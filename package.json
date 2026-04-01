@@ -1,0 +1,13 @@
+{
+  "name": "@justinhaaheim/justin-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    "./check-runner": "./src/check-runner.ts"
+  },
+  "files": [
+    "src",
+    "templates",
+    "docs"
+  ]
+}
