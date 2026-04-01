@@ -3,44 +3,65 @@
 /**
  * justin-sdk CLI
  *
- * Usage:
- *   justin-sdk doctor [--fix] [--quiet]
- *   justin-sdk signal [--quiet] [--serial]
+ * Cross-project tooling for Justin's projects.
+ * Provides doctor checks, signal (code quality) checks, and more.
  */
+
+import yargs from 'yargs';
+import {hideBin} from 'yargs/helpers';
 
 import {runDoctor} from './doctor';
 import {runSignal} from './signal';
 
-const args = process.argv.slice(2);
-const command = args[0];
-const flags = new Set(args.slice(1));
-
-async function main(): Promise<void> {
-  switch (command) {
-    case 'doctor': {
+void yargs(hideBin(process.argv))
+  .scriptName('justin-sdk')
+  .command(
+    'doctor',
+    'Run environment checks based on justin-sdk.json components',
+    (y) =>
+      y
+        .option('fix', {
+          type: 'boolean',
+          describe: 'Attempt to auto-fix failures',
+          default: false,
+        })
+        .option('quiet', {
+          type: 'boolean',
+          describe: 'Summary only (one-liner on all-pass)',
+          default: false,
+        }),
+    async (argv) => {
       const exitCode = await runDoctor(process.cwd(), {
-        fix: flags.has('--fix'),
-        quiet: flags.has('--quiet'),
+        fix: argv.fix,
+        quiet: argv.quiet,
       });
       process.exit(exitCode);
-    }
-    // fallthrough unreachable — process.exit above
-
-    case 'signal': {
+    },
+  )
+  .command(
+    'signal',
+    'Run code quality checks from package.json signal-source:* scripts',
+    (y) =>
+      y
+        .option('quiet', {
+          type: 'boolean',
+          describe: 'Summary only (one-liner on all-pass)',
+          default: false,
+        })
+        .option('serial', {
+          type: 'boolean',
+          describe: 'Run checks sequentially instead of in parallel',
+          default: false,
+        }),
+    async (argv) => {
       const exitCode = await runSignal(process.cwd(), {
-        quiet: flags.has('--quiet'),
-        serial: flags.has('--serial'),
+        quiet: argv.quiet,
+        serial: argv.serial,
       });
       process.exit(exitCode);
-    }
-    // fallthrough unreachable — process.exit above
-
-    default:
-      console.error(
-        `Usage: justin-sdk <command>\n\nCommands:\n  doctor  Run environment checks based on justin-sdk.json components\n  signal  Run code quality checks from package.json signal-source:* scripts`,
-      );
-      process.exit(1);
-  }
-}
-
-void main();
+    },
+  )
+  .demandCommand(1, 'Please specify a command')
+  .strict()
+  .help()
+  .parse();
