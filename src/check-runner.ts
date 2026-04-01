@@ -76,6 +76,13 @@ export interface RunChecksOptions {
   serial?: boolean;
 }
 
+/** A check with optional children that only run if the parent passes. */
+export interface CheckNode {
+  check: Check;
+  /** Child checks — only run if this check passes. */
+  children?: CheckNode[];
+}
+
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
@@ -91,6 +98,10 @@ interface InternalResult {
   exitCode: number;
   label: string;
   severity: 'error' | 'warn';
+  /** Set when a check was skipped because its parent failed. */
+  skipped?: boolean;
+  /** Label of the parent check that caused this to be skipped. */
+  skippedReason?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -271,15 +282,16 @@ function printSummary(
   quiet: boolean,
 ): void {
   const errors = results.filter(
-    (r) => r.exitCode !== 0 && r.severity === 'error',
+    (r) => !r.skipped && r.exitCode !== 0 && r.severity === 'error',
   );
   const warnings = results.filter(
-    (r) => r.exitCode !== 0 && r.severity === 'warn',
+    (r) => !r.skipped && r.exitCode !== 0 && r.severity === 'warn',
   );
-  const passed = results.filter((r) => r.exitCode === 0);
+  const passed = results.filter((r) => !r.skipped && r.exitCode === 0);
+  const skipped = results.filter((r) => r.skipped);
 
-  // In quiet mode, only print if there are errors or warnings
-  if (quiet && errors.length === 0 && warnings.length === 0) {
+  // In quiet mode, only print if there are errors, warnings, or skipped
+  if (quiet && errors.length === 0 && warnings.length === 0 && skipped.length === 0) {
     console.log(
       `${GREEN}✓${RESET} All ${results.length} checks passed. ${DIM}[${formatDuration(totalMs)}]${RESET}`,
     );
@@ -289,6 +301,15 @@ function printSummary(
   console.log('');
 
   for (const r of results) {
+    if (r.skipped) {
+      // In quiet mode, skip the skipped checks too
+      if (quiet) continue;
+
+      const label = `${DIM}${r.label}${RESET}`;
+      console.log(` ${DIM}↳${RESET} ${label} ${DIM}skipped (depends on ${r.skippedReason})${RESET}`);
+      continue;
+    }
+
     const ok = r.exitCode === 0;
     const isWarn = !ok && r.severity === 'warn';
 
@@ -320,8 +341,10 @@ function printSummary(
   if (warnings.length > 0)
     console.log(` ${YELLOW}${warnings.length} warn${RESET}`);
   if (errors.length > 0) console.log(` ${RED}${errors.length} fail${RESET}`);
+  if (skipped.length > 0)
+    console.log(` ${DIM}${skipped.length} skipped${RESET}`);
   console.log(
-    `${BOLD}Ran ${results.length} checks. ${DIM}[${formatDuration(totalMs)}]${RESET}`,
+    `${BOLD}Ran ${results.length - skipped.length} checks. ${DIM}[${formatDuration(totalMs)}]${RESET}`,
   );
 }
 
@@ -427,6 +450,109 @@ export async function runChecks(
   // Only errors affect exit code, not warnings
   const hasErrors = results.some(
     (r) => r.exitCode !== 0 && r.severity === 'error',
+  );
+  return hasErrors ? 1 : 0;
+}
+
+/**
+ * Run a tree of checks where children only run if their parent passes.
+ * Always runs serially (tree dependencies require sequential execution).
+ * Returns the process exit code (0 = all pass, 1 = any fail).
+ */
+export async function runCheckTree(
+  nodes: CheckNode[],
+  options: RunChecksOptions = {},
+): Promise<number> {
+  const {quiet = false, align = false, fix = false} = options;
+
+  // Flatten the tree to collect all labels for alignment
+  function collectLabels(nodeList: CheckNode[]): string[] {
+    const labels: string[] = [];
+    for (const node of nodeList) {
+      labels.push(node.check.label);
+      if (node.children) {
+        labels.push(...collectLabels(node.children));
+      }
+    }
+    return labels;
+  }
+
+  const allLabels = collectLabels(nodes);
+  const maxLabelLen = Math.max(...allLabels.map((l) => l.length));
+  const opts: ExecOptions = {align, maxLabelLen, piped: true, quiet};
+
+  if (!quiet) {
+    console.log(`Running ${allLabels.length} checks...\n`);
+  }
+
+  const totalStart = performance.now();
+  const results: InternalResult[] = [];
+  const allEntries: InternalEntry[] = [];
+  let colorIndex = 0;
+
+  async function walkTree(
+    nodeList: CheckNode[],
+    skipReason?: string,
+  ): Promise<void> {
+    for (const node of nodeList) {
+      const entry: InternalEntry = {
+        check: node.check,
+        color: COLOR_PALETTE[colorIndex % COLOR_PALETTE.length] ?? '\x1b[36m',
+      };
+      allEntries.push(entry);
+      colorIndex++;
+
+      if (skipReason) {
+        // Parent failed — skip this check and all its children
+        results.push({
+          durationMs: 0,
+          exitCode: 1,
+          label: node.check.label,
+          severity: node.check.severity ?? 'error',
+          skipped: true,
+          skippedReason: skipReason,
+        });
+        if (node.children) {
+          await walkTree(node.children, skipReason);
+        }
+        continue;
+      }
+
+      const result = await runOne(entry, opts);
+      results.push(result);
+
+      if (result.exitCode !== 0 && node.children) {
+        // This check failed — skip children
+        await walkTree(node.children, node.check.label);
+      } else if (node.children) {
+        // This check passed — run children
+        await walkTree(node.children);
+      }
+    }
+  }
+
+  await walkTree(nodes);
+
+  if (fix) {
+    // For tree mode, only attempt fixes on non-skipped results
+    const fixableResults = results.filter((r) => !r.skipped);
+    const fixedResults = await attemptFixes(fixableResults, allEntries, opts);
+    // Merge fixed results back
+    for (const fixed of fixedResults) {
+      const idx = results.findIndex(
+        (r) => r.label === fixed.label && !r.skipped,
+      );
+      if (idx >= 0) {
+        results[idx] = fixed;
+      }
+    }
+  }
+
+  const totalMs = Math.round(performance.now() - totalStart);
+  printSummary(results, totalMs, quiet);
+
+  const hasErrors = results.some(
+    (r) => !r.skipped && r.exitCode !== 0 && r.severity === 'error',
   );
   return hasErrors ? 1 : 0;
 }
