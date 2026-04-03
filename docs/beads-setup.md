@@ -469,11 +469,20 @@ All beads-related checks (MISE, MISE_TOML, BR, BR_DB, AGENTS_MD) should pass. If
 
 ## Appendix: Troubleshooting
 
+**`mise install` fails with GitHub rate limiting**
+
+- mise's `github:` backend hits GitHub API rate limits, especially in CI/remote environments
+- The `setup-env.ts` template has a built-in fallback: if `br` isn't found in mise shims after `mise install`, it downloads directly from GitHub releases using the repo's official install script
+- The fallback reads the version from `mise.toml` to stay in sync
+- To install manually: `curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh" | bash -s -- --version v0.1.34 --quiet --skip-skills`
+- The direct install puts `br` in `~/.local/bin/` (same default as mise shims parent)
+
 **`br: command not found`**
 
 - Check `mise install` was run
 - Check mise shims are on PATH: `echo $PATH | tr ':' '\n' | grep mise`
 - Try `mise x -- br --version` to bypass PATH issues
+- If mise was rate-limited, check `~/.local/bin/br` (direct install fallback location)
 
 **`mise: command not found`**
 

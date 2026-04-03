@@ -5,6 +5,7 @@
  * Behavior differs by environment:
  *   - Remote (CLAUDE_CODE_REMOTE=true): Installs mise, runs `mise install`,
  *     adds shims to PATH, initializes beads_rust, runs `bun install`.
+ *     Falls back to direct GitHub release download if mise is rate-limited.
  *   - Local: Validates that required tools are available and prints
  *     actionable errors if they're not. Does not install anything.
  *
@@ -46,6 +47,58 @@ function log(msg: string): void {
 
 function warn(msg: string): void {
   console.warn(`[setup-env] ⚠ ${msg}`);
+}
+
+// ---------------------------------------------------------------------------
+// beads_rust version from mise.toml
+// ---------------------------------------------------------------------------
+
+function getBeadsVersionFromMiseToml(): string | null {
+  const miseToml = resolve(PROJECT_ROOT, 'mise.toml');
+  if (!existsSync(miseToml)) return null;
+  const content = readFileSync(miseToml, 'utf-8');
+  const match = /Dicklesworthstone\/beads_rust.*?version\s*=\s*"([^"]+)"/.exec(
+    content,
+  );
+  return match?.[1] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Direct install fallback (when mise is rate-limited by GitHub)
+// ---------------------------------------------------------------------------
+
+const BR_DIRECT_BIN = resolve(HOME, '.local/bin/br');
+
+function installBrDirect(): boolean {
+  const version = getBeadsVersionFromMiseToml();
+  if (!version) {
+    warn(
+      'Cannot determine beads_rust version from mise.toml. Skipping direct install.',
+    );
+    return false;
+  }
+
+  const versionTag = version.startsWith('v') ? version : `v${version}`;
+  log(
+    `Installing br ${versionTag} directly from GitHub releases (mise fallback)...`,
+  );
+
+  try {
+    run(
+      `curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh" | bash -s -- --version ${versionTag} --quiet --skip-skills`,
+    );
+  } catch {
+    warn('Direct br install failed.');
+    return false;
+  }
+
+  if (existsSync(BR_DIRECT_BIN)) {
+    log(`br installed successfully at ${BR_DIRECT_BIN}`);
+    return true;
+  }
+
+  warn('br binary not found after direct install.');
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,29 +161,36 @@ function setupRemote(): void {
     run('curl -fsSL https://mise.run | sh');
   }
 
-  if (!existsSync(MISE_BIN)) {
+  const miseAvailable = existsSync(MISE_BIN);
+  if (!miseAvailable) {
     warn(
-      `mise binary not found at ${MISE_BIN} after install. Tools may not be available.`,
+      `mise binary not found at ${MISE_BIN} after install. Will try direct fallback for tools.`,
     );
-    return;
   }
 
   // 3. Install mise-managed tools from mise.toml
-  if (existsSync(resolve(PROJECT_ROOT, 'mise.toml'))) {
-    log('Installing mise tools from mise.toml...');
-    run(`"${MISE_BIN}" install --yes`);
-  } else {
-    log('No mise.toml found. Skipping mise tool installation.');
+  if (miseAvailable) {
+    if (existsSync(resolve(PROJECT_ROOT, 'mise.toml'))) {
+      log('Installing mise tools from mise.toml...');
+      run(`"${MISE_BIN}" install --yes`, {ignoreError: true});
+    } else {
+      log('No mise.toml found. Skipping mise tool installation.');
+    }
   }
 
   // 4. Add mise shims to PATH via CLAUDE_ENV_FILE
   const envFile = process.env.CLAUDE_ENV_FILE;
   if (envFile) {
-    log('Adding mise shims to PATH...');
-    appendFileSync(envFile, `export PATH="${MISE_SHIMS_DIR}:$PATH"\n`);
+    if (miseAvailable) {
+      log('Adding mise shims to PATH...');
+      appendFileSync(envFile, `export PATH="${MISE_SHIMS_DIR}:$PATH"\n`);
+    }
+    // Ensure ~/.local/bin is on PATH for direct-install fallback
+    const localBin = resolve(HOME, '.local/bin');
+    appendFileSync(envFile, `export PATH="${localBin}:$PATH"\n`);
   } else {
     warn(
-      'CLAUDE_ENV_FILE not set. mise shims may not be on PATH for subsequent commands.',
+      'CLAUDE_ENV_FILE not set. Tool binaries may not be on PATH for subsequent commands.',
     );
   }
 
@@ -139,7 +199,13 @@ function setupRemote(): void {
   if (existsSync(brBin)) {
     initializeBeads(brBin);
   } else {
-    log('br not found in mise shims. Skipping beads initialization.');
+    // Fallback: install br directly from GitHub releases (mise may be rate-limited)
+    log('br not found in mise shims. Trying direct install from GitHub...');
+    if (installBrDirect()) {
+      initializeBeads(BR_DIRECT_BIN);
+    } else {
+      warn('br could not be installed. Skipping beads initialization.');
+    }
   }
 
   log('Remote setup complete.');
