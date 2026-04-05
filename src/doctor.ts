@@ -15,6 +15,8 @@ import {execSync} from 'child_process';
 import {existsSync, readFileSync} from 'fs';
 import {resolve} from 'path';
 
+const IS_REMOTE = process.env.CLAUDE_CODE_REMOTE === 'true';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -131,9 +133,12 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
         fn: (): CheckResult => {
           const {stdout, exitCode} = exec('mise --version', projectRoot);
           if (exitCode !== 0) {
+            const fixCommand = IS_REMOTE
+              ? 'curl -fsSL https://mise.run | sh'
+              : 'brew install mise';
             return {
-              fix: 'Run: brew install mise',
-              fixCommand: 'brew install mise',
+              fix: `Run: ${fixCommand}`,
+              fixCommand,
               message: 'mise is not installed',
               pass: false,
             };
@@ -163,9 +168,29 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
                 fn: (): CheckResult => {
                   const {stdout, exitCode} = exec('br --version', projectRoot);
                   if (exitCode !== 0) {
+                    // Build a fixCommand that tries mise first, then falls
+                    // back to the official install script if mise is
+                    // rate-limited by GitHub.
+                    const miseVersions = parseMiseToml(projectRoot);
+                    const beadsKey = miseVersions
+                      ? Object.keys(miseVersions).find((k) =>
+                          k.includes('beads_rust'),
+                        )
+                      : null;
+                    const version = beadsKey ? miseVersions![beadsKey] : null;
+                    const versionTag =
+                      version && !version.startsWith('v')
+                        ? `v${version}`
+                        : version;
+
+                    let fixCommand = 'mise install';
+                    if (versionTag) {
+                      fixCommand = `mise install || curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh" | bash -s -- --version ${versionTag} --quiet --skip-skills`;
+                    }
+
                     return {
-                      fix: 'Run: mise install && ensure ~/.local/share/mise/shims is on PATH',
-                      fixCommand: 'mise install',
+                      fix: 'Run: mise install (falls back to direct GitHub download if rate-limited)',
+                      fixCommand,
                       message: 'br (beads_rust) is not installed or not on PATH',
                       pass: false,
                     };

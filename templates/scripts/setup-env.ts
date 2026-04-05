@@ -3,11 +3,9 @@
  * setup-env.ts — Ensure development tools are installed and available.
  *
  * Behavior differs by environment:
- *   - Remote (CLAUDE_CODE_REMOTE=true): Installs mise, runs `mise install`,
- *     adds shims to PATH, initializes beads_rust, runs `bun install`.
- *     Falls back to direct GitHub release download if mise is rate-limited.
- *   - Local: Validates that required tools are available and prints
- *     actionable errors if they're not. Does not install anything.
+ *   - Remote (CLAUDE_CODE_REMOTE=true): Bootstraps mise + PATH, then
+ *     delegates to `doctor --fix` for tool installation and validation.
+ *   - Local: Runs `doctor --quiet` to validate the environment.
  *
  * This script is designed to be copied into any project at scripts/setup-env.ts
  * and referenced by a SessionStart hook in .claude/settings.json.
@@ -16,7 +14,7 @@
  */
 
 import {execSync} from 'child_process';
-import {appendFileSync, existsSync, readFileSync} from 'fs';
+import {appendFileSync, existsSync} from 'fs';
 import {resolve} from 'path';
 
 const HOME = process.env.HOME ?? '/root';
@@ -50,142 +48,31 @@ function warn(msg: string): void {
 }
 
 // ---------------------------------------------------------------------------
-// beads_rust version from mise.toml
-// ---------------------------------------------------------------------------
-
-function getBeadsVersionFromMiseToml(): string | null {
-  const miseToml = resolve(PROJECT_ROOT, 'mise.toml');
-  if (!existsSync(miseToml)) return null;
-  const content = readFileSync(miseToml, 'utf-8');
-  const match = /Dicklesworthstone\/beads_rust.*?version\s*=\s*"([^"]+)"/.exec(
-    content,
-  );
-  return match?.[1] ?? null;
-}
-
-// ---------------------------------------------------------------------------
-// Direct install fallback (when mise is rate-limited by GitHub)
-// ---------------------------------------------------------------------------
-
-const BR_DIRECT_BIN = resolve(HOME, '.local/bin/br');
-
-function installBrDirect(): boolean {
-  const version = getBeadsVersionFromMiseToml();
-  if (!version) {
-    warn(
-      'Cannot determine beads_rust version from mise.toml. Skipping direct install.',
-    );
-    return false;
-  }
-
-  const versionTag = version.startsWith('v') ? version : `v${version}`;
-  log(
-    `Installing br ${versionTag} directly from GitHub releases (mise fallback)...`,
-  );
-
-  try {
-    run(
-      `curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh" | bash -s -- --version ${versionTag} --quiet --skip-skills`,
-    );
-  } catch {
-    warn('Direct br install failed.');
-    return false;
-  }
-
-  if (existsSync(BR_DIRECT_BIN)) {
-    log(`br installed successfully at ${BR_DIRECT_BIN}`);
-    return true;
-  }
-
-  warn('br binary not found after direct install.');
-  return false;
-}
-
-// ---------------------------------------------------------------------------
-// Beads initialization (shared between remote and local)
-// ---------------------------------------------------------------------------
-
-function initializeBeads(brBin: string): void {
-  const beadsDir = resolve(PROJECT_ROOT, '.beads');
-  const beadsDb = resolve(beadsDir, 'beads.db');
-
-  if (existsSync(beadsDb)) {
-    log('beads_rust already initialized.');
-    return;
-  }
-
-  // Check for old beads data that needs migration
-  const metadataPath = resolve(beadsDir, 'metadata.json');
-  if (existsSync(metadataPath)) {
-    try {
-      const meta = readFileSync(metadataPath, 'utf-8');
-      if (meta.includes('"dolt"')) {
-        warn(
-          'Existing .beads/ directory uses Dolt backend. ' +
-            'Run the beads-setup.md migration steps before initializing beads_rust.',
-        );
-        return;
-      }
-    } catch {
-      // metadata unreadable — proceed with init
-    }
-  }
-
-  log('Initializing beads_rust workspace...');
-  run(`"${brBin}" init`);
-
-  // Generate AGENTS.md
-  run(`"${brBin}" agents --add --force`, {ignoreError: true});
-
-  // Verify
-  const version = run(`"${brBin}" --version`, {ignoreError: true});
-  if (version) {
-    log(`beads_rust ${version} initialized successfully.`);
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Remote environment setup
 // ---------------------------------------------------------------------------
 
 function setupRemote(): void {
   log('Remote environment detected. Installing tools...');
 
-  // 1. Install node dependencies
+  // Phase 1: Bootstrap — things that must happen before doctor can run
+
+  // 1a. Install node dependencies (needed for SDK / doctor to be available)
   log('Installing node dependencies...');
   run('bun install', {ignoreError: true});
 
-  // 2. Install mise if not present
+  // 1b. Install mise if not present
   if (!existsSync(MISE_BIN)) {
     log('Installing mise...');
-    run('curl -fsSL https://mise.run | sh');
+    run('curl -fsSL https://mise.run | sh', {ignoreError: true});
   }
 
-  const miseAvailable = existsSync(MISE_BIN);
-  if (!miseAvailable) {
-    warn(
-      `mise binary not found at ${MISE_BIN} after install. Will try direct fallback for tools.`,
-    );
-  }
-
-  // 3. Install mise-managed tools from mise.toml
-  if (miseAvailable) {
-    if (existsSync(resolve(PROJECT_ROOT, 'mise.toml'))) {
-      log('Installing mise tools from mise.toml...');
-      run(`"${MISE_BIN}" install --yes`, {ignoreError: true});
-    } else {
-      log('No mise.toml found. Skipping mise tool installation.');
-    }
-  }
-
-  // 4. Add mise shims to PATH via CLAUDE_ENV_FILE
+  // 1c. Ensure mise shims + ~/.local/bin are on PATH
   const envFile = process.env.CLAUDE_ENV_FILE;
   if (envFile) {
-    if (miseAvailable) {
+    if (existsSync(MISE_BIN)) {
       log('Adding mise shims to PATH...');
       appendFileSync(envFile, `export PATH="${MISE_SHIMS_DIR}:$PATH"\n`);
     }
-    // Ensure ~/.local/bin is on PATH for direct-install fallback
     const localBin = resolve(HOME, '.local/bin');
     appendFileSync(envFile, `export PATH="${localBin}:$PATH"\n`);
   } else {
@@ -194,21 +81,20 @@ function setupRemote(): void {
     );
   }
 
-  // 5. Initialize beads_rust if br is available and .beads/ doesn't exist
-  const brBin = resolve(MISE_SHIMS_DIR, 'br');
-  if (existsSync(brBin)) {
-    initializeBeads(brBin);
-  } else {
-    // Fallback: install br directly from GitHub releases (mise may be rate-limited)
-    log('br not found in mise shims. Trying direct install from GitHub...');
-    if (installBrDirect()) {
-      initializeBeads(BR_DIRECT_BIN);
-    } else {
-      warn('br could not be installed. Skipping beads initialization.');
-    }
+  // Phase 2: Delegate to doctor --fix for everything else
+  // Doctor handles: mise install, br install (with direct fallback),
+  // br init, AGENTS.md generation, and all other component checks.
+  log('Running doctor --fix...');
+  try {
+    execSync('bun run doctor --fix', {
+      cwd: PROJECT_ROOT,
+      encoding: 'utf-8',
+      stdio: 'inherit',
+    });
+    log('Remote setup complete.');
+  } catch {
+    warn('doctor --fix reported failures. Check output above.');
   }
-
-  log('Remote setup complete.');
 }
 
 // ---------------------------------------------------------------------------

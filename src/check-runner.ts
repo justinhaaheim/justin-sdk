@@ -481,29 +481,39 @@ export async function runCheckTree(
   const maxLabelLen = Math.max(...allLabels.map((l) => l.length));
   const opts: ExecOptions = {align, maxLabelLen, piped: true, quiet};
 
-  if (!quiet) {
-    console.log(`Running ${allLabels.length} checks...\n`);
+  // Assign stable colors to each node (by position in the tree)
+  function buildEntryMap(
+    nodeList: CheckNode[],
+    startIndex: number,
+  ): {entries: Map<string, InternalEntry>; nextIndex: number} {
+    const entries = new Map<string, InternalEntry>();
+    let idx = startIndex;
+    for (const node of nodeList) {
+      entries.set(node.check.label, {
+        check: node.check,
+        color: COLOR_PALETTE[idx % COLOR_PALETTE.length] ?? '\x1b[36m',
+      });
+      idx++;
+      if (node.children) {
+        const child = buildEntryMap(node.children, idx);
+        for (const [k, v] of child.entries) entries.set(k, v);
+        idx = child.nextIndex;
+      }
+    }
+    return {entries, nextIndex: idx};
   }
 
-  const totalStart = performance.now();
-  const results: InternalResult[] = [];
-  const allEntries: InternalEntry[] = [];
-  let colorIndex = 0;
+  const {entries: entryMap} = buildEntryMap(nodes, 0);
 
   async function walkTree(
     nodeList: CheckNode[],
     skipReason?: string,
-  ): Promise<void> {
+  ): Promise<InternalResult[]> {
+    const results: InternalResult[] = [];
     for (const node of nodeList) {
-      const entry: InternalEntry = {
-        check: node.check,
-        color: COLOR_PALETTE[colorIndex % COLOR_PALETTE.length] ?? '\x1b[36m',
-      };
-      allEntries.push(entry);
-      colorIndex++;
+      const entry = entryMap.get(node.check.label)!;
 
       if (skipReason) {
-        // Parent failed — skip this check and all its children
         results.push({
           durationMs: 0,
           exitCode: 1,
@@ -513,7 +523,7 @@ export async function runCheckTree(
           skippedReason: skipReason,
         });
         if (node.children) {
-          await walkTree(node.children, skipReason);
+          results.push(...(await walkTree(node.children, skipReason)));
         }
         continue;
       }
@@ -522,29 +532,51 @@ export async function runCheckTree(
       results.push(result);
 
       if (result.exitCode !== 0 && node.children) {
-        // This check failed — skip children
-        await walkTree(node.children, node.check.label);
+        results.push(...(await walkTree(node.children, node.check.label)));
       } else if (node.children) {
-        // This check passed — run children
-        await walkTree(node.children);
+        results.push(...(await walkTree(node.children)));
       }
     }
+    return results;
   }
 
-  await walkTree(nodes);
+  if (!quiet) {
+    console.log(`Running ${allLabels.length} checks...\n`);
+  }
+
+  const totalStart = performance.now();
+  let results = await walkTree(nodes);
 
   if (fix) {
-    // For tree mode, only attempt fixes on non-skipped results
-    const fixableResults = results.filter((r) => !r.skipped);
-    const fixedResults = await attemptFixes(fixableResults, allEntries, opts);
-    // Merge fixed results back
-    for (const fixed of fixedResults) {
-      const idx = results.findIndex(
-        (r) => r.label === fixed.label && !r.skipped,
+    // Attempt fixes on non-skipped failures, then re-walk the entire tree
+    // so that children of newly-fixed parents get a chance to run.
+    const fixable = results.filter(
+      (r) => !r.skipped && r.exitCode !== 0 && r.checkResult?.fixCommand,
+    );
+
+    if (fixable.length > 0) {
+      console.log(
+        `\n${YELLOW}Attempting fixes for ${fixable.length} check(s)...${RESET}\n`,
       );
-      if (idx >= 0) {
-        results[idx] = fixed;
+
+      for (const r of fixable) {
+        const fixCmd = r.checkResult?.fixCommand ?? '';
+        console.log(
+          `  ${YELLOW}→${RESET} ${r.label}: ${DIM}${fixCmd}${RESET}`,
+        );
+        try {
+          const proc = Bun.spawn(['sh', '-c', fixCmd], {
+            cwd: process.cwd(),
+            stdio: ['pipe', 'pipe', 'pipe'],
+          });
+          await proc.exited;
+        } catch {
+          // fix attempt failed — will show in re-walk
+        }
       }
+
+      console.log(`\n${YELLOW}Re-running all checks...${RESET}\n`);
+      results = await walkTree(nodes);
     }
   }
 
