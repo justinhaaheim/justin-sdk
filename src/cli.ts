@@ -18,7 +18,7 @@ void yargs(hideBin(process.argv))
   .scriptName('justin-sdk')
   .command(
     'doctor',
-    'Run environment checks based on justin-sdk.json components',
+    'Run environment checks based on justin-sdk.config.json components',
     (y) =>
       y
         .option('fix', {

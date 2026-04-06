@@ -7,7 +7,7 @@ This is the **foundation layer** for all of Justin's projects. It installs the j
 **What this installs:**
 
 - `@justinhaaheim/justin-sdk` — Package providing the `justin-sdk` CLI with `doctor` and `signal` subcommands
-- `justin-sdk.json` — Config file tracking SDK version and which components are installed
+- `justin-sdk.config.json` — Config file tracking SDK version and which components are installed
 - `signal-source:*` scripts in package.json — Define which code quality checks to run
 - `scripts/setup-env.ts` — SessionStart hook (installs tools in remote, validates locally)
 
@@ -26,9 +26,9 @@ If `@types/bun` is already in devDependencies, skip that part.
 
 ---
 
-## Step 2: Create justin-sdk.json
+## Step 2: Create justin-sdk.config.json
 
-Create `justin-sdk.json` at the project root:
+Create `justin-sdk.config.json` at the project root:
 
 ```json
 {
@@ -162,7 +162,7 @@ bun scripts/setup-env.ts
 ## Step 7: Commit
 
 ```bash
-git add scripts/setup-env.ts package.json justin-sdk.json .claude/settings.json
+git add scripts/setup-env.ts package.json justin-sdk.config.json .claude/settings.json
 git commit -m 'Add base tooling via justin-sdk'
 ```
 
@@ -173,7 +173,7 @@ git commit -m 'Add base tooling via justin-sdk'
 **Scripted (deterministic):**
 
 - Installing the SDK package
-- Creating justin-sdk.json
+- Creating justin-sdk.config.json
 - Adding package.json script entries
 - Copying setup-env.ts
 - Configuring SessionStart hook
@@ -199,8 +199,8 @@ If the project has local `scripts/check-runner.ts`, `scripts/signal.ts`, and/or 
 4. Delete local scripts that are no longer needed:
    - `scripts/check-runner.ts` — now imported from the SDK package
    - `scripts/signal.ts` — replaced by `justin-sdk signal` CLI + `signal-source:*` scripts
-   - `scripts/doctor.ts` — replaced by `justin-sdk doctor` CLI + `justin-sdk.json` components
-5. Update `justin-sdk.json` version to `0.2.0`
+   - `scripts/doctor.ts` — replaced by `justin-sdk doctor` CLI + `justin-sdk.config.json` components
+5. Update `justin-sdk.config.json` version to `0.2.0`
 6. Run `bun run signal` and `bun run doctor` to verify
 
 ### From pre-SDK setup (no justin-sdk at all)
@@ -215,6 +215,6 @@ If the project has hand-written signal/doctor scripts or uses `concurrently` for
 
 ## How components work
 
-The `justin-sdk.json` `components` array determines which doctor checks run. Each component (e.g., `"base-setup"`, `"beads-setup"`) registers its own set of doctor checks in the SDK. When you apply a new setup prompt (like `beads-setup.md`), add the component name to the array — the corresponding doctor checks activate automatically.
+The `justin-sdk.config.json` `components` array determines which doctor checks run. Each component (e.g., `"base-setup"`, `"beads-setup"`) registers its own set of doctor checks in the SDK. When you apply a new setup prompt (like `beads-setup.md`), add the component name to the array — the corresponding doctor checks activate automatically.
 
 This means doctor checks are **not maintained per-project**. They live in the SDK and are updated centrally. Upgrading the SDK version gives you improved/new checks for all your components.

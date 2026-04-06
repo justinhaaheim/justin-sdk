@@ -1,11 +1,11 @@
 /**
  * Doctor — component-based environment validation.
  *
- * Reads justin-sdk.json to determine which components are installed,
+ * Reads justin-sdk.config.json to determine which components are installed,
  * then runs the corresponding doctor checks.
  *
  * Each component registers its own checks. Adding a new component
- * to justin-sdk.json automatically includes its doctor checks.
+ * to justin-sdk.config.json automatically includes its doctor checks.
  */
 
 import type {CheckNode, CheckResult} from './check-runner';
@@ -119,10 +119,10 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
       check: {
         label: 'JUSTIN_SDK_JSON',
         fn: (): CheckResult => {
-          if (!existsSync(resolve(projectRoot, 'justin-sdk.json'))) {
+          if (!existsSync(resolve(projectRoot, 'justin-sdk.config.json'))) {
             return {
-              fix: 'Create justin-sdk.json at project root',
-              message: 'No justin-sdk.json found',
+              fix: 'Create justin-sdk.config.json at project root',
+              message: 'No justin-sdk.config.json found',
               pass: false,
             };
           }
@@ -386,7 +386,7 @@ export interface DoctorOptions {
 }
 
 /**
- * Run doctor checks based on the components listed in justin-sdk.json.
+ * Run doctor checks based on the components listed in justin-sdk.config.json.
  *
  * @param projectRoot - Path to the project root (defaults to cwd)
  * @param options - Doctor options (fix, quiet)
@@ -396,11 +396,11 @@ export async function runDoctor(
   projectRoot: string = process.cwd(),
   options: DoctorOptions = {},
 ): Promise<number> {
-  const configPath = resolve(projectRoot, 'justin-sdk.json');
+  const configPath = resolve(projectRoot, 'justin-sdk.config.json');
 
   if (!existsSync(configPath)) {
     console.error(
-      'Error: justin-sdk.json not found. Create one with at least {"version": "0.2.0", "components": ["base-setup"]}',
+      'Error: justin-sdk.config.json not found. Create one with at least {"version": "0.2.0", "components": ["base-setup"]}',
     );
     return 1;
   }

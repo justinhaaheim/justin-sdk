@@ -3,7 +3,9 @@
   "version": "0.2.0",
   "type": "module",
   "bin": {
-    "justin-sdk": "./src/cli.ts"
+    "justin-sdk": "./src/cli.ts",
+    "jsdk": "./src/cli.ts",
+    "j": "./src/cli.ts"
   },
   "exports": {
     "./check-runner": "./src/check-runner.ts"

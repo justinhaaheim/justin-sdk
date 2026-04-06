@@ -3,7 +3,7 @@
  *
  * Orchestrates: mise.toml, br install, migration, br init, AGENTS.md,
  * CLAUDE.md (@docs/prompts/BEADS.md pattern), .prettierignore,
- * .claude/settings.json, and justin-sdk.json.
+ * .claude/settings.json, and justin-sdk.config.json.
  *
  * Bails with a clear error on unexpected state rather than guessing.
  */
@@ -474,24 +474,24 @@ function stepClaudeSettings(projectRoot: string): boolean {
 }
 
 function stepJustinSdkJson(projectRoot: string): boolean {
-  const configPath = resolve(projectRoot, 'justin-sdk.json');
+  const configPath = resolve(projectRoot, 'justin-sdk.config.json');
   const config = readJson(configPath);
 
   if (!config) {
-    warn('No justin-sdk.json found — skipping component registration');
+    warn('No justin-sdk.config.json found — skipping component registration');
     return true;
   }
 
   const components = (config.components ?? []) as string[];
   if (components.includes('beads-setup')) {
-    success('justin-sdk.json already includes beads-setup component');
+    success('justin-sdk.config.json already includes beads-setup component');
     return true;
   }
 
   components.push('beads-setup');
   config.components = components;
   writeJson(configPath, config);
-  success('Added beads-setup to justin-sdk.json components');
+  success('Added beads-setup to justin-sdk.config.json components');
   return true;
 }
 
@@ -555,8 +555,8 @@ export async function runBeadsSetup(
   console.log('\x1b[1m9. .claude/settings.json\x1b[0m');
   if (!stepClaudeSettings(projectRoot)) return 1;
 
-  // Step 10: justin-sdk.json
-  console.log('\x1b[1m10. justin-sdk.json\x1b[0m');
+  // Step 10: justin-sdk.config.json
+  console.log('\x1b[1m10. justin-sdk.config.json\x1b[0m');
   if (!stepJustinSdkJson(projectRoot)) return 1;
 
   // Step 11: Git commit
@@ -565,7 +565,7 @@ export async function runBeadsSetup(
     const status = exec('git status --porcelain', projectRoot);
     if (status.stdout.trim().length > 0) {
       exec(
-        'git add mise.toml .beads/ AGENTS.md .claude/settings.json .prettierignore justin-sdk.json docs/prompts/BEADS.md',
+        'git add mise.toml .beads/ AGENTS.md .claude/settings.json .prettierignore justin-sdk.config.json docs/prompts/BEADS.md',
         projectRoot,
       );
       // Also add CLAUDE.md if it was modified

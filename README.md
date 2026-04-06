@@ -36,7 +36,7 @@ Claude Code-executable guides for setting up tooling:
 
 ## Consumer config
 
-Projects track their SDK version in `justin-sdk.json`:
+Projects track their SDK version in `justin-sdk.config.json`:
 
 ```json
 {
