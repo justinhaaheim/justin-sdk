@@ -4,11 +4,17 @@
  *
  * Behavior differs by environment:
  *   - Remote (CLAUDE_CODE_REMOTE=true): Bootstraps mise + PATH, then
- *     delegates to `doctor --fix` for tool installation and validation.
- *   - Local: Runs `doctor --quiet` to validate the environment.
+ *     delegates to `doctor --fix --yes` for tool installation. The --yes
+ *     flag pre-approves system-level installs (mise, br, etc.).
+ *   - Local: Runs `doctor --quiet` to validate the environment. Never
+ *     auto-installs anything — approvals must be explicit via --yes.
  *
  * This script is designed to be copied into any project at scripts/setup-env.ts
  * and referenced by a SessionStart hook in .claude/settings.json.
+ *
+ * PREREQUISITE: bun must be installed. In Dockerfiles, add either:
+ *   RUN npm i -g bun
+ *   RUN curl -fsSL https://bun.sh/install | bash
  *
  * It is idempotent and safe to re-run.
  */
@@ -81,19 +87,19 @@ function setupRemote(): void {
     );
   }
 
-  // Phase 2: Delegate to doctor --fix for everything else
-  // Doctor handles: mise install, br install (with direct fallback),
-  // br init, AGENTS.md generation, and all other component checks.
-  log('Running doctor --fix...');
+  // Phase 2: Delegate to doctor --fix --yes for everything else.
+  // --yes pre-approves system-level installs (mise, br). Safe in
+  // remote/sandbox environments; on local dev, approvals are explicit.
+  log('Running doctor --fix --yes...');
   try {
-    execSync('bun run doctor --fix', {
+    execSync('bun run doctor:fix -- --yes', {
       cwd: PROJECT_ROOT,
       encoding: 'utf-8',
       stdio: 'inherit',
     });
     log('Remote setup complete.');
   } catch {
-    warn('doctor --fix reported failures. Check output above.');
+    warn('doctor --fix --yes reported failures. Check output above.');
   }
 }
 

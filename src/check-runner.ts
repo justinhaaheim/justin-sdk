@@ -56,6 +56,13 @@ export interface CheckResult {
   /** Shown on failure (e.g., "expected 0.1.34, got 0.1.30") */
   message?: string;
   pass: boolean;
+  /**
+   * When true, the fixCommand modifies system-level state (installs,
+   * global packages, curl pipe-to-bash) and requires explicit approval
+   * via --yes before --fix mode will run it. Project-local fixes should
+   * leave this unset or false.
+   */
+  requiresApproval?: boolean;
   /** Override severity for this result (takes precedence over Check.severity) */
   severity?: 'error' | 'warn';
 }
@@ -76,6 +83,11 @@ export interface RunChecksOptions {
   fix?: boolean;
   quiet?: boolean;
   serial?: boolean;
+  /**
+   * Pre-approve fixes that require approval (e.g., system-level installs).
+   * Without this flag, fixes marked `requiresApproval: true` are skipped.
+   */
+  yes?: boolean;
 }
 
 /** A check with optional children that only run if the parent passes. */
@@ -239,7 +251,10 @@ async function runFnCheck(entry: InternalEntry): Promise<InternalResult> {
   try {
     const fn =
       check.fn ??
-      (() => ({message: 'No check function provided', pass: false}));
+      ((): CheckResult => ({
+        message: 'No check function provided',
+        pass: false,
+      }));
     const result = await fn();
     const durationMs = Math.round(performance.now() - start);
     return {
@@ -465,7 +480,7 @@ export async function runCheckTree(
   nodes: CheckNode[],
   options: RunChecksOptions = {},
 ): Promise<number> {
-  const {quiet = false, align = false, fix = false} = options;
+  const {quiet = false, align = false, fix = false, yes = false} = options;
 
   // Flatten the tree to collect all labels for alignment
   function collectLabels(nodeList: CheckNode[]): string[] {
@@ -554,22 +569,36 @@ export async function runCheckTree(
   let results = await walkTree(nodes);
 
   if (fix) {
-    // Attempt fixes on non-skipped failures, then re-walk the entire tree
-    // so that children of newly-fixed parents get a chance to run.
-    const fixable = results.filter(
+    // Separate fixable failures into auto-run vs. approval-required.
+    const allFixable = results.filter(
       (r) => !r.skipped && r.exitCode !== 0 && r.checkResult?.fixCommand,
     );
+    const autoRun = allFixable.filter(
+      (r) => !r.checkResult?.requiresApproval,
+    );
+    const needsApproval = allFixable.filter(
+      (r) => r.checkResult?.requiresApproval,
+    );
 
-    if (fixable.length > 0) {
-      console.log(
-        `\n${YELLOW}Attempting fixes for ${fixable.length} check(s)...${RESET}\n`,
-      );
-
-      for (const r of fixable) {
-        const fixCmd = r.checkResult?.fixCommand ?? '';
+    // Run the auto-fixes (project-local changes)
+    const runList = [...autoRun, ...(yes ? needsApproval : [])];
+    if (runList.length > 0) {
+      if (!quiet) {
         console.log(
-          `  ${YELLOW}→${RESET} ${r.label}: ${DIM}${fixCmd}${RESET}`,
+          `\n${YELLOW}Attempting fixes for ${runList.length} check(s)...${RESET}\n`,
         );
+      }
+
+      for (const r of runList) {
+        const fixCmd = r.checkResult?.fixCommand ?? '';
+        if (!quiet) {
+          const approvalNote = r.checkResult?.requiresApproval
+            ? ` ${DIM}(approved via --yes)${RESET}`
+            : '';
+          console.log(
+            `  ${YELLOW}→${RESET} ${r.label}: ${DIM}${fixCmd}${RESET}${approvalNote}`,
+          );
+        }
         try {
           const proc = Bun.spawn(['sh', '-c', fixCmd], {
             cwd: process.cwd(),
@@ -581,8 +610,24 @@ export async function runCheckTree(
         }
       }
 
-      console.log(`\n${YELLOW}Re-running all checks...${RESET}\n`);
+      if (!quiet) {
+        console.log(`\n${YELLOW}Re-running all checks...${RESET}\n`);
+      }
       results = await walkTree(nodes);
+    }
+
+    // Report any approval-required fixes that were skipped
+    if (!yes && needsApproval.length > 0 && !quiet) {
+      console.log(
+        `\n${YELLOW}Skipped ${needsApproval.length} fix(es) that require approval:${RESET}`,
+      );
+      for (const r of needsApproval) {
+        const fixCmd = r.checkResult?.fixCommand ?? '';
+        console.log(`  ${DIM}•${RESET} ${r.label}: ${DIM}${fixCmd}${RESET}`);
+      }
+      console.log(
+        `\n  ${DIM}Run with --yes to approve these fixes.${RESET}\n`,
+      );
     }
   }
 

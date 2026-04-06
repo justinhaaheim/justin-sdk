@@ -30,11 +30,19 @@ void yargs(hideBin(process.argv))
           type: 'boolean',
           describe: 'Summary only (one-liner on all-pass)',
           default: false,
+        })
+        .option('yes', {
+          alias: 'y',
+          type: 'boolean',
+          describe:
+            'Pre-approve fixes that modify system state (installs, global packages). Without this, those fixes are reported but skipped.',
+          default: false,
         }),
     async (argv) => {
       const exitCode = await runDoctor(process.cwd(), {
         fix: argv.fix,
         quiet: argv.quiet,
+        yes: argv.yes,
       });
       process.exit(exitCode);
     },

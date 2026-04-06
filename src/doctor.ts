@@ -78,6 +78,32 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
   return [
     {
       check: {
+        label: 'BUN',
+        fn: (): CheckResult => {
+          const {stdout, exitCode} = exec('bun --version', projectRoot);
+          if (exitCode !== 0) {
+            // Env-aware fix: brew on macOS, npm global elsewhere, curl as last resort
+            let fixCommand: string;
+            if (process.platform === 'darwin' && !IS_REMOTE) {
+              fixCommand = 'brew install bun';
+            } else {
+              fixCommand =
+                'npm i -g bun || curl -fsSL https://bun.sh/install | bash';
+            }
+            return {
+              fix: `Run: ${fixCommand}`,
+              fixCommand,
+              message: 'bun is not installed',
+              pass: false,
+              requiresApproval: true,
+            };
+          }
+          return {message: `bun ${stdout}`, pass: true};
+        },
+      },
+    },
+    {
+      check: {
         label: 'CLAUDE_MD',
         fn: (): CheckResult => {
           if (!existsSync(resolve(projectRoot, 'CLAUDE.md'))) {
@@ -153,6 +179,7 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
               fixCommand,
               message: 'mise is not installed',
               pass: false,
+              requiresApproval: true,
             };
           }
           return {message: `mise ${stdout}`, pass: true};
@@ -206,6 +233,7 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
                       message:
                         'br (beads_rust) is not installed or not on PATH',
                       pass: false,
+                      requiresApproval: true,
                     };
                   }
 
@@ -384,13 +412,15 @@ const componentCheckFactories: Record<
 export interface DoctorOptions {
   fix?: boolean;
   quiet?: boolean;
+  /** Pre-approve fixes that require approval (system-level installs). */
+  yes?: boolean;
 }
 
 /**
  * Run doctor checks based on the components listed in justin-sdk.config.json.
  *
  * @param projectRoot - Path to the project root (defaults to cwd)
- * @param options - Doctor options (fix, quiet)
+ * @param options - Doctor options (fix, quiet, yes)
  * @returns Process exit code (0 = all pass, 1 = any fail)
  */
 export async function runDoctor(
@@ -428,5 +458,6 @@ export async function runDoctor(
     align: true,
     fix: options.fix,
     quiet: options.quiet,
+    yes: options.yes,
   });
 }
