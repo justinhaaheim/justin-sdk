@@ -337,26 +337,50 @@ function stepImportIssues(
   projectRoot: string,
   jsonlPath: string | null,
 ): boolean {
-  if (!jsonlPath) return true;
+  if (jsonlPath == null) return true;
 
   const targetJsonl = resolve(projectRoot, '.beads', 'issues.jsonl');
   log('Importing issues from backup...');
 
+  // Count source issues for verification
+  let sourceCount = 0;
+  try {
+    sourceCount = readFileSync(jsonlPath, 'utf-8')
+      .split('\n')
+      .filter((line) => line.trim() !== '').length;
+  } catch {
+    // ignore
+  }
+
   // Copy JSONL into .beads/
   cpSync(jsonlPath, targetJsonl, {force: true});
-  const result = exec('br sync --import-only', projectRoot);
+
+  // Use --orphans allow because migrating from old beads (bd) often
+  // produces orphan dependency references that strict mode rejects
+  // (silently dropping issues). --force ensures we re-import even if
+  // br thinks the JSONL hash is unchanged.
+  const result = exec(
+    'br sync --import-only --orphans allow --force',
+    projectRoot,
+  );
   if (result.exitCode !== 0) {
     fail(`br sync --import-only failed: ${result.stderr}`);
     return false;
   }
 
-  // Verify
-  const verify = exec('br list --json', projectRoot);
+  // Verify with --all (br list defaults to excluding closed issues)
+  const verify = exec('br list --all --json', projectRoot);
   if (verify.exitCode === 0) {
     try {
       const data = JSON.parse(verify.stdout) as {issues?: unknown[]};
       const count = data.issues?.length ?? 0;
-      success(`Imported ${count} issues`);
+      if (sourceCount > 0 && count < sourceCount) {
+        warn(
+          `Imported ${count} issues, but source had ${sourceCount}. Some may have been dropped.`,
+        );
+      } else {
+        success(`Imported ${count} issues`);
+      }
     } catch {
       success('Issues imported (could not parse count)');
     }
