@@ -56,6 +56,8 @@ export interface CheckResult {
   /** Shown on failure (e.g., "expected 0.1.34, got 0.1.30") */
   message?: string;
   pass: boolean;
+  /** Override severity for this result (takes precedence over Check.severity) */
+  severity?: 'error' | 'warn';
 }
 
 /** A single check to run. Provide either `command` (shell) or `fn` (async). */
@@ -245,7 +247,7 @@ async function runFnCheck(entry: InternalEntry): Promise<InternalResult> {
       durationMs,
       exitCode: result.pass ? 0 : 1,
       label: check.label,
-      severity: check.severity ?? 'error',
+      severity: result.severity ?? check.severity ?? 'error',
     };
   } catch (error) {
     const durationMs = Math.round(performance.now() - start);
@@ -531,7 +533,11 @@ export async function runCheckTree(
       const result = await runOne(entry, opts);
       results.push(result);
 
-      if (result.exitCode !== 0 && node.children) {
+      // Only skip children if the parent actually FAILED (error severity).
+      // Warnings don't block children.
+      const blockedChildren =
+        result.exitCode !== 0 && result.severity === 'error';
+      if (blockedChildren && node.children) {
         results.push(...(await walkTree(node.children, node.check.label)));
       } else if (node.children) {
         results.push(...(await walkTree(node.children)));

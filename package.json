@@ -7,6 +7,10 @@
     "jsdk": "./src/cli.ts",
     "j": "./src/cli.ts"
   },
+  "scripts": {
+    "test": "bun test",
+    "test:watch": "bun test --watch"
+  },
   "exports": {
     "./check-runner": "./src/check-runner.ts"
   },

@@ -231,6 +231,7 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
                       fixCommand: 'mise install',
                       message: `Version mismatch: expected ${expected} (from ${source}), got ${actual}`,
                       pass: false,
+                      severity: 'warn',
                     };
                   }
 

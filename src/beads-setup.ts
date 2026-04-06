@@ -45,19 +45,30 @@ function exec(
   }
 }
 
+let QUIET = false;
+
 function log(msg: string): void {
+  if (QUIET) return;
   console.log(`  ${msg}`);
 }
 
+function stepHeader(msg: string): void {
+  if (QUIET) return;
+  console.log(`\x1b[1m${msg}\x1b[0m`);
+}
+
 function success(msg: string): void {
+  if (QUIET) return;
   console.log(`  \x1b[32m✓\x1b[0m ${msg}`);
 }
 
 function warn(msg: string): void {
+  if (QUIET) return;
   console.warn(`  \x1b[33m⚠\x1b[0m ${msg}`);
 }
 
 function fail(msg: string): void {
+  // Failures always print
   console.error(`  \x1b[31m✗\x1b[0m ${msg}`);
 }
 
@@ -504,64 +515,69 @@ export interface BeadsSetupOptions {
   noCommit?: boolean;
   /** Project root (defaults to cwd) */
   projectRoot?: string;
+  /** Suppress non-error output (useful for tests) */
+  quiet?: boolean;
 }
 
 export async function runBeadsSetup(
   options: BeadsSetupOptions = {},
 ): Promise<number> {
+  QUIET = options.quiet ?? false;
   const projectRoot = options.projectRoot ?? process.cwd();
   const version = getPinnedVersion();
 
-  console.log(
-    `\n\x1b[1mSetting up beads_rust ${version} in ${basename(projectRoot)}\x1b[0m\n`,
-  );
+  if (!QUIET) {
+    console.log(
+      `\n\x1b[1mSetting up beads_rust ${version} in ${basename(projectRoot)}\x1b[0m\n`,
+    );
+  }
 
   // Step 1: mise.toml
-  console.log('\x1b[1m1. mise.toml\x1b[0m');
+  stepHeader('1. mise.toml');
   if (!stepMiseToml(projectRoot, version)) return 1;
 
   // Step 2: Install br
-  console.log('\x1b[1m2. Install br\x1b[0m');
+  stepHeader('2. Install br');
   if (!stepInstallBr(projectRoot, version)) return 1;
 
   // Step 3: Handle existing .beads/ data
-  console.log('\x1b[1m3. Migration check\x1b[0m');
+  stepHeader('3. Migration check');
   const migration = stepMigrateOldBeads(projectRoot);
   if (!migration.ok) return 1;
 
   // Step 4: Initialize beads_rust
-  console.log('\x1b[1m4. Initialize beads_rust\x1b[0m');
+  stepHeader('4. Initialize beads_rust');
   if (!stepInitBeads(projectRoot)) return 1;
 
   // Step 5: Import old issues
   if (migration.hadOldData) {
-    console.log('\x1b[1m5. Import issues\x1b[0m');
+    stepHeader('5. Import issues');
     if (!stepImportIssues(projectRoot, migration.jsonlPath)) return 1;
   }
 
   // Step 6: AGENTS.md
-  console.log('\x1b[1m6. AGENTS.md\x1b[0m');
+  stepHeader('6. AGENTS.md');
   if (!stepAgentsMd(projectRoot)) return 1;
 
   // Step 7: CLAUDE.md
-  console.log('\x1b[1m7. CLAUDE.md\x1b[0m');
+  stepHeader('7. CLAUDE.md');
   if (!stepClaudeMd(projectRoot)) return 1;
 
   // Step 8: .prettierignore
-  console.log('\x1b[1m8. .prettierignore\x1b[0m');
+  stepHeader('8. .prettierignore');
   if (!stepPrettierIgnore(projectRoot)) return 1;
 
   // Step 9: .claude/settings.json
-  console.log('\x1b[1m9. .claude/settings.json\x1b[0m');
+  stepHeader('9. .claude/settings.json');
   if (!stepClaudeSettings(projectRoot)) return 1;
 
   // Step 10: justin-sdk.config.json
-  console.log('\x1b[1m10. justin-sdk.config.json\x1b[0m');
+  stepHeader('10. justin-sdk.config.json');
   if (!stepJustinSdkJson(projectRoot)) return 1;
 
   // Step 11: Git commit
   if (!options.noCommit) {
-    console.log('\x1b[1m11. Git commit\x1b[0m');
+    stepHeader('11. Git commit');
     const status = exec('git status --porcelain', projectRoot);
     if (status.stdout.trim().length > 0) {
       exec(
@@ -584,27 +600,29 @@ export async function runBeadsSetup(
     }
   }
 
-  console.log(
-    `\n\x1b[32m\x1b[1mDone!\x1b[0m beads_rust ${version} is ready in ${basename(projectRoot)}.\n`,
-  );
+  if (!QUIET) {
+    console.log(
+      `\n\x1b[32m\x1b[1mDone!\x1b[0m beads_rust ${version} is ready in ${basename(projectRoot)}.\n`,
+    );
 
-  // Remind about agent-only tasks
-  const agentTasks: string[] = [];
-  const claudeMd = resolve(projectRoot, 'CLAUDE.md');
-  if (existsSync(claudeMd)) {
-    const content = readFileSync(claudeMd, 'utf-8');
-    if (content.includes('bd ') || content.includes('bd\n')) {
-      agentTasks.push(
-        'CLAUDE.md has stale `bd` references — have an agent clean them up',
-      );
+    // Remind about agent-only tasks
+    const agentTasks: string[] = [];
+    const claudeMd = resolve(projectRoot, 'CLAUDE.md');
+    if (existsSync(claudeMd)) {
+      const content = readFileSync(claudeMd, 'utf-8');
+      if (content.includes('bd ') || content.includes('bd\n')) {
+        agentTasks.push(
+          'CLAUDE.md has stale `bd` references — have an agent clean them up',
+        );
+      }
     }
-  }
-  if (agentTasks.length > 0) {
-    console.log('\x1b[33mRemaining tasks for an agent:\x1b[0m');
-    for (const task of agentTasks) {
-      console.log(`  • ${task}`);
+    if (agentTasks.length > 0) {
+      console.log('\x1b[33mRemaining tasks for an agent:\x1b[0m');
+      for (const task of agentTasks) {
+        console.log(`  • ${task}`);
+      }
+      console.log('');
     }
-    console.log('');
   }
 
   return 0;
