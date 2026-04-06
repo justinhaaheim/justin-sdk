@@ -10,6 +10,7 @@
 import yargs from 'yargs';
 import {hideBin} from 'yargs/helpers';
 
+import {runBeadsSetup} from './beads-setup';
 import {runDoctor} from './doctor';
 import {runSignal} from './signal';
 
@@ -59,6 +60,31 @@ void yargs(hideBin(process.argv))
         serial: argv.serial,
       });
       process.exit(exitCode);
+    },
+  )
+  .command(
+    'add <component>',
+    'Add a component to the current project',
+    (y) =>
+      y
+        .positional('component', {
+          type: 'string',
+          describe: 'Component to add (e.g., beads)',
+          choices: ['beads'],
+        })
+        .option('commit', {
+          type: 'boolean',
+          describe: 'Create a git commit at the end (use --no-commit to skip)',
+          default: true,
+        }),
+    async (argv) => {
+      if (argv.component === 'beads') {
+        const exitCode = await runBeadsSetup({
+          noCommit: !argv.commit,
+          projectRoot: process.cwd(),
+        });
+        process.exit(exitCode);
+      }
     },
   )
   .demandCommand(1, 'Please specify a command')

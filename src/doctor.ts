@@ -17,14 +17,26 @@ import {resolve} from 'path';
 
 const IS_REMOTE = process.env.CLAUDE_CODE_REMOTE === 'true';
 
+/** Read the centrally pinned version from versions.json (if available). */
+function getCentralBeadsVersion(): string | null {
+  const versionsPath = resolve(import.meta.dirname, '..', 'versions.json');
+  if (!existsSync(versionsPath)) return null;
+  try {
+    const versions = JSON.parse(readFileSync(versionsPath, 'utf-8')) as Record<
+      string,
+      string
+    >;
+    return versions.beads_rust ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function exec(
-  cmd: string,
-  cwd: string,
-): {exitCode: number; stdout: string} {
+function exec(cmd: string, cwd: string): {exitCode: number; stdout: string} {
   try {
     const stdout = execSync(cmd, {
       cwd,
@@ -191,32 +203,39 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
                     return {
                       fix: 'Run: mise install (falls back to direct GitHub download if rate-limited)',
                       fixCommand,
-                      message: 'br (beads_rust) is not installed or not on PATH',
+                      message:
+                        'br (beads_rust) is not installed or not on PATH',
                       pass: false,
                     };
                   }
 
+                  // Check version against central pin (preferred) or mise.toml
+                  const actual = stdout.replace(/^br\s*/, '').trim();
+                  const centralVersion = getCentralBeadsVersion();
                   const miseVersions = parseMiseToml(projectRoot);
-                  if (miseVersions) {
-                    const beadsKey = Object.keys(miseVersions).find((k) =>
-                      k.includes('beads_rust'),
-                    );
-                    if (beadsKey) {
-                      const expected = miseVersions[beadsKey];
-                      const actual = stdout.replace(/^br\s*/, '').trim();
-                      if (actual !== expected) {
-                        return {
-                          fix: 'Run: mise install',
-                          fixCommand: 'mise install',
-                          message: `Version mismatch: expected ${expected} (from mise.toml), got ${actual}`,
-                          pass: false,
-                        };
-                      }
-                    }
+                  const beadsKey = miseVersions
+                    ? Object.keys(miseVersions).find((k) =>
+                        k.includes('beads_rust'),
+                      )
+                    : null;
+                  const expected =
+                    centralVersion ??
+                    (beadsKey ? miseVersions![beadsKey] : null);
+
+                  if (expected && actual !== expected) {
+                    const source = centralVersion
+                      ? 'versions.json'
+                      : 'mise.toml';
+                    return {
+                      fix: 'Run: mise install',
+                      fixCommand: 'mise install',
+                      message: `Version mismatch: expected ${expected} (from ${source}), got ${actual}`,
+                      pass: false,
+                    };
                   }
 
                   return {
-                    message: `br ${stdout.replace(/^br\s*/, '').trim()}`,
+                    message: `br ${actual}`,
                     pass: true,
                   };
                 },
@@ -226,11 +245,14 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
                   check: {
                     label: 'BR_DB',
                     fn: (): CheckResult => {
-                      if (!existsSync(resolve(projectRoot, '.beads/beads.db'))) {
+                      if (
+                        !existsSync(resolve(projectRoot, '.beads/beads.db'))
+                      ) {
                         return {
                           fix: 'Run: br init',
                           fixCommand: 'br init',
-                          message: '.beads/beads.db not found — beads not initialized',
+                          message:
+                            '.beads/beads.db not found — beads not initialized',
                           pass: false,
                         };
                       }
@@ -264,11 +286,15 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
                           }
 
                           const content = readFileSync(agentsMd, 'utf-8');
-                          if (!content.includes('br ') && !content.includes('beads_rust')) {
+                          if (
+                            !content.includes('br ') &&
+                            !content.includes('beads_rust')
+                          ) {
                             return {
                               fix: 'Run: br agents --add --force',
                               fixCommand: 'br agents --add --force',
-                              message: 'AGENTS.md does not reference br/beads_rust — may be outdated',
+                              message:
+                                'AGENTS.md does not reference br/beads_rust — may be outdated',
                               pass: false,
                             };
                           }
@@ -291,7 +317,8 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
                           if (!content.includes('AGENTS.md')) {
                             return {
                               fix: 'Add an @AGENTS.md reference to CLAUDE.md',
-                              message: 'CLAUDE.md does not reference @AGENTS.md',
+                              message:
+                                'CLAUDE.md does not reference @AGENTS.md',
                               pass: false,
                             };
                           }
