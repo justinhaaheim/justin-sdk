@@ -10,6 +10,7 @@
 import yargs from 'yargs';
 import {hideBin} from 'yargs/helpers';
 
+import {runAgent} from './agent';
 import {runBeadsSetup} from './beads-setup';
 import {runDoctor} from './doctor';
 import {runSignal} from './signal';
@@ -93,6 +94,15 @@ void yargs(hideBin(process.argv))
         });
         process.exit(exitCode);
       }
+    },
+  )
+  .command(
+    'agent',
+    'Print the agent playbook (self-contained instructions for AI coding agents)',
+    (y) => y,
+    () => {
+      runAgent();
+      process.exit(0);
     },
   )
   .demandCommand(1, 'Please specify a command')
