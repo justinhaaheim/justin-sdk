@@ -365,6 +365,14 @@ function stepAgentsMd(projectRoot: string): boolean {
   }
   success('Generated AGENTS.md');
 
+  // Delete the AGENTS.md.bak that br agents --force creates. We already
+  // wrote our own backup to tmp/ above (if there was stale content), so
+  // br's .bak is redundant and would otherwise clutter the repo root.
+  const brBackup = resolve(projectRoot, 'AGENTS.md.bak');
+  if (existsSync(brBackup)) {
+    rmSync(brBackup);
+  }
+
   // Add dependency direction docs if not already present
   if (existsSync(agentsMd)) {
     const content = readFileSync(agentsMd, 'utf-8');

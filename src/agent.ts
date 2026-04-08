@@ -89,7 +89,7 @@ A CLI tool and module library that provides:
 
 - **\`doctor\`** — environment health checks with auto-fix mode
 - **\`signal\`** — run project code quality checks (lint/ts/prettier)
-- **\`add <component>\`** — install a component (currently only \`beads\`)
+- **\`add <component>\`** — install a component (\`base-setup\` or \`beads\`)
 - **\`agent\`** — print this playbook (the command you probably just ran)
 
 It also exports an importable \`check-runner\` module that projects can

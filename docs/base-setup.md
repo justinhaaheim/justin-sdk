@@ -133,7 +133,7 @@ Auto-lint and auto-format on file edits:
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.file_path' | { read file_path; if [[ \"$file_path\" != \"$CLAUDE_PROJECT_DIR\"/* ]]; then echo \"Skipping - file outside project\"; else if [[ \"$file_path\" =~ \\.(ts|tsx|js|jsx|cjs|mjs)$ ]]; then bun run lint:fix:file -- \"$file_path\"; fi; bun run prettier --write -u \"$file_path\"; fi; }"
+            "command": "jq -r '.tool_input.file_path' | bash -c 'read file_path; if [[ \"$file_path\" != \"$CLAUDE_PROJECT_DIR\"/* ]]; then echo \"Skipping - file outside project\"; else if [[ \"$file_path\" =~ \\.(ts|tsx|js|jsx|cjs|mjs)$ ]]; then bun run lint:fix:file -- \"$file_path\"; fi; bun run prettier --write -u \"$file_path\"; fi'"
           }
         ]
       }
@@ -141,6 +141,8 @@ Auto-lint and auto-format on file edits:
   }
 }
 ```
+
+**Important:** The inner test logic uses bash-specific `[[ ]]` and `=~`, but Claude Code runs hook commands under `/bin/sh` (dash on most systems), which does not support either. The `bash -c '...'` wrapper ensures bash parses the inner logic. Without it, the hook fails silently with a syntax error when dash encounters `[[`.
 
 ---
 

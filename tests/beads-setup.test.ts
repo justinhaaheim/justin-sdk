@@ -229,6 +229,14 @@ describe('beads-setup (full install)', () => {
     expect(occurrences.length).toBe(1);
   });
 
+  test('no stray AGENTS.md.bak in project root after run (home-base-s9p)', async () => {
+    if (!hasBr) return;
+    const sb = track(createProjectSandbox());
+    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+
+    expect(existsSync(join(sb.path, 'AGENTS.md.bak'))).toBe(false);
+  });
+
   test('stale bd AGENTS.md is backed up and replaced cleanly', async () => {
     if (!hasBr) return;
     const sb = track(createProjectSandbox());
