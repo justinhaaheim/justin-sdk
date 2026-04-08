@@ -391,7 +391,50 @@ function stepImportIssues(
   return true;
 }
 
+/**
+ * Detects stale `bd` (legacy beads) content in AGENTS.md.
+ *
+ * `br agents --add` appends to AGENTS.md rather than replacing it, so if
+ * an old bd-era AGENTS.md exists, the result is a messy stack of old bd
+ * content and new br content. This detects that situation so we can
+ * back up the file and start fresh.
+ */
+function hasStaleBeadsContent(agentsMdContent: string): boolean {
+  // Strong signal: bd's end-of-content marker
+  if (agentsMdContent.includes('END BEADS INTEGRATION')) return true;
+  // Strong signal: bd's header phrasing
+  if (agentsMdContent.includes('**bd** (beads)')) return true;
+  // Strong signal: `bd onboard` (bd-specific command)
+  if (agentsMdContent.includes('bd onboard')) return true;
+  return false;
+}
+
 function stepAgentsMd(projectRoot: string): boolean {
+  const agentsMd = resolve(projectRoot, 'AGENTS.md');
+
+  // If AGENTS.md has stale bd content, back it up and replace with a
+  // placeholder so br agents --add --force writes clean content.
+  if (existsSync(agentsMd)) {
+    const existing = readFileSync(agentsMd, 'utf-8');
+    if (hasStaleBeadsContent(existing)) {
+      const tmpDir = resolve(projectRoot, 'tmp');
+      ensureDir(tmpDir);
+      const timestamp = new Date()
+        .toISOString()
+        .replace(/[:.]/g, '-')
+        .slice(0, 19);
+      const backupPath = resolve(
+        tmpDir,
+        `AGENTS.md.bd-backup-${timestamp}`,
+      );
+      cpSync(agentsMd, backupPath, {force: true});
+      writeFileSync(agentsMd, '# Agent Instructions\n');
+      success(
+        `Detected stale bd content in AGENTS.md; backed up to tmp/AGENTS.md.bd-backup-${timestamp} and reset`,
+      );
+    }
+  }
+
   const result = exec('br agents --add --force', projectRoot);
   if (result.exitCode !== 0) {
     fail(`br agents --add --force failed: ${result.stderr}`);
@@ -400,7 +443,6 @@ function stepAgentsMd(projectRoot: string): boolean {
   success('Generated AGENTS.md');
 
   // Add dependency direction docs if not already present
-  const agentsMd = resolve(projectRoot, 'AGENTS.md');
   if (existsSync(agentsMd)) {
     const content = readFileSync(agentsMd, 'utf-8');
     if (!content.includes('Dependency Direction')) {

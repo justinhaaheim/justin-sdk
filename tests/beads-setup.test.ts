@@ -10,7 +10,7 @@
 
 import {describe, test, expect, afterEach, beforeAll} from 'bun:test';
 import {execSync} from 'child_process';
-import {existsSync, readFileSync} from 'fs';
+import {existsSync, readdirSync, readFileSync} from 'fs';
 import {join} from 'path';
 
 import {runBeadsSetup} from '../src/beads-setup';
@@ -51,7 +51,8 @@ describe('beads-setup (file operations)', () => {
     const sb = track(createProjectSandbox());
     const exitCode = await runBeadsSetup({
       projectRoot: sb.path,
-      noCommit: true, quiet: true,
+      noCommit: true,
+      quiet: true,
     });
     expect(exitCode).toBe(0);
 
@@ -191,7 +192,8 @@ describe('beads-setup (full install)', () => {
     const sb = track(createProjectSandbox());
     const exitCode = await runBeadsSetup({
       projectRoot: sb.path,
-      noCommit: true, quiet: true,
+      noCommit: true,
+      quiet: true,
     });
     expect(exitCode).toBe(0);
 
@@ -227,17 +229,87 @@ describe('beads-setup (full install)', () => {
     expect(occurrences.length).toBe(1);
   });
 
+  test('stale bd AGENTS.md is backed up and replaced cleanly', async () => {
+    if (!hasBr) return;
+    const sb = track(createProjectSandbox());
+    const staleAgentsMd = `# Agent Instructions
+
+This project uses **bd** (beads) for issue tracking. Run \`bd onboard\` to get started.
+
+## Quick Reference
+
+\`\`\`bash
+bd ready
+bd show <id>
+bd create --title "foo"
+\`\`\`
+
+<!-- END BEADS INTEGRATION -->
+`;
+    sb.writeFile('AGENTS.md', staleAgentsMd);
+
+    const exitCode = await runBeadsSetup({
+      projectRoot: sb.path,
+      noCommit: true,
+      quiet: true,
+    });
+    expect(exitCode).toBe(0);
+
+    // Stale markers should be gone
+    const newContent = readFileSync(join(sb.path, 'AGENTS.md'), 'utf-8');
+    expect(newContent).not.toContain('END BEADS INTEGRATION');
+    expect(newContent).not.toContain('bd onboard');
+    expect(newContent).not.toContain('**bd** (beads)');
+
+    // br content should be present
+    expect(newContent).toContain('br ');
+
+    // Dependency Direction section should be present (added by script)
+    expect(newContent).toContain('Dependency Direction');
+
+    // Backup should exist in tmp/
+    const tmpFiles = readdirSync(join(sb.path, 'tmp')).filter((f) =>
+      f.startsWith('AGENTS.md.bd-backup-'),
+    );
+    expect(tmpFiles.length).toBe(1);
+
+    // Backup should have the original stale content
+    const backup = readFileSync(join(sb.path, 'tmp', tmpFiles[0]!), 'utf-8');
+    expect(backup).toContain('END BEADS INTEGRATION');
+    expect(backup).toContain('bd onboard');
+  });
+
+  test('does NOT back up clean AGENTS.md', async () => {
+    if (!hasBr) return;
+    const sb = track(createProjectSandbox());
+    // Create a clean br-era AGENTS.md first via the script
+    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+    // Second run should not create a backup
+    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+
+    // tmp/ shouldn't have any bd-backup files
+    const tmpDir = join(sb.path, 'tmp');
+    if (existsSync(tmpDir)) {
+      const tmpFiles = readdirSync(tmpDir).filter((f) =>
+        f.startsWith('AGENTS.md.bd-backup-'),
+      );
+      expect(tmpFiles.length).toBe(0);
+    }
+  });
+
   test('fully idempotent: two runs produce same end state (exit 0)', async () => {
     if (!hasBr) return;
     const sb = track(createProjectSandbox({claudeMd: '# Test\n'}));
 
     const first = await runBeadsSetup({
       projectRoot: sb.path,
-      noCommit: true, quiet: true,
+      noCommit: true,
+      quiet: true,
     });
     const second = await runBeadsSetup({
       projectRoot: sb.path,
-      noCommit: true, quiet: true,
+      noCommit: true,
+      quiet: true,
     });
 
     expect(first).toBe(0);
@@ -278,7 +350,8 @@ describe('beads-setup (safety)', () => {
 
     const exitCode = await runBeadsSetup({
       projectRoot: sb.path,
-      noCommit: true, quiet: true,
+      noCommit: true,
+      quiet: true,
     });
     expect(exitCode).toBe(0);
     // BEADS.md is still created
