@@ -124,12 +124,29 @@ first, then retry.
 
 ---
 
+## Available components
+
+Currently, \`add\` supports two components:
+
+- **\`base-setup\`** — the foundation layer every justin-sdk project
+  needs. Creates \`justin-sdk.config.json\`, adds package.json scripts
+  (signal/doctor/setup-env), copies \`scripts/setup-env.ts\`, adds
+  \`tmp/\` to .gitignore, and scaffolds \`.claude/settings.json\` with
+  a SessionStart hook. Idempotent and safe to re-run.
+- **\`beads\`** — installs beads_rust (\`br\`) issue tracking. Runs
+  base-setup automatically as a precondition if not already installed.
+
+Future components (not yet implemented): eslint, prettier, tsconfig,
+version-manager, prompts.
+
 ## Figure out what the user wants
 
 The user probably said something like:
-- "Add beads to this project" → run \`add beads\` (see next section)
+- "Set up this project with justin-sdk" → run \`add base-setup\`
+  first, then \`add beads\` (or just \`add beads\` — it runs base-setup
+  automatically as a precondition)
+- "Add beads to this project" → \`add beads\` (see next section)
 - "Migrate from bd to beads_rust" → also \`add beads\` (handles migration)
-- "Set up this project with justin-sdk" → \`add beads\` + doctor check
 - "Check the environment" → \`bunx justin-sdk doctor\`
 - "Run signal" → \`bunx justin-sdk signal\`
 - "Update the beads version" → update \`versions.json\` in the SDK,
@@ -140,13 +157,32 @@ see the current state, then decide based on what's missing.
 
 ---
 
+## Secondary workflow: \`add base-setup\`
+
+Installs the foundation layer. You usually don't need to run this
+directly — \`add beads\` runs it automatically as a precondition. But
+if you want just the foundation (scripts, config, gitignore, hooks)
+without beads, run:
+
+\`\`\`bash
+bunx github:justinhaaheim/justin-sdk#main add base-setup
+\`\`\`
+
+This is also the right command if a user says "set up this project
+with justin-sdk but I don't want beads yet".
+
+---
+
 ## Primary workflow: \`add beads\`
 
 This is the most common task. It sets up **beads_rust** (\`br\`) for issue
 tracking in a project, handling migration from older tools automatically.
 
-### What it does (11 steps, fully automated)
+### What it does (12 steps, fully automated)
 
+0. **base-setup** — runs \`add base-setup\` first to ensure the foundation
+   layer is present (justin-sdk.config.json, package.json scripts,
+   scripts/setup-env.ts, .gitignore, .claude/settings.json). Idempotent.
 1. **mise.toml** — creates or updates with the pinned beads_rust version
 2. **install br** — via mise first, falls back to direct GitHub download
    if mise fails or is rate-limited

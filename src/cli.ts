@@ -11,6 +11,7 @@ import yargs from 'yargs';
 import {hideBin} from 'yargs/helpers';
 
 import {runAgent} from './agent';
+import {runBaseSetup} from './base-setup';
 import {runBeadsSetup} from './beads-setup';
 import {runDoctor} from './doctor';
 import {runSignal} from './signal';
@@ -73,13 +74,13 @@ void yargs(hideBin(process.argv))
   )
   .command(
     'add <component>',
-    'Add a component to the current project',
+    'Add a justin-sdk component to the current project',
     (y) =>
       y
         .positional('component', {
           type: 'string',
-          describe: 'Component to add (e.g., beads)',
-          choices: ['beads'],
+          describe: 'Component to add',
+          choices: ['base-setup', 'beads'],
         })
         .option('commit', {
           type: 'boolean',
@@ -87,6 +88,12 @@ void yargs(hideBin(process.argv))
           default: true,
         }),
     async (argv) => {
+      if (argv.component === 'base-setup') {
+        const exitCode = await runBaseSetup({
+          projectRoot: process.cwd(),
+        });
+        process.exit(exitCode);
+      }
       if (argv.component === 'beads') {
         const exitCode = await runBeadsSetup({
           noCommit: !argv.commit,

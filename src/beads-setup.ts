@@ -3,127 +3,50 @@
  *
  * Orchestrates: mise.toml, br install, migration, br init, AGENTS.md,
  * CLAUDE.md (@docs/prompts/BEADS.md pattern), .prettierignore,
- * .claude/settings.json, and justin-sdk.config.json.
+ * .claude/settings.json, and the beads-setup component registration.
+ *
+ * Runs base-setup as a precondition so the foundation layer is always
+ * present before beads-specific steps run.
  *
  * Bails with a clear error on unexpected state rather than guessing.
  */
 
-import {execSync} from 'child_process';
 import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
   appendFileSync,
   cpSync,
+  existsSync,
+  readFileSync,
   rmSync,
+  writeFileSync,
 } from 'fs';
-import {resolve, basename} from 'path';
+import {basename, resolve} from 'path';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function exec(
-  cmd: string,
-  cwd: string,
-): {exitCode: number; stdout: string; stderr: string} {
-  try {
-    const stdout = execSync(cmd, {
-      cwd,
-      encoding: 'utf-8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
-    return {exitCode: 0, stdout, stderr: ''};
-  } catch (error) {
-    const err = error as {status?: number; stdout?: string; stderr?: string};
-    return {
-      exitCode: err.status ?? 1,
-      stdout: (err.stdout ?? '').toString().trim(),
-      stderr: (err.stderr ?? '').toString().trim(),
-    };
-  }
-}
-
-let QUIET = false;
-
-function log(msg: string): void {
-  if (QUIET) return;
-  console.log(`  ${msg}`);
-}
-
-function stepHeader(msg: string): void {
-  if (QUIET) return;
-  console.log(`\x1b[1m${msg}\x1b[0m`);
-}
-
-function success(msg: string): void {
-  if (QUIET) return;
-  console.log(`  \x1b[32m✓\x1b[0m ${msg}`);
-}
-
-function warn(msg: string): void {
-  if (QUIET) return;
-  console.warn(`  \x1b[33m⚠\x1b[0m ${msg}`);
-}
-
-function fail(msg: string): void {
-  // Failures always print
-  console.error(`  \x1b[31m✗\x1b[0m ${msg}`);
-}
-
-function ensureDir(dir: string): void {
-  if (!existsSync(dir)) mkdirSync(dir, {recursive: true});
-}
-
-function readJson(path: string): Record<string, unknown> | null {
-  if (!existsSync(path)) return null;
-  try {
-    return JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
-function writeJson(path: string, data: unknown): void {
-  writeFileSync(path, JSON.stringify(data, null, 2) + '\n');
-}
-
-/** Append a line to a file if it's not already present. */
-function appendIfMissing(
-  filePath: string,
-  searchStr: string,
-  appendStr: string,
-): boolean {
-  if (existsSync(filePath)) {
-    const content = readFileSync(filePath, 'utf-8');
-    if (content.includes(searchStr)) return false;
-    appendFileSync(filePath, appendStr);
-  } else {
-    writeFileSync(filePath, appendStr);
-  }
-  return true;
-}
+import {runBaseSetup} from './base-setup';
+import {
+  appendIfMissing,
+  ensureDir,
+  exec,
+  fail,
+  getPinnedToolVersion,
+  log,
+  readJson,
+  setQuiet,
+  stepHeader,
+  success,
+  warn,
+  writeJson,
+} from './setup-helpers';
 
 // ---------------------------------------------------------------------------
 // Version pin
 // ---------------------------------------------------------------------------
 
 function getPinnedVersion(): string {
-  // versions.json lives alongside this source file in the SDK
-  const versionsPath = resolve(import.meta.dirname, '..', 'versions.json');
-  if (!existsSync(versionsPath)) {
+  const version = getPinnedToolVersion('beads_rust');
+  if (version == null) {
     throw new Error(
-      `versions.json not found at ${versionsPath}. Cannot determine pinned beads_rust version.`,
+      'beads_rust version not found in versions.json. Cannot determine pinned beads_rust version.',
     );
-  }
-  const versions = JSON.parse(readFileSync(versionsPath, 'utf-8')) as Record<
-    string,
-    string
-  >;
-  const version = versions.beads_rust;
-  if (!version) {
-    throw new Error('beads_rust version not found in versions.json');
   }
   return version;
 }
@@ -551,15 +474,19 @@ function stepClaudeSettings(projectRoot: string): boolean {
 }
 
 function stepJustinSdkJson(projectRoot: string): boolean {
+  // base-setup ensures the config file exists; we just need to add the
+  // beads-setup component if it's not already there.
   const configPath = resolve(projectRoot, 'justin-sdk.config.json');
   const config = readJson(configPath);
 
-  if (!config) {
-    warn('No justin-sdk.config.json found — skipping component registration');
-    return true;
+  if (config == null) {
+    fail(
+      'justin-sdk.config.json not found after base-setup — this should not happen',
+    );
+    return false;
   }
 
-  const components = (config.components ?? []) as string[];
+  const components = ((config.components as string[] | undefined) ?? []).slice();
   if (components.includes('beads-setup')) {
     success('justin-sdk.config.json already includes beads-setup component');
     return true;
@@ -588,15 +515,35 @@ export interface BeadsSetupOptions {
 export async function runBeadsSetup(
   options: BeadsSetupOptions = {},
 ): Promise<number> {
-  QUIET = options.quiet ?? false;
+  setQuiet(options.quiet ?? false);
+  const quiet = options.quiet ?? false;
   const projectRoot = options.projectRoot ?? process.cwd();
   const version = getPinnedVersion();
 
-  if (!QUIET) {
+  if (!quiet) {
     console.log(
       `\n\x1b[1mSetting up beads_rust ${version} in ${basename(projectRoot)}\x1b[0m\n`,
     );
   }
+
+  // Step 0: Ensure base-setup is installed first (foundation layer).
+  // This creates justin-sdk.config.json, package.json scripts,
+  // scripts/setup-env.ts, .gitignore entries, and .claude/settings.json.
+  // Pre-registers 'beads-setup' as a component so we don't have to
+  // update the config file twice.
+  stepHeader('0. base-setup (foundation layer)');
+  const baseExit = await runBaseSetup({
+    projectRoot,
+    quiet: true,
+    extraComponents: ['beads-setup'],
+  });
+  if (baseExit !== 0) {
+    fail('base-setup failed — cannot proceed with beads-setup');
+    return baseExit;
+  }
+  // base-setup toggled quiet on/off internally; restore our own setting.
+  setQuiet(quiet);
+  success('base-setup ready');
 
   // Step 1: mise.toml
   stepHeader('1. mise.toml');
@@ -633,25 +580,40 @@ export async function runBeadsSetup(
   stepHeader('8. .prettierignore');
   if (!stepPrettierIgnore(projectRoot)) return 1;
 
-  // Step 9: .claude/settings.json
+  // Step 9: .claude/settings.json (add br to sandbox.excludedCommands)
   stepHeader('9. .claude/settings.json');
   if (!stepClaudeSettings(projectRoot)) return 1;
 
-  // Step 10: justin-sdk.config.json
+  // Step 10: justin-sdk.config.json (ensure beads-setup is in components)
   stepHeader('10. justin-sdk.config.json');
   if (!stepJustinSdkJson(projectRoot)) return 1;
 
   // Step 11: Git commit
-  if (!options.noCommit) {
+  if (options.noCommit !== true) {
     stepHeader('11. Git commit');
     const status = exec('git status --porcelain', projectRoot);
     if (status.stdout.trim().length > 0) {
-      exec(
-        'git add mise.toml .beads/ AGENTS.md .claude/settings.json .prettierignore justin-sdk.config.json docs/prompts/BEADS.md',
-        projectRoot,
-      );
-      // Also add CLAUDE.md if it was modified
-      exec('git add CLAUDE.md', projectRoot);
+      // Stage each file individually so one missing file doesn't cause
+      // the rest to be silently dropped (home-base-beq).
+      const filesToAdd = [
+        'mise.toml',
+        '.beads/',
+        'AGENTS.md',
+        '.claude/settings.json',
+        '.prettierignore',
+        'justin-sdk.config.json',
+        'docs/prompts/BEADS.md',
+        'CLAUDE.md',
+        'scripts/setup-env.ts',
+        'package.json',
+        '.gitignore',
+      ];
+      for (const path of filesToAdd) {
+        const fullPath = resolve(projectRoot, path);
+        if (existsSync(fullPath)) {
+          exec(`git add '${path}'`, projectRoot);
+        }
+      }
       const commitResult = exec(
         `git commit -m 'Add beads_rust (br) issue tracking via justin-sdk'`,
         projectRoot,
@@ -666,7 +628,7 @@ export async function runBeadsSetup(
     }
   }
 
-  if (!QUIET) {
+  if (!quiet) {
     console.log(
       `\n\x1b[32m\x1b[1mDone!\x1b[0m beads_rust ${version} is ready in ${basename(projectRoot)}.\n`,
     );
