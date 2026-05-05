@@ -3,11 +3,20 @@
  * setup-env.ts — Ensure development tools are installed and available.
  *
  * Behavior differs by environment:
- *   - Remote (CLAUDE_CODE_REMOTE=true): Bootstraps mise + PATH, then
- *     delegates to `doctor --fix --yes` for tool installation. The --yes
- *     flag pre-approves system-level installs (mise, br, etc.).
+ *   - Remote (CLAUDE_CODE_REMOTE=true): Bootstraps mise + PATH, runs any
+ *     project-specific `setup-env:*` scripts declared in package.json, then
+ *     delegates to `doctor --fix --yes` for SDK-component tool installation.
+ *     The --yes flag pre-approves system-level installs (mise, br, etc.).
  *   - Local: Runs `doctor --quiet` to validate the environment. Never
  *     auto-installs anything — approvals must be explicit via --yes.
+ *
+ * Project-specific setup hook:
+ *   Any package.json script whose name starts with `setup-env:` is treated
+ *   as a project-specific setup step. They run between the mise/PATH
+ *   bootstrap and `doctor --fix`, in alphabetical order. Use numeric
+ *   prefixes (`setup-env:10-swift`, `setup-env:20-foo`) if you need strict
+ *   ordering. Each sub-script is responsible for its own idempotence and
+ *   failure handling — setup-env.ts logs + continues on sub-script failure.
  *
  * This script is designed to be copied into any project at scripts/setup-env.ts
  * and referenced by a SessionStart hook in .claude/settings.json.
@@ -20,7 +29,7 @@
  */
 
 import {execSync} from 'child_process';
-import {appendFileSync, existsSync} from 'fs';
+import {appendFileSync, existsSync, readFileSync} from 'fs';
 import {resolve} from 'path';
 
 const HOME = process.env.HOME ?? '/root';
@@ -51,6 +60,51 @@ function log(msg: string): void {
 
 function warn(msg: string): void {
   console.warn(`[setup-env] ⚠ ${msg}`);
+}
+
+// ---------------------------------------------------------------------------
+// Project-specific setup-env:* sub-script discovery
+// ---------------------------------------------------------------------------
+
+function discoverProjectSetupScripts(): string[] {
+  const pkgPath = resolve(PROJECT_ROOT, 'package.json');
+  if (!existsSync(pkgPath)) return [];
+
+  let pkg: {scripts?: Record<string, string>};
+  try {
+    pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as {
+      scripts?: Record<string, string>;
+    };
+  } catch (error) {
+    warn(`Failed to parse package.json: ${String(error)}`);
+    return [];
+  }
+
+  const scripts = pkg.scripts ?? {};
+  return Object.keys(scripts)
+    .filter((name) => name.startsWith('setup-env:'))
+    .sort();
+}
+
+function runProjectSetupScripts(): void {
+  const subScripts = discoverProjectSetupScripts();
+  if (subScripts.length === 0) return;
+
+  log(
+    `Running ${subScripts.length} project setup script(s): ${subScripts.join(', ')}`,
+  );
+  for (const name of subScripts) {
+    log(`→ ${name}`);
+    try {
+      execSync(`bun run ${name}`, {
+        cwd: PROJECT_ROOT,
+        encoding: 'utf-8',
+        stdio: 'inherit',
+      });
+    } catch {
+      warn(`${name} failed — continuing.`);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -87,7 +141,10 @@ function setupRemote(): void {
     );
   }
 
-  // Phase 2: Delegate to doctor --fix --yes for everything else.
+  // Phase 1.5: Project-specific setup-env:* scripts
+  runProjectSetupScripts();
+
+  // Phase 2: Delegate to doctor --fix --yes for SDK component tools.
   // --yes pre-approves system-level installs (mise, br). Safe in
   // remote/sandbox environments; on local dev, approvals are explicit.
   log('Running doctor --fix --yes...');
@@ -108,14 +165,8 @@ function setupRemote(): void {
 // ---------------------------------------------------------------------------
 
 function validateLocal(): void {
-  const doctorScript = resolve(PROJECT_ROOT, 'scripts/doctor.ts');
-  if (!existsSync(doctorScript)) {
-    log('Local environment OK (doctor script not found, skipping checks).');
-    return;
-  }
-
   try {
-    execSync('bun scripts/doctor.ts --quiet', {
+    execSync('bun run doctor -- --quiet', {
       cwd: PROJECT_ROOT,
       encoding: 'utf-8',
       stdio: 'inherit',

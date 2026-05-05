@@ -91,7 +91,33 @@ cp node_modules/@justinhaaheim/justin-sdk/templates/scripts/setup-env.ts scripts
 
 Create the `scripts/` directory first if it doesn't exist. This is the **only** file that gets copied — everything else runs from the SDK package.
 
-**If setup-env.ts already exists**, review it for any project-specific customizations before overwriting. The template handles: remote tool installation (mise, beads_rust), local doctor validation, and `bun install`.
+**If setup-env.ts already exists**, overwrite it. The template is generic and has no project-specific logic — any customizations that look project-specific should be extracted into a `setup-env:*` sub-script (see below) before the overwrite.
+
+### Project-specific setup: `setup-env:*` scripts
+
+The template discovers and runs any `setup-env:*` script in `package.json` between the mise/PATH bootstrap and the `doctor --fix` call, in alphabetical order. This is the extension point for project-specific setup needs (e.g., installing Swift, downloading a large model, building a native binary) — you never need to fork `setup-env.ts` itself.
+
+**Example** (from `apple-reminders-mcp`, which needs Swift for Linux in remote):
+
+```json
+{
+  "scripts": {
+    "setup-env": "bun scripts/setup-env.ts",
+    "setup-env:swift": "bun scripts/setup-env-swift.ts"
+  }
+}
+```
+
+Each sub-script should:
+
+- **Be self-contained.** Don't import from `setup-env.ts`. Copy the `run`/`log`/`warn` helpers if needed.
+- **Be idempotent.** SessionStart hooks run every session — check for existing state and exit early.
+- **Self-gate on `CLAUDE_CODE_REMOTE`** if the work only makes sense in one environment. The template calls sub-scripts in remote mode only, but a sub-script may still be invoked directly for testing, so gating inside the sub-script is a safer default.
+- **Handle its own failures.** `setup-env.ts` logs a warning and continues if a sub-script exits non-zero; it will not abort the SessionStart hook.
+
+**Ordering:** alphabetical by script name. If you need strict ordering, use numeric prefixes: `setup-env:10-swift`, `setup-env:20-native-build`.
+
+**When to add a sub-script vs. an SDK doctor check:** if the tool is specific to one project, use a `setup-env:*` sub-script. If it's something multiple projects need (e.g., a common SDK version), it belongs as a doctor check in a new SDK component.
 
 ---
 
