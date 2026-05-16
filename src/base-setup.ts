@@ -16,6 +16,7 @@
  * Bails on unexpected state rather than guessing.
  */
 
+import {createHash} from 'crypto';
 import {cpSync, existsSync, readFileSync, writeFileSync} from 'fs';
 import {basename, resolve} from 'path';
 
@@ -100,8 +101,8 @@ export function stepJustinSdkConfig(
     modified = true;
   }
   if (config.version !== sdkVersion) {
-    // Don't overwrite — this is the version the project was LAST synced to.
-    // Leave it as an informational marker the user can update manually.
+    config.version = sdkVersion;
+    modified = true;
   }
 
   if (modified) {
@@ -135,12 +136,21 @@ export function stepPackageScripts(projectRoot: string): boolean {
     {}) as Record<string, string>;
   let modified = false;
 
-  // Add required SDK scripts (overwrite if they point at old node_modules path)
+  // Add required SDK scripts. Overwrite if the existing value is a
+  // known-stale shape:
+  //   - Points at the old node_modules path
+  //   - Points at a local scripts/{doctor,signal,check-runner}.ts (pre-SDK
+  //     pattern that was inlined per-project before the CLI existed)
+  // Custom values that don't match a stale shape are preserved (e.g.,
+  // apple-reminders-mcp's `signal: "bun run prettier-check"`).
+  const STALE_LOCAL_SCRIPT_RE =
+    /^bun(?:x)?\s+scripts\/(?:doctor|signal|check-runner)\.ts(?:\s.*)?$/;
   for (const [name, cmd] of Object.entries(SDK_SCRIPTS)) {
     const existing = scripts[name];
     const isStaleSdkScript =
       existing != null &&
-      existing.includes('node_modules/@justinhaaheim/justin-sdk');
+      (existing.includes('node_modules/@justinhaaheim/justin-sdk') ||
+        STALE_LOCAL_SCRIPT_RE.test(existing));
     if (existing == null || isStaleSdkScript) {
       scripts[name] = cmd;
       modified = true;
@@ -169,17 +179,37 @@ export function stepPackageScripts(projectRoot: string): boolean {
   return true;
 }
 
+function sha256(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+/**
+ * Known hashes of older versions of the setup-env.ts template. If the
+ * project's current file matches one of these, it's safe to silently
+ * overwrite — we know the user didn't hand-modify it.
+ *
+ * Add to this list each time the template ships in a new SDK release,
+ * by hashing the previous version's content with sha256.
+ */
+const KNOWN_OLD_SETUP_ENV_HASHES: ReadonlySet<string> = new Set<string>([
+  // (none yet — first hashed release of this list is 0.3.2)
+]);
+
 /**
  * Copy the setup-env.ts template into scripts/setup-env.ts.
- * Does NOT overwrite an existing file (users may have customized it).
+ *
+ * Behavior:
+ *  - If file is missing → copy template.
+ *  - If file matches current template (by hash) → noop.
+ *  - If file matches a known-old template hash → silently overwrite.
+ *  - If file is hand-modified (no hash match) → warn and skip, unless
+ *    `force: true` is passed in which case overwrite.
  */
-export function stepSetupEnvScript(projectRoot: string): boolean {
+export function stepSetupEnvScript(
+  projectRoot: string,
+  force = false,
+): boolean {
   const targetPath = resolve(projectRoot, 'scripts', 'setup-env.ts');
-  if (existsSync(targetPath)) {
-    success('scripts/setup-env.ts already exists');
-    return true;
-  }
-
   const templatePath = resolve(
     import.meta.dirname,
     '..',
@@ -193,8 +223,38 @@ export function stepSetupEnvScript(projectRoot: string): boolean {
   }
 
   ensureDir(resolve(projectRoot, 'scripts'));
-  cpSync(templatePath, targetPath);
-  success('Copied scripts/setup-env.ts from template');
+
+  if (!existsSync(targetPath)) {
+    cpSync(templatePath, targetPath);
+    success('Copied scripts/setup-env.ts from template');
+    return true;
+  }
+
+  const currentTemplateHash = sha256(readFileSync(templatePath, 'utf-8'));
+  const existingHash = sha256(readFileSync(targetPath, 'utf-8'));
+
+  if (existingHash === currentTemplateHash) {
+    success('scripts/setup-env.ts matches current template');
+    return true;
+  }
+
+  if (KNOWN_OLD_SETUP_ENV_HASHES.has(existingHash)) {
+    cpSync(templatePath, targetPath);
+    success('Upgraded scripts/setup-env.ts from a known older template');
+    return true;
+  }
+
+  if (force) {
+    cpSync(templatePath, targetPath);
+    success('Overwrote scripts/setup-env.ts (--force)');
+    return true;
+  }
+
+  warn(
+    'scripts/setup-env.ts differs from SDK template (hand-modified or unrecognized version). ' +
+      'Re-run with --force to overwrite. Project-specific setup logic ' +
+      'should live in a setup-env:* sub-script in package.json instead.',
+  );
   return true;
 }
 
@@ -276,6 +336,53 @@ export function stepClaudeSettings(projectRoot: string): boolean {
   return true;
 }
 
+/**
+ * Ensure `@justinhaaheim/justin-sdk` is declared as a dependency in
+ * package.json so that fresh installs (especially Claude web session VMs)
+ * actually link the SDK locally. Without this, `bunx justin-sdk …` calls
+ * fall back to looking up the unscoped name on the npm registry, which
+ * 404s. Pins to the currently-running SDK version.
+ *
+ * Skips the project if the SDK is already declared as a dep or devDep
+ * regardless of source (workspace, github, file, registry, etc.), since
+ * we don't want to flip an intentional workspace dep to a github URL.
+ */
+export function stepDepsHasSdk(projectRoot: string): boolean {
+  const pkgPath = resolve(projectRoot, 'package.json');
+  if (!existsSync(pkgPath)) {
+    fail('package.json not found — cannot declare SDK dep');
+    return false;
+  }
+
+  const pkg = readJson(pkgPath);
+  if (pkg == null) {
+    fail('package.json is not valid JSON');
+    return false;
+  }
+
+  const SDK_PKG = '@justinhaaheim/justin-sdk';
+  const deps = (pkg.dependencies as Record<string, string> | undefined) ?? {};
+  const devDeps =
+    (pkg.devDependencies as Record<string, string> | undefined) ?? {};
+
+  if (SDK_PKG in deps || SDK_PKG in devDeps) {
+    success(`${SDK_PKG} already declared as a dependency`);
+    return true;
+  }
+
+  const sdkVersion = getSdkVersion();
+  const ref = `github:justinhaaheim/justin-sdk#${sdkVersion}`;
+  devDeps[SDK_PKG] = ref;
+  pkg.devDependencies = devDeps;
+  writeJson(pkgPath, pkg);
+  success(`Added ${SDK_PKG} to devDependencies (${ref})`);
+  warn(
+    'Run `bun install` to fetch the SDK locally. Without it, ' +
+      '`bunx justin-sdk …` will continue to 404 against the npm registry.',
+  );
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -287,6 +394,11 @@ export interface BaseSetupOptions {
   quiet?: boolean;
   /** Extra components to register in justin-sdk.config.json (e.g., ['beads-setup']) */
   extraComponents?: string[];
+  /**
+   * Force-overwrite files (currently only affects scripts/setup-env.ts when
+   * it differs from the SDK template and isn't a known-old template hash).
+   */
+  force?: boolean;
 }
 
 /**
@@ -302,6 +414,7 @@ export async function runBaseSetup(
   setQuiet(options.quiet ?? false);
   const projectRoot = options.projectRoot ?? process.cwd();
   const extraComponents = options.extraComponents ?? [];
+  const force = options.force ?? false;
 
   if (!options.quiet) {
     console.log(
@@ -312,16 +425,19 @@ export async function runBaseSetup(
   stepHeader('1. justin-sdk.config.json');
   if (!stepJustinSdkConfig(projectRoot, extraComponents)) return 1;
 
-  stepHeader('2. package.json scripts');
+  stepHeader('2. package.json: @justinhaaheim/justin-sdk dep');
+  if (!stepDepsHasSdk(projectRoot)) return 1;
+
+  stepHeader('3. package.json scripts');
   if (!stepPackageScripts(projectRoot)) return 1;
 
-  stepHeader('3. scripts/setup-env.ts');
-  if (!stepSetupEnvScript(projectRoot)) return 1;
+  stepHeader('4. scripts/setup-env.ts');
+  if (!stepSetupEnvScript(projectRoot, force)) return 1;
 
-  stepHeader('4. .gitignore');
+  stepHeader('5. .gitignore');
   if (!stepGitignore(projectRoot)) return 1;
 
-  stepHeader('5. .claude/settings.json');
+  stepHeader('6. .claude/settings.json');
   if (!stepClaudeSettings(projectRoot)) return 1;
 
   if (!options.quiet) {

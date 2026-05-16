@@ -88,8 +88,9 @@ describe('base-setup', () => {
     expect(config.components).toContain('base-setup');
     expect(config.components).toContain('custom-thing');
     expect(config.customField).toBe('preserved');
-    // version is left alone (user marker)
-    expect(config.version).toBe('0.2.0');
+    // version is actively bumped to the current SDK's version (0.3.2+ behavior)
+    expect(config.version).not.toBe('0.2.0');
+    expect(config.version).toMatch(/^\d+\.\d+\.\d+/);
     // lastSynced is updated
     expect(config.lastSynced).not.toBe('2020-01-01');
   });
@@ -162,7 +163,7 @@ describe('base-setup', () => {
     expect(content).toContain('setup-env');
   });
 
-  test('does NOT overwrite existing setup-env.ts', async () => {
+  test('does NOT overwrite hand-modified setup-env.ts without --force', async () => {
     const sb = track(createProjectSandbox());
     sb.writeFile('scripts/setup-env.ts', '// custom setup\n');
 
@@ -170,6 +171,135 @@ describe('base-setup', () => {
 
     const content = readFileSync(join(sb.path, 'scripts/setup-env.ts'), 'utf-8');
     expect(content).toBe('// custom setup\n');
+  });
+
+  test('--force overwrites hand-modified setup-env.ts', async () => {
+    const sb = track(createProjectSandbox());
+    sb.writeFile('scripts/setup-env.ts', '// custom setup\n');
+
+    await runBaseSetup({projectRoot: sb.path, quiet: true, force: true});
+
+    const content = readFileSync(join(sb.path, 'scripts/setup-env.ts'), 'utf-8');
+    expect(content).not.toBe('// custom setup\n');
+    expect(content).toContain('setup-env');
+  });
+
+  test('does NOT overwrite setup-env.ts that matches current template (idempotent)', async () => {
+    const sb = track(createProjectSandbox());
+    // First run installs the template
+    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    const firstContent = readFileSync(
+      join(sb.path, 'scripts/setup-env.ts'),
+      'utf-8',
+    );
+    // Second run should see hash match and noop (would warn on hand-modified)
+    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    const secondContent = readFileSync(
+      join(sb.path, 'scripts/setup-env.ts'),
+      'utf-8',
+    );
+    expect(secondContent).toBe(firstContent);
+  });
+
+  test('adds @justinhaaheim/justin-sdk to devDependencies when missing', async () => {
+    const sb = track(createProjectSandbox());
+    await runBaseSetup({projectRoot: sb.path, quiet: true});
+
+    const pkg = JSON.parse(
+      readFileSync(join(sb.path, 'package.json'), 'utf-8'),
+    ) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    expect(pkg.devDependencies?.['@justinhaaheim/justin-sdk']).toMatch(
+      /^github:justinhaaheim\/justin-sdk#/,
+    );
+  });
+
+  test('does not touch SDK dep if already declared (workspace, file, github, etc.)', async () => {
+    const sb = track(
+      createProjectSandbox({
+        packageJson: {
+          name: 'test',
+          dependencies: {'@justinhaaheim/justin-sdk': 'workspace:*'},
+        },
+      }),
+    );
+    await runBaseSetup({projectRoot: sb.path, quiet: true});
+
+    const pkg = JSON.parse(
+      readFileSync(join(sb.path, 'package.json'), 'utf-8'),
+    ) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    expect(pkg.dependencies?.['@justinhaaheim/justin-sdk']).toBe('workspace:*');
+    expect(pkg.devDependencies?.['@justinhaaheim/justin-sdk']).toBeUndefined();
+  });
+
+  test('rewrites stale local script wirings (bun scripts/doctor.ts → bunx)', async () => {
+    const sb = track(
+      createProjectSandbox({
+        packageJson: {
+          name: 'test',
+          scripts: {
+            doctor: 'bun scripts/doctor.ts',
+            'doctor:fix': 'bun scripts/doctor.ts --fix',
+            signal: 'bun scripts/signal.ts --quiet',
+            'signal:verbose': 'bun scripts/signal.ts',
+            'signal:serial': 'bun scripts/signal.ts --serial',
+          },
+        },
+      }),
+    );
+    await runBaseSetup({projectRoot: sb.path, quiet: true});
+
+    const pkg = JSON.parse(
+      readFileSync(join(sb.path, 'package.json'), 'utf-8'),
+    ) as {scripts?: Record<string, string>};
+    expect(pkg.scripts?.doctor).toBe('bunx justin-sdk doctor');
+    expect(pkg.scripts?.['doctor:fix']).toBe('bunx justin-sdk doctor --fix');
+    expect(pkg.scripts?.signal).toBe('bunx justin-sdk signal --quiet');
+    expect(pkg.scripts?.['signal:verbose']).toBe('bunx justin-sdk signal');
+    expect(pkg.scripts?.['signal:serial']).toBe('bunx justin-sdk signal --serial');
+  });
+
+  test('preserves custom script values that do not match a stale shape', async () => {
+    const sb = track(
+      createProjectSandbox({
+        packageJson: {
+          name: 'test',
+          scripts: {
+            signal: 'bun run prettier-check',
+          },
+        },
+      }),
+    );
+    await runBaseSetup({projectRoot: sb.path, quiet: true});
+
+    const pkg = JSON.parse(
+      readFileSync(join(sb.path, 'package.json'), 'utf-8'),
+    ) as {scripts?: Record<string, string>};
+    expect(pkg.scripts?.signal).toBe('bun run prettier-check');
+  });
+
+  test('actively bumps justin-sdk.config.json version on every run', async () => {
+    const sb = track(
+      createProjectSandbox({
+        justinSdkConfig: {
+          version: '0.1.0',
+          components: ['base-setup'],
+          lastSynced: '2020-01-01',
+        },
+      }),
+    );
+    await runBaseSetup({projectRoot: sb.path, quiet: true});
+
+    const config = JSON.parse(
+      readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
+    ) as {version?: string};
+    expect(config.version).not.toBe('0.1.0');
+    expect(config.version).toMatch(/^\d+\.\d+\.\d+/);
   });
 
   test('adds tmp/ and dynamic-version.local.* to .gitignore', async () => {

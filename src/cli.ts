@@ -86,11 +86,18 @@ void yargs(hideBin(process.argv))
           type: 'boolean',
           describe: 'Create a git commit at the end (use --no-commit to skip)',
           default: true,
+        })
+        .option('force', {
+          type: 'boolean',
+          describe:
+            'Overwrite hand-modified files (currently: scripts/setup-env.ts) that differ from the SDK template and don\'t match a known-old hash',
+          default: false,
         }),
     async (argv) => {
       if (argv.component === 'base-setup') {
         const exitCode = await runBaseSetup({
           projectRoot: process.cwd(),
+          force: argv.force,
         });
         process.exit(exitCode);
       }
