@@ -1,0 +1,44 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Editor directories and files
+# .vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+.eslintcache
+
+*.local
+*.local.json
+*.local.*
+
+# Temporary / scratch files
+tmp/
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# Dolt database files (added by `bd init`, not used by `br`)
+.dolt/
+*.db
+
+# Dynamic version artifacts (local-only)
+dynamic-version.local.json
+dynamic-version.local.d.ts

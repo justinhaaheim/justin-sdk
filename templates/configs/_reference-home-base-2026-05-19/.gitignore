@@ -1,0 +1,138 @@
+# ╔═══════════════════════════════════════════════════════════════════════════
+# ║  ████████╗██╗████████╗██╗ ██████╗ ███╗   ██╗ ██████╗ ██████╗ ███████╗
+# ║  ██╔═════╝██║╚══██╔══╝██║██╔════╝ ████╗  ██║██╔═══██╗██╔══██╗██╔════╝
+# ║  ██║  ███╗██║   ██║   ██║██║  ███╗██╔██╗ ██║██║   ██║██████╔╝█████╗
+# ║  ██║   ██║██║   ██║   ██║██║   ██║██║╚██╗██║██║   ██║██╔══██╗██╔══╝
+# ║  ╚██████╔╝██║   ██║   ██║╚██████╔╝██║ ╚████║╚██████╔╝██║  ██║███████╗
+# ║   ╚═════╝ ╚═╝   ╚═╝   ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝
+# ║
+# ║                   🎯 COMPREHENSIVE CHEAT SHEET 🎯
+# ║               Never forget gitignore syntax again!
+# ╚═══════════════════════════════════════════════════════════════════════════
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# | 📁 DIRECTORY PATTERNS
+# ═══════════════════════════════════════════════════════════════════════════
+#
+#  dirname/      👈 RECOMMENDED - ignores directories at any level
+#  /dirname/     📍 ignores only root-level directory  
+#  dirname       ⚠️  ignores both files AND directories (less explicit)
+#  **/dirname/   📝 same as dirname/ but more verbose
+#  dirname/*     🗂️  ignores contents but tracks empty dirs (rarely used)
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# | 📄 FILE PATTERNS  
+# ═══════════════════════════════════════════════════════════════════════════
+#
+#  *.ext         🎯 all files with extension (.log, .tmp, etc.)
+#  filename.*    📋 files with any extension (README.*, config.*)
+#  exact-name    📌 exact filename or dirname match
+#  temp-*        🔤 files starting with 'temp-'
+#  *-backup      🔚 files ending with '-backup'
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# | 🎭 WILDCARDS & PATTERNS
+# ═══════════════════════════════════════════════════════════════════════════
+#
+#  *             🌟 matches any characters except /
+#  **            🌌 matches any characters including /
+#  ?             ❓ matches exactly one character
+#  [abc]         📝 matches any one character in brackets
+#  [a-z]         📏 matches any character in range
+#  [!abc]        ❌ matches any character NOT in brackets
+#
+#  Examples:
+#  **/*.log      📊 all .log files anywhere in project
+#  src/**/*.test.* 🧪 all test files under src/
+#  temp?         🔢 temp1, temp2, tempA, etc.
+#  [Tt]emp*      📁 Temp*, temp*, TEMP*, etc.
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# | 🚫 NEGATION PATTERNS (!)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+#  Use ! to UN-ignore files that would otherwise be ignored
+#  Negation patterns must come AFTER the broader ignore pattern
+#
+#  Common Examples:
+#
+#  # Ignore all of build/ except version info
+#  build/
+#  !build/version.txt
+#  !build/manifest.json
+#
+#  # Ignore all .env files except the template
+#  .env*
+#  !.env.example
+#
+#  # Ignore all logs except error logs
+#  *.log
+#  !error.log
+#  !*-error.log
+#
+#  # Ignore dist/ but keep important assets
+#  dist/
+#  !dist/assets/
+#  !dist/index.html
+#
+# ═══════════════════════════════════════════════════════════════════════════
+# | 🔧 ADVANCED PATTERNS
+# ═══════════════════════════════════════════════════════════════════════════
+#
+#  /root-only    📍 only matches at repository root
+#  path/to/file  🎯 specific path from repo root
+#  **/deep/**    🏊 matches at any depth
+#  *.{jpg,png}   🖼️  matches multiple extensions (bash-style)
+#
+#  ⚡ Pro Tips:
+#  • Patterns are case-sensitive (except on Windows)
+#  • Trailing spaces are ignored
+#  • Lines starting with # are comments
+#  • Empty lines are ignored
+#  • Order matters for negation (!) patterns
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Editor directories and files
+# .vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+.eslintcache
+
+*.local
+*.local.json
+*.local.*
+
+tmp/
+
+# bv (beads viewer) local config and caches
+.bv/
+
+# Dolt database files (added by bd init)
+.dolt/
+*.db
+dynamic-version.local.json
+dynamic-version.local.d.ts
+
+# Cross-project clones (see CLAUDE.md)
+projects/*
+!projects/justin-sdk

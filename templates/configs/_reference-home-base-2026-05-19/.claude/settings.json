@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Read(~/Dev/**)",
+      "Read(/Users/jhaa/Dropbox/Screenshots/**)",
+
+      "Bash(cat:*)",
+      "Bash(cp:*)",
+      "Bash(grep:*)",
+      "Bash(head:*)",
+      "Bash(ls:*)",
+      "Bash(mkdir:*)",
+      "Bash(cass:*)",
+
+      "Bash(git add:*)",
+      "Bash(git checkout:*)",
+      "Bash(git commit:*)",
+      "Bash(git fetch:*)",
+      "Bash(git log:*)",
+      "Bash(git rebase:*)",
+      "Bash(git show:*)",
+      "Bash(git status:*)",
+
+      "Bash(npm install:*)",
+      "Bash(npm list:*)",
+      "Bash(npm run:*)",
+      "Bash(npm search:*)",
+      "Bash(npm uninstall:*)",
+      "Bash(npm update:*)",
+      "Bash(npm view:*)",
+
+      "Bash(bun add:*)",
+      "Bash(bun install:*)",
+      "Bash(bun list:*)",
+      "Bash(bun remove:*)",
+      "Bash(bun run:*)",
+      "Bash(bun search:*)",
+      "Bash(bun test:*)",
+      "Bash(bun uninstall:*)",
+      "Bash(bun update:*)",
+      "Bash(bun view:*)",
+      "Bash(bun pm:*)",
+
+      "Bash(npx @justinhaaheim/version-manager)",
+      "Bash(npx eslint:*)",
+      "Bash(npx expo install:*)",
+      "Bash(npx prettier:*)",
+      "Bash(npx tsc:*)",
+
+      "Bash(gh pr diff:*)",
+      "Bash(gh pr view:*)",
+
+      "Bash(xcrun simctl runtime:*)",
+      "Bash(xcrun simctl list:*)",
+
+      "mcp__ide__getDiagnostics",
+
+      "WebSearch",
+      "WebFetch(domain:github.com)"
+    ],
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/*.p12)",
+      "Read(**/*.pfx)",
+      "Read(~/.ssh/**)"
+    ],
+    "defaultMode": "acceptEdits"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bun run \"$CLAUDE_PROJECT_DIR/scripts/setup-env.ts\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "jq -r '.tool_input.file_path' | { read file_path; if [[ \"$file_path\" != \"$CLAUDE_PROJECT_DIR\"/* ]]; then echo \"[PostToolUse] Skipping lint/prettier - file outside CLAUDE_PROJECT_DIR: $file_path\"; else if [[ \"$file_path\" =~ \\.(ts|tsx|js|jsx|cjs|mjs)$ ]]; then bun run lint:fix:file -- \"$file_path\"; fi; bun run prettier --write -u \"$file_path\"; fi; }"
+          }
+        ]
+      }
+    ]
+  },
+  "enabledPlugins": {},
+  "sandbox": {
+    "enabled": true,
+    "autoAllowBashIfSandboxed": true,
+    "excludedCommands": ["bd", "br"]
+  }
+}

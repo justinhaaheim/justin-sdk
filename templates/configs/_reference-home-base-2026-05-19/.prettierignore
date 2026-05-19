@@ -1,0 +1,42 @@
+# NOTE: These are ignored by default by prettier
+# **/.git
+# **/.svn
+# **/.hg
+# **/node_modules
+
+# Ignore artifacts:
+build
+coverage
+**/dist
+
+# Yarn
+.pnp.*
+.yarn/*
+.yarnrc.*
+
+# Typescript
+*.tsbuildinfo
+
+# Playwright
+/test-results/
+/playwright-report/
+/playwright/.cache/
+
+# temp
+/tmp
+
+# Expo: don't format android and ios folders https://docs.expo.dev/workflow/continuous-native-generation/
+/android
+/ios
+
+# Drizzle
+/src/db/drizzle
+
+# Beads issue tracker data
+.beads
+
+**/CLAUDE.md
+
+# Submodules (have their own formatting)
+projects/justin-sdk
+

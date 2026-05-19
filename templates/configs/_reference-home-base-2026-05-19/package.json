@@ -1,0 +1,83 @@
+{
+  "name": "home-base",
+  "description": "Central hub for strategizing about projects, priorities, and next steps",
+  "version": "0.1.0",
+  "scripts": {
+    "backup-claude-history": "bun run scripts/backup-claude-history.ts",
+    "archive-apple-photos": "bun run scripts/archive-apple-photos.ts",
+    "print-1password-backup": "bun run scripts/print-1password-backup.ts",
+    "project-status": "bun run scripts/project-status.ts",
+    "recent-conversations": "bun run scripts/recent-conversations.ts",
+    "export-bear-notes": "bun run scripts/export-bear-notes.ts",
+    "test:export-bear-notes": "bun test scripts/export-bear-notes.test.ts",
+    "snapshot-folder": "bun run scripts/snapshot-folder.ts",
+    "clean:node-modules": "rm -rf node_modules/",
+    "lint-base": "eslint --report-unused-disable-directives --max-warnings 0",
+    "lint:fix": "bun run lint-base -- --fix .",
+    "lint:fix:file": "bun run lint-base -- --fix",
+    "lint": "bun run lint-base -- .",
+    "lint:no-cache": "bun run lint-base -- --no-cache .",
+    "prettier:check": "prettier --check .",
+    "prettier:write": "prettier --write .",
+    "prettier:write:file": "prettier --write --ignore-unknown",
+    "signal": "bunx justin-sdk signal --quiet",
+    "signal:verbose": "bunx justin-sdk signal",
+    "signal:serial": "bunx justin-sdk signal --serial",
+    "signal-source:TS": "tsc --noEmit",
+    "signal-source:LINT": "eslint --report-unused-disable-directives --max-warnings 0 .",
+    "signal-source:PRETTIER": "prettier --check .",
+    "doctor": "bunx justin-sdk doctor",
+    "doctor:fix": "bunx justin-sdk doctor --fix",
+    "setup-env": "bun scripts/setup-env.ts",
+    "test:sdk": "cd projects/justin-sdk && bun test",
+    "ts-check": "tsc --noEmit",
+    "ts-check-masked": "bun run ts-check",
+    "prepare": "husky",
+    "reinstall-my-lint-config": "bun add eslint-config-jha-react-node@github:justinhaaheim/eslint-config-jha-react-node",
+    "install-my-prompts": "bunx git+https://github.com/justinhaaheim/prompts --target-dir docs/prompts --md",
+    "dynamic-version:install": "npx @justinhaaheim/version-manager install",
+    "dynamic-version:install-scripts": "npx @justinhaaheim/version-manager install-scripts",
+    "dynamic-version:generate": "npx @justinhaaheim/version-manager",
+    "prebuild": "npx @justinhaaheim/version-manager",
+    "predev": "npx @justinhaaheim/version-manager",
+    "prestart": "npx @justinhaaheim/version-manager"
+  },
+  "workspaces": [
+    "projects/justin-sdk"
+  ],
+  "dependencies": {
+    "@justinhaaheim/justin-sdk": "workspace:*",
+    "@justinhaaheim/version-manager": "github:justinhaaheim/version-manager#0.4.6",
+    "date-fns": "^4.1.0",
+    "date-fns-tz": "^3.2.0",
+    "dayjs": "1.11.13",
+    "node-emoji": "^2.2.0",
+    "nullthrows": "1.1.1",
+    "yaml": "^2.8.4",
+    "yargs": "^18.0.0"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.11",
+    "@types/yargs": "^17.0.33",
+    "concurrently": "8.2.1",
+    "dotenv": "^16.5.0",
+    "esbuild": "^0.28.0",
+    "eslint": "9.31.0",
+    "eslint-config-jha-react-node": "github:justinhaaheim/eslint-config-jha-react-node",
+    "globals": "17.3.0",
+    "husky": "9.1.7",
+    "lint-staged": "^14.0.1",
+    "prettier": "3.6.2",
+    "typescript": "~5.9.2"
+  },
+  "private": true,
+  "lint-staged": {
+    "**/*": "prettier --check --ignore-unknown",
+    "*.(js|jsx|cjs|ts|tsx)": [
+      "eslint --cache --max-warnings=0 --no-warn-ignored"
+    ]
+  },
+  "trustedDependencies": [
+    "@justinhaaheim/version-manager"
+  ]
+}

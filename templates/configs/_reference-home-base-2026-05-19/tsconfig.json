@@ -1,0 +1,49 @@
+{
+  "compilerOptions": {
+    /* From expo/base tsconfig with some modifications */
+    "allowJs": true,
+    "esModuleInterop": true,
+    "jsx": "react-jsx",
+    "lib": ["DOM", "ESNext"],
+    "module": "preserve",
+    "moduleDetection": "force",
+    "moduleResolution": "bundler",
+    "customConditions": ["react-native"],
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "target": "ESNext",
+
+    /* My custom rules */
+
+    /* Linting */
+    "strict": true,
+    // I prefer to handle noUnusedLocals behavior via lint rules
+    "noUnusedLocals": false,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+
+    /* My other rules */
+    "noUncheckedIndexedAccess": true,
+    "forceConsistentCasingInFileNames": true /* Ensure that casing is correct in imports. */,
+    "strictNullChecks": true /* When type checking, take into account `null` and `undefined`. */,
+    "strictFunctionTypes": true /* When assigning functions, check to ensure parameters and the return values are subtype-compatible. */,
+    "strictBindCallApply": true /* Check that the arguments for `bind`, `call`, and `apply` methods match the original function. */,
+    "strictPropertyInitialization": true /* Check for class properties that are declared but not set in the constructor. */,
+    "noImplicitThis": true /* Enable error reporting when `this` is given the type `any`. */,
+    // "useUnknownInCatchVariables": true,               /* Type catch clause variables as 'unknown' instead of 'any'. */
+    "alwaysStrict": true /* Ensure 'use strict' is always emitted. */,
+    "noImplicitReturns": true /* Enable error reporting for codepaths that do not explicitly return in a function. */,
+    "noImplicitOverride": true /* Ensure overriding members in derived classes are marked with an override modifier. */,
+    // "noPropertyAccessFromIndexSignature": true /* Enforces using indexed accessors for keys declared using an indexed type */,
+    "allowUnusedLabels": false /* Disable error reporting for unused labels. */,
+    "allowUnreachableCode": false /* Disable error reporting for unreachable code. */,
+
+    /* JavaScript Support */
+    // "allowJs": true /* Allow JavaScript files to be a part of your program. Use the `checkJS` option to get errors from these files. */,
+    "checkJs": true /* Enable error reporting in type-checked JavaScript files. */
+  },
+  "include": ["**/*.ts", "**/*.tsx"],
+  "exclude": ["eslint.config.js", "tmp", "projects"]
+}

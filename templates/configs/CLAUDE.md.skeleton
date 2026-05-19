@@ -1,0 +1,21 @@
+# {{PROJECT_NAME}}
+
+## About
+
+<!-- One or two paragraphs describing what this project is and why it exists. -->
+
+## Tooling
+
+This project uses the standard justin-sdk toolchain. See:
+
+- @docs/prompts/IMPORTANT_GUIDELINES_INLINED.md — coding guidelines for AI agents
+- @AGENTS.md — agent-facing tooling reference (beads, signal, doctor)
+
+Quick commands:
+
+- `bun run signal` — typecheck + lint + prettier check
+- `bun run doctor` — environment validation
+
+## Notes
+
+<!-- Project-specific notes, decisions, gotchas, links. -->

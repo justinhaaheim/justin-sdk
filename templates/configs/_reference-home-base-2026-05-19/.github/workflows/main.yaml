@@ -1,0 +1,36 @@
+name: Project Signals (typescript check, linting & prettier)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check-signals:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [20.x]
+
+    steps:
+      - uses: actions/checkout@v3
+      # - uses: actions/setup-node@v3
+      #   with:
+      #     node-version: ${{ matrix.node-version }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install project dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Check for typescript errors
+        run: bun run ts-check
+
+      - name: Check for lint errors
+        run: bun run lint
+
+      - name: Check for prettier errors
+        run: bun run prettier:check
