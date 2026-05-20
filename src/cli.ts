@@ -13,9 +13,12 @@ import {hideBin} from 'yargs/helpers';
 import {runAgent} from './agent';
 import {runBaseSetup} from './base-setup';
 import {runBeadsSetup} from './beads-setup';
+import {runClaudeMdSetup} from './claude-md-setup';
 import {runDoctor} from './doctor';
+import {runEslintSetup} from './eslint-setup';
 import {runGhActionsSetup} from './gh-actions-setup';
 import {runGitignoreSetup} from './gitignore-setup';
+import {runHuskySetup} from './husky-setup';
 import {runPrettierSetup} from './prettier-setup';
 import {runPromptsSetup} from './prompts-setup';
 import {runSignal} from './signal';
@@ -88,8 +91,11 @@ void yargs(hideBin(process.argv))
           choices: [
             'base-setup',
             'beads',
+            'claude-md',
+            'eslint',
             'gh-actions',
             'gitignore',
+            'husky',
             'prettier',
             'prompts',
             'tsconfig',
@@ -151,6 +157,27 @@ void yargs(hideBin(process.argv))
       }
       if (argv.component === 'gitignore') {
         const exitCode = await runGitignoreSetup({
+          force: argv.force,
+          projectRoot: process.cwd(),
+        });
+        process.exit(exitCode);
+      }
+      if (argv.component === 'eslint') {
+        const exitCode = await runEslintSetup({
+          force: argv.force,
+          projectRoot: process.cwd(),
+        });
+        process.exit(exitCode);
+      }
+      if (argv.component === 'claude-md') {
+        const exitCode = await runClaudeMdSetup({
+          force: argv.force,
+          projectRoot: process.cwd(),
+        });
+        process.exit(exitCode);
+      }
+      if (argv.component === 'husky') {
+        const exitCode = await runHuskySetup({
           force: argv.force,
           projectRoot: process.cwd(),
         });

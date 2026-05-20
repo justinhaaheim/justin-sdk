@@ -12,7 +12,7 @@ import type {CheckNode, CheckResult} from './check-runner';
 
 import {runCheckTree} from './check-runner';
 import {execSync} from 'child_process';
-import {existsSync, readFileSync} from 'fs';
+import {existsSync, readFileSync, statSync} from 'fs';
 import {resolve} from 'path';
 
 import {PINNED} from './pinned-versions';
@@ -841,6 +841,302 @@ function makeGitignoreChecks(projectRoot: string): CheckNode[] {
 }
 
 // ---------------------------------------------------------------------------
+// ESLint checks (eslint-setup component)
+// ---------------------------------------------------------------------------
+
+function makeEslintChecks(projectRoot: string): CheckNode[] {
+  return [
+    {
+      check: {
+        label: 'ESLINT_INSTALLED',
+        fn: (): CheckResult => {
+          const installed = readPkgDevDep(projectRoot, 'eslint');
+          if (installed == null) {
+            return {
+              fix: 'Run: bunx justin-sdk add eslint',
+              fixCommand: 'bunx justin-sdk add eslint',
+              message: 'eslint not in package.json devDependencies',
+              pass: false,
+            };
+          }
+          if (installed !== PINNED.eslint) {
+            return {
+              fix: `Update eslint to ${PINNED.eslint} (currently ${installed})`,
+              message: `eslint ${installed} installed, pinned is ${PINNED.eslint}`,
+              pass: false,
+              severity: 'warn',
+            };
+          }
+          return {message: `eslint ${installed}`, pass: true};
+        },
+      },
+    },
+    {
+      check: {
+        label: 'JHA_CONFIG_INSTALLED',
+        fn: (): CheckResult => {
+          const installed = readPkgDevDep(
+            projectRoot,
+            'eslint-config-jha-react-node',
+          );
+          if (installed == null) {
+            return {
+              fix: 'Run: bunx justin-sdk add eslint',
+              fixCommand: 'bunx justin-sdk add eslint',
+              message:
+                'eslint-config-jha-react-node not in package.json devDependencies',
+              pass: false,
+            };
+          }
+          return {
+            message: `eslint-config-jha-react-node ${installed}`,
+            pass: true,
+          };
+        },
+      },
+    },
+    {
+      check: {
+        label: 'ESLINT_CONFIG',
+        fn: (): CheckResult => {
+          const candidates = [
+            'eslint.config.cjs',
+            'eslint.config.js',
+            'eslint.config.mjs',
+          ];
+          const found = candidates.find((name) =>
+            existsSync(resolve(projectRoot, name)),
+          );
+          if (found == null) {
+            return {
+              fix: 'Run: bunx justin-sdk add eslint',
+              fixCommand: 'bunx justin-sdk add eslint',
+              message:
+                'No eslint config found (looked for eslint.config.cjs, .js, .mjs)',
+              pass: false,
+            };
+          }
+          return {message: found, pass: true};
+        },
+      },
+    },
+    {
+      check: {
+        label: 'SIGNAL_SOURCE_LINT',
+        fn: (): CheckResult => {
+          const script = readPkgScript(projectRoot, 'signal-source:LINT');
+          if (script == null) {
+            return {
+              fix: 'Run: bunx justin-sdk add eslint',
+              fixCommand: 'bunx justin-sdk add eslint',
+              message: 'package.json missing signal-source:LINT script',
+              pass: false,
+            };
+          }
+          return {pass: true};
+        },
+      },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// CLAUDE.md checks (claude-md-setup component)
+// ---------------------------------------------------------------------------
+
+function makeClaudeMdChecks(projectRoot: string): CheckNode[] {
+  const claudeMdPath = resolve(projectRoot, 'CLAUDE.md');
+  const FIX_CMD = 'bunx justin-sdk add claude-md';
+  const PROMPTS_REF = '@docs/prompts/IMPORTANT_GUIDELINES_INLINED.md';
+
+  return [
+    {
+      check: {
+        label: 'CLAUDE_MD_EXISTS',
+        fn: (): CheckResult => {
+          if (!existsSync(claudeMdPath)) {
+            return {
+              fix: `Run: ${FIX_CMD}`,
+              fixCommand: FIX_CMD,
+              message: 'CLAUDE.md not found at project root',
+              pass: false,
+            };
+          }
+          return {pass: true};
+        },
+      },
+      children: [
+        {
+          check: {
+            label: 'CLAUDE_MD_PROMPTS_REF',
+            fn: (): CheckResult => {
+              const content = readFileSync(claudeMdPath, 'utf-8');
+              if (!content.includes(PROMPTS_REF)) {
+                return {
+                  fix: `Run: ${FIX_CMD}`,
+                  fixCommand: FIX_CMD,
+                  message: `CLAUDE.md does not reference ${PROMPTS_REF}`,
+                  pass: false,
+                };
+              }
+              return {pass: true};
+            },
+          },
+        },
+      ],
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Husky checks (husky-setup component)
+// ---------------------------------------------------------------------------
+
+function makeHuskyChecks(projectRoot: string): CheckNode[] {
+  const FIX_CMD = 'bunx justin-sdk add husky';
+  return [
+    {
+      check: {
+        label: 'HUSKY_INSTALLED',
+        fn: (): CheckResult => {
+          const installed = readPkgDevDep(projectRoot, 'husky');
+          if (installed == null) {
+            return {
+              fix: `Run: ${FIX_CMD}`,
+              fixCommand: FIX_CMD,
+              message: 'husky not in package.json devDependencies',
+              pass: false,
+            };
+          }
+          if (installed !== PINNED.husky) {
+            return {
+              fix: `Update husky to ${PINNED.husky} (currently ${installed})`,
+              message: `husky ${installed} installed, pinned is ${PINNED.husky}`,
+              pass: false,
+              severity: 'warn',
+            };
+          }
+          return {message: `husky ${installed}`, pass: true};
+        },
+      },
+    },
+    {
+      check: {
+        label: 'LINT_STAGED_INSTALLED',
+        fn: (): CheckResult => {
+          const installed = readPkgDevDep(projectRoot, 'lint-staged');
+          if (installed == null) {
+            return {
+              fix: `Run: ${FIX_CMD}`,
+              fixCommand: FIX_CMD,
+              message: 'lint-staged not in package.json devDependencies',
+              pass: false,
+            };
+          }
+          if (installed !== PINNED['lint-staged']) {
+            return {
+              fix: `Update lint-staged to ${PINNED['lint-staged']} (currently ${installed})`,
+              message: `lint-staged ${installed} installed, pinned is ${PINNED['lint-staged']}`,
+              pass: false,
+              severity: 'warn',
+            };
+          }
+          return {message: `lint-staged ${installed}`, pass: true};
+        },
+      },
+    },
+    {
+      check: {
+        label: 'HUSKY_PRECOMMIT',
+        fn: (): CheckResult => {
+          const hookPath = resolve(projectRoot, '.husky/pre-commit');
+          if (!existsSync(hookPath)) {
+            return {
+              fix: `Run: ${FIX_CMD}`,
+              fixCommand: FIX_CMD,
+              message: '.husky/pre-commit not found',
+              pass: false,
+            };
+          }
+          const mode = statSync(hookPath).mode;
+          if ((mode & 0o111) === 0) {
+            return {
+              fix: 'Run: chmod +x .husky/pre-commit',
+              fixCommand: 'chmod +x .husky/pre-commit',
+              message: '.husky/pre-commit exists but is not executable',
+              pass: false,
+              severity: 'warn',
+            };
+          }
+          return {pass: true};
+        },
+      },
+    },
+    {
+      check: {
+        label: 'PREPARE_SCRIPT',
+        fn: (): CheckResult => {
+          const script = readPkgScript(projectRoot, 'prepare');
+          if (script == null) {
+            return {
+              fix: `Run: ${FIX_CMD}`,
+              fixCommand: FIX_CMD,
+              message: 'package.json missing "prepare" script',
+              pass: false,
+            };
+          }
+          if (!script.includes('husky')) {
+            return {
+              fix: 'Ensure the "prepare" script invokes husky (e.g., "husky" or "husky install")',
+              message: `"prepare" script does not reference husky (current: "${script}")`,
+              pass: false,
+              severity: 'warn',
+            };
+          }
+          return {message: `prepare: ${script}`, pass: true};
+        },
+      },
+    },
+    {
+      check: {
+        label: 'LINT_STAGED_CONFIG',
+        fn: (): CheckResult => {
+          const pkgPath = resolve(projectRoot, 'package.json');
+          if (!existsSync(pkgPath)) {
+            return {
+              fix: `Run: ${FIX_CMD}`,
+              fixCommand: FIX_CMD,
+              message: 'package.json not found',
+              pass: false,
+            };
+          }
+          try {
+            const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as Record<
+              string,
+              unknown
+            >;
+            if (!('lint-staged' in pkg)) {
+              return {
+                fix: `Run: ${FIX_CMD}`,
+                fixCommand: FIX_CMD,
+                message: 'package.json missing "lint-staged" config',
+                pass: false,
+              };
+            }
+            return {pass: true};
+          } catch {
+            return {
+              message: 'package.json is not valid JSON',
+              pass: false,
+            };
+          }
+        },
+      },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // Component registry
 // ---------------------------------------------------------------------------
 
@@ -850,8 +1146,11 @@ const componentCheckFactories: Record<
 > = {
   'base-setup': makeBaseChecks,
   'beads-setup': makeBeadsChecks,
+  'claude-md-setup': makeClaudeMdChecks,
+  'eslint-setup': makeEslintChecks,
   'gh-actions-setup': makeGhActionsChecks,
   'gitignore-setup': makeGitignoreChecks,
+  'husky-setup': makeHuskyChecks,
   'prettier-setup': makePrettierChecks,
   'prompts-setup': makePromptsChecks,
   'tsconfig-setup': makeTsconfigChecks,
