@@ -28,6 +28,7 @@ import {
   exec,
   fail,
   getPinnedToolVersion,
+  kebabCase,
   log,
   readJson,
   setQuiet,
@@ -225,8 +226,15 @@ function stepInitBeads(projectRoot: string): boolean {
     return true;
   }
 
-  const prefix = basename(projectRoot);
-  const result = exec(`br init --prefix ${prefix}`, projectRoot);
+  const rawPrefix = basename(projectRoot);
+  const prefix = kebabCase(rawPrefix);
+  if (prefix.length === 0) {
+    fail(
+      `Cannot derive a valid beads prefix from directory name "${rawPrefix}". Rename the directory or run br init manually.`,
+    );
+    return false;
+  }
+  const result = exec(`br init --prefix '${prefix}'`, projectRoot);
   if (result.exitCode !== 0) {
     fail(`br init failed: ${result.stderr}`);
     return false;

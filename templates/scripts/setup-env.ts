@@ -49,7 +49,7 @@ function run(
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
   } catch (error) {
-    if (options?.ignoreError) return '';
+    if (options?.ignoreError === true) return '';
     throw error;
   }
 }
@@ -128,7 +128,7 @@ function setupRemote(): void {
 
   // 1c. Ensure mise shims + ~/.local/bin are on PATH
   const envFile = process.env.CLAUDE_ENV_FILE;
-  if (envFile) {
+  if (envFile != null && envFile.length > 0) {
     if (existsSync(MISE_BIN)) {
       log('Adding mise shims to PATH...');
       appendFileSync(envFile, `export PATH="${MISE_SHIMS_DIR}:$PATH"\n`);

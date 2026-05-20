@@ -19,6 +19,7 @@ import {runEslintSetup} from './eslint-setup';
 import {runGhActionsSetup} from './gh-actions-setup';
 import {runGitignoreSetup} from './gitignore-setup';
 import {runHuskySetup} from './husky-setup';
+import {runInit} from './init';
 import {runPrettierSetup} from './prettier-setup';
 import {runPromptsSetup} from './prompts-setup';
 import {runSignal} from './signal';
@@ -183,6 +184,49 @@ void yargs(hideBin(process.argv))
         });
         process.exit(exitCode);
       }
+    },
+  )
+  .command(
+    'init',
+    'Scaffold a greenfield project (package.json + all add components + commit)',
+    (y) =>
+      y
+        .option('preset', {
+          type: 'string',
+          describe: 'Preset to use',
+          default: 'node-cli',
+          choices: ['node-cli'],
+        })
+        .option('allow-dirty', {
+          type: 'boolean',
+          describe: 'Allow running with uncommitted changes',
+          default: false,
+        })
+        .option('commit', {
+          type: 'boolean',
+          describe:
+            'Create a single git commit at the end (use --no-commit to skip)',
+          default: true,
+        })
+        .option('force', {
+          type: 'boolean',
+          describe: 'Pass --force to underlying add commands',
+          default: false,
+        }),
+    async (argv) => {
+      if (argv.preset !== 'node-cli') {
+        console.error(
+          `Error: preset '${argv.preset}' not yet supported (planned for future release)`,
+        );
+        process.exit(1);
+      }
+      const exitCode = await runInit({
+        allowDirty: argv['allow-dirty'],
+        force: argv.force,
+        noCommit: !argv.commit,
+        projectRoot: process.cwd(),
+      });
+      process.exit(exitCode);
     },
   )
   .command(

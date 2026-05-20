@@ -166,3 +166,18 @@ export function getPinnedToolVersion(toolName: string): string | null {
 export function todayIsoDate(): string {
   return new Date().toISOString().slice(0, 10);
 }
+
+/**
+ * Lowercase, replace any char outside [a-z0-9-] with '-', collapse
+ * consecutive '-' into one, strip leading/trailing '-'.
+ *
+ * Used for both package.json names (npm requires kebab-style) and
+ * beads issue prefixes (must be shell-safe and JSONL-friendly).
+ */
+export function kebabCase(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
