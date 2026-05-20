@@ -15,6 +15,8 @@ import {execSync} from 'child_process';
 import {existsSync, readFileSync} from 'fs';
 import {resolve} from 'path';
 
+import {PINNED} from './pinned-versions';
+
 const IS_REMOTE = process.env.CLAUDE_CODE_REMOTE === 'true';
 
 /** Read the centrally pinned version from versions.json (if available). */
@@ -182,7 +184,8 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
             return {
               fix: `Run: ${fixCommand}`,
               fixCommand,
-              message: 'mise is not installed (br falls back to direct install)',
+              message:
+                'mise is not installed (br falls back to direct install)',
               pass: false,
               requiresApproval: true,
             };
@@ -199,8 +202,7 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
           if (!existsSync(resolve(projectRoot, 'mise.toml'))) {
             return {
               fix: 'Create mise.toml to enable mise-managed br installs',
-              message:
-                'No mise.toml found (br falls back to direct install)',
+              message: 'No mise.toml found (br falls back to direct install)',
               pass: false,
             };
           }
@@ -222,9 +224,7 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
             const centralVersion = getCentralBeadsVersion();
             const miseVersions = parseMiseToml(projectRoot);
             const beadsKey = miseVersions
-              ? Object.keys(miseVersions).find((k) =>
-                  k.includes('beads_rust'),
-                )
+              ? Object.keys(miseVersions).find((k) => k.includes('beads_rust'))
               : null;
             const version =
               centralVersion ?? (beadsKey ? miseVersions![beadsKey] : null);
@@ -258,7 +258,8 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
             centralVersion ?? (beadsKey ? miseVersions![beadsKey] : null);
 
           if (expected != null && actual !== expected) {
-            const source = centralVersion != null ? 'versions.json' : 'mise.toml';
+            const source =
+              centralVersion != null ? 'versions.json' : 'mise.toml';
             return {
               fix: 'Run: mise install',
               fixCommand: 'mise install',
@@ -391,6 +392,455 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
 }
 
 // ---------------------------------------------------------------------------
+// Shared package.json helpers
+// ---------------------------------------------------------------------------
+
+function readPkgDevDep(projectRoot: string, name: string): string | null {
+  const pkgPath = resolve(projectRoot, 'package.json');
+  if (!existsSync(pkgPath)) return null;
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as {
+      devDependencies?: Record<string, string>;
+      dependencies?: Record<string, string>;
+    };
+    return pkg.devDependencies?.[name] ?? pkg.dependencies?.[name] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function readPkgScript(projectRoot: string, name: string): string | null {
+  const pkgPath = resolve(projectRoot, 'package.json');
+  if (!existsSync(pkgPath)) return null;
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as {
+      scripts?: Record<string, string>;
+    };
+    return pkg.scripts?.[name] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Prettier checks (prettier-setup component)
+// ---------------------------------------------------------------------------
+
+function makePrettierChecks(projectRoot: string): CheckNode[] {
+  return [
+    {
+      check: {
+        label: 'PRETTIER_INSTALLED',
+        fn: (): CheckResult => {
+          const installed = readPkgDevDep(projectRoot, 'prettier');
+          if (installed == null) {
+            return {
+              fix: 'Run: bunx justin-sdk add prettier',
+              fixCommand: 'bunx justin-sdk add prettier',
+              message: 'prettier not in package.json devDependencies',
+              pass: false,
+            };
+          }
+          if (installed !== PINNED.prettier) {
+            return {
+              fix: `Update prettier to ${PINNED.prettier} (currently ${installed})`,
+              message: `prettier ${installed} installed, pinned is ${PINNED.prettier}`,
+              pass: false,
+              severity: 'warn',
+            };
+          }
+          return {message: `prettier ${installed}`, pass: true};
+        },
+      },
+    },
+    {
+      check: {
+        label: 'PRETTIERRC',
+        fn: (): CheckResult => {
+          if (!existsSync(resolve(projectRoot, '.prettierrc.json'))) {
+            return {
+              fix: 'Run: bunx justin-sdk add prettier',
+              fixCommand: 'bunx justin-sdk add prettier',
+              message: '.prettierrc.json not found',
+              pass: false,
+            };
+          }
+          return {pass: true};
+        },
+      },
+    },
+    {
+      check: {
+        label: 'PRETTIERIGNORE',
+        fn: (): CheckResult => {
+          const prettierIgnore = resolve(projectRoot, '.prettierignore');
+          if (!existsSync(prettierIgnore)) {
+            return {
+              fix: 'Run: bunx justin-sdk add prettier',
+              fixCommand: 'bunx justin-sdk add prettier',
+              message: '.prettierignore not found',
+              pass: false,
+            };
+          }
+          const content = readFileSync(prettierIgnore, 'utf-8');
+          if (!content.includes('.beads')) {
+            return {
+              fix: 'Add .beads to .prettierignore (or re-run: bunx justin-sdk add prettier)',
+              fixCommand: 'bunx justin-sdk add prettier',
+              message: '.prettierignore does not include .beads',
+              pass: false,
+            };
+          }
+          return {pass: true};
+        },
+      },
+    },
+    {
+      check: {
+        label: 'SIGNAL_SOURCE_PRETTIER',
+        fn: (): CheckResult => {
+          const script = readPkgScript(projectRoot, 'signal-source:PRETTIER');
+          if (script == null) {
+            return {
+              fix: 'Run: bunx justin-sdk add prettier',
+              fixCommand: 'bunx justin-sdk add prettier',
+              message: 'package.json missing signal-source:PRETTIER script',
+              pass: false,
+            };
+          }
+          return {pass: true};
+        },
+      },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Tsconfig checks (tsconfig-setup component)
+// ---------------------------------------------------------------------------
+
+function makeTsconfigChecks(projectRoot: string): CheckNode[] {
+  return [
+    {
+      check: {
+        label: 'TS_INSTALLED',
+        fn: (): CheckResult => {
+          const version = readPkgDevDep(projectRoot, 'typescript');
+          if (version == null) {
+            return {
+              fix: 'Run: bunx justin-sdk add tsconfig',
+              fixCommand: 'bunx justin-sdk add tsconfig',
+              message: 'typescript is not in devDependencies',
+              pass: false,
+            };
+          }
+          if (version !== PINNED.typescript) {
+            return {
+              fix: `Update package.json devDependencies.typescript to ${PINNED.typescript}`,
+              message: `typescript is at ${version}, SDK pins ${PINNED.typescript}`,
+              pass: false,
+              severity: 'warn',
+            };
+          }
+          return {message: `typescript ${version}`, pass: true};
+        },
+      },
+    },
+    {
+      check: {
+        label: 'TYPES_BUN_INSTALLED',
+        fn: (): CheckResult => {
+          const version = readPkgDevDep(projectRoot, '@types/bun');
+          if (version == null) {
+            return {
+              fix: 'Run: bunx justin-sdk add tsconfig',
+              fixCommand: 'bunx justin-sdk add tsconfig',
+              message: '@types/bun is not in devDependencies',
+              pass: false,
+            };
+          }
+          return {message: `@types/bun ${version}`, pass: true};
+        },
+      },
+    },
+    {
+      check: {
+        label: 'TSCONFIG',
+        fn: (): CheckResult => {
+          if (!existsSync(resolve(projectRoot, 'tsconfig.json'))) {
+            return {
+              fix: 'Run: bunx justin-sdk add tsconfig',
+              fixCommand: 'bunx justin-sdk add tsconfig',
+              message: 'tsconfig.json not found at project root',
+              pass: false,
+            };
+          }
+          return {pass: true};
+        },
+      },
+      children: [
+        {
+          check: {
+            label: 'TSCONFIG_STRICT',
+            fn: (): CheckResult => {
+              const tsconfigPath = resolve(projectRoot, 'tsconfig.json');
+              const raw = readFileSync(tsconfigPath, 'utf-8');
+              try {
+                const parsed = JSON.parse(raw) as {
+                  compilerOptions?: {strict?: boolean};
+                };
+                if (parsed.compilerOptions?.strict === true) {
+                  return {pass: true};
+                }
+                return {
+                  fix: 'Set compilerOptions.strict to true in tsconfig.json',
+                  message: 'compilerOptions.strict is not true',
+                  pass: false,
+                };
+              } catch {
+                if (/"strict"\s*:\s*true/.test(raw)) {
+                  return {pass: true};
+                }
+                return {
+                  fix: 'Set compilerOptions.strict to true in tsconfig.json',
+                  message:
+                    'compilerOptions.strict is not true (JSONC fallback check)',
+                  pass: false,
+                };
+              }
+            },
+          },
+        },
+      ],
+    },
+    {
+      check: {
+        label: 'SIGNAL_SOURCE_TS',
+        fn: (): CheckResult => {
+          const script = readPkgScript(projectRoot, 'signal-source:TS');
+          if (script == null) {
+            return {
+              fix: 'Run: bunx justin-sdk add tsconfig',
+              fixCommand: 'bunx justin-sdk add tsconfig',
+              message: 'package.json missing signal-source:TS script',
+              pass: false,
+            };
+          }
+          return {pass: true};
+        },
+      },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// GitHub Actions checks (gh-actions-setup component)
+// ---------------------------------------------------------------------------
+
+function makeGhActionsChecks(projectRoot: string): CheckNode[] {
+  return [
+    {
+      check: {
+        label: 'GH_ACTIONS_SIGNAL',
+        fn: (): CheckResult => {
+          const workflow = resolve(projectRoot, '.github/workflows/signal.yml');
+          if (!existsSync(workflow)) {
+            return {
+              fix: 'Run: bunx justin-sdk add gh-actions',
+              fixCommand: 'bunx justin-sdk add gh-actions',
+              message: '.github/workflows/signal.yml not found',
+              pass: false,
+            };
+          }
+          return {pass: true};
+        },
+      },
+      children: [
+        {
+          check: {
+            label: 'GH_ACTIONS_SIGNAL_BUN',
+            severity: 'warn',
+            fn: (): CheckResult => {
+              const workflow = resolve(
+                projectRoot,
+                '.github/workflows/signal.yml',
+              );
+              const content = readFileSync(workflow, 'utf-8');
+              if (!content.includes('oven-sh/setup-bun')) {
+                return {
+                  fix: 'Re-install with: bunx justin-sdk add gh-actions --force',
+                  message:
+                    '.github/workflows/signal.yml does not use oven-sh/setup-bun — may be a custom workflow',
+                  pass: false,
+                };
+              }
+              return {pass: true};
+            },
+          },
+        },
+      ],
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Prompts checks (prompts-setup component)
+// ---------------------------------------------------------------------------
+
+function makePromptsChecks(projectRoot: string): CheckNode[] {
+  return [
+    {
+      check: {
+        label: 'PROMPTS_DIR',
+        fn: (): CheckResult => {
+          if (!existsSync(resolve(projectRoot, 'docs/prompts'))) {
+            return {
+              fix: 'Run: bunx justin-sdk add prompts',
+              fixCommand: 'bunx justin-sdk add prompts',
+              message: 'docs/prompts/ not found',
+              pass: false,
+            };
+          }
+          return {pass: true};
+        },
+      },
+      children: [
+        {
+          check: {
+            label: 'IMPORTANT_GUIDELINES',
+            fn: (): CheckResult => {
+              if (
+                !existsSync(
+                  resolve(
+                    projectRoot,
+                    'docs/prompts/IMPORTANT_GUIDELINES_INLINED.md',
+                  ),
+                )
+              ) {
+                return {
+                  fix: 'Run: bunx justin-sdk add prompts',
+                  fixCommand: 'bunx justin-sdk add prompts',
+                  message:
+                    'docs/prompts/IMPORTANT_GUIDELINES_INLINED.md not found',
+                  pass: false,
+                };
+              }
+              return {pass: true};
+            },
+          },
+        },
+      ],
+    },
+    {
+      check: {
+        label: 'INSTALL_PROMPTS_SCRIPT',
+        fn: (): CheckResult => {
+          const script = readPkgScript(projectRoot, 'install-my-prompts');
+          if (script == null) {
+            return {
+              fix: 'Run: bunx justin-sdk add prompts',
+              fixCommand: 'bunx justin-sdk add prompts',
+              message:
+                'package.json is missing the "install-my-prompts" script',
+              pass: false,
+            };
+          }
+          return {pass: true};
+        },
+      },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Gitignore checks (gitignore-setup component)
+// ---------------------------------------------------------------------------
+
+function makeGitignoreChecks(projectRoot: string): CheckNode[] {
+  const gitignorePath = resolve(projectRoot, '.gitignore');
+  const FIX_CMD = 'bunx justin-sdk add gitignore';
+
+  function readGitignore(): string | null {
+    if (!existsSync(gitignorePath)) return null;
+    return readFileSync(gitignorePath, 'utf-8');
+  }
+
+  return [
+    {
+      check: {
+        label: 'GITIGNORE_EXISTS',
+        fn: (): CheckResult => {
+          if (readGitignore() == null) {
+            return {
+              fix: `Run: ${FIX_CMD}`,
+              fixCommand: FIX_CMD,
+              message: '.gitignore not found at project root',
+              pass: false,
+            };
+          }
+          return {pass: true};
+        },
+      },
+      children: [
+        {
+          check: {
+            label: 'GITIGNORE_HAS_NODE_MODULES',
+            fn: (): CheckResult => {
+              const content = readGitignore() ?? '';
+              if (!content.includes('node_modules/')) {
+                return {
+                  fix: `Run: ${FIX_CMD}`,
+                  fixCommand: FIX_CMD,
+                  message: '.gitignore missing node_modules/',
+                  pass: false,
+                };
+              }
+              return {pass: true};
+            },
+          },
+        },
+        {
+          check: {
+            label: 'GITIGNORE_HAS_TMP',
+            severity: 'warn',
+            fn: (): CheckResult => {
+              const content = readGitignore() ?? '';
+              if (!content.includes('tmp/')) {
+                return {
+                  fix: `Run: ${FIX_CMD}`,
+                  fixCommand: FIX_CMD,
+                  message: '.gitignore missing tmp/',
+                  pass: false,
+                };
+              }
+              return {pass: true};
+            },
+          },
+        },
+        {
+          check: {
+            label: 'GITIGNORE_HAS_ENV',
+            severity: 'warn',
+            fn: (): CheckResult => {
+              const content = readGitignore() ?? '';
+              if (!content.includes('.env')) {
+                return {
+                  fix: `Run: ${FIX_CMD}`,
+                  fixCommand: FIX_CMD,
+                  message: '.gitignore missing .env',
+                  pass: false,
+                };
+              }
+              return {pass: true};
+            },
+          },
+        },
+      ],
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // Component registry
 // ---------------------------------------------------------------------------
 
@@ -400,6 +850,11 @@ const componentCheckFactories: Record<
 > = {
   'base-setup': makeBaseChecks,
   'beads-setup': makeBeadsChecks,
+  'gh-actions-setup': makeGhActionsChecks,
+  'gitignore-setup': makeGitignoreChecks,
+  'prettier-setup': makePrettierChecks,
+  'prompts-setup': makePromptsChecks,
+  'tsconfig-setup': makeTsconfigChecks,
 };
 
 // ---------------------------------------------------------------------------

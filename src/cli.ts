@@ -14,7 +14,12 @@ import {runAgent} from './agent';
 import {runBaseSetup} from './base-setup';
 import {runBeadsSetup} from './beads-setup';
 import {runDoctor} from './doctor';
+import {runGhActionsSetup} from './gh-actions-setup';
+import {runGitignoreSetup} from './gitignore-setup';
+import {runPrettierSetup} from './prettier-setup';
+import {runPromptsSetup} from './prompts-setup';
 import {runSignal} from './signal';
+import {runTsconfigSetup} from './tsconfig-setup';
 
 void yargs(hideBin(process.argv))
   .scriptName('justin-sdk')
@@ -80,7 +85,15 @@ void yargs(hideBin(process.argv))
         .positional('component', {
           type: 'string',
           describe: 'Component to add',
-          choices: ['base-setup', 'beads'],
+          choices: [
+            'base-setup',
+            'beads',
+            'gh-actions',
+            'gitignore',
+            'prettier',
+            'prompts',
+            'tsconfig',
+          ],
         })
         .option('commit', {
           type: 'boolean',
@@ -90,7 +103,7 @@ void yargs(hideBin(process.argv))
         .option('force', {
           type: 'boolean',
           describe:
-            'Overwrite hand-modified files (currently: scripts/setup-env.ts) that differ from the SDK template and don\'t match a known-old hash',
+            "Overwrite hand-modified files (currently: scripts/setup-env.ts) that differ from the SDK template and don't match a known-old hash",
           default: false,
         }),
     async (argv) => {
@@ -104,6 +117,41 @@ void yargs(hideBin(process.argv))
       if (argv.component === 'beads') {
         const exitCode = await runBeadsSetup({
           noCommit: !argv.commit,
+          projectRoot: process.cwd(),
+        });
+        process.exit(exitCode);
+      }
+      if (argv.component === 'prettier') {
+        const exitCode = await runPrettierSetup({
+          force: argv.force,
+          projectRoot: process.cwd(),
+        });
+        process.exit(exitCode);
+      }
+      if (argv.component === 'tsconfig') {
+        const exitCode = await runTsconfigSetup({
+          force: argv.force,
+          projectRoot: process.cwd(),
+        });
+        process.exit(exitCode);
+      }
+      if (argv.component === 'gh-actions') {
+        const exitCode = await runGhActionsSetup({
+          force: argv.force,
+          projectRoot: process.cwd(),
+        });
+        process.exit(exitCode);
+      }
+      if (argv.component === 'prompts') {
+        const exitCode = await runPromptsSetup({
+          force: argv.force,
+          projectRoot: process.cwd(),
+        });
+        process.exit(exitCode);
+      }
+      if (argv.component === 'gitignore') {
+        const exitCode = await runGitignoreSetup({
+          force: argv.force,
           projectRoot: process.cwd(),
         });
         process.exit(exitCode);
