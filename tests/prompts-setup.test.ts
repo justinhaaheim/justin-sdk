@@ -28,7 +28,7 @@ afterEach(() => {
 });
 
 const EXPECTED_COMMAND =
-  'bunx git+https://github.com/justinhaaheim/prompts --target-dir docs/prompts --md';
+  'npx -y git+https://github.com/justinhaaheim/prompts --target-dir docs/prompts --md';
 
 describe('prompts-setup', () => {
   test('fresh project: adds script, registers component, does not auto-create docs/prompts/', async () => {
@@ -123,6 +123,33 @@ describe('prompts-setup', () => {
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
     expect(pkg.scripts?.['install-my-prompts']).toBe(customCommand);
+  });
+
+  test('upgrades a stale `bunx git+...` install-my-prompts script to npx', async () => {
+    const staleCommand =
+      'bunx git+https://github.com/justinhaaheim/prompts --target-dir docs/prompts --md';
+    const sb = track(
+      createProjectSandbox({
+        packageJson: {
+          name: 'test',
+          scripts: {
+            'install-my-prompts': staleCommand,
+          },
+        },
+      }),
+    );
+
+    const exitCode = await runPromptsSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      skipFetch: true,
+    });
+    expect(exitCode).toBe(0);
+
+    const pkg = JSON.parse(
+      readFileSync(join(sb.path, 'package.json'), 'utf-8'),
+    ) as {scripts?: Record<string, string>};
+    expect(pkg.scripts?.['install-my-prompts']).toBe(EXPECTED_COMMAND);
   });
 
   test('preserves other scripts in package.json', async () => {

@@ -364,6 +364,14 @@ function stepAgentsMd(projectRoot: string): boolean {
         `Detected stale bd content in AGENTS.md; backed up to tmp/AGENTS.md.bd-backup-${timestamp} and reset`,
       );
     }
+  } else {
+    // Pre-create an empty AGENTS.md so `br agents --add --force` writes
+    // there. Without this, `br` falls back to CLAUDE.md when AGENTS.md
+    // doesn't exist but CLAUDE.md does — clobbering the user's CLAUDE.md
+    // and leaving AGENTS.md missing. With the empty placeholder, br
+    // targets AGENTS.md unambiguously. (br creates AGENTS.md.bak which
+    // we delete below; the original was empty anyway.)
+    writeFileSync(agentsMd, '');
   }
 
   const result = exec('br agents --add --force', projectRoot);

@@ -31,8 +31,18 @@ import {
 // ---------------------------------------------------------------------------
 
 const INSTALL_PROMPTS_SCRIPT_NAME = 'install-my-prompts';
+// Use npx (not bunx). The prompts repo is fetched via GitHub's tarball
+// API which requires auth for private repos. npm/npx route through git's
+// credential helper (which works locally via macOS keychain or stored
+// tokens); bunx hits the unauthenticated tarball endpoint directly and
+// 404s on private repos. npx works regardless of repo visibility.
 const INSTALL_PROMPTS_COMMAND =
-  'bunx git+https://github.com/justinhaaheim/prompts --target-dir docs/prompts --md';
+  'npx -y git+https://github.com/justinhaaheim/prompts --target-dir docs/prompts --md';
+// Old bunx version of the command. Detected on re-run and silently
+// upgraded so existing projects don't stay stuck on the broken bunx path.
+const STALE_INSTALL_PROMPTS_COMMANDS: ReadonlySet<string> = new Set([
+  'bunx git+https://github.com/justinhaaheim/prompts --target-dir docs/prompts --md',
+]);
 
 // ---------------------------------------------------------------------------
 // Step implementations
@@ -66,6 +76,16 @@ function stepInstallPromptsScript(projectRoot: string): boolean {
 
   if (existing === INSTALL_PROMPTS_COMMAND) {
     success(`"${INSTALL_PROMPTS_SCRIPT_NAME}" script already up to date`);
+    return true;
+  }
+
+  if (STALE_INSTALL_PROMPTS_COMMANDS.has(existing)) {
+    scripts[INSTALL_PROMPTS_SCRIPT_NAME] = INSTALL_PROMPTS_COMMAND;
+    pkg.scripts = scripts;
+    writeJson(pkgPath, pkg);
+    success(
+      `Upgraded "${INSTALL_PROMPTS_SCRIPT_NAME}" script from a known-old value (bunx → npx)`,
+    );
     return true;
   }
 
