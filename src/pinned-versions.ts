@@ -29,5 +29,18 @@ export const PINNED_GITHUB = {
     'github:justinhaaheim/eslint-config-jha-react-node',
 } as const;
 
+/**
+ * The justinhaaheim/prompts repo doesn't use tags or releases — pinning
+ * means committing to a specific SHA. To upgrade:
+ *  1. cd into the prompts repo, find the desired commit
+ *  2. update `sha` below
+ *  3. cut a new SDK release
+ *  4. consumers receive the bump on next `j update`
+ */
+export const PROMPTS_PIN = {
+  sha: 'bc5994b48b',
+  repo: 'justinhaaheim/prompts',
+} as const;
+
 export type PinnedPackage = keyof typeof PINNED;
 export type PinnedGithubPackage = keyof typeof PINNED_GITHUB;

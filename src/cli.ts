@@ -24,6 +24,7 @@ import {runPrettierSetup} from './prettier-setup';
 import {runPromptsSetup} from './prompts-setup';
 import {runSignal} from './signal';
 import {runTsconfigSetup} from './tsconfig-setup';
+import {runUpdate} from './update';
 
 void yargs(hideBin(process.argv))
   .scriptName('justin-sdk')
@@ -225,6 +226,63 @@ void yargs(hideBin(process.argv))
         force: argv.force,
         noCommit: !argv.commit,
         projectRoot: process.cwd(),
+      });
+      process.exit(exitCode);
+    },
+  )
+  .command(
+    'update',
+    "Sync this project to the SDK's current pinned state (re-applies all components)",
+    (y) =>
+      y
+        .option('self-update', {
+          type: 'boolean',
+          describe:
+            'Bump the SDK in devDependencies first, then re-exec the new CLI (use --no-self-update to skip)',
+          default: true,
+        })
+        .option('commit', {
+          type: 'boolean',
+          describe:
+            'Create a single git commit at the end (use --no-commit to skip)',
+          default: true,
+        })
+        .option('allow-dirty', {
+          type: 'boolean',
+          describe:
+            'Allow running with uncommitted changes (skips final commit)',
+          default: false,
+        })
+        .option('dry-run', {
+          type: 'boolean',
+          describe: 'Print the plan without writing',
+          default: false,
+        })
+        .option('force', {
+          type: 'boolean',
+          describe: 'Pass --force to underlying add commands',
+          default: false,
+        })
+        .option('skip-prompts-fetch', {
+          type: 'boolean',
+          describe: 'Skip fetching the prompts library (used by tests)',
+          default: false,
+        })
+        .option('quiet', {
+          type: 'boolean',
+          describe: 'Suppress non-error output',
+          default: false,
+        }),
+    async (argv) => {
+      const exitCode = await runUpdate({
+        allowDirty: argv['allow-dirty'],
+        dryRun: argv['dry-run'],
+        force: argv.force,
+        noCommit: !argv.commit,
+        noSelfUpdate: !argv['self-update'],
+        projectRoot: process.cwd(),
+        quiet: argv.quiet,
+        skipPromptsFetch: argv['skip-prompts-fetch'],
       });
       process.exit(exitCode);
     },

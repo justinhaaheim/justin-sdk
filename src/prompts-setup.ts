@@ -15,6 +15,7 @@
 import {basename, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
+import {PROMPTS_PIN} from './pinned-versions';
 import {
   exec,
   fail,
@@ -36,13 +37,28 @@ const INSTALL_PROMPTS_SCRIPT_NAME = 'install-my-prompts';
 // credential helper (which works locally via macOS keychain or stored
 // tokens); bunx hits the unauthenticated tarball endpoint directly and
 // 404s on private repos. npx works regardless of repo visibility.
-const INSTALL_PROMPTS_COMMAND =
-  'npx -y git+https://github.com/justinhaaheim/prompts --target-dir docs/prompts --md';
-// Old bunx version of the command. Detected on re-run and silently
-// upgraded so existing projects don't stay stuck on the broken bunx path.
-const STALE_INSTALL_PROMPTS_COMMANDS: ReadonlySet<string> = new Set([
-  'bunx git+https://github.com/justinhaaheim/prompts --target-dir docs/prompts --md',
-]);
+//
+// Pinned to a specific commit SHA (see PROMPTS_PIN). To advance the pin,
+// edit src/pinned-versions.ts and cut a new SDK release.
+const INSTALL_PROMPTS_COMMAND = `npx -y git+https://github.com/${PROMPTS_PIN.repo}#${PROMPTS_PIN.sha} --target-dir docs/prompts --md`;
+
+// Marker file (outside docs/prompts/ so the prompts CLI's wholesale
+// overwrite of that directory doesn't clobber it). Records which SHA was
+// most recently materialized into the project, so `j update` and doctor
+// can detect drift from the SDK's current PROMPTS_PIN.
+const PROMPTS_MARKER_REL_PATH = 'docs/.prompts-installed-from.json';
+
+// Past versions of the install command. Detected on re-run and silently
+// upgraded so projects pinned to old SHAs (or to the broken bunx path)
+// move forward without manual intervention.
+const STALE_INSTALL_PROMPTS_PATTERNS: readonly RegExp[] = [
+  // Original broken bunx form (pre-2026-05-19)
+  /^bunx git\+https:\/\/github\.com\/justinhaaheim\/prompts --target-dir docs\/prompts --md$/,
+  // Unpinned npx form (2026-05-19 — before PROMPTS_PIN landed)
+  /^npx -y git\+https:\/\/github\.com\/justinhaaheim\/prompts --target-dir docs\/prompts --md$/,
+  // Pinned npx form, but to a different SHA than the current PROMPTS_PIN
+  /^npx -y git\+https:\/\/github\.com\/justinhaaheim\/prompts#[0-9a-f]+ --target-dir docs\/prompts --md$/,
+];
 
 // ---------------------------------------------------------------------------
 // Step implementations
@@ -79,12 +95,12 @@ function stepInstallPromptsScript(projectRoot: string): boolean {
     return true;
   }
 
-  if (STALE_INSTALL_PROMPTS_COMMANDS.has(existing)) {
+  if (STALE_INSTALL_PROMPTS_PATTERNS.some((re) => re.test(existing))) {
     scripts[INSTALL_PROMPTS_SCRIPT_NAME] = INSTALL_PROMPTS_COMMAND;
     pkg.scripts = scripts;
     writeJson(pkgPath, pkg);
     success(
-      `Upgraded "${INSTALL_PROMPTS_SCRIPT_NAME}" script from a known-old value (bunx → npx)`,
+      `Upgraded "${INSTALL_PROMPTS_SCRIPT_NAME}" script to current PROMPTS_PIN (${PROMPTS_PIN.sha})`,
     );
     return true;
   }
@@ -93,6 +109,25 @@ function stepInstallPromptsScript(projectRoot: string): boolean {
     `"${INSTALL_PROMPTS_SCRIPT_NAME}" script exists with a custom value — preserving it. ` +
       `Expected: ${INSTALL_PROMPTS_COMMAND}`,
   );
+  return true;
+}
+
+/**
+ * Write the drift-detection marker to docs/.prompts-installed-from.json.
+ * Records which SHA we just materialized so doctor + `j update` can
+ * detect when a project has drifted from the SDK's current pin.
+ *
+ * Lives outside docs/prompts/ because the prompts CLI may overwrite the
+ * contents of docs/prompts/ wholesale on each run.
+ */
+function stepWriteMarker(projectRoot: string): boolean {
+  const markerPath = resolve(projectRoot, PROMPTS_MARKER_REL_PATH);
+  writeJson(markerPath, {
+    sha: PROMPTS_PIN.sha,
+    repo: PROMPTS_PIN.repo,
+    installedAt: new Date().toISOString(),
+  });
+  success(`Wrote drift marker (${PROMPTS_MARKER_REL_PATH})`);
   return true;
 }
 
@@ -114,8 +149,11 @@ function stepFetchPrompts(projectRoot: string): boolean {
     }
     return true;
   }
-  success('Fetched prompt files into docs/prompts/');
-  return true;
+  success(`Fetched prompt files into docs/prompts/ (pin: ${PROMPTS_PIN.sha})`);
+  // Only write the drift marker on successful fetch. A failed fetch
+  // (sandbox, network) leaves the previous marker — if any — intact so
+  // doctor doesn't claim a fresh pin landed when it didn't.
+  return stepWriteMarker(projectRoot);
 }
 
 // ---------------------------------------------------------------------------

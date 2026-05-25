@@ -10,6 +10,7 @@ import {describe, test, expect, afterEach} from 'bun:test';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
+import {PROMPTS_PIN} from '../src/pinned-versions';
 import {runPromptsSetup} from '../src/prompts-setup';
 import {createProjectSandbox, type Sandbox} from './sandbox';
 
@@ -27,8 +28,7 @@ afterEach(() => {
   }
 });
 
-const EXPECTED_COMMAND =
-  'npx -y git+https://github.com/justinhaaheim/prompts --target-dir docs/prompts --md';
+const EXPECTED_COMMAND = `npx -y git+https://github.com/${PROMPTS_PIN.repo}#${PROMPTS_PIN.sha} --target-dir docs/prompts --md`;
 
 describe('prompts-setup', () => {
   test('fresh project: adds script, registers component, does not auto-create docs/prompts/', async () => {

@@ -15,7 +15,7 @@ import {execSync} from 'child_process';
 import {existsSync, readFileSync, statSync} from 'fs';
 import {resolve} from 'path';
 
-import {PINNED} from './pinned-versions';
+import {PINNED, PROMPTS_PIN} from './pinned-versions';
 
 const IS_REMOTE = process.env.CLAUDE_CODE_REMOTE === 'true';
 
@@ -746,6 +746,48 @@ function makePromptsChecks(projectRoot: string): CheckNode[] {
             };
           }
           return {pass: true};
+        },
+      },
+    },
+    {
+      check: {
+        label: 'PROMPTS_PIN_MATCHES',
+        fn: (): CheckResult => {
+          const markerPath = resolve(
+            projectRoot,
+            'docs/.prompts-installed-from.json',
+          );
+          if (!existsSync(markerPath)) {
+            return {
+              fix: 'Run: bunx justin-sdk add prompts --force',
+              fixCommand: 'bunx justin-sdk add prompts --force',
+              message:
+                'docs/.prompts-installed-from.json not found — prompts version unknown',
+              pass: false,
+            };
+          }
+          try {
+            const marker = JSON.parse(readFileSync(markerPath, 'utf-8')) as {
+              sha?: string;
+            };
+            if (marker.sha !== PROMPTS_PIN.sha) {
+              return {
+                fix: `Run: bunx justin-sdk add prompts (currently ${marker.sha ?? '?'}, pinned ${PROMPTS_PIN.sha})`,
+                fixCommand: 'bunx justin-sdk add prompts',
+                message: `prompts at ${marker.sha ?? '?'}, SDK pins ${PROMPTS_PIN.sha}`,
+                pass: false,
+              };
+            }
+            return {pass: true};
+          } catch {
+            return {
+              fix: 'Run: bunx justin-sdk add prompts --force',
+              fixCommand: 'bunx justin-sdk add prompts --force',
+              message:
+                'docs/.prompts-installed-from.json is malformed — re-install prompts',
+              pass: false,
+            };
+          }
         },
       },
     },
