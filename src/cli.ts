@@ -244,13 +244,13 @@ void yargs(hideBin(process.argv))
         .option('commit', {
           type: 'boolean',
           describe:
-            'Create a single git commit at the end (use --no-commit to skip)',
-          default: true,
+            'Create a single git commit at the end. Default is off — pass --commit to opt in.',
+          default: false,
         })
         .option('allow-dirty', {
           type: 'boolean',
           describe:
-            'Allow running with uncommitted changes (skips final commit)',
+            'Allow running with uncommitted changes (commit step still respects --commit)',
           default: false,
         })
         .option('dry-run', {
