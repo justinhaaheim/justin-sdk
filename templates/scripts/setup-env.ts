@@ -111,6 +111,16 @@ function runProjectSetupScripts(): void {
 // Remote environment setup
 // ---------------------------------------------------------------------------
 
+function miseTrust(): void {
+  if (!existsSync(resolve(PROJECT_ROOT, 'mise.toml'))) return;
+
+  // Each worktree / fresh clone is a new filesystem path, so mise treats its
+  // config as untrusted and refuses `mise install`. Trust it (idempotent).
+  const miseCmd = existsSync(MISE_BIN) ? `"${MISE_BIN}"` : 'mise';
+  log('Trusting mise config...');
+  run(`${miseCmd} trust`, {ignoreError: true});
+}
+
 function setupRemote(): void {
   log('Remote environment detected. Installing tools...');
 
@@ -144,6 +154,9 @@ function setupRemote(): void {
   // Phase 1.5: Project-specific setup-env:* scripts
   runProjectSetupScripts();
 
+  // Trust mise config before doctor's mise install (new path = untrusted).
+  miseTrust();
+
   // Phase 2: Delegate to doctor --fix --yes for SDK component tools.
   // --yes pre-approves system-level installs (mise, br). Safe in
   // remote/sandbox environments; on local dev, approvals are explicit.
@@ -165,6 +178,9 @@ function setupRemote(): void {
 // ---------------------------------------------------------------------------
 
 function validateLocal(): void {
+  // Trust mise config (each worktree/clone is a new, untrusted path).
+  miseTrust();
+
   try {
     execSync('bun run doctor -- --quiet', {
       cwd: PROJECT_ROOT,
