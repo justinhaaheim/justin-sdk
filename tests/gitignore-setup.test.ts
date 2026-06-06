@@ -136,6 +136,7 @@ describe('gitignore-setup', () => {
         'dynamic-version.local.json',
         'dynamic-version.local.d.ts',
         '.eslintcache',
+        '.claude/worktrees/',
       ].join('\n') + '\n';
     sb.writeFile('.gitignore', seeded);
 

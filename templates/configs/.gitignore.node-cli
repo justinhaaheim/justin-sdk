@@ -42,3 +42,6 @@ tmp/
 # Dynamic version artifacts (local-only)
 dynamic-version.local.json
 dynamic-version.local.d.ts
+
+# Claude Code ephemeral bg-job worktrees
+.claude/worktrees/

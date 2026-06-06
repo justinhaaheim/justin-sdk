@@ -151,6 +151,7 @@ const PRETTIERIGNORE_BASELINE_ENTRIES: ReadonlyArray<string> = [
   '.beads',
   'tmp',
   '*.log',
+  '**/.claude/worktrees/',
 ];
 
 /**

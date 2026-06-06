@@ -58,6 +58,7 @@ const BASELINE_ENTRIES: ReadonlyArray<string> = [
   'dynamic-version.local.json',
   'dynamic-version.local.d.ts',
   '.eslintcache',
+  '.claude/worktrees/',
 ];
 
 // ---------------------------------------------------------------------------
