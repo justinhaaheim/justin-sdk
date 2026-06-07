@@ -32,6 +32,8 @@ import {execSync} from 'child_process';
 import {appendFileSync, existsSync, readFileSync} from 'fs';
 import {resolve} from 'path';
 
+if (process.env.JSDK_SKIP_SETUP_ENV === '1') process.exit(0);
+
 const HOME = process.env.HOME ?? '/root';
 const PROJECT_ROOT = resolve(import.meta.dirname, '..');
 const MISE_BIN = resolve(HOME, '.local/bin/mise');
