@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -12,7 +12,8 @@
     "test:watch": "bun test --watch"
   },
   "exports": {
-    "./check-runner": "./src/check-runner.ts"
+    "./check-runner": "./src/check-runner.ts",
+    "./date": "./src/date.ts"
   },
   "files": [
     "src",
