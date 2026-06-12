@@ -1,9 +1,10 @@
 /**
  * beads-setup.ts — Deterministic beads_rust setup for any project.
  *
- * Orchestrates: mise.toml, br install, migration, br init, AGENTS.md,
- * CLAUDE.md (@docs/prompts/BEADS.md pattern), .prettierignore,
- * .claude/settings.json, and the beads-setup component registration.
+ * Orchestrates: mise.toml, br install, migration, br init, AGENTS.md
+ * (br command reference + co-located beads workflow prompt), CLAUDE.md
+ * (ensures an @AGENTS.md reference), .prettierignore, .claude/settings.json,
+ * and the beads-setup component registration.
  *
  * Runs base-setup as a precondition so the foundation layer is always
  * present before beads-specific steps run.
@@ -322,6 +323,86 @@ function stepImportIssues(
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Beads workflow prompt (co-located with the SDK)
+// ---------------------------------------------------------------------------
+
+// Marker used to detect (idempotently) whether AGENTS.md already has the
+// workflow prompt appended.
+const BEADS_WORKFLOW_MARKER = '## Beads workflow (br)';
+
+// Justin's opinionated "when and why to use beads" prompt. `br agents --add`
+// writes the command *reference* into AGENTS.md; this is appended after it to
+// cover the workflow/process side. It lives here (rather than the general
+// prompts repo) so it versions alongside beads itself. CLAUDE.md @-links
+// AGENTS.md, so Claude Code loads this recursively.
+const BEADS_WORKFLOW_CONTENT = `
+${BEADS_WORKFLOW_MARKER} — how Justin wants issues tracked
+
+This project uses **beads_rust** (\`br\`) as the single source of truth for plans,
+tasks, and progress. The command reference is above; this section is about *when*
+and *why* to use it.
+
+**ALWAYS use beads for ALL work.** Every task — even trivial ones — gets a bead.
+This is non-negotiable: beads provide accountability, trackability, and a durable
+audit trail that survives across sessions. **Do NOT write planning documents in
+\`docs/plans/\` or anywhere else, and do NOT use markdown TODO lists.** Use beads.
+
+### Why this matters
+
+Context evaporates between sessions. Without externalized state, resuming work
+means rebuilding context from chat history (gone), file diffs (lossy), and memory
+(fragile). The fix: **always capture "what's next" at the END of a session, while
+context is fresh — not at the START of the next one, when it's gone.**
+
+- Don't end a session with in-progress beads in vague states. Update their notes.
+- Don't end without creating beads for the follow-ups you noticed during the work.
+- Don't leave the project in a state where "what to work on next" requires reading code.
+
+The hand-off moment (end of session, end of an epic phase, mid-task interrupt) is
+the most valuable place to apply this. Treat it as a first-class step.
+
+### When you start work
+
+Decide which case you're in:
+
+1. **Trivial task** (single file edit, simple fix) — create one bead, do the work, close it.
+2. **Non-trivial task** (multiple files, real design decisions, multi-session work) —
+   create an **epic**, flesh out its description / design / acceptance-criteria /
+   notes fields, then break it into **child beads** with \`--parent EPIC_ID\`
+   (sub-beads auto-number as \`EPIC_ID.1\`, \`EPIC_ID.2\`, ...). Using \`--parent\`
+   creates the sub-bead AND the parent-child relationship in one step — prefer it
+   over \`br dep add\` for epic / sub-bead links. Share the plan and wait for
+   approval before implementing.
+3. **Already-planned work** — check \`br ready\` for the highest-priority unblocked
+   bead and claim it (\`br update <id> --status=in_progress\`).
+
+### During work
+
+- Update status as you go: \`in_progress\` when claimed, \`closed\` with a \`--reason\` when done.
+- Discover a follow-up? Create a bead for it immediately.
+- Surprises, decisions, dead-ends worth remembering — append to the bead's \`notes\`.
+  The bead is the durable memory; chat history is not.
+
+### When you finish (or hit a stopping point)
+
+Always end with:
+
+1. \`br sync --flush-only\` — exports the DB to \`.beads/issues.jsonl\` (committed in git).
+2. \`git add\` your changes (code + \`.beads/issues.jsonl\`).
+3. \`git commit\` (see the commit guidelines).
+
+For a multi-bead epic handed off mid-stream, give Justin a short handoff message:
+the epic id, the branch, what's done, and which bead to claim next.
+
+### When Justin asks "what should I work on?"
+
+- \`br ready\` — open, unblocked beads ordered by priority.
+- \`br epic status\` — how active epics are progressing.
+- Present concrete options with context — don't make him read raw command output.
+  Help him pick something that moves toward a meaningful milestone.
+`;
+
 /**
  * Detects stale `bd` (legacy beads) content in AGENTS.md.
  *
@@ -354,10 +435,7 @@ function stepAgentsMd(projectRoot: string): boolean {
         .toISOString()
         .replace(/[:.]/g, '-')
         .slice(0, 19);
-      const backupPath = resolve(
-        tmpDir,
-        `AGENTS.md.bd-backup-${timestamp}`,
-      );
+      const backupPath = resolve(tmpDir, `AGENTS.md.bd-backup-${timestamp}`);
       cpSync(agentsMd, backupPath, {force: true});
       writeFileSync(agentsMd, '# Agent Instructions\n');
       success(
@@ -389,73 +467,37 @@ function stepAgentsMd(projectRoot: string): boolean {
     rmSync(brBackup);
   }
 
-  // Add dependency direction docs if not already present
+  // Append Justin's beads workflow prompt (when/why to use beads) after the
+  // br-generated command reference. Co-located with the SDK so it versions
+  // alongside beads; CLAUDE.md @-links AGENTS.md so Claude Code loads it.
   if (existsSync(agentsMd)) {
     const content = readFileSync(agentsMd, 'utf-8');
-    if (!content.includes('Dependency Direction')) {
-      const depSection = `
-## Dependency Direction (IMPORTANT)
-
-\`br dep add <issue> <depends-on>\` means \`<issue>\` is **blocked by** \`<depends-on>\`.
-
-- **Epic/sub-bead pattern**: The **epic depends on its sub-beads**, NOT the other way around. The epic is blocked until its sub-beads are done.
-  - Correct: \`br dep add EPIC SUB_BEAD\` (epic is blocked by sub-bead)
-  - WRONG: \`br dep add SUB_BEAD EPIC\` (this would mean the sub-bead can't start until the epic is done, which is backwards)
-- **Sequential tasks**: If task B can't start until task A is done: \`br dep add B A\`
-- Think of it as: **"Who is waiting?"** The _waiter_ is the first argument.
-`;
-      // Insert before the br-agent-instructions marker if present, else append
-      const marker = '<!-- br-agent-instructions-v1 -->';
-      if (content.includes(marker)) {
-        const updated = content.replace(marker, depSection + '\n' + marker);
-        writeFileSync(agentsMd, updated);
-      } else {
-        appendFileSync(agentsMd, depSection);
-      }
-      success('Added dependency direction docs to AGENTS.md');
+    if (!content.includes(BEADS_WORKFLOW_MARKER)) {
+      appendFileSync(agentsMd, BEADS_WORKFLOW_CONTENT);
+      success('Appended beads workflow prompt to AGENTS.md');
+    } else {
+      success('AGENTS.md already has the beads workflow prompt');
     }
   }
 
   return true;
 }
 
-const BEADS_PROMPT_CONTENT = `# Beads Issue Tracking
-
-This project uses **beads_rust** (\`br\`) for issue tracking. See \`@AGENTS.md\` for the full command reference.
-
-**ALWAYS use beads for ALL work.** Every task — even trivial ones — should have a bead. This is non-negotiable. Beads provide accountability, trackability, visibility, and an audit trail. Specifically:
-
-- **Before starting any work**, check \`br ready\` for existing beads, or create one.
-- **For non-trivial tasks**, create an epic bead, break it into sub-beads, then implement. Close sub-beads as you go.
-- **For quick tasks**, create a single bead, do the work, close it.
-- **At session end**, ensure all completed work has closed beads, and any unfinished work has open beads with context for the next session.
-- **Do NOT use markdown TODOs, task lists, or other tracking methods.** Beads is the single source of truth for task tracking.
-`;
-
-function stepClaudeMd(projectRoot: string): boolean {
-  // Create docs/prompts/BEADS.md
-  const promptsDir = resolve(projectRoot, 'docs', 'prompts');
-  ensureDir(promptsDir);
-  const beadsPrompt = resolve(promptsDir, 'BEADS.md');
-  writeFileSync(beadsPrompt, BEADS_PROMPT_CONTENT);
-  success('Created docs/prompts/BEADS.md');
-
-  // Append reference to CLAUDE.md
+function stepEnsureClaudeMdAgentsRef(projectRoot: string): boolean {
+  // The beads workflow prompt now lives in AGENTS.md (appended in stepAgentsMd).
+  // Ensure CLAUDE.md @-links AGENTS.md so Claude Code loads it recursively.
+  // We no longer create a separate docs/prompts/BEADS.md.
   const claudeMd = resolve(projectRoot, 'CLAUDE.md');
   if (!existsSync(claudeMd)) {
-    warn('No CLAUDE.md found — skipping reference append');
+    warn('No CLAUDE.md found — skipping @AGENTS.md reference');
     return true;
   }
 
-  const added = appendIfMissing(
-    claudeMd,
-    'BEADS.md',
-    '\n@docs/prompts/BEADS.md\n',
-  );
+  const added = appendIfMissing(claudeMd, 'AGENTS.md', '\n@AGENTS.md\n');
   if (added) {
-    success('Appended @docs/prompts/BEADS.md reference to CLAUDE.md');
+    success('Appended @AGENTS.md reference to CLAUDE.md');
   } else {
-    success('CLAUDE.md already references BEADS.md');
+    success('CLAUDE.md already references AGENTS.md');
   }
 
   return true;
@@ -510,7 +552,9 @@ function stepJustinSdkJson(projectRoot: string): boolean {
     return false;
   }
 
-  const components = ((config.components as string[] | undefined) ?? []).slice();
+  const components = (
+    (config.components as string[] | undefined) ?? []
+  ).slice();
   if (components.includes('beads-setup')) {
     success('justin-sdk.config.json already includes beads-setup component');
     return true;
@@ -596,9 +640,9 @@ export async function runBeadsSetup(
   stepHeader('6. AGENTS.md');
   if (!stepAgentsMd(projectRoot)) return 1;
 
-  // Step 7: CLAUDE.md
+  // Step 7: CLAUDE.md (ensure it @-links AGENTS.md so the beads workflow loads)
   stepHeader('7. CLAUDE.md');
-  if (!stepClaudeMd(projectRoot)) return 1;
+  if (!stepEnsureClaudeMdAgentsRef(projectRoot)) return 1;
 
   // Step 8: .prettierignore
   stepHeader('8. .prettierignore');
@@ -626,7 +670,6 @@ export async function runBeadsSetup(
         '.claude/settings.json',
         '.prettierignore',
         'justin-sdk.config.json',
-        'docs/prompts/BEADS.md',
         'CLAUDE.md',
         'scripts/setup-env.ts',
         'package.json',

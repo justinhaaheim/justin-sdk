@@ -512,6 +512,23 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
         },
       },
     },
+    {
+      check: {
+        label: 'FIX_SOURCE_PRETTIER',
+        fn: (): CheckResult => {
+          const script = readPkgScript(projectRoot, 'fix-source:PRETTIER');
+          if (script == null) {
+            return {
+              fix: 'Run: bunx justin-sdk add prettier',
+              fixCommand: 'bunx justin-sdk add prettier',
+              message: 'package.json missing fix-source:PRETTIER script',
+              pass: false,
+            };
+          }
+          return {pass: true};
+        },
+      },
+    },
   ];
 }
 
@@ -972,6 +989,23 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
               fix: 'Run: bunx justin-sdk add eslint',
               fixCommand: 'bunx justin-sdk add eslint',
               message: 'package.json missing signal-source:LINT script',
+              pass: false,
+            };
+          }
+          return {pass: true};
+        },
+      },
+    },
+    {
+      check: {
+        label: 'FIX_SOURCE_LINT',
+        fn: (): CheckResult => {
+          const script = readPkgScript(projectRoot, 'fix-source:LINT');
+          if (script == null) {
+            return {
+              fix: 'Run: bunx justin-sdk add eslint',
+              fixCommand: 'bunx justin-sdk add eslint',
+              message: 'package.json missing fix-source:LINT script',
               pass: false,
             };
           }

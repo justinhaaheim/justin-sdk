@@ -257,6 +257,58 @@ function stepSignalSourceScript(projectRoot: string): boolean {
   return true;
 }
 
+// Named convenience scripts so the exact prettier syntax is codified once and
+// never has to be recalled. `prettier:write` is the "format the whole project"
+// command; `prettier:write:file` (single path, ignore-unknown) is what
+// lint-staged / pre-commit hooks call. `fix-source:PRETTIER` is the code-fix
+// counterpart to `signal-source:PRETTIER`, discovered by `justin-sdk fix`.
+const PRETTIER_SCRIPTS: ReadonlyArray<{key: string; value: string}> = [
+  {key: 'prettier:check', value: 'prettier --check .'},
+  {key: 'prettier:write', value: 'prettier --write .'},
+  {key: 'prettier:write:file', value: 'prettier --write --ignore-unknown'},
+  {key: 'fix-source:PRETTIER', value: 'prettier --write .'},
+];
+
+/**
+ * Add named prettier convenience scripts (prettier:check/write/write:file) and
+ * the fix-source:PRETTIER code-fix script to package.json. Preserves any
+ * existing custom values — only adds keys that are missing.
+ */
+function stepPrettierScripts(projectRoot: string): boolean {
+  const pkgPath = resolve(projectRoot, 'package.json');
+  if (!existsSync(pkgPath)) {
+    fail('package.json not found — cannot add prettier scripts');
+    return false;
+  }
+
+  const pkg = readJson(pkgPath);
+  if (pkg == null) {
+    fail('package.json is not valid JSON');
+    return false;
+  }
+
+  const scripts = ((pkg.scripts as Record<string, string> | undefined) ??
+    {}) as Record<string, string>;
+  let modified = false;
+
+  for (const {key, value} of PRETTIER_SCRIPTS) {
+    if (key in scripts) {
+      success(`${key} script already present (preserved: "${scripts[key]}")`);
+      continue;
+    }
+    scripts[key] = value;
+    success(`Added ${key} script ("${value}")`);
+    modified = true;
+  }
+
+  if (modified) {
+    pkg.scripts = scripts;
+    writeJson(pkgPath, pkg);
+  }
+
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -327,12 +379,23 @@ export async function runPrettierSetup(
   stepHeader('4. package.json: signal-source:PRETTIER script');
   if (!stepSignalSourceScript(projectRoot)) return 1;
 
+  // Step 5: named convenience + fix-source scripts
+  stepHeader(
+    '5. package.json: prettier scripts (prettier:check/write/write:file, fix-source:PRETTIER)',
+  );
+  if (!stepPrettierScripts(projectRoot)) return 1;
+
   if (!quiet) {
     console.log(
       `\n\x1b[32m\x1b[1mprettier-setup ready\x1b[0m in ${basename(projectRoot)}.\n`,
     );
     console.log(
-      '  Run `bun install` to fetch prettier locally (if not already installed).\n',
+      '  Run `bun install` to fetch prettier locally (if not already installed).',
+    );
+    // Formatting existing files is a deliberate manual step — setup/doctor only
+    // ensure prettier is wired up, they never rewrite your code.
+    console.log(
+      '  To reformat the whole project now: `bun run prettier:write` (or `bun run fix` for lint + format).\n',
     );
   }
 

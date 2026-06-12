@@ -87,8 +87,11 @@ SDK (this tool) to keep them consistent. He has ADHD, which means:
 
 A CLI tool and module library that provides:
 
-- **\`doctor\`** — environment health checks with auto-fix mode
-- **\`signal\`** — run project code quality checks (lint/ts/prettier)
+- **\`doctor\`** — environment/scaffolding health checks with auto-fix mode
+  (configs, deps, instructions in place — never rewrites your code)
+- **\`signal\`** — run project code quality *checks* (ts/lint/prettier, read-only)
+- **\`fix\`** — *auto-fix* code: eslint --fix + prettier --write, run serially
+  (the mutating counterpart to signal; distinct from doctor's scaffolding fixes)
 - **\`add <component>\`** — install a component (\`base-setup\` or \`beads\`)
 - **\`agent\`** — print this playbook (the command you probably just ran)
 
@@ -198,13 +201,14 @@ tracking in a project, handling migration from older tools automatically.
 6. **AGENTS.md** — auto-detects stale bd content (END BEADS INTEGRATION
    marker, \`**bd** (beads)\` phrase, \`bd onboard\` command) and backs it
    up to \`tmp/AGENTS.md.bd-backup-TIMESTAMP\` before regenerating with
-   \`br agents --add --force\`. Also adds a "Dependency Direction" section
-   below the marker.
-7. **CLAUDE.md** — creates \`docs/prompts/BEADS.md\` (standard workflow
-   doc) and appends \`@docs/prompts/BEADS.md\` reference to CLAUDE.md.
-   This is the @docs/prompts pattern — setup commands don't edit CLAUDE.md
-   directly, they create a standalone prompt file and append a one-line
-   reference. Idempotent.
+   \`br agents --add --force\`. Then appends Justin's beads *workflow*
+   prompt (the "## Beads workflow (br)" section — when/why to use beads)
+   after the br-generated command reference. (No hardcoded "Dependency
+   Direction" section anymore — \`br agents\` owns the command reference.)
+7. **CLAUDE.md** — ensures CLAUDE.md @-links AGENTS.md (\`@AGENTS.md\`) so
+   the beads workflow prompt loads recursively. No separate
+   docs/prompts/BEADS.md is created — the workflow prompt lives in AGENTS.md,
+   co-located with the SDK so it versions alongside beads. Idempotent.
 8. **.prettierignore** — appends \`.beads\` if not already present
 9. **.claude/settings.json** — adds \`br\` to \`sandbox.excludedCommands\`
 10. **justin-sdk.config.json** — adds \`beads-setup\` to \`components\`
@@ -227,7 +231,9 @@ bunx justin-sdk add beads
 \`\`\`
 
 **Flags:**
-- \`--no-commit\` — skip the final git commit (you commit manually)
+- \`--commit\` — create a git commit at the end. **Off by default**: \`add\`
+  only changes the working tree, so you can inspect the diff and commit
+  yourself (a de-facto dry run). Pass \`--commit\` to have it commit for you.
 
 ### What to check after
 
@@ -353,6 +359,27 @@ with \`--serial\`) and reports a combined pass/fail summary.
 
 ---
 
+## Fix: auto-fix code
+
+\`\`\`bash
+bunx justin-sdk fix          # eslint --fix + prettier --write, in serial
+\`\`\`
+
+Fix runs \`fix-source:*\` scripts from package.json — the *mutating*
+counterpart to \`signal-source:*\`:
+- \`fix-source:LINT\` — \`eslint --fix .\`
+- \`fix-source:PRETTIER\` — \`prettier --write .\`
+
+Always serial and label-sorted so formatters run last (LINT before
+PRETTIER, so prettier has the final say on formatting).
+
+**This is separate from \`doctor\`.** \`doctor --fix\` repairs *scaffolding*
+(missing configs, deps, package.json scripts). \`fix\` rewrites your
+*source code*. Reformatting the whole project is never done automatically
+by setup or doctor — it's an explicit \`bun run fix\` / \`bun run prettier:write\`.
+
+---
+
 ## Common gotchas
 
 ### 1. beads DB out of sync with issues.jsonl
@@ -436,7 +463,7 @@ The script commits automatically. But if you passed \`--no-commit\` or
 had to fix something manually:
 
 \`\`\`bash
-git add mise.toml .beads/ AGENTS.md CLAUDE.md docs/prompts/BEADS.md \\
+git add mise.toml .beads/ AGENTS.md CLAUDE.md \\
         .prettierignore .claude/settings.json justin-sdk.config.json
 git commit -m '[Claude Opus 4.6] Add beads_rust via justin-sdk add beads'
 \`\`\`

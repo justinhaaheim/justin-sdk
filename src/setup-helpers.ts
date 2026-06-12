@@ -45,6 +45,11 @@ export function exec(cmd: string, cwd: string): ExecResult {
   try {
     const stdout = execSync(cmd, {
       cwd,
+      // Pass the live process env explicitly. This is a no-op in normal use
+      // (the default already inherits the environment), but Bun's execSync
+      // snapshots env at startup and ignores later `process.env` mutations
+      // unless `env` is passed — tests rely on setting env vars at runtime.
+      env: process.env,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();

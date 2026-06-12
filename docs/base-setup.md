@@ -50,17 +50,25 @@ Add these scripts to `package.json`. Preserve any existing scripts — merge, do
 {
   "scripts": {
     "setup-env": "bun scripts/setup-env.ts",
-    "signal": "bun node_modules/@justinhaaheim/justin-sdk/src/cli.ts signal --quiet",
-    "signal:verbose": "bun node_modules/@justinhaaheim/justin-sdk/src/cli.ts signal",
-    "signal:serial": "bun node_modules/@justinhaaheim/justin-sdk/src/cli.ts signal --serial",
-    "doctor": "bun node_modules/@justinhaaheim/justin-sdk/src/cli.ts doctor",
-    "doctor:fix": "bun node_modules/@justinhaaheim/justin-sdk/src/cli.ts doctor --fix",
+    "signal": "bunx justin-sdk signal --quiet",
+    "signal:verbose": "bunx justin-sdk signal",
+    "signal:serial": "bunx justin-sdk signal --serial",
+    "doctor": "bunx justin-sdk doctor",
+    "doctor:fix": "bunx justin-sdk doctor --fix",
+    "fix": "bunx justin-sdk fix",
     "signal-source:TS": "tsc --noEmit",
     "signal-source:LINT": "eslint --report-unused-disable-directives --max-warnings 0 .",
     "signal-source:PRETTIER": "prettier --check ."
   }
 }
 ```
+
+`doctor` / `doctor:fix` keep the **scaffolding** healthy (configs, deps,
+package.json scripts). `signal` **checks** code quality (read-only). `fix`
+**auto-fixes** code by running `fix-source:*` scripts serially (eslint --fix,
+prettier --write) — those are added by the `eslint` and `prettier` components,
+not base-setup. Reformatting your code is always an explicit `bun run fix`
+(or `bun run prettier:write`), never something setup or doctor does for you.
 
 ### Adapt signal-source scripts for the project
 

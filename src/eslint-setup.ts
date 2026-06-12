@@ -173,6 +173,10 @@ const LINT_SCRIPTS: ReadonlyArray<{key: string; value: string}> = [
   {key: 'lint', value: 'bun run lint-base -- .'},
   {key: 'lint:fix', value: 'bun run lint-base -- --fix .'},
   {key: 'lint:fix:file', value: 'bun run lint-base -- --fix'},
+  // Code-fix counterpart to signal-source:LINT, discovered by `justin-sdk fix`.
+  // Plain `eslint --fix .` (no --max-warnings gate): a fixer should fix what it
+  // can and only exit non-zero on remaining errors, not surviving warnings.
+  {key: 'fix-source:LINT', value: 'eslint --fix .'},
 ];
 
 /**
@@ -319,9 +323,9 @@ export async function runEslintSetup(
   stepHeader('3. package.json: signal-source:LINT script');
   if (!stepSignalSourceScript(projectRoot)) return 1;
 
-  // Step 4: convenience lint scripts
+  // Step 4: convenience lint scripts + fix-source:LINT
   stepHeader(
-    '4. package.json: lint convenience scripts (lint, lint:fix, lint:fix:file, lint-base)',
+    '4. package.json: lint scripts (lint, lint:fix, lint:fix:file, lint-base, fix-source:LINT)',
   );
   if (!stepLintScripts(projectRoot)) return 1;
 

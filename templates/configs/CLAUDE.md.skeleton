@@ -1,21 +1,21 @@
 # {{PROJECT_NAME}}
 
-## About
+## Important Guidelines
 
-<!-- One or two paragraphs describing what this project is and why it exists. -->
+Carefully follow these guidelines:
 
-## Tooling
+- @docs/prompts/IMPORTANT_GUIDELINES_INLINED.md
+- @AGENTS.md
 
-This project uses the standard justin-sdk toolchain. See:
+## Justin SDK
 
-- @docs/prompts/IMPORTANT_GUIDELINES_INLINED.md — coding guidelines for AI agents
-- @AGENTS.md — agent-facing tooling reference (beads, signal, doctor)
+This project is set up with [justin-sdk](https://github.com/justinhaaheim/justin-sdk),
+a cross-project toolchain that keeps shared configuration, scripts, and agent
+instructions consistent across Justin's projects (linting, formatting, TypeScript
+config, beads issue tracking, environment checks, and more).
 
 Quick commands:
 
 - `bun run signal` — typecheck + lint + prettier check
-- `bun run doctor` — environment validation
-
-## Notes
-
-<!-- Project-specific notes, decisions, gotchas, links. -->
+- `bun run doctor` — environment/config health (scaffolding, not code)
+- `bun run fix` — auto-fix code (lint --fix + prettier --write)

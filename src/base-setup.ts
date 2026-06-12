@@ -41,7 +41,8 @@ import {
 
 const DEFAULT_SIGNAL_SOURCE_SCRIPTS: Record<string, string> = {
   'signal-source:TS': 'tsc --noEmit',
-  'signal-source:LINT': 'eslint --report-unused-disable-directives --max-warnings 0 .',
+  'signal-source:LINT':
+    'eslint --report-unused-disable-directives --max-warnings 0 .',
   'signal-source:PRETTIER': 'prettier --check .',
 };
 
@@ -52,6 +53,7 @@ const SDK_SCRIPTS: Record<string, string> = {
   'signal:serial': 'bunx justin-sdk signal --serial',
   doctor: 'bunx justin-sdk doctor',
   'doctor:fix': 'bunx justin-sdk doctor --fix',
+  fix: 'bunx justin-sdk fix',
 };
 
 /**
@@ -82,7 +84,9 @@ export function stepJustinSdkConfig(
 
   // File exists — ensure base-setup is in components and update lastSynced
   const config = readJson(configPath) ?? {};
-  const components = ((config.components as string[] | undefined) ?? []).slice();
+  const components = (
+    (config.components as string[] | undefined) ?? []
+  ).slice();
   let modified = false;
 
   if (!components.includes('base-setup')) {
@@ -108,7 +112,9 @@ export function stepJustinSdkConfig(
   if (modified) {
     config.components = components;
     writeJson(configPath, config);
-    success(`Updated justin-sdk.config.json (components: ${components.join(', ')})`);
+    success(
+      `Updated justin-sdk.config.json (components: ${components.join(', ')})`,
+    );
   } else {
     success('justin-sdk.config.json already up to date');
   }
@@ -264,7 +270,11 @@ export function stepSetupEnvScript(
 export function stepGitignore(projectRoot: string): boolean {
   const gitignore = resolve(projectRoot, '.gitignore');
   const entries: Array<{search: string; append: string; label: string}> = [
-    {search: 'tmp/', append: '\n# Temporary / scratch files\ntmp/\n', label: 'tmp/'},
+    {
+      search: 'tmp/',
+      append: '\n# Temporary / scratch files\ntmp/\n',
+      label: 'tmp/',
+    },
     {
       search: 'dynamic-version.local',
       append:
@@ -312,8 +322,7 @@ export function stepClaudeSettings(projectRoot: string): boolean {
   // Ensure SessionStart hook runs setup-env.ts
   const hooks = ((settings.hooks as Record<string, unknown> | undefined) ??
     {}) as Record<string, unknown>;
-  const setupCommand =
-    'bun run "$CLAUDE_PROJECT_DIR/scripts/setup-env.ts"';
+  const setupCommand = 'bun run "$CLAUDE_PROJECT_DIR/scripts/setup-env.ts"';
   const sessionStart = (hooks.SessionStart as unknown[] | undefined) ?? [];
   const hasSetupHook = JSON.stringify(sessionStart).includes(
     'scripts/setup-env.ts',

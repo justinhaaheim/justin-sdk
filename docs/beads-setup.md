@@ -201,50 +201,21 @@ This creates or updates `AGENTS.md` at the project root with beads_rust agent in
 
 **Important:** If the project had an old `bd`-based AGENTS.md, `br agents --add` may append rather than replace. Review the result and remove any duplicate or stale `bd` sections.
 
-**After generating AGENTS.md**, add this dependency direction section **above** the `<!-- br-agent-instructions-v1 -->` marker (so it won't be overwritten by future `br agents --update`):
+**After generating AGENTS.md**, append Justin's beads _workflow_ prompt — the `## Beads workflow (br)` section (when and why to use beads, the epic/sub-bead pattern, the end-of-session hand-off ritual) — after the br-generated command reference. The `add beads` command does this automatically and idempotently (it skips if the section is already present).
 
-```markdown
-## Dependency Direction (IMPORTANT)
-
-`br dep add <issue> <depends-on>` means `<issue>` is **blocked by** `<depends-on>`.
-
-- **Epic/sub-bead pattern**: The **epic depends on its sub-beads**, NOT the other way around. The epic is blocked until its sub-beads are done.
-  - Correct: `br dep add EPIC SUB_BEAD` (epic is blocked by sub-bead)
-  - WRONG: `br dep add SUB_BEAD EPIC` (this would mean the sub-bead can't start until the epic is done, which is backwards)
-- **Sequential tasks**: If task B can't start until task A is done: `br dep add B A`
-- Think of it as: **"Who is waiting?"** The _waiter_ is the first argument.
-```
-
-This is critical because LLMs frequently get the dependency direction backwards, especially for epic/sub-bead relationships.
+This prompt is co-located with the SDK (in `beads-setup.ts`) rather than the general prompts repo, so it versions alongside beads itself. We no longer hand-roll a "Dependency Direction" section — `br agents` owns the command reference, and the workflow prompt covers the epic/sub-bead `--parent` pattern.
 
 ---
 
 ## Step 4: CLAUDE.md Integration
 
-The project's `CLAUDE.md` **must** reference `AGENTS.md` so Claude Code follows the beads workflow.
+The project's `CLAUDE.md` **must** reference `AGENTS.md` so Claude Code loads the beads command reference _and_ the workflow prompt (both live in `AGENTS.md`).
 
 ### 4a. Ensure `@AGENTS.md` reference
 
-Check if `CLAUDE.md` already contains a reference to `AGENTS.md`. Look for any of:
+Check if `CLAUDE.md` already contains a reference to `AGENTS.md`. If not, append a one-line `@AGENTS.md` reference — Claude Code loads @-linked files recursively. The `add beads` command does this via `appendIfMissing`, so it's idempotent and safe to re-run.
 
-- `@AGENTS.md`
-- A section mentioning beads/issue tracking that links to AGENTS.md
-
-**If no reference exists**, add a section like this to the appropriate location in `CLAUDE.md`:
-
-```markdown
-## Issue Tracking
-
-This project uses **beads_rust** (`br`) for issue tracking. See `@AGENTS.md` for the full command reference.
-
-**ALWAYS use beads for ALL work.** Every task — even trivial ones — should have a bead. This is non-negotiable. Beads provide accountability, trackability, visibility, and an audit trail. Specifically:
-
-- **Before starting any work**, check `br ready` for existing beads, or create one.
-- **For non-trivial tasks**, create an epic bead, break it into sub-beads, then implement. Close sub-beads as you go.
-- **For quick tasks**, create a single bead, do the work, close it.
-- **At session end**, ensure all completed work has closed beads, and any unfinished work has open beads with context for the next session.
-- **Do NOT use markdown TODOs, task lists, or other tracking methods.** Beads is the single source of truth for task tracking.
-```
+We do **not** duplicate the beads workflow text into `CLAUDE.md`, and we no longer create a separate `docs/prompts/BEADS.md`. The workflow prompt lives in `AGENTS.md` only, reached via the `@AGENTS.md` link.
 
 ### 4b. Remove stale `bd` references
 

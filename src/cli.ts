@@ -16,6 +16,7 @@ import {runBeadsSetup} from './beads-setup';
 import {runClaudeMdSetup} from './claude-md-setup';
 import {runDoctor} from './doctor';
 import {runEslintSetup} from './eslint-setup';
+import {runFix} from './fix';
 import {runGhActionsSetup} from './gh-actions-setup';
 import {runGitignoreSetup} from './gitignore-setup';
 import {runHuskySetup} from './husky-setup';
@@ -83,6 +84,22 @@ void yargs(hideBin(process.argv))
     },
   )
   .command(
+    'fix',
+    'Auto-fix code from package.json fix-source:* scripts (eslint --fix, prettier --write). Runs serially and mutates files. Distinct from doctor, which fixes scaffolding (configs/deps), not code.',
+    (y) =>
+      y.option('quiet', {
+        type: 'boolean',
+        describe: 'Summary only (one-liner on all-pass)',
+        default: false,
+      }),
+    async (argv) => {
+      const exitCode = await runFix(process.cwd(), {
+        quiet: argv.quiet,
+      });
+      process.exit(exitCode);
+    },
+  )
+  .command(
     'add <component>',
     'Add a justin-sdk component to the current project',
     (y) =>
@@ -105,8 +122,9 @@ void yargs(hideBin(process.argv))
         })
         .option('commit', {
           type: 'boolean',
-          describe: 'Create a git commit at the end (use --no-commit to skip)',
-          default: true,
+          describe:
+            'Create a git commit at the end. Default is off — pass --commit to opt in. Without it, files change in the working tree but nothing is committed, so you can run it like a dry run and inspect the diff first.',
+          default: false,
         })
         .option('force', {
           type: 'boolean',
@@ -189,7 +207,7 @@ void yargs(hideBin(process.argv))
   )
   .command(
     'init',
-    'Scaffold a greenfield project (package.json + all add components + commit)',
+    'Scaffold a greenfield project (package.json + all add components; pass --commit to also commit)',
     (y) =>
       y
         .option('preset', {
@@ -206,8 +224,8 @@ void yargs(hideBin(process.argv))
         .option('commit', {
           type: 'boolean',
           describe:
-            'Create a single git commit at the end (use --no-commit to skip)',
-          default: true,
+            'Create a single git commit at the end. Default is off — pass --commit to opt in. Without it, files change in the working tree but nothing is committed, so you can inspect the diff first.',
+          default: false,
         })
         .option('force', {
           type: 'boolean',

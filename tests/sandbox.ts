@@ -5,9 +5,24 @@
  * macOS, /tmp on Linux). Cleanup is automatic via afterEach.
  */
 
-import {mkdtempSync, rmSync, writeFileSync, mkdirSync} from 'fs';
+import {mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
+
+// `br` is installed as a mise tool and resolved via mise shims. mise refuses to
+// evaluate a directory's mise.toml unless that directory is trusted, which would
+// make `br --version` fail in our ephemeral sandboxes and send the setup code
+// down a redundant (lock-contending) install path. Trust the whole tmp base
+// once — mise's trusted_config_paths prefix-matches, so this covers every
+// sandbox we create under it. We mutate process.env here; setup-helpers' exec()
+// passes the live env to children, so this reaches `br` even under Bun (whose
+// execSync otherwise snapshots env at startup and ignores later mutations).
+const TMP_BASE = realpathSync(tmpdir());
+const existingTrust = process.env.MISE_TRUSTED_CONFIG_PATHS;
+process.env.MISE_TRUSTED_CONFIG_PATHS =
+  existingTrust != null && existingTrust.length > 0
+    ? `${existingTrust}:${TMP_BASE}`
+    : TMP_BASE;
 
 export interface Sandbox {
   /** Absolute path to the sandbox directory */
@@ -21,7 +36,10 @@ export interface Sandbox {
 }
 
 export function createSandbox(): Sandbox {
-  const path = mkdtempSync(join(tmpdir(), 'justin-sdk-test-'));
+  // realpathSync so the canonical (/private/... on macOS) form is used — it must
+  // sit under the trusted TMP_BASE prefix set at module load, and mise
+  // canonicalizes paths when matching, so a /var symlink form wouldn't match.
+  const path = realpathSync(mkdtempSync(join(tmpdir(), 'justin-sdk-test-')));
 
   return {
     path,
