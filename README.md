@@ -46,15 +46,16 @@ bunx j doctor
 
 ## Commands
 
-| Command                       | What it does                                          |
-| ----------------------------- | ----------------------------------------------------- |
-| `justin-sdk agent`            | Print the agent playbook (AI coding agent onboarding) |
-| `justin-sdk doctor`           | Run environment health checks based on components    |
-| `justin-sdk doctor --fix`     | Auto-run project-local fixes                          |
-| `justin-sdk doctor --fix -y`  | Also run system-level installs (mise, br, bun)        |
-| `justin-sdk signal`           | Run `signal-source:*` scripts from package.json       |
-| `justin-sdk add beads`        | Install beads_rust issue tracking (with migration)   |
-| `justin-sdk --help`           | Command reference                                     |
+| Command                      | What it does                                          |
+| ---------------------------- | ----------------------------------------------------- |
+| `justin-sdk agent`           | Print the agent playbook (AI coding agent onboarding) |
+| `justin-sdk doctor`          | Run environment health checks based on components     |
+| `justin-sdk doctor --fix`    | Auto-run project-local fixes                          |
+| `justin-sdk doctor --fix -y` | Also run system-level installs (mise, br, bun)        |
+| `justin-sdk signal`          | Run `signal-source:*` scripts from package.json       |
+| `justin-sdk add beads`       | Install beads_rust issue tracking (with migration)    |
+| `justin-sdk add core`        | Install a preset bundle of components (see Presets)   |
+| `justin-sdk --help`          | Command reference                                     |
 
 The CLI is exposed under three equivalent names: `justin-sdk`, `jsdk`,
 and `j`.
@@ -80,6 +81,25 @@ Available components:
   integration via `@docs/prompts/BEADS.md` pattern. Add via `add beads`.
 
 Adding a component installs it AND registers it for future doctor checks.
+
+### Presets
+
+`add` also accepts a preset name that expands to several components, run in
+dependency order (each one self-registers in `justin-sdk.config.json`):
+
+- **minimal** — `base-setup` + `beads`
+- **core** — code-quality + beads: `gitignore`, `prettier`, `tsconfig`,
+  `eslint`, `husky`, `beads`
+- **all** — every component (`core` + `gh-actions`, `prompts`, `claude-md`)
+
+```bash
+bunx j add core    # the always-want baseline
+bunx j add all     # everything
+```
+
+Presets are always no-commit — files change in the working tree and you
+inspect the diff and commit yourself. (`init` is the greenfield equivalent
+that also scaffolds `package.json` and commits.)
 
 ## Central version pins
 
@@ -114,7 +134,11 @@ sandboxes, CI, and Docker containers.
 In addition to the CLI, the SDK exports modules you can import:
 
 ```typescript
-import type {Check, CheckNode, CheckResult} from '@justinhaaheim/justin-sdk/check-runner';
+import type {
+  Check,
+  CheckNode,
+  CheckResult,
+} from '@justinhaaheim/justin-sdk/check-runner';
 import {runChecks, runCheckTree} from '@justinhaaheim/justin-sdk/check-runner';
 ```
 
@@ -136,5 +160,5 @@ reference):
 Minimal templates that get copied into each project:
 
 - `templates/scripts/setup-env.ts` — SessionStart hook. Bootstraps bun
-  + mise + PATH in remote/sandbox environments, runs `doctor --quiet`
-  locally.
+  - mise + PATH in remote/sandbox environments, runs `doctor --quiet`
+    locally.

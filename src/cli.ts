@@ -10,21 +10,12 @@
 import yargs from 'yargs';
 import {hideBin} from 'yargs/helpers';
 
+import {ADD_TARGETS, PRESET_NAMES, runAdd} from './add';
 import {runAgent} from './agent';
-import {runBaseSetup} from './base-setup';
-import {runBeadsSetup} from './beads-setup';
-import {runClaudeMdSetup} from './claude-md-setup';
 import {runDoctor} from './doctor';
-import {runEslintSetup} from './eslint-setup';
 import {runFix} from './fix';
-import {runGhActionsSetup} from './gh-actions-setup';
-import {runGitignoreSetup} from './gitignore-setup';
-import {runHuskySetup} from './husky-setup';
 import {runInit} from './init';
-import {runPrettierSetup} from './prettier-setup';
-import {runPromptsSetup} from './prompts-setup';
 import {runSignal} from './signal';
-import {runTsconfigSetup} from './tsconfig-setup';
 import {runUpdate} from './update';
 
 void yargs(hideBin(process.argv))
@@ -100,30 +91,20 @@ void yargs(hideBin(process.argv))
     },
   )
   .command(
-    'add <component>',
-    'Add a justin-sdk component to the current project',
+    'add <target>',
+    `Add a justin-sdk component or preset (${PRESET_NAMES.join(', ')}) to the current project`,
     (y) =>
       y
-        .positional('component', {
+        .positional('target', {
           type: 'string',
-          describe: 'Component to add',
-          choices: [
-            'base-setup',
-            'beads',
-            'claude-md',
-            'eslint',
-            'gh-actions',
-            'gitignore',
-            'husky',
-            'prettier',
-            'prompts',
-            'tsconfig',
-          ],
+          describe:
+            'Component to add, or a preset that expands to several (minimal = base-setup + beads; core = code-quality + beads; all = everything)',
+          choices: ADD_TARGETS,
         })
         .option('commit', {
           type: 'boolean',
           describe:
-            'Create a git commit at the end. Default is off — pass --commit to opt in. Without it, files change in the working tree but nothing is committed, so you can run it like a dry run and inspect the diff first.',
+            'Create a git commit at the end (single-component beads only). Default is off — pass --commit to opt in. Without it, files change in the working tree but nothing is committed, so you can run it like a dry run and inspect the diff first. Presets are always no-commit and ignore this flag.',
           default: false,
         })
         .option('force', {
@@ -133,76 +114,12 @@ void yargs(hideBin(process.argv))
           default: false,
         }),
     async (argv) => {
-      if (argv.component === 'base-setup') {
-        const exitCode = await runBaseSetup({
-          projectRoot: process.cwd(),
-          force: argv.force,
-        });
-        process.exit(exitCode);
-      }
-      if (argv.component === 'beads') {
-        const exitCode = await runBeadsSetup({
-          noCommit: !argv.commit,
-          projectRoot: process.cwd(),
-        });
-        process.exit(exitCode);
-      }
-      if (argv.component === 'prettier') {
-        const exitCode = await runPrettierSetup({
-          force: argv.force,
-          projectRoot: process.cwd(),
-        });
-        process.exit(exitCode);
-      }
-      if (argv.component === 'tsconfig') {
-        const exitCode = await runTsconfigSetup({
-          force: argv.force,
-          projectRoot: process.cwd(),
-        });
-        process.exit(exitCode);
-      }
-      if (argv.component === 'gh-actions') {
-        const exitCode = await runGhActionsSetup({
-          force: argv.force,
-          projectRoot: process.cwd(),
-        });
-        process.exit(exitCode);
-      }
-      if (argv.component === 'prompts') {
-        const exitCode = await runPromptsSetup({
-          force: argv.force,
-          projectRoot: process.cwd(),
-        });
-        process.exit(exitCode);
-      }
-      if (argv.component === 'gitignore') {
-        const exitCode = await runGitignoreSetup({
-          force: argv.force,
-          projectRoot: process.cwd(),
-        });
-        process.exit(exitCode);
-      }
-      if (argv.component === 'eslint') {
-        const exitCode = await runEslintSetup({
-          force: argv.force,
-          projectRoot: process.cwd(),
-        });
-        process.exit(exitCode);
-      }
-      if (argv.component === 'claude-md') {
-        const exitCode = await runClaudeMdSetup({
-          force: argv.force,
-          projectRoot: process.cwd(),
-        });
-        process.exit(exitCode);
-      }
-      if (argv.component === 'husky') {
-        const exitCode = await runHuskySetup({
-          force: argv.force,
-          projectRoot: process.cwd(),
-        });
-        process.exit(exitCode);
-      }
+      const exitCode = await runAdd(argv.target as string, {
+        commit: argv.commit,
+        force: argv.force,
+        projectRoot: process.cwd(),
+      });
+      process.exit(exitCode);
     },
   )
   .command(
