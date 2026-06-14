@@ -21,15 +21,8 @@
 import {existsSync, writeFileSync} from 'fs';
 import {basename, resolve} from 'path';
 
-import {runBeadsSetup} from './beads-setup';
-import {runClaudeMdSetup} from './claude-md-setup';
+import {DEPENDENCY_ORDER, runComponentByName} from './components';
 import {runDoctor} from './doctor';
-import {runEslintSetup} from './eslint-setup';
-import {runGhActionsSetup} from './gh-actions-setup';
-import {runGitignoreSetup} from './gitignore-setup';
-import {runHuskySetup} from './husky-setup';
-import {runPrettierSetup} from './prettier-setup';
-import {runPromptsSetup} from './prompts-setup';
 import {
   exec,
   fail,
@@ -40,7 +33,6 @@ import {
   success,
   warn,
 } from './setup-helpers';
-import {runTsconfigSetup} from './tsconfig-setup';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -70,11 +62,6 @@ export interface InitOptions {
   skipPromptsFetch?: boolean;
   /** Skip the `bunx justin-sdk doctor` self-check at the end (default false) */
   skipDoctor?: boolean;
-}
-
-interface Component {
-  name: string;
-  run: () => Promise<number>;
 }
 
 /**
@@ -152,39 +139,28 @@ export async function runInit(options: InitOptions = {}): Promise<number> {
   // -------------------------------------------------------------------------
   // Phase 3: Run add components in dependency order
   // -------------------------------------------------------------------------
-  // Note: every add component calls runBaseSetup internally — that's
-  // idempotent and fine. We don't need to call it from init too.
-  const baseArgs = {projectRoot, quiet: true, force};
-
-  const components: Component[] = [
-    {name: 'gitignore', run: () => runGitignoreSetup(baseArgs)},
-    {name: 'prettier', run: () => runPrettierSetup(baseArgs)},
-    {name: 'tsconfig', run: () => runTsconfigSetup(baseArgs)},
-    {name: 'eslint', run: () => runEslintSetup(baseArgs)},
-    {name: 'husky', run: () => runHuskySetup(baseArgs)},
-    {name: 'gh-actions', run: () => runGhActionsSetup(baseArgs)},
-    {
-      name: 'prompts',
-      run: () => runPromptsSetup({...baseArgs, skipFetch: skipPromptsFetch}),
-    },
-    {name: 'claude-md', run: () => runClaudeMdSetup(baseArgs)},
-    {name: 'beads', run: () => runBeadsSetup({...baseArgs, noCommit: true})},
-  ];
-
+  // Note: every component calls runBaseSetup internally — idempotent — so
+  // DEPENDENCY_ORDER omits base-setup and we don't apply it separately.
   stepHeader('3. Components');
-  for (const component of components) {
+  for (const name of DEPENDENCY_ORDER) {
     // The shared QUIET flag flips during each sub-call (they restore quiet
     // on the way in, but other code paths may not). Re-assert init's own
     // quiet setting before each component so our headers/messages print
     // when they should.
     setQuiet(quiet);
-    const exitCode = await component.run();
+    const exitCode = await runComponentByName(name, {
+      projectRoot,
+      quiet: true,
+      force,
+      noCommit: true,
+      skipFetch: skipPromptsFetch,
+    });
     setQuiet(quiet);
     if (exitCode !== 0) {
-      fail(`add ${component.name} failed; aborting init.`);
+      fail(`add ${name} failed; aborting init.`);
       return exitCode;
     }
-    success(`add ${component.name} done`);
+    success(`add ${name} done`);
   }
 
   // -------------------------------------------------------------------------

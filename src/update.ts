@@ -26,16 +26,8 @@ import {spawnSync} from 'child_process';
 import {existsSync, readFileSync} from 'fs';
 import {basename, resolve} from 'path';
 
-import {runBaseSetup} from './base-setup';
-import {runBeadsSetup} from './beads-setup';
-import {runClaudeMdSetup} from './claude-md-setup';
+import {runComponentByConfigName} from './components';
 import {runDoctor} from './doctor';
-import {runEslintSetup} from './eslint-setup';
-import {runGhActionsSetup} from './gh-actions-setup';
-import {runGitignoreSetup} from './gitignore-setup';
-import {runHuskySetup} from './husky-setup';
-import {runPrettierSetup} from './prettier-setup';
-import {runPromptsSetup} from './prompts-setup';
 import {selfUpdateSdk} from './self-update';
 import {
   exec,
@@ -49,64 +41,6 @@ import {
   warn,
   writeJson,
 } from './setup-helpers';
-import {runTsconfigSetup} from './tsconfig-setup';
-
-// ---------------------------------------------------------------------------
-// Component registry
-// ---------------------------------------------------------------------------
-
-interface ComponentRunArgs {
-  projectRoot: string;
-  quiet: boolean;
-  force: boolean;
-  skipPromptsFetch: boolean;
-}
-
-/**
- * Map a component name (as it appears in justin-sdk.config.json) to the
- * idempotent installer function that re-applies it.
- *
- * Unknown components are skipped with a warning rather than failing —
- * a project may have hand-edited its components list, or the SDK may
- * have renamed a component since the project's last sync.
- */
-function runComponent(
-  name: string,
-  args: ComponentRunArgs,
-): Promise<number> | null {
-  const baseArgs = {
-    projectRoot: args.projectRoot,
-    quiet: args.quiet,
-    force: args.force,
-  };
-  switch (name) {
-    case 'base-setup':
-      return runBaseSetup(baseArgs);
-    case 'beads-setup':
-      return runBeadsSetup({...baseArgs, noCommit: true});
-    case 'prettier-setup':
-      return runPrettierSetup(baseArgs);
-    case 'tsconfig-setup':
-      return runTsconfigSetup(baseArgs);
-    case 'eslint-setup':
-      return runEslintSetup(baseArgs);
-    case 'husky-setup':
-      return runHuskySetup(baseArgs);
-    case 'gh-actions-setup':
-      return runGhActionsSetup(baseArgs);
-    case 'prompts-setup':
-      return runPromptsSetup({
-        ...baseArgs,
-        skipFetch: args.skipPromptsFetch,
-      });
-    case 'claude-md-setup':
-      return runClaudeMdSetup(baseArgs);
-    case 'gitignore-setup':
-      return runGitignoreSetup(baseArgs);
-    default:
-      return null;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -229,13 +163,13 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
       success(`(dry-run) would re-apply ${component}`);
       continue;
     }
-    const componentArgs: ComponentRunArgs = {
+    const result = runComponentByConfigName(component, {
       projectRoot,
       quiet: true,
       force,
-      skipPromptsFetch,
-    };
-    const result = runComponent(component, componentArgs);
+      noCommit: true,
+      skipFetch: skipPromptsFetch,
+    });
     if (result == null) {
       warn(
         `Unknown component "${component}" in justin-sdk.config.json — skipping. ` +
