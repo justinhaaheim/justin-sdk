@@ -12,7 +12,11 @@
 
 import {afterEach, describe, expect, test} from 'bun:test';
 
-import {selfUpdateSdk} from '../src/self-update';
+import {
+  parseSdkVersion,
+  pickLatestTag,
+  selfUpdateSdk,
+} from '../src/self-update';
 import {createProjectSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -28,6 +32,47 @@ function track(sb: Sandbox): Sandbox {
   sandboxes.push(sb);
   return sb;
 }
+
+describe('parseSdkVersion', () => {
+  test('parses unprefixed and v-prefixed versions identically', () => {
+    expect(parseSdkVersion('0.6.1')).toEqual([0, 6, 1]);
+    expect(parseSdkVersion('v0.6.0')).toEqual([0, 6, 0]);
+    expect(parseSdkVersion('  v1.2.3  ')).toEqual([1, 2, 3]);
+  });
+
+  test('reads the leading X.Y.Z triple, ignoring any suffix', () => {
+    expect(parseSdkVersion('0.6.1-beta.2')).toEqual([0, 6, 1]);
+  });
+
+  test('returns null for non-version strings', () => {
+    expect(parseSdkVersion('main')).toBeNull();
+    expect(parseSdkVersion('latest')).toBeNull();
+    expect(parseSdkVersion('1.2')).toBeNull();
+  });
+});
+
+describe('pickLatestTag', () => {
+  test('picks the highest semver regardless of input order', () => {
+    expect(pickLatestTag(['0.5.1', '0.6.1', '0.4.0', '0.5.0'])).toBe('0.6.1');
+    expect(pickLatestTag(['0.6.1', '0.5.1'])).toBe('0.6.1');
+  });
+
+  test('is not fooled by a v-prefixed tag lexically outsorting numbers', () => {
+    // The bug this guards: a naive `.[0]`/lexical pick could surface v0.6.0
+    // over the newer 0.6.1. Semver wins here.
+    expect(pickLatestTag(['0.4.0', 'v0.6.0', '0.6.1', '0.5.1'])).toBe('0.6.1');
+  });
+
+  test('returns the RAW name (keeps the v) when a v-tag is genuinely newest', () => {
+    expect(pickLatestTag(['0.4.0', 'v0.6.0', '0.5.1'])).toBe('v0.6.0');
+  });
+
+  test('ignores unparseable tags; returns null when none parse', () => {
+    expect(pickLatestTag(['main', '0.5.0', 'nightly'])).toBe('0.5.0');
+    expect(pickLatestTag(['main', 'latest'])).toBeNull();
+    expect(pickLatestTag([])).toBeNull();
+  });
+});
 
 describe('selfUpdateSdk', () => {
   test('returns "not installed" shape when SDK is missing from node_modules', async () => {

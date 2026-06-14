@@ -54,20 +54,63 @@ function readInstalledSdkVersion(projectRoot: string): string | null {
 }
 
 /**
- * Ask GitHub for the most recent tag on the SDK repo. Returns null if
- * gh is missing, the API call fails, or the response is malformed.
+ * Parse a tag/version into [major, minor, patch], tolerating an optional
+ * leading "v" (so both `0.6.1` and `v0.6.0` parse). Returns null if the
+ * string doesn't start with an X.Y.Z triple.
+ */
+export function parseSdkVersion(tag: string): [number, number, number] | null {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(tag.trim());
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+/** Compare two parsed versions: >0 if a is newer, <0 if older, 0 if equal. */
+function compareSdkVersions(
+  a: [number, number, number],
+  b: [number, number, number],
+): number {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] - b[i];
+  }
+  return 0;
+}
+
+/**
+ * Pick the highest-semver tag from a list of raw tag names, returning the
+ * RAW name (the git ref we install against, so a `v`-prefixed tag keeps its
+ * `v`). Unparseable names are ignored; returns null if none parse.
  *
- * Note: this lists the *first* tag, which `gh api .../tags` returns in
- * descending semver-ish order. Good enough for our `0.X.Y` tag scheme.
+ * We sort ourselves rather than trusting `gh api .../tags` to return the
+ * newest first: that ordering isn't guaranteed to be semver-descending, and
+ * a stray `v`-prefixed tag can lexically outsort the unprefixed ones.
+ */
+export function pickLatestTag(tagNames: string[]): string | null {
+  let best: {name: string; version: [number, number, number]} | null = null;
+  for (const name of tagNames) {
+    const version = parseSdkVersion(name);
+    if (version == null) continue;
+    if (best == null || compareSdkVersions(version, best.version) > 0) {
+      best = {name, version};
+    }
+  }
+  return best?.name ?? null;
+}
+
+/**
+ * Ask GitHub for all tags on the SDK repo and return the highest-semver one
+ * (raw name). Returns null if gh is missing, the API call fails, or no tag
+ * parses as a version.
  */
 function queryLatestSdkTag(projectRoot: string): string | null {
   const result = exec(
-    `gh api repos/${SDK_REPO}/tags --jq '.[0].name'`,
+    `gh api repos/${SDK_REPO}/tags --paginate --jq '.[].name'`,
     projectRoot,
   );
   if (result.exitCode !== 0) return null;
-  const tag = result.stdout.trim();
-  return tag.length > 0 ? tag : null;
+  const names = result.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  return pickLatestTag(names);
 }
 
 /**
@@ -105,12 +148,22 @@ export async function selfUpdateSdk(
     };
   }
 
-  if (latest === previousVersion) {
+  // Compare normalized versions so a "v"-prefixed tag (e.g. v0.6.0) doesn't
+  // read as different from an unprefixed installed version (0.6.0), and so we
+  // never "bump" to an older tag. Fall back to raw string equality if either
+  // side doesn't parse.
+  const latestVersion = parseSdkVersion(latest);
+  const installedVersion = parseSdkVersion(previousVersion);
+  const alreadyCurrent =
+    latestVersion != null && installedVersion != null
+      ? compareSdkVersions(latestVersion, installedVersion) <= 0
+      : latest === previousVersion;
+  if (alreadyCurrent) {
     success(`SDK already at latest tag (${latest})`);
     return {
       updated: false,
       previousVersion,
-      newVersion: latest,
+      newVersion: previousVersion,
       shouldReExec: false,
     };
   }
