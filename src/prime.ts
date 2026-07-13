@@ -21,13 +21,7 @@
  */
 
 import {execSync} from 'child_process';
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  statSync,
-  writeFileSync,
-} from 'fs';
+import {existsSync, mkdirSync, readFileSync, statSync, writeFileSync} from 'fs';
 import {dirname, join, resolve} from 'path';
 
 const DEFAULT_REPO_URL = 'https://github.com/justinhaaheim/prompts.git';
@@ -49,9 +43,14 @@ interface ProjectContext {
 // --- predicate registry ----------------------------------------------------
 // Named booleans over the project context, referenced by name from a
 // component's `includeIf:` frontmatter. Lives in the SDK (versioned with the
-// assembler); the prompts repo stays pure markdown. v1 ships one; generalize
-// (t6a0.5) when a second predicate actually exists.
+// assembler); the prompts repo stays pure markdown. Generalizing this into a
+// named is/has predicate framework (t6a0.5) is still deferred — this stays a
+// small hand-written registry until that's worth building.
 const PREDICATES: Record<string, (ctx: ProjectContext) => boolean> = {
+  isReact: (ctx) =>
+    ctx.deps.has('react') ||
+    ctx.deps.has('expo') ||
+    ctx.deps.has('react-native'),
   isReactNative: (ctx) => ctx.deps.has('expo') || ctx.deps.has('react-native'),
 };
 
