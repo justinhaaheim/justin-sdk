@@ -16,7 +16,7 @@
  * home-base-46w2 (branch-status).
  */
 
-import {execSync} from 'child_process';
+import {execFileSync, execSync} from 'child_process';
 
 const DEFAULT_SINCE_DAYS = 30;
 
@@ -65,6 +65,15 @@ function git(args: string, cwd: string): string {
 function tryGit(args: string, cwd: string): string | null {
   try {
     return git(args, cwd);
+  } catch {
+    return null;
+  }
+}
+
+/** Like tryGit, but takes argv directly — for calls that embed ref names (avoids shell interpolation of untrusted-ish branch names). */
+function tryGitArgv(argv: string[], cwd: string): string | null {
+  try {
+    return execFileSync('git', argv, {cwd, encoding: 'utf-8', stdio: 'pipe'});
   } catch {
     return null;
   }
@@ -157,8 +166,8 @@ function getBranchTips(cwd: string, worktrees: WorktreeEntry[]): BranchTip[] {
 
 /** Commits `other` has that `current` doesn't (i.e. how far ahead `other` is). */
 function countAhead(cwd: string, current: string, other: string): number {
-  const out = tryGit(
-    `rev-list --left-right --count "${current}...${other}"`,
+  const out = tryGitArgv(
+    ['rev-list', '--left-right', '--count', `${current}...${other}`],
     cwd,
   );
   if (out == null) return 0;

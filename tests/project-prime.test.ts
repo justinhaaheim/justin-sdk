@@ -8,7 +8,7 @@
  */
 
 import {describe, test, expect, afterEach} from 'bun:test';
-import {execSync} from 'child_process';
+import {execFileSync, execSync} from 'child_process';
 import {writeFileSync} from 'fs';
 import {join} from 'path';
 
@@ -134,6 +134,24 @@ describe('project-prime', () => {
 
     const text = formatReport(report!);
     expect(text).toContain('same tip');
+  });
+
+  test('a branch name containing shell metacharacters is still counted correctly (not shell-interpolated)', () => {
+    const sb = track(createSandbox());
+    initRepo(sb);
+    const trickyName = 'feature$(true)rest';
+    // Create the branch via argv (not the shell-interpolating `git` test helper)
+    // so the test setup itself doesn't fall into the same trap being tested.
+    execFileSync('git', ['checkout', '-q', '-b', trickyName], {cwd: sb.path});
+    commit(sb, 'feature.txt', 'feature work');
+    git(sb.path, 'checkout -q main');
+
+    const report = runDivergenceCheck({cwd: sb.path});
+    expect(report?.groups).toHaveLength(1);
+    expect(report?.groups[0]?.branches[0]?.name).toBe(trickyName);
+    // If the implementation shell-interpolated the ref name, `$(true)` would
+    // execute and the ref would fail to resolve, silently dropping to 0.
+    expect(report?.groups[0]?.aheadOfCurrent).toBe(1);
   });
 
   test('a branch fully merged into current (ahead=0) is not flagged', () => {
