@@ -57,6 +57,10 @@
           {
             "type": "command",
             "command": "bun run \"$CLAUDE_PROJECT_DIR/scripts/setup-env.ts\""
+          },
+          {
+            "type": "command",
+            "command": "bunx justin-sdk prime --format hook"
           }
         ]
       }
