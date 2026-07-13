@@ -15,6 +15,7 @@ import {runAgent} from './agent';
 import {runDoctor} from './doctor';
 import {runFix} from './fix';
 import {runInit} from './init';
+import {runPrime} from './prime';
 import {runSignal} from './signal';
 import {runUpdate} from './update';
 
@@ -229,6 +230,31 @@ void yargs(hideBin(process.argv))
     () => {
       runAgent();
       process.exit(0);
+    },
+  )
+  .command(
+    'prime',
+    'Assemble + emit the critical-guidelines for the current project from the prompts repo (read-only, no network)',
+    (y) =>
+      y
+        .option('format', {
+          type: 'string',
+          choices: ['markdown', 'hook'] as const,
+          default: 'markdown',
+          describe:
+            'markdown = human-readable (default); hook = SessionStart additionalContext JSON envelope',
+        })
+        .option('prompts-dir', {
+          type: 'string',
+          describe:
+            'Override the prompts repo location (default: $JSDK_PROMPTS_DIR or ~/Dev/prompts)',
+        }),
+    (argv) => {
+      const exitCode = runPrime(process.cwd(), {
+        format: argv.format as 'markdown' | 'hook',
+        promptsDir: argv['prompts-dir'],
+      });
+      process.exit(exitCode);
     },
   )
   .demandCommand(1, 'Please specify a command')
