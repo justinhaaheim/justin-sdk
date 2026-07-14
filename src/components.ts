@@ -17,6 +17,7 @@
 import {runBaseSetup} from './base-setup';
 import {runBeadsSetup} from './beads-setup';
 import {runClaudeMdSetup} from './claude-md-setup';
+import {runEasSetup} from './eas-setup';
 import {runEslintSetup} from './eslint-setup';
 import {runGhActionsSetup} from './gh-actions-setup';
 import {runGitignoreSetup} from './gitignore-setup';
@@ -46,17 +47,29 @@ export const COMPONENT_NAMES = [
   'prompts',
   'claude-md',
   'beads',
+  'eas',
 ] as const;
 
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
 
 /**
+ * Components that are only ever installed on explicit request (`add <name>`),
+ * never by `init` or the `all` preset:
+ *   - base-setup: the implicit foundation every installer self-applies.
+ *   - eas: app-specific (Expo/RN); scaffolding it into a node CLI would be wrong.
+ * A future app-only component (e.g. `detox`) joins this set.
+ */
+const OPT_IN_ONLY: ReadonlySet<ComponentName> = new Set([
+  'base-setup',
+  'eas',
+]);
+
+/**
  * The components to install when scaffolding "everything" (init and the
- * `all` preset): the canonical order minus base-setup, which every installer
- * applies on its own, so listing it would just be a redundant first pass.
+ * `all` preset): the canonical order minus the opt-in-only components.
  */
 export const DEPENDENCY_ORDER: ComponentName[] = COMPONENT_NAMES.filter(
-  (name) => name !== 'base-setup',
+  (name) => !OPT_IN_ONLY.has(name),
 );
 
 /**
@@ -119,6 +132,7 @@ const RUNNERS: Record<
       quiet: a.quiet,
       noCommit: a.noCommit ?? true,
     }),
+  eas: (a) => runEasSetup(base(a)),
 };
 
 /** Run a component by its short name. */

@@ -25,7 +25,7 @@ describe('components: ordering', () => {
 
   test('DEPENDENCY_ORDER is the canonical order minus base-setup', () => {
     expect(DEPENDENCY_ORDER).toEqual(
-      COMPONENT_NAMES.filter((name) => name !== 'base-setup'),
+      COMPONENT_NAMES.filter((name) => name !== 'base-setup' && name !== 'eas'),
     );
     expect(DEPENDENCY_ORDER).not.toContain('base-setup');
   });

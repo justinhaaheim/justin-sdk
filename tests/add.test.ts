@@ -141,7 +141,7 @@ describe('add: preset definitions', () => {
 
   test('all = every component except the implicit base-setup', () => {
     expect(new Set(PRESETS.all)).toEqual(
-      new Set(COMPONENTS.filter((c) => c !== 'base-setup')),
+      new Set(COMPONENTS.filter((c) => c !== 'base-setup' && c !== 'eas')),
     );
     // base-setup is implicit (every installer self-applies it).
     expect(PRESETS.all).not.toContain('base-setup');
