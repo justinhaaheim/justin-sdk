@@ -25,8 +25,6 @@ import {existsSync, mkdirSync, readFileSync, statSync, writeFileSync} from 'fs';
 import {dirname, join, resolve} from 'path';
 
 const DEFAULT_REPO_URL = 'https://github.com/justinhaaheim/prompts.git';
-const REPO_WEB_URL = 'https://github.com/justinhaaheim/prompts';
-const WORKING_REPO_REL = 'Dev/prompts'; // relative to $HOME — where Justin edits
 const DEFAULT_MAX_AGE_SECONDS = 300;
 const GIT_TIMEOUT_MS = 8000;
 const MAX_INLINE_DEPTH = 10;
@@ -34,6 +32,7 @@ const MAX_INLINE_DEPTH = 10;
 export interface PrimeOptions {
   format: 'markdown' | 'hook';
   promptsDir?: string; // override: read this dir as-is (skip clone/pull)
+  forceUpdate?: boolean; // force a fetch/pull of the managed clone, bypassing the staleness gate
 }
 
 interface ProjectContext {
@@ -137,7 +136,7 @@ function ensurePromptsSource(opts: PrimeOptions): string {
     mkdirSync(dirname(dir), {recursive: true});
     git(['clone', '--depth', '1', url, `"${dir}"`]);
     touchMarker();
-  } else if (isStale(maxAge)) {
+  } else if (opts.forceUpdate === true || isStale(maxAge)) {
     try {
       git(['fetch', '--depth', '1', 'origin', 'HEAD'], dir);
       git(['reset', '--hard', 'FETCH_HEAD'], dir);
@@ -257,20 +256,8 @@ function inlineFile(
 
 // --- header ----------------------------------------------------------------
 
-function editLocation(): string {
-  const working = resolve(process.env.HOME ?? '', WORKING_REPO_REL);
-  return existsSync(working) ? working : REPO_WEB_URL;
-}
-
 function buildHeader(): string {
-  return [
-    '# Critical Guidelines',
-    '',
-    "These cross-project instructions apply to all of Justin's projects. To add " +
-      'or change durable guidance that should propagate everywhere, edit the ' +
-      `prompts repo at \`${editLocation()}\` and push — never patch it per-project. ` +
-      '(`~/.claude/CLAUDE.md` is an inbox: move durable additions into the prompts repo.)',
-  ].join('\n');
+  return '# Critical Guidelines';
 }
 
 // --- entry point -----------------------------------------------------------

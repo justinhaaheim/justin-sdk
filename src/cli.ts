@@ -248,11 +248,18 @@ void yargs(hideBin(process.argv))
           type: 'string',
           describe:
             'Override the prompts repo location (default: $JSDK_PROMPTS_DIR or ~/Dev/prompts)',
+        })
+        .option('force-update', {
+          type: 'boolean',
+          describe:
+            'Force a fetch/pull of the managed prompts clone, bypassing the staleness gate',
+          default: false,
         }),
     (argv) => {
       const exitCode = runPrime(process.cwd(), {
         format: argv.format as 'markdown' | 'hook',
         promptsDir: argv['prompts-dir'],
+        forceUpdate: argv['force-update'],
       });
       process.exit(exitCode);
     },
