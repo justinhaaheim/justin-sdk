@@ -13,6 +13,7 @@ import {hideBin} from 'yargs/helpers';
 import {ADD_TARGETS, PRESET_NAMES, runAdd} from './add';
 import {runAgent} from './agent';
 import {runDoctor} from './doctor';
+import {runEasUpdate} from './eas-update';
 import {runFix} from './fix';
 import {runInit} from './init';
 import {runMigrateToPrime} from './migrate-to-prime';
@@ -220,6 +221,37 @@ void yargs(hideBin(process.argv))
         projectRoot: process.cwd(),
         quiet: argv.quiet,
         skipPromptsFetch: argv['skip-prompts-fetch'],
+      });
+      process.exit(exitCode);
+    },
+  )
+  .command(
+    'eas-update <channel> [changelog..]',
+    'Publish an EAS update with a standardized, disambiguating message (<dynamicVersion>-<branch> (<runtime> runtime) - <changelog>). Reads dynamic-version.local.json in the cwd (run `bun run prebuild` first); environment resolves from APP_VARIANT.',
+    (y) =>
+      y
+        .positional('channel', {
+          type: 'string',
+          describe: 'EAS channel (development / preview / production)',
+        })
+        .positional('changelog', {
+          type: 'string',
+          array: true,
+          describe: 'Changelog text; defaults to the latest commit subject',
+        })
+        .option('platform', {
+          type: 'string',
+          describe: 'EAS platform',
+          default: 'ios',
+        }),
+    (argv) => {
+      const changelog = ((argv.changelog as string[] | undefined) ?? [])
+        .join(' ')
+        .trim();
+      const exitCode = runEasUpdate(process.cwd(), {
+        channel: argv.channel as string,
+        changelog: changelog !== '' ? changelog : null,
+        platform: argv.platform,
       });
       process.exit(exitCode);
     },
