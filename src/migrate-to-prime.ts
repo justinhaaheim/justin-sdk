@@ -311,22 +311,25 @@ function stepClaudeMd(projectRoot: string, report: Report): void {
     kept.push(line);
   }
 
-  // Collapse runs of 3+ blank lines down to a single blank line.
-  const collapsed: string[] = [];
-  let blankRun = 0;
-  for (const line of kept) {
-    if (line.trim().length === 0) {
-      blankRun++;
-      if (blankRun >= 2) continue;
-    } else {
-      blankRun = 0;
+  // Only rewrite CLAUDE.md if we actually removed a ref — never touch it for
+  // pure-whitespace reasons (that would produce a noisy no-op diff + a
+  // misleading "Removed 0" report).
+  let next = original;
+  if (removedCount > 0) {
+    // Collapse the runs of 2+ blank lines a removed ref may have left behind.
+    const collapsed: string[] = [];
+    let blankRun = 0;
+    for (const line of kept) {
+      if (line.trim().length === 0) {
+        blankRun++;
+        if (blankRun >= 2) continue;
+      } else {
+        blankRun = 0;
+      }
+      collapsed.push(line);
     }
-    collapsed.push(line);
-  }
-  let next = collapsed.join('\n');
-  if (!next.endsWith('\n')) next += '\n';
-
-  if (next !== original) {
+    next = collapsed.join('\n');
+    if (!next.endsWith('\n')) next += '\n';
     writeFileSync(claudePath, next);
     report.did.push(
       `Removed ${removedCount} standalone @-ref line(s) from CLAUDE.md`,
@@ -372,8 +375,10 @@ function stepConfig(projectRoot: string, report: Report): void {
 function stepRepoGrep(projectRoot: string, report: Report): void {
   // Flag other tracked files that still mention docs/prompts or AGENTS.md so
   // the spot-check can catch READMEs / memory files / inventory docs.
+  // Exclude CLAUDE.md/AGENTS.md (handled above) and .beads data (the JSONL
+  // export mentions AGENTS.md in bead text — noise in every project).
   const {stdout} = exec(
-    "git grep -l -e 'docs/prompts' -e 'AGENTS.md' -- ':!CLAUDE.md' ':!AGENTS.md'",
+    "git grep -l -e 'docs/prompts' -e 'AGENTS.md' -- ':!CLAUDE.md' ':!AGENTS.md' ':!.beads'",
     projectRoot,
   );
   for (const file of stdout
