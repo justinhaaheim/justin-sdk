@@ -302,63 +302,12 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
               return {pass: true};
             },
           },
-          children: [
-            {
-              check: {
-                label: 'AGENTS_MD',
-                fn: (): CheckResult => {
-                  const agentsMd = resolve(projectRoot, 'AGENTS.md');
-                  if (!existsSync(agentsMd)) {
-                    return {
-                      fix: 'Run: br agents --add --force',
-                      fixCommand: 'br agents --add --force',
-                      message: 'AGENTS.md not found',
-                      pass: false,
-                    };
-                  }
-
-                  const content = readFileSync(agentsMd, 'utf-8');
-                  if (
-                    !content.includes('br ') &&
-                    !content.includes('beads_rust')
-                  ) {
-                    return {
-                      fix: 'Run: br agents --add --force',
-                      fixCommand: 'br agents --add --force',
-                      message:
-                        'AGENTS.md does not reference br/beads_rust — may be outdated',
-                      pass: false,
-                    };
-                  }
-
-                  return {pass: true};
-                },
-              },
-            },
-            {
-              check: {
-                label: 'CLAUDE_MD_AGENTS_REF',
-                severity: 'warn',
-                fn: (): CheckResult => {
-                  const claudeMd = resolve(projectRoot, 'CLAUDE.md');
-                  if (!existsSync(claudeMd)) {
-                    return {message: 'No CLAUDE.md found', pass: false};
-                  }
-
-                  const content = readFileSync(claudeMd, 'utf-8');
-                  if (!content.includes('AGENTS.md')) {
-                    return {
-                      fix: 'Add an @AGENTS.md reference to CLAUDE.md',
-                      message: 'CLAUDE.md does not reference @AGENTS.md',
-                      pass: false,
-                    };
-                  }
-
-                  return {pass: true};
-                },
-              },
-            },
-          ],
+          // AGENTS.md is no longer generated or required: cross-project guidance
+          // is delivered by `justin-sdk prime` (SessionStart hook), and the
+          // essential `br` commands live in the prime beads-workflow guideline
+          // (+ `br --help`). The old AGENTS_MD / CLAUDE_MD_AGENTS_REF checks were
+          // removed here so they stop re-generating AGENTS.md at session start.
+          // See home-base-t6a0.12 (migrate-to-prime).
         },
       ],
     },

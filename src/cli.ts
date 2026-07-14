@@ -15,6 +15,7 @@ import {runAgent} from './agent';
 import {runDoctor} from './doctor';
 import {runFix} from './fix';
 import {runInit} from './init';
+import {runMigrateToPrime} from './migrate-to-prime';
 import {runPrime} from './prime';
 import {runSignal} from './signal';
 import {runUpdate} from './update';
@@ -260,6 +261,31 @@ void yargs(hideBin(process.argv))
         format: argv.format as 'markdown' | 'hook',
         promptsDir: argv['prompts-dir'],
         forceUpdate: argv['force-update'],
+      });
+      process.exit(exitCode);
+    },
+  )
+  .command(
+    'migrate-to-prime',
+    'One-time migration to justin-sdk prime: install the prime SessionStart hook, remove docs/prompts + AGENTS.md (safe/recoverable only) + standalone CLAUDE.md @-refs, and flag anything needing manual review. Idempotent; default no-commit.',
+    (y) =>
+      y
+        .option('commit', {
+          type: 'boolean',
+          describe:
+            'Commit the migration at the end. Default off — inspect the diff and resolve flagged items first.',
+          default: false,
+        })
+        .option('quiet', {
+          type: 'boolean',
+          describe: 'Suppress non-error output',
+          default: false,
+        }),
+    (argv) => {
+      const exitCode = runMigrateToPrime({
+        commit: argv.commit,
+        projectRoot: process.cwd(),
+        quiet: argv.quiet,
       });
       process.exit(exitCode);
     },
