@@ -106,7 +106,10 @@ function getWorktrees(cwd: string): WorktreeEntry[] {
       currentBranch = null;
     } else if (line.startsWith('branch ')) {
       // "branch refs/heads/foo" -> "foo"
-      currentBranch = line.slice('branch '.length).replace('refs/heads/', '').trim();
+      currentBranch = line
+        .slice('branch '.length)
+        .replace('refs/heads/', '')
+        .trim();
     }
   }
   if (currentPath != null) {
@@ -124,7 +127,9 @@ function getBranchTips(cwd: string, worktrees: WorktreeEntry[]): BranchTip[] {
   if (out == null) return [];
 
   const worktreeByBranch = new Map(
-    worktrees.filter((w) => w.branch != null).map((w) => [w.branch as string, w.path]),
+    worktrees
+      .filter((w) => w.branch != null)
+      .map((w) => [w.branch as string, w.path]),
   );
 
   const local = new Map<string, BranchTip>();
@@ -196,11 +201,15 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
   );
 
   const candidates = tips.filter(
-    (t) => t.worktreePath != null || isRecentEnough(t.lastCommitDate, sinceDays),
+    (t) =>
+      t.worktreePath != null || isRecentEnough(t.lastCommitDate, sinceDays),
   );
 
   const withAhead = candidates
-    .map((t) => ({...t, aheadOfCurrent: countAhead(cwd, currentBranch, t.name)}))
+    .map((t) => ({
+      ...t,
+      aheadOfCurrent: countAhead(cwd, currentBranch, t.name),
+    }))
     .filter((t) => t.aheadOfCurrent > 0);
 
   // Group by tip sha — branches sharing a tip likely represent the same work.
@@ -226,7 +235,8 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
 
   groups.sort((a, b) => {
     if (a.hasWorktree !== b.hasWorktree) return a.hasWorktree ? -1 : 1;
-    if (a.aheadOfCurrent !== b.aheadOfCurrent) return b.aheadOfCurrent - a.aheadOfCurrent;
+    if (a.aheadOfCurrent !== b.aheadOfCurrent)
+      return b.aheadOfCurrent - a.aheadOfCurrent;
     return b.lastCommitDate.localeCompare(a.lastCommitDate);
   });
 
@@ -237,19 +247,41 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
 // Formatting
 // ---------------------------------------------------------------------------
 
-function formatDate(iso: string): string {
-  return iso.slice(0, 10); // YYYY-MM-DD
+const RECENT_TOUCH_MS = 72 * 60 * 60 * 1000;
+
+/** YYYY-MM-DD, plus ` HH:MM` (24h, local) when the commit is within the last 72h. */
+function formatTouched(iso: string): string {
+  const d = new Date(iso);
+  const y = d.getFullYear();
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const date = `${y}-${mo}-${day}`;
+  if (Date.now() - d.getTime() > RECENT_TOUCH_MS) return date;
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${date} ${hh}:${mm}`;
 }
 
-export function formatReport(report: DivergenceReport): string {
-  if (report.groups.length === 0) return '';
+/**
+ * Render the repo-state section for session-start injection. ALWAYS returns a
+ * titled section when on a branch — including a "clean" line when there's no
+ * divergence — so a reader always sees the current repo state. Returns '' only
+ * when there's nothing sensible to report (detached HEAD / not a git repo).
+ */
+export function formatRepoState(report: DivergenceReport | null): string {
+  if (report == null) return '';
 
-  const lines: string[] = [];
+  const header = '# Current repo state';
+  if (report.groups.length === 0) {
+    return `${header}\n\nOn \`${report.currentBranch}\` — no unmerged work on any other branch or worktree.`;
+  }
+
   const plural = report.groups.length === 1 ? '' : 'es';
-  lines.push(
-    `${report.groups.length} branch${plural} have unmerged work relative to \`${report.currentBranch}\`:`,
-  );
-
+  const lines: string[] = [
+    header,
+    '',
+    `On \`${report.currentBranch}\`, ${report.groups.length} branch${plural} have unmerged work:`,
+  ];
   for (const group of report.groups) {
     const names = group.branches.map((b) => b.name).join(' / ');
     const worktreeNote = group.hasWorktree ? 'worktree, ' : '';
@@ -259,10 +291,13 @@ export function formatReport(report: DivergenceReport): string {
         ? ' -- same tip, may be the same underlying work'
         : '';
     lines.push(
-      `  - ${names} (${worktreeNote}${group.aheadOfCurrent} ${commitWord} ahead, last touched ${formatDate(group.lastCommitDate)})${sameTipNote}`,
+      `  - ${names} (${worktreeNote}${group.aheadOfCurrent} ${commitWord} ahead, last touched ${formatTouched(group.lastCommitDate)})${sameTipNote}`,
     );
   }
-
+  lines.push(
+    '',
+    'When there is unmerged work on feature branch(es), the human may prefer for new work to base from the feature branches rather than main. When in doubt, ask.',
+  );
   return lines.join('\n');
 }
 
@@ -283,8 +318,8 @@ export function runCli(cwd: string, argv: string[]): number {
     return 0;
   }
 
-  if (report == null || report.groups.length === 0) return 0; // silent — nothing notable
-  console.log(formatReport(report));
+  const text = formatRepoState(report);
+  if (text.length > 0) console.log(text);
   return 0;
 }
 

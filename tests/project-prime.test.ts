@@ -12,7 +12,10 @@ import {execFileSync, execSync} from 'child_process';
 import {writeFileSync} from 'fs';
 import {join} from 'path';
 
-import {runDivergenceCheck, formatReport} from '../src/project-prime';
+import {
+  runDivergenceCheck,
+  formatRepoState,
+} from '../src/plugin/lib/project-prime';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -47,24 +50,31 @@ function initRepo(sb: Sandbox): void {
   git(sb.path, 'config user.name Test');
   sb.writeFile('README.md', 'hello\n');
   git(sb.path, 'add README.md');
-  git(sb.path, "commit -q -m initial");
+  git(sb.path, 'commit -q -m initial');
 }
 
-function commit(sb: Sandbox, file: string, msg: string, dateIso?: string): void {
+function commit(
+  sb: Sandbox,
+  file: string,
+  msg: string,
+  dateIso?: string,
+): void {
   sb.writeFile(file, `${msg}\n`);
   git(sb.path, `add ${file}`);
   git(sb.path, `commit -q -m "${msg}"`, dateIso);
 }
 
 describe('project-prime', () => {
-  test('clean repo with no other branches reports nothing', () => {
+  test('clean repo with no other branches still reports a "clean" state', () => {
     const sb = track(createSandbox());
     initRepo(sb);
 
     const report = runDivergenceCheck({cwd: sb.path});
     expect(report).not.toBeNull();
     expect(report?.groups).toEqual([]);
-    expect(formatReport(report!)).toBe('');
+    const text = formatRepoState(report!);
+    expect(text).toContain('# Current repo state');
+    expect(text).toContain('no unmerged work');
   });
 
   test('a recent branch ahead of current is flagged', () => {
@@ -81,9 +91,16 @@ describe('project-prime', () => {
     expect(report?.groups[0]?.aheadOfCurrent).toBe(1);
     expect(report?.groups[0]?.hasWorktree).toBe(false);
 
-    const text = formatReport(report!);
+    const text = formatRepoState(report!);
+    expect(text).toContain('# Current repo state');
     expect(text).toContain('feature-x');
     expect(text).toContain('1 commit ahead');
+    // Just-created commit is within 72h, so last-touched includes HH:MM.
+    expect(text).toMatch(/last touched \d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
+    // Guidance line when there IS unmerged work.
+    expect(text).toContain(
+      'the human may prefer for new work to base from the feature branches',
+    );
   });
 
   test('a stale branch beyond sinceDays is filtered out', () => {
@@ -132,7 +149,7 @@ describe('project-prime', () => {
     const names = report?.groups[0]?.branches.map((b) => b.name).sort();
     expect(names).toEqual(['feature-a', 'feature-b']);
 
-    const text = formatReport(report!);
+    const text = formatRepoState(report!);
     expect(text).toContain('same tip');
   });
 

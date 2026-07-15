@@ -262,13 +262,19 @@ function buildHeader(): string {
 
 // --- entry point -----------------------------------------------------------
 
-interface Assembled {
+export interface Assembled {
   count: number;
   markdown: string;
   warnings: string[];
 }
 
-function assemble(opts: PrimeOptions, projectRoot: string): Assembled {
+/**
+ * Assemble the guidelines markdown for a project (no I/O to stdout). Exported so
+ * the plugin SessionStart hook can compose the guidelines with other context
+ * (e.g. repo-state) into a single injection. Throws if the guidelines can't be
+ * loaded — callers decide how to degrade.
+ */
+export function assemble(opts: PrimeOptions, projectRoot: string): Assembled {
   const source = ensurePromptsSource(opts);
   const indexPath = join(source, 'src', 'guidelines', 'index.md');
   if (!existsSync(indexPath)) {
