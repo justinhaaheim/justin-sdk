@@ -4,8 +4,11 @@
  * to the new `justin-sdk prime` world (guidance injected at session start from
  * the central prompts repo).
  *
- * End state per project: just its own CLAUDE.md + the prime SessionStart hook.
- * No docs/prompts/, no AGENTS.md, no @-references to either.
+ * End state per project: just its own CLAUDE.md. No docs/prompts/, no AGENTS.md,
+ * no @-references to either, and no per-project prime SessionStart hook — the
+ * `prime` Claude Code plugin injects the guidance globally (installed once per
+ * machine), so a per-project `bunx justin-sdk prime` hook would only
+ * double-inject. This migration REMOVES any such hook it finds (home-base-t6a0.16).
  *
  * Design (home-base-t6a0.12, fable-advisor-reviewed):
  *  - SAFE DELETES ONLY. A file is deleted only if it is git-tracked AND clean
@@ -31,7 +34,6 @@ import {existsSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'fs';
 import {basename, join, resolve} from 'path';
 
 import {
-  ensureDir,
   exec,
   fail,
   readJson,
@@ -45,9 +47,7 @@ import {
 // Constants
 // ---------------------------------------------------------------------------
 
-const PRIME_HOOK_COMMAND = 'bunx justin-sdk prime --format hook';
 const PRIME_HOOK_NEEDLE = 'justin-sdk prime';
-const SETUP_ENV_NEEDLE = 'setup-env';
 const AGENTS_MARKER = '<!-- br-agent-instructions-v1 -->';
 
 /**
@@ -109,7 +109,10 @@ interface Report {
 }
 
 // ---------------------------------------------------------------------------
-// Step: install the prime SessionStart hook (structure-aware, idempotent)
+// Step: remove the per-project prime SessionStart hook (structure-aware,
+// idempotent). The `prime` plugin injects guidance globally, so a per-project
+// `bunx justin-sdk prime` hook only double-injects — strip any we find, drop
+// the emptied groups, and preserve every other hook (setup-env etc.).
 // ---------------------------------------------------------------------------
 
 interface HookEntry {
@@ -121,55 +124,49 @@ interface HookGroup {
   hooks?: HookEntry[];
 }
 
-function stepPrimeHook(projectRoot: string, report: Report): void {
+function stepRemovePrimeHook(projectRoot: string, report: Report): void {
   const settingsPath = resolve(projectRoot, '.claude', 'settings.json');
-  const settings = (readJson(settingsPath) ?? {}) as Record<string, unknown>;
-  const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
-  const sessionStart = (hooks.SessionStart ?? []) as HookGroup[];
+  const settings = readJson(settingsPath);
+  if (settings == null) return; // no settings.json — nothing to remove
 
-  const alreadyPresent = sessionStart.some((group) =>
-    (group.hooks ?? []).some(
-      (h) =>
-        typeof h.command === 'string' && h.command.includes(PRIME_HOOK_NEEDLE),
-    ),
-  );
-  if (alreadyPresent) {
-    report.did.push('prime hook already present in .claude/settings.json');
+  const hooks = settings.hooks as Record<string, unknown> | undefined;
+  const sessionStart = hooks?.SessionStart as HookGroup[] | undefined;
+  if (hooks == null || !Array.isArray(sessionStart)) return;
+
+  let removed = 0;
+  const nextGroups: HookGroup[] = [];
+  for (const group of sessionStart) {
+    const kept = (group.hooks ?? []).filter((h) => {
+      const isPrime =
+        typeof h.command === 'string' && h.command.includes(PRIME_HOOK_NEEDLE);
+      if (isPrime) removed++;
+      return !isPrime;
+    });
+    // Drop a now-empty group entirely; otherwise keep it with the survivors.
+    if (kept.length > 0) {
+      group.hooks = kept;
+      nextGroups.push(group);
+    }
+  }
+
+  if (removed === 0) {
+    report.did.push(
+      'No per-project prime hook in .claude/settings.json (nothing to remove)',
+    );
     return;
   }
 
-  const primeEntry: HookEntry = {command: PRIME_HOOK_COMMAND, type: 'command'};
-
-  // Prefer to insert right after the existing setup-env hook, in its group.
-  let inserted = false;
-  for (const group of sessionStart) {
-    const groupHooks = group.hooks ?? [];
-    const idx = groupHooks.findIndex(
-      (h) =>
-        typeof h.command === 'string' && h.command.includes(SETUP_ENV_NEEDLE),
-    );
-    if (idx >= 0) {
-      groupHooks.splice(idx + 1, 0, primeEntry);
-      group.hooks = groupHooks;
-      inserted = true;
-      break;
+  if (nextGroups.length > 0) {
+    hooks.SessionStart = nextGroups;
+  } else {
+    delete hooks.SessionStart; // empty SessionStart array — drop the key
+    if (Object.keys(hooks).length === 0) {
+      delete (settings as Record<string, unknown>).hooks;
     }
   }
-  if (!inserted) {
-    if (sessionStart.length > 0 && sessionStart[0] != null) {
-      const first = sessionStart[0];
-      first.hooks = [...(first.hooks ?? []), primeEntry];
-    } else {
-      sessionStart.push({hooks: [primeEntry]});
-    }
-  }
-
-  hooks.SessionStart = sessionStart;
-  settings.hooks = hooks;
-  ensureDir(resolve(projectRoot, '.claude'));
   writeJson(settingsPath, settings);
   report.did.push(
-    `Added prime hook to .claude/settings.json SessionStart (${PRIME_HOOK_COMMAND})`,
+    `Removed ${removed} per-project prime hook(s) from .claude/settings.json SessionStart`,
   );
 }
 
@@ -421,7 +418,7 @@ export function runMigrateToPrime(options: MigrateToPrimeOptions = {}): number {
 
   const report: Report = {did: [], flagged: []};
 
-  stepPrimeHook(projectRoot, report);
+  stepRemovePrimeHook(projectRoot, report);
   stepDocsPrompts(projectRoot, report);
   stepAgentsMd(projectRoot, report);
   stepClaudeMd(projectRoot, report);
@@ -446,7 +443,7 @@ export function runMigrateToPrime(options: MigrateToPrimeOptions = {}): number {
     if (status.stdout.trim().length > 0) {
       exec('git add -A', projectRoot);
       const result = exec(
-        "git commit -m 'Migrate to justin-sdk prime (remove docs/prompts + AGENTS.md + CLAUDE.md @-refs; install prime hook)'",
+        "git commit -m 'Migrate to justin-sdk prime (remove docs/prompts + AGENTS.md + CLAUDE.md @-refs + per-project prime hook)'",
         projectRoot,
       );
       if (result.exitCode === 0) success('Committed migration');

@@ -60,7 +60,7 @@ function sessionStartCommands(sb: Sandbox): string[] {
 }
 
 describe('migrate-to-prime', () => {
-  test('installs the prime hook after setup-env, and is idempotent', () => {
+  test('removes the prime hook, preserves setup-env, and is idempotent', () => {
     const sb = track(createSandbox());
     initRepo(sb);
     mkdirSync(join(sb.path, '.claude'), {recursive: true});
@@ -73,6 +73,10 @@ describe('migrate-to-prime', () => {
               {
                 hooks: [
                   {type: 'command', command: 'bun run scripts/setup-env.ts'},
+                  {
+                    type: 'command',
+                    command: 'bunx justin-sdk prime --format hook',
+                  },
                 ],
               },
             ],
@@ -86,19 +90,55 @@ describe('migrate-to-prime', () => {
 
     expect(migrate(sb)).toBe(0);
     const cmds = sessionStartCommands(sb);
-    expect(cmds.some((c) => c.includes('justin-sdk prime'))).toBe(true);
-    // prime is right after setup-env
-    const setupIdx = cmds.findIndex((c) => c.includes('setup-env'));
-    const primeIdx = cmds.findIndex((c) => c.includes('justin-sdk prime'));
-    expect(primeIdx).toBe(setupIdx + 1);
+    // prime hook gone
+    expect(cmds.some((c) => c.includes('justin-sdk prime'))).toBe(false);
+    // setup-env preserved
+    expect(cmds.some((c) => c.includes('setup-env'))).toBe(true);
 
-    // Idempotent: a second run adds no duplicate.
+    // Idempotent: a second run is a no-op (still no prime, setup-env intact).
     migrate(sb);
     const cmds2 = sessionStartCommands(sb);
-    expect(cmds2.filter((c) => c.includes('justin-sdk prime'))).toHaveLength(1);
+    expect(cmds2.filter((c) => c.includes('justin-sdk prime'))).toHaveLength(0);
+    expect(cmds2.some((c) => c.includes('setup-env'))).toBe(true);
   });
 
-  test('adds a prime hook even when settings.json has no SessionStart', () => {
+  test('drops the SessionStart key when the prime hook was its only entry', () => {
+    const sb = track(createSandbox());
+    initRepo(sb);
+    mkdirSync(join(sb.path, '.claude'), {recursive: true});
+    writeFileSync(
+      join(sb.path, '.claude/settings.json'),
+      JSON.stringify(
+        {
+          hooks: {
+            SessionStart: [
+              {
+                hooks: [
+                  {
+                    type: 'command',
+                    command: 'bunx justin-sdk prime --format hook',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    commitAll(sb);
+
+    migrate(sb);
+    const s = readSettings(sb);
+    // emptied group dropped -> SessionStart removed entirely
+    expect(s.hooks?.SessionStart ?? []).toHaveLength(0);
+    expect(
+      sessionStartCommands(sb).some((c) => c.includes('justin-sdk prime')),
+    ).toBe(false);
+  });
+
+  test('is a no-op when settings.json has no prime hook', () => {
     const sb = track(createSandbox());
     initRepo(sb);
     mkdirSync(join(sb.path, '.claude'), {recursive: true});
@@ -106,9 +146,10 @@ describe('migrate-to-prime', () => {
     commitAll(sb);
 
     migrate(sb);
-    expect(
-      sessionStartCommands(sb).some((c) => c.includes('justin-sdk prime')),
-    ).toBe(true);
+    // no prime hook was present; file untouched, working tree stays clean
+    expect(git(sb.path, 'status --porcelain -- .claude/settings.json')).toBe(
+      '',
+    );
   });
 
   test('removes docs/prompts when all files are known + tracked + clean', () => {

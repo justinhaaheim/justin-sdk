@@ -299,7 +299,7 @@ void yargs(hideBin(process.argv))
   )
   .command(
     'migrate-to-prime',
-    'One-time migration to justin-sdk prime: install the prime SessionStart hook, remove docs/prompts + AGENTS.md (safe/recoverable only) + standalone CLAUDE.md @-refs, and flag anything needing manual review. Idempotent; default no-commit.',
+    'One-time migration to justin-sdk prime: remove docs/prompts + AGENTS.md (safe/recoverable only) + standalone CLAUDE.md @-refs + the now-redundant per-project prime SessionStart hook (the prime plugin injects globally), and flag anything needing manual review. Idempotent; default no-commit.',
     (y) =>
       y
         .option('commit', {
