@@ -1,0 +1,13 @@
+{
+  "name": "justin-sdk-plugins",
+  "owner": {
+    "name": "Justin Haaheim"
+  },
+  "plugins": [
+    {
+      "name": "prime",
+      "source": "./plugins/prime",
+      "description": "Session-start injection of Justin's cross-project critical-guidelines (project-type-aware, sourced from the prompts repo). Global replacement for the per-project `justin-sdk prime` SessionStart hook."
+    }
+  ]
+}
