@@ -19,7 +19,6 @@
     "src",
     "templates",
     "docs",
-    "plugins",
     ".claude-plugin"
   ],
   "dependencies": {

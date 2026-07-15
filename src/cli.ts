@@ -17,7 +17,7 @@ import {runEasUpdate} from './eas-update';
 import {runFix} from './fix';
 import {runInit} from './init';
 import {runMigrateToPrime} from './migrate-to-prime';
-import {runPrime} from '../plugins/prime/lib/prime';
+import {runPrime} from './plugin/lib/prime';
 import {runSignal} from './signal';
 import {runUpdate} from './update';
 
