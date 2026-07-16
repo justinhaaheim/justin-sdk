@@ -126,6 +126,92 @@ describe('prime assemble() partition', () => {
   });
 });
 
+describe('prime assemble() partition — nested refs & invariants', () => {
+  /** index -> universal parent that itself @-refs an RN-gated child. */
+  function nestedUniversalParent(): Sandbox {
+    const sb = track(createSandbox());
+    sb.writeFile('src/rules/index.md', '@./parent-u.md');
+    sb.writeFile('src/rules/parent-u.md', 'PARENT_U\n\n@./nested-c.md');
+    sb.writeFile(
+      'src/rules/nested-c.md',
+      '---\nincludeIf: [isReactNative]\n---\n\nNESTED_C',
+    );
+    return sb;
+  }
+  /** index -> RN-gated parent that itself @-refs a universal child. */
+  function nestedConditionalParent(): Sandbox {
+    const sb = track(createSandbox());
+    sb.writeFile('src/rules/index.md', '@./parent-c.md');
+    sb.writeFile(
+      'src/rules/parent-c.md',
+      '---\nincludeIf: [isReactNative]\n---\n\nPARENT_C\n\n@./nested-u.md',
+    );
+    sb.writeFile('src/rules/nested-u.md', 'NESTED_U');
+    return sb;
+  }
+
+  test('a nested conditional child travels with its universal parent (not lost)', () => {
+    const prompts = nestedUniversalParent();
+    const uni = assemble(
+      {format: 'markdown', partition: 'universal', promptsDir: prompts.path},
+      RN_PROJECT(),
+    );
+    // parent is top-level universal -> kept, and its nested conditional child
+    // rides along (partition gating is top-level only).
+    expect(uni.text).toContain('PARENT_U');
+    expect(uni.text).toContain('NESTED_C');
+    // conditional half gets neither (the whole subtree already went to universal)
+    const cond = assemble(
+      {format: 'markdown', partition: 'conditional', promptsDir: prompts.path},
+      RN_PROJECT(),
+    );
+    expect(cond.text).toBe('');
+  });
+
+  test('a nested universal child travels with its conditional parent', () => {
+    const prompts = nestedConditionalParent();
+    const cond = assemble(
+      {format: 'markdown', partition: 'conditional', promptsDir: prompts.path},
+      RN_PROJECT(),
+    );
+    expect(cond.text).toContain('PARENT_C');
+    expect(cond.text).toContain('NESTED_U');
+    const uni = assemble(
+      {format: 'markdown', partition: 'universal', promptsDir: prompts.path},
+      RN_PROJECT(),
+    );
+    expect(uni.text).toBe('');
+  });
+
+  test('universal ∪ conditional === full for nested mixes (RN project)', () => {
+    for (const fixture of [nestedUniversalParent, nestedConditionalParent]) {
+      const prompts = fixture();
+      const opts = {format: 'markdown' as const, promptsDir: prompts.path};
+      const uni = assemble({...opts, partition: 'universal'}, RN_PROJECT());
+      const cond = assemble({...opts, partition: 'conditional'}, RN_PROJECT());
+      const full = assemble({...opts, partition: 'full'}, RN_PROJECT());
+      expect(uni.count + cond.count).toBe(full.count);
+      for (const token of ['PARENT_U', 'NESTED_C', 'PARENT_C', 'NESTED_U']) {
+        const inHalves = uni.text.includes(token) || cond.text.includes(token);
+        expect(inHalves).toBe(full.text.includes(token));
+      }
+    }
+  });
+
+  test('universal partition is project-independent (same for RN and plain)', () => {
+    const prompts = promptsFixture();
+    const opts = {
+      format: 'markdown' as const,
+      partition: 'universal' as const,
+      promptsDir: prompts.path,
+    };
+    const rn = assemble(opts, RN_PROJECT());
+    const plain = assemble(opts, PLAIN_PROJECT());
+    expect(rn.text).toBe(plain.text);
+    expect(rn.count).toBe(plain.count);
+  });
+});
+
 describe('prime assemble() path fallback', () => {
   test('reads src/rules when present', () => {
     const prompts = promptsFixture('src/rules');

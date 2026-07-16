@@ -250,13 +250,19 @@ function inlineFile(
       continue;
     }
     const {includeIf} = stripFrontmatter(readFileSync(refPath, 'utf-8'));
-    // Partition gate: a module with any includeIf is "conditional"; one with
-    // none is "universal". 'universal' drops conditionals; 'conditional' drops
-    // universals; 'full' keeps both. Conditionals still get their predicate
-    // evaluated below.
-    const isConditional = includeIf.length > 0;
-    if (partition === 'universal' && isConditional) continue;
-    if (partition === 'conditional' && !isConditional) continue;
+    // Partition gate — applied ONLY to the top-level (index) refs (depth 0). A
+    // top-level module with any includeIf is "conditional"; one with none is
+    // "universal". 'universal' drops conditionals; 'conditional' drops
+    // universals; 'full' keeps both. A module's entire nested subtree travels
+    // WITH it (nested refs are inlined wholesale, predicate-gated but not
+    // partition-gated) so that `universal ∪ conditional === full` holds even
+    // when a nested ref's conditionality differs from its parent's — otherwise
+    // such a nested ref would silently land in neither deployed half.
+    if (depth === 0) {
+      const isConditional = includeIf.length > 0;
+      if (partition === 'universal' && isConditional) continue;
+      if (partition === 'conditional' && !isConditional) continue;
+    }
     const {included, unknown} = evaluateInclude(includeIf, ctx);
     if (unknown.length > 0) {
       warnings.push(
@@ -265,7 +271,8 @@ function inlineFile(
       continue;
     }
     if (!included) continue;
-    const nested = inlineFile(refPath, ctx, depth + 1, partition);
+    // Nested subtree is inlined in full (partition gating is top-level only).
+    const nested = inlineFile(refPath, ctx, depth + 1, 'full');
     out.push(nested.text);
     count += 1 + nested.count;
     warnings.push(...nested.warnings);

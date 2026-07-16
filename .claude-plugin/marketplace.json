@@ -7,7 +7,7 @@
     {
       "name": "prime",
       "source": "./src/plugin",
-      "description": "Session-start injection of Justin's cross-project critical-guidelines (project-type-aware, sourced from the prompts repo). Global replacement for the per-project `justin-sdk prime` SessionStart hook."
+      "description": "Session-start injection of Justin's cross-project critical-rules (project-type-aware, sourced from the prompts repo). Global replacement for the per-project `justin-sdk prime` SessionStart hook."
     }
   ]
 }
