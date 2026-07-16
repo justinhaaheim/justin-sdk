@@ -267,7 +267,7 @@ void yargs(hideBin(process.argv))
   )
   .command(
     'prime',
-    'Assemble + emit the critical-guidelines for the current project from the prompts repo (read-only, no network)',
+    'Assemble + emit the critical-rules for the current project from the prompts repo (read-only, no network)',
     (y) =>
       y
         .option('format', {

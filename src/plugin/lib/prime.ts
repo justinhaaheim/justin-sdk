@@ -1,7 +1,7 @@
 /**
- * prime — assemble the critical-guidelines for the current project and emit them.
+ * prime — assemble the critical-rules for the current project and emit them.
  *
- * Compiles `src/guidelines/index.md` from a MANAGED CLONE of the prompts repo
+ * Compiles `src/rules/index.md` from a MANAGED CLONE of the prompts repo
  * (default: ~/.config/justin-sdk/prompts). The index references component files
  * via `@./relative/path` lines (like CLAUDE.md imports); each reference is
  * inlined in order, recursively, and a component whose `includeIf:` frontmatter
@@ -257,7 +257,7 @@ function inlineFile(
 // --- header ----------------------------------------------------------------
 
 function buildHeader(): string {
-  return '# Critical Guidelines';
+  return '# Critical Rules';
 }
 
 // --- entry point -----------------------------------------------------------
@@ -269,16 +269,22 @@ export interface Assembled {
 }
 
 /**
- * Assemble the guidelines markdown for a project (no I/O to stdout). Exported so
- * the plugin SessionStart hook can compose the guidelines with other context
- * (e.g. repo-state) into a single injection. Throws if the guidelines can't be
+ * Assemble the rules markdown for a project (no I/O to stdout). Exported so
+ * the plugin SessionStart hook can compose the rules with other context
+ * (e.g. repo-state) into a single injection. Throws if the rules can't be
  * loaded — callers decide how to degrade.
  */
 export function assemble(opts: PrimeOptions, projectRoot: string): Assembled {
   const source = ensurePromptsSource(opts);
-  const indexPath = join(source, 'src', 'guidelines', 'index.md');
+  // The prompts repo's rules dir was renamed src/guidelines -> src/rules
+  // (home-base-r3pb.1). Prefer the new path; fall back to the old one so the
+  // plugin and the prompts repo can be deployed in either order without a
+  // broken window.
+  const rulesIndex = join(source, 'src', 'rules', 'index.md');
+  const legacyIndex = join(source, 'src', 'guidelines', 'index.md');
+  const indexPath = existsSync(rulesIndex) ? rulesIndex : legacyIndex;
   if (!existsSync(indexPath)) {
-    throw new Error(`guidelines index not found at ${indexPath}`);
+    throw new Error(`rules index not found at ${rulesIndex}`);
   }
   const ctx = loadProjectContext(projectRoot);
   const {text, count, warnings} = inlineFile(indexPath, ctx, 0);
@@ -291,7 +297,7 @@ export function runPrime(projectRoot: string, opts: PrimeOptions): number {
     assembled = assemble(opts, projectRoot);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    const failMsg = `justin-sdk prime · FAILED to load guidelines (${reason}). No guidance injected — provide it manually or troubleshoot.`;
+    const failMsg = `justin-sdk prime · FAILED to load rules (${reason}). No rules injected — provide them manually or troubleshoot.`;
     if (opts.format === 'hook') {
       process.stdout.write(JSON.stringify({systemMessage: failMsg}));
     } else {
@@ -302,7 +308,7 @@ export function runPrime(projectRoot: string, opts: PrimeOptions): number {
 
   const {markdown, count, warnings} = assembled;
   const status =
-    `justin-sdk prime · ${count} guideline module${count === 1 ? '' : 's'} compiled` +
+    `justin-sdk prime · ${count} rule module${count === 1 ? '' : 's'} compiled` +
     (warnings.length > 0 ? ` · ${warnings.length} warning(s)` : '');
 
   if (opts.format === 'hook') {

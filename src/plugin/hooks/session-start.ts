@@ -50,11 +50,9 @@ const additionalContext = [guidelines, repoState]
 
 const parts: string[] = [];
 if (guidelinesFailed != null) {
-  parts.push(`FAILED to load guidelines (${guidelinesFailed})`);
+  parts.push(`FAILED to load rules (${guidelinesFailed})`);
 } else {
-  parts.push(
-    `${guidelineCount} guideline module${guidelineCount === 1 ? '' : 's'}`,
-  );
+  parts.push(`${guidelineCount} rule module${guidelineCount === 1 ? '' : 's'}`);
 }
 if (repoState.length > 0) parts.push('repo state');
 const systemMessage = `justin-sdk prime · ${parts.join(' + ')}`;
