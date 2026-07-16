@@ -30,6 +30,8 @@ import {
 } from 'fs';
 import {dirname, join} from 'path';
 
+import prettier from 'prettier';
+
 import {assemble} from './plugin/lib/prime';
 import {
   buildStamp,
@@ -40,6 +42,22 @@ import {
 import {fail, setQuiet, success, warn} from './setup-helpers';
 
 const VM_DEFAULT_SPEC = 'github:justinhaaheim/version-manager';
+
+/**
+ * Format the generated rules markdown with Prettier so the deployed file is
+ * consistently formatted (deterministic output). NOTE: the drift/idempotency
+ * hash is taken over the RAW assembled markdown, not this — because the
+ * SessionStart hook that recomputes it runs in the plugin cache with no
+ * node_modules and can't run Prettier. If Prettier ever fails, we fall back to
+ * the raw markdown rather than block the deploy.
+ */
+async function prettierMarkdown(markdown: string): Promise<string> {
+  try {
+    return (await prettier.format(markdown, {parser: 'markdown'})).trimEnd();
+  } catch {
+    return markdown.trimEnd();
+  }
+}
 
 /** The version-manager dep spec the prompts repo pins, so sync-rules stays in
  * lockstep with it (falls back to the repo's default branch). */
@@ -127,7 +145,9 @@ export interface SyncRulesOptions {
   outFile?: string;
 }
 
-export function runSyncRules(options: SyncRulesOptions = {}): number {
+export async function runSyncRules(
+  options: SyncRulesOptions = {},
+): Promise<number> {
   setQuiet(options.quiet ?? false);
 
   let assembled;
@@ -168,7 +188,9 @@ export function runSyncRules(options: SyncRulesOptions = {}): number {
     contentHash: hash,
     generated: options.now ?? new Date().toISOString(),
   });
-  const body = `${stamp}\n\n${markdown}\n`;
+  // Prettier the BODY for consistent formatting; the stamp's content hash is
+  // over the RAW markdown (above) so the hook can recompute it without Prettier.
+  const body = `${stamp}\n\n${await prettierMarkdown(markdown)}\n`;
 
   // Atomic write (a session can start mid-write).
   mkdirSync(dirname(file), {recursive: true});

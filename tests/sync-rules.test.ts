@@ -47,10 +47,14 @@ function outFile(): string {
 }
 
 describe('sync-rules', () => {
-  test('writes the universal rules with a version/commit/content stamp', () => {
+  test('writes the universal rules with a version/commit/content stamp', async () => {
     promptsFixture();
     const out = outFile();
-    const rc = runSyncRules({quiet: true, outFile: out, now: '2020-01-01'});
+    const rc = await runSyncRules({
+      quiet: true,
+      outFile: out,
+      now: '2020-01-01',
+    });
     expect(rc).toBe(0);
     expect(existsSync(out)).toBe(true);
     const content = readFileSync(out, 'utf-8');
@@ -64,23 +68,35 @@ describe('sync-rules', () => {
     expect(content).toContain('do not edit');
   });
 
-  test('is idempotent — unchanged content is not rewritten', () => {
+  test('is idempotent — unchanged content is not rewritten', async () => {
     promptsFixture();
     const out = outFile();
-    runSyncRules({quiet: true, outFile: out, now: '2020-01-01T00:00:00Z'});
+    await runSyncRules({
+      quiet: true,
+      outFile: out,
+      now: '2020-01-01T00:00:00Z',
+    });
     // second run with a DIFFERENT timestamp: if idempotent, the file keeps the
     // original timestamp (never rewritten).
-    runSyncRules({quiet: true, outFile: out, now: '2099-12-31T00:00:00Z'});
+    await runSyncRules({
+      quiet: true,
+      outFile: out,
+      now: '2099-12-31T00:00:00Z',
+    });
     const content = readFileSync(out, 'utf-8');
     expect(content).toContain('2020-01-01T00:00:00Z');
     expect(content).not.toContain('2099-12-31T00:00:00Z');
   });
 
-  test('--force rewrites even when content is unchanged', () => {
+  test('--force rewrites even when content is unchanged', async () => {
     promptsFixture();
     const out = outFile();
-    runSyncRules({quiet: true, outFile: out, now: '2020-01-01T00:00:00Z'});
-    runSyncRules({
+    await runSyncRules({
+      quiet: true,
+      outFile: out,
+      now: '2020-01-01T00:00:00Z',
+    });
+    await runSyncRules({
       quiet: true,
       outFile: out,
       now: '2099-12-31T00:00:00Z',

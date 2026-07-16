@@ -53,10 +53,17 @@ export interface RulesStamp {
   contentHash: string | null;
 }
 
-/** Parse the stamp from a deployed rules file. null = file missing or unstamped. */
+/** Parse the stamp from a deployed rules file. null = file missing, unreadable,
+ * or unstamped. Never throws — a read error (EACCES, a directory at the path)
+ * must not break the SessionStart hook. */
 export function readDeployedStamp(file: string): RulesStamp | null {
   if (!existsSync(file)) return null;
-  const firstLine = readFileSync(file, 'utf-8').split('\n', 1)[0] ?? '';
+  let firstLine: string;
+  try {
+    firstLine = readFileSync(file, 'utf-8').split('\n', 1)[0] ?? '';
+  } catch {
+    return null;
+  }
   if (!firstLine.startsWith(STAMP_PREFIX)) return null;
   return {
     version: /· v(\S+)/.exec(firstLine)?.[1] ?? 'unknown',
@@ -75,14 +82,6 @@ export function buildStamp(opts: {
     `${STAMP_PREFIX} · v${opts.version} · commit ${opts.commit} · content ${opts.contentHash}` +
     ` · generated ${opts.generated} · GENERATED FILE — do not edit; run: ${SYNC_RULES_CMD} -->`
   );
-}
-
-/** The 12-char source sha the deployed file was generated from (strips
- * '-dirty'), or null if unknown. Used by the hook's drift check. */
-export function deployedSourceSha(stamp: RulesStamp | null): string | null {
-  if (stamp == null) return null;
-  const bare = stamp.commit.replace(/-dirty$/, '');
-  return bare === 'unknown' ? null : bare.slice(0, 12);
 }
 
 /** True if the deployed file was generated from a dirty working tree. */

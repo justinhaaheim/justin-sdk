@@ -10,7 +10,6 @@ import {join} from 'path';
 import {
   buildStamp,
   deployedIsDirty,
-  deployedSourceSha,
   readDeployedStamp,
 } from '../src/plugin/lib/rules-file';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -46,21 +45,13 @@ describe('rules-file stamp round-trip', () => {
     expect(stamp?.contentHash).toBe('84bf3e47bf75');
   });
 
-  test('deployedSourceSha returns the 12-char sha', () => {
-    const stamp = readDeployedStamp(writeStamped('cc6573bb0834'));
-    expect(deployedSourceSha(stamp)).toBe('cc6573bb0834');
-    expect(deployedIsDirty(stamp)).toBe(false);
-  });
-
-  test('a dirty stamp is detected and its -dirty suffix stripped for the sha', () => {
-    const stamp = readDeployedStamp(writeStamped('cc6573bb0834-dirty'));
-    expect(deployedIsDirty(stamp)).toBe(true);
-    expect(deployedSourceSha(stamp)).toBe('cc6573bb0834');
-  });
-
-  test("an 'unknown' commit yields a null source sha", () => {
-    const stamp = readDeployedStamp(writeStamped('unknown'));
-    expect(deployedSourceSha(stamp)).toBeNull();
+  test('a clean stamp is not flagged dirty; a -dirty stamp is', () => {
+    expect(
+      deployedIsDirty(readDeployedStamp(writeStamped('cc6573bb0834'))),
+    ).toBe(false);
+    expect(
+      deployedIsDirty(readDeployedStamp(writeStamped('cc6573bb0834-dirty'))),
+    ).toBe(true);
   });
 
   test('readDeployedStamp returns null for a missing file', () => {
