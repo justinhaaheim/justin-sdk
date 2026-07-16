@@ -28,8 +28,8 @@
 import {assemble} from '../lib/prime';
 import {formatRepoState, runDivergenceCheck} from '../lib/project-prime';
 import {
+  contentHash,
   deployedIsDirty,
-  deployedSourceSha,
   PRIME_FULL_CMD,
   readDeployedStamp,
   rulesFilePath,
@@ -48,7 +48,7 @@ const pointerLine = (missing: boolean): string =>
 // --- rules (may throw if the prompts source can't be loaded) ----------------
 let ruleText = ''; // the block injected through the hook
 let condNames: string[] = [];
-let cloneSha: string | null = null;
+let currentUniversalHash: string | null = null;
 let rulesFailed: string | null = null;
 
 const stamp = readDeployedStamp(RULES_FILE);
@@ -62,11 +62,27 @@ try {
     projectRoot,
   );
   condNames = assembled.names;
-  cloneSha = assembled.sourceSha;
   const body = fileMissing ? assembled.markdown : assembled.text;
   ruleText = [pointerLine(fileMissing), body]
     .filter((s) => s.length > 0)
     .join('\n\n');
+
+  // Content-based drift: hash the CURRENT universal rules (what sync-rules
+  // would deploy) and compare to the deployed file's stamped content hash.
+  // Content — not commit sha — so a prompts commit that doesn't touch rule
+  // content never triggers a false "stale" nag. Reuse the already-resolved
+  // clone dir so this is a cheap read (no extra clone/pull).
+  if (!fileMissing) {
+    const universal = assemble(
+      {
+        format: 'markdown',
+        partition: 'universal',
+        promptsDir: assembled.sourceDir,
+      },
+      projectRoot,
+    );
+    currentUniversalHash = contentHash(universal.markdown);
+  }
 } catch (error) {
   rulesFailed = error instanceof Error ? error.message : String(error);
 }
@@ -85,11 +101,11 @@ const additionalContext = [ruleText, repoState]
   .join('\n\n');
 
 // --- drift check + systemMessage (for Justin; the model does NOT read it) ---
-const deployedSha = deployedSourceSha(stamp);
 const drift =
-  !fileMissing && cloneSha != null && deployedSha != null
-    ? deployedSha !== cloneSha.slice(0, 12)
-    : false;
+  !fileMissing &&
+  currentUniversalHash != null &&
+  stamp?.contentHash != null &&
+  currentUniversalHash !== stamp.contentHash;
 
 const parts: string[] = [];
 if (rulesFailed != null) {
@@ -100,7 +116,7 @@ if (rulesFailed != null) {
   );
 } else {
   const sync = drift
-    ? `⚠️ STALE (file ${deployedSha} ≠ clone ${cloneSha?.slice(0, 12) ?? '?'}) → run: ${SYNC_RULES_CMD}`
+    ? `⚠️ STALE (deployed ${stamp?.contentHash} ≠ current ${currentUniversalHash}) → run: ${SYNC_RULES_CMD}`
     : deployedIsDirty(stamp)
       ? `⚠️ built from a dirty tree → run: ${SYNC_RULES_CMD}`
       : '✓ in sync';

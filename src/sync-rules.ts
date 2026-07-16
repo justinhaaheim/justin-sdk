@@ -21,7 +21,6 @@
  */
 
 import {execSync} from 'child_process';
-import {createHash} from 'crypto';
 import {
   existsSync,
   mkdirSync,
@@ -34,16 +33,13 @@ import {dirname, join} from 'path';
 import {assemble} from './plugin/lib/prime';
 import {
   buildStamp,
+  contentHash,
   readDeployedStamp,
   rulesFilePath,
 } from './plugin/lib/rules-file';
 import {fail, setQuiet, success, warn} from './setup-helpers';
 
 const VM_DEFAULT_SPEC = 'github:justinhaaheim/version-manager';
-
-function contentHash(s: string): string {
-  return createHash('sha256').update(s).digest('hex').slice(0, 12);
-}
 
 /** The version-manager dep spec the prompts repo pins, so sync-rules stays in
  * lockstep with it (falls back to the repo's default branch). */

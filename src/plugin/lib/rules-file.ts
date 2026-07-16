@@ -10,10 +10,19 @@
  *   <!-- justin-sdk rules · v0.4.14 · commit cc6573bb0834 · content 84bf3e47bf75 · generated 2026-… · GENERATED FILE — do not edit; run: bunx justin-sdk sync-rules -->
  */
 
+import {createHash} from 'crypto';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
 export const STAMP_PREFIX = '<!-- justin-sdk rules';
+
+/** Stable short hash of the rules body — the drift/idempotency key. Both the
+ * writer (sync-rules) and the reader (hook drift check) hash the SAME thing
+ * (the assembled universal markdown), so drift = "would sync-rules produce
+ * different content?" — immune to commits that don't change rule content. */
+export function contentHash(markdown: string): string {
+  return createHash('sha256').update(markdown).digest('hex').slice(0, 12);
+}
 
 /**
  * Universal invocations. `@justinhaaheim/justin-sdk` is a GitHub package (not on
