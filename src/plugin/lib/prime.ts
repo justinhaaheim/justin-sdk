@@ -21,7 +21,14 @@
  */
 
 import {execSync} from 'child_process';
-import {existsSync, mkdirSync, readFileSync, statSync, writeFileSync} from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'fs';
 import {dirname, join, resolve} from 'path';
 
 const DEFAULT_REPO_URL = 'https://github.com/justinhaaheim/prompts.git';
@@ -116,6 +123,21 @@ function git(args: string[], cwd?: string): void {
   });
 }
 
+/** HEAD commit sha of a git checkout, or null if unavailable (e.g. a non-git
+ * test fixture). Used to stamp/compare the deployed rules against the source. */
+export function headSha(dir: string): string | null {
+  try {
+    return execSync('git rev-parse HEAD', {
+      cwd: dir,
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      timeout: GIT_TIMEOUT_MS,
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
 function isStale(maxAgeSeconds: number): boolean {
   const marker = lastPullMarker();
   if (!existsSync(marker)) return true;
@@ -146,11 +168,18 @@ function ensurePromptsSource(opts: PrimeOptions): string {
 
   if (!existsSync(join(dir, '.git'))) {
     mkdirSync(dirname(dir), {recursive: true});
-    git(['clone', '--depth', '1', url, `"${dir}"`]);
+    // FULL clone (not --depth 1): version-manager computes the dynamic version
+    // from commit COUNT, which a shallow clone can't provide (home-base-r3pb).
+    git(['clone', url, `"${dir}"`]);
+    touchMarker();
+  } else if (existsSync(join(dir, '.git', 'shallow'))) {
+    // Migrate a pre-r3pb shallow clone to a full one, self-healing.
+    rmSync(dir, {recursive: true, force: true});
+    git(['clone', url, `"${dir}"`]);
     touchMarker();
   } else if (opts.forceUpdate === true || isStale(maxAge)) {
     try {
-      git(['fetch', '--depth', '1', 'origin', 'HEAD'], dir);
+      git(['fetch', 'origin', 'HEAD'], dir);
       git(['reset', '--hard', 'FETCH_HEAD'], dir);
       touchMarker();
     } catch {
@@ -296,6 +325,10 @@ export interface Assembled {
   /** buildHeader() + text — the standalone rules document. */
   markdown: string;
   warnings: string[];
+  /** The prompts dir actually read (the managed clone, unless overridden). */
+  sourceDir: string;
+  /** HEAD sha of sourceDir, or null (non-git fixture / unavailable). */
+  sourceSha: string | null;
 }
 
 /**
@@ -324,6 +357,8 @@ export function assemble(opts: PrimeOptions, projectRoot: string): Assembled {
     text,
     markdown: `${buildHeader()}\n\n${text}`.trim(),
     warnings,
+    sourceDir: source,
+    sourceSha: headSha(source),
   };
 }
 

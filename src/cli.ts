@@ -18,6 +18,7 @@ import {runFix} from './fix';
 import {runInit} from './init';
 import {runMigrateToPrime} from './migrate-to-prime';
 import {runPrime} from './plugin/lib/prime';
+import {runSyncRules} from './sync-rules';
 import {runSignal} from './signal';
 import {runUpdate} from './update';
 
@@ -311,6 +312,25 @@ void yargs(hideBin(process.argv))
         forceUpdate: argv['force-update'],
       });
       process.exit(exitCode);
+    },
+  )
+  .command(
+    'sync-rules',
+    'Regenerate ~/.claude/rules/justin-sdk/critical-rules.md (the universal always-on rules Claude autoloads) from the managed prompts clone. Run AFTER pushing a prompts change. Idempotent; never reads ~/Dev/prompts. Works from any project.',
+    (y) =>
+      y
+        .option('force', {
+          type: 'boolean',
+          default: false,
+          describe: 'Rewrite even when the content hash is unchanged',
+        })
+        .option('quiet', {
+          type: 'boolean',
+          default: false,
+          describe: 'Suppress non-error output',
+        }),
+    (argv) => {
+      process.exit(runSyncRules({force: argv.force, quiet: argv.quiet}));
     },
   )
   .command(
