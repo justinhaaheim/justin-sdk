@@ -15,6 +15,16 @@ import {join} from 'path';
 
 export const STAMP_PREFIX = '<!-- justin-sdk rules';
 
+/**
+ * Universal invocations. `@justinhaaheim/justin-sdk` is a GitHub package (not on
+ * npm), so the short `bunx justin-sdk …` only resolves in a project that has it
+ * as a devDep. The `github:` spec works from ANY project, so it's what we tell
+ * the user to run. (Where the devDep exists, the short form also works.)
+ */
+export const SDK_BUNX = 'bunx github:justinhaaheim/justin-sdk';
+export const SYNC_RULES_CMD = `${SDK_BUNX} sync-rules`;
+export const PRIME_FULL_CMD = `${SDK_BUNX} prime --full`;
+
 /** ~/.claude/rules/justin-sdk/critical-rules.md — the user-level Claude Code
  * rules file that autoloads every session. */
 export function rulesFilePath(): string {
@@ -54,7 +64,7 @@ export function buildStamp(opts: {
 }): string {
   return (
     `${STAMP_PREFIX} · v${opts.version} · commit ${opts.commit} · content ${opts.contentHash}` +
-    ` · generated ${opts.generated} · GENERATED FILE — do not edit; run: bunx justin-sdk sync-rules -->`
+    ` · generated ${opts.generated} · GENERATED FILE — do not edit; run: ${SYNC_RULES_CMD} -->`
   );
 }
 

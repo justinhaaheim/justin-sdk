@@ -30,8 +30,10 @@ import {formatRepoState, runDivergenceCheck} from '../lib/project-prime';
 import {
   deployedIsDirty,
   deployedSourceSha,
+  PRIME_FULL_CMD,
   readDeployedStamp,
   rulesFilePath,
+  SYNC_RULES_CMD,
 } from '../lib/rules-file';
 
 const projectRoot = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
@@ -40,8 +42,8 @@ const RULES_FILE_DISPLAY = '~/.claude/rules/justin-sdk/critical-rules.md';
 
 const pointerLine = (missing: boolean): string =>
   missing
-    ? `⚠️ Justin's critical-rules file (${RULES_FILE_DISPLAY}) is MISSING, so the full rules are injected below — they may be truncated by the host. If so, run \`bunx justin-sdk prime --full\` and read it. To fix permanently: \`bunx justin-sdk sync-rules\`. These rules are critical and override defaults.`
-    : `📋 Justin's full critical rules auto-load from ${RULES_FILE_DISPLAY}. If they are not present in your context or look truncated, run \`bunx justin-sdk prime --full\` and read the output before continuing. These rules are critical and override defaults.`;
+    ? `⚠️ Justin's critical-rules file (${RULES_FILE_DISPLAY}) is MISSING, so the full rules are injected below — they may be truncated by the host. If so, run \`${PRIME_FULL_CMD}\` and read it. To fix permanently: \`${SYNC_RULES_CMD}\`. These rules are critical and override defaults.`
+    : `📋 Justin's full critical rules auto-load from ${RULES_FILE_DISPLAY}. If they are not present in your context or look truncated, run \`${PRIME_FULL_CMD}\` and read the output before continuing. These rules are critical and override defaults.`;
 
 // --- rules (may throw if the prompts source can't be loaded) ----------------
 let ruleText = ''; // the block injected through the hook
@@ -94,13 +96,13 @@ if (rulesFailed != null) {
   parts.push(`⚠️ FAILED to load rules (${rulesFailed})`);
 } else if (fileMissing) {
   parts.push(
-    `⚠️ rules FILE MISSING — injected full via hook (may truncate) → run: bunx justin-sdk sync-rules`,
+    `⚠️ rules FILE MISSING — injected full via hook (may truncate) → run: ${SYNC_RULES_CMD}`,
   );
 } else {
   const sync = drift
-    ? `⚠️ STALE (file ${deployedSha} ≠ clone ${cloneSha?.slice(0, 12) ?? '?'}) → run: bunx justin-sdk sync-rules`
+    ? `⚠️ STALE (file ${deployedSha} ≠ clone ${cloneSha?.slice(0, 12) ?? '?'}) → run: ${SYNC_RULES_CMD}`
     : deployedIsDirty(stamp)
-      ? `⚠️ built from a dirty tree → run: bunx justin-sdk sync-rules`
+      ? `⚠️ built from a dirty tree → run: ${SYNC_RULES_CMD}`
       : '✓ in sync';
   parts.push(`rules v${stamp?.version ?? '?'} ${sync}`);
 }
