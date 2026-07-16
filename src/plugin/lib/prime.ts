@@ -29,8 +29,20 @@ const DEFAULT_MAX_AGE_SECONDS = 300;
 const GIT_TIMEOUT_MS = 8000;
 const MAX_INLINE_DEPTH = 10;
 
+/**
+ * Which slice of the rules to assemble:
+ *  - 'universal'   — only always-on modules (no includeIf). Written to the
+ *    natively-loaded rules file (~/.claude/rules/justin-sdk/critical-rules.md).
+ *  - 'conditional' — only project-type-gated modules (includeIf) that match.
+ *    This is the small subset injected through the SessionStart hook.
+ *  - 'full'        — everything (universal + matching conditional). The default,
+ *    and what `prime --full` prints on demand.
+ */
+export type Partition = 'universal' | 'conditional' | 'full';
+
 export interface PrimeOptions {
   format: 'markdown' | 'hook';
+  partition?: Partition; // default 'full'
   promptsDir?: string; // override: read this dir as-is (skip clone/pull)
   forceUpdate?: boolean; // force a fetch/pull of the managed clone, bypassing the staleness gate
 }
@@ -216,6 +228,7 @@ function inlineFile(
   filePath: string,
   ctx: ProjectContext,
   depth: number,
+  partition: Partition,
 ): InlineResult {
   if (depth > MAX_INLINE_DEPTH) {
     return {count: 0, text: '', warnings: [`max inline depth at ${filePath}`]};
@@ -237,6 +250,13 @@ function inlineFile(
       continue;
     }
     const {includeIf} = stripFrontmatter(readFileSync(refPath, 'utf-8'));
+    // Partition gate: a module with any includeIf is "conditional"; one with
+    // none is "universal". 'universal' drops conditionals; 'conditional' drops
+    // universals; 'full' keeps both. Conditionals still get their predicate
+    // evaluated below.
+    const isConditional = includeIf.length > 0;
+    if (partition === 'universal' && isConditional) continue;
+    if (partition === 'conditional' && !isConditional) continue;
     const {included, unknown} = evaluateInclude(includeIf, ctx);
     if (unknown.length > 0) {
       warnings.push(
@@ -245,7 +265,7 @@ function inlineFile(
       continue;
     }
     if (!included) continue;
-    const nested = inlineFile(refPath, ctx, depth + 1);
+    const nested = inlineFile(refPath, ctx, depth + 1, partition);
     out.push(nested.text);
     count += 1 + nested.count;
     warnings.push(...nested.warnings);
@@ -264,6 +284,9 @@ function buildHeader(): string {
 
 export interface Assembled {
   count: number;
+  /** Raw inlined content, no header — for callers that compose their own framing. */
+  text: string;
+  /** buildHeader() + text — the standalone rules document. */
   markdown: string;
   warnings: string[];
 }
@@ -287,8 +310,14 @@ export function assemble(opts: PrimeOptions, projectRoot: string): Assembled {
     throw new Error(`rules index not found at ${rulesIndex}`);
   }
   const ctx = loadProjectContext(projectRoot);
-  const {text, count, warnings} = inlineFile(indexPath, ctx, 0);
-  return {count, markdown: `${buildHeader()}\n\n${text}`.trim(), warnings};
+  const partition = opts.partition ?? 'full';
+  const {text, count, warnings} = inlineFile(indexPath, ctx, 0, partition);
+  return {
+    count,
+    text,
+    markdown: `${buildHeader()}\n\n${text}`.trim(),
+    warnings,
+  };
 }
 
 export function runPrime(projectRoot: string, opts: PrimeOptions): number {

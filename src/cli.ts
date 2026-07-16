@@ -277,6 +277,19 @@ void yargs(hideBin(process.argv))
           describe:
             'markdown = human-readable (default); hook = SessionStart additionalContext JSON envelope',
         })
+        .option('full', {
+          type: 'boolean',
+          default: false,
+          describe:
+            'Print the complete rules (universal + all matching conditional). This is already the default; the flag is a stable, memorable command to hand to Claude ("run prime --full") when the hook injection was truncated.',
+        })
+        .option('partition', {
+          type: 'string',
+          choices: ['universal', 'conditional', 'full'] as const,
+          default: 'full',
+          describe:
+            'Which slice of the rules to emit: universal (always-on) | conditional (project-type-gated) | full (both). Default full. --full forces full.',
+        })
         .option('prompts-dir', {
           type: 'string',
           describe:
@@ -291,6 +304,9 @@ void yargs(hideBin(process.argv))
     (argv) => {
       const exitCode = runPrime(process.cwd(), {
         format: argv.format as 'markdown' | 'hook',
+        partition: argv.full
+          ? 'full'
+          : (argv.partition as 'universal' | 'conditional' | 'full'),
         promptsDir: argv['prompts-dir'],
         forceUpdate: argv['force-update'],
       });
