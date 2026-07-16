@@ -22,7 +22,6 @@
     ".claude-plugin"
   ],
   "dependencies": {
-    "prettier": "^3.6.2",
     "yargs": "^18.0.0"
   },
   "devDependencies": {

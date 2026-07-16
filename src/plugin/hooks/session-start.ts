@@ -5,24 +5,22 @@
  * The BULK of the rules (universal, always-on) is NOT injected here — it lives
  * in ~/.claude/rules/justin-sdk/critical-rules.md, a user-level Claude Code
  * rules file that autoloads every session with no size limit (home-base-r3pb).
- * This hook injects only the SMALL, per-session pieces that a static file
- * can't carry:
- *   1. a pointer line (where the full rules are; what to do if truncated),
- *   2. the CONDITIONAL (project-type-gated) rules for THIS project,
- *   3. the current repo state (branch/worktree divergence).
- * That payload stays well under the host's hook-output truncation limit.
+ * This hook injects only the SMALL, per-session pieces a static file can't
+ * carry: a pointer line, the CONDITIONAL (project-type-gated) rules for THIS
+ * project, and the current repo state. Headings are numbered; the injection is
+ * Prettier'd (both on by default).
  *
- * It also does a cheap DRIFT CHECK: compare the sha the deployed rules file was
- * generated from (its stamp) against the managed clone's HEAD (the remote
- * mirror the assembler already pulled). If they differ — or the file is missing
- * — it warns in the `systemMessage` (which the model does NOT read; it's for
- * Justin) with the exact fix command. When the file is missing entirely it
- * fails safe by injecting the FULL rules through the hook (possibly truncated,
- * but better than nothing).
+ * DRIFT CHECK (result goes in the systemMessage, which the model does NOT read
+ * — it's for Justin): fast path compares the deployed file's stamped source sha
+ * against the managed clone's HEAD; equal ⇒ in sync with no further work. Only
+ * when they differ does it do the expensive check — assemble the current
+ * universal rules, Prettier + hash them, and compare to the deployed content
+ * hash — so a commit that doesn't change rule content (or only reformats it)
+ * never false-nags. Missing file ⇒ fail-safe: inject the FULL rules here.
  *
  * All lib modules live in this plugin's ./lib (a marketplace plugin only gets
- * its own subdir), import only node builtins, and this runs with just `bun`.
- * Always emits a valid envelope and exits 0 — never breaks a session.
+ * its own subdir), use only bun builtins / bunx subprocesses (no node_modules),
+ * and this runs with just `bun`. Always emits a valid envelope and exits 0.
  */
 
 import {assemble} from '../lib/prime';
@@ -30,7 +28,9 @@ import {formatRepoState, runDivergenceCheck} from '../lib/project-prime';
 import {
   contentHash,
   deployedIsDirty,
+  deployedSourceSha,
   PRIME_FULL_CMD,
+  prettierMarkdown,
   readDeployedStamp,
   rulesFilePath,
   SYNC_RULES_CMD,
@@ -45,14 +45,15 @@ const pointerLine = (missing: boolean): string =>
     ? `⚠️ Justin's critical-rules file (${RULES_FILE_DISPLAY}) is MISSING, so the full rules are injected below — they may be truncated by the host. If so, run \`${PRIME_FULL_CMD}\` and read it. To fix permanently: \`${SYNC_RULES_CMD}\`. These rules are critical and override defaults.`
     : `📋 Justin's full critical rules auto-load from ${RULES_FILE_DISPLAY}. If they are not present in your context or look truncated, run \`${PRIME_FULL_CMD}\` and read the output before continuing. These rules are critical and override defaults.`;
 
-// --- rules (may throw if the prompts source can't be loaded) ----------------
-let ruleText = ''; // the block injected through the hook
-let condNames: string[] = [];
-let currentUniversalHash: string | null = null;
-let rulesFailed: string | null = null;
-
 const stamp = readDeployedStamp(RULES_FILE);
 const fileMissing = stamp == null;
+
+// --- rules (may throw if the prompts source can't be loaded) ----------------
+let ruleText = '';
+let condNames: string[] = [];
+let cloneSha: string | null = null;
+let sourceDir: string | null = null;
+let rulesFailed: string | null = null;
 
 try {
   // Missing file -> inject the FULL rules as a fallback; otherwise just the
@@ -62,27 +63,12 @@ try {
     projectRoot,
   );
   condNames = assembled.names;
+  cloneSha = assembled.sourceSha;
+  sourceDir = assembled.sourceDir;
   const body = fileMissing ? assembled.markdown : assembled.text;
   ruleText = [pointerLine(fileMissing), body]
     .filter((s) => s.length > 0)
     .join('\n\n');
-
-  // Content-based drift: hash the CURRENT universal rules (what sync-rules
-  // would deploy) and compare to the deployed file's stamped content hash.
-  // Content — not commit sha — so a prompts commit that doesn't touch rule
-  // content never triggers a false "stale" nag. Reuse the already-resolved
-  // clone dir so this is a cheap read (no extra clone/pull).
-  if (!fileMissing) {
-    const universal = assemble(
-      {
-        format: 'markdown',
-        partition: 'universal',
-        promptsDir: assembled.sourceDir,
-      },
-      projectRoot,
-    );
-    currentUniversalHash = contentHash(universal.markdown);
-  }
 } catch (error) {
   rulesFailed = error instanceof Error ? error.message : String(error);
 }
@@ -95,18 +81,37 @@ try {
   // Non-fatal: a git-inspection failure just omits the repo-state block.
 }
 
-// --- compose the injection (for the model) ----------------------------------
-const additionalContext = [ruleText, repoState]
+// --- compose + Prettier the injection (for the model) -----------------------
+let additionalContext = [ruleText, repoState]
   .filter((b) => b.length > 0)
   .join('\n\n');
+if (additionalContext.length > 0) {
+  additionalContext = prettierMarkdown(additionalContext);
+}
 
-// --- drift check + systemMessage (for Justin; the model does NOT read it) ---
-const drift =
-  !fileMissing &&
-  currentUniversalHash != null &&
-  stamp?.contentHash != null &&
-  currentUniversalHash !== stamp.contentHash;
+// --- drift check (fast path: sha; slow path: Prettier'd content hash) --------
+const deployedSha = deployedSourceSha(stamp);
+let drift = false;
+if (!fileMissing && rulesFailed == null) {
+  const shaMatch =
+    deployedSha != null &&
+    cloneSha != null &&
+    deployedSha === cloneSha.slice(0, 12);
+  if (!shaMatch && sourceDir != null) {
+    try {
+      const universal = assemble(
+        {format: 'markdown', partition: 'universal', promptsDir: sourceDir},
+        projectRoot,
+      );
+      const currentHash = contentHash(prettierMarkdown(universal.markdown));
+      drift = stamp?.contentHash != null && currentHash !== stamp.contentHash;
+    } catch {
+      drift = false; // couldn't recompute -> don't false-alarm
+    }
+  }
+}
 
+// --- systemMessage (for Justin; the model does NOT read it) -----------------
 const parts: string[] = [];
 if (rulesFailed != null) {
   parts.push(`⚠️ FAILED to load rules (${rulesFailed})`);
@@ -116,19 +121,26 @@ if (rulesFailed != null) {
   );
 } else {
   const sync = drift
-    ? `⚠️ STALE (deployed ${stamp?.contentHash} ≠ current ${currentUniversalHash}) → run: ${SYNC_RULES_CMD}`
+    ? `⚠️ STALE → run: ${SYNC_RULES_CMD}`
     : deployedIsDirty(stamp)
       ? `⚠️ built from a dirty tree → run: ${SYNC_RULES_CMD}`
       : '✓ in sync';
   parts.push(`rules v${stamp?.version ?? '?'} ${sync}`);
 }
-// Only label the assembled modules "conditional" in the normal case; when the
-// file is missing, `condNames` is the FULL set (already conveyed above).
-if (!fileMissing && rulesFailed == null && condNames.length > 0) {
-  parts.push(`+${condNames.length} conditional [${condNames.join(', ')}]`);
-}
 let systemMessage = `justin-sdk prime · ${parts.join(' · ')}`;
-if (repoState.length > 0) systemMessage += `\n${repoState}`;
+
+// Numbered summary of the modules compiled into the prime injection.
+if (condNames.length > 0) {
+  const label = fileMissing
+    ? 'modules injected (full)'
+    : 'conditional modules (prime injection)';
+  systemMessage +=
+    `\n${label}:\n` + condNames.map((n, i) => `  ${i + 1}. ${n}`).join('\n');
+}
+// The ENTIRE prime output the model receives, so Justin can see it too.
+if (additionalContext.length > 0) {
+  systemMessage += `\n\n─── full prime injection (what the model receives) ───\n${additionalContext}`;
+}
 
 process.stdout.write(
   JSON.stringify({

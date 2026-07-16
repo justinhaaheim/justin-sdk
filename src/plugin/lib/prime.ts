@@ -325,6 +325,34 @@ function buildHeader(): string {
   return '# Critical Rules';
 }
 
+/**
+ * Number every ATX heading with a nested-outline counter: each heading level
+ * has its own counter that resets when a shallower heading appears.
+ *   # 1. A / # 2. B / ## 1. B.a / ## 2. B.b / # 3. C
+ * Headings inside fenced code blocks are left alone. So references stay stable,
+ * this is applied deterministically to the assembled markdown.
+ */
+export function numberHeaders(markdown: string): string {
+  const counters: number[] = [];
+  let inFence = false;
+  return markdown
+    .split('\n')
+    .map((line) => {
+      if (/^\s*(```|~~~)/.test(line)) {
+        inFence = !inFence;
+        return line;
+      }
+      if (inFence) return line;
+      const m = /^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(line);
+      if (m == null) return line;
+      const level = m[1].length;
+      counters[level - 1] = (counters[level - 1] ?? 0) + 1;
+      counters.length = level; // reset all deeper-level counters
+      return `${m[1]} ${counters[level - 1]}. ${m[2]}`;
+    })
+    .join('\n');
+}
+
 // --- entry point -----------------------------------------------------------
 
 export interface Assembled {
@@ -371,8 +399,8 @@ export function assemble(opts: PrimeOptions, projectRoot: string): Assembled {
   return {
     count,
     names,
-    text,
-    markdown: `${buildHeader()}\n\n${text}`.trim(),
+    text: numberHeaders(text),
+    markdown: numberHeaders(`${buildHeader()}\n\n${text}`.trim()),
     warnings,
     sourceDir: source,
     sourceSha: headSha(source),

@@ -10,7 +10,7 @@
 
 import {describe, test, expect, afterEach} from 'bun:test';
 
-import {assemble} from '../src/plugin/lib/prime';
+import {assemble, numberHeaders} from '../src/plugin/lib/prime';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -47,6 +47,48 @@ function projectRoot(deps: Record<string, string>): string {
 
 const RN_PROJECT = () => projectRoot({expo: '*'});
 const PLAIN_PROJECT = () => projectRoot({lodash: '*'});
+
+describe('numberHeaders', () => {
+  test('numbers each level with a counter that resets under a shallower heading', () => {
+    const input = [
+      '# A',
+      'body',
+      '# B',
+      '## B.a',
+      '## B.b',
+      '### B.b.i',
+      '# C',
+      '## C.a',
+    ].join('\n');
+    expect(numberHeaders(input).split('\n')).toEqual([
+      '# 1. A',
+      'body',
+      '# 2. B',
+      '## 1. B.a',
+      '## 2. B.b',
+      '### 1. B.b.i',
+      '# 3. C',
+      '## 1. C.a',
+    ]);
+  });
+
+  test('leaves headings inside fenced code blocks alone', () => {
+    const input = [
+      '# Real',
+      '```sh',
+      '# not a heading',
+      '```',
+      '## Also real',
+    ].join('\n');
+    expect(numberHeaders(input).split('\n')).toEqual([
+      '# 1. Real',
+      '```sh',
+      '# not a heading',
+      '```',
+      '## 1. Also real',
+    ]);
+  });
+});
 
 describe('prime assemble() partition', () => {
   test("'universal' includes only non-includeIf modules (RN project)", () => {
@@ -115,14 +157,14 @@ describe('prime assemble() partition', () => {
     expect(out.count).toBe(3);
   });
 
-  test('markdown carries the "# Critical Rules" header; text does not', () => {
+  test('markdown carries the numbered "# 1. Critical Rules" header; text does not', () => {
     const prompts = promptsFixture();
     const out = assemble(
       {format: 'markdown', partition: 'universal', promptsDir: prompts.path},
       RN_PROJECT(),
     );
-    expect(out.markdown.startsWith('# Critical Rules')).toBe(true);
-    expect(out.text).not.toContain('# Critical Rules');
+    expect(out.markdown.startsWith('# 1. Critical Rules')).toBe(true);
+    expect(out.text).not.toContain('Critical Rules');
   });
 });
 

@@ -10,6 +10,9 @@ import {join} from 'path';
 import {
   buildStamp,
   deployedIsDirty,
+  deployedSourceSha,
+  prettierEnabled,
+  prettierMarkdown,
   readDeployedStamp,
 } from '../src/plugin/lib/rules-file';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -19,8 +22,11 @@ function track(sb: Sandbox): Sandbox {
   sandboxes.push(sb);
   return sb;
 }
+const savedPrettier = process.env.JSDK_PRIME_PRETTIER;
 afterEach(() => {
   while (sandboxes.length > 0) sandboxes.pop()?.cleanup();
+  if (savedPrettier == null) delete process.env.JSDK_PRIME_PRETTIER;
+  else process.env.JSDK_PRIME_PRETTIER = savedPrettier;
 });
 
 function writeStamped(commit: string): string {
@@ -45,6 +51,18 @@ describe('rules-file stamp round-trip', () => {
     expect(stamp?.contentHash).toBe('84bf3e47bf75');
   });
 
+  test('deployedSourceSha returns the 12-char sha, stripping -dirty', () => {
+    expect(
+      deployedSourceSha(readDeployedStamp(writeStamped('cc6573bb0834'))),
+    ).toBe('cc6573bb0834');
+    expect(
+      deployedSourceSha(readDeployedStamp(writeStamped('cc6573bb0834-dirty'))),
+    ).toBe('cc6573bb0834');
+    expect(
+      deployedSourceSha(readDeployedStamp(writeStamped('unknown'))),
+    ).toBeNull();
+  });
+
   test('a clean stamp is not flagged dirty; a -dirty stamp is', () => {
     expect(
       deployedIsDirty(readDeployedStamp(writeStamped('cc6573bb0834'))),
@@ -63,5 +81,23 @@ describe('rules-file stamp round-trip', () => {
     const file = join(sb.path, 'x.md');
     writeFileSync(file, '# no stamp here\n');
     expect(readDeployedStamp(file)).toBeNull();
+  });
+});
+
+describe('prettier toggle', () => {
+  test('prettierEnabled defaults to true; env var disables it', () => {
+    delete process.env.JSDK_PRIME_PRETTIER;
+    expect(prettierEnabled()).toBe(true);
+    for (const off of ['0', 'false', 'off', 'no', 'OFF']) {
+      process.env.JSDK_PRIME_PRETTIER = off;
+      expect(prettierEnabled()).toBe(false);
+    }
+    process.env.JSDK_PRIME_PRETTIER = '1';
+    expect(prettierEnabled()).toBe(true);
+  });
+
+  test('prettierMarkdown is a trim-only no-op when disabled (no bunx call)', () => {
+    process.env.JSDK_PRIME_PRETTIER = '0';
+    expect(prettierMarkdown('# H\n\n\nx\n\n')).toBe('# H\n\n\nx');
   });
 });

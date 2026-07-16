@@ -13,11 +13,16 @@
  * ~/Dev/prompts — the managed clone is the single source, so `sync-rules` works
  * identically from any project and on any machine.
  *
+ * Headings are numbered (nested-outline) and the body is Prettier'd (via `bunx
+ * prettier`, on by default; JSDK_PRIME_PRETTIER=0 disables) BEFORE hashing, so
+ * trivial formatting differences normalize out of the content hash.
+ *
  * Stamp: an HTML comment (not read by Claude) records the version-manager
- * dynamic version, the source commit sha, and a content hash. The content hash
- * makes the write idempotent (unchanged rules => no rewrite); the sha drives the
- * hook's drift check. Run this AFTER pushing a change to the prompts repo (so
- * the managed clone can pull it): `bunx justin-sdk sync-rules`.
+ * dynamic version, the source commit sha, and the content hash. The content
+ * hash makes the write idempotent (unchanged rules => no rewrite); the hook's
+ * drift check compares the clone HEAD sha (fast) then this hash (slow). Run
+ * AFTER pushing a change to the prompts repo (so the managed clone can pull it):
+ * `bunx github:justinhaaheim/justin-sdk sync-rules`.
  */
 
 import {execSync} from 'child_process';
@@ -30,34 +35,17 @@ import {
 } from 'fs';
 import {dirname, join} from 'path';
 
-import prettier from 'prettier';
-
 import {assemble} from './plugin/lib/prime';
 import {
   buildStamp,
   contentHash,
+  prettierMarkdown,
   readDeployedStamp,
   rulesFilePath,
 } from './plugin/lib/rules-file';
 import {fail, setQuiet, success, warn} from './setup-helpers';
 
 const VM_DEFAULT_SPEC = 'github:justinhaaheim/version-manager';
-
-/**
- * Format the generated rules markdown with Prettier so the deployed file is
- * consistently formatted (deterministic output). NOTE: the drift/idempotency
- * hash is taken over the RAW assembled markdown, not this — because the
- * SessionStart hook that recomputes it runs in the plugin cache with no
- * node_modules and can't run Prettier. If Prettier ever fails, we fall back to
- * the raw markdown rather than block the deploy.
- */
-async function prettierMarkdown(markdown: string): Promise<string> {
-  try {
-    return (await prettier.format(markdown, {parser: 'markdown'})).trimEnd();
-  } catch {
-    return markdown.trimEnd();
-  }
-}
 
 /** The version-manager dep spec the prompts repo pins, so sync-rules stays in
  * lockstep with it (falls back to the repo's default branch). */
@@ -145,9 +133,7 @@ export interface SyncRulesOptions {
   outFile?: string;
 }
 
-export async function runSyncRules(
-  options: SyncRulesOptions = {},
-): Promise<number> {
+export function runSyncRules(options: SyncRulesOptions = {}): number {
   setQuiet(options.quiet ?? false);
 
   let assembled;
@@ -166,7 +152,11 @@ export async function runSyncRules(
   }
 
   const {markdown, count, sourceDir, sourceSha} = assembled;
-  const hash = contentHash(markdown);
+  // Prettier the (already header-numbered) markdown, then hash the RESULT —
+  // so meaningless formatting differences normalize out of the hash. The hook
+  // recomputes this identically (same prettier, same env toggle).
+  const pretty = prettierMarkdown(markdown);
+  const hash = contentHash(pretty);
   const file = options.outFile ?? rulesFilePath();
 
   if (!options.force && readDeployedStamp(file)?.contentHash === hash) {
@@ -188,9 +178,7 @@ export async function runSyncRules(
     contentHash: hash,
     generated: options.now ?? new Date().toISOString(),
   });
-  // Prettier the BODY for consistent formatting; the stamp's content hash is
-  // over the RAW markdown (above) so the hook can recompute it without Prettier.
-  const body = `${stamp}\n\n${await prettierMarkdown(markdown)}\n`;
+  const body = `${stamp}\n\n${pretty}\n`;
 
   // Atomic write (a session can start mid-write).
   mkdirSync(dirname(file), {recursive: true});

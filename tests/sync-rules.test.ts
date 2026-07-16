@@ -19,14 +19,20 @@ function track(sb: Sandbox): Sandbox {
   return sb;
 }
 const savedPromptsDir = process.env.JSDK_PROMPTS_DIR;
+const savedPrettier = process.env.JSDK_PRIME_PRETTIER;
 afterEach(() => {
   while (sandboxes.length > 0) sandboxes.pop()?.cleanup();
   if (savedPromptsDir == null) delete process.env.JSDK_PROMPTS_DIR;
   else process.env.JSDK_PROMPTS_DIR = savedPromptsDir;
+  if (savedPrettier == null) delete process.env.JSDK_PRIME_PRETTIER;
+  else process.env.JSDK_PRIME_PRETTIER = savedPrettier;
 });
 
-/** A prompts fixture (universal + one RN-gated module) used as the source. */
+/** A prompts fixture (universal + one RN-gated module) used as the source.
+ * Disables prettier so tests don't shell out to `bunx prettier` (slow/network);
+ * sync-rules logic is identical either way. */
 function promptsFixture(): string {
+  process.env.JSDK_PRIME_PRETTIER = '0';
   const sb = track(createSandbox());
   sb.writeFile(
     'src/rules/index.md',
@@ -47,10 +53,10 @@ function outFile(): string {
 }
 
 describe('sync-rules', () => {
-  test('writes the universal rules with a version/commit/content stamp', async () => {
+  test('writes the universal rules with a version/commit/content stamp', () => {
     promptsFixture();
     const out = outFile();
-    const rc = await runSyncRules({
+    const rc = runSyncRules({
       quiet: true,
       outFile: out,
       now: '2020-01-01',
@@ -61,24 +67,24 @@ describe('sync-rules', () => {
     // universal content only (RN-gated module excluded from the file)
     expect(content).toContain('UNIVERSAL_A');
     expect(content).not.toContain('RN_ONLY');
-    expect(content).toContain('# Critical Rules');
+    expect(content).toContain('# 1. Critical Rules'); // headers numbered
     // stamp present with a content hash (non-git fixture -> version unknown)
     expect(content.startsWith('<!-- justin-sdk rules')).toBe(true);
     expect(/content [0-9a-f]{12}/.test(content)).toBe(true);
     expect(content).toContain('do not edit');
   });
 
-  test('is idempotent — unchanged content is not rewritten', async () => {
+  test('is idempotent — unchanged content is not rewritten', () => {
     promptsFixture();
     const out = outFile();
-    await runSyncRules({
+    runSyncRules({
       quiet: true,
       outFile: out,
       now: '2020-01-01T00:00:00Z',
     });
     // second run with a DIFFERENT timestamp: if idempotent, the file keeps the
     // original timestamp (never rewritten).
-    await runSyncRules({
+    runSyncRules({
       quiet: true,
       outFile: out,
       now: '2099-12-31T00:00:00Z',
@@ -88,15 +94,15 @@ describe('sync-rules', () => {
     expect(content).not.toContain('2099-12-31T00:00:00Z');
   });
 
-  test('--force rewrites even when content is unchanged', async () => {
+  test('--force rewrites even when content is unchanged', () => {
     promptsFixture();
     const out = outFile();
-    await runSyncRules({
+    runSyncRules({
       quiet: true,
       outFile: out,
       now: '2020-01-01T00:00:00Z',
     });
-    await runSyncRules({
+    runSyncRules({
       quiet: true,
       outFile: out,
       now: '2099-12-31T00:00:00Z',

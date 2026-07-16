@@ -329,8 +329,8 @@ void yargs(hideBin(process.argv))
           default: false,
           describe: 'Suppress non-error output',
         }),
-    async (argv) => {
-      process.exit(await runSyncRules({force: argv.force, quiet: argv.quiet}));
+    (argv) => {
+      process.exit(runSyncRules({force: argv.force, quiet: argv.quiet}));
     },
   )
   .command(
