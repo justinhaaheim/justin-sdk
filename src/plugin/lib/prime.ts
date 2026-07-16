@@ -29,7 +29,7 @@ import {
   statSync,
   writeFileSync,
 } from 'fs';
-import {dirname, join, resolve} from 'path';
+import {basename, dirname, join, resolve} from 'path';
 
 const DEFAULT_REPO_URL = 'https://github.com/justinhaaheim/prompts.git';
 const DEFAULT_MAX_AGE_SECONDS = 300;
@@ -246,6 +246,8 @@ const AT_REFERENCE = /^\s*@(\S+)\s*$/;
 interface InlineResult {
   text: string;
   count: number;
+  /** Basenames (no .md) of the modules that were included, in order. */
+  names: string[];
   warnings: string[];
 }
 
@@ -260,11 +262,17 @@ function inlineFile(
   partition: Partition,
 ): InlineResult {
   if (depth > MAX_INLINE_DEPTH) {
-    return {count: 0, text: '', warnings: [`max inline depth at ${filePath}`]};
+    return {
+      count: 0,
+      text: '',
+      names: [],
+      warnings: [`max inline depth at ${filePath}`],
+    };
   }
   const {body} = stripFrontmatter(readFileSync(filePath, 'utf-8'));
   const out: string[] = [];
   let count = 0;
+  const names: string[] = [];
   const warnings: string[] = [];
 
   for (const line of body.split('\n')) {
@@ -304,10 +312,11 @@ function inlineFile(
     const nested = inlineFile(refPath, ctx, depth + 1, 'full');
     out.push(nested.text);
     count += 1 + nested.count;
+    names.push(basename(refPath, '.md'), ...nested.names);
     warnings.push(...nested.warnings);
   }
 
-  return {count, text: out.join('\n').trim(), warnings};
+  return {count, text: out.join('\n').trim(), names, warnings};
 }
 
 // --- header ----------------------------------------------------------------
@@ -320,6 +329,8 @@ function buildHeader(): string {
 
 export interface Assembled {
   count: number;
+  /** Basenames (no .md) of the included modules, in order. */
+  names: string[];
   /** Raw inlined content, no header — for callers that compose their own framing. */
   text: string;
   /** buildHeader() + text — the standalone rules document. */
@@ -351,9 +362,15 @@ export function assemble(opts: PrimeOptions, projectRoot: string): Assembled {
   }
   const ctx = loadProjectContext(projectRoot);
   const partition = opts.partition ?? 'full';
-  const {text, count, warnings} = inlineFile(indexPath, ctx, 0, partition);
+  const {text, count, names, warnings} = inlineFile(
+    indexPath,
+    ctx,
+    0,
+    partition,
+  );
   return {
     count,
+    names,
     text,
     markdown: `${buildHeader()}\n\n${text}`.trim(),
     warnings,

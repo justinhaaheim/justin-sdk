@@ -2,37 +2,71 @@
 /**
  * SessionStart hook entry for the `prime` Claude Code plugin.
  *
- * Composes TWO context blocks into a single injection:
- *   1. The critical-guidelines (assembled from the prompts repo, project-type-aware).
- *   2. The current repo state — branch/worktree divergence (project-prime).
+ * The BULK of the rules (universal, always-on) is NOT injected here — it lives
+ * in ~/.claude/rules/justin-sdk/critical-rules.md, a user-level Claude Code
+ * rules file that autoloads every session with no size limit (home-base-r3pb).
+ * This hook injects only the SMALL, per-session pieces that a static file
+ * can't carry:
+ *   1. a pointer line (where the full rules are; what to do if truncated),
+ *   2. the CONDITIONAL (project-type-gated) rules for THIS project,
+ *   3. the current repo state (branch/worktree divergence).
+ * That payload stays well under the host's hook-output truncation limit.
  *
- * Both modules live in this plugin's ./lib (a marketplace plugin only gets its
- * own subdir copied to the cache, so imports must stay inside it). They import
- * only node builtins, so this runs with just `bun`, no node_modules.
+ * It also does a cheap DRIFT CHECK: compare the sha the deployed rules file was
+ * generated from (its stamp) against the managed clone's HEAD (the remote
+ * mirror the assembler already pulled). If they differ — or the file is missing
+ * — it warns in the `systemMessage` (which the model does NOT read; it's for
+ * Justin) with the exact fix command. When the file is missing entirely it
+ * fails safe by injecting the FULL rules through the hook (possibly truncated,
+ * but better than nothing).
  *
- * Project root: prefer $CLAUDE_PROJECT_DIR (set by Claude Code) so project-type
- * detection + git inspection target the right directory; fall back to cwd.
- *
- * Always emits a valid SessionStart envelope and exits 0 — never breaks a
- * session over context assembly. If the guidelines fail to load, the repo-state
- * block (and a failure notice in the systemMessage) are still emitted.
+ * All lib modules live in this plugin's ./lib (a marketplace plugin only gets
+ * its own subdir), import only node builtins, and this runs with just `bun`.
+ * Always emits a valid envelope and exits 0 — never breaks a session.
  */
 
 import {assemble} from '../lib/prime';
 import {formatRepoState, runDivergenceCheck} from '../lib/project-prime';
+import {
+  deployedIsDirty,
+  deployedSourceSha,
+  readDeployedStamp,
+  rulesFilePath,
+} from '../lib/rules-file';
 
 const projectRoot = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
+const RULES_FILE = rulesFilePath();
+const RULES_FILE_DISPLAY = '~/.claude/rules/justin-sdk/critical-rules.md';
 
-// --- guidelines (may throw if the prompts repo can't be loaded) -------------
-let guidelines = '';
-let guidelineCount = 0;
-let guidelinesFailed: string | null = null;
+const pointerLine = (missing: boolean): string =>
+  missing
+    ? `⚠️ Justin's critical-rules file (${RULES_FILE_DISPLAY}) is MISSING, so the full rules are injected below — they may be truncated by the host. If so, run \`bunx justin-sdk prime --full\` and read it. To fix permanently: \`bunx justin-sdk sync-rules\`. These rules are critical and override defaults.`
+    : `📋 Justin's full critical rules auto-load from ${RULES_FILE_DISPLAY}. If they are not present in your context or look truncated, run \`bunx justin-sdk prime --full\` and read the output before continuing. These rules are critical and override defaults.`;
+
+// --- rules (may throw if the prompts source can't be loaded) ----------------
+let ruleText = ''; // the block injected through the hook
+let condNames: string[] = [];
+let cloneSha: string | null = null;
+let rulesFailed: string | null = null;
+
+const stamp = readDeployedStamp(RULES_FILE);
+const fileMissing = stamp == null;
+
 try {
-  const assembled = assemble({format: 'hook'}, projectRoot);
-  guidelines = assembled.markdown;
-  guidelineCount = assembled.count;
+  // Missing file -> inject the FULL rules as a fallback; otherwise just the
+  // project-specific CONDITIONAL rules (the universal bulk is in the file).
+  const assembled = assemble(
+    {format: 'hook', partition: fileMissing ? 'full' : 'conditional'},
+    projectRoot,
+  );
+  condNames = assembled.names;
+  cloneSha = assembled.sourceSha;
+  const body = fileMissing ? assembled.markdown : assembled.text;
+  ruleText = [pointerLine(fileMissing), body]
+    .filter((s) => s.length > 0)
+    .join('\n\n');
 } catch (error) {
-  guidelinesFailed = error instanceof Error ? error.message : String(error);
+  rulesFailed = error instanceof Error ? error.message : String(error);
 }
 
 // --- repo state (branch/worktree divergence) --------------------------------
@@ -43,19 +77,40 @@ try {
   // Non-fatal: a git-inspection failure just omits the repo-state block.
 }
 
-// --- compose the single injection -------------------------------------------
-const additionalContext = [guidelines, repoState]
+// --- compose the injection (for the model) ----------------------------------
+const additionalContext = [ruleText, repoState]
   .filter((b) => b.length > 0)
   .join('\n\n');
 
+// --- drift check + systemMessage (for Justin; the model does NOT read it) ---
+const deployedSha = deployedSourceSha(stamp);
+const drift =
+  !fileMissing && cloneSha != null && deployedSha != null
+    ? deployedSha !== cloneSha.slice(0, 12)
+    : false;
+
 const parts: string[] = [];
-if (guidelinesFailed != null) {
-  parts.push(`FAILED to load rules (${guidelinesFailed})`);
+if (rulesFailed != null) {
+  parts.push(`⚠️ FAILED to load rules (${rulesFailed})`);
+} else if (fileMissing) {
+  parts.push(
+    `⚠️ rules FILE MISSING — injected full via hook (may truncate) → run: bunx justin-sdk sync-rules`,
+  );
 } else {
-  parts.push(`${guidelineCount} rule module${guidelineCount === 1 ? '' : 's'}`);
+  const sync = drift
+    ? `⚠️ STALE (file ${deployedSha} ≠ clone ${cloneSha?.slice(0, 12) ?? '?'}) → run: bunx justin-sdk sync-rules`
+    : deployedIsDirty(stamp)
+      ? `⚠️ built from a dirty tree → run: bunx justin-sdk sync-rules`
+      : '✓ in sync';
+  parts.push(`rules v${stamp?.version ?? '?'} ${sync}`);
 }
-if (repoState.length > 0) parts.push('repo state');
-const systemMessage = `justin-sdk prime · ${parts.join(' + ')}`;
+// Only label the assembled modules "conditional" in the normal case; when the
+// file is missing, `condNames` is the FULL set (already conveyed above).
+if (!fileMissing && rulesFailed == null && condNames.length > 0) {
+  parts.push(`+${condNames.length} conditional [${condNames.join(', ')}]`);
+}
+let systemMessage = `justin-sdk prime · ${parts.join(' · ')}`;
+if (repoState.length > 0) systemMessage += `\n${repoState}`;
 
 process.stdout.write(
   JSON.stringify({

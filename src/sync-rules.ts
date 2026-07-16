@@ -32,20 +32,14 @@ import {
 import {dirname, join} from 'path';
 
 import {assemble} from './plugin/lib/prime';
+import {
+  buildStamp,
+  readDeployedStamp,
+  rulesFilePath,
+} from './plugin/lib/rules-file';
 import {fail, setQuiet, success, warn} from './setup-helpers';
 
 const VM_DEFAULT_SPEC = 'github:justinhaaheim/version-manager';
-
-/** ~/.claude/rules/justin-sdk/critical-rules.md */
-function rulesFilePath(): string {
-  return join(
-    process.env.HOME ?? '',
-    '.claude',
-    'rules',
-    'justin-sdk',
-    'critical-rules.md',
-  );
-}
 
 function contentHash(s: string): string {
   return createHash('sha256').update(s).digest('hex').slice(0, 12);
@@ -127,16 +121,6 @@ function isDirty(sourceDir: string): boolean {
   }
 }
 
-const STAMP_PREFIX = '<!-- justin-sdk rules';
-
-/** Parse the deployed file's stamped content hash (for idempotency). */
-function deployedContentHash(file: string): string | null {
-  if (!existsSync(file)) return null;
-  const firstLine = readFileSync(file, 'utf-8').split('\n', 1)[0] ?? '';
-  if (!firstLine.startsWith(STAMP_PREFIX)) return null;
-  return /content ([0-9a-f]+)/.exec(firstLine)?.[1] ?? null;
-}
-
 export interface SyncRulesOptions {
   quiet?: boolean;
   /** Rewrite even when the content hash is unchanged. */
@@ -169,7 +153,7 @@ export function runSyncRules(options: SyncRulesOptions = {}): number {
   const hash = contentHash(markdown);
   const file = options.outFile ?? rulesFilePath();
 
-  if (!options.force && deployedContentHash(file) === hash) {
+  if (!options.force && readDeployedStamp(file)?.contentHash === hash) {
     success(
       `rules already in sync (content ${hash}, ${count} module${count === 1 ? '' : 's'}) — no rewrite`,
     );
@@ -181,11 +165,13 @@ export function runSyncRules(options: SyncRulesOptions = {}): number {
     warn('version-manager unavailable — stamping version as "unknown"');
   }
   const shaShort = sourceSha != null ? sourceSha.slice(0, 12) : 'unknown';
-  const dirty = sourceSha != null && isDirty(sourceDir) ? '-dirty' : '';
-  const generated = options.now ?? new Date().toISOString();
-  const stamp =
-    `${STAMP_PREFIX} · v${version} · commit ${shaShort}${dirty} · content ${hash}` +
-    ` · generated ${generated} · GENERATED FILE — do not edit; run: bunx justin-sdk sync-rules -->`;
+  const commit = `${shaShort}${sourceSha != null && isDirty(sourceDir) ? '-dirty' : ''}`;
+  const stamp = buildStamp({
+    version,
+    commit,
+    contentHash: hash,
+    generated: options.now ?? new Date().toISOString(),
+  });
   const body = `${stamp}\n\n${markdown}\n`;
 
   // Atomic write (a session can start mid-write).
@@ -195,7 +181,7 @@ export function runSyncRules(options: SyncRulesOptions = {}): number {
   renameSync(tmp, file);
 
   success(
-    `wrote ${file}\n  v${version} · commit ${shaShort}${dirty} · ${count} module${count === 1 ? '' : 's'} · content ${hash}`,
+    `wrote ${file}\n  v${version} · commit ${commit} · ${count} module${count === 1 ? '' : 's'} · content ${hash}`,
   );
   return 0;
 }
