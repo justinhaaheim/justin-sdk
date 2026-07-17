@@ -1,7 +1,7 @@
 {
   "name": "prime",
   "description": "Injects Justin's cross-project critical-rules (from the prompts repo, project-type-aware) at session start via a SessionStart hook. Assembler lives in ./lib/prime.ts; shared with the `justin-sdk prime` CLI.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": {
     "name": "Justin Haaheim"
   }

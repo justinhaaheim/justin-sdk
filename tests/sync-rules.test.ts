@@ -67,7 +67,8 @@ describe('sync-rules', () => {
     // universal content only (RN-gated module excluded from the file)
     expect(content).toContain('UNIVERSAL_A');
     expect(content).not.toContain('RN_ONLY');
-    expect(content).toContain('# 1. Critical Rules'); // headers numbered
+    expect(content).toContain('# Critical Rules'); // title itself is unnumbered
+    expect(content).not.toContain('# 1. Critical Rules');
     // stamp present with a content hash (non-git fixture -> version unknown)
     expect(content.startsWith('<!-- justin-sdk rules')).toBe(true);
     expect(/content [0-9a-f]{12}/.test(content)).toBe(true);

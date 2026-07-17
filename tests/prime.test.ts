@@ -49,7 +49,7 @@ const RN_PROJECT = () => projectRoot({expo: '*'});
 const PLAIN_PROJECT = () => projectRoot({lodash: '*'});
 
 describe('numberHeaders', () => {
-  test('numbers each level with a counter that resets under a shallower heading', () => {
+  test('numbers headings with their full dotted path, resetting deeper levels', () => {
     const input = [
       '# A',
       'body',
@@ -64,11 +64,11 @@ describe('numberHeaders', () => {
       '# 1. A',
       'body',
       '# 2. B',
-      '## 1. B.a',
-      '## 2. B.b',
-      '### 1. B.b.i',
+      '## 2.1 B.a',
+      '## 2.2 B.b',
+      '### 2.2.1 B.b.i',
       '# 3. C',
-      '## 1. C.a',
+      '## 3.1 C.a',
     ]);
   });
 
@@ -85,7 +85,16 @@ describe('numberHeaders', () => {
       '```sh',
       '# not a heading',
       '```',
-      '## 1. Also real',
+      '## 1.1 Also real',
+    ]);
+  });
+
+  test('pads a skipped intermediate level so the path stays well-formed', () => {
+    const input = ['# A', '### A.deep', '## A.b'].join('\n');
+    expect(numberHeaders(input).split('\n')).toEqual([
+      '# 1. A',
+      '### 1.1.1 A.deep',
+      '## 1.2 A.b',
     ]);
   });
 });
@@ -157,14 +166,36 @@ describe('prime assemble() partition', () => {
     expect(out.count).toBe(3);
   });
 
-  test('markdown carries the numbered "# 1. Critical Rules" header; text does not', () => {
+  test('markdown carries an UNNUMBERED "# Critical Rules" title; text does not', () => {
     const prompts = promptsFixture();
     const out = assemble(
       {format: 'markdown', partition: 'universal', promptsDir: prompts.path},
       RN_PROJECT(),
     );
-    expect(out.markdown.startsWith('# 1. Critical Rules')).toBe(true);
+    expect(out.markdown.startsWith('# Critical Rules\n')).toBe(true);
     expect(out.text).not.toContain('Critical Rules');
+  });
+
+  test('title is skipped by the numbering: modules still start at 1', () => {
+    const sb = track(createSandbox());
+    sb.writeFile('src/rules/index.md', '@./a.md\n\n@./b.md');
+    sb.writeFile('src/rules/a.md', '# Alpha\n\n## Alpha sub');
+    sb.writeFile('src/rules/b.md', '# Beta');
+    const out = assemble(
+      {format: 'markdown', partition: 'universal', promptsDir: sb.path},
+      PLAIN_PROJECT(),
+    );
+    // The title takes no number and does not consume the "1" slot, and the
+    // standalone document and the hook-injected body number identically.
+    expect(out.markdown.split('\n').filter((l) => l.startsWith('#'))).toEqual([
+      '# Critical Rules',
+      '# 1. Alpha',
+      '## 1.1 Alpha sub',
+      '# 2. Beta',
+    ]);
+    expect(out.text).toContain('# 1. Alpha');
+    expect(out.text).toContain('## 1.1 Alpha sub');
+    expect(out.text).toContain('# 2. Beta');
   });
 });
 
