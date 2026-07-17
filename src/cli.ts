@@ -263,6 +263,29 @@ void yargs(hideBin(process.argv))
     'Run an external autonomous loop: a fresh `claude -p` per iteration, gated on your real /usage quota. Run from a real terminal, not inside a Claude session.',
     (y) =>
       y
+        .option('mode', {
+          type: 'string',
+          choices: ['attachable', 'print'] as const,
+          describe:
+            'attachable: `claude --bg` — inspect with `claude logs <id>`, step in with `claude attach <id>`, answer questions from `claude agents`. print: headless `claude -p`, not attachable, a question becomes a BLOCKED verdict.',
+          default: RALPH_DEFAULTS.mode,
+        })
+        .option('blocked-wait-min', {
+          type: 'number',
+          describe:
+            'attachable only: how long a blocked iteration waits for your answer before being stopped and filed as a bead',
+          default: RALPH_DEFAULTS.blockedWaitMin,
+        })
+        .option('poll-sec', {
+          type: 'number',
+          describe: 'attachable only: seconds between agent-state polls',
+          default: RALPH_DEFAULTS.pollSec,
+        })
+        .option('verdict-path', {
+          type: 'string',
+          describe: 'attachable only: where each iteration writes its verdict',
+          default: RALPH_DEFAULTS.verdictPath,
+        })
         .option('prompt', {
           type: 'string',
           describe: 'Prompt for each iteration (a slash command works)',
@@ -332,12 +355,16 @@ void yargs(hideBin(process.argv))
         }),
     async (argv) => {
       const exitCode = await runRalph(process.cwd(), {
+        blockedWaitMin: argv['blocked-wait-min'],
         dryRun: argv['dry-run'],
         gatePollMin: argv['gate-poll-min'],
         ledgerPath: argv.ledger,
         maxBudgetUsd: argv['max-budget-usd'] ?? null,
         maxIterations: argv['max-iterations'],
+        mode: argv.mode as 'print' | 'attachable',
         model: argv.model,
+        pollSec: argv['poll-sec'],
+        verdictPath: argv['verdict-path'],
         noProgressAbort: argv['no-progress-abort'],
         onGateHit: argv['on-gate-hit'] as 'pause' | 'exit',
         permissionMode: argv['permission-mode'],

@@ -21,8 +21,14 @@
  *      can return a validated verdict object instead of a sentinel string.
  */
 import {spawnSync} from 'node:child_process';
-import {appendFileSync, mkdirSync} from 'node:fs';
-import {dirname} from 'node:path';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
+import {dirname, join} from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -68,7 +74,39 @@ export interface IterationResult {
   crashed: boolean;
 }
 
+/**
+ * How each iteration runs. These are mutually exclusive at the CLI level — the
+ * binary itself refuses `--bg` with `--print`, because "--print never starts the
+ * interactive session that `claude agents` attaches to, so the job would be
+ * unattachable". So this is a real fork, not a flag.
+ *
+ * print      — headless. Returns a --json-schema verdict directly. Cannot be
+ *              attached to or answered; a question means a BLOCKED verdict.
+ * attachable — `claude --bg`. Inspect with `claude logs <id>`, step in with
+ *              `claude attach <id>`, answer questions from `claude agents`.
+ *              No --print means no --json-schema, so the verdict arrives via a
+ *              file the iteration writes as its last act.
+ */
+export type RunMode = 'print' | 'attachable';
+
 export interface RalphOptions {
+  mode: RunMode;
+  /**
+   * Attachable mode only. How long to leave a blocked session waiting for an
+   * answer before giving up on it.
+   *
+   * This bound is the whole point. Background agents block instead of failing,
+   * which is the behaviour we want — but a blocked session nobody answers is an
+   * invisible open thread. (Measured on this machine 2026-07-16: 37 background
+   * sessions, 17 blocked, oldest 43 days.) When the bound expires we stop the
+   * session and file the question as a bead, so it lands somewhere visible
+   * instead of joining that graveyard.
+   */
+  blockedWaitMin: number;
+  /** Attachable mode only. Seconds between `claude agents --json` polls. */
+  pollSec: number;
+  /** Attachable mode only. Where the iteration writes its verdict. */
+  verdictPath: string;
   /** Prompt for each iteration. A slash command works (verified). */
   prompt: string;
   maxIterations: number;
@@ -97,19 +135,23 @@ export interface RalphOptions {
 }
 
 export const DEFAULT_OPTIONS: RalphOptions = {
+  blockedWaitMin: 15,
+  dryRun: false,
   gatePollMin: 5,
   ledgerPath: 'tmp/ralph-ledger.jsonl',
   maxBudgetUsd: null,
   maxIterations: 10,
+  mode: 'attachable',
   model: 'opus',
   noProgressAbort: 3,
   onGateHit: 'pause',
   permissionMode: 'auto',
+  pollSec: 20,
   prompt: '/loop-session',
   sessionStopPct: 50,
   timeoutMin: 45,
+  verdictPath: 'tmp/ralph-verdict.json',
   weeklyStopPct: 80,
-  dryRun: false,
 };
 
 /**
@@ -176,6 +218,112 @@ Be honest in the verdict. Reporting CONTINUE on work you did not actually
 finish, or COMPLETE to end the loop early, corrupts every downstream decision
 the runner makes.
 `.trim();
+
+/**
+ * Extra contract for attachable mode.
+ *
+ * In print mode --json-schema guarantees a verdict comes back. Here there is no
+ * --print, so nothing forces one: the model has to write the file itself, and a
+ * missing file is indistinguishable from a crash. Hence the emphasis.
+ */
+export function attachableContract(verdictPath: string): string {
+  return `${VERDICT_CONTRACT}
+
+You are running as a background agent, so there is no structured-output channel.
+Report your verdict by writing ${verdictPath} as the LAST thing you do:
+
+  {"status":"CONTINUE","summary":"<one sentence>","followUps":["<bead-id>"]}
+
+status must be exactly one of CONTINUE, COMPLETE, BLOCKED, FAILED. Write this
+file even when things went badly — a missing file is read as a crash, and the
+runner cannot tell the difference between "you failed" and "you died".
+
+You CAN ask the human a question: this session blocks and waits rather than
+failing, and they can answer from \`claude agents\`. But do not block casually.
+The runner only waits a bounded time before stopping you and filing your
+question as a bead. Ask only when you genuinely cannot proceed, and make the
+question answerable in one line.`;
+}
+
+// ---------------------------------------------------------------------------
+// Background session control
+//
+// The control surface, established empirically (2026-07-16) rather than from
+// docs, because the docs and the CLI disagree:
+//   dispatch — `claude --bg --name X "task"` prints `backgrounded · <id> · <name>`
+//   poll     — `claude agents --json` → {id, pid, state, status, waitingFor}
+//   inspect  — `claude logs <id>` / `claude attach <id>`  (both real, both hidden)
+//   stop     — kill the pid. NOT `claude stop <id>`: the --bg banner advertises
+//              that command but it is not a subcommand, so it silently degrades
+//              into a *prompt* — spawning a session that bills tokens and leaves
+//              the target running.
+// ---------------------------------------------------------------------------
+
+export interface AgentRow {
+  id: string;
+  pid: number | null;
+  name: string;
+  state: string | null;
+  status: string | null;
+  waitingFor: string | null;
+}
+
+/** Parse the `backgrounded · <id> · <name>` banner. */
+export function parseBackgroundedId(stdout: string): string | null {
+  const match = /backgrounded\s*·\s*(\S+)/.exec(stdout);
+  return match != null ? match[1] : null;
+}
+
+export function listAgents(cwd: string): AgentRow[] {
+  const proc = spawnSync('claude', ['agents', '--json'], {
+    cwd,
+    encoding: 'utf-8',
+    env: process.env,
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: 60_000,
+  });
+  if (proc.status !== 0 || proc.stdout == null) return [];
+  try {
+    const rows = JSON.parse(proc.stdout) as Array<Record<string, unknown>>;
+    return rows.map((r) => ({
+      id: String(r.id ?? ''),
+      name: String(r.name ?? ''),
+      pid: typeof r.pid === 'number' ? r.pid : null,
+      state: typeof r.state === 'string' ? r.state : null,
+      status: typeof r.status === 'string' ? r.status : null,
+      waitingFor: typeof r.waitingFor === 'string' ? r.waitingFor : null,
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export function findAgent(cwd: string, id: string): AgentRow | null {
+  return listAgents(cwd).find((r) => r.id === id) ?? null;
+}
+
+/**
+ * Best-effort stop of a background session.
+ *
+ * CAVEAT, measured rather than assumed: this is NOT a reliable kill. Background
+ * agents run under Claude Code's own daemon (`backend: "daemon"` in the job's
+ * state.json) with a `respawnFlags` entry, and a SIGTERM'd session was observed
+ * coming back under a new pid. `claude stop <id>` — which the `--bg` banner
+ * itself advertises — is not a registered subcommand and degrades into a
+ * *prompt*, so it stops nothing and bills tokens for the privilege.
+ *
+ * So the "we always clean up after ourselves" guarantee is currently
+ * best-effort. The reliable stop is `claude agents` → Ctrl+X, which is
+ * interactive-only. Tracked in home-base-aa6j.9.
+ */
+export function stopAgent(row: AgentRow | null): void {
+  if (row?.pid == null) return;
+  try {
+    process.kill(row.pid, 'SIGTERM');
+  } catch {
+    // Already gone.
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Usage gate — free, server-authoritative
@@ -312,6 +460,210 @@ export function runIteration(cwd: string, opts: RalphOptions): IterationResult {
   }
 }
 
+/**
+ * Read and validate the verdict file. Returns null when it is missing or
+ * malformed, which the caller treats as a crash — deliberately, since a silent
+ * "assume it worked" would let a dead iteration look like a successful one.
+ */
+export function readVerdictFile(cwd: string, path: string): Verdict | null {
+  const full = path.startsWith('/') ? path : join(cwd, path);
+  if (!existsSync(full)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(full, 'utf8')) as Partial<Verdict>;
+    const valid: VerdictStatus[] = ['CONTINUE', 'COMPLETE', 'BLOCKED', 'FAILED'];
+    if (
+      typeof parsed.status !== 'string' ||
+      !valid.includes(parsed.status as VerdictStatus)
+    ) {
+      return null;
+    }
+    return {
+      followUps: Array.isArray(parsed.followUps) ? parsed.followUps : [],
+      status: parsed.status as VerdictStatus,
+      summary: typeof parsed.summary === 'string' ? parsed.summary : '',
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * One iteration as an attachable background agent.
+ *
+ * Trade-off vs print mode: no --json-schema and no token/cost telemetry, since
+ * `--bg` returns immediately and never emits a result object. What it buys is
+ * the ability to see the work (`claude logs`), step into it (`claude attach`),
+ * and answer a question mid-flight instead of losing the iteration.
+ */
+export async function runIterationAttachable(
+  cwd: string,
+  opts: RalphOptions,
+  n: number,
+  onBlocked: (row: AgentRow, id: string) => void,
+): Promise<IterationResult> {
+  const verdictFull = opts.verdictPath.startsWith('/')
+    ? opts.verdictPath
+    : join(cwd, opts.verdictPath);
+  // A stale verdict from the previous iteration would be read as this one's.
+  rmSync(verdictFull, {force: true});
+
+  // The contract MUST carry an absolute path. A background agent does not run
+  // in the project directory: its cwd is its own job dir (~/.claude/jobs/<id>/),
+  // even though `claude agents --json` and the job's state.json both report cwd
+  // as the project. A relative path therefore lands in the job dir and the
+  // runner never sees it — observed exactly once, cost one confusing iteration.
+  const name = `ralph-${n}`;
+  const started = Date.now();
+  const dispatch = spawnSync(
+    'claude',
+    [
+      '--bg',
+      '--name',
+      name,
+      '--model',
+      opts.model,
+      '--permission-mode',
+      opts.permissionMode,
+      '--append-system-prompt',
+      attachableContract(verdictFull),
+      opts.prompt,
+    ],
+    {cwd, encoding: 'utf-8', env: process.env, timeout: 120_000},
+  );
+
+  const id = parseBackgroundedId(dispatch.stdout ?? '');
+  if (id == null) {
+    return {
+      costUsd: 0,
+      crashed: true,
+      durationMs: Date.now() - started,
+      isError: true,
+      numTurns: 0,
+      sessionId: null,
+      subtype: 'dispatch-failed',
+      tokens: emptyTokens(),
+      verdict: null,
+    };
+  }
+
+  process.stdout.write(
+    `   ${DIM}background ${id} · inspect: claude logs ${id} · step in: claude attach ${id}${RESET}\n`,
+  );
+
+  const deadline = started + opts.timeoutMin * 60_000;
+  let blockedSince: number | null = null;
+  let notified = false;
+
+  for (;;) {
+    await sleep(opts.pollSec * 1000);
+    const row = findAgent(cwd, id);
+    const verdict = readVerdictFile(cwd, opts.verdictPath);
+
+    // The verdict file is the real completion signal. A session can linger in
+    // agent view after finishing its work, so trust the file over the state.
+    if (verdict != null) {
+      stopAgent(row);
+      return {
+        costUsd: 0,
+        crashed: false,
+        durationMs: Date.now() - started,
+        isError: false,
+        numTurns: 0,
+        sessionId: id,
+        subtype: 'success',
+        tokens: emptyTokens(),
+        verdict,
+      };
+    }
+
+    // Finished (or vanished) without writing a verdict. Give the file one grace
+    // poll to appear — the session can report `done` a beat before the write
+    // lands — then call it a crash rather than polling to the timeout, which is
+    // what the first version did for a full 45 minutes.
+    const finished =
+      row == null ||
+      row.state === 'done' ||
+      (row.pid == null && row.state !== 'blocked');
+    if (finished) {
+      await sleep(opts.pollSec * 1000);
+      const late = readVerdictFile(cwd, opts.verdictPath);
+      if (late != null) {
+        stopAgent(row);
+        return {
+          costUsd: 0,
+          crashed: false,
+          durationMs: Date.now() - started,
+          isError: false,
+          numTurns: 0,
+          sessionId: id,
+          subtype: 'success',
+          tokens: emptyTokens(),
+          verdict: late,
+        };
+      }
+      return {
+        costUsd: 0,
+        crashed: true,
+        durationMs: Date.now() - started,
+        isError: true,
+        numTurns: 0,
+        sessionId: id,
+        subtype: 'no-verdict',
+        tokens: emptyTokens(),
+        verdict: null,
+      };
+    }
+
+    if (row.state === 'blocked') {
+      if (blockedSince == null) {
+        blockedSince = Date.now();
+      }
+      if (!notified) {
+        onBlocked(row, id);
+        notified = true;
+      }
+      // Bounded wait: answer it, or it gets filed as a bead rather than stranded.
+      if (Date.now() - blockedSince > opts.blockedWaitMin * 60_000) {
+        stopAgent(row);
+        return {
+          costUsd: 0,
+          crashed: false,
+          durationMs: Date.now() - started,
+          isError: false,
+          numTurns: 0,
+          sessionId: id,
+          subtype: 'blocked-timeout',
+          tokens: emptyTokens(),
+          verdict: {
+            followUps: [],
+            status: 'BLOCKED',
+            summary: `Waited ${opts.blockedWaitMin}m for an answer to "${row.waitingFor ?? 'a question'}" and got none. Session stopped so it would not strand. Re-run to retry.`,
+          },
+        };
+      }
+    } else {
+      // Answered, and moving again.
+      blockedSince = null;
+      notified = false;
+    }
+
+    if (Date.now() > deadline) {
+      stopAgent(row);
+      return {
+        costUsd: 0,
+        crashed: true,
+        durationMs: Date.now() - started,
+        isError: true,
+        numTurns: 0,
+        sessionId: id,
+        subtype: 'timeout',
+        tokens: emptyTokens(),
+        verdict: null,
+      };
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Preflight
 // ---------------------------------------------------------------------------
@@ -413,8 +765,11 @@ interface RunTotals {
 function renderHeader(cwd: string, opts: RalphOptions): void {
   process.stdout.write(
     `\n${BOLD}ralph${RESET} ${DIM}→${RESET} ${cwd}\n` +
-      `${DIM}prompt=${opts.prompt}  model=${opts.model}  mode=${opts.permissionMode}  ` +
-      `max=${opts.maxIterations} iters  session-stop=${opts.sessionStopPct}%  week-stop=${opts.weeklyStopPct}%${RESET}\n\n`,
+      `${DIM}prompt=${opts.prompt}  model=${opts.model}  perms=${opts.permissionMode}  ` +
+      `max=${opts.maxIterations} iters  session-stop=${opts.sessionStopPct}%  week-stop=${opts.weeklyStopPct}%${RESET}\n` +
+      (opts.mode === 'attachable'
+        ? `${DIM}mode=attachable — inspect with \`claude agents\`; blocked iterations wait ${opts.blockedWaitMin}m for you${RESET}\n\n`
+        : `${DIM}mode=print — headless, not attachable; a question becomes a BLOCKED verdict${RESET}\n\n`),
   );
 }
 
@@ -495,6 +850,31 @@ function appendLedger(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Get a blocked iteration in front of the human.
+ *
+ * Best-effort and deliberately dumb: a terminal bell plus a macOS notification.
+ * The real "answer from my phone" path is Remote Control, which pushes
+ * permission prompts and questions to the Claude app — but it attaches to
+ * interactive sessions, and whether it composes with `--bg` is untested. Until
+ * that is settled this at least makes a block audible rather than silent, which
+ * is the actual failure mode (17 sessions on this machine blocked unnoticed,
+ * oldest 43 days).
+ */
+function notifyBlocked(cwd: string, n: number, row: AgentRow): void {
+  process.stdout.write(''); // bell
+  if (process.platform !== 'darwin') return;
+  const message = `Iteration ${n} needs input: ${row.waitingFor ?? 'a question'}`;
+  spawnSync(
+    'osascript',
+    [
+      '-e',
+      `display notification ${JSON.stringify(message)} with title "ralph" sound name "Ping"`,
+    ],
+    {cwd, encoding: 'utf-8', timeout: 10_000},
+  );
 }
 
 /**
@@ -592,7 +972,18 @@ export async function runRalph(
 
     // --- work ---
     const headBefore = gitHead(cwd);
-    const result = runIteration(cwd, opts);
+    const result =
+      opts.mode === 'attachable'
+        ? await runIterationAttachable(cwd, opts, n, (row, id) => {
+            process.stdout.write(
+              `\n${YELLOW}?${RESET}  ${BOLD}iteration ${n} needs you${RESET} — ${row.waitingFor ?? 'waiting for input'}\n` +
+                `   ${DIM}answer it:  claude agents   (Space to peek, type a reply)${RESET}\n` +
+                `   ${DIM}or step in: claude attach ${id}${RESET}\n` +
+                `   ${DIM}waiting up to ${opts.blockedWaitMin}m, then filing it as a bead and moving on${RESET}\n\n`,
+            );
+            notifyBlocked(cwd, n, row);
+          })
+        : runIteration(cwd, opts);
     const headAfter = gitHead(cwd);
     const progressed = headBefore !== headAfter;
 
