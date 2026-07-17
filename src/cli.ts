@@ -18,6 +18,7 @@ import {runFix} from './fix';
 import {runInit} from './init';
 import {runMigrateToPrime} from './migrate-to-prime';
 import {runPrime} from './plugin/lib/prime';
+import {DEFAULT_OPTIONS as RALPH_DEFAULTS, runRalph} from './ralph';
 import {runSyncRules} from './sync-rules';
 import {runSignal} from './signal';
 import {runUpdate} from './update';
@@ -253,6 +254,97 @@ void yargs(hideBin(process.argv))
         channel: argv.channel as string,
         changelog: changelog !== '' ? changelog : null,
         platform: argv.platform,
+      });
+      process.exit(exitCode);
+    },
+  )
+  .command(
+    'ralph',
+    'Run an external autonomous loop: a fresh `claude -p` per iteration, gated on your real /usage quota. Run from a real terminal, not inside a Claude session.',
+    (y) =>
+      y
+        .option('prompt', {
+          type: 'string',
+          describe: 'Prompt for each iteration (a slash command works)',
+          default: RALPH_DEFAULTS.prompt,
+        })
+        .option('max-iterations', {
+          type: 'number',
+          describe: 'Maximum iterations before stopping',
+          default: RALPH_DEFAULTS.maxIterations,
+        })
+        .option('session-stop-pct', {
+          type: 'number',
+          describe:
+            'Pause/exit when the 5-hour session window reaches this percent',
+          default: RALPH_DEFAULTS.sessionStopPct,
+        })
+        .option('weekly-stop-pct', {
+          type: 'number',
+          describe: 'Pause/exit when the weekly window reaches this percent',
+          default: RALPH_DEFAULTS.weeklyStopPct,
+        })
+        .option('on-gate-hit', {
+          type: 'string',
+          choices: ['pause', 'exit'] as const,
+          describe: 'Wait for quota to reset, or stop the run',
+          default: RALPH_DEFAULTS.onGateHit,
+        })
+        .option('gate-poll-min', {
+          type: 'number',
+          describe: 'Minutes between (free) quota re-checks while paused',
+          default: RALPH_DEFAULTS.gatePollMin,
+        })
+        .option('max-budget-usd', {
+          type: 'number',
+          describe: 'Hard per-iteration cost cap (omit to disable)',
+        })
+        .option('model', {
+          type: 'string',
+          describe: 'Model for each iteration',
+          default: RALPH_DEFAULTS.model,
+        })
+        .option('permission-mode', {
+          type: 'string',
+          describe: 'Permission mode for each iteration',
+          default: RALPH_DEFAULTS.permissionMode,
+        })
+        .option('timeout-min', {
+          type: 'number',
+          describe: 'Per-iteration wall-clock timeout in minutes',
+          default: RALPH_DEFAULTS.timeoutMin,
+        })
+        .option('no-progress-abort', {
+          type: 'number',
+          describe:
+            'Abort after this many consecutive iterations with no new commit',
+          default: RALPH_DEFAULTS.noProgressAbort,
+        })
+        .option('ledger', {
+          type: 'string',
+          describe: 'Path for the per-iteration JSONL ledger',
+          default: RALPH_DEFAULTS.ledgerPath,
+        })
+        .option('dry-run', {
+          type: 'boolean',
+          describe: 'Show quota + config and exit without spawning iterations',
+          default: false,
+        }),
+    async (argv) => {
+      const exitCode = await runRalph(process.cwd(), {
+        dryRun: argv['dry-run'],
+        gatePollMin: argv['gate-poll-min'],
+        ledgerPath: argv.ledger,
+        maxBudgetUsd: argv['max-budget-usd'] ?? null,
+        maxIterations: argv['max-iterations'],
+        model: argv.model,
+        noProgressAbort: argv['no-progress-abort'],
+        onGateHit: argv['on-gate-hit'] as 'pause' | 'exit',
+        permissionMode: argv['permission-mode'],
+        prompt: argv.prompt,
+        sessionStopPct: argv['session-stop-pct'],
+        timeoutMin: argv['timeout-min'],
+        weeklyStopPct: argv['weekly-stop-pct'],
       });
       process.exit(exitCode);
     },
