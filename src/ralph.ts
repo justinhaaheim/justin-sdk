@@ -507,11 +507,12 @@ export async function runIterationAttachable(
   // A stale verdict from the previous iteration would be read as this one's.
   rmSync(verdictFull, {force: true});
 
-  // The contract MUST carry an absolute path. A background agent does not run
-  // in the project directory: its cwd is its own job dir (~/.claude/jobs/<id>/),
-  // even though `claude agents --json` and the job's state.json both report cwd
-  // as the project. A relative path therefore lands in the job dir and the
-  // runner never sees it — observed exactly once, cost one confusing iteration.
+  // The contract carries an absolute path because a relative one is ambiguous
+  // to the model, not because the cwd is wrong. Measured: a background agent
+  // runs in the project directory (`pwd` and `git rev-parse --show-toplevel`
+  // both report it). But given a relative `tmp/verdict.json`, one run resolved
+  // it against its job dir (~/.claude/jobs/<id>/tmp/) instead, and the runner
+  // never found the file. An absolute path removes the choice.
   const name = `ralph-${n}`;
   const started = Date.now();
   const dispatch = spawnSync(
