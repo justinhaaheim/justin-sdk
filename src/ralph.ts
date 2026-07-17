@@ -141,6 +141,42 @@ export const VERDICT_SCHEMA = {
   type: 'object',
 } as const;
 
+/**
+ * The verdict contract, injected per-run rather than written into the skill.
+ *
+ * `/loop-session` is shared with the interactive path and shouldn't carry
+ * runner-specific plumbing, so the loop semantics are appended to the system
+ * prompt at spawn time instead. --json-schema alone forces the SHAPE of the
+ * answer; this is what tells the model how to CHOOSE between the four states.
+ */
+export const VERDICT_CONTRACT = `
+You are running as one iteration of an autonomous loop. An external runner
+spawns you, you do ONE unit of work, you exit, and it spawns a fresh you.
+Nothing survives in context between iterations — only git, beads, and the
+working tree carry state forward. Act accordingly.
+
+Rules for this iteration:
+- Do exactly ONE unit of work. Do not batch. The loop will call you again.
+- Before concluding something is unimplemented, search for it. A failed search
+  is not proof of absence.
+- No placeholder or stub implementations. Finish what you start or report it.
+- File follow-up work you discover as beads rather than doing it now.
+- Commit your work. An iteration that leaves nothing committed is a lost one.
+- Do NOT attempt to recover a broken tree with destructive git commands
+  (reset --hard, clean -fd, restore .). The runner owns rescue. Report FAILED.
+
+You MUST end by reporting a verdict:
+- COMPLETE: no eligible work remains. The loop stops.
+- CONTINUE: you did one unit of work and more remains. The loop continues.
+- BLOCKED: you need a human decision, a credential, or a physical device.
+  File a bead describing what you need. The loop stops.
+- FAILED: checks are red and you could not fix them. The loop stops.
+
+Be honest in the verdict. Reporting CONTINUE on work you did not actually
+finish, or COMPLETE to end the loop early, corrupts every downstream decision
+the runner makes.
+`.trim();
+
 // ---------------------------------------------------------------------------
 // Usage gate — free, server-authoritative
 // ---------------------------------------------------------------------------
@@ -218,6 +254,8 @@ export function runIteration(cwd: string, opts: RalphOptions): IterationResult {
     opts.model,
     '--permission-mode',
     opts.permissionMode,
+    '--append-system-prompt',
+    VERDICT_CONTRACT,
   ];
   if (opts.maxBudgetUsd != null) {
     args.push('--max-budget-usd', String(opts.maxBudgetUsd));
@@ -382,11 +420,12 @@ function renderHeader(cwd: string, opts: RalphOptions): void {
 
 function renderIteration(
   n: number,
-  max: number,
+  opts: RalphOptions,
   usage: UsageSnapshot,
   result: IterationResult,
   progressed: boolean,
 ): void {
+  const max = opts.maxIterations;
   const status: VerdictStatus | 'CRASH' = result.crashed
     ? 'CRASH'
     : (result.verdict?.status ?? 'FAILED');
@@ -413,7 +452,8 @@ function renderIteration(
     );
   }
   process.stdout.write(
-    `   ${DIM}session${RESET} ${quotaBar(usage.sessionPct, 100)}\n`,
+    `   ${DIM}session${RESET} ${quotaBar(usage.sessionPct, opts.sessionStopPct)}` +
+      `   ${DIM}week${RESET} ${quotaBar(usage.weekPct, opts.weeklyStopPct)}\n`,
   );
 }
 
@@ -564,7 +604,7 @@ export async function runRalph(
     totals.tokens.cacheCreation += result.tokens.cacheCreation;
     if (progressed) totals.commits++;
 
-    renderIteration(n, opts.maxIterations, usage, result, progressed);
+    renderIteration(n, opts, usage, result, progressed);
     appendLedger(cwd, opts.ledgerPath, {
       costUsd: result.costUsd,
       durationMs: result.durationMs,
