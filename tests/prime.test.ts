@@ -97,6 +97,16 @@ describe('numberHeaders', () => {
       '## 1.2 A.b',
     ]);
   });
+
+  test('prefix namespaces the numbers (P-1 / P-1.1 / P-2, no trailing period)', () => {
+    const input = ['# A', '## A.a', '## A.b', '# B'].join('\n');
+    expect(numberHeaders(input, 'P-').split('\n')).toEqual([
+      '# P-1 A',
+      '## P-1.1 A.a',
+      '## P-1.2 A.b',
+      '# P-2 B',
+    ]);
+  });
 });
 
 describe('prime assemble() partition', () => {
@@ -196,6 +206,34 @@ describe('prime assemble() partition', () => {
     expect(out.text).toContain('# 1. Alpha');
     expect(out.text).toContain('## 1.1 Alpha sub');
     expect(out.text).toContain('# 2. Beta');
+  });
+
+  test("the 'conditional' hook injection is P-namespaced; 'universal' is plain", () => {
+    const sb = track(createSandbox());
+    sb.writeFile('src/rules/index.md', '@./u.md\n\n@./rn.md');
+    sb.writeFile('src/rules/u.md', '# Universal\n\n## Universal sub');
+    sb.writeFile(
+      'src/rules/rn.md',
+      '---\nincludeIf: [isReactNative]\n---\n\n# RN one\n\n## RN sub\n\n# RN two',
+    );
+    // Conditional partition (the hook injection) → P- prefix, starting at P-1.
+    const cond = assemble(
+      {format: 'markdown', partition: 'conditional', promptsDir: sb.path},
+      RN_PROJECT(),
+    );
+    expect(cond.text.split('\n').filter((l) => l.startsWith('#'))).toEqual([
+      '# P-1 RN one',
+      '## P-1.1 RN sub',
+      '# P-2 RN two',
+    ]);
+    // Universal partition (the autoloaded file) → plain, unaffected by the prefix.
+    const uni = assemble(
+      {format: 'markdown', partition: 'universal', promptsDir: sb.path},
+      RN_PROJECT(),
+    );
+    expect(uni.text).toContain('# 1. Universal');
+    expect(uni.text).toContain('## 1.1 Universal sub');
+    expect(uni.text).not.toContain('P-');
   });
 });
 

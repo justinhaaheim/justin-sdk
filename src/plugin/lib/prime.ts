@@ -332,16 +332,21 @@ function buildHeader(): string {
  * Top-level headings render as `1.` (trailing period); deeper ones as the bare
  * dotted path. Headings inside fenced code blocks are left alone.
  *
+ * `prefix` namespaces the numbers (e.g. 'P-' → `P-1`, `P-2.1`). The conditional
+ * hook injection uses 'P-' so its numbers don't collide with the plain 1/2/3 of
+ * the autoloaded universal rules file — the two documents coexist in one session
+ * and "see P-3.1" must be unambiguous from "see 2.1". A prefixed top-level
+ * heading has NO trailing period (`P-1`, not `P-1.`).
+ *
  * Hand-rolled on purpose: this runs inside assemble(), which the plugin calls
  * from its marketplace cache where there is NO node_modules — a markdown-AST
  * lib (remark/mdast) could not be imported there without bundling it in. ATX
  * heading detection plus a counter stack is a poor use of an AST anyway.
  *
  * Callers pass the BODY only: the '# Critical Rules' title is prepended after
- * numbering so it stays unnumbered (and so the standalone document and the
- * hook injection carry identical numbers).
+ * numbering so it stays unnumbered.
  */
-export function numberHeaders(markdown: string): string {
+export function numberHeaders(markdown: string, prefix = ''): string {
   const counters: number[] = [];
   let inFence = false;
   return markdown
@@ -361,7 +366,11 @@ export function numberHeaders(markdown: string): string {
       const next = (counters[level - 1] ?? 0) + 1;
       counters.length = level; // reset all deeper-level counters
       counters[level - 1] = next;
-      const label = level === 1 ? `${next}.` : counters.join('.');
+      const path = counters.join('.');
+      // Prefixed: `P-1` / `P-2.1` (no trailing period). Plain: `1.` at the top
+      // level, bare dotted path below.
+      const label =
+        prefix !== '' ? `${prefix}${path}` : level === 1 ? `${path}.` : path;
       return `${m[1]} ${label} ${m[2]}`;
     })
     .join('\n');
@@ -410,9 +419,14 @@ export function assemble(opts: PrimeOptions, projectRoot: string): Assembled {
     0,
     partition,
   );
-  // Number the body only, then prepend the title — the title carries no number,
-  // and both `text` and `markdown` share one numbering.
-  const numbered = numberHeaders(text);
+  // Number the body only, then prepend the title (the title carries no number).
+  // The conditional partition is the hook injection, which coexists in-session
+  // with the plain-numbered universal rules FILE — give it the 'P-' namespace so
+  // "see P-3.1" is unambiguous from the file's "2.1". Every other partition
+  // stands alone (the file, or the missing-file/`--full` fallbacks), so it uses
+  // plain numbering.
+  const prefix = partition === 'conditional' ? 'P-' : '';
+  const numbered = numberHeaders(text, prefix);
   return {
     count,
     names,
