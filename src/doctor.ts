@@ -16,6 +16,11 @@ import {existsSync, readFileSync, statSync} from 'fs';
 import {resolve} from 'path';
 
 import {PINNED, PROMPTS_PIN} from './pinned-versions';
+import {
+  eslintWorktreeStatus,
+  prettierWorktreeStatus,
+  worktreeGitStatus,
+} from './worktree-ignore';
 
 const IS_REMOTE = process.env.CLAUDE_CODE_REMOTE === 'true';
 
@@ -155,6 +160,69 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
             };
           }
           return {pass: true};
+        },
+      },
+    },
+    // Worktree hygiene. These live in base-setup (universal) ON PURPOSE: the
+    // usual failure is a project NOT being enrolled in gitignore/eslint/prettier
+    // -setup, so a surface-specific component check would never fire for exactly
+    // the projects that need it. Reported as independent SIBLINGS so one missing
+    // surface doesn't mask the others. tsconfig is intentionally NOT checked —
+    // TS skips dot-dirs, so .claude/worktrees is already invisible to tsc.
+    {
+      check: {
+        label: 'WORKTREE_GITIGNORE',
+        fn: (): CheckResult => {
+          const status = worktreeGitStatus(projectRoot);
+          if (status === 'committed' || status === 'not-git') {
+            return {pass: true};
+          }
+          const message =
+            status === 'ephemeral'
+              ? '.claude/worktrees is ignored only by a non-committed layer (global git ignore or .git/info/exclude) — that does NOT travel with the repo, so EAS Build and fresh clones still archive the worktrees'
+              : '.claude/worktrees is not git-ignored';
+          return {
+            fix: 'Run: bunx justin-sdk add gitignore (adds .claude/worktrees/ to the committed .gitignore)',
+            fixCommand: 'bunx justin-sdk add gitignore',
+            message,
+            pass: false,
+          };
+        },
+      },
+    },
+    {
+      check: {
+        label: 'WORKTREE_ESLINT',
+        severity: 'warn',
+        fn: (): CheckResult => {
+          const status = eslintWorktreeStatus(projectRoot);
+          if (!status.applicable || status.covered) return {pass: true};
+          return {
+            fix: `Add '**/.claude/worktrees/' to the ignores in ${status.configFile ?? 'your eslint config'}`,
+            message: `${status.configFile ?? 'eslint config'} does not ignore .claude/worktrees — eslint will lint worktree copies (turns signal red)`,
+            pass: false,
+            severity: 'warn',
+          };
+        },
+      },
+    },
+    {
+      check: {
+        label: 'WORKTREE_PRETTIER',
+        severity: 'warn',
+        fn: (): CheckResult => {
+          const status = prettierWorktreeStatus(
+            projectRoot,
+            worktreeGitStatus(projectRoot),
+          );
+          if (!status.applicable || status.covered) return {pass: true};
+          return {
+            fix: "Add '**/.claude/worktrees/' to .prettierignore (or ensure the committed .gitignore covers it — prettier reads .gitignore by default)",
+            message:
+              'prettier will format .claude/worktrees copies (neither .prettierignore nor the committed .gitignore excludes it)',
+            pass: false,
+            severity: 'warn',
+          };
         },
       },
     },

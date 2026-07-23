@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -22,6 +22,7 @@
     ".claude-plugin"
   ],
   "dependencies": {
+    "ignore": "^7.0.6",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
