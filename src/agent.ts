@@ -198,21 +198,21 @@ tracking in a project, handling migration from older tools automatically.
    \`br sync --import-only --orphans allow --force\`. This is important:
    the default \`--orphans strict\` mode silently drops issues with
    unresolvable dependency references. \`allow\` mode imports everything.
-6. **AGENTS.md** — auto-detects stale bd content (END BEADS INTEGRATION
-   marker, \`**bd** (beads)\` phrase, \`bd onboard\` command) and backs it
-   up to \`tmp/AGENTS.md.bd-backup-TIMESTAMP\` before regenerating with
-   \`br agents --add --force\`. Then appends Justin's beads *workflow*
-   prompt (the "## Beads workflow (br)" section — when/why to use beads)
-   after the br-generated command reference. (No hardcoded "Dependency
-   Direction" section anymore — \`br agents\` owns the command reference.)
-7. **CLAUDE.md** — ensures CLAUDE.md @-links AGENTS.md (\`@AGENTS.md\`) so
-   the beads workflow prompt loads recursively. No separate
-   docs/prompts/BEADS.md is created — the workflow prompt lives in AGENTS.md,
-   co-located with the SDK so it versions alongside beads. Idempotent.
-8. **.prettierignore** — appends \`.beads\` if not already present
-9. **.claude/settings.json** — adds \`br\` to \`sandbox.excludedCommands\`
-10. **justin-sdk.config.json** — adds \`beads-setup\` to \`components\`
-11. **git commit** — stages all beads-related files and commits
+6. **.prettierignore** — appends \`.beads\` if not already present
+7. **.claude/settings.json** — adds \`br\` to \`sandbox.excludedCommands\`
+8. **justin-sdk.config.json** — adds \`beads-setup\` to \`components\`
+9. **git commit** — stages all beads-related files and commits
+
+**No prompt files are written.** beads-setup installs *tooling* only — it does
+NOT run \`br agents --add\`, does NOT create or modify AGENTS.md, and does NOT
+add an \`@AGENTS.md\` reference to CLAUDE.md. Beads *guidance* is authored once
+in the prompts repo (\`~/Dev/prompts/src/rules/beads-workflow.md\`) and injected
+into every session by the \`prime\` SessionStart hook + \`~/.claude/rules/\`.
+\`br agents\` output is upstream-owned and had drifted from Justin's guidance
+(it still referenced \`bd\`, \`br sync --flush-only\`, and a session protocol
+that no longer applies now that every project auto-flushes), so installing a
+second staler copy per-project was worse than having none. To remove an
+AGENTS.md a project no longer wants, use \`bunx justin-sdk migrate-to-prime\`.
 
 ### Running it
 
@@ -407,12 +407,16 @@ with \`pwd\` if unsure.
 This trips up migration verification — you run \`br list | wc -l\`, see
 6 issues, assume the import dropped 14, when actually 14 are just closed.
 
-### 4. \`br agents --add\` APPENDS, doesn't replace
+### 4. Don't run \`br agents --add\` — ever
 
-When you run \`br agents --add --force\` on an existing AGENTS.md, it
-appends its content instead of replacing. The \`add beads\` script
-auto-detects stale bd content and replaces the file first, but if you
-call \`br agents\` directly, be aware.
+beads-setup deliberately never calls it, and neither should you. Its output
+is hardcoded upstream (beads_rust \`src/cli/commands/agents.rs\`) and is stale
+relative to Justin's guidance: it references \`bd\`, tells you to run
+\`br sync --flush-only\` (every project auto-flushes now), and adds a "Session
+Protocol" that contradicts the real workflow. It also *appends* rather than
+replaces, so running it twice stacks duplicate blocks. The canonical beads
+guidance is \`~/Dev/prompts/src/rules/beads-workflow.md\`, delivered by the
+\`prime\` hook.
 
 ### 5. mise rate-limited by GitHub
 

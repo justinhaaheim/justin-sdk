@@ -1,10 +1,11 @@
 /**
  * beads-setup.ts — Deterministic beads_rust setup for any project.
  *
- * Orchestrates: mise.toml, br install, migration, br init, AGENTS.md
- * (br command reference + co-located beads workflow prompt), CLAUDE.md
- * (ensures an @AGENTS.md reference), .prettierignore, .claude/settings.json,
- * and the beads-setup component registration.
+ * Orchestrates: mise.toml, br install, migration, br init, .prettierignore,
+ * .claude/settings.json, and the beads-setup component registration.
+ *
+ * This is tooling-only. Beads *guidance* is authored in the prompts repo and
+ * injected by the `prime` SessionStart hook — beads-setup writes no prompts.
  *
  * Runs base-setup as a precondition so the foundation layer is always
  * present before beads-specific steps run.
@@ -323,185 +324,15 @@ function stepImportIssues(
   return true;
 }
 
-// ---------------------------------------------------------------------------
-// Beads workflow prompt (co-located with the SDK)
-// ---------------------------------------------------------------------------
-
-// Marker used to detect (idempotently) whether AGENTS.md already has the
-// workflow prompt appended.
-const BEADS_WORKFLOW_MARKER = '## Beads workflow (br)';
-
-// Justin's opinionated "when and why to use beads" prompt. `br agents --add`
-// writes the command *reference* into AGENTS.md; this is appended after it to
-// cover the workflow/process side. It lives here (rather than the general
-// prompts repo) so it versions alongside beads itself. CLAUDE.md @-links
-// AGENTS.md, so Claude Code loads this recursively.
-const BEADS_WORKFLOW_CONTENT = `
-${BEADS_WORKFLOW_MARKER} — how Justin wants issues tracked
-
-This project uses **beads_rust** (\`br\`) as the single source of truth for plans,
-tasks, and progress. The command reference is above; this section is about *when*
-and *why* to use it.
-
-**ALWAYS use beads for ALL work.** Every task — even trivial ones — gets a bead.
-This is non-negotiable: beads provide accountability, trackability, and a durable
-audit trail that survives across sessions. **Do NOT write planning documents in
-\`docs/plans/\` or anywhere else, and do NOT use markdown TODO lists.** Use beads.
-
-### Why this matters
-
-Context evaporates between sessions. Without externalized state, resuming work
-means rebuilding context from chat history (gone), file diffs (lossy), and memory
-(fragile). The fix: **always capture "what's next" at the END of a session, while
-context is fresh — not at the START of the next one, when it's gone.**
-
-- Don't end a session with in-progress beads in vague states. Update their notes.
-- Don't end without creating beads for the follow-ups you noticed during the work.
-- Don't leave the project in a state where "what to work on next" requires reading code.
-
-The hand-off moment (end of session, end of an epic phase, mid-task interrupt) is
-the most valuable place to apply this. Treat it as a first-class step.
-
-### When you start work
-
-Decide which case you're in:
-
-1. **Trivial task** (single file edit, simple fix) — create one bead, do the work, close it.
-2. **Non-trivial task** (multiple files, real design decisions, multi-session work) —
-   create an **epic**, flesh out its description / design / acceptance-criteria /
-   notes fields, then break it into **child beads** with \`--parent EPIC_ID\`
-   (sub-beads auto-number as \`EPIC_ID.1\`, \`EPIC_ID.2\`, ...). Using \`--parent\`
-   creates the sub-bead AND the parent-child relationship in one step — prefer it
-   over \`br dep add\` for epic / sub-bead links. Share the plan and wait for
-   approval before implementing.
-3. **Already-planned work** — check \`br ready\` for the highest-priority unblocked
-   bead and claim it (\`br update <id> --status=in_progress\`).
-
-### During work
-
-- Update status as you go: \`in_progress\` when claimed, \`closed\` with a \`--reason\` when done.
-- Discover a follow-up? Create a bead for it immediately.
-- Surprises, decisions, dead-ends worth remembering — append to the bead's \`notes\`.
-  The bead is the durable memory; chat history is not.
-
-### When you finish (or hit a stopping point)
-
-Always end with:
-
-1. \`br sync --flush-only\` — exports the DB to \`.beads/issues.jsonl\` (committed in git).
-2. \`git add\` your changes (code + \`.beads/issues.jsonl\`).
-3. \`git commit\` (see the commit guidelines).
-
-For a multi-bead epic handed off mid-stream, give Justin a short handoff message:
-the epic id, the branch, what's done, and which bead to claim next.
-
-### When Justin asks "what should I work on?"
-
-- \`br ready\` — open, unblocked beads ordered by priority.
-- \`br epic status\` — how active epics are progressing.
-- Present concrete options with context — don't make him read raw command output.
-  Help him pick something that moves toward a meaningful milestone.
-`;
-
-/**
- * Detects stale `bd` (legacy beads) content in AGENTS.md.
- *
- * `br agents --add` appends to AGENTS.md rather than replacing it, so if
- * an old bd-era AGENTS.md exists, the result is a messy stack of old bd
- * content and new br content. This detects that situation so we can
- * back up the file and start fresh.
- */
-function hasStaleBeadsContent(agentsMdContent: string): boolean {
-  // Strong signal: bd's end-of-content marker
-  if (agentsMdContent.includes('END BEADS INTEGRATION')) return true;
-  // Strong signal: bd's header phrasing
-  if (agentsMdContent.includes('**bd** (beads)')) return true;
-  // Strong signal: `bd onboard` (bd-specific command)
-  if (agentsMdContent.includes('bd onboard')) return true;
-  return false;
-}
-
-function stepAgentsMd(projectRoot: string): boolean {
-  const agentsMd = resolve(projectRoot, 'AGENTS.md');
-
-  // If AGENTS.md has stale bd content, back it up and replace with a
-  // placeholder so br agents --add --force writes clean content.
-  if (existsSync(agentsMd)) {
-    const existing = readFileSync(agentsMd, 'utf-8');
-    if (hasStaleBeadsContent(existing)) {
-      const tmpDir = resolve(projectRoot, 'tmp');
-      ensureDir(tmpDir);
-      const timestamp = new Date()
-        .toISOString()
-        .replace(/[:.]/g, '-')
-        .slice(0, 19);
-      const backupPath = resolve(tmpDir, `AGENTS.md.bd-backup-${timestamp}`);
-      cpSync(agentsMd, backupPath, {force: true});
-      writeFileSync(agentsMd, '# Agent Instructions\n');
-      success(
-        `Detected stale bd content in AGENTS.md; backed up to tmp/AGENTS.md.bd-backup-${timestamp} and reset`,
-      );
-    }
-  } else {
-    // Pre-create an empty AGENTS.md so `br agents --add --force` writes
-    // there. Without this, `br` falls back to CLAUDE.md when AGENTS.md
-    // doesn't exist but CLAUDE.md does — clobbering the user's CLAUDE.md
-    // and leaving AGENTS.md missing. With the empty placeholder, br
-    // targets AGENTS.md unambiguously. (br creates AGENTS.md.bak which
-    // we delete below; the original was empty anyway.)
-    writeFileSync(agentsMd, '');
-  }
-
-  const result = exec('br agents --add --force', projectRoot);
-  if (result.exitCode !== 0) {
-    fail(`br agents --add --force failed: ${result.stderr}`);
-    return false;
-  }
-  success('Generated AGENTS.md');
-
-  // Delete the AGENTS.md.bak that br agents --force creates. We already
-  // wrote our own backup to tmp/ above (if there was stale content), so
-  // br's .bak is redundant and would otherwise clutter the repo root.
-  const brBackup = resolve(projectRoot, 'AGENTS.md.bak');
-  if (existsSync(brBackup)) {
-    rmSync(brBackup);
-  }
-
-  // Append Justin's beads workflow prompt (when/why to use beads) after the
-  // br-generated command reference. Co-located with the SDK so it versions
-  // alongside beads; CLAUDE.md @-links AGENTS.md so Claude Code loads it.
-  if (existsSync(agentsMd)) {
-    const content = readFileSync(agentsMd, 'utf-8');
-    if (!content.includes(BEADS_WORKFLOW_MARKER)) {
-      appendFileSync(agentsMd, BEADS_WORKFLOW_CONTENT);
-      success('Appended beads workflow prompt to AGENTS.md');
-    } else {
-      success('AGENTS.md already has the beads workflow prompt');
-    }
-  }
-
-  return true;
-}
-
-function stepEnsureClaudeMdAgentsRef(projectRoot: string): boolean {
-  // The beads workflow prompt now lives in AGENTS.md (appended in stepAgentsMd).
-  // Ensure CLAUDE.md @-links AGENTS.md so Claude Code loads it recursively.
-  // We no longer create a separate docs/prompts/BEADS.md.
-  const claudeMd = resolve(projectRoot, 'CLAUDE.md');
-  if (!existsSync(claudeMd)) {
-    warn('No CLAUDE.md found — skipping @AGENTS.md reference');
-    return true;
-  }
-
-  const added = appendIfMissing(claudeMd, 'AGENTS.md', '\n@AGENTS.md\n');
-  if (added) {
-    success('Appended @AGENTS.md reference to CLAUDE.md');
-  } else {
-    success('CLAUDE.md already references AGENTS.md');
-  }
-
-  return true;
-}
+// NOTE: beads-setup deliberately does NOT generate AGENTS.md and does NOT run
+// `br agents --add`. The beads workflow guidance is authored once in the prompts
+// repo (`~/Dev/prompts/src/rules/beads-workflow.md`) and delivered to every
+// session by the `prime` SessionStart hook + `~/.claude/rules/`. `br agents`
+// output is upstream-owned (beads_rust src/cli/commands/agents.rs) and had
+// drifted from Justin's guidance — it still referenced `bd`, `br sync
+// --flush-only`, and a session protocol that no longer applies now that every
+// project auto-flushes. Installing a second, staler copy per-project was worse
+// than having none. See home-base-t6a0.14.
 
 function stepPrettierIgnore(projectRoot: string): boolean {
   const prettierIgnore = resolve(projectRoot, '.prettierignore');
@@ -636,29 +467,21 @@ export async function runBeadsSetup(
     if (!stepImportIssues(projectRoot, migration.jsonlPath)) return 1;
   }
 
-  // Step 6: AGENTS.md
-  stepHeader('6. AGENTS.md');
-  if (!stepAgentsMd(projectRoot)) return 1;
-
-  // Step 7: CLAUDE.md (ensure it @-links AGENTS.md so the beads workflow loads)
-  stepHeader('7. CLAUDE.md');
-  if (!stepEnsureClaudeMdAgentsRef(projectRoot)) return 1;
-
-  // Step 8: .prettierignore
-  stepHeader('8. .prettierignore');
+  // Step 6: .prettierignore
+  stepHeader('6. .prettierignore');
   if (!stepPrettierIgnore(projectRoot)) return 1;
 
-  // Step 9: .claude/settings.json (add br to sandbox.excludedCommands)
-  stepHeader('9. .claude/settings.json');
+  // Step 7: .claude/settings.json (add br to sandbox.excludedCommands)
+  stepHeader('7. .claude/settings.json');
   if (!stepClaudeSettings(projectRoot)) return 1;
 
-  // Step 10: justin-sdk.config.json (ensure beads-setup is in components)
-  stepHeader('10. justin-sdk.config.json');
+  // Step 8: justin-sdk.config.json (ensure beads-setup is in components)
+  stepHeader('8. justin-sdk.config.json');
   if (!stepJustinSdkJson(projectRoot)) return 1;
 
-  // Step 11: Git commit
+  // Step 9: Git commit
   if (options.noCommit !== true) {
-    stepHeader('11. Git commit');
+    stepHeader('9. Git commit');
     const status = exec('git status --porcelain', projectRoot);
     if (status.stdout.trim().length > 0) {
       // Stage each file individually so one missing file doesn't cause
@@ -666,7 +489,6 @@ export async function runBeadsSetup(
       const filesToAdd = [
         'mise.toml',
         '.beads/',
-        'AGENTS.md',
         '.claude/settings.json',
         '.prettierignore',
         'justin-sdk.config.json',

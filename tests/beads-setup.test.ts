@@ -62,20 +62,19 @@ describe('beads-setup (file operations)', () => {
     expect(miseToml).toContain('exe = "br"');
   });
 
-  test('writes the beads workflow prompt into AGENTS.md (not docs/prompts/BEADS.md)', async () => {
+  // beads-setup is tooling-only: guidance lives in the prompts repo and is
+  // injected by the `prime` SessionStart hook. It must not write any prompt
+  // files into the project. See home-base-t6a0.14.
+  test('writes no prompt files (no AGENTS.md, no docs/prompts/BEADS.md)', async () => {
     if (!hasBr) return;
     const sb = track(createProjectSandbox());
     await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
 
-    // We no longer create a separate docs/prompts/BEADS.md.
     expect(existsSync(join(sb.path, 'docs/prompts/BEADS.md'))).toBe(false);
-
-    const agentsMd = readFileSync(join(sb.path, 'AGENTS.md'), 'utf-8');
-    expect(agentsMd).toContain('Beads workflow (br)');
-    expect(agentsMd).toContain('br ready');
+    expect(existsSync(join(sb.path, 'AGENTS.md'))).toBe(false);
   });
 
-  test('appends @AGENTS.md to existing CLAUDE.md', async () => {
+  test('leaves an existing CLAUDE.md byte-for-byte untouched', async () => {
     if (!hasBr) return;
     const originalClaudeMd = '# Test Project\n\nSome existing content.\n';
     const sb = track(createProjectSandbox({claudeMd: originalClaudeMd}));
@@ -83,16 +82,11 @@ describe('beads-setup (file operations)', () => {
     await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
 
     const updated = readFileSync(join(sb.path, 'CLAUDE.md'), 'utf-8');
-    expect(updated).toContain('# Test Project');
-    expect(updated).toContain('Some existing content.');
-    expect(updated).toContain('@AGENTS.md');
-    // Original content is preserved
-    expect(updated.indexOf('# Test Project')).toBeLessThan(
-      updated.indexOf('@AGENTS.md'),
-    );
+    expect(updated).toBe(originalClaudeMd);
+    expect(updated).not.toContain('@AGENTS.md');
   });
 
-  test('idempotent: second run does not duplicate CLAUDE.md reference', async () => {
+  test('idempotent: repeated runs still add no @AGENTS.md reference', async () => {
     if (!hasBr) return;
     const sb = track(createProjectSandbox({claudeMd: '# Test\n'}));
 
@@ -100,8 +94,7 @@ describe('beads-setup (file operations)', () => {
     await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
 
     const content = readFileSync(join(sb.path, 'CLAUDE.md'), 'utf-8');
-    const occurrences = content.match(/@AGENTS\.md/g) ?? [];
-    expect(occurrences.length).toBe(1);
+    expect(content).toBe('# Test\n');
   });
 
   test('adds .beads to .prettierignore (creates if missing)', async () => {
@@ -199,8 +192,8 @@ describe('beads-setup (full install)', () => {
 
     // .beads/beads.db should exist
     expect(existsSync(join(sb.path, '.beads/beads.db'))).toBe(true);
-    // AGENTS.md should be generated
-    expect(existsSync(join(sb.path, 'AGENTS.md'))).toBe(true);
+    // AGENTS.md is deliberately NOT generated (tooling-only setup)
+    expect(existsSync(join(sb.path, 'AGENTS.md'))).toBe(false);
 
     // Config should have the (kebab-cased) directory name as prefix. br init
     // derives the prefix via kebabCase(basename), which lowercases — so compare
@@ -208,30 +201,6 @@ describe('beads-setup (full install)', () => {
     const config = readFileSync(join(sb.path, '.beads/config.yaml'), 'utf-8');
     const dirName = sb.path.split('/').pop() ?? '';
     expect(config).toContain(`issue_prefix: ${kebabCase(dirName)}`);
-  });
-
-  test('AGENTS.md includes the beads workflow prompt', async () => {
-    if (!hasBr) return;
-    const sb = track(createProjectSandbox());
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
-
-    const agentsMd = readFileSync(join(sb.path, 'AGENTS.md'), 'utf-8');
-    // br-generated command reference is present...
-    expect(agentsMd).toContain('br ');
-    // ...followed by Justin's appended workflow prompt.
-    expect(agentsMd).toContain('## Beads workflow (br)');
-    expect(agentsMd).toContain('ALWAYS use beads for ALL work');
-  });
-
-  test('idempotent: second run does not duplicate the beads workflow prompt', async () => {
-    if (!hasBr) return;
-    const sb = track(createProjectSandbox());
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
-
-    const agentsMd = readFileSync(join(sb.path, 'AGENTS.md'), 'utf-8');
-    const occurrences = agentsMd.match(/## Beads workflow \(br\)/g) ?? [];
-    expect(occurrences.length).toBe(1);
   });
 
   test('no stray AGENTS.md.bak in project root after run (home-base-s9p)', async () => {
@@ -242,20 +211,16 @@ describe('beads-setup (full install)', () => {
     expect(existsSync(join(sb.path, 'AGENTS.md.bak'))).toBe(false);
   });
 
-  test('stale bd AGENTS.md is backed up and replaced cleanly', async () => {
+  // We used to detect stale `bd`-era AGENTS.md, back it up to tmp/, and
+  // regenerate it via `br agents --add --force`. That whole path is gone: an
+  // existing AGENTS.md is now none of beads-setup's business. Removing an
+  // AGENTS.md a project no longer wants is `migrate-to-prime`'s job.
+  test('leaves a pre-existing AGENTS.md untouched and makes no backup', async () => {
     if (!hasBr) return;
     const sb = track(createProjectSandbox());
     const staleAgentsMd = `# Agent Instructions
 
 This project uses **bd** (beads) for issue tracking. Run \`bd onboard\` to get started.
-
-## Quick Reference
-
-\`\`\`bash
-bd ready
-bd show <id>
-bd create --title "foo"
-\`\`\`
 
 <!-- END BEADS INTEGRATION -->
 `;
@@ -268,39 +233,12 @@ bd create --title "foo"
     });
     expect(exitCode).toBe(0);
 
-    // Stale markers should be gone
-    const newContent = readFileSync(join(sb.path, 'AGENTS.md'), 'utf-8');
-    expect(newContent).not.toContain('END BEADS INTEGRATION');
-    expect(newContent).not.toContain('bd onboard');
-    expect(newContent).not.toContain('**bd** (beads)');
-
-    // br content should be present
-    expect(newContent).toContain('br ');
-
-    // Beads workflow prompt should be present (appended by script)
-    expect(newContent).toContain('## Beads workflow (br)');
-
-    // Backup should exist in tmp/
-    const tmpFiles = readdirSync(join(sb.path, 'tmp')).filter((f) =>
-      f.startsWith('AGENTS.md.bd-backup-'),
+    // Untouched, byte for byte — we neither rewrite nor delete it.
+    expect(readFileSync(join(sb.path, 'AGENTS.md'), 'utf-8')).toBe(
+      staleAgentsMd,
     );
-    expect(tmpFiles.length).toBe(1);
 
-    // Backup should have the original stale content
-    const backup = readFileSync(join(sb.path, 'tmp', tmpFiles[0]!), 'utf-8');
-    expect(backup).toContain('END BEADS INTEGRATION');
-    expect(backup).toContain('bd onboard');
-  });
-
-  test('does NOT back up clean AGENTS.md', async () => {
-    if (!hasBr) return;
-    const sb = track(createProjectSandbox());
-    // Create a clean br-era AGENTS.md first via the script
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
-    // Second run should not create a backup
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
-
-    // tmp/ shouldn't have any bd-backup files
+    // And no backup was written to tmp/.
     const tmpDir = join(sb.path, 'tmp');
     if (existsSync(tmpDir)) {
       const tmpFiles = readdirSync(tmpDir).filter((f) =>
@@ -371,9 +309,9 @@ describe('beads-setup (safety)', () => {
       quiet: true,
     });
     expect(exitCode).toBe(0);
-    // The workflow prompt lives in AGENTS.md now; no docs/prompts/BEADS.md.
+    // No prompt files are written at all — guidance comes from the prime hook.
     expect(existsSync(join(sb.path, 'docs/prompts/BEADS.md'))).toBe(false);
-    expect(existsSync(join(sb.path, 'AGENTS.md'))).toBe(true);
+    expect(existsSync(join(sb.path, 'AGENTS.md'))).toBe(false);
     // CLAUDE.md was not created
     expect(existsSync(join(sb.path, 'CLAUDE.md'))).toBe(false);
   });
