@@ -56,6 +56,7 @@ export interface PrimeOptions {
 
 interface ProjectContext {
   deps: Set<string>;
+  projectRoot: string;
 }
 
 // --- predicate registry ----------------------------------------------------
@@ -70,6 +71,35 @@ const PREDICATES: Record<string, (ctx: ProjectContext) => boolean> = {
     ctx.deps.has('expo') ||
     ctx.deps.has('react-native'),
   isReactNative: (ctx) => ctx.deps.has('expo') || ctx.deps.has('react-native'),
+
+  /**
+   * True for beads_rust (`br`) projects — NOT Yegge's Dolt-backed `bd`.
+   *
+   * The two are distinguished by `.beads/metadata.json`, which is git-tracked
+   * (so this works on a fresh clone; `beads.db` would not — `.beads/.gitignore`
+   * ignores `*.db`):
+   *   br: {"database":"beads.db","jsonl_export":"issues.jsonl"}
+   *   bd: {"database":"dolt","backend":"dolt","dolt_mode":"embedded",...}
+   *
+   * Dolt is excluded explicitly rather than requiring `database === 'beads.db'`
+   * so that an upstream br schema tweak degrades to "still shows the beads
+   * rules" instead of silently unguiding every project. Mirrors the existing
+   * Dolt sniff in beads-setup's migration step.
+   */
+  isBeadsRust: (ctx) => {
+    const metadataPath = join(ctx.projectRoot, '.beads', 'metadata.json');
+    if (!existsSync(metadataPath)) return false;
+    try {
+      const meta = JSON.parse(readFileSync(metadataPath, 'utf-8')) as Record<
+        string,
+        unknown
+      >;
+      return meta.backend !== 'dolt' && meta.database !== 'dolt';
+    } catch {
+      // Unparseable metadata.json -> don't claim it's beads_rust.
+      return false;
+    }
+  },
 };
 
 function loadProjectContext(projectRoot: string): ProjectContext {
@@ -95,7 +125,7 @@ function loadProjectContext(projectRoot: string): ProjectContext {
       // Unparseable package.json -> no deps detected; predicates fall to false.
     }
   }
-  return {deps};
+  return {deps, projectRoot};
 }
 
 // --- managed prompts clone -------------------------------------------------

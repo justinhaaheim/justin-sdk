@@ -48,6 +48,71 @@ function projectRoot(deps: Record<string, string>): string {
 const RN_PROJECT = () => projectRoot({expo: '*'});
 const PLAIN_PROJECT = () => projectRoot({lodash: '*'});
 
+/** A prompts fixture with one universal module and one beads_rust-gated one. */
+function beadsPromptsFixture(): Sandbox {
+  const sb = track(createSandbox());
+  sb.writeFile(
+    'src/rules/index.md',
+    ['@./universal-a.md', '@./beads-only.md'].join('\n\n'),
+  );
+  sb.writeFile('src/rules/universal-a.md', 'UNIVERSAL_A');
+  sb.writeFile(
+    'src/rules/beads-only.md',
+    '---\nincludeIf: [isBeadsRust]\n---\n\nBEADS_ONLY',
+  );
+  return sb;
+}
+
+/** A project root with a `.beads/metadata.json` of the given shape. */
+function beadsProject(metadata: string | null): string {
+  const sb = track(createSandbox());
+  sb.writeFile('package.json', JSON.stringify({dependencies: {lodash: '*'}}));
+  if (metadata !== null) sb.writeFile('.beads/metadata.json', metadata);
+  return sb.path;
+}
+
+// Real shapes, copied verbatim from disk 2026-07-30.
+const BR_METADATA = '{"database":"beads.db","jsonl_export":"issues.jsonl"}';
+const BD_DOLT_METADATA =
+  '{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"jl","project_id":"f52bcf30"}';
+
+function beadsRuleIncluded(projectPath: string): boolean {
+  const prompts = beadsPromptsFixture();
+  const out = assemble(
+    {format: 'markdown', partition: 'conditional', promptsDir: prompts.path},
+    projectPath,
+  );
+  return out.text.includes('BEADS_ONLY');
+}
+
+describe('isBeadsRust predicate', () => {
+  test('matches a beads_rust project', () => {
+    expect(beadsRuleIncluded(beadsProject(BR_METADATA))).toBe(true);
+  });
+
+  // The whole point of this predicate: Justin has a project on Yegge's
+  // Dolt-backed `bd`, and his br-specific guidance must not show up there.
+  test("does NOT match Yegge's Dolt-backed bd project", () => {
+    expect(beadsRuleIncluded(beadsProject(BD_DOLT_METADATA))).toBe(false);
+  });
+
+  test('does NOT match a project with no .beads/ at all', () => {
+    expect(beadsRuleIncluded(beadsProject(null))).toBe(false);
+  });
+
+  test('does NOT match when metadata.json is unparseable', () => {
+    expect(beadsRuleIncluded(beadsProject('{not json'))).toBe(false);
+  });
+
+  // Degrade toward showing the rules, not silently dropping them, if br's
+  // metadata schema shifts under us.
+  test('still matches if br changes its schema, so long as it is not dolt', () => {
+    expect(beadsRuleIncluded(beadsProject('{"database":"beads-v2.sqlite"}'))).toBe(
+      true,
+    );
+  });
+});
+
 describe('numberHeaders', () => {
   test('numbers headings with their full dotted path, resetting deeper levels', () => {
     const input = [
