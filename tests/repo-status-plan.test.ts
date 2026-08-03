@@ -1,11 +1,16 @@
 /**
  * Tests for plan/apply — the only mutating path in repo-status.
  *
- * The test that matters most is the DRIFT one: a branch that was proven safe
- * when the plan was built, then gained a commit before apply ran, must be
- * SKIPPED rather than deleted. That guard is the difference between "proven
- * safe at report time" and "proven safe at deletion time", and without a test
- * it would be trivially easy to regress into deleting live work.
+ * apply RENAMES finished branches to archive/<name> rather than deleting them,
+ * so the tests here are mostly about proving nothing is destroyed:
+ *
+ *  - DRIFT: a branch that gains a commit between plan and apply keeps that
+ *    commit. Under a delete-based design this was the dangerous case; under a
+ *    rename it is simply carried along, which is the whole argument for the
+ *    rename default.
+ *  - COLLISION: an existing archive/<name> is never clobbered.
+ *  - The one surviving deletion path (a branch an archive mirror already holds
+ *    in full) still refuses when the mirror has gone stale.
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
@@ -81,9 +86,9 @@ describe('buildPlan', () => {
     const plan = buildPlan(report(sb));
     expect(plan.safe.map((a) => a.branch)).toEqual(['landed']);
     expect(plan.needsJudgment.map((a) => a.branch)).toContain('live-work');
-    expect(plan.safe.every((a) => a.action === 'delete-local-branch')).toBe(
-      true,
-    );
+    // Default action is a non-destructive rename, not a delete.
+    expect(plan.safe[0]?.action).toBe('archive-local-branch');
+    expect(plan.safe[0]?.target).toBe('archive/landed');
   });
 
   test('a branch checked out in a worktree is proven-safe but left MANUAL', () => {
@@ -106,24 +111,56 @@ describe('buildPlan', () => {
 });
 
 describe('executePlan', () => {
-  test('deletes a branch that is proven merged by content', () => {
+  test('RENAMES a merged branch to archive/* — the commits survive', () => {
     const sb = track(createSandbox());
     initRepo(sb);
     addSquashMergedBranch(sb, 'landed');
+    const tip = git(sb.path, ['rev-parse', 'landed']);
 
     const results = executePlan(buildPlan(report(sb)), sb.path);
-    expect(results).toEqual([
-      {
-        branch: 'landed',
-        outcome: 'deleted',
-        reason: 'content present on baseline',
-      },
-    ]);
-    const branches = git(sb.path, ['branch', '--format=%(refname:short)']);
-    expect(branches.split('\n')).not.toContain('landed');
+    expect(results[0]?.outcome).toBe('archived');
+    expect(results[0]?.target).toBe('archive/landed');
+
+    const branches = git(sb.path, [
+      'branch',
+      '--format=%(refname:short)',
+    ]).split('\n');
+    expect(branches).not.toContain('landed');
+    expect(branches).toContain('archive/landed');
+    // The whole point: nothing was destroyed.
+    expect(git(sb.path, ['rev-parse', 'archive/landed'])).toBe(tip);
   });
 
-  test('DRIFT GUARD: a branch that gains a commit after planning is skipped, not deleted', () => {
+  test('refuses to clobber an existing archive ref', () => {
+    const sb = track(createSandbox());
+    initRepo(sb);
+    addSquashMergedBranch(sb, 'landed');
+    // An unrelated archive/landed already exists, holding different work.
+    git(sb.path, ['branch', 'archive/landed', 'main']);
+    const existing = git(sb.path, ['rev-parse', 'archive/landed']);
+    const plan = buildPlan(report(sb));
+
+    // buildPlan sees a mirror that does NOT cover the branch -> not safe at all.
+    // Force the rename path to prove executePlan itself guards the collision.
+    const forced = {
+      ...plan,
+      safe: [
+        {
+          action: 'archive-local-branch' as const,
+          branch: 'landed',
+          reason: 'forced',
+          target: 'archive/landed',
+        },
+      ],
+    };
+    const results = executePlan(forced, sb.path);
+    expect(results[0]?.outcome).toBe('skipped');
+    expect(results[0]?.reason).toContain('already exists');
+    expect(git(sb.path, ['rev-parse', 'archive/landed'])).toBe(existing);
+    expect(git(sb.path, ['rev-parse', 'landed'])).toBeTruthy();
+  });
+
+  test('DRIFT: a branch that gains a commit after planning still keeps that commit', () => {
     const sb = track(createSandbox());
     initRepo(sb);
     addSquashMergedBranch(sb, 'landed');
@@ -138,12 +175,12 @@ describe('executePlan', () => {
     git(sb.path, ['checkout', '-q', 'main']);
 
     const results = executePlan(plan, sb.path);
-    expect(results[0]?.outcome).toBe('skipped');
-    expect(results[0]?.reason).toContain('no longer proves safe');
-    // The branch — and the late commit — must still exist.
-    const branches = git(sb.path, ['branch', '--format=%(refname:short)']);
-    expect(branches.split('\n')).toContain('landed');
-    expect(git(sb.path, ['log', '-1', '--format=%s', 'landed'])).toBe(
+    // A rename is safe regardless of drift — the late commit rides along.
+    expect(results[0]?.outcome).toBe('archived');
+    // This is the property that makes renaming the right default: even when the
+    // plan was stale, the work that arrived after it survives — under the
+    // archived name, reachable, recoverable.
+    expect(git(sb.path, ['log', '-1', '--format=%s', 'archive/landed'])).toBe(
       'late work',
     );
   });

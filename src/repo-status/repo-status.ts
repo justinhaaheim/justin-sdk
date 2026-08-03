@@ -31,14 +31,15 @@ TYPICAL USAGE
     repo-status status              the ledger — every branch, grouped by disposition
     repo-status branch <name>       dig into one branch, commit by commit, with proof
     repo-status plan                the proposed cleanup, as a dry run
-    repo-status apply --safe-only   execute ONLY the provably-safe part
+    repo-status apply --safe-only   archive the finished branches (non-destructive)
 
   Start with 'status'. Most branches resolve to 'merged' or 'mirrored' and need
   no thought. Anything marked 'review' or 'needs-judgment' is where your
   attention actually belongs — run 'branch <name>' on those to see the evidence.
 
-  Nothing here mutates the repo except 'apply', and 'apply' refuses to touch any
-  branch the tool has not PROVEN safe.
+  Nothing here mutates the repo except 'apply'. 'apply' RENAMES finished branches
+  to archive/<name> rather than deleting them, so nothing is destroyed even if a
+  disposition is wrong, and it refuses to touch anything not PROVEN safe.
 `.trim();
 
 const STATUS_NARRATIVE = `
@@ -75,18 +76,24 @@ comparison against the baseline. This is the proof behind a 'merged' verdict.
 const PLAN_NARRATIVE = `
 The proposed cleanup as a DRY RUN, grouped by safety. Nothing is executed.
 
-Read it, then run 'apply --safe-only' to execute only the proven-safe group.
+Read it, then run 'apply --safe-only' to execute the proven-safe group. Entries
+shown as 'name -> archive/name' are renames, which preserve every commit.
 Branches needing judgment are listed for your attention but are never actioned
 automatically, by design.
 `.trim();
 
 const APPLY_NARRATIVE = `
 Executes the cleanup. Requires --safe-only (the only supported mode today) and
-an explicit --yes, because branch deletion is irreversible.
+an explicit --yes.
 
-Acts ONLY on branches the tool has proven safe: every unique commit present on
-the baseline by content, or an exact non-stale archive mirror. It will refuse
-'review' and 'needs-judgment' rows even if you ask for them.
+It RENAMES finished branches to archive/<name> rather than deleting them, so
+every commit stays reachable even if the disposition engine is wrong. The one
+exception is a branch an archive/* mirror already holds in full: renaming would
+collide with that mirror, and the commits are already preserved, so the
+redundant local copy is deleted instead (re-proven against live state first).
+
+Acts ONLY on branches the tool proved safe, and only on local ones. It will
+refuse 'review' and 'needs-judgment' rows even if you ask for them.
 `.trim();
 
 function render(obj: unknown, json: boolean): string {
@@ -220,7 +227,7 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
           })
           .option('yes', {
             default: false,
-            describe: 'Required. Confirm irreversible deletion',
+            describe: 'Required. Confirm the repo will be modified',
             type: 'boolean',
           }),
       (args) => {
@@ -246,7 +253,7 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
         if (!args.yes) {
           console.error(renderPlan(plan));
           console.error(
-            '\nrefusing to act without --yes (branch deletion is irreversible)',
+            '\nrefusing to act without --yes (this modifies the repository)',
           );
           exitCode = 2;
           return;

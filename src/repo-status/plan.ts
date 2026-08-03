@@ -2,22 +2,37 @@
  * repo-status — the proposed cleanup, and the guarded execution of it.
  *
  * `plan` is a pure function of the report: it proposes, it never touches the
- * repo. `apply` is the only mutating path in the whole tool, and it is
- * deliberately the most paranoid code here.
+ * repo. `apply` is the only mutating path in the whole tool.
  *
- * THREE GUARDS, because deleting a branch is irreversible:
+ * ── Why apply RENAMES instead of deleting ────────────────────────────────────
  *
- *  1. Only rows the report marked `provenSafe` are ever candidates. A
- *     'review' or 'needs-judgment' row is never actioned, and there is no flag
- *     to override that.
- *  2. Every candidate is RE-PROVEN immediately before deletion. The report may
- *     be seconds or minutes old, and a branch can gain commits in between; a
- *     plan is a proposal, not a licence. A candidate that no longer proves out
- *     is skipped with a reason rather than deleted.
- *  3. V0 deletes LOCAL branches only. Remote branches and worktrees are
- *     surfaced as manual follow-ups: deleting a remote ref is outward-facing
- *     and removing a worktree can discard uncommitted files, neither of which
- *     belongs in an automated pass this young.
+ * The obvious design is "prove the branch is redundant, then delete it". That
+ * makes the whole tool rest on a judgement call — is patch-id proof enough? is
+ * a mirror fresh enough? — where being wrong destroys work permanently.
+ *
+ * Renaming a branch to `archive/<name>` sidesteps the question entirely. The
+ * commits stay reachable under a namespaced ref, the branch list gets clean,
+ * and nothing is destroyed even if the disposition engine is wrong. Justin's
+ * own reconcile notes reached the same conclusion by hand: "git branch
+ * archive/<name> first, then delete the remote."
+ *
+ * So the disposition no longer decides "is deleting safe" — it decides "is this
+ * finished work worth tidying away", which is a far less dangerous thing to be
+ * wrong about.
+ *
+ * Deletion survives in exactly one case: the branch is ALREADY fully preserved
+ * in an `archive/*` mirror. Renaming would collide with that mirror, and the
+ * commits are already held by it, so removing the redundant copy loses nothing.
+ *
+ * ── Remaining guards ─────────────────────────────────────────────────────────
+ *
+ *  1. Only rows the report marked `provenSafe` are candidates. 'review' and
+ *     'needs-judgment' are never actioned, and there is no flag to override it.
+ *  2. Deletions (the mirrored case only) are RE-PROVEN against live state
+ *     immediately before running. A plan is a proposal, not a licence.
+ *  3. LOCAL branches only. Renaming a remote branch means pushing a new ref and
+ *     deleting the old one — outward-facing, and not something to automate this
+ *     early. Worktree-checked-out branches are left alone too.
  *
  * Part of home-base-qyu1.7.
  */
@@ -28,17 +43,28 @@ import {mirrorFullyPreserves, proveContentOnBaseline} from './content';
 
 import type {BranchRow, RepoStatusReport} from './report';
 
+const ARCHIVE_PREFIX = 'archive/';
+
+export type PlanActionKind =
+  /** Rename to `archive/<name>`. Non-destructive: every commit stays reachable. */
+  | 'archive-local-branch'
+  /** Delete. ONLY when an archive/* mirror already holds every commit. */
+  | 'delete-local-branch'
+  /** Surfaced for a human; never executed. */
+  | 'manual';
+
 export interface PlanAction {
   branch: string;
-  /** What the action would be. `delete-local-branch` is the only automated one. */
-  action: 'delete-local-branch' | 'manual';
+  action: PlanActionKind;
+  /** Where the branch ends up, for `archive-local-branch`. */
+  target: string | null;
   reason: string;
 }
 
 export interface CleanupPlan {
   repoRoot: string;
   baselineRef: string;
-  /** Proven safe AND automatable — what `apply --safe-only` will act on. */
+  /** What `apply --safe-only` will execute. */
   safe: PlanAction[];
   /** Proven safe but deliberately left manual (remote refs, worktrees). */
   manual: PlanAction[];
@@ -47,7 +73,12 @@ export interface CleanupPlan {
 }
 
 function isAutomatable(row: BranchRow): boolean {
-  return row.provenSafe && !row.isRemoteOnly && row.worktree == null;
+  return (
+    row.provenSafe &&
+    !row.isRemoteOnly &&
+    row.worktree == null &&
+    !row.name.startsWith(ARCHIVE_PREFIX)
+  );
 }
 
 export function buildPlan(report: RepoStatusReport): CleanupPlan {
@@ -61,24 +92,43 @@ export function buildPlan(report: RepoStatusReport): CleanupPlan {
         action: 'manual',
         branch: row.name,
         reason: row.why,
+        target: null,
       });
       continue;
     }
-    if (isAutomatable(row)) {
-      safe.push({
-        action: 'delete-local-branch',
-        branch: row.name,
-        reason: row.why,
-      });
-    } else {
+
+    if (!isAutomatable(row)) {
       manual.push({
         action: 'manual',
         branch: row.name,
         reason: row.isRemoteOnly
-          ? `${row.why} — remote ref; delete it yourself if you want it gone`
-          : `${row.why} — checked out at ${row.worktree}; remove the worktree first`,
+          ? `${row.why} — remote ref; renaming it means pushing a new ref and deleting the old one, so do it yourself`
+          : row.name.startsWith(ARCHIVE_PREFIX)
+            ? `${row.why} — already under ${ARCHIVE_PREFIX}`
+            : `${row.why} — checked out at ${row.worktree}; remove the worktree first`,
+        target: null,
       });
+      continue;
     }
+
+    // Already mirrored -> the archive holds these commits, so this local branch
+    // is a redundant copy and renaming would collide with the mirror.
+    if (mirrorFullyPreserves(row.archiveMirror)) {
+      safe.push({
+        action: 'delete-local-branch',
+        branch: row.name,
+        reason: `every commit is already preserved in ${row.archiveMirror?.ref}; this local copy is redundant`,
+        target: null,
+      });
+      continue;
+    }
+
+    safe.push({
+      action: 'archive-local-branch',
+      branch: row.name,
+      reason: row.why,
+      target: `${ARCHIVE_PREFIX}${row.name}`,
+    });
   }
 
   return {
@@ -106,15 +156,18 @@ export function renderPlan(plan: CleanupPlan): string {
       lines.push('  none');
     } else {
       lines.push(`  ${note}`);
-      for (const a of actions) lines.push(`  - ${a.branch}: ${a.reason}`);
+      for (const a of actions) {
+        const arrow = a.target != null ? ` -> ${a.target}` : '';
+        lines.push(`  - ${a.branch}${arrow}: ${a.reason}`);
+      }
     }
     lines.push('');
   };
 
   section(
-    'Proven safe — will be deleted by `apply --safe-only --yes`',
+    'Will run under `apply --safe-only --yes`',
     plan.safe,
-    'each is re-proven immediately before deletion',
+    'renames preserve every commit; the only deletions are branches an archive mirror already holds',
   );
   section(
     'Proven safe, left manual',
@@ -132,7 +185,8 @@ export function renderPlan(plan: CleanupPlan): string {
 
 export interface ApplyResult {
   branch: string;
-  outcome: 'deleted' | 'skipped' | 'failed';
+  outcome: 'archived' | 'deleted' | 'skipped' | 'failed';
+  target: string | null;
   reason: string;
 }
 
@@ -150,47 +204,77 @@ function gitArgv(argv: string[], cwd: string): {ok: boolean; out: string} {
   }
 }
 
+function refExists(ref: string, cwd: string): boolean {
+  const result = gitArgv(['rev-parse', '--verify', '--quiet', ref], cwd);
+  return result.ok && result.out.trim().length > 0;
+}
+
 /**
- * Execute the safe group, re-proving each branch first.
+ * Execute the safe group.
  *
- * The re-proof is not ceremony. Between building a plan and running it, a
- * branch can be pushed to, a mirror can fall behind, or another session can
- * move a ref. Proving again against live state — and skipping anything that no
- * longer holds — is what makes "proven safe" mean something at the moment of
- * deletion rather than at the moment of reporting.
+ * Renames are non-destructive and need no re-proof — the commits survive under
+ * the new name whatever the disposition engine concluded. They are still
+ * guarded against clobbering an existing ref.
+ *
+ * Deletions DO get re-proven against live state, because that is the one path
+ * where being stale could destroy something: between building the plan and
+ * running it, a mirror can fall behind or a branch can gain commits.
  */
 export function executePlan(plan: CleanupPlan, cwd: string): ApplyResult[] {
-  return plan.safe.map(({branch}): ApplyResult => {
-    const proof = proveContentOnBaseline(branch, plan.baselineRef, cwd);
-    const mirror = proof.archiveMirror;
-    const stillSafe =
-      proof.allContentOnBaseline || mirrorFullyPreserves(mirror);
+  return plan.safe.map((action): ApplyResult => {
+    const {branch, target} = action;
 
-    if (!stillSafe) {
+    if (action.action === 'archive-local-branch') {
+      if (target == null) {
+        return {branch, outcome: 'failed', reason: 'no archive target', target};
+      }
+      if (refExists(target, cwd)) {
+        return {
+          branch,
+          outcome: 'skipped',
+          reason: `${target} already exists — refusing to clobber it`,
+          target,
+        };
+      }
+      const result = gitArgv(['branch', '-m', branch, target], cwd);
+      return result.ok
+        ? {branch, outcome: 'archived', reason: action.reason, target}
+        : {
+            branch,
+            outcome: 'failed',
+            reason: result.out.split('\n')[0] ?? 'git branch -m failed',
+            target,
+          };
+    }
+
+    // Deletion: only ever the already-mirrored case, and only after re-proving.
+    const proof = proveContentOnBaseline(branch, plan.baselineRef, cwd);
+    if (!mirrorFullyPreserves(proof.archiveMirror)) {
       return {
         branch,
         outcome: 'skipped',
         reason:
-          'no longer proves safe against live state — the repo changed since the plan was built',
+          'the archive mirror no longer holds every commit — the repo changed since the plan was built',
+        target: null,
       };
     }
 
-    // -D rather than -d: our proof is by CONTENT, which is strictly stronger
-    // than git's ancestry test and correctly covers squash-merged branches that
-    // -d would refuse. The re-proof above is what earns the right to use it.
+    // -D rather than -d: the mirror provably holds these commits, which is a
+    // stronger guarantee than git's ancestry test and covers squash-merged
+    // branches -d would refuse. The re-proof above earns the right to use it.
     const result = gitArgv(['branch', '-D', branch], cwd);
     return result.ok
       ? {
           branch,
           outcome: 'deleted',
-          reason: proof.allContentOnBaseline
-            ? 'content present on baseline'
-            : 'every commit preserved in the archive mirror',
+          reason: `redundant copy; ${proof.archiveMirror?.ref} holds every commit`,
+          target: null,
         }
       : {
           branch,
           outcome: 'failed',
           reason: result.out.split('\n')[0] ?? 'git branch -D failed',
+          target: null,
         };
   });
 }
