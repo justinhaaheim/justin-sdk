@@ -24,7 +24,7 @@
 
 import {execFileSync} from 'child_process';
 
-import {proveContentOnBaseline} from './content';
+import {mirrorFullyPreserves, proveContentOnBaseline} from './content';
 
 import type {BranchRow, RepoStatusReport} from './report';
 
@@ -164,10 +164,7 @@ export function executePlan(plan: CleanupPlan, cwd: string): ApplyResult[] {
     const proof = proveContentOnBaseline(branch, plan.baselineRef, cwd);
     const mirror = proof.archiveMirror;
     const stillSafe =
-      proof.allContentOnBaseline ||
-      (mirror?.exists === true &&
-        mirror.isExact &&
-        mirror.commitsMissingFromMirror === 0);
+      proof.allContentOnBaseline || mirrorFullyPreserves(mirror);
 
     if (!stillSafe) {
       return {
@@ -188,7 +185,7 @@ export function executePlan(plan: CleanupPlan, cwd: string): ApplyResult[] {
           outcome: 'deleted',
           reason: proof.allContentOnBaseline
             ? 'content present on baseline'
-            : 'preserved in an exact archive mirror',
+            : 'every commit preserved in the archive mirror',
         }
       : {
           branch,

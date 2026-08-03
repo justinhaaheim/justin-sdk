@@ -19,6 +19,7 @@ import {join} from 'path';
 
 import {
   inspectArchiveMirror,
+  mirrorFullyPreserves,
   proveContentOnBaseline,
 } from '../src/repo-status/content';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -233,6 +234,30 @@ describe('inspectArchiveMirror', () => {
     expect(mirror?.commitsMissingFromMirror).toBe(3);
     expect(mirror?.staleAgainst).toBe('origin/feature');
     expect(mirror?.isExact).toBe(false);
+  });
+
+  test('a mirror AHEAD of the branch still preserves everything (superset, not stale)', () => {
+    const sb = track(createSandbox());
+    initRepo(sb);
+    git(sb.path, ['checkout', '-q', '-b', 'feature']);
+    commit(sb, 'f.txt', 'work\n', 'work');
+    // The mirror keeps going after the branch stopped — it is a SUPERSET.
+    git(sb.path, ['checkout', '-q', '-b', 'archive/feature']);
+    commit(
+      sb,
+      'extra.txt',
+      'kept only in the archive\n',
+      'extra archived work',
+    );
+    git(sb.path, ['checkout', '-q', 'main']);
+
+    const mirror = inspectArchiveMirror('feature', sb.path);
+    expect(mirror?.exists).toBe(true);
+    // Nothing on the branch is missing from the mirror, so deleting the branch
+    // loses nothing — even though the tips are not identical.
+    expect(mirror?.commitsMissingFromMirror).toBe(0);
+    expect(mirror?.isExact).toBe(false);
+    expect(mirrorFullyPreserves(mirror)).toBe(true);
   });
 
   test('archive mirroring does NOT by itself mark content as present on the baseline', () => {

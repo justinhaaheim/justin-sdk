@@ -16,6 +16,8 @@
  * Part of home-base-qyu1.1.
  */
 
+import {mirrorFullyPreserves} from './content';
+
 import type {ContentProof} from './content';
 import type {PullRequest} from './prs';
 import type {BranchDivergence} from './types';
@@ -114,11 +116,12 @@ export function decideDisposition(
   }
 
   // --- Not merged, but exactly mirrored ------------------------------------
-  if (mirror?.exists === true && mirror.isExact) {
+  if (mirrorFullyPreserves(mirror)) {
+    const extra = mirror?.isExact === false ? ' (mirror is ahead of the branch)' : '';
     return {
       disposition: 'mirrored',
       provenSafe: true,
-      why: `not on ${proof.baselineRef}, but preserved exactly in ${mirror.ref} (mirror is current)`,
+      why: `not on ${proof.baselineRef}, but every commit is preserved in ${mirror?.ref}${extra}`,
     };
   }
 
@@ -141,6 +144,6 @@ export function decideDisposition(
   return {
     disposition: 'needs-judgment',
     provenSafe: false,
-    why: `${plural(proof.unaccountedCommits.length, 'commit')} not present on ${proof.baselineRef} and no archive mirror${prNote}`,
+    why: `${plural(proof.unaccountedCommits.length, 'commit')} not present on ${proof.baselineRef}${mirror?.exists === true ? ` and the ${mirror.ref} mirror does not cover them` : ' and no archive mirror'}${prNote}`,
   };
 }

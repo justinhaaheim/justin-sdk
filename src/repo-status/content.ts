@@ -97,6 +97,22 @@ export interface ArchiveMirror {
   isExact: boolean;
 }
 
+/**
+ * Whether a mirror preserves EVERYTHING the branch has.
+ *
+ * This — not `isExact` — is the safety question. A mirror that is AHEAD of the
+ * branch is a superset: it still contains every commit the branch holds, so
+ * deleting the branch loses nothing. Requiring identical tips instead produced
+ * false 'needs-judgment' verdicts on branches that were provably preserved
+ * (caught by comparing against a hand-built classification), which quietly
+ * defeats the point of the tool: shrinking the set that needs human attention.
+ *
+ * `isExact` is retained as informational detail, not as a safety gate.
+ */
+export function mirrorFullyPreserves(mirror: ArchiveMirror | null): boolean {
+  return mirror != null && mirror.exists && mirror.commitsMissingFromMirror === 0;
+}
+
 export interface ContentProof {
   baselineRef: string;
   branch: string;
