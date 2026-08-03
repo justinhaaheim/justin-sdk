@@ -24,7 +24,10 @@
  */
 
 import {assemble} from '../lib/prime';
-import {formatRepoState, runDivergenceCheck} from '../lib/project-prime';
+import {
+  formatRepoState,
+  runDivergenceCheck,
+} from '../../repo-status/prime-view';
 import {
   contentHash,
   deployedIsDirty,
