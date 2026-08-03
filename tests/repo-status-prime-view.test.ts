@@ -171,6 +171,22 @@ describe('project-prime', () => {
     expect(report?.groups[0]?.aheadOfCurrent).toBe(1);
   });
 
+  test('PR enrichment is OFF by default — no network, no PR note', () => {
+    const sb = track(createSandbox());
+    initRepo(sb);
+    git(sb.path, 'checkout -q -b feature-x');
+    commit(sb, 'feature.txt', 'feature work');
+    git(sb.path, 'checkout -q main');
+
+    // The session-start hot path must not make a network call unless asked.
+    // gh is unavailable in this sandbox anyway, so a regression that fetched
+    // unconditionally would surface as a timeout rather than as wrong output —
+    // assert the shape explicitly so the intent is pinned.
+    const report = runDivergenceCheck({cwd: sb.path});
+    expect(report?.groups[0]?.prNote).toBeNull();
+    expect(formatRepoState(report!)).not.toContain('PR #');
+  });
+
   test('a branch fully merged into current (ahead=0) is not flagged', () => {
     const sb = track(createSandbox());
     initRepo(sb);

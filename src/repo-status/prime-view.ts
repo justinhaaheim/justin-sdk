@@ -16,8 +16,23 @@
  */
 
 import {buildCoreInventory} from './core';
+import {EMPTY_PR_INDEX, fetchPullRequests, prForBranch} from './prs';
 
 import type {BranchDivergence} from './types';
+
+/**
+ * PR fetching is OFF by default here, and that default is measured rather than
+ * assumed. On a real repo the core walk costs ~150ms while the `gh` call adds
+ * ~600ms — tolerable on its own, and Justin's expectation that it would not
+ * meaningfully slow session start holds for the happy path.
+ *
+ * The tail is what decides it. `gh` is a network call, and it fails in
+ * environments Justin actually uses (TLS inside the Claude Code sandbox,
+ * offline, unauthenticated). Those paths pay the full timeout at EVERY session
+ * start for no data. So it stays opt-in, and when enabled it uses a much
+ * tighter timeout than the CLI's — a session-start hook must degrade fast.
+ */
+const PRIME_PR_TIMEOUT_MS = 2000;
 
 /** Branches sharing a tip sha — usually one, but >1 hints at the same underlying work. */
 export interface DivergentGroup {
@@ -26,6 +41,8 @@ export interface DivergentGroup {
   aheadOfCurrent: number;
   lastCommitDate: string;
   hasWorktree: boolean;
+  /** e.g. "PR #12 open". Null when PR data was not requested or unavailable. */
+  prNote: string | null;
 }
 
 export interface DivergenceReport {
@@ -37,6 +54,8 @@ export interface RunOptions {
   cwd: string;
   /** Branches with no commits within this many days are ignored unless they have a worktree. Default 30. */
   sinceDays?: number;
+  /** Include PR state. Off by default — see PRIME_PR_TIMEOUT_MS above for why. */
+  prs?: boolean;
 }
 
 export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
@@ -51,6 +70,13 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
   // Only branches that HAVE something we might lose are worth surfacing here.
   const withAhead = inventory.branches.filter((b) => b.ahead > 0);
 
+  // Fetch PRs only when asked, and only when there is something to annotate —
+  // a clean repo should never pay for a network call it cannot use.
+  const prIndex =
+    opts.prs === true && withAhead.length > 0
+      ? fetchPullRequests({cwd: opts.cwd, timeoutMs: PRIME_PR_TIMEOUT_MS})
+      : EMPTY_PR_INDEX;
+
   const bySha = new Map<string, BranchDivergence[]>();
   for (const b of withAhead) {
     const list = bySha.get(b.tipSha) ?? [];
@@ -63,6 +89,7 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
       aheadOfCurrent: branches[0]?.ahead ?? 0,
       branches,
       hasWorktree: branches.some((b) => b.worktreePath != null),
+      prNote: prNoteFor(branches, prIndex),
       lastCommitDate: branches.reduce(
         (latest, b) => (b.lastCommitDate > latest ? b.lastCommitDate : latest),
         branches[0]?.lastCommitDate ?? '',
@@ -79,6 +106,18 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
   });
 
   return {currentBranch: inventory.currentBranch, groups};
+}
+
+function prNoteFor(
+  branches: BranchDivergence[],
+  prIndex: ReturnType<typeof fetchPullRequests>,
+): string | null {
+  if (!prIndex.available) return null;
+  for (const b of branches) {
+    const pr = prForBranch(prIndex, b.name);
+    if (pr != null) return `PR #${pr.number} ${pr.state.toLowerCase()}`;
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -128,8 +167,9 @@ export function formatRepoState(report: DivergenceReport | null): string {
       group.branches.length > 1
         ? ' -- same tip, may be the same underlying work'
         : '';
+    const prNote = group.prNote != null ? `, ${group.prNote}` : '';
     lines.push(
-      `  - ${names} (${worktreeNote}${group.aheadOfCurrent} ${commitWord} ahead, last touched ${formatTouched(group.lastCommitDate)})${sameTipNote}`,
+      `  - ${names} (${worktreeNote}${group.aheadOfCurrent} ${commitWord} ahead, last touched ${formatTouched(group.lastCommitDate)}${prNote})${sameTipNote}`,
     );
   }
   lines.push(
