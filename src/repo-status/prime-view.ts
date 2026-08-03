@@ -114,11 +114,11 @@ export function formatRepoState(report: DivergenceReport | null): string {
     return `${header}\n\nOn \`${report.currentBranch}\` — no unmerged work on any other branch or worktree.`;
   }
 
-  const plural = report.groups.length === 1 ? '' : 'es';
+  const one = report.groups.length === 1;
   const lines: string[] = [
     header,
     '',
-    `On \`${report.currentBranch}\`, ${report.groups.length} branch${plural} have unmerged work:`,
+    `On \`${report.currentBranch}\`, ${report.groups.length} branch${one ? '' : 'es'} ${one ? 'has' : 'have'} unmerged work:`,
   ];
   for (const group of report.groups) {
     const names = group.branches.map((b) => b.name).join(' / ');
