@@ -198,6 +198,11 @@ export function miseTrustStatus(target: string): MiseTrustStatus {
   try {
     stdout = execFileSync('mise', ['trust', '--show', '-C', target], {
       encoding: 'utf-8',
+      // Explicit, not inherited: Bun's execFileSync otherwise hands the child
+      // the env as it was at process START, ignoring later mutations — and
+      // MISE_TRUSTED_CONFIG_PATHS is exactly the kind of variable a caller may
+      // set programmatically.
+      env: process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
   } catch {
