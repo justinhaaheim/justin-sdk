@@ -72,7 +72,18 @@ function write(root: string, relPath: string, content: string): void {
  * Anything matching the repo's own .gitignore stays untracked (`git add -A`
  * honors it), which is how the gitignored fixtures are made.
  */
-function initPrimary(sb: Sandbox, files: Record<string, string>): string {
+function initPrimary(
+  sb: Sandbox,
+  files: Record<string, string>,
+  options?: {
+    /**
+     * Paths to `git add -f`, i.e. track them even though .gitignore matches.
+     * That combination — tracked AND ignore-pattern-matched — is the only way
+     * to exercise `git check-ignore`'s index awareness.
+     */
+    forceAdd?: string[];
+  },
+): string {
   const primary = join(sb.path, 'primary');
   mkdirSync(primary, {recursive: true});
   git(primary, ['init', '-q', '-b', 'main', '.']);
@@ -85,6 +96,9 @@ function initPrimary(sb: Sandbox, files: Record<string, string>): string {
     write(primary, relPath, content);
   }
   git(primary, ['add', '-A']);
+  for (const relPath of options?.forceAdd ?? []) {
+    git(primary, ['add', '-f', '--', relPath]);
+  }
   git(primary, ['commit', '-qm', 'init']);
   return primary;
 }
@@ -346,16 +360,28 @@ describe('planWorktreeIncludeCopies', () => {
 
   test('a TRACKED file matching the manifest is never a copy candidate', () => {
     const sb = track(createSandbox());
-    // config.json matches the manifest but is committed, so `git check-ignore`
-    // (index-aware, no --no-index) reports it as not ignored.
-    const primary = initPrimary(sb, {
-      '.gitignore': 'ignored.txt\n',
-      '.worktreeinclude': 'config.json\nignored.txt\n',
-      'config.json': '{"tracked":true}\n',
-    });
+    // config.json is force-added, so it is TRACKED *and* matched by the
+    // `*.json` ignore pattern. Only an index-aware `git check-ignore` (i.e.
+    // WITHOUT --no-index) rejects it — this is the assertion that pins that
+    // flag choice, and it mirrors Claude Code's rule that tracked files are
+    // never duplicated into a worktree.
+    const primary = initPrimary(
+      sb,
+      {
+        '.gitignore': '*.json\nignored.txt\n',
+        '.worktreeinclude': 'config.json\nignored.txt\n',
+        'config.json': '{"tracked":true}\n',
+      },
+      {forceAdd: ['config.json']},
+    );
     write(primary, 'ignored.txt', 'ignored\n');
     const target = join(sb.path, 'target');
     mkdirSync(target);
+    // Sanity-check the fixture itself: config.json really is tracked, and the
+    // matcher really does match it — so the only thing excluding it is git.
+    expect(git(primary, ['ls-files', '--', 'config.json']).trim()).toBe(
+      'config.json',
+    );
     expect(
       planWorktreeIncludeCopies(primary, target).entries.map((e) => e.relPath),
     ).toEqual(['ignored.txt']);
