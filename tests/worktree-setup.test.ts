@@ -25,6 +25,7 @@ import {
   tierIncludes,
   worktreeNew,
   worktreeSetup,
+  WORKTREE_INCLUDE_FILE,
   type StepReport,
 } from '../src/worktree-setup';
 import {addLinkedWorktree, git, initPrimary, write} from './git-fixtures';
@@ -57,6 +58,27 @@ function statuses(steps: StepReport[]): Record<string, string> {
 
 function detailFor(steps: StepReport[], label: string): string {
   return steps.find((s) => s.label === label)?.detail ?? '';
+}
+
+/**
+ * Capture what the module writes to stderr via its own `report()`. Needed for
+ * the F3 advisory lines, which are deliberately NOT StepReports (there is no
+ * 'warn' StepStatus, and inventing one would change the done/skipped/failed
+ * summary counts). Child-process output goes straight to fd 2 and so is not
+ * captured here — only our own report lines are, which is exactly the scope.
+ */
+function captureStderr<T>(fn: () => T): {result: T; stderr: string} {
+  const original = process.stderr.write;
+  let captured = '';
+  process.stderr.write = ((chunk: unknown): boolean => {
+    captured += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    return {result: fn(), stderr: captured};
+  } finally {
+    process.stderr.write = original;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +413,85 @@ describe('planWorktreeIncludeCopies', () => {
     expect(existsSync(join(sb.path, 'outside.txt'))).toBe(true);
   });
 
+  // -------------------------------------------------------------------------
+  // F3: per-pattern accounting for lines that contributed nothing
+  // -------------------------------------------------------------------------
+
+  test('reports a directory-naming line and a no-match glob as unmatched', () => {
+    const sb = track(createSandbox());
+    const primary = initPrimary(sb, {
+      '.gitignore': 'ios/\n.env.local\n',
+      // `ios/` can NEVER match: this step copies files, not trees, and
+      // `ls-files --directory` collapses the whole tree to one skipped entry.
+      // `*.nothing` is a well-formed glob that simply matches no file.
+      '.worktreeinclude': 'ios/\n*.nothing\n.env.local\n',
+    });
+    write(primary, '.env.local', 'SIM=1\n');
+    write(primary, 'ios/Podfile', 'noise\n');
+    const target = join(sb.path, 'target');
+    mkdirSync(target);
+
+    const plan = planWorktreeIncludeCopies(primary, target);
+    expect(plan.entries).toEqual([{action: 'copy', relPath: '.env.local'}]);
+    // The line that DID contribute is not listed; the two that did not, are.
+    expect(plan.unmatchedPatterns).toEqual(['ios/', '*.nothing']);
+  });
+
+  test('comment and negation lines are never reported as unmatched', () => {
+    const sb = track(createSandbox());
+    const primary = initPrimary(sb, {
+      '.gitignore': '*.local\n',
+      '.worktreeinclude': '# a comment\n\n*.local\n!secret.local\n',
+    });
+    write(primary, 'keep.local', 'keep\n');
+    write(primary, 'secret.local', 'nope\n');
+    const target = join(sb.path, 'target');
+    mkdirSync(target);
+    expect(planWorktreeIncludeCopies(primary, target).unmatchedPatterns).toEqual(
+      [],
+    );
+  });
+
+  test('a pattern that only matches a TRACKED file is reported as unmatched', () => {
+    const sb = track(createSandbox());
+    // The subtle real-world case: the line looks right, the file exists, but a
+    // tracked file is never copied — so the pattern delivers nothing and the
+    // report has to say so.
+    const primary = initPrimary(
+      sb,
+      {
+        '.gitignore': '*.json\n',
+        '.worktreeinclude': 'config.json\n',
+        'config.json': '{"tracked":true}\n',
+      },
+      {forceAdd: ['config.json']},
+    );
+    const target = join(sb.path, 'target');
+    mkdirSync(target);
+    const plan = planWorktreeIncludeCopies(primary, target);
+    expect(plan.entries).toEqual([]);
+    expect(plan.unmatchedPatterns).toEqual(['config.json']);
+  });
+
+  test('a pattern jointly matching a copied file gets credit (no false warn)', () => {
+    const sb = track(createSandbox());
+    // `ios/` names the directory AND matches ios/.xcode.env.local, which the
+    // literal line makes reachable. Both lines contributed, so neither warns —
+    // this is what keeps the warning from crying wolf on real RN manifests.
+    const primary = initPrimary(sb, {
+      '.gitignore': 'ios/\n',
+      '.worktreeinclude': 'ios/\nios/.xcode.env.local\n',
+    });
+    write(primary, 'ios/.xcode.env.local', 'export NODE_BINARY=node\n');
+    const target = join(sb.path, 'target');
+    mkdirSync(target);
+    const plan = planWorktreeIncludeCopies(primary, target);
+    expect(plan.entries).toEqual([
+      {action: 'copy', relPath: 'ios/.xcode.env.local'},
+    ]);
+    expect(plan.unmatchedPatterns).toEqual([]);
+  });
+
   test('manifest negation (!) is honored by the ignore parser', () => {
     const sb = track(createSandbox());
     const primary = initPrimary(sb, {
@@ -479,6 +580,44 @@ describe('worktreeSetup', () => {
     expect(readFileSync(join(linked, 'gen/version.json'), 'utf-8')).toBe(
       '{"v":"1.2.3"}\n',
     );
+  });
+
+  /**
+   * F3, end to end: the unmatched lines must actually reach the human, and must
+   * NOT turn a working hydration into a failure. The directory-naming case gets
+   * the actionable hint ("list files") because that is the one a real RN
+   * manifest hits.
+   */
+  test('warns on stderr for each unmatched manifest line, exit still 0', () => {
+    const sb = track(createSandbox());
+    const primary = initPrimary(sb, {
+      '.gitignore': 'ios/\n.env.local\n',
+      '.worktreeinclude': 'ios/\n*.nothing\n.env.local\n',
+    });
+    write(primary, '.env.local', 'SIM=1\n');
+    write(primary, 'ios/Podfile', 'noise\n');
+    const linked = addLinkedWorktree(
+      primary,
+      join(sb.path, 'wt'),
+      'worktree-probe',
+    );
+
+    const {result, stderr} = captureStderr(() =>
+      worktreeSetup({target: linked}),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(statuses(result.steps).WORKTREEINCLUDE).toBe('done');
+    expect(stderr).toContain(
+      `${WORKTREE_INCLUDE_FILE} pattern 'ios/' matched no copyable files`,
+    );
+    expect(stderr).toContain('directories are not copied — list files');
+    expect(stderr).toContain(
+      `${WORKTREE_INCLUDE_FILE} pattern '*.nothing' matched no copyable files`,
+    );
+    // The line that worked is not maligned, and the copy still happened.
+    expect(stderr).not.toContain(`pattern '.env.local'`);
+    expect(readFileSync(join(linked, '.env.local'), 'utf-8')).toBe('SIM=1\n');
   });
 
   test('is idempotent: a second run succeeds and reports the files as present', () => {

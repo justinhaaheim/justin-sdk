@@ -436,6 +436,15 @@ export interface CopyPlan {
   entries: CopyPlanEntry[];
   hasManifest: boolean;
   manifestPath: string;
+  /**
+   * Manifest lines (trimmed, verbatim) that contributed ZERO entries — finding
+   * F3. Without this the report says "copied 0" and never says WHY, so a real
+   * manifest with a directory-naming line (`ios/`) silently underdelivers: this
+   * step copies FILES, not trees, so such a line can never match anything.
+   * Comment (`#`) and negation (`!`) lines are excluded — neither is expected to
+   * contribute an entry.
+   */
+  unmatchedPatterns: string[];
 }
 
 const GLOB_METACHARS = /[*?[\]!]/;
@@ -537,7 +546,12 @@ export function planWorktreeIncludeCopies(
 ): CopyPlan {
   const manifestPath = join(primary, WORKTREE_INCLUDE_FILE);
   if (!existsSync(manifestPath)) {
-    return {entries: [], hasManifest: false, manifestPath};
+    return {
+      entries: [],
+      hasManifest: false,
+      manifestPath,
+      unmatchedPatterns: [],
+    };
   }
 
   const content = readFileSync(manifestPath, 'utf-8');
@@ -554,7 +568,53 @@ export function planWorktreeIncludeCopies(
     });
   }
 
-  return {entries, hasManifest: true, manifestPath};
+  return {
+    entries,
+    hasManifest: true,
+    manifestPath,
+    unmatchedPatterns: findUnmatchedPatterns(content, entries),
+  };
+}
+
+/**
+ * Which manifest lines contributed nothing (F3).
+ *
+ * Attribution is done against the FINAL entries, using a fresh single-line
+ * matcher per pattern. Two consequences, both deliberate:
+ *   - a pattern whose only candidate was removed by a later `!` negation is
+ *     correctly reported as contributing nothing;
+ *   - a pattern that jointly matches an entry another line also matched still
+ *     gets credit, so `ios/` alongside `ios/.xcode.env.local` is NOT warned
+ *     about — it really did name the file that got copied.
+ * `skip-exists` entries count as contributions: the pattern named a copyable
+ * file, it just happened to already be in the target.
+ */
+function findUnmatchedPatterns(
+  content: string,
+  entries: CopyPlanEntry[],
+): string[] {
+  const unmatched: string[] = [];
+  for (const raw of content.split('\n')) {
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#') || line.startsWith('!')) continue;
+    const single = ignore().add(line);
+    if (entries.some((entry) => matchesManifest(single, entry.relPath))) {
+      continue;
+    }
+    unmatched.push(line);
+  }
+  return unmatched;
+}
+
+/**
+ * Why a pattern found nothing. The directory case is by far the most likely in a
+ * real manifest (`ios/`, `android/`) and has a concrete remedy, so it gets its
+ * own sentence rather than a generic one.
+ */
+function explainUnmatchedPattern(pattern: string): string {
+  return pattern.endsWith('/')
+    ? 'directories are not copied — list files'
+    : 'nothing gitignored, untracked and present in the primary checkout matches it';
 }
 
 // ---------------------------------------------------------------------------
@@ -779,6 +839,15 @@ export function worktreeSetup(
           failure = `${entry.relPath}: ${error instanceof Error ? error.message : String(error)}`;
           break;
         }
+      }
+      // F3: name every manifest line that contributed nothing. "copied 0" with
+      // no reason is how a manifest silently underdelivers — and these lines are
+      // ADVISORY, never a failure: the manifest is the project's to fix, and a
+      // stale line in it must not break hydration.
+      for (const pattern of plan.unmatchedPatterns) {
+        report(
+          `  ${YELLOW}⚠${RESET} ${WORKTREE_INCLUDE_FILE} pattern '${pattern}' matched no copyable files ${DIM}(${explainUnmatchedPattern(pattern)})${RESET}`,
+        );
       }
       const summary =
         `${dryRun ? 'dry-run: would copy' : 'copied'} ${copied.length}` +
