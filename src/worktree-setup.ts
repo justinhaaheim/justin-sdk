@@ -26,6 +26,14 @@
  *     absolute worktree path) for worktree-new, which the `wt` zsh function
  *     captures to `cd`.
  *
+ * SUBMODULES ARE PART OF "WHAT GIT TRACKS", BUT ONLY AS A POINTER. A fresh
+ * worktree gets an EMPTY directory for every submodule, and when a submodule
+ * backs a package-manager WORKSPACE (home-base consumes justin-sdk exactly that
+ * way) the install dies with `Workspace not found "<path>"` — an error that
+ * names the package.json rather than the submodule, i.e. the same
+ * misdiagnosis-by-misleading-error this command exists to kill
+ * (home-base-v170.7). Hence a SUBMODULES step BEFORE install.
+ *
  * .worktreeinclude IS THE ONLY COPY MANIFEST (D4). Claude Code natively copies
  * gitignored files matching that root-level, gitignore-syntax file into the
  * worktrees IT creates — but it is NOT processed for a manual
@@ -86,6 +94,9 @@ export const WORKTREE_BRANCH_PREFIX = 'worktree-';
 
 /** The manifest Claude Code reads natively; we read the same one (D4). */
 export const WORKTREE_INCLUDE_FILE = '.worktreeinclude';
+
+/** Tracked file whose presence is the only sign a repo has submodules at all. */
+export const GITMODULES_FILE = '.gitmodules';
 
 /** No slashes: a slug names a directory leaf AND a branch leaf (D7). */
 export const SLUG_PATTERN = /^[A-Za-z0-9._-]+$/;
@@ -201,20 +212,31 @@ function isTier(value: string): value is Tier {
 // ---------------------------------------------------------------------------
 
 /**
- * Run git and capture stdout, or null on any failure. argv form only — a prior
- * SDK bug was exactly a shell-interpolated ref name, so paths and branch names
- * never go through a shell here.
+ * Run git and capture stdout VERBATIM, or null on any failure. argv form only —
+ * a prior SDK bug was exactly a shell-interpolated ref name, so paths and branch
+ * names never go through a shell here.
+ *
+ * Used directly only where LEADING whitespace is data. `git submodule status` is
+ * exactly that case: its first column is a single status character, and an
+ * initialized submodule's is a SPACE. Trimming the output therefore deletes the
+ * status of the first submodule listed and makes it unparseable — a bug this
+ * module actually shipped for the length of one test run.
  */
-function gitCapture(argv: string[], cwd: string): string | null {
+function gitCaptureRaw(argv: string[], cwd: string): string | null {
   try {
     return execFileSync('git', argv, {
       cwd,
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
-    }).trim();
+    });
   } catch {
     return null;
   }
+}
+
+/** gitCaptureRaw, trimmed — the right default for single-value plumbing output. */
+function gitCapture(argv: string[], cwd: string): string | null {
+  return gitCaptureRaw(argv, cwd)?.trim() ?? null;
 }
 
 /** True if git exits 0. Used for existence probes (`rev-parse --verify`). */
@@ -384,6 +406,103 @@ function runChild(argv: string[], cwd: string): ChildResult {
 }
 
 // ---------------------------------------------------------------------------
+// Step 3: git submodules
+// ---------------------------------------------------------------------------
+
+/**
+ * `--init --recursive`, matching home-base's .husky/post-checkout hook exactly
+ * (AC6). Recursive because a submodule may itself have submodules, and the
+ * non-recursive form leaves those empty — the identical failure one level down.
+ */
+export const SUBMODULE_UPDATE_ARGV = [
+  'git',
+  'submodule',
+  'update',
+  '--init',
+  '--recursive',
+] as const;
+
+/** Human-readable form of SUBMODULE_UPDATE_ARGV, for report details. */
+const SUBMODULE_UPDATE_COMMAND = SUBMODULE_UPDATE_ARGV.join(' ');
+
+export interface SubmoduleStatus {
+  /** Every submodule path git reported, initialized or not. */
+  all: string[];
+  /** Paths git reports as NOT initialized — status line prefix `-`. */
+  uninitialized: string[];
+}
+
+/**
+ * A `git submodule status` line: one prefix character, the object id, a space,
+ * then the path, then an OPTIONAL ` (<describe>)` suffix which git omits for an
+ * uninitialized submodule. Verified against git 2.x output for both states, both
+ * top-level and `--recursive`.
+ *
+ * The path group is lazy so the optional suffix wins where it exists; the object
+ * id is 40 or 64 hex characters (sha1 / sha256 repositories). A submodule path
+ * that itself ENDS in ` (...)` would have that stripped — accepted, because the
+ * path is only ever printed, never acted on.
+ */
+const SUBMODULE_STATUS_LINE = /^(.)[0-9a-f]{40,64} (.*?)(?: \([^)]*\))?$/;
+
+/**
+ * Parse `git submodule status --recursive` output.
+ *
+ * The load-bearing datum is the PREFIX character, which is the documented
+ * "needs initializing" signal: `-` means the submodule is not initialized, while
+ * ` `, `+` (checked out at a different commit) and `U` (conflicts) all mean it
+ * IS. So a dirty-but-populated submodule is correctly left alone — this step
+ * initializes, it does not reconcile.
+ */
+export function parseSubmoduleStatus(stdout: string): SubmoduleStatus {
+  const all: string[] = [];
+  const uninitialized: string[] = [];
+  for (const raw of stdout.split('\n')) {
+    const line = raw.trimEnd();
+    if (line === '') continue;
+    const match = SUBMODULE_STATUS_LINE.exec(line);
+    if (match == null) continue;
+    const [, prefix, path] = match;
+    if (path == null || path === '') continue;
+    all.push(path);
+    if (prefix === '-') uninitialized.push(path);
+  }
+  return {all, uninitialized};
+}
+
+export type SubmoduleProbe =
+  | {kind: 'known'; status: SubmoduleStatus}
+  | {kind: 'none'}
+  | {kind: 'unknown'};
+
+/**
+ * What submodule work `target` needs, without changing anything.
+ *
+ * `none` (no `.gitmodules`) is the overwhelmingly common fleet case and must
+ * cost one `stat`, so the whole probe short-circuits there — no subprocess, no
+ * new noise in the report for the ~all repos that have no submodules (AC2).
+ *
+ * `unknown` means `.gitmodules` exists but `git submodule status` could not be
+ * read. That is deliberately NOT treated as "nothing to do": silently skipping
+ * is how the original bug reappears (the install then fails naming a workspace),
+ * so the caller attempts the init and lets git report the real reason.
+ */
+export function probeSubmodules(target: string): SubmoduleProbe {
+  if (!existsSync(join(target, GITMODULES_FILE))) return {kind: 'none'};
+  // RAW, not gitCapture: the leading space of an initialized submodule's status
+  // line IS the status, and trimming it silently loses the first submodule.
+  const output = gitCaptureRaw(['submodule', 'status', '--recursive'], target);
+  if (output == null) return {kind: 'unknown'};
+  return {kind: 'known', status: parseSubmoduleStatus(output)};
+}
+
+/** `2 submodules (a, b)` — count first so the detail reads at a glance. */
+function describeSubmodulePaths(paths: string[]): string {
+  const noun = paths.length === 1 ? 'submodule' : 'submodules';
+  return `${paths.length} ${noun}${paths.length > 0 ? ` (${paths.join(', ')})` : ''}`;
+}
+
+// ---------------------------------------------------------------------------
 // Package manager detection
 // ---------------------------------------------------------------------------
 
@@ -423,7 +542,7 @@ export function detectPackageManager(target: string): PackageManagerDetection {
 }
 
 // ---------------------------------------------------------------------------
-// Step 4: .worktreeinclude copy plan
+// Step 5: .worktreeinclude copy plan
 // ---------------------------------------------------------------------------
 
 export interface CopyPlanEntry {
@@ -618,7 +737,7 @@ function explainUnmatchedPattern(pattern: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Step 5: worktree-source:<tier>:<LABEL> discovery
+// Step 6: worktree-source:<tier>:<LABEL> discovery
 // ---------------------------------------------------------------------------
 
 export interface HydrationScript {
@@ -716,13 +835,14 @@ function finish(result: WorktreeSetupResult): WorktreeSetupResult {
 /**
  * Hydrate a worktree. Steps run in a fixed order and STOP at the first
  * failure, because each later step assumes the earlier ones: an install into an
- * untrusted mise tree fails confusingly, and a hydration script cannot run
+ * untrusted mise tree fails confusingly, an install with an empty
+ * submodule-backed workspace fails outright, and a hydration script cannot run
  * without node_modules.
  *
- * Idempotent (epic AC #3): step 3 is a no-op reinstall, step 4 skips files
- * already present, and step 5's scripts are the project's own responsibility —
- * they ARE re-run on every invocation, so projects must write them to be
- * safely repeatable.
+ * Idempotent (epic AC #3): step 3 skips when every submodule is already
+ * populated, step 4 is a no-op reinstall, step 5 skips files already present,
+ * and step 6's scripts are the project's own responsibility — they ARE re-run on
+ * every invocation, so projects must write them to be safely repeatable.
  */
 export function worktreeSetup(
   options: WorktreeSetupOptions = {},
@@ -783,7 +903,68 @@ export function worktreeSetup(
     step(steps, 'MISE', 'done', 'mise trust');
   }
 
-  // --- Step 3: install dependencies ---------------------------------------
+  // --- Step 3: git submodules ----------------------------------------------
+  // BEFORE install, because an empty submodule directory that backs a
+  // package-manager workspace makes the install fail outright
+  // (home-base-v170.7). AFTER mise trust, because nothing here reads mise.
+  const submodules: SubmoduleProbe =
+    primary == null ? {kind: 'none'} : probeSubmodules(target);
+  if (submodules.kind === 'none') {
+    // `primary == null` collapses into this branch on purpose: with no git repo
+    // there is nothing to initialize, and RESOLVE has already said so.
+    step(steps, 'SUBMODULES', 'skipped', `no ${GITMODULES_FILE}`);
+  } else if (submodules.kind === 'known' && submodules.status.all.length === 0) {
+    step(
+      steps,
+      'SUBMODULES',
+      'skipped',
+      `${GITMODULES_FILE} present but git reports no submodules`,
+    );
+  } else if (
+    submodules.kind === 'known' &&
+    submodules.status.uninitialized.length === 0
+  ) {
+    // AC3: idempotent — a populated submodule is reported skipped, not re-done.
+    step(
+      steps,
+      'SUBMODULES',
+      'skipped',
+      `already initialized — ${describeSubmodulePaths(submodules.status.all)}`,
+    );
+  } else {
+    const pending =
+      submodules.kind === 'known'
+        ? `uninitialized: ${describeSubmodulePaths(submodules.status.uninitialized)}`
+        : `\`git submodule status\` unreadable — attempting anyway`;
+    if (dryRun) {
+      step(
+        steps,
+        'SUBMODULES',
+        'skipped',
+        `dry-run: would run \`${SUBMODULE_UPDATE_COMMAND}\` (${pending})`,
+      );
+    } else {
+      const child = runChild([...SUBMODULE_UPDATE_ARGV], target);
+      if (child.exitCode !== 0) {
+        step(
+          steps,
+          'SUBMODULES',
+          'failed',
+          `${SUBMODULE_UPDATE_COMMAND} exited ${child.exitCode}${child.error == null ? '' : ` (${child.error})`}`,
+        );
+        result.exitCode = 1;
+        return finish(result);
+      }
+      step(
+        steps,
+        'SUBMODULES',
+        'done',
+        `${SUBMODULE_UPDATE_COMMAND} (${pending})`,
+      );
+    }
+  }
+
+  // --- Step 4: install dependencies ---------------------------------------
   const detection = detectPackageManager(target);
   const packageManager = detection.packageManager;
   if (packageManager == null) {
@@ -815,7 +996,7 @@ export function worktreeSetup(
     );
   }
 
-  // --- Step 4: .worktreeinclude copy --------------------------------------
+  // --- Step 5: .worktreeinclude copy --------------------------------------
   if (primary == null) {
     step(
       steps,
@@ -890,7 +1071,7 @@ export function worktreeSetup(
     }
   }
 
-  // --- Step 5: project-declared hydration scripts -------------------------
+  // --- Step 6: project-declared hydration scripts -------------------------
   const scripts = discoverHydrationScripts(target);
   if (scripts.length === 0) {
     step(

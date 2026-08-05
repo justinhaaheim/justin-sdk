@@ -37,7 +37,7 @@ import {
  * `lint` omitted install while `js` claimed to add it — which is finding F1.
  */
 const TIER_FLAG_HELP: Record<Tier, string> = {
-  lint: 'Seconds-to-~15s: mise trust + dependency install + .worktreeinclude copy + lint-tier project scripts',
+  lint: 'Seconds-to-~15s: mise trust + submodule init + dependency install + .worktreeinclude copy + lint-tier project scripts',
   js: 'The lint tier plus js-tier project scripts (default — the floor at which `signal` means anything)',
   native:
     'Everything, including native-tier project scripts (prebuild/pod install — minutes)',
@@ -499,7 +499,7 @@ void yargs(hideBin(process.argv))
   )
   .command(
     'worktree-setup',
-    'Hydrate a git worktree: mise trust, install deps, copy the .worktreeinclude files from the primary checkout, run worktree-source:<tier>:* scripts. A fresh worktree has only tracked files, so it is neither buildable nor lintable until this runs. Report goes to stderr; stdout stays empty.',
+    'Hydrate a git worktree: mise trust, init submodules, install deps, copy the .worktreeinclude files from the primary checkout, run worktree-source:<tier>:* scripts. A fresh worktree has only tracked files, so it is neither buildable nor lintable until this runs. Report goes to stderr; stdout stays empty.',
     (y) =>
       y
         .option('lint', {type: 'boolean', describe: TIER_FLAG_HELP.lint})

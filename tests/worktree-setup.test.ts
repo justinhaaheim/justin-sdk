@@ -20,7 +20,9 @@ import {
   detectPackageManager,
   discoverHydrationScripts,
   formatMiseFailureDetail,
+  parseSubmoduleStatus,
   planWorktreeIncludeCopies,
+  probeSubmodules,
   resolvePrimaryCheckout,
   resolveTier,
   tierIncludes,
@@ -29,7 +31,15 @@ import {
   WORKTREE_INCLUDE_FILE,
   type StepReport,
 } from '../src/worktree-setup';
-import {addLinkedWorktree, git, initPrimary, write} from './git-fixtures';
+import {
+  addLinkedWorktree,
+  addSubmodule,
+  git,
+  initPrimary,
+  initRepo,
+  withFileSubmodulesAllowed,
+  write,
+} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
@@ -555,10 +565,14 @@ describe('worktreeSetup', () => {
     expect(statuses(result.steps)).toEqual({
       RESOLVE: 'done',
       MISE: 'skipped',
+      SUBMODULES: 'skipped',
       INSTALL: 'skipped',
       WORKTREEINCLUDE: 'skipped',
       HYDRATE: 'skipped',
     });
+    // AC2: the overwhelming majority of repos have no submodules, and they must
+    // see a reason rather than a bare new line in the report.
+    expect(detailFor(result.steps, 'SUBMODULES')).toBe('no .gitmodules');
   });
 
   test('running in the primary checkout is allowed and reports the no-op', () => {
@@ -819,6 +833,255 @@ describe('worktreeSetup', () => {
     expect(
       detailFor(result.steps, 'HYDRATE:worktree-source:web:THING'),
     ).toContain('unknown tier');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The SUBMODULES step (home-base-v170.7)
+// ---------------------------------------------------------------------------
+
+describe('parseSubmoduleStatus', () => {
+  const SHA_A = 'a'.repeat(40);
+  const SHA_B = 'b'.repeat(40);
+
+  test('a leading `-` is the only "not initialized" signal', () => {
+    // Verbatim shapes from git 2.x: the describe suffix is present for an
+    // initialized submodule and absent for an uninitialized one.
+    expect(
+      parseSubmoduleStatus(
+        [
+          ` ${SHA_A} projects/ready (heads/main)`,
+          `-${SHA_B} projects/empty`,
+        ].join('\n'),
+      ),
+    ).toEqual({
+      all: ['projects/ready', 'projects/empty'],
+      uninitialized: ['projects/empty'],
+    });
+  });
+
+  test('`+` and `U` mean initialized — this step initializes, it never reconciles', () => {
+    expect(
+      parseSubmoduleStatus(
+        [
+          `+${SHA_A} projects/moved (heads/other)`,
+          `U${SHA_B} projects/conflicted`,
+        ].join('\n'),
+      ),
+    ).toEqual({
+      all: ['projects/moved', 'projects/conflicted'],
+      uninitialized: [],
+    });
+  });
+
+  test('paths containing spaces survive, and sha256 ids parse', () => {
+    expect(
+      parseSubmoduleStatus(
+        [
+          `-${'c'.repeat(64)} projects/my sdk`,
+          ` ${SHA_A} projects/my sdk/nested (heads/main)`,
+        ].join('\n'),
+      ),
+    ).toEqual({
+      all: ['projects/my sdk', 'projects/my sdk/nested'],
+      uninitialized: ['projects/my sdk'],
+    });
+  });
+
+  test('empty output and unparseable noise yield nothing, never a throw', () => {
+    expect(parseSubmoduleStatus('')).toEqual({all: [], uninitialized: []});
+    expect(parseSubmoduleStatus('\n\n')).toEqual({all: [], uninitialized: []});
+    expect(parseSubmoduleStatus('fatal: whatever')).toEqual({
+      all: [],
+      uninitialized: [],
+    });
+  });
+});
+
+describe('probeSubmodules', () => {
+  test('no .gitmodules short-circuits to `none` (no subprocess, AC2)', () => {
+    const sb = track(createSandbox());
+    const primary = initPrimary(sb, {'a.txt': 'a\n'});
+    expect(probeSubmodules(primary)).toEqual({kind: 'none'});
+  });
+
+  test('a .gitmodules with no matching index entry reports zero submodules', () => {
+    const sb = track(createSandbox());
+    const primary = initPrimary(sb, {
+      '.gitmodules': '[submodule "ghost"]\n\tpath = ghost\n\turl = ./nope\n',
+    });
+    expect(probeSubmodules(primary)).toEqual({
+      kind: 'known',
+      status: {all: [], uninitialized: []},
+    });
+  });
+});
+
+/**
+ * The regression fixture for home-base-v170.7, over REAL git: a repo whose bun
+ * workspace member IS a submodule, plus a nested submodule one level deeper so
+ * `--init --recursive` (AC6) is observable rather than asserted.
+ *
+ * `bun install` really runs here. That is the point — the bug was that install
+ * DIED on the empty submodule directory, and only a real install can prove it
+ * does not any more.
+ */
+describe('SUBMODULES over a real submodule-backed workspace', () => {
+  function fixture(sb: Sandbox): {linked: string; primary: string} {
+    // Deliberately NOT a JS package: it must not become a bun workspace member.
+    const nested = initRepo(sb, 'nested-source', {'note.txt': 'nested\n'});
+    const sub = initRepo(sb, 'sub-source', {
+      'package.json': `${JSON.stringify({name: 'sub', version: '1.0.0'}, null, 2)}\n`,
+    });
+    addSubmodule(sub, nested, 'nested');
+
+    const primary = initPrimary(sb, {
+      '.gitignore': 'node_modules/\n',
+      'package.json': `${JSON.stringify(
+        {name: 'root', private: true, workspaces: ['projects/sub']},
+        null,
+        2,
+      )}\n`,
+    });
+    addSubmodule(primary, sub, 'projects/sub');
+    const linked = addLinkedWorktree(
+      primary,
+      join(sb.path, 'wt'),
+      'worktree-probe',
+    );
+    return {linked, primary};
+  }
+
+  /**
+   * Proves the fixture reproduces the ORIGINAL bug, so the tests below are not
+   * vacuous: without submodule init, the install fails naming the WORKSPACE —
+   * the misleading error the epic exists to kill. This is the permanent form of
+   * the AC4 negative control.
+   */
+  test('the fixture reproduces the bug: bare `bun install` fails on the workspace', () => {
+    const sb = track(createSandbox());
+    const {linked} = fixture(sb);
+    expect(existsSync(join(linked, 'projects', 'sub', 'package.json'))).toBe(
+      false,
+    );
+
+    const install = spawnSync('bun', ['install'], {
+      cwd: linked,
+      encoding: 'utf-8',
+    });
+    expect(install.status).not.toBe(0);
+    expect(`${install.stdout}${install.stderr}`).toContain(
+      'Workspace not found',
+    );
+  });
+
+  /**
+   * REGRESSION, found by this suite: the probe originally read the status
+   * through the trimming git helper, which deleted the leading SPACE that IS an
+   * initialized submodule's status — silently losing the FIRST submodule listed.
+   * The primary checkout is the ideal witness: `git submodule add` populates the
+   * top-level submodule but does NOT recurse, so the initialized one comes first
+   * and the uninitialized one second.
+   */
+  test('probeSubmodules keeps the leading-space status of the first submodule', () => {
+    const sb = track(createSandbox());
+    const {primary} = fixture(sb);
+    expect(probeSubmodules(primary)).toEqual({
+      kind: 'known',
+      status: {
+        all: ['projects/sub', 'projects/sub/nested'],
+        uninitialized: ['projects/sub/nested'],
+      },
+    });
+  });
+
+  test('AC1/AC6: one invocation hydrates the tree, recursively, exit 0', () => {
+    const sb = track(createSandbox());
+    const {linked} = fixture(sb);
+
+    const result = withFileSubmodulesAllowed(() =>
+      worktreeSetup({target: linked}),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(statuses(result.steps).SUBMODULES).toBe('done');
+    expect(statuses(result.steps).INSTALL).toBe('done');
+    // AC2: ordered before install — the whole reason the step exists.
+    expect(result.steps.map((s) => s.label).slice(0, 4)).toEqual([
+      'RESOLVE',
+      'MISE',
+      'SUBMODULES',
+      'INSTALL',
+    ]);
+    expect(detailFor(result.steps, 'SUBMODULES')).toContain(
+      'git submodule update --init --recursive',
+    );
+    expect(detailFor(result.steps, 'SUBMODULES')).toContain(
+      'uninitialized: 1 submodule (projects/sub)',
+    );
+    // The workspace member is populated, and so is ITS submodule (--recursive).
+    expect(
+      readFileSync(join(linked, 'projects', 'sub', 'package.json'), 'utf-8'),
+    ).toContain('"name": "sub"');
+    expect(
+      readFileSync(join(linked, 'projects', 'sub', 'nested', 'note.txt'), 'utf-8'),
+    ).toBe('nested\n');
+    // And the install that used to die actually produced node_modules.
+    expect(existsSync(join(linked, 'node_modules'))).toBe(true);
+  });
+
+  test('AC3: a second run reports skipped/already initialized, not done', () => {
+    const sb = track(createSandbox());
+    const {linked} = fixture(sb);
+
+    expect(
+      withFileSubmodulesAllowed(() => worktreeSetup({target: linked})).exitCode,
+    ).toBe(0);
+
+    const second = withFileSubmodulesAllowed(() =>
+      worktreeSetup({target: linked}),
+    );
+    expect(second.exitCode).toBe(0);
+    expect(statuses(second.steps).SUBMODULES).toBe('skipped');
+    // Both levels counted, which is only true if the probe is recursive too.
+    expect(detailFor(second.steps, 'SUBMODULES')).toBe(
+      'already initialized — 2 submodules (projects/sub, projects/sub/nested)',
+    );
+  });
+
+  test('--dry-run reports the would-run and initializes nothing', () => {
+    const sb = track(createSandbox());
+    const {linked} = fixture(sb);
+
+    const result = withFileSubmodulesAllowed(() =>
+      worktreeSetup({dryRun: true, target: linked}),
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(statuses(result.steps).SUBMODULES).toBe('skipped');
+    expect(detailFor(result.steps, 'SUBMODULES')).toContain(
+      'dry-run: would run `git submodule update --init --recursive`',
+    );
+    expect(existsSync(join(linked, 'projects', 'sub', 'package.json'))).toBe(
+      false,
+    );
+    expect(existsSync(join(linked, 'node_modules'))).toBe(false);
+  });
+
+  test('a failing submodule init stops the run before install (never a misleading workspace error)', () => {
+    const sb = track(createSandbox());
+    const {linked} = fixture(sb);
+
+    // No GIT_ALLOW_PROTOCOL here: git refuses the file transport, so the clone
+    // fails — a real init failure, not a simulated one.
+    const result = worktreeSetup({target: linked});
+
+    expect(result.exitCode).toBe(1);
+    expect(statuses(result.steps).SUBMODULES).toBe('failed');
+    expect(detailFor(result.steps, 'SUBMODULES')).toContain(
+      'git submodule update --init --recursive exited',
+    );
+    expect(result.steps.some((s) => s.label === 'INSTALL')).toBe(false);
   });
 });
 
