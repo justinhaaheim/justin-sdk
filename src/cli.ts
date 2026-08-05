@@ -22,6 +22,19 @@ import {DEFAULT_OPTIONS as RALPH_DEFAULTS, runRalph} from './ralph';
 import {runSyncRules} from './sync-rules';
 import {runSignal} from './signal';
 import {runUpdate} from './update';
+import {
+  type Tier,
+  resolveTier,
+  worktreeNew,
+  worktreeSetup,
+} from './worktree-setup';
+
+const TIER_FLAG_HELP: Record<Tier, string> = {
+  lint: 'Seconds: mise trust + .worktreeinclude copy + lint-tier project scripts',
+  js: 'The lint tier plus dependency install and js-tier scripts (default — the floor at which `signal` means anything)',
+  native:
+    'Everything, including native-tier project scripts (prebuild/pod install — minutes)',
+};
 
 void yargs(hideBin(process.argv))
   .scriptName('justin-sdk')
@@ -475,6 +488,79 @@ void yargs(hideBin(process.argv))
         quiet: argv.quiet,
       });
       process.exit(exitCode);
+    },
+  )
+  .command(
+    'worktree-setup',
+    'Hydrate a git worktree: mise trust, install deps, copy the .worktreeinclude files from the primary checkout, run worktree-source:<tier>:* scripts. A fresh worktree has only tracked files, so it is neither buildable nor lintable until this runs. Report goes to stderr; stdout stays empty.',
+    (y) =>
+      y
+        .option('lint', {type: 'boolean', describe: TIER_FLAG_HELP.lint})
+        .option('js', {type: 'boolean', describe: TIER_FLAG_HELP.js})
+        .option('native', {type: 'boolean', describe: TIER_FLAG_HELP.native})
+        .option('target', {
+          type: 'string',
+          describe:
+            'Worktree to hydrate (default: cwd). Lets you run this from the primary checkout, where the SDK is already installed.',
+        })
+        .option('dry-run', {
+          type: 'boolean',
+          describe: 'Print what would happen and change nothing',
+          default: false,
+        }),
+    (argv) => {
+      const tier = resolveTier({
+        js: argv.js,
+        lint: argv.lint,
+        native: argv.native,
+      });
+      if ('error' in tier) {
+        console.error(`Error: ${tier.error}`);
+        process.exit(1);
+      }
+      const result = worktreeSetup({
+        dryRun: argv['dry-run'],
+        target: argv.target,
+        tier: tier.tier,
+      });
+      process.exit(result.exitCode);
+    },
+  )
+  .command(
+    'worktree-new <slug>',
+    'Create a worktree the way Claude Code does — .claude/worktrees/<slug> on branch worktree-<slug> — then hydrate it. Prints exactly one stdout line, the absolute worktree path, for the `wt` shell function to cd into.',
+    (y) =>
+      y
+        .positional('slug', {
+          type: 'string',
+          describe:
+            'Names both the directory and the branch. [A-Za-z0-9._-] only — no slashes.',
+        })
+        .option('lint', {type: 'boolean', describe: TIER_FLAG_HELP.lint})
+        .option('js', {type: 'boolean', describe: TIER_FLAG_HELP.js})
+        .option('native', {type: 'boolean', describe: TIER_FLAG_HELP.native})
+        .option('setup', {
+          type: 'boolean',
+          describe:
+            'Hydrate after creating (default). Pass --no-setup to create only.',
+          default: true,
+        }),
+    (argv) => {
+      const tier = resolveTier({
+        js: argv.js,
+        lint: argv.lint,
+        native: argv.native,
+      });
+      if ('error' in tier) {
+        console.error(`Error: ${tier.error}`);
+        process.exit(1);
+      }
+      const result = worktreeNew({
+        noSetup: !argv.setup,
+        slug: argv.slug as string,
+        tier: tier.tier,
+      });
+      process.exit(result.exitCode);
     },
   )
   .demandCommand(1, 'Please specify a command')
