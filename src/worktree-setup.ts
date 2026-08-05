@@ -90,6 +90,16 @@ export const WORKTREE_INCLUDE_FILE = '.worktreeinclude';
 /** No slashes: a slug names a directory leaf AND a branch leaf (D7). */
 export const SLUG_PATTERN = /^[A-Za-z0-9._-]+$/;
 
+/**
+ * Slugs of nothing but dots — `.` and `..` — which SLUG_PATTERN happily accepts
+ * because `.` is in its character class (finding F2). They are not names, they
+ * are directory references: `..` makes the worktree path collapse to
+ * `<primary>/.claude`, so `worktree-new ..` in a repo with no `.claude` yet
+ * would attempt `git worktree add` AT the `.claude` directory itself. Every
+ * other pure-dot form is equally meaningless, hence `+` not a literal pair.
+ */
+const PURE_DOT_SLUG_PATTERN = /^\.+$/;
+
 export type StepStatus = 'done' | 'skipped' | 'failed';
 
 export interface StepReport {
@@ -904,6 +914,11 @@ export function worktreeNew(options: WorktreeNewOptions): WorktreeNewResult {
   if (!SLUG_PATTERN.test(slug)) {
     return failed(
       `invalid slug ${JSON.stringify(slug)} — must match ${String(SLUG_PATTERN)} (no slashes: the slug names both the directory and the branch)`,
+    );
+  }
+  if (PURE_DOT_SLUG_PATTERN.test(slug)) {
+    return failed(
+      `invalid slug ${JSON.stringify(slug)} — a slug of only dots is a directory reference, not a name (\`..\` would point the worktree at the \`.claude\` directory itself)`,
     );
   }
 

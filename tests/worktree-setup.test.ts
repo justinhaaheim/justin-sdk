@@ -728,6 +728,36 @@ describe('worktreeNew', () => {
     },
   );
 
+  /**
+   * F2. `.` and `..` PASS SLUG_PATTERN, because `.` is in its character class.
+   * `..` is the dangerous one: `join(primary, '.claude', 'worktrees', '..')`
+   * collapses to `<primary>/.claude`, so in a repo with no `.claude` yet the
+   * existsSync guard waves it through and `git worktree add` is aimed at the
+   * `.claude` directory itself. Refname rules happen to reject `worktree-..`
+   * today, so this is a guard against a self-defusing bug — which is exactly the
+   * kind that stops self-defusing after an unrelated change.
+   */
+  test.each(['.', '..', '...'])(
+    'refuses the pure-dot slug %p and creates nothing',
+    (slug) => {
+      const sb = track(createSandbox());
+      const primary = initPrimary(sb, {'.gitignore': '.claude/\n'});
+      const result = worktreeNew({cwd: primary, noSetup: true, slug});
+      expect(result.exitCode).toBe(1);
+      expect(result.path).toBeNull();
+      // THE load-bearing assertion. exitCode 1 alone proves nothing here: git's
+      // refname rules reject `worktree-.` anyway, so removing the guard still
+      // yields exit 1. `baseRef` is only ever populated once we have decided to
+      // create — a null baseRef proves the slug was refused BEFORE any git work
+      // was attempted at the collapsed path.
+      expect(result.baseRef).toBeNull();
+      // And nothing was created anywhere along that collapsed path.
+      expect(existsSync(join(primary, '.claude'))).toBe(false);
+      expect(git(primary, ['branch', '--list'])).not.toContain('worktree-');
+      expect(git(primary, ['worktree', 'list'])).not.toContain('.claude');
+    },
+  );
+
   test('refuses when the worktree directory already exists', () => {
     const sb = track(createSandbox());
     const primary = initPrimary(sb, {'.gitignore': '.claude/\n'});
@@ -848,6 +878,20 @@ describe('CLI stdout purity', () => {
     expect(stderr).toContain('worktree-new');
     expect(stderr).toContain('SCRIPT_STDOUT_NOISE');
   });
+
+  /** F2's other half of the AC: the refusal must not put anything on stdout. */
+  test.each(['.', '..'])(
+    'a pure-dot slug %p exits 1 with EMPTY stdout',
+    (slug) => {
+      const sb = track(createSandbox());
+      const primary = initPrimary(sb, {'.gitignore': '.claude/\n'});
+      const {status, stdout, stderr} = runCli(['worktree-new', slug], primary);
+      expect(status).toBe(1);
+      expect(stdout).toBe('');
+      expect(stderr).toContain('only dots');
+      expect(existsSync(join(primary, '.claude'))).toBe(false);
+    },
+  );
 
   test('mutually exclusive tier flags exit 1 with the error on stderr', () => {
     const sb = track(createSandbox());
