@@ -55,7 +55,15 @@ import {
   readFileSync,
   statSync,
 } from 'node:fs';
-import {basename, dirname, isAbsolute, join, resolve} from 'node:path';
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  normalize,
+  resolve,
+  sep,
+} from 'node:path';
 import ignore from 'ignore';
 
 // ---------------------------------------------------------------------------
@@ -347,6 +355,44 @@ export interface CopyPlan {
 const GLOB_METACHARS = /[*?[\]!]/;
 
 /**
+ * Normalize a manifest line to a clean repo-relative POSIX path, or null if it
+ * is not one.
+ *
+ * This is a hard requirement, not tidiness: `ignore`'s matcher THROWS a
+ * RangeError ("path should be a `path.relative()`d string") for absolute,
+ * `./`-prefixed, or `..`-escaping paths, and a TypeError for an empty one. A
+ * `.worktreeinclude` line of `./foo` — a common habit, even though gitignore
+ * syntax doesn't need the prefix — would otherwise crash the command with an
+ * unhandled exception. `./foo` normalizes to `foo`; anything escaping the repo
+ * is rejected outright.
+ */
+function toRelativeCandidate(line: string): string | null {
+  const trimmed = line.replace(/^\/+/, '').replace(/\/+$/, '');
+  if (trimmed === '') return null;
+  const normalized = normalize(trimmed).split(sep).join('/');
+  if (normalized === '' || normalized === '.') return null;
+  if (normalized === '..' || normalized.startsWith('../')) return null;
+  if (isAbsolute(normalized)) return null;
+  return normalized;
+}
+
+/**
+ * Match a path against the manifest, treating any matcher throw as "no match".
+ * Belt-and-braces with toRelativeCandidate: no content of a project's
+ * `.worktreeinclude` should ever be able to crash hydration.
+ */
+function matchesManifest(
+  matcher: ReturnType<typeof ignore>,
+  relPath: string,
+): boolean {
+  try {
+    return matcher.ignores(relPath);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Candidate files in `primary` that a `.worktreeinclude` pattern could name.
  *
  * Two sources, unioned:
@@ -378,8 +424,8 @@ function collectCandidates(primary: string, manifestLines: string[]): string[] {
     const line = raw.trim();
     if (line === '' || line.startsWith('#') || line.startsWith('!')) continue;
     if (GLOB_METACHARS.test(line)) continue;
-    const relPath = line.replace(/^\/+/, '').replace(/\/+$/, '');
-    if (relPath === '') continue;
+    const relPath = toRelativeCandidate(line);
+    if (relPath == null) continue;
     try {
       if (statSync(join(primary, relPath)).isFile()) candidates.add(relPath);
     } catch {
@@ -414,7 +460,7 @@ export function planWorktreeIncludeCopies(
 
   const entries: CopyPlanEntry[] = [];
   for (const relPath of candidates) {
-    if (!matcher.ignores(relPath)) continue;
+    if (!matchesManifest(matcher, relPath)) continue;
     if (!gitSucceeds(['check-ignore', '-q', '--', relPath], primary)) continue;
     entries.push({
       relPath,

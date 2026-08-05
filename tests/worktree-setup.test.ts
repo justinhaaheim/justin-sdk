@@ -420,6 +420,41 @@ describe('planWorktreeIncludeCopies', () => {
     ]);
   });
 
+  test('a `./`-prefixed manifest line does not crash (and matches nothing, like git)', () => {
+    const sb = track(createSandbox());
+    // Two separate facts here, both verified:
+    //  1. `ignore`'s matcher THROWS a RangeError on a './'-prefixed path, so
+    //     without normalizing the CANDIDATE this line takes the command down.
+    //  2. git itself does NOT match `foo` with the pattern `./foo` (verified
+    //     directly: `git check-ignore` exits 1 and `git status` still shows the
+    //     file as untracked). So the correct outcome is "no crash, no match" —
+    //     normalizing must not invent a match the manifest didn't express.
+    const primary = initPrimary(sb, {
+      '.gitignore': '.env.local\n',
+      '.worktreeinclude': './.env.local\n',
+    });
+    write(primary, '.env.local', 'SIM=1\n');
+    const target = join(sb.path, 'target');
+    mkdirSync(target);
+    expect(() => planWorktreeIncludeCopies(primary, target)).not.toThrow();
+    expect(planWorktreeIncludeCopies(primary, target).entries).toEqual([]);
+  });
+
+  test('a manifest line escaping the repo is rejected, not thrown on', () => {
+    const sb = track(createSandbox());
+    const primary = initPrimary(sb, {
+      '.gitignore': '.env.local\n',
+      '.worktreeinclude': '../outside.txt\n/etc/hosts\n..\n\n',
+    });
+    // A real file at the escaping path, so it is only excluded by the guard.
+    write(sb.path, 'outside.txt', 'nope\n');
+    const target = join(sb.path, 'target');
+    mkdirSync(target);
+    expect(() => planWorktreeIncludeCopies(primary, target)).not.toThrow();
+    expect(planWorktreeIncludeCopies(primary, target).entries).toEqual([]);
+    expect(existsSync(join(sb.path, 'outside.txt'))).toBe(true);
+  });
+
   test('manifest negation (!) is honored by the ignore parser', () => {
     const sb = track(createSandbox());
     const primary = initPrimary(sb, {
