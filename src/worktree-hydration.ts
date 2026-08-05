@@ -91,8 +91,11 @@ export interface WorktreeHydrationStatus {
  * where it would have worked fine — which is the escape-hatch concern raised on
  * bead home-base-v170.2 and ruled here.
  *
- * DOCTOR IS DELIBERATELY NOT SPLIT: it reports state rather than gating work, so
- * it fires on ANY problem.
+ * DOCTOR'S GATE IS DELIBERATELY NOT SPLIT: it reports state rather than gating
+ * work, so it fires on ANY problem. Its MESSAGE does consult the split
+ * (home-base-v170.6) — the PHANTOM claim is only true of a blocking problem, and
+ * over-claiming it where it is false is what would make it disbelieved where it
+ * is true.
  */
 export const BLOCKING_PROBLEM_KINDS: ReadonlySet<HydrationProblemKind> = new Set(
   ['node-modules'],

@@ -19,6 +19,7 @@ import {PINNED, PROMPTS_PIN} from './pinned-versions';
 import {
   describeMissing,
   detectWorktreeHydration,
+  hasBlockingProblem,
   isLinkedWorktree,
 } from './worktree-hydration';
 import {
@@ -96,8 +97,12 @@ function parseMiseToml(projectRoot: string): Record<string, string> | null {
  *
  * Inside a worktree the check IS registered even when everything is hydrated, so
  * a worktree gets positive confirmation rather than silence; it FAILS only when
- * there is a real problem, at severity error (the default) because an
- * unhydrated worktree cannot be built or linted at all.
+ * there is a real problem, at severity error (the default) because a hydration
+ * gap always costs something — either trustworthy checks or a working build.
+ *
+ * THE GATE IS NOT SPLIT (F7): doctor reports state rather than deciding whether
+ * work may proceed, so ANY problem is `pass: false`. The MESSAGE is split, and
+ * only the message (home-base-v170.6) — see the consequence sentence below.
  */
 export function makeWorktreeHydrationChecks(projectRoot: string): CheckNode[] {
   if (!isLinkedWorktree(projectRoot)) return [];
@@ -110,11 +115,21 @@ export function makeWorktreeHydrationChecks(projectRoot: string): CheckNode[] {
           if (status.problems.length === 0) {
             return {message: 'linked worktree, hydrated', pass: true};
           }
+          // The PHANTOM claim is the one sentence in this whole feature that has
+          // to be BELIEVED, so it is emitted only where F7 says it is true: a
+          // blocking problem (a missing node_modules). Asserting it for an
+          // advisory-only gap — say a missing .env.local with node_modules
+          // intact — is simply false, and a reader who catches it being false
+          // once will discount it in the blocking case where it matters.
+          const blocking = hasBlockingProblem(status);
+          const consequence = blocking
+            ? 'Any lint/type failures here are PHANTOM (they blame untouched files).'
+            : 'Lint/type results here are still trustworthy — this cannot fabricate failures — but a build, or any command needing the pinned toolchain, may fail.';
           return {
             fix: `Run: ${status.fixCommand}`,
             message:
-              `unhydrated linked worktree — missing ${describeMissing(status)}. ` +
-              `Any lint/type failures here are PHANTOM (they blame untouched files). ` +
+              `${blocking ? '' : 'partially '}unhydrated linked worktree — ` +
+              `missing ${describeMissing(status)}. ${consequence} ` +
               status.problems.map((problem) => problem.detail).join('; '),
             pass: false,
           };

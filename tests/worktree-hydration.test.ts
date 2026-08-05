@@ -631,6 +631,74 @@ describe('blocking vs advisory problem kinds (F7)', () => {
     expect(stderr).not.toContain('partially unhydrated');
   });
 
+  /**
+   * home-base-v170.6 — doctor's MESSAGE follows the same split, its GATE does
+   * not. The two fixtures below differ in exactly one thing (whether
+   * node_modules exists), so any difference in the message is attributable to
+   * the blocking/advisory decision and nothing else. Both must still fail.
+   */
+  describe("doctor's message (v170.6)", () => {
+    /** Advisory `.env.local` gap always present; node_modules is the variable. */
+    function fixture(sb: Sandbox, nodeModules: boolean): string {
+      const primary = makePrimary(sb, {
+        files: {'.env.local': 'SECRET=1\n'},
+        worktreeinclude: '.env.local\n',
+      });
+      const wt = addLinkedWorktree(
+        primary,
+        join(primary, '.claude', 'worktrees', 'w1'),
+        'worktree-w1',
+      );
+      if (nodeModules) mkdirSync(join(wt, 'node_modules'), {recursive: true});
+      return wt;
+    }
+
+    function doctorMessage(worktree: string): {message: string; pass: boolean} {
+      const result = makeWorktreeHydrationChecks(worktree)[0]?.check.fn?.() as {
+        message?: string;
+        pass: boolean;
+      };
+      return {message: result.message ?? '', pass: result.pass};
+    }
+
+    test('a BLOCKING worktree still gets the PHANTOM sentence', () => {
+      const sb = track(createSandbox());
+      const wt = fixture(sb, false);
+      // Fixture sanity: this is the MIXED state, so the advisory problem is
+      // present too and must not soften the claim.
+      expect(kinds(detectWorktreeHydration(wt)).sort()).toEqual([
+        'node-modules',
+        'worktreeinclude',
+      ]);
+
+      const {message, pass} = doctorMessage(wt);
+      expect(pass).toBe(false);
+      expect(message).toContain('PHANTOM');
+      expect(message).toContain('node_modules');
+      // Not hedged into meaninglessness by the advisory wording.
+      expect(message).not.toContain('still trustworthy');
+      expect(message).not.toContain('partially unhydrated');
+    });
+
+    test('an ADVISORY-ONLY worktree does NOT claim phantom-ness', () => {
+      const sb = track(createSandbox());
+      const wt = fixture(sb, true);
+      // Fixture sanity: node_modules intact, so the ONLY problem is advisory.
+      expect(kinds(detectWorktreeHydration(wt))).toEqual(['worktreeinclude']);
+
+      const {message, pass} = doctorMessage(wt);
+      // The gate is unchanged — a real gap is still an error.
+      expect(pass).toBe(false);
+      // THE assertion this bead exists for.
+      expect(message).not.toContain('PHANTOM');
+      // …and it says what the gap DOES affect instead of what it doesn't.
+      expect(message).toContain('still trustworthy');
+      expect(message).toContain('build');
+      expect(message).toContain('partially unhydrated');
+      expect(message).toContain('.env.local');
+    });
+  });
+
   test('the advisory warning is 3 lines and carries all three facts', () => {
     const status: WorktreeHydrationStatus = {
       fixCommand: 'bun run worktree:setup',
