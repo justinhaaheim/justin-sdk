@@ -16,7 +16,7 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {existsSync, mkdirSync, writeFileSync} from 'fs';
+import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {makeWorktreeHydrationChecks} from '../src/doctor';
@@ -30,6 +30,8 @@ import {
   miseTrustStatus,
   parseMiseTrustStatus,
   WORKTREE_SETUP_BUNX,
+  type HydrationProblem,
+  type HydrationProblemKind,
   type WorktreeHydrationStatus,
 } from '../src/worktree-hydration';
 import {addLinkedWorktree, git, initPrimary} from './git-fixtures';
@@ -324,15 +326,31 @@ describe('linked worktree missing node_modules', () => {
     expect(result.message).toContain('PHANTOM');
   });
 
-  test('doctor names `bun run worktree:setup` when the project declares it', () => {
+  /**
+   * F6 — DELIBERATE CONTRACT CHANGE. This test previously asserted the OPPOSITE
+   * (`Run: bun run worktree:setup`), i.e. that a declared alias always wins.
+   * That is precisely the hazardous state: node_modules is missing in this
+   * fixture, so the fleet alias form `bunx justin-sdk worktree-setup` cannot
+   * resolve the SDK locally and bunx would fetch the BARE npm name — not this
+   * package. Ruled on home-base-v170.5 (F6): the node-modules problem forces the
+   * explicit github form. The rewrite is the finding, not test-fudging.
+   */
+  test('doctor forces the bunx-github form even when the alias exists (F6)', () => {
     const sb = track(createSandbox());
     const wt = setup(sb, {worktreeSetupScript: true});
+    // Fixture sanity: the alias really IS declared, in the exact fleet form —
+    // so what follows is about the rule, not about a missing script.
+    const pkg = JSON.parse(
+      readFileSync(join(wt, 'package.json'), 'utf-8'),
+    ) as {scripts: Record<string, string>};
+    expect(pkg.scripts['worktree:setup']).toBe('bunx justin-sdk worktree-setup');
+
     const result = makeWorktreeHydrationChecks(wt)[0]?.check.fn?.() as {
       fix?: string;
       pass: boolean;
     };
     expect(result.pass).toBe(false);
-    expect(result.fix).toBe('Run: bun run worktree:setup');
+    expect(result.fix).toBe(`Run: ${WORKTREE_SETUP_BUNX}`);
   });
 
   test('a package.json with no dependencies is not a hydration problem', () => {
@@ -427,6 +445,34 @@ describe('.worktreeinclude missing files', () => {
     expect(kinds(status)).toEqual(['worktreeinclude']);
     expect(status.problems[0]?.label).toBe('.env.local');
     expect(status.problems[0]?.detail).toContain('.worktreeinclude');
+  });
+
+  /**
+   * F6's other half, end to end: with node_modules INTACT the alias can actually
+   * resolve the SDK, so it is the right thing to print — faster, no network. The
+   * two F6 tests differ only in whether node_modules exists.
+   */
+  test('with node_modules intact, the project alias IS preferred (F6)', () => {
+    const sb = track(createSandbox());
+    const primary = makePrimary(sb, {
+      files: {'.env.local': 'SECRET=1\n'},
+      packageJson: {
+        devDependencies: {'left-pad': '1.3.0'},
+        name: 'fixture',
+        scripts: {'worktree:setup': 'bunx justin-sdk worktree-setup'},
+      },
+      worktreeinclude: '.env.local\n',
+    });
+    const wt = addLinkedWorktree(
+      primary,
+      join(primary, '.claude', 'worktrees', 'w1'),
+      'worktree-w1',
+    );
+    mkdirSync(join(wt, 'node_modules'), {recursive: true});
+
+    const status = detectWorktreeHydration(wt);
+    expect(kinds(status)).toEqual(['worktreeinclude']);
+    expect(status.fixCommand).toBe('bun run worktree:setup');
   });
 
   test('once the file is copied in, the problem is gone', () => {
@@ -572,26 +618,84 @@ describe('messaging', () => {
 });
 
 describe('hydrationFixCommand', () => {
-  test('prefers the project-local alias when declared', () => {
-    const sb = track(createSandbox());
+  /** A problem of the given kind; only `kind` participates in the F6 rule. */
+  function problem(kind: HydrationProblemKind): HydrationProblem {
+    return {detail: `${kind} detail`, kind, label: kind};
+  }
+
+  const INCLUDE_ONLY = [problem('worktreeinclude')];
+  const WITH_NODE_MODULES = [problem('worktreeinclude'), problem('node-modules')];
+
+  function withAlias(sb: Sandbox): string {
     writeFileSync(
       join(sb.path, 'package.json'),
       JSON.stringify({scripts: {'worktree:setup': 'anything'}}),
     );
-    expect(hydrationFixCommand(sb.path)).toBe('bun run worktree:setup');
+    return sb.path;
+  }
+
+  test('prefers the project-local alias when declared', () => {
+    const sb = track(createSandbox());
+    expect(hydrationFixCommand(withAlias(sb), INCLUDE_ONLY)).toBe(
+      'bun run worktree:setup',
+    );
+  });
+
+  /**
+   * F6, THE safety assertion. With node_modules missing, the fleet alias form
+   * `bunx justin-sdk worktree-setup` cannot resolve the SDK locally, and bunx
+   * falls back to the BARE npm name `justin-sdk` — a package that is not ours.
+   * Printing the alias here would hand the user a command that fetches and runs
+   * a stranger's code, so the rule is absolute regardless of the alias existing.
+   */
+  test('a node-modules problem forces the bunx-github form despite the alias', () => {
+    const sb = track(createSandbox());
+    const target = withAlias(sb);
+    // Same target, same alias — only the STATE differs between these two.
+    expect(hydrationFixCommand(target, INCLUDE_ONLY)).toBe(
+      'bun run worktree:setup',
+    );
+    expect(hydrationFixCommand(target, WITH_NODE_MODULES)).toBe(
+      WORKTREE_SETUP_BUNX,
+    );
+  });
+
+  test('the node-modules rule holds whatever else is missing', () => {
+    const sb = track(createSandbox());
+    const target = withAlias(sb);
+    expect(hydrationFixCommand(target, [problem('node-modules')])).toBe(
+      WORKTREE_SETUP_BUNX,
+    );
+    expect(
+      hydrationFixCommand(target, [
+        problem('mise-untrusted'),
+        problem('node-modules'),
+      ]),
+    ).toBe(WORKTREE_SETUP_BUNX);
+    // …and an untrusted mise.toml alone does NOT force it: node_modules is
+    // intact there, so the alias can genuinely run.
+    expect(hydrationFixCommand(target, [problem('mise-untrusted')])).toBe(
+      'bun run worktree:setup',
+    );
   });
 
   test('falls back to the static-safe bunx form (no tier flag)', () => {
     const sb = track(createSandbox());
     writeFileSync(join(sb.path, 'package.json'), JSON.stringify({scripts: {}}));
-    expect(hydrationFixCommand(sb.path)).toBe(WORKTREE_SETUP_BUNX);
+    expect(hydrationFixCommand(sb.path, INCLUDE_ONLY)).toBe(
+      WORKTREE_SETUP_BUNX,
+    );
     expect(WORKTREE_SETUP_BUNX).not.toContain('--');
   });
 
   test('a missing or unparseable package.json falls back too', () => {
     const sb = track(createSandbox());
-    expect(hydrationFixCommand(sb.path)).toBe(WORKTREE_SETUP_BUNX);
+    expect(hydrationFixCommand(sb.path, INCLUDE_ONLY)).toBe(
+      WORKTREE_SETUP_BUNX,
+    );
     writeFileSync(join(sb.path, 'package.json'), '{not json');
-    expect(hydrationFixCommand(sb.path)).toBe(WORKTREE_SETUP_BUNX);
+    expect(hydrationFixCommand(sb.path, INCLUDE_ONLY)).toBe(
+      WORKTREE_SETUP_BUNX,
+    );
   });
 });

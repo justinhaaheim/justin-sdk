@@ -110,19 +110,45 @@ function hasEntries(record: Record<string, string> | undefined): boolean {
 }
 
 /**
- * The exact command to print. Per the conductor's install-universal ruling
- * there is NO tier flag: install runs at every tier, so the default (`js`) is
- * always the right thing to recommend.
- *
- * Prefers the project-local alias when the project declares one, because it is
- * faster and touches no network. Note the caveat recorded on bead
- * home-base-v170.2: the fleet convention for such aliases is
- * `bunx justin-sdk <cmd>`, which resolves the SDK out of node_modules — so a
- * `worktree:setup` alias written that way cannot run in a worktree whose
- * node_modules is missing. Keeping the rule as ruled; the durable fix is to
- * define the alias itself static-safely.
+ * True when node_modules is missing, i.e. when NOTHING that resolves out of
+ * node_modules can be trusted to run. Deliberately its own predicate rather than
+ * a reuse of BLOCKING_PROBLEM_KINDS (below): that set answers "may signal run at
+ * all", this one answers "can a local command resolve" — two different
+ * questions that happen to have the same answer today.
  */
-export function hydrationFixCommand(target: string): string {
+function nodeModulesMissing(problems: readonly HydrationProblem[]): boolean {
+  return problems.some((problem) => problem.kind === 'node-modules');
+}
+
+/**
+ * The exact command to print, given what is actually MISSING (finding F6).
+ *
+ * Per the conductor's install-universal ruling there is NO tier flag: install
+ * runs at every tier, so the default (`js`) is always the right recommendation.
+ *
+ * STATE-AWARE, and this is a SAFETY rule, not an optimization. The fleet
+ * convention for a `worktree:setup` alias is `bunx justin-sdk worktree-setup`,
+ * which is expected to resolve the SDK out of the project's node_modules. In a
+ * worktree where node_modules is MISSING that resolution fails, and bunx falls
+ * back to fetching the BARE npm name `justin-sdk` from the registry — which is
+ * NOT this package (ours is GitHub-only, under @justinhaaheim). So printing the
+ * alias in that state hands the user a command that downloads and executes a
+ * stranger's code. It must never be printed there, however convenient it is.
+ *
+ * Hence: node_modules missing ⇒ ALWAYS the explicit
+ * `bunx github:justinhaaheim/justin-sdk` form, alias or no alias. The alias is
+ * preferred only when node_modules is intact and can actually resolve it — the
+ * include-missing / mise-untrusted cases.
+ *
+ * `problems` is REQUIRED on purpose. An optional parameter defaulting to "no
+ * problems" would make a caller that simply forgot it get the hazardous answer;
+ * there is no safe default for a question whose wrong answer runs foreign code.
+ */
+export function hydrationFixCommand(
+  target: string,
+  problems: readonly HydrationProblem[],
+): string {
+  if (nodeModulesMissing(problems)) return WORKTREE_SETUP_BUNX;
   const pkg = readPackageJson(target);
   return pkg?.scripts?.[WORKTREE_SETUP_SCRIPT] != null
     ? `bun run ${WORKTREE_SETUP_SCRIPT}`
@@ -296,7 +322,7 @@ export function detectWorktreeHydration(
   }
 
   return {
-    fixCommand: hydrationFixCommand(resolved),
+    fixCommand: hydrationFixCommand(resolved, problems),
     isLinkedWorktree: true,
     primary,
     problems,
