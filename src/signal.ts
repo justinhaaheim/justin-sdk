@@ -9,6 +9,11 @@
  *   "signal-source:TS": "tsc --noEmit",
  *   "signal-source:LINT": "eslint .",
  *   "signal-source:PRETTIER": "prettier --check ."
+ *
+ * Before any of that, an UNHYDRATED-WORKTREE PREFLIGHT runs (D3). A fresh git
+ * worktree has no node_modules, so the checks would fail loudly in files the
+ * change never touched — signal must name that cause instead of relaying the
+ * phantom failures. See src/worktree-hydration.ts.
  */
 
 import type {Check} from './check-runner';
@@ -16,6 +21,11 @@ import type {Check} from './check-runner';
 import {runChecks} from './check-runner';
 import {existsSync, readFileSync} from 'fs';
 import {resolve} from 'path';
+
+import {
+  detectWorktreeHydration,
+  formatUnhydratedWorktreeBanner,
+} from './worktree-hydration';
 
 const SIGNAL_SOURCE_PREFIX = 'signal-source:';
 
@@ -39,6 +49,17 @@ export async function runSignal(
   projectRoot: string = process.cwd(),
   options: SignalOptions = {},
 ): Promise<number> {
+  // PREFLIGHT, before any check is discovered or run. An unhydrated worktree
+  // produces ~10 type/lint errors in files the change never touched, blaming the
+  // wrong code — so relaying them is WORSE than printing nothing. Naming the
+  // real cause is the entire value here. Costs one `stat` in a primary
+  // checkout, where the node is inert.
+  const hydration = detectWorktreeHydration(projectRoot);
+  if (hydration.isLinkedWorktree && hydration.problems.length > 0) {
+    process.stderr.write(formatUnhydratedWorktreeBanner(hydration));
+    return 1;
+  }
+
   const pkgPath = resolve(projectRoot, 'package.json');
 
   if (!existsSync(pkgPath)) {
