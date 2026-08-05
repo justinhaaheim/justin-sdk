@@ -74,6 +74,40 @@ export interface WorktreeHydrationStatus {
   target: string;
 }
 
+/**
+ * The problem kinds that make `signal` UNRUNNABLE, as opposed to merely
+ * incomplete (finding F7). Exported at kind level so signal and any future
+ * consumer share one definition of the split instead of each re-deciding it.
+ *
+ * Only node_modules qualifies, and the test is specifically "does this cause
+ * PHANTOM CHECK FAILURES" — the single misdiagnosis the preflight exists to
+ * prevent. Without node_modules, eslint and tsc fail in files the change never
+ * touched, so relaying those results is worse than printing nothing.
+ *
+ * The other two are real hydration gaps that do NOT corrupt check results: a
+ * missing `.worktreeinclude` file (a `.env.local`, a generated version file) and
+ * an untrusted `mise.toml` may break a BUILD, but they do not make `signal` lie.
+ * Blocking on them would make `signal` unrunnable with no override in a tree
+ * where it would have worked fine — which is the escape-hatch concern raised on
+ * bead home-base-v170.2 and ruled here.
+ *
+ * DOCTOR IS DELIBERATELY NOT SPLIT: it reports state rather than gating work, so
+ * it fires on ANY problem.
+ */
+export const BLOCKING_PROBLEM_KINDS: ReadonlySet<HydrationProblemKind> = new Set(
+  ['node-modules'],
+);
+
+/** Whether this one problem makes `signal`'s results untrustworthy. */
+export function isBlockingProblem(problem: HydrationProblem): boolean {
+  return BLOCKING_PROBLEM_KINDS.has(problem.kind);
+}
+
+/** Whether ANY problem does — the preflight's actual question. */
+export function hasBlockingProblem(status: WorktreeHydrationStatus): boolean {
+  return status.problems.some(isBlockingProblem);
+}
+
 /** The project-local alias, when a project defines it. */
 export const WORKTREE_SETUP_SCRIPT = 'worktree:setup';
 
@@ -344,6 +378,7 @@ export function describeMissing(status: WorktreeHydrationStatus): string {
 
 const RESET = '\x1b[0m';
 const BOLD = '\x1b[1m';
+const DIM = '\x1b[2m';
 const RED = '\x1b[31m';
 const YELLOW = '\x1b[33m';
 
@@ -373,4 +408,26 @@ export function formatUnhydratedWorktreeBanner(
     `${RED}${rule}${RESET}`,
     '',
   ].join('\n');
+}
+
+/**
+ * The ADVISORY counterpart (F7): printed when a worktree is partly unhydrated in
+ * ways that cannot corrupt check results, and the checks therefore DO run.
+ *
+ * Deliberately three lines and deliberately not a banner. The full banner earns
+ * its size by claiming the results below it are worthless; this one makes no such
+ * claim, and a red rule around it would train the reader to ignore the real one.
+ * It still carries all three actionable facts — which worktree, what is missing,
+ * and the exact fix.
+ */
+export function formatAdvisoryWorktreeWarning(
+  status: WorktreeHydrationStatus,
+): string {
+  return (
+    [
+      `${YELLOW}⚠${RESET} ${BOLD}partially unhydrated worktree${RESET} ${status.target}`,
+      `  Missing: ${describeMissing(status)} ${DIM}(does not affect check results — running them anyway)${RESET}`,
+      `  Fix:     ${YELLOW}${status.fixCommand}${RESET}`,
+    ].join('\n') + '\n'
+  );
 }

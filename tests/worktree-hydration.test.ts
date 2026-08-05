@@ -22,10 +22,14 @@ import {join} from 'path';
 import {makeWorktreeHydrationChecks} from '../src/doctor';
 import {runSignal} from '../src/signal';
 import {
+  BLOCKING_PROBLEM_KINDS,
   describeMissing,
   detectWorktreeHydration,
+  formatAdvisoryWorktreeWarning,
   formatUnhydratedWorktreeBanner,
+  hasBlockingProblem,
   hydrationFixCommand,
+  isBlockingProblem,
   isLinkedWorktree,
   miseTrustStatus,
   parseMiseTrustStatus,
@@ -149,6 +153,11 @@ function packageJsonWithCheck(
 
 function kinds(status: WorktreeHydrationStatus): string[] {
   return status.problems.map((problem) => problem.kind);
+}
+
+/** A problem of the given kind; only `kind` participates in the F6/F7 rules. */
+function makeProblem(kind: HydrationProblemKind): HydrationProblem {
+  return {detail: `${kind} detail`, kind, label: kind};
 }
 
 // ---------------------------------------------------------------------------
@@ -421,9 +430,18 @@ describe('fully hydrated linked worktree', () => {
 // ---------------------------------------------------------------------------
 
 describe('.worktreeinclude missing files', () => {
-  function setup(sb: Sandbox): {primary: string; wt: string} {
+  function setup(
+    sb: Sandbox,
+    options: {sentinel?: string} = {},
+  ): {primary: string; wt: string} {
     const primary = makePrimary(sb, {
       files: {'.env.local': 'SECRET=1\n'},
+      // A sentinel-touching check only when a test needs to prove whether the
+      // checks ran; the hydration problems are identical either way.
+      packageJson:
+        options.sentinel == null
+          ? undefined
+          : packageJsonWithCheck(options.sentinel),
       worktreeinclude: '.env.local\n',
     });
     // Sanity: the fixture only means anything if .env.local is untracked and
@@ -482,14 +500,150 @@ describe('.worktreeinclude missing files', () => {
     expect(detectWorktreeHydration(wt).problems).toEqual([]);
   });
 
-  test('signal short-circuits on a missing manifest file alone', async () => {
+  /**
+   * F7 — DELIBERATE CONTRACT CHANGE. This test was
+   * "signal short-circuits on a missing manifest file alone" and asserted exit 1.
+   * Ruled on home-base-v170.5: a missing `.worktreeinclude` file cannot corrupt
+   * check RESULTS, so it must not make `signal` unrunnable — there is no override
+   * flag, and a missing `.env.local` in a tree where eslint and tsc work fine is
+   * not grounds for refusing to lint. It warns, and the checks run.
+   */
+  test('signal WARNS and RUNS the checks on a manifest file alone (advisory)', async () => {
     const sb = track(createSandbox());
-    const {wt} = setup(sb);
+    const sentinel = join(sb.path, 'advisory-checks-ran');
+    const {wt} = setup(sb, {sentinel});
+
     const {result, stderr} = await captureStderr(() =>
       runSignal(wt, {quiet: true}),
     );
-    expect(result).toBe(1);
+
+    // THE load-bearing assertion: discovery happened and the check really ran.
+    expect(existsSync(sentinel)).toBe(true);
+    expect(result).toBe(0);
+    // All three advisory facts are present…
+    expect(stderr).toContain('partially unhydrated worktree');
     expect(stderr).toContain('.env.local');
+    expect(stderr).toContain(WORKTREE_SETUP_BUNX);
+    // …and it is emphatically NOT the blocking banner, whose whole claim is that
+    // the results are worthless. Reusing that here would train the reader to
+    // ignore it when it matters.
+    expect(stderr).not.toContain('UNHYDRATED');
+    expect(stderr).not.toContain('PHANTOM');
+  });
+
+  test('the advisory exit code comes from the CHECKS, not the preflight', async () => {
+    const sb = track(createSandbox());
+    const sentinel = join(sb.path, 'advisory-failing-check');
+    // Same advisory state, but the project's own check fails. Exit 1 here must
+    // mean "your check failed", which is only meaningful because the sibling
+    // test above shows a passing check yields 0 in the identical state.
+    const primary = makePrimary(sb, {
+      files: {'.env.local': 'SECRET=1\n'},
+      packageJson: packageJsonWithCheck(sentinel, {}, 3),
+      worktreeinclude: '.env.local\n',
+    });
+    const wt = addLinkedWorktree(
+      primary,
+      join(primary, '.claude', 'worktrees', 'w1'),
+      'worktree-w1',
+    );
+    mkdirSync(join(wt, 'node_modules'), {recursive: true});
+
+    const {result, stderr} = await captureStderr(() =>
+      runSignal(wt, {quiet: true}),
+    );
+
+    expect(existsSync(sentinel)).toBe(true);
+    expect(result).toBe(1);
+    expect(stderr).toContain('partially unhydrated worktree');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F7: the blocking / advisory split
+// ---------------------------------------------------------------------------
+
+describe('blocking vs advisory problem kinds (F7)', () => {
+  /**
+   * Pinned at kind level, because this set IS the contract signal and doctor
+   * share. The test is "does this kind cause PHANTOM CHECK FAILURES" — only a
+   * missing node_modules makes eslint and tsc report errors in untouched files.
+   */
+  test('exactly node-modules blocks; the other two are advisory', () => {
+    expect([...BLOCKING_PROBLEM_KINDS]).toEqual(['node-modules']);
+    expect(isBlockingProblem(makeProblem('node-modules'))).toBe(true);
+    expect(isBlockingProblem(makeProblem('worktreeinclude'))).toBe(false);
+    expect(isBlockingProblem(makeProblem('mise-untrusted'))).toBe(false);
+  });
+
+  test('hasBlockingProblem is false for an advisory-only status', () => {
+    const advisory: WorktreeHydrationStatus = {
+      fixCommand: WORKTREE_SETUP_BUNX,
+      isLinkedWorktree: true,
+      primary: '/primary',
+      problems: [makeProblem('worktreeinclude'), makeProblem('mise-untrusted')],
+      target: '/primary/.claude/worktrees/w1',
+    };
+    expect(hasBlockingProblem(advisory)).toBe(false);
+    expect(
+      hasBlockingProblem({
+        ...advisory,
+        problems: [...advisory.problems, makeProblem('node-modules')],
+      }),
+    ).toBe(true);
+  });
+
+  /**
+   * The precedence case, and the one a naive implementation gets wrong: an
+   * advisory problem must never soften a blocking one. Mixed state -> full
+   * banner, exit 1, checks never run.
+   */
+  test('a blocking problem alongside an advisory one still BLOCKS', async () => {
+    const sb = track(createSandbox());
+    const sentinel = join(sb.path, 'mixed-checks-ran');
+    const primary = makePrimary(sb, {
+      files: {'.env.local': 'SECRET=1\n'},
+      packageJson: packageJsonWithCheck(sentinel, {}, 3),
+      worktreeinclude: '.env.local\n',
+    });
+    // No node_modules mkdir: BOTH problems are present.
+    const wt = addLinkedWorktree(
+      primary,
+      join(primary, '.claude', 'worktrees', 'w1'),
+      'worktree-w1',
+    );
+    expect(kinds(detectWorktreeHydration(wt)).sort()).toEqual([
+      'node-modules',
+      'worktreeinclude',
+    ]);
+
+    const {result, stderr} = await captureStderr(() =>
+      runSignal(wt, {quiet: true}),
+    );
+
+    expect(result).toBe(1);
+    expect(existsSync(sentinel)).toBe(false);
+    expect(stderr).toContain('UNHYDRATED');
+    expect(stderr).toContain('PHANTOM');
+    // Both are still listed — blocking changes the treatment, not the inventory.
+    expect(stderr).toContain('node_modules');
+    expect(stderr).toContain('.env.local');
+    expect(stderr).not.toContain('partially unhydrated');
+  });
+
+  test('the advisory warning is 3 lines and carries all three facts', () => {
+    const status: WorktreeHydrationStatus = {
+      fixCommand: 'bun run worktree:setup',
+      isLinkedWorktree: true,
+      primary: '/primary',
+      problems: [makeProblem('worktreeinclude')],
+      target: '/primary/.claude/worktrees/w1',
+    };
+    const warning = formatAdvisoryWorktreeWarning(status);
+    expect(warning.trimEnd().split('\n')).toHaveLength(3);
+    expect(warning).toContain('/primary/.claude/worktrees/w1');
+    expect(warning).toContain('worktreeinclude');
+    expect(warning).toContain('bun run worktree:setup');
   });
 });
 
@@ -618,11 +772,7 @@ describe('messaging', () => {
 });
 
 describe('hydrationFixCommand', () => {
-  /** A problem of the given kind; only `kind` participates in the F6 rule. */
-  function problem(kind: HydrationProblemKind): HydrationProblem {
-    return {detail: `${kind} detail`, kind, label: kind};
-  }
-
+  const problem = makeProblem;
   const INCLUDE_ONLY = [problem('worktreeinclude')];
   const WITH_NODE_MODULES = [problem('worktreeinclude'), problem('node-modules')];
 

@@ -13,7 +13,8 @@
  * Before any of that, an UNHYDRATED-WORKTREE PREFLIGHT runs (D3). A fresh git
  * worktree has no node_modules, so the checks would fail loudly in files the
  * change never touched — signal must name that cause instead of relaying the
- * phantom failures. See src/worktree-hydration.ts.
+ * phantom failures. Problems that CANNOT corrupt check results only warn and let
+ * the checks run (F7). See src/worktree-hydration.ts.
  */
 
 import type {Check} from './check-runner';
@@ -24,7 +25,9 @@ import {resolve} from 'path';
 
 import {
   detectWorktreeHydration,
+  formatAdvisoryWorktreeWarning,
   formatUnhydratedWorktreeBanner,
+  hasBlockingProblem,
 } from './worktree-hydration';
 
 const SIGNAL_SOURCE_PREFIX = 'signal-source:';
@@ -54,10 +57,19 @@ export async function runSignal(
   // wrong code — so relaying them is WORSE than printing nothing. Naming the
   // real cause is the entire value here. Costs one `stat` in a primary
   // checkout, where the node is inert.
+  //
+  // TWO OUTCOMES, split by whether the problem can corrupt CHECK RESULTS (F7):
+  //   BLOCKING (node_modules) — the checks would lie, so they must not run.
+  //   ADVISORY (.worktreeinclude, mise) — real gaps that may break a BUILD but
+  //     cannot make `signal` lie, so warn and run. Blocking on these would make
+  //     `signal` unrunnable, with no override, in a tree where it works fine.
   const hydration = detectWorktreeHydration(projectRoot);
   if (hydration.isLinkedWorktree && hydration.problems.length > 0) {
-    process.stderr.write(formatUnhydratedWorktreeBanner(hydration));
-    return 1;
+    if (hasBlockingProblem(hydration)) {
+      process.stderr.write(formatUnhydratedWorktreeBanner(hydration));
+      return 1;
+    }
+    process.stderr.write(formatAdvisoryWorktreeWarning(hydration));
   }
 
   const pkgPath = resolve(projectRoot, 'package.json');
