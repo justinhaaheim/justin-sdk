@@ -29,9 +29,16 @@ import {
   worktreeSetup,
 } from './worktree-setup';
 
+/**
+ * Tier help text. Note that dependency install is UNIVERSAL — it runs at EVERY
+ * tier, including `--lint` (conductor ruling on bead home-base-v170.1: the tiers
+ * price PROJECT scripts by cost class, and lint is meaningless without
+ * node_modules). These strings previously contradicted that on both sides —
+ * `lint` omitted install while `js` claimed to add it — which is finding F1.
+ */
 const TIER_FLAG_HELP: Record<Tier, string> = {
-  lint: 'Seconds: mise trust + .worktreeinclude copy + lint-tier project scripts',
-  js: 'The lint tier plus dependency install and js-tier scripts (default — the floor at which `signal` means anything)',
+  lint: 'Seconds-to-~15s: mise trust + dependency install + .worktreeinclude copy + lint-tier project scripts',
+  js: 'The lint tier plus js-tier project scripts (default — the floor at which `signal` means anything)',
   native:
     'Everything, including native-tier project scripts (prebuild/pod install — minutes)',
 };
