@@ -218,6 +218,83 @@ function gitSucceeds(argv: string[], cwd: string): boolean {
 }
 
 /**
+ * The two git admin paths whose (in)equality is the ONLY reliable
+ * linked-worktree test, resolved absolute.
+ *
+ * Why nothing simpler works: `.git` being a FILE does not mean "linked
+ * worktree" — a submodule or a `--separate-git-dir` MAIN checkout has one too,
+ * and THIS SDK is exactly that case — and `git worktree list` misreports the
+ * main worktree for a submodule. `--git-dir` is per-worktree while
+ * `--git-common-dir` is shared by every worktree of the repo, so they differ if
+ * and only if the caller is inside a linked worktree.
+ */
+export interface GitTopology {
+  /**
+   * Absolute `--git-common-dir` — shared by every worktree of the repo. In the
+   * no-subprocess fast path below this is `<target>/.git` as spelled, NOT
+   * realpath-canonicalized; only its equality with `gitDir` is load-bearing.
+   */
+  commonDir: string;
+  /** Absolute `--git-dir` — per-worktree. null only if git failed to report it. */
+  gitDir: string | null;
+  /**
+   * True iff this is a LINKED worktree. Deliberately false when `gitDir` is
+   * unknown: a false negative costs only a missed hint, while a false positive
+   * would make `signal` refuse to run in a perfectly healthy checkout.
+   */
+  isLinked: boolean;
+}
+
+/**
+ * Resolve `target`'s git topology, or null if it is not in a git repo.
+ */
+export function resolveGitTopology(target: string): GitTopology | null {
+  // Fast path, no subprocess: a `.git` DIRECTORY means `target` is the MAIN
+  // worktree of its repo — `git worktree add` always writes a gitFILE, never a
+  // directory — and in that layout both --git-dir and --git-common-dir return
+  // exactly this path. Worth special-casing because this predicate now runs
+  // inside EVERY `signal` invocation, where a primary checkout is the
+  // overwhelmingly common case and must cost nothing. The converse is NOT
+  // true, so a `.git` file (or no `.git` at all, i.e. a subdirectory of the
+  // repo) falls through to git itself.
+  try {
+    if (statSync(join(target, '.git')).isDirectory()) {
+      const abs = resolve(target, '.git');
+      return {commonDir: abs, gitDir: abs, isLinked: false};
+    }
+  } catch {
+    // Missing or unreadable — ask git.
+  }
+
+  const commonDirRaw = gitCapture(
+    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+    target,
+  );
+  if (commonDirRaw == null || commonDirRaw === '') return null;
+  const commonDir = resolve(target, commonDirRaw);
+
+  const gitDirRaw = gitCapture(
+    ['rev-parse', '--path-format=absolute', '--git-dir'],
+    target,
+  );
+  const gitDir = gitDirRaw == null ? null : resolve(target, gitDirRaw);
+
+  return {commonDir, gitDir, isLinked: gitDir != null && gitDir !== commonDir};
+}
+
+/**
+ * True iff `target` sits inside a LINKED git worktree.
+ *
+ * THE one definition — worktree hydration detection, the doctor
+ * WORKTREE_HYDRATION check and the `signal` preflight all route here. Two
+ * implementations that could disagree about "is this a worktree?" would
+ * reintroduce exactly the misdiagnosis this feature exists to eliminate.
+ */
+export function isLinkedWorktree(target: string): boolean {
+  return resolveGitTopology(target)?.isLinked === true;
+}
+
+/**
  * Absolute path of the PRIMARY checkout for whatever repo `target` belongs to,
  * or null if `target` is not in a git repo.
  *
@@ -232,20 +309,19 @@ function gitSucceeds(argv: string[], cwd: string): boolean {
  *   3. linked worktree, detached git dir (submodule, `--separate-git-dir`) →
  *      `core.worktree` from the common config, resolved against the git dir.
  * Never does path math on the worktree's own location (epic AC #9).
+ *
+ * `topology` is an optional already-resolved GitTopology, so a caller that
+ * needed the linked-worktree predicate first does not pay for the same two
+ * `rev-parse` calls twice. Omitting it is always equivalent.
  */
-export function resolvePrimaryCheckout(target: string): string | null {
-  const commonDirRaw = gitCapture(
-    ['rev-parse', '--path-format=absolute', '--git-common-dir'],
-    target,
-  );
-  if (commonDirRaw == null || commonDirRaw === '') return null;
-  const commonDir = resolve(target, commonDirRaw);
-
-  const gitDirRaw = gitCapture(
-    ['rev-parse', '--path-format=absolute', '--git-dir'],
-    target,
-  );
-  const gitDir = gitDirRaw == null ? null : resolve(target, gitDirRaw);
+export function resolvePrimaryCheckout(
+  target: string,
+  topology?: GitTopology | null,
+): string | null {
+  const resolved =
+    topology === undefined ? resolveGitTopology(target) : topology;
+  if (resolved == null) return null;
+  const {commonDir, gitDir} = resolved;
 
   if (gitDir === commonDir) {
     const top = gitCapture(['rev-parse', '--show-toplevel'], target);
