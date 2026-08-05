@@ -24,7 +24,10 @@
  */
 
 import {assemble} from '../lib/prime';
-import {formatRepoState, runDivergenceCheck} from '../lib/project-prime';
+import {
+  formatRepoState,
+  runDivergenceCheck,
+} from '../../repo-status/prime-view';
 import {
   contentHash,
   deployedIsDirty,
@@ -76,7 +79,15 @@ try {
 // --- repo state (branch/worktree divergence) --------------------------------
 let repoState = '';
 try {
-  repoState = formatRepoState(runDivergenceCheck({cwd: projectRoot}));
+  // PR state is genuinely useful repo context, but it is a network call on the
+  // session-start hot path: measured at ~600ms typical against ~150ms for the
+  // core walk, and it pays a full timeout when gh cannot reach GitHub (sandbox
+  // TLS, offline, unauthenticated). Opt in per-machine with
+  // JUSTIN_SDK_PRIME_PRS=1 rather than making every session pay that tail.
+  const wantPrs = process.env.JUSTIN_SDK_PRIME_PRS === '1';
+  repoState = formatRepoState(
+    runDivergenceCheck({cwd: projectRoot, prs: wantPrs}),
+  );
 } catch {
   // Non-fatal: a git-inspection failure just omits the repo-state block.
 }
