@@ -17,6 +17,11 @@ import {resolve} from 'path';
 
 import {PINNED, PROMPTS_PIN} from './pinned-versions';
 import {
+  describeMissing,
+  detectWorktreeHydration,
+  isLinkedWorktree,
+} from './worktree-hydration';
+import {
   eslintWorktreeStatus,
   prettierWorktreeStatus,
   worktreeGitStatus,
@@ -78,11 +83,58 @@ function parseMiseToml(projectRoot: string): Record<string, string> | null {
 }
 
 // ---------------------------------------------------------------------------
+// Worktree hydration (base-setup component)
+// ---------------------------------------------------------------------------
+
+/**
+ * The WORKTREE_HYDRATION check — but ONLY inside a linked git worktree.
+ *
+ * The node is omitted entirely in a primary checkout, which is the point:
+ * doctor's output there is byte-identical to before this check existed. The
+ * alternative (always present, always green) would add a line to every project
+ * in the fleet to report something structurally impossible outside a worktree.
+ *
+ * Inside a worktree the check IS registered even when everything is hydrated, so
+ * a worktree gets positive confirmation rather than silence; it FAILS only when
+ * there is a real problem, at severity error (the default) because an
+ * unhydrated worktree cannot be built or linted at all.
+ */
+export function makeWorktreeHydrationChecks(projectRoot: string): CheckNode[] {
+  if (!isLinkedWorktree(projectRoot)) return [];
+  return [
+    {
+      check: {
+        label: 'WORKTREE_HYDRATION',
+        fn: (): CheckResult => {
+          const status = detectWorktreeHydration(projectRoot);
+          if (status.problems.length === 0) {
+            return {message: 'linked worktree, hydrated', pass: true};
+          }
+          return {
+            fix: `Run: ${status.fixCommand}`,
+            message:
+              `unhydrated linked worktree — missing ${describeMissing(status)}. ` +
+              `Any lint/type failures here are PHANTOM (they blame untouched files). ` +
+              status.problems.map((problem) => problem.detail).join('; '),
+            pass: false,
+          };
+        },
+      },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // Base checks (base-setup component)
 // ---------------------------------------------------------------------------
 
 function makeBaseChecks(projectRoot: string): CheckNode[] {
   return [
+    // FIRST because it explains every other failure when it fires: in an
+    // unhydrated worktree the other checks report symptoms, and this one reports
+    // the cause. Contributes NOTHING in a primary checkout (empty array), so
+    // doctor's output there is unchanged.
+    ...makeWorktreeHydrationChecks(projectRoot),
     {
       check: {
         label: 'BUN',
