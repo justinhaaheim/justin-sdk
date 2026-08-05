@@ -670,6 +670,28 @@ export function discoverHydrationScripts(target: string): HydrationScript[] {
 // worktree-setup
 // ---------------------------------------------------------------------------
 
+/**
+ * Why `mise trust` failing aborts the run WITH a specific hint (F4).
+ *
+ * The abort itself is ruled (home-base-v170.1): an install into an untrusted
+ * mise tree fails confusingly, so continuing is worse. But the epic's failure
+ * mode 4 records the single most likely cause, and it is not the user's fault —
+ * `mise trust` records trust by writing into ~/.local/state/mise/trusted-configs,
+ * which a sandboxed agent is routinely blocked from. Without naming it, the
+ * report says only "mise trust exited 1" and the next twenty minutes go to
+ * debugging mise.
+ */
+export function formatMiseFailureDetail(
+  exitCode: number,
+  error: string | null,
+): string {
+  return (
+    `mise trust exited ${exitCode}${error == null ? '' : ` (${error})`} — ` +
+    'note: `mise trust` writes a symlink into ~/.local/state/mise/trusted-configs, ' +
+    'and a sandboxed agent may be blocked from that; re-run outside the sandbox'
+  );
+}
+
 function step(
   steps: StepReport[],
   label: string,
@@ -753,7 +775,7 @@ export function worktreeSetup(
         steps,
         'MISE',
         'failed',
-        `mise trust exited ${child.exitCode}${child.error == null ? '' : ` (${child.error})`}`,
+        formatMiseFailureDetail(child.exitCode, child.error),
       );
       result.exitCode = 1;
       return finish(result);

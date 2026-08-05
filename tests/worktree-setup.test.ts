@@ -19,6 +19,7 @@ import {dirname, join, resolve} from 'path';
 import {
   detectPackageManager,
   discoverHydrationScripts,
+  formatMiseFailureDetail,
   planWorktreeIncludeCopies,
   resolvePrimaryCheckout,
   resolveTier,
@@ -505,6 +506,33 @@ describe('planWorktreeIncludeCopies', () => {
     expect(
       planWorktreeIncludeCopies(primary, target).entries.map((e) => e.relPath),
     ).toEqual(['keep.local']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F4: the MISE failure detail
+// ---------------------------------------------------------------------------
+
+describe('formatMiseFailureDetail', () => {
+  /**
+   * Tested through the extracted formatter rather than a live failure: making
+   * the real `mise trust` fail means either breaking the user's mise state or
+   * removing mise from PATH, and this SDK's rule is that a detector/step must
+   * never mutate machine state to be testable. What IS worth pinning is that the
+   * sandbox cause survives — the whole point of F4 is that "exited 1" alone sent
+   * the reader to debug mise instead of the sandbox.
+   */
+  test('names the exit code, the trusted-configs write, and the sandbox', () => {
+    const detail = formatMiseFailureDetail(1, null);
+    expect(detail).toContain('mise trust exited 1');
+    expect(detail).toContain('~/.local/state/mise/trusted-configs');
+    expect(detail).toContain('re-run outside the sandbox');
+  });
+
+  test('includes the spawn error when there is one', () => {
+    expect(formatMiseFailureDetail(1, 'spawn mise ENOENT')).toContain(
+      '(spawn mise ENOENT)',
+    );
   });
 });
 
