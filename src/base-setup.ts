@@ -4,7 +4,7 @@
  *
  * Installs:
  *  - justin-sdk.config.json at project root (tracks SDK version + components)
- *  - package.json scripts (signal/doctor/setup-env using bunx justin-sdk)
+ *  - package.json scripts (signal/doctor/setup-env using bunx @justinhaaheim/justin-sdk)
  *  - scripts/setup-env.ts (copied from templates/)
  *  - .gitignore entries (tmp/, dynamic-version.local.*, .beads/.br_recovery/)
  *  - .claude/settings.json with sandbox.excludedCommands scaffolding
@@ -48,12 +48,12 @@ const DEFAULT_SIGNAL_SOURCE_SCRIPTS: Record<string, string> = {
 
 const SDK_SCRIPTS: Record<string, string> = {
   'setup-env': 'bun scripts/setup-env.ts',
-  signal: 'bunx justin-sdk signal --quiet',
-  'signal:verbose': 'bunx justin-sdk signal',
-  'signal:serial': 'bunx justin-sdk signal --serial',
-  doctor: 'bunx justin-sdk doctor',
-  'doctor:fix': 'bunx justin-sdk doctor --fix',
-  fix: 'bunx justin-sdk fix',
+  signal: 'bunx @justinhaaheim/justin-sdk signal --quiet',
+  'signal:verbose': 'bunx @justinhaaheim/justin-sdk signal',
+  'signal:serial': 'bunx @justinhaaheim/justin-sdk signal --serial',
+  doctor: 'bunx @justinhaaheim/justin-sdk doctor',
+  'doctor:fix': 'bunx @justinhaaheim/justin-sdk doctor --fix',
+  fix: 'bunx @justinhaaheim/justin-sdk fix',
 };
 
 /**
@@ -348,9 +348,11 @@ export function stepClaudeSettings(projectRoot: string): boolean {
 /**
  * Ensure `@justinhaaheim/justin-sdk` is declared as a dependency in
  * package.json so that fresh installs (especially Claude web session VMs)
- * actually link the SDK locally. Without this, `bunx justin-sdk …` calls
- * fall back to looking up the unscoped name on the npm registry, which
- * 404s. Pins to the currently-running SDK version.
+ * actually link the SDK locally. Without it the script aliases have nothing
+ * to resolve against, and `bunx @justinhaaheim/justin-sdk …` degrades to a
+ * registry lookup of an unpublished scoped name — i.e. it FAILS, which is the
+ * intended posture (home-base-2qhw) but still a broken project. Pins to the
+ * currently-running SDK version.
  *
  * Skips the project if the SDK is already declared as a dep or devDep
  * regardless of source (workspace, github, file, registry, etc.), since
@@ -386,8 +388,9 @@ export function stepDepsHasSdk(projectRoot: string): boolean {
   writeJson(pkgPath, pkg);
   success(`Added ${SDK_PKG} to devDependencies (${ref})`);
   warn(
-    'Run `bun install` to fetch the SDK locally. Without it, ' +
-      '`bunx justin-sdk …` will continue to 404 against the npm registry.',
+    'Run `bun install` to fetch the SDK locally. Without it, the ' +
+      '`bunx @justinhaaheim/justin-sdk …` aliases have nothing to resolve ' +
+      'against and will fail.',
   );
   return true;
 }

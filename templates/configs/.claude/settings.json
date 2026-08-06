@@ -28,7 +28,7 @@
       "Bash(bun update:*)",
       "Bash(bun pm:*)",
 
-      "Bash(bunx justin-sdk:*)",
+      "Bash(bunx @justinhaaheim/justin-sdk:*)",
 
       "Bash(npx eslint:*)",
       "Bash(npx prettier:*)",
@@ -60,7 +60,7 @@
           },
           {
             "type": "command",
-            "command": "bunx justin-sdk prime --format hook"
+            "command": "bunx @justinhaaheim/justin-sdk prime --format hook"
           }
         ]
       }

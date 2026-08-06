@@ -163,14 +163,20 @@ function nodeModulesMissing(problems: readonly HydrationProblem[]): boolean {
  * Per the conductor's install-universal ruling there is NO tier flag: install
  * runs at every tier, so the default (`js`) is always the right recommendation.
  *
- * STATE-AWARE, and this is a SAFETY rule, not an optimization. The fleet
- * convention for a `worktree:setup` alias is `bunx justin-sdk worktree-setup`,
- * which is expected to resolve the SDK out of the project's node_modules. In a
- * worktree where node_modules is MISSING that resolution fails, and bunx falls
- * back to fetching the BARE npm name `justin-sdk` from the registry — which is
- * NOT this package (ours is GitHub-only, under @justinhaaheim). So printing the
- * alias in that state hands the user a command that downloads and executes a
- * stranger's code. It must never be printed there, however convenient it is.
+ * STATE-AWARE, and originally a SAFETY rule rather than an optimization. The
+ * fleet convention for a `worktree:setup` alias is
+ * `bunx @justinhaaheim/justin-sdk worktree-setup`, which is expected to resolve
+ * the SDK out of the project's node_modules. In a worktree where node_modules is
+ * MISSING that resolution fails and bunx falls through to the registry.
+ *
+ * When the alias still used the BARE name, that fallback fetched and EXECUTED
+ * whatever `justin-sdk` resolved to on npm — an unclaimed, unscoped name anyone
+ * could take. That hazard is narrowed: the aliases now name the `@justinhaaheim`
+ * scope, so the fallback can only ever resolve to something published under that
+ * scope, never to a top-level name a stranger can claim (home-base-2qhw). The
+ * rule survives on the remaining ground — the scoped name is deliberately
+ * unpublished, so the fallback simply FAILS, and printing it would hand the user
+ * a command that cannot work in the exact state they are stuck in.
  *
  * Hence: node_modules missing ⇒ ALWAYS the explicit
  * `bunx github:justinhaaheim/justin-sdk` form, alias or no alias. The alias is

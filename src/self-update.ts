@@ -124,7 +124,7 @@ export async function selfUpdateSdk(
   if (previousVersion == null) {
     fail(
       `${SDK_PKG} is not installed in this project. ` +
-        'Run `bunx justin-sdk add base-setup` to bootstrap, then re-run update.',
+        'Run `bunx @justinhaaheim/justin-sdk add base-setup` to bootstrap, then re-run update.',
     );
     return {
       updated: false,

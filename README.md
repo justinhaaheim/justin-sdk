@@ -39,7 +39,7 @@ If you'd rather install the SDK locally:
 ```bash
 bun add github:justinhaaheim/justin-sdk#main
 # Then use any of:
-bunx justin-sdk doctor
+bunx @justinhaaheim/justin-sdk doctor
 bunx jsdk doctor
 bunx j doctor
 ```

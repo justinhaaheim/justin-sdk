@@ -103,8 +103,8 @@ describe('base-setup', () => {
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
 
-    expect(pkg.scripts?.signal).toContain('bunx justin-sdk');
-    expect(pkg.scripts?.doctor).toContain('bunx justin-sdk');
+    expect(pkg.scripts?.signal).toContain('bunx @justinhaaheim/justin-sdk');
+    expect(pkg.scripts?.doctor).toContain('bunx @justinhaaheim/justin-sdk');
     expect(pkg.scripts?.['setup-env']).toContain('scripts/setup-env.ts');
   });
 
@@ -126,8 +126,8 @@ describe('base-setup', () => {
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
-    expect(pkg.scripts?.signal).toBe('bunx justin-sdk signal --quiet');
-    expect(pkg.scripts?.doctor).toBe('bunx justin-sdk doctor');
+    expect(pkg.scripts?.signal).toBe('bunx @justinhaaheim/justin-sdk signal --quiet');
+    expect(pkg.scripts?.doctor).toBe('bunx @justinhaaheim/justin-sdk doctor');
   });
 
   test('preserves existing signal-source:* scripts (does not clobber)', async () => {
@@ -257,11 +257,11 @@ describe('base-setup', () => {
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
-    expect(pkg.scripts?.doctor).toBe('bunx justin-sdk doctor');
-    expect(pkg.scripts?.['doctor:fix']).toBe('bunx justin-sdk doctor --fix');
-    expect(pkg.scripts?.signal).toBe('bunx justin-sdk signal --quiet');
-    expect(pkg.scripts?.['signal:verbose']).toBe('bunx justin-sdk signal');
-    expect(pkg.scripts?.['signal:serial']).toBe('bunx justin-sdk signal --serial');
+    expect(pkg.scripts?.doctor).toBe('bunx @justinhaaheim/justin-sdk doctor');
+    expect(pkg.scripts?.['doctor:fix']).toBe('bunx @justinhaaheim/justin-sdk doctor --fix');
+    expect(pkg.scripts?.signal).toBe('bunx @justinhaaheim/justin-sdk signal --quiet');
+    expect(pkg.scripts?.['signal:verbose']).toBe('bunx @justinhaaheim/justin-sdk signal');
+    expect(pkg.scripts?.['signal:serial']).toBe('bunx @justinhaaheim/justin-sdk signal --serial');
   });
 
   test('preserves custom script values that do not match a stale shape', async () => {

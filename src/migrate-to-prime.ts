@@ -7,7 +7,7 @@
  * End state per project: just its own CLAUDE.md. No docs/prompts/, no AGENTS.md,
  * no @-references to either, and no per-project prime SessionStart hook — the
  * `prime` Claude Code plugin injects the guidance globally (installed once per
- * machine), so a per-project `bunx justin-sdk prime` hook would only
+ * machine), so a per-project `bunx @justinhaaheim/justin-sdk prime` hook would only
  * double-inject. This migration REMOVES any such hook it finds (home-base-t6a0.16).
  *
  * Design (home-base-t6a0.12, fable-advisor-reviewed):
@@ -111,7 +111,7 @@ interface Report {
 // ---------------------------------------------------------------------------
 // Step: remove the per-project prime SessionStart hook (structure-aware,
 // idempotent). The `prime` plugin injects guidance globally, so a per-project
-// `bunx justin-sdk prime` hook only double-injects — strip any we find, drop
+// `bunx @justinhaaheim/justin-sdk prime` hook only double-injects — strip any we find, drop
 // the emptied groups, and preserve every other hook (setup-env etc.).
 // ---------------------------------------------------------------------------
 

@@ -14,8 +14,9 @@
   # Resolve the SDK STATIC-SAFELY (epic home-base-v170, D1): this tree has no
   # node_modules, so a project-local `bun run` alias cannot resolve here. Prefer
   # the MAIN worktree's installed binary — offline, and it honors the project's
-  # own SDK pin — else the explicit `github:` spec. NEVER the bare name
-  # `bunx justin-sdk`, which falls through to the npm registry (home-base-2qhw).
+  # own SDK pin — else the explicit `github:` spec. NEVER bunx with the bare,
+  # unscoped package name: that falls through to the npm registry, where the
+  # name is unclaimed and anyone could publish to it (home-base-2qhw).
   # Caveat, benign: inside a git SUBMODULE, git reports the main worktree as the
   # `.git/modules/<path>` gitdir, which has no node_modules — so that case
   # degrades to the `github:` spec and still hydrates.
