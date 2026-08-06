@@ -38,11 +38,25 @@ If you'd rather install the SDK locally:
 
 ```bash
 bun add github:justinhaaheim/justin-sdk#main
-# Then use any of:
+# Then, from anywhere in the project:
 bunx @justinhaaheim/justin-sdk doctor
-bunx jsdk doctor
-bunx j doctor
 ```
+
+**Never `bunx` a bare name — always name the package.** When `bunx` cannot
+resolve a bare name from a nearby `node_modules/.bin`, it does not fail: it
+treats the name as an npm package and fetches it. `justin-sdk` is unclaimed on
+npm, but **`j` and `jsdk` are both real, unrelated third-party packages** —
+measured, both resolve on the registry today. So handing either short name to
+`bunx` can download and execute a stranger's code in any tree where the SDK
+isn't installed: a fresh worktree, a fresh clone, anything pre-install
+(home-base-2qhw). Use exactly two forms: `bunx @justinhaaheim/justin-sdk <cmd>`
+in a project that has the SDK installed, and `bunx
+github:justinhaaheim/justin-sdk <cmd>` anywhere else.
+
+The short `jsdk` / `j` bins are real and fine — but only where
+`node_modules/.bin` is already on `PATH`, i.e. inside a `package.json` script
+(`bun run` puts it there) or a shell you have set up that way. Never after
+`bunx`.
 
 ## Commands
 
@@ -58,7 +72,8 @@ bunx j doctor
 | `justin-sdk --help`          | Command reference                                     |
 
 The CLI is exposed under three equivalent names: `justin-sdk`, `jsdk`,
-and `j`.
+and `j`. They are equivalent as INSTALLED bins (on `PATH`, or via
+`bun run`) — not as `bunx` arguments; see the warning above.
 
 ## Components
 
@@ -93,8 +108,8 @@ dependency order (each one self-registers in `justin-sdk.config.json`):
 - **all** — every component (`core` + `gh-actions`, `prompts`, `claude-md`)
 
 ```bash
-bunx j add core    # the always-want baseline
-bunx j add all     # everything
+bunx github:justinhaaheim/justin-sdk#main add core   # the always-want baseline
+bunx github:justinhaaheim/justin-sdk#main add all    # everything
 ```
 
 Presets are always no-commit — files change in the working tree and you
