@@ -9,6 +9,11 @@
  *
  *  1. git runs post-checkout with cwd = the NEW worktree (so bare
  *     `worktree-setup`, which defaults to cwd, targets the right tree).
+ *     A linked worktree shares the primary's .git/config, so husky's
+ *     core.hooksPath is already set there — which is exactly why this works for
+ *     worktrees and CANNOT work for a fresh `git clone`, where hooksPath is
+ *     unset and `.git/hooks` holds only samples (measured: a clone of a repo
+ *     with a committed `.husky/post-checkout` runs nothing at all).
  *  2. `[ -d node_modules ]` is FALSE there — the guard fires exactly once, at
  *     creation.
  *  3. `git worktree list --porcelain`'s first line, read from inside the new
