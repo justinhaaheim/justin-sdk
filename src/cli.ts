@@ -20,6 +20,7 @@ import {runMigrateToPrime} from './migrate-to-prime';
 import {runPrime} from './plugin/lib/prime';
 import {DEFAULT_OPTIONS as RALPH_DEFAULTS, runRalph} from './ralph';
 import {runSyncRules} from './sync-rules';
+import {runTimeCheck} from './time-check';
 import {runSignal} from './signal';
 import {runUpdate} from './update';
 import {
@@ -451,6 +452,15 @@ void yargs(hideBin(process.argv))
         forceUpdate: argv['force-update'],
       });
       process.exit(exitCode);
+    },
+  )
+  .command(
+    'time-check',
+    'UserPromptSubmit hook: stamp the wall-clock into the transcript after a long gap or on a new working day (reads stdin, prints nothing when not due)',
+    (y) => y,
+    () => {
+      // Always exits 0: a failing UserPromptSubmit hook can block the prompt.
+      process.exit(runTimeCheck({}));
     },
   )
   .command(

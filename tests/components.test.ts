@@ -23,11 +23,21 @@ describe('components: ordering', () => {
     expect(COMPONENT_NAMES[0]).toBe('base-setup');
   });
 
-  test('DEPENDENCY_ORDER is the canonical order minus base-setup', () => {
+  test('DEPENDENCY_ORDER is the canonical order minus the opt-in-only components', () => {
     expect(DEPENDENCY_ORDER).toEqual(
-      COMPONENT_NAMES.filter((name) => name !== 'base-setup' && name !== 'eas'),
+      COMPONENT_NAMES.filter(
+        (name) =>
+          name !== 'base-setup' && name !== 'eas' && name !== 'time-check',
+      ),
     );
     expect(DEPENDENCY_ORDER).not.toContain('base-setup');
+  });
+
+  test('time-check is opt-in only — its hook fires on every prompt', () => {
+    // Installing it via `init`/`all` would spend a process spawn per prompt in
+    // every project just to print nothing.
+    expect(COMPONENT_NAMES).toContain('time-check');
+    expect(DEPENDENCY_ORDER).not.toContain('time-check');
   });
 
   test('DEPENDENCY_ORDER matches the documented init/all order', () => {

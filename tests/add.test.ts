@@ -139,12 +139,18 @@ describe('add: preset definitions', () => {
     }
   });
 
-  test('all = every component except the implicit base-setup', () => {
+  test('all = every component except the opt-in-only ones', () => {
     expect(new Set(PRESETS.all)).toEqual(
-      new Set(COMPONENTS.filter((c) => c !== 'base-setup' && c !== 'eas')),
+      new Set(
+        COMPONENTS.filter(
+          (c) => c !== 'base-setup' && c !== 'eas' && c !== 'time-check',
+        ),
+      ),
     );
     // base-setup is implicit (every installer self-applies it).
     expect(PRESETS.all).not.toContain('base-setup');
+    // time-check's hook runs on every prompt — never install it implicitly.
+    expect(PRESETS.all).not.toContain('time-check');
   });
 
   test('all order mirrors init.ts dependency order', () => {

@@ -24,6 +24,7 @@ import {runGitignoreSetup} from './gitignore-setup';
 import {runHuskySetup} from './husky-setup';
 import {runPrettierSetup} from './prettier-setup';
 import {runPromptsSetup} from './prompts-setup';
+import {runTimeCheckSetup} from './time-check-setup';
 import {runTsconfigSetup} from './tsconfig-setup';
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,7 @@ export const COMPONENT_NAMES = [
   'claude-md',
   'beads',
   'eas',
+  'time-check',
 ] as const;
 
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
@@ -57,11 +59,15 @@ export type ComponentName = (typeof COMPONENT_NAMES)[number];
  * never by `init` or the `all` preset:
  *   - base-setup: the implicit foundation every installer self-applies.
  *   - eas: app-specific (Expo/RN); scaffolding it into a node CLI would be wrong.
+ *   - time-check: its hook fires on EVERY prompt, so installing it everywhere
+ *     "but disabled" would cost a process spawn per prompt in every project to
+ *     print nothing. Opt in where the wall-clock actually matters.
  * A future app-only component (e.g. `detox`) joins this set.
  */
 const OPT_IN_ONLY: ReadonlySet<ComponentName> = new Set([
   'base-setup',
   'eas',
+  'time-check',
 ]);
 
 /**
@@ -133,6 +139,7 @@ const RUNNERS: Record<
       noCommit: a.noCommit ?? true,
     }),
   eas: (a) => runEasSetup(base(a)),
+  'time-check': (a) => runTimeCheckSetup(base(a)),
 };
 
 /** Run a component by its short name. */
