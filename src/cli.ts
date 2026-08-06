@@ -19,6 +19,7 @@ import {runInit} from './init';
 import {runMigrateToPrime} from './migrate-to-prime';
 import {runPrime} from './plugin/lib/prime';
 import {DEFAULT_OPTIONS as RALPH_DEFAULTS, runRalph} from './ralph';
+import {runSkill} from './skill';
 import {runSyncRules} from './sync-rules';
 import {runTimeCheck} from './time-check';
 import {runSignal} from './signal';
@@ -452,6 +453,14 @@ void yargs(hideBin(process.argv))
         forceUpdate: argv['force-update'],
       });
       process.exit(exitCode);
+    },
+  )
+  .command(
+    'skill',
+    'Print the guide to justin-sdk: install/upgrade, how it runs, the component table and command list (both derived, so they cannot go stale)',
+    (y) => y,
+    () => {
+      process.exit(runSkill());
     },
   )
   .command(
