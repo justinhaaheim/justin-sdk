@@ -30,6 +30,7 @@ import {
   scanTranscript,
   TIME_CHECK_DEFAULTS,
   TIME_CHECK_MARKER,
+  runTimeCheck,
   workingDayKey,
 } from '../src/time-check';
 
@@ -258,6 +259,79 @@ describe('formatting', () => {
 });
 
 // ---------------------------------------------------------------------------
+
+describe('emit: both channels', () => {
+  /**
+   * The stamp has to reach TWO readers that do not overlap: `systemMessage`
+   * renders in Justin's terminal but never enters the model's context, while
+   * `additionalContext` reaches the model and is invisible to Justin. Emitting
+   * only one is the bug this guards — the original version printed plain stdout,
+   * so the model got the stamp and Justin saw nothing.
+   */
+  function captureRun(dir: string, transcript: string): string {
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => {
+      lines.push(args.join(' '));
+    };
+    try {
+      runTimeCheck({
+        stdin: JSON.stringify({cwd: dir, transcript_path: transcript}),
+      });
+    } finally {
+      console.log = original;
+    }
+    return lines.join('\n');
+  }
+
+  test('emits systemMessage AND additionalContext, with identical text', () => {
+    const dir = tempDir();
+    writeConfig(dir, {
+      componentConfig: {
+        'time-check': {enabled: true, gapHours: 0},
+      },
+    });
+    const transcript = join(dir, 't.jsonl');
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        timestamp: '2026-08-05T10:00:00.000Z',
+        type: 'assistant',
+      }),
+      'utf8',
+    );
+
+    const parsed = JSON.parse(captureRun(dir, transcript)) as {
+      hookSpecificOutput?: {additionalContext?: string; hookEventName?: string};
+      systemMessage?: string;
+    };
+    expect(parsed.systemMessage).toContain(TIME_CHECK_MARKER);
+    expect(parsed.hookSpecificOutput?.hookEventName).toBe('UserPromptSubmit');
+    expect(parsed.hookSpecificOutput?.additionalContext).toBe(
+      parsed.systemMessage,
+    );
+  });
+
+  test('stays completely silent when not due (no empty envelope)', () => {
+    const dir = tempDir();
+    writeConfig(dir, {
+      componentConfig: {
+        'time-check': {
+          enabled: true,
+          gapHours: 999,
+          notifyOnNewDayBoundaryHour: null,
+        },
+      },
+    });
+    const transcript = join(dir, 't.jsonl');
+    writeFileSync(
+      transcript,
+      JSON.stringify({timestamp: new Date().toISOString(), type: 'assistant'}),
+      'utf8',
+    );
+    expect(captureRun(dir, transcript)).toBe('');
+  });
+});
 
 describe('scanTranscript', () => {
   /** Mirrors the real file layout, including entries that break naive scans. */

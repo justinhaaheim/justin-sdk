@@ -360,6 +360,23 @@ export function runTimeCheck(args: {now?: Date; stdin?: string}): number {
   }
 
   // decide() returns non-null only when lastMessage is set.
-  console.log(formatReport(now, lastMessage as Date));
+  const report = formatReport(now, lastMessage as Date);
+
+  // Emit BOTH channels. They reach different readers and neither implies the
+  // other: `systemMessage` renders in Justin's terminal but never enters the
+  // model's context (that is exactly what ~/.claude/scripts/timestamp-hook.sh
+  // relies on), while `additionalContext` goes to the model and is invisible to
+  // Justin. Printing only stdout — as this did originally — meant the model got
+  // the stamp and Justin saw nothing, which is a confusing way for a tool to
+  // behave when its whole job is telling you what time it is.
+  console.log(
+    JSON.stringify({
+      hookSpecificOutput: {
+        additionalContext: report,
+        hookEventName: 'UserPromptSubmit',
+      },
+      systemMessage: report,
+    }),
+  );
   return 0;
 }

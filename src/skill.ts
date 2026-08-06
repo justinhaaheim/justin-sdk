@@ -152,8 +152,13 @@ latest main. Verified 2026-08-06:
     invocation dies with \`Cannot find package 'yargs'\` — which looks like a
     dependency bug in the SDK and is not one.
 
-  Fix / force a fresh fetch:
+  Neither \`--force\` nor \`--no-cache\` busts it — both were measured at 0.04s
+  with no network, i.e. still the cached copy. Two things that DO work:
 
+      # 1. isolate the cache (cleanest — touches no shared state)
+      TMPDIR=$(mktemp -d) bunx github:justinhaaheim/justin-sdk#main <cmd>
+
+      # 2. evict it
       rm -rf "$TMPDIR"/bunx-*justin-sdk*
 
   Prefer a version tag when you want determinism:
@@ -194,6 +199,27 @@ keyed by the SHORT component name:
 ${captureCommandList()}
 
 Run \`justin-sdk <cmd> --help\` for any command's flags.
+
+
+## Gotchas that have cost real time
+
+- **beads is SPLIT across the fleet, on purpose.** Coding repos use beads_rust
+  (\`br\`, SQLite). \`life-management\` deliberately migrated to beads (\`bd\`, Dolt)
+  for metadata support, and \`br\` errors there BY DESIGN. Do not "fix" either one
+  to match the other, and do not follow any instruction to migrate one to the
+  other without checking which repo you are in. A cross-workspace reference
+  between the two is string-only.
+- **Shell cwd drift.** Sandboxed shells reset the working directory between
+  commands. Pass \`-C <repo>\` to git, or use absolute paths, rather than relying
+  on a \`cd\` from an earlier call.
+- **\`br list\` hides closed issues by default.** An issue that "disappeared" is
+  usually closed, not lost.
+- **Husky/lint-staged fails on a submodule-only commit.** A gitlink \`lstat\`s as a
+  directory and gets handed to prettier. home-base fixes this with \`--no-stash\`
+  in \`.husky/pre-commit\`.
+- **Never run \`br agents --add\`.**
+- **mise can be rate-limited by GitHub**, which surfaces as a confusing install
+  failure rather than a rate-limit message.
 
 
 ## Working on the SDK itself

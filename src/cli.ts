@@ -11,7 +11,6 @@ import yargs from 'yargs';
 import {hideBin} from 'yargs/helpers';
 
 import {ADD_TARGETS, PRESET_NAMES, runAdd} from './add';
-import {runAgent} from './agent';
 import {runDoctor} from './doctor';
 import {runEasUpdate} from './eas-update';
 import {runFix} from './fix';
@@ -44,6 +43,12 @@ const TIER_FLAG_HELP: Record<Tier, string> = {
   native:
     'Everything, including native-tier project scripts (prebuild/pod install — minutes)',
 };
+
+// Handled before yargs: `--skill` is a bare flag, and `demandCommand(1)` would
+// reject it. Mirrors the `tt --skill` convention.
+if (hideBin(process.argv).includes('--skill')) {
+  process.exit(runSkill());
+}
 
 void yargs(hideBin(process.argv))
   .scriptName('justin-sdk')
@@ -399,15 +404,6 @@ void yargs(hideBin(process.argv))
     },
   )
   .command(
-    'agent',
-    'Print the agent playbook (self-contained instructions for AI coding agents)',
-    (y) => y,
-    () => {
-      runAgent();
-      process.exit(0);
-    },
-  )
-  .command(
     'prime',
     'Assemble + emit the critical-rules for the current project from the prompts repo (read-only, no network)',
     (y) =>
@@ -456,7 +452,7 @@ void yargs(hideBin(process.argv))
     },
   )
   .command(
-    'skill',
+    ['skill', 'agent'],
     'Print the guide to justin-sdk: install/upgrade, how it runs, the component table and command list (both derived, so they cannot go stale)',
     (y) => y,
     () => {
