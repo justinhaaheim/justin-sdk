@@ -1,7 +1,7 @@
 /**
  * agent.ts — prints a self-contained playbook for AI coding agents.
  *
- * Usage: bunx justin-sdk agent
+ * Usage: bunx @justinhaaheim/justin-sdk agent
  *
  * This is the "cold-start prompt" for any agent entering a project. It
  * explains what justin-sdk is, what it can do, how to figure out what
@@ -122,7 +122,7 @@ ${versionsTable === '' ? '(versions.json not readable)' : versionsTable}
   - Other: \`npm i -g bun\` or \`curl -fsSL https://bun.sh/install | bash\`
 - **macOS or Linux**
 
-If bun is missing, you can't run \`bunx justin-sdk\` at all — install bun
+If bun is missing, you can't run \`bunx @justinhaaheim/justin-sdk\` at all — install bun
 first, then retry.
 
 ---
@@ -150,12 +150,12 @@ The user probably said something like:
   automatically as a precondition)
 - "Add beads to this project" → \`add beads\` (see next section)
 - "Migrate from bd to beads_rust" → also \`add beads\` (handles migration)
-- "Check the environment" → \`bunx justin-sdk doctor\`
-- "Run signal" → \`bunx justin-sdk signal\`
+- "Check the environment" → \`bunx @justinhaaheim/justin-sdk doctor\`
+- "Run signal" → \`bunx @justinhaaheim/justin-sdk signal\`
 - "Update the beads version" → update \`versions.json\` in the SDK,
   bump the project's local mise.toml to match, run \`mise install\`
 
-**If their request is unclear, run \`bunx justin-sdk doctor\` first** to
+**If their request is unclear, run \`bunx @justinhaaheim/justin-sdk doctor\` first** to
 see the current state, then decide based on what's missing.
 
 ---
@@ -212,7 +212,7 @@ into every session by the \`prime\` SessionStart hook + \`~/.claude/rules/\`.
 (it still referenced \`bd\`, \`br sync --flush-only\`, and a session protocol
 that no longer applies now that every project auto-flushes), so installing a
 second staler copy per-project was worse than having none. To remove an
-AGENTS.md a project no longer wants, use \`bunx justin-sdk migrate-to-prime\`.
+AGENTS.md a project no longer wants, use \`bunx @justinhaaheim/justin-sdk migrate-to-prime\`.
 
 ### Running it
 
@@ -227,7 +227,7 @@ Or if the SDK is already installed as a dep:
 \`\`\`bash
 bun x justin-sdk add beads
 # or
-bunx justin-sdk add beads
+bunx @justinhaaheim/justin-sdk add beads
 \`\`\`
 
 **Flags:**
@@ -241,7 +241,7 @@ bunx justin-sdk add beads
    ⚠ (warning), or ✗ (error). Warnings are OK; errors mean something
    needs your attention.
 2. Run \`git status\` to see what was committed and what wasn't.
-3. Run \`bunx justin-sdk doctor\` to verify the installation.
+3. Run \`bunx @justinhaaheim/justin-sdk doctor\` to verify the installation.
 4. Run \`br list --all\` to see issues. If migrating, confirm the count
    matches the original (the script warns if there's a mismatch).
 
@@ -313,10 +313,10 @@ were. Don't silently accept data loss.
 ## Doctor: environment health checks
 
 \`\`\`bash
-bunx justin-sdk doctor              # Just report status
-bunx justin-sdk doctor --fix        # Auto-run project-local fixes
-bunx justin-sdk doctor --fix --yes  # Also run system-level installs (mise, br, bun)
-bunx justin-sdk doctor --quiet      # Summary only, one line on all-pass
+bunx @justinhaaheim/justin-sdk doctor              # Just report status
+bunx @justinhaaheim/justin-sdk doctor --fix        # Auto-run project-local fixes
+bunx @justinhaaheim/justin-sdk doctor --fix --yes  # Also run system-level installs (mise, br, bun)
+bunx @justinhaaheim/justin-sdk doctor --quiet      # Summary only, one line on all-pass
 \`\`\`
 
 **Approval gating:** Checks whose fix modifies system state (installing
@@ -344,9 +344,9 @@ is a warning too (BR check has a curl fallback).
 ## Signal: project code quality checks
 
 \`\`\`bash
-bunx justin-sdk signal              # Parallel, verbose
-bunx justin-sdk signal --quiet      # One-liner on all-pass
-bunx justin-sdk signal --serial     # Run sequentially (easier debugging)
+bunx @justinhaaheim/justin-sdk signal              # Parallel, verbose
+bunx @justinhaaheim/justin-sdk signal --quiet      # One-liner on all-pass
+bunx @justinhaaheim/justin-sdk signal --serial     # Run sequentially (easier debugging)
 \`\`\`
 
 Signal runs \`signal-source:*\` scripts from package.json. Typically:
@@ -362,7 +362,7 @@ with \`--serial\`) and reports a combined pass/fail summary.
 ## Fix: auto-fix code
 
 \`\`\`bash
-bunx justin-sdk fix          # eslint --fix + prettier --write, in serial
+bunx @justinhaaheim/justin-sdk fix          # eslint --fix + prettier --write, in serial
 \`\`\`
 
 Fix runs \`fix-source:*\` scripts from package.json — the *mutating*
@@ -515,8 +515,8 @@ backups live there and should NOT be committed.
 - **SDK source:** https://github.com/justinhaaheim/justin-sdk
 - **beads_rust:** https://github.com/Dicklesworthstone/beads_rust
 - **home-base (meta project):** https://github.com/justinhaaheim/home-base
-- **Command reference:** \`bunx justin-sdk --help\`
-- **Current project state:** \`bunx justin-sdk doctor\`
+- **Command reference:** \`bunx @justinhaaheim/justin-sdk --help\`
+- **Current project state:** \`bunx @justinhaaheim/justin-sdk doctor\`
 
 ---
 

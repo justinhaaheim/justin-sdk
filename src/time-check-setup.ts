@@ -3,7 +3,7 @@
  *
  * Scaffolds two things in the consuming project:
  *   - a UserPromptSubmit hook in .claude/settings.json running
- *     `bunx justin-sdk time-check`
+ *     `bunx @justinhaaheim/justin-sdk time-check`
  *   - a `componentConfig["time-check"]` block in justin-sdk.config.json
  *     carrying the defaults
  *
@@ -33,8 +33,8 @@ import {
 } from './setup-helpers';
 import {TIME_CHECK_CONFIG_KEY, TIME_CHECK_DEFAULTS} from './time-check';
 
-/** The command the hook runs. Matches the `bunx justin-sdk prime` precedent. */
-const HOOK_COMMAND = 'bunx justin-sdk time-check';
+/** The command the hook runs. Matches the `bunx @justinhaaheim/justin-sdk prime` precedent. */
+const HOOK_COMMAND = 'bunx @justinhaaheim/justin-sdk time-check';
 
 /**
  * Add the UserPromptSubmit hook to .claude/settings.json.

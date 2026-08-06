@@ -7,7 +7,7 @@
  * The stamp is an HTML comment (Claude Code does not render HTML comments into
  * context, so it's invisible to the model) carrying the version-manager
  * version, the source commit sha, and a content hash. Example:
- *   <!-- justin-sdk rules · v0.4.14 · commit cc6573bb0834 · content 84bf3e47bf75 · generated 2026-… · GENERATED FILE — do not edit; run: bunx justin-sdk sync-rules -->
+ *   <!-- justin-sdk rules · v0.4.14 · commit cc6573bb0834 · content 84bf3e47bf75 · generated 2026-… · GENERATED FILE — do not edit; run: bunx github:justinhaaheim/justin-sdk sync-rules -->
  */
 
 import {execSync} from 'child_process';
@@ -60,9 +60,11 @@ export function prettierMarkdown(markdown: string): string {
 
 /**
  * Universal invocations. `@justinhaaheim/justin-sdk` is a GitHub package (not on
- * npm), so the short `bunx justin-sdk …` only resolves in a project that has it
- * as a devDep. The `github:` spec works from ANY project, so it's what we tell
- * the user to run. (Where the devDep exists, the short form also works.)
+ * npm), so `bunx @justinhaaheim/justin-sdk …` only resolves in a project that
+ * has it as a devDep. The `github:` spec works from ANY project, so it's what we
+ * tell the user to run. (Where the devDep exists, the scoped form also works —
+ * and the BARE name is never used anywhere: it falls through to the npm registry,
+ * home-base-2qhw.)
  */
 export const SDK_BUNX = 'bunx github:justinhaaheim/justin-sdk';
 export const SYNC_RULES_CMD = `${SDK_BUNX} sync-rules`;
