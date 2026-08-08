@@ -171,16 +171,24 @@ export function stepPackageScripts(projectRoot: string): boolean {
   //     (pre-SDK / pre-j2n7 patterns; setup-env.ts is DELETED by
   //     stepSetupEnvScript this same run, so an un-migrated alias would point
   //     at a missing file)
+  //   - Uses a BARE bunx name (`bunx justin-sdk`/`jsdk`/`j`) — the banned
+  //     pre-scope generation (home-base-2qhw): when local resolution fails,
+  //     a bare name falls through to the public npm registry, i.e. the
+  //     standard dependency-confusion shape. Found surviving the first live
+  //     sweep (ratchet finding #7); these are SDK-emitted values, never
+  //     hand-written, so rewriting is safe.
   // Custom values that don't match a stale shape are preserved (e.g.,
   // apple-reminders-mcp's `signal: "bun run prettier-check"`).
   const STALE_LOCAL_SCRIPT_RE =
     /^bun(?:x)?\s+(?:run\s+)?(?:"\$CLAUDE_PROJECT_DIR\/)?scripts\/(?:doctor|signal|check-runner|setup-env)\.ts"?(?:\s.*)?$/;
+  const STALE_BARE_BUNX_RE = /^bunx\s+(?:justin-sdk|jsdk|j)\s/;
   for (const [name, cmd] of Object.entries(SDK_SCRIPTS)) {
     const existing = scripts[name];
     const isStaleSdkScript =
       existing != null &&
       (existing.includes('node_modules/@justinhaaheim/justin-sdk') ||
-        STALE_LOCAL_SCRIPT_RE.test(existing));
+        STALE_LOCAL_SCRIPT_RE.test(existing) ||
+        STALE_BARE_BUNX_RE.test(existing));
     if (existing == null || isStaleSdkScript) {
       scripts[name] = cmd;
       modified = true;

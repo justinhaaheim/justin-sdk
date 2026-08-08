@@ -136,6 +136,36 @@ describe('base-setup', () => {
     expect(pkg.scripts?.doctor).toBe('bunx @justinhaaheim/justin-sdk doctor');
   });
 
+  test('migrates BARE bunx aliases (bunx justin-sdk/jsdk/j) to the scoped name — the 2qhw hazard', async () => {
+    const sb = track(
+      createProjectSandbox({
+        packageJson: {
+          name: 'test',
+          scripts: {
+            signal: 'bunx justin-sdk signal --quiet',
+            doctor: 'bunx jsdk doctor',
+            fix: 'bunx j fix',
+            // NOT SDK-emitted — a custom value must survive untouched.
+            'signal:custom': 'bunx justin-sdk-lookalike thing',
+          },
+        },
+      }),
+    );
+    await runBaseSetup({projectRoot: sb.path, quiet: true});
+
+    const pkg = JSON.parse(
+      readFileSync(join(sb.path, 'package.json'), 'utf-8'),
+    ) as {scripts?: Record<string, string>};
+    expect(pkg.scripts?.signal).toBe(
+      'bunx @justinhaaheim/justin-sdk signal --quiet',
+    );
+    expect(pkg.scripts?.doctor).toBe('bunx @justinhaaheim/justin-sdk doctor');
+    expect(pkg.scripts?.fix).toBe('bunx @justinhaaheim/justin-sdk fix');
+    expect(pkg.scripts?.['signal:custom']).toBe(
+      'bunx justin-sdk-lookalike thing',
+    );
+  });
+
   test('migrates a pre-j2n7 setup-env alias pointing at the deleted committed copy', async () => {
     const sb = track(
       createProjectSandbox({
