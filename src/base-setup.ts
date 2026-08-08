@@ -167,12 +167,14 @@ export function stepPackageScripts(projectRoot: string): boolean {
   // Add required SDK scripts. Overwrite if the existing value is a
   // known-stale shape:
   //   - Points at the old node_modules path
-  //   - Points at a local scripts/{doctor,signal,check-runner}.ts (pre-SDK
-  //     pattern that was inlined per-project before the CLI existed)
+  //   - Points at a local scripts/{doctor,signal,check-runner,setup-env}.ts
+  //     (pre-SDK / pre-j2n7 patterns; setup-env.ts is DELETED by
+  //     stepSetupEnvScript this same run, so an un-migrated alias would point
+  //     at a missing file)
   // Custom values that don't match a stale shape are preserved (e.g.,
   // apple-reminders-mcp's `signal: "bun run prettier-check"`).
   const STALE_LOCAL_SCRIPT_RE =
-    /^bun(?:x)?\s+scripts\/(?:doctor|signal|check-runner)\.ts(?:\s.*)?$/;
+    /^bun(?:x)?\s+(?:run\s+)?(?:"\$CLAUDE_PROJECT_DIR\/)?scripts\/(?:doctor|signal|check-runner|setup-env)\.ts"?(?:\s.*)?$/;
   for (const [name, cmd] of Object.entries(SDK_SCRIPTS)) {
     const existing = scripts[name];
     const isStaleSdkScript =

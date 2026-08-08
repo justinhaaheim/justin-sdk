@@ -136,6 +136,28 @@ describe('base-setup', () => {
     expect(pkg.scripts?.doctor).toBe('bunx @justinhaaheim/justin-sdk doctor');
   });
 
+  test('migrates a pre-j2n7 setup-env alias pointing at the deleted committed copy', async () => {
+    const sb = track(
+      createProjectSandbox({
+        packageJson: {
+          name: 'test',
+          scripts: {
+            'setup-env': 'bun scripts/setup-env.ts',
+          },
+        },
+      }),
+    );
+    await runBaseSetup({projectRoot: sb.path, quiet: true});
+
+    const pkg = JSON.parse(
+      readFileSync(join(sb.path, 'package.json'), 'utf-8'),
+    ) as {scripts?: Record<string, string>};
+    // The old value points at a file stepSetupEnvScript deletes this same run.
+    expect(pkg.scripts?.['setup-env']).toBe(
+      'bunx @justinhaaheim/justin-sdk setup-env',
+    );
+  });
+
   test('preserves existing signal-source:* scripts (does not clobber)', async () => {
     const sb = track(
       createProjectSandbox({
