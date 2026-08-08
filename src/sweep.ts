@@ -40,6 +40,7 @@ import {existsSync, readdirSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {basename, join, resolve} from 'node:path';
 
+import {getSdkVersion} from './setup-helpers';
 import {setupEnv} from './setup-env';
 
 export const SWEEP_BRANCH = 'worktree-sdk-sweep';
@@ -237,7 +238,12 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
     };
   }
   if (
-    gitOk(repo, ['rev-parse', '--verify', '--quiet', `refs/heads/${SWEEP_BRANCH}`])
+    gitOk(repo, [
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      `refs/heads/${SWEEP_BRANCH}`,
+    ])
   ) {
     return {
       detail: `branch ${SWEEP_BRANCH} already exists — resolve it, then re-sweep`,
@@ -274,7 +280,10 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
   if (add.exitCode !== 0) return fail('git worktree add failed');
 
   const cleanupWorktree = (): void => {
-    run(['git', '-C', repo, 'worktree', 'remove', '--force', worktreePath], repo);
+    run(
+      ['git', '-C', repo, 'worktree', 'remove', '--force', worktreePath],
+      repo,
+    );
     run(['git', '-C', repo, 'branch', '-D', SWEEP_BRANCH], repo);
   };
 
@@ -289,11 +298,26 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
   }
 
   // --- Update --------------------------------------------------------------
-  // The TARGET's own SDK runs the update (self-update bumps the pin, re-execs
-  // the new CLI, re-applies components). bunx resolves it from the hydrated
-  // worktree's node_modules.
+  // The SWEEP pins the target, deterministically, to ITS OWN version — it IS
+  // the latest SDK. Learned live on the first sweep run (raycast-j-recent,
+  // pinned 0.6.1-era): delegating the bump to the TARGET's `j update`
+  // self-update means trusting every ancient self-update code path in the
+  // fleet, and 0.6.1's silently failed to move the pin at all. Pin first,
+  // then run the NEW code with --no-self-update — no gh tag query, no old
+  // code trusted, fleet version === orchestrator version by construction.
+  const pin = `github:justinhaaheim/justin-sdk#v${getSdkVersion()}`;
+  const pinAdd = run(['bun', 'add', '-d', pin], worktreePath);
+  if (pinAdd.exitCode !== 0) {
+    return fail(`bun add -d ${pin} failed — worktree left for inspection`);
+  }
   const update = run(
-    ['bunx', '@justinhaaheim/justin-sdk', 'update', '--quiet'],
+    [
+      'bunx',
+      '@justinhaaheim/justin-sdk',
+      'update',
+      '--no-self-update',
+      '--quiet',
+    ],
     worktreePath,
   );
   if (update.exitCode !== 0) {
@@ -305,7 +329,10 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
     existsSync(join(worktreePath, file)),
   );
   if (present.length > 0) {
-    run(['bunx', 'prettier', '--write', '--ignore-unknown', ...present], worktreePath);
+    run(
+      ['bunx', 'prettier', '--write', '--ignore-unknown', ...present],
+      worktreePath,
+    );
   }
 
   // --- Gates ---------------------------------------------------------------
@@ -345,7 +372,12 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
 
   // --- Merge safety + merge -----------------------------------------------
   const changedFiles = staged.split('\n').filter((line) => line !== '');
-  const primaryBranch = git(repo, ['symbolic-ref', '--quiet', '--short', 'HEAD']);
+  const primaryBranch = git(repo, [
+    'symbolic-ref',
+    '--quiet',
+    '--short',
+    'HEAD',
+  ]);
   const porcelain = git(repo, ['status', '--porcelain']) ?? '';
   const safety = mergeSafety(
     primaryBranch,
@@ -360,7 +392,10 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
       repo: name,
     };
   }
-  const merge = run(['git', '-C', repo, 'merge', '--ff-only', SWEEP_BRANCH], repo);
+  const merge = run(
+    ['git', '-C', repo, 'merge', '--ff-only', SWEEP_BRANCH],
+    repo,
+  );
   if (merge.exitCode !== 0) {
     return {
       detail: `merge --ff-only failed (diverged?) — branch ${SWEEP_BRANCH} left standing`,
@@ -374,7 +409,10 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
   const remotes = git(repo, ['remote']);
   if (remotes != null && remotes !== '') {
     const push = run(['git', '-C', repo, 'push'], repo);
-    pushNote = push.exitCode === 0 ? 'pushed' : 'PUSH FAILED (remote ahead?) — merged locally, push by hand';
+    pushNote =
+      push.exitCode === 0
+        ? 'pushed'
+        : 'PUSH FAILED (remote ahead?) — merged locally, push by hand';
   }
   cleanupWorktree();
   return {
@@ -422,7 +460,9 @@ export function runSweep(options: SweepOptions = {}): number {
     skipped: `${DIM}⊘${RESET}`,
   };
   for (const result of results) {
-    say(`  ${ICON[result.outcome]} ${result.repo} ${DIM}${result.detail}${RESET}`);
+    say(
+      `  ${ICON[result.outcome]} ${result.repo} ${DIM}${result.detail}${RESET}`,
+    );
   }
   const failed = results.filter((result) => result.outcome === 'failed').length;
   const pending = results.filter(
