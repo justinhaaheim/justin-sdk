@@ -346,7 +346,19 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
     return fail('j update failed — worktree left for inspection');
   }
 
-  // Normalize SDK-written JSON to the repo's own prettier config.
+  // --- Gates ---------------------------------------------------------------
+  const doctor = run(
+    ['bunx', '@justinhaaheim/justin-sdk', 'doctor', '--fix'],
+    worktreePath,
+  );
+  if (doctor.exitCode !== 0) {
+    return fail('doctor red after update — worktree left for inspection');
+  }
+
+  // Normalize SDK-written JSON to the repo's own prettier config — AFTER
+  // doctor --fix (fifth live-sweep finding: doctor's fixers re-write these
+  // files unformatted, so normalizing before it hands signal a dirty file)
+  // and BEFORE signal, whose PRETTIER check is the gate that cares.
   const present = PRETTIER_NORMALIZE_FILES.filter((file) =>
     existsSync(join(worktreePath, file)),
   );
@@ -357,14 +369,6 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
     );
   }
 
-  // --- Gates ---------------------------------------------------------------
-  const doctor = run(
-    ['bunx', '@justinhaaheim/justin-sdk', 'doctor', '--fix'],
-    worktreePath,
-  );
-  if (doctor.exitCode !== 0) {
-    return fail('doctor red after update — worktree left for inspection');
-  }
   const signal = run(['bun', 'run', 'signal'], worktreePath);
   if (signal.exitCode !== 0) {
     return fail('signal red after update — worktree left for inspection');
