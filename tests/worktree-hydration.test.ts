@@ -16,10 +16,10 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
+import {existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
-import {makeWorktreeHydrationChecks} from '../src/doctor';
+import {makeEnvHydrationChecks} from '../src/doctor';
 import {runSignal} from '../src/signal';
 import {
   BLOCKING_PROBLEM_KINDS,
@@ -33,7 +33,7 @@ import {
   isLinkedWorktree,
   miseTrustStatus,
   parseMiseTrustStatus,
-  WORKTREE_SETUP_BUNX,
+  SETUP_ENV_BUNX,
   type HydrationProblem,
   type HydrationProblemKind,
   type WorktreeHydrationStatus,
@@ -155,6 +155,22 @@ function kinds(status: WorktreeHydrationStatus): string[] {
   return status.problems.map((problem) => problem.kind);
 }
 
+/**
+ * Simulate an installed dep the way the per-dep probes see one:
+ * node_modules/<name>/package.json with a version. What `bun install`
+ * produces, minus the parts the probes never read.
+ */
+function installDep(root: string, name: string, version = '1.3.0'): void {
+  const dir = join(root, 'node_modules', name);
+  mkdirSync(dir, {recursive: true});
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({name, version}));
+}
+
+/** The fixture's declared dep (left-pad@1.3.0), installed to match. */
+function hydrateFixtureDeps(root: string): void {
+  installDep(root, 'left-pad', '1.3.0');
+}
+
 /** A problem of the given kind; only `kind` participates in the F6/F7 rules. */
 function makeProblem(kind: HydrationProblemKind): HydrationProblem {
   return {detail: `${kind} detail`, kind, label: kind};
@@ -205,23 +221,110 @@ describe('isLinkedWorktree', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Primary checkout: ZERO behavior change (regression-critical)
+// Primary checkout (j2n7.2): detection RUNS here now; doctor WARNS; signal is
+// still completely unchanged — its preflight gates on the topology BEFORE
+// detection, so its behavior in a primary checkout must not regress.
 // ---------------------------------------------------------------------------
 
 describe('primary checkout', () => {
-  test('detection is inert even when node_modules is missing', () => {
+  test('missing node_modules IS detected (the forgot-to-install case)', () => {
     const sb = track(createSandbox());
     const primary = makePrimary(sb);
     expect(existsSync(join(primary, 'node_modules'))).toBe(false);
 
     const status = detectWorktreeHydration(primary);
     expect(status.isLinkedWorktree).toBe(false);
-    expect(status.problems).toEqual([]);
+    expect(kinds(status)).toEqual(['node-modules']);
+    // node_modules missing ⇒ the local alias cannot resolve ⇒ bunx-github form.
+    expect(status.fixCommand).toBe(SETUP_ENV_BUNX);
   });
 
-  test('the doctor check is ABSENT (not merely passing)', () => {
+  test('the doctor check is PRESENT and warns (severity warn, never error)', () => {
     const sb = track(createSandbox());
-    expect(makeWorktreeHydrationChecks(makePrimary(sb))).toEqual([]);
+    const nodes = makeEnvHydrationChecks(makePrimary(sb));
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]?.check.label).toBe('ENV_HYDRATION');
+    const result = nodes[0]?.check.fn?.() as {
+      message?: string;
+      pass: boolean;
+      severity?: string;
+    };
+    expect(result.pass).toBe(false);
+    expect(result.severity).toBe('warn');
+    expect(result.message).toContain('stale environment');
+    expect(result.message).not.toContain('worktree');
+  });
+
+  test('a hydrated primary checkout passes with a positive message', () => {
+    const sb = track(createSandbox());
+    const primary = makePrimary(sb);
+    hydrateFixtureDeps(primary);
+    const nodes = makeEnvHydrationChecks(primary);
+    const result = nodes[0]?.check.fn?.() as {message?: string; pass: boolean};
+    expect(result.pass).toBe(true);
+    expect(result.message).toContain('deps present');
+  });
+
+  test('a declared dep with no directory is detected, and clears when the dir appears (install simulation)', () => {
+    const sb = track(createSandbox());
+    const primary = makePrimary(sb, {
+      packageJson: {
+        dependencies: {'is-number': '7.0.0'},
+        devDependencies: {'left-pad': '1.3.0'},
+        name: 'fixture',
+      },
+    });
+    hydrateFixtureDeps(primary); // left-pad only — is-number missing
+    const before = detectWorktreeHydration(primary);
+    expect(kinds(before)).toEqual(['dep-missing']);
+    expect(before.problems[0]?.detail).toContain('is-number');
+    // The warning clears after its own fix (an install producing the dir).
+    installDep(primary, 'is-number', '7.0.0');
+    expect(kinds(detectWorktreeHydration(primary))).toEqual([]);
+  });
+
+  test('an installed version outside the declared range is detected; satisfying it clears (branch moved a pin)', () => {
+    const sb = track(createSandbox());
+    const primary = makePrimary(sb, {
+      packageJson: {devDependencies: {'left-pad': '^2.0.0'}, name: 'fixture'},
+    });
+    installDep(primary, 'left-pad', '1.3.0'); // tree still has the old one
+    const before = detectWorktreeHydration(primary);
+    expect(kinds(before)).toEqual(['dep-version']);
+    expect(before.problems[0]?.detail).toContain('left-pad@1.3.0');
+    installDep(primary, 'left-pad', '2.0.0');
+    expect(kinds(detectWorktreeHydration(primary))).toEqual([]);
+  });
+
+  test('non-semver specifiers (github:, file:, workspace:*) are existence-only, never version-checked', () => {
+    const sb = track(createSandbox());
+    const primary = makePrimary(sb, {
+      packageJson: {
+        devDependencies: {
+          '@justinhaaheim/justin-sdk':
+            'github:justinhaaheim/justin-sdk#v0.15.0',
+          'local-pkg': 'file:./packages/local-pkg',
+          'ws-pkg': 'workspace:*',
+        },
+        name: 'fixture',
+      },
+    });
+    installDep(primary, '@justinhaaheim/justin-sdk', '0.1.0');
+    installDep(primary, 'local-pkg', '0.0.0');
+    installDep(primary, 'ws-pkg', '9.9.9');
+    expect(kinds(detectWorktreeHydration(primary))).toEqual([]);
+  });
+
+  test('a SYMLINKED node_modules is detected (breaks native modules and file:-linked packages)', () => {
+    const sb = track(createSandbox());
+    const primary = makePrimary(sb);
+    const real = join(sb.path, 'elsewhere-node-modules');
+    mkdirSync(real, {recursive: true});
+    symlinkSync(real, join(primary, 'node_modules'));
+    const status = detectWorktreeHydration(primary);
+    expect(kinds(status)).toEqual(['node-modules-symlink']);
+    // A symlinked tree cannot be trusted to resolve the alias either.
+    expect(status.fixCommand).toBe(SETUP_ENV_BUNX);
   });
 
   test('signal still discovers and runs its checks', async () => {
@@ -240,7 +343,7 @@ describe('primary checkout', () => {
     expect(stderr).not.toContain('UNHYDRATED');
   });
 
-  test('a non-git project root is likewise inert', async () => {
+  test('a non-git project root is likewise left alone by signal', async () => {
     const sb = track(createSandbox());
     const sentinel = join(sb.path, 'non-git-checks-ran');
     writeFileSync(
@@ -313,14 +416,14 @@ describe('linked worktree missing node_modules', () => {
     expect(stderr).toContain('UNHYDRATED');
     expect(stderr).toContain('PHANTOM');
     expect(stderr).toContain('node_modules');
-    expect(stderr).toContain(WORKTREE_SETUP_BUNX);
+    expect(stderr).toContain(SETUP_ENV_BUNX);
   });
 
   test('doctor reports an error naming the bunx fix (no worktree:setup script)', () => {
     const sb = track(createSandbox());
-    const nodes = makeWorktreeHydrationChecks(setup(sb));
+    const nodes = makeEnvHydrationChecks(setup(sb));
     expect(nodes).toHaveLength(1);
-    expect(nodes[0]?.check.label).toBe('WORKTREE_HYDRATION');
+    expect(nodes[0]?.check.label).toBe('ENV_HYDRATION');
     // severity omitted === 'error' (check-runner's default).
     expect(nodes[0]?.check.severity).toBeUndefined();
 
@@ -330,7 +433,7 @@ describe('linked worktree missing node_modules', () => {
       pass: boolean;
     };
     expect(result.pass).toBe(false);
-    expect(result.fix).toBe(`Run: ${WORKTREE_SETUP_BUNX}`);
+    expect(result.fix).toBe(`Run: ${SETUP_ENV_BUNX}`);
     expect(result.message).toContain('node_modules');
     expect(result.message).toContain('PHANTOM');
   });
@@ -351,17 +454,19 @@ describe('linked worktree missing node_modules', () => {
     const wt = setup(sb, {worktreeSetupScript: true});
     // Fixture sanity: the alias really IS declared, in the exact fleet form —
     // so what follows is about the rule, not about a missing script.
-    const pkg = JSON.parse(
-      readFileSync(join(wt, 'package.json'), 'utf-8'),
-    ) as {scripts: Record<string, string>};
-    expect(pkg.scripts['worktree:setup']).toBe('bunx @justinhaaheim/justin-sdk worktree-setup');
+    const pkg = JSON.parse(readFileSync(join(wt, 'package.json'), 'utf-8')) as {
+      scripts: Record<string, string>;
+    };
+    expect(pkg.scripts['worktree:setup']).toBe(
+      'bunx @justinhaaheim/justin-sdk worktree-setup',
+    );
 
-    const result = makeWorktreeHydrationChecks(wt)[0]?.check.fn?.() as {
+    const result = makeEnvHydrationChecks(wt)[0]?.check.fn?.() as {
       fix?: string;
       pass: boolean;
     };
     expect(result.pass).toBe(false);
-    expect(result.fix).toBe(`Run: ${WORKTREE_SETUP_BUNX}`);
+    expect(result.fix).toBe(`Run: ${SETUP_ENV_BUNX}`);
   });
 
   test('a package.json with no dependencies is not a hydration problem', () => {
@@ -390,22 +495,20 @@ describe('fully hydrated linked worktree', () => {
       join(primary, '.claude', 'worktrees', 'w1'),
       'worktree-w1',
     );
-    mkdirSync(join(wt, 'node_modules'), {recursive: true});
+    hydrateFixtureDeps(wt);
     return wt;
   }
 
   test('reports no problems', () => {
     const sb = track(createSandbox());
-    const status = detectWorktreeHydration(
-      setup(sb, join(sb.path, 'unused')),
-    );
+    const status = detectWorktreeHydration(setup(sb, join(sb.path, 'unused')));
     expect(status.isLinkedWorktree).toBe(true);
     expect(status.problems).toEqual([]);
   });
 
   test('the doctor check is PRESENT and passing (positive confirmation)', () => {
     const sb = track(createSandbox());
-    const nodes = makeWorktreeHydrationChecks(setup(sb, join(sb.path, 'x')));
+    const nodes = makeEnvHydrationChecks(setup(sb, join(sb.path, 'x')));
     expect(nodes).toHaveLength(1);
     const result = nodes[0]?.check.fn?.() as {message?: string; pass: boolean};
     expect(result.pass).toBe(true);
@@ -454,7 +557,7 @@ describe('.worktreeinclude missing files', () => {
       join(primary, '.claude', 'worktrees', 'w1'),
       'worktree-w1',
     );
-    mkdirSync(join(wt, 'node_modules'), {recursive: true});
+    hydrateFixtureDeps(wt);
     return {primary, wt};
   }
 
@@ -479,7 +582,9 @@ describe('.worktreeinclude missing files', () => {
       packageJson: {
         devDependencies: {'left-pad': '1.3.0'},
         name: 'fixture',
-        scripts: {'worktree:setup': 'bunx @justinhaaheim/justin-sdk worktree-setup'},
+        scripts: {
+          'worktree:setup': 'bunx @justinhaaheim/justin-sdk worktree-setup',
+        },
       },
       worktreeinclude: '.env.local\n',
     });
@@ -488,7 +593,7 @@ describe('.worktreeinclude missing files', () => {
       join(primary, '.claude', 'worktrees', 'w1'),
       'worktree-w1',
     );
-    mkdirSync(join(wt, 'node_modules'), {recursive: true});
+    hydrateFixtureDeps(wt);
 
     const status = detectWorktreeHydration(wt);
     expect(kinds(status)).toEqual(['worktreeinclude']);
@@ -525,7 +630,7 @@ describe('.worktreeinclude missing files', () => {
     // All three advisory facts are present…
     expect(stderr).toContain('partially unhydrated worktree');
     expect(stderr).toContain('.env.local');
-    expect(stderr).toContain(WORKTREE_SETUP_BUNX);
+    expect(stderr).toContain(SETUP_ENV_BUNX);
     // …and it is emphatically NOT the blocking banner, whose whole claim is that
     // the results are worthless. Reusing that here would train the reader to
     // ignore it when it matters.
@@ -549,7 +654,7 @@ describe('.worktreeinclude missing files', () => {
       join(primary, '.claude', 'worktrees', 'w1'),
       'worktree-w1',
     );
-    mkdirSync(join(wt, 'node_modules'), {recursive: true});
+    hydrateFixtureDeps(wt);
 
     const {result, stderr} = await captureStderr(() =>
       runSignal(wt, {quiet: true}),
@@ -580,7 +685,7 @@ describe('blocking vs advisory problem kinds (F7)', () => {
 
   test('hasBlockingProblem is false for an advisory-only status', () => {
     const advisory: WorktreeHydrationStatus = {
-      fixCommand: WORKTREE_SETUP_BUNX,
+      fixCommand: SETUP_ENV_BUNX,
       isLinkedWorktree: true,
       primary: '/primary',
       problems: [makeProblem('worktreeinclude'), makeProblem('mise-untrusted')],
@@ -651,12 +756,12 @@ describe('blocking vs advisory problem kinds (F7)', () => {
         join(primary, '.claude', 'worktrees', 'w1'),
         'worktree-w1',
       );
-      if (nodeModules) mkdirSync(join(wt, 'node_modules'), {recursive: true});
+      if (nodeModules) hydrateFixtureDeps(wt);
       return wt;
     }
 
     function doctorMessage(worktree: string): {message: string; pass: boolean} {
-      const result = makeWorktreeHydrationChecks(worktree)[0]?.check.fn?.() as {
+      const result = makeEnvHydrationChecks(worktree)[0]?.check.fn?.() as {
         message?: string;
         pass: boolean;
       };
@@ -730,9 +835,9 @@ describe('parseMiseTrustStatus', () => {
 
   test('expands the tilde form mise prints for paths under $HOME', () => {
     const home = process.env.HOME ?? '';
-    expect(parseMiseTrustStatus('~/Dev/thing: untrusted', `${home}/Dev/thing`)).toBe(
-      'untrusted',
-    );
+    expect(
+      parseMiseTrustStatus('~/Dev/thing: untrusted', `${home}/Dev/thing`),
+    ).toBe('untrusted');
   });
 
   test('an unlisted target, empty output, or unknown word is "unknown"', () => {
@@ -752,7 +857,7 @@ describe('mise trust signal', () => {
       join(primary, '.claude', 'worktrees', 'w1'),
       'worktree-w1',
     );
-    mkdirSync(join(wt, 'node_modules'), {recursive: true});
+    hydrateFixtureDeps(wt);
     return wt;
   }
 
@@ -764,7 +869,7 @@ describe('mise trust signal', () => {
       join(primary, '.claude', 'worktrees', 'w1'),
       'worktree-w1',
     );
-    mkdirSync(join(wt, 'node_modules'), {recursive: true});
+    hydrateFixtureDeps(wt);
     expect(miseTrustStatus(wt)).toBe('unknown');
     expect(detectWorktreeHydration(wt).problems).toEqual([]);
   });
@@ -807,7 +912,7 @@ describe('mise trust signal', () => {
 describe('messaging', () => {
   function statusWith(labels: string[]): WorktreeHydrationStatus {
     return {
-      fixCommand: WORKTREE_SETUP_BUNX,
+      fixCommand: SETUP_ENV_BUNX,
       isLinkedWorktree: true,
       primary: '/primary',
       problems: labels.map((label) => ({
@@ -836,7 +941,7 @@ describe('messaging', () => {
     expect(banner).toContain('UNHYDRATED');
     expect(banner).toContain('PHANTOM');
     expect(banner).toContain('.env.local');
-    expect(banner).toContain(WORKTREE_SETUP_BUNX);
+    expect(banner).toContain(SETUP_ENV_BUNX);
     expect(banner).toContain('/primary/.claude/worktrees/w1');
   });
 });
@@ -844,7 +949,10 @@ describe('messaging', () => {
 describe('hydrationFixCommand', () => {
   const problem = makeProblem;
   const INCLUDE_ONLY = [problem('worktreeinclude')];
-  const WITH_NODE_MODULES = [problem('worktreeinclude'), problem('node-modules')];
+  const WITH_NODE_MODULES = [
+    problem('worktreeinclude'),
+    problem('node-modules'),
+  ];
 
   function withAlias(sb: Sandbox): string {
     writeFileSync(
@@ -877,23 +985,21 @@ describe('hydrationFixCommand', () => {
     expect(hydrationFixCommand(target, INCLUDE_ONLY)).toBe(
       'bun run worktree:setup',
     );
-    expect(hydrationFixCommand(target, WITH_NODE_MODULES)).toBe(
-      WORKTREE_SETUP_BUNX,
-    );
+    expect(hydrationFixCommand(target, WITH_NODE_MODULES)).toBe(SETUP_ENV_BUNX);
   });
 
   test('the node-modules rule holds whatever else is missing', () => {
     const sb = track(createSandbox());
     const target = withAlias(sb);
     expect(hydrationFixCommand(target, [problem('node-modules')])).toBe(
-      WORKTREE_SETUP_BUNX,
+      SETUP_ENV_BUNX,
     );
     expect(
       hydrationFixCommand(target, [
         problem('mise-untrusted'),
         problem('node-modules'),
       ]),
-    ).toBe(WORKTREE_SETUP_BUNX);
+    ).toBe(SETUP_ENV_BUNX);
     // …and an untrusted mise.toml alone does NOT force it: node_modules is
     // intact there, so the alias can genuinely run.
     expect(hydrationFixCommand(target, [problem('mise-untrusted')])).toBe(
@@ -904,20 +1010,14 @@ describe('hydrationFixCommand', () => {
   test('falls back to the static-safe bunx form (no tier flag)', () => {
     const sb = track(createSandbox());
     writeFileSync(join(sb.path, 'package.json'), JSON.stringify({scripts: {}}));
-    expect(hydrationFixCommand(sb.path, INCLUDE_ONLY)).toBe(
-      WORKTREE_SETUP_BUNX,
-    );
-    expect(WORKTREE_SETUP_BUNX).not.toContain('--');
+    expect(hydrationFixCommand(sb.path, INCLUDE_ONLY)).toBe(SETUP_ENV_BUNX);
+    expect(SETUP_ENV_BUNX).not.toContain('--');
   });
 
   test('a missing or unparseable package.json falls back too', () => {
     const sb = track(createSandbox());
-    expect(hydrationFixCommand(sb.path, INCLUDE_ONLY)).toBe(
-      WORKTREE_SETUP_BUNX,
-    );
+    expect(hydrationFixCommand(sb.path, INCLUDE_ONLY)).toBe(SETUP_ENV_BUNX);
     writeFileSync(join(sb.path, 'package.json'), '{not json');
-    expect(hydrationFixCommand(sb.path, INCLUDE_ONLY)).toBe(
-      WORKTREE_SETUP_BUNX,
-    );
+    expect(hydrationFixCommand(sb.path, INCLUDE_ONLY)).toBe(SETUP_ENV_BUNX);
   });
 });

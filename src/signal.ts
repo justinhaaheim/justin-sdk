@@ -28,6 +28,7 @@ import {
   formatAdvisoryWorktreeWarning,
   formatUnhydratedWorktreeBanner,
   hasBlockingProblem,
+  isLinkedWorktree,
 } from './worktree-hydration';
 
 const SIGNAL_SOURCE_PREFIX = 'signal-source:';
@@ -55,21 +56,29 @@ export async function runSignal(
   // PREFLIGHT, before any check is discovered or run. An unhydrated worktree
   // produces ~10 type/lint errors in files the change never touched, blaming the
   // wrong code — so relaying them is WORSE than printing nothing. Naming the
-  // real cause is the entire value here. Costs one `stat` in a primary
-  // checkout, where the node is inert.
+  // real cause is the entire value here.
+  //
+  // LINKED WORKTREES ONLY, gated BEFORE detection (j2n7.2 ruling): detection
+  // now probes deps + mise in primary checkouts too (for doctor), but signal
+  // in a primary checkout has always run against whatever tree exists — its
+  // failures there are real and loud, not phantom — and the preflight must
+  // stay one `stat` on signal's hot path there.
   //
   // TWO OUTCOMES, split by whether the problem can corrupt CHECK RESULTS (F7):
   //   BLOCKING (node_modules) — the checks would lie, so they must not run.
-  //   ADVISORY (.worktreeinclude, mise) — real gaps that may break a BUILD but
-  //     cannot make `signal` lie, so warn and run. Blocking on these would make
-  //     `signal` unrunnable, with no override, in a tree where it works fine.
-  const hydration = detectWorktreeHydration(projectRoot);
-  if (hydration.isLinkedWorktree && hydration.problems.length > 0) {
-    if (hasBlockingProblem(hydration)) {
-      process.stderr.write(formatUnhydratedWorktreeBanner(hydration));
-      return 1;
+  //   ADVISORY (.worktreeinclude, mise, stale deps) — real gaps that may break
+  //     a BUILD but cannot make `signal` lie, so warn and run. Blocking on
+  //     these would make `signal` unrunnable, with no override, in a tree
+  //     where it works fine.
+  if (isLinkedWorktree(projectRoot)) {
+    const hydration = detectWorktreeHydration(projectRoot);
+    if (hydration.problems.length > 0) {
+      if (hasBlockingProblem(hydration)) {
+        process.stderr.write(formatUnhydratedWorktreeBanner(hydration));
+        return 1;
+      }
+      process.stderr.write(formatAdvisoryWorktreeWarning(hydration));
     }
-    process.stderr.write(formatAdvisoryWorktreeWarning(hydration));
   }
 
   const pkgPath = resolve(projectRoot, 'package.json');

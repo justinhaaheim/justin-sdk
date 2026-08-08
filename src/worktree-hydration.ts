@@ -1,8 +1,9 @@
 /**
- * worktree-hydration.ts — detect an UNHYDRATED linked git worktree.
+ * worktree-hydration.ts — detect a STALE or UNHYDRATED environment: linked
+ * worktrees AND primary checkouts (home-base-j2n7 extends the v170 detector).
  *
- * WHY THIS IS THE HIGHEST-VALUE PIECE OF THE FEATURE. `worktree-setup` (see
- * src/worktree-setup.ts) is the FIXER; this is the GUARD. A fresh `git worktree`
+ * WHY THIS IS THE HIGHEST-VALUE PIECE OF THE FEATURE. `setup-env` (see
+ * src/setup-env.ts) is the FIXER; this is the GUARD. A fresh `git worktree`
  * contains only what git TRACKS, so every piece of gitignored build state is
  * absent — and the errors that produces name the WRONG CAUSE: ~10 eslint/tsc
  * failures in files the change never touched, CocoaPods errors pointing at the
@@ -10,27 +11,45 @@
  * untrusted. The natural response is to debug the wrong thing for twenty
  * minutes. This module converts that into a one-line instruction.
  *
+ * THE PRIMARY-CHECKOUT CASE (j2n7.2): "check out a branch that added a dep,
+ * forget to bun install, lose many minutes to the wrong error" is the same
+ * misdiagnosis in the PRIMARY checkout — so the deps probes now run there too,
+ * surfaced by doctor at severity WARN. Setup-env's execution model makes this
+ * the only session-start guard locally: the fixer never runs on a heartbeat
+ * (no hidden side effects), so the detector must speak up.
+ *
+ * WHY THE DEPS PROBE IS CONTENT-BASED, NOT MTIME-BASED (measured 2026-08-08,
+ * j2n7.2 spec amendment): a no-op `bun install` does NOT touch node_modules'
+ * mtime, so an mtime(node_modules) >= mtime(bun.lock) rule would keep warning
+ * AFTER its own prescribed fix ran — a nagging-forever loop. Instead: every
+ * declared dep has a directory, and (for semver-range specifiers only)
+ * the installed version satisfies the declared range. Both clear naturally
+ * after any successful install. `bun install --dry-run` was also ruled out —
+ * it reports the resolved graph, not disk state (byte-identical output with a
+ * package present vs deleted).
+ *
  * TWO CONSUMERS, ONE DETECTION (D3 — the integration points are doctor and
  * signal, NOT a WorktreeCreate hook):
- *   - src/doctor.ts   — the WORKTREE_HYDRATION check.
+ *   - src/doctor.ts   — the ENV_HYDRATION check (error in a linked worktree,
+ *                       warn in a primary checkout).
  *   - src/signal.ts   — a PREFLIGHT that refuses to run the checks at all,
  *                       because relaying phantom failures is worse than
- *                       printing nothing.
+ *                       printing nothing. DELIBERATELY still linked-worktree
+ *                       only (j2n7.2 ruling): signal in a primary checkout has
+ *                       always run against whatever tree exists, and its
+ *                       failures there are real and loud, not phantom.
  *
- * ZERO BEHAVIOR CHANGE OUTSIDE A LINKED WORKTREE. This runs inside every
- * `signal` invocation, so the primary-checkout path must be both free and inert:
- * `isLinkedWorktree()` short-circuits on a single `stat` there (a `.git`
- * directory can only be a main worktree), and nothing else in this module runs.
- *
- * BUDGET: < ~200ms. Only `git rev-parse`, `git check-ignore`, `stat`, and at
- * most one `mise trust --show`. No installs, no network, no mutation — this is
- * a detector, and a detector that changes state is a bug.
+ * BUDGET: < ~200ms. `git rev-parse`, `git check-ignore`, `stat`, at most one
+ * `mise trust --show`, and up to one package.json read per declared dep
+ * (~0.1ms each). No installs, no network, no mutation — this is a detector,
+ * and a detector that changes state is a bug.
  */
 
 import {execFileSync} from 'node:child_process';
-import {existsSync, readFileSync, realpathSync} from 'node:fs';
+import {existsSync, lstatSync, readFileSync, realpathSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {join, resolve} from 'node:path';
+import {satisfies, validRange} from 'semver';
 
 import {
   planWorktreeIncludeCopies,
@@ -51,8 +70,11 @@ export {isLinkedWorktree} from './setup-env';
 // ---------------------------------------------------------------------------
 
 export type HydrationProblemKind =
+  | 'dep-missing'
+  | 'dep-version'
   | 'mise-untrusted'
   | 'node-modules'
+  | 'node-modules-symlink'
   | 'worktreeinclude';
 
 export interface HydrationProblem {
@@ -69,7 +91,10 @@ export interface WorktreeHydrationStatus {
   isLinkedWorktree: boolean;
   /** Absolute primary checkout, or null when unresolvable. */
   primary: string | null;
-  /** Always empty unless `isLinkedWorktree`. */
+  /**
+   * Deps/mise problems can appear for ANY checkout; worktreeinclude problems
+   * only when `isLinkedWorktree` (they need a primary to copy from).
+   */
   problems: HydrationProblem[];
   target: string;
 }
@@ -97,9 +122,8 @@ export interface WorktreeHydrationStatus {
  * over-claiming it where it is false is what would make it disbelieved where it
  * is true.
  */
-export const BLOCKING_PROBLEM_KINDS: ReadonlySet<HydrationProblemKind> = new Set(
-  ['node-modules'],
-);
+export const BLOCKING_PROBLEM_KINDS: ReadonlySet<HydrationProblemKind> =
+  new Set(['node-modules']);
 
 /** Whether this one problem makes `signal`'s results untrustworthy. */
 export function isBlockingProblem(problem: HydrationProblem): boolean {
@@ -111,15 +135,17 @@ export function hasBlockingProblem(status: WorktreeHydrationStatus): boolean {
   return status.problems.some(isBlockingProblem);
 }
 
-/** The project-local alias, when a project defines it. */
-export const WORKTREE_SETUP_SCRIPT = 'worktree:setup';
+/** The project-local alias every base-setup project has. */
+export const SETUP_ENV_SCRIPT = 'setup-env';
+
+/** The pre-j2n7 alias, still preferred over bunx where it exists. */
+export const LEGACY_WORKTREE_SETUP_SCRIPT = 'worktree:setup';
 
 /**
  * The static-safe invocation (D1): works in a repo that has never installed the
  * SDK, which is the whole point — a fresh worktree has no node_modules.
  */
-export const WORKTREE_SETUP_BUNX =
-  'bunx github:justinhaaheim/justin-sdk worktree-setup';
+export const SETUP_ENV_BUNX = 'bunx github:justinhaaheim/justin-sdk setup-env';
 
 // ---------------------------------------------------------------------------
 // package.json probes
@@ -142,19 +168,22 @@ function readPackageJson(target: string): PackageJsonShape | null {
   }
 }
 
-function hasEntries(record: Record<string, string> | undefined): boolean {
-  return record != null && Object.keys(record).length > 0;
-}
-
 /**
- * True when node_modules is missing, i.e. when NOTHING that resolves out of
- * node_modules can be trusted to run. Deliberately its own predicate rather than
- * a reuse of BLOCKING_PROBLEM_KINDS (below): that set answers "may signal run at
- * all", this one answers "can a local command resolve" — two different
- * questions that happen to have the same answer today.
+ * True when local resolution out of node_modules cannot be trusted: the whole
+ * tree is missing, individual dep dirs are missing (the missing one may be the
+ * SDK itself), or node_modules is a symlink (breaks native modules and
+ * file:-linked packages — the audio-journal-1 failure class). Deliberately its
+ * own predicate rather than a reuse of BLOCKING_PROBLEM_KINDS (below): that
+ * set answers "may signal run at all", this one answers "can a local command
+ * resolve" — two different questions.
  */
 function nodeModulesMissing(problems: readonly HydrationProblem[]): boolean {
-  return problems.some((problem) => problem.kind === 'node-modules');
+  return problems.some(
+    (problem) =>
+      problem.kind === 'node-modules' ||
+      problem.kind === 'dep-missing' ||
+      problem.kind === 'node-modules-symlink',
+  );
 }
 
 /**
@@ -191,11 +220,14 @@ export function hydrationFixCommand(
   target: string,
   problems: readonly HydrationProblem[],
 ): string {
-  if (nodeModulesMissing(problems)) return WORKTREE_SETUP_BUNX;
+  if (nodeModulesMissing(problems)) return SETUP_ENV_BUNX;
   const pkg = readPackageJson(target);
-  return pkg?.scripts?.[WORKTREE_SETUP_SCRIPT] != null
-    ? `bun run ${WORKTREE_SETUP_SCRIPT}`
-    : WORKTREE_SETUP_BUNX;
+  if (pkg?.scripts?.[SETUP_ENV_SCRIPT] != null) {
+    return `bun run ${SETUP_ENV_SCRIPT}`;
+  }
+  return pkg?.scripts?.[LEGACY_WORKTREE_SETUP_SCRIPT] != null
+    ? `bun run ${LEGACY_WORKTREE_SETUP_SCRIPT}`
+    : SETUP_ENV_BUNX;
 }
 
 // ---------------------------------------------------------------------------
@@ -290,33 +322,118 @@ export function miseTrustStatus(target: string): MiseTrustStatus {
  */
 const MAX_LISTED_PROBLEMS = 8;
 
-function notLinked(target: string): WorktreeHydrationStatus {
-  return {
-    fixCommand: WORKTREE_SETUP_BUNX,
-    isLinkedWorktree: false,
-    primary: null,
-    problems: [],
-    target,
+/**
+ * The deps probes, shared by worktree and primary-checkout detection. All
+ * READ-ONLY, all content-based (see the module header for why mtime and
+ * `bun install --dry-run` are both ruled out):
+ *
+ *   1. node_modules absent while package.json declares dependencies — the
+ *      cause of the ~10 eslint/tsc errors in untouched files.
+ *   2. node_modules is a SYMLINK — breaks native modules, patch-package, and
+ *      file:-linked packages (the audio-journal-1 fork's guard, absorbed here
+ *      as a detection; the fix is a real install, which setup-env performs).
+ *      Further per-dep probes are skipped: contents seen through the symlink
+ *      belong to some other tree and would mislead either way.
+ *   3. a declared dep with no directory under node_modules — the
+ *      checked-out-a-branch-that-added-a-dep-and-forgot-to-install case.
+ *   4. for SEMVER-RANGE specifiers only: the installed version does not
+ *      satisfy the declared range (branch moved a pin; tree still has the old
+ *      one). Non-registry specifiers (github:, file:, link:, workspace:*) are
+ *      existence-only — validRange() rejects them. includePrerelease keeps a
+ *      legitimately-locked prerelease from warning against a stable range.
+ */
+function probeDependencyProblems(resolved: string): HydrationProblem[] {
+  const problems: HydrationProblem[] = [];
+  const pkg = readPackageJson(resolved);
+  const declared: Record<string, string> = {
+    ...pkg?.dependencies,
+    ...pkg?.devDependencies,
   };
+  const names = Object.keys(declared);
+  if (names.length === 0) return problems;
+
+  const nodeModulesPath = join(resolved, 'node_modules');
+  let nodeModulesStat: ReturnType<typeof lstatSync> | null = null;
+  try {
+    nodeModulesStat = lstatSync(nodeModulesPath);
+  } catch {
+    nodeModulesStat = null;
+  }
+
+  if (nodeModulesStat == null) {
+    problems.push({
+      detail:
+        'node_modules is absent while package.json declares dependencies — eslint, tsc and every tool that lives in node_modules will fail in files you never touched',
+      kind: 'node-modules',
+      label: 'node_modules',
+    });
+    return problems;
+  }
+
+  if (nodeModulesStat.isSymbolicLink()) {
+    problems.push({
+      detail:
+        'node_modules is a SYMLINK — native modules, patch-package, and file:-linked packages resolve against some other tree; a real install is needed',
+      kind: 'node-modules-symlink',
+      label: 'node_modules (symlink)',
+    });
+    return problems;
+  }
+
+  const missing: string[] = [];
+  const mismatched: string[] = [];
+  for (const [name, spec] of Object.entries(declared)) {
+    if (!existsSync(join(nodeModulesPath, name))) {
+      missing.push(name);
+      continue;
+    }
+    const range = validRange(spec);
+    if (range == null) continue;
+    let installedVersion: string | null = null;
+    try {
+      const depPkg = JSON.parse(
+        readFileSync(join(nodeModulesPath, name, 'package.json'), 'utf-8'),
+      ) as {version?: string};
+      installedVersion = depPkg.version ?? null;
+    } catch {
+      continue;
+    }
+    if (
+      installedVersion != null &&
+      !satisfies(installedVersion, range, {includePrerelease: true})
+    ) {
+      mismatched.push(`${name}@${installedVersion}≁${spec}`);
+    }
+  }
+
+  if (missing.length > 0) {
+    const shown = missing.slice(0, MAX_LISTED_PROBLEMS).join(', ');
+    problems.push({
+      detail: `${missing.length} declared dependenc${missing.length === 1 ? 'y has' : 'ies have'} no directory under node_modules (${shown}${missing.length > MAX_LISTED_PROBLEMS ? ', …' : ''}) — a branch likely added or renamed deps since the last install`,
+      kind: 'dep-missing',
+      label: `${missing.length} uninstalled dep${missing.length === 1 ? '' : 's'}`,
+    });
+  }
+  if (mismatched.length > 0) {
+    const shown = mismatched.slice(0, MAX_LISTED_PROBLEMS).join(', ');
+    problems.push({
+      detail: `installed versions no longer satisfy package.json ranges (${shown}${mismatched.length > MAX_LISTED_PROBLEMS ? ', …' : ''}) — the branch moved a pin since the last install`,
+      kind: 'dep-version',
+      label: `${mismatched.length} stale dep version${mismatched.length === 1 ? '' : 's'}`,
+    });
+  }
+  return problems;
 }
 
 /**
- * Decide whether `target` is an unhydrated linked worktree, and if so exactly
- * what is missing.
- *
- * The three signals are the ones that actually produce phantom failures:
- *   1. node_modules absent while package.json declares dependencies — the
- *      cause of the ~10 eslint/tsc errors in untouched files.
- *   2. a `.worktreeinclude` entry present-and-gitignored in the primary but
- *      absent here (D4: that file is the ONE copy manifest). Reuses
- *      planWorktreeIncludeCopies, whose `copy` action means precisely "should
- *      be here and is not".
- *   3. `mise.toml` present but untrusted — mise then refuses to supply the
- *      pinned toolchain, and the resulting failure blames the tools.
+ * Decide whether `target`'s environment is stale or unhydrated, and exactly
+ * what is missing. Runs for ANY checkout (j2n7.2): the deps and mise probes
+ * apply everywhere; the `.worktreeinclude` probe only inside a linked worktree
+ * (it needs a primary to copy from).
  *
  * A missing primary checkout is NOT reported as a problem: we cannot know what
  * should have been copied, and inventing a problem we can't describe is worse
- * than staying quiet.
+ * than staying quiet. A non-git directory gets the deps probes only.
  */
 export function detectWorktreeHydration(
   target: string = process.cwd(),
@@ -325,25 +442,16 @@ export function detectWorktreeHydration(
 
   // One topology resolution serves both the predicate and the primary lookup.
   const topology = resolveGitTopology(resolved);
-  if (topology == null || !topology.isLinked) return notLinked(resolved);
+  const isLinked = topology?.isLinked === true;
+  const primary = isLinked
+    ? resolvePrimaryCheckout(resolved, topology)
+    : topology == null
+      ? null
+      : resolved;
 
-  const primary = resolvePrimaryCheckout(resolved, topology);
-  const problems: HydrationProblem[] = [];
+  const problems: HydrationProblem[] = [...probeDependencyProblems(resolved)];
 
-  const pkg = readPackageJson(resolved);
-  const declaresDependencies =
-    pkg != null &&
-    (hasEntries(pkg.dependencies) || hasEntries(pkg.devDependencies));
-  if (declaresDependencies && !existsSync(join(resolved, 'node_modules'))) {
-    problems.push({
-      detail:
-        'node_modules is absent while package.json declares dependencies — eslint, tsc and every tool that lives in node_modules will fail in files you never touched',
-      kind: 'node-modules',
-      label: 'node_modules',
-    });
-  }
-
-  if (primary != null && primary !== resolved) {
+  if (isLinked && primary != null && primary !== resolved) {
     const plan = planWorktreeIncludeCopies(primary, resolved);
     for (const entry of plan.entries) {
       if (entry.action !== 'copy') continue;
@@ -366,7 +474,7 @@ export function detectWorktreeHydration(
 
   return {
     fixCommand: hydrationFixCommand(resolved, problems),
-    isLinkedWorktree: true,
+    isLinkedWorktree: isLinked,
     primary,
     problems,
     target: resolved,
