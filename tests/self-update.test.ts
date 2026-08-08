@@ -72,6 +72,16 @@ describe('pickLatestTag', () => {
     expect(pickLatestTag(['main', 'latest'])).toBeNull();
     expect(pickLatestTag([])).toBeNull();
   });
+
+  test('a DUPLICATE version (bare + v-prefixed) resolves to the v-prefixed spelling, in EITHER input order (j2n7.4)', () => {
+    // The repo really carried 0.14.0 and v0.14.0 pointing at DIFFERENT
+    // commits. Input order is gh's API ordering — not a contract. Both orders
+    // must land on the sweep-guard spelling.
+    expect(pickLatestTag(['0.14.0', 'v0.14.0'])).toBe('v0.14.0');
+    expect(pickLatestTag(['v0.14.0', '0.14.0'])).toBe('v0.14.0');
+    // A bare-only latest is still returned raw — nothing to prefer.
+    expect(pickLatestTag(['v0.14.0', '0.15.0'])).toBe('0.15.0');
+  });
 });
 
 describe('selfUpdateSdk', () => {

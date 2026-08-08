@@ -414,8 +414,11 @@ export function stepDepsHasSdk(projectRoot: string): boolean {
     return true;
   }
 
+  // v-PREFIXED, always (home-base-l9tz / v170.15): the bare spelling has
+  // 404'd (no such tag) and, worse, silently resolved a POISONED duplicate
+  // tag pointing at the wrong tree. The release convention is vX.Y.Z.
   const sdkVersion = getSdkVersion();
-  const ref = `github:justinhaaheim/justin-sdk#${sdkVersion}`;
+  const ref = `github:justinhaaheim/justin-sdk#v${sdkVersion}`;
   devDeps[SDK_PKG] = ref;
   pkg.devDependencies = devDeps;
   writeJson(pkgPath, pkg);

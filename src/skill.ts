@@ -163,12 +163,12 @@ latest main. Verified 2026-08-06:
 
   Prefer a version tag when you want determinism:
 
-      bunx github:justinhaaheim/justin-sdk#${getSdkVersion()} <cmd>
+      bunx github:justinhaaheim/justin-sdk#v${getSdkVersion()} <cmd>
 
-  TAG FORMAT: releases are tagged with BARE semver (\`0.13.0\`), not \`v0.13.0\`.
-  Older releases (<= 0.12.1) are only \`v\`-prefixed. This matters because
-  \`add\` writes the self-pin as \`github:justinhaaheim/justin-sdk#\${version}\`
-  with a bare version — against a \`v\`-tagged release that 404s.
+  TAG FORMAT: \`v\`-PREFIXED semver (\`v0.16.0\`), always (home-base-v170.15 /
+  j2n7.4). The repo carried duplicate bare tags for a while (\`0.14.0\` even
+  points at a DIFFERENT commit than \`v0.14.0\`) — never hand-type a bare
+  \`#X.Y.Z\` pin; it can silently resolve the wrong tree.
 
   Also: \`--version\` prints "unknown" when run via bunx-from-GitHub. Known bug;
   it does not mean the install failed.

@@ -82,6 +82,12 @@ function compareSdkVersions(
  * We sort ourselves rather than trusting `gh api .../tags` to return the
  * newest first: that ordering isn't guaranteed to be semver-descending, and
  * a stray `v`-prefixed tag can lexically outsort the unprefixed ones.
+ *
+ * TIES PREFER THE `v`-PREFIXED SPELLING (home-base-j2n7.4 / v170.15): the
+ * repo has carried BOTH `0.14.0` and `v0.14.0` pointing at DIFFERENT commits,
+ * so a tie broken by input order made which TREE a fleet bump landed on
+ * depend on gh's API ordering — silently. v-prefixed is the sweep-guard
+ * convention; deterministic beats lucky.
  */
 export function pickLatestTag(tagNames: string[]): string | null {
   let best: {name: string; version: [number, number, number]} | null = null;
@@ -89,6 +95,12 @@ export function pickLatestTag(tagNames: string[]): string | null {
     const version = parseSdkVersion(name);
     if (version == null) continue;
     if (best == null || compareSdkVersions(version, best.version) > 0) {
+      best = {name, version};
+    } else if (
+      compareSdkVersions(version, best.version) === 0 &&
+      name.startsWith('v') &&
+      !best.name.startsWith('v')
+    ) {
       best = {name, version};
     }
   }
