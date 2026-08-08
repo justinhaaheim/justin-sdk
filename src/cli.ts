@@ -23,6 +23,7 @@ import {runSyncRules} from './sync-rules';
 import {runTimeCheck} from './time-check';
 import {runSetupEnv} from './setup-env-command';
 import {runSignal} from './signal';
+import {runSweep} from './sweep';
 import {runUpdate} from './update';
 import {worktreeNew} from './worktree-new';
 
@@ -543,6 +544,36 @@ void yargs(hideBin(process.argv))
         target: argv.target,
       });
       process.exit(exitCode);
+    },
+  )
+  .command(
+    'sweep',
+    'Fleet propagation: for every repo under --root with a justin-sdk.config.json, update the SDK in a fresh worktree (j update), gate on the repo’s own signal + doctor, then merge --ff-only into the default branch and push. Green = fully automatic; red = worktree left standing + non-zero exit. Deterministic by contract (home-base-j2n7): failures get fixed in the SDK, never papered over here.',
+    (y) =>
+      y
+        .option('dry-run', {
+          type: 'boolean',
+          describe: 'List discovered repos and planned actions; change nothing',
+          default: false,
+        })
+        .option('repo', {
+          type: 'string',
+          array: true,
+          describe:
+            'Explicit repo path(s) — overrides discovery entirely (use for a single-repo run or for repos outside --root, e.g. a Dropbox-remote repo)',
+        })
+        .option('root', {
+          type: 'string',
+          describe: 'Discovery root (default ~/Dev)',
+        }),
+    (argv) => {
+      process.exit(
+        runSweep({
+          dryRun: argv['dry-run'],
+          repos: argv.repo,
+          root: argv.root,
+        }),
+      );
     },
   )
   .command(
