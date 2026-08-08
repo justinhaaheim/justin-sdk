@@ -41,7 +41,7 @@ import {homedir} from 'node:os';
 import {basename, join, resolve} from 'node:path';
 
 import {getSdkVersion} from './setup-helpers';
-import {setupEnv} from './setup-env';
+import {detectPackageManager, setupEnv} from './setup-env';
 
 export const SWEEP_BRANCH = 'worktree-sdk-sweep';
 export const SWEEP_WORKTREE_SEGMENTS = [
@@ -305,10 +305,27 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
   // fleet, and 0.6.1's silently failed to move the pin at all. Pin first,
   // then run the NEW code with --no-self-update — no gh tag query, no old
   // code trusted, fleet version === orchestrator version by construction.
+  // The pin is written with the repo's OWN package manager (third live-sweep
+  // finding: raycast-j-recent is an npm repo — Raycast tooling — and `bun
+  // add` there migrated package-lock.json and died in a resolver loop).
+  // Mixing managers is exactly the class of nondeterminism this script
+  // exists to avoid.
   const pin = `github:justinhaaheim/justin-sdk#v${getSdkVersion()}`;
-  const pinAdd = run(['bun', 'add', '-d', pin], worktreePath);
+  const {packageManager} = detectPackageManager(worktreePath);
+  const PIN_ARGV: Record<string, string[]> = {
+    bun: ['bun', 'add', '-d', pin],
+    npm: ['npm', 'install', '--save-dev', pin],
+    yarn: ['yarn', 'add', '--dev', pin],
+  };
+  const pinArgv = PIN_ARGV[packageManager ?? 'bun'];
+  if (pinArgv == null) {
+    return fail(`no pin recipe for package manager ${String(packageManager)}`);
+  }
+  const pinAdd = run(pinArgv, worktreePath);
   if (pinAdd.exitCode !== 0) {
-    return fail(`bun add -d ${pin} failed — worktree left for inspection`);
+    return fail(
+      `${pinArgv.slice(0, 2).join(' ')} of ${pin} failed — worktree left for inspection`,
+    );
   }
   const update = run(
     [
