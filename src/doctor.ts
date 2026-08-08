@@ -1228,7 +1228,16 @@ function makeHuskyChecks(projectRoot: string): CheckNode[] {
             };
           }
           const mode = statSync(hookPath).mode;
-          if ((mode & 0o111) === 0) {
+          // Husky v9 layout: core.hooksPath points at .husky/_, whose shim
+          // SOURCES the user file — the exec bit on .husky/pre-commit is
+          // irrelevant there (verified live: mode 644 + working hooks in
+          // home-base). Only the legacy layout (no shim dir) executes the
+          // user file directly and needs the bit. Warning on the v9 layout
+          // would print at every session start, forever, about nothing.
+          const hasV9Shim = existsSync(
+            resolve(projectRoot, '.husky/_/pre-commit'),
+          );
+          if ((mode & 0o111) === 0 && !hasV9Shim) {
             return {
               fix: 'Run: chmod +x .husky/pre-commit',
               fixCommand: 'chmod +x .husky/pre-commit',
@@ -1270,6 +1279,28 @@ function makeHuskyChecks(projectRoot: string): CheckNode[] {
       check: {
         label: 'LINT_STAGED_CONFIG',
         fn: (): CheckResult => {
+          // lint-staged reads config from a package.json key OR a standalone
+          // config file — home-base uses lint-staged.config.mjs (it filters
+          // symlinks/submodule gitlinks, which a JSON key cannot). Accept the
+          // documented file names, not just the key.
+          const CONFIG_FILES = [
+            '.lintstagedrc',
+            '.lintstagedrc.json',
+            '.lintstagedrc.yaml',
+            '.lintstagedrc.yml',
+            '.lintstagedrc.mjs',
+            '.lintstagedrc.cjs',
+            '.lintstagedrc.js',
+            'lint-staged.config.mjs',
+            'lint-staged.config.cjs',
+            'lint-staged.config.js',
+          ];
+          const configFile = CONFIG_FILES.find((name) =>
+            existsSync(resolve(projectRoot, name)),
+          );
+          if (configFile != null) {
+            return {message: configFile, pass: true};
+          }
           const pkgPath = resolve(projectRoot, 'package.json');
           if (!existsSync(pkgPath)) {
             return {
@@ -1288,7 +1319,8 @@ function makeHuskyChecks(projectRoot: string): CheckNode[] {
               return {
                 fix: `Run: ${FIX_CMD}`,
                 fixCommand: FIX_CMD,
-                message: 'package.json missing "lint-staged" config',
+                message:
+                  'no lint-staged config (package.json key or config file)',
                 pass: false,
               };
             }
