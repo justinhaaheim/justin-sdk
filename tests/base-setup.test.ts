@@ -105,7 +105,10 @@ describe('base-setup', () => {
 
     expect(pkg.scripts?.signal).toContain('bunx @justinhaaheim/justin-sdk');
     expect(pkg.scripts?.doctor).toContain('bunx @justinhaaheim/justin-sdk');
-    expect(pkg.scripts?.['setup-env']).toContain('scripts/setup-env.ts');
+    // j2n7: the alias invokes the SDK command, not a committed copy.
+    expect(pkg.scripts?.['setup-env']).toBe(
+      'bunx @justinhaaheim/justin-sdk setup-env',
+    );
   });
 
   test('overwrites stale SDK scripts that point at node_modules path', async () => {
@@ -116,7 +119,8 @@ describe('base-setup', () => {
           scripts: {
             signal:
               'bun node_modules/@justinhaaheim/justin-sdk/src/cli.ts signal --quiet',
-            doctor: 'bun node_modules/@justinhaaheim/justin-sdk/src/cli.ts doctor',
+            doctor:
+              'bun node_modules/@justinhaaheim/justin-sdk/src/cli.ts doctor',
           },
         },
       }),
@@ -126,7 +130,9 @@ describe('base-setup', () => {
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
-    expect(pkg.scripts?.signal).toBe('bunx @justinhaaheim/justin-sdk signal --quiet');
+    expect(pkg.scripts?.signal).toBe(
+      'bunx @justinhaaheim/justin-sdk signal --quiet',
+    );
     expect(pkg.scripts?.doctor).toBe('bunx @justinhaaheim/justin-sdk doctor');
   });
 
@@ -148,57 +154,59 @@ describe('base-setup', () => {
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
     // Existing signal-source entries preserved
-    expect(pkg.scripts?.['signal-source:OXLINT']).toBe('oxlint --deny-warnings');
+    expect(pkg.scripts?.['signal-source:OXLINT']).toBe(
+      'oxlint --deny-warnings',
+    );
     expect(pkg.scripts?.['signal-source:TS']).toBe('tsc --noEmit --strict');
     // Defaults NOT added (because some signal-source entries existed)
     expect(pkg.scripts?.['signal-source:LINT']).toBeUndefined();
   });
 
-  test('copies scripts/setup-env.ts from template', async () => {
+  test('does NOT create scripts/setup-env.ts (retired j2n7 — the SDK command supersedes the copy)', async () => {
     const sb = track(createProjectSandbox());
     await runBaseSetup({projectRoot: sb.path, quiet: true});
 
-    expect(existsSync(join(sb.path, 'scripts/setup-env.ts'))).toBe(true);
-    const content = readFileSync(join(sb.path, 'scripts/setup-env.ts'), 'utf-8');
-    expect(content).toContain('setup-env');
+    expect(existsSync(join(sb.path, 'scripts/setup-env.ts'))).toBe(false);
   });
 
-  test('does NOT overwrite hand-modified setup-env.ts without --force', async () => {
+  test('DELETES an unmodified template copy (fleet migration path)', async () => {
+    const sb = track(createProjectSandbox());
+    // Simulate a pre-j2n7 project: the committed copy matches the retired
+    // template byte-for-byte (the template stays on disk for recognition).
+    const templatePath = join(
+      import.meta.dirname,
+      '..',
+      'templates',
+      'scripts',
+      'setup-env.ts',
+    );
+    sb.writeFile('scripts/setup-env.ts', readFileSync(templatePath, 'utf-8'));
+
+    await runBaseSetup({projectRoot: sb.path, quiet: true});
+
+    expect(existsSync(join(sb.path, 'scripts/setup-env.ts'))).toBe(false);
+  });
+
+  test('KEEPS a hand-modified setup-env.ts without --force (flag, never silently delete)', async () => {
     const sb = track(createProjectSandbox());
     sb.writeFile('scripts/setup-env.ts', '// custom setup\n');
 
     await runBaseSetup({projectRoot: sb.path, quiet: true});
 
-    const content = readFileSync(join(sb.path, 'scripts/setup-env.ts'), 'utf-8');
+    const content = readFileSync(
+      join(sb.path, 'scripts/setup-env.ts'),
+      'utf-8',
+    );
     expect(content).toBe('// custom setup\n');
   });
 
-  test('--force overwrites hand-modified setup-env.ts', async () => {
+  test('--force deletes a hand-modified setup-env.ts', async () => {
     const sb = track(createProjectSandbox());
     sb.writeFile('scripts/setup-env.ts', '// custom setup\n');
 
     await runBaseSetup({projectRoot: sb.path, quiet: true, force: true});
 
-    const content = readFileSync(join(sb.path, 'scripts/setup-env.ts'), 'utf-8');
-    expect(content).not.toBe('// custom setup\n');
-    expect(content).toContain('setup-env');
-  });
-
-  test('does NOT overwrite setup-env.ts that matches current template (idempotent)', async () => {
-    const sb = track(createProjectSandbox());
-    // First run installs the template
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
-    const firstContent = readFileSync(
-      join(sb.path, 'scripts/setup-env.ts'),
-      'utf-8',
-    );
-    // Second run should see hash match and noop (would warn on hand-modified)
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
-    const secondContent = readFileSync(
-      join(sb.path, 'scripts/setup-env.ts'),
-      'utf-8',
-    );
-    expect(secondContent).toBe(firstContent);
+    expect(existsSync(join(sb.path, 'scripts/setup-env.ts'))).toBe(false);
   });
 
   test('adds @justinhaaheim/justin-sdk to devDependencies when missing', async () => {
@@ -258,10 +266,18 @@ describe('base-setup', () => {
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
     expect(pkg.scripts?.doctor).toBe('bunx @justinhaaheim/justin-sdk doctor');
-    expect(pkg.scripts?.['doctor:fix']).toBe('bunx @justinhaaheim/justin-sdk doctor --fix');
-    expect(pkg.scripts?.signal).toBe('bunx @justinhaaheim/justin-sdk signal --quiet');
-    expect(pkg.scripts?.['signal:verbose']).toBe('bunx @justinhaaheim/justin-sdk signal');
-    expect(pkg.scripts?.['signal:serial']).toBe('bunx @justinhaaheim/justin-sdk signal --serial');
+    expect(pkg.scripts?.['doctor:fix']).toBe(
+      'bunx @justinhaaheim/justin-sdk doctor --fix',
+    );
+    expect(pkg.scripts?.signal).toBe(
+      'bunx @justinhaaheim/justin-sdk signal --quiet',
+    );
+    expect(pkg.scripts?.['signal:verbose']).toBe(
+      'bunx @justinhaaheim/justin-sdk signal',
+    );
+    expect(pkg.scripts?.['signal:serial']).toBe(
+      'bunx @justinhaaheim/justin-sdk signal --serial',
+    );
   });
 
   test('preserves custom script values that do not match a stale shape', async () => {
@@ -336,9 +352,44 @@ describe('base-setup', () => {
     expect(Array.isArray(settings.sandbox?.excludedCommands)).toBe(true);
     expect(Array.isArray(settings.hooks?.SessionStart)).toBe(true);
 
-    // SessionStart hook should reference setup-env.ts
+    // The j2n7 hook line: remote runs setup-env, local runs read-only doctor.
     const serialized = JSON.stringify(settings.hooks?.SessionStart);
-    expect(serialized).toContain('scripts/setup-env.ts');
+    expect(serialized).toContain('justin-sdk setup-env');
+    expect(serialized).toContain('doctor --quiet');
+    expect(serialized).not.toContain('scripts/setup-env.ts');
+  });
+
+  test('MIGRATES a pre-j2n7 SessionStart hook that ran the committed copy', async () => {
+    const sb = track(createProjectSandbox());
+    sb.writeFile(
+      '.claude/settings.json',
+      JSON.stringify({
+        hooks: {
+          SessionStart: [
+            {
+              hooks: [
+                {
+                  type: 'command',
+                  command: 'bun run "$CLAUDE_PROJECT_DIR/scripts/setup-env.ts"',
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+
+    await runBaseSetup({projectRoot: sb.path, quiet: true});
+
+    const settings = JSON.parse(
+      readFileSync(join(sb.path, '.claude/settings.json'), 'utf-8'),
+    ) as {hooks?: {SessionStart?: unknown[]}};
+    const serialized = JSON.stringify(settings.hooks?.SessionStart);
+    // The old entry is REPLACED, not accumulated: the copy it invoked is being
+    // deleted, and a hook pointing at a missing file errors at every session.
+    expect(serialized).not.toContain('scripts/setup-env.ts');
+    expect(serialized).toContain('justin-sdk setup-env');
+    expect(settings.hooks?.SessionStart).toHaveLength(1);
   });
 
   test('preserves existing .claude/settings.json contents', async () => {

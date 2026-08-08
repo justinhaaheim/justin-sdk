@@ -5,10 +5,14 @@
  * Installs:
  *  - justin-sdk.config.json at project root (tracks SDK version + components)
  *  - package.json scripts (signal/doctor/setup-env using bunx @justinhaaheim/justin-sdk)
- *  - scripts/setup-env.ts (copied from templates/)
  *  - .gitignore entries (tmp/, dynamic-version.local.*, .beads/.br_recovery/)
  *  - .claude/settings.json with sandbox.excludedCommands scaffolding
- *    and SessionStart hook for setup-env.ts
+ *    and the j2n7 SessionStart hook line (remote: setup-env bootstrap;
+ *    local: read-only doctor --quiet)
+ *
+ * Removes (home-base-j2n7): the committed scripts/setup-env.ts copy, which
+ * the SDK `setup-env` command supersedes — deleted when hash-recognized as an
+ * unmodified template, flagged when hand-modified.
  *
  * Idempotent: every step detects existing state and only writes when
  * something actually needs to change.
@@ -17,7 +21,7 @@
  */
 
 import {createHash} from 'crypto';
-import {cpSync, existsSync, readFileSync, writeFileSync} from 'fs';
+import {existsSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {basename, resolve} from 'path';
 
 import {
@@ -47,7 +51,7 @@ const DEFAULT_SIGNAL_SOURCE_SCRIPTS: Record<string, string> = {
 };
 
 const SDK_SCRIPTS: Record<string, string> = {
-  'setup-env': 'bun scripts/setup-env.ts',
+  'setup-env': 'bunx @justinhaaheim/justin-sdk setup-env',
   signal: 'bunx @justinhaaheim/justin-sdk signal --quiet',
   'signal:verbose': 'bunx @justinhaaheim/justin-sdk signal',
   'signal:serial': 'bunx @justinhaaheim/justin-sdk signal --serial',
@@ -55,6 +59,24 @@ const SDK_SCRIPTS: Record<string, string> = {
   'doctor:fix': 'bunx @justinhaaheim/justin-sdk doctor --fix',
   fix: 'bunx @justinhaaheim/justin-sdk fix',
 };
+
+/**
+ * The one committed SessionStart hook line (home-base-j2n7 decision). Two
+ * worlds, irreconcilable in a single bare invocation, hence the shell branch:
+ *
+ *  - REMOTE (fresh container, no node_modules): only the `github:` form can
+ *    resolve — the scoped name is deliberately unpublished (home-base-2qhw),
+ *    so a scoped bunx would 404 before the tree is installed. setup-env then
+ *    bootstraps mise/PATH, hydrates, and runs doctor --fix --yes.
+ *  - LOCAL session start: READ-ONLY by ruling (write actions need a trigger,
+ *    not a heartbeat) — so it runs `doctor --quiet`, which carries the
+ *    ENV_HYDRATION staleness warning. The scoped form resolves via the
+ *    project's own devDep pin (fast, offline, pinned); `|| true` keeps a
+ *    fresh clone (nothing resolvable yet) from greeting every session with a
+ *    hard hook error.
+ */
+export const SESSION_START_HOOK_COMMAND =
+  'if [ "$CLAUDE_CODE_REMOTE" = "true" ]; then bunx github:justinhaaheim/justin-sdk setup-env; else bunx @justinhaaheim/justin-sdk doctor --quiet || true; fi';
 
 /**
  * Create justin-sdk.config.json with sensible defaults if missing.
@@ -190,32 +212,50 @@ function sha256(content: string): string {
 }
 
 /**
- * Known hashes of older versions of the setup-env.ts template. If the
- * project's current file matches one of these, it's safe to silently
- * overwrite — we know the user didn't hand-modify it.
- *
- * Add to this list each time the template ships in a new SDK release,
- * by hashing the previous version's content with sha256.
+ * Known hashes of retired versions of the setup-env.ts template. A committed
+ * scripts/setup-env.ts matching one of these (or the final template still on
+ * disk under templates/) is a known SDK artifact with no hand modifications —
+ * safe to DELETE during migration to the SDK `setup-env` command.
  */
 const KNOWN_OLD_SETUP_ENV_HASHES: ReadonlySet<string> = new Set<string>([
-  // (none yet — first hashed release of this list is 0.3.2)
+  // Fleet variants hashed 2026-08-08 (home-base-j2n7.3 audit). Every one is a
+  // stale template generation or a pure prettier reformat — no unique logic.
+  // audio-journal-1's fork is DELIBERATELY absent: it carried a real
+  // symlinked-node_modules guard (now an ENV_HYDRATION detection), and its
+  // deletion should be a reviewed step, not a silent one.
+  'ed18903d547e32f2dff50e71c15a3f8c54ac2ad9213feaf8c9c88e780089e832', // home-base (pre-template generation, hardcoded initSubmodules)
+  '1d0fae9d92c29ec8e295752d0d098f73dac3a9ce04b81d14258d309c25e1a958', // imessage-exporter (missing JSDK_SKIP_SETUP_ENV)
+  '397b54e4f9eb45d0895215df06417563394b6c35f291ded03d2320adf08bcbd1', // browser-automation-central (pre-miseTrust)
+  '68e0bd4e027d9b71c4dff6f9da17a9fec40394ab5770f107255a53228a9d5324', // apple-reminders-mcp (pre-miseTrust variant)
+  '57849540e200828a512e1f98e704fe6de6700b7f8c0659d45585ba5ed41b2135', // raycast-j-recent (pure prettier reformat of current template)
 ]);
 
 /**
- * Copy the setup-env.ts template into scripts/setup-env.ts.
+ * REMOVE the committed scripts/setup-env.ts (home-base-j2n7): the copied
+ * template is superseded by the SDK `setup-env` command — the per-project
+ * surface is now the SessionStart hook line + the `setup-env` package.json
+ * alias, both emitted by this component.
  *
  * Behavior:
- *  - If file is missing → copy template.
- *  - If file matches current template (by hash) → noop.
- *  - If file matches a known-old template hash → silently overwrite.
- *  - If file is hand-modified (no hash match) → warn and skip, unless
- *    `force: true` is passed in which case overwrite.
+ *  - File absent → nothing to do (the desired end state).
+ *  - File matches the final template (kept on disk under templates/ exactly
+ *    for this recognition) or a known-old hash → delete it.
+ *  - Hand-modified (no hash match) → warn and keep, unless `force: true`.
+ *    Project-specific logic belongs in setup-env:<LABEL> package.json
+ *    scripts, which the SDK command runs in declaration order.
  */
 export function stepSetupEnvScript(
   projectRoot: string,
   force = false,
 ): boolean {
   const targetPath = resolve(projectRoot, 'scripts', 'setup-env.ts');
+  if (!existsSync(targetPath)) {
+    success(
+      'No committed scripts/setup-env.ts (superseded by the SDK setup-env command)',
+    );
+    return true;
+  }
+
   const templatePath = resolve(
     import.meta.dirname,
     '..',
@@ -223,43 +263,30 @@ export function stepSetupEnvScript(
     'scripts',
     'setup-env.ts',
   );
-  if (!existsSync(templatePath)) {
-    fail(`setup-env.ts template not found at ${templatePath}`);
-    return false;
-  }
-
-  ensureDir(resolve(projectRoot, 'scripts'));
-
-  if (!existsSync(targetPath)) {
-    cpSync(templatePath, targetPath);
-    success('Copied scripts/setup-env.ts from template');
-    return true;
-  }
-
-  const currentTemplateHash = sha256(readFileSync(templatePath, 'utf-8'));
   const existingHash = sha256(readFileSync(targetPath, 'utf-8'));
+  const matchesTemplate =
+    existsSync(templatePath) &&
+    existingHash === sha256(readFileSync(templatePath, 'utf-8'));
 
-  if (existingHash === currentTemplateHash) {
-    success('scripts/setup-env.ts matches current template');
-    return true;
-  }
-
-  if (KNOWN_OLD_SETUP_ENV_HASHES.has(existingHash)) {
-    cpSync(templatePath, targetPath);
-    success('Upgraded scripts/setup-env.ts from a known older template');
+  if (matchesTemplate || KNOWN_OLD_SETUP_ENV_HASHES.has(existingHash)) {
+    rmSync(targetPath);
+    success(
+      'Deleted scripts/setup-env.ts (unmodified SDK template — superseded by the SDK setup-env command)',
+    );
     return true;
   }
 
   if (force) {
-    cpSync(templatePath, targetPath);
-    success('Overwrote scripts/setup-env.ts (--force)');
+    rmSync(targetPath);
+    success('Deleted scripts/setup-env.ts (--force)');
     return true;
   }
 
   warn(
-    'scripts/setup-env.ts differs from SDK template (hand-modified or unrecognized version). ' +
-      'Re-run with --force to overwrite. Project-specific setup logic ' +
-      'should live in a setup-env:* sub-script in package.json instead.',
+    'scripts/setup-env.ts differs from every known SDK template (hand-modified). ' +
+      'Move project-specific logic into setup-env:<LABEL> package.json scripts ' +
+      '(run by `bunx @justinhaaheim/justin-sdk setup-env` in declaration order), ' +
+      'then delete the file or re-run with --force.',
   );
   return true;
 }
@@ -319,19 +346,25 @@ export function stepClaudeSettings(projectRoot: string): boolean {
   }
   settings.sandbox = sandbox;
 
-  // Ensure SessionStart hook runs setup-env.ts
+  // Ensure the SessionStart hook is the j2n7 command line — and MIGRATE any
+  // pre-j2n7 entry that ran the committed scripts/setup-env.ts copy, which is
+  // being deleted by stepSetupEnvScript (an un-migrated hook would error at
+  // every session start pointing at a file that no longer exists).
   const hooks = ((settings.hooks as Record<string, unknown> | undefined) ??
     {}) as Record<string, unknown>;
-  const setupCommand = 'bun run "$CLAUDE_PROJECT_DIR/scripts/setup-env.ts"';
   const sessionStart = (hooks.SessionStart as unknown[] | undefined) ?? [];
-  const hasSetupHook = JSON.stringify(sessionStart).includes(
-    'scripts/setup-env.ts',
+  const hasCurrentHook = JSON.stringify(sessionStart).includes(
+    'justin-sdk setup-env',
   );
-  if (!hasSetupHook) {
-    sessionStart.push({
-      hooks: [{type: 'command', command: setupCommand}],
+  if (!hasCurrentHook) {
+    // Drop every entry that references the retired committed copy.
+    const migrated = sessionStart.filter(
+      (entry) => !JSON.stringify(entry).includes('scripts/setup-env.ts'),
+    );
+    migrated.push({
+      hooks: [{type: 'command', command: SESSION_START_HOOK_COMMAND}],
     });
-    hooks.SessionStart = sessionStart;
+    hooks.SessionStart = migrated;
     modified = true;
   }
   settings.hooks = hooks;
@@ -407,8 +440,8 @@ export interface BaseSetupOptions {
   /** Extra components to register in justin-sdk.config.json (e.g., ['beads-setup']) */
   extraComponents?: string[];
   /**
-   * Force-overwrite files (currently only affects scripts/setup-env.ts when
-   * it differs from the SDK template and isn't a known-old template hash).
+   * Force-DELETE a hand-modified scripts/setup-env.ts (one whose hash matches
+   * no known SDK template). Hash-recognized copies are deleted without it.
    */
   force?: boolean;
 }
@@ -443,7 +476,7 @@ export async function runBaseSetup(
   stepHeader('3. package.json scripts');
   if (!stepPackageScripts(projectRoot)) return 1;
 
-  stepHeader('4. scripts/setup-env.ts');
+  stepHeader('4. scripts/setup-env.ts (retired — remove committed copy)');
   if (!stepSetupEnvScript(projectRoot, force)) return 1;
 
   stepHeader('5. .gitignore');
