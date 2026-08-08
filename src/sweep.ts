@@ -327,12 +327,17 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
       `${pinArgv.slice(0, 2).join(' ')} of ${pin} failed — worktree left for inspection`,
     );
   }
+  // --allow-dirty because the tree IS dirty by design at this point: the
+  // sweep's own pin bump is sitting uncommitted (fourth live-sweep finding —
+  // update's dirty guard correctly refused). The sweep makes the one commit
+  // itself after the gates.
   const update = run(
     [
       'bunx',
       '@justinhaaheim/justin-sdk',
       'update',
       '--no-self-update',
+      '--allow-dirty',
       '--quiet',
     ],
     worktreePath,
