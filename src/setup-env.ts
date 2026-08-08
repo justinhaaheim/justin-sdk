@@ -1,8 +1,13 @@
 #!/usr/bin/env bun
 
 /**
- * worktree-setup / worktree-new — hydrate a fresh git worktree's gitignored
- * build state, and create worktrees the way Claude Code does.
+ * setup-env — hydrate a checkout's gitignored build state, for fresh git
+ * worktrees, fresh clones, and remote (Claude Code web) environments.
+ *
+ * Supersedes the copied `scripts/setup-env.ts` template (home-base-j2n7): the
+ * 209-line per-project copy could not stay in sync even in principle (a repo
+ * with a different prettier config rewrites it on contact), so the logic lives
+ * HERE and projects carry only a hook line + a package.json alias.
  *
  * WHY: a `git worktree` checkout contains only what git TRACKS. Every piece of
  * gitignored build state (node_modules/, generated version files, .env.local,
@@ -13,18 +18,27 @@
  * because the new mise.toml path is untrusted. The natural response is to debug
  * the wrong thing for twenty minutes.
  *
- * STATIC-SAFE (D1). Both commands must work as
- * `bunx github:justinhaaheim/justin-sdk worktree-setup` in a repo that has
- * never installed the SDK — because a fresh worktree has no node_modules, so a
- * project-local `bun run worktree:setup` alias cannot possibly work there.
+ * EXECUTION MODEL (home-base-j2n7 decision, Justin 2026-08-08):
+ *   - LOCAL: runs at worktree creation (post-checkout preamble) and on manual
+ *     invocation ONLY — never on a session-start heartbeat. Write actions need
+ *     a trigger, not a heartbeat; no hidden side effects. Local session start
+ *     gets the read-only ENV_HYDRATION doctor check instead (worktree-hydration.ts).
+ *   - REMOTE (CLAUDE_CODE_REMOTE=true): runs at SessionStart via the hook
+ *     line, and additionally bootstraps the environment (mise install, PATH
+ *     wiring via CLAUDE_ENV_FILE) then delegates to `doctor --fix --yes`.
+ *
+ * STATIC-SAFE (D1). Must work as
+ * `bunx github:justinhaaheim/justin-sdk setup-env` in a repo that has never
+ * installed the SDK — because a fresh worktree has no node_modules, so a
+ * project-local `bun run setup-env` alias cannot possibly work there.
  * Consequences, both load-bearing:
  *   - nothing here may resolve an import from the consumer project, and nothing
  *     may read justin-sdk.config.json. Only node builtins, the SDK's own
  *     dependencies (`ignore`), and SDK-local modules.
  *   - all human-readable report output goes to STDERR. stdout is machine
- *     output only: EMPTY for worktree-setup, and exactly one line (the
- *     absolute worktree path) for worktree-new, which the `wt` zsh function
- *     captures to `cd`.
+ *     output only: EMPTY for setup-env, and exactly one line (the absolute
+ *     worktree path) for worktree-new (src/worktree-new.ts), which the `wt`
+ *     zsh function captures to `cd`.
  *
  * SUBMODULES ARE PART OF "WHAT GIT TRACKS", BUT ONLY AS A POINTER. A fresh
  * worktree gets an EMPTY directory for every submodule, and when a submodule
@@ -41,17 +55,24 @@
  * no second `copyFromPrimary` config key. Matching uses the `ignore` package
  * (the parser eslint and prettier use internally), never hand-rolled globbing.
  *
- * TIERS (D5). The steps differ by ORDERS OF MAGNITUDE in cost, so projects
- * declare their own hydration scripts as `worktree-source:<tier>:<LABEL>`
- * package.json scripts — the same discovery convention as `signal-source:`
- * (src/signal.ts) and `fix-source:` (src/fix.ts), so there is no new config
- * file or key. Tiers are cumulative (lint ⊂ js ⊂ native), default `js`, and
- * run in package.json DECLARATION order, serially. `--lint` must never
- * execute a `native:` script.
+ * PROJECT SCRIPTS — `setup-env:<LABEL>`, FLAT, NO TIERS (j2n7 supersedes D5).
+ * Same discovery convention as `signal-source:` (src/signal.ts) and
+ * `fix-source:` (src/fix.ts); run serially in package.json DECLARATION order
+ * (hydration steps have real generate-then-consume ordering, unlike
+ * fix-source's label sort). Scripts are SELF-GUARDING: environment awareness
+ * (remote-only installs, idempotence) lives in the script, not in engine
+ * modes — reference: apple-reminders-mcp's setup-env:swift / setup-env:sqlite,
+ * which no-op in milliseconds on macOS. The v170 tier system (lint/js/native)
+ * was removed after a fleet autopsy found ZERO genuinely-needed tiered
+ * scripts — the only adopter's three were convention-filling, each redundant
+ * with an existing mechanism (expo prebuild auto-installs pods; every build
+ * path already runs prebuild; `prepare` regenerates the dynamic version on
+ * every install). See home-base-j2n7's ruled-out comment before reintroducing
+ * a cost filter here.
  *
  * NOT built on check-runner, deliberately: check-runner has no per-check cwd
  * (it hardcodes `process.cwd()`), and its summary prints to stdout — both
- * disqualifying here, where every step runs with cwd = the TARGET worktree and
+ * disqualifying here, where every step runs with cwd = the TARGET tree and
  * stdout must stay clean.
  */
 
@@ -79,14 +100,15 @@ import ignore from 'ignore';
 // ---------------------------------------------------------------------------
 
 /** Cost-ordered and cumulative: lint ⊂ js ⊂ native. */
-export const TIER_ORDER = ['lint', 'js', 'native'] as const;
-export type Tier = (typeof TIER_ORDER)[number];
-
-/** `--js` is the floor at which `bun run signal` means anything. */
-export const DEFAULT_TIER: Tier = 'js';
-
 /** package.json script prefix, mirroring `signal-source:` / `fix-source:`. */
-export const WORKTREE_SOURCE_PREFIX = 'worktree-source:';
+export const SETUP_ENV_SOURCE_PREFIX = 'setup-env:';
+
+/**
+ * The v170-era tiered prefix. Discovery still RECOGNIZES it — but only to
+ * skip it with a rename hint, so a project carrying stale scripts gets one
+ * clear line instead of silent non-execution.
+ */
+export const LEGACY_WORKTREE_SOURCE_PREFIX = 'worktree-source:';
 
 /** Claude Code's own convention (D2) — byte-identical on purpose. */
 export const WORKTREE_DIR_SEGMENTS = ['.claude', 'worktrees'] as const;
@@ -101,16 +123,6 @@ export const GITMODULES_FILE = '.gitmodules';
 /** No slashes: a slug names a directory leaf AND a branch leaf (D7). */
 export const SLUG_PATTERN = /^[A-Za-z0-9._-]+$/;
 
-/**
- * Slugs of nothing but dots — `.` and `..` — which SLUG_PATTERN happily accepts
- * because `.` is in its character class (finding F2). They are not names, they
- * are directory references: `..` makes the worktree path collapse to
- * `<primary>/.claude`, so `worktree-new ..` in a repo with no `.claude` yet
- * would attempt `git worktree add` AT the `.claude` directory itself. Every
- * other pure-dot form is equally meaningless, hence `+` not a literal pair.
- */
-const PURE_DOT_SLUG_PATTERN = /^\.+$/;
-
 export type StepStatus = 'done' | 'skipped' | 'failed';
 
 export interface StepReport {
@@ -121,21 +133,18 @@ export interface StepReport {
   detail: string;
 }
 
-export interface WorktreeSetupOptions {
+export interface SetupEnvOptions {
   dryRun?: boolean;
   /** Directory to hydrate. Defaults to cwd. */
   target?: string;
-  /** Defaults to DEFAULT_TIER. */
-  tier?: Tier;
 }
 
-export interface WorktreeSetupResult {
+export interface SetupEnvResult {
   exitCode: number;
   /** Absolute path of the primary checkout, or null if unresolvable. */
   primary: string | null;
   steps: StepReport[];
   target: string;
-  tier: Tier;
 }
 
 export type PackageManager = 'bun' | 'npm' | 'yarn';
@@ -144,18 +153,19 @@ export type PackageManager = 'bun' | 'npm' | 'yarn';
 // stderr reporting
 // ---------------------------------------------------------------------------
 
-const RESET = '\x1b[0m';
+export const RESET = '\x1b[0m';
 const GREEN = '\x1b[32m';
-const RED = '\x1b[31m';
-const DIM = '\x1b[2m';
-const BOLD = '\x1b[1m';
-const YELLOW = '\x1b[33m';
+export const RED = '\x1b[31m';
+export const DIM = '\x1b[2m';
+export const BOLD = '\x1b[1m';
+export const YELLOW = '\x1b[33m';
 
 /**
- * Every human-readable line in this module goes through here. Nothing in this
- * file may use console.log — stdout is reserved for machine output (D1).
+ * Every human-readable line in this module (and worktree-new.ts, which shares
+ * the stdout contract) goes through here. Nothing here may use console.log —
+ * stdout is reserved for machine output (D1).
  */
-function report(line: string): void {
+export function report(line: string): void {
   process.stderr.write(`${line}\n`);
 }
 
@@ -169,42 +179,6 @@ function reportStep(step: StepReport): void {
   report(
     `  ${STATUS_ICON[step.status]} ${step.label} ${DIM}${step.detail}${RESET}`,
   );
-}
-
-// ---------------------------------------------------------------------------
-// Tier resolution
-// ---------------------------------------------------------------------------
-
-export interface TierFlags {
-  js?: boolean;
-  lint?: boolean;
-  native?: boolean;
-}
-
-export type TierResolution = {tier: Tier} | {error: string};
-
-/**
- * Resolve the mutually-exclusive tier flags to a single tier. Returns an error
- * (rather than throwing or silently picking) when more than one is passed —
- * `--lint --native` is an ambiguous request, not a cheap one.
- */
-export function resolveTier(flags: TierFlags): TierResolution {
-  const given = TIER_ORDER.filter((tier) => flags[tier] === true);
-  if (given.length > 1) {
-    return {
-      error: `${given.map((t) => `--${t}`).join(' and ')} are mutually exclusive — pass at most one tier flag`,
-    };
-  }
-  return {tier: given[0] ?? DEFAULT_TIER};
-}
-
-/** True if `scriptTier` runs under `selected`, given cumulative tiers. */
-export function tierIncludes(selected: Tier, scriptTier: Tier): boolean {
-  return TIER_ORDER.indexOf(scriptTier) <= TIER_ORDER.indexOf(selected);
-}
-
-function isTier(value: string): value is Tier {
-  return (TIER_ORDER as readonly string[]).includes(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +214,7 @@ function gitCapture(argv: string[], cwd: string): string | null {
 }
 
 /** True if git exits 0. Used for existence probes (`rev-parse --verify`). */
-function gitSucceeds(argv: string[], cwd: string): boolean {
+export function gitSucceeds(argv: string[], cwd: string): boolean {
   try {
     execFileSync('git', argv, {cwd, stdio: ['pipe', 'pipe', 'pipe']});
     return true;
@@ -380,7 +354,7 @@ export function resolvePrimaryCheckout(
 // Child processes
 // ---------------------------------------------------------------------------
 
-interface ChildResult {
+export interface ChildResult {
   exitCode: number;
   error: string | null;
 }
@@ -391,7 +365,7 @@ interface ChildResult {
  * which matters because project hydration scripts print freely and
  * worktree-new's stdout contract is a single line.
  */
-function runChild(argv: string[], cwd: string): ChildResult {
+export function runChild(argv: string[], cwd: string): ChildResult {
   const [cmd, ...args] = argv;
   if (cmd == null) return {exitCode: 1, error: 'empty command'};
   const result = spawnSync(cmd, args, {
@@ -737,21 +711,31 @@ function explainUnmatchedPattern(pattern: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Step 6: worktree-source:<tier>:<LABEL> discovery
+// Step 6: setup-env:<LABEL> discovery
 // ---------------------------------------------------------------------------
 
 export interface HydrationScript {
-  /** Full package.json script name, e.g. `worktree-source:js:VERSION`. */
+  /** Full package.json script name, e.g. `setup-env:swift`. */
   name: string;
   label: string;
-  /** null when the tier segment is not a known tier. */
-  tier: Tier | null;
+  /**
+   * True for a v170-era `worktree-source:<tier>:<LABEL>` script. Legacy
+   * scripts are never RUN — they are reported with a rename hint, so stale
+   * ones surface as one clear line instead of silently not executing.
+   */
+  legacy: boolean;
 }
 
 /**
- * Discover `worktree-source:<tier>:<LABEL>` scripts from a package.json, in
- * DECLARATION order (unlike `fix-source:`, which sorts by label — hydration
- * steps have real ordering dependencies, e.g. generate-then-consume).
+ * Discover `setup-env:<LABEL>` scripts from a package.json, in DECLARATION
+ * order (unlike `fix-source:`, which sorts by label — hydration steps have
+ * real ordering dependencies, e.g. generate-then-consume).
+ *
+ * The bare `setup-env` script (no colon) is the project's own alias for this
+ * command and is structurally excluded by the prefix — running it from here
+ * would recurse.
+ *
+ * Also returns v170-era `worktree-source:` scripts as `legacy: true` entries.
  */
 export function discoverHydrationScripts(target: string): HydrationScript[] {
   const pkgPath = join(target, 'package.json');
@@ -769,18 +753,18 @@ export function discoverHydrationScripts(target: string): HydrationScript[] {
 
   const found: HydrationScript[] = [];
   for (const name of Object.keys(scripts)) {
-    if (!name.startsWith(WORKTREE_SOURCE_PREFIX)) continue;
-    const rest = name.slice(WORKTREE_SOURCE_PREFIX.length);
-    const separator = rest.indexOf(':');
-    if (separator <= 0) continue;
-    const tierSegment = rest.slice(0, separator);
-    const label = rest.slice(separator + 1);
-    if (label === '') continue;
-    found.push({
-      label,
-      name,
-      tier: isTier(tierSegment) ? tierSegment : null,
-    });
+    if (name.startsWith(SETUP_ENV_SOURCE_PREFIX)) {
+      const label = name.slice(SETUP_ENV_SOURCE_PREFIX.length);
+      if (label === '') continue;
+      found.push({label, legacy: false, name});
+      continue;
+    }
+    if (name.startsWith(LEGACY_WORKTREE_SOURCE_PREFIX)) {
+      const rest = name.slice(LEGACY_WORKTREE_SOURCE_PREFIX.length);
+      const separator = rest.indexOf(':');
+      const label = separator >= 0 ? rest.slice(separator + 1) : rest;
+      found.push({label, legacy: true, name});
+    }
   }
   return found;
 }
@@ -823,7 +807,7 @@ function step(
   return entry;
 }
 
-function finish(result: WorktreeSetupResult): WorktreeSetupResult {
+function finish(result: SetupEnvResult): SetupEnvResult {
   const counts = {done: 0, failed: 0, skipped: 0};
   for (const s of result.steps) counts[s.status] += 1;
   const parts = [`${counts.done} done`, `${counts.skipped} skipped`];
@@ -833,34 +817,30 @@ function finish(result: WorktreeSetupResult): WorktreeSetupResult {
 }
 
 /**
- * Hydrate a worktree. Steps run in a fixed order and STOP at the first
- * failure, because each later step assumes the earlier ones: an install into an
- * untrusted mise tree fails confusingly, an install with an empty
- * submodule-backed workspace fails outright, and a hydration script cannot run
- * without node_modules.
+ * Hydrate a checkout (worktree, clone, or primary). Steps run in a fixed order
+ * and STOP at the first failure, because each later step assumes the earlier
+ * ones: an install into an untrusted mise tree fails confusingly, an install
+ * with an empty submodule-backed workspace fails outright, and a hydration
+ * script cannot run without node_modules.
  *
  * Idempotent (epic AC #3): step 3 skips when every submodule is already
  * populated, step 4 is a no-op reinstall, step 5 skips files already present,
  * and step 6's scripts are the project's own responsibility — they ARE re-run on
  * every invocation, so projects must write them to be safely repeatable.
  */
-export function worktreeSetup(
-  options: WorktreeSetupOptions = {},
-): WorktreeSetupResult {
-  const tier = options.tier ?? DEFAULT_TIER;
+export function setupEnv(options: SetupEnvOptions = {}): SetupEnvResult {
   const dryRun = options.dryRun === true;
   const target = resolve(options.target ?? process.cwd());
   const steps: StepReport[] = [];
-  const result: WorktreeSetupResult = {
+  const result: SetupEnvResult = {
     exitCode: 0,
     primary: null,
     steps,
     target,
-    tier,
   };
 
   report(
-    `${BOLD}worktree-setup${RESET} ${target} ${DIM}(tier: ${tier}${dryRun ? ', dry-run' : ''})${RESET}`,
+    `${BOLD}setup-env${RESET} ${target}${dryRun ? ` ${DIM}(dry-run)${RESET}` : ''}`,
   );
 
   // --- Step 1: resolve target + primary checkout ---------------------------
@@ -913,7 +893,10 @@ export function worktreeSetup(
     // `primary == null` collapses into this branch on purpose: with no git repo
     // there is nothing to initialize, and RESOLVE has already said so.
     step(steps, 'SUBMODULES', 'skipped', `no ${GITMODULES_FILE}`);
-  } else if (submodules.kind === 'known' && submodules.status.all.length === 0) {
+  } else if (
+    submodules.kind === 'known' &&
+    submodules.status.all.length === 0
+  ) {
     step(
       steps,
       'SUBMODULES',
@@ -1078,26 +1061,17 @@ export function worktreeSetup(
       steps,
       'HYDRATE',
       'skipped',
-      `no ${WORKTREE_SOURCE_PREFIX}<tier>:<LABEL> scripts in package.json`,
+      `no ${SETUP_ENV_SOURCE_PREFIX}<LABEL> scripts in package.json`,
     );
   } else {
     for (const script of scripts) {
       const label = `HYDRATE:${script.name}`;
-      if (script.tier == null) {
+      if (script.legacy) {
         step(
           steps,
           label,
           'skipped',
-          `unknown tier segment — expected one of ${TIER_ORDER.join('/')}`,
-        );
-        continue;
-      }
-      if (!tierIncludes(tier, script.tier)) {
-        step(
-          steps,
-          label,
-          'skipped',
-          `tier ${script.tier} not included in --${tier}`,
+          `deprecated ${LEGACY_WORKTREE_SOURCE_PREFIX} script (tiers were removed) — rename to ${SETUP_ENV_SOURCE_PREFIX}${script.label} to run it, or delete it`,
         );
         continue;
       }
@@ -1135,127 +1109,4 @@ export function worktreeSetup(
   }
 
   return finish(result);
-}
-
-// ---------------------------------------------------------------------------
-// worktree-new
-// ---------------------------------------------------------------------------
-
-export interface WorktreeNewOptions {
-  /** Where the command was invoked; used to resolve the repo. Defaults to cwd. */
-  cwd?: string;
-  /** Skip hydration entirely (just create the worktree). */
-  noSetup?: boolean;
-  slug: string;
-  tier?: Tier;
-}
-
-export interface WorktreeNewResult {
-  /** `origin/HEAD` or `HEAD`, or null if creation never happened. */
-  baseRef: string | null;
-  branch: string;
-  exitCode: number;
-  /** Absolute worktree path — null if it was not created. */
-  path: string | null;
-  setup: WorktreeSetupResult | null;
-}
-
-/**
- * Create a worktree exactly the way Claude Code does — directory
- * `<primary>/.claude/worktrees/<slug>`, branch `worktree-<slug>` (D2) — and
- * then hydrate it.
- *
- * Prints the absolute worktree path as the ONLY stdout line, as soon as
- * creation succeeds: creation is the irreversible fact, so the `wt` zsh
- * function can still `cd` there to debug when hydration afterwards fails. The
- * exit code reflects hydration.
- *
- * Refuses rather than guesses when the name is partly taken: an existing
- * directory is the `wt` function's own switch-to-existing case, and an existing
- * branch with no directory would mean silently attaching to unknown work.
- */
-export function worktreeNew(options: WorktreeNewOptions): WorktreeNewResult {
-  const {slug} = options;
-  const branch = `${WORKTREE_BRANCH_PREFIX}${slug}`;
-  const cwd = resolve(options.cwd ?? process.cwd());
-  const failed = (message: string): WorktreeNewResult => {
-    report(`${RED}Error:${RESET} ${message}`);
-    return {baseRef: null, branch, exitCode: 1, path: null, setup: null};
-  };
-
-  if (!SLUG_PATTERN.test(slug)) {
-    return failed(
-      `invalid slug ${JSON.stringify(slug)} — must match ${String(SLUG_PATTERN)} (no slashes: the slug names both the directory and the branch)`,
-    );
-  }
-  if (PURE_DOT_SLUG_PATTERN.test(slug)) {
-    return failed(
-      `invalid slug ${JSON.stringify(slug)} — a slug of only dots is a directory reference, not a name (\`..\` would point the worktree at the \`.claude\` directory itself)`,
-    );
-  }
-
-  const primary = resolvePrimaryCheckout(cwd);
-  if (primary == null) {
-    return failed(`not inside a git repository: ${cwd}`);
-  }
-
-  const worktreePath = join(primary, ...WORKTREE_DIR_SEGMENTS, slug);
-  if (existsSync(worktreePath)) {
-    return failed(
-      `worktree directory already exists: ${worktreePath} (use \`wt\` to switch to it)`,
-    );
-  }
-  if (
-    gitSucceeds(
-      ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`],
-      cwd,
-    )
-  ) {
-    return failed(
-      `branch ${branch} already exists but ${worktreePath} does not — refusing to attach silently. Delete the branch, pick another slug, or create the worktree yourself.`,
-    );
-  }
-
-  // origin/HEAD when it already resolves locally; never fetch (a create should
-  // not block on the network).
-  const baseRef = gitSucceeds(
-    ['rev-parse', '--verify', '--quiet', 'origin/HEAD'],
-    cwd,
-  )
-    ? 'origin/HEAD'
-    : 'HEAD';
-  report(`${BOLD}worktree-new${RESET} ${branch} ${DIM}from ${baseRef}${RESET}`);
-
-  const add = runChild(
-    ['git', 'worktree', 'add', '-b', branch, worktreePath, baseRef],
-    cwd,
-  );
-  if (add.exitCode !== 0) {
-    report(
-      `${RED}Error:${RESET} git worktree add exited ${add.exitCode}${add.error == null ? '' : ` (${add.error})`}`,
-    );
-    return {baseRef, branch, exitCode: 1, path: null, setup: null};
-  }
-
-  // The one and only stdout line (D1).
-  process.stdout.write(`${worktreePath}\n`);
-
-  if (options.noSetup === true) {
-    report(`  ${DIM}⊘ hydration skipped (--no-setup)${RESET}`);
-    return {baseRef, branch, exitCode: 0, path: worktreePath, setup: null};
-  }
-
-  const setup = worktreeSetup({target: worktreePath, tier: options.tier});
-  if (setup.exitCode !== 0) {
-    report(
-      `${YELLOW}⚠${RESET} worktree created at ${worktreePath} but hydration failed`,
-    );
-  }
-  return {
-    baseRef,
-    branch,
-    exitCode: setup.exitCode,
-    path: worktreePath,
-    setup,
-  };
 }

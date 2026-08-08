@@ -21,28 +21,35 @@ import {DEFAULT_OPTIONS as RALPH_DEFAULTS, runRalph} from './ralph';
 import {runSkill} from './skill';
 import {runSyncRules} from './sync-rules';
 import {runTimeCheck} from './time-check';
+import {runSetupEnv} from './setup-env-command';
 import {runSignal} from './signal';
 import {runUpdate} from './update';
-import {
-  type Tier,
-  resolveTier,
-  worktreeNew,
-  worktreeSetup,
-} from './worktree-setup';
+import {worktreeNew} from './worktree-new';
 
 /**
- * Tier help text. Note that dependency install is UNIVERSAL — it runs at EVERY
- * tier, including `--lint` (conductor ruling on bead home-base-v170.1: the tiers
- * price PROJECT scripts by cost class, and lint is meaningless without
- * node_modules). These strings previously contradicted that on both sides —
- * `lint` omitted install while `js` claimed to add it — which is finding F1.
+ * The v170 tier flags (--lint/--js/--native) were removed with the tier system
+ * (home-base-j2n7) but are still ACCEPTED as hidden no-ops for one release:
+ * `.strict()` would otherwise hard-fail any caller that predates the removal
+ * (an old post-checkout preamble, a stale alias) instead of just hydrating.
  */
-const TIER_FLAG_HELP: Record<Tier, string> = {
-  lint: 'Seconds-to-~15s: mise trust + submodule init + dependency install + .worktreeinclude copy + lint-tier project scripts',
-  js: 'The lint tier plus js-tier project scripts (default — the floor at which `signal` means anything)',
-  native:
-    'Everything, including native-tier project scripts (prebuild/pod install — minutes)',
-};
+const DEPRECATED_TIER_FLAGS = ['lint', 'js', 'native'] as const;
+
+function applyDeprecatedTierFlags<T>(y: import('yargs').Argv<T>) {
+  let out = y;
+  for (const flag of DEPRECATED_TIER_FLAGS) {
+    out = out.option(flag, {type: 'boolean', hidden: true});
+  }
+  return out;
+}
+
+function warnDeprecatedTierFlags(argv: Record<string, unknown>): void {
+  const passed = DEPRECATED_TIER_FLAGS.filter((f) => argv[f] === true);
+  if (passed.length > 0) {
+    console.error(
+      `Warning: ${passed.map((f) => `--${f}`).join(' ')} ignored — the tier system was removed (home-base-j2n7); setup-env runs all setup-env:<LABEL> scripts.`,
+    );
+  }
+}
 
 // Handled before yargs: `--skill` is a bare flag, and `demandCommand(1)` would
 // reject it. Mirrors the `tt --skill` convention.
@@ -513,74 +520,54 @@ void yargs(hideBin(process.argv))
     },
   )
   .command(
-    'worktree-setup',
-    'Hydrate a git worktree: mise trust, init submodules, install deps, copy the .worktreeinclude files from the primary checkout, run worktree-source:<tier>:* scripts. A fresh worktree has only tracked files, so it is neither buildable nor lintable until this runs. Report goes to stderr; stdout stays empty.',
+    ['setup-env', 'worktree-setup'],
+    'Hydrate this checkout (worktree, clone, or primary): mise trust, init submodules, install deps, copy the .worktreeinclude files from the primary checkout, run setup-env:<LABEL> scripts. Remote (CLAUDE_CODE_REMOTE=true) additionally bootstraps mise + PATH and runs doctor --fix --yes. Report goes to stderr; stdout stays empty. (`worktree-setup` is the deprecated pre-j2n7 name.)',
     (y) =>
-      y
-        .option('lint', {type: 'boolean', describe: TIER_FLAG_HELP.lint})
-        .option('js', {type: 'boolean', describe: TIER_FLAG_HELP.js})
-        .option('native', {type: 'boolean', describe: TIER_FLAG_HELP.native})
-        .option('target', {
-          type: 'string',
-          describe:
-            'Worktree to hydrate (default: cwd). Lets you run this from the primary checkout, where the SDK is already installed.',
-        })
-        .option('dry-run', {
-          type: 'boolean',
-          describe: 'Print what would happen and change nothing',
-          default: false,
-        }),
-    (argv) => {
-      const tier = resolveTier({
-        js: argv.js,
-        lint: argv.lint,
-        native: argv.native,
-      });
-      if ('error' in tier) {
-        console.error(`Error: ${tier.error}`);
-        process.exit(1);
-      }
-      const result = worktreeSetup({
+      applyDeprecatedTierFlags(
+        y
+          .option('target', {
+            type: 'string',
+            describe:
+              'Directory to hydrate (default: cwd). Lets you run this from the primary checkout, where the SDK is already installed.',
+          })
+          .option('dry-run', {
+            type: 'boolean',
+            describe: 'Print what would happen and change nothing',
+            default: false,
+          }),
+      ),
+    async (argv) => {
+      warnDeprecatedTierFlags(argv);
+      const exitCode = await runSetupEnv({
         dryRun: argv['dry-run'],
         target: argv.target,
-        tier: tier.tier,
       });
-      process.exit(result.exitCode);
+      process.exit(exitCode);
     },
   )
   .command(
     'worktree-new <slug>',
     'Create a worktree the way Claude Code does — .claude/worktrees/<slug> on branch worktree-<slug> — then hydrate it. Prints exactly one stdout line, the absolute worktree path, for the `wt` shell function to cd into.',
     (y) =>
-      y
-        .positional('slug', {
-          type: 'string',
-          describe:
-            'Names both the directory and the branch. [A-Za-z0-9._-] only — no slashes.',
-        })
-        .option('lint', {type: 'boolean', describe: TIER_FLAG_HELP.lint})
-        .option('js', {type: 'boolean', describe: TIER_FLAG_HELP.js})
-        .option('native', {type: 'boolean', describe: TIER_FLAG_HELP.native})
-        .option('setup', {
-          type: 'boolean',
-          describe:
-            'Hydrate after creating (default). Pass --no-setup to create only.',
-          default: true,
-        }),
+      applyDeprecatedTierFlags(
+        y
+          .positional('slug', {
+            type: 'string',
+            describe:
+              'Names both the directory and the branch. [A-Za-z0-9._-] only — no slashes.',
+          })
+          .option('setup', {
+            type: 'boolean',
+            describe:
+              'Hydrate after creating (default). Pass --no-setup to create only.',
+            default: true,
+          }),
+      ),
     (argv) => {
-      const tier = resolveTier({
-        js: argv.js,
-        lint: argv.lint,
-        native: argv.native,
-      });
-      if ('error' in tier) {
-        console.error(`Error: ${tier.error}`);
-        process.exit(1);
-      }
+      warnDeprecatedTierFlags(argv);
       const result = worktreeNew({
         noSetup: !argv.setup,
         slug: argv.slug as string,
-        tier: tier.tier,
       });
       process.exit(result.exitCode);
     },

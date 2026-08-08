@@ -1,5 +1,6 @@
 /**
- * Tests for `justin-sdk worktree-setup` and `justin-sdk worktree-new`.
+ * Tests for `justin-sdk setup-env` (the hydration engine) and
+ * `justin-sdk worktree-new`.
  *
  * Fixtures are real git repos in $TMPDIR — the behavior under test IS git
  * behavior (worktree admin files, `check-ignore`'s index awareness,
@@ -7,7 +8,7 @@
  * live in ./git-fixtures, shared with tests/worktree-hydration.test.ts.
  *
  * The stdout-purity tests spawn the real CLI as a subprocess. That is the only
- * way to prove the contract (stdout empty for worktree-setup, exactly one path
+ * way to prove the contract (stdout empty for setup-env, exactly one path
  * line for worktree-new) end-to-end, including yargs registration.
  */
 
@@ -24,13 +25,11 @@ import {
   planWorktreeIncludeCopies,
   probeSubmodules,
   resolvePrimaryCheckout,
-  resolveTier,
-  tierIncludes,
-  worktreeNew,
-  worktreeSetup,
+  setupEnv,
   WORKTREE_INCLUDE_FILE,
   type StepReport,
-} from '../src/worktree-setup';
+} from '../src/setup-env';
+import {worktreeNew} from '../src/worktree-new';
 import {
   addLinkedWorktree,
   addSubmodule,
@@ -93,57 +92,6 @@ function captureStderr<T>(fn: () => T): {result: T; stderr: string} {
 }
 
 // ---------------------------------------------------------------------------
-// Tier flags
-// ---------------------------------------------------------------------------
-
-describe('resolveTier', () => {
-  test('defaults to js when no flag is given', () => {
-    expect(resolveTier({})).toEqual({tier: 'js'});
-  });
-
-  test.each(['lint', 'js', 'native'] as const)('honors --%s alone', (tier) => {
-    expect(resolveTier({[tier]: true})).toEqual({tier});
-  });
-
-  test('false flags are not "given"', () => {
-    expect(resolveTier({js: false, lint: false, native: false})).toEqual({
-      tier: 'js',
-    });
-  });
-
-  test('two tier flags is an error naming both', () => {
-    const result = resolveTier({lint: true, native: true});
-    expect(result).toHaveProperty('error');
-    if (!('error' in result)) throw new Error('expected an error');
-    expect(result.error).toContain('--lint');
-    expect(result.error).toContain('--native');
-    expect(result.error).toContain('mutually exclusive');
-  });
-
-  test('all three tier flags is an error', () => {
-    expect(resolveTier({js: true, lint: true, native: true})).toHaveProperty(
-      'error',
-    );
-  });
-});
-
-describe('tierIncludes (cumulative lint ⊂ js ⊂ native)', () => {
-  test.each([
-    ['lint', 'lint', true],
-    ['lint', 'js', false],
-    ['lint', 'native', false],
-    ['js', 'lint', true],
-    ['js', 'js', true],
-    ['js', 'native', false],
-    ['native', 'lint', true],
-    ['native', 'js', true],
-    ['native', 'native', true],
-  ] as const)('--%s includes %s tier === %p', (selected, script, expected) => {
-    expect(tierIncludes(selected, script)).toBe(expected);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Package manager detection
 // ---------------------------------------------------------------------------
 
@@ -185,7 +133,7 @@ describe('detectPackageManager', () => {
 });
 
 // ---------------------------------------------------------------------------
-// worktree-source:<tier>:<LABEL> discovery
+// setup-env:<LABEL> discovery
 // ---------------------------------------------------------------------------
 
 describe('discoverHydrationScripts', () => {
@@ -195,10 +143,10 @@ describe('discoverHydrationScripts', () => {
       'package.json',
       JSON.stringify({
         scripts: {
-          'worktree-source:js:ZEBRA': 'true',
+          'setup-env:ZEBRA': 'true',
           build: 'true',
-          'worktree-source:lint:ALPHA': 'true',
-          'worktree-source:native:MIDDLE': 'true',
+          'setup-env:ALPHA': 'true',
+          'setup-env:MIDDLE': 'true',
         },
       }),
     );
@@ -209,26 +157,46 @@ describe('discoverHydrationScripts', () => {
     ]);
   });
 
-  test('unrecognized tier segment is surfaced as tier: null, not dropped', () => {
-    const sb = track(createSandbox());
-    sb.writeFile(
-      'package.json',
-      JSON.stringify({scripts: {'worktree-source:web:THING': 'true'}}),
-    );
-    expect(discoverHydrationScripts(sb.path)).toEqual([
-      {label: 'THING', name: 'worktree-source:web:THING', tier: null},
-    ]);
-  });
-
-  test('malformed names (no label, no tier separator) are ignored', () => {
+  test('the bare setup-env alias (no colon) is NOT discovered — running it would recurse', () => {
     const sb = track(createSandbox());
     sb.writeFile(
       'package.json',
       JSON.stringify({
         scripts: {
-          'worktree-source:js': 'true',
-          'worktree-source:js:': 'true',
-          'worktree-source:': 'true',
+          'setup-env': 'bunx @justinhaaheim/justin-sdk setup-env',
+          'setup-env:REAL': 'true',
+        },
+      }),
+    );
+    expect(discoverHydrationScripts(sb.path)).toEqual([
+      {label: 'REAL', legacy: false, name: 'setup-env:REAL'},
+    ]);
+  });
+
+  test('a v170 worktree-source: script is surfaced as legacy, not dropped', () => {
+    const sb = track(createSandbox());
+    sb.writeFile(
+      'package.json',
+      JSON.stringify({
+        scripts: {
+          'worktree-source:lint:VERSION': 'true',
+          'worktree-source:web:THING': 'true',
+        },
+      }),
+    );
+    expect(discoverHydrationScripts(sb.path)).toEqual([
+      {label: 'VERSION', legacy: true, name: 'worktree-source:lint:VERSION'},
+      {label: 'THING', legacy: true, name: 'worktree-source:web:THING'},
+    ]);
+  });
+
+  test('empty labels are ignored', () => {
+    const sb = track(createSandbox());
+    sb.writeFile(
+      'package.json',
+      JSON.stringify({
+        scripts: {
+          'setup-env:': 'true',
         },
       }),
     );
@@ -458,9 +426,9 @@ describe('planWorktreeIncludeCopies', () => {
     write(primary, 'secret.local', 'nope\n');
     const target = join(sb.path, 'target');
     mkdirSync(target);
-    expect(planWorktreeIncludeCopies(primary, target).unmatchedPatterns).toEqual(
-      [],
-    );
+    expect(
+      planWorktreeIncludeCopies(primary, target).unmatchedPatterns,
+    ).toEqual([]);
   });
 
   test('a pattern that only matches a TRACKED file is reported as unmatched', () => {
@@ -559,7 +527,7 @@ describe('worktreeSetup', () => {
       join(sb.path, 'wt'),
       'worktree-probe',
     );
-    const result = worktreeSetup({target: linked});
+    const result = setupEnv({target: linked});
     expect(result.exitCode).toBe(0);
     expect(result.primary).toBe(primary);
     expect(statuses(result.steps)).toEqual({
@@ -582,7 +550,7 @@ describe('worktreeSetup', () => {
       '.worktreeinclude': '.env.local\n',
     });
     write(primary, '.env.local', 'SIM=1\n');
-    const result = worktreeSetup({target: primary});
+    const result = setupEnv({target: primary});
     expect(result.exitCode).toBe(0);
     expect(statuses(result.steps).WORKTREEINCLUDE).toBe('skipped');
     expect(detailFor(result.steps, 'WORKTREEINCLUDE')).toContain(
@@ -595,7 +563,7 @@ describe('worktreeSetup', () => {
 
   test('a non-existent target fails at RESOLVE with exit 1', () => {
     const sb = track(createSandbox());
-    const result = worktreeSetup({target: join(sb.path, 'nope')});
+    const result = setupEnv({target: join(sb.path, 'nope')});
     expect(result.exitCode).toBe(1);
     expect(result.steps).toHaveLength(1);
     expect(statuses(result.steps).RESOLVE).toBe('failed');
@@ -615,7 +583,7 @@ describe('worktreeSetup', () => {
       'worktree-probe',
     );
 
-    const result = worktreeSetup({target: linked});
+    const result = setupEnv({target: linked});
     expect(result.exitCode).toBe(0);
     expect(statuses(result.steps).WORKTREEINCLUDE).toBe('done');
     expect(readFileSync(join(linked, '.env.local'), 'utf-8')).toBe('SIM=abc\n');
@@ -644,9 +612,7 @@ describe('worktreeSetup', () => {
       'worktree-probe',
     );
 
-    const {result, stderr} = captureStderr(() =>
-      worktreeSetup({target: linked}),
-    );
+    const {result, stderr} = captureStderr(() => setupEnv({target: linked}));
 
     expect(result.exitCode).toBe(0);
     expect(statuses(result.steps).WORKTREEINCLUDE).toBe('done');
@@ -675,11 +641,11 @@ describe('worktreeSetup', () => {
       'worktree-probe',
     );
 
-    const first = worktreeSetup({target: linked});
+    const first = setupEnv({target: linked});
     expect(first.exitCode).toBe(0);
     expect(statuses(first.steps).WORKTREEINCLUDE).toBe('done');
 
-    const second = worktreeSetup({target: linked});
+    const second = setupEnv({target: linked});
     expect(second.exitCode).toBe(0);
     expect(statuses(second.steps).WORKTREEINCLUDE).toBe('skipped');
     expect(detailFor(second.steps, 'WORKTREEINCLUDE')).toContain(
@@ -696,7 +662,7 @@ describe('worktreeSetup', () => {
       '.worktreeinclude': '.env.local\n',
       'package.json': JSON.stringify({
         name: 'p',
-        scripts: {'worktree-source:lint:MARK': 'sh -c "echo ran > ran.txt"'},
+        scripts: {'setup-env:MARK': 'sh -c "echo ran > ran.txt"'},
       }),
     });
     write(primary, '.env.local', 'SIM=abc\n');
@@ -706,7 +672,7 @@ describe('worktreeSetup', () => {
       'worktree-probe',
     );
 
-    const result = worktreeSetup({dryRun: true, target: linked});
+    const result = setupEnv({dryRun: true, target: linked});
     expect(result.exitCode).toBe(0);
     expect(existsSync(join(linked, '.env.local'))).toBe(false);
     expect(existsSync(join(linked, 'ran.txt'))).toBe(false);
@@ -715,18 +681,18 @@ describe('worktreeSetup', () => {
     expect(detailFor(result.steps, 'WORKTREEINCLUDE')).toContain(
       'would copy 1',
     );
-    expect(
-      detailFor(result.steps, 'HYDRATE:worktree-source:lint:MARK'),
-    ).toContain('dry-run: would run');
+    expect(detailFor(result.steps, 'HYDRATE:setup-env:MARK')).toContain(
+      'dry-run: would run',
+    );
   });
 
-  describe('tier gating (epic AC #2) and declaration order', () => {
+  describe('declaration order and legacy skip', () => {
     // ZEBRA is declared before ALPHA on purpose: a label-sorted runner (like
     // fix-source:) would invert them.
     const scripts = {
-      'worktree-source:js:ZEBRA': "sh -c 'echo js >> order.log'",
-      'worktree-source:lint:ALPHA': "sh -c 'echo lint >> order.log'",
-      'worktree-source:native:OMEGA': "sh -c 'echo native >> order.log'",
+      'setup-env:ZEBRA': "sh -c 'echo zebra >> order.log'",
+      'setup-env:ALPHA': "sh -c 'echo alpha >> order.log'",
+      'worktree-source:native:LEGACY': "sh -c 'echo legacy >> order.log'",
     };
 
     function fixture(sb: Sandbox): {linked: string; primary: string} {
@@ -747,43 +713,21 @@ describe('worktreeSetup', () => {
       return readFileSync(logPath, 'utf-8').trim().split('\n').filter(Boolean);
     }
 
-    test('--lint runs only lint scripts (never js or native)', () => {
+    test('runs setup-env: scripts in declaration order; legacy worktree-source: is skipped with a rename hint, NOT run', () => {
       const sb = track(createSandbox());
       const {linked} = fixture(sb);
-      const result = worktreeSetup({target: linked, tier: 'lint'});
+      const result = setupEnv({target: linked});
       expect(result.exitCode).toBe(0);
-      expect(order(linked)).toEqual(['lint']);
+      // legacy never executed — order.log has only the flat scripts, declared order
+      expect(order(linked)).toEqual(['zebra', 'alpha']);
       expect(statuses(result.steps)).toMatchObject({
-        'HYDRATE:worktree-source:js:ZEBRA': 'skipped',
-        'HYDRATE:worktree-source:lint:ALPHA': 'done',
-        'HYDRATE:worktree-source:native:OMEGA': 'skipped',
+        'HYDRATE:setup-env:ZEBRA': 'done',
+        'HYDRATE:setup-env:ALPHA': 'done',
+        'HYDRATE:worktree-source:native:LEGACY': 'skipped',
       });
       expect(
-        detailFor(result.steps, 'HYDRATE:worktree-source:native:OMEGA'),
-      ).toContain('not included in --lint');
-    });
-
-    test('--js runs lint + js in declaration order, never native', () => {
-      const sb = track(createSandbox());
-      const {linked} = fixture(sb);
-      const result = worktreeSetup({target: linked, tier: 'js'});
-      expect(result.exitCode).toBe(0);
-      expect(order(linked)).toEqual(['js', 'lint']);
-    });
-
-    test('the default tier is js', () => {
-      const sb = track(createSandbox());
-      const {linked} = fixture(sb);
-      expect(worktreeSetup({target: linked}).exitCode).toBe(0);
-      expect(order(linked)).toEqual(['js', 'lint']);
-    });
-
-    test('--native runs all three, still in declaration order', () => {
-      const sb = track(createSandbox());
-      const {linked} = fixture(sb);
-      const result = worktreeSetup({target: linked, tier: 'native'});
-      expect(result.exitCode).toBe(0);
-      expect(order(linked)).toEqual(['js', 'lint', 'native']);
+        detailFor(result.steps, 'HYDRATE:worktree-source:native:LEGACY'),
+      ).toContain('rename to setup-env:LEGACY');
     });
   });
 
@@ -793,9 +737,9 @@ describe('worktreeSetup', () => {
       'package.json': JSON.stringify({
         name: 'p',
         scripts: {
-          'worktree-source:lint:FIRST': "sh -c 'echo first >> order.log'",
-          'worktree-source:lint:BOOM': 'false',
-          'worktree-source:lint:NEVER': "sh -c 'echo never >> order.log'",
+          'setup-env:FIRST': "sh -c 'echo first >> order.log'",
+          'setup-env:BOOM': 'false',
+          'setup-env:NEVER': "sh -c 'echo never >> order.log'",
         },
       }),
     });
@@ -805,34 +749,11 @@ describe('worktreeSetup', () => {
       'worktree-probe',
     );
 
-    const result = worktreeSetup({target: linked, tier: 'lint'});
+    const result = setupEnv({target: linked});
     expect(result.exitCode).toBe(1);
-    expect(statuses(result.steps)['HYDRATE:worktree-source:lint:BOOM']).toBe(
-      'failed',
-    );
+    expect(statuses(result.steps)['HYDRATE:setup-env:BOOM']).toBe('failed');
     expect(result.steps.some((s) => s.label.endsWith('NEVER'))).toBe(false);
     expect(readFileSync(join(linked, 'order.log'), 'utf-8')).toBe('first\n');
-  });
-
-  test('scripts with an unknown tier segment are skipped, not run', () => {
-    const sb = track(createSandbox());
-    const primary = initPrimary(sb, {
-      'package.json': JSON.stringify({
-        name: 'p',
-        scripts: {'worktree-source:web:THING': "sh -c 'echo web > web.txt'"},
-      }),
-    });
-    const linked = addLinkedWorktree(
-      primary,
-      join(sb.path, 'wt'),
-      'worktree-probe',
-    );
-    const result = worktreeSetup({target: linked, tier: 'native'});
-    expect(result.exitCode).toBe(0);
-    expect(existsSync(join(linked, 'web.txt'))).toBe(false);
-    expect(
-      detailFor(result.steps, 'HYDRATE:worktree-source:web:THING'),
-    ).toContain('unknown tier');
   });
 });
 
@@ -999,9 +920,7 @@ describe('SUBMODULES over a real submodule-backed workspace', () => {
     const sb = track(createSandbox());
     const {linked} = fixture(sb);
 
-    const result = withFileSubmodulesAllowed(() =>
-      worktreeSetup({target: linked}),
-    );
+    const result = withFileSubmodulesAllowed(() => setupEnv({target: linked}));
 
     expect(result.exitCode).toBe(0);
     expect(statuses(result.steps).SUBMODULES).toBe('done');
@@ -1024,7 +943,10 @@ describe('SUBMODULES over a real submodule-backed workspace', () => {
       readFileSync(join(linked, 'projects', 'sub', 'package.json'), 'utf-8'),
     ).toContain('"name": "sub"');
     expect(
-      readFileSync(join(linked, 'projects', 'sub', 'nested', 'note.txt'), 'utf-8'),
+      readFileSync(
+        join(linked, 'projects', 'sub', 'nested', 'note.txt'),
+        'utf-8',
+      ),
     ).toBe('nested\n');
     // And the install that used to die actually produced node_modules.
     expect(existsSync(join(linked, 'node_modules'))).toBe(true);
@@ -1035,12 +957,10 @@ describe('SUBMODULES over a real submodule-backed workspace', () => {
     const {linked} = fixture(sb);
 
     expect(
-      withFileSubmodulesAllowed(() => worktreeSetup({target: linked})).exitCode,
+      withFileSubmodulesAllowed(() => setupEnv({target: linked})).exitCode,
     ).toBe(0);
 
-    const second = withFileSubmodulesAllowed(() =>
-      worktreeSetup({target: linked}),
-    );
+    const second = withFileSubmodulesAllowed(() => setupEnv({target: linked}));
     expect(second.exitCode).toBe(0);
     expect(statuses(second.steps).SUBMODULES).toBe('skipped');
     // Both levels counted, which is only true if the probe is recursive too.
@@ -1054,7 +974,7 @@ describe('SUBMODULES over a real submodule-backed workspace', () => {
     const {linked} = fixture(sb);
 
     const result = withFileSubmodulesAllowed(() =>
-      worktreeSetup({dryRun: true, target: linked}),
+      setupEnv({dryRun: true, target: linked}),
     );
 
     expect(result.exitCode).toBe(0);
@@ -1074,7 +994,7 @@ describe('SUBMODULES over a real submodule-backed workspace', () => {
 
     // No GIT_ALLOW_PROTOCOL here: git refuses the file transport, so the clone
     // fails — a real init failure, not a simulated one.
-    const result = worktreeSetup({target: linked});
+    const result = setupEnv({target: linked});
 
     expect(result.exitCode).toBe(1);
     expect(statuses(result.steps).SUBMODULES).toBe('failed');
@@ -1255,7 +1175,7 @@ describe('CLI stdout purity', () => {
     };
   }
 
-  test('worktree-setup writes NOTHING to stdout, and its report to stderr', () => {
+  test('setup-env writes NOTHING to stdout, and its report to stderr', () => {
     const sb = track(createSandbox());
     const primary = initPrimary(sb, {
       '.gitignore': '.env.local\n',
@@ -1263,7 +1183,7 @@ describe('CLI stdout purity', () => {
       'package.json': JSON.stringify({
         name: 'p',
         scripts: {
-          'worktree-source:lint:NOISY': "sh -c 'echo SCRIPT_STDOUT_NOISE'",
+          'setup-env:NOISY': "sh -c 'echo SCRIPT_STDOUT_NOISE'",
         },
       }),
     });
@@ -1274,12 +1194,20 @@ describe('CLI stdout purity', () => {
       'worktree-probe',
     );
 
-    const {status, stdout, stderr} = runCli(['worktree-setup'], linked);
+    const {status, stdout, stderr} = runCli(['setup-env'], linked);
     expect(status).toBe(0);
     expect(stdout).toBe('');
     expect(stderr).toContain('WORKTREEINCLUDE');
     // Even a project script's own stdout is redirected to stderr.
     expect(stderr).toContain('SCRIPT_STDOUT_NOISE');
+  });
+
+  test('the deprecated worktree-setup command name still works (alias)', () => {
+    const sb = track(createSandbox());
+    const primary = initPrimary(sb, {'a.txt': 'a\n'});
+    const {status, stdout} = runCli(['worktree-setup'], primary);
+    expect(status).toBe(0);
+    expect(stdout).toBe('');
   });
 
   test('worktree-new writes EXACTLY one stdout line: the absolute path', () => {
@@ -1290,7 +1218,7 @@ describe('CLI stdout purity', () => {
       'package.json': JSON.stringify({
         name: 'p',
         scripts: {
-          'worktree-source:lint:NOISY': "sh -c 'echo SCRIPT_STDOUT_NOISE'",
+          'setup-env:NOISY': "sh -c 'echo SCRIPT_STDOUT_NOISE'",
         },
       }),
     });
@@ -1323,15 +1251,16 @@ describe('CLI stdout purity', () => {
     },
   );
 
-  test('mutually exclusive tier flags exit 1 with the error on stderr', () => {
+  test('deprecated tier flags are accepted as no-ops with a warning (old preambles must not break)', () => {
     const sb = track(createSandbox());
     const primary = initPrimary(sb, {'a.txt': 'a\n'});
     const {status, stdout, stderr} = runCli(
-      ['worktree-setup', '--lint', '--native'],
+      ['setup-env', '--lint', '--native'],
       primary,
     );
-    expect(status).toBe(1);
+    expect(status).toBe(0);
     expect(stdout).toBe('');
-    expect(stderr).toContain('mutually exclusive');
+    expect(stderr).toContain('ignored');
+    expect(stderr).toContain('tier system was removed');
   });
 });

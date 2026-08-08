@@ -109,7 +109,7 @@ function huskyPrimary(
     'package.json': `${JSON.stringify(
       {
         name: 'fixture-root',
-        scripts: {'worktree-source:lint:MARKER': MARKER_SCRIPT},
+        scripts: {'setup-env:MARKER': MARKER_SCRIPT},
         version: '0.0.0',
       },
       null,

@@ -37,14 +37,14 @@ import {
   resolveGitTopology,
   resolvePrimaryCheckout,
   WORKTREE_INCLUDE_FILE,
-} from './worktree-setup';
+} from './setup-env';
 
 /**
  * Re-exported so every consumer can get the predicate from this module without
  * needing to know that the git plumbing lives next to `worktree-setup`. There is
  * still exactly ONE implementation.
  */
-export {isLinkedWorktree} from './worktree-setup';
+export {isLinkedWorktree} from './setup-env';
 
 // ---------------------------------------------------------------------------
 // Public types
