@@ -12,7 +12,7 @@
  * something actually needs to change.
  *
  * Does NOT run `bun add` itself — it edits package.json directly so the
- * function is fast, offline, and unit-testable. The `j init` orchestrator
+ * function is fast, offline, and unit-testable. The `justin-sdk init` orchestrator
  * (or the user) runs `bun install` once at the end to materialize the dep.
  */
 
@@ -331,7 +331,7 @@ export interface PrettierSetupOptions {
  * Runs base-setup as a precondition so the foundation layer is always
  * present, registering 'prettier-setup' in justin-sdk.config.json.
  *
- * Does NOT run `bun install`. The `j init` orchestrator (or the user)
+ * Does NOT run `bun install`. The `justin-sdk init` orchestrator (or the user)
  * runs that once at the end after all components are added.
  */
 export async function runPrettierSetup(

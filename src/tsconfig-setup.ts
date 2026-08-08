@@ -218,7 +218,7 @@ export interface TsconfigSetupOptions {
  * adds typescript + @types/bun to devDependencies, writes tsconfig.json
  * from the SDK template, and registers the `signal-source:TS` script.
  *
- * The orchestrator that wires multiple `j add ...` components together is
+ * The orchestrator that wires multiple `justin-sdk add ...` components together is
  * responsible for running `bun install` once at the end — this function
  * does NOT install packages itself.
  */

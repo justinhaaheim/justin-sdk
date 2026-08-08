@@ -1,13 +1,13 @@
 /**
  * pinned-versions.ts — Single source of truth for dev-tool versions
- * installed by `j add ...` components.
+ * installed by `justin-sdk add ...` components.
  *
  * Each `add` component reads from this module and runs
  * `bun add -d <pkg>@<PINNED[pkg]>` (or `bun add <pkg>@<PINNED_GITHUB[pkg]>`)
  * so every fresh scaffold gets exactly the same versions.
  *
  * To upgrade: bump the values here, tag a new SDK release, and dependent
- * projects can opt in by re-running `j add <component>`. Doctor will be
+ * projects can opt in by re-running `justin-sdk add <component>`. Doctor will be
  * extended in a later bead to warn when an installed version drifts from
  * what's pinned here.
  *
@@ -35,7 +35,7 @@ export const PINNED_GITHUB = {
  *  1. cd into the prompts repo, find the desired commit
  *  2. update `sha` below
  *  3. cut a new SDK release
- *  4. consumers receive the bump on next `j update`
+ *  4. consumers receive the bump on next `justin-sdk update`
  */
 export const PROMPTS_PIN = {
   sha: 'bc5994b48b',

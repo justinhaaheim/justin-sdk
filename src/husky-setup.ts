@@ -13,7 +13,7 @@
  * something actually needs to change.
  *
  * Does NOT run `bun add` or `bun run prepare` itself — it edits package.json
- * directly so the function is fast, offline, and unit-testable. The `j init`
+ * directly so the function is fast, offline, and unit-testable. The `justin-sdk init`
  * orchestrator (or the user) runs `bun install` once at the end, which will
  * automatically execute the `prepare` script and wire husky into `.git/`.
  *
@@ -534,7 +534,7 @@ export interface HuskySetupOptions {
  * Runs base-setup as a precondition so the foundation layer is always
  * present, registering 'husky-setup' in justin-sdk.config.json.
  *
- * Does NOT run `bun install` or `bun run prepare`. The `j init` orchestrator
+ * Does NOT run `bun install` or `bun run prepare`. The `justin-sdk init` orchestrator
  * (or the user) runs `bun install` once at the end after all components are
  * added, which automatically executes the `prepare` script and wires husky
  * into `.git/hooks/`.

@@ -1,5 +1,5 @@
 /**
- * add.ts — `j add <target>` orchestrator.
+ * add.ts — `justin-sdk add <target>` orchestrator.
  *
  * `target` is either a single component (base-setup, beads, prettier, …) or
  * a preset (minimal, core, all) that expands to an ordered list of

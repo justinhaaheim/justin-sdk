@@ -1,5 +1,5 @@
 /**
- * init.ts — Greenfield scaffold orchestrator for `j init`.
+ * init.ts — Greenfield scaffold orchestrator for `justin-sdk init`.
  *
  * Composes the 8 add-component installers (plus beads) into a single
  * one-shot scaffold for a brand-new project. The component installers

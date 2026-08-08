@@ -2,13 +2,13 @@
  * self-update.ts — Bump the SDK pinned in a project's devDependencies to
  * the latest tag published on `github:justinhaaheim/justin-sdk`.
  *
- * Used by `j update` as Step 1 of the sync loop. After this returns
+ * Used by `justin-sdk update` as Step 1 of the sync loop. After this returns
  * `shouldReExec: true`, the caller is expected to re-exec the freshly
  * installed CLI so the rest of the update runs against the new code.
  *
  * Failure modes (gh missing, network blocked, sandbox) degrade gracefully:
  * a warning is logged and `{updated: false, shouldReExec: false}` is
- * returned, so `j update` can still re-apply components with the SDK
+ * returned, so `justin-sdk update` can still re-apply components with the SDK
  * the project already has.
  */
 
@@ -27,7 +27,7 @@ export interface SelfUpdateResult {
   /** Version we ended up with (same as previous if `updated: false`). */
   newVersion: string | null;
   /**
-   * True iff the SDK was actually bumped. The caller (`j update`) should
+   * True iff the SDK was actually bumped. The caller (`justin-sdk update`) should
    * re-exec the freshly installed CLI so subsequent steps run against
    * the new code, not the stale process that started the update.
    */
@@ -37,7 +37,7 @@ export interface SelfUpdateResult {
 /**
  * Read the version field from the SDK installed in the project's
  * node_modules. Returns null if the SDK isn't installed yet — in which
- * case the project hasn't run `j add base-setup` and `j update` should
+ * case the project hasn't run `justin-sdk add base-setup` and `justin-sdk update` should
  * bail with a clear message before getting this far.
  */
 function readInstalledSdkVersion(projectRoot: string): string | null {

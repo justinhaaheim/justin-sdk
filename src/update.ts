@@ -1,5 +1,5 @@
 /**
- * update.ts — `j update` orchestrator.
+ * update.ts — `justin-sdk update` orchestrator.
  *
  * Brings an existing justin-sdk project up to whatever the SDK's current
  * pinned state is. Idempotent; designed to be run periodically (e.g.

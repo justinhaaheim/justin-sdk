@@ -7,7 +7,7 @@
  * consistent and avoids duplication.
  */
 
-import {execSync} from 'child_process';
+import {execFileSync, execSync} from 'child_process';
 import {
   appendFileSync,
   existsSync,
@@ -15,7 +15,7 @@ import {
   readFileSync,
   writeFileSync,
 } from 'fs';
-import {resolve} from 'path';
+import {dirname, resolve} from 'path';
 
 // ---------------------------------------------------------------------------
 // Quiet mode (module-level flag toggled by runBase/runBeads/etc.)
@@ -110,8 +110,49 @@ export function readJson(path: string): Record<string, unknown> | null {
   }
 }
 
+/**
+ * Find the target repo's OWN prettier binary by walking node_modules/.bin
+ * upward from `startDir`. Local-only on purpose: a bunx fallback would fetch
+ * prettier from the registry on every write in a repo that has none —
+ * slow, network-dependent, and formatted with a version the repo never chose.
+ */
+export function findLocalPrettier(startDir: string): string | null {
+  let dir = resolve(startDir);
+  for (;;) {
+    const candidate = resolve(dir, 'node_modules', '.bin', 'prettier');
+    if (existsSync(candidate)) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
+ * Write JSON and immediately format it IN PLACE with the target repo's own
+ * prettier (binary resolved by walking up from the file; config resolved by
+ * prettier itself from the file's location).
+ *
+ * Justin's ruling (2026-08-08, j2n7): ALWAYS format what we write — tool
+ * output must be fully idempotent against a repo where prettier runs on
+ * commit, and most fleet repos have one. Before this, every installer write
+ * left a file the repo's own signal called dirty (the recurring t6a0.13
+ * gotcha).
+ *
+ * No local prettier, or prettier errors → the plain 2-space JSON stands,
+ * silently — exactly the old behavior.
+ */
 export function writeJson(path: string, data: unknown): void {
   writeFileSync(path, JSON.stringify(data, null, 2) + '\n');
+  const prettierBin = findLocalPrettier(dirname(resolve(path)));
+  if (prettierBin == null) return;
+  try {
+    execFileSync(prettierBin, ['--write', '--ignore-unknown', path], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 15_000,
+    });
+  } catch {
+    // Formatting is best-effort; the valid JSON already on disk stands.
+  }
 }
 
 /**

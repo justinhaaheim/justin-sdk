@@ -44,7 +44,7 @@ const INSTALL_PROMPTS_COMMAND = `npx -y git+https://github.com/${PROMPTS_PIN.rep
 
 // Marker file (outside docs/prompts/ so the prompts CLI's wholesale
 // overwrite of that directory doesn't clobber it). Records which SHA was
-// most recently materialized into the project, so `j update` and doctor
+// most recently materialized into the project, so `justin-sdk update` and doctor
 // can detect drift from the SDK's current PROMPTS_PIN.
 const PROMPTS_MARKER_REL_PATH = 'docs/.prompts-installed-from.json';
 
@@ -114,7 +114,7 @@ function stepInstallPromptsScript(projectRoot: string): boolean {
 
 /**
  * Write the drift-detection marker to docs/.prompts-installed-from.json.
- * Records which SHA we just materialized so doctor + `j update` can
+ * Records which SHA we just materialized so doctor + `justin-sdk update` can
  * detect when a project has drifted from the SDK's current pin.
  *
  * Lives outside docs/prompts/ because the prompts CLI may overwrite the

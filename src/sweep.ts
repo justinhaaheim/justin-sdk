@@ -3,7 +3,7 @@
  * (home-base-j2n7, decisions of 2026-08-08).
  *
  * WHAT IT DOES, per enrolled repo: fresh worktree off the local default
- * branch → hydrate → `j update` (self-update the pin + re-apply components)
+ * branch → hydrate → `justin-sdk update` (self-update the pin + re-apply components)
  * → prettier-normalize the SDK-written JSON → gate on the repo's own signal
  * + doctor → commit → merge --ff-only into the default branch → push →
  * clean up. Anything red: STOP that repo, leave the worktree standing for
@@ -300,7 +300,7 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
   // --- Update --------------------------------------------------------------
   // The SWEEP pins the target, deterministically, to ITS OWN version — it IS
   // the latest SDK. Learned live on the first sweep run (raycast-j-recent,
-  // pinned 0.6.1-era): delegating the bump to the TARGET's `j update`
+  // pinned 0.6.1-era): delegating the bump to the TARGET's `justin-sdk update`
   // self-update means trusting every ancient self-update code path in the
   // fleet, and 0.6.1's silently failed to move the pin at all. Pin first,
   // then run the NEW code with --no-self-update — no gh tag query, no old
@@ -343,7 +343,7 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
     worktreePath,
   );
   if (update.exitCode !== 0) {
-    return fail('j update failed — worktree left for inspection');
+    return fail('justin-sdk update failed — worktree left for inspection');
   }
 
   // --- Gates ---------------------------------------------------------------
