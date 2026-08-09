@@ -146,20 +146,25 @@ export function renderPlan(plan: CleanupPlan): string {
     '',
   ];
 
+  // Valid markdown, not markdown-flavoured plain text: a blank line after every
+  // heading, the note as its own paragraph rather than an indented orphan, and
+  // list items at column 0. The reason each item's detail sits on a continuation
+  // line is length — `<branch> -> <target>` plus a full sentence of reasoning on
+  // one line wraps badly in a terminal and reads worse in a renderer.
   const section = (
     title: string,
     actions: PlanAction[],
     note: string,
   ): void => {
-    lines.push(`## ${title} (${actions.length})`);
+    lines.push(`## ${title} (${actions.length})`, '');
     if (actions.length === 0) {
-      lines.push('  none');
-    } else {
-      lines.push(`  ${note}`);
-      for (const a of actions) {
-        const arrow = a.target != null ? ` -> ${a.target}` : '';
-        lines.push(`  - ${a.branch}${arrow}: ${a.reason}`);
-      }
+      lines.push('None.', '');
+      return;
+    }
+    lines.push(`${note}`, '');
+    for (const a of actions) {
+      const arrow = a.target != null ? ` → \`${a.target}\`` : '';
+      lines.push(`- \`${a.branch}\`${arrow}`, `  ${a.reason}`);
     }
     lines.push('');
   };
@@ -167,17 +172,17 @@ export function renderPlan(plan: CleanupPlan): string {
   section(
     'Will run under `apply --safe-only --yes`',
     plan.safe,
-    'renames preserve every commit; the only deletions are branches an archive mirror already holds',
+    'Renames preserve every commit. The only deletions are branches an archive mirror already holds in full.',
   );
   section(
     'Proven safe, left manual',
     plan.manual,
-    'remote refs and checked-out worktrees are never automated',
+    'Remote refs and checked-out worktrees are never automated.',
   );
   section(
     'Needs judgment — NEVER automated',
     plan.needsJudgment,
-    'these are the ones actually worth your attention',
+    'These are the ones actually worth your attention.',
   );
 
   return lines.join('\n').trimEnd();
