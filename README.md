@@ -14,8 +14,8 @@ Haaheim project, run this command first to get your bearings:
 bunx github:justinhaaheim/justin-sdk#main agent
 ```
 
-It prints a self-contained playbook with everything you need — who
-Justin is and what he values, what justin-sdk does, the full workflows
+It prints a self-contained playbook with everything you need — what
+justin-sdk does, the full workflows
 for common tasks (adding beads, migrating from bd, running doctor),
 known gotchas from real migrations, and commit conventions. No other
 context required.
@@ -37,19 +37,19 @@ bunx github:justinhaaheim/justin-sdk#main signal
 If you'd rather install the SDK locally:
 
 ```bash
-bun add github:justinhaaheim/justin-sdk#main
+bun add -d @jhaa/justin-sdk
 # Then, from anywhere in the project:
-bunx @justinhaaheim/justin-sdk doctor
+bunx @jhaa/justin-sdk doctor
 ```
 
 **Never `bunx` a bare name — always name the package.** When `bunx` cannot
 resolve a bare name from a nearby `node_modules/.bin`, it does not fail: it
-treats the name as an npm package and fetches it. `justin-sdk` is unclaimed on
-npm, but **`j` and `jsdk` are both real, unrelated third-party packages** —
+treats the name as an npm package and fetches it. `justin-sdk` is now claimed defensively as a name guard that fails loudly,
+and **`j` and `jsdk` are both real, unrelated third-party packages** —
 measured, both resolve on the registry today. So handing either short name to
 `bunx` can download and execute a stranger's code in any tree where the SDK
 isn't installed: a fresh worktree, a fresh clone, anything pre-install
-(home-base-2qhw). Use exactly two forms: `bunx @justinhaaheim/justin-sdk <cmd>`
+(home-base-2qhw). Use exactly two forms: `bunx @jhaa/justin-sdk <cmd>`
 in a project that has the SDK installed, and `bunx
 github:justinhaaheim/justin-sdk <cmd>` anywhere else.
 
@@ -153,8 +153,8 @@ import type {
   Check,
   CheckNode,
   CheckResult,
-} from '@justinhaaheim/justin-sdk/check-runner';
-import {runChecks, runCheckTree} from '@justinhaaheim/justin-sdk/check-runner';
+} from '@jhaa/justin-sdk/check-runner';
+import {runChecks, runCheckTree} from '@jhaa/justin-sdk/check-runner';
 ```
 
 The `check-runner` module powers doctor and signal. You can use it to

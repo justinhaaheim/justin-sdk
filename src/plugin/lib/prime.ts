@@ -10,9 +10,15 @@
  * Why a managed clone (not the live ~/Dev/prompts working tree): reading the
  * working tree would race with in-progress edits — a session firing the hook
  * mid-edit could compile a half-written state and fail opaquely. Instead we clone
- * once and pull (best-effort, staleness-gated) — oh-my-zsh style. This also works
- * in Claude Code web / remote (public repo, no local checkout needed) and offline
- * (a prior clone keeps working without network).
+ * once and pull (best-effort, staleness-gated) — oh-my-zsh style. It needs no
+ * local checkout, and works offline once cloned (a prior clone keeps working
+ * without network).
+ *
+ * NOTE: the prompts repo is PRIVATE, so the clone requires git credentials
+ * with access. Environments without them (a fresh Claude Code web container,
+ * any non-owner install of this package) degrade to no guidance rather than
+ * failing — see the graceful-degradation paths below. An earlier version of
+ * this comment claimed the repo was public; it never was.
  *
  * Output: `--format markdown` (default) prints human-readable markdown + a status
  * line on stderr. `--format hook` emits the SessionStart JSON envelope with

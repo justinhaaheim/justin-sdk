@@ -1,6 +1,7 @@
 {
   "name": "@jhaa/justin-sdk",
   "version": "1.0.0",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -19,6 +20,7 @@
   "files": [
     "src",
     "templates",
+    "!templates/configs/_reference-home-base-*",
     "docs",
     ".claude-plugin",
     "versions.json"
