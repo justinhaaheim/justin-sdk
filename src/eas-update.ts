@@ -1,7 +1,7 @@
 /**
  * eas-update — publish an EAS update with a standardized, disambiguating
  * message, so the same behavior is available to every project via the CLI
- * (`bunx @justinhaaheim/justin-sdk eas-update <channel>`) instead of a copy-pasted script.
+ * (`bunx @jhaa/justin-sdk eas-update <channel>`) instead of a copy-pasted script.
  *
  * Message format:
  *   <dynamicVersion>-<branch> (<runtime> runtime) - <changelog>

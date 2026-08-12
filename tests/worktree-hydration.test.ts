@@ -301,7 +301,7 @@ describe('primary checkout', () => {
     const primary = makePrimary(sb, {
       packageJson: {
         devDependencies: {
-          '@justinhaaheim/justin-sdk':
+          '@jhaa/justin-sdk':
             'github:justinhaaheim/justin-sdk#v0.15.0',
           'local-pkg': 'file:./packages/local-pkg',
           'ws-pkg': 'workspace:*',
@@ -309,7 +309,7 @@ describe('primary checkout', () => {
         name: 'fixture',
       },
     });
-    installDep(primary, '@justinhaaheim/justin-sdk', '0.1.0');
+    installDep(primary, '@jhaa/justin-sdk', '0.1.0');
     installDep(primary, 'local-pkg', '0.0.0');
     installDep(primary, 'ws-pkg', '9.9.9');
     expect(kinds(detectWorktreeHydration(primary))).toEqual([]);
@@ -374,7 +374,7 @@ describe('linked worktree missing node_modules', () => {
         ? {
             scripts: {
               'signal-source:SENTINEL': `touch ${JSON.stringify(options.sentinel ?? join(sb.path, 'unused'))}; exit 3`,
-              'worktree:setup': 'bunx @justinhaaheim/justin-sdk worktree-setup',
+              'worktree:setup': 'bunx @jhaa/justin-sdk worktree-setup',
             },
           }
         : {};
@@ -443,7 +443,7 @@ describe('linked worktree missing node_modules', () => {
    * (`Run: bun run worktree:setup`), i.e. that a declared alias always wins.
    * That is precisely the unusable state: node_modules is missing in this
    * fixture, so the fleet alias form
-   * `bunx @justinhaaheim/justin-sdk worktree-setup` cannot resolve the SDK
+   * `bunx @jhaa/justin-sdk worktree-setup` cannot resolve the SDK
    * locally and bunx falls through to the registry, where the scoped name is
    * deliberately unpublished. Ruled on home-base-v170.5 (F6): the node-modules
    * problem forces the explicit github form. The rewrite is the finding, not
@@ -458,7 +458,7 @@ describe('linked worktree missing node_modules', () => {
       scripts: Record<string, string>;
     };
     expect(pkg.scripts['worktree:setup']).toBe(
-      'bunx @justinhaaheim/justin-sdk worktree-setup',
+      'bunx @jhaa/justin-sdk worktree-setup',
     );
 
     const result = makeEnvHydrationChecks(wt)[0]?.check.fn?.() as {
@@ -583,7 +583,7 @@ describe('.worktreeinclude missing files', () => {
         devDependencies: {'left-pad': '1.3.0'},
         name: 'fixture',
         scripts: {
-          'worktree:setup': 'bunx @justinhaaheim/justin-sdk worktree-setup',
+          'worktree:setup': 'bunx @jhaa/justin-sdk worktree-setup',
         },
       },
       worktreeinclude: '.env.local\n',
@@ -971,7 +971,7 @@ describe('hydrationFixCommand', () => {
 
   /**
    * F6, THE load-bearing assertion. With node_modules missing, the fleet alias
-   * form `bunx @justinhaaheim/justin-sdk worktree-setup` cannot resolve the SDK
+   * form `bunx @jhaa/justin-sdk worktree-setup` cannot resolve the SDK
    * locally and bunx falls through to the registry, where the scoped name is
    * unpublished — so the alias FAILS in exactly the state the user is stuck in.
    * (Before home-base-2qhw the aliases used the bare, unclaimed name, and this

@@ -194,7 +194,7 @@ function nodeModulesMissing(problems: readonly HydrationProblem[]): boolean {
  *
  * STATE-AWARE, and originally a SAFETY rule rather than an optimization. The
  * fleet convention for a `worktree:setup` alias is
- * `bunx @justinhaaheim/justin-sdk worktree-setup`, which is expected to resolve
+ * `bunx @jhaa/justin-sdk worktree-setup`, which is expected to resolve
  * the SDK out of the project's node_modules. In a worktree where node_modules is
  * MISSING that resolution fails and bunx falls through to the registry.
  *

@@ -258,8 +258,8 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
               ? '.claude/worktrees is ignored only by a non-committed layer (global git ignore or .git/info/exclude) — that does NOT travel with the repo, so EAS Build and fresh clones still archive the worktrees'
               : '.claude/worktrees is not git-ignored';
           return {
-            fix: 'Run: bunx @justinhaaheim/justin-sdk add gitignore (adds .claude/worktrees/ to the committed .gitignore)',
-            fixCommand: 'bunx @justinhaaheim/justin-sdk add gitignore',
+            fix: 'Run: bunx @jhaa/justin-sdk add gitignore (adds .claude/worktrees/ to the committed .gitignore)',
+            fixCommand: 'bunx @jhaa/justin-sdk add gitignore',
             message,
             pass: false,
           };
@@ -528,8 +528,8 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           const installed = readPkgDevDep(projectRoot, 'prettier');
           if (installed == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prettier',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prettier',
+              fix: 'Run: bunx @jhaa/justin-sdk add prettier',
+              fixCommand: 'bunx @jhaa/justin-sdk add prettier',
               message: 'prettier not in package.json devDependencies',
               pass: false,
             };
@@ -552,8 +552,8 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
         fn: (): CheckResult => {
           if (!existsSync(resolve(projectRoot, '.prettierrc.json'))) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prettier',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prettier',
+              fix: 'Run: bunx @jhaa/justin-sdk add prettier',
+              fixCommand: 'bunx @jhaa/justin-sdk add prettier',
               message: '.prettierrc.json not found',
               pass: false,
             };
@@ -569,8 +569,8 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           const prettierIgnore = resolve(projectRoot, '.prettierignore');
           if (!existsSync(prettierIgnore)) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prettier',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prettier',
+              fix: 'Run: bunx @jhaa/justin-sdk add prettier',
+              fixCommand: 'bunx @jhaa/justin-sdk add prettier',
               message: '.prettierignore not found',
               pass: false,
             };
@@ -578,8 +578,8 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           const content = readFileSync(prettierIgnore, 'utf-8');
           if (!content.includes('.beads')) {
             return {
-              fix: 'Add .beads to .prettierignore (or re-run: bunx @justinhaaheim/justin-sdk add prettier)',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prettier',
+              fix: 'Add .beads to .prettierignore (or re-run: bunx @jhaa/justin-sdk add prettier)',
+              fixCommand: 'bunx @jhaa/justin-sdk add prettier',
               message: '.prettierignore does not include .beads',
               pass: false,
             };
@@ -595,8 +595,8 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           const script = readPkgScript(projectRoot, 'signal-source:PRETTIER');
           if (script == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prettier',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prettier',
+              fix: 'Run: bunx @jhaa/justin-sdk add prettier',
+              fixCommand: 'bunx @jhaa/justin-sdk add prettier',
               message: 'package.json missing signal-source:PRETTIER script',
               pass: false,
             };
@@ -612,8 +612,8 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           const script = readPkgScript(projectRoot, 'fix-source:PRETTIER');
           if (script == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prettier',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prettier',
+              fix: 'Run: bunx @jhaa/justin-sdk add prettier',
+              fixCommand: 'bunx @jhaa/justin-sdk add prettier',
               message: 'package.json missing fix-source:PRETTIER script',
               pass: false,
             };
@@ -638,8 +638,8 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
           const version = readPkgDevDep(projectRoot, 'typescript');
           if (version == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add tsconfig',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add tsconfig',
+              fix: 'Run: bunx @jhaa/justin-sdk add tsconfig',
+              fixCommand: 'bunx @jhaa/justin-sdk add tsconfig',
               message: 'typescript is not in devDependencies',
               pass: false,
             };
@@ -663,8 +663,8 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
           const version = readPkgDevDep(projectRoot, '@types/bun');
           if (version == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add tsconfig',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add tsconfig',
+              fix: 'Run: bunx @jhaa/justin-sdk add tsconfig',
+              fixCommand: 'bunx @jhaa/justin-sdk add tsconfig',
               message: '@types/bun is not in devDependencies',
               pass: false,
             };
@@ -679,8 +679,8 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
         fn: (): CheckResult => {
           if (!existsSync(resolve(projectRoot, 'tsconfig.json'))) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add tsconfig',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add tsconfig',
+              fix: 'Run: bunx @jhaa/justin-sdk add tsconfig',
+              fixCommand: 'bunx @jhaa/justin-sdk add tsconfig',
               message: 'tsconfig.json not found at project root',
               pass: false,
             };
@@ -730,8 +730,8 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
           const script = readPkgScript(projectRoot, 'signal-source:TS');
           if (script == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add tsconfig',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add tsconfig',
+              fix: 'Run: bunx @jhaa/justin-sdk add tsconfig',
+              fixCommand: 'bunx @jhaa/justin-sdk add tsconfig',
               message: 'package.json missing signal-source:TS script',
               pass: false,
             };
@@ -756,8 +756,8 @@ function makeGhActionsChecks(projectRoot: string): CheckNode[] {
           const workflow = resolve(projectRoot, '.github/workflows/signal.yml');
           if (!existsSync(workflow)) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add gh-actions',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add gh-actions',
+              fix: 'Run: bunx @jhaa/justin-sdk add gh-actions',
+              fixCommand: 'bunx @jhaa/justin-sdk add gh-actions',
               message: '.github/workflows/signal.yml not found',
               pass: false,
             };
@@ -778,7 +778,7 @@ function makeGhActionsChecks(projectRoot: string): CheckNode[] {
               const content = readFileSync(workflow, 'utf-8');
               if (!content.includes('oven-sh/setup-bun')) {
                 return {
-                  fix: 'Re-install with: bunx @justinhaaheim/justin-sdk add gh-actions --force',
+                  fix: 'Re-install with: bunx @jhaa/justin-sdk add gh-actions --force',
                   message:
                     '.github/workflows/signal.yml does not use oven-sh/setup-bun — may be a custom workflow',
                   pass: false,
@@ -805,8 +805,8 @@ function makePromptsChecks(projectRoot: string): CheckNode[] {
         fn: (): CheckResult => {
           if (!existsSync(resolve(projectRoot, 'docs/prompts'))) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prompts',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prompts',
+              fix: 'Run: bunx @jhaa/justin-sdk add prompts',
+              fixCommand: 'bunx @jhaa/justin-sdk add prompts',
               message: 'docs/prompts/ not found',
               pass: false,
             };
@@ -828,8 +828,8 @@ function makePromptsChecks(projectRoot: string): CheckNode[] {
                 )
               ) {
                 return {
-                  fix: 'Run: bunx @justinhaaheim/justin-sdk add prompts',
-                  fixCommand: 'bunx @justinhaaheim/justin-sdk add prompts',
+                  fix: 'Run: bunx @jhaa/justin-sdk add prompts',
+                  fixCommand: 'bunx @jhaa/justin-sdk add prompts',
                   message:
                     'docs/prompts/IMPORTANT_GUIDELINES_INLINED.md not found',
                   pass: false,
@@ -848,8 +848,8 @@ function makePromptsChecks(projectRoot: string): CheckNode[] {
           const script = readPkgScript(projectRoot, 'install-my-prompts');
           if (script == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prompts',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prompts',
+              fix: 'Run: bunx @jhaa/justin-sdk add prompts',
+              fixCommand: 'bunx @jhaa/justin-sdk add prompts',
               message:
                 'package.json is missing the "install-my-prompts" script',
               pass: false,
@@ -869,8 +869,8 @@ function makePromptsChecks(projectRoot: string): CheckNode[] {
           );
           if (!existsSync(markerPath)) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prompts --force',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prompts --force',
+              fix: 'Run: bunx @jhaa/justin-sdk add prompts --force',
+              fixCommand: 'bunx @jhaa/justin-sdk add prompts --force',
               message:
                 'docs/.prompts-installed-from.json not found — prompts version unknown',
               pass: false,
@@ -882,8 +882,8 @@ function makePromptsChecks(projectRoot: string): CheckNode[] {
             };
             if (marker.sha !== PROMPTS_PIN.sha) {
               return {
-                fix: `Run: bunx @justinhaaheim/justin-sdk add prompts (currently ${marker.sha ?? '?'}, pinned ${PROMPTS_PIN.sha})`,
-                fixCommand: 'bunx @justinhaaheim/justin-sdk add prompts',
+                fix: `Run: bunx @jhaa/justin-sdk add prompts (currently ${marker.sha ?? '?'}, pinned ${PROMPTS_PIN.sha})`,
+                fixCommand: 'bunx @jhaa/justin-sdk add prompts',
                 message: `prompts at ${marker.sha ?? '?'}, SDK pins ${PROMPTS_PIN.sha}`,
                 pass: false,
               };
@@ -891,8 +891,8 @@ function makePromptsChecks(projectRoot: string): CheckNode[] {
             return {pass: true};
           } catch {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prompts --force',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prompts --force',
+              fix: 'Run: bunx @jhaa/justin-sdk add prompts --force',
+              fixCommand: 'bunx @jhaa/justin-sdk add prompts --force',
               message:
                 'docs/.prompts-installed-from.json is malformed — re-install prompts',
               pass: false,
@@ -910,7 +910,7 @@ function makePromptsChecks(projectRoot: string): CheckNode[] {
 
 function makeGitignoreChecks(projectRoot: string): CheckNode[] {
   const gitignorePath = resolve(projectRoot, '.gitignore');
-  const FIX_CMD = 'bunx @justinhaaheim/justin-sdk add gitignore';
+  const FIX_CMD = 'bunx @jhaa/justin-sdk add gitignore';
 
   function readGitignore(): string | null {
     if (!existsSync(gitignorePath)) return null;
@@ -1005,8 +1005,8 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
           const installed = readPkgDevDep(projectRoot, 'eslint');
           if (installed == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add eslint',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add eslint',
+              fix: 'Run: bunx @jhaa/justin-sdk add eslint',
+              fixCommand: 'bunx @jhaa/justin-sdk add eslint',
               message: 'eslint not in package.json devDependencies',
               pass: false,
             };
@@ -1033,8 +1033,8 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
           );
           if (installed == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add eslint',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add eslint',
+              fix: 'Run: bunx @jhaa/justin-sdk add eslint',
+              fixCommand: 'bunx @jhaa/justin-sdk add eslint',
               message:
                 'eslint-config-jha-react-node not in package.json devDependencies',
               pass: false,
@@ -1061,8 +1061,8 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
           );
           if (found == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add eslint',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add eslint',
+              fix: 'Run: bunx @jhaa/justin-sdk add eslint',
+              fixCommand: 'bunx @jhaa/justin-sdk add eslint',
               message:
                 'No eslint config found (looked for eslint.config.cjs, .js, .mjs)',
               pass: false,
@@ -1079,8 +1079,8 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
           const script = readPkgScript(projectRoot, 'signal-source:LINT');
           if (script == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add eslint',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add eslint',
+              fix: 'Run: bunx @jhaa/justin-sdk add eslint',
+              fixCommand: 'bunx @jhaa/justin-sdk add eslint',
               message: 'package.json missing signal-source:LINT script',
               pass: false,
             };
@@ -1096,8 +1096,8 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
           const script = readPkgScript(projectRoot, 'fix-source:LINT');
           if (script == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add eslint',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add eslint',
+              fix: 'Run: bunx @jhaa/justin-sdk add eslint',
+              fixCommand: 'bunx @jhaa/justin-sdk add eslint',
               message: 'package.json missing fix-source:LINT script',
               pass: false,
             };
@@ -1115,7 +1115,7 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
 
 function makeClaudeMdChecks(projectRoot: string): CheckNode[] {
   const claudeMdPath = resolve(projectRoot, 'CLAUDE.md');
-  const FIX_CMD = 'bunx @justinhaaheim/justin-sdk add claude-md';
+  const FIX_CMD = 'bunx @jhaa/justin-sdk add claude-md';
   const PROMPTS_REF = '@docs/prompts/IMPORTANT_GUIDELINES_INLINED.md';
 
   return [
@@ -1162,7 +1162,7 @@ function makeClaudeMdChecks(projectRoot: string): CheckNode[] {
 // ---------------------------------------------------------------------------
 
 function makeHuskyChecks(projectRoot: string): CheckNode[] {
-  const FIX_CMD = 'bunx @justinhaaheim/justin-sdk add husky';
+  const FIX_CMD = 'bunx @jhaa/justin-sdk add husky';
   return [
     {
       check: {

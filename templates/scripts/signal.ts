@@ -10,9 +10,9 @@
  *   bun scripts/signal.ts --serial  # Sequential execution
  */
 
-import type {Check} from '@justinhaaheim/justin-sdk/check-runner';
+import type {Check} from '@jhaa/justin-sdk/check-runner';
 
-import {runChecks} from '@justinhaaheim/justin-sdk/check-runner';
+import {runChecks} from '@jhaa/justin-sdk/check-runner';
 
 const checks: Check[] = [
   {command: 'bun run ts-check', label: 'TS'},

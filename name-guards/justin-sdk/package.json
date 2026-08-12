@@ -1,0 +1,22 @@
+{
+  "name": "justin-sdk",
+  "version": "1.0.0",
+  "description": "Name guard. The real package is @jhaa/justin-sdk — this exists only so the unscoped name cannot be squatted.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/justinhaaheim/justin-sdk.git",
+    "directory": "name-guards/justin-sdk"
+  },
+  "bin": {
+    "justin-sdk": "./bin/moved.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "keywords": [
+    "moved",
+    "renamed",
+    "placeholder"
+  ]
+}

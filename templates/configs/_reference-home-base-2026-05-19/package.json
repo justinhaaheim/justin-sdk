@@ -46,7 +46,7 @@
     "projects/justin-sdk"
   ],
   "dependencies": {
-    "@justinhaaheim/justin-sdk": "workspace:*",
+    "@jhaa/justin-sdk": "workspace:*",
     "@justinhaaheim/version-manager": "github:justinhaaheim/version-manager#0.4.6",
     "date-fns": "^4.1.0",
     "date-fns-tz": "^3.2.0",

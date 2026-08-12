@@ -17,8 +17,7 @@ import {resolve} from 'path';
 
 import {exec, fail, success, warn} from './setup-helpers';
 
-const SDK_PKG = '@justinhaaheim/justin-sdk';
-const SDK_REPO = 'justinhaaheim/justin-sdk';
+import {SDK_PKG, SDK_REPO} from './package-identity';
 
 export interface SelfUpdateResult {
   updated: boolean;
@@ -136,7 +135,7 @@ export async function selfUpdateSdk(
   if (previousVersion == null) {
     fail(
       `${SDK_PKG} is not installed in this project. ` +
-        'Run `bunx @justinhaaheim/justin-sdk add base-setup` to bootstrap, then re-run update.',
+        'Run `bunx @jhaa/justin-sdk add base-setup` to bootstrap, then re-run update.',
     );
     return {
       updated: false,

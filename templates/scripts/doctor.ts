@@ -10,13 +10,13 @@
  *   bun scripts/doctor.ts --quiet   # Summary only
  */
 
-import type {Check, CheckResult} from '@justinhaaheim/justin-sdk/check-runner';
+import type {Check, CheckResult} from '@jhaa/justin-sdk/check-runner';
 
 import {execSync} from 'child_process';
 import {existsSync, readFileSync} from 'fs';
 import {resolve} from 'path';
 
-import {runChecks} from '@justinhaaheim/justin-sdk/check-runner';
+import {runChecks} from '@jhaa/justin-sdk/check-runner';
 
 const PROJECT_ROOT = resolve(import.meta.dirname, '..');
 

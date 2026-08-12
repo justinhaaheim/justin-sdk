@@ -103,12 +103,10 @@ describe('base-setup', () => {
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
 
-    expect(pkg.scripts?.signal).toContain('bunx @justinhaaheim/justin-sdk');
-    expect(pkg.scripts?.doctor).toContain('bunx @justinhaaheim/justin-sdk');
+    expect(pkg.scripts?.signal).toContain('bunx @jhaa/justin-sdk');
+    expect(pkg.scripts?.doctor).toContain('bunx @jhaa/justin-sdk');
     // j2n7: the alias invokes the SDK command, not a committed copy.
-    expect(pkg.scripts?.['setup-env']).toBe(
-      'bunx @justinhaaheim/justin-sdk setup-env',
-    );
+    expect(pkg.scripts?.['setup-env']).toBe('bunx @jhaa/justin-sdk setup-env');
   });
 
   test('overwrites stale SDK scripts that point at node_modules path', async () => {
@@ -118,9 +116,8 @@ describe('base-setup', () => {
           name: 'test',
           scripts: {
             signal:
-              'bun node_modules/@justinhaaheim/justin-sdk/src/cli.ts signal --quiet',
-            doctor:
-              'bun node_modules/@justinhaaheim/justin-sdk/src/cli.ts doctor',
+              'bun node_modules/@jhaa/justin-sdk/src/cli.ts signal --quiet',
+            doctor: 'bun node_modules/@jhaa/justin-sdk/src/cli.ts doctor',
           },
         },
       }),
@@ -130,10 +127,8 @@ describe('base-setup', () => {
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
-    expect(pkg.scripts?.signal).toBe(
-      'bunx @justinhaaheim/justin-sdk signal --quiet',
-    );
-    expect(pkg.scripts?.doctor).toBe('bunx @justinhaaheim/justin-sdk doctor');
+    expect(pkg.scripts?.signal).toBe('bunx @jhaa/justin-sdk signal --quiet');
+    expect(pkg.scripts?.doctor).toBe('bunx @jhaa/justin-sdk doctor');
   });
 
   test('migrates BARE bunx aliases (bunx justin-sdk/jsdk/j) to the scoped name — the 2qhw hazard', async () => {
@@ -156,13 +151,58 @@ describe('base-setup', () => {
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
-    expect(pkg.scripts?.signal).toBe(
-      'bunx @justinhaaheim/justin-sdk signal --quiet',
-    );
-    expect(pkg.scripts?.doctor).toBe('bunx @justinhaaheim/justin-sdk doctor');
-    expect(pkg.scripts?.fix).toBe('bunx @justinhaaheim/justin-sdk fix');
+    expect(pkg.scripts?.signal).toBe('bunx @jhaa/justin-sdk signal --quiet');
+    expect(pkg.scripts?.doctor).toBe('bunx @jhaa/justin-sdk doctor');
+    expect(pkg.scripts?.fix).toBe('bunx @jhaa/justin-sdk fix');
     expect(pkg.scripts?.['signal:custom']).toBe(
       'bunx justin-sdk-lookalike thing',
+    );
+  });
+
+  test('migrates the legacy @justinhaaheim scope to @jhaa, CARRYING the existing spec', async () => {
+    const sb = track(
+      createProjectSandbox({
+        packageJson: {
+          name: 'test',
+          // A project deliberately on workspace:* must keep that spec — the
+          // NAME is ours to change, the SPEC is the project's decision.
+          devDependencies: {'@justinhaaheim/justin-sdk': 'workspace:*'},
+          scripts: {signal: 'bunx @justinhaaheim/justin-sdk signal --quiet'},
+        },
+      }),
+    );
+    await runBaseSetup({projectRoot: sb.path, quiet: true});
+
+    const pkg = JSON.parse(
+      readFileSync(join(sb.path, 'package.json'), 'utf-8'),
+    ) as {
+      devDependencies?: Record<string, string>;
+      scripts?: Record<string, string>;
+    };
+    expect(pkg.devDependencies?.['@justinhaaheim/justin-sdk']).toBeUndefined();
+    expect(pkg.devDependencies?.['@jhaa/justin-sdk']).toBe('workspace:*');
+    expect(pkg.scripts?.signal).toBe('bunx @jhaa/justin-sdk signal --quiet');
+  });
+
+  test('a legacy github: pin is carried across the rename verbatim (not re-derived)', async () => {
+    const sb = track(
+      createProjectSandbox({
+        packageJson: {
+          name: 'test',
+          devDependencies: {
+            '@justinhaaheim/justin-sdk':
+              'github:justinhaaheim/justin-sdk#v0.9.0',
+          },
+        },
+      }),
+    );
+    await runBaseSetup({projectRoot: sb.path, quiet: true});
+
+    const pkg = JSON.parse(
+      readFileSync(join(sb.path, 'package.json'), 'utf-8'),
+    ) as {devDependencies?: Record<string, string>};
+    expect(pkg.devDependencies?.['@jhaa/justin-sdk']).toBe(
+      'github:justinhaaheim/justin-sdk#v0.9.0',
     );
   });
 
@@ -183,9 +223,7 @@ describe('base-setup', () => {
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
     // The old value points at a file stepSetupEnvScript deletes this same run.
-    expect(pkg.scripts?.['setup-env']).toBe(
-      'bunx @justinhaaheim/justin-sdk setup-env',
-    );
+    expect(pkg.scripts?.['setup-env']).toBe('bunx @jhaa/justin-sdk setup-env');
   });
 
   test('preserves existing signal-source:* scripts (does not clobber)', async () => {
@@ -261,7 +299,7 @@ describe('base-setup', () => {
     expect(existsSync(join(sb.path, 'scripts/setup-env.ts'))).toBe(false);
   });
 
-  test('adds @justinhaaheim/justin-sdk to devDependencies when missing', async () => {
+  test('adds @jhaa/justin-sdk to devDependencies when missing', async () => {
     const sb = track(createProjectSandbox());
     await runBaseSetup({projectRoot: sb.path, quiet: true});
 
@@ -271,7 +309,7 @@ describe('base-setup', () => {
       dependencies?: Record<string, string>;
       devDependencies?: Record<string, string>;
     };
-    expect(pkg.devDependencies?.['@justinhaaheim/justin-sdk']).toMatch(
+    expect(pkg.devDependencies?.['@jhaa/justin-sdk']).toMatch(
       /^github:justinhaaheim\/justin-sdk#/,
     );
   });
@@ -281,7 +319,7 @@ describe('base-setup', () => {
       createProjectSandbox({
         packageJson: {
           name: 'test',
-          dependencies: {'@justinhaaheim/justin-sdk': 'workspace:*'},
+          dependencies: {'@jhaa/justin-sdk': 'workspace:*'},
         },
       }),
     );
@@ -293,8 +331,8 @@ describe('base-setup', () => {
       dependencies?: Record<string, string>;
       devDependencies?: Record<string, string>;
     };
-    expect(pkg.dependencies?.['@justinhaaheim/justin-sdk']).toBe('workspace:*');
-    expect(pkg.devDependencies?.['@justinhaaheim/justin-sdk']).toBeUndefined();
+    expect(pkg.dependencies?.['@jhaa/justin-sdk']).toBe('workspace:*');
+    expect(pkg.devDependencies?.['@jhaa/justin-sdk']).toBeUndefined();
   });
 
   test('rewrites stale local script wirings (bun scripts/doctor.ts → bunx)', async () => {
@@ -317,18 +355,16 @@ describe('base-setup', () => {
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
-    expect(pkg.scripts?.doctor).toBe('bunx @justinhaaheim/justin-sdk doctor');
+    expect(pkg.scripts?.doctor).toBe('bunx @jhaa/justin-sdk doctor');
     expect(pkg.scripts?.['doctor:fix']).toBe(
-      'bunx @justinhaaheim/justin-sdk doctor --fix',
+      'bunx @jhaa/justin-sdk doctor --fix',
     );
-    expect(pkg.scripts?.signal).toBe(
-      'bunx @justinhaaheim/justin-sdk signal --quiet',
-    );
+    expect(pkg.scripts?.signal).toBe('bunx @jhaa/justin-sdk signal --quiet');
     expect(pkg.scripts?.['signal:verbose']).toBe(
-      'bunx @justinhaaheim/justin-sdk signal',
+      'bunx @jhaa/justin-sdk signal',
     );
     expect(pkg.scripts?.['signal:serial']).toBe(
-      'bunx @justinhaaheim/justin-sdk signal --serial',
+      'bunx @jhaa/justin-sdk signal --serial',
     );
   });
 

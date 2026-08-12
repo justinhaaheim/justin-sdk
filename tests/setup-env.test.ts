@@ -163,7 +163,7 @@ describe('discoverHydrationScripts', () => {
       'package.json',
       JSON.stringify({
         scripts: {
-          'setup-env': 'bunx @justinhaaheim/justin-sdk setup-env',
+          'setup-env': 'bunx @jhaa/justin-sdk setup-env',
           'setup-env:REAL': 'true',
         },
       }),

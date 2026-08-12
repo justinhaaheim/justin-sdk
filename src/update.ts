@@ -97,7 +97,7 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
   if (!existsSync(configPath)) {
     fail(
       'justin-sdk.config.json not found. ' +
-        'Run `bunx @justinhaaheim/justin-sdk init` (greenfield) or `bunx @justinhaaheim/justin-sdk add base-setup` first.',
+        'Run `bunx @jhaa/justin-sdk init` (greenfield) or `bunx @jhaa/justin-sdk add base-setup` first.',
     );
     return 1;
   }
@@ -234,7 +234,7 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
     setQuiet(quiet);
     if (doctorExit !== 0) {
       warn(
-        'doctor reported issues — run `bunx @justinhaaheim/justin-sdk doctor` for details.',
+        'doctor reported issues — run `bunx @jhaa/justin-sdk doctor` for details.',
       );
     } else {
       success('All doctor checks passed');

@@ -60,7 +60,7 @@ export interface InitOptions {
   skipInstall?: boolean;
   /** Skip fetching the prompts library (forwarded to runPromptsSetup) */
   skipPromptsFetch?: boolean;
-  /** Skip the `bunx @justinhaaheim/justin-sdk doctor` self-check at the end (default false) */
+  /** Skip the `bunx @jhaa/justin-sdk doctor` self-check at the end (default false) */
   skipDoctor?: boolean;
 }
 
@@ -211,7 +211,7 @@ export async function runInit(options: InitOptions = {}): Promise<number> {
     setQuiet(quiet);
     if (doctorExit !== 0) {
       warn(
-        'doctor reported issues; review and re-run components or run `bunx @justinhaaheim/justin-sdk doctor` for details.',
+        'doctor reported issues; review and re-run components or run `bunx @jhaa/justin-sdk doctor` for details.',
       );
     } else {
       success('All doctor checks passed');

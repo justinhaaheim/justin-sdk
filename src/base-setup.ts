@@ -4,7 +4,7 @@
  *
  * Installs:
  *  - justin-sdk.config.json at project root (tracks SDK version + components)
- *  - package.json scripts (signal/doctor/setup-env using bunx @justinhaaheim/justin-sdk)
+ *  - package.json scripts (signal/doctor/setup-env using bunx @jhaa/justin-sdk)
  *  - .gitignore entries (tmp/, dynamic-version.local.*, .beads/.br_recovery/)
  *  - .claude/settings.json with sandbox.excludedCommands scaffolding
  *    and the j2n7 SessionStart hook line (remote: setup-env bootstrap;
@@ -24,6 +24,7 @@ import {createHash} from 'crypto';
 import {existsSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {basename, resolve} from 'path';
 
+import {LEGACY_BUNX_RE, LEGACY_SDK_PKGS, SDK_PKG} from './package-identity';
 import {
   appendIfMissing,
   ensureDir,
@@ -51,13 +52,13 @@ const DEFAULT_SIGNAL_SOURCE_SCRIPTS: Record<string, string> = {
 };
 
 const SDK_SCRIPTS: Record<string, string> = {
-  'setup-env': 'bunx @justinhaaheim/justin-sdk setup-env',
-  signal: 'bunx @justinhaaheim/justin-sdk signal --quiet',
-  'signal:verbose': 'bunx @justinhaaheim/justin-sdk signal',
-  'signal:serial': 'bunx @justinhaaheim/justin-sdk signal --serial',
-  doctor: 'bunx @justinhaaheim/justin-sdk doctor',
-  'doctor:fix': 'bunx @justinhaaheim/justin-sdk doctor --fix',
-  fix: 'bunx @justinhaaheim/justin-sdk fix',
+  'setup-env': 'bunx @jhaa/justin-sdk setup-env',
+  signal: 'bunx @jhaa/justin-sdk signal --quiet',
+  'signal:verbose': 'bunx @jhaa/justin-sdk signal',
+  'signal:serial': 'bunx @jhaa/justin-sdk signal --serial',
+  doctor: 'bunx @jhaa/justin-sdk doctor',
+  'doctor:fix': 'bunx @jhaa/justin-sdk doctor --fix',
+  fix: 'bunx @jhaa/justin-sdk fix',
 };
 
 /**
@@ -76,7 +77,7 @@ const SDK_SCRIPTS: Record<string, string> = {
  *    hard hook error.
  */
 export const SESSION_START_HOOK_COMMAND =
-  'if [ "$CLAUDE_CODE_REMOTE" = "true" ]; then bunx github:justinhaaheim/justin-sdk setup-env; else bunx @justinhaaheim/justin-sdk doctor --quiet || true; fi';
+  'if [ "$CLAUDE_CODE_REMOTE" = "true" ]; then bunx github:justinhaaheim/justin-sdk setup-env; else bunx @jhaa/justin-sdk doctor --quiet || true; fi';
 
 /**
  * Create justin-sdk.config.json with sensible defaults if missing.
@@ -171,24 +172,25 @@ export function stepPackageScripts(projectRoot: string): boolean {
   //     (pre-SDK / pre-j2n7 patterns; setup-env.ts is DELETED by
   //     stepSetupEnvScript this same run, so an un-migrated alias would point
   //     at a missing file)
-  //   - Uses a BARE bunx name (`bunx justin-sdk`/`jsdk`/`j`) — the banned
-  //     pre-scope generation (home-base-2qhw): when local resolution fails,
-  //     a bare name falls through to the public npm registry, i.e. the
-  //     standard dependency-confusion shape. Found surviving the first live
-  //     sweep (ratchet finding #7); these are SDK-emitted values, never
-  //     hand-written, so rewriting is safe.
+  //   - Names the SDK under any LEGACY package name (see package-identity):
+  //     the pre-2026-08-12 scope `@justinhaaheim/justin-sdk`, or a BARE bunx
+  //     name (`justin-sdk`/`jsdk`/`j`) — the banned pre-scope generation
+  //     (home-base-2qhw), where a failed local resolution falls through to
+  //     the public npm registry, i.e. the standard dependency-confusion
+  //     shape. All are SDK-emitted values, never hand-written, so rewriting
+  //     is safe; a lookalike (`bunx justin-sdk-other`) is not matched.
   // Custom values that don't match a stale shape are preserved (e.g.,
   // apple-reminders-mcp's `signal: "bun run prettier-check"`).
   const STALE_LOCAL_SCRIPT_RE =
     /^bun(?:x)?\s+(?:run\s+)?(?:"\$CLAUDE_PROJECT_DIR\/)?scripts\/(?:doctor|signal|check-runner|setup-env)\.ts"?(?:\s.*)?$/;
-  const STALE_BARE_BUNX_RE = /^bunx\s+(?:justin-sdk|jsdk|j)\s/;
   for (const [name, cmd] of Object.entries(SDK_SCRIPTS)) {
     const existing = scripts[name];
     const isStaleSdkScript =
       existing != null &&
-      (existing.includes('node_modules/@justinhaaheim/justin-sdk') ||
+      (existing.includes('node_modules/@jhaa/justin-sdk') ||
+        existing.includes('node_modules/@justinhaaheim/justin-sdk') ||
         STALE_LOCAL_SCRIPT_RE.test(existing) ||
-        STALE_BARE_BUNX_RE.test(existing));
+        LEGACY_BUNX_RE.test(existing));
     if (existing == null || isStaleSdkScript) {
       scripts[name] = cmd;
       modified = true;
@@ -295,7 +297,7 @@ export function stepSetupEnvScript(
   warn(
     'scripts/setup-env.ts differs from every known SDK template (hand-modified). ' +
       'Move project-specific logic into setup-env:<LABEL> package.json scripts ' +
-      '(run by `bunx @justinhaaheim/justin-sdk setup-env` in declaration order), ' +
+      '(run by `bunx @jhaa/justin-sdk setup-env` in declaration order), ' +
       'then delete the file or re-run with --force.',
   );
   return true;
@@ -389,10 +391,10 @@ export function stepClaudeSettings(projectRoot: string): boolean {
 }
 
 /**
- * Ensure `@justinhaaheim/justin-sdk` is declared as a dependency in
+ * Ensure `@jhaa/justin-sdk` is declared as a dependency in
  * package.json so that fresh installs (especially Claude web session VMs)
  * actually link the SDK locally. Without it the script aliases have nothing
- * to resolve against, and `bunx @justinhaaheim/justin-sdk …` degrades to a
+ * to resolve against, and `bunx @jhaa/justin-sdk …` degrades to a
  * registry lookup of an unpublished scoped name — i.e. it FAILS, which is the
  * intended posture (home-base-2qhw) but still a broken project. Pins to the
  * currently-running SDK version.
@@ -414,12 +416,27 @@ export function stepDepsHasSdk(projectRoot: string): boolean {
     return false;
   }
 
-  const SDK_PKG = '@justinhaaheim/justin-sdk';
   const deps = (pkg.dependencies as Record<string, string> | undefined) ?? {};
   const devDeps =
     (pkg.devDependencies as Record<string, string> | undefined) ?? {};
 
-  if (SDK_PKG in deps || SDK_PKG in devDeps) {
+  // RENAME MIGRATION (2026-08-12): carry the existing SPEC across from a
+  // legacy package name rather than re-deriving one. A project deliberately
+  // on `workspace:*` or a `file:` path must not be silently flipped to a
+  // github ref just because the package was renamed — the spec is the
+  // project's decision, the NAME is ours.
+  let carriedSpec: string | null = null;
+  for (const legacy of LEGACY_SDK_PKGS) {
+    for (const table of [deps, devDeps]) {
+      if (legacy in table) {
+        carriedSpec ??= table[legacy] ?? null;
+        delete table[legacy];
+        success(`Migrated dependency ${legacy} → ${SDK_PKG}`);
+      }
+    }
+  }
+
+  if ((SDK_PKG in deps || SDK_PKG in devDeps) && carriedSpec == null) {
     success(`${SDK_PKG} already declared as a dependency`);
     return true;
   }
@@ -428,14 +445,19 @@ export function stepDepsHasSdk(projectRoot: string): boolean {
   // 404'd (no such tag) and, worse, silently resolved a POISONED duplicate
   // tag pointing at the wrong tree. The release convention is vX.Y.Z.
   const sdkVersion = getSdkVersion();
-  const ref = `github:justinhaaheim/justin-sdk#v${sdkVersion}`;
-  devDeps[SDK_PKG] = ref;
+  const ref = carriedSpec ?? `github:justinhaaheim/justin-sdk#v${sdkVersion}`;
+  if (SDK_PKG in deps) {
+    deps[SDK_PKG] = ref;
+  } else {
+    devDeps[SDK_PKG] = ref;
+  }
+  if (Object.keys(deps).length > 0) pkg.dependencies = deps;
   pkg.devDependencies = devDeps;
   writeJson(pkgPath, pkg);
-  success(`Added ${SDK_PKG} to devDependencies (${ref})`);
+  success(`Declared ${SDK_PKG} (${ref})`);
   warn(
     'Run `bun install` to fetch the SDK locally. Without it, the ' +
-      '`bunx @justinhaaheim/justin-sdk …` aliases have nothing to resolve ' +
+      '`bunx @jhaa/justin-sdk …` aliases have nothing to resolve ' +
       'against and will fail.',
   );
   return true;
@@ -483,7 +505,7 @@ export async function runBaseSetup(
   stepHeader('1. justin-sdk.config.json');
   if (!stepJustinSdkConfig(projectRoot, extraComponents)) return 1;
 
-  stepHeader('2. package.json: @justinhaaheim/justin-sdk dep');
+  stepHeader('2. package.json: @jhaa/justin-sdk dep');
   if (!stepDepsHasSdk(projectRoot)) return 1;
 
   stepHeader('3. package.json scripts');

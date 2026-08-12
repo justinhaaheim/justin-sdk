@@ -59,8 +59,8 @@ export function prettierMarkdown(markdown: string): string {
 }
 
 /**
- * Universal invocations. `@justinhaaheim/justin-sdk` is a GitHub package (not on
- * npm), so `bunx @justinhaaheim/justin-sdk …` only resolves in a project that
+ * Universal invocations. `@jhaa/justin-sdk` is a GitHub package (not on
+ * npm), so `bunx @jhaa/justin-sdk …` only resolves in a project that
  * has it as a devDep. The `github:` spec works from ANY project, so it's what we
  * tell the user to run. (Where the devDep exists, the scoped form also works —
  * and the BARE name is never used anywhere: it falls through to the npm registry,

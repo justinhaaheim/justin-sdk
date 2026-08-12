@@ -109,7 +109,7 @@ the SDK already has it, and prefer adding it here over forking it there.
 ## Two ways it runs
 
 1. AS AN INSTALLED DEPENDENCY (the normal case). Projects declare
-   \`@justinhaaheim/justin-sdk\` in devDependencies and call \`bunx justin-sdk <cmd>\`.
+   \`@jhaa/justin-sdk\` in devDependencies and call \`bunx justin-sdk <cmd>\`.
    \`bunx\` finds the LOCAL copy in node_modules — no network, fast enough for a
    per-prompt hook (~80ms).
 

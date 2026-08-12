@@ -2,7 +2,7 @@
  * Tests for selfUpdateSdk. Network and `gh` calls are not mocked; the
  * test exercises the failure-mode paths that don't require either:
  *
- *  - missing node_modules/@justinhaaheim/justin-sdk → returns the
+ *  - missing node_modules/@jhaa/justin-sdk → returns the
  *    "not installed" shape
  *  - malformed installed package.json → returns null previousVersion
  *
@@ -101,7 +101,7 @@ describe('selfUpdateSdk', () => {
   test('returns null previousVersion when SDK package.json is malformed', async () => {
     const sb = track(createProjectSandbox());
     sb.writeFile(
-      'node_modules/@justinhaaheim/justin-sdk/package.json',
+      'node_modules/@jhaa/justin-sdk/package.json',
       'not json',
     );
 

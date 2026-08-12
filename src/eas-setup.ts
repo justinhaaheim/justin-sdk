@@ -3,7 +3,7 @@
  * a project's package.json, so they are uniform across projects instead of
  * copy-pasted and hand-maintained.
  *
- * The update/ship scripts delegate to the shared `bunx @justinhaaheim/justin-sdk eas-update`
+ * The update/ship scripts delegate to the shared `bunx @jhaa/justin-sdk eas-update`
  * CLI command (there is no per-project publish script to keep in sync).
  *
  * Load-bearing pairing: `build:eas:base` is the clean `eas build --platform ios`
@@ -19,7 +19,7 @@
  * differs from canonical, warn and leave it unless `force` is set.
  *
  * Not part of `init` / the `all` preset (EAS is app-specific) — install it
- * explicitly with `bunx @justinhaaheim/justin-sdk add eas`. It self-registers `eas-setup` in
+ * explicitly with `bunx @jhaa/justin-sdk add eas`. It self-registers `eas-setup` in
  * justin-sdk.config.json so `update` re-applies it.
  */
 import {existsSync} from 'fs';
@@ -62,12 +62,12 @@ const EAS_SCRIPTS: ReadonlyArray<{key: string; value: string}> = [
   {
     key: 'eas:update:development',
     value:
-      'bun run prebuild && APP_VARIANT=development bunx @justinhaaheim/justin-sdk eas-update development',
+      'bun run prebuild && APP_VARIANT=development bunx @jhaa/justin-sdk eas-update development',
   },
   {
     key: 'eas:update:preview',
     value:
-      'bun run prebuild && APP_VARIANT=preview bunx @justinhaaheim/justin-sdk eas-update preview',
+      'bun run prebuild && APP_VARIANT=preview bunx @jhaa/justin-sdk eas-update preview',
   },
   {
     key: 'ship:development',

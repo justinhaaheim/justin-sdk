@@ -334,7 +334,7 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
   const update = run(
     [
       'bunx',
-      '@justinhaaheim/justin-sdk',
+      '@jhaa/justin-sdk',
       'update',
       '--no-self-update',
       '--allow-dirty',
@@ -348,7 +348,7 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
 
   // --- Gates ---------------------------------------------------------------
   const doctor = run(
-    ['bunx', '@justinhaaheim/justin-sdk', 'doctor', '--fix'],
+    ['bunx', '@jhaa/justin-sdk', 'doctor', '--fix'],
     worktreePath,
   );
   if (doctor.exitCode !== 0) {
