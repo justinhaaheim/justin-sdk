@@ -17,6 +17,7 @@ import {runFix} from './fix';
 import {runInit} from './init';
 import {runMigrateToPrime} from './migrate-to-prime';
 import {runPrime} from './plugin/lib/prime';
+import {repoStatusCommand} from './repo-status/repo-status';
 import {DEFAULT_OPTIONS as RALPH_DEFAULTS, runRalph} from './ralph';
 import {runSkill} from './skill';
 import {runSyncRules} from './sync-rules';
@@ -603,6 +604,7 @@ void yargs(hideBin(process.argv))
       process.exit(result.exitCode);
     },
   )
+  .command(repoStatusCommand)
   .demandCommand(1, 'Please specify a command')
   .strict()
   .help()

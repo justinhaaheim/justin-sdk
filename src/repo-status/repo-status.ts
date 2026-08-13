@@ -20,6 +20,8 @@
 import yargs from 'yargs';
 import {hideBin} from 'yargs/helpers';
 
+import type {Argv} from 'yargs';
+
 import {buildPlan, executePlan, renderPlan} from './plan';
 import {buildReport, type RepoStatusReport} from './report';
 
@@ -122,14 +124,156 @@ function emit(report: RepoStatusReport | null, json: boolean): number {
   return 0;
 }
 
-export async function runCli(argv: string[], cwd: string): Promise<number> {
-  let exitCode = 0;
+// ---------------------------------------------------------------------------
+// Commands
+// ---------------------------------------------------------------------------
+//
+// Each subcommand is a yargs COMMAND MODULE, and the whole set is exposed two
+// ways from one definition:
+//
+//   * `repoStatusCommand` — mounts the group under a host CLI, so
+//     `justin-sdk repo-status …` works.
+//   * `runCli` — the standalone `repo-status` bin.
+//
+// The subcommand form is the one that actually travels. A PATH symlink is
+// per-machine and never reaches a Claude Code web/cloud session; `bunx
+// github:justinhaaheim/justin-sdk repo-status` works anywhere the SDK resolves.
+//
+// Handlers set `process.exitCode` rather than calling `process.exit`, so
+// hosting these inside a larger CLI can never terminate it mid-parse.
 
-  await yargs(hideBin(argv))
-    .scriptName('repo-status')
-    .usage(`$0 <command> [options]\n\n${TOP_NARRATIVE}`)
+const statusCommand = {
+  builder: (y: Argv) =>
+    y
+      .epilogue(STATUS_NARRATIVE)
+      .option('content', {
+        default: true,
+        describe: 'Run per-commit content proofs (local, thorough)',
+        type: 'boolean' as const,
+      })
+      .option('prs', {
+        default: true,
+        describe: 'Query GitHub for PR state (network)',
+        type: 'boolean' as const,
+      })
+      .option('since-days', {
+        describe: 'Ignore branches with no commits in this many days',
+        type: 'number' as const,
+      }),
+  command: ['status', '$0'],
+  describe: 'Per-branch disposition ledger for the repo',
+  handler: (args: any) => {
+    process.exitCode = emit(
+      buildReport({
+        content: args.content,
+        cwd: args.repo,
+        prs: args.prs,
+        sinceDays: args.sinceDays ?? null,
+      }),
+      args.json,
+    );
+  },
+};
+
+const branchCommand = {
+  builder: (y: Argv) =>
+    y
+      .epilogue(BRANCH_NARRATIVE)
+      .positional('name', {demandOption: true, type: 'string' as const})
+      .option('prs', {default: true, type: 'boolean' as const}),
+  command: 'branch <name>',
+  describe: 'Comprehensive commit-by-commit deep-dive on one branch',
+  handler: (args: any) => {
+    const report = buildReport({
+      content: true,
+      cwd: args.repo,
+      only: args.name,
+      prs: args.prs,
+      sinceDays: null,
+    });
+    if (report != null && report.branches.length === 0) {
+      console.error(`no such branch: ${args.name}`);
+      process.exitCode = 1;
+      return;
+    }
+    process.exitCode = emit(report, args.json);
+  },
+};
+
+const planCommand = {
+  builder: (y: Argv) => y.epilogue(PLAN_NARRATIVE),
+  command: 'plan',
+  describe: 'Proposed cleanup as a dry run, grouped by safety',
+  handler: (args: any) => {
+    const report = buildReport({
+      content: true,
+      cwd: args.repo,
+      prs: true,
+      sinceDays: null,
+    });
+    if (report == null) {
+      console.error('not a git repository');
+      process.exitCode = 1;
+      return;
+    }
+    const plan = buildPlan(report);
+    console.log(args.json ? render(plan, true) : renderPlan(plan));
+  },
+};
+
+const applyCommand = {
+  builder: (y: Argv) =>
+    y
+      .epilogue(APPLY_NARRATIVE)
+      .option('safe-only', {
+        default: false,
+        describe: 'Required. Act only on branches proven safe',
+        type: 'boolean' as const,
+      })
+      .option('yes', {
+        default: false,
+        describe: 'Required. Confirm the repo will be modified',
+        type: 'boolean' as const,
+      }),
+  command: 'apply',
+  describe: 'Execute the proven-safe cleanup (modifies the repo)',
+  handler: (args: any) => {
+    if (!args.safeOnly) {
+      console.error(
+        'refusing to run without --safe-only (it is the only supported mode)',
+      );
+      process.exitCode = 2;
+      return;
+    }
+    const report = buildReport({
+      content: true,
+      cwd: args.repo,
+      prs: true,
+      sinceDays: null,
+    });
+    if (report == null) {
+      console.error('not a git repository');
+      process.exitCode = 1;
+      return;
+    }
+    const plan = buildPlan(report);
+    if (!args.yes) {
+      console.error(renderPlan(plan));
+      console.error(
+        '\nrefusing to act without --yes (this modifies the repository)',
+      );
+      process.exitCode = 2;
+      return;
+    }
+    console.log(render(executePlan(plan, args.repo), args.json));
+  },
+};
+
+/** The shared shape: global options plus every subcommand. */
+function buildRepoStatus(y: Argv): Argv {
+  return y
     .option('repo', {
-      default: cwd,
+      default: process.cwd(),
       describe: 'Repository to inspect (defaults to the current directory)',
       type: 'string',
     })
@@ -138,139 +282,38 @@ export async function runCli(argv: string[], cwd: string): Promise<number> {
       describe: 'Emit the same typed object as JSON instead of YAML',
       type: 'boolean',
     })
-    .command(
-      ['status', '$0'],
-      'Per-branch disposition ledger for the repo',
-      (y) =>
-        y
-          .epilogue(STATUS_NARRATIVE)
-          .option('content', {
-            default: true,
-            describe: 'Run per-commit content proofs (local, thorough)',
-            type: 'boolean',
-          })
-          .option('prs', {
-            default: true,
-            describe: 'Query GitHub for PR state (network)',
-            type: 'boolean',
-          })
-          .option('since-days', {
-            describe: 'Ignore branches with no commits in this many days',
-            type: 'number',
-          }),
-      (args) => {
-        exitCode = emit(
-          buildReport({
-            content: args.content,
-            cwd: args.repo,
-            prs: args.prs,
-            sinceDays: args.sinceDays ?? null,
-          }),
-          args.json,
-        );
-      },
-    )
-    .command(
-      'branch <name>',
-      'Comprehensive commit-by-commit deep-dive on one branch',
-      (y) =>
-        y
-          .epilogue(BRANCH_NARRATIVE)
-          .positional('name', {demandOption: true, type: 'string'})
-          .option('prs', {default: true, type: 'boolean'}),
-      (args) => {
-        const report = buildReport({
-          content: true,
-          cwd: args.repo,
-          only: args.name,
-          prs: args.prs,
-          sinceDays: null,
-        });
-        if (report != null && report.branches.length === 0) {
-          console.error(`no such branch: ${args.name}`);
-          exitCode = 1;
-          return;
-        }
-        exitCode = emit(report, args.json);
-      },
-    )
-    .command(
-      'plan',
-      'Proposed cleanup as a dry run, grouped by safety',
-      (y) => y.epilogue(PLAN_NARRATIVE),
-      (args) => {
-        const report = buildReport({
-          content: true,
-          cwd: args.repo,
-          prs: true,
-          sinceDays: null,
-        });
-        if (report == null) {
-          console.error('not a git repository');
-          exitCode = 1;
-          return;
-        }
-        const plan = buildPlan(report);
-        console.log(args.json ? render(plan, true) : renderPlan(plan));
-      },
-    )
-    .command(
-      'apply',
-      'Execute the proven-safe cleanup (irreversible)',
-      (y) =>
-        y
-          .epilogue(APPLY_NARRATIVE)
-          .option('safe-only', {
-            default: false,
-            describe: 'Required. Act only on branches proven safe',
-            type: 'boolean',
-          })
-          .option('yes', {
-            default: false,
-            describe: 'Required. Confirm the repo will be modified',
-            type: 'boolean',
-          }),
-      (args) => {
-        if (!args.safeOnly) {
-          console.error(
-            'refusing to run without --safe-only (it is the only supported mode)',
-          );
-          exitCode = 2;
-          return;
-        }
-        const report = buildReport({
-          content: true,
-          cwd: args.repo,
-          prs: true,
-          sinceDays: null,
-        });
-        if (report == null) {
-          console.error('not a git repository');
-          exitCode = 1;
-          return;
-        }
-        const plan = buildPlan(report);
-        if (!args.yes) {
-          console.error(renderPlan(plan));
-          console.error(
-            '\nrefusing to act without --yes (this modifies the repository)',
-          );
-          exitCode = 2;
-          return;
-        }
-        const results = executePlan(plan, args.repo);
-        console.log(render(results, args.json));
-      },
-    )
-    .demandCommand(0)
+    .command(statusCommand)
+    .command(branchCommand)
+    .command(planCommand)
+    .command(applyCommand)
+    .demandCommand(0);
+}
+
+/** Mount the whole group under a host CLI (`justin-sdk repo-status …`). */
+export const repoStatusCommand = {
+  builder: (y: Argv) =>
+    buildRepoStatus(y.usage(`$0 repo-status <command> [options]\n\n${TOP_NARRATIVE}`)),
+  command: 'repo-status',
+  describe: 'Per-branch reconcile ledger for one git repository',
+  handler: () => {
+    // Subcommand handlers do the work; `$0` maps to `status`.
+  },
+};
+
+export async function runCli(argv: string[]): Promise<number> {
+  await buildRepoStatus(
+    yargs(hideBin(argv))
+      .scriptName('repo-status')
+      .usage(`$0 <command> [options]\n\n${TOP_NARRATIVE}`),
+  )
     .strict()
     .help()
     .wrap(Math.min(100, process.stdout.columns ?? 100))
     .parseAsync();
 
-  return exitCode;
+  return typeof process.exitCode === 'number' ? process.exitCode : 0;
 }
 
 if (import.meta.main) {
-  process.exit(await runCli(process.argv, process.cwd()));
+  process.exit(await runCli(process.argv));
 }
