@@ -129,6 +129,22 @@ export interface PlanAction {
   reason: string;
   /** Set only for `archive-remote-branch`; null for every local action. */
   remoteArchive: RemoteArchiveSpec | null;
+  /**
+   * The literal git commands this action would run, in execution order.
+   *
+   * Carried ON THE OBJECT rather than synthesised inside a renderer, so every
+   * output format shows the same thing. `plan` defaults to YAML (home-base-
+   * qyu1.16) and its primary reader is Claude Code: making that reader
+   * reconstruct a `--force-with-lease` from a spec would be handing it the
+   * chance to get a destructive command subtly wrong.
+   *
+   * Populated for `archive-remote-branch` only. Those are the actions that
+   * mutate a SHARED remote, and the ones whose ORDER is the whole safety
+   * argument, so they are the ones worth quoting verbatim. Local actions leave
+   * this null: `target` already says exactly where the branch lands, and
+   * nothing about a local rename is dangerous enough to need the literal.
+   */
+  commands: string[] | null;
 }
 
 export interface CleanupPlan {
@@ -169,7 +185,29 @@ function isProtectedBranchName(
 }
 
 function manualAction(branch: string, reason: string): PlanAction {
-  return {action: 'manual', branch, reason, remoteArchive: null, target: null};
+  return {
+    action: 'manual',
+    branch,
+    commands: null,
+    reason,
+    remoteArchive: null,
+    target: null,
+  };
+}
+
+/**
+ * The literal commands a remote archive runs, in order.
+ *
+ * Printed verbatim — including the lease — rather than described, so what the
+ * reader approves is exactly what executes. Resolved at PLAN time and stored on
+ * the action, which is what lets the YAML/JSON renderings carry the same
+ * commands the markdown dry run prints instead of a spec to reassemble.
+ */
+export function remoteArchiveCommands(spec: RemoteArchiveSpec): string[] {
+  return [
+    `git push ${spec.remote} ${spec.sha}:refs/heads/${spec.archiveBranch}`,
+    `git push ${spec.remote} --delete ${spec.sourceBranch} --force-with-lease=refs/heads/${spec.sourceBranch}:${spec.sha}`,
+  ];
 }
 
 export function buildPlan(report: RepoStatusReport): CleanupPlan {
@@ -224,16 +262,18 @@ export function buildPlan(report: RepoStatusReport): CleanupPlan {
         continue;
       }
       const archiveBranch = `${ARCHIVE_PREFIX}${split.bare}`;
+      const spec: RemoteArchiveSpec = {
+        archiveBranch,
+        remote: split.remote,
+        sha: row.tipSha,
+        sourceBranch: split.bare,
+      };
       remote.push({
         action: 'archive-remote-branch',
         branch: row.name,
+        commands: remoteArchiveCommands(spec),
         reason: row.why,
-        remoteArchive: {
-          archiveBranch,
-          remote: split.remote,
-          sha: row.tipSha,
-          sourceBranch: split.bare,
-        },
+        remoteArchive: spec,
         target: `${split.remote}/${archiveBranch}`,
       });
       continue;
@@ -262,6 +302,7 @@ export function buildPlan(report: RepoStatusReport): CleanupPlan {
       safe.push({
         action: 'delete-local-branch',
         branch: row.name,
+        commands: null,
         reason: `every commit is already preserved in ${row.archiveMirror?.ref}; this local copy is redundant`,
         remoteArchive: null,
         target: null,
@@ -272,6 +313,7 @@ export function buildPlan(report: RepoStatusReport): CleanupPlan {
     safe.push({
       action: 'archive-local-branch',
       branch: row.name,
+      commands: null,
       reason: row.why,
       remoteArchive: null,
       target: `${ARCHIVE_PREFIX}${row.name}`,
@@ -290,18 +332,14 @@ export function buildPlan(report: RepoStatusReport): CleanupPlan {
 }
 
 /**
- * The literal commands a remote archive runs, in order, for the dry run.
+ * The MARKDOWN dry run — `plan --markdown`, and the confirmation preview `apply`
+ * shows a human before it mutates anything.
  *
- * Printed verbatim — including the lease — rather than described, so what the
- * reader approves is exactly what executes.
+ * `plan` itself defaults to YAML now (home-base-qyu1.16): the same object, on
+ * the same schema as `status` and `apply`, for the reader that is actually
+ * primary here. This rendering is what you reach for when a PERSON has to read
+ * and approve the thing.
  */
-export function remoteArchiveCommands(spec: RemoteArchiveSpec): string[] {
-  return [
-    `git push ${spec.remote} ${spec.sha}:refs/heads/${spec.archiveBranch}`,
-    `git push ${spec.remote} --delete ${spec.sourceBranch} --force-with-lease=refs/heads/${spec.sourceBranch}:${spec.sha}`,
-  ];
-}
-
 export function renderPlan(plan: CleanupPlan): string {
   const lines: string[] = [
     `# Cleanup plan (dry run) — baseline ${plan.baselineRef}`,
@@ -329,9 +367,11 @@ export function renderPlan(plan: CleanupPlan): string {
       lines.push(`- \`${a.branch}\`${arrow}`, `  ${a.reason}`);
       // The exact push/delete pair, indented under its branch as a fenced-free
       // inline-code run. A reader approving a mutation of a shared remote should
-      // see the commands themselves, not a paraphrase of them.
-      if (a.remoteArchive != null) {
-        for (const cmd of remoteArchiveCommands(a.remoteArchive)) {
+      // see the commands themselves, not a paraphrase of them. Read off the
+      // action rather than recomputed, so this rendering and the YAML/JSON one
+      // cannot drift into quoting different commands.
+      if (a.commands != null) {
+        for (const cmd of a.commands) {
           lines.push(`    \`${cmd}\``);
         }
       }
