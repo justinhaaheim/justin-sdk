@@ -88,13 +88,22 @@ const PLAN_NARRATIVE = `
 The proposed cleanup as a DRY RUN, grouped by safety. Nothing is executed.
 
 Read it, then run 'apply --safe-only' to execute the proven-safe group. Entries
-shown as 'name -> archive/name' are renames, which preserve every commit.
+whose 'target' is 'archive/<name>' are renames, which preserve every commit.
 Branches needing judgment are listed for your attention but are never actioned
 automatically, by design.
 
-Remote branches get their own group, printed with the EXACT push and delete
-commands that would run, in order. They are executed only by
+Remote branches get their own group, carrying the EXACT push and delete commands
+that would run, in order — in every output format. They are executed only by
 'apply --safe-only --include-remote --yes' — never by a bare --safe-only run.
+
+  repo-status plan              YAML: the plan object, same schema as 'status'
+  repo-status plan --json       the identical object as JSON
+  repo-status plan --markdown   prose dry run, grouped under headings, for a
+                                human to read and approve
+
+YAML is the default because the plan is a structured object and the primary
+reader is a program. --markdown is the same content written for a person; it is
+also what 'apply' prints as its confirmation preview when you leave off --yes.
 `.trim();
 
 const APPLY_NARRATIVE = `
@@ -225,10 +234,24 @@ const branchCommand = {
 };
 
 const planCommand = {
-  builder: (y: Argv) => y.epilogue(PLAN_NARRATIVE),
+  builder: (y: Argv) =>
+    y.epilogue(PLAN_NARRATIVE).option('markdown', {
+      default: false,
+      describe: 'Render the prose dry run for a human instead of YAML',
+      type: 'boolean' as const,
+    }),
   command: 'plan',
   describe: 'Proposed cleanup as a dry run, grouped by safety',
   handler: (args: any) => {
+    // Two explicit format flags disagreeing is a mistake, not a preference to
+    // silently resolve — the same reflex as `apply` refusing an ambiguous run.
+    if (args.json && args.markdown) {
+      console.error(
+        '--json and --markdown select different renderings; pass at most one',
+      );
+      process.exitCode = 2;
+      return;
+    }
     const report = buildReport({
       content: true,
       cwd: args.repo,
@@ -241,7 +264,9 @@ const planCommand = {
       return;
     }
     const plan = buildPlan(report);
-    console.log(args.json ? render(plan, true) : renderPlan(plan));
+    // YAML by default, through the SAME render() as status and apply: one typed
+    // object, one schema, whatever the format (home-base-qyu1.16).
+    console.log(args.markdown ? renderPlan(plan) : render(plan, args.json));
   },
 };
 
@@ -288,6 +313,8 @@ const applyCommand = {
     }
     const plan = buildPlan(report);
     if (!args.yes) {
+      // Deliberately MARKDOWN even though `plan` now defaults to YAML: this
+      // preview exists to be read by the person deciding whether to type --yes.
       console.error(renderPlan(plan));
       console.error(
         `\nrefusing to act without --yes (this modifies ${
