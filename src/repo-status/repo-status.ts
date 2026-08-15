@@ -63,6 +63,17 @@ and a disposition with a one-line reason.
   needs-judgment  real unmerged work with no proof it is preserved anywhere
 
 Ahead/behind counts are reported alongside the disposition, not replaced by it.
+Every row also states what those counts already prove about MERGING, so nothing
+has to re-derive it with 'git merge-base --is-ancestor':
+
+  fast-forward        the baseline is an ancestor of the branch (behind 0) —
+                      merging it in fast-forwards, no merge commit
+  merge-needed        both sides moved — merging writes a merge commit
+  already-up-to-date  the branch holds nothing the baseline lacks
+
+That is a sha-reachability fact and is deliberately independent of the
+content-based disposition: a squash-merged branch is 'merged' AND 'merge-needed'
+at the same time, and both readings are worth having.
 
 A 'submodules' section reports each submodule's recorded gitlink separately,
 because the questions there are different ones:

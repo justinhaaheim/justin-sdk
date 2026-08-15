@@ -22,6 +22,7 @@ import {
   type CommitVerdict,
 } from './content';
 import {decideDisposition, type Disposition} from './disposition';
+import {describeMergeShape, type MergeShape} from './merge-shape';
 import {
   EMPTY_PR_INDEX,
   fetchPullRequests,
@@ -56,6 +57,17 @@ export interface BranchRow {
   /** Kept because it is the standard metric and reads fine — but see `why`. */
   ahead: number;
   behind: number;
+  /**
+   * What those two numbers already prove about merging this branch into the
+   * baseline: fast-forward, real merge commit, or nothing to do.
+   *
+   * Always present, on every row including `merged` and `mirrored` ones. It is a
+   * sha-reachability fact, orthogonal to the content-based `disposition`, and
+   * the rows where the two disagree are the informative ones — a squash-merged
+   * branch is `merged` yet cannot be fast-forwarded. Derived arithmetically from
+   * `ahead`/`behind`; it costs no git invocation. See `merge-shape.ts`.
+   */
+  mergeShape: MergeShape;
   lastCommitDate: string;
   worktree: string | null;
   disposition: Disposition;
@@ -233,6 +245,7 @@ function buildRow(
     disposition,
     isRemoteOnly: branch.isRemoteOnly,
     lastCommitDate: branch.lastCommitDate,
+    mergeShape: describeMergeShape(branch, baselineRef),
     name: branch.name,
     pr:
       pr != null
