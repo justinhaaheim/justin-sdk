@@ -172,21 +172,26 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
 
   const prIndex: PrIndex = prs ? fetchPullRequests({cwd}) : EMPTY_PR_INDEX;
 
-  const submoduleInventory = submodules
-    ? buildSubmoduleInventory({
-        allWorktreeStores: submoduleStores,
-        cwd,
-        repoRoot: inventory.repoRoot,
-        worktrees: inventory.worktrees,
-      })
-    : EMPTY_SUBMODULE_INVENTORY;
-
   const selected =
     only != null
       ? inventory.branches.filter(
           (b) => b.name === only || b.name === `origin/${only}`,
         )
       : inventory.branches;
+
+  // `selected`, not `inventory.branches`: the per-branch gitlink audit is a
+  // claim about the branch rows this report actually carries, so it must be
+  // computed over exactly those rows and no others.
+  const submoduleInventory = submodules
+    ? buildSubmoduleInventory({
+        allWorktreeStores: submoduleStores,
+        baselineRef: inventory.baselineRef,
+        branches: selected,
+        cwd,
+        repoRoot: inventory.repoRoot,
+        worktrees: inventory.worktrees,
+      })
+    : EMPTY_SUBMODULE_INVENTORY;
 
   const rows: BranchRow[] = selected.map((branch) =>
     buildRow(branch, inventory.baselineRef, cwd, {content, only, prIndex}),

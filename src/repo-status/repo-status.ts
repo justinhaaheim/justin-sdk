@@ -82,12 +82,21 @@ A 'submodules' section reports each submodule's recorded gitlink separately,
 because the questions there are different ones:
 
   severe          the recorded pointer is on no remote (every fresh clone, CI run
-                  and 'git worktree add' fails on it), or the checkout holds
-                  commits that exist on no remote
+                  and 'git worktree add' fails on it), the checkout holds commits
+                  that exist on no remote, or a BRANCH records a pointer that is
+                  on no remote — merging it would publish an unresolvable gitlink
   advisory        the checkout is behind its remote (stale base, and therefore
                   probably stale dependencies), the pointer is missing from THIS
                   checkout's object store, or the parent's worktrees disagree
   ok              nothing to do
+
+It also reads the gitlink every BRANCH records and compares it to the baseline's,
+because that is what decides whether a merge is mechanical: two branches
+recording different submodule commits conflict on the gitlink, and git resolves
+that with neither side's content — somebody has to choose a submodule commit.
+Only branches that DISAGREE are printed, so a repo where they all agree says
+nothing; 'branchPointers' still reports that it looked and how many it compared,
+so the silence is a claim rather than an absence.
 
 Every submodule finding names the QUESTION its numbers answer, because the same
 number means opposite things: "behind by 49" is noise for "can I delete this"

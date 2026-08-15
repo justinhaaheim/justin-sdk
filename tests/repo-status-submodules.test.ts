@@ -21,7 +21,9 @@ import {dirname, join, resolve} from 'path';
 import {buildReport, type RepoStatusReport} from '../src/repo-status/report';
 import {runDivergenceCheck} from '../src/repo-status/prime-view';
 import {
+  buildSubmoduleInventory,
   Q_CURRENT_CODE,
+  Q_MERGE_POINTER,
   Q_RESOLVABLE,
   Q_WORK_AT_RISK,
   type SubmoduleFinding,
@@ -473,6 +475,255 @@ describe('multiple parent worktrees', () => {
     );
     expect(loud.severity).toBe('advisory');
     expect(loud.why).toContain('destroys a unique copy');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-branch gitlinks (home-base-qyu1.20)
+// ---------------------------------------------------------------------------
+
+/** Create `branch` off main recording `sha` as the gitlink for `sub`. */
+function branchRecording(fx: Fixture, branch: string, sha: string): void {
+  git(fx.parent, ['checkout', '-q', '-b', branch]);
+  git(fx.parent, ['update-index', '--add', '--cacheinfo', `160000,${sha},sub`]);
+  git(fx.parent, ['commit', '-qm', `record ${sha.slice(0, 7)} on ${branch}`]);
+  git(fx.parent, ['checkout', '-q', 'main']);
+}
+
+/** A branch that touches everything EXCEPT the gitlink. */
+function branchLeavingPointerAlone(fx: Fixture, branch: string): void {
+  git(fx.parent, ['checkout', '-q', '-b', branch]);
+  writeFileSync(join(fx.parent, 'README.md'), `changed on ${branch}\n`);
+  git(fx.parent, ['commit', '-qam', `unrelated work on ${branch}`]);
+  git(fx.parent, ['checkout', '-q', 'main']);
+}
+
+function branchFindings(row: SubmoduleRow): SubmoduleFinding[] {
+  return allFindings(row).filter(
+    (f) => f.kind === 'pointer-diverges-across-branches',
+  );
+}
+
+describe('gitlinks recorded by other BRANCHES', () => {
+  test('says nothing when every branch agrees — and the silence is a CLAIM, not an absence', () => {
+    const sb = track(createSandbox());
+    const fx = setupFixture(sb);
+    branchLeavingPointerAlone(fx, 'feature');
+
+    const row = subRow(report(fx.parent));
+    expect(branchFindings(row)).toEqual([]);
+
+    // The whole point: "checked, all agree" must be readable as such. A caller
+    // that cannot tell this apart from "nobody looked" learns nothing from the
+    // silence, so the positive form is recorded explicitly.
+    expect(row.branchPointers.checked).toBe(true);
+    expect(row.branchPointers.branchesCompared).toBe(1);
+    expect(row.branchPointers.divergent).toEqual([]);
+    expect(row.branchPointers.baselineRef).toBe('main');
+    expect(row.branchPointers.baselinePointer).not.toBeNull();
+    expect(row.branchPointers.note).toBeNull();
+  });
+
+  test('NOT checked is spelled differently from checked-and-agreeing', () => {
+    const sb = track(createSandbox());
+    const fx = setupFixture(sb);
+    branchLeavingPointerAlone(fx, 'feature');
+
+    // `enabled` alone cannot carry this: the section ran, and the branch
+    // comparison still did not happen.
+    const inventory = buildSubmoduleInventory({
+      cwd: fx.parent,
+      repoRoot: fx.parent,
+      worktrees: [],
+    });
+    expect(inventory.enabled).toBe(true);
+    const audit = inventory.entries[0]?.branchPointers;
+    expect(audit?.checked).toBe(false);
+    expect(audit?.divergent).toEqual([]);
+    expect(audit?.branchesCompared).toBe(0);
+    expect(audit?.note).toContain('no branch rows were supplied');
+  });
+
+  test('a baseline that does not record the submodule at all is not-checked, never divergence', () => {
+    const sb = track(createSandbox());
+    const fx = setupFixture(sb);
+
+    // `sub` exists only on a branch: keep a ref to the commit that added it,
+    // then rewind main behind it and inspect from the branch. The submodule is
+    // discoverable (the checkout has it) while the BASELINE records nothing.
+    git(fx.parent, ['branch', 'adds-sub']);
+    git(fx.parent, ['reset', '--hard', '-q', 'HEAD~1']);
+    git(fx.parent, ['checkout', '-q', 'adds-sub']);
+
+    const r = report(fx.parent);
+    const row = r.submodules.entries.find((e) => e.path === 'sub');
+    expect(row).not.toBeUndefined();
+
+    // Reported as "nothing to compare against" rather than as every branch
+    // disagreeing, which would be a loud lie about a submodule nobody moved.
+    expect(row?.branchPointers.checked).toBe(false);
+    expect(row?.branchPointers.note).toContain('does not record this submodule');
+    expect(branchFindings(row as SubmoduleRow)).toEqual([]);
+  });
+
+  test('one finding per divergent branch, naming the branch, BOTH shas and the merge consequence', () => {
+    const sb = track(createSandbox());
+    const fx = setupFixture(sb);
+    const baseline = git(fx.parent, ['rev-parse', 'HEAD:sub']).trim();
+
+    const v2 = pushFromSubWork(fx, 'v2');
+    const v3 = pushFromSubWork(fx, 'v3');
+    git(join(fx.parent, 'sub'), ['fetch', '--all', '-q']);
+    branchRecording(fx, 'one', v2);
+    branchRecording(fx, 'two', v3);
+    branchLeavingPointerAlone(fx, 'agrees');
+
+    const row = subRow(report(fx.parent));
+    const found = branchFindings(row);
+    // Exactly the two that disagree — the third branch is compared and silent.
+    expect(found).toHaveLength(2);
+    expect(row.branchPointers.branchesCompared).toBe(3);
+    expect(row.branchPointers.divergent.map((d) => d.branch).sort()).toEqual([
+      'one',
+      'two',
+    ]);
+
+    const one = found.find((f) => f.why.includes('branch one'));
+    expect(one?.question).toBe(Q_MERGE_POINTER);
+    expect(one?.why).toContain(v2.slice(0, 7));
+    expect(one?.why).toContain(baseline.slice(0, 7));
+    expect(one?.why).toContain('moves the recorded gitlink');
+    expect(one?.why).toContain('conflicts on the gitlink');
+    expect(one?.fix).toContain('diff main one -- sub');
+
+    // Both shas are in the store here, so the relation IS knowable and is the
+    // fact that says how to unify them.
+    expect(
+      row.branchPointers.divergent.find((d) => d.branch === 'one')
+        ?.relationToBaseline,
+    ).toBe('ahead of');
+
+    // NEGATIVE CONTROL: point both branches back at the baseline pointer and
+    // every finding must vanish while the comparison still reports as done.
+    for (const branch of ['one', 'two']) {
+      git(fx.parent, ['checkout', '-q', branch]);
+      git(fx.parent, [
+        'update-index',
+        '--add',
+        '--cacheinfo',
+        `160000,${baseline},sub`,
+      ]);
+      git(fx.parent, ['commit', '-qm', `back to baseline on ${branch}`]);
+    }
+    git(fx.parent, ['checkout', '-q', 'main']);
+
+    const quiet = subRow(report(fx.parent));
+    expect(branchFindings(quiet)).toEqual([]);
+    expect(quiet.branchPointers.checked).toBe(true);
+    expect(quiet.branchPointers.branchesCompared).toBe(3);
+  });
+
+  test('a divergent pointer that is on NO REMOTE inherits the severe framing', () => {
+    const sb = track(createSandbox());
+    const fx = setupFixture(sb);
+
+    // A submodule commit that exists in this store and nowhere else. The
+    // checkout is put back on the pushed commit afterwards so the ONLY thing
+    // wrong with this repo is the branch's recorded pointer — otherwise
+    // qyu1.14's unpushed-commits finding would supply the severity instead.
+    const orphan = commitInParentSub(fx, 'never pushed anywhere');
+    git(join(fx.parent, 'sub'), ['reset', '--hard', '-q', 'origin/main']);
+    branchRecording(fx, 'doomed', orphan);
+
+    const row = subRow(report(fx.parent));
+    expect(kinds(row)).not.toContain('unpushed-commits');
+
+    const finding = branchFindings(row)[0];
+    expect(finding?.severity).toBe('severe');
+    expect(finding?.question).toBe(Q_MERGE_POINTER);
+    expect(finding?.why).toContain('doomed');
+    expect(finding?.why).toContain('on no remote-tracking branch');
+    expect(finding?.why).toContain('not our ref');
+    expect(finding?.fix).toContain('BEFORE merging doomed');
+    // The severity has to reach the row, or nothing surfaces it to a reader.
+    expect(row.severity).toBe('severe');
+    expect(row.why).toContain('doomed');
+
+    const divergence = row.branchPointers.divergent[0];
+    expect(divergence?.inStore).toBe(true);
+    expect(divergence?.onRemotes).toEqual([]);
+
+    // NEGATIVE CONTROL: push that exact commit. It is still divergent — the
+    // branch still moves the gitlink — but it is no longer an alarm.
+    git(join(fx.parent, 'sub'), [
+      'push',
+      '-q',
+      'origin',
+      `${orphan}:refs/heads/rescued`,
+    ]);
+    const rescued = subRow(report(fx.parent));
+    expect(branchFindings(rescued)).toHaveLength(1);
+    expect(branchFindings(rescued)[0]?.severity).toBe('ok');
+    expect(rescued.severity).toBe('ok');
+    expect(rescued.branchPointers.divergent[0]?.onRemotes).toContain(
+      'origin/rescued',
+    );
+  });
+
+  test('a branch pointer this store has never fetched is reported, but not as an alarm', () => {
+    const sb = track(createSandbox());
+    const fx = setupFixture(sb);
+
+    // Pushed from the other clone and never fetched here. This is the ORDINARY
+    // state for a branch someone else pushed, so treating "I do not have that
+    // object" as evidence of breakage would fire on almost every real repo.
+    const unfetched = pushFromSubWork(fx, 'v2');
+    branchRecording(fx, 'theirs', unfetched);
+
+    const finding = branchFindings(subRow(report(fx.parent)))[0];
+    expect(finding?.severity).toBe('ok');
+    expect(finding?.why).toContain('is not an object in this checkout');
+    expect(finding?.why).toContain('cannot be judged from here');
+    expect(finding?.fix).toContain('fetch --all');
+
+    const divergence = subRow(report(fx.parent)).branchPointers.divergent[0];
+    expect(divergence?.inStore).toBe(false);
+    // No merge-base was attempted against an object we do not have.
+    expect(divergence?.relationToBaseline).toBeNull();
+  });
+
+  test('claims no RELATION when the object missing from this store is the BASELINE one', () => {
+    const sb = track(createSandbox());
+    const fx = setupFixture(sb);
+    const original = git(fx.parent, ['rev-parse', 'HEAD:sub']).trim();
+
+    // The asymmetric case, and the one seen live on home-base: the BRANCH's
+    // pointer is present here while the BASELINE's is not. `merge-base` fails
+    // on either missing object, and reading that failure as "divergent from"
+    // would print a confident lie — so the relation must stay unknown.
+    const unfetched = pushFromSubWork(fx, 'v2');
+    recordPointer(fx, unfetched, 'move main to a commit this store lacks');
+    branchRecording(fx, 'stays', original);
+
+    const row = subRow(report(fx.parent));
+    const divergence = row.branchPointers.divergent[0];
+    expect(divergence?.branch).toBe('stays');
+    expect(divergence?.inStore).toBe(true);
+    expect(divergence?.relationToBaseline).toBeNull();
+    // Knowing nothing about the relation is not an alarm, and the finding must
+    // not silently drop the parenthetical's absence into a wrong claim.
+    expect(branchFindings(row)[0]?.severity).toBe('ok');
+    expect(branchFindings(row)[0]?.why).not.toContain('in submodule history');
+
+    // NEGATIVE CONTROL: fetch, and the relation becomes knowable.
+    git(join(fx.parent, 'sub'), ['fetch', '--all', '-q']);
+    const fetched = subRow(report(fx.parent));
+    expect(fetched.branchPointers.divergent[0]?.relationToBaseline).toBe(
+      'behind',
+    );
+    expect(branchFindings(fetched)[0]?.why).toContain(
+      'behind it in submodule history',
+    );
   });
 });
 

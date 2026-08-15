@@ -74,11 +74,14 @@ export const Q_WORK_AT_RISK = 'can this be removed without losing work?';
 export const Q_CURRENT_CODE = 'am I building on current code?';
 export const Q_RESOLVABLE =
   'can anything but this checkout resolve the recorded pointer?';
+export const Q_MERGE_POINTER =
+  'what does merging this branch do to the submodule pointer?';
 
 export type SubmoduleQuestion =
   | typeof Q_WORK_AT_RISK
   | typeof Q_CURRENT_CODE
-  | typeof Q_RESOLVABLE;
+  | typeof Q_RESOLVABLE
+  | typeof Q_MERGE_POINTER;
 
 export type SubmoduleFindingKind =
   /** Pointer is in this store but on no remote-tracking branch. Breaks everyone else. */
@@ -95,6 +98,8 @@ export type SubmoduleFindingKind =
   | 'checkout-behind-pointer'
   /** The parent's worktrees record different submodule commits. */
   | 'pointer-diverges-across-worktrees'
+  /** A BRANCH records a different submodule commit than the baseline does. */
+  | 'pointer-diverges-across-branches'
   /** No checkout in this worktree at all. */
   | 'not-initialized'
   /** No remote-tracking refs, so pushedness cannot be judged either way. */
@@ -144,6 +149,66 @@ export interface SubmoduleCheckout {
   severity: SubmoduleSeverity;
 }
 
+/**
+ * The minimum a branch row must supply to have its gitlink read.
+ *
+ * Deliberately structural rather than an import of `BranchDivergence`: this
+ * module needs the NAME and nothing else, and a narrow input type keeps the
+ * submodule scan usable from anywhere that can name a ref.
+ */
+export interface BranchRef {
+  name: string;
+}
+
+/** What one branch records for one submodule, when it differs from the baseline. */
+export interface SubmoduleBranchPointer {
+  /** Branch name as the ledger spells it — short for locals, `origin/x` for remote-only. */
+  branch: string;
+  /** The gitlink `branch` records for this submodule. */
+  pointer: string;
+  /**
+   * Whether `pointer` is an object in the store this row was evaluated against.
+   * Null when no store was open to ask. False is the ORDINARY case for a branch
+   * someone else pushed and says nothing bad — see the severity note below.
+   */
+  inStore: boolean | null;
+  /** Remote-tracking refs containing `pointer`; `[]` is the severe case. */
+  onRemotes: string[] | null;
+  /**
+   * How `pointer` relates to the baseline's pointer in submodule history — the
+   * fact that decides how to unify them. Null when either sha is absent from the
+   * store, because `merge-base` FAILS on a missing object and reading that
+   * failure as "divergent" would be a confident lie (the qyu1.14 lesson).
+   */
+  relationToBaseline: PointerRelation | null;
+}
+
+/**
+ * The per-branch gitlink comparison for ONE submodule.
+ *
+ * SILENCE IS A CLAIM. `divergent: []` must mean "every branch was compared and
+ * they all agree", never "nobody looked" — so the positive form is recorded:
+ * `checked` plus `branchesCompared` plus the baseline it was compared against.
+ * The inventory's `enabled` flag is NOT sufficient for this. `enabled` says the
+ * submodule section ran; the branch comparison can still be skipped for reasons
+ * independent of it (no baseline ref, or a baseline that does not record this
+ * submodule at all), and those two states must not be spelled the same way.
+ */
+export interface BranchPointerAudit {
+  /** True when branch refs were actually read and compared. */
+  checked: boolean;
+  /** Why nothing was compared, when `checked` is false. */
+  note: string | null;
+  /** The ref every branch was compared against. */
+  baselineRef: string | null;
+  /** The gitlink the baseline records for this submodule. */
+  baselinePointer: string | null;
+  /** How many branches recorded this submodule and were compared. */
+  branchesCompared: number;
+  /** Only the branches that DISAGREE with the baseline. Empty means all agree. */
+  divergent: SubmoduleBranchPointer[];
+}
+
 export interface SubmoduleRow {
   /** Path within the parent repo, e.g. `projects/justin-sdk`. */
   path: string;
@@ -153,6 +218,8 @@ export interface SubmoduleRow {
   why: string;
   /** Distinct pointers recorded across the parent's worktrees; >1 means they disagree. */
   pointersAcrossWorktrees: number;
+  /** Per-BRANCH gitlink comparison against the baseline; see the type's note on silence. */
+  branchPointers: BranchPointerAudit;
   /** Findings about the submodule as a whole rather than one checkout. */
   findings: SubmoduleFinding[];
   checkouts: SubmoduleCheckout[];
@@ -183,6 +250,14 @@ export interface SubmoduleOptions {
    * outside the worktree being inspected.
    */
   allWorktreeStores?: boolean;
+  /**
+   * The branch rows to compare gitlinks across. One `ls-tree` per branch, total,
+   * however many submodules the repo has. Omit and the per-branch comparison is
+   * reported as NOT CHECKED rather than as agreement.
+   */
+  branches?: BranchRef[];
+  /** The ref every branch's gitlink is compared against. */
+  baselineRef?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -310,12 +385,34 @@ export function discoverSubmodules(
     .sort((a, b) => a.path.localeCompare(b.path));
 }
 
+/**
+ * The gitlink each of `subPaths` has in `ref`'s tree — ONE git invocation.
+ *
+ * Multi-pathspec on purpose: the per-branch scan is `ls-tree` per BRANCH, not
+ * per branch per submodule, so its cost does not multiply by the number of
+ * submodules. `-z` because git otherwise C-quotes paths with unusual bytes,
+ * which would silently fail to match the path we asked about.
+ */
+function pointersAtRef(
+  cwd: string,
+  ref: string,
+  subPaths: string[],
+): Map<string, string> {
+  const found = new Map<string, string>();
+  if (subPaths.length === 0) return found;
+  const out = gitArgv(['ls-tree', '-z', ref, '--', ...subPaths], cwd);
+  if (out == null) return found;
+  for (const record of out.split('\0')) {
+    const match = /^160000 commit (\S+)\t(.*)$/.exec(record);
+    if (match?.[1] == null || match[2] == null) continue;
+    found.set(match[2], match[1]);
+  }
+  return found;
+}
+
 /** The gitlink sha recorded in `worktree`'s HEAD commit for `subPath`. */
 function pointerInHead(worktree: string, subPath: string): string | null {
-  const out = gitArgv(['ls-tree', 'HEAD', '--', subPath], worktree);
-  if (out == null) return null;
-  const match = /^160000 commit (\S+)\t/.exec(out.trim());
-  return match?.[1] ?? null;
+  return pointersAtRef(worktree, 'HEAD', [subPath]).get(subPath) ?? null;
 }
 
 /** The gitlink sha staged in `worktree`'s index for `subPath`. */
@@ -506,9 +603,7 @@ function buildCheckout(
   }
 
   const pointerInStore =
-    recordedPointer != null
-      ? gitArgv(['cat-file', '-t', recordedPointer], dir)?.trim() === 'commit'
-      : null;
+    recordedPointer != null ? inStore(dir, recordedPointer) : null;
   const pointerOnRemotes =
     recordedPointer != null && pointerInStore === true
       ? remotesContaining(dir, recordedPointer)
@@ -649,12 +744,21 @@ function decideCheckoutFindings(ctx: {
   return findings;
 }
 
-/** How the checked-out commit relates to the one the parent recorded. */
+/** How one submodule commit sits relative to another in submodule history. */
+export type PointerRelation = 'ahead of' | 'behind' | 'divergent from';
+
+/**
+ * How the checked-out commit relates to the one the parent recorded.
+ *
+ * Callers MUST have established that both shas are objects in `dir` first:
+ * `merge-base` exits non-zero on a missing object, which this reads as
+ * "divergent from" — a confident lie about a commit that is one fetch away.
+ */
 function describeRelation(
   dir: string,
   head: string,
   recorded: string,
-): 'ahead of' | 'behind' | 'divergent from' {
+): PointerRelation {
   if (gitOk(['merge-base', '--is-ancestor', head, recorded], dir)) {
     return 'behind';
   }
@@ -665,13 +769,252 @@ function describeRelation(
 }
 
 // ---------------------------------------------------------------------------
+// Per-branch gitlinks
+// ---------------------------------------------------------------------------
+//
+// qyu1.14 answers "what does THIS checkout record?" per worktree. It cannot
+// answer "what does THAT branch record?", which is the question that decides
+// whether a parent-repo merge is mechanical: two branches recording different
+// submodule commits conflict on the gitlink, and git resolves that conflict
+// with neither side's content — somebody has to choose a submodule commit.
+//
+// CHECK ALWAYS, PRINT ON CONDITION. Reading the gitlink is one `ls-tree` per
+// branch (multi-pathspec, so it does not multiply by submodule count), which is
+// cheap enough to do unconditionally. Only branches that DISAGREE with the
+// baseline are reported, so the normal repo says nothing at all — and the audit
+// records that it looked, so the silence is a claim rather than an absence.
+//
+// Part of home-base-qyu1.20.
+
+/** Every branch's gitlinks, read once for the whole inventory. */
+interface BranchPointerScan {
+  checked: boolean;
+  note: string | null;
+  baselineRef: string | null;
+  baselinePointers: Map<string, string>;
+  byBranch: Array<{name: string; pointers: Map<string, string>}>;
+}
+
+function scanBranchPointers(ctx: {
+  baselineRef: string | null;
+  branches: BranchRef[] | undefined;
+  cwd: string;
+  subPaths: string[];
+}): BranchPointerScan {
+  const {baselineRef, branches, cwd, subPaths} = ctx;
+  const base = {
+    baselinePointers: new Map<string, string>(),
+    baselineRef,
+    byBranch: [],
+  };
+
+  if (subPaths.length === 0) {
+    return {...base, checked: false, note: 'the repo records no submodules'};
+  }
+  if (branches == null) {
+    return {
+      ...base,
+      checked: false,
+      note: 'no branch rows were supplied to the submodule scan',
+    };
+  }
+  if (baselineRef == null) {
+    return {
+      ...base,
+      checked: false,
+      note: 'no baseline ref to compare branch gitlinks against',
+    };
+  }
+
+  return {
+    baselinePointers: pointersAtRef(cwd, baselineRef, subPaths),
+    baselineRef,
+    byBranch: branches.map((b) => ({
+      name: b.name,
+      pointers: pointersAtRef(cwd, b.name, subPaths),
+    })),
+    checked: true,
+    note: null,
+  };
+}
+
+/** Whether `sha` is a commit object in the store at `dir`. */
+function inStore(dir: string, sha: string): boolean {
+  return gitArgv(['cat-file', '-t', sha], dir)?.trim() === 'commit';
+}
+
+/** Compare every branch's gitlink for ONE submodule against the baseline's. */
+function auditBranchPointers(ctx: {
+  checkouts: SubmoduleCheckout[];
+  repoRoot: string;
+  scan: BranchPointerScan;
+  subPath: string;
+}): {audit: BranchPointerAudit; findings: SubmoduleFinding[]} {
+  const {checkouts, repoRoot, scan, subPath} = ctx;
+
+  const notChecked = (
+    note: string,
+  ): {audit: BranchPointerAudit; findings: SubmoduleFinding[]} => ({
+    audit: {
+      baselinePointer: null,
+      baselineRef: scan.baselineRef,
+      branchesCompared: 0,
+      checked: false,
+      divergent: [],
+      note,
+    },
+    findings: [],
+  });
+
+  if (!scan.checked) return notChecked(scan.note ?? 'not checked');
+
+  const found = scan.baselinePointers.get(subPath) ?? null;
+  if (found == null) {
+    return notChecked(
+      `the baseline ${scan.baselineRef} does not record this submodule, so there is nothing to compare branch gitlinks against`,
+    );
+  }
+  // Re-bound after the guard so the narrowing survives into `evaluate` below,
+  // whose closure would otherwise widen it back to `string | null`.
+  const baselinePointer: string = found;
+
+  // Reachability is judged in ONE store — the current checkout's, when it is
+  // open — because that is the only store this process can honestly speak for.
+  const opened =
+    checkouts.find((c) => c.isCurrent && c.store != null) ??
+    checkouts.find((c) => c.store != null);
+  const dir = opened != null ? join(opened.worktree, subPath) : null;
+  const store = opened?.store ?? null;
+  const baselineInStore = dir != null && inStore(dir, baselinePointer);
+
+  // Evaluate each DISTINCT sha once. Branches routinely share a pointer (every
+  // branch cut since the last bump records the same one) and each evaluation
+  // costs two or three git invocations.
+  type Reach = Omit<SubmoduleBranchPointer, 'branch' | 'pointer'>;
+  const evaluated = new Map<string, Reach>();
+  function evaluate(sha: string): Reach {
+    const cached = evaluated.get(sha);
+    if (cached != null) return cached;
+    let result: Reach;
+    if (dir == null) {
+      result = {inStore: null, onRemotes: null, relationToBaseline: null};
+    } else if (!inStore(dir, sha)) {
+      result = {inStore: false, onRemotes: null, relationToBaseline: null};
+    } else {
+      result = {
+        inStore: true,
+        onRemotes: remotesContaining(dir, sha),
+        // Only when BOTH shas are present: `merge-base` fails on a missing
+        // object and that failure reads as "divergent", which would be a lie.
+        relationToBaseline: baselineInStore
+          ? describeRelation(dir, sha, baselinePointer)
+          : null,
+      };
+    }
+    evaluated.set(sha, result);
+    return result;
+  }
+
+  let branchesCompared = 0;
+  const divergent: SubmoduleBranchPointer[] = [];
+  for (const {name, pointers} of scan.byBranch) {
+    const pointer = pointers.get(subPath);
+    // A branch that does not record this submodule at all cannot move its
+    // pointer, so it is not compared and is not counted as agreeing either.
+    if (pointer == null) continue;
+    branchesCompared += 1;
+    if (pointer === baselinePointer) continue;
+    divergent.push({branch: name, pointer, ...evaluate(pointer)});
+  }
+
+  const audit: BranchPointerAudit = {
+    baselinePointer,
+    baselineRef: scan.baselineRef,
+    branchesCompared,
+    checked: true,
+    divergent,
+    note: null,
+  };
+
+  return {
+    audit,
+    findings: divergent.map((d) =>
+      branchFinding({audit, dir, divergence: d, repoRoot, store, subPath}),
+    ),
+  };
+}
+
+function branchFinding(ctx: {
+  audit: BranchPointerAudit;
+  dir: string | null;
+  divergence: SubmoduleBranchPointer;
+  repoRoot: string;
+  store: string | null;
+  subPath: string;
+}): SubmoduleFinding {
+  const {audit, dir, divergence: d, repoRoot, store, subPath} = ctx;
+  const both = `branch ${d.branch} records ${short(d.pointer)} for this submodule where the baseline ${audit.baselineRef} records ${short(audit.baselinePointer)}`;
+
+  // SEVERE inherits qyu1.14's framing for exactly its case: the commit is HERE
+  // and on no remote, so merging this branch publishes a gitlink nobody else
+  // can resolve. This is the only branch state that deserves an alarm.
+  if (d.inStore === true && d.onRemotes != null && d.onRemotes.length === 0) {
+    return {
+      fix: `git -C ${dir} fetch --all first (remote-tracking refs may be stale); if ${short(d.pointer)} is still on no remote, push it from a checkout that has it BEFORE merging ${d.branch}`,
+      kind: 'pointer-diverges-across-branches',
+      question: Q_MERGE_POINTER,
+      severity: 'severe',
+      why: `${both}, and ${short(d.pointer)} is on no remote-tracking branch — merging ${d.branch} would record a gitlink that no fresh clone, CI checkout or \`git worktree add\` can resolve ("upload-pack: not our ref")`,
+    };
+  }
+
+  // NOT KNOWING IS NOT A PROBLEM HERE. A branch someone else pushed routinely
+  // points at a submodule commit this store has never fetched. qyu1.14 makes
+  // that an advisory for the pointer THIS checkout must build against, where it
+  // really does block a build; for another branch's pointer it is the ordinary
+  // case, and alarming on it would fire on almost every repo forever.
+  if (d.inStore !== true) {
+    const reason =
+      d.inStore === false
+        ? `${short(d.pointer)} is not an object in this checkout's store (${store})`
+        : 'no submodule store was open to judge it';
+    return {
+      fix: dir != null ? `git -C ${dir} fetch --all, then re-run` : null,
+      kind: 'pointer-diverges-across-branches',
+      question: Q_MERGE_POINTER,
+      severity: 'ok',
+      why: `${both}, so merging ${d.branch} moves the recorded gitlink — but ${reason}, and object stores are per-checkout, so whether that pointer resolves anywhere else cannot be judged from here`,
+    };
+  }
+
+  const relation =
+    d.relationToBaseline != null
+      ? ` (${d.relationToBaseline} it in submodule history)`
+      : '';
+  return {
+    fix: `git -C ${repoRoot} diff ${audit.baselineRef} ${d.branch} -- ${subPath} shows the exact pointer move; decide which submodule commit wins BEFORE merging, because git resolves a gitlink conflict with neither side's content`,
+    kind: 'pointer-diverges-across-branches',
+    question: Q_MERGE_POINTER,
+    severity: 'ok',
+    why: `${both}${relation}, so merging ${d.branch} moves the recorded gitlink — and if the baseline has moved it too since they parted, the merge conflicts on the gitlink and resolving it is a submodule decision, not a text merge`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Inventory
 // ---------------------------------------------------------------------------
 
 export function buildSubmoduleInventory(
   opts: SubmoduleOptions,
 ): SubmoduleInventory {
-  const {allWorktreeStores = false, cwd, repoRoot, worktrees} = opts;
+  const {
+    allWorktreeStores = false,
+    baselineRef = null,
+    branches,
+    cwd,
+    repoRoot,
+    worktrees,
+  } = opts;
   const currentRoot = canonical(repoRoot);
 
   // Fall back to a single synthetic worktree when `git worktree list` gave
@@ -681,24 +1024,42 @@ export function buildSubmoduleInventory(
       ? worktrees
       : [{branch: null, isPrimary: true, path: repoRoot}];
 
-  const entries = discoverSubmodules(cwd, repoRoot).map(({path, url}) => {
+  const discovered = discoverSubmodules(cwd, repoRoot);
+  const scan = scanBranchPointers({
+    baselineRef,
+    branches,
+    cwd,
+    subPaths: discovered.map((d) => d.path),
+  });
+
+  const entries = discovered.map(({path, url}) => {
     const checkouts = trees.map((wt) => {
       const isCurrent = canonical(wt.path) === currentRoot;
       return buildCheckout(wt, path, isCurrent, allWorktreeStores || isCurrent);
     });
 
-    const rowFindings = decideRowFindings(checkouts, path);
+    const branchAudit = auditBranchPointers({
+      checkouts,
+      repoRoot,
+      scan,
+      subPath: path,
+    });
+    const rowFindings = [
+      ...decideRowFindings(checkouts, path),
+      ...branchAudit.findings,
+    ];
     const findings = [...rowFindings, ...checkouts.flatMap((c) => c.findings)];
     const severity = worstSeverity(findings);
 
     return {
+      branchPointers: branchAudit.audit,
       checkouts,
       findings: rowFindings,
       path,
       pointersAcrossWorktrees: distinctPointers(checkouts).length,
       severity,
       url,
-      why: summarise(findings, checkouts, severity),
+      why: summarise(findings, checkouts, severity, branchAudit.audit),
     };
   });
 
@@ -795,6 +1156,7 @@ function summarise(
   findings: SubmoduleFinding[],
   checkouts: SubmoduleCheckout[],
   severity: SubmoduleSeverity,
+  branchAudit: BranchPointerAudit,
 ): string {
   if (severity !== 'ok') {
     const worst = findings.find((f) => f.severity === severity);
@@ -807,10 +1169,14 @@ function summarise(
   // Divergence that did not rise to an advisory still belongs in the one-liner:
   // it is the fact a reader needs in order to decide whether to escalate.
   const spread = distinctPointers(checkouts).length;
-  const note =
-    spread > 1
-      ? `; the parent's worktrees record ${spread} different pointers (see findings)`
+  const branchNote =
+    branchAudit.checked && branchAudit.divergent.length > 0
+      ? `; ${branchAudit.divergent.length} of ${branchAudit.branchesCompared} branches record a different pointer than ${branchAudit.baselineRef} (see findings)`
       : '';
+  const note =
+    (spread > 1
+      ? `; the parent's worktrees record ${spread} different pointers (see findings)`
+      : '') + branchNote;
 
   if (current.store == null) {
     return `recorded pointer ${short(current.recordedPointer)}; no store was opened for this worktree${note}`;
