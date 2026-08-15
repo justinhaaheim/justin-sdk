@@ -25,6 +25,7 @@ import type {
   BranchTip,
   CoreInventory,
   CoreOptions,
+  DivergenceCounts,
   WorktreeEntry,
 } from './types';
 
@@ -168,30 +169,41 @@ export function getBranchTips(
 }
 
 /**
- * Commits each side has that the other lacks, in ONE call.
+ * Commits each side has that the other lacks, in ONE call — or null when that
+ * call could not answer.
  *
  * `A...B` (three dots) with `--left-right --count` yields "<only-in-A>
  * <only-in-B>". Note this is the symmetric-difference form; the two-dot `A..B`
  * form answers a different question and is the source of a well-known
  * misreading when a branch is far behind its baseline.
+ *
+ * FAILURE IS NOT ZERO (home-base-qyu1.21). This returned `{ahead: 0, behind: 0}`
+ * on any git failure — an unresolvable baseline, a gc/lock race, a missing
+ * object — and `ahead === 0` is the disposition engine's strongest possible
+ * statement: "nothing unique here, proven safe to delete". `rev-parse` on the
+ * tip can keep succeeding while this walk fails, so the pre-flight guards in
+ * `plan.ts` cannot catch the substitution either. A branch whose divergence
+ * cannot be measured must report exactly that, all the way to the verdict.
+ *
+ * Unparseable output is treated identically: git answering something this
+ * cannot read is no more informative than git not answering at all, and
+ * coercing it to 0 was the same fabrication in miniature.
  */
 export function countDivergence(
   cwd: string,
   baseline: string,
   branch: string,
-): {ahead: number; behind: number} {
+): DivergenceCounts | null {
   const out = gitArgv(
     ['rev-list', '--left-right', '--count', `${baseline}...${branch}`],
     cwd,
   );
-  if (out == null) return {ahead: 0, behind: 0};
+  if (out == null) return null;
   const parts = out.trim().split(/\s+/);
-  const behind = Number(parts[0] ?? '0');
-  const ahead = Number(parts[1] ?? '0');
-  return {
-    ahead: Number.isFinite(ahead) ? ahead : 0,
-    behind: Number.isFinite(behind) ? behind : 0,
-  };
+  const behind = Number(parts[0]);
+  const ahead = Number(parts[1]);
+  if (!Number.isFinite(ahead) || !Number.isFinite(behind)) return null;
+  return {ahead, behind};
 }
 
 // ---------------------------------------------------------------------------
@@ -255,7 +267,7 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
 
   const branches: BranchDivergence[] = candidates.map((t) => ({
     ...t,
-    ...countDivergence(cwd, baselineRef, t.name),
+    divergence: countDivergence(cwd, baselineRef, t.name),
   }));
 
   return {

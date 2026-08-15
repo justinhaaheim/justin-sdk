@@ -54,9 +54,23 @@ export interface BranchRow {
    * silently acting on whatever it has become by then.
    */
   tipSha: string;
-  /** Kept because it is the standard metric and reads fine — but see `why`. */
-  ahead: number;
-  behind: number;
+  /**
+   * Kept because it is the standard metric and reads fine — but see `why`.
+   *
+   * BOTH ARE NULL when the divergence could not be measured (home-base-
+   * qyu1.21), which is a different statement from `0`: zero means "measured,
+   * and there is nothing here", null means "no measurement exists". Such a row
+   * is always `disposition: review` with `provenSafe: false`, and its
+   * `mergeShape.kind` is `unknown`.
+   *
+   * They stay two flat fields on the published row — rather than the nullable
+   * `divergence` object the core inventory carries — because these are the
+   * documented top-level keys every reader of the YAML/JSON already looks for,
+   * and re-nesting them would break that schema for every consumer to restate
+   * a fact `mergeShape` and `why` already carry.
+   */
+  ahead: number | null;
+  behind: number | null;
   /**
    * What those two numbers already prove about merging this branch into the
    * baseline: fast-forward, real merge commit, or nothing to do.
@@ -65,7 +79,8 @@ export interface BranchRow {
    * sha-reachability fact, orthogonal to the content-based `disposition`, and
    * the rows where the two disagree are the informative ones — a squash-merged
    * branch is `merged` yet cannot be fast-forwarded. Derived arithmetically from
-   * `ahead`/`behind`; it costs no git invocation. See `merge-shape.ts`.
+   * `ahead`/`behind`; it costs no git invocation, and reports `unknown` when
+   * those two numbers do not exist. See `merge-shape.ts`.
    */
   mergeShape: MergeShape;
   lastCommitDate: string;
@@ -182,7 +197,12 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
       DISPOSITION_ORDER.indexOf(a.disposition) -
       DISPOSITION_ORDER.indexOf(b.disposition);
     if (d !== 0) return d;
-    if (a.ahead !== b.ahead) return b.ahead - a.ahead;
+    // An unmeasured row sorts as if it were the largest possible ahead-count:
+    // within its group it is the row most likely to be hiding work, so it goes
+    // to the top rather than to the bottom where a `0` would have put it.
+    const aheadRank = (r: BranchRow): number =>
+      r.ahead ?? Number.MAX_SAFE_INTEGER;
+    if (aheadRank(a) !== aheadRank(b)) return aheadRank(b) - aheadRank(a);
     return b.lastCommitDate.localeCompare(a.lastCommitDate);
   });
 
@@ -222,13 +242,21 @@ function buildRow(
 ): BranchRow {
   // Skip the expensive proof when the branch has nothing unique — there is
   // nothing for it to prove, and on a large repo that is most of the work.
+  //
+  // Skip it too when the divergence is UNKNOWN, which is a different reason:
+  // the proof enumerates "commits the baseline lacks" by walking the same
+  // history with the same git that just failed to walk it, so whatever it
+  // returned would describe an unknown subset of the branch. The disposition
+  // engine refuses such a row before reading any proof anyway (qyu1.21); not
+  // computing one keeps the row from carrying evidence nobody may rely on.
   const proof =
-    ctx.content && branch.ahead > 0
+    ctx.content && branch.divergence != null && branch.divergence.ahead > 0
       ? proveContentOnBaseline(branch.name, baselineRef, cwd)
       : null;
 
   const pr = prForBranch(ctx.prIndex, branch.name);
   const {disposition, provenSafe, why} = decideDisposition({
+    baselineRef,
     branch,
     pr,
     prDataAvailable: ctx.prIndex.available,
@@ -236,16 +264,16 @@ function buildRow(
   });
 
   return {
-    ahead: branch.ahead,
+    ahead: branch.divergence?.ahead ?? null,
     archiveMirror: proof?.archiveMirror ?? null,
-    behind: branch.behind,
+    behind: branch.divergence?.behind ?? null,
     ...(ctx.only != null && proof != null
       ? {commits: proof.uniqueCommits}
       : {}),
     disposition,
     isRemoteOnly: branch.isRemoteOnly,
     lastCommitDate: branch.lastCommitDate,
-    mergeShape: describeMergeShape(branch, baselineRef),
+    mergeShape: describeMergeShape(branch.divergence, baselineRef),
     name: branch.name,
     pr:
       pr != null

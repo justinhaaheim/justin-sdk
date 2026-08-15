@@ -50,16 +50,40 @@ export interface BranchTip {
 }
 
 /**
- * A branch tip plus how far it diverges from the baseline ref.
+ * How far a branch diverges from the baseline ref.
  *
  * `ahead` is what the branch has that the baseline lacks — the commits at risk
  * of being lost. `behind` is how far the branch trails the baseline; it is
  * reported because it is the standard metric, but it must NEVER be used to
  * infer mergedness (see the two-dot/three-dot footgun in `content.ts`).
  */
-export interface BranchDivergence extends BranchTip {
+export interface DivergenceCounts {
   ahead: number;
   behind: number;
+}
+
+/**
+ * A branch tip plus its divergence — or an explicit statement that the
+ * divergence is UNKNOWN.
+ *
+ * WHY THIS IS NULLABLE, AND WHY IT IS ONE FIELD RATHER THAN TWO
+ * (home-base-qyu1.21). The counts come from a single `rev-list`, which can fail
+ * for reasons that have nothing to do with the branch: an unresolvable
+ * baseline, a gc/lock race, a missing object. That failure used to be
+ * FABRICATED into `{ahead: 0, behind: 0}`, and `ahead === 0` is exactly what
+ * the disposition engine reads as "fully contained in the baseline, proven safe
+ * to delete" — so a transient git error silently became a licence to destroy a
+ * branch. The absence of evidence has to be representable, or it gets
+ * misreported as evidence of absence.
+ *
+ * It is ONE nullable field and not two nullable numbers because the two numbers
+ * are produced by one command: "ahead known, behind unknown" is not a state
+ * that can occur, and a shape that can express it invites code that handles
+ * only half of it.
+ */
+export interface BranchDivergence extends BranchTip {
+  /** Null when the divergence could not be measured — never assume zero. */
+  divergence: DivergenceCounts | null;
 }
 
 /**

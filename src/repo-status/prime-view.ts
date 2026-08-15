@@ -38,7 +38,14 @@ const PRIME_PR_TIMEOUT_MS = 2000;
 export interface DivergentGroup {
   tipSha: string;
   branches: BranchDivergence[];
-  aheadOfCurrent: number;
+  /**
+   * Null when the divergence could not be measured (home-base-qyu1.21). Such a
+   * group is still SURFACED: this view exists so unmerged work is never missed,
+   * and "I could not count it" is a weaker reason to stay quiet than any
+   * count — dropping it would be the same silent-omission failure the module
+   * was written to prevent.
+   */
+  aheadOfCurrent: number | null;
   lastCommitDate: string;
   hasWorktree: boolean;
   /** e.g. "PR #12 open". Null when PR data was not requested or unavailable. */
@@ -67,8 +74,12 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
   // Detached HEAD / not a repo — nothing sensible to report.
   if (inventory?.currentBranch == null) return null;
 
-  // Only branches that HAVE something we might lose are worth surfacing here.
-  const withAhead = inventory.branches.filter((b) => b.ahead > 0);
+  // Only branches that HAVE something we might lose are worth surfacing here —
+  // plus the ones where that could not be determined, which are exactly the
+  // branches this view must not quietly drop.
+  const withAhead = inventory.branches.filter(
+    (b) => b.divergence == null || b.divergence.ahead > 0,
+  );
 
   // Fetch PRs only when asked, and only when there is something to annotate —
   // a clean repo should never pay for a network call it cannot use.
@@ -86,7 +97,7 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
 
   const groups: DivergentGroup[] = Array.from(bySha.entries()).map(
     ([tipSha, branches]) => ({
-      aheadOfCurrent: branches[0]?.ahead ?? 0,
+      aheadOfCurrent: branches[0]?.divergence?.ahead ?? null,
       branches,
       hasWorktree: branches.some((b) => b.worktreePath != null),
       prNote: prNoteFor(branches, prIndex),
@@ -100,8 +111,11 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
 
   groups.sort((a, b) => {
     if (a.hasWorktree !== b.hasWorktree) return a.hasWorktree ? -1 : 1;
-    if (a.aheadOfCurrent !== b.aheadOfCurrent)
-      return b.aheadOfCurrent - a.aheadOfCurrent;
+    // Unmeasured sorts to the top, as the largest possible count: it is the
+    // group whose contents are least known, not the one with the least in it.
+    const rank = (g: DivergentGroup): number =>
+      g.aheadOfCurrent ?? Number.MAX_SAFE_INTEGER;
+    if (rank(a) !== rank(b)) return rank(b) - rank(a);
     return b.lastCommitDate.localeCompare(a.lastCommitDate);
   });
 
@@ -162,14 +176,20 @@ export function formatRepoState(report: DivergenceReport | null): string {
   for (const group of report.groups) {
     const names = group.branches.map((b) => b.name).join(' / ');
     const worktreeNote = group.hasWorktree ? 'worktree, ' : '';
-    const commitWord = group.aheadOfCurrent === 1 ? 'commit' : 'commits';
+    // "unknown" rather than a number: `git rev-list` failed for this branch, so
+    // it may hold anything from nothing to everything, and the one thing it may
+    // not be reported as is zero.
+    const aheadNote =
+      group.aheadOfCurrent == null
+        ? 'commits ahead UNKNOWN — could not measure divergence'
+        : `${group.aheadOfCurrent} ${group.aheadOfCurrent === 1 ? 'commit' : 'commits'} ahead`;
     const sameTipNote =
       group.branches.length > 1
         ? ' -- same tip, may be the same underlying work'
         : '';
     const prNote = group.prNote != null ? `, ${group.prNote}` : '';
     lines.push(
-      `  - ${names} (${worktreeNote}${group.aheadOfCurrent} ${commitWord} ahead, last touched ${formatTouched(group.lastCommitDate)}${prNote})${sameTipNote}`,
+      `  - ${names} (${worktreeNote}${aheadNote}, last touched ${formatTouched(group.lastCommitDate)}${prNote})${sameTipNote}`,
     );
   }
   lines.push(

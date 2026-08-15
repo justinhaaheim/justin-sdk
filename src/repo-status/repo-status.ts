@@ -70,6 +70,9 @@ has to re-derive it with 'git merge-base --is-ancestor':
                       merging it in fast-forwards, no merge commit
   merge-needed        both sides moved — merging writes a merge commit
   already-up-to-date  the branch holds nothing the baseline lacks
+  unknown             the ahead/behind counts could not be computed at all, so
+                      nothing here is known — such a row reports ahead and
+                      behind as null and is always 'review', never proven safe
 
 That is a sha-reachability fact and is deliberately independent of the
 content-based disposition: a squash-merged branch is 'merged' AND 'merge-needed'

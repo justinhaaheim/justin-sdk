@@ -149,11 +149,17 @@ describe('merge shape agrees with git', () => {
         equal: ancestor,
       });
       // ...and the field says "fast-forward" on exactly those rows that have
-      // something to merge AND sit on top of the baseline.
+      // something to merge AND sit on top of the baseline. (`ahead` is nullable
+      // since home-base-qyu1.21 — an unmeasurable row is neither ahead nor a
+      // fast-forward, so the explicit null check preserves this assertion
+      // exactly; every row in THIS fixture is measurable.)
       expect({
         branch: row.name,
         ff: row.mergeShape.kind === 'fast-forward',
-      }).toEqual({branch: row.name, ff: ancestor && row.ahead > 0});
+      }).toEqual({
+        branch: row.name,
+        ff: ancestor && row.ahead != null && row.ahead > 0,
+      });
     }
   });
 
