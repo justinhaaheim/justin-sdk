@@ -22,7 +22,12 @@ import {hideBin} from 'yargs/helpers';
 
 import type {Argv} from 'yargs';
 
-import {buildPlan, executePlan, renderPlan} from './plan';
+import {
+  buildPlan,
+  executePlan,
+  executeRemotePlan,
+  renderPlan,
+} from './plan';
 import {buildReport, type RepoStatusReport} from './report';
 
 const TOP_NARRATIVE = `
@@ -34,6 +39,10 @@ TYPICAL USAGE
     repo-status branch <name>       dig into one branch, commit by commit, with proof
     repo-status plan                the proposed cleanup, as a dry run
     repo-status apply --safe-only   archive the finished branches (non-destructive)
+
+  Remote branches are archived only by 'apply --safe-only --include-remote',
+  which pushes archive/<name>, confirms it landed, and only then deletes the
+  original. Nothing else in this tool can modify a remote.
 
   Start with 'status'. Most branches resolve to 'merged' or 'mirrored' and need
   no thought. Anything marked 'review' or 'needs-judgment' is where your
@@ -82,6 +91,10 @@ Read it, then run 'apply --safe-only' to execute the proven-safe group. Entries
 shown as 'name -> archive/name' are renames, which preserve every commit.
 Branches needing judgment are listed for your attention but are never actioned
 automatically, by design.
+
+Remote branches get their own group, printed with the EXACT push and delete
+commands that would run, in order. They are executed only by
+'apply --safe-only --include-remote --yes' — never by a bare --safe-only run.
 `.trim();
 
 const APPLY_NARRATIVE = `
@@ -94,8 +107,19 @@ exception is a branch an archive/* mirror already holds in full: renaming would
 collide with that mirror, and the commits are already preserved, so the
 redundant local copy is deleted instead (re-proven against live state first).
 
-Acts ONLY on branches the tool proved safe, and only on local ones. It will
-refuse 'review' and 'needs-judgment' rows even if you ask for them.
+Acts ONLY on branches the tool proved safe. It will refuse 'review' and
+'needs-judgment' rows even if you ask for them.
+
+  repo-status apply --safe-only --yes                    local branches only
+  repo-status apply --safe-only --include-remote --yes   also archive on the remote
+
+--include-remote is the ONLY way anything reaches the network. Without it this
+command cannot modify a remote at all, whatever else you pass. With it, each
+remote branch is archived as a push FOLLOWED BY a delete: the archive ref is
+pushed at the exact sha that was proven, confirmed present on the remote, and
+only then is the original removed. A push or verification that fails leaves the
+original branch untouched and moves on. Run 'plan' first — it prints the exact
+push/delete commands.
 `.trim();
 
 function render(obj: unknown, json: boolean): string {
@@ -230,6 +254,12 @@ const applyCommand = {
         describe: 'Required. Act only on branches proven safe',
         type: 'boolean' as const,
       })
+      .option('include-remote', {
+        default: false,
+        describe:
+          'Also archive proven-safe REMOTE branches (pushes archive/<name>, then deletes the original)',
+        type: 'boolean' as const,
+      })
       .option('yes', {
         default: false,
         describe: 'Required. Confirm the repo will be modified',
@@ -260,12 +290,31 @@ const applyCommand = {
     if (!args.yes) {
       console.error(renderPlan(plan));
       console.error(
-        '\nrefusing to act without --yes (this modifies the repository)',
+        `\nrefusing to act without --yes (this modifies ${
+          args.includeRemote
+            ? `the repository AND ${plan.remote.length} branch(es) on the remote`
+            : 'the repository'
+        })`,
       );
+      if (!args.includeRemote && plan.remote.length > 0) {
+        console.error(
+          `note: ${plan.remote.length} proven-safe remote branch(es) will NOT be touched — pass --include-remote to archive those too`,
+        );
+      }
       process.exitCode = 2;
       return;
     }
-    console.log(render(executePlan(plan, args.repo), args.json));
+
+    // Local first, and via a separate call: `executePlan` cannot reach the
+    // remote group, so the network is touched only on the explicit opt-in.
+    const results = executePlan(plan, args.repo);
+    if (args.includeRemote) {
+      console.error(
+        `archiving ${plan.remote.length} branch(es) on the remote (push, verify, then delete)`,
+      );
+      results.push(...executeRemotePlan(plan, args.repo));
+    }
+    console.log(render(results, args.json));
   },
 };
 
