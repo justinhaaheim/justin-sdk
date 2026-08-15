@@ -63,7 +63,15 @@
  * evidence. A stale view is reported and skipped instead, so the proof and the
  * action always describe the same data.
  *
- * Part of home-base-qyu1.7 / qyu1.13.
+ * ── One source for "what will run" (home-base-qyu1.17) ───────────────────────
+ *
+ * Those commands are assembled EXACTLY ONCE, by `remoteArchiveArgv`. `apply`
+ * executes those argv arrays; every dry run renders its strings from the same
+ * arrays. They used to be hand-written twice — once for display, once for
+ * execution — with nothing tying them together, which is how a dry run starts
+ * quietly lying about what it is going to do.
+ *
+ * Part of home-base-qyu1.7 / qyu1.13 / qyu1.17.
  */
 
 import {execFileSync} from 'child_process';
@@ -143,6 +151,9 @@ export interface PlanAction {
    * argument, so they are the ones worth quoting verbatim. Local actions leave
    * this null: `target` already says exactly where the branch lands, and
    * nothing about a local rename is dangerous enough to need the literal.
+   *
+   * Rendered from the argv `apply` executes (`remoteArchiveArgv`), shell-quoted
+   * so the line is safe to paste — a branch name may legally contain `$( )`.
    */
   commands: string[] | null;
 }
@@ -196,18 +207,81 @@ function manualAction(branch: string, reason: string): PlanAction {
 }
 
 /**
+ * The two git invocations a remote archive runs, in order, in argv form.
+ *
+ * THE single source for both halves of the promise a dry run makes. `apply`
+ * passes these arrays straight to git, and the printed commands are rendered
+ * from these same arrays — so "what the reader approves is exactly what
+ * executes" is a property of the code rather than of two hand-written copies
+ * happening to agree (home-base-qyu1.17).
+ */
+export interface RemoteArchiveArgv {
+  /** `push <remote> --delete <source> --force-with-lease=<sourceRef>:<sha>` */
+  delete: string[];
+  /** `push <remote> <sha>:refs/heads/<archiveBranch>` */
+  push: string[];
+}
+
+export function remoteArchiveArgv(spec: RemoteArchiveSpec): RemoteArchiveArgv {
+  return {
+    delete: [
+      'push',
+      spec.remote,
+      '--delete',
+      spec.sourceBranch,
+      `--force-with-lease=refs/heads/${spec.sourceBranch}:${spec.sha}`,
+    ],
+    push: ['push', spec.remote, `${spec.sha}:refs/heads/${spec.archiveBranch}`],
+  };
+}
+
+/**
+ * Characters that survive a shell untouched, so an argv element made only of
+ * them can be printed bare. Everything git needs here — `refs/heads/x:sha`,
+ * `--force-with-lease=...` — is in this set, which is what keeps the printed
+ * form of an ordinary branch byte-for-byte what it has always been.
+ */
+const SHELL_SAFE_ARG = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/**
+ * POSIX single-quoting, applied only where it changes anything.
+ *
+ * This is NOT cosmetic. git happily accepts branch names containing `$( )`,
+ * backticks, `;`, `&` and `|` — spaces and a handful of glob characters are the
+ * only things `check-ref-format` rejects — so a remote branch named
+ * `feat/$(id)` printed bare would give a reader a command that runs `id` and
+ * then pushes and DELETES a ref other than the one the plan proved safe. The
+ * execution side was never exposed to this (every git call is argv-form
+ * execFileSync, never a shell string); it is the printed side that has to be
+ * made paste-safe, and quoting it is what makes the printed and executed forms
+ * the same command rather than merely similar ones.
+ */
+function shellQuote(arg: string): string {
+  if (SHELL_SAFE_ARG.test(arg)) return arg;
+  // A single quote cannot appear inside single quotes: close, escape it, reopen.
+  return `'${arg.split("'").join(`'\\''`)}'`;
+}
+
+/** An argv array as the command line that reproduces it. */
+function renderGitCommand(argv: string[]): string {
+  return ['git', ...argv.map(shellQuote)].join(' ');
+}
+
+/**
  * The literal commands a remote archive runs, in order.
  *
  * Printed verbatim — including the lease — rather than described, so what the
  * reader approves is exactly what executes. Resolved at PLAN time and stored on
  * the action, which is what lets the YAML/JSON renderings carry the same
  * commands the markdown dry run prints instead of a spec to reassemble.
+ *
+ * DERIVED from `remoteArchiveArgv`, never hand-assembled: see the drift test,
+ * which runs a real `apply` behind a git that records its argv and asserts these
+ * strings parse back — through a real shell — to exactly what git received.
  */
 export function remoteArchiveCommands(spec: RemoteArchiveSpec): string[] {
-  return [
-    `git push ${spec.remote} ${spec.sha}:refs/heads/${spec.archiveBranch}`,
-    `git push ${spec.remote} --delete ${spec.sourceBranch} --force-with-lease=refs/heads/${spec.sourceBranch}:${spec.sha}`,
-  ];
+  const argv = remoteArchiveArgv(spec);
+  return [renderGitCommand(argv.push), renderGitCommand(argv.delete)];
 }
 
 export function buildPlan(report: RepoStatusReport): CleanupPlan {
@@ -574,6 +648,10 @@ function archiveRemoteBranch(
   const {archiveBranch, remote, sha, sourceBranch} = spec;
   const archiveRef = `refs/heads/${archiveBranch}`;
   const sourceRef = `refs/heads/${sourceBranch}`;
+  // The mutating commands are taken from the shared builder, NOT re-assembled
+  // here: these two arrays and the strings the plan printed are the same object
+  // rendered two ways, so approving the dry run approves precisely this.
+  const argv = remoteArchiveArgv(spec);
 
   // GUARD 1: the remote's own default branch, asked of the remote itself. The
   // static name list in buildPlan already covers the usual suspects; this
@@ -643,10 +721,7 @@ function archiveRemoteBranch(
   // PUSH. Skipped when a previous run already landed this exact sha, which makes
   // an interrupted run safe to simply re-run.
   if (!alreadyPushed) {
-    const pushed = gitArgv(
-      ['push', remote, `${sha}:${archiveRef}`],
-      cwd,
-    );
+    const pushed = gitArgv(argv.push, cwd);
     if (!pushed.ok) {
       return {
         branch: action.branch,
@@ -671,16 +746,7 @@ function archiveRemoteBranch(
 
   // DELETE. The lease makes the server itself refuse if the branch moved in the
   // window since GUARD 3, which is the only gap the checks above cannot cover.
-  const deleted = gitArgv(
-    [
-      'push',
-      remote,
-      '--delete',
-      sourceBranch,
-      `--force-with-lease=${sourceRef}:${sha}`,
-    ],
-    cwd,
-  );
+  const deleted = gitArgv(argv.delete, cwd);
   if (!deleted.ok) {
     return {
       branch: action.branch,
