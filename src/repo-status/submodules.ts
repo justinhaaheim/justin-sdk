@@ -89,8 +89,10 @@ export type SubmoduleFindingKind =
   | 'unpushed-commits'
   /** Behind its remote — stale base, and therefore probably stale dependencies. */
   | 'stale-checkout'
-  /** Checkout HEAD differs from the pointer the parent has committed. */
+  /** Checkout HEAD is ahead of (or divergent from) the pointer the parent records. */
   | 'pointer-bump-uncommitted'
+  /** Checkout HEAD is an ancestor of the pointer the parent records. */
+  | 'checkout-behind-pointer'
   /** The parent's worktrees record different submodule commits. */
   | 'pointer-diverges-across-worktrees'
   /** No checkout in this worktree at all. */
@@ -612,37 +614,54 @@ function decideCheckoutFindings(ctx: {
   }
 
   // --- Does the parent agree with what is checked out? ---------------------
+  //
+  // Only when the recorded pointer is actually IN this store. Comparing against
+  // an object you do not have cannot produce an answer, and `merge-base` simply
+  // FAILS on it — which reads as "divergent" and prints a confident lie about a
+  // commit that is merely one fetch away. The absent-from-store finding above
+  // already covers that case, and covers it correctly.
   if (
     recordedPointer != null &&
+    pointerInStore === true &&
     facts.head != null &&
     facts.head !== recordedPointer
   ) {
-    findings.push({
-      fix: `git -C ${worktree.path} add -- ${ctx.subPath} && git -C ${worktree.path} commit (or \`git -C ${worktree.path} submodule update -- ${ctx.subPath}\` to discard)`,
-      kind: 'pointer-bump-uncommitted',
-      question: Q_RESOLVABLE,
-      severity: 'advisory',
-      why: `this worktree has ${short(facts.head)} checked out (${describeRelation(dir, facts.head, recordedPointer)}) but the parent still records ${short(recordedPointer)}, so every other clone and worktree gets ${short(recordedPointer)}`,
-    });
+    const relation = describeRelation(dir, facts.head, recordedPointer);
+    findings.push(
+      relation === 'behind'
+        ? {
+            fix: `git -C ${worktree.path} submodule update --init -- ${ctx.subPath}`,
+            kind: 'checkout-behind-pointer',
+            question: Q_CURRENT_CODE,
+            severity: 'advisory',
+            why: `this worktree has ${short(facts.head)} checked out, an ANCESTOR of the ${short(recordedPointer)} the parent records — you are building against older submodule code than the parent asks for`,
+          }
+        : {
+            fix: `git -C ${worktree.path} add -- ${ctx.subPath} && git -C ${worktree.path} commit (or \`git -C ${worktree.path} submodule update -- ${ctx.subPath}\` to discard)`,
+            kind: 'pointer-bump-uncommitted',
+            question: Q_RESOLVABLE,
+            severity: 'advisory',
+            why: `this worktree has ${short(facts.head)} checked out (${relation} the recorded pointer) but the parent still records ${short(recordedPointer)}, so every other clone and worktree gets ${short(recordedPointer)}`,
+          },
+    );
   }
 
   return findings;
 }
 
 /** How the checked-out commit relates to the one the parent recorded. */
-function describeRelation(dir: string, head: string, recorded: string): string {
-  const headIsAncestor = gitOk(
-    ['merge-base', '--is-ancestor', head, recorded],
-    dir,
-  );
-  const recordedIsAncestor = gitOk(
-    ['merge-base', '--is-ancestor', recorded, head],
-    dir,
-  );
-  if (headIsAncestor && !recordedIsAncestor) return 'behind the recorded pointer';
-  if (recordedIsAncestor && !headIsAncestor) return 'ahead of the recorded pointer';
-  if (headIsAncestor && recordedIsAncestor) return 'the same commit';
-  return 'divergent from the recorded pointer';
+function describeRelation(
+  dir: string,
+  head: string,
+  recorded: string,
+): 'ahead of' | 'behind' | 'divergent from' {
+  if (gitOk(['merge-base', '--is-ancestor', head, recorded], dir)) {
+    return 'behind';
+  }
+  if (gitOk(['merge-base', '--is-ancestor', recorded, head], dir)) {
+    return 'ahead of';
+  }
+  return 'divergent from';
 }
 
 // ---------------------------------------------------------------------------
