@@ -64,10 +64,31 @@ and a disposition with a one-line reason.
 
 Ahead/behind counts are reported alongside the disposition, not replaced by it.
 
+A 'submodules' section reports each submodule's recorded gitlink separately,
+because the questions there are different ones:
+
+  severe          the recorded pointer is on no remote (every fresh clone, CI run
+                  and 'git worktree add' fails on it), or the checkout holds
+                  commits that exist on no remote
+  advisory        the checkout is behind its remote (stale base, and therefore
+                  probably stale dependencies), the pointer is missing from THIS
+                  checkout's object store, or the parent's worktrees disagree
+  ok              nothing to do
+
+Every submodule finding names the QUESTION its numbers answer, because the same
+number means opposite things: "behind by 49" is noise for "can I delete this"
+and load-bearing for "am I building on current code".
+
   repo-status status                 full ledger (content proofs + PR state)
   repo-status status --no-content    skip per-commit proofs — fast, but dispositions
                                      stay conservative because nothing is proven
   repo-status status --no-prs        skip the network entirely
+  repo-status status --no-submodules skip the submodule section
+  repo-status status --submodule-stores
+                                     also open EVERY worktree's submodule object
+                                     store, not just this worktree's — each linked
+                                     worktree has its own store, and 'git worktree
+                                     remove' deletes it along with anything unpushed
   repo-status status --json          same object as JSON
 `.trim();
 
@@ -154,6 +175,14 @@ function emit(report: RepoStatusReport | null, json: boolean): number {
       `note: PR state unavailable — ${report.enrichments.prsUnavailableReason}`,
     );
   }
+  // A severe submodule row is the whole reason this section exists: it is the
+  // failure that looks fine locally and breaks every clone. Surfacing it on
+  // stderr as well means it cannot be scrolled past in a long ledger.
+  for (const sub of report.submodules.entries) {
+    if (sub.severity === 'severe') {
+      console.error(`severe: submodule ${sub.path} — ${sub.why}`);
+    }
+  }
   return 0;
 }
 
@@ -189,6 +218,17 @@ const statusCommand = {
         describe: 'Query GitHub for PR state (network)',
         type: 'boolean' as const,
       })
+      .option('submodules', {
+        default: true,
+        describe: 'Report submodule gitlink state (local, cheap)',
+        type: 'boolean' as const,
+      })
+      .option('submodule-stores', {
+        default: false,
+        describe:
+          "Open every worktree's submodule object store, not just this worktree's",
+        type: 'boolean' as const,
+      })
       .option('since-days', {
         describe: 'Ignore branches with no commits in this many days',
         type: 'number' as const,
@@ -202,6 +242,8 @@ const statusCommand = {
         cwd: args.repo,
         prs: args.prs,
         sinceDays: args.sinceDays ?? null,
+        submoduleStores: args.submoduleStores,
+        submodules: args.submodules,
       }),
       args.json,
     );
@@ -223,6 +265,10 @@ const branchCommand = {
       only: args.name,
       prs: args.prs,
       sinceDays: null,
+      // A one-branch deep-dive is not the place for repo-wide submodule state;
+      // `status` is. Skipping it also keeps this command's cost proportional to
+      // the one branch it was asked about.
+      submodules: false,
     });
     if (report != null && report.branches.length === 0) {
       console.error(`no such branch: ${args.name}`);
@@ -257,6 +303,9 @@ const planCommand = {
       cwd: args.repo,
       prs: true,
       sinceDays: null,
+      // The plan only ever archives BRANCHES, so submodule state would be
+      // computed and then discarded. `status` is where it belongs.
+      submodules: false,
     });
     if (report == null) {
       console.error('not a git repository');
@@ -305,6 +354,9 @@ const applyCommand = {
       cwd: args.repo,
       prs: true,
       sinceDays: null,
+      // The plan only ever archives BRANCHES, so submodule state would be
+      // computed and then discarded. `status` is where it belongs.
+      submodules: false,
     });
     if (report == null) {
       console.error('not a git repository');

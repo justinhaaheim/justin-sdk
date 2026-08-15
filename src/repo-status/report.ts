@@ -28,6 +28,11 @@ import {
   prForBranch,
   type PrIndex,
 } from './prs';
+import {
+  buildSubmoduleInventory,
+  EMPTY_SUBMODULE_INVENTORY,
+  type SubmoduleInventory,
+} from './submodules';
 
 import type {BranchDivergence, WorktreeEntry} from './types';
 
@@ -81,9 +86,11 @@ export interface RepoStatusReport {
     content: boolean;
     prs: boolean;
     prsUnavailableReason: string | null;
+    submodules: boolean;
   };
   worktrees: WorktreeEntry[];
   branches: BranchRow[];
+  submodules: SubmoduleInventory;
 }
 
 export interface ReportOptions {
@@ -92,6 +99,19 @@ export interface ReportOptions {
   content?: boolean;
   /** Query GitHub for PR state. Network. Independent of `content`. */
   prs?: boolean;
+  /**
+   * Inspect submodule gitlink state. Local and cheap, and independent of both
+   * `content` and `prs`. The `prime` session-start path never calls
+   * `buildReport` at all, so this costs it nothing whatever it is set to.
+   */
+  submodules?: boolean;
+  /**
+   * Open EVERY worktree's submodule object store rather than just the current
+   * one. Off by default because it is the only part that reaches outside the
+   * worktree being inspected; on, it answers the work-at-risk question per
+   * store, which is what catches commits that `git worktree remove` would eat.
+   */
+  submoduleStores?: boolean;
   /** Age gate; null keeps every branch however old (what reconcile wants). */
   sinceDays?: number | null;
   /** Restrict to one branch (the `branch <name>` deep-dive). */
@@ -106,7 +126,15 @@ const DISPOSITION_ORDER: Disposition[] = [
 ];
 
 export function buildReport(opts: ReportOptions): RepoStatusReport | null {
-  const {content = true, cwd, only, prs = true, sinceDays = null} = opts;
+  const {
+    content = true,
+    cwd,
+    only,
+    prs = true,
+    sinceDays = null,
+    submoduleStores = false,
+    submodules = true,
+  } = opts;
 
   const inventory = buildCoreInventory({
     baseline: 'default',
@@ -116,6 +144,15 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
   if (inventory == null) return null;
 
   const prIndex: PrIndex = prs ? fetchPullRequests({cwd}) : EMPTY_PR_INDEX;
+
+  const submoduleInventory = submodules
+    ? buildSubmoduleInventory({
+        allWorktreeStores: submoduleStores,
+        cwd,
+        repoRoot: inventory.repoRoot,
+        worktrees: inventory.worktrees,
+      })
+    : EMPTY_SUBMODULE_INVENTORY;
 
   const selected =
     only != null
@@ -143,6 +180,7 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
       content,
       prs: prIndex.available,
       prsUnavailableReason: prIndex.unavailableReason,
+      submodules,
     },
     repo: {
       baselineRef: inventory.baselineRef,
@@ -159,6 +197,7 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
       provenSafe: rows.filter((r) => r.provenSafe).length,
       review: rows.filter((r) => r.disposition === 'review').length,
     },
+    submodules: submoduleInventory,
     worktrees: inventory.worktrees,
   };
 }
