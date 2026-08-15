@@ -13,6 +13,10 @@
  * them. `provenSafe` is the only field `apply` is ever allowed to act on, and
  * nothing sets it without positive proof.
  *
+ * The very first rule is the one for MISSING evidence: a branch whose
+ * divergence could not be measured gets `review`, before any rule that could
+ * read a fabricated number as reassurance (home-base-qyu1.21).
+ *
  * Part of home-base-qyu1.1.
  */
 
@@ -45,6 +49,11 @@ export interface BranchDisposition {
 
 export interface DispositionInputs {
   branch: BranchDivergence;
+  /**
+   * The ref divergence was measured against. Named in the verdict, so a reader
+   * of a failed measurement can see WHICH comparison could not be made.
+   */
+  baselineRef: string;
   /** Null when the +content enrichment was not run. */
   proof: ContentProof | null;
   /** Null when there is no PR, or when +prs was not run / unavailable. */
@@ -60,14 +69,32 @@ function plural(n: number, word: string): string {
 export function decideDisposition(
   inputs: DispositionInputs,
 ): BranchDisposition {
-  const {branch, pr, prDataAvailable, proof} = inputs;
+  const {baselineRef, branch, pr, prDataAvailable, proof} = inputs;
+  const {divergence} = branch;
+
+  // --- UNMEASURED: no evidence at all, so no conclusion at all --------------
+  // FIRST, above every other rule including the reassuring `ahead === 0` one
+  // below. When the divergence could not be computed, this function has been
+  // handed nothing to reason from: the content proof (when one was even
+  // attempted) walks the same history with the same git, so it cannot rescue
+  // the row either, and letting it try would let `allContentOnBaseline` grant
+  // `provenSafe` off a proof of an unknown set of commits. Unknown is a
+  // `review` — the disposition that exists for incomplete evidence — never a
+  // `merged`. See home-base-qyu1.21.
+  if (divergence == null) {
+    return {
+      disposition: 'review',
+      provenSafe: false,
+      why: `divergence could not be measured — \`git rev-list --left-right --count ${baselineRef}...${branch.name}\` failed, so how much unique work this branch holds is UNKNOWN and NOTHING about it is proven. Re-run; if it persists, check that both refs resolve (\`git rev-parse ${baselineRef} ${branch.name}\`) and that the objects are intact (\`git fsck\`).`,
+    };
+  }
 
   // --- Trivially contained: no unique commits at all -----------------------
-  if (branch.ahead === 0) {
+  if (divergence.ahead === 0) {
     return {
       disposition: 'merged',
       provenSafe: true,
-      why: `no unique commits; fully contained in ${branch.behind > 0 ? `the baseline (${plural(branch.behind, 'commit')} behind)` : 'the baseline'}`,
+      why: `no unique commits; fully contained in ${divergence.behind > 0 ? `the baseline (${plural(divergence.behind, 'commit')} behind)` : 'the baseline'}`,
     };
   }
 
@@ -92,7 +119,7 @@ export function decideDisposition(
     return {
       disposition: 'needs-judgment',
       provenSafe: false,
-      why: `${plural(branch.ahead, 'commit')} ahead; content proof not computed (run with content checking enabled to resolve)`,
+      why: `${plural(divergence.ahead, 'commit')} ahead; content proof not computed (run with content checking enabled to resolve)`,
     };
   }
 

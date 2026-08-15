@@ -29,6 +29,14 @@
  * abandoned branch "needs a merge commit", which is precisely the confusion
  * this field exists to end. `already-up-to-date` is that case, stated.
  *
+ * ── And a fourth state for "the numbers do not exist" ────────────────────────
+ *
+ * Those three describe what the counts MEAN. `unknown` covers the case where
+ * there are no counts to read: the `rev-list` that produces them failed, so the
+ * divergence is null (home-base-qyu1.21). The wrong answer there is
+ * `already-up-to-date` — the shape a fabricated `{0, 0}` would have produced,
+ * and the single most reassuring thing this field can say.
+ *
  * ── What this is NOT ─────────────────────────────────────────────────────────
  *
  * It is a fact about SHA REACHABILITY, deliberately independent of the content
@@ -51,6 +59,8 @@
  * Part of home-base-qyu1.19.
  */
 
+import type {DivergenceCounts} from './types';
+
 /**
  * The question this field's value answers.
  *
@@ -67,7 +77,12 @@ export type MergeShapeKind =
   /** Both sides moved. `git merge` writes a merge commit and can conflict. */
   | 'merge-needed'
   /** Nothing to merge: the branch is contained in the baseline already. */
-  | 'already-up-to-date';
+  | 'already-up-to-date'
+  /**
+   * The counts this is read off could not be computed, so the shape is
+   * genuinely unknown — NOT "nothing to merge" (home-base-qyu1.21).
+   */
+  | 'unknown';
 
 export interface MergeShape {
   /** Which question this row's ahead/behind numbers answer. */
@@ -86,11 +101,25 @@ function plural(n: number, word: string): string {
  *
  * `baselineRef` is used for wording only. Pure by construction: no cwd, no
  * subprocess, no git.
+ *
+ * A null `divergence` means the counts could not be measured at all, and it
+ * degrades to a fourth state rather than to a reassuring one. The kind is a
+ * VALUE of this field rather than a null field for the same reason the field
+ * exists: every reader switches on `kind`, and an absent shape reads as
+ * "nothing notable" to exactly the reader that most needs to be told otherwise.
  */
 export function describeMergeShape(
-  divergence: {ahead: number; behind: number},
+  divergence: DivergenceCounts | null,
   baselineRef: string,
 ): MergeShape {
+  if (divergence == null) {
+    return {
+      kind: 'unknown',
+      question: Q_MERGE_SHAPE,
+      why: `unanswerable: the ahead/behind counts against ${baselineRef} could not be computed for this branch, so whether merging fast-forwards is UNKNOWN — this is NOT "nothing to merge"`,
+    };
+  }
+
   const {ahead, behind} = divergence;
 
   if (ahead === 0) {
