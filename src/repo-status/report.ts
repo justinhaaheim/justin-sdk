@@ -42,6 +42,12 @@ export interface PrSummary {
 export interface BranchRow {
   name: string;
   isRemoteOnly: boolean;
+  /**
+   * The tip commit. Carried through from the core inventory so a plan can PIN
+   * the exact commit it proved rather than re-resolving a ref later and
+   * silently acting on whatever it has become by then.
+   */
+  tipSha: string;
   /** Kept because it is the standard metric and reads fine — but see `why`. */
   ahead: number;
   behind: number;
@@ -200,6 +206,7 @@ function buildRow(
           }
         : null,
     provenSafe,
+    tipSha: branch.tipSha,
     why,
     worktree: branch.worktreePath,
   };

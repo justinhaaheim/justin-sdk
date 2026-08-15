@@ -149,6 +149,7 @@ describe('executePlan', () => {
           action: 'archive-local-branch' as const,
           branch: 'landed',
           reason: 'forced',
+          remoteArchive: null,
           target: 'archive/landed',
         },
       ],
