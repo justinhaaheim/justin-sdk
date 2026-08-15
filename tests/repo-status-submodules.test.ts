@@ -691,6 +691,40 @@ describe('gitlinks recorded by other BRANCHES', () => {
     // No merge-base was attempted against an object we do not have.
     expect(divergence?.relationToBaseline).toBeNull();
   });
+
+  test('claims no RELATION when the object missing from this store is the BASELINE one', () => {
+    const sb = track(createSandbox());
+    const fx = setupFixture(sb);
+    const original = git(fx.parent, ['rev-parse', 'HEAD:sub']).trim();
+
+    // The asymmetric case, and the one seen live on home-base: the BRANCH's
+    // pointer is present here while the BASELINE's is not. `merge-base` fails
+    // on either missing object, and reading that failure as "divergent from"
+    // would print a confident lie — so the relation must stay unknown.
+    const unfetched = pushFromSubWork(fx, 'v2');
+    recordPointer(fx, unfetched, 'move main to a commit this store lacks');
+    branchRecording(fx, 'stays', original);
+
+    const row = subRow(report(fx.parent));
+    const divergence = row.branchPointers.divergent[0];
+    expect(divergence?.branch).toBe('stays');
+    expect(divergence?.inStore).toBe(true);
+    expect(divergence?.relationToBaseline).toBeNull();
+    // Knowing nothing about the relation is not an alarm, and the finding must
+    // not silently drop the parenthetical's absence into a wrong claim.
+    expect(branchFindings(row)[0]?.severity).toBe('ok');
+    expect(branchFindings(row)[0]?.why).not.toContain('in submodule history');
+
+    // NEGATIVE CONTROL: fetch, and the relation becomes knowable.
+    git(join(fx.parent, 'sub'), ['fetch', '--all', '-q']);
+    const fetched = subRow(report(fx.parent));
+    expect(fetched.branchPointers.divergent[0]?.relationToBaseline).toBe(
+      'behind',
+    );
+    expect(branchFindings(fetched)[0]?.why).toContain(
+      'behind it in submodule history',
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
