@@ -15,12 +15,15 @@
  *
  * The very first rule is the one for MISSING evidence: a branch whose
  * divergence could not be measured gets `review`, before any rule that could
- * read a fabricated number as reassurance (home-base-qyu1.21).
+ * read a fabricated number as reassurance (home-base-qyu1.21). The same
+ * ordering applies one level down, to a content proof containing a file git
+ * could not read (home-base-qyu1.24) — incomplete evidence is ruled on before
+ * both `merged` and `mirrored`.
  *
  * Part of home-base-qyu1.1.
  */
 
-import {mirrorFullyPreserves} from './content';
+import {findUnreadableEvidence, mirrorFullyPreserves} from './content';
 
 import type {ContentProof} from './content';
 import type {PullRequest} from './prs';
@@ -140,6 +143,28 @@ export function decideDisposition(
       disposition: 'needs-judgment',
       provenSafe: false,
       why: `${plural(divergence.ahead, 'commit')} ahead; content proof not computed (run with content checking enabled to resolve)`,
+    };
+  }
+
+  // --- UNREADABLE FILE EVIDENCE: a check that failed is not a check that passed
+  // Before BOTH reassuring rules below, for the same reason the divergence rule
+  // sits above `ahead === 0`: a verdict list with a hole in it must not be read
+  // as a complete one (home-base-qyu1.24). The hole used to be invisible — a
+  // deleted path git could not look up on the baseline was recorded as
+  // `deletion-reflected`, so the proof came back "every file accounted for".
+  //
+  // It also outranks `mirrorFullyPreserves`, which is the deliberate part: the
+  // mirror comparison is `rev-list`, which walks COMMITS and never opens a tree,
+  // so it answers cleanly in exactly the damaged repo that produced this failure
+  // and would hand back `provenSafe` off a measurement that cannot see the
+  // damage. A branch in a repo whose object store just refused a read is a
+  // branch to look at, not one to act on.
+  const unreadable = findUnreadableEvidence(proof);
+  if (unreadable != null) {
+    return {
+      disposition: 'review',
+      provenSafe: false,
+      why: `content proof INCOMPLETE — git could not read \`${unreadable.path}\` on ${unreadable.ref} while checking commit ${unreadable.sha.slice(0, 8)}: \`${unreadable.command}\` failed (${unreadable.detail}). Whether that path is really on ${proof.baselineRef} is UNKNOWN, so NOTHING about this branch is proven. Re-run; if it persists the object store is damaged — \`git fsck\` names the missing object, and a missing TREE is the shape that produces this.`,
     };
   }
 
