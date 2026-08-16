@@ -336,10 +336,12 @@ describe('a rename whose deletion half the baseline never took', () => {
     const proof = proveContentOnBaseline('rename-half-lost', 'main', fx.repo);
     expect(proof.allContentOnBaseline).toBe(false);
 
-    // Measured before the fix, verbatim: disposition `merged`, provenSafe
-    // `true`, why "1 unique commit already on main by content — all changed
-    // files already identical on the baseline", and `archive-local-branch` in
-    // `plan.safe`.
+    // Reverting `content.ts` under this fixture puts `provenSafe` back to
+    // `true` — that is the negative control, and it is the assertion below that
+    // catches it. On a standalone probe of the same shape the full pre-fix
+    // verdict measured as: disposition `merged`, provenSafe `true`, why "1
+    // unique commit already on main by content — all changed files already
+    // identical on the baseline", and `archive-local-branch ren` in `plan.safe`.
     const row = rowFor(fx.repo, 'rename-half-lost');
     expect(row.provenSafe).toBe(false);
     expect(row.disposition).not.toBe('merged');
