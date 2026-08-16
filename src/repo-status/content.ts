@@ -289,31 +289,75 @@ function lookupPathOnRef(ref: string, path: string, cwd: string): PathOnRef {
 }
 
 /**
+ * A `--name-status` status field: one letter, plus a similarity score for the
+ * rename/copy/broken-pair forms (`R100`, `C75`, `B50`).
+ */
+const STATUS_RECORD = /^[A-Z][0-9]*$/;
+
+/**
  * Which paths a commit touched, with its own status letter.
  * `-m --first-parent` makes merge commits report a diff instead of nothing.
+ *
+ * `-z` IS THE FIX, NOT A TIDINESS PREFERENCE (home-base-qyu1.26). Without it git
+ * applies `core.quotePath`, which defaults to true, and hands back a C-quoted
+ * ASCII rendering of any path outside 7-bit ASCII: `d/café.txt` arrives as the
+ * literal 18 characters `"d/caf\303\251.txt"`, surrounding quotes included.
+ * That string is not a path on any ref, so looking it up finds nothing — and for
+ * a DELETED file, "found nothing on the baseline" was read as
+ * `deletion-reflected`, the most reassuring verdict in this module. It feeds
+ * `allFilesReflected` -> `allContentOnBaseline` -> `merged` with
+ * `provenSafe: true`. So a perfectly HEALTHY repo that had ever deleted an
+ * accented, CJK or emoji filename reported the branch as safe to delete while
+ * the baseline still held the file. No corruption required, unlike qyu1.24 —
+ * only a filename most codebases already have.
+ *
+ * `-z` emits the bytes git actually stored. It also removes the tab-and-newline
+ * framing, which a filename containing either would otherwise break, and it is
+ * why nothing here trims: under `-z` a leading or trailing space in a record IS
+ * part of the filename.
+ *
+ * THE FRAMING IS DIFFERENT UNDER `-z`, and getting it wrong re-opens this exact
+ * bug. Every record is NUL-TERMINATED and the status is its OWN record, so the
+ * stream is `M\0path\0D\0path\0`, not one line per file. Renames and copies emit
+ * THREE records — `R100\0old\0new\0` — of which the POST-state path is the
+ * second. A parser that assumed one path per status would take `old` for a
+ * rename and then read every later record off by one, turning real paths into
+ * garbage that resolves nowhere, which lands straight back in
+ * `deletion-reflected`. Hence `STATUS_RECORD`: a record that cannot be a status
+ * means the framing assumption has broken, and the safe answer to "what did this
+ * commit touch" is then NOT a half-parsed list. An empty list makes
+ * `allFilesReflected` false, so the commit stays unaccounted and the branch
+ * stays out of the safe group.
  */
 function changedPaths(
   sha: string,
   cwd: string,
 ): {path: string; status: string}[] {
   const out = gitArgv(
-    ['show', '--name-status', '--format=', '-m', '--first-parent', sha],
+    ['show', '-z', '--name-status', '--format=', '-m', '--first-parent', sha],
     cwd,
   );
   if (out == null) return [];
 
+  const records = out.split('\0');
+  // `-z` TERMINATES rather than separates, so the split always leaves an empty
+  // tail record. Dropping it here is what lets the loop treat every remaining
+  // empty record as the desync it would be.
+  if (records[records.length - 1] === '') records.pop();
+
   const seen = new Set<string>();
   const result: {path: string; status: string}[] = [];
-  for (const line of out.split('\n')) {
-    if (line.trim().length === 0) continue;
-    const parts = line.split('\t');
-    const status = parts[0]?.trim();
-    // Renames/copies report "R100\told\tnew" — the post-state path is last.
-    const path = parts[parts.length - 1]?.trim();
-    if (status == null || path == null || path.length === 0) continue;
+  for (let i = 0; i < records.length; i += 1) {
+    const status = records[i];
+    if (status == null || !STATUS_RECORD.test(status)) return [];
+    const letter = status.charAt(0);
+    const pathCount = letter === 'R' || letter === 'C' ? 2 : 1;
+    const path = records[i + pathCount];
+    i += pathCount;
+    if (path == null || path.length === 0) return [];
     if (seen.has(path)) continue;
     seen.add(path);
-    result.push({path, status: status[0] ?? '?'});
+    result.push({path, status: letter});
   }
   return result;
 }
