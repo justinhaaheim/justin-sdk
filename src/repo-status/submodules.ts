@@ -243,7 +243,14 @@ export interface SubmoduleOptions {
   /** The worktree `repo-status` was pointed at. */
   cwd: string;
   repoRoot: string;
-  worktrees: WorktreeEntry[];
+  /**
+   * Every checked-out tree of the parent repo. NULL when `git worktree list`
+   * failed (home-base-qyu1.23), which is handled the same way as an empty list —
+   * only THIS checkout can be inspected — but is a weaker statement: the
+   * `pointersAcrossWorktrees` count then covers the one checkout that could be
+   * seen rather than all of them.
+   */
+  worktrees: WorktreeEntry[] | null;
   /**
    * Open every worktree's submodule store, not just the current one. Off by
    * default: it is the only part of this module that reaches into directories
@@ -1018,9 +1025,12 @@ export function buildSubmoduleInventory(
   const currentRoot = canonical(repoRoot);
 
   // Fall back to a single synthetic worktree when `git worktree list` gave
-  // nothing, so a plain repo still gets a full row rather than none.
+  // nothing — or could not be read at all — so a plain repo still gets a full
+  // row rather than none. The unknown-ness of the latter is reported at the
+  // report level (`worktrees: null` plus an enumeration failure); here it only
+  // narrows what can be inspected to the checkout in hand.
   const trees: WorktreeEntry[] =
-    worktrees.length > 0
+    worktrees != null && worktrees.length > 0
       ? worktrees
       : [{branch: null, isPrimary: true, path: repoRoot}];
 

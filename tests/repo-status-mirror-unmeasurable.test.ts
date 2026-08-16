@@ -31,10 +31,11 @@
  *    every `rev-list` naming it fails with "Invalid revision range". This is
  *    the maximally dangerous shape — the mirror preserves NOTHING — but it
  *    cannot reach `buildReport`, because `for-each-ref --format=%(committerdate
- *    :iso-strict)` must parse each tip and fails for the whole repo, leaving an
- *    empty inventory (asserted below: fail-closed). It DOES reach `executePlan`,
- *    which re-proves without any `for-each-ref` — and that is the code path
- *    that deletes, so it is the one that matters most.
+ *    :iso-strict)` must parse each tip and fails for the whole repo (asserted
+ *    below: the inventory reports that it could not be read, which is what
+ *    home-base-qyu1.23 changed from an empty branch list). It DOES reach
+ *    `executePlan`, which re-proves without any `for-each-ref` — and that is the
+ *    code path that deletes, so it is the one that matters most.
  *
  * The shape of the damage matters, and the fixtures pin it: a missing object on
  * the UNINTERESTING side of `A..B` does NOT fail — git returns a wrong,
@@ -54,7 +55,11 @@ import {join} from 'path';
 
 import {countAhead, inspectArchiveMirror} from '../src/repo-status/content';
 import {buildPlan, executePlan, type CleanupPlan} from '../src/repo-status/plan';
-import {buildReport, type BranchRow} from '../src/repo-status/report';
+import {
+  buildReport,
+  type BranchRow,
+  type RepoStatusReport,
+} from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const CLI = join(import.meta.dir, '../src/repo-status/repo-status.ts');
@@ -173,7 +178,7 @@ function buildBrokenMirrorRepo(sb: Sandbox): {repo: string; mirrorTip: string} {
   return {mirrorTip, repo};
 }
 
-function rowsFor(repo: string): BranchRow[] {
+function reportFor(repo: string): RepoStatusReport {
   const report = buildReport({
     content: true,
     cwd: repo,
@@ -182,7 +187,15 @@ function rowsFor(repo: string): BranchRow[] {
     submodules: false,
   });
   if (report == null) throw new Error('expected a report');
-  return report.branches;
+  return report;
+}
+
+function rowsFor(repo: string): BranchRow[] {
+  const rows = reportFor(repo).branches;
+  // Null only when the branch listing itself failed (home-base-qyu1.23); the
+  // repo that DOES hit that is asserted on directly rather than through here.
+  if (rows == null) throw new Error('expected branch rows');
+  return rows;
 }
 
 function byName(rows: BranchRow[], name: string): BranchRow {
@@ -192,15 +205,10 @@ function byName(rows: BranchRow[], name: string): BranchRow {
 }
 
 function planFor(repo: string): CleanupPlan {
-  const report = buildReport({
-    content: true,
-    cwd: repo,
-    prs: false,
-    sinceDays: null,
-    submodules: false,
-  });
-  if (report == null) throw new Error('expected a report');
-  return buildPlan(report);
+  const plan = buildPlan(reportFor(repo));
+  // Null only when the branch listing itself failed (home-base-qyu1.23).
+  if (plan == null) throw new Error('expected a plan');
+  return plan;
 }
 
 function deletesIn(plan: CleanupPlan): string[] {
@@ -265,10 +273,17 @@ describe('countAhead reports failure as failure', () => {
     }).toEqual({revList: 128, revParse: 0});
 
     // It cannot reach `buildReport` though: listing tips reads every tip's
-    // committer date, which fails for the whole repo. That is fail-CLOSED — an
-    // empty inventory proposes nothing — and it is why this shape lives in its
-    // own repo rather than alongside the rows above.
-    expect(rowsFor(broken.repo)).toEqual([]);
+    // committer date, which fails for the whole repo, and that is why this shape
+    // lives in its own repo rather than alongside the rows above.
+    //
+    // This assertion used to read `toEqual([])`, and that empty list WAS the
+    // qyu1.23 bug: fail-closed for actions, but an empty branch inventory is
+    // also how "this repo has no branches" is spelled, and the session-start
+    // view renders it as an all-clear. The listing now reports that it could not
+    // be read.
+    const report = reportFor(broken.repo);
+    expect(report.branches).toBeNull();
+    expect(report.enumerationFailures?.map((f) => f.what)).toEqual(['branches']);
   });
 
   test('inspectArchiveMirror says UNKNOWN, naming the ref it could not measure', () => {

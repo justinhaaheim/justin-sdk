@@ -35,7 +35,11 @@ import {
   type SubmoduleInventory,
 } from './submodules';
 
-import type {BranchDivergence, WorktreeEntry} from './types';
+import type {
+  BranchDivergence,
+  EnumerationFailure,
+  WorktreeEntry,
+} from './types';
 
 export interface PrSummary {
   number: number;
@@ -94,6 +98,33 @@ export interface BranchRow {
   commits?: CommitVerdict[];
 }
 
+export interface RepoStatusSummary {
+  branches: number;
+  merged: number;
+  mirrored: number;
+  review: number;
+  needsJudgment: number;
+  provenSafe: number;
+}
+
+/**
+ * The whole ledger.
+ *
+ * `branches`, `summary` and `worktrees` are NULL when the underlying `git
+ * for-each-ref` / `git worktree list` could not be read (home-base-qyu1.23).
+ * They are nullable rather than empty-on-failure because every one of them is
+ * read as a claim: no branches means "nothing unmerged anywhere", a summary of
+ * zeroes means "nothing to review", and no worktrees means "no branch is checked
+ * out, so archiving is unobstructed". Emitting those over a repo git could not
+ * read is the failure this schema exists to prevent — and typing them nullable
+ * is what forces each consumer to say what it does about it instead of
+ * inheriting an empty array by accident.
+ *
+ * `enumerationFailures` is present ONLY when something failed, and carries the
+ * detail (which command, what is unknown, how to diagnose). The nulls are the
+ * load-bearing signal; this key is the explanation, so nothing depends on a
+ * reader noticing an absent key.
+ */
 export interface RepoStatusReport {
   repo: {
     root: string;
@@ -101,22 +132,19 @@ export interface RepoStatusReport {
     defaultBranch: string | null;
     baselineRef: string;
   };
-  summary: {
-    branches: number;
-    merged: number;
-    mirrored: number;
-    review: number;
-    needsJudgment: number;
-    provenSafe: number;
-  };
+  /** Null when the branch listing failed — there is nothing to summarise. */
+  summary: RepoStatusSummary | null;
   enrichments: {
     content: boolean;
     prs: boolean;
     prsUnavailableReason: string | null;
     submodules: boolean;
   };
-  worktrees: WorktreeEntry[];
-  branches: BranchRow[];
+  enumerationFailures?: EnumerationFailure[];
+  /** Null when `git worktree list` failed — NOT the same as "no worktrees". */
+  worktrees: WorktreeEntry[] | null;
+  /** Null when `git for-each-ref` failed — NOT the same as "no branches". */
+  branches: BranchRow[] | null;
   submodules: SubmoduleInventory;
 }
 
@@ -174,30 +202,34 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
 
   const selected =
     only != null
-      ? inventory.branches.filter(
+      ? inventory.branches?.filter(
           (b) => b.name === only || b.name === `origin/${only}`,
         )
       : inventory.branches;
 
   // `selected`, not `inventory.branches`: the per-branch gitlink audit is a
   // claim about the branch rows this report actually carries, so it must be
-  // computed over exactly those rows and no others.
+  // computed over exactly those rows and no others. When the branch listing
+  // failed there are no such rows, and `branches: undefined` is how this module
+  // says NOT CHECKED — passing `[]` instead would make it report that it
+  // compared every branch and they all agreed.
   const submoduleInventory = submodules
     ? buildSubmoduleInventory({
         allWorktreeStores: submoduleStores,
         baselineRef: inventory.baselineRef,
-        branches: selected,
+        branches: selected ?? undefined,
         cwd,
         repoRoot: inventory.repoRoot,
         worktrees: inventory.worktrees,
       })
     : EMPTY_SUBMODULE_INVENTORY;
 
-  const rows: BranchRow[] = selected.map((branch) =>
-    buildRow(branch, inventory.baselineRef, cwd, {content, only, prIndex}),
-  );
+  const rows: BranchRow[] | null =
+    selected?.map((branch) =>
+      buildRow(branch, inventory.baselineRef, cwd, {content, only, prIndex}),
+    ) ?? null;
 
-  rows.sort((a, b) => {
+  rows?.sort((a, b) => {
     const d =
       DISPOSITION_ORDER.indexOf(a.disposition) -
       DISPOSITION_ORDER.indexOf(b.disposition);
@@ -219,21 +251,29 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
       prsUnavailableReason: prIndex.unavailableReason,
       submodules,
     },
+    // Emitted only when something actually failed, so a healthy repo's output is
+    // byte-for-byte what it was before this key existed.
+    ...(inventory.enumerationFailures.length > 0
+      ? {enumerationFailures: inventory.enumerationFailures}
+      : {}),
     repo: {
       baselineRef: inventory.baselineRef,
       currentBranch: inventory.currentBranch,
       defaultBranch: inventory.defaultBranch,
       root: inventory.repoRoot,
     },
-    summary: {
-      branches: rows.length,
-      merged: rows.filter((r) => r.disposition === 'merged').length,
-      mirrored: rows.filter((r) => r.disposition === 'mirrored').length,
-      needsJudgment: rows.filter((r) => r.disposition === 'needs-judgment')
-        .length,
-      provenSafe: rows.filter((r) => r.provenSafe).length,
-      review: rows.filter((r) => r.disposition === 'review').length,
-    },
+    summary:
+      rows == null
+        ? null
+        : {
+            branches: rows.length,
+            merged: rows.filter((r) => r.disposition === 'merged').length,
+            mirrored: rows.filter((r) => r.disposition === 'mirrored').length,
+            needsJudgment: rows.filter((r) => r.disposition === 'needs-judgment')
+              .length,
+            provenSafe: rows.filter((r) => r.provenSafe).length,
+            review: rows.filter((r) => r.disposition === 'review').length,
+          },
     submodules: submoduleInventory,
     worktrees: inventory.worktrees,
   };

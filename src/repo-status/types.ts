@@ -87,8 +87,39 @@ export interface BranchDivergence extends BranchTip {
 }
 
 /**
+ * One half of the core walk that could not be read at all.
+ *
+ * WHY THIS EXISTS (home-base-qyu1.23). `git worktree list` and `git for-each-ref`
+ * each used to answer `[]` on failure, and an empty list is indistinguishable
+ * from a repo that genuinely has none. That is the same fabrication qyu1.21/.22
+ * removed from the COUNTS, one level up: for `for-each-ref` it makes the whole
+ * inventory empty, which the session-start view then renders as "no unmerged
+ * work on any other branch or worktree" — a clean bill of health printed over a
+ * repo git could not read. One unreadable tip object is enough to trigger it,
+ * because the listing must parse every tip's committer date and fails for the
+ * WHOLE repo when any one of them is gone.
+ *
+ * So the two lists are nullable, and this record says which one failed, what
+ * command failed, and what is therefore unknown. Absence of evidence has to be
+ * representable or it gets reported as evidence of absence.
+ */
+export interface EnumerationFailure {
+  /** Which half of the core walk could not be read. */
+  what: 'branches' | 'worktrees';
+  /** The exact git command that failed, shell-quoted so it is safe to paste. */
+  command: string;
+  /** What is NOT known as a result. Never phrased as a reassurance. */
+  why: string;
+  /** What to run to find out why. */
+  diagnose: string;
+}
+
+/**
  * The always-populated core inventory. Cheap: one `worktree list`, one
  * `for-each-ref`, and one `rev-list` per candidate branch.
+ *
+ * `branches` and `worktrees` are NULL when their listing failed, which is a
+ * different statement from `[]` — see `EnumerationFailure`.
  */
 export interface CoreInventory {
   repoRoot: string;
@@ -98,8 +129,12 @@ export interface CoreInventory {
   defaultBranch: string | null;
   /** The ref `ahead`/`behind` are measured against. */
   baselineRef: string;
-  branches: BranchDivergence[];
-  worktrees: WorktreeEntry[];
+  /** Null when the branch listing failed — NOT the same as "no branches". */
+  branches: BranchDivergence[] | null;
+  /** Null when the worktree listing failed — NOT the same as "no worktrees". */
+  worktrees: WorktreeEntry[] | null;
+  /** Empty when the whole walk was readable. One entry per failed half. */
+  enumerationFailures: EnumerationFailure[];
 }
 
 // ---------------------------------------------------------------------------

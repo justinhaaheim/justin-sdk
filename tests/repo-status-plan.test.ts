@@ -74,6 +74,17 @@ function report(sb: Sandbox) {
   return r;
 }
 
+/**
+ * `buildPlan` returns null when the branch listing could not be read at all
+ * (home-base-qyu1.23); every repo here is healthy, so that would be a bug in the
+ * fixture rather than a case to test.
+ */
+function planFor(sb: Sandbox) {
+  const p = buildPlan(report(sb));
+  if (p == null) throw new Error('expected a plan');
+  return p;
+}
+
 describe('buildPlan', () => {
   test('proven-safe local branches are automatable; unmerged ones are never', () => {
     const sb = track(createSandbox());
@@ -83,7 +94,7 @@ describe('buildPlan', () => {
     commit(sb, 'live.txt', 'not merged anywhere\n', 'live work');
     git(sb.path, ['checkout', '-q', 'main']);
 
-    const plan = buildPlan(report(sb));
+    const plan = planFor(sb);
     expect(plan.safe.map((a) => a.branch)).toEqual(['landed']);
     expect(plan.needsJudgment.map((a) => a.branch)).toContain('live-work');
     // Default action is a non-destructive rename, not a delete.
@@ -98,7 +109,7 @@ describe('buildPlan', () => {
     const wt = `${sb.path}-wt`;
     git(sb.path, ['worktree', 'add', '-q', wt, 'landed']);
     try {
-      const plan = buildPlan(report(sb));
+      const plan = planFor(sb);
       expect(plan.safe).toHaveLength(0);
       expect(plan.manual.map((a) => a.branch)).toEqual(['landed']);
       expect(plan.manual[0]?.reason).toContain('remove the worktree first');
@@ -117,7 +128,7 @@ describe('executePlan', () => {
     addSquashMergedBranch(sb, 'landed');
     const tip = git(sb.path, ['rev-parse', 'landed']);
 
-    const results = executePlan(buildPlan(report(sb)), sb.path);
+    const results = executePlan(planFor(sb), sb.path);
     expect(results[0]?.outcome).toBe('archived');
     expect(results[0]?.target).toBe('archive/landed');
 
@@ -138,7 +149,7 @@ describe('executePlan', () => {
     // An unrelated archive/landed already exists, holding different work.
     git(sb.path, ['branch', 'archive/landed', 'main']);
     const existing = git(sb.path, ['rev-parse', 'archive/landed']);
-    const plan = buildPlan(report(sb));
+    const plan = planFor(sb);
 
     // buildPlan sees a mirror that does NOT cover the branch -> not safe at all.
     // Force the rename path to prove executePlan itself guards the collision.
@@ -168,7 +179,7 @@ describe('executePlan', () => {
     addSquashMergedBranch(sb, 'landed');
 
     // Plan while it is genuinely safe.
-    const plan = buildPlan(report(sb));
+    const plan = planFor(sb);
     expect(plan.safe.map((a) => a.branch)).toEqual(['landed']);
 
     // Someone pushes new work to it before apply runs.
@@ -203,7 +214,7 @@ describe('executePlan', () => {
     commit(sb, 's2.txt', 'work after the mirror\n', 'work after the mirror');
     git(sb.path, ['checkout', '-q', 'main']);
 
-    const plan = buildPlan(report(sb));
+    const plan = planFor(sb);
     expect(plan.safe.map((a) => a.branch)).toContain('mirrored-ok');
     expect(plan.safe.map((a) => a.branch)).not.toContain('mirrored-stale');
     expect(plan.needsJudgment.map((a) => a.branch)).toContain('mirrored-stale');

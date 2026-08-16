@@ -18,7 +18,7 @@
 import {buildCoreInventory} from './core';
 import {EMPTY_PR_INDEX, fetchPullRequests, prForBranch} from './prs';
 
-import type {BranchDivergence} from './types';
+import type {BranchDivergence, EnumerationFailure} from './types';
 
 /**
  * PR fetching is OFF by default here, and that default is measured rather than
@@ -55,6 +55,20 @@ export interface DivergentGroup {
 export interface DivergenceReport {
   currentBranch: string;
   groups: DivergentGroup[];
+  /**
+   * Halves of the core walk git could not read (home-base-qyu1.23). NON-EMPTY
+   * MEANS `groups` IS NOT A COMPLETE ANSWER, and in the `for-each-ref` case it
+   * carries no answer at all — so `formatRepoState` checks this FIRST and never
+   * prints the all-clear sentence while it is non-empty.
+   *
+   * `groups` stays a plain array rather than becoming nullable because this
+   * report has exactly one consumer, the formatter below, and the rule it has to
+   * enforce is about the SENTENCE it prints rather than about a per-group value.
+   * Making the array nullable would push a null check into every caller reading
+   * group contents while doing nothing extra for the one thing that matters —
+   * that a repo git could not read is never described as clean.
+   */
+  enumerationFailures: EnumerationFailure[];
 }
 
 export interface RunOptions {
@@ -77,7 +91,11 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
   // Only branches that HAVE something we might lose are worth surfacing here —
   // plus the ones where that could not be determined, which are exactly the
   // branches this view must not quietly drop.
-  const withAhead = inventory.branches.filter(
+  //
+  // A null `branches` is not "none": the listing failed, so there is no set to
+  // filter. It yields no groups, and the enumeration failure below is what stops
+  // that from being rendered as a clean repo.
+  const withAhead = (inventory.branches ?? []).filter(
     (b) => b.divergence == null || b.divergence.ahead > 0,
   );
 
@@ -119,7 +137,11 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
     return b.lastCommitDate.localeCompare(a.lastCommitDate);
   });
 
-  return {currentBranch: inventory.currentBranch, groups};
+  return {
+    currentBranch: inventory.currentBranch,
+    enumerationFailures: inventory.enumerationFailures,
+    groups,
+  };
 }
 
 function prNoteFor(
@@ -158,21 +180,58 @@ function formatTouched(iso: string): string {
  * titled section when on a branch — including a "clean" line when there's no
  * divergence — so a reader always sees the current repo state. Returns '' only
  * when there's nothing sensible to report (detached HEAD / not a git repo).
+ *
+ * THE ALL-CLEAR IS A CLAIM (home-base-qyu1.23). "no unmerged work on any other
+ * branch or worktree" is the single most consequential sentence this module
+ * emits: it is injected at session start, and it tells the reader it is safe to
+ * start building where they stand. It used to be printed whenever the group list
+ * came back empty — including when the list was empty because `git for-each-ref`
+ * failed and the inventory was fabricated from nothing. A repo git cannot read is
+ * the one repo where that sentence is most likely to be wrong, so the failures
+ * are checked BEFORE the count of groups, and while any exist the section says
+ * UNKNOWN instead.
  */
 export function formatRepoState(report: DivergenceReport | null): string {
   if (report == null) return '';
 
   const header = '# Current repo state';
+
+  // Deliberately first, and deliberately not merged into the branch listing:
+  // when the branch listing itself is what failed, everything below is silence
+  // rather than evidence, and a reader has to see that before anything else.
+  const failed: string[] = [];
+  if (report.enumerationFailures.length > 0) {
+    failed.push(
+      header,
+      '',
+      `On \`${report.currentBranch}\` — the repo state could NOT be fully read. Treat it as UNKNOWN, not as clean:`,
+      '',
+    );
+    for (const f of report.enumerationFailures) {
+      failed.push(`  - could not enumerate ${f.what}: \`${f.command}\` failed`);
+      failed.push(`    ${f.why}`);
+      failed.push(`    ${f.diagnose}`);
+    }
+  }
+
   if (report.groups.length === 0) {
+    if (failed.length > 0) return failed.join('\n');
     return `${header}\n\nOn \`${report.currentBranch}\` — no unmerged work on any other branch or worktree.`;
   }
 
   const one = report.groups.length === 1;
-  const lines: string[] = [
-    header,
-    '',
-    `On \`${report.currentBranch}\`, ${report.groups.length} branch${one ? '' : 'es'} ${one ? 'has' : 'have'} unmerged work:`,
-  ];
+  const lines: string[] =
+    failed.length > 0
+      ? [
+          ...failed,
+          '',
+          `Of what COULD be read, ${report.groups.length} branch${one ? '' : 'es'} ${one ? 'has' : 'have'} unmerged work:`,
+        ]
+      : [
+          header,
+          '',
+          `On \`${report.currentBranch}\`, ${report.groups.length} branch${one ? '' : 'es'} ${one ? 'has' : 'have'} unmerged work:`,
+        ];
   for (const group of report.groups) {
     const names = group.branches.map((b) => b.name).join(' / ');
     const worktreeNote = group.hasWorktree ? 'worktree, ' : '';

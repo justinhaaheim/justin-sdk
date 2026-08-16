@@ -793,9 +793,15 @@ describe('cost to the prime session-start path', () => {
 
     const divergence = runDivergenceCheck({cwd: fx.parent});
     expect(divergence).not.toBeNull();
+    // The claim is that NO submodule key appears here, not that the shape never
+    // grows: `enumerationFailures` was added by home-base-qyu1.23 so a repo whose
+    // branches could not be listed is never rendered as clean, and it is empty
+    // on a readable repo like this one.
     expect(Object.keys(divergence ?? {}).sort()).toEqual([
       'currentBranch',
+      'enumerationFailures',
       'groups',
     ]);
+    expect(divergence?.enumerationFailures).toEqual([]);
   });
 });
