@@ -496,11 +496,22 @@ describe('a rename resolves to the post-state path', () => {
     // would put `zz-after-rename.txt` in the status slot and a status letter in
     // the path slot — and a garbage path resolves nowhere, which is
     // `deletion-reflected` all over again.
+    //
+    // `rename-src.txt` was NOT in this map when qyu1.26 wrote it, and its
+    // arrival is qyu1.27 landing rather than a regression: the rename's old
+    // half is now checked as the deletion it is, and main — which created
+    // `rename-src.txt` in M0 and never removed it — has not taken that
+    // deletion. Whole-map `toEqual` is what forced this to be declared instead
+    // of slipping through, which is exactly why it is written that way.
     expect(statuses(files)).toEqual({
       'keep/café.txt': 'deletion-not-reflected',
+      'rename-src.txt': 'deletion-not-reflected',
       'renamé-dst.txt': 'absent-on-baseline',
       'zz-after-rename.txt': 'deletion-not-reflected',
     });
+    expect(files.find((f) => f.path === 'rename-src.txt')?.renamedTo).toBe(
+      RENAME_DST,
+    );
 
     const row = byName(rowsFor(fx.repo), 'rename-then-delete');
     expect(row.provenSafe).toBe(false);

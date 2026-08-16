@@ -115,6 +115,22 @@ export interface UnreadablePath {
 
 export interface FileVerdict {
   path: string;
+  /**
+   * Present ONLY on the DELETION half of a rename, naming the path the file
+   * moved TO (home-base-qyu1.27).
+   *
+   * `path` on such a verdict is the OLD path — the one whose ABSENCE is the
+   * claim being checked — which is the only sensible name for it and also a
+   * path that does NOT appear in the commit's post-state. Without this key a
+   * reader would see a `deletion-*` verdict for a file the commit did not
+   * delete in any way `git show` reports, with nothing to explain it. With it,
+   * the two halves of the rename are legible as one event.
+   *
+   * Omitted otherwise — same conditional-key discipline as `unreadable`, and
+   * the reason a repo whose unique commits contain no renames produces exactly
+   * the output it did before this key existed.
+   */
+  renamedTo?: string;
   status: FileStatus;
   /**
    * Present ONLY when `status` is `unreadable`, and omitted otherwise so a
@@ -294,6 +310,21 @@ function lookupPathOnRef(ref: string, path: string, cwd: string): PathOnRef {
  */
 const STATUS_RECORD = /^[A-Z][0-9]*$/;
 
+/** One check a commit's diff asks for: a path, and the status that asked. */
+interface ChangedPath {
+  path: string;
+  /**
+   * Set only on the synthetic DELETION half of a rename, where `path` is the
+   * OLD path and this is where it went. Carried through to `FileVerdict`.
+   */
+  renamedTo?: string;
+  /**
+   * The git status letter, except on the synthetic deletion half of a rename,
+   * which is a `D` because that is what the rename did to the old path.
+   */
+  status: string;
+}
+
 /**
  * Which paths a commit touched, with its own status letter.
  * `-m --first-parent` makes merge commits report a diff instead of nothing.
@@ -328,11 +359,33 @@ const STATUS_RECORD = /^[A-Z][0-9]*$/;
  * commit touch" is then NOT a half-parsed list. An empty list makes
  * `allFilesReflected` false, so the commit stays unaccounted and the branch
  * stays out of the safe group.
+ *
+ * A RENAME IS TWO FACTS, AND TAKING ONLY THE POST-STATE PATH CHECKS ONE OF THEM
+ * (home-base-qyu1.27). qyu1.26 settled the FRAMING of the triplet and left its
+ * MEANING alone: the old path was read and discarded. So `R100\0old\0new\0`
+ * became the single claim "the baseline has `new`" — and a baseline that took
+ * the ADD half without the DELETE half satisfies it completely. It has `new`,
+ * byte-identical; it also still has `old`; and the branch was reported `merged`
+ * with `provenSafe: true`. Deleting it then destroys the only remaining record
+ * that `old` was supposed to be gone. An `R` therefore yields TWO entries: the
+ * new path, checked as before, and the old path checked as a `D` — because that
+ * is precisely what a rename does to it.
+ *
+ * `C` IS RULED THE OTHER WAY, DELIBERATELY. A copy leaves the source in place —
+ * that is the entire difference between `C` and `R` — so asserting the old
+ * path's absence would assert the opposite of what the commit did. git says so
+ * in the same stream: with copy detection on, the source arrives with its own
+ * `M` record right after the triplet (measured: `C100\0src\0copy\0M\0src\0`).
+ * So `C` keeps exactly the behaviour it has always had, new path only.
+ *
+ * The post-state set below is the guard for the one shape that would make the
+ * synthetic deletion wrong: an old path that is ALSO some record's new path,
+ * and so present after the commit. git cannot produce it with the argv above —
+ * it pairs a rename only from a source it saw DELETED — but it does under `-B`
+ * (measured: `R100\0c\0a\0R100\0a\0b\0`), and one Set buys correctness that does
+ * not depend on record order or on which flags a future caller adds.
  */
-function changedPaths(
-  sha: string,
-  cwd: string,
-): {path: string; status: string}[] {
+function changedPaths(sha: string, cwd: string): ChangedPath[] {
   const out = gitArgv(
     ['show', '-z', '--name-status', '--format=', '-m', '--first-parent', sha],
     cwd,
@@ -345,19 +398,43 @@ function changedPaths(
   // empty record as the desync it would be.
   if (records[records.length - 1] === '') records.pop();
 
-  const seen = new Set<string>();
-  const result: {path: string; status: string}[] = [];
+  // Framing first, meaning second. The whole stream is parsed into its records
+  // before any verdict is decided, because deciding whether a rename's old path
+  // deserves a deletion check needs to know every OTHER record's post-state
+  // path — which a single forward pass does not yet have.
+  const parsed: {letter: string; newPath: string; oldPath: string | null}[] = [];
   for (let i = 0; i < records.length; i += 1) {
     const status = records[i];
     if (status == null || !STATUS_RECORD.test(status)) return [];
     const letter = status.charAt(0);
-    const pathCount = letter === 'R' || letter === 'C' ? 2 : 1;
-    const path = records[i + pathCount];
-    i += pathCount;
-    if (path == null || path.length === 0) return [];
-    if (seen.has(path)) continue;
-    seen.add(path);
-    result.push({path, status: letter});
+    const twoPaths = letter === 'R' || letter === 'C';
+    const first = records[i + 1];
+    const second = twoPaths ? records[i + 2] : null;
+    i += twoPaths ? 2 : 1;
+    // An empty or missing record is the same desync `STATUS_RECORD` catches,
+    // and it is checked on BOTH paths of a triplet now that both are used.
+    if (first == null || first.length === 0) return [];
+    if (!twoPaths) {
+      parsed.push({letter, newPath: first, oldPath: null});
+      continue;
+    }
+    if (second == null || second.length === 0) return [];
+    parsed.push({letter, newPath: second, oldPath: first});
+  }
+
+  const postState = new Set(parsed.map((p) => p.newPath));
+  const seen = new Set<string>();
+  const result: ChangedPath[] = [];
+  for (const {letter, newPath, oldPath} of parsed) {
+    if (!seen.has(newPath)) {
+      seen.add(newPath);
+      result.push({path: newPath, status: letter});
+    }
+    // `C` is excluded on purpose — see the ruling in the doc comment above.
+    if (letter !== 'R' || oldPath == null) continue;
+    if (postState.has(oldPath) || seen.has(oldPath)) continue;
+    seen.add(oldPath);
+    result.push({path: oldPath, renamedTo: newPath, status: 'D'});
   }
   return result;
 }
@@ -382,50 +459,75 @@ function unreadableVerdict(
  * motivating reconcile got burned by checking one signature file and
  * generalising from it.
  *
- * A FAILED LOOK IS NOT A FINDING (home-base-qyu1.24), and it is checked first,
- * before the branch that reads a missing path as a reflected deletion. That
- * ordering is the fix: `deletion-reflected` is the most reassuring verdict in
- * this file, and it used to be what a broken object store produced.
+ * "Every path a commit touched" now includes the path a rename moved AWAY from,
+ * which is a second entry with the same `sha` and a `D` status (qyu1.27).
  */
 export function verifyCommitFiles(
   sha: string,
   baselineRef: string,
   cwd: string,
 ): FileVerdict[] {
-  return changedPaths(sha, cwd).map(({path, status}): FileVerdict => {
-    const onBaseline = lookupPathOnRef(baselineRef, path, cwd);
-    if (onBaseline.kind === 'unreadable') {
-      return unreadableVerdict(path, baselineRef, onBaseline);
-    }
+  return changedPaths(sha, cwd).map(
+    ({path, renamedTo, status}): FileVerdict => {
+      const verdict = verifyChangedPath(path, status, sha, baselineRef, cwd);
+      // The annotation rides on whatever the verdict turned out to be,
+      // `unreadable` included — which is where a reader is MOST likely to
+      // wonder why a path absent from the post-state is being looked up at all.
+      return renamedTo == null ? verdict : {...verdict, renamedTo};
+    },
+  );
+}
 
-    if (status === 'D') {
-      return {
-        path,
-        status:
-          onBaseline.kind === 'absent'
-            ? 'deletion-reflected'
-            : 'deletion-not-reflected',
-      };
-    }
-    if (onBaseline.kind === 'absent') {
-      return {path, status: 'absent-on-baseline'};
-    }
+/**
+ * One path's verdict against the baseline.
+ *
+ * A FAILED LOOK IS NOT A FINDING (home-base-qyu1.24), and it is checked first,
+ * before the branch that reads a missing path as a reflected deletion. That
+ * ordering is the fix: `deletion-reflected` is the most reassuring verdict in
+ * this file, and it used to be what a broken object store produced.
+ *
+ * Split out of `verifyCommitFiles` only so the rename annotation attaches in
+ * ONE place instead of at each of the four returns below.
+ */
+function verifyChangedPath(
+  path: string,
+  status: string,
+  sha: string,
+  baselineRef: string,
+  cwd: string,
+): FileVerdict {
+  const onBaseline = lookupPathOnRef(baselineRef, path, cwd);
+  if (onBaseline.kind === 'unreadable') {
+    return unreadableVerdict(path, baselineRef, onBaseline);
+  }
 
-    const onCommit = lookupPathOnRef(sha, path, cwd);
-    // Unreadable on the COMMIT side used to read as `differs`, which degrades
-    // safe — but it is still a claim about content that was never compared, and
-    // it would send a reader to diff two things git cannot even open.
-    if (onCommit.kind === 'unreadable') {
-      return unreadableVerdict(path, sha, onCommit);
-    }
+  if (status === 'D') {
     return {
       path,
       status:
-        onCommit.kind === 'present' && onCommit.sha === onBaseline.sha
-          ? 'identical'
-          : 'differs',
+        onBaseline.kind === 'absent'
+          ? 'deletion-reflected'
+          : 'deletion-not-reflected',
     };
-  });
+  }
+  if (onBaseline.kind === 'absent') {
+    return {path, status: 'absent-on-baseline'};
+  }
+
+  const onCommit = lookupPathOnRef(sha, path, cwd);
+  // Unreadable on the COMMIT side used to read as `differs`, which degrades
+  // safe — but it is still a claim about content that was never compared, and
+  // it would send a reader to diff two things git cannot even open.
+  if (onCommit.kind === 'unreadable') {
+    return unreadableVerdict(path, sha, onCommit);
+  }
+  return {
+    path,
+    status:
+      onCommit.kind === 'present' && onCommit.sha === onBaseline.sha
+        ? 'identical'
+        : 'differs',
+  };
 }
 
 /**
