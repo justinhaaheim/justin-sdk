@@ -30,7 +30,14 @@
  *     'needs-judgment' are never actioned, and there is no flag to override it.
  *  2. Deletions (the mirrored case only) are RE-PROVEN against live state
  *     immediately before running. A plan is a proposal, not a licence.
- *  3. Worktree-checked-out branches are left alone.
+ *  3. Worktree-checked-out branches are left alone — and so is EVERY local
+ *     branch when the worktree listing could not be read at all, since which of
+ *     them is checked out is then exactly what is unknown. git provides no
+ *     backstop of its own here: `git branch -m` renames a checked-out branch
+ *     without complaint and moves that worktree's HEAD onto the new name
+ *     (home-base-qyu1.23).
+ *  4. There is no plan at all when the BRANCH listing could not be read: an
+ *     empty plan is indistinguishable from a clean repo.
  *
  * ── Remote archiving (home-base-qyu1.13) ─────────────────────────────────────
  *

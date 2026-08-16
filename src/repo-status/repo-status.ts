@@ -78,6 +78,13 @@ That is a sha-reachability fact and is deliberately independent of the
 content-based disposition: a squash-merged branch is 'merged' AND 'merge-needed'
 at the same time, and both readings are worth having.
 
+When git cannot LIST something, this says so rather than reporting nothing.
+'branches' and 'summary' become null (never an empty ledger), 'worktrees' becomes
+null, an 'enumerationFailures' entry names the exact command that failed, and the
+exit code is non-zero. Worth knowing: one unreadable object behind ANY ref tip
+loses the branch listing for the whole repo, so "no branches" and "could not read
+the branches" are states worth telling apart.
+
 A 'submodules' section reports each submodule's recorded gitlink separately,
 because the questions there are different ones:
 
@@ -139,6 +146,12 @@ automatically, by design.
 Remote branches get their own group, carrying the EXACT push and delete commands
 that would run, in order — in every output format. They are executed only by
 'apply --safe-only --include-remote --yes' — never by a bare --safe-only run.
+
+There is NO plan at all when the branch listing could not be read: an empty plan
+would read as "nothing to clean up", so this prints why and exits non-zero
+instead. And when the WORKTREE listing could not be read, every local branch goes
+to the manual group — whether one is checked out is then unknown, and git does
+not refuse to rename a checked-out branch.
 
   repo-status plan              YAML: the plan object, same schema as 'status'
   repo-status plan --json       the identical object as JSON
