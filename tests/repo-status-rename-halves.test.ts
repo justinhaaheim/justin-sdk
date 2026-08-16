@@ -159,11 +159,25 @@ function planFor(repo: string): CleanupPlan {
 // ---------------------------------------------------------------------------
 
 /**
- * Hostile basenames, inherited from the qyu1.26 gauntlet: a rename of one of
- * these spends the same three `-z` records as any other rename, and BOTH of its
- * paths now have to survive the parse rather than just the second.
+ * The qyu1.26 gauntlet, inherited whole: a rename of one of these spends the
+ * same three `-z` records as any other rename, so BOTH of its paths now have to
+ * survive the parse rather than just the second. `trailing space ` is the
+ * pure-ASCII one that the pre-`-z` parser also mangled, and it is here for the
+ * same reason it is there — the families that break are not only the exotic
+ * ones. (The emoji is escaped only because it is outside the BMP and reads
+ * badly in diffs.)
  */
-const TRICKY = ['café.txt', 'with space.txt', 'with"quote.txt'];
+const TRICKY = [
+  'café.txt',
+  '日本語.txt',
+  'emoji\u{1f600}.txt',
+  'with\ttab.txt',
+  'with\nnewline.txt',
+  'with"quote.txt',
+  'with\\back.txt',
+  'trailing space ',
+  'with space.txt',
+];
 
 const GAUNTLET_SRC = 'gauntlet';
 const GAUNTLET_DST = 'gauntlet-moved';
