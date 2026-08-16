@@ -414,7 +414,7 @@ describe('plan and apply refuse a repo whose branches are unknown', () => {
     const repo = buildUnreadableBranchesRepo(sb);
     const before = git(repo, ['rev-parse', 'broken']).trim();
 
-    const planned = runCli(['plan', '--repo', repo, '--json']);
+    const planned = runCli(['plan-experimental', '--repo', repo, '--json']);
     expect(planned.code).toBe(1);
     // Nothing on stdout: an empty plan object is exactly the reading being
     // refused, so there must be no object to read.
@@ -423,10 +423,11 @@ describe('plan and apply refuse a repo whose branches are unknown', () => {
     expect(planned.err).toContain('NOT "nothing to clean up"');
 
     const applied = runCli([
-      'apply',
+      'apply-experimental',
       '--repo',
       repo,
       '--safe-only',
+      '--experimental-acknowledge-data-loss-risk',
       '--yes',
       '--json',
     ]);
@@ -448,7 +449,7 @@ describe('an unknown worktree state routes every local row to manual', () => {
     const fx = buildWorktreeFixture(sb);
     const shim = installWorktreeListShim(sb, 'fail');
 
-    const run = runCli(['plan', '--repo', fx.repo, '--json'], shim);
+    const run = runCli(['plan-experimental', '--repo', fx.repo, '--json'], shim);
     expect(run.code).toBe(0);
     const plan = JSON.parse(run.out) as ReturnType<typeof buildPlan> & object;
 
@@ -471,7 +472,15 @@ describe('an unknown worktree state routes every local row to manual', () => {
     const shim = installWorktreeListShim(sb, 'fail');
 
     const run = runCli(
-      ['apply', '--repo', fx.repo, '--safe-only', '--yes', '--json'],
+      [
+        'apply-experimental',
+        '--repo',
+        fx.repo,
+        '--safe-only',
+        '--experimental-acknowledge-data-loss-risk',
+        '--yes',
+        '--json',
+      ],
       shim,
     );
     expect(run.code).toBe(0);
@@ -500,7 +509,15 @@ describe('an unknown worktree state routes every local row to manual', () => {
     const shim = installWorktreeListShim(sb, 'empty');
 
     const run = runCli(
-      ['apply', '--repo', fx.repo, '--safe-only', '--yes', '--json'],
+      [
+        'apply-experimental',
+        '--repo',
+        fx.repo,
+        '--safe-only',
+        '--experimental-acknowledge-data-loss-risk',
+        '--yes',
+        '--json',
+      ],
       shim,
     );
     expect(run.code).toBe(0);
