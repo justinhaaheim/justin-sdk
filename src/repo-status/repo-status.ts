@@ -78,6 +78,13 @@ That is a sha-reachability fact and is deliberately independent of the
 content-based disposition: a squash-merged branch is 'merged' AND 'merge-needed'
 at the same time, and both readings are worth having.
 
+When git cannot LIST something, this says so rather than reporting nothing.
+'branches' and 'summary' become null (never an empty ledger), 'worktrees' becomes
+null, an 'enumerationFailures' entry names the exact command that failed, and the
+exit code is non-zero. Worth knowing: one unreadable object behind ANY ref tip
+loses the branch listing for the whole repo, so "no branches" and "could not read
+the branches" are states worth telling apart.
+
 A 'submodules' section reports each submodule's recorded gitlink separately,
 because the questions there are different ones:
 
@@ -139,6 +146,12 @@ automatically, by design.
 Remote branches get their own group, carrying the EXACT push and delete commands
 that would run, in order — in every output format. They are executed only by
 'apply --safe-only --include-remote --yes' — never by a bare --safe-only run.
+
+There is NO plan at all when the branch listing could not be read: an empty plan
+would read as "nothing to clean up", so this prints why and exits non-zero
+instead. And when the WORKTREE listing could not be read, every local branch goes
+to the manual group — whether one is checked out is then unknown, and git does
+not refuse to rename a checked-out branch.
 
   repo-status plan              YAML: the plan object, same schema as 'status'
   repo-status plan --json       the identical object as JSON
@@ -206,7 +219,19 @@ function emit(report: RepoStatusReport | null, json: boolean): number {
       console.error(`severe: submodule ${sub.path} — ${sub.why}`);
     }
   }
-  return 0;
+  // Same reasoning, for the walk that produces the ledger itself: a ledger
+  // missing a whole half of its input must not be read as a short one
+  // (home-base-qyu1.23). The nulls in the object are the machine-readable form;
+  // this is the form that cannot be scrolled past.
+  for (const failure of report.enumerationFailures ?? []) {
+    console.error(
+      `severe: could not enumerate ${failure.what} — \`${failure.command}\` failed. ${failure.why}. ${failure.diagnose}`,
+    );
+  }
+  // A failed BRANCH listing leaves nothing of the ledger, so the command did not
+  // do what it was asked; a failed worktree listing degrades a report that is
+  // still substantially there. Those deserve different exit codes.
+  return report.branches == null ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +318,10 @@ const branchCommand = {
       // the one branch it was asked about.
       submodules: false,
     });
-    if (report != null && report.branches.length === 0) {
+    // `branches == null` is NOT "no such branch" — the listing failed, so this
+    // branch's absence from it says nothing about the branch. `emit` reports
+    // that case for what it is.
+    if (report?.branches != null && report.branches.length === 0) {
       console.error(`no such branch: ${args.name}`);
       process.exitCode = 1;
       return;
@@ -336,11 +364,35 @@ const planCommand = {
       return;
     }
     const plan = buildPlan(report);
+    if (plan == null) {
+      reportNoPlan(report);
+      process.exitCode = 1;
+      return;
+    }
     // YAML by default, through the SAME render() as status and apply: one typed
     // object, one schema, whatever the format (home-base-qyu1.16).
     console.log(args.markdown ? renderPlan(plan) : render(plan, args.json));
   },
 };
+
+/**
+ * Why there is no plan, on stderr, and nothing on stdout.
+ *
+ * `buildPlan` returns null only when the branch listing failed, and the whole
+ * point of that null is that an empty plan would have read as "nothing to clean
+ * up" (home-base-qyu1.23). Printing an empty object here would put that reading
+ * straight back, so the commands print the reason and exit non-zero instead.
+ */
+function reportNoPlan(report: RepoStatusReport): void {
+  console.error(
+    'no plan: the repo\'s branches could not be enumerated, so there is no branch set to plan over — this is NOT "nothing to clean up"',
+  );
+  for (const failure of report.enumerationFailures ?? []) {
+    console.error(
+      `  ${failure.what}: \`${failure.command}\` failed. ${failure.why}. ${failure.diagnose}`,
+    );
+  }
+}
 
 const applyCommand = {
   builder: (y: Argv) =>
@@ -387,6 +439,11 @@ const applyCommand = {
       return;
     }
     const plan = buildPlan(report);
+    if (plan == null) {
+      reportNoPlan(report);
+      process.exitCode = 1;
+      return;
+    }
     if (!args.yes) {
       // Deliberately MARKDOWN even though `plan` now defaults to YAML: this
       // preview exists to be read by the person deciding whether to type --yes.

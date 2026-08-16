@@ -150,6 +150,10 @@ function rowsFor(repo: string, only?: string): BranchRow[] {
     submodules: false,
   });
   if (report == null) throw new Error('expected a report');
+  // Null only when the branch listing itself failed (home-base-qyu1.23); here
+  // every ref TIP is intact by construction, which is what lets these rows exist
+  // at all while the WALK through them fails.
+  if (report.branches == null) throw new Error('expected branch rows');
   return report.branches;
 }
 
@@ -168,7 +172,10 @@ function planFor(repo: string): CleanupPlan {
     submodules: false,
   });
   if (report == null) throw new Error('expected a report');
-  return buildPlan(report);
+  const plan = buildPlan(report);
+  // Null only when the branch listing itself failed (home-base-qyu1.23).
+  if (plan == null) throw new Error('expected a plan');
+  return plan;
 }
 
 const BROKEN = ['corrupt-local', 'origin/corrupt-remote'];

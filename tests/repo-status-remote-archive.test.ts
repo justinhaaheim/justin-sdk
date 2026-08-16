@@ -114,7 +114,11 @@ function plan(fx: Fixture) {
     sinceDays: null,
   });
   if (report == null) throw new Error('expected a report');
-  return buildPlan(report);
+  const p = buildPlan(report);
+  // Null only when the branch listing itself failed (home-base-qyu1.23), which
+  // in these fixtures would mean the fixture is broken, not the code.
+  if (p == null) throw new Error('expected a plan');
+  return p;
 }
 
 // ---------------------------------------------------------------------------

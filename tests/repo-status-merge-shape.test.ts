@@ -114,6 +114,8 @@ function rowsFor(sb: Sandbox): {baselineRef: string; rows: BranchRow[]} {
     submodules: false,
   });
   if (report == null) throw new Error('expected a report');
+  // Null only when the branch listing itself failed (home-base-qyu1.23).
+  if (report.branches == null) throw new Error('expected branch rows');
   return {baselineRef: report.repo.baselineRef, rows: report.branches};
 }
 

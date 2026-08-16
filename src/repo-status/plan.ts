@@ -30,7 +30,14 @@
  *     'needs-judgment' are never actioned, and there is no flag to override it.
  *  2. Deletions (the mirrored case only) are RE-PROVEN against live state
  *     immediately before running. A plan is a proposal, not a licence.
- *  3. Worktree-checked-out branches are left alone.
+ *  3. Worktree-checked-out branches are left alone — and so is EVERY local
+ *     branch when the worktree listing could not be read at all, since which of
+ *     them is checked out is then exactly what is unknown. git provides no
+ *     backstop of its own here: `git branch -m` renames a checked-out branch
+ *     without complaint and moves that worktree's HEAD onto the new name
+ *     (home-base-qyu1.23).
+ *  4. There is no plan at all when the BRANCH listing could not be read: an
+ *     empty plan is indistinguishable from a clean repo.
  *
  * ── Remote archiving (home-base-qyu1.13) ─────────────────────────────────────
  *
@@ -77,6 +84,7 @@
 import {execFileSync} from 'child_process';
 
 import {mirrorFullyPreserves, proveContentOnBaseline} from './content';
+import {ENUMERATION_FAILURES} from './core';
 
 import type {BranchRow, RepoStatusReport} from './report';
 
@@ -284,7 +292,37 @@ export function remoteArchiveCommands(spec: RemoteArchiveSpec): string[] {
   return [renderGitCommand(argv.push), renderGitCommand(argv.delete)];
 }
 
-export function buildPlan(report: RepoStatusReport): CleanupPlan {
+/**
+ * Turn a report into a proposal — or NULL when there is no honest proposal to
+ * make.
+ *
+ * NULL WHEN THE BRANCHES ARE UNKNOWN (home-base-qyu1.23). If `git for-each-ref`
+ * failed, `report.branches` is null: not an empty repo, an unread one. A plan
+ * built from it would have four empty groups, and four empty groups render as
+ * "nothing needs cleaning up" — the same false calm one layer down. There is no
+ * conservative plan over an unknown branch set, only a meaningless one, so this
+ * returns nothing at all and the callers refuse to proceed. Every group being
+ * empty and the plan not existing are different facts and must not be spelled
+ * the same way.
+ */
+export function buildPlan(report: RepoStatusReport): CleanupPlan | null {
+  if (report.branches == null) return null;
+
+  // WORKTREE STATE IS A PRECONDITION FOR ARCHIVING (home-base-qyu1.23). A local
+  // branch is only actionable because nothing has it checked out, and when the
+  // worktree listing failed that is exactly what is not known — `row.worktree`
+  // is null for every row because none could be looked up, which is spelled the
+  // same as "checked out nowhere".
+  //
+  // git provides NO backstop here, contrary to the assumption this was filed
+  // under. `git branch -m` on a branch checked out in another worktree SUCCEEDS
+  // (verified on git 2.50.1): it renames the branch and silently retargets that
+  // worktree's HEAD onto the new name, so a live worktree would find itself on
+  // `archive/<name>` with nothing reported. Only `git branch -D` refuses. Every
+  // local row therefore falls to `manual` while the state is unknown.
+  const worktreeStateUnknown = report.worktrees == null;
+  const unknownWorktreeNote = `the repo's checkouts could not be listed (\`${ENUMERATION_FAILURES.worktrees.command}\` failed), so whether this branch is checked out somewhere is UNKNOWN — and \`git branch -m\` does NOT refuse a checked-out branch, it renames it and moves that worktree's HEAD`;
+
   const safe: PlanAction[] = [];
   const remote: PlanAction[] = [];
   const manual: PlanAction[] = [];
@@ -350,6 +388,14 @@ export function buildPlan(report: RepoStatusReport): CleanupPlan {
         remoteArchive: spec,
         target: `${split.remote}/${archiveBranch}`,
       });
+      continue;
+    }
+
+    // Asked BEFORE `row.worktree`, because with the listing unread that field
+    // says nothing: a null there means "not found in a list that does not
+    // exist", not "not checked out".
+    if (worktreeStateUnknown) {
+      manual.push(manualAction(row.name, `${row.why} — ${unknownWorktreeNote}`));
       continue;
     }
 

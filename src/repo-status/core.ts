@@ -26,6 +26,7 @@ import type {
   CoreInventory,
   CoreOptions,
   DivergenceCounts,
+  EnumerationFailure,
   WorktreeEntry,
 } from './types';
 
@@ -42,6 +43,32 @@ function gitArgv(argv: string[], cwd: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Characters a shell leaves alone, so an argv element made only of them prints
+ * bare. `--format=%(refname) %(objectname) …` is not one of those.
+ */
+const SHELL_SAFE_ARG = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/**
+ * An argv array as the command line that reproduces it, quoted where a shell
+ * would otherwise mangle it — so a reported failure can be pasted and re-run.
+ *
+ * Deliberately a LOCAL copy of the same idea in `plan.ts` rather than an import:
+ * `plan.ts` imports `report.ts` which imports this file, so reaching the other
+ * way would close a cycle (`submodules.ts` keeps its own `gitArgv` for the same
+ * reason). The two also serve different purposes — plan.ts renders commands a
+ * reader APPROVES and `apply` then executes, so its rendering is drift-tested
+ * against the argv git actually receives; this one renders a command that has
+ * ALREADY failed, for a human to reproduce.
+ */
+function renderGitCommand(argv: string[]): string {
+  const quote = (arg: string): string =>
+    SHELL_SAFE_ARG.test(arg)
+      ? arg
+      : `'${arg.split("'").join(`'\\''`)}'`;
+  return ['git', ...argv.map(quote)].join(' ');
 }
 
 export function getRepoRoot(cwd: string): string | null {
@@ -80,9 +107,55 @@ export function detectDefaultBranch(cwd: string): string | null {
   return null;
 }
 
-export function getWorktrees(cwd: string): WorktreeEntry[] {
-  const out = gitArgv(['worktree', 'list', '--porcelain'], cwd);
-  if (out == null) return [];
+const WORKTREE_LIST_ARGV = ['worktree', 'list', '--porcelain'];
+
+const BRANCH_TIPS_ARGV = [
+  'for-each-ref',
+  '--format=%(refname) %(objectname) %(committerdate:iso-strict)',
+  'refs/heads',
+  'refs/remotes',
+];
+
+/**
+ * What is not known when a listing fails, in the terms a reader has to act on.
+ *
+ * Written HERE, next to the commands, so the session-start prose, the `status`
+ * object and the plan's refusals all quote one description rather than three
+ * that can drift (home-base-qyu1.23).
+ */
+export const ENUMERATION_FAILURES: Record<
+  'branches' | 'worktrees',
+  EnumerationFailure
+> = {
+  branches: {
+    command: renderGitCommand(BRANCH_TIPS_ARGV),
+    diagnose:
+      'run the command above to see git\'s own error, then `git fsck --no-progress` — the listing must parse EVERY ref tip, so one unreadable object anywhere fails it for the entire repo',
+    what: 'branches',
+    why: 'no branch could be listed at all, so an empty branch inventory here means NOTHING COULD BE READ — not that the repo has no branches; unmerged work may exist on any number of them',
+  },
+  worktrees: {
+    command: renderGitCommand(WORKTREE_LIST_ARGV),
+    diagnose:
+      "run the command above to see git's own error; `git worktree prune` clears a stale administrative entry",
+    what: 'worktrees',
+    why: 'the repo\'s checkouts could not be listed, so NO branch can be said to be free of a worktree — one that is actually checked out reads as unattached, and `git branch -m` on a checked-out branch SUCCEEDS and silently retargets that worktree\'s HEAD rather than refusing',
+  },
+};
+
+/**
+ * Every checked-out tree of this repo — or NULL when git could not say.
+ *
+ * FAILURE IS NOT "NONE" (home-base-qyu1.23). This returned `[]` on failure, and
+ * an empty list is read downstream as "no branch is checked out anywhere", which
+ * is the precondition for archiving a branch. Renaming a branch that IS checked
+ * out is not blocked by git — verified: `git branch -m` succeeds and moves the
+ * live worktree's HEAD onto the new name — so nothing further down would have
+ * caught the substitution either.
+ */
+export function getWorktrees(cwd: string): WorktreeEntry[] | null {
+  const out = gitArgv(WORKTREE_LIST_ARGV, cwd);
+  if (out == null) return null;
 
   const entries: WorktreeEntry[] = [];
   let path: string | null = null;
@@ -109,25 +182,32 @@ export function getWorktrees(cwd: string): WorktreeEntry[] {
 
 /**
  * All local + remote branch tips, deduped: a remote branch that merely mirrors
- * an identically-named local branch is dropped in favour of the local one.
+ * an identically-named local branch is dropped in favour of the local one. NULL
+ * when the listing failed.
+ *
+ * FAILURE IS NOT "NO BRANCHES" (home-base-qyu1.23). This returned `[]` on
+ * failure, which produced an inventory with zero branches — and the session-start
+ * view renders zero branches as "no unmerged work on any other branch or
+ * worktree", the exact all-clear this module exists to avoid printing falsely.
+ * The trigger is not exotic: `%(committerdate:iso-strict)` has to parse every
+ * tip commit, so a SINGLE missing object behind ANY ref fails the command for
+ * the whole repo (proven in the qyu1.22 suite, where the whole inventory went
+ * empty from one destroyed object).
+ *
+ * `worktrees` is nullable for the same reason. A null there is not treated as
+ * "no worktrees": no tip gets a `worktreePath`, and the caller records the
+ * enumeration failure so the unknown-ness travels with the inventory rather than
+ * being silently spelled as `worktreePath: null` on every row.
  */
 export function getBranchTips(
   cwd: string,
-  worktrees: WorktreeEntry[],
-): BranchTip[] {
-  const out = gitArgv(
-    [
-      'for-each-ref',
-      '--format=%(refname) %(objectname) %(committerdate:iso-strict)',
-      'refs/heads',
-      'refs/remotes',
-    ],
-    cwd,
-  );
-  if (out == null) return [];
+  worktrees: WorktreeEntry[] | null,
+): BranchTip[] | null {
+  const out = gitArgv(BRANCH_TIPS_ARGV, cwd);
+  if (out == null) return null;
 
   const worktreeByBranch = new Map(
-    worktrees
+    (worktrees ?? [])
       .filter((w) => w.branch != null)
       .map((w) => [w.branch as string, w.path]),
   );
@@ -241,6 +321,14 @@ function resolveBaseline(
  * No `ahead > 0` filtering happens here: a branch with `ahead === 0` is fully
  * merged, which is a meaningful disposition rather than something to hide.
  * Filtering is left to the view.
+ *
+ * A FAILED LISTING IS NOT AN EMPTY ONE (home-base-qyu1.23). Either half of the
+ * walk can fail on its own, so each is nullable and each failure is recorded in
+ * `enumerationFailures` for the views to surface. Note the second-order effect
+ * when the WORKTREE listing fails: no tip carries a `worktreePath`, so the
+ * `sinceDays` gate can also drop an old branch it would normally have kept for
+ * having a worktree. That is one more reason the failure must be reported rather
+ * than absorbed — the missing rows are invisible by construction.
  */
 export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
   const {cwd} = opts;
@@ -256,8 +344,9 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
   const sinceDays =
     opts.sinceDays === null ? null : (opts.sinceDays ?? DEFAULT_SINCE_DAYS);
 
-  const candidates = getBranchTips(cwd, worktrees)
-    .filter((t) => t.name !== baselineRef)
+  const tips = getBranchTips(cwd, worktrees);
+  const candidates = tips
+    ?.filter((t) => t.name !== baselineRef)
     .filter(
       (t) =>
         sinceDays === null ||
@@ -265,16 +354,22 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
         isRecentEnough(t.lastCommitDate, sinceDays),
     );
 
-  const branches: BranchDivergence[] = candidates.map((t) => ({
-    ...t,
-    divergence: countDivergence(cwd, baselineRef, t.name),
-  }));
+  const branches: BranchDivergence[] | null =
+    candidates?.map((t) => ({
+      ...t,
+      divergence: countDivergence(cwd, baselineRef, t.name),
+    })) ?? null;
+
+  const enumerationFailures: EnumerationFailure[] = [];
+  if (worktrees == null) enumerationFailures.push(ENUMERATION_FAILURES.worktrees);
+  if (tips == null) enumerationFailures.push(ENUMERATION_FAILURES.branches);
 
   return {
     baselineRef,
     branches,
     currentBranch,
     defaultBranch,
+    enumerationFailures,
     repoRoot,
     worktrees,
   };

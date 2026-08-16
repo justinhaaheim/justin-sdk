@@ -113,7 +113,10 @@ function planFor(repo: string): CleanupPlan {
     sinceDays: null,
   });
   if (report == null) throw new Error('expected a report');
-  return buildPlan(report);
+  const plan = buildPlan(report);
+  // Null only when the branch listing itself failed (home-base-qyu1.23).
+  if (plan == null) throw new Error('expected a plan');
+  return plan;
 }
 
 interface CliRun {
