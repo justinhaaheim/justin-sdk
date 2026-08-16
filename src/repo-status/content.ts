@@ -90,10 +90,21 @@ export interface ArchiveMirror {
    * The worst case across the branch and its remote counterpart: how many
    * commits exist that the mirror does NOT have. ANY value above zero means the
    * mirror is STALE and the branch must not be treated as safely archived.
+   *
+   * NULL when that could not be measured (home-base-qyu1.22) — a `rev-list`
+   * naming the mirror failed, so how much the mirror is missing is UNKNOWN.
+   * Unknown is not zero: zero is the value that authorises deleting the branch,
+   * and it must be earned by a comparison that actually ran.
    */
-  commitsMissingFromMirror: number;
+  commitsMissingFromMirror: number | null;
   /** Which ref produced that worst case (useful when it is the remote, not the local). */
   staleAgainst: string | null;
+  /**
+   * Which ref's comparison against the mirror could not be measured, when one
+   * could not be. Named in the verdict so a reader can see WHICH comparison
+   * failed and re-run it by hand.
+   */
+  unmeasuredAgainst: string | null;
   isExact: boolean;
 }
 
@@ -108,9 +119,18 @@ export interface ArchiveMirror {
  * defeats the point of the tool: shrinking the set that needs human attention.
  *
  * `isExact` is retained as informational detail, not as a safety gate.
+ *
+ * UNKNOWN IS NOT ZERO (home-base-qyu1.22). A mirror whose freshness could not
+ * be measured preserves nothing PROVABLE, so it answers false here — the same
+ * answer as a stale mirror, because the two are indistinguishable from the
+ * evidence available. Spelled as an explicit null check rather than left to
+ * `=== 0`: this is the gate a deletion is authorised through, and it should say
+ * out loud what it refuses.
  */
 export function mirrorFullyPreserves(mirror: ArchiveMirror | null): boolean {
-  return mirror != null && mirror.exists && mirror.commitsMissingFromMirror === 0;
+  if (mirror == null || !mirror.exists) return false;
+  if (mirror.commitsMissingFromMirror == null) return false;
+  return mirror.commitsMissingFromMirror === 0;
 }
 
 export interface ContentProof {
@@ -211,11 +231,40 @@ function refExists(ref: string, cwd: string): boolean {
   return gitArgv(['rev-parse', '--verify', '--quiet', ref], cwd) != null;
 }
 
-/** Commits `ref` has that `other` lacks. */
-function countAhead(ref: string, other: string, cwd: string): number {
+/**
+ * Commits `ref` has that `other` lacks — or null when git could not answer.
+ *
+ * FAILURE IS NOT ZERO (home-base-qyu1.22). This returned 0 on any git failure,
+ * and 0 here is the most reassuring number in the module: it makes
+ * `commitsMissingFromMirror` zero, which makes `mirrorFullyPreserves` true,
+ * which makes the disposition `mirrored` with `provenSafe: true`, which makes
+ * `buildPlan` emit `delete-local-branch` — the only outright deletion the tool
+ * proposes on the local path. `executePlan` re-proves before deleting, but the
+ * re-proof called THIS function, so it re-confirmed the fabrication rather than
+ * catching it. Exactly the qyu1.21 bug on a strictly worse path.
+ *
+ * The failure is reachable without any exotic transient: `git rev-parse
+ * --verify` on a ref resolves from the ref file and does NOT check that the
+ * object is present, so an archive mirror whose tip object is gone still passes
+ * `refExists` while every `rev-list` naming it fails with "Invalid revision
+ * range". Such a mirror preserves nothing at all, and the old code called it a
+ * complete one.
+ *
+ * Empty or unparseable output is treated as failure too: git answering
+ * something this cannot read is no more informative than git not answering.
+ * `Number('')` is 0, so the emptiness check is what stops the same fabrication
+ * from sneaking back in through the parse.
+ */
+export function countAhead(
+  ref: string,
+  other: string,
+  cwd: string,
+): number | null {
   const out = gitArgv(['rev-list', '--count', `${other}..${ref}`], cwd);
-  const n = Number(out?.trim() ?? '0');
-  return Number.isFinite(n) ? n : 0;
+  const trimmed = out?.trim();
+  if (trimmed == null || trimmed.length === 0) return null;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : null;
 }
 
 /**
@@ -247,6 +296,7 @@ export function inspectArchiveMirror(
       isExact: false,
       ref: bare,
       staleAgainst: null,
+      unmeasuredAgainst: null,
     };
   }
 
@@ -260,6 +310,7 @@ export function inspectArchiveMirror(
       isExact: false,
       ref,
       staleAgainst: null,
+      unmeasuredAgainst: null,
     };
   }
 
@@ -270,23 +321,45 @@ export function inspectArchiveMirror(
 
   let worst = 0;
   let staleAgainst: string | null = null;
+  // The first candidate whose comparison git could not answer. A failed
+  // comparison is NOT a clean one: skipping past it would leave `worst` at
+  // whatever the other candidates said, which is a claim about a strictly
+  // smaller set of refs than the one this function promises to cover.
+  let unmeasuredAgainst: string | null = null;
   for (const candidate of candidates) {
     const missing = countAhead(candidate, ref, cwd);
+    if (missing == null) {
+      unmeasuredAgainst ??= candidate;
+      continue;
+    }
     if (missing > worst) {
       worst = missing;
       staleAgainst = candidate;
     }
   }
 
-  const mirrorAhead = candidates.some((c) => countAhead(ref, c, cwd) === 0);
+  // No candidate ref resolved at all: there is nothing this mirror was compared
+  // against, and "compared against nothing" must not read as "compared and
+  // found complete" — the same fabrication one level up from countAhead.
+  if (candidates.length === 0) unmeasuredAgainst = bare;
+
+  const measured = unmeasuredAgainst == null;
+
+  // `isExact` asks whether the mirror sits ON one of these refs rather than
+  // ahead of it: `countAhead(ref, c) === 0` is "the mirror holds nothing beyond
+  // c". A null is not that, so the short-circuit keeps an unmeasurable mirror
+  // out of the exact case (and skips git calls that already failed).
+  const mirrorSitsOnACandidate =
+    measured && candidates.some((c) => countAhead(ref, c, cwd) === 0);
 
   return {
-    commitsMissingFromMirror: worst,
+    commitsMissingFromMirror: measured ? worst : null,
     exists: true,
     isArchiveRef: false,
-    isExact: worst === 0 && mirrorAhead,
+    isExact: measured && worst === 0 && mirrorSitsOnACandidate,
     ref,
     staleAgainst,
+    unmeasuredAgainst,
   };
 }
 
