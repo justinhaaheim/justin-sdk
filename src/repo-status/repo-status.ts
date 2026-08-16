@@ -85,6 +85,13 @@ exit code is non-zero. Worth knowing: one unreadable object behind ANY ref tip
 loses the branch listing for the whole repo, so "no branches" and "could not read
 the branches" are states worth telling apart.
 
+The same holds when git cannot READ a file the proof needs. A changed path that
+comes back unreadable on the baseline is recorded as 'unreadable' — never as a
+path the baseline no longer has, which for a DELETED file would read as "the
+deletion already landed" — and the branch goes to 'review' naming the command
+that failed. One missing tree object is enough to produce this while every other
+command still answers, so 'git fsck' is the follow-up.
+
 A 'submodules' section reports each submodule's recorded gitlink separately,
 because the questions there are different ones:
 
