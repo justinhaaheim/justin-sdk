@@ -554,13 +554,25 @@ export function executePlan(plan: CleanupPlan, cwd: string): ApplyResult[] {
     }
 
     // Deletion: only ever the already-mirrored case, and only after re-proving.
+    //
+    // The re-proof is only worth running if it can come back NEGATIVE. It used
+    // to call a `countAhead` that answered 0 whenever git failed, so a failure
+    // re-confirmed the same fabrication that built the plan (home-base-qyu1.22)
+    // — a second look through the same blindfold. It now refuses on an
+    // unmeasurable mirror, and says which of the two refusals this is: "the
+    // mirror fell behind" and "the mirror could not be read" call for different
+    // things from whoever reads the output.
     const proof = proveContentOnBaseline(branch, plan.baselineRef, cwd);
-    if (!mirrorFullyPreserves(proof.archiveMirror)) {
+    const mirror = proof.archiveMirror;
+    if (!mirrorFullyPreserves(mirror)) {
+      const unmeasurable =
+        mirror?.exists === true && mirror.commitsMissingFromMirror == null;
       return {
         branch,
         outcome: 'skipped',
-        reason:
-          'the archive mirror no longer holds every commit — the repo changed since the plan was built',
+        reason: unmeasurable
+          ? `the archive mirror could not be re-proven — \`git rev-list --count ${mirror.ref}..${mirror.unmeasuredAgainst ?? branch}\` failed, so refusing to delete on an unproven mirror`
+          : 'the archive mirror no longer holds every commit — the repo changed since the plan was built',
         target: null,
       };
     }

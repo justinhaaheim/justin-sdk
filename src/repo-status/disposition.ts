@@ -103,15 +103,35 @@ export function decideDisposition(
   // --- UNSAFE CASES FIRST ---------------------------------------------------
   // A stale mirror is the single most dangerous state: it LOOKS like a safe
   // archive and is not. This must be evaluated before any mirror-based
-  // reassurance below.
-  if (mirror?.exists === true && mirror.commitsMissingFromMirror > 0) {
-    const against =
-      mirror.staleAgainst != null ? ` (${mirror.staleAgainst})` : '';
-    return {
-      disposition: 'review',
-      provenSafe: false,
-      why: `archive mirror ${mirror.ref} is STALE — ${plural(mirror.commitsMissingFromMirror, 'commit')} exist${mirror.commitsMissingFromMirror === 1 ? 's' : ''} on the branch${against} that the mirror does not have. Deleting would destroy them.`,
-    };
+  // reassurance below. And within it, MISSING evidence is checked before stale
+  // evidence, because an unmeasurable mirror used to be indistinguishable from
+  // a perfect one (home-base-qyu1.22).
+  if (mirror?.exists === true) {
+    const missing = mirror.commitsMissingFromMirror;
+
+    // UNMEASURED: `countAhead` fabricated 0 here, which read as "the mirror
+    // holds everything" — `mirrored`, `provenSafe: true`, and the one plan
+    // action that DELETES rather than renames. A mirror whose freshness cannot
+    // be measured proves nothing, so it gets `review`, the disposition that
+    // exists for incomplete evidence.
+    if (missing == null) {
+      const against = mirror.unmeasuredAgainst ?? branch.name;
+      return {
+        disposition: 'review',
+        provenSafe: false,
+        why: `archive mirror ${mirror.ref} could not be measured — \`git rev-list --count ${mirror.ref}..${against}\` failed, so whether the mirror still holds every commit is UNKNOWN and NOTHING about this branch is proven safe. Re-run; if it persists, check that both refs resolve to present objects (\`git rev-parse ${mirror.ref}^{commit} ${against}^{commit}\`) — a ref can resolve while its object is missing — and that the store is intact (\`git fsck\`).`,
+      };
+    }
+
+    if (missing > 0) {
+      const against =
+        mirror.staleAgainst != null ? ` (${mirror.staleAgainst})` : '';
+      return {
+        disposition: 'review',
+        provenSafe: false,
+        why: `archive mirror ${mirror.ref} is STALE — ${plural(missing, 'commit')} exist${missing === 1 ? 's' : ''} on the branch${against} that the mirror does not have. Deleting would destroy them.`,
+      };
+    }
   }
 
   // --- No content proof computed: stay conservative -------------------------
