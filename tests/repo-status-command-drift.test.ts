@@ -164,11 +164,12 @@ function runApply(fx: Fixture, shimDir: string): {status: number; err: string} {
     'bun',
     [
       CLI,
-      'apply',
+      'apply-experimental',
       '--repo',
       fx.work,
       '--safe-only',
       '--include-remote',
+      '--experimental-acknowledge-data-loss-risk',
       '--yes',
     ],
     {

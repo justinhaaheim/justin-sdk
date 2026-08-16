@@ -139,7 +139,14 @@ async function runPlan(repo: string, extra: string[]): Promise<CliRun> {
   const previousExitCode = process.exitCode;
   let code = 0;
   try {
-    code = await runCli(['bun', 'repo-status', 'plan', '--repo', repo, ...extra]);
+    code = await runCli([
+      'bun',
+      'repo-status',
+      'plan-experimental',
+      '--repo',
+      repo,
+      ...extra,
+    ]);
   } finally {
     console.log = log;
     console.error = error;
@@ -230,7 +237,7 @@ describe('plan renderings', () => {
 
   test('--help documents --markdown', () => {
     // A subprocess, because yargs prints help and exits the process itself.
-    const result = spawnSync('bun', [CLI, 'plan', '--help'], {
+    const result = spawnSync('bun', [CLI, 'plan-experimental', '--help'], {
       encoding: 'utf-8',
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -238,6 +245,6 @@ describe('plan renderings', () => {
     expect(result.stdout).toContain('--markdown');
     // The usage NARRATIVE, not just the flag list — the narrative is what a
     // reader with no external memory drives this tool from (home-base-qyu1.5).
-    expect(result.stdout).toContain('repo-status plan --markdown');
+    expect(result.stdout).toContain('repo-status plan-experimental --markdown');
   });
 });

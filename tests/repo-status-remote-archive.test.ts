@@ -429,10 +429,11 @@ describe('apply --include-remote (through the CLI)', () => {
       await runCli([
         'bun',
         'repo-status',
-        'apply',
+        'apply-experimental',
         '--repo',
         fx.work,
         '--safe-only',
+        '--experimental-acknowledge-data-loss-risk',
         '--yes',
         ...extra,
       ]);
@@ -474,10 +475,13 @@ describe('apply --include-remote (through the CLI)', () => {
     console.error = (...a: unknown[]) => void errors.push(a.join(' '));
     const previousExitCode = process.exitCode;
     try {
+      // No --experimental-acknowledge-data-loss-risk on purpose: without --yes
+      // this is the dry-run preview, and the acknowledgement gates EXECUTION,
+      // not inspection (home-base-qyu1.29).
       await runCli([
         'bun',
         'repo-status',
-        'apply',
+        'apply-experimental',
         '--repo',
         fx.work,
         '--safe-only',

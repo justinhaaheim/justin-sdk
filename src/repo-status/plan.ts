@@ -169,11 +169,25 @@ export interface PlanAction {
 export interface CleanupPlan {
   repoRoot: string;
   baselineRef: string;
+  /**
+   * ALPHA, carried on the object itself (home-base-qyu1.29).
+   *
+   * The stderr banner warns whoever is watching the terminal. This warns
+   * whoever is reading the PLAN — a `--json` consumer, a skill that parsed the
+   * YAML hours later, a file somebody piped this into. Those readers never see
+   * stderr, and a plan that has outlived the run that produced it is exactly
+   * the artefact most likely to be trusted without its warning.
+   *
+   * A literal type, not `string`: a consumer switching on it should get a
+   * compile error the day this becomes something other than alpha, rather than
+   * silently keeping a branch of code that no longer applies.
+   */
+  stability: 'alpha';
   /** The repo's default branch, so remote execution can refuse to archive it. */
   defaultBranch: string | null;
-  /** What `apply --safe-only` will execute. LOCAL ONLY, by construction. */
+  /** What `apply-experimental --safe-only` will execute. LOCAL ONLY, by construction. */
   safe: PlanAction[];
-  /** What `apply --safe-only --include-remote` additionally executes. */
+  /** What `apply-experimental --safe-only --include-remote` additionally executes. */
   remote: PlanAction[];
   /** Proven safe but deliberately left manual (worktrees, already-archived). */
   manual: PlanAction[];
@@ -448,8 +462,32 @@ export function buildPlan(report: RepoStatusReport): CleanupPlan | null {
     remote,
     repoRoot: report.repo.root,
     safe,
+    stability: 'alpha',
   };
 }
+
+/**
+ * The ALPHA warning as it appears INSIDE the plan document.
+ *
+ * `--markdown` goes to stdout and the banner goes to stderr, so the moment
+ * anyone redirects one and not the other — `plan-experimental --markdown >
+ * plan.md`, or a pipe into a reader — the document travels alone. It has to
+ * carry its own warning or it arrives looking authoritative.
+ *
+ * Spelled with the literal `stability: alpha` so the marker reads the same in
+ * the prose rendering as in the YAML and JSON ones, and one assertion covers
+ * all three.
+ */
+const MARKDOWN_ALPHA_NOTE = [
+  '> **ALPHA — `stability: alpha`. Do not act on this plan without checking it.**',
+  '>',
+  '> Every verdict below comes from an evidence layer that was found FABRICATING',
+  '> safe verdicts as recently as 2026-08: branches whose work was preserved',
+  '> nowhere were presented as proven safe. Those bugs are fixed and more are',
+  '> likely. Satisfy yourself that each branch really is preserved before any',
+  '> apply — and note that `apply-experimental --include-remote` DELETES branches',
+  '> on the shared remote, which is effectively irreversible.',
+];
 
 /**
  * The MARKDOWN dry run — `plan --markdown`, and the confirmation preview `apply`
@@ -463,6 +501,8 @@ export function buildPlan(report: RepoStatusReport): CleanupPlan | null {
 export function renderPlan(plan: CleanupPlan): string {
   const lines: string[] = [
     `# Cleanup plan (dry run) — baseline ${plan.baselineRef}`,
+    '',
+    ...MARKDOWN_ALPHA_NOTE,
     '',
   ];
 
@@ -500,12 +540,12 @@ export function renderPlan(plan: CleanupPlan): string {
   };
 
   section(
-    'Will run under `apply --safe-only --yes`',
+    'Will run under `apply-experimental --safe-only --yes`',
     plan.safe,
-    'Renames preserve every commit. The only deletions are branches an archive mirror already holds in full.',
+    'Renames preserve every commit. The only deletions are branches an archive mirror already holds in full. Executing also requires `--experimental-acknowledge-data-loss-risk`.',
   );
   section(
-    'Will run ONLY with `apply --safe-only --include-remote --yes`',
+    'Will run ONLY with `apply-experimental --safe-only --include-remote --yes`',
     plan.remote,
     'These mutate the shared remote. Each is a push THEN a delete, in that order: the original is removed only after the archive ref is confirmed present on the remote at the exact sha below. Never included in a bare `--safe-only` run.',
   );
