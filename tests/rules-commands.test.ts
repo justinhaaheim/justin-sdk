@@ -613,6 +613,34 @@ describe('rules-update refuses, distinctly, and without writing', () => {
     );
   });
 
+  test('a repo that GITIGNORES the artifact fails loudly, keeping the written file for the human', () => {
+    // Reachable in the fleet: some repos ignore `.claude/`. git refuses to add
+    // an ignored path, and that must surface as a distinct failure rather than
+    // as a quiet "committed nothing".
+    setQuiet(true);
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture({
+      files: {'.gitignore': '.claude/\n'},
+      modules: ['alpha', 'omega'],
+    });
+    const commits = commitCount(repo);
+
+    expect(
+      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
+    ).toBe(RULES_UPDATE_EXIT.commitFailed);
+    expect(commitCount(repo)).toBe(commits);
+    // The regenerated file is left on disk on purpose: the write succeeded, only
+    // the commit could not happen, and deleting it would hide the evidence.
+    expect(existsSync(projectRulesFilePath(repo))).toBe(true);
+
+    // NEGATIVE CONTROL: the same fixture without that ignore line commits.
+    const ok = projectFixture({modules: ['alpha', 'omega']});
+    expect(runRulesUpdate({now: NOW, projectRoot: ok, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
+    expect(filesInHead(ok)).toEqual([ARTIFACT_REL]);
+  });
+
   test('a broken module selection is assemblyFailed, not notEnrolled', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
