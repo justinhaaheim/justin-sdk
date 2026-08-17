@@ -176,7 +176,9 @@ export function buildStamp(opts: {
   command?: string;
 }): string {
   const version =
-    opts.version != null && opts.version.length > 0 ? ` · v${opts.version}` : '';
+    opts.version != null && opts.version.length > 0
+      ? ` · v${opts.version}`
+      : '';
   return (
     `${STAMP_PREFIX}${version} · commit ${opts.commit} · content ${opts.contentHash}` +
     ` · generated ${opts.generated} · GENERATED FILE — do not edit; run: ${opts.command ?? SYNC_RULES_CMD} -->`

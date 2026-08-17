@@ -50,12 +50,11 @@ import {
   runCriticalRulesSetup,
   stepCriticalRulesConfig,
 } from '../src/critical-rules-setup';
-import {
-  assembleSelected,
-  describeIndexModules,
-} from '../src/plugin/lib/prime';
+import {assembleSelected, describeIndexModules} from '../src/plugin/lib/prime';
 import {
   contentHash,
+  deployedIsDirty,
+  deployedSourceSha,
   projectRulesFilePath,
   readDeployedStamp,
   STAMP_PREFIX,
@@ -212,7 +211,8 @@ function projectFixture(options: ProjectOptions = {}): string {
       ) + '\n';
   }
   if (options.git === true) return initRepoAt(join(sb.path, 'repo'), files);
-  for (const [rel, content] of Object.entries(files)) sb.writeFile(rel, content);
+  for (const [rel, content] of Object.entries(files))
+    sb.writeFile(rel, content);
   return sb.path;
 }
 
@@ -356,10 +356,12 @@ describe('module selection seeding', () => {
     expect(plainRead.modules).not.toContain('rn-only');
     // The detection RESULT is what's recorded, in the config, readable by hand.
     const block = (
-      (readJson(join(rn, 'justin-sdk.config.json'))?.componentConfig as Record<
-        string,
-        unknown
-      >)[CRITICAL_RULES_CONFIG_KEY] as {modules: string[]}
+      (
+        readJson(join(rn, 'justin-sdk.config.json'))?.componentConfig as Record<
+          string,
+          unknown
+        >
+      )[CRITICAL_RULES_CONFIG_KEY] as {modules: string[]}
     ).modules;
     expect(block).toEqual(rnRead.modules);
   });
@@ -419,9 +421,14 @@ describe('the committed artifact', () => {
     expect(body.startsWith('---')).toBe(false);
     expect(body).not.toMatch(/^---\s*$/m);
     expect(body).toContain('# Critical Rules');
-    expect(readDeployedStamp(projectRulesFilePath(root))?.contentHash).toBe(
-      outcome.contentHash,
-    );
+    // The reader contract the staleness check (home-base-si46) will use: the
+    // sha fast-path resolves, and the version field reads 'unknown' BY DESIGN
+    // (no SDK version is stamped, so an SDK release can't move these bytes).
+    const stamp = readDeployedStamp(projectRulesFilePath(root));
+    expect(stamp?.contentHash).toBe(outcome.contentHash);
+    expect(deployedSourceSha(stamp)).toBe(sha.slice(0, 12));
+    expect(deployedIsDirty(stamp)).toBe(false);
+    expect(stamp?.version).toBe('unknown');
   });
 
   test('a second run is a no-op; --force rewrites', () => {
@@ -487,8 +494,15 @@ describe('the committed artifact', () => {
     const binDir = join(root, 'node_modules', '.bin');
     mkdirSync(binDir, {recursive: true});
     const fake = join(binDir, 'prettier');
-    // Marks the file it is handed, so "which prettier ran" is observable.
-    writeFileSync(fake, '#!/bin/sh\nprintf \'\\nLOCAL_PRETTIER_RAN\\n\' >> "$2"\n');
+    // Marks the file it is handed, so "which prettier ran" is observable. It
+    // appends to the LAST argument, not $2: setup-helpers' writeJson also
+    // resolves a local prettier and calls it as `--write --ignore-unknown
+    // <path>`, and a $2-based fake would create a file literally named
+    // '--ignore-unknown' in the cwd (observed).
+    writeFileSync(
+      fake,
+      '#!/bin/sh\nfor f in "$@"; do :; done\nprintf \'\\nLOCAL_PRETTIER_RAN\\n\' >> "$f"\n',
+    );
     chmodSync(fake, 0o755);
 
     expect(
@@ -516,7 +530,10 @@ describe('refreshCriticalRulesArtifact touches ONE path', () => {
     writeFileSync(join(repo, 'src/app.ts'), 'export const a = 2;\n');
     writeFileSync(join(repo, 'scratch.txt'), 'scratch\n');
     const before = statusPaths(repo);
-    const cfgBytes = readFileSync(join(repo, 'justin-sdk.config.json'), 'utf-8');
+    const cfgBytes = readFileSync(
+      join(repo, 'justin-sdk.config.json'),
+      'utf-8',
+    );
     const pkgBytes = readFileSync(join(repo, 'package.json'), 'utf-8');
 
     expect(
@@ -548,7 +565,10 @@ describe('refreshCriticalRulesArtifact touches ONE path', () => {
       modules: ['alpha', 'omega'],
     });
     const before = statusPaths(repo);
-    const cfgBytes = readFileSync(join(repo, 'justin-sdk.config.json'), 'utf-8');
+    const cfgBytes = readFileSync(
+      join(repo, 'justin-sdk.config.json'),
+      'utf-8',
+    );
 
     const exit = await runCriticalRulesSetup({
       projectRoot: repo,
@@ -562,12 +582,12 @@ describe('refreshCriticalRulesArtifact touches ONE path', () => {
     expect(added).toContain(ARTIFACT_REL);
     // …and MORE than the artifact: base-setup's own scaffolding + the config.
     expect(added.length).toBeGreaterThan(1);
-    expect(readFileSync(join(repo, 'justin-sdk.config.json'), 'utf-8')).not.toBe(
-      cfgBytes,
-    );
-    expect((readJson(join(repo, 'justin-sdk.config.json')) ?? {}).version).not.toBe(
-      '0.0.1-fixture',
-    );
+    expect(
+      readFileSync(join(repo, 'justin-sdk.config.json'), 'utf-8'),
+    ).not.toBe(cfgBytes);
+    expect(
+      (readJson(join(repo, 'justin-sdk.config.json')) ?? {}).version,
+    ).not.toBe('0.0.1-fixture');
   });
 
   test('the installer seeds the selection AND writes the artifact in one pass', async () => {
@@ -584,7 +604,8 @@ describe('refreshCriticalRulesArtifact touches ONE path', () => {
     ).toBe(0);
 
     const read = readSelectedModules(root);
-    if (!read.ok) throw new Error(`expected a seeded selection: ${read.message}`);
+    if (!read.ok)
+      throw new Error(`expected a seeded selection: ${read.message}`);
     expect(read.modules).toEqual(['alpha', 'beads-only', 'rn-only', 'omega']);
     const body = readArtifact(root);
     expect(body).toContain('BEADS_ONLY_RULE');
