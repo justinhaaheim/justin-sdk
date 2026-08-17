@@ -479,6 +479,35 @@ export function restorePinSnapshot(
   return restored;
 }
 
+/**
+ * Undo any pin drift the GATES reintroduced, after they have run
+ * (home-base-r47v F2 — the residual gap Dispatch A left open).
+ *
+ * The payload is not the only thing in the pipeline that can move a pin: the
+ * `doctor --fix` gate's fixCommands are `bunx @justinhaaheim/justin-sdk add
+ * <component>`, every installer chains base-setup, and base-setup's
+ * stepJustinSdkConfig stamps `version`/`lastSynced`. Measured direction of the
+ * damage: those subprocesses resolve the TARGET's own pinned SDK, so the
+ * orchestrator's version cannot leak in — but in a repo where a doctor check was
+ * already RED (a green repo runs no fixer and writes nothing) `lastSynced` still
+ * moves to today and `version` to the local pin's version. That would land in
+ * the sweep's single commit, and a run whose entire contract is "the pin did not
+ * move" would have moved it.
+ *
+ * COMPONENT MODE ONLY. In a full sweep the pin is SUPPOSED to move — that run's
+ * whole purpose is the bump — so this must never restore there. Passing the
+ * payload rather than a boolean keeps that decision in one place instead of at
+ * the call site.
+ */
+export function holdPinAfterGates(
+  worktree: string,
+  payload: SweepPayload,
+  beforeGates: PinSnapshot | null,
+): string[] {
+  if (payload.mode !== 'component' || beforeGates == null) return [];
+  return restorePinSnapshot(worktree, beforeGates);
+}
+
 /** Paths from `git status --porcelain`, both rename sides included. */
 export function parsePorcelainPaths(porcelain: string): string[] {
   const paths: string[] = [];
@@ -746,12 +775,31 @@ async function sweepOneRepo(
   say(`  ${DIM}${payload.note}${RESET}`);
 
   // --- Gates ---------------------------------------------------------------
+  // Snapshot AFTER the payload (which already restored the pin), so the gates
+  // are measured against the state the commit is supposed to have.
+  const pinBeforeGates =
+    context.payload.mode === 'component' ? readPinSnapshot(worktreePath) : null;
   const doctor = run(
     ['bunx', '@justinhaaheim/justin-sdk', 'doctor', '--fix'],
     worktreePath,
   );
+  // Before the exit-code check, deliberately (home-base-r47v F2): a red doctor
+  // still ran its fixers, and a worktree an operator is about to inspect must
+  // not have a moved pin sitting in it either.
+  const pinHeldAfterGates = holdPinAfterGates(
+    worktreePath,
+    context.payload,
+    pinBeforeGates,
+  );
+  const pinGateNote =
+    pinHeldAfterGates.length > 0
+      ? ` (post-gate pin held: ${pinHeldAfterGates.join(', ')})`
+      : '';
+  if (pinGateNote !== '') say(`  ${DIM}${pinGateNote.trim()}${RESET}`);
   if (doctor.exitCode !== 0) {
-    return fail('doctor red after update — worktree left for inspection');
+    return fail(
+      `doctor red after update — worktree left for inspection${pinGateNote}`,
+    );
   }
 
   // Normalize SDK-written JSON to the repo's own prettier config — AFTER
@@ -812,7 +860,7 @@ async function sweepOneRepo(
   );
   if (!safety.ok) {
     return {
-      detail: `green + committed on ${SWEEP_BRANCH}, but merge deferred: ${safety.reason}`,
+      detail: `green + committed on ${SWEEP_BRANCH}${pinGateNote}, but merge deferred: ${safety.reason}`,
       outcome: 'merge-pending',
       repo: name,
     };
@@ -841,7 +889,7 @@ async function sweepOneRepo(
   }
   cleanupWorktree();
   return {
-    detail: `updated, merged into ${defaultBranch}, ${pushNote}`,
+    detail: `updated, merged into ${defaultBranch}, ${pushNote}${pinGateNote}`,
     outcome: 'clean',
     repo: name,
   };

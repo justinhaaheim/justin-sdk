@@ -26,7 +26,7 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {existsSync, mkdirSync, readFileSync} from 'fs';
+import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {runBaseSetup} from '../src/base-setup';
@@ -40,6 +40,7 @@ import {
 import {
   applySweepPayload,
   committedConfigComponents,
+  holdPinAfterGates,
   isEnrolledIn,
   parseComponentOption,
   parseConfigComponents,
@@ -528,5 +529,122 @@ describe('runSweep --component', () => {
     expect(out).toContain('would sweep off main');
     expect(out).not.toContain('pin NOT bumped');
     expectUntouched(repo);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The post-gate pin assertion (home-base-r47v F2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Make an existing fixture project a committed git repo, so the assertion can be
+ * about what the sweep's `git add -A` + commit would actually CONTAIN rather than
+ * only about bytes on disk.
+ */
+function commitProject(root: string): void {
+  git(root, ['init', '-q', '-b', 'main', '.']);
+  git(root, ['config', 'user.email', 'test@example.com']);
+  git(root, ['config', 'user.name', 'Test']);
+  const excludes = join(root, '.git', 'controlled-excludes');
+  writeFileSync(excludes, '');
+  git(root, ['config', 'core.excludesFile', excludes]);
+  git(root, ['add', '-A']);
+  git(root, ['commit', '-qm', 'init']);
+}
+
+/** What the sweep's commit would carry, as git itself sees it. */
+function stagedPaths(root: string): string {
+  git(root, ['add', '-A']);
+  return git(root, ['diff', '--cached', '--name-only']);
+}
+
+/**
+ * Reproduce the drift the DOCTOR GATE can reintroduce. doctor --fix's fixCommands
+ * are `bunx @justinhaaheim/justin-sdk add <component>`, i.e. exactly this
+ * installer, and stepJustinSdkConfig inside it is what stamps version/lastSynced.
+ * Running the real gate is out of reach in a test (it hydrates with a real `bun
+ * install` and resolves the SDK from the TARGET's pin), so the drift is
+ * manufactured by the same code the gate would invoke — and each arm asserts the
+ * drift really happened before asserting it was undone.
+ */
+async function driftLikeTheDoctorGate(root: string): Promise<void> {
+  const exitCode = await runComponentByName('gitignore', {
+    force: false,
+    noCommit: true,
+    projectRoot: root,
+    quiet: true,
+  });
+  expect(exitCode).toBe(0);
+}
+
+describe('holdPinAfterGates — drift the GATES reintroduce', () => {
+  test('a doctor-shaped drift after the payload is undone: the commit is pin-neutral', async () => {
+    const project = await enrolledProject();
+    commitProject(project.root);
+    const payload = planSweepPayload('gitignore');
+
+    expect((await applySweepPayload(project.root, payload)).ok).toBe(true);
+    // The snapshot the sweep takes: after the payload, before the gates.
+    const beforeGates = readPinSnapshot(project.root);
+    const pkgBefore = readFileSync(project.pkgPath, 'utf-8');
+    const cfgBefore = readFileSync(project.cfgPath, 'utf-8');
+
+    await driftLikeTheDoctorGate(project.root);
+    // The arm cannot pass vacuously: prove the gate's drift is real first.
+    expect((readJson(project.cfgPath) ?? {}).version).toBe(getSdkVersion());
+    expect((readJson(project.cfgPath) ?? {}).lastSynced).toBe(todayIsoDate());
+
+    const held = holdPinAfterGates(project.root, payload, beforeGates);
+
+    expect(held).toContain('justin-sdk.config.json:version');
+    expect(held).toContain('justin-sdk.config.json:lastSynced');
+    expect(readFileSync(project.pkgPath, 'utf-8')).toBe(pkgBefore);
+    expect(readFileSync(project.cfgPath, 'utf-8')).toBe(cfgBefore);
+    // And the thing that actually matters — what the commit would carry.
+    const staged = stagedPaths(project.root);
+    expect(staged).not.toContain('justin-sdk.config.json');
+    expect(staged).not.toContain('package.json');
+  });
+
+  test('NEGATIVE CONTROL: without the post-gate hold, that drift lands in the commit', async () => {
+    const project = await enrolledProject();
+    commitProject(project.root);
+    const payload = planSweepPayload('gitignore');
+    expect((await applySweepPayload(project.root, payload)).ok).toBe(true);
+
+    await driftLikeTheDoctorGate(project.root);
+
+    // No holdPinAfterGates call — this is the pre-F2 sweep, and the pin moves
+    // inside the commit of a run whose contract says it cannot.
+    const staged = stagedPaths(project.root);
+    expect(staged).toContain('justin-sdk.config.json');
+    expect((readJson(project.cfgPath) ?? {}).version).toBe(getSdkVersion());
+  });
+
+  test('a FULL sweep is never touched: there, moving the pin IS the payload', async () => {
+    const project = await enrolledProject();
+    const beforeGates = readPinSnapshot(project.root);
+
+    // Whatever the full payload's pin step wrote must survive the gates.
+    const cfg = readJson(project.cfgPath) ?? {};
+    cfg.version = '9.9.9';
+    writeJson(project.cfgPath, cfg);
+
+    expect(
+      holdPinAfterGates(project.root, planSweepPayload(null), beforeGates),
+    ).toEqual([]);
+    expect((readJson(project.cfgPath) ?? {}).version).toBe('9.9.9');
+  });
+
+  test('no snapshot means no restore — never a guess at what the pin was', async () => {
+    const project = await enrolledProject();
+    const cfg = readJson(project.cfgPath) ?? {};
+    cfg.version = '9.9.9';
+    writeJson(project.cfgPath, cfg);
+
+    expect(
+      holdPinAfterGates(project.root, planSweepPayload('gitignore'), null),
+    ).toEqual([]);
+    expect((readJson(project.cfgPath) ?? {}).version).toBe('9.9.9');
   });
 });
