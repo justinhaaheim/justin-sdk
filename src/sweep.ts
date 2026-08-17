@@ -33,14 +33,31 @@
  * KNOWN RETRY (home-base-dl0q): the FIRST install in a fresh tree can exit
  * 127 (a github: dep's prepare runs a devDep bun never installed) while
  * leaving the tree usable — hydration is retried exactly once.
+ *
+ * PAYLOAD SCOPE — `--component <name>` (home-base-4qsc, t6a0.21 D2a/D11):
+ * the default payload is "bump the pin + re-apply every component". A rules
+ * edit needs neither of those fleet-wide, so `--component X` narrows the
+ * payload to that ONE component and makes the run PIN-NEUTRAL: no `bun add`
+ * of the pin, no `update` subprocess, and the pin-bearing fields of
+ * package.json / justin-sdk.config.json come out byte-identical. This is a
+ * payload SCOPE filter, not per-repo intelligence — the ratchet contract
+ * (this orchestrator stays dumb) is untouched. D11: the component runs
+ * IN-PROCESS, i.e. the orchestrator's own code, precisely so a rules sweep
+ * does not depend on the SDK version each repo happens to be pinned to.
  */
 
 import {execFileSync, spawnSync} from 'node:child_process';
-import {existsSync, readdirSync} from 'node:fs';
+import {existsSync, readFileSync, readdirSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {basename, join, resolve} from 'node:path';
 
-import {getSdkVersion} from './setup-helpers';
+import {
+  COMPONENT_NAMES,
+  configNameFor,
+  runComponentByName,
+  type ComponentName,
+} from './components';
+import {getSdkVersion, writeJson} from './setup-helpers';
 import {detectPackageManager, setupEnv} from './setup-env';
 
 export const SWEEP_BRANCH = 'worktree-sdk-sweep';
@@ -185,6 +202,283 @@ export function mergeSafety(
   return {ok: true, reason: ''};
 }
 
+// ---------------------------------------------------------------------------
+// Payload scope — `--component <name>` (home-base-4qsc)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the sweep applies inside each repo's worktree.
+ *   full      — the historical payload: bump the pin, then `update` re-applies
+ *               every registered component.
+ * component   — ONE component, run in-process, pin left exactly as found.
+ */
+export type SweepPayload =
+  | {mode: 'full'}
+  | {mode: 'component'; component: ComponentName};
+
+/** Absent `--component` means the historical full payload. Pure. */
+export function planSweepPayload(
+  component: ComponentName | null,
+): SweepPayload {
+  return component == null ? {mode: 'full'} : {component, mode: 'component'};
+}
+
+/**
+ * Validate `--component`. Accepts either the short name (`gitignore`) or the
+ * `-setup` config name (`gitignore-setup`) and normalizes to the short one.
+ * An unknown name is an ERROR, never a silently-full sweep: a typo that fell
+ * through to the default payload would ship an SDK bump to the whole fleet.
+ */
+export function parseComponentOption(
+  raw: string | undefined,
+): {ok: true; component: ComponentName | null} | {ok: false; error: string} {
+  if (raw == null) return {component: null, ok: true};
+  const wanted = raw.trim();
+  for (const name of COMPONENT_NAMES) {
+    if (wanted === name || wanted === configNameFor(name)) {
+      return {component: name, ok: true};
+    }
+  }
+  return {
+    error:
+      `unknown component "${raw}" — nothing was swept. Known components: ` +
+      `${COMPONENT_NAMES.join(', ')}`,
+    ok: false,
+  };
+}
+
+/** The one commit a swept repo gets. Names the component when scoped. */
+export function sweepCommitMessage(payload: SweepPayload): string {
+  if (payload.mode === 'component') {
+    return (
+      `chore(sdk): sweep ${payload.component} — re-apply that component only, ` +
+      'SDK pin unchanged (automated, home-base-4qsc)'
+    );
+  }
+  return 'chore: justin-sdk sweep — bump pin + re-apply components (automated, home-base-j2n7)';
+}
+
+/** Is `component` registered in a repo's justin-sdk.config.json list? Pure. */
+export function isEnrolledIn(
+  components: readonly string[],
+  component: ComponentName,
+): boolean {
+  return components.includes(configNameFor(component));
+}
+
+/**
+ * Components declared by a justin-sdk.config.json's raw text. `ok: false` for
+ * unparseable content — an empty list means "read it, it declares none", and
+ * conflating the two would let a corrupt config read as "not enrolled".
+ */
+export function parseConfigComponents(
+  json: string,
+): {ok: true; components: string[]} | {ok: false; reason: string} {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return {ok: false, reason: 'justin-sdk.config.json is not valid JSON'};
+  }
+  if (typeof parsed !== 'object' || parsed == null) {
+    return {ok: false, reason: 'justin-sdk.config.json is not a JSON object'};
+  }
+  const raw = (parsed as {components?: unknown}).components;
+  if (raw == null) return {components: [], ok: true};
+  if (!Array.isArray(raw) || raw.some((e) => typeof e !== 'string')) {
+    return {
+      ok: false,
+      reason: 'justin-sdk.config.json components is not a string array',
+    };
+  }
+  return {components: raw as string[], ok: true};
+}
+
+/**
+ * The components declared by the config AS COMMITTED ON `branch` — read with
+ * `git show`, not off the working tree, because the sweep branches from that
+ * exact commit. Reading the primary's working copy could disagree (dirty
+ * checkout, different branch) and decide enrollment from a tree that is not
+ * the one being swept.
+ */
+export function committedConfigComponents(
+  repo: string,
+  branch: string,
+): {ok: true; components: string[]} | {ok: false; reason: string} {
+  const shown = git(repo, [
+    'show',
+    `refs/heads/${branch}:justin-sdk.config.json`,
+  ]);
+  if (shown == null) {
+    return {
+      ok: false,
+      reason: `justin-sdk.config.json is not committed on ${branch}`,
+    };
+  }
+  return parseConfigComponents(shown);
+}
+
+// ---------------------------------------------------------------------------
+// Pin neutrality (the semantic contract of --component, t6a0.21 D2a)
+// ---------------------------------------------------------------------------
+
+const SDK_PKG = '@justinhaaheim/justin-sdk';
+
+/**
+ * Every field that records "which SDK version this repo is on". A
+ * component-scoped sweep must leave all of them exactly as found.
+ *
+ * WHY THIS EXISTS AT ALL (measured, not assumed): skipping the pin step and
+ * the `update` subprocess is NOT sufficient. Every component installer chains
+ * `runBaseSetup`, whose stepJustinSdkConfig rewrites `version` to the RUNNING
+ * SDK's version and `lastSynced` to today, and whose stepDepsHasSdk adds the
+ * pin to package.json when absent. Run in-process from the orchestrator, that
+ * would stamp the orchestrator's version into a repo whose package.json still
+ * pins an older one — a config that LIES about the installed SDK. So the
+ * component-mode payload snapshots these fields and puts them back.
+ */
+interface PinField {
+  file: string;
+  /** Containing object path; [] = top level. */
+  parents: readonly string[];
+  key: string;
+}
+
+const PIN_FIELDS: readonly PinField[] = [
+  {file: 'package.json', key: SDK_PKG, parents: ['dependencies']},
+  {file: 'package.json', key: SDK_PKG, parents: ['devDependencies']},
+  {file: 'justin-sdk.config.json', key: 'version', parents: []},
+  {file: 'justin-sdk.config.json', key: 'lastSynced', parents: []},
+];
+
+interface PinFieldValue {
+  /** Did the field itself exist? */
+  present: boolean;
+  /** Did its containing object exist? (Absent parent must not be left as {}.) */
+  parentPresent: boolean;
+  value: unknown;
+}
+
+/** A snapshot of the pin-bearing fields. Keys are `<file>:<parents>.<key>`. */
+export type PinSnapshot = ReadonlyMap<string, PinFieldValue>;
+
+function pinFieldId(field: PinField): string {
+  return `${field.file}:${[...field.parents, field.key].join('.')}`;
+}
+
+function objectAt(
+  root: Record<string, unknown>,
+  parents: readonly string[],
+): Record<string, unknown> | null {
+  let cursor: Record<string, unknown> = root;
+  for (const parent of parents) {
+    const next = cursor[parent];
+    if (typeof next !== 'object' || next == null || Array.isArray(next)) {
+      return null;
+    }
+    cursor = next as Record<string, unknown>;
+  }
+  return cursor;
+}
+
+function readJsonObject(path: string): Record<string, unknown> | null {
+  if (!existsSync(path)) return null;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'));
+    if (typeof parsed !== 'object' || parsed == null || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** Snapshot the pin-bearing fields of a project root. */
+export function readPinSnapshot(root: string): PinSnapshot {
+  const snapshot = new Map<string, PinFieldValue>();
+  for (const field of PIN_FIELDS) {
+    const parsed = readJsonObject(join(root, field.file));
+    const container = parsed == null ? null : objectAt(parsed, field.parents);
+    snapshot.set(pinFieldId(field), {
+      parentPresent: container != null,
+      present: container != null && field.key in container,
+      value: container == null ? undefined : container[field.key],
+    });
+  }
+  return snapshot;
+}
+
+/**
+ * Put every drifted pin field back to its snapshot value. Returns the ids of
+ * the fields it had to restore — a non-empty list is expected in component
+ * mode (base-setup always stamps version/lastSynced) and is worth printing,
+ * because it is the visible evidence the neutrality guard did its job.
+ */
+export function restorePinSnapshot(
+  root: string,
+  before: PinSnapshot,
+): string[] {
+  const restored: string[] = [];
+  const byFile = new Map<string, PinField[]>();
+  for (const field of PIN_FIELDS) {
+    const list = byFile.get(field.file) ?? [];
+    list.push(field);
+    byFile.set(field.file, list);
+  }
+
+  for (const [file, fields] of byFile) {
+    const path = join(root, file);
+    const parsed = readJsonObject(path);
+    if (parsed == null) continue;
+    let modified = false;
+
+    for (const field of fields) {
+      const want = before.get(pinFieldId(field));
+      if (want == null) continue;
+      const container = objectAt(parsed, field.parents);
+      const hasNow = container != null && field.key in container;
+      const valueNow = container == null ? undefined : container[field.key];
+
+      if (want.present) {
+        if (hasNow && valueNow === want.value) continue;
+        // Recreate any missing parent so the value can go back.
+        let cursor = parsed;
+        for (const parent of field.parents) {
+          const next = cursor[parent];
+          if (typeof next !== 'object' || next == null || Array.isArray(next)) {
+            cursor[parent] = {};
+          }
+          cursor = cursor[parent] as Record<string, unknown>;
+        }
+        cursor[field.key] = want.value;
+        modified = true;
+        restored.push(pinFieldId(field));
+        continue;
+      }
+
+      if (!hasNow || container == null) continue;
+      delete container[field.key];
+      // An absent parent must not be left behind as an empty object — that is
+      // still a diff in a run whose whole contract is "the pin did not move".
+      if (!want.parentPresent && Object.keys(container).length === 0) {
+        const owner = objectAt(parsed, field.parents.slice(0, -1));
+        const last = field.parents[field.parents.length - 1];
+        if (owner != null && last != null) delete owner[last];
+      }
+      modified = true;
+      restored.push(pinFieldId(field));
+    }
+
+    // The SDK's own writer, so the restored file lands in the same shape the
+    // installers write (2-space + the repo's OWN prettier when it has one) —
+    // that is what makes "the pin fields came back byte-identical" true of the
+    // whole file and not just of the parsed values.
+    if (modified) writeJson(path, parsed);
+  }
+  return restored;
+}
+
 /** Paths from `git status --porcelain`, both rename sides included. */
 export function parsePorcelainPaths(porcelain: string): string[] {
   const paths: string[] = [];
@@ -200,14 +494,137 @@ export function parsePorcelainPaths(porcelain: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// The payload: what actually gets applied inside a hydrated worktree
+// ---------------------------------------------------------------------------
+
+export type PayloadOutcome =
+  | {ok: true; note: string}
+  | {ok: false; detail: string};
+
+/**
+ * Apply `payload` to an already-hydrated worktree. Exported because this is
+ * the one step `--component` changes, so it is also the step whose pin
+ * neutrality has to be provable against a fixture repo without standing up
+ * the whole sweep (hydration, the doctor/signal subprocesses, git plumbing).
+ */
+export async function applySweepPayload(
+  worktree: string,
+  payload: SweepPayload,
+): Promise<PayloadOutcome> {
+  if (payload.mode === 'component') {
+    // D11: run the orchestrator's OWN component code in-process. The
+    // alternative — `bunx @justinhaaheim/justin-sdk update --component` —
+    // resolves the TARGET's pinned SDK, so it would fail against every repo
+    // until each pin was bumped once, which is the exact coupling this flag
+    // exists to break.
+    const before = readPinSnapshot(worktree);
+    let exitCode: number;
+    try {
+      exitCode = await runComponentByName(payload.component, {
+        force: false,
+        noCommit: true,
+        projectRoot: worktree,
+        quiet: true,
+        skipFetch: false,
+      });
+    } catch (error) {
+      return {
+        detail: `component ${payload.component} threw: ${
+          error instanceof Error ? error.message : String(error)
+        } — worktree left for inspection`,
+        ok: false,
+      };
+    }
+    // Restore even on failure: a half-applied component must not leave a
+    // moved pin behind in the worktree an operator is about to inspect.
+    const restored = restorePinSnapshot(worktree, before);
+    if (exitCode !== 0) {
+      return {
+        detail: `component ${payload.component} failed (exit ${exitCode}) — worktree left for inspection`,
+        ok: false,
+      };
+    }
+    return {
+      note:
+        `applied ${payload.component}` +
+        (restored.length > 0
+          ? ` (pin held: ${restored.join(', ')})`
+          : ' (pin untouched)'),
+      ok: true,
+    };
+  }
+
+  // --- Full payload: pin + update ------------------------------------------
+  // The SWEEP pins the target, deterministically, to ITS OWN version — it IS
+  // the latest SDK. Learned live on the first sweep run (raycast-j-recent,
+  // pinned 0.6.1-era): delegating the bump to the TARGET's `justin-sdk update`
+  // self-update means trusting every ancient self-update code path in the
+  // fleet, and 0.6.1's silently failed to move the pin at all. Pin first,
+  // then run the NEW code with --no-self-update — no gh tag query, no old
+  // code trusted, fleet version === orchestrator version by construction.
+  // The pin is written with the repo's OWN package manager (third live-sweep
+  // finding: raycast-j-recent is an npm repo — Raycast tooling — and `bun
+  // add` there migrated package-lock.json and died in a resolver loop).
+  // Mixing managers is exactly the class of nondeterminism this script
+  // exists to avoid.
+  const pin = `github:justinhaaheim/justin-sdk#v${getSdkVersion()}`;
+  const {packageManager} = detectPackageManager(worktree);
+  const PIN_ARGV: Record<string, string[]> = {
+    bun: ['bun', 'add', '-d', pin],
+    npm: ['npm', 'install', '--save-dev', pin],
+    yarn: ['yarn', 'add', '--dev', pin],
+  };
+  const pinArgv = PIN_ARGV[packageManager ?? 'bun'];
+  if (pinArgv == null) {
+    return {
+      detail: `no pin recipe for package manager ${String(packageManager)}`,
+      ok: false,
+    };
+  }
+  const pinAdd = run(pinArgv, worktree);
+  if (pinAdd.exitCode !== 0) {
+    return {
+      detail: `${pinArgv.slice(0, 2).join(' ')} of ${pin} failed — worktree left for inspection`,
+      ok: false,
+    };
+  }
+  // --allow-dirty because the tree IS dirty by design at this point: the
+  // sweep's own pin bump is sitting uncommitted (fourth live-sweep finding —
+  // update's dirty guard correctly refused). The sweep makes the one commit
+  // itself after the gates.
+  const update = run(
+    [
+      'bunx',
+      '@justinhaaheim/justin-sdk',
+      'update',
+      '--no-self-update',
+      '--allow-dirty',
+      '--quiet',
+    ],
+    worktree,
+  );
+  if (update.exitCode !== 0) {
+    return {
+      detail: 'justin-sdk update failed — worktree left for inspection',
+      ok: false,
+    };
+  }
+  return {note: `pinned ${pin} + re-applied components`, ok: true};
+}
+
+// ---------------------------------------------------------------------------
 // The per-repo pipeline
 // ---------------------------------------------------------------------------
 
 interface SweepContext {
   dryRun: boolean;
+  payload: SweepPayload;
 }
 
-function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
+async function sweepOneRepo(
+  repo: string,
+  context: SweepContext,
+): Promise<RepoResult> {
   const name = basename(repo);
   const fail = (detail: string): RepoResult => ({
     detail,
@@ -229,6 +646,29 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
       repo: name,
     };
   }
+  // Enrollment (component mode only) — decided from the config as COMMITTED on
+  // the branch the sweep will branch from, before anything is created. A repo
+  // that does not register the component is out of scope for this run: a
+  // visible skip, never a silent one and never a failure.
+  if (context.payload.mode === 'component') {
+    const {component} = context.payload;
+    const declared = committedConfigComponents(repo, defaultBranch);
+    if (!declared.ok) {
+      return {
+        detail: `skipped — cannot read enrollment: ${declared.reason}`,
+        outcome: 'skipped',
+        repo: name,
+      };
+    }
+    if (!isEnrolledIn(declared.components, component)) {
+      return {
+        detail: `skipped — not enrolled in ${component}`,
+        outcome: 'skipped',
+        repo: name,
+      };
+    }
+  }
+
   const worktreePath = join(repo, ...SWEEP_WORKTREE_SEGMENTS);
   if (existsSync(worktreePath)) {
     return {
@@ -254,7 +694,10 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
 
   if (context.dryRun) {
     return {
-      detail: `would sweep off ${defaultBranch}`,
+      detail:
+        context.payload.mode === 'component'
+          ? `would apply ${context.payload.component} off ${defaultBranch} (pin untouched)`
+          : `would sweep off ${defaultBranch}`,
       outcome: 'current',
       repo: name,
     };
@@ -297,54 +740,10 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
     return fail('hydration failed twice — worktree left for inspection');
   }
 
-  // --- Update --------------------------------------------------------------
-  // The SWEEP pins the target, deterministically, to ITS OWN version — it IS
-  // the latest SDK. Learned live on the first sweep run (raycast-j-recent,
-  // pinned 0.6.1-era): delegating the bump to the TARGET's `justin-sdk update`
-  // self-update means trusting every ancient self-update code path in the
-  // fleet, and 0.6.1's silently failed to move the pin at all. Pin first,
-  // then run the NEW code with --no-self-update — no gh tag query, no old
-  // code trusted, fleet version === orchestrator version by construction.
-  // The pin is written with the repo's OWN package manager (third live-sweep
-  // finding: raycast-j-recent is an npm repo — Raycast tooling — and `bun
-  // add` there migrated package-lock.json and died in a resolver loop).
-  // Mixing managers is exactly the class of nondeterminism this script
-  // exists to avoid.
-  const pin = `github:justinhaaheim/justin-sdk#v${getSdkVersion()}`;
-  const {packageManager} = detectPackageManager(worktreePath);
-  const PIN_ARGV: Record<string, string[]> = {
-    bun: ['bun', 'add', '-d', pin],
-    npm: ['npm', 'install', '--save-dev', pin],
-    yarn: ['yarn', 'add', '--dev', pin],
-  };
-  const pinArgv = PIN_ARGV[packageManager ?? 'bun'];
-  if (pinArgv == null) {
-    return fail(`no pin recipe for package manager ${String(packageManager)}`);
-  }
-  const pinAdd = run(pinArgv, worktreePath);
-  if (pinAdd.exitCode !== 0) {
-    return fail(
-      `${pinArgv.slice(0, 2).join(' ')} of ${pin} failed — worktree left for inspection`,
-    );
-  }
-  // --allow-dirty because the tree IS dirty by design at this point: the
-  // sweep's own pin bump is sitting uncommitted (fourth live-sweep finding —
-  // update's dirty guard correctly refused). The sweep makes the one commit
-  // itself after the gates.
-  const update = run(
-    [
-      'bunx',
-      '@justinhaaheim/justin-sdk',
-      'update',
-      '--no-self-update',
-      '--allow-dirty',
-      '--quiet',
-    ],
-    worktreePath,
-  );
-  if (update.exitCode !== 0) {
-    return fail('justin-sdk update failed — worktree left for inspection');
-  }
+  // --- Payload (pin + update, or one component in-process) -----------------
+  const payload = await applySweepPayload(worktreePath, context.payload);
+  if (!payload.ok) return fail(payload.detail);
+  say(`  ${DIM}${payload.note}${RESET}`);
 
   // --- Gates ---------------------------------------------------------------
   const doctor = run(
@@ -388,7 +787,7 @@ function sweepOneRepo(repo: string, context: SweepContext): RepoResult {
       worktreePath,
       'commit',
       '-m',
-      'chore: justin-sdk sweep — bump pin + re-apply components (automated, home-base-j2n7)',
+      sweepCommitMessage(context.payload),
     ],
     repo,
   );
@@ -458,9 +857,24 @@ export interface SweepOptions {
   repos?: string[];
   /** Discovery root. Default ~/Dev. */
   root?: string;
+  /**
+   * Scope the payload to ONE component (short or `-setup` name) and leave the
+   * SDK pin alone. Unknown name = the whole run refuses, before any repo is
+   * touched. Default (absent) = the historical pin-bump-and-re-apply-all sweep.
+   */
+  component?: string;
 }
 
-export function runSweep(options: SweepOptions = {}): number {
+export async function runSweep(options: SweepOptions = {}): Promise<number> {
+  const parsedComponent = parseComponentOption(options.component);
+  if (!parsedComponent.ok) {
+    // Refuse the ENTIRE run: falling through to the default payload on a typo
+    // would ship an SDK pin bump to the whole fleet.
+    say(`${RED}✗ ${parsedComponent.error}${RESET}`);
+    return 1;
+  }
+  const payload = planSweepPayload(parsedComponent.component);
+
   const root = resolve(options.root ?? join(homedir(), 'Dev'));
   const explicit = (options.repos ?? []).map((repoPath) => resolve(repoPath));
   const repos = explicit.length > 0 ? explicit : discoverSweepRepos(root);
@@ -469,12 +883,17 @@ export function runSweep(options: SweepOptions = {}): number {
   say(
     `${BOLD}justin-sdk sweep${RESET} — ${repos.length} repo(s)` +
       `${explicit.length > 0 ? ' (explicit)' : ` discovered under ${root}`}` +
+      `${
+        payload.mode === 'component'
+          ? ` ${DIM}· component: ${payload.component} (SDK pin NOT bumped)${RESET}`
+          : ''
+      }` +
       `${dryRun ? ` ${DIM}(dry-run)${RESET}` : ''}`,
   );
 
   const results: RepoResult[] = [];
   for (const repo of repos) {
-    results.push(sweepOneRepo(repo, {dryRun}));
+    results.push(await sweepOneRepo(repo, {dryRun, payload}));
   }
 
   say(`\n${BOLD}Summary${RESET}`);

@@ -11,6 +11,7 @@ import yargs from 'yargs';
 import {hideBin} from 'yargs/helpers';
 
 import {ADD_TARGETS, PRESET_NAMES, runAdd} from './add';
+import {COMPONENT_NAMES} from './components';
 import {runDoctor} from './doctor';
 import {runEasUpdate} from './eas-update';
 import {runFix} from './fix';
@@ -566,10 +567,17 @@ void yargs(hideBin(process.argv))
         .option('root', {
           type: 'string',
           describe: 'Discovery root (default ~/Dev)',
+        })
+        .option('component', {
+          type: 'string',
+          choices: [...COMPONENT_NAMES],
+          describe:
+            'Scope the payload to ONE component and leave the SDK pin alone: no pin bump, no `update`, no other component re-applied — so a rules/config edit does not ship an SDK upgrade to the whole fleet. Repos not enrolled in the component are skipped. Same gates either way. Unknown name refuses the whole run.',
         }),
-    (argv) => {
+    async (argv) => {
       process.exit(
-        runSweep({
+        await runSweep({
+          component: argv.component,
           dryRun: argv['dry-run'],
           repos: argv.repo,
           root: argv.root,
