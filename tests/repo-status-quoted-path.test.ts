@@ -69,6 +69,20 @@ afterEach(() => {
   while (sandboxes.length > 0) sandboxes.pop()?.cleanup();
 });
 
+/**
+ * Explicit per-test timeout for the arms that build the fixture repo and then
+ * shell out to git many times (home-base-r47v F3).
+ *
+ * WHY: bun's default is 5s, and these are the slowest tests in the suite —
+ * measured unloaded at 1.6–2.4s each, and one of them was observed taking 5.7s
+ * during a full-suite run on a busy machine (it passes in isolation every time).
+ * A ~2.4x load factor on a 2.4s test is not a bug worth chasing; a wall-clock
+ * failure that only appears under load is a flake that trains people to re-run
+ * the suite instead of reading it. The generous number is deliberate: these
+ * assertions are about git's behaviour, never about speed.
+ */
+const GIT_FIXTURE_TIMEOUT_MS = 30_000;
+
 function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, {cwd, encoding: 'utf-8', stdio: 'pipe'});
 }
@@ -426,7 +440,7 @@ describe('a deletion the baseline did NOT take never reads as reflected', () => 
     const plan = planFor(fx.repo);
     expect(plan.safe.map((a) => a.branch)).not.toContain('drop-quoted');
     expect(plan.needsJudgment.map((a) => a.branch)).toContain('drop-quoted');
-  });
+  }, GIT_FIXTURE_TIMEOUT_MS);
 });
 
 // ---------------------------------------------------------------------------
@@ -451,7 +465,7 @@ describe('deletions the baseline DID take still read as reflected', () => {
       disposition: 'merged',
       provenSafe: true,
     });
-  });
+  }, GIT_FIXTURE_TIMEOUT_MS);
 
   test('the ASCII control is still merged, and still acted on', () => {
     const sb = track(createSandbox());
@@ -477,7 +491,7 @@ describe('deletions the baseline DID take still read as reflected', () => {
         .map((a) => a.branch)
         .sort(),
     ).toEqual(['drop-gone', 'genuine-delete']);
-  });
+  }, GIT_FIXTURE_TIMEOUT_MS);
 });
 
 // ---------------------------------------------------------------------------
@@ -515,7 +529,7 @@ describe('a rename resolves to the post-state path', () => {
 
     const row = byName(rowsFor(fx.repo), 'rename-then-delete');
     expect(row.provenSafe).toBe(false);
-  });
+  }, GIT_FIXTURE_TIMEOUT_MS);
 });
 
 // ---------------------------------------------------------------------------
