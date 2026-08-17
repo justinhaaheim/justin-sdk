@@ -17,6 +17,7 @@
 import {runBaseSetup} from './base-setup';
 import {runBeadsSetup} from './beads-setup';
 import {runClaudeMdSetup} from './claude-md-setup';
+import {runCriticalRulesSetup} from './critical-rules-setup';
 import {runEasSetup} from './eas-setup';
 import {runEslintSetup} from './eslint-setup';
 import {runGhActionsSetup} from './gh-actions-setup';
@@ -50,6 +51,7 @@ export const COMPONENT_NAMES = [
   'beads',
   'eas',
   'time-check',
+  'critical-rules',
 ] as const;
 
 export type ComponentName = (typeof COMPONENT_NAMES)[number];
@@ -62,12 +64,16 @@ export type ComponentName = (typeof COMPONENT_NAMES)[number];
  *   - time-check: its hook fires on EVERY prompt, so installing it everywhere
  *     "but disabled" would cost a process spawn per prompt in every project to
  *     print nothing. Opt in where the wall-clock actually matters.
+ *   - critical-rules: it commits a generated rules file INTO the repo, and four
+ *     enrolled repos are public. Which rules a repo publishes is a deliberate
+ *     per-repo decision, not something a preset should make (t6a0.21 D6/D12).
  * A future app-only component (e.g. `detox`) joins this set.
  */
 const OPT_IN_ONLY: ReadonlySet<ComponentName> = new Set([
   'base-setup',
   'eas',
   'time-check',
+  'critical-rules',
 ]);
 
 /**
@@ -140,6 +146,7 @@ const RUNNERS: Record<
     }),
   eas: (a) => runEasSetup(base(a)),
   'time-check': (a) => runTimeCheckSetup(base(a)),
+  'critical-rules': (a) => runCriticalRulesSetup(base(a)),
 };
 
 /** Run a component by its short name. */

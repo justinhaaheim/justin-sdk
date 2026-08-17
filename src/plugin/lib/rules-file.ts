@@ -10,7 +10,7 @@
  *   <!-- justin-sdk rules · v0.4.14 · commit cc6573bb0834 · content 84bf3e47bf75 · generated 2026-… · GENERATED FILE — do not edit; run: bunx github:justinhaaheim/justin-sdk sync-rules -->
  */
 
-import {execSync} from 'child_process';
+import {execFileSync, execSync} from 'child_process';
 import {createHash} from 'crypto';
 import {existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
@@ -36,20 +36,43 @@ export function prettierEnabled(): boolean {
 }
 
 /**
- * Format markdown with `bunx prettier --write <tmpfile>`. Uses bunx (not an
- * `import prettier`) ON PURPOSE: bunx self-fetches prettier, so this runs in the
- * plugin cache which has no node_modules — importing prettier would throw there.
- * Returns the input unchanged when disabled or on any failure (offline, etc.),
- * so it never blocks. Run BEFORE hashing so trivial formatting normalizes out.
+ * Format markdown with prettier. By default `bunx prettier --write <tmpfile>`,
+ * using bunx (not an `import prettier`) ON PURPOSE: bunx self-fetches prettier,
+ * so this runs in the plugin cache which has no node_modules — importing
+ * prettier would throw there. Returns the input unchanged when disabled or on
+ * any failure (offline, etc.), so it never blocks. Run BEFORE hashing so
+ * trivial formatting normalizes out.
+ *
+ * `options.binary` runs THAT prettier instead (config still resolved by
+ * prettier itself, from the temp file's location — so pass a config path via
+ * the binary's own project if it matters). The committed per-repo artifact uses
+ * this to format with the TARGET REPO'S OWN prettier: that artifact is checked
+ * by the repo's `signal`/lint-staged, and a newer bunx prettier formatting it
+ * differently from the repo's pinned one would fail that gate. Same reasoning
+ * as `writeJson` in setup-helpers (Justin's 2026-08-08 ruling: always format
+ * what we write with the repo's own prettier). Resolution of the binary lives
+ * OUTSIDE this module on purpose — src/plugin/lib runs from the plugin cache
+ * and must not import setup-helpers, which isn't shipped there.
  */
-export function prettierMarkdown(markdown: string): string {
+export function prettierMarkdown(
+  markdown: string,
+  options?: {binary?: string | null},
+): string {
   if (!prettierEnabled()) return markdown.trimEnd();
   let dir: string | null = null;
   try {
     dir = mkdtempSync(join(tmpdir(), 'jsdk-prettier-'));
     const file = join(dir, 'rules.md');
     writeFileSync(file, markdown);
-    execSync(`bunx prettier --write ${file}`, {stdio: 'pipe', timeout: 60_000});
+    const binary = options?.binary;
+    if (binary != null && binary.length > 0) {
+      execFileSync(binary, ['--write', file], {stdio: 'pipe', timeout: 60_000});
+    } else {
+      execSync(`bunx prettier --write ${file}`, {
+        stdio: 'pipe',
+        timeout: 60_000,
+      });
+    }
     return readFileSync(file, 'utf-8').trimEnd();
   } catch {
     return markdown.trimEnd();
@@ -69,6 +92,10 @@ export function prettierMarkdown(markdown: string): string {
 export const SDK_BUNX = 'bunx github:justinhaaheim/justin-sdk';
 export const SYNC_RULES_CMD = `${SDK_BUNX} sync-rules`;
 export const PRIME_FULL_CMD = `${SDK_BUNX} prime --full`;
+/** The pull channel for the COMMITTED per-repo artifact (t6a0.21 D4). Lands in
+ * home-base-q1hp — stamped into artifacts now so the file names its own
+ * regeneration command from day one. */
+export const RULES_UPDATE_CMD = `${SDK_BUNX} rules-update`;
 
 /** ~/.claude/rules/justin-sdk/critical-rules.md — the user-level Claude Code
  * rules file that autoloads every session. */
@@ -80,6 +107,26 @@ export function rulesFilePath(): string {
     'justin-sdk',
     'critical-rules.md',
   );
+}
+
+/**
+ * Path segments of the COMMITTED per-repo rules artifact, relative to a project
+ * root: `.claude/rules/justin-sdk/critical-rules.md` (t6a0.21 D1/D13).
+ *
+ * `.claude/rules/` is a first-class Claude Code autoload location (project
+ * scope, recursive, same priority as CLAUDE.md, no truncation cap), and the
+ * `justin-sdk/` subdirectory is tool-owned by contract — which is what lets
+ * `rules-update` and the sweep overwrite anything under it.
+ */
+export const PROJECT_RULES_SEGMENTS = [
+  '.claude',
+  'rules',
+  'justin-sdk',
+  'critical-rules.md',
+] as const;
+
+export function projectRulesFilePath(projectRoot: string): string {
+  return join(projectRoot, ...PROJECT_RULES_SEGMENTS);
 }
 
 export interface RulesStamp {
@@ -108,15 +155,31 @@ export function readDeployedStamp(file: string): RulesStamp | null {
   };
 }
 
+/**
+ * Build the stamp line.
+ *
+ * `version` is OPTIONAL and the committed per-repo artifact deliberately omits
+ * it: stamping an SDK version there would make an SDK release change the bytes
+ * of a committed file in twelve repos — the exact coupling `sweep --component`
+ * exists to break. That artifact's identity is (prompts commit, content hash);
+ * `readDeployedStamp` reports version 'unknown' for it, correctly.
+ *
+ * `command` names the regeneration command for the file being stamped —
+ * `sync-rules` for the user-level file, `rules-update` for the committed one.
+ * A wrong command here would send an editor to regenerate a DIFFERENT file.
+ */
 export function buildStamp(opts: {
-  version: string;
+  version?: string;
   commit: string; // sha, sha-dirty, or 'unknown'
   contentHash: string;
-  generated: string; // ISO
+  generated: string; // ISO timestamp or YYYY-MM-DD date
+  command?: string;
 }): string {
+  const version =
+    opts.version != null && opts.version.length > 0 ? ` · v${opts.version}` : '';
   return (
-    `${STAMP_PREFIX} · v${opts.version} · commit ${opts.commit} · content ${opts.contentHash}` +
-    ` · generated ${opts.generated} · GENERATED FILE — do not edit; run: ${SYNC_RULES_CMD} -->`
+    `${STAMP_PREFIX}${version} · commit ${opts.commit} · content ${opts.contentHash}` +
+    ` · generated ${opts.generated} · GENERATED FILE — do not edit; run: ${opts.command ?? SYNC_RULES_CMD} -->`
   );
 }
 

@@ -27,7 +27,10 @@ describe('components: ordering', () => {
     expect(DEPENDENCY_ORDER).toEqual(
       COMPONENT_NAMES.filter(
         (name) =>
-          name !== 'base-setup' && name !== 'eas' && name !== 'time-check',
+          name !== 'base-setup' &&
+          name !== 'eas' &&
+          name !== 'time-check' &&
+          name !== 'critical-rules',
       ),
     );
     expect(DEPENDENCY_ORDER).not.toContain('base-setup');
@@ -38,6 +41,13 @@ describe('components: ordering', () => {
     // every project just to print nothing.
     expect(COMPONENT_NAMES).toContain('time-check');
     expect(DEPENDENCY_ORDER).not.toContain('time-check');
+  });
+
+  test('critical-rules is opt-in only — it commits rules into the repo', () => {
+    // Four enrolled repos are public; which rules a repo publishes is a
+    // deliberate per-repo decision, never a preset's (t6a0.21 D6/D12).
+    expect(COMPONENT_NAMES).toContain('critical-rules');
+    expect(DEPENDENCY_ORDER).not.toContain('critical-rules');
   });
 
   test('DEPENDENCY_ORDER matches the documented init/all order', () => {

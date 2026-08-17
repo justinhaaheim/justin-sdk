@@ -1341,6 +1341,11 @@ function makeHuskyChecks(projectRoot: string): CheckNode[] {
 // Component registry
 // ---------------------------------------------------------------------------
 
+// A component with no entry here simply has no doctor checks — see the
+// skip-with-no-warning loop in runDoctor.
+// doctor check: home-base-si46 — 'critical-rules-setup' gets its staleness
+// check (local NEVER writes + a systemMessage naming rules-diff/rules-update;
+// remote --fix writes) in that dispatch, not this one.
 const componentCheckFactories: Record<
   string,
   (projectRoot: string) => CheckNode[]

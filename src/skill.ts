@@ -38,6 +38,8 @@ const COMPONENT_BLURBS: Record<ComponentName, string> = {
   beads:
     'Issue tracking via beads. Installs the tool, seeds .beads/, and adds the workflow prompt.',
   'claude-md': 'Generates/refreshes CLAUDE.md with the standard skeleton.',
+  'critical-rules':
+    'Writes the COMMITTED rules artifact .claude/rules/justin-sdk/critical-rules.md (autoloaded at CLAUDE.md priority, no truncation cap, travels to web/CI/fresh clones). Module selection is opt-in per repo: componentConfig["critical-rules"].modules. Regenerate with `rules-update`; propagate with `sweep --component critical-rules`.',
   eas: 'Expo/EAS build + update + ship scripts. App-only — wrong for a node CLI.',
   eslint: 'Shared ESLint config wired to the project.',
   'gh-actions': 'GitHub Actions workflows (signal on PR).',

@@ -96,11 +96,25 @@ describe('parseComponentOption', () => {
   });
 
   test('an unknown name is an error naming the input and the valid names', () => {
-    const result = parseComponentOption('critical-rules');
+    const result = parseComponentOption('no-such-component');
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
-    expect(result.error).toContain('critical-rules');
+    expect(result.error).toContain('no-such-component');
     expect(result.error).toContain('gitignore');
+  });
+
+  test('critical-rules validates — the component this flag exists for', () => {
+    // `sweep --component critical-rules` IS the push channel of t6a0.21 D2a.
+    // Dispatch A wrote this arm as an unknown-name case because the component
+    // did not exist yet (home-base-we85 registered it).
+    expect(parseComponentOption('critical-rules')).toEqual({
+      component: 'critical-rules',
+      ok: true,
+    });
+    expect(parseComponentOption('critical-rules-setup')).toEqual({
+      component: 'critical-rules',
+      ok: true,
+    });
   });
 
   test('an empty string is an error, NOT a silent full sweep', () => {

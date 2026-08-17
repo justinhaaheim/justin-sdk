@@ -35,7 +35,7 @@ import {
 } from 'fs';
 import {dirname, join} from 'path';
 
-import {assemble} from './plugin/lib/prime';
+import {assemble, isDirtyCheckout} from './plugin/lib/prime';
 import {
   buildStamp,
   contentHash,
@@ -106,23 +106,6 @@ function computeVersion(sourceDir: string): string | null {
   return null;
 }
 
-/** True if the source checkout has uncommitted changes (managed clone never
- * does; an overridden --prompts-dir might). */
-function isDirty(sourceDir: string): boolean {
-  try {
-    const out = execSync('git status --porcelain', {
-      cwd: sourceDir,
-      encoding: 'utf-8',
-      stdio: 'pipe',
-      timeout: 8000,
-    });
-    // dynamic-version.local.json is gitignored; anything else = dirty.
-    return out.trim().length > 0;
-  } catch {
-    return false;
-  }
-}
-
 export interface SyncRulesOptions {
   quiet?: boolean;
   /** Rewrite even when the content hash is unchanged. */
@@ -171,7 +154,7 @@ export function runSyncRules(options: SyncRulesOptions = {}): number {
     warn('version-manager unavailable — stamping version as "unknown"');
   }
   const shaShort = sourceSha != null ? sourceSha.slice(0, 12) : 'unknown';
-  const commit = `${shaShort}${sourceSha != null && isDirty(sourceDir) ? '-dirty' : ''}`;
+  const commit = `${shaShort}${sourceSha != null && isDirtyCheckout(sourceDir) ? '-dirty' : ''}`;
   const stamp = buildStamp({
     version,
     commit,

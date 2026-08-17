@@ -94,6 +94,12 @@ Available components:
   CLAUDE.md reference. Installed by default when you run any SDK command.
 - **beads-setup** — beads_rust issue tracker via mise, AGENTS.md, CLAUDE.md
   integration via `@docs/prompts/BEADS.md` pattern. Add via `add beads`.
+- **critical-rules-setup** — writes the committed rules artifact
+  `.claude/rules/justin-sdk/critical-rules.md`, assembled from the prompts repo
+  with an opt-in module list recorded in
+  `componentConfig["critical-rules"].modules`. Opt-in only; add via
+  `add critical-rules`, regenerate with `rules-update`, propagate with
+  `sweep --component critical-rules`.
 
 Adding a component installs it AND registers it for future doctor checks.
 
