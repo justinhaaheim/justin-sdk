@@ -244,8 +244,14 @@ describe('the repo-rules segment of the systemMessage', () => {
     expect(detail.indexOf('rules-diff')).toBeLessThan(
       detail.indexOf('rules-update'),
     );
-    // Both spelled out as `justin-sdk`, never a bare `j`/`jsdk` bin.
-    expect(detail).toContain('bunx github:justinhaaheim/justin-sdk rules-diff');
+    // Spelled out as `justin-sdk`, never a bare `j`/`jsdk` bin — and LOCAL-FIRST,
+    // not a github: spec (home-base-r47v F4): this notice only ever appears inside
+    // an enrolled repo, which has a pin to resolve, and bunx caches github specs
+    // on the spec string — so that form can serve a stale binary to answer a
+    // question about staleness.
+    expect(detail).toContain('bunx @justinhaaheim/justin-sdk rules-diff');
+    expect(detail).toContain('bunx @justinhaaheim/justin-sdk rules-update');
+    expect(detail).not.toContain('github:');
   });
 
   test('missing: names rules-update', () => {

@@ -66,6 +66,7 @@ import {
   readDeployedStamp,
   RULES_DIFF_CMD,
   RULES_UPDATE_CMD,
+  SDK_BUNX,
 } from './plugin/lib/rules-file';
 import {artifactBody} from './rules-diff';
 import {findLocalPrettier} from './setup-helpers';
@@ -114,6 +115,19 @@ export function isRulesDriftProblem(status: RulesDriftStatus): boolean {
  * these strings are the whole product of the feature: a notice that names the
  * wrong command (or names `rules-update` for a hand-edited file, where it
  * reports "already up to date" and changes nothing) is worse than no notice.
+ *
+ * THE SPELLING IS LOCAL-FIRST, AND THAT IS LOAD-BEARING (home-base-r47v F4).
+ * `RULES_DIFF_CMD`/`RULES_UPDATE_CMD` are `bunx @justinhaaheim/justin-sdk …`
+ * rather than `bunx github:…`, because every state below except not-enrolled is
+ * reached only INSIDE a repo enrolled in critical-rules — which by construction
+ * has the SDK pinned as a devDep at a version carrying these commands, resolved
+ * locally in ~73ms with no network (measured, home-base-j2n7). The github: form
+ * would be worse than slow: bunx keys its github cache on the SPEC STRING, not
+ * the resolved commit, so an untagged spec can silently serve the commit it first
+ * fetched — a staleness command answering from a stale binary.
+ *
+ * not-enrolled is the one exception and keeps `github:`: that repo has no pin to
+ * resolve, which is exactly what `add critical-rules` is about to give it.
  */
 export function rulesDriftAdvice(status: RulesDriftStatus): string | null {
   switch (status) {
@@ -128,7 +142,9 @@ export function rulesDriftAdvice(status: RulesDriftStatus): string | null {
     case 'cannot-check':
       return `staleness UNKNOWN — fix the source (connectivity/config) and re-check with \`${RULES_DIFF_CMD}\``;
     case 'not-enrolled':
-      return 'run `bunx github:justinhaaheim/justin-sdk add critical-rules` to enroll this repo';
+      // github:, not the local spelling — see the header: an unenrolled repo may
+      // have no SDK devDep for `bunx @justinhaaheim/…` to resolve.
+      return `run \`${SDK_BUNX} add critical-rules\` to enroll this repo`;
     case 'in-sync':
       return null;
   }

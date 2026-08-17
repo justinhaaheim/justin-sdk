@@ -82,24 +82,47 @@ export function prettierMarkdown(
 }
 
 /**
- * Universal invocations. `@justinhaaheim/justin-sdk` is a GitHub package (not on
- * npm), so `bunx @justinhaaheim/justin-sdk …` only resolves in a project that
- * has it as a devDep. The `github:` spec works from ANY project, so it's what we
- * tell the user to run. (Where the devDep exists, the scoped form also works —
+ * Universal invocations — the spelling for commands that must run from ANY
+ * project. `@justinhaaheim/justin-sdk` is a GitHub package (not on npm), so
+ * `bunx @justinhaaheim/justin-sdk …` only resolves in a project that has it as a
+ * devDep. The `github:` spec works everywhere, so it's what we tell the user to
+ * run when we cannot know they have a pin. (Where the devDep exists, prefer
+ * SDK_BUNX_LOCAL below — the scoped form also works —
  * and the BARE name is never used anywhere: it falls through to the npm registry,
  * home-base-2qhw.)
  */
 export const SDK_BUNX = 'bunx github:justinhaaheim/justin-sdk';
 export const SYNC_RULES_CMD = `${SDK_BUNX} sync-rules`;
 export const PRIME_FULL_CMD = `${SDK_BUNX} prime --full`;
+
+/**
+ * The LOCAL-FIRST spelling, for commands whose only audience is someone sitting
+ * in a repo that is already ENROLLED (home-base-r47v F4).
+ *
+ * Enrollment is what makes this correct by construction: an enrolled repo has
+ * the SDK as a devDep at a pin new enough to carry these commands, and `bunx
+ * @justinhaaheim/justin-sdk …` resolves that local copy in ~73ms with no network
+ * (measured, home-base-j2n7).
+ *
+ * The `github:` spelling is actively WRONG here, which is why the two spellings
+ * are separate constants rather than one: bunx caches a github spec under a hash
+ * of the SPEC STRING, not the commit it resolved to, so an untagged
+ * `github:…/justin-sdk rules-diff` can silently serve whatever commit it first
+ * fetched (also j2n7). Serving a stale binary is the single worst property a
+ * command whose entire job is answering "are my rules current?" could have.
+ *
+ * `github:` remains right for BOOTSTRAP — sync-rules, prime, `add <component>` —
+ * which must run in projects that have no pin to resolve.
+ */
+export const SDK_BUNX_LOCAL = 'bunx @justinhaaheim/justin-sdk';
 /** The pull channel for the COMMITTED per-repo artifact (t6a0.21 D4). Lands in
  * home-base-q1hp — stamped into artifacts now so the file names its own
  * regeneration command from day one. */
-export const RULES_UPDATE_CMD = `${SDK_BUNX} rules-update`;
+export const RULES_UPDATE_CMD = `${SDK_BUNX_LOCAL} rules-update`;
 /** "What am I missing?" — the read half of the same channel (home-base-q1hp).
  * Lives here, next to its sibling, so the session notice and the doctor check
  * cannot name it two different ways (home-base-si46). */
-export const RULES_DIFF_CMD = `${SDK_BUNX} rules-diff`;
+export const RULES_DIFF_CMD = `${SDK_BUNX_LOCAL} rules-diff`;
 
 /** ~/.claude/rules/justin-sdk/critical-rules.md — the user-level Claude Code
  * rules file that autoloads every session. */

@@ -492,6 +492,24 @@ describe('contract', () => {
     }
   });
 
+  test('advice is LOCAL-FIRST inside an enrolled repo, github: only to enroll', () => {
+    // home-base-r47v F4. Every problem state except not-enrolled is reachable
+    // ONLY in a repo that already pins the SDK, so the local alias resolves (fast,
+    // no network) — and a github: spec would be worse than slow here, because bunx
+    // caches those on the spec STRING and can serve the first commit it ever
+    // fetched. A staleness notice must not be answered by a stale binary.
+    for (const status of ALL) {
+      const advice = rulesDriftAdvice(status);
+      if (advice == null || status === 'not-enrolled') continue;
+      expect(advice).toContain('bunx @justinhaaheim/justin-sdk');
+      expect(advice).not.toContain('github:');
+    }
+    // The one exception, and why: an unenrolled repo has no pin to resolve.
+    expect(rulesDriftAdvice('not-enrolled')).toContain(
+      'bunx github:justinhaaheim/justin-sdk add critical-rules',
+    );
+  });
+
   test('checking a stale repo writes nothing inside it', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({modules: ['alpha', 'omega']});
