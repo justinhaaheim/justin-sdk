@@ -229,8 +229,13 @@ export interface RefreshOptions {
  * decided no refresh was needed) is deliberately NOT here: this function always
  * forces a refresh, so anything short of a completed one means we could not
  * verify the source, and unverified is not permission to write (D15).
+ *
+ * Exported for `rules-diff` (home-base-q1hp), which forces a refresh for the
+ * same reason and must reach the same verdict — ONE definition of "verified", so
+ * the read path and the write path cannot drift into disagreeing about whether
+ * the source was checked.
  */
-function refreshIsVerified(refresh: SourceRefresh): boolean {
+export function refreshIsVerified(refresh: SourceRefresh): boolean {
   return refresh === 'override' || refresh === 'cloned' || refresh === 'pulled';
 }
 

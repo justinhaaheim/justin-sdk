@@ -20,6 +20,8 @@ import {runMigrateToPrime} from './migrate-to-prime';
 import {runPrime} from './plugin/lib/prime';
 import {repoStatusCommand} from './repo-status/repo-status';
 import {DEFAULT_OPTIONS as RALPH_DEFAULTS, runRalph} from './ralph';
+import {runRulesDiff} from './rules-diff';
+import {runRulesUpdate} from './rules-update';
 import {runSkill} from './skill';
 import {runSyncRules} from './sync-rules';
 import {runTimeCheck} from './time-check';
@@ -495,6 +497,34 @@ void yargs(hideBin(process.argv))
         }),
     (argv) => {
       process.exit(runSyncRules({force: argv.force, quiet: argv.quiet}));
+    },
+  )
+  .command(
+    'rules-update',
+    'Regenerate this repo’s COMMITTED rules artifact (.claude/rules/justin-sdk/critical-rules.md) from the managed prompts clone and commit it on the CURRENT branch. Commits nothing but that folder — dirt elsewhere is never staged. Refuses (without writing) on a detached HEAD, a merge/rebase/cherry-pick in progress, a repo not enrolled in critical-rules, or a prompts clone it could not refresh. No merge, no push, no branch switching.',
+    (y) =>
+      y
+        .option('force', {
+          type: 'boolean',
+          default: false,
+          describe:
+            'Regenerate even when the content hash says the artifact is current (use when the file was edited by hand)',
+        })
+        .option('quiet', {
+          type: 'boolean',
+          default: false,
+          describe: 'Suppress non-error output',
+        }),
+    (argv) => {
+      process.exit(runRulesUpdate({force: argv.force, quiet: argv.quiet}));
+    },
+  )
+  .command(
+    'rules-diff',
+    'What am I missing? Print a unified diff between this repo’s committed rules artifact (what this session loaded at launch) and the freshly assembled canonical content, so new guidance can be read and acted on without restarting. Read-only. Exit 0 = in sync (said explicitly), 1 = a diff was printed, 2 = could not check (never reported as in sync).',
+    (y) => y,
+    () => {
+      process.exit(runRulesDiff());
     },
   )
   .command(
