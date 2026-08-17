@@ -40,6 +40,7 @@ import {
   refreshCriticalRulesArtifact,
   refreshSucceeded,
 } from '../src/critical-rules-setup';
+import {runDoctor} from '../src/doctor';
 import {projectRulesFilePath} from '../src/plugin/lib/rules-file';
 import {
   checkRulesDrift,
@@ -642,26 +643,142 @@ describe('doctor RULES_ARTIFACT check', () => {
     expect(commitCount(repo)).toBe(commits);
   });
 
-  test('KNOWN HOLE (question on home-base-si46): --fix --yes does NOT write yet', () => {
-    // The scoped behavior is that the REMOTE session-start path (doctor --fix
-    // --yes) writes the artifact without committing it. check-runner has no
-    // in-process function fixer — its fix loop only runs `sh -c <fixCommand>` —
-    // and both candidate shell commands are wrong (`rules-update` commits;
-    // `add critical-rules` re-runs the installer), so this check ships with no
-    // fixCommand at all. This test pins the CURRENT truth so the gap is visible
-    // rather than assumed, and will fail the day a fixer is wired — at which
-    // point it should be replaced by the write-but-do-not-commit assertions.
+});
+
+// ---------------------------------------------------------------------------
+// The remote write path — `doctor --fix --yes` (home-base-r47v F1)
+// ---------------------------------------------------------------------------
+
+/**
+ * The REMOTE session-start path is `runDoctor(target, {fix: true, yes: true})`
+ * (setup-env-command.ts), and D4's contract for it is exactly one sentence: WRITE
+ * the artifact, do NOT commit it — "the write is either committed with the
+ * session work or discarded harmlessly". So every arm here asserts both halves;
+ * a fixer that wrote AND committed would satisfy "the file is current" while
+ * silently authoring commits in a repo nobody asked it to touch.
+ *
+ * The fixer is an in-process function (check-runner's `fixFn`), which is also
+ * why the last arm runs `runDoctor` DIRECTLY with a cwd that is not the repo: a
+ * shell fixCommand is spawned in `process.cwd()`, so it would have fixed the
+ * wrong directory (home-base-6dni) and no CLI-subprocess test — where cwd IS the
+ * repo — could ever have noticed.
+ */
+describe('doctor --fix --yes writes the artifact without committing it', () => {
+  function doctorFix(repo: string): {status: number | null; out: string} {
+    const result = spawnSync(
+      process.execPath,
+      [CLI, 'doctor', '--fix', '--yes'],
+      {cwd: repo, encoding: 'utf-8', env: {...process.env}},
+    );
+    return {
+      out: `${result.stdout ?? ''}${result.stderr ?? ''}`,
+      status: result.status,
+    };
+  }
+
+  test('a MISSING artifact is written, left uncommitted, and the re-check is green', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
       modules: ['alpha', 'omega'],
     });
     const commits = commitCount(repo);
+    const file = projectRulesFilePath(repo);
 
-    const run = doctor(repo, ['--fix', '--yes']);
-    expect(run.out).toContain('missing:');
-    expect(existsSync(projectRulesFilePath(repo))).toBe(false);
+    const run = doctorFix(repo);
+
+    expect(existsSync(file)).toBe(true);
+    expect(checkRulesDrift(repo, {promptsDir: dir}).status).toBe('in-sync');
+    // Written, not committed: the artifact is sitting there as an untracked file.
     expect(commitCount(repo)).toBe(commits);
-    expect(statusLines(repo)).toBe('');
+    expect(statusLines(repo)).toContain(`?? ${ARTIFACT_REL}`);
+    // The fix ran through the in-process fixer, and the re-walk saw the result.
+    expect(run.out).toContain('RULES_ARTIFACT');
+    expect(run.out).toContain('in-process fixer');
+    expect(run.status).toBe(0);
+  });
+
+  test('a STALE artifact is rewritten to canonical, and still uncommitted', () => {
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture({
+      components: ['critical-rules-setup'],
+      modules: ['alpha', 'omega'],
+    });
+    const file = writeArtifact(repo, dir);
+    editPromptsRules(dir);
+    const before = readFileSync(file, 'utf-8');
+    const commits = commitCount(repo);
+    expect(checkRulesDrift(repo, {promptsDir: dir}).status).toBe('stale');
+
+    doctorFix(repo);
+
+    const after = readFileSync(file, 'utf-8');
+    expect(after).not.toBe(before);
+    expect(after).toContain('ALPHA_RULE_V2');
+    expect(checkRulesDrift(repo, {promptsDir: dir}).status).toBe('in-sync');
+    expect(commitCount(repo)).toBe(commits);
+    expect(statusLines(repo)).toContain(` M ${ARTIFACT_REL}`);
+  });
+
+  test('a LOCALLY MODIFIED artifact is NOT overwritten (no fixer, on purpose)', () => {
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture({
+      components: ['critical-rules-setup'],
+      modules: ['alpha', 'omega'],
+    });
+    const file = writeArtifact(repo, dir);
+    writeFileSync(file, `${readFileSync(file, 'utf-8')}\nHAND EDITED\n`);
+    const edited = readFileSync(file, 'utf-8');
+
+    const run = doctorFix(repo);
+
+    // --force would destroy a human's edit; a plain regenerate would no-op and
+    // report success. Both are worse than warning and leaving it alone.
+    expect(readFileSync(file, 'utf-8')).toBe(edited);
+    expect(run.out).toContain('locally-modified:');
+    expect(run.out).toContain('rules-update --force');
+  });
+
+  test('CANNOT-CHECK attempts no write at all — no fixer, so no fix failure', () => {
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture({
+      components: ['critical-rules-setup'],
+      modules: ['alpha', 'omega'],
+    });
+    const file = writeArtifact(repo, dir);
+    const artifact = readFileSync(file, 'utf-8');
+    const {cloneDir} = sandboxedManagedClone();
+    initRepoAt(cloneDir, RULES_FILES);
+
+    const run = doctorFix(repo);
+
+    // The writer refuses an unverified source anyway (D15); offering the fixer
+    // here would print a loud failure at every offline session start instead.
+    expect(run.out).toContain('cannot-check:');
+    expect(run.out).not.toContain('in-process fixer');
+    expect(run.out).not.toContain('fix FAILED');
+    expect(readFileSync(file, 'utf-8')).toBe(artifact);
+  });
+
+  test('in-process: the fixer writes the CHECKED root, not the cwd (home-base-6dni)', async () => {
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture({
+      components: ['critical-rules-setup'],
+      modules: ['alpha', 'omega'],
+    });
+    const commits = commitCount(repo);
+    // cwd here is the SDK checkout the test runs from — deliberately NOT the
+    // repo under examination, which is the whole point of the arm.
+    const cwd = process.cwd();
+    expect(resolve(cwd)).not.toBe(resolve(repo));
+    const cwdArtifact = projectRulesFilePath(cwd);
+    const cwdArtifactBefore = existsSync(cwdArtifact);
+
+    const exit = await runDoctor(repo, {fix: true, quiet: false, yes: true});
+
+    expect(exit).toBe(0);
+    expect(existsSync(projectRulesFilePath(repo))).toBe(true);
+    expect(existsSync(cwdArtifact)).toBe(cwdArtifactBefore);
+    expect(commitCount(repo)).toBe(commits);
   });
 });

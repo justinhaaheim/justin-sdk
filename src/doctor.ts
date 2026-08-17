@@ -15,6 +15,10 @@ import {execSync} from 'child_process';
 import {existsSync, readFileSync, statSync} from 'fs';
 import {resolve} from 'path';
 
+import {
+  refreshCriticalRulesArtifact,
+  refreshSucceeded,
+} from './critical-rules-setup';
 import {PINNED, PROMPTS_PIN} from './pinned-versions';
 import {
   checkRulesDrift,
@@ -1363,17 +1367,30 @@ function makeHuskyChecks(projectRoot: string): CheckNode[] {
  * silently passing because we could not tell — is the exact failure this whole
  * epic exists to prevent.
  *
- * NO fixCommand, DELIBERATELY, AND IT IS A KNOWN HOLE — see the question on
- * home-base-si46. The remote session-start path (`doctor --fix --yes`, from
- * setup-env-command.ts) is supposed to WRITE the artifact without committing it,
- * which needs an in-process fixer calling `refreshCriticalRulesArtifact`.
- * check-runner has no function-fixer support today: `attemptFixes` only ever
- * runs `sh -c <fixCommand>` (check-runner.ts:391/603). The two shell commands
- * that could go here are both wrong — `rules-update` COMMITS (it is the pull
- * channel), and `add critical-rules` re-runs the whole installer, touching
- * config and the SDK pin. Both spawn with `cwd: process.cwd()`, which is not
- * necessarily this `projectRoot` (remote calls `runDoctor(target, …)`). So the
- * check reports and stops until the conductor picks the mechanism.
+ * THE FIXER IS IN-PROCESS, WRITE-ONLY, AND NEVER SHELLS OUT (home-base-r47v F1,
+ * closing the si46 hole). `--fix` mode calls `refreshCriticalRulesArtifact`
+ * directly, which writes exactly one path and never commits — which is the whole
+ * requirement for the remote session-start path (`doctor --fix --yes` from
+ * setup-env-command.ts): D4 says the write is "either committed with the session
+ * work or discarded harmlessly". Neither shell command could do that
+ * (`rules-update` COMMITS — it is the pull channel; `add critical-rules` re-runs
+ * the whole installer, touching config and the SDK pin), and every fixCommand is
+ * spawned in `process.cwd()`, which is not necessarily this `projectRoot`
+ * (`runDoctor(target, …)` — home-base-6dni). A closure over projectRoot cannot
+ * miss.
+ *
+ * ONLY `missing` AND `stale` GET A FIXER — the two states where "regenerate from
+ * the recorded selection" is unambiguously right:
+ *   locally-modified  a regenerate would either overwrite a human's edit (with
+ *                     --force) or, without it, no-op and report success while
+ *                     the file stays wrong — the advice (rules-diff first) is
+ *                     the correct remedy and it needs a human.
+ *   cannot-check      the source could not be verified, and the writer REFUSES
+ *                     to write from an unverified checkout (D15). Offering a
+ *                     fixer here would print a loud failure at every offline
+ *                     session start while changing nothing.
+ * A state with no fixer simply warns — no fix is attempted, so nothing can fail
+ * quietly.
  */
 function makeCriticalRulesChecks(projectRoot: string): CheckNode[] {
   return [
@@ -1384,8 +1401,26 @@ function makeCriticalRulesChecks(projectRoot: string): CheckNode[] {
           const drift = checkRulesDrift(projectRoot);
           if (!isRulesDriftProblem(drift.status)) return {pass: true};
           const advice = rulesDriftAdvice(drift.status);
+          const writable =
+            drift.status === 'missing' || drift.status === 'stale';
           return {
             ...(advice != null ? {fix: advice} : {}),
+            ...(writable
+              ? {
+                  fixFn: (): void => {
+                    const outcome = refreshCriticalRulesArtifact(projectRoot);
+                    if (!refreshSucceeded(outcome)) {
+                      // Loud, not silent: check-runner reports a thrown fixer as
+                      // a fix FAILURE. Returning quietly here would leave the
+                      // re-check red with no explanation of why the write
+                      // did not happen (critical rule 5).
+                      throw new Error(
+                        `could not write the rules artifact (${outcome.status}): ${outcome.message}`,
+                      );
+                    }
+                  },
+                }
+              : {}),
             message: `${drift.status}: ${drift.message}`,
             pass: false,
             severity: 'warn',

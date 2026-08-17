@@ -53,6 +53,23 @@ export interface CheckResult {
   fix?: string;
   /** Shell command that --fix mode can auto-run to attempt a fix */
   fixCommand?: string;
+  /**
+   * In-process fixer for --fix mode (home-base-r47v F1). Use this instead of
+   * `fixCommand` when the fix must run against a SPECIFIC directory rather than
+   * wherever the process happens to be: every `fixCommand` is spawned with
+   * `cwd: process.cwd()`, which is not necessarily the project the check
+   * examined (`doctor --target <dir>` checks one repo and would fix another —
+   * home-base-6dni). A closure receives the checked root by construction.
+   *
+   * PRECEDENCE: when a result carries both, `fixFn` WINS and the fixCommand is
+   * not run — one fix per check, chosen by the check, never two side effects
+   * from one failure.
+   *
+   * A fixFn that THROWS is reported loudly (never swallowed into "fixed"), and
+   * the subsequent re-check still shows the check red — a failed fix must not be
+   * representable as a successful one (critical rule 5).
+   */
+  fixFn?: () => void | Promise<void>;
   /** Shown on failure (e.g., "expected 0.1.34, got 0.1.30") */
   message?: string;
   pass: boolean;
@@ -369,13 +386,62 @@ function printSummary(
 // Fix mode
 // ---------------------------------------------------------------------------
 
+/** Does this result carry anything --fix mode can run? */
+function hasFix(result: CheckResult | undefined): boolean {
+  return result?.fixFn != null || result?.fixCommand != null;
+}
+
+/** How to name the fix in the log. An in-process fixer has no command line. */
+function fixDescription(result: CheckResult | undefined): string {
+  if (result?.fixFn != null) return '(in-process fixer)';
+  return result?.fixCommand ?? '';
+}
+
+/**
+ * Run one result's fix: `fixFn` when present (it wins — see CheckResult.fixFn),
+ * otherwise `sh -c fixCommand`.
+ *
+ * The fixFn failure path PRINTS, unconditionally and to stderr, even in quiet
+ * mode: a fixer that threw did not fix anything, and the one thing that must
+ * never happen is a fix failing invisibly and the re-check being read as "the
+ * fix worked". The shell path keeps its historical silence (its failure shows in
+ * the re-check) so existing fixCommand behavior is unchanged.
+ */
+async function runFix(
+  result: CheckResult | undefined,
+  label: string,
+): Promise<void> {
+  const fixFn = result?.fixFn;
+  if (fixFn != null) {
+    try {
+      await fixFn();
+    } catch (error) {
+      console.error(
+        `  ${RED}✗${RESET} ${label}: fix FAILED: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    return;
+  }
+  try {
+    const proc = Bun.spawn(['sh', '-c', result?.fixCommand ?? ''], {
+      cwd: process.cwd(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    await proc.exited;
+  } catch {
+    // fix attempt failed — will show in re-check
+  }
+}
+
 async function attemptFixes(
   results: InternalResult[],
   entries: InternalEntry[],
   opts: ExecOptions,
 ): Promise<InternalResult[]> {
   const fixable = results.filter(
-    (r) => r.exitCode !== 0 && r.checkResult?.fixCommand,
+    (r) => r.exitCode !== 0 && hasFix(r.checkResult),
   );
 
   if (fixable.length === 0) return results;
@@ -385,17 +451,9 @@ async function attemptFixes(
   );
 
   for (const r of fixable) {
-    const fixCmd = r.checkResult?.fixCommand ?? '';
+    const fixCmd = fixDescription(r.checkResult);
     console.log(`  ${YELLOW}→${RESET} ${r.label}: ${DIM}${fixCmd}${RESET}`);
-    try {
-      const proc = Bun.spawn(['sh', '-c', fixCmd], {
-        cwd: process.cwd(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
-      await proc.exited;
-    } catch {
-      // fix attempt failed — will show in re-check
-    }
+    await runFix(r.checkResult, r.label);
   }
 
   // Re-run only the checks that had fixes
@@ -571,7 +629,7 @@ export async function runCheckTree(
   if (fix) {
     // Separate fixable failures into auto-run vs. approval-required.
     const allFixable = results.filter(
-      (r) => !r.skipped && r.exitCode !== 0 && r.checkResult?.fixCommand,
+      (r) => !r.skipped && r.exitCode !== 0 && hasFix(r.checkResult),
     );
     const autoRun = allFixable.filter(
       (r) => !r.checkResult?.requiresApproval,
@@ -590,7 +648,7 @@ export async function runCheckTree(
       }
 
       for (const r of runList) {
-        const fixCmd = r.checkResult?.fixCommand ?? '';
+        const fixCmd = fixDescription(r.checkResult);
         if (!quiet) {
           const approvalNote = r.checkResult?.requiresApproval
             ? ` ${DIM}(approved via --yes)${RESET}`
@@ -599,15 +657,7 @@ export async function runCheckTree(
             `  ${YELLOW}→${RESET} ${r.label}: ${DIM}${fixCmd}${RESET}${approvalNote}`,
           );
         }
-        try {
-          const proc = Bun.spawn(['sh', '-c', fixCmd], {
-            cwd: process.cwd(),
-            stdio: ['pipe', 'pipe', 'pipe'],
-          });
-          await proc.exited;
-        } catch {
-          // fix attempt failed — will show in re-walk
-        }
+        await runFix(r.checkResult, r.label);
       }
 
       if (!quiet) {
@@ -622,7 +672,7 @@ export async function runCheckTree(
         `\n${YELLOW}Skipped ${needsApproval.length} fix(es) that require approval:${RESET}`,
       );
       for (const r of needsApproval) {
-        const fixCmd = r.checkResult?.fixCommand ?? '';
+        const fixCmd = fixDescription(r.checkResult);
         console.log(`  ${DIM}•${RESET} ${r.label}: ${DIM}${fixCmd}${RESET}`);
       }
       console.log(
