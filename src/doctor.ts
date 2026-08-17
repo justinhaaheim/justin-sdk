@@ -17,6 +17,11 @@ import {resolve} from 'path';
 
 import {PINNED, PROMPTS_PIN} from './pinned-versions';
 import {
+  checkRulesDrift,
+  isRulesDriftProblem,
+  rulesDriftAdvice,
+} from './rules-drift';
+import {
   describeMissing,
   detectWorktreeHydration,
   hasBlockingProblem,
@@ -1338,14 +1343,66 @@ function makeHuskyChecks(projectRoot: string): CheckNode[] {
 }
 
 // ---------------------------------------------------------------------------
+// Critical-rules checks (critical-rules-setup component)
+// ---------------------------------------------------------------------------
+
+/**
+ * Is the committed rules artifact the canonical one? (home-base-si46, D4/D5)
+ *
+ * The verdict comes from `checkRulesDrift` — the SAME function the plugin's
+ * SessionStart notice uses, so doctor and the session can never tell Justin two
+ * different stories about one file. This check only decides how to say it.
+ *
+ * WARN, NEVER ERROR, for every unhappy state. Out-of-date rules are a nag, not a
+ * broken environment: doctor runs at every session start (`doctor --quiet` via
+ * the setup-env hook), and making stale rules exit non-zero would turn a routine
+ * "there's an update" into a red gate on unrelated work.
+ *
+ * CANNOT-CHECK IS A WARN TOO, NOT A PASS (D5, critical rule 5). A failed refresh
+ * leaves a usable-looking clone behind; certifying the artifact from it — or
+ * silently passing because we could not tell — is the exact failure this whole
+ * epic exists to prevent.
+ *
+ * NO fixCommand, DELIBERATELY, AND IT IS A KNOWN HOLE — see the question on
+ * home-base-si46. The remote session-start path (`doctor --fix --yes`, from
+ * setup-env-command.ts) is supposed to WRITE the artifact without committing it,
+ * which needs an in-process fixer calling `refreshCriticalRulesArtifact`.
+ * check-runner has no function-fixer support today: `attemptFixes` only ever
+ * runs `sh -c <fixCommand>` (check-runner.ts:391/603). The two shell commands
+ * that could go here are both wrong — `rules-update` COMMITS (it is the pull
+ * channel), and `add critical-rules` re-runs the whole installer, touching
+ * config and the SDK pin. Both spawn with `cwd: process.cwd()`, which is not
+ * necessarily this `projectRoot` (remote calls `runDoctor(target, …)`). So the
+ * check reports and stops until the conductor picks the mechanism.
+ */
+function makeCriticalRulesChecks(projectRoot: string): CheckNode[] {
+  return [
+    {
+      check: {
+        label: 'RULES_ARTIFACT',
+        fn: (): CheckResult => {
+          const drift = checkRulesDrift(projectRoot);
+          if (!isRulesDriftProblem(drift.status)) return {pass: true};
+          const advice = rulesDriftAdvice(drift.status);
+          return {
+            ...(advice != null ? {fix: advice} : {}),
+            message: `${drift.status}: ${drift.message}`,
+            pass: false,
+            severity: 'warn',
+          };
+        },
+        severity: 'warn',
+      },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // Component registry
 // ---------------------------------------------------------------------------
 
 // A component with no entry here simply has no doctor checks — see the
 // skip-with-no-warning loop in runDoctor.
-// doctor check: home-base-si46 — 'critical-rules-setup' gets its staleness
-// check (local NEVER writes + a systemMessage naming rules-diff/rules-update;
-// remote --fix writes) in that dispatch, not this one.
 const componentCheckFactories: Record<
   string,
   (projectRoot: string) => CheckNode[]
@@ -1353,6 +1410,7 @@ const componentCheckFactories: Record<
   'base-setup': makeBaseChecks,
   'beads-setup': makeBeadsChecks,
   'claude-md-setup': makeClaudeMdChecks,
+  'critical-rules-setup': makeCriticalRulesChecks,
   'eslint-setup': makeEslintChecks,
   'gh-actions-setup': makeGhActionsChecks,
   'gitignore-setup': makeGitignoreChecks,

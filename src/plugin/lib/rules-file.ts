@@ -96,6 +96,10 @@ export const PRIME_FULL_CMD = `${SDK_BUNX} prime --full`;
  * home-base-q1hp — stamped into artifacts now so the file names its own
  * regeneration command from day one. */
 export const RULES_UPDATE_CMD = `${SDK_BUNX} rules-update`;
+/** "What am I missing?" — the read half of the same channel (home-base-q1hp).
+ * Lives here, next to its sibling, so the session notice and the doctor check
+ * cannot name it two different ways (home-base-si46). */
+export const RULES_DIFF_CMD = `${SDK_BUNX} rules-diff`;
 
 /** ~/.claude/rules/justin-sdk/critical-rules.md — the user-level Claude Code
  * rules file that autoloads every session. */
