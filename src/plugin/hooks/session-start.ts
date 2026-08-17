@@ -18,6 +18,13 @@
  * hash — so a commit that doesn't change rule content (or only reformats it)
  * never false-nags. Missing file ⇒ fail-safe: inject the FULL rules here.
  *
+ * A SECOND drift check (home-base-si46) covers the COMMITTED per-repo artifact
+ * `.claude/rules/justin-sdk/critical-rules.md` for repos enrolled in
+ * critical-rules — a different file, a different channel, its own verdict, and
+ * the same one the `critical-rules-setup` doctor check reports (see
+ * ../../rules-drift). It only ever REPORTS: nothing inside the repo is written
+ * here (t6a0.21 D4/D9).
+ *
  * All lib modules live in this plugin's ./lib (a marketplace plugin only gets
  * its own subdir), use only bun builtins / bunx subprocesses (no node_modules),
  * and this runs with just `bun`. Always emits a valid envelope and exits 0.
@@ -38,6 +45,12 @@ import {
   rulesFilePath,
   SYNC_RULES_CMD,
 } from '../lib/rules-file';
+import {
+  checkRulesDrift,
+  isRulesDriftProblem,
+  rulesDriftAdvice,
+  type RulesDriftStatus,
+} from '../../rules-drift';
 
 const projectRoot = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
 const RULES_FILE = rulesFilePath();
@@ -122,6 +135,23 @@ if (!fileMissing && rulesFailed == null) {
   }
 }
 
+// --- committed per-repo artifact: is THIS repo's rules file current? ---------
+// A second, independent delivery channel (t6a0.21 D1): enrolled repos carry
+// `.claude/rules/justin-sdk/critical-rules.md` in git. Its staleness verdict is
+// computed by the shared checker the doctor check also calls, so the session and
+// doctor can never disagree — and it is REPORTED here, never fixed: this hook
+// writes nothing inside the repo (D4/D9). A repo that is not enrolled adds
+// nothing to the output at all.
+const repoRules = checkRulesDrift(projectRoot);
+const REPO_RULES_MARKER: Record<RulesDriftStatus, string> = {
+  'cannot-check': '⚠️ staleness UNKNOWN',
+  'in-sync': '✓ in sync',
+  'locally-modified': '⚠️ LOCALLY MODIFIED',
+  missing: '⚠️ MISSING',
+  'not-enrolled': '', // never rendered
+  stale: '⚠️ STALE',
+};
+
 // --- systemMessage (for Justin; the model does NOT read it) -----------------
 const parts: string[] = [];
 if (rulesFailed != null) {
@@ -138,7 +168,17 @@ if (rulesFailed != null) {
       : '✓ in sync';
   parts.push(`rules v${stamp?.version ?? '?'} ${sync}`);
 }
+if (repoRules.status !== 'not-enrolled') {
+  parts.push(`repo rules ${REPO_RULES_MARKER[repoRules.status]}`);
+}
 let systemMessage = `justin-sdk prime · ${parts.join(' · ')}`;
+
+// The detail sits immediately under the header line — closest to the marker it
+// explains, and above the module list, because it is the only part of this
+// message that ever asks Justin to DO something.
+if (isRulesDriftProblem(repoRules.status)) {
+  systemMessage += `\n⚠️ repo rules: ${repoRules.message}\n   → ${rulesDriftAdvice(repoRules.status)}`;
+}
 
 // Numbered summary of the modules compiled into the prime injection.
 if (condNames.length > 0) {
