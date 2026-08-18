@@ -21,7 +21,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'fs';
-import {basename, resolve} from 'path';
+import {basename, dirname, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
 import {
@@ -149,26 +149,221 @@ function stepInstallBr(projectRoot: string, version: string): boolean {
   return false;
 }
 
-function stepMigrateOldBeads(projectRoot: string): {
+// ---------------------------------------------------------------------------
+// Beads workspace state (home-base-o33r)
+// ---------------------------------------------------------------------------
+
+/**
+ * Artifacts that git actually CHECKS OUT for a beads workspace. `beads.db` is
+ * NOT one of them — `.beads/.gitignore` ignores `*.db`, so a database file is
+ * absent from every fresh worktree and every fresh clone of a repo that has had
+ * beads for years.
+ *
+ * This list is the whole point of home-base-o33r: "no beads.db" and "no beads
+ * workspace" are two different facts, and conflating them made the sweep re-init
+ * every repo it touched — renaming each one's `issue_prefix` to the sweep
+ * worktree's directory name and discarding its real configuration.
+ */
+const TRACKED_BEADS_ARTIFACTS = ['config.yaml', 'issues.jsonl'] as const;
+
+export type BeadsWorkspaceState =
+  /** No `.beads/` at all — a genuine first-time initialization. */
+  | {kind: 'none'}
+  /** A working `br` database is present. */
+  | {kind: 'initialized'}
+  /**
+   * The repo carries a COMMITTED beads workspace but no database in this tree
+   * (the normal state of a linked worktree or a fresh clone). Hydration
+   * concern, never an init concern — the configuration must not be touched.
+   */
+  | {artifact: string; kind: 'tracked-not-hydrated'}
+  /** `.beads/` exists but is not a usable beads_rust workspace. */
+  | {kind: 'legacy'; reason: string};
+
+/**
+ * Classify what kind of beads workspace (if any) `projectRoot` has.
+ *
+ * Ordering is load-bearing: the `br list` probe only runs when a database file
+ * actually exists, so the common worktree case is decided from the filesystem
+ * alone and never spawns a process.
+ */
+export function detectBeadsWorkspace(projectRoot: string): BeadsWorkspaceState {
+  const beadsDir = resolve(projectRoot, '.beads');
+  if (!existsSync(beadsDir)) return {kind: 'none'};
+
+  const metadataPath = resolve(beadsDir, 'metadata.json');
+  if (existsSync(metadataPath)) {
+    try {
+      if (readFileSync(metadataPath, 'utf-8').includes('"dolt"')) {
+        return {kind: 'legacy', reason: 'old Dolt (bd) backend'};
+      }
+    } catch {
+      // Unreadable metadata decides nothing — fall through to the other probes.
+    }
+  }
+
+  if (existsSync(resolve(beadsDir, 'beads.db'))) {
+    const check = exec('br list --json', projectRoot);
+    if (check.exitCode === 0) return {kind: 'initialized'};
+    return {
+      kind: 'legacy',
+      reason: 'beads.db present but `br list` failed',
+    };
+  }
+
+  for (const artifact of TRACKED_BEADS_ARTIFACTS) {
+    if (existsSync(resolve(beadsDir, artifact))) {
+      return {artifact, kind: 'tracked-not-hydrated'};
+    }
+  }
+
+  return {
+    kind: 'legacy',
+    reason: '.beads/ exists with neither a database nor a tracked config',
+  };
+}
+
+/**
+ * The checkout that gives this project its IDENTITY: the MAIN worktree's root.
+ *
+ * `basename(projectRoot)` is the wrong answer in a linked worktree — there it is
+ * the worktree's directory name (`sdk-sweep`), not the repo's. Deriving a beads
+ * prefix from it is exactly how home-base-o33r renamed five repos' issue
+ * prefixes to `sdk-sweep`.
+ *
+ * Returns null when git cannot answer (not a repo, bare repo, unusual layout).
+ * The caller must treat that as "unknown", never silently substitute a value
+ * that looks measured (critical rule 5).
+ */
+export function mainCheckoutRoot(projectRoot: string): string | null {
+  const result = exec('git rev-parse --git-common-dir', projectRoot);
+  if (result.exitCode !== 0) return null;
+  const raw = result.stdout.trim();
+  if (raw.length === 0) return null;
+  // `.git` in a primary checkout, an absolute path in a linked worktree.
+  const commonDir = resolve(projectRoot, raw);
+  if (basename(commonDir) !== '.git') return null;
+  return dirname(commonDir);
+}
+
+/**
+ * The beads prefix for a genuinely uninitialized project, derived from the MAIN
+ * checkout's directory name. `ok: false` when the identity could not be
+ * measured — a failed derivation must not be representable as a real prefix.
+ */
+export function deriveBeadsPrefix(
+  projectRoot: string,
+): {ok: true; prefix: string; source: string} | {ok: false; reason: string} {
+  // Three cases, kept distinct on purpose. Only the middle one is the o33r
+  // hazard; the first genuinely cannot be a worktree, so the checkout dir IS
+  // the identity there — that is a measurement, not a fallback.
+  const insideRepo =
+    exec('git rev-parse --is-inside-work-tree', projectRoot).exitCode === 0;
+  const identityRoot = insideRepo ? mainCheckoutRoot(projectRoot) : projectRoot;
+  if (identityRoot == null) {
+    return {
+      ok: false,
+      reason:
+        `${projectRoot} is inside a git repository, but its main checkout root ` +
+        'could not be resolved (`git rev-parse --git-common-dir` gave no usable ' +
+        'answer). Refusing to guess a beads prefix from the checkout directory — ' +
+        'in a worktree that is the worktree name, not the repo (home-base-o33r). ' +
+        'Run `br init --prefix <name>` by hand.',
+    };
+  }
+  const rawPrefix = basename(identityRoot);
+  const prefix = kebabCase(rawPrefix);
+  if (prefix.length === 0) {
+    return {
+      ok: false,
+      reason: `cannot derive a valid beads prefix from directory name "${rawPrefix}". Rename the directory or run br init manually.`,
+    };
+  }
+  return {ok: true, prefix, source: identityRoot};
+}
+
+/**
+ * Add the sync keys beads-setup owns to a `.beads/config.yaml`, preserving
+ * every other line exactly.
+ *
+ * Pure, and deliberately a MERGE rather than a template render: the whole-file
+ * overwrite this replaces is what silently discarded each repo's real
+ * configuration (home-base-o33r fix shape 3). `issue_prefix` is never read and
+ * never written here.
+ */
+export function mergeBeadsSyncConfig(original: string): string {
+  const lines = original.split('\n');
+  const syncIndex = lines.findIndex((line) => /^sync:\s*$/.test(line));
+
+  if (syncIndex === -1) {
+    const base =
+      original.length === 0 || original.endsWith('\n')
+        ? original
+        : `${original}\n`;
+    return `${base}\n# Sync behavior\nsync:\n  auto_import: true\n  auto_flush: true\n`;
+  }
+
+  // The block is the indented (or blank) run of lines after `sync:`.
+  let end = syncIndex + 1;
+  while (end < lines.length) {
+    const line = lines[end] ?? '';
+    if (line.trim() === '' || /^\s+\S/.test(line)) {
+      end++;
+      continue;
+    }
+    break;
+  }
+  while (end > syncIndex + 1 && (lines[end - 1] ?? '').trim() === '') end--;
+
+  const block = lines.slice(syncIndex + 1, end);
+  for (const key of ['auto_import', 'auto_flush'] as const) {
+    const keyIndex = block.findIndex((line) =>
+      new RegExp(`^\\s*${key}\\s*:`).test(line),
+    );
+    if (keyIndex === -1) {
+      block.push(`  ${key}: true`);
+    } else {
+      block[keyIndex] = (block[keyIndex] ?? '').replace(
+        new RegExp(`^(\\s*${key}\\s*:).*$`),
+        '$1 true',
+      );
+    }
+  }
+
+  return [...lines.slice(0, syncIndex + 1), ...block, ...lines.slice(end)].join(
+    '\n',
+  );
+}
+
+function stepMigrateOldBeads(
+  projectRoot: string,
+  state: BeadsWorkspaceState,
+): {
   hadOldData: boolean;
   jsonlPath: string | null;
   ok: boolean;
 } {
   const beadsDir = resolve(projectRoot, '.beads');
 
-  if (!existsSync(beadsDir)) {
+  if (state.kind === 'none') {
+    return {hadOldData: false, jsonlPath: null, ok: true};
+  }
+  if (state.kind === 'initialized') {
+    success('beads_rust already initialized and working');
+    return {hadOldData: false, jsonlPath: null, ok: true};
+  }
+  if (state.kind === 'tracked-not-hydrated') {
+    // home-base-o33r: a committed workspace with no checked-out database. NOT a
+    // migration — backing it up and deleting it is how the real config got
+    // discarded. Say what was measured, and leave the directory alone.
+    success(
+      `beads workspace already present (.beads/${state.artifact} is committed); ` +
+        'no database in this tree — hydration concern, not init. Leaving .beads/ untouched.',
+    );
     return {hadOldData: false, jsonlPath: null, ok: true};
   }
 
-  const beadsDb = resolve(beadsDir, 'beads.db');
-  if (existsSync(beadsDb)) {
-    // Check if it's already a working beads_rust db
-    const check = exec('br list --json', projectRoot);
-    if (check.exitCode === 0) {
-      success('beads_rust already initialized and working');
-      return {hadOldData: false, jsonlPath: null, ok: true};
-    }
-  }
+  log(`Migrating legacy .beads/ (${state.reason})`);
 
   // Back up existing data
   const tmpDir = resolve(projectRoot, 'tmp');
@@ -221,21 +416,36 @@ function stepMigrateOldBeads(projectRoot: string): {
   return {hadOldData: true, jsonlPath, ok: true};
 }
 
-function stepInitBeads(projectRoot: string): boolean {
-  const beadsDb = resolve(projectRoot, '.beads', 'beads.db');
-  if (existsSync(beadsDb)) {
+/**
+ * Initialize a beads workspace — ONLY when the project genuinely has none.
+ *
+ * home-base-o33r: this used to decide from `existsSync('.beads/beads.db')`,
+ * which is false in every worktree (the db is gitignored), so it re-inited
+ * repos that already had a workspace and overwrote their config.yaml wholesale.
+ * The decision now comes from `detectBeadsWorkspace`, and the config write is a
+ * targeted merge.
+ */
+function stepInitBeads(
+  projectRoot: string,
+  state: BeadsWorkspaceState,
+): boolean {
+  if (state.kind === 'initialized') {
     success('beads_rust already initialized');
     return true;
   }
-
-  const rawPrefix = basename(projectRoot);
-  const prefix = kebabCase(rawPrefix);
-  if (prefix.length === 0) {
-    fail(
-      `Cannot derive a valid beads prefix from directory name "${rawPrefix}". Rename the directory or run br init manually.`,
+  if (state.kind === 'tracked-not-hydrated') {
+    success(
+      `beads_rust workspace already committed (.beads/${state.artifact}) — not re-initializing`,
     );
+    return true;
+  }
+
+  const derived = deriveBeadsPrefix(projectRoot);
+  if (!derived.ok) {
+    fail(derived.reason);
     return false;
   }
+  const {prefix} = derived;
   const result = exec(`br init --prefix '${prefix}'`, projectRoot);
   if (result.exitCode !== 0) {
     fail(`br init failed: ${result.stderr}`);
@@ -243,22 +453,14 @@ function stepInitBeads(projectRoot: string): boolean {
   }
   success(`Initialized beads_rust with prefix "${prefix}"`);
 
-  // Configure auto-sync
+  // Configure auto-sync — merged into whatever br init wrote, never a
+  // whole-file template overwrite (home-base-o33r).
   const configPath = resolve(projectRoot, '.beads', 'config.yaml');
   if (existsSync(configPath)) {
     const config = readFileSync(configPath, 'utf-8');
-    if (!config.includes('auto_import: true')) {
-      const updatedConfig = `# Beads Project Configuration
-issue_prefix: ${prefix}
-default_priority: 2
-default_type: task
-
-# Sync behavior
-sync:
-  auto_import: true
-  auto_flush: true
-`;
-      writeFileSync(configPath, updatedConfig);
+    const merged = mergeBeadsSyncConfig(config);
+    if (merged !== config) {
+      writeFileSync(configPath, merged);
       success('Configured auto-sync in config.yaml');
     }
   }
@@ -454,12 +656,16 @@ export async function runBeadsSetup(
 
   // Step 3: Handle existing .beads/ data
   stepHeader('3. Migration check');
-  const migration = stepMigrateOldBeads(projectRoot);
+  // Classified ONCE, before anything is moved or deleted, and reused by both
+  // steps — so "already has a workspace" cannot be answered differently by the
+  // migration step and the init step (home-base-o33r).
+  const state = detectBeadsWorkspace(projectRoot);
+  const migration = stepMigrateOldBeads(projectRoot, state);
   if (!migration.ok) return 1;
 
   // Step 4: Initialize beads_rust
   stepHeader('4. Initialize beads_rust');
-  if (!stepInitBeads(projectRoot)) return 1;
+  if (!stepInitBeads(projectRoot, state)) return 1;
 
   // Step 5: Import old issues
   if (migration.hadOldData) {

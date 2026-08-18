@@ -279,6 +279,42 @@ export function sweepCommitMessage(payload: SweepPayload): string {
   return 'chore: justin-sdk sweep — bump pin + re-apply components (automated, home-base-j2n7)';
 }
 
+/**
+ * DEFENCE IN DEPTH for home-base-o33r (fix shape 4).
+ *
+ * A full-mode sweep bumps the SDK pin and re-applies components. It has no
+ * business rewriting any repo's beads `config.yaml` — that file carries the
+ * repo's `issue_prefix`, i.e. the namespace of every issue id it has ever
+ * minted. When the payload nonetheless produces a change there, the run stops
+ * for that repo BEFORE the commit, leaving the worktree standing for
+ * inspection; it is never committed, never merged, never pushed.
+ *
+ * Scoped to full mode on purpose: a `--component beads` sweep is an operator
+ * deliberately re-applying that component, and stopping it would be stopping the
+ * very thing that was asked for.
+ *
+ * Pure.
+ */
+export function beadsConfigGuard(
+  payload: SweepPayload,
+  changedFiles: readonly string[],
+): {ok: true} | {ok: false; offenders: string[]; reason: string} {
+  if (payload.mode !== 'full') return {ok: true};
+  const offenders = changedFiles.filter(
+    (file) =>
+      file === '.beads/config.yaml' || file.endsWith('/.beads/config.yaml'),
+  );
+  if (offenders.length === 0) return {ok: true};
+  return {
+    ok: false,
+    offenders,
+    reason:
+      `HARD STOP (home-base-o33r): the payload changed ${offenders.join(', ')}. ` +
+      'A full sweep must never rewrite a beads config — it carries the issue ' +
+      'prefix. Nothing was committed; worktree left for inspection.',
+  };
+}
+
 /** Is `component` registered in a repo's justin-sdk.config.json list? Pure. */
 export function isEnrolledIn(
   components: readonly string[],
@@ -1287,6 +1323,11 @@ async function sweepOneRepo(
       repo: name,
     };
   }
+  const changedFiles = staged.split('\n').filter((line) => line !== '');
+  const beadsGuard = beadsConfigGuard(context.payload, changedFiles);
+  if (!beadsGuard.ok) {
+    return fail(beadsGuard.reason);
+  }
   const commit = run(
     [
       'git',
@@ -1303,7 +1344,6 @@ async function sweepOneRepo(
   }
 
   // --- Merge safety + merge -----------------------------------------------
-  const changedFiles = staged.split('\n').filter((line) => line !== '');
   const primaryBranch = git(repo, [
     'symbolic-ref',
     '--quiet',
