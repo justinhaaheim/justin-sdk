@@ -31,7 +31,7 @@
  * of it except in the one test that deliberately exercises a prettier binary.
  */
 
-import {afterEach, describe, expect, test} from 'bun:test';
+import {afterEach, describe, expect, spyOn, test} from 'bun:test';
 import {execFileSync} from 'child_process';
 import {
   chmodSync,
@@ -663,6 +663,70 @@ describe('the committed artifact is byte-identical to the repo prettier output',
 
     expect(checkRulesDrift(root, {promptsDir}).status).toBe('in-sync');
     expect(rulesDiff({projectRoot: root, promptsDir}).outcome).toBe('in-sync');
+  });
+
+  test('the COMMITTED bytes are checked against the repo prettier, and a non-fixpoint warns', () => {
+    // The body is formatted, but the stamp is prepended afterwards (it carries
+    // the hash OF that body). Whether prettier leaves a stamped file alone is
+    // therefore an assumption, so the writer checks it — this proves the check
+    // is wired and speaks up. The fake formats happily and only fails --check,
+    // which is exactly the shape of "the stamp perturbed formatting".
+    const promptsDir = promptsFixture();
+    delete process.env.JSDK_PRIME_PRETTIER;
+    setQuiet(false); // warn() is suppressed in quiet mode
+    const warns = spyOn(console, 'warn').mockImplementation(() => {});
+    const logs = spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const root = projectFixture({modules: ['alpha']});
+      const binDir = join(root, 'node_modules', '.bin');
+      mkdirSync(binDir, {recursive: true});
+      const fake = join(binDir, 'prettier');
+      writeFileSync(
+        fake,
+        '#!/bin/sh\ncase "$1" in --check) exit 1 ;; esac\ncat\n',
+      );
+      chmodSync(fake, 0o755);
+
+      expect(
+        refreshCriticalRulesArtifact(root, {now: NOW, promptsDir}).status,
+      ).toBe('written');
+      const said = warns.mock.calls.flat().join('\n');
+      expect(said).toContain('does NOT satisfy');
+      expect(said).toContain(ARTIFACT_REL);
+    } finally {
+      warns.mockRestore();
+      logs.mockRestore();
+    }
+  });
+
+  test('NEGATIVE CONTROL: a prettier-clean artifact produces NO such warning', () => {
+    const promptsDir = promptsFixture();
+    delete process.env.JSDK_PRIME_PRETTIER;
+    setQuiet(false);
+    const warns = spyOn(console, 'warn').mockImplementation(() => {});
+    const logs = spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const root = projectFixture({modules: ['alpha']});
+      const binDir = join(root, 'node_modules', '.bin');
+      mkdirSync(binDir, {recursive: true});
+      const fake = join(binDir, 'prettier');
+      // Identical to the arm above except --check succeeds.
+      writeFileSync(
+        fake,
+        '#!/bin/sh\ncase "$1" in --check) exit 0 ;; esac\ncat\n',
+      );
+      chmodSync(fake, 0o755);
+
+      expect(
+        refreshCriticalRulesArtifact(root, {now: NOW, promptsDir}).status,
+      ).toBe('written');
+      expect(warns.mock.calls.flat().join('\n')).not.toContain(
+        'does NOT satisfy',
+      );
+    } finally {
+      warns.mockRestore();
+      logs.mockRestore();
+    }
   });
 
   test('NEGATIVE CONTROL: a hand-edit to the repo spelling IS detected', () => {
