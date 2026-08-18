@@ -138,7 +138,15 @@ export function runSyncRules(options: SyncRulesOptions = {}): number {
   // Prettier the (already header-numbered) markdown, then hash the RESULT —
   // so meaningless formatting differences normalize out of the hash. The hook
   // recomputes this identically (same prettier, same env toggle).
-  const pretty = prettierMarkdown(markdown);
+  const formatted = prettierMarkdown(markdown);
+  if (formatted.status === 'failed') {
+    // A file written from unformatted content would hash differently from what
+    // the hook recomputes, so every session would nag STALE forever — and the
+    // nag would name the wrong cause. Fail loudly with the real one instead.
+    fail(`sync-rules: could not format the rules (${formatted.reason})`);
+    return 1;
+  }
+  const pretty = formatted.markdown;
   const hash = contentHash(pretty);
   const file = options.outFile ?? rulesFilePath();
 

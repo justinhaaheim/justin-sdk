@@ -38,6 +38,7 @@
  * committed artifact and "couldn't check" is never reported as "in sync".
  */
 
+import {execFileSync} from 'child_process';
 import {existsSync, mkdirSync, renameSync, writeFileSync} from 'fs';
 import {basename, dirname, relative, resolve} from 'path';
 
@@ -53,6 +54,7 @@ import {
 import {
   buildStamp,
   contentHash,
+  prettierEnabled,
   prettierMarkdown,
   projectRulesFilePath,
   readDeployedStamp,
@@ -293,13 +295,26 @@ export function refreshCriticalRulesArtifact(
   }
 
   const file = projectRulesFilePath(projectRoot);
-  // Format with the TARGET REPO'S OWN prettier when it has one: this artifact is
-  // committed and is checked by that repo's signal/lint-staged, and the sweep
-  // gates on exactly that. A newer bunx prettier formatting it differently would
-  // turn every swept repo red.
-  const pretty = prettierMarkdown(assembled.markdown, {
+  // Format with the TARGET REPO'S OWN prettier when it has one, AND with that
+  // repo's own config: this artifact is committed and is checked by that repo's
+  // signal/lint-staged, and the sweep gates on exactly that. Passing `filePath`
+  // is what makes the config the repo's — formatting the same bytes anywhere
+  // else silently applies prettier's defaults (t6a0.21.1). The three read-only
+  // callers pass the identical filePath, so their canonical bytes match these.
+  const formatted = prettierMarkdown(assembled.markdown, {
     binary: findLocalPrettier(dirname(file)),
+    filePath: file,
   });
+  if (formatted.status === 'failed') {
+    // Refuse to write. Unformatted bytes here are not a cosmetic loss: they get
+    // COMMITTED, they fail the repo's own prettier gate three steps later with
+    // no hint as to why, and their contentHash describes bytes no reader will
+    // ever reproduce. "Could not format" is not "nothing to format" (rule 5).
+    const message = `could not format the artifact — NOT writing it (${formatted.reason})`;
+    fail(`critical-rules: ${message}`);
+    return {message, status: 'failed'};
+  }
+  const pretty = formatted.markdown;
   const hash = contentHash(pretty);
 
   for (const warning of assembled.warnings) warn(warning);
@@ -347,11 +362,56 @@ export function refreshCriticalRulesArtifact(
   writeFileSync(tmp, body);
   renameSync(tmp, file);
 
+  verifyArtifactIsPrettierClean(projectRoot, file);
+
   success(
     `wrote ${relative(projectRoot, file)}\n  commit ${shaShort}${dirtySuffix} · ` +
       `${selection.modules.length} module${selection.modules.length === 1 ? '' : 's'} · content ${hash}`,
   );
   return {...common, status: 'written'};
+}
+
+/**
+ * The bytes we just committed must be a FIXPOINT of the repo's own prettier —
+ * that is the literal thing `sweep --component critical-rules` gates on, via
+ * `signal-source:PRETTIER`.
+ *
+ * The body is formatted, but the stamp is prepended AFTERWARDS (it carries the
+ * hash OF the formatted body, so it cannot be present while that body is being
+ * formatted). Whether prettier leaves a stamped file alone is therefore an
+ * assumption — an empirically solid one (an HTML comment followed by a blank
+ * line is an untouched markdown `html` node; measured against prettier 3.6 with
+ * a real fleet config), but this bead exists because an assumption about
+ * prettier went unchecked. So: check it, on every real write, in every repo.
+ *
+ * `--check` rather than a second `--write`: it answers the same question
+ * without mutating a file whose stamp already claims a hash for the body on
+ * disk. Run with cwd = projectRoot and WITHOUT the ignore override, so this
+ * mirrors the repo's own `prettier --check .` exactly — including a repo that
+ * ignores the artifact, where there is genuinely nothing to satisfy.
+ *
+ * Warn, don't fail: the file is already written, the sweep's own gate will go
+ * red on it anyway, and this line is the explanation that gate cannot give.
+ */
+function verifyArtifactIsPrettierClean(projectRoot: string, file: string): void {
+  if (!prettierEnabled()) return;
+  const binary = findLocalPrettier(dirname(file));
+  if (binary == null) return; // no repo prettier ⇒ no repo prettier gate
+  try {
+    execFileSync(binary, ['--check', file], {
+      cwd: projectRoot,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 60_000,
+    });
+  } catch {
+    warn(
+      `critical-rules: ${relative(projectRoot, file)} does NOT satisfy this repo's own ` +
+        `\`prettier --check\` — the repo's signal/lint-staged gate will fail on it. ` +
+        `The rules BODY was formatted with ${binary}, so the difference is in the ` +
+        `generated stamp line; that is a bug in this tool, not in the repo.`,
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------

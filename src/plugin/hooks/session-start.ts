@@ -110,12 +110,18 @@ let additionalContext = [ruleText, repoState]
   .filter((b) => b.length > 0)
   .join('\n\n');
 if (additionalContext.length > 0) {
-  additionalContext = prettierMarkdown(additionalContext);
+  // Presentation only — this text is injected, never hashed or committed — so a
+  // prettier failure legitimately degrades to the unformatted (still complete)
+  // markdown. The drift hash below is a MEASUREMENT and is handled differently.
+  const formatted = prettierMarkdown(additionalContext);
+  if (formatted.status !== 'failed') additionalContext = formatted.markdown;
 }
 
 // --- drift check (fast path: sha; slow path: Prettier'd content hash) --------
 const deployedSha = deployedSourceSha(stamp);
 let drift = false;
+/** Set when the comparison could not be MADE. Not the same as "no drift". */
+let driftUnknown: string | null = null;
 if (!fileMissing && rulesFailed == null) {
   const shaMatch =
     deployedSha != null &&
@@ -127,10 +133,20 @@ if (!fileMissing && rulesFailed == null) {
         {format: 'markdown', partition: 'universal', promptsDir: sourceDir},
         projectRoot,
       );
-      const currentHash = contentHash(prettierMarkdown(universal.markdown));
-      drift = stamp?.contentHash != null && currentHash !== stamp.contentHash;
-    } catch {
-      drift = false; // couldn't recompute -> don't false-alarm
+      // The hash is only comparable if it was computed the way sync-rules
+      // computes it — i.e. Prettier'd. Unformatted content would hash to
+      // something no writer ever stamps, so it cannot answer the question at
+      // all: that is a cannot-check, never a clean bill of health (rule 5).
+      const formatted = prettierMarkdown(universal.markdown);
+      if (formatted.status === 'failed') {
+        driftUnknown = formatted.reason;
+      } else {
+        const currentHash = contentHash(formatted.markdown);
+        drift = stamp?.contentHash != null && currentHash !== stamp.contentHash;
+      }
+    } catch (error) {
+      // Couldn't recompute -> report unknown rather than a false all-clear.
+      driftUnknown = error instanceof Error ? error.message : String(error);
     }
   }
 }
@@ -163,9 +179,11 @@ if (rulesFailed != null) {
 } else {
   const sync = drift
     ? `⚠️ STALE → run: ${SYNC_RULES_CMD}`
-    : deployedIsDirty(stamp)
-      ? `⚠️ built from a dirty tree → run: ${SYNC_RULES_CMD}`
-      : '✓ in sync';
+    : driftUnknown != null
+      ? `⚠️ freshness UNKNOWN (${driftUnknown})`
+      : deployedIsDirty(stamp)
+        ? `⚠️ built from a dirty tree → run: ${SYNC_RULES_CMD}`
+        : '✓ in sync';
   parts.push(`rules v${stamp?.version ?? '?'} ${sync}`);
 }
 if (repoRules.status !== 'not-enrolled') {

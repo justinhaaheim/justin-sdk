@@ -861,11 +861,11 @@ describe('rules-diff', () => {
     const binDir = join(repo, 'node_modules', '.bin');
     mkdirSync(binDir, {recursive: true});
     const fake = join(binDir, 'prettier');
-    // Marks the file it is handed, so "which prettier ran" is observable.
-    writeFileSync(
-      fake,
-      '#!/bin/sh\nfor f in "$@"; do :; done\nprintf \'\\nLOCAL_PRETTIER_RAN\\n\' >> "$f"\n',
-    );
+    // Marks the content it is handed, so "which prettier ran" is observable.
+    // stdin/stdout, because the formatter is invoked with --stdin-filepath now
+    // (t6a0.21.1) — and because a fake that appended to a path argument would
+    // create the artifact behind the writer's back.
+    writeFileSync(fake, "#!/bin/sh\ncat\nprintf 'LOCAL_PRETTIER_RAN\\n'\n");
     chmodSync(fake, 0o755);
 
     expect(

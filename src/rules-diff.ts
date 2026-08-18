@@ -146,13 +146,23 @@ export function rulesDiff(options: RulesDiffOptions = {}): RulesDiffResult {
   }
 
   const file = projectRulesFilePath(projectRoot);
-  // The SAME prettier the writer uses (the repo's own, resolved from the same
-  // directory) — a different formatter here would manufacture a phantom diff.
-  const canonical = normalize(
-    prettierMarkdown(assembled.markdown, {
-      binary: findLocalPrettier(dirname(file)),
-    }),
-  );
+  // The SAME prettier the writer uses — same binary AND same config, the latter
+  // resolved by handing prettier the artifact's real path (t6a0.21.1). A
+  // different formatter or a different config here would manufacture a phantom
+  // diff. Nothing is written: the path is passed via --stdin-filepath.
+  const formatted = prettierMarkdown(assembled.markdown, {
+    binary: findLocalPrettier(dirname(file)),
+    filePath: file,
+  });
+  if (formatted.status === 'failed') {
+    // No canonical bytes ⇒ no comparison. Reporting "in sync" (or a diff) off
+    // unformatted content would be an answer we did not measure.
+    return cannotCheck(
+      `cannot check what is missing: the rules could not be formatted, so there are no canonical ` +
+        `bytes to compare against (${formatted.reason}). This is "unknown", not "clean".`,
+    );
+  }
+  const canonical = normalize(formatted.markdown);
   const shaShort =
     assembled.sourceSha != null ? assembled.sourceSha.slice(0, 12) : 'unknown';
   const moduleCount = `${selection.modules.length} module${selection.modules.length === 1 ? '' : 's'}`;

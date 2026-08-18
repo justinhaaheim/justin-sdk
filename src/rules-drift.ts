@@ -316,9 +316,22 @@ function check(
   //    any rules — a prompts commit that touched a README must not nag twelve
   //    repos. Formatted with the repo's own prettier, exactly as the writer does,
   //    or the formatter difference would masquerade as drift.
-  const canonical = prettierMarkdown(assembled.markdown, {
+  //    Same binary AND same config as the writer — the config only follows the
+  //    binary if prettier is handed the artifact's real path (t6a0.21.1).
+  //    --stdin-filepath means this reader still writes nothing.
+  const formatted = prettierMarkdown(assembled.markdown, {
     binary: findLocalPrettier(dirname(file)),
-  }).trimEnd();
+    filePath: file,
+  });
+  if (formatted.status === 'failed') {
+    return result(
+      'cannot-check',
+      `the canonical rules could not be formatted (${formatted.reason}), so the artifact cannot be ` +
+        `compared against them — this is "unknown", not "in sync"`,
+      withSource,
+    );
+  }
+  const canonical = formatted.markdown.trimEnd();
   if (canonical === localBody) {
     return result(
       'in-sync',

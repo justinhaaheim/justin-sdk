@@ -10,9 +10,9 @@
  *   <!-- justin-sdk rules · v0.4.14 · commit cc6573bb0834 · content 84bf3e47bf75 · generated 2026-… · GENERATED FILE — do not edit; run: bunx github:justinhaaheim/justin-sdk sync-rules -->
  */
 
-import {execFileSync, execSync} from 'child_process';
+import {execFileSync} from 'child_process';
 import {createHash} from 'crypto';
-import {existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'fs';
+import {existsSync, readFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
@@ -36,49 +36,141 @@ export function prettierEnabled(): boolean {
 }
 
 /**
- * Format markdown with prettier. By default `bunx prettier --write <tmpfile>`,
- * using bunx (not an `import prettier`) ON PURPOSE: bunx self-fetches prettier,
- * so this runs in the plugin cache which has no node_modules — importing
- * prettier would throw there. Returns the input unchanged when disabled or on
- * any failure (offline, etc.), so it never blocks. Run BEFORE hashing so
- * trivial formatting normalizes out.
+ * The outcome of a prettier pass.
  *
- * `options.binary` runs THAT prettier instead (config still resolved by
- * prettier itself, from the temp file's location — so pass a config path via
- * the binary's own project if it matters). The committed per-repo artifact uses
- * this to format with the TARGET REPO'S OWN prettier: that artifact is checked
- * by the repo's `signal`/lint-staged, and a newer bunx prettier formatting it
- * differently from the repo's pinned one would fail that gate. Same reasoning
- * as `writeJson` in setup-helpers (Justin's 2026-08-08 ruling: always format
- * what we write with the repo's own prettier). Resolution of the binary lives
- * OUTSIDE this module on purpose — src/plugin/lib runs from the plugin cache
- * and must not import setup-helpers, which isn't shipped there.
+ * `failed` deliberately carries NO markdown: a caller cannot reach formatted
+ * text without first narrowing, so it cannot accidentally treat "prettier blew
+ * up" as "prettier had nothing to change" (the rule-5 conflation that made
+ * home-base-t6a0.21.1 a P0 — the old bare `catch` returned the unformatted
+ * input, indistinguishable from success). Each caller decides what a failure
+ * means for it: a writer refuses to write, a reader reports cannot-check.
+ *
+ * `disabled` is distinct from `failed` on purpose — JSDK_PRIME_PRETTIER=0 is a
+ * deliberate choice, not a defect.
+ */
+export type PrettierMarkdownResult =
+  | {markdown: string; status: 'disabled' | 'formatted'}
+  | {reason: string; status: 'failed'};
+
+/** An ignore file with no rules in it. See `prettierMarkdown` for why. */
+const IGNORE_NOTHING = '/dev/null';
+
+/**
+ * Format markdown with prettier, resolving that repo's OWN configuration.
+ *
+ * Content goes in on STDIN with `--stdin-filepath <the artifact's real path>`.
+ * That flag is the whole fix for t6a0.21.1: prettier resolves `.prettierrc*` /
+ * `package.json#prettier` / `.editorconfig` by walking up from the FILE'S OWN
+ * path, so the previous implementation — write into a fresh `$TMPDIR` directory
+ * and format there — ran the repo's BINARY with prettier's DEFAULT config. The
+ * committed artifact then failed that repo's own `prettier --check .` (measured
+ * on nature-sounds: `bracketSpacing: false` in its config vs. the default true,
+ * inside a fenced json example), which is exactly the check the sweep gates on.
+ * Prettier formats embedded code fences, so EVERY option a fence can exercise
+ * is a divergence surface — this is not one option's problem.
+ *
+ * stdin (rather than formatting the real file in place) is what lets the WRITER
+ * and the three READ-ONLY callers (rules-diff, rules-drift, the SessionStart
+ * hook) share one code path and therefore produce byte-identical canonical
+ * bytes. The readers must not write inside the repo, and any second mechanism
+ * would be a second thing to keep byte-identical. It also works when the
+ * artifact's directory does not exist yet (verified: prettier resolves config up
+ * from a non-existent path just the same).
+ *
+ * `--ignore-path /dev/null` is load-bearing, not tidiness: prettier resolves
+ * ignore files RELATIVE TO CWD (unlike config, which is file-relative), and a
+ * stdin-filepath that lands under an ignore rule is passed through UNCHANGED
+ * with exit 0 (measured). Since the writer, the CLI readers and the hook all run
+ * with different cwds, honouring ignore files would mean the same artifact gets
+ * formatted for one caller and not another — silent phantom drift. Neutralising
+ * ignores makes the canonical bytes a function of the path alone. A repo that
+ * ignores the artifact simply never checks it, so formatting it anyway is free.
+ *
+ * bunx (not `import prettier`) when no binary is given, ON PURPOSE: bunx
+ * self-fetches prettier, so this works in the plugin cache which has no
+ * node_modules. `options.binary` runs THAT prettier instead — the committed
+ * per-repo artifact passes the target repo's own, because that artifact is
+ * checked by the repo's `signal`/lint-staged and a newer bunx prettier
+ * formatting it differently would turn every swept repo red. Same reasoning as
+ * `writeJson` in setup-helpers (Justin's 2026-08-08 ruling: always format what
+ * we write with the repo's own prettier). Resolution of the binary lives OUTSIDE
+ * this module on purpose — src/plugin/lib runs from the plugin cache and must
+ * not import setup-helpers, which isn't shipped there.
+ *
+ * Run BEFORE hashing, so trivial formatting normalizes out of the hash.
  */
 export function prettierMarkdown(
   markdown: string,
-  options?: {binary?: string | null},
-): string {
-  if (!prettierEnabled()) return markdown.trimEnd();
-  let dir: string | null = null;
-  try {
-    dir = mkdtempSync(join(tmpdir(), 'jsdk-prettier-'));
-    const file = join(dir, 'rules.md');
-    writeFileSync(file, markdown);
-    const binary = options?.binary;
-    if (binary != null && binary.length > 0) {
-      execFileSync(binary, ['--write', file], {stdio: 'pipe', timeout: 60_000});
-    } else {
-      execSync(`bunx prettier --write ${file}`, {
-        stdio: 'pipe',
-        timeout: 60_000,
-      });
-    }
-    return readFileSync(file, 'utf-8').trimEnd();
-  } catch {
-    return markdown.trimEnd();
-  } finally {
-    if (dir != null) rmSync(dir, {recursive: true, force: true});
+  options?: {binary?: string | null; filePath?: string | null},
+): PrettierMarkdownResult {
+  if (!prettierEnabled()) {
+    return {markdown: markdown.trimEnd(), status: 'disabled'};
   }
+  // No filePath = the USER-LEVEL rules file, which is not in any repo. A path
+  // under $TMPDIR keeps that caller's config resolution (and therefore its
+  // content hash) exactly what it has always been. Nothing is written there —
+  // the path only needs to name a .md file for parser + config resolution.
+  const filePath = options?.filePath ?? join(tmpdir(), 'jsdk-prettier-rules.md');
+  const given = options?.binary;
+  const binary = given != null && given.length > 0 ? given : null;
+  const label = binary ?? 'bunx prettier';
+  const args = ['--ignore-path', IGNORE_NOTHING, '--stdin-filepath', filePath];
+  const spawn: Parameters<typeof execFileSync>[2] & {encoding: 'utf-8'} = {
+    encoding: 'utf-8',
+    input: markdown,
+    stdio: ['pipe', 'pipe', 'pipe'],
+    timeout: 60_000,
+  };
+
+  let out: string;
+  try {
+    out =
+      binary != null
+        ? execFileSync(binary, args, spawn)
+        : execFileSync('bunx', ['prettier', ...args], spawn);
+  } catch (error) {
+    return {
+      reason: `${label} failed formatting ${filePath}: ${describeExecFailure(error)}`,
+      status: 'failed',
+    };
+  }
+  // Exit 0 with nothing on stdout is a failure wearing success's clothes (a
+  // killed child, a shim that swallows stdin). Never let it become "the rules
+  // are empty".
+  if (out.trim().length === 0 && markdown.trim().length > 0) {
+    return {
+      reason: `${label} exited 0 but produced EMPTY output for ${filePath} — refusing to treat that as formatted content`,
+      status: 'failed',
+    };
+  }
+  return {markdown: out.trimEnd(), status: 'formatted'};
+}
+
+/** One line naming what actually went wrong, stderr included — the whole point
+ * of not swallowing the error. Kept local so this module stays import-free. */
+function describeExecFailure(error: unknown): string {
+  const e = error as {
+    code?: unknown;
+    signal?: unknown;
+    status?: unknown;
+    stderr?: unknown;
+  };
+  const bits: string[] = [];
+  if (e?.status != null) bits.push(`exit ${String(e.status)}`);
+  if (e?.signal != null) bits.push(`signal ${String(e.signal)}`);
+  if (e?.code != null) bits.push(String(e.code));
+  const stderr =
+    typeof e?.stderr === 'string'
+      ? e.stderr
+      : e?.stderr != null
+        ? String(e.stderr)
+        : '';
+  const trimmed = stderr.trim().split('\n').slice(0, 5).join(' / ');
+  if (trimmed.length > 0) bits.push(trimmed);
+  if (bits.length === 0) {
+    bits.push(error instanceof Error ? error.message : String(error));
+  }
+  return bits.join(' — ');
 }
 
 /**

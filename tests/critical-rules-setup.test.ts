@@ -32,6 +32,7 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
+import {execFileSync} from 'child_process';
 import {
   chmodSync,
   existsSync,
@@ -59,6 +60,8 @@ import {
   readDeployedStamp,
   STAMP_PREFIX,
 } from '../src/plugin/lib/rules-file';
+import {rulesDiff} from '../src/rules-diff';
+import {checkRulesDrift} from '../src/rules-drift';
 import {readJson, setQuiet, writeJson} from '../src/setup-helpers';
 import {git} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -494,21 +497,200 @@ describe('the committed artifact', () => {
     const binDir = join(root, 'node_modules', '.bin');
     mkdirSync(binDir, {recursive: true});
     const fake = join(binDir, 'prettier');
-    // Marks the file it is handed, so "which prettier ran" is observable. It
-    // appends to the LAST argument, not $2: setup-helpers' writeJson also
-    // resolves a local prettier and calls it as `--write --ignore-unknown
-    // <path>`, and a $2-based fake would create a file literally named
-    // '--ignore-unknown' in the cwd (observed).
-    writeFileSync(
-      fake,
-      '#!/bin/sh\nfor f in "$@"; do :; done\nprintf \'\\nLOCAL_PRETTIER_RAN\\n\' >> "$f"\n',
-    );
+    // Marks the content it is handed, so "which prettier ran" is observable.
+    // It reads STDIN and writes STDOUT because that is how the formatter is
+    // now invoked (--stdin-filepath, t6a0.21.1) — a fake that appended to a
+    // path argument would CREATE the artifact behind the writer's back, and
+    // would also be run by setup-helpers' writeJson (`--write
+    // --ignore-unknown <path>`) and by the post-write `--check`.
+    writeFileSync(fake, "#!/bin/sh\ncat\nprintf 'LOCAL_PRETTIER_RAN\\n'\n");
     chmodSync(fake, 0o755);
 
     expect(
       refreshCriticalRulesArtifact(root, {now: NOW, promptsDir: dir}).status,
     ).toBe('written');
     expect(readArtifact(root)).toContain('LOCAL_PRETTIER_RAN');
+  });
+
+  test('a prettier that FAILS blocks the write — it never yields unformatted bytes', () => {
+    // The rule-5 half of t6a0.21.1. Unformatted bytes here get COMMITTED and
+    // fail the repo's own gate three steps later with no hint why, and their
+    // stamped hash describes bytes no reader can reproduce.
+    const {dir} = gitPromptsFixture();
+    delete process.env.JSDK_PRIME_PRETTIER; // prettier ON for this test only
+    setQuiet(true);
+    const root = projectFixture({modules: ['alpha']});
+    const binDir = join(root, 'node_modules', '.bin');
+    mkdirSync(binDir, {recursive: true});
+    const fake = join(binDir, 'prettier');
+    writeFileSync(fake, '#!/bin/sh\necho "prettier exploded" >&2\nexit 2\n');
+    chmodSync(fake, 0o755);
+
+    const outcome = refreshCriticalRulesArtifact(root, {
+      now: NOW,
+      promptsDir: dir,
+    });
+    expect(outcome.status).toBe('failed');
+    if (outcome.status !== 'failed') throw new Error('unreachable');
+    expect(outcome.message).toContain('prettier exploded');
+    expect(outcome.message).toContain(fake);
+    // NOTHING on disk: a half-formatted artifact is worse than none.
+    expect(existsSync(projectRulesFilePath(root))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The committed bytes are the TARGET REPO'S prettier output (home-base-t6a0.21.1)
+//
+// The P0 this guards: `findLocalPrettier` correctly located the repo's BINARY,
+// but the content was formatted in a scratch directory, so prettier resolved its
+// CONFIG from there — i.e. the defaults. The artifact then failed the enrolled
+// repo's own `prettier --check .`, which is precisely `signal-source:PRETTIER`,
+// which is precisely what `sweep --component critical-rules` gates on.
+//
+// So this suite runs a REAL prettier against a repo whose config differs from
+// the defaults on an option the rules content exercises (nature-sounds' actual
+// divergence: `bracketSpacing: false` against a fenced json example), and
+// asserts byte equality with that repo's prettier output — not "prettier ran".
+// ---------------------------------------------------------------------------
+
+/** The SDK's own prettier — a devDependency, so this is offline and pinned. */
+const REAL_PRETTIER = join(
+  import.meta.dir,
+  '..',
+  'node_modules',
+  '.bin',
+  'prettier',
+);
+
+/** Give a fixture repo a real local prettier, the way an enrolled repo has one. */
+function installRealPrettier(root: string): string {
+  if (!existsSync(REAL_PRETTIER)) {
+    throw new Error(
+      `missing ${REAL_PRETTIER} — prettier is a devDependency of this repo precisely so this test can run a real one`,
+    );
+  }
+  const binDir = join(root, 'node_modules', '.bin');
+  mkdirSync(binDir, {recursive: true});
+  const shim = join(binDir, 'prettier');
+  writeFileSync(shim, `#!/bin/sh\nexec "${REAL_PRETTIER}" "$@"\n`);
+  chmodSync(shim, 0o755);
+  return shim;
+}
+
+/** A rules module whose body is a json fence — the surface where a config
+ * difference between the repo and prettier's defaults becomes visible bytes. */
+const FENCED_ALPHA =
+  '# Alpha\n\nALPHA_RULE\n\n```json\n{ "proseWrap": "preserve" }\n```\n';
+const REPO_SPELLING = '{"proseWrap": "preserve"}'; // bracketSpacing: false
+const DEFAULT_SPELLING = '{ "proseWrap": "preserve" }'; // prettier's default
+
+describe('the committed artifact is byte-identical to the repo prettier output', () => {
+  test('the repo config wins, and the bytes on disk are exactly what that prettier emits', () => {
+    const promptsDir = promptsFixture({'src/rules/alpha.md': FENCED_ALPHA});
+    delete process.env.JSDK_PRIME_PRETTIER; // prettier ON for this test only
+    setQuiet(true);
+    const root = projectFixture({
+      files: {
+        '.prettierrc.json': `${JSON.stringify({bracketSpacing: false}, null, 2)}\n`,
+      },
+      modules: ['alpha'],
+    });
+    const prettier = installRealPrettier(root);
+
+    expect(
+      refreshCriticalRulesArtifact(root, {now: NOW, promptsDir}).status,
+    ).toBe('written');
+
+    const file = projectRulesFilePath(root);
+    const bytes = readFileSync(file, 'utf-8');
+
+    // (1) BYTE EQUALITY with what this repo's prettier produces for this path.
+    //     Not "prettier ran": the exact output, compared whole.
+    const repoPrettierOutput = execFileSync(prettier, [file], {
+      cwd: root,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    expect(bytes).toBe(repoPrettierOutput);
+
+    // (2) The repo's config really is the one that applied.
+    expect(bytes).toContain(REPO_SPELLING);
+    expect(bytes).not.toContain(DEFAULT_SPELLING);
+
+    // (3) NEGATIVE CONTROL, in-test: the same content formatted OUTSIDE the
+    //     repo — which is exactly what the old implementation did — produces
+    //     the OTHER spelling. Without this arm, (2) would also pass for a
+    //     fixture whose fence happened to be config-insensitive.
+    const outsideRepo = execFileSync(
+      prettier,
+      [
+        '--ignore-path',
+        '/dev/null',
+        '--stdin-filepath',
+        join(root, '..', 'elsewhere', 'critical-rules.md'),
+      ],
+      {
+        cwd: root,
+        encoding: 'utf-8',
+        input: FENCED_ALPHA,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      },
+    );
+    expect(outsideRepo).toContain(DEFAULT_SPELLING);
+    expect(outsideRepo).not.toContain(REPO_SPELLING);
+  });
+
+  test('the READERS canonicalize to the same bytes, so a fresh artifact is in sync', () => {
+    // The crux of the fix: rules-drift/rules-diff must reach byte-identical
+    // canonical content WITHOUT writing the artifact's real path. If they
+    // resolved a different config, every freshly generated artifact in every
+    // enrolled repo would report drift on the very next session.
+    const promptsDir = promptsFixture({'src/rules/alpha.md': FENCED_ALPHA});
+    delete process.env.JSDK_PRIME_PRETTIER;
+    setQuiet(true);
+    const root = projectFixture({
+      files: {
+        '.prettierrc.json': `${JSON.stringify({bracketSpacing: false}, null, 2)}\n`,
+      },
+      modules: ['alpha'],
+    });
+    installRealPrettier(root);
+
+    expect(
+      refreshCriticalRulesArtifact(root, {now: NOW, promptsDir}).status,
+    ).toBe('written');
+
+    expect(checkRulesDrift(root, {promptsDir}).status).toBe('in-sync');
+    expect(rulesDiff({projectRoot: root, promptsDir}).outcome).toBe('in-sync');
+  });
+
+  test('NEGATIVE CONTROL: a hand-edit to the repo spelling IS detected', () => {
+    // Proves the in-sync verdicts above are measurements, not a checker that
+    // says in-sync no matter what.
+    const promptsDir = promptsFixture({'src/rules/alpha.md': FENCED_ALPHA});
+    delete process.env.JSDK_PRIME_PRETTIER;
+    setQuiet(true);
+    const root = projectFixture({
+      files: {
+        '.prettierrc.json': `${JSON.stringify({bracketSpacing: false}, null, 2)}\n`,
+      },
+      modules: ['alpha'],
+    });
+    installRealPrettier(root);
+    expect(
+      refreshCriticalRulesArtifact(root, {now: NOW, promptsDir}).status,
+    ).toBe('written');
+
+    const file = projectRulesFilePath(root);
+    writeFileSync(
+      file,
+      readFileSync(file, 'utf-8').replace(REPO_SPELLING, DEFAULT_SPELLING),
+    );
+    expect(checkRulesDrift(root, {promptsDir}).status).toBe('locally-modified');
+    expect(rulesDiff({projectRoot: root, promptsDir}).outcome).not.toBe(
+      'in-sync',
+    );
   });
 });
 
