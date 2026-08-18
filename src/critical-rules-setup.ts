@@ -18,9 +18,22 @@
  *       commit only paths under .claude/rules/justin-sdk/.
  *
  *   (b) runCriticalRulesSetup() — enrollment: the base-setup chain, seeding the
- *       module list, then (a). This is what `add critical-rules` and
- *       `sweep --component critical-rules` run; the sweep's pin-neutrality guard
- *       absorbs base-setup's config drift.
+ *       module list, then (a), then the `.claude/settings.json` exclusion that
+ *       drops the USER-LEVEL duplicate (home-base-anhw). This is what
+ *       `add critical-rules` and `sweep --component critical-rules` run; the
+ *       sweep's pin-neutrality guard absorbs base-setup's config drift.
+ *       The exclusion lives HERE and not in (a) on purpose: (a) is what
+ *       `rules-update` calls, and its contract is that it writes exactly one
+ *       path so a rules-only commit stays rules-only.
+ *
+ * DEDUPLICATION, NOT RETIREMENT (home-base-anhw, revising t6a0.21 D7): the
+ * user-level `~/.claude/rules/justin-sdk/critical-rules.md` is KEPT — it is the
+ * only channel reaching the ~69 repos that are not enrolled. An enrolled repo
+ * would otherwise load the universal rules TWICE (user-level + its own
+ * artifact), so enrollment adds one `claudeMdExcludes` entry naming the
+ * user-level file and nothing else. The hook's half of the same job is in
+ * plugin/hooks/session-start.ts: it stops injecting rule text into a repo that
+ * carries its own artifact.
  *
  * OPT-IN MODULE SELECTION (D12): the selection is an EXPLICIT list of module
  * names in `componentConfig["critical-rules"].modules`, seeded ONCE at
@@ -40,7 +53,7 @@
 
 import {execFileSync} from 'child_process';
 import {existsSync, mkdirSync, renameSync, writeFileSync} from 'fs';
-import {basename, dirname, relative, resolve} from 'path';
+import {basename, dirname, join, relative, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
 import {
@@ -58,6 +71,7 @@ import {
   prettierMarkdown,
   projectRulesFilePath,
   readDeployedStamp,
+  rulesFilePath,
   RULES_UPDATE_CMD,
 } from './plugin/lib/rules-file';
 import {
@@ -499,6 +513,121 @@ export function stepCriticalRulesConfig(
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Layer (b): suppress the USER-LEVEL duplicate (home-base-anhw)
+// ---------------------------------------------------------------------------
+
+/** The Claude Code settings key that drops a file from the autoloaded set. */
+export const CLAUDE_MD_EXCLUDES_KEY = 'claudeMdExcludes';
+
+/**
+ * The one string this repo excludes: the ABSOLUTE path of the USER-LEVEL rules
+ * file — the same path `sync-rules` writes, from the same function, so the
+ * exclusion and the file it suppresses cannot drift apart.
+ *
+ * *** THE FORM IS NOT A STYLE CHOICE — IT WAS MEASURED, AND EVERY PLAUSIBLE
+ * ALTERNATIVE IS BROKEN (home-base-anhw, six real `claude -p` probes). ***
+ *
+ * The user-level file and the committed per-repo artifact have the SAME
+ * basename and the SAME trailing four segments (`.claude/rules/justin-sdk/
+ * critical-rules.md`) — one under $HOME, one under the repo. So:
+ *
+ *   `**​/justin-sdk/critical-rules.md`   excludes BOTH — including the repo's own
+ *                                       artifact. That is total omission: the
+ *                                       failure class this whole epic exists to
+ *                                       kill. Reproduced, not theorised.
+ *   `~/.claude/rules/…`                 no tilde expansion — matches nothing.
+ *   `$HOME/.claude/rules/…`             no env expansion — matches nothing.
+ *   `/Users/*​/.claude/rules/…`          a `*` segment does not match — nothing.
+ *   `/Users/jhaa/.claude/rules/…`       the ONLY form that suppresses the
+ *                                       user-level file while leaving the
+ *                                       repo's own artifact loaded.
+ *
+ * The three no-op forms are the real hazard: they look perfectly reasonable in
+ * a committed settings.json and fail SILENTLY (the repo just keeps
+ * double-loading). Only a probe can tell them from the working form — reading
+ * the file cannot. Do not "tidy" this into a portable-looking glob.
+ *
+ * Machine-specificity is therefore forced, and it is fine: on a machine with a
+ * different $HOME the entry matches nothing, which is the BENIGN direction (a
+ * duplicate, never an omission), and off Justin's machines — cloud, CI, a fresh
+ * clone of one of the public repos — there is no user-level file to suppress at
+ * all. It is also why the write below is ADDITIVE: a second machine APPENDS its
+ * own path rather than replacing the first, so both converge instead of
+ * un-fixing each other.
+ */
+export function userLevelRulesExclude(): string {
+  return rulesFilePath();
+}
+
+export type ExcludeOutcome =
+  | {status: 'added' | 'already-present'; value: string}
+  | {status: 'failed'; message: string};
+
+/**
+ * Add the user-level exclusion to the repo's `.claude/settings.json`, ADDITIVELY.
+ *
+ * Never clobbers: an existing `claudeMdExcludes` list is preserved entry for
+ * entry and ours is appended, because that list is Justin's to curate and this
+ * component owns exactly one line of it. Re-running is a no-op (idempotent), so
+ * every future `sweep --component critical-rules` leaves the file byte-identical.
+ *
+ * A settings.json that exists but cannot be parsed, or a `claudeMdExcludes` that
+ * is not a list of strings, is a REFUSAL — never a silent overwrite. Those bytes
+ * are a human's configuration; guessing what they meant and rewriting them is
+ * worse than stopping and saying so.
+ */
+export function addUserLevelRulesExclude(projectRoot: string): ExcludeOutcome {
+  const settingsPath = resolve(projectRoot, '.claude', 'settings.json');
+  const value = userLevelRulesExclude();
+
+  // readJson returns null for BOTH "missing" and "unparseable" — a distinction
+  // that decides between "create it" and "do not touch it" (rule 5).
+  const existing = readJson(settingsPath);
+  if (existing == null && existsSync(settingsPath)) {
+    return {
+      message: `${settingsPath} exists but could not be parsed — refusing to rewrite a settings file we cannot read`,
+      status: 'failed',
+    };
+  }
+  const settings = existing ?? {};
+
+  const raw = settings[CLAUDE_MD_EXCLUDES_KEY];
+  if (
+    raw != null &&
+    (!Array.isArray(raw) || raw.some((entry) => typeof entry !== 'string'))
+  ) {
+    return {
+      message: `${settingsPath} has a "${CLAUDE_MD_EXCLUDES_KEY}" that is not an array of strings — refusing to overwrite it`,
+      status: 'failed',
+    };
+  }
+  const excludes = raw == null ? [] : [...(raw as string[])];
+  if (excludes.includes(value)) return {status: 'already-present', value};
+
+  excludes.push(value);
+  settings[CLAUDE_MD_EXCLUDES_KEY] = excludes;
+  mkdirSync(dirname(settingsPath), {recursive: true});
+  writeJson(settingsPath, settings);
+  return {status: 'added', value};
+}
+
+/** Installer step wrapper: logs, and reports whether enrollment may continue. */
+export function stepUserLevelRulesExclude(projectRoot: string): boolean {
+  const outcome = addUserLevelRulesExclude(projectRoot);
+  if (outcome.status === 'failed') {
+    fail(`critical-rules: ${outcome.message}`);
+    return false;
+  }
+  const where = join('.claude', 'settings.json');
+  success(
+    outcome.status === 'added'
+      ? `${where} now excludes the user-level rules file\n  ${outcome.value}\n  (this repo's own committed artifact is unaffected — only the duplicate is dropped)`
+      : `${where} already excludes the user-level rules file`,
+  );
+  return true;
+}
+
 export async function runCriticalRulesSetup(args: {
   projectRoot: string;
   quiet: boolean;
@@ -533,6 +662,14 @@ export async function runCriticalRulesSetup(args: {
     promptsDir: args.promptsDir,
   });
   if (!refreshSucceeded(outcome)) return 1;
+
+  // DELIVERY BEFORE DEDUPLICATION — the order is load-bearing. The exclusion
+  // step can refuse (a settings.json we must not rewrite), and if it ran first
+  // that refusal would cost this repo its rules entirely. Written second, the
+  // worst case is the artifact landing without the exclusion: a DUPLICATE, which
+  // is exactly today's behaviour and harmless, reported loudly either way.
+  stepHeader('3. .claude/settings.json (drop the user-level duplicate)');
+  if (!stepUserLevelRulesExclude(projectRoot)) return 1;
 
   if (!isQuiet()) {
     console.log(

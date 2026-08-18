@@ -43,6 +43,8 @@ import {
 import {join} from 'path';
 
 import {
+  addUserLevelRulesExclude,
+  CLAUDE_MD_EXCLUDES_KEY,
   computeDefaultModules,
   CRITICAL_RULES_CONFIG_KEY,
   readSelectedModules,
@@ -50,6 +52,7 @@ import {
   refreshSucceeded,
   runCriticalRulesSetup,
   stepCriticalRulesConfig,
+  userLevelRulesExclude,
 } from '../src/critical-rules-setup';
 import {assembleSelected, describeIndexModules} from '../src/plugin/lib/prime';
 import {
@@ -58,6 +61,7 @@ import {
   deployedSourceSha,
   projectRulesFilePath,
   readDeployedStamp,
+  rulesFilePath,
   STAMP_PREFIX,
 } from '../src/plugin/lib/rules-file';
 import {rulesDiff} from '../src/rules-diff';
@@ -73,6 +77,7 @@ function track(sb: Sandbox): Sandbox {
 }
 
 const SAVED_ENV = {
+  home: process.env.HOME,
   promptsDir: process.env.JSDK_PROMPTS_DIR,
   prettier: process.env.JSDK_PRIME_PRETTIER,
   repoUrl: process.env.JSDK_PROMPTS_REPO_URL,
@@ -86,6 +91,7 @@ function restoreEnv(name: string, value: string | undefined): void {
 
 afterEach(() => {
   while (sandboxes.length > 0) sandboxes.pop()?.cleanup();
+  restoreEnv('HOME', SAVED_ENV.home);
   restoreEnv('JSDK_PROMPTS_DIR', SAVED_ENV.promptsDir);
   restoreEnv('JSDK_PRIME_PRETTIER', SAVED_ENV.prettier);
   restoreEnv('JSDK_PROMPTS_REPO_URL', SAVED_ENV.repoUrl);
@@ -1090,5 +1096,199 @@ describe('determinism', () => {
     expect(contentHash(firstBytes.split('\n').slice(2).join('\n').trim())).toBe(
       first.contentHash,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The user-level exclusion (home-base-anhw, half A)
+// ---------------------------------------------------------------------------
+
+/**
+ * Enrollment drops the USER-LEVEL rules file from the repo's autoload set, so an
+ * enrolled repo stops receiving the universal rules twice.
+ *
+ * WHAT THESE TESTS CAN AND CANNOT PROVE, stated plainly because the difference
+ * is the whole risk here. Claude Code's own glob matcher is not importable, so
+ * NO unit test can establish that a given exclude string matches one file and
+ * not another — that was settled by six real `claude -p --disallowedTools '*'`
+ * probes recorded on home-base-anhw, which found that `**​/justin-sdk/critical-
+ * rules.md` excludes the repo's OWN artifact too (total omission) while `~/…`,
+ * `$HOME/…` and `/Users/*​/…` all silently match nothing.
+ *
+ * What these tests DO guarantee is that no future edit can quietly reintroduce
+ * any of those five broken forms: the entry must be an absolute path, carry no
+ * glob metacharacter at all (so it can only ever name ONE file), and lie outside
+ * the project. A single `*` added to that string turns the trap back on, and
+ * `matchesExactlyOneFileOutsideTheRepo` below goes red the moment it appears.
+ */
+function settingsPathOf(repo: string): string {
+  return join(repo, '.claude', 'settings.json');
+}
+
+function readExcludes(repo: string): unknown {
+  return readJson(settingsPathOf(repo))?.[CLAUDE_MD_EXCLUDES_KEY];
+}
+
+/** A throwaway $HOME, so the expected value never depends on this machine. */
+function sandboxHome(): string {
+  const sb = track(createSandbox());
+  process.env.HOME = sb.path;
+  return sb.path;
+}
+
+describe('the user-level rules exclusion', () => {
+  test('names the USER-LEVEL file, and is the same path sync-rules writes', () => {
+    const home = sandboxHome();
+    const repo = projectFixture({modules: ['alpha']});
+
+    const outcome = addUserLevelRulesExclude(repo);
+    expect(outcome.status).toBe('added');
+    expect(readExcludes(repo)).toEqual([
+      join(home, '.claude/rules/justin-sdk/critical-rules.md'),
+    ]);
+    // ONE source for the path: the exclusion and the file it suppresses cannot
+    // drift apart, because both come from rulesFilePath().
+    expect(userLevelRulesExclude()).toBe(rulesFilePath());
+  });
+
+  test('matchesExactlyOneFileOutsideTheRepo: the trap cannot creep back in', () => {
+    sandboxHome();
+    const repo = projectFixture({modules: ['alpha']});
+    addUserLevelRulesExclude(repo);
+    const [entry] = readExcludes(repo) as string[];
+
+    // No glob metacharacter anywhere: an exact path can match exactly one file,
+    // which is what makes "does it also hit the repo's artifact?" answerable at
+    // all. `**​/justin-sdk/critical-rules.md` fails on the very first assertion.
+    for (const meta of ['*', '?', '[', ']', '{', '}']) {
+      expect(entry).not.toContain(meta);
+    }
+    // Absolute, and NOT the repo's own artifact — the two files share a basename
+    // AND their last four segments, so only the prefix can separate them.
+    expect(entry.startsWith('/')).toBe(true);
+    expect(entry).not.toBe(projectRulesFilePath(repo));
+    expect(entry.startsWith(repo)).toBe(false);
+    expect(entry.endsWith(ARTIFACT_REL)).toBe(true); // same tail, different file
+    // No unexpanded shell/tilde syntax: all three spellings measured as no-ops.
+    expect(entry.startsWith('~')).toBe(false);
+    expect(entry).not.toContain('$');
+  });
+
+  test('is ADDITIVE — an existing claudeMdExcludes list survives entry for entry', () => {
+    const home = sandboxHome();
+    const repo = projectFixture({modules: ['alpha']});
+    // A list Justin curated by hand, including one entry that looks like ours.
+    const existing = [
+      'docs/legacy-notes.md',
+      '/Users/someone-else/.claude/rules/justin-sdk/critical-rules.md',
+    ];
+    mkdirSync(join(repo, '.claude'), {recursive: true});
+    writeJson(settingsPathOf(repo), {
+      [CLAUDE_MD_EXCLUDES_KEY]: existing,
+      otherSetting: {keep: true},
+    });
+
+    expect(addUserLevelRulesExclude(repo).status).toBe('added');
+    expect(readExcludes(repo)).toEqual([
+      ...existing,
+      join(home, '.claude/rules/justin-sdk/critical-rules.md'),
+    ]);
+    // Sibling keys are untouched — this component owns one line, not the file.
+    expect(readJson(settingsPathOf(repo))?.otherSetting).toEqual({keep: true});
+  });
+
+  test('is idempotent — a second run reports already-present and rewrites nothing', () => {
+    sandboxHome();
+    const repo = projectFixture({modules: ['alpha']});
+    expect(addUserLevelRulesExclude(repo).status).toBe('added');
+    const bytes = readFileSync(settingsPathOf(repo), 'utf-8');
+
+    const again = addUserLevelRulesExclude(repo);
+    expect(again.status).toBe('already-present');
+    // Byte-identical: every future `sweep --component critical-rules` must leave
+    // twelve repos with nothing to commit.
+    expect(readFileSync(settingsPathOf(repo), 'utf-8')).toBe(bytes);
+  });
+
+  test('REFUSES a settings.json it cannot parse, and leaves the bytes alone', () => {
+    sandboxHome();
+    const repo = projectFixture({modules: ['alpha']});
+    mkdirSync(join(repo, '.claude'), {recursive: true});
+    const corrupt = '{ "claudeMdExcludes": [ // a comment JSON does not allow\n';
+    writeFileSync(settingsPathOf(repo), corrupt);
+
+    const outcome = addUserLevelRulesExclude(repo);
+    expect(outcome.status).toBe('failed');
+    if (outcome.status !== 'failed') throw new Error('unreachable');
+    expect(outcome.message).toContain('could not be parsed');
+    // The refusal is the point: these are a human's bytes.
+    expect(readFileSync(settingsPathOf(repo), 'utf-8')).toBe(corrupt);
+  });
+
+  test('REFUSES a claudeMdExcludes that is not a list of strings', () => {
+    sandboxHome();
+    const repo = projectFixture({modules: ['alpha']});
+    mkdirSync(join(repo, '.claude'), {recursive: true});
+
+    for (const bad of ['a-single-string', {}, ['fine.md', 42]]) {
+      writeFileSync(
+        settingsPathOf(repo),
+        JSON.stringify({[CLAUDE_MD_EXCLUDES_KEY]: bad}),
+      );
+      const bytes = readFileSync(settingsPathOf(repo), 'utf-8');
+      const outcome = addUserLevelRulesExclude(repo);
+      expect(outcome.status).toBe('failed');
+      expect(readFileSync(settingsPathOf(repo), 'utf-8')).toBe(bytes);
+    }
+
+    // NEGATIVE CONTROL: a well-formed list at the same key IS accepted, so the
+    // refusals above are about the shape and not about the key being present.
+    writeFileSync(
+      settingsPathOf(repo),
+      JSON.stringify({[CLAUDE_MD_EXCLUDES_KEY]: ['fine.md']}),
+    );
+    expect(addUserLevelRulesExclude(repo).status).toBe('added');
+  });
+
+  test('enrollment writes BOTH the artifact and the exclusion', async () => {
+    const home = sandboxHome();
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture({git: true, modules: ['alpha', 'omega']});
+
+    const exit = await runCriticalRulesSetup({
+      projectRoot: repo,
+      promptsDir: dir,
+      quiet: true,
+    });
+    expect(exit).toBe(0);
+    expect(existsSync(projectRulesFilePath(repo))).toBe(true);
+    expect(readExcludes(repo)).toContain(
+      join(home, '.claude/rules/justin-sdk/critical-rules.md'),
+    );
+  });
+
+  test('DELIVERY BEFORE DEDUPLICATION: a refused exclusion still leaves the rules', async () => {
+    sandboxHome();
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture({git: true, modules: ['alpha', 'omega']});
+    // base-setup rewrites this file but preserves keys it does not own, so a
+    // malformed claudeMdExcludes survives to reach the exclusion step.
+    mkdirSync(join(repo, '.claude'), {recursive: true});
+    writeJson(settingsPathOf(repo), {
+      [CLAUDE_MD_EXCLUDES_KEY]: 'not-an-array',
+    });
+
+    const exit = await runCriticalRulesSetup({
+      projectRoot: repo,
+      promptsDir: dir,
+      quiet: true,
+    });
+    // Loud…
+    expect(exit).toBe(1);
+    expect(readExcludes(repo)).toBe('not-an-array');
+    // …but the rules landed anyway. The worst case of a refusal is a DUPLICATE
+    // (the pre-anhw status quo), never a repo left with no rules at all.
+    expect(existsSync(projectRulesFilePath(repo))).toBe(true);
+    expect(readArtifact(repo)).toContain('ALPHA_RULE');
   });
 });
