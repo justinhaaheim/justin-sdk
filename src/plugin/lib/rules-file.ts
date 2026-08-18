@@ -110,7 +110,8 @@ export function prettierMarkdown(
   // under $TMPDIR keeps that caller's config resolution (and therefore its
   // content hash) exactly what it has always been. Nothing is written there —
   // the path only needs to name a .md file for parser + config resolution.
-  const filePath = options?.filePath ?? join(tmpdir(), 'jsdk-prettier-rules.md');
+  const filePath =
+    options?.filePath ?? join(tmpdir(), 'jsdk-prettier-rules.md');
   const given = options?.binary;
   const binary = given != null && given.length > 0 ? given : null;
   const label = binary ?? 'bunx prettier';

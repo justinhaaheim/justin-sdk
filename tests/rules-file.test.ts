@@ -188,7 +188,9 @@ describe('prettierMarkdown failure reporting', () => {
 
     const result = prettierMarkdown(INPUT, {binary: bin, filePath: artifact});
     if (result.status === 'failed') throw new Error(result.reason);
-    expect(result.markdown).toBe(`ARGS: --ignore-path /dev/null --stdin-filepath ${artifact}`);
+    expect(result.markdown).toBe(
+      `ARGS: --ignore-path /dev/null --stdin-filepath ${artifact}`,
+    );
     // The read-only callers depend on this: naming the path must not create it.
     expect(existsSync(artifact)).toBe(false);
   });
