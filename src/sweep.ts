@@ -45,6 +45,15 @@
  * IN-PROCESS, i.e. the orchestrator's own code, precisely so a rules sweep
  * does not depend on the SDK version each repo happens to be pinned to.
  *
+ * THE PIN WRITE (home-base-apus.1): remove-then-add, via the repo's OWN package
+ * manager, across BOTH dependency sections — never `add` over the top. Adding
+ * over an existing github spec is broken in two different directions at once
+ * (`bun add -d` errors `DependencyLoop`; `bun add -d` / `yarn add --dev` over a
+ * `dependencies` declaration return 0 and leave the manifest wrong), and the
+ * post-condition is checked against the manifest rather than the exit code.
+ * A repo whose SDK comes from a WORKSPACE MEMBER (home-base) gets no pin
+ * written at all, with its own reported outcome — D21.
+ *
  * ONE COMMAND, BOTH SURFACES (t6a0.21 D17): a `--component critical-rules` run
  * also refreshes THIS machine's user-level rules file at the end, because that
  * file is still the only channel serving the repos that are not enrolled. It is
@@ -55,7 +64,7 @@
 import {execFileSync, spawnSync} from 'node:child_process';
 import {existsSync, readFileSync, readdirSync} from 'node:fs';
 import {homedir} from 'node:os';
-import {basename, join, resolve} from 'node:path';
+import {basename, join, relative, resolve} from 'node:path';
 
 import {
   COMPONENT_NAMES,
@@ -535,6 +544,194 @@ export function parsePorcelainPaths(porcelain: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// The pin write (full payload only) — home-base-apus.1
+// ---------------------------------------------------------------------------
+
+const SDK_DEP_SECTIONS = ['dependencies', 'devDependencies'] as const;
+export type DepSection = (typeof SDK_DEP_SECTIONS)[number];
+
+/**
+ * Which dependency sections declare the SDK, and at what spec.
+ *
+ * `ok: false` for a package.json that cannot be read or parsed — "I could not
+ * look" must never render as "it is declared nowhere" (rule 5). That
+ * conflation is not theoretical here: the empty verdict is exactly what sends
+ * the pin step down the skip-the-remove path, which is how a stale declaration
+ * survives into a second, contradictory one.
+ */
+export function readSdkDeclarations(
+  root: string,
+):
+  | {ok: true; declared: ReadonlyMap<DepSection, string>}
+  | {ok: false; reason: string} {
+  const path = join(root, 'package.json');
+  if (!existsSync(path)) return {ok: false, reason: 'package.json not found'};
+  const parsed = readJsonObject(path);
+  if (parsed == null) {
+    return {ok: false, reason: 'package.json is not a readable JSON object'};
+  }
+  const declared = new Map<DepSection, string>();
+  for (const section of SDK_DEP_SECTIONS) {
+    // objectAt returns null unless the section really is a plain object, so a
+    // `"dependencies": null` or `"dependencies": []` reads as "declares none"
+    // rather than throwing on the way through.
+    const container = objectAt(parsed, [section]);
+    if (container == null) continue;
+    const spec = container[SDK_PKG];
+    if (typeof spec === 'string') declared.set(section, spec);
+  }
+  return {declared, ok: true};
+}
+
+/** The `workspaces` entries a package.json declares, in either supported shape. */
+export function workspacePatternsOf(pkg: Record<string, unknown>): string[] {
+  const raw = pkg.workspaces;
+  const list = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'object' && raw != null
+      ? ((raw as {packages?: unknown}).packages ?? null)
+      : null;
+  if (!Array.isArray(list)) return [];
+  return list.filter((entry): entry is string => typeof entry === 'string');
+}
+
+/**
+ * Directories a workspaces pattern names. Deliberately covers only the two
+ * shapes that occur in practice — a literal path (`projects/justin-sdk`) and a
+ * single trailing star (`packages/*`) — rather than pulling in a glob engine.
+ *
+ * The limit is safe because this is the SECONDARY signal: the primary one is a
+ * `workspace:` spec on the declaration itself, which is what home-base (the
+ * only workspace consumer in the fleet) actually carries. A pattern this cannot
+ * expand simply contributes no evidence.
+ */
+function expandWorkspacePattern(root: string, pattern: string): string[] {
+  const clean = pattern.replace(/\/+$/, '');
+  if (clean === '') return [];
+  if (!clean.includes('*')) return [join(root, clean)];
+  const prefix = clean.slice(0, -2);
+  if (!clean.endsWith('/*') || prefix.includes('*')) return [];
+  const parent = join(root, prefix);
+  if (!existsSync(parent)) return [];
+  try {
+    return readdirSync(parent, {withFileTypes: true})
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(parent, entry.name));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Is the SDK already satisfied by a workspace member rather than by a pin?
+ * (t6a0.21 D21 — the answer to Dispatch D's home-base QUESTION.)
+ *
+ * home-base declares `"@justinhaaheim/justin-sdk": "workspace:*"` and lists the
+ * submodule that IS the SDK in its `workspaces` array. Writing a github pin
+ * there would not bump a pin, it would convert the SDK's own development host
+ * off the submodule+workspace arrangement — and it would do so GREEN, because
+ * the gates plausibly still pass on the rewritten manifest. So the pin write is
+ * skipped, with its own reported outcome; update, gates and component re-apply
+ * still run.
+ */
+export type WorkspaceSatisfaction =
+  | {satisfied: true; reason: string}
+  | {satisfied: false};
+
+export function sdkWorkspaceSatisfaction(
+  root: string,
+  declared: ReadonlyMap<DepSection, string>,
+): WorkspaceSatisfaction {
+  for (const section of SDK_DEP_SECTIONS) {
+    const spec = declared.get(section);
+    if (spec != null && spec.startsWith('workspace:')) {
+      return {reason: `${section}.${SDK_PKG} is "${spec}"`, satisfied: true};
+    }
+  }
+  const pkg = readJsonObject(join(root, 'package.json'));
+  if (pkg == null) return {satisfied: false};
+  for (const pattern of workspacePatternsOf(pkg)) {
+    for (const dir of expandWorkspacePattern(root, pattern)) {
+      const member = readJsonObject(join(dir, 'package.json'));
+      if (member != null && member.name === SDK_PKG) {
+        return {
+          reason: `workspaces member ${relative(root, dir)} IS ${SDK_PKG}`,
+          satisfied: true,
+        };
+      }
+    }
+  }
+  return {satisfied: false};
+}
+
+/**
+ * How many times package.json declares the SDK AS A KEY, counted in the RAW
+ * TEXT rather than in the parsed object.
+ *
+ * Not redundant with verifySinglePin, which cannot see this: `bun add -d` over
+ * an existing declaration in the same section writes the key TWICE into one
+ * object (measured, bun 1.3.11, `file:` specs). That is valid JSON, JSON.parse
+ * silently keeps the last one, and so every parsed view of the manifest —
+ * including this module's own — reports one clean declaration while the
+ * committed file is corrupt. A text-level count is the only thing that sees it.
+ *
+ * The literal `"<name>":` form is what separates a declaration from the package
+ * name appearing inside a script alias (`bunx @justinhaaheim/justin-sdk
+ * doctor`), which carries no closing quote and colon.
+ */
+export function countSdkKeyDeclarations(packageJsonText: string): number {
+  return packageJsonText.split(`"${SDK_PKG}":`).length - 1;
+}
+
+/**
+ * The post-condition of the pin write, measured off the manifest rather than
+ * inferred from an exit code. EXACTLY ONE declaration, in devDependencies, at
+ * the swept pin.
+ *
+ * This exists because every failure this function catches has already shipped:
+ * `bun add -d` on a repo declaring the SDK in `dependencies` returns 0 and
+ * leaves TWO contradictory declarations (health-logger-rn, commit d14c327,
+ * committed and pushed), and `yarn add --dev` on the same shape returns 0 and
+ * updates the spec in `dependencies`, silently ignoring `--dev`. A green exit
+ * code is not evidence the manifest is right; the manifest is.
+ */
+export function verifySinglePin(
+  declared: ReadonlyMap<DepSection, string>,
+  pin: string,
+): {ok: true} | {ok: false; reason: string} {
+  const entries = [...declared.entries()];
+  if (entries.length === 0) {
+    return {
+      ok: false,
+      reason: `the pin step left ${SDK_PKG} declared in neither dependencies nor devDependencies (expected devDependencies "${pin}")`,
+    };
+  }
+  if (entries.length > 1) {
+    const shown = entries
+      .map(([section, spec]) => `${section}: "${spec}"`)
+      .join('; ');
+    return {
+      ok: false,
+      reason: `the pin step left ${SDK_PKG} declared ${entries.length} times (${shown}) — exactly one declaration, in devDependencies, is the contract`,
+    };
+  }
+  const [section, spec] = entries[0] as [DepSection, string];
+  if (section !== 'devDependencies') {
+    return {
+      ok: false,
+      reason: `the pin step left ${SDK_PKG} in ${section} ("${spec}") rather than devDependencies`,
+    };
+  }
+  if (spec !== pin) {
+    return {
+      ok: false,
+      reason: `the pin step left ${SDK_PKG} at "${spec}", not the swept pin "${pin}"`,
+    };
+  }
+  return {ok: true};
+}
+
+// ---------------------------------------------------------------------------
 // The USER-LEVEL surface — one command, both surfaces (t6a0.21 D17)
 // ---------------------------------------------------------------------------
 
@@ -607,8 +804,14 @@ export function refreshUserLevelRules(
   }
   const after = readDeployedStamp(file)?.contentHash ?? null;
   return after === before
-    ? {detail: `${file} already current (content ${after ?? 'unstamped'})`, status: 'current'}
-    : {detail: `${file} refreshed (content ${before ?? 'none'} → ${after ?? 'unstamped'})`, status: 'refreshed'};
+    ? {
+        detail: `${file} already current (content ${after ?? 'unstamped'})`,
+        status: 'current',
+      }
+    : {
+        detail: `${file} refreshed (content ${before ?? 'none'} → ${after ?? 'unstamped'})`,
+        status: 'refreshed',
+      };
 }
 
 // ---------------------------------------------------------------------------
@@ -616,7 +819,17 @@ export function refreshUserLevelRules(
 // ---------------------------------------------------------------------------
 
 export type PayloadOutcome =
-  | {ok: true; note: string}
+  | {
+      ok: true;
+      note: string;
+      /**
+       * A short phrase that must survive into the repo's SUMMARY line, not just
+       * the inline chatter — reserved for payload facts an operator would
+       * misread the run without ("the pin was not written"). Absent for the
+       * ordinary case, so the common summary line stays unchanged.
+       */
+      summaryNote?: string;
+    }
   | {ok: false; detail: string};
 
 /**
@@ -685,19 +898,100 @@ export async function applySweepPayload(
   // add` there migrated package-lock.json and died in a resolver loop).
   // Mixing managers is exactly the class of nondeterminism this script
   // exists to avoid.
-  const pin = `github:justinhaaheim/justin-sdk#v${getSdkVersion()}`;
+  const pinWrite = writeSdkPin(
+    worktree,
+    `github:justinhaaheim/justin-sdk#v${getSdkVersion()}`,
+  );
+  if (!pinWrite.ok) return pinWrite;
+  const update = runSweepUpdate(worktree);
+  if (!update.ok) return update;
+  return {
+    ...pinWrite,
+    note: `${pinWrite.note} + re-applied components`,
+  };
+}
+
+/**
+ * Write `pin` as the repo's ONE SDK declaration, using the repo's own package
+ * manager — or report that this repo is not a pin consumer at all.
+ *
+ * REMOVE-THEN-ADD, never add-over-the-top (home-base-apus.1). Measured on
+ * bun 1.3.11 / npm 11.12.1 / yarn 1.22.22, one fixture per manager and shape:
+ *   bun  add -d over an existing devDeps GITHUB spec → internal
+ *        `DependencyLoop` error, package.json untouched. That is the normal
+ *        state of every repo a previous sweep has touched, so it took 4 of the
+ *        first 6 repos of the maiden real sweep red.
+ *   bun  add -d over an existing devDeps `file:` spec → exit 0, and the SAME
+ *        KEY written TWICE into one object. Valid JSON, last-wins on parse, so
+ *        the corruption is invisible to any parsed view of the manifest.
+ *   bun  add -d over a `dependencies` declaration → exit 0, TWO contradictory
+ *        declarations left behind (shipped: health-logger-rn d14c327,
+ *        `dependencies` #v0.9.0 vs `devDependencies` #v0.18.0).
+ *   yarn add --dev over a `dependencies` declaration → exit 0, spec updated IN
+ *        `dependencies`; the `--dev` is silently ignored.
+ *   npm  handles both shapes correctly on its own — the remove is kept anyway,
+ *        because one recipe for all three managers is the point (uniformity),
+ *        and it was measured harmless there.
+ * One `<pm> remove` clears BOTH sections in all three managers, so a single
+ * remove is the whole fix for every shape. Normalizing a `dependencies`
+ * declaration into devDependencies is INTENDED, not collateral, which is why it
+ * is reported when it happens.
+ *
+ * Exported so the four manifest shapes can be exercised against the REAL
+ * package managers with a local `file:` pin — offline, and without standing up
+ * hydration, the doctor/signal subprocesses and git plumbing around them.
+ */
+export function writeSdkPin(worktree: string, pin: string): PayloadOutcome {
   const {packageManager} = detectPackageManager(worktree);
   const PIN_ARGV: Record<string, string[]> = {
     bun: ['bun', 'add', '-d', pin],
     npm: ['npm', 'install', '--save-dev', pin],
     yarn: ['yarn', 'add', '--dev', pin],
   };
-  const pinArgv = PIN_ARGV[packageManager ?? 'bun'];
-  if (pinArgv == null) {
+  const REMOVE_ARGV: Record<string, string[]> = {
+    bun: ['bun', 'remove', SDK_PKG],
+    npm: ['npm', 'uninstall', SDK_PKG],
+    yarn: ['yarn', 'remove', SDK_PKG],
+  };
+  const manager = packageManager ?? 'bun';
+  const pinArgv = PIN_ARGV[manager];
+  const removeArgv = REMOVE_ARGV[manager];
+  if (pinArgv == null || removeArgv == null) {
     return {
       detail: `no pin recipe for package manager ${String(packageManager)}`,
       ok: false,
     };
+  }
+
+  const before = readSdkDeclarations(worktree);
+  if (!before.ok) {
+    return {
+      detail: `cannot read the SDK declaration before pinning: ${before.reason} — worktree left for inspection`,
+      ok: false,
+    };
+  }
+
+  // D21: a workspace consumer is not a pin consumer. Skip the write, loudly.
+  const workspace = sdkWorkspaceSatisfaction(worktree, before.declared);
+  if (workspace.satisfied) {
+    return {
+      note: `pin: workspace-satisfied, not written (${workspace.reason})`,
+      ok: true,
+      summaryNote: 'pin: workspace-satisfied, not written',
+    };
+  }
+
+  const stale = [...before.declared.keys()];
+  if (stale.length > 0) {
+    const removed = run(removeArgv, worktree);
+    if (removed.exitCode !== 0) {
+      return {
+        detail:
+          `${removeArgv.join(' ')} failed (exit ${removed.exitCode}) — the pin was NOT written, ` +
+          'worktree left for inspection',
+        ok: false,
+      };
+    }
   }
   const pinAdd = run(pinArgv, worktree);
   if (pinAdd.exitCode !== 0) {
@@ -706,6 +1000,51 @@ export async function applySweepPayload(
       ok: false,
     };
   }
+
+  // Measure the MANIFEST, not the exit code: every shape listed above returned
+  // 0 while leaving the manifest wrong.
+  const pkgPath = join(worktree, 'package.json');
+  const keyCount = countSdkKeyDeclarations(
+    existsSync(pkgPath) ? readFileSync(pkgPath, 'utf-8') : '',
+  );
+  if (keyCount !== 1) {
+    return {
+      detail:
+        `after the pin write package.json declares "${SDK_PKG}" as a key ${keyCount} time(s), ` +
+        'not once — worktree left for inspection',
+      ok: false,
+    };
+  }
+  const after = readSdkDeclarations(worktree);
+  if (!after.ok) {
+    return {
+      detail: `cannot read the SDK declaration after pinning: ${after.reason} — worktree left for inspection`,
+      ok: false,
+    };
+  }
+  const single = verifySinglePin(after.declared, pin);
+  if (!single.ok) {
+    return {
+      detail: `${single.reason} — worktree left for inspection`,
+      ok: false,
+    };
+  }
+
+  return stale.includes('dependencies')
+    ? {
+        note: `pinned ${pin} (normalized from dependencies → devDependencies)`,
+        ok: true,
+        summaryNote: 'pin normalized: dependencies → devDependencies',
+      }
+    : {note: `pinned ${pin}`, ok: true};
+}
+
+/**
+ * `justin-sdk update` inside the worktree — the second half of the full
+ * payload, shared by the pinned and the workspace-satisfied paths so the
+ * skip cannot accidentally skip the component re-apply too.
+ */
+function runSweepUpdate(worktree: string): PayloadOutcome {
   // --allow-dirty because the tree IS dirty by design at this point: the
   // sweep's own pin bump is sitting uncommitted (fourth live-sweep finding —
   // update's dirty guard correctly refused). The sweep makes the one commit
@@ -727,7 +1066,9 @@ export async function applySweepPayload(
       ok: false,
     };
   }
-  return {note: `pinned ${pin} + re-applied components`, ok: true};
+  // The caller owns the note: it is the only one that knows whether the pin was
+  // written, normalized, or deliberately skipped.
+  return {note: 'components re-applied', ok: true};
 }
 
 // ---------------------------------------------------------------------------
@@ -737,6 +1078,27 @@ export async function applySweepPayload(
 interface SweepContext {
   dryRun: boolean;
   payload: SweepPayload;
+}
+
+/**
+ * The dry-run's advisory line about the pin, so `sweep --dry-run` says up front
+ * which repo will NOT get a pin written — the one thing about a full sweep that
+ * a plan reading "would sweep off main" hides.
+ *
+ * ADVISORY, deliberately: it reads the PRIMARY checkout's working tree, while
+ * the real run re-decides inside a worktree branched from the default branch's
+ * committed state. A dirty or off-branch primary can therefore disagree. The
+ * real decision is never taken from here.
+ */
+function dryRunPinNote(repo: string): string {
+  const declarations = readSdkDeclarations(repo);
+  if (!declarations.ok) {
+    return ` — pin: UNREADABLE (${declarations.reason}); the real run would fail here`;
+  }
+  const workspace = sdkWorkspaceSatisfaction(repo, declarations.declared);
+  return workspace.satisfied
+    ? ` — pin: workspace-satisfied, would NOT be written (${workspace.reason})`
+    : '';
 }
 
 async function sweepOneRepo(
@@ -815,7 +1177,7 @@ async function sweepOneRepo(
       detail:
         context.payload.mode === 'component'
           ? `would apply ${context.payload.component} off ${defaultBranch} (pin untouched)`
-          : `would sweep off ${defaultBranch}`,
+          : `would sweep off ${defaultBranch}${dryRunPinNote(repo)}`,
       outcome: 'current',
       repo: name,
     };
@@ -862,6 +1224,10 @@ async function sweepOneRepo(
   const payload = await applySweepPayload(worktreePath, context.payload);
   if (!payload.ok) return fail(payload.detail);
   say(`  ${DIM}${payload.note}${RESET}`);
+  // Carried all the way to the summary line: a pin that was deliberately not
+  // written must not be legible only in the scrollback above.
+  const payloadNote =
+    payload.summaryNote == null ? '' : ` [${payload.summaryNote}]`;
 
   // --- Gates ---------------------------------------------------------------
   // Snapshot AFTER the payload (which already restored the pin), so the gates
@@ -915,7 +1281,11 @@ async function sweepOneRepo(
   const staged = git(worktreePath, ['diff', '--cached', '--name-only']);
   if (staged == null || staged === '') {
     cleanupWorktree();
-    return {detail: 'already current', outcome: 'current', repo: name};
+    return {
+      detail: `already current${payloadNote}`,
+      outcome: 'current',
+      repo: name,
+    };
   }
   const commit = run(
     [
@@ -949,7 +1319,7 @@ async function sweepOneRepo(
   );
   if (!safety.ok) {
     return {
-      detail: `green + committed on ${SWEEP_BRANCH}${pinGateNote}, but merge deferred: ${safety.reason}`,
+      detail: `green + committed on ${SWEEP_BRANCH}${pinGateNote}${payloadNote}, but merge deferred: ${safety.reason}`,
       outcome: 'merge-pending',
       repo: name,
     };
@@ -960,7 +1330,7 @@ async function sweepOneRepo(
   );
   if (merge.exitCode !== 0) {
     return {
-      detail: `merge --ff-only failed (diverged?) — branch ${SWEEP_BRANCH} left standing`,
+      detail: `merge --ff-only failed (diverged?) — branch ${SWEEP_BRANCH} left standing${payloadNote}`,
       outcome: 'merge-pending',
       repo: name,
     };
@@ -978,7 +1348,7 @@ async function sweepOneRepo(
   }
   cleanupWorktree();
   return {
-    detail: `updated, merged into ${defaultBranch}, ${pushNote}${pinGateNote}`,
+    detail: `updated, merged into ${defaultBranch}, ${pushNote}${pinGateNote}${payloadNote}`,
     outcome: 'clean',
     repo: name,
   };
