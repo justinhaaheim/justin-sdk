@@ -44,6 +44,12 @@
  * (this orchestrator stays dumb) is untouched. D11: the component runs
  * IN-PROCESS, i.e. the orchestrator's own code, precisely so a rules sweep
  * does not depend on the SDK version each repo happens to be pinned to.
+ *
+ * ONE COMMAND, BOTH SURFACES (t6a0.21 D17): a `--component critical-rules` run
+ * also refreshes THIS machine's user-level rules file at the end, because that
+ * file is still the only channel serving the repos that are not enrolled. It is
+ * a payload/summary addition with its own outcome line — not per-repo
+ * intelligence, and the ratchet contract still holds.
  */
 
 import {execFileSync, spawnSync} from 'node:child_process';
@@ -57,8 +63,14 @@ import {
   runComponentByName,
   type ComponentName,
 } from './components';
-import {getSdkVersion, writeJson} from './setup-helpers';
+import {
+  readDeployedStamp,
+  rulesFilePath,
+  SYNC_RULES_CMD,
+} from './plugin/lib/rules-file';
+import {getSdkVersion, isQuiet, setQuiet, writeJson} from './setup-helpers';
 import {detectPackageManager, setupEnv} from './setup-env';
+import {runSyncRules} from './sync-rules';
 
 export const SWEEP_BRANCH = 'worktree-sdk-sweep';
 export const SWEEP_WORKTREE_SEGMENTS = [
@@ -523,6 +535,83 @@ export function parsePorcelainPaths(porcelain: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
+// The USER-LEVEL surface — one command, both surfaces (t6a0.21 D17)
+// ---------------------------------------------------------------------------
+
+/**
+ * A rules edit has to reach TWO places: the enrolled repos (the per-repo
+ * artifacts, above) and `~/.claude/rules/justin-sdk/critical-rules.md`, which is
+ * still the ONLY channel serving the ~69 repos that are not enrolled
+ * (home-base-anhw). Making Justin remember a second command after every sweep is
+ * exactly the kind of step that gets skipped and then silently rots, so the
+ * sweep does it — same trigger-not-heartbeat principle as D4: an explicit act
+ * by an invoker who is present, never a background write.
+ *
+ * SCOPED, and deliberately narrowly: only `--component critical-rules`. A
+ * gitignore sweep has no business rewriting anyone's rules file, and the FULL
+ * sweep is about SDK pins rather than rules content. Other machines still
+ * converge through the existing session-start staleness notice.
+ *
+ * ISOLATED IN BOTH DIRECTIONS. It runs whatever the repos did (a failed repo is
+ * no reason to leave THIS machine on stale rules), and its own outcome is a
+ * separate value that never touches a RepoResult — so a broken prompts clone
+ * cannot make twelve green repos read as failed, and a red repo cannot make a
+ * successful refresh read as skipped.
+ */
+export type UserRulesOutcome =
+  | {status: 'refreshed' | 'current' | 'dry-run'; detail: string}
+  | {status: 'failed'; detail: string};
+
+/** null ⇒ this payload has no business touching the user-level file. */
+export function refreshUserLevelRules(
+  payload: SweepPayload,
+  options: {dryRun: boolean} = {dryRun: false},
+): UserRulesOutcome | null {
+  if (payload.mode !== 'component' || payload.component !== 'critical-rules') {
+    return null;
+  }
+  const file = rulesFilePath();
+  if (options.dryRun) {
+    return {detail: `would refresh ${file}`, status: 'dry-run'};
+  }
+
+  // Report "did the bytes actually move?" by MEASURING the stamped hash either
+  // side of the call, rather than by trusting an exit code to mean it. Also the
+  // one thing that distinguishes a real refresh from an already-current no-op,
+  // which sync-rules only says in prose.
+  const before = readDeployedStamp(file)?.contentHash ?? null;
+  const wasQuiet = isQuiet();
+  let exitCode: number;
+  try {
+    // quiet: its success chatter would land in the middle of the summary. Its
+    // FAILURE line still prints — fail() ignores quiet — so the cause is on
+    // screen and this line only has to name the remedy.
+    exitCode = runSyncRules({quiet: true});
+  } catch (error) {
+    return {
+      detail:
+        `sync-rules threw (${error instanceof Error ? error.message : String(error)}) — ` +
+        `${file} was NOT refreshed; the repos above are unaffected`,
+      status: 'failed',
+    };
+  } finally {
+    setQuiet(wasQuiet);
+  }
+  if (exitCode !== 0) {
+    return {
+      detail:
+        `sync-rules failed (exit ${exitCode}) — ${file} was NOT refreshed, so unenrolled repos ` +
+        `still see the OLD rules. Fix the cause above, then run \`${SYNC_RULES_CMD}\`. The repos above are unaffected`,
+      status: 'failed',
+    };
+  }
+  const after = readDeployedStamp(file)?.contentHash ?? null;
+  return after === before
+    ? {detail: `${file} already current (content ${after ?? 'unstamped'})`, status: 'current'}
+    : {detail: `${file} refreshed (content ${before ?? 'none'} → ${after ?? 'unstamped'})`, status: 'refreshed'};
+}
+
+// ---------------------------------------------------------------------------
 // The payload: what actually gets applied inside a hydrated worktree
 // ---------------------------------------------------------------------------
 
@@ -944,6 +1033,10 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
     results.push(await sweepOneRepo(repo, {dryRun, payload}));
   }
 
+  // D17. Unconditional on the repo results by design (see refreshUserLevelRules):
+  // a repo that went red is no reason to leave this machine's own rules stale.
+  const userRules = refreshUserLevelRules(payload, {dryRun});
+
   say(`\n${BOLD}Summary${RESET}`);
   const ICON: Record<RepoOutcome, string> = {
     clean: `${GREEN}✓${RESET}`,
@@ -957,6 +1050,20 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
       `  ${ICON[result.outcome]} ${result.repo} ${DIM}${result.detail}${RESET}`,
     );
   }
+  if (userRules != null) {
+    // Its OWN line, visibly not a repo: the two surfaces succeed and fail
+    // independently, so folding this in among the repo names would invite
+    // reading a red user-level refresh as a red repo.
+    const USER_ICON: Record<UserRulesOutcome['status'], string> = {
+      current: `${GREEN}=${RESET}`,
+      'dry-run': `${DIM}⊘${RESET}`,
+      failed: `${RED}✗${RESET}`,
+      refreshed: `${GREEN}✓${RESET}`,
+    };
+    say(
+      `  ${USER_ICON[userRules.status]} ${BOLD}user-level rules${RESET} ${DIM}${userRules.detail}${RESET}`,
+    );
+  }
   const failed = results.filter((result) => result.outcome === 'failed').length;
   const pending = results.filter(
     (result) => result.outcome === 'merge-pending',
@@ -966,5 +1073,8 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
       `\n${YELLOW}${failed} failed, ${pending} merge-pending — each left its worktree/branch standing for inspection. Fix the CAUSE in the SDK (ratchet contract), then re-sweep.${RESET}`,
     );
   }
-  return failed > 0 ? 1 : 0;
+  // A failed user-level refresh is a real failure and must not exit 0 — that
+  // would be the silence-shaped kind. It is attributed to its own surface, never
+  // to a repo, and the remedy is one command rather than another whole sweep.
+  return failed > 0 || userRules?.status === 'failed' ? 1 : 0;
 }

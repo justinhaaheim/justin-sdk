@@ -31,6 +31,7 @@ import {join} from 'path';
 
 import {runBaseSetup} from '../src/base-setup';
 import {runComponentByName} from '../src/components';
+import {readDeployedStamp} from '../src/plugin/lib/rules-file';
 import {
   getSdkVersion,
   readJson,
@@ -46,6 +47,7 @@ import {
   parseConfigComponents,
   planSweepPayload,
   readPinSnapshot,
+  refreshUserLevelRules,
   restorePinSnapshot,
   runSweep,
   SWEEP_BRANCH,
@@ -646,5 +648,230 @@ describe('holdPinAfterGates — drift the GATES reintroduce', () => {
       holdPinAfterGates(project.root, planSweepPayload('gitignore'), null),
     ).toEqual([]);
     expect((readJson(project.cfgPath) ?? {}).version).toBe('9.9.9');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D17 — one command, both surfaces
+// ---------------------------------------------------------------------------
+
+/**
+ * A rules edit has to land in the enrolled repos AND in this machine's
+ * user-level rules file, which is still the only channel for the repos that are
+ * not enrolled. The sweep does both, so there is no second command to forget.
+ *
+ * THE TWO THINGS THAT MUST HOLD, and both are about BLAST RADIUS:
+ *  1. SCOPE. Only `--component critical-rules` may touch that file. A gitignore
+ *     sweep or a full sweep writing to ~/.claude would be a side effect nobody
+ *     asked for, so the no-op arms assert the file does not even come into
+ *     existence — not merely that nothing was printed.
+ *  2. ISOLATION, BOTH WAYS. The user-level surface and the repo surface fail
+ *     independently. A broken prompts source must not turn green repos red, and
+ *     a red repo must not stop the refresh — a failed repo is no reason to leave
+ *     this machine on stale rules.
+ *
+ * $HOME is a sandbox throughout, so `rulesFilePath()` resolves inside the
+ * fixture: these tests can never read or write Justin's real rules file. The
+ * prompts fixture is deliberately NOT a git checkout, which skips sync-rules'
+ * `bunx version-manager` call (network) and stamps the version 'unknown'.
+ */
+const SAVED_D17_ENV = {
+  home: process.env.HOME,
+  prettier: process.env.JSDK_PRIME_PRETTIER,
+  promptsDir: process.env.JSDK_PROMPTS_DIR,
+};
+
+afterEach(() => {
+  for (const [name, value] of [
+    ['HOME', SAVED_D17_ENV.home],
+    ['JSDK_PRIME_PRETTIER', SAVED_D17_ENV.prettier],
+    ['JSDK_PROMPTS_DIR', SAVED_D17_ENV.promptsDir],
+  ] as const) {
+    if (value == null) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
+
+/** A throwaway $HOME; returns where the user-level rules file would land. */
+function sandboxHome(): string {
+  const sb = track(createSandbox());
+  process.env.HOME = sb.path;
+  return join(sb.path, '.claude/rules/justin-sdk/critical-rules.md');
+}
+
+function userRulesPrompts(body = 'UNIVERSAL_RULE_V1'): string {
+  process.env.JSDK_PRIME_PRETTIER = '0';
+  const sb = track(createSandbox());
+  sb.writeFile('src/rules/index.md', '@./alpha.md');
+  sb.writeFile('src/rules/alpha.md', `# Alpha\n\n${body}`);
+  process.env.JSDK_PROMPTS_DIR = sb.path;
+  return sb.path;
+}
+
+const CRITICAL_RULES_PAYLOAD = planSweepPayload('critical-rules');
+
+describe('refreshUserLevelRules (D17)', () => {
+  test('a critical-rules component sweep writes the user-level file', () => {
+    const file = sandboxHome();
+    userRulesPrompts();
+    expect(existsSync(file)).toBe(false);
+
+    const outcome = refreshUserLevelRules(CRITICAL_RULES_PAYLOAD);
+    expect(outcome?.status).toBe('refreshed');
+    expect(readFileSync(file, 'utf-8')).toContain('UNIVERSAL_RULE_V1');
+    expect(outcome?.detail).toContain(file);
+  });
+
+  test('SCOPE: no other payload touches the user-level file, at all', () => {
+    for (const payload of [
+      planSweepPayload(null), // the full sweep
+      planSweepPayload('gitignore'),
+      planSweepPayload('beads'),
+    ]) {
+      const file = sandboxHome();
+      userRulesPrompts();
+      // null, not a no-op outcome: there is no line to print either.
+      expect(refreshUserLevelRules(payload)).toBeNull();
+      // The sharper assertion — nothing was WRITTEN, not just nothing said.
+      expect(existsSync(file)).toBe(false);
+    }
+  });
+
+  test('an already-current file is reported as current, not as a refresh', () => {
+    const file = sandboxHome();
+    userRulesPrompts();
+    expect(refreshUserLevelRules(CRITICAL_RULES_PAYLOAD)?.status).toBe(
+      'refreshed',
+    );
+    const bytes = readFileSync(file, 'utf-8');
+
+    const second = refreshUserLevelRules(CRITICAL_RULES_PAYLOAD);
+    expect(second?.status).toBe('current');
+    // "current" is a measurement of the bytes, not a claim about the exit code.
+    expect(readFileSync(file, 'utf-8')).toBe(bytes);
+  });
+
+  test('a moved source is reported as refreshed, with both content hashes', () => {
+    const file = sandboxHome();
+    userRulesPrompts('UNIVERSAL_RULE_V1');
+    refreshUserLevelRules(CRITICAL_RULES_PAYLOAD);
+    const firstHash = readDeployedStamp(file)?.contentHash;
+
+    userRulesPrompts('UNIVERSAL_RULE_V2');
+    const outcome = refreshUserLevelRules(CRITICAL_RULES_PAYLOAD);
+    expect(outcome?.status).toBe('refreshed');
+    expect(readFileSync(file, 'utf-8')).toContain('UNIVERSAL_RULE_V2');
+    expect(outcome?.detail).toContain(String(firstHash));
+  });
+
+  test('--dry-run says what it would do and writes nothing', () => {
+    const file = sandboxHome();
+    userRulesPrompts();
+
+    const outcome = refreshUserLevelRules(CRITICAL_RULES_PAYLOAD, {
+      dryRun: true,
+    });
+    expect(outcome?.status).toBe('dry-run');
+    expect(outcome?.detail).toContain('would refresh');
+    expect(existsSync(file)).toBe(false);
+  });
+
+  test('an unreadable prompts source is FAILED, and names the remedy', () => {
+    const file = sandboxHome();
+    // A prompts dir with no rules index at all: assemble cannot succeed.
+    const sb = track(createSandbox());
+    sb.writeFile('README.md', 'no rules here\n');
+    process.env.JSDK_PROMPTS_DIR = sb.path;
+    process.env.JSDK_PRIME_PRETTIER = '0';
+
+    const outcome = refreshUserLevelRules(CRITICAL_RULES_PAYLOAD);
+    expect(outcome?.status).toBe('failed');
+    expect(outcome?.detail).toContain('NOT refreshed');
+    expect(outcome?.detail).toContain('sync-rules');
+    // Never a half-written file standing in for a real one.
+    expect(existsSync(file)).toBe(false);
+  });
+});
+
+describe('runSweep --component critical-rules · the user-level line (D17)', () => {
+  test('the refresh gets its OWN summary line, distinct from every repo line', async () => {
+    const file = sandboxHome();
+    userRulesPrompts();
+    const sb = track(createSandbox());
+    // Not enrolled ⇒ skipped before any worktree work, which keeps this test
+    // about the summary rather than about hydration.
+    const repo = repoWithComponents(sb, 'other', ['base-setup']);
+
+    const {out, value} = await captureLog(() =>
+      runSweep({component: 'critical-rules', repos: [repo]}),
+    );
+
+    expect(value).toBe(0);
+    const line = out
+      .split('\n')
+      .find((l) => l.includes('user-level rules')) as string;
+    expect(line).toBeDefined();
+    expect(line).toContain(file);
+    // It is NOT attached to a repo: the repo has its own line, and that line
+    // says only what happened to the repo.
+    expect(line).not.toContain('other');
+    expect(out).toContain('skipped — not enrolled in critical-rules');
+    expect(readFileSync(file, 'utf-8')).toContain('UNIVERSAL_RULE_V1');
+  });
+
+  test('an unscoped sweep prints no user-level line and writes no user-level file', async () => {
+    const file = sandboxHome();
+    userRulesPrompts();
+    const sb = track(createSandbox());
+    const repo = repoWithComponents(sb, 'enrolled', ['base-setup']);
+
+    const {out} = await captureLog(() =>
+      runSweep({dryRun: true, repos: [repo]}),
+    );
+
+    expect(out).not.toContain('user-level rules');
+    expect(existsSync(file)).toBe(false);
+  });
+
+  test('ISOLATION: a failed user-level refresh does not mark any repo failed', async () => {
+    sandboxHome();
+    const sb = track(createSandbox());
+    sb.writeFile('broken-prompts/README.md', 'no rules index\n');
+    process.env.JSDK_PROMPTS_DIR = join(sb.path, 'broken-prompts');
+    process.env.JSDK_PRIME_PRETTIER = '0';
+    const repo = repoWithComponents(sb, 'other', ['base-setup']);
+
+    const {out, value} = await captureLog(() =>
+      runSweep({component: 'critical-rules', repos: [repo]}),
+    );
+
+    // The run is red — a silent 0 here would be the failure-shaped-as-silence
+    // this codebase forbids…
+    expect(value).toBe(1);
+    // …but attributed to the user-level surface, NOT to the repo.
+    expect(out).toContain('user-level rules');
+    expect(out).toContain('NOT refreshed');
+    expect(out).toContain('skipped — not enrolled in critical-rules');
+    expect(out).not.toContain('0 failed');
+    expectUntouched(repo);
+  });
+
+  test('ISOLATION: repo trouble does not stop the user-level refresh', async () => {
+    const file = sandboxHome();
+    userRulesPrompts();
+    const sb = track(createSandbox());
+    // A repo whose enrollment cannot even be read — the worst repo-side outcome
+    // reachable without hydration.
+    const repo = initRepo(sb, 'uncommitted', {'a.txt': 'a\n'});
+
+    const {out} = await captureLog(() =>
+      runSweep({component: 'critical-rules', repos: [repo]}),
+    );
+
+    expect(out).toContain('cannot read enrollment');
+    // Refreshed anyway: a repo that went sideways is no reason to leave THIS
+    // machine's rules stale.
+    expect(readFileSync(file, 'utf-8')).toContain('UNIVERSAL_RULE_V1');
+    expect(out).toContain('user-level rules');
   });
 });
