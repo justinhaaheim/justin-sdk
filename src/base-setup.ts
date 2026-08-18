@@ -24,6 +24,7 @@ import {createHash} from 'crypto';
 import {existsSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {basename, resolve} from 'path';
 
+import {findTypeScriptSources} from './ts-inputs';
 import {
   appendIfMissing,
   ensureDir,
@@ -254,6 +255,23 @@ const KNOWN_OLD_SETUP_ENV_HASHES: ReadonlySet<string> = new Set<string>([
  *    Project-specific logic belongs in setup-env:<LABEL> package.json
  *    scripts, which the SDK command runs in declaration order.
  */
+/**
+ * home-base-gsqz fix shape 3: say it out loud when the retirement just removed
+ * the repo's LAST TypeScript file. The repo's tsconfig now matches nothing —
+ * `tsc --noEmit` reports TS18003 there, and while the SDK's own signal reports
+ * that as "not applicable" rather than red, an operator should still SEE that
+ * this payload changed the repo's TypeScript surface to empty.
+ */
+function warnIfLastTypeScriptFile(projectRoot: string): void {
+  if (findTypeScriptSources(projectRoot, 1).length > 0) return;
+  warn(
+    'That removed the LAST TypeScript file in this repo. Its tsconfig.json now ' +
+      'matches no inputs (tsc reports TS18003); the TS check will report ' +
+      '"not applicable" rather than pass. Consider retiring tsconfig.json and ' +
+      'the signal-source:TS script here (home-base-gsqz).',
+  );
+}
+
 export function stepSetupEnvScript(
   projectRoot: string,
   force = false,
@@ -283,12 +301,14 @@ export function stepSetupEnvScript(
     success(
       'Deleted scripts/setup-env.ts (unmodified SDK template — superseded by the SDK setup-env command)',
     );
+    warnIfLastTypeScriptFile(projectRoot);
     return true;
   }
 
   if (force) {
     rmSync(targetPath);
     success('Deleted scripts/setup-env.ts (--force)');
+    warnIfLastTypeScriptFile(projectRoot);
     return true;
   }
 

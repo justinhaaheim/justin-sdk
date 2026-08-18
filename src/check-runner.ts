@@ -84,8 +84,33 @@ export interface CheckResult {
   severity?: 'error' | 'warn';
 }
 
+/**
+ * A shell check reported that it MEASURED NOTHING — neither a pass nor a
+ * failure (home-base-gsqz). Rendered as its own outcome, always visible
+ * (including in --quiet), and excluded from both the pass and the fail tallies.
+ */
+export interface CheckNotApplicable {
+  /** Why nothing was measured. Shown verbatim. */
+  reason: string;
+}
+
 /** A single check to run. Provide either `command` (shell) or `fn` (async). */
 export interface Check {
+  /**
+   * Post-hoc classification of a shell check's outcome (home-base-gsqz).
+   * Returning null keeps normal exit-code handling; returning a reason marks
+   * the check NOT APPLICABLE.
+   *
+   * Deliberately narrow: a classifier can only ever DOWNGRADE a failure to
+   * "measured nothing" — it cannot turn a failure into a pass, so no classifier
+   * can manufacture a green.
+   *
+   * Declaring one forces the check's output to be captured.
+   */
+  classify?: (outcome: {
+    exitCode: number;
+    output: string;
+  }) => CheckNotApplicable | null;
   /** Shell command — exit 0 = pass, non-zero = fail */
   command?: string;
   /** Function returning a CheckResult (sync or async) */
@@ -128,6 +153,11 @@ interface InternalResult {
   durationMs: number;
   exitCode: number;
   label: string;
+  /**
+   * Set when the check ran but measured nothing (Check.classify). Distinct
+   * from both pass and fail, and from `skipped` (which means "never ran").
+   */
+  notApplicable?: string;
   severity: 'error' | 'warn';
   /** Set when a check was skipped because its parent failed. */
   skipped?: boolean;
@@ -163,47 +193,48 @@ function buildPrefix(
 // ---------------------------------------------------------------------------
 
 function prefixLines(
-  chunk: Uint8Array,
+  chunk: string,
   prefix: string,
   trailing: string,
 ): {output: string; trailing: string} {
-  const text = trailing + new TextDecoder().decode(chunk);
+  const text = trailing + chunk;
   const lines = text.split('\n');
   const newTrailing = lines.pop() ?? '';
   const output = lines.map((line) => `${prefix} ${line}\n`).join('');
   return {output, trailing: newTrailing};
 }
 
-async function pipeWithPrefix(
+/**
+ * Read a stream to completion, optionally echoing it with a label prefix and
+ * optionally accumulating the raw text for a classifier. Both are optional and
+ * independent: `--quiet` echoes nothing but may still need to capture.
+ */
+async function consumeStream(
   stream: ReadableStream<Uint8Array> | null | undefined,
   prefix: string,
-  writer: (text: string) => void,
+  writer: ((text: string) => void) | null,
+  sink: string[] | null,
 ): Promise<void> {
   if (!stream) return;
   const reader = stream.getReader();
+  const decoder = new TextDecoder();
   let trailing = '';
 
   while (true) {
     const {done, value} = await reader.read();
     if (done) break;
-    const result = prefixLines(value, prefix, trailing);
-    writer(result.output);
-    trailing = result.trailing;
+    if (value == null) continue;
+    const text = decoder.decode(value);
+    if (sink) sink.push(text);
+    if (writer) {
+      const result = prefixLines(text, prefix, trailing);
+      writer(result.output);
+      trailing = result.trailing;
+    }
   }
 
-  if (trailing) {
+  if (writer && trailing) {
     writer(`${prefix} ${trailing}\n`);
-  }
-}
-
-async function drainStream(
-  stream: ReadableStream<Uint8Array> | null | undefined,
-): Promise<void> {
-  if (!stream) return;
-  const reader = stream.getReader();
-  while (true) {
-    const {done} = await reader.read();
-    if (done) break;
   }
 }
 
@@ -227,7 +258,11 @@ async function runShellCommand(
   const prefix = buildPrefix(check.label, color, align, maxLabelLen);
   const start = performance.now();
 
-  const shouldPipe = piped || quiet;
+  // A classifier needs the text, so its check is always piped — otherwise the
+  // output would go straight to the terminal and there would be nothing to
+  // classify.
+  const capture = check.classify != null;
+  const shouldPipe = piped || quiet || capture;
   const command = check.command ?? '';
   const proc = Bun.spawn(['sh', '-c', command], {
     cwd: process.cwd(),
@@ -236,27 +271,37 @@ async function runShellCommand(
     stdout: shouldPipe ? 'pipe' : 'inherit',
   });
 
+  const sink: string[] | null = capture ? [] : null;
   if (shouldPipe) {
-    const writeStderr = (text: string) => process.stderr.write(text);
-    const stdoutPipe = quiet
-      ? drainStream(proc.stdout)
-      : pipeWithPrefix(proc.stdout, prefix, (text) =>
-          process.stdout.write(text),
-        );
-
     await Promise.all([
-      stdoutPipe,
-      pipeWithPrefix(proc.stderr, prefix, writeStderr),
+      consumeStream(
+        proc.stdout,
+        prefix,
+        quiet ? null : (text) => process.stdout.write(text),
+        sink,
+      ),
+      consumeStream(
+        proc.stderr,
+        prefix,
+        (text) => process.stderr.write(text),
+        sink,
+      ),
     ]);
   }
 
   const exitCode = await proc.exited;
   const durationMs = Math.round(performance.now() - start);
 
+  const classified =
+    check.classify == null
+      ? null
+      : check.classify({exitCode, output: (sink ?? []).join('')});
+
   return {
     durationMs,
     exitCode,
     label: check.label,
+    notApplicable: classified?.reason,
     severity: check.severity ?? 'error',
   };
 }
@@ -315,17 +360,29 @@ function printSummary(
   totalMs: number,
   quiet: boolean,
 ): void {
-  const errors = results.filter(
-    (r) => !r.skipped && r.exitCode !== 0 && r.severity === 'error',
+  const measured = results.filter((r) => !r.skipped && r.notApplicable == null);
+  const errors = measured.filter(
+    (r) => r.exitCode !== 0 && r.severity === 'error',
   );
-  const warnings = results.filter(
-    (r) => !r.skipped && r.exitCode !== 0 && r.severity === 'warn',
+  const warnings = measured.filter(
+    (r) => r.exitCode !== 0 && r.severity === 'warn',
   );
-  const passed = results.filter((r) => !r.skipped && r.exitCode === 0);
+  const passed = measured.filter((r) => r.exitCode === 0);
   const skipped = results.filter((r) => r.skipped);
+  const notApplicable = results.filter(
+    (r) => !r.skipped && r.notApplicable != null,
+  );
 
-  // In quiet mode, only print if there are errors, warnings, or skipped
-  if (quiet && errors.length === 0 && warnings.length === 0 && skipped.length === 0) {
+  // In quiet mode, only print if there are errors, warnings, skipped, or
+  // not-applicable checks. A check that measured nothing is never folded into
+  // "all checks passed" — silence must be a claim (critical rule 5).
+  if (
+    quiet &&
+    errors.length === 0 &&
+    warnings.length === 0 &&
+    skipped.length === 0 &&
+    notApplicable.length === 0
+  ) {
     console.log(
       `${GREEN}✓${RESET} All ${results.length} checks passed. ${DIM}[${formatDuration(totalMs)}]${RESET}`,
     );
@@ -341,6 +398,16 @@ function printSummary(
 
       const label = `${DIM}${r.label}${RESET}`;
       console.log(` ${DIM}↳${RESET} ${label} ${DIM}skipped (depends on ${r.skippedReason})${RESET}`);
+      continue;
+    }
+
+    if (r.notApplicable != null) {
+      // Printed even in quiet mode: this check produced no verdict, and the
+      // operator must be able to see that from the summary alone.
+      console.log(
+        ` ${YELLOW}○${RESET} ${YELLOW}${r.label}${RESET} ${DIM}[${formatDuration(r.durationMs)}]${RESET}` +
+          `\n     ${DIM}not applicable — ${r.notApplicable}${RESET}`,
+      );
       continue;
     }
 
@@ -375,6 +442,8 @@ function printSummary(
   if (warnings.length > 0)
     console.log(` ${YELLOW}${warnings.length} warn${RESET}`);
   if (errors.length > 0) console.log(` ${RED}${errors.length} fail${RESET}`);
+  if (notApplicable.length > 0)
+    console.log(` ${YELLOW}${notApplicable.length} not applicable${RESET}`);
   if (skipped.length > 0)
     console.log(` ${DIM}${skipped.length} skipped${RESET}`);
   console.log(
@@ -441,7 +510,7 @@ async function attemptFixes(
   opts: ExecOptions,
 ): Promise<InternalResult[]> {
   const fixable = results.filter(
-    (r) => r.exitCode !== 0 && hasFix(r.checkResult),
+    (r) => r.notApplicable == null && r.exitCode !== 0 && hasFix(r.checkResult),
   );
 
   if (fixable.length === 0) return results;
@@ -522,9 +591,14 @@ export async function runChecks(
   const totalMs = Math.round(performance.now() - totalStart);
   printSummary(results, totalMs, quiet);
 
-  // Only errors affect exit code, not warnings
+  // Only errors affect exit code — not warnings, and not checks that measured
+  // nothing (home-base-gsqz).
   const hasErrors = results.some(
-    (r) => r.exitCode !== 0 && r.severity === 'error',
+    (r) =>
+      !r.skipped &&
+      r.notApplicable == null &&
+      r.exitCode !== 0 &&
+      r.severity === 'error',
   );
   return hasErrors ? 1 : 0;
 }
@@ -629,7 +703,11 @@ export async function runCheckTree(
   if (fix) {
     // Separate fixable failures into auto-run vs. approval-required.
     const allFixable = results.filter(
-      (r) => !r.skipped && r.exitCode !== 0 && hasFix(r.checkResult),
+      (r) =>
+        !r.skipped &&
+        r.notApplicable == null &&
+        r.exitCode !== 0 &&
+        hasFix(r.checkResult),
     );
     const autoRun = allFixable.filter(
       (r) => !r.checkResult?.requiresApproval,
@@ -685,7 +763,11 @@ export async function runCheckTree(
   printSummary(results, totalMs, quiet);
 
   const hasErrors = results.some(
-    (r) => !r.skipped && r.exitCode !== 0 && r.severity === 'error',
+    (r) =>
+      !r.skipped &&
+      r.notApplicable == null &&
+      r.exitCode !== 0 &&
+      r.severity === 'error',
   );
   return hasErrors ? 1 : 0;
 }
