@@ -424,3 +424,166 @@ describe('the hook stays runnable from the marketplace cache (no node_modules)',
     expect(thirdParty).toEqual([]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Half B of the deduplication: the hook stops injecting rules a repo already has
+// (home-base-anhw, D20)
+// ---------------------------------------------------------------------------
+
+/**
+ * An enrolled repo loads its committed artifact natively, so injecting the
+ * conditional rules on top delivers them TWICE. The hook drops its rule text
+ * for such a repo and keeps the repo state — Justin's explicit requirement, and
+ * the right split: repo state is per-session and no committed file can carry it.
+ *
+ * These fixtures carry a project-type-GATED module, unlike the ones above, for a
+ * reason: with only universal modules the hook's conditional partition is empty
+ * and "no rule text was injected" would pass vacuously. Here RN_ONLY_RULE is
+ * real content that the hook demonstrably injects when it should — so its
+ * absence means suppression, not an empty payload.
+ *
+ * Every arm also asserts where the content WENT: the same RN_ONLY_RULE must be
+ * inside the committed artifact. Suppression is only correct if the repo really
+ * has the rules; a test that checked only for absence would be equally happy
+ * with a bug that dropped them everywhere.
+ */
+const GATED_RULES_FILES: Record<string, string> = {
+  'src/rules/index.md': ['@./alpha.md', '@./rn-only.md', '@./omega.md'].join(
+    '\n\n',
+  ),
+  'src/rules/alpha.md': '# Alpha\n\nALPHA_RULE',
+  'src/rules/rn-only.md':
+    '---\nincludeIf: [isReactNative]\n---\n\n# React Native\n\nRN_ONLY_RULE',
+  'src/rules/omega.md': '# Omega\n\nOMEGA_RULE',
+};
+
+const GATED_MODULES = ['alpha', 'rn-only', 'omega'];
+
+function gatedPromptsFixture(): string {
+  process.env.JSDK_PRIME_PRETTIER = '0';
+  const sb = track(createSandbox());
+  const dir = initRepoAt(join(sb.path, 'prompts'), GATED_RULES_FILES);
+  process.env.JSDK_PROMPTS_DIR = dir;
+  return dir;
+}
+
+/** A React Native project, so the gated module is genuinely in the injection. */
+function rnProjectFixture(modules?: string[]): string {
+  const sb = track(createSandbox());
+  return initRepoAt(join(sb.path, 'repo'), {
+    'justin-sdk.config.json': `${JSON.stringify(
+      {
+        components: ['base-setup', 'critical-rules-setup'],
+        ...(modules != null
+          ? {componentConfig: {[CRITICAL_RULES_CONFIG_KEY]: {modules}}}
+          : {}),
+        version: '0.0.1-fixture',
+      },
+      null,
+      2,
+    )}\n`,
+    'package.json': `${JSON.stringify(
+      {dependencies: {'react-native': '*'}, name: 'fixture'},
+      null,
+      2,
+    )}\n`,
+  });
+}
+
+const REPO_STATE_HEADER = '# Current repo state';
+
+describe('the hook does not re-deliver rules the repo already carries', () => {
+  test('NOT enrolled: rule text AND repo state, exactly as before anhw', () => {
+    gatedPromptsFixture();
+    const repo = rnProjectFixture(); // no selection recorded
+
+    const run = runHook(repo);
+    expect(run.status).toBe(0);
+    // The positive control the suppression arms depend on: this content really
+    // does travel through the hook when nothing suppresses it.
+    expect(run.additionalContext).toContain('RN_ONLY_RULE');
+    expect(run.additionalContext).toContain(REPO_STATE_HEADER);
+    expect(run.systemMessage).not.toContain('rule text NOT injected');
+  });
+
+  test('enrolled with the artifact PRESENT: repo state only, and it says so', () => {
+    const dir = gatedPromptsFixture();
+    const repo = rnProjectFixture(GATED_MODULES);
+    const artifact = writeArtifact(repo, dir);
+
+    const run = runHook(repo);
+    expect(run.status).toBe(0);
+    expect(run.systemMessage).toContain('repo rules ✓ in sync');
+
+    // The rules are NOT injected…
+    expect(run.additionalContext).not.toContain('RN_ONLY_RULE');
+    expect(run.additionalContext).not.toContain('ALPHA_RULE');
+    expect(run.additionalContext).not.toContain('📋'); // the pointer line too
+    // …because the repo carries them itself. Asserted, not assumed.
+    const committed = readFileSync(artifact, 'utf-8');
+    expect(committed).toContain('RN_ONLY_RULE');
+    expect(committed).toContain('ALPHA_RULE');
+
+    // Repo state still ships, for every repo, enrolled or not (Justin).
+    expect(run.additionalContext).toContain(REPO_STATE_HEADER);
+    // And the systemMessage says what happened, so "where did my rules go?" is
+    // answerable from one line instead of by reading this file.
+    expect(run.systemMessage).toContain('rule text NOT injected');
+    expect(run.systemMessage).toContain('NOT injected — already in this repo');
+  });
+
+  test('D20 — enrolled but the artifact is MISSING: keep injecting', () => {
+    gatedPromptsFixture();
+    const repo = rnProjectFixture(GATED_MODULES); // enrolled, nothing written
+
+    const run = runHook(repo);
+    expect(run.systemMessage).toContain('repo rules ⚠️ MISSING');
+    // Fail toward delivery: the repo is enrolled but has no rules on disk, so
+    // suppressing here would leave the session with NO rules at all — the one
+    // outcome this whole epic exists to prevent.
+    expect(run.additionalContext).toContain('RN_ONLY_RULE');
+    expect(run.systemMessage).not.toContain('rule text NOT injected');
+  });
+
+  test('D20 — cannot-check: a failed MEASUREMENT never suppresses', () => {
+    gatedPromptsFixture();
+    const repo = rnProjectFixture(GATED_MODULES);
+    writeArtifact(repo, gatedPromptsFixture());
+    // A managed clone that exists but cannot be refreshed (D5's trap).
+    const home = track(createSandbox());
+    initRepoAt(join(home.path, 'config', 'justin-sdk', 'prompts'), GATED_RULES_FILES);
+
+    const run = runHook(repo, {
+      HOME: home.path,
+      JSDK_PROMPTS_DIR: '',
+      XDG_CONFIG_HOME: join(home.path, 'config'),
+    });
+    expect(run.systemMessage).toContain('repo rules ⚠️ staleness UNKNOWN');
+    expect(run.additionalContext).toContain('RN_ONLY_RULE');
+    expect(run.systemMessage).not.toContain('rule text NOT injected');
+  });
+
+  test('STALE and LOCALLY MODIFIED still suppress — the file is loaded either way', () => {
+    const dir = gatedPromptsFixture();
+
+    // stale: the artifact exists, the source moved past it.
+    const staleRepo = rnProjectFixture(GATED_MODULES);
+    writeArtifact(staleRepo, dir);
+    writeFileSync(join(dir, 'src/rules/alpha.md'), '# Alpha\n\nALPHA_RULE_V2');
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'edit alpha']);
+    const stale = runHook(staleRepo);
+    expect(stale.systemMessage).toContain('repo rules ⚠️ STALE');
+    expect(stale.additionalContext).not.toContain('RN_ONLY_RULE');
+    expect(stale.additionalContext).toContain(REPO_STATE_HEADER);
+
+    // locally modified: hand-edited bytes, stamp intact.
+    const editedRepo = rnProjectFixture(GATED_MODULES);
+    const file = writeArtifact(editedRepo, dir);
+    writeFileSync(file, `${readFileSync(file, 'utf-8')}\nHAND EDITED\n`);
+    const edited = runHook(editedRepo);
+    expect(edited.systemMessage).toContain('repo rules ⚠️ LOCALLY MODIFIED');
+    expect(edited.additionalContext).not.toContain('RN_ONLY_RULE');
+    expect(edited.additionalContext).toContain(REPO_STATE_HEADER);
+  });
+});

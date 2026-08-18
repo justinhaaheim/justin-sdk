@@ -25,6 +25,15 @@
  * ../../rules-drift). It only ever REPORTS: nothing inside the repo is written
  * here (t6a0.21 D4/D9).
  *
+ * THAT SAME VERDICT ALSO GATES THE INJECTION (home-base-anhw, half B). A repo
+ * whose committed artifact is present already carries these rules, so injecting
+ * them here would deliver the content twice; in that case only the REPO STATE is
+ * injected. Justin's explicit requirement is that the repo state keeps printing
+ * for every repo, enrolled or not — and the shrink buys back headroom against
+ * the ~10,000-char cliff for the repos still relying on the hook. The
+ * user-level file's half of the same duplication is handled by a
+ * `claudeMdExcludes` entry enrollment writes (half A, critical-rules-setup.ts).
+ *
  * All lib modules live in this plugin's ./lib (a marketplace plugin only gets
  * its own subdir), use only bun builtins / bunx subprocesses (no node_modules),
  * and this runs with just `bun`. Always emits a valid envelope and exits 0.
@@ -89,6 +98,55 @@ try {
   rulesFailed = error instanceof Error ? error.message : String(error);
 }
 
+// --- committed per-repo artifact: is THIS repo's rules file current? ---------
+// A second, independent delivery channel (t6a0.21 D1): enrolled repos carry
+// `.claude/rules/justin-sdk/critical-rules.md` in git. Its staleness verdict is
+// computed by the shared checker the doctor check also calls, so the session and
+// doctor can never disagree — and it is REPORTED here, never fixed: this hook
+// writes nothing inside the repo (D4/D9). A repo that is not enrolled adds
+// nothing to the output at all.
+//
+// It runs HERE, before the injection is composed, because the answer also
+// decides whether ruleText is injected at all (see below). The call was already
+// unconditional, so moving it up costs nothing.
+const repoRules = checkRulesDrift(projectRoot);
+
+/**
+ * Does this repo already carry the rules, so injecting them would be a DUPLICATE?
+ *
+ * Half B of the deduplication (home-base-anhw). Half A is the `claudeMdExcludes`
+ * entry enrollment writes, which drops the user-level file; this half drops the
+ * hook's own copy of the conditional rules, which the repo's committed artifact
+ * already contains (its module selection is universal AND conditional, D12).
+ *
+ * D20 — SUPPRESS ONLY ON PROOF THE ARTIFACT IS THERE. The three states below are
+ * exactly the ones `checkRulesDrift` cannot reach without having stat'd the file
+ * (its step 2 returns `missing` first), so each of them is a POSITIVE finding
+ * that the repo has rules of its own. Everything else keeps injecting:
+ *
+ *   not-enrolled     no artifact by definition — the hook is the only channel.
+ *   missing          enrolled, but the file is not there. The notice nags about
+ *                    it separately; meanwhile the session must not be left with
+ *                    no rules at all.
+ *   cannot-check     we could not MEASURE. A failed measurement is not a finding
+ *                    (rule 5), and the two directions are not symmetric: a wrong
+ *                    suppress silently costs a session its rules, a wrong inject
+ *                    costs a duplicate — which is merely the pre-anhw status quo.
+ *
+ * `stale` and `locally-modified` DO suppress: the file exists and Claude Code
+ * loads it regardless of how current it is, so injecting on top would duplicate
+ * rather than repair. The systemMessage still says so, loudly.
+ */
+const REPO_CARRIES_RULES: Record<RulesDriftStatus, boolean> = {
+  'cannot-check': false,
+  'in-sync': true,
+  'locally-modified': true,
+  missing: false,
+  'not-enrolled': false,
+  stale: true,
+};
+const suppressRuleText = REPO_CARRIES_RULES[repoRules.status];
+
 // --- repo state (branch/worktree divergence) --------------------------------
 let repoState = '';
 try {
@@ -106,7 +164,10 @@ try {
 }
 
 // --- compose + Prettier the injection (for the model) -----------------------
-let additionalContext = [ruleText, repoState]
+// repoState is injected for EVERY repo, enrolled or not (Justin's explicit
+// requirement): the branch/worktree picture is per-session state no committed
+// file can carry, so it is never the duplicate half.
+let additionalContext = [suppressRuleText ? '' : ruleText, repoState]
   .filter((b) => b.length > 0)
   .join('\n\n');
 if (additionalContext.length > 0) {
@@ -151,14 +212,6 @@ if (!fileMissing && rulesFailed == null) {
   }
 }
 
-// --- committed per-repo artifact: is THIS repo's rules file current? ---------
-// A second, independent delivery channel (t6a0.21 D1): enrolled repos carry
-// `.claude/rules/justin-sdk/critical-rules.md` in git. Its staleness verdict is
-// computed by the shared checker the doctor check also calls, so the session and
-// doctor can never disagree — and it is REPORTED here, never fixed: this hook
-// writes nothing inside the repo (D4/D9). A repo that is not enrolled adds
-// nothing to the output at all.
-const repoRules = checkRulesDrift(projectRoot);
 const REPO_RULES_MARKER: Record<RulesDriftStatus, string> = {
   'cannot-check': '⚠️ staleness UNKNOWN',
   'in-sync': '✓ in sync',
@@ -189,6 +242,11 @@ if (rulesFailed != null) {
 if (repoRules.status !== 'not-enrolled') {
   parts.push(`repo rules ${REPO_RULES_MARKER[repoRules.status]}`);
 }
+// Say it out loud. "The rules stopped appearing in my injection" must be
+// answerable from this line alone, or the next person to look debugs a feature.
+if (suppressRuleText) {
+  parts.push('rule text NOT injected (this repo carries its own)');
+}
 let systemMessage = `justin-sdk prime · ${parts.join(' · ')}`;
 
 // The detail sits immediately under the header line — closest to the marker it
@@ -198,11 +256,15 @@ if (isRulesDriftProblem(repoRules.status)) {
   systemMessage += `\n⚠️ repo rules: ${repoRules.message}\n   → ${rulesDriftAdvice(repoRules.status)}`;
 }
 
-// Numbered summary of the modules compiled into the prime injection.
+// Numbered summary of the modules the injection WOULD carry. The label has to
+// track suppression: naming these "injected" while they were dropped is the
+// systemMessage telling Justin something that is not true.
 if (condNames.length > 0) {
-  const label = fileMissing
-    ? 'modules injected (full)'
-    : 'conditional modules (prime injection)';
+  const label = suppressRuleText
+    ? 'conditional modules (NOT injected — already in this repo’s artifact)'
+    : fileMissing
+      ? 'modules injected (full)'
+      : 'conditional modules (prime injection)';
   systemMessage +=
     `\n${label}:\n` + condNames.map((n, i) => `  ${i + 1}. ${n}`).join('\n');
 }
