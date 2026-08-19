@@ -41,20 +41,23 @@ import {
 import {
   applySweepPayload,
   committedConfigComponents,
+  componentContractPaths,
   holdPinAfterGates,
   isEnrolledIn,
   parseComponentOption,
   parseConfigComponents,
+  partitionByComponentContract,
   planSweepPayload,
   readPinSnapshot,
   refreshUserLevelRules,
   restorePinSnapshot,
   runSweep,
+  stageForCommit,
   SWEEP_BRANCH,
   SWEEP_WORKTREE_SEGMENTS,
   sweepCommitMessage,
 } from '../src/sweep';
-import {git, initRepo} from './git-fixtures';
+import {git, initRepo, write} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const SDK_PKG = '@justinhaaheim/justin-sdk';
@@ -873,5 +876,168 @@ describe('runSweep --component critical-rules · the user-level line (D17)', () 
     // machine's rules stale.
     expect(readFileSync(file, 'utf-8')).toContain('UNIVERSAL_RULE_V1');
     expect(out).toContain('user-level rules');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The component contract: a component sweep commits only what that component
+// owns (home-base-926v)
+// ---------------------------------------------------------------------------
+
+/**
+ * THE BUG THIS PINS. The sweep gates every worktree with
+ * `bunx @justinhaaheim/justin-sdk doctor --fix`, and that resolves the TARGET
+ * repo's pinned SDK — not the one running the sweep. On a repo still enrolled in
+ * a component t6a0 retired, that fixer re-applies the scaffolding the migration
+ * removed. Observed 2026-08-19 in the `life` and `userscripts-j` sweep
+ * worktrees:
+ *
+ *   CLAUDE.md              + @docs/prompts/IMPORTANT_GUIDELINES_INLINED.md
+ *   .claude/settings.json  + a setup-env SessionStart hook
+ *   scripts/setup-env.ts   (recreated)
+ *
+ * `git add -A` would have committed all three under a message reading
+ * "sweep critical-rules — re-apply that component only". Nothing was damaged
+ * only because both repos' gates were red for unrelated reasons — luck that
+ * expires the moment those reds are fixed.
+ */
+describe('component contract', () => {
+  test('critical-rules owns the artifact, the selection and the settings file', () => {
+    expect(componentContractPaths('critical-rules')).toEqual([
+      '.claude/rules/justin-sdk/',
+      '.claude/settings.json',
+      'justin-sdk.config.json',
+    ]);
+  });
+
+  test('a component with no declared contract keeps the historical add -A', () => {
+    // Deliberate: a too-narrow list would DROP a real change and then report
+    // "already current" — silent omission, the worse failure direction.
+    expect(componentContractPaths('gitignore')).toBeNull();
+    expect(
+      partitionByComponentContract({component: 'gitignore', mode: 'component'}, [
+        'CLAUDE.md',
+        '.gitignore',
+      ]),
+    ).toEqual({inScope: ['CLAUDE.md', '.gitignore'], outOfScope: []});
+  });
+
+  test('the real doctor --fix churn is split from the rules payload', () => {
+    expect(
+      partitionByComponentContract(
+        {component: 'critical-rules', mode: 'component'},
+        [
+          '.claude/rules/justin-sdk/critical-rules.md',
+          '.claude/settings.json',
+          'CLAUDE.md',
+          'justin-sdk.config.json',
+          'scripts/setup-env.ts',
+        ],
+      ),
+    ).toEqual({
+      inScope: [
+        '.claude/rules/justin-sdk/critical-rules.md',
+        '.claude/settings.json',
+        'justin-sdk.config.json',
+      ],
+      outOfScope: ['CLAUDE.md', 'scripts/setup-env.ts'],
+    });
+  });
+
+  test('a FULL sweep is untouched — it is supposed to re-apply everything', () => {
+    expect(
+      partitionByComponentContract({mode: 'full'}, ['CLAUDE.md', 'package.json']),
+    ).toEqual({inScope: ['CLAUDE.md', 'package.json'], outOfScope: []});
+  });
+
+  test('the prefix entry matches the directory, not a lookalike sibling', () => {
+    expect(
+      partitionByComponentContract(
+        {component: 'critical-rules', mode: 'component'},
+        [
+          '.claude/rules/justin-sdk/critical-rules.md',
+          '.claude/rules/justin-sdk-notes.md',
+          '.claude/settings.local.json',
+        ],
+      ).outOfScope,
+    ).toEqual(['.claude/rules/justin-sdk-notes.md', '.claude/settings.local.json']);
+  });
+});
+
+describe('stageForCommit (real git index)', () => {
+  /** A repo carrying the exact file set the observed churn produced. */
+  function churnedRepo(sb: Sandbox): string {
+    const repo = initRepo(sb, 'churned', {
+      '.claude/rules/justin-sdk/critical-rules.md': 'OLD RULES\n',
+      'CLAUDE.md': '# Project\n',
+      'justin-sdk.config.json': '{}\n',
+    });
+    // The payload's own write…
+    write(repo, '.claude/rules/justin-sdk/critical-rules.md', 'NEW RULES\n');
+    // …and the two files `doctor --fix` rewrote behind its back.
+    write(repo, 'CLAUDE.md', '# Project\n\n@docs/prompts/IMPORTANT_GUIDELINES_INLINED.md\n');
+    write(repo, 'scripts/setup-env.ts', '// recreated by the fixer\n');
+    return repo;
+  }
+
+  test('a component sweep stages the rules change and NOTHING else', () => {
+    const sb = track(createSandbox());
+    const repo = churnedRepo(sb);
+
+    const result = stageForCommit(repo, {
+      component: 'critical-rules',
+      mode: 'component',
+    });
+
+    expect(result.staged).toEqual([
+      '.claude/rules/justin-sdk/critical-rules.md',
+    ]);
+    expect(result.excluded).toEqual(['CLAUDE.md', 'scripts/setup-env.ts']);
+
+    // Asserted against git itself, not the return value: this is the state the
+    // commit would capture.
+    expect(git(repo, ['diff', '--cached', '--name-only']).trim()).toBe(
+      '.claude/rules/justin-sdk/critical-rules.md',
+    );
+    // Un-staged, NOT reverted — an operator inspecting a red run still sees it.
+    expect(readFileSync(join(repo, 'CLAUDE.md'), 'utf-8')).toContain(
+      'IMPORTANT_GUIDELINES_INLINED',
+    );
+  });
+
+  test('NEGATIVE CONTROL: a FULL sweep of the same tree stages all of it', () => {
+    // Same fixture, same function, only the payload differs — so the test above
+    // cannot be passing because the fixture failed to produce the stray files.
+    const sb = track(createSandbox());
+    const repo = churnedRepo(sb);
+
+    const result = stageForCommit(repo, {mode: 'full'});
+
+    expect(result.excluded).toEqual([]);
+    expect(result.staged).toEqual([
+      '.claude/rules/justin-sdk/critical-rules.md',
+      'CLAUDE.md',
+      'scripts/setup-env.ts',
+    ]);
+  });
+
+  test('the green path is unchanged: a clean rules sweep is still a 1-file commit', () => {
+    // Regression-check against audio-journal-1's ad29363 shape.
+    const sb = track(createSandbox());
+    const repo = initRepo(sb, 'clean', {
+      '.claude/rules/justin-sdk/critical-rules.md': 'OLD RULES\n',
+      'justin-sdk.config.json': '{}\n',
+    });
+    write(repo, '.claude/rules/justin-sdk/critical-rules.md', 'NEW RULES\n');
+
+    const result = stageForCommit(repo, {
+      component: 'critical-rules',
+      mode: 'component',
+    });
+
+    expect(result.staged).toEqual([
+      '.claude/rules/justin-sdk/critical-rules.md',
+    ]);
+    expect(result.excluded).toEqual([]);
   });
 });

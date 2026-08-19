@@ -315,6 +315,112 @@ export function beadsConfigGuard(
   };
 }
 
+/**
+ * The paths one component owns — everything a `--component X` sweep is allowed
+ * to COMMIT (home-base-926v). An entry ending in `/` is a directory prefix.
+ *
+ * `null` means the component's contract has not been pinned down, and the commit
+ * keeps its historical `git add -A` shape. That default is deliberate and it is
+ * the SAFE direction: a contract list that is too NARROW would silently drop a
+ * change the component really made and then report "already current" — the
+ * total-omission failure this whole epic exists to kill. So a component earns a
+ * list only once someone has actually enumerated what it writes.
+ */
+export function componentContractPaths(
+  component: ComponentName,
+): readonly string[] | null {
+  switch (component) {
+    case 'critical-rules':
+      // The generated artifact, the module selection that produced it, and the
+      // claudeMdExcludes entry enrollment writes (t6a0.21 D12, anhw half A).
+      return [
+        '.claude/rules/justin-sdk/',
+        '.claude/settings.json',
+        'justin-sdk.config.json',
+      ];
+    default:
+      return null;
+  }
+}
+
+/**
+ * Split a component sweep's staged files into the ones that component owns and
+ * the ones it does not (home-base-926v).
+ *
+ * WHY THIS EXISTS. The sweep gates each worktree with `bunx … doctor --fix`, and
+ * that resolves the TARGET repo's pinned SDK — not the one running the sweep. On
+ * a repo still enrolled in components t6a0 retired, that fixer re-applies the
+ * scaffolding the migration removed (observed 2026-08-19 in the `life` and
+ * `userscripts-j` worktrees: `CLAUDE.md`, `scripts/setup-env.ts`, a setup-env
+ * SessionStart hook). `git add -A` would then commit all of it under a message
+ * that says "re-apply that component only". Nothing was damaged that run only
+ * because those two repos' gates were red for unrelated reasons.
+ *
+ * `holdPinAfterGates` already establishes the principle — gate-time writes must
+ * not leak into the commit — and holds the pin fields. This is the same rule for
+ * whole files.
+ *
+ * NOT SILENT: the caller reports every out-of-scope path in the run output AND in
+ * the repo's summary line. A path-limit nobody can see would hide the fact that
+ * doctor is rewriting files, which is a real problem worth knowing about.
+ *
+ * RESIDUAL, stated rather than papered over: this is path granularity, so a
+ * doctor edit INSIDE a contract file (the same `.claude/settings.json` that
+ * carries the exclude) still rides along. Fixing that needs a content-level
+ * snapshot across the gates, which is a bigger change than this bug warrants.
+ *
+ * Pure.
+ */
+export function partitionByComponentContract(
+  payload: SweepPayload,
+  changedFiles: readonly string[],
+): {inScope: string[]; outOfScope: string[]} {
+  if (payload.mode !== 'component') {
+    return {inScope: [...changedFiles], outOfScope: []};
+  }
+  const contract = componentContractPaths(payload.component);
+  if (contract == null) return {inScope: [...changedFiles], outOfScope: []};
+  const owned = (file: string): boolean =>
+    contract.some((entry) =>
+      entry.endsWith('/') ? file.startsWith(entry) : file === entry,
+    );
+  return {
+    inScope: changedFiles.filter(owned),
+    outOfScope: changedFiles.filter((file) => !owned(file)),
+  };
+}
+
+/**
+ * Stage the worktree for the sweep's one commit, honouring the component
+ * contract (home-base-926v).
+ *
+ * `git add -A` first, then UNSTAGE anything the component does not own, then
+ * re-read the index — the returned list is what git actually holds, not what
+ * the partition predicted, so a reset that silently failed cannot be reported
+ * as a scoped commit.
+ *
+ * Un-staged, never reverted: the file keeps its new content in the worktree, so
+ * an operator inspecting a red run still sees exactly what `doctor --fix` did.
+ * On a green run the worktree is removed and the change dies with it — which is
+ * what already happens today, just without the commit.
+ */
+export function stageForCommit(
+  worktreePath: string,
+  payload: SweepPayload,
+): {staged: string[]; excluded: string[]} {
+  const readStaged = (): string[] => {
+    const out = git(worktreePath, ['diff', '--cached', '--name-only']);
+    return out == null ? [] : out.split('\n').filter((line) => line !== '');
+  };
+
+  git(worktreePath, ['add', '-A']);
+  const scope = partitionByComponentContract(payload, readStaged());
+  if (scope.outOfScope.length === 0) return {excluded: [], staged: scope.inScope};
+
+  git(worktreePath, ['reset', '-q', '--', ...scope.outOfScope]);
+  return {excluded: scope.outOfScope, staged: readStaged()};
+}
+
 /** Is `component` registered in a repo's justin-sdk.config.json list? Pure. */
 export function isEnrolledIn(
   components: readonly string[],
@@ -1313,17 +1419,24 @@ async function sweepOneRepo(
   }
 
   // --- Commit --------------------------------------------------------------
-  run(['git', '-C', worktreePath, 'add', '-A'], repo);
-  const staged = git(worktreePath, ['diff', '--cached', '--name-only']);
-  if (staged == null || staged === '') {
+  const stage = stageForCommit(worktreePath, context.payload);
+  let scopeNote = '';
+  if (stage.excluded.length > 0) {
+    scopeNote = ` [NOT committed, outside this component's contract: ${stage.excluded.join(', ')}]`;
+    say(
+      `  ${YELLOW}⚠${RESET} left uncommitted (outside the component's contract): ${stage.excluded.join(', ')}`,
+    );
+  }
+
+  const changedFiles = stage.staged;
+  if (changedFiles.length === 0) {
     cleanupWorktree();
     return {
-      detail: `already current${payloadNote}`,
+      detail: `already current${payloadNote}${scopeNote}`,
       outcome: 'current',
       repo: name,
     };
   }
-  const changedFiles = staged.split('\n').filter((line) => line !== '');
   const beadsGuard = beadsConfigGuard(context.payload, changedFiles);
   if (!beadsGuard.ok) {
     return fail(beadsGuard.reason);
@@ -1359,7 +1472,7 @@ async function sweepOneRepo(
   );
   if (!safety.ok) {
     return {
-      detail: `green + committed on ${SWEEP_BRANCH}${pinGateNote}${payloadNote}, but merge deferred: ${safety.reason}`,
+      detail: `green + committed on ${SWEEP_BRANCH}${pinGateNote}${payloadNote}${scopeNote}, but merge deferred: ${safety.reason}`,
       outcome: 'merge-pending',
       repo: name,
     };
@@ -1370,7 +1483,7 @@ async function sweepOneRepo(
   );
   if (merge.exitCode !== 0) {
     return {
-      detail: `merge --ff-only failed (diverged?) — branch ${SWEEP_BRANCH} left standing${payloadNote}`,
+      detail: `merge --ff-only failed (diverged?) — branch ${SWEEP_BRANCH} left standing${payloadNote}${scopeNote}`,
       outcome: 'merge-pending',
       repo: name,
     };
@@ -1388,7 +1501,7 @@ async function sweepOneRepo(
   }
   cleanupWorktree();
   return {
-    detail: `updated, merged into ${defaultBranch}, ${pushNote}${pinGateNote}${payloadNote}`,
+    detail: `updated, merged into ${defaultBranch}, ${pushNote}${pinGateNote}${payloadNote}${scopeNote}`,
     outcome: 'clean',
     repo: name,
   };
