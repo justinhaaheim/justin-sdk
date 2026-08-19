@@ -55,7 +55,7 @@ import {execFileSync} from 'child_process';
 import {existsSync, realpathSync} from 'fs';
 import {join} from 'path';
 
-import type {WorktreeEntry} from './types';
+import type {WorktreeEntry} from '../plugin/lib/repo-status/types';
 
 // ---------------------------------------------------------------------------
 // Schema

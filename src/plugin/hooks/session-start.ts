@@ -22,7 +22,7 @@
  * `.claude/rules/justin-sdk/critical-rules.md` for repos enrolled in
  * critical-rules — a different file, a different channel, its own verdict, and
  * the same one the `critical-rules-setup` doctor check reports (see
- * ../../rules-drift). It only ever REPORTS: nothing inside the repo is written
+ * ../lib/rules-drift). It only ever REPORTS: nothing inside the repo is written
  * here (t6a0.21 D4/D9).
  *
  * THAT SAME VERDICT ALSO GATES THE INJECTION (home-base-anhw, half B). A repo
@@ -34,16 +34,27 @@
  * user-level file's half of the same duplication is handled by a
  * `claudeMdExcludes` entry enrollment writes (half A, critical-rules-setup.ts).
  *
- * All lib modules live in this plugin's ./lib (a marketplace plugin only gets
- * its own subdir), use only bun builtins / bunx subprocesses (no node_modules),
- * and this runs with just `bun`. Always emits a valid envelope and exits 0.
+ * EVERY import must resolve inside ../lib — no exceptions, no `../../`. The
+ * marketplace publishes `./src/plugin` as the WHOLE plugin package, so at
+ * runtime this file is `<cache>/prime/<version>/hooks/session-start.ts` and
+ * nothing above it exists on disk. Plugin 0.5.0 shipped two `../../` imports and
+ * the hook died at import time for a week WITHOUT ANYONE SEEING IT: Claude Code
+ * classifies the failure `hook_non_blocking_error`, starts the session anyway,
+ * and prints nothing — total, silent omission (home-base-qjyj). Two tests pin
+ * this: an import-closure guard, and one that runs this hook from a copy of only
+ * the published file set. Same reason the lib uses bun builtins / bunx
+ * subprocesses only: the cache has no node_modules. Always emits a valid
+ * envelope and exits 0.
  */
 
 import {assemble} from '../lib/prime';
+import {formatRepoState, runDivergenceCheck} from '../lib/repo-status/prime-view';
 import {
-  formatRepoState,
-  runDivergenceCheck,
-} from '../../repo-status/prime-view';
+  checkRulesDrift,
+  isRulesDriftProblem,
+  rulesDriftAdvice,
+  type RulesDriftStatus,
+} from '../lib/rules-drift';
 import {
   contentHash,
   deployedIsDirty,
@@ -54,12 +65,6 @@ import {
   rulesFilePath,
   SYNC_RULES_CMD,
 } from '../lib/rules-file';
-import {
-  checkRulesDrift,
-  isRulesDriftProblem,
-  rulesDriftAdvice,
-  type RulesDriftStatus,
-} from '../../rules-drift';
 
 const projectRoot = process.env.CLAUDE_PROJECT_DIR ?? process.cwd();
 const RULES_FILE = rulesFilePath();

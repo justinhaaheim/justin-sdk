@@ -46,18 +46,27 @@
  * TOTAL AND SILENT. It never throws and never prints: the hook's stdout is a
  * JSON envelope, so a stray console.log from a helper would corrupt every
  * session's hook output, and an exception would take the whole injection down.
+ *
+ * IT LIVES IN THE PLUGIN LIB (home-base-qjyj). The marketplace publishes
+ * `./src/plugin` as the entire plugin package, so an import that escapes this
+ * subtree does not exist on disk at runtime and kills the hook at import time —
+ * which is exactly what plugin 0.5.0 shipped, invisibly. Everything reachable
+ * from `hooks/` must therefore resolve inside `src/plugin/`, use bun builtins
+ * only, and the SDK-side callers (doctor, tests) import it from HERE (D14: one
+ * definition, never a forked copy).
  */
 
 import {existsSync, readFileSync} from 'fs';
 import {dirname} from 'path';
 
-import {readSelectedModules} from './critical-rules-setup';
+import {findLocalPrettier} from './local-fs';
 import {
   assembleSelected,
   PROMPTS_SOURCE_FAILURE,
   type SourceRefresh,
-} from './plugin/lib/prime';
+} from './prime';
 import {
+  artifactBody,
   contentHash,
   deployedIsDirty,
   deployedSourceSha,
@@ -67,9 +76,8 @@ import {
   RULES_DIFF_CMD,
   RULES_UPDATE_CMD,
   SDK_BUNX,
-} from './plugin/lib/rules-file';
-import {artifactBody} from './rules-diff';
-import {findLocalPrettier} from './setup-helpers';
+} from './rules-file';
+import {readSelectedModules} from './rules-selection';
 
 export type RulesDriftStatus =
   | 'not-enrolled'

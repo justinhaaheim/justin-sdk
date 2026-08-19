@@ -19,7 +19,7 @@ import {existsSync, readFileSync, writeFileSync} from 'fs';
 import {dirname, join, resolve} from 'path';
 
 import {buildReport, type RepoStatusReport} from '../src/repo-status/report';
-import {runDivergenceCheck} from '../src/repo-status/prime-view';
+import {runDivergenceCheck} from '../src/plugin/lib/repo-status/prime-view';
 import {
   buildSubmoduleInventory,
   Q_CURRENT_CODE,

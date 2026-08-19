@@ -15,7 +15,7 @@
  * Part of home-base-qyu1.1 / qyu1.4.
  */
 
-import {buildCoreInventory} from './core';
+import {buildCoreInventory} from '../plugin/lib/repo-status/core';
 import {
   proveContentOnBaseline,
   type ArchiveMirror,
@@ -28,7 +28,7 @@ import {
   fetchPullRequests,
   prForBranch,
   type PrIndex,
-} from './prs';
+} from '../plugin/lib/repo-status/prs';
 import {
   buildSubmoduleInventory,
   EMPTY_SUBMODULE_INVENTORY,
@@ -39,7 +39,7 @@ import type {
   BranchDivergence,
   EnumerationFailure,
   WorktreeEntry,
-} from './types';
+} from '../plugin/lib/repo-status/types';
 
 export interface PrSummary {
   number: number;

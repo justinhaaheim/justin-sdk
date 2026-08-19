@@ -15,7 +15,7 @@ import {join} from 'path';
 import {
   runDivergenceCheck,
   formatRepoState,
-} from '../src/repo-status/prime-view';
+} from '../src/plugin/lib/repo-status/prime-view';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];

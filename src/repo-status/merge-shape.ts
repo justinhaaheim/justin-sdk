@@ -59,7 +59,7 @@
  * Part of home-base-qyu1.19.
  */
 
-import type {DivergenceCounts} from './types';
+import type {DivergenceCounts} from '../plugin/lib/repo-status/types';
 
 /**
  * The question this field's value answers.

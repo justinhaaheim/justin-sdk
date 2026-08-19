@@ -65,6 +65,10 @@ import {
   type SourceRefresh,
 } from './plugin/lib/prime';
 import {
+  CRITICAL_RULES_CONFIG_KEY,
+  readSelectedModules,
+} from './plugin/lib/rules-selection';
+import {
   buildStamp,
   contentHash,
   prettierEnabled,
@@ -87,8 +91,18 @@ import {
   writeJson,
 } from './setup-helpers';
 
-/** Key under `componentConfig` in justin-sdk.config.json. */
-export const CRITICAL_RULES_CONFIG_KEY = 'critical-rules';
+/**
+ * The selection reader MOVED to src/plugin/lib/rules-selection.ts, because the
+ * SessionStart hook reaches it through `rules-drift` and a published plugin
+ * package contains only `src/plugin` (home-base-qjyj). Re-exported here so the
+ * installer-facing import site is unchanged — one definition, two names for the
+ * same module (t6a0.21 D14: share, never fork).
+ */
+export {
+  CRITICAL_RULES_CONFIG_KEY,
+  readSelectedModules,
+  type SelectionRead,
+} from './plugin/lib/rules-selection';
 
 /**
  * Universal modules kept OUT of the default seed.
@@ -117,81 +131,6 @@ export function computeDefaultModules(
     .filter((m) => (m.includeIf.length === 0 ? true : m.matches))
     .map((m) => m.name)
     .filter((name) => !DEFAULT_SEED_EXCLUDED.includes(name));
-}
-
-export type SelectionRead =
-  | {ok: true; modules: string[]}
-  | {ok: false; status: 'not-enrolled' | 'failed'; message: string};
-
-/**
- * Read the recorded module selection.
- *
- * Every failure is its own state — "no config file", "corrupt config", "no
- * selection recorded", "the list is not a list of names" and "the list is
- * empty" are five different facts and none of them may read as "assemble
- * nothing" (which would write an artifact stripped of every rule and report
- * success).
- */
-export function readSelectedModules(projectRoot: string): SelectionRead {
-  const configPath = resolve(projectRoot, 'justin-sdk.config.json');
-  const config = readJson(configPath);
-  if (config == null) {
-    // readJson returns null for BOTH "missing" and "unparseable", which are not
-    // the same fact — re-read the existence to tell them apart.
-    return existsSync(configPath)
-      ? {
-          message: `justin-sdk.config.json at ${configPath} could not be parsed — refusing to guess the module selection`,
-          ok: false,
-          status: 'failed',
-        }
-      : {
-          message: `justin-sdk.config.json not found in ${projectRoot} — run \`add critical-rules\` to enroll`,
-          ok: false,
-          status: 'not-enrolled',
-        };
-  }
-
-  const componentConfig = config.componentConfig as
-    | Record<string, unknown>
-    | undefined;
-  const block = componentConfig?.[CRITICAL_RULES_CONFIG_KEY];
-  if (block == null) {
-    return {
-      message:
-        `no componentConfig["${CRITICAL_RULES_CONFIG_KEY}"] in justin-sdk.config.json — ` +
-        `this repo has no recorded module selection; run \`add critical-rules\` to enroll`,
-      ok: false,
-      status: 'not-enrolled',
-    };
-  }
-  if (typeof block !== 'object' || Array.isArray(block)) {
-    return {
-      message: `componentConfig["${CRITICAL_RULES_CONFIG_KEY}"] must be an object with a "modules" array`,
-      ok: false,
-      status: 'failed',
-    };
-  }
-  const raw = (block as Record<string, unknown>).modules;
-  if (
-    !Array.isArray(raw) ||
-    raw.some((name) => typeof name !== 'string' || name.length === 0)
-  ) {
-    return {
-      message: `componentConfig["${CRITICAL_RULES_CONFIG_KEY}"].modules must be an array of module names`,
-      ok: false,
-      status: 'failed',
-    };
-  }
-  if (raw.length === 0) {
-    return {
-      message:
-        `componentConfig["${CRITICAL_RULES_CONFIG_KEY}"].modules is empty — ` +
-        `nothing to assemble. Add module names, or remove the component from "components".`,
-      ok: false,
-      status: 'failed',
-    };
-  }
-  return {modules: raw as string[], ok: true};
 }
 
 // ---------------------------------------------------------------------------

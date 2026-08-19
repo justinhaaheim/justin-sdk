@@ -46,12 +46,13 @@ import {dirname, join} from 'path';
 import {readSelectedModules, refreshIsVerified} from './critical-rules-setup';
 import {assembleSelected, PROMPTS_SOURCE_FAILURE} from './plugin/lib/prime';
 import {
+  artifactBody,
   contentHash,
+  normalizeArtifactText,
   prettierMarkdown,
   projectRulesFilePath,
   readDeployedStamp,
   RULES_UPDATE_CMD,
-  STAMP_PREFIX,
 } from './plugin/lib/rules-file';
 import {fail, findLocalPrettier} from './setup-helpers';
 
@@ -78,25 +79,12 @@ export interface RulesDiffOptions {
 }
 
 /**
- * Strip the generated stamp from an artifact's bytes.
- *
- * Only a FIRST line that really is a stamp is removed; anything else is returned
- * as-is, so a file that was replaced by hand with un-stamped content diffs in
- * full rather than losing its first line.
+ * `artifactBody` (and the `normalizeArtifactText` shape it enforces) moved to
+ * src/plugin/lib/rules-file.ts: the staleness checker the SessionStart hook
+ * calls needs it, and the hook can only import from the plugin subtree
+ * (home-base-qjyj). Re-exported so this module's public surface is unchanged.
  */
-export function artifactBody(fileContents: string): string {
-  const lines = fileContents.split('\n');
-  if (!(lines[0] ?? '').startsWith(STAMP_PREFIX)) return normalize(fileContents);
-  let i = 1;
-  while ((lines[i] ?? '').trim() === '') i += 1;
-  return normalize(lines.slice(i).join('\n'));
-}
-
-/** One trailing newline, no trailing blank lines: the writer's own shape
- * (`${stamp}\n\n${pretty}\n`), so neither side can differ by whitespace alone. */
-function normalize(text: string): string {
-  return `${text.trimEnd()}\n`;
-}
+export {artifactBody} from './plugin/lib/rules-file';
 
 function cannotCheck(message: string): RulesDiffResult {
   return {
@@ -162,7 +150,7 @@ export function rulesDiff(options: RulesDiffOptions = {}): RulesDiffResult {
         `bytes to compare against (${formatted.reason}). This is "unknown", not "clean".`,
     );
   }
-  const canonical = normalize(formatted.markdown);
+  const canonical = normalizeArtifactText(formatted.markdown);
   const shaShort =
     assembled.sourceSha != null ? assembled.sourceSha.slice(0, 12) : 'unknown';
   const moduleCount = `${selection.modules.length} module${selection.modules.length === 1 ? '' : 's'}`;

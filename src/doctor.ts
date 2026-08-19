@@ -24,7 +24,7 @@ import {
   checkRulesDrift,
   isRulesDriftProblem,
   rulesDriftAdvice,
-} from './rules-drift';
+} from './plugin/lib/rules-drift';
 import {
   describeMissing,
   detectWorktreeHydration,

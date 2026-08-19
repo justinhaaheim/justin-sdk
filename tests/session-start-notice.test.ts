@@ -163,7 +163,11 @@ interface HookRun {
  * USER-level rules file is absent and this can never read or write Justin's real
  * one; XDG_CONFIG_HOME is sandboxed so the managed clone is never touched.
  */
-function runHook(repo: string, extraEnv: Record<string, string> = {}): HookRun {
+function runHook(
+  repo: string,
+  extraEnv: Record<string, string> = {},
+  hookPath: string = HOOK,
+): HookRun {
   const home = track(createSandbox());
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
@@ -172,7 +176,7 @@ function runHook(repo: string, extraEnv: Record<string, string> = {}): HookRun {
     XDG_CONFIG_HOME: join(home.path, 'config'),
     ...extraEnv,
   };
-  const result = spawnSync(process.execPath, [HOOK], {
+  const result = spawnSync(process.execPath, [hookPath], {
     cwd: repo,
     encoding: 'utf-8',
     env,
@@ -366,10 +370,23 @@ describe('the hook never writes inside the project', () => {
 // The plugin-cache constraint
 // ---------------------------------------------------------------------------
 
-/** Every relative import reachable from `entry`, plus every bare specifier. */
-function importGraph(entry: string): {files: string[]; bare: string[]} {
+/**
+ * Every relative import reachable from `entry`, plus every bare specifier.
+ *
+ * `unresolved` matters as much as `files`: a relative specifier pointing at a
+ * file that is not there is precisely the 0.5.0 shape (home-base-qjyj), and a
+ * walker that just skipped it would report a clean graph for a hook that cannot
+ * start. It is reported as the path the specifier POINTS AT, so the escape check
+ * below can judge it the same way it judges a resolved file.
+ */
+function importGraph(entry: string): {
+  files: string[];
+  bare: string[];
+  unresolved: string[];
+} {
   const seen = new Set<string>();
   const bare = new Set<string>();
+  const unresolved = new Set<string>();
   const stack = [resolve(entry)];
   while (stack.length > 0) {
     const file = stack.pop();
@@ -384,15 +401,14 @@ function importGraph(entry: string): {files: string[]; bare: string[]} {
         continue;
       }
       const base = resolve(dirname(file), spec);
-      for (const candidate of [`${base}.ts`, join(base, 'index.ts')]) {
-        if (existsSync(candidate)) {
-          stack.push(candidate);
-          break;
-        }
-      }
+      const resolved = [`${base}.ts`, join(base, 'index.ts')].find((candidate) =>
+        existsSync(candidate),
+      );
+      if (resolved == null) unresolved.add(base);
+      else stack.push(resolved);
     }
   }
-  return {bare: [...bare], files: [...seen]};
+  return {bare: [...bare], files: [...seen], unresolved: [...unresolved]};
 }
 
 describe('the hook stays runnable from the marketplace cache (no node_modules)', () => {
@@ -410,18 +426,108 @@ describe('the hook stays runnable from the marketplace cache (no node_modules)',
   test('nothing in the import graph needs a third-party package', () => {
     const graph = importGraph(HOOK);
     // Sanity: the walker really traversed into the new code, or this is vacuous.
-    expect(graph.files.some((f) => f.endsWith('/src/rules-drift.ts'))).toBe(true);
     expect(
-      graph.files.some((f) => f.endsWith('/src/critical-rules-setup.ts')),
+      graph.files.some((f) => f.endsWith('/src/plugin/lib/rules-drift.ts')),
     ).toBe(true);
-    expect(graph.files.some((f) => f.endsWith('/src/setup-helpers.ts'))).toBe(
-      true,
-    );
+    expect(
+      graph.files.some((f) => f.endsWith('/src/plugin/lib/rules-selection.ts')),
+    ).toBe(true);
+    expect(
+      graph.files.some((f) => f.endsWith('/src/plugin/lib/local-fs.ts')),
+    ).toBe(true);
 
     const thirdParty = graph.bare.filter(
       (spec) => !BUILTINS.has(spec.replace(/^node:/, '')),
     );
     expect(thirdParty).toEqual([]);
+  });
+
+  /**
+   * THE GUARD THAT WAS MISSING WHEN 0.5.0 SHIPPED (home-base-qjyj).
+   *
+   * `.claude-plugin/marketplace.json` publishes `"source": "./src/plugin"`, so
+   * that directory IS the plugin package: at runtime the hook is
+   * `<cache>/prime/<version>/hooks/session-start.ts` and nothing above it was
+   * copied. 0.5.0's hook imported `../../repo-status/prime-view` and
+   * `../../rules-drift`, which resolve fine in this repo and to nothing at all
+   * in the cache — so the hook exited 1 at import time in every real session for
+   * a week. It was invisible because Claude Code calls that a
+   * `hook_non_blocking_error`: the session starts, and nothing is printed.
+   *
+   * Neither existing test could catch it. The third-party test above passes with
+   * escaping imports (they are relative, not bare), and every behavioural test
+   * runs the hook from this repo, where the escape resolves.
+   */
+  test('no import escapes the published plugin subtree', () => {
+    const pluginRoot = resolve(import.meta.dirname, '..', 'src', 'plugin');
+    const graph = importGraph(HOOK);
+
+    // Sanity: the walk really traverses, or "no escapes" is vacuous. Asserted on
+    // a module the hook reaches through a NON-escaping import, deliberately —
+    // an assertion about the escaping half would collapse together with the
+    // thing under test and report the wrong failure.
+    expect(
+      graph.files.some((f) => f.endsWith('/src/plugin/lib/prime.ts')),
+    ).toBe(true);
+
+    // Judged together: an import that resolves OUTSIDE the package and one that
+    // resolves nowhere are the same production failure — a module the cache does
+    // not contain — and the second is what the escaping paths become once the
+    // SDK moves them, so neither may pass.
+    const escapes = [...graph.files, ...graph.unresolved].filter((file) =>
+      relative(pluginRoot, file).startsWith('..'),
+    );
+    expect(escapes).toEqual([]);
+    expect(graph.unresolved).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The published file set, executed the way the plugin cache executes it
+// ---------------------------------------------------------------------------
+
+/** Copy a directory tree — the marketplace's own "publish this subdir" act. */
+function copyTree(from: string, to: string): void {
+  mkdirSync(to, {recursive: true});
+  for (const entry of readdirSync(from, {withFileTypes: true})) {
+    const src = join(from, entry.name);
+    const dest = join(to, entry.name);
+    if (entry.isDirectory()) copyTree(src, dest);
+    else writeFileSync(dest, readFileSync(src));
+  }
+}
+
+describe('the hook runs from a copy of ONLY the published plugin files', () => {
+  /**
+   * The static guard above reads import specifiers; this one PROVES the result
+   * by doing what the marketplace does — copy `src/plugin` somewhere with
+   * nothing above it and run the hook from there. A specifier form the regex
+   * missed, or a runtime require, still fails here.
+   */
+  test('exit 0 and a valid envelope, with nothing outside src/plugin on disk', () => {
+    const dir = promptsFixture();
+    const repo = projectFixture(['alpha', 'omega']);
+    writeArtifact(repo, dir);
+
+    const sb = track(createSandbox());
+    const published = join(sb.path, 'prime', '0.0.0-test');
+    copyTree(resolve(import.meta.dirname, '..', 'src', 'plugin'), published);
+
+    // The cache really is only the plugin subtree: the SDK's own src/ is absent.
+    expect(existsSync(join(published, 'hooks', 'session-start.ts'))).toBe(true);
+    expect(existsSync(join(published, 'lib', 'rules-drift.ts'))).toBe(true);
+    expect(existsSync(join(sb.path, 'src'))).toBe(false);
+    expect(existsSync(join(published, 'node_modules'))).toBe(false);
+
+    const run = runHook(
+      repo,
+      {},
+      join(published, 'hooks', 'session-start.ts'),
+    );
+    // runHook already JSON.parses stdout and asserts the envelope's event name.
+    expect(run.status).toBe(0);
+    expect(run.stderr).toBe('');
+    expect(run.systemMessage).toContain('justin-sdk prime');
   });
 });
 

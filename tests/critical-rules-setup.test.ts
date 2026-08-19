@@ -65,7 +65,7 @@ import {
   STAMP_PREFIX,
 } from '../src/plugin/lib/rules-file';
 import {rulesDiff} from '../src/rules-diff';
-import {checkRulesDrift} from '../src/rules-drift';
+import {checkRulesDrift} from '../src/plugin/lib/rules-drift';
 import {readJson, setQuiet, writeJson} from '../src/setup-helpers';
 import {git} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';

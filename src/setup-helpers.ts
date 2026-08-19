@@ -17,6 +17,8 @@ import {
 } from 'fs';
 import {dirname, resolve} from 'path';
 
+import {findLocalPrettier} from './plugin/lib/local-fs';
+
 // ---------------------------------------------------------------------------
 // Quiet mode (module-level flag toggled by runBase/runBeads/etc.)
 // ---------------------------------------------------------------------------
@@ -101,31 +103,14 @@ export function ensureDir(dir: string): void {
   if (!existsSync(dir)) mkdirSync(dir, {recursive: true});
 }
 
-export function readJson(path: string): Record<string, unknown> | null {
-  if (!existsSync(path)) return null;
-  try {
-    return JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
 /**
- * Find the target repo's OWN prettier binary by walking node_modules/.bin
- * upward from `startDir`. Local-only on purpose: a bunx fallback would fetch
- * prettier from the registry on every write in a repo that has none —
- * slow, network-dependent, and formatted with a version the repo never chose.
+ * `readJson` and `findLocalPrettier` now LIVE in the plugin lib
+ * (src/plugin/lib/local-fs.ts) because the SessionStart hook needs them and a
+ * published plugin package contains only `src/plugin` — see the header there
+ * (home-base-qjyj). They are re-exported here, not re-implemented, so their ~17
+ * existing callers keep one import site and there is exactly one copy of each.
  */
-export function findLocalPrettier(startDir: string): string | null {
-  let dir = resolve(startDir);
-  for (;;) {
-    const candidate = resolve(dir, 'node_modules', '.bin', 'prettier');
-    if (existsSync(candidate)) return candidate;
-    const parent = dirname(dir);
-    if (parent === dir) return null;
-    dir = parent;
-  }
-}
+export {findLocalPrettier, readJson} from './plugin/lib/local-fs';
 
 /**
  * Write JSON and immediately format it IN PLACE with the target repo's own

@@ -317,3 +317,32 @@ export function deployedSourceSha(stamp: RulesStamp | null): string | null {
 export function deployedIsDirty(stamp: RulesStamp | null): boolean {
   return stamp?.commit.endsWith('-dirty') ?? false;
 }
+
+/**
+ * One trailing newline, no trailing blank lines: the writer's own shape
+ * (`${stamp}\n\n${pretty}\n`), so neither side can differ by whitespace alone.
+ */
+export function normalizeArtifactText(text: string): string {
+  return `${text.trimEnd()}\n`;
+}
+
+/**
+ * Strip the generated stamp from an artifact's bytes.
+ *
+ * Only a FIRST line that really is a stamp is removed; anything else is returned
+ * as-is, so a file that was replaced by hand with un-stamped content diffs in
+ * full rather than losing its first line.
+ *
+ * Lives here rather than in `rules-diff` (its original home) because the
+ * staleness checker the SessionStart hook calls needs it, and the hook can only
+ * import from this directory (home-base-qjyj). `rules-diff` imports it from here.
+ */
+export function artifactBody(fileContents: string): string {
+  const lines = fileContents.split('\n');
+  if (!(lines[0] ?? '').startsWith(STAMP_PREFIX)) {
+    return normalizeArtifactText(fileContents);
+  }
+  let i = 1;
+  while ((lines[i] ?? '').trim() === '') i += 1;
+  return normalizeArtifactText(lines.slice(i).join('\n'));
+}

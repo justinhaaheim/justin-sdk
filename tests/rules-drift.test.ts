@@ -47,7 +47,7 @@ import {
   isRulesDriftProblem,
   rulesDriftAdvice,
   type RulesDriftStatus,
-} from '../src/rules-drift';
+} from '../src/plugin/lib/rules-drift';
 import {setQuiet} from '../src/setup-helpers';
 import {git} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';

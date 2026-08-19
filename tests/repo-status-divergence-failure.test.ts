@@ -36,7 +36,7 @@ import {execFileSync, spawnSync} from 'child_process';
 import {existsSync, mkdirSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
-import {countDivergence} from '../src/repo-status/core';
+import {countDivergence} from '../src/plugin/lib/repo-status/core';
 import {describeMergeShape} from '../src/repo-status/merge-shape';
 import {
   buildPlan,

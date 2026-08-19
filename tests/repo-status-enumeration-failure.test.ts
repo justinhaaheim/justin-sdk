@@ -52,9 +52,9 @@ import {
   buildCoreInventory,
   getBranchTips,
   getWorktrees,
-} from '../src/repo-status/core';
+} from '../src/plugin/lib/repo-status/core';
 import {buildPlan} from '../src/repo-status/plan';
-import {formatRepoState, runDivergenceCheck} from '../src/repo-status/prime-view';
+import {formatRepoState, runDivergenceCheck} from '../src/plugin/lib/repo-status/prime-view';
 import {buildReport, type RepoStatusReport} from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
 

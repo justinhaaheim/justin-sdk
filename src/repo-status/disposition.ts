@@ -26,8 +26,8 @@
 import {findUnreadableEvidence, mirrorFullyPreserves} from './content';
 
 import type {ContentProof} from './content';
-import type {PullRequest} from './prs';
-import type {BranchDivergence} from './types';
+import type {PullRequest} from '../plugin/lib/repo-status/prs';
+import type {BranchDivergence} from '../plugin/lib/repo-status/types';
 
 export type Disposition =
   /** Every unique commit is demonstrably on the baseline. Nothing to lose. */

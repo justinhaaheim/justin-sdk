@@ -84,7 +84,7 @@
 import {execFileSync} from 'child_process';
 
 import {mirrorFullyPreserves, proveContentOnBaseline} from './content';
-import {ENUMERATION_FAILURES} from './core';
+import {ENUMERATION_FAILURES} from '../plugin/lib/repo-status/core';
 
 import type {BranchRow, RepoStatusReport} from './report';
 
