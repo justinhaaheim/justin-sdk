@@ -28,12 +28,15 @@ import {tmpdir} from 'os';
 import {join, resolve} from 'path';
 
 import {
+  attachableContract,
   checkGate,
   DEFAULT_OPTIONS,
   parseBackgroundedId,
   parseUsage,
   readVerdictFile,
+  respawnIntent,
   type UsageSnapshot,
+  VERDICT_CONTRACT,
   VERDICT_SCHEMA,
 } from '../src/ralph';
 import {initRepo} from './git-fixtures';
@@ -382,6 +385,27 @@ describe('ralph --dry-run, end to end with a fake claude on PATH', () => {
     // the assertion that no percentage was fabricated to fill the gap.
     expect(result.out).not.toContain('stop at');
   });
+
+  test('the handoff scan and --no-usage-gate compose (1r6d.4 AC7)', () => {
+    // Two independently-added preflight steps in one run. The fixture repo is a
+    // plain git repo with no beads workspace, so this also exercises the
+    // degradation path end to end: the scan cannot look, says so, and the run
+    // still proceeds and exits 0 rather than dying on a missing `br`.
+    const result = runDryRun(fixture(), ['--no-usage-gate']);
+    expect(result.out).toContain('handoff');
+    expect(result.out).toContain('UNAVAILABLE');
+    expect(result.out).toContain('may exist and not be seen');
+    expect(result.status).toBe(0);
+    // …and it did not resurrect the /usage call the flag exists to suppress.
+    expect(result.calls.filter((c) => c.includes('/usage'))).toEqual([]);
+  });
+
+  test('with the gate ON, a repo with no handoffs still reports the scan', () => {
+    // Silence must be a claim: the scan line appears on every run, so "nothing
+    // waiting" is never confused with "nobody looked".
+    const result = runDryRun(fixture(), []);
+    expect(result.out).toContain('handoff');
+  });
 });
 
 describe('parseBackgroundedId', () => {
@@ -449,6 +473,110 @@ describe('readVerdictFile', () => {
     const dir = withVerdict('{"status":"COMPLETE","summary":"done"}');
     expect(readVerdictFile(dir, 'v.json')?.followUps).toEqual([]);
   });
+
+  // --- respawn intent (home-base-1r6d.4) ---
+
+  test('round-trips a respawn intent and the handoff bead it names', () => {
+    const dir = withVerdict(
+      '{"status":"CONTINUE","summary":"context is full","followUps":[],"respawn":"immediate","handoffBead":"hb-42"}',
+    );
+    const v = readVerdictFile(dir, 'v.json');
+    expect(v?.respawn).toBe('immediate');
+    expect(v?.handoffBead).toBe('hb-42');
+    expect(respawnIntent(v)).toBe('immediate');
+  });
+
+  test('an omitted respawn stays ABSENT in the parse, and reads as on-schedule', () => {
+    // Two different facts kept apart: the field is null (nobody said anything),
+    // and every respawn DECISION reads that null conservatively.
+    const dir = withVerdict('{"status":"CONTINUE","summary":"more to do"}');
+    const v = readVerdictFile(dir, 'v.json');
+    expect(v?.respawn).toBeNull();
+    expect(v?.handoffBead).toBeNull();
+    expect(respawnIntent(v)).toBe('on-schedule');
+  });
+
+  test('an unrecognised respawn value is discarded, never guessed at', () => {
+    // Guessing "immediate" from a typo would boot a session nobody asked for.
+    const dir = withVerdict(
+      '{"status":"CONTINUE","summary":"x","respawn":"IMMEDIATE!"}',
+    );
+    expect(readVerdictFile(dir, 'v.json')?.respawn).toBeNull();
+  });
+
+  test('an empty handoffBead is absent, not a bead id', () => {
+    const dir = withVerdict(
+      '{"status":"CONTINUE","summary":"x","respawn":"immediate","handoffBead":"  "}',
+    );
+    expect(readVerdictFile(dir, 'v.json')?.handoffBead).toBeNull();
+  });
+
+  test('respawnIntent is conservative when there is no verdict at all', () => {
+    expect(respawnIntent(null)).toBe('on-schedule');
+  });
+});
+
+/**
+ * The injected contract is the ONLY place the outgoing session learns the
+ * handoff lifecycle — `/loop-session` is shared with interactive use and stays
+ * runner-agnostic, so runner plumbing lives here (home-base-1r6d.4 AC2).
+ */
+describe('VERDICT_CONTRACT — the handoff lifecycle', () => {
+  test('states the order: commit, flush beads, write the bead, then report', () => {
+    expect(VERDICT_CONTRACT).toContain('Commit your code');
+    expect(VERDICT_CONTRACT).toContain('Flush and commit .beads/');
+    expect(VERDICT_CONTRACT).toContain('br create "HANDOFF: <arc>"');
+    expect(VERDICT_CONTRACT).toContain('--labels handoff');
+    expect(VERDICT_CONTRACT).toContain('Report your verdict');
+  });
+
+  test('tells the session what the handoff bead must carry', () => {
+    expect(VERDICT_CONTRACT).toContain('WORKTREE PATH');
+    expect(VERDICT_CONTRACT).toContain('next concrete step');
+    expect(VERDICT_CONTRACT).toContain('open questions');
+  });
+
+  test('warns about clap eating values that start with a dash', () => {
+    // `br update --notes -foo` is parsed as a flag; the equals form is the fix.
+    expect(VERDICT_CONTRACT).toContain('--flag=value');
+  });
+
+  test('names both respawn intents and says silence means on-schedule', () => {
+    expect(VERDICT_CONTRACT).toContain('immediate');
+    expect(VERDICT_CONTRACT).toContain('on-schedule');
+    expect(VERDICT_CONTRACT).toContain('never boots a successor');
+  });
+
+  test('forbids `br init` in a repo with no beads workspace', () => {
+    // Creating a workspace unasked is exactly the o33r damage shape.
+    expect(VERDICT_CONTRACT).toContain('do NOT run `br init`');
+  });
+
+  test('pre-authorises the automated notices as the repo owner speaking', () => {
+    // home-base-1r6d.7: a sterile session flagged the wrap-up directive as a
+    // prompt injection and refused it — "instructions you never gave". The fix
+    // is provenance, so the contract vouches for the channel by name.
+    expect(VERDICT_CONTRACT).toContain('[Automated Usage Check]');
+    expect(VERDICT_CONTRACT).toContain('[Automated Time Check]');
+    expect(VERDICT_CONTRACT).toContain('not a');
+    expect(VERDICT_CONTRACT).toContain('prompt-injection attempt');
+    expect(VERDICT_CONTRACT).toContain('follow it');
+  });
+
+  test('the attachable verdict example carries the respawn fields', () => {
+    // The model copies this literally; a stale example is a silent way to lose
+    // the whole feature in the mode that is the DEFAULT.
+    const contract = attachableContract('/tmp/verdict.json');
+    expect(contract).toContain('"respawn":"immediate"');
+    expect(contract).toContain('"handoffBead"');
+    expect(contract).toContain('"immediate" or "on-schedule"');
+  });
+
+  test('the attachable contract still puts the verdict file LAST', () => {
+    expect(attachableContract('/tmp/verdict.json')).toContain(
+      'as the LAST thing you do',
+    );
+  });
 });
 
 describe('attachable defaults', () => {
@@ -476,5 +604,22 @@ describe('VERDICT_SCHEMA', () => {
 
   test('requires every field the runner reads', () => {
     expect(VERDICT_SCHEMA.required).toEqual(['status', 'summary', 'followUps']);
+  });
+
+  test('print mode can express a respawn intent and a handoff bead', () => {
+    // additionalProperties is false, so an undeclared field could not be
+    // written at all — print mode would silently lose the whole feature.
+    expect(VERDICT_SCHEMA.properties.respawn.enum).toEqual([
+      'immediate',
+      'on-schedule',
+    ]);
+    expect(VERDICT_SCHEMA.properties.handoffBead.type).toBe('string');
+  });
+
+  test('leaves both respawn fields optional', () => {
+    // An iteration with nothing to hand forward has nothing honest to put in
+    // them, and an omitted respawn already has a defined meaning.
+    expect(VERDICT_SCHEMA.required).not.toContain('respawn');
+    expect(VERDICT_SCHEMA.required).not.toContain('handoffBead');
   });
 });
