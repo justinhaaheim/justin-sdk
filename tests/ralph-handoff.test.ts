@@ -710,6 +710,145 @@ describe('scripted simulation: two sessions, one handoff bead (real br)', () => 
   );
 });
 
+/**
+ * The whole respawn chain, driven end to end by a scripted loop.
+ *
+ * `claude` and `br` are both fakes on PATH, so a REAL two-iteration run happens
+ * — real argv, real verdict parsing, real branching, real ledger — with nothing
+ * model-shaped in it. This is what proves the successor's prompt actually
+ * carries the pickup, rather than proving each function does its bit and
+ * assuming the wiring between them.
+ *
+ * Iteration 1 reports CONTINUE + respawn=immediate + a handoff bead; iteration 2
+ * must boot with the pickup preamble naming that bead, and then reports
+ * COMPLETE. Iteration 1's own argv is the negative control: it must NOT contain
+ * a pickup, because nothing was waiting when the run started.
+ */
+describe('scripted loop: an immediate respawn boots its successor on the bead', () => {
+  const CLI = join(dirname(import.meta.dirname), 'src', 'cli.ts');
+
+  interface Loop {
+    out: string;
+    status: number | null;
+    call: (n: number) => string;
+    ledger: Array<Record<string, unknown>>;
+  }
+
+  function runScriptedLoop(): Loop {
+    const sb = track(createSandbox());
+    const repo = initRepo(sb, 'project', {'README.md': '# scripted loop\n'});
+    const binDir = join(sb.path, 'fakebin');
+    mkdirSync(binDir, {recursive: true});
+
+    // Every invocation's argv is dumped to its own file — the prompt spans
+    // lines, so one call cannot be one log line.
+    const counter = join(sb.path, 'claude-calls');
+    const callFile = (n: number): string => join(sb.path, `call-${n}.args`);
+    const verdictOf = (status: string, extra: string): string =>
+      `{"structured_output":{"status":"${status}","summary":"scripted","followUps":[]${extra}},"is_error":false,"num_turns":1,"total_cost_usd":0.01,"session_id":"fake"}`;
+    writeFileSync(
+      join(binDir, 'claude'),
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "--version" ]; then echo "2.1.999-fake"; exit 0; fi',
+        `N=0; [ -f ${JSON.stringify(counter)} ] && N=$(cat ${JSON.stringify(counter)})`,
+        `N=$((N+1)); echo "$N" > ${JSON.stringify(counter)}`,
+        `printf '%s\\n' "$@" > ${JSON.stringify(sb.path)}/call-$N.args`,
+        'if [ "$N" = "1" ]; then',
+        `  printf '%s' '${verdictOf('CONTINUE', ',"respawn":"immediate","handoffBead":"hoff-77"')}'`,
+        'else',
+        `  printf '%s' '${verdictOf('COMPLETE', '')}'`,
+        'fi',
+        'exit 0',
+      ].join('\n'),
+    );
+    chmodSync(join(binDir, 'claude'), 0o755);
+
+    // A beads workspace holding exactly one open handoff bead, which is NOT
+    // waiting at start (the scan finds nothing) but IS resolvable by id.
+    writeFileSync(
+      join(binDir, 'br'),
+      [
+        '#!/bin/sh',
+        'case "$*" in',
+        '  *"--id hoff-77"*)',
+        `    printf '%s' '{"issues":[{"id":"hoff-77","title":"HANDOFF: the arc","status":"open","updated_at":"2026-08-21T03:00:00Z"}]}' ;;`,
+        `  *) printf '%s' '{"issues":[]}' ;;`,
+        'esac',
+        'exit 0',
+      ].join('\n'),
+    );
+    chmodSync(join(binDir, 'br'), 0o755);
+
+    const ledgerPath = join(sb.path, 'ledger.jsonl');
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    };
+    delete env.ANTHROPIC_API_KEY;
+    const proc = Bun.spawnSync({
+      cmd: [
+        'bun',
+        CLI,
+        'ralph',
+        '--mode',
+        'print',
+        '--no-usage-gate',
+        '--max-iterations',
+        '2',
+        '--ledger',
+        ledgerPath,
+      ],
+      cwd: repo,
+      env: env as Record<string, string>,
+    });
+    return {
+      call: (n) => readFileSync(callFile(n), 'utf8'),
+      ledger: readFileSync(ledgerPath, 'utf8')
+        .split('\n')
+        .filter((l) => l !== '')
+        .map((l) => JSON.parse(l) as Record<string, unknown>),
+      out: `${proc.stdout.toString()}${proc.stderr.toString()}`,
+      status: proc.exitCode,
+    };
+  }
+
+  test('iteration 2 is spawned with the pickup, iteration 1 is not', () => {
+    const loop = runScriptedLoop();
+
+    // Negative control, built in: nothing was waiting when the run started.
+    expect(loop.call(1)).not.toContain('PICK UP THE HANDOFF');
+    expect(loop.call(1)).not.toContain('hoff-77');
+
+    // …and the successor is booted on the bead its predecessor named.
+    expect(loop.call(2)).toContain('PICK UP THE HANDOFF FIRST');
+    expect(loop.call(2)).toContain('hoff-77');
+    expect(loop.call(2)).toContain(
+      "br close hoff-77 --reason='picked up by ralph-2'",
+    );
+    expect(loop.call(2)).toContain('WORKTREE PATH');
+  });
+
+  test('the run says out loud which bead the next iteration boots on', () => {
+    const loop = runScriptedLoop();
+    expect(loop.out).toContain('next iteration boots with handoff hoff-77');
+    expect(loop.out).toContain('respawn=immediate');
+    expect(loop.out).toContain('COMPLETE');
+    expect(loop.status).toBe(0);
+  });
+
+  test('the ledger records a stated intent and an unstated one differently', () => {
+    const loop = runScriptedLoop();
+    expect(loop.ledger.length).toBe(2);
+    expect(loop.ledger[0].respawn).toBe('immediate');
+    expect(loop.ledger[0].handoffBead).toBe('hoff-77');
+    // Iteration 2 said nothing: null, never the string 'on-schedule', which
+    // would claim the session made a choice it did not make.
+    expect(loop.ledger[1].respawn).toBeNull();
+    expect(loop.ledger[1].handoffBead).toBeNull();
+  });
+});
+
 describe('crash boots', () => {
   test('a missing verdict file produces a reconstruct boot, not a fresh one', () => {
     // The chain AC5 asks for: no verdict → crash → the successor is told.
