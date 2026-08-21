@@ -27,6 +27,7 @@ import {runPrettierSetup} from './prettier-setup';
 import {runPromptsSetup} from './prompts-setup';
 import {runTimeCheckSetup} from './time-check-setup';
 import {runTsconfigSetup} from './tsconfig-setup';
+import {runUsageCheckSetup} from './usage-check-setup';
 
 // ---------------------------------------------------------------------------
 // Names and ordering
@@ -51,6 +52,7 @@ export const COMPONENT_NAMES = [
   'beads',
   'eas',
   'time-check',
+  'usage-check',
   'critical-rules',
 ] as const;
 
@@ -64,6 +66,9 @@ export type ComponentName = (typeof COMPONENT_NAMES)[number];
  *   - time-check: its hook fires on EVERY prompt, so installing it everywhere
  *     "but disabled" would cost a process spawn per prompt in every project to
  *     print nothing. Opt in where the wall-clock actually matters.
+ *   - usage-check: same reasoning, and more of it — its hooks fire on every
+ *     prompt AND after every tool batch. Opt in where long sessions need to
+ *     know their own context size.
  *   - critical-rules: it commits a generated rules file INTO the repo, and four
  *     enrolled repos are public. Which rules a repo publishes is a deliberate
  *     per-repo decision, not something a preset should make (t6a0.21 D6/D12).
@@ -73,6 +78,7 @@ const OPT_IN_ONLY: ReadonlySet<ComponentName> = new Set([
   'base-setup',
   'eas',
   'time-check',
+  'usage-check',
   'critical-rules',
 ]);
 
@@ -146,6 +152,7 @@ const RUNNERS: Record<
     }),
   eas: (a) => runEasSetup(base(a)),
   'time-check': (a) => runTimeCheckSetup(base(a)),
+  'usage-check': (a) => runUsageCheckSetup(base(a)),
   'critical-rules': (a) => runCriticalRulesSetup(base(a)),
 };
 

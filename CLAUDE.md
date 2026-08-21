@@ -6,7 +6,7 @@ Validation bar here is `tsc --noEmit` + `bun test` — this repo has no ESLint c
 
 ## Shape
 
-- **Components** are installed per-repo with `justin-sdk add <component>` and recorded in the consumer's `justin-sdk.config.json`: `base-setup`, `gitignore`, `prettier`, `tsconfig`, `eslint`, `husky`, `gh-actions`, `prompts`, `claude-md`, `beads`, `eas`, `time-check`, `critical-rules`. Presets: `minimal`, `core`, `all`. Default is **no commit** — files change in the working tree so the diff can be inspected first.
+- **Components** are installed per-repo with `justin-sdk add <component>` and recorded in the consumer's `justin-sdk.config.json`: `base-setup`, `gitignore`, `prettier`, `tsconfig`, `eslint`, `husky`, `gh-actions`, `prompts`, `claude-md`, `beads`, `eas`, `time-check`, `usage-check`, `critical-rules`. Presets: `minimal`, `core`, `all`. Default is **no commit** — files change in the working tree so the diff can be inspected first.
 - **`check-runner`** is an importable module (`@justinhaaheim/justin-sdk/check-runner`), not a copied file. Checks support `severity: 'warn'` (non-blocking) vs `'error'`, and accept shell commands or TypeScript functions.
 - **`signal` and `doctor` discover their work from the consumer's package.json** — `signal-source:LABEL` and `fix-source:LABEL` scripts. That keeps per-project variation in the project, not in a forked script.
 - **`doctor` fixes scaffolding** (configs, deps); **`fix` fixes code** (eslint --fix, prettier --write). Keep them distinct — formatting is never auto-run at session start.

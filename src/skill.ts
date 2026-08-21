@@ -50,6 +50,8 @@ const COMPONENT_BLURBS: Record<ComponentName, string> = {
   'time-check':
     'UserPromptSubmit hook stamping the wall-clock into the transcript after a long gap or on a new working day. Config: componentConfig["time-check"].',
   tsconfig: 'Shared TypeScript config.',
+  'usage-check':
+    "UserPromptSubmit + PostToolBatch hook telling the session how many tokens of its OWN context it has used — NOT subscription quota — once per setpoint, adding a wrap-up directive past wrapUpAt. PostToolBatch is what reaches an autonomous session mid-turn. Config: componentConfig[\"usage-check\"].",
 };
 
 /** Capture the CLI's own help so the command list can never drift. */

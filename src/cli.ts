@@ -25,6 +25,7 @@ import {runRulesUpdate} from './rules-update';
 import {runSkill} from './skill';
 import {runSyncRules} from './sync-rules';
 import {runTimeCheck} from './time-check';
+import {runUsageCheck} from './usage-check';
 import {runSetupEnv} from './setup-env-command';
 import {runSignal} from './signal';
 import {runSweep} from './sweep';
@@ -490,6 +491,15 @@ void yargs(hideBin(process.argv))
     () => {
       // Always exits 0: a failing UserPromptSubmit hook can block the prompt.
       process.exit(runTimeCheck({}));
+    },
+  )
+  .command(
+    'usage-check',
+    'UserPromptSubmit + PostToolBatch hook: tell the session how many tokens of its OWN CONTEXT it has used (NOT subscription quota), once per configured setpoint, adding the wrap-up directive past wrapUpAt (reads stdin, prints nothing when not due)',
+    (y) => y,
+    () => {
+      // Always exits 0: a failing UserPromptSubmit hook can block the prompt.
+      process.exit(runUsageCheck());
     },
   )
   .command(
