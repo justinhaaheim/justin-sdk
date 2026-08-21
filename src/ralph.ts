@@ -111,6 +111,30 @@ export interface RalphOptions {
   prompt: string;
   maxIterations: number;
   /**
+   * Whether to read `/usage` before every iteration and refuse to run when it
+   * cannot be read. ON by default, and the default must stay that way: an
+   * unreadable quota is UNKNOWN quota, and spending unknown quota is exactly
+   * what the gate exists to prevent.
+   *
+   * The opt-out (`--no-usage-gate`) exists because the gate can become
+   * unsatisfiable rather than merely unsatisfied, and then fail-closed stops
+   * meaning "careful" and starts meaning "never runs". That is not
+   * hypothetical: `claude -p /usage` stopped rendering the quota panel in print
+   * mode, so `parseUsage` returned null on every call and every scheduled run
+   * became a silent no-op — 0 iterations, $0.00, no output (home-base-nsd5;
+   * home-base-j0yo tracks finding a print-mode-compatible quota source).
+   *
+   * Opting out is sound exactly when the spend is bounded up front rather than
+   * by the quota reading — a `--max-iterations 1` job that runs once a day
+   * costs what it costs, once. It is NOT sound for a long multi-iteration loop,
+   * which is the runaway the gate was built for.
+   *
+   * When off, NO `/usage` call is made at all, and quota is reported as
+   * unread everywhere (dashboard and ledger). It is never reported as 0%:
+   * an absent measurement must look absent, not reassuring (critical rule 6).
+   */
+  usageGate: boolean;
+  /**
    * Stop/pause when the 5-hour session window reaches this percent.
    * Justin's default is 50 — leave half the window for interactive work.
    */
@@ -150,6 +174,7 @@ export const DEFAULT_OPTIONS: RalphOptions = {
   prompt: '/loop-session',
   sessionStopPct: 50,
   timeoutMin: 45,
+  usageGate: true,
   verdictPath: 'tmp/ralph-verdict.json',
   weeklyStopPct: 80,
 };
@@ -372,6 +397,55 @@ export function readUsage(cwd: string): UsageSnapshot | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * The four things the pre-iteration gate can conclude. They are four DIFFERENT
+ * facts and the type keeps them that way: "the gate was off" is not "the quota
+ * is 0%", and neither is "the quota could not be read" (critical rule 6).
+ *
+ * `disabled` deliberately carries no UsageSnapshot. There is nothing to carry —
+ * with the gate off no quota is read at all, so any number here would be
+ * invented.
+ */
+export type GateDecision =
+  | {kind: 'disabled'}
+  | {kind: 'ok'; usage: UsageSnapshot}
+  | {kind: 'tripped'; usage: UsageSnapshot}
+  | {kind: 'unreadable'; reason: string};
+
+/**
+ * Decide whether an iteration may start.
+ *
+ * The quota reader is injected rather than called directly so this stays
+ * testable without spawning `claude` — and so a test can assert the property
+ * that actually matters when the gate is off: that the reader is never called
+ * AT ALL. "Skips the gate" must mean no `/usage` process is spawned, not that
+ * one is spawned and its answer ignored.
+ */
+export function checkGate(
+  opts: Pick<RalphOptions, 'sessionStopPct' | 'usageGate' | 'weeklyStopPct'>,
+  readQuota: () => UsageSnapshot | null,
+): GateDecision {
+  if (!opts.usageGate) {
+    return {kind: 'disabled'};
+  }
+  const usage = readQuota();
+  if (usage == null) {
+    // Fail closed: if we cannot read the quota, we do not spend it.
+    return {
+      kind: 'unreadable',
+      reason:
+        'could not read /usage — failing closed rather than spending unknown quota',
+    };
+  }
+  if (
+    usage.sessionPct >= opts.sessionStopPct ||
+    usage.weekPct >= opts.weeklyStopPct
+  ) {
+    return {kind: 'tripped', usage};
+  }
+  return {kind: 'ok', usage};
 }
 
 // ---------------------------------------------------------------------------
@@ -763,11 +837,26 @@ interface RunTotals {
   commits: number;
 }
 
+/**
+ * What to print where the quota bars would go when the gate is off.
+ *
+ * Not an empty space and not a 0% bar: the reader has to be able to tell that
+ * quota was NOT MEASURED this run, which is a different fact from measuring it
+ * and finding room (critical rule 6 — silence must be a claim).
+ */
+function quotaGateDisabled(): string {
+  return `${YELLOW}[gate disabled]${RESET}${DIM} /usage not read — quota UNKNOWN, not 0% (--no-usage-gate)${RESET}`;
+}
+
 function renderHeader(cwd: string, opts: RalphOptions): void {
   process.stdout.write(
     `\n${BOLD}ralph${RESET} ${DIM}→${RESET} ${cwd}\n` +
       `${DIM}prompt=${opts.prompt}  model=${opts.model}  perms=${opts.permissionMode}  ` +
-      `max=${opts.maxIterations} iters  session-stop=${opts.sessionStopPct}%  week-stop=${opts.weeklyStopPct}%${RESET}\n` +
+      `max=${opts.maxIterations} iters  ` +
+      (opts.usageGate
+        ? `session-stop=${opts.sessionStopPct}%  week-stop=${opts.weeklyStopPct}%`
+        : `usage-gate=DISABLED`) +
+      `${RESET}\n` +
       (opts.mode === 'attachable'
         ? `${DIM}mode=attachable — inspect with \`claude agents\`; blocked iterations wait ${opts.blockedWaitMin}m for you${RESET}\n\n`
         : `${DIM}mode=print — headless, not attachable; a question becomes a BLOCKED verdict${RESET}\n\n`),
@@ -777,7 +866,8 @@ function renderHeader(cwd: string, opts: RalphOptions): void {
 function renderIteration(
   n: number,
   opts: RalphOptions,
-  usage: UsageSnapshot,
+  /** null when the gate was disabled — no quota was read for this iteration. */
+  usage: UsageSnapshot | null,
   result: IterationResult,
   progressed: boolean,
 ): void {
@@ -808,8 +898,10 @@ function renderIteration(
     );
   }
   process.stdout.write(
-    `   ${DIM}session${RESET} ${quotaBar(usage.sessionPct, opts.sessionStopPct)}` +
-      `   ${DIM}week${RESET} ${quotaBar(usage.weekPct, opts.weeklyStopPct)}\n`,
+    usage == null
+      ? `   ${DIM}quota${RESET} ${quotaGateDisabled()}\n`
+      : `   ${DIM}session${RESET} ${quotaBar(usage.sessionPct, opts.sessionStopPct)}` +
+          `   ${DIM}week${RESET} ${quotaBar(usage.weekPct, opts.weeklyStopPct)}\n`,
   );
 }
 
@@ -922,6 +1014,15 @@ export async function runRalph(
   renderHeader(cwd, opts);
 
   if (opts.dryRun) {
+    if (!opts.usageGate) {
+      process.stdout.write(
+        `${DIM}dry run — no iterations spawned${RESET}\n` +
+          `  quota gate    ${quotaGateDisabled()}\n` +
+          `  session       ${DIM}not read${RESET}\n` +
+          `  week          ${DIM}not read${RESET}\n\n`,
+      );
+      return 0;
+    }
     const usage = readUsage(cwd);
     if (usage == null) {
       process.stderr.write(`${RED}error${RESET} could not read /usage\n`);
@@ -948,22 +1049,22 @@ export async function runRalph(
 
   for (let n = 1; n <= opts.maxIterations; n++) {
     // --- gate (free) ---
-    let usage = readUsage(cwd);
-    if (usage == null) {
-      // Fail closed: if we cannot read the quota, we do not spend it.
-      stopReason =
-        'could not read /usage — failing closed rather than spending unknown quota';
+    const decision = checkGate(opts, () => readUsage(cwd));
+    if (decision.kind === 'unreadable') {
+      stopReason = decision.reason;
       break;
     }
-    if (
-      usage.sessionPct >= opts.sessionStopPct ||
-      usage.weekPct >= opts.weeklyStopPct
-    ) {
+    // Stays null for the whole iteration when the gate is off, all the way
+    // through the dashboard and the ledger. A disabled gate means quota was
+    // never measured — never that it measured zero.
+    let usage: UsageSnapshot | null =
+      decision.kind === 'disabled' ? null : decision.usage;
+    if (decision.kind === 'tripped') {
       if (opts.onGateHit === 'exit') {
-        stopReason = `quota gate (session ${usage.sessionPct}% / week ${usage.weekPct}%)`;
+        stopReason = `quota gate (session ${decision.usage.sessionPct}% / week ${decision.usage.weekPct}%)`;
         break;
       }
-      const resumed = await waitForGate(cwd, opts, usage);
+      const resumed = await waitForGate(cwd, opts, decision.usage);
       if (resumed == null) {
         stopReason = 'could not read /usage while paused — failing closed';
         break;
@@ -1000,15 +1101,20 @@ export async function runRalph(
     appendLedger(cwd, opts.ledgerPath, {
       costUsd: result.costUsd,
       durationMs: result.durationMs,
+      // Always emitted, both ways round: a row without this field would leave a
+      // later reader unable to tell "gate was on" from "written by an older
+      // ralph". Silence must be a claim (critical rule 6).
+      gateDisabled: !opts.usageGate,
       iteration: n,
       numTurns: result.numTurns,
       progressed,
       sessionId: result.sessionId,
-      sessionPct: usage.sessionPct,
+      // null (not 0) when the gate was off — nothing was measured.
+      sessionPct: usage?.sessionPct ?? null,
       status: result.crashed ? 'CRASH' : (result.verdict?.status ?? 'UNKNOWN'),
       summary: result.verdict?.summary ?? null,
       tokens: result.tokens,
-      weekPct: usage.weekPct,
+      weekPct: usage?.weekPct ?? null,
     });
 
     // --- decide ---

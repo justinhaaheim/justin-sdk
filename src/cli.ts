@@ -335,6 +335,12 @@ void yargs(hideBin(process.argv))
           describe: 'Maximum iterations before stopping',
           default: RALPH_DEFAULTS.maxIterations,
         })
+        .option('usage-gate', {
+          type: 'boolean',
+          describe:
+            'Read your real /usage quota before every iteration and refuse to run when it cannot be read. Pass --no-usage-gate to skip the gate entirely — no /usage call is made and quota is reported as UNKNOWN, never 0%. Use it only when the spend is bounded up front (e.g. --max-iterations 1), not for long loops.',
+          default: RALPH_DEFAULTS.usageGate,
+        })
         .option('session-stop-pct', {
           type: 'number',
           describe:
@@ -410,6 +416,12 @@ void yargs(hideBin(process.argv))
         prompt: argv.prompt,
         sessionStopPct: argv['session-stop-pct'],
         timeoutMin: argv['timeout-min'],
+        // yargs boolean-negation: `--no-usage-gate` sets `usage-gate` false.
+        // Declaring the option positively is load-bearing — an option literally
+        // NAMED `no-usage-gate` would be negated into `usage-gate: false` while
+        // `no-usage-gate` kept its own default, so passing the flag would
+        // silently do nothing (measured on yargs 18).
+        usageGate: argv['usage-gate'],
         weeklyStopPct: argv['weekly-stop-pct'],
       });
       process.exit(exitCode);

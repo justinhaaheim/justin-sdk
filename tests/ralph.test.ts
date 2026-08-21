@@ -14,18 +14,30 @@
  * separator character (·) preserved exactly as emitted.
  */
 
-import {describe, expect, test} from 'bun:test';
-import {mkdtempSync, writeFileSync} from 'fs';
+import {afterEach, describe, expect, test} from 'bun:test';
+import {spawnSync} from 'child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  writeFileSync,
+} from 'fs';
 import {tmpdir} from 'os';
-import {join} from 'path';
+import {join, resolve} from 'path';
 
 import {
+  checkGate,
   DEFAULT_OPTIONS,
   parseBackgroundedId,
   parseUsage,
   readVerdictFile,
+  type UsageSnapshot,
   VERDICT_SCHEMA,
 } from '../src/ralph';
+import {initRepo} from './git-fixtures';
+import {createSandbox, type Sandbox} from './sandbox';
 
 const REAL_USAGE_OUTPUT = `You are currently using your subscription to power your Claude Code usage
 
@@ -107,6 +119,268 @@ describe('defaults', () => {
   test('never resumes a session — fresh context per iteration is the technique', () => {
     // Guard against someone "helpfully" adding --resume later.
     expect(DEFAULT_OPTIONS.prompt).toBe('/loop-session');
+  });
+
+  test('the usage gate is ON unless explicitly opted out', () => {
+    // The opt-out must always be a deliberate act. If this default ever flips,
+    // every unattended loop silently loses its quota ceiling.
+    expect(DEFAULT_OPTIONS.usageGate).toBe(true);
+  });
+});
+
+/**
+ * The `--no-usage-gate` opt-out (home-base-nsd5).
+ *
+ * Background, because the flag looks like a footgun without it: the gate reads
+ * `/usage` before every iteration and refuses to run when it cannot be read.
+ * That is right. But `claude -p /usage` stopped rendering the quota panel in
+ * print mode, so the read returned null EVERY time and fail-closed stopped
+ * meaning "careful" and started meaning "never runs" — scheduled runs became
+ * silent no-ops (0 iterations, $0.00, no output). The opt-out restores the
+ * ability to run a bounded job while keeping fail-closed as the default.
+ *
+ * Two properties these tests exist to defend:
+ *   1. Off means NO `/usage` CALL — not a call whose answer is ignored. Asserted
+ *      by counting reader invocations, since a wasted spawn per iteration would
+ *      otherwise be invisible.
+ *   2. The default is untouched. An unreadable quota with the flag absent must
+ *      still stop the run, with a reason that names what could not be read.
+ */
+describe('checkGate', () => {
+  function snapshot(sessionPct: number, weekPct: number): UsageSnapshot {
+    return {
+      isSubscription: true,
+      raw: 'fixture',
+      sessionPct,
+      sessionResetsAt: null,
+      weekPct,
+      weekResetsAt: null,
+    };
+  }
+
+  /** A quota reader that records whether — and how often — it was consulted. */
+  function countingReader(result: UsageSnapshot | null): {
+    read: () => UsageSnapshot | null;
+    calls: () => number;
+  } {
+    let calls = 0;
+    return {
+      calls: () => calls,
+      read: () => {
+        calls++;
+        return result;
+      },
+    };
+  }
+
+  const THRESHOLDS = {sessionStopPct: 50, weeklyStopPct: 80};
+
+  test('gate off: skips the quota read entirely, never spawning /usage', () => {
+    // The load-bearing assertion is calls() === 0. "Skips the gate" has to mean
+    // no process is spawned; reading the quota and then ignoring it would pass
+    // a naive kind-only assertion while still hitting the broken /usage path
+    // once per iteration.
+    const reader = countingReader(snapshot(5, 10));
+    const decision = checkGate({...THRESHOLDS, usageGate: false}, reader.read);
+    expect(decision.kind).toBe('disabled');
+    expect(reader.calls()).toBe(0);
+  });
+
+  test('gate off: reports no percentages at all — absent, not zero', () => {
+    // Critical rule 6. A disabled gate must not hand downstream code a
+    // fabricated 0%, which would render as an empty quota bar and read as
+    // "plenty of room left".
+    const decision = checkGate({...THRESHOLDS, usageGate: false}, () => null);
+    expect(decision).toEqual({kind: 'disabled'});
+    expect(decision).not.toHaveProperty('usage');
+  });
+
+  test('gate on: an unreadable quota still fails closed', () => {
+    // The default path, unchanged. This is the exact shape of the live bug:
+    // the reader succeeds as a process but parses to null.
+    const reader = countingReader(null);
+    const decision = checkGate({...THRESHOLDS, usageGate: true}, reader.read);
+    expect(decision.kind).toBe('unreadable');
+    expect(reader.calls()).toBe(1);
+  });
+
+  test('gate on: the fail-closed reason names /usage so the stop is diagnosable', () => {
+    // A bare "stopped" would have made the original bug much harder to find —
+    // the run summary is the only surface a scheduled job leaves behind.
+    const decision = checkGate({...THRESHOLDS, usageGate: true}, () => null);
+    expect(decision.kind === 'unreadable' ? decision.reason : '').toContain(
+      '/usage',
+    );
+    expect(decision.kind === 'unreadable' ? decision.reason : '').toContain(
+      'failing closed',
+    );
+  });
+
+  test('gate on: proceeds when both windows are under their thresholds', () => {
+    const decision = checkGate({...THRESHOLDS, usageGate: true}, () =>
+      snapshot(5, 10),
+    );
+    expect(decision.kind).toBe('ok');
+    expect(decision.kind === 'ok' ? decision.usage.sessionPct : null).toBe(5);
+  });
+
+  test('gate on: trips at the session threshold, inclusive', () => {
+    const decision = checkGate({...THRESHOLDS, usageGate: true}, () =>
+      snapshot(50, 10),
+    );
+    expect(decision.kind).toBe('tripped');
+  });
+
+  test('gate on: trips at the weekly threshold, inclusive', () => {
+    const decision = checkGate({...THRESHOLDS, usageGate: true}, () =>
+      snapshot(5, 80),
+    );
+    expect(decision.kind).toBe('tripped');
+  });
+});
+
+const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
+
+describe('ralph CLI help', () => {
+  // yargs handles --help before command validation and before any handler runs,
+  // so this never touches `claude` and never starts a loop.
+  function ralphHelp(): string {
+    const proc = spawnSync('bun', [CLI, 'ralph', '--help'], {
+      encoding: 'utf-8',
+      timeout: 60_000,
+    });
+    return `${proc.stdout ?? ''}${proc.stderr ?? ''}`;
+  }
+
+  test('documents the opt-out by the name the user actually types', () => {
+    // The flag is declared positively (`--usage-gate`, default true) and reached
+    // through yargs boolean-negation, so `--no-usage-gate` appears nowhere in
+    // the generated option list — it has to be in the description or it is
+    // undiscoverable.
+    expect(ralphHelp()).toContain('--no-usage-gate');
+  });
+
+  test('keeps the gate on by default in the help output', () => {
+    expect(ralphHelp()).toMatch(/--usage-gate[\s\S]*default: true/);
+  });
+});
+
+/**
+ * End-to-end proof that `--no-usage-gate` actually reaches the gate, against a
+ * FAKE `claude` on PATH.
+ *
+ * This exists because the unit tests above cannot see the seam most likely to
+ * break silently: the yargs wiring. `--no-usage-gate` is not a declared option
+ * name — it is boolean-negation of `--usage-gate` — and an option declared
+ * literally as `no-usage-gate` would be negated into `usage-gate: false` while
+ * `no-usage-gate` kept its own default, so passing the flag would compile,
+ * typecheck, run, and do NOTHING (measured on yargs 18). Nothing but an
+ * end-to-end run catches that.
+ *
+ * The fake `claude` reproduces the live bug exactly (home-base-nsd5): `-p
+ * /usage` exits 0 with a valid JSON envelope whose `result` carries no
+ * percentages. So the no-flag arm here is a genuine reproduction, and doubles as
+ * the negative control for the flag arm.
+ *
+ * `--dry-run` throughout: no iteration is ever spawned, and the fake would not
+ * be able to do any work if one were.
+ */
+describe('ralph --dry-run, end to end with a fake claude on PATH', () => {
+  const sandboxes: Sandbox[] = [];
+  afterEach(() => {
+    while (sandboxes.length > 0) sandboxes.pop()?.cleanup();
+  });
+
+  interface Fixture {
+    repo: string;
+    callLog: string;
+    env: Record<string, string | undefined>;
+  }
+
+  function fixture(): Fixture {
+    const sb = createSandbox();
+    sandboxes.push(sb);
+    // preflight requires a git repo with a resolvable HEAD.
+    const repo = initRepo(sb, 'project', {'README.md': '# ralph fixture\n'});
+
+    const binDir = join(sb.path, 'fakebin');
+    mkdirSync(binDir, {recursive: true});
+    const callLog = join(sb.path, 'claude-calls.log');
+    const fake = join(binDir, 'claude');
+    writeFileSync(
+      fake,
+      [
+        '#!/bin/sh',
+        // Log EVERY invocation, including --version. The flag arm asserts the
+        // log exists and holds the --version line, so "no /usage call" cannot
+        // pass merely because the fake was never on PATH at all.
+        `echo "$@" >> ${JSON.stringify(callLog)}`,
+        'if [ "$1" = "--version" ]; then echo "2.1.999-fake"; exit 0; fi',
+        // The bug, verbatim in shape: exit 0, valid JSON, no percentages.
+        `printf '%s' '{"result":"Total cost: $0.0000","is_error":false,"num_turns":0}'`,
+        'exit 0',
+      ].join('\n'),
+    );
+    chmodSync(fake, 0o755);
+
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    };
+    // preflight refuses to run at all when this is set, which would make both
+    // arms fail for an unrelated reason on a machine that has one exported.
+    delete env.ANTHROPIC_API_KEY;
+    return {callLog, env, repo};
+  }
+
+  function runDryRun(
+    f: Fixture,
+    args: string[],
+  ): {out: string; status: number | null; calls: string[]} {
+    const proc = spawnSync('bun', [CLI, 'ralph', '--dry-run', ...args], {
+      cwd: f.repo,
+      encoding: 'utf-8',
+      env: f.env,
+      timeout: 120_000,
+    });
+    return {
+      calls: existsSync(f.callLog)
+        ? readFileSync(f.callLog, 'utf8')
+            .split('\n')
+            .filter((l) => l !== '')
+        : [],
+      out: `${proc.stdout ?? ''}${proc.stderr ?? ''}`,
+      status: proc.status,
+    };
+  }
+
+  test('without the flag: spawns /usage, cannot read it, and refuses to run', () => {
+    // The default, unchanged — and a live reproduction of the bug the flag
+    // exists for. This is also the negative control for the next test: it
+    // proves the fake IS reachable and IS consulted.
+    const result = runDryRun(fixture(), []);
+    expect(result.calls.filter((c) => c.includes('/usage')).length).toBe(1);
+    expect(result.out).toContain('could not read /usage');
+    expect(result.status).toBe(1);
+  });
+
+  test('with --no-usage-gate: no /usage call is made at all, and it proceeds', () => {
+    const result = runDryRun(fixture(), ['--no-usage-gate']);
+    // The fake was on PATH and was used (preflight's --version probe) …
+    expect(result.calls.some((c) => c.includes('--version'))).toBe(true);
+    // … and yet /usage was never asked for.
+    expect(result.calls.filter((c) => c.includes('/usage'))).toEqual([]);
+    expect(result.out).not.toContain('could not read /usage');
+    expect(result.status).toBe(0);
+  });
+
+  test('with --no-usage-gate: reports quota as unread, never as a percentage', () => {
+    const result = runDryRun(fixture(), ['--no-usage-gate']);
+    expect(result.out).toContain('gate disabled');
+    expect(result.out).toContain('not read');
+    // "stop at N%" is emitted only by a rendered quota bar, so its absence is
+    // the assertion that no percentage was fabricated to fill the gap.
+    expect(result.out).not.toContain('stop at');
   });
 });
 
