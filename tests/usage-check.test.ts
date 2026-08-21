@@ -22,10 +22,17 @@
  */
 
 import {describe, expect, test} from 'bun:test';
-import {appendFileSync, mkdtempSync, writeFileSync} from 'fs';
+import {appendFileSync, mkdtempSync, readFileSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
+import {setQuiet} from '../src/setup-helpers';
+import {
+  addUsageCheckHook,
+  stepUsageCheckConfig,
+  stepUsageCheckHooks,
+  USAGE_CHECK_HOOK_EVENTS,
+} from '../src/usage-check-setup';
 import {
   contextTokensFromUsage,
   decide,
@@ -702,5 +709,88 @@ describe('runUsageCheck: end to end over real files', () => {
     const after = noticeOf(runCapturing(input));
     expect(after).toContain('setpoint=100000');
     expect(after).toContain('115,000 tokens of context');
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('installer: settings and config wiring', () => {
+  test('registers BOTH events, since UserPromptSubmit alone misses long turns', () => {
+    expect([...USAGE_CHECK_HOOK_EVENTS]).toEqual([
+      'UserPromptSubmit',
+      'PostToolBatch',
+    ]);
+  });
+
+  test('appends rather than replacing existing hooks for the same event', () => {
+    // Claude Code runs every hook registered for an event, so clobbering a
+    // project's own UserPromptSubmit hook would silently break it.
+    const settings: Record<string, unknown> = {
+      hooks: {
+        UserPromptSubmit: [
+          {hooks: [{command: 'bunx @justinhaaheim/justin-sdk time-check'}]},
+        ],
+      },
+    };
+    expect(addUsageCheckHook(settings, 'UserPromptSubmit')).toBe(true);
+
+    const hooks = settings.hooks as Record<string, unknown[]>;
+    expect(hooks.UserPromptSubmit).toHaveLength(2);
+    expect(JSON.stringify(hooks.UserPromptSubmit)).toContain('time-check');
+    expect(JSON.stringify(hooks.UserPromptSubmit)).toContain(
+      'bunx @justinhaaheim/justin-sdk usage-check',
+    );
+  });
+
+  test('is idempotent — a second install adds nothing', () => {
+    const settings: Record<string, unknown> = {};
+    expect(addUsageCheckHook(settings, 'PostToolBatch')).toBe(true);
+    expect(addUsageCheckHook(settings, 'PostToolBatch')).toBe(false);
+    expect((settings.hooks as Record<string, unknown[]>).PostToolBatch).toHaveLength(1);
+  });
+
+  test('writes both hooks and the config block into a real project', () => {
+    setQuiet(true);
+    const dir = tempDir();
+    writeConfig(dir, null);
+
+    expect(stepUsageCheckHooks(dir)).toBe(true);
+    expect(stepUsageCheckConfig(dir)).toBe(true);
+
+    const settings = JSON.parse(
+      readFileSync(join(dir, '.claude', 'settings.json'), 'utf8'),
+    ) as {hooks: Record<string, unknown[]>};
+    for (const event of USAGE_CHECK_HOOK_EVENTS) {
+      expect(JSON.stringify(settings.hooks[event])).toContain(
+        'bunx @justinhaaheim/justin-sdk usage-check',
+      );
+    }
+
+    // The installed defaults must be what the hook actually reads back.
+    const installed = readUsageCheckConfig(dir);
+    expect(installed).toEqual({
+      enabled: true,
+      reArmDropFraction: USAGE_CHECK_DEFAULTS.reArmDropFraction,
+      setpoints: USAGE_CHECK_DEFAULTS.setpoints,
+      wrapUpAt: USAGE_CHECK_DEFAULTS.wrapUpAt,
+    });
+    expect(resolveUsageCheckConfig(installed)).not.toBeNull();
+  });
+
+  test('a tuned config survives a re-install untouched', () => {
+    setQuiet(true);
+    const dir = tempDir();
+    writeConfig(dir, {enabled: false, setpoints: [42_000], wrapUpAt: null});
+    expect(stepUsageCheckConfig(dir)).toBe(true);
+    expect(readUsageCheckConfig(dir)).toEqual({
+      enabled: false,
+      setpoints: [42_000],
+      wrapUpAt: null,
+    });
+  });
+
+  test('refuses to configure a project with no justin-sdk.config.json', () => {
+    setQuiet(true);
+    expect(stepUsageCheckConfig(tempDir())).toBe(false);
   });
 });
