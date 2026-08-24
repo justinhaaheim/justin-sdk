@@ -63,12 +63,7 @@ Add these scripts to `package.json`. Preserve any existing scripts — merge, do
 }
 ```
 
-`doctor` / `doctor:fix` keep the **scaffolding** healthy (configs, deps,
-package.json scripts). `signal` **checks** code quality (read-only). `fix`
-**auto-fixes** code by running `fix-source:*` scripts serially (eslint --fix,
-prettier --write) — those are added by the `eslint` and `prettier` components,
-not base-setup. Reformatting your code is always an explicit `bun run fix`
-(or `bun run prettier:write`), never something setup or doctor does for you.
+`doctor` / `doctor:fix` keep the **scaffolding** healthy (configs, deps, package.json scripts). `signal` **checks** code quality (read-only). `fix` **auto-fixes** code by running `fix-source:*` scripts serially (eslint --fix, prettier --write) — those are added by the `eslint` and `prettier` components, not base-setup. Reformatting your code is always an explicit `bun run fix` (or `bun run prettier:write`), never something setup or doctor does for you.
 
 ### Adapt signal-source scripts for the project
 
