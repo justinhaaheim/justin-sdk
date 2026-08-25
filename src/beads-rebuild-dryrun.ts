@@ -198,6 +198,47 @@ function renderEmpty(value: string | null): string {
   return value === null ? 'NULL' : '""';
 }
 
+/**
+ * Which side of a difference holds the newer content. This decides the RECOVERY, and the two directions have OPPOSITE recoveries — which is why the tool must never state one without having established it.
+ *
+ * MEASURED (home-base, 2026-08-25, dispatch G): nature-sounds returns exit 1 with a DB of 76 issues against a JSONL of 105, every one of its 13 field differences newer in the JSONL. The database there is simply stale, and a person following blanket `br sync --flush-only` advice would have pushed that stale database over the newer JSONL — destroying 29 issues, 70 comments and months of closures. The tool would have talked them into the exact loss it exists to prevent.
+ */
+type DriftDirection = 'db-newer' | 'jsonl-newer' | 'unknown';
+
+interface Finding {
+  message: string;
+  direction: DriftDirection;
+}
+
+/** A normalized timestamp this tool is willing to ORDER: plain UTC, fixed-width down to the seconds, fraction without trailing zeros — the exact shape `norm` emits, so lexicographic order is chronological order. Anything else (absent, empty, a non-UTC offset, a non-timestamp) is null, meaning the direction cannot be established. */
+const ORDERABLE_STAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/;
+
+function comparableStamp(value: unknown): string | null {
+  const text = norm(value);
+  if (text == null || text === '') return null;
+  return ORDERABLE_STAMP.test(text) ? text : null;
+}
+
+/**
+ * Classify one issue's drift by comparing the two `updated_at` values.
+ *
+ * CAVEAT, stated because it is load-bearing: this trusts `updated_at` monotonicity. A writer that ever set that field backwards would make the direction call WRONG, and a wrong direction call is worse than no direction call — it is the bug this function exists to fix, pointed the other way. So every case that cannot be established returns 'unknown', which suppresses the flush advice rather than guessing at it.
+ */
+function issueDirection(oldRow: Row, newRow: Row): DriftDirection {
+  const dbStamp = comparableStamp(oldRow['updated_at']);
+  const jsonlStamp = comparableStamp(newRow['updated_at']);
+  if (dbStamp == null || jsonlStamp == null) return 'unknown';
+  if (dbStamp === jsonlStamp) return 'unknown';
+  return dbStamp > jsonlStamp ? 'db-newer' : 'jsonl-newer';
+}
+
+/** How a direction reads at the head of a FATAL line. */
+const DIRECTION_TAG: Record<DriftDirection, string> = {
+  'db-newer': '[DB newer]  ',
+  'jsonl-newer': '[JSONL newer]',
+  unknown: '[direction ?]',
+};
+
 interface Side {
   cols: string[];
   issues: Map<string, Row>;
@@ -291,8 +332,10 @@ function read(path: string, label: string): Side {
 }
 
 interface Comparison {
-  /** Content the rebuild would DESTROY. Non-empty means not safe. */
-  fatal: string[];
+  /** Content the rebuild would DESTROY, each carrying which side is newer. Non-empty means not safe. */
+  fatal: Finding[];
+  /** Beads TOMBSTONED in the database and still live in the JSONL: the rebuild does not lose these, it RESURRECTS them. Called out separately because "brings a deleted bead back" reads nothing like "loses a field", and a reader skimming a wall of FATALs would miss it. */
+  resurrections: string[];
   /** Content the rebuild would restore or add. Informational. */
   restored: string[];
   /** Table-level row-count changes — derived caches and audit trails. */
@@ -308,13 +351,25 @@ function compare(
   after: Side,
   jsonlUnchanged: boolean,
 ): Comparison {
-  const fatal: string[] = [];
+  const fatal: Finding[] = [];
   const restored: string[] = [];
   const notes: string[] = [];
   const emptyStates: string[] = [];
+  const resurrections: string[] = [];
+
+  /** A finding whose direction is STRUCTURAL rather than a content race — nothing to compare timestamps on, so it is never allowed to license the flush advice. */
+  const structural = (message: string): void => {
+    fatal.push({direction: 'unknown', message});
+  };
+  /**
+   * Content that exists on the database side and nowhere in the JSONL. There is no counterpart to compare an `updated_at` against, but the RECOVERY is unambiguous — only a flush can carry it across — so it counts as the database side for advice purposes.
+   */
+  const dbSideOnly = (message: string): void => {
+    fatal.push({direction: 'db-newer', message});
+  };
 
   if (!jsonlUnchanged) {
-    fatal.push(
+    structural(
       'issues.jsonl was MODIFIED by the rebuild — this procedure is supposed to leave it untouched; investigate before trusting anything below',
     );
   }
@@ -323,7 +378,7 @@ function compare(
     (c) => !after.cols.includes(c) && !NOT_COMPARED.has(c),
   );
   for (const c of droppedCols) {
-    fatal.push(
+    structural(
       `column issues.${c} exists in the original schema and NOT in the rebuilt one`,
     );
   }
@@ -335,7 +390,7 @@ function compare(
     .filter((id) => !before.issues.has(id))
     .sort();
   for (const id of dbOnly) {
-    fatal.push(
+    dbSideOnly(
       `issue ${id} is in the current DB and would NOT survive the rebuild`,
     );
   }
@@ -351,10 +406,17 @@ function compare(
   for (const [id, oldRow] of before.issues) {
     const newRow = after.issues.get(id);
     if (!newRow) continue;
+    const direction = issueDirection(oldRow, newRow);
     for (const c of compareCols) {
       const a = norm(oldRow[c]);
       const b = norm(newRow[c]);
       if (a === b) continue;
+      // A bead tombstoned in the database and live in the JSONL. Still a FATAL field difference like any other, but it is the one whose consequence a reader most needs spelled out: the rebuild UNDOES the deletion.
+      if (c === 'deleted_at' && !isEmpty(a) && isEmpty(b)) {
+        resurrections.push(
+          `issue ${id} was DELETED in the database (deleted_at ${JSON.stringify(a)}) and is still live in the JSONL — the rebuild would bring it back`,
+        );
+      }
       if (isEmpty(a) && isEmpty(b)) {
         // Both sides are empty, in DIFFERENT ways. No content moves, so this is not loss — but it is a real difference and must not be silently equated (see `norm`).
         emptyStates.push(
@@ -365,9 +427,10 @@ function compare(
           `issue ${id} field ${c}: ${renderEmpty(a)} now, ${JSON.stringify(b)} after the rebuild (gained, not lost)`,
         );
       } else {
-        fatal.push(
-          `issue ${id} field ${c}: ${JSON.stringify(a)} now, ${JSON.stringify(b)} after the rebuild`,
-        );
+        fatal.push({
+          direction,
+          message: `issue ${id} field ${c}: ${JSON.stringify(a)} now, ${JSON.stringify(b)} after the rebuild`,
+        });
       }
     }
   }
@@ -377,7 +440,7 @@ function compare(
       const newSet = after[kind].get(id) ?? new Set<string>();
       for (const item of oldSet) {
         if (!newSet.has(item)) {
-          fatal.push(
+          dbSideOnly(
             `issue ${id}: a ${kind} entry would be LOST — ${item.slice(0, 100)}`,
           );
         }
@@ -412,7 +475,66 @@ function compare(
     .filter((t) => !rowCompared.has(t))
     .sort();
 
-  return {countOnlyTables, emptyStates, fatal, notes, restored};
+  return {
+    countOnlyTables,
+    emptyStates,
+    fatal,
+    notes,
+    restored,
+    resurrections,
+  };
+}
+
+interface DirectionTally {
+  dbNewer: number;
+  jsonlNewer: number;
+  unknown: number;
+}
+
+function tallyDirections(fatal: Finding[]): DirectionTally {
+  return {
+    dbNewer: fatal.filter((f) => f.direction === 'db-newer').length,
+    jsonlNewer: fatal.filter((f) => f.direction === 'jsonl-newer').length,
+    unknown: fatal.filter((f) => f.direction === 'unknown').length,
+  };
+}
+
+/**
+ * The remediation text, chosen by measured direction rather than assumed.
+ *
+ * The flush advice is the DANGEROUS branch — it overwrites the JSONL with the database — so it is the one that has to earn its way out: every difference must point at the database side AND none may be unclassified. Every other combination says what was seen and what NOT to run. The conservative exit-1 verdict itself is unchanged in all four cases (critical rule 6); only the advice differs, because only the advice was wrong.
+ */
+function remediation(tally: DirectionTally): string[] {
+  // Wording preserved from the measurement that corrected it: 0.4.1 behaves the same way as 0.1.37, and `--orphans allow` is not a guard.
+  const FLUSH_WARNING =
+    'Do NOT use `br sync --import-only --force` — measured on br 0.1.37 AND 0.4.1, that silently HARD-DELETES database rows the JSONL lacks (exit 0, no mention of it). Adding `--orphans allow` does NOT protect it.';
+
+  if (tally.dbNewer > 0 && tally.jsonlNewer > 0) {
+    return [
+      `DIRECTION: BIDIRECTIONAL — ${tally.dbNewer} difference(s) newer in the DATABASE, ${tally.jsonlNewer} newer in the JSONL.`,
+      'NEITHER single command is safe here: `br sync --flush-only` destroys the JSONL-newer content, and the rebuild destroys the DB-newer content.',
+      'The two sides must be merged BY HAND, row by row, from the list above.',
+    ];
+  }
+  if (tally.jsonlNewer > 0) {
+    return [
+      `DIRECTION: the JSONL is NEWER on all ${tally.jsonlNewer} classified difference(s) — the database is STALE, and the rebuild REPAIRS these rows rather than losing them.`,
+      'DO NOT run `br sync --flush-only` here. It would push the stale database over the newer JSONL and destroy the newer content — the opposite of the loss this exit code warns about.',
+      'Read the list above and decide per row; on this drift the rebuild is likely the improvement, not the risk.',
+    ];
+  }
+  if (tally.dbNewer > 0 && tally.unknown === 0) {
+    return [
+      `DIRECTION: the database is NEWER (or is the only copy) on all ${tally.dbNewer} difference(s), so the content at risk lives only in the database.`,
+      'Recover first: `br sync --flush-only` to push the DB-only content into the JSONL, commit it, then re-run this dry run.',
+      FLUSH_WARNING,
+    ];
+  }
+  return [
+    `DIRECTION: could NOT be established for ${tally.unknown} difference(s) (\`updated_at\` absent, equal, or unorderable), so which side is newer is UNKNOWN.`,
+    'DO NOT run `br sync --flush-only` on an unknown direction: if the JSONL turns out to be the newer side, flushing destroys it. Establish the direction by hand from the list above first.',
+    FLUSH_WARNING,
+  ];
 }
 
 function report(args: {
@@ -425,7 +547,8 @@ function report(args: {
   jsonlUnchanged: boolean;
 }): number {
   const {after, beadsDir, before, brBin, comparison, importOutput} = args;
-  const {countOnlyTables, emptyStates, fatal, notes, restored} = comparison;
+  const {countOnlyTables, emptyStates, fatal, notes, restored, resurrections} =
+    comparison;
 
   console.log(`beads dir     : ${beadsDir}`);
   console.log(`br binary     : ${brBin}`);
@@ -474,21 +597,47 @@ function report(args: {
   }
 
   if (fatal.length > 0) {
+    const tally = tallyDirections(fatal);
+
+    // Direction goes in the REPORT, not only in the advice: exit 1 otherwise prints "the DB holds work the JSONL never received" and "the DB is stale" identically, and those are opposites with opposite recoveries.
+    console.log(
+      `\nDRIFT DIRECTION (which side holds the newer content — read this BEFORE recovering):`,
+    );
+    console.log(
+      `  newer in the DATABASE : ${tally.dbNewer} — content the JSONL has never received; only a flush carries it across`,
+    );
+    console.log(
+      `  newer in the JSONL    : ${tally.jsonlNewer} — the database is stale here; the rebuild REPAIRS these`,
+    );
+    console.log(
+      `  direction unknown     : ${tally.unknown} — could not be established, and never assumed`,
+    );
+    console.log(
+      '  (direction is read from `updated_at`; a writer that ever set it backwards would fool this)',
+    );
+
+    if (resurrections.length > 0) {
+      console.log(
+        `\nDELETIONS THE REBUILD WOULD UNDO (${resurrections.length}) — not lost content, RESURRECTED content:`,
+      );
+      for (const m of resurrections.slice(0, REPORT_CAP)) {
+        console.log(`  UNDELETE ${m}`);
+      }
+      if (resurrections.length > REPORT_CAP) {
+        console.log(`  ... and ${resurrections.length - REPORT_CAP} more`);
+      }
+    }
+
     console.log(`\nWOULD BE LOST (${fatal.length}):`);
-    for (const m of fatal.slice(0, REPORT_CAP)) console.log(`  FATAL ${m}`);
+    for (const f of fatal.slice(0, REPORT_CAP)) {
+      console.log(`  FATAL ${DIRECTION_TAG[f.direction]} ${f.message}`);
+    }
     if (fatal.length > REPORT_CAP) {
       console.log(`  ... and ${fatal.length - REPORT_CAP} more`);
     }
+
     console.log('\nNOT SAFE to delete beads.db in this repo.');
-    console.log(
-      'Recover first: `br sync --flush-only` to push the DB-only content into the JSONL, commit it,',
-    );
-    console.log(
-      'then re-run this dry run. Do NOT use `br sync --import-only --force` — on br 0.1.37 that',
-    );
-    console.log(
-      'silently HARD-DELETES database rows the JSONL lacks, which is exactly the content at risk here.',
-    );
+    for (const line of remediation(tally)) console.log(line);
     return BEADS_REBUILD_DRYRUN_EXIT.wouldLoseContent;
   }
 

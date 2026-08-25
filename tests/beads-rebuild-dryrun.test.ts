@@ -20,7 +20,7 @@ import {
   writeFileSync,
 } from 'fs';
 import {homedir, tmpdir} from 'os';
-import {join, resolve} from 'path';
+import {dirname, join, resolve} from 'path';
 
 import {
   BEADS_REBUILD_DRYRUN_EXIT,
@@ -646,4 +646,132 @@ describe('the beads-rebuild-dryrun CLI', () => {
     expect(output).toContain('WOULD BE LOST (1)');
     expect(exitCode).toBe(BEADS_REBUILD_DRYRUN_EXIT.wouldLoseContent);
   });
+});
+
+/**
+ * The exit-1 REMEDIATION used to print unconditionally: "Recover first: `br sync --flush-only`". That advice is correct only when the database is the newer side, and catastrophic when it is not — and the fleet has the catastrophic shape in it right now.
+ *
+ * MEASURED (dispatch G, 2026-08-25): nature-sounds exits 1 with a 76-issue database against a 105-issue JSONL, all 13 field differences newer in the JSONL. Following the old advice there would have flushed the stale database over the newer JSONL and destroyed 29 issues, 70 comments and months of closures — the tool talking a person into the exact loss it exists to prevent.
+ *
+ * So each direction is pinned here with the advice it must and must NOT carry. The exit-1 VERDICT is identical in all four cases and must stay that way (critical rule 6); only the recovery differs, because only the recovery was wrong.
+ */
+describe('beads-rebuild-dryrun classifies WHICH SIDE holds the newer content', () => {
+  const FLUSH_ADVICE = 'Recover first: `br sync --flush-only`';
+  const FLUSH_REFUSAL = 'DO NOT run `br sync --flush-only`';
+
+  test.skipIf(!hasBr)(
+    'a STALE DATABASE (the JSONL is newer) is told NOT to flush',
+    () => {
+      const beadsDir = workspace();
+      editJsonlIssue(beadsDir, requireIds().alpha, (record) => {
+        record.title = 'Retitled later, in the JSONL only';
+        record.updated_at = '2026-12-01T00:00:00Z';
+      });
+
+      const {exitCode, output} = captureOutput(() =>
+        runBeadsRebuildDryRun({beadsDir, brBin: requireBr()}),
+      );
+
+      expect(output).toContain('[JSONL newer]');
+      expect(output).toContain('the database is STALE');
+      expect(output).toContain(FLUSH_REFUSAL);
+      // The whole point: the dangerous advice must be ABSENT, not merely outweighed.
+      expect(output).not.toContain(FLUSH_ADVICE);
+      expect(exitCode).toBe(BEADS_REBUILD_DRYRUN_EXIT.wouldLoseContent);
+    },
+  );
+
+  test.skipIf(!hasBr)(
+    'a database holding work the JSONL never received IS told to flush',
+    () => {
+      const beadsDir = workspace();
+      dropJsonlIssue(beadsDir, requireIds().delta);
+
+      const {exitCode, output} = captureOutput(() =>
+        runBeadsRebuildDryRun({beadsDir, brBin: requireBr()}),
+      );
+
+      expect(output).toContain('newer in the DATABASE : 1');
+      expect(output).toContain(FLUSH_ADVICE);
+      expect(output).not.toContain(FLUSH_REFUSAL);
+      expect(exitCode).toBe(BEADS_REBUILD_DRYRUN_EXIT.wouldLoseContent);
+    },
+  );
+
+  test.skipIf(!hasBr)(
+    'BIDIRECTIONAL drift is sent to a manual merge, not to either single command',
+    () => {
+      const beadsDir = workspace();
+      const {alpha, delta} = requireIds();
+      // Newer in the database: a row the JSONL never received.
+      dropJsonlIssue(beadsDir, delta);
+      // Newer in the JSONL: the same workspace, drifting the other way at once.
+      editJsonlIssue(beadsDir, alpha, (record) => {
+        record.title = 'Retitled later, in the JSONL only';
+        record.updated_at = '2026-12-01T00:00:00Z';
+      });
+
+      const {exitCode, output} = captureOutput(() =>
+        runBeadsRebuildDryRun({beadsDir, brBin: requireBr()}),
+      );
+
+      expect(output).toContain('DIRECTION: BIDIRECTIONAL');
+      expect(output).toContain('NEITHER single command is safe');
+      expect(output).toContain('merged BY HAND');
+      expect(output).not.toContain(FLUSH_ADVICE);
+      expect(exitCode).toBe(BEADS_REBUILD_DRYRUN_EXIT.wouldLoseContent);
+    },
+  );
+
+  test.skipIf(!hasBr)(
+    'a direction that cannot be established is never guessed, and never licenses a flush',
+    () => {
+      const beadsDir = workspace();
+      // A field moves while `updated_at` does not, so neither side can be shown to be newer.
+      editJsonlIssue(beadsDir, requireIds().alpha, (record) => {
+        record.title = 'Retitled with no clock movement at all';
+      });
+
+      const {exitCode, output} = captureOutput(() =>
+        runBeadsRebuildDryRun({beadsDir, brBin: requireBr()}),
+      );
+
+      expect(output).toContain('[direction ?]');
+      expect(output).toContain('direction unknown     : 1');
+      expect(output).toContain('could NOT be established');
+      expect(output).not.toContain(FLUSH_ADVICE);
+      expect(exitCode).toBe(BEADS_REBUILD_DRYRUN_EXIT.wouldLoseContent);
+    },
+  );
+
+  test.skipIf(!hasBr)(
+    'a bead tombstoned in the database is called out as a RESURRECTION, not as a lost field',
+    () => {
+      const beadsDir = workspace();
+      // DELTA, not a connected issue: `br delete` REFUSES to tombstone an issue that has dependents and says "No changes made (preview mode)" — while exiting 0. Measured 2026-08-25 on br 0.1.37.
+      const {delta} = requireIds();
+      // The health-logger-rn shape: tombstoned in the database, still live in the JSONL. Built by tombstoning for real and then restoring the pre-delete JSONL, NOT by assuming `br delete` leaves the JSONL alone — measured 2026-08-25, it flushes the tombstone in some workspaces and not in others, and a fixture resting on that would decide what this test proves at random.
+      const liveJsonl = readJsonl(beadsDir);
+      const deleteOutput = runBr(dirname(beadsDir), [
+        'delete',
+        delta,
+        '--reason',
+        'testing the resurrection call-out',
+      ]);
+      // `br delete` exits 0 whether or not it deleted anything, so the fixture asserts the tombstone was actually created rather than trusting the exit code.
+      expect(deleteOutput).toContain('Deleted 1');
+      writeJsonl(beadsDir, liveJsonl);
+
+      const {exitCode, output} = captureOutput(() =>
+        runBeadsRebuildDryRun({beadsDir, brBin: requireBr()}),
+      );
+
+      expect(output).toContain('DELETIONS THE REBUILD WOULD UNDO (1)');
+      expect(output).toContain(`UNDELETE issue ${delta} was DELETED in the`);
+      expect(output).toContain('the rebuild would bring it back');
+      // A deletion is the database being NEWER, so this one does get the flush advice.
+      expect(output).toContain(FLUSH_ADVICE);
+      expect(exitCode).toBe(BEADS_REBUILD_DRYRUN_EXIT.wouldLoseContent);
+    },
+  );
 });
