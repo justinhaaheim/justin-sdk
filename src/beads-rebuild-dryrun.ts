@@ -43,8 +43,12 @@ export interface BeadsRebuildDryRunOptions {
   beadsDir?: string;
   /** The `br` to rebuild WITH — i.e. the one that will perform the real migration. Default `br` from PATH. */
   brBin?: string;
-  /** Leave the temp working copy behind for inspection. */
+  /** Leave the temp working copy behind for inspection. The path is printed. */
   keep?: boolean;
+  /**
+   * TEST SEAM. Run after the working copy is staged and before the rebuild, so a test can inject an UNFORESEEN throw — one that is not a `cannotCheck` — and prove the catch-all in `runBeadsRebuildDryRun` turns it into exit 2. Without a seam that behavior is only ever provable by hand-editing the source, which protects nothing. Never set outside tests.
+   */
+  onStagedForTest?: () => void;
 }
 
 /** Files copied out of the live workspace. The WAL and -shm come too: a committed transaction can live entirely in the WAL, and copying the main file alone would silently drop it from BOTH sides of the comparison. */
@@ -64,6 +68,18 @@ const NOT_COMPARED = new Set([
   // Recomputed from the issue's content. The hash algorithm changed between schema 4 and schema 17, so it differs after ANY migration path, including an in-place one.
   'content_hash',
 ]);
+
+/**
+ * The tables this tool compares ROW BY ROW. Everything else in the database is compared by ROW COUNT ONLY, which cannot see equal-count/different-rows drift — the very weakness this tool's header criticises `br doctor` for.
+ *
+ * That trade-off is deliberate (see `report`): the remaining tables are derived caches (`blocked_issues_cache`, `dirty_issues`, `export_hashes`, `child_counters`), sync bookkeeping (`metadata`, `config`) and an append-only audit trail (`events`) — all of which the rebuild legitimately regenerates from scratch, so a row-level diff of them is pure noise that would train the reader to skip the report. What is NOT acceptable is letting a count-only comparison pass for a full one, so the report NAMES the count-only tables on every run, including the all-clear. A content table that this list does not know about therefore shows up by name rather than being silently waved through (critical rule 6 — silence must be a claim).
+ */
+const ROW_COMPARED_TABLES = [
+  'issues',
+  'comments',
+  'dependencies',
+  'labels',
+] as const;
 
 /** How many FATAL / INFO lines to print before eliding the rest. */
 const REPORT_CAP = 40;
@@ -149,9 +165,16 @@ function rebuild(brBin: string, scratch: string, work: string): string {
 
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/;
 
-/** Collapse the representational differences between the two schemas — nullish/empty, boolean and numeric spellings, and timestamp punctuation/precision — so that only genuine content differences survive the comparison. */
+/**
+ * Collapse the representational differences between the two schemas — boolean and numeric spellings, and timestamp punctuation/precision — so that only genuine content differences survive the comparison.
+ *
+ * DECISION (home-base-97lo): `''` and `NULL` are kept DISTINCT here. They were previously both folded to `null`, which meant a field that is empty-string now and NULL after the rebuild compared EQUAL and was never reported — a tool whose entire job is not conflating states, conflating two states, and against the standing rule that `null` means absent while `''` is a different thing.
+ *
+ * The alternative — treating the change as loss — was rejected: an `''`↔`NULL` swap is a schema-spelling change, not content going missing, and reporting it as FATAL would block migrations that lose nothing (the false-positive failure that killed this tool's earlier static design). So `compare` gives it its own verdict: reported as a NOTE, never conflated, never fatal. Distinguished AND correctly classified, rather than distinguished OR quiet.
+ */
 function norm(value: unknown): string | null {
-  if (value === undefined || value === null || value === '') return null;
+  if (value === undefined || value === null) return null;
+  if (value === '') return '';
   if (typeof value === 'boolean') return value ? '1' : '0';
   if (typeof value === 'number') return String(value);
   const text = String(value);
@@ -163,6 +186,16 @@ function norm(value: unknown): string | null {
   if (dot === -1) return `${body}.0Z`;
   const frac = body.slice(dot + 1).replace(/0+$/, '');
   return `${body.slice(0, dot)}.${frac === '' ? '0' : frac}Z`;
+}
+
+/** Absent OR empty — the two states `norm` deliberately no longer conflates, grouped where "there is nothing here" is the question being asked. */
+function isEmpty(value: string | null): boolean {
+  return value === null || value === '';
+}
+
+/** Print an empty state as the state it actually is, so a NOTE about the pair is readable. */
+function renderEmpty(value: string | null): string {
+  return value === null ? 'NULL' : '""';
 }
 
 interface Side {
@@ -215,9 +248,10 @@ function read(path: string, label: string): Side {
       addTo(
         comments,
         String(r.issue_id),
+        // The body is NOT run through `norm`: it is free text, and normalising it would rewrite a comment that merely happens to start with something timestamp-shaped. `?? ''` was replaced by an explicit null because a NULL body and an empty body are different comments (critical rule 6).
         JSON.stringify([
           norm(r.author),
-          String(r.text ?? ''),
+          r.text === undefined || r.text === null ? null : String(r.text),
           norm(r.created_at),
         ]),
       );
@@ -263,6 +297,10 @@ interface Comparison {
   restored: string[];
   /** Table-level row-count changes — derived caches and audit trails. */
   notes: string[];
+  /** Fields that are empty on BOTH sides but not in the same way (`''` vs `NULL`). Reported so the two states are never conflated; not loss, so never fatal. */
+  emptyStates: string[];
+  /** Every table present on either side that was compared by ROW COUNT ONLY, named so that the limit of the comparison is stated rather than assumed. */
+  countOnlyTables: string[];
 }
 
 function compare(
@@ -273,6 +311,7 @@ function compare(
   const fatal: string[] = [];
   const restored: string[] = [];
   const notes: string[] = [];
+  const emptyStates: string[] = [];
 
   if (!jsonlUnchanged) {
     fatal.push(
@@ -316,9 +355,14 @@ function compare(
       const a = norm(oldRow[c]);
       const b = norm(newRow[c]);
       if (a === b) continue;
-      if (a === null) {
+      if (isEmpty(a) && isEmpty(b)) {
+        // Both sides are empty, in DIFFERENT ways. No content moves, so this is not loss — but it is a real difference and must not be silently equated (see `norm`).
+        emptyStates.push(
+          `issue ${id} field ${c}: ${renderEmpty(a)} now, ${renderEmpty(b)} after the rebuild — both empty, but NOT the same state`,
+        );
+      } else if (isEmpty(a)) {
         restored.push(
-          `issue ${id} field ${c}: empty now, ${JSON.stringify(b)} after the rebuild (gained, not lost)`,
+          `issue ${id} field ${c}: ${renderEmpty(a)} now, ${JSON.stringify(b)} after the rebuild (gained, not lost)`,
         );
       } else {
         fatal.push(
@@ -360,7 +404,15 @@ function compare(
     }
   }
 
-  return {fatal, notes, restored};
+  // Named, not counted: a table missing from ROW_COMPARED_TABLES is one this tool never looked inside, and the report has to say so on every run — equal counts are not equal rows.
+  const rowCompared = new Set<string>(ROW_COMPARED_TABLES);
+  const countOnlyTables = [
+    ...new Set([...before.tables.keys(), ...after.tables.keys()]),
+  ]
+    .filter((t) => !rowCompared.has(t))
+    .sort();
+
+  return {countOnlyTables, emptyStates, fatal, notes, restored};
 }
 
 function report(args: {
@@ -373,7 +425,7 @@ function report(args: {
   jsonlUnchanged: boolean;
 }): number {
   const {after, beadsDir, before, brBin, comparison, importOutput} = args;
-  const {fatal, notes, restored} = comparison;
+  const {countOnlyTables, emptyStates, fatal, notes, restored} = comparison;
 
   console.log(`beads dir     : ${beadsDir}`);
   console.log(`br binary     : ${brBin}`);
@@ -386,6 +438,24 @@ function report(args: {
   console.log(
     `issues.jsonl  : ${args.jsonlUnchanged ? 'UNCHANGED by the rebuild' : 'CHANGED — see below'}`,
   );
+
+  // Printed on EVERY run, all-clear included: the verdict below is only as wide as this line says it is, and a reader must never have to assume how far it looked.
+  console.log(`compared row-by-row : ${ROW_COMPARED_TABLES.join(', ')}`);
+  console.log(
+    `compared by COUNT ONLY (equal counts do NOT prove equal rows): ${countOnlyTables.length === 0 ? 'none' : countOnlyTables.join(', ')}`,
+  );
+
+  if (emptyStates.length > 0) {
+    console.log(
+      `\nEMPTY-STATE CHANGES (${emptyStates.length}) — no content moves, but "" and NULL are different states and are not conflated here:`,
+    );
+    for (const m of emptyStates.slice(0, REPORT_CAP)) {
+      console.log(`  NOTE  ${m}`);
+    }
+    if (emptyStates.length > REPORT_CAP) {
+      console.log(`  ... and ${emptyStates.length - REPORT_CAP} more`);
+    }
+  }
 
   if (notes.length > 0) {
     console.log(
@@ -428,6 +498,10 @@ function report(args: {
   console.log(
     'dependency or label would be lost. Safe to delete beads.db and rebuild from the JSONL.',
   );
+  console.log(
+    'This all-clear covers the row-by-row tables named above; the count-only tables were',
+  );
+  console.log('checked for a change in size only.');
   return BEADS_REBUILD_DRYRUN_EXIT.safe;
 }
 
@@ -455,6 +529,7 @@ export function runBeadsRebuildDryRun(
     const originalDb = join(scratch, 'original.db');
 
     stage(beadsDir, work, originalDb);
+    options.onStagedForTest?.();
 
     const jsonlBefore = hashFile(join(work, 'issues.jsonl'));
     const importOutput = rebuild(brBin, scratch, work);
@@ -482,6 +557,10 @@ export function runBeadsRebuildDryRun(
     console.error('This is NOT an all-clear. Do not delete beads.db.');
     return BEADS_REBUILD_DRYRUN_EXIT.cannotCheck;
   } finally {
+    if (scratch != null && keep) {
+      // A working copy nobody can find is not kept, it is leaked. Printed on every outcome, including the failures, because a failed run is exactly when someone wants to open it.
+      console.log(`\nkept the working copy at ${scratch}`);
+    }
     if (scratch != null && !keep) {
       try {
         rmSync(scratch, {recursive: true, force: true});
