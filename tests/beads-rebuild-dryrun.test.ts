@@ -750,7 +750,7 @@ describe('beads-rebuild-dryrun classifies WHICH SIDE holds the newer content', (
       const beadsDir = workspace();
       // DELTA, not a connected issue: `br delete` REFUSES to tombstone an issue that has dependents and says "No changes made (preview mode)" — while exiting 0. Measured 2026-08-25 on br 0.1.37.
       const {delta} = requireIds();
-      // The health-logger-rn shape: tombstoned in the database, still live in the JSONL. Built by tombstoning for real and then restoring the pre-delete JSONL, NOT by assuming `br delete` leaves the JSONL alone — measured 2026-08-25, it flushes the tombstone in some workspaces and not in others, and a fixture resting on that would decide what this test proves at random.
+      // The health-logger-rn shape: tombstoned in the database, still live in the JSONL. Built by tombstoning for real and then writing the pre-delete JSONL back, rather than by assuming `br delete` leaves the JSONL alone. It did leave it alone in the one workspace where that was observed, but the fixture must not rest on a once-observed side effect of the command under test's own ecosystem — restoring it explicitly makes the drift the same shape every run.
       const liveJsonl = readJsonl(beadsDir);
       const deleteOutput = runBr(dirname(beadsDir), [
         'delete',
