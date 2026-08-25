@@ -17,7 +17,7 @@ import {
   readFileSync,
   writeFileSync,
 } from 'fs';
-import {tmpdir} from 'os';
+import {homedir, tmpdir} from 'os';
 import {join, resolve} from 'path';
 
 import {
@@ -49,12 +49,50 @@ function resolveBrBinary(): string | null {
   return path !== '' && existsSync(path) ? path : null;
 }
 
+function brVersion(bin: string): string | null {
+  const proc = Bun.spawnSync([bin, '--version'], {
+    cwd: tmpdir(),
+    stderr: 'pipe',
+    stdout: 'pipe',
+  });
+  if (proc.exitCode !== 0) return null;
+  const text = (proc.stdout?.toString() ?? '').trim();
+  return text === '' ? null : text;
+}
+
+/**
+ * A SECOND br, from the 0.4 line — the version the fleet migration rebuilds WITH. Found by asking each installed mise build for its own `--version`, never by trusting a directory name. Absent on a machine that has only one br, in which case the cross-version test skips rather than pretending to have run.
+ */
+function resolveBr04(): string | null {
+  const root = join(
+    homedir(),
+    '.local/share/mise/installs/github-dicklesworthstone-beads-rust',
+  );
+  if (!existsSync(root)) return null;
+  for (const name of readdirSync(root).sort().reverse()) {
+    const candidate = join(root, name, 'br');
+    if (!existsSync(candidate)) continue;
+    if (brVersion(candidate)?.startsWith('br 0.4') === true) return candidate;
+  }
+  return null;
+}
+
 const BR = resolveBrBinary();
 const hasBr = BR != null;
 
 function requireBr(): string {
   if (BR == null) throw new Error('no br binary resolved');
   return BR;
+}
+
+const BR_04 = resolveBr04();
+/** Only meaningful when the two builds really are different versions. */
+const hasCrossVersionBr =
+  hasBr && BR_04 != null && brVersion(requireBr()) !== brVersion(BR_04);
+
+function requireBr04(): string {
+  if (BR_04 == null) throw new Error('no br 0.4.x binary resolved');
+  return BR_04;
 }
 
 const sandboxes: Sandbox[] = [];
@@ -178,6 +216,25 @@ describe('beads-rebuild-dryrun exit-code contract', () => {
 
       expect(output).toContain('issues        : 2 now -> 2 after the rebuild');
       expect(output).toContain('dependency or label would be lost');
+      expect(exitCode).toBe(BEADS_REBUILD_DRYRUN_EXIT.safe);
+    },
+  );
+
+  /**
+   * The migration this gate exists for: the workspace was written by one br line and is rebuilt by another. Only here does `content_hash` get recomputed differently, which is why it sits in NOT_COMPARED — with it compared, this clean workspace reports one FATAL per issue and the gate blocks a migration that loses nothing.
+   */
+  test.skipIf(!hasCrossVersionBr)(
+    'a rebuild by a DIFFERENT br version is safe, and the recomputed content_hash is not mistaken for loss',
+    () => {
+      const beadsDir = workspace();
+      const {exitCode, output} = captureOutput(() =>
+        runBeadsRebuildDryRun({beadsDir, brBin: requireBr04()}),
+      );
+
+      // Proof the other br really did the rebuild rather than declining it.
+      expect(output).toContain('Imported from JSONL');
+      expect(output).toContain('issues        : 2 now -> 2 after the rebuild');
+      expect(output).not.toContain('content_hash');
       expect(exitCode).toBe(BEADS_REBUILD_DRYRUN_EXIT.safe);
     },
   );
