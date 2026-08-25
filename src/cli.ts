@@ -495,7 +495,7 @@ void yargs(hideBin(process.argv))
   )
   .command(
     'usage-check',
-    'UserPromptSubmit + PostToolBatch hook: tell the session how many tokens of its OWN CONTEXT it has used (NOT subscription quota), once per configured setpoint, adding the wrap-up directive past wrapUpAt (reads stdin, prints nothing when not due)',
+    'UserPromptSubmit + PostToolBatch hook: tell the session how many tokens of its OWN CONTEXT it has used (NOT subscription quota), once per setpoint — by default every 100k tokens. The wrap-up directive is opt-in and OFF unless componentConfig["usage-check"].wrapUpAt names a token count (reads stdin, prints nothing when not due)',
     (y) => y,
     () => {
       // Always exits 0: a failing UserPromptSubmit hook can block the prompt.

@@ -6,7 +6,8 @@
  *     `bunx @justinhaaheim/justin-sdk usage-check`
  *   - a PostToolBatch hook running the same command
  *   - a `componentConfig["usage-check"]` block in justin-sdk.config.json
- *     carrying the defaults
+ *     carrying the two switches (`enabled`, `wrapUpAt`) and deliberately NOT
+ *     the setpoint ladder — see stepUsageCheckConfig
  *
  * WHY BOTH EVENTS (verified empirically in CC 2.1.238, home-base-1r6d.1):
  * UserPromptSubmit only fires when a human sends a message, and the sessions
@@ -39,7 +40,13 @@ import {
   success,
   writeJson,
 } from './setup-helpers';
-import {USAGE_CHECK_CONFIG_KEY, USAGE_CHECK_DEFAULTS} from './usage-check';
+import {
+  formatTokens,
+  SETPOINT_CEILING_TOKENS,
+  SETPOINT_INTERVAL_TOKENS,
+  USAGE_CHECK_CONFIG_KEY,
+  USAGE_CHECK_DEFAULTS,
+} from './usage-check';
 
 /** The command the hooks run. Matches the time-check precedent. */
 const HOOK_COMMAND = 'bunx @justinhaaheim/justin-sdk usage-check';
@@ -103,7 +110,22 @@ export function stepUsageCheckHooks(projectRoot: string): boolean {
 }
 
 /**
- * Seed `componentConfig["usage-check"]` with the defaults.
+ * Seed `componentConfig["usage-check"]` with the two switches Justin operates,
+ * and nothing else.
+ *
+ * WHAT IS OMITTED AND WHY: `setpoints` and `reArmDropFraction` are deliberately
+ * NOT written. A materialized copy freezes today's defaults into every repo at
+ * install time, so changing the default ladder later would silently reach none
+ * of them — and the ladder is exactly the thing that has already changed once
+ * (D7). Leaving them absent makes the SDK's default the live value everywhere,
+ * and a project that wants its own rungs still writes them out longhand; the
+ * hook reads an absent key as "use the default", never as "disabled".
+ *
+ * WHAT IS WRITTEN AND WHY: `enabled` and `wrapUpAt` are the knobs, so they are
+ * spelled out even when they equal the defaults — `wrapUpAt: null` is how a
+ * reader discovers that the wrap-up directive exists, is off, and is turned on
+ * by putting a number there (D8). Both track USAGE_CHECK_DEFAULTS rather than
+ * repeating literals, so there is still one source for the values.
  *
  * Only writes when the block is absent — a project that has tuned its
  * setpoints (or set `enabled: false`) must survive a re-run untouched.
@@ -128,15 +150,21 @@ export function stepUsageCheckConfig(projectRoot: string): boolean {
   }
 
   componentConfig[USAGE_CHECK_CONFIG_KEY] = {
-    ...USAGE_CHECK_DEFAULTS,
-    setpoints: [...USAGE_CHECK_DEFAULTS.setpoints],
+    enabled: USAGE_CHECK_DEFAULTS.enabled,
+    wrapUpAt: USAGE_CHECK_DEFAULTS.wrapUpAt,
   };
   config.componentConfig = componentConfig;
   writeJson(configPath, config);
+
+  const wrapUpSummary =
+    USAGE_CHECK_DEFAULTS.wrapUpAt == null
+      ? 'wrapUpAt: null — the wrap-up directive is OFF; set a token count to opt in'
+      : `wrapUpAt: ${USAGE_CHECK_DEFAULTS.wrapUpAt}`;
+  success(`Added componentConfig.${USAGE_CHECK_CONFIG_KEY} (${wrapUpSummary})`);
   success(
-    `Added componentConfig.${USAGE_CHECK_CONFIG_KEY} ` +
-      `(setpoints: ${USAGE_CHECK_DEFAULTS.setpoints.join(', ')}; ` +
-      `wrapUpAt: ${USAGE_CHECK_DEFAULTS.wrapUpAt})`,
+    'Setpoints left unset, so this project tracks the SDK default: one ' +
+      `notice every ${formatTokens(SETPOINT_INTERVAL_TOKENS)} tokens up to ` +
+      formatTokens(SETPOINT_CEILING_TOKENS),
   );
   return true;
 }

@@ -13,6 +13,12 @@
  * handoff, one written at 100% never gets written at all. The statusline shows
  * Justin a percentage, but the model never sees the statusline.
  *
+ * TWO HALVES, ONE ON BY DEFAULT (D8): the INFORMATIONAL notice — "this session
+ * has used N tokens of context" — fires every SETPOINT_INTERVAL_TOKENS and is
+ * what Justin wants in every session. The wrap-up DIRECTIVE that can ride along
+ * with it is experimental and opt-in per repo, off unless a project sets a
+ * numeric `wrapUpAt`. See UsageCheckConfig.wrapUpAt for the reasoning.
+ *
  * WHERE THE NUMBER COMES FROM: every assistant entry in the transcript carries
  * `message.usage`, and the context size of that API call is
  *   input_tokens + cache_creation_input_tokens + cache_read_input_tokens
@@ -70,22 +76,99 @@ const SETPOINT_TOKEN = /setpoint=(\d+)/;
 /** The key under `componentConfig` in justin-sdk.config.json. */
 export const USAGE_CHECK_CONFIG_KEY = 'usage-check';
 
-/** The wrap-up directive, in Justin's words (home-base-1r6d.1, D5 REVISED). */
+/**
+ * The wrap-up directive, in Justin's words (home-base-1r6d.1, D5 REVISED).
+ * Only ever said when a project has opted in with a numeric `wrapUpAt` (D8).
+ */
 export const WRAP_UP_DIRECTIVE =
   'Wrap up your session at the next available opportunity. Follow the handoff/ralph-handoff protocol.';
 
 export interface UsageCheckConfig {
   enabled?: boolean;
-  /** Ascending token thresholds; each announces once. null/absent disables. */
+  /**
+   * Ascending token thresholds; each announces once. Explicit null disables the
+   * ladder; ABSENT takes the generated default (see USAGE_CHECK_DEFAULTS), so
+   * an installed project tracks changes to that default instead of freezing a
+   * copy of it.
+   */
   setpoints?: number[] | null;
   /**
    * At or above this context size the notice adds WRAP_UP_DIRECTIVE. Keyed off
    * the measured context rather than the announced setpoint, so it still fires
-   * when it sits between two setpoints. null/absent means never nag.
+   * when it sits between two setpoints.
+   *
+   * null means never nag — and that is the DEFAULT (D8). The directive is
+   * experimental and opt-in per repo: Justin's reasoning (2026-08-24) is that
+   * "there are going to be sessions where I want to continue past 300k, and
+   * sessions where Claude Code is going to be confused where the message is
+   * coming from." The INFORMATIONAL half of this component he wants everywhere;
+   * the directive he wants only where he asked for it. Putting a number here IS
+   * the on switch, and null-vs-number is the whole of it.
    */
   wrapUpAt?: number | null;
   /** Fractional drop below the last announced setpoint that re-arms the ladder. */
   reArmDropFraction?: number;
+}
+
+/*
+ * THE DEFAULT LADDER IS GENERATED, not hand-picked (D7).
+ *
+ * Justin's words (2026-08-24): "automatically run every hundred thousand
+ * tokens". The rungs this shipped with (150k/200k/250k/300k/400k/500k) were
+ * uneven below 500k and silent above it.
+ *
+ * D7 kept `setpoints` an ARRAY rather than adding a `setpointIntervalTokens`
+ * config key: the resolve, dedupe and re-arm machinery all operate on arrays, a
+ * second config concept would mean two ways to say the same thing, and a
+ * project that wants irregular rungs can still write them out longhand.
+ */
+
+/** Spacing between the setpoints of the generated default ladder. */
+export const SETPOINT_INTERVAL_TOKENS = 100_000;
+
+/**
+ * The highest setpoint the generated default ladder reaches. It exists only
+ * because the ladder has to be a finite array, and sits past any context window
+ * in service — so the series never runs out in practice, and raising it costs
+ * one more number in an array.
+ */
+export const SETPOINT_CEILING_TOKENS = 2_000_000;
+
+/**
+ * Ascending, evenly spaced setpoints from `interval` up to and including the
+ * largest multiple of `interval` that is <= `ceiling`.
+ *
+ * Multiplies rather than accumulating, so a fractional interval cannot drift
+ * the upper rungs off their exact values.
+ *
+ * THROWS on a non-positive interval or a ceiling below it. Both are programmer
+ * errors — the only production caller passes the constants above — and the
+ * tempting alternative, returning [], is precisely the failure-shaped-as-
+ * emptiness this codebase forbids: an empty ladder resolves to "usage-check
+ * disabled", so a bad constant would silently switch the component off for
+ * every project at once and nothing would ever look wrong.
+ */
+export function buildSetpointLadder(
+  interval: number,
+  ceiling: number,
+): number[] {
+  if (!Number.isFinite(interval) || interval <= 0) {
+    throw new RangeError(
+      `setpoint interval must be a positive finite number, got ${interval}`,
+    );
+  }
+  if (!Number.isFinite(ceiling) || ceiling < interval) {
+    throw new RangeError(
+      `setpoint ceiling ${ceiling} is below the interval ${interval}`,
+    );
+  }
+
+  const rungs = Math.floor(ceiling / interval);
+  const ladder: number[] = [];
+  for (let rung = 1; rung <= rungs; rung += 1) {
+    ladder.push(interval * rung);
+  }
+  return ladder;
 }
 
 /**
@@ -94,25 +177,35 @@ export interface UsageCheckConfig {
  * only ever apply where the component was deliberately added.
  *
  * Typed explicitly rather than as `Required<UsageCheckConfig>`: `Required` only
- * strips optionality, so the null halves of the config's own union would
- * survive into the defaults and make `setpoints` un-iterable at every call
- * site. The defaults are exactly the values that are always present.
+ * strips optionality, so the null half of `setpoints`' union would survive into
+ * the defaults and make it un-iterable at every call site. `wrapUpAt` keeps its
+ * null (D8) because null is not "missing" here — it is the value, and it means
+ * the wrap-up directive is off until a project asks for it.
  */
 export const USAGE_CHECK_DEFAULTS: {
   enabled: boolean;
   reArmDropFraction: number;
   setpoints: number[];
-  wrapUpAt: number;
+  wrapUpAt: number | null;
 } = {
   enabled: true,
   reArmDropFraction: 0.25,
-  setpoints: [150_000, 200_000, 250_000, 300_000, 400_000, 500_000],
-  wrapUpAt: 300_000,
+  setpoints: buildSetpointLadder(
+    SETPOINT_INTERVAL_TOKENS,
+    SETPOINT_CEILING_TOKENS,
+  ),
+  wrapUpAt: null,
 };
 
 export interface ResolvedUsageCheckConfig {
-  /** Ascending, deduped, and guaranteed to contain wrapUpAt (see below). */
+  /**
+   * Ascending and deduped. When `wrapUpAt` is a number the ladder is also
+   * guaranteed to contain it (see resolveUsageCheckConfig); when `wrapUpAt` is
+   * null that guarantee has nothing to guarantee and lapses — the ladder is
+   * purely informational, and null is never folded in as a rung.
+   */
   setpoints: number[];
+  /** null means the wrap-up directive is off entirely — the default (D8). */
   wrapUpAt: number | null;
   reArmDropFraction: number;
 }
@@ -159,12 +252,28 @@ export function readUsageCheckConfig(
 }
 
 /**
+ * The wrap-up threshold as a usable number, or null when the directive is off.
+ *
+ * One function so that "is this a real threshold?" is answered in exactly one
+ * place: the ladder-folding below and the returned config must never disagree
+ * about it, or a null could be folded in as a rung, or a threshold could be
+ * honoured without the rung that guarantees it gets said.
+ */
+function normalizeWrapUpAt(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : null;
+}
+
+/**
  * Merge a project's config over the defaults and normalize the ladder.
  *
- * `wrapUpAt` is folded INTO the setpoints. Without that, a config whose
- * wrapUpAt sits between two setpoints would cross the wrap-up threshold
+ * A NUMERIC `wrapUpAt` is folded INTO the setpoints. Without that, a config
+ * whose wrapUpAt sits between two setpoints would cross the wrap-up threshold
  * without any notice being due, and the directive would never be said — a
- * silent, config-shaped way to lose the one message that matters most.
+ * silent, config-shaped way to lose the one message that matters most. A null
+ * wrapUpAt (the default, D8) folds in nothing: there is no threshold to reach,
+ * so the ladder stays exactly what the setpoints said.
  *
  * Returns null when the component is absent, disabled, or left with an empty
  * ladder (nothing could ever fire, so say so by returning the same "off" value
@@ -181,10 +290,11 @@ export function resolveUsageCheckConfig(
     config.setpoints === undefined
       ? USAGE_CHECK_DEFAULTS.setpoints
       : config.setpoints;
-  const wrapUpAt =
+  const wrapUpAt = normalizeWrapUpAt(
     config.wrapUpAt === undefined
       ? USAGE_CHECK_DEFAULTS.wrapUpAt
-      : config.wrapUpAt;
+      : config.wrapUpAt,
+  );
   const reArmDropFraction =
     typeof config.reArmDropFraction === 'number' &&
     Number.isFinite(config.reArmDropFraction) &&
@@ -199,8 +309,8 @@ export function resolveUsageCheckConfig(
       ladder.add(Math.floor(value));
     }
   }
-  if (typeof wrapUpAt === 'number' && Number.isFinite(wrapUpAt) && wrapUpAt > 0) {
-    ladder.add(Math.floor(wrapUpAt));
+  if (wrapUpAt != null) {
+    ladder.add(wrapUpAt);
   }
   if (ladder.size === 0) {
     return null;
@@ -209,10 +319,7 @@ export function resolveUsageCheckConfig(
   return {
     reArmDropFraction,
     setpoints: [...ladder].sort((a, b) => a - b),
-    wrapUpAt:
-      typeof wrapUpAt === 'number' && Number.isFinite(wrapUpAt) && wrapUpAt > 0
-        ? Math.floor(wrapUpAt)
-        : null,
+    wrapUpAt,
   };
 }
 

@@ -34,6 +34,7 @@ import {
   USAGE_CHECK_HOOK_EVENTS,
 } from '../src/usage-check-setup';
 import {
+  buildSetpointLadder,
   contextTokensFromUsage,
   decide,
   formatNotice,
@@ -241,6 +242,78 @@ describe('config: ladder normalization', () => {
     expect(resolved({reArmDropFraction: 0}).reArmDropFraction).toBe(0.25);
     expect(resolved({reArmDropFraction: 1}).reArmDropFraction).toBe(0.25);
     expect(resolved({reArmDropFraction: 0.4}).reArmDropFraction).toBe(0.4);
+  });
+});
+
+describe('defaults: an every-100k ladder, wrap-up directive OFF (D7, D8)', () => {
+  test('the generated ladder starts at 100,000 and steps by 100,000', () => {
+    // The literals here are deliberate. Asserting against
+    // SETPOINT_INTERVAL_TOKENS would make this test agree with whatever the
+    // constant happens to say, which is the one thing it exists to pin down.
+    // Justin's words (2026-08-24): "automatically run every hundred thousand
+    // tokens".
+    const ladder = USAGE_CHECK_DEFAULTS.setpoints;
+    expect(ladder[0]).toBe(100_000);
+    expect(ladder[1]).toBe(200_000);
+    expect(ladder.at(-1)).toBe(2_000_000);
+    expect(ladder).toHaveLength(20);
+    for (let index = 0; index < ladder.length; index += 1) {
+      expect(ladder[index]).toBe(100_000 * (index + 1));
+    }
+  });
+
+  test('the ladder is ascending, deduped, and carries no null or junk rung', () => {
+    const ladder = USAGE_CHECK_DEFAULTS.setpoints;
+    expect([...new Set(ladder)]).toHaveLength(ladder.length);
+    expect([...ladder].sort((a, b) => a - b)).toEqual(ladder);
+    expect(ladder.some((rung) => rung == null)).toBe(false);
+    expect(ladder.every((rung) => Number.isFinite(rung) && rung > 0)).toBe(
+      true,
+    );
+  });
+
+  test('buildSetpointLadder throws rather than handing back an empty ladder', () => {
+    // An empty ladder resolves to "disabled", so a bad interval would switch
+    // the component off in every project at once and look like nothing had
+    // gone wrong anywhere.
+    expect(() => buildSetpointLadder(0, 1_000)).toThrow(RangeError);
+    expect(() => buildSetpointLadder(-100, 1_000)).toThrow(RangeError);
+    expect(() => buildSetpointLadder(Number.NaN, 1_000)).toThrow(RangeError);
+    expect(() => buildSetpointLadder(100, 99)).toThrow(RangeError);
+
+    expect(buildSetpointLadder(100, 100)).toEqual([100]);
+    // A ceiling that is not a multiple of the interval stops below it rather
+    // than overshooting.
+    expect(buildSetpointLadder(100, 250)).toEqual([100, 200]);
+  });
+
+  test('the default wrapUpAt is null, and resolving folds no null into the ladder', () => {
+    expect(USAGE_CHECK_DEFAULTS.wrapUpAt).toBeNull();
+
+    const config = resolved({enabled: true});
+    expect(config.wrapUpAt).toBeNull();
+    expect(config.setpoints).toEqual(USAGE_CHECK_DEFAULTS.setpoints);
+    expect(config.setpoints.some((rung) => rung == null)).toBe(false);
+  });
+
+  test('with the default config no context size, however large, nags', () => {
+    const config = resolved({enabled: true});
+    for (const contextTokens of [
+      100_000, 300_000, 500_000, 999_999, 1_500_000, 2_000_000, 5_000_000,
+    ]) {
+      const decision = decide({
+        config,
+        contextTokens,
+        lastAnnouncedSetpoint: null,
+      });
+      // The informational half still fires — this is not "off", it is "off
+      // for the directive only".
+      expect(decision).not.toBeNull();
+      expect(decision?.wrapUp).toBe(false);
+      if (decision != null) {
+        expect(formatNotice(decision)).not.toContain(WRAP_UP_DIRECTIVE);
+      }
+    }
   });
 });
 
@@ -682,6 +755,78 @@ describe('runUsageCheck: end to end over real files', () => {
     expect(runCapturing(input)).toBeNull();
   });
 
+  test('a whole session on the DEFAULT config: a notice every 100k, never a directive', () => {
+    // The end-to-end proof of D7 + D8 together. A project that installs the
+    // component and tunes nothing gets the informational notice on every 100k
+    // rung — including well past 500,000, where the old hand-picked ladder ran
+    // out — and never once gets told to wrap up, including past the 300,000
+    // that used to trigger the directive unconditionally.
+    const dir = tempDir();
+    writeConfig(dir, {enabled: true}); // Exactly what the installer now seeds.
+    const transcriptPath = writeTranscript(dir, [assistantEntry(105_000)]);
+    const input = {
+      cwd: dir,
+      hook_event_name: 'PostToolBatch',
+      transcript_path: transcriptPath,
+    };
+
+    const announced: number[] = [];
+    for (
+      let contextTokens = 105_000;
+      contextTokens <= 905_000;
+      contextTokens += 50_000
+    ) {
+      if (contextTokens > 105_000) {
+        appendFileSync(
+          transcriptPath,
+          `${JSON.stringify(assistantEntry(contextTokens))}\n`,
+        );
+      }
+      const notice = noticeOf(runCapturing(input));
+      if (notice == null) {
+        continue;
+      }
+      expect(notice).not.toContain(WRAP_UP_DIRECTIVE);
+      const match = /setpoint=(\d+)/.exec(notice);
+      expect(match?.[1]).toBeDefined();
+      announced.push(Number(match?.[1]));
+      recordNotice(transcriptPath, notice);
+    }
+
+    // Every rung, once each, in order — the half-step contexts stay silent.
+    expect(announced).toEqual([
+      100_000, 200_000, 300_000, 400_000, 500_000, 600_000, 700_000, 800_000,
+      900_000,
+    ]);
+  });
+
+  test('opting in with wrapUpAt alone: default ladder, directive at the threshold', () => {
+    // The opt-in shape a project actually hand-writes (D8): one key added to
+    // the seeded block, nothing else touched. The ladder stays the SDK default
+    // and the directive arrives exactly at the threshold.
+    const dir = tempDir();
+    writeConfig(dir, {enabled: true, wrapUpAt: 300_000});
+    const transcriptPath = writeTranscript(dir, [assistantEntry(205_000)]);
+    const input = {
+      cwd: dir,
+      hook_event_name: 'PostToolBatch',
+      transcript_path: transcriptPath,
+    };
+
+    const at205 = noticeOf(runCapturing(input));
+    expect(at205).toContain('setpoint=200000');
+    expect(at205).not.toContain(WRAP_UP_DIRECTIVE);
+    recordNotice(transcriptPath, at205 as string);
+
+    appendFileSync(
+      transcriptPath,
+      `${JSON.stringify(assistantEntry(305_000))}\n`,
+    );
+    const at305 = noticeOf(runCapturing(input));
+    expect(at305).toContain('setpoint=300000');
+    expect(at305).toContain(WRAP_UP_DIRECTIVE);
+  });
+
   test('auto-compaction re-arms the ladder end to end', () => {
     const {dir, transcriptPath} = setup(TEST_CONFIG, 305_000);
     const input = {
@@ -766,15 +911,22 @@ describe('installer: settings and config wiring', () => {
       );
     }
 
-    // The installed defaults must be what the hook actually reads back.
+    // The seed carries the two switches and NOTHING else. A materialized copy
+    // of `setpoints` would freeze today's ladder into the project, so the next
+    // change to the default would reach none of the repos it was made for.
     const installed = readUsageCheckConfig(dir);
-    expect(installed).toEqual({
-      enabled: true,
-      reArmDropFraction: USAGE_CHECK_DEFAULTS.reArmDropFraction,
-      setpoints: USAGE_CHECK_DEFAULTS.setpoints,
-      wrapUpAt: USAGE_CHECK_DEFAULTS.wrapUpAt,
-    });
-    expect(resolveUsageCheckConfig(installed)).not.toBeNull();
+    expect(installed).toEqual({enabled: true, wrapUpAt: null});
+
+    // …and an absent `setpoints` must read as "use the SDK default", never as
+    // "nothing to fire", which is the same shape as "disabled".
+    const active = resolveUsageCheckConfig(installed);
+    expect(active).not.toBeNull();
+    expect(active?.setpoints).toEqual(USAGE_CHECK_DEFAULTS.setpoints);
+    expect(active?.setpoints[0]).toBe(100_000);
+    expect(active?.reArmDropFraction).toBe(
+      USAGE_CHECK_DEFAULTS.reArmDropFraction,
+    );
+    expect(active?.wrapUpAt).toBeNull();
   });
 
   test('a tuned config survives a re-install untouched', () => {
