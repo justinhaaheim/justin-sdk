@@ -292,8 +292,11 @@ describe('defaults: an every-100k ladder, wrap-up directive OFF (D7, D8)', () =>
 
     const config = resolved({enabled: true});
     expect(config.wrapUpAt).toBeNull();
-    expect(config.setpoints).toEqual(USAGE_CHECK_DEFAULTS.setpoints);
+    // Sharpest assertion first: resolve() folds wrapUpAt INTO the ladder, so a
+    // null threshold is the one value that could slip in as a rung — where it
+    // would sort ahead of every real setpoint and be announced as one.
     expect(config.setpoints.some((rung) => rung == null)).toBe(false);
+    expect(config.setpoints).toEqual(USAGE_CHECK_DEFAULTS.setpoints);
   });
 
   test('with the default config no context size, however large, nags', () => {
