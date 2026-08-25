@@ -11,6 +11,7 @@ import yargs from 'yargs';
 import {hideBin} from 'yargs/helpers';
 
 import {ADD_TARGETS, PRESET_NAMES, runAdd} from './add';
+import {runBeadsRebuildDryRun} from './beads-rebuild-dryrun';
 import {COMPONENT_NAMES} from './components';
 import {runDoctor} from './doctor';
 import {runEasUpdate} from './eas-update';
@@ -547,6 +548,36 @@ void yargs(hideBin(process.argv))
     (y) => y,
     () => {
       process.exit(runRulesDiff());
+    },
+  )
+  .command(
+    'beads-rebuild-dryrun',
+    'Pre-flight for migrating a beads workspace by deleting .beads/beads.db and rebuilding it from .beads/issues.jsonl: performs that destructive rebuild on a throwaway COPY of .beads/ and reports exactly what it would lose. The live workspace is only ever read. Exit 0 = compared, nothing would be lost (safe), 1 = content would be DESTROYED (not safe), 2 = the check could not run (never an all-clear).',
+    (y) =>
+      y
+        .option('beads', {
+          type: 'string',
+          describe: 'The beads workspace to check (default: .beads)',
+        })
+        .option('br', {
+          type: 'string',
+          describe:
+            'The `br` binary to rebuild WITH — i.e. the one that will perform the real migration (default: br from PATH). Pass a full path when `br` is a version-manager shim: the rebuild runs in a temp directory, where a shim may resolve to nothing.',
+        })
+        .option('keep', {
+          type: 'boolean',
+          default: false,
+          describe:
+            'Leave the temp working copy behind for inspection instead of removing it',
+        }),
+    (argv) => {
+      process.exit(
+        runBeadsRebuildDryRun({
+          beadsDir: argv.beads,
+          brBin: argv.br,
+          keep: argv.keep,
+        }),
+      );
     },
   )
   .command(
