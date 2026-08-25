@@ -8,13 +8,14 @@
  * before running.
  */
 
+import {Database} from 'bun:sqlite';
 import {describe, test, expect, afterEach, beforeAll} from 'bun:test';
 import {execSync} from 'child_process';
-import {existsSync, readdirSync, readFileSync} from 'fs';
+import {existsSync, readdirSync, readFileSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
-import {runBeadsSetup} from '../src/beads-setup';
-import {kebabCase} from '../src/setup-helpers';
+import {BEADS_IMPORT_COMMAND, runBeadsSetup} from '../src/beads-setup';
+import {getPinnedToolVersion, kebabCase} from '../src/setup-helpers';
 import {createProjectSandbox, createSandbox, type Sandbox} from './sandbox';
 
 let hasBr = false;
@@ -314,5 +315,76 @@ describe('beads-setup (safety)', () => {
     expect(existsSync(join(sb.path, 'AGENTS.md'))).toBe(false);
     // CLAUDE.md was not created
     expect(existsSync(join(sb.path, 'CLAUDE.md'))).toBe(false);
+  });
+});
+
+/**
+ * `br sync --import-only --force` HARD-DELETES database rows the JSONL lacks — measured on br 0.1.37 and br 0.4.1, exit 0 both times, no mention of the deletion in its output, and `--orphans allow` protecting nothing. This test runs the EXACT command the enrollment path ships and insists the destruction does not happen, so re-adding `--force` to that line fails here instead of in somebody's repo.
+ *
+ * It is a real workspace and a real br on purpose: the behavior under test is br's, and a mocked br would only test this file's idea of br.
+ */
+describe('beads-setup import command (destructiveness)', () => {
+  function brOrThrow(cwd: string, args: string): string {
+    return execSync(`br ${args}`, {cwd, encoding: 'utf-8', env: process.env});
+  }
+
+  function count(dbPath: string, table: string): number {
+    const db = new Database(dbPath, {readonly: true});
+    const n =
+      db.query<{n: number}, []>(`select count(*) as n from ${table}`).get()
+        ?.n ?? -1;
+    db.close();
+    return n;
+  }
+
+  test('preserves database content the JSONL does not cover', () => {
+    if (!hasBr) return;
+    const sb = track(createSandbox());
+    // `br` on this fleet is a mise shim that resolves its version from the CURRENT DIRECTORY's config, so a bare sandbox has no br at all. Pinning here the same way `stepMiseToml` does means the command under test runs against the version enrolled repos actually get, not whatever happens to be global.
+    sb.writeFile(
+      'mise.toml',
+      `[tools]\n"github:Dicklesworthstone/beads_rust" = { version = "${getPinnedToolVersion('beads_rust')}", exe = "br" }\n`,
+    );
+    brOrThrow(sb.path, 'init --prefix fx');
+    const alpha = brOrThrow(sb.path, 'q "Alpha"').trim();
+    const beta = brOrThrow(sb.path, 'q "Beta"').trim();
+    const gamma = brOrThrow(sb.path, 'q "Gamma"').trim();
+    brOrThrow(sb.path, `comments add ${gamma} "gamma only comment"`);
+    brOrThrow(sb.path, `dep add ${gamma} ${alpha}`);
+    brOrThrow(sb.path, `label add ${gamma} gamma-label`);
+    brOrThrow(sb.path, 'sync --flush-only');
+
+    // Gamma now lives in the database only — the drift shape a forced import destroys. Its comment, dependency and label go with it, so all four tables are watched.
+    const jsonl = join(sb.path, '.beads', 'issues.jsonl');
+    const kept = readFileSync(jsonl, 'utf-8')
+      .split('\n')
+      .filter((l) => l.trim() !== '' && !l.includes(`"id":"${gamma}"`));
+    expect(kept.length).toBe(2);
+    writeFileSync(jsonl, `${kept.join('\n')}\n`);
+
+    const db = join(sb.path, '.beads', 'beads.db');
+    expect(count(db, 'issues')).toBe(3);
+
+    execSync(BEADS_IMPORT_COMMAND, {cwd: sb.path, env: process.env});
+
+    // The specific issue, named — asserted before the counts so a destructive invocation fails on the row it destroyed rather than on an arithmetic mismatch.
+    const survivors = new Database(db, {readonly: true});
+    const ids = survivors
+      .query<{id: string}, []>('select id from issues')
+      .all()
+      .map((r) => r.id);
+    survivors.close();
+    expect(ids).toContain(gamma);
+    expect(ids).toContain(alpha);
+    expect(ids).toContain(beta);
+    expect(count(db, 'comments')).toBe(1);
+    expect(count(db, 'dependencies')).toBe(1);
+    expect(count(db, 'labels')).toBe(1);
+  });
+
+  test('ships no --force: the flag hard-deletes and buys nothing here', () => {
+    expect(BEADS_IMPORT_COMMAND).not.toContain('--force');
+    // Kept deliberately — legacy `bd` exports carry orphan dependency refs that strict mode rejects.
+    expect(BEADS_IMPORT_COMMAND).toContain('--orphans allow');
   });
 });

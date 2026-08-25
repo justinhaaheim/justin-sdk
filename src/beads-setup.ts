@@ -468,6 +468,17 @@ function stepInitBeads(
   return true;
 }
 
+/**
+ * The import that seeds a freshly-initialised workspace from the migrated JSONL. Exported so the regression test can run the EXACT shipped invocation rather than its own idea of it.
+ *
+ * `--force` used to be on this line, and it is a hard delete waiting for a caller. Measured on br 0.1.37 (the pinned version) and br 0.4.1: `br sync --import-only --force` DELETES — not tombstones — every issue in the database that the JSONL lacks, taking its comments, dependencies and labels with it, and exits 0 while reporting only what it "Created". Adding `--orphans allow` does not change that by one row; the two invocations produce identical destruction. For contrast, on 0.1.37 the documented destructive flag `--rebuild` TOMBSTONES those rows and says "Orphans removed: 1 issues (not in JSONL)"; on 0.4.1 `--rebuild` no longer exists at all.
+ *
+ * It was also unnecessary here. The comment it carried — "ensures we re-import even if br thinks the JSONL hash is unchanged" — cannot apply on this path: the step only runs after `stepMigrateOldBeads` deleted `.beads/` and `stepInitBeads` created a new one, so the stored hash belongs to the empty JSONL `br init` wrote and never to the non-empty backup copied over it. Measured: a plain `--import-only` into a fresh init imports every issue, comment, dependency and label. That made `--force` a destructive capability shipped into every enrolled repo in exchange for nothing.
+ *
+ * `--orphans allow` stays: legacy `bd` exports often carry dependency references to deleted issues, and strict mode rejects the referring issues instead of importing them.
+ */
+export const BEADS_IMPORT_COMMAND = 'br sync --import-only --orphans allow';
+
 function stepImportIssues(
   projectRoot: string,
   jsonlPath: string | null,
@@ -490,16 +501,9 @@ function stepImportIssues(
   // Copy JSONL into .beads/
   cpSync(jsonlPath, targetJsonl, {force: true});
 
-  // Use --orphans allow because migrating from old beads (bd) often
-  // produces orphan dependency references that strict mode rejects
-  // (silently dropping issues). --force ensures we re-import even if
-  // br thinks the JSONL hash is unchanged.
-  const result = exec(
-    'br sync --import-only --orphans allow --force',
-    projectRoot,
-  );
+  const result = exec(BEADS_IMPORT_COMMAND, projectRoot);
   if (result.exitCode !== 0) {
-    fail(`br sync --import-only failed: ${result.stderr}`);
+    fail(`${BEADS_IMPORT_COMMAND} failed: ${result.stderr}`);
     return false;
   }
 
