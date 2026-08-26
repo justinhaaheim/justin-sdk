@@ -11,6 +11,7 @@ import yargs from 'yargs';
 import {hideBin} from 'yargs/helpers';
 
 import {ADD_TARGETS, PRESET_NAMES, runAdd} from './add';
+import {runBeadsRebuildDryRun} from './beads-rebuild-dryrun';
 import {COMPONENT_NAMES} from './components';
 import {runDoctor} from './doctor';
 import {runEasUpdate} from './eas-update';
@@ -25,6 +26,7 @@ import {runRulesUpdate} from './rules-update';
 import {runSkill} from './skill';
 import {runSyncRules} from './sync-rules';
 import {runTimeCheck} from './time-check';
+import {runUsageCheck} from './usage-check';
 import {runSetupEnv} from './setup-env-command';
 import {runSignal} from './signal';
 import {runSweep} from './sweep';
@@ -335,6 +337,12 @@ void yargs(hideBin(process.argv))
           describe: 'Maximum iterations before stopping',
           default: RALPH_DEFAULTS.maxIterations,
         })
+        .option('usage-gate', {
+          type: 'boolean',
+          describe:
+            'Read your real /usage quota before every iteration and refuse to run when it cannot be read. Pass --no-usage-gate to skip the gate entirely — no /usage call is made and quota is reported as UNKNOWN, never 0%. Use it only when the spend is bounded up front (e.g. --max-iterations 1), not for long loops.',
+          default: RALPH_DEFAULTS.usageGate,
+        })
         .option('session-stop-pct', {
           type: 'number',
           describe:
@@ -410,6 +418,12 @@ void yargs(hideBin(process.argv))
         prompt: argv.prompt,
         sessionStopPct: argv['session-stop-pct'],
         timeoutMin: argv['timeout-min'],
+        // yargs boolean-negation: `--no-usage-gate` sets `usage-gate` false.
+        // Declaring the option positively is load-bearing — an option literally
+        // NAMED `no-usage-gate` would be negated into `usage-gate: false` while
+        // `no-usage-gate` kept its own default, so passing the flag would
+        // silently do nothing (measured on yargs 18).
+        usageGate: argv['usage-gate'],
         weeklyStopPct: argv['weekly-stop-pct'],
       });
       process.exit(exitCode);
@@ -481,6 +495,15 @@ void yargs(hideBin(process.argv))
     },
   )
   .command(
+    'usage-check',
+    'UserPromptSubmit + PostToolBatch hook: tell the session how many tokens of its OWN CONTEXT it has used (NOT subscription quota), once per setpoint — by default every 100k tokens. The wrap-up directive is opt-in and OFF unless componentConfig["usage-check"].wrapUpAt names a token count (reads stdin, prints nothing when not due)',
+    (y) => y,
+    () => {
+      // Always exits 0: a failing UserPromptSubmit hook can block the prompt.
+      process.exit(runUsageCheck());
+    },
+  )
+  .command(
     'sync-rules',
     'Regenerate ~/.claude/rules/justin-sdk/critical-rules.md (the universal always-on rules Claude autoloads) from the managed prompts clone. Run AFTER pushing a prompts change. Idempotent; never reads ~/Dev/prompts. Works from any project.',
     (y) =>
@@ -525,6 +548,36 @@ void yargs(hideBin(process.argv))
     (y) => y,
     () => {
       process.exit(runRulesDiff());
+    },
+  )
+  .command(
+    'beads-rebuild-dryrun',
+    'Pre-flight for migrating a beads workspace by deleting .beads/beads.db and rebuilding it from .beads/issues.jsonl: performs that destructive rebuild on a throwaway COPY of .beads/ and reports exactly what it would lose. The live workspace is only ever read. Exit 0 = compared, nothing would be lost (safe), 1 = content would be DESTROYED (not safe), 2 = the check could not run (never an all-clear).',
+    (y) =>
+      y
+        .option('beads', {
+          type: 'string',
+          describe: 'The beads workspace to check (default: .beads)',
+        })
+        .option('br', {
+          type: 'string',
+          describe:
+            'The `br` binary to rebuild WITH — i.e. the one that will perform the real migration (default: br from PATH). Pass a full path when `br` is a version-manager shim: the rebuild runs in a temp directory, where a shim may resolve to nothing.',
+        })
+        .option('keep', {
+          type: 'boolean',
+          default: false,
+          describe:
+            'Leave the temp working copy behind for inspection instead of removing it',
+        }),
+    (argv) => {
+      process.exit(
+        runBeadsRebuildDryRun({
+          beadsDir: argv.beads,
+          brBin: argv.br,
+          keep: argv.keep,
+        }),
+      );
     },
   )
   .command(

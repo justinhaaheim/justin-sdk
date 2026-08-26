@@ -147,6 +147,7 @@ describe('add: preset definitions', () => {
             c !== 'base-setup' &&
             c !== 'eas' &&
             c !== 'time-check' &&
+            c !== 'usage-check' &&
             c !== 'critical-rules',
         ),
       ),
@@ -155,6 +156,8 @@ describe('add: preset definitions', () => {
     expect(PRESETS.all).not.toContain('base-setup');
     // time-check's hook runs on every prompt — never install it implicitly.
     expect(PRESETS.all).not.toContain('time-check');
+    // usage-check's hooks run on every prompt AND after every tool batch.
+    expect(PRESETS.all).not.toContain('usage-check');
     // critical-rules COMMITS rules into the repo, and four enrolled repos are
     // public — enrolment is a per-repo decision, never a preset's (t6a0.21 D6).
     expect(PRESETS.all).not.toContain('critical-rules');

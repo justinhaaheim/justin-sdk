@@ -30,6 +30,7 @@ describe('components: ordering', () => {
           name !== 'base-setup' &&
           name !== 'eas' &&
           name !== 'time-check' &&
+          name !== 'usage-check' &&
           name !== 'critical-rules',
       ),
     );
@@ -41,6 +42,13 @@ describe('components: ordering', () => {
     // every project just to print nothing.
     expect(COMPONENT_NAMES).toContain('time-check');
     expect(DEPENDENCY_ORDER).not.toContain('time-check');
+  });
+
+  test('usage-check is opt-in only — its hooks fire on every prompt AND batch', () => {
+    // Same reasoning as time-check, doubled: it also runs after every tool
+    // batch, so it must never be installed implicitly (home-base-1r6d.1).
+    expect(COMPONENT_NAMES).toContain('usage-check');
+    expect(DEPENDENCY_ORDER).not.toContain('usage-check');
   });
 
   test('critical-rules is opt-in only — it commits rules into the repo', () => {
