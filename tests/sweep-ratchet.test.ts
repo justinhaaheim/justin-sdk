@@ -912,10 +912,10 @@ describe('preflight removes a provably-empty leftover (F5)', () => {
 
   test('a leftover is cleaned even in a repo NOT enrolled in this payload', async () => {
     // The leftover is the sweep's own litter at a fixed path, so it blocks
-    // every future sweep of that repo whatever the payload. Measured
-    // 2026-09-04: two of the seven stranded worktrees (imessage-exporter,
-    // ynab-mcp-deluxe) are in repos not enrolled in critical-rules, i.e. the
-    // exact repos an enrollment-first order would never clear.
+    // every future sweep of that repo whatever the payload — while enrollment
+    // only says whether the PAYLOAD applies. A repo that is out of scope for
+    // this component would otherwise keep its stranded worktree until some
+    // future run happened to carry a payload it is enrolled in.
     const sb = track(createSandbox());
     const repo = e2eRepo(sb, 'leftover-unenrolled');
     write(
@@ -941,6 +941,38 @@ describe('preflight removes a provably-empty leftover (F5)', () => {
     expect(out).toContain('auto-removed a leftover from an earlier run');
     expect(out).toContain('not enrolled in gitignore');
     expectNoSweepRemains(repo);
+  });
+
+  test('an UNSAFE leftover in a not-enrolled repo is reported, but does not fail the run', async () => {
+    // The mirror of the case above: this run had no business sweeping the repo,
+    // so a leftover it may not delete is news, not a failure. In an ENROLLED
+    // repo the same leftover is a "could not sweep" (see the F4 test).
+    const sb = track(createSandbox());
+    const repo = e2eRepo(sb, 'unenrolled-with-work');
+    write(
+      repo,
+      'justin-sdk.config.json',
+      JSON.stringify({components: ['base-setup']}, null, 2) + '\n',
+    );
+    git(repo, ['add', '-A']);
+    git(repo, ['commit', '-qm', 'drop the component']);
+    const worktree = join(repo, ...SWEEP_WORKTREE_SEGMENTS);
+    mkdirSync(join(repo, '.claude', 'worktrees'), {recursive: true});
+    git(repo, ['worktree', 'add', '-q', '-b', SWEEP_BRANCH, worktree, 'main']);
+    writeFileSync(join(worktree, 'a.txt'), 'unfinished work\n');
+
+    const {out, value} = await captureLog(() =>
+      runSweep({
+        component: 'gitignore',
+        logDir: join(sb.path, 'logs'),
+        repos: [repo],
+      }),
+    );
+
+    expect(value).toBe(0);
+    expect(out).toContain('a leftover was left alone');
+    expect(out).not.toContain('COULD NOT SWEEP');
+    expect(existsSync(worktree)).toBe(true);
   });
 
   test('--dry-run says it WOULD remove one, and removes nothing', async () => {

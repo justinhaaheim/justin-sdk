@@ -1863,14 +1863,29 @@ async function sweepOneRepo(
       'no default branch (origin/HEAD, main, master all unresolvable)',
     );
   }
+  // Enrollment (component mode only) — decided from the config as COMMITTED on
+  // the branch the sweep will branch from, before anything is created. A repo
+  // that does not register the component is out of scope for this run: a
+  // visible skip, never a silent one and never a failure.
+  //
+  // DECIDED here but ACTED ON below the leftover block, because the two answer
+  // different questions: enrollment says whether the PAYLOAD applies to this
+  // repo, while a leftover is the SWEEP's own litter — a fixed-name worktree at
+  // a fixed path that blocks every future sweep of the repo whatever the
+  // payload. Tidying that is not payload-scoped, so it happens either way.
+  let enrolled = true;
+  if (context.payload.mode === 'component') {
+    const {component} = context.payload;
+    const declared = committedConfigComponents(repo, defaultBranch);
+    if (!declared.ok) {
+      // NOT a benign skip: "I could not read the enrollment" is a repo this run
+      // failed to sweep, and it has to be counted as one (ckc4 F4).
+      return blocked(`cannot read enrollment: ${declared.reason}`);
+    }
+    enrolled = isEnrolledIn(declared.components, component);
+  }
+
   // --- Leftovers from an earlier run (ckc4 F5) -----------------------------
-  // BEFORE the enrollment check, deliberately: the leftover is the SWEEP's own
-  // litter — a fixed-name worktree at a fixed path, which blocks every future
-  // sweep of that repo whatever the payload — so tidying it is not payload
-  // scoped. Measured 2026-09-04: two of the seven stranded worktrees on this
-  // machine (imessage-exporter, ynab-mcp-deluxe) are in repos NOT enrolled in
-  // critical-rules, so an enrollment-first order would leave exactly those two
-  // stranded forever, by the run meant to clear them.
   const leftover = assessSweepLeftover(
     repo,
     worktreePath,
@@ -1880,7 +1895,17 @@ async function sweepOneRepo(
   );
   if (leftover.present) {
     if (!leftover.safe) {
-      return blocked(`leftover from an earlier run — ${leftover.reason}`);
+      // A leftover holding real work is a repo that CANNOT be swept — but only
+      // if this run was going to sweep it. In a repo the payload does not apply
+      // to, the same leftover is reported on the skip line instead of failing a
+      // run that had no business touching that repo.
+      return enrolled
+        ? blocked(`leftover from an earlier run — ${leftover.reason}`)
+        : {
+            detail: `skipped — not enrolled, and a leftover was left alone: ${leftover.reason}`,
+            outcome: 'skipped',
+            repo: name,
+          };
     }
     if (context.dryRun) {
       say(`  ${YELLOW}⚠${RESET} would auto-remove a leftover — ${leftover.reason}`);
@@ -1901,25 +1926,14 @@ async function sweepOneRepo(
     }
   }
 
-  // Enrollment (component mode only) — decided from the config as COMMITTED on
-  // the branch the sweep will branch from, before anything is created. A repo
-  // that does not register the component is out of scope for this run: a
-  // visible skip, never a silent one and never a failure.
-  if (context.payload.mode === 'component') {
-    const {component} = context.payload;
-    const declared = committedConfigComponents(repo, defaultBranch);
-    if (!declared.ok) {
-      // NOT a benign skip: "I could not read the enrollment" is a repo this run
-      // failed to sweep, and it has to be counted as one (ckc4 F4).
-      return blocked(`cannot read enrollment: ${declared.reason}`);
-    }
-    if (!isEnrolledIn(declared.components, component)) {
-      return {
-        detail: `skipped — not enrolled in ${component}`,
-        outcome: 'skipped',
-        repo: name,
-      };
-    }
+  if (!enrolled) {
+    return {
+      detail: `skipped — not enrolled in ${
+        context.payload.mode === 'component' ? context.payload.component : ''
+      }`,
+      outcome: 'skipped',
+      repo: name,
+    };
   }
 
   if (context.dryRun) {
