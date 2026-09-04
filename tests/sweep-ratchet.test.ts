@@ -659,6 +659,35 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
     expect(written).toContain('fixture signal: payload applied = true');
   });
 
+  test('a commit failure is cleaned up too, with git own error in the log', async () => {
+    // The one red step --no-verify cannot mask: git refuses an empty ident. It
+    // is also the step furthest down the pipeline, so reaching it proves the
+    // cleanup runs from the very end of the per-repo run, not just from the
+    // early failures.
+    const sb = track(createSandbox());
+    const repo = e2eRepo(sb, 'uncommittable');
+    git(repo, ['config', 'user.name', '']);
+    git(repo, ['config', 'user.email', '']);
+
+    const {out, value} = await captureLog(() =>
+      runSweep({
+        component: 'gitignore',
+        logDir: join(sb.path, 'logs'),
+        repos: [repo],
+      }),
+    );
+
+    expect(value).toBe(1);
+    expect(out).toContain('commit failed');
+    expectNoSweepRemains(repo);
+
+    const logPath = out.match(/failure log: (\S+\.log)/)?.[1];
+    const written = readFileSync(logPath as string, 'utf-8');
+    expect(written).toContain('uncommittable · step: commit');
+    // The raw command output, not just our own summary of it.
+    expect(written).toContain('empty ident name');
+  });
+
   test('a green run writes no log file at all', async () => {
     const sb = track(createSandbox());
     const repo = e2eRepo(sb, 'green');

@@ -1873,7 +1873,8 @@ async function sweepOneRepo(
   // repo, while a leftover is the SWEEP's own litter — a fixed-name worktree at
   // a fixed path that blocks every future sweep of the repo whatever the
   // payload. Tidying that is not payload-scoped, so it happens either way.
-  let enrolled = true;
+  /** Non-null = this repo is out of scope, and this is the line that says so. */
+  let notEnrolled: string | null = null;
   if (context.payload.mode === 'component') {
     const {component} = context.payload;
     const declared = committedConfigComponents(repo, defaultBranch);
@@ -1882,7 +1883,9 @@ async function sweepOneRepo(
       // failed to sweep, and it has to be counted as one (ckc4 F4).
       return blocked(`cannot read enrollment: ${declared.reason}`);
     }
-    enrolled = isEnrolledIn(declared.components, component);
+    if (!isEnrolledIn(declared.components, component)) {
+      notEnrolled = `skipped — not enrolled in ${component}`;
+    }
   }
 
   // --- Leftovers from an earlier run (ckc4 F5) -----------------------------
@@ -1899,10 +1902,10 @@ async function sweepOneRepo(
       // if this run was going to sweep it. In a repo the payload does not apply
       // to, the same leftover is reported on the skip line instead of failing a
       // run that had no business touching that repo.
-      return enrolled
+      return notEnrolled == null
         ? blocked(`leftover from an earlier run — ${leftover.reason}`)
         : {
-            detail: `skipped — not enrolled, and a leftover was left alone: ${leftover.reason}`,
+            detail: `${notEnrolled}, and a leftover was left alone: ${leftover.reason}`,
             outcome: 'skipped',
             repo: name,
           };
@@ -1926,14 +1929,8 @@ async function sweepOneRepo(
     }
   }
 
-  if (!enrolled) {
-    return {
-      detail: `skipped — not enrolled in ${
-        context.payload.mode === 'component' ? context.payload.component : ''
-      }`,
-      outcome: 'skipped',
-      repo: name,
-    };
+  if (notEnrolled != null) {
+    return {detail: notEnrolled, outcome: 'skipped', repo: name};
   }
 
   if (context.dryRun) {
