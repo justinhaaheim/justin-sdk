@@ -10,7 +10,7 @@ Validation bar here is `tsc --noEmit` + `bun test` — this repo has no ESLint c
 - **`check-runner`** is an importable module (`@justinhaaheim/justin-sdk/check-runner`), not a copied file. Checks support `severity: 'warn'` (non-blocking) vs `'error'`, and accept shell commands or TypeScript functions.
 - **`signal` and `doctor` discover their work from the consumer's package.json** — `signal-source:LABEL` and `fix-source:LABEL` scripts. That keeps per-project variation in the project, not in a forked script.
 - **`doctor` fixes scaffolding** (configs, deps); **`fix` fixes code** (eslint --fix, prettier --write). Keep them distinct — formatting is never auto-run at session start.
-- **`sweep`** propagates a component across all enrolled repos, each in its own temp worktree with gates and a push.
+- **`sweep`** propagates a component across all enrolled repos, each in its own temp worktree with gates and a push. Its doctor/signal gates are a **ratchet**: each is measured before AND after the payload, and only green→red fails (home-base-ckc4). A red step removes its worktree and writes the evidence to `~/Dev/home-base/tmp/sdk-sweep/<run>.log`.
 
 ## Design principles
 
@@ -27,4 +27,6 @@ Validation bar here is `tsc --noEmit` + `bun test` — this repo has no ESLint c
 - **A release is four things: version + tag + push + consumer pin bump.** Bumping a git-dep's version without pushing a tag changes nothing for consumers pinned to tags.
 - **Prefer `v`-prefixed tags.** With both `0.14.0` and `v0.14.0` present, `pickLatestTag` breaks the tie by gh API ordering — which tree you get is nondeterministic.
 - **`bun test <path>` is a cwd-relative filter, not a path.** Run from the wrong directory it silently matches a different checkout's copy of the tests. Verify cwd before trusting a green run.
+- **`bun install` runs NONE of the root package.json lifecycle scripts** — `preinstall`, `install`, `postinstall` and `prepare` are all skipped (measured, bun 1.4.0; npm DOES run them). So a repo that generates files from `postinstall` gets nothing from `setup-env`'s INSTALL step, and its fresh worktrees are missing those files. Hydration has to go through a `setup-env-source:<LABEL>` script or `.worktreeinclude`.
+- **`bunx <pkg>` only resolves a local `node_modules/.bin` entry whose target is EXECUTABLE.** Without the exec bit it silently falls through to the registry — in a test fixture that turns a hermetic run into a network fetch whose 404 becomes the "measured" exit code.
 - **Installers chain `base-setup`, which stamps the running SDK's version** — any in-process component run needs a pin-neutrality snapshot/restore guard so it doesn't bump pins as a side effect.
