@@ -633,7 +633,7 @@ void yargs(hideBin(process.argv))
   )
   .command(
     'sweep',
-    'Fleet propagation: for every repo under --root with a justin-sdk.config.json, update the SDK in a fresh worktree (j update), gate on the repo’s own signal + doctor, then merge --ff-only into the default branch and push. Green = fully automatic; red = worktree left standing + non-zero exit. Deterministic by contract (home-base-j2n7): failures get fixed in the SDK, never papered over here.',
+    'Fleet propagation: for every repo under --root with a justin-sdk.config.json, update the SDK in a fresh worktree (j update), gate on the repo’s own signal + doctor AS A RATCHET (each measured before and after the payload — only green→red fails, a repo that was already red proceeds with a loud note), then merge --ff-only into the default branch and push. Green = fully automatic; red = worktree AND branch removed, the failing step + output tail written to ~/Dev/home-base/tmp/sdk-sweep/<run>.log, non-zero exit. Repos that could not be swept at all are counted and named last, and also exit non-zero. Deterministic by contract (home-base-j2n7): failures get fixed in the SDK, never papered over here.',
     (y) =>
       y
         .option('dry-run', {

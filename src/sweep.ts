@@ -3,11 +3,32 @@
  * (home-base-j2n7, decisions of 2026-08-08).
  *
  * WHAT IT DOES, per enrolled repo: fresh worktree off the local default
- * branch → hydrate → `justin-sdk update` (self-update the pin + re-apply components)
- * → prettier-normalize the SDK-written JSON → gate on the repo's own signal
- * + doctor → commit → merge --ff-only into the default branch → push →
- * clean up. Anything red: STOP that repo, leave the worktree standing for
- * inspection, keep going with the rest, and exit non-zero.
+ * branch → hydrate → measure the BASELINE doctor/signal → `justin-sdk update`
+ * (self-update the pin + re-apply components) → prettier-normalize the
+ * SDK-written JSON → gate on the repo's own signal + doctor AS A RATCHET
+ * (regression, not absolute health) → commit → merge --ff-only into the
+ * default branch → push → clean up. Anything red: STOP that repo, remove its
+ * worktree, write the failing step + output tail to the run log, keep going
+ * with the rest, and exit non-zero.
+ *
+ * THE RATCHET GATE (home-base-ckc4 F3) — the gate measures REGRESSION, not
+ * health. Measured 2026-09-04: five of six sweep failures were repos that were
+ * never green to begin with (pre-existing red on main, or a fresh worktree
+ * missing gitignored generated files), so an absolute-health gate reports
+ * "the payload broke it" about trees the payload never touched. So each gate is
+ * run twice — once on the hydrated tree before the payload, once after — and
+ * only green→red fails. red→red proceeds with a loud per-repo note that says
+ * the gate was BLIND there. Exit codes only: `signal` is repo-defined, so its
+ * output is not a uniform interface. Stated limitation: a baseline-red repo
+ * gets no payload-breakage protection at all.
+ *
+ * FAILURE IS NOT INSPECTABLE IN PLACE ANY MORE (ckc4 F2). Leaving the worktree
+ * standing sounded helpful and was not: the name is fixed, so one red repo
+ * blocked every later sweep of it (seven such leftovers accumulated by
+ * 2026-09-04). Every failure now removes the worktree AND the branch, and the
+ * evidence goes to a durable per-run log instead — failing step, exit code, and
+ * the last 60 lines of its stdout+stderr. The two deliberate `merge-pending`
+ * returns are the only paths that keep a worktree, and they say so.
  *
  * THE RATCHET CONTRACT (Justin, verbatim-adjacent: "the more deterministic
  * we can make this, the better"): this script stays DUMB. It never grows
@@ -62,7 +83,13 @@
  */
 
 import {execFileSync, spawnSync} from 'node:child_process';
-import {existsSync, readFileSync, readdirSync} from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+} from 'node:fs';
 import {homedir} from 'node:os';
 import {basename, join, relative, resolve} from 'node:path';
 
@@ -111,8 +138,9 @@ export type RepoOutcome =
   | 'clean' // updated, gated green, merged, pushed
   | 'current' // nothing to do — already at the latest state
   | 'merge-pending' // green + committed, but the merge/push could not complete safely
-  | 'failed' // a step went red; worktree left standing
-  | 'skipped'; // preflight said don't touch this one
+  | 'failed' // a step went red; worktree removed, evidence in the run log
+  | 'blocked' // COULD NOT sweep — preflight refused (ckc4 F4). Fails the run.
+  | 'skipped'; // out of scope for this payload (not enrolled). Expected, not a failure.
 
 export interface RepoResult {
   repo: string;
@@ -144,16 +172,284 @@ function gitOk(repo: string, argv: string[]): boolean {
   return git(repo, argv) != null;
 }
 
-/** Run a command with output passed through (for update/signal/doctor). */
+/**
+ * Run a command, CAPTURING its output and echoing it afterwards
+ * (for update/signal/doctor).
+ *
+ * WHY CAPTURE RATHER THAN `stdio: 'inherit'` (ckc4 F2): a failure now removes
+ * its worktree, so the output IS the evidence — it has to reach the run log,
+ * and an inherited stream is unreadable to this process. The trade-off, stated
+ * rather than hidden: output appears per STEP (when the child exits) instead of
+ * live, so the `$ <command>` line printed before each step is what tells an
+ * operator which long-running thing is currently running. stdout and stderr are
+ * concatenated in that order, so their relative interleaving is lost.
+ *
+ * stdin is `ignore`, matching setup-env's runChild: a fleet tool must never
+ * block on a child that decided to prompt.
+ */
 function run(
   argv: string[],
   cwd: string,
-): {exitCode: number; error: string | null} {
+): {exitCode: number; error: string | null; output: string} {
   const [cmd, ...args] = argv;
-  if (cmd == null) return {exitCode: 1, error: 'empty command'};
-  const child = spawnSync(cmd, args, {cwd, env: process.env, stdio: 'inherit'});
-  if (child.error) return {exitCode: 1, error: child.error.message};
-  return {exitCode: child.status ?? 1, error: null};
+  if (cmd == null) return {error: 'empty command', exitCode: 1, output: ''};
+  say(`  ${DIM}$ ${argv.join(' ')}${RESET}`);
+  const child = spawnSync(cmd, args, {
+    cwd,
+    encoding: 'utf-8',
+    env: process.env,
+    // A full `bun install` + signal run can be large; the Node default (1MB)
+    // would truncate exactly the tail the log needs.
+    maxBuffer: 64 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const output = `${child.stdout ?? ''}${child.stderr ?? ''}`;
+  const trimmed = output.replace(/\n+$/, '');
+  if (trimmed !== '') say(trimmed);
+  if (child.error) return {error: child.error.message, exitCode: 1, output};
+  return {error: null, exitCode: child.status ?? 1, output};
+}
+
+// ---------------------------------------------------------------------------
+// The run log — where a failure's evidence goes now that the worktree is
+// removed (home-base-ckc4 F2)
+// ---------------------------------------------------------------------------
+
+/** How many lines of a failed step's output reach the log and the screen. */
+export const FAILURE_TAIL_LINES = 60;
+
+/** The last `limit` lines of `text`, trailing blank lines dropped. Pure. */
+export function tailLines(text: string, limit = FAILURE_TAIL_LINES): string {
+  const lines = text.replace(/\n+$/, '').split('\n');
+  return lines.slice(Math.max(0, lines.length - limit)).join('\n');
+}
+
+/**
+ * One log file per run, under home-base's gitignored `tmp/`. Not the SDK's own
+ * directory and not the swept repos': the sweep is run from home-base, the file
+ * has to survive the worktree it describes, and `tmp/` is the documented home
+ * for disposable output.
+ */
+export const SWEEP_LOG_DIR = join(
+  homedir(),
+  'Dev',
+  'home-base',
+  'tmp',
+  'sdk-sweep',
+);
+
+export interface SweepRunLog {
+  /** Where the failures WOULD be written — printed at the top of every run. */
+  readonly path: string;
+  /** Has anything actually been written? (An empty run writes no file.) */
+  wrote: () => boolean;
+  record: (entry: {
+    repo: string;
+    step: string;
+    detail: string;
+    /** null = this step reports steps rather than raw command output. */
+    output: string | null;
+  }) => void;
+}
+
+/**
+ * Lazily-created: the path is decided (and printed) up front, but nothing is
+ * written until something fails, so a clean run leaves no litter behind.
+ *
+ * A log-write failure is REPORTED and never swallowed — but it also never
+ * changes a repo's verdict. Losing the evidence of a failure is bad; turning a
+ * green repo red because a directory was unwritable would be worse.
+ */
+export function createRunLog(
+  dir: string = SWEEP_LOG_DIR,
+  now: Date = new Date(),
+): SweepRunLog {
+  // Colons are legal on macOS but hostile in shell arguments and Finder.
+  const stamp = now.toISOString().replace(/:/g, '-');
+  const path = join(dir, `${stamp}.log`);
+  let written = false;
+  return {
+    path,
+    record: ({detail, output, repo, step}) => {
+      const body = [
+        '',
+        '─'.repeat(72),
+        `${repo} · step: ${step}`,
+        detail,
+        output == null
+          ? '(this step reports steps, not raw command output — see the detail above)'
+          : `--- last ${FAILURE_TAIL_LINES} lines of stdout+stderr ---\n${tailLines(output)}`,
+        '',
+      ].join('\n');
+      try {
+        mkdirSync(dir, {recursive: true});
+        appendFileSync(
+          path,
+          written
+            ? body
+            : `justin-sdk sweep — failure log for the run started ${now.toISOString()}\n${body}`,
+        );
+        written = true;
+      } catch (error) {
+        say(
+          `  ${RED}✗${RESET} could not write the failure log at ${path}: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    },
+    wrote: () => written,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Worktree plumbing — creation, recovery, removal (home-base-ckc4 F1/F2/F5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Neutralize the repo's hooks for ONE git invocation (ckc4 F1).
+ *
+ * MEASURED, on ynab-mcp-deluxe and reproduced in a fixture: `git worktree add`
+ * runs the repo's `post-checkout` hook in the new tree and PROPAGATES its exit
+ * code, while keeping the worktree it just created and registered. husky's hook
+ * shells out to mise, mise refuses a mise.toml at an untrusted path, and the
+ * sweep read the resulting exit 1 as "worktree add failed" — then left the
+ * successfully-created worktree standing, which blocked every later sweep of
+ * that repo.
+ *
+ * Disabling hooks is the right call on its own terms, not just as a workaround:
+ * the hook's job (submodules, install, version stamps) is exactly what the
+ * hydration step immediately does deliberately, so running it here is at best a
+ * duplicate and at worst — as here — a foreign failure attributed to the sweep.
+ *
+ * `-c` is per-invocation: verified that the created worktree still resolves the
+ * repo's real `core.hooksPath` afterwards.
+ */
+const HOOKS_OFF = ['-c', 'core.hooksPath=/dev/null'] as const;
+
+/** The `worktree <path>` lines of `git worktree list --porcelain`. Pure. */
+export function parseWorktreePaths(porcelain: string): string[] {
+  const paths: string[] = [];
+  for (const line of porcelain.split('\n')) {
+    if (line.startsWith('worktree ')) paths.push(line.slice('worktree '.length));
+  }
+  return paths;
+}
+
+/**
+ * Is `path` registered as a worktree of `repo`? Registration is what blocks a
+ * later `worktree add`, and it outlives the DIRECTORY — a hand-deleted worktree
+ * is still registered (git calls it prunable) — so this is asked separately
+ * from `existsSync`.
+ */
+export function isWorktreeRegistered(repo: string, path: string): boolean {
+  const porcelain = git(repo, ['worktree', 'list', '--porcelain']);
+  if (porcelain == null) return false;
+  const wanted = resolve(path);
+  return parseWorktreePaths(porcelain).some(
+    (entry) => resolve(entry) === wanted,
+  );
+}
+
+export interface CleanupResult {
+  ok: boolean;
+  /** What was removed, or exactly what survived. Never "probably gone". */
+  detail: string;
+}
+
+/**
+ * Remove the sweep's worktree AND its branch, and VERIFY both are gone.
+ *
+ * The single removal path for all four callers — a failed `worktree add`, any
+ * red step, a preflight leftover, and the green finish — so "cleaned up" means
+ * the same thing everywhere.
+ *
+ * Verified rather than assumed (rule 6): `worktree remove` can fail, and a
+ * cleanup that reports success while leaving a registered worktree behind
+ * recreates the exact bug this fixes. `prune` covers the case where the
+ * directory is already gone but the registration is not.
+ */
+export function cleanupWorktreeAndBranch(
+  repo: string,
+  worktreePath: string,
+  branch: string,
+): CleanupResult {
+  if (existsSync(worktreePath) || isWorktreeRegistered(repo, worktreePath)) {
+    run(['git', '-C', repo, 'worktree', 'remove', '--force', worktreePath], repo);
+    run(['git', '-C', repo, 'worktree', 'prune'], repo);
+  }
+  const branchRef = `refs/heads/${branch}`;
+  if (gitOk(repo, ['rev-parse', '--verify', '--quiet', branchRef])) {
+    run(['git', '-C', repo, 'branch', '-D', branch], repo);
+  }
+
+  const survivors: string[] = [];
+  if (existsSync(worktreePath)) survivors.push(`directory ${worktreePath}`);
+  if (isWorktreeRegistered(repo, worktreePath)) {
+    survivors.push(`worktree registration for ${worktreePath}`);
+  }
+  if (gitOk(repo, ['rev-parse', '--verify', '--quiet', branchRef])) {
+    survivors.push(`branch ${branch}`);
+  }
+  return survivors.length === 0
+    ? {detail: `removed worktree ${worktreePath} and branch ${branch}`, ok: true}
+    : {
+        detail: `cleanup INCOMPLETE — still present: ${survivors.join('; ')}`,
+        ok: false,
+      };
+}
+
+export interface WorktreeAddResult {
+  ok: boolean;
+  detail: string;
+  /** The add's own output, for the run log. */
+  output: string;
+}
+
+/**
+ * Create the sweep worktree with the repo's hooks disabled (ckc4 F1), and never
+ * trust the exit code alone about what exists afterwards.
+ *
+ * A non-zero add that nonetheless registered the worktree is the exact shape of
+ * the ynab-mcp-deluxe bug, so the failure path re-checks and cleans up. With
+ * `HOOKS_OFF` that shape should now be unreachable — it is kept because "the
+ * add failed" and "nothing was created" are different facts, and assuming the
+ * second from the first is what stranded seven worktrees.
+ */
+export function addSweepWorktree(
+  repo: string,
+  worktreePath: string,
+  branch: string,
+  baseSha: string,
+): WorktreeAddResult {
+  const add = run(
+    [
+      'git',
+      '-C',
+      repo,
+      ...HOOKS_OFF,
+      'worktree',
+      'add',
+      '-b',
+      branch,
+      worktreePath,
+      baseSha,
+    ],
+    repo,
+  );
+  if (add.exitCode === 0) {
+    return {detail: `worktree added at ${worktreePath}`, ok: true, output: add.output};
+  }
+  const salvage = cleanupWorktreeAndBranch(repo, worktreePath, branch);
+  return {
+    detail:
+      `git worktree add failed (exit ${add.exitCode}) — ${
+        salvage.ok
+          ? 'nothing left behind'
+          : `and ${salvage.detail.toLowerCase()}`
+      }`,
+    ok: false,
+    output: add.output,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -380,13 +676,175 @@ export function partitionByComponentContract(
   }
   const contract = componentContractPaths(payload.component);
   if (contract == null) return {inScope: [...changedFiles], outOfScope: []};
-  const owned = (file: string): boolean =>
-    contract.some((entry) =>
-      entry.endsWith('/') ? file.startsWith(entry) : file === entry,
-    );
+  const owned = (file: string): boolean => matchesContract(contract, file);
   return {
     inScope: changedFiles.filter(owned),
     outOfScope: changedFiles.filter((file) => !owned(file)),
+  };
+}
+
+/**
+ * Does `file` fall inside `contract`? An entry ending in `/` is a directory
+ * prefix, anything else is an exact path.
+ *
+ * Shared by the commit's scope filter and the preflight leftover check (ckc4
+ * F5) on purpose: "paths this component owns" must mean the same thing when
+ * deciding what may be committed and when deciding what may be deleted.
+ * Pure.
+ */
+export function matchesContract(
+  contract: readonly string[],
+  file: string,
+): boolean {
+  return contract.some((entry) =>
+    entry.endsWith('/') ? file.startsWith(entry) : file === entry,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Preflight: leftovers from an earlier run (home-base-ckc4 F5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Uncommitted paths a leftover worktree may carry and still be provably empty.
+ *
+ * In component mode that is the component's own contract — the sweep
+ * REGENERATES exactly those files, so a modified one carries no information
+ * that the next run will not reproduce. Anything else (including every full
+ * sweep, whose payload has no enumerated contract) allows nothing: only a
+ * pristine worktree is provably empty. Pure.
+ */
+export function allowedLeftoverPaths(payload: SweepPayload): readonly string[] {
+  if (payload.mode !== 'component') return [];
+  return componentContractPaths(payload.component) ?? [];
+}
+
+export type LeftoverAssessment =
+  | {present: false}
+  | {present: true; safe: boolean; reason: string};
+
+/**
+ * May the sweep delete the leftover worktree/branch it found, or must it refuse
+ * to sweep this repo? (ckc4 F5.)
+ *
+ * WHY AUTO-CLEAN AT ALL: the worktree name is FIXED, so one leftover blocks
+ * every future sweep of that repo permanently, and the seven that had
+ * accumulated by 2026-09-04 all held nothing — zero commits, and at most a
+ * regenerable rules file. "Resolve it by hand, then re-sweep" is a chore that
+ * nobody does, which is how a propagation tool silently stops propagating.
+ *
+ * SAFE means PROVABLY EMPTY, and every leg is measured:
+ *   - no commits beyond the default branch, on the branch AND in the worktree;
+ *   - uncommitted changes confined to paths this payload regenerates;
+ *   - the directory, if present, is really a registered worktree of this repo.
+ * Anything unmeasurable — an unreadable status, an uncountable rev-list — is
+ * UNSAFE, never "nothing found" (rule 6): the reassuring direction here deletes
+ * someone's work.
+ */
+export function assessSweepLeftover(
+  repo: string,
+  worktreePath: string,
+  branch: string,
+  defaultBranch: string,
+  allowedPaths: readonly string[],
+): LeftoverAssessment {
+  const directory = existsSync(worktreePath);
+  const registered = isWorktreeRegistered(repo, worktreePath);
+  const branchRef = `refs/heads/${branch}`;
+  const branchExists = gitOk(repo, [
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    branchRef,
+  ]);
+  if (!directory && !registered && !branchExists) return {present: false};
+
+  const found = [
+    directory ? 'worktree directory' : null,
+    registered && !directory ? 'worktree registration (directory already gone)' : null,
+    branchExists ? `branch ${branch}` : null,
+  ]
+    .filter((entry): entry is string => entry != null)
+    .join(' + ');
+
+  if (directory && !registered) {
+    return {
+      present: true,
+      reason: `${found}: a directory sits at ${worktreePath} that git does not know as a worktree of this repo — not the sweep's to delete`,
+      safe: false,
+    };
+  }
+
+  const commitsBeyond = (from: string, ref: string): number | null => {
+    const out = git(from, ['rev-list', '--count', `${defaultBranch}..${ref}`]);
+    if (out == null) return null;
+    const count = Number(out.trim());
+    // Number('') is 0 — the empty-string-reads-as-zero conflation.
+    return out.trim() === '' || !Number.isInteger(count) ? null : count;
+  };
+
+  if (branchExists) {
+    const ahead = commitsBeyond(repo, branch);
+    if (ahead == null) {
+      return {
+        present: true,
+        reason: `${found}: could not count ${branch}'s commits beyond ${defaultBranch} — refusing to delete what cannot be measured`,
+        safe: false,
+      };
+    }
+    if (ahead > 0) {
+      return {
+        present: true,
+        reason: `${found}: ${branch} has ${ahead} commit(s) beyond ${defaultBranch} — real work, kept`,
+        safe: false,
+      };
+    }
+  }
+
+  if (directory) {
+    const ahead = commitsBeyond(worktreePath, 'HEAD');
+    if (ahead == null) {
+      return {
+        present: true,
+        reason: `${found}: could not count the worktree's commits beyond ${defaultBranch} — refusing to delete what cannot be measured`,
+        safe: false,
+      };
+    }
+    if (ahead > 0) {
+      return {
+        present: true,
+        reason: `${found}: the worktree's HEAD is ${ahead} commit(s) beyond ${defaultBranch} — real work, kept`,
+        safe: false,
+      };
+    }
+    const porcelain = git(worktreePath, ['status', '--porcelain']);
+    if (porcelain == null) {
+      return {
+        present: true,
+        reason: `${found}: could not read the worktree's git status — refusing to delete what cannot be measured`,
+        safe: false,
+      };
+    }
+    const offenders = parsePorcelainPaths(porcelain).filter(
+      (file) => !matchesContract(allowedPaths, file),
+    );
+    if (offenders.length > 0) {
+      return {
+        present: true,
+        reason: `${found}: uncommitted change(s) outside what this run regenerates: ${offenders.join(', ')} — kept`,
+        safe: false,
+      };
+    }
+  }
+
+  return {
+    present: true,
+    reason:
+      `${found}: 0 commits beyond ${defaultBranch}` +
+      (directory
+        ? `, and no uncommitted changes outside ${allowedPaths.length === 0 ? 'nothing (a full sweep regenerates no enumerated paths)' : allowedPaths.join(', ')}`
+        : ''),
+    safe: true,
   };
 }
 
@@ -1214,12 +1672,91 @@ function runSweepUpdate(worktree: string): PayloadOutcome {
 }
 
 // ---------------------------------------------------------------------------
+// The ratchet gate — regression, not absolute health (home-base-ckc4 F3)
+// ---------------------------------------------------------------------------
+
+export type GateVerdict =
+  | {kind: 'proceed'; note: string}
+  /** Red before AND after: proceed, but say out loud that the gate saw nothing. */
+  | {kind: 'blind'; note: string}
+  | {kind: 'fail'; reason: string};
+
+/**
+ * What a gate's before/after exit codes mean.
+ *
+ *   green → green   proceed (the ordinary case)
+ *   red   → red     proceed, BLIND: the tree was already broken, so this gate
+ *                   proves nothing about the payload either way
+ *   green → red     FAIL — the payload did it
+ *   red   → green   proceed (the payload improved the tree)
+ *
+ * EXIT CODES ONLY. `signal` is defined by each repo's own package.json, so its
+ * output has no uniform structure to diff; two different reds compare equal
+ * here, and that limitation is the price of not growing per-repo intelligence
+ * (the ratchet contract). What it buys: five of the six 2026-09-04 failures,
+ * none of which the payload caused, stop being reported as payload failures.
+ *
+ * An UNMEASURABLE baseline is never treated as green — a red-after would then
+ * be blamed on the payload without evidence — but it is also never treated as
+ * red, which would silently disable the gate. It is its own verdict: fail, and
+ * say why. Pure.
+ */
+export function ratchetVerdict(
+  gate: string,
+  baseline: number | null,
+  after: number,
+): GateVerdict {
+  if (after === 0) {
+    return baseline === 0 || baseline == null
+      ? {kind: 'proceed', note: ''}
+      : {
+          kind: 'proceed',
+          note: `${gate} was red before the update (exit ${baseline}) and is green after`,
+        };
+  }
+  if (baseline == null) {
+    return {
+      kind: 'fail',
+      reason: `${gate} red after the update (exit ${after}) and its BASELINE could not be measured — the red cannot be attributed to the tree, so it is attributed to the payload`,
+    };
+  }
+  if (baseline === 0) {
+    return {
+      kind: 'fail',
+      reason: `${gate} was GREEN before the update and is red after (exit ${after}) — the payload broke it`,
+    };
+  }
+  return {
+    kind: 'blind',
+    note: `${gate} already red before the update (exit ${baseline}, still ${after} after) — PRE-EXISTING, gate blind here`,
+  };
+}
+
+/**
+ * A baseline measurement: the exit code, or `null` when the command could not
+ * be run at all. The two are different facts and the verdict table treats them
+ * differently, so they must not collapse into one number.
+ */
+export function measureBaseline(
+  argv: string[],
+  cwd: string,
+): {exitCode: number | null; output: string} {
+  const result = run(argv, cwd);
+  return {
+    exitCode: result.error == null ? result.exitCode : null,
+    output: result.output,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // The per-repo pipeline
 // ---------------------------------------------------------------------------
 
 interface SweepContext {
   dryRun: boolean;
   payload: SweepPayload;
+  /** Where a red step's evidence goes now that the worktree does not survive. */
+  log: SweepRunLog;
 }
 
 /**
@@ -1248,9 +1785,45 @@ async function sweepOneRepo(
   context: SweepContext,
 ): Promise<RepoResult> {
   const name = basename(repo);
-  const fail = (detail: string): RepoResult => ({
+  const worktreePath = join(repo, ...SWEEP_WORKTREE_SEGMENTS);
+  let worktreeCreated = false;
+
+  /**
+   * A red step (ckc4 F2): write the evidence to the run log, remove the
+   * worktree and branch, and report where to look. The cleanup runs for EVERY
+   * failure after the worktree exists — the old "left standing for inspection"
+   * behaviour is what stranded seven worktrees, each of which then blocked
+   * every later sweep of its repo.
+   */
+  const fail = (
+    step: string,
+    detail: string,
+    output: string | null,
+  ): RepoResult => {
+    context.log.record({detail, output, repo: name, step});
+    if (output != null && output.trim() !== '') {
+      say(`  ${RED}✗${RESET} ${step} — last ${FAILURE_TAIL_LINES} lines:`);
+      say(tailLines(output));
+    }
+    let cleanupNote = '';
+    if (worktreeCreated) {
+      const cleaned = cleanupWorktreeAndBranch(repo, worktreePath, SWEEP_BRANCH);
+      cleanupNote = cleaned.ok
+        ? ' [worktree removed]'
+        : ` [${cleaned.detail}]`;
+      if (!cleaned.ok) say(`  ${RED}✗${RESET} ${cleaned.detail}`);
+    }
+    return {
+      detail: `${detail}${cleanupNote} — see ${context.log.path}`,
+      outcome: 'failed',
+      repo: name,
+    };
+  };
+
+  /** Preflight said this repo cannot be swept at all (ckc4 F4). */
+  const blocked = (detail: string): RepoResult => ({
     detail,
-    outcome: 'failed',
+    outcome: 'blocked',
     repo: name,
   });
 
@@ -1258,15 +1831,13 @@ async function sweepOneRepo(
 
   // --- Preflight -----------------------------------------------------------
   if (!gitOk(repo, ['rev-parse', '--git-dir'])) {
-    return {detail: 'not a git repository', outcome: 'skipped', repo: name};
+    return blocked('not a git repository');
   }
   const defaultBranch = defaultBranchOf(repo);
   if (defaultBranch == null) {
-    return {
-      detail: 'no default branch (origin/HEAD, main, master all unresolvable)',
-      outcome: 'skipped',
-      repo: name,
-    };
+    return blocked(
+      'no default branch (origin/HEAD, main, master all unresolvable)',
+    );
   }
   // Enrollment (component mode only) — decided from the config as COMMITTED on
   // the branch the sweep will branch from, before anything is created. A repo
@@ -1276,11 +1847,9 @@ async function sweepOneRepo(
     const {component} = context.payload;
     const declared = committedConfigComponents(repo, defaultBranch);
     if (!declared.ok) {
-      return {
-        detail: `skipped — cannot read enrollment: ${declared.reason}`,
-        outcome: 'skipped',
-        repo: name,
-      };
+      // NOT a benign skip: "I could not read the enrollment" is a repo this run
+      // failed to sweep, and it has to be counted as one (ckc4 F4).
+      return blocked(`cannot read enrollment: ${declared.reason}`);
     }
     if (!isEnrolledIn(declared.components, component)) {
       return {
@@ -1291,35 +1860,44 @@ async function sweepOneRepo(
     }
   }
 
-  const worktreePath = join(repo, ...SWEEP_WORKTREE_SEGMENTS);
-  if (existsSync(worktreePath)) {
-    return {
-      detail: `stale sweep worktree exists at ${worktreePath} — resolve it (previous red run?), then re-sweep`,
-      outcome: 'skipped',
-      repo: name,
-    };
-  }
-  if (
-    gitOk(repo, [
-      'rev-parse',
-      '--verify',
-      '--quiet',
-      `refs/heads/${SWEEP_BRANCH}`,
-    ])
-  ) {
-    return {
-      detail: `branch ${SWEEP_BRANCH} already exists — resolve it, then re-sweep`,
-      outcome: 'skipped',
-      repo: name,
-    };
+  // --- Leftovers from an earlier run (ckc4 F5) -----------------------------
+  const leftover = assessSweepLeftover(
+    repo,
+    worktreePath,
+    SWEEP_BRANCH,
+    defaultBranch,
+    allowedLeftoverPaths(context.payload),
+  );
+  if (leftover.present) {
+    if (!leftover.safe) {
+      return blocked(`leftover from an earlier run — ${leftover.reason}`);
+    }
+    if (context.dryRun) {
+      say(`  ${YELLOW}⚠${RESET} would auto-remove a leftover — ${leftover.reason}`);
+    } else {
+      const cleaned = cleanupWorktreeAndBranch(
+        repo,
+        worktreePath,
+        SWEEP_BRANCH,
+      );
+      if (!cleaned.ok) {
+        return blocked(
+          `leftover was provably empty but could not be removed — ${cleaned.detail}`,
+        );
+      }
+      say(
+        `  ${YELLOW}⚠${RESET} auto-removed a leftover from an earlier run — ${leftover.reason}`,
+      );
+    }
   }
 
   if (context.dryRun) {
     return {
       detail:
-        context.payload.mode === 'component'
+        (leftover.present ? 'would auto-remove a leftover, then ' : '') +
+        (context.payload.mode === 'component'
           ? `would apply ${context.payload.component} off ${defaultBranch} (pin untouched)`
-          : `would sweep off ${defaultBranch}${dryRunPinNote(repo)}`,
+          : `would sweep off ${defaultBranch}${dryRunPinNote(repo)}`),
       outcome: 'current',
       repo: name,
     };
@@ -1327,30 +1905,12 @@ async function sweepOneRepo(
 
   // --- Worktree ------------------------------------------------------------
   const baseSha = git(repo, ['rev-parse', `refs/heads/${defaultBranch}`]);
-  if (baseSha == null) return fail(`cannot resolve ${defaultBranch}`);
-  const add = run(
-    [
-      'git',
-      '-C',
-      repo,
-      'worktree',
-      'add',
-      '-b',
-      SWEEP_BRANCH,
-      worktreePath,
-      baseSha,
-    ],
-    repo,
-  );
-  if (add.exitCode !== 0) return fail('git worktree add failed');
-
-  const cleanupWorktree = (): void => {
-    run(
-      ['git', '-C', repo, 'worktree', 'remove', '--force', worktreePath],
-      repo,
-    );
-    run(['git', '-C', repo, 'branch', '-D', SWEEP_BRANCH], repo);
-  };
+  if (baseSha == null) {
+    return fail('resolve-base', `cannot resolve ${defaultBranch}`, null);
+  }
+  const add = addSweepWorktree(repo, worktreePath, SWEEP_BRANCH, baseSha);
+  if (!add.ok) return fail('worktree-add', add.detail, add.output);
+  worktreeCreated = true;
 
   // --- Hydrate (retry once — home-base-dl0q) -------------------------------
   let hydrated = setupEnv({target: worktreePath});
@@ -1359,12 +1919,34 @@ async function sweepOneRepo(
     hydrated = setupEnv({target: worktreePath});
   }
   if (hydrated.exitCode !== 0) {
-    return fail('hydration failed twice — worktree left for inspection');
+    // setupEnv reports STEPS rather than raw child output (its children write
+    // straight to this process's stderr), so the log gets the step table — the
+    // failing label and its detail — which is what names the cause here.
+    return fail(
+      'hydrate',
+      'hydration failed twice',
+      hydrated.steps
+        .map((step) => `${step.label} ${step.status} — ${step.detail}`)
+        .join('\n'),
+    );
   }
+
+  // --- Baseline (ckc4 F3) --------------------------------------------------
+  // Measured on the HYDRATED tree, BEFORE the payload, so the gates below can
+  // tell "the payload broke this" from "this tree was never green". Read-only:
+  // doctor without --fix, and the repo's own signal, which never writes.
+  const doctorBaseline = measureBaseline(
+    ['bunx', '@justinhaaheim/justin-sdk', 'doctor'],
+    worktreePath,
+  );
+  const signalBaseline = measureBaseline(['bun', 'run', 'signal'], worktreePath);
+  say(
+    `  ${DIM}baseline: doctor ${doctorBaseline.exitCode ?? 'UNMEASURABLE'}, signal ${signalBaseline.exitCode ?? 'UNMEASURABLE'}${RESET}`,
+  );
 
   // --- Payload (pin + update, or one component in-process) -----------------
   const payload = await applySweepPayload(worktreePath, context.payload);
-  if (!payload.ok) return fail(payload.detail);
+  if (!payload.ok) return fail('payload', payload.detail, null);
   say(`  ${DIM}${payload.note}${RESET}`);
   // Carried all the way to the summary line: a pin that was deliberately not
   // written must not be legible only in the scrollback above.
@@ -1393,10 +1975,28 @@ async function sweepOneRepo(
       ? ` (post-gate pin held: ${pinHeldAfterGates.join(', ')})`
       : '';
   if (pinGateNote !== '') say(`  ${DIM}${pinGateNote.trim()}${RESET}`);
-  if (doctor.exitCode !== 0) {
+
+  // The ratchet, not the absolute verdict (ckc4 F3). The baseline was measured
+  // with `doctor` (read-only); this is `doctor --fix`, so a repo whose doctor is
+  // fixable goes red → green here and proceeds, which is the intended shape.
+  const blindNotes: string[] = [];
+  const doctorVerdict = ratchetVerdict(
+    'doctor',
+    doctorBaseline.exitCode,
+    doctor.exitCode,
+  );
+  if (doctorVerdict.kind === 'fail') {
     return fail(
-      `doctor red after update — worktree left for inspection${pinGateNote}`,
+      'doctor',
+      `${doctorVerdict.reason}${pinGateNote}`,
+      `--- BASELINE (doctor, before the payload) ---\n${doctorBaseline.output}\n--- AFTER (doctor --fix) ---\n${doctor.output}`,
     );
+  }
+  if (doctorVerdict.kind === 'blind') {
+    blindNotes.push(doctorVerdict.note);
+    say(`  ${YELLOW}⚠${RESET} ${doctorVerdict.note}`);
+  } else if (doctorVerdict.note !== '') {
+    say(`  ${DIM}${doctorVerdict.note}${RESET}`);
   }
 
   // Normalize SDK-written JSON to the repo's own prettier config — AFTER
@@ -1414,9 +2014,28 @@ async function sweepOneRepo(
   }
 
   const signal = run(['bun', 'run', 'signal'], worktreePath);
-  if (signal.exitCode !== 0) {
-    return fail('signal red after update — worktree left for inspection');
+  const signalVerdict = ratchetVerdict(
+    'signal',
+    signalBaseline.exitCode,
+    signal.exitCode,
+  );
+  if (signalVerdict.kind === 'fail') {
+    return fail(
+      'signal',
+      signalVerdict.reason,
+      `--- BASELINE (signal, before the payload) ---\n${signalBaseline.output}\n--- AFTER ---\n${signal.output}`,
+    );
   }
+  if (signalVerdict.kind === 'blind') {
+    blindNotes.push(signalVerdict.note);
+    say(`  ${YELLOW}⚠${RESET} ${signalVerdict.note}`);
+  } else if (signalVerdict.note !== '') {
+    say(`  ${DIM}${signalVerdict.note}${RESET}`);
+  }
+  // Carried into the SUMMARY line, not just the scrollback: a repo that was
+  // merged with its gates blind must not read as an ordinary green.
+  const blindNote =
+    blindNotes.length > 0 ? ` [${blindNotes.join('; ')}]` : '';
 
   // --- Commit --------------------------------------------------------------
   const stage = stageForCommit(worktreePath, context.payload);
@@ -1430,16 +2049,18 @@ async function sweepOneRepo(
 
   const changedFiles = stage.staged;
   if (changedFiles.length === 0) {
-    cleanupWorktree();
+    const cleaned = cleanupWorktreeAndBranch(repo, worktreePath, SWEEP_BRANCH);
     return {
-      detail: `already current${payloadNote}${scopeNote}`,
+      detail: `already current${payloadNote}${scopeNote}${blindNote}${
+        cleaned.ok ? '' : ` [${cleaned.detail}]`
+      }`,
       outcome: 'current',
       repo: name,
     };
   }
   const beadsGuard = beadsConfigGuard(context.payload, changedFiles);
   if (!beadsGuard.ok) {
-    return fail(beadsGuard.reason);
+    return fail('beads-config-guard', beadsGuard.reason, null);
   }
   const commit = run(
     [
@@ -1447,13 +2068,23 @@ async function sweepOneRepo(
       '-C',
       worktreePath,
       'commit',
+      // --no-verify (ckc4 F3b). health-logger-rn and ynab-mcp-deluxe run
+      // `ts-check` in .husky/pre-commit, so a repo with a PRE-EXISTING red
+      // baseline — which the ratchet gate above deliberately lets through —
+      // would fail at the commit instead, re-importing the absolute-health gate
+      // through the back door. The sweep IS its own gate, and it measured this
+      // content. A lint-staged hook is also skipped as a result, which is a
+      // second win: what gets committed is byte-identical to what was
+      // generated, and a prettier-unstable artifact shows up as green→red on
+      // the repo's own PRETTIER check, where it belongs.
+      '--no-verify',
       '-m',
       sweepCommitMessage(context.payload),
     ],
     repo,
   );
   if (commit.exitCode !== 0) {
-    return fail('commit failed — worktree left for inspection');
+    return fail('commit', `commit failed (exit ${commit.exitCode})`, commit.output);
   }
 
   // --- Merge safety + merge -----------------------------------------------
@@ -1471,8 +2102,12 @@ async function sweepOneRepo(
     changedFiles,
   );
   if (!safety.ok) {
+    // One of the two paths that DELIBERATELY keeps its worktree and branch
+    // (ckc4 F2): the commit is green and still has to be merged by a human, so
+    // deleting it would delete the work. Says so explicitly, because everything
+    // else now cleans up.
     return {
-      detail: `green + committed on ${SWEEP_BRANCH}${pinGateNote}${payloadNote}${scopeNote}, but merge deferred: ${safety.reason}`,
+      detail: `green + committed on ${SWEEP_BRANCH}${pinGateNote}${payloadNote}${scopeNote}${blindNote}, but merge deferred: ${safety.reason} — worktree + branch KEPT ON PURPOSE (they hold the commit)`,
       outcome: 'merge-pending',
       repo: name,
     };
@@ -1482,8 +2117,9 @@ async function sweepOneRepo(
     repo,
   );
   if (merge.exitCode !== 0) {
+    // The second deliberate keep — same reason: the commit lives on that branch.
     return {
-      detail: `merge --ff-only failed (diverged?) — branch ${SWEEP_BRANCH} left standing${payloadNote}${scopeNote}`,
+      detail: `merge --ff-only failed (diverged?)${payloadNote}${scopeNote}${blindNote} — worktree + branch ${SWEEP_BRANCH} KEPT ON PURPOSE (they hold the commit)`,
       outcome: 'merge-pending',
       repo: name,
     };
@@ -1499,9 +2135,11 @@ async function sweepOneRepo(
         ? 'pushed'
         : 'PUSH FAILED (remote ahead?) — merged locally, push by hand';
   }
-  cleanupWorktree();
+  const cleaned = cleanupWorktreeAndBranch(repo, worktreePath, SWEEP_BRANCH);
   return {
-    detail: `updated, merged into ${defaultBranch}, ${pushNote}${pinGateNote}${payloadNote}${scopeNote}`,
+    detail: `updated, merged into ${defaultBranch}, ${pushNote}${pinGateNote}${payloadNote}${scopeNote}${blindNote}${
+      cleaned.ok ? '' : ` [${cleaned.detail}]`
+    }`,
     outcome: 'clean',
     repo: name,
   };
@@ -1523,6 +2161,8 @@ export interface SweepOptions {
    * touched. Default (absent) = the historical pin-bump-and-re-apply-all sweep.
    */
   component?: string;
+  /** Where the run's failure log goes. Default SWEEP_LOG_DIR. */
+  logDir?: string;
 }
 
 export async function runSweep(options: SweepOptions = {}): Promise<number> {
@@ -1551,9 +2191,15 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
       `${dryRun ? ` ${DIM}(dry-run)${RESET}` : ''}`,
   );
 
+  // Announced at the top AND at the bottom (ckc4 F2): a failure's worktree is
+  // gone by the time the summary prints, so the log is the only evidence left
+  // and the operator has to know where it is before the run starts scrolling.
+  const log = createRunLog(options.logDir ?? SWEEP_LOG_DIR);
+  say(`${DIM}failure log (written only if something fails): ${log.path}${RESET}`);
+
   const results: RepoResult[] = [];
   for (const repo of repos) {
-    results.push(await sweepOneRepo(repo, {dryRun, payload}));
+    results.push(await sweepOneRepo(repo, {dryRun, log, payload}));
   }
 
   // D17. Unconditional on the repo results by design (see refreshUserLevelRules):
@@ -1562,6 +2208,7 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
 
   say(`\n${BOLD}Summary${RESET}`);
   const ICON: Record<RepoOutcome, string> = {
+    blocked: `${RED}⊘${RESET}`,
     clean: `${GREEN}✓${RESET}`,
     current: `${GREEN}=${RESET}`,
     failed: `${RED}✗${RESET}`,
@@ -1587,17 +2234,48 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
       `  ${USER_ICON[userRules.status]} ${BOLD}user-level rules${RESET} ${DIM}${userRules.detail}${RESET}`,
     );
   }
-  const failed = results.filter((result) => result.outcome === 'failed').length;
-  const pending = results.filter(
-    (result) => result.outcome === 'merge-pending',
-  ).length;
-  if (failed + pending > 0) {
+  const of = (outcome: RepoOutcome): RepoResult[] =>
+    results.filter((result) => result.outcome === outcome);
+  const failed = of('failed');
+  const pending = of('merge-pending');
+  const blocked = of('blocked');
+  const skipped = of('skipped');
+
+  if (failed.length + pending.length > 0) {
     say(
-      `\n${YELLOW}${failed} failed, ${pending} merge-pending — each left its worktree/branch standing for inspection. Fix the CAUSE in the SDK (ratchet contract), then re-sweep.${RESET}`,
+      `\n${YELLOW}${failed.length} failed (worktree removed; evidence in the run log), ${pending.length} merge-pending (worktree kept — it holds the commit). Fix the CAUSE in the SDK (ratchet contract), then re-sweep.${RESET}`,
+    );
+  }
+  if (log.wrote()) {
+    say(`${YELLOW}failure log: ${log.path}${RESET}`);
+  }
+  // ckc4 F4. Two things that both used to be "skipped" and both used to exit 0:
+  // a repo this payload does not apply to (expected), and a repo this run COULD
+  // NOT SWEEP (a leftover it may not delete, an unreadable enrollment, a
+  // non-repo). The second is a propagation failure — the fleet is now out of
+  // sync and nothing said so — and it is printed LAST, where a long run's tail
+  // is actually read.
+  if (skipped.length > 0) {
+    say(
+      `${DIM}${skipped.length} not enrolled in this payload (expected, not a failure): ${skipped
+        .map((result) => result.repo)
+        .join(', ')}${RESET}`,
+    );
+  }
+  if (blocked.length > 0) {
+    say(
+      `\n${RED}${blocked.length} COULD NOT SWEEP: ${blocked
+        .map((result) => result.repo)
+        .join(', ')}${RESET}` +
+        `\n${RED}These repos did NOT receive the payload. Resolve each (see its line above), then re-sweep.${RESET}`,
     );
   }
   // A failed user-level refresh is a real failure and must not exit 0 — that
   // would be the silence-shaped kind. It is attributed to its own surface, never
   // to a repo, and the remedy is one command rather than another whole sweep.
-  return failed > 0 || userRules?.status === 'failed' ? 1 : 0;
+  return failed.length > 0 ||
+    blocked.length > 0 ||
+    userRules?.status === 'failed'
+    ? 1
+    : 0;
 }

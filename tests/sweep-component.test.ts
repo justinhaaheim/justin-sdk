@@ -484,7 +484,7 @@ describe('runSweep --component', () => {
     expectUntouched(repo);
   });
 
-  test('a repo whose config is not committed is skipped with the reason, never assumed', async () => {
+  test('a repo whose config is not committed COULD NOT BE SWEPT — reason given, run fails', async () => {
     const sb = track(createSandbox());
     const repo = initRepo(sb, 'uncommitted', {'a.txt': 'a\n'});
 
@@ -492,8 +492,12 @@ describe('runSweep --component', () => {
       runSweep({component: 'gitignore', repos: [repo]}),
     );
 
-    expect(value).toBe(0);
+    // ckc4 F4: "I could not read this repo's enrollment" is a repo the run
+    // failed to sweep, not a benign skip. It used to exit 0 — a fleet silently
+    // left out of sync.
+    expect(value).toBe(1);
     expect(out).toContain('cannot read enrollment');
+    expect(out).toContain('COULD NOT SWEEP: uncommitted');
     expect(existsSync(join(repo, ...SWEEP_WORKTREE_SEGMENTS))).toBe(false);
     expect(git(repo, ['branch', '--list', SWEEP_BRANCH]).trim()).toBe('');
   });
