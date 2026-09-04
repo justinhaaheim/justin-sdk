@@ -354,7 +354,8 @@ const HOOKS_OFF = ['-c', 'core.hooksPath=/dev/null'] as const;
 export function parseWorktreePaths(porcelain: string): string[] {
   const paths: string[] = [];
   for (const line of porcelain.split('\n')) {
-    if (line.startsWith('worktree ')) paths.push(line.slice('worktree '.length));
+    if (line.startsWith('worktree '))
+      paths.push(line.slice('worktree '.length));
   }
   return paths;
 }
@@ -398,7 +399,10 @@ export function cleanupWorktreeAndBranch(
   branch: string,
 ): CleanupResult {
   if (existsSync(worktreePath) || isWorktreeRegistered(repo, worktreePath)) {
-    run(['git', '-C', repo, 'worktree', 'remove', '--force', worktreePath], repo);
+    run(
+      ['git', '-C', repo, 'worktree', 'remove', '--force', worktreePath],
+      repo,
+    );
     run(['git', '-C', repo, 'worktree', 'prune'], repo);
   }
   const branchRef = `refs/heads/${branch}`;
@@ -415,7 +419,10 @@ export function cleanupWorktreeAndBranch(
     survivors.push(`branch ${branch}`);
   }
   return survivors.length === 0
-    ? {detail: `removed worktree ${worktreePath} and branch ${branch}`, ok: true}
+    ? {
+        detail: `removed worktree ${worktreePath} and branch ${branch}`,
+        ok: true,
+      }
     : {
         detail: `cleanup INCOMPLETE — still present: ${survivors.join('; ')}`,
         ok: false,
@@ -461,16 +468,17 @@ export function addSweepWorktree(
     repo,
   );
   if (add.exitCode === 0) {
-    return {detail: `worktree added at ${worktreePath}`, ok: true, output: add.output};
+    return {
+      detail: `worktree added at ${worktreePath}`,
+      ok: true,
+      output: add.output,
+    };
   }
   const salvage = cleanupWorktreeAndBranch(repo, worktreePath, branch);
   return {
-    detail:
-      `git worktree add failed (exit ${add.exitCode}) — ${
-        salvage.ok
-          ? 'nothing left behind'
-          : `and ${salvage.detail.toLowerCase()}`
-      }`,
+    detail: `git worktree add failed (exit ${add.exitCode}) — ${
+      salvage.ok ? 'nothing left behind' : `and ${salvage.detail.toLowerCase()}`
+    }`,
     ok: false,
     output: add.output,
   };
@@ -554,8 +562,7 @@ export function mergeSafety(
  * component   — ONE component, run in-process, pin left exactly as found.
  */
 export type SweepPayload =
-  | {mode: 'full'}
-  | {mode: 'component'; component: ComponentName};
+  {mode: 'full'} | {mode: 'component'; component: ComponentName};
 
 /** Absent `--component` means the historical full payload. Pure. */
 export function planSweepPayload(
@@ -744,8 +751,7 @@ export function allowedLeftoverPaths(payload: SweepPayload): readonly string[] {
 }
 
 export type LeftoverAssessment =
-  | {present: false}
-  | {present: true; safe: boolean; reason: string};
+  {present: false} | {present: true; safe: boolean; reason: string};
 
 /**
  * May the sweep delete the leftover worktree/branch it found, or must it refuse
@@ -785,7 +791,9 @@ export function assessSweepLeftover(
 
   const found = [
     directory ? 'worktree directory' : null,
-    registered && !directory ? 'worktree registration (directory already gone)' : null,
+    registered && !directory
+      ? 'worktree registration (directory already gone)'
+      : null,
     branchExists ? `branch ${branch}` : null,
   ]
     .filter((entry): entry is string => entry != null)
@@ -897,7 +905,8 @@ export function stageForCommit(
 
   git(worktreePath, ['add', '-A']);
   const scope = partitionByComponentContract(payload, readStaged());
-  if (scope.outOfScope.length === 0) return {excluded: [], staged: scope.inScope};
+  if (scope.outOfScope.length === 0)
+    return {excluded: [], staged: scope.inScope};
 
   git(worktreePath, ['reset', '-q', '--', ...scope.outOfScope]);
   return {excluded: scope.outOfScope, staged: readStaged()};
@@ -1259,8 +1268,7 @@ function expandWorkspacePattern(root: string, pattern: string): string[] {
  * still run.
  */
 export type WorkspaceSatisfaction =
-  | {satisfied: true; reason: string}
-  | {satisfied: false};
+  {satisfied: true; reason: string} | {satisfied: false};
 
 export function sdkWorkspaceSatisfaction(
   root: string,
@@ -1831,10 +1839,12 @@ async function sweepOneRepo(
     }
     let cleanupNote = '';
     if (worktreeCreated) {
-      const cleaned = cleanupWorktreeAndBranch(repo, worktreePath, SWEEP_BRANCH);
-      cleanupNote = cleaned.ok
-        ? ' [worktree removed]'
-        : ` [${cleaned.detail}]`;
+      const cleaned = cleanupWorktreeAndBranch(
+        repo,
+        worktreePath,
+        SWEEP_BRANCH,
+      );
+      cleanupNote = cleaned.ok ? ' [worktree removed]' : ` [${cleaned.detail}]`;
       if (!cleaned.ok) say(`  ${RED}✗${RESET} ${cleaned.detail}`);
     }
     return {
@@ -1911,7 +1921,9 @@ async function sweepOneRepo(
           };
     }
     if (context.dryRun) {
-      say(`  ${YELLOW}⚠${RESET} would auto-remove a leftover — ${leftover.reason}`);
+      say(
+        `  ${YELLOW}⚠${RESET} would auto-remove a leftover — ${leftover.reason}`,
+      );
     } else {
       const cleaned = cleanupWorktreeAndBranch(
         repo,
@@ -1981,7 +1993,10 @@ async function sweepOneRepo(
     ['bunx', '@justinhaaheim/justin-sdk', 'doctor'],
     worktreePath,
   );
-  const signalBaseline = measureBaseline(['bun', 'run', 'signal'], worktreePath);
+  const signalBaseline = measureBaseline(
+    ['bun', 'run', 'signal'],
+    worktreePath,
+  );
   say(
     `  ${DIM}baseline: doctor ${doctorBaseline.exitCode ?? 'UNMEASURABLE'}, signal ${signalBaseline.exitCode ?? 'UNMEASURABLE'}${RESET}`,
   );
@@ -2076,8 +2091,7 @@ async function sweepOneRepo(
   }
   // Carried into the SUMMARY line, not just the scrollback: a repo that was
   // merged with its gates blind must not read as an ordinary green.
-  const blindNote =
-    blindNotes.length > 0 ? ` [${blindNotes.join('; ')}]` : '';
+  const blindNote = blindNotes.length > 0 ? ` [${blindNotes.join('; ')}]` : '';
 
   // --- Commit --------------------------------------------------------------
   const stage = stageForCommit(worktreePath, context.payload);
@@ -2126,7 +2140,11 @@ async function sweepOneRepo(
     repo,
   );
   if (commit.exitCode !== 0) {
-    return fail('commit', `commit failed (exit ${commit.exitCode})`, commit.output);
+    return fail(
+      'commit',
+      `commit failed (exit ${commit.exitCode})`,
+      commit.output,
+    );
   }
 
   // --- Merge safety + merge -----------------------------------------------
@@ -2237,7 +2255,9 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
   // gone by the time the summary prints, so the log is the only evidence left
   // and the operator has to know where it is before the run starts scrolling.
   const log = createRunLog(options.logDir ?? SWEEP_LOG_DIR);
-  say(`${DIM}failure log (written only if something fails): ${log.path}${RESET}`);
+  say(
+    `${DIM}failure log (written only if something fails): ${log.path}${RESET}`,
+  );
 
   const results: RepoResult[] = [];
   for (const repo of repos) {

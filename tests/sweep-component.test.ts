@@ -919,10 +919,10 @@ describe('component contract', () => {
     // "already current" — silent omission, the worse failure direction.
     expect(componentContractPaths('gitignore')).toBeNull();
     expect(
-      partitionByComponentContract({component: 'gitignore', mode: 'component'}, [
-        'CLAUDE.md',
-        '.gitignore',
-      ]),
+      partitionByComponentContract(
+        {component: 'gitignore', mode: 'component'},
+        ['CLAUDE.md', '.gitignore'],
+      ),
     ).toEqual({inScope: ['CLAUDE.md', '.gitignore'], outOfScope: []});
   });
 
@@ -950,7 +950,10 @@ describe('component contract', () => {
 
   test('a FULL sweep is untouched — it is supposed to re-apply everything', () => {
     expect(
-      partitionByComponentContract({mode: 'full'}, ['CLAUDE.md', 'package.json']),
+      partitionByComponentContract({mode: 'full'}, [
+        'CLAUDE.md',
+        'package.json',
+      ]),
     ).toEqual({inScope: ['CLAUDE.md', 'package.json'], outOfScope: []});
   });
 
@@ -964,7 +967,10 @@ describe('component contract', () => {
           '.claude/settings.local.json',
         ],
       ).outOfScope,
-    ).toEqual(['.claude/rules/justin-sdk-notes.md', '.claude/settings.local.json']);
+    ).toEqual([
+      '.claude/rules/justin-sdk-notes.md',
+      '.claude/settings.local.json',
+    ]);
   });
 });
 
@@ -979,7 +985,11 @@ describe('stageForCommit (real git index)', () => {
     // The payload's own write…
     write(repo, '.claude/rules/justin-sdk/critical-rules.md', 'NEW RULES\n');
     // …and the two files `doctor --fix` rewrote behind its back.
-    write(repo, 'CLAUDE.md', '# Project\n\n@docs/prompts/IMPORTANT_GUIDELINES_INLINED.md\n');
+    write(
+      repo,
+      'CLAUDE.md',
+      '# Project\n\n@docs/prompts/IMPORTANT_GUIDELINES_INLINED.md\n',
+    );
     write(repo, 'scripts/setup-env.ts', '// recreated by the fixer\n');
     return repo;
   }

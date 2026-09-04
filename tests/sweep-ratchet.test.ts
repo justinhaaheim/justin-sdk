@@ -22,7 +22,13 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'fs';
 import {join} from 'path';
 
 import {
@@ -288,7 +294,10 @@ describe('addSweepWorktree (F1)', () => {
 const RULES_CONTRACT = ['.claude/rules/justin-sdk/'] as const;
 
 /** A repo carrying a leftover sweep worktree + branch, as a red run left it. */
-function repoWithLeftover(sb: Sandbox, name: string): {
+function repoWithLeftover(
+  sb: Sandbox,
+  name: string,
+): {
   repo: string;
   worktree: string;
 } {
@@ -330,7 +339,9 @@ describe('assessSweepLeftover (F5)', () => {
     );
 
     expect(verdict).toMatchObject({present: true, safe: true});
-    expect(verdict.present && verdict.reason).toContain('0 commits beyond main');
+    expect(verdict.present && verdict.reason).toContain(
+      '0 commits beyond main',
+    );
   });
 
   test('an uncommitted change INSIDE the contract is SAFE — the sweep regenerates it', () => {
@@ -342,13 +353,7 @@ describe('assessSweepLeftover (F5)', () => {
     );
 
     expect(
-      assessSweepLeftover(
-        repo,
-        worktree,
-        SWEEP_BRANCH,
-        'main',
-        RULES_CONTRACT,
-      ),
+      assessSweepLeftover(repo, worktree, SWEEP_BRANCH, 'main', RULES_CONTRACT),
     ).toMatchObject({present: true, safe: true});
   });
 
@@ -473,7 +478,7 @@ function e2eRepo(sb: Sandbox, name: string, options: E2EOptions = {}): string {
     join(sdkDir, 'cli.js'),
     [
       '#!/usr/bin/env node',
-      "const args = process.argv.slice(2);",
+      'const args = process.argv.slice(2);',
       "console.log('fixture justin-sdk ' + args.join(' '));",
       `process.exit(args.includes('--fix') ? ${doctorFixExit} : ${doctorExit});`,
       '',
@@ -779,7 +784,11 @@ describe('the ratchet gate, end to end (F3)', () => {
 
     const summaryLine = out
       .split('\n')
-      .find((line) => line.includes('already-red-summary') && line.includes('merged into main'));
+      .find(
+        (line) =>
+          line.includes('already-red-summary') &&
+          line.includes('merged into main'),
+      );
     expect(summaryLine).toBeDefined();
     expect(summaryLine).toContain('PRE-EXISTING');
   });
