@@ -173,6 +173,30 @@ function gitOk(repo: string, argv: string[]): boolean {
 }
 
 /**
+ * `git`, WITHOUT the trim — for `status --porcelain`, whose leading two-column
+ * status field is load-bearing.
+ *
+ * MEASURED BUG this exists to fix (found by the ckc4 merge-pending test, and
+ * pre-existing since the porcelain parser was written): `git()` trims, so the
+ * leading space of a ` M path` first line disappeared, `parsePorcelainPaths`
+ * sliced 3 characters off `M path` and returned `ath`. The dirty file was
+ * therefore invisible to mergeSafety's overlap check, which then said "no
+ * sweep-changed file is dirty in the primary" and let the merge run — the
+ * conflation that degrades TOWARD the reassuring answer. git aborted the merge
+ * itself, so nothing was lost; the sweep just reported the wrong reason.
+ */
+function gitPorcelain(repo: string): string | null {
+  try {
+    return execFileSync('git', ['-C', repo, 'status', '--porcelain'], {
+      encoding: 'utf-8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Run a command, CAPTURING its output and echoing it afterwards
  * (for update/signal/doctor).
  *
@@ -817,7 +841,7 @@ export function assessSweepLeftover(
         safe: false,
       };
     }
-    const porcelain = git(worktreePath, ['status', '--porcelain']);
+    const porcelain = gitPorcelain(worktreePath);
     if (porcelain == null) {
       return {
         present: true,
@@ -1839,28 +1863,14 @@ async function sweepOneRepo(
       'no default branch (origin/HEAD, main, master all unresolvable)',
     );
   }
-  // Enrollment (component mode only) — decided from the config as COMMITTED on
-  // the branch the sweep will branch from, before anything is created. A repo
-  // that does not register the component is out of scope for this run: a
-  // visible skip, never a silent one and never a failure.
-  if (context.payload.mode === 'component') {
-    const {component} = context.payload;
-    const declared = committedConfigComponents(repo, defaultBranch);
-    if (!declared.ok) {
-      // NOT a benign skip: "I could not read the enrollment" is a repo this run
-      // failed to sweep, and it has to be counted as one (ckc4 F4).
-      return blocked(`cannot read enrollment: ${declared.reason}`);
-    }
-    if (!isEnrolledIn(declared.components, component)) {
-      return {
-        detail: `skipped — not enrolled in ${component}`,
-        outcome: 'skipped',
-        repo: name,
-      };
-    }
-  }
-
   // --- Leftovers from an earlier run (ckc4 F5) -----------------------------
+  // BEFORE the enrollment check, deliberately: the leftover is the SWEEP's own
+  // litter — a fixed-name worktree at a fixed path, which blocks every future
+  // sweep of that repo whatever the payload — so tidying it is not payload
+  // scoped. Measured 2026-09-04: two of the seven stranded worktrees on this
+  // machine (imessage-exporter, ynab-mcp-deluxe) are in repos NOT enrolled in
+  // critical-rules, so an enrollment-first order would leave exactly those two
+  // stranded forever, by the run meant to clear them.
   const leftover = assessSweepLeftover(
     repo,
     worktreePath,
@@ -1888,6 +1898,27 @@ async function sweepOneRepo(
       say(
         `  ${YELLOW}⚠${RESET} auto-removed a leftover from an earlier run — ${leftover.reason}`,
       );
+    }
+  }
+
+  // Enrollment (component mode only) — decided from the config as COMMITTED on
+  // the branch the sweep will branch from, before anything is created. A repo
+  // that does not register the component is out of scope for this run: a
+  // visible skip, never a silent one and never a failure.
+  if (context.payload.mode === 'component') {
+    const {component} = context.payload;
+    const declared = committedConfigComponents(repo, defaultBranch);
+    if (!declared.ok) {
+      // NOT a benign skip: "I could not read the enrollment" is a repo this run
+      // failed to sweep, and it has to be counted as one (ckc4 F4).
+      return blocked(`cannot read enrollment: ${declared.reason}`);
+    }
+    if (!isEnrolledIn(declared.components, component)) {
+      return {
+        detail: `skipped — not enrolled in ${component}`,
+        outcome: 'skipped',
+        repo: name,
+      };
     }
   }
 
@@ -2094,7 +2125,7 @@ async function sweepOneRepo(
     '--short',
     'HEAD',
   ]);
-  const porcelain = git(repo, ['status', '--porcelain']) ?? '';
+  const porcelain = gitPorcelain(repo) ?? '';
   const safety = mergeSafety(
     primaryBranch,
     defaultBranch,
