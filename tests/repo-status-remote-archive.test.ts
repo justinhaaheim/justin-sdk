@@ -441,7 +441,10 @@ describe('apply --include-remote (through the CLI)', () => {
       console.log = log;
       console.error = err;
       // Handlers set process.exitCode; left set it would fail the whole run.
-      process.exitCode = previousExitCode;
+      // `?? 0` is load-bearing (home-base-uarq): assigning `undefined` to
+      // process.exitCode is a NO-OP under bun 1.4.0, so restoring the captured
+      // `undefined` leaves the handler's code in place.
+      process.exitCode = previousExitCode ?? 0;
     }
   }
 
@@ -489,7 +492,8 @@ describe('apply --include-remote (through the CLI)', () => {
       ]);
     } finally {
       console.error = err;
-      process.exitCode = previousExitCode;
+      // `?? 0`: see runApply above (home-base-uarq).
+      process.exitCode = previousExitCode ?? 0;
     }
 
     expect(errors.join('\n')).toContain('1 branch(es) on the remote');

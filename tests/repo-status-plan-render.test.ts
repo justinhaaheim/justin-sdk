@@ -151,7 +151,11 @@ async function runPlan(repo: string, extra: string[]): Promise<CliRun> {
     console.log = log;
     console.error = error;
     // Handlers set process.exitCode; left set it would fail the whole run.
-    process.exitCode = previousExitCode;
+    // `?? 0` is load-bearing (home-base-uarq): under bun 1.4.0 assigning
+    // `undefined` to process.exitCode is a NO-OP, so restoring the captured
+    // `undefined` left the handler's 2 in place and `bun test` exited 2 on a
+    // fully green suite.
+    process.exitCode = previousExitCode ?? 0;
   }
   return {code, stderr: err.join('\n'), stdout: out.join('\n')};
 }
@@ -233,6 +237,19 @@ describe('plan renderings', () => {
     expect(code).toBe(2);
     expect(stdout).toBe('');
     expect(stderr).toContain('pass at most one');
+  });
+
+  test('a refused run does not leave process.exitCode set for the runner', async () => {
+    const work = fixture(track(createSandbox()));
+
+    // home-base-uarq: the handler sets process.exitCode = 2 in-process. If the
+    // helper does not CLEAR it (restoring the captured `undefined` is a no-op
+    // under bun 1.4.0), `bun test` exits 2 on a fully green suite and every
+    // exit-code consumer — pre-commit, CI, the sweep gate — reads this repo's
+    // passing suite as failing.
+    const {code} = await runPlan(work, ['--json', '--markdown']);
+    expect(code).toBe(2);
+    expect(process.exitCode).toBeFalsy();
   });
 
   test('--help documents --markdown', () => {
