@@ -57,11 +57,21 @@
  *   setpoint <= C, so the very next evaluation sees S <= C and neither branch
  *   fires again.
  *
- * @see home-base-1r6d.1
+ * WHOSE CONTEXT (1r6d.23): a hook firing during a SUBAGENT's turn still carries
+ * the PARENT's `transcript_path`, so for a year this could only ever report the
+ * conductor's number to a player — the exact inversion the wrap-up bound must
+ * not have. The payload also carries `agent_id`, and the subagent's own
+ * transcript sits at <session dir>/subagents/agent-<agent_id>.jsonl. So the
+ * hook branches on that id: absent, measure transcript_path as before; present,
+ * measure the subagent's file, apply the `roles.player` budget, and say in the
+ * notice that the number is the subagent's own. When the derived file is not
+ * there, it reports UNKNOWN on stderr and measures NOTHING — see runUsageCheck.
+ *
+ * @see home-base-1r6d.1, home-base-1r6d.23
  */
 
 import {closeSync, openSync, readFileSync, readSync, statSync} from 'fs';
-import {resolve} from 'path';
+import {join, resolve} from 'path';
 
 /** Marks our own output so a later run can find it in the transcript. */
 export const USAGE_CHECK_MARKER = '[Automated Usage Check]';
@@ -83,8 +93,12 @@ export const USAGE_CHECK_CONFIG_KEY = 'usage-check';
 export const WRAP_UP_DIRECTIVE =
   'Wrap up your session at the next available opportunity. Follow the handoff/ralph-handoff protocol.';
 
-export interface UsageCheckConfig {
-  enabled?: boolean;
+/**
+ * The knobs, minus `enabled`. Written out as its own interface because a ROLE
+ * (see UsageCheckConfig.roles) can override any of them without being able to
+ * switch the component off for one role and not the other.
+ */
+export interface UsageCheckRoleConfig {
   /**
    * Ascending token thresholds; each announces once. Explicit null disables the
    * ladder; ABSENT takes the generated default (see USAGE_CHECK_DEFAULTS), so
@@ -109,6 +123,36 @@ export interface UsageCheckConfig {
   /** Fractional drop below the last announced setpoint that re-arms the ladder. */
   reArmDropFraction?: number;
 }
+
+/**
+ * A project's `componentConfig["usage-check"]` block.
+ *
+ * The top-level knobs describe the TOP-LEVEL SESSION. `roles.player` overrides
+ * them for a dispatched subagent, whose budget is a different number from its
+ * conductor's — Justin, 2026-09-04: players get a wrap-up bound (~350,000, "a
+ * balance between keeping token counts low while allowing actual work to
+ * happen") while the top-level session gets none until it can respawn itself.
+ * Expressed as a nested block rather than parallel `playerWrapUpAt` keys so
+ * every knob is overridable by role without the key list being written twice.
+ *
+ * A role field left ABSENT inherits the top-level value; a role field set to
+ * null means null FOR THAT ROLE (so `roles.player.wrapUpAt: null` really does
+ * switch the directive off for players while the session keeps its own).
+ *
+ * @see home-base-1r6d.23
+ */
+export interface UsageCheckConfig extends UsageCheckRoleConfig {
+  enabled?: boolean;
+  roles?: {player?: UsageCheckRoleConfig | null} | null;
+}
+
+/**
+ * Which budget applies. Selected by the PRESENCE of `agent_id` in the hook
+ * payload — measured 2026-09-03: PostToolUse/PostToolBatch payloads carry
+ * `agent_id`/`agent_type` when and only when the tool call originated inside a
+ * subagent, so this needs no heuristic.
+ */
+export type UsageCheckRole = 'player' | 'session';
 
 /*
  * THE DEFAULT LADDER IS GENERATED, not hand-picked (D7).
@@ -266,6 +310,38 @@ function normalizeWrapUpAt(value: number | null | undefined): number | null {
 }
 
 /**
+ * Layer `roles[role]` over the top-level knobs.
+ *
+ * Only keys the role states EXPLICITLY win — `undefined` means "inherit", which
+ * is what makes a role block that names one knob (Justin's case: a player
+ * wrapUpAt and nothing else) leave the ladder and re-arm fraction alone. Since
+ * null is a meaningful value for `setpoints` and `wrapUpAt`, the test is
+ * `!== undefined` rather than a truthiness or nullish check.
+ *
+ * The 'session' role has no block by construction: the top-level knobs ARE the
+ * session's, so there is only ever one place to write them.
+ */
+function applyRoleOverrides(
+  config: UsageCheckConfig,
+  role: UsageCheckRole,
+): UsageCheckRoleConfig {
+  const override = role === 'player' ? config.roles?.player : null;
+  if (override == null) {
+    return config;
+  }
+  return {
+    reArmDropFraction:
+      override.reArmDropFraction !== undefined
+        ? override.reArmDropFraction
+        : config.reArmDropFraction,
+    setpoints:
+      override.setpoints !== undefined ? override.setpoints : config.setpoints,
+    wrapUpAt:
+      override.wrapUpAt !== undefined ? override.wrapUpAt : config.wrapUpAt,
+  };
+}
+
+/**
  * Merge a project's config over the defaults and normalize the ladder.
  *
  * A NUMERIC `wrapUpAt` is folded INTO the setpoints. Without that, a config
@@ -275,32 +351,41 @@ function normalizeWrapUpAt(value: number | null | undefined): number | null {
  * wrapUpAt (the default, D8) folds in nothing: there is no threshold to reach,
  * so the ladder stays exactly what the setpoints said.
  *
+ * `role` selects whose budget applies (1r6d.23). It defaults to 'session', so
+ * every pre-existing caller keeps the behaviour it had; 'player' layers
+ * `roles.player` over the top-level knobs first. The fold-in above then runs on
+ * the ROLE's wrapUpAt, which is what makes a player's threshold reachable on a
+ * ladder that was only ever tuned for the session.
+ *
  * Returns null when the component is absent, disabled, or left with an empty
  * ladder (nothing could ever fire, so say so by returning the same "off" value
  * rather than a config that silently does nothing).
  */
 export function resolveUsageCheckConfig(
   config: UsageCheckConfig | null,
+  role: UsageCheckRole = 'session',
 ): ResolvedUsageCheckConfig | null {
   if (config == null || config.enabled === false) {
     return null;
   }
 
+  const effective = applyRoleOverrides(config, role);
+
   const rawSetpoints =
-    config.setpoints === undefined
+    effective.setpoints === undefined
       ? USAGE_CHECK_DEFAULTS.setpoints
-      : config.setpoints;
+      : effective.setpoints;
   const wrapUpAt = normalizeWrapUpAt(
-    config.wrapUpAt === undefined
+    effective.wrapUpAt === undefined
       ? USAGE_CHECK_DEFAULTS.wrapUpAt
-      : config.wrapUpAt,
+      : effective.wrapUpAt,
   );
   const reArmDropFraction =
-    typeof config.reArmDropFraction === 'number' &&
-    Number.isFinite(config.reArmDropFraction) &&
-    config.reArmDropFraction > 0 &&
-    config.reArmDropFraction < 1
-      ? config.reArmDropFraction
+    typeof effective.reArmDropFraction === 'number' &&
+    Number.isFinite(effective.reArmDropFraction) &&
+    effective.reArmDropFraction > 0 &&
+    effective.reArmDropFraction < 1
+      ? effective.reArmDropFraction
       : USAGE_CHECK_DEFAULTS.reArmDropFraction;
 
   const ladder = new Set<number>();
@@ -321,6 +406,118 @@ export function resolveUsageCheckConfig(
     setpoints: [...ladder].sort((a, b) => a - b),
     wrapUpAt,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Whose context are we measuring?
+// ---------------------------------------------------------------------------
+
+/** Which kind of transcript file a path points at. */
+export type MeasurementScope = 'session' | 'subagent';
+
+/**
+ * What the hook decided to measure, or why it could not decide.
+ *
+ * 'unknown' is a DISTINCT member on purpose (rule 6): the one thing this must
+ * never do is answer "I could not find the player's transcript" by measuring
+ * the parent's instead. That substitution would look like a success, would
+ * report a number that is real but belongs to somebody else, and would
+ * reintroduce exactly the inverted bound this feature exists to remove — a
+ * player told to wrap up when its CONDUCTOR crosses the threshold.
+ */
+export type MeasurementTarget =
+  | {kind: 'session'; path: string}
+  | {kind: 'subagent'; path: string; agentId: string}
+  | {kind: 'unknown'; reason: string};
+
+/**
+ * Subagent ids as Claude Code writes them. Narrow on purpose: this string is
+ * concatenated into a filesystem path, so anything carrying a separator, a
+ * `..`, or a NUL is refused rather than resolved.
+ */
+const AGENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+
+/**
+ * The subagent transcript for `agentId`, derived from the parent's path.
+ *
+ * DERIVATION, measured 2026-09-03 and re-confirmed 2026-09-04:
+ *   transcript_path -> strip the trailing ".jsonl" -> the session DIRECTORY
+ *   + "/subagents/agent-<agent_id>.jsonl"
+ * i.e. ~/.claude/projects/<slug>/<parent-session-id>/subagents/agent-<id>.jsonl
+ *
+ * Identity lives in the FILE PATH and nowhere else: the `sessionId` field
+ * INSIDE a subagent transcript is the PARENT's id. That is almost certainly why
+ * an earlier investigation (home-base-1r6d.20) concluded no subagent-scoped
+ * transcript existed — it read transcript_path and record contents, both of
+ * which say "parent", and never looked at the directory.
+ *
+ * Returns null when the parent path is not a `.jsonl` file or the id is not a
+ * plain token. Both mean "we cannot derive it", never "use the parent".
+ */
+export function subagentTranscriptPath(
+  transcriptPath: string,
+  agentId: string,
+): string | null {
+  if (!AGENT_ID_PATTERN.test(agentId)) {
+    return null;
+  }
+  if (!transcriptPath.endsWith('.jsonl')) {
+    return null;
+  }
+  const sessionDir = transcriptPath.slice(0, -'.jsonl'.length);
+  if (sessionDir === '') {
+    return null;
+  }
+  return join(sessionDir, 'subagents', `agent-${agentId}.jsonl`);
+}
+
+/**
+ * Pick the transcript whose context this hook is reporting.
+ *
+ * No `agent_id` in the payload means the tool batch was the top-level session's
+ * own, so `transcript_path` is the right file — unchanged behaviour, and the
+ * only path that existed before 1r6d.23.
+ *
+ * An `agent_id` means the batch came from inside a subagent, and the subagent's
+ * own transcript is the only file that describes ITS context. When that file
+ * cannot be derived or is not on disk we return 'unknown' and the caller says
+ * so; we never hand back the parent's path as a consolation prize.
+ *
+ * The existence check lives HERE rather than being left to the reader so the
+ * failure can name the path it looked for. `readTranscriptFacts` returning a
+ * null context would be indistinguishable from a transcript that simply holds
+ * no usage yet, and the two need different messages.
+ */
+export function resolveMeasurementTarget(args: {
+  transcriptPath: string | null | undefined;
+  agentId: string | null | undefined;
+}): MeasurementTarget {
+  const {agentId, transcriptPath} = args;
+  if (transcriptPath == null || transcriptPath === '') {
+    return {kind: 'unknown', reason: 'the payload carried no transcript_path'};
+  }
+  if (agentId == null || agentId === '') {
+    return {kind: 'session', path: transcriptPath};
+  }
+
+  const path = subagentTranscriptPath(transcriptPath, agentId);
+  if (path == null) {
+    return {
+      kind: 'unknown',
+      reason: `could not derive a subagent transcript from transcript_path ${transcriptPath} and agent_id ${agentId}`,
+    };
+  }
+  try {
+    if (!statSync(path).isFile()) {
+      return {kind: 'unknown', reason: `${path} is not a file`};
+    }
+  } catch {
+    return {
+      kind: 'unknown',
+      reason: `no subagent transcript at ${path} (agent_id ${agentId}) — refusing to fall back to the parent session's transcript`,
+    };
+  }
+  return {agentId, kind: 'subagent', path};
 }
 
 // ---------------------------------------------------------------------------
@@ -458,8 +655,16 @@ interface ScanState {
  *     as a STRING. Either dates the notice equally, so both are accepted and
  *     `hookEvent` is deliberately NOT filtered on — we now fire from two
  *     different events, and a filter would have to be updated for a third.
+ *
+ * `scope` says WHICH conversation this file is: 'session' for a top-level
+ * transcript, where sidechain records belong to somebody else, and 'subagent'
+ * for a subagents/agent-<id>.jsonl file, where they are the whole point.
  */
-function scanWindow(text: string, state: ScanState): void {
+function scanWindow(
+  text: string,
+  state: ScanState,
+  scope: MeasurementScope,
+): void {
   const lines = text.split('\n');
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     if (state.contextTokens != null && state.lastAnnouncedSetpoint != null) {
@@ -486,10 +691,11 @@ function scanWindow(text: string, state: ScanState): void {
       continue; // A partially-written trailing line is normal on a live file.
     }
 
-    // A subagent's context is not this session's. Current Claude Code writes
-    // sidechains to a separate file, but older versions inlined them and this
-    // costs one comparison.
-    if (entry.isSidechain === true) {
+    // A subagent's context is not this session's — UNLESS the subagent IS the
+    // subject. Measured 2026-09-04: every record in a subagent transcript
+    // carries isSidechain:true (170/170 in the sample), so keeping this filter
+    // on that file would skip the entire file and report UNKNOWN forever.
+    if (scope === 'session' && entry.isSidechain === true) {
       continue;
     }
 
@@ -534,6 +740,8 @@ export function readTranscriptFacts(args: {
   transcriptPath: string;
   lowestSetpoint: number;
   initialWindowBytes?: number;
+  /** Defaults to 'session' — the shape every caller had before 1r6d.23. */
+  scope?: MeasurementScope;
 }): TranscriptFacts {
   const state: ScanState = {contextTokens: null, lastAnnouncedSetpoint: null};
   let windowBytes = args.initialWindowBytes ?? INITIAL_WINDOW_BYTES;
@@ -546,7 +754,7 @@ export function readTranscriptFacts(args: {
       return {...state, reachedStart: false};
     }
     reachedStart = window.reachedStart;
-    scanWindow(window.text, state);
+    scanWindow(window.text, state, args.scope ?? 'session');
 
     const needContext = state.contextTokens == null;
     const needSetpoint =
@@ -654,6 +862,16 @@ export function formatTokens(value: number): string {
   return parts.join(',');
 }
 
+/** Who the notice is about — see formatNotice. */
+export interface NoticeSubject {
+  scope: MeasurementScope;
+  /** `agent_type` from the hook payload ("player", "Explore", …), when given. */
+  agentType?: string | null;
+}
+
+/** The default subject: the top-level session, as it was before 1r6d.23. */
+const SESSION_SUBJECT: NoticeSubject = {scope: 'session'};
+
 /**
  * The notice. The first line carries the marker AND the machine-readable
  * `setpoint=` token that a later run reads back as state — see SETPOINT_TOKEN.
@@ -661,11 +879,30 @@ export function formatTokens(value: number): string {
  * "of context" is load-bearing wording: elsewhere in this SDK "usage" means
  * subscription QUOTA (`/usage`, ralph's usage gate), and the two numbers must
  * never be mistaken for each other.
+ *
+ * A SUBAGENT's notice says so explicitly and names its type (1r6d.23). The
+ * disclaimer is not decoration: for a year this hook could only report the
+ * parent's number, so a subagent reading "this session has used 400,000" had
+ * every reason to think it was its own. Saying whose number it is, in the same
+ * sentence as the number, is the whole point of the feature.
  */
-export function formatNotice(decision: UsageDecision): string {
-  const first = `${USAGE_CHECK_MARKER} This session has now used ${formatTokens(
-    decision.contextTokens,
-  )} tokens of context (setpoint=${decision.setpoint}).`;
+export function formatNotice(
+  decision: UsageDecision,
+  subject: NoticeSubject = SESSION_SUBJECT,
+): string {
+  const tokens = formatTokens(decision.contextTokens);
+  if (subject.scope === 'session') {
+    const line = `${USAGE_CHECK_MARKER} This session has now used ${tokens} tokens of context (setpoint=${decision.setpoint}).`;
+    return decision.wrapUp ? `${line}\n${WRAP_UP_DIRECTIVE}` : line;
+  }
+
+  // agent_type is what Claude Code called the subagent ("player", "Explore").
+  // Absent, "This subagent" still says the one thing that matters: not you.
+  const who =
+    subject.agentType == null || subject.agentType === ''
+      ? 'This subagent'
+      : `This ${subject.agentType} subagent`;
+  const first = `${USAGE_CHECK_MARKER} ${who} has now used ${tokens} tokens of its OWN context, measured from its own transcript — this is your number, not the parent session's (setpoint=${decision.setpoint}).`;
   return decision.wrapUp ? `${first}\n${WRAP_UP_DIRECTIVE}` : first;
 }
 
@@ -677,6 +914,14 @@ interface HookInput {
   cwd?: string;
   transcript_path?: string;
   hook_event_name?: string;
+  /**
+   * Present when and only when the tool call originated inside a subagent
+   * (measured 2026-09-03: 61 of 102 PostToolUse rows on a conductor session
+   * carried them, the other 41 being the conductor's own). Their PRESENCE is
+   * the role discriminant; no heuristic is involved.
+   */
+  agent_id?: string;
+  agent_type?: string;
 }
 
 /** The events this hook is wired to; anything else still echoes its own name. */
@@ -696,6 +941,16 @@ const DEFAULT_HOOK_EVENT = 'UserPromptSubmit';
  * self-corrects at the next setpoint or the next successful read. The unknown
  * state is also near-unreachable, since the same failed read would already have
  * left the context unmeasured.
+ *
+ * THE ONE THING IT DOES SAY OUT LOUD is a subagent whose own transcript it
+ * cannot find (1r6d.23). Silence there would be indistinguishable from "no
+ * notice was due", and the tempting repair — measure the parent instead — is
+ * the rule-6 violation this feature was built to remove. So that case writes a
+ * diagnostic to STDERR, naming the path it looked for, and emits nothing on
+ * stdout. stderr is the right channel: the hook still exits 0 and cannot block
+ * a turn, the model's context is never touched (so a persistent misconfig
+ * cannot become per-batch spam in the conversation), and the line is visible in
+ * `claude --debug` and when the hook is run by hand with a crafted payload.
  */
 export function runUsageCheck(args?: {stdin?: string}): number {
   let input: HookInput = {};
@@ -707,18 +962,34 @@ export function runUsageCheck(args?: {stdin?: string}): number {
   }
 
   const projectRoot = input.cwd ?? process.cwd();
-  const config = resolveUsageCheckConfig(readUsageCheckConfig(projectRoot));
-  if (config == null) {
+  const rawConfig = readUsageCheckConfig(projectRoot);
+  if (rawConfig == null || rawConfig.enabled === false) {
     return 0; // Not installed here, or explicitly disabled.
   }
 
-  if (input.transcript_path == null || input.transcript_path === '') {
+  // Presence of agent_id is the whole discriminant (see HookInput.agent_id).
+  const role: UsageCheckRole = input.agent_id ? 'player' : 'session';
+  const config = resolveUsageCheckConfig(rawConfig, role);
+  if (config == null) {
+    return 0; // Resolved to an empty ladder — nothing could ever fire.
+  }
+
+  const target = resolveMeasurementTarget({
+    agentId: input.agent_id,
+    transcriptPath: input.transcript_path,
+  });
+  if (target.kind === 'unknown') {
+    if (input.agent_id) {
+      // UNKNOWN, said out loud. Never a fallback to input.transcript_path.
+      console.error(`${USAGE_CHECK_MARKER} UNKNOWN: ${target.reason}`);
+    }
     return 0;
   }
 
   const facts = readTranscriptFacts({
     lowestSetpoint: config.setpoints[0] as number,
-    transcriptPath: input.transcript_path,
+    scope: target.kind,
+    transcriptPath: target.path,
   });
   if (facts.contextTokens == null) {
     return 0;
@@ -736,7 +1007,10 @@ export function runUsageCheck(args?: {stdin?: string}): number {
     return 0;
   }
 
-  const notice = formatNotice(decision);
+  const notice = formatNotice(decision, {
+    agentType: input.agent_type,
+    scope: target.kind,
+  });
 
   // Emit BOTH channels, exactly as time-check does and for the same reason:
   // `systemMessage` renders in Justin's terminal but never enters the model's

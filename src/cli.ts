@@ -496,7 +496,7 @@ void yargs(hideBin(process.argv))
   )
   .command(
     'usage-check',
-    'UserPromptSubmit + PostToolBatch hook: tell the session how many tokens of its OWN CONTEXT it has used (NOT subscription quota), once per setpoint — by default every 100k tokens. The wrap-up directive is opt-in and OFF unless componentConfig["usage-check"].wrapUpAt names a token count (reads stdin, prints nothing when not due)',
+    'UserPromptSubmit + PostToolBatch hook: tell the session how many tokens of its OWN CONTEXT it has used (NOT subscription quota), once per setpoint — by default every 100k tokens. When the payload carries an agent_id the number measured is the SUBAGENT\'s own, read from its own transcript, and componentConfig["usage-check"].roles.player overrides the budget for it. The wrap-up directive is opt-in and OFF unless a wrapUpAt names a token count (reads stdin, prints nothing when not due; a subagent whose transcript cannot be found prints UNKNOWN to stderr and measures nothing)',
     (y) => y,
     () => {
       // Always exits 0: a failing UserPromptSubmit hook can block the prompt.

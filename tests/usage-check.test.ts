@@ -17,14 +17,25 @@
  *     `input_tokens`, and a marker that simply sits beyond the read window are
  *     three different facts, and none of them is "the session has used 0
  *     tokens" or "no notice has ever been sent".
+ *  4. WHOSE NUMBER IS IT. A hook firing inside a subagent must measure the
+ *     SUBAGENT, and when it cannot find that subagent's transcript it must say
+ *     UNKNOWN rather than quietly reporting the parent's number as the
+ *     subagent's — a failure that would look exactly like a success.
  *
- * @see home-base-1r6d.1
+ * @see home-base-1r6d.1, home-base-1r6d.23
  */
 
 import {describe, expect, test} from 'bun:test';
-import {appendFileSync, mkdtempSync, readFileSync, writeFileSync} from 'fs';
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'fs';
 import {tmpdir} from 'os';
-import {join} from 'path';
+import {dirname, join} from 'path';
 
 import {setQuiet} from '../src/setup-helpers';
 import {
@@ -41,14 +52,17 @@ import {
   formatTokens,
   readTranscriptFacts,
   readUsageCheckConfig,
+  resolveMeasurementTarget,
   resolveUsageCheckConfig,
   runUsageCheck,
+  subagentTranscriptPath,
   USAGE_CHECK_CONFIG_KEY,
   USAGE_CHECK_DEFAULTS,
   USAGE_CHECK_MARKER,
   WRAP_UP_DIRECTIVE,
   type ResolvedUsageCheckConfig,
   type UsageCheckConfig,
+  type UsageCheckRole,
 } from '../src/usage-check';
 
 function tempDir(): string {
@@ -159,6 +173,18 @@ function resolved(config: UsageCheckConfig): ResolvedUsageCheckConfig {
   const value = resolveUsageCheckConfig(config);
   if (value == null) {
     throw new Error('expected a resolved config');
+  }
+  return value;
+}
+
+/** `resolved`, for a named role (home-base-1r6d.23). */
+function resolvedFor(
+  config: UsageCheckConfig,
+  role: UsageCheckRole,
+): ResolvedUsageCheckConfig {
+  const value = resolveUsageCheckConfig(config, role);
+  if (value == null) {
+    throw new Error(`expected a resolved config for role ${role}`);
   }
   return value;
 }
@@ -857,6 +883,386 @@ describe('runUsageCheck: end to end over real files', () => {
     const after = noticeOf(runCapturing(input));
     expect(after).toContain('setpoint=100000');
     expect(after).toContain('115,000 tokens of context');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-1r6d.23 — whose context is being measured
+// ---------------------------------------------------------------------------
+
+/**
+ * A subagent transcript's records ALL carry isSidechain:true — measured
+ * 2026-09-04 against a live player's file, 170 of 170 records, every one of
+ * them also carrying that agent's `agentId`. The scan therefore has to STOP
+ * skipping sidechain entries when the sidechain is the subject; a fixture that
+ * used isSidechain:false would test a file shape that never occurs.
+ */
+function sidechainEntry(entry: unknown, agentId: string): unknown {
+  return {...(entry as object), agentId, isSidechain: true};
+}
+
+/**
+ * A project whose parent transcript and one subagent transcript hold different
+ * context sizes, laid out exactly as Claude Code lays them out:
+ *   <dir>/session.jsonl
+ *   <dir>/session/subagents/agent-<agentId>.jsonl
+ */
+function subagentFixture(args: {
+  usageCheck: UsageCheckConfig;
+  sessionTokens: number;
+  agentTokens: number;
+  agentId: string;
+}) {
+  const dir = tempDir();
+  writeConfig(dir, args.usageCheck);
+
+  const sessionPath = join(dir, 'session.jsonl');
+  writeFileSync(
+    sessionPath,
+    `${JSON.stringify(assistantEntry(args.sessionTokens))}\n`,
+  );
+
+  const agentPath = join(
+    dir,
+    'session',
+    'subagents',
+    `agent-${args.agentId}.jsonl`,
+  );
+  mkdirSync(dirname(agentPath), {recursive: true});
+  writeFileSync(
+    agentPath,
+    `${JSON.stringify(
+      sidechainEntry(assistantEntry(args.agentTokens), args.agentId),
+    )}\n`,
+  );
+
+  return {agentPath, dir, sessionPath};
+}
+
+/** runCapturing, plus whatever went to stderr. */
+function runCapturingBoth(input: unknown): {
+  payload: Record<string, unknown> | null;
+  stderr: string;
+} {
+  const errors: string[] = [];
+  const originalError = console.error;
+  console.error = (...args: unknown[]) => {
+    errors.push(args.map(String).join(' '));
+  };
+  try {
+    return {payload: runCapturing(input), stderr: errors.join('\n')};
+  } finally {
+    console.error = originalError;
+  }
+}
+
+describe('subagent transcripts: the path derivation', () => {
+  test('strips .jsonl to get the session DIRECTORY, then indexes by agent id', () => {
+    expect(
+      subagentTranscriptPath('/p/-slug/6c2e-4a1b.jsonl', 'a405a84daeae6cd2b'),
+    ).toBe('/p/-slug/6c2e-4a1b/subagents/agent-a405a84daeae6cd2b.jsonl');
+  });
+
+  test('refuses an agent id that could escape the directory', () => {
+    for (const bad of ['../../etc/passwd', 'a/b', '', 'a\0b', 'a.b']) {
+      expect(subagentTranscriptPath('/p/s.jsonl', bad)).toBeNull();
+    }
+  });
+
+  test('refuses a parent path that is not a .jsonl file', () => {
+    expect(subagentTranscriptPath('/p/s.txt', 'a1')).toBeNull();
+    expect(subagentTranscriptPath('.jsonl', 'a1')).toBeNull();
+  });
+});
+
+describe('measurement target: agent_id decides, and failure is not the parent', () => {
+  const AGENT = 'a405a84daeae6cd2b';
+
+  test('no agent_id measures transcript_path — unchanged behaviour', () => {
+    const fx = subagentFixture({
+      agentId: AGENT,
+      agentTokens: 1,
+      sessionTokens: 1,
+      usageCheck: TEST_CONFIG,
+    });
+    expect(
+      resolveMeasurementTarget({
+        agentId: undefined,
+        transcriptPath: fx.sessionPath,
+      }),
+    ).toEqual({kind: 'session', path: fx.sessionPath});
+  });
+
+  test('an agent_id whose transcript exists resolves to that file', () => {
+    const fx = subagentFixture({
+      agentId: AGENT,
+      agentTokens: 1,
+      sessionTokens: 1,
+      usageCheck: TEST_CONFIG,
+    });
+    expect(
+      resolveMeasurementTarget({
+        agentId: AGENT,
+        transcriptPath: fx.sessionPath,
+      }),
+    ).toEqual({agentId: AGENT, kind: 'subagent', path: fx.agentPath});
+  });
+
+  test('a bogus agent_id is UNKNOWN, never the parent (rule 6)', () => {
+    const fx = subagentFixture({
+      agentId: AGENT,
+      agentTokens: 1,
+      sessionTokens: 1,
+      usageCheck: TEST_CONFIG,
+    });
+    const target = resolveMeasurementTarget({
+      agentId: 'abogusdeadbeef00',
+      transcriptPath: fx.sessionPath,
+    });
+
+    expect(target.kind).toBe('unknown');
+    // The whole bug this guards: 'session' here would measure the CONDUCTOR
+    // and report the number as the player's.
+    expect(JSON.stringify(target)).not.toContain(fx.sessionPath);
+    if (target.kind !== 'unknown') throw new Error('expected unknown');
+    expect(target.reason).toContain('agent-abogusdeadbeef00.jsonl');
+    expect(target.reason).toContain('refusing to fall back');
+  });
+
+  test('an underivable path is UNKNOWN rather than a silent session read', () => {
+    const target = resolveMeasurementTarget({
+      agentId: '../escape',
+      transcriptPath: '/p/s.jsonl',
+    });
+    expect(target.kind).toBe('unknown');
+  });
+
+  test('no transcript_path at all is UNKNOWN, not an empty measurement', () => {
+    expect(
+      resolveMeasurementTarget({agentId: null, transcriptPath: ''}).kind,
+    ).toBe('unknown');
+  });
+});
+
+describe('config: per-role budgets (players vs the top-level session)', () => {
+  // Justin's decided shape, 2026-09-04: a player wrap-up bound, and none for
+  // the session until it can respawn itself.
+  const JUSTINS_CONFIG: UsageCheckConfig = {
+    enabled: true,
+    roles: {player: {wrapUpAt: 350_000}},
+    wrapUpAt: null,
+  };
+
+  test('the session keeps null while the player gets 350,000', () => {
+    expect(resolved(JUSTINS_CONFIG).wrapUpAt).toBeNull();
+    expect(resolvedFor(JUSTINS_CONFIG, 'player').wrapUpAt).toBe(350_000);
+  });
+
+  test("the player's threshold is folded into the player's ladder", () => {
+    expect(resolvedFor(JUSTINS_CONFIG, 'player').setpoints).toContain(350_000);
+    expect(resolved(JUSTINS_CONFIG).setpoints).not.toContain(350_000);
+  });
+
+  test('an unnamed knob is inherited, not reset to the SDK default', () => {
+    const config: UsageCheckConfig = {
+      enabled: true,
+      reArmDropFraction: 0.5,
+      roles: {player: {wrapUpAt: 350_000}},
+      setpoints: [50_000],
+    };
+    const player = resolvedFor(config, 'player');
+    expect(player.reArmDropFraction).toBe(0.5);
+    expect(player.setpoints).toEqual([50_000, 350_000]);
+  });
+
+  test('a role may override the ladder itself, not just the threshold', () => {
+    const config: UsageCheckConfig = {
+      enabled: true,
+      roles: {player: {setpoints: [25_000, 50_000]}},
+      setpoints: [100_000],
+    };
+    expect(resolvedFor(config, 'player').setpoints).toEqual([25_000, 50_000]);
+    expect(resolved(config).setpoints).toEqual([100_000]);
+  });
+
+  test('a role may set null explicitly to switch its own directive off', () => {
+    const config: UsageCheckConfig = {
+      enabled: true,
+      roles: {player: {wrapUpAt: null}},
+      wrapUpAt: 200_000,
+    };
+    expect(resolvedFor(config, 'player').wrapUpAt).toBeNull();
+    expect(resolved(config).wrapUpAt).toBe(200_000);
+  });
+
+  test('no roles block at all means both roles resolve identically', () => {
+    const config: UsageCheckConfig = {enabled: true, wrapUpAt: 200_000};
+    expect(resolvedFor(config, 'player')).toEqual(resolved(config));
+  });
+
+  test('enabled:false is not role-overridable — off is off', () => {
+    const config: UsageCheckConfig = {
+      enabled: false,
+      roles: {player: {wrapUpAt: 350_000}},
+    };
+    expect(resolveUsageCheckConfig(config, 'player')).toBeNull();
+  });
+});
+
+describe('runUsageCheck: a player is measured on ITS OWN transcript', () => {
+  const AGENT = 'a405a84daeae6cd2b';
+
+  /** Justin's shape: no session bound, a 350k player bound. */
+  const ROLE_CONFIG: UsageCheckConfig = {
+    enabled: true,
+    roles: {player: {wrapUpAt: 350_000}},
+    setpoints: [100_000, 200_000, 300_000],
+    wrapUpAt: null,
+  };
+
+  test('the two numbers are independent, from the same payload', () => {
+    const fx = subagentFixture({
+      agentId: AGENT,
+      agentTokens: 360_000,
+      sessionTokens: 900_000,
+      usageCheck: ROLE_CONFIG,
+    });
+    const base = {
+      cwd: fx.dir,
+      hook_event_name: 'PostToolBatch',
+      transcript_path: fx.sessionPath,
+    };
+
+    const asPlayer = noticeOf(
+      runCapturing({...base, agent_id: AGENT, agent_type: 'player'}),
+    );
+    const asSession = noticeOf(runCapturing(base));
+
+    // The player's own number, its own rung, and its own wrap-up bound.
+    expect(asPlayer).toContain('360,000 tokens');
+    expect(asPlayer).toContain('setpoint=350000');
+    expect(asPlayer).toContain(WRAP_UP_DIRECTIVE);
+    // The notice names the PLAYER, so it cannot be read as the parent's.
+    expect(asPlayer).toContain('This player subagent');
+    expect(asPlayer).toContain('not the parent');
+
+    // Same payload, same instant, the session's own number — and NO directive,
+    // because the session opted out while the player opted in.
+    expect(asSession).toContain('900,000 tokens');
+    expect(asSession).toContain('setpoint=300000');
+    expect(asSession).not.toContain(WRAP_UP_DIRECTIVE);
+    expect(asSession).toContain('This session');
+
+    // The property the whole bead exists for.
+    expect(asPlayer).not.toBe(asSession);
+  });
+
+  test('an unknown agent_type still says subagent rather than session', () => {
+    const fx = subagentFixture({
+      agentId: AGENT,
+      agentTokens: 210_000,
+      sessionTokens: 10,
+      usageCheck: ROLE_CONFIG,
+    });
+    const notice = noticeOf(
+      runCapturing({
+        agent_id: AGENT,
+        cwd: fx.dir,
+        transcript_path: fx.sessionPath,
+      }),
+    );
+    expect(notice).toContain('This subagent has now used 210,000 tokens');
+  });
+
+  test('the once-per-setpoint contract closes in the SUBAGENT file', () => {
+    // Verified live 2026-09-04: a notice emitted during a player's turn is
+    // recorded in that player's own transcript as a hook_additional_context
+    // attachment with isSidechain:true and its agentId — so the state round
+    // trip has to be read back from the same file the context came from.
+    const fx = subagentFixture({
+      agentId: AGENT,
+      agentTokens: 210_000,
+      sessionTokens: 10,
+      usageCheck: ROLE_CONFIG,
+    });
+    const input = {
+      agent_id: AGENT,
+      agent_type: 'player',
+      cwd: fx.dir,
+      transcript_path: fx.sessionPath,
+    };
+
+    const first = noticeOf(runCapturing(input));
+    expect(first).toContain('setpoint=200000');
+
+    // Record it exactly as Claude Code does — into the subagent's file.
+    appendFileSync(
+      fx.agentPath,
+      `${JSON.stringify(
+        sidechainEntry(noticeEntry(first as string), AGENT),
+      )}\n`,
+    );
+    expect(runCapturing(input)).toBeNull();
+  });
+
+  test('NEGATIVE CONTROL: a bogus agent_id reports UNKNOWN and measures nothing', () => {
+    const fx = subagentFixture({
+      agentId: AGENT,
+      agentTokens: 210_000,
+      sessionTokens: 900_000,
+      usageCheck: ROLE_CONFIG,
+    });
+
+    const {payload, stderr} = runCapturingBoth({
+      agent_id: 'abogusdeadbeef00',
+      agent_type: 'player',
+      cwd: fx.dir,
+      transcript_path: fx.sessionPath,
+    });
+
+    // Nothing on stdout: no notice, and above all no notice carrying a number.
+    expect(payload).toBeNull();
+    // The failure is SAID, not swallowed.
+    expect(stderr).toContain('UNKNOWN');
+    expect(stderr).toContain('agent-abogusdeadbeef00.jsonl');
+    // And it is emphatically NOT the parent's 900,000 relabelled as the
+    // player's — the exact substitution rule 6 forbids.
+    expect(stderr).not.toContain('900,000');
+    expect(stderr).not.toContain('setpoint=');
+  });
+
+  test('a real agent_id whose file was deleted mid-session is UNKNOWN too', () => {
+    const fx = subagentFixture({
+      agentId: AGENT,
+      agentTokens: 210_000,
+      sessionTokens: 900_000,
+      usageCheck: ROLE_CONFIG,
+    });
+    rmSync(fx.agentPath);
+
+    const {payload, stderr} = runCapturingBoth({
+      agent_id: AGENT,
+      cwd: fx.dir,
+      transcript_path: fx.sessionPath,
+    });
+    expect(payload).toBeNull();
+    expect(stderr).toContain('UNKNOWN');
+  });
+
+  test('a top-level session with a broken transcript stays SILENT, as before', () => {
+    // The stderr channel is for the subagent case only: a session that cannot
+    // read its own transcript is the pre-existing, deliberately quiet path.
+    const {dir} = (() => {
+      const d = tempDir();
+      writeConfig(d, ROLE_CONFIG);
+      return {dir: d};
+    })();
+    const {payload, stderr} = runCapturingBoth({
+      cwd: dir,
+      transcript_path: join(dir, 'nope.jsonl'),
+    });
+    expect(payload).toBeNull();
+    expect(stderr).toBe('');
   });
 });
 
