@@ -39,6 +39,8 @@
 
 import {execFileSync} from 'child_process';
 
+import {renderGitCommand} from '../plugin/lib/repo-status/core';
+
 /**
  * How many conflicted paths a preview carries. The COUNT is always exact; this
  * caps only the list, so one branch that renamed a directory cannot bury the
@@ -110,14 +112,6 @@ function runGit(argv: string[], cwd: string): GitRun {
 /** A 40-char sha1 or 64-char sha256 object id — what a real result starts with. */
 const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 
-const SHELL_SAFE_ARG = /^[A-Za-z0-9_@%+=:,./-]+$/;
-
-/** The argv as a pasteable command line, so a reported failure can be re-run. */
-function renderGitCommand(argv: string[]): string {
-  const quote = (arg: string): string =>
-    SHELL_SAFE_ARG.test(arg) ? arg : `'${arg.split("'").join(`'\\''`)}'`;
-  return ['git', ...argv.map(quote)].join(' ');
-}
 
 /** git's own complaint, first line only, collapsed to fit in a one-line `why`. */
 function firstLine(text: string): string {

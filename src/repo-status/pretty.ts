@@ -28,6 +28,8 @@
  * piped, and a wrapped table is less readable than plain lines.
  */
 
+import {formatTouched} from '../plugin/lib/repo-status/prime-view';
+
 import type {RepoStatusReport, BranchRow} from './report';
 import type {Disposition} from './disposition';
 import type {OverlapReport} from './overlap';
@@ -55,18 +57,6 @@ const GROUPS: {heading: string; key: Disposition; blurb: string}[] = [
     key: 'merged',
   },
 ];
-
-const RECENT_TOUCH_MS = 72 * 60 * 60 * 1000;
-
-/** YYYY-MM-DD, plus ` HH:MM` when the commit is within the last 72h. */
-function formatTouched(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-  if (Date.now() - d.getTime() > RECENT_TOUCH_MS) return date;
-  return `${date} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
 
 /** `1 branch` / `13 branches` — the sibilant endings need `es`, not `s`. */
 function plural(n: number, word: string): string {

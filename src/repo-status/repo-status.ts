@@ -560,11 +560,13 @@ const statusCommand = {
         describe: 'Render the compact human-readable ledger instead of YAML',
         type: 'boolean' as const,
       })
-      // An explicit --all next to an explicit --since-days/--include-archive is
-      // a contradiction, not a preference to silently resolve — the same reflex
-      // as plan-experimental refusing --json with --markdown.
-      .conflicts('all', 'since-days')
-      .conflicts('all', 'include-archive'),
+      // An explicit --all next to an explicit --since-days is a contradiction —
+      // two different windows — and is refused rather than silently resolved,
+      // the same reflex as plan-experimental refusing --json with --markdown.
+      // --include-archive is NOT in that class: alongside --all it is merely
+      // redundant, and --all winning errs toward showing MORE, which is the
+      // safe direction for a filter.
+      .conflicts('all', 'since-days'),
   command: ['status', '$0'],
   describe: 'Per-branch disposition ledger for the repo',
   handler: (args: any) => {

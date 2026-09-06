@@ -185,9 +185,15 @@ function prNoteFor(
 
 const RECENT_TOUCH_MS = 72 * 60 * 60 * 1000;
 
-/** YYYY-MM-DD, plus ` HH:MM` (24h, local) when the commit is within the last 72h. */
-function formatTouched(iso: string): string {
+/**
+ * YYYY-MM-DD, plus ` HH:MM` (24h, local) when the commit is within the last 72h.
+ *
+ * Exported because `--pretty` renders the same dates for the same reader and
+ * they must not drift into two conventions (home-base-qyu1.33.4).
+ */
+export function formatTouched(iso: string): string {
   const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
   const y = d.getFullYear();
   const mo = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');

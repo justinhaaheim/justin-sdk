@@ -40,6 +40,7 @@
 
 import {execFileSync} from 'child_process';
 
+import {renderGitCommand} from '../plugin/lib/repo-status/core';
 import {previewMerge, type MergePreview} from './merge-preview';
 
 /** Pairs that may be merge-checked in one run, after the shared-file screen. */
@@ -48,13 +49,6 @@ export const DEFAULT_PAIR_CAP = 20;
 /** Cap on a reported shared-path LIST. Counts are never capped. */
 const SHARED_FILE_CAP = 12;
 
-const SHELL_SAFE_ARG = /^[A-Za-z0-9_@%+=:,./-]+$/;
-
-function renderGitCommand(argv: string[]): string {
-  const quote = (arg: string): string =>
-    SHELL_SAFE_ARG.test(arg) ? arg : `'${arg.split("'").join(`'\\''`)}'`;
-  return ['git', ...argv.map(quote)].join(' ');
-}
 
 /**
  * The paths a branch changed relative to its merge base with the baseline — or

@@ -86,8 +86,12 @@ const SHELL_SAFE_ARG = /^[A-Za-z0-9_@%+=:,./-]+$/;
  * reader APPROVES and `apply` then executes, so its rendering is drift-tested
  * against the argv git actually receives; this one renders a command that has
  * ALREADY failed, for a human to reproduce.
+ *
+ * `merge-preview.ts` and `overlap.ts` DO import this one: they sit above this
+ * file in the graph, so there is no cycle to avoid, and they render the same
+ * kind of thing — a command that failed, for a human to re-run.
  */
-function renderGitCommand(argv: string[]): string {
+export function renderGitCommand(argv: string[]): string {
   const quote = (arg: string): string =>
     SHELL_SAFE_ARG.test(arg)
       ? arg

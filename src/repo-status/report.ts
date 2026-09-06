@@ -324,6 +324,14 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
     overlaps && rows != null
       ? buildOverlaps(
           rows
+            // OPEN work only. Justin's question is about the branches still in
+            // flight; a `merged` (squash-merged) or `mirrored` row is finished,
+            // and pairing it against a live branch restates what that row's own
+            // `mergePreview` already said, at the cost of a merge-tree run.
+            .filter(
+              (r) =>
+                r.disposition === 'needs-judgment' || r.disposition === 'review',
+            )
             .filter((r) => changedByBranch.has(r.name))
             .map((r) => ({
               changed: changedByBranch.get(r.name) as ChangedFileSet,
