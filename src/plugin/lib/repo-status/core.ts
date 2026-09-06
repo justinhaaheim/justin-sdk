@@ -32,6 +32,30 @@ import type {
 
 const DEFAULT_SINCE_DAYS = 30;
 
+const ARCHIVE_PREFIX = 'archive/';
+
+/**
+ * Is this ref an `archive/*` mirror?
+ *
+ * Tested on the BARE name, with any remote qualifier stripped first:
+ * `origin/archive/foo` is every bit as archived as `archive/foo`, and its full
+ * name does not start with the prefix. `plan.ts` learned this the hard way —
+ * checking the qualified name there produced proposals to archive an archive as
+ * `archive/archive/foo` — and the same normalisation is what `content.ts` does
+ * before looking a mirror up.
+ *
+ * Remote-qualified names are the only ones with a prefix to strip, so
+ * `isRemoteOnly` decides rather than a guess about slashes: a LOCAL branch
+ * genuinely called `origin/thing` is legal, and blindly cutting at the first
+ * slash would read it as the branch `thing` on the remote `origin`.
+ */
+export function isArchiveRef(tip: {isRemoteOnly: boolean; name: string}): boolean {
+  const bare = tip.isRemoteOnly
+    ? tip.name.slice(tip.name.indexOf('/') + 1)
+    : tip.name;
+  return bare.startsWith(ARCHIVE_PREFIX);
+}
+
 // ---------------------------------------------------------------------------
 // git plumbing
 // ---------------------------------------------------------------------------
@@ -312,11 +336,18 @@ function resolveBaseline(
  * Returns null only when there is nothing sensible to measure against — a
  * detached HEAD with no explicit baseline, or not a git repo at all.
  *
- * Branches are gated by `sinceDays` BEFORE any per-branch `rev-list` runs (that
- * gate is what keeps the session-start path cheap), except that a branch with a
- * worktree is always kept regardless of age — an old branch someone still has
- * checked out is precisely the kind of thing worth surfacing. Pass
- * `sinceDays: null` to keep every branch, which is what reconcile wants.
+ * Branches are gated by `sinceDays` and, when asked, by `excludeArchive` BEFORE
+ * any per-branch `rev-list` runs — that ordering is what keeps the session-start
+ * path cheap and what makes the gates a speed-up rather than a cosmetic one.
+ * A branch with a worktree is exempt from both, however old and however named:
+ * an old branch someone still has checked out is precisely the kind of thing
+ * worth surfacing. Pass `sinceDays: null` to keep every branch, which is what
+ * `plan`/`apply` want.
+ *
+ * WHATEVER IS DROPPED IS COUNTED, in `filtered` (home-base-qyu1.33.1). A gate
+ * that shortens the ledger without saying so turns "here are the open branches"
+ * into a claim that is quietly wrong, which is rule 6 arriving through the
+ * filter layer instead of the error path.
  *
  * No `ahead > 0` filtering happens here: a branch with `ahead === 0` is fully
  * merged, which is a meaningful disposition rather than something to hide.
@@ -344,15 +375,55 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
   const sinceDays =
     opts.sinceDays === null ? null : (opts.sinceDays ?? DEFAULT_SINCE_DAYS);
 
+  const excludeArchive = opts.excludeArchive === true;
+
   const tips = getBranchTips(cwd, worktrees);
-  const candidates = tips
-    ?.filter((t) => t.name !== baselineRef)
-    .filter(
-      (t) =>
-        sinceDays === null ||
-        t.worktreePath != null ||
-        isRecentEnough(t.lastCommitDate, sinceDays),
-    );
+
+  // Counted, not merely filtered. Every number below ends up in `filtered`, so
+  // a caller can tell a short ledger from a small repo; they stay NULL when
+  // there were no tips to walk, because "0 excluded" would be a measurement
+  // that never ran.
+  let excludedAsArchive: number | null = null;
+  let excludedAsStale: number | null = null;
+  let keptForWorktree: number | null = null;
+
+  let candidates: BranchTip[] | undefined;
+  if (tips != null) {
+    excludedAsArchive = 0;
+    excludedAsStale = 0;
+    keptForWorktree = 0;
+    candidates = [];
+    for (const tip of tips) {
+      if (tip.name === baselineRef) continue;
+      // A CHECKED-OUT BRANCH IS NEVER HIDDEN, by either filter. Something is
+      // standing in it right now, which is the strongest available signal that
+      // it is live work — and hiding it is the exact failure the prime view
+      // exists to prevent. Checked before both tests so the exemption is
+      // visible as one rule rather than repeated inside each.
+      if (tip.worktreePath != null) {
+        if (
+          (excludeArchive && isArchiveRef(tip)) ||
+          (sinceDays !== null && !isRecentEnough(tip.lastCommitDate, sinceDays))
+        ) {
+          keptForWorktree += 1;
+        }
+        candidates.push(tip);
+        continue;
+      }
+      if (excludeArchive && isArchiveRef(tip)) {
+        excludedAsArchive += 1;
+        continue;
+      }
+      // Age is judged over what SURVIVED the archive filter, so a stale archive
+      // mirror is counted once — under the rule that actually removed it — and
+      // the two numbers sum to the total dropped.
+      if (sinceDays !== null && !isRecentEnough(tip.lastCommitDate, sinceDays)) {
+        excludedAsStale += 1;
+        continue;
+      }
+      candidates.push(tip);
+    }
+  }
 
   const branches: BranchDivergence[] | null =
     candidates?.map((t) => ({
@@ -370,6 +441,13 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
     currentBranch,
     defaultBranch,
     enumerationFailures,
+    filtered: {
+      excludeArchive,
+      excludedAsArchive,
+      excludedAsStale,
+      keptForWorktree,
+      sinceDays,
+    },
     repoRoot,
     worktrees,
   };

@@ -135,6 +135,8 @@ export interface CoreInventory {
   worktrees: WorktreeEntry[] | null;
   /** Empty when the whole walk was readable. One entry per failed half. */
   enumerationFailures: EnumerationFailure[];
+  /** What was dropped before `branches` was built. Always present. */
+  filtered: FilterSummary;
 }
 
 // ---------------------------------------------------------------------------
@@ -156,4 +158,64 @@ export interface CoreOptions {
    * branch, however old; the session-start view wants only recent ones).
    */
   sinceDays?: number | null;
+  /**
+   * Drop `archive/*` refs from the walk. They are mirrors of finished work —
+   * the thing a reconcile already dealt with — so on the "what is still open?"
+   * question they are pure noise, and they are the majority of the noise in a
+   * repo that has been reconciled a few times.
+   *
+   * Filtering them from the LEDGER does not remove them as EVIDENCE: the
+   * archive-mirror lookup in `content.ts` resolves `archive/<name>` by ref name
+   * and never reads this list, so a branch still gets `mirrored` from a mirror
+   * this filter hides. Default false here — the callers that want the
+   * unfiltered walk (`plan`, `apply`) get it by not asking.
+   */
+  excludeArchive?: boolean;
+}
+
+/**
+ * What the core walk DROPPED before anything downstream ever saw it.
+ *
+ * WHY THIS IS PART OF THE SCHEMA (home-base-qyu1.33.1). Filtering is the one
+ * feature that makes the ledger shorter without making anything false — and
+ * that is exactly the shape rule 6 exists to catch. A reader who asks "what
+ * branches are open?" and gets eight rows has been told, implicitly, that there
+ * are eight; if three more were hidden for being old and two for being archive
+ * mirrors, that reading is wrong and NOTHING in the output says so. So the
+ * counts travel with the ledger, always, including when they are zero: a
+ * present `excludedByAge: 0` is the claim "the window was applied and it
+ * dropped nothing", which an absent key cannot make.
+ *
+ * The counts are NULL — never 0 — when the branch listing itself failed. There
+ * was no set to filter, so "0 were excluded" would be a measurement that never
+ * happened, and this is the module that must not manufacture one.
+ */
+export interface FilterSummary {
+  /**
+   * The age window applied, in days. Null means no age gate: every branch was
+   * considered however old. Not the same as `0`.
+   */
+  sinceDays: number | null;
+  /** Whether `archive/*` refs were dropped from the ledger. */
+  excludeArchive: boolean;
+  /**
+   * Branches dropped for being `archive/*` mirrors. Null when the branch
+   * listing failed, 0 when the filter ran and matched nothing.
+   */
+  excludedAsArchive: number | null;
+  /**
+   * Branches dropped for having no commit inside the window. Null when the
+   * branch listing failed, 0 when the gate ran and matched nothing.
+   *
+   * Counted over what SURVIVED the archive filter, so the two numbers sum to
+   * the total dropped rather than double-counting a stale archive mirror.
+   */
+  excludedAsStale: number | null;
+  /**
+   * Branches that matched a filter but were kept anyway for having a worktree.
+   * A checked-out branch is never hidden — an old branch someone still has
+   * open is precisely the thing worth surfacing — and this says how often that
+   * exemption fired, so the kept row is not mistaken for a filter bug.
+   */
+  keptForWorktree: number | null;
 }

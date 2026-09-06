@@ -23,6 +23,14 @@ import {
 } from './content';
 import {decideDisposition, type Disposition} from './disposition';
 import {describeMergeShape, type MergeShape} from './merge-shape';
+import {previewMerge, type MergePreview} from './merge-preview';
+import {
+  buildOverlaps,
+  OVERLAPS_NOT_RUN,
+  readChangedFiles,
+  type ChangedFileSet,
+  type OverlapReport,
+} from './overlap';
 import {
   EMPTY_PR_INDEX,
   fetchPullRequests,
@@ -38,6 +46,7 @@ import {
 import type {
   BranchDivergence,
   EnumerationFailure,
+  FilterSummary,
   WorktreeEntry,
 } from '../plugin/lib/repo-status/types';
 
@@ -87,6 +96,20 @@ export interface BranchRow {
    * those two numbers do not exist. See `merge-shape.ts`.
    */
   mergeShape: MergeShape;
+  /**
+   * Whether the merge `mergeShape` describes would actually APPLY, and which
+   * files break if not. Null when there was nothing to preview — no unique
+   * commits, an unmeasured divergence, or the enrichment switched off — which
+   * is a different statement from `kind: 'clean'`. See `merge-preview.ts`.
+   */
+  mergePreview: MergePreview | null;
+  /**
+   * How many files this branch changed relative to its merge base with the
+   * baseline — the cheapest available proxy for how big a merge this is. Null
+   * when not computed or not readable; the LIST lives on `changedFiles`, and
+   * only in the `branch` deep-dive.
+   */
+  changedFileCount: number | null;
   lastCommitDate: string;
   worktree: string | null;
   disposition: Disposition;
@@ -96,6 +119,8 @@ export interface BranchRow {
   archiveMirror: ArchiveMirror | null;
   /** Populated only by the `branch` deep-dive, which is where detail belongs. */
   commits?: CommitVerdict[];
+  /** Same: the full changed-file list is deep-dive detail, not ledger material. */
+  changedFiles?: string[];
 }
 
 export interface RepoStatusSummary {
@@ -139,7 +164,20 @@ export interface RepoStatusReport {
     prs: boolean;
     prsUnavailableReason: string | null;
     submodules: boolean;
+    mergePreview: boolean;
+    overlaps: boolean;
   };
+  /**
+   * What the walk DROPPED before `branches` was built. Always present, so a
+   * short ledger can never be mistaken for a small repo (home-base-qyu1.33.1).
+   */
+  filtered: FilterSummary;
+  /**
+   * Which of the branches above are in each other's way. Every count is null
+   * when the enrichment did not run, so "no overlaps" and "did not look" stay
+   * distinguishable.
+   */
+  overlaps: OverlapReport;
   enumerationFailures?: EnumerationFailure[];
   /** Null when `git worktree list` failed — NOT the same as "no worktrees". */
   worktrees: WorktreeEntry[] | null;
@@ -169,6 +207,26 @@ export interface ReportOptions {
   submoduleStores?: boolean;
   /** Age gate; null keeps every branch however old (what reconcile wants). */
   sinceDays?: number | null;
+  /**
+   * Drop `archive/*` mirrors from the ledger. They are finished work a previous
+   * reconcile already dealt with, and in a repo that has been reconciled a few
+   * times they are most of the rows. Off by default here so `plan`/`apply` — the
+   * callers that must see every branch — get the full set without asking.
+   */
+  excludeArchive?: boolean;
+  /**
+   * Run `git merge-tree` per branch with unique work: one cheap local call each
+   * (~0.1s), answering whether the merge applies cleanly.
+   */
+  mergePreview?: boolean;
+  /**
+   * Read each candidate's changed-file set and cross-compare them. Populates
+   * `changedFileCount` on every row with unique work AND the `overlaps` section.
+   * Linear in branches, plus a capped number of pairwise merges.
+   */
+  overlaps?: boolean;
+  /** Max pairs to merge-check after the shared-file screen. */
+  pairCap?: number;
   /** Restrict to one branch (the `branch <name>` deep-dive). */
   only?: string;
 }
@@ -184,7 +242,11 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
   const {
     content = true,
     cwd,
+    excludeArchive = false,
+    mergePreview = true,
     only,
+    overlaps = true,
+    pairCap,
     prs = true,
     sinceDays = null,
     submoduleStores = false,
@@ -194,6 +256,7 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
   const inventory = buildCoreInventory({
     baseline: 'default',
     cwd,
+    excludeArchive,
     sinceDays,
   });
   if (inventory == null) return null;
@@ -224,10 +287,52 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
       })
     : EMPTY_SUBMODULE_INVENTORY;
 
+  // Changed-file sets are read ONCE and then used twice — for each row's
+  // `changedFileCount` and for the pairwise intersection. Reading them per
+  // consumer would double the git calls to answer the same question.
+  //
+  // Only branches with unique work get one: a branch with `ahead === 0` has no
+  // footprint of its own to compare, and one with an unmeasured divergence has
+  // already failed the walk this would repeat.
+  const changedByBranch = new Map<string, ChangedFileSet>();
+  if (overlaps) {
+    for (const branch of selected ?? []) {
+      if (branch.divergence == null || branch.divergence.ahead === 0) continue;
+      changedByBranch.set(
+        branch.name,
+        readChangedFiles(inventory.baselineRef, branch.name, cwd),
+      );
+    }
+  }
+
   const rows: BranchRow[] | null =
     selected?.map((branch) =>
-      buildRow(branch, inventory.baselineRef, cwd, {content, only, prIndex}),
+      buildRow(branch, inventory.baselineRef, cwd, {
+        changed: changedByBranch.get(branch.name) ?? null,
+        content,
+        mergePreview,
+        only,
+        prIndex,
+      }),
     ) ?? null;
+
+  // Pairs are built from the rows this report actually SHOWS, so the overlap
+  // section is a claim about the ledger above it rather than about some larger
+  // set the reader cannot see. A null `rows` means there was no set to compare,
+  // which `OVERLAPS_NOT_RUN` states without implying agreement.
+  const overlapReport: OverlapReport =
+    overlaps && rows != null
+      ? buildOverlaps(
+          rows
+            .filter((r) => changedByBranch.has(r.name))
+            .map((r) => ({
+              changed: changedByBranch.get(r.name) as ChangedFileSet,
+              lastCommitDate: r.lastCommitDate,
+              name: r.name,
+            })),
+          {cwd, pairCap},
+        )
+      : OVERLAPS_NOT_RUN;
 
   rows?.sort((a, b) => {
     const d =
@@ -247,6 +352,8 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
     branches: rows,
     enrichments: {
       content,
+      mergePreview,
+      overlaps,
       prs: prIndex.available,
       prsUnavailableReason: prIndex.unavailableReason,
       submodules,
@@ -256,6 +363,8 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
     ...(inventory.enumerationFailures.length > 0
       ? {enumerationFailures: inventory.enumerationFailures}
       : {}),
+    filtered: inventory.filtered,
+    overlaps: overlapReport,
     repo: {
       baselineRef: inventory.baselineRef,
       currentBranch: inventory.currentBranch,
@@ -283,7 +392,13 @@ function buildRow(
   branch: BranchDivergence,
   baselineRef: string,
   cwd: string,
-  ctx: {content: boolean; only: string | undefined; prIndex: PrIndex},
+  ctx: {
+    changed: ChangedFileSet | null;
+    content: boolean;
+    mergePreview: boolean;
+    only: string | undefined;
+    prIndex: PrIndex;
+  },
 ): BranchRow {
   // Skip the expensive proof when the branch has nothing unique — there is
   // nothing for it to prove, and on a large repo that is most of the work.
@@ -308,16 +423,30 @@ function buildRow(
     proof,
   });
 
+  // Same gate as the proof, for the same two reasons: a branch with no unique
+  // commits has nothing to merge, and one with an unmeasured divergence would
+  // be previewed by the same git that just failed to walk it. `null` here means
+  // NOT PREVIEWED, which is deliberately not expressible as `kind: 'clean'`.
+  const preview =
+    ctx.mergePreview && branch.divergence != null && branch.divergence.ahead > 0
+      ? previewMerge(baselineRef, branch.name, cwd)
+      : null;
+
   return {
     ahead: branch.divergence?.ahead ?? null,
     archiveMirror: proof?.archiveMirror ?? null,
     behind: branch.divergence?.behind ?? null,
+    changedFileCount: ctx.changed?.count ?? null,
+    ...(ctx.only != null && ctx.changed?.files != null
+      ? {changedFiles: ctx.changed.files}
+      : {}),
     ...(ctx.only != null && proof != null
       ? {commits: proof.uniqueCommits}
       : {}),
     disposition,
     isRemoteOnly: branch.isRemoteOnly,
     lastCommitDate: branch.lastCommitDate,
+    mergePreview: preview,
     mergeShape: describeMergeShape(branch.divergence, baselineRef),
     name: branch.name,
     pr:

@@ -18,7 +18,11 @@
 import {buildCoreInventory} from './core';
 import {EMPTY_PR_INDEX, fetchPullRequests, prForBranch} from './prs';
 
-import type {BranchDivergence, EnumerationFailure} from './types';
+import type {
+  BranchDivergence,
+  EnumerationFailure,
+  FilterSummary,
+} from './types';
 
 /**
  * PR fetching is OFF by default here, and that default is measured rather than
@@ -69,6 +73,15 @@ export interface DivergenceReport {
    * that a repo git could not read is never described as clean.
    */
   enumerationFailures: EnumerationFailure[];
+  /**
+   * What the walk hid before any of this was computed.
+   *
+   * Carried because the sentence this view prints — "N branches have unmerged
+   * work" — is read as a complete count, and two filters run before it. Saying
+   * so in one clause is what keeps the number a claim about the whole repo
+   * rather than about a subset the reader cannot see (home-base-qyu1.33.1).
+   */
+  filtered: FilterSummary;
 }
 
 export interface RunOptions {
@@ -77,12 +90,21 @@ export interface RunOptions {
   sinceDays?: number;
   /** Include PR state. Off by default — see PRIME_PR_TIMEOUT_MS above for why. */
   prs?: boolean;
+  /**
+   * Hide `archive/*` mirrors. Default TRUE here: this section answers "what
+   * work might I not know about", and an archive mirror is by definition work a
+   * previous reconcile finished with. Left visible they are pure noise at the
+   * top of every session in a repo that has been reconciled a few times — and
+   * noise at session start is what makes the real rows get skimmed past.
+   */
+  excludeArchive?: boolean;
 }
 
 export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
   const inventory = buildCoreInventory({
     baseline: 'current',
     cwd: opts.cwd,
+    excludeArchive: opts.excludeArchive ?? true,
     sinceDays: opts.sinceDays,
   });
   // Detached HEAD / not a repo — nothing sensible to report.
@@ -140,6 +162,7 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
   return {
     currentBranch: inventory.currentBranch,
     enumerationFailures: inventory.enumerationFailures,
+    filtered: inventory.filtered,
     groups,
   };
 }
@@ -173,6 +196,28 @@ function formatTouched(iso: string): string {
   const hh = String(d.getHours()).padStart(2, '0');
   const mm = String(d.getMinutes()).padStart(2, '0');
   return `${date} ${hh}:${mm}`;
+}
+
+/**
+ * The one clause that keeps the count above honest, or '' when nothing was hidden.
+ *
+ * Both filters run before any branch is counted, so "no unmerged work on any
+ * other branch" is, strictly, "none among the branches I listed". That gap is
+ * small and it is real, and one clause closes it — including on the all-clear
+ * line, which is the sentence most likely to be acted on.
+ */
+function formatHidden(filtered: FilterSummary): string {
+  const parts: string[] = [];
+  if ((filtered.excludedAsArchive ?? 0) > 0) {
+    parts.push(`${filtered.excludedAsArchive} archive/* mirror(s)`);
+  }
+  if ((filtered.excludedAsStale ?? 0) > 0) {
+    parts.push(
+      `${filtered.excludedAsStale} branch(es) with no commit in ${filtered.sinceDays}d`,
+    );
+  }
+  if (parts.length === 0) return '';
+  return `Not listed: ${parts.join(', ')} — \`repo-status status --all\` shows everything.`;
 }
 
 /**
@@ -214,9 +259,16 @@ export function formatRepoState(report: DivergenceReport | null): string {
     }
   }
 
+  const hidden = formatHidden(report.filtered);
+
   if (report.groups.length === 0) {
     if (failed.length > 0) return failed.join('\n');
-    return `${header}\n\nOn \`${report.currentBranch}\` — no unmerged work on any other branch or worktree.`;
+    return [
+      header,
+      '',
+      `On \`${report.currentBranch}\` — no unmerged work on any other branch or worktree.`,
+      ...(hidden.length > 0 ? ['', hidden] : []),
+    ].join('\n');
   }
 
   const one = report.groups.length === 1;
@@ -251,6 +303,7 @@ export function formatRepoState(report: DivergenceReport | null): string {
       `  - ${names} (${worktreeNote}${aheadNote}, last touched ${formatTouched(group.lastCommitDate)}${prNote})${sameTipNote}`,
     );
   }
+  if (hidden.length > 0) lines.push('', hidden);
   lines.push(
     '',
     'When there is unmerged work on feature branch(es), the human may prefer for new work to base from the feature branches rather than main. When in doubt, ask.',

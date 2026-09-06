@@ -28,7 +28,21 @@ import {
   executeRemotePlan,
   renderPlan,
 } from './plan';
+import {DEFAULT_PAIR_CAP} from './overlap';
+import {renderReportPretty} from './pretty';
 import {buildReport, type RepoStatusReport} from './report';
+
+/**
+ * The default age window for `status`, in days.
+ *
+ * NINETY, not core's thirty. The two gates answer different questions: the
+ * session-start view asks "what might I be about to duplicate right now", where
+ * a month is generous; `status` is what a reconcile reads, and a branch left
+ * alone for two months is exactly the kind of thing a reconcile exists to find.
+ * Anything with a worktree is exempt at any age, and `--all` removes the window
+ * entirely.
+ */
+const DEFAULT_STATUS_SINCE_DAYS = 90;
 
 const TOP_NARRATIVE = `
 TYPICAL USAGE
@@ -111,8 +125,23 @@ function warnAlpha(): void {
 }
 
 const STATUS_NARRATIVE = `
-Computes the full ledger: every branch, how far it diverges from the baseline,
-and a disposition with a one-line reason.
+Computes the ledger: the branches that are still live, how far each diverges
+from the baseline, whether it still merges, and a disposition with a one-line
+reason.
+
+WHAT IS IN THE LEDGER BY DEFAULT, and what is not. Two filters run before
+anything is measured, because they are also what makes this command fast:
+
+  --since-days 90    branches with no commit in that window are dropped
+  archive/* hidden   they are finished work a previous reconcile dealt with
+
+A branch with a WORKTREE is exempt from both, however old and however named.
+Whatever the filters drop is COUNTED, in the 'filtered' block that is present on
+every report — a shorter ledger always says it is shorter, so it can never be
+read as a smaller repo. '--all' turns both off; '--since-days <n>' and
+'--include-archive' turn off one each. 'plan-experimental' and
+'apply-experimental' are never filtered, because a partial cleanup plan is worse
+than none.
 
   merged          every unique commit is on the baseline by content — nothing to lose
   mirrored        not on the baseline, but preserved in an exact, current archive/* mirror
@@ -173,7 +202,25 @@ Every submodule finding names the QUESTION its numbers answer, because the same
 number means opposite things: "behind by 49" is noise for "can I delete this"
 and load-bearing for "am I building on current code".
 
-  repo-status status                 full ledger (content proofs + PR state)
+WILL IT ACTUALLY MERGE. 'mergeShape' says whether merging fast-forwards — a
+sha-reachability fact, free. 'mergePreview' says whether it APPLIES, by running
+a real three-way merge in the object store ('git merge-tree --write-tree'; no
+worktree, no index, nothing to clean up), and names the conflicting files when
+it does not. Three states, and the third one matters: 'clean', 'conflicts', and
+'unmeasured' for the merges git could not compute at all. Note that merge-tree
+exits non-zero for a CONFLICT and for a FAILURE alike, so 'unmeasured' is never
+inferred from the exit code — it means no merged tree came back.
+
+WHICH BRANCHES ARE IN EACH OTHER'S WAY. The 'overlaps' section reads each
+branch's changed-file set (one 'git diff' per branch, linear), intersects them
+in memory, and then merge-checks only the pairs that actually share a file, up
+to '--pair-cap'. It always reports how many pairs it considered, how many shared
+files, how many it merge-checked and how many the cap dropped, so "no overlaps"
+is never confusable with "did not look".
+
+  repo-status status                 the ledger, filtered, with merge previews
+  repo-status status --pretty        the same thing written for a human to read
+  repo-status status --all           every branch, however old, archive/* too
   repo-status status --no-content    skip per-commit proofs — fast, but dispositions
                                      stay conservative because nothing is proven
   repo-status status --no-prs        skip the network entirely
@@ -184,6 +231,13 @@ and load-bearing for "am I building on current code".
                                      worktree has its own store, and 'git worktree
                                      remove' deletes it along with anything unpushed
   repo-status status --json          same object as JSON
+  repo-status status --no-merge-preview --no-overlaps
+                                     skip the merge questions entirely
+
+YAML is the default because the primary reader of this tool is an agent and a
+consistently-keyed object is what an agent should read. '--pretty' is the same
+object rendered for a person: grouped by what to do about it, one line per
+branch, detail indented. It is a rendering only — it computes nothing of its own.
 `.trim();
 
 const BRANCH_NARRATIVE = `
@@ -194,6 +248,10 @@ Shows every commit the branch has that the baseline does not, whether each is
 present on the baseline by patch-id (which sees through squash-merge, rebase and
 cherry-pick), and for anything patch-id could not match, a per-changed-file
 comparison against the baseline. This is the proof behind a 'merged' verdict.
+
+It also carries the full 'changedFiles' list and the merge preview, which the
+ledger deliberately summarises rather than prints. Nothing is filtered here —
+naming a branch is asking about that branch.
 
   repo-status branch my-feature
   repo-status branch my-feature --json
@@ -375,14 +433,18 @@ function render(obj: unknown, json: boolean): string {
   return Bun.YAML.stringify(obj, null, 2).trimEnd();
 }
 
-function emit(report: RepoStatusReport | null, json: boolean): number {
+function emit(
+  report: RepoStatusReport | null,
+  json: boolean,
+  pretty = false,
+): number {
   if (report == null) {
     console.error(
       'not a git repository (or no baseline branch could be found)',
     );
     return 1;
   }
-  console.log(render(report, json));
+  console.log(pretty ? renderReportPretty(report) : render(report, json));
   if (
     !report.enrichments.prs &&
     report.enrichments.prsUnavailableReason != null
@@ -457,23 +519,79 @@ const statusCommand = {
           "Open every worktree's submodule object store, not just this worktree's",
         type: 'boolean' as const,
       })
+      // NO yargs `default` on these two, deliberately. A yargs default lands in
+      // `argv` exactly like a typed flag, so `.conflicts()` below would fire on
+      // every single run — measured. The defaults are applied in the handler
+      // instead, and stated in the describe text so `--help` still carries them.
       .option('since-days', {
-        describe: 'Ignore branches with no commits in this many days',
+        describe: `Ignore branches with no commits in this many days (default: ${DEFAULT_STATUS_SINCE_DAYS})`,
         type: 'number' as const,
-      }),
+      })
+      .option('include-archive', {
+        describe: 'Also list archive/* mirrors (default: hidden)',
+        type: 'boolean' as const,
+      })
+      .option('all', {
+        default: false,
+        describe:
+          'No filtering at all: every branch, however old, archive/* included',
+        type: 'boolean' as const,
+      })
+      .option('merge-preview', {
+        default: true,
+        describe:
+          'Run `git merge-tree` per unmerged branch to see if it merges cleanly',
+        type: 'boolean' as const,
+      })
+      .option('overlaps', {
+        default: true,
+        describe:
+          "Read each branch's changed files and cross-compare them for collisions",
+        type: 'boolean' as const,
+      })
+      .option('pair-cap', {
+        default: DEFAULT_PAIR_CAP,
+        describe:
+          'Max branch pairs to merge-check, after the shared-file screen',
+        type: 'number' as const,
+      })
+      .option('pretty', {
+        default: false,
+        describe: 'Render the compact human-readable ledger instead of YAML',
+        type: 'boolean' as const,
+      })
+      // An explicit --all next to an explicit --since-days/--include-archive is
+      // a contradiction, not a preference to silently resolve — the same reflex
+      // as plan-experimental refusing --json with --markdown.
+      .conflicts('all', 'since-days')
+      .conflicts('all', 'include-archive'),
   command: ['status', '$0'],
   describe: 'Per-branch disposition ledger for the repo',
   handler: (args: any) => {
+    if (args.json && args.pretty) {
+      console.error(
+        '--json and --pretty select different renderings; pass at most one',
+      );
+      process.exitCode = 2;
+      return;
+    }
     process.exitCode = emit(
       buildReport({
         content: args.content,
         cwd: args.repo,
+        excludeArchive: !(args.all === true || args.includeArchive === true),
+        mergePreview: args.mergePreview,
+        overlaps: args.overlaps,
+        pairCap: args.pairCap,
         prs: args.prs,
-        sinceDays: args.sinceDays ?? null,
+        sinceDays: args.all === true
+          ? null
+          : (args.sinceDays ?? DEFAULT_STATUS_SINCE_DAYS),
         submoduleStores: args.submoduleStores,
         submodules: args.submodules,
       }),
       args.json,
+      args.pretty,
     );
   },
 };
@@ -490,7 +608,12 @@ const branchCommand = {
     const report = buildReport({
       content: true,
       cwd: args.repo,
+      // The deep-dive is where the full changed-file list belongs, and it is
+      // the one place a merge preview is certainly wanted. The pairwise half
+      // finds no pairs on a one-branch report and says so.
+      mergePreview: true,
       only: args.name,
+      overlaps: true,
       prs: args.prs,
       sinceDays: null,
       // A one-branch deep-dive is not the place for repo-wide submodule state;
@@ -539,7 +662,14 @@ const planCommand = {
       prs: true,
       sinceDays: null,
       // The plan only ever archives BRANCHES, so submodule state would be
-      // computed and then discarded. `status` is where it belongs.
+      // computed and then discarded. `status` is where it belongs — and the
+      // same goes for the merge preview and the overlap walk, which say how
+      // hard a merge would be and have no bearing on whether a branch's work is
+      // preserved. Note the filters stay OFF here (`sinceDays: null`, archive
+      // included): a cleanup plan drawn over a filtered branch set would be
+      // silently partial, which is the one thing a plan may not be.
+      mergePreview: false,
+      overlaps: false,
       submodules: false,
     });
     if (report == null) {
@@ -638,7 +768,14 @@ const applyCommand = {
       prs: true,
       sinceDays: null,
       // The plan only ever archives BRANCHES, so submodule state would be
-      // computed and then discarded. `status` is where it belongs.
+      // computed and then discarded. `status` is where it belongs — and the
+      // same goes for the merge preview and the overlap walk, which say how
+      // hard a merge would be and have no bearing on whether a branch's work is
+      // preserved. Note the filters stay OFF here (`sinceDays: null`, archive
+      // included): a cleanup plan drawn over a filtered branch set would be
+      // silently partial, which is the one thing a plan may not be.
+      mergePreview: false,
+      overlaps: false,
       submodules: false,
     });
     if (report == null) {
