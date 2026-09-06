@@ -795,11 +795,13 @@ describe('cost to the prime session-start path', () => {
     expect(divergence).not.toBeNull();
     // The claim is that NO submodule key appears here, not that the shape never
     // grows: `enumerationFailures` was added by home-base-qyu1.23 so a repo whose
-    // branches could not be listed is never rendered as clean, and it is empty
-    // on a readable repo like this one.
+    // branches could not be listed is never rendered as clean, and `filtered` by
+    // home-base-qyu1.33.1 so the branches this view HIDES are counted rather
+    // than silently dropped. Both are cheap facts the core walk already had.
     expect(Object.keys(divergence ?? {}).sort()).toEqual([
       'currentBranch',
       'enumerationFailures',
+      'filtered',
       'groups',
     ]);
     expect(divergence?.enumerationFailures).toEqual([]);

@@ -263,12 +263,22 @@ function describeOverlaps(n: {
   unmeasured: number;
   withShared: number;
 }): string {
+  // The unmeasured note is appended to EVERY branch of this function, including
+  // this early one. A repo with one readable branch and one unreadable one hits
+  // this path, and saying only "there is no pair to compare" there would drop
+  // the single most important fact — that a branch was left out because its
+  // footprint could not be read.
+  const unmeasuredNote =
+    n.unmeasured > 0
+      ? `. ${n.unmeasured} branch(es) could not have their changed files read and appear in NO pair, so nothing here rules out a collision with them`
+      : '';
+
   if (n.candidates < 2) {
     const only =
       n.candidates === 0
         ? 'no branch has unique work'
         : 'only one branch has unique work';
-    return `${only}, so there is no pair to compare — this is not a statement that branches agree`;
+    return `${only}, so there is no pair to compare — this is not a statement that branches agree${unmeasuredNote}`;
   }
   const base =
     n.withShared === 0
@@ -277,10 +287,6 @@ function describeOverlaps(n: {
   const capNote =
     n.skipped > 0
       ? `, and ${n.skipped} more shared files but were NOT merge-checked (pair cap) — those are unknown, not clean`
-      : '';
-  const unmeasuredNote =
-    n.unmeasured > 0
-      ? `. ${n.unmeasured} branch(es) could not have their changed files read and appear in NO pair, so nothing here rules out a collision with them`
       : '';
   return `${base}${capNote}${unmeasuredNote}`;
 }
