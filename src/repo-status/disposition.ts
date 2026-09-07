@@ -218,6 +218,17 @@ export function decideDisposition(
         ? '; no PR'
         : '; PR state not checked';
   const one = proof.unaccountedCommits.length === 1;
+  // RECONCILE THIS NUMBER WITH THE AHEAD COUNT, in the line itself. The row says
+  // AHEAD 41 and this sentence says 39, because the proof walks non-merge
+  // commits; six independent blind reviewers hit that gap and every one of them
+  // spent git calls on it, several first concluding the tool had a bug. Two
+  // numbers for "commits not on main" that never explain each other is a defect
+  // in the output whatever the code is doing.
+  const merges = divergence.ahead - proof.unaccountedCommits.length;
+  const mergeGap =
+    merges > 0
+      ? ` (the row's AHEAD ${divergence.ahead} also counts ${plural(merges, 'merge commit')}, which carry no work of their own)`
+      : '';
   const backupNote =
     mirror?.exists === true
       ? `, and the ${mirror.ref} backup branch does not hold ${one ? 'it' : 'them'} either`
@@ -225,6 +236,6 @@ export function decideDisposition(
   return {
     disposition: 'needs-judgment',
     provenSafe: false,
-    why: `${plural(proof.unaccountedCommits.length, 'commit')} ${one ? 'exists' : 'exist'} only here — not on ${proof.baselineRef}${backupNote}${prNote}`,
+    why: `${plural(proof.unaccountedCommits.length, 'commit')} ${one ? 'exists' : 'exist'} only here${mergeGap} — not on ${proof.baselineRef}${backupNote}${prNote}`,
   };
 }
