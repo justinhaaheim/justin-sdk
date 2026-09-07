@@ -67,6 +67,15 @@ export interface MergePreview {
   conflictedFilesTruncated: boolean;
   /** The command that failed. Populated only when `kind` is `unmeasured`. */
   command: string | null;
+  /**
+   * Submodule pointers the merge would move. EMPTY means checked and none move;
+   * NULL means the check did not run (no submodule paths were supplied), which
+   * is a different claim and must not read as "no submodule moved".
+   *
+   * A `clean` merge can still carry a `regression` here, and that combination is
+   * the reason this field exists — see `SubmoduleShift`.
+   */
+  submoduleShifts: SubmoduleShift[] | null;
 }
 
 const QUESTION =
@@ -156,9 +165,117 @@ function parseConflictedPaths(stdout: string): string[] | null {
   return paths;
 }
 
+/**
+ * A submodule pointer the merge would MOVE, and which way.
+ *
+ * WHY THIS EXISTS. `merge-tree` exiting 0 means git resolved every path without
+ * asking — it does NOT mean the resulting tree is what you want. A gitlink is
+ * the case where those come apart hardest: when only one side moved a submodule
+ * pointer, git takes that side unconditionally and reports no conflict, so a
+ * branch whose submodule is MONTHS BEHIND the baseline's merges "cleanly" and
+ * silently reverts it. Found in a blind review (2026-09-07): merging a live
+ * feature branch here would have rolled the SDK submodule back three releases,
+ * with the ledger calling the merge clean.
+ *
+ * `direction` is decided by ancestry, which is the only thing that makes
+ * "backwards" a fact rather than a guess:
+ *
+ *   regression  the merged pointer is an ANCESTOR of the baseline's — the merge
+ *               undoes submodule history the baseline already has
+ *   advance     the baseline's is an ancestor of the merged one — an ordinary
+ *               bump, which is usually the point of the branch
+ *   divergent   neither reaches the other — the two histories forked
+ *   unknown     ancestry could not be determined (a pointer whose commit is not
+ *               in the submodule's object store, most often). NOT reassuring.
+ */
+export interface SubmoduleShift {
+  path: string;
+  /** The gitlink the baseline records today. */
+  baselineSha: string;
+  /** The gitlink the merged tree would record. */
+  mergedSha: string;
+  direction: 'advance' | 'divergent' | 'regression' | 'unknown';
+  why: string;
+}
+
 export interface MergePreviewOptions {
   /** Cap on the reported path LIST. The count is never capped. */
   maxFiles?: number;
+  /**
+   * Submodule paths to check the merged tree against. Empty means the check did
+   * not run, which is reported as such rather than as "no submodule moved".
+   */
+  submodulePaths?: string[];
+}
+
+/** The gitlink a tree-ish records at `path`, or null when there is none/unreadable. */
+function gitlinkAt(treeish: string, path: string, cwd: string): string | null {
+  const run = runGit(['ls-tree', treeish, '--', path], cwd);
+  if (run.status !== 0) return null;
+  // `<mode> <type> <sha>\t<path>` — a submodule is mode 160000, type commit.
+  const match = /^160000 commit ([0-9a-f]{40,64})\t/.exec(run.stdout.trim());
+  return match?.[1] ?? null;
+}
+
+/** Is `maybeAncestor` reachable from `descendant`? Null when git could not say. */
+function isAncestor(
+  maybeAncestor: string,
+  descendant: string,
+  cwd: string,
+): boolean | null {
+  const run = runGit(
+    ['merge-base', '--is-ancestor', maybeAncestor, descendant],
+    cwd,
+  );
+  if (run.status === 0) return true;
+  if (run.status === 1) return false;
+  // Any other status means the question was not answered — a missing object,
+  // most likely. Not the same as "no".
+  return null;
+}
+
+/**
+ * Which submodule pointers the merged tree would move, and which way.
+ *
+ * Runs inside the SUBMODULE's own object store (`cwd` is the submodule path),
+ * because the ancestry question is about the submodule's history, not the
+ * parent's.
+ */
+function checkSubmoduleShifts(
+  mergedTree: string,
+  baselineRef: string,
+  paths: string[],
+  repoCwd: string,
+): SubmoduleShift[] {
+  const shifts: SubmoduleShift[] = [];
+  for (const path of paths) {
+    const mergedSha = gitlinkAt(mergedTree, path, repoCwd);
+    const baselineSha = gitlinkAt(baselineRef, path, repoCwd);
+    if (mergedSha == null || baselineSha == null) continue;
+    if (mergedSha === baselineSha) continue;
+
+    const subCwd = `${repoCwd}/${path}`;
+    const mergedIsOlder = isAncestor(mergedSha, baselineSha, subCwd);
+    const mergedIsNewer = isAncestor(baselineSha, mergedSha, subCwd);
+
+    let direction: SubmoduleShift['direction'];
+    let why: string;
+    if (mergedIsOlder === null || mergedIsNewer === null) {
+      direction = 'unknown';
+      why = `submodule ${path} would move ${baselineSha.slice(0, 8)} -> ${mergedSha.slice(0, 8)}, but which way could not be determined — \`git -C ${path} merge-base --is-ancestor\` failed, most likely because one of those commits is not in the submodule's object store. This is NOT known to be safe.`;
+    } else if (mergedIsOlder) {
+      direction = 'regression';
+      why = `REVERTS submodule ${path} from ${baselineSha.slice(0, 8)} back to ${mergedSha.slice(0, 8)} — an ancestor, so the merge silently UNDOES submodule history ${baselineRef} already has. git reports no conflict for this: only one side moved the pointer, so it takes that side.`;
+    } else if (mergedIsNewer) {
+      direction = 'advance';
+      why = `advances submodule ${path} from ${baselineSha.slice(0, 8)} to ${mergedSha.slice(0, 8)} (a descendant) — an ordinary bump`;
+    } else {
+      direction = 'divergent';
+      why = `submodule ${path} would move ${baselineSha.slice(0, 8)} -> ${mergedSha.slice(0, 8)}, and neither commit reaches the other — the submodule histories have forked, so somebody has to choose`;
+    }
+    shifts.push({baselineSha, direction, mergedSha, path, why});
+  }
+  return shifts;
 }
 
 /**
@@ -194,9 +311,30 @@ export function previewMerge(
       conflictedFilesTruncated: false,
       kind: 'unmeasured',
       question: QUESTION,
+      submoduleShifts: null,
       why: `merge could not be previewed — \`${command}\` exited ${run.status ?? 'abnormally'} without producing a merged tree (${firstLine(run.stderr)}). Whether merging ${branch} conflicts is UNKNOWN; it is NOT known to be clean. \`git merge-tree --write-tree\` needs git >= 2.38, and refuses outright when the two sides share no common ancestor.`,
     };
   }
+
+  // The merged tree is the first field, and it is what makes the gitlink check
+  // possible at all: the question is not what the branch records, it is what the
+  // MERGE RESULT would record.
+  const mergedTree = run.stdout.split('\0')[0]?.trim() ?? '';
+  const submodulePaths = opts.submodulePaths ?? [];
+  const shifts =
+    submodulePaths.length > 0
+      ? checkSubmoduleShifts(mergedTree, baselineRef, submodulePaths, cwd)
+      : null;
+  const regressions = (shifts ?? []).filter(
+    (s) => s.direction === 'regression' || s.direction === 'unknown',
+  );
+  // Appended to whatever verdict follows, because a clean merge that reverts a
+  // submodule is still a clean merge — and still something nobody should land
+  // without knowing.
+  const shiftNote =
+    regressions.length > 0
+      ? ` WARNING: ${regressions.map((s) => s.why).join(' ')}`
+      : '';
 
   if (paths.length === 0) {
     return {
@@ -206,7 +344,8 @@ export function previewMerge(
       conflictedFilesTruncated: false,
       kind: 'clean',
       question: QUESTION,
-      why: `merges into ${baselineRef} with no conflicts — git resolved every path on its own`,
+      submoduleShifts: shifts,
+      why: `merges into ${baselineRef} with no conflicts — git resolved every path on its own.${shiftNote}`,
     };
   }
 
@@ -219,6 +358,7 @@ export function previewMerge(
     conflictedFilesTruncated: truncated,
     kind: 'conflicts',
     question: QUESTION,
-    why: `merging into ${baselineRef} conflicts in ${paths.length} file${paths.length === 1 ? '' : 's'}${truncated ? ` (first ${maxFiles} listed)` : ''} — someone has to resolve ${paths.length === 1 ? 'it' : 'them'} by hand`,
+    submoduleShifts: shifts,
+    why: `merging into ${baselineRef} conflicts in ${paths.length} file${paths.length === 1 ? '' : 's'}${truncated ? ` (first ${maxFiles} listed)` : ''} — someone has to resolve ${paths.length === 1 ? 'it' : 'them'} by hand.${shiftNote}`,
   };
 }

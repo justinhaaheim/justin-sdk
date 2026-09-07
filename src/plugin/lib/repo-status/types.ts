@@ -47,6 +47,24 @@ export interface BranchTip {
   lastCommitDate: string;
   /** Path of the worktree that has this branch checked out, if any. */
   worktreePath: string | null;
+  /**
+   * The remote-tracking ref carrying this branch, or null when NO remote has it.
+   *
+   * This is the recoverable/unrecoverable line, and it is the most consequential
+   * fact about an unmerged branch: work that is only on this disk is gone if the
+   * disk is, and work sitting on origin at the same sha is not. A blind review
+   * of the ledger caught the report describing a branch as existing nowhere else
+   * while `origin/<name>` held it at the identical sha (2026-09-07).
+   *
+   * It costs NO extra git call. Remote refs were always in the same
+   * `for-each-ref` the branch walk already runs; the information was simply
+   * discarded after being used to dedupe.
+   *
+   * `inSync` compares tips only. False means the remote has this branch under
+   * some other sha — which is not a claim about WHICH is ahead, only that they
+   * differ, so a reader is never told a stale remote copy is a backup.
+   */
+  remote: {inSync: boolean; ref: string; sha: string} | null;
 }
 
 /**

@@ -35,7 +35,7 @@
  *     streams interleaved and will not attribute a line to either; a person
  *     redirecting stdout to a file loses them entirely.
  *
- * Part of home-base-qyu1.33.4 / qyu1.34.
+ * Part of home-base-qyu1.33.4 / qyu1.33.5.
  */
 
 import {formatTouched} from '../plugin/lib/repo-status/prime-view';
@@ -56,8 +56,12 @@ import type {SubmoduleInventory} from './submodules';
  */
 const GROUPS: {blurb: string; heading: string; key: Disposition}[] = [
   {
-    blurb:
-      'commits that exist only on these branches — not on main, and not backed up anywhere',
+    // NOT "not backed up anywhere". That was the old blurb and it was FALSE for
+    // any branch sitting on origin at the same sha — a generalisation across
+    // rows that the rows themselves did not support, caught by every blind
+    // reviewer (2026-09-07). Where the work exists is now a per-branch column,
+    // because it varies per branch.
+    blurb: 'commits that are on these branches and not on main',
     heading: 'UNMERGED WORK',
     key: 'needs-judgment',
   },
@@ -74,8 +78,13 @@ const GROUPS: {blurb: string; heading: string; key: Disposition}[] = [
     key: 'mirrored',
   },
   {
+    // Deliberately NOT "nothing to lose here" any more. That sentence
+    // authorises deleting a branch and its worktree, and it was being printed
+    // over checkouts holding uncommitted edits — a claim about a working tree,
+    // made without looking at one. The commit claim is what this group proves;
+    // the working-tree claim is now a per-row `uncommitted` marker.
     blurb:
-      'every commit is already on main by content, so squash-merges and rebases count — nothing to lose here',
+      'every COMMIT is already on main (by content, so squash-merges and rebases count)',
     heading: 'ALREADY MERGED',
     key: 'merged',
   },
@@ -144,11 +153,38 @@ function fileList(files: string[], total: number, cap: number): string {
   return `${shown.join(', ')}${hidden > 0 ? `, +${hidden} more` : ''}`;
 }
 
-/** Where the branch lives, in one word. Empty for an ordinary local ref. */
-function location(row: BranchRow): string {
-  if (row.worktree != null) return 'worktree';
-  if (row.isRemoteOnly) return 'remote-only';
-  return 'local';
+/**
+ * Where the branch's work EXISTS, which is the recoverable/unrecoverable line.
+ *
+ * Every blind reviewer ranked this the most important missing field: a branch
+ * on origin survives losing this machine and a branch that is only here does
+ * not, and the old output drew no distinction between them.
+ */
+function backup(row: BranchRow, baselineRef: string): string {
+  // A branch with no unique commits has nothing at risk WHEREVER its ref lives:
+  // its work is on the baseline. Flagging those as "this disk only" would fire
+  // the loudest marker in the table on the ten rows that need no attention at
+  // all, which is how a real warning stops being read.
+  if (row.disposition === 'merged' && row.ahead === 0) return baselineRef;
+  if (row.remote == null) return 'THIS DISK ONLY';
+  return row.remote.inSync ? row.remote.ref : `${row.remote.ref} (differs)`;
+}
+
+/**
+ * The checkout, as a path — not the word "worktree".
+ *
+ * "worktree" told a reader a worktree existed and then made them run `git
+ * worktree list` to find it, which was the first thing every reviewer did.
+ */
+function checkout(row: BranchRow, repoRoot: string): string {
+  if (row.worktree == null) return '—';
+  const relative = row.worktree.startsWith(`${repoRoot}/`)
+    ? row.worktree.slice(repoRoot.length + 1)
+    : row.worktree;
+  const state = row.worktreeState;
+  if (state?.dirty === true) return `${relative} [UNCOMMITTED]`;
+  if (state?.dirty == null && state != null) return `${relative} [state?]`;
+  return relative;
 }
 
 /**
@@ -244,34 +280,38 @@ function overlapLines(
 
 interface Columns {
   ahead: number;
+  backup: number;
   behind: number;
   files: number;
-  location: number;
   name: number;
 }
 
-const DATE_WIDTH = 16;
+/** `YYYY-MM-DD HH:MM` is 16, plus one for the `*` fallback marker. */
+const DATE_WIDTH = 17;
 
 const HEADERS = {
   ahead: 'AHEAD',
+  backup: 'ALSO ON',
   behind: 'BEHIND',
   branch: 'BRANCH',
   files: 'FILES',
-  lastCommit: 'LAST COMMIT',
-  location: 'LOCATION',
+  lastWork: 'LAST WORK',
 };
 
 /** Widths measured over EVERY row in the report, so all sections share a grid. */
-function measureColumns(rows: BranchRow[]): Columns {
+function measureColumns(rows: BranchRow[], baselineRef: string): Columns {
   const max = (pick: (r: BranchRow) => string, floor: number): number =>
     rows.reduce((w, r) => Math.max(w, pick(r).length), floor);
   return {
     ahead: max((r) => String(r.ahead ?? '?'), HEADERS.ahead.length),
+    backup: max((r) => backup(r, baselineRef), HEADERS.backup.length),
     behind: max((r) => String(r.behind ?? '?'), HEADERS.behind.length),
-    files: max((r) => String(r.changedFileCount ?? ''), HEADERS.files.length),
-    location: max(location, HEADERS.location.length),
+    files: max((r) => String(r.changedFileCount ?? '?'), HEADERS.files.length),
     // A pathological branch name must not push every other column off screen.
-    name: Math.min(52, max((r) => r.name, HEADERS.branch.length)),
+    name: Math.min(
+      52,
+      max((r) => r.name, HEADERS.branch.length),
+    ),
   };
 }
 
@@ -279,24 +319,53 @@ function headerRow(cols: Columns, style: Styler): string {
   return style.dim(
     `  ${HEADERS.branch.padEnd(cols.name)}  ${HEADERS.ahead.padStart(
       cols.ahead,
-    )}  ${HEADERS.behind.padStart(cols.behind)}  ${HEADERS.lastCommit.padEnd(
-      DATE_WIDTH,
-    )}  ${HEADERS.location.padEnd(cols.location)}  ${HEADERS.files.padStart(
+    )}  ${HEADERS.behind.padStart(cols.behind)}  ${HEADERS.files.padStart(
       cols.files,
-    )}`,
+    )}  ${HEADERS.lastWork.padEnd(DATE_WIDTH)}  ${HEADERS.backup.padEnd(cols.backup)}`,
   );
 }
 
-function branchRow(row: BranchRow, cols: Columns, style: Styler): string {
-  // '?' rather than a blank cell: the divergence was not measured, and an empty
-  // cell would read as a zero somebody forgot to print.
+/**
+ * The date to show: when the branch was last ADVANCED, falling back to its tip.
+ *
+ * A trailing `*` marks the fallback, so the two are never silently
+ * interchanged. A tip date on a branch whose only unique commits are merges is
+ * a different fact from a work date, and that difference is the entire reason
+ * `lastWork` exists.
+ */
+function workDate(row: BranchRow): string {
+  if (row.lastWork != null) return formatTouched(row.lastWork.date, 'always');
+  return `${formatTouched(row.lastCommitDate, 'always')}*`;
+}
+
+function branchRow(
+  row: BranchRow,
+  cols: Columns,
+  style: Styler,
+  repoRoot: string,
+  baselineRef: string,
+): string {
+  // '?' rather than a blank cell: the value was not measured, and an empty cell
+  // would read as a zero somebody forgot to print.
   const ahead = String(row.ahead ?? '?').padStart(cols.ahead);
   const behind = String(row.behind ?? '?').padStart(cols.behind);
-  const files = String(row.changedFileCount ?? '').padStart(cols.files);
-  const when = formatTouched(row.lastCommitDate, 'always').padEnd(DATE_WIDTH);
-  return `  ${style.bold(row.name.padEnd(cols.name))}  ${ahead}  ${behind}  ${when}  ${location(
+  const files = String(row.changedFileCount ?? '?').padStart(cols.files);
+  const where = backup(row, baselineRef);
+  const line = `  ${style.bold(row.name.padEnd(cols.name))}  ${ahead}  ${behind}  ${files}  ${workDate(
     row,
-  ).padEnd(cols.location)}  ${files}`;
+  ).padEnd(
+    DATE_WIDTH,
+  )}  ${where === 'THIS DISK ONLY' ? style.alert(where) : where}`;
+  // The checkout path earns its own line only where the reader would USE it —
+  // an open branch they might cd into, or a checkout holding uncommitted work
+  // they must look at before deleting it. Printing it under every settled row
+  // doubled the height of the merged table to say what the branch name already
+  // implies.
+  const place = checkout(row, repoRoot);
+  const worthShowing =
+    place !== '—' &&
+    (row.disposition !== 'merged' || row.worktreeState?.dirty !== false);
+  return worthShowing ? `${line}\n      in ${place}` : line;
 }
 
 // ---------------------------------------------------------------------------
@@ -312,14 +381,24 @@ function summaryBlock(report: RepoStatusReport, style: Styler): string[] {
     ? (f.excludedAsArchive ?? 0) + (f.excludedAsStale ?? 0)
     : null;
 
+  // Zero rows are SUPPRESSED. A category with no members and no example in the
+  // output is a label a cold reader cannot decode — three reviewers all asked
+  // what "needs a look" meant and none could tell from a zero (2026-09-07). The
+  // sections below define each category by showing it; a count with nothing
+  // under it defines nothing.
+  const counts: [number, string][] = [
+    [s.needsJudgment, 'unmerged work'],
+    [s.review, 'needs a look'],
+    [s.mirrored, 'archived'],
+    [s.merged, 'already merged'],
+  ];
   const lines: string[] = [
     hidden == null
       ? `${plural(s.branches, 'branch')} shown (how many were hidden is UNKNOWN)`
       : `${s.branches} of ${s.branches + hidden} branches shown`,
-    `  ${String(s.needsJudgment).padStart(3)}  unmerged work`,
-    `  ${String(s.review).padStart(3)}  needs a look`,
-    `  ${String(s.mirrored).padStart(3)}  archived`,
-    `  ${String(s.merged).padStart(3)}  already merged`,
+    ...counts
+      .filter(([n]) => n > 0)
+      .map(([n, label]) => `  ${String(n).padStart(3)}  ${label}`),
     '',
   ];
 
@@ -341,17 +420,28 @@ function summaryBlock(report: RepoStatusReport, style: Styler): string[] {
     );
   } else {
     lines.push(`${plural(hidden ?? 0, 'branch')} hidden`);
-    if (f.excludeArchive) {
+    // Same rule as the summary counts above: a reason that excluded nothing is
+    // a line with no content. The filters that DID run are named in the
+    // "what was and was not checked" footer either way.
+    if (f.excludeArchive && (f.excludedAsArchive ?? 0) > 0) {
       lines.push(
-        `  ${String(f.excludedAsArchive).padStart(3)}  archive/ backup branches`,
+        `  ${String(f.excludedAsArchive).padStart(3)}  on an archive/ backup branch`,
       );
     }
-    if (f.sinceDays != null) {
+    if (f.sinceDays != null && (f.excludedAsStale ?? 0) > 0) {
       lines.push(
         `  ${String(f.excludedAsStale).padStart(3)}  no commit in the last ${f.sinceDays} days`,
       );
     }
-    lines.push(style.dim('       (--all shows every branch)'));
+    // NOT just a flag hint. Two reviewers checked what the hidden branches
+    // actually held and found unmerged commits in nearly all of them — the word
+    // "archive" reads as already-handled, and a bare pointer to `--all`
+    // undersells that (2026-09-07).
+    lines.push(
+      style.alert(
+        '       these were not inspected — hidden does NOT mean merged; `--all` includes them',
+      ),
+    );
   }
   if ((f.keptForWorktree ?? 0) > 0) {
     lines.push(
@@ -373,6 +463,11 @@ function summaryBlock(report: RepoStatusReport, style: Styler): string[] {
  */
 function methodBlock(report: RepoStatusReport, style: Styler): string[] {
   const lines: string[] = [];
+  if ((report.branches ?? []).some((r) => r.lastWork == null)) {
+    lines.push(
+      'LAST WORK is the newest non-merge commit the branch has and the baseline does not — merging main into a branch moves its tip without advancing it. A `*` marks a row with no such commit, showing the tip date instead.',
+    );
+  }
   const o = report.overlaps;
   if (o.pairs == null) {
     lines.push(
@@ -385,11 +480,15 @@ function methodBlock(report: RepoStatusReport, style: Styler): string[] {
       `Cross-branch overlap: compared ${plural(
         o.candidates ?? 0,
         'branch',
-      )} by changed files over ${plural(o.pairsConsidered ?? 0, 'pair')}; ${
-        o.pairsWithSharedFiles
-      } share a file, ${o.pairsConflictChecked} merge-checked${
+      )} by changed files over ${plural(o.pairsConsidered ?? 0, 'pair')}; ${plural(
+        o.pairsWithSharedFiles ?? 0,
+        'pair',
+      )} share a file, and ${plural(
+        o.pairsConflictChecked ?? 0,
+        'pair',
+      )} were merge-checked against each other${
         (o.pairsSkippedByCap ?? 0) > 0
-          ? `, ${o.pairsSkippedByCap} left UNCHECKED at the pair cap`
+          ? `; ${plural(o.pairsSkippedByCap ?? 0, 'pair')} left UNCHECKED at the pair cap`
           : ''
       }.`,
     );
@@ -408,13 +507,20 @@ function methodBlock(report: RepoStatusReport, style: Styler): string[] {
       ),
     );
   }
+  if (!report.enrichments.worktreeState) {
+    lines.push(
+      style.alert(
+        'Working trees: NOT inspected — every "already merged" row above is a claim about commits only, and may sit on uncommitted work.',
+      ),
+    );
+  }
   if (!report.enrichments.prs) {
     lines.push(
-      `PR state: not included${
+      `PR state: NOT checked${
         report.enrichments.prsUnavailableReason != null
           ? ` (${report.enrichments.prsUnavailableReason})`
           : ''
-      }.`,
+      } — pass \`--prs\`. Rows saying "PR state not checked" mean this, not that no PR exists.`,
     );
   }
   return lines;
@@ -460,11 +566,39 @@ export function renderReportPretty(
   const style = opts.color === true ? ANSI : PLAIN;
   const blocks: string[][] = [];
 
+  // YOU ARE HERE, first. Every blind reviewer of an earlier revision ranked the
+  // state of the checkout the reader is standing in as the single most missing
+  // thing — the report described eleven other branches and said nothing about
+  // the one under the reader's feet, including that it had unpushed commits and
+  // uncommitted files (2026-09-07).
+  const here = report.repo.here;
   blocks.push([
     style.heading('REPO STATUS'),
     `Repo:      ${report.repo.root}`,
-    `Branch:    ${report.repo.currentBranch ?? '(detached HEAD)'}`,
-    `Baseline:  ${report.repo.baselineRef}  ${style.dim('(every branch below is compared against this)')}`,
+    `Branch:    ${report.repo.currentBranch ?? '(detached HEAD)'}${
+      here?.upstream != null
+        ? `  ${here.upstream.ahead} ahead / ${here.upstream.behind} behind ${here.upstream.ref}`
+        : '  (no upstream)'
+    }`,
+    `Baseline:  ${report.repo.baselineRef}  ${style.dim(
+      'AHEAD = commits the branch has and this does not; BEHIND = the reverse',
+    )}`,
+    here?.state?.dirty === true
+      ? style.alert(
+          `Uncommitted here: ${plural(here.state.changedPaths ?? 0, 'path')} — ${fileList(
+            here.state.samplePaths ?? [],
+            here.state.changedPaths ?? 0,
+            5,
+          )}`,
+        )
+      : here?.state?.dirty === false
+        ? style.dim('Uncommitted here: none')
+        : style.alert(
+            "Uncommitted here: UNKNOWN — this checkout's state could not be read",
+          ),
+    style.dim(
+      `Generated: ${formatTouched(new Date().toISOString(), 'always')}`,
+    ),
   ]);
 
   // FIRST, and before any count: everything below is silence rather than
@@ -495,7 +629,7 @@ export function renderReportPretty(
 
   blocks.push(summaryBlock(report, style));
 
-  const cols = measureColumns(report.branches);
+  const cols = measureColumns(report.branches, report.repo.baselineRef);
   for (const group of GROUPS) {
     const rows = report.branches.filter((r) => r.disposition === group.key);
     if (rows.length === 0) continue;
@@ -506,15 +640,45 @@ export function renderReportPretty(
       headerRow(cols, style),
     ];
     for (const row of rows) {
-      lines.push(branchRow(row, cols, style));
+      lines.push(
+        branchRow(row, cols, style, report.repo.root, report.repo.baselineRef),
+      );
       const detail: string[] = [];
+      if (row.lastWork != null) detail.push(style.dim(row.lastWork.subject));
       const merge = mergeSentence(row, style);
       if (merge != null) detail.push(merge);
+      const dirty = row.worktreeState;
+      if (dirty?.dirty === true) {
+        detail.push(
+          style.alert(
+            `${plural(dirty.changedPaths ?? 0, 'uncommitted path')} in its checkout: ${fileList(
+              dirty.samplePaths ?? [],
+              dirty.changedPaths ?? 0,
+              5,
+            )} — ${(dirty.changedPaths ?? 0) === 1 ? 'it is' : 'these are'} on NO branch and no commit holds ${(dirty.changedPaths ?? 0) === 1 ? 'it' : 'them'}`,
+          ),
+        );
+      } else if (dirty?.dirty == null && dirty != null) {
+        detail.push(
+          style.alert(
+            `could not read its checkout's state (${dirty.unreadableReason}) — whether it holds uncommitted work is UNKNOWN`,
+          ),
+        );
+      }
       // The `why` on a fully-contained row only restates the ahead/behind
       // already on its line. The squash-merge case says how the content was
       // proven, which is the whole evidence for the verdict, so it keeps its.
       if (!(row.disposition === 'merged' && row.ahead === 0)) {
         detail.push(row.why);
+      }
+      // A submodule pointer moving the wrong way is invisible in a conflict
+      // list — git takes the only side that moved and reports success — so it
+      // gets its own line, above the overlap detail, on any row that has one.
+      for (const shift of row.mergePreview?.submoduleShifts ?? []) {
+        if (shift.direction === 'advance') continue;
+        detail.push(
+          shift.direction === 'divergent' ? shift.why : style.alert(shift.why),
+        );
       }
       detail.push(...overlapLines(row, report.overlaps, style));
       if (detail.length > 0) {

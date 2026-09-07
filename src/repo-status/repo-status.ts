@@ -15,7 +15,7 @@
  *
  * It USED to drive the output format too — YAML by default, on the reasoning
  * that a consistently-keyed object is what a program should read. That was
- * reversed on 2026-09-07 (home-base-qyu1.34). The readable ledger says the same
+ * reversed on 2026-09-07 (home-base-qyu1.33.5). The readable ledger says the same
  * things in about a fifteenth of the bytes, and the premise turned out to be
  * wrong in a specific way: the questions an agent brings to this tool are the
  * same ones a person brings — what is open, how old, did it land, what will
@@ -715,6 +715,9 @@ const planCommand = {
       mergePreview: false,
       overlaps: false,
       submodules: false,
+      // Same reasoning: a plan archives BRANCHES, so a `git status` in every
+      // worktree would be run and thrown away. `status` is where that belongs.
+      worktreeState: false,
     });
     if (report == null) {
       console.error('not a git repository');
@@ -821,6 +824,9 @@ const applyCommand = {
       mergePreview: false,
       overlaps: false,
       submodules: false,
+      // Same reasoning: a plan archives BRANCHES, so a `git status` in every
+      // worktree would be run and thrown away. `status` is where that belongs.
+      worktreeState: false,
     });
     if (report == null) {
       console.error('not a git repository');

@@ -217,13 +217,14 @@ export function decideDisposition(
       : prDataAvailable
         ? '; no PR'
         : '; PR state not checked';
+  const one = proof.unaccountedCommits.length === 1;
   const backupNote =
     mirror?.exists === true
-      ? `, and the ${mirror.ref} backup branch does not hold them either`
-      : ', and no archive/ backup branch holds them';
+      ? `, and the ${mirror.ref} backup branch does not hold ${one ? 'it' : 'them'} either`
+      : `, and no archive/ backup branch holds ${one ? 'it' : 'them'}`;
   return {
     disposition: 'needs-judgment',
     provenSafe: false,
-    why: `${plural(proof.unaccountedCommits.length, 'commit')} exist only here — not on ${proof.baselineRef}${backupNote}${prNote}`,
+    why: `${plural(proof.unaccountedCommits.length, 'commit')} ${one ? 'exists' : 'exist'} only here — not on ${proof.baselineRef}${backupNote}${prNote}`,
   };
 }

@@ -49,7 +49,10 @@ const ARCHIVE_PREFIX = 'archive/';
  * genuinely called `origin/thing` is legal, and blindly cutting at the first
  * slash would read it as the branch `thing` on the remote `origin`.
  */
-export function isArchiveRef(tip: {isRemoteOnly: boolean; name: string}): boolean {
+export function isArchiveRef(tip: {
+  isRemoteOnly: boolean;
+  name: string;
+}): boolean {
   const bare = tip.isRemoteOnly
     ? tip.name.slice(tip.name.indexOf('/') + 1)
     : tip.name;
@@ -93,9 +96,7 @@ const SHELL_SAFE_ARG = /^[A-Za-z0-9_@%+=:,./-]+$/;
  */
 export function renderGitCommand(argv: string[]): string {
   const quote = (arg: string): string =>
-    SHELL_SAFE_ARG.test(arg)
-      ? arg
-      : `'${arg.split("'").join(`'\\''`)}'`;
+    SHELL_SAFE_ARG.test(arg) ? arg : `'${arg.split("'").join(`'\\''`)}'`;
   return ['git', ...argv.map(quote)].join(' ');
 }
 
@@ -158,7 +159,7 @@ export const ENUMERATION_FAILURES: Record<
   branches: {
     command: renderGitCommand(BRANCH_TIPS_ARGV),
     diagnose:
-      'run the command above to see git\'s own error, then `git fsck --no-progress` — the listing must parse EVERY ref tip, so one unreadable object anywhere fails it for the entire repo',
+      "run the command above to see git's own error, then `git fsck --no-progress` — the listing must parse EVERY ref tip, so one unreadable object anywhere fails it for the entire repo",
     what: 'branches',
     why: 'no branch could be listed at all, so an empty branch inventory here means NOTHING COULD BE READ — not that the repo has no branches; unmerged work may exist on any number of them',
   },
@@ -167,7 +168,7 @@ export const ENUMERATION_FAILURES: Record<
     diagnose:
       "run the command above to see git's own error; `git worktree prune` clears a stale administrative entry",
     what: 'worktrees',
-    why: 'the repo\'s checkouts could not be listed, so NO branch can be said to be free of a worktree — one that is actually checked out reads as unattached, and `git branch -m` on a checked-out branch SUCCEEDS and silently retargets that worktree\'s HEAD rather than refusing',
+    why: "the repo's checkouts could not be listed, so NO branch can be said to be free of a worktree — one that is actually checked out reads as unattached, and `git branch -m` on a checked-out branch SUCCEEDS and silently retargets that worktree's HEAD rather than refusing",
   },
 };
 
@@ -242,6 +243,8 @@ export function getBranchTips(
 
   const local = new Map<string, BranchTip>();
   const remote: BranchTip[] = [];
+  /** Remote-tracking refs by BARE name, so a local branch can find its own. */
+  const remoteByBareName = new Map<string, {ref: string; sha: string}>();
 
   for (const line of out.trim().split('\n')) {
     if (line.length === 0) continue;
@@ -256,6 +259,7 @@ export function getBranchTips(
         isRemoteOnly: false,
         lastCommitDate,
         name,
+        remote: null, // attached below, once every remote ref has been seen
         tipSha,
         worktreePath: worktreeByBranch.get(name) ?? null,
       });
@@ -263,14 +267,40 @@ export function getBranchTips(
       const short = refname.slice('refs/remotes/'.length);
       if (short.endsWith('/HEAD')) continue; // symbolic ref, not a real branch
       const withoutRemote = short.slice(short.indexOf('/') + 1);
+      // First remote wins when several carry the same branch. `origin` sorts
+      // ahead of most other remote names, and the question this answers — "does
+      // this work exist anywhere but my disk?" — is settled by any one of them.
+      if (!remoteByBareName.has(withoutRemote)) {
+        remoteByBareName.set(withoutRemote, {ref: short, sha: tipSha});
+      }
       remote.push({
         isRemoteOnly: !local.has(withoutRemote),
         lastCommitDate,
         name: short,
+        remote: {inSync: true, ref: short, sha: tipSha},
         tipSha,
         worktreePath: null,
       });
     }
+  }
+
+  // Attach each local branch's remote-tracking ref, in a SECOND pass because a
+  // remote ref can be listed before its local counterpart and the answer must
+  // not depend on git's ordering.
+  //
+  // This costs no git invocation — the refs were already in the one
+  // `for-each-ref` above, and the information used to be thrown away. Throwing
+  // it away is what let the report describe a branch as existing nowhere else
+  // when it was sitting on origin at the identical sha (found in a blind review
+  // of the ledger, 2026-09-07).
+  for (const [name, tip] of local) {
+    const match = remoteByBareName.get(name);
+    if (match == null) continue;
+    tip.remote = {
+      inSync: match.sha === tip.tipSha,
+      ref: match.ref,
+      sha: match.sha,
+    };
   }
 
   return [...local.values(), ...remote.filter((r) => r.isRemoteOnly)];
@@ -421,7 +451,10 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
       // Age is judged over what SURVIVED the archive filter, so a stale archive
       // mirror is counted once — under the rule that actually removed it — and
       // the two numbers sum to the total dropped.
-      if (sinceDays !== null && !isRecentEnough(tip.lastCommitDate, sinceDays)) {
+      if (
+        sinceDays !== null &&
+        !isRecentEnough(tip.lastCommitDate, sinceDays)
+      ) {
         excludedAsStale += 1;
         continue;
       }
@@ -436,7 +469,8 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
     })) ?? null;
 
   const enumerationFailures: EnumerationFailure[] = [];
-  if (worktrees == null) enumerationFailures.push(ENUMERATION_FAILURES.worktrees);
+  if (worktrees == null)
+    enumerationFailures.push(ENUMERATION_FAILURES.worktrees);
   if (tips == null) enumerationFailures.push(ENUMERATION_FAILURES.branches);
 
   return {

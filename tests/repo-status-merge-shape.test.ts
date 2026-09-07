@@ -334,7 +334,11 @@ describe('the shape rides the typed object', () => {
       squashed: 'merge-needed',
     });
 
-    const yaml = runStatus(sb.path, shim.dir, []);
+    // `--yaml` explicitly: the readable ledger became the default on
+    // 2026-09-07, and it summarises `mergeShape` into an English sentence
+    // rather than printing the field. The claim here is about the typed
+    // object, so it has to ask for the format that renders one.
+    const yaml = runStatus(sb.path, shim.dir, ['--yaml']);
     expect(yaml.status).toBe(0);
     expect(yaml.out).toContain('mergeShape:');
     expect(yaml.out).toContain('kind: fast-forward');

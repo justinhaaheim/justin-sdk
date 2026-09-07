@@ -42,6 +42,13 @@ import {
   EMPTY_SUBMODULE_INVENTORY,
   type SubmoduleInventory,
 } from './submodules';
+import {readLastWork, type LastWork} from './last-work';
+import {
+  readUpstreamDivergence,
+  readWorktreeState,
+  readWorktreeStates,
+  type WorktreeState,
+} from './worktree-state';
 
 import type {
   BranchDivergence,
@@ -111,7 +118,36 @@ export interface BranchRow {
    */
   changedFileCount: number | null;
   lastCommitDate: string;
+  /**
+   * The newest commit the branch has that the baseline does not, EXCLUDING
+   * merges — the last time somebody actually did work here.
+   *
+   * `lastCommitDate` alone misled every blind reviewer of this report in the
+   * same way (2026-09-07): merging main into a dormant branch updates its tip,
+   * so a branch whose real work stopped weeks ago shows today's date and reads
+   * as live. Both are kept because they answer different questions — "when did
+   * this ref last move" and "when was this branch last advanced" — and it is
+   * the gap between them that identifies a branch somebody is maintaining
+   * without progressing.
+   *
+   * Null when the branch has no unique commits, or when it was not computed.
+   */
+  lastWork: {date: string; sha: string; subject: string} | null;
   worktree: string | null;
+  /**
+   * Uncommitted work in this branch's checkout. Null when the branch has no
+   * worktree, or when the enrichment was off.
+   *
+   * The merged group's "nothing to lose" reading depends entirely on this: it
+   * is a claim about a working tree, and until this field existed it was made
+   * without looking at one.
+   */
+  worktreeState: WorktreeState | null;
+  /**
+   * Where else this branch exists. Null means NO remote has it — the branch is
+   * on this disk only, and losing the disk loses the work.
+   */
+  remote: {inSync: boolean; ref: string; sha: string} | null;
   disposition: Disposition;
   why: string;
   provenSafe: boolean;
@@ -156,6 +192,20 @@ export interface RepoStatusReport {
     currentBranch: string | null;
     defaultBranch: string | null;
     baselineRef: string;
+    /**
+     * The state of the checkout the caller is standing in.
+     *
+     * The report described every branch except the one under the reader's feet
+     * — including that it had unpushed commits and uncommitted files. Three
+     * blind reviews independently ranked this the most important omission
+     * (2026-09-07).
+     */
+    here: {
+      /** Uncommitted work right here. Null when not inspected. */
+      state: WorktreeState | null;
+      /** Divergence from this branch's upstream. Null when there is none. */
+      upstream: {ahead: number; behind: number; ref: string} | null;
+    } | null;
   };
   /** Null when the branch listing failed — there is nothing to summarise. */
   summary: RepoStatusSummary | null;
@@ -166,6 +216,12 @@ export interface RepoStatusReport {
     submodules: boolean;
     mergePreview: boolean;
     overlaps: boolean;
+    /**
+     * Whether working trees were inspected. False means every "nothing to lose"
+     * reading in this report is about COMMITS only, which the renderer has to
+     * say rather than let the reader assume.
+     */
+    worktreeState: boolean;
   };
   /**
    * What the walk DROPPED before `branches` was built. Always present, so a
@@ -227,6 +283,11 @@ export interface ReportOptions {
   overlaps?: boolean;
   /** Max pairs to merge-check after the shared-file screen. */
   pairCap?: number;
+  /**
+   * Run `git status` in every checkout, so "nothing to lose" is a claim about a
+   * working tree rather than only about commits. One call per worktree.
+   */
+  worktreeState?: boolean;
   /** Restrict to one branch (the `branch <name>` deep-dive). */
   only?: string;
 }
@@ -251,6 +312,7 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
     sinceDays = null,
     submoduleStores = false,
     submodules = true,
+    worktreeState = true,
   } = opts;
 
   const inventory = buildCoreInventory({
@@ -305,14 +367,39 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
     }
   }
 
+  // One `git status` per CHECKOUT, not per branch — several branches can share
+  // none and no worktree is inspected twice.
+  const worktreeStates = worktreeState
+    ? readWorktreeStates((inventory.worktrees ?? []).map((w) => w.path))
+    : new Map();
+
+  // Submodule paths for the merge preview's gitlink check. Taken from the
+  // inventory that was already built, so this costs nothing; when submodules
+  // were not inspected the preview is told so and reports the check as not run
+  // rather than as "no submodule moved".
+  const submodulePaths = submodules
+    ? submoduleInventory.entries.map((e) => e.path)
+    : [];
+
   const rows: BranchRow[] | null =
     selected?.map((branch) =>
       buildRow(branch, inventory.baselineRef, cwd, {
         changed: changedByBranch.get(branch.name) ?? null,
         content,
+        // Only branches with unique work have a "last work" to find; on the rest
+        // the answer is empty by construction and the call would be wasted.
+        lastWork:
+          branch.divergence != null && branch.divergence.ahead > 0
+            ? readLastWork(inventory.baselineRef, branch.name, cwd)
+            : null,
         mergePreview,
         only,
         prIndex,
+        submodulePaths,
+        worktreeState:
+          branch.worktreePath != null
+            ? (worktreeStates.get(branch.worktreePath) ?? null)
+            : null,
       }),
     ) ?? null;
 
@@ -330,7 +417,8 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
             // `mergePreview` already said, at the cost of a merge-tree run.
             .filter(
               (r) =>
-                r.disposition === 'needs-judgment' || r.disposition === 'review',
+                r.disposition === 'needs-judgment' ||
+                r.disposition === 'review',
             )
             .filter((r) => changedByBranch.has(r.name))
             .map((r) => ({
@@ -365,6 +453,7 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
       prs: prIndex.available,
       prsUnavailableReason: prIndex.unavailableReason,
       submodules,
+      worktreeState,
     },
     // Emitted only when something actually failed, so a healthy repo's output is
     // byte-for-byte what it was before this key existed.
@@ -377,6 +466,13 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
       baselineRef: inventory.baselineRef,
       currentBranch: inventory.currentBranch,
       defaultBranch: inventory.defaultBranch,
+      here: {
+        state: worktreeState ? readWorktreeState(cwd) : null,
+        upstream:
+          inventory.currentBranch != null
+            ? readUpstreamDivergence(inventory.currentBranch, cwd)
+            : null,
+      },
       root: inventory.repoRoot,
     },
     summary:
@@ -386,8 +482,9 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
             branches: rows.length,
             merged: rows.filter((r) => r.disposition === 'merged').length,
             mirrored: rows.filter((r) => r.disposition === 'mirrored').length,
-            needsJudgment: rows.filter((r) => r.disposition === 'needs-judgment')
-              .length,
+            needsJudgment: rows.filter(
+              (r) => r.disposition === 'needs-judgment',
+            ).length,
             provenSafe: rows.filter((r) => r.provenSafe).length,
             review: rows.filter((r) => r.disposition === 'review').length,
           },
@@ -403,9 +500,12 @@ function buildRow(
   ctx: {
     changed: ChangedFileSet | null;
     content: boolean;
+    lastWork: LastWork | null;
     mergePreview: boolean;
     only: string | undefined;
     prIndex: PrIndex;
+    submodulePaths: string[];
+    worktreeState: WorktreeState | null;
   },
 ): BranchRow {
   // Skip the expensive proof when the branch has nothing unique — there is
@@ -437,14 +537,21 @@ function buildRow(
   // NOT PREVIEWED, which is deliberately not expressible as `kind: 'clean'`.
   const preview =
     ctx.mergePreview && branch.divergence != null && branch.divergence.ahead > 0
-      ? previewMerge(baselineRef, branch.name, cwd)
+      ? previewMerge(baselineRef, branch.name, cwd, {
+          submodulePaths: ctx.submodulePaths,
+        })
       : null;
 
   return {
     ahead: branch.divergence?.ahead ?? null,
     archiveMirror: proof?.archiveMirror ?? null,
     behind: branch.divergence?.behind ?? null,
-    changedFileCount: ctx.changed?.count ?? null,
+    // A branch with no unique commits has no unique footprint either: its merge
+    // base with the baseline IS its tip, so the diff is empty. Deriving the 0
+    // rather than leaving the cell blank costs no git call and keeps "measured
+    // zero" distinguishable from "not measured", which a blank is not.
+    changedFileCount:
+      ctx.changed?.count ?? (branch.divergence?.ahead === 0 ? 0 : null),
     ...(ctx.only != null && ctx.changed?.files != null
       ? {changedFiles: ctx.changed.files}
       : {}),
@@ -454,6 +561,7 @@ function buildRow(
     disposition,
     isRemoteOnly: branch.isRemoteOnly,
     lastCommitDate: branch.lastCommitDate,
+    lastWork: ctx.lastWork,
     mergePreview: preview,
     mergeShape: describeMergeShape(branch.divergence, baselineRef),
     name: branch.name,
@@ -468,8 +576,10 @@ function buildRow(
           }
         : null,
     provenSafe,
+    remote: branch.remote,
     tipSha: branch.tipSha,
     why,
     worktree: branch.worktreePath,
+    worktreeState: ctx.worktreeState,
   };
 }

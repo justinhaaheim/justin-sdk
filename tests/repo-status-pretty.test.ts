@@ -131,8 +131,11 @@ describe('the ledger rendering', () => {
     const out = prettyFor(buildFixture(track(createSandbox())));
 
     expect(out).toContain('branch hidden');
-    expect(out).toContain('archive/ backup branches');
-    expect(out).toContain('--all shows every branch');
+    expect(out).toContain('on an archive/ backup branch');
+    // Hiding is fine; hiding SILENTLY is not. Reviewers checked what the hidden
+    // branches held and found unmerged commits in nearly all of them, so the
+    // line has to say hidden is not a synonym for handled.
+    expect(out).toContain('hidden does NOT mean merged');
     expect(out).not.toContain('archive/finished');
   });
 
