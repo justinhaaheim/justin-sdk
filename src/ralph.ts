@@ -139,6 +139,31 @@ export interface RalphOptions {
   verdictPath: string;
   /** Prompt for each iteration. A slash command works (verified). */
   prompt: string;
+  /**
+   * Whether `prompt` is an ASK the human typed, rather than the default
+   * (home-base-1r6d.26, D1).
+   *
+   * This distinction is the whole fix. The start-of-run scan prepends "PICK UP
+   * THE HANDOFF FIRST … then continue with the task below" to the prompt, which
+   * is right for the scheduled-tick workflow (`/loop-session`, nobody watching)
+   * and a HIJACK for the direct-ask workflow: a stale handoff from an unrelated
+   * arc would run before the thing that was actually asked for. So an explicit
+   * ask starts fresh unless `pickup` says otherwise — and the scan still runs
+   * and still reports, because "not picked up" must never look like "nothing
+   * was waiting" (critical rule 6).
+   *
+   * The CLI cannot infer this after the fact: with a yargs `default` on
+   * `--prompt`, an explicit `--prompt /loop-session` and no flag at all produce
+   * identical argv. Hence the separate field, set only where the command line
+   * is still visible.
+   */
+  promptExplicit: boolean;
+  /**
+   * `--pickup`: take the newest waiting handoff bead even though an explicit
+   * `--prompt` was given. Opt-in, because the direct-ask workflow's default has
+   * to be "do what I asked".
+   */
+  pickup: boolean;
   maxIterations: number;
   /**
    * Whether to read `/usage` before every iteration and refuse to run when it
@@ -200,8 +225,10 @@ export const DEFAULT_OPTIONS: RalphOptions = {
   noProgressAbort: 3,
   onGateHit: 'pause',
   permissionMode: 'auto',
+  pickup: false,
   pollSec: 20,
   prompt: '/loop-session',
+  promptExplicit: false,
   sessionStopPct: 50,
   timeoutMin: 45,
   usageGate: true,
@@ -638,6 +665,25 @@ export interface BootContext {
 }
 
 /**
+ * Which workflow this run is, as far as the start-of-run scan is concerned
+ * (home-base-1r6d.26, D1). Both flags come from the command line and nowhere
+ * else — see RalphOptions.promptExplicit.
+ */
+export interface StartBootPolicy {
+  /** The human typed `--prompt`: this run has an ASK, not a standing job. */
+  promptExplicit: boolean;
+  /** `--pickup`: take the newest waiting handoff anyway. */
+  pickup: boolean;
+}
+
+/**
+ * Said on every run where an explicit ask suppressed the pickup, so the choice
+ * is visible rather than inferred from a missing line.
+ */
+export const EXPLICIT_SKIP_LINE =
+  'NOT picked up: --prompt was given explicitly; pass --pickup to start from the newest';
+
+/**
  * Decide which handoff bead a fresh runner picks up, and say out loud what it
  * is NOT picking up.
  *
@@ -647,24 +693,34 @@ export interface BootContext {
  * not machine-readable here — "newest per arc" is implemented as newest overall
  * plus an explicit report of the rest, which is the same guarantee (pick one,
  * report the others, never fan out) without inventing an arc parser.
+ *
+ * D1 (home-base-1r6d.26): an explicit `--prompt` without `--pickup` picks up
+ * NOTHING. The scan still runs and every waiting bead is still named — the run
+ * just does not put someone else's arc in front of the ask it was given. The
+ * other three combinations behave exactly as before.
  */
-export function planStartBoot(scan: HandoffScan): {
+export function planStartBoot(
+  scan: HandoffScan,
+  policy: StartBootPolicy = {pickup: false, promptExplicit: false},
+): {
   plan: BootPlan;
   report: string[];
 } {
+  const skipping = policy.promptExplicit && !policy.pickup;
   if (scan.kind === 'unavailable') {
-    return {
-      plan: {kind: 'fresh'},
-      report: [
-        `handoff scan UNAVAILABLE — ${scan.reason}. Starting fresh; a handoff bead may exist and not be seen.`,
-      ],
-    };
+    // Reported as unavailable in EVERY path, skipping included: "we could not
+    // look" and "we looked and chose not to take it" are different facts, and
+    // the second must never absorb the first (critical rule 6).
+    const report = [
+      `handoff scan UNAVAILABLE — ${scan.reason}. Starting fresh; a handoff bead may exist and not be seen.`,
+    ];
+    if (skipping) report.push(EXPLICIT_SKIP_LINE);
+    return {plan: {kind: 'fresh'}, report};
   }
   if (scan.beads.length === 0) {
-    return {
-      plan: {kind: 'fresh'},
-      report: [`no open handoff beads (checked, label \`${HANDOFF_LABEL}\`)`],
-    };
+    const report = [`no open handoff beads (checked, label \`${HANDOFF_LABEL}\`)`];
+    if (skipping) report.push(EXPLICIT_SKIP_LINE);
+    return {plan: {kind: 'fresh'}, report};
   }
   // Newest first. A bead with no timestamp cannot be claimed to be newest, so
   // it sorts last rather than winning by accident; ties break on id so the
@@ -677,6 +733,18 @@ export function planStartBoot(scan: HandoffScan): {
     }
     return a.id < b.id ? -1 : 1;
   });
+  if (skipping) {
+    // Every bead by id AND title: the point of still scanning is that the human
+    // can see what is waiting and re-run with --pickup if they meant it.
+    return {
+      plan: {kind: 'fresh'},
+      report: [
+        `${ordered.length} open handoff bead(s) waiting:`,
+        ...ordered.map((b) => `  ${b.id} — ${b.title}`),
+        EXPLICIT_SKIP_LINE,
+      ],
+    };
+  }
   const [chosen, ...deferred] = ordered;
   const report = [`picking up handoff ${chosen.id} — ${chosen.title}`];
   if (deferred.length > 0) {
@@ -1619,7 +1687,14 @@ export async function runRalph(
   // bead waiting is a continuation, not a fresh start. Read-only, and reported
   // in dry runs too — "is anything waiting in this repo?" is exactly what a dry
   // run is for.
-  const startBoot = planStartBoot(scanHandoffBeads(cwd));
+  //
+  // The scan ALWAYS runs. What an explicit `--prompt` changes is whether its
+  // result is acted on (home-base-1r6d.26, D1) — never whether the human gets
+  // to see it.
+  const startBoot = planStartBoot(scanHandoffBeads(cwd), {
+    pickup: opts.pickup,
+    promptExplicit: opts.promptExplicit,
+  });
   for (const line of startBoot.report) {
     process.stdout.write(`${DIM}handoff${RESET} ${line}\n`);
   }

@@ -327,10 +327,23 @@ void yargs(hideBin(process.argv))
           describe: 'attachable only: where each iteration writes its verdict',
           default: RALPH_DEFAULTS.verdictPath,
         })
+        // NO yargs `default` here, deliberately (home-base-1r6d.26, D6). With
+        // one, `--prompt /loop-session` and no flag at all produce identical
+        // argv, so the runner cannot tell an ask from the standing job — and an
+        // explicit ask is exactly what must not be pre-empted by a stale
+        // handoff bead. `defaultDescription` still documents the default in
+        // --help without writing it into argv.
         .option('prompt', {
           type: 'string',
-          describe: 'Prompt for each iteration (a slash command works)',
-          default: RALPH_DEFAULTS.prompt,
+          describe:
+            'Prompt for each iteration (a slash command works). Giving one explicitly makes this run an ASK: the start-of-run handoff scan still reports what is waiting, but does not put it in front of your prompt. Pass --pickup to start from the newest handoff anyway.',
+          defaultDescription: RALPH_DEFAULTS.prompt,
+        })
+        .option('pickup', {
+          type: 'boolean',
+          describe:
+            'Start from the newest waiting handoff bead even though --prompt was given explicitly. Without --prompt this is already the behaviour.',
+          default: RALPH_DEFAULTS.pickup,
         })
         .option('max-iterations', {
           type: 'number',
@@ -415,7 +428,10 @@ void yargs(hideBin(process.argv))
         noProgressAbort: argv['no-progress-abort'],
         onGateHit: argv['on-gate-hit'] as 'pause' | 'exit',
         permissionMode: argv['permission-mode'],
-        prompt: argv.prompt,
+        pickup: argv.pickup,
+        // The command line is the ONLY place this is knowable — see D6 above.
+        prompt: argv.prompt ?? RALPH_DEFAULTS.prompt,
+        promptExplicit: argv.prompt !== undefined,
         sessionStopPct: argv['session-stop-pct'],
         timeoutMin: argv['timeout-min'],
         // yargs boolean-negation: `--no-usage-gate` sets `usage-gate` false.

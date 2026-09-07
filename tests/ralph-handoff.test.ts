@@ -32,6 +32,7 @@ import {
   composeBootPrompt,
   crashBootPlan,
   decideRespawn,
+  EXPLICIT_SKIP_LINE,
   formatRespawnLine,
   type HandoffBead,
   type HandoffPickup,
@@ -379,6 +380,121 @@ describe('planStartBoot — the scheduled-tick pickup', () => {
   });
 });
 
+/**
+ * D1 (home-base-1r6d.26): the direct-ask workflow.
+ *
+ * The failure this prevents: Justin types
+ * `ralph --prompt '/conductor fix the parser'`, an unrelated arc's stale handoff
+ * bead is still open in the repo, and the session boots with "PICK UP THE
+ * HANDOFF FIRST … then continue with the task below" — so it does someone
+ * else's work before (or instead of) the thing that was asked for. An explicit
+ * ask is not to be pre-empted.
+ *
+ * What must NOT be lost in the fix: the scan itself. Skipping the pickup and
+ * skipping the LOOK are different things, and only one of them is wanted — a
+ * run that quietly stopped mentioning waiting handoffs would make them
+ * invisible, which is the failure mode the scan exists to prevent.
+ *
+ * All four combinations of promptExplicit × pickup, with one bead and with
+ * several, plus an unavailable scan in every combination.
+ */
+describe('planStartBoot — an explicit --prompt is an ASK (D1)', () => {
+  const ASK = {pickup: false, promptExplicit: true} as const;
+  const ASK_PICKUP = {pickup: true, promptExplicit: true} as const;
+  const JOB = {pickup: false, promptExplicit: false} as const;
+  const JOB_PICKUP = {pickup: true, promptExplicit: false} as const;
+
+  const one = [bead({id: 'hoff-solo', title: 'HANDOFF: the solo arc'})];
+  const several = [
+    bead({id: 'hoff-old', title: 'HANDOFF: old arc', updatedAt: '2026-08-01T00:00:00Z'}),
+    bead({id: 'hoff-new', title: 'HANDOFF: new arc', updatedAt: '2026-08-20T00:00:00Z'}),
+    bead({id: 'hoff-mid', title: 'HANDOFF: mid arc', updatedAt: '2026-08-10T00:00:00Z'}),
+  ];
+
+  function planned(
+    beads: HandoffBead[],
+    policy: {promptExplicit: boolean; pickup: boolean},
+  ): {picked: string | null; report: string} {
+    const start = planStartBoot({beads, kind: 'ok'}, policy);
+    return {
+      picked: start.plan.kind === 'handoff' ? start.plan.bead.id : null,
+      report: start.report.join('\n'),
+    };
+  }
+
+  test('explicit ask, no --pickup: starts fresh even with ONE bead waiting', () => {
+    const {picked, report} = planned(one, ASK);
+    expect(picked).toBeNull();
+    // …and names it, so "not picked up" never reads as "nothing was waiting".
+    expect(report).toContain('hoff-solo');
+    expect(report).toContain('HANDOFF: the solo arc');
+    expect(report).toContain(EXPLICIT_SKIP_LINE);
+    expect(report).not.toContain('picking up handoff');
+  });
+
+  test('explicit ask, no --pickup: names EVERY waiting bead by id and title', () => {
+    const {picked, report} = planned(several, ASK);
+    expect(picked).toBeNull();
+    for (const b of several) {
+      expect(report).toContain(b.id);
+      expect(report).toContain(b.title);
+    }
+    expect(report).toContain('3 open handoff bead(s) waiting');
+    expect(report).toContain(EXPLICIT_SKIP_LINE);
+  });
+
+  test('explicit ask WITH --pickup: newest wins, exactly as before', () => {
+    expect(planned(one, ASK_PICKUP).picked).toBe('hoff-solo');
+    const many = planned(several, ASK_PICKUP);
+    expect(many.picked).toBe('hoff-new');
+    expect(many.report).toContain('NOT picked up this run (one arc per run)');
+    expect(many.report).not.toContain(EXPLICIT_SKIP_LINE);
+  });
+
+  test('the default prompt picks up as before, with and without --pickup', () => {
+    for (const policy of [JOB, JOB_PICKUP]) {
+      expect(planned(one, policy).picked).toBe('hoff-solo');
+      const many = planned(several, policy);
+      expect(many.picked).toBe('hoff-new');
+      expect(many.report).toContain('hoff-old');
+      expect(many.report).toContain('hoff-mid');
+      expect(many.report).not.toContain(EXPLICIT_SKIP_LINE);
+    }
+  });
+
+  test('omitting the policy entirely keeps the old behaviour', () => {
+    // The default argument is the scheduled-tick workflow: a caller that has
+    // not been taught about asks must not accidentally stop picking up.
+    expect(
+      planStartBoot({beads: one, kind: 'ok'}).plan.kind === 'handoff',
+    ).toBe(true);
+  });
+
+  test('an empty workspace still says it CHECKED, in all four combinations', () => {
+    for (const policy of [ASK, ASK_PICKUP, JOB, JOB_PICKUP]) {
+      const start = planStartBoot({beads: [], kind: 'ok'}, policy);
+      expect(start.plan).toEqual({kind: 'fresh'});
+      expect(start.report.join('\n')).toContain('checked');
+    }
+  });
+
+  test('an UNAVAILABLE scan is reported as unavailable in all four combinations', () => {
+    // Critical rule 6: "we could not look" must survive every policy. Suppressing
+    // the pickup must never also suppress the admission that the scan failed.
+    for (const policy of [ASK, ASK_PICKUP, JOB, JOB_PICKUP]) {
+      const start = planStartBoot(
+        {kind: 'unavailable', reason: 'br exited 1: no beads workspace'},
+        policy,
+      );
+      expect(start.plan).toEqual({kind: 'fresh'});
+      const report = start.report.join('\n');
+      expect(report).toContain('UNAVAILABLE');
+      expect(report).toContain('br exited 1: no beads workspace');
+      expect(report).toContain('may exist and not be seen');
+    }
+  });
+});
+
 describe('bootPreamble', () => {
   const label = 'ralph-3';
 
@@ -711,6 +827,127 @@ describe('scripted simulation: two sessions, one handoff bead (real br)', () => 
 });
 
 /**
+ * The yargs seam (D6), end to end against a fake `br` and a fake `claude`.
+ *
+ * The unit tests above prove planStartBoot branches correctly on
+ * `promptExplicit`. They cannot prove the CLI ever sets it, and that is the half
+ * most likely to break silently: with a yargs `default` on `--prompt`, an
+ * explicit `--prompt /loop-session` and no flag at all produce byte-identical
+ * argv, so the runner would treat every run as the standing job and the fix
+ * would compile, typecheck, pass every unit test, and do nothing.
+ *
+ * `--dry-run --no-usage-gate` throughout: the start scan runs and reports, and
+ * no iteration is ever spawned.
+ */
+describe('CLI: --prompt makes the run an ASK (D1/D6)', () => {
+  const CLI = join(dirname(import.meta.dirname), 'src', 'cli.ts');
+
+  interface Run {
+    out: string;
+    status: number | null;
+  }
+
+  function runRalphCli(args: string[]): Run {
+    const sb = track(createSandbox());
+    const repo = initRepo(sb, 'project', {'README.md': '# ask fixture\n'});
+    const binDir = join(sb.path, 'fakebin');
+    mkdirSync(binDir, {recursive: true});
+
+    writeFileSync(
+      join(binDir, 'claude'),
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "--version" ]; then echo "2.1.999-fake"; exit 0; fi',
+        // Nothing else should ever be asked of it in a gate-less dry run; if it
+        // is, exit non-zero so the run cannot pass by accident.
+        'exit 3',
+      ].join('\n'),
+    );
+    chmodSync(join(binDir, 'claude'), 0o755);
+
+    // Two open handoff beads from unrelated arcs — exactly the situation that
+    // hijacks an ask today.
+    writeFileSync(
+      join(binDir, 'br'),
+      [
+        '#!/bin/sh',
+        'case "$*" in',
+        '  *"-l handoff"*)',
+        `    printf '%s' '{"issues":[{"id":"hoff-old","title":"HANDOFF: unrelated arc","status":"open","updated_at":"2026-08-01T00:00:00Z"},{"id":"hoff-new","title":"HANDOFF: newest arc","status":"open","updated_at":"2026-09-01T00:00:00Z"}]}' ;;`,
+        `  *) printf '%s' '{"issues":[]}' ;;`,
+        'esac',
+        'exit 0',
+      ].join('\n'),
+    );
+    chmodSync(join(binDir, 'br'), 0o755);
+
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    };
+    delete env.ANTHROPIC_API_KEY;
+    const proc = Bun.spawnSync({
+      cmd: ['bun', CLI, 'ralph', '--dry-run', '--no-usage-gate', ...args],
+      cwd: repo,
+      env: env as Record<string, string>,
+    });
+    return {
+      out: `${proc.stdout.toString()}${proc.stderr.toString()}`,
+      status: proc.exitCode,
+    };
+  }
+
+  test('no --prompt: promptExplicit is false, so the newest handoff is picked up', () => {
+    // The negative control for every case below: the fakes ARE reachable and the
+    // scan DOES find both beads.
+    const run = runRalphCli([]);
+    expect(run.out).toContain('picking up handoff hoff-new');
+    expect(run.out).not.toContain(EXPLICIT_SKIP_LINE);
+    expect(run.status).toBe(0);
+  });
+
+  test('--prompt with an ask: nothing is picked up, everything is named', () => {
+    const run = runRalphCli(['--prompt', '/conductor fix the parser']);
+    expect(run.out).not.toContain('picking up handoff');
+    expect(run.out).toContain(EXPLICIT_SKIP_LINE);
+    expect(run.out).toContain('hoff-new');
+    expect(run.out).toContain('HANDOFF: newest arc');
+    expect(run.out).toContain('hoff-old');
+    expect(run.out).toContain('HANDOFF: unrelated arc');
+    expect(run.status).toBe(0);
+  });
+
+  test('--prompt /loop-session — the SAME string as the default — still skips', () => {
+    // The whole point of dropping the yargs default. If `promptExplicit` were
+    // inferred by comparing the value against the default, this case would be
+    // indistinguishable from the no-flag case and would wrongly pick up.
+    const run = runRalphCli(['--prompt', '/loop-session']);
+    expect(run.out).toContain(EXPLICIT_SKIP_LINE);
+    expect(run.out).not.toContain('picking up handoff');
+  });
+
+  test('--prompt with --pickup: back to picking up the newest', () => {
+    const run = runRalphCli(['--prompt', '/conductor fix the parser', '--pickup']);
+    expect(run.out).toContain('picking up handoff hoff-new');
+    expect(run.out).not.toContain(EXPLICIT_SKIP_LINE);
+  });
+
+  test('--help still documents the default it no longer writes into argv', () => {
+    // `defaultDescription` (yargs 18) documents `/loop-session` without setting
+    // argv.prompt. Verified here rather than assumed: if a future yargs dropped
+    // it, the flag would silently become undocumented.
+    const proc = Bun.spawnSync({cmd: ['bun', CLI, 'ralph', '--help']});
+    const help = `${proc.stdout.toString()}${proc.stderr.toString()}`;
+    // The quoting differs between the two mechanisms (`default` renders
+    // `"/loop-session"`, `defaultDescription` renders it bare), so the optional
+    // quote keeps this test about DOCUMENTATION rather than about yargs'
+    // rendering — the behaviour is pinned by the four tests above.
+    expect(help).toMatch(/--prompt[\s\S]*default: "?\/loop-session/);
+    expect(help).toContain('--pickup');
+  });
+});
+
+/**
  * The whole respawn chain, driven end to end by a scripted loop.
  *
  * `claude` and `br` are both fakes on PATH, so a REAL two-iteration run happens
@@ -734,7 +971,7 @@ describe('scripted loop: an immediate respawn boots its successor on the bead', 
     ledger: Array<Record<string, unknown>>;
   }
 
-  function runScriptedLoop(): Loop {
+  function runScriptedLoop(extraArgs: string[] = []): Loop {
     const sb = track(createSandbox());
     const repo = initRepo(sb, 'project', {'README.md': '# scripted loop\n'});
     const binDir = join(sb.path, 'fakebin');
@@ -798,6 +1035,7 @@ describe('scripted loop: an immediate respawn boots its successor on the bead', 
         '2',
         '--ledger',
         ledgerPath,
+        ...extraArgs,
       ],
       cwd: repo,
       env: env as Record<string, string>,
@@ -835,6 +1073,66 @@ describe('scripted loop: an immediate respawn boots its successor on the bead', 
     expect(loop.out).toContain('respawn=immediate');
     expect(loop.out).toContain('COMPLETE');
     expect(loop.status).toBe(0);
+  });
+
+  /**
+   * D2 (home-base-1r6d.26): mid-run respawn is UNCHANGED by the direct-ask fix,
+   * and the ask itself is what travels.
+   *
+   * The start-of-run scan is now suppressed by an explicit --prompt; the
+   * SUCCESSOR's pickup is not, and must not be — that chain IS the direct-ask
+   * workflow. Iteration 2 must get the identical ask its predecessor got, with
+   * the pickup preamble appended and nothing else changed.
+   *
+   * In print mode argv is `-p <composed prompt> --output-format …`, so the
+   * composed prompt is everything between those two markers — recovered exactly
+   * rather than substring-matched, because "contains the ask" would also pass if
+   * the ask had been wrapped, truncated or reordered.
+   */
+  function promptOf(callArgs: string): string {
+    const lines = callArgs.split('\n');
+    expect(lines[0]).toBe('-p');
+    const end = lines.indexOf('--output-format');
+    expect(end).toBeGreaterThan(1);
+    return lines.slice(1, end).join('\n');
+  }
+
+  test('iteration 2 boots with the SAME explicit ask plus the pickup preamble', () => {
+    const ASK = '/conductor finish the parser in ~/Dev/thing';
+    const loop = runScriptedLoop(['--prompt', ASK]);
+
+    // The ask reaches iteration 1 verbatim — not the default, not wrapped.
+    const first = promptOf(loop.call(1));
+    expect(first).toBe(ASK);
+    expect(first).not.toContain('/loop-session');
+
+    // …and iteration 2 gets that same ask, with the preamble appended after it.
+    const second = promptOf(loop.call(2));
+    expect(second.startsWith(`${first}\n\n`)).toBe(true);
+    expect(second).toContain('PICK UP THE HANDOFF FIRST');
+    expect(second).toContain('hoff-77');
+
+    // Exactly the preamble was added — nothing else was rewritten. The bead
+    // fields are the fake `br`'s row for hoff-77.
+    const preamble = bootPreamble({
+      label: 'ralph-2',
+      plan: {
+        bead: {
+          id: 'hoff-77',
+          status: 'open',
+          title: 'HANDOFF: the arc',
+          updatedAt: '2026-08-21T03:00:00Z',
+        },
+        kind: 'handoff',
+      },
+    });
+    if (preamble == null) {
+      throw new Error('bootPreamble returned null for a handoff boot');
+    }
+    expect(second.slice(first.length + 2)).toBe(preamble);
+
+    expect(loop.status).toBe(0);
+    expect(loop.ledger.length).toBe(2);
   });
 
   test('the ledger records a stated intent and an unstated one differently', () => {
