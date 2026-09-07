@@ -122,17 +122,27 @@ export type RunMode = 'print' | 'attachable';
 export interface RalphOptions {
   mode: RunMode;
   /**
-   * Attachable mode only. How long to leave a blocked session waiting for an
-   * answer before giving up on it.
+   * Attachable mode only. An OPTIONAL bound on how long a blocked session waits
+   * for an answer before being stopped. null (the default) waits indefinitely.
    *
-   * This bound is the whole point. Background agents block instead of failing,
-   * which is the behaviour we want — but a blocked session nobody answers is an
-   * invisible open thread. (Measured on this machine 2026-07-16: 37 background
-   * sessions, 17 blocked, oldest 43 days.) When the bound expires we stop the
-   * session and file the question as a bead, so it lands somewhere visible
+   * D3 (home-base-1r6d.26) reversed the original default of 15 minutes. The
+   * bound was built for the unattended scheduled-tick workflow, where a blocked
+   * session nobody answers is an invisible open thread (measured on this machine
+   * 2026-07-16: 37 background sessions, 17 blocked, oldest 43 days). But in the
+   * direct-ask workflow — Justin kicks off a run and is the one being asked —
+   * that bound KILLS the session he is about to answer, and ends the run at
+   * exit 2. Blocked means "waiting for Justin", and the runner does not get to
+   * decide he took too long.
+   *
+   * Set it (`--blocked-wait-min <n>`, n > 0) for an unattended run: the session
+   * is then stopped when the bound expires and the runner files a synthetic
+   * BLOCKED verdict carrying the question, so it lands somewhere visible
    * instead of joining that graveyard.
+   *
+   * Blocked time never counts toward `timeoutMin` either way — see
+   * runIterationAttachable.
    */
-  blockedWaitMin: number;
+  blockedWaitMin: number | null;
   /** Attachable mode only. Seconds between `claude agents --json` polls. */
   pollSec: number;
   /** Attachable mode only. Where the iteration writes its verdict. */
@@ -214,7 +224,7 @@ export interface RalphOptions {
 }
 
 export const DEFAULT_OPTIONS: RalphOptions = {
-  blockedWaitMin: 15,
+  blockedWaitMin: null,
   dryRun: false,
   gatePollMin: 5,
   ledgerPath: 'tmp/ralph-ledger.jsonl',
@@ -364,7 +374,23 @@ verdict rather than refusing the directive.
  * --print, so nothing forces one: the model has to write the file itself, and a
  * missing file is indistinguishable from a crash. Hence the emphasis.
  */
-export function attachableContract(verdictPath: string): string {
+export function attachableContract(
+  verdictPath: string,
+  /** The run's `blockedWaitMin`. null = the default, wait indefinitely. */
+  blockedWaitMin: number | null = null,
+): string {
+  // What the model is told about blocking has to match what the runner will
+  // actually do, so it is generated from the same setting rather than written
+  // once and left to rot. Both sentences say "do not block casually" — but for
+  // opposite reasons, and telling the model the wrong one is how it either
+  // strands a run or refuses to ask a question it needed to ask.
+  const waitRule =
+    blockedWaitMin == null
+      ? `The runner waits for them indefinitely: nothing else happens in this
+iteration until you are answered, so a question nobody is expecting stalls the
+whole run.`
+      : `The runner waits ${blockedWaitMin}m for an answer, then stops you and
+files your question as a bead.`;
   return `${VERDICT_CONTRACT}
 
 You are running as a background agent, so there is no structured-output channel.
@@ -382,9 +408,9 @@ between "you failed" and "you died".
 
 You CAN ask the human a question: this session blocks and waits rather than
 failing, and they can answer from \`claude agents\`. But do not block casually.
-The runner only waits a bounded time before stopping you and filing your
-question as a bead. Ask only when you genuinely cannot proceed, and make the
-question answerable in one line.`;
+${waitRule}
+Ask only when you genuinely cannot proceed, and make the question answerable in
+one line.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1202,6 +1228,44 @@ export function decideRespawn(
 }
 
 /**
+ * Everything runIterationAttachable reaches outside itself (D5,
+ * home-base-1r6d.26).
+ *
+ * Injected purely so the loop is testable. Its two interesting behaviours are
+ * both about the passage of time — a blocked session that outlives the
+ * iteration timeout, and one that outlives an opt-in bound — and neither can be
+ * exercised against a real clock, a real `sleep` and a real `claude agents`
+ * without a test that takes 45 real minutes. With a fake clock and a scripted
+ * sequence of agent rows they run in milliseconds.
+ */
+export interface AttachableDeps {
+  /** Spawn the background session. Returns `claude`'s stdout (the banner). */
+  dispatch: (cwd: string, args: string[]) => string;
+  findAgent: (cwd: string, id: string) => AgentRow | null;
+  now: () => number;
+  readVerdict: (cwd: string, path: string) => Verdict | null;
+  sleep: (ms: number) => Promise<void>;
+  stopAgent: (row: AgentRow | null) => void;
+}
+
+export const REAL_ATTACHABLE_DEPS: AttachableDeps = {
+  dispatch: (cwd, args) => {
+    const proc = spawnSync('claude', args, {
+      cwd,
+      encoding: 'utf-8',
+      env: process.env,
+      timeout: 120_000,
+    });
+    return proc.stdout ?? '';
+  },
+  findAgent,
+  now: () => Date.now(),
+  readVerdict: readVerdictFile,
+  sleep,
+  stopAgent,
+};
+
+/**
  * One iteration as an attachable background agent.
  *
  * Trade-off vs print mode: no --json-schema and no token/cost telemetry, since
@@ -1215,6 +1279,7 @@ export async function runIterationAttachable(
   n: number,
   boot: BootContext,
   onBlocked: (row: AgentRow, id: string) => void,
+  deps: AttachableDeps = REAL_ATTACHABLE_DEPS,
 ): Promise<IterationResult> {
   const verdictFull = opts.verdictPath.startsWith('/')
     ? opts.verdictPath
@@ -1231,30 +1296,29 @@ export async function runIterationAttachable(
   // The agent name and the name the successor is told to claim under are the
   // same string, so a claim reason in a bead can be traced back to a session.
   const name = boot.label;
-  const started = Date.now();
-  const dispatch = spawnSync(
-    'claude',
-    [
-      '--bg',
-      '--name',
-      name,
-      '--model',
-      opts.model,
-      '--permission-mode',
-      opts.permissionMode,
-      '--append-system-prompt',
-      bootContract(attachableContract(verdictFull), boot),
-      composeBootPrompt(opts.prompt, boot),
-    ],
-    {cwd, encoding: 'utf-8', env: process.env, timeout: 120_000},
-  );
+  const started = deps.now();
+  const banner = deps.dispatch(cwd, [
+    '--bg',
+    '--name',
+    name,
+    '--model',
+    opts.model,
+    '--permission-mode',
+    opts.permissionMode,
+    '--append-system-prompt',
+    bootContract(
+      attachableContract(verdictFull, opts.blockedWaitMin),
+      boot,
+    ),
+    composeBootPrompt(opts.prompt, boot),
+  ]);
 
-  const id = parseBackgroundedId(dispatch.stdout ?? '');
+  const id = parseBackgroundedId(banner);
   if (id == null) {
     return {
       costUsd: 0,
       crashed: true,
-      durationMs: Date.now() - started,
+      durationMs: deps.now() - started,
       isError: true,
       numTurns: 0,
       sessionId: null,
@@ -1268,23 +1332,27 @@ export async function runIterationAttachable(
     `   ${DIM}background ${id} · inspect: claude logs ${id} · step in: claude attach ${id}${RESET}\n`,
   );
 
-  const deadline = started + opts.timeoutMin * 60_000;
+  // Mutable: time the session spends BLOCKED is pushed onto the deadline when
+  // it starts moving again (D3). The wall-clock timeout is there to catch an
+  // iteration that has run away, and an iteration waiting for a human has not
+  // run away — it is doing exactly what it was told to do.
+  let deadline = started + opts.timeoutMin * 60_000;
   let blockedSince: number | null = null;
   let notified = false;
 
   for (;;) {
-    await sleep(opts.pollSec * 1000);
-    const row = findAgent(cwd, id);
-    const verdict = readVerdictFile(cwd, opts.verdictPath);
+    await deps.sleep(opts.pollSec * 1000);
+    const row = deps.findAgent(cwd, id);
+    const verdict = deps.readVerdict(cwd, opts.verdictPath);
 
     // The verdict file is the real completion signal. A session can linger in
     // agent view after finishing its work, so trust the file over the state.
     if (verdict != null) {
-      stopAgent(row);
+      deps.stopAgent(row);
       return {
         costUsd: 0,
         crashed: false,
-        durationMs: Date.now() - started,
+        durationMs: deps.now() - started,
         isError: false,
         numTurns: 0,
         sessionId: id,
@@ -1303,14 +1371,14 @@ export async function runIterationAttachable(
       row.state === 'done' ||
       (row.pid == null && row.state !== 'blocked');
     if (finished) {
-      await sleep(opts.pollSec * 1000);
-      const late = readVerdictFile(cwd, opts.verdictPath);
+      await deps.sleep(opts.pollSec * 1000);
+      const late = deps.readVerdict(cwd, opts.verdictPath);
       if (late != null) {
-        stopAgent(row);
+        deps.stopAgent(row);
         return {
           costUsd: 0,
           crashed: false,
-          durationMs: Date.now() - started,
+          durationMs: deps.now() - started,
           isError: false,
           numTurns: 0,
           sessionId: id,
@@ -1322,7 +1390,7 @@ export async function runIterationAttachable(
       return {
         costUsd: 0,
         crashed: true,
-        durationMs: Date.now() - started,
+        durationMs: deps.now() - started,
         isError: true,
         numTurns: 0,
         sessionId: id,
@@ -1333,20 +1401,23 @@ export async function runIterationAttachable(
     }
 
     if (row.state === 'blocked') {
+      const now = deps.now();
       if (blockedSince == null) {
-        blockedSince = Date.now();
+        blockedSince = now;
       }
       if (!notified) {
         onBlocked(row, id);
         notified = true;
       }
-      // Bounded wait: answer it, or it gets filed as a bead rather than stranded.
-      if (Date.now() - blockedSince > opts.blockedWaitMin * 60_000) {
-        stopAgent(row);
+      // The bound is OPT-IN (D3). null means blocked is "waiting for Justin",
+      // and the runner has no business deciding he took too long.
+      const waitMin = opts.blockedWaitMin;
+      if (waitMin != null && now - blockedSince > waitMin * 60_000) {
+        deps.stopAgent(row);
         return {
           costUsd: 0,
           crashed: false,
-          durationMs: Date.now() - started,
+          durationMs: now - started,
           isError: false,
           numTurns: 0,
           sessionId: id,
@@ -1359,22 +1430,32 @@ export async function runIterationAttachable(
             handoffBead: null,
             respawn: null,
             status: 'BLOCKED',
-            summary: `Waited ${opts.blockedWaitMin}m for an answer to "${row.waitingFor ?? 'a question'}" and got none. Session stopped so it would not strand. Re-run to retry.`,
+            summary: `Waited ${waitMin}m for an answer to "${row.waitingFor ?? 'a question'}" and got none. Session stopped so it would not strand. Re-run to retry.`,
           },
         };
       }
-    } else {
-      // Answered, and moving again.
+      // The iteration timeout must NOT fire while the session waits for a
+      // human, so the deadline check below is skipped for as long as this
+      // stretch lasts; when it ends, the whole stretch is added back to the
+      // deadline. Otherwise `--blocked-wait-min 720` would be a lie: the
+      // 45-minute timeout would kill the session long before the 12 hours
+      // Justin thought he had to answer.
+      continue;
+    }
+    if (blockedSince != null) {
+      // Answered, and moving again. Give the iteration back the time it spent
+      // waiting on us.
+      deadline += deps.now() - blockedSince;
       blockedSince = null;
       notified = false;
     }
 
-    if (Date.now() > deadline) {
-      stopAgent(row);
+    if (deps.now() > deadline) {
+      deps.stopAgent(row);
       return {
         costUsd: 0,
         crashed: true,
-        durationMs: Date.now() - started,
+        durationMs: deps.now() - started,
         isError: true,
         numTurns: 0,
         sessionId: id,
@@ -1495,6 +1576,16 @@ function quotaGateDisabled(): string {
   return `${YELLOW}[gate disabled]${RESET}${DIM} /usage not read — quota UNKNOWN, not 0% (--no-usage-gate)${RESET}`;
 }
 
+/**
+ * How the run header describes the blocked-wait policy (D3). One place, so the
+ * header can never claim a bound the loop is not applying.
+ */
+export function blockedWaitDescription(blockedWaitMin: number | null): string {
+  return blockedWaitMin == null
+    ? 'blocked iterations wait INDEFINITELY for you (--blocked-wait-min to bound it)'
+    : `blocked iterations wait ${blockedWaitMin}m for you, then stop`;
+}
+
 function renderHeader(cwd: string, opts: RalphOptions): void {
   process.stdout.write(
     `\n${BOLD}ralph${RESET} ${DIM}→${RESET} ${cwd}\n` +
@@ -1505,7 +1596,7 @@ function renderHeader(cwd: string, opts: RalphOptions): void {
         : `usage-gate=DISABLED`) +
       `${RESET}\n` +
       (opts.mode === 'attachable'
-        ? `${DIM}mode=attachable — inspect with \`claude agents\`; blocked iterations wait ${opts.blockedWaitMin}m for you${RESET}\n\n`
+        ? `${DIM}mode=attachable — inspect with \`claude agents\`; ${blockedWaitDescription(opts.blockedWaitMin)}${RESET}\n\n`
         : `${DIM}mode=print — headless, not attachable; a question becomes a BLOCKED verdict${RESET}\n\n`),
   );
 }
@@ -1770,7 +1861,9 @@ export async function runRalph(
               `\n${YELLOW}?${RESET}  ${BOLD}iteration ${n} needs you${RESET} — ${row.waitingFor ?? 'waiting for input'}\n` +
                 `   ${DIM}answer it:  claude agents   (Space to peek, type a reply)${RESET}\n` +
                 `   ${DIM}or step in: claude attach ${id}${RESET}\n` +
-                `   ${DIM}waiting up to ${opts.blockedWaitMin}m, then filing it as a bead and moving on${RESET}\n\n`,
+                (opts.blockedWaitMin == null
+                  ? `   ${DIM}waiting INDEFINITELY — this iteration does nothing until you answer${RESET}\n\n`
+                  : `   ${DIM}waiting up to ${opts.blockedWaitMin}m, then filing it as a bead and moving on${RESET}\n\n`),
             );
             notifyBlocked(cwd, n, row);
           })

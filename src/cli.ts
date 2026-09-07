@@ -311,11 +311,26 @@ void yargs(hideBin(process.argv))
             'attachable: `claude --bg` — inspect with `claude logs <id>`, step in with `claude attach <id>`, answer questions from `claude agents`. print: headless `claude -p`, not attachable, a question becomes a BLOCKED verdict.',
           default: RALPH_DEFAULTS.mode,
         })
+        // No default, and none wanted (home-base-1r6d.26, D3): omitted means a
+        // blocked iteration waits for you indefinitely. Passing a number is how
+        // you opt into a bound for an UNATTENDED run.
         .option('blocked-wait-min', {
           type: 'number',
           describe:
-            'attachable only: how long a blocked iteration waits for your answer before being stopped and filed as a bead',
-          default: RALPH_DEFAULTS.blockedWaitMin,
+            'attachable only: bound how long a blocked iteration waits for your answer before it is stopped and its question filed as a bead. Omitted (the default) waits indefinitely — blocked means waiting for you, and the runner does not decide you took too long.',
+          defaultDescription: 'wait indefinitely',
+        })
+        .check((argv) => {
+          const wait = argv['blocked-wait-min'];
+          // 0 or a negative bound is not "no bound" — it is a value that would
+          // silently stop every blocked session on the first poll. Refuse it
+          // rather than guessing which the user meant.
+          if (wait !== undefined && !(wait > 0)) {
+            throw new Error(
+              '--blocked-wait-min must be greater than 0 (omit it to wait indefinitely)',
+            );
+          }
+          return true;
         })
         .option('poll-sec', {
           type: 'number',
@@ -415,7 +430,7 @@ void yargs(hideBin(process.argv))
         }),
     async (argv) => {
       const exitCode = await runRalph(process.cwd(), {
-        blockedWaitMin: argv['blocked-wait-min'],
+        blockedWaitMin: argv['blocked-wait-min'] ?? null,
         dryRun: argv['dry-run'],
         gatePollMin: argv['gate-poll-min'],
         ledgerPath: argv.ledger,

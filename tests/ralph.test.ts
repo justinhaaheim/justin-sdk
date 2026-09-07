@@ -29,6 +29,7 @@ import {join, resolve} from 'path';
 
 import {
   attachableContract,
+  blockedWaitDescription,
   checkGate,
   DEFAULT_OPTIONS,
   parseBackgroundedId,
@@ -584,11 +585,48 @@ describe('attachable defaults', () => {
     expect(DEFAULT_OPTIONS.mode).toBe('attachable');
   });
 
-  test('bounds the blocked wait so an iteration cannot strand', () => {
-    // The entire reason this bound exists: block-and-wait with no bound is how
-    // 17 sessions on this machine ended up blocked for up to 43 days.
-    expect(DEFAULT_OPTIONS.blockedWaitMin).toBeGreaterThan(0);
-    expect(DEFAULT_OPTIONS.blockedWaitMin).toBeLessThanOrEqual(60);
+  test('blocked means WAIT FOR JUSTIN — the bound is opt-in (D3)', () => {
+    // Reversed from a 15-minute default (home-base-1r6d.26, D3). The bound was
+    // built for the unattended scheduled-tick workflow, where a blocked session
+    // nobody answers is an invisible open thread — 17 such sessions on this
+    // machine, oldest 43 days. But the workflow that matters now is the direct
+    // ask, where the person being asked is the person who started the run, and
+    // a 15-minute bound kills the session he is walking back to answer.
+    //
+    // null, not 0: "no bound" and "a bound of zero minutes" are different
+    // instructions, and 0 would stop every blocked session on its first poll.
+    expect(DEFAULT_OPTIONS.blockedWaitMin).toBeNull();
+  });
+
+  test('the header says which of the two policies is in force', () => {
+    // A header that still promised a bound while the loop waited forever would
+    // be worse than no header at all.
+    expect(blockedWaitDescription(null)).toContain('INDEFINITELY');
+    expect(blockedWaitDescription(null)).toContain('--blocked-wait-min');
+    expect(blockedWaitDescription(720)).toContain('720m');
+    expect(blockedWaitDescription(720)).not.toContain('INDEFINITELY');
+  });
+
+  test('the contract tells the model the SAME policy the loop will apply', () => {
+    // The model decides whether to ask a question based on this sentence. If it
+    // says "bounded" while the runner waits forever, a session stalls a run it
+    // was told would be reaped; if it says "indefinite" while the runner reaps
+    // at 15m, the model asks a question that gets it killed.
+    const unbounded = attachableContract('/tmp/v.json', null);
+    expect(unbounded).toContain('indefinitely');
+    expect(unbounded).not.toContain('bounded time');
+    const bounded = attachableContract('/tmp/v.json', 720);
+    expect(bounded).toContain('waits 720m');
+    expect(bounded).toContain('files your question as a bead');
+    expect(bounded).not.toContain('indefinitely');
+  });
+
+  test('no text anywhere still promises the bounded wait as the default', () => {
+    // AC6. The old sentence — "The runner only waits a bounded time before
+    // stopping you" — was in the contract the model reads, and is exactly the
+    // kind of stale promise that survives a behaviour change.
+    expect(attachableContract('/tmp/v.json')).not.toContain('bounded time');
+    expect(VERDICT_CONTRACT).not.toContain('bounded time');
   });
 });
 
