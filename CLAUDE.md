@@ -24,6 +24,7 @@ Validation bar here is `tsc --noEmit` + `bun test` — this repo has no ESLint c
 
 ## Gotchas
 
+- **Pushing `main` and cutting tags here needs no permission** (Justin, 2026-09-07). Do it whenever the work calls for it, rather than asking and stopping.
 - **A release is four things: version + tag + push + consumer pin bump.** Bumping a git-dep's version without pushing a tag changes nothing for consumers pinned to tags.
 - **Prefer `v`-prefixed tags.** With both `0.14.0` and `v0.14.0` present, `pickLatestTag` breaks the tie by gh API ordering — which tree you get is nondeterministic.
 - **`bun test <path>` is a cwd-relative filter, not a path.** Run from the wrong directory it silently matches a different checkout's copy of the tests. Verify cwd before trusting a green run.

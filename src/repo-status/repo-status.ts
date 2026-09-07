@@ -9,10 +9,19 @@
  * a judgment part that is small enough to actually look at.
  *
  * The primary audience is Claude Code, not a human reading a terminal. That
- * drives most of the ergonomics here: YAML by default (structured but
- * low-token and readable as plain output), `--json` for the identical object,
- * inspect SUBCOMMANDS so a reader never has to jq a blob, and `--help` that
- * carries a usage NARRATIVE so no external memory is needed to drive the tool.
+ * drives most of the ergonomics here: inspect SUBCOMMANDS so a reader never has
+ * to jq a blob, and a `--help` carrying a usage NARRATIVE so no external memory
+ * is needed to drive the tool.
+ *
+ * It USED to drive the output format too — YAML by default, on the reasoning
+ * that a consistently-keyed object is what a program should read. That was
+ * reversed on 2026-09-07 (home-base-qyu1.34). The readable ledger says the same
+ * things in about a fifteenth of the bytes, and the premise turned out to be
+ * wrong in a specific way: the questions an agent brings to this tool are the
+ * same ones a person brings — what is open, how old, did it land, what will
+ * merging cost — and a rendering that answers those in prose answers them for
+ * both. `--yaml` and `--json` remain for scripts and for the fields the ledger
+ * summarises away, over the identical object.
  *
  * Part of home-base-qyu1.
  */
@@ -22,14 +31,9 @@ import {hideBin} from 'yargs/helpers';
 
 import type {Argv} from 'yargs';
 
-import {
-  buildPlan,
-  executePlan,
-  executeRemotePlan,
-  renderPlan,
-} from './plan';
+import {buildPlan, executePlan, executeRemotePlan, renderPlan} from './plan';
 import {DEFAULT_PAIR_CAP} from './overlap';
-import {renderReportPretty} from './pretty';
+import {renderReportPretty, shouldStyle} from './pretty';
 import {buildReport, type RepoStatusReport} from './report';
 
 /**
@@ -219,7 +223,6 @@ files, how many it merge-checked and how many the cap dropped, so "no overlaps"
 is never confusable with "did not look".
 
   repo-status status                 the ledger, filtered, with merge previews
-  repo-status status --pretty        the same thing written for a human to read
   repo-status status --all           every branch, however old, archive/* too
   repo-status status --no-content    skip per-commit proofs — fast, but dispositions
                                      stay conservative because nothing is proven
@@ -230,14 +233,21 @@ is never confusable with "did not look".
                                      store, not just this worktree's — each linked
                                      worktree has its own store, and 'git worktree
                                      remove' deletes it along with anything unpushed
-  repo-status status --json          same object as JSON
+  repo-status status --yaml          the full typed object as YAML
+  repo-status status --json          the same object as JSON
   repo-status status --no-merge-preview --no-overlaps
                                      skip the merge questions entirely
 
-YAML is the default because the primary reader of this tool is an agent and a
-consistently-keyed object is what an agent should read. '--pretty' is the same
-object rendered for a person: grouped by what to do about it, one line per
-branch, detail indented. It is a rendering only — it computes nothing of its own.
+FORMAT. The readable ledger above is the DEFAULT, for agents as much as for
+people: it carries the same answers in roughly a fifteenth of the bytes, and the
+questions an agent asks of this tool turn out to be the questions a person asks.
+'--yaml' and '--json' render the full typed object, which is what a script wants
+and what to reach for when you need a field the ledger summarises away. All
+three are the same object; only the rendering differs, and the ledger computes
+nothing of its own.
+
+ANSI styling appears only on an interactive terminal (and never when NO_COLOR is
+set), so piped and tool-call output stays plain text.
 `.trim();
 
 const BRANCH_NARRATIVE = `
@@ -433,31 +443,46 @@ function render(obj: unknown, json: boolean): string {
   return Bun.YAML.stringify(obj, null, 2).trimEnd();
 }
 
-function emit(
-  report: RepoStatusReport | null,
-  json: boolean,
-  pretty = false,
-): number {
+/**
+ * Which rendering a set of flags selects.
+ *
+ * `ledger` — the readable one — is the DEFAULT for everybody, human and agent
+ * alike (2026-09-07). It carries the same answers in roughly a fifteenth of the
+ * bytes, and the structured formats stay for scripts and for anything that
+ * needs a field the summary drops.
+ */
+type Format = 'json' | 'ledger' | 'yaml';
+
+function emit(report: RepoStatusReport | null, format: Format): number {
   if (report == null) {
     console.error(
       'not a git repository (or no baseline branch could be found)',
     );
     return 1;
   }
-  console.log(pretty ? renderReportPretty(report) : render(report, json));
+  const ledger = format === 'ledger';
+  console.log(
+    ledger
+      ? renderReportPretty(report, {color: shouldStyle()})
+      : render(report, format === 'json'),
+  );
   if (
     !report.enrichments.prs &&
-    report.enrichments.prsUnavailableReason != null
+    report.enrichments.prsUnavailableReason != null &&
+    // The ledger already carries this under "what was and was not checked".
+    // Repeating it on stderr just prints it twice into the same terminal.
+    !ledger
   ) {
     console.error(
       `note: PR state unavailable — ${report.enrichments.prsUnavailableReason}`,
     );
   }
-  // A severe submodule row is the whole reason this section exists: it is the
-  // failure that looks fine locally and breaks every clone. Surfacing it on
-  // stderr as well means it cannot be scrolled past in a long ledger.
+  // A severe submodule row is the whole reason that section exists: it is the
+  // failure that looks fine locally and breaks every clone. On the structured
+  // formats it goes to stderr so it cannot be scrolled past; the ledger prints
+  // it in the body already, and duplicating it there was measured noise.
   for (const sub of report.submodules.entries) {
-    if (sub.severity === 'severe') {
+    if (sub.severity === 'severe' && !ledger) {
       console.error(`severe: submodule ${sub.path} — ${sub.why}`);
     }
   }
@@ -466,6 +491,7 @@ function emit(
   // (home-base-qyu1.23). The nulls in the object are the machine-readable form;
   // this is the form that cannot be scrolled past.
   for (const failure of report.enumerationFailures ?? []) {
+    if (ledger) continue;
     console.error(
       `severe: could not enumerate ${failure.what} — \`${failure.command}\` failed. ${failure.why}. ${failure.diagnose}`,
     );
@@ -555,9 +581,21 @@ const statusCommand = {
           'Max branch pairs to merge-check, after the shared-file screen',
         type: 'number' as const,
       })
+      // No yargs `default` here, for the same measured reason as `since-days`
+      // above: a default lands in `argv` exactly like a typed flag, so a
+      // `.conflicts('json', 'yaml')` would refuse every run. The two are
+      // checked against each other in the handler instead.
+      .option('yaml', {
+        describe:
+          'Emit the full typed object as YAML instead of the ledger (default: ledger)',
+        type: 'boolean' as const,
+      })
+      // Retained so anything that learned `--pretty` when it was opt-in keeps
+      // working. It now selects what it would have got anyway.
       .option('pretty', {
         default: false,
-        describe: 'Render the compact human-readable ledger instead of YAML',
+        describe: 'Deprecated no-op — the readable ledger is now the default',
+        hidden: true,
         type: 'boolean' as const,
       })
       // An explicit --all next to an explicit --since-days is a contradiction —
@@ -570,9 +608,9 @@ const statusCommand = {
   command: ['status', '$0'],
   describe: 'Per-branch disposition ledger for the repo',
   handler: (args: any) => {
-    if (args.json && args.pretty) {
+    if (args.json === true && args.yaml === true) {
       console.error(
-        '--json and --pretty select different renderings; pass at most one',
+        '--json and --yaml select different renderings; pass at most one',
       );
       process.exitCode = 2;
       return;
@@ -586,14 +624,14 @@ const statusCommand = {
         overlaps: args.overlaps,
         pairCap: args.pairCap,
         prs: args.prs,
-        sinceDays: args.all === true
-          ? null
-          : (args.sinceDays ?? DEFAULT_STATUS_SINCE_DAYS),
+        sinceDays:
+          args.all === true
+            ? null
+            : (args.sinceDays ?? DEFAULT_STATUS_SINCE_DAYS),
         submoduleStores: args.submoduleStores,
         submodules: args.submodules,
       }),
-      args.json,
-      args.pretty,
+      args.json === true ? 'json' : args.yaml === true ? 'yaml' : 'ledger',
     );
   },
 };
@@ -631,7 +669,11 @@ const branchCommand = {
       process.exitCode = 1;
       return;
     }
-    process.exitCode = emit(report, args.json);
+    // STRUCTURED BY DEFAULT here, unlike `status`. The ledger rendering
+    // deliberately summarises away the per-commit verdicts and the changed-file
+    // list — which are the entire reason to run this command — so rendering a
+    // deep-dive through it would answer a question nobody asked.
+    process.exitCode = emit(report, args.json === true ? 'json' : 'yaml');
   },
 };
 
@@ -887,7 +929,9 @@ function buildRepoStatus(y: Argv): Argv {
 /** Mount the whole group under a host CLI (`justin-sdk repo-status …`). */
 export const repoStatusCommand = {
   builder: (y: Argv) =>
-    buildRepoStatus(y.usage(`$0 repo-status <command> [options]\n\n${TOP_NARRATIVE}`)),
+    buildRepoStatus(
+      y.usage(`$0 repo-status <command> [options]\n\n${TOP_NARRATIVE}`),
+    ),
   command: 'repo-status',
   describe: 'Per-branch reconcile ledger for one git repository',
   handler: () => {

@@ -189,7 +189,8 @@ export function decideDisposition(
 
   // --- Not merged, but exactly mirrored ------------------------------------
   if (mirrorFullyPreserves(mirror)) {
-    const extra = mirror?.isExact === false ? ' (mirror is ahead of the branch)' : '';
+    const extra =
+      mirror?.isExact === false ? ' (mirror is ahead of the branch)' : '';
     return {
       disposition: 'mirrored',
       provenSafe: true,
@@ -207,15 +208,22 @@ export function decideDisposition(
   }
 
   // --- Genuinely unresolved -------------------------------------------------
+  // Plain English, because this line is the one a reader acts on and the words
+  // in it were bespoke: "no archive mirror" told a reader nothing unless they
+  // already knew this repo's archive/<name> convention (Justin, 2026-09-07).
   const prNote =
     pr != null
-      ? ` (PR #${pr.number} ${pr.state.toLowerCase()})`
+      ? `; PR #${pr.number} is ${pr.state.toLowerCase()}`
       : prDataAvailable
-        ? ' (no PR)'
-        : ' (PR state unknown)';
+        ? '; no PR'
+        : '; PR state not checked';
+  const backupNote =
+    mirror?.exists === true
+      ? `, and the ${mirror.ref} backup branch does not hold them either`
+      : ', and no archive/ backup branch holds them';
   return {
     disposition: 'needs-judgment',
     provenSafe: false,
-    why: `${plural(proof.unaccountedCommits.length, 'commit')} not present on ${proof.baselineRef}${mirror?.exists === true ? ` and the ${mirror.ref} mirror does not cover them` : ' and no archive mirror'}${prNote}`,
+    why: `${plural(proof.unaccountedCommits.length, 'commit')} exist only here — not on ${proof.baselineRef}${backupNote}${prNote}`,
   };
 }

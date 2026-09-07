@@ -186,19 +186,31 @@ function prNoteFor(
 const RECENT_TOUCH_MS = 72 * 60 * 60 * 1000;
 
 /**
- * YYYY-MM-DD, plus ` HH:MM` (24h, local) when the commit is within the last 72h.
+ * `YYYY-MM-DD`, plus ` HH:MM` (24h, local).
  *
- * Exported because `--pretty` renders the same dates for the same reader and
- * they must not drift into two conventions (home-base-qyu1.33.4).
+ * TWO MODES, and the difference is about the surrounding layout rather than the
+ * date. `recent` (the default, and what the session-start prose wants) prints
+ * the time only for a commit inside the last 72h, because in flowing prose an
+ * unhelpful `00:00` on a two-month-old commit is clutter. `always` is what a
+ * COLUMN wants: a variable-width cell makes the whole table ragged, and the
+ * ragged column costs more than the extra digits.
+ *
+ * Exported because the ledger renders the same dates for the same reader, and
+ * two copies of this would have drifted into two conventions.
  */
-export function formatTouched(iso: string): string {
+export function formatTouched(
+  iso: string,
+  time: 'always' | 'recent' = 'recent',
+): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   const y = d.getFullYear();
   const mo = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   const date = `${y}-${mo}-${day}`;
-  if (Date.now() - d.getTime() > RECENT_TOUCH_MS) return date;
+  if (time === 'recent' && Date.now() - d.getTime() > RECENT_TOUCH_MS) {
+    return date;
+  }
   const hh = String(d.getHours()).padStart(2, '0');
   const mm = String(d.getMinutes()).padStart(2, '0');
   return `${date} ${hh}:${mm}`;
