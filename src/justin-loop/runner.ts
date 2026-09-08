@@ -483,7 +483,26 @@ export function parseBackgroundedId(stdout: string): string | null {
   return match != null ? match[1] : null;
 }
 
-export function listAgents(cwd: string): AgentRow[] {
+/**
+ * The result of asking `claude agents --json` what exists.
+ *
+ * `ok: false` is a DISTINCT member, and it is load-bearing (critical rule 6).
+ * An earlier version returned `[]` when the command timed out, exited non-zero,
+ * or printed unparseable JSON — which made "we could not look" indistinguishable
+ * from "there is nothing there". Two such failures in a row would have been
+ * counted as two consecutive absences and licensed spawning a successor onto a
+ * predecessor that was, for all anyone knew, still running: the reassuring
+ * substitution, arriving at the one decision this whole file exists to protect.
+ */
+export type AgentListing =
+  | {ok: true; rows: AgentRow[]}
+  | {ok: false; reason: string};
+
+export type AgentLookup =
+  | {ok: true; row: AgentRow | null}
+  | {ok: false; reason: string};
+
+export function listAgents(cwd: string): AgentListing {
   const proc = spawnSync('claude', ['agents', '--json'], {
     cwd,
     encoding: 'utf-8',
@@ -491,24 +510,47 @@ export function listAgents(cwd: string): AgentRow[] {
     maxBuffer: 16 * 1024 * 1024,
     timeout: 60_000,
   });
-  if (proc.status !== 0 || proc.stdout == null) return [];
+  if (proc.error != null) {
+    return {ok: false, reason: `claude agents could not run: ${proc.error.message}`};
+  }
+  if (proc.status !== 0) {
+    const how =
+      proc.status != null
+        ? `exited ${proc.status}`
+        : `was killed (${proc.signal ?? 'unknown signal'})`;
+    return {ok: false, reason: `claude agents --json ${how}`};
+  }
+  if (proc.stdout == null) {
+    return {ok: false, reason: 'claude agents --json produced no output'};
+  }
   try {
     const rows = JSON.parse(proc.stdout) as Array<Record<string, unknown>>;
-    return rows.map((r) => ({
-      id: String(r.id ?? ''),
-      name: String(r.name ?? ''),
-      pid: typeof r.pid === 'number' ? r.pid : null,
-      state: typeof r.state === 'string' ? r.state : null,
-      status: typeof r.status === 'string' ? r.status : null,
-      waitingFor: typeof r.waitingFor === 'string' ? r.waitingFor : null,
-    }));
-  } catch {
-    return [];
+    if (!Array.isArray(rows)) {
+      return {ok: false, reason: 'claude agents --json did not return an array'};
+    }
+    return {
+      ok: true,
+      rows: rows.map((r) => ({
+        id: String(r.id ?? ''),
+        name: String(r.name ?? ''),
+        pid: typeof r.pid === 'number' ? r.pid : null,
+        state: typeof r.state === 'string' ? r.state : null,
+        status: typeof r.status === 'string' ? r.status : null,
+        waitingFor: typeof r.waitingFor === 'string' ? r.waitingFor : null,
+      })),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `claude agents --json was unparseable: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
 }
 
-export function findAgent(cwd: string, id: string): AgentRow | null {
-  return listAgents(cwd).find((r) => r.id === id) ?? null;
+export function findAgent(cwd: string, id: string): AgentLookup {
+  const listing = listAgents(cwd);
+  if (!listing.ok) return {ok: false, reason: listing.reason};
+  return {ok: true, row: listing.rows.find((r) => r.id === id) ?? null};
 }
 
 /**
@@ -560,14 +602,23 @@ export function signalPid(pid: number, sig: NodeJS.Signals): boolean {
  * What became of a session we asked to stop. Every member is a DIFFERENT fact,
  * and only two of them license spawning a successor.
  *
- * already-gone  the row was absent before we touched anything.
+ * already-gone  we LOOKED SUCCESSFULLY and the row was already absent.
  * stopped       we stopped it and CONFIRMED the row is gone.
  * no-pid        the row survived everything and carries no pid, so there was
  *               not even an OS process to fall back on. NOT verified gone.
  * kill-failed   the row survived everything and still has a pid. NOT verified
  *               gone — this stops the whole run (D6).
+ * unverified    `claude agents --json` could not be read, so whether the session
+ *               is gone is UNKNOWN. Not absence, not presence — its own answer,
+ *               because the alternative is spending "we could not look" as
+ *               "it is gone" (critical rule 6).
  */
-export type StopOutcome = 'already-gone' | 'stopped' | 'no-pid' | 'kill-failed';
+export type StopOutcome =
+  | 'already-gone'
+  | 'stopped'
+  | 'no-pid'
+  | 'kill-failed'
+  | 'unverified';
 
 /** The two outcomes that mean the predecessor is provably not running. */
 export function isVerifiedGone(outcome: StopOutcome): boolean {
@@ -581,7 +632,7 @@ export interface StopReport {
 }
 
 export interface StopDeps {
-  findAgent: (cwd: string, id: string) => AgentRow | null;
+  findAgent: (cwd: string, id: string) => AgentLookup;
   signalPid: (pid: number, sig: NodeJS.Signals) => boolean;
   sleep: (ms: number) => Promise<void>;
   stopSession: (cwd: string, id: string) => {ok: boolean; detail: string};
@@ -597,11 +648,22 @@ async function confirmGone(
   id: string,
   pollMs: number,
   deps: StopDeps,
+  notes: string[],
 ): Promise<boolean> {
   let consecutive = 0;
   for (let i = 0; i < STOP_VERIFY_POLLS; i++) {
     await deps.sleep(pollMs);
-    if (deps.findAgent(cwd, id) == null) {
+    const look = deps.findAgent(cwd, id);
+    if (!look.ok) {
+      // UNKNOWN IS NOT ABSENT. A listing we could not read says nothing about
+      // whether the session is gone, so it resets the streak rather than
+      // counting toward it — otherwise two timed-out `claude agents` calls
+      // would read as proof and license a spawn.
+      notes.push(`could not read \`claude agents\` (${look.reason}) — NOT counted as absent`);
+      consecutive = 0;
+      continue;
+    }
+    if (look.row == null) {
       consecutive++;
       if (consecutive >= STOP_CONSECUTIVE_ABSENT) return true;
     } else {
@@ -637,8 +699,19 @@ export async function stopAndVerify(
 ): Promise<StopReport> {
   const notes: string[] = [];
   const before = deps.findAgent(cwd, id);
-  if (before == null) {
-    return {notes: [`${id} was already absent from \`claude agents\``], outcome: 'already-gone'};
+  if (before.ok && before.row == null) {
+    return {
+      notes: [`${id} was already absent from \`claude agents\``],
+      outcome: 'already-gone',
+    };
+  }
+  if (!before.ok) {
+    // We cannot even tell whether there is anything to stop. Stopping is
+    // idempotent and harmless, so the ladder still runs — but nothing here may
+    // shortcut to `already-gone`, which is the answer that licenses a spawn.
+    notes.push(
+      `could not read \`claude agents\` before stopping (${before.reason}) — proceeding with the stop, and NOT assuming it is gone`,
+    );
   }
 
   const attempts: Array<{label: string; act: () => boolean | null}> = [
@@ -660,9 +733,10 @@ export async function stopAndVerify(
     },
     {
       act: () => {
-        const row = deps.findAgent(cwd, id);
+        const look = deps.findAgent(cwd, id);
+        const row = look.ok ? look.row : null;
         if (row?.pid == null) {
-          notes.push('SIGTERM skipped — the row carries no pid to signal');
+          notes.push('SIGTERM skipped — no pid to signal');
           return null;
         }
         const sent = deps.signalPid(row.pid, 'SIGTERM');
@@ -675,9 +749,10 @@ export async function stopAndVerify(
     },
     {
       act: () => {
-        const row = deps.findAgent(cwd, id);
+        const look = deps.findAgent(cwd, id);
+        const row = look.ok ? look.row : null;
         if (row?.pid == null) {
-          notes.push('SIGKILL skipped — the row carries no pid to signal');
+          notes.push('SIGKILL skipped — no pid to signal');
           return null;
         }
         const sent = deps.signalPid(row.pid, 'SIGKILL');
@@ -690,7 +765,7 @@ export async function stopAndVerify(
 
   for (const attempt of attempts) {
     attempt.act();
-    if (await confirmGone(cwd, id, pollMs, deps)) {
+    if (await confirmGone(cwd, id, pollMs, deps, notes)) {
       notes.push(
         `verified gone: ${id} absent from \`claude agents\` on ${STOP_CONSECUTIVE_ABSENT} consecutive polls after ${attempt.label}`,
       );
@@ -700,14 +775,22 @@ export async function stopAndVerify(
   }
 
   const after = deps.findAgent(cwd, id);
-  if (after == null) {
+  if (!after.ok) {
+    // The honest answer is that we do not know, and "do not know" must never be
+    // spendable as "gone" (critical rule 6). Refuses the spawn like a failure.
+    notes.push(
+      `UNVERIFIED: \`claude agents\` could not be read on the final check (${after.reason}), so whether ${id} is gone is UNKNOWN`,
+    );
+    return {notes, outcome: 'unverified'};
+  }
+  if (after.row == null) {
     // Vanished between the last poll and now. Absence is absence.
     notes.push(`${id} is absent on the final check`);
     return {notes, outcome: 'stopped'};
   }
-  const outcome: StopOutcome = after.pid == null ? 'no-pid' : 'kill-failed';
+  const outcome: StopOutcome = after.row.pid == null ? 'no-pid' : 'kill-failed';
   notes.push(
-    `${id} is STILL PRESENT (state=${after.state ?? 'unknown'}, pid=${after.pid ?? 'none'}) — NOT verified gone`,
+    `${id} is STILL PRESENT (state=${after.row.state ?? 'unknown'}, pid=${after.row.pid ?? 'none'}) — NOT verified gone`,
   );
   return {notes, outcome};
 }
@@ -1214,7 +1297,8 @@ export type LedgerOutcome =
   | 'multiple-handoffs'
   | 'kill-failed'
   | 'br-unavailable'
-  | 'dispatch-failed';
+  | 'dispatch-failed'
+  | 'agents-unreadable';
 
 export interface LedgerRow {
   schemaVersion: number;
@@ -1456,7 +1540,17 @@ export type SessionEnding =
   | {kind: 'ended'}
   | {kind: 'timeout'; afterMin: number}
   | {kind: 'blocked-timeout'; waitingFor: string | null}
-  | {kind: 'dispatch-failed'; banner: string};
+  | {kind: 'dispatch-failed'; banner: string}
+  /**
+   * `claude agents --json` could not be read enough times in a row that we have
+   * stopped pretending to be watching. Without this the default
+   * `--timeout-min 0` would poll a dead daemon forever, and every poll would be
+   * an unknown the runner was quietly treating as "keep waiting".
+   */
+  | {kind: 'agents-unreadable'; reason: string; failures: number};
+
+/** Consecutive unreadable `claude agents` polls before a session is abandoned. */
+export const AGENTS_FAILURE_LIMIT = 5;
 
 export interface SessionRun {
   ending: SessionEnding;
@@ -1519,9 +1613,31 @@ export async function runSession(
   let blockedSince: number | null = null;
   let notified = false;
 
+  let agentsFailures = 0;
+
   for (;;) {
     await deps.sleep(opts.pollSec * 1000);
-    const row = deps.findAgent(cwd, id);
+    const look = deps.findAgent(cwd, id);
+
+    if (!look.ok) {
+      // A listing we could not read is NOT an ending and NOT a continuation —
+      // it is an unknown. Keep waiting, but boundedly, and then say so.
+      agentsFailures++;
+      if (agentsFailures >= AGENTS_FAILURE_LIMIT) {
+        return {
+          durationMs: deps.now() - started,
+          ending: {
+            failures: agentsFailures,
+            kind: 'agents-unreadable',
+            reason: look.reason,
+          },
+          id,
+        };
+      }
+      continue;
+    }
+    agentsFailures = 0;
+    const row = look.row;
 
     if (row == null || isSessionEnded(row)) {
       return {durationMs: deps.now() - started, ending: {kind: 'ended'}, id};
@@ -1806,6 +1922,18 @@ export async function runJustinLoop(
     );
     for (const note of stop.notes) {
       deps.write(`   ${DIM}stop${RESET} ${note}\n`);
+    }
+
+    if (run.ending.kind === 'agents-unreadable') {
+      // We stopped watching, so we do not know what this session is doing. The
+      // only safe move is to stop the run — reading the beads now would act on
+      // a session that may still be writing them.
+      ledger('agents-unreadable', null, stop.outcome, null);
+      end = {
+        exitCode: 2,
+        reason: `lost sight of session ${label}: \`claude agents --json\` failed ${run.ending.failures} polls in a row (${run.ending.reason}). Nothing is spawned — check the Claude Code daemon.`,
+      };
+      break;
     }
 
     if (run.ending.kind === 'blocked-timeout') {

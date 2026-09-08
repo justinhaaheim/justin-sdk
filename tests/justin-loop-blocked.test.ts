@@ -37,6 +37,7 @@ import {afterEach, describe, expect, test} from 'bun:test';
 
 import {
   type AgentRow,
+  AGENTS_FAILURE_LIMIT,
   type BootContext,
   DEFAULT_OPTIONS,
   isSessionEnded,
@@ -97,7 +98,8 @@ interface Sim {
  */
 async function simulate(spec: {
   opts?: Partial<JustinLoopOptions>;
-  rowAt: (poll: number) => AgentRow | null;
+  /** `'unreadable'` = `claude agents --json` failed on that poll. */
+  rowAt: (poll: number) => AgentRow | null | 'unreadable';
   maxPolls?: number;
 }): Promise<Sim> {
   const sb = createSandbox();
@@ -131,7 +133,10 @@ async function simulate(spec: {
       if (polls > maxPolls) {
         throw new Error(`runSession did not terminate within ${maxPolls} polls`);
       }
-      return spec.rowAt(polls);
+      const row = spec.rowAt(polls);
+      return row === 'unreadable'
+        ? {ok: false, reason: 'claude agents --json exited 1'}
+        : {ok: true, row};
     },
     gitHead: () => 'abc123',
     notifyBlocked: () => {
@@ -356,6 +361,69 @@ describe('blocked time does not count toward timeoutMin (D3)', () => {
   });
 });
 
+describe('an unreadable `claude agents` is neither an ending nor a continuation', () => {
+  test('a few failed polls are ridden out, and the session still ends normally', () => {
+    // Transient: the daemon hiccups, we keep waiting, and the answer arrives.
+    return simulate({
+      opts: {timeoutMin: 0},
+      rowAt: (poll) => {
+        if (poll <= 3) return 'unreadable';
+        if (poll <= 6) return WORKING;
+        return DONE;
+      },
+    }).then((sim) => {
+      expect(sim.run.ending.kind).toBe('ended');
+    });
+  });
+
+  test('the failure streak RESETS on a successful read', async () => {
+    // 4 failures, a good read, then 4 more — under the limit of 5 either side,
+    // so this must NOT abandon the session.
+    const sim = await simulate({
+      opts: {timeoutMin: 0},
+      rowAt: (poll) => {
+        if (poll <= 4) return 'unreadable';
+        if (poll === 5) return WORKING;
+        if (poll <= 9) return 'unreadable';
+        return DONE;
+      },
+    });
+    expect(sim.run.ending.kind).toBe('ended');
+  });
+
+  test('but a dead daemon is abandoned rather than polled forever', async () => {
+    // With --timeout-min 0 (the default) there is no clock to save us, so an
+    // unbounded "keep waiting" on an unreadable listing would hang the run
+    // silently. AGENTS_FAILURE_LIMIT consecutive failures end the session with
+    // its own distinct ending, naming what failed.
+    const sim = await simulate({
+      opts: {timeoutMin: 0},
+      rowAt: () => 'unreadable',
+      maxPolls: 40,
+    });
+    expect(sim.run.ending.kind).toBe('agents-unreadable');
+    expect(
+      sim.run.ending.kind === 'agents-unreadable' ? sim.run.ending.failures : 0,
+    ).toBe(AGENTS_FAILURE_LIMIT);
+    expect(
+      sim.run.ending.kind === 'agents-unreadable' ? sim.run.ending.reason : '',
+    ).toContain('claude agents');
+  });
+
+  test('an unreadable listing is never mistaken for the session ending', async () => {
+    // The whole point: `[]` used to come back from a failed listing, so a
+    // failure looked exactly like "the row is gone" — which is "the session
+    // finished" here and "safe to spawn" in stopAndVerify.
+    const sim = await simulate({
+      opts: {timeoutMin: 0},
+      rowAt: (poll) => (poll <= 2 ? 'unreadable' : DONE),
+    });
+    expect(sim.run.ending.kind).toBe('ended');
+    // It kept polling past the failures rather than returning on the first one.
+    expect(sim.polls).toBeGreaterThan(2);
+  });
+});
+
 describe('dispatch', () => {
   test('an absent row is an ending too — there is nothing left to wait for', async () => {
     const sim = await simulate({rowAt: () => null});
@@ -370,7 +438,7 @@ describe('dispatch', () => {
       appendLedgerRow: () => ({ok: true, reason: null}),
       br: () => ({ok: true, reason: null, stdout: '{"issues":[]}'}),
       dispatch: () => 'error: could not start\n',
-      findAgent: () => {
+      findAgent: (): never => {
         throw new Error('must not poll for a session that never started');
       },
       gitHead: () => null,

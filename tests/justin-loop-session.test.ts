@@ -155,6 +155,8 @@ async function runLoop(spec: {
   opts?: Partial<JustinLoopOptions>;
   scans?: Array<BeadSpec[] | 'unavailable'>;
   sessions?: SessionScript[];
+  /** false on a given global poll = `claude agents --json` failed that time. */
+  agentsReadable?: (poll: number) => boolean;
 }): Promise<LoopResult> {
   const rows = new Map<string, AgentRow>();
   const scriptOf = new Map<string, SessionScript>();
@@ -216,17 +218,20 @@ async function runLoop(spec: {
       if (polls > MAX_POLLS) {
         throw new Error(`runJustinLoop did not terminate within ${MAX_POLLS} polls`);
       }
+      if (spec.agentsReadable?.(polls) === false) {
+        return {ok: false, reason: 'claude agents --json exited 1'};
+      }
       const row = rows.get(id);
-      if (row == null) return null;
+      if (row == null) return {ok: true, row: null};
       const script = scriptOf.get(id) ?? {};
       const seen = (pollsFor.get(id) ?? 0) + 1;
       pollsFor.set(id, seen);
       // A session that "works for N polls" flips to done afterwards, so a
       // timeout test can hold it working forever with a large N.
       if (script.worksForPolls != null && seen > script.worksForPolls) {
-        return {...row, state: 'done'};
+        return {ok: true, row: {...row, state: 'done'}};
       }
-      return row;
+      return {ok: true, row};
     },
     gitHead: () => `head-${dispatched}`,
     notifyBlocked: () => {},
@@ -565,8 +570,11 @@ describe('AC2: stopAndVerify (D6)', () => {
   }
 
   async function runStop(spec: {
-    /** The row as seen on each poll; null = absent. */
-    rowAt: (poll: number) => AgentRow | null;
+    /**
+     * The row as seen on each poll: null = absent, `'unreadable'` = the
+     * `claude agents --json` call itself failed.
+     */
+    rowAt: (poll: number) => AgentRow | null | 'unreadable';
     onStop?: () => void;
     onSignal?: (sig: string) => void;
   }): Promise<StopWorld> {
@@ -574,7 +582,12 @@ describe('AC2: stopAndVerify (D6)', () => {
     let stops = 0;
     const signals: string[] = [];
     const deps: StopDeps = {
-      findAgent: () => spec.rowAt(polls++),
+      findAgent: () => {
+        const row = spec.rowAt(polls++);
+        return row === 'unreadable'
+          ? {ok: false, reason: 'claude agents --json exited 1'}
+          : {ok: true, row};
+      },
       signalPid: (_pid, sig) => {
         signals.push(String(sig));
         spec.onSignal?.(String(sig));
@@ -686,9 +699,109 @@ describe('AC2: stopAndVerify (D6)', () => {
 
   test('only stopped and already-gone license a spawn', () => {
     const licensed: StopOutcome[] = ['stopped', 'already-gone'];
-    const refused: StopOutcome[] = ['no-pid', 'kill-failed'];
+    const refused: StopOutcome[] = ['no-pid', 'kill-failed', 'unverified'];
     for (const o of licensed) expect(isVerifiedGone(o)).toBe(true);
     for (const o of refused) expect(isVerifiedGone(o)).toBe(false);
+  });
+
+  /**
+   * An unreadable `claude agents --json` is the most dangerous input this
+   * function takes, because the shape of the failure IS the shape of success:
+   * "no row for that id". `listAgents` used to return `[]` on a timeout, a
+   * non-zero exit or unparseable output, so two failed polls in a row were
+   * indistinguishable from two confirmed absences — and confirmed absence is
+   * exactly what licenses spawning a successor. That is critical rule 6's
+   * cardinal case: the substitution moves the verdict toward "safe".
+   */
+  describe('an unreadable listing is UNKNOWN, never absence', () => {
+    test('NEGATIVE CONTROL: two failed polls after the stop do NOT reach `stopped`', () => {
+      return runStop({rowAt: () => 'unreadable'}).then((w) => {
+        expect(w.report.outcome).toBe('unverified');
+        expect(isVerifiedGone(w.report.outcome)).toBe(false);
+        expect(w.report.notes.join('\n')).toContain('NOT counted as absent');
+        expect(w.report.notes.join('\n')).toContain('UNVERIFIED');
+      });
+    });
+
+    test('POSITIVE CONTROL: the same polls, genuinely absent, DO reach `stopped`', async () => {
+      // Without this the test above would also pass if stopAndVerify could
+      // never confirm anything.
+      let cleared = false;
+      const w = await runStop({
+        onStop: () => {
+          cleared = true;
+        },
+        rowAt: () => (cleared ? null : live),
+      });
+      expect(w.report.outcome).toBe('stopped');
+    });
+
+    test('a failed poll RESETS the absence streak rather than counting', async () => {
+      // absent, unreadable, absent, absent → only the final pair is proof.
+      let poll = 0;
+      const w = await runStop({
+        rowAt: () => {
+          poll++;
+          if (poll === 1) return live; // the initial presence check
+          if (poll === 3) return 'unreadable';
+          return null;
+        },
+      });
+      expect(w.report.outcome).toBe('stopped');
+      expect(w.report.notes.join('\n')).toContain('NOT counted as absent');
+    });
+
+    test('an unreadable INITIAL check never shortcuts to already-gone', async () => {
+      // `already-gone` licenses a spawn on the strength of one lookup, so it
+      // must require a lookup that actually succeeded.
+      let poll = 0;
+      const w = await runStop({
+        rowAt: () => {
+          poll++;
+          return poll === 1 ? 'unreadable' : null;
+        },
+      });
+      expect(w.report.outcome).not.toBe('already-gone');
+      expect(w.report.outcome).toBe('stopped');
+      // It stopped the session rather than assuming there was nothing to stop.
+      expect(w.stops).toBeGreaterThan(0);
+      expect(w.report.notes.join('\n')).toContain('NOT assuming it is gone');
+    });
+  });
+});
+
+describe('AC2: the loop refuses to spawn when it cannot see `claude agents`', () => {
+  test('an unreadable listing during verification blocks the successor', async () => {
+    // A perfectly good continue-handoff, and a listing that cannot be read. The
+    // predecessor might be running; the successor must not start.
+    const r = await runLoop({
+      // Poll 1 is the session poll (sees `done`); everything after is the stop
+      // verification, which must stay unreadable.
+      agentsReadable: (poll) => poll <= 1,
+      opts: {label: 'the-arc'},
+      scans: [[], [beadFrom('hoff-1', {from: 'the-arc-1'})]],
+    });
+    expect(r.dispatches).toHaveLength(1);
+    expect(r.exitCode).toBe(2);
+    expect(r.ledger[0].stopOutcome).toBe('unverified');
+    expect(r.stdout).toContain('REFUSING TO SPAWN');
+  });
+
+  test('losing sight of a session mid-run stops the run, naming what failed', async () => {
+    const r = await runLoop({
+      agentsReadable: () => false,
+      opts: {label: 'the-arc', maxSessions: 2},
+      scans: [[], [beadFrom('hoff-1', {from: 'the-arc-1'})]],
+      sessions: [{worksForPolls: 10_000}],
+    });
+    expect(r.dispatches).toHaveLength(1);
+    expect(r.exitCode).toBe(2);
+    expect(r.ledger[0].outcome).toBe('agents-unreadable');
+    expect(r.stdout).toContain('lost sight of session the-arc-1');
+    expect(r.stdout).toContain('claude agents --json');
+    // The beads were never consulted: a session we stopped watching may still
+    // be writing them.
+    expect(r.brCalls.filter((c) => c[0] === 'list')).toHaveLength(1);
   });
 });
 
@@ -982,7 +1095,7 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
         });
         return 'backgrounded · sess-1 · n\n';
       },
-      findAgent: (_cwd, id) => rows.get(id) ?? null,
+      findAgent: (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
       gitHead: () => 'abc',
       notifyBlocked: () => {},
       now: () => Date.UTC(2026, 8, 8, 11, 30),
@@ -1059,7 +1172,7 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
         });
         return 'backgrounded · sess-1 · n\n';
       },
-      findAgent: (_cwd, id) => rows.get(id) ?? null,
+      findAgent: (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
       gitHead: () => 'abc',
       notifyBlocked: () => {},
       now: () => Date.UTC(2026, 8, 8, 11, 30),

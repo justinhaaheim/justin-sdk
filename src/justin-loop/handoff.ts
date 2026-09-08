@@ -88,8 +88,12 @@ export type HandoffParse =
   {ok: true; handoff: Handoff} | {ok: false; errors: string[]};
 
 /**
- * A single row of `br list --json`, carrying the two fields ralph's
- * `parseBeadList` drops: `description` and `notes`.
+ * A single row of `br list --json`, carrying the fields the runner decides from:
+ * `notes` (the whole contract, per D3) and `labels`.
+ *
+ * This is the ONLY row parser in src/justin-loop — the runner's old
+ * `parseBeadList`, which dropped both fields, was deleted with the verdict file
+ * (home-base-1r6d.33.2, note 12).
  *
  * `notes: null` is load-bearing — it means br reported no notes for this bead,
  * which is a real, reachable state (a create that died between its two steps)
