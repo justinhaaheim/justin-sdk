@@ -17,6 +17,15 @@ import {runDoctor} from './doctor';
 import {runEasUpdate} from './eas-update';
 import {runFix} from './fix';
 import {runInit} from './init';
+import {
+  createHandoff,
+  DISPOSITIONS,
+  emit,
+  parseCreateFlags,
+  renderCreate,
+  renderValidate,
+  validateHandoffs,
+} from './justin-loop/handoff';
 import {runMigrateToPrime} from './migrate-to-prime';
 import {runPrime} from './plugin/lib/prime';
 import {repoStatusCommand} from './repo-status/repo-status';
@@ -458,6 +467,117 @@ void yargs(hideBin(process.argv))
         weeklyStopPct: argv['weekly-stop-pct'],
       });
       process.exit(exitCode);
+    },
+  )
+  // justin-loop (home-base-1r6d.33): a session chain whose control channel IS a
+  // committed handoff bead. `.1` wires the bead's creator and validator; the
+  // runner itself arrives in `.2` as this command's default action.
+  .command(
+    'justin-loop',
+    'The justin-loop session chain: each session hands its work to the next through a committed handoff bead.',
+    (y) =>
+      y
+        .command(
+          'handoff',
+          'Write this session’s handoff bead: what happened, and the successor’s starting instructions. Refuses a second open handoff from the same session. Prints the new bead id — and nothing else — on stdout.',
+          (yy) =>
+            yy
+              // Subcommand FIRST so `handoff validate …` never falls through to
+              // the creator. The creator's own options are deliberately declared
+              // WITHOUT `demandOption`: options on a parent command apply to its
+              // subcommands too, so a demanded --from would make `handoff
+              // validate` unusable. parseCreateFlags does the demanding instead.
+              .command(
+                'validate [id]',
+                'Re-check a handoff bead against the schema. With no id, checks every OPEN handoff bead. Exit 0 all valid (or none exist), 1 any invalid, 2 br unavailable.',
+                (y3) =>
+                  y3.positional('id', {
+                    type: 'string',
+                    describe:
+                      'One bead to check, closed ones included. Omit to check every open handoff bead.',
+                  }),
+                (argv) => {
+                  process.exit(
+                    emit(
+                      renderValidate(
+                        validateHandoffs(process.cwd(), argv.id ?? null),
+                      ),
+                    ),
+                  );
+                },
+              )
+              .option('from', {
+                type: 'string',
+                describe:
+                  'The session label the runner gave this session. Identity: only one OPEN handoff may exist per label.',
+              })
+              .option('disposition', {
+                type: 'string',
+                choices: DISPOSITIONS,
+                describe:
+                  'continue = boot a successor from --next; done = the arc is finished, stop; blocked = only Justin can answer --open-question, stop.',
+              })
+              .option('arc', {
+                type: 'string',
+                describe: 'Epic/bead id or short name for this arc of work.',
+              })
+              .option('worktree', {
+                type: 'string',
+                describe:
+                  'ABSOLUTE path to the worktree the successor must work in.',
+              })
+              .option('branch', {
+                type: 'string',
+                describe: 'Branch to work on.',
+              })
+              .option('state', {
+                type: 'string',
+                describe: '2–4 sentences: where things stand right now.',
+              })
+              .option('next', {
+                type: 'string',
+                describe:
+                  'The successor’s FULL starting instructions — this text becomes its prompt verbatim. Required for every disposition; for done/blocked it is what a future session would need to know.',
+              })
+              .option('open-question', {
+                type: 'string',
+                array: true,
+                describe:
+                  'A question only Justin can answer. Repeatable. Use --open-question=… so a value starting with "-" survives.',
+              })
+              .option('context-tokens', {
+                type: 'number',
+                describe:
+                  'Context tokens from the latest usage notice. Omit when unknown — it is recorded as null, never as 0.',
+              }),
+          (argv) => {
+            const flags = parseCreateFlags({
+              arc: argv.arc,
+              branch: argv.branch,
+              contextTokens: argv['context-tokens'],
+              disposition: argv.disposition,
+              from: argv.from,
+              next: argv.next,
+              openQuestions: argv['open-question'],
+              state: argv.state,
+              worktree: argv.worktree,
+            });
+            if (!flags.ok) {
+              for (const err of flags.errors) console.error(err);
+              console.error(
+                'No handoff bead was created. See `justin-sdk justin-loop handoff --help`.',
+              );
+              process.exit(1);
+            }
+            process.exit(
+              emit(renderCreate(createHandoff(process.cwd(), flags.input))),
+            );
+          },
+        )
+        .demandCommand(1, 'Please specify a justin-loop subcommand'),
+    () => {
+      // Unreachable: demandCommand above rejects a bare `justin-loop` today.
+      // `.2` replaces this with the runner.
     },
   )
   .command(
