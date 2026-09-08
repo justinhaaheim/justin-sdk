@@ -11,7 +11,8 @@
  * the entire point of the technique.
  *
  * WHAT THIS REPLACED, and why (home-base-1r6d.33.2):
- *   - `tmp/ralph-verdict.json`. Two sessions in one repo shared one verdict file,
+ *   - The repo-local scratch verdict file (`ralph-verdict.json`, written under
+ *     the repo's own scratch directory). Two sessions in one repo shared one,
  *     so the runner could read the wrong session's verdict. A bead stamped with
  *     its writer's label cannot be confused, and it is committed, so the chain is
  *     auditable from git alone.
@@ -145,7 +146,11 @@ export interface JustinLoopOptions {
   weeklyStopPct: number;
 }
 
-/** Where the ledger lives (D9): durable, outside git, never `tmp/`. */
+/**
+ * Where the ledger lives (D9): durable, outside git, and never inside the repo —
+ * a ledger in the working tree is a file every session has to remember not to
+ * commit, which is where the old one lived.
+ */
 export const DEFAULT_STATE_DIR = join(
   homedir(),
   '.local',
@@ -366,9 +371,21 @@ export function slugify(raw: string): string {
     .replace(/-+$/, '');
 }
 
-/** Build a slug out of the ask: the first few words that carry meaning. */
+/**
+ * Build a slug out of the ask: the first few words that carry meaning.
+ *
+ * The words are split from the RAW ask, before any length cap. Capping first
+ * (which an earlier version did) truncated the ask to 40 characters and then
+ * picked words out of the stump, so "please can you fix the worktree hydration
+ * bug" became `fix-worktree-hydratio` — a mangled word and a lost one.
+ */
 export function deriveSlug(ask: string): string {
-  const words = slugify(ask).split('-').filter((w) => w !== '');
+  const words = ask
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w !== '');
   const meaningful = words.filter(
     (w) => !SLUG_STOPWORDS.has(w) && w.length > 1,
   );
@@ -1179,7 +1196,7 @@ export function checkGate(
 // Ledger (D9)
 //
 // One JSON line per SESSION, appended to ~/.local/state/justin-sdk/justin-loop/
-// runs.jsonl: durable, outside git, never `tmp/`. This is a debugging aid — the
+// runs.jsonl: durable, outside git, and never inside the repo. A debugging aid — the
 // facts Justin reads live in the handoff beads, which are committed. There is no
 // cost dashboard: `claude --bg` never reports tokens or cost, so any number here
 // would be invented.
