@@ -151,7 +151,9 @@ describe('defaults', () => {
     // tmp/ was where the verdict file and the old ledger lived, and both are
     // gone. A ledger inside the repo is a file every session has to remember not
     // to commit.
-    expect(DEFAULT_OPTIONS.stateDir).toContain('.local/state/justin-sdk/justin-loop');
+    expect(DEFAULT_OPTIONS.stateDir).toContain(
+      '.local/state/justin-sdk/justin-loop',
+    );
     expect(DEFAULT_OPTIONS.stateDir).not.toContain('tmp');
   });
 
@@ -398,7 +400,9 @@ describe('justin-loop --dry-run, end to end with a fake claude on PATH', () => {
     const sb = createSandbox();
     sandboxes.push(sb);
     // preflight requires a git repo with a resolvable HEAD.
-    const repo = initRepo(sb, 'project', {'README.md': '# justin-loop fixture\n'});
+    const repo = initRepo(sb, 'project', {
+      'README.md': '# justin-loop fixture\n',
+    });
 
     const binDir = join(sb.path, 'fakebin');
     mkdirSync(binDir, {recursive: true});
@@ -533,9 +537,16 @@ backgrounded · 1a7289b9 · ralph-probe-DELETEME
  */
 describe('sessionContract — the handoff protocol', () => {
   const LABEL = 'justin-loop-3';
-  const contract = sessionContract({blockedWaitMin: null, label: LABEL});
+  /** The directory the runner was launched in — the beads workspace it scans. */
+  const CWD = '/Users/jhaa/Dev/home-base';
+  const contract = sessionContract({
+    blockedWaitMin: null,
+    cwd: CWD,
+    label: LABEL,
+  });
   /** The worst case for size: contract + the longest boot preamble. */
   const pickupBoot: BootContext = {
+    cwd: CWD,
     label: LABEL,
     plan: {
       kind: 'handoff',
@@ -551,7 +562,9 @@ describe('sessionContract — the handoff protocol', () => {
           openQuestions: [],
           schemaVersion: 1,
           state: 'Half done.',
-          worktree: '/Users/jhaa/Dev/home-base',
+          // A worktree, deliberately NOT the runner's own directory: the two are
+          // different places, and the contract has to name both (1r6d.33.9).
+          worktree: '/Users/jhaa/Dev/home-base/.claude/worktrees/the-arc',
         },
         row: {
           id: 'hoff-42',
@@ -589,6 +602,31 @@ describe('sessionContract — the handoff protocol', () => {
     ]) {
       expect(contract).toContain(flag);
     }
+  });
+
+  test('names the directory to run the helper and the claim from (1r6d.33.9)', () => {
+    // `br` resolves its workspace from the process's own cwd, and the runner
+    // scans the directory IT was launched in. A conductor session that pins
+    // every `br` to its worktree therefore writes its handoff into
+    // `<worktree>/.beads/`, where the runner never looks — and the run reads as
+    // a session that wrote no handoff at all, which is the failure this text
+    // prevents. Both commands that touch the runner's database are named.
+    expect(contract).toContain(`\`${CWD}\``);
+    expect(contract).toContain('br close');
+    // Whitespace-collapsed so the assertion survives a re-wrap of the prose.
+    expect(contract.replace(/\s+/g, ' ')).toContain(
+      `RUN THAT HELPER — and the \`br close\` that claims a handoff — FROM \`${CWD}\`, the directory this loop was started in: the runner reads THAT repo's beads database, not a worktree's`,
+    );
+
+    // Interpolated from the argument, not a constant that happens to be
+    // home-base: the same contract for another repo names that repo.
+    const elsewhere = sessionContract({
+      blockedWaitMin: null,
+      cwd: '/Users/jhaa/Dev/nature-sounds',
+      label: LABEL,
+    });
+    expect(elsewhere).toContain('`/Users/jhaa/Dev/nature-sounds`');
+    expect(elsewhere).not.toContain(CWD);
   });
 
   test('states the order: commit, flush beads, hand off, then stop', () => {
@@ -671,11 +709,15 @@ describe('sessionContract — the handoff protocol', () => {
   });
 
   test('the composed contract stays small enough to pay for every session', () => {
-    // Measured 2026-09-08 with gpt-tokenizer (cl100k_base, a stand-in for
-    // Claude's tokenizer): the contract alone is 994 tokens / 4,211 chars, and
-    // 1,211 tokens / 5,047 chars composed with the pickup preamble — the
-    // longest of the three boots. The cap is in characters because there is no
-    // tokenizer in this repo, at the ~4 chars/token this text measures.
+    // Measured 2026-09-08, after 1r6d.33.9 added the cwd sentence to both
+    // halves: the contract alone is 4,484 chars, and 5,615 composed with the
+    // pickup preamble — the longest of the three boots — leaving ~385 chars of
+    // headroom under the cap. (The earlier revision measured 994 tokens /
+    // 4,211 chars and 1,211 tokens / 5,047 chars with gpt-tokenizer,
+    // cl100k_base, a stand-in for Claude's tokenizer; only the char counts are
+    // re-measured here, at the ~4 chars/token that text ran.) Both numbers grow
+    // with the length of the interpolated cwd and worktree paths, which is why
+    // this fixture uses realistic ones rather than short stubs.
     expect(contract.length).toBeLessThan(6000);
     expect(bootContract(contract, pickupBoot).length).toBeLessThan(6000);
   });
@@ -709,10 +751,18 @@ describe('session defaults', () => {
     // says "bounded" while the runner waits forever, a session stalls a run it
     // was told would be reaped; if it says "indefinite" while the runner reaps
     // at 15m, the model asks a question that gets it killed.
-    const unbounded = sessionContract({blockedWaitMin: null, label: 'jl-1'});
+    const unbounded = sessionContract({
+      blockedWaitMin: null,
+      cwd: '/repo',
+      label: 'jl-1',
+    });
     expect(unbounded).toContain('indefinitely');
     expect(unbounded).not.toContain('bounded time');
-    const bounded = sessionContract({blockedWaitMin: 720, label: 'jl-1'});
+    const bounded = sessionContract({
+      blockedWaitMin: 720,
+      cwd: '/repo',
+      label: 'jl-1',
+    });
     expect(bounded).toContain('waits 720m');
     expect(bounded).toContain('files your question as a bead');
     expect(bounded).not.toContain('indefinitely');
@@ -723,7 +773,7 @@ describe('session defaults', () => {
     // stopping you" — was in the contract the model reads, and is exactly the
     // kind of stale promise that survives a behaviour change.
     expect(
-      sessionContract({blockedWaitMin: null, label: 'jl-1'}),
+      sessionContract({blockedWaitMin: null, cwd: '/repo', label: 'jl-1'}),
     ).not.toContain('bounded time');
   });
 });

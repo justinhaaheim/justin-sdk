@@ -219,6 +219,15 @@ export function sessionContract(opts: {
   label: string;
   /** The run's `blockedWaitMin`. null = the default, wait indefinitely. */
   blockedWaitMin: number | null;
+  /**
+   * The directory the runner was launched in, ABSOLUTE (the real caller passes
+   * `process.cwd()`). Interpolated into the contract because `br` resolves its
+   * workspace from the process's own cwd: a session that runs the helper from a
+   * worktree writes the handoff into that worktree's `.beads/`, which the runner
+   * never scans, and the run then looks exactly like a session that wrote no
+   * handoff at all (home-base-1r6d.33.9).
+   */
+  cwd: string;
 }): string {
   // What the model is told about blocking has to match what the runner will
   // actually do, so it is generated from the same setting rather than written
@@ -279,6 +288,11 @@ with the helper — never by hand — doing these, in this order, LAST:
      question, or leave it out. Use the --flag=value form for every value, so a
      value starting with a dash is not parsed as a flag.
   4. End your turn. Do not keep working once the handoff exists.
+
+RUN THAT HELPER — and the \`br close\` that claims a handoff — FROM
+\`${opts.cwd}\`, the directory this loop was started in: the runner reads THAT
+repo's beads database, not a worktree's, so cd there for those two commands even
+if your work lives in a worktree.
 
 --disposition says what the loop does next. Choose exactly one:
 - continue: work remains. A successor is spawned, and your --next IS its prompt.
@@ -1001,6 +1015,12 @@ export interface BootContext {
   plan: BootPlan;
   /** Names the session in claim reasons and in `--from`, e.g. `fix-hydration-2`. */
   label: string;
+  /**
+   * The runner's own directory, ABSOLUTE — the beads workspace the runner scans.
+   * The preamble names it so the claim `br close` is run there rather than in
+   * the worktree the handoff points at (home-base-1r6d.33.9).
+   */
+  cwd: string;
 }
 
 /**
@@ -1152,7 +1172,9 @@ bead ${row.id} ("${row.title}"). Before anything else:
      (${handoff.worktree}) and branch (${handoff.branch}) it was working in, the
      state it left, and your next step. Work in the worktree it names — if you
      are not in it, go there first.
-  2. Claim it: \`br close ${row.id} --reason='picked up by ${boot.label}'\`.
+  2. Claim it: \`br close ${row.id} --reason='picked up by ${boot.label}'\`, run
+     FROM \`${boot.cwd}\` — the directory this loop was started in, whose beads
+     database the runner reads — and NOT from the worktree above.
      Claiming is how a second session finds out this arc is already taken, so do
      it before you start working, not after.
   3. If it is ALREADY CLOSED when you get there, another session claimed it
@@ -1667,7 +1689,13 @@ export async function runSession(
     opts.permissionMode,
     '--append-system-prompt',
     bootContract(
-      sessionContract({blockedWaitMin: opts.blockedWaitMin, label: boot.label}),
+      sessionContract({
+        blockedWaitMin: opts.blockedWaitMin,
+        // The runner's cwd IS the beads workspace it scans for the handoff, so
+        // the session is told to run `br` there (home-base-1r6d.33.9).
+        cwd,
+        label: boot.label,
+      }),
       boot,
     ),
     composeBootPrompt(opts.prompt, boot),
@@ -2299,7 +2327,7 @@ export async function runJustinLoop(
   for (let n = 1; n <= opts.maxSessions; n++) {
     const label = sessionLabel(slug, n);
     const name = sessionName(stamp, label);
-    const boot: BootContext = {label, plan: bootPlan};
+    const boot: BootContext = {cwd, label, plan: bootPlan};
 
     // --- gate (free) ---
     const decision = checkGate(opts, () => deps.readUsage(cwd));

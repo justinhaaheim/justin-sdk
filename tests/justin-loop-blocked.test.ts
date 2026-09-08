@@ -115,7 +115,11 @@ async function simulate(spec: {
     pollSec: 60,
     ...spec.opts,
   };
-  const boot: BootContext = {label: 'the-arc-1', plan: {kind: 'fresh'}};
+  const boot: BootContext = {
+    cwd: sb.path,
+    label: 'the-arc-1',
+    plan: {kind: 'fresh'},
+  };
   const maxPolls = spec.maxPolls ?? 400;
 
   let clock = 1_000_000;
@@ -134,7 +138,9 @@ async function simulate(spec: {
     findAgent: () => {
       polls++;
       if (polls > maxPolls) {
-        throw new Error(`runSession did not terminate within ${maxPolls} polls`);
+        throw new Error(
+          `runSession did not terminate within ${maxPolls} polls`,
+        );
       }
       const row = spec.rowAt(polls);
       return row === 'unreadable'
@@ -260,7 +266,9 @@ describe('--blocked-wait-min is an opt-in bound (D3)', () => {
     // The question itself travels with the ending, or the report says nothing
     // useful about why the run stopped.
     expect(
-      sim.run.ending.kind === 'blocked-timeout' ? sim.run.ending.waitingFor : null,
+      sim.run.ending.kind === 'blocked-timeout'
+        ? sim.run.ending.waitingFor
+        : null,
     ).toBe('Which approach do you want?');
     expect(sim.elapsedMin).toBeLessThan(5);
   });
@@ -459,7 +467,7 @@ describe('dispatch', () => {
       sb.path,
       DEFAULT_OPTIONS,
       1,
-      {label: 'the-arc-1', plan: {kind: 'fresh'}},
+      {cwd: sb.path, label: 'the-arc-1', plan: {kind: 'fresh'}},
       'sim name',
       deps,
     );

@@ -146,7 +146,9 @@ describe('runBr', () => {
     const fake = join(binDir, 'br');
     writeFileSync(
       fake,
-      ['#!/bin/sh', `echo "$@" >> ${JSON.stringify(log)}`, ...script].join('\n'),
+      ['#!/bin/sh', `echo "$@" >> ${JSON.stringify(log)}`, ...script].join(
+        '\n',
+      ),
     );
     chmodSync(fake, 0o755);
     const original = process.env.PATH;
@@ -188,7 +190,10 @@ describe('scanHandoffBeads', () => {
   test('a br failure is UNAVAILABLE, never an empty list', () => {
     // The whole point: "we could not look" and "we looked and there is nothing"
     // must not collapse into the same answer (critical rule 6).
-    const scan = scanHandoffBeads('/repo', brokenBr('br exited 1: no workspace'));
+    const scan = scanHandoffBeads(
+      '/repo',
+      brokenBr('br exited 1: no workspace'),
+    );
     expect(scan.kind).toBe('unavailable');
     expect(scan.kind === 'unavailable' ? scan.reason : '').toContain(
       'no workspace',
@@ -429,18 +434,21 @@ describe('planStartBoot — an explicit --prompt is an ASK (D1)', () => {
 
 describe('bootPreamble', () => {
   const label = 'the-arc-2';
+  const cwd = '/Users/jhaa/Dev/home-base';
 
   test('a fresh boot says nothing extra', () => {
-    expect(bootPreamble({label, plan: {kind: 'fresh'}})).toBeNull();
+    expect(bootPreamble({cwd, label, plan: {kind: 'fresh'}})).toBeNull();
   });
 
   test('a handoff boot names the bead, the claim, and the worktree', () => {
     const match = {handoff: handoff(), row: row({id: 'hoff-42'})};
     const preamble =
-      bootPreamble({label, plan: {kind: 'handoff', match}}) ?? '';
+      bootPreamble({cwd, label, plan: {kind: 'handoff', match}}) ?? '';
     expect(preamble).toContain('hoff-42');
     expect(preamble).toContain('br show hoff-42');
-    expect(preamble).toContain(`br close hoff-42 --reason='picked up by ${label}'`);
+    expect(preamble).toContain(
+      `br close hoff-42 --reason='picked up by ${label}'`,
+    );
     expect(preamble).toContain('/Users/jhaa/Dev/home-base');
     expect(preamble).toContain('worktree-justin-loop-runner');
     // The already-claimed branch tells it to hand off `done`, not to redo work.
@@ -448,9 +456,40 @@ describe('bootPreamble', () => {
     expect(preamble).toContain('--disposition=done');
   });
 
+  test('the claim names the RUNNER’s directory to run `br close` from', () => {
+    // home-base-1r6d.33.9. `br` resolves its workspace from the process cwd, so
+    // a successor that claims from the worktree the handoff points at closes the
+    // bead in a database the runner never scans — and the runner then sees the
+    // handoff still open. The preamble has to name the runner's own directory,
+    // and it must be the INTERPOLATED one, not a constant that happens to match
+    // home-base.
+    const match = {
+      handoff: handoff({
+        worktree: '/Users/jhaa/Dev/home-base/.claude/worktrees/the-arc',
+      }),
+      row: row({id: 'hoff-42'}),
+    };
+    const preamble =
+      bootPreamble({
+        cwd: '/Users/jhaa/Dev/nature-sounds',
+        label,
+        plan: {kind: 'handoff', match},
+      }) ?? '';
+    expect(preamble).toContain('`/Users/jhaa/Dev/nature-sounds`');
+    // Attached to the claim, not merely mentioned somewhere in the preamble.
+    // Whitespace-collapsed so the assertion survives a re-wrap of the prose.
+    expect(preamble.replace(/\s+/g, ' ')).toContain(
+      "br close hoff-42 --reason='picked up by the-arc-2'`, run FROM `/Users/jhaa/Dev/nature-sounds`",
+    );
+    // And the worktree is still named, as the place the WORK happens.
+    expect(preamble).toContain(
+      '/Users/jhaa/Dev/home-base/.claude/worktrees/the-arc',
+    );
+  });
+
   test('a reconstruct boot says NO handoff exists and never calls itself one', () => {
     const plan = crashBootPlan(2, 'stopped after 45m (--timeout-min)');
-    const preamble = bootPreamble({label, plan}) ?? '';
+    const preamble = bootPreamble({cwd, label, plan}) ?? '';
     expect(preamble).toContain('NO HANDOFF EXISTS');
     expect(preamble).toContain('session 2 ended without handing anything over');
     expect(preamble).toContain('--timeout-min');
@@ -462,9 +501,10 @@ describe('bootPreamble', () => {
 
 describe('sessionPrompt and composeBootPrompt', () => {
   const label = 'the-arc-2';
+  const cwd = '/Users/jhaa/Dev/home-base';
 
   test('a fresh boot runs the base prompt, untouched', () => {
-    const boot: BootContext = {label, plan: {kind: 'fresh'}};
+    const boot: BootContext = {cwd, label, plan: {kind: 'fresh'}};
     expect(sessionPrompt('/loop-session', boot)).toBe('/loop-session');
     expect(composeBootPrompt('/loop-session', boot)).toBe('/loop-session');
   });
@@ -475,7 +515,7 @@ describe('sessionPrompt and composeBootPrompt', () => {
     // of it — session 2 of an arc is not asked the question session 1 was.
     const next = 'Rewrite parseFoo, then run bun test and report the count.';
     const match = {handoff: handoff({next}), row: row()};
-    const boot: BootContext = {label, plan: {kind: 'handoff', match}};
+    const boot: BootContext = {cwd, label, plan: {kind: 'handoff', match}};
     expect(sessionPrompt('/loop-session', boot)).toBe(next);
     const composed = composeBootPrompt('/loop-session', boot);
     expect(composed.startsWith(next)).toBe(true);
@@ -487,6 +527,7 @@ describe('sessionPrompt and composeBootPrompt', () => {
     // The base prompt may be a slash command, which is only recognised when it
     // leads the prompt.
     const boot: BootContext = {
+      cwd,
       label,
       plan: crashBootPlan(1, 'no handoff bead'),
     };
@@ -499,7 +540,7 @@ describe('sessionPrompt and composeBootPrompt', () => {
     // Delivered twice on purpose: a skill that ignores its arguments would drop
     // the prompt copy silently.
     const match = {handoff: handoff(), row: row({id: 'hoff-42'})};
-    const boot: BootContext = {label, plan: {kind: 'handoff', match}};
+    const boot: BootContext = {cwd, label, plan: {kind: 'handoff', match}};
     expect(bootContract('CONTRACT', boot)).toContain('hoff-42');
     expect(bootContract('CONTRACT', boot).startsWith('CONTRACT')).toBe(true);
   });
@@ -576,7 +617,9 @@ describe('scripted simulation: a handoff bead round-trips through real br', () =
       // A fresh runner scans, and gets rows carrying real notes.
       const scan = scanHandoffBeads(repo, realBr);
       expect(scan.kind).toBe('ok');
-      expect(scan.kind === 'ok' ? scan.rows.map((r) => r.id) : []).toEqual([id]);
+      expect(scan.kind === 'ok' ? scan.rows.map((r) => r.id) : []).toEqual([
+        id,
+      ]);
 
       // …which planStartBoot turns into a pickup whose prompt is the bead's
       // `next`, byte for byte through br's storage.
@@ -585,7 +628,11 @@ describe('scripted simulation: a handoff bead round-trips through real br', () =
       if (start.plan.kind !== 'handoff') return;
       expect(start.plan.match.handoff.next).toBe(payload.next);
       expect(
-        sessionPrompt('/loop-session', {label: 'x-1', plan: start.plan}),
+        sessionPrompt('/loop-session', {
+          cwd: repo,
+          label: 'x-1',
+          plan: start.plan,
+        }),
       ).toBe(payload.next);
 
       // Claiming it (what the successor is told to do) takes it out of the scan.
@@ -745,7 +792,11 @@ describe('CLI: --prompt makes the run an ASK (D1/D6)', () => {
   });
 
   test('--prompt with --pickup: back to picking up the newest', () => {
-    const run = runLoopCli(['--prompt', '/conductor fix the parser', '--pickup']);
+    const run = runLoopCli([
+      '--prompt',
+      '/conductor fix the parser',
+      '--pickup',
+    ]);
     expect(run.out).toContain('picking up handoff hoff-new');
     expect(run.out).not.toContain(EXPLICIT_SKIP_LINE);
   });
