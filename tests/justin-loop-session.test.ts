@@ -750,6 +750,12 @@ describe('AC3: --timeout-min', () => {
     expect(r.ledger[0].handoffBead).toBe('hoff-1');
     expect(spawns(r.dispatches)).toHaveLength(2);
     expect(r.exitCode).toBe(0);
+    // The load-bearing pair. Under V-f the timeout took the no-handoff path, so
+    // the bead was only ever found by DEMANDING it back out of a session that
+    // had already written it — the same successor, one wasted turn later. These
+    // two say the bead was honoured directly.
+    expect(resumes(r.dispatches)).toHaveLength(0);
+    expect(r.ledger[0].demands).toBe(0);
   });
 
   test('NEGATIVE CONTROL: the discarded-beads behaviour would ledger no-handoff', async () => {
