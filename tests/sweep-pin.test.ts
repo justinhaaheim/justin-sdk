@@ -387,20 +387,17 @@ describe('writeSdkPin — bun, every fleet manifest shape (AC1-AC3)', () => {
     expect(countSdkKeyDeclarations(fixture.read())).toBe(1);
   });
 
-  test('NEGATIVE CONTROL: `bun add -d` over that same fixture writes the key TWICE', () => {
-    // The offline face of the bug. With a GITHUB spec this same precondition
-    // produces the `DependencyLoop` that stopped the maiden sweep (measured on
-    // home-base-apus.1, four arms); with a `file:` spec bun instead corrupts
-    // the manifest with a duplicate key. Same precondition, same fix, and this
-    // arm is the one that can be automated.
-    const fixture = pinFixture({sections: ['devDependencies']});
-    execFileSync('bun', ['add', '-d', fixture.newPin], {
-      cwd: fixture.root,
-      stdio: 'ignore',
-    });
-    expect(countSdkKeyDeclarations(fixture.read())).toBe(2);
-  });
-
+  // RETIRED NEGATIVE CONTROL (home-base-7oql, 2026-09-08). This asserted that
+  // `bun add -d <file: spec>` over the same fixture left the SDK key declared
+  // TWICE — the manifest corruption `writeSdkPin` exists to avoid. With a
+  // GITHUB spec the same precondition produced the `DependencyLoop` that
+  // stopped the maiden sweep (home-base-apus.1, four arms). Under bun 1.4.2 the
+  // count comes back 1: bun no longer duplicates the key, so the control could
+  // not fail and proved nothing. Measured 2026-09-06 and again 2026-09-08, both
+  // on bun 1.4.2. The matching upstream report is oven-sh/bun#15209 (`bun add
+  // --development` leaves the package in `dependencies`); the changelog entry
+  // for the fix was NOT located, so no minimum bun version is claimed here. The
+  // positive `writeSdkPin` assertions above and below remain the guard.
   test('dependencies only: normalized into devDependencies, exactly once (AC2)', () => {
     const fixture = pinFixture({sections: ['dependencies']});
     const result = writeSdkPin(fixture.root, fixture.newPin);
@@ -415,20 +412,14 @@ describe('writeSdkPin — bun, every fleet manifest shape (AC1-AC3)', () => {
     expect(result.summaryNote).toContain('dependencies → devDependencies');
   });
 
-  test('NEGATIVE CONTROL: `bun add -d` over that same fixture leaves TWO declarations', () => {
-    // health-logger-rn d14c327, committed and pushed: `dependencies` #v0.9.0
-    // beside `devDependencies` #v0.18.0.
-    const fixture = pinFixture({sections: ['dependencies']});
-    execFileSync('bun', ['add', '-d', fixture.newPin], {
-      cwd: fixture.root,
-      stdio: 'ignore',
-    });
-    expect(declarationsOf(fixture.root)).toEqual({
-      dependencies: fixture.oldPin,
-      devDependencies: fixture.newPin,
-    });
-  });
-
+  // RETIRED NEGATIVE CONTROL (home-base-7oql, 2026-09-08). This asserted that
+  // `bun add -d` over a `dependencies`-only fixture left the old spec in
+  // `dependencies` beside the new one in `devDependencies` — the shape shipped
+  // in health-logger-rn d14c327 (#v0.9.0 beside #v0.18.0). Retired with its
+  // sibling above: bun 1.4.2 normalizes instead of duplicating, so the control
+  // no longer demonstrates the hazard. Same evidence — measured 2026-09-06 and
+  // 2026-09-08 on bun 1.4.2, upstream report oven-sh/bun#15209, changelog entry
+  // for the fix not located.
   test('BOTH sections (the ynab-mcp-deluxe shape): ends with exactly one (AC3)', () => {
     const fixture = pinFixture({
       sections: ['dependencies', 'devDependencies'],
@@ -442,20 +433,13 @@ describe('writeSdkPin — bun, every fleet manifest shape (AC1-AC3)', () => {
     expect(countSdkKeyDeclarations(fixture.read())).toBe(1);
   });
 
-  test('NEGATIVE CONTROL: `bun add -d` over the both-sections fixture leaves two', () => {
-    const fixture = pinFixture({
-      sections: ['dependencies', 'devDependencies'],
-    });
-    execFileSync('bun', ['add', '-d', fixture.newPin], {
-      cwd: fixture.root,
-      stdio: 'ignore',
-    });
-    expect(Object.keys(declarationsOf(fixture.root)).sort()).toEqual([
-      'dependencies',
-      'devDependencies',
-    ]);
-  });
-
+  // RETIRED NEGATIVE CONTROL (home-base-7oql, 2026-09-08). This asserted that
+  // `bun add -d` over the both-sections fixture left BOTH sections declared.
+  // Retired with its two siblings above, on the same evidence: bun 1.4.2 no
+  // longer duplicates the key (measured 2026-09-06 and 2026-09-08), upstream
+  // report oven-sh/bun#15209, changelog entry for the fix not located. Nothing
+  // is known to be wrong with bun 1.4.2 here to assert against instead, so the
+  // control was removed rather than rewritten.
   test('a repo declaring the SDK nowhere still gets the pin', () => {
     // The enrollment path: nothing to remove, the add is the whole step.
     const fixture = pinFixture({sections: []});
