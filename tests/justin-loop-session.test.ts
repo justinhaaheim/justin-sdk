@@ -113,7 +113,9 @@ describe('AC1: an ended session with ONE valid continue-handoff boots a successo
     // The pickup preamble, naming the bead it must read and claim.
     expect(systemPrompt).toContain('PICK UP THE HANDOFF FIRST');
     expect(systemPrompt).toContain('br show hoff-1');
-    expect(systemPrompt).toContain("br close hoff-1 --reason='picked up by the-arc-2'");
+    expect(systemPrompt).toContain(
+      "br close hoff-1 --reason='picked up by the-arc-2'",
+    );
   });
 
   test('session 1 gets no pickup preamble — nothing was waiting for it', async () => {
@@ -139,7 +141,10 @@ describe('AC1: done and blocked stop the loop', () => {
   test('done stops at exit 0 and spawns nothing more', async () => {
     const r = await runLoop({
       opts: {label: 'the-arc'},
-      scans: [[], [beadFrom('hoff-9', {disposition: 'done', from: 'the-arc-1'})]],
+      scans: [
+        [],
+        [beadFrom('hoff-9', {disposition: 'done', from: 'the-arc-1'})],
+      ],
     });
     expect(r.exitCode).toBe(0);
     expect(r.dispatches).toHaveLength(1);
@@ -315,16 +320,13 @@ describe('decideAfterSession — the pure decision (D5)', () => {
 
   test('an unreadable bead never becomes the decision, but always the report', () => {
     const out = decideAfterSession(
-      scan([
-        {id: 'broken', notes: '{{{'},
-        beadFrom('h1', {from: 'the-arc-1'}),
-      ]),
+      scan([{id: 'broken', notes: '{{{'}, beadFrom('h1', {from: 'the-arc-1'})]),
       'the-arc-1',
     );
     expect(out.kind).toBe('continue');
-    expect(out.kind === 'continue' ? out.invalid.map((i) => i.id) : []).toEqual([
-      'broken',
-    ]);
+    expect(out.kind === 'continue' ? out.invalid.map((i) => i.id) : []).toEqual(
+      ['broken'],
+    );
   });
 
   test('every disposition maps to its own outcome', () => {
@@ -661,7 +663,10 @@ describe('AC2: the loop refuses to spawn onto a live predecessor', () => {
   test('the stop outcome is printed AND ledgered on every path', async () => {
     const r = await runLoop({
       opts: {label: 'the-arc'},
-      scans: [[], [beadFrom('hoff-9', {disposition: 'done', from: 'the-arc-1'})]],
+      scans: [
+        [],
+        [beadFrom('hoff-9', {disposition: 'done', from: 'the-arc-1'})],
+      ],
     });
     expect(r.stdout).toContain('verified gone');
     expect(r.stdout).toContain('stop=stopped');
@@ -703,7 +708,10 @@ describe('AC3: --timeout-min', () => {
     const r = await runLoop({
       opts: {label: 'the-arc', pollSec: 60},
       // Works for 300 simulated minutes, far past the old 45-minute default.
-      scans: [[], [beadFrom('hoff-9', {disposition: 'done', from: 'the-arc-1'})]],
+      scans: [
+        [],
+        [beadFrom('hoff-9', {disposition: 'done', from: 'the-arc-1'})],
+      ],
       sessions: [{worksForPolls: 300}],
     });
     expect(r.exitCode).toBe(0);
@@ -793,7 +801,10 @@ describe('AC4: labels and session names (D3)', () => {
     // The contract writes `--from=<label>` UNQUOTED, so a space or a `#` here
     // silently truncates the flag. This is why the `#<n>` name format was
     // retracted.
-    const label = sessionLabel(runSlug({label: 'Fix the Parser!', prompt: 'x'}), 3);
+    const label = sessionLabel(
+      runSlug({label: 'Fix the Parser!', prompt: 'x'}),
+      3,
+    );
     expect(label).toBe('fix-the-parser-3');
     expect(label).toMatch(/^[a-z0-9-]+$/);
   });
@@ -823,7 +834,9 @@ describe('AC4: labels and session names (D3)', () => {
   });
 
   test('a garbage --label falls back to the ask rather than to nothing', () => {
-    expect(runSlug({label: '###', prompt: 'fix the parser'})).toBe('fix-parser');
+    expect(runSlug({label: '###', prompt: 'fix the parser'})).toBe(
+      'fix-parser',
+    );
   });
 
   test('slugify never leaves a trailing dash, even when it truncates', () => {
@@ -867,7 +880,9 @@ describe('AC4: labels and session names (D3)', () => {
       scans: [[], [beadFrom('h', {disposition: 'done', from: 'the-arc-1'})]],
     });
     expect(r.ledger[0].name).toBe(argOf(r.dispatches[0], '--name'));
-    expect(r.ledger[0].name).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2} the-arc-1$/);
+    expect(r.ledger[0].name).toMatch(
+      /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} the-arc-1$/,
+    );
   });
 });
 

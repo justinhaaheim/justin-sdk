@@ -168,7 +168,11 @@ export async function runLoop(spec: {
     brCalls.push(args);
     if (args[0] === 'create') {
       if (spec.brCreateFails === true) {
-        return {ok: false, reason: 'br exited 1: no beads workspace', stdout: ''};
+        return {
+          ok: false,
+          reason: 'br exited 1: no beads workspace',
+          stdout: '',
+        };
       }
       created++;
       // The real `br create` line shape (see parseCreatedId).
@@ -178,7 +182,8 @@ export async function runLoop(spec: {
         stdout: `✓ Created fx-bug${created}: ${args[1] ?? ''}\n`,
       };
     }
-    if (args[0] !== 'list') return {ok: true, reason: null, stdout: '{"issues":[]}'};
+    if (args[0] !== 'list')
+      return {ok: true, reason: null, stdout: '{"issues":[]}'};
     const answer = (spec.scans ?? [])[scanIndex++];
     if (answer === 'unavailable') {
       return {ok: false, reason: 'br exited 1: no beads workspace', stdout: ''};
@@ -207,7 +212,8 @@ export async function runLoop(spec: {
       sessionId,
       // A session with a working period starts `working`; otherwise it is
       // already `done` on the first poll, which is the common case here.
-      state: script.state ?? (script.worksForPolls != null ? 'working' : 'done'),
+      state:
+        script.state ?? (script.worksForPolls != null ? 'working' : 'done'),
       status: 'idle',
       waitingFor: null,
     });
@@ -251,7 +257,9 @@ export async function runLoop(spec: {
     findAgent: (_cwd, id) => {
       polls++;
       if (polls > MAX_POLLS) {
-        throw new Error(`runJustinLoop did not terminate within ${MAX_POLLS} polls`);
+        throw new Error(
+          `runJustinLoop did not terminate within ${MAX_POLLS} polls`,
+        );
       }
       if (spec.agentsReadable?.(polls) === false) {
         return {ok: false, reason: 'claude agents --json exited 1'};
@@ -308,7 +316,16 @@ export async function runLoop(spec: {
     {maxSessions: 2, usageGate: false, ...spec.opts},
     deps,
   );
-  return {brCalls, dispatches, exitCode, ledger, signals, stderr, stdout, stopCalls};
+  return {
+    brCalls,
+    dispatches,
+    exitCode,
+    ledger,
+    signals,
+    stderr,
+    stdout,
+    stopCalls,
+  };
 }
 
 export function argOf(args: string[], flag: string): string {
@@ -336,4 +353,3 @@ export function spawns(dispatches: string[][]): string[][] {
 export function resumes(dispatches: string[][]): string[][] {
   return dispatches.filter((d) => d.includes('--resume'));
 }
-

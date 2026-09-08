@@ -54,7 +54,9 @@ describe('resumeArgs: the argv that CONTINUES rather than copies', () => {
     // MEASURED 2026-09-08 (claude v2.1.263): "background session 11205a3b keeps
     // its own saved options, so the flags you passed started a copy as
     // 0ea9def1." Any extra flag here — even the SAME --name — forks the session.
-    expect(resumeArgs('11205a3b-34c4-435b-b21f-4289486061a0', 'write it')).toEqual([
+    expect(
+      resumeArgs('11205a3b-34c4-435b-b21f-4289486061a0', 'write it'),
+    ).toEqual([
       '--bg',
       '--resume',
       '11205a3b-34c4-435b-b21f-4289486061a0',
@@ -86,7 +88,11 @@ describe('handoffDemand: what the session is actually told', () => {
       id: 'home-base-9q1',
       title: 'HANDOFF ???',
     },
-    {errors: ['notes are empty'], id: 'home-base-9q2', title: 'HANDOFF continue: x'},
+    {
+      errors: ['notes are empty'],
+      id: 'home-base-9q2',
+      title: 'HANDOFF continue: x',
+    },
   ];
 
   test('names the helper command WITH this session label interpolated', () => {
@@ -223,7 +229,11 @@ describe('AC2: an ended session with no handoff is resumed and told to write one
   test('a demanded `done` stops the loop at 0 and spawns nothing', async () => {
     const r = await runLoop({
       opts: {label: 'the-arc', maxSessions: 2},
-      scans: [[], [], [beadFrom('h', {disposition: 'done', from: 'the-arc-1'})]],
+      scans: [
+        [],
+        [],
+        [beadFrom('h', {disposition: 'done', from: 'the-arc-1'})],
+      ],
     });
     expect(r.exitCode).toBe(0);
     expect(spawns(r.dispatches)).toHaveLength(1);

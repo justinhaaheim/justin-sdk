@@ -514,12 +514,10 @@ export function parseBackgroundedId(stdout: string): string | null {
  * substitution, arriving at the one decision this whole file exists to protect.
  */
 export type AgentListing =
-  | {ok: true; rows: AgentRow[]}
-  | {ok: false; reason: string};
+  {ok: true; rows: AgentRow[]} | {ok: false; reason: string};
 
 export type AgentLookup =
-  | {ok: true; row: AgentRow | null}
-  | {ok: false; reason: string};
+  {ok: true; row: AgentRow | null} | {ok: false; reason: string};
 
 export function listAgents(cwd: string): AgentListing {
   const proc = spawnSync('claude', ['agents', '--json'], {
@@ -530,7 +528,10 @@ export function listAgents(cwd: string): AgentListing {
     timeout: 60_000,
   });
   if (proc.error != null) {
-    return {ok: false, reason: `claude agents could not run: ${proc.error.message}`};
+    return {
+      ok: false,
+      reason: `claude agents could not run: ${proc.error.message}`,
+    };
   }
   if (proc.status !== 0) {
     const how =
@@ -545,7 +546,10 @@ export function listAgents(cwd: string): AgentListing {
   try {
     const rows = JSON.parse(proc.stdout) as Array<Record<string, unknown>>;
     if (!Array.isArray(rows)) {
-      return {ok: false, reason: 'claude agents --json did not return an array'};
+      return {
+        ok: false,
+        reason: 'claude agents --json did not return an array',
+      };
     }
     return {
       ok: true,
@@ -599,7 +603,10 @@ export function stopSession(
     timeout: 60_000,
   });
   if (proc.error != null) {
-    return {detail: `claude stop could not run: ${proc.error.message}`, ok: false};
+    return {
+      detail: `claude stop could not run: ${proc.error.message}`,
+      ok: false,
+    };
   }
   const out = `${proc.stdout ?? ''}${proc.stderr ?? ''}`.trim().split('\n')[0];
   return {
@@ -634,11 +641,7 @@ export function signalPid(pid: number, sig: NodeJS.Signals): boolean {
  *               "it is gone" (critical rule 6).
  */
 export type StopOutcome =
-  | 'already-gone'
-  | 'stopped'
-  | 'no-pid'
-  | 'kill-failed'
-  | 'unverified';
+  'already-gone' | 'stopped' | 'no-pid' | 'kill-failed' | 'unverified';
 
 /** The two outcomes that mean the predecessor is provably not running. */
 export function isVerifiedGone(outcome: StopOutcome): boolean {
@@ -679,7 +682,9 @@ async function confirmGone(
       // whether the session is gone, so it resets the streak rather than
       // counting toward it — otherwise two timed-out `claude agents` calls
       // would read as proof and license a spawn.
-      notes.push(`could not read \`claude agents\` (${look.reason}) — NOT counted as absent`);
+      notes.push(
+        `could not read \`claude agents\` (${look.reason}) — NOT counted as absent`,
+      );
       consecutive = 0;
       continue;
     }
@@ -776,7 +781,9 @@ export async function stopAndVerify(
           return null;
         }
         const sent = deps.signalPid(row.pid, 'SIGKILL');
-        notes.push(`SIGKILL ${row.pid}: ${sent ? 'sent' : 'process already gone'}`);
+        notes.push(
+          `SIGKILL ${row.pid}: ${sent ? 'sent' : 'process already gone'}`,
+        );
         return sent;
       },
       label: 'SIGKILL',
@@ -835,8 +842,7 @@ export async function stopAndVerify(
  * safe to describe as "nothing waiting" (critical rule 6).
  */
 export type HandoffScan =
-  | {kind: 'unavailable'; reason: string}
-  | {kind: 'ok'; rows: HandoffRow[]};
+  {kind: 'unavailable'; reason: string} | {kind: 'ok'; rows: HandoffRow[]};
 
 export function scanHandoffBeads(
   cwd: string,
@@ -904,12 +910,14 @@ export type SessionOutcome =
  */
 export type ResolvedOutcome = Exclude<SessionOutcome, {kind: 'enforce'}>;
 
-const DISPOSITION_TO_KIND: Record<Disposition, 'continue' | 'done' | 'blocked'> =
-  {
-    blocked: 'blocked',
-    continue: 'continue',
-    done: 'done',
-  };
+const DISPOSITION_TO_KIND: Record<
+  Disposition,
+  'continue' | 'done' | 'blocked'
+> = {
+  blocked: 'blocked',
+  continue: 'continue',
+  done: 'done',
+};
 
 /**
  * Read the scan as an instruction (D5).
@@ -1175,7 +1183,9 @@ export function crashBootPlan(session: number, reason: string): BootPlan {
  * written to be a prompt. For everything else it is the run's own prompt.
  */
 export function sessionPrompt(basePrompt: string, boot: BootContext): string {
-  return boot.plan.kind === 'handoff' ? boot.plan.match.handoff.next : basePrompt;
+  return boot.plan.kind === 'handoff'
+    ? boot.plan.match.handoff.next
+    : basePrompt;
 }
 
 /**
@@ -1219,10 +1229,11 @@ export function parseUsage(raw: string): UsageSnapshot | null {
   if (session == null || week == null) {
     return null;
   }
-  const sessionResets = /Current session:[^·\n]*·\s*resets\s*([^\n(]+)/.exec(raw);
-  const weekResets = /Current week \(all models\):[^·\n]*·\s*resets\s*([^\n(]+)/.exec(
+  const sessionResets = /Current session:[^·\n]*·\s*resets\s*([^\n(]+)/.exec(
     raw,
   );
+  const weekResets =
+    /Current week \(all models\):[^·\n]*·\s*resets\s*([^\n(]+)/.exec(raw);
 
   return {
     isSubscription: /using your subscription/i.test(raw),
@@ -1236,12 +1247,16 @@ export function parseUsage(raw: string): UsageSnapshot | null {
 
 /** Read the real quota. Costs zero tokens (verified: num_turns=0, cost=0). */
 export function readUsage(cwd: string): UsageSnapshot | null {
-  const proc = spawnSync('claude', ['-p', '/usage', '--output-format', 'json'], {
-    cwd,
-    encoding: 'utf-8',
-    env: process.env,
-    timeout: 60_000,
-  });
+  const proc = spawnSync(
+    'claude',
+    ['-p', '/usage', '--output-format', 'json'],
+    {
+      cwd,
+      encoding: 'utf-8',
+      env: process.env,
+      timeout: 60_000,
+    },
+  );
   if (proc.status !== 0 || proc.stdout == null) {
     return null;
   }
@@ -1385,7 +1400,10 @@ export function appendLedgerRow(
     appendFileSync(path, `${JSON.stringify(row)}\n`);
     return {ok: true, reason: null};
   } catch (err) {
-    return {ok: false, reason: err instanceof Error ? err.message : String(err)};
+    return {
+      ok: false,
+      reason: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
@@ -1394,7 +1412,10 @@ export function appendLedgerRow(
 // ---------------------------------------------------------------------------
 
 function gitHead(cwd: string): string | null {
-  const proc = spawnSync('git', ['rev-parse', 'HEAD'], {cwd, encoding: 'utf-8'});
+  const proc = spawnSync('git', ['rev-parse', 'HEAD'], {
+    cwd,
+    encoding: 'utf-8',
+  });
   return proc.status === 0 ? proc.stdout.trim() : null;
 }
 
@@ -1426,7 +1447,10 @@ export function preflight(cwd: string): PreflightProblem[] {
   }
   // A nested claude inherits the parent sandbox and cannot create its session
   // dir (verified: EPERM on ~/.claude/session-env). Run from a real terminal.
-  if (process.env.CLAUDECODE != null || process.env.CLAUDE_CODE_SIMPLE != null) {
+  if (
+    process.env.CLAUDECODE != null ||
+    process.env.CLAUDE_CODE_SIMPLE != null
+  ) {
     problems.push({
       fatal: false,
       message:
@@ -1921,8 +1945,7 @@ export function handoffFailureDescription(opts: {
 
 /** Filing the failure bead is best-effort, and its failure is never silent. */
 export type FailureBeadResult =
-  | {ok: true; id: string}
-  | {ok: false; reason: string};
+  {ok: true; id: string} | {ok: false; reason: string};
 
 export function fileHandoffFailureBead(
   cwd: string,
@@ -1944,7 +1967,10 @@ export function fileHandoffFailureBead(
     `--description=${handoffFailureDescription({...opts, cwd})}`,
   ]);
   if (!created.ok) {
-    return {ok: false, reason: created.reason ?? 'br failed for an unrecorded reason'};
+    return {
+      ok: false,
+      reason: created.reason ?? 'br failed for an unrecorded reason',
+    };
   }
   const id = parseCreatedId(created.stdout);
   if (id == null) {
@@ -1975,9 +2001,19 @@ export interface DemandContext {
  */
 export type DemandResult =
   /** The session answered: this is the re-scan's verdict, whatever it is. */
-  | {kind: 'resolved'; outcome: ResolvedOutcome; stop: StopReport; demands: number}
+  | {
+      kind: 'resolved';
+      outcome: ResolvedOutcome;
+      stop: StopReport;
+      demands: number;
+    }
   /** Every demand spent, still no readable handoff. */
-  | {kind: 'exhausted'; enforce: EnforceOutcome; stop: StopReport; demands: number}
+  | {
+      kind: 'exhausted';
+      enforce: EnforceOutcome;
+      stop: StopReport;
+      demands: number;
+    }
   /**
    * We stopped being able to ask, or to watch the answer. Distinct from
    * `exhausted`, which is a session that WAS asked and did not comply.
@@ -2078,12 +2114,7 @@ export async function demandHandoff(
     // Stop and verify the DEMANDED turn too. A woken session lingers in
     // `claude agents` exactly like any other, and the successor gate downstream
     // reads this report, not the one from before the demand.
-    stop = await stopAndVerify(
-      ctx.cwd,
-      id,
-      ctx.opts.stopPollSec * 1000,
-      deps,
-    );
+    stop = await stopAndVerify(ctx.cwd, id, ctx.opts.stopPollSec * 1000, deps);
     for (const note of stop.notes) {
       deps.write(`   ${DIM}stop${RESET} ${note}\n`);
     }
@@ -2118,7 +2149,8 @@ export async function demandHandoff(
       scanHandoffBeads(ctx.cwd, deps.br),
       ctx.label,
     );
-    if (outcome.kind !== 'br-unavailable') renderInvalid(outcome.invalid, deps.write);
+    if (outcome.kind !== 'br-unavailable')
+      renderInvalid(outcome.invalid, deps.write);
     if (outcome.kind !== 'enforce') {
       return {demands, kind: 'resolved', outcome, stop};
     }
@@ -2135,7 +2167,10 @@ export interface RunEnd {
   exitCode: number;
 }
 
-function renderInvalid(invalid: InvalidHandoff[], write: (t: string) => void): void {
+function renderInvalid(
+  invalid: InvalidHandoff[],
+  write: (t: string) => void,
+): void {
   for (const bad of invalid) {
     write(
       `   ${YELLOW}!${RESET} handoff bead ${bad.id} ("${bad.title}") is UNREADABLE: ${bad.errors.join('; ')}\n`,
@@ -2414,7 +2449,8 @@ export async function runJustinLoop(
     }
     const scanned = decideAfterSession(scanHandoffBeads(cwd, deps.br), label);
 
-    if (scanned.kind !== 'br-unavailable') renderInvalid(scanned.invalid, deps.write);
+    if (scanned.kind !== 'br-unavailable')
+      renderInvalid(scanned.invalid, deps.write);
 
     // --- YIELD ENFORCEMENT (D10): ask the session itself, up to N times ---
     //
