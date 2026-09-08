@@ -750,6 +750,26 @@ describe('CLI: --prompt makes the run an ASK (D1/D6)', () => {
     expect(run.out).not.toContain(EXPLICIT_SKIP_LINE);
   });
 
+  test('the hidden --max-iterations alias still sets the chain length', () => {
+    // One release of grace for a scheduled invocation that predates the rename.
+    // The run header names the bound, so a dry run is enough to prove the flag
+    // reaches the runner rather than being silently swallowed by yargs.
+    const run = runLoopCli(['--max-iterations', '7']);
+    expect(run.out).toContain('max=7 sessions');
+    expect(run.out).toContain('--max-iterations is now --max-sessions');
+  });
+
+  test('--max-sessions is the name that works without a deprecation notice', () => {
+    const run = runLoopCli(['--max-sessions', '7']);
+    expect(run.out).toContain('max=7 sessions');
+    expect(run.out).not.toContain('--max-iterations is now');
+  });
+
+  test('the header names every label the chain may use', () => {
+    const run = runLoopCli(['--label', 'my-arc', '--max-sessions', '3']);
+    expect(run.out).toContain('labels=my-arc-1…my-arc-3');
+  });
+
   test('the deprecated `ralph` name reaches the same runner (D1)', () => {
     const run = runLoopCli([], 'ralph');
     expect(run.out).toContain('ralph is now justin-loop');

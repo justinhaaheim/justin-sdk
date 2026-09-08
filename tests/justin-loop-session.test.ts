@@ -719,6 +719,28 @@ describe('AC2: the loop refuses to spawn onto a live predecessor', () => {
     expect(r.ledger[0].stopOutcome).toBe('no-pid');
   });
 
+  test('hitting --max-sessions with a continue-handoff SAYS the bead is still open', async () => {
+    // A bound is not a finish. "reached --max-sessions" on its own reads as the
+    // arc being over, while an open bead sits there waiting for the next run.
+    const r = await runLoop({
+      opts: {label: 'the-arc', maxSessions: 1},
+      scans: [[], [beadFrom('hoff-1', {from: 'the-arc-1'})]],
+    });
+    expect(r.dispatches).toHaveLength(1);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('reached --max-sessions');
+    expect(r.stdout).toContain('hoff-1 is still OPEN');
+    expect(r.stdout).toContain('arc is NOT finished');
+  });
+
+  test('a chain that ends on `done` does NOT claim an open bead', async () => {
+    const r = await runLoop({
+      opts: {label: 'the-arc', maxSessions: 1},
+      scans: [[], [beadFrom('h', {disposition: 'done', from: 'the-arc-1'})]],
+    });
+    expect(r.stdout).not.toContain('still OPEN');
+  });
+
   test('NEGATIVE CONTROL: the same script spawns once the stop works', async () => {
     const r = await runLoop({
       opts: {label: 'the-arc'},

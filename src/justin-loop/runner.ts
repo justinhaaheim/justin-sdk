@@ -1688,6 +1688,12 @@ export async function runJustinLoop(
   let noProgressStreak = 0;
   let bootPlan: BootPlan = startBoot.plan;
   let sessionsRun = 0;
+  /**
+   * The handoff bead the chain would have booted from next, if the run had any
+   * sessions left. Named in the summary so hitting --max-sessions never looks
+   * like the arc finishing: the bead stays OPEN, and the next run picks it up.
+   */
+  let unspentHandoff: string | null = null;
 
   for (let n = 1; n <= opts.maxSessions; n++) {
     const label = sessionLabel(slug, n);
@@ -1912,14 +1918,21 @@ export async function runJustinLoop(
     }
 
     bootPlan = {kind: 'handoff', match};
-    deps.write(
-      `   ${DIM}next session boots from ${match.row.id}${RESET}\n`,
-    );
+    unspentHandoff = match.row.id;
+    deps.write(`   ${DIM}next session boots from ${match.row.id}${RESET}\n`);
   }
+
+  // Reaching --max-sessions with a `continue` handoff in hand is a BOUND, not a
+  // finish. Saying only "reached max sessions" would read as "the arc is done"
+  // while an open bead sits there waiting (critical rule 6).
+  const bound =
+    unspentHandoff != null && sessionsRun >= opts.maxSessions
+      ? ` Handoff bead ${unspentHandoff} is still OPEN — the arc is NOT finished; re-run to continue from it.`
+      : '';
 
   deps.write(
     `\n${BOLD}── run summary ──${RESET}\n` +
-      `  stopped     ${end.reason}\n` +
+      `  stopped     ${end.reason}${bound}\n` +
       `  sessions    ${sessionsRun}\n` +
       `  ledger      ${ledgerPath}\n\n`,
   );
