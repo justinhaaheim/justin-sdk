@@ -40,6 +40,7 @@ import {
   type Handoff,
   HANDOFF_LABEL,
   type HandoffRow,
+  parseCreatedId,
   parseHandoff,
   parseHandoffRows,
 } from './handoff';
@@ -79,6 +80,16 @@ export interface JustinLoopOptions {
   dryRun: boolean;
   /** Minutes between free /usage polls while paused at a quota gate. */
   gatePollMin: number;
+  /**
+   * `--handoff-retries`: how many times a session that ended without a valid
+   * handoff bead is RESUMED and told to write one before the run gives up (D10).
+   *
+   * 0 disables the demand entirely and restores the pre-.3 behaviour: the run
+   * stops at exit 2 saying what it found. That is a real choice, not a footgun —
+   * but it is not the default, because a session that simply forgot to hand off
+   * is the most likely way a chain dies, and re-asking it costs one turn.
+   */
+  handoffRetries: number;
   /**
    * `--label`: the slug half of every session label in this run (D3). null means
    * derive one from the ask. Normalised to `[a-z0-9-]` either way, because the
@@ -163,6 +174,7 @@ export const DEFAULT_OPTIONS: JustinLoopOptions = {
   blockedWaitMin: null,
   dryRun: false,
   gatePollMin: 5,
+  handoffRetries: 3,
   label: null,
   maxSessions: 3,
   model: 'opus',
@@ -472,6 +484,13 @@ export interface AgentRow {
   id: string;
   pid: number | null;
   name: string;
+  /**
+   * The FULL session id (`11205a3b-34c4-435b-b21f-4289486061a0`), which is the
+   * only thing `--resume` accepts (home-base-1r6d.33.3 — the short `id` starts a
+   * COPY). null when the row did not carry one, which must never be papered over
+   * with the short id: `id` is a TRUNCATION of this, not a substitute for it.
+   */
+  sessionId: string | null;
   state: string | null;
   status: string | null;
   waitingFor: string | null;
@@ -534,6 +553,7 @@ export function listAgents(cwd: string): AgentListing {
         id: String(r.id ?? ''),
         name: String(r.name ?? ''),
         pid: typeof r.pid === 'number' ? r.pid : null,
+        sessionId: typeof r.sessionId === 'string' ? r.sessionId : null,
         state: typeof r.state === 'string' ? r.state : null,
         status: typeof r.status === 'string' ? r.status : null,
         waitingFor: typeof r.waitingFor === 'string' ? r.waitingFor : null,
@@ -856,9 +876,10 @@ export interface InvalidHandoff {
 /**
  * What the runner does after a session ends, decided ONLY from the beads (D2).
  *
- * `enforce` is the hook home-base-1r6d.33.3 takes over: the session ended without
- * a handoff it could read, so it should be resumed and told to write one. Until
- * .3 lands this path prints what it found and stops the run — it NEVER spawns.
+ * `enforce` means the session ended without a handoff the runner could read. It
+ * is never acted on directly: `demandHandoff` resumes that same session and asks
+ * for one, up to `--handoff-retries` times (D10, home-base-1r6d.33.3). Nothing on
+ * that path spawns anything.
  */
 export type SessionOutcome =
   | {kind: 'continue'; match: HandoffMatch; invalid: InvalidHandoff[]}
@@ -873,6 +894,15 @@ export type SessionOutcome =
     }
   | {kind: 'multiple'; matches: HandoffMatch[]; invalid: InvalidHandoff[]}
   | {kind: 'br-unavailable'; reason: string};
+
+/**
+ * A verdict the run loop can actually act on: everything except `enforce`.
+ *
+ * The type is the guard. `enforce` can only leave the loop body through
+ * `demandHandoff`, so there is no expressible path from "this session did not
+ * hand off" to spawning a successor.
+ */
+export type ResolvedOutcome = Exclude<SessionOutcome, {kind: 'enforce'}>;
 
 const DISPOSITION_TO_KIND: Record<Disposition, 'continue' | 'done' | 'blocked'> =
   {
@@ -1285,7 +1315,8 @@ export function checkGate(
 // would be invented.
 // ---------------------------------------------------------------------------
 
-export const LEDGER_SCHEMA_VERSION = 1;
+/** 2 adds `demands` (home-base-1r6d.33.3). */
+export const LEDGER_SCHEMA_VERSION = 2;
 
 /** Every way a session can end, as the ledger names it. */
 export type LedgerOutcome =
@@ -1294,6 +1325,14 @@ export type LedgerOutcome =
   | 'blocked'
   | 'no-handoff'
   | 'invalid-handoff'
+  /** Demanded `handoffRetries` times and still nothing readable (D10). */
+  | 'no-handoff-after-demands'
+  /**
+   * We could not even DELIVER a demand — no full sessionId to resume, or the
+   * resume itself failed. A different fact from a session that was asked and
+   * refused, and it must not be filed under the same name (critical rule 6).
+   */
+  | 'demand-undeliverable'
   | 'multiple-handoffs'
   | 'kill-failed'
   | 'br-unavailable'
@@ -1318,6 +1357,14 @@ export interface LedgerRow {
   /** From the handoff bead. null = not measured, never 0 (critical rule 6). */
   contextTokens: number | null;
   progressed: boolean;
+  /**
+   * How many times this session had to be RESUMED and told to write a handoff
+   * (D10). 0 is the normal case — it handed off on its own. Recorded because
+   * `outcome: 'continue'` alone cannot tell a session that handed off unprompted
+   * apart from one that had to be asked three times, and the difference is the
+   * whole reason the ledger exists.
+   */
+  demands: number;
 }
 
 export function runsJsonlPath(stateDir: string): string {
@@ -1449,7 +1496,7 @@ export function blockedWaitDescription(blockedWaitMin: number | null): string {
  */
 export function timeoutDescription(timeoutMin: number): string {
   return timeoutMin > 0
-    ? `each session is stopped after ${timeoutMin}m of non-blocked wall clock`
+    ? `each session is stopped after ${timeoutMin}m of non-blocked wall clock, then its handoff beads are read as usual`
     : 'no wall-clock timeout — sessions end when they hand off (--timeout-min to bound it)';
 }
 
@@ -1556,6 +1603,17 @@ export interface SessionRun {
   ending: SessionEnding;
   /** The `claude agents` id. null only when dispatch failed. */
   id: string | null;
+  /**
+   * The FULL session id read off the agents row while the session was running —
+   * the only id `--resume` will continue rather than copy (D10). null means we
+   * never managed to observe a row, and null is load-bearing: the short `id` is
+   * a truncation of this and substituting it would silently start a SECOND live
+   * session on the same worktree.
+   *
+   * Captured DURING the run because `claude stop` removes the row, and the
+   * demand happens after the stop.
+   */
+  fullSessionId: string | null;
   durationMs: number;
 }
 
@@ -1596,6 +1654,7 @@ export async function runSession(
     return {
       durationMs: deps.now() - started,
       ending: {banner: banner.trim(), kind: 'dispatch-failed'},
+      fullSessionId: null,
       id: null,
     };
   }
@@ -1604,6 +1663,25 @@ export async function runSession(
     `   ${DIM}background ${id} · inspect: claude logs ${id} · step in: claude attach ${id}${RESET}\n`,
   );
 
+  return watchSession(cwd, opts, n, id, started, deps);
+}
+
+/**
+ * Poll one already-dispatched background session until it is over.
+ *
+ * Shared by the first dispatch and by every `--resume` demand (D10), so a
+ * demanded turn is watched, timed and bounded by exactly the same rules as the
+ * turn that preceded it — including the blocked handling, which is the one place
+ * where "waiting for Justin" must not be mistaken for a hang.
+ */
+async function watchSession(
+  cwd: string,
+  opts: JustinLoopOptions,
+  n: number,
+  id: string,
+  started: number,
+  deps: RunnerDeps,
+): Promise<SessionRun> {
   // Mutable: time the session spends BLOCKED is pushed onto the deadline when it
   // starts moving again (D3). A wall-clock timeout is there to catch a session
   // that has run away, and a session waiting for a human has not run away — it is
@@ -1614,6 +1692,12 @@ export async function runSession(
   let notified = false;
 
   let agentsFailures = 0;
+  /**
+   * The last full session id we actually SAW. Captured here rather than after
+   * the run because the stop removes the row, and `--resume` needs this exact
+   * string (home-base-1r6d.33.3, measured).
+   */
+  let fullSessionId: string | null = null;
 
   for (;;) {
     await deps.sleep(opts.pollSec * 1000);
@@ -1631,6 +1715,7 @@ export async function runSession(
             kind: 'agents-unreadable',
             reason: look.reason,
           },
+          fullSessionId,
           id,
         };
       }
@@ -1638,9 +1723,15 @@ export async function runSession(
     }
     agentsFailures = 0;
     const row = look.row;
+    if (row?.sessionId != null) fullSessionId = row.sessionId;
 
     if (row == null || isSessionEnded(row)) {
-      return {durationMs: deps.now() - started, ending: {kind: 'ended'}, id};
+      return {
+        durationMs: deps.now() - started,
+        ending: {kind: 'ended'},
+        fullSessionId,
+        id,
+      };
     }
 
     if (row.state === 'blocked') {
@@ -1657,6 +1748,7 @@ export async function runSession(
         return {
           durationMs: now - started,
           ending: {kind: 'blocked-timeout', waitingFor: row.waitingFor},
+          fullSessionId,
           id,
         };
       }
@@ -1679,10 +1771,343 @@ export async function runSession(
       return {
         durationMs: deps.now() - started,
         ending: {afterMin: opts.timeoutMin, kind: 'timeout'},
+        fullSessionId,
         id,
       };
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Yield enforcement: resume the session and DEMAND a handoff (D10)
+//
+// A session that ends without a valid handoff bead has broken the only control
+// channel the loop has. The runner does not guess what it meant and does not
+// spawn anything — it wakes that same session and tells it, in the same
+// conversation, what is missing and exactly which command writes it. Bounded by
+// `--handoff-retries`, and every path out of here refuses to spawn a successor.
+//
+// THE RESUME MECHANISM, MEASURED 2026-09-08 against claude v2.1.263
+// (home-base-1r6d.33.3 AC1). Two throwaway `--bg` haiku sessions, both removed:
+//
+//   `claude --bg --resume <FULL sessionId> "<prompt>"`, WITH NO OTHER FLAGS,
+//   WAKES THE SAME SESSION — same short id, same sessionId, same conversation.
+//   Proven by content, not by id: the session was asked for a word, replied
+//   `done`, was `claude stop`-ed, and on resume answered "what did you reply a
+//   moment ago" with `done AGAIN`. stderr: "note: woke session 11205a3b with its
+//   saved options (--name, --model, --permission-mode)."
+//
+//   PASSING ANY OTHER FLAG STARTS A COPY — even the same `--name` it already
+//   had: "note: background session 11205a3b keeps its own saved options, so the
+//   flags you passed started a copy as 0ea9def1. Without flags, the same command
+//   continues 11205a3b itself." A copy is a SECOND live session on the same
+//   worktree, i.e. the 1r6d.31/.32 failure, so `resumeArgs` passes the prompt and
+//   nothing else. The woken session keeps its own model, permission mode and
+//   system prompt, so the demand text has to stand on its own.
+//
+//   A `claude stop` does not prevent a later resume (the row is gone from the
+//   default list but the conversation is not). The banner is the usual
+//   `backgrounded · <id> · <name>`, so `parseBackgroundedId` works unchanged.
+//
+// The short `id` is the first 8 characters of `sessionId`, and that near-miss is
+// exactly the hazard: `--resume <short id>` silently forks a copy. The runner
+// therefore READS `sessionId` off the row while the session is still listed, and
+// treats "never observed" as its own outcome rather than falling back.
+//
+// No fallback path (a fresh session pointed at the transcript) is implemented,
+// because resume works.
+// ---------------------------------------------------------------------------
+
+/** The enforce half of `SessionOutcome`, named so it can be passed around. */
+export type EnforceOutcome = Extract<SessionOutcome, {kind: 'enforce'}>;
+
+/**
+ * The argv that CONTINUES a session rather than copying it.
+ *
+ * Deliberately minimal, and it must stay that way: every extra flag measured
+ * turns this into a fork (see above). If a future flag is genuinely needed here,
+ * re-measure first.
+ */
+export function resumeArgs(fullSessionId: string, demand: string): string[] {
+  return ['--bg', '--resume', fullSessionId, demand];
+}
+
+/**
+ * What the runner says to a session that did not hand off (D10, decision 3).
+ *
+ * Written for a session whose system prompt may not be re-applied on resume, so
+ * it repeats the whole helper invocation with this session's real label already
+ * interpolated. It quotes the validation errors VERBATIM, per bead: a session
+ * told only "invalid" cannot tell whether it wrote nothing, wrote unparseable
+ * notes, or is looking at someone else's broken bead.
+ */
+export function handoffDemand(opts: {
+  label: string;
+  sub: 'no-handoff' | 'invalid-handoff';
+  reason: string;
+  invalid: InvalidHandoff[];
+  /** 1-based. */
+  attempt: number;
+  attempts: number;
+}): string {
+  const lines: string[] = [
+    `[justin-loop runner] This message is from the runner that started you, not from a person. Your session label is \`${opts.label}\`.`,
+    '',
+    `YOU ENDED WITHOUT A VALID HANDOFF BEAD, so the loop cannot continue and no successor session has been started. ${opts.reason}`,
+    '',
+  ];
+
+  if (opts.invalid.length > 0) {
+    lines.push(
+      'These open handoff beads could not be read, and one of them may be the one you wrote:',
+    );
+    for (const bad of opts.invalid) {
+      lines.push(`  - ${bad.id} ("${bad.title}"): ${bad.errors.join('; ')}`);
+    }
+    lines.push(
+      '',
+      'FIRST fix or close each of those: `br update <id> --notes=<the exact JSON the helper writes>` if it is yours and salvageable, or `br close <id> --reason=...` if it is not. An unreadable open handoff bead is why validation fails.',
+      '',
+    );
+  }
+
+  lines.push(
+    'THEN commit your code and your `.beads/` changes, and run this ONCE:',
+    '',
+    `  justin-sdk justin-loop handoff --from=${opts.label} --disposition=continue|done|blocked --arc=<bead id or arc name> --worktree=<absolute path> --branch=<branch> --state='<where the work actually stands>' --next='<the successor's complete starting instructions, written for a cold reader>' [--open-question='<...>']... [--context-tokens=<N>]`,
+    '',
+    'Pick `continue` if work remains, `done` if the arc is finished, `blocked` if you need Justin. Write the bead with the helper, never by hand. Then end your turn.',
+    '',
+    `This is demand ${opts.attempt} of ${opts.attempts}. If there is still no valid handoff bead after the last one, the run stops and files a bug bead against this session.`,
+  );
+  return lines.join('\n');
+}
+
+/**
+ * The bead filed when a session would not hand off however often it was asked.
+ *
+ * Deliberately NOT labelled `handoff` — it is a bug report about a missing
+ * handoff, and a bead carrying that label would be picked up by the next run's
+ * start-of-run scan as though it were the thing it is complaining about.
+ */
+export function handoffFailureTitle(label: string, demands: number): string {
+  return `justin-loop: session ${label} ended without a handoff after ${demands} demand${demands === 1 ? '' : 's'}`;
+}
+
+export function handoffFailureDescription(opts: {
+  label: string;
+  demands: number;
+  reason: string;
+  invalid: InvalidHandoff[];
+  cwd: string;
+}): string {
+  const lines = [
+    `Session \`${opts.label}\` (in ${opts.cwd}) was resumed ${opts.demands} time(s) and told to write a handoff bead with \`justin-sdk justin-loop handoff --from=${opts.label} ...\`, and there is still no valid open handoff bead with that \`from\`.`,
+    '',
+    `Last thing the runner saw: ${opts.reason}`,
+  ];
+  if (opts.invalid.length > 0) {
+    lines.push('', 'Open handoff beads that could not be parsed:');
+    for (const bad of opts.invalid) {
+      lines.push(`  - ${bad.id} ("${bad.title}"): ${bad.errors.join('; ')}`);
+    }
+  }
+  lines.push(
+    '',
+    'The chain is stopped. Nothing was spawned. Read that session (`claude logs`) or the branch to find out what it actually did, then either write the handoff bead by hand or close this.',
+  );
+  return lines.join('\n');
+}
+
+/** Filing the failure bead is best-effort, and its failure is never silent. */
+export type FailureBeadResult =
+  | {ok: true; id: string}
+  | {ok: false; reason: string};
+
+export function fileHandoffFailureBead(
+  cwd: string,
+  opts: {
+    label: string;
+    demands: number;
+    reason: string;
+    invalid: InvalidHandoff[];
+  },
+  run: BrRunner,
+): FailureBeadResult {
+  const created = run(cwd, [
+    'create',
+    handoffFailureTitle(opts.label, opts.demands),
+    '-t',
+    'bug',
+    '-p',
+    '1',
+    `--description=${handoffFailureDescription({...opts, cwd})}`,
+  ]);
+  if (!created.ok) {
+    return {ok: false, reason: created.reason ?? 'br failed for an unrecorded reason'};
+  }
+  const id = parseCreatedId(created.stdout);
+  if (id == null) {
+    return {
+      ok: false,
+      reason: `\`br create\` succeeded but its output did not name an id: ${JSON.stringify(created.stdout.trim())}`,
+    };
+  }
+  return {id, ok: true};
+}
+
+/** Everything the demand loop needs about the session it is chasing. */
+export interface DemandContext {
+  cwd: string;
+  opts: JustinLoopOptions;
+  /** The session's label — the `from` every handoff bead must carry. */
+  label: string;
+  /** Session number in the chain, for the blocked notification. */
+  n: number;
+  /** The FULL sessionId. null = we never saw a row, so no demand can be sent. */
+  fullSessionId: string | null;
+}
+
+/**
+ * How the demand loop ended. Each member is a different fact, and NONE of them
+ * is "spawn a successor" — that decision belongs to the caller, and only
+ * `resolved` can even reach it.
+ */
+export type DemandResult =
+  /** The session answered: this is the re-scan's verdict, whatever it is. */
+  | {kind: 'resolved'; outcome: ResolvedOutcome; stop: StopReport; demands: number}
+  /** Every demand spent, still no readable handoff. */
+  | {kind: 'exhausted'; enforce: EnforceOutcome; stop: StopReport; demands: number}
+  /**
+   * We stopped being able to ask, or to watch the answer. Distinct from
+   * `exhausted`, which is a session that WAS asked and did not comply.
+   */
+  | {
+      kind: 'aborted';
+      reason: string;
+      ledgerOutcome: LedgerOutcome;
+      stop: StopReport;
+      demands: number;
+      enforce: EnforceOutcome;
+    };
+
+/**
+ * Resume the session and demand a handoff, up to `--handoff-retries` times.
+ *
+ * Invariants, all of them load-bearing:
+ *   - Every dispatch from here is a `--resume` of the SAME session. Nothing in
+ *     this function can start a new one.
+ *   - Every demanded turn is stopped and verified before its beads are read,
+ *     exactly like the turn that preceded it.
+ *   - `handoffRetries: 0` sends nothing and returns `exhausted` with 0 demands,
+ *     which is the pre-.3 behaviour and the negative control for the bound.
+ */
+export async function demandHandoff(
+  ctx: DemandContext,
+  first: EnforceOutcome,
+  firstStop: StopReport,
+  deps: RunnerDeps,
+): Promise<DemandResult> {
+  let enforce = first;
+  let stop = firstStop;
+  let demands = 0;
+
+  while (demands < ctx.opts.handoffRetries) {
+    const fullSessionId = ctx.fullSessionId;
+    if (fullSessionId == null) {
+      // The short `claude agents` id would start a COPY, not continue this
+      // session, so there is nothing safe to fall back to (measured).
+      return {
+        demands,
+        enforce,
+        kind: 'aborted',
+        ledgerOutcome: 'demand-undeliverable',
+        reason: `cannot demand a handoff from ${ctx.label}: its full session id was never seen in \`claude agents\`, and \`--resume\` with the short id would start a COPY of the session rather than continue it`,
+        stop,
+      };
+    }
+
+    demands++;
+    const demand = handoffDemand({
+      attempt: demands,
+      attempts: ctx.opts.handoffRetries,
+      invalid: enforce.invalid,
+      label: ctx.label,
+      reason: enforce.reason,
+      sub: enforce.sub,
+    });
+    deps.write(
+      `   ${YELLOW}demand ${demands}/${ctx.opts.handoffRetries}${RESET}${DIM} waking ${fullSessionId} to ask for a handoff bead${RESET}\n`,
+    );
+
+    const started = deps.now();
+    const banner = deps.dispatch(ctx.cwd, resumeArgs(fullSessionId, demand));
+    const id = parseBackgroundedId(banner);
+    if (id == null) {
+      return {
+        demands,
+        enforce,
+        kind: 'aborted',
+        ledgerOutcome: 'demand-undeliverable',
+        reason: `could not resume ${ctx.label} to demand a handoff — \`claude --bg --resume\` printed no id: ${JSON.stringify(banner.trim())}`,
+        stop,
+      };
+    }
+
+    const run = await watchSession(ctx.cwd, ctx.opts, ctx.n, id, started, deps);
+
+    // Stop and verify the DEMANDED turn too. A woken session lingers in
+    // `claude agents` exactly like any other, and the successor gate downstream
+    // reads this report, not the one from before the demand.
+    stop = await stopAndVerify(
+      ctx.cwd,
+      id,
+      ctx.opts.stopPollSec * 1000,
+      deps,
+    );
+    for (const note of stop.notes) {
+      deps.write(`   ${DIM}stop${RESET} ${note}\n`);
+    }
+
+    if (run.ending.kind === 'agents-unreadable') {
+      return {
+        demands,
+        enforce,
+        kind: 'aborted',
+        ledgerOutcome: 'agents-unreadable',
+        reason: `lost sight of session ${ctx.label} while demanding a handoff: \`claude agents --json\` failed ${run.ending.failures} polls in a row (${run.ending.reason})`,
+        stop,
+      };
+    }
+    if (run.ending.kind === 'blocked-timeout') {
+      return {
+        demands,
+        enforce,
+        kind: 'aborted',
+        ledgerOutcome: 'blocked',
+        reason: `session ${ctx.label} blocked while being asked for a handoff ("${run.ending.waitingFor ?? 'a question'}") and waited ${ctx.opts.blockedWaitMin}m with no answer`,
+        stop,
+      };
+    }
+    if (run.ending.kind === 'timeout') {
+      deps.write(
+        `   ${YELLOW}!${RESET} the demanded turn hit --timeout-min (${run.ending.afterMin}m) — reading the beads anyway\n`,
+      );
+    }
+
+    const outcome = decideAfterSession(
+      scanHandoffBeads(ctx.cwd, deps.br),
+      ctx.label,
+    );
+    if (outcome.kind !== 'br-unavailable') renderInvalid(outcome.invalid, deps.write);
+    if (outcome.kind !== 'enforce') {
+      return {demands, kind: 'resolved', outcome, stop};
+    }
+    deps.write(`   ${YELLOW}!${RESET} still no handoff: ${outcome.reason}\n`);
+    enforce = outcome;
+  }
+
+  return {demands, enforce, kind: 'exhausted', stop};
 }
 
 /** Why the run stopped, and what the process should exit with. */
@@ -1856,6 +2281,11 @@ export async function runJustinLoop(
     sessionsRun++;
     const progressed = headBefore !== deps.gitHead(cwd);
 
+    // How many times this session had to be resumed and TOLD to hand off (D10).
+    // Reset per session, carried into the ledger row so a demanded handoff never
+    // reads like a spontaneous one.
+    let demands = 0;
+
     const ledger = (
       outcome: LedgerOutcome,
       handoffBead: string | null,
@@ -1864,6 +2294,7 @@ export async function runJustinLoop(
     ): void => {
       const written = deps.appendLedgerRow(ledgerPath, {
         contextTokens,
+        demands,
         endedAt: new Date(deps.now()).toISOString(),
         handoffBead,
         label,
@@ -1914,7 +2345,11 @@ export async function runJustinLoop(
     // a live pid, forever. So there is no path on which "it ended" already means
     // "it is gone" — every path stops it and confirms, and only then may a
     // successor be spawned.
-    const stop = await stopAndVerify(
+    //
+    // The stop REMOVES the row, and with it the only place the full session id
+    // is published — which is why `runSession` captured it while polling. A
+    // demand needs it (D10) and the short id would fork a copy.
+    let stop = await stopAndVerify(
       cwd,
       sessionId,
       opts.stopPollSec * 1000,
@@ -1946,17 +2381,98 @@ export async function runJustinLoop(
     }
 
     // --- READ THE BEAD (D2): the only thing that decides what happens next ---
-    const outcome =
-      run.ending.kind === 'timeout'
-        ? ({
-            invalid: [],
-            kind: 'enforce',
-            reason: `session ${label} was stopped after ${run.ending.afterMin}m (--timeout-min), so it never wrote a handoff`,
-            sub: 'no-handoff',
-          } as SessionOutcome)
-        : decideAfterSession(scanHandoffBeads(cwd, deps.br), label);
+    //
+    // A `--timeout-min` ending is read EXACTLY like any other (D7, reversing
+    // .2's V-f, which threw the beads away on this path). The timeout says the
+    // clock ran out; it says nothing about whether the session handed off before
+    // it hung, and discarding a valid handoff that is sitting right there throws
+    // away real, committed work and re-runs it. The session was stopped and
+    // CONFIRMED gone above, so reading its beads now cannot race it.
+    if (run.ending.kind === 'timeout') {
+      deps.write(
+        `   ${YELLOW}!${RESET} session ${label} was stopped after ${run.ending.afterMin}m (--timeout-min) — reading its handoff beads anyway: one written before it hung is still valid (D7)\n`,
+      );
+    }
+    const scanned = decideAfterSession(scanHandoffBeads(cwd, deps.br), label);
 
-    if (outcome.kind !== 'br-unavailable') renderInvalid(outcome.invalid, deps.write);
+    if (scanned.kind !== 'br-unavailable') renderInvalid(scanned.invalid, deps.write);
+
+    // --- YIELD ENFORCEMENT (D10): ask the session itself, up to N times ---
+    //
+    // `outcome` is the verdict AFTER any demands, and its type cannot be
+    // `enforce`: every enforce either resolves into something else or ends the
+    // run right here. That is what makes "no successor on a demand path"
+    // structural rather than a rule someone has to remember.
+    let outcome: ResolvedOutcome;
+    if (scanned.kind === 'enforce') {
+      deps.write(`   ${YELLOW}!${RESET} ${scanned.reason}\n`);
+      const demanded = await demandHandoff(
+        {cwd, fullSessionId: run.fullSessionId, label, n, opts},
+        scanned,
+        stop,
+        deps,
+      );
+      demands = demanded.demands;
+      stop = demanded.stop;
+
+      if (demanded.kind === 'aborted') {
+        ledger(demanded.ledgerOutcome, null, stop.outcome, null);
+        end = {
+          exitCode: 2,
+          reason: `${demanded.reason}. No successor is spawned.`,
+        };
+        break;
+      }
+      if (demanded.kind === 'exhausted') {
+        // A bounded failure that has to be impossible to miss: the run stops,
+        // the ledger says so, and a bead is filed so it survives the terminal.
+        // With --handoff-retries=0 nothing was demanded, so this is simply the
+        // pre-.3 report and no bug bead is filed against a session nobody asked.
+        const bounded = demands > 0;
+        ledger(
+          bounded ? 'no-handoff-after-demands' : demanded.enforce.sub,
+          null,
+          stop.outcome,
+          null,
+        );
+        let filed = '';
+        if (bounded) {
+          const bead = fileHandoffFailureBead(
+            cwd,
+            {
+              demands,
+              invalid: demanded.enforce.invalid,
+              label,
+              reason: demanded.enforce.reason,
+            },
+            deps.br,
+          );
+          filed = bead.ok
+            ? ` Filed ${bead.id}.`
+            : ` The failure bead could NOT be filed (${bead.reason}) — this run exists only in the ledger and in what you are reading.`;
+          deps.write(
+            bead.ok
+              ? `   ${DIM}filed ${bead.id}${RESET}\n`
+              : `   ${RED}!${RESET} could not file the failure bead: ${bead.reason}\n`,
+          );
+        }
+        end = {
+          exitCode: 2,
+          reason: bounded
+            ? `session ${label} was told ${demands} time(s) to write a handoff bead and still has none: ${demanded.enforce.reason} No successor is spawned.${filed}`
+            : `${demanded.enforce.reason} No successor is spawned, and no handoff was demanded (--handoff-retries=0).`,
+        };
+        break;
+      }
+      outcome = demanded.outcome;
+      if (outcome.kind !== 'br-unavailable') {
+        deps.write(
+          `   ${GREEN}✓${RESET}${DIM} handoff written after ${demands} demand(s)${RESET}\n`,
+        );
+      }
+    } else {
+      outcome = scanned;
+    }
 
     if (outcome.kind === 'br-unavailable') {
       ledger('br-unavailable', null, stop.outcome, null);
@@ -1979,24 +2495,6 @@ export async function runJustinLoop(
       };
       break;
     }
-    if (outcome.kind === 'enforce') {
-      // home-base-1r6d.33.3 takes this path over: resume the session and demand a
-      // handoff, bounded. Until then it prints what it found and stops — it never
-      // spawns, and never pretends the session finished cleanly.
-      ledger(
-        outcome.sub,
-        null,
-        stop.outcome,
-        null,
-      );
-      deps.write(`   ${YELLOW}!${RESET} ${outcome.reason}\n`);
-      end = {
-        exitCode: 2,
-        reason: `${outcome.reason} No successor is spawned. (Runner-side enforcement lands in home-base-1r6d.33.3.)`,
-      };
-      break;
-    }
-
     const {match} = outcome;
     ledger(
       outcome.kind,

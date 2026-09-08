@@ -469,8 +469,23 @@ void yargs(ARGV)
         .option('timeout-min', {
           type: 'number',
           describe:
-            'Per-session wall-clock timeout in minutes. 0 (the default) is NONE: a session is bounded by the ~300k wrap-up notice, not by the clock. When set, an expired session is stopped, CONFIRMED gone, and then treated as having written no handoff — it never boots a successor.',
+            'Per-session wall-clock timeout in minutes. 0 (the default) is NONE: a session is bounded by the ~300k wrap-up notice, not by the clock. When set, an expired session is stopped and CONFIRMED gone, and its handoff beads are then read exactly like any other ending — a valid handoff written before it hung is honoured rather than thrown away.',
           default: LOOP_DEFAULTS.timeoutMin,
+        })
+        .option('handoff-retries', {
+          type: 'number',
+          describe:
+            'How many times a session that ended without a valid handoff bead is RESUMED and told to write one before the run gives up, files a bug bead and exits 2. 0 disables the demand and just stops the run.',
+          default: LOOP_DEFAULTS.handoffRetries,
+        })
+        .check((argv) => {
+          const retries = argv['handoff-retries'];
+          // Negative is not "unlimited" and not "none" — it is a number nobody
+          // meant. Refuse rather than silently rounding it to one of them.
+          if (!(retries >= 0)) {
+            throw new Error('--handoff-retries must be 0 or greater');
+          }
+          return true;
         })
         // No default, and none wanted (home-base-1r6d.26, D3): omitted means a
         // blocked session waits for you indefinitely. Passing a number is how
@@ -570,6 +585,7 @@ void yargs(ARGV)
         blockedWaitMin: argv['blocked-wait-min'] ?? null,
         dryRun: argv['dry-run'],
         gatePollMin: argv['gate-poll-min'],
+        handoffRetries: argv['handoff-retries'],
         label: argv.label ?? null,
         maxSessions: argv['max-iterations'] ?? argv['max-sessions'],
         model: argv.model,

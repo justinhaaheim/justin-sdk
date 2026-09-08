@@ -60,6 +60,9 @@ function agentRow(over: Partial<AgentRow> = {}): AgentRow {
     id: 'sim-1',
     name: '2026-09-08 04:30 the-arc-1',
     pid: 4242,
+    // MEASURED: the short `id` is the first 8 chars of this. The runner must
+    // read the field, never truncate/extend the id (a short id forks a copy).
+    sessionId: 'sim-1-34c4-435b-b21f-4289486061a0',
     state: 'working',
     status: 'idle',
     waitingFor: null,

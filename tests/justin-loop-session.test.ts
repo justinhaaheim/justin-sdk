@@ -126,6 +126,18 @@ interface SessionScript {
   stop?: StopBehaviour;
   /** Never register a row at all — the session vanished before the first poll. */
   vanishes?: boolean;
+  /**
+   * Publish no `sessionId` on the row. The runner then has nothing `--resume`
+   * would continue rather than copy, so no demand can be delivered
+   * (home-base-1r6d.33.3).
+   */
+  noSessionId?: boolean;
+  /**
+   * What each RESUMED turn does, in order. A demand beyond this list behaves
+   * like `{}`: the woken session ends on its first poll and its stop clears the
+   * row, which is the measured normal case.
+   */
+  demandTurns?: SessionScript[];
 }
 
 interface LoopResult {
@@ -157,9 +169,16 @@ async function runLoop(spec: {
   sessions?: SessionScript[];
   /** false on a given global poll = `claude agents --json` failed that time. */
   agentsReadable?: (poll: number) => boolean;
+  /** Make `br create` fail, so the failure bead cannot be filed. */
+  brCreateFails?: boolean;
 }): Promise<LoopResult> {
   const rows = new Map<string, AgentRow>();
   const scriptOf = new Map<string, SessionScript>();
+  /** The session each FULL session id belongs to — what `--resume` looks up. */
+  const idBySessionId = new Map<string, string>();
+  /** The original script of each session, so its demand turns can be replayed. */
+  const bornAs = new Map<string, SessionScript>();
+  const demandsFor = new Map<string, number>();
   const dispatches: string[][] = [];
   const stopCalls: string[] = [];
   const signals: Array<{pid: number; sig: string}> = [];
@@ -173,8 +192,21 @@ async function runLoop(spec: {
   let polls = 0;
   const pollsFor = new Map<string, number>();
 
+  let created = 0;
   const br: BrRunner = (_cwd, args) => {
     brCalls.push(args);
+    if (args[0] === 'create') {
+      if (spec.brCreateFails === true) {
+        return {ok: false, reason: 'br exited 1: no beads workspace', stdout: ''};
+      }
+      created++;
+      // The real `br create` line shape (see parseCreatedId).
+      return {
+        ok: true,
+        reason: null,
+        stdout: `✓ Created fx-bug${created}: ${args[1] ?? ''}\n`,
+      };
+    }
     if (args[0] !== 'list') return {ok: true, reason: null, stdout: '{"issues":[]}'};
     const answer = (spec.scans ?? [])[scanIndex++];
     if (answer === 'unavailable') {
@@ -182,6 +214,33 @@ async function runLoop(spec: {
     }
     return {ok: true, reason: null, stdout: listJson(answer ?? [])};
   };
+
+  /**
+   * Put a session's row into `claude agents` and arm its script for this turn.
+   * Shared by the first dispatch and by every resume, because a woken session
+   * is listed exactly like a fresh one.
+   */
+  function register(id: string, script: SessionScript, name: string): void {
+    scriptOf.set(id, script);
+    pollsFor.set(id, 0);
+    if (script.vanishes === true) return;
+    // MEASURED: `id` is the first 8 characters of `sessionId`. The near-miss is
+    // the whole hazard — `--resume <short id>` starts a COPY.
+    const sessionId = script.noSessionId === true ? null : `${id}-full-uuid`;
+    if (sessionId != null) idBySessionId.set(sessionId, id);
+    rows.set(id, {
+      id,
+      name,
+      // MEASURED: a live row carries a pid; an ended one keeps it.
+      pid: 4000 + dispatched,
+      sessionId,
+      // A session with a working period starts `working`; otherwise it is
+      // already `done` on the first poll, which is the common case here.
+      state: script.state ?? (script.worksForPolls != null ? 'working' : 'done'),
+      status: 'idle',
+      waitingFor: null,
+    });
+  }
 
   const deps: RunnerDeps = {
     appendLedgerRow: (_path, row) => {
@@ -191,26 +250,31 @@ async function runLoop(spec: {
     br,
     dispatch: (_cwd, args) => {
       dispatches.push(args);
+
+      // A `--resume` WAKES an existing session (MEASURED 2026-09-08): same id,
+      // same sessionId, same conversation. It must never mint a new one here,
+      // or the "no successor is spawned on a demand path" tests would be
+      // measuring the wrong thing.
+      const resumeAt = args.indexOf('--resume');
+      if (resumeAt >= 0) {
+        const full = args[resumeAt + 1] ?? '';
+        const id = idBySessionId.get(full);
+        if (id == null) {
+          // The real CLI prints an error and no banner for an unknown id.
+          return `No session matching '${full}'.\n`;
+        }
+        const turn = demandsFor.get(id) ?? 0;
+        demandsFor.set(id, turn + 1);
+        const script = (bornAs.get(id)?.demandTurns ?? [])[turn] ?? {};
+        register(id, script, 'resumed');
+        return `backgrounded · ${id} · resumed\n`;
+      }
+
       dispatched++;
       const id = `sess-${dispatched}`;
       const script = (spec.sessions ?? [])[dispatched - 1] ?? {};
-      scriptOf.set(id, script);
-      pollsFor.set(id, 0);
-      if (!(script.vanishes === true)) {
-        rows.set(id, {
-          id,
-          name: args[args.indexOf('--name') + 1] ?? '',
-          // MEASURED: a live row carries a pid; an ended one keeps it.
-          pid: 4000 + dispatched,
-          // A session with a working period starts `working`; otherwise it is
-          // already `done` on the first poll, which is the common case here.
-          state:
-            script.state ??
-            (script.worksForPolls != null ? 'working' : 'done'),
-          status: 'idle',
-          waitingFor: null,
-        });
-      }
+      bornAs.set(id, script);
+      register(id, script, args[args.indexOf('--name') + 1] ?? '');
       return `backgrounded · ${id} · ${args[args.indexOf('--name') + 1] ?? ''}\n`;
     },
     findAgent: (_cwd, id) => {
@@ -284,6 +348,22 @@ function argOf(args: string[], flag: string): string {
 /** `claude --bg … <prompt>` — the prompt is the last positional. */
 function promptOf(args: string[]): string {
   return args[args.length - 1] ?? '';
+}
+
+/**
+ * Dispatches that START a session — i.e. successors.
+ *
+ * A `--resume` demand (home-base-1r6d.33.3) is also a `claude --bg` call, so
+ * counting raw dispatches would make "no successor was spawned" pass or fail for
+ * the wrong reason. This is the assertion the "never spawns" tests actually mean.
+ */
+function spawns(dispatches: string[][]): string[][] {
+  return dispatches.filter((d) => !d.includes('--resume'));
+}
+
+/** Dispatches that WAKE the session that is already there. */
+function resumes(dispatches: string[][]): string[][] {
+  return dispatches.filter((d) => d.includes('--resume'));
 }
 
 // ---------------------------------------------------------------------------
@@ -405,23 +485,32 @@ describe('AC1: done and blocked stop the loop', () => {
 });
 
 describe('AC1: zero, unreadable-only and two-open NEVER spawn', () => {
+  // These pin the SCAN verdict, so they run with `--handoff-retries 0`: the
+  // demand loop (home-base-1r6d.33.3) has its own describe below, and mixing the
+  // two would make it unclear which mechanism a red test was accusing.
+  const NO_DEMANDS: Partial<JustinLoopOptions> = {
+    handoffRetries: 0,
+    label: 'the-arc',
+  };
+
   test('ZERO handoffs: the run stops, says which label it looked for, spawns nothing', async () => {
-    const r = await runLoop({opts: {label: 'the-arc'}, scans: [[], []]});
-    expect(r.dispatches).toHaveLength(1);
+    const r = await runLoop({opts: NO_DEMANDS, scans: [[], []]});
+    expect(spawns(r.dispatches)).toHaveLength(1);
+    expect(resumes(r.dispatches)).toHaveLength(0);
     expect(r.exitCode).toBe(2);
     expect(r.stdout).toContain('ended without creating a handoff bead');
     expect(r.stdout).toContain('the-arc-1');
     expect(r.ledger[0].outcome).toBe('no-handoff');
-    // The hook .3 takes over is named, so this is visibly unfinished, not silent.
-    expect(r.stdout).toContain('home-base-1r6d.33.3');
+    // Silence must be a claim: the run says WHY nothing was demanded.
+    expect(r.stdout).toContain('--handoff-retries=0');
   });
 
   test("another session's handoff is not this session's, and is counted", async () => {
     const r = await runLoop({
-      opts: {label: 'the-arc'},
+      opts: NO_DEMANDS,
       scans: [[], [beadFrom('hoff-other', {from: 'some-other-run-7'})]],
     });
-    expect(r.dispatches).toHaveLength(1);
+    expect(spawns(r.dispatches)).toHaveLength(1);
     expect(r.exitCode).toBe(2);
     expect(r.ledger[0].outcome).toBe('no-handoff');
     expect(r.stdout).toContain('belong to other sessions');
@@ -429,7 +518,7 @@ describe('AC1: zero, unreadable-only and two-open NEVER spawn', () => {
 
   test('UNREADABLE only: never spawns, and the errors are printed per bead', async () => {
     const r = await runLoop({
-      opts: {label: 'the-arc'},
+      opts: NO_DEMANDS,
       scans: [
         [],
         [
@@ -438,13 +527,13 @@ describe('AC1: zero, unreadable-only and two-open NEVER spawn', () => {
         ],
       ],
     });
-    expect(r.dispatches).toHaveLength(1);
+    expect(spawns(r.dispatches)).toHaveLength(1);
     expect(r.exitCode).toBe(2);
     expect(r.stdout).toContain('hoff-broken');
     expect(r.stdout).toContain('hoff-noteless');
     expect(r.stdout).toContain('UNREADABLE');
     // Ledgered differently from "wrote nothing": one of these MIGHT be its
-    // handoff, and that is a different problem to hand .3.
+    // handoff, and that is a different problem to demand a fix for.
     expect(r.ledger[0].outcome).toBe('invalid-handoff');
     expect(r.stdout).toContain('may be this session');
   });
@@ -452,7 +541,7 @@ describe('AC1: zero, unreadable-only and two-open NEVER spawn', () => {
   test('TWO open handoffs with this from: stops, names both, spawns nothing', async () => {
     // The forked chain. Picking a winner here is how 1→2→4→8 starts.
     const r = await runLoop({
-      opts: {label: 'the-arc'},
+      opts: NO_DEMANDS,
       scans: [
         [],
         [
@@ -461,7 +550,7 @@ describe('AC1: zero, unreadable-only and two-open NEVER spawn', () => {
         ],
       ],
     });
-    expect(r.dispatches).toHaveLength(1);
+    expect(spawns(r.dispatches)).toHaveLength(1);
     expect(r.exitCode).toBe(2);
     expect(r.stdout).toContain('hoff-a');
     expect(r.stdout).toContain('hoff-b');
@@ -470,8 +559,8 @@ describe('AC1: zero, unreadable-only and two-open NEVER spawn', () => {
   });
 
   test('br UNAVAILABLE never reads as "no handoff exists"', async () => {
-    const r = await runLoop({opts: {label: 'the-arc'}, scans: [[], 'unavailable']});
-    expect(r.dispatches).toHaveLength(1);
+    const r = await runLoop({opts: NO_DEMANDS, scans: [[], 'unavailable']});
+    expect(spawns(r.dispatches)).toHaveLength(1);
     expect(r.exitCode).toBe(2);
     expect(r.stdout).toContain('rather than guessing that none exist');
     expect(r.ledger[0].outcome).toBe('br-unavailable');
@@ -481,10 +570,10 @@ describe('AC1: zero, unreadable-only and two-open NEVER spawn', () => {
     // Without this, every "never spawns" test above would also pass if the
     // runner were incapable of spawning at all.
     const r = await runLoop({
-      opts: {label: 'the-arc'},
+      opts: NO_DEMANDS,
       scans: [[], [beadFrom('hoff-ok', {from: 'the-arc-1'})]],
     });
-    expect(r.dispatches).toHaveLength(2);
+    expect(spawns(r.dispatches)).toHaveLength(2);
   });
 });
 
@@ -608,6 +697,7 @@ describe('AC2: stopAndVerify (D6)', () => {
     id: 'sess-1',
     name: 'n',
     pid: 4242,
+    sessionId: 'sess-1-full-uuid',
     state: 'done',
     status: 'idle',
     waitingFor: null,
@@ -860,7 +950,7 @@ describe('AC2: the loop refuses to spawn onto a live predecessor', () => {
       scans: [[], [beadFrom('hoff-1', {from: 'the-arc-1'})]],
       sessions: [{stop: 'clears'}],
     });
-    expect(r.dispatches).toHaveLength(2);
+    expect(spawns(r.dispatches)).toHaveLength(2);
     expect(r.ledger[0].stopOutcome).toBe('stopped');
   });
 
@@ -881,7 +971,7 @@ describe('AC2: the loop refuses to spawn onto a live predecessor', () => {
       sessions: [{vanishes: true}],
     });
     expect(r.ledger[0].stopOutcome).toBe('already-gone');
-    expect(r.dispatches).toHaveLength(2);
+    expect(spawns(r.dispatches)).toHaveLength(2);
   });
 
   test('EVERY session is stopped, including the last one of the chain', async () => {
@@ -916,20 +1006,60 @@ describe('AC3: --timeout-min', () => {
     expect(r.ledger[0].outcome).toBe('done');
   });
 
-  test('a configured timeout stops the session, verifies it, and never spawns', async () => {
+  test('a configured timeout stops the session and CONFIRMS it is gone first', async () => {
     const r = await runLoop({
-      opts: {label: 'the-arc', pollSec: 60, timeoutMin: 5},
-      // A valid continue-handoff IS present — and is deliberately NOT acted on.
-      // A session stopped mid-flight did not choose to hand off (D7).
-      scans: [[], [beadFrom('hoff-1', {from: 'the-arc-1'})]],
+      opts: {handoffRetries: 0, label: 'the-arc', pollSec: 60, timeoutMin: 5},
+      // Nothing was handed off, so the timeout ending is also a no-handoff one.
+      scans: [[], []],
       sessions: [{worksForPolls: 10_000}],
     });
-    expect(r.dispatches).toHaveLength(1);
+    expect(spawns(r.dispatches)).toHaveLength(1);
     expect(r.stopCalls).toEqual(['sess-1']);
     expect(r.stdout).toContain('verified gone');
     expect(r.exitCode).toBe(2);
     expect(r.ledger[0].outcome).toBe('no-handoff');
     expect(r.stdout).toContain('--timeout-min');
+  });
+
+  /**
+   * AC4 (home-base-1r6d.33.3): the .2 runner DISCARDED the beads on a timeout
+   * (its deviation V-f), so a session that handed off and then hung had its
+   * committed handoff thrown away and the arc re-run. D7 says the timeout is
+   * about the clock, not about the bead: stop, confirm gone, THEN read.
+   */
+  test('a timeout reads the beads after the stop and HONOURS a valid handoff', async () => {
+    const r = await runLoop({
+      opts: {label: 'the-arc', pollSec: 60, timeoutMin: 5},
+      // The session wrote a valid continue-handoff and THEN hung.
+      scans: [
+        [],
+        [beadFrom('hoff-1', {from: 'the-arc-1'})],
+        [beadFrom('hoff-2', {disposition: 'done', from: 'the-arc-2'})],
+      ],
+      sessions: [{worksForPolls: 10_000}],
+    });
+    // The stop happens BEFORE the read, and the successor only after both.
+    expect(r.stopCalls[0]).toBe('sess-1');
+    expect(r.stdout).toContain('verified gone');
+    expect(r.stdout).toContain('reading its handoff beads anyway');
+    expect(r.ledger[0].outcome).toBe('continue');
+    expect(r.ledger[0].handoffBead).toBe('hoff-1');
+    expect(spawns(r.dispatches)).toHaveLength(2);
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('NEGATIVE CONTROL: the discarded-beads behaviour would ledger no-handoff', async () => {
+    // The same world with NO handoff bead present is the only shape that may
+    // ledger `no-handoff` after a timeout. If the runner regressed to V-f, the
+    // test above would produce this row for a repo that HAS a valid handoff.
+    const r = await runLoop({
+      opts: {handoffRetries: 0, label: 'the-arc', pollSec: 60, timeoutMin: 5},
+      scans: [[], []],
+      sessions: [{worksForPolls: 10_000}],
+    });
+    expect(r.ledger[0].outcome).toBe('no-handoff');
+    expect(r.ledger[0].handoffBead).toBeNull();
+    expect(spawns(r.dispatches)).toHaveLength(1);
   });
 
   test('NEGATIVE CONTROL: the same session under no timeout runs to its handoff', async () => {
@@ -939,7 +1069,7 @@ describe('AC3: --timeout-min', () => {
       // Ends on its own, well past where the 5m timeout above fired.
       sessions: [{worksForPolls: 20}],
     });
-    expect(r.dispatches).toHaveLength(2);
+    expect(spawns(r.dispatches)).toHaveLength(2);
     expect(r.ledger[0].outcome).toBe('continue');
   });
 });
@@ -1089,6 +1219,7 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
           id: 'sess-1',
           name: args[args.indexOf('--name') + 1] ?? '',
           pid: 1,
+          sessionId: 'sess-1-full-uuid',
           state: 'done',
           status: 'idle',
           waitingFor: null,
@@ -1122,7 +1253,9 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
     const lines = readFileSync(path, 'utf8').trim().split('\n');
     expect(lines).toHaveLength(1);
     const row = JSON.parse(lines[0]) as LedgerRow;
-    expect(row.schemaVersion).toBe(1);
+    // 2 since home-base-1r6d.33.3 added `demands`.
+    expect(row.schemaVersion).toBe(2);
+    expect(row.demands).toBe(0);
     expect(row.n).toBe(1);
     expect(row.label).toBe('the-arc-1');
     expect(row.outcome).toBe('done');
@@ -1166,6 +1299,7 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
           id: 'sess-1',
           name: 'n',
           pid: 1,
+          sessionId: 'sess-1-full-uuid',
           state: 'done',
           status: 'idle',
           waitingFor: null,
