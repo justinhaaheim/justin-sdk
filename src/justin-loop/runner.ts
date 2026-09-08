@@ -1867,8 +1867,15 @@ export function resumeArgs(fullSessionId: string, demand: string): string[] {
  */
 export function handoffDemand(opts: {
   label: string;
-  sub: 'no-handoff' | 'invalid-handoff';
+  /** The enforce outcome's own words for what the runner looked for and found. */
   reason: string;
+  /**
+   * The unreadable open handoff beads, if any. Deliberately NOT keyed off the
+   * enforce `sub`: whether to tell the session about a broken bead depends on
+   * whether there IS one, and nothing else. (Today `sub` is `invalid-handoff`
+   * exactly when this is non-empty, but a demand that dropped a bead because a
+   * flag said so would be the failure this whole file is about.)
+   */
   invalid: InvalidHandoff[];
   /** 1-based. */
   attempt: number;
@@ -2089,7 +2096,6 @@ export async function demandHandoff(
       invalid: enforce.invalid,
       label: ctx.label,
       reason: enforce.reason,
-      sub: enforce.sub,
     });
     deps.write(
       `   ${YELLOW}demand ${demands}/${ctx.opts.handoffRetries}${RESET}${DIM} waking ${fullSessionId} to ask for a handoff bead${RESET}\n`,

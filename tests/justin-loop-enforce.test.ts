@@ -102,7 +102,6 @@ describe('handoffDemand: what the session is actually told', () => {
       invalid: [],
       label: 'fix-hydration-2',
       reason: 'session fix-hydration-2 ended without creating a handoff bead',
-      sub: 'no-handoff',
     });
     expect(text).toContain('justin-sdk justin-loop handoff');
     // The label, and the label already stamped onto --from: a session told only
@@ -123,7 +122,6 @@ describe('handoffDemand: what the session is actually told', () => {
       invalid: [],
       label: 'the-arc-1',
       reason: 'r',
-      sub: 'no-handoff',
     });
     expect(text).toContain('justin-loop runner');
     expect(text).toContain('demand 2 of 3');
@@ -136,7 +134,6 @@ describe('handoffDemand: what the session is actually told', () => {
       invalid: BROKEN,
       label: 'the-arc-1',
       reason: 'no readable handoff bead with from=the-arc-1',
-      sub: 'invalid-handoff',
     });
     for (const bad of BROKEN) {
       expect(text).toContain(bad.id);
@@ -155,7 +152,6 @@ describe('handoffDemand: what the session is actually told', () => {
       invalid: [],
       label: 'the-arc-1',
       reason: 'r',
-      sub: 'no-handoff',
     });
     expect(text).not.toContain('br close <id> --reason=');
     expect(text).not.toContain('could not be read');
