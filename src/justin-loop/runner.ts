@@ -2013,6 +2013,25 @@ export async function demandHandoff(
   let demands = 0;
 
   while (demands < ctx.opts.handoffRetries) {
+    // NOT SPECIFIED BY THE BEAD, added because .3 creates the hazard: a demand
+    // is a `claude --bg` call aimed at a session we have just tried to stop. If
+    // the stop could not be CONFIRMED, that session may still be running, and
+    // what a resume does to a live session is not measured. D6 says an
+    // unverified predecessor licenses nothing — that has to cover waking it too,
+    // not only spawning past it.
+    if (!isVerifiedGone(stop.outcome)) {
+      return {
+        demands,
+        enforce,
+        kind: 'aborted',
+        // `stopOutcome` on the same ledger row says which of kill-failed /
+        // no-pid / unverified this was.
+        ledgerOutcome: 'kill-failed',
+        reason: `REFUSING TO DEMAND: session ${ctx.label} could not be confirmed gone from \`claude agents\` (${stop.outcome}), so waking it could be talking to a session that is still running`,
+        stop,
+      };
+    }
+
     const fullSessionId = ctx.fullSessionId;
     if (fullSessionId == null) {
       // The short `claude agents` id would start a COPY, not continue this
