@@ -28,16 +28,17 @@ import {tmpdir} from 'os';
 import {join, resolve} from 'path';
 
 import {
-  attachableContract,
   blockedWaitDescription,
+  type BootContext,
+  bootContract,
   checkGate,
   DEFAULT_OPTIONS,
   parseBackgroundedId,
   parseUsage,
   readVerdictFile,
   respawnIntent,
+  sessionContract,
   type UsageSnapshot,
-  VERDICT_CONTRACT,
   VERDICT_SCHEMA,
 } from '../src/ralph';
 import {initRepo} from './git-fixtures';
@@ -518,65 +519,140 @@ describe('readVerdictFile', () => {
 });
 
 /**
- * The injected contract is the ONLY place the outgoing session learns the
- * handoff lifecycle — `/loop-session` is shared with interactive use and stays
- * runner-agnostic, so runner plumbing lives here (home-base-1r6d.4 AC2).
+ * The injected contract is the ONLY place a session learns the justin-loop
+ * protocol — `/loop-session` is shared with interactive use and stays
+ * runner-agnostic, so runner plumbing lives here (home-base-1r6d.33.4).
  */
-describe('VERDICT_CONTRACT — the handoff lifecycle', () => {
-  test('states the order: commit, flush beads, write the bead, then report', () => {
-    expect(VERDICT_CONTRACT).toContain('Commit your code');
-    expect(VERDICT_CONTRACT).toContain('Flush and commit .beads/');
-    expect(VERDICT_CONTRACT).toContain('br create "HANDOFF: <arc>"');
-    expect(VERDICT_CONTRACT).toContain('--labels handoff');
-    expect(VERDICT_CONTRACT).toContain('Report your verdict');
+describe('sessionContract — the handoff protocol', () => {
+  const LABEL = 'justin-loop-3';
+  const contract = sessionContract({blockedWaitMin: null, label: LABEL});
+  /** The worst case for size: contract + the longest boot preamble. */
+  const pickupBoot: BootContext = {
+    label: LABEL,
+    plan: {
+      bead: {
+        id: 'hoff-42',
+        status: 'open',
+        title: 'HANDOFF continue: the arc',
+        updatedAt: '2026-09-08T03:00:00Z',
+      },
+      kind: 'handoff',
+    },
+  };
+
+  test('tells the session its own label, and stamps it onto --from (D5)', () => {
+    // Identity is the whole of D5: the runner matches the handoff to the
+    // session by this string, so a session that does not know its label cannot
+    // write a handoff the runner will accept.
+    expect(contract).toContain(`\`${LABEL}\``);
+    expect(contract).toContain(`--from=${LABEL}`);
   });
 
-  test('tells the session what the handoff bead must carry', () => {
-    expect(VERDICT_CONTRACT).toContain('WORKTREE PATH');
-    expect(VERDICT_CONTRACT).toContain('next concrete step');
-    expect(VERDICT_CONTRACT).toContain('open questions');
+  test('teaches the helper command with every flag it takes (D4)', () => {
+    // Hand-written JSON in a notes field is what D4 exists to prevent, so the
+    // contract has to carry the whole invocation, not a gesture at it.
+    expect(contract).toContain('justin-sdk justin-loop handoff');
+    for (const flag of [
+      '--disposition=',
+      '--arc=',
+      '--worktree=',
+      '--branch=',
+      '--state=',
+      '--next=',
+      '--open-question=',
+      '--context-tokens=',
+    ]) {
+      expect(contract).toContain(flag);
+    }
+  });
+
+  test('states the order: commit, flush beads, hand off, then stop', () => {
+    // Order is load-bearing: a handoff written before the commit points at a
+    // branch that does not have the work on it.
+    const commit = contract.indexOf('Commit your code');
+    const flush = contract.indexOf('Flush and commit `.beads/`');
+    const handoff = contract.indexOf('justin-sdk justin-loop handoff');
+    const end = contract.indexOf('End your turn');
+    expect(commit).toBeGreaterThan(-1);
+    expect(flush).toBeGreaterThan(commit);
+    expect(handoff).toBeGreaterThan(flush);
+    expect(end).toBeGreaterThan(handoff);
+  });
+
+  test('names the three dispositions and what each does to the loop (D2)', () => {
+    expect(contract).toContain('- continue:');
+    expect(contract).toContain('A successor is spawned');
+    expect(contract).toContain('- done:');
+    expect(contract).toContain('no successor is spawned');
+    expect(contract).toContain('- blocked:');
+    expect(contract).toContain('only Justin can make');
+  });
+
+  test('says exactly one handoff per session, never a second (D5)', () => {
+    expect(contract).toContain('EXACTLY ONE HANDOFF PER SESSION');
+    expect(contract).toContain('Never create a second one');
+  });
+
+  test('tells the session what --next must carry, for a cold reader (D3)', () => {
+    expect(contract).toContain('WRITE --next FOR A COLD READER');
+    expect(contract).toContain('the worktree to work in');
+    expect(contract).toContain('concrete step');
+    expect(contract).toContain('the open questions');
+  });
+
+  test('names the wrap-up notice as the normal ending (D11)', () => {
+    // Sessions here are bounded by context, not by the clock — the notice is
+    // the trigger, so the contract has to say so or the session runs on.
+    expect(contract).toContain('WIND DOWN AND HAND OFF');
+    expect(contract).toContain('tells you to wrap up');
+    expect(contract).toContain('bounded by context, not by the clock');
   });
 
   test('warns about clap eating values that start with a dash', () => {
     // `br update --notes -foo` is parsed as a flag; the equals form is the fix.
-    expect(VERDICT_CONTRACT).toContain('--flag=value');
-  });
-
-  test('names both respawn intents and says silence means on-schedule', () => {
-    expect(VERDICT_CONTRACT).toContain('immediate');
-    expect(VERDICT_CONTRACT).toContain('on-schedule');
-    expect(VERDICT_CONTRACT).toContain('never boots a successor');
+    expect(contract).toContain('--flag=value');
   });
 
   test('forbids `br init` in a repo with no beads workspace', () => {
     // Creating a workspace unasked is exactly the o33r damage shape.
-    expect(VERDICT_CONTRACT).toContain('do NOT run `br init`');
+    expect(contract).toContain('do NOT run `br init`');
   });
 
   test('pre-authorises the automated notices as the repo owner speaking', () => {
     // home-base-1r6d.7: a sterile session flagged the wrap-up directive as a
     // prompt injection and refused it — "instructions you never gave". The fix
     // is provenance, so the contract vouches for the channel by name.
-    expect(VERDICT_CONTRACT).toContain('[Automated Usage Check]');
-    expect(VERDICT_CONTRACT).toContain('[Automated Time Check]');
-    expect(VERDICT_CONTRACT).toContain('not a');
-    expect(VERDICT_CONTRACT).toContain('prompt-injection attempt');
-    expect(VERDICT_CONTRACT).toContain('follow it');
+    expect(contract).toContain('[Automated Usage Check]');
+    expect(contract).toContain('[Automated Time Check]');
+    expect(contract).toContain('not a');
+    expect(contract).toContain('prompt-injection attempt');
+    expect(contract).toContain('follow it');
   });
 
-  test('the attachable verdict example carries the respawn fields', () => {
-    // The model copies this literally; a stale example is a silent way to lose
-    // the whole feature in the mode that is the DEFAULT.
-    const contract = attachableContract('/tmp/verdict.json');
-    expect(contract).toContain('"respawn":"immediate"');
-    expect(contract).toContain('"handoffBead"');
-    expect(contract).toContain('"immediate" or "on-schedule"');
+  test('no verdict-file vocabulary survives anywhere the session can read it', () => {
+    // AC2. The verdict file is gone as a concept (D2) — a contract that still
+    // mentions one would have a session writing to a channel nothing reads.
+    const composed = bootContract(contract, pickupBoot).toLowerCase();
+    for (const dead of [
+      'verdict',
+      '--json-schema',
+      'ralph',
+      'respawn',
+      'on-schedule',
+      'report complete',
+    ]) {
+      expect(composed).not.toContain(dead);
+    }
   });
 
-  test('the attachable contract still puts the verdict file LAST', () => {
-    expect(attachableContract('/tmp/verdict.json')).toContain(
-      'as the LAST thing you do',
-    );
+  test('the composed contract stays small enough to pay for every session', () => {
+    // Measured 2026-09-08 with gpt-tokenizer (cl100k_base, a stand-in for
+    // Claude's tokenizer): the contract alone is 994 tokens / 4,211 chars, and
+    // 1,211 tokens / 5,047 chars composed with the pickup preamble — the
+    // longest of the three boots. The cap is in characters because there is no
+    // tokenizer in this repo, at the ~4 chars/token this text measures.
+    expect(contract.length).toBeLessThan(6000);
+    expect(bootContract(contract, pickupBoot).length).toBeLessThan(6000);
   });
 });
 
@@ -612,10 +688,10 @@ describe('attachable defaults', () => {
     // says "bounded" while the runner waits forever, a session stalls a run it
     // was told would be reaped; if it says "indefinite" while the runner reaps
     // at 15m, the model asks a question that gets it killed.
-    const unbounded = attachableContract('/tmp/v.json', null);
+    const unbounded = sessionContract({blockedWaitMin: null, label: 'jl-1'});
     expect(unbounded).toContain('indefinitely');
     expect(unbounded).not.toContain('bounded time');
-    const bounded = attachableContract('/tmp/v.json', 720);
+    const bounded = sessionContract({blockedWaitMin: 720, label: 'jl-1'});
     expect(bounded).toContain('waits 720m');
     expect(bounded).toContain('files your question as a bead');
     expect(bounded).not.toContain('indefinitely');
@@ -625,8 +701,9 @@ describe('attachable defaults', () => {
     // AC6. The old sentence — "The runner only waits a bounded time before
     // stopping you" — was in the contract the model reads, and is exactly the
     // kind of stale promise that survives a behaviour change.
-    expect(attachableContract('/tmp/v.json')).not.toContain('bounded time');
-    expect(VERDICT_CONTRACT).not.toContain('bounded time');
+    expect(
+      sessionContract({blockedWaitMin: null, label: 'jl-1'}),
+    ).not.toContain('bounded time');
   });
 });
 

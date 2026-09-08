@@ -526,8 +526,8 @@ describe('bootPreamble', () => {
     expect(text).toContain('no-verdict');
     expect(text).toContain('git');
     expect(text).toContain('beads');
-    // It must not merely reconstruct quietly — the summary has to admit it.
-    expect(text).toContain('SAY in your summary');
+    // It must not merely reconstruct quietly — the handoff has to admit it.
+    expect(text).toContain('SAY in your handoff --state');
   });
 
   test('a crash boot never describes itself as a handoff', () => {
