@@ -8,9 +8,11 @@
  *   2. `br` being unavailable must never read as "every handoff is valid" or as
  *      "no handoff exists" (critical rule 6) — exit 2 is its own answer.
  *   3. A session must never open a second handoff bead (D5). That is the
- *      1→2→4→8 fan-out the whole design exists to prevent, and an existing bead
- *      whose notes will not parse has an UNKNOWN `from`, so it counts as a
- *      conflict rather than being skipped.
+ *      1→2→4→8 fan-out the whole design exists to prevent. An existing bead
+ *      whose notes will not parse is WARNED about but does not block the create
+ *      (home-base-1r6d.33.2, note 11): the runner cannot spawn from a bead it
+ *      cannot parse, so it cannot fan out, whereas refusing let one corrupt bead
+ *      strand every later session's handoff.
  *   4. The successor's starting prompt must survive the round trip through br
  *      byte for byte — it is several paragraphs with quotes in it.
  *
@@ -24,15 +26,12 @@ import {existsSync} from 'fs';
 import {homedir} from 'os';
 import {dirname, join} from 'path';
 
-import {
-  type BrOutcome,
-  type BrRunner,
-  HANDOFF_LABEL,
-  runBr,
-} from '../src/ralph';
+import {type BrOutcome, type BrRunner, runBr} from '../src/justin-loop/br';
 import {
   checkErrors,
   createHandoff,
+  findFromConflicts,
+  HANDOFF_LABEL,
   type Handoff,
   type HandoffInput,
   handoffJson,
@@ -434,9 +433,13 @@ describe('createHandoff', () => {
     expect(createHandoff('/repo', INPUT, br.run).kind).toBe('created');
   });
 
-  test('an open handoff with UNREADABLE notes is a conflict, never a skip', () => {
-    // Its `from` is unknown, so it cannot be ruled out as this session's. The
-    // reassuring guess ("not mine, carry on") is the one that fans out.
+  test('an open handoff with UNREADABLE notes WARNS but does not block (note 11)', () => {
+    // Reversed on 2026-09-08 (home-base-1r6d.33.2, note 11). It used to refuse,
+    // on the grounds that an unknown `from` cannot be ruled out as this
+    // session's. But the RUNNER never spawns from a bead it cannot parse, so an
+    // unreadable bead cannot produce the fan-out the refusal existed to prevent
+    // — while refusing meant one corrupt bead anywhere in the repo stranded
+    // every later session's handoff. It is now loud and non-blocking.
     const broken = listJson([
       {
         id: 'fx-broken',
@@ -446,12 +449,89 @@ describe('createHandoff', () => {
         title: 'HANDOFF continue: ???',
       },
     ]);
-    const br = scriptedBr([(a) => (a[0] === 'list' ? ok(broken) : null)]);
+    const br = scriptedBr([
+      (a) => (a[0] === 'list' ? ok(broken) : null),
+      (a) =>
+        a[0] === 'create' ? ok('✓ Created fx-new: HANDOFF continue: x') : null,
+      (a) => (a[0] === 'update' ? ok('Updated fx-new') : null),
+    ]);
+    const out = createHandoff('/repo', INPUT, br.run);
+    expect(out.kind).toBe('created');
+    if (out.kind !== 'created') return;
+    expect(out.warnings.map((w) => w.id)).toEqual(['fx-broken']);
+    expect(out.warnings[0]?.kind).toBe('unreadable');
+
+    const report = renderCreate(out);
+    // Created, so exit 0 and the id on stdout — but the warning is impossible
+    // to miss on stderr, and it carries the command that cleans it up.
+    expect(report.exitCode).toBe(0);
+    expect(report.stdout).toEqual(['fx-new']);
+    const stderr = report.stderr.join('\n');
+    expect(stderr).toContain('WARNING');
+    expect(stderr).toContain('fx-broken');
+    expect(stderr).toContain('br close fx-broken');
+  });
+
+  test('an unreadable bead is still reported when a same-from bead refuses', () => {
+    // The refusal must not swallow the warning: both facts are true and the
+    // human needs both to clean up.
+    const rows = listJson([
+      {
+        id: 'fx-broken',
+        labels: [HANDOFF_LABEL],
+        notes: '{not json',
+        status: 'open',
+        title: 'HANDOFF ???',
+      },
+      {
+        id: 'fx-first',
+        labels: [HANDOFF_LABEL],
+        notes: handoffJson(VALID),
+        status: 'open',
+        title: handoffTitle(VALID),
+      },
+    ]);
+    const br = scriptedBr([(a) => (a[0] === 'list' ? ok(rows) : null)]);
     const out = createHandoff('/repo', INPUT, br.run);
     expect(out.kind).toBe('refused');
     if (out.kind !== 'refused') return;
-    expect(out.conflicts[0]?.kind).toBe('unreadable');
-    expect(renderCreate(out).stderr.join('\n')).toContain('fx-broken');
+    expect(out.conflicts.map((c) => c.id)).toEqual(['fx-first']);
+    expect(out.warnings.map((w) => w.id)).toEqual(['fx-broken']);
+    const stderr = renderCreate(out).stderr.join('\n');
+    expect(stderr).toContain('fx-broken');
+    expect(stderr).toContain('fx-first');
+  });
+
+  test('findFromConflicts keeps the two lists apart', () => {
+    const rows = [
+      {
+        id: 'fx-mine',
+        labels: [HANDOFF_LABEL],
+        notes: handoffJson(VALID),
+        status: 'open',
+        title: 't',
+        updatedAt: null,
+      },
+      {
+        id: 'fx-theirs',
+        labels: [HANDOFF_LABEL],
+        notes: handoffJson({...VALID, from: 'someone-else-4'}),
+        status: 'open',
+        title: 't',
+        updatedAt: null,
+      },
+      {
+        id: 'fx-broken',
+        labels: [HANDOFF_LABEL],
+        notes: null,
+        status: 'open',
+        title: 't',
+        updatedAt: null,
+      },
+    ];
+    const found = findFromConflicts(rows, VALID.from);
+    expect(found.conflicts.map((c) => c.id)).toEqual(['fx-mine']);
+    expect(found.unreadable.map((c) => c.id)).toEqual(['fx-broken']);
   });
 
   test('br failing on the scan is UNAVAILABLE (exit 2), not "no conflict"', () => {

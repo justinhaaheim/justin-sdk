@@ -1,18 +1,18 @@
 /**
- * ralph's self-handoff lifecycle (home-base-1r6d.4).
+ * How a justin-loop session BOOTS (home-base-1r6d.33.2).
  *
- * A session ends deliberately, says whether it wants a fresh-context successor
- * NOW, and leaves its continuation payload in a `handoff`-labelled bead. There
- * is no session-to-session channel by design (D1) — beads are the whole
- * transport — so everything the runner does here is: look for the bead, check
- * nobody else has claimed it, and tell the successor how to claim it.
+ * There is no session-to-session channel by design (D1/D2) — a committed handoff
+ * bead is the whole transport — so everything here is: read the beads, decide
+ * which one (if any) is a starting point, and compose the prompt and system
+ * prompt the next session actually receives.
  *
  * What these tests are defending, in order of how badly it fails if it breaks:
- *   1. A crash must never boot a successor that thinks it received a handoff.
- *   2. A bead another session already claimed must produce a VISIBLE report,
- *      not a second agent quietly redoing the same arc.
- *   3. `br` being unavailable must never read as "no handoff is waiting".
- *   4. An unstated respawn must never boot a successor.
+ *   1. `br` being unavailable must never read as "no handoff is waiting".
+ *   2. A bead the runner cannot PARSE must never become a successor's prompt,
+ *      and must never be silently dropped from the report either.
+ *   3. A `done` or `blocked` bead is a finished chain, not a starting point.
+ *   4. A session that left nothing behind must never boot a successor that
+ *      thinks it received a handoff.
  *
  * The `br` boundary is injected everywhere, so the branching is provable without
  * a beads workspace — plus one scripted simulation against the REAL `br` binary,
@@ -24,27 +24,24 @@ import {execFileSync} from 'child_process';
 import {chmodSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {dirname, join} from 'path';
 
+import {type BrOutcome, runBr} from '../src/justin-loop/br';
 import {
-  bootContract,
+  type Handoff,
+  HANDOFF_LABEL,
+  handoffJson,
+  type HandoffRow,
+} from '../src/justin-loop/handoff';
+import {
   type BootContext,
+  bootContract,
   bootPreamble,
-  type BrOutcome,
   composeBootPrompt,
   crashBootPlan,
-  decideRespawn,
   EXPLICIT_SKIP_LINE,
-  formatRespawnLine,
-  type HandoffBead,
-  type HandoffPickup,
-  HANDOFF_LABEL,
-  normalizeVerdict,
-  parseBeadList,
   planStartBoot,
-  resolveHandoffPickup,
-  runBr,
   scanHandoffBeads,
-  type Verdict,
-} from '../src/ralph';
+  sessionPrompt,
+} from '../src/justin-loop/runner';
 import {initRepo} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
 
@@ -58,50 +55,49 @@ function track(sb: Sandbox): Sandbox {
   return sb;
 }
 
-/** Verbatim `br list -l handoff --json` output, br 0.1.37, 2026-08-21. */
-const REAL_BR_LIST = `{
-  "issues": [
-    {
-      "id": "hoff-q1h",
-      "title": "HANDOFF: mayor arc",
-      "status": "open",
-      "priority": 1,
-      "issue_type": "task",
-      "created_at": "2026-08-21T02:53:51.439779Z",
-      "created_by": "jhaa",
-      "updated_at": "2026-08-21T02:53:51.439779Z",
-      "source_repo": ".",
-      "compaction_level": 0,
-      "original_size": 0,
-      "labels": [
-        "handoff"
-      ],
-      "dependency_count": 0,
-      "dependent_count": 0
-    }
-  ],
-  "total": 1,
-  "limit": 50,
-  "offset": 0,
-  "has_more": false
-}`;
+function handoff(over: Partial<Handoff> = {}): Handoff {
+  return {
+    arc: 'home-base-1r6d.33',
+    branch: 'worktree-justin-loop-runner',
+    contextTokens: 302_000,
+    createdAt: '2026-09-08T04:00:00Z',
+    disposition: 'continue',
+    from: 'the-arc-1',
+    next: 'Finish the parser, then run bun test.',
+    openQuestions: [],
+    schemaVersion: 1,
+    state: 'The parser is half written.',
+    worktree: '/Users/jhaa/Dev/home-base',
+    ...over,
+  };
+}
 
-const EMPTY_BR_LIST =
-  '{"issues": [], "total": 0, "limit": 50, "offset": 0, "has_more": false}';
-
-function beadListJson(
-  rows: Array<Partial<HandoffBead> & {updated_at?: string | null}>,
+/** `br list --json` output carrying the notes and labels the runner reads. */
+function listJson(
+  rows: Array<{
+    id: string;
+    title?: string;
+    status?: string;
+    notes?: string | null;
+    labels?: string[];
+    updated_at?: string | null;
+  }>,
 ): string {
   return JSON.stringify({
     issues: rows.map((r) => ({
       id: r.id,
-      status: r.status,
-      title: r.title,
+      labels: r.labels ?? [HANDOFF_LABEL],
+      ...(r.notes === undefined ? {} : {notes: r.notes}),
+      status: r.status ?? 'open',
+      title: r.title ?? 'HANDOFF continue: an arc',
       updated_at: r.updated_at,
     })),
     total: rows.length,
   });
 }
+
+const EMPTY_BR_LIST =
+  '{"issues": [], "total": 0, "limit": 50, "offset": 0, "has_more": false}';
 
 /** A `br` that always succeeds with this stdout, recording the argv it saw. */
 function fakeBr(stdout: string): {
@@ -110,7 +106,7 @@ function fakeBr(stdout: string): {
 } {
   const seen: string[][] = [];
   return {
-    run: (_cwd, args) => {
+    run: (_cwd: string, args: string[]) => {
       seen.push(args);
       return {ok: true, reason: null, stdout};
     },
@@ -123,112 +119,23 @@ function brokenBr(reason: string): (cwd: string, args: string[]) => BrOutcome {
   return () => ({ok: false, reason, stdout: ''});
 }
 
-function bead(over: Partial<HandoffBead> = {}): HandoffBead {
+function row(over: Partial<HandoffRow> = {}): HandoffRow {
   return {
     id: 'hoff-1',
+    labels: [HANDOFF_LABEL],
+    notes: handoffJson(handoff()),
     status: 'open',
-    title: 'HANDOFF: an arc',
-    updatedAt: '2026-08-21T02:00:00Z',
+    title: 'HANDOFF continue: an arc',
+    updatedAt: '2026-09-08T04:00:00Z',
     ...over,
   };
 }
-
-function verdict(over: Partial<Verdict> = {}): Verdict {
-  return {
-    followUps: [],
-    handoffBead: null,
-    respawn: null,
-    status: 'CONTINUE',
-    summary: 'did one unit of work',
-    ...over,
-  };
-}
-
-describe('parseBeadList', () => {
-  test('parses real `br list --json` output', () => {
-    const beads = parseBeadList(REAL_BR_LIST);
-    expect(beads).toEqual([
-      {
-        id: 'hoff-q1h',
-        status: 'open',
-        title: 'HANDOFF: mayor arc',
-        updatedAt: '2026-08-21T02:53:51.439779Z',
-      },
-    ]);
-  });
-
-  test('an empty result set is an empty list, not a failure', () => {
-    expect(parseBeadList(EMPTY_BR_LIST)).toEqual([]);
-  });
-
-  test('malformed JSON is unreadable (null), never an empty list', () => {
-    // The whole point of the null: [] would read as "nothing is waiting".
-    expect(parseBeadList('{not json')).toBeNull();
-    expect(parseBeadList('')).toBeNull();
-  });
-
-  test('output without an issues array is unreadable, not empty', () => {
-    expect(parseBeadList('{"total":0}')).toBeNull();
-    expect(parseBeadList('[]')).toBeNull();
-  });
-
-  test('one unreadable row rejects the WHOLE list rather than dropping it', () => {
-    // Skipping the bad row would silently understate how many handoffs are
-    // open — the reassuring direction, which is the dangerous one here.
-    const json = beadListJson([
-      {id: 'hoff-1', status: 'open', title: 'HANDOFF: a', updated_at: null},
-      {id: 'hoff-2', title: 'HANDOFF: b', updated_at: null}, // no status
-    ]);
-    expect(parseBeadList(json)).toBeNull();
-  });
-
-  test('a missing timestamp is null, not a fabricated date', () => {
-    const json = beadListJson([
-      {id: 'hoff-1', status: 'open', title: 'HANDOFF: a'},
-    ]);
-    expect(parseBeadList(json)?.[0].updatedAt).toBeNull();
-  });
-});
-
-describe('scanHandoffBeads', () => {
-  test('asks br for open beads carrying the handoff label, as JSON', () => {
-    const br = fakeBr(REAL_BR_LIST);
-    scanHandoffBeads('/repo', br.run);
-    expect(br.seen()[0]).toEqual(['list', '-l', HANDOFF_LABEL, '--json']);
-    // No `-a`: a closed handoff has been claimed and is not waiting for anyone.
-    expect(br.seen()[0]).not.toContain('-a');
-  });
-
-  test('a br failure is UNAVAILABLE, never an empty list', () => {
-    // The whole graceful-degradation contract: a repo with no beads workspace
-    // and a repo with no waiting handoff must not look the same.
-    const scan = scanHandoffBeads('/repo', brokenBr('br exited 1: no database'));
-    expect(scan.kind).toBe('unavailable');
-    expect(scan.kind === 'unavailable' ? scan.reason : '').toContain(
-      'no database',
-    );
-  });
-
-  test('unparseable output is UNAVAILABLE too', () => {
-    const scan = scanHandoffBeads('/repo', () => ({
-      ok: true,
-      reason: null,
-      stdout: 'not json at all',
-    }));
-    expect(scan.kind).toBe('unavailable');
-  });
-
-  test('a genuinely empty workspace reports ok with no beads', () => {
-    const scan = scanHandoffBeads('/repo', fakeBr(EMPTY_BR_LIST).run);
-    expect(scan).toEqual({beads: [], kind: 'ok'});
-  });
-});
 
 describe('runBr', () => {
   /**
    * `br`'s auto-import runs a real `git merge origin/main` in the working
    * directory (home-base c2u5 — a merge that "appeared out of nowhere" in a
-   * worktree). An unattended loop runner doing that mid-iteration would be far
+   * worktree). An unattended loop runner doing that mid-session would be far
    * worse than a stale bead list, so every call carries --no-auto-import.
    */
   function withFakeBr<T>(script: string[], body: (log: string) => T): T {
@@ -262,456 +169,344 @@ describe('runBr', () => {
   });
 
   test('a non-zero exit is a failure carrying br own stderr, not empty output', () => {
-    withFakeBr(
-      ['echo "no beads database found" >&2', 'exit 1'],
-      () => {
-        const out = runBr(process.cwd(), ['list', '--json']);
-        expect(out.ok).toBe(false);
-        expect(out.stdout).toBe('');
-        expect(out.reason).toContain('no beads database found');
-      },
+    withFakeBr(['echo "no beads database found" >&2', 'exit 1'], () => {
+      const out = runBr(process.cwd(), ['list', '--json']);
+      expect(out.ok).toBe(false);
+      expect(out.stdout).toBe('');
+      expect(out.reason).toContain('no beads database found');
+    });
+  });
+});
+
+describe('scanHandoffBeads', () => {
+  test('asks br for open beads carrying the handoff label, as JSON', () => {
+    const br = fakeBr(EMPTY_BR_LIST);
+    scanHandoffBeads('/repo', br.run);
+    expect(br.seen()).toEqual([['list', '-l', HANDOFF_LABEL, '--json']]);
+  });
+
+  test('a br failure is UNAVAILABLE, never an empty list', () => {
+    // The whole point: "we could not look" and "we looked and there is nothing"
+    // must not collapse into the same answer (critical rule 6).
+    const scan = scanHandoffBeads('/repo', brokenBr('br exited 1: no workspace'));
+    expect(scan.kind).toBe('unavailable');
+    expect(scan.kind === 'unavailable' ? scan.reason : '').toContain(
+      'no workspace',
+    );
+  });
+
+  test('unparseable output is UNAVAILABLE too', () => {
+    const scan = scanHandoffBeads('/repo', fakeBr('not json at all').run);
+    expect(scan.kind).toBe('unavailable');
+  });
+
+  test('a genuinely empty workspace reports ok with no rows', () => {
+    const scan = scanHandoffBeads('/repo', fakeBr(EMPTY_BR_LIST).run);
+    expect(scan.kind).toBe('ok');
+    expect(scan.kind === 'ok' ? scan.rows : null).toEqual([]);
+  });
+
+  test('the rows carry the notes, which are the whole contract (D3)', () => {
+    const scan = scanHandoffBeads(
+      '/repo',
+      fakeBr(listJson([{id: 'hoff-9', notes: handoffJson(handoff())}])).run,
+    );
+    expect(scan.kind === 'ok' ? scan.rows[0]?.notes : null).toContain(
+      '"disposition": "continue"',
     );
   });
 });
 
-describe('resolveHandoffPickup', () => {
-  test('looks the bead up INCLUDING closed ones', () => {
-    // Without -a a claimed bead reads as "missing", and the double-pickup
-    // report — the only signal that two sessions are on one arc — never fires.
-    const br = fakeBr(REAL_BR_LIST);
-    resolveHandoffPickup('/repo', 'hoff-q1h', br.run);
-    expect(br.seen()[0]).toEqual(['list', '--id', 'hoff-q1h', '-a', '--json']);
-  });
-
-  test('an open bead is ready to hand to the successor', () => {
-    const pickup = resolveHandoffPickup(
-      '/repo',
-      'hoff-q1h',
-      fakeBr(REAL_BR_LIST).run,
-    );
-    expect(pickup.kind).toBe('ready');
-  });
-
-  test('a closed bead is ALREADY CLAIMED — someone else got there first', () => {
-    const json = beadListJson([
-      {
-        id: 'hoff-q1h',
-        status: 'closed',
-        title: 'HANDOFF: mayor arc',
-        updated_at: '2026-08-21T03:00:00Z',
-      },
-    ]);
-    const pickup = resolveHandoffPickup('/repo', 'hoff-q1h', fakeBr(json).run);
-    expect(pickup.kind).toBe('already-claimed');
-  });
-
-  test('a bead that does not exist is MISSING, not claimed and not ready', () => {
-    const pickup = resolveHandoffPickup(
-      '/repo',
-      'hoff-nope',
-      fakeBr(EMPTY_BR_LIST).run,
-    );
-    expect(pickup).toEqual({id: 'hoff-nope', kind: 'missing'});
-  });
-
-  test('br failing leaves the answer UNKNOWN, never "ready"', () => {
-    const pickup = resolveHandoffPickup(
-      '/repo',
-      'hoff-q1h',
-      brokenBr('br exited 1: mise ERROR No version is set for shim: br'),
-    );
-    expect(pickup.kind).toBe('unavailable');
-  });
-});
-
-describe('planStartBoot — the scheduled-tick pickup', () => {
+describe('planStartBoot — the start-of-run pickup', () => {
   test('an unavailable scan starts fresh and SAYS it could not look', () => {
-    const start = planStartBoot({kind: 'unavailable', reason: 'br exited 1'});
-    expect(start.plan).toEqual({kind: 'fresh'});
+    const start = planStartBoot(
+      scanHandoffBeads('/repo', brokenBr('br exited 1: no workspace')),
+    );
+    expect(start.plan.kind).toBe('fresh');
     expect(start.report.join('\n')).toContain('UNAVAILABLE');
-    // Silence must be a claim: the report has to admit a handoff may exist.
     expect(start.report.join('\n')).toContain('may exist and not be seen');
   });
 
   test('an empty workspace says it CHECKED and found none', () => {
-    const start = planStartBoot({beads: [], kind: 'ok'});
-    expect(start.plan).toEqual({kind: 'fresh'});
+    const start = planStartBoot({kind: 'ok', rows: []});
+    expect(start.plan.kind).toBe('fresh');
+    expect(start.report.join('\n')).toContain('no open handoff beads');
     expect(start.report.join('\n')).toContain('checked');
   });
 
-  test('one waiting handoff becomes the boot pickup', () => {
-    const only = bead({id: 'hoff-7'});
-    const start = planStartBoot({beads: [only], kind: 'ok'});
-    expect(start.plan).toEqual({bead: only, kind: 'handoff'});
-    expect(start.report.join('\n')).toContain('hoff-7');
+  test('one waiting continue-handoff becomes the boot pickup', () => {
+    const start = planStartBoot({kind: 'ok', rows: [row({id: 'hoff-7'})]});
+    expect(start.plan.kind).toBe('handoff');
+    expect(start.plan.kind === 'handoff' ? start.plan.match.row.id : null).toBe(
+      'hoff-7',
+    );
+    expect(start.report.join('\n')).toContain('picking up handoff hoff-7');
   });
 
   test('several arcs: picks the newest and NAMES the ones it is not taking', () => {
-    // Never fan out — two agents in one repo cannot tell whose worktree is
-    // whose. The others stay open for the next tick, and are reported.
     const start = planStartBoot({
-      beads: [
-        bead({id: 'hoff-old', updatedAt: '2026-08-01T00:00:00Z'}),
-        bead({id: 'hoff-new', updatedAt: '2026-08-20T00:00:00Z'}),
-        bead({id: 'hoff-mid', updatedAt: '2026-08-10T00:00:00Z'}),
-      ],
       kind: 'ok',
+      rows: [
+        row({id: 'hoff-old', updatedAt: '2026-08-01T00:00:00Z'}),
+        row({id: 'hoff-new', updatedAt: '2026-09-01T00:00:00Z'}),
+        row({id: 'hoff-mid', updatedAt: '2026-08-15T00:00:00Z'}),
+      ],
     });
-    expect(start.plan.kind === 'handoff' ? start.plan.bead.id : null).toBe(
+    expect(start.plan.kind === 'handoff' ? start.plan.match.row.id : null).toBe(
       'hoff-new',
     );
     const report = start.report.join('\n');
-    expect(report).toContain('NOT picked up');
     expect(report).toContain('hoff-old');
     expect(report).toContain('hoff-mid');
+    expect(report).toContain('NOT picked up');
   });
 
   test('a bead with no timestamp never wins the "newest" contest', () => {
+    // A missing timestamp is not evidence of being newest. It sorts last rather
+    // than winning by accident.
     const start = planStartBoot({
-      beads: [
-        bead({id: 'hoff-undated', updatedAt: null}),
-        bead({id: 'hoff-dated', updatedAt: '2026-01-01T00:00:00Z'}),
-      ],
       kind: 'ok',
+      rows: [
+        row({id: 'hoff-undated', updatedAt: null}),
+        row({id: 'hoff-dated', updatedAt: '2026-08-01T00:00:00Z'}),
+      ],
     });
-    expect(start.plan.kind === 'handoff' ? start.plan.bead.id : null).toBe(
+    expect(start.plan.kind === 'handoff' ? start.plan.match.row.id : null).toBe(
       'hoff-dated',
     );
   });
 });
 
 /**
- * D1 (home-base-1r6d.26): the direct-ask workflow.
+ * D10: the start scan picks up only a bead that PARSES and says `continue`.
  *
- * The failure this prevents: Justin types
- * `ralph --prompt '/conductor fix the parser'`, an unrelated arc's stale handoff
- * bead is still open in the repo, and the session boots with "PICK UP THE
- * HANDOFF FIRST … then continue with the task below" — so it does someone
- * else's work before (or instead of) the thing that was asked for. An explicit
- * ask is not to be pre-empted.
- *
- * What must NOT be lost in the fix: the scan itself. Skipping the pickup and
- * skipping the LOOK are different things, and only one of them is wanted — a
- * run that quietly stopped mentioning waiting handoffs would make them
- * invisible, which is the failure mode the scan exists to prevent.
- *
- * All four combinations of promptExplicit × pickup, with one bead and with
- * several, plus an unavailable scan in every combination.
+ * This is the half that changed when the bead became the control channel. A bead
+ * the runner cannot read is not a prompt, and a `done`/`blocked` bead is a
+ * finished chain — but "not eligible" must never be delivered as silence, so
+ * every rejected bead is still named with its reason.
  */
+describe('planStartBoot — only a valid `continue` bead is a starting point (D10)', () => {
+  test('an UNREADABLE bead is never picked up, and is named as unreadable', () => {
+    const start = planStartBoot({
+      kind: 'ok',
+      rows: [row({id: 'hoff-broken', notes: 'see the epic'})],
+    });
+    expect(start.plan.kind).toBe('fresh');
+    const report = start.report.join('\n');
+    expect(report).toContain('hoff-broken');
+    expect(report).toContain('UNREADABLE');
+    expect(report).toContain('none eligible');
+  });
+
+  test('a bead with no notes at all is unreadable, not empty', () => {
+    // The reachable two-step-create gap: `br create` succeeded, `br update
+    // --notes` did not. br omits the key entirely, and that must not read as
+    // "an empty handoff", which is what a `?? ''` would make it.
+    const start = planStartBoot({
+      kind: 'ok',
+      rows: [row({id: 'hoff-noteless', notes: null})],
+    });
+    expect(start.plan.kind).toBe('fresh');
+    expect(start.report.join('\n')).toContain('hoff-noteless');
+  });
+
+  test('a `done` bead is a finished chain, not a starting point', () => {
+    const start = planStartBoot({
+      kind: 'ok',
+      rows: [
+        row({
+          id: 'hoff-done',
+          notes: handoffJson(handoff({disposition: 'done'})),
+        }),
+      ],
+    });
+    expect(start.plan.kind).toBe('fresh');
+    expect(start.report.join('\n')).toContain('disposition=done');
+  });
+
+  test('a `blocked` bead is not a starting point either', () => {
+    const start = planStartBoot({
+      kind: 'ok',
+      rows: [
+        row({
+          id: 'hoff-blocked',
+          notes: handoffJson(handoff({disposition: 'blocked'})),
+        }),
+      ],
+    });
+    expect(start.plan.kind).toBe('fresh');
+    expect(start.report.join('\n')).toContain('disposition=blocked');
+  });
+
+  test('the eligible one wins even when unreadable siblings are newer', () => {
+    // The dangerous shape: an unreadable bead sorts newest. It must neither be
+    // picked up nor block the readable one — and it must still be reported.
+    const start = planStartBoot({
+      kind: 'ok',
+      rows: [
+        row({
+          id: 'hoff-broken',
+          notes: '{{{',
+          updatedAt: '2026-09-09T00:00:00Z',
+        }),
+        row({id: 'hoff-good', updatedAt: '2026-09-01T00:00:00Z'}),
+      ],
+    });
+    expect(start.plan.kind === 'handoff' ? start.plan.match.row.id : null).toBe(
+      'hoff-good',
+    );
+    expect(start.report.join('\n')).toContain('hoff-broken');
+  });
+});
+
 describe('planStartBoot — an explicit --prompt is an ASK (D1)', () => {
-  const ASK = {pickup: false, promptExplicit: true} as const;
-  const ASK_PICKUP = {pickup: true, promptExplicit: true} as const;
-  const JOB = {pickup: false, promptExplicit: false} as const;
-  const JOB_PICKUP = {pickup: true, promptExplicit: false} as const;
+  const waiting = {
+    kind: 'ok' as const,
+    rows: [
+      row({id: 'hoff-old', updatedAt: '2026-08-01T00:00:00Z'}),
+      row({id: 'hoff-new', updatedAt: '2026-09-01T00:00:00Z'}),
+    ],
+  };
 
-  const one = [bead({id: 'hoff-solo', title: 'HANDOFF: the solo arc'})];
-  const several = [
-    bead({id: 'hoff-old', title: 'HANDOFF: old arc', updatedAt: '2026-08-01T00:00:00Z'}),
-    bead({id: 'hoff-new', title: 'HANDOFF: new arc', updatedAt: '2026-08-20T00:00:00Z'}),
-    bead({id: 'hoff-mid', title: 'HANDOFF: mid arc', updatedAt: '2026-08-10T00:00:00Z'}),
-  ];
-
-  function planned(
-    beads: HandoffBead[],
-    policy: {promptExplicit: boolean; pickup: boolean},
-  ): {picked: string | null; report: string} {
-    const start = planStartBoot({beads, kind: 'ok'}, policy);
-    return {
-      picked: start.plan.kind === 'handoff' ? start.plan.bead.id : null,
-      report: start.report.join('\n'),
-    };
-  }
-
-  test('explicit ask, no --pickup: starts fresh even with ONE bead waiting', () => {
-    const {picked, report} = planned(one, ASK);
-    expect(picked).toBeNull();
-    // …and names it, so "not picked up" never reads as "nothing was waiting".
-    expect(report).toContain('hoff-solo');
-    expect(report).toContain('HANDOFF: the solo arc');
-    expect(report).toContain(EXPLICIT_SKIP_LINE);
-    expect(report).not.toContain('picking up handoff');
+  test('explicit ask, no --pickup: starts fresh even with beads waiting', () => {
+    const start = planStartBoot(waiting, {pickup: false, promptExplicit: true});
+    expect(start.plan.kind).toBe('fresh');
+    expect(start.report).toContain(EXPLICIT_SKIP_LINE);
   });
 
   test('explicit ask, no --pickup: names EVERY waiting bead by id and title', () => {
-    const {picked, report} = planned(several, ASK);
-    expect(picked).toBeNull();
-    for (const b of several) {
-      expect(report).toContain(b.id);
-      expect(report).toContain(b.title);
-    }
-    expect(report).toContain('3 open handoff bead(s) waiting');
-    expect(report).toContain(EXPLICIT_SKIP_LINE);
+    const start = planStartBoot(waiting, {pickup: false, promptExplicit: true});
+    const report = start.report.join('\n');
+    expect(report).toContain('hoff-old');
+    expect(report).toContain('hoff-new');
+    expect(report).toContain('HANDOFF continue: an arc');
   });
 
   test('explicit ask WITH --pickup: newest wins, exactly as before', () => {
-    expect(planned(one, ASK_PICKUP).picked).toBe('hoff-solo');
-    const many = planned(several, ASK_PICKUP);
-    expect(many.picked).toBe('hoff-new');
-    expect(many.report).toContain('NOT picked up this run (one arc per run)');
-    expect(many.report).not.toContain(EXPLICIT_SKIP_LINE);
+    const start = planStartBoot(waiting, {pickup: true, promptExplicit: true});
+    expect(start.plan.kind === 'handoff' ? start.plan.match.row.id : null).toBe(
+      'hoff-new',
+    );
+    expect(start.report).not.toContain(EXPLICIT_SKIP_LINE);
   });
 
   test('the default prompt picks up as before, with and without --pickup', () => {
-    for (const policy of [JOB, JOB_PICKUP]) {
-      expect(planned(one, policy).picked).toBe('hoff-solo');
-      const many = planned(several, policy);
-      expect(many.picked).toBe('hoff-new');
-      expect(many.report).toContain('hoff-old');
-      expect(many.report).toContain('hoff-mid');
-      expect(many.report).not.toContain(EXPLICIT_SKIP_LINE);
+    for (const pickup of [true, false]) {
+      const start = planStartBoot(waiting, {pickup, promptExplicit: false});
+      expect(start.plan.kind).toBe('handoff');
+      expect(start.report).not.toContain(EXPLICIT_SKIP_LINE);
     }
   });
 
   test('omitting the policy entirely keeps the old behaviour', () => {
-    // The default argument is the scheduled-tick workflow: a caller that has
-    // not been taught about asks must not accidentally stop picking up.
-    expect(
-      planStartBoot({beads: one, kind: 'ok'}).plan.kind === 'handoff',
-    ).toBe(true);
+    expect(planStartBoot(waiting).plan.kind).toBe('handoff');
   });
 
   test('an empty workspace still says it CHECKED, in all four combinations', () => {
-    for (const policy of [ASK, ASK_PICKUP, JOB, JOB_PICKUP]) {
-      const start = planStartBoot({beads: [], kind: 'ok'}, policy);
-      expect(start.plan).toEqual({kind: 'fresh'});
-      expect(start.report.join('\n')).toContain('checked');
+    for (const promptExplicit of [true, false]) {
+      for (const pickup of [true, false]) {
+        const start = planStartBoot(
+          {kind: 'ok', rows: []},
+          {pickup, promptExplicit},
+        );
+        expect(start.report.join('\n')).toContain('no open handoff beads');
+      }
     }
   });
 
   test('an UNAVAILABLE scan is reported as unavailable in all four combinations', () => {
-    // Critical rule 6: "we could not look" must survive every policy. Suppressing
-    // the pickup must never also suppress the admission that the scan failed.
-    for (const policy of [ASK, ASK_PICKUP, JOB, JOB_PICKUP]) {
-      const start = planStartBoot(
-        {kind: 'unavailable', reason: 'br exited 1: no beads workspace'},
-        policy,
-      );
-      expect(start.plan).toEqual({kind: 'fresh'});
-      const report = start.report.join('\n');
-      expect(report).toContain('UNAVAILABLE');
-      expect(report).toContain('br exited 1: no beads workspace');
-      expect(report).toContain('may exist and not be seen');
+    for (const promptExplicit of [true, false]) {
+      for (const pickup of [true, false]) {
+        const start = planStartBoot(
+          {kind: 'unavailable', reason: 'br exited 1'},
+          {pickup, promptExplicit},
+        );
+        expect(start.report.join('\n')).toContain('UNAVAILABLE');
+      }
     }
   });
 });
 
 describe('bootPreamble', () => {
-  const label = 'ralph-3';
+  const label = 'the-arc-2';
 
   test('a fresh boot says nothing extra', () => {
     expect(bootPreamble({label, plan: {kind: 'fresh'}})).toBeNull();
   });
 
-  test('a handoff boot names the bead, the claim, and the worktree rule', () => {
-    const text = bootPreamble({
-      label,
-      plan: {bead: bead({id: 'hoff-42'}), kind: 'handoff'},
-    });
-    expect(text).toContain('hoff-42');
-    expect(text).toContain('br show hoff-42');
-    // Claiming IS closing, and the reason names the session — that is what
-    // makes a second pickup visible instead of silent.
-    expect(text).toContain("br close hoff-42 --reason='picked up by ralph-3'");
-    expect(text).toContain('WORKTREE PATH');
-    expect(text).toContain('ALREADY CLOSED');
+  test('a handoff boot names the bead, the claim, and the worktree', () => {
+    const match = {handoff: handoff(), row: row({id: 'hoff-42'})};
+    const preamble =
+      bootPreamble({label, plan: {kind: 'handoff', match}}) ?? '';
+    expect(preamble).toContain('hoff-42');
+    expect(preamble).toContain('br show hoff-42');
+    expect(preamble).toContain(`br close hoff-42 --reason='picked up by ${label}'`);
+    expect(preamble).toContain('/Users/jhaa/Dev/home-base');
+    expect(preamble).toContain('worktree-justin-loop-runner');
+    // The already-claimed branch tells it to hand off `done`, not to redo work.
+    expect(preamble).toContain('ALREADY CLOSED');
+    expect(preamble).toContain('--disposition=done');
   });
 
-  test('a crash boot says NO handoff exists and reconstruction is required', () => {
-    const text = bootPreamble({
-      label,
-      plan: crashBootPlan(2, 'no-verdict'),
-    });
-    expect(text).toContain('NO HANDOFF EXISTS');
-    expect(text).toContain('RECONSTRUCT');
-    expect(text).toContain('no-verdict');
-    expect(text).toContain('git');
-    expect(text).toContain('beads');
-    // It must not merely reconstruct quietly — the handoff has to admit it.
-    expect(text).toContain('SAY in your handoff --state');
-  });
-
-  test('a crash boot never describes itself as a handoff', () => {
-    const text = bootPreamble({label, plan: crashBootPlan(2, 'timeout')}) ?? '';
-    expect(text).not.toContain('PICK UP THE HANDOFF');
+  test('a reconstruct boot says NO handoff exists and never calls itself one', () => {
+    const plan = crashBootPlan(2, 'stopped after 45m (--timeout-min)');
+    const preamble = bootPreamble({label, plan}) ?? '';
+    expect(preamble).toContain('NO HANDOFF EXISTS');
+    expect(preamble).toContain('session 2 ended without handing anything over');
+    expect(preamble).toContain('--timeout-min');
+    expect(preamble).not.toContain('PICK UP THE HANDOFF');
+    // A crash must never license destructive tidying.
+    expect(preamble).toContain('do not use destructive git');
   });
 });
 
-describe('composeBootPrompt', () => {
-  const boot: BootContext = {
-    label: 'ralph-2',
-    plan: {bead: bead({id: 'hoff-9'}), kind: 'handoff'},
-  };
+describe('sessionPrompt and composeBootPrompt', () => {
+  const label = 'the-arc-2';
 
-  test('leaves the base prompt untouched when there is nothing to say', () => {
-    expect(
-      composeBootPrompt('/loop-session', {label: 'ralph-1', plan: {kind: 'fresh'}}),
-    ).toBe('/loop-session');
+  test('a fresh boot runs the base prompt, untouched', () => {
+    const boot: BootContext = {label, plan: {kind: 'fresh'}};
+    expect(sessionPrompt('/loop-session', boot)).toBe('/loop-session');
+    expect(composeBootPrompt('/loop-session', boot)).toBe('/loop-session');
   });
 
-  test('keeps the slash command FIRST and appends the preamble', () => {
-    // A slash command is recognised by leading the prompt; a paragraph in front
-    // of it would most likely turn `/loop-session` into literal text.
+  test('a handoff boot is prompted with the bead `next`, VERBATIM (D6)', () => {
+    // The whole design: the outgoing session wrote its successor's prompt. The
+    // runner does not paraphrase it, and does not put the original ask in front
+    // of it — session 2 of an arc is not asked the question session 1 was.
+    const next = 'Rewrite parseFoo, then run bun test and report the count.';
+    const match = {handoff: handoff({next}), row: row()};
+    const boot: BootContext = {label, plan: {kind: 'handoff', match}};
+    expect(sessionPrompt('/loop-session', boot)).toBe(next);
+    const composed = composeBootPrompt('/loop-session', boot);
+    expect(composed.startsWith(next)).toBe(true);
+    expect(composed).not.toContain('/loop-session');
+    expect(composed).toContain('PICK UP THE HANDOFF FIRST');
+  });
+
+  test('a reconstruct boot keeps the base prompt FIRST, preamble after', () => {
+    // The base prompt may be a slash command, which is only recognised when it
+    // leads the prompt.
+    const boot: BootContext = {
+      label,
+      plan: crashBootPlan(1, 'no handoff bead'),
+    };
     const composed = composeBootPrompt('/loop-session', boot);
     expect(composed.startsWith('/loop-session')).toBe(true);
-    expect(composed).toContain('hoff-9');
+    expect(composed).toContain('NO HANDOFF EXISTS');
   });
 
   test('the same preamble also rides the appended system prompt', () => {
-    // Belt and braces: a skill that ignores its arguments would drop the prompt
-    // copy silently, and the system prompt is the channel that always arrives.
-    expect(bootContract('CONTRACT', boot)).toContain('hoff-9');
+    // Delivered twice on purpose: a skill that ignores its arguments would drop
+    // the prompt copy silently.
+    const match = {handoff: handoff(), row: row({id: 'hoff-42'})};
+    const boot: BootContext = {label, plan: {kind: 'handoff', match}};
+    expect(bootContract('CONTRACT', boot)).toContain('hoff-42');
     expect(bootContract('CONTRACT', boot).startsWith('CONTRACT')).toBe(true);
   });
 });
 
 /**
- * The runner's branching, which is the part that decides whether a successor
- * exists at all. Pure and injectable so this is provable without spawning a
- * `claude` — the alternative would be running a real loop, which is expensive
- * and unrepeatable.
- */
-describe('decideRespawn', () => {
-  const never = (): HandoffPickup => {
-    throw new Error('resolvePickup must not be called here');
-  };
-  const ready = (): HandoffPickup => ({bead: bead(), kind: 'ready'});
-
-  test('COMPLETE ends the run and leaves any handoff bead open for next time', () => {
-    const d = decideRespawn(
-      verdict({handoffBead: 'hoff-5', status: 'COMPLETE'}),
-      never,
-    );
-    expect(d.plan).toBeNull();
-    expect(d.stopReason).toContain('COMPLETE');
-    expect(d.stopReason).toContain('hoff-5');
-    expect(d.stopReason).toContain('left open');
-  });
-
-  test('BLOCKED and FAILED still stop, with their summaries intact', () => {
-    expect(
-      decideRespawn(
-        verdict({status: 'BLOCKED', summary: 'needs an API key'}),
-        never,
-      ).stopReason,
-    ).toBe('BLOCKED — needs an API key');
-    expect(
-      decideRespawn(
-        verdict({status: 'FAILED', summary: 'tests red'}),
-        never,
-      ).stopReason,
-    ).toBe('FAILED — tests red');
-  });
-
-  test('CONTINUE + respawn=immediate + an open bead boots the successor on it', () => {
-    const d = decideRespawn(
-      verdict({handoffBead: 'hoff-1', respawn: 'immediate'}),
-      ready,
-    );
-    expect(d.stopReason).toBeNull();
-    expect(d.plan?.kind).toBe('handoff');
-    expect(d.plan?.kind === 'handoff' ? d.plan.bead.id : null).toBe('hoff-1');
-  });
-
-  test('CONTINUE + respawn=on-schedule ends the run cleanly', () => {
-    const d = decideRespawn(
-      verdict({handoffBead: 'hoff-1', respawn: 'on-schedule'}),
-      never,
-    );
-    expect(d.plan).toBeNull();
-    expect(d.stopReason).toContain('on-schedule');
-    expect(d.stopReason).toContain('next scheduled run');
-    expect(d.stopReason).toContain('hoff-1');
-  });
-
-  test('an UNSTATED respawn never boots a successor — and never looks up a bead', () => {
-    // Silence is conservative where it matters: no pickup, no claim, no
-    // successor. `never` is the assertion — a bead lookup here would mean
-    // silence was being treated as intent.
-    const d = decideRespawn(verdict({respawn: null}), never);
-    expect(d.plan).toEqual({kind: 'fresh'});
-    expect(d.stopReason).toBeNull();
-  });
-
-  test('a handoff bead WITHOUT an immediate request is left alone entirely', () => {
-    // A session can write a handoff bead and still not ask to be respawned —
-    // that bead belongs to the next scheduled tick. `never` is the assertion:
-    // the runner must not even look it up, let alone hand it to a successor.
-    const d = decideRespawn(verdict({handoffBead: 'hoff-1'}), never);
-    expect(d.plan).toEqual({kind: 'fresh'});
-  });
-
-  test('an unstated respawn does NOT stop a loop the human already licensed', () => {
-    // The nsd5 shape in reverse: reading silence as "stop" would turn every
-    // CONTINUE from a prompt that omits the field into a one-iteration run.
-    // Recorded as an interpretation on home-base-1r6d.4 for the conductor.
-    expect(decideRespawn(verdict(), never).stopReason).toBeNull();
-  });
-
-  test('respawn=immediate with no bead hands nothing over, and says so', () => {
-    const d = decideRespawn(verdict({respawn: 'immediate'}), never);
-    expect(d.plan?.kind).toBe('reconstruct');
-    expect(d.notes.join('\n')).toContain('no handoffBead');
-    expect(d.stopReason).toBeNull();
-  });
-
-  test('DOUBLE PICKUP: an already-claimed bead stops the run with a visible report', () => {
-    // Two sessions, one arc. The second must report rather than duplicate.
-    const d = decideRespawn(
-      verdict({handoffBead: 'hoff-1', respawn: 'immediate'}),
-      () => ({bead: bead({status: 'closed'}), kind: 'already-claimed'}),
-    );
-    expect(d.plan).toBeNull();
-    expect(d.notes.join('\n')).toContain('DOUBLE PICKUP');
-    expect(d.stopReason).toContain('already claimed by another session');
-    expect(d.stopReason).toContain('rather than duplicating');
-  });
-
-  test('a bead that does not exist is reported, and the successor reconstructs', () => {
-    const d = decideRespawn(
-      verdict({handoffBead: 'hoff-ghost', respawn: 'immediate'}),
-      () => ({id: 'hoff-ghost', kind: 'missing'}),
-    );
-    expect(d.plan?.kind).toBe('reconstruct');
-    expect(d.notes.join('\n')).toContain('hoff-ghost');
-    expect(d.notes.join('\n')).toContain('does not exist');
-  });
-
-  test('br unavailable: respawn control stays with the verdict, honestly', () => {
-    // Graceful degradation. The loop continues because the VERDICT asked for
-    // it, but the successor is told the payload could not be verified — it is
-    // never handed an unverified bead as though it were a clean handoff.
-    const d = decideRespawn(
-      verdict({handoffBead: 'hoff-1', respawn: 'immediate'}),
-      () => ({id: 'hoff-1', kind: 'unavailable', reason: 'br exited 1'}),
-    );
-    expect(d.stopReason).toBeNull();
-    expect(d.plan?.kind).toBe('reconstruct');
-    expect(d.notes.join('\n')).toContain('could not verify');
-  });
-});
-
-describe('formatRespawnLine', () => {
-  test('reports a stated intent verbatim, with the bead it named', () => {
-    expect(
-      formatRespawnLine(
-        verdict({handoffBead: 'hoff-1', respawn: 'immediate'}),
-      ),
-    ).toBe('respawn=immediate · handoff hoff-1');
-  });
-
-  test('spells out an unstated intent rather than leaving it blank', () => {
-    // "the session chose on-schedule" and "the session said nothing" are two
-    // different facts, and the dashboard has to show which one happened.
-    expect(formatRespawnLine(verdict())).toContain('not stated');
-  });
-
-  test('says nothing on a terminal verdict that named no bead', () => {
-    expect(formatRespawnLine(verdict({status: 'COMPLETE'}))).toBeNull();
-  });
-});
-
-/**
- * The full claim protocol against the REAL `br` binary — the half a fake cannot
+ * The full pickup protocol against the REAL `br` binary — the half a fake cannot
  * vouch for: that the flags are right and the JSON shape is what we parse.
  *
  * Resolved at module load so a machine without br reports these as SKIPPED
@@ -732,7 +527,7 @@ const brBinDir = ((): string | null => {
   }
 })();
 
-describe('scripted simulation: two sessions, one handoff bead (real br)', () => {
+describe('scripted simulation: a handoff bead round-trips through real br', () => {
   function realBr(cwd: string, args: string[]): BrOutcome {
     const original = process.env.PATH;
     process.env.PATH = `${brBinDir}:${original ?? ''}`;
@@ -753,64 +548,75 @@ describe('scripted simulation: two sessions, one handoff bead (real br)', () => 
   }
 
   test.skipIf(brBinDir == null)(
-    'a handoff bead is found, picked up, and claimed exactly once',
+    'a handoff bead is found, its notes survive, and it becomes the prompt',
     () => {
       const repo = beadsRepo();
+      const payload = handoff({
+        next: 'Line one.\n\nLine two, with "quotes" and a trailing tab\t',
+      });
 
-      // The outgoing session writes its handoff bead — the exact command the
-      // injected contract tells it to run.
       const created = realBr(repo, [
         'create',
-        'HANDOFF: the mayor arc',
+        'HANDOFF continue: the arc',
         '-t',
         'task',
         '-p',
         '1',
         '--labels',
         HANDOFF_LABEL,
-        '--description=worktree /tmp/wt · branch arc-1 · next: finish the parser',
+        '--description=readable copy',
       ]);
       expect(created.ok).toBe(true);
       const id = /Created (\S+):/.exec(created.stdout)?.[1] ?? '';
       expect(id).not.toBe('');
+      expect(
+        realBr(repo, ['update', id, `--notes=${handoffJson(payload)}`]).ok,
+      ).toBe(true);
 
-      // A fresh runner scans and picks it up.
+      // A fresh runner scans, and gets rows carrying real notes.
       const scan = scanHandoffBeads(repo, realBr);
       expect(scan.kind).toBe('ok');
-      expect(scan.kind === 'ok' ? scan.beads.map((b) => b.id) : []).toEqual([
-        id,
-      ]);
+      expect(scan.kind === 'ok' ? scan.rows.map((r) => r.id) : []).toEqual([id]);
+
+      // …which planStartBoot turns into a pickup whose prompt is the bead's
+      // `next`, byte for byte through br's storage.
       const start = planStartBoot(scan);
       expect(start.plan.kind).toBe('handoff');
+      if (start.plan.kind !== 'handoff') return;
+      expect(start.plan.match.handoff.next).toBe(payload.next);
+      expect(
+        sessionPrompt('/loop-session', {label: 'x-1', plan: start.plan}),
+      ).toBe(payload.next);
 
-      // A verdict naming it resolves as ready — one session, no conflict.
-      const first = decideRespawn(
-        verdict({handoffBead: id, respawn: 'immediate'}),
-        (beadId) => resolveHandoffPickup(repo, beadId, realBr),
-      );
-      expect(first.plan?.kind).toBe('handoff');
-      expect(first.stopReason).toBeNull();
-
-      // Now the successor claims it, exactly as the boot preamble instructs.
-      const claim = realBr(repo, [
-        'close',
-        id,
-        "--reason=picked up by ralph-2",
-      ]);
-      expect(claim.ok).toBe(true);
-
-      // A SECOND session arriving at the same bead must be told, loudly.
-      const second = decideRespawn(
-        verdict({handoffBead: id, respawn: 'immediate'}),
-        (beadId) => resolveHandoffPickup(repo, beadId, realBr),
-      );
-      expect(second.notes.join('\n')).toContain('DOUBLE PICKUP');
-      expect(second.plan).toBeNull();
-      expect(second.stopReason).toContain('already claimed');
-
-      // And a claimed bead stops being "waiting" for the next scheduled tick.
+      // Claiming it (what the successor is told to do) takes it out of the scan.
+      expect(
+        realBr(repo, ['close', id, '--reason=picked up by the-arc-2']).ok,
+      ).toBe(true);
       const rescan = scanHandoffBeads(repo, realBr);
-      expect(rescan.kind === 'ok' ? rescan.beads : null).toEqual([]);
+      expect(rescan.kind === 'ok' ? rescan.rows : null).toEqual([]);
+    },
+  );
+
+  test.skipIf(brBinDir == null)(
+    'a bead created without notes is UNREADABLE, never an empty handoff',
+    () => {
+      // The two-step-create gap, reproduced against the real binary: br omits
+      // the `notes` key entirely, and the runner must refuse to boot from it.
+      const repo = beadsRepo();
+      const created = realBr(repo, [
+        'create',
+        'HANDOFF ???',
+        '-t',
+        'task',
+        '-p',
+        '1',
+        '--labels',
+        HANDOFF_LABEL,
+      ]);
+      expect(created.ok).toBe(true);
+      const start = planStartBoot(scanHandoffBeads(repo, realBr));
+      expect(start.plan.kind).toBe('fresh');
+      expect(start.report.join('\n')).toContain('UNREADABLE');
     },
   );
 
@@ -820,8 +626,7 @@ describe('scripted simulation: two sessions, one handoff bead (real br)', () => 
       const repo = initRepo(track(createSandbox()), 'no-beads', {
         'README.md': '# no beads here\n',
       });
-      const scan = scanHandoffBeads(repo, realBr);
-      expect(scan.kind).toBe('unavailable');
+      expect(scanHandoffBeads(repo, realBr).kind).toBe('unavailable');
     },
   );
 });
@@ -837,7 +642,7 @@ describe('scripted simulation: two sessions, one handoff bead (real br)', () => 
  * would compile, typecheck, pass every unit test, and do nothing.
  *
  * `--dry-run --no-usage-gate` throughout: the start scan runs and reports, and
- * no iteration is ever spawned.
+ * no session is ever spawned.
  */
 describe('CLI: --prompt makes the run an ASK (D1/D6)', () => {
   const CLI = join(dirname(import.meta.dirname), 'src', 'cli.ts');
@@ -847,7 +652,7 @@ describe('CLI: --prompt makes the run an ASK (D1/D6)', () => {
     status: number | null;
   }
 
-  function runRalphCli(args: string[]): Run {
+  function runLoopCli(args: string[], command = 'justin-loop'): Run {
     const sb = track(createSandbox());
     const repo = initRepo(sb, 'project', {'README.md': '# ask fixture\n'});
     const binDir = join(sb.path, 'fakebin');
@@ -865,15 +670,28 @@ describe('CLI: --prompt makes the run an ASK (D1/D6)', () => {
     );
     chmodSync(join(binDir, 'claude'), 0o755);
 
-    // Two open handoff beads from unrelated arcs — exactly the situation that
-    // hijacks an ask today.
+    // Two open handoff beads from unrelated arcs, both VALID and both
+    // `continue` — exactly the situation that hijacks an ask.
+    const beads = listJson([
+      {
+        id: 'hoff-old',
+        notes: handoffJson(handoff({arc: 'unrelated arc', from: 'other-1'})),
+        title: 'HANDOFF continue: unrelated arc',
+        updated_at: '2026-08-01T00:00:00Z',
+      },
+      {
+        id: 'hoff-new',
+        notes: handoffJson(handoff({arc: 'newest arc', from: 'other-2'})),
+        title: 'HANDOFF continue: newest arc',
+        updated_at: '2026-09-01T00:00:00Z',
+      },
+    ]);
     writeFileSync(
       join(binDir, 'br'),
       [
         '#!/bin/sh',
         'case "$*" in',
-        '  *"-l handoff"*)',
-        `    printf '%s' '{"issues":[{"id":"hoff-old","title":"HANDOFF: unrelated arc","status":"open","updated_at":"2026-08-01T00:00:00Z"},{"id":"hoff-new","title":"HANDOFF: newest arc","status":"open","updated_at":"2026-09-01T00:00:00Z"}]}' ;;`,
+        `  *"-l handoff"*) printf '%s' ${JSON.stringify(beads)} ;;`,
         `  *) printf '%s' '{"issues":[]}' ;;`,
         'esac',
         'exit 0',
@@ -887,7 +705,7 @@ describe('CLI: --prompt makes the run an ASK (D1/D6)', () => {
     };
     delete env.ANTHROPIC_API_KEY;
     const proc = Bun.spawnSync({
-      cmd: ['bun', CLI, 'ralph', '--dry-run', '--no-usage-gate', ...args],
+      cmd: ['bun', CLI, command, '--dry-run', '--no-usage-gate', ...args],
       cwd: repo,
       env: env as Record<string, string>,
     });
@@ -900,20 +718,20 @@ describe('CLI: --prompt makes the run an ASK (D1/D6)', () => {
   test('no --prompt: promptExplicit is false, so the newest handoff is picked up', () => {
     // The negative control for every case below: the fakes ARE reachable and the
     // scan DOES find both beads.
-    const run = runRalphCli([]);
+    const run = runLoopCli([]);
     expect(run.out).toContain('picking up handoff hoff-new');
     expect(run.out).not.toContain(EXPLICIT_SKIP_LINE);
     expect(run.status).toBe(0);
   });
 
   test('--prompt with an ask: nothing is picked up, everything is named', () => {
-    const run = runRalphCli(['--prompt', '/conductor fix the parser']);
+    const run = runLoopCli(['--prompt', '/conductor fix the parser']);
     expect(run.out).not.toContain('picking up handoff');
     expect(run.out).toContain(EXPLICIT_SKIP_LINE);
     expect(run.out).toContain('hoff-new');
-    expect(run.out).toContain('HANDOFF: newest arc');
+    expect(run.out).toContain('HANDOFF continue: newest arc');
     expect(run.out).toContain('hoff-old');
-    expect(run.out).toContain('HANDOFF: unrelated arc');
+    expect(run.out).toContain('HANDOFF continue: unrelated arc');
     expect(run.status).toBe(0);
   });
 
@@ -921,22 +739,29 @@ describe('CLI: --prompt makes the run an ASK (D1/D6)', () => {
     // The whole point of dropping the yargs default. If `promptExplicit` were
     // inferred by comparing the value against the default, this case would be
     // indistinguishable from the no-flag case and would wrongly pick up.
-    const run = runRalphCli(['--prompt', '/loop-session']);
+    const run = runLoopCli(['--prompt', '/loop-session']);
     expect(run.out).toContain(EXPLICIT_SKIP_LINE);
     expect(run.out).not.toContain('picking up handoff');
   });
 
   test('--prompt with --pickup: back to picking up the newest', () => {
-    const run = runRalphCli(['--prompt', '/conductor fix the parser', '--pickup']);
+    const run = runLoopCli(['--prompt', '/conductor fix the parser', '--pickup']);
     expect(run.out).toContain('picking up handoff hoff-new');
     expect(run.out).not.toContain(EXPLICIT_SKIP_LINE);
+  });
+
+  test('the deprecated `ralph` name reaches the same runner (D1)', () => {
+    const run = runLoopCli([], 'ralph');
+    expect(run.out).toContain('ralph is now justin-loop');
+    expect(run.out).toContain('picking up handoff hoff-new');
+    expect(run.status).toBe(0);
   });
 
   test('--help still documents the default it no longer writes into argv', () => {
     // `defaultDescription` (yargs 18) documents `/loop-session` without setting
     // argv.prompt. Verified here rather than assumed: if a future yargs dropped
     // it, the flag would silently become undocumented.
-    const proc = Bun.spawnSync({cmd: ['bun', CLI, 'ralph', '--help']});
+    const proc = Bun.spawnSync({cmd: ['bun', CLI, 'justin-loop', '--help']});
     const help = `${proc.stdout.toString()}${proc.stderr.toString()}`;
     // The quoting differs between the two mechanisms (`default` renders
     // `"/loop-session"`, `defaultDescription` renders it bare), so the optional
@@ -944,227 +769,5 @@ describe('CLI: --prompt makes the run an ASK (D1/D6)', () => {
     // rendering — the behaviour is pinned by the four tests above.
     expect(help).toMatch(/--prompt[\s\S]*default: "?\/loop-session/);
     expect(help).toContain('--pickup');
-  });
-});
-
-/**
- * The whole respawn chain, driven end to end by a scripted loop.
- *
- * `claude` and `br` are both fakes on PATH, so a REAL two-iteration run happens
- * — real argv, real verdict parsing, real branching, real ledger — with nothing
- * model-shaped in it. This is what proves the successor's prompt actually
- * carries the pickup, rather than proving each function does its bit and
- * assuming the wiring between them.
- *
- * Iteration 1 reports CONTINUE + respawn=immediate + a handoff bead; iteration 2
- * must boot with the pickup preamble naming that bead, and then reports
- * COMPLETE. Iteration 1's own argv is the negative control: it must NOT contain
- * a pickup, because nothing was waiting when the run started.
- */
-describe('scripted loop: an immediate respawn boots its successor on the bead', () => {
-  const CLI = join(dirname(import.meta.dirname), 'src', 'cli.ts');
-
-  interface Loop {
-    out: string;
-    status: number | null;
-    call: (n: number) => string;
-    ledger: Array<Record<string, unknown>>;
-  }
-
-  function runScriptedLoop(extraArgs: string[] = []): Loop {
-    const sb = track(createSandbox());
-    const repo = initRepo(sb, 'project', {'README.md': '# scripted loop\n'});
-    const binDir = join(sb.path, 'fakebin');
-    mkdirSync(binDir, {recursive: true});
-
-    // Every invocation's argv is dumped to its own file — the prompt spans
-    // lines, so one call cannot be one log line.
-    const counter = join(sb.path, 'claude-calls');
-    const callFile = (n: number): string => join(sb.path, `call-${n}.args`);
-    const verdictOf = (status: string, extra: string): string =>
-      `{"structured_output":{"status":"${status}","summary":"scripted","followUps":[]${extra}},"is_error":false,"num_turns":1,"total_cost_usd":0.01,"session_id":"fake"}`;
-    writeFileSync(
-      join(binDir, 'claude'),
-      [
-        '#!/bin/sh',
-        'if [ "$1" = "--version" ]; then echo "2.1.999-fake"; exit 0; fi',
-        `N=0; [ -f ${JSON.stringify(counter)} ] && N=$(cat ${JSON.stringify(counter)})`,
-        `N=$((N+1)); echo "$N" > ${JSON.stringify(counter)}`,
-        `printf '%s\\n' "$@" > ${JSON.stringify(sb.path)}/call-$N.args`,
-        'if [ "$N" = "1" ]; then',
-        `  printf '%s' '${verdictOf('CONTINUE', ',"respawn":"immediate","handoffBead":"hoff-77"')}'`,
-        'else',
-        `  printf '%s' '${verdictOf('COMPLETE', '')}'`,
-        'fi',
-        'exit 0',
-      ].join('\n'),
-    );
-    chmodSync(join(binDir, 'claude'), 0o755);
-
-    // A beads workspace holding exactly one open handoff bead, which is NOT
-    // waiting at start (the scan finds nothing) but IS resolvable by id.
-    writeFileSync(
-      join(binDir, 'br'),
-      [
-        '#!/bin/sh',
-        'case "$*" in',
-        '  *"--id hoff-77"*)',
-        `    printf '%s' '{"issues":[{"id":"hoff-77","title":"HANDOFF: the arc","status":"open","updated_at":"2026-08-21T03:00:00Z"}]}' ;;`,
-        `  *) printf '%s' '{"issues":[]}' ;;`,
-        'esac',
-        'exit 0',
-      ].join('\n'),
-    );
-    chmodSync(join(binDir, 'br'), 0o755);
-
-    const ledgerPath = join(sb.path, 'ledger.jsonl');
-    const env: Record<string, string | undefined> = {
-      ...process.env,
-      PATH: `${binDir}:${process.env.PATH ?? ''}`,
-    };
-    delete env.ANTHROPIC_API_KEY;
-    const proc = Bun.spawnSync({
-      cmd: [
-        'bun',
-        CLI,
-        'ralph',
-        '--mode',
-        'print',
-        '--no-usage-gate',
-        '--max-iterations',
-        '2',
-        '--ledger',
-        ledgerPath,
-        ...extraArgs,
-      ],
-      cwd: repo,
-      env: env as Record<string, string>,
-    });
-    return {
-      call: (n) => readFileSync(callFile(n), 'utf8'),
-      ledger: readFileSync(ledgerPath, 'utf8')
-        .split('\n')
-        .filter((l) => l !== '')
-        .map((l) => JSON.parse(l) as Record<string, unknown>),
-      out: `${proc.stdout.toString()}${proc.stderr.toString()}`,
-      status: proc.exitCode,
-    };
-  }
-
-  test('iteration 2 is spawned with the pickup, iteration 1 is not', () => {
-    const loop = runScriptedLoop();
-
-    // Negative control, built in: nothing was waiting when the run started.
-    expect(loop.call(1)).not.toContain('PICK UP THE HANDOFF');
-    expect(loop.call(1)).not.toContain('hoff-77');
-
-    // …and the successor is booted on the bead its predecessor named.
-    expect(loop.call(2)).toContain('PICK UP THE HANDOFF FIRST');
-    expect(loop.call(2)).toContain('hoff-77');
-    expect(loop.call(2)).toContain(
-      "br close hoff-77 --reason='picked up by ralph-2'",
-    );
-    expect(loop.call(2)).toContain('WORKTREE PATH');
-  });
-
-  test('the run says out loud which bead the next iteration boots on', () => {
-    const loop = runScriptedLoop();
-    expect(loop.out).toContain('next iteration boots with handoff hoff-77');
-    expect(loop.out).toContain('respawn=immediate');
-    expect(loop.out).toContain('COMPLETE');
-    expect(loop.status).toBe(0);
-  });
-
-  /**
-   * D2 (home-base-1r6d.26): mid-run respawn is UNCHANGED by the direct-ask fix,
-   * and the ask itself is what travels.
-   *
-   * The start-of-run scan is now suppressed by an explicit --prompt; the
-   * SUCCESSOR's pickup is not, and must not be — that chain IS the direct-ask
-   * workflow. Iteration 2 must get the identical ask its predecessor got, with
-   * the pickup preamble appended and nothing else changed.
-   *
-   * In print mode argv is `-p <composed prompt> --output-format …`, so the
-   * composed prompt is everything between those two markers — recovered exactly
-   * rather than substring-matched, because "contains the ask" would also pass if
-   * the ask had been wrapped, truncated or reordered.
-   */
-  function promptOf(callArgs: string): string {
-    const lines = callArgs.split('\n');
-    expect(lines[0]).toBe('-p');
-    const end = lines.indexOf('--output-format');
-    expect(end).toBeGreaterThan(1);
-    return lines.slice(1, end).join('\n');
-  }
-
-  test('iteration 2 boots with the SAME explicit ask plus the pickup preamble', () => {
-    const ASK = '/conductor finish the parser in ~/Dev/thing';
-    const loop = runScriptedLoop(['--prompt', ASK]);
-
-    // The ask reaches iteration 1 verbatim — not the default, not wrapped.
-    const first = promptOf(loop.call(1));
-    expect(first).toBe(ASK);
-    expect(first).not.toContain('/loop-session');
-
-    // …and iteration 2 gets that same ask, with the preamble appended after it.
-    const second = promptOf(loop.call(2));
-    expect(second.startsWith(`${first}\n\n`)).toBe(true);
-    expect(second).toContain('PICK UP THE HANDOFF FIRST');
-    expect(second).toContain('hoff-77');
-
-    // Exactly the preamble was added — nothing else was rewritten. The bead
-    // fields are the fake `br`'s row for hoff-77.
-    const preamble = bootPreamble({
-      label: 'ralph-2',
-      plan: {
-        bead: {
-          id: 'hoff-77',
-          status: 'open',
-          title: 'HANDOFF: the arc',
-          updatedAt: '2026-08-21T03:00:00Z',
-        },
-        kind: 'handoff',
-      },
-    });
-    if (preamble == null) {
-      throw new Error('bootPreamble returned null for a handoff boot');
-    }
-    expect(second.slice(first.length + 2)).toBe(preamble);
-
-    expect(loop.status).toBe(0);
-    expect(loop.ledger.length).toBe(2);
-  });
-
-  test('the ledger records a stated intent and an unstated one differently', () => {
-    const loop = runScriptedLoop();
-    expect(loop.ledger.length).toBe(2);
-    expect(loop.ledger[0].respawn).toBe('immediate');
-    expect(loop.ledger[0].handoffBead).toBe('hoff-77');
-    // Iteration 2 said nothing: null, never the string 'on-schedule', which
-    // would claim the session made a choice it did not make.
-    expect(loop.ledger[1].respawn).toBeNull();
-    expect(loop.ledger[1].handoffBead).toBeNull();
-  });
-});
-
-describe('crash boots', () => {
-  test('a missing verdict file produces a reconstruct boot, not a fresh one', () => {
-    // The chain AC5 asks for: no verdict → crash → the successor is told.
-    const plan = crashBootPlan(4, 'no-verdict');
-    expect(plan.kind).toBe('reconstruct');
-    expect(
-      bootPreamble({label: 'ralph-5', plan}),
-    ).toContain('NO HANDOFF EXISTS');
-  });
-
-  test('an unreadable verdict is a crash, not a silent CONTINUE', () => {
-    // normalizeVerdict is the gate: null here is what makes the runner take the
-    // crash branch instead of treating a garbled file as more work.
-    expect(normalizeVerdict({status: 'DONE'})).toBeNull();
-    // A raw string is not a verdict object either — and must not be coerced
-    // into one just because it happens to contain the right word.
-    expect(normalizeVerdict('{"status":"CONTINUE"}')).toBeNull();
-    expect(normalizeVerdict(null)).toBeNull();
-    expect(normalizeVerdict({status: 'CONTINUE'})?.status).toBe('CONTINUE');
   });
 });

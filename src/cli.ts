@@ -29,7 +29,10 @@ import {
 import {runMigrateToPrime} from './migrate-to-prime';
 import {runPrime} from './plugin/lib/prime';
 import {repoStatusCommand} from './repo-status/repo-status';
-import {DEFAULT_OPTIONS as RALPH_DEFAULTS, runRalph} from './ralph';
+import {
+  DEFAULT_OPTIONS as LOOP_DEFAULTS,
+  runJustinLoop,
+} from './justin-loop/runner';
 import {runRulesDiff} from './rules-diff';
 import {runRulesUpdate} from './rules-update';
 import {runSkill} from './skill';
@@ -73,7 +76,25 @@ if (hideBin(process.argv).includes('--skill')) {
   process.exit(runSkill());
 }
 
-void yargs(hideBin(process.argv))
+const ARGV = hideBin(process.argv);
+
+/**
+ * `ralph` is the old name for `justin-loop` (home-base-1r6d.33, D1). Kept for
+ * ONE release as a hidden alias.
+ *
+ * Rewritten into `justin-loop` here, before yargs ever sees it, rather than
+ * registered as a second command: an alias that shares no code cannot drift from
+ * the real command, and `justin-sdk --help` never learns the dead name. Every
+ * flag, including `--help`, is then handled by `justin-loop` itself.
+ */
+if (ARGV[0] === 'ralph') {
+  console.error(
+    'ralph is now justin-loop; the ralph name goes away in the next release',
+  );
+  ARGV[0] = 'justin-loop';
+}
+
+void yargs(ARGV)
   .scriptName('justin-sdk')
   .command(
     'doctor',
@@ -308,173 +329,14 @@ void yargs(hideBin(process.argv))
       process.exit(exitCode);
     },
   )
-  .command(
-    'ralph',
-    'Run an external autonomous loop: a fresh `claude -p` per iteration, gated on your real /usage quota. Run from a real terminal, not inside a Claude session.',
-    (y) =>
-      y
-        .option('mode', {
-          type: 'string',
-          choices: ['attachable', 'print'] as const,
-          describe:
-            'attachable: `claude --bg` — inspect with `claude logs <id>`, step in with `claude attach <id>`, answer questions from `claude agents`. print: headless `claude -p`, not attachable, a question becomes a BLOCKED verdict.',
-          default: RALPH_DEFAULTS.mode,
-        })
-        // No default, and none wanted (home-base-1r6d.26, D3): omitted means a
-        // blocked iteration waits for you indefinitely. Passing a number is how
-        // you opt into a bound for an UNATTENDED run.
-        .option('blocked-wait-min', {
-          type: 'number',
-          describe:
-            'attachable only: bound how long a blocked iteration waits for your answer before it is stopped and its question filed as a bead. Omitted (the default) waits indefinitely — blocked means waiting for you, and the runner does not decide you took too long.',
-          defaultDescription: 'wait indefinitely',
-        })
-        .check((argv) => {
-          const wait = argv['blocked-wait-min'];
-          // 0 or a negative bound is not "no bound" — it is a value that would
-          // silently stop every blocked session on the first poll. Refuse it
-          // rather than guessing which the user meant.
-          if (wait !== undefined && !(wait > 0)) {
-            throw new Error(
-              '--blocked-wait-min must be greater than 0 (omit it to wait indefinitely)',
-            );
-          }
-          return true;
-        })
-        .option('poll-sec', {
-          type: 'number',
-          describe: 'attachable only: seconds between agent-state polls',
-          default: RALPH_DEFAULTS.pollSec,
-        })
-        .option('verdict-path', {
-          type: 'string',
-          describe: 'attachable only: where each iteration writes its verdict',
-          default: RALPH_DEFAULTS.verdictPath,
-        })
-        // NO yargs `default` here, deliberately (home-base-1r6d.26, D6). With
-        // one, `--prompt /loop-session` and no flag at all produce identical
-        // argv, so the runner cannot tell an ask from the standing job — and an
-        // explicit ask is exactly what must not be pre-empted by a stale
-        // handoff bead. `defaultDescription` still documents the default in
-        // --help without writing it into argv.
-        .option('prompt', {
-          type: 'string',
-          describe:
-            'Prompt for each iteration (a slash command works). Giving one explicitly makes this run an ASK: the start-of-run handoff scan still reports what is waiting, but does not put it in front of your prompt. Pass --pickup to start from the newest handoff anyway.',
-          defaultDescription: RALPH_DEFAULTS.prompt,
-        })
-        .option('pickup', {
-          type: 'boolean',
-          describe:
-            'Start from the newest waiting handoff bead even though --prompt was given explicitly. Without --prompt this is already the behaviour.',
-          default: RALPH_DEFAULTS.pickup,
-        })
-        .option('max-iterations', {
-          type: 'number',
-          describe: 'Maximum iterations before stopping',
-          default: RALPH_DEFAULTS.maxIterations,
-        })
-        .option('usage-gate', {
-          type: 'boolean',
-          describe:
-            'Read your real /usage quota before every iteration and refuse to run when it cannot be read. Pass --no-usage-gate to skip the gate entirely — no /usage call is made and quota is reported as UNKNOWN, never 0%. Use it only when the spend is bounded up front (e.g. --max-iterations 1), not for long loops.',
-          default: RALPH_DEFAULTS.usageGate,
-        })
-        .option('session-stop-pct', {
-          type: 'number',
-          describe:
-            'Pause/exit when the 5-hour session window reaches this percent',
-          default: RALPH_DEFAULTS.sessionStopPct,
-        })
-        .option('weekly-stop-pct', {
-          type: 'number',
-          describe: 'Pause/exit when the weekly window reaches this percent',
-          default: RALPH_DEFAULTS.weeklyStopPct,
-        })
-        .option('on-gate-hit', {
-          type: 'string',
-          choices: ['pause', 'exit'] as const,
-          describe: 'Wait for quota to reset, or stop the run',
-          default: RALPH_DEFAULTS.onGateHit,
-        })
-        .option('gate-poll-min', {
-          type: 'number',
-          describe: 'Minutes between (free) quota re-checks while paused',
-          default: RALPH_DEFAULTS.gatePollMin,
-        })
-        .option('max-budget-usd', {
-          type: 'number',
-          describe: 'Hard per-iteration cost cap (omit to disable)',
-        })
-        .option('model', {
-          type: 'string',
-          describe: 'Model for each iteration',
-          default: RALPH_DEFAULTS.model,
-        })
-        .option('permission-mode', {
-          type: 'string',
-          describe: 'Permission mode for each iteration',
-          default: RALPH_DEFAULTS.permissionMode,
-        })
-        .option('timeout-min', {
-          type: 'number',
-          describe: 'Per-iteration wall-clock timeout in minutes',
-          default: RALPH_DEFAULTS.timeoutMin,
-        })
-        .option('no-progress-abort', {
-          type: 'number',
-          describe:
-            'Abort after this many consecutive iterations with no new commit',
-          default: RALPH_DEFAULTS.noProgressAbort,
-        })
-        .option('ledger', {
-          type: 'string',
-          describe: 'Path for the per-iteration JSONL ledger',
-          default: RALPH_DEFAULTS.ledgerPath,
-        })
-        .option('dry-run', {
-          type: 'boolean',
-          describe: 'Show quota + config and exit without spawning iterations',
-          default: false,
-        }),
-    async (argv) => {
-      const exitCode = await runRalph(process.cwd(), {
-        blockedWaitMin: argv['blocked-wait-min'] ?? null,
-        dryRun: argv['dry-run'],
-        gatePollMin: argv['gate-poll-min'],
-        ledgerPath: argv.ledger,
-        maxBudgetUsd: argv['max-budget-usd'] ?? null,
-        maxIterations: argv['max-iterations'],
-        mode: argv.mode as 'print' | 'attachable',
-        model: argv.model,
-        pollSec: argv['poll-sec'],
-        verdictPath: argv['verdict-path'],
-        noProgressAbort: argv['no-progress-abort'],
-        onGateHit: argv['on-gate-hit'] as 'pause' | 'exit',
-        permissionMode: argv['permission-mode'],
-        pickup: argv.pickup,
-        // The command line is the ONLY place this is knowable — see D6 above.
-        prompt: argv.prompt ?? RALPH_DEFAULTS.prompt,
-        promptExplicit: argv.prompt !== undefined,
-        sessionStopPct: argv['session-stop-pct'],
-        timeoutMin: argv['timeout-min'],
-        // yargs boolean-negation: `--no-usage-gate` sets `usage-gate` false.
-        // Declaring the option positively is load-bearing — an option literally
-        // NAMED `no-usage-gate` would be negated into `usage-gate: false` while
-        // `no-usage-gate` kept its own default, so passing the flag would
-        // silently do nothing (measured on yargs 18).
-        usageGate: argv['usage-gate'],
-        weeklyStopPct: argv['weekly-stop-pct'],
-      });
-      process.exit(exitCode);
-    },
-  )
   // justin-loop (home-base-1r6d.33): a session chain whose control channel IS a
-  // committed handoff bead. `.1` wires the bead's creator and validator; the
-  // runner itself arrives in `.2` as this command's default action.
+  // committed handoff bead. Running the command with no subcommand RUNS the
+  // loop; `handoff` and `handoff validate` are what a session inside the loop
+  // calls. Print mode is gone: there is no `--mode`, no `--verdict-path` and no
+  // `--json-schema` verdict any more, because the bead is the only channel (D2).
   .command(
     'justin-loop',
-    'The justin-loop session chain: each session hands its work to the next through a committed handoff bead.',
+    'Run a chain of Claude Code sessions on one arc: each session hands its work to the next through a committed handoff bead, which is also what tells the runner whether to spawn a successor at all.',
     (y) =>
       y
         .command(
@@ -574,10 +436,166 @@ void yargs(hideBin(process.argv))
             );
           },
         )
-        .demandCommand(1, 'Please specify a justin-loop subcommand'),
-    () => {
-      // Unreachable: demandCommand above rejects a bare `justin-loop` today.
-      // `.2` replaces this with the runner.
+        .option('prompt', {
+          type: 'string',
+          describe:
+            'Prompt for the FIRST session (a slash command works). Giving one explicitly makes this run an ASK: the start-of-run handoff scan still reports what is waiting, but does not put it in front of your prompt. Pass --pickup to start from the newest handoff anyway. Every LATER session is prompted with its predecessor’s handoff bead instead, never with this.',
+          defaultDescription: LOOP_DEFAULTS.prompt,
+        })
+        .option('pickup', {
+          type: 'boolean',
+          describe:
+            'Start from the newest waiting handoff bead even though --prompt was given explicitly. Without --prompt this is already the behaviour.',
+          default: LOOP_DEFAULTS.pickup,
+        })
+        .option('label', {
+          type: 'string',
+          describe:
+            'Slug for this run’s session labels: <label>-1, <label>-2, … Normalised to [a-z0-9-] so it is safe unquoted in the --from the session contract writes. Omit to derive one from the prompt.',
+          defaultDescription: 'derived from the prompt',
+        })
+        .option('max-sessions', {
+          type: 'number',
+          describe:
+            'Chain length: how many sessions this run may spawn in total',
+          default: LOOP_DEFAULTS.maxSessions,
+        })
+        .option('max-iterations', {
+          type: 'number',
+          hidden: true,
+          describe:
+            'Deprecated alias for --max-sessions. Goes away in the next release.',
+        })
+        .option('timeout-min', {
+          type: 'number',
+          describe:
+            'Per-session wall-clock timeout in minutes. 0 (the default) is NONE: a session is bounded by the ~300k wrap-up notice, not by the clock. When set, an expired session is stopped, CONFIRMED gone, and then treated as having written no handoff — it never boots a successor.',
+          default: LOOP_DEFAULTS.timeoutMin,
+        })
+        // No default, and none wanted (home-base-1r6d.26, D3): omitted means a
+        // blocked session waits for you indefinitely. Passing a number is how
+        // you opt into a bound for an UNATTENDED run.
+        .option('blocked-wait-min', {
+          type: 'number',
+          describe:
+            'Bound how long a blocked session waits for your answer before it is stopped. Omitted (the default) waits indefinitely — blocked means waiting for you, and the runner does not decide you took too long.',
+          defaultDescription: 'wait indefinitely',
+        })
+        .check((argv) => {
+          const wait = argv['blocked-wait-min'];
+          // 0 or a negative bound is not "no bound" — it is a value that would
+          // silently stop every blocked session on the first poll. Refuse it
+          // rather than guessing which the user meant.
+          if (wait !== undefined && !(wait > 0)) {
+            throw new Error(
+              '--blocked-wait-min must be greater than 0 (omit it to wait indefinitely)',
+            );
+          }
+          return true;
+        })
+        .option('poll-sec', {
+          type: 'number',
+          describe: 'Seconds between `claude agents --json` polls',
+          default: LOOP_DEFAULTS.pollSec,
+        })
+        .option('stop-poll-sec', {
+          type: 'number',
+          describe:
+            'Seconds between polls while CONFIRMING a stopped session has left `claude agents`',
+          default: LOOP_DEFAULTS.stopPollSec,
+        })
+        .option('usage-gate', {
+          type: 'boolean',
+          describe:
+            'Read your real /usage quota before every session and refuse to run when it cannot be read. Pass --no-usage-gate to skip the gate entirely — no /usage call is made and quota is reported as UNKNOWN, never 0%. Use it only when the spend is bounded up front (e.g. --max-sessions 1), not for long chains.',
+          default: LOOP_DEFAULTS.usageGate,
+        })
+        .option('session-stop-pct', {
+          type: 'number',
+          describe:
+            'Pause/exit when the 5-hour session window reaches this percent',
+          default: LOOP_DEFAULTS.sessionStopPct,
+        })
+        .option('weekly-stop-pct', {
+          type: 'number',
+          describe: 'Pause/exit when the weekly window reaches this percent',
+          default: LOOP_DEFAULTS.weeklyStopPct,
+        })
+        .option('on-gate-hit', {
+          type: 'string',
+          choices: ['pause', 'exit'] as const,
+          describe: 'Wait for quota to reset, or stop the run',
+          default: LOOP_DEFAULTS.onGateHit,
+        })
+        .option('gate-poll-min', {
+          type: 'number',
+          describe: 'Minutes between (free) quota re-checks while paused',
+          default: LOOP_DEFAULTS.gatePollMin,
+        })
+        .option('model', {
+          type: 'string',
+          describe: 'Model for each session',
+          default: LOOP_DEFAULTS.model,
+        })
+        .option('permission-mode', {
+          type: 'string',
+          describe: 'Permission mode for each session',
+          default: LOOP_DEFAULTS.permissionMode,
+        })
+        .option('no-progress-abort', {
+          type: 'number',
+          describe:
+            'Abort after this many consecutive sessions with no new commit',
+          default: LOOP_DEFAULTS.noProgressAbort,
+        })
+        .option('state-dir', {
+          type: 'string',
+          describe:
+            'Where runs.jsonl is appended. Outside git on purpose — the facts you read live in the committed handoff beads.',
+          default: LOOP_DEFAULTS.stateDir,
+          defaultDescription: '~/.local/state/justin-sdk/justin-loop',
+        })
+        .option('dry-run', {
+          type: 'boolean',
+          describe: 'Show quota + what is waiting, and exit without spawning',
+          default: false,
+        }),
+    async (argv) => {
+      if (argv['max-iterations'] !== undefined) {
+        console.error(
+          '--max-iterations is now --max-sessions; the old name goes away in the next release',
+        );
+      }
+      const exitCode = await runJustinLoop(process.cwd(), {
+        blockedWaitMin: argv['blocked-wait-min'] ?? null,
+        dryRun: argv['dry-run'],
+        gatePollMin: argv['gate-poll-min'],
+        label: argv.label ?? null,
+        maxSessions: argv['max-iterations'] ?? argv['max-sessions'],
+        model: argv.model,
+        noProgressAbort: argv['no-progress-abort'],
+        onGateHit: argv['on-gate-hit'] as 'pause' | 'exit',
+        permissionMode: argv['permission-mode'],
+        pickup: argv.pickup,
+        pollSec: argv['poll-sec'],
+        // The command line is the ONLY place this is knowable: with a yargs
+        // `default` on --prompt, an explicit `--prompt /loop-session` and no
+        // flag at all produce identical argv (home-base-1r6d.26, D6).
+        prompt: argv.prompt ?? LOOP_DEFAULTS.prompt,
+        promptExplicit: argv.prompt !== undefined,
+        sessionStopPct: argv['session-stop-pct'],
+        stateDir: argv['state-dir'],
+        stopPollSec: argv['stop-poll-sec'],
+        timeoutMin: argv['timeout-min'],
+        // yargs boolean-negation: `--no-usage-gate` sets `usage-gate` false.
+        // Declaring the option positively is load-bearing — an option literally
+        // NAMED `no-usage-gate` would be negated into `usage-gate: false` while
+        // `no-usage-gate` kept its own default, so passing the flag would
+        // silently do nothing (measured on yargs 18).
+        usageGate: argv['usage-gate'],
+        weeklyStopPct: argv['weekly-stop-pct'],
+      });
+      process.exit(exitCode);
     },
   )
   .command(

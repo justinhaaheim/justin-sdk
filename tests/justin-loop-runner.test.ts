@@ -1,5 +1,10 @@
 /**
- * Tests for `justin-sdk ralph`.
+ * Tests for `justin-sdk justin-loop` — the run-level surface: the usage gate,
+ * the defaults, the session contract, and the CLI wiring.
+ *
+ * The per-session behaviour (what the runner does with a handoff bead once a
+ * session ends, and how it proves the predecessor is gone) lives in
+ * tests/justin-loop-session.test.ts.
  *
  * The focus is `parseUsage`, which is the highest-consequence pure function in
  * the runner: it reads the REAL subscription quota out of `/usage` text and is
@@ -35,12 +40,10 @@ import {
   DEFAULT_OPTIONS,
   parseBackgroundedId,
   parseUsage,
-  readVerdictFile,
-  respawnIntent,
   sessionContract,
+  timeoutDescription,
   type UsageSnapshot,
-  VERDICT_SCHEMA,
-} from '../src/ralph';
+} from '../src/justin-loop/runner';
 import {initRepo} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
 
@@ -121,7 +124,7 @@ describe('defaults', () => {
     expect(DEFAULT_OPTIONS.onGateHit).toBe('pause');
   });
 
-  test('never resumes a session — fresh context per iteration is the technique', () => {
+  test('never resumes a session — fresh context per session is the technique', () => {
     // Guard against someone "helpfully" adding --resume later.
     expect(DEFAULT_OPTIONS.prompt).toBe('/loop-session');
   });
@@ -130,6 +133,33 @@ describe('defaults', () => {
     // The opt-out must always be a deliberate act. If this default ever flips,
     // every unattended loop silently loses its quota ceiling.
     expect(DEFAULT_OPTIONS.usageGate).toBe(true);
+  });
+
+  test('there is NO wall-clock timeout by default (D7)', () => {
+    // The 2026-09-07 pilot's worst failure: a 45-minute timeout fired, declared
+    // CRASH, did NOT stop the session, and spawned a successor onto the live
+    // predecessor (home-base-1r6d.31/.32). Sessions are bounded by the ~300k
+    // wrap-up notice, not by minutes. 0 means none — and it must stay 0.
+    expect(DEFAULT_OPTIONS.timeoutMin).toBe(0);
+  });
+
+  test('the chain is three sessions long by default (D7)', () => {
+    expect(DEFAULT_OPTIONS.maxSessions).toBe(3);
+  });
+
+  test('the ledger lives outside git, under ~/.local/state — never tmp/ (D9)', () => {
+    // tmp/ was where the verdict file and the old ledger lived, and both are
+    // gone. A ledger inside the repo is a file every session has to remember not
+    // to commit.
+    expect(DEFAULT_OPTIONS.stateDir).toContain('.local/state/justin-sdk/justin-loop');
+    expect(DEFAULT_OPTIONS.stateDir).not.toContain('tmp');
+  });
+
+  test('the header describes the timeout policy it will actually apply', () => {
+    expect(timeoutDescription(0)).toContain('no wall-clock timeout');
+    expect(timeoutDescription(0)).toContain('--timeout-min');
+    expect(timeoutDescription(45)).toContain('45m');
+    expect(timeoutDescription(45)).not.toContain('no wall-clock timeout');
   });
 });
 
@@ -246,15 +276,18 @@ describe('checkGate', () => {
 
 const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
 
-describe('ralph CLI help', () => {
+describe('justin-loop CLI help (AC6)', () => {
   // yargs handles --help before command validation and before any handler runs,
   // so this never touches `claude` and never starts a loop.
-  function ralphHelp(): string {
-    const proc = spawnSync('bun', [CLI, 'ralph', '--help'], {
+  function help(...argv: string[]): {out: string; status: number | null} {
+    const proc = spawnSync('bun', [CLI, ...argv], {
       encoding: 'utf-8',
       timeout: 60_000,
     });
-    return `${proc.stdout ?? ''}${proc.stderr ?? ''}`;
+    return {
+      out: `${proc.stdout ?? ''}${proc.stderr ?? ''}`,
+      status: proc.status,
+    };
   }
 
   test('documents the opt-out by the name the user actually types', () => {
@@ -262,11 +295,70 @@ describe('ralph CLI help', () => {
     // through yargs boolean-negation, so `--no-usage-gate` appears nowhere in
     // the generated option list — it has to be in the description or it is
     // undiscoverable.
-    expect(ralphHelp()).toContain('--no-usage-gate');
+    expect(help('justin-loop', '--help').out).toContain('--no-usage-gate');
   });
 
   test('keeps the gate on by default in the help output', () => {
-    expect(ralphHelp()).toMatch(/--usage-gate[\s\S]*default: true/);
+    expect(help('justin-loop', '--help').out).toMatch(
+      /--usage-gate[\s\S]*default: true/,
+    );
+  });
+
+  test('`justin-loop` is the documented entry, listed by the top-level help', () => {
+    const top = help('--help').out;
+    expect(top).toContain('justin-loop');
+    // The old name is not advertised anywhere: it is rewritten before yargs.
+    expect(top).not.toContain('ralph');
+  });
+
+  test('the runner flags are on the justin-loop command itself', () => {
+    const out = help('justin-loop', '--help').out;
+    for (const flag of [
+      '--max-sessions',
+      '--timeout-min',
+      '--label',
+      '--state-dir',
+      '--blocked-wait-min',
+    ]) {
+      expect(out).toContain(flag);
+    }
+  });
+
+  test('the handoff subcommands are still nested under it', () => {
+    expect(help('justin-loop', '--help').out).toContain('handoff');
+  });
+
+  test('PRINT MODE AND ITS FLAGS ARE GONE (D2)', () => {
+    // The whole `--mode print` path was deleted: a headless session cannot be
+    // attached or answered, and the handoff helper needs no structured output.
+    // If any of these reappear in help, the verdict-file design has crept back.
+    const out = help('justin-loop', '--help').out;
+    // Anchored, because `--permission-mode` legitimately contains `--mode`.
+    expect(out).not.toMatch(/(^|\s)--mode\b/);
+    expect(out).not.toContain('--verdict-path');
+    expect(out).not.toContain('--max-budget-usd');
+    expect(out).not.toContain('json-schema');
+    expect(out).not.toContain('verdict');
+  });
+
+  test('the help says the bead is the control channel, not a file', () => {
+    expect(help('justin-loop', '--help').out).toContain('handoff bead');
+  });
+
+  test('--max-iterations still works, hidden, and is not advertised', () => {
+    // One release of grace for a scheduled invocation that predates the rename.
+    expect(help('justin-loop', '--help').out).not.toContain('--max-iterations');
+  });
+
+  test('`ralph` prints the deprecation line and delegates (D1)', () => {
+    const result = help('ralph', '--help');
+    expect(result.out).toContain(
+      'ralph is now justin-loop; the ralph name goes away in the next release',
+    );
+    // Delegated, not merely warned about: this IS the justin-loop help.
+    expect(result.out).toContain('--max-sessions');
+    expect(result.out).toContain('handoff bead');
+    expect(result.status).toBe(0);
   });
 });
 
@@ -290,7 +382,7 @@ describe('ralph CLI help', () => {
  * `--dry-run` throughout: no iteration is ever spawned, and the fake would not
  * be able to do any work if one were.
  */
-describe('ralph --dry-run, end to end with a fake claude on PATH', () => {
+describe('justin-loop --dry-run, end to end with a fake claude on PATH', () => {
   const sandboxes: Sandbox[] = [];
   afterEach(() => {
     while (sandboxes.length > 0) sandboxes.pop()?.cleanup();
@@ -306,7 +398,7 @@ describe('ralph --dry-run, end to end with a fake claude on PATH', () => {
     const sb = createSandbox();
     sandboxes.push(sb);
     // preflight requires a git repo with a resolvable HEAD.
-    const repo = initRepo(sb, 'project', {'README.md': '# ralph fixture\n'});
+    const repo = initRepo(sb, 'project', {'README.md': '# justin-loop fixture\n'});
 
     const binDir = join(sb.path, 'fakebin');
     mkdirSync(binDir, {recursive: true});
@@ -342,7 +434,7 @@ describe('ralph --dry-run, end to end with a fake claude on PATH', () => {
     f: Fixture,
     args: string[],
   ): {out: string; status: number | null; calls: string[]} {
-    const proc = spawnSync('bun', [CLI, 'ralph', '--dry-run', ...args], {
+    const proc = spawnSync('bun', [CLI, 'justin-loop', '--dry-run', ...args], {
       cwd: f.repo,
       encoding: 'utf-8',
       env: f.env,
@@ -434,90 +526,6 @@ backgrounded · 1a7289b9 · ralph-probe-DELETEME
   });
 });
 
-describe('readVerdictFile', () => {
-  function withVerdict(contents: string): string {
-    const dir = mkdtempSync(join(tmpdir(), 'ralph-verdict-'));
-    writeFileSync(join(dir, 'v.json'), contents);
-    return dir;
-  }
-
-  test('reads a well-formed verdict', () => {
-    const dir = withVerdict(
-      '{"status":"CONTINUE","summary":"did a thing","followUps":["hb-1"]}',
-    );
-    const verdict = readVerdictFile(dir, 'v.json');
-    expect(verdict?.status).toBe('CONTINUE');
-    expect(verdict?.summary).toBe('did a thing');
-    expect(verdict?.followUps).toEqual(['hb-1']);
-  });
-
-  test('treats a missing file as a crash, not a success', () => {
-    // In attachable mode there is no --json-schema forcing a verdict, so a
-    // missing file is the normal shape of "the iteration died". It must never
-    // read as an implicit pass.
-    const dir = mkdtempSync(join(tmpdir(), 'ralph-verdict-'));
-    expect(readVerdictFile(dir, 'nope.json')).toBeNull();
-  });
-
-  test('rejects an invalid status rather than passing it through', () => {
-    const dir = withVerdict('{"status":"DONE","summary":"x","followUps":[]}');
-    expect(readVerdictFile(dir, 'v.json')).toBeNull();
-  });
-
-  test('rejects malformed JSON', () => {
-    const dir = withVerdict('{not json');
-    expect(readVerdictFile(dir, 'v.json')).toBeNull();
-  });
-
-  test('tolerates a missing followUps list', () => {
-    // Worth being lenient here: the shape is model-authored, and losing an
-    // iteration over an omitted empty array would be silly.
-    const dir = withVerdict('{"status":"COMPLETE","summary":"done"}');
-    expect(readVerdictFile(dir, 'v.json')?.followUps).toEqual([]);
-  });
-
-  // --- respawn intent (home-base-1r6d.4) ---
-
-  test('round-trips a respawn intent and the handoff bead it names', () => {
-    const dir = withVerdict(
-      '{"status":"CONTINUE","summary":"context is full","followUps":[],"respawn":"immediate","handoffBead":"hb-42"}',
-    );
-    const v = readVerdictFile(dir, 'v.json');
-    expect(v?.respawn).toBe('immediate');
-    expect(v?.handoffBead).toBe('hb-42');
-    expect(respawnIntent(v)).toBe('immediate');
-  });
-
-  test('an omitted respawn stays ABSENT in the parse, and reads as on-schedule', () => {
-    // Two different facts kept apart: the field is null (nobody said anything),
-    // and every respawn DECISION reads that null conservatively.
-    const dir = withVerdict('{"status":"CONTINUE","summary":"more to do"}');
-    const v = readVerdictFile(dir, 'v.json');
-    expect(v?.respawn).toBeNull();
-    expect(v?.handoffBead).toBeNull();
-    expect(respawnIntent(v)).toBe('on-schedule');
-  });
-
-  test('an unrecognised respawn value is discarded, never guessed at', () => {
-    // Guessing "immediate" from a typo would boot a session nobody asked for.
-    const dir = withVerdict(
-      '{"status":"CONTINUE","summary":"x","respawn":"IMMEDIATE!"}',
-    );
-    expect(readVerdictFile(dir, 'v.json')?.respawn).toBeNull();
-  });
-
-  test('an empty handoffBead is absent, not a bead id', () => {
-    const dir = withVerdict(
-      '{"status":"CONTINUE","summary":"x","respawn":"immediate","handoffBead":"  "}',
-    );
-    expect(readVerdictFile(dir, 'v.json')?.handoffBead).toBeNull();
-  });
-
-  test('respawnIntent is conservative when there is no verdict at all', () => {
-    expect(respawnIntent(null)).toBe('on-schedule');
-  });
-});
-
 /**
  * The injected contract is the ONLY place a session learns the justin-loop
  * protocol — `/loop-session` is shared with interactive use and stays
@@ -530,13 +538,30 @@ describe('sessionContract — the handoff protocol', () => {
   const pickupBoot: BootContext = {
     label: LABEL,
     plan: {
-      bead: {
-        id: 'hoff-42',
-        status: 'open',
-        title: 'HANDOFF continue: the arc',
-        updatedAt: '2026-09-08T03:00:00Z',
-      },
       kind: 'handoff',
+      match: {
+        handoff: {
+          arc: 'the arc',
+          branch: 'worktree-the-arc',
+          contextTokens: 301_000,
+          createdAt: '2026-09-08T03:00:00Z',
+          disposition: 'continue',
+          from: 'justin-loop-2',
+          next: 'Carry on with the arc.',
+          openQuestions: [],
+          schemaVersion: 1,
+          state: 'Half done.',
+          worktree: '/Users/jhaa/Dev/home-base',
+        },
+        row: {
+          id: 'hoff-42',
+          labels: ['handoff'],
+          notes: '{}',
+          status: 'open',
+          title: 'HANDOFF continue: the arc',
+          updatedAt: '2026-09-08T03:00:00Z',
+        },
+      },
     },
   };
 
@@ -656,11 +681,7 @@ describe('sessionContract — the handoff protocol', () => {
   });
 });
 
-describe('attachable defaults', () => {
-  test('defaults to attachable — Justin asked for it explicitly', () => {
-    expect(DEFAULT_OPTIONS.mode).toBe('attachable');
-  });
-
+describe('session defaults', () => {
   test('blocked means WAIT FOR JUSTIN — the bound is opt-in (D3)', () => {
     // Reversed from a 15-minute default (home-base-1r6d.26, D3). The bound was
     // built for the unattended scheduled-tick workflow, where a blocked session
@@ -704,37 +725,5 @@ describe('attachable defaults', () => {
     expect(
       sessionContract({blockedWaitMin: null, label: 'jl-1'}),
     ).not.toContain('bounded time');
-  });
-});
-
-describe('VERDICT_SCHEMA', () => {
-  test('pins the four stop states the loop switches on', () => {
-    expect(VERDICT_SCHEMA.properties.status.enum).toEqual([
-      'CONTINUE',
-      'COMPLETE',
-      'BLOCKED',
-      'FAILED',
-    ]);
-  });
-
-  test('requires every field the runner reads', () => {
-    expect(VERDICT_SCHEMA.required).toEqual(['status', 'summary', 'followUps']);
-  });
-
-  test('print mode can express a respawn intent and a handoff bead', () => {
-    // additionalProperties is false, so an undeclared field could not be
-    // written at all — print mode would silently lose the whole feature.
-    expect(VERDICT_SCHEMA.properties.respawn.enum).toEqual([
-      'immediate',
-      'on-schedule',
-    ]);
-    expect(VERDICT_SCHEMA.properties.handoffBead.type).toBe('string');
-  });
-
-  test('leaves both respawn fields optional', () => {
-    // An iteration with nothing to hand forward has nothing honest to put in
-    // them, and an omitted respawn already has a defined meaning.
-    expect(VERDICT_SCHEMA.required).not.toContain('respawn');
-    expect(VERDICT_SCHEMA.required).not.toContain('handoffBead');
   });
 });

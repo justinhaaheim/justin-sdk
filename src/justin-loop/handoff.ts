@@ -37,7 +37,14 @@
  * second step fails is reported loudly with the id, never as a plain failure.
  */
 
-import {type BrOutcome, type BrRunner, HANDOFF_LABEL, runBr} from '../ralph';
+import {type BrOutcome, type BrRunner, runBr} from './br';
+
+/**
+ * The label that makes a bead a handoff bead (D3). The runner's whole scan is
+ * `br list -l handoff --json`, so a handoff bead that loses this label is
+ * invisible to the loop however good its JSON is.
+ */
+export const HANDOFF_LABEL = 'handoff';
 
 /** Bumped only for a breaking change to the object below. */
 export const HANDOFF_SCHEMA_VERSION = 1;
@@ -378,12 +385,19 @@ export interface HandoffInput {
 }
 
 /**
- * Why an existing open handoff bead blocks a new one.
+ * Something the create path found in the open handoff beads.
  *
- * `unreadable` is a conflict, not a skip: a bead whose notes will not parse has
- * an UNKNOWN `from`, so it cannot be ruled out as this session's. Treating it as
- * "not mine" would be the reassuring guess that lets a session fan out
- * (critical rule 6, and D3 of this bead's design).
+ * `same-from` REFUSES the create: a second open handoff from the same session
+ * would fork the chain into two successors (D5).
+ *
+ * `unreadable` only WARNS (home-base-1r6d.33.2, note 11). A bead whose notes do
+ * not parse has an unknown `from`, so it cannot be positively ruled out as this
+ * session's — but the runner never spawns from a bead it cannot parse, so an
+ * unreadable bead cannot cause the fan-out the refusal exists to prevent.
+ * Blocking on it bought nothing and cost everything: ONE corrupt or half-written
+ * bead anywhere in the repo stranded every subsequent session's handoff, which
+ * is a far worse failure than the one being guarded against. So it is surfaced
+ * loudly on stderr, with the command to clean it up, and creation proceeds.
  */
 export interface HandoffConflict {
   id: string;
@@ -391,11 +405,29 @@ export interface HandoffConflict {
   detail: string;
 }
 
+/**
+ * What the pre-create scan of the open handoff beads turned up.
+ *
+ * The two lists are kept apart because they mean different things and get
+ * different treatment: `conflicts` stop the create, `unreadable` do not. Folding
+ * them into one list is exactly what note 11 undid.
+ */
+export interface FromScanFindings {
+  conflicts: HandoffConflict[];
+  unreadable: HandoffConflict[];
+}
+
 export type CreateHandoffOutcome =
-  | {kind: 'created'; id: string; json: string}
-  | {kind: 'refused'; conflicts: HandoffConflict[]}
+  | {kind: 'created'; id: string; json: string; warnings: HandoffConflict[]}
+  | {kind: 'refused'; conflicts: HandoffConflict[]; warnings: HandoffConflict[]}
   /** The bead exists but its notes were never written — the two-step gap. */
-  | {kind: 'incomplete'; id: string; json: string; reason: string}
+  | {
+      kind: 'incomplete';
+      id: string;
+      json: string;
+      reason: string;
+      warnings: HandoffConflict[];
+    }
   | {kind: 'unavailable'; reason: string};
 
 function brFailure(out: BrOutcome): string {
@@ -414,17 +446,26 @@ export function parseCreatedId(stdout: string): string | null {
   return id != null && id !== '' ? id : null;
 }
 
-/** Every OPEN handoff bead whose notes do not rule it out as `from`'s. */
+/**
+ * Sort the OPEN handoff beads into the ones that refuse this create and the ones
+ * that merely need saying out loud (note 11).
+ *
+ * An unreadable bead is NEVER silently dropped — it lands in `unreadable` and is
+ * printed. "Checked, and there is no conflict" and "could not check one of them"
+ * stay different facts (critical rule 6); what changed is only which of them
+ * stops the create.
+ */
 export function findFromConflicts(
   rows: HandoffRow[],
   from: string,
-): HandoffConflict[] {
+): FromScanFindings {
   const conflicts: HandoffConflict[] = [];
+  const unreadable: HandoffConflict[] = [];
   for (const row of rows) {
     const parsed = parseHandoff(row.notes);
     if (!parsed.ok) {
-      conflicts.push({
-        detail: `its notes do not parse, so its \`from\` is unknown and it cannot be ruled out (${parsed.errors[0] ?? 'unreadable'})`,
+      unreadable.push({
+        detail: `its notes do not parse, so its \`from\` is unknown (${parsed.errors[0] ?? 'unreadable'})`,
         id: row.id,
         kind: 'unreadable',
       });
@@ -438,7 +479,7 @@ export function findFromConflicts(
       });
     }
   }
-  return conflicts;
+  return {conflicts, unreadable};
 }
 
 /**
@@ -463,8 +504,12 @@ export function createHandoff(
       reason: 'could not parse `br list -l handoff --json`',
     };
   }
-  const conflicts = findFromConflicts(rows, input.from);
-  if (conflicts.length > 0) return {conflicts, kind: 'refused'};
+  const {conflicts, unreadable} = findFromConflicts(rows, input.from);
+  // Only a POSITIVELY identified same-from bead refuses (note 11). Unreadable
+  // ones ride along as warnings so they are still impossible to miss.
+  if (conflicts.length > 0) {
+    return {conflicts, kind: 'refused', warnings: unreadable};
+  }
 
   const handoff: Handoff = {
     arc: input.arc,
@@ -506,9 +551,15 @@ export function createHandoff(
 
   const noted = run(cwd, ['update', id, `--notes=${json}`]);
   if (!noted.ok) {
-    return {id, json, kind: 'incomplete', reason: brFailure(noted)};
+    return {
+      id,
+      json,
+      kind: 'incomplete',
+      reason: brFailure(noted),
+      warnings: unreadable,
+    };
   }
-  return {id, json, kind: 'created'};
+  return {id, json, kind: 'created', warnings: unreadable};
 }
 
 export interface HandoffCheck {
@@ -602,16 +653,33 @@ export interface CommandReport {
  * capture it with no parsing; the human-readable confirmation goes to stderr.
  * Same contract as `justin-sdk worktree-new`.
  */
+/**
+ * How an unreadable open handoff bead is reported (note 11).
+ *
+ * It does not stop anything, so it has to be loud, and it has to carry the fix —
+ * otherwise it is a line nobody acts on and the corrupt bead stays forever.
+ */
+export function renderWarnings(warnings: HandoffConflict[]): string[] {
+  return warnings.flatMap((w) => [
+    `WARNING: open handoff bead ${w.id} is unreadable — ${w.detail}`,
+    `  It is invisible to the runner's scan. If it is an orphan, close it: br close ${w.id} --reason='orphaned handoff, unreadable notes'`,
+  ]);
+}
+
 export function renderCreate(outcome: CreateHandoffOutcome): CommandReport {
   switch (outcome.kind) {
     case 'created':
       return {
         exitCode: 0,
-        stderr: [`✓ handoff bead ${outcome.id} created`],
+        stderr: [
+          ...renderWarnings(outcome.warnings),
+          `✓ handoff bead ${outcome.id} created`,
+        ],
         stdout: [outcome.id],
       };
     case 'refused': {
       const lines = [
+        ...renderWarnings(outcome.warnings),
         'REFUSED: this session already has an open handoff bead (one per session, D5).',
         ...outcome.conflicts.map((c) => `  ${c.id} — ${c.detail}`),
         'Close or fix the bead above before writing another handoff.',
@@ -622,6 +690,7 @@ export function renderCreate(outcome: CreateHandoffOutcome): CommandReport {
       return {
         exitCode: 2,
         stderr: [
+          ...renderWarnings(outcome.warnings),
           `INCOMPLETE: bead ${outcome.id} was created but its notes could not be written: ${outcome.reason}`,
           'It will FAIL validation until the JSON is written. Fix it with:',
           `  br update ${outcome.id} --notes='<the JSON below>'`,
