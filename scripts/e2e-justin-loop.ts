@@ -159,8 +159,12 @@ const USAGE = `bun run e2e:justin-loop [options]
                        (default: tmp/e2e-justin-loop/<timestamp>)
   --bound-min=<n>      Our own wall-clock bound per scenario (default: 12)
   --model=<m>          Model for the fixture sessions (default: haiku)
-  --permission-mode=<m>  (default: bypassPermissions — see the note in the
-                       source; \`auto\` is unavailable on haiku)
+  --permission-mode=<m>  (default: auto, the runner's own default.
+                       bypassPermissions is NOT usable here: measured
+                       2026-09-09, \`claude --bg\` refuses it with "requires
+                       accepting the disclaimer first. Run
+                       \`claude --dangerously-skip-permissions\` once
+                       interactively" and exits 1.)
   --keep               Keep the fixture directory even when everything passes
   --help`;
 
@@ -170,7 +174,7 @@ function parseArgs(argv: string[]): Options {
     boundMin: 12,
     keep: false,
     model: 'haiku',
-    permissionMode: 'bypassPermissions',
+    permissionMode: 'auto',
     recordDir: join(REPO_ROOT, 'tmp', 'e2e-justin-loop', stamp),
     replayDir: null,
     scenarios: ['a', 'b'],
@@ -1040,6 +1044,12 @@ async function runScenario(
     '--no-usage-gate',
     '--poll-sec=5',
     '--stop-poll-sec=3',
+    // The runner's default is to wait for Justin indefinitely, which is right
+    // for a real run and wrong here: nobody is going to answer a fixture
+    // session. Bounded so a permission prompt ends as a legible `blocked`
+    // outcome in the ledger instead of as our own SIGKILL, which says only
+    // that something took too long.
+    '--blocked-wait-min=2',
   ];
   const args =
     scenario === 'a'

@@ -1606,6 +1606,22 @@ export interface RunnerDeps extends StopDeps {
 export const REAL_DEPS: RunnerDeps = {
   appendLedgerRow,
   br: runBr,
+  /**
+   * Spawn (or resume) a background session and hand back what `claude` said.
+   *
+   * A FAILED dispatch must not come back as a banner that merely happens to
+   * contain no id (critical rule 6). `claude` prints its refusal on stderr and
+   * exits non-zero, and that sentence is the entire diagnosis — without it the
+   * run summary reads `\`claude --bg\` printed no id: ""`, which names no cause
+   * and points at nothing. Measured 2026-09-09 while building the e2e fixture
+   * (home-base-1r6d.33.10): `--bg` with `--permission-mode bypassPermissions`
+   * exits 1 with "requires accepting the disclaimer first. Run `claude
+   * --dangerously-skip-permissions` once interactively", and every word of that
+   * was being thrown away.
+   *
+   * On success the return value is byte-identical to what it always was: the
+   * caller only ever runs `parseBackgroundedId` over it.
+   */
   dispatch: (cwd, args) => {
     const proc = spawnSync('claude', args, {
       cwd,
@@ -1613,7 +1629,19 @@ export const REAL_DEPS: RunnerDeps = {
       env: process.env,
       timeout: 120_000,
     });
-    return proc.stdout ?? '';
+    const stdout = proc.stdout ?? '';
+    if (proc.error != null) {
+      return `${stdout}claude --bg could not run: ${proc.error.message}`;
+    }
+    if (proc.status !== 0) {
+      const how =
+        proc.status != null
+          ? `exited ${proc.status}`
+          : `was killed (${proc.signal ?? 'unknown signal'})`;
+      const said = (proc.stderr ?? '').trim();
+      return `${stdout}claude --bg ${how}${said !== '' ? `: ${said}` : ''}`;
+    }
+    return stdout;
   },
   findAgent,
   gitHead,

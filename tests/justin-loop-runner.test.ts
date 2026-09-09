@@ -40,6 +40,7 @@ import {
   DEFAULT_OPTIONS,
   parseBackgroundedId,
   parseUsage,
+  REAL_DEPS,
   sessionContract,
   timeoutDescription,
   type UsageSnapshot,
@@ -503,6 +504,64 @@ describe('justin-loop --dry-run, end to end with a fake claude on PATH', () => {
     // waiting" is never confused with "nobody looked".
     const result = runDryRun(fixture(), []);
     expect(result.out).toContain('handoff');
+  });
+});
+
+describe('REAL_DEPS.dispatch — a failed dispatch says WHY', () => {
+  const sandboxes: Sandbox[] = [];
+  afterEach(() => {
+    while (sandboxes.length > 0) sandboxes.pop()?.cleanup();
+  });
+
+  /**
+   * Put a scripted `claude` first on PATH. `REAL_DEPS.dispatch` resolves the
+   * binary from PATH at call time, so this is the whole injection point.
+   */
+  function withFakeClaude<T>(body: string, run: (repo: string) => T): T {
+    const sb = createSandbox();
+    sandboxes.push(sb);
+    const repo = initRepo(sb, 'project', {'README.md': '# fixture\n'});
+    const binDir = join(sb.path, 'fakebin');
+    mkdirSync(binDir, {recursive: true});
+    const fake = join(binDir, 'claude');
+    writeFileSync(fake, `#!/bin/sh\n${body}\n`);
+    chmodSync(fake, 0o755);
+    const original = process.env.PATH;
+    process.env.PATH = `${binDir}:${original ?? ''}`;
+    try {
+      return run(repo);
+    } finally {
+      process.env.PATH = original;
+    }
+  }
+
+  test('a non-zero exit carries stderr into the banner, not an empty string', () => {
+    // The real refusal, verbatim (measured 2026-09-09, claude 2.1.266):
+    // `--bg` with bypassPermissions needs a one-time interactive acceptance.
+    // Before home-base-1r6d.33.10 this reached the run summary as
+    // "`claude --bg` printed no id: \"\"" — a failed measurement rendered as an
+    // empty value, which is exactly what critical rule 6 forbids.
+    const refusal =
+      '--bg with bypassPermissions requires accepting the disclaimer first.';
+    const banner = withFakeClaude(
+      `echo ${JSON.stringify(refusal)} >&2\nexit 1`,
+      (repo) => REAL_DEPS.dispatch(repo, ['--bg', 'hello']),
+    );
+    expect(banner).toContain(refusal);
+    expect(banner).toContain('exited 1');
+    // …and it is still not mistaken for a successful dispatch.
+    expect(parseBackgroundedId(banner)).toBeNull();
+  });
+
+  test('a successful dispatch returns stdout unchanged, with nothing appended', () => {
+    // The negative control for the arm above: the failure text must never leak
+    // into a good banner, and the id must still parse.
+    const banner = withFakeClaude(
+      `echo "backgrounded · abc12345 · a name"\nexit 0`,
+      (repo) => REAL_DEPS.dispatch(repo, ['--bg', 'hello']),
+    );
+    expect(banner).toBe('backgrounded · abc12345 · a name\n');
+    expect(parseBackgroundedId(banner)).toBe('abc12345');
   });
 });
 
