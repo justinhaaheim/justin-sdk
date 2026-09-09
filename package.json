@@ -10,7 +10,8 @@
   },
   "scripts": {
     "test": "bun test",
-    "test:watch": "bun test --watch"
+    "test:watch": "bun test --watch",
+    "e2e:justin-loop": "bun scripts/e2e-justin-loop.ts"
   },
   "exports": {
     "./check-runner": "./src/check-runner.ts",
