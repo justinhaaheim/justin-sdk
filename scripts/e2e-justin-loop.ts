@@ -335,6 +335,41 @@ function writeShims(binDir: string, claudeBin: string, brBin: string): void {
   }
 }
 
+/**
+ * Let the fixture's own sessions run shell commands without a prompt.
+ *
+ * MEASURED 2026-09-09 (claude 2.1.266), and this is the whole reason the file
+ * exists: `--permission-mode auto` is UNAVAILABLE on haiku — the session's own
+ * status line says "auto mode unavailable for this model" and it falls back to
+ * asking. One run's demanded turn then blocked on a permission prompt for the
+ * VERY COMMAND the runner had just told it to run, because the model wrapped
+ * it over several lines and auto mode flags "backslash-escaped whitespace".
+ * That is a property of Claude Code's permission heuristics, not of the loop,
+ * and a fixture that stalls on it is measuring the wrong thing.
+ *
+ * `bypassPermissions` is not the answer: `claude --bg` refuses it until the
+ * disclaimer has been accepted once INTERACTIVELY, which is a machine-wide
+ * change this script has no business making on anybody's behalf. So the
+ * permission lives in the disposable fixture instead — a project settings file
+ * inside the temp repo, which reaches these sessions and nothing else.
+ */
+function writeFixturePermissions(fixture: Fixture): void {
+  const dir = join(fixture.repo, '.claude');
+  mkdirSync(dir, {recursive: true});
+  writeFileSync(
+    join(dir, 'settings.json'),
+    `${JSON.stringify(
+      {
+        permissions: {
+          allow: ['Bash'],
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
 function buildFixture(
   scenario: Scenario,
   claudeBin: string,
@@ -369,6 +404,7 @@ function buildFixture(
       successorInstructions(fixture),
     );
   }
+  writeFixturePermissions(fixture);
   mustRun(['git', 'add', '-A'], fixture.repo);
   mustRun(['git', 'commit', '-qm', 'chore: e2e fixture'], fixture.repo);
 
