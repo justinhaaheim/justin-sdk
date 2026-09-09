@@ -458,6 +458,26 @@ interface RunnerResult {
  * is the SCRIPT's, so a hung fixture cannot run forever, and its firing is
  * recorded as its own fact rather than as a runner exit code.
  */
+/** Read a child stream to the end, echoing every chunk as it lands. */
+async function drain(
+  stream: ReadableStream<Uint8Array>,
+  echo: (text: string) => void,
+): Promise<string> {
+  const decoder = new TextDecoder();
+  let text = '';
+  for await (const chunk of stream) {
+    const piece = decoder.decode(chunk, {stream: true});
+    text += piece;
+    echo(piece);
+  }
+  const tail = decoder.decode();
+  if (tail !== '') {
+    text += tail;
+    echo(tail);
+  }
+  return text;
+}
+
 async function runRunner(
   fixture: Fixture,
   args: string[],
@@ -476,9 +496,12 @@ async function runRunner(
     timedOut = true;
     proc.kill('SIGKILL');
   }, boundMin * 60_000);
+  // Echoed as it arrives rather than collected in silence: a scenario takes
+  // minutes, and a human watching a blank terminal cannot tell a working run
+  // from a wedged one. The full text is still captured for the recording.
   const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    drain(proc.stdout, (s) => process.stdout.write(s)),
+    drain(proc.stderr, (s) => process.stderr.write(s)),
   ]);
   const exitCode = await proc.exited;
   clearTimeout(timer);
@@ -734,10 +757,23 @@ function handoffBeads(a: Artifacts): BeadRow[] {
     .sort((x, y) => ((x.createdAt ?? '') < (y.createdAt ?? '') ? -1 : 1));
 }
 
+/**
+ * The transcript as lines, with the runner's colour codes removed.
+ *
+ * Load-bearing: the runner writes `   \x1b[2mbackground <id> …`, so a pattern
+ * anchored at the start of the line matches nothing at all — and "matched
+ * nothing" would read as "the runner never dispatched a session", which is the
+ * reassuring direction (critical rule 6). The recording keeps the raw bytes;
+ * only the matching is stripped.
+ */
+function transcriptLines(stdout: string): string[] {
+  return stdout.replace(/\u001b\[[0-9;]*m/g, '').split('\n');
+}
+
 /** Lines the runner prints once per NEW session dispatched (never per demand). */
 function dispatchLines(stdout: string): number[] {
   const idx: number[] = [];
-  stdout.split('\n').forEach((line, i) => {
+  transcriptLines(stdout).forEach((line, i) => {
     if (/^\s*background \S+ · inspect:/.test(line)) idx.push(i);
   });
   return idx;
@@ -745,13 +781,18 @@ function dispatchLines(stdout: string): number[] {
 
 /** The line stopAndVerify prints when — and only when — the row is confirmed gone. */
 function stopConfirmedLine(stdout: string): number {
-  return stdout
-    .split('\n')
-    .findIndex(
-      (line) =>
-        line.includes('verified gone:') ||
-        line.includes('was already absent from'),
-    );
+  return transcriptLines(stdout).findIndex(
+    (line) =>
+      line.includes('verified gone:') ||
+      line.includes('was already absent from'),
+  );
+}
+
+/** The lines the demand loop prints, one per demand actually sent. */
+function demandLines(stdout: string): string[] {
+  return transcriptLines(stdout).filter((l) =>
+    /^\s*demand \d+\/\d+ waking /.test(l),
+  );
 }
 
 function exitCheck(a: Artifacts): Check[] {
@@ -920,16 +961,14 @@ function checkScenarioB(a: Artifacts): Check[] {
   const beads = handoffBeads(a);
   const ledger = a.ledger;
 
-  const demandLines = a.stdout
-    .split('\n')
-    .filter((l) => /demand \d+\/\d+.*waking /.test(l));
+  const demands = demandLines(a.stdout);
   checks.push(
     check(
       'the runner WOKE the session and demanded a handoff',
-      demandLines.length >= 1,
-      demandLines.length === 0
+      demands.length >= 1,
+      demands.length === 0
         ? 'no `demand N/M waking …` line in the transcript'
-        : `${demandLines.length} demand(s) sent`,
+        : `${demands.length} demand(s) sent`,
     ),
   );
 
