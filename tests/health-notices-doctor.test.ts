@@ -18,6 +18,7 @@ import {mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {dirname, join} from 'path';
 
 import {
+  callsiteTier,
   decideDoctorHeartbeat,
   DOCTOR_COMMAND,
   DOCTOR_HEARTBEAT_TIMEOUT_MS,
@@ -353,6 +354,22 @@ describe('decideDoctorHeartbeat', () => {
     expect(
       decideDoctorHeartbeat({...base, commandName: 'doctor', config: config()}),
     ).toEqual({reason: 'is-doctor', status: 'skip'});
+  });
+
+  test('SETUP-ENV never triggers a heartbeat — the checkout is not hydrated yet (uxwc.5 F6)', () => {
+    // The post-checkout hook runs this on a brand new worktree whose committed
+    // config already reads as enrolled. Doctor would report the failures
+    // hydration is about to fix, and stamp the hour on the way out.
+    for (const name of ['setup-env', 'worktree-setup']) {
+      expect(
+        decideDoctorHeartbeat({...base, commandName: name, config: config()}),
+      ).toEqual({reason: 'is-setup-env', status: 'skip'});
+    }
+  });
+
+  test('the version notice still speaks for setup-env — it needs nothing from the checkout', () => {
+    expect(callsiteTier('setup-env')).toBe(3);
+    expect(callsiteTier('worktree-setup')).toBe(3);
   });
 
   test('a NEVER command is not eligible', () => {
@@ -718,6 +735,21 @@ describe('runDoctorHeartbeat', () => {
     if (result.status !== 'ran') throw new Error('unreachable');
     expect(result.row.error).toBe('the child produced no exit code');
     expect(result.row.passed).toBeNull();
+  });
+
+  test('SETUP-ENV spawns nothing, through the real orchestrator (uxwc.5 F6)', async () => {
+    const rigged = rig();
+    const {calls, spawner} = spy(passed());
+
+    const result = await runDoctorHeartbeat({
+      commandName: 'worktree-setup',
+      env: rigged.env,
+      projectRoot: rigged.projectRoot,
+      spawner,
+    });
+
+    expect(result).toEqual({reason: 'is-setup-env', status: 'skipped'});
+    expect(calls).toHaveLength(0);
   });
 
   test('DOCTOR ITSELF spawns nothing, through the real orchestrator', async () => {

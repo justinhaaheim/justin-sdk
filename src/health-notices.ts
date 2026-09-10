@@ -1443,6 +1443,8 @@ export type DoctorHeartbeatSkipReason =
   | 'disabled'
   /** The command IS doctor — running it again would be absurd, and recursive. */
   | 'is-doctor'
+  /** The command is `setup-env`: this checkout is not hydrated YET (F6). */
+  | 'is-setup-env'
   | 'not-eligible'
   /** No readable `justin-sdk.config.json`: doctor has nothing to check here. */
   | 'not-enrolled'
@@ -1475,8 +1477,19 @@ export function decideDoctorHeartbeat(options: {
 
   const tier = callsiteTier(commandName);
   if (tier == null) return {reason: 'not-eligible', status: 'skip'};
-  if (canonicalCommandName(commandName ?? '') === 'doctor') {
+  const canonical = canonicalCommandName(commandName ?? '');
+  if (canonical === 'doctor') {
     return {reason: 'is-doctor', status: 'skip'};
+  }
+  // NOT before hydration (uxwc.5 F6). `setup-env` (and its `worktree-setup`
+  // alias) is what the post-checkout hook runs on a BRAND NEW worktree: the
+  // config file is committed, so the repo reads as enrolled, but node_modules
+  // and the mise tools are not there yet. A heartbeat here reports the
+  // failures hydration is seconds away from fixing — and stamps the hour, so
+  // the run that WOULD have found something real is throttled out.
+  // The version notice is unaffected: it needs nothing from the checkout.
+  if (canonical === 'setup-env') {
+    return {reason: 'is-setup-env', status: 'skip'};
   }
   if (!tierAllows(tier, config.doctor.promptTier)) {
     return {reason: 'tier', status: 'skip'};
