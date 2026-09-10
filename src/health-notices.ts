@@ -664,6 +664,55 @@ export function writeState(
   }
 }
 
+/**
+ * Was this file written by a NEWER justin-sdk? Its detail, or null (uxwc.5 F8).
+ *
+ * An older SDK reading a `schemaVersion` it does not recognise reads the file
+ * as ABSENT — which is right for reading, and catastrophic for writing: it
+ * would then persist its own empty-plus-one-row state over a file holding every
+ * repo's stamps. This is the one place that decides, so "do not use it" and "do
+ * not overwrite it" can never disagree.
+ */
+export function newerSchemaDetail(outcome: StateReadOutcome): string | null {
+  if (
+    outcome.status === 'absent' &&
+    outcome.reason === 'unknown-schema-version'
+  ) {
+    return outcome.detail ?? 'unrecognised schemaVersion';
+  }
+  return null;
+}
+
+/**
+ * Re-read, apply THIS process's row to the fresh copy, write (uxwc.5 F3).
+ *
+ * WHY: both probes do slow work between reading state and writing it — a fetch
+ * of up to 5s, a doctor child of up to 60s — and justin-sdk runs in several
+ * shells at once. Writing back the snapshot taken before that work erases
+ * whatever another process recorded meanwhile: a notice stamp, a heartbeat row,
+ * the fetch clock. Only the rows `change` touches are this process's to write.
+ *
+ * `fallback` is used when the re-read fails for any OTHER reason (a corrupt or
+ * unreadable file): the snapshot we already hold is better than nothing, and
+ * self-heals the file. A file written by a newer SDK is refused outright — the
+ * race F8 guards against is exactly an upgrade landing mid-run.
+ */
+export function updateState(options: {
+  change: (base: HealthNoticesState) => HealthNoticesState;
+  fallback: HealthNoticesState;
+  now?: Date;
+  paths: HealthNoticesPaths;
+}): boolean {
+  const fresh = readState(options.paths);
+  if (newerSchemaDetail(fresh) != null) return false;
+  const base = fresh.status === 'ok' ? fresh.state : options.fallback;
+  return writeState(
+    options.paths,
+    options.change(base),
+    options.now ?? new Date(),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // The version check (D3, D5)
 // ---------------------------------------------------------------------------
@@ -831,6 +880,8 @@ export type NoticeOutcome =
         | 'disabled'
         | 'nothing-newer'
         | 'not-eligible'
+        /** The state file belongs to a NEWER justin-sdk (F8). */
+        | 'state-newer-schema'
         | 'state-unwritable'
         | 'throttled'
         | 'tier';
@@ -982,7 +1033,8 @@ export async function resolveHealthNoticesContext(options: {
 export type SdkVersionProbe =
   | {
       detail: string;
-      reason: 'disabled' | 'state-unwritable';
+      /** `state-newer-schema`: the file belongs to a newer SDK (F8). */
+      reason: 'disabled' | 'state-newer-schema' | 'state-unwritable';
       status: 'skipped';
     }
   | {
@@ -1051,6 +1103,19 @@ export async function probeSdkVersion(
   }
 
   const outcome = readState(paths);
+  const newerSchema = newerSchemaDetail(outcome);
+  if (newerSchema != null) {
+    // F8. Not merely "do not write": with no readable state there is no clock
+    // to throttle the fetch, so carrying on would fetch on EVERY command
+    // (invariant 3). The situation is self-correcting in the direction that
+    // matters — a newer SDK wrote that file, which is the upgrade this notice
+    // exists to ask for.
+    return {
+      detail: `the state file (${paths.file}) was written by a newer justin-sdk (${newerSchema}), so it was neither used nor overwritten`,
+      reason: 'state-newer-schema',
+      status: 'skipped',
+    };
+  }
   const state = outcome.status === 'ok' ? outcome.state : emptyState();
 
   let fetcher = options.fetcher;
@@ -1068,7 +1133,21 @@ export async function probeSdkVersion(
     timeoutMs: options.timeoutMs,
   });
 
-  if (checked.state !== state) writeState(paths, checked.state);
+  if (checked.state !== state) {
+    // Only the two rows THIS process measured, merged into a re-read of the
+    // file (F3): the fetch above may have taken seconds, and another shell's
+    // notice stamp or heartbeat row must survive it.
+    updateState({
+      change: (base) => ({
+        ...base,
+        lastCheck: checked.state.lastCheck,
+        lastKnownLatest: checked.state.lastKnownLatest,
+      }),
+      fallback: state,
+      now,
+      paths,
+    });
+  }
 
   return {
     config,
@@ -1111,11 +1190,15 @@ export async function maybeNotifySdkVersion(
   // The write's boolean is deliberately not acted on: the notice has already
   // been printed, and there is no undo. A failure here costs one repeated
   // notice, and `isStateWritable` above has already ruled out the case where it
-  // would fail every time.
-  writeState(
-    healthNoticesPaths(options.env ?? process.env),
-    recordNotified(probe.state, options.projectRoot, decision.kind, now),
-  );
+  // would fail every time. Only this repo's throttle stamp is written, onto a
+  // re-read of the file (F3) — the fetch it just paid for takes real time.
+  updateState({
+    change: (base) =>
+      recordNotified(base, options.projectRoot, decision.kind, now),
+    fallback: probe.state,
+    now,
+    paths: healthNoticesPaths(options.env ?? process.env),
+  });
   return decision;
 }
 
@@ -1328,6 +1411,8 @@ export type DoctorHeartbeatSkipReason =
   | 'not-eligible'
   /** No readable `justin-sdk.config.json`: doctor has nothing to check here. */
   | 'not-enrolled'
+  /** The state file belongs to a NEWER justin-sdk (F8) — do not touch it. */
+  | 'state-newer-schema'
   | 'state-unwritable'
   | 'throttled'
   | 'tier';
@@ -1544,6 +1629,12 @@ export async function runDoctorHeartbeat(
   }
 
   const read = readState(paths);
+  // F8, and for the same second reason as the version probe: with no readable
+  // clock, a run that could not be recorded would spawn a doctor on EVERY
+  // command.
+  if (newerSchemaDetail(read) != null) {
+    return {reason: 'state-newer-schema', status: 'skipped'};
+  }
   const state = read.status === 'ok' ? read.state : emptyState();
 
   const decision = decideDoctorHeartbeat({
@@ -1601,9 +1692,17 @@ export async function runDoctorHeartbeat(
   // throws EPIPE). Unlike the version notice — whose stamp is a claim that it
   // spoke, and must not be written if it did not — this stamp only claims the
   // run happened, which is true either way.
-  writeState(paths, {
-    ...state,
-    doctorRuns: {...state.doctorRuns, [projectRoot]: row},
+  // Only this repo's row, onto a RE-READ of the file (F3): the child above may
+  // have run for up to 60 seconds, and anything another process recorded in
+  // that time — a notice stamp, another repo's heartbeat — must survive it.
+  updateState({
+    change: (base) => ({
+      ...base,
+      doctorRuns: {...base.doctorRuns, [projectRoot]: row},
+    }),
+    fallback: state,
+    now,
+    paths,
   });
 
   const lines = renderDoctorHeartbeat({

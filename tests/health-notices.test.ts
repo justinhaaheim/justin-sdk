@@ -668,6 +668,82 @@ describe('probeSdkVersion', () => {
     expect(calls).toHaveLength(0);
     expect(probe.status).toBe('skipped');
   });
+
+  test('a row another process wrote DURING the fetch survives (uxwc.5 F3)', async () => {
+    // The race: the fetch takes up to 5s, and justin-sdk runs in several shells
+    // at once. Writing back the state snapshot taken before the fetch erased
+    // whatever landed meanwhile. The fetcher below IS that other process.
+    const {env, paths} = stateEnv();
+    const project = newSandbox();
+    const foreign = {
+      at: '2026-09-10T11:59:00.000Z',
+      error: null,
+      errors: 0,
+      exitCode: 0,
+      passed: 7,
+      warnings: 0,
+    };
+
+    const outcome = await maybeNotifySdkVersion({
+      commandName: 'signal',
+      env,
+      fetcher: () => {
+        writeState(paths, {
+          ...emptyState(),
+          doctorRuns: {'/another/repo': foreign},
+          lastNotified: {'/another/repo': {patch: '2026-09-10T11:59:00.000Z'}},
+        });
+        // A version no tag will ever reach, so the notice definitely fires and
+        // BOTH of this process's writes (the check row, then the throttle
+        // stamp) are exercised.
+        return {status: 'ok', tag: 'v99.0.0', version: '99.0.0'};
+      },
+      now: AT('2026-09-10T12:00:00.000Z'),
+      projectRoot: project.path,
+    });
+
+    expect(outcome.status).toBe('notify');
+    const after = readState(paths);
+    if (after.status !== 'ok') throw new Error('unreachable');
+    // Both of this process's writes landed...
+    expect(after.state.lastCheck).toMatchObject({latest: '99.0.0', ok: true});
+    expect(after.state.lastNotified[project.path]).toBeDefined();
+    // ...without erasing the other process's rows.
+    expect(after.state.doctorRuns['/another/repo']).toEqual(foreign);
+    expect(after.state.lastNotified['/another/repo']).toEqual({
+      patch: '2026-09-10T11:59:00.000Z',
+    });
+  });
+
+  test('a state file from a NEWER SDK is never used and never overwritten (uxwc.5 F8)', async () => {
+    const {env, paths} = stateEnv();
+    const project = newSandbox();
+    const {calls, fetcher} = countingFetcher(OK_026);
+    mkdirSync(paths.dir, {recursive: true});
+    const future = JSON.stringify({
+      doctorRuns: {},
+      lastCheck: null,
+      lastKnownLatest: null,
+      lastNotified: {},
+      schemaVersion: STATE_SCHEMA_VERSION + 1,
+      somethingNewer: {},
+    });
+    writeFileSync(paths.file, future);
+
+    const probe = await probeSdkVersion({
+      env,
+      fetcher,
+      now: AT('2026-09-10T12:00:00.000Z'),
+      projectRoot: project.path,
+    });
+
+    expect(probe.status).toBe('skipped');
+    if (probe.status !== 'skipped') throw new Error('unreachable');
+    expect(probe.reason).toBe('state-newer-schema');
+    // No fetch either: with no readable clock there is nothing to throttle it.
+    expect(calls).toHaveLength(0);
+    expect(readFileSync(paths.file, 'utf-8')).toBe(future);
+  });
 });
 
 // ---------------------------------------------------------------------------

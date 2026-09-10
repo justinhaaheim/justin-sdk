@@ -14,7 +14,7 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {mkdirSync, writeFileSync} from 'fs';
+import {mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {dirname, join} from 'path';
 
 import {
@@ -875,6 +875,58 @@ describe('runDoctorHeartbeat', () => {
       '2026-09-10T11:00:00.000Z',
     );
     expect(after.doctorRuns[rigged.projectRoot]?.passed).toBe(10);
+  });
+
+  test('a row another process wrote DURING the doctor run survives (uxwc.5 F3)', async () => {
+    // Doctor gets up to 60 seconds. Anything another shell records in that
+    // window — here, a notice stamp — must not be erased by a state snapshot
+    // taken before the child started. The SPAWNER is that other process.
+    const rigged = rig();
+    const stamp = '2026-09-10T11:59:00.000Z';
+
+    const result = await runDoctorHeartbeat({
+      commandName: 'signal',
+      env: rigged.env,
+      projectRoot: rigged.projectRoot,
+      spawner: async () => {
+        writeState(rigged.paths, {
+          ...emptyState(),
+          lastNotified: {'/another/repo': {major: stamp}},
+        });
+        return passed();
+      },
+    });
+
+    expect(result.status).toBe('ran');
+    const after = rigged.state();
+    expect(after.doctorRuns[rigged.projectRoot]?.passed).toBe(10);
+    expect(after.lastNotified['/another/repo']).toEqual({major: stamp});
+  });
+
+  test('a state file from a NEWER SDK spawns NOTHING and is left alone (uxwc.5 F8)', async () => {
+    const rigged = rig();
+    mkdirSync(rigged.paths.dir, {recursive: true});
+    const future = JSON.stringify({
+      doctorRuns: {},
+      lastCheck: null,
+      lastKnownLatest: null,
+      lastNotified: {},
+      schemaVersion: 999,
+    });
+    writeFileSync(rigged.paths.file, future);
+    const {calls, spawner} = spy(passed());
+
+    const result = await runDoctorHeartbeat({
+      commandName: 'signal',
+      env: rigged.env,
+      projectRoot: rigged.projectRoot,
+      spawner,
+    });
+
+    expect(result).toEqual({reason: 'state-newer-schema', status: 'skipped'});
+    // Nothing spawned, because nothing could record that it had been.
+    expect(calls).toHaveLength(0);
+    expect(readFileSync(rigged.paths.file, 'utf-8')).toBe(future);
   });
 
   test('printNotice is the writer, so a heartbeat can never reach stdout', async () => {
