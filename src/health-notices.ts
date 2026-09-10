@@ -30,6 +30,13 @@
  *     told us not to ask" are four facts with four representations, and the
  *     reassuring one is only ever produced by an actual measurement.
  *
+ * PRERELEASES ARE OUT OF SCOPE (uxwc.5 F5). The fleet ships plain X.Y.Z tags.
+ * Both sides of the comparison are coerced (which strips any suffix), so only
+ * major/minor/patch can ever be reported, and `pickLatestTag` skips a tag with
+ * anything after the triple rather than ranking `v0.26.0-rc.1` alongside
+ * `0.26.0`. Publishing a prerelease tag would make this notice ignore it, which
+ * is the intended behaviour and not an oversight.
+ *
  * WHY THIS MODULE IMPORTS ONLY NODE BUILTINS AT THE TOP. `cli.ts` runs its
  * notice middleware for EVERY command, and the middleware must consult the
  * classification table below before it can know whether a command is eligible —
@@ -770,22 +777,21 @@ export interface SdkVersionCheckResult {
 /**
  * Map a semver diff onto the three kinds Justin configures.
  *
- * Prerelease diffs collapse onto their base kind (D2). `prerelease` itself —
- * `1.0.0-a` → `1.0.0-b`, same release, different build — has no base kind and
- * is treated as a patch: the quietest tier, which is the right default for a
- * bump the fleet never publishes.
+ * THREE KINDS, NOT SEVEN (uxwc.5 F5): prereleases are out of scope for the
+ * fleet. `computeKind` coerces BOTH sides before comparing, and `semver.coerce`
+ * strips any prerelease suffix (measured), so `semver.diff` can only ever
+ * answer major/minor/patch here — the `premajor`/`preminor`/`prepatch`/
+ * `prerelease` branches that used to be here were unreachable, and their test
+ * only ever tested itself. Anything else is a comparison this code did not
+ * make, and returns null rather than a guess (critical rule 6).
  */
 export function bumpKindFromDiff(diff: string | null): VersionBumpKind | null {
   switch (diff) {
     case 'major':
-    case 'premajor':
       return 'major';
     case 'minor':
-    case 'preminor':
       return 'minor';
     case 'patch':
-    case 'prepatch':
-    case 'prerelease':
       return 'patch';
     default:
       return null;

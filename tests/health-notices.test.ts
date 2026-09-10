@@ -370,11 +370,12 @@ describe('isStateWritable', () => {
 // ---------------------------------------------------------------------------
 
 describe('bumpKindFromDiff', () => {
-  test('prerelease kinds collapse onto their base kind (D2)', () => {
-    expect(bumpKindFromDiff('premajor')).toBe('major');
-    expect(bumpKindFromDiff('preminor')).toBe('minor');
-    expect(bumpKindFromDiff('prepatch')).toBe('patch');
-    expect(bumpKindFromDiff('prerelease')).toBe('patch');
+  test('a prerelease kind is NOT a kind — prereleases are out of scope (uxwc.5 F5)', () => {
+    // Both sides are coerced before the diff, and coercion strips prerelease
+    // suffixes, so semver never produces these here. Mapping them anyway was
+    // dead code whose test tested itself.
+    expect(bumpKindFromDiff('premajor')).toBeNull();
+    expect(bumpKindFromDiff('prerelease')).toBeNull();
   });
 
   test('plain kinds pass through, and null stays null', () => {

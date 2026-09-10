@@ -69,9 +69,21 @@ export function compareSdkVersions(
 }
 
 /**
+ * A tag that names a RELEASE: an X.Y.Z triple and nothing else after it.
+ *
+ * `v0.26.0-rc.1` and `0.26.0+build` are deliberately excluded (uxwc.5 F5).
+ * Prereleases are out of scope for the fleet, and the comparison here only
+ * reads the triple — so an rc tag compared EQUAL to its release and then won
+ * the `v`-prefix tie-break, making `justin-sdk update` install a candidate
+ * over the real thing.
+ */
+const RELEASE_TAG_PATTERN = /^v?\d+\.\d+\.\d+$/;
+
+/**
  * Pick the highest-semver tag from a list of raw tag names, returning the
  * RAW name (the git ref we install against, so a `v`-prefixed tag keeps its
- * `v`). Unparseable names are ignored; returns null if none parse.
+ * `v`). Names that are not plain releases are ignored; returns null if none
+ * qualify.
  *
  * We sort ourselves rather than trusting the listing's order: `git ls-remote`
  * sorts refs LEXICALLY, which puts `refs/tags/0.15.0` before `refs/tags/0.2.0`
@@ -86,6 +98,7 @@ export function compareSdkVersions(
 export function pickLatestTag(tagNames: string[]): string | null {
   let best: {name: string; version: [number, number, number]} | null = null;
   for (const name of tagNames) {
+    if (!RELEASE_TAG_PATTERN.test(name.trim())) continue;
     const version = parseSdkVersion(name);
     if (version == null) continue;
     if (best == null || compareSdkVersions(version, best.version) > 0) {

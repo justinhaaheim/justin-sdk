@@ -88,6 +88,20 @@ describe('pickLatestTag', () => {
     // A bare-only latest is still returned raw — nothing to prefer.
     expect(pickLatestTag(['v0.14.0', '0.15.0'])).toBe('0.15.0');
   });
+
+  test('a PRERELEASE tag never wins, in either order (uxwc.5 F5)', () => {
+    // The bug this guards: only the X.Y.Z triple is compared, so v0.26.0-rc.1
+    // ranked EQUAL to 0.26.0 and then won the v-prefix tie-break — `update`
+    // would have installed the candidate over the release. Prereleases are out
+    // of scope for the fleet, so they are not candidates at all.
+    expect(pickLatestTag(['0.26.0', 'v0.26.0-rc.1'])).toBe('0.26.0');
+    expect(pickLatestTag(['v0.26.0-rc.1', '0.26.0'])).toBe('0.26.0');
+    // Not even when it is the highest triple present.
+    expect(pickLatestTag(['0.25.0', 'v0.26.0-rc.1'])).toBe('0.25.0');
+    expect(pickLatestTag(['v0.27.0-rc.1'])).toBeNull();
+    // Build metadata is excluded for the same reason: it is not a release tag.
+    expect(pickLatestTag(['0.26.0', '0.26.0+build.5'])).toBe('0.26.0');
+  });
 });
 
 describe('parseLsRemoteTags', () => {
