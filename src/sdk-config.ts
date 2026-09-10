@@ -21,7 +21,7 @@
  * keep their own hand-rolled readers.
  */
 
-import {existsSync, readFileSync} from 'fs';
+import {readFileSync} from 'fs';
 import {join, resolve} from 'path';
 
 import {z} from 'zod';
@@ -274,10 +274,10 @@ export type HealthNoticesFileConfig = z.infer<typeof healthNoticesSchema>;
 
 /**
  * How a config file read turned out. FIVE outcomes, deliberately distinct
- * (critical rule 6): "there is no file", "the bytes are not JSON", "the JSON
- * does not match the schema" and "the file exists but could not be read" are
- * four different facts, and only one of them is boring. None of them is ever
- * represented as an empty config.
+ * (critical rule 6): "it parsed", "there is no file", "the bytes are not JSON",
+ * "the JSON does not match the schema" and "the file is there but could not be
+ * read" are five different facts, and only two of them are boring. None of them
+ * is ever represented as an empty config.
  */
 export type ConfigReadOutcome<T> =
   | {config: T; path: string; status: 'ok'}
@@ -295,23 +295,32 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** The errno of a thrown fs error, when it has one. */
+function errorCode(error: unknown): string | null {
+  if (error == null || typeof error !== 'object' || !('code' in error)) {
+    return null;
+  }
+  const code = (error as {code: unknown}).code;
+  return typeof code === 'string' ? code : null;
+}
+
 /**
  * Read and validate one config file. Never throws.
  *
- * `existsSync` first so a genuinely missing file is `absent` and a file that
- * exists but cannot be read is `unreadable` — a sandboxed `~/.config` must not
- * masquerade as "the user has no config".
+ * The read is attempted directly and the ERRNO decides the outcome, rather than
+ * asking `existsSync` first: `existsSync` answers false for every failure it
+ * meets, so an unreadable directory (a Claude sandbox, a permissions problem)
+ * would masquerade as "the user has no config". Only ENOENT is absence.
  */
 function readConfigFile<T>(
   path: string,
   schema: z.ZodType<T>,
 ): ConfigReadOutcome<T> {
-  if (!existsSync(path)) return {path, status: 'absent'};
-
   let raw: string;
   try {
     raw = readFileSync(path, 'utf-8');
   } catch (error) {
+    if (errorCode(error) === 'ENOENT') return {path, status: 'absent'};
     return {error: errorMessage(error), path, status: 'unreadable'};
   }
 

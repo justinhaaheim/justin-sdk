@@ -130,6 +130,19 @@ describe('readProjectConfig outcomes', () => {
     expect(isConfigProblem(outcome)).toBe(true);
   });
 
+  test('unreadable: a file that exists but cannot be read is NOT absent', () => {
+    // A directory where the config file should be: readFileSync throws EISDIR,
+    // which must not be swallowed into "the repo has no config".
+    const box = sandbox();
+    box.mkdir('justin-sdk.config.json');
+    const outcome = readProjectConfig(box.path);
+    expect(outcome.status).toBe('unreadable');
+    if (outcome.status !== 'unreadable') throw new Error('unreachable');
+    expect(outcome.error.length).toBeGreaterThan(0);
+    expect(isConfigProblem(outcome)).toBe(true);
+    expect(describeConfigOutcome(outcome)).toContain('could not be read');
+  });
+
   test('schema-violation: a wrong TYPE names the exact key path', () => {
     const outcome = readProjectConfig(
       projectWith(
