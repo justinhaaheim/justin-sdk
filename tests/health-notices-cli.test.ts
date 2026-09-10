@@ -495,16 +495,14 @@ describe('the CLI hot path', () => {
 // ---------------------------------------------------------------------------
 
 /**
- * DELIBERATELY HERMETIC, and therefore deliberately partial. Nothing in the
- * suite may spawn a real `doctor` child, so what is asserted here is the half
- * of the seam that can be proved without one: an eligible command in a real
- * enrolled repo, running the real middleware, leaves a fresh heartbeat stamp
- * exactly as it found it and says nothing.
+ * HERMETIC, and — since uxwc.5 F13 — no longer partial: the describe below
+ * covers the throttled case without spawning anything, and `a heartbeat that
+ * really runs` further down spawns ONE real `doctor --quiet` child.
  *
- * The other half — that the middleware DOES spawn doctor when one is due — is
- * covered by `runDoctorHeartbeat`'s own tests with an injected spawner
- * (tests/health-notices-doctor.test.ts) and was measured by hand against the
- * real CLI; see home-base-uxwc.3's notes for that run.
+ * That one real spawn is the only thing that can prove the middleware reaches
+ * `runDoctorHeartbeat` at all. Everything else about the heartbeat is unit
+ * tested with an injected spawner (tests/health-notices-doctor.test.ts), and
+ * deleting the call from cli.ts used to leave the whole suite green.
  */
 describe('the doctor heartbeat at the CLI seam', () => {
   /**
@@ -602,4 +600,118 @@ describe('the doctor heartbeat at the CLI seam', () => {
     expect(stderr).not.toContain('justin-sdk doctor');
     expect(readSeeded(rigged).doctorRuns).toEqual({});
   });
+});
+
+// ---------------------------------------------------------------------------
+// A heartbeat that really runs (uxwc.5 F13a)
+// ---------------------------------------------------------------------------
+
+/**
+ * THE ONE PLACE A REAL `doctor --quiet` CHILD IS SPAWNED (~150ms each).
+ *
+ * Everything else in the suite injects a spawner, which is why deleting the
+ * `await runDoctorHeartbeat(...)` line from cli.ts used to leave every test
+ * green. These two spawn a real one, from a real middleware, in a real
+ * enrolled repo whose doctor FAILS — and assert the two contracts that a
+ * heartbeat could plausibly break: nothing of it reaches stdout, and the
+ * child's exit code is not the command's.
+ *
+ * Still hermetic: the fixture's package.json runs `true`, the state file is
+ * pre-seeded so no fetch is due, and the child carries GIT_ALLOW_PROTOCOL=file
+ * plus the kill switch, so it makes no network call of its own.
+ */
+describe('a heartbeat that really runs', () => {
+  /**
+   * An enrolled repo whose `signal` PASSES and whose `doctor` FAILS: the
+   * package.json is missing the `doctor` script base-setup's PKG_SCRIPTS check
+   * requires, so the child exits non-zero with something real to print.
+   */
+  function failingDoctorRepo(): string {
+    const box = newSandbox();
+    box.writeFile('CLAUDE.md', '# test\n');
+    box.writeFile(
+      'package.json',
+      JSON.stringify({
+        name: 'p',
+        scripts: {
+          'setup-env': 'true',
+          signal: 'true',
+          'signal-source:TRUE': 'true',
+        },
+      }),
+    );
+    box.writeFile(
+      'justin-sdk.config.json',
+      JSON.stringify({
+        components: ['base-setup'],
+        lastSynced: '2026-09-10',
+        version: '0.26.0',
+      }),
+    );
+    box.mkdir('src/deep');
+    return box.path;
+  }
+
+  function runIn(
+    cwd: string,
+    env: Record<string, string>,
+  ): {status: number | null; stderr: string; stdout: string} {
+    const run = spawnSync(process.execPath, [CLI, 'signal'], {
+      cwd,
+      encoding: 'utf-8',
+      env,
+      input: '',
+    });
+    return {status: run.status, stderr: run.stderr, stdout: run.stdout};
+  }
+
+  test('the failing checks reach STDERR, and signal own exit code stands', () => {
+    const rigged = rig();
+    const projectRoot = failingDoctorRepo();
+
+    const on = runIn(projectRoot, rigged.on);
+    const off = runIn(projectRoot, rigged.off);
+
+    // The child said something, and all of it is on stderr.
+    expect(on.stderr).toContain(
+      `justin-sdk doctor (heartbeat) found errors in ${projectRoot}:`,
+    );
+    expect(on.stderr).toContain('PKG_SCRIPTS');
+    expect(on.stderr).toContain(
+      'full run: bunx @justinhaaheim/justin-sdk doctor',
+    );
+
+    // Not one byte of it reached stdout: signal's own output is untouched,
+    // once its own per-check timings (which differ run to run) are normalised.
+    const withoutTimings = (text: string): string =>
+      text.replace(/\d+ms/g, 'Nms');
+    expect(withoutTimings(on.stdout)).toBe(withoutTimings(off.stdout));
+    expect(on.stdout).not.toContain('PKG_SCRIPTS');
+    expect(on.stdout).not.toContain('heartbeat');
+
+    // The child exited NON-ZERO and signal still exited 0 — the two exit codes
+    // are separate facts, and only signal's is the command's.
+    expect(on.status).toBe(0);
+    expect(on.status).toBe(off.status);
+    const row = readSeeded(rigged).doctorRuns[projectRoot];
+    expect(row?.exitCode).not.toBe(0);
+    expect(row?.error).toBeNull();
+  }, 30000);
+
+  test('it runs from a SUBDIRECTORY too, recorded against the root (uxwc.5 F2)', () => {
+    // Before F2 this was the case that never ran at all: the enrollment probe
+    // looked for justin-sdk.config.json beside the cwd. `signal` itself fails
+    // here (it reads package.json from the cwd), which makes stdout BYTE-EMPTY
+    // and the assertion below exact.
+    const rigged = rig();
+    const projectRoot = failingDoctorRepo();
+
+    const {stderr, stdout} = runIn(join(projectRoot, 'src', 'deep'), rigged.on);
+
+    expect(stdout).toBe('');
+    expect(stderr).toContain(
+      `justin-sdk doctor (heartbeat) found errors in ${projectRoot}:`,
+    );
+    expect(Object.keys(readSeeded(rigged).doctorRuns)).toEqual([projectRoot]);
+  }, 30000);
 });
