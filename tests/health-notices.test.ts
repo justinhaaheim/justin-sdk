@@ -737,13 +737,25 @@ describe('decideNotice', () => {
     expect(decide({cfg, state: after, tier: 3}).status).toBe('notify');
   });
 
-  test('an unreadable lastNotified timestamp stays quiet rather than notifying forever', () => {
+  test('an UNREADABLE lastNotified stamp speaks once rather than going quiet forever', () => {
+    // The trap this guards: a throttle stamp is only ever cleared BY a notice,
+    // so treating an unreadable one as "already said" would silence this
+    // repo+kind permanently and invisibly — the exact failure the whole
+    // feature exists to prevent. Speaking rewrites the stamp, so it heals.
     const state = emptyState();
     state.lastNotified['/repo'] = {minor: 'not a date'};
-    expect(decide({state, tier: 3})).toEqual({
-      reason: 'throttled',
-      status: 'silent',
-    });
+    const outcome = decide({state, tier: 3});
+    expect(outcome.status).toBe('notify');
+
+    const healed = recordNotified(state, '/repo', 'minor', now);
+    expect(healed.lastNotified['/repo']?.minor).toBe(now.toISOString());
+    expect(decide({state: healed, tier: 3}).status).toBe('silent');
+  });
+
+  test('a FUTURE lastNotified stamp (skewed clock) also speaks rather than waiting it out', () => {
+    const state = emptyState();
+    state.lastNotified['/repo'] = {minor: '2999-01-01T00:00:00.000Z'};
+    expect(decide({state, tier: 3}).status).toBe('notify');
   });
 });
 

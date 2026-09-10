@@ -704,9 +704,14 @@ export function decideNotice(options: {
   const lastNotified = state.lastNotified[projectRoot]?.[result.kind] ?? null;
   if (lastNotified != null && kindConfig.throttleMinutes > 0) {
     const age = minutesBetween(now, lastNotified);
-    // An unparseable timestamp is not a licence to speak: treat it as "we
-    // already said this" rather than re-notifying on every command forever.
-    if (age == null || (age >= 0 && age < kindConfig.throttleMinutes)) {
+    // An UNPARSEABLE stamp (age null) deliberately does NOT throttle. The
+    // cautious verdict here is to speak: staying quiet on a stamp we cannot
+    // read would silence this repo+kind forever — the throttle can only be
+    // cleared by a notice, and a notice can never happen while it throttles.
+    // Speaking once rewrites the stamp with a valid one, so it self-heals.
+    // A FUTURE stamp (age negative, a skewed clock) is likewise not a licence
+    // to go quiet indefinitely.
+    if (age != null && age >= 0 && age < kindConfig.throttleMinutes) {
       return {reason: 'throttled', status: 'silent'};
     }
   }
