@@ -427,7 +427,15 @@ function printSummary(
     const duration = `${DIM}[${formatDuration(r.durationMs)}]${RESET}`;
     let line = ` ${icon} ${label} ${duration}`;
 
-    if (!ok && r.checkResult?.message) {
+    // The message prints for a PASSING check too (home-base-dpm4, Justin's
+    // ruling 2026-09-10): a pass message says what was actually measured — the
+    // bun version, the config files that were validated — and rendering it only
+    // on failure made every one of those strings dead text. Quiet mode is
+    // untouched by construction: passing checks never reach here under --quiet
+    // (they `continue` above), and an all-pass quiet run returns earlier still.
+    // Only `fn` checks ever carry a checkResult, so this can never dump a shell
+    // command's captured output.
+    if (r.checkResult?.message) {
       line += `\n     ${DIM}${r.checkResult.message}${RESET}`;
     }
     if (!ok && r.checkResult?.fix) {
