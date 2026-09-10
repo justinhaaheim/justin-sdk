@@ -2,7 +2,7 @@
 
 Cross-project SDK: one implementation of the tooling that would otherwise be copy-pasted into ~12 repos and drift. See `README.md` for usage, and run `justin-sdk agent` for the full agent playbook.
 
-Validation bar here is `tsc --noEmit` + `bun test` — this repo has no ESLint config of its own (home-base's root eslint/prettier configs exclude `projects/`).
+Validation bar here is `tsc --noEmit` + `bun test` — this repo has no ESLint config of its own (home-base's root eslint/prettier configs exclude `projects/`). **Run `bun test` with the Claude Code Bash sandbox OFF:** under the sandbox mise cannot write `~/.local/state`, and ~18 sweep/setup-env tests fail for that reason alone (measured 2026-09-10).
 
 ## Shape
 
