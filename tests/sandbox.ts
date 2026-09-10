@@ -24,6 +24,18 @@ process.env.MISE_TRUSTED_CONFIG_PATHS =
     ? `${existingTrust}:${TMP_BASE}`
     : TMP_BASE;
 
+// Health notices (home-base-uxwc) reach for the network — `git ls-remote`
+// against the SDK repo — and write a state file under $XDG_STATE_HOME. NEITHER
+// belongs in a test run: a suite that quietly makes 60 network calls is slow,
+// flaky offline, and no longer measuring what it claims to. Set here, at module
+// load, because every child the tests spawn inherits process.env (the same
+// reason MISE_TRUSTED_CONFIG_PATHS is set above).
+//
+// Tests that need notices ON build their own env object and pass it explicitly
+// rather than mutating this one — see tests/health-notices-cli.test.ts, which
+// also pre-seeds the state file so the fetch is never attempted.
+process.env.JUSTIN_SDK_HEALTH_NOTICES = 'off';
+
 export interface Sandbox {
   /** Absolute path to the sandbox directory */
   path: string;

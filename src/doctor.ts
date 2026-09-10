@@ -26,12 +26,6 @@ import {
   rulesDriftAdvice,
 } from './plugin/lib/rules-drift';
 import {
-  describeConfigOutcome,
-  isConfigProblem,
-  readProjectConfig,
-  readUserConfig,
-} from './sdk-config';
-import {
   describeMissing,
   detectWorktreeHydration,
   hasBlockingProblem,
@@ -260,10 +254,21 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
     // wrong-typed key is a nuisance, not a broken environment — and it does not
     // enumerate what is MISSING, only what is wrong: unknown keys are always
     // allowed, so this can never fail a repo for being ahead of the SDK.
+    //
+    // sdk-config is `await import`ed rather than imported at the top of this
+    // file: cli.ts loads doctor.ts eagerly, so a static import would put zod
+    // (12-13ms against a 40-50ms CLI startup) into the time-check and
+    // usage-check hook path, which runs on every prompt Justin types.
     {
       check: {
         label: 'CONFIG_SCHEMA',
-        fn: (): CheckResult => {
+        fn: async (): Promise<CheckResult> => {
+          const {
+            describeConfigOutcome,
+            isConfigProblem,
+            readProjectConfig,
+            readUserConfig,
+          } = await import('./sdk-config');
           const outcomes = [readProjectConfig(projectRoot), readUserConfig()];
           const problems = outcomes
             .filter(isConfigProblem)
@@ -282,6 +287,61 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
               .join('; '),
             pass: true,
           };
+        },
+        severity: 'warn',
+      },
+    },
+    // SDK_VERSION (home-base-uxwc D5, D6). Warn-only, and deliberately WITHOUT
+    // a fixCommand or fixFn: the remote SessionStart hook runs `doctor --fix
+    // --yes`, and --yes bypasses requiresApproval, so a fixCommand here would
+    // rewrite package.json and bun.lock in every cloud session of every repo in
+    // the fleet. The fix is TEXT; a human runs it.
+    //
+    // It shares the health-notices probe, so it is throttled by the same
+    // checkIntervalMinutes as the stderr notice — running doctor does not
+    // mean a network call.
+    {
+      check: {
+        label: 'SDK_VERSION',
+        fn: async (): Promise<CheckResult> => {
+          const {probeSdkVersion, sdkVersionVerdict, UPGRADE_COMMAND} =
+            await import('./health-notices');
+          const {SDK_REPO_URL} = await import('./sdk-latest');
+          const now = new Date();
+          const verdict = sdkVersionVerdict(
+            await probeSdkVersion({projectRoot}),
+            now,
+          );
+          switch (verdict.status) {
+            case 'newer':
+              // `silenced` means promptTier 1 for this kind: Justin has said he
+              // does not want to hear about these, so doctor states the fact
+              // without colouring the run yellow.
+              return verdict.silenced
+                ? {message: verdict.message, pass: true}
+                : {
+                    fix: `Run: ${UPGRADE_COMMAND}`,
+                    message: verdict.message,
+                    pass: false,
+                    severity: 'warn',
+                  };
+            case 'not-checked':
+              // A check nobody asked for is not a failed check. The message
+              // still says "not checked" out loud — what must never happen is
+              // this rendering as "you are on the latest version".
+              return {message: verdict.message, pass: true};
+            case 'unknown':
+              // Tried and could not tell. Never a pass (D5) — an unknown
+              // version is exactly the state Justin has been stuck in.
+              return {
+                fix: `Check by hand: git ls-remote --tags ${SDK_REPO_URL} | tail`,
+                message: verdict.message,
+                pass: false,
+                severity: 'warn',
+              };
+            case 'up-to-date':
+              return {message: verdict.message, pass: true};
+          }
         },
         severity: 'warn',
       },

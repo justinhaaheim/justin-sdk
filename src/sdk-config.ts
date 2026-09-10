@@ -120,6 +120,12 @@ export const healthNoticesSchema = z
       })
       .optional()
       .describe('The doctor heartbeat: doctor run on a cadence, on stderr.'),
+    enabled: z
+      .boolean()
+      .optional()
+      .describe(
+        'Master switch for every health notice in this scope. false here is exactly as quiet as JUSTIN_SDK_HEALTH_NOTICES=off, and the env kill switch still wins over a true.',
+      ),
     sdkVersion: z
       .looseObject({
         checkIntervalMinutes: z
@@ -404,9 +410,9 @@ export interface SdkVersionKindConfig {
 
 export interface ResolvedHealthNoticesConfig {
   /**
-   * False when the env says so (see resolveHealthNoticesConfig). Not a file
-   * key: the kill switch is per-invocation, and per-notice silencing is what
-   * `promptTier: 1` is for.
+   * Master switch. Settable in either file and forced to false by the env kill
+   * switch (see resolveHealthNoticesConfig). Per-notice silencing is what
+   * `promptTier: 1` is for; this is the whole layer at once.
    */
   enabled: boolean;
   doctor: {
@@ -464,7 +470,7 @@ function mergeHealthNotices(
       promptTier: doctor?.promptTier ?? base.doctor.promptTier,
       showOnPass: doctor?.showOnPass ?? base.doctor.showOnPass,
     },
-    enabled: base.enabled,
+    enabled: layer.enabled ?? base.enabled,
     sdkVersion: {
       checkIntervalMinutes:
         sdkVersion?.checkIntervalMinutes ??

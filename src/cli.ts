@@ -34,7 +34,6 @@ import {
   runJustinLoop,
 } from './justin-loop/runner';
 import {runRulesDiff} from './rules-diff';
-import {configSchemaJson, renderConfigSchema} from './sdk-config';
 import {runRulesUpdate} from './rules-update';
 import {runSkill} from './skill';
 import {runSyncRules} from './sync-rules';
@@ -95,8 +94,40 @@ if (ARGV[0] === 'ralph') {
   ARGV[0] = 'justin-loop';
 }
 
+/**
+ * The health-notice middleware (home-base-uxwc D7).
+ *
+ * Runs before every command handler and prints, on STDERR only, at most one
+ * two-line notice that a newer justin-sdk exists. Everything about it is
+ * defensive:
+ *
+ *  - WRAPPED IN try/catch that swallows. A notice must never be able to fail a
+ *    command, and this runs in front of ALL of them.
+ *  - `await import`ed, not imported at the top of this file, so the eager
+ *    module graph the `time-check` / `usage-check` hooks pay for does not grow.
+ *    health-notices.ts itself imports only node builtins at its top for the
+ *    same reason: a NEVER command loads that one file, reads the table, and
+ *    returns having loaded neither zod nor semver.
+ *  - yargs resolves `--help` and rejects unknown commands BEFORE middleware
+ *    (measured 2026-09-10), so neither path can reach this.
+ */
+async function healthNoticeMiddleware(argv: {
+  _: readonly (number | string)[];
+}): Promise<void> {
+  try {
+    const {callsiteTier, commandNameFromArgv, maybeNotifySdkVersion} =
+      await import('./health-notices');
+    const commandName = commandNameFromArgv(argv._);
+    if (callsiteTier(commandName) == null) return;
+    await maybeNotifySdkVersion({commandName, projectRoot: process.cwd()});
+  } catch {
+    // A health notice is never worth a failed command.
+  }
+}
+
 void yargs(ARGV)
   .scriptName('justin-sdk')
+  .middleware(healthNoticeMiddleware)
   .command(
     'doctor',
     'Run environment checks based on justin-sdk.config.json components',
@@ -146,7 +177,12 @@ void yargs(ARGV)
                 'Print JSON Schema for both files as {project, user} instead of the human-readable tree.',
               default: false,
             }),
-          (argv) => {
+          async (argv) => {
+            // Lazy so `sdk-config` (and its 12-13ms of zod) stays out of the
+            // CLI's eager module graph — the time-check/usage-check hooks pay
+            // for anything imported at the top of this file.
+            const {configSchemaJson, renderConfigSchema} =
+              await import('./sdk-config');
             if (argv.json) {
               console.log(JSON.stringify(configSchemaJson(), null, 2));
             } else {

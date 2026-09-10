@@ -109,6 +109,21 @@ Checks are split into two categories:
 
 This lets `doctor --fix` be safe to run on a dev machine (won't silently install anything globally) while `doctor --fix --yes` works for sandboxes, CI, and Docker containers.
 
+## Health notices
+
+When a newer `justin-sdk` tag exists, most commands print a two-line notice on **stderr** before their own output:
+
+```
+justin-sdk 0.24.0 → 0.26.0 available (minor)
+  upgrade: bunx @justinhaaheim/justin-sdk update
+```
+
+The remote tag list is fetched at most once an hour (a failed fetch counts, so being offline costs one attempt per hour, not one per command), and each kind of bump is throttled per repo. `doctor` reports the same thing as its `SDK_VERSION` check — with fix TEXT only, never a `fixCommand`, so `doctor --fix --yes` never upgrades anything by itself.
+
+Which commands may print it is set per bump kind by `promptTier`: **1** never, **2** only `doctor`, **3** `doctor` plus interactive commands (`signal`, `fix`, `add`, `worktree-new`, …), **4** every command. Hooks (`time-check`, `usage-check`, `prime`), the upgrade commands themselves (`update`, `sweep`), and anything with a machine-read stdout contract (`justin-loop handoff`) never print it at any tier.
+
+Configure it under `healthNotices` in `~/.config/justin-sdk/config.json` (everywhere) or a repo's `justin-sdk.config.json` (that repo only) — run `justin-sdk config schema` for every key, its type and its default. To switch it all off: `healthNotices.enabled: false` in either file, or `JUSTIN_SDK_HEALTH_NOTICES=off` for one invocation. It is off automatically in CI and in remote Claude Code sessions.
+
 ## Importable modules
 
 In addition to the CLI, the SDK exports modules you can import:
