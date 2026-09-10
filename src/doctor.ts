@@ -21,16 +21,16 @@ import {
 } from './critical-rules-setup';
 import {PINNED, PROMPTS_PIN} from './pinned-versions';
 import {
+  checkRulesDrift,
+  isRulesDriftProblem,
+  rulesDriftAdvice,
+} from './plugin/lib/rules-drift';
+import {
   describeConfigOutcome,
   isConfigProblem,
   readProjectConfig,
   readUserConfig,
 } from './sdk-config';
-import {
-  checkRulesDrift,
-  isRulesDriftProblem,
-  rulesDriftAdvice,
-} from './plugin/lib/rules-drift';
 import {
   describeMissing,
   detectWorktreeHydration,
