@@ -197,6 +197,12 @@ keyed by the SHORT component name:
       }
     }
 
+\`config schema\` prints every key of that file — and of the user-level
+\`~/.config/justin-sdk/config.json\`, which holds settings that should apply to
+every repo — with its type, default and description. Unknown keys are always
+accepted (a config written by a newer SDK must not fail an older one); a known
+key with the wrong type is what doctor's CONFIG_SCHEMA check reports.
+
 
 ## Commands
 

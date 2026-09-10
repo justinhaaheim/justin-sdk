@@ -34,6 +34,7 @@ import {
   runJustinLoop,
 } from './justin-loop/runner';
 import {runRulesDiff} from './rules-diff';
+import {configSchemaJson, renderConfigSchema} from './sdk-config';
 import {runRulesUpdate} from './rules-update';
 import {runSkill} from './skill';
 import {runSyncRules} from './sync-rules';
@@ -126,6 +127,36 @@ void yargs(ARGV)
       });
       process.exit(exitCode);
     },
+  )
+  // A command GROUP, not a bare command: `config get`/`config set` are the
+  // obvious next members (home-base-uxwc D9). Bare `config` prints its own help
+  // via demandCommand rather than guessing which subcommand was meant.
+  .command(
+    'config',
+    'Inspect the justin-sdk config files — the committed per-repo justin-sdk.config.json and the user-level ~/.config/justin-sdk/config.json.',
+    (y) =>
+      y
+        .command(
+          'schema',
+          'Print every key of both config files with its type, resolved default and description. Derived from the schemas themselves, so it cannot drift from what is actually accepted.',
+          (yy) =>
+            yy.option('json', {
+              type: 'boolean',
+              describe:
+                'Print JSON Schema for both files as {project, user} instead of the human-readable tree.',
+              default: false,
+            }),
+          (argv) => {
+            if (argv.json) {
+              console.log(JSON.stringify(configSchemaJson(), null, 2));
+            } else {
+              console.log(renderConfigSchema({projectRoot: process.cwd()}));
+            }
+            process.exit(0);
+          },
+        )
+        .demandCommand(1, 'Please specify a config subcommand'),
+    () => {},
   )
   .command(
     'signal',

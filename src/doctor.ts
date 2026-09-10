@@ -21,6 +21,12 @@ import {
 } from './critical-rules-setup';
 import {PINNED, PROMPTS_PIN} from './pinned-versions';
 import {
+  describeConfigOutcome,
+  isConfigProblem,
+  readProjectConfig,
+  readUserConfig,
+} from './sdk-config';
+import {
   checkRulesDrift,
   isRulesDriftProblem,
   rulesDriftAdvice,
@@ -246,6 +252,38 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+      },
+    },
+    // CONFIG_SCHEMA (home-base-uxwc D9). A SIBLING of JUSTIN_SDK_JSON, not a
+    // child: the user-level file still deserves validating in a repo that has
+    // no project config yet. Warn-only — a config that parses but has one
+    // wrong-typed key is a nuisance, not a broken environment — and it does not
+    // enumerate what is MISSING, only what is wrong: unknown keys are always
+    // allowed, so this can never fail a repo for being ahead of the SDK.
+    {
+      check: {
+        label: 'CONFIG_SCHEMA',
+        fn: (): CheckResult => {
+          const outcomes = [readProjectConfig(projectRoot), readUserConfig()];
+          const problems = outcomes
+            .filter(isConfigProblem)
+            .map((outcome) => describeConfigOutcome(outcome));
+          if (problems.length > 0) {
+            return {
+              fix: 'See every accepted key, its type and its default: bunx @justinhaaheim/justin-sdk config schema',
+              message: problems.join(' | '),
+              pass: false,
+              severity: 'warn',
+            };
+          }
+          return {
+            message: outcomes
+              .map((outcome) => describeConfigOutcome(outcome))
+              .join('; '),
+            pass: true,
+          };
+        },
+        severity: 'warn',
       },
     },
     // Worktree hygiene. These live in base-setup (universal) ON PURPOSE: the
