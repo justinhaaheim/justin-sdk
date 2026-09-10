@@ -1211,6 +1211,11 @@ describe('CLI stdout purity', () => {
     env.CLAUDE_CODE_REMOTE = '';
     env.XDG_CONFIG_HOME = join(sb.path, 'notice-config');
     env.XDG_STATE_HOME = stateHome;
+    // Belt and braces on top of the interval: git refuses an https remote
+    // under this, so even a regression cannot make these tests reach GitHub.
+    // The fixtures here are local worktrees with no submodules, so nothing
+    // else in the child needs a transport.
+    env.GIT_ALLOW_PROTOCOL = 'file';
     return env;
   }
 
