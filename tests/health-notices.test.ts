@@ -30,6 +30,7 @@ import {
   sdkVersionVerdict,
   STATE_SCHEMA_VERSION,
   tierAllows,
+  UNREADABLE_CURRENT_VERSION,
   UPGRADE_COMMAND,
   writeState,
   xdgStateHome,
@@ -547,6 +548,38 @@ describe('checkSdkVersion', () => {
     }
   });
 
+  test('a running version that could NOT be read fetches nothing and warns (uxwc.5 F10)', async () => {
+    // getSdkVersion() answers "0.0.0" for an unreadable package.json, which
+    // rendered as `justin-sdk 0.0.0 → 0.26.0 available (major)` — a bump
+    // measured against a version nothing is running. null instead, and the
+    // check is reported as one that FAILED.
+    const {calls, fetcher} = countingFetcher(OK_026);
+    const before = emptyState();
+    const {result, state} = await checkSdkVersion({
+      config: config(),
+      current: null,
+      fetcher,
+      now: AT('2026-09-10T12:00:00.000Z'),
+      state: before,
+    });
+
+    expect(result.current).toBeNull();
+    expect(result.error).toBe(UNREADABLE_CURRENT_VERSION);
+    expect(result.kind).toBeNull();
+    // Nothing to compare against, so nothing is asked of the network, and the
+    // state is untouched — including the clock, which no attempt was made on.
+    expect(calls).toHaveLength(0);
+    expect(state).toBe(before);
+
+    // And doctor calls it could-not-check, never up-to-date.
+    const verdict = sdkVersionVerdict(
+      {config: config(), result, state, status: 'checked'},
+      AT('2026-09-10T12:00:00.000Z'),
+    );
+    expect(verdict.status).toBe('unknown');
+    expect(verdict.message).toContain(UNREADABLE_CURRENT_VERSION);
+  });
+
   test('an unparseable running version yields kind null rather than a guess', async () => {
     const {result} = await checkSdkVersion({
       config: config(),
@@ -879,6 +912,44 @@ describe('decideNotice', () => {
       tier: 3,
     });
     expect(outcome).toEqual({reason: 'nothing-newer', status: 'silent'});
+  });
+
+  test('a check nobody has ever made is "never-checked", not "nothing newer" (uxwc.5 F11)', () => {
+    // The reassuring answer to a question that was never put. Silent either
+    // way, but the reason is what a test — or a future snooze feature — reads.
+    const outcome = decideNotice({
+      config: config(),
+      now,
+      projectRoot: '/repo',
+      result: {
+        ...result,
+        checkedAt: null,
+        error: null,
+        kind: null,
+        latest: null,
+        latestMeasuredAt: null,
+      },
+      state: emptyState(),
+      tier: 3,
+    });
+    expect(outcome).toEqual({reason: 'never-checked', status: 'silent'});
+  });
+
+  test('a running version that could not be read is silent as a FAILED check (uxwc.5 F10)', () => {
+    const outcome = decideNotice({
+      config: config(),
+      now,
+      projectRoot: '/repo',
+      result: {
+        ...result,
+        current: null,
+        error: UNREADABLE_CURRENT_VERSION,
+        kind: null,
+      },
+      state: emptyState(),
+      tier: 3,
+    });
+    expect(outcome).toEqual({reason: 'check-failed', status: 'silent'});
   });
 
   test('a FAILED check is silent too — but is NOT filed as "nothing newer"', () => {

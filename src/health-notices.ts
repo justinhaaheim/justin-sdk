@@ -753,11 +753,20 @@ export function updateState(options: {
 // The version check (D3, D5)
 // ---------------------------------------------------------------------------
 
+/** What `error` says when the running SDK cannot say what version it is. */
+export const UNREADABLE_CURRENT_VERSION =
+  'could not read the running SDK version';
+
 export interface SdkVersionCheckResult {
   /** ISO time of the most recent ATTEMPT. null = never attempted. */
   checkedAt: string | null;
-  /** The running SDK version. */
-  current: string;
+  /**
+   * The running SDK version, or null when its own package.json could not be
+   * read (uxwc.5 F10). Never a placeholder: `getSdkVersion()` answers "0.0.0"
+   * for that case, which rendered as `justin-sdk 0.0.0 → 0.26.0 available
+   * (major)` — a measurement of a version nothing is running.
+   */
+  current: string | null;
   /**
    * Why the most recent attempt failed, or why none was made. null means the
    * most recent attempt succeeded — check `checkedAt` for "never attempted".
@@ -850,13 +859,32 @@ async function resultFromState(
  */
 export async function checkSdkVersion(options: {
   config: ResolvedHealthNoticesConfig;
-  current: string;
+  /** null when the running SDK's package.json could not be read (F10). */
+  current: string | null;
   fetcher: SdkTagFetcher;
   now: Date;
   state: HealthNoticesState;
   timeoutMs?: number;
 }): Promise<{result: SdkVersionCheckResult; state: HealthNoticesState}> {
   const {config, current, fetcher, now, state} = options;
+
+  if (current == null) {
+    // Nothing to compare against, so nothing to ask the network for. Reported
+    // as a FAILED check (doctor renders that as could-not-check) rather than as
+    // "nothing newer", which is what a "0.0.0" placeholder would have produced
+    // once it was newer than nothing (F10).
+    return {
+      result: {
+        checkedAt: state.lastCheck?.at ?? null,
+        current: null,
+        error: UNREADABLE_CURRENT_VERSION,
+        kind: null,
+        latest: state.lastKnownLatest?.version ?? null,
+        latestMeasuredAt: state.lastKnownLatest?.at ?? null,
+      },
+      state,
+    };
+  }
 
   const lastAt = state.lastCheck?.at ?? null;
   const age = lastAt != null ? minutesBetween(now, lastAt) : null;
@@ -926,6 +954,8 @@ export type NoticeOutcome =
         /** We tried to find out and could not. NOT the same as "nothing newer". */
         | 'check-failed'
         | 'disabled'
+        /** Nobody has asked yet on this machine. NOT "nothing newer" (F11). */
+        | 'never-checked'
         | 'nothing-newer'
         | 'not-eligible'
         /** The state file belongs to a NEWER justin-sdk (F8). */
@@ -962,12 +992,20 @@ export function decideNotice(options: {
   // cannot fire is a second gate to keep in sync.
   const {config, now, projectRoot, result, state, tier} = options;
   if (tier == null) return {reason: 'not-eligible', status: 'silent'};
-  if (result.kind == null || result.latest == null) {
-    // Both are silent, but they are not the same fact. A failed check is
-    // reported by doctor's SDK_VERSION, not by a notice in front of every
-    // command — but it must not be FILED as "you are up to date".
+  if (result.kind == null || result.latest == null || result.current == null) {
+    // All silent, and all DIFFERENT facts. A failed check is reported by
+    // doctor's SDK_VERSION, not by a notice in front of every command — but it
+    // must never be FILED as "you are up to date". `never-checked` (uxwc.5
+    // F11) is the third: nobody has asked yet on this machine, which used to
+    // be recorded as nothing-newer — the reassuring answer to a question that
+    // was never put.
     return {
-      reason: result.error != null ? 'check-failed' : 'nothing-newer',
+      reason:
+        result.error != null
+          ? 'check-failed'
+          : result.checkedAt == null
+            ? 'never-checked'
+            : 'nothing-newer',
       status: 'silent',
     };
   }
@@ -1105,10 +1143,29 @@ export interface ProbeOptions {
   timeoutMs?: number;
 }
 
-/** The running SDK's own version. */
-async function currentSdkVersion(): Promise<string> {
-  const {getSdkVersion} = await import('./setup-helpers');
-  return getSdkVersion();
+/**
+ * The running SDK's own version, or null when it could not be read (F10).
+ *
+ * `getSdkVersion()` in setup-helpers answers `'0.0.0'` for the same failure,
+ * which is right for stamping a config file and WRONG here: it made an
+ * unreadable package.json render as `justin-sdk 0.0.0 → 0.26.0 available
+ * (major)`, a bump measured against a version nothing is running. That
+ * signature has many callers, so this is a local reader rather than a change
+ * to it — and it keeps setup-helpers off this module's import path.
+ */
+function runningSdkVersion(): string | null {
+  try {
+    const raw = readFileSync(
+      resolve(import.meta.dirname, '..', 'package.json'),
+      'utf-8',
+    );
+    const parsed: unknown = JSON.parse(raw);
+    if (!isRecord(parsed)) return null;
+    const version = parsed.version;
+    return typeof version === 'string' && version.length > 0 ? version : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1174,7 +1231,7 @@ export async function probeSdkVersion(
 
   const checked = await checkSdkVersion({
     config,
-    current: await currentSdkVersion(),
+    current: runningSdkVersion(),
     fetcher,
     now,
     state,
@@ -1299,6 +1356,13 @@ export function sdkVersionVerdict(
     };
   }
 
+  if (result.current == null) {
+    // Unreachable from checkSdkVersion, which files this as an error above —
+    // and still not allowed to fall through to a message that would name a
+    // version nobody measured (F10).
+    return {message: `${UNREADABLE_CURRENT_VERSION}`, status: 'unknown'};
+  }
+
   if (result.latest == null) {
     return {
       message:
@@ -1315,7 +1379,12 @@ export function sdkVersionVerdict(
   }
 
   const promptTier = config.sdkVersion[result.kind].promptTier;
-  const silenced = !tierAllows(2, promptTier);
+  // DOCTOR'S OWN TIER, from the one classification table (uxwc.5 F12d) — the
+  // literal 2 that used to be here was a second copy of it. If `doctor` ever
+  // became a NEVER command, `silenced` stays FALSE and doctor warns: the loud
+  // verdict is the safe one, and a silent "you are up to date" is not.
+  const doctorTier = callsiteTier('doctor');
+  const silenced = doctorTier != null && !tierAllows(doctorTier, promptTier);
   return {
     kind: result.kind,
     message:
