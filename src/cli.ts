@@ -107,7 +107,9 @@ if (ARGV[0] === 'ralph') {
  *    module graph the `time-check` / `usage-check` hooks pay for does not grow.
  *    health-notices.ts itself imports only node builtins at its top for the
  *    same reason: a NEVER command loads that one file, reads the table, and
- *    returns having loaded neither zod nor semver.
+ *    returns without ever loading zod (measured 2026-09-10 with a resolution
+ *    shim). `semver` is a separate matter — worktree-hydration.ts already
+ *    imports it statically, so it was on this path before any of this.
  *  - yargs resolves `--help` and rejects unknown commands BEFORE middleware
  *    (measured 2026-09-10), so neither path can reach this.
  */
