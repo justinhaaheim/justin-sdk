@@ -12,6 +12,7 @@ import {hideBin} from 'yargs/helpers';
 
 import {ADD_TARGETS, PRESET_NAMES, runAdd} from './add';
 import {runBeadsRebuildDryRun} from './beads-rebuild-dryrun';
+import {reportCliFailure} from './cli-failure';
 import {COMPONENT_NAMES} from './components';
 import {runDoctor} from './doctor';
 import {runEasUpdate} from './eas-update';
@@ -964,5 +965,9 @@ void yargs(ARGV)
   .command(repoStatusCommand)
   .demandCommand(1, 'Please specify a command')
   .strict()
+  // The CLI reports its OWN failures (uxwc.5 F1). Without this, yargs' default
+  // failure path writes a bare newline to STDOUT — which `worktree-new`'s and
+  // `justin-loop handoff`'s stdout contracts cannot afford. See cli-failure.ts.
+  .fail(reportCliFailure)
   .help()
   .parse();
