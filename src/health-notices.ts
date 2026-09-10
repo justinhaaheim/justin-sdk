@@ -41,7 +41,14 @@
  * having loaded nothing but this file.
  */
 
-import {mkdirSync, readFileSync, renameSync, rmSync, writeFileSync} from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'fs';
 import {homedir} from 'os';
 import {dirname, join, resolve} from 'path';
 
@@ -77,6 +84,59 @@ export function silencedChildEnv(
   base: EnvLike = process.env,
 ): Record<string, string | undefined> {
   return {...base, [HEALTH_NOTICES_ENV_VAR]: HEALTH_NOTICES_OFF};
+}
+
+// ---------------------------------------------------------------------------
+// Which repo is this command about? (uxwc.5 F2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Name of the per-repo config file, at the project root.
+ *
+ * Declared HERE and re-exported by `sdk-config` for the same reason as
+ * {@link HEALTH_NOTICES_ENV_VAR}: finding the repo root is the first thing the
+ * middleware does, for every command, and this module may not import zod.
+ */
+export const PROJECT_CONFIG_FILENAME = 'justin-sdk.config.json';
+
+/** A directory that is the root of a git repository (or a linked worktree). */
+function isRepositoryRoot(dir: string): boolean {
+  // A linked worktree has `.git` as a FILE, a primary checkout as a directory;
+  // `existsSync` answers the only question here, which is "is this a boundary".
+  return existsSync(join(dir, '.git'));
+}
+
+/**
+ * The repo a command is about: the nearest directory at or above `startDir`
+ * holding a {@link PROJECT_CONFIG_FILENAME}, or `startDir` when there is none.
+ *
+ * WHY (F2): everything here is keyed by project root — the notice throttle, the
+ * heartbeat interval, the config file that tunes them. Keying on `cwd` instead
+ * meant a repeated notice from every subdirectory, a heartbeat that NEVER ran
+ * from one (the enrollment probe looked for the config file beside `cwd`), and
+ * a state file growing one key per directory Justin ever typed a command in.
+ *
+ * THE WALK STOPS AT A REPOSITORY BOUNDARY. Without that it escapes into a
+ * PARENT repo: `~/Dev/home-base/projects/justin-sdk` is a submodule with no
+ * config of its own, so a bare walk resolves it to `~/Dev/home-base` and the
+ * heartbeat spawns a doctor for a repo Justin is not in. A directory is checked
+ * for the config file BEFORE it is checked for `.git`, so the ordinary case —
+ * config and `.git` together at the root — still resolves there.
+ *
+ * `existsSync` answers false for a permissions error as well as for absence,
+ * which here means falling back to `startDir`: the same not-enrolled verdict
+ * the caller had before, never a claim of enrollment that was not measured.
+ */
+export function findProjectRoot(startDir: string): string {
+  const start = resolve(startDir);
+  let dir = start;
+  for (;;) {
+    if (existsSync(join(dir, PROJECT_CONFIG_FILENAME))) return dir;
+    if (isRepositoryRoot(dir)) return start;
+    const parent = dirname(dir);
+    if (parent === dir) return start;
+    dir = parent;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -525,21 +585,73 @@ export function isStateWritable(paths: HealthNoticesPaths): boolean {
 }
 
 /**
+ * How long a per-repo row survives without being touched (uxwc.5 F2). Long
+ * enough that a repo worked on monthly keeps its throttles, short enough that
+ * the file does not accumulate a row for every temp worktree ever created.
+ */
+export const STATE_RETENTION_DAYS = 30;
+
+function isExpired(now: Date, iso: string, retentionDays: number): boolean {
+  const age = minutesBetween(now, iso);
+  // Unparseable or future stamps are NOT expired: "we cannot read this" is not
+  // "this is old", and dropping a row we could not measure is a deletion made
+  // on no evidence.
+  return age != null && age > retentionDays * 24 * 60;
+}
+
+/**
+ * Drop per-repo rows nothing has touched for {@link STATE_RETENTION_DAYS}.
+ *
+ * Both maps are keyed by project root, and roots are created faster than they
+ * are retired — every `worktree-new` mints one that is deleted a week later.
+ * Applied on every write (see {@link writeState}) so no caller can forget it.
+ */
+export function pruneState(
+  state: HealthNoticesState,
+  now: Date,
+  retentionDays: number = STATE_RETENTION_DAYS,
+): HealthNoticesState {
+  const lastNotified: HealthNoticesState['lastNotified'] = {};
+  for (const [root, kinds] of Object.entries(state.lastNotified)) {
+    const stamps = Object.values(kinds).filter(
+      (stamp): stamp is string => stamp != null,
+    );
+    // The NEWEST stamp decides: one kind going quiet must not retire a repo
+    // whose other kinds are still speaking.
+    const live =
+      stamps.length === 0 ||
+      stamps.some((stamp) => !isExpired(now, stamp, retentionDays));
+    if (live) lastNotified[root] = kinds;
+  }
+
+  const doctorRuns: HealthNoticesState['doctorRuns'] = {};
+  for (const [root, row] of Object.entries(state.doctorRuns)) {
+    if (!isExpired(now, row.at, retentionDays)) doctorRuns[root] = row;
+  }
+
+  return {...state, doctorRuns, lastNotified};
+}
+
+/**
  * Write the state file. Returns false — never throws — when it could not be
  * written, so a caller can tell "recorded" from "not recorded" and never
  * assumes the clock was stamped.
  *
  * Temp-file-then-rename so a killed process cannot leave a half-written JSON
  * file that every later run would read as corrupt.
+ *
+ * PRUNES on the way out (F2), because every write is the moment the file is
+ * already being rewritten and no caller can then forget to.
  */
 export function writeState(
   paths: HealthNoticesPaths,
   state: HealthNoticesState,
+  now: Date = new Date(),
 ): boolean {
   const temp = `${paths.file}.${process.pid}.tmp`;
   try {
     mkdirSync(paths.dir, {recursive: true});
-    writeFileSync(temp, JSON.stringify(state, null, 2) + '\n');
+    writeFileSync(temp, JSON.stringify(pruneState(state, now), null, 2) + '\n');
     renameSync(temp, paths.file);
     return true;
   } catch {
@@ -746,8 +858,10 @@ export function decideNotice(options: {
   state: HealthNoticesState;
   tier: PromptTier | null;
 }): NoticeOutcome {
+  // `config.enabled` is NOT re-checked here (F9): `probeSdkVersion` returns
+  // `skipped: disabled` before this is ever reached, and a second gate that
+  // cannot fire is a second gate to keep in sync.
   const {config, now, projectRoot, result, state, tier} = options;
-  if (!config.enabled) return {reason: 'disabled', status: 'silent'};
   if (tier == null) return {reason: 'not-eligible', status: 'silent'};
   if (result.kind == null || result.latest == null) {
     // Both are silent, but they are not the same fact. A failed check is
@@ -815,6 +929,55 @@ export function printNotice(lines: string[]): void {
 // Orchestration
 // ---------------------------------------------------------------------------
 
+/**
+ * Everything BOTH probes need, measured once per command (uxwc.5 F9).
+ *
+ * Before this existed, an eligible command resolved the config twice, read the
+ * project config three times, and ran the writability probe — a mkdir, a write
+ * and an unlink — twice. Each probe still resolves its own when a caller does
+ * not supply one, so a direct call (doctor, the tests) needs nothing extra.
+ */
+export interface HealthNoticesContext {
+  config: ResolvedHealthNoticesConfig;
+  /**
+   * Does doctor have anything to check here? `schema-violation` counts: the
+   * file exists, and CONFIG_SCHEMA is the check that reports what is wrong
+   * with it.
+   */
+  enrolled: boolean;
+  projectRoot: string;
+  /**
+   * Can the state file be written? `null` means NOT PROBED, which happens only
+   * when notices are off — an off switch must not touch the disk. Never `true`
+   * unless a write actually succeeded (critical rule 6).
+   */
+  stateWritable: boolean | null;
+}
+
+/** Resolve {@link HealthNoticesContext} for one command in one repo. */
+export async function resolveHealthNoticesContext(options: {
+  env?: EnvLike;
+  projectRoot: string;
+}): Promise<HealthNoticesContext> {
+  const env = options.env ?? process.env;
+  const {readProjectConfig, readUserConfig, resolveHealthNoticesConfigFrom} =
+    await import('./sdk-config');
+  const project = readProjectConfig(options.projectRoot);
+  const config = resolveHealthNoticesConfigFrom({
+    env,
+    project,
+    user: readUserConfig(env),
+  });
+  return {
+    config,
+    enrolled: project.status === 'ok' || project.status === 'schema-violation',
+    projectRoot: options.projectRoot,
+    stateWritable: config.enabled
+      ? isStateWritable(healthNoticesPaths(env))
+      : null,
+  };
+}
+
 /** Outcome of a probe, including the reasons it may not have happened. */
 export type SdkVersionProbe =
   | {
@@ -830,11 +993,15 @@ export type SdkVersionProbe =
     };
 
 export interface ProbeOptions {
+  /** Pre-resolved by the middleware (F9). Absent: resolved here. */
+  config?: ResolvedHealthNoticesConfig;
   env?: EnvLike;
   /** Injected by tests. Defaults to the real `git ls-remote` call. */
   fetcher?: SdkTagFetcher;
   now?: Date;
   projectRoot: string;
+  /** Pre-probed by the middleware (F9). Absent: probed here. */
+  stateWritable?: boolean | null;
   timeoutMs?: number;
 }
 
@@ -858,8 +1025,11 @@ export async function probeSdkVersion(
 ): Promise<SdkVersionProbe> {
   const env = options.env ?? process.env;
   const now = options.now ?? new Date();
-  const {resolveHealthNoticesConfig} = await import('./sdk-config');
-  const config = resolveHealthNoticesConfig(options.projectRoot, env);
+  let config = options.config;
+  if (config == null) {
+    const {resolveHealthNoticesConfig} = await import('./sdk-config');
+    config = resolveHealthNoticesConfig(options.projectRoot, env);
+  }
   if (!config.enabled) {
     return {
       detail:
@@ -870,7 +1040,9 @@ export async function probeSdkVersion(
   }
 
   const paths = healthNoticesPaths(env);
-  if (!isStateWritable(paths)) {
+  // `null` (not probed, because notices were off) cannot reach here, and would
+  // fall through to a fresh probe rather than being read as writable.
+  if ((options.stateWritable ?? isStateWritable(paths)) !== true) {
     return {
       detail: `state directory is not writable (${paths.dir}), so no check was attempted`,
       reason: 'state-unwritable',
@@ -1191,7 +1363,10 @@ export function decideDoctorHeartbeat(options: {
   }
 
   const lastAt = state.doctorRuns[projectRoot]?.at ?? null;
-  if (lastAt != null && config.doctor.intervalMinutes > 0) {
+  // No `intervalMinutes > 0` guard (F9): the schema is `.positive()`, so a
+  // zero would be a schema violation and the whole file it came from is
+  // discarded before it reaches here.
+  if (lastAt != null) {
     const age = minutesBetween(now, lastAt);
     if (age != null && age >= 0 && age < config.doctor.intervalMinutes) {
       return {reason: 'throttled', status: 'skip'};
@@ -1249,11 +1424,17 @@ export type DoctorHeartbeatOutcome =
 
 export interface DoctorHeartbeatOptions {
   commandName: string | null;
+  /** Pre-resolved by the middleware (F9). Absent: resolved here. */
+  config?: ResolvedHealthNoticesConfig;
+  /** Pre-read by the middleware (F9). Absent: read here. */
+  enrolled?: boolean;
   env?: EnvLike;
   now?: Date;
   projectRoot: string;
   /** Injected by tests. Defaults to a real `doctor --quiet` child process. */
   spawner?: DoctorSpawner;
+  /** Pre-probed by the middleware (F9). Absent: probed here. */
+  stateWritable?: boolean | null;
   timeoutMs?: number;
 }
 
@@ -1333,9 +1514,11 @@ export async function runDoctorHeartbeat(
   const tier = callsiteTier(options.commandName);
   if (tier == null) return {reason: 'not-eligible', status: 'skipped'};
 
-  const {readProjectConfig, resolveHealthNoticesConfig} =
-    await import('./sdk-config');
-  const config = resolveHealthNoticesConfig(projectRoot, env);
+  let config = options.config;
+  if (config == null) {
+    const {resolveHealthNoticesConfig} = await import('./sdk-config');
+    config = resolveHealthNoticesConfig(projectRoot, env);
+  }
   if (!config.enabled) return {reason: 'disabled', status: 'skipped'};
 
   // "Enrolled" means doctor has something to say here. `absent` is the ordinary
@@ -1344,13 +1527,17 @@ export async function runDoctorHeartbeat(
   // on the first and report nothing useful on the second, and a heartbeat must
   // never turn a broken config into a wall of stderr on every command. The
   // CONFIG_SCHEMA doctor check is what reports those, when doctor is asked for.
-  const enrollment = readProjectConfig(projectRoot);
-  if (enrollment.status !== 'ok' && enrollment.status !== 'schema-violation') {
-    return {reason: 'not-enrolled', status: 'skipped'};
+  let enrolled = options.enrolled;
+  if (enrolled == null) {
+    const {readProjectConfig} = await import('./sdk-config');
+    const enrollment = readProjectConfig(projectRoot);
+    enrolled =
+      enrollment.status === 'ok' || enrollment.status === 'schema-violation';
   }
+  if (!enrolled) return {reason: 'not-enrolled', status: 'skipped'};
 
   const paths = healthNoticesPaths(env);
-  if (!isStateWritable(paths)) {
+  if ((options.stateWritable ?? isStateWritable(paths)) !== true) {
     // Same pre-flight as the version probe (D4): a machine that cannot persist
     // the "already ran" stamp would spawn a doctor on EVERY command.
     return {reason: 'state-unwritable', status: 'skipped'};

@@ -121,20 +121,28 @@ async function healthNoticeMiddleware(argv: {
     const {
       callsiteTier,
       commandNameFromArgv,
+      findProjectRoot,
       maybeNotifySdkVersion,
+      resolveHealthNoticesContext,
       runDoctorHeartbeat,
     } = await import('./health-notices');
     const commandName = commandNameFromArgv(argv._);
     if (callsiteTier(commandName) == null) return;
-    const projectRoot = process.cwd();
-    await maybeNotifySdkVersion({commandName, projectRoot});
+    // THE REPO, not the directory (uxwc.5 F2): everything below is keyed by
+    // project root, so resolving it from cwd is what makes a notice throttled
+    // and a heartbeat due once per REPO rather than once per subdirectory.
+    const projectRoot = findProjectRoot(process.cwd());
+    // Config, enrollment and the writability probe, measured ONCE for both
+    // probes (F9) — each of them used to do its own.
+    const context = await resolveHealthNoticesContext({projectRoot});
+    await maybeNotifySdkVersion({commandName, ...context});
     // AWAITED, not detached (home-base-uxwc.3 decision 1). Doctor measures
     // 0.35-1.2s and runs at most once per repo per interval; detaching it would
     // make the stderr ordering nondeterministic and throw away the exit code
     // that decides whether anything is printed at all. It runs AFTER the
     // version notice so the two never interleave, and inside the same catch —
     // neither is ever worth a failed command.
-    await runDoctorHeartbeat({commandName, projectRoot});
+    await runDoctorHeartbeat({commandName, ...context});
   } catch {
     // A health notice is never worth a failed command.
   }

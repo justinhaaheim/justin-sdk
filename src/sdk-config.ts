@@ -26,24 +26,25 @@ import {join, resolve} from 'path';
 
 import {z} from 'zod';
 
-import {HEALTH_NOTICES_ENV_VAR} from './health-notices';
+import {
+  HEALTH_NOTICES_ENV_VAR,
+  PROJECT_CONFIG_FILENAME,
+} from './health-notices';
 
 /** Environment as this module consumes it — `process.env` is assignable. */
 export type EnvLike = Record<string, string | undefined>;
 
-/** Name of the per-repo config file, at the project root. */
-export const PROJECT_CONFIG_FILENAME = 'justin-sdk.config.json';
-
 /**
- * Env var that switches every health notice off for one invocation (D2).
+ * Two names that live in health-notices.ts and are re-exported here, so this
+ * module stays the one place a caller has to look for config names. Neither can
+ * be DEFINED here: the code that needs them earliest — the middleware's walk up
+ * to the repo root, and the env that silences CHILD justin-sdk processes
+ * (`sweep`'s gates, the doctor heartbeat) — is on cli.ts's eager import graph,
+ * and importing this module would put zod back on the hot path.
  *
- * DEFINED in health-notices.ts and re-exported here so this module stays the
- * one place a caller has to look for config names. It cannot be defined here:
- * the code that silences CHILD justin-sdk processes (`sweep`'s gates, the
- * doctor heartbeat) is on cli.ts's eager import graph, and importing this
- * module would put zod back on the hot path.
+ * `PROJECT_CONFIG_FILENAME` is the per-repo config file, at the project root.
  */
-export {HEALTH_NOTICES_ENV_VAR};
+export {HEALTH_NOTICES_ENV_VAR, PROJECT_CONFIG_FILENAME};
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -519,14 +520,34 @@ export function resolveHealthNoticesConfig(
   projectRoot: string,
   env: EnvLike = process.env,
 ): ResolvedHealthNoticesConfig {
+  return resolveHealthNoticesConfigFrom({
+    env,
+    project: readProjectConfig(projectRoot),
+    user: readUserConfig(env),
+  });
+}
+
+/**
+ * The same resolution, for a caller that has ALREADY read both files
+ * (home-base-uxwc.5 F9).
+ *
+ * The health-notice middleware needs the project config for a second reason —
+ * whether the repo is enrolled at all — and reading, parsing and zod-validating
+ * it twice per command is pure waste. This is where the merge actually lives;
+ * {@link resolveHealthNoticesConfig} is the convenience wrapper for everyone
+ * who has not read them.
+ */
+export function resolveHealthNoticesConfigFrom(options: {
+  env?: EnvLike;
+  project: ConfigReadOutcome<{healthNotices?: HealthNoticesFileConfig}>;
+  user: ConfigReadOutcome<{healthNotices?: HealthNoticesFileConfig}>;
+}): ResolvedHealthNoticesConfig {
+  const env = options.env ?? process.env;
   const withUser = mergeHealthNotices(
     DEFAULT_HEALTH_NOTICES,
-    layerFrom(readUserConfig(env)),
+    layerFrom(options.user),
   );
-  const resolved = mergeHealthNotices(
-    withUser,
-    layerFrom(readProjectConfig(projectRoot)),
-  );
+  const resolved = mergeHealthNotices(withUser, layerFrom(options.project));
 
   const ci = env.CI;
   const killed =

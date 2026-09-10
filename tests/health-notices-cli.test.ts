@@ -195,6 +195,72 @@ describe('the notice on an eligible command', () => {
   });
 });
 
+describe('the repo a notice is about (uxwc.5 F2)', () => {
+  /**
+   * An enrolled repo with two subdirectories, and a doctorRuns stamp already
+   * fresh for it — the heartbeat must not spawn a real doctor from this suite,
+   * and the throttle under test here is the NOTICE's.
+   */
+  function enrolledRepo(rigged: Rig): {root: string; subdirs: string[]} {
+    const box = newSandbox();
+    box.writeFile('.git', 'gitdir: elsewhere\n');
+    box.writeFile(
+      'justin-sdk.config.json',
+      JSON.stringify({
+        components: ['base-setup'],
+        lastSynced: '2026-09-10',
+        version: '0.26.0',
+      }),
+    );
+    box.mkdir('src/deep');
+    box.mkdir('scripts');
+
+    const seeded = readSeeded(rigged);
+    seeded.doctorRuns[box.path] = {
+      at: new Date().toISOString(),
+      error: null,
+      errors: 0,
+      exitCode: 0,
+      passed: 10,
+      warnings: 0,
+    };
+    writeFileSync(rigged.stateFile, JSON.stringify(seeded, null, 2) + '\n');
+
+    return {
+      root: box.path,
+      subdirs: [join(box.path, 'src', 'deep'), join(box.path, 'scripts')],
+    };
+  }
+
+  function runFrom(
+    cwd: string,
+    env: Record<string, string>,
+  ): {stderr: string; stdout: string} {
+    const child = spawnSync(process.execPath, [CLI, 'config', 'schema'], {
+      cwd,
+      encoding: 'utf-8',
+      env,
+      input: '',
+    });
+    return {stderr: child.stderr, stdout: child.stdout};
+  }
+
+  test('speaks ONCE per repo, not once per directory it is run from', () => {
+    const rigged = rig();
+    const {root, subdirs} = enrolledRepo(rigged);
+
+    const first = runFrom(subdirs[0] as string, rigged.on);
+    expect(first.stderr).toContain('available (major)');
+
+    // A DIFFERENT subdirectory of the same repo, inside the throttle window.
+    const second = runFrom(subdirs[1] as string, rigged.on);
+    expect(second.stderr).toBe('');
+
+    // And the stamp is keyed by the ROOT — one key, not one per directory.
+    expect(Object.keys(readSeeded(rigged).lastNotified)).toEqual([root]);
+  });
+});
+
 describe('commands that must never carry a notice', () => {
   // Each is run with notices fully ON. Any output difference from the killed
   // run is a bug — these are hooks and machine-read stdout.

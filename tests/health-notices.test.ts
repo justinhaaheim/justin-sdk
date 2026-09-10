@@ -18,9 +18,12 @@ import {
   commandNameFromArgv,
   decideNotice,
   emptyState,
+  findProjectRoot,
   healthNoticesPaths,
   isStateWritable,
+  maybeNotifySdkVersion,
   probeSdkVersion,
+  pruneState,
   readState,
   recordNotified,
   renderNotice,
@@ -124,6 +127,57 @@ describe('xdgStateHome', () => {
     const paths = healthNoticesPaths({XDG_STATE_HOME: '/x/state'});
     expect(paths.file).toBe('/x/state/justin-sdk/health-notices.json');
     expect(paths.dir).toBe('/x/state/justin-sdk');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findProjectRoot — the repo a command is about (uxwc.5 F2)
+// ---------------------------------------------------------------------------
+
+describe('findProjectRoot', () => {
+  /** A repo dir with a `.git` marker and, optionally, an SDK config. */
+  function repo(options: {config: boolean}): Sandbox {
+    const box = newSandbox();
+    box.writeFile('.git', 'gitdir: elsewhere\n');
+    if (options.config) {
+      box.writeFile(
+        'justin-sdk.config.json',
+        JSON.stringify({
+          components: [],
+          lastSynced: '2026-09-10',
+          version: '0',
+        }),
+      );
+    }
+    return box;
+  }
+
+  test('a SUBDIRECTORY resolves to the repo root that holds the config', () => {
+    const box = repo({config: true});
+    box.mkdir('src/deep/deeper');
+    expect(findProjectRoot(join(box.path, 'src/deep/deeper'))).toBe(box.path);
+  });
+
+  test('the root itself resolves to itself', () => {
+    const box = repo({config: true});
+    expect(findProjectRoot(box.path)).toBe(box.path);
+  });
+
+  test('the walk STOPS at a repo boundary and never escapes into a parent repo', () => {
+    // The measured case: ~/Dev/home-base/projects/justin-sdk is a submodule
+    // with no config of its own, and home-base above it HAS one. Escaping would
+    // make the heartbeat spawn a doctor for a repo Justin is not in.
+    const outer = repo({config: true});
+    const inner = join(outer.path, 'projects', 'inner');
+    mkdirSync(join(inner, 'src'), {recursive: true});
+    writeFileSync(join(inner, '.git'), 'gitdir: elsewhere\n');
+    expect(findProjectRoot(join(inner, 'src'))).toBe(join(inner, 'src'));
+  });
+
+  test('an unenrolled directory falls back to itself, not to an ancestor', () => {
+    const box = repo({config: false});
+    box.mkdir('src');
+    expect(findProjectRoot(join(box.path, 'src'))).toBe(join(box.path, 'src'));
   });
 });
 
@@ -233,6 +287,67 @@ describe('writeState', () => {
     writeFileSync(join(box.path, 'justin-sdk'), 'not a directory');
     const paths = healthNoticesPaths({XDG_STATE_HOME: box.path});
     expect(writeState(paths, emptyState())).toBe(false);
+  });
+});
+
+describe('pruneState (uxwc.5 F2)', () => {
+  const NOW = AT('2026-09-10T12:00:00.000Z');
+  const RECENT = '2026-09-09T12:00:00.000Z';
+  const ANCIENT = '2026-01-01T12:00:00.000Z';
+
+  function run(row: Partial<HealthNoticesState>): HealthNoticesState {
+    return pruneState({...emptyState(), ...row}, NOW);
+  }
+
+  test('drops a repo whose newest notice stamp is older than the window', () => {
+    const pruned = run({
+      lastNotified: {'/old': {minor: ANCIENT}, '/new': {minor: RECENT}},
+    });
+    expect(Object.keys(pruned.lastNotified)).toEqual(['/new']);
+  });
+
+  test('a repo with ONE live kind keeps the whole entry', () => {
+    // The newest stamp decides: one quiet kind must not retire a repo that is
+    // still being notified about another.
+    const pruned = run({
+      lastNotified: {'/repo': {major: ANCIENT, minor: RECENT}},
+    });
+    expect(pruned.lastNotified['/repo']).toEqual({
+      major: ANCIENT,
+      minor: RECENT,
+    });
+  });
+
+  test('drops a stale doctorRuns row and keeps a fresh one', () => {
+    const row = (at: string) => ({
+      at,
+      error: null,
+      errors: 0,
+      exitCode: 0,
+      passed: 1,
+      warnings: 0,
+    });
+    const pruned = run({
+      doctorRuns: {'/new': row(RECENT), '/old': row(ANCIENT)},
+    });
+    expect(Object.keys(pruned.doctorRuns)).toEqual(['/new']);
+  });
+
+  test('an UNPARSEABLE stamp is never pruned — unreadable is not old', () => {
+    const pruned = run({lastNotified: {'/repo': {minor: 'not a date'}}});
+    expect(pruned.lastNotified['/repo']).toEqual({minor: 'not a date'});
+  });
+
+  test('writeState prunes on the way out, so no caller can forget to', () => {
+    const {paths} = stateEnv();
+    const state: HealthNoticesState = {
+      ...emptyState(),
+      lastNotified: {'/old': {minor: ANCIENT}, '/new': {minor: RECENT}},
+    };
+    expect(writeState(paths, state, NOW)).toBe(true);
+    const outcome = readState(paths);
+    if (outcome.status !== 'ok') throw new Error('unreachable');
+    expect(Object.keys(outcome.state.lastNotified)).toEqual(['/new']);
   });
 });
 
@@ -655,11 +770,26 @@ describe('decideNotice', () => {
     });
   });
 
-  test('disabled beats everything', () => {
-    expect(decide({cfg: config({enabled: false}), tier: 2})).toEqual({
-      reason: 'disabled',
-      status: 'silent',
+  test('a disabled config is stopped by the PROBE, before decideNotice runs', async () => {
+    // decideNotice has no `enabled` gate of its own (uxwc.5 F9) — the probe
+    // returns `skipped: disabled` and never fetches, which is the gate that
+    // matters. Asserted through the orchestrator, so the silence is the one a
+    // command would actually get.
+    const {env, paths} = stateEnv();
+    const project = newSandbox();
+    const {calls, fetcher} = countingFetcher(OK_026);
+
+    const outcome = await maybeNotifySdkVersion({
+      commandName: 'signal',
+      env: {...env, JUSTIN_SDK_HEALTH_NOTICES: 'off'},
+      fetcher,
+      now,
+      projectRoot: project.path,
     });
+
+    expect(outcome).toEqual({reason: 'disabled', status: 'silent'});
+    expect(calls).toHaveLength(0);
+    expect(readState(paths).status).toBe('absent');
   });
 
   test('nothing newer is silent, and says so distinctly from "not allowed"', () => {
