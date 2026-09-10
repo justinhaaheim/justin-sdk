@@ -1079,6 +1079,21 @@ export type DoctorSpawner = (
 ) => Promise<DoctorSpawnOutcome>;
 
 /**
+ * Why an outcome carries no verdict, or null when the child ran to completion.
+ * The ONE place that decides "did this measure anything", so the line printed
+ * and the reason recorded can never disagree.
+ */
+export function doctorFailureReason(
+  outcome: DoctorSpawnOutcome,
+): string | null {
+  if (outcome.error != null) return outcome.error;
+  // Belt and braces: the pair invariant makes this unreachable from the real
+  // spawner, and an unreachable "no exit code" must still not read as success.
+  if (outcome.exitCode == null) return 'the child produced no exit code';
+  return null;
+}
+
+/**
  * Counts read out of doctor's summary. `null` means the summary did not say —
  * never `0`, which is a measurement (see {@link parseDoctorSummary}).
  */
@@ -1204,9 +1219,9 @@ export function renderDoctorHeartbeat(options: {
 }): string[] {
   const {counts, outcome, projectRoot, showOnPass} = options;
 
-  if (outcome.error != null || outcome.exitCode == null) {
-    const reason = outcome.error ?? 'the child produced no exit code';
-    return [`justin-sdk doctor heartbeat could not run: ${reason}`];
+  const failure = doctorFailureReason(outcome);
+  if (failure != null) {
+    return [`justin-sdk doctor heartbeat could not run: ${failure}`];
   }
 
   if (outcome.exitCode !== 0) {
@@ -1375,14 +1390,19 @@ export async function runDoctorHeartbeat(
     };
   }
 
-  const ran = outcome.error == null && outcome.exitCode != null;
-  const counts = ran
-    ? parseDoctorSummary(`${outcome.stdout}${outcome.stderr}`)
-    : {errors: null, passed: null, warnings: null};
+  // A child that did not finish told us NOTHING, so its partial output is not
+  // parsed at all: `--quiet` output truncated mid-run can still contain a pass
+  // count, and filing a killed doctor as "9 passed, nothing failed" is exactly
+  // the manufactured-evidence failure of critical rule 6.
+  const failure = doctorFailureReason(outcome);
+  const counts =
+    failure == null
+      ? parseDoctorSummary(`${outcome.stdout}${outcome.stderr}`)
+      : {errors: null, passed: null, warnings: null};
 
   const row: DoctorRunRow = {
     at: now.toISOString(),
-    error: outcome.error,
+    error: failure,
     errors: counts.errors,
     exitCode: outcome.exitCode,
     passed: counts.passed,

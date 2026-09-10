@@ -695,6 +695,31 @@ describe('runDoctorHeartbeat', () => {
     expect(result.row.exitCode).toBeNull();
   });
 
+  test('an outcome with no error AND no exit code records a REASON, not a null', async () => {
+    // Unreachable from the real spawner, but the type permits it, and a row
+    // reading {error: null, exitCode: null} would be silently ambiguous.
+    const rigged = rig();
+    const {spawner} = spy({
+      error: null,
+      exitCode: null,
+      stderr: '',
+      stdout: QUIET_ALL_PASS,
+    });
+
+    const {result} = await captureStderr(() =>
+      runDoctorHeartbeat({
+        commandName: 'signal',
+        env: rigged.env,
+        projectRoot: rigged.projectRoot,
+        spawner,
+      }),
+    );
+
+    if (result.status !== 'ran') throw new Error('unreachable');
+    expect(result.row.error).toBe('the child produced no exit code');
+    expect(result.row.passed).toBeNull();
+  });
+
   test('DOCTOR ITSELF spawns nothing, through the real orchestrator', async () => {
     const rigged = rig();
     const {calls, spawner} = spy(passed());
