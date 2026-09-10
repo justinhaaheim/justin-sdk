@@ -146,7 +146,7 @@ describe('CONFIG_SCHEMA doctor check', () => {
     expect(status).toBe(0);
   });
 
-  test('an unparseable project config is reported as bad JSON, not as absent', () => {
+  test('an unparseable USER config is reported as bad JSON, not as absent', () => {
     const box = newSandbox();
     box.writeFile('CLAUDE.md', '# test\n');
     box.writeFile(
