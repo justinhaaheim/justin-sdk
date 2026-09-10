@@ -651,6 +651,8 @@ export type NoticeOutcome =
   | {kind: VersionBumpKind; lines: string[]; status: 'notify'}
   | {
       reason:
+        /** We tried to find out and could not. NOT the same as "nothing newer". */
+        | 'check-failed'
         | 'disabled'
         | 'nothing-newer'
         | 'not-eligible'
@@ -685,7 +687,13 @@ export function decideNotice(options: {
   if (!config.enabled) return {reason: 'disabled', status: 'silent'};
   if (tier == null) return {reason: 'not-eligible', status: 'silent'};
   if (result.kind == null || result.latest == null) {
-    return {reason: 'nothing-newer', status: 'silent'};
+    // Both are silent, but they are not the same fact. A failed check is
+    // reported by doctor's SDK_VERSION, not by a notice in front of every
+    // command — but it must not be FILED as "you are up to date".
+    return {
+      reason: result.error != null ? 'check-failed' : 'nothing-newer',
+      status: 'silent',
+    };
   }
 
   const kindConfig = config.sdkVersion[result.kind];
@@ -860,6 +868,10 @@ export async function maybeNotifySdkVersion(
   if (decision.status !== 'notify') return decision;
 
   printNotice(decision.lines);
+  // The write's boolean is deliberately not acted on: the notice has already
+  // been printed, and there is no undo. A failure here costs one repeated
+  // notice, and `isStateWritable` above has already ruled out the case where it
+  // would fail every time.
   writeState(
     healthNoticesPaths(options.env ?? process.env),
     recordNotified(probe.state, options.projectRoot, decision.kind, now),

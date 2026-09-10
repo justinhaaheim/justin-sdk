@@ -24,12 +24,15 @@ import {
   readState,
   recordNotified,
   renderNotice,
+  sdkVersionVerdict,
   STATE_SCHEMA_VERSION,
   tierAllows,
   UPGRADE_COMMAND,
   writeState,
   xdgStateHome,
   type HealthNoticesState,
+  type SdkVersionCheckResult,
+  type SdkVersionProbe,
 } from '../src/health-notices';
 import {
   DEFAULT_HEALTH_NOTICES,
@@ -662,6 +665,25 @@ describe('decideNotice', () => {
     expect(outcome).toEqual({reason: 'nothing-newer', status: 'silent'});
   });
 
+  test('a FAILED check is silent too — but is NOT filed as "nothing newer"', () => {
+    const outcome = decideNotice({
+      config: config(),
+      now,
+      projectRoot: '/repo',
+      result: {
+        checkedAt: '2026-09-10T12:00:00.000Z',
+        current: '0.24.0',
+        error: 'git ls-remote timed out after 5000ms',
+        kind: null,
+        latest: null,
+        latestMeasuredAt: null,
+      },
+      state: emptyState(),
+      tier: 3,
+    });
+    expect(outcome).toEqual({reason: 'check-failed', status: 'silent'});
+  });
+
   test('spoken once, then throttled for the configured window, then spoken again', () => {
     const first = decide({tier: 3});
     expect(first.status).toBe('notify');
@@ -722,6 +744,126 @@ describe('decideNotice', () => {
       reason: 'throttled',
       status: 'silent',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The doctor verdict (D5, D6)
+// ---------------------------------------------------------------------------
+
+describe('sdkVersionVerdict', () => {
+  const now = AT('2026-09-10T12:00:00.000Z');
+
+  function checked(
+    result: Partial<SdkVersionCheckResult>,
+    cfg = config(),
+  ): SdkVersionProbe {
+    return {
+      config: cfg,
+      result: {
+        checkedAt: '2026-09-10T11:30:00.000Z',
+        current: '0.24.0',
+        error: null,
+        kind: null,
+        latest: null,
+        latestMeasuredAt: null,
+        ...result,
+      },
+      state: emptyState(),
+      status: 'checked',
+    };
+  }
+
+  test('a newer version names the kind and how old the check is', () => {
+    const verdict = sdkVersionVerdict(
+      checked({
+        kind: 'minor',
+        latest: '0.26.0',
+        latestMeasuredAt: '2026-09-10T11:30:00.000Z',
+      }),
+      now,
+    );
+    expect(verdict.status).toBe('newer');
+    expect(verdict.message).toContain('0.24.0 → 0.26.0 available (minor)');
+  });
+
+  test('newer but promptTier 1 is a PASS with an informational message (D5)', () => {
+    const cfg = config({
+      sdkVersion: {
+        ...DEFAULT_HEALTH_NOTICES.sdkVersion,
+        minor: {promptTier: 1, throttleMinutes: 60},
+      },
+    });
+    const verdict = sdkVersionVerdict(
+      checked(
+        {
+          kind: 'minor',
+          latest: '0.26.0',
+          latestMeasuredAt: '2026-09-10T11:30:00.000Z',
+        },
+        cfg,
+      ),
+      now,
+    );
+    expect(verdict.status).toBe('newer');
+    if (verdict.status !== 'newer') throw new Error('unreachable');
+    expect(verdict.silenced).toBe(true);
+    expect(verdict.message).toContain('promptTier 1');
+  });
+
+  test('up to date says which version, and how long ago it was checked', () => {
+    const verdict = sdkVersionVerdict(
+      checked({
+        latest: '0.24.0',
+        latestMeasuredAt: '2026-09-10T11:30:00.000Z',
+      }),
+      now,
+    );
+    expect(verdict.status).toBe('up-to-date');
+    expect(verdict.message).toContain('is the latest tag');
+    expect(verdict.message).toContain('30m ago');
+  });
+
+  test('a FAILED check is "unknown" — never up-to-date — and names the error', () => {
+    const verdict = sdkVersionVerdict(
+      checked({error: 'git ls-remote timed out after 5000ms'}),
+      now,
+    );
+    expect(verdict.status).toBe('unknown');
+    expect(verdict.message).toContain('timed out');
+    expect(verdict.message).toContain('has ever been read successfully');
+  });
+
+  test('a failed check with a cached answer reports BOTH the error and the last known latest', () => {
+    const verdict = sdkVersionVerdict(
+      checked({
+        error: 'offline',
+        kind: 'minor',
+        latest: '0.26.0',
+        latestMeasuredAt: '2026-09-10T09:00:00.000Z',
+      }),
+      now,
+    );
+    expect(verdict.status).toBe('unknown');
+    expect(verdict.message).toContain('offline');
+    expect(verdict.message).toContain('Last known latest: 0.26.0');
+    expect(verdict.message).toContain('3h ago');
+  });
+
+  test('never checked is "unknown", not "up to date"', () => {
+    const verdict = sdkVersionVerdict(checked({checkedAt: null}), now);
+    expect(verdict.status).toBe('unknown');
+    expect(verdict.message).toContain('unknown');
+  });
+
+  test('a SKIPPED probe is "not-checked" and says so — never that the SDK is current', () => {
+    const verdict = sdkVersionVerdict(
+      {detail: 'health notices are off', reason: 'disabled', status: 'skipped'},
+      now,
+    );
+    expect(verdict.status).toBe('not-checked');
+    expect(verdict.message).toContain('not checked');
+    expect(verdict.message).not.toContain('latest tag');
   });
 });
 
