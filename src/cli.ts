@@ -117,11 +117,23 @@ async function healthNoticeMiddleware(argv: {
   _: readonly (number | string)[];
 }): Promise<void> {
   try {
-    const {callsiteTier, commandNameFromArgv, maybeNotifySdkVersion} =
-      await import('./health-notices');
+    const {
+      callsiteTier,
+      commandNameFromArgv,
+      maybeNotifySdkVersion,
+      runDoctorHeartbeat,
+    } = await import('./health-notices');
     const commandName = commandNameFromArgv(argv._);
     if (callsiteTier(commandName) == null) return;
-    await maybeNotifySdkVersion({commandName, projectRoot: process.cwd()});
+    const projectRoot = process.cwd();
+    await maybeNotifySdkVersion({commandName, projectRoot});
+    // AWAITED, not detached (home-base-uxwc.3 decision 1). Doctor measures
+    // 0.35-1.2s and runs at most once per repo per interval; detaching it would
+    // make the stderr ordering nondeterministic and throw away the exit code
+    // that decides whether anything is printed at all. It runs AFTER the
+    // version notice so the two never interleave, and inside the same catch —
+    // neither is ever worth a failed command.
+    await runDoctorHeartbeat({commandName, projectRoot});
   } catch {
     // A health notice is never worth a failed command.
   }

@@ -195,7 +195,16 @@ describe('writeState', () => {
   test('round-trips a full state', () => {
     const {paths} = stateEnv();
     const state: HealthNoticesState = {
-      doctorRuns: {'/repo': {at: 'T1', errors: 0, passed: 18, warnings: 1}},
+      doctorRuns: {
+        '/repo': {
+          at: 'T1',
+          error: null,
+          errors: 0,
+          exitCode: 0,
+          passed: 18,
+          warnings: 1,
+        },
+      },
       lastCheck: {at: 'T2', error: null, latest: '0.26.0', ok: true},
       lastKnownLatest: {at: 'T2', version: '0.26.0'},
       lastNotified: {'/repo': {minor: 'T3'}},

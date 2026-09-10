@@ -1,6 +1,11 @@
 /**
  * health-notices.ts — the mechanism behind "a newer justin-sdk is available"
- * (home-base-uxwc D1, D4, D5, D7).
+ * and "doctor has not run in this repo for an hour" (home-base-uxwc D1, D4, D5,
+ * D7, D8).
+ *
+ * TWO PROBES, ONE MECHANISM: the SDK version check and the doctor heartbeat
+ * share the tiers, the throttles, the config and the state file. Adding a third
+ * should mean adding a section here, not a second copy of all of that.
  *
  * Justin's problem, in his words (2026-09-09): "I have not been consistent and
  * diligent about upgrading justin-sdk across my projects" — troubleshooting
@@ -46,6 +51,33 @@ import type {
   ResolvedHealthNoticesConfig,
 } from './sdk-config';
 import type {SdkTagFetcher} from './sdk-latest';
+
+/**
+ * Env var that switches every health notice off for one invocation (D2).
+ *
+ * Declared HERE, and re-exported by `sdk-config`, because the callers that must
+ * silence a CHILD justin-sdk process — `sweep`'s gates (home-base-uxwc.6), the
+ * doctor heartbeat's own child — sit on `cli.ts`'s EAGER import graph, and
+ * `sdk-config` brings 12-13ms of zod with it (see the file header).
+ */
+export const HEALTH_NOTICES_ENV_VAR = 'JUSTIN_SDK_HEALTH_NOTICES';
+
+/** The value of {@link HEALTH_NOTICES_ENV_VAR} that means "stay quiet". */
+export const HEALTH_NOTICES_OFF = 'off';
+
+/**
+ * `base`, with the kill switch set — the env any child justin-sdk (or `bun run`
+ * script that may reach one) must be spawned with.
+ *
+ * Two callers, one reason each: the heartbeat's own `doctor --quiet` child must
+ * not start a heartbeat of its own, and `sweep`'s per-worktree gates must not
+ * nag about an upgrade they are in the middle of performing (uxwc.6).
+ */
+export function silencedChildEnv(
+  base: EnvLike = process.env,
+): Record<string, string | undefined> {
+  return {...base, [HEALTH_NOTICES_ENV_VAR]: HEALTH_NOTICES_OFF};
+}
 
 // ---------------------------------------------------------------------------
 // Command classification (D1)
@@ -210,12 +242,27 @@ export interface LastKnownLatestRow {
   version: string;
 }
 
-/** One heartbeat doctor run, per repo. Written by home-base-uxwc.3. */
+/**
+ * One heartbeat doctor run, per repo (D8).
+ *
+ * EVERY field but `at` is nullable, and that is the whole point (critical rule
+ * 6). A doctor that could not be spawned, was killed by the timeout, or printed
+ * a summary this parser does not recognise has told us NOTHING about how many
+ * checks passed — and `0` is a legal, reassuring answer to that question. The
+ * counts are `null` in exactly those cases and `error` names the reason, so
+ * "ran clean" and "never ran" can never be read as the same row.
+ *
+ * `exitCode` is null for the same reason: a child that did not run has no exit
+ * code, and 0 would say it succeeded.
+ */
 export interface DoctorRunRow {
   at: string;
-  errors: number;
-  passed: number;
-  warnings: number;
+  /** Why the run produced no verdict. null iff the child ran to completion. */
+  error: string | null;
+  errors: number | null;
+  exitCode: number | null;
+  passed: number | null;
+  warnings: number | null;
 }
 
 export interface HealthNoticesState {
@@ -301,6 +348,17 @@ function optionalString(value: unknown): string | null | undefined {
 }
 
 /**
+ * A field that may be a number, an explicit null, or missing entirely — the
+ * three shapes a `DoctorRunRow` count can legitimately take. `undefined` is the
+ * REJECT signal (a wrong type was present), never "absent": absent reads as
+ * null, which is what an unknown count is.
+ */
+function optionalNumber(value: unknown): number | null | undefined {
+  if (value === null || value === undefined) return null;
+  return typeof value === 'number' ? value : undefined;
+}
+
+/**
  * Validate by hand rather than with zod: this module is on the hook hot path
  * (see the file header), and the shape is four fields deep.
  *
@@ -349,20 +407,25 @@ function parseState(value: unknown): HealthNoticesState | null {
   const doctorRuns: HealthNoticesState['doctorRuns'] = {};
   for (const [root, row] of Object.entries(value.doctorRuns)) {
     if (!isRecord(row)) return null;
+    if (typeof row.at !== 'string') return null;
+    // Only `at` is required. A row written by a SDK that recorded fewer fields
+    // reads as "we know when, we do not know what" rather than as a corrupt
+    // state file that throws the lastNotified throttles away with it.
+    const error = row.error === undefined ? null : optionalString(row.error);
+    const errors = optionalNumber(row.errors);
+    const exitCode = optionalNumber(row.exitCode);
+    const passed = optionalNumber(row.passed);
+    const warnings = optionalNumber(row.warnings);
     if (
-      typeof row.at !== 'string' ||
-      typeof row.errors !== 'number' ||
-      typeof row.passed !== 'number' ||
-      typeof row.warnings !== 'number'
+      error === undefined ||
+      errors === undefined ||
+      exitCode === undefined ||
+      passed === undefined ||
+      warnings === undefined
     ) {
       return null;
     }
-    doctorRuns[root] = {
-      at: row.at,
-      errors: row.errors,
-      passed: row.passed,
-      warnings: row.warnings,
-    };
+    doctorRuns[root] = {at: row.at, error, errors, exitCode, passed, warnings};
   }
 
   return {
@@ -960,4 +1023,389 @@ export function sdkVersionVerdict(
     silenced,
     status: 'newer',
   };
+}
+
+// ---------------------------------------------------------------------------
+// The doctor heartbeat (D8) — home-base-uxwc.3
+// ---------------------------------------------------------------------------
+
+/**
+ * WHY A HEARTBEAT. Justin, 2026-09-09: a beads database was corrupt for weeks
+ * with nothing saying so — "it is hard to overstate the benefit of NOT running
+ * into a bug that is hard to diagnose". `doctor` already knows how to find that
+ * class of problem; the gap is cadence. SessionStart runs it once per Claude
+ * session, which misses every shell Justin works in and every session that runs
+ * for hours. This runs it again, at most once per repo per interval, in front
+ * of a command he was running anyway.
+ *
+ * IT INHERITS THE FOUR INVARIANTS AT THE TOP OF THIS FILE, and adds one:
+ * a heartbeat never spawns a heartbeat. The child carries the kill switch
+ * ({@link silencedChildEnv}) AND is `doctor`, which is excluded by name below —
+ * two independent guards, because an infinite fork bomb is the one failure here
+ * that would not be merely annoying.
+ */
+
+/** What to run for the full, unabridged version of the heartbeat's output. */
+export const DOCTOR_COMMAND = 'bunx @justinhaaheim/justin-sdk doctor';
+
+/** How long the child gets before it is killed (D3). */
+export const DOCTOR_HEARTBEAT_TIMEOUT_MS = 60_000;
+
+export interface DoctorSpawnRequest {
+  args: readonly string[];
+  command: string;
+  cwd: string;
+  env: Record<string, string | undefined>;
+  timeoutMs: number;
+}
+
+/**
+ * What a spawn attempt produced.
+ *
+ * `error` and `exitCode` are a PAIR: exactly one is non-null. A child that
+ * could not be started, or was killed by the timeout, has no exit code — and
+ * `0` would say it succeeded (critical rule 6).
+ */
+export interface DoctorSpawnOutcome {
+  error: string | null;
+  exitCode: number | null;
+  stderr: string;
+  stdout: string;
+}
+
+/** The injection seam. Tests pass a fake; nothing else does. */
+export type DoctorSpawner = (
+  request: DoctorSpawnRequest,
+) => Promise<DoctorSpawnOutcome>;
+
+/**
+ * Counts read out of doctor's summary. `null` means the summary did not say —
+ * never `0`, which is a measurement (see {@link parseDoctorSummary}).
+ */
+export interface DoctorSummaryCounts {
+  errors: number | null;
+  passed: number | null;
+  warnings: number | null;
+}
+
+/** ANSI SGR sequences, built from a char code so this file holds no ESC byte. */
+const ANSI_SGR = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
+
+function matchCount(text: string, word: string): number | null {
+  const found = new RegExp(`^\\s*(\\d+) ${word}\\s*$`, 'm').exec(text);
+  const digits = found?.[1];
+  if (digits == null) return null;
+  const value = Number.parseInt(digits, 10);
+  return Number.isNaN(value) ? null : value;
+}
+
+/**
+ * Read `doctor --quiet`'s summary. Pure.
+ *
+ * `--quiet` has TWO shapes, and both are handled here because both are normal:
+ *
+ *  - all-pass, nothing skipped: one line, `✓ All 10 checks passed. [35ms]`;
+ *  - anything else: the failing/warning checks, then ` 9 pass` / ` 1 warn` /
+ *    ` 1 fail` (each line printed ONLY when its count is non-zero), then the
+ *    `Ran 10 checks.` footer.
+ *
+ * THE FOOTER IS THE ANCHOR. `printSummary` writes it last, so its presence is
+ * what makes a missing ` 1 warn` line mean "zero warnings" rather than "output
+ * truncated". Without either shape's anchor every count is null: a summary we
+ * did not recognise has told us nothing, and reporting it as 0/0/0 would file a
+ * killed child as a clean run.
+ */
+export function parseDoctorSummary(output: string): DoctorSummaryCounts {
+  const text = output.replace(ANSI_SGR, '');
+
+  const allPassed = /^.*All (\d+) checks passed\./m.exec(text);
+  if (allPassed?.[1] != null) {
+    return {errors: 0, passed: Number.parseInt(allPassed[1], 10), warnings: 0};
+  }
+
+  if (!/^.*Ran \d+ checks\./m.test(text)) {
+    return {errors: null, passed: null, warnings: null};
+  }
+  return {
+    errors: matchCount(text, 'fail') ?? 0,
+    passed: matchCount(text, 'pass') ?? 0,
+    warnings: matchCount(text, 'warn') ?? 0,
+  };
+}
+
+/** Why a heartbeat did not happen. Each is a different fact worth asserting. */
+export type DoctorHeartbeatSkipReason =
+  | 'disabled'
+  /** The command IS doctor — running it again would be absurd, and recursive. */
+  | 'is-doctor'
+  | 'not-eligible'
+  /** No readable `justin-sdk.config.json`: doctor has nothing to check here. */
+  | 'not-enrolled'
+  | 'state-unwritable'
+  | 'throttled'
+  | 'tier';
+
+export type DoctorHeartbeatDecision =
+  {reason: DoctorHeartbeatSkipReason; status: 'skip'} | {status: 'run'};
+
+/**
+ * The pure gate (D2's order, minus the two steps that need the filesystem):
+ * switched on, an eligible callsite, not doctor itself, loud enough for the
+ * configured tier, and not inside the interval since the last run here.
+ *
+ * As with the notice throttle, an UNPARSEABLE or FUTURE `at` does not throttle:
+ * a stamp only a run can rewrite must never be able to silence a repo forever.
+ */
+export function decideDoctorHeartbeat(options: {
+  commandName: string | null;
+  config: ResolvedHealthNoticesConfig;
+  now: Date;
+  projectRoot: string;
+  state: HealthNoticesState;
+}): DoctorHeartbeatDecision {
+  const {commandName, config, now, projectRoot, state} = options;
+  if (!config.enabled) return {reason: 'disabled', status: 'skip'};
+
+  const tier = callsiteTier(commandName);
+  if (tier == null) return {reason: 'not-eligible', status: 'skip'};
+  if (canonicalCommandName(commandName ?? '') === 'doctor') {
+    return {reason: 'is-doctor', status: 'skip'};
+  }
+  if (!tierAllows(tier, config.doctor.promptTier)) {
+    return {reason: 'tier', status: 'skip'};
+  }
+
+  const lastAt = state.doctorRuns[projectRoot]?.at ?? null;
+  if (lastAt != null && config.doctor.intervalMinutes > 0) {
+    const age = minutesBetween(now, lastAt);
+    if (age != null && age >= 0 && age < config.doctor.intervalMinutes) {
+      return {reason: 'throttled', status: 'skip'};
+    }
+  }
+  return {status: 'run'};
+}
+
+/**
+ * What the heartbeat says out loud (D4). Pure, so every branch is assertable
+ * without capturing a stream.
+ *
+ *  - the child never ran        → one line naming the reason;
+ *  - non-zero exit              → a header, the child's output VERBATIM, and
+ *                                 how to re-run it in full;
+ *  - exit 0                     → nothing, unless `showOnPass`, and then one
+ *                                 line. Warnings live here: they are not
+ *                                 errors, and doctor already exits 0 for them.
+ */
+export function renderDoctorHeartbeat(options: {
+  counts: DoctorSummaryCounts;
+  outcome: DoctorSpawnOutcome;
+  projectRoot: string;
+  showOnPass: boolean;
+}): string[] {
+  const {counts, outcome, projectRoot, showOnPass} = options;
+
+  if (outcome.error != null || outcome.exitCode == null) {
+    const reason = outcome.error ?? 'the child produced no exit code';
+    return [`justin-sdk doctor heartbeat could not run: ${reason}`];
+  }
+
+  if (outcome.exitCode !== 0) {
+    // stdout then stderr, concatenated — the same shape sweep's `run` uses.
+    // Their relative interleaving is lost; the content is not.
+    const body = `${outcome.stdout}${outcome.stderr}`.replace(/\n+$/, '');
+    return [
+      `justin-sdk doctor (heartbeat) found errors in ${projectRoot}:`,
+      ...(body === '' ? [] : body.split('\n')),
+      `  full run: ${DOCTOR_COMMAND}`,
+    ];
+  }
+
+  if (!showOnPass) return [];
+  const summary =
+    counts.passed == null || counts.warnings == null
+      ? 'summary unparsed'
+      : `${counts.passed} pass, ${counts.warnings} warn`;
+  return [`✅ justin-sdk doctor: ${summary}`];
+}
+
+export type DoctorHeartbeatOutcome =
+  | {lines: string[]; row: DoctorRunRow; status: 'ran'}
+  | {reason: DoctorHeartbeatSkipReason; status: 'skipped'};
+
+export interface DoctorHeartbeatOptions {
+  commandName: string | null;
+  env?: EnvLike;
+  now?: Date;
+  projectRoot: string;
+  /** Injected by tests. Defaults to a real `doctor --quiet` child process. */
+  spawner?: DoctorSpawner;
+  timeoutMs?: number;
+}
+
+/** `bun <this src dir>/cli.ts doctor --quiet` — the SAME SDK that is running. */
+export function doctorHeartbeatRequest(options: {
+  cwd: string;
+  env: EnvLike;
+  timeoutMs: number;
+}): DoctorSpawnRequest {
+  return {
+    // `cli.ts`, not the `justin-sdk` on PATH: the running SDK is the one whose
+    // checks this build knows about, and a bunx lookup would be both slower and
+    // a different (possibly older, possibly missing) version. Same shape as
+    // `captureCommandList` in skill.ts.
+    args: [resolve(import.meta.dirname, 'cli.ts'), 'doctor', '--quiet'],
+    command: process.execPath,
+    cwd: options.cwd,
+    env: silencedChildEnv(options.env),
+    timeoutMs: options.timeoutMs,
+  };
+}
+
+async function spawnDoctor(
+  request: DoctorSpawnRequest,
+): Promise<DoctorSpawnOutcome> {
+  const {spawnSync} = await import('node:child_process');
+  const child = spawnSync(request.command, [...request.args], {
+    cwd: request.cwd,
+    encoding: 'utf-8',
+    env: request.env,
+    // Doctor's quiet output is small, but a check that dumps a diff is not.
+    maxBuffer: 16 * 1024 * 1024,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: request.timeoutMs,
+  });
+  const stderr = child.stderr ?? '';
+  const stdout = child.stdout ?? '';
+  if (child.error != null) {
+    return {error: child.error.message, exitCode: null, stderr, stdout};
+  }
+  if (child.status == null) {
+    // Killed by a signal (measured: the timeout arrives as SIGTERM with a
+    // non-null `error`, but a signal from anywhere else does not).
+    return {
+      error: `doctor was killed by ${child.signal ?? 'an unknown signal'}`,
+      exitCode: null,
+      stderr,
+      stdout,
+    };
+  }
+  return {error: null, exitCode: child.status, stderr, stdout};
+}
+
+/**
+ * Run doctor for this repo if it is due, say what needs saying, and record it.
+ * Never writes stdout and never changes the caller's exit code. Everything it
+ * calls is non-throwing by construction, and the one foreign thing — an
+ * injected spawner — is caught and turned into a recorded failure below.
+ *
+ * WHY IT RE-READS STATE rather than taking it from the caller: the version
+ * notice that runs immediately before this one may have just written a fresh
+ * throttle stamp, and writing back a state captured before that would erase it.
+ * The read is a few hundred bytes and happens at most once per command.
+ *
+ * WHY THE RUN IS RECORDED EVEN WHEN IT FAILED: the same rule that stops an
+ * offline laptop re-fetching on every command (invariant 3). A doctor that
+ * cannot be spawned here will not be spawnable on the next command either, and
+ * an unrecorded failure would retry — with its 60s timeout — forever.
+ */
+export async function runDoctorHeartbeat(
+  options: DoctorHeartbeatOptions,
+): Promise<DoctorHeartbeatOutcome> {
+  const env = options.env ?? process.env;
+  const now = options.now ?? new Date();
+  const {projectRoot} = options;
+
+  const tier = callsiteTier(options.commandName);
+  if (tier == null) return {reason: 'not-eligible', status: 'skipped'};
+
+  const {readProjectConfig, resolveHealthNoticesConfig} =
+    await import('./sdk-config');
+  const config = resolveHealthNoticesConfig(projectRoot, env);
+  if (!config.enabled) return {reason: 'disabled', status: 'skipped'};
+
+  // "Enrolled" means doctor has something to say here. `absent` is the ordinary
+  // case for any directory that is not one of Justin's repos. `invalid-json`
+  // and `unreadable` are excluded too — deliberately: `runDoctor` would throw
+  // on the first and report nothing useful on the second, and a heartbeat must
+  // never turn a broken config into a wall of stderr on every command. The
+  // CONFIG_SCHEMA doctor check is what reports those, when doctor is asked for.
+  const enrollment = readProjectConfig(projectRoot);
+  if (enrollment.status !== 'ok' && enrollment.status !== 'schema-violation') {
+    return {reason: 'not-enrolled', status: 'skipped'};
+  }
+
+  const paths = healthNoticesPaths(env);
+  if (!isStateWritable(paths)) {
+    // Same pre-flight as the version probe (D4): a machine that cannot persist
+    // the "already ran" stamp would spawn a doctor on EVERY command.
+    return {reason: 'state-unwritable', status: 'skipped'};
+  }
+
+  const read = readState(paths);
+  const state = read.status === 'ok' ? read.state : emptyState();
+
+  const decision = decideDoctorHeartbeat({
+    commandName: options.commandName,
+    config,
+    now,
+    projectRoot,
+    state,
+  });
+  if (decision.status === 'skip') {
+    return {reason: decision.reason, status: 'skipped'};
+  }
+
+  const spawner = options.spawner ?? spawnDoctor;
+  const request = doctorHeartbeatRequest({
+    cwd: projectRoot,
+    env,
+    timeoutMs: options.timeoutMs ?? DOCTOR_HEARTBEAT_TIMEOUT_MS,
+  });
+  let outcome: DoctorSpawnOutcome;
+  try {
+    outcome = await spawner(request);
+  } catch (error) {
+    // A spawner that THREW measured nothing. It is a failed run — recorded as
+    // one, with the reason — never an absence of one, and never a skip.
+    outcome = {
+      error: error instanceof Error ? error.message : String(error),
+      exitCode: null,
+      stderr: '',
+      stdout: '',
+    };
+  }
+
+  const ran = outcome.error == null && outcome.exitCode != null;
+  const counts = ran
+    ? parseDoctorSummary(`${outcome.stdout}${outcome.stderr}`)
+    : {errors: null, passed: null, warnings: null};
+
+  const row: DoctorRunRow = {
+    at: now.toISOString(),
+    error: outcome.error,
+    errors: counts.errors,
+    exitCode: outcome.exitCode,
+    passed: counts.passed,
+    warnings: counts.warnings,
+  };
+
+  // RECORD FIRST, THEN SPEAK. The stamp is what keeps the next command from
+  // spawning another doctor; the printing is best-effort (a closed stderr
+  // throws EPIPE). Unlike the version notice — whose stamp is a claim that it
+  // spoke, and must not be written if it did not — this stamp only claims the
+  // run happened, which is true either way.
+  writeState(paths, {
+    ...state,
+    doctorRuns: {...state.doctorRuns, [projectRoot]: row},
+  });
+
+  const lines = renderDoctorHeartbeat({
+    counts,
+    outcome,
+    projectRoot,
+    showOnPass: config.doctor.showOnPass,
+  });
+  printNotice(lines);
+
+  return {lines, row, status: 'ran'};
 }

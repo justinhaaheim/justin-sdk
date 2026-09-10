@@ -26,14 +26,24 @@ import {join, resolve} from 'path';
 
 import {z} from 'zod';
 
+import {HEALTH_NOTICES_ENV_VAR} from './health-notices';
+
 /** Environment as this module consumes it — `process.env` is assignable. */
 export type EnvLike = Record<string, string | undefined>;
 
 /** Name of the per-repo config file, at the project root. */
 export const PROJECT_CONFIG_FILENAME = 'justin-sdk.config.json';
 
-/** Env var that switches every health notice off for one invocation (D2). */
-export const HEALTH_NOTICES_ENV_VAR = 'JUSTIN_SDK_HEALTH_NOTICES';
+/**
+ * Env var that switches every health notice off for one invocation (D2).
+ *
+ * DEFINED in health-notices.ts and re-exported here so this module stays the
+ * one place a caller has to look for config names. It cannot be defined here:
+ * the code that silences CHILD justin-sdk processes (`sweep`'s gates, the
+ * doctor heartbeat) is on cli.ts's eager import graph, and importing this
+ * module would put zod back on the hot path.
+ */
+export {HEALTH_NOTICES_ENV_VAR};
 
 // ---------------------------------------------------------------------------
 // Paths

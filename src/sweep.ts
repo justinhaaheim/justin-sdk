@@ -99,6 +99,7 @@ import {
   runComponentByName,
   type ComponentName,
 } from './components';
+import {silencedChildEnv} from './health-notices';
 import {
   readDeployedStamp,
   rulesFilePath,
@@ -210,6 +211,18 @@ function gitPorcelain(repo: string): string | null {
  *
  * stdin is `ignore`, matching setup-env's runChild: a fleet tool must never
  * block on a child that decided to prompt.
+ *
+ * HEALTH NOTICES ARE OFF IN EVERY CHILD (home-base-uxwc.6). D1 classifies
+ * `sweep` itself as NEVER — "sweep IS the upgrade" — but that only covers this
+ * process. The gates spawn `bunx … doctor`, `… doctor --fix` and `bun run
+ * signal` inside each temp worktree, and those are tier-2/tier-3 callsites in
+ * their own right: without the kill switch a 12-repo sweep prints the upgrade
+ * notice up to 12 times into the run log (the per-repo throttle is keyed by
+ * project root, and every sweep worktree is a different path), and every one of
+ * them would also fire a doctor heartbeat inside a gate that is already running
+ * doctor. Noise, in exactly the log an operator reads when a sweep goes red.
+ * This is the ONE funnel — `measureBaseline` and the direct callers all come
+ * through here — so it is the one place the switch has to be set.
  */
 function run(
   argv: string[],
@@ -221,7 +234,7 @@ function run(
   const child = spawnSync(cmd, args, {
     cwd,
     encoding: 'utf-8',
-    env: process.env,
+    env: silencedChildEnv(process.env),
     // A full `bun install` + signal run can be large; the Node default (1MB)
     // would truncate exactly the tail the log needs.
     maxBuffer: 64 * 1024 * 1024,
