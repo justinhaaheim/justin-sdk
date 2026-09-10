@@ -73,10 +73,15 @@ export const PROMPT_TIERS = [1, 2, 3, 4] as const;
 
 export type PromptTier = (typeof PROMPT_TIERS)[number];
 
+/**
+ * The tier scale is explained ONCE, on the `healthNotices` block itself: this
+ * line appears beside four different keys, and repeating the whole thing four
+ * times crowded out every other description in `config schema` (uxwc.5 F12e).
+ */
 const promptTierSchema = z
   .literal([...PROMPT_TIERS])
   .describe(
-    'How loudly this notice may speak. 1 = never; 2 = only when doctor runs; 3 = doctor plus a short list of interactive commands; 4 = every command that is allowed to print a notice at all.',
+    'How loudly this notice may speak: 1 never … 4 every eligible command (scale on healthNotices).',
   );
 
 const sdkVersionKindSchema = z
@@ -148,7 +153,7 @@ export const healthNoticesSchema = z
       .describe('The "a newer justin-sdk is available" notice.'),
   })
   .describe(
-    'Version-upgrade and doctor-heartbeat notices. Set in the user file for every repo; override per repo in the project file. Switched off entirely by JUSTIN_SDK_HEALTH_NOTICES=off, by CI, or by CLAUDE_CODE_REMOTE=true.',
+    'Version-upgrade and doctor-heartbeat notices. Set in the user file for every repo; override per repo in the project file. Switched off entirely by JUSTIN_SDK_HEALTH_NOTICES=off, by CI, or by CLAUDE_CODE_REMOTE=true. promptTier is the volume knob throughout, and means: 1 = never; 2 = only when doctor runs; 3 = doctor plus the interactive commands (signal, fix, add, init, setup-env, worktree-new, rules-*, sync-rules); 4 = every command that may print a notice at all — which excludes the hooks (time-check, usage-check, prime), the upgrade commands themselves (update, sweep) and anything with a machine-read stdout contract (justin-loop handoff, skill).',
   );
 
 /**
@@ -559,6 +564,8 @@ interface JsonSchemaNode {
   enum?: unknown[];
   items?: JsonSchemaNode;
   properties?: Record<string, JsonSchemaNode>;
+  /** Keys of `properties` that must be present. Emitted by z.toJSONSchema. */
+  required?: string[];
   type?: string | string[];
 }
 
@@ -579,6 +586,8 @@ export interface SchemaKeyLine {
   description: string | null;
   /** Dotted path, e.g. `healthNotices.sdkVersion.minor.promptTier`. */
   key: string;
+  /** Must be present, or the WHOLE file is a schema violation (uxwc.5 F12b). */
+  required: boolean;
   type: string;
 }
 
@@ -647,6 +656,7 @@ export function describeSchemaKeys(
         !isBlock && childDefault != null ? JSON.stringify(childDefault) : null,
       description: child.description ?? null,
       key: dotted,
+      required: node.required?.includes(key) ?? false,
       type: jsonSchemaType(rawChild),
     });
     if (isBlock) {
@@ -672,6 +682,7 @@ function renderSection(
   for (const line of keys) {
     const annotations = [
       line.type,
+      line.required ? 'required' : null,
       line.defaultValue != null ? `default ${line.defaultValue}` : null,
       line.description,
     ].filter((part): part is string => part != null);
@@ -689,6 +700,7 @@ export function renderConfigSchema(
   const projectRoot = options.projectRoot ?? process.cwd();
   const lines = [
     'justin-sdk config files. Unknown keys are ALWAYS allowed (a newer SDK’s config must not fail an older one); a known key with the wrong type is a violation, which `justin-sdk doctor` reports as CONFIG_SCHEMA.',
+    'A key marked `required` must be present: without it the WHOLE file fails validation, and a file that fails contributes nothing — so a project file missing `version` has its healthNotices block ignored entirely, and the user file (or the defaults) applies instead.',
     '',
     ...renderSection(
       'PROJECT',

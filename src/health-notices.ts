@@ -167,7 +167,7 @@ export const SELECT_COMMANDS = [
 ] as const;
 
 /**
- * Commands that must NEVER carry a notice, for two different reasons:
+ * Commands that must NEVER carry a notice, for three different reasons:
  *
  *  - `time-check`, `usage-check` and `prime` are HOOKS. Their output is
  *    injected into a Claude session's context, and their cost is paid on every

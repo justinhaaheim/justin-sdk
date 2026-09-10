@@ -464,6 +464,33 @@ describe('config schema', () => {
     );
   });
 
+  test('REQUIRED keys are marked, and optional ones are not (uxwc.5 F12b)', () => {
+    // Why it matters: a file missing a required key fails validation, and a
+    // file that fails contributes NOTHING — so a project justin-sdk.config.json
+    // without `version` silently loses its whole healthNotices block.
+    const rendered = renderConfigSchema({
+      env: {XDG_CONFIG_HOME: '/xdg'},
+      projectRoot: '/repo',
+    });
+    for (const key of ['components', 'lastSynced', 'version']) {
+      expect(rendered).toMatch(new RegExp(`\\n {2}${key} +[^\\n]*· +required`));
+    }
+    expect(rendered).not.toMatch(/healthNotices[^\n]*· +required/);
+    expect(rendered).toContain('A key marked `required` must be present');
+  });
+
+  test('the promptTier scale is explained ONCE, not on all four keys (uxwc.5 F12e)', () => {
+    const rendered = renderConfigSchema({
+      env: {XDG_CONFIG_HOME: '/xdg'},
+      projectRoot: '/repo',
+    });
+    // Four promptTier keys across the two files; the full scale appears only on
+    // the two healthNotices block descriptions that carry it.
+    const scale = rendered.split('2 = only when doctor runs').length - 1;
+    expect(scale).toBe(2);
+    expect(rendered.split('scale on healthNotices').length - 1).toBe(8);
+  });
+
   test('--json is parseable JSON Schema, one object per file, with descriptions', () => {
     const json = configSchemaJson() as {
       project: {description?: string; properties: Record<string, unknown>};

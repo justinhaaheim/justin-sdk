@@ -118,13 +118,17 @@ justin-sdk 0.24.0 → 0.26.0 available (minor)
   upgrade: bunx @justinhaaheim/justin-sdk update
 ```
 
-The remote tag list is fetched at most once an hour (a failed fetch counts, so being offline costs one attempt per hour, not one per command), and each kind of bump is throttled per repo. `doctor` reports the same thing as its `SDK_VERSION` check — with fix TEXT only, never a `fixCommand`, so `doctor --fix --yes` never upgrades anything by itself.
+The remote tag list is fetched at most once an hour (a failed fetch counts, so being offline costs one attempt per hour, not one per command) and is given **2 seconds** to answer — `justin-sdk update`, where that listing is the job rather than an errand, still waits the full 5. Only plain `X.Y.Z` tags count: prereleases are out of scope for the fleet, so `v0.27.0-rc.1` is ignored on purpose. `doctor` reports the same thing as its `SDK_VERSION` check — with fix TEXT only, never a `fixCommand`, so `doctor --fix --yes` never upgrades anything by itself.
 
-Which commands may print it is set per bump kind by `promptTier`: **1** never, **2** only `doctor`, **3** `doctor` plus interactive commands (`signal`, `fix`, `add`, `worktree-new`, …), **4** every command. Hooks (`time-check`, `usage-check`, `prime`), the upgrade commands themselves (`update`, `sweep`), and anything with a machine-read stdout contract (`justin-loop handoff`) never print it at any tier.
+Each kind of bump is throttled **per repo**, and "repo" means the directory holding `justin-sdk.config.json`, found by walking up from wherever the command was run (stopping at the enclosing repository, so a submodule never resolves to its parent). Running from `src/` and from `scripts/` is therefore the same repo, and says it once. Rows for repos nothing has run in for 30 days are dropped.
+
+Which commands may print it is set per bump kind by `promptTier`: **1** never, **2** only `doctor`, **3** `doctor` plus interactive commands (`signal`, `fix`, `add`, `worktree-new`, …), **4** every command. Hooks (`time-check`, `usage-check`, `prime`), the upgrade commands themselves (`update`, `sweep`), and anything whose stdout is read by something other than a person (`justin-loop handoff`, `skill`) never print it at any tier.
 
 ### The doctor heartbeat
 
-The same layer also keeps `doctor` running on its own. In an enrolled repo (one with a `justin-sdk.config.json`), an eligible command runs `justin-sdk doctor --quiet` as a child process at most once an hour per repo — enough to notice a problem that started hours into a session, which the SessionStart hook's single run cannot. It never touches stdout and never changes the command's exit code.
+The same layer also keeps `doctor` running on its own. In an enrolled repo (one with a `justin-sdk.config.json`), an eligible command runs `justin-sdk doctor --quiet` as a child process at most once an hour per repo — enough to notice a problem that started hours into a session, which the SessionStart hook's single run cannot. It runs against the repo root, so it works from any subdirectory. It never touches stdout and never changes the command's exit code.
+
+Two commands never trigger one: `doctor` itself, and `setup-env` — the post-checkout hook runs `setup-env` on a worktree that is not hydrated yet, where doctor would report the failures hydration is about to fix.
 
 On a clean run it says **nothing**. Set `doctor.showOnPass: true` and it prints one line instead:
 
@@ -142,11 +146,13 @@ Any error-severity failure is always printed, whatever `showOnPass` says — the
 }
 ```
 
-`promptTier` works exactly as it does above, and `doctor` itself never triggers a heartbeat. `intervalMinutes` is measured from the last run **in that repo**, and a run that could not be made — the child failed to spawn, or hit its 60-second timeout — is recorded as a failure with its reason, so it is not retried on the next command.
+`promptTier` works exactly as it does above. `intervalMinutes` is measured from the last run **in that repo**, and a run that could not be made — the child failed to spawn, or hit its 60-second timeout — is recorded as a failure with its reason, so it is not retried on the next command.
 
 ### Configuring both
 
-Configure them under `healthNotices` in `~/.config/justin-sdk/config.json` (everywhere) or a repo's `justin-sdk.config.json` (that repo only) — run `justin-sdk config schema` for every key, its type and its default. To switch it all off: `healthNotices.enabled: false` in either file, or `JUSTIN_SDK_HEALTH_NOTICES=off` for one invocation. It is off automatically in CI and in remote Claude Code sessions.
+Configure them under `healthNotices` in `~/.config/justin-sdk/config.json` (everywhere) or a repo's `justin-sdk.config.json` (that repo only) — run `justin-sdk config schema` for every key, its type, its default and whether it is required. Unknown keys are always allowed; a known key with the wrong type, or a missing required one, makes the whole file fail validation, and a file that fails contributes **nothing** (`doctor`'s `CONFIG_SCHEMA` check names it).
+
+To switch it all off: `healthNotices.enabled: false` in either file, or `JUSTIN_SDK_HEALTH_NOTICES=off` for one invocation. It is off automatically in CI and in remote Claude Code sessions.
 
 ## Importable modules
 
