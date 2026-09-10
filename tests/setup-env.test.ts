@@ -17,6 +17,7 @@ import {spawnSync} from 'child_process';
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {dirname, join, resolve} from 'path';
 
+import {healthNoticesPaths, STATE_SCHEMA_VERSION} from '../src/health-notices';
 import {
   detectPackageManager,
   discoverHydrationScripts,
@@ -1162,10 +1163,12 @@ describe('CLI stdout purity', () => {
   function runCli(
     args: string[],
     cwd: string,
+    env?: Record<string, string>,
   ): {status: number | null; stderr: string; stdout: string} {
     const result = spawnSync('bun', [CLI, ...args], {
       cwd,
       encoding: 'utf-8',
+      env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     return {
@@ -1173,6 +1176,51 @@ describe('CLI stdout purity', () => {
       stderr: result.stderr ?? '',
       stdout: result.stdout ?? '',
     };
+  }
+
+  /**
+   * An env in which health notices are ON and a newer version is already
+   * "known" (home-base-uxwc D7), so the two commands with the strictest stdout
+   * contracts can be re-run with the notice actually firing.
+   *
+   * The state file is seeded with a `lastCheck` stamped NOW, inside the
+   * 60-minute interval, so no network call is made — each test asserts the
+   * stamp is unchanged afterwards, which is what would catch a regression.
+   */
+  function noticesOnEnv(sb: Sandbox): Record<string, string> {
+    const stateHome = join(sb.path, 'notice-state');
+    const {dir, file} = healthNoticesPaths({XDG_STATE_HOME: stateHome});
+    mkdirSync(dir, {recursive: true});
+    const at = new Date().toISOString();
+    writeFileSync(
+      file,
+      JSON.stringify({
+        doctorRuns: {},
+        lastCheck: {at, error: null, latest: '99.0.0', ok: true},
+        lastKnownLatest: {at, version: '99.0.0'},
+        lastNotified: {},
+        schemaVersion: STATE_SCHEMA_VERSION,
+      }),
+    );
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (key === 'JUSTIN_SDK_HEALTH_NOTICES') continue;
+      if (value != null) env[key] = value;
+    }
+    env.CI = '';
+    env.CLAUDE_CODE_REMOTE = '';
+    env.XDG_CONFIG_HOME = join(sb.path, 'notice-config');
+    env.XDG_STATE_HOME = stateHome;
+    return env;
+  }
+
+  function seededCheckAt(sb: Sandbox): string | undefined {
+    const {file} = healthNoticesPaths({
+      XDG_STATE_HOME: join(sb.path, 'notice-state'),
+    });
+    return (
+      JSON.parse(readFileSync(file, 'utf-8')) as {lastCheck?: {at?: string}}
+    ).lastCheck?.at;
   }
 
   test('setup-env writes NOTHING to stdout, and its report to stderr', () => {
@@ -1235,6 +1283,47 @@ describe('CLI stdout purity', () => {
     expect(stdout.trimEnd().split('\n')).toHaveLength(1);
     expect(stderr).toContain('worktree-new');
     expect(stderr).toContain('SCRIPT_STDOUT_NOISE');
+  });
+
+  // The two commands above, re-run with the health-notice middleware actually
+  // firing (home-base-uxwc D7). This is the contract the `wt` shell function
+  // depends on: one stdout line to `cd` into. A notice on stdout would make it
+  // cd into a sentence.
+  test('worktree-new STILL writes exactly the path with a notice firing', () => {
+    const sb = track(createSandbox());
+    const primary = initPrimary(sb, {
+      '.gitignore': '.claude/\n',
+      'package.json': JSON.stringify({name: 'p'}),
+    });
+    const env = noticesOnEnv(sb);
+
+    const {status, stdout, stderr} = runCli(
+      ['worktree-new', 'noticed-slug'],
+      primary,
+      env,
+    );
+
+    expect(status).toBe(0);
+    expect(stdout).toBe(
+      `${join(primary, '.claude', 'worktrees', 'noticed-slug')}\n`,
+    );
+    // The notice really did fire — otherwise this asserts nothing.
+    expect(stderr).toContain('→ 99.0.0 available (major)');
+    expect(seededCheckAt(sb)).toBeString();
+  });
+
+  test('setup-env STILL writes NOTHING to stdout with a notice firing', () => {
+    const sb = track(createSandbox());
+    const primary = initPrimary(sb, {
+      'package.json': JSON.stringify({name: 'p'}),
+    });
+    const env = noticesOnEnv(sb);
+
+    const {status, stdout, stderr} = runCli(['setup-env'], primary, env);
+
+    expect(status).toBe(0);
+    expect(stdout).toBe('');
+    expect(stderr).toContain('→ 99.0.0 available (major)');
   });
 
   /** F2's other half of the AC: the refusal must not put anything on stdout. */
