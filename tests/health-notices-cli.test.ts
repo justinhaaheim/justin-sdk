@@ -385,3 +385,117 @@ describe('the CLI hot path', () => {
     expect(stdout).toBe('');
   });
 });
+
+// ---------------------------------------------------------------------------
+// The doctor heartbeat at the CLI seam (home-base-uxwc D8)
+// ---------------------------------------------------------------------------
+
+/**
+ * DELIBERATELY HERMETIC, and therefore deliberately partial. Nothing in the
+ * suite may spawn a real `doctor` child, so what is asserted here is the half
+ * of the seam that can be proved without one: an eligible command in a real
+ * enrolled repo, running the real middleware, leaves a fresh heartbeat stamp
+ * exactly as it found it and says nothing.
+ *
+ * The other half — that the middleware DOES spawn doctor when one is due — is
+ * covered by `runDoctorHeartbeat`'s own tests with an injected spawner
+ * (tests/health-notices-doctor.test.ts) and was measured by hand against the
+ * real CLI; see home-base-uxwc.3's notes for that run.
+ */
+describe('the doctor heartbeat at the CLI seam', () => {
+  /**
+   * A scratch repo `signal` runs cleanly in — enrolled (doctor has something to
+   * check) or not, which is the one difference the heartbeat's enrollment gate
+   * turns on.
+   */
+  function scratchProject(options: {enrolled: boolean}): string {
+    const box = newSandbox();
+    box.writeFile('CLAUDE.md', '# test\n');
+    box.writeFile(
+      'package.json',
+      JSON.stringify({
+        name: 'p',
+        scripts: {
+          doctor: 'true',
+          'setup-env': 'true',
+          signal: 'true',
+          'signal-source:TRUE': 'true',
+        },
+      }),
+    );
+    if (options.enrolled) {
+      box.writeFile(
+        'justin-sdk.config.json',
+        JSON.stringify({
+          components: ['base-setup'],
+          lastSynced: '2026-09-10',
+          version: '0.26.0',
+        }),
+      );
+    }
+    return box.path;
+  }
+
+  function runIn(
+    cwd: string,
+    args: string[],
+    env: Record<string, string>,
+  ): {status: number | null; stderr: string; stdout: string} {
+    const run = spawnSync(process.execPath, [CLI, ...args], {
+      cwd,
+      encoding: 'utf-8',
+      env,
+      input: '',
+    });
+    return {status: run.status, stderr: run.stderr, stdout: run.stdout};
+  }
+
+  test('a fresh stamp means no doctor is spawned and nothing extra is said', () => {
+    const rigged = rig();
+    const projectRoot = scratchProject({enrolled: true});
+    const at = new Date().toISOString();
+
+    const seeded = readSeeded(rigged);
+    seeded.doctorRuns[projectRoot] = {
+      at,
+      error: null,
+      errors: 0,
+      exitCode: 0,
+      passed: 10,
+      warnings: 0,
+    };
+    writeFileSync(rigged.stateFile, JSON.stringify(seeded, null, 2) + '\n');
+
+    const {status, stderr} = runIn(projectRoot, ['signal'], rigged.on);
+
+    expect(status).toBe(0);
+    // The version notice still fires, which is what proves notices are ON here
+    // and the run is not silent for some unrelated reason.
+    expect(stderr).toContain('available (major)');
+    expect(stderr).not.toContain('justin-sdk doctor');
+    // Untouched, to the field: a spawn would have rewritten `at`.
+    expect(readSeeded(rigged).doctorRuns[projectRoot]).toEqual({
+      at,
+      error: null,
+      errors: 0,
+      exitCode: 0,
+      passed: 10,
+      warnings: 0,
+    });
+  });
+
+  test('a repo with no justin-sdk.config.json records no heartbeat at all', () => {
+    // `signal` deliberately — it is tier 3, so the tier gate lets it through
+    // and the ENROLLMENT gate is the only thing that can stop the heartbeat.
+    // (A tier-4 command would skip earlier and prove nothing.)
+    const rigged = rig();
+    const projectRoot = scratchProject({enrolled: false});
+
+    const {status, stderr} = runIn(projectRoot, ['signal'], rigged.on);
+
+    expect(status).toBe(0);
+    expect(stderr).toContain('available (major)');
+    expect(stderr).not.toContain('justin-sdk doctor');
+    expect(readSeeded(rigged).doctorRuns).toEqual({});
+  });
+});

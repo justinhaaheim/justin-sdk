@@ -81,9 +81,11 @@ describe('sweep child environment', () => {
   test('the rest of the environment still reaches the child', () => {
     // The fix must be an ADDITION to process.env, not a replacement of it: a
     // child without PATH cannot run `bunx` or `bun` at all.
+    const parentPath = process.env.PATH;
+    expect(parentPath).toBeString();
     const seen = childSees('PATH');
     expect(seen.exitCode).toBe(0);
-    expect(seen.value.trimEnd()).toBe(process.env.PATH);
+    expect(seen.value.trimEnd()).toBe(parentPath ?? '');
   });
 
   test('printenv really does fail on an unset variable (the control)', () => {

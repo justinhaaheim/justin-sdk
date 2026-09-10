@@ -122,7 +122,31 @@ The remote tag list is fetched at most once an hour (a failed fetch counts, so b
 
 Which commands may print it is set per bump kind by `promptTier`: **1** never, **2** only `doctor`, **3** `doctor` plus interactive commands (`signal`, `fix`, `add`, `worktree-new`, …), **4** every command. Hooks (`time-check`, `usage-check`, `prime`), the upgrade commands themselves (`update`, `sweep`), and anything with a machine-read stdout contract (`justin-loop handoff`) never print it at any tier.
 
-Configure it under `healthNotices` in `~/.config/justin-sdk/config.json` (everywhere) or a repo's `justin-sdk.config.json` (that repo only) — run `justin-sdk config schema` for every key, its type and its default. To switch it all off: `healthNotices.enabled: false` in either file, or `JUSTIN_SDK_HEALTH_NOTICES=off` for one invocation. It is off automatically in CI and in remote Claude Code sessions.
+### The doctor heartbeat
+
+The same layer also keeps `doctor` running on its own. In an enrolled repo (one with a `justin-sdk.config.json`), an eligible command runs `justin-sdk doctor --quiet` as a child process at most once an hour per repo — enough to notice a problem that started hours into a session, which the SessionStart hook's single run cannot. It never touches stdout and never changes the command's exit code.
+
+On a clean run it says **nothing**. Set `doctor.showOnPass: true` and it prints one line instead:
+
+```
+✅ justin-sdk doctor: 18 pass, 1 warn
+```
+
+Any error-severity failure is always printed, whatever `showOnPass` says — the failing checks reach stderr verbatim, under a header naming the repo, followed by `full run: bunx @justinhaaheim/justin-sdk doctor`. Warnings do not: doctor exits 0 for them, and they show up in the `showOnPass` counts.
+
+```json
+{
+  "healthNotices": {
+    "doctor": {"intervalMinutes": 60, "promptTier": 3, "showOnPass": false}
+  }
+}
+```
+
+`promptTier` works exactly as it does above, and `doctor` itself never triggers a heartbeat. `intervalMinutes` is measured from the last run **in that repo**, and a run that could not be made — the child failed to spawn, or hit its 60-second timeout — is recorded as a failure with its reason, so it is not retried on the next command.
+
+### Configuring both
+
+Configure them under `healthNotices` in `~/.config/justin-sdk/config.json` (everywhere) or a repo's `justin-sdk.config.json` (that repo only) — run `justin-sdk config schema` for every key, its type and its default. To switch it all off: `healthNotices.enabled: false` in either file, or `JUSTIN_SDK_HEALTH_NOTICES=off` for one invocation. It is off automatically in CI and in remote Claude Code sessions.
 
 ## Importable modules
 
