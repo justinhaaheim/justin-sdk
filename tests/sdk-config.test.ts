@@ -36,7 +36,9 @@ import {
   resolveHealthNoticesConfig,
   userConfigPath,
   userConfigSchema,
+  xdgConfigHome,
 } from '../src/sdk-config';
+import {xdgStateHome} from '../src/health-notices';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
@@ -97,6 +99,20 @@ describe('userConfigPath', () => {
     );
     expect(userConfigPath({HOME: '/home/j', XDG_CONFIG_HOME: ''})).toBe(
       '/home/j/.config/justin-sdk/config.json',
+    );
+  });
+
+  test('an EMPTY HOME resolves to the real home, not into the current repo (uxwc.5 F4)', () => {
+    // `resolve('', '.config')` is CWD-relative, so an unset HOME would make
+    // "the user-level config" mean a different file in every checkout — and
+    // silently, since an absent config is the ordinary case. The state file's
+    // xdgStateHome has always used homedir() here; this is the same fallback,
+    // now shared with it.
+    const resolved = userConfigPath({HOME: ''});
+    expect(resolved.startsWith(process.cwd())).toBe(false);
+    expect(resolved.endsWith('/.config/justin-sdk/config.json')).toBe(true);
+    expect(xdgConfigHome({HOME: ''})).toBe(
+      xdgStateHome({HOME: ''}).replace('/.local/state', '/.config'),
     );
   });
 });

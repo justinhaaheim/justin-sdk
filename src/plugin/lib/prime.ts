@@ -134,6 +134,15 @@ function loadProjectContext(projectRoot: string): ProjectContext {
 
 // --- managed prompts clone -------------------------------------------------
 
+/**
+ * A DELIBERATE second copy: the plugin package may not import from outside
+ * `src/plugin`, so it cannot share `xdgConfigHome` in health-notices.ts.
+ *
+ * It also DIVERGES from that one, which falls back to `homedir()` when HOME is
+ * unset or empty (uxwc.5 F4). Here `resolve('', '.config')` resolves relative
+ * to the CWD — wrong, but only ever READ through: the worst case is a managed
+ * clone this fails to find and reports as missing. Nothing on this path writes.
+ */
 function xdgConfigHome(): string {
   const fromEnv = process.env.XDG_CONFIG_HOME;
   if (fromEnv != null && fromEnv.length > 0) return fromEnv;
@@ -225,11 +234,7 @@ function touchMarker(): void {
  *    (that's the point of the tolerance) but it may be stale.
  */
 export type SourceRefresh =
-  | 'override'
-  | 'cloned'
-  | 'pulled'
-  | 'skipped'
-  | 'failed';
+  'override' | 'cloned' | 'pulled' | 'skipped' | 'failed';
 
 export interface PromptsSource {
   dir: string;

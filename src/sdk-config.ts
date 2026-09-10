@@ -29,40 +29,30 @@ import {z} from 'zod';
 import {
   HEALTH_NOTICES_ENV_VAR,
   PROJECT_CONFIG_FILENAME,
+  xdgConfigHome,
 } from './health-notices';
 
 /** Environment as this module consumes it — `process.env` is assignable. */
 export type EnvLike = Record<string, string | undefined>;
 
 /**
- * Two names that live in health-notices.ts and are re-exported here, so this
- * module stays the one place a caller has to look for config names. Neither can
- * be DEFINED here: the code that needs them earliest — the middleware's walk up
- * to the repo root, and the env that silences CHILD justin-sdk processes
- * (`sweep`'s gates, the doctor heartbeat) — is on cli.ts's eager import graph,
- * and importing this module would put zod back on the hot path.
+ * Three names that live in health-notices.ts and are re-exported here, so this
+ * module stays the one place a caller has to look for config names. None can be
+ * DEFINED here: the code that needs them earliest — the middleware's walk up to
+ * the repo root, its read of the user config, and the env that silences CHILD
+ * justin-sdk processes (`sweep`'s gates, the doctor heartbeat) — is on cli.ts's
+ * eager import graph, and importing this module would put zod back on the hot
+ * path.
  *
  * `PROJECT_CONFIG_FILENAME` is the per-repo config file, at the project root.
+ * `xdgConfigHome` resolves `$XDG_CONFIG_HOME`, or `$HOME/.config`, from an
+ * injected env so tests never touch the real `~/.config`.
  */
-export {HEALTH_NOTICES_ENV_VAR, PROJECT_CONFIG_FILENAME};
+export {HEALTH_NOTICES_ENV_VAR, PROJECT_CONFIG_FILENAME, xdgConfigHome};
 
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
-
-/**
- * `$XDG_CONFIG_HOME`, or `$HOME/.config`. Mirrors `xdgConfigHome()` in
- * plugin/lib/prime.ts, which is where the managed prompts clone lives — the
- * user-level SDK config sits beside it under the same `justin-sdk/` directory.
- *
- * Read from an injected env rather than `process.env` directly so tests never
- * touch the real `~/.config`.
- */
-export function xdgConfigHome(env: EnvLike = process.env): string {
-  const fromEnv = env.XDG_CONFIG_HOME;
-  if (fromEnv != null && fromEnv.length > 0) return fromEnv;
-  return resolve(env.HOME ?? '', '.config');
-}
 
 /** Absolute path to the user-level config file. */
 export function userConfigPath(env: EnvLike = process.env): string {

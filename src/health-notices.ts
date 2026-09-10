@@ -373,11 +373,40 @@ export interface HealthNoticesPaths {
 export function xdgStateHome(env: EnvLike = process.env): string {
   const fromEnv = env.XDG_STATE_HOME;
   if (fromEnv != null && fromEnv.length > 0) return fromEnv;
-  return resolve(
-    env.HOME != null && env.HOME.length > 0 ? env.HOME : homedir(),
-    '.local',
-    'state',
-  );
+  return resolve(homeDir(env), '.local', 'state');
+}
+
+/**
+ * `$HOME`, or the OS's idea of it when the variable is unset or EMPTY.
+ *
+ * `resolve('', '.config')` is CWD-relative, so an empty HOME silently turns a
+ * user-level path into a per-repo one — a config nobody wrote, or a state file
+ * dropped inside whichever checkout happened to be current. `homedir()` reads
+ * the passwd entry, which is right even in the environments (launchd agents,
+ * some CI images, `env -i`) where HOME went missing.
+ */
+function homeDir(env: EnvLike): string {
+  return env.HOME != null && env.HOME.length > 0 ? env.HOME : homedir();
+}
+
+/**
+ * `$XDG_CONFIG_HOME`, or `$HOME/.config` — where the user-level justin-sdk
+ * config lives, beside the managed prompts clone.
+ *
+ * Lives HERE, and is re-exported by `sdk-config`, for the same reason as
+ * {@link PROJECT_CONFIG_FILENAME}: the middleware resolves it for every
+ * eligible command and this module may not import zod. It shares
+ * {@link homeDir} with {@link xdgStateHome} so the two cannot drift apart —
+ * which they had (uxwc.5 F4).
+ *
+ * `plugin/lib/prime.ts` keeps its OWN copy, still with the `''` fallback: the
+ * plugin package may not import from outside `src/plugin`. It only ever READS
+ * through it, so the worst case there is a clone it fails to find.
+ */
+export function xdgConfigHome(env: EnvLike = process.env): string {
+  const fromEnv = env.XDG_CONFIG_HOME;
+  if (fromEnv != null && fromEnv.length > 0) return fromEnv;
+  return resolve(homeDir(env), '.config');
 }
 
 export function healthNoticesPaths(
