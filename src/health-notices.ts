@@ -890,6 +890,19 @@ export async function checkSdkVersion(options: {
 /** What to run to take the notice's advice (D6). */
 export const UPGRADE_COMMAND = 'bunx @justinhaaheim/justin-sdk update';
 
+/**
+ * How long the remote tag listing gets when it is a SIDE ERRAND (uxwc.5 F7).
+ *
+ * The measured call is ~0.34s. `sdk-latest`'s 5s default is right for
+ * `justin-sdk update`, where the listing IS the job and a slow answer beats no
+ * answer — but here it is paid in front of a command Justin asked for, and
+ * doctor is on the SessionStart hook path: with a captive portal or a dead
+ * network that is 5 seconds of a session doing nothing, once an hour. Failing
+ * fast costs one notice; the check is stamped either way (invariant 3) and the
+ * failure is reported as a failure, never as "up to date".
+ */
+export const NOTICE_FETCH_TIMEOUT_MS = 2000;
+
 /** Exactly the two lines of D7. Nothing here decides whether to print them. */
 export function renderNotice(
   current: string,

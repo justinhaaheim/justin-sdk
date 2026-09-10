@@ -123,6 +123,7 @@ async function healthNoticeMiddleware(argv: {
       commandNameFromArgv,
       findProjectRoot,
       maybeNotifySdkVersion,
+      NOTICE_FETCH_TIMEOUT_MS,
       resolveHealthNoticesContext,
       runDoctorHeartbeat,
     } = await import('./health-notices');
@@ -135,7 +136,13 @@ async function healthNoticeMiddleware(argv: {
     // Config, enrollment and the writability probe, measured ONCE for both
     // probes (F9) — each of them used to do its own.
     const context = await resolveHealthNoticesContext({projectRoot});
-    await maybeNotifySdkVersion({commandName, ...context});
+    // A SHORTER fetch timeout than `justin-sdk update` gets (F7): this one is
+    // an errand in front of a command Justin asked for, not the job itself.
+    await maybeNotifySdkVersion({
+      commandName,
+      ...context,
+      timeoutMs: NOTICE_FETCH_TIMEOUT_MS,
+    });
     // AWAITED, not detached (home-base-uxwc.3 decision 1). Doctor measures
     // 0.35-1.2s and runs at most once per repo per interval; detaching it would
     // make the stderr ordering nondeterministic and throw away the exit code

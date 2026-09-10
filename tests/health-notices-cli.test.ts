@@ -27,7 +27,7 @@
 
 import {afterEach, describe, expect, test} from 'bun:test';
 import {spawnSync} from 'child_process';
-import {mkdirSync, readFileSync, writeFileSync} from 'fs';
+import {chmodSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {dirname, join, resolve} from 'path';
 
 import {
@@ -259,6 +259,44 @@ describe('the repo a notice is about (uxwc.5 F2)', () => {
     // And the stamp is keyed by the ROOT — one key, not one per directory.
     expect(Object.keys(readSeeded(rigged).lastNotified)).toEqual([root]);
   });
+});
+
+describe('a hanging network (uxwc.5 F7)', () => {
+  test('the fetch is killed at 2s, not at sdk-latest 5s default', () => {
+    // Hermetic: a `git` on PATH that never answers. Nothing reaches the
+    // network, and the wall clock is the assertion — this timeout is paid in
+    // front of a command Justin asked for, and doctor --quiet runs it from the
+    // SessionStart hook.
+    const rigged = rig();
+    const bin = newSandbox();
+    bin.writeFile('git', '#!/bin/sh\nsleep 30\n');
+    chmodSync(join(bin.path, 'git'), 0o755);
+
+    // A state file with a check STAMPED LONG AGO, so a fetch is due. (The rest
+    // of this file seeds it as "just now" precisely to prevent one.)
+    const stale = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const seeded = readSeeded(rigged);
+    seeded.lastCheck = {at: stale, error: null, latest: FAR_FUTURE, ok: true};
+    writeFileSync(rigged.stateFile, JSON.stringify(seeded, null, 2) + '\n');
+
+    const started = Date.now();
+    const {status} = runCli(rigged, ['config', 'schema'], {
+      ...rigged.on,
+      PATH: `${bin.path}:${rigged.on.PATH ?? ''}`,
+    });
+    const elapsed = Date.now() - started;
+
+    expect(status).toBe(0);
+    // The recorded failure names the timeout it was actually given...
+    const after = readSeeded(rigged);
+    expect(after.lastCheck?.ok).toBe(false);
+    expect(after.lastCheck?.error).toContain('timed out after 2000ms');
+    // ...and the command really did come back in about that long.
+    expect(elapsed).toBeLessThan(4500);
+    // The clock is stamped even though the check FAILED (invariant 3): one
+    // doomed attempt per interval, not one per command.
+    expect(after.lastCheck?.at).not.toBe(stale);
+  }, 20000);
 });
 
 describe('commands that must never carry a notice', () => {

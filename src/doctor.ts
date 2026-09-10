@@ -304,12 +304,21 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
       check: {
         label: 'SDK_VERSION',
         fn: async (): Promise<CheckResult> => {
-          const {probeSdkVersion, sdkVersionVerdict, UPGRADE_COMMAND} =
-            await import('./health-notices');
+          const {
+            NOTICE_FETCH_TIMEOUT_MS,
+            probeSdkVersion,
+            sdkVersionVerdict,
+            UPGRADE_COMMAND,
+          } = await import('./health-notices');
           const {SDK_REPO_URL} = await import('./sdk-latest');
           const now = new Date();
+          // The short timeout (uxwc.5 F7): doctor --quiet runs from the
+          // SessionStart hook, so a dead network must not hold a session up.
           const verdict = sdkVersionVerdict(
-            await probeSdkVersion({projectRoot}),
+            await probeSdkVersion({
+              projectRoot,
+              timeoutMs: NOTICE_FETCH_TIMEOUT_MS,
+            }),
             now,
           );
           switch (verdict.status) {
