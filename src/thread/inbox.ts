@@ -32,8 +32,8 @@ import {
 } from './bd';
 import {contextFor, resolveThread, type ThreadRef} from './resolve';
 import {
-  lifeBeadsDir,
-  lifeBeadsMissingLine,
+  threadsBeadsDir,
+  threadsBeadsMissingLine,
   probeWritable,
   SANDBOX_DENIED_LINE,
   threadsStateDir,
@@ -296,7 +296,7 @@ export async function runThreadInbox(
   // `bd comments … — the sandbox refused it (…)` and exit 1: true, but not
   // actionable, and not the line the rule branches on.
   const stateProbe = probeWritable(threadsStateDir(env), {create: true});
-  const beadsProbe = probeWritable(lifeBeadsDir(env), {create: false});
+  const beadsProbe = probeWritable(threadsBeadsDir(env), {create: false});
   if (stateProbe.kind === 'denied' || beadsProbe.kind === 'denied') {
     console.log(SANDBOX_DENIED_LINE);
     return 0;
@@ -304,7 +304,7 @@ export async function runThreadInbox(
   // NOT exit 0 (F9 + rule 6.2): "there is no beads workspace" must never reach
   // the next turn looking like "he has not answered anything".
   if (beadsProbe.kind === 'missing') {
-    console.error(lifeBeadsMissingLine(beadsProbe.path));
+    console.error(threadsBeadsMissingLine(beadsProbe.path));
     return 1;
   }
 

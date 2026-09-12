@@ -102,7 +102,7 @@ describe('a report whose every write dies in auto-export', () => {
   test('is RECORDED, with the export flagged — not spooled as a failure', async () => {
     const fake = createFakeBd(0, null, true);
     const ctx = bdContext(fake.env);
-    ctx.lifeDir = fake.dir;
+    ctx.repoDir = fake.dir;
 
     const outcome = await writeReportToBd({
       ctx,
@@ -127,7 +127,7 @@ describe('a report whose every write dies in auto-export', () => {
     // export miss. The loud path has to survive the fix.
     const fake = createFakeBd(1, null, false); // the 1st `create -t ask` dies
     const ctx = bdContext(fake.env);
-    ctx.lifeDir = fake.dir;
+    ctx.repoDir = fake.dir;
 
     const outcome = await writeReportToBd({
       ctx,

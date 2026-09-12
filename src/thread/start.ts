@@ -39,10 +39,11 @@ import {
   findThreadBySession,
   setThreadInProgress,
 } from './bd';
+import {commitThreadsRepo, describeCommit} from './commit';
 import {collectThreadFacts} from './facts';
 import {
-  lifeBeadsDir,
-  lifeBeadsMissingLine,
+  threadsBeadsDir,
+  threadsBeadsMissingLine,
   probeWritable,
   SANDBOX_DENIED_LINE,
   threadsStateDir,
@@ -51,6 +52,7 @@ import {buildStartMetadata} from './metadata';
 import {recordStartFailure} from './archive';
 
 import type {BdFailure} from './bd';
+import type {CommitOutcome} from './commit';
 import type {EnvLike} from './paths';
 import type {ThreadFacts} from './facts';
 import type {WriteResult} from './archive';
@@ -67,11 +69,13 @@ export type ThreadStartOutcome =
   | {kind: 'disabled'; reason: string}
   | {kind: 'skippedSubagent'; agentId: string}
   | {kind: 'sandboxDenied'; path: string; error: string}
-  | {kind: 'lifeBeadsMissing'; path: string}
+  | {kind: 'threadsBeadsMissing'; path: string}
   | {kind: 'noSessionId'; reason: string}
   | {kind: 'existing'; threadId: string; status: string | null; title: string}
   | {
       kind: 'created';
+      /** What became of the tool's own commit of the JSONL (p1uj.11). */
+      commit: CommitOutcome;
       /** A write landed but its JSONL export was not git-staged (p1uj.10). */
       exportUnstaged: boolean;
       threadId: string;
@@ -84,6 +88,8 @@ export type ThreadStartOutcome =
 export interface ThreadStartOptions {
   /** Present only for a subagent's tool call — see runThreadStartHook. */
   agentId?: string | null;
+  /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
+  autoCommit?: boolean;
   cwd?: string;
   env?: EnvLike;
   now?: Date;
@@ -217,7 +223,7 @@ export async function startThread(
       path: stateProbe.path,
     };
   }
-  const beadsProbe = probeWritable(lifeBeadsDir(env), {create: false});
+  const beadsProbe = probeWritable(threadsBeadsDir(env), {create: false});
   if (beadsProbe.kind === 'denied') {
     return {
       error: beadsProbe.error,
@@ -226,7 +232,7 @@ export async function startThread(
     };
   }
   if (beadsProbe.kind === 'missing') {
-    return {kind: 'lifeBeadsMissing', path: beadsProbe.path};
+    return {kind: 'threadsBeadsMissing', path: beadsProbe.path};
   }
 
   const ctx = bdContext(env);
@@ -285,7 +291,18 @@ export async function startThread(
   // failure would be its own rule-6 violation in the other direction, so the
   // outcome carries both the id and the named failure.
   const status = await setThreadInProgress(ctx, created.value);
+
+  // 8. COMMIT (p1uj.11). The beads are in Dolt either way; this is the step
+  // that makes them durable in git, and its failure is a warning, never a loss.
+  const commit = commitThreadsRepo(`thread ${created.value}: start`, {
+    autoCommit: options.autoCommit,
+    dir: ctx.repoDir,
+    env,
+    exportUnstaged: ctx.exportUnstaged,
+  });
+
   return {
+    commit,
     exportUnstaged: ctx.exportUnstaged,
     kind: 'created',
     statusFailure: status.ok ? null : status.failure,
@@ -303,8 +320,8 @@ export function describeStartOutcome(outcome: ThreadStartOutcome): string {
       return `thread start: skipped — this is a subagent (agent_id=${outcome.agentId}); its conductor owns the thread.`;
     case 'sandboxDenied':
       return SANDBOX_DENIED_LINE;
-    case 'lifeBeadsMissing':
-      return lifeBeadsMissingLine(outcome.path);
+    case 'threadsBeadsMissing':
+      return threadsBeadsMissingLine(outcome.path);
     case 'noSessionId':
       return `thread start: ${outcome.reason} Nothing was created.`;
     case 'existing':
@@ -333,6 +350,10 @@ export async function runThreadStart(
 ): Promise<number> {
   const outcome = await startThread(options);
   const line = describeStartOutcome(outcome);
+  if (outcome.kind === 'created') {
+    const commitLine = describeCommit(outcome.commit, 'the threads repo');
+    if (commitLine != null) console.error(commitLine);
+  }
   if (outcome.kind === 'bdFailed') {
     console.error(line);
     if (outcome.record != null && !outcome.record.ok) {
@@ -382,6 +403,8 @@ interface SessionStartHookInput {
  * than the one starting, and the payload is authoritative by construction.
  */
 export async function runThreadStartHook(args?: {
+  /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
+  autoCommit?: boolean;
   stdin?: string;
   now?: Date;
 }): Promise<number> {
@@ -399,6 +422,7 @@ export async function runThreadStartHook(args?: {
   try {
     const outcome = await startThread({
       agentId: input.agent_id ?? null,
+      autoCommit: args?.autoCommit,
       cwd: input.cwd,
       now: args?.now,
       sessionId: input.session_id ?? null,
@@ -408,6 +432,8 @@ export async function runThreadStartHook(args?: {
     if (outcome.kind === 'created') {
       console.log(describeStartOutcome(outcome));
       if (outcome.exportUnstaged) console.error(EXPORT_UNSTAGED_WARNING);
+      const commitLine = describeCommit(outcome.commit, 'the threads repo');
+      if (commitLine != null) console.error(commitLine);
       return 0;
     }
     // Everything below is stderr-only. `disabled` and `skippedSubagent` are the

@@ -47,7 +47,7 @@ import type {ThreadFacts} from '../src/thread/facts';
 let stateDir: string;
 let env: Record<string, string | undefined>;
 
-const CTX: BdContext = {env: {}, exportUnstaged: false, lifeDir: '/nowhere'};
+const CTX: BdContext = {env: {}, exportUnstaged: false, repoDir: '/nowhere'};
 
 function facts(reportedAt: string): ThreadFacts {
   return {

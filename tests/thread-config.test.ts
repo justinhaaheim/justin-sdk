@@ -13,7 +13,7 @@ import {join} from 'path';
 
 import {resolveThreadConfig} from '../src/thread/config';
 import {
-  lifeBeadsDir,
+  threadsBeadsDir,
   probeWritable,
   SANDBOX_DENIED_LINE,
   threadsStateDir,
@@ -121,8 +121,8 @@ describe('paths', () => {
     expect(threadsStateDir({JUSTIN_THREADS_STATE_DIR: '/tmp/x'})).toBe(
       '/tmp/x',
     );
-    expect(lifeBeadsDir({JUSTIN_THREADS_LIFE_DIR: '/tmp/life'})).toBe(
-      '/tmp/life/.beads',
+    expect(threadsBeadsDir({JUSTIN_THREADS_REPO_DIR: '/tmp/threads'})).toBe(
+      '/tmp/threads/.beads',
     );
   });
 
@@ -130,7 +130,7 @@ describe('paths', () => {
     expect(SANDBOX_DENIED_LINE.startsWith('THREADS: SANDBOX DENIED')).toBe(
       true,
     );
-    expect(SANDBOX_DENIED_LINE).toContain('~/Dev/life/.beads');
+    expect(SANDBOX_DENIED_LINE).toContain('~/Dev/threads');
     expect(SANDBOX_DENIED_LINE).toContain('~/.local/state/justin-threads');
     expect(SANDBOX_DENIED_LINE.toLowerCase()).not.toContain('disable');
   });

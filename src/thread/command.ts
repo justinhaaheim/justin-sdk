@@ -328,7 +328,7 @@ export const threadCommand: CommandModule = {
       .demandCommand(1, 'Please specify a thread subcommand'),
   command: 'thread',
   describe:
-    'Status reports as beads: one thread bead per Claude Code session in ~/Dev/life, with a child ask bead for everything Justin has to do.',
+    'Status reports as beads: one thread bead per Claude Code session in ~/Dev/threads, with a child ask bead for everything Justin has to do.',
   handler: () => {
     // Subcommands do the work; demandCommand prints help for a bare `thread`.
   },

@@ -84,7 +84,7 @@ describe('a report interrupted between its two asks', () => {
   test('the retry SUCCEEDS: the orphan is closed and the asks are recreated', async () => {
     const fake = createFakeBd(2); // fail the 2nd `create -t ask`
     const ctx = bdContext(fake.env);
-    ctx.lifeDir = fake.dir;
+    ctx.repoDir = fake.dir;
     const payload = twoAskPayload();
 
     // --- attempt 1: dies after the first ask ---
@@ -140,7 +140,7 @@ describe('a report interrupted between its two asks', () => {
     // on, which is far worse than the bug it replaces.
     const fake = createFakeBd(0);
     const ctx = bdContext(fake.env);
-    ctx.lifeDir = fake.dir;
+    ctx.repoDir = fake.dir;
 
     const first = await writeReportToBd({
       ctx,
@@ -182,7 +182,7 @@ describe('a report interrupted between its two asks', () => {
   test('the carried asks reach the rendered report IN FULL (F4)', async () => {
     const fake = createFakeBd(0);
     const ctx = bdContext(fake.env);
-    ctx.lifeDir = fake.dir;
+    ctx.repoDir = fake.dir;
 
     const first = await writeReportToBd({
       ctx,
@@ -222,7 +222,7 @@ describe('a report interrupted between its two asks', () => {
   test('the PROVISIONAL write on an existing thread never says "no thread bead"', async () => {
     const fake = createFakeBd(0);
     const ctx = bdContext(fake.env);
-    ctx.lifeDir = fake.dir;
+    ctx.repoDir = fake.dir;
 
     await writeReportToBd({
       ctx,

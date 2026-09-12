@@ -204,6 +204,18 @@ const componentConfigSchema = z
           .describe(
             'The PREFLIGHT BRANCH POINT for thread reports, not a master switch (home-base-p1uj D6; corrected 2026-09-12, F7b). DEFAULT FALSE. It decides one thing: whether `thread prepare` prints THREADS: ENABLED or THREADS: DISABLED, which is the line the wrap-up rule branches on to fall back to the plain text status report. It does NOT disable the command group — `thread report`, `board`, `answer` and `inbox` all still work when it is false, which is deliberate: a human running them by hand should not be silently refused.',
           ),
+        autoCommit: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether `thread` commits the threads repo’s `.beads/issues.jsonl` itself after every write batch (home-base-p1uj.11). DEFAULT TRUE — the only thread knob that defaults on, because threads live in their own repo whose sole writer is this tool, so committing is finishing the write rather than a new risk. Set it false to batch the commits by hand, or when the threads workspace is not a git repo. A commit that cannot be made is a WARNING, never a lost report.',
+          ),
+        repoDir: z
+          .string()
+          .optional()
+          .describe(
+            'The bd workspace holding `thread` and `ask` beads (home-base-p1uj.11). DEFAULT ~/Dev/threads. Overridden by the JUSTIN_THREADS_REPO_DIR env var, which outranks both config files; the older JUSTIN_THREADS_LIFE_DIR still works for one release and prints a deprecation line.',
+          ),
         startOnSessionStart: z
           .boolean()
           .optional()

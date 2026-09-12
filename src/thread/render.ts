@@ -478,7 +478,7 @@ export function renderAskDescription(ask: ThreadAsk, threadId: string): string {
   lines.push('', `IF UNANSWERED: ${ask.default}`);
   lines.push(
     '',
-    `Answer by commenting on this bead: cd ~/Dev/life && bun run bd comments add <this id> "your answer"`,
+    `Answer by commenting on this bead: cd ~/Dev/threads && bun run bd comments add <this id> "your answer"`,
     `Thread: ${threadId}`,
   );
   return lines.join('\n');

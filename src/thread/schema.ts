@@ -4,7 +4,7 @@
  * WHAT THIS IS. A status report used to be prose that Justin had to parse. It
  * is now a data structure: `thread report` takes this JSON, validates it,
  * attaches the facts Claude should never type (see facts.ts), writes it to a
- * `thread` bead in ~/Dev/life and renders the familiar text report from it.
+ * `thread` bead in the threads repo and renders the familiar text report from it.
  * Everything in here is therefore something only Claude can know — nothing that
  * can be measured belongs in this file.
  *

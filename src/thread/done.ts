@@ -34,9 +34,16 @@ import {
   reopenIssue,
   type BdContext,
 } from './bd';
+import {commitThreadsRepo, describeCommit, type CommitOutcome} from './commit';
 import {contextFor, resolveThread, type ThreadRef} from './resolve';
 
 export const DEFAULT_DONE_REASON = 'thread closed by Justin';
+
+/** One place, so `done` and `reopen` cannot drift apart on what they print. */
+function printCommit(outcome: CommitOutcome): void {
+  const line = describeCommit(outcome, 'the threads repo');
+  if (line != null) console.error(line);
+}
 
 /**
  * The bd calls this module makes, as an injectable seam.
@@ -61,6 +68,8 @@ const REAL_DEPS: DoneDeps = {
 };
 
 export interface DoneOptions extends ThreadRef {
+  /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
+  autoCommit?: boolean;
   deps?: DoneDeps;
   reason?: string | null;
 }
@@ -124,6 +133,14 @@ export async function runThreadDone(
   // The close landed but its export did not stage (home-base-p1uj.10). Said out
   // loud here too: an unstaged JSONL that nobody is told about is a silence.
   if (ctx.exportUnstaged) console.error(EXPORT_UNSTAGED_WARNING);
+  printCommit(
+    commitThreadsRepo(`thread ${thread.id}: closed`, {
+      autoCommit: options.autoCommit,
+      dir: ctx.repoDir,
+      env,
+      exportUnstaged: ctx.exportUnstaged,
+    }),
+  );
   return 0;
 }
 
@@ -157,6 +174,15 @@ export async function runThreadReopen(
   console.log(`  reason: ${reason}`);
   console.log(
     '  its asks stay CLOSED — they were closed as no longer relevant. The next report can ask again.',
+  );
+  if (ctx.exportUnstaged) console.error(EXPORT_UNSTAGED_WARNING);
+  printCommit(
+    commitThreadsRepo(`thread ${thread.id}: reopened`, {
+      autoCommit: options.autoCommit,
+      dir: ctx.repoDir,
+      env,
+      exportUnstaged: ctx.exportUnstaged,
+    }),
   );
   return 0;
 }

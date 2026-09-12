@@ -60,6 +60,7 @@ import {
   type BdContext,
   type BdIssue,
 } from './bd';
+import {commitThreadsRepo, describeCommit} from './commit';
 import {contextFor, resolveThread, type ThreadRef} from './resolve';
 import {
   compareAsksForNumbering,
@@ -354,6 +355,8 @@ function createTerminalIo(): {io: AnswerIo; close: () => void} {
 }
 
 export interface AnswerOptions extends ThreadRef {
+  /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
+  autoCommit?: boolean;
   /** Injected by tests; the real command uses the readline adapter. */
   io?: AnswerIo;
 }
@@ -427,6 +430,17 @@ export async function runThreadAnswer(
   // Before the summary, so the walk's last line stays the one Justin says.
   if (ctx.exportUnstaged) console.error(EXPORT_UNSTAGED_WARNING);
 
+  const commitLine = describeCommit(
+    commitThreadsRepo(`thread ${thread.id}: answers`, {
+      autoCommit: options.autoCommit,
+      dir: ctx.repoDir,
+      env,
+      exportUnstaged: ctx.exportUnstaged,
+    }),
+    'the threads repo',
+  );
+  if (commitLine != null) console.error(commitLine);
+
   return summarizeWalk(result);
 }
 
@@ -451,7 +465,7 @@ export function commentTextFor(decision: AskDecision): string {
 
 /** The exact command that writes one comment by hand, for the failure banner. */
 export function retryCommandFor(id: string, text: string): string {
-  return `cd ~/Dev/life && bun run bd comments add ${id} ${shellSingleQuote(text)}`;
+  return `cd ~/Dev/threads && bun run bd comments add ${id} ${shellSingleQuote(text)}`;
 }
 
 /**

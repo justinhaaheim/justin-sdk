@@ -18,11 +18,12 @@
  * here, before anything is shown, so the board never renders a view it knows to
  * be out of date. Nothing is printed when the spool was empty.
  *
- * THE LAST LINE IS THE D13 REMINDER: bd auto-exports `issues.jsonl` and git-adds
- * it, but committing stays manual, so every thread written today is one `git
- * commit` away from being real. The count is measured, and an unmeasurable one
- * says UNKNOWN rather than 0 — "nothing to commit" is the reassuring reading,
- * and the reassuring reading is the dangerous one.
+ * THE LAST LINE IS AN EXCEPTION REPORT, NOT A REMINDER (p1uj.11, retiring D13).
+ * The tool now commits the threads repo itself after every write, so a dirty
+ * `issues.jsonl` means a commit FAILED and needs a human. Nothing is printed
+ * when the repo is clean; an unmeasurable one says UNKNOWN rather than 0, since
+ * "nothing to commit" is the reassuring reading and the reassuring reading is
+ * the dangerous one.
  */
 
 import {spawnSync} from 'child_process';
@@ -35,8 +36,9 @@ import {
   type BdIssue,
 } from './bd';
 import {bdContext} from './bd';
+import {commitThreadsRepo, describeCommit} from './commit';
 import {drainSpool, renderDrain, type SpoolApplier} from './drain';
-import {lifeRepoDir} from './paths';
+import {threadsRepoDir} from './paths';
 import {readReportCount} from './metadata';
 
 import type {EnvLike} from './paths';
@@ -333,29 +335,35 @@ export function renderOpenAsks(asks: readonly BoardAsk[]): string {
 }
 
 /**
- * D13's reminder line. Measured, and UNKNOWN when it cannot be.
+ * WHAT IS STILL UNCOMMITTED — which, since p1uj.11, means SOMETHING FAILED.
  *
- * The tool deliberately does not commit life's `issues.jsonl` (a cross-repo
- * commit from every session's wrap-up is an index.lock hazard), so this is the
- * only thing standing between a written thread and a committed one.
+ * This used to be D13's standing reminder: the tool did not commit the beads
+ * JSONL, so the board nagged after every session. The tool now commits after
+ * every write batch (`commit.ts`), so a dirty `issues.jsonl` is no longer the
+ * normal state — it means a commit was refused (a denied `.git` under the
+ * sandbox, an `index.lock`, `autoCommit` turned off). Hence `null` for the
+ * clean case: the board says nothing when there is nothing wrong.
+ *
+ * UNKNOWN is still its own answer, and is still printed. "git could not be
+ * read" is not "there is nothing uncommitted" (rule 6) — and here the
+ * reassuring reading is the dangerous one, because it would hide exactly the
+ * reports that never reached git.
  */
-export function uncommittedLine(env: EnvLike, dir?: string): string {
-  const lifeDir = dir ?? lifeRepoDir(env);
+export function uncommittedLine(env: EnvLike, dir?: string): string | null {
+  const repoDir = dir ?? threadsRepoDir(env);
   const result = spawnSync(
     'git',
     ['diff', '--numstat', 'HEAD', '--', '.beads/issues.jsonl'],
-    {cwd: lifeDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']},
+    {cwd: repoDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']},
   );
   if (result.error != null || result.status !== 0) {
     const detail = (result.stderr ?? '').trim() || String(result.error ?? '');
-    return `📌 uncommitted beads in ~/Dev/life: UNKNOWN — git could not be read (${detail.slice(0, 120)})`;
+    return `📌 uncommitted beads in ${repoDir}: UNKNOWN — git could not be read (${detail.slice(0, 120)})`;
   }
   const line = (result.stdout ?? '').trim();
-  if (line === '') {
-    return '📌 ~/Dev/life/.beads/issues.jsonl: no uncommitted changes.';
-  }
+  if (line === '') return null;
   const [added, removed] = line.split('\n')[0]!.split('\t');
-  return `📌 ~/Dev/life/.beads/issues.jsonl has UNCOMMITTED changes (+${added ?? '?'}/-${removed ?? '?'} lines). Commit it so today's threads survive: cd ~/Dev/life && git add .beads/issues.jsonl && git commit -m 'chore(beads): thread reports'`;
+  return `📌 ${repoDir}/.beads/issues.jsonl has UNCOMMITTED changes (+${added ?? '?'}/-${removed ?? '?'} lines), so a commit this tool should have made did NOT happen. Commit it: cd ${repoDir} && git add .beads/issues.jsonl && git commit -m 'chore(beads): thread reports'`;
 }
 
 export type BoardView = 'repo' | 'recent' | 'openAsks';
@@ -363,6 +371,8 @@ export type BoardView = 'repo' | 'recent' | 'openAsks';
 export interface BoardOptions {
   /** Injected by tests so the drain can be exercised without a bd database. */
   apply?: SpoolApplier;
+  /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
+  autoCommit?: boolean;
   env?: EnvLike;
   json?: boolean;
   now?: Date;
@@ -389,6 +399,25 @@ export async function runThreadBoard(
   // as the `drain` key and a loose line would corrupt the document.
   if (options.json !== true) {
     for (const line of drainLines) console.log(line);
+  }
+  // A drained report is a write like any other, so it gets the same commit
+  // (p1uj.11). One commit for the whole drain, not one per file: they land in
+  // the same JSONL in the same second, and N commits would say N things
+  // happened when one batch did.
+  if (drained != null && drained.applied > 0) {
+    const commitLine = describeCommit(
+      commitThreadsRepo(
+        `thread drain: applied ${drained.applied} spooled report${drained.applied === 1 ? '' : 's'}`,
+        {
+          autoCommit: options.autoCommit,
+          dir: ctx.repoDir,
+          env,
+          exportUnstaged: ctx.exportUnstaged,
+        },
+      ),
+      'the threads repo',
+    );
+    if (commitLine != null) console.error(commitLine);
   }
 
   // 2. Exactly two bd calls. Everything below is client-side.
@@ -440,7 +469,10 @@ export async function runThreadBoard(
     }
   }
 
-  console.log('');
-  console.log(uncommittedLine(env));
+  const uncommitted = uncommittedLine(env);
+  if (uncommitted != null) {
+    console.log('');
+    console.log(uncommitted);
+  }
   return 0;
 }
