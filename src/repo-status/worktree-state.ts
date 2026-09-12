@@ -117,10 +117,19 @@ export function readWorktreeStates(
  * renderer says it) or when the count could not be read. Never a fabricated
  * `{0, 0}`: zero unpushed commits is the single most reassuring thing this can
  * report, and it may only be printed when it was measured.
+ *
+ * `branch` is the NAME — `@{upstream}` is a name-based lookup and nothing else
+ * can answer it. `branchRev` is what the COUNT is taken against, so a caller
+ * holding a pinned commit passes it and the header stops describing a different
+ * commit from the table below it (home-base-qyu1.33.6, D1: this line is the half
+ * of the report that stayed live in the round-2 trial, and it is the half a
+ * reader is most likely to trust). It defaults to the name, which is what an
+ * unpinned caller means.
  */
 export function readUpstreamDivergence(
   branch: string,
   cwd: string,
+  branchRev: string = branch,
 ): {ahead: number; behind: number; ref: string} | null {
   let ref: string;
   try {
@@ -138,7 +147,7 @@ export function readUpstreamDivergence(
   try {
     const out = execFileSync(
       'git',
-      ['rev-list', '--left-right', '--count', `${ref}...${branch}`],
+      ['rev-list', '--left-right', '--count', `${ref}...${branchRev}`],
       {cwd, encoding: 'utf-8', stdio: 'pipe'},
     );
     const parts = out.trim().split(/\s+/);

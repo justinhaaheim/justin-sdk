@@ -22,6 +22,7 @@ import {
   type CommitVerdict,
 } from './content';
 import {decideDisposition, type Disposition} from './disposition';
+import {readFetchAge, type FetchAge} from './fetch-age';
 import {describeMergeShape, type MergeShape} from './merge-shape';
 import {previewMerge, type MergePreview} from './merge-preview';
 import {
@@ -191,7 +192,26 @@ export interface RepoStatusReport {
     root: string;
     currentBranch: string | null;
     defaultBranch: string | null;
+    /** The baseline's NAME — what every sentence in this report calls it. */
     baselineRef: string;
+    /**
+     * The commit that name resolved to when the walk started, and the commit
+     * EVERY number in this report was measured against (home-base-qyu1.33.6).
+     *
+     * Published because it is what makes the report auditable: with it, a reader
+     * can re-run any count later and get the same answer; without it, every
+     * figure here is relative to a name that has since moved. The round-2 blind
+     * trial caught exactly that — the header measured after a commit landed
+     * mid-run, the thirteen table rows measured before it, and nothing in the
+     * output said so.
+     */
+    baselineSha: string;
+    /**
+     * When this checkout last fetched — the unstated precondition under every
+     * `N behind origin/*` figure in this report. `origin/main` is a local ref,
+     * so "0 behind" means "0 behind what this disk last downloaded".
+     */
+    remoteRefs: FetchAge;
     /**
      * The state of the checkout the caller is standing in.
      *
@@ -323,6 +343,13 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
   });
   if (inventory == null) return null;
 
+  // Read WITH the pin, at the start, for the same reason the pin exists: it
+  // qualifies every `N behind origin/*` below, and a fetch that lands during the
+  // walk must not be able to make those counts look fresher than they are.
+  // Erring old is the safe direction for a number whose whole job is to say how
+  // much a reassurance can be trusted.
+  const remoteRefs = readFetchAge(cwd);
+
   const prIndex: PrIndex = prs ? fetchPullRequests({cwd}) : EMPTY_PR_INDEX;
 
   const selected =
@@ -342,6 +369,7 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
     ? buildSubmoduleInventory({
         allWorktreeStores: submoduleStores,
         baselineRef: inventory.baselineRef,
+        baselineSha: inventory.baselineSha,
         branches: selected ?? undefined,
         cwd,
         repoRoot: inventory.repoRoot,
@@ -362,7 +390,9 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
       if (branch.divergence == null || branch.divergence.ahead === 0) continue;
       changedByBranch.set(
         branch.name,
-        readChangedFiles(inventory.baselineRef, branch.name, cwd),
+        // Keyed by NAME, measured by SHA: the map is an index for the rows, and
+        // the diff is a measurement of two commits.
+        readChangedFiles(inventory.baselineSha, branch.tipSha, cwd),
       );
     }
   }
@@ -383,14 +413,14 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
 
   const rows: BranchRow[] | null =
     selected?.map((branch) =>
-      buildRow(branch, inventory.baselineRef, cwd, {
+      buildRow(branch, inventory.baselineRef, inventory.baselineSha, cwd, {
         changed: changedByBranch.get(branch.name) ?? null,
         content,
         // Only branches with unique work have a "last work" to find; on the rest
         // the answer is empty by construction and the call would be wasted.
         lastWork:
           branch.divergence != null && branch.divergence.ahead > 0
-            ? readLastWork(inventory.baselineRef, branch.name, cwd)
+            ? readLastWork(inventory.baselineSha, branch.tipSha, cwd)
             : null,
         mergePreview,
         only,
@@ -464,15 +494,30 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
     overlaps: overlapReport,
     repo: {
       baselineRef: inventory.baselineRef,
+      baselineSha: inventory.baselineSha,
       currentBranch: inventory.currentBranch,
       defaultBranch: inventory.defaultBranch,
       here: {
         state: worktreeState ? readWorktreeState(cwd) : null,
+        // MEASURED FROM THE PIN when the branch under the reader's feet IS the
+        // baseline. This runs at the END of the walk while the branch table was
+        // computed at the start, so it is the half that stayed live in the
+        // round-2 trial: the header said `3 ahead of origin/main` against a
+        // `main` that had just moved, and every row below described `main~1`.
+        // A branch that is not the baseline has no pin here and is measured by
+        // name, as before.
         upstream:
           inventory.currentBranch != null
-            ? readUpstreamDivergence(inventory.currentBranch, cwd)
+            ? readUpstreamDivergence(
+                inventory.currentBranch,
+                cwd,
+                inventory.currentBranch === inventory.baselineRef
+                  ? inventory.baselineSha
+                  : inventory.currentBranch,
+              )
             : null,
       },
+      remoteRefs,
       root: inventory.repoRoot,
     },
     summary:
@@ -495,7 +540,10 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
 
 function buildRow(
   branch: BranchDivergence,
+  /** The baseline's NAME: every sentence on this row. */
   baselineRef: string,
+  /** The baseline's pinned COMMIT: every git walk under this row. */
+  baselineSha: string,
   cwd: string,
   ctx: {
     changed: ChangedFileSet | null;
@@ -519,7 +567,10 @@ function buildRow(
   // computing one keeps the row from carrying evidence nobody may rely on.
   const proof =
     ctx.content && branch.divergence != null && branch.divergence.ahead > 0
-      ? proveContentOnBaseline(branch.name, baselineRef, cwd)
+      ? proveContentOnBaseline(branch.name, baselineRef, cwd, {
+          baseline: baselineSha,
+          branch: branch.tipSha,
+        })
       : null;
 
   const pr = prForBranch(ctx.prIndex, branch.name);
@@ -538,6 +589,7 @@ function buildRow(
   const preview =
     ctx.mergePreview && branch.divergence != null && branch.divergence.ahead > 0
       ? previewMerge(baselineRef, branch.name, cwd, {
+          pins: {baseline: baselineSha, branch: branch.tipSha},
           submodulePaths: ctx.submodulePaths,
         })
       : null;

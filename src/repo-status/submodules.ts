@@ -152,12 +152,19 @@ export interface SubmoduleCheckout {
 /**
  * The minimum a branch row must supply to have its gitlink read.
  *
- * Deliberately structural rather than an import of `BranchDivergence`: this
- * module needs the NAME and nothing else, and a narrow input type keeps the
- * submodule scan usable from anywhere that can name a ref.
+ * Deliberately structural rather than an import of `BranchDivergence`: a narrow
+ * input type keeps the submodule scan usable from anywhere that can name a ref
+ * and say what it resolved to.
+ *
+ * BOTH FIELDS, because the two are used for different things: the NAME is what
+ * the findings say, and the SHA is what the `ls-tree` reads (home-base-qyu1.33.6,
+ * D1). Required rather than optional so "named but unpinned" is not a state this
+ * module has to have an opinion about.
  */
 export interface BranchRef {
   name: string;
+  /** The commit this branch's tip resolved to when the walk enumerated it. */
+  tipSha: string;
 }
 
 /** What one branch records for one submodule, when it differs from the baseline. */
@@ -263,8 +270,14 @@ export interface SubmoduleOptions {
    * reported as NOT CHECKED rather than as agreement.
    */
   branches?: BranchRef[];
-  /** The ref every branch's gitlink is compared against. */
+  /** The NAME of the ref every branch's gitlink is compared against — for the findings. */
   baselineRef?: string | null;
+  /**
+   * The commit that name resolved to at the top of the walk, which is what the
+   * comparison actually reads (home-base-qyu1.33.6, D1). Null means an unpinned
+   * caller and the name is read as it resolves now.
+   */
+  baselineSha?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -804,11 +817,12 @@ interface BranchPointerScan {
 
 function scanBranchPointers(ctx: {
   baselineRef: string | null;
+  baselineSha: string | null;
   branches: BranchRef[] | undefined;
   cwd: string;
   subPaths: string[];
 }): BranchPointerScan {
-  const {baselineRef, branches, cwd, subPaths} = ctx;
+  const {baselineRef, baselineSha, branches, cwd, subPaths} = ctx;
   const base = {
     baselinePointers: new Map<string, string>(),
     baselineRef,
@@ -834,11 +848,15 @@ function scanBranchPointers(ctx: {
   }
 
   return {
-    baselinePointers: pointersAtRef(cwd, baselineRef, subPaths),
+    // SHAS on both sides where the caller pinned them (home-base-qyu1.33.6, D1):
+    // this comparison decides whether merging a branch moves a gitlink, and it
+    // has to be about the same commits the rest of the report measured. The
+    // NAMES stay on the scan for the findings to quote.
+    baselinePointers: pointersAtRef(cwd, baselineSha ?? baselineRef, subPaths),
     baselineRef,
     byBranch: branches.map((b) => ({
       name: b.name,
-      pointers: pointersAtRef(cwd, b.name, subPaths),
+      pointers: pointersAtRef(cwd, b.tipSha, subPaths),
     })),
     checked: true,
     note: null,
@@ -1017,6 +1035,7 @@ export function buildSubmoduleInventory(
   const {
     allWorktreeStores = false,
     baselineRef = null,
+    baselineSha = null,
     branches,
     cwd,
     repoRoot,
@@ -1037,6 +1056,7 @@ export function buildSubmoduleInventory(
   const discovered = discoverSubmodules(cwd, repoRoot);
   const scan = scanBranchPointers({
     baselineRef,
+    baselineSha,
     branches,
     cwd,
     subPaths: discovered.map((d) => d.path),

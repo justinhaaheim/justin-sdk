@@ -464,12 +464,25 @@ function unreadableVerdict(
  */
 export function verifyCommitFiles(
   sha: string,
-  baselineRef: string,
+  /** What to LOOK UP against — a pinned commit from the walk, or a ref name. */
+  baselineRev: string,
   cwd: string,
+  /**
+   * What to CALL it in the verdict a failed lookup carries, which
+   * `disposition.ts` prints as "could not read <path> on <ref>". Defaults to
+   * whatever was looked up, which is right when that was a name.
+   */
+  baselineName: string = baselineRev,
 ): FileVerdict[] {
   return changedPaths(sha, cwd).map(
     ({path, renamedTo, status}): FileVerdict => {
-      const verdict = verifyChangedPath(path, status, sha, baselineRef, cwd);
+      const verdict = verifyChangedPath(
+        path,
+        status,
+        sha,
+        {name: baselineName, rev: baselineRev},
+        cwd,
+      );
       // The annotation rides on whatever the verdict turned out to be,
       // `unreadable` included — which is where a reader is MOST likely to
       // wonder why a path absent from the post-state is being looked up at all.
@@ -493,12 +506,18 @@ function verifyChangedPath(
   path: string,
   status: string,
   sha: string,
-  baselineRef: string,
+  /**
+   * `rev` is read; `name` is what the verdict says. They differ when the walk
+   * pinned the baseline (home-base-qyu1.33.6): the failed COMMAND names the
+   * exact commit so re-running it reproduces the failure, while the sentence
+   * built from it keeps saying "on main", which is what a reader can act on.
+   */
+  baseline: {name: string; rev: string},
   cwd: string,
 ): FileVerdict {
-  const onBaseline = lookupPathOnRef(baselineRef, path, cwd);
+  const onBaseline = lookupPathOnRef(baseline.rev, path, cwd);
   if (onBaseline.kind === 'unreadable') {
-    return unreadableVerdict(path, baselineRef, onBaseline);
+    return unreadableVerdict(path, baseline.name, onBaseline);
   }
 
   if (status === 'D') {
@@ -706,17 +725,33 @@ export function inspectArchiveMirror(
  * Archive-mirror state is gathered but deliberately kept OUT of
  * `allContentOnBaseline`: "mirrored" and "already merged" are different claims
  * with different risks, and collapsing them is how work gets lost.
+ *
+ * `branch` and `baselineRef` are the NAMES — they travel onto the returned
+ * proof, which is where `disposition.ts` reads them for its sentences, and the
+ * archive-mirror lookup resolves `archive/<branch>` from the name because only a
+ * name can answer that. `pins` is what the git walks below actually measure
+ * (home-base-qyu1.33.6, D1): a proof and the ahead/behind counts printed beside
+ * it must enumerate the same commits, and re-resolving the two names here is how
+ * they come apart.
  */
 export function proveContentOnBaseline(
   branch: string,
   baselineRef: string,
   cwd: string,
+  /**
+   * The commits the two names resolved to at the top of the walk. Both or
+   * neither; omitted means an unpinned caller, and the names are walked as they
+   * resolve right now.
+   */
+  pins?: {baseline: string; branch: string},
 ): ContentProof {
+  const baselineRev = pins?.baseline ?? baselineRef;
+  const branchRev = pins?.branch ?? branch;
   const archiveMirror = inspectArchiveMirror(branch, cwd);
 
   // `git cherry -v <upstream> <head>`: "- sha subject" when an equivalent patch
   // is already upstream, "+ sha subject" when it is not.
-  const cherry = gitArgv(['cherry', '-v', baselineRef, branch], cwd);
+  const cherry = gitArgv(['cherry', '-v', baselineRev, branchRev], cwd);
   if (cherry == null) {
     return {
       allContentOnBaseline: false,
@@ -750,8 +785,10 @@ export function proveContentOnBaseline(
       continue;
     }
 
-    // No patch-id match — fall back to the comprehensive per-file comparison.
-    const files = verifyCommitFiles(sha, baselineRef, cwd);
+    // No patch-id match — fall back to the comprehensive per-file comparison,
+    // against the same pinned commit `git cherry` just walked. The NAME rides
+    // along for the sentence a failed lookup produces.
+    const files = verifyCommitFiles(sha, baselineRev, cwd, baselineRef);
     uniqueCommits.push({
       // Only the two POSITIVE verdicts count, so `unreadable` fails this the
       // same way `differs` does. That is necessary but not sufficient: it makes

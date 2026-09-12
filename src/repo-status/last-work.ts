@@ -43,7 +43,14 @@ export interface LastWork {
 const RECORD = '';
 
 /**
- * The newest non-merge commit on `branch` that `baselineRef` does not have.
+ * The newest non-merge commit `branchRev` has that `baselineRev` does not.
+ *
+ * BOTH ARE REVS, and `report.ts` passes SHAS — the pinned baseline and the
+ * branch's tip (home-base-qyu1.33.6, D1). This produces a DATE that is printed
+ * next to ahead/behind counts, so it has to describe the same two commits those
+ * counts were measured from; resolving the two names again here is how a row
+ * ends up half-describing a repo state that no longer exists. Nothing in the
+ * return value is prose, so no name is needed.
  *
  * Returns null when there is none — a branch whose only unique commits are
  * merges, or which has none at all — and null when git could not answer. Those
@@ -52,8 +59,8 @@ const RECORD = '';
  * reads a null as a reassurance.
  */
 export function readLastWork(
-  baselineRef: string,
-  branch: string,
+  baselineRev: string,
+  branchRev: string,
   cwd: string,
 ): LastWork | null {
   let out: string;
@@ -65,7 +72,7 @@ export function readLastWork(
         '-1',
         '--no-merges',
         `--format=%H${RECORD}%cI${RECORD}%s`,
-        `${baselineRef}..${branch}`,
+        `${baselineRev}..${branchRev}`,
       ],
       {cwd, encoding: 'utf-8', maxBuffer: 1024 * 1024, stdio: 'pipe'},
     );

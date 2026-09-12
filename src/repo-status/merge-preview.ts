@@ -128,7 +128,7 @@ function firstLine(text: string): string {
   return line.length > 0 ? line : 'no output on stderr';
 }
 
-function mergeTreeArgv(baselineRef: string, branch: string): string[] {
+function mergeTreeArgv(baselineRev: string, branchRev: string): string[] {
   return [
     'merge-tree',
     '--write-tree',
@@ -137,8 +137,8 @@ function mergeTreeArgv(baselineRef: string, branch: string): string[] {
     // newline — legal in git — cannot desync the parse and turn one conflicted
     // file into two invented ones.
     '-z',
-    baselineRef,
-    branch,
+    baselineRev,
+    branchRev,
   ];
 }
 
@@ -206,6 +206,19 @@ export interface MergePreviewOptions {
    * not run, which is reported as such rather than as "no submodule moved".
    */
   submodulePaths?: string[];
+  /**
+   * The commits the two ref names resolved to at the top of the walk
+   * (home-base-qyu1.33.6, D1). When present, EVERY git argv below uses these
+   * shas and the two NAMES are used only for the sentences — so the preview
+   * describes the same commits the row's ahead/behind counts were measured from,
+   * and the `command` a failure prints names commits rather than refs that may
+   * have moved by the time anybody re-runs it.
+   *
+   * Both or neither, in one field, so "pinned baseline against a live branch
+   * name" is unrepresentable. Omitted is the honest state for a caller with no
+   * pinned walk behind it: the names are then measured as they resolve now.
+   */
+  pins?: {baseline: string; branch: string};
 }
 
 /** The gitlink a tree-ish records at `path`, or null when there is none/unreadable. */
@@ -243,14 +256,18 @@ function isAncestor(
  */
 function checkSubmoduleShifts(
   mergedTree: string,
-  baselineRef: string,
+  baseline: {name: string; rev: string},
   paths: string[],
   repoCwd: string,
 ): SubmoduleShift[] {
   const shifts: SubmoduleShift[] = [];
   for (const path of paths) {
     const mergedSha = gitlinkAt(mergedTree, path, repoCwd);
-    const baselineSha = gitlinkAt(baselineRef, path, repoCwd);
+    // The REV reads the tree; the NAME goes in the sentence below. They are
+    // separate arguments because this line is the one place in the module where
+    // a single string would end up in both, and the sentence has to keep saying
+    // "history main already has" rather than quoting a sha at the reader.
+    const baselineSha = gitlinkAt(baseline.rev, path, repoCwd);
     if (mergedSha == null || baselineSha == null) continue;
     if (mergedSha === baselineSha) continue;
 
@@ -265,7 +282,7 @@ function checkSubmoduleShifts(
       why = `submodule ${path} would move ${baselineSha.slice(0, 8)} -> ${mergedSha.slice(0, 8)}, but which way could not be determined — \`git -C ${path} merge-base --is-ancestor\` failed, most likely because one of those commits is not in the submodule's object store. This is NOT known to be safe.`;
     } else if (mergedIsOlder) {
       direction = 'regression';
-      why = `REVERTS submodule ${path} from ${baselineSha.slice(0, 8)} back to ${mergedSha.slice(0, 8)} — an ancestor, so the merge silently UNDOES submodule history ${baselineRef} already has. git reports no conflict for this: only one side moved the pointer, so it takes that side.`;
+      why = `REVERTS submodule ${path} from ${baselineSha.slice(0, 8)} back to ${mergedSha.slice(0, 8)} — an ancestor, so the merge silently UNDOES submodule history ${baseline.name} already has. git reports no conflict for this: only one side moved the pointer, so it takes that side.`;
     } else if (mergedIsNewer) {
       direction = 'advance';
       why = `advances submodule ${path} from ${baselineSha.slice(0, 8)} to ${mergedSha.slice(0, 8)} (a descendant) — an ordinary bump`;
@@ -285,6 +302,10 @@ function checkSubmoduleShifts(
  * `ahead === 0` has nothing to preview, and one whose divergence could not be
  * measured has already failed the walk this would repeat. `report.ts` enforces
  * both; doing it there keeps the cost proportional to the interesting rows.
+ *
+ * The two ref arguments NAME the sides — they are what every sentence below
+ * says. What git is actually run against is `opts.pins` when the caller has a
+ * pinned walk behind it, and these names otherwise (home-base-qyu1.33.6, D1).
  */
 export function previewMerge(
   baselineRef: string,
@@ -293,7 +314,9 @@ export function previewMerge(
   opts: MergePreviewOptions = {},
 ): MergePreview {
   const maxFiles = opts.maxFiles ?? DEFAULT_CONFLICT_FILE_CAP;
-  const argv = mergeTreeArgv(baselineRef, branch);
+  const baselineRev = opts.pins?.baseline ?? baselineRef;
+  const branchRev = opts.pins?.branch ?? branch;
+  const argv = mergeTreeArgv(baselineRev, branchRev);
   const run = runGit(argv, cwd);
   const command = renderGitCommand(argv);
 
@@ -323,7 +346,12 @@ export function previewMerge(
   const submodulePaths = opts.submodulePaths ?? [];
   const shifts =
     submodulePaths.length > 0
-      ? checkSubmoduleShifts(mergedTree, baselineRef, submodulePaths, cwd)
+      ? checkSubmoduleShifts(
+          mergedTree,
+          {name: baselineRef, rev: baselineRev},
+          submodulePaths,
+          cwd,
+        )
       : null;
   const regressions = (shifts ?? []).filter(
     (s) => s.direction === 'regression' || s.direction === 'unknown',

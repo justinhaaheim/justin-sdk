@@ -41,6 +41,7 @@
 import {formatTouched} from '../plugin/lib/repo-status/prime-view';
 
 import type {Disposition} from './disposition';
+import type {FetchAge} from './fetch-age';
 import type {BranchOverlap, OverlapReport} from './overlap';
 import type {RepoStatusReport, BranchRow} from './report';
 import type {SubmoduleInventory} from './submodules';
@@ -144,6 +145,37 @@ export function shouldStyle(): boolean {
 function plural(n: number, word: string): string {
   if (n === 1) return `${n} ${word}`;
   return `${n} ${word}${/(?:ch|sh|s|x|z)$/.test(word) ? 'es' : 's'}`;
+}
+
+/** A commit, abbreviated for reading. The full sha stays in the YAML/JSON. */
+function short(sha: string): string {
+  return sha.slice(0, 7);
+}
+
+/**
+ * What the remote refs in this report are worth, in one line.
+ *
+ * `0 behind origin/main` rests entirely on this and never said so: `origin/main`
+ * is a local ref that only a fetch moves, so the figure is against whatever this
+ * disk last downloaded. The three states are printed as three different
+ * sentences, and two of them are alerts — a never-fetched checkout and an
+ * unreadable fetch age both mean the BEHIND column is unsupported, and neither
+ * may be rendered as the quiet, ordinary case (home-base-qyu1.33.6).
+ */
+function remoteRefsLine(age: FetchAge, style: Styler): string {
+  if (age.kind === 'fetched') {
+    return style.dim(
+      `Remote refs: last fetched ${formatTouched(age.at, 'always')} — every BEHIND against an origin/* ref is measured against what was downloaded then`,
+    );
+  }
+  if (age.kind === 'never') {
+    return style.alert(
+      'Remote refs: NO fetch recorded in this checkout — any BEHIND against an origin/* ref is against refs that were never refreshed here',
+    );
+  }
+  return style.alert(
+    `Remote refs: fetch age UNKNOWN (${age.why}) — how stale the origin/* refs are cannot be said`,
+  );
 }
 
 /** A path list, capped, with the remainder counted rather than dropped. */
@@ -580,9 +612,14 @@ export function renderReportPretty(
         ? `  ${here.upstream.ahead} ahead / ${here.upstream.behind} behind ${here.upstream.ref}`
         : '  (no upstream)'
     }`,
-    `Baseline:  ${report.repo.baselineRef}  ${style.dim(
+    // THE SHA, NOT JUST THE NAME (home-base-qyu1.33.6). `main` means whatever
+    // `main` points at when the reader gets here; the sha is what every number
+    // below was actually measured against, and printing it is what makes the
+    // ledger re-checkable afterwards.
+    `Baseline:  ${report.repo.baselineRef} @ ${short(report.repo.baselineSha)}  ${style.dim(
       'AHEAD = commits the branch has and this does not; BEHIND = the reverse',
     )}`,
+    remoteRefsLine(report.repo.remoteRefs, style),
     here?.state?.dirty === true
       ? style.alert(
           `Uncommitted here: ${plural(here.state.changedPaths ?? 0, 'path')} — ${fileList(

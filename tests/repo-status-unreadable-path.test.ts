@@ -394,7 +394,13 @@ describe('an unreadable file keeps a branch out of the safe group', () => {
     // Actionable: which path, on which ref, and the command to re-run.
     expect(row.why).toContain('content proof INCOMPLETE');
     expect(row.why).toContain('`d/foo` on main');
-    expect(row.why).toContain('git ls-tree --full-tree main -- :(literal)d/foo');
+    // The COMMAND names the pinned commit rather than `main`, because the walk
+    // measures against a sha (home-base-qyu1.33.6) and a reader re-running this
+    // has to reproduce the lookup that actually failed — `main` may have moved
+    // by then. The sentence around it still says `main`, asserted above.
+    expect(row.why).toMatch(
+      /git ls-tree --full-tree [0-9a-f]{40} -- ':\(literal\)d\/foo'|git ls-tree --full-tree [0-9a-f]{40} -- :\(literal\)d\/foo/,
+    );
     expect(row.why).toContain(`error: Could not read ${fx.missingTree}`);
   });
 

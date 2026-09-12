@@ -114,6 +114,23 @@ function refExists(name: string, cwd: string): boolean {
 }
 
 /**
+ * The commit a ref names RIGHT NOW, or null when it names none.
+ *
+ * `^{commit}` peels an annotated tag and refuses a ref that resolves to
+ * something that is not a commit, so a caller that gets a sha back has a sha it
+ * can hand to `rev-list` and `merge-tree`. Null is the only other outcome —
+ * never the name back, which would be the fabricated-measurement shape this
+ * whole module is built against.
+ */
+export function resolveCommit(ref: string, cwd: string): string | null {
+  const out = gitArgv(
+    ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`],
+    cwd,
+  )?.trim();
+  return out != null && out.length > 0 ? out : null;
+}
+
+/**
  * The repo's default branch. Prefers what the remote actually says
  * (`origin/HEAD`), then falls back to the conventional names. Returns null
  * rather than guessing when neither exists — a wrong baseline would silently
@@ -326,14 +343,19 @@ export function getBranchTips(
  * Unparseable output is treated identically: git answering something this
  * cannot read is no more informative than git not answering at all, and
  * coercing it to 0 was the same fabrication in miniature.
+ *
+ * BOTH SIDES ARE REVS, and the walk passes SHAS for both — the pinned baseline
+ * and the tip each ref already resolved to (home-base-qyu1.33.6, D1). A name
+ * still works and is what a direct caller means; it measures whatever the name
+ * points at when this runs, which is the thing the pin exists to avoid.
  */
 export function countDivergence(
   cwd: string,
-  baseline: string,
-  branch: string,
+  baselineRev: string,
+  branchRev: string,
 ): DivergenceCounts | null {
   const out = gitArgv(
-    ['rev-list', '--left-right', '--count', `${baseline}...${branch}`],
+    ['rev-list', '--left-right', '--count', `${baselineRev}...${branchRev}`],
     cwd,
   );
   if (out == null) return null;
@@ -405,6 +427,18 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
   const baselineRef = resolveBaseline(opts, currentBranch, defaultBranch);
   if (baselineRef == null) return null;
 
+  // THE PIN (home-base-qyu1.33.6, D1). One `rev-parse`, here, before any
+  // measurement runs — every `rev-list` below and every enrichment downstream
+  // then describes THIS commit, so the whole report is one snapshot of one repo
+  // rather than a series of lookups of a name that can move between them.
+  //
+  // A baseline that does not resolve to a commit is a NULL INVENTORY, the same
+  // answer as no baseline at all. Continuing with the name would produce a
+  // report that looks entirely ordinary while every number in it came back from
+  // a ref git could not read.
+  const baselineSha = resolveCommit(baselineRef, cwd);
+  if (baselineSha == null) return null;
+
   const worktrees = getWorktrees(cwd);
   const sinceDays =
     opts.sinceDays === null ? null : (opts.sinceDays ?? DEFAULT_SINCE_DAYS);
@@ -465,7 +499,10 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
   const branches: BranchDivergence[] | null =
     candidates?.map((t) => ({
       ...t,
-      divergence: countDivergence(cwd, baselineRef, t.name),
+      // SHAS ON BOTH SIDES: the pinned baseline, and the tip this ref already
+      // resolved to in the one `for-each-ref` above. Neither side is re-read
+      // here, so a ref that moves mid-walk cannot split the table.
+      divergence: countDivergence(cwd, baselineSha, t.tipSha),
     })) ?? null;
 
   const enumerationFailures: EnumerationFailure[] = [];
@@ -475,6 +512,7 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
 
   return {
     baselineRef,
+    baselineSha,
     branches,
     currentBranch,
     defaultBranch,

@@ -68,20 +68,29 @@ export interface ChangedFileSet {
   command: string | null;
 }
 
-function changedFilesArgv(baselineRef: string, branch: string): string[] {
+function changedFilesArgv(baselineRev: string, branchRev: string): string[] {
   // Three dots: diff the merge base against the branch tip, which is the
   // branch's own footprint. Two dots would fold in everything the baseline did
   // since they diverged and make every long-lived branch look enormous.
-  return ['diff', '--name-only', '-z', `${baselineRef}...${branch}`];
+  return ['diff', '--name-only', '-z', `${baselineRev}...${branchRev}`];
 }
 
-/** One `git diff` per branch. This is the linear half of the module. */
+/**
+ * One `git diff` per branch. This is the linear half of the module.
+ *
+ * BOTH ARE REVS, and `report.ts` passes SHAS — the pinned baseline and the
+ * branch's tip (home-base-qyu1.33.6, D1) — so a file set and the ahead/behind
+ * counts it is displayed beside describe the same two commits. The failure
+ * `command` is rendered from the argv, so a reader who has to re-run it gets the
+ * exact commits that were compared rather than two names that may since have
+ * moved. Nothing here is prose, so no name is needed.
+ */
 export function readChangedFiles(
-  baselineRef: string,
-  branch: string,
+  baselineRev: string,
+  branchRev: string,
   cwd: string,
 ): ChangedFileSet {
-  const argv = changedFilesArgv(baselineRef, branch);
+  const argv = changedFilesArgv(baselineRev, branchRev);
   let out: string;
   try {
     out = execFileSync('git', argv, {

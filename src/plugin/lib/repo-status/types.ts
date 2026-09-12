@@ -145,8 +145,30 @@ export interface CoreInventory {
   currentBranch: string | null;
   /** The repo's default branch (`main`/`master`), if one could be determined. */
   defaultBranch: string | null;
-  /** The ref `ahead`/`behind` are measured against. */
+  /**
+   * The NAME of the ref the walk measures against — for prose, and for the
+   * name-based lookups (`archive/<name>`, `origin/<name>`) that only a name can
+   * answer. It is NOT what anything measures against; see `baselineSha`.
+   */
   baselineRef: string;
+  /**
+   * The commit `baselineRef` resolved to, ONCE, at the top of the walk — and
+   * what every subsequent git invocation measures against (home-base-qyu1.33.6,
+   * epic decision D1).
+   *
+   * WHY A SHA AND NOT THE NAME. Refs move. Resolving `main` per measurement
+   * splits one report across two repo states when a commit lands mid-run, and
+   * nothing in the output lets a reader detect it: measured from the reflog in a
+   * blind trial (2026-09-07), the header said `3 ahead of origin/main` against a
+   * post-commit `main` while all thirteen table rows were computed against
+   * `main~1`. Pinning here is also what makes every number in the report
+   * auditable later, against a commit that cannot have moved since.
+   *
+   * Never null: a baseline that does not resolve to a commit produces NO
+   * inventory at all, rather than one measured against a name (rule 6 — a failed
+   * resolve must not degrade into a report that looks ordinary).
+   */
+  baselineSha: string;
   /** Null when the branch listing failed — NOT the same as "no branches". */
   branches: BranchDivergence[] | null;
   /** Null when the worktree listing failed — NOT the same as "no worktrees". */
