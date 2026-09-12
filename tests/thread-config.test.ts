@@ -14,7 +14,11 @@ import {join} from 'path';
 import {resolveThreadConfig} from '../src/thread/config';
 import {
   threadsBeadsDir,
+  threadsRepoDir,
+  threadsRepoDirResolution,
+  LIFE_DIR_DEPRECATION_NOTICE,
   probeWritable,
+  resetDeprecationNoticeForTests,
   SANDBOX_DENIED_LINE,
   threadsStateDir,
 } from '../src/thread/paths';
@@ -113,6 +117,83 @@ describe('resolveThreadConfig (D6)', () => {
     const resolved = resolveThreadConfig({cwd, env});
     expect(resolved.enabled).toBe(false);
     expect(resolved.problems.length).toBeGreaterThan(0);
+  });
+});
+
+describe('where the threads repo is (home-base-p1uj.11)', () => {
+  test('nothing configured resolves to ~/Dev/threads, not ~/Dev/life', () => {
+    const {env} = configWorld({});
+    const resolved = threadsRepoDirResolution(env);
+    expect(resolved.source).toBe('default');
+    expect(resolved.dir.endsWith('/Dev/threads')).toBe(true);
+  });
+
+  test('the config file moves it, and says which layer did', () => {
+    const {env} = configWorld({
+      user: {componentConfig: {thread: {repoDir: '/tmp/elsewhere'}}},
+    });
+    expect(threadsRepoDirResolution(env)).toEqual({
+      dir: '/tmp/elsewhere',
+      source: 'config',
+    });
+    expect(resolveThreadConfig({env}).repoDirSource).toBe('user');
+  });
+
+  test('the env var outranks the config file', () => {
+    const {env} = configWorld({
+      user: {componentConfig: {thread: {repoDir: '/tmp/from-config'}}},
+    });
+    expect(
+      threadsRepoDirResolution({
+        ...env,
+        JUSTIN_THREADS_REPO_DIR: '/tmp/from-env',
+      }),
+    ).toEqual({dir: '/tmp/from-env', source: 'env'});
+  });
+
+  test('JUSTIN_THREADS_LIFE_DIR still WORKS, and says once that it is deprecated', () => {
+    // Deprecated means honoured-with-a-notice for one release, not ignored: a
+    // shell or hook that still exports it must keep working, or the move
+    // silently sends that session's beads to a repo nobody is reading.
+    resetDeprecationNoticeForTests();
+    const env = {JUSTIN_THREADS_LIFE_DIR: '/tmp/old-home'};
+    expect(threadsRepoDirResolution(env)).toEqual({
+      dir: '/tmp/old-home',
+      source: 'deprecatedEnv',
+    });
+
+    const said: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      said.push(args.map(String).join(' '));
+    };
+    try {
+      expect(threadsRepoDir(env)).toBe('/tmp/old-home');
+      expect(threadsRepoDir(env)).toBe('/tmp/old-home');
+      expect(threadsRepoDir(env)).toBe('/tmp/old-home');
+    } finally {
+      console.error = realError;
+    }
+    // ONCE per process: three calls, one line. A notice repeated on every
+    // internal call reads as three problems.
+    expect(said).toEqual([LIFE_DIR_DEPRECATION_NOTICE]);
+    expect(LIFE_DIR_DEPRECATION_NOTICE).toContain('DEPRECATED');
+    expect(LIFE_DIR_DEPRECATION_NOTICE).toContain('JUSTIN_THREADS_REPO_DIR');
+    resetDeprecationNoticeForTests();
+  });
+
+  test('autoCommit DEFAULTS ON — the only thread knob that does', () => {
+    const {cwd, env} = configWorld({});
+    expect(resolveThreadConfig({cwd, env}).autoCommit).toBe(true);
+  });
+
+  test('autoCommit can be turned off per repo', () => {
+    const {cwd, env} = configWorld({
+      project: {componentConfig: {thread: {autoCommit: false}}},
+    });
+    const resolved = resolveThreadConfig({cwd, env});
+    expect(resolved.autoCommit).toBe(false);
+    expect(resolved.autoCommitSource).toBe('project');
   });
 });
 
