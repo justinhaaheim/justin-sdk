@@ -27,6 +27,14 @@
  * exposing one is still an open request upstream (anthropics/claude-code
  * #25689, #27969, #44790) — so the transcript is the only source.
  *
+ * THE TOP-LEVEL TOTALS ARE NOT ALWAYS THE CONTEXT (home-base-fjcp). A record
+ * containing a server-side tool call — the `advisor` — carries the SUM of every
+ * model turn inside it, which double-counts the cache reads and reports roughly
+ * twice the real context. Such a record is read through its per-turn
+ * `usage.iterations` breakdown instead, taking the LAST turn; see
+ * `contextTokensFromRecordUsage` for the measurement and for why the obvious
+ * content-block filter does not work.
+ *
  * TWO EVENTS, one script (both verified injecting in CC 2.1.238):
  *   - UserPromptSubmit — fires when Justin sends a message.
  *   - PostToolBatch — fires ONCE after each batch of tool calls resolves,
@@ -625,6 +633,124 @@ export function contextTokensFromUsage(usage: unknown): number | null {
   return total;
 }
 
+/**
+ * The `iterations[].type` of an ordinary model turn. Anything else in that slot
+ * is a foreign turn spliced into the same record — today, `advisor_message`.
+ */
+const ITERATION_TYPE_MODEL_TURN = 'message';
+
+/** The `server_tool_use` counters that mark a record as a server-tool exchange. */
+const SERVER_TOOL_COUNTERS = ['web_search_requests', 'web_fetch_requests'];
+
+/**
+ * Is this record a server-tool exchange by the `server_tool_use` counters?
+ *
+ * DEFENSIVE, AND ITS PREMISE IS UNVERIFIED. WebSearch and WebFetch are server
+ * tools too and would plausibly disturb a record's totals the way the advisor
+ * does, but no transcript proves it: across all 2,787 files under
+ * ~/.claude/projects, 1,938 carry `web_search_requests` and every one of them is
+ * zero, so no real web-tool record exists to measure. Only the FIELD shape is
+ * real; the linkage to inflated totals is conjecture.
+ *
+ * These counters are NOT the advisor's discriminant — the advisor record reports
+ * both as zero — which is why `contextTokensFromRecordUsage` leans on
+ * `iterations` for the case we can actually measure. A hit here is treated as
+ * unmeasurable rather than decomposed, because with no real record we do not
+ * know that such a record even HAS a per-turn breakdown to read.
+ */
+function usageHasServerToolCalls(fields: Record<string, unknown>): boolean {
+  const serverToolUse = fields.server_tool_use;
+  if (serverToolUse == null || typeof serverToolUse !== 'object') {
+    return false;
+  }
+  const counters = serverToolUse as Record<string, unknown>;
+  for (const key of SERVER_TOOL_COUNTERS) {
+    const value = counters[key];
+    if (typeof value === 'number' && value > 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** An iteration's `type`, when it states one. */
+function iterationType(iteration: unknown): string | null {
+  if (iteration == null || typeof iteration !== 'object') {
+    return null;
+  }
+  const type = (iteration as Record<string, unknown>).type;
+  return typeof type === 'string' ? type : null;
+}
+
+/**
+ * The context size a transcript RECORD describes, or null when the record is
+ * not a usable context reading.
+ *
+ * This is the selector every reader goes through; `contextTokensFromUsage` is
+ * only the raw arithmetic underneath it.
+ *
+ * WHY IT IS NOT JUST THE ARITHMETIC (home-base-fjcp): a server-side tool — the
+ * `advisor` — runs inside a single assistant record, and Claude Code records
+ * that record's top-level usage as the SUM over every model turn the record
+ * contains. The sum double-counts `cache_read_input_tokens`, so the totals read
+ * roughly twice the real context. Measured on conductor session 5b9ad9b0
+ * (2026-09-12): the advisor record totalled 4 / 16,115 / 325,748 = 341,867 while
+ * the session's real context was ~172k, and the hook duly fired a wrap-up
+ * directive at a threshold the session had not remotely reached.
+ *
+ * THE OBVIOUS FIX DOES NOT WORK, so do not "simplify" this into it: an advisor
+ * exchange is not one record but SEVEN consecutive ones sharing a `message.id`,
+ * and while the middle ones carry `server_tool_use` and `advisor_tool_result`
+ * content blocks, the LAST one carries a plain `tool_use` block and nothing
+ * else. Filtering on content blocks leaves that final record — the one nearest
+ * the tail, and therefore the one a backwards scan finds first — still reporting
+ * 341,867.
+ *
+ * WHAT WORKS is `usage.iterations`, the per-turn breakdown the sum is built
+ * from. Verified across the whole of that transcript: 314 assistant records
+ * carry `[message]` and 14 carry `[message, advisor_message, message]`, with no
+ * other combination present. When the breakdown shows several turns we read the
+ * LAST one, which is the session's context as that record ended — 2 + 3,059 +
+ * 169,402 = 172,463 on the evidence record, against 174,554 on the next clean
+ * record, so the two agree to within one turn's growth. Reading the last turn
+ * rather than discarding the record keeps the measurement current instead of
+ * stale, and needs no knowledge of what the foreign turn in the middle was.
+ *
+ * NULL IS RETURNED, NEVER A GUESS, when the last turn carries no usable
+ * `input_tokens`, when the only turn present is a foreign one (there is then no
+ * turn of ours to read), and when the server-tool counters fire. The caller
+ * keeps scanning backwards; if nothing clean is ever found the context stays
+ * unmeasured, which is a different fact from zero and is reported as such.
+ */
+export function contextTokensFromRecordUsage(usage: unknown): number | null {
+  if (usage == null || typeof usage !== 'object') {
+    return null;
+  }
+  const fields = usage as Record<string, unknown>;
+
+  if (usageHasServerToolCalls(fields)) {
+    return null;
+  }
+
+  const iterations = fields.iterations;
+  if (Array.isArray(iterations) && iterations.length > 0) {
+    const last = iterations[iterations.length - 1];
+    const lastType = iterationType(last);
+    if (lastType != null && lastType !== ITERATION_TYPE_MODEL_TURN) {
+      // The record ends on somebody else's turn, so it holds no reading of
+      // ours — including the single-iteration case, where the top-level totals
+      // would BE that foreign turn.
+      return null;
+    }
+    if (iterations.length > 1) {
+      // Several turns: the top-level sum double-counts, the last turn does not.
+      return contextTokensFromUsage(last);
+    }
+  }
+
+  return contextTokensFromUsage(fields);
+}
+
 /** Every string an attachment's `content` field might be carrying. */
 function attachmentStrings(entry: Record<string, unknown>): string[] {
   const attachment = entry.attachment as {content?: unknown} | undefined;
@@ -701,7 +827,11 @@ function scanWindow(
 
     if (maybeAssistant && entry.type === 'assistant') {
       const message = entry.message as {usage?: unknown} | undefined;
-      const tokens = contextTokensFromUsage(message?.usage);
+      // NOT `contextTokensFromUsage` — a record containing a server-tool turn
+      // needs its per-turn breakdown read instead of its double-counted totals
+      // (home-base-fjcp). Null means "this record is not a reading", and the
+      // scan simply keeps walking back.
+      const tokens = contextTokensFromRecordUsage(message?.usage);
       if (tokens != null) {
         state.contextTokens = tokens;
       }
