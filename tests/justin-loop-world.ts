@@ -21,10 +21,14 @@ import {
 import {type BrRunner} from '../src/justin-loop/br';
 import {
   type AgentRow,
+  type BootContext,
+  DEFAULT_OPTIONS,
   type JustinLoopOptions,
   type LedgerRow,
   runJustinLoop,
   type RunnerDeps,
+  runSession,
+  type SessionRun,
 } from '../src/justin-loop/runner';
 
 // ---------------------------------------------------------------------------
@@ -122,6 +126,17 @@ export interface LoopResult {
   ledger: LedgerRow[];
   /** br argv, in order. */
   brCalls: string[][];
+  /**
+   * Every dispatch, stop and `br` call INTERLEAVED, in the order they happened:
+   * `dispatch:spawn`, `dispatch:resume`, `stop:<id>`, `br:<subcommand>`.
+   *
+   * The separate arrays above cannot answer an ORDERING question, and two of the
+   * runner's invariants are purely about order: a session is stopped and
+   * confirmed gone BEFORE its beads are read (D6), and no successor is dispatched
+   * until then. Asserting those from `stopCalls` and `brCalls` separately proves
+   * only that both happened.
+   */
+  events: string[];
 }
 
 export const MAX_POLLS = 500;
@@ -170,6 +185,7 @@ export async function runLoop(spec: {
   const signals: Array<{pid: number; sig: string}> = [];
   const ledger: LedgerRow[] = [];
   const brCalls: string[][] = [];
+  const events: string[] = [];
   let stdout = '';
   let stderr = '';
   let clock = Date.UTC(2026, 8, 8, 11, 30, 0);
@@ -181,6 +197,7 @@ export async function runLoop(spec: {
   let created = 0;
   const br: BrRunner = (_cwd, args) => {
     brCalls.push(args);
+    events.push(`br:${args[0] ?? ''}`);
     if (args[0] === 'create') {
       if (spec.brCreateFails === true) {
         return {
@@ -256,6 +273,9 @@ export async function runLoop(spec: {
     // without a single test going red.
     dispatch: async (_cwd, args) => {
       dispatches.push(args);
+      events.push(
+        args.includes('--resume') ? 'dispatch:resume' : 'dispatch:spawn',
+      );
 
       // A `--resume` WAKES an existing session (MEASURED 2026-09-08): same id,
       // same sessionId, same conversation. It must never mint a new one here,
@@ -335,6 +355,7 @@ export async function runLoop(spec: {
     },
     stopSession: async (_cwd, id) => {
       stopCalls.push(id);
+      events.push(`stop:${id}`);
       const behaviour = scriptOf.get(id)?.stop ?? 'clears';
       if (behaviour === 'clears') rows.delete(id);
       if (behaviour === 'lingers-pidless') {
@@ -359,12 +380,131 @@ export async function runLoop(spec: {
   return {
     brCalls,
     dispatches,
+    events,
     exitCode,
     ledger,
     signals,
     stderr,
     stdout,
     stopCalls,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// One session, watched
+// ---------------------------------------------------------------------------
+
+export interface SessionSim {
+  run: SessionRun;
+  /** Simulated minutes from dispatch to return. */
+  elapsedMin: number;
+  polls: number;
+  stdout: string;
+  /** Every `br` argv the watch made, in order. */
+  brCalls: string[][];
+}
+
+/**
+ * Run ONE session against a scripted `claude agents` row sequence and a scripted
+ * `br`, on a fake clock that only moves when the loop sleeps.
+ *
+ * Why this exists next to `runLoop`: the handoff-settle scan (D15) is a property
+ * of the WATCH — which polls it fires on, which rows it fires for, what it does
+ * with a scan it could not make — and driving it through the whole loop would
+ * mean asserting on it through two bead reads and a stop ladder. This drives
+ * `runSession` directly and hands back the raw ending.
+ *
+ * tests/justin-loop-blocked.test.ts has an older local `simulate` of the same
+ * shape, from before a `br` script or the watch's stdout mattered. The two have
+ * not been merged: that file's 40-odd passing tests are the D3/D7/D8 contract and
+ * are not worth re-baselining for a helper move.
+ */
+export async function simulateSession(spec: {
+  opts?: Partial<JustinLoopOptions>;
+  /** The session's label — the `from` its handoff bead must carry. */
+  label?: string;
+  /** 1-based on the poll number. `'unreadable'` = `claude agents` failed. */
+  rowAt: (poll: number) => AgentRow | null | 'unreadable';
+  /**
+   * Answer to the Nth (1-based) `br list -l handoff --json` the watch makes.
+   * Omitted = every scan finds no beads at all, which is what a repo with
+   * nothing waiting looks like.
+   */
+  beadsAt?: (call: number) => BeadSpec[] | 'unavailable';
+  maxPolls?: number;
+}): Promise<SessionSim> {
+  const opts: JustinLoopOptions = {
+    ...DEFAULT_OPTIONS,
+    // One poll = one simulated minute, so every liveness tick is one poll and
+    // every duration below reads in minutes without arithmetic.
+    pollSec: 60,
+    ...spec.opts,
+  };
+  const label = spec.label ?? 'the-arc-1';
+  const boot: BootContext = {cwd: '/repo', label, plan: {kind: 'fresh'}};
+  const maxPolls = spec.maxPolls ?? 400;
+
+  let clock = 1_000_000;
+  const started = clock;
+  let polls = 0;
+  let listCalls = 0;
+  let stdout = '';
+  const brCalls: string[][] = [];
+
+  const deps: RunnerDeps = {
+    appendLedgerRow: () => ({ok: true, reason: null}),
+    br: (_cwd, args) => {
+      brCalls.push(args);
+      if (args[0] !== 'list')
+        return {ok: true, reason: null, stdout: '{"issues":[]}'};
+      const answer = spec.beadsAt?.(++listCalls) ?? [];
+      return answer === 'unavailable'
+        ? {ok: false, reason: 'br exited 1: no beads workspace', stdout: ''}
+        : {ok: true, reason: null, stdout: listJson(answer)};
+    },
+    dispatch: async () => `backgrounded · sim-1 · 2026-09-08 04:30 ${label}\n`,
+    findAgent: async () => {
+      polls++;
+      if (polls > maxPolls) {
+        throw new Error(
+          `runSession did not terminate within ${maxPolls} polls`,
+        );
+      }
+      const row = spec.rowAt(polls);
+      return row === 'unreadable'
+        ? {ok: false, reason: 'claude agents --json exited 1'}
+        : {ok: true, row};
+    },
+    gitHead: async () => ({ok: true, sha: 'abc123'}),
+    notifyBlocked: () => {},
+    now: () => clock,
+    preflight: async () => [],
+    readUsage: async () => null,
+    signalPid: () => true,
+    sleep: async (ms: number) => {
+      clock += ms;
+    },
+    stopSession: async () => ({detail: 'stopped sim-1', ok: true}),
+    write: (text) => {
+      stdout += text;
+    },
+    writeErr: () => {},
+  };
+
+  const run = await runSession(
+    '/repo',
+    opts,
+    1,
+    boot,
+    '2026-09-08 04:30 the-arc-1',
+    deps,
+  );
+  return {
+    brCalls,
+    elapsedMin: Math.round((clock - started) / 60_000),
+    polls,
+    run,
+    stdout,
   };
 }
 

@@ -579,6 +579,20 @@ void yargs(ARGV)
             'How many times a session that ended without a valid handoff bead is RESUMED and told to write one before the run gives up, files a bug bead and exits 2. 0 disables the demand and just stops the run.',
           default: LOOP_DEFAULTS.handoffRetries,
         })
+        .option('handoff-settle-min', {
+          type: 'number',
+          describe:
+            'MEASURED defect belt (D15): a `claude --bg` session can finish its turn — handoff bead written and committed — while its `claude agents` row stays `working` forever, and the runner then waits on a session that is already done. Set N to treat this session’s own valid open handoff bead as evidence it finished: if the row still is not `done` N minutes after that bead is first seen, the session is stopped, CONFIRMED gone, and its beads are read exactly like any other ending. 0 (the default) makes no scan at all. Settling can stop a session mid-commit, which is why it is opt-in.',
+          default: LOOP_DEFAULTS.handoffSettleMin,
+        })
+        .check((argv) => {
+          const settle = argv['handoff-settle-min'];
+          // Negative is not "off" and not "immediately" — 0 is how you say off.
+          if (!(settle >= 0)) {
+            throw new Error('--handoff-settle-min must be 0 or greater');
+          }
+          return true;
+        })
         .check((argv) => {
           const retries = argv['handoff-retries'];
           // Negative is not "unlimited" and not "none" — it is a number nobody
@@ -687,6 +701,7 @@ void yargs(ARGV)
         dryRun: argv['dry-run'],
         gatePollMin: argv['gate-poll-min'],
         handoffRetries: argv['handoff-retries'],
+        handoffSettleMin: argv['handoff-settle-min'],
         label: argv.label ?? null,
         maxSessions: argv['max-iterations'] ?? argv['max-sessions'],
         model: argv.model,

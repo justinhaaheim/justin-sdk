@@ -93,6 +93,29 @@ export interface JustinLoopOptions {
    */
   handoffRetries: number;
   /**
+   * `--handoff-settle-min`: the SECOND signal that a session is over (D15).
+   *
+   * 0 (the default) disables it completely — no scan is ever made while a session
+   * is watched, and `ENDED` stays exactly what D8 measured.
+   *
+   * MEASURED 2026-09-12 (claude 2.1.269, home-base-0cfl, 1 of 7 fixture runs): a
+   * `--bg` session can finish its turn — `end_turn` in its transcript, stop hook
+   * run, handoff bead written and committed — while its `claude agents` row stays
+   * `state: working, status: idle` INDEFINITELY. With no `--timeout-min` the
+   * runner then waits forever on a session that is already done, which is the
+   * 2026-09-10 silence. When this is set to N, a valid open handoff bead carrying
+   * this session's label is treated as evidence the session finished: if the row
+   * still is not `done`/absent N minutes after that bead was first seen, the
+   * session ends as `handoff-settled` and takes the D7 timeout path (stop and
+   * verify first, THEN read the beads).
+   *
+   * Why a knob and not the default: the bead proves the session wrote its
+   * handoff, not that it has stopped touching the repo, so settling can stop a
+   * session mid-commit. That is an accepted consequence for the pilot (which runs
+   * with 3), not something to inflict on every run before it has been exercised.
+   */
+  handoffSettleMin: number;
+  /**
    * `--label`: the slug half of every session label in this run (D3). null means
    * derive one from the ask. Normalised to `[a-z0-9-]` either way, because the
    * session contract interpolates the label into `--from=<label>` unquoted.
@@ -177,6 +200,9 @@ export const DEFAULT_OPTIONS: JustinLoopOptions = {
   dryRun: false,
   gatePollMin: 5,
   handoffRetries: 3,
+  // OFF (D15). A second ending signal that fires by default would change what
+  // every existing run means, and this one has never run outside a test.
+  handoffSettleMin: 0,
   label: null,
   maxSessions: 3,
   model: 'opus',
@@ -1130,6 +1156,50 @@ export function decideAfterSession(
       };
 }
 
+/**
+ * What the mid-session handoff scan saw (D15). Three members, on purpose:
+ * `unavailable` is NOT `none` — a scan we could not make says nothing about
+ * whether the session has handed off, and collapsing the two would make an
+ * unreadable `br` look like a session that is still working (critical rule 6).
+ */
+export type SettleScan =
+  | {kind: 'unavailable'; reason: string}
+  | {kind: 'none'}
+  | {kind: 'seen'; beadId: string};
+
+/**
+ * Has this session already written its handoff bead (D15)?
+ *
+ * Deliberately built ON `decideAfterSession` rather than beside it: the question
+ * "is there a valid open handoff bead with from == label" is the same question
+ * the runner asks after a session ends, and two implementations of it could
+ * disagree — one of them accepting a bead the other would not. Everything the
+ * ending path refuses is refused here too: an unparseable bead (it might be
+ * anyone's), and a bead whose `from` is another session's label.
+ *
+ * `multiple` counts as seen. Two valid open beads from this label is a forked
+ * chain the run will stop on, but the session plainly did hand off, and the
+ * alternative is waiting forever on exactly the row this signal exists for.
+ */
+export function scanForOwnHandoff(
+  scan: HandoffScan,
+  label: string,
+): SettleScan {
+  const outcome = decideAfterSession(scan, label);
+  switch (outcome.kind) {
+    case 'br-unavailable':
+      return {kind: 'unavailable', reason: outcome.reason};
+    case 'continue':
+    case 'done':
+    case 'blocked':
+      return {beadId: outcome.match.row.id, kind: 'seen'};
+    case 'multiple':
+      return {beadId: outcome.matches[0].row.id, kind: 'seen'};
+    case 'enforce':
+      return {kind: 'none'};
+  }
+}
+
 // ---------------------------------------------------------------------------
 // How a session boots
 // ---------------------------------------------------------------------------
@@ -1511,6 +1581,14 @@ export type LedgerOutcome =
    */
   | 'demand-undeliverable'
   | 'multiple-handoffs'
+  /**
+   * The session handed off but its row never reached `done`, so
+   * `--handoff-settle-min` ended it (D15). It REPLACES the disposition in this
+   * field on purpose: "how often did the CLI defect fire" has to be countable
+   * from the ledger, and `handoffBead` on the same row still names the bead the
+   * disposition can be read from.
+   */
+  | 'handoff-settled'
   | 'kill-failed'
   | 'br-unavailable'
   | 'dispatch-failed'
@@ -1689,7 +1767,10 @@ const CYAN = '[36m';
 function outcomeColor(outcome: LedgerOutcome): string {
   if (outcome === 'done') return GREEN;
   if (outcome === 'continue') return CYAN;
-  if (outcome === 'blocked') return YELLOW;
+  // Yellow, not red: the chain itself is fine (the handoff was read and acted
+  // on), but a row that never reached `done` is a fact to notice, not a normal
+  // ending (D15).
+  if (outcome === 'blocked' || outcome === 'handoff-settled') return YELLOW;
   return RED;
 }
 
@@ -1736,6 +1817,19 @@ export function timeoutDescription(timeoutMin: number): string {
   return timeoutMin > 0
     ? `each session is stopped after ${timeoutMin}m of non-blocked wall clock, then its handoff beads are read as usual`
     : 'no wall-clock timeout — sessions end when they hand off (--timeout-min to bound it)';
+}
+
+/**
+ * How the header describes the handoff-settle knob (D15). `null` when it is off,
+ * so the default run banner says nothing about a signal that is not armed — the
+ * header lists what this run WILL do, not everything it could have been asked to.
+ */
+export function handoffSettleDescription(
+  handoffSettleMin: number,
+): string | null {
+  return handoffSettleMin > 0
+    ? `a session whose handoff bead is written but whose row never reaches done is settled after ${handoffSettleMin}m (--handoff-settle-min)`
+    : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1841,6 +1935,14 @@ export const REAL_DEPS: RunnerDeps = {
 export type SessionEnding =
   | {kind: 'ended'}
   | {kind: 'timeout'; afterMin: number}
+  /**
+   * The session wrote its handoff bead and its row never reached `done` (D15,
+   * `--handoff-settle-min`). A DISTINCT member rather than a reuse of `timeout`:
+   * they take the same path but they are different facts, and the pilot question
+   * — how often does the CLI defect actually happen — is unanswerable if this one
+   * is filed under the clock running out.
+   */
+  | {kind: 'handoff-settled'; afterMin: number; beadId: string}
   | {kind: 'blocked-timeout'; waitingFor: string | null}
   | {kind: 'dispatch-failed'; banner: string}
   /**
@@ -1937,7 +2039,7 @@ export async function runSession(
     `   ${DIM}background ${id} · inspect: claude logs ${id} · step in: claude attach ${id}${RESET}\n`,
   );
 
-  return watchSession(cwd, opts, n, id, started, deps);
+  return watchSession(cwd, opts, n, boot.label, id, started, deps);
 }
 
 /**
@@ -1956,6 +2058,12 @@ function livenessLine(state: {
   lastSeen: AgentRow | null;
   agentsFailures: number;
   lastUnreadable: string | null;
+  /**
+   * What the handoff-settle scan found on this tick, when the knob is on (D15).
+   * null = nothing to say, which is also every run with the knob off — so the
+   * default line is byte-for-byte the one home-base-a1go shipped.
+   */
+  settle: string | null;
 }): string {
   const minutes = Math.round(state.elapsedMs / 60_000);
   const what = !state.everRead
@@ -1969,7 +2077,8 @@ function livenessLine(state: {
     state.agentsFailures === 0
       ? 'agents ok'
       : `agents unreadable ×${state.agentsFailures}: ${state.lastUnreadable ?? 'unknown'}`;
-  return `   ${DIM}watching ${minutes}m · ${state.polls} polls · ${what} · ${agents}${RESET}\n`;
+  const settle = state.settle == null ? '' : ` · ${state.settle}`;
+  return `   ${DIM}watching ${minutes}m · ${state.polls} polls · ${what} · ${agents}${settle}${RESET}\n`;
 }
 
 /**
@@ -1984,6 +2093,12 @@ async function watchSession(
   cwd: string,
   opts: JustinLoopOptions,
   n: number,
+  /**
+   * The session's label — the `from` its handoff bead must carry (D5). Threaded
+   * in for the handoff-settle scan (D15), which is the only way to tell this
+   * session's bead from one written by any other session in the chain.
+   */
+  label: string,
   id: string,
   started: number,
   deps: RunnerDeps,
@@ -2014,6 +2129,17 @@ async function watchSession(
   let lastSeen: AgentRow | null = null;
   let lastUnreadable: string | null = null;
 
+  /**
+   * When this session's own handoff bead was FIRST seen, and which bead it was
+   * (D15). Both STICKY once set: the bead is evidence the session has finished
+   * its work, and a scan that later cannot see it (br broke, someone closed it)
+   * is not evidence the work restarted. Re-arming on every miss would also let a
+   * flapping scan postpone the settle forever, which is the stall this exists to
+   * end.
+   */
+  let handoffSeenAt: number | null = null;
+  let handoffBead: string | null = null;
+
   for (;;) {
     await deps.sleep(opts.pollSec * 1000);
     const look = await deps.findAgent(cwd, id);
@@ -2021,6 +2147,10 @@ async function watchSession(
     if (look.ok) {
       everRead = true;
       lastSeen = look.row;
+      // Captured the instant it is readable, not further down: the handoff-settle
+      // tick below can return from ABOVE the old capture point, and a demand with
+      // no full session id cannot be delivered at all (D10).
+      if (look.row?.sessionId != null) fullSessionId = look.row.sessionId;
       // A successful read ends the streak (the failure limit below counts
       // CONSECUTIVE failures), and with it the "unreadable" half of the line.
       agentsFailures = 0;
@@ -2032,6 +2162,44 @@ async function watchSession(
     const nowMs = deps.now();
     if (nowMs - lastLiveness >= LIVENESS_INTERVAL_MS) {
       lastLiveness = nowMs;
+
+      // --- THE HANDOFF-SETTLE SCAN (D15) ---
+      //
+      // It rides the liveness tick and nothing else: one `br list` a minute is
+      // affordable, one per poll is not, and the tick is already the place the
+      // runner says out loud what it knows. Three guards, all load-bearing:
+      // the knob must be on (off = no scan is ever made), the listing must have
+      // been READ this poll (an unknown row is not a working one), and the row
+      // must be `working` — a `done`/absent row is handled by D8 below and a
+      // `blocked` one is waiting for Justin, which is not a stall.
+      let settle: string | null = null;
+      let settleNow = false;
+      if (
+        opts.handoffSettleMin > 0 &&
+        look.ok &&
+        look.row != null &&
+        look.row.state === 'working'
+      ) {
+        const scan = scanForOwnHandoff(scanHandoffBeads(cwd, deps.br), label);
+        const parts: string[] = [];
+        if (scan.kind === 'unavailable') {
+          // NOT "no bead" (critical rule 6): keep waiting, and say why we are
+          // waiting without an answer rather than printing a silent tick.
+          parts.push(`handoff scan unavailable: ${scan.reason}`);
+        } else if (scan.kind === 'seen' && handoffSeenAt == null) {
+          handoffSeenAt = nowMs;
+          handoffBead = scan.beadId;
+        }
+        if (handoffSeenAt != null && handoffBead != null) {
+          const waitedMin = Math.round((nowMs - handoffSeenAt) / 60_000);
+          parts.push(
+            `handoff ${handoffBead} seen ${waitedMin}m ago (settles at ${opts.handoffSettleMin}m)`,
+          );
+          settleNow = nowMs - handoffSeenAt >= opts.handoffSettleMin * 60_000;
+        }
+        settle = parts.length > 0 ? parts.join(' · ') : null;
+      }
+
       deps.write(
         livenessLine({
           agentsFailures,
@@ -2040,8 +2208,24 @@ async function watchSession(
           lastSeen,
           lastUnreadable,
           polls,
+          settle,
         }),
       );
+
+      // After the line, so the last thing printed before the ending is the state
+      // the decision was made on.
+      if (settleNow && handoffBead != null) {
+        return {
+          durationMs: deps.now() - started,
+          ending: {
+            afterMin: opts.handoffSettleMin,
+            beadId: handoffBead,
+            kind: 'handoff-settled',
+          },
+          fullSessionId,
+          id,
+        };
+      }
     }
 
     if (!look.ok) {
@@ -2062,7 +2246,6 @@ async function watchSession(
       continue;
     }
     const row = look.row;
-    if (row?.sessionId != null) fullSessionId = row.sessionId;
 
     if (row == null || isSessionEnded(row)) {
       return {
@@ -2436,7 +2619,15 @@ export async function demandHandoff(
       };
     }
 
-    const run = await watchSession(ctx.cwd, ctx.opts, ctx.n, id, started, deps);
+    const run = await watchSession(
+      ctx.cwd,
+      ctx.opts,
+      ctx.n,
+      ctx.label,
+      id,
+      started,
+      deps,
+    );
 
     // Stop and verify the DEMANDED turn too. A woken session lingers in
     // `claude agents` exactly like any other, and the successor gate downstream
@@ -2469,6 +2660,14 @@ export async function demandHandoff(
     if (run.ending.kind === 'timeout') {
       deps.write(
         `   ${YELLOW}!${RESET} the demanded turn hit --timeout-min (${run.ending.afterMin}m) — reading the beads anyway\n`,
+      );
+    }
+    if (run.ending.kind === 'handoff-settled') {
+      // The demanded turn did exactly what it was asked to do and then stuck in
+      // `claude agents` (D15). Reading the beads is the whole point of the
+      // demand, so this is a note, not a branch.
+      deps.write(
+        `   ${YELLOW}!${RESET} the demanded turn wrote handoff bead ${run.ending.beadId} but its row never reached done — settled after ${run.ending.afterMin}m (--handoff-settle-min)\n`,
       );
     }
 
@@ -2553,6 +2752,7 @@ export async function runJustinLoop(
   const stamp = runStamp(kickoff);
   const runId = `${stamp.replace(/[^0-9]/g, '')}-${slug}`;
   const ledgerPath = runsJsonlPath(opts.stateDir);
+  const settleDescription = handoffSettleDescription(opts.handoffSettleMin);
 
   deps.write(
     `\n${BOLD}justin-loop${RESET} ${DIM}→${RESET} ${cwd}\n` +
@@ -2563,6 +2763,10 @@ export async function runJustinLoop(
         : `usage-gate=DISABLED`) +
       `${RESET}\n` +
       `${DIM}${timeoutDescription(opts.timeoutMin)}; ${blockedWaitDescription(opts.blockedWaitMin)}${RESET}\n` +
+      // Only when the knob is armed (D15) — see handoffSettleDescription.
+      (settleDescription != null
+        ? `${DIM}${settleDescription}${RESET}\n`
+        : '') +
       // WHICH `claude` this run will spawn, said out loud once. A cmux pane puts
       // a shim first on PATH that answers `claude stop` by prompting the model
       // (measured 2026-09-12), so "which binary" is not a detail.
@@ -2797,6 +3001,14 @@ export async function runJustinLoop(
         `   ${YELLOW}!${RESET} session ${label} was stopped after ${run.ending.afterMin}m (--timeout-min) — reading its handoff beads anyway: one written before it hung is still valid (D7)\n`,
       );
     }
+    // D15 takes the SAME path, for the same reason and with more justification:
+    // this ending exists precisely because the handoff bead is already sitting
+    // there. The stop above ran first, so nothing here can race the session.
+    if (run.ending.kind === 'handoff-settled') {
+      deps.write(
+        `   ${YELLOW}!${RESET} session ${label} wrote handoff bead ${run.ending.beadId} but its \`claude agents\` row was still \`working\` ${run.ending.afterMin}m later (--handoff-settle-min) — stopped, and now reading its handoff beads (D15)\n`,
+      );
+    }
     const scanned = decideAfterSession(scanHandoffBeads(cwd, deps.br), label);
 
     if (scanned.kind !== 'br-unavailable')
@@ -2902,7 +3114,13 @@ export async function runJustinLoop(
     }
     const {match} = outcome;
     ledger(
-      outcome.kind,
+      // A settled session is ledgered as `handoff-settled`, not as the
+      // disposition it handed off with (D15): the pilot has to be able to COUNT
+      // how often the row never reached `done`, and `handoffBead` on this same
+      // row still points at the bead the disposition is readable from. Only this
+      // success path is renamed — a settle that then hit `br-unavailable` or
+      // `multiple-handoffs` must keep saying so (critical rule 6).
+      run.ending.kind === 'handoff-settled' ? 'handoff-settled' : outcome.kind,
       match.row.id,
       stop.outcome,
       match.handoff.contextTokens,
