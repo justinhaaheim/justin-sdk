@@ -627,7 +627,12 @@ describe('runSweep --dry-run names the repo that will not be pinned', () => {
     expect(lineFor('workspace-consumer')).toContain(
       'would sweep off main — pin: workspace-satisfied, would NOT be written',
     );
-    // The ordinary repo's line is unchanged — the flag is not decoration.
-    expect(lineFor('pinned').trim()).toBe('= pinned would sweep off main');
+    // The ordinary repo's line carries NO pin flag — the flag is not
+    // decoration. Asserted as an absence rather than as the whole line: every
+    // dry-run line now also carries the post-merge install note
+    // (home-base-bgfl), which has nothing to do with the pin.
+    const pinnedLine = lineFor('pinned').trim();
+    expect(pinnedLine).toStartWith('= pinned would sweep off main');
+    expect(pinnedLine).not.toContain('pin:');
   });
 });
