@@ -105,6 +105,30 @@ export interface BranchDivergence extends BranchTip {
 }
 
 /**
+ * A branch the filters DROPPED, carried out of the walk so something downstream
+ * can measure what it holds (home-base-qyu1.33.9, epic decision D4).
+ *
+ * The core walk itself runs NO git for these — it is on the `prime`
+ * session-start path, and the whole point of the filters there is that a hidden
+ * branch costs nothing. What it does instead is refuse to throw the tips away:
+ * the `status` path then spends one `git cherry` per tip and can say whether the
+ * hidden set holds unmerged work, rather than printing a count that silently
+ * excludes it.
+ *
+ * `tipSha` and not the name, for the same reason every other measurement in this
+ * module takes a sha: the name is what the ROW is called, the sha is what was
+ * measured, and a ref that moves between the listing and the measurement must
+ * not be able to split the two.
+ */
+export interface HiddenTip {
+  /** Short name for locals, remote-qualified for remote-only — as listed. */
+  name: string;
+  tipSha: string;
+  /** Which filter removed it. Matches the `filtered` counts one-for-one. */
+  reason: 'archive' | 'stale';
+}
+
+/**
  * One half of the core walk that could not be read at all.
  *
  * WHY THIS EXISTS (home-base-qyu1.23). `git worktree list` and `git for-each-ref`
@@ -173,6 +197,13 @@ export interface CoreInventory {
   branches: BranchDivergence[] | null;
   /** Null when the worktree listing failed — NOT the same as "no worktrees". */
   worktrees: WorktreeEntry[] | null;
+  /**
+   * The tips the filters dropped, so a caller that wants to can measure them.
+   * Null when the branch listing failed — there was no set to filter, which is
+   * not the same as "nothing was hidden". Empty when the filters ran and hid
+   * nothing. NO git runs to produce this. See `HiddenTip`.
+   */
+  hiddenTips: HiddenTip[] | null;
   /** Empty when the whole walk was readable. One entry per failed half. */
   enumerationFailures: EnumerationFailure[];
   /** What was dropped before `branches` was built. Always present. */
@@ -258,4 +289,33 @@ export interface FilterSummary {
    * exemption fired, so the kept row is not mistaken for a filter bug.
    */
   keptForWorktree: number | null;
+  /**
+   * What the HIDDEN branches actually hold — or NULL, meaning NOT COMPUTED
+   * (home-base-qyu1.33.9, epic decision D4).
+   *
+   * NULL IS THE DEFAULT AND MEANS NOBODY LOOKED. The core walk always sets it
+   * null: measuring costs one `git cherry` per hidden tip, and core runs on the
+   * `prime` SessionStart path where the filters exist precisely so a hidden
+   * branch costs nothing. Only the `status` path fills it in. A consumer that
+   * reads null as "none" would print the reassurance this field was added to
+   * remove, so it is nullable rather than defaulted to zeroes.
+   *
+   * WHY IT EXISTS. Two blind reviewers checked the hidden branches by hand and
+   * found unmerged commits in nearly all of them (2026-09-07), while the ledger
+   * headline counted only the shown rows and the disclaimer beneath it was a
+   * footnote losing to a headline. A count of open work that excludes branches
+   * without saying what they hold is the rule-6 shape arriving through the
+   * filter layer.
+   *
+   * ONE OBJECT, NOT TWO NUMBERS: both come from the same per-tip walk, and
+   * "measured some, did not look at the rest" is a state only this shape can
+   * express. `unmeasured` counts the tips whose `git cherry` FAILED — those are
+   * never folded into `branchesWithUnmergedCommits` as zeroes.
+   */
+  hiddenUnmerged: {
+    /** Hidden branches carrying at least one commit with no patch-id match on the baseline. */
+    branchesWithUnmergedCommits: number;
+    /** Hidden branches whose check failed. UNKNOWN, never counted as clean. */
+    unmeasured: number;
+  } | null;
 }

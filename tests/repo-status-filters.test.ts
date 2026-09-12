@@ -27,7 +27,12 @@ import {execFileSync} from 'child_process';
 import {existsSync, chmodSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
-import {buildReport, type RepoStatusReport} from '../src/repo-status/report';
+import {renderReportPretty} from '../src/repo-status/pretty';
+import {
+  buildReport,
+  measureHiddenUnmerged,
+  type RepoStatusReport,
+} from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -228,6 +233,9 @@ describe('repo-status default filters', () => {
     expect(report.filtered.excludedAsArchive).toBeNull();
     expect(report.filtered.excludedAsStale).toBeNull();
     expect(report.filtered.keptForWorktree).toBeNull();
+    // Same rule one level down: there was no hidden SET to walk, so "0 hidden
+    // branches carry unmerged work" would be a measurement that never ran.
+    expect(report.filtered.hiddenUnmerged).toBeNull();
     // The window itself is still a fact about what was ASKED for, so it stays.
     expect(report.filtered.sinceDays).toBe(90);
   });
@@ -252,5 +260,166 @@ describe('repo-status default filters', () => {
     const feature = (report.branches ?? []).find((b) => b.name === 'feature');
     expect(feature?.disposition).toBe('mirrored');
     expect(feature?.archiveMirror?.ref).toBe('archive/feature');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What the hidden set holds (home-base-qyu1.33.9, epic decision D4)
+// ---------------------------------------------------------------------------
+
+/** A 40-hex name for no object at all: `git cherry` fails on it. */
+const NO_SUCH_COMMIT = '0123456789abcdef0123456789abcdef01234567';
+
+/**
+ * A repo whose two HIDDEN branches differ in what they actually hold.
+ *
+ *   shown-work        fresh, unique work        -> the one SHOWN unmerged row
+ *   archive/finished  hidden as an archive/*    -> carries work, or not, per flag
+ *   stale-landed      hidden by the age window  -> its patch is already on main
+ *
+ * `stale-landed` is the case that makes the measurement worth making: it HAS a
+ * commit of its own by sha, so any count based on `ahead` would call it unmerged
+ * work, and the identical patch is sitting on main under a different sha. Only
+ * the patch-id walk can tell the two hidden branches apart.
+ */
+function buildHiddenSetFixture(
+  sb: Sandbox,
+  opts: {archiveCarriesWork: boolean},
+): string {
+  const repo = sb.path;
+  git(repo, ['init', '-q', '-b', 'main']);
+  git(repo, ['config', 'user.email', 'test@example.com']);
+  git(repo, ['config', 'user.name', 'Test']);
+  const base = commit(repo, 'README.md', 'initial');
+
+  branchFrom(repo, base, 'shown-work');
+  commit(repo, 'shown.txt', 'work in flight');
+
+  branchFrom(repo, base, 'stale-landed');
+  const landed = commit(repo, 'landed.txt', 'landed long ago', daysAgo(200));
+
+  branchFrom(repo, base, 'archive/finished');
+  const archived = commit(repo, 'archived.txt', 'archived work');
+
+  git(repo, ['checkout', '-q', 'main']);
+  // The landed halves are replayed onto main, so their patch-ids match there
+  // under a DIFFERENT sha — which is exactly what `git cherry` sees through.
+  git(repo, ['cherry-pick', landed]);
+  if (!opts.archiveCarriesWork) git(repo, ['cherry-pick', archived]);
+  return repo;
+}
+
+describe('what the hidden set holds', () => {
+  test('counts the hidden branches carrying commits the baseline lacks', () => {
+    const repo = buildHiddenSetFixture(track(createSandbox()), {
+      archiveCarriesWork: true,
+    });
+    const report = filteredReport(repo);
+
+    // Two branches hidden, by two different rules.
+    expect(report.filtered.excludedAsArchive).toBe(1);
+    expect(report.filtered.excludedAsStale).toBe(1);
+    // One of them holds work the baseline lacks; the other's patch is on main.
+    expect(report.filtered.hiddenUnmerged).toEqual({
+      branchesWithUnmergedCommits: 1,
+      unmeasured: 0,
+    });
+
+    const out = renderReportPretty(report);
+    // THE HEADLINE, which is the whole point: the ledger shows one unmerged
+    // branch and there is another one it is not showing.
+    expect(out).toContain('UNMERGED WORK (1 shown, 1 more hidden)');
+    expect(out).toContain(
+      '1 of the 2 hidden branches carries commits not on main',
+    );
+    // The disclaimer it replaces must be gone: a measurement happened.
+    expect(out).not.toContain('these were not inspected');
+  });
+
+  test('every hidden branch already landed reads as a measured NONE', () => {
+    const repo = buildHiddenSetFixture(track(createSandbox()), {
+      archiveCarriesWork: false,
+    });
+    const report = filteredReport(repo);
+
+    expect(report.filtered.hiddenUnmerged).toEqual({
+      branchesWithUnmergedCommits: 0,
+      unmeasured: 0,
+    });
+
+    const out = renderReportPretty(report);
+    expect(out).toContain(
+      'none of the 2 hidden branches carries a commit not on main',
+    );
+    // Nothing is hidden that carries work, so the heading is a plain count.
+    expect(out).toContain('UNMERGED WORK (1)');
+    expect(out).not.toContain('more hidden');
+  });
+
+  test('a hidden tip whose cherry FAILS is unmeasured, never a clean zero', () => {
+    const repo = buildHiddenSetFixture(track(createSandbox()), {
+      archiveCarriesWork: true,
+    });
+    const report = filteredReport(repo);
+
+    // One real tip, one that names no object — the shape of a tip whose commit
+    // has been gc'd or corrupted out from under the walk.
+    const measured = measureHiddenUnmerged(
+      [
+        {
+          name: 'archive/finished',
+          reason: 'archive',
+          tipSha: git(repo, ['rev-parse', 'archive/finished']),
+        },
+        {name: 'stale-landed', reason: 'stale', tipSha: NO_SUCH_COMMIT},
+      ],
+      report.repo.baselineSha,
+      repo,
+    );
+    expect(measured).toEqual({
+      branchesWithUnmergedCommits: 1,
+      unmeasured: 1,
+    });
+
+    const out = renderReportPretty({
+      ...report,
+      filtered: {...report.filtered, hiddenUnmerged: measured},
+    });
+    expect(out).toContain(
+      '1 of the 2 hidden branches COULD NOT BE CHECKED — whether it carries commits not on main is UNKNOWN',
+    );
+    expect(out).toContain(
+      '1 of the 2 hidden branches carries commits not on main',
+    );
+  });
+
+  test('when NO hidden tip could be checked, nothing reassuring is printed', () => {
+    const repo = buildHiddenSetFixture(track(createSandbox()), {
+      archiveCarriesWork: true,
+    });
+    const report = filteredReport(repo);
+
+    const measured = measureHiddenUnmerged(
+      [
+        {name: 'archive/finished', reason: 'archive', tipSha: NO_SUCH_COMMIT},
+        {name: 'stale-landed', reason: 'stale', tipSha: `${'f'.repeat(40)}`},
+      ],
+      report.repo.baselineSha,
+      repo,
+    );
+    expect(measured).toEqual({
+      branchesWithUnmergedCommits: 0,
+      unmeasured: 2,
+    });
+
+    const out = renderReportPretty({
+      ...report,
+      filtered: {...report.filtered, hiddenUnmerged: measured},
+    });
+    expect(out).toContain('2 of the 2 hidden branches COULD NOT BE CHECKED');
+    // Zero branches were found to carry work ONLY because zero were looked at.
+    // No sentence in the output may spend that as a "none".
+    expect(out).not.toContain('none of the');
+    expect(out).not.toContain('more hidden');
   });
 });

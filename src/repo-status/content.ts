@@ -712,6 +712,57 @@ export function inspectArchiveMirror(
 }
 
 // ---------------------------------------------------------------------------
+// The patch-id walk
+// ---------------------------------------------------------------------------
+
+/**
+ * `git cherry -v <upstream> <head>`: "- sha subject" when an equivalent patch is
+ * already upstream, "+ sha subject" when it is not.
+ *
+ * ONE invocation shape, shared by the proof below and by
+ * `countUnmergedByPatchId`. The two answer questions at different scales — a
+ * per-commit verdict for a row that is SHOWN, a single count for a branch that
+ * is HIDDEN — and the numbers appear in the same report, one as
+ * "N commits exist only here" and one as "N of the M hidden branches carry
+ * commits not on main". Built from one function so they cannot drift into
+ * measuring subtly different things (home-base-qyu1.33.9, D4).
+ */
+function cherryArgv(baselineRev: string, branchRev: string): string[] {
+  return ['cherry', '-v', baselineRev, branchRev];
+}
+
+/**
+ * How many commits `tipRev` has that have NO patch-id equivalent on
+ * `baselineRev` — or NULL when git could not answer.
+ *
+ * NULL IS NOT ZERO, and here that distinction is the whole point. This is used
+ * for the branches the ledger HIDES, whose entire risk is that a reader takes
+ * their absence for mergedness; a failed call that returned 0 would upgrade
+ * "could not look" into "looked and found nothing", which is exactly the
+ * reassurance the hidden set must never be given for free.
+ *
+ * Both arguments are REVS and callers pass SHAS (the pinned baseline and the tip
+ * the ref already resolved to), for the reason every other measurement in this
+ * tool does: a name measures whatever it points at when this runs.
+ *
+ * PATCH-ID ONLY. Unlike `proveContentOnBaseline` this does NOT fall back to the
+ * per-file comparison for the commits patch-id could not match, so a commit that
+ * landed via a history-reshaping squash still counts here. That makes this a
+ * deliberate upper bound — it can say a hidden branch carries work the deeper
+ * proof would clear, and it will never say a branch is clean when it is not. The
+ * renderer says "checked by patch-id only" for exactly this reason.
+ */
+export function countUnmergedByPatchId(
+  baselineRev: string,
+  tipRev: string,
+  cwd: string,
+): number | null {
+  const cherry = gitArgv(cherryArgv(baselineRev, tipRev), cwd);
+  if (cherry == null) return null;
+  return cherry.split('\n').filter((line) => line.startsWith('+')).length;
+}
+
+// ---------------------------------------------------------------------------
 // The proof
 // ---------------------------------------------------------------------------
 
@@ -749,9 +800,7 @@ export function proveContentOnBaseline(
   const branchRev = pins?.branch ?? branch;
   const archiveMirror = inspectArchiveMirror(branch, cwd);
 
-  // `git cherry -v <upstream> <head>`: "- sha subject" when an equivalent patch
-  // is already upstream, "+ sha subject" when it is not.
-  const cherry = gitArgv(['cherry', '-v', baselineRev, branchRev], cwd);
+  const cherry = gitArgv(cherryArgv(baselineRev, branchRev), cwd);
   if (cherry == null) {
     return {
       allContentOnBaseline: false,

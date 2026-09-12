@@ -114,6 +114,32 @@ describe('project-prime', () => {
     expect(report?.groups).toEqual([]);
   });
 
+  test('what the hidden branches hold is NOT COMPUTED here, and renders nothing', () => {
+    const sb = track(createSandbox());
+    initRepo(sb);
+    git(sb.path, 'checkout -q -b old-feature');
+    commit(sb, 'old.txt', 'old work', '2020-01-01T00:00:00');
+    git(sb.path, 'checkout -q main');
+
+    const report = runDivergenceCheck({cwd: sb.path, sinceDays: 30});
+
+    // NULL, always, on this path (home-base-qyu1.33.9, epic decision D4).
+    // Measuring the hidden set costs one `git cherry` per hidden tip, and the
+    // filters exist here precisely so a hidden branch costs nothing at session
+    // start. `status` is the only caller that fills this in.
+    expect(report?.filtered.hiddenUnmerged).toBeNull();
+    expect(report?.filtered.excludedAsStale).toBe(1);
+
+    const text = formatRepoState(report!);
+    // The hidden line is EXACTLY what it was before the field existed.
+    expect(text).toContain('Not listed: 1 branch(es) with no commit in 30d');
+    // And the null renders as nothing at all — in particular not as a "none",
+    // which is the one thing a not-computed measurement must never become.
+    expect(text).not.toContain('not on main');
+    expect(text).not.toContain('hidden branch');
+    expect(text).not.toContain('COULD NOT BE CHECKED');
+  });
+
   test('a worktree with ahead commits is flagged regardless of age, with its path set', () => {
     const sb = track(createSandbox());
     initRepo(sb);

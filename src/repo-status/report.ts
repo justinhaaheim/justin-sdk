@@ -17,6 +17,7 @@
 
 import {buildCoreInventory} from '../plugin/lib/repo-status/core';
 import {
+  countUnmergedByPatchId,
   proveContentOnBaseline,
   type ArchiveMirror,
   type CommitVerdict,
@@ -55,8 +56,49 @@ import type {
   BranchDivergence,
   EnumerationFailure,
   FilterSummary,
+  HiddenTip,
   WorktreeEntry,
 } from '../plugin/lib/repo-status/types';
+
+/**
+ * What the branches the ledger HIDES actually hold (home-base-qyu1.33.9, D4).
+ *
+ * The filters are the one feature that makes the answer shorter without making
+ * anything in it false — and "UNMERGED WORK (3)" over a repo with seven hidden
+ * branches, nearly all of them carrying commits not on main, is that shape
+ * failing anyway: the headline counts the shown rows and the disclaimer under it
+ * is a footnote losing to a heading. So the status path spends one `git cherry`
+ * per hidden tip and states the result.
+ *
+ * NULL IN, NULL OUT. When the branch listing failed there are no hidden tips to
+ * walk, and "0 hidden branches carry unmerged work" would be a measurement that
+ * never ran. `unmeasured` carries the same discipline one level down: a tip
+ * whose `cherry` failed is counted THERE and never as a clean zero.
+ *
+ * Runs on `buildReport` only. `buildCoreInventory` — the `prime` SessionStart
+ * path — never calls this and always publishes `hiddenUnmerged: null`.
+ */
+export function measureHiddenUnmerged(
+  hiddenTips: HiddenTip[] | null,
+  baselineSha: string,
+  cwd: string,
+): FilterSummary['hiddenUnmerged'] {
+  if (hiddenTips == null) return null;
+  let branchesWithUnmergedCommits = 0;
+  let unmeasured = 0;
+  for (const tip of hiddenTips) {
+    // The PINNED baseline and the tip's own sha — the same two commits the
+    // shown rows' proofs walk, so the headline and the rows cannot describe
+    // different repo states.
+    const unique = countUnmergedByPatchId(baselineSha, tip.tipSha, cwd);
+    if (unique == null) {
+      unmeasured += 1;
+      continue;
+    }
+    if (unique > 0) branchesWithUnmergedCommits += 1;
+  }
+  return {branchesWithUnmergedCommits, unmeasured};
+}
 
 export interface PrSummary {
   number: number;
@@ -490,7 +532,17 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
     ...(inventory.enumerationFailures.length > 0
       ? {enumerationFailures: inventory.enumerationFailures}
       : {}),
-    filtered: inventory.filtered,
+    // The core's `filtered`, plus the one field only this path can fill in:
+    // core leaves `hiddenUnmerged` null because it runs at session start and
+    // this costs a git call per hidden branch (home-base-qyu1.33.9, D4).
+    filtered: {
+      ...inventory.filtered,
+      hiddenUnmerged: measureHiddenUnmerged(
+        inventory.hiddenTips,
+        inventory.baselineSha,
+        cwd,
+      ),
+    },
     overlaps: overlapReport,
     repo: {
       baselineRef: inventory.baselineRef,

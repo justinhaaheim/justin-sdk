@@ -27,6 +27,7 @@ import type {
   CoreOptions,
   DivergenceCounts,
   EnumerationFailure,
+  HiddenTip,
   WorktreeEntry,
 } from './types';
 
@@ -400,6 +401,10 @@ function resolveBaseline(
  * worth surfacing. Pass `sinceDays: null` to keep every branch, which is what
  * `plan`/`apply` want.
  *
+ * WHATEVER IS DROPPED IS ALSO RETURNED, in `hiddenTips` — name and sha, no git
+ * — so a caller willing to spend git calls can say what the hidden set holds
+ * (home-base-qyu1.33.9, D4). This path never measures them itself.
+ *
  * WHATEVER IS DROPPED IS COUNTED, in `filtered` (home-base-qyu1.33.1). A gate
  * that shortens the ledger without saying so turns "here are the open branches"
  * into a claim that is quietly wrong, which is rule 6 arriving through the
@@ -454,12 +459,19 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
   let excludedAsArchive: number | null = null;
   let excludedAsStale: number | null = null;
   let keptForWorktree: number | null = null;
+  // The dropped tips themselves, NOT just how many (home-base-qyu1.33.9, D4).
+  // Collected here because this is the only place that knows which tips were
+  // dropped and why — and collecting them costs nothing: every tip already
+  // carries its sha from the one `for-each-ref` above, so NO git runs for this
+  // and the session-start path is exactly as cheap as it was.
+  let hiddenTips: HiddenTip[] | null = null;
 
   let candidates: BranchTip[] | undefined;
   if (tips != null) {
     excludedAsArchive = 0;
     excludedAsStale = 0;
     keptForWorktree = 0;
+    hiddenTips = [];
     candidates = [];
     for (const tip of tips) {
       if (tip.name === baselineRef) continue;
@@ -480,6 +492,7 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
       }
       if (excludeArchive && isArchiveRef(tip)) {
         excludedAsArchive += 1;
+        hiddenTips.push({name: tip.name, reason: 'archive', tipSha: tip.tipSha});
         continue;
       }
       // Age is judged over what SURVIVED the archive filter, so a stale archive
@@ -490,6 +503,7 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
         !isRecentEnough(tip.lastCommitDate, sinceDays)
       ) {
         excludedAsStale += 1;
+        hiddenTips.push({name: tip.name, reason: 'stale', tipSha: tip.tipSha});
         continue;
       }
       candidates.push(tip);
@@ -521,9 +535,15 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
       excludeArchive,
       excludedAsArchive,
       excludedAsStale,
+      // NOT COMPUTED, always, from here. Core is the session-start path and
+      // measuring the hidden set costs one `git cherry` per tip; `status` fills
+      // this in from `hiddenTips` and nothing else may read the null as "none"
+      // (home-base-qyu1.33.9, D4).
+      hiddenUnmerged: null,
       keptForWorktree,
       sinceDays,
     },
+    hiddenTips,
     repoRoot,
     worktrees,
   };

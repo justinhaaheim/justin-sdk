@@ -46,6 +46,7 @@
 
 import {formatTouched} from '../plugin/lib/repo-status/prime-view';
 
+import type {FilterSummary} from '../plugin/lib/repo-status/types';
 import type {Disposition} from './disposition';
 import type {FetchAge} from './fetch-age';
 import type {BranchOverlap, OverlapReport} from './overlap';
@@ -412,6 +413,83 @@ function branchRow(
 // Blocks
 // ---------------------------------------------------------------------------
 
+/** The indent every line under the hidden count shares. */
+const HIDDEN_INDENT = '       ';
+
+/** What was and was not established about the branches this ledger hides. */
+const HIDDEN_METHOD =
+  'checked by patch-id only — nothing else about them was inspected; `--all` shows them';
+
+/**
+ * What the HIDDEN branches hold — measured, not disclaimed (epic design D4).
+ *
+ * The line this replaces was a disclaimer: "these were not inspected — hidden
+ * does NOT mean merged". True, and useless, because the reader had no way to act
+ * on it: two blind reviewers went and checked by hand and found unmerged commits
+ * in nearly all of the hidden branches (2026-09-07). One `git cherry` per hidden
+ * tip turns that footnote into a fact.
+ *
+ * It lives HERE, in the summary, and not only in the section heading, because a
+ * group with zero rows is never rendered at all — a repo whose every SHOWN
+ * branch is merged would otherwise print no unmerged-work heading to carry the
+ * hidden count.
+ *
+ * THE DISCLAIMER SURVIVES, VERBATIM, when `hiddenUnmerged` is null: null means
+ * NOT COMPUTED, and the one thing this block may never do is let a measurement
+ * that did not happen read as a measurement that came back clean.
+ */
+function hiddenVerdict(
+  hidden: number,
+  measured: FilterSummary['hiddenUnmerged'],
+  style: Styler,
+): string[] {
+  if (measured == null) {
+    // NOT just a flag hint. Two reviewers checked what the hidden branches
+    // actually held and found unmerged commits in nearly all of them — the word
+    // "archive" reads as already-handled, and a bare pointer to `--all`
+    // undersells that (2026-09-07).
+    return [
+      style.alert(
+        `${HIDDEN_INDENT}these were not inspected — hidden does NOT mean merged; \`--all\` includes them`,
+      ),
+    ];
+  }
+  const lines: string[] = [];
+  const {branchesWithUnmergedCommits: withWork, unmeasured} = measured;
+  const checked = hidden - unmeasured;
+  if (withWork > 0) {
+    lines.push(
+      style.alert(
+        `${HIDDEN_INDENT}${withWork} of the ${plural(hidden, 'hidden branch')} ${
+          withWork === 1 ? 'carries' : 'carry'
+        } commits not on main (${HIDDEN_METHOD})`,
+      ),
+    );
+  } else if (checked > 0) {
+    // "none of the M" only when M is what was actually walked. With any tip
+    // unmeasured the claim shrinks to the ones that were checked, because the
+    // rest are UNKNOWN and folding them into a "none" is the fabrication this
+    // whole field exists to prevent.
+    lines.push(
+      style.dim(
+        unmeasured === 0
+          ? `${HIDDEN_INDENT}none of the ${plural(hidden, 'hidden branch')} carries a commit not on main (${HIDDEN_METHOD})`
+          : `${HIDDEN_INDENT}none of the ${plural(checked, 'hidden branch')} that could be checked carries a commit not on main (${HIDDEN_METHOD})`,
+      ),
+    );
+  }
+  if (unmeasured > 0) {
+    lines.push(
+      style.alert(
+        `${HIDDEN_INDENT}${unmeasured} of the ${plural(hidden, 'hidden branch')} COULD NOT BE CHECKED — whether ${
+          unmeasured === 1 ? 'it carries' : 'they carry'
+        } commits not on main is UNKNOWN`,
+      ),
+    );
+  }
+  return lines;
+}
+
 function summaryBlock(report: RepoStatusReport, style: Styler): string[] {
   const s = report.summary;
   if (s == null) return [];
@@ -458,8 +536,11 @@ function summaryBlock(report: RepoStatusReport, style: Styler): string[] {
           : 'Nothing hidden — no filters applied',
       ),
     );
-  } else {
-    lines.push(`${plural(hidden ?? 0, 'branch')} hidden`);
+    // `hidden != null` is already guaranteed by the `hiddenKnown` return above;
+    // restating it is what lets the count below be a number rather than a `?? 0`
+    // standing in for a measurement.
+  } else if (hidden != null) {
+    lines.push(`${plural(hidden, 'branch')} hidden`);
     // Same rule as the summary counts above: a reason that excluded nothing is
     // a line with no content. The filters that DID run are named in the
     // "what was and was not checked" footer either way.
@@ -473,15 +554,7 @@ function summaryBlock(report: RepoStatusReport, style: Styler): string[] {
         `  ${String(f.excludedAsStale).padStart(3)}  no commit in the last ${f.sinceDays} days`,
       );
     }
-    // NOT just a flag hint. Two reviewers checked what the hidden branches
-    // actually held and found unmerged commits in nearly all of them — the word
-    // "archive" reads as already-handled, and a bare pointer to `--all`
-    // undersells that (2026-09-07).
-    lines.push(
-      style.alert(
-        '       these were not inspected — hidden does NOT mean merged; `--all` includes them',
-      ),
-    );
+    lines.push(...hiddenVerdict(hidden, f.hiddenUnmerged, style));
   }
   if ((f.keptForWorktree ?? 0) > 0) {
     lines.push(
@@ -714,8 +787,21 @@ export function renderReportPretty(
   for (const group of GROUPS) {
     const rows = report.branches.filter((r) => r.disposition === group.key);
     if (rows.length === 0) continue;
+    // THE HEADLINE COUNTS WHAT IS HIDDEN TOO (epic design D4). `UNMERGED WORK
+    // (3)` over a repo with four MORE unmerged branches the filters dropped is
+    // a number every reader takes as the answer to "what is still open?", and
+    // the correction was a dim line several blocks above it. Only this group
+    // gets the suffix: it is the only one whose count reads as a total.
+    const alsoHidden =
+      group.key === 'needs-judgment'
+        ? (report.filtered.hiddenUnmerged?.branchesWithUnmergedCommits ?? 0)
+        : 0;
     const lines = [
-      style.heading(`${group.heading} (${rows.length})`),
+      style.heading(
+        alsoHidden > 0
+          ? `${group.heading} (${rows.length} shown, ${alsoHidden} more hidden)`
+          : `${group.heading} (${rows.length})`,
+      ),
       style.dim(group.blurb),
       '',
       headerRow(cols, style),

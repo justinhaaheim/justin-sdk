@@ -103,6 +103,21 @@ describe('the ledger rendering', () => {
     expect(out).toContain('CONFLICTS with main in 1 file: shared.txt');
   });
 
+  test('the unmerged headline counts the branches the filters hid', () => {
+    // `archive/finished` is hidden by the default filters and carries a commit
+    // main does not — so a heading of `UNMERGED WORK (1)` would be the answer to
+    // "what is still open?" with one of the answers filtered out of it
+    // (epic design D4).
+    const out = prettyFor(buildFixture(track(createSandbox())));
+
+    expect(out).toContain('UNMERGED WORK (1 shown, 1 more hidden)');
+    expect(out).toContain(
+      '1 of the 1 hidden branch carries commits not on main',
+    );
+    // The measured statement REPLACES the disclaimer it was filed against.
+    expect(out).not.toContain('these were not inspected');
+  });
+
   test('one column grid across every section, so the sections line up', () => {
     const out = prettyFor(buildFixture(track(createSandbox())), {
       excludeArchive: false,
@@ -133,9 +148,12 @@ describe('the ledger rendering', () => {
     expect(out).toContain('branch hidden');
     expect(out).toContain('on an archive/ backup branch');
     // Hiding is fine; hiding SILENTLY is not. Reviewers checked what the hidden
-    // branches held and found unmerged commits in nearly all of them, so the
-    // line has to say hidden is not a synonym for handled.
-    expect(out).toContain('hidden does NOT mean merged');
+    // branches held and found unmerged commits in nearly all of them — so the
+    // line beneath the count no longer DISCLAIMS ("hidden does NOT mean
+    // merged"), it STATES the result of having checked (epic design D4).
+    expect(out).toContain(
+      'carries commits not on main (checked by patch-id only — nothing else about them was inspected; `--all` shows them)',
+    );
     expect(out).not.toContain('archive/finished');
   });
 
