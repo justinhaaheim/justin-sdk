@@ -63,17 +63,22 @@ export const threadCommand: CommandModule = {
               describe: 'Read the payload from stdin instead of a file',
               type: 'boolean' as const,
             })
+            // NO `.check()` HERE, deliberately (home-base-p1uj.2). A `.check()`
+            // that throws is routed to the CLI-wide `.fail(reportCliFailure)`,
+            // which prints a STACK TRACE and exits 1 — measured 2026-09-12:
+            // four frames of yargs internals for a plain usage mistake, and an
+            // exit code that says "bd failed" rather than "fix your command".
+            // That contract is shared with every other command and must not be
+            // changed from here (tests/cli-failure.test.ts pins it).
+            //
+            // So the flag combination is validated INSIDE `runThreadReport`
+            // instead, where it lands on the same one-line/exit-2 path as every
+            // other refusal. Exit 2 is the documented "refused, nothing was
+            // written" code; a usage error is exactly that.
             .option('session', {
               describe:
                 'Session id to report for (default: $CLAUDE_CODE_SESSION_ID)',
               type: 'string' as const,
-            })
-            .check((argv) => {
-              const hasFile = argv.file != null && argv.file !== '';
-              if (hasFile === (argv.stdin === true)) {
-                throw new Error('pass exactly one of --file <path> or --stdin');
-              }
-              return true;
             }),
         async (argv) => {
           const {runThreadReport} = await import('./report');

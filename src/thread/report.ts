@@ -99,9 +99,24 @@ export interface ReportOptions {
   stdin?: boolean;
 }
 
+/**
+ * Where the `--file` / `--stdin` combination is checked (home-base-p1uj.2).
+ *
+ * It is checked HERE rather than in a yargs `.check()` because a throwing
+ * `.check()` reaches the CLI-wide `.fail()` handler, which prints a stack trace
+ * and exits 1. A usage mistake deserves one line and the "refused, nothing
+ * written" code, which is what every other refusal in this file returns.
+ */
 function readPayloadText(
   options: ReportOptions,
 ): {text: string} | {error: string} {
+  const hasFile = options.file != null && options.file !== '';
+  if (hasFile && options.stdin === true) {
+    return {
+      error:
+        'pass exactly one of --file <path> or --stdin, not both — I cannot tell which payload you meant',
+    };
+  }
   if (options.stdin === true) {
     try {
       return {text: readFileSync(0, 'utf8')};
