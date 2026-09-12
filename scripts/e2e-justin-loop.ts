@@ -949,11 +949,17 @@ function checkScenarioA(a: Artifacts): Check[] {
       `${beads[0]?.id ?? '(no bead)'} status=${beads[0]?.status ?? 'n/a'}`,
     ),
   );
+  // D14 (home-base-r4fs): the `done` bead has no successor to claim it, so the
+  // RUNNER closes it as the last act of the run. Asserted over every handoff
+  // bead, not just the last: "no open handoff bead is left behind" is the fact
+  // that matters, and checking only beads[1] would miss a third one appearing.
   checks.push(
     check(
-      'the `done` handoff bead is still OPEN (nobody closes it — FINDING-1)',
-      beads[1]?.status === 'open',
-      `${beads[1]?.id ?? '(no bead)'} status=${beads[1]?.status ?? 'n/a'}`,
+      'both handoff beads are closed — the runner closes the `done` one (D14)',
+      beads.length === 2 && beads.every((b) => b.status === 'closed'),
+      beads.length === 0
+        ? '(no handoff beads to check)'
+        : beads.map((b) => `${b.id} status=${b.status}`).join(' · '),
     ),
   );
 
