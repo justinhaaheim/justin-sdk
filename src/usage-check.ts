@@ -27,6 +27,13 @@
  * exposing one is still an open request upstream (anthropics/claude-code
  * #25689, #27969, #44790) — so the transcript is the only source.
  *
+ * NOT EVERY ASSISTANT RECORD IS A CONTEXT READING (home-base-fjcp). A record
+ * containing a server-side tool call — the `advisor` — carries the SUM of every
+ * model turn inside it, which double-counts the cache reads and reports roughly
+ * twice the real context. Those records are skipped; see
+ * `usageSpansMultipleTurns` for the measurement and for why the obvious
+ * content-block filter does not work.
+ *
  * TWO EVENTS, one script (both verified injecting in CC 2.1.238):
  *   - UserPromptSubmit — fires when Justin sends a message.
  *   - PostToolBatch — fires ONCE after each batch of tool calls resolves,
@@ -625,6 +632,90 @@ export function contextTokensFromUsage(usage: unknown): number | null {
   return total;
 }
 
+/**
+ * The `iterations[].type` of an ordinary model turn. Anything else in that slot
+ * is a foreign turn spliced into the same record — today, `advisor_message`.
+ */
+const ITERATION_TYPE_MODEL_TURN = 'message';
+
+/** The `server_tool_use` counters that mark a record as a server-tool exchange. */
+const SERVER_TOOL_COUNTERS = ['web_search_requests', 'web_fetch_requests'];
+
+/**
+ * Does this `message.usage` describe MORE THAN ONE model turn?
+ *
+ * WHY THIS EXISTS (home-base-fjcp): a server-side tool — the `advisor` — runs
+ * inside a single assistant record, and Claude Code records that record's usage
+ * as the SUM over every turn the record contains. The sum double-counts
+ * `cache_read_input_tokens`, so the record reports roughly N times the real
+ * context. Measured on the conductor transcript 5b9ad9b0 (2026-09-12): the
+ * advisor record totalled 4 / 16,115 / 325,748 = 341,867 while the session's
+ * real context was ~174k, and the hook duly fired a wrap-up directive at a
+ * threshold the session had not remotely reached.
+ *
+ * THE OBVIOUS FIX DOES NOT WORK, so do not "simplify" this back to it: an
+ * advisor exchange is not one record but SEVEN consecutive ones sharing a
+ * `message.id`, and while the middle ones carry `server_tool_use` and
+ * `advisor_tool_result` content blocks, the LAST one carries a plain `tool_use`
+ * block and nothing else. Filtering on content blocks leaves that final record —
+ * the one nearest the tail, and therefore the one a backwards scan finds first —
+ * still reporting 341,867.
+ *
+ * WHAT DOES WORK is `usage.iterations`, the per-turn breakdown the sum is built
+ * from. Verified across the whole of that transcript: 314 assistant records
+ * carry `[message]` and 14 carry `[message, advisor_message, message]`, with no
+ * other combination present. So either a length above one OR a non-`message`
+ * type means the totals span turns and must not be read as a context size.
+ *
+ * The `server_tool_use` counter check is DEFENSIVE and its premise is UNVERIFIED.
+ * WebSearch and WebFetch are server tools too and would plausibly inflate a
+ * record the same way, but no transcript proves it: across all 2,787 files under
+ * ~/.claude/projects, 1,938 carry `web_search_requests` and every one of them is
+ * zero, so no real web-tool record exists to measure. The counters are also NOT
+ * the advisor's discriminant — the advisor record reports both as zero — which
+ * is precisely why the `iterations` test above carries the actual load.
+ *
+ * COST OF A FALSE POSITIVE IS ONE TURN, and it is self-correcting: skipping a
+ * good record means the scan reports the previous record instead, understating
+ * the context by a single turn's delta until the next clean record lands. The
+ * false NEGATIVE this replaces was a doubled reading that ended sessions early.
+ */
+export function usageSpansMultipleTurns(usage: unknown): boolean {
+  if (usage == null || typeof usage !== 'object') {
+    return false;
+  }
+  const fields = usage as Record<string, unknown>;
+
+  const iterations = fields.iterations;
+  if (Array.isArray(iterations)) {
+    if (iterations.length > 1) {
+      return true;
+    }
+    for (const iteration of iterations) {
+      if (iteration == null || typeof iteration !== 'object') {
+        continue;
+      }
+      const type = (iteration as Record<string, unknown>).type;
+      if (typeof type === 'string' && type !== ITERATION_TYPE_MODEL_TURN) {
+        return true;
+      }
+    }
+  }
+
+  const serverToolUse = fields.server_tool_use;
+  if (serverToolUse != null && typeof serverToolUse === 'object') {
+    const counters = serverToolUse as Record<string, unknown>;
+    for (const key of SERVER_TOOL_COUNTERS) {
+      const value = counters[key];
+      if (typeof value === 'number' && value > 0) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 /** Every string an attachment's `content` field might be carrying. */
 function attachmentStrings(entry: Record<string, unknown>): string[] {
   const attachment = entry.attachment as {content?: unknown} | undefined;
@@ -701,7 +792,15 @@ function scanWindow(
 
     if (maybeAssistant && entry.type === 'assistant') {
       const message = entry.message as {usage?: unknown} | undefined;
-      const tokens = contextTokensFromUsage(message?.usage);
+      const usage = message?.usage;
+      // A record whose totals span several model turns double-counts the cache
+      // reads, so it is not a context size at all — leave contextTokens unset
+      // and let the scan keep walking back to the last single-turn record
+      // (home-base-fjcp). Guarding the read rather than `continue`-ing keeps
+      // the notice branch below reachable for the same line.
+      const tokens = usageSpansMultipleTurns(usage)
+        ? null
+        : contextTokensFromUsage(usage);
       if (tokens != null) {
         state.contextTokens = tokens;
       }
