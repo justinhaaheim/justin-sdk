@@ -46,15 +46,22 @@
  */
 
 import {execFileSync} from 'node:child_process';
-import {existsSync, lstatSync, readFileSync, realpathSync} from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from 'node:fs';
 import {homedir} from 'node:os';
-import {join, resolve} from 'node:path';
+import {isAbsolute, join, normalize, resolve} from 'node:path';
 import {satisfies, validRange} from 'semver';
 
 import {
   planWorktreeIncludeCopies,
   resolveGitTopology,
   resolvePrimaryCheckout,
+  SETUP_ENV_SOURCE_PREFIX,
   WORKTREE_INCLUDE_FILE,
 } from './setup-env';
 
@@ -72,6 +79,12 @@ export {isLinkedWorktree} from './setup-env';
 export type HydrationProblemKind =
   | 'dep-missing'
   | 'dep-version'
+  /**
+   * A file NAMED LITERALLY in this checkout's tsconfig `include`/`files` that
+   * exists in the primary but not here (home-base-qe6b.4, D1) — a generated,
+   * gitignored input no `.worktreeinclude` manifest lists. Advisory.
+   */
+  | 'generated-input'
   | 'mise-untrusted'
   | 'node-modules'
   | 'node-modules-symlink'
@@ -109,12 +122,22 @@ export interface WorktreeHydrationStatus {
  * prevent. Without node_modules, eslint and tsc fail in files the change never
  * touched, so relaying those results is worse than printing nothing.
  *
- * The other two are real hydration gaps that do NOT corrupt check results: a
+ * The others are hydration gaps that do not, on their own, make `signal` lie: a
  * missing `.worktreeinclude` file (a `.env.local`, a generated version file) and
- * an untrusted `mise.toml` may break a BUILD, but they do not make `signal` lie.
- * Blocking on them would make `signal` unrunnable with no override in a tree
- * where it would have worked fine — which is the escape-hatch concern raised on
- * bead home-base-v170.2 and ruled here.
+ * an untrusted `mise.toml` may break a BUILD, but they do not corrupt check
+ * results. Blocking on them would make `signal` unrunnable with no override in a
+ * tree where it would have worked fine — which is the escape-hatch concern
+ * raised on bead home-base-v170.2 and ruled here.
+ *
+ * `generated-input` IS ADVISORY BY DECISION (home-base-qe6b.4 D1), and it is the
+ * one advisory kind for which the no-corruption claim is NOT safe to make: a
+ * missing `expo-env.d.ts` was measured to flip typescript-eslint's
+ * projectService program to `any` and produce 16 phantom `no-unsafe-*` errors,
+ * while `tsc --noEmit` stayed green. It is advisory anyway because the FIRST
+ * job is making the gap visible — promoting it to blocking would make `signal`
+ * refuse to run fleet-wide off a heuristic that has never been exercised, which
+ * is a far bigger change than this bead. The consequence sentence doctor prints
+ * is split accordingly (see `makeEnvHydrationChecks`) rather than over-claiming.
  *
  * DOCTOR'S GATE IS DELIBERATELY NOT SPLIT: it reports state rather than gating
  * work, so it fires on ANY problem. Its MESSAGE does consult the split
@@ -228,6 +251,173 @@ export function hydrationFixCommand(
   return pkg?.scripts?.[LEGACY_WORKTREE_SETUP_SCRIPT] != null
     ? `bun run ${LEGACY_WORKTREE_SETUP_SCRIPT}`
     : SETUP_ENV_BUNX;
+}
+
+// ---------------------------------------------------------------------------
+// tsconfig-named generated inputs (home-base-qe6b.4, D1)
+// ---------------------------------------------------------------------------
+
+/** The tsconfig this probe reads. Only the project root's own file. */
+export const TSCONFIG_FILE = 'tsconfig.json';
+
+/**
+ * An `include`/`files` entry containing any of these is a PATTERN, not a named
+ * file, and is deliberately ignored: a repo whose tsconfig names only globs
+ * (`src/**\/*.ts`) says nothing about which individual generated files must
+ * exist, and guessing would nag every worktree of every repo — the exact
+ * failure mode that got the unconditional `no-manifest` advisory retracted.
+ */
+const GLOB_CHARACTERS = /[*?[\]{}]/;
+
+/**
+ * JSONC → JSON: strip `//` and block comments and trailing commas, both of
+ * which TypeScript accepts in a tsconfig and `JSON.parse` does not. Exported
+ * for its own tests.
+ *
+ * String-aware on purpose, in ONE pass. A regex-only stripper corrupts any
+ * entry containing `//` (a URL, a Windows UNC path) or a comma before a
+ * bracket, and the corruption is silent — it yields a parse that succeeds with
+ * the wrong contents.
+ */
+export function stripJsoncExtras(text: string): string {
+  let out = '';
+  let index = 0;
+  let inString = false;
+  while (index < text.length) {
+    const ch = text[index] as string;
+    if (inString) {
+      if (ch === '\\') {
+        out += ch + (text[index + 1] ?? '');
+        index += 2;
+        continue;
+      }
+      if (ch === '"') inString = false;
+      out += ch;
+      index += 1;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      index += 1;
+      continue;
+    }
+    if (ch === '/' && text[index + 1] === '/') {
+      while (index < text.length && text[index] !== '\n') index += 1;
+      continue;
+    }
+    if (ch === '/' && text[index + 1] === '*') {
+      index += 2;
+      while (
+        index < text.length &&
+        !(text[index] === '*' && text[index + 1] === '/')
+      ) {
+        index += 1;
+      }
+      index += 2;
+      continue;
+    }
+    if (ch === '}' || ch === ']') {
+      // Drop a trailing comma. Safe here and nowhere else: we are outside every
+      // string literal, so the tail being trimmed is structural punctuation.
+      out = out.replace(/,\s*$/, '');
+    }
+    out += ch;
+    index += 1;
+  }
+  return out;
+}
+
+/**
+ * The `include` + `files` entries of a tsconfig that name ONE FILE literally,
+ * normalized to a repo-relative path.
+ *
+ * Pure, and takes the TEXT rather than a path so the parsing rules are testable
+ * without a fixture tree.
+ *
+ * `extends` is NOT followed (D1 scope). A base config lives in node_modules or
+ * a sibling repo, its paths resolve relative to ITS directory, and every case
+ * this probe exists for — `expo-env.d.ts` — is named in the repo's own file.
+ * The cost is a FALSE NEGATIVE (an advisory that stays quiet), never a false
+ * positive, which is the direction this detector must fail in.
+ */
+export function literalTsconfigInputs(tsconfigText: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stripJsoncExtras(tsconfigText));
+  } catch {
+    // KNOWN BLIND SPOT, matching this module's standing convention (an
+    // unparseable package.json, an unrecognized `mise trust` line): a file we
+    // cannot read yields NO advisory rather than a guessed one. Reporting
+    // "something may be missing" without being able to name it is exactly the
+    // nagging this probe was designed around.
+    return [];
+  }
+  if (parsed == null || typeof parsed !== 'object') return [];
+  const config = parsed as {files?: unknown; include?: unknown};
+  const entries = [
+    ...(Array.isArray(config.include) ? config.include : []),
+    ...(Array.isArray(config.files) ? config.files : []),
+  ];
+  const literal: string[] = [];
+  for (const entry of entries) {
+    if (typeof entry !== 'string') continue;
+    if (entry === '' || GLOB_CHARACTERS.test(entry)) continue;
+    if (isAbsolute(entry)) continue;
+    const relPath = normalize(entry);
+    // `..` would name a file outside the checkout, where "present in the
+    // primary but absent here" is meaningless (both resolve to the same place).
+    if (relPath === '.' || relPath.startsWith('..')) continue;
+    if (!literal.includes(relPath)) literal.push(relPath);
+  }
+  return literal;
+}
+
+/**
+ * The `generated-input` problems for a linked worktree: every literal tsconfig
+ * input that is a FILE in the primary and absent here.
+ *
+ * The file test is deliberate — a bare directory in `include` (`"src"`) means
+ * "everything under it", is tracked, and can never be the generated-input case.
+ *
+ * `covered` holds the labels already reported as `worktreeinclude` problems:
+ * a manifest-listed file is the SAME missing file with a better message, and
+ * listing it twice would double it in doctor's `Missing:` line.
+ */
+function probeGeneratedInputProblems(
+  primary: string,
+  target: string,
+  covered: ReadonlySet<string>,
+): HydrationProblem[] {
+  const tsconfigPath = join(target, TSCONFIG_FILE);
+  if (!existsSync(tsconfigPath)) return [];
+  let text: string;
+  try {
+    text = readFileSync(tsconfigPath, 'utf-8');
+  } catch {
+    return [];
+  }
+  const problems: HydrationProblem[] = [];
+  for (const relPath of literalTsconfigInputs(text)) {
+    if (covered.has(relPath)) continue;
+    if (existsSync(join(target, relPath))) continue;
+    let isFileInPrimary = false;
+    try {
+      isFileInPrimary = statSync(join(primary, relPath)).isFile();
+    } catch {
+      isFileInPrimary = false;
+    }
+    if (!isFileInPrimary) continue;
+    problems.push({
+      detail:
+        `${relPath} is named in ${TSCONFIG_FILE} include/files and exists in the primary ` +
+        `checkout but not here — a generated (gitignored) input; list it in ` +
+        `${WORKTREE_INCLUDE_FILE}, or produce it with a ${SETUP_ENV_SOURCE_PREFIX}<LABEL> script`,
+      kind: 'generated-input',
+      label: relPath,
+    });
+  }
+  return problems;
 }
 
 // ---------------------------------------------------------------------------
@@ -453,14 +643,24 @@ export function detectWorktreeHydration(
 
   if (isLinked && primary != null && primary !== resolved) {
     const plan = planWorktreeIncludeCopies(primary, resolved);
+    const manifestLabels = new Set<string>();
     for (const entry of plan.entries) {
       if (entry.action !== 'copy') continue;
+      manifestLabels.add(entry.relPath);
       problems.push({
         detail: `${entry.relPath} is listed in ${WORKTREE_INCLUDE_FILE} and present in the primary checkout, but absent here`,
         kind: 'worktreeinclude',
         label: entry.relPath,
       });
     }
+    // D1 (home-base-qe6b.4). THE BLIND SPOT THIS CLOSES: a repo with no
+    // `.worktreeinclude` produced NO problem at all, so signal ran in a tree
+    // missing a generated input and relayed phantom failures — the exact
+    // misdiagnosis this module exists to prevent. Runs AFTER the manifest loop
+    // because it consumes that loop's labels.
+    problems.push(
+      ...probeGeneratedInputProblems(primary, resolved, manifestLabels),
+    );
   }
 
   if (miseTrustStatus(resolved) === 'untrusted') {
@@ -540,10 +740,19 @@ export function formatUnhydratedWorktreeBanner(
 export function formatAdvisoryWorktreeWarning(
   status: WorktreeHydrationStatus,
 ): string {
+  // The parenthetical is the same claim doctor makes, and it is false for a
+  // `generated-input` gap (home-base-qe6b.4): a missing tsconfig-named input
+  // was measured to degrade type-aware lint to `any` while tsc stayed green.
+  // The checks still run either way — only the claim about their worth differs.
+  const caveat = status.problems.some(
+    (problem) => problem.kind === 'generated-input',
+  )
+    ? 'running the checks anyway — but type-aware lint results may be wrong'
+    : 'does not affect check results — running them anyway';
   return (
     [
       `${YELLOW}⚠${RESET} ${BOLD}partially unhydrated worktree${RESET} ${status.target}`,
-      `  Missing: ${describeMissing(status)} ${DIM}(does not affect check results — running them anyway)${RESET}`,
+      `  Missing: ${describeMissing(status)} ${DIM}(${caveat})${RESET}`,
       `  Fix:     ${YELLOW}${status.fixCommand}${RESET}`,
     ].join('\n') + '\n'
   );

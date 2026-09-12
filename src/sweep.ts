@@ -282,6 +282,14 @@ function run(
 /** How many lines of a failed step's output reach the log and the screen. */
 export const FAILURE_TAIL_LINES = 60;
 
+/**
+ * Appended to every blind-gate note, on screen AND in the summary line (D2).
+ * The note itself says the gate proved nothing; without this clause it also
+ * leaves the reader with nowhere to go, which is what turned one blind sweep
+ * into a from-scratch investigation.
+ */
+export const BLIND_LOG_NOTE = ' — both gate outputs are in the run log';
+
 /** The last `limit` lines of `text`, trailing blank lines dropped. Pure. */
 export function tailLines(text: string, limit = FAILURE_TAIL_LINES): string {
   const lines = text.replace(/\n+$/, '').split('\n');
@@ -303,7 +311,7 @@ export const SWEEP_LOG_DIR = join(
 );
 
 export interface SweepRunLog {
-  /** Where the failures WOULD be written — printed at the top of every run. */
+  /** Where the evidence WOULD be written — printed at the top of every run. */
   readonly path: string;
   /** Has anything actually been written? (An empty run writes no file.) */
   wrote: () => boolean;
@@ -318,7 +326,15 @@ export interface SweepRunLog {
 
 /**
  * Lazily-created: the path is decided (and printed) up front, but nothing is
- * written until something fails, so a clean run leaves no litter behind.
+ * written until there is something to record, so a clean run leaves no litter
+ * behind.
+ *
+ * IT IS A RUN LOG, NOT A FAILURE LOG (home-base-qe6b.4 D2). It was failure-only
+ * until a BLIND gate — red before the payload and red after — turned out to
+ * discard the one thing that would have said WHICH check was already failing,
+ * and a whole investigation had to reproduce it by hand. A blind gate records
+ * both of its outputs here and the repo still proceeds; only a `fail` changes a
+ * verdict.
  *
  * A log-write failure is REPORTED and never swallowed — but it also never
  * changes a repo's verdict. Losing the evidence of a failure is bad; turning a
@@ -351,12 +367,12 @@ export function createRunLog(
           path,
           written
             ? body
-            : `justin-sdk sweep — failure log for the run started ${now.toISOString()}\n${body}`,
+            : `justin-sdk sweep — run log (failures and blind gates) for the run started ${now.toISOString()}\n${body}`,
         );
         written = true;
       } catch (error) {
         say(
-          `  ${RED}✗${RESET} could not write the failure log at ${path}: ` +
+          `  ${RED}✗${RESET} could not write the run log at ${path}: ` +
             `${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -2019,7 +2035,10 @@ export function measureBaseline(
 interface SweepContext {
   dryRun: boolean;
   payload: SweepPayload;
-  /** Where a red step's evidence goes now that the worktree does not survive. */
+  /**
+   * Where a red step's — and, since D2, a blind gate's — evidence goes now that
+   * the worktree does not survive.
+   */
   log: SweepRunLog;
 }
 
@@ -2283,8 +2302,18 @@ async function sweepOneRepo(
     );
   }
   if (doctorVerdict.kind === 'blind') {
-    blindNotes.push(doctorVerdict.note);
-    say(`  ${YELLOW}⚠${RESET} ${doctorVerdict.note}`);
+    // D2 (home-base-qe6b.4): a blind gate is the case where the operator most
+    // needs the output and used to get none of it — the worktree is gone by the
+    // summary, and "already red" says nothing about WHICH check was red. Both
+    // runs go to the run log; the verdict is unchanged.
+    blindNotes.push(`${doctorVerdict.note}${BLIND_LOG_NOTE}`);
+    context.log.record({
+      detail: doctorVerdict.note,
+      output: `--- BASELINE (doctor, before the payload) ---\n${doctorBaseline.output}\n--- AFTER (doctor --fix) ---\n${doctor.output}`,
+      repo: name,
+      step: 'doctor-blind',
+    });
+    say(`  ${YELLOW}⚠${RESET} ${doctorVerdict.note}${BLIND_LOG_NOTE}`);
   } else if (doctorVerdict.note !== '') {
     say(`  ${DIM}${doctorVerdict.note}${RESET}`);
   }
@@ -2317,8 +2346,17 @@ async function sweepOneRepo(
     );
   }
   if (signalVerdict.kind === 'blind') {
-    blindNotes.push(signalVerdict.note);
-    say(`  ${YELLOW}⚠${RESET} ${signalVerdict.note}`);
+    // D2 — see the doctor branch above. This is the one that cost the
+    // investigation: both RN repos were merged with `signal` blind and nothing
+    // recorded which of their checks was already failing.
+    blindNotes.push(`${signalVerdict.note}${BLIND_LOG_NOTE}`);
+    context.log.record({
+      detail: signalVerdict.note,
+      output: `--- BASELINE (signal, before the payload) ---\n${signalBaseline.output}\n--- AFTER ---\n${signal.output}`,
+      repo: name,
+      step: 'signal-blind',
+    });
+    say(`  ${YELLOW}⚠${RESET} ${signalVerdict.note}${BLIND_LOG_NOTE}`);
   } else if (signalVerdict.note !== '') {
     say(`  ${DIM}${signalVerdict.note}${RESET}`);
   }
@@ -2478,7 +2516,7 @@ export interface SweepOptions {
    * touched. Default (absent) = the historical pin-bump-and-re-apply-all sweep.
    */
   component?: string;
-  /** Where the run's failure log goes. Default SWEEP_LOG_DIR. */
+  /** Where the run log goes. Default SWEEP_LOG_DIR. */
   logDir?: string;
 }
 
@@ -2513,7 +2551,7 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
   // and the operator has to know where it is before the run starts scrolling.
   const log = createRunLog(options.logDir ?? SWEEP_LOG_DIR);
   say(
-    `${DIM}failure log (written only if something fails): ${log.path}${RESET}`,
+    `${DIM}run log (written only if a step fails or a gate is blind): ${log.path}${RESET}`,
   );
 
   const results: RepoResult[] = [];
@@ -2567,8 +2605,11 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
       `\n${YELLOW}${failed.length} failed (worktree removed; evidence in the run log), ${pending.length} merge-pending (worktree kept — it holds the commit). Fix the CAUSE in the SDK (ratchet contract), then re-sweep.${RESET}`,
     );
   }
+  // Unconditional on the outcome, and deliberately so since D2: an all-green
+  // run whose gates were BLIND writes records too, and the path is the only
+  // pointer to them once every worktree has been removed.
   if (log.wrote()) {
-    say(`${YELLOW}failure log: ${log.path}${RESET}`);
+    say(`${YELLOW}run log: ${log.path}${RESET}`);
   }
   // ckc4 F4. Two things that both used to be "skipped" and both used to exit 0:
   // a repo this payload does not apply to (expected), and a repo this run COULD

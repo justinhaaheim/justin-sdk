@@ -137,9 +137,23 @@ export function makeEnvHydrationChecks(projectRoot: string): CheckNode[] {
           // intact — is simply false, and a reader who catches it being false
           // once will discount it in the blocking case where it matters.
           const blocking = hasBlockingProblem(status);
+          // The advisory sentence is SPLIT AGAIN for `generated-input`
+          // (home-base-qe6b.4). Every other advisory kind genuinely cannot
+          // fabricate failures; a missing tsconfig-named generated input can —
+          // measured on nature-sounds, where an absent `expo-env.d.ts` degraded
+          // typescript-eslint's projectService program to `any` and produced 16
+          // phantom errors while tsc stayed green. Printing "still trustworthy"
+          // there would be the one thing this feature cannot afford: a claim
+          // that is demonstrably false, in the same sentence slot as the
+          // PHANTOM claim that has to be believed.
+          const generatedInput = status.problems.some(
+            (problem) => problem.kind === 'generated-input',
+          );
           const consequence = blocking
             ? 'Any lint/type failures here are PHANTOM (they blame untouched files).'
-            : 'Lint/type results here are still trustworthy — this cannot fabricate failures — but a build, or any command needing the pinned toolchain, may fail.';
+            : generatedInput
+              ? 'The checks still RUN, but type-aware lint results here may be wrong: a missing generated input can silently degrade the type program while tsc stays green.'
+              : 'Lint/type results here are still trustworthy — this cannot fabricate failures — but a build, or any command needing the pinned toolchain, may fail.';
           return {
             fix: `Run: ${status.fixCommand}`,
             message:

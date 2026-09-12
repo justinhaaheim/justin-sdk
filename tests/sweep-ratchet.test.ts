@@ -632,7 +632,7 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
     expect(out).toContain('hydration failed twice');
     expectNoSweepRemains(repo);
 
-    const logPath = out.match(/failure log: (\S+\.log)/)?.[1];
+    const logPath = out.match(/run log: (\S+\.log)/)?.[1];
     expect(logPath).toBeDefined();
     const written = readFileSync(logPath as string, 'utf-8');
     expect(written).toContain('broken-hydration · step: hydrate');
@@ -656,7 +656,7 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
       'justin-sdk baseline',
     );
 
-    const logPath = out.match(/failure log: (\S+\.log)/)?.[1];
+    const logPath = out.match(/run log: (\S+\.log)/)?.[1];
     const written = readFileSync(logPath as string, 'utf-8');
     expect(written).toContain('payload-breaks-it · step: signal');
     expect(written).toContain('--- BASELINE (signal, before the payload) ---');
@@ -686,14 +686,21 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
     expect(out).toContain('commit failed');
     expectNoSweepRemains(repo);
 
-    const logPath = out.match(/failure log: (\S+\.log)/)?.[1];
+    const logPath = out.match(/run log: (\S+\.log)/)?.[1];
     const written = readFileSync(logPath as string, 'utf-8');
     expect(written).toContain('uncommittable · step: commit');
     // The raw command output, not just our own summary of it.
     expect(written).toContain('empty ident name');
   });
 
-  test('a green run writes no log file at all', async () => {
+  /**
+   * The NEGATIVE CONTROL for D2's blind record (home-base-qe6b.4): this repo's
+   * gates are green→green, i.e. `proceed`, and nothing at all may be written.
+   * Its twin — the blind repo that DOES write — is
+   * "a BLIND gate records both outputs…" below; the two differ only in whether
+   * the fixture's signal is red.
+   */
+  test('a green run writes no log file at all (and no blind record)', async () => {
     const sb = track(createSandbox());
     const repo = e2eRepo(sb, 'green');
     const logDir = join(sb.path, 'logs');
@@ -703,7 +710,9 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
     );
 
     expect(value).toBe(0);
-    expect(out).not.toContain('\nfailure log:');
+    expect(out).not.toContain('\nrun log:');
+    expect(out).not.toContain('signal-blind');
+    expect(out).not.toContain('both gate outputs are in the run log');
     expect(existsSync(logDir)).toBe(false);
     expect(out).not.toContain('registry.npmjs.org');
     expectNoSweepRemains(repo);
@@ -791,6 +800,66 @@ describe('the ratchet gate, end to end (F3)', () => {
       );
     expect(summaryLine).toBeDefined();
     expect(summaryLine).toContain('PRE-EXISTING');
+  });
+
+  /**
+   * home-base-qe6b.4 D2 — THE bead this test exists for. Both RN repos were
+   * swept, merged and pushed with `signal` blind, and the run log kept nothing:
+   * "already red before the update (exit 1, still 1 after)" names no check, and
+   * the worktree that could have been inspected is removed before the summary
+   * prints. Diagnosing it needed a whole probe investigation.
+   *
+   * The fixture is `always-red` in BOTH gates, so both blind branches run, and
+   * the assertions are on the log CONTENTS — the baseline and after outputs the
+   * old code discarded — rather than on the note alone.
+   */
+  test('a BLIND gate records both outputs in the run log, and says so on screen', async () => {
+    const sb = track(createSandbox());
+    const repo = e2eRepo(sb, 'blind-gate-logged', {
+      doctorExit: 1,
+      doctorFixExit: 1,
+      signal: 'always-red',
+    });
+
+    const {out, value} = await captureLog(() =>
+      runSweep({
+        component: 'gitignore',
+        logDir: join(sb.path, 'logs'),
+        repos: [repo],
+      }),
+    );
+
+    // Unchanged verdict: blind still proceeds, merges and exits 0. D2 adds
+    // evidence, it does not move the ratchet.
+    expect(value).toBe(0);
+
+    // The pointer is printed at the END of the run even though nothing failed —
+    // the only way anyone finds the records on a green-exit sweep.
+    const logPath = out.match(/run log: (\S+\.log)/)?.[1];
+    expect(logPath).toBeDefined();
+
+    const written = readFileSync(logPath as string, 'utf-8');
+    expect(written).toContain('blind-gate-logged · step: signal-blind');
+    expect(written).toContain('blind-gate-logged · step: doctor-blind');
+    // THE load-bearing assertions: the gate OUTPUT survives, both halves of it,
+    // labelled — this is what a future investigation reads instead of
+    // reproducing the repo by hand.
+    expect(written).toContain('--- BASELINE (signal, before the payload) ---');
+    expect(written).toContain('--- AFTER ---');
+    expect(written).toContain('fixture signal: pre-existing red');
+    expect(written).toContain('--- BASELINE (doctor, before the payload) ---');
+    expect(written).toContain('--- AFTER (doctor --fix) ---');
+    expect(written).toContain('fixture justin-sdk doctor');
+
+    // …and the summary line SENDS the reader there, rather than leaving the
+    // blind note as a dead end.
+    const summaryLine = out
+      .split('\n')
+      .find(
+        (line) =>
+          line.includes('blind-gate-logged') && line.includes('merged into'),
+      );
+    expect(summaryLine).toContain('both gate outputs are in the run log');
   });
 
   test('a doctor that goes green → red fails the repo', async () => {
