@@ -394,6 +394,10 @@ describe('AC2: stopAndVerify (D6)', () => {
         spec.onStop?.();
         return {detail: 'stopped', ok: true};
       },
+      // These tests assert on the REPORT; that the same notes also stream out
+      // through this writer as they are made is asserted in
+      // tests/justin-loop-liveness.test.ts.
+      write: () => {},
     };
     const report = await stopAndVerify('/repo', 'sess-1', 0, deps);
     return {polls, report, signals, stops};
@@ -1149,5 +1153,42 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
     // …and the ledger records "not measured", not `false`.
     expect(ledger).toHaveLength(1);
     expect(ledger[0]?.progressed).toBeNull();
+  });
+
+  test('the circuit breaker SAYS when the streak was unreadable, not just "no commit"', async () => {
+    // An unreadable HEAD counts toward the no-progress streak on purpose —
+    // unknown must never reset a breaker. But the abort reason is what Justin
+    // reads, and "2 sessions with no commit" is a claim about two measurements
+    // that were never taken. The reason names the doubt instead.
+    const r = await runLoop({
+      gitHeadFails: true,
+      opts: {label: 'the-arc', maxSessions: 3, noProgressAbort: 2},
+      scans: [
+        [],
+        [beadFrom('hoff-1', {from: 'the-arc-1'})],
+        [beadFrom('hoff-2', {from: 'the-arc-2'})],
+      ],
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stdout).toContain(
+      '2 sessions with no commit or an unreadable HEAD — circuit breaker',
+    );
+  });
+
+  test('a streak with no unreadable read keeps the plain wording', async () => {
+    // The other half: when every HEAD WAS read and simply did not move, the
+    // reason must not hedge. `gitHead` here returns one fixed sha, so the
+    // comparison is a real measurement that says "nothing was committed".
+    const r = await runLoop({
+      gitHeadStuck: true,
+      opts: {label: 'the-arc', maxSessions: 3, noProgressAbort: 2},
+      scans: [
+        [],
+        [beadFrom('hoff-1', {from: 'the-arc-1'})],
+        [beadFrom('hoff-2', {from: 'the-arc-2'})],
+      ],
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stdout).toContain('2 sessions with no commit — circuit breaker');
   });
 });

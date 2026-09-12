@@ -735,6 +735,15 @@ export interface StopDeps {
     cwd: string,
     id: string,
   ) => Promise<{ok: boolean; detail: string}>;
+  /**
+   * Where each note goes AS IT HAPPENS (home-base-a1go). The ladder used to
+   * return its notes and let the caller print them afterwards, which is fine
+   * when it takes 5 seconds and a disaster when it does not: every `claude`
+   * call is now bounded at 60s, so against a wedged daemon the four rungs ×
+   * STOP_VERIFY_POLLS polls are half an hour of total silence followed by a
+   * wall of text. The array survives for the ledger; this is the live channel.
+   */
+  write: (text: string) => void;
 }
 
 /** Polls per verification attempt. Measured: the row goes within 5s. */
@@ -742,12 +751,15 @@ export const STOP_VERIFY_POLLS = 6;
 /** Consecutive absent observations required before we believe it (D6). */
 export const STOP_CONSECUTIVE_ABSENT = 2;
 
+/** Records a ladder note in the ledger array AND prints it immediately. */
+type Note = (text: string) => void;
+
 async function confirmGone(
   cwd: string,
   id: string,
   pollMs: number,
   deps: StopDeps,
-  notes: string[],
+  note: Note,
 ): Promise<boolean> {
   let consecutive = 0;
   for (let i = 0; i < STOP_VERIFY_POLLS; i++) {
@@ -758,7 +770,7 @@ async function confirmGone(
       // whether the session is gone, so it resets the streak rather than
       // counting toward it — otherwise two timed-out `claude agents` calls
       // would read as proof and license a spawn.
-      notes.push(
+      note(
         `could not read \`claude agents\` (${look.reason}) — NOT counted as absent`,
       );
       consecutive = 0;
@@ -799,18 +811,24 @@ export async function stopAndVerify(
   deps: StopDeps,
 ): Promise<StopReport> {
   const notes: string[] = [];
+  // ONE place notes are made, so the ledger copy and the printed copy can never
+  // drift apart and no note can be printed twice (the caller used to re-print
+  // the whole array afterwards).
+  const note: Note = (text) => {
+    notes.push(text);
+    deps.write(`   ${DIM}stop${RESET} ${text}\n`);
+  };
+
   const before = await deps.findAgent(cwd, id);
   if (before.ok && before.row == null) {
-    return {
-      notes: [`${id} was already absent from \`claude agents\``],
-      outcome: 'already-gone',
-    };
+    note(`${id} was already absent from \`claude agents\``);
+    return {notes, outcome: 'already-gone'};
   }
   if (!before.ok) {
     // We cannot even tell whether there is anything to stop. Stopping is
     // idempotent and harmless, so the ladder still runs — but nothing here may
     // shortcut to `already-gone`, which is the answer that licenses a spawn.
-    notes.push(
+    note(
       `could not read \`claude agents\` before stopping (${before.reason}) — proceeding with the stop, and NOT assuming it is gone`,
     );
   }
@@ -819,7 +837,7 @@ export async function stopAndVerify(
     {
       act: async () => {
         const r = await deps.stopSession(cwd, id);
-        notes.push(`claude stop ${id}: ${r.detail}`);
+        note(`claude stop ${id}: ${r.detail}`);
         return r.ok;
       },
       label: 'claude stop',
@@ -827,7 +845,7 @@ export async function stopAndVerify(
     {
       act: async () => {
         const r = await deps.stopSession(cwd, id);
-        notes.push(`claude stop ${id} (retry): ${r.detail}`);
+        note(`claude stop ${id} (retry): ${r.detail}`);
         return r.ok;
       },
       label: 'claude stop retry',
@@ -837,11 +855,11 @@ export async function stopAndVerify(
         const look = await deps.findAgent(cwd, id);
         const row = look.ok ? look.row : null;
         if (row?.pid == null) {
-          notes.push('SIGTERM skipped — no pid to signal');
+          note('SIGTERM skipped — no pid to signal');
           return null;
         }
         const sent = deps.signalPid(row.pid, 'SIGTERM');
-        notes.push(
+        note(
           `SIGTERM ${row.pid}: ${sent ? 'sent' : 'process already gone'} (note: SIGTERM alone is measured to RESPAWN a background session)`,
         );
         return sent;
@@ -853,13 +871,11 @@ export async function stopAndVerify(
         const look = await deps.findAgent(cwd, id);
         const row = look.ok ? look.row : null;
         if (row?.pid == null) {
-          notes.push('SIGKILL skipped — no pid to signal');
+          note('SIGKILL skipped — no pid to signal');
           return null;
         }
         const sent = deps.signalPid(row.pid, 'SIGKILL');
-        notes.push(
-          `SIGKILL ${row.pid}: ${sent ? 'sent' : 'process already gone'}`,
-        );
+        note(`SIGKILL ${row.pid}: ${sent ? 'sent' : 'process already gone'}`);
         return sent;
       },
       label: 'SIGKILL',
@@ -868,31 +884,31 @@ export async function stopAndVerify(
 
   for (const attempt of attempts) {
     await attempt.act();
-    if (await confirmGone(cwd, id, pollMs, deps, notes)) {
-      notes.push(
+    if (await confirmGone(cwd, id, pollMs, deps, note)) {
+      note(
         `verified gone: ${id} absent from \`claude agents\` on ${STOP_CONSECUTIVE_ABSENT} consecutive polls after ${attempt.label}`,
       );
       return {notes, outcome: 'stopped'};
     }
-    notes.push(`${attempt.label} did NOT clear the row — escalating`);
+    note(`${attempt.label} did NOT clear the row — escalating`);
   }
 
   const after = await deps.findAgent(cwd, id);
   if (!after.ok) {
     // The honest answer is that we do not know, and "do not know" must never be
     // spendable as "gone" (critical rule 6). Refuses the spawn like a failure.
-    notes.push(
+    note(
       `UNVERIFIED: \`claude agents\` could not be read on the final check (${after.reason}), so whether ${id} is gone is UNKNOWN`,
     );
     return {notes, outcome: 'unverified'};
   }
   if (after.row == null) {
     // Vanished between the last poll and now. Absence is absence.
-    notes.push(`${id} is absent on the final check`);
+    note(`${id} is absent on the final check`);
     return {notes, outcome: 'stopped'};
   }
   const outcome: StopOutcome = after.row.pid == null ? 'no-pid' : 'kill-failed';
-  notes.push(
+  note(
     `${id} is STILL PRESENT (state=${after.row.state ?? 'unknown'}, pid=${after.row.pid ?? 'none'}) — NOT verified gone`,
   );
   return {notes, outcome};
@@ -1782,6 +1798,19 @@ export type SessionEnding =
 /** Consecutive unreadable `claude agents` polls before a session is abandoned. */
 export const AGENTS_FAILURE_LIMIT = 5;
 
+/**
+ * How much session time passes between liveness lines while watching (D-a1go).
+ *
+ * A working session is silent by design — it prints nothing until it ends — so
+ * the runner's own stdout used to go quiet for the entire life of a session.
+ * That is indistinguishable from the wedge this bead is about (717s of nothing
+ * on 2026-09-10), and "is it working or is it stuck?" is the one question the
+ * output has to answer. One dim line a minute is cheap enough to leave on
+ * always and carries what the answer needs: how long, how many polls, what the
+ * row said, and whether the listing could be read at all.
+ */
+export const LIVENESS_INTERVAL_MS = 60_000;
+
 export interface SessionRun {
   ending: SessionEnding;
   /** The `claude agents` id. null only when dispatch failed. */
@@ -1856,6 +1885,38 @@ export async function runSession(
 }
 
 /**
+ * The one dim line a liveness tick prints.
+ *
+ * Every part of it is a FACT ABOUT A MEASUREMENT, never a substitute for one
+ * (critical rule 6): a listing that has never been read successfully says so
+ * rather than borrowing "no row", which means read-and-absent; and an
+ * unreadable listing names its reason and its streak next to whatever row we
+ * last actually saw, so a stale row can never read as a current one.
+ */
+function livenessLine(state: {
+  elapsedMs: number;
+  polls: number;
+  everRead: boolean;
+  lastSeen: AgentRow | null;
+  agentsFailures: number;
+  lastUnreadable: string | null;
+}): string {
+  const minutes = Math.round(state.elapsedMs / 60_000);
+  const what = !state.everRead
+    ? 'no listing read yet'
+    : state.lastSeen == null
+      ? 'no row'
+      : state.lastSeen.state === 'blocked'
+        ? `blocked: ${state.lastSeen.waitingFor ?? 'unknown'}`
+        : `${state.lastSeen.state ?? 'unknown'}/${state.lastSeen.status ?? 'unknown'}`;
+  const agents =
+    state.agentsFailures === 0
+      ? 'agents ok'
+      : `agents unreadable ×${state.agentsFailures}: ${state.lastUnreadable ?? 'unknown'}`;
+  return `   ${DIM}watching ${minutes}m · ${state.polls} polls · ${what} · ${agents}${RESET}\n`;
+}
+
+/**
  * Poll one already-dispatched background session until it is over.
  *
  * Shared by the first dispatch and by every `--resume` demand (D10), so a
@@ -1888,14 +1949,48 @@ async function watchSession(
    */
   let fullSessionId: string | null = null;
 
+  // Liveness bookkeeping. `lastSeen` is the last row we ACTUALLY read, kept
+  // apart from `everRead` so "never managed to look" can never print as "there
+  // is no row".
+  let polls = 0;
+  let lastLiveness = started;
+  let everRead = false;
+  let lastSeen: AgentRow | null = null;
+  let lastUnreadable: string | null = null;
+
   for (;;) {
     await deps.sleep(opts.pollSec * 1000);
     const look = await deps.findAgent(cwd, id);
+    polls++;
+    if (look.ok) {
+      everRead = true;
+      lastSeen = look.row;
+      // A successful read ends the streak (the failure limit below counts
+      // CONSECUTIVE failures), and with it the "unreadable" half of the line.
+      agentsFailures = 0;
+    } else {
+      agentsFailures++;
+      lastUnreadable = look.reason;
+    }
+
+    const nowMs = deps.now();
+    if (nowMs - lastLiveness >= LIVENESS_INTERVAL_MS) {
+      lastLiveness = nowMs;
+      deps.write(
+        livenessLine({
+          agentsFailures,
+          elapsedMs: nowMs - started,
+          everRead,
+          lastSeen,
+          lastUnreadable,
+          polls,
+        }),
+      );
+    }
 
     if (!look.ok) {
       // A listing we could not read is NOT an ending and NOT a continuation —
       // it is an unknown. Keep waiting, but boundedly, and then say so.
-      agentsFailures++;
       if (agentsFailures >= AGENTS_FAILURE_LIMIT) {
         return {
           durationMs: deps.now() - started,
@@ -1910,7 +2005,6 @@ async function watchSession(
       }
       continue;
     }
-    agentsFailures = 0;
     const row = look.row;
     if (row?.sessionId != null) fullSessionId = row.sessionId;
 
@@ -2288,10 +2382,10 @@ export async function demandHandoff(
     // Stop and verify the DEMANDED turn too. A woken session lingers in
     // `claude agents` exactly like any other, and the successor gate downstream
     // reads this report, not the one from before the demand.
+    // The ladder prints its own notes as it climbs (StopDeps.write), so there
+    // is nothing to print here — a second pass over `stop.notes` would double
+    // every line.
     stop = await stopAndVerify(ctx.cwd, id, ctx.opts.stopPollSec * 1000, deps);
-    for (const note of stop.notes) {
-      deps.write(`   ${DIM}stop${RESET} ${note}\n`);
-    }
 
     if (run.ending.kind === 'agents-unreadable') {
       return {
@@ -2459,6 +2553,12 @@ export async function runJustinLoop(
     reason: `reached --max-sessions (${opts.maxSessions})`,
   };
   let noProgressStreak = 0;
+  /**
+   * Did any session in the CURRENT streak have an unreadable HEAD? Only so the
+   * abort reason can say so: "3 sessions with no commit" is a measurement, and
+   * a session whose HEAD could not be read was never measured (critical rule 6).
+   */
+  let noProgressHadUnreadable = false;
   let bootPlan: BootPlan = startBoot.plan;
   let sessionsRun = 0;
   /**
@@ -2595,15 +2695,14 @@ export async function runJustinLoop(
     // The stop REMOVES the row, and with it the only place the full session id
     // is published — which is why `runSession` captured it while polling. A
     // demand needs it (D10) and the short id would fork a copy.
+    // Notes stream out of the ladder itself as each rung is tried; printing
+    // `stop.notes` here as well would print every one of them twice.
     let stop = await stopAndVerify(
       cwd,
       sessionId,
       opts.stopPollSec * 1000,
       deps,
     );
-    for (const note of stop.notes) {
-      deps.write(`   ${DIM}stop${RESET} ${note}\n`);
-    }
 
     if (run.ending.kind === 'agents-unreadable') {
       // We stopped watching, so we do not know what this session is doing. The
@@ -2785,11 +2884,17 @@ export async function runJustinLoop(
     // commit. The two directions are not symmetric: treating unknown as progress
     // resets the breaker and licenses looping forever on quota, while treating
     // it as no-progress at worst stops a run early and says why.
-    noProgressStreak = progressed === true ? 0 : noProgressStreak + 1;
+    if (progressed === true) {
+      noProgressStreak = 0;
+      noProgressHadUnreadable = false;
+    } else {
+      noProgressStreak++;
+      if (progressed == null) noProgressHadUnreadable = true;
+    }
     if (noProgressStreak >= opts.noProgressAbort) {
       end = {
         exitCode: 2,
-        reason: `${noProgressStreak} sessions with no commit — circuit breaker`,
+        reason: `${noProgressStreak} sessions with no commit${noProgressHadUnreadable ? ' or an unreadable HEAD' : ''} — circuit breaker`,
       };
       break;
     }

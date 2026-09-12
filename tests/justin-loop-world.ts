@@ -142,6 +142,15 @@ export async function runLoop(spec: {
   agentsReadable?: (poll: number) => boolean;
   /** Make `br create` fail, so the failure bead cannot be filed. */
   brCreateFails?: boolean;
+  /**
+   * Make every HEAD read fail, so `progressed` is null — NOT false
+   * (home-base-a1go). The normal world hands back a different sha per dispatch,
+   * i.e. every session commits, so this is the only way to reach the paths that
+   * treat "we could not measure" differently from "nothing happened".
+   */
+  gitHeadFails?: boolean;
+  /** Hand back one fixed sha, so every session is MEASURED to have committed nothing. */
+  gitHeadStuck?: boolean;
 }): Promise<LoopResult> {
   const rows = new Map<string, AgentRow>();
   const scriptOf = new Map<string, SessionScript>();
@@ -280,7 +289,18 @@ export async function runLoop(spec: {
       }
       return {ok: true, row};
     },
-    gitHead: async () => ({ok: true, sha: `head-${dispatched}`}),
+    gitHead: async () =>
+      spec.gitHeadFails === true
+        ? {
+            ok: false,
+            reason:
+              'git rev-parse HEAD did not finish within 10000ms and was SIGKILLed',
+          }
+        : {
+            ok: true,
+            sha:
+              spec.gitHeadStuck === true ? 'head-fixed' : `head-${dispatched}`,
+          },
     notifyBlocked: () => {},
     now: () => clock,
     preflight: async () => [],
