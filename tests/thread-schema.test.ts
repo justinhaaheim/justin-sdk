@@ -154,9 +154,43 @@ describe('thread report schema', () => {
     expect(validateThreadReport(payload).status).toBe('invalid');
   });
 
-  test('accepts unknown extra keys (loose, like sdk-config)', () => {
+  // STRICT, not loose (home-base-p1uj.2, reversing dispatch 2's z.looseObject).
+  // The whole point is that the key is NAMED: a report is written and read by
+  // the same binary seconds apart, so an unknown key is never a newer SDK's
+  // field — it is a typo, and a dropped typo is a failed field reported as an
+  // absent one.
+  test('REFUSES an unknown top-level key, and names it', () => {
     const payload = examplePayload();
-    payload.somethingANewerSdkAdded = 42;
-    expect(validateThreadReport(payload).status).toBe('ok');
+    payload.somethingIMistyped = 42;
+    const result = validateThreadReport(payload);
+    expect(result.status).toBe('invalid');
+    if (result.status !== 'invalid') throw new Error('unreachable');
+    expect(result.issues.join('\n')).toContain('somethingIMistyped');
+  });
+
+  test('REFUSES a typo that would otherwise silently drop a whole field', () => {
+    const payload = examplePayload();
+    payload.progres = payload.progress;
+    delete payload.progress;
+    const result = validateThreadReport(payload);
+    expect(result.status).toBe('invalid');
+    if (result.status !== 'invalid') throw new Error('unreachable');
+    const text = result.issues.join('\n');
+    // Asserting on the UNRECOGNIZED-KEY issue specifically, not just on the
+    // substring "progres" — which "progress" trivially contains, so a loose
+    // schema (where only the missing-field issue is raised) would pass it. The
+    // negative control caught exactly that, 2026-09-12.
+    expect(text).toContain('Unrecognized key: "progres"');
+    expect(text).toContain('progress');
+  });
+
+  test('REFUSES an unknown key nested inside an ask', () => {
+    const payload = examplePayload();
+    const asks = payload.asks as Record<string, unknown>[];
+    asks[0]!.blockign = true;
+    const result = validateThreadReport(payload);
+    expect(result.status).toBe('invalid');
+    if (result.status !== 'invalid') throw new Error('unreachable');
+    expect(result.issues.join('\n')).toContain('blockign');
   });
 });

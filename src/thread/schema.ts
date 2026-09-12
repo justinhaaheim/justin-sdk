@@ -8,12 +8,21 @@
  * Everything in here is therefore something only Claude can know — nothing that
  * can be measured belongs in this file.
  *
- * LOOSE, like sdk-config.ts (`z.looseObject` throughout): an unknown key is
- * accepted rather than refused. That is the SDK's house style for validated
- * JSON, and it keeps a payload written against a newer schemaVersion from being
- * rejected wholesale by an older CLI.
+ * STRICT (`z.strictObject` throughout): an unknown key is a validation error
+ * that NAMES the key. This deliberately departs from sdk-config.ts, which is
+ * loose, and the difference is lifetime. A config FILE is long-lived and is read
+ * by many SDK versions, so looseness there buys real forward compatibility: an
+ * older CLI must not reject a file a newer one wrote. A report payload has no
+ * such lifetime — it is written and read by the SAME binary, seconds apart, by a
+ * Claude that just had the skeleton printed at it. The only thing looseness
+ * could buy here is a silently dropped typo: `progres: {...}` would vanish, the
+ * report would render without it, and nothing would ever say so. That is rule 6
+ * arriving through the validation layer — a mis-keyed field is a FAILED field,
+ * not an absent one. Changed 2026-09-12 (home-base-p1uj.2) after dispatch 2
+ * raised it as ask jl-e9f4.3; `schemaVersion` is the forward-compatibility
+ * mechanism that looseness was standing in for.
  *
- * THE ONE THING IT IS STRICT ABOUT is `beadsTouched[].description`. A bare bead
+ * ANOTHER THING IT IS STRICT ABOUT is `beadsTouched[].description`. A bare bead
  * id is the single most common way a report goes stale on arrival: sampling ten
  * real reports on 2026-09-12 found ids like `z36o` and `ueue` dropped with no
  * gloss, and Justin cannot look them up. A missing description is a validation
@@ -71,7 +80,7 @@ export type AskDisposition = (typeof ASK_DISPOSITIONS)[number];
 const nonEmpty = (what: string) =>
   z.string().min(1, `${what} must not be empty`);
 
-const askOptionSchema = z.looseObject({
+const askOptionSchema = z.strictObject({
   recommended: z
     .boolean()
     .describe('Exactly one option should be marked recommended.'),
@@ -80,7 +89,7 @@ const askOptionSchema = z.looseObject({
   ),
 });
 
-const askSchema = z.looseObject({
+const askSchema = z.strictObject({
   blocking: z
     .boolean()
     .describe('Blocking means the work genuinely cannot proceed without it.'),
@@ -99,7 +108,7 @@ const askSchema = z.looseObject({
   text: nonEmpty('ask.text').describe('The question or action, in one line.'),
 });
 
-const priorAskSchema = z.looseObject({
+const priorAskSchema = z.strictObject({
   detail: nonEmpty('priorAsks.detail').describe(
     'answered → quote the answer. decided → say which default you took. irrelevant → say why. carried → say why it is still open.',
   ),
@@ -107,17 +116,17 @@ const priorAskSchema = z.looseObject({
   id: nonEmpty('priorAsks.id').describe('The ask bead id, e.g. jl-x7q.2.'),
 });
 
-const beadTouchedSchema = z.looseObject({
+const beadTouchedSchema = z.strictObject({
   description: nonEmpty('beadsTouched.description').describe(
     'REQUIRED. A bare id is unreadable: say what the bead is, e.g. "the thread-state fact collector".',
   ),
   id: nonEmpty('beadsTouched.id'),
 });
 
-export const threadReportSchema = z.looseObject({
+export const threadReportSchema = z.strictObject({
   answers: z
     .array(
-      z.looseObject({
+      z.strictObject({
         answer: nonEmpty('answers.answer'),
         question: nonEmpty('answers.question').describe(
           'RESTATED VERBATIM. Justin cannot remember what he asked.',
@@ -151,7 +160,7 @@ export const threadReportSchema = z.looseObject({
   ),
   learned: z
     .array(
-      z.looseObject({
+      z.strictObject({
         disposition: nonEmpty('learned.disposition').describe(
           'Where the learning was written, or the bead id that now carries it.',
         ),
@@ -164,7 +173,7 @@ export const threadReportSchema = z.looseObject({
     .describe(
       'EVERY open ask from the last report, dispositioned. The report is refused without them (D4).',
     ),
-  progress: z.looseObject({
+  progress: z.strictObject({
     percent: z
       .number()
       .min(0)
@@ -177,14 +186,14 @@ export const threadReportSchema = z.looseObject({
   schemaVersion: z
     .literal(THREAD_SCHEMA_VERSION)
     .describe(`Always ${THREAD_SCHEMA_VERSION}.`),
-  stopReason: z.looseObject({
+  stopReason: z.strictObject({
     detail: nonEmpty('stopReason.detail'),
     kind: z.literal([...STOP_REASON_KINDS]),
   }),
   title: nonEmpty('title').describe(
     'SALIENT and recognizable — the hook Justin’s memory latches onto, not a category.',
   ),
-  workProduct: z.looseObject({
+  workProduct: z.strictObject({
     kind: z.literal([...WORK_PRODUCT_KINDS]),
     merged: z.literal([...MERGE_STATES]),
     pr: z.string().nullable().describe('PR URL or number, or null.'),
