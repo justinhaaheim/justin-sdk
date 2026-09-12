@@ -30,15 +30,23 @@ import {join} from 'path';
 
 import {measureUsageNow} from '../src/thread/usage-now';
 import {
+  contextTokensFromRecordUsage,
   readTranscriptFacts,
   runUsageCheck,
   USAGE_CHECK_CONFIG_KEY,
-  usageSpansMultipleTurns,
   WRAP_UP_DIRECTIVE,
 } from '../src/usage-check';
 
-/** The session's real context after the advisor returned: 32 + 5,120 + 169,402. */
-const REAL_CONTEXT = 174_554;
+/**
+ * The session's real context as the advisor record ended, read from that
+ * record's LAST iteration: 2 + 3,059 + 169,402. The next clean record's own
+ * totals come to 174,554, so the two agree to within one turn's growth — which
+ * is the cross-check that the last-iteration reading is the right one.
+ */
+const REAL_CONTEXT = 172_463;
+
+/** The following clean record's totals: 32 + 5,120 + 169,402. */
+const NEXT_CLEAN_CONTEXT = 174_554;
 
 /** The phantom the bug reported: 4 + 16,115 + 325,748. */
 const PHANTOM_CONTEXT = 341_867;
@@ -212,68 +220,92 @@ function runCapturing(input: unknown): Record<string, unknown> | null {
     : (JSON.parse(lines.join('')) as Record<string, unknown>);
 }
 
-describe('usageSpansMultipleTurns: the discriminant', () => {
-  test('the real advisor usage block spans turns', () => {
-    expect(usageSpansMultipleTurns(advisorUsage())).toBe(true);
+describe('contextTokensFromRecordUsage: the selector', () => {
+  test('an advisor record reads its LAST turn, not its double-counted totals', () => {
+    // 2 + 3,059 + 169,402 — the session's context as that record ended.
+    expect(contextTokensFromRecordUsage(advisorUsage())).toBe(REAL_CONTEXT);
+    expect(contextTokensFromRecordUsage(advisorUsage())).not.toBe(
+      PHANTOM_CONTEXT,
+    );
   });
 
-  test('an ordinary single-turn usage block does NOT', () => {
-    expect(usageSpansMultipleTurns(cleanUsage())).toBe(false);
+  test('an ordinary single-turn record reads its totals unchanged', () => {
+    expect(contextTokensFromRecordUsage(cleanUsage())).toBe(NEXT_CLEAN_CONTEXT);
   });
 
   test('a record with no iterations key at all is left alone', () => {
     // Older transcripts carry no `iterations`; they are single-turn records and
     // must keep being measured exactly as before.
     expect(
-      usageSpansMultipleTurns({
+      contextTokensFromRecordUsage({
         cache_creation_input_tokens: 1_000,
         cache_read_input_tokens: 150_000,
         input_tokens: 2,
       }),
-    ).toBe(false);
+    ).toBe(151_002);
   });
 
   test('present-and-zero server tool counters are not a signal', () => {
     // 1,938 of the 2,787 transcripts under ~/.claude/projects carry these keys
     // and every value is zero, so treating their presence as a signal would
-    // skip virtually every record in existence.
-    expect(
-      usageSpansMultipleTurns({
-        input_tokens: 2,
-        iterations: [{type: 'message'}],
-        server_tool_use: {web_fetch_requests: 0, web_search_requests: 0},
-      }),
-    ).toBe(false);
+    // refuse to measure virtually every record in existence.
+    expect(contextTokensFromRecordUsage(cleanUsage())).not.toBeNull();
   });
 
-  test('a non-zero web_search/web_fetch counter is treated as a server-tool turn', () => {
+  test('a non-zero web_search/web_fetch counter refuses to measure', () => {
     // DEFENSIVE AND UNVERIFIED: no transcript anywhere under ~/.claude/projects
-    // has a non-zero counter, so the premise that a web tool inflates the
+    // has a non-zero counter, so the premise that a web tool disturbs the
     // totals the way the advisor does is conjecture, not measurement. Only the
-    // FIELD shape below is real. Kept because a false positive costs one turn
-    // of under-reporting while a false negative is the doubled reading this
-    // whole file exists to prevent.
+    // FIELD shape below is real. It refuses rather than decomposing, because
+    // with no real record we do not know such a record even HAS a breakdown.
     expect(
-      usageSpansMultipleTurns({
+      contextTokensFromRecordUsage({
         input_tokens: 2,
         server_tool_use: {web_fetch_requests: 0, web_search_requests: 1},
       }),
-    ).toBe(true);
+    ).toBeNull();
     expect(
-      usageSpansMultipleTurns({
+      contextTokensFromRecordUsage({
         input_tokens: 2,
         server_tool_use: {web_fetch_requests: 2, web_search_requests: 0},
       }),
-    ).toBe(true);
+    ).toBeNull();
+  });
+
+  test('a last turn with no usable input_tokens falls back to refusing', () => {
+    const usage = advisorUsage();
+    (usage.iterations as Record<string, unknown>[])[2] = {
+      cache_read_input_tokens: 169_402,
+      type: 'message',
+    };
+    expect(contextTokensFromRecordUsage(usage)).toBeNull();
+  });
+
+  test('a record ending on a FOREIGN turn holds no reading of ours', () => {
+    const usage = advisorUsage();
+    // Drop the trailing session turn, leaving the advisor's own turn last.
+    usage.iterations = (usage.iterations as unknown[]).slice(0, 2);
+    expect(contextTokensFromRecordUsage(usage)).toBeNull();
+    // The single-iteration case too, where the totals WOULD BE the foreign turn.
+    expect(
+      contextTokensFromRecordUsage({
+        input_tokens: 172_527,
+        iterations: [{input_tokens: 172_527, type: 'advisor_message'}],
+      }),
+    ).toBeNull();
   });
 
   test('the innocent-looking TAIL of the advisor exchange is still caught', () => {
     // THE TRAP. The last of the seven records carries a bare `tool_use` block
     // and no server-tool block, so a content-block filter would accept it — and
     // since a backwards scan meets it FIRST, the bug would survive untouched.
+    // Its usage is the advisor usage, so it must read 172,463, never 341,867.
     const tail = ADVISOR_CONTENT_SEQUENCE[ADVISOR_CONTENT_SEQUENCE.length - 1];
     expect(tail).toBe('tool_use');
-    expect(usageSpansMultipleTurns(advisorUsage())).toBe(true);
+    expect(contextTokensFromRecordUsage(advisorUsage())).toBe(REAL_CONTEXT);
+    expect(contextTokensFromRecordUsage(advisorUsage())).not.toBe(
+      PHANTOM_CONTEXT,
+    );
   });
 });
 
@@ -301,10 +333,10 @@ describe('the reading itself', () => {
 
     expect(output).not.toBeNull();
     const notice = output?.systemMessage as string;
-    expect(notice).toContain('174,554');
+    expect(notice).toContain('172,463');
     expect(notice).not.toContain('341,867');
     // The bug's real damage: at the phantom 341,867 this crossed wrapUpAt and
-    // told a session sitting at 174k to wind down.
+    // told a session sitting at 172k to wind down.
     expect(notice).not.toContain(WRAP_UP_DIRECTIVE);
     expect(notice).toContain('setpoint=100000');
   });
@@ -317,16 +349,19 @@ describe('the reading itself', () => {
     expect(result.contextTokens).not.toBe(PHANTOM_CONTEXT);
   });
 
-  test('a transcript of NOTHING BUT advisor records measures nothing, not zero', () => {
-    // FAILURE IS NOT EMPTY: with no single-turn record to fall back to, the
-    // answer is "unmeasured", never a fabricated number and never 0.
+  test('a transcript holding NO readable record measures nothing, not zero', () => {
+    // FAILURE IS NOT EMPTY: when every record ends on a foreign turn there is
+    // no context of ours anywhere in the file, and the answer must be
+    // "unmeasured" — never a fabricated number, and never 0.
     const dir = tempDir();
+    const truncated = advisorUsage();
+    truncated.iterations = (truncated.iterations as unknown[]).slice(0, 2);
     const records = ADVISOR_CONTENT_SEQUENCE.map((contentType, index) =>
       assistantRecord({
         contentType,
         id: ADVISOR_ID,
         timestamp: `2026-09-12T08:28:5${index}.000Z`,
-        usage: advisorUsage(),
+        usage: truncated,
       }),
     );
     const path = join(dir, 'transcript.jsonl');
@@ -341,5 +376,27 @@ describe('the reading itself', () => {
     const result = measureUsageNow({transcriptPath: path});
     expect(result.contextTokens).toBeNull();
     expect(result.reason).toContain('no assistant record');
+  });
+
+  test('the clean record is still what a scan finds once past the advisor', () => {
+    // The fallback path still works: a transcript whose tail is the ordinary
+    // record reads that record's own totals, unchanged by any of this.
+    const dir = tempDir();
+    const path = join(dir, 'transcript.jsonl');
+    writeFileSync(
+      path,
+      `${JSON.stringify(
+        assistantRecord({
+          contentType: 'tool_use',
+          id: CLEAN_ID,
+          timestamp: '2026-09-12T08:29:51.520Z',
+          usage: cleanUsage(),
+        }),
+      )}\n`,
+    );
+    expect(
+      readTranscriptFacts({lowestSetpoint: 100_000, transcriptPath: path})
+        .contextTokens,
+    ).toBe(NEXT_CLEAN_CONTEXT);
   });
 });
