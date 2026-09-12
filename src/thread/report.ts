@@ -40,6 +40,7 @@ import {
   finalizeThread,
   type BdContext,
   type BdFailure,
+  type BdIssue,
 } from './bd';
 import {
   buildAskMetadata,
@@ -239,7 +240,7 @@ export async function runThreadReport(
   }
 
   const existingThread = existing.value;
-  let openAskIds: string[] = [];
+  let openAsks: BdIssue[] = [];
   if (existingThread != null) {
     const asks = await listOpenAsks(ctx, existingThread.id);
     if (!asks.ok) {
@@ -253,8 +254,9 @@ export async function runThreadReport(
         report,
       });
     }
-    openAskIds = asks.value.map((ask) => ask.id);
+    openAsks = asks.value;
   }
+  const openAskIds = openAsks.map((ask) => ask.id);
 
   // --- 5. D4 ---------------------------------------------------------------
   const coverage = checkPriorAskCoverage(openAskIds, payload.priorAsks);
@@ -279,8 +281,28 @@ export async function runThreadReport(
   // --- 6. write ------------------------------------------------------------
   const reportCount = readReportCount(existingThread?.metadata) + 1;
   const description = renderThreadDescription({facts, payload});
+
+  // Asks this report leaves open behind it: the `carried` ones. Everything else
+  // in priorAsks is about to be closed, so it is not part of what still waits
+  // for Justin. `blocking` is read from the ask bead's OWN metadata rather than
+  // assumed — an unreadable block is false, which under-reports urgency rather
+  // than inventing it.
+  const carriedIds = new Set(
+    payload.priorAsks
+      .filter((prior) => !CLOSING_DISPOSITIONS.has(prior.disposition))
+      .map((prior) => prior.id),
+  );
+  const carriedOpenAsks = openAsks
+    .filter((ask) => carriedIds.has(ask.id))
+    .map((ask) => ({
+      blocking:
+        (ask.metadata as {blocking?: unknown} | undefined)?.blocking === true,
+      id: ask.id,
+    }));
+
   const provisionalMetadata = buildThreadMetadata({
     askIds: [],
+    carriedOpenAsks,
     facts,
     payload,
     reportCount,
@@ -393,7 +415,13 @@ export async function runThreadReport(
     rendered,
     // The metadata is rebuilt, not reused: the first write could only record
     // `askIds: []`, because the asks did not exist yet.
-    buildThreadMetadata({askIds, facts, payload, reportCount}),
+    buildThreadMetadata({
+      askIds,
+      carriedOpenAsks,
+      facts,
+      payload,
+      reportCount,
+    }),
   );
   if (!notesWritten.ok) {
     return notRecorded({

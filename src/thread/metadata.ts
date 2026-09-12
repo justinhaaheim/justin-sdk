@@ -21,6 +21,15 @@ import type {ThreadReportPayload} from './schema';
 
 export interface ThreadMetadataInput {
   askIds: (string | null)[];
+  /**
+   * Asks from EARLIER reports that are still open after this one — i.e. the
+   * ones dispositioned `carried`. Required, because `openAskCount` is a claim
+   * about the whole thread and not about this report: a report that creates no
+   * asks while carrying a blocking one would otherwise record `openAskCount:
+   * 0`, which the board would read as "nothing is waiting for Justin" (rule 6,
+   * and in the reassuring direction).
+   */
+  carriedOpenAsks: readonly {blocking: boolean; id: string}[];
   facts: ThreadFacts;
   payload: ThreadReportPayload;
   reportCount: number;
@@ -29,13 +38,17 @@ export interface ThreadMetadataInput {
 export function buildThreadMetadata(
   input: ThreadMetadataInput,
 ): Record<string, unknown> {
-  const {askIds, facts, payload, reportCount} = input;
+  const {askIds, carriedOpenAsks, facts, payload, reportCount} = input;
+  const createdIds = askIds.filter((id): id is string => id != null);
   return {
     aheadBehind: facts.aheadBehind,
-    askIds: askIds.filter((id): id is string => id != null),
+    askIds: createdIds,
     autofillFailures: facts.autofillFailures,
     beadsTouched: payload.beadsTouched,
-    blockingAskCount: payload.asks.filter((ask) => ask.blocking).length,
+    blockingAskCount:
+      payload.asks.filter((ask) => ask.blocking).length +
+      carriedOpenAsks.filter((ask) => ask.blocking).length,
+    carriedAskIds: carriedOpenAsks.map((ask) => ask.id),
     branch: facts.branch,
     continuesFrom: payload.continuesFrom ?? null,
     cwd: facts.cwd,
@@ -49,7 +62,9 @@ export function buildThreadMetadata(
     lastUserMessage: facts.lastUserMessage,
     mergeState: payload.workProduct.merged,
     model: facts.model,
-    openAskCount: payload.asks.length,
+    // The WHOLE thread's open asks after this report: the ones it just created
+    // plus the ones it carried. Not "asks in this payload".
+    openAskCount: createdIds.length + carriedOpenAsks.length,
     pr: payload.workProduct.pr,
     progressPercent: payload.progress.percent,
     reportCount,
