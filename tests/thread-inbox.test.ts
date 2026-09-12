@@ -19,12 +19,12 @@ import {
   noteFrom,
   renderInbox,
   renderInboxAsk,
-  restateAsk,
   stripAnswerPrefix,
   type InboxAsk,
   type InboxView,
 } from '../src/thread/inbox';
 import {SKIP_COMMENT} from '../src/thread/answer';
+import {restateAsk} from '../src/thread/render';
 
 import type {BdComment} from '../src/thread/bd';
 
@@ -50,10 +50,24 @@ describe('askStateOf — three states, never two', () => {
     expect(askStateOf({}, [comment('ANSWER: b')])).toBe('answered');
   });
 
-  test('the skippedAt stamp is a SKIP even with other comments present', () => {
+  // F2: an answer written AFTER a skip must win. The ask bead's own description
+  // tells Justin to `bd comments add`, so this is the documented way to change
+  // his mind — and it used to be discarded, handing the next turn permission to
+  // take a default against an explicit instruction.
+  test('a real comment after a skip is an ANSWER, not a skip', () => {
     expect(
       askStateOf({skippedAt: '2026-09-12T10:00:00Z'}, [comment('ANSWER: b')]),
+    ).toBe('answered');
+  });
+
+  test('a skip stamp with only the skip comment stays a skip', () => {
+    expect(
+      askStateOf({skippedAt: '2026-09-12T10:00:00Z'}, [comment(SKIP_COMMENT)]),
     ).toBe('skipped');
+  });
+
+  test('a skip stamp whose comment write failed is still a skip', () => {
+    expect(askStateOf({skippedAt: '2026-09-12T10:00:00Z'}, [])).toBe('skipped');
   });
 
   test('a lone skip COMMENT is a skip even when the stamp write failed', () => {
@@ -149,6 +163,44 @@ describe('renderInboxAsk — the three shapes prepare and inbox share', () => {
     expect(lines.join('\n')).not.toContain('SKIPPED');
     // With no note supplied (inbox's case) the ask still renders, bare.
     expect(renderInboxAsk(base(), '  head')).toHaveLength(lines.length - 1);
+  });
+});
+
+// F2 end-to-end through the two functions `inbox` AND `prepare` both call —
+// `collectInboxAsks` classifies with askStateOf, `renderInboxAsk` renders. There
+// is exactly one implementation of each, so this covers both commands.
+describe('an answer written after a skip reaches BOTH inbox and prepare', () => {
+  test('skippedAt + a later real comment renders HIS ANSWER, not SKIPPED', () => {
+    const metadata = {
+      blocking: true,
+      defaultAction: 'I keep by-repo.',
+      kind: 'pick',
+      skippedAt: '2026-09-12T10:00:00Z',
+    };
+    const comments = [comment(SKIP_COMMENT), comment('ANSWER: do b')];
+    const state = askStateOf(metadata, comments);
+    expect(state).toBe('answered');
+
+    const lines = renderInboxAsk(
+      {
+        answers: comments
+          .map((entry) => stripAnswerPrefix((entry.text ?? '').trim()))
+          .filter((text) => text !== '' && text !== SKIP_COMMENT),
+        blocking: true,
+        defaultAction: 'I keep by-repo.',
+        id: 'jl-x.1',
+        kind: 'pick',
+        restated: '[Pick a/b] Which view?',
+        state,
+        title: 'Which view?',
+      },
+      '  jl-x.1 · [pick] BLOCKING · Which view?',
+      '     (no answer yet — disposition it as carried or decided)',
+    );
+    const text = lines.join('\n');
+    expect(text).toContain('>>> HIS ANSWER: do b');
+    expect(text).not.toContain('SKIPPED');
+    expect(text).not.toContain('no answer yet');
   });
 });
 

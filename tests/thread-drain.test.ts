@@ -180,6 +180,14 @@ describe('drainSpool', () => {
     expect(summary?.kept).toBe(0);
     expect(existsSync(file)).toBe(false);
     expect(summary?.outcomes[0]?.detail).toContain('report #4');
+    // F6: honest about what was LOST. The payload never reached bd, so its asks
+    // were never created and never will be — saying it "reached its
+    // destination" hid two questions Justin would never see.
+    expect(summary?.outcomes[0]?.detail).toContain('NOT applied');
+    expect(summary?.outcomes[0]?.detail).toContain('NEVER created');
+    expect(summary?.outcomes[0]?.detail).not.toContain(
+      'reached its destination',
+    );
   });
 
   test('an unparseable file is KEPT and named — not understood is not handled', async () => {

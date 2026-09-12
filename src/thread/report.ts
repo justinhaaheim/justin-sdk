@@ -52,15 +52,18 @@ import {
   renderAskDescription,
   renderReport,
   renderThreadDescription,
+  restateAsk,
+  type CarriedAsk,
 } from './render';
-import {THREAD_SCHEMA_VERSION, validateThreadReport} from './schema';
+import {
+  CLOSING_DISPOSITIONS,
+  THREAD_SCHEMA_VERSION,
+  validateThreadReport,
+} from './schema';
 
 import type {EnvLike} from './paths';
 import type {ThreadFacts} from './facts';
 import type {ThreadPriorAsk, ThreadReportPayload} from './schema';
-
-/** Dispositions that close the ask. `carried` leaves it open by definition. */
-const CLOSING_DISPOSITIONS = new Set(['answered', 'decided', 'irrelevant']);
 
 /** bd title length before it stops being a title and starts being a paragraph. */
 const ASK_TITLE_CAP = 110;
@@ -283,6 +286,63 @@ export async function writeReportToBd(
     }
     openAsks = asks.value;
   }
+  // --- 4b. ORPHANS FROM A HALF-WRITTEN PREVIOUS ATTEMPT (F1) --------------
+  //
+  // A bd failure AFTER the first successful createAsk leaves an ask that THIS
+  // payload created. D4 then refuses every replay of that payload forever: the
+  // orphan cannot appear in priorAsks, because it did not exist when the
+  // payload was written. The spool file never drains — for exactly the failure
+  // D5 names as the accepted risk, a Dolt lock mid-write — and the obvious
+  // human workaround (disposition it "carried") makes the retry create a SECOND
+  // bead for the same question.
+  //
+  // An orphan is identified by the two stamps together: its createdAt equals
+  // the THREAD bead's last reportedAt (so it was made by the previous attempt
+  // on this thread), and its id is absent from the thread's metadata.askIds.
+  // askIds is written empty by the provisional write and filled by the
+  // finalise, so "not in askIds" is precisely "created by an attempt whose
+  // finalise never ran". The thread's own reportedAt is the key, not the
+  // payload's: a live retry regenerates facts.reportedAt and would match
+  // nothing. This gives metadata.askIds its first real reader.
+  const threadMeta = (existingThread?.metadata ?? {}) as Record<
+    string,
+    unknown
+  >;
+  const lastReportedAt =
+    typeof threadMeta.reportedAt === 'string' ? threadMeta.reportedAt : null;
+  const recordedAskIds = new Set(
+    Array.isArray(threadMeta.askIds)
+      ? threadMeta.askIds.filter((id): id is string => typeof id === 'string')
+      : [],
+  );
+  const orphans =
+    lastReportedAt == null
+      ? []
+      : openAsks.filter((ask) => {
+          const meta = (ask.metadata ?? {}) as Record<string, unknown>;
+          return (
+            meta.createdAt === lastReportedAt && !recordedAskIds.has(ask.id)
+          );
+        });
+  const orphanIds = new Set(orphans.map((ask) => ask.id));
+  for (const orphan of orphans) {
+    const closed = await closeAsk(
+      ctx,
+      orphan.id,
+      'incomplete report attempt — this ask was recreated by the retry',
+    );
+    if (!closed.ok) {
+      return {
+        failure: closed.failure,
+        rendered: renderWithoutBead(),
+        status: 'bdFailed',
+      };
+    }
+  }
+  // Orphans are excluded from BOTH the coverage set and the carried set: they
+  // are about to be recreated, so demanding a disposition for them would be
+  // demanding one for a bead the retry itself is replacing.
+  openAsks = openAsks.filter((ask) => !orphanIds.has(ask.id));
   const openAskIds = openAsks.map((ask) => ask.id);
 
   // --- 5. D4 ---------------------------------------------------------------
@@ -305,11 +365,22 @@ export async function writeReportToBd(
   );
   const carriedOpenAsks = openAsks
     .filter((ask) => carriedIds.has(ask.id))
-    .map((ask) => ({
-      blocking:
-        (ask.metadata as {blocking?: unknown} | undefined)?.blocking === true,
-      id: ask.id,
-    }));
+    .map((ask): CarriedAsk => {
+      const meta = (ask.metadata ?? {}) as Record<string, unknown>;
+      return {
+        blocking: meta.blocking === true,
+        fromReport:
+          typeof meta.reportCount === 'number' &&
+          Number.isFinite(meta.reportCount)
+            ? meta.reportCount
+            : null,
+        id: ask.id,
+        // The bead's own description is the full ask — form tag, context,
+        // lettered options, default — so F4 reuses it rather than
+        // reconstructing a question the payload no longer carries.
+        restated: restateAsk(ask.description ?? ask.title ?? ''),
+      };
+    });
 
   const provisionalMetadata = buildThreadMetadata({
     askIds: [],
@@ -329,7 +400,22 @@ export async function writeReportToBd(
   // died between the two writes the bead would be left saying "(rendering)" —
   // a report-shaped hole in the one field D10 promises is always readable.
   // An id-less report is degraded; a placeholder is a lie.
-  const provisionalNotes = renderWithoutBead();
+  // On the UPDATE path the thread id is already known, so the provisional write
+  // must not claim there is no bead (F1). It used to call renderWithoutBead(),
+  // which ends "Answer: (no thread bead — this report was NOT recorded)" — on a
+  // bead that IS the thread. A finalise failure on report 2 or later then left
+  // exactly that sentence in the one field D10 promises is always readable.
+  const provisionalNotes =
+    existingThread == null
+      ? renderWithoutBead()
+      : renderReport({
+          askIds: payload.asks.map(() => null),
+          carried: carriedOpenAsks,
+          facts,
+          missingAskIdLabel: '(ask ids pending)',
+          payload,
+          threadId: existingThread.id,
+        });
 
   let threadId: string;
   if (existingThread == null) {
@@ -375,6 +461,7 @@ export async function writeReportToBd(
         defaultAction: ask.default,
         kind: ask.kind,
         optionCount: ask.options.length,
+        reportCount,
         reportedAt: facts.reportedAt,
         sessionId,
         threadId,
@@ -385,7 +472,13 @@ export async function writeReportToBd(
       askIds.push(null);
       return {
         failure: created.failure,
-        rendered: renderReport({askIds, facts, payload, threadId}),
+        rendered: renderReport({
+          askIds,
+          carried: carriedOpenAsks,
+          facts,
+          payload,
+          threadId,
+        }),
         status: 'bdFailed',
       };
     }
@@ -404,14 +497,26 @@ export async function writeReportToBd(
     if (!closed.ok) {
       return {
         failure: closed.failure,
-        rendered: renderReport({askIds, facts, payload, threadId}),
+        rendered: renderReport({
+          askIds,
+          carried: carriedOpenAsks,
+          facts,
+          payload,
+          threadId,
+        }),
         status: 'bdFailed',
       };
     }
     closedAsks.push(prior.id);
   }
 
-  const rendered = renderReport({askIds, facts, payload, threadId});
+  const rendered = renderReport({
+    askIds,
+    carried: carriedOpenAsks,
+    facts,
+    payload,
+    threadId,
+  });
   const notesWritten = await finalizeThread(
     ctx,
     threadId,

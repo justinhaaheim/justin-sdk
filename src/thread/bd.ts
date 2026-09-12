@@ -439,8 +439,15 @@ export async function readComments(
   const raw = await runBd(ctx, args);
   if (!raw.ok) return raw;
   const trimmed = raw.value.trim();
-  // A bead with no comments prints a human "no comments" line rather than [].
-  if (trimmed === '' || !trimmed.startsWith('[')) return {ok: true, value: []};
+  // ALWAYS PARSE (F3). This used to map any stdout not starting with `[` to an
+  // EMPTY LIST, so a bd upgrade notice or a Dolt warning printed ahead of the
+  // JSON became "he has not answered anything" — rule 6.2's "silence must be a
+  // claim" broken in the reassuring direction, and the only read in this file
+  // that did not route the condition to bad-json. Measured 2026-09-12: zero
+  // comments prints exactly `[]`, so the prefix test protected against nothing
+  // that happens while absorbing the case it was not written for. The one
+  // exception kept is bd's literal "no comments" sentence, matched exactly.
+  if (/^no comments\b/i.test(trimmed)) return {ok: true, value: []};
   const parsed = parseJson<BdComment[]>(`bd ${args.join(' ')}`, raw.value);
   if (!parsed.ok) return parsed;
   return {ok: true, value: Array.isArray(parsed.value) ? parsed.value : []};

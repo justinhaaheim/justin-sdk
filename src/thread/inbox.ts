@@ -31,10 +31,14 @@ import {
   type BdIssue,
 } from './bd';
 import {contextFor, resolveThread, type ThreadRef} from './resolve';
+import {
+  lifeBeadsDir,
+  probeWritable,
+  SANDBOX_DENIED_LINE,
+  threadsStateDir,
+} from './paths';
 import {SKIP_COMMENT} from './answer';
-
-/** The footer `renderAskDescription` appends; noise once the ask is being read back. */
-const ANSWER_FOOTER_MARKER = 'Answer by commenting on this bead:';
+import {restateAsk} from './render';
 
 export type AskState = 'answered' | 'skipped' | 'unanswered';
 
@@ -56,12 +60,6 @@ export interface InboxView {
   threadTitle: string;
 }
 
-/** Drop the "answer by commenting" footer — it is instructions to Justin, not content. */
-export function restateAsk(description: string): string {
-  const cut = description.indexOf(ANSWER_FOOTER_MARKER);
-  return (cut === -1 ? description : description.slice(0, cut)).trimEnd();
-}
-
 /** `ANSWER: foo` → `foo`. A hand-written comment is returned unchanged. */
 export function stripAnswerPrefix(text: string): string {
   return text.startsWith('ANSWER: ') ? text.slice('ANSWER: '.length) : text;
@@ -81,13 +79,22 @@ export function askStateOf(
   metadata: Record<string, unknown>,
   comments: readonly BdComment[],
 ): AskState {
+  const texts = comments
+    .map((comment) => (comment.text ?? '').trim())
+    .filter((text) => text !== '');
+  // COMMENTS DECIDE FIRST (F2). This used to return `skipped` off the stamp
+  // before it ever looked at the comments, which threw away an answer Justin
+  // wrote AFTER a skip — exactly what the ask bead's own description tells him
+  // to do (`bd comments add <id> "..."`). The next turn was then told it had
+  // permission to take the default, against an explicit instruction, with no
+  // signal anywhere. A real comment is an answer no matter what the stamp says.
+  if (texts.some((text) => text !== SKIP_COMMENT)) return 'answered';
+  if (texts.length > 0) return 'skipped';
+  // No comments at all: the stamps are all we have. A skippedAt with no comment
+  // means the comment write failed after the stamp landed — still a skip.
   const skippedAt = metadata.skippedAt;
   if (typeof skippedAt === 'string' && skippedAt !== '') return 'skipped';
-  const texts = comments.map((comment) => (comment.text ?? '').trim());
-  const meaningful = texts.filter((text) => text !== '');
-  if (meaningful.length === 0) return 'unanswered';
-  if (meaningful.every((text) => text === SKIP_COMMENT)) return 'skipped';
-  return 'answered';
+  return 'unanswered';
 }
 
 function metadataOf(issue: BdIssue): Record<string, unknown> {
@@ -269,6 +276,19 @@ export async function runThreadInbox(
   options: InboxOptions = {},
 ): Promise<number> {
   const env = options.env ?? process.env;
+
+  // THE SAME PROBE `prepare` DOES (F7). The rule tells Claude to run `thread
+  // inbox` at the START of a turn, which is the one moment a sandboxed session
+  // most needs to be told WHICH two paths to allowlist. Without this it got
+  // `bd comments … — the sandbox refused it (…)` and exit 1: true, but not
+  // actionable, and not the line the rule branches on.
+  const stateProbe = probeWritable(threadsStateDir(env));
+  const beadsProbe = probeWritable(lifeBeadsDir(env));
+  if (stateProbe.kind === 'denied' || beadsProbe.kind === 'denied') {
+    console.log(SANDBOX_DENIED_LINE);
+    return 0;
+  }
+
   const ctx: BdContext = contextFor(env);
 
   const resolved = await resolveThread(ctx, options);

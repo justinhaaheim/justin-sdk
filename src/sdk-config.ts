@@ -202,7 +202,7 @@ const componentConfigSchema = z
           .boolean()
           .optional()
           .describe(
-            'Master switch for the `justin-sdk thread` command group. DEFAULT FALSE (home-base-p1uj D6): with it off, `thread prepare` prints THREADS: DISABLED and every session keeps its plain text status report.',
+            'The PREFLIGHT BRANCH POINT for thread reports, not a master switch (home-base-p1uj D6; corrected 2026-09-12, F7b). DEFAULT FALSE. It decides one thing: whether `thread prepare` prints THREADS: ENABLED or THREADS: DISABLED, which is the line the wrap-up rule branches on to fall back to the plain text status report. It does NOT disable the command group — `thread report`, `board`, `answer` and `inbox` all still work when it is false, which is deliberate: a human running them by hand should not be silently refused.',
           ),
       })
       .optional()

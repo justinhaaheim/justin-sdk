@@ -13,11 +13,14 @@
  * has vanished from the only place still tracking it, and it would vanish
  * quietly, during a command whose output is a reassuring dashboard.
  *
- * `superseded` removes the file because the report DID reach its destination —
- * it was simply overtaken. D1 rewrites the thread bead in place, so replaying
- * an older payload over a newer one would regress the bead. The payload still
- * exists in the archive (`<stateDir>/reports/<sessionId>/`), which is never
- * pruned, so nothing is destroyed by dropping the spool copy.
+ * `superseded` removes the file because replaying it would do HARM, not because
+ * it succeeded (F6). D1 rewrites the thread bead in place, so an older payload
+ * written over a newer one regresses the bead to a state Justin already moved
+ * past. But its ASKS were never created and never will be — they belong to a
+ * report the thread has overtaken — so the line says exactly that, with the
+ * count, instead of claiming the report reached its destination. The payload
+ * itself survives in the archive (`<stateDir>/reports/<sessionId>/`), which is
+ * never pruned, so a discarded ask is recoverable by hand from there.
  *
  * A file we cannot PARSE is never removed either. "I do not understand this"
  * and "this has been handled" are different facts, and only one of them makes
@@ -195,7 +198,14 @@ export async function drainSpool(
       rmSync(path, {force: true});
       summary.superseded += 1;
       summary.outcomes.push({
-        detail: `superseded by report #${outcome.existingReportCount} on ${outcome.threadId} (${outcome.existingReportedAt}); the archive still has it`,
+        detail: (() => {
+          const count = read.report.payload.asks.length;
+          const asks =
+            count === 0
+              ? 'it asked for nothing'
+              : `its ${count} ask${count === 1 ? '' : 's'} were NEVER created and will not be — they belong to a report the thread has overtaken`;
+          return `superseded by report #${outcome.existingReportCount} on ${outcome.threadId} (${outcome.existingReportedAt}) — NOT applied; ${asks}. The payload is still in the archive.`;
+        })(),
         file: name,
         kind: 'superseded',
       });

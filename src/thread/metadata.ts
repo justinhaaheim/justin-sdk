@@ -89,6 +89,8 @@ export interface AskMetadataInput {
   defaultAction: string;
   kind: string;
   optionCount: number;
+  /** Which report created this ask — read back by F4's "carried from report #N". */
+  reportCount: number;
   reportedAt: string;
   sessionId: string;
   threadId: string;
@@ -107,6 +109,7 @@ export function buildAskMetadata(
     defaultAction: input.defaultAction,
     kind: input.kind,
     optionCount: input.optionCount,
+    reportCount: input.reportCount,
     schemaVersion: THREAD_SCHEMA_VERSION,
     sessionId: input.sessionId,
     threadId: input.threadId,

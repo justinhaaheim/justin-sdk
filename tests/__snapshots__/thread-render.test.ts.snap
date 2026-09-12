@@ -46,7 +46,7 @@ exports[`renderReport full report matches the committed baseline 1`] = `
      b. b — every enrolled repo
      If you don't answer: I leave it off everywhere but this machine.
 
-**Prior asks — what happened to them:**
+**Prior asks — closed by this report:**
 - jl-x7q.1 — answered: You said "yes, closing is right".
 
 **Work product:**

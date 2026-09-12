@@ -74,6 +74,18 @@ export const MERGE_STATES = [
   'unknown',
 ] as const;
 
+/**
+ * Dispositions that CLOSE the ask. `carried` leaves it open by definition, and
+ * a carried ask is therefore still one of the things Justin owes an answer on —
+ * which is why the renderer puts it in the numbered Asks section rather than in
+ * the historical "prior asks" list (F4).
+ */
+export const CLOSING_DISPOSITIONS: ReadonlySet<string> = new Set([
+  'answered',
+  'decided',
+  'irrelevant',
+]);
+
 export type AskKind = (typeof ASK_KINDS)[number];
 export type AskDisposition = (typeof ASK_DISPOSITIONS)[number];
 
@@ -168,6 +180,12 @@ export const threadReportSchema = z.strictObject({
       }),
     )
     .describe('Each learning ends with where it now lives.'),
+  nextSteps: z
+    .array(z.string())
+    .optional()
+    .describe(
+      'What CLAUDE or the next session does next. Anything JUSTIN must do is an ask, not a next step.',
+    ),
   priorAsks: z
     .array(priorAskSchema)
     .describe(
@@ -262,6 +280,9 @@ export function payloadSkeleton(): string {
     instruction: 'You told me to <restate his last instruction>',
     learned: [
       {disposition: '<where it now lives>', text: '<what you learned>'},
+    ],
+    nextSteps: [
+      '<what I or the next session do next — NOT things you must do>',
     ],
     priorAsks: [
       {

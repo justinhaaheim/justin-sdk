@@ -189,3 +189,116 @@ describe('askKindTag', () => {
     ).toBe('[Pick a/b/c]');
   });
 });
+
+/**
+ * F4: a CARRIED ask — the thing Justin still owes an answer on — must appear in
+ * the numbered Asks section IN FULL.
+ *
+ * It used to render as `- jl-x7q.1 — carried: <detail>` under "Prior asks": a
+ * bare bead id with no question, no form control, no options and no default.
+ * The worst case is report 2 carrying a blocking pick and creating no new asks,
+ * where the report read "Asks — everything I need from you: - (nothing — you
+ * are not blocking anything)" while a blocking question sat unanswered four
+ * lines below. That is the exact loss this epic was written to stop, and it
+ * broke status-report-format.md twice over ("asks are ONE numbered sequence"
+ * and "never a bare id").
+ */
+describe('carried asks (F4)', () => {
+  const carried = [
+    {
+      blocking: true,
+      fromReport: 1,
+      id: 'jl-x7q.1',
+      restated: `[Pick a/b] Which default board view do you want?
+
+CONTEXT: you have not been here for hours; this is the dashboard's landing view.
+
+OPTIONS:
+  a. (Recommended) Group by repo
+  b. Flat by recency
+
+IF UNANSWERED: I keep by-repo as the default.`,
+    },
+  ];
+
+  test('a report that carries a blocking ask and creates none still shows it', () => {
+    const bare = payload();
+    bare.asks = [];
+    const text = renderReport({
+      askIds: [],
+      carried,
+      facts: facts(),
+      payload: bare,
+      threadId: 'jl-x7q',
+    });
+    const asksSection = text.slice(
+      text.indexOf('**Asks — everything I need from you:**'),
+      text.indexOf('**Prior asks'),
+    );
+    expect(asksSection).not.toContain('you are not blocking anything');
+    expect(asksSection).toContain('- Blocking:');
+    expect(asksSection).toContain('1. (carried from report #1) (jl-x7q.1)');
+    // In FULL: the question, the form control, both options, and the default.
+    expect(asksSection).toContain('[Pick a/b] Which default board view');
+    expect(asksSection).toContain('a. (Recommended) Group by repo');
+    expect(asksSection).toContain(
+      'IF UNANSWERED: I keep by-repo as the default.',
+    );
+  });
+
+  test('carried asks are numbered ahead of new ones in the same sequence', () => {
+    const withNew = payload();
+    const text = renderReport({
+      askIds: ['jl-x7q.4'],
+      carried,
+      facts: facts(),
+      payload: withNew,
+      threadId: 'jl-x7q',
+    });
+    expect(text).toContain('1. (carried from report #1) (jl-x7q.1)');
+    expect(text).toContain('2.');
+    expect(text.indexOf('jl-x7q.1')).toBeLessThan(text.indexOf('jl-x7q.4'));
+  });
+
+  test('a bead with no recorded report number says so rather than inventing one', () => {
+    const text = renderReport({
+      askIds: [],
+      carried: [{...carried[0]!, fromReport: null}],
+      facts: facts(),
+      payload: (() => {
+        const p = payload();
+        p.asks = [];
+        return p;
+      })(),
+      threadId: 'jl-x7q',
+    });
+    expect(text).toContain('(carried from an earlier report)');
+  });
+
+  test('nextSteps render as MINE, separate from the asks (F5)', () => {
+    const p = payload();
+    p.nextSteps = ['Merge the branch once the review clears'];
+    const text = renderReport({
+      askIds: ['jl-x7q.4'],
+      facts: facts(),
+      payload: p,
+      threadId: 'jl-x7q',
+    });
+    expect(text).toContain('**Next steps (mine, not yours):**');
+    expect(text).toContain('➡️ Merge the branch once the review clears');
+  });
+
+  test('the provisional label replaces "(NOT RECORDED)" when ids are merely pending', () => {
+    const text = renderReport({
+      askIds: [null],
+      facts: facts(),
+      missingAskIdLabel: '(ask ids pending)',
+      payload: payload(),
+      threadId: 'jl-x7q',
+    });
+    expect(text).toContain('(ask ids pending)');
+    expect(text).not.toContain('(NOT RECORDED)');
+    // and the footer names the real bead, not "no thread bead"
+    expect(text).toContain('justin-sdk thread answer jl-x7q');
+  });
+});

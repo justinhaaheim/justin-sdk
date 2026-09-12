@@ -28,6 +28,8 @@
 
 import {formatTokens} from '../usage-check';
 
+import {CLOSING_DISPOSITIONS} from './schema';
+
 import type {ThreadFacts} from './facts';
 import type {ThreadAsk, ThreadReportPayload} from './schema';
 
@@ -50,6 +52,21 @@ const MERGE_LABEL: Record<string, string> = {
   unmerged: 'UNMERGED',
   unknown: 'UNKNOWN',
 };
+
+/** The footer `renderAskDescription` appends, and the marker for removing it. */
+const ANSWER_FOOTER_MARKER = 'Answer by commenting on this bead:';
+
+/**
+ * An ask bead's description minus the "answer by commenting" footer.
+ *
+ * Lives here because this file WRITES that footer — the code that adds a thing
+ * should own removing it. `inbox`, `prepare` and the carried-ask rendering
+ * below all read it back through this one function.
+ */
+export function restateAsk(description: string): string {
+  const cut = description.indexOf(ANSWER_FOOTER_MARKER);
+  return (cut === -1 ? description : description.slice(0, cut)).trimEnd();
+}
 
 /** a, b, c, … for an option index. */
 export function optionLetter(index: number): string {
@@ -104,6 +121,25 @@ function renderTokens(facts: ThreadFacts): string {
     : `${formatTokens(facts.tokensAtStop)} tokens of context`;
 }
 
+/**
+ * An ask from an EARLIER report that is still open (F4).
+ *
+ * It used to render as `- jl-x7q.1 — carried: <detail>` under "Prior asks": a
+ * bare bead id with no question, no options, no form control and no default —
+ * for the one thing Justin still owes an answer on. That broke two rules in
+ * status-report-format.md at once ("asks are ONE numbered sequence" and "never
+ * a bare id") and was precisely the loss this epic exists to stop. It now
+ * appears in the numbered sequence, in full, marked as carried.
+ */
+export interface CarriedAsk {
+  blocking: boolean;
+  /** The report number that first asked it, when the bead records one. */
+  fromReport: number | null;
+  id: string;
+  /** The ask bead's description, footer stripped. */
+  restated: string;
+}
+
 export interface RenderOptions {
   /**
    * Ask bead ids, parallel to `payload.asks`. A null entry means the bead was
@@ -111,7 +147,15 @@ export interface RenderOptions {
    * id that does not exist.
    */
   askIds: (string | null)[];
+  /** Still-open asks from earlier reports, rendered in the same sequence (F4). */
+  carried?: readonly CarriedAsk[];
   facts: ThreadFacts;
+  /**
+   * What a null entry in `askIds` means. "(NOT RECORDED)" when bd never took
+   * the report; "(ask ids pending)" for the provisional write that happens
+   * BEFORE the asks exist, on a bead that is already the thread (F1).
+   */
+  missingAskIdLabel?: string;
   payload: ThreadReportPayload;
   /** The thread bead id, or null when bd never took the report. */
   threadId: string | null;
@@ -122,8 +166,9 @@ function renderAsk(
   ask: ThreadAsk,
   id: string | null,
   number: number,
+  missingLabel: string,
 ): void {
-  const idTag = id == null ? '(NOT RECORDED)' : `(${id})`;
+  const idTag = id == null ? missingLabel : `(${id})`;
   lines.push(`  ${number}. ${askKindTag(ask)} ${ask.text} ${idTag}`);
   lines.push(`     Context: ${ask.context}`);
   ask.options.forEach((option, index) => {
@@ -131,6 +176,19 @@ function renderAsk(
     lines.push(`     ${optionLetter(index)}. ${prefix}${option.text}`);
   });
   lines.push(`     If you don't answer: ${ask.default}`);
+}
+
+function renderCarried(
+  lines: string[],
+  carried: CarriedAsk,
+  number: number,
+): void {
+  const from =
+    carried.fromReport == null
+      ? '(carried from an earlier report)'
+      : `(carried from report #${carried.fromReport})`;
+  lines.push(`  ${number}. ${from} (${carried.id})`);
+  for (const line of carried.restated.split('\n')) lines.push(`     ${line}`);
 }
 
 /** The whole report, as one string. Ends without a trailing newline. */
@@ -204,33 +262,59 @@ export function renderReport(options: RenderOptions): string {
     ask,
     id: askIds[index] ?? null,
   }));
+  const carriedAsks = options.carried ?? [];
+  const missingLabel = options.missingAskIdLabel ?? '(NOT RECORDED)';
   const blocking = ordered.filter((entry) => entry.ask.blocking);
   const nonBlocking = ordered.filter((entry) => !entry.ask.blocking);
-  if (ordered.length === 0) {
+  const carriedBlocking = carriedAsks.filter((entry) => entry.blocking);
+  const carriedOther = carriedAsks.filter((entry) => !entry.blocking);
+  if (ordered.length === 0 && carriedAsks.length === 0) {
     lines.push('- (nothing — you are not blocking anything)');
   }
+  // CARRIED ASKS COME FIRST within each group: they have been waiting longest,
+  // and they are the ones most likely to have fallen out of Justin's head.
   let number = 1;
-  if (blocking.length > 0) {
+  if (blocking.length > 0 || carriedBlocking.length > 0) {
     lines.push('- Blocking:');
+    for (const entry of carriedBlocking) {
+      renderCarried(lines, entry, number);
+      number += 1;
+    }
     for (const entry of blocking) {
-      renderAsk(lines, entry.ask, entry.id, number);
+      renderAsk(lines, entry.ask, entry.id, number, missingLabel);
       number += 1;
     }
   }
-  if (nonBlocking.length > 0) {
+  if (nonBlocking.length > 0 || carriedOther.length > 0) {
     lines.push('- Non-blocking (I proceeded; you can override):');
+    for (const entry of carriedOther) {
+      renderCarried(lines, entry, number);
+      number += 1;
+    }
     for (const entry of nonBlocking) {
-      renderAsk(lines, entry.ask, entry.id, number);
+      renderAsk(lines, entry.ask, entry.id, number, missingLabel);
       number += 1;
     }
   }
   lines.push('');
 
-  lines.push('**Prior asks — what happened to them:**');
-  if (payload.priorAsks.length === 0) {
-    lines.push('- (there were none open)');
+  if (payload.nextSteps != null && payload.nextSteps.length > 0) {
+    // What CLAUDE does next. Anything Justin must do is an ask, above.
+    lines.push('**Next steps (mine, not yours):**');
+    for (const step of payload.nextSteps) lines.push(`- ➡️ ${step}`);
+    lines.push('');
   }
-  for (const prior of payload.priorAsks) {
+
+  // Only the ones CLOSED this time. The carried ones are live asks and are
+  // rendered above; repeating them here as bare ids is what F4 removed.
+  const closedPriors = payload.priorAsks.filter((prior) =>
+    CLOSING_DISPOSITIONS.has(prior.disposition),
+  );
+  lines.push('**Prior asks — closed by this report:**');
+  if (closedPriors.length === 0) {
+    lines.push('- (none closed this time)');
+  }
+  for (const prior of closedPriors) {
     lines.push(`- ${prior.id} — ${prior.disposition}: ${prior.detail}`);
   }
   lines.push('');
