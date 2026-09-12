@@ -2,10 +2,15 @@
  * `thread answer` — the walk (home-base-p1uj D3, dispatch home-base-p1uj.2).
  *
  * The TTY half of this command is a dozen lines of readline adapter and cannot
- * be exercised from a subagent; the BEHAVIOUR is `walkAsks`, which takes its
- * terminal as an interface. That split is the reason this file can exist at
- * all, and the reason the live cmux run recorded on the bead is the other half
- * of the evidence rather than the whole of it.
+ * be exercised from a subagent; the BEHAVIOUR is `walkAsks`, which takes both
+ * its terminal and its bd writer as interfaces. That split is the reason this
+ * file can exist at all, and the reason the live pty run recorded on the bead
+ * is the other half of the evidence rather than the whole of it.
+ *
+ * THE ORDER IS THE POINT (home-base-p1uj.9). An answer must be IN bd before the
+ * next ask is printed, and the end-to-end tests at the bottom of this file
+ * assert exactly that, against a real bd subprocess, by sampling bd's own
+ * command log at the moment each prompt is shown.
  *
  * THE DISTINCTION THAT MATTERS: an empty line is a SKIP, which D3 defines as
  * "take your stated default" — an explicit decision. It is NOT an empty answer,
