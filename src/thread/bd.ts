@@ -376,6 +376,59 @@ export async function listOpenAsks(
   return {ok: true, value: issues.filter((issue) => issue.status !== 'closed')};
 }
 
+/**
+ * EVERY thread bead, for the board (home-base-p1uj.2).
+ *
+ * ONE CALL, no per-row follow-up: the board's whole promise is that it is fast
+ * enough to be the first thing run in the morning, and a per-thread `bd show`
+ * would turn a 2-call render into a 2+N one. Everything a row needs already
+ * lives in the listing's `metadata` (repo, branch, reportedAt, progressPercent,
+ * stopReasonKind, mergeState — see metadata.ts).
+ *
+ * Closed threads are excluded unless asked for: a board is what is still live.
+ */
+export async function listThreads(
+  ctx: BdContext,
+  options: {includeClosed?: boolean} = {},
+): Promise<BdResult<BdIssue[]>> {
+  const args = ['list', '-t', 'thread', '--limit', '0', '--json'];
+  if (options.includeClosed === true) args.push('--all');
+  const raw = await runBd(ctx, args);
+  if (!raw.ok) return raw;
+  const parsed = parseJson<BdIssue[]>(`bd ${args.join(' ')}`, raw.value);
+  if (!parsed.ok) return parsed;
+  return {ok: true, value: Array.isArray(parsed.value) ? parsed.value : []};
+}
+
+/**
+ * EVERY open ask, for the board's join.
+ *
+ * The board pairs these to threads CLIENT-SIDE on `parent`, which the listing
+ * carries (measured 2026-09-12: `bd list -t ask --json` returns `parent`
+ * alongside `metadata`). `metadata.threadId` is the fallback, because an ask
+ * created outside `thread report` could have a parent and no metadata, or the
+ * reverse, and dropping such a row would under-report what waits for Justin.
+ */
+export async function listAsks(
+  ctx: BdContext,
+  options: {includeClosed?: boolean} = {},
+): Promise<BdResult<BdIssue[]>> {
+  const args = ['list', '-t', 'ask', '--limit', '0', '--json'];
+  if (options.includeClosed === true) args.push('--all');
+  const raw = await runBd(ctx, args);
+  if (!raw.ok) return raw;
+  const parsed = parseJson<BdIssue[]>(`bd ${args.join(' ')}`, raw.value);
+  if (!parsed.ok) return parsed;
+  const issues = Array.isArray(parsed.value) ? parsed.value : [];
+  return {
+    ok: true,
+    value:
+      options.includeClosed === true
+        ? issues
+        : issues.filter((issue) => issue.status !== 'closed'),
+  };
+}
+
 /** Justin's answers on one ask bead, oldest first (D3). */
 export async function readComments(
   ctx: BdContext,
@@ -572,7 +625,82 @@ export async function closeAsk(
   id: string,
   reason: string,
 ): Promise<BdResult<true>> {
+  return closeIssue(ctx, id, reason);
+}
+
+/**
+ * Close any bead — a thread (`thread done`) or an ask — with its reason.
+ *
+ * `closeAsk` is the D4 spelling of this and delegates here; they were one
+ * command all along, and keeping two implementations would let the "never
+ * delete" invariant drift apart between them.
+ */
+export async function closeIssue(
+  ctx: BdContext,
+  id: string,
+  reason: string,
+): Promise<BdResult<true>> {
   const result = await runBd(ctx, ['close', id, '--reason', reason]);
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
+
+/**
+ * Reopen a closed bead.
+ *
+ * `bd reopen <id> -r <reason>` exists and is NOT the same as `bd update -s
+ * open`: it clears `closed_at` and emits a Reopened event (measured 2026-09-12
+ * from `bd reopen --help`). Checked rather than assumed — flag and subcommand
+ * parity across bd subcommands is not guaranteed, which is how dispatch 2 found
+ * that `bd create` has no `-s` at all.
+ */
+export async function reopenIssue(
+  ctx: BdContext,
+  id: string,
+  reason: string,
+): Promise<BdResult<true>> {
+  const result = await runBd(ctx, ['reopen', id, '-r', reason]);
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
+
+/**
+ * Add one comment to a bead — how Justin's answer is recorded (D3).
+ *
+ * D3 chose comments for answers on purpose, and the br "never use comments"
+ * rule does not reach here: this is bd, where `bd comments <id>` is a real
+ * surface that `thread prepare`, `thread show` and `thread inbox` all read.
+ *
+ * The text is passed as an ARGV entry, never through a shell, so newlines,
+ * quotes and backticks in Justin's answer survive verbatim.
+ */
+export async function addComment(
+  ctx: BdContext,
+  id: string,
+  text: string,
+): Promise<BdResult<true>> {
+  const result = await runBd(ctx, ['comments', 'add', id, text]);
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
+
+/**
+ * Merge a few keys into a bead's metadata, leaving the rest alone.
+ *
+ * THIS IS THE ONE PLACE THE MERGE SEMANTICS ARE WANTED. Everywhere else in this
+ * file sends the full key set precisely because `--metadata @file` merges
+ * instead of replacing (see the header). Here the merge IS the operation:
+ * `thread answer` stamps `answeredAt` on an ask bead and must not disturb
+ * `kind`, `blocking`, `defaultAction` or `threadId`, none of which it knows.
+ */
+export async function mergeMetadata(
+  ctx: BdContext,
+  id: string,
+  metadata: Record<string, unknown>,
+): Promise<BdResult<true>> {
+  const result = await withMetadataFile(metadata, (metaPath) =>
+    runBd(ctx, ['update', id, '--metadata', `@${metaPath}`]),
+  );
   if (!result.ok) return result;
   return {ok: true, value: true};
 }

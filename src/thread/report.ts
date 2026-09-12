@@ -167,10 +167,277 @@ function notRecorded(args: {
 }
 
 /**
- * One long linear pipeline on purpose: the ORDER is the design (see the file
- * header), and splitting it into helpers would hide the one property that
- * matters — that the archive happens before bd and that every bd failure lands
- * in the same NOT RECORDED path.
+ * What the bd half of a report did, as a tagged outcome.
+ *
+ * Four members, not three, because `refused` and `bdFailed` need opposite
+ * responses: a refusal means "fix the payload, nothing was written" (exit 2,
+ * nothing to spool), a bd failure means "the payload is fine, the database was
+ * not" (exit 1, spool it). `superseded` is a third distinct fact — see below.
+ * Every member that has a report to show carries the RENDERED text, because the
+ * report prints on every path including the failing ones.
+ */
+export type BdWriteOutcome =
+  | {
+      status: 'written';
+      askIds: (string | null)[];
+      closedAsks: string[];
+      rendered: string;
+      reportCount: number;
+      threadId: string;
+    }
+  | {status: 'bdFailed'; failure: BdFailure; rendered: string}
+  | {status: 'refused'; missing: string[]}
+  | {
+      status: 'superseded';
+      existingReportedAt: string;
+      existingReportCount: number;
+      threadId: string;
+    };
+
+export interface BdWriteInput {
+  ctx: BdContext;
+  facts: ThreadFacts;
+  payload: ThreadReportPayload;
+  sessionId: string;
+  /**
+   * Refuse to write a payload OLDER than the thread's current state.
+   *
+   * Off for a live report, which is the newest thing there is by construction.
+   * ON for the spool drain, where it is load-bearing: sandbox denial is
+   * per-session, so report #3 can spool while report #4 from the same session
+   * lands fine minutes later. D1 rewrites the bead IN PLACE, so draining #3
+   * afterwards would overwrite #4's title, notes and metadata with older ones —
+   * a silent regression of the bead to a state Justin already moved past, and
+   * in the reassuring direction (an old report shows old open-ask counts).
+   */
+  supersedeGuard?: boolean;
+}
+
+/**
+ * Steps 4-6 of the pipeline: read the thread, enforce D4, write everything.
+ *
+ * EXTRACTED SO THE SPOOL DRAIN SHARES IT (home-base-p1uj.2). `thread board`
+ * drains spooled payloads by replaying exactly this sequence, and a second copy
+ * of it would drift from this one the first time either was touched — the two
+ * would then disagree about D4, about the two-write ordering, or about what
+ * counts as a carried ask, and only one of them would be under test.
+ *
+ * The steps BEFORE this (validate, measure, archive) stay in `runThreadReport`:
+ * a spooled payload has already been validated, measured and archived once, and
+ * re-measuring facts at drain time would attach today's git state to a report
+ * written yesterday.
+ */
+export async function writeReportToBd(
+  input: BdWriteInput,
+): Promise<BdWriteOutcome> {
+  const {ctx, facts, payload, sessionId} = input;
+
+  const renderWithoutBead = (): string =>
+    renderReport({
+      askIds: payload.asks.map(() => null),
+      facts,
+      payload,
+      threadId: null,
+    });
+
+  // --- 4. read the existing thread and its open asks ----------------------
+  const existing = await findThreadBySession(ctx, sessionId);
+  if (!existing.ok) {
+    return {
+      failure: existing.failure,
+      rendered: renderWithoutBead(),
+      status: 'bdFailed',
+    };
+  }
+  const existingThread = existing.value;
+
+  if (input.supersedeGuard === true && existingThread != null) {
+    const meta = (existingThread.metadata ?? {}) as {reportedAt?: unknown};
+    const existingReportedAt =
+      typeof meta.reportedAt === 'string' ? meta.reportedAt : null;
+    // A MEASURED comparison or nothing: if the bead carries no readable
+    // reportedAt we cannot show this payload is newer, so we do not claim it is
+    // — we apply it, which is the drain's job, rather than silently discarding
+    // a report on the strength of an unknown.
+    if (existingReportedAt != null && existingReportedAt > facts.reportedAt) {
+      return {
+        existingReportCount: readReportCount(existingThread.metadata),
+        existingReportedAt,
+        status: 'superseded',
+        threadId: existingThread.id,
+      };
+    }
+  }
+
+  let openAsks: BdIssue[] = [];
+  if (existingThread != null) {
+    const asks = await listOpenAsks(ctx, existingThread.id);
+    if (!asks.ok) {
+      // A failed read is NOT "no open asks". Proceeding would skip D4 entirely
+      // and silently drop everything Justin was asked last time.
+      return {
+        failure: asks.failure,
+        rendered: renderWithoutBead(),
+        status: 'bdFailed',
+      };
+    }
+    openAsks = asks.value;
+  }
+  const openAskIds = openAsks.map((ask) => ask.id);
+
+  // --- 5. D4 ---------------------------------------------------------------
+  const coverage = checkPriorAskCoverage(openAskIds, payload.priorAsks);
+  if (!coverage.ok) return {missing: coverage.missing, status: 'refused'};
+
+  // --- 6. write ------------------------------------------------------------
+  const reportCount = readReportCount(existingThread?.metadata) + 1;
+  const description = renderThreadDescription({facts, payload});
+
+  // Asks this report leaves open behind it: the `carried` ones. Everything else
+  // in priorAsks is about to be closed, so it is not part of what still waits
+  // for Justin. `blocking` is read from the ask bead's OWN metadata rather than
+  // assumed — an unreadable block is false, which under-reports urgency rather
+  // than inventing it.
+  const carriedIds = new Set(
+    payload.priorAsks
+      .filter((prior) => !CLOSING_DISPOSITIONS.has(prior.disposition))
+      .map((prior) => prior.id),
+  );
+  const carriedOpenAsks = openAsks
+    .filter((ask) => carriedIds.has(ask.id))
+    .map((ask) => ({
+      blocking:
+        (ask.metadata as {blocking?: unknown} | undefined)?.blocking === true,
+      id: ask.id,
+    }));
+
+  const provisionalMetadata = buildThreadMetadata({
+    askIds: [],
+    carriedOpenAsks,
+    facts,
+    payload,
+    reportCount,
+  });
+
+  // The notes field carries the RENDERED report (D10), and the rendering wants
+  // the ask ids inline — which do not exist until the asks are created, which
+  // needs the thread id. So the bead is written twice: once to exist, once with
+  // the finished report in its notes.
+  //
+  // The FIRST write already carries a complete report, with the ask ids shown
+  // as "(NOT RECORDED)". A placeholder would be cheaper, but if the run then
+  // died between the two writes the bead would be left saying "(rendering)" —
+  // a report-shaped hole in the one field D10 promises is always readable.
+  // An id-less report is degraded; a placeholder is a lie.
+  const provisionalNotes = renderWithoutBead();
+
+  let threadId: string;
+  if (existingThread == null) {
+    const created = await createThread(ctx, {
+      description,
+      metadata: provisionalMetadata,
+      notes: provisionalNotes,
+      title: payload.title,
+    });
+    if (!created.ok) {
+      return {
+        failure: created.failure,
+        rendered: renderWithoutBead(),
+        status: 'bdFailed',
+      };
+    }
+    threadId = created.value;
+  } else {
+    threadId = existingThread.id;
+    const updated = await updateThread(ctx, threadId, {
+      description,
+      metadata: provisionalMetadata,
+      notes: provisionalNotes,
+      title: payload.title,
+    });
+    if (!updated.ok) {
+      return {
+        failure: updated.failure,
+        rendered: renderWithoutBead(),
+        status: 'bdFailed',
+      };
+    }
+  }
+
+  const askIds: (string | null)[] = [];
+  for (const [index, ask] of payload.asks.entries()) {
+    const created = await createAsk(ctx, threadId, {
+      blocking: ask.blocking,
+      description: renderAskDescription(ask, threadId),
+      metadata: buildAskMetadata({
+        askIndex: index,
+        blocking: ask.blocking,
+        defaultAction: ask.default,
+        kind: ask.kind,
+        optionCount: ask.options.length,
+        reportedAt: facts.reportedAt,
+        sessionId,
+        threadId,
+      }),
+      title: firstLine(ask.text, ASK_TITLE_CAP),
+    });
+    if (!created.ok) {
+      askIds.push(null);
+      return {
+        failure: created.failure,
+        rendered: renderReport({askIds, facts, payload, threadId}),
+        status: 'bdFailed',
+      };
+    }
+    askIds.push(created.value);
+  }
+
+  const closedAsks: string[] = [];
+  for (const prior of payload.priorAsks) {
+    if (!CLOSING_DISPOSITIONS.has(prior.disposition)) continue;
+    if (!openAskIds.includes(prior.id)) continue;
+    const closed = await closeAsk(
+      ctx,
+      prior.id,
+      `${prior.disposition}: ${prior.detail}`,
+    );
+    if (!closed.ok) {
+      return {
+        failure: closed.failure,
+        rendered: renderReport({askIds, facts, payload, threadId}),
+        status: 'bdFailed',
+      };
+    }
+    closedAsks.push(prior.id);
+  }
+
+  const rendered = renderReport({askIds, facts, payload, threadId});
+  const notesWritten = await finalizeThread(
+    ctx,
+    threadId,
+    rendered,
+    // The metadata is rebuilt, not reused: the first write could only record
+    // `askIds: []`, because the asks did not exist yet.
+    buildThreadMetadata({
+      askIds,
+      carriedOpenAsks,
+      facts,
+      payload,
+      reportCount,
+    }),
+  );
+  if (!notesWritten.ok) {
+    return {failure: notesWritten.failure, rendered, status: 'bdFailed'};
+  }
+
+  return {askIds, closedAsks, rendered, reportCount, status: 'written', threadId};
+}
+
+/**
+ * The pipeline's ORDER is the design (see the file header): validate, measure,
+ * ARCHIVE, then bd. Only the bd half is extracted (`writeReportToBd`, shared
+ * with the drain) — the archive-before-bd ordering, which is the rule-6
+ * property this file exists to guarantee, stays here where it is visible.
  */
 export async function runThreadReport(
   options: ReportOptions = {},
@@ -234,52 +501,15 @@ export async function runThreadReport(
   }
   const archivePath = archive.ok ? archive.path : null;
 
-  // --- 4. read the existing thread and its open asks ----------------------
+  // --- 4-6. the bd half, shared with the spool drain ----------------------
   const ctx: BdContext = bdContext(env);
-  const existing = await findThreadBySession(ctx, sessionId);
-  const renderWithoutBead = (): string =>
-    renderReport({
-      askIds: payload.asks.map(() => null),
-      facts,
-      payload,
-      threadId: null,
-    });
-  if (!existing.ok) {
-    return notRecorded({
-      archivePath,
-      env,
-      failure: existing.failure,
-      rendered: renderWithoutBead(),
-      report,
-    });
-  }
+  const outcome = await writeReportToBd({ctx, facts, payload, sessionId});
 
-  const existingThread = existing.value;
-  let openAsks: BdIssue[] = [];
-  if (existingThread != null) {
-    const asks = await listOpenAsks(ctx, existingThread.id);
-    if (!asks.ok) {
-      // A failed read is NOT "no open asks". Proceeding would skip D4 entirely
-      // and silently drop everything Justin was asked last time.
-      return notRecorded({
-        archivePath,
-        env,
-        failure: asks.failure,
-        rendered: renderWithoutBead(),
-        report,
-      });
-    }
-    openAsks = asks.value;
-  }
-  const openAskIds = openAsks.map((ask) => ask.id);
-
-  // --- 5. D4 ---------------------------------------------------------------
-  const coverage = checkPriorAskCoverage(openAskIds, payload.priorAsks);
-  if (!coverage.ok) {
+  if (outcome.status === 'refused') {
     console.error(
       'thread report: REFUSED — these open asks are not dispositioned in priorAsks (D4). Nothing was written.',
     );
-    for (const id of coverage.missing) console.error(`  ${id}`);
+    for (const id of outcome.missing) console.error(`  ${id}`);
     console.error('');
     console.error('Add one entry per id to priorAsks, then re-run:');
     console.error(
@@ -293,160 +523,27 @@ export async function runThreadReport(
     return 2;
   }
 
-  // --- 6. write ------------------------------------------------------------
-  const reportCount = readReportCount(existingThread?.metadata) + 1;
-  const description = renderThreadDescription({facts, payload});
-
-  // Asks this report leaves open behind it: the `carried` ones. Everything else
-  // in priorAsks is about to be closed, so it is not part of what still waits
-  // for Justin. `blocking` is read from the ask bead's OWN metadata rather than
-  // assumed — an unreadable block is false, which under-reports urgency rather
-  // than inventing it.
-  const carriedIds = new Set(
-    payload.priorAsks
-      .filter((prior) => !CLOSING_DISPOSITIONS.has(prior.disposition))
-      .map((prior) => prior.id),
-  );
-  const carriedOpenAsks = openAsks
-    .filter((ask) => carriedIds.has(ask.id))
-    .map((ask) => ({
-      blocking:
-        (ask.metadata as {blocking?: unknown} | undefined)?.blocking === true,
-      id: ask.id,
-    }));
-
-  const provisionalMetadata = buildThreadMetadata({
-    askIds: [],
-    carriedOpenAsks,
-    facts,
-    payload,
-    reportCount,
-  });
-
-  // The notes field carries the RENDERED report (D10), and the rendering wants
-  // the ask ids inline — which do not exist until the asks are created, which
-  // needs the thread id. So the bead is written twice: once to exist, once with
-  // the finished report in its notes.
-  //
-  // The FIRST write already carries a complete report, with the ask ids shown
-  // as "(NOT RECORDED)". A placeholder would be cheaper, but if the run then
-  // died between the two writes the bead would be left saying "(rendering)" —
-  // a report-shaped hole in the one field D10 promises is always readable.
-  // An id-less report is degraded; a placeholder is a lie.
-  const provisionalNotes = renderWithoutBead();
-
-  let threadId: string;
-  if (existingThread == null) {
-    const created = await createThread(ctx, {
-      description,
-      metadata: provisionalMetadata,
-      notes: provisionalNotes,
-      title: payload.title,
-    });
-    if (!created.ok) {
-      return notRecorded({
-        archivePath,
-        env,
-        failure: created.failure,
-        rendered: renderWithoutBead(),
-        report,
-      });
-    }
-    threadId = created.value;
-  } else {
-    threadId = existingThread.id;
-    const updated = await updateThread(ctx, threadId, {
-      description,
-      metadata: provisionalMetadata,
-      notes: provisionalNotes,
-      title: payload.title,
-    });
-    if (!updated.ok) {
-      return notRecorded({
-        archivePath,
-        env,
-        failure: updated.failure,
-        rendered: renderWithoutBead(),
-        report,
-      });
-    }
-  }
-
-  const askIds: (string | null)[] = [];
-  for (const [index, ask] of payload.asks.entries()) {
-    const created = await createAsk(ctx, threadId, {
-      blocking: ask.blocking,
-      description: renderAskDescription(ask, threadId),
-      metadata: buildAskMetadata({
-        askIndex: index,
-        blocking: ask.blocking,
-        defaultAction: ask.default,
-        kind: ask.kind,
-        optionCount: ask.options.length,
-        reportedAt: facts.reportedAt,
-        sessionId,
-        threadId,
-      }),
-      title: firstLine(ask.text, ASK_TITLE_CAP),
-    });
-    if (!created.ok) {
-      askIds.push(null);
-      return notRecorded({
-        archivePath,
-        env,
-        failure: created.failure,
-        rendered: renderReport({askIds, facts, payload, threadId}),
-        report,
-      });
-    }
-    askIds.push(created.value);
-  }
-
-  const closedAsks: string[] = [];
-  for (const prior of payload.priorAsks) {
-    if (!CLOSING_DISPOSITIONS.has(prior.disposition)) continue;
-    if (!openAskIds.includes(prior.id)) continue;
-    const closed = await closeAsk(
-      ctx,
-      prior.id,
-      `${prior.disposition}: ${prior.detail}`,
-    );
-    if (!closed.ok) {
-      return notRecorded({
-        archivePath,
-        env,
-        failure: closed.failure,
-        rendered: renderReport({askIds, facts, payload, threadId}),
-        report,
-      });
-    }
-    closedAsks.push(prior.id);
-  }
-
-  const rendered = renderReport({askIds, facts, payload, threadId});
-  const notesWritten = await finalizeThread(
-    ctx,
-    threadId,
-    rendered,
-    // The metadata is rebuilt, not reused: the first write could only record
-    // `askIds: []`, because the asks did not exist yet.
-    buildThreadMetadata({
-      askIds,
-      carriedOpenAsks,
-      facts,
-      payload,
-      reportCount,
-    }),
-  );
-  if (!notesWritten.ok) {
+  if (outcome.status === 'bdFailed') {
     return notRecorded({
       archivePath,
       env,
-      failure: notesWritten.failure,
-      rendered,
+      failure: outcome.failure,
+      rendered: outcome.rendered,
       report,
     });
   }
+
+  if (outcome.status === 'superseded') {
+    // Unreachable from here: `supersedeGuard` is off for a live report, which
+    // is the newest thing there is. Handled rather than cast away so that
+    // turning the guard on later cannot silently fall through to "recorded".
+    console.error(
+      `thread report: the thread ${outcome.threadId} already carries a newer report (#${outcome.existingReportCount}, ${outcome.existingReportedAt}). Nothing was written.`,
+    );
+    return 2;
+  }
+
+  const {askIds, closedAsks, rendered, reportCount, threadId} = outcome;
 
   // --- 7. print ------------------------------------------------------------
   console.log(rendered);
