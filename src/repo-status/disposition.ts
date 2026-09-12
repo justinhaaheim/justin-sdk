@@ -39,6 +39,17 @@ export type Disposition =
   /** Real unmerged work with no proof of preservation anywhere. */
   | 'needs-judgment';
 
+/**
+ * The clause a `why` carries when PR data was not available.
+ *
+ * Exported because the renderer has to remove EXACTLY this suffix, and it can
+ * only do that safely if the two sides share one string (epic design D5). The
+ * typed object keeps the clause — a YAML consumer still has to tell "no PR"
+ * apart from "not checked" — but the ledger prints the fact once, in the footer,
+ * rather than once per unmerged row plus the footer.
+ */
+export const PR_STATE_NOT_CHECKED = '; PR state not checked';
+
 export interface BranchDisposition {
   disposition: Disposition;
   /** One line explaining the verdict, in plain language. */
@@ -216,7 +227,7 @@ export function decideDisposition(
       ? `; PR #${pr.number} is ${pr.state.toLowerCase()}`
       : prDataAvailable
         ? '; no PR'
-        : '; PR state not checked';
+        : PR_STATE_NOT_CHECKED;
   const one = proof.unaccountedCommits.length === 1;
   // RECONCILE THIS NUMBER WITH THE AHEAD COUNT, in the line itself. The row says
   // AHEAD 41 and this sentence says 39, because the proof walks non-merge

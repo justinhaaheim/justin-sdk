@@ -22,9 +22,10 @@
 
 import {afterEach, describe, expect, test} from 'bun:test';
 import {execFileSync, spawnSync} from 'child_process';
-import {chmodSync, existsSync, rmSync, writeFileSync} from 'fs';
+import {chmodSync, existsSync, mkdirSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
+import {PR_STATE_NOT_CHECKED} from '../src/repo-status/disposition';
 import {renderReportPretty} from '../src/repo-status/pretty';
 import {buildReport, type RepoStatusReport} from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -314,5 +315,253 @@ describe('the ledger rendering', () => {
 
     expect(filtered.stdout).not.toContain('archive/finished');
     expect(all.stdout).toContain('archive/finished');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The round-2 cut list (epic design D5, home-base-qyu1.33.10)
+// ---------------------------------------------------------------------------
+
+/** The row line for one branch, as rendered. Throws rather than returning null. */
+function rowFor(out: string, name: string): string {
+  const line = out
+    .split('\n')
+    .find((l) => l.startsWith(`  ${name} `) || l === `  ${name}`);
+  if (line == null) throw new Error(`no row rendered for ${name}`);
+  return line;
+}
+
+/**
+ * A row's cells. Branch names never contain a space, so splitting on runs of
+ * whitespace gives `[name, AHEAD, BEHIND, FILES, date, time, ...ALSO ON]`.
+ */
+function cells(out: string, name: string): string[] {
+  return rowFor(out, name).trim().split(/\s+/);
+}
+
+/** Everything a row says under ALSO ON, which is whatever follows the clock. */
+function alsoOn(out: string, name: string): string {
+  const line = rowFor(out, name).trimEnd();
+  // The date column is padded to hold the `*` fallback marker, so a row without
+  // one has an extra space before the next column.
+  const clock = /\d{2}:\d{2}\*? {2}/.exec(line);
+  if (clock == null) throw new Error(`no timestamp in the row for ${name}`);
+  return line.slice(clock.index + clock[0].length).trimStart();
+}
+
+/**
+ * Every ALSO ON state in one repo: merged with a remote at the same sha, merged
+ * with a remote that differs, merged local-only, merged remote-only, and an
+ * UNMERGED local-only branch — the one row that must still say THIS DISK ONLY.
+ */
+function alsoOnFixture(sb: Sandbox): string {
+  const repo = sb.path;
+  git(repo, ['init', '-q', '-b', 'main']);
+  git(repo, ['config', 'user.email', 'test@example.com']);
+  git(repo, ['config', 'user.name', 'Test']);
+  const base = commit(repo, 'shared.txt', 'original\n', 'initial');
+  const head = commit(repo, 'second.txt', 'more\n', 'second');
+
+  git(repo, ['branch', '-q', 'landed-pushed', head]);
+  git(repo, ['update-ref', 'refs/remotes/origin/landed-pushed', head]);
+
+  // The remote is at this branch's OLD tip: merged either way, but the remote
+  // ref is not the same commit, so deleting one is not deleting the other.
+  git(repo, ['branch', '-q', 'landed-drifted', head]);
+  git(repo, ['update-ref', 'refs/remotes/origin/landed-drifted', base]);
+
+  git(repo, ['branch', '-q', 'landed-local', head]);
+
+  // No local branch at all — the row IS the remote ref.
+  git(repo, ['update-ref', 'refs/remotes/origin/landed-remote', head]);
+
+  git(repo, ['checkout', '-q', '-b', 'open-local', base]);
+  commit(repo, 'open.txt', 'unmerged\n', 'work only here');
+  git(repo, ['checkout', '-q', 'main']);
+  return repo;
+}
+
+describe('ALSO ON says something different in each half of the ledger', () => {
+  test('a merged row names the remote ref that also needs deleting', () => {
+    const out = prettyFor(alsoOnFixture(track(createSandbox())), {
+      sinceDays: null,
+    });
+
+    // The CLEANUP fact, not the tautology. `main` was the old answer and it was
+    // the same answer on every merged row (epic design D5).
+    expect(alsoOn(out, 'landed-pushed')).toBe('origin/landed-pushed');
+    expect(alsoOn(out, 'landed-drifted')).toBe(
+      'origin/landed-drifted (differs)',
+    );
+    expect(alsoOn(out, 'landed-local')).toBe('—');
+    // A remote-only row's remote ref is its own name; repeating it would just
+    // restate the BRANCH column.
+    expect(alsoOn(out, 'origin/landed-remote')).toBe('—');
+
+    // The tautology is gone: no merged row answers with the baseline name.
+    const merged = out.slice(out.indexOf('ALREADY MERGED'));
+    expect(merged).not.toMatch(/ {2}main\s*$/m);
+  });
+
+  test('THIS DISK ONLY survives where it means something, and only there', () => {
+    const out = prettyFor(alsoOnFixture(track(createSandbox())), {
+      sinceDays: null,
+    });
+
+    // `landed-local` and `open-local` are both on no remote. The difference is
+    // that one has work to lose and the other does not, which is exactly what
+    // this marker is for.
+    expect(alsoOn(out, 'open-local')).toBe('THIS DISK ONLY');
+    expect(out.slice(out.indexOf('ALREADY MERGED'))).not.toContain(
+      'THIS DISK ONLY',
+    );
+  });
+});
+
+describe('FILES tells a structural zero from a measured one', () => {
+  test('an ahead-0 row renders —, and an unmeasured row still renders ?', () => {
+    const repo = alsoOnFixture(track(createSandbox()));
+
+    // `overlaps: false` is what leaves `changedFileCount` null on a row with
+    // unique work: the count comes from the changed-file walk that section runs.
+    const unmeasured = prettyFor(repo, {overlaps: false, sinceDays: null});
+    expect(cells(unmeasured, 'landed-local')[1]).toBe('0');
+    expect(cells(unmeasured, 'landed-local')[3]).toBe('—');
+    expect(cells(unmeasured, 'open-local')[3]).toBe('?');
+
+    // POSITIVE CONTROL: with the walk on, the same row prints its real count —
+    // so `?` above is the absence of a measurement, not a constant.
+    const measured = prettyFor(repo, {overlaps: true, sinceDays: null});
+    expect(cells(measured, 'open-local')[3]).toBe('1');
+    // …and the merged row stays `—`, because its zero was never measured at all.
+    expect(cells(measured, 'landed-local')[3]).toBe('—');
+  });
+});
+
+/**
+ * A parent repo where TWO branches each drag the submodule pointer backwards.
+ *
+ * Built the way `tests/repo-status-safety-claims.test.ts` builds its regression
+ * fixture — deliberately duplicated rather than imported, because that file
+ * asserts the claims `merge-preview` makes and must not be modified by work on
+ * the renderer.
+ */
+function twoRegressionsFixture(sb: Sandbox): {
+  old: string;
+  parent: string;
+  recent: string;
+} {
+  const sub = join(sb.path, 'sub');
+  mkdirSync(sub, {recursive: true});
+  git(sub, ['init', '-q', '-b', 'main']);
+  git(sub, ['config', 'user.email', 'test@example.com']);
+  git(sub, ['config', 'user.name', 'Test']);
+  const old = commit(sub, 'v.txt', 'old\n', 'old release');
+  const recent = commit(sub, 'v.txt', 'new\n', 'new release');
+
+  const parent = join(sb.path, 'parent');
+  mkdirSync(parent, {recursive: true});
+  git(parent, ['init', '-q', '-b', 'main']);
+  git(parent, ['config', 'user.email', 'test@example.com']);
+  git(parent, ['config', 'user.name', 'Test']);
+  commit(parent, 'README.md', 'x\n', 'initial');
+  execFileSync(
+    'git',
+    ['-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', sub, 'sub'],
+    {cwd: parent, stdio: 'pipe'},
+  );
+  git(parent, ['-C', 'sub', 'checkout', '-q', recent]);
+  git(parent, ['add', 'sub']);
+  git(parent, ['commit', '-q', '-m', 'point sub at the new release']);
+  const tip = git(parent, ['rev-parse', 'HEAD']);
+
+  for (const name of ['stale-one', 'stale-two']) {
+    git(parent, ['checkout', '-q', '-b', name, tip]);
+    git(parent, ['-C', 'sub', 'checkout', '-q', old]);
+    git(parent, ['add', 'sub']);
+    git(parent, ['commit', '-q', '-m', `${name} drags sub backwards`]);
+  }
+  git(parent, ['checkout', '-q', 'main']);
+  git(parent, ['-C', 'sub', 'checkout', '-q', recent]);
+  return {old, parent, recent};
+}
+
+describe('a submodule REVERTS states the fact per row and the mechanism once', () => {
+  test('two rows sharing a regression get one short line each', () => {
+    const {old, parent, recent} = twoRegressionsFixture(track(createSandbox()));
+    const out = prettyFor(parent, {sinceDays: null, submodules: true});
+    const expected = `REVERTS submodule sub ${recent.slice(0, 7)} -> ${old.slice(0, 7)}`;
+
+    const perRow = out.split('\n').filter((l) => l.includes(expected));
+    expect(perRow).toHaveLength(2);
+    expect(perRow[0]).toBe(`      ${expected}`);
+
+    // The MECHANISM, exactly once, and in the footer rather than under a row.
+    const mechanism = out
+      .split('\n')
+      .filter((l) => l.startsWith('A merge that REVERTS a submodule'));
+    expect(mechanism).toHaveLength(1);
+    expect(out.indexOf(mechanism[0] ?? '')).toBeGreaterThan(
+      out.indexOf('WHAT WAS AND WAS NOT CHECKED'),
+    );
+
+    // The paragraph that used to print under every affected row is gone from
+    // the ledger — and still intact on the typed object below.
+    expect(out).not.toContain('an ancestor, so the merge silently UNDOES');
+  });
+
+  test('the typed object keeps the full explanation the renderer shortened', () => {
+    const {parent} = twoRegressionsFixture(track(createSandbox()));
+    const report = buildReport({
+      content: false,
+      cwd: parent,
+      prs: false,
+      sinceDays: null,
+      submodules: true,
+    });
+    const shift = report?.branches
+      ?.find((b) => b.name === 'stale-one')
+      ?.mergePreview?.submoduleShifts?.find((s) => s.path === 'sub');
+
+    expect(shift?.direction).toBe('regression');
+    // A YAML consumer gets no footer, so the mechanism has to stay in the field.
+    expect(shift?.why).toContain('the merge silently UNDOES submodule history');
+  });
+
+  test('no rendered regression means no mechanism line at all', () => {
+    // NEGATIVE CONTROL: a standing explanation of a hazard this repo does not
+    // exhibit is a line the reader learns to skip.
+    const out = prettyFor(buildFixture(track(createSandbox())));
+    expect(out).not.toContain('A merge that REVERTS a submodule');
+  });
+});
+
+describe('the PR-state clause is stated once, and only where it is unknown', () => {
+  test('with --prs off the footer says it and no row repeats it', () => {
+    const out = prettyFor(alsoOnFixture(track(createSandbox())), {
+      content: true,
+      prs: false,
+      sinceDays: null,
+    });
+
+    expect(out).toContain('PR state: NOT checked');
+    expect(out).not.toContain('PR state not checked');
+    // The footer no longer points at row text the reader will not find.
+    expect(out).not.toContain('Rows saying');
+  });
+
+  test('the typed object still carries the clause on every row', () => {
+    const report = buildReport({
+      content: true,
+      cwd: alsoOnFixture(track(createSandbox())),
+      prs: false,
+      sinceDays: null,
+      submodules: false,
+    });
+    const row = report?.branches?.find((b) => b.name === 'open-local');
+
+    // Stripping is a RENDERING decision. A YAML consumer reading one row in
+    // isolation has no footer and still has to tell "no PR" from "not checked".
+    expect(row?.why.endsWith(PR_STATE_NOT_CHECKED)).toBe(true);
   });
 });

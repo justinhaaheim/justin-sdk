@@ -45,10 +45,12 @@
  */
 
 import {formatTouched} from '../plugin/lib/repo-status/prime-view';
+import {PR_STATE_NOT_CHECKED} from './disposition';
 
 import type {FilterSummary} from '../plugin/lib/repo-status/types';
 import type {Disposition} from './disposition';
 import type {FetchAge} from './fetch-age';
+import type {SubmoduleShift} from './merge-preview';
 import type {BranchOverlap, OverlapReport} from './overlap';
 import type {RepoStatusReport, BranchRow} from './report';
 import type {
@@ -197,20 +199,71 @@ function fileList(files: string[], total: number, cap: number): string {
 }
 
 /**
- * Where the branch's work EXISTS, which is the recoverable/unrecoverable line.
+ * ALSO ON — one column answering two different questions, by section.
  *
- * Every blind reviewer ranked this the most important missing field: a branch
- * on origin survives losing this machine and a branch that is only here does
- * not, and the old output drew no distinction between them.
+ * ON AN UNMERGED ROW it is where the WORK survives: a branch on origin survives
+ * losing this machine and a branch that is only here does not, which every blind
+ * reviewer ranked the most important missing field. `THIS DISK ONLY` belongs to
+ * this half and only this half.
+ *
+ * ON A MERGED ROW the work is on the baseline by definition, so "where does it
+ * survive" has one answer for every row and printing it was a tautology — the
+ * column said `main` ten times over (all three round-2 reviewers, independently).
+ * The useful fact there is the CLEANUP one: deleting the local branch leaves the
+ * remote ref behind, so what this column names is the ref that also has to go
+ * (`git push origin --delete <name>`). Nothing to delete renders `—`: a
+ * local-only merged branch has no remote ref, and a remote-only row IS its
+ * remote ref, so naming it would just repeat the BRANCH column.
+ *
+ * `THIS DISK ONLY` is never printed on a merged row. It is an alert about work
+ * at risk, and a merged row has none — firing the loudest marker in the table on
+ * the rows needing no attention is how a real warning stops being read.
+ *
+ * Epic design D5.
  */
-function backup(row: BranchRow, baselineRef: string): string {
-  // A branch with no unique commits has nothing at risk WHEREVER its ref lives:
-  // its work is on the baseline. Flagging those as "this disk only" would fire
-  // the loudest marker in the table on the ten rows that need no attention at
-  // all, which is how a real warning stops being read.
-  if (row.disposition === 'merged' && row.ahead === 0) return baselineRef;
+function backup(row: BranchRow): string {
+  if (row.disposition === 'merged') {
+    if (row.remote == null || row.isRemoteOnly) return '—';
+    return row.remote.inSync ? row.remote.ref : `${row.remote.ref} (differs)`;
+  }
   if (row.remote == null) return 'THIS DISK ONLY';
   return row.remote.inSync ? row.remote.ref : `${row.remote.ref} (differs)`;
+}
+
+/**
+ * FILES — changed against the baseline, or `—` when there is nothing to change.
+ *
+ * A row with no unique commits changes no files: the zero is STRUCTURAL, implied
+ * by AHEAD 0 on the same line, and a column of measured-looking zeroes invited
+ * the reader to wonder what was counted. `—` says "not applicable" where `0`
+ * said "measured, and it came out zero".
+ *
+ * `?` is untouched and keeps its own meaning — the count was not measured — so
+ * the three states stay three states (rule 6; epic design D5).
+ */
+function filesCell(row: BranchRow): string {
+  if (row.ahead === 0) return '—';
+  return String(row.changedFileCount ?? '?');
+}
+
+/**
+ * The row's verdict, with the PR-state clause removed when it is a global fact.
+ *
+ * `; PR state not checked` is true of EVERY row when `--prs` did not run, so as
+ * a per-row clause it carries no per-row information — it appeared on every
+ * unmerged row and again in the footer, four times in a real home-base run.
+ * The footer states it once; the rows say what differs between them.
+ *
+ * The typed object is NOT touched: `row.why` still ends with the clause, because
+ * a YAML consumer reading one row in isolation has no footer and still has to
+ * tell "no PR" from "PR state unknown" (rule 6). This strip is a rendering
+ * decision, and it fires under exactly the condition that prints the footer line
+ * (`enrichments.prs` is `prIndex.available`, the same flag `decideDisposition`
+ * receives as `prDataAvailable`), so the fact can never go missing from both.
+ */
+function whyLine(why: string, prsChecked: boolean): string {
+  if (prsChecked || !why.endsWith(PR_STATE_NOT_CHECKED)) return why;
+  return why.slice(0, why.length - PR_STATE_NOT_CHECKED.length);
 }
 
 /**
@@ -266,6 +319,48 @@ function mergeSentence(row: BranchRow, style: Styler): string | null {
       ? 'merges into main cleanly (fast-forward, no merge commit)'
       : 'merges into main cleanly (writes a merge commit)',
   );
+}
+
+/**
+ * A submodule pointer moving, as ONE short fact per row.
+ *
+ * `shift.why` is a paragraph — it has to be, because `merge-preview` appends it
+ * to the preview's own `why` for a YAML consumer who gets no other explanation,
+ * and a caller reading only that field must still learn why a conflict-free
+ * merge is dangerous. Printed verbatim under every affected row it repeated the
+ * mechanism once per branch (twice in a real home-base run) and buried the
+ * per-row fact — which path, and which way — inside it.
+ *
+ * So the ledger splits them: the FACT is per row, here, and the MECHANISM is
+ * stated once in the footer (`submoduleMechanismLine`). The word REVERTS stays
+ * in the row line — it is what makes the row scannable, and dropping it was
+ * never on the table. `merge-preview.ts` is untouched (epic design D5).
+ */
+function shiftLine(shift: SubmoduleShift): string {
+  const move = `submodule ${shift.path} ${short(shift.baselineSha)} -> ${short(
+    shift.mergedSha,
+  )}`;
+  if (shift.direction === 'regression') return `REVERTS ${move}`;
+  if (shift.direction === 'unknown') return `${move}: direction UNKNOWN`;
+  return `${move}: histories forked`;
+}
+
+/**
+ * The mechanism behind a REVERTS line, said once for the whole report.
+ *
+ * Only when a rendered row actually has a regression or unknown shift: a
+ * standing explanation of a hazard nothing in this report exhibits is a line the
+ * reader learns to skip, and skipping it is exactly what must not happen on the
+ * run where it does apply.
+ */
+function submoduleMechanismLine(rows: BranchRow[]): string | null {
+  const hit = rows.some((r) =>
+    (r.mergePreview?.submoduleShifts ?? []).some(
+      (s) => s.direction === 'regression' || s.direction === 'unknown',
+    ),
+  );
+  if (!hit) return null;
+  return 'A merge that REVERTS a submodule reports no conflict — only one side moved the pointer, so git takes that side. Check the direction before landing.';
 }
 
 /**
@@ -342,14 +437,16 @@ const HEADERS = {
 };
 
 /** Widths measured over EVERY row in the report, so all sections share a grid. */
-function measureColumns(rows: BranchRow[], baselineRef: string): Columns {
+function measureColumns(rows: BranchRow[]): Columns {
   const max = (pick: (r: BranchRow) => string, floor: number): number =>
     rows.reduce((w, r) => Math.max(w, pick(r).length), floor);
   return {
     ahead: max((r) => String(r.ahead ?? '?'), HEADERS.ahead.length),
-    backup: max((r) => backup(r, baselineRef), HEADERS.backup.length),
+    // Measured through the SAME functions the rows print, so a cell can never be
+    // wider than the column reserved for it.
+    backup: max((r) => backup(r), HEADERS.backup.length),
     behind: max((r) => String(r.behind ?? '?'), HEADERS.behind.length),
-    files: max((r) => String(r.changedFileCount ?? '?'), HEADERS.files.length),
+    files: max((r) => filesCell(r), HEADERS.files.length),
     // A pathological branch name must not push every other column off screen.
     name: Math.min(
       52,
@@ -386,14 +483,13 @@ function branchRow(
   cols: Columns,
   style: Styler,
   repoRoot: string,
-  baselineRef: string,
 ): string {
   // '?' rather than a blank cell: the value was not measured, and an empty cell
   // would read as a zero somebody forgot to print.
   const ahead = String(row.ahead ?? '?').padStart(cols.ahead);
   const behind = String(row.behind ?? '?').padStart(cols.behind);
-  const files = String(row.changedFileCount ?? '?').padStart(cols.files);
-  const where = backup(row, baselineRef);
+  const files = filesCell(row).padStart(cols.files);
+  const where = backup(row);
   const line = `  ${style.bold(row.name.padEnd(cols.name))}  ${ahead}  ${behind}  ${files}  ${workDate(
     row,
   ).padEnd(
@@ -628,14 +724,21 @@ function methodBlock(report: RepoStatusReport, style: Styler): string[] {
     );
   }
   if (!report.enrichments.prs) {
+    // The "Rows saying …" clause is gone with the rows that said it: no row
+    // carries the per-row copy any more (see `whyLine`), so a pointer back to
+    // text the reader will not find above is a wild goose chase. This line is
+    // now the ONLY statement of the fact, which is why it is unconditional on
+    // `--prs` being off rather than gated on any row having a PR.
     lines.push(
       `PR state: NOT checked${
         report.enrichments.prsUnavailableReason != null
           ? ` (${report.enrichments.prsUnavailableReason})`
           : ''
-      } — pass \`--prs\`. Rows saying "PR state not checked" mean this, not that no PR exists.`,
+      } — pass \`--prs\`. Absent PR data is not the absence of a PR.`,
     );
   }
+  const mechanism = submoduleMechanismLine(report.branches ?? []);
+  if (mechanism != null) lines.push(style.alert(mechanism));
   return lines;
 }
 
@@ -662,7 +765,9 @@ function furtherFindings(entry: SubmoduleRow): SubmoduleFinding[] {
   const printed = all.findIndex(
     (f) => f.severity === entry.severity && f.why === entry.why,
   );
-  return printed < 0 ? all : [...all.slice(0, printed), ...all.slice(printed + 1)];
+  return printed < 0
+    ? all
+    : [...all.slice(0, printed), ...all.slice(printed + 1)];
 }
 
 function submoduleBlock(
@@ -783,7 +888,7 @@ export function renderReportPretty(
 
   blocks.push(summaryBlock(report, style));
 
-  const cols = measureColumns(report.branches, report.repo.baselineRef);
+  const cols = measureColumns(report.branches);
   for (const group of GROUPS) {
     const rows = report.branches.filter((r) => r.disposition === group.key);
     if (rows.length === 0) continue;
@@ -807,9 +912,7 @@ export function renderReportPretty(
       headerRow(cols, style),
     ];
     for (const row of rows) {
-      lines.push(
-        branchRow(row, cols, style, report.repo.root, report.repo.baselineRef),
-      );
+      lines.push(branchRow(row, cols, style, report.repo.root));
       const detail: string[] = [];
       if (row.lastWork != null) detail.push(style.dim(row.lastWork.subject));
       const merge = mergeSentence(row, style);
@@ -836,16 +939,16 @@ export function renderReportPretty(
       // already on its line. The squash-merge case says how the content was
       // proven, which is the whole evidence for the verdict, so it keeps its.
       if (!(row.disposition === 'merged' && row.ahead === 0)) {
-        detail.push(row.why);
+        detail.push(whyLine(row.why, report.enrichments.prs));
       }
       // A submodule pointer moving the wrong way is invisible in a conflict
       // list — git takes the only side that moved and reports success — so it
       // gets its own line, above the overlap detail, on any row that has one.
+      // ONE SHORT FACT per row; the mechanism is in the footer (epic design D5).
       for (const shift of row.mergePreview?.submoduleShifts ?? []) {
         if (shift.direction === 'advance') continue;
-        detail.push(
-          shift.direction === 'divergent' ? shift.why : style.alert(shift.why),
-        );
+        const text = shiftLine(shift);
+        detail.push(shift.direction === 'divergent' ? text : style.alert(text));
       }
       detail.push(...overlapLines(row, report.overlaps, style));
       if (detail.length > 0) {
