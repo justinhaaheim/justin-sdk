@@ -114,6 +114,162 @@ export const threadCommand: CommandModule = {
           );
         },
       )
+      .command(
+        'answer [threadId]',
+        'Walk this thread’s open asks one at a time and record your answers as bd comments. Needs a terminal. Exit 0 walked · 1 a write failed · 2 could not start.',
+        (yy) =>
+          yy
+            .positional('threadId', {
+              describe: 'Thread bead id. Omit for this session’s thread.',
+              type: 'string' as const,
+            })
+            .option('latest', {
+              default: false,
+              describe: 'The most recently reported thread, whatever session',
+              type: 'boolean' as const,
+            })
+            .option('session', {
+              describe: 'Look up by this session id instead of the current one',
+              type: 'string' as const,
+            }),
+        async (argv) => {
+          const {runThreadAnswer} = await import('./answer');
+          process.exit(
+            await runThreadAnswer({
+              latest: argv.latest === true,
+              sessionId: argv.session ?? null,
+              threadId: (argv.threadId as string | undefined) ?? null,
+            }),
+          );
+        },
+      )
+      .command(
+        'inbox [threadId]',
+        'What Justin answered or skipped since the last report, each ask restated in full. Read this at the start of a turn. Marks nothing.',
+        (yy) =>
+          yy
+            .positional('threadId', {
+              describe: 'Thread bead id. Omit for this session’s thread.',
+              type: 'string' as const,
+            })
+            .option('json', {
+              default: false,
+              describe: 'Print the inbox as JSON',
+              type: 'boolean' as const,
+            })
+            .option('latest', {
+              default: false,
+              describe: 'The most recently reported thread, whatever session',
+              type: 'boolean' as const,
+            })
+            .option('session', {
+              describe: 'Look up by this session id instead of the current one',
+              type: 'string' as const,
+            }),
+        async (argv) => {
+          const {runThreadInbox} = await import('./inbox');
+          process.exit(
+            await runThreadInbox({
+              json: argv.json === true,
+              latest: argv.latest === true,
+              sessionId: argv.session ?? null,
+              threadId: (argv.threadId as string | undefined) ?? null,
+            }),
+          );
+        },
+      )
+      .command(
+        'board',
+        'Every live thread: what it was, how far it got, why it stopped, and what it needs from you. Drains the spool first. Grouped by repo; --recent for a flat newest-first list; --open-asks for everything waiting on you.',
+        (yy) =>
+          yy
+            .option('json', {
+              default: false,
+              describe: 'Print the board as JSON',
+              type: 'boolean' as const,
+            })
+            .option('open-asks', {
+              default: false,
+              describe: 'Every open ask across all threads, blocking first',
+              type: 'boolean' as const,
+            })
+            .option('recent', {
+              default: false,
+              describe: 'A flat list, newest report first',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          const {runThreadBoard} = await import('./board');
+          process.exit(
+            await runThreadBoard({
+              json: argv.json === true,
+              view:
+                argv['open-asks'] === true
+                  ? 'openAsks'
+                  : argv.recent === true
+                    ? 'recent'
+                    : 'repo',
+            }),
+          );
+        },
+      )
+      .command(
+        'done [threadId]',
+        'Mark a thread finished: closes it AND its open asks. Omit the id for this session’s thread.',
+        (yy) =>
+          yy
+            .positional('threadId', {
+              describe: 'Thread bead id. Omit for this session’s thread.',
+              type: 'string' as const,
+            })
+            .option('latest', {
+              default: false,
+              describe: 'The most recently reported thread, whatever session',
+              type: 'boolean' as const,
+            })
+            .option('reason', {
+              describe: 'Why it is done (default: "thread closed by Justin")',
+              type: 'string' as const,
+            })
+            .option('session', {
+              describe: 'Look up by this session id instead of the current one',
+              type: 'string' as const,
+            }),
+        async (argv) => {
+          const {runThreadDone} = await import('./done');
+          process.exit(
+            await runThreadDone({
+              latest: argv.latest === true,
+              reason: argv.reason ?? null,
+              sessionId: argv.session ?? null,
+              threadId: (argv.threadId as string | undefined) ?? null,
+            }),
+          );
+        },
+      )
+      .command(
+        'reopen <threadId>',
+        'Reopen a closed thread. Its asks stay closed — the next report can ask again.',
+        (yy) =>
+          yy
+            .positional('threadId', {
+              describe: 'Thread bead id',
+              type: 'string' as const,
+            })
+            .option('reason', {
+              describe: 'Why it is being reopened',
+              type: 'string' as const,
+            }),
+        async (argv) => {
+          const {runThreadReopen} = await import('./done');
+          process.exit(
+            await runThreadReopen({
+              reason: argv.reason ?? null,
+              threadId: (argv.threadId as string | undefined) ?? null,
+            }),
+          );
+        },
+      )
       .demandCommand(1, 'Please specify a thread subcommand'),
   command: 'thread',
   describe:
