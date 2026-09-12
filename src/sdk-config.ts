@@ -196,6 +196,19 @@ const componentConfigSchema = z
       })
       .optional()
       .describe('time-check: the elapsed-time notice.'),
+    thread: z
+      .looseObject({
+        enabled: z
+          .boolean()
+          .optional()
+          .describe(
+            'Master switch for the `justin-sdk thread` command group. DEFAULT FALSE (home-base-p1uj D6): with it off, `thread prepare` prints THREADS: DISABLED and every session keeps its plain text status report.',
+          ),
+      })
+      .optional()
+      .describe(
+        'thread: status reports as beads. Set in the user file to turn it on everywhere; override per repo in the project file.',
+      ),
     'usage-check': z
       .looseObject({
         enabled: z.boolean().optional(),
@@ -270,6 +283,11 @@ export const projectConfigSchema = z
 /** Schema for `$XDG_CONFIG_HOME/justin-sdk/config.json`. */
 export const userConfigSchema = z
   .looseObject({
+    // The SAME block as the project file's. A component knob Justin wants on
+    // for every repo (the `thread` group is the first, home-base-p1uj D6) has
+    // to be settable once, machine-wide, rather than repo by repo — and it must
+    // be the same shape in both files or the two would drift into dialects.
+    componentConfig: componentConfigSchema.optional(),
     healthNotices: healthNoticesSchema.optional(),
   })
   .describe(

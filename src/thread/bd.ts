@@ -1,0 +1,529 @@
+/**
+ * The bd adapter — the ONLY place this SDK talks to ~/Dev/life's beads
+ * (home-base-p1uj D2, D9).
+ *
+ * HOW bd IS REACHED. `bd` is a zsh alias for `bun run bd` inside ~/Dev/life; it
+ * is not on a non-interactive PATH, so every call here is `bun run bd …` with
+ * cwd set to the life workspace. The workspace is `JUSTIN_THREADS_LIFE_DIR`-
+ * overridable, which is also how the "bd unreachable" path gets exercised for
+ * real rather than mocked.
+ *
+ * NOTHING HERE THROWS PAST THE ADAPTER. Every function returns a Result, and
+ * the failure side is a tagged union rather than a string, because the four
+ * failures need four different responses:
+ *
+ *   sandbox-denied  the Claude Code sandbox refused Dolt's LOCK file. The fix
+ *                   is an allowlist entry, and the caller says so — it never
+ *                   tells anyone to re-run with the sandbox disabled.
+ *   unreachable     bun, bd or the workspace is missing. Nothing to retry.
+ *   locked          a concurrent writer. Retried with backoff, then reported.
+ *   failed          bd ran and said no. Carries its exit code and stderr.
+ *   bad-json        bd printed something we could not parse. NEVER treated as
+ *                   an empty result: "no thread bead exists" and "I could not
+ *                   read the answer" are opposite facts, and confusing them
+ *                   would create a second thread bead for a session that
+ *                   already had one, every time.
+ *
+ * MEASURED FACTS this file depends on (2026-09-12, bd 1.1.0):
+ *   - `bd list` and `bd ready` default to a LIMIT. Always pass `--limit 0`.
+ *   - `bd delete` wedges auto-export (the JSONL keeps records Dolt no longer
+ *     has, and every later export refuses). This adapter therefore NEVER
+ *     deletes. Asks are closed, threads are closed; nothing is removed.
+ *   - `--metadata @file.json` MERGES into existing metadata on update — it does
+ *     NOT replace, despite D9's wording. So every writer here sends the FULL
+ *     key set on every write, with explicit nulls, which makes the merge
+ *     behave as a replacement for our keys. Verified: nulls and `[]` both
+ *     persist and overwrite.
+ *   - `bd show <id> --json` returns an ARRAY of one issue; `metadata` is absent
+ *     entirely when the issue has none.
+ *   - `bd comments <id> --json` lists; `bd comments list <id>` is an error.
+ */
+
+import {spawnSync} from 'child_process';
+import {mkdtempSync, rmSync, writeFileSync} from 'fs';
+import {tmpdir} from 'os';
+import {join} from 'path';
+
+import {lifeRepoDir} from './paths';
+
+import type {EnvLike} from './paths';
+
+export type BdFailure =
+  | {kind: 'sandbox-denied'; command: string; detail: string}
+  | {kind: 'unreachable'; command: string; detail: string}
+  | {kind: 'locked'; command: string; detail: string}
+  | {kind: 'failed'; command: string; exitCode: number | null; detail: string}
+  | {kind: 'bad-json'; command: string; detail: string};
+
+export type BdResult<T> =
+  {ok: true; value: T} | {ok: false; failure: BdFailure};
+
+/** One line naming the failing command and why, for the NOT RECORDED banner. */
+export function describeBdFailure(failure: BdFailure): string {
+  switch (failure.kind) {
+    case 'sandbox-denied':
+      return `${failure.command} — the sandbox refused it (${failure.detail})`;
+    case 'unreachable':
+      return `${failure.command} — bd is unreachable (${failure.detail})`;
+    case 'locked':
+      return `${failure.command} — the beads database stayed locked (${failure.detail})`;
+    case 'failed':
+      return `${failure.command} — exit ${failure.exitCode ?? 'null'}: ${failure.detail}`;
+    case 'bad-json':
+      return `${failure.command} — unparseable output (${failure.detail})`;
+  }
+}
+
+export interface BdIssue {
+  close_reason?: string | null;
+  id: string;
+  issue_type?: string;
+  metadata?: Record<string, unknown>;
+  notes?: string | null;
+  description?: string | null;
+  parent?: string | null;
+  priority?: number;
+  status?: string;
+  title?: string;
+  updated_at?: string;
+}
+
+export interface BdComment {
+  author?: string;
+  created_at?: string;
+  text?: string;
+}
+
+const MAX_LOCK_ATTEMPTS = 3;
+const LOCK_BACKOFF_MS = [250, 750];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((done) => setTimeout(done, ms));
+}
+
+/**
+ * Sandbox denial FIRST, before the lock test. The sandbox's own message is
+ * `openat LOCK: operation not permitted`, which matches both patterns — and
+ * retrying it three times with backoff would be pure latency for a failure that
+ * can never clear on its own.
+ */
+function classify(
+  command: string,
+  exitCode: number | null,
+  stderr: string,
+  spawnError: Error | undefined,
+): BdFailure {
+  const text = `${stderr}${spawnError == null ? '' : ` ${spawnError.message}`}`;
+  if (/operation not permitted|EPERM|permission denied/i.test(text)) {
+    return {command, detail: text.trim().slice(0, 400), kind: 'sandbox-denied'};
+  }
+  if (
+    spawnError != null ||
+    /ENOENT|command not found|no such file/i.test(text)
+  ) {
+    return {
+      command,
+      detail: (spawnError?.message ?? text).trim().slice(0, 400),
+      kind: 'unreachable',
+    };
+  }
+  if (/lock|database is locked|resource temporarily unavailable/i.test(text)) {
+    return {command, detail: text.trim().slice(0, 400), kind: 'locked'};
+  }
+  return {command, detail: text.trim().slice(0, 400), exitCode, kind: 'failed'};
+}
+
+export interface BdContext {
+  env: EnvLike;
+  lifeDir: string;
+}
+
+export function bdContext(env: EnvLike = process.env): BdContext {
+  return {env, lifeDir: lifeRepoDir(env)};
+}
+
+/**
+ * Run one bd command, retrying only a `locked` failure.
+ *
+ * stdout is returned even on success paths that print nothing; stderr is
+ * captured rather than inherited so a lock warning never lands in the middle of
+ * the rendered report on the user's terminal.
+ */
+async function runBd(
+  ctx: BdContext,
+  args: string[],
+): Promise<BdResult<string>> {
+  const command = `bd ${args.join(' ')}`;
+  let last: BdFailure | null = null;
+  for (let attempt = 0; attempt < MAX_LOCK_ATTEMPTS; attempt += 1) {
+    const result = spawnSync('bun', ['run', 'bd', ...args], {
+      cwd: ctx.lifeDir,
+      encoding: 'utf8',
+      env: ctx.env as NodeJS.ProcessEnv,
+      maxBuffer: 64 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (result.error == null && result.status === 0) {
+      return {ok: true, value: result.stdout ?? ''};
+    }
+    last = classify(
+      command,
+      result.status,
+      result.stderr ?? '',
+      result.error ?? undefined,
+    );
+    if (last.kind !== 'locked') return {failure: last, ok: false};
+    const backoff = LOCK_BACKOFF_MS[attempt];
+    if (backoff != null) await sleep(backoff);
+  }
+  return {
+    failure: last ?? {
+      command,
+      detail: 'no attempt produced a result',
+      kind: 'unreachable',
+    },
+    ok: false,
+  };
+}
+
+function parseJson<T>(command: string, text: string): BdResult<T> {
+  const trimmed = text.trim();
+  if (trimmed === '') {
+    return {
+      failure: {command, detail: 'bd printed nothing', kind: 'bad-json'},
+      ok: false,
+    };
+  }
+  try {
+    return {ok: true, value: JSON.parse(trimmed) as T};
+  } catch (error) {
+    return {
+      failure: {
+        command,
+        detail: error instanceof Error ? error.message : String(error),
+        kind: 'bad-json',
+      },
+      ok: false,
+    };
+  }
+}
+
+/**
+ * Write a metadata document somewhere bd can read it.
+ *
+ * `$TMPDIR` on purpose: it is the one directory the Claude Code sandbox always
+ * allows writes to, so passing metadata through a file does not add a second
+ * path that has to be allowlisted.
+ */
+function withMetadataFile<T>(
+  metadata: Record<string, unknown>,
+  body: (path: string) => T,
+): T {
+  const dir = mkdtempSync(join(tmpdir(), 'justin-thread-'));
+  try {
+    const path = join(dir, 'metadata.json');
+    writeFileSync(path, JSON.stringify(metadata));
+    return body(path);
+  } finally {
+    rmSync(dir, {force: true, recursive: true});
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Reads
+// ---------------------------------------------------------------------------
+
+/** Is bd usable at all? A cheap read that touches the database. */
+export async function checkBdReachable(
+  ctx: BdContext,
+): Promise<BdResult<true>> {
+  const result = await runBd(ctx, ['types']);
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
+
+export interface TypeCheck {
+  missing: string[];
+  registered: string[];
+}
+
+/**
+ * Are the custom `thread` and `ask` types registered here?
+ *
+ * They live in bd's Dolt config store, which `.beads/.gitignore` excludes, so a
+ * fresh clone or a second machine has NONE of them and `bd create -t thread`
+ * fails with a cryptic "invalid issue type". Checking up front lets `prepare`
+ * hand over the exact command that fixes it.
+ */
+export async function checkThreadTypes(
+  ctx: BdContext,
+): Promise<BdResult<TypeCheck>> {
+  const result = await runBd(ctx, ['types']);
+  if (!result.ok) return result;
+  const text = result.value;
+  const registered: string[] = [];
+  const missing: string[] = [];
+  for (const type of ['thread', 'ask']) {
+    if (new RegExp(`\\b${type}\\b`).test(text)) registered.push(type);
+    else missing.push(type);
+  }
+  return {ok: true, value: {missing, registered}};
+}
+
+/** The fix `prepare` prints when a type is missing. */
+export const REGISTER_TYPES_COMMAND =
+  'cd ~/Dev/life && bun run bd config set types.custom docs,question,source-email,source-message,thread,ask';
+
+/**
+ * The thread bead for one session, or null when there genuinely is none.
+ *
+ * Null here is a MEASURED absence — every failure path returns a failure, so a
+ * caller can safely read null as "create one". More than one match is itself a
+ * failure: D1 says one bead per session, and silently picking the first would
+ * hide a duplicate forever.
+ */
+export async function findThreadBySession(
+  ctx: BdContext,
+  sessionId: string,
+): Promise<BdResult<BdIssue | null>> {
+  const args = [
+    'list',
+    '-t',
+    'thread',
+    '--metadata-field',
+    `sessionId=${sessionId}`,
+    '--limit',
+    '0',
+    '--all',
+    '--json',
+  ];
+  const raw = await runBd(ctx, args);
+  if (!raw.ok) return raw;
+  const parsed = parseJson<BdIssue[]>(`bd ${args.join(' ')}`, raw.value);
+  if (!parsed.ok) return parsed;
+  const issues = Array.isArray(parsed.value) ? parsed.value : [];
+  const open = issues.filter((issue) => issue.status !== 'closed');
+  const chosen = open[0] ?? issues[0] ?? null;
+  if (open.length > 1) {
+    return {
+      failure: {
+        command: `bd ${args.join(' ')}`,
+        detail: `${open.length} open thread beads carry sessionId=${sessionId} (${open
+          .map((issue) => issue.id)
+          .join(', ')}); D1 says there must be exactly one`,
+        exitCode: 0,
+        kind: 'failed',
+      },
+      ok: false,
+    };
+  }
+  return {ok: true, value: chosen};
+}
+
+/** Full record for one bead, or a failure. Never null-for-failure. */
+export async function showIssue(
+  ctx: BdContext,
+  id: string,
+): Promise<BdResult<BdIssue | null>> {
+  const args = ['show', id, '--json'];
+  const raw = await runBd(ctx, args);
+  if (!raw.ok) return raw;
+  const parsed = parseJson<BdIssue[]>(`bd ${args.join(' ')}`, raw.value);
+  if (!parsed.ok) return parsed;
+  return {ok: true, value: parsed.value[0] ?? null};
+}
+
+/** The still-open ask beads under one thread. Empty means MEASURED empty. */
+export async function listOpenAsks(
+  ctx: BdContext,
+  threadId: string,
+): Promise<BdResult<BdIssue[]>> {
+  const args = [
+    'list',
+    '--parent',
+    threadId,
+    '-t',
+    'ask',
+    '--limit',
+    '0',
+    '--json',
+  ];
+  const raw = await runBd(ctx, args);
+  if (!raw.ok) return raw;
+  const parsed = parseJson<BdIssue[]>(`bd ${args.join(' ')}`, raw.value);
+  if (!parsed.ok) return parsed;
+  const issues = Array.isArray(parsed.value) ? parsed.value : [];
+  return {ok: true, value: issues.filter((issue) => issue.status !== 'closed')};
+}
+
+/** Justin's answers on one ask bead, oldest first (D3). */
+export async function readComments(
+  ctx: BdContext,
+  id: string,
+): Promise<BdResult<BdComment[]>> {
+  const args = ['comments', id, '--json'];
+  const raw = await runBd(ctx, args);
+  if (!raw.ok) return raw;
+  const trimmed = raw.value.trim();
+  // A bead with no comments prints a human "no comments" line rather than [].
+  if (trimmed === '' || !trimmed.startsWith('[')) return {ok: true, value: []};
+  const parsed = parseJson<BdComment[]>(`bd ${args.join(' ')}`, raw.value);
+  if (!parsed.ok) return parsed;
+  return {ok: true, value: Array.isArray(parsed.value) ? parsed.value : []};
+}
+
+// ---------------------------------------------------------------------------
+// Writes
+// ---------------------------------------------------------------------------
+
+export interface ThreadBeadFields {
+  description: string;
+  metadata: Record<string, unknown>;
+  notes: string;
+  title: string;
+}
+
+/** Create the session's thread bead. Returns its id. */
+export async function createThread(
+  ctx: BdContext,
+  fields: ThreadBeadFields,
+): Promise<BdResult<string>> {
+  const result = await withMetadataFile(fields.metadata, (metaPath) =>
+    runBd(ctx, [
+      'create',
+      fields.title,
+      '-t',
+      'thread',
+      '-p',
+      '2',
+      '-d',
+      fields.description,
+      '--notes',
+      fields.notes,
+      '--metadata',
+      `@${metaPath}`,
+      '-s',
+      'in_progress',
+      '--silent',
+    ]),
+  );
+  if (!result.ok) return result;
+  const id = result.value.trim().split('\n').pop()?.trim() ?? '';
+  if (id === '') {
+    return {
+      failure: {
+        command: 'bd create -t thread',
+        detail: 'bd --silent printed no issue id',
+        kind: 'bad-json',
+      },
+      ok: false,
+    };
+  }
+  return {ok: true, value: id};
+}
+
+/**
+ * Rewrite the thread bead in place (D1).
+ *
+ * Every field is sent every time, including the full metadata key set: update's
+ * `--metadata` merges, so an omitted key would keep whatever the previous report
+ * left there. Sending everything makes the merge a replacement.
+ */
+export async function updateThread(
+  ctx: BdContext,
+  id: string,
+  fields: ThreadBeadFields,
+): Promise<BdResult<true>> {
+  const result = await withMetadataFile(fields.metadata, (metaPath) =>
+    runBd(ctx, [
+      'update',
+      id,
+      '--title',
+      fields.title,
+      '-d',
+      fields.description,
+      '--notes',
+      fields.notes,
+      '--metadata',
+      `@${metaPath}`,
+      '-s',
+      'in_progress',
+    ]),
+  );
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
+
+/** Update ONLY the notes field — used to fold ask ids into the report (D10). */
+export async function updateThreadNotes(
+  ctx: BdContext,
+  id: string,
+  notes: string,
+): Promise<BdResult<true>> {
+  const result = await runBd(ctx, ['update', id, '--notes', notes]);
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
+
+export interface AskBeadFields {
+  blocking: boolean;
+  description: string;
+  metadata: Record<string, unknown>;
+  title: string;
+}
+
+/** Create one ask bead as a child of the thread (D3). Returns its id. */
+export async function createAsk(
+  ctx: BdContext,
+  threadId: string,
+  fields: AskBeadFields,
+): Promise<BdResult<string>> {
+  const result = await withMetadataFile(fields.metadata, (metaPath) =>
+    runBd(ctx, [
+      'create',
+      fields.title,
+      '-t',
+      'ask',
+      '-p',
+      fields.blocking ? '1' : '2',
+      '--parent',
+      threadId,
+      '-d',
+      fields.description,
+      '--metadata',
+      `@${metaPath}`,
+      '--silent',
+    ]),
+  );
+  if (!result.ok) return result;
+  const id = result.value.trim().split('\n').pop()?.trim() ?? '';
+  if (id === '') {
+    return {
+      failure: {
+        command: 'bd create -t ask',
+        detail: 'bd --silent printed no issue id',
+        kind: 'bad-json',
+      },
+      ok: false,
+    };
+  }
+  return {ok: true, value: id};
+}
+
+/**
+ * Close one ask with its disposition as the reason (D4).
+ *
+ * Closing, never deleting: `bd delete` leaves records in the JSONL that Dolt no
+ * longer has, and every subsequent auto-export refuses until someone runs a
+ * manual `bd export`. A wedged export means later reports silently never reach
+ * git, which is precisely the shape of failure this system exists to prevent.
+ */
+export async function closeAsk(
+  ctx: BdContext,
+  id: string,
+  reason: string,
+): Promise<BdResult<true>> {
+  const result = await runBd(ctx, ['close', id, '--reason', reason]);
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
