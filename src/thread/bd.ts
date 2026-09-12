@@ -575,6 +575,26 @@ export async function finalizeThread(
   return {ok: true, value: true};
 }
 
+/**
+ * Move a thread bead to `in_progress` and nothing else (home-base-p1uj.3).
+ *
+ * `thread start` needs this because `bd create` has no status flag at all (see
+ * createThread), so a freshly created bead lands as `open` and a second write is
+ * unavoidable. It does NOT reuse `finalizeThread`: that one rewrites notes and
+ * the whole metadata document, which at start time would mean sending the same
+ * bytes twice for no reason, on the one code path that is paying a session's
+ * startup latency. Each bd call costs ~1.3s wall clock (measured 2026-09-12),
+ * so the smaller command is the point, not tidiness.
+ */
+export async function setThreadInProgress(
+  ctx: BdContext,
+  id: string,
+): Promise<BdResult<true>> {
+  const result = await runBd(ctx, ['update', id, '-s', 'in_progress']);
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
+
 export interface AskBeadFields {
   blocking: boolean;
   description: string;

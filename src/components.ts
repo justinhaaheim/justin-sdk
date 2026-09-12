@@ -25,6 +25,7 @@ import {runGitignoreSetup} from './gitignore-setup';
 import {runHuskySetup} from './husky-setup';
 import {runPrettierSetup} from './prettier-setup';
 import {runPromptsSetup} from './prompts-setup';
+import {runThreadHooksSetup} from './thread-hooks-setup';
 import {runTimeCheckSetup} from './time-check-setup';
 import {runTsconfigSetup} from './tsconfig-setup';
 import {runUsageCheckSetup} from './usage-check-setup';
@@ -53,6 +54,7 @@ export const COMPONENT_NAMES = [
   'eas',
   'time-check',
   'usage-check',
+  'thread-hooks',
   'critical-rules',
 ] as const;
 
@@ -69,6 +71,10 @@ export type ComponentName = (typeof COMPONENT_NAMES)[number];
  *   - usage-check: same reasoning, and more of it — its hooks fire on every
  *     prompt AND after every tool batch. Opt in where long sessions need to
  *     know their own context size.
+ *   - thread-hooks: its SessionStart hook writes to a SHARED Dolt database
+ *     (~/Dev/life) on every session start, so installing it everywhere would
+ *     have every repo paying lock contention for a feature only some sessions
+ *     use. Opt in where the session is worth tracking on the board.
  *   - critical-rules: it commits a generated rules file INTO the repo, and four
  *     enrolled repos are public. Which rules a repo publishes is a deliberate
  *     per-repo decision, not something a preset should make (t6a0.21 D6/D12).
@@ -79,6 +85,7 @@ const OPT_IN_ONLY: ReadonlySet<ComponentName> = new Set([
   'eas',
   'time-check',
   'usage-check',
+  'thread-hooks',
   'critical-rules',
 ]);
 
@@ -153,6 +160,7 @@ const RUNNERS: Record<
   eas: (a) => runEasSetup(base(a)),
   'time-check': (a) => runTimeCheckSetup(base(a)),
   'usage-check': (a) => runUsageCheckSetup(base(a)),
+  'thread-hooks': (a) => runThreadHooksSetup(base(a)),
   'critical-rules': (a) => runCriticalRulesSetup(base(a)),
 };
 

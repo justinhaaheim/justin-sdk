@@ -94,6 +94,46 @@ export function archiveReport(
   );
 }
 
+/**
+ * Where a FAILED `thread start` leaves its trace (home-base-p1uj.3).
+ *
+ * Deliberately NOT `spool/`. The spool is drained by `thread board`, which
+ * reads every file in it as an `ArchivedReport` and replays it through
+ * `writeReportToBd`; a start record has no payload and no asks, so putting one
+ * there would either wedge the drain or, worse, get half-applied. The two also
+ * want different fates: a spooled report MUST eventually reach bd or Justin
+ * loses work, whereas a failed start is only a missed head start — the session's
+ * first real report still creates the bead. So this is an audit trail, not a
+ * queue, and nothing drains it.
+ *
+ * It exists at all because the alternative is silence: a hook that swallows
+ * every bd failure at session start is exactly the calm, invisible failure
+ * rule 6 is about.
+ */
+export function startFailuresDir(env: EnvLike = process.env): string {
+  return join(threadsStateDir(env), 'start-failures');
+}
+
+export interface StartFailureRecord {
+  facts: ThreadFacts;
+  sessionId: string;
+  startedAt: string;
+}
+
+export function recordStartFailure(
+  record: StartFailureRecord,
+  reason: string,
+  env: EnvLike = process.env,
+): WriteResult {
+  const dir = startFailuresDir(env);
+  const name = `${record.sessionId}-${fileStamp(record.startedAt)}.json`;
+  return writeJson(join(dir, name), dir, {
+    ...record,
+    kind: 'threadStartFailed',
+    reason,
+  });
+}
+
 /** Write the spool copy, with the reason bd did not take it. */
 export function spoolReport(
   report: ArchivedReport,

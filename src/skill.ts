@@ -49,6 +49,8 @@ const COMPONENT_BLURBS: Record<ComponentName, string> = {
   prompts: 'Fetches the shared prompts library into the project.',
   'time-check':
     'UserPromptSubmit hook stamping the wall-clock into the transcript after a long gap or on a new working day. Config: componentConfig["time-check"].',
+  'thread-hooks':
+    'SessionStart hook (startup|resume) running `thread start`, which creates this session’s thread bead in ~/Dev/life up front so a session that never reaches a status report is still on the board. INERT until BOTH componentConfig.thread.enabled and .startOnSessionStart are true — set them in the USER file; this installer writes no componentConfig block, because a project-level value would outrank it.',
   tsconfig: 'Shared TypeScript config.',
   'usage-check':
     'UserPromptSubmit + PostToolBatch hook telling the session how many tokens of its OWN context it has used — NOT subscription quota — once per setpoint, every 100k tokens by default. PostToolBatch is what reaches an autonomous session mid-turn. The wrap-up directive is experimental and OFF unless the project sets a numeric wrapUpAt. Config: componentConfig["usage-check"].',
