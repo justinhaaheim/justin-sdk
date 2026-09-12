@@ -26,6 +26,12 @@
  *   * DETAIL IS INDENTED UNDER ITS ROW, and a row with detail is followed by a
  *     blank line. Rows with no detail stay tight: the blank line exists to bind
  *     a row to its own lines, and a one-line row has nothing to bind.
+ *   * THE CHECKOUT PATH IS PART OF THE ROW, not detail, and it prints on EVERY
+ *     row that has a worktree — including merged ones, which are exactly the
+ *     `git worktree remove` cleanup list (epic design D2). Being part of the
+ *     row rather than detail is what keeps that unconditional: a merged row
+ *     with a clean checkout is two tight lines, so the merged table gains a
+ *     path without becoming double-spaced.
  *
  * ── Two things it must not do ───────────────────────────────────────────────
  *
@@ -388,16 +394,14 @@ function branchRow(
   ).padEnd(
     DATE_WIDTH,
   )}  ${where === 'THIS DISK ONLY' ? style.alert(where) : where}`;
-  // The checkout path earns its own line only where the reader would USE it —
-  // an open branch they might cd into, or a checkout holding uncommitted work
-  // they must look at before deleting it. Printing it under every settled row
-  // doubled the height of the merged table to say what the branch name already
-  // implies.
+  // UNCONDITIONAL on every row that has a checkout, merged rows included (epic
+  // design D2). The earlier gate hid the path on merged-and-clean rows on the
+  // theory that a settled row has nothing to cd into — but merged-plus-worktree
+  // is precisely the `git worktree remove` cleanup list, so those are the rows
+  // whose path the reader most needs. A branch name does not imply a path: the
+  // two differ, and only some branches have a checkout at all.
   const place = checkout(row, repoRoot);
-  const worthShowing =
-    place !== '—' &&
-    (row.disposition !== 'merged' || row.worktreeState?.dirty !== false);
-  return worthShowing ? `${line}\n      in ${place}` : line;
+  return place === '—' ? line : `${line}\n      in ${place}`;
 }
 
 // ---------------------------------------------------------------------------

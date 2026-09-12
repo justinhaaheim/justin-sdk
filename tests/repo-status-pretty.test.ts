@@ -176,6 +176,40 @@ describe('the ledger rendering', () => {
     expect(renderReportPretty(report, {color: true})).toContain('[');
   });
 
+  test('a merged branch with a clean checkout still shows its path', () => {
+    const repo = buildFixture(track(createSandbox()));
+    // Claude Code's worktrees live under the repo and are gitignored there;
+    // mirror that, so the fixture exercises the relative-path rendering rather
+    // than the absolute-path fallback.
+    writeFileSync(join(repo, '.git', 'info', 'exclude'), '.claude/\n');
+    git(repo, [
+      'worktree',
+      'add',
+      '-q',
+      join(repo, '.claude', 'worktrees', 'landed'),
+      'landed',
+    ]);
+    // A second merged branch, older so the sort is deterministic, with NO
+    // checkout — the negative half of the same rule.
+    const base = git(repo, ['rev-list', '--max-parents=0', 'HEAD']);
+    git(repo, ['branch', '-q', 'settled', base]);
+
+    const lines = prettyFor(repo).split('\n');
+    const i = lines.findIndex((l) => /^ {2}landed\s/.test(l));
+    expect(i).toBeGreaterThanOrEqual(0);
+
+    // `landed` is MERGED and its checkout is CLEAN: the exact row the old
+    // "show it only where useful" gate hid the path on, and exactly the row
+    // that needs it — merged-plus-worktree is the `git worktree remove`
+    // cleanup list (epic design D2).
+    expect(lines[i + 1]).toBe('      in .claude/worktrees/landed');
+    // The path is part of the ROW, not detail, so no blank line follows: the
+    // next merged row starts immediately and the table stays single-spaced.
+    expect(lines[i + 2]).toMatch(/^ {2}settled\s/);
+    // And a row with no worktree renders no path line at all.
+    expect(lines[i + 3]).not.toMatch(/^ {6}in /);
+  });
+
   test('a repo git could not read renders as UNKNOWN, never as clean', () => {
     const sb = track(createSandbox());
     const repo = buildFixture(sb);
