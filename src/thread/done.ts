@@ -37,7 +37,30 @@ import {contextFor, resolveThread, type ThreadRef} from './resolve';
 
 export const DEFAULT_DONE_REASON = 'thread closed by Justin';
 
+/**
+ * The bd calls this module makes, as an injectable seam.
+ *
+ * The same pattern `drain.ts` uses for its applier and `answer.ts` for its
+ * terminal: what is worth testing here is the ORDER and the abort behaviour —
+ * asks before the thread, and a failed ask close leaving the thread open — and
+ * neither can be shown against a live database without destroying real beads.
+ */
+export interface DoneDeps {
+  closeIssue: typeof closeIssue;
+  listOpenAsks: typeof listOpenAsks;
+  reopenIssue: typeof reopenIssue;
+  resolveThread: typeof resolveThread;
+}
+
+const REAL_DEPS: DoneDeps = {
+  closeIssue,
+  listOpenAsks,
+  reopenIssue,
+  resolveThread,
+};
+
 export interface DoneOptions extends ThreadRef {
+  deps?: DoneDeps;
   reason?: string | null;
 }
 
@@ -46,8 +69,9 @@ export async function runThreadDone(
 ): Promise<number> {
   const env = options.env ?? process.env;
   const ctx: BdContext = contextFor(env);
+  const deps = options.deps ?? REAL_DEPS;
 
-  const resolved = await resolveThread(ctx, options);
+  const resolved = await deps.resolveThread(ctx, options);
   if (!resolved.ok) {
     console.error(`thread done: ${resolved.message}`);
     return 2;
@@ -58,7 +82,7 @@ export async function runThreadDone(
       ? options.reason
       : DEFAULT_DONE_REASON;
 
-  const asks = await listOpenAsks(ctx, thread.id);
+  const asks = await deps.listOpenAsks(ctx, thread.id);
   if (!asks.ok) {
     // Closing the thread while unable to see its asks would strand them.
     console.error(
@@ -69,7 +93,7 @@ export async function runThreadDone(
 
   const closedAsks: string[] = [];
   for (const ask of asks.value) {
-    const closed = await closeIssue(
+    const closed = await deps.closeIssue(
       ctx,
       ask.id,
       `no longer relevant: ${reason}`,
@@ -83,7 +107,7 @@ export async function runThreadDone(
     closedAsks.push(ask.id);
   }
 
-  const closed = await closeIssue(ctx, thread.id, reason);
+  const closed = await deps.closeIssue(ctx, thread.id, reason);
   if (!closed.ok) {
     console.error(
       `thread done: closed ${closedAsks.length} ask(s), but could NOT close the thread ${thread.id} — ${describeBdFailure(closed.failure)}`,
@@ -104,8 +128,9 @@ export async function runThreadReopen(
 ): Promise<number> {
   const env = options.env ?? process.env;
   const ctx: BdContext = contextFor(env);
+  const deps = options.deps ?? REAL_DEPS;
 
-  const resolved = await resolveThread(ctx, options);
+  const resolved = await deps.resolveThread(ctx, options);
   if (!resolved.ok) {
     console.error(`thread reopen: ${resolved.message}`);
     return 2;
@@ -116,7 +141,7 @@ export async function runThreadReopen(
       ? options.reason
       : 'reopened by Justin';
 
-  const reopened = await reopenIssue(ctx, thread.id, reason);
+  const reopened = await deps.reopenIssue(ctx, thread.id, reason);
   if (!reopened.ok) {
     console.error(
       `thread reopen: could not reopen ${thread.id} — ${describeBdFailure(reopened.failure)}`,

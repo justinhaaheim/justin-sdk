@@ -107,6 +107,43 @@ export function noteFrom(comments: readonly BdComment[]): string | null {
   return notes.length === 0 ? null : notes.join('\n\n');
 }
 
+/**
+ * ONE ask, restated and then answered — the shape `inbox` and `prepare` share.
+ *
+ * Extracted so there is exactly one renderer for "here is the question, here is
+ * what Justin said" (home-base-p1uj.2 follow-up). `prepare` used to print every
+ * comment as `ANSWER (<time>): <text>`, which rendered a skip as
+ * `ANSWER (...): skipped: use default` — a deliberate skip shown as an answer —
+ * and a real answer as `ANSWER (...): ANSWER: a`. `prepare` is the D4 entry
+ * point run before every report, so that was the surface it mattered on most.
+ *
+ * `unansweredNote` exists because the two callers want different things from an
+ * untouched ask: `inbox` lists it separately under STILL WAITING, `prepare`
+ * needs it inline with the nudge to disposition it.
+ */
+export function renderInboxAsk(
+  ask: InboxAsk,
+  heading: string,
+  unansweredNote: string | null = null,
+): string[] {
+  const lines = [heading];
+  for (const line of ask.restated.split('\n')) lines.push(`     ${line}`);
+  if (ask.state === 'skipped') {
+    lines.push(`     >>> SKIPPED — use your default: ${ask.defaultAction}`);
+    return lines;
+  }
+  if (ask.state === 'unanswered') {
+    if (unansweredNote != null) lines.push(unansweredNote);
+    return lines;
+  }
+  for (const answer of ask.answers) {
+    for (const [position, line] of answer.split('\n').entries()) {
+      lines.push(`     >>> ${position === 0 ? 'HIS ANSWER: ' : ''}${line}`);
+    }
+  }
+  return lines;
+}
+
 export function renderInbox(view: InboxView): string {
   const lines: string[] = [];
   lines.push(`INBOX for ${view.threadId} · ${view.threadTitle}`);
@@ -124,18 +161,11 @@ export function renderInbox(view: InboxView): string {
   for (const [index, ask] of touched.entries()) {
     lines.push('');
     lines.push(
-      `  ${index + 1}. ${ask.id} · ${ask.blocking ? 'BLOCKING' : 'non-blocking'} · [${ask.kind}]`,
+      ...renderInboxAsk(
+        ask,
+        `  ${index + 1}. ${ask.id} · ${ask.blocking ? 'BLOCKING' : 'non-blocking'} · [${ask.kind}]`,
+      ),
     );
-    for (const line of ask.restated.split('\n')) lines.push(`     ${line}`);
-    if (ask.state === 'skipped') {
-      lines.push(`     >>> SKIPPED — use your default: ${ask.defaultAction}`);
-    } else {
-      for (const answer of ask.answers) {
-        for (const [position, line] of answer.split('\n').entries()) {
-          lines.push(`     >>> ${position === 0 ? 'HIS ANSWER: ' : ''}${line}`);
-        }
-      }
-    }
   }
 
   lines.push('');
@@ -168,6 +198,69 @@ export function renderInbox(view: InboxView): string {
   return lines.join('\n');
 }
 
+/**
+ * Read every ask's comments and fold them into `InboxAsk`s.
+ *
+ * Shared by `inbox` and `prepare` (home-base-p1uj.2 follow-up) so the two
+ * cannot disagree about what counts as an answer. `readFailed` is returned
+ * rather than thrown or swallowed: an unreadable comment list is NOT an
+ * unanswered ask, and the reassuring reading — "he said nothing, take your
+ * default" — is the dangerous one.
+ */
+export async function collectInboxAsks(
+  ctx: BdContext,
+  openAsks: readonly BdIssue[],
+): Promise<{asks: InboxAsk[]; readFailed: boolean}> {
+  const asks: InboxAsk[] = [];
+  let readFailed = false;
+  for (const ask of openAsks) {
+    const meta = metadataOf(ask);
+    const base = {
+      blocking: meta.blocking === true,
+      defaultAction: stringOr(meta.defaultAction, 'UNKNOWN'),
+      id: ask.id,
+      kind: stringOr(meta.kind, 'UNKNOWN'),
+      restated: restateAsk(ask.description ?? ''),
+      title: ask.title ?? '',
+    };
+    const comments = await readComments(ctx, ask.id);
+    if (!comments.ok) {
+      readFailed = true;
+      asks.push({
+        ...base,
+        answers: [
+          `UNKNOWN — could not read the answers: ${describeBdFailure(comments.failure)}`,
+        ],
+        state: 'answered',
+      });
+      continue;
+    }
+    asks.push({
+      ...base,
+      answers: comments.value
+        .map((comment) => stripAnswerPrefix((comment.text ?? '').trim()))
+        .filter((text) => text !== '' && text !== SKIP_COMMENT),
+      state: askStateOf(meta, comments.value),
+    });
+  }
+  return {asks, readFailed};
+}
+
+/** The thread bead's free-text NOTE, or a named failure. Never a silent null. */
+export async function readThreadNote(
+  ctx: BdContext,
+  threadId: string,
+): Promise<{note: string | null; readFailed: boolean}> {
+  const comments = await readComments(ctx, threadId);
+  if (!comments.ok) {
+    return {
+      note: `UNKNOWN — could not read the thread's comments: ${describeBdFailure(comments.failure)}`,
+      readFailed: true,
+    };
+  }
+  return {note: noteFrom(comments.value), readFailed: false};
+}
+
 export interface InboxOptions extends ThreadRef {
   json?: boolean;
 }
@@ -193,57 +286,13 @@ export async function runThreadInbox(
     return 1;
   }
 
-  let readFailed = false;
-  const inboxAsks: InboxAsk[] = [];
-  for (const ask of asks.value) {
-    const meta = metadataOf(ask);
-    const comments = await readComments(ctx, ask.id);
-    if (!comments.ok) {
-      // An unreadable comment list is NOT an unanswered ask. Saying so out loud
-      // is the whole of rule 6 here: the reassuring reading ("he said nothing,
-      // take your default") is the dangerous one.
-      readFailed = true;
-      inboxAsks.push({
-        answers: [
-          `UNKNOWN — could not read the answers: ${describeBdFailure(comments.failure)}`,
-        ],
-        blocking: meta.blocking === true,
-        defaultAction: stringOr(meta.defaultAction, 'UNKNOWN'),
-        id: ask.id,
-        kind: stringOr(meta.kind, 'UNKNOWN'),
-        restated: restateAsk(ask.description ?? ''),
-        state: 'answered',
-        title: ask.title ?? '',
-      });
-      continue;
-    }
-    const state = askStateOf(meta, comments.value);
-    inboxAsks.push({
-      answers: comments.value
-        .map((comment) => stripAnswerPrefix((comment.text ?? '').trim()))
-        .filter((text) => text !== '' && text !== SKIP_COMMENT),
-      blocking: meta.blocking === true,
-      defaultAction: stringOr(meta.defaultAction, 'UNKNOWN'),
-      id: ask.id,
-      kind: stringOr(meta.kind, 'UNKNOWN'),
-      restated: restateAsk(ask.description ?? ''),
-      state,
-      title: ask.title ?? '',
-    });
-  }
-
-  const threadComments = await readComments(ctx, thread.id);
-  let note: string | null = null;
-  if (!threadComments.ok) {
-    readFailed = true;
-    note = `UNKNOWN — could not read the thread's comments: ${describeBdFailure(threadComments.failure)}`;
-  } else {
-    note = noteFrom(threadComments.value);
-  }
+  const collected = await collectInboxAsks(ctx, asks.value);
+  const noteRead = await readThreadNote(ctx, thread.id);
+  const readFailed = collected.readFailed || noteRead.readFailed;
 
   const view: InboxView = {
-    asks: inboxAsks,
-    note,
+    asks: collected.asks,
+    note: noteRead.note,
     threadId: thread.id,
     threadTitle: thread.title ?? '(no title)',
   };

@@ -28,9 +28,9 @@ import {
   describeBdFailure,
   findThreadBySession,
   listOpenAsks,
-  readComments,
   REGISTER_TYPES_COMMAND,
 } from './bd';
+import {collectInboxAsks, readThreadNote, renderInboxAsk} from './inbox';
 import {collectThreadFacts} from './facts';
 import {draftPath} from './archive';
 import {
@@ -133,27 +133,27 @@ export async function runThreadPrepare(
       } else if (asks.value.length === 0) {
         out.push('  (none open)');
       } else {
-        for (const ask of asks.value) {
-          const meta = (ask.metadata ?? {}) as Record<string, unknown>;
-          const kind = typeof meta.kind === 'string' ? meta.kind : 'UNKNOWN';
-          const blocking = meta.blocking === true ? 'BLOCKING' : 'non-blocking';
-          out.push(`  ${ask.id} · [${kind}] ${blocking} · ${ask.title ?? ''}`);
-          const comments = await readComments(ctx, ask.id);
-          if (!comments.ok) {
-            out.push(
-              `      answers UNKNOWN — ${describeBdFailure(comments.failure)}`,
-            );
-          } else if (comments.value.length === 0) {
-            out.push(
-              '      (no answer yet — disposition it as carried or decided)',
-            );
-          } else {
-            for (const comment of comments.value) {
-              out.push(
-                `      ANSWER (${comment.created_at ?? 'unknown time'}): ${comment.text ?? ''}`,
-              );
-            }
-          }
+        // The SAME renderer `thread inbox` uses (home-base-p1uj.2 follow-up).
+        // This used to print every comment as `ANSWER (<time>): <text>`, which
+        // showed a deliberate skip as `ANSWER (...): skipped: use default` and a
+        // real answer as `ANSWER (...): ANSWER: a`. A skip is permission to take
+        // a stated default, not an answer, and this is the D4 entry point run
+        // before every report — the worst surface on which to confuse the two.
+        const collected = await collectInboxAsks(ctx, asks.value);
+        for (const ask of collected.asks) {
+          out.push(
+            ...renderInboxAsk(
+              ask,
+              `  ${ask.id} · [${ask.kind}] ${ask.blocking ? 'BLOCKING' : 'non-blocking'} · ${ask.title}`,
+              '     (no answer yet — disposition it as carried or decided)',
+            ),
+          );
+        }
+        const noteRead = await readThreadNote(ctx, thread.id);
+        if (noteRead.note != null) {
+          out.push('');
+          out.push('NOTE FROM JUSTIN');
+          for (const line of noteRead.note.split('\n')) out.push(`  ${line}`);
         }
       }
     }

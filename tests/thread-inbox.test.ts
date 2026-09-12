@@ -18,8 +18,10 @@ import {
   askStateOf,
   noteFrom,
   renderInbox,
+  renderInboxAsk,
   restateAsk,
   stripAnswerPrefix,
+  type InboxAsk,
   type InboxView,
 } from '../src/thread/inbox';
 import {SKIP_COMMENT} from '../src/thread/answer';
@@ -92,6 +94,61 @@ describe('reading the ask back', () => {
       noteFrom([comment('ANSWER: b'), comment('NOTE: also check the hook')]),
     ).toBe('also check the hook');
     expect(noteFrom([comment('ANSWER: b')])).toBeNull();
+  });
+});
+
+// The renderer `thread prepare` now shares (home-base-p1uj.2 follow-up).
+// prepare used to print every comment as `ANSWER (<time>): <text>`, so a skip
+// arrived as `ANSWER (...): skipped: use default` — a deliberate skip shown as
+// an answer — and a real answer as `ANSWER (...): ANSWER: a`. One renderer, so
+// the two surfaces cannot drift apart again.
+describe('renderInboxAsk — the three shapes prepare and inbox share', () => {
+  function base(overrides: Partial<InboxAsk> = {}): InboxAsk {
+    return {
+      answers: [],
+      blocking: false,
+      defaultAction: 'I keep by-repo as the default.',
+      id: 'jl-kigm.1',
+      kind: 'pick',
+      restated: restateAsk(ASK_DESCRIPTION),
+      state: 'unanswered',
+      title: 'Which default board view?',
+      ...overrides,
+    };
+  }
+
+  test('ANSWERED: the ask, then ">>> HIS ANSWER: <text>"', () => {
+    const lines = renderInboxAsk(
+      base({answers: ['a'], state: 'answered'}),
+      '  jl-kigm.1 · [pick] BLOCKING · Which default board view?',
+    );
+    expect(lines[0]).toBe(
+      '  jl-kigm.1 · [pick] BLOCKING · Which default board view?',
+    );
+    expect(lines.join('\n')).toContain('a. (Recommended) Ship it now');
+    expect(lines[lines.length - 1]).toBe('     >>> HIS ANSWER: a');
+    // The raw comment prefix never leaks through.
+    expect(lines.join('\n')).not.toContain('ANSWER: ANSWER:');
+  });
+
+  test('SKIPPED: ">>> SKIPPED — use your default: <default>", never an answer', () => {
+    const lines = renderInboxAsk(base({state: 'skipped'}), '  head');
+    expect(lines[lines.length - 1]).toBe(
+      '     >>> SKIPPED — use your default: I keep by-repo as the default.',
+    );
+    expect(lines.join('\n')).not.toContain('HIS ANSWER');
+    // The bug this replaced: the skip comment rendered as an answer.
+    expect(lines.join('\n')).not.toContain('skipped: use default"');
+  });
+
+  test('UNANSWERED: the ask plus the caller’s note, and no answer line', () => {
+    const note = '     (no answer yet — disposition it as carried or decided)';
+    const lines = renderInboxAsk(base(), '  head', note);
+    expect(lines[lines.length - 1]).toBe(note);
+    expect(lines.join('\n')).not.toContain('HIS ANSWER');
+    expect(lines.join('\n')).not.toContain('SKIPPED');
+    // With no note supplied (inbox's case) the ask still renders, bare.
+    expect(renderInboxAsk(base(), '  head')).toHaveLength(lines.length - 1);
   });
 });
 
