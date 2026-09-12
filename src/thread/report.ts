@@ -290,12 +290,20 @@ export async function runThreadReport(
   // the ask ids inline — which do not exist until the asks are created, which
   // needs the thread id. So the bead is written twice: once to exist, once with
   // the finished report in its notes.
+  //
+  // The FIRST write already carries a complete report, with the ask ids shown
+  // as "(NOT RECORDED)". A placeholder would be cheaper, but if the run then
+  // died between the two writes the bead would be left saying "(rendering)" —
+  // a report-shaped hole in the one field D10 promises is always readable.
+  // An id-less report is degraded; a placeholder is a lie.
+  const provisionalNotes = renderWithoutBead();
+
   let threadId: string;
   if (existingThread == null) {
     const created = await createThread(ctx, {
       description,
       metadata: provisionalMetadata,
-      notes: '(rendering — see the next write)',
+      notes: provisionalNotes,
       title: payload.title,
     });
     if (!created.ok) {
@@ -313,7 +321,7 @@ export async function runThreadReport(
     const updated = await updateThread(ctx, threadId, {
       description,
       metadata: provisionalMetadata,
-      notes: '(rendering — see the next write)',
+      notes: provisionalNotes,
       title: payload.title,
     });
     if (!updated.ok) {
