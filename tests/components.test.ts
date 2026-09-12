@@ -31,10 +31,19 @@ describe('components: ordering', () => {
           name !== 'eas' &&
           name !== 'time-check' &&
           name !== 'usage-check' &&
+          name !== 'thread-hooks' &&
           name !== 'critical-rules',
       ),
     );
     expect(DEPENDENCY_ORDER).not.toContain('base-setup');
+  });
+
+  test('thread-hooks is opt-in only — its hook writes to a SHARED database', () => {
+    // Its SessionStart hook writes to ~/Dev/life's Dolt DB on every session
+    // start, so installing it everywhere would have every repo paying lock
+    // contention for a feature only some sessions use (home-base-p1uj.3).
+    expect(COMPONENT_NAMES).toContain('thread-hooks');
+    expect(DEPENDENCY_ORDER).not.toContain('thread-hooks');
   });
 
   test('time-check is opt-in only — its hook fires on every prompt', () => {
