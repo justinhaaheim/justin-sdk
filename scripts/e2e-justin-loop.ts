@@ -149,6 +149,18 @@ interface Options {
   permissionMode: string;
   recordDir: string;
   replayDir: string | null;
+  /**
+   * Forwarded to the runner as `--handoff-settle-min` (D15). 0 = not passed at
+   * all, which is the runner's own default.
+   *
+   * The harness CANNOT reproduce the stall this knob exists for — a session whose
+   * `claude agents` row never reaches `done` happened in 1 of 7 real runs and is
+   * not scriptable from out here. So what a run with this on measures is the
+   * other direction: that arming the second signal does NOT settle sessions that
+   * end normally. A `handoff-settled` outcome in the ledger of a scenario A run
+   * is a FALSE POSITIVE, not a pass.
+   */
+  settleMin: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +191,11 @@ const USAGE = `bun run e2e:justin-loop [options]
                        session gets through the handoff without a permission
                        prompt. A blocked run is a valid result here, not a
                        flake — do not retry it, report it.
+  --settle-min=<n>     Forward --handoff-settle-min=<n> to the runner (D15).
+                       0 (default) does not pass the flag at all. The stall it
+                       guards against is not reproducible here, so a run with
+                       this on measures the absence of a FALSE positive: no
+                       handoff-settled outcome in the ledger.
   --keep               Keep the fixture directory even when everything passes
   --help`;
 
@@ -193,6 +210,7 @@ function parseArgs(argv: string[]): Options {
     recordDir: join(REPO_ROOT, 'tmp', 'e2e-justin-loop', stamp),
     replayDir: null,
     scenarios: ['a', 'b'],
+    settleMin: 0,
   };
   for (const arg of argv) {
     const [flag, ...rest] = arg.split('=');
@@ -213,6 +231,12 @@ function parseArgs(argv: string[]): Options {
       const n = Number(value);
       if (!(n > 0)) fatal(`--bound-min must be greater than 0 (got ${value})`);
       opts.boundMin = n;
+    } else if (flag === '--settle-min') {
+      const n = Number(value);
+      // A typo'd value must not silently become 0 (= the knob off) on a run
+      // whose whole purpose is to have it on.
+      if (!(n >= 0)) fatal(`--settle-min must be 0 or greater (got ${value})`);
+      opts.settleMin = n;
     } else if (flag === '--model') {
       opts.model = value;
     } else if (flag === '--permission-mode') {
@@ -1162,6 +1186,9 @@ async function runScenario(
     // outcome in the ledger instead of as our own SIGKILL, which says only
     // that something took too long.
     '--blocked-wait-min=2',
+    // Only when asked for (D15): a run with the knob off and a run with it on
+    // must be distinguishable in the recorded argv and stdout.
+    ...(opts.settleMin > 0 ? [`--handoff-settle-min=${opts.settleMin}`] : []),
   ];
   const args =
     scenario === 'a'
