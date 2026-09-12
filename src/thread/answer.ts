@@ -477,7 +477,7 @@ export function retryCommandFor(id: string, text: string): string {
  * out loud — telling him to re-type an answer bd already holds would be its own
  * small lie.
  */
-function bdWriter(ctx: BdContext, threadId: string): AnswerWriter {
+export function bdWriter(ctx: BdContext, threadId: string): AnswerWriter {
   const writeComment = async (
     id: string,
     text: string,

@@ -222,6 +222,12 @@ const componentConfigSchema = z
           .describe(
             'Whether the SessionStart hook installed by `justin-sdk add thread-hooks` may create this session’s thread bead before it has reported anything (home-base-p1uj.3). DEFAULT FALSE, and gated by `enabled` as well: BOTH must be true. Separate from `enabled` because this one turns every session start and every resume into a Dolt write, so it is the expensive half and must be armed deliberately.',
           ),
+        answerUi: z
+          .enum(['classic', 'ink', 'web'])
+          .optional()
+          .describe(
+            'Which UI `thread answer` opens (home-base-p1uj.12). DEFAULT "web": a local page on 127.0.0.1 with one textarea per ask, autosaved to disk on every keystroke burst, where no key can discard text and Enter is a newline. "classic" is the original readline walk — keep it for the iOS remote-control flow, which cannot reach a localhost page. "ink" is accepted and REFUSED in one line: the spike measured it and found no maintained multi-line editor for Ink (ink-text-input is single-line; the multi-line packages are pre-1.0 with three-figure weekly downloads), so it was rejected rather than never considered. Overridden per run by `thread answer --ui <name>` / `--classic`.',
+          ),
       })
       .optional()
       .describe(

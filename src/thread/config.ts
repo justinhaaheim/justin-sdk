@@ -61,10 +61,43 @@ export const THREAD_DEFAULT_START_ON_SESSION_START = false;
  */
 export const THREAD_DEFAULT_AUTO_COMMIT = true;
 
+/**
+ * Which UI `thread answer` puts in front of Justin (home-base-p1uj.12).
+ *
+ * `ink` is a REAL member of this union even though no Ink UI ships, and that is
+ * deliberate. The bead named three values; the spike measured Ink and rejected
+ * it (no maintained multi-line editor exists for it — the verdict with its
+ * numbers is in the bead's notes). Accepting `ink` and silently running
+ * something else would be the reassuring kind of wrong, and dropping it from the
+ * union would turn a considered rejection into a typo. So it parses, and
+ * `thread answer` refuses it in one line that names the verdict.
+ */
+export type ThreadAnswerUi = 'classic' | 'ink' | 'web';
+
+/** The spike winner (home-base-p1uj.12). */
+export const THREAD_DEFAULT_ANSWER_UI: ThreadAnswerUi = 'web';
+
+export const THREAD_ANSWER_UIS: readonly ThreadAnswerUi[] = [
+  'classic',
+  'ink',
+  'web',
+];
+
+export function isThreadAnswerUi(value: unknown): value is ThreadAnswerUi {
+  return (
+    typeof value === 'string' &&
+    (THREAD_ANSWER_UIS as readonly string[]).includes(value)
+  );
+}
+
 /** Which layer decided one knob's value. */
 export type ThreadConfigSource = 'default' | 'project' | 'user';
 
 export interface ResolvedThreadConfig {
+  /** Which UI `thread answer` opens. */
+  answerUi: ThreadAnswerUi;
+  /** Which layer decided `answerUi`. */
+  answerUiSource: ThreadConfigSource;
   /** Whether the tool commits `.beads/issues.jsonl` after each write batch. */
   autoCommit: boolean;
   /** Which layer decided `autoCommit`. */
@@ -178,7 +211,28 @@ export function resolveThreadConfig(
     }
   }
 
+  let answerUi: ThreadAnswerUi = THREAD_DEFAULT_ANSWER_UI;
+  let answerUiSource: ThreadConfigSource = 'default';
+  for (const layer of layers) {
+    const read = threadStringIn(layer.config, 'answerUi');
+    if (read == null) continue;
+    if (!isThreadAnswerUi(read)) {
+      // A misspelled UI is NAMED, not shrugged off: a knob that reads as the
+      // default because of a typo is exactly the silent-shaped failure rule 6 is
+      // about, and this one decides which editor Justin types five paragraphs
+      // into.
+      problems.push(
+        `componentConfig.thread.answerUi in the ${layer.name} config is ${JSON.stringify(read)}, which is not one of ${THREAD_ANSWER_UIS.join(', ')} — ignoring it and using ${THREAD_DEFAULT_ANSWER_UI}.`,
+      );
+      continue;
+    }
+    answerUi = read;
+    answerUiSource = layer.name;
+  }
+
   return {
+    answerUi,
+    answerUiSource,
     autoCommit: autoCommit.value,
     autoCommitSource: autoCommit.source,
     enabled: enabled.value,
