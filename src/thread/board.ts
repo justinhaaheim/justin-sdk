@@ -336,6 +336,16 @@ export async function runThreadBoard(
   // 1. The spool, before anything is shown (D5).
   const drained = await drainSpool({apply: options.apply, ctx, env});
   const drainLines = renderDrain(drained);
+  // PRINTED IMMEDIATELY, before the listings that can fail. The drain has
+  // already MOVED things — applied a report, or left one spooled — and if the
+  // bd read below then fails, a drain summary held back until "success" is a
+  // report that silently changed state and said nothing. Measured: with bd
+  // unreachable this was exactly the case, and the "1 STILL SPOOLED" line never
+  // reached the screen. JSON mode is the exception, where the same facts go out
+  // as the `drain` key and a loose line would corrupt the document.
+  if (options.json !== true) {
+    for (const line of drainLines) console.log(line);
+  }
 
   // 2. Exactly two bd calls. Everything below is client-side.
   const threads = await listThreads(ctx);
@@ -371,8 +381,6 @@ export async function runThreadBoard(
     );
     return 0;
   }
-
-  for (const line of drainLines) console.log(line);
 
   if (view === 'openAsks') {
     console.log(renderOpenAsks(collectOpenAsks(threads.value, asks.value)));

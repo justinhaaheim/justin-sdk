@@ -207,10 +207,21 @@ function createTerminalIo(): {io: AnswerIo; close: () => void} {
 
   const ask = async (prompt: string): Promise<string | null> => {
     if (closed) return null;
-    const closedPromise = new Promise<null>((resolve) =>
-      rl.once('close', () => resolve(null)),
-    );
-    return Promise.race([rl.question(prompt), closedPromise]);
+    // The close listener is REMOVED on the normal path. `once` only fires once,
+    // but a question that resolves normally leaves its listener attached
+    // forever, so a walk with a dozen prompts (asks plus note lines) would trip
+    // Node's MaxListenersExceededWarning — printed to stderr, mid-walk, on
+    // exactly the threads with the most asks to answer.
+    let onClose: (() => void) | null = null;
+    const closedPromise = new Promise<null>((resolve) => {
+      onClose = () => resolve(null);
+      rl.once('close', onClose);
+    });
+    try {
+      return await Promise.race([rl.question(prompt), closedPromise]);
+    } finally {
+      if (onClose != null) rl.off('close', onClose);
+    }
   };
 
   return {
