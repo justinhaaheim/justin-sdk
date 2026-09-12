@@ -7,11 +7,10 @@
  * the seam between this process and a child's stdio. A scripted world could not
  * have shown it and cannot guard it.
  *
- * SCOPE TODAY: the helper itself. The runner's own calls (`listAgents`,
- * `stopSession`, the HEAD-sha read, the preflight `claude --version`) are NOT
- * routed through it yet — that is the rest of home-base-a1go, and until it lands
- * those calls are still synchronous and the two untimed ones are still
- * unbounded. Nothing below should be read as covering them.
+ * TWO LAYERS. The first describe drives `runChild` directly. The second drives
+ * the RUNNER'S OWN functions — `listAgents`, `gitHead`, `preflight` — against
+ * the same fakes, because "the helper is bounded" and "the runner uses the
+ * helper" are different claims and only the second one is the bug.
  *
  * THE NEGATIVE CONTROL was run once, on the OLD synchronous path, before any of
  * this existed (recorded in home-base-a1go's notes): the same pipe-holder fake
@@ -19,6 +18,20 @@
  * the grandchild — and reported `status: 0, error: null`, i.e. success. With a
  * 2000ms timeout it consumed the whole 2002ms rather than the ~1ms the child
  * actually took. Every bound asserted below is a bound that path did not have.
+ *
+ * THE SECOND LAYER WAS CONTROLLED THE SAME WAY, four times, by breaking the
+ * runner and watching exactly one assertion redden each time:
+ *   - `listAgents` put back on `spawnSync` with no timeout → the wedge test sat
+ *     on the grandchild's pipe until bun's 5s per-test limit and failed on
+ *     `ms < 2000` (received 5001), nothing else;
+ *   - the failure derived from `status !== 0` instead of
+ *     `describeChildFailure` → both timeout tests failed on the reason text
+ *     ("claude agents --json exited" where the timeout should be named);
+ *   - a timed-out HEAD read allowed through as a success → the git test failed
+ *     on `ok === false`, returning `ok: true` carrying the half-line the fake
+ *     had managed to print;
+ *   - the preflight message put back to "claude CLI not found on PATH" → the
+ *     version test failed on `toHaveLength(1)`, received 0.
  */
 import {afterAll, beforeAll, describe, expect, test} from 'bun:test';
 import {chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'fs';
@@ -26,6 +39,12 @@ import {tmpdir} from 'os';
 import {join} from 'path';
 
 import {describeChildFailure, runChild} from '../src/justin-loop/child';
+import {
+  CLAUDE_BIN_ENV,
+  gitHead,
+  listAgents,
+  preflight,
+} from '../src/justin-loop/runner';
 
 /**
  * The three shapes a child can take when it will not let go, as real files.
@@ -67,6 +86,16 @@ function fake(name: keyof typeof FAKES | string): string {
   return join(fakeDir, name, 'claude');
 }
 
+/**
+ * A directory holding a `git` that never exits, for prepending to PATH.
+ *
+ * The HEAD-sha read is the one call here that does NOT go through
+ * `resolveClaudeBin`, so PATH is its injection point — and PATH is enough
+ * precisely because `runChild` passes `process.env` to `spawn`, which resolves
+ * a bare name against the PATH it is handed.
+ */
+let fakeGitDir: string;
+
 beforeAll(() => {
   fakeDir = mkdtempSync(join(tmpdir(), 'justin-loop-hang-'));
   for (const [name, lines] of Object.entries(FAKES)) {
@@ -76,6 +105,11 @@ beforeAll(() => {
     writeFileSync(bin, `${lines.join('\n')}\n`);
     chmodSync(bin, 0o755);
   }
+  fakeGitDir = join(fakeDir, 'fake-git');
+  mkdirSync(fakeGitDir, {recursive: true});
+  const git = join(fakeGitDir, 'git');
+  writeFileSync(git, `${(FAKES['never-exits'] ?? []).join('\n')}\n`);
+  chmodSync(git, 0o755);
 });
 
 afterAll(() => {
@@ -163,5 +197,131 @@ describe('runChild: a child that will not let go cannot hold the runner', () => 
     });
     expect(v.stdout).toBe('hello');
     expect(describeChildFailure('sh', v)).toBeNull();
+  });
+});
+
+/**
+ * The RUNNER'S OWN calls, against the same fakes.
+ *
+ * The layer above proves the helper is bounded. These prove the runner actually
+ * goes through it — the distinction that matters, because the wedge was never in
+ * a helper: it was in `listAgents` calling `spawnSync` directly. Every call here
+ * is the real exported function, spawning a real process.
+ *
+ * Injection differs by call, and that difference IS the design:
+ *   - the `claude` calls resolve their binary through `resolveClaudeBin()`, so
+ *     `JUSTIN_LOOP_CLAUDE_BIN` points them at a fake;
+ *   - the HEAD read spawns a bare `git`, so PATH points it at a fake.
+ */
+describe('the runner routes its own child calls through runChild', () => {
+  const SLACK_MS = 2_000;
+
+  /** Point every `claude` the runner spawns at one fake, then put it back. */
+  async function withClaude<T>(
+    bin: string,
+    body: () => Promise<T>,
+  ): Promise<T> {
+    const original = process.env[CLAUDE_BIN_ENV];
+    process.env[CLAUDE_BIN_ENV] = bin;
+    try {
+      return await body();
+    } finally {
+      if (original == null) delete process.env[CLAUDE_BIN_ENV];
+      else process.env[CLAUDE_BIN_ENV] = original;
+    }
+  }
+
+  /** Put the never-exiting `git` first on PATH, then put PATH back. */
+  async function withFakeGit<T>(body: () => Promise<T>): Promise<T> {
+    const original = process.env.PATH;
+    process.env.PATH = `${fakeGitDir}:${original ?? ''}`;
+    try {
+      return await body();
+    } finally {
+      process.env.PATH = original;
+    }
+  }
+
+  test('listAgents SUCCEEDS against a claude that leaves a grandchild on the pipe', async () => {
+    // THE REGRESSION TEST (home-base-a1go). This is the measured wedge, driven
+    // through the real `listAgents`: the fake prints its JSON, backgrounds a
+    // 20s sleep holding the inherited stdout, and exits 0 at once. The old
+    // `spawnSync` sat on the pipe for the grandchild's whole life — 120_015ms
+    // when it was measured with a 120s sleep — and the 60s timeout would have
+    // turned that into a FAILED poll five times over, which is
+    // `agents-unreadable` and the end of the run.
+    const {ms, v} = await timed(() =>
+      withClaude(fake('exits-leaving-pipe-holder'), () =>
+        listAgents(import.meta.dirname, 10_000),
+      ),
+    );
+    expect(v.ok).toBe(true);
+    expect(v.ok ? v.rows : null).toEqual([]);
+    expect(ms).toBeLessThan(SLACK_MS);
+  });
+
+  test('listAgents against a claude that never exits names the timeout and the kill', async () => {
+    const {ms, v} = await timed(() =>
+      withClaude(fake('never-exits'), () =>
+        listAgents(import.meta.dirname, 1_000),
+      ),
+    );
+    expect(v.ok).toBe(false);
+    expect(v.ok ? '' : v.reason).toContain('did not finish within 1000ms');
+    expect(v.ok ? '' : v.reason).toContain('SIGKILL');
+    expect(ms).toBeLessThan(1_000 + SLACK_MS);
+  });
+
+  test('listAgents against a claude that hangs AND holds the pipe still answers', async () => {
+    // The worst case: the SIGKILL does not close the pipe, because the
+    // grandchild has it. Half a JSON document is on that pipe, and a failure
+    // that returned it as rows would be worse than one that hung.
+    const {ms, v} = await timed(() =>
+      withClaude(fake('hangs-holding-pipe'), () =>
+        listAgents(import.meta.dirname, 1_000),
+      ),
+    );
+    expect(v.ok).toBe(false);
+    expect(v.ok ? '' : v.reason).toContain('did not finish within 1000ms');
+    expect(ms).toBeLessThan(1_000 + SLACK_MS);
+  });
+
+  test('the HEAD read against a git that never exits is a REASON, not a null', async () => {
+    // The positional suspect for the 717s silence: this read runs the instant a
+    // session ends, and before home-base-a1go it had no timeout at all.
+    const {ms, v} = await timed(() =>
+      withFakeGit(() => gitHead(import.meta.dirname, 1_000)),
+    );
+    expect(v.ok).toBe(false);
+    expect(v.ok ? '' : v.reason).toContain('git rev-parse HEAD');
+    expect(v.ok ? '' : v.reason).toContain('did not finish within 1000ms');
+    expect(v.ok ? '' : v.reason).toContain('SIGKILL');
+    expect(ms).toBeLessThan(1_000 + SLACK_MS);
+  });
+
+  test('a claude that never answers --version is a TIMEOUT, not "not found"', async () => {
+    // Preflight's version probe was the other unbounded call. A CLI that is
+    // installed but wedged must not be reported as a CLI that is missing —
+    // "not found on PATH" sends you looking for the wrong thing, and it is the
+    // reassuring direction: it reads like a setup mistake rather than a machine
+    // in a bad state.
+    const {ms, v} = await timed(() =>
+      withClaude(fake('never-exits'), () =>
+        preflight(import.meta.dirname, 1_000),
+      ),
+    );
+    const timeouts = v.filter((p) =>
+      p.message.includes('did not finish within 1000ms'),
+    );
+    expect(timeouts).toHaveLength(1);
+    expect(timeouts[0]?.fatal).toBe(true);
+    expect(timeouts[0]?.message).toContain('SIGKILL');
+    expect(v.some((p) => p.message.includes('not found'))).toBe(false);
+    // …and the git repo it was pointed at read fine, so nothing here is a
+    // failure of the directory.
+    expect(v.some((p) => p.message.includes('could not read HEAD'))).toBe(
+      false,
+    );
+    expect(ms).toBeLessThan(1_000 + SLACK_MS);
   });
 });
