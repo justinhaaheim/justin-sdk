@@ -39,16 +39,20 @@ import {
   threadsStateDir,
 } from './paths';
 import {SKIP_COMMENT} from './answer';
-import {restateAsk} from './render';
+import {compareAsksForNumbering, numberingFieldsOf, restateAsk} from './render';
 
 export type AskState = 'answered' | 'skipped' | 'unanswered';
 
 export interface InboxAsk {
   answers: string[];
+  /** `metadata.askIndex` — part of the one ask order (F12 follow-up). */
+  askIndex: number | null;
   blocking: boolean;
   defaultAction: string;
   id: string;
   kind: string;
+  /** `metadata.reportCount` — which report created this ask. */
+  reportCount: number | null;
   restated: string;
   state: AskState;
   title: string;
@@ -224,6 +228,7 @@ export async function collectInboxAsks(
   for (const ask of openAsks) {
     const meta = metadataOf(ask);
     const base = {
+      ...numberingFieldsOf(meta),
       blocking: meta.blocking === true,
       defaultAction: stringOr(meta.defaultAction, 'UNKNOWN'),
       id: ask.id,
@@ -251,6 +256,13 @@ export async function collectInboxAsks(
       state: askStateOf(meta, comments.value),
     });
   }
+  // ONE ORDER EVERYWHERE (F12, extended to inbox by the conductor). The report,
+  // the `thread answer` walk and this list are the three places an ask is shown
+  // with a number in front of it; this one used to print in bd's listing order,
+  // which is not an order at all. Sorting the RESULT rather than the input
+  // keeps the reads in whatever order bd handed them over — only what Justin
+  // reads is arranged.
+  asks.sort(compareAsksForNumbering);
   return {asks, readFailed};
 }
 

@@ -72,6 +72,8 @@ export interface BoardRow {
   /** True when this thread has never reported: `thread start` made it and stopped. */
   reported: boolean;
   reportedAt: string | null;
+  /** When the thread began — `threadStartedAt`, else the session's `startedAt`. */
+  startedAt: string | null;
   stopDetail: string | null;
   stopKind: string | null;
   title: string;
@@ -196,6 +198,7 @@ export function buildBoard(
       repo: metaString(meta, 'repo'),
       reported,
       reportedAt,
+      startedAt,
       stopDetail: metaString(meta, 'stopReasonDetail'),
       stopKind: metaString(meta, 'stopReasonKind'),
       title: thread.title ?? '(no title)',
@@ -206,8 +209,22 @@ export function buildBoard(
   return {orphanAsks, rows};
 }
 
+/**
+ * Newest activity first — a REPORT if there is one, otherwise when the thread
+ * started (conductor, extending item A).
+ *
+ * Sorting on `reportedAt` alone sent every start-only thread to the bottom,
+ * under threads last touched days ago: a session that started ten minutes ago
+ * is the most recent thing on the board, and burying it is the same mistake as
+ * printing its age as UNKNOWN. A thread with neither stamp sorts last, where an
+ * empty string puts it, rather than being dropped.
+ */
+function activityAt(row: BoardRow): string {
+  return row.reportedAt ?? row.startedAt ?? '';
+}
+
 function byReportedAtDesc(a: BoardRow, b: BoardRow): number {
-  return (b.reportedAt ?? '').localeCompare(a.reportedAt ?? '');
+  return activityAt(b).localeCompare(activityAt(a));
 }
 
 function renderRow(row: BoardRow): string {

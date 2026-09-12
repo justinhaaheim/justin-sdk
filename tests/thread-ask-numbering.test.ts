@@ -29,6 +29,9 @@ import type {ThreadReportPayload} from '../src/thread/schema';
 
 const THIS_REPORT = 3;
 
+/** A directory with no `bd` script: every read fails, loudly and by design. */
+const NO_BD_WORKSPACE = '/nonexistent-life-workspace';
+
 function facts(): ThreadFacts {
   return {
     aheadBehind: null,
@@ -182,6 +185,21 @@ describe('the report and the walk number the same asks the same way', () => {
     const walkedIds = walked.map((ask) => ask.id);
     expect(walkedIds.indexOf('jl-t.2')).toBeLessThan(
       walkedIds.indexOf('jl-t.10'),
+    );
+  });
+
+  test('thread inbox lists them in the same order — three surfaces, one order', async () => {
+    // `inbox` numbers its lines too (inbox.ts), and it used to print in bd's
+    // listing order, which is not an order at all. Its bd reads are stubbed
+    // here — what is under test is the arrangement, not the comment fetch.
+    const {collectInboxAsks} = await import('../src/thread/inbox');
+    const ctx = {env: {}, lifeDir: NO_BD_WORKSPACE};
+    const collected = await collectInboxAsks(ctx, beads());
+    // Every read failed (there is no bd there), which is itself the honest
+    // path: the asks are still listed, each saying its answers are UNKNOWN.
+    expect(collected.readFailed).toBe(true);
+    expect(collected.asks.map((ask) => ask.id)).toEqual(
+      printed.map(([, id]) => id),
     );
   });
 

@@ -177,6 +177,35 @@ describe('a thread that has not reported yet (item A)', () => {
     expect(renderRecent(buildBoard([odd], [], NOW))).toContain('40%');
   });
 
+  test('--recent sorts it by its START time, between two reported threads', () => {
+    // 10:30 sits between jl-c3's report at 11:30 and jl-a1's at 10:00. Sorting
+    // on reportedAt alone sent every start-only thread to the bottom, under
+    // threads last touched days ago.
+    const between = thread('jl-s6', 'started between the two', {
+      reportCount: 0,
+      reportedAt: null,
+      repo: 'justin-sdk',
+      threadStartedAt: '2026-09-12T10:30:00.000Z',
+    });
+    const text = renderRecent(buildBoard([...THREADS, between], ASKS, NOW));
+    const order = [
+      'Older justin-sdk work', // reported 11:30
+      'started between the two', // started 10:30
+      'Thread reports read path', // reported 10:00
+      'Mail scan sender guide', // reported two days ago
+    ].map((title) => text.indexOf(title));
+    expect(order.every((at) => at >= 0)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  test('a thread with NEITHER stamp sorts last rather than first', () => {
+    const bare = thread('jl-s5', 'no stamps at all', {reportCount: 0});
+    const text = renderRecent(buildBoard([bare, ...THREADS], ASKS, NOW));
+    expect(text.indexOf('no stamps at all')).toBeGreaterThan(
+      text.indexOf('Mail scan sender guide'),
+    );
+  });
+
   test('a thread that HAS reported is untouched by any of this', () => {
     const row = buildBoard(THREADS, ASKS, NOW).rows.find(
       (entry) => entry.id === 'jl-a1',
