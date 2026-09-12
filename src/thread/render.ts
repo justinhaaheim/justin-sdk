@@ -132,12 +132,72 @@ function renderTokens(facts: ThreadFacts): string {
  * appears in the numbered sequence, in full, marked as carried.
  */
 export interface CarriedAsk {
+  /** `metadata.askIndex` — its position within the report that created it. */
+  askIndex: number | null;
   blocking: boolean;
   /** The report number that first asked it, when the bead records one. */
   fromReport: number | null;
   id: string;
   /** The ask bead's description, footer stripped. */
   restated: string;
+}
+
+/**
+ * THE ASK NUMBERING CONTRACT (F12) — one order, used by the report and by the
+ * `thread answer` walk.
+ *
+ * They used to disagree. The report numbered blocking-then-non-blocking with
+ * carried asks first inside each group, in payload order; the walk sorted by
+ * `id.localeCompare`, which puts `.10` before `.2` and interleaves carried asks
+ * with new ones. So "1 yes, 2 b", typed against the pasted report, walked onto
+ * different asks. Both sides now sort with this comparator, which is the
+ * report's own rule written down:
+ *
+ *   1. BLOCKING FIRST. The report prints two labelled groups in that order.
+ *   2. OLDEST REPORT FIRST. A carried ask has waited longest and is the one
+ *      most likely to have fallen out of Justin's head, so it leads its group.
+ *      An ask whose bead records no `reportCount` sorts as OLDER than any that
+ *      does: it cannot have been created by the report being rendered (that
+ *      report stamps every ask it creates), so it is carried by definition.
+ *   3. THEN PAYLOAD ORDER, via `askIndex` — the order Claude wrote them in.
+ *   4. THEN id, so the order is total and two runs never differ.
+ *
+ * Numeric fields are compared as NUMBERS, never as strings: `localeCompare` is
+ * what put ask 10 ahead of ask 2 in the first place.
+ */
+export interface NumberedAsk {
+  askIndex: number | null;
+  blocking: boolean;
+  id: string;
+  reportCount: number | null;
+}
+
+export function compareAsksForNumbering(
+  a: NumberedAsk,
+  b: NumberedAsk,
+): number {
+  if (a.blocking !== b.blocking) return a.blocking ? -1 : 1;
+  const reportA = a.reportCount ?? -1;
+  const reportB = b.reportCount ?? -1;
+  if (reportA !== reportB) return reportA - reportB;
+  const indexA = a.askIndex ?? -1;
+  const indexB = b.askIndex ?? -1;
+  if (indexA !== indexB) return indexA - indexB;
+  return a.id.localeCompare(b.id);
+}
+
+/** Read the numbering fields off an ask bead's metadata. Absent stays null. */
+export function numberingFieldsOf(metadata: unknown): {
+  askIndex: number | null;
+  reportCount: number | null;
+} {
+  const meta = (metadata ?? {}) as Record<string, unknown>;
+  const asNumber = (value: unknown): number | null =>
+    typeof value === 'number' && Number.isFinite(value) ? value : null;
+  return {
+    askIndex: asNumber(meta.askIndex),
+    reportCount: asNumber(meta.reportCount),
+  };
 }
 
 export interface RenderOptions {
@@ -157,6 +217,12 @@ export interface RenderOptions {
    */
   missingAskIdLabel?: string;
   payload: ThreadReportPayload;
+  /**
+   * Which report this is (1-based). Used ONLY to order this report's own asks
+   * after the carried ones (F12); absent means "newer than anything carried",
+   * which is the same thing every caller means by it.
+   */
+  reportCount?: number;
   /** The thread bead id, or null when bd never took the report. */
   threadId: string | null;
 }
@@ -256,43 +322,54 @@ export function renderReport(options: RenderOptions): string {
   }
 
   // ONE numbered sequence across both groups, blocking first, so an answer can
-  // be "1. yes 2. b" and land unambiguously (D11).
+  // be "1. yes 2. b" and land unambiguously (D11). The order is
+  // `compareAsksForNumbering`'s, and `thread answer` walks the same order (F12)
+  // — that is the whole point of sorting here rather than concatenating groups
+  // by hand, which is what let the two drift apart.
   lines.push('**Asks — everything I need from you:**');
-  const ordered = payload.asks.map((ask, index) => ({
-    ask,
-    id: askIds[index] ?? null,
-  }));
   const carriedAsks = options.carried ?? [];
   const missingLabel = options.missingAskIdLabel ?? '(NOT RECORDED)';
-  const blocking = ordered.filter((entry) => entry.ask.blocking);
-  const nonBlocking = ordered.filter((entry) => !entry.ask.blocking);
-  const carriedBlocking = carriedAsks.filter((entry) => entry.blocking);
-  const carriedOther = carriedAsks.filter((entry) => !entry.blocking);
-  if (ordered.length === 0 && carriedAsks.length === 0) {
+  const thisReport = options.reportCount ?? Number.MAX_SAFE_INTEGER;
+  const entries: {sort: NumberedAsk; render: (n: number) => void}[] = [
+    ...carriedAsks.map((carried) => ({
+      render: (n: number) => renderCarried(lines, carried, n),
+      sort: {
+        askIndex: carried.askIndex,
+        blocking: carried.blocking,
+        id: carried.id,
+        reportCount: carried.fromReport,
+      },
+    })),
+    ...payload.asks.map((ask, index) => ({
+      render: (n: number) =>
+        renderAsk(lines, ask, askIds[index] ?? null, n, missingLabel),
+      // A brand-new ask carries THIS report's number, so it sorts after every
+      // carried one. The id is only a tiebreak, and it may not exist yet.
+      sort: {
+        askIndex: index,
+        blocking: ask.blocking,
+        id: askIds[index] ?? '',
+        reportCount: thisReport,
+      },
+    })),
+  ].sort((a, b) => compareAsksForNumbering(a.sort, b.sort));
+  if (entries.length === 0) {
     lines.push('- (nothing — you are not blocking anything)');
   }
-  // CARRIED ASKS COME FIRST within each group: they have been waiting longest,
-  // and they are the ones most likely to have fallen out of Justin's head.
   let number = 1;
-  if (blocking.length > 0 || carriedBlocking.length > 0) {
+  const blockingEntries = entries.filter((entry) => entry.sort.blocking);
+  const otherEntries = entries.filter((entry) => !entry.sort.blocking);
+  if (blockingEntries.length > 0) {
     lines.push('- Blocking:');
-    for (const entry of carriedBlocking) {
-      renderCarried(lines, entry, number);
-      number += 1;
-    }
-    for (const entry of blocking) {
-      renderAsk(lines, entry.ask, entry.id, number, missingLabel);
+    for (const entry of blockingEntries) {
+      entry.render(number);
       number += 1;
     }
   }
-  if (nonBlocking.length > 0 || carriedOther.length > 0) {
+  if (otherEntries.length > 0) {
     lines.push('- Non-blocking (I proceeded; you can override):');
-    for (const entry of carriedOther) {
-      renderCarried(lines, entry, number);
-      number += 1;
-    }
-    for (const entry of nonBlocking) {
-      renderAsk(lines, entry.ask, entry.id, number, missingLabel);
+    for (const entry of otherEntries) {
+      entry.render(number);
       number += 1;
     }
   }

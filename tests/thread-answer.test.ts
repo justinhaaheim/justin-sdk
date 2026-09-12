@@ -29,12 +29,14 @@ import type {BdIssue} from '../src/thread/bd';
 
 function view(overrides: Partial<AskView> = {}): AskView {
   return {
+    askIndex: 0,
     blocking: false,
     defaultAction: 'I take the recommended option.',
     description: '[Pick a/b] Ship it?',
     id: 'jl-a1.1',
     kind: 'pick',
     optionCount: 2,
+    reportCount: 1,
     title: 'Ship it?',
     ...overrides,
   };
@@ -64,20 +66,24 @@ describe('reading an ask bead', () => {
       description: 'the rendered ask',
       id: 'jl-a1.1',
       metadata: {
+        askIndex: 2,
         blocking: true,
         defaultAction: 'I ship it.',
         kind: 'pick',
         optionCount: 3,
+        reportCount: 4,
       },
       title: 'Ship it?',
     };
     expect(askViewOf(issue)).toEqual({
+      askIndex: 2,
       blocking: true,
       defaultAction: 'I ship it.',
       description: 'the rendered ask',
       id: 'jl-a1.1',
       kind: 'pick',
       optionCount: 3,
+      reportCount: 4,
       title: 'Ship it?',
     });
   });
@@ -86,6 +92,10 @@ describe('reading an ask bead', () => {
     const read = askViewOf({id: 'jl-a1.1', metadata: {}});
     expect(read.defaultAction).toContain('UNKNOWN');
     expect(read.optionCount).toBe(0);
+    // Not 0 (F12): a zero here would sort an ask with no recorded position
+    // ahead of the report's first ask, inventing an order nobody chose.
+    expect(read.askIndex).toBeNull();
+    expect(read.reportCount).toBeNull();
   });
 });
 
@@ -141,16 +151,56 @@ describe('decisionFor', () => {
 });
 
 describe('orderAsks', () => {
-  test('blocking asks come first, then id order', () => {
+  test('blocking asks come first, then payload order within one report', () => {
     const asks = [
-      view({blocking: false, id: 'jl-a1.3'}),
-      view({blocking: true, id: 'jl-a1.2'}),
-      view({blocking: false, id: 'jl-a1.1'}),
+      view({askIndex: 1, blocking: false, id: 'jl-a1.3'}),
+      view({askIndex: 2, blocking: true, id: 'jl-a1.2'}),
+      view({askIndex: 0, blocking: false, id: 'jl-a1.1'}),
     ];
     expect(orderAsks(asks).map((ask) => ask.id)).toEqual([
       'jl-a1.2',
       'jl-a1.1',
       'jl-a1.3',
+    ]);
+  });
+
+  test('ask 10 does not jump ahead of ask 2 (F12)', () => {
+    // The old comparator was `id.localeCompare`, under which "jl-a1.10" sorts
+    // before "jl-a1.2" — so the walk asked them in an order the report never
+    // printed, and "2. b" landed on the wrong ask.
+    const asks = [
+      view({askIndex: 9, blocking: true, id: 'jl-a1.10'}),
+      view({askIndex: 1, blocking: true, id: 'jl-a1.2'}),
+    ];
+    expect(orderAsks(asks).map((ask) => ask.id)).toEqual([
+      'jl-a1.2',
+      'jl-a1.10',
+    ]);
+  });
+
+  test('a CARRIED ask leads its group, exactly as the report prints it', () => {
+    const asks = [
+      view({askIndex: 0, blocking: true, id: 'jl-a1.9', reportCount: 3}),
+      view({askIndex: 0, blocking: true, id: 'jl-a1.1', reportCount: 1}),
+      view({askIndex: 0, blocking: false, id: 'jl-a1.8', reportCount: 2}),
+    ];
+    expect(orderAsks(asks).map((ask) => ask.id)).toEqual([
+      'jl-a1.1',
+      'jl-a1.9',
+      'jl-a1.8',
+    ]);
+  });
+
+  test('an ask with no recorded report sorts as the OLDEST, not the newest', () => {
+    // It cannot have come from the report being rendered — that one stamps
+    // every ask it creates — so it is carried by definition.
+    const asks = [
+      view({askIndex: 0, blocking: true, id: 'jl-a1.4', reportCount: 1}),
+      view({askIndex: null, blocking: true, id: 'jl-a1.3', reportCount: null}),
+    ];
+    expect(orderAsks(asks).map((ask) => ask.id)).toEqual([
+      'jl-a1.3',
+      'jl-a1.4',
     ]);
   });
 });

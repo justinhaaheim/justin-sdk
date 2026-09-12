@@ -27,7 +27,7 @@
 
 import {homedir} from 'os';
 import {join} from 'path';
-import {mkdirSync, rmSync, writeFileSync} from 'fs';
+import {mkdirSync, readdirSync, rmSync, statSync, writeFileSync} from 'fs';
 
 /** Environment as this module consumes it — `process.env` is assignable. */
 export type EnvLike = Record<string, string | undefined>;
@@ -67,9 +67,17 @@ export function lifeBeadsDir(env: EnvLike = process.env): string {
  * refused me" is an actionable, one-command fix, while "the disk is full" or
  * "the parent does not exist" is not, and collapsing them would print the wrong
  * remedy for the wrong problem.
+ *
+ * `missing` is the fourth member, and it exists because of F9 (p1uj.6): the
+ * probe used to `mkdirSync` whatever it was handed, so on a machine with no
+ * ~/Dev/life it CREATED ~/Dev/life/.beads and reported it writable — after
+ * which every bd call failed with `Script not found "bd"`, and the beads
+ * workspace was a directory this tool had fabricated. "There is no workspace
+ * here" and "I can write to the workspace" are opposite facts.
  */
 export type WriteProbe =
   | {kind: 'writable'; path: string}
+  | {kind: 'missing'; path: string}
   | {kind: 'denied'; path: string; error: string}
   | {kind: 'failed'; path: string; error: string};
 
@@ -88,25 +96,92 @@ export function probeErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Every probe file this tool has ever written starts with this. */
+const PROBE_PREFIX = '.justin-threads-probe-';
+
 /**
- * Can we write inside `dir`? Creates the directory if needed, writes a uniquely
- * named probe file, and removes it again.
+ * Remove probe files left by runs that died between the write and the unlink.
+ *
+ * The old comment claimed a crashed probe was cleaned up "on the next run's
+ * rmSync", which was false (F9): each run only ever removed its OWN pid-named
+ * file, so a killed run left `.justin-threads-probe-<pid>` inside
+ * ~/Dev/life/.beads — a directory whose own .gitignore does not cover it, so it
+ * showed as untracked in the life repo forever. Sweeping the whole prefix is
+ * what makes the claim true.
+ *
+ * Deleting a CONCURRENT probe's file is harmless and is not worth avoiding: by
+ * the time a sweep can see it, that probe's `writeFileSync` has already
+ * returned (which is the whole measurement), and its own cleanup is
+ * `force: true`.
+ */
+function sweepStaleProbes(dir: string): void {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    // Unreadable: the write probe below is what reports why, with the right
+    // remedy attached. Nothing to say here.
+    return;
+  }
+  for (const name of names) {
+    if (!name.startsWith(PROBE_PREFIX)) continue;
+    try {
+      rmSync(join(dir, name), {force: true});
+    } catch {
+      // A probe file we cannot remove is a nuisance, not a reason to fail a
+      // command that has not even started yet.
+    }
+  }
+}
+
+/**
+ * Can we write inside `dir`? Writes a uniquely named probe file and removes it.
  *
  * Deliberately NOT `access(W_OK)`: the sandbox is a syscall filter, not a
  * permission bit, and `access` reports the bits. Only an actual write tells the
  * truth. The probe file name is prefixed with a dot and carries the pid so two
- * concurrent sessions cannot collide, and it is removed in a `finally` so a
- * crash between write and unlink still cleans up on the next run's `rmSync`.
+ * concurrent sessions cannot collide, and stale ones are swept at probe time.
+ *
+ * `create` IS THE CALLER'S DECISION AND HAS NO DEFAULT (F9). The state dir is
+ * ours to create; `~/Dev/life/.beads` is bd's, and a tool that conjures it has
+ * turned "you have no beads workspace" into "you have an empty one". A missing
+ * no-create directory returns `missing`, which is distinct from `denied` — and
+ * the distinction is measured with `statSync` rather than `existsSync`,
+ * precisely because `existsSync` reports a READ the sandbox refused as "not
+ * there".
  */
-export function probeWritable(dir: string): WriteProbe {
-  const probePath = join(dir, `.justin-threads-probe-${process.pid}`);
-  try {
-    mkdirSync(dir, {recursive: true});
-  } catch (error) {
-    return isDenial(error)
-      ? {error: probeErrorMessage(error), kind: 'denied', path: dir}
-      : {error: probeErrorMessage(error), kind: 'failed', path: dir};
+export function probeWritable(
+  dir: string,
+  options: {create: boolean},
+): WriteProbe {
+  if (options.create) {
+    try {
+      mkdirSync(dir, {recursive: true});
+    } catch (error) {
+      return isDenial(error)
+        ? {error: probeErrorMessage(error), kind: 'denied', path: dir}
+        : {error: probeErrorMessage(error), kind: 'failed', path: dir};
+    }
+  } else {
+    try {
+      if (!statSync(dir).isDirectory()) {
+        return {error: 'not a directory', kind: 'failed', path: dir};
+      }
+    } catch (error) {
+      if (isDenial(error)) {
+        return {error: probeErrorMessage(error), kind: 'denied', path: dir};
+      }
+      const code =
+        error != null && typeof error === 'object' && 'code' in error
+          ? String((error as {code: unknown}).code)
+          : '';
+      return code === 'ENOENT'
+        ? {kind: 'missing', path: dir}
+        : {error: probeErrorMessage(error), kind: 'failed', path: dir};
+    }
   }
+  sweepStaleProbes(dir);
+  const probePath = join(dir, `${PROBE_PREFIX}${process.pid}`);
   try {
     writeFileSync(probePath, 'probe\n');
   } catch (error) {
@@ -117,10 +192,16 @@ export function probeWritable(dir: string): WriteProbe {
     try {
       rmSync(probePath, {force: true});
     } catch {
-      // Leaving a 6-byte probe file behind is not worth failing a command over.
+      // Leaving a 6-byte probe file behind is not worth failing a command over;
+      // the next run's sweep removes it.
     }
   }
   return {kind: 'writable', path: dir};
+}
+
+/** The line every command prints when the beads workspace is not there (F9). */
+export function lifeBeadsMissingLine(path: string): string {
+  return `THREADS: life beads dir missing - ${path} does not exist, so there is no beads workspace to read or write. Nothing was created.`;
 }
 
 /**

@@ -27,18 +27,17 @@
  * deletion safe.
  */
 
-import {readdirSync, readFileSync, rmSync} from 'fs';
+import {readdirSync, readFileSync, renameSync, rmSync} from 'fs';
 import {join} from 'path';
 
 import {bdContext, type BdContext} from './bd';
 import {describeBdFailure} from './bd';
 import {spoolDir} from './archive';
-import {validateThreadReport} from './schema';
+import {validateThreadFacts, validateThreadReport} from './schema';
 import {writeReportToBd, type BdWriteOutcome} from './report';
 
 import type {ArchivedReport} from './archive';
 import type {EnvLike} from './paths';
-import type {ThreadFacts} from './facts';
 
 export type SpoolOutcomeKind = 'applied' | 'superseded' | 'kept';
 
@@ -52,6 +51,10 @@ export interface DrainSummary {
   applied: number;
   kept: number;
   outcomes: SpoolOutcome[];
+  /** Inflight files left by a drain that died; renamed back and replayed here. */
+  reclaimed: number;
+  /** Files another drain had already claimed. NOT ours to report on. */
+  skippedConcurrent: number;
   superseded: number;
 }
 
@@ -74,6 +77,109 @@ export const applyViaBd: SpoolApplier = async (report, ctx) =>
     sessionId: report.sessionId,
     supersedeGuard: true,
   });
+
+/**
+ * THE DRAIN LOCK (F10), and it is one `rename(2)` rather than a lock file.
+ *
+ * Two `thread board` runs used to read the same listing and both apply every
+ * file in it: the loser wrote a duplicate report, or got a refusal for asks the
+ * winner had already closed, and then printed a 🚨 STILL SPOOLED line for a file
+ * the winner had already removed. Renaming a file to `<name>.inflight-<pid>`
+ * before touching it is atomic on every POSIX filesystem — exactly one of the
+ * two renames can succeed, and the loser's ENOENT IS the lock being taken.
+ *
+ * The suffix deliberately does not end in `.json`, so an inflight file is
+ * invisible to `spoolFiles` and cannot be picked up twice.
+ *
+ * A drain that DIES while holding a file would strand it under a name nothing
+ * looks for — the spool losing a report silently, which is the failure this
+ * whole subsystem exists to prevent. Hence the pid in the name and the reclaim
+ * sweep: an inflight file whose owner is MEASURABLY gone is renamed back and
+ * replayed. "I could not tell whether that process is alive" leaves it alone.
+ */
+const INFLIGHT_SUFFIX = '.inflight-';
+
+function inflightName(name: string, pid: number): string {
+  return `${name}${INFLIGHT_SUFFIX}${pid}`;
+}
+
+/** The pid an inflight file names, or null when this is not one. */
+function pidOfInflight(name: string): number | null {
+  const at = name.lastIndexOf(INFLIGHT_SUFFIX);
+  if (at === -1) return null;
+  const raw = name.slice(at + INFLIGHT_SUFFIX.length);
+  if (!/^[0-9]+$/.test(raw)) return null;
+  const pid = Number(raw);
+  return Number.isSafeInteger(pid) && pid > 0 ? pid : null;
+}
+
+/** true = running, false = MEASURED gone, null = could not tell (rule 6). */
+function pidAlive(pid: number): boolean | null {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    const code =
+      error != null && typeof error === 'object' && 'code' in error
+        ? String((error as {code: unknown}).code)
+        : '';
+    if (code === 'ESRCH') return false;
+    // EPERM means it exists and belongs to someone else.
+    if (code === 'EPERM') return true;
+    return null;
+  }
+}
+
+/** Rename abandoned inflight files back so this run can replay them. */
+function reclaimAbandoned(dir: string): number {
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return 0;
+  }
+  let reclaimed = 0;
+  for (const name of names) {
+    const pid = pidOfInflight(name);
+    if (pid == null) continue;
+    if (pid === process.pid) continue; // ours, this very run
+    if (pidAlive(pid) !== false) continue; // alive, or unknowable — hands off
+    const base = name.slice(0, name.lastIndexOf(INFLIGHT_SUFFIX));
+    try {
+      renameSync(join(dir, name), join(dir, base));
+      reclaimed += 1;
+    } catch {
+      // Another drain reclaimed it first, or the rename failed; either way the
+      // file is still there under one of the two names for the next run.
+    }
+  }
+  return reclaimed;
+}
+
+type Claim =
+  | {kind: 'claimed'; path: string}
+  | {kind: 'taken'}
+  | {kind: 'failed'; error: string};
+
+/** Take one spool file, atomically. ENOENT means a concurrent drain won. */
+function claimSpoolFile(dir: string, name: string): Claim {
+  const from = join(dir, name);
+  const to = join(dir, inflightName(name, process.pid));
+  try {
+    renameSync(from, to);
+    return {kind: 'claimed', path: to};
+  } catch (error) {
+    const code =
+      error != null && typeof error === 'object' && 'code' in error
+        ? String((error as {code: unknown}).code)
+        : '';
+    if (code === 'ENOENT') return {kind: 'taken'};
+    return {
+      error: error instanceof Error ? error.message : String(error),
+      kind: 'failed',
+    };
+  }
+}
 
 /** Files are named `<sessionId>-<stamp>.json`, so a name sort is oldest-first per session. */
 function spoolFiles(dir: string): string[] | null {
@@ -136,15 +242,28 @@ function readSpooled(
       ok: false,
     };
   }
+  // THE FACTS ARE VALIDATED TOO (F11), not cast. A facts object without a
+  // string `reportedAt` used to reach the supersede guard, where
+  // `"2026-…" > undefined` is false — so the guard said "not superseded" and the
+  // stale payload was APPLIED over newer state, rendering `undefined` into the
+  // bead. An unvalidatable facts document is a THIRD fact, distinct from both
+  // "replay it" and "it has been overtaken", so the file is kept and named.
+  const facts = validateThreadFacts(document.facts);
+  if (facts.status === 'invalid') {
+    return {
+      detail: `the spooled facts no longer validate: ${facts.issues.slice(0, 3).join('; ')}`,
+      ok: false,
+    };
+  }
   return {
     ok: true,
     report: {
-      facts: document.facts as ThreadFacts,
+      facts: facts.facts,
       payload: validation.payload,
       reportedAt:
-        typeof document.reportedAt === 'string'
+        typeof document.reportedAt === 'string' && document.reportedAt !== ''
           ? document.reportedAt
-          : (document.facts as ThreadFacts).reportedAt,
+          : facts.facts.reportedAt,
       schemaVersion:
         typeof document.schemaVersion === 'number' ? document.schemaVersion : 1,
       sessionId: document.sessionId,
@@ -166,21 +285,59 @@ export async function drainSpool(
   const apply = options.apply ?? applyViaBd;
   const dir = spoolDir(env);
 
+  const reclaimed = reclaimAbandoned(dir);
   const files = spoolFiles(dir);
   if (files == null) return null; // could not even look — the caller says so
   const summary: DrainSummary = {
     applied: 0,
     kept: 0,
     outcomes: [],
+    reclaimed,
+    skippedConcurrent: 0,
     superseded: 0,
   };
 
+  /** Put a file back in the spool under its original name. */
+  const release = (inflight: string, name: string): string | null => {
+    try {
+      renameSync(inflight, join(dir, name));
+      return null;
+    } catch (error) {
+      // The file is still on disk under the inflight name, and the next drain
+      // reclaims it once this process is gone — but say so rather than letting
+      // a "kept" line imply it is sitting in the spool where it was.
+      return error instanceof Error ? error.message : String(error);
+    }
+  };
+
   for (const name of files) {
-    const path = join(dir, name);
+    const claim = claimSpoolFile(dir, name);
+    if (claim.kind === 'taken') {
+      summary.skippedConcurrent += 1;
+      continue;
+    }
+    if (claim.kind === 'failed') {
+      summary.kept += 1;
+      summary.outcomes.push({
+        detail: `could not be claimed for the drain (${claim.error}) — NOT applied`,
+        file: name,
+        kind: 'kept',
+      });
+      continue;
+    }
+    const path = claim.path;
     const read = readSpooled(path);
     if (!read.ok) {
+      const failedRelease = release(path, name);
       summary.kept += 1;
-      summary.outcomes.push({detail: read.detail, file: name, kind: 'kept'});
+      summary.outcomes.push({
+        detail:
+          failedRelease == null
+            ? read.detail
+            : `${read.detail}; and it could not be put back (${failedRelease}) — it is now ${inflightName(name, process.pid)}`,
+        file: name,
+        kind: 'kept',
+      });
       continue;
     }
     const outcome = await apply(read.report, ctx);
@@ -211,12 +368,17 @@ export async function drainSpool(
       });
       continue;
     }
+    const failedRelease = release(path, name);
+    const detail =
+      outcome.status === 'refused'
+        ? `refused: open asks not dispositioned (${outcome.missing.join(', ')})`
+        : describeBdFailure(outcome.failure);
     summary.kept += 1;
     summary.outcomes.push({
       detail:
-        outcome.status === 'refused'
-          ? `refused: open asks not dispositioned (${outcome.missing.join(', ')})`
-          : describeBdFailure(outcome.failure),
+        failedRelease == null
+          ? detail
+          : `${detail}; and it could not be put back (${failedRelease}) — it is now ${inflightName(name, process.pid)}`,
       file: name,
       kind: 'kept',
     });
@@ -232,11 +394,17 @@ export function renderDrain(summary: DrainSummary | null): string[] {
       '⚠️ could not read the spool directory — spooled reports may be waiting.',
     ];
   }
-  if (summary.outcomes.length === 0) return [];
+  if (summary.outcomes.length === 0 && summary.reclaimed === 0) return [];
   const lines = [
     `applied ${summary.applied} spooled report${summary.applied === 1 ? '' : 's'}` +
       (summary.superseded > 0 ? ` · ${summary.superseded} superseded` : '') +
-      (summary.kept > 0 ? ` · ${summary.kept} STILL SPOOLED` : ''),
+      (summary.kept > 0 ? ` · ${summary.kept} STILL SPOOLED` : '') +
+      (summary.reclaimed > 0
+        ? ` · ${summary.reclaimed} reclaimed from an interrupted drain`
+        : '') +
+      (summary.skippedConcurrent > 0
+        ? ` · ${summary.skippedConcurrent} left to another drain running now`
+        : ''),
   ];
   for (const outcome of summary.outcomes) {
     if (outcome.kind === 'applied') continue;

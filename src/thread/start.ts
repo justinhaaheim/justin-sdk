@@ -41,6 +41,7 @@ import {
 import {collectThreadFacts} from './facts';
 import {
   lifeBeadsDir,
+  lifeBeadsMissingLine,
   probeWritable,
   SANDBOX_DENIED_LINE,
   threadsStateDir,
@@ -64,8 +65,8 @@ import type {WriteResult} from './archive';
 export type ThreadStartOutcome =
   | {kind: 'disabled'; reason: string}
   | {kind: 'skippedSubagent'; agentId: string}
-  | {kind: 'skippedUnattended'; detail: string}
   | {kind: 'sandboxDenied'; path: string; error: string}
+  | {kind: 'lifeBeadsMissing'; path: string}
   | {kind: 'noSessionId'; reason: string}
   | {kind: 'existing'; threadId: string; status: string | null; title: string}
   | {
@@ -163,22 +164,16 @@ export async function startThread(
     return {agentId: options.agentId, kind: 'skippedSubagent'};
   }
 
-  // 2. UNATTENDED / HEADLESS. CONJECTURE, NOT A MEASUREMENT, and deliberately
-  // shaped so that being wrong changes nothing: CLAUDE_CODE_SESSION_ATTENDED
-  // was observed as "1" in an interactive session (2026-09-12, 2.1.269), but
-  // what a `claude -p` run sets — "0", or nothing at all — has NOT been
-  // measured. So the guard fires only on an explicit non-"1" value; an ABSENT
-  // variable is treated as attended and still starts a thread. If it ever does
-  // fire, hook mode says so on stderr, which is how the conjecture gets tested.
-  const attended = env.CLAUDE_CODE_SESSION_ATTENDED;
-  if (attended != null && attended !== '' && attended !== '1') {
-    return {
-      detail: `CLAUDE_CODE_SESSION_ATTENDED=${attended}`,
-      kind: 'skippedUnattended',
-    };
-  }
+  // NO HEADLESS / UNATTENDED GUARD. There used to be one here, skipping any
+  // session whose CLAUDE_CODE_SESSION_ATTENDED was set to something other than
+  // "1". It was labelled conjecture in its own comment — what a `claude -p` run
+  // sets was never measured — and it contradicted D30, which wants a row for
+  // EVERY session: an unattended run is if anything MORE likely to be the one
+  // nobody notices stopped. Deleted on the conductor's decision (p1uj.7, item
+  // B). The subagent skip above stays: that one is measured, and it prevents a
+  // player from creating its conductor's bead.
 
-  // 3. KNOBS. Read before anything that costs a subprocess or a write probe.
+  // 2. KNOBS. Read before anything that costs a subprocess or a write probe.
   const {resolveThreadConfig} = await import('./config');
   const config = resolveThreadConfig({cwd, env});
   if (!config.enabled || !config.startOnSessionStart) {
@@ -188,7 +183,7 @@ export async function startThread(
     return {kind: 'disabled', reason: off};
   }
 
-  // 4. FACTS. `transcriptPath` comes from the hook payload when there is one,
+  // 3. FACTS. `transcriptPath` comes from the hook payload when there is one,
   // which skips scanning every directory under ~/.claude/projects for a file
   // that, at `source: startup`, does not exist yet anyway.
   const facts = collectThreadFacts({
@@ -207,18 +202,33 @@ export async function startThread(
   }
   const sessionId = facts.sessionId;
 
-  // 5. SANDBOX. Probed before any bd call, so a session that cannot possibly
+  // 4. SANDBOX. Probed before any bd call, so a session that cannot possibly
   // write never spends a subprocess — or a permission prompt — finding out.
-  for (const dir of [threadsStateDir(env), lifeBeadsDir(env)]) {
-    const probe = probeWritable(dir);
-    if (probe.kind === 'denied') {
-      return {error: probe.error, kind: 'sandboxDenied', path: probe.path};
-    }
+  // The state dir is ours to create; the beads dir is bd's, and creating it
+  // would fabricate a workspace rather than find one (F9).
+  const stateProbe = probeWritable(threadsStateDir(env), {create: true});
+  if (stateProbe.kind === 'denied') {
+    return {
+      error: stateProbe.error,
+      kind: 'sandboxDenied',
+      path: stateProbe.path,
+    };
+  }
+  const beadsProbe = probeWritable(lifeBeadsDir(env), {create: false});
+  if (beadsProbe.kind === 'denied') {
+    return {
+      error: beadsProbe.error,
+      kind: 'sandboxDenied',
+      path: beadsProbe.path,
+    };
+  }
+  if (beadsProbe.kind === 'missing') {
+    return {kind: 'lifeBeadsMissing', path: beadsProbe.path};
   }
 
   const ctx = bdContext(env);
 
-  // 6. IDEMPOTENCY. A resume fires SessionStart again with the same session id,
+  // 5. IDEMPOTENCY. A resume fires SessionStart again with the same session id,
   // and `thread report` may already have created the bead, so the lookup is the
   // load-bearing half of "run me as often as you like". A FAILED lookup is not
   // "there is none": returning bdFailed here is what stops a locked database
@@ -244,7 +254,7 @@ export async function startThread(
     };
   }
 
-  // 7. CREATE.
+  // 6. CREATE.
   const title =
     options.title != null && options.title !== ''
       ? options.title
@@ -267,7 +277,7 @@ export async function startThread(
     };
   }
 
-  // 8. STATUS. `bd create` has no status flag, so `in_progress` (D10) costs a
+  // 7. STATUS. `bd create` has no status flag, so `in_progress` (D10) costs a
   // second write. If it fails the bead still EXISTS — reporting that as a plain
   // failure would be its own rule-6 violation in the other direction, so the
   // outcome carries both the id and the named failure.
@@ -287,10 +297,10 @@ export function describeStartOutcome(outcome: ThreadStartOutcome): string {
       return `thread start: disabled — ${outcome.reason}. Nothing was created.`;
     case 'skippedSubagent':
       return `thread start: skipped — this is a subagent (agent_id=${outcome.agentId}); its conductor owns the thread.`;
-    case 'skippedUnattended':
-      return `thread start: skipped — this session looks unattended (${outcome.detail}).`;
     case 'sandboxDenied':
       return SANDBOX_DENIED_LINE;
+    case 'lifeBeadsMissing':
+      return lifeBeadsMissingLine(outcome.path);
     case 'noSessionId':
       return `thread start: ${outcome.reason} Nothing was created.`;
     case 'existing':

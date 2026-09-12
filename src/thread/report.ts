@@ -49,6 +49,7 @@ import {
 } from './metadata';
 import {collectThreadFacts} from './facts';
 import {
+  numberingFieldsOf,
   renderAskDescription,
   renderReport,
   renderThreadDescription,
@@ -367,13 +368,13 @@ export async function writeReportToBd(
     .filter((ask) => carriedIds.has(ask.id))
     .map((ask): CarriedAsk => {
       const meta = (ask.metadata ?? {}) as Record<string, unknown>;
+      // askIndex and reportCount are what put this ask in the same position in
+      // the report and in the `thread answer` walk (F12).
+      const numbering = numberingFieldsOf(meta);
       return {
+        askIndex: numbering.askIndex,
         blocking: meta.blocking === true,
-        fromReport:
-          typeof meta.reportCount === 'number' &&
-          Number.isFinite(meta.reportCount)
-            ? meta.reportCount
-            : null,
+        fromReport: numbering.reportCount,
         id: ask.id,
         // The bead's own description is the full ask — form tag, context,
         // lettered options, default — so F4 reuses it rather than
@@ -414,6 +415,7 @@ export async function writeReportToBd(
           facts,
           missingAskIdLabel: '(ask ids pending)',
           payload,
+          reportCount,
           threadId: existingThread.id,
         });
 
@@ -477,6 +479,7 @@ export async function writeReportToBd(
           carried: carriedOpenAsks,
           facts,
           payload,
+          reportCount,
           threadId,
         }),
         status: 'bdFailed',
@@ -502,6 +505,7 @@ export async function writeReportToBd(
           carried: carriedOpenAsks,
           facts,
           payload,
+          reportCount,
           threadId,
         }),
         status: 'bdFailed',
@@ -515,6 +519,7 @@ export async function writeReportToBd(
     carried: carriedOpenAsks,
     facts,
     payload,
+    reportCount,
     threadId,
   });
   const notesWritten = await finalizeThread(
