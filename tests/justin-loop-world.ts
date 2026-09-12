@@ -143,6 +143,12 @@ export async function runLoop(spec: {
   /** Make `br create` fail, so the failure bead cannot be filed. */
   brCreateFails?: boolean;
   /**
+   * Make `br close` fail, so the `done` bead cannot be closed (D14). The run
+   * still finished, so this must be loud on stderr and must NOT change the exit
+   * code — which is exactly what this knob exists to prove.
+   */
+  brCloseFails?: boolean;
+  /**
    * Make every HEAD read fail, so `progressed` is null — NOT false
    * (home-base-a1go). The normal world hands back a different sha per dispatch,
    * i.e. every session commits, so this is the only way to reach the paths that
@@ -190,6 +196,16 @@ export async function runLoop(spec: {
         reason: null,
         stdout: `✓ Created fx-bug${created}: ${args[1] ?? ''}\n`,
       };
+    }
+    if (args[0] === 'close') {
+      if (spec.brCloseFails === true) {
+        return {
+          ok: false,
+          reason: 'br exited 1: no issue with id hoff-9',
+          stdout: '',
+        };
+      }
+      return {ok: true, reason: null, stdout: `✓ Closed ${args[1] ?? ''}\n`};
     }
     if (args[0] !== 'list')
       return {ok: true, reason: null, stdout: '{"issues":[]}'};

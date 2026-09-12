@@ -152,6 +152,64 @@ describe('AC1: done and blocked stop the loop', () => {
     expect(r.ledger[0].outcome).toBe('done');
   });
 
+  // D14 (home-base-r4fs): a `done` bead has no successor, so nobody else would
+  // ever close it. Before D14 every finished chain left exactly one OPEN handoff
+  // bead behind, in every repo a loop had ever finished in.
+  test('done CLOSES the handoff bead through br, with a reason naming the run (D14)', async () => {
+    const r = await runLoop({
+      opts: {label: 'the-arc'},
+      scans: [
+        [],
+        [beadFrom('hoff-9', {disposition: 'done', from: 'the-arc-1'})],
+      ],
+    });
+    const closes = r.brCalls.filter((c) => c[0] === 'close');
+    expect(closes).toHaveLength(1);
+    // The runId is read off the ledger rather than hardcoded: it is built from
+    // the LOCAL-time stamp, so spelling it out would make this test pass or fail
+    // by timezone.
+    expect(closes[0]).toEqual([
+      'close',
+      'hoff-9',
+      `--reason=chain complete, read by justin-loop run ${r.ledger[0].runId}`,
+    ]);
+    expect(r.ledger[0].runId).toContain('the-arc');
+    expect(r.stdout).toContain('closed hoff-9');
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a br close that FAILS is printed on stderr WITH br’s reason, and the run still exits 0 (D14)', async () => {
+    const r = await runLoop({
+      brCloseFails: true,
+      opts: {label: 'the-arc'},
+      scans: [
+        [],
+        [beadFrom('hoff-9', {disposition: 'done', from: 'the-arc-1'})],
+      ],
+    });
+    // The arc finished. Only the hygiene failed, so the verdict is unchanged…
+    expect(r.exitCode).toBe(0);
+    // …and the failure is a fact on stderr, never a silent skip.
+    expect(r.stderr).toContain('hoff-9 could NOT be closed');
+    expect(r.stderr).toContain('br exited 1: no issue with id hoff-9');
+    expect(r.stderr).toContain('STILL OPEN');
+    expect(r.stdout).not.toContain('closed hoff-9');
+  });
+
+  test('blocked closes NOTHING and says the bead stays open on purpose (D14)', async () => {
+    const r = await runLoop({
+      opts: {label: 'the-arc'},
+      scans: [
+        [],
+        [beadFrom('hoff-b', {disposition: 'blocked', from: 'the-arc-1'})],
+      ],
+    });
+    expect(r.brCalls.filter((c) => c[0] === 'close')).toHaveLength(0);
+    expect(r.stdout).toContain(
+      'handoff hoff-b stays open — it is the question waiting for you',
+    );
+  });
+
   test('blocked stops at exit 2 and PRINTS the open questions', async () => {
     const r = await runLoop({
       opts: {label: 'the-arc'},

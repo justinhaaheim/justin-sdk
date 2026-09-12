@@ -46,7 +46,7 @@ import {
   parseHandoff,
   parseHandoffRows,
 } from './handoff';
-import {type BrRunner, runBr} from './br';
+import {type BrOutcome, type BrRunner, runBr} from './br';
 
 export {HANDOFF_LABEL};
 
@@ -936,14 +936,23 @@ export async function stopAndVerify(
 // ---------------------------------------------------------------------------
 // Reading the handoff beads
 //
-// Everything here is READ-ONLY on the runner side. The runner looks; the
-// successor claims (by closing the bead), because the claim has to be an act of
-// the session that actually picked the work up, not of the process that spawned
-// it.
+// Reading is all the runner does to a `continue` bead: the successor claims it
+// by closing it, because the claim has to be an act of the session that actually
+// picked the work up, not of the process that spawned it (D6).
+//
+// A `done` bead is the one exception (D14, home-base-r4fs). It has no successor
+// by construction, so nobody else will ever close it, and before D14 every
+// finished chain left exactly one OPEN handoff bead behind — a bead that means
+// "finished" sitting in `br ready` where it reads as its opposite. The runner is
+// that bead's reader, so the runner closes it (see closeDoneHandoff).
+//
+// A `blocked` bead stays OPEN on purpose (D14): it IS the question waiting for
+// Justin, and home-base-1r6d.33.7 defines how the chain resumes from it.
 //
 // Command shapes verified against br 0.1.37 AND br 0.4.1 (2026-09-08):
 //   scan    br list -l handoff --json     (closed excluded by default)
-//   claim   br close <id> --reason=…      (done by the successor, not by us)
+//   claim   br close <id> --reason=…      (the successor, on a `continue` bead)
+//   finish  br close <id> --reason=…      (us, on a `done` bead — D14)
 // ---------------------------------------------------------------------------
 
 /**
@@ -971,6 +980,34 @@ export function scanHandoffBeads(
     return {kind: 'unavailable', reason: 'could not parse `br list --json`'};
   }
   return {kind: 'ok', rows};
+}
+
+/**
+ * Why the runner closed a `done` handoff bead, written into `close_reason`.
+ *
+ * It names the RUN, not the session: the ledger row for that run (`runs.jsonl`,
+ * same `runId`) is where the whole chain is auditable from, so the bead points
+ * at it rather than restating it.
+ */
+export function doneCloseReason(runId: string): string {
+  return `chain complete, read by justin-loop run ${runId}`;
+}
+
+/**
+ * Close a `done` handoff bead — the runner's only write to a handoff bead (D14).
+ *
+ * Returns the outcome instead of acting on it: a failure here must be printed,
+ * not swallowed and not fatal (critical rule 6 — the chain itself completed, so
+ * the exit code is unchanged and the loud print is what stops "still open" from
+ * passing as "closed").
+ */
+export function closeDoneHandoff(
+  cwd: string,
+  id: string,
+  runId: string,
+  run: BrRunner,
+): BrOutcome {
+  return run(cwd, ['close', id, `--reason=${doneCloseReason(runId)}`]);
 }
 
 /** A handoff bead the runner could read, with its parsed contract. */
@@ -2876,6 +2913,23 @@ export async function runJustinLoop(
     );
 
     if (outcome.kind === 'done') {
+      // D14: the runner closes the bead it just read. Nobody else ever will —
+      // a `done` handoff has no successor by construction, and the successor is
+      // the only other actor that closes handoff beads.
+      const closed = closeDoneHandoff(cwd, match.row.id, runId, deps.br);
+      if (closed.ok) {
+        deps.write(
+          `   ${DIM}closed ${match.row.id} — ${doneCloseReason(runId)}${RESET}\n`,
+        );
+      } else {
+        // Loud, and NOT fatal. The arc finished; only the hygiene failed. An
+        // exit code of 2 here would report a completed chain as a failed run,
+        // and a silent skip would leave an open bead nobody knows about
+        // (critical rule 6 — the print is what makes the failure a fact).
+        deps.writeErr(
+          `${RED}!${RESET} handoff bead ${match.row.id} could NOT be closed (${closed.reason ?? 'br failed for an unrecorded reason'}) — it is STILL OPEN; close it by hand.\n`,
+        );
+      }
       end = {
         exitCode: 0,
         reason: `done — ${match.handoff.arc} is finished (handoff bead ${match.row.id})`,
@@ -2886,6 +2940,12 @@ export async function runJustinLoop(
       for (const q of match.handoff.openQuestions) {
         deps.write(`   ${YELLOW}?${RESET} ${q}\n`);
       }
+      // Said out loud so the open bead reads as deliberate (D14). The `done`
+      // path closes its bead one branch up; a reader who saw that and then found
+      // this one open would otherwise be right to suspect the close had failed.
+      deps.write(
+        `   ${DIM}handoff ${match.row.id} stays open — it is the question waiting for you${RESET}\n`,
+      );
       end = {
         exitCode: 2,
         reason: `blocked — session ${label} needs Justin (handoff bead ${match.row.id}${match.handoff.openQuestions.length === 0 ? ', but it listed no open questions' : ''})`,
