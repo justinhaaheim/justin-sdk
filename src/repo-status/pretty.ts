@@ -50,7 +50,11 @@ import type {Disposition} from './disposition';
 import type {FetchAge} from './fetch-age';
 import type {BranchOverlap, OverlapReport} from './overlap';
 import type {RepoStatusReport, BranchRow} from './report';
-import type {SubmoduleInventory} from './submodules';
+import type {
+  SubmoduleFinding,
+  SubmoduleInventory,
+  SubmoduleRow,
+} from './submodules';
 
 /**
  * Section names and blurbs, in reading order.
@@ -562,6 +566,32 @@ function methodBlock(report: RepoStatusReport, style: Styler): string[] {
   return lines;
 }
 
+/**
+ * EVERY non-ok finding under the entry, not just the worst one.
+ *
+ * `entry.why` is the worst finding's `why` and nothing else, so a second SEVERE
+ * finding used to vanish from the output entirely. That is how round 2 of the
+ * blind trials read "the submodule checkout has 1 commit on no remote" over a
+ * checkout that was ALSO dirty and never heard about the dirt — two different
+ * risks, one line, and the fragile one dropped (epic design D3).
+ *
+ * The findings are flattened in the same order `buildSubmoduleInventory` used
+ * to pick `why` (row findings first, then each checkout's), and exactly one
+ * copy of the line already printed as `why` is removed — matching `summarise`'s
+ * `find`, which takes the FIRST finding at the entry's severity. Two findings
+ * with identical text would otherwise silently drop the survivor.
+ */
+function furtherFindings(entry: SubmoduleRow): SubmoduleFinding[] {
+  const all = [
+    ...entry.findings,
+    ...entry.checkouts.flatMap((c) => c.findings),
+  ].filter((f) => f.severity !== 'ok');
+  const printed = all.findIndex(
+    (f) => f.severity === entry.severity && f.why === entry.why,
+  );
+  return printed < 0 ? all : [...all.slice(0, printed), ...all.slice(printed + 1)];
+}
+
 function submoduleBlock(
   submodules: SubmoduleInventory,
   style: Styler,
@@ -575,6 +605,16 @@ function submoduleBlock(
       `  ${entry.severity === 'severe' ? style.alert(label) : label}`,
       `      ${entry.why}`,
     );
+    for (const f of furtherFindings(entry)) {
+      // The severity prefix appears only when it DIFFERS from the entry's:
+      // repeating `SEVERE` under a row already headed SEVERE is noise, while an
+      // unprefixed advisory sitting under a severe heading would read as one
+      // more severe fact.
+      const prefix =
+        f.severity === entry.severity ? '' : `${f.severity.toUpperCase()}: `;
+      const text = `${prefix}${f.why}`;
+      lines.push(`      ${f.severity === 'severe' ? style.alert(text) : text}`);
+    }
   }
   return lines;
 }

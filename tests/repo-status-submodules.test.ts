@@ -15,9 +15,10 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {existsSync, readFileSync, writeFileSync} from 'fs';
+import {chmodSync, existsSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {dirname, join, resolve} from 'path';
 
+import {renderReportPretty} from '../src/repo-status/pretty';
 import {buildReport, type RepoStatusReport} from '../src/repo-status/report';
 import {runDivergenceCheck} from '../src/plugin/lib/repo-status/prime-view';
 import {
@@ -368,6 +369,157 @@ describe('a checkout behind its remote with nothing ahead', () => {
     // Same checkout, both numbers present, and they are not the same question.
     expect(row.checkouts[0]?.behind).toBeGreaterThan(0);
     expect(row.checkouts[0]?.unpushedCommits).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Uncommitted work in the checkout (home-base-qyu1.33.8, epic design D3)
+// ---------------------------------------------------------------------------
+//
+// Every other check in this file is about COMMITS, and a commit survives almost
+// anything. Edited and untracked files survive none of `git submodule update`,
+// `git worktree remove` or a checkout switch — so the round-2 output that said
+// "1 commit on no remote" over a checkout that was ALSO dirty named the durable
+// risk and dropped the fragile one.
+
+describe('uncommitted files in the submodule checkout', () => {
+  test('a dirty checkout is SEVERE, names the paths, and clears when the work is put away', () => {
+    const sb = track(createSandbox());
+    const fx = setupFixture(sb);
+
+    const dir = join(fx.parent, 'sub');
+    writeFileSync(join(dir, 'lib.txt'), 'edited, never committed\n');
+    // Untracked too: the most easily lost thing in a checkout, and the one a
+    // `--untracked-files=no` reading would have called clean.
+    writeFileSync(join(dir, 'scratch.txt'), 'untracked, never added\n');
+
+    const row = subRow(report(fx.parent));
+    const state = row.checkouts[0]?.checkoutState;
+    expect(state?.path).toBe(dir);
+    expect(state?.dirty).toBe(true);
+    expect(state?.changedPaths).toBe(2);
+
+    const uncommitted = findingOf(row, 'uncommitted-changes');
+    expect(uncommitted.severity).toBe('severe');
+    expect(uncommitted.question).toBe(Q_WORK_AT_RISK);
+    expect(uncommitted.why).toContain('2 uncommitted paths');
+    expect(uncommitted.why).toContain('lib.txt');
+    expect(uncommitted.why).toContain('scratch.txt');
+    expect(uncommitted.why).toContain('git submodule update');
+    expect(uncommitted.why).toContain('git worktree remove');
+    expect(uncommitted.fix).toContain(dir);
+    expect(row.severity).toBe('severe');
+
+    // NEGATIVE CONTROL: put the work away — restore the tracked file, delete
+    // the untracked one — and both the finding and the severity go. Nothing
+    // else about the fixture changes, so only the dirt can be under test.
+    git(dir, ['checkout', '--', 'lib.txt']);
+    rmSync(join(dir, 'scratch.txt'));
+    const clean = subRow(report(fx.parent));
+    expect(kinds(clean)).not.toContain('uncommitted-changes');
+    expect(clean.severity).toBe('ok');
+  });
+
+  test('a clean checkout says so POSITIVELY — no finding, and a measured state', () => {
+    const sb = track(createSandbox());
+    const fx = setupFixture(sb);
+
+    const row = subRow(report(fx.parent));
+    expect(kinds(row)).not.toContain('uncommitted-changes');
+    // Silence is only allowed to mean "checked, and there is none". The state
+    // object is what makes that claim checkable rather than an absence.
+    const state = row.checkouts[0]?.checkoutState;
+    expect(state?.dirty).toBe(false);
+    expect(state?.changedPaths).toBe(0);
+    expect(state?.samplePaths).toEqual([]);
+    expect(state?.unreadableReason).toBeNull();
+    expect(row.severity).toBe('ok');
+  });
+
+  test('a checkout whose status CANNOT be read is an UNKNOWN advisory, never silence', () => {
+    const sb = track(createSandbox());
+    const fx = setupFixture(sb);
+
+    // Make `git status` — and only `git status` — fail. The store facts come
+    // from rev-parse / for-each-ref / rev-list, none of which open the index,
+    // so an unreadable index isolates exactly the new call.
+    const dir = join(fx.parent, 'sub');
+    const index = resolve(dir, git(dir, ['rev-parse', '--git-path', 'index']).trim());
+    chmodSync(index, 0o000);
+    try {
+      const row = subRow(report(fx.parent));
+      const state = row.checkouts[0]?.checkoutState;
+      expect(state?.dirty).toBeNull();
+      expect(state?.changedPaths).toBeNull();
+      expect(state?.samplePaths).toBeNull();
+      expect(state?.unreadableReason).not.toBeNull();
+
+      const unknown = findingOf(row, 'uncommitted-changes');
+      expect(unknown.severity).toBe('advisory');
+      expect(unknown.question).toBe(Q_WORK_AT_RISK);
+      expect(unknown.why).toContain('UNKNOWN');
+      expect(unknown.why).toContain(dir);
+      // The store facts still read, so this really is the status call alone.
+      expect(row.checkouts[0]?.checkoutHead).not.toBeNull();
+      expect(row.checkouts[0]?.store).not.toBeNull();
+    } finally {
+      chmodSync(index, 0o644);
+    }
+
+    // NEGATIVE CONTROL: with the index readable again the finding is gone.
+    const readable = subRow(report(fx.parent));
+    expect(kinds(readable)).not.toContain('uncommitted-changes');
+    expect(readable.checkouts[0]?.checkoutState?.dirty).toBe(false);
+  });
+
+  test('the ledger prints BOTH severe findings under one entry, not only the worst', () => {
+    const sb = track(createSandbox());
+    const fx = setupFixture(sb);
+
+    // The round-2 state, reproduced exactly: a gitlink recorded at an unpushed
+    // commit (severe), commits in the checkout on no remote (severe), and
+    // uncommitted files in that same checkout (severe).
+    commitInParentSub(fx, 'local only');
+    git(fx.parent, ['add', '--', 'sub']);
+    git(fx.parent, ['commit', '-qm', 'bump sub']);
+    writeFileSync(join(fx.parent, 'sub', 'lib.txt'), 'edited after the commit\n');
+
+    const r = report(fx.parent);
+    const row = subRow(r);
+    expect(row.severity).toBe('severe');
+    expect(kinds(row)).toContain('pointer-not-on-remote');
+    expect(kinds(row)).toContain('unpushed-commits');
+    expect(kinds(row)).toContain('uncommitted-changes');
+    // The one-liner still carries only the worst finding — that is the whole
+    // mechanism, and it is the renderer's job to print past it.
+    expect(row.why).toContain('not our ref');
+    expect(row.why).not.toContain('uncommitted');
+
+    const block = renderReportPretty(r, {color: false}).split('SUBMODULES')[1];
+    expect(block).toBeDefined();
+    expect(block).toContain('SEVERE  sub');
+    expect(block).toContain('not our ref');
+    expect(block).toContain('on no remote, held only in');
+    expect(block).toContain('1 uncommitted path');
+    expect(block).toContain('lib.txt');
+    // Printed exactly once: the finding that became the entry's `why` is not
+    // repeated by the further-findings pass.
+    expect(block?.split('not our ref')).toHaveLength(2);
+  });
+
+  test('the structured formats carry the checkout state, not just the finding', () => {
+    const sb = track(createSandbox());
+    const fx = setupFixture(sb);
+    writeFileSync(join(fx.parent, 'sub', 'lib.txt'), 'edited\n');
+
+    const r = report(fx.parent);
+    const yaml = Bun.YAML.stringify(r.submodules, null, 2);
+    const json = JSON.stringify(r.submodules, null, 2);
+    for (const text of [yaml, json]) {
+      expect(text).toContain('checkoutState');
+      expect(text).toContain('unreadableReason');
+      expect(text).toContain('lib.txt');
+    }
   });
 });
 

@@ -46,7 +46,20 @@
  * By default only the CURRENT checkout's store is opened; every other worktree
  * contributes one cheap `ls-tree`/`ls-files` so pointer DIVERGENCE across
  * worktrees is still detected. `allWorktreeStores` opts into opening them all,
- * which is what answers the work-at-risk question per store.
+ * which is what answers the work-at-risk question per store. Each OPENED store
+ * also costs one `git status --porcelain` (~40ms) for the uncommitted-work
+ * question below.
+ *
+ * UNCOMMITTED WORK IS THE FRAGILE HALF (home-base-qyu1.33.8, epic design D3).
+ * Every check above is about COMMITS, and a commit survives almost anything —
+ * it is still in the object store after a `submodule update`, a branch switch,
+ * even a `worktree remove` of the parent (the store dies, but the commit was
+ * reachable from somewhere else or it was already reported as at risk). Files
+ * that are merely EDITED survive none of those. Round 2 of the blind trials
+ * caught exactly that gap: the ledger said "the submodule checkout has 1 commit
+ * on no remote" over a checkout that was also dirty, and said nothing about the
+ * dirt. So every opened checkout now gets the same `readWorktreeState` the
+ * parent's own worktrees get — same rigour, same module, one question.
  *
  * Part of home-base-qyu1.14.
  */
@@ -56,6 +69,8 @@ import {existsSync, realpathSync} from 'fs';
 import {join} from 'path';
 
 import type {WorktreeEntry} from '../plugin/lib/repo-status/types';
+
+import {readWorktreeState, type WorktreeState} from './worktree-state';
 
 // ---------------------------------------------------------------------------
 // Schema
@@ -90,6 +105,8 @@ export type SubmoduleFindingKind =
   | 'pointer-absent-from-store'
   /** Checkout has commits on no remote. Dies with the worktree. */
   | 'unpushed-commits'
+  /** Checkout holds edits no commit has — or its state could not be read at all. */
+  | 'uncommitted-changes'
   /** Behind its remote — stale base, and therefore probably stale dependencies. */
   | 'stale-checkout'
   /** Checkout HEAD is ahead of (or divergent from) the pointer the parent records. */
@@ -136,6 +153,16 @@ export interface SubmoduleCheckout {
   storeNote: string | null;
   checkoutHead: string | null;
   checkoutBranch: string | null;
+  /**
+   * What this checkout is holding that no commit has (home-base-qyu1.33.8).
+   *
+   * NULL means NOBODY LOOKED — the store was not opened, or there is no
+   * checkout here at all. It never means clean: `WorktreeState.dirty` carries
+   * that, and carries its own null for "`git status` failed here", so the three
+   * states (clean / dirty / unreadable) stay distinguishable all the way out to
+   * the YAML. A bare boolean on this field would have collapsed two of them.
+   */
+  checkoutState: WorktreeState | null;
   /** Whether `recordedPointer` resolves to a commit in `store`. */
   pointerInStore: boolean | null;
   /** Remote-tracking refs in `store` that contain `recordedPointer`. */
@@ -310,6 +337,21 @@ function short(sha: string | null): string {
 
 function plural(n: number, word: string): string {
   return `${n} ${word}${n === 1 ? '' : 's'}`;
+}
+
+/**
+ * `a, b, +3 more` — the sample `readWorktreeState` kept, plus what it dropped.
+ *
+ * The "+N more" tail is not decoration: `samplePaths` is capped, so printing it
+ * bare would understate the size of what is at risk, and the count is the half
+ * of that sentence a reader acts on.
+ */
+function sampleList(state: WorktreeState): string {
+  const sample = state.samplePaths ?? [];
+  if (sample.length === 0) return 'paths not listed';
+  const total = state.changedPaths ?? sample.length;
+  const rest = total - sample.length;
+  return `${sample.join(', ')}${rest > 0 ? `, +${rest} more` : ''}`;
 }
 
 function canonical(path: string): string {
@@ -575,6 +617,7 @@ function buildCheckout(
       behind: null,
       checkoutBranch: null,
       checkoutHead: null,
+      checkoutState: null,
       findings: [],
       isCurrent,
       isPrimary: worktree.isPrimary,
@@ -606,6 +649,10 @@ function buildCheckout(
       behind: null,
       checkoutBranch: null,
       checkoutHead: null,
+      // Not initialized: there is no working tree here to be dirty, and saying
+      // "clean" about a directory that does not exist would be a measurement
+      // nobody took.
+      checkoutState: null,
       findings,
       isCurrent,
       isPrimary: worktree.isPrimary,
@@ -629,7 +676,13 @@ function buildCheckout(
       ? remotesContaining(dir, recordedPointer)
       : null;
 
+  // The same reader the parent's own worktrees get, pointed at the submodule
+  // checkout (home-base-qyu1.33.8). Only ever run on an OPENED store, so the
+  // default `status` run still spends exactly one `git status` here.
+  const checkoutState = readWorktreeState(dir);
+
   const findings = decideCheckoutFindings({
+    checkoutState,
     dir,
     facts,
     pointerInStore,
@@ -643,6 +696,7 @@ function buildCheckout(
     behind: facts.behind,
     checkoutBranch: facts.branch,
     checkoutHead: facts.head,
+    checkoutState,
     findings,
     isCurrent,
     isPrimary: worktree.isPrimary,
@@ -660,6 +714,7 @@ function buildCheckout(
 }
 
 function decideCheckoutFindings(ctx: {
+  checkoutState: WorktreeState;
   dir: string;
   facts: StoreFacts;
   pointerInStore: boolean | null;
@@ -668,8 +723,15 @@ function decideCheckoutFindings(ctx: {
   subPath: string;
   worktree: WorktreeEntry;
 }): SubmoduleFinding[] {
-  const {dir, facts, pointerInStore, pointerOnRemotes, recordedPointer, worktree} =
-    ctx;
+  const {
+    checkoutState,
+    dir,
+    facts,
+    pointerInStore,
+    pointerOnRemotes,
+    recordedPointer,
+    worktree,
+  } = ctx;
   const findings: SubmoduleFinding[] = [];
 
   // --- Is the recorded pointer usable anywhere but here? -------------------
@@ -713,6 +775,32 @@ function decideCheckoutFindings(ctx: {
       question: Q_WORK_AT_RISK,
       severity: 'severe',
       why: `the submodule checkout has ${plural(facts.unpushedCommits, 'commit')} on no remote, held only in ${facts.store}${storeDies ? ' — that store belongs to a linked worktree and `git worktree remove` deletes it, taking the commits with it' : ''}`,
+    });
+  }
+
+  // AFTER the unpushed-commits finding, deliberately: this leaves `summarise`
+  // picking the same one-liner it always has, and the pretty renderer now
+  // prints every further non-ok finding under the entry rather than only the
+  // worst one — which is what stopped the dirt from being hidden behind the
+  // commit count (epic design D3).
+  if (checkoutState.dirty === true) {
+    findings.push({
+      fix: `commit or stash inside ${dir} before touching this worktree`,
+      kind: 'uncommitted-changes',
+      question: Q_WORK_AT_RISK,
+      severity: 'severe',
+      why: `the submodule checkout has ${plural(checkoutState.changedPaths ?? 0, 'uncommitted path')} (${sampleList(checkoutState)}) — on no branch and in no commit; \`git submodule update\`, \`git worktree remove\` and a checkout switch all discard them`,
+    });
+  } else if (checkoutState.dirty == null) {
+    // NEVER SILENCE. A `git status` that could not run is not a clean checkout,
+    // and the whole point of this finding is that it is the fragile half — an
+    // unreadable one has to say so out loud.
+    findings.push({
+      fix: null,
+      kind: 'uncommitted-changes',
+      question: Q_WORK_AT_RISK,
+      severity: 'advisory',
+      why: `whether the submodule checkout at ${dir} holds uncommitted work is UNKNOWN — ${checkoutState.unreadableReason ?? `\`git -C ${dir} status --porcelain\` failed`}`,
     });
   }
 
