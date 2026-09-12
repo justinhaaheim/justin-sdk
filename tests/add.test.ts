@@ -148,6 +148,7 @@ describe('add: preset definitions', () => {
             c !== 'eas' &&
             c !== 'time-check' &&
             c !== 'usage-check' &&
+            c !== 'thread-hooks' &&
             c !== 'critical-rules',
         ),
       ),
@@ -158,6 +159,10 @@ describe('add: preset definitions', () => {
     expect(PRESETS.all).not.toContain('time-check');
     // usage-check's hooks run on every prompt AND after every tool batch.
     expect(PRESETS.all).not.toContain('usage-check');
+    // thread-hooks' SessionStart hook writes to a SHARED Dolt database on every
+    // session start, so installing it everywhere makes every repo pay lock
+    // contention for a feature only some sessions use (home-base-p1uj.3).
+    expect(PRESETS.all).not.toContain('thread-hooks');
     // critical-rules COMMITS rules into the repo, and four enrolled repos are
     // public — enrolment is a per-repo decision, never a preset's (t6a0.21 D6).
     expect(PRESETS.all).not.toContain('critical-rules');

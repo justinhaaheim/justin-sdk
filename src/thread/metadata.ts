@@ -83,6 +83,80 @@ export function buildThreadMetadata(
   };
 }
 
+/**
+ * The metadata for a thread bead created at SESSION START, before the session
+ * has reported anything (home-base-p1uj.3).
+ *
+ * THE SAME KEY SET as `buildThreadMetadata`, with an explicit `null` everywhere
+ * the answer is genuinely not known yet. That is the whole point: `bd update
+ * --metadata` merges, so the first real report overwrites every one of these,
+ * and a reader (`thread board`) can tell "this session has not reported" from
+ * "this session reported nothing" — `reportCount: 0` and `reportedAt: null`
+ * together say it out loud.
+ *
+ * `reportedAt: null` IS LOAD-BEARING, not cosmetic. `writeReportToBd` reads it
+ * twice: the supersede guard compares it against the incoming report's stamp,
+ * and the orphan-ask sweep uses it to recognise asks left by a half-written
+ * previous attempt. A start bead has had neither, so a fabricated stamp here
+ * would make the first real report either look superseded or hunt for orphans
+ * among asks that cannot exist. Null makes both checks correctly skip.
+ *
+ * `askIds`, `carriedAskIds`, `openAskCount` and `blockingAskCount` are the
+ * exception to the nulls, and they are MEASURED rather than assumed: a bead
+ * that was created seconds ago has no children, so empty and zero are the true
+ * values, not stand-ins for an unknown.
+ */
+export function buildStartMetadata(input: {
+  facts: ThreadFacts;
+  startedAt: string;
+}): Record<string, unknown> {
+  const {facts, startedAt} = input;
+  return {
+    aheadBehind: facts.aheadBehind,
+    askIds: [],
+    autofillFailures: facts.autofillFailures,
+    beadsTouched: [],
+    blockingAskCount: 0,
+    carriedAskIds: [],
+    branch: facts.branch,
+    continuesFrom: null,
+    cwd: facts.cwd,
+    dirty: facts.dirty,
+    entrypoint: facts.entrypoint,
+    goal: null,
+    handoffPresent: false,
+    headSha: facts.headSha,
+    instruction: null,
+    isWorktree: facts.isWorktree,
+    lastUserMessage: facts.lastUserMessage,
+    mergeState: null,
+    model: facts.model,
+    openAskCount: 0,
+    pr: null,
+    progressPercent: null,
+    reportCount: 0,
+    reportedAt: null,
+    repo: facts.repo,
+    repoPath: facts.repoPath,
+    schemaVersion: THREAD_SCHEMA_VERSION,
+    sessionId: facts.sessionId,
+    // When the SESSION began where that is readable from the transcript, and
+    // otherwise when the hook ran. Distinguished in `startedAtSource` rather
+    // than silently conflated: "the transcript says 09:04" and "I saw this
+    // session for the first time at 09:04" are different claims.
+    startedAt: facts.startedAt ?? startedAt,
+    startedAtSource:
+      facts.startedAt != null ? 'transcript' : 'sessionStartHook',
+    stopReasonDetail: null,
+    stopReasonKind: null,
+    threadStartedAt: startedAt,
+    tokensAtStop: facts.tokensAtStop,
+    transcriptPath: facts.transcriptPath,
+    workProductKind: null,
+    worktreePath: facts.worktreePath,
+  };
+}
+
 export interface AskMetadataInput {
   askIndex: number;
   blocking: boolean;

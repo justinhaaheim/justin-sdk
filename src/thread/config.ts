@@ -33,16 +33,45 @@ export const THREAD_CONFIG_KEY = 'thread';
 /** Off unless something says otherwise (D6). */
 export const THREAD_DEFAULT_ENABLED = false;
 
+/**
+ * Off unless something says otherwise (home-base-p1uj.3).
+ *
+ * A SECOND knob rather than a reuse of `enabled`, deliberately. `enabled` is
+ * the preflight branch point a human-driven wrap-up reads; `startOnSessionStart`
+ * arms a HOOK that fires on every session start and every resume, in every repo
+ * that installed it, and turns each one into a Dolt write. Those two want
+ * different blast radii: Justin can dogfood `thread prepare`/`report` by hand
+ * for a week before he is willing to pay a bd round-trip at the top of every
+ * session. Folding them together would make the cheap decision imply the
+ * expensive one.
+ */
+export const THREAD_DEFAULT_START_ON_SESSION_START = false;
+
+/** Which layer decided one knob's value. */
+export type ThreadConfigSource = 'default' | 'project' | 'user';
+
 export interface ResolvedThreadConfig {
   enabled: boolean;
   /** Human-readable config read problems. Empty means both files were fine. */
   problems: string[];
   /** Which layer decided `enabled`. */
-  source: 'default' | 'project' | 'user';
+  source: ThreadConfigSource;
+  /** Whether the SessionStart hook may create this session's thread bead. */
+  startOnSessionStart: boolean;
+  /** Which layer decided `startOnSessionStart`. */
+  startSource: ThreadConfigSource;
   projectRoot: string;
 }
 
-function enabledIn(config: unknown): boolean | null {
+/**
+ * Read one boolean out of `componentConfig.thread`.
+ *
+ * Returns null for "this layer says nothing", which is a DISTINCT answer from
+ * `false` — the layering below depends on the difference, and collapsing them
+ * would make an absent user file read as an explicit "off" that a project file
+ * then has to argue with.
+ */
+function threadFlagIn(config: unknown, key: string): boolean | null {
   if (config == null || typeof config !== 'object') return null;
   const componentConfig = (config as {componentConfig?: unknown})
     .componentConfig;
@@ -52,8 +81,8 @@ function enabledIn(config: unknown): boolean | null {
     THREAD_CONFIG_KEY
   ];
   if (section == null || typeof section !== 'object') return null;
-  const enabled = (section as {enabled?: unknown}).enabled;
-  return typeof enabled === 'boolean' ? enabled : null;
+  const value = (section as Record<string, unknown>)[key];
+  return typeof value === 'boolean' ? value : null;
 }
 
 /** DEFAULT ← user file ← project file. */
@@ -71,23 +100,39 @@ export function resolveThreadConfig(
   if (isConfigProblem(user)) problems.push(describeConfigOutcome(user));
   if (isConfigProblem(project)) problems.push(describeConfigOutcome(project));
 
-  let enabled = THREAD_DEFAULT_ENABLED;
-  let source: ResolvedThreadConfig['source'] = 'default';
+  const layers: {config: unknown; name: ThreadConfigSource}[] = [];
+  if (user.status === 'ok') layers.push({config: user.config, name: 'user'});
+  if (project.status === 'ok')
+    layers.push({config: project.config, name: 'project'});
 
-  if (user.status === 'ok') {
-    const value = enabledIn(user.config);
-    if (value != null) {
-      enabled = value;
-      source = 'user';
+  function resolveFlag(
+    key: string,
+    fallback: boolean,
+  ): {source: ThreadConfigSource; value: boolean} {
+    let value = fallback;
+    let source: ThreadConfigSource = 'default';
+    for (const layer of layers) {
+      const read = threadFlagIn(layer.config, key);
+      if (read != null) {
+        value = read;
+        source = layer.name;
+      }
     }
-  }
-  if (project.status === 'ok') {
-    const value = enabledIn(project.config);
-    if (value != null) {
-      enabled = value;
-      source = 'project';
-    }
+    return {source, value};
   }
 
-  return {enabled, problems, projectRoot, source};
+  const enabled = resolveFlag('enabled', THREAD_DEFAULT_ENABLED);
+  const start = resolveFlag(
+    'startOnSessionStart',
+    THREAD_DEFAULT_START_ON_SESSION_START,
+  );
+
+  return {
+    enabled: enabled.value,
+    problems,
+    projectRoot,
+    source: enabled.source,
+    startOnSessionStart: start.value,
+    startSource: start.source,
+  };
 }

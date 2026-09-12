@@ -30,6 +30,19 @@ Run this BEFORE writing a report. It prints, in order:
 DISABLED means the knob is off — fall back to the plain text status report.
 SANDBOX DENIED names the two paths to allowlist and exits 0; fall back too.`;
 
+const START_NARRATIVE = `
+Creates the thread bead UP FRONT, status in_progress, titled "(untitled) <repo>
+session <id>" and noted "no report yet", so a session that never reaches its
+status report is still visible on the board instead of vanishing.
+
+It is the same upsert \`thread report\` uses: keyed on metadata.sessionId, so the
+first report REWRITES this bead rather than creating a second.
+
+Both knobs must be true — componentConfig.thread.enabled AND
+componentConfig.thread.startOnSessionStart — and both default false.
+
+Install the hook that runs this with:  justin-sdk add thread-hooks`;
+
 export const threadCommand: CommandModule = {
   builder: (y: Argv) =>
     y
@@ -46,6 +59,48 @@ export const threadCommand: CommandModule = {
           const {runThreadPrepare} = await import('./prepare');
           process.exit(
             await runThreadPrepare({sessionId: argv.session ?? null}),
+          );
+        },
+      )
+      .command(
+        'start',
+        'Create this session’s thread bead before it has reported anything, so an abandoned session is still on the board. Idempotent. Needs componentConfig.thread.enabled AND .startOnSessionStart.',
+        (yy) =>
+          yy
+            .epilogue(START_NARRATIVE)
+            .option('hook', {
+              default: false,
+              describe:
+                'SessionStart hook mode: read the payload from stdin, always exit 0, print at most one line',
+              type: 'boolean' as const,
+            })
+            .option('session', {
+              describe:
+                'Session id to start (default: $CLAUDE_CODE_SESSION_ID)',
+              type: 'string' as const,
+            })
+            .option('title', {
+              describe:
+                'Title instead of the "(untitled) <repo> session <id>" placeholder',
+              type: 'string' as const,
+            })
+            .option('transcript', {
+              describe:
+                'Transcript path, if known — skips the search under ~/.claude/projects',
+              type: 'string' as const,
+            }),
+        async (argv) => {
+          const {runThreadStart, runThreadStartHook} = await import('./start');
+          if (argv.hook === true) {
+            process.exit(await runThreadStartHook());
+            return;
+          }
+          process.exit(
+            await runThreadStart({
+              sessionId: argv.session ?? null,
+              title: argv.title ?? null,
+              transcriptPath: argv.transcript ?? null,
+            }),
           );
         },
       )
