@@ -51,6 +51,24 @@
  * dirty there. Otherwise the branch + worktree are left standing and
  * reported — green cases fully automatic, weird cases queue for a human.
  *
+ * POST-MERGE INSTALL (home-base-bgfl): the merge writes package.json and the
+ * lockfile into the primary, but the primary's node_modules still holds the
+ * PREVIOUS SDK — the sweep only ever installed inside its own worktree. MEASURED
+ * 2026-09-12, right after the fleet sweep to v0.28.1: `bunx
+ * @justinhaaheim/justin-sdk doctor` in apple-reminders-mcp printed "justin-sdk
+ * 0.27.0 → 0.28.1 available" with the pin already AT 0.28.1, and six primaries
+ * were still executing a pre-0.27 SDK after two sweeps — a run reporting
+ * "updated, merged, pushed" about a repo that goes on running the old version,
+ * i.e. the exact thing the sweep exists to change. So a successful merge is now
+ * followed by the repo's own FROZEN install, run in the primary. Frozen
+ * (`bun install --frozen-lockfile` / `npm ci` / `yarn install
+ * --frozen-lockfile`) because the lockfile the sweep just committed must not be
+ * rewritten by this step: a mismatch has to fail loudly instead. It runs only
+ * when the sweep's own commit touched package.json or the lockfile, and only
+ * when neither is dirty in the primary; every other case is a SKIP that names
+ * its reason. A failed install is its own outcome (`install-failed`) rather
+ * than a green with a footnote — the repo really is still running the old SDK.
+ *
  * KNOWN RETRY (home-base-dl0q): the FIRST install in a fresh tree can exit
  * 127 (a github: dep's prepare runs a devDep bun never installed) while
  * leaving the tree usable — hydration is retried exactly once.
@@ -106,7 +124,7 @@ import {
   SYNC_RULES_CMD,
 } from './plugin/lib/rules-file';
 import {getSdkVersion, isQuiet, setQuiet, writeJson} from './setup-helpers';
-import {detectPackageManager, setupEnv} from './setup-env';
+import {detectPackageManager, setupEnv, type PackageManager} from './setup-env';
 import {runSyncRules} from './sync-rules';
 
 export const SWEEP_BRANCH = 'worktree-sdk-sweep';
@@ -139,6 +157,7 @@ export type RepoOutcome =
   | 'clean' // updated, gated green, merged, pushed
   | 'current' // nothing to do — already at the latest state
   | 'merge-pending' // green + committed, but the merge/push could not complete safely
+  | 'install-failed' // merged, but the primary's post-merge install went red — it still runs the OLD SDK (bgfl)
   | 'failed' // a step went red; worktree removed, evidence in the run log
   | 'blocked' // COULD NOT sweep — preflight refused (ckc4 F4). Fails the run.
   | 'skipped'; // out of scope for this payload (not enrolled). Expected, not a failure.
@@ -227,6 +246,14 @@ function gitPorcelain(repo: string): string | null {
 function run(
   argv: string[],
   cwd: string,
+  /**
+   * `quiet` suppresses the ECHO of the child's output, never its capture — the
+   * caller still gets every byte for the run log. For steps whose success is
+   * uninteresting and whose failure is reported by the caller (the post-merge
+   * install, home-base-bgfl). The `$ <command>` line is still printed: an
+   * operator must always be able to see what is currently running.
+   */
+  options: {quiet?: boolean} = {},
 ): {exitCode: number; error: string | null; output: string} {
   const [cmd, ...args] = argv;
   if (cmd == null) return {error: 'empty command', exitCode: 1, output: ''};
@@ -242,7 +269,7 @@ function run(
   });
   const output = `${child.stdout ?? ''}${child.stderr ?? ''}`;
   const trimmed = output.replace(/\n+$/, '');
-  if (trimmed !== '') say(trimmed);
+  if (trimmed !== '' && options.quiet !== true) say(trimmed);
   if (child.error) return {error: child.error.message, exitCode: 1, output};
   return {error: null, exitCode: child.status ?? 1, output};
 }
@@ -562,6 +589,198 @@ export function mergeSafety(
     };
   }
   return {ok: true, reason: ''};
+}
+
+// ---------------------------------------------------------------------------
+// The post-merge install in the primary — home-base-bgfl
+// ---------------------------------------------------------------------------
+
+/**
+ * The FROZEN install for each manager. Frozen is the whole point: the lockfile
+ * the sweep just committed is the thing being propagated, so this step must
+ * never be able to rewrite it — a mismatch fails loudly instead.
+ */
+const FROZEN_INSTALL: Record<PackageManager, readonly string[]> = {
+  bun: ['bun', 'install', '--frozen-lockfile'],
+  npm: ['npm', 'ci'],
+  yarn: ['yarn', 'install', '--frozen-lockfile'],
+};
+
+/** The files whose change means the primary's node_modules is now stale. */
+const INSTALL_TRIGGERS: Record<PackageManager, readonly string[]> = {
+  bun: ['package.json', 'bun.lock', 'bun.lockb'],
+  npm: ['package.json', 'package-lock.json'],
+  yarn: ['package.json', 'yarn.lock'],
+};
+
+/** The frozen recipe for `packageManager`, or null when there is none. Pure. */
+export function frozenInstallRecipe(
+  packageManager: PackageManager | null,
+): string[] | null {
+  if (packageManager == null) return null;
+  const recipe = FROZEN_INSTALL[packageManager];
+  return recipe == null ? null : [...recipe];
+}
+
+export type PrimaryInstallPlan =
+  {kind: 'run'; argv: string[]} | {kind: 'skip'; reason: string};
+
+/**
+ * Should the sweep install in the PRIMARY after its merge, and with what? A
+ * pure decision over three measurements, so it is unit-testable (D2):
+ *
+ *   changedFiles   — what the sweep's own commit touched. A component-only run
+ *                    that changed neither package.json nor the lockfile leaves
+ *                    node_modules perfectly valid, so it installs nothing.
+ *   dirtyPaths     — `git status --porcelain` of the primary AFTER the merge.
+ *                    Belt and braces over mergeSafety, and cheap: a locally
+ *                    modified manifest or lockfile is someone's work in
+ *                    progress, and a frozen install against it either fails
+ *                    confusingly or installs something nobody asked for.
+ *   packageManager — from the primary's own lockfile (detectPackageManager).
+ *
+ * A skip ALWAYS names its reason (rule 6: silence must be a claim) — "no
+ * install ran" and "no install was needed" are different facts, and the summary
+ * line has to say which one happened.
+ *
+ * STATED LIMITATION: the decision cannot see whether a lockfile exists, only
+ * what changed and what is dirty. `detectPackageManager` answers `bun` for a
+ * package.json with NO lockfile at all, and a frozen install there fails. That
+ * shape is not reachable in the fleet — the sweep's own hydration installs in
+ * the worktree, so a lockfile exists and is committed by the time this runs —
+ * and if it ever is reached it fails LOUDLY as `install-failed` rather than
+ * quietly claiming success.
+ */
+export function planPrimaryInstall(input: {
+  changedFiles: readonly string[];
+  dirtyPaths: readonly string[];
+  packageManager: PackageManager | null;
+}): PrimaryInstallPlan {
+  const {changedFiles, dirtyPaths, packageManager} = input;
+  const argv = frozenInstallRecipe(packageManager);
+  if (packageManager == null || argv == null) {
+    return {
+      kind: 'skip',
+      reason: `no frozen install recipe for ${packageManager ?? 'an undetectable package manager'}`,
+    };
+  }
+  const triggers = INSTALL_TRIGGERS[packageManager];
+  const changed = triggers.filter((file) => changedFiles.includes(file));
+  if (changed.length === 0) {
+    return {
+      kind: 'skip',
+      reason: `the sweep changed none of ${triggers.join(', ')}, so node_modules is still valid`,
+    };
+  }
+  const dirty = triggers.filter((file) => dirtyPaths.includes(file));
+  if (dirty.length > 0) {
+    return {
+      kind: 'skip',
+      reason: `locally dirty in the primary: ${dirty.join(', ')} — run \`${argv.join(' ')}\` there once that is resolved`,
+    };
+  }
+  return {argv, kind: 'run'};
+}
+
+interface PrimaryInstallResult {
+  /** false ONLY when an install really ran and really went red. */
+  ok: boolean;
+  /** The clause appended to this repo's summary line. Never empty. */
+  note: string;
+  /** A failed install's stdout+stderr, for the run log. null when none ran. */
+  output: string | null;
+  /** What ran (or would have), so the operator can repeat it by hand. */
+  argv: string[] | null;
+}
+
+/**
+ * Decide, then (maybe) install, in the PRIMARY checkout after its merge —
+ * home-base-bgfl. The effectful half; `planPrimaryInstall` is the decision.
+ *
+ * The primary's working tree is measured before and after and NEVER reverted:
+ * anything the install leaves dirty is named on the summary line and left for
+ * its owner. An unreadable `git status` is reported as unknown rather than
+ * silently read as clean (rule 6) — and it makes the install a skip, because
+ * "nothing is dirty" is exactly the claim that could not be checked.
+ */
+export function installInPrimary(
+  repo: string,
+  changedFiles: readonly string[],
+): PrimaryInstallResult {
+  const detection = detectPackageManager(repo);
+  const before = gitPorcelain(repo);
+  if (before == null) {
+    return {
+      argv: frozenInstallRecipe(detection.packageManager),
+      note: ', primary install skipped: `git status --porcelain` of the primary could not be read, so "nothing is dirty" is UNVERIFIED',
+      ok: true,
+      output: null,
+    };
+  }
+  const beforePaths = parsePorcelainPaths(before);
+  const plan = planPrimaryInstall({
+    changedFiles,
+    dirtyPaths: beforePaths,
+    packageManager: detection.packageManager,
+  });
+  if (plan.kind === 'skip') {
+    // The DETECTION's own basis is only worth printing when detection is what
+    // ruled the install out; otherwise it is noise on every green line.
+    const basis =
+      detection.packageManager == null ? ` (${detection.reason})` : '';
+    return {
+      argv: frozenInstallRecipe(detection.packageManager),
+      note: `, primary install skipped: ${plan.reason}${basis}`,
+      ok: true,
+      output: null,
+    };
+  }
+
+  const installed = run(plan.argv, repo, {quiet: true});
+  const after = gitPorcelain(repo);
+  let dirtNote = '';
+  if (after == null) {
+    dirtNote =
+      ' [could not re-read `git status --porcelain` after the install — whether it left the primary dirty is UNKNOWN]';
+  } else {
+    const appeared = parsePorcelainPaths(after).filter(
+      (path) => !beforePaths.includes(path),
+    );
+    if (appeared.length > 0) {
+      dirtNote = ` [the install left these dirty in the primary and NOTHING was reverted: ${appeared.join(', ')}]`;
+    }
+  }
+
+  if (installed.exitCode !== 0 || installed.error != null) {
+    return {
+      argv: plan.argv,
+      note:
+        `, PRIMARY INSTALL FAILED (${installed.error ?? `exit ${installed.exitCode}`}) — ` +
+        `the primary still executes the OLD SDK; run \`${plan.argv.join(' ')}\` in ${repo} by hand${dirtNote}`,
+      ok: false,
+      output: installed.output,
+    };
+  }
+  return {
+    argv: plan.argv,
+    note: `, primary installed${dirtNote}`,
+    ok: true,
+    output: null,
+  };
+}
+
+/**
+ * The dry-run's advisory line about the post-merge install (D5). It cannot know
+ * what the real run will change, so it states the CONDITION rather than a
+ * verdict — and it names the absence of a recipe, which is the case where a
+ * real run would merge and then leave node_modules stale.
+ */
+function dryRunInstallNote(repo: string): string {
+  const detection = detectPackageManager(repo);
+  const recipe = frozenInstallRecipe(detection.packageManager);
+  return recipe == null
+    ? ` — and would NOT install in the primary: no frozen install recipe (${detection.reason})`
+    : ` — would then \`${recipe.join(' ')}\` in the primary, if package.json or the lockfile change`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1964,7 +2183,8 @@ async function sweepOneRepo(
         (leftover.present ? 'would auto-remove a leftover, then ' : '') +
         (context.payload.mode === 'component'
           ? `would apply ${context.payload.component} off ${defaultBranch} (pin untouched)`
-          : `would sweep off ${defaultBranch}${dryRunPinNote(repo)}`),
+          : `would sweep off ${defaultBranch}${dryRunPinNote(repo)}`) +
+        dryRunInstallNote(repo),
       outcome: 'current',
       repo: name,
     };
@@ -2198,6 +2418,27 @@ async function sweepOneRepo(
     };
   }
 
+  // --- Post-merge install in the primary (home-base-bgfl) ------------------
+  // D1: here, immediately after the merge and BEFORE the push. The push does
+  // not depend on the install — the commit is correct either way — but the
+  // install's verdict IS this repo's verdict, because a repo that still runs
+  // the old SDK is not a repo the sweep finished.
+  const install = installInPrimary(repo, changedFiles);
+  if (!install.ok) {
+    context.log.record({
+      detail: install.note.replace(/^, /, ''),
+      output: install.output,
+      repo: name,
+      step: 'primary-install',
+    });
+    if (install.output != null && install.output.trim() !== '') {
+      say(
+        `  ${RED}✗${RESET} primary-install — last ${FAILURE_TAIL_LINES} lines:`,
+      );
+      say(tailLines(install.output));
+    }
+  }
+
   // --- Push + cleanup ------------------------------------------------------
   let pushNote = 'no remote';
   const remotes = git(repo, ['remote']);
@@ -2210,10 +2451,13 @@ async function sweepOneRepo(
   }
   const cleaned = cleanupWorktreeAndBranch(repo, worktreePath, SWEEP_BRANCH);
   return {
+    // The install clause goes LAST, after even the cleanup note: it is the
+    // answer to "does this repo now RUN the new SDK?", which is the question
+    // the whole line exists to answer.
     detail: `updated, merged into ${defaultBranch}, ${pushNote}${pinGateNote}${payloadNote}${scopeNote}${blindNote}${
       cleaned.ok ? '' : ` [${cleaned.detail}]`
-    }`,
-    outcome: 'clean',
+    }${install.note}`,
+    outcome: install.ok ? 'clean' : 'install-failed',
     repo: name,
   };
 }
@@ -2287,6 +2531,7 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
     clean: `${GREEN}✓${RESET}`,
     current: `${GREEN}=${RESET}`,
     failed: `${RED}✗${RESET}`,
+    'install-failed': `${RED}⚠${RESET}`,
     'merge-pending': `${YELLOW}⏸${RESET}`,
     skipped: `${DIM}⊘${RESET}`,
   };
@@ -2315,6 +2560,7 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
   const pending = of('merge-pending');
   const blocked = of('blocked');
   const skipped = of('skipped');
+  const installFailed = of('install-failed');
 
   if (failed.length + pending.length > 0) {
     say(
@@ -2337,6 +2583,18 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
         .join(', ')}${RESET}`,
     );
   }
+  // home-base-bgfl. Printed with the other red tails, because the failure mode
+  // it names is precisely the silence-shaped one: the commit landed, the push
+  // succeeded, every gate was green — and the repo goes on executing the SDK it
+  // had before. Nothing else in this summary would say so.
+  if (installFailed.length > 0) {
+    say(
+      `\n${RED}${installFailed.length} MERGED BUT STILL RUNNING THE OLD SDK (the post-merge install in the primary failed): ${installFailed
+        .map((result) => result.repo)
+        .join(', ')}${RESET}` +
+        `\n${RED}Run the install named on each line above, in that repo, then re-check with doctor.${RESET}`,
+    );
+  }
   if (blocked.length > 0) {
     say(
       `\n${RED}${blocked.length} COULD NOT SWEEP: ${blocked
@@ -2350,6 +2608,7 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
   // to a repo, and the remedy is one command rather than another whole sweep.
   return failed.length > 0 ||
     blocked.length > 0 ||
+    installFailed.length > 0 ||
     userRules?.status === 'failed'
     ? 1
     : 0;
