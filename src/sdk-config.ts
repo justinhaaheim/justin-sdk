@@ -196,6 +196,19 @@ const componentConfigSchema = z
       })
       .optional()
       .describe('time-check: the elapsed-time notice.'),
+    thread: z
+      .looseObject({
+        enabled: z
+          .boolean()
+          .optional()
+          .describe(
+            'The PREFLIGHT BRANCH POINT for thread reports, not a master switch (home-base-p1uj D6; corrected 2026-09-12, F7b). DEFAULT FALSE. It decides one thing: whether `thread prepare` prints THREADS: ENABLED or THREADS: DISABLED, which is the line the wrap-up rule branches on to fall back to the plain text status report. It does NOT disable the command group — `thread report`, `board`, `answer` and `inbox` all still work when it is false, which is deliberate: a human running them by hand should not be silently refused.',
+          ),
+      })
+      .optional()
+      .describe(
+        'thread: status reports as beads. Set in the user file to turn it on everywhere; override per repo in the project file.',
+      ),
     'usage-check': z
       .looseObject({
         enabled: z.boolean().optional(),
@@ -270,6 +283,11 @@ export const projectConfigSchema = z
 /** Schema for `$XDG_CONFIG_HOME/justin-sdk/config.json`. */
 export const userConfigSchema = z
   .looseObject({
+    // The SAME block as the project file's. A component knob Justin wants on
+    // for every repo (the `thread` group is the first, home-base-p1uj D6) has
+    // to be settable once, machine-wide, rather than repo by repo — and it must
+    // be the same shape in both files or the two would drift into dialects.
+    componentConfig: componentConfigSchema.optional(),
     healthNotices: healthNoticesSchema.optional(),
   })
   .describe(

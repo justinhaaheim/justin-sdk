@@ -499,7 +499,14 @@ describe('config schema', () => {
     expect(Object.keys(json.project.properties).sort()).toEqual(
       topLevelKeys(projectConfigSchema).sort(),
     );
-    expect(Object.keys(json.user.properties)).toEqual(['healthNotices']);
+    // DERIVED, like the project assertion above, rather than a hard-coded
+    // list: the user file gained `componentConfig` when the `thread` knob
+    // landed (home-base-p1uj D6), and a literal here means every future key
+    // added to either file breaks this test for no reason. What is actually
+    // being checked is that z.toJSONSchema preserves the schema's own keys.
+    expect(Object.keys(json.user.properties).sort()).toEqual(
+      topLevelKeys(userConfigSchema).sort(),
+    );
     expect(json.project.description).toBeString();
     expect(JSON.parse(JSON.stringify(json))).toEqual(json);
   });

@@ -30,6 +30,10 @@ import {
 import {runMigrateToPrime} from './migrate-to-prime';
 import {runPrime} from './plugin/lib/prime';
 import {repoStatusCommand} from './repo-status/repo-status';
+// By reference, like repo-status. command.ts imports nothing but yargs TYPES
+// and `await import`s each handler, so zod (and the whole thread module graph)
+// stays off the eager path the time-check/usage-check hooks pay for.
+import {threadCommand, usageNowCommand} from './thread/command';
 import {
   DEFAULT_OPTIONS as LOOP_DEFAULTS,
   runJustinLoop,
@@ -978,6 +982,8 @@ void yargs(ARGV)
     },
   )
   .command(repoStatusCommand)
+  .command(threadCommand)
+  .command(usageNowCommand)
   .demandCommand(1, 'Please specify a command')
   .strict()
   // The CLI reports its OWN failures (uxwc.5 F1). Without this, yargs' default

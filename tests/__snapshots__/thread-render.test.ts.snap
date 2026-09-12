@@ -1,0 +1,61 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`renderReport full report matches the committed baseline 1`] = `
+"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+
+**Thread:** thread-reports dispatch 2: the write path
+**Repo:** justin-sdk · **Branch:** thread-reports · **Worktree:** primary checkout
+**Tree:** UNCOMMITTED CHANGES · 3 ahead / 0 behind · HEAD 8dc0fd1abc99
+**Stop reason:** ✅ Work completed — Dispatch 2 is built and verified.
+**Tokens at stop:** 243,093 tokens of context
+**You asked me to:** You told me to build dispatch 2 of the thread-reports epic.
+**Your last message, verbatim:** go build dispatch 2
+
+**What I did:**
+- ✅ Built the thread command group
+- ✅ Wired the bin symlink
+
+**Progress toward goal:**
+- ⚽ Goal: Status reports as beads, one thread bead per session
+- 📈 Progress estimate: 70%
+- 📋 Remaining:
+  - the read path
+  - the rules edit
+
+**What I learned:**
+1. bd update --metadata merges rather than replaces (✅ written into src/thread/bd.ts)
+
+**Answers to your questions:**
+1. Q: Is CLAUDE_CODE_SESSION_ID exported inside a subagent?
+   A: Yes — measured 2026-09-12, it is the parent session id.
+
+**Discussion:**
+- bd update --metadata MERGES; it does not replace.
+
+**Asks — everything I need from you:**
+- Blocking:
+  1. [Approve Y/n] Approve closing ask beads rather than deleting them? (jl-x7q.2)
+     Context: The adapter closes asks instead of deleting them, because bd delete wedges auto-export.
+     a. (Recommended) Keep closing — reversible, export stays healthy
+     b. Delete — tidier list, wedges the JSONL export
+     If you don't answer: I keep closing rather than deleting.
+- Non-blocking (I proceeded; you can override):
+  2. [Pick a/b] Where should componentConfig.thread.enabled live? (jl-x7q.3)
+     Context: The knob defaults off, so nothing changes for other sessions.
+     a. (Recommended) a — user config only
+     b. b — every enrolled repo
+     If you don't answer: I leave it off everywhere but this machine.
+
+**Prior asks — closed by this report:**
+- jl-x7q.1 — answered: You said "yes, closing is right".
+
+**Work product:**
+- code: src/thread/ plus the bin symlink, on branch thread-reports
+- Merge state: UNMERGED
+
+**Beads touched:**
+- home-base-p1uj.1 — the thread command group core
+
+Answer: justin-sdk thread answer jl-x7q
+🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️"
+`;

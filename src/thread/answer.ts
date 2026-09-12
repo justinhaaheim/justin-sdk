@@ -1,0 +1,397 @@
+/**
+ * `justin-sdk thread answer` — Justin answers his asks (home-base-p1uj D3).
+ *
+ * The report told him what it needs. This walks those asks one at a time,
+ * records each answer as a bd COMMENT on the ask bead, and prints the one line
+ * he pastes back into the Claude session. The next turn picks the answers up
+ * with `thread inbox`.
+ *
+ * WHY THE PROMPTS ARE HAND-ROLLED — the verdict, measured 2026-09-12, so nobody
+ * re-litigates it. `@inquirer/prompts` was vetted as the brief required:
+ *   - v8.7.2, published 2026-09-07. Genuinely maintained; that was never the
+ *     problem.
+ *   - With stdin not a TTY it RENDERS THE PROMPT AND HANGS FOREVER (measured:
+ *     killed at a 10s timeout, exit 124). This command's hard requirement is
+ *     the opposite — one line and a non-zero exit — so the `isTTY` guard below
+ *     has to exist either way; the library does not provide the one property
+ *     that mattered.
+ *   - It renders correctly under bun in a pty, so bun compatibility was fine.
+ *   - 25 packages / 1.6 MB onto an SDK with four direct dependencies, which
+ *     every `bunx github:justinhaaheim/justin-sdk` bootstrap then installs.
+ *   - The final multi-line field is not buildable from its primitives: `input`
+ *     is single-line and `editor` shells out to $EDITOR. Hand-rolled regardless.
+ * Peer libraries (@clack/prompts and friends) share the same raw-mode design,
+ * so re-vetting them would reach the same place. What is left — a letter, a
+ * y/n, a line of text — is `node:readline/promises`.
+ *
+ * LETTER-KEYED, NOT ARROW-KEYED, and that is an improvement rather than a
+ * consolation: it matches the report's own form controls ("[Pick a/b/c]"), it
+ * is what Justin already types when he answers in chat, and it survives iOS
+ * remote control and a flaky pane, where a raw-mode cursor UI does not.
+ *
+ * Exit 0 = walked · 1 = a bd write failed · 2 = could not start (no TTY, no
+ * thread, nothing open). A failed comment write is NEVER swallowed: the whole
+ * point of this command is that the answer reaches the bead.
+ */
+
+import {createInterface} from 'readline/promises';
+
+import {
+  addComment,
+  describeBdFailure,
+  listOpenAsks,
+  mergeMetadata,
+  type BdContext,
+  type BdIssue,
+} from './bd';
+import {contextFor, resolveThread, type ThreadRef} from './resolve';
+import {optionLetter} from './render';
+
+/** What one ask needs in order to be asked. Everything comes from the bead. */
+export interface AskView {
+  blocking: boolean;
+  /** The ask bead's rendered description: kind tag, context, options, default. */
+  description: string;
+  defaultAction: string;
+  id: string;
+  kind: string;
+  optionCount: number;
+  title: string;
+}
+
+export type AskDecision = {kind: 'answered'; text: string} | {kind: 'skipped'};
+
+/** The comment text written for a skipped ask. Read back verbatim by `inbox`. */
+export const SKIP_COMMENT = 'skipped: use default';
+
+/**
+ * The terminal, as the walk sees it. An interface rather than `console` +
+ * `readline` directly so the walk can be driven by a scripted prompt in a test
+ * — the TTY is exactly the part that cannot be exercised from a subagent.
+ */
+export interface AnswerIo {
+  /** Multi-line: ends on an empty line or EOF. */
+  block(prompt: string): Promise<string>;
+  /** One line back, already trimmed. */
+  line(prompt: string): Promise<string>;
+  print(text: string): void;
+}
+
+export interface WalkResult {
+  decisions: {ask: AskView; decision: AskDecision}[];
+  note: string | null;
+}
+
+/** Read an ask bead into the shape the walk needs. Unreadable metadata degrades loudly. */
+export function askViewOf(issue: BdIssue): AskView {
+  const meta = (issue.metadata ?? {}) as Record<string, unknown>;
+  return {
+    blocking: meta.blocking === true,
+    defaultAction:
+      typeof meta.defaultAction === 'string' && meta.defaultAction !== ''
+        ? meta.defaultAction
+        : 'UNKNOWN (the ask bead records no default)',
+    description: issue.description ?? '',
+    id: issue.id,
+    kind: typeof meta.kind === 'string' ? meta.kind : 'answer',
+    optionCount:
+      typeof meta.optionCount === 'number' && Number.isFinite(meta.optionCount)
+        ? Math.max(0, Math.floor(meta.optionCount))
+        : 0,
+    title: issue.title ?? '',
+  };
+}
+
+/** Blocking first, then by id, so the order matches the report's numbering. */
+export function orderAsks(asks: readonly AskView[]): AskView[] {
+  return [...asks].sort((a, b) => {
+    if (a.blocking !== b.blocking) return a.blocking ? -1 : 1;
+    return a.id.localeCompare(b.id);
+  });
+}
+
+/** The prompt suffix for one ask — what SHAPE of reply this wants. */
+export function promptFor(ask: AskView): string {
+  if (ask.kind === 'pick' && ask.optionCount > 0) {
+    const letters = Array.from({length: ask.optionCount}, (_v, index) =>
+      optionLetter(index),
+    ).join('/');
+    return `[${letters}, or Enter to skip] `;
+  }
+  if (ask.kind === 'approve') return '[y/n, or Enter to skip] ';
+  return '[type your answer, or Enter to skip] ';
+}
+
+/**
+ * Turn one raw line into a decision.
+ *
+ * An empty line is a SKIP, which D3 defines as "take your default" — not an
+ * empty answer. The two are recorded differently and read back differently, and
+ * conflating them would let a skipped ask arrive at the next turn looking like
+ * Justin had answered with silence.
+ */
+export function decisionFor(ask: AskView, raw: string): AskDecision {
+  const text = raw.trim();
+  if (text === '') return {kind: 'skipped'};
+  if (ask.kind === 'pick' && ask.optionCount > 0) {
+    const letters = Array.from({length: ask.optionCount}, (_v, index) =>
+      optionLetter(index),
+    );
+    const chosen = text.toLowerCase();
+    if (!letters.includes(chosen)) {
+      return {kind: 'answered', text};
+    }
+    return {kind: 'answered', text: chosen};
+  }
+  if (ask.kind === 'approve') {
+    const lowered = text.toLowerCase();
+    if (lowered === 'y' || lowered === 'yes')
+      return {kind: 'answered', text: 'yes'};
+    if (lowered === 'n' || lowered === 'no')
+      return {kind: 'answered', text: 'no'};
+  }
+  return {kind: 'answered', text};
+}
+
+/**
+ * The walk itself — PURE with respect to the terminal and to bd.
+ *
+ * Everything interactive is behind `io`, and nothing is written here; the
+ * caller records the result. That is what makes this testable at all: the TTY
+ * half is a dozen lines of adapter, and this is where the behaviour lives.
+ */
+export async function walkAsks(
+  asks: readonly AskView[],
+  io: AnswerIo,
+): Promise<WalkResult> {
+  const decisions: {ask: AskView; decision: AskDecision}[] = [];
+  const ordered = orderAsks(asks);
+
+  for (const [index, ask] of ordered.entries()) {
+    io.print('');
+    io.print(
+      `── ${index + 1}/${ordered.length} · ${ask.id} · ${ask.blocking ? 'BLOCKING' : 'non-blocking'} ──`,
+    );
+    io.print(ask.description === '' ? ask.title : ask.description);
+    io.print('');
+    const raw = await io.line(promptFor(ask));
+    const decision = decisionFor(ask, raw);
+    decisions.push({ask, decision});
+    io.print(
+      decision.kind === 'skipped'
+        ? `   → skipped; Claude will: ${ask.defaultAction}`
+        : `   → recorded: ${decision.text}`,
+    );
+  }
+
+  io.print('');
+  io.print('── Anything else for Claude? (end with an empty line) ──');
+  const note = await io.block('> ');
+  return {decisions, note: note.trim() === '' ? null : note.trim()};
+}
+
+/**
+ * The readline adapter. The ONLY place stdin is touched.
+ *
+ * `block` ends on an empty line OR on EOF (ctrl-D). The `close` race matters:
+ * a `question()` whose stream has closed never settles, so a ctrl-D at the
+ * wrong moment would hang the command — the exact failure this file refuses to
+ * ship.
+ */
+function createTerminalIo(): {io: AnswerIo; close: () => void} {
+  const rl = createInterface({input: process.stdin, output: process.stdout});
+  let closed = false;
+  rl.on('close', () => {
+    closed = true;
+  });
+
+  const ask = async (prompt: string): Promise<string | null> => {
+    if (closed) return null;
+    // The close listener is REMOVED on the normal path. `once` only fires once,
+    // but a question that resolves normally leaves its listener attached
+    // forever, so a walk with a dozen prompts (asks plus note lines) would trip
+    // Node's MaxListenersExceededWarning — printed to stderr, mid-walk, on
+    // exactly the threads with the most asks to answer.
+    let onClose: (() => void) | null = null;
+    const closedPromise = new Promise<null>((resolve) => {
+      onClose = () => resolve(null);
+      rl.once('close', onClose);
+    });
+    try {
+      return await Promise.race([rl.question(prompt), closedPromise]);
+    } finally {
+      if (onClose != null) rl.off('close', onClose);
+    }
+  };
+
+  return {
+    close: () => rl.close(),
+    io: {
+      async block(prompt: string): Promise<string> {
+        const lines: string[] = [];
+        for (;;) {
+          const line = await ask(prompt);
+          if (line == null) break; // EOF
+          if (line.trim() === '') break;
+          lines.push(line);
+        }
+        return lines.join('\n');
+      },
+      async line(prompt: string): Promise<string> {
+        return (await ask(prompt)) ?? '';
+      },
+      print(text: string): void {
+        console.log(text);
+      },
+    },
+  };
+}
+
+export interface AnswerOptions extends ThreadRef {
+  /** Injected by tests; the real command uses the readline adapter. */
+  io?: AnswerIo;
+}
+
+export async function runThreadAnswer(
+  options: AnswerOptions = {},
+): Promise<number> {
+  const env = options.env ?? process.env;
+  const ctx: BdContext = contextFor(env);
+
+  const resolved = await resolveThread(ctx, options);
+  if (!resolved.ok) {
+    console.error(`thread answer: ${resolved.message}`);
+    return 2;
+  }
+  const thread = resolved.issue;
+
+  const asks = await listOpenAsks(ctx, thread.id);
+  if (!asks.ok) {
+    // NOT "there is nothing to answer": we could not look.
+    console.error(
+      `thread answer: could not read the asks on ${thread.id} — ${describeBdFailure(asks.failure)}`,
+    );
+    return 1;
+  }
+
+  // The report first, so Justin knows what he is answering. D10 put the whole
+  // rendered report in `notes` precisely so it can be replayed here.
+  console.log(
+    thread.notes == null || thread.notes === ''
+      ? `THREAD ${thread.id} · ${thread.title ?? '(no title)'} (no rendered report on this bead)`
+      : thread.notes,
+  );
+
+  if (asks.value.length === 0) {
+    console.log('');
+    console.log(
+      `No open asks on ${thread.id} — checked, and there are none. Nothing to answer.`,
+    );
+    return 0;
+  }
+
+  let io = options.io ?? null;
+  let closeIo: (() => void) | null = null;
+  if (io == null) {
+    // The guard the vetted library did not provide. A non-TTY run must fail
+    // loudly and immediately: this command blocks on a human, and a background
+    // or piped invocation that waited would hang a session forever.
+    if (process.stdin.isTTY !== true) {
+      console.error(
+        'thread answer: stdin is not a terminal, and this command has to ask you things. Run it in a terminal, or use `bd comments add <askId> "..."` directly.',
+      );
+      return 2;
+    }
+    const terminal = createTerminalIo();
+    io = terminal.io;
+    closeIo = terminal.close;
+  }
+
+  let result: WalkResult;
+  try {
+    result = await walkAsks(asks.value.map(askViewOf), io);
+  } finally {
+    if (closeIo != null) closeIo();
+  }
+
+  return recordAnswers(ctx, thread.id, result);
+}
+
+/**
+ * Write the walk's result to bd.
+ *
+ * Each answer is a COMMENT plus a metadata stamp, and the comment is written
+ * FIRST: the comment is the answer Justin actually gave, the stamp is only
+ * bookkeeping, and a run that died between them must lose the bookkeeping
+ * rather than the answer. Every failure is counted and named; the exit code
+ * reflects them.
+ */
+async function recordAnswers(
+  ctx: BdContext,
+  threadId: string,
+  result: WalkResult,
+): Promise<number> {
+  const stampedAt = new Date().toISOString();
+  const failures: string[] = [];
+  let answered = 0;
+  let skipped = 0;
+
+  for (const {ask, decision} of result.decisions) {
+    const text =
+      decision.kind === 'skipped' ? SKIP_COMMENT : `ANSWER: ${decision.text}`;
+    const wrote = await addComment(ctx, ask.id, text);
+    if (!wrote.ok) {
+      failures.push(`${ask.id} comment — ${describeBdFailure(wrote.failure)}`);
+      continue;
+    }
+    // Both stamps exist, and only one is ever set: `inbox` has to tell an ask
+    // Justin ANSWERED from one he deliberately SKIPPED from one he never
+    // reached, and three facts need three states, not a boolean.
+    const stamped = await mergeMetadata(ctx, ask.id, {
+      answeredAt: decision.kind === 'answered' ? stampedAt : null,
+      skippedAt: decision.kind === 'skipped' ? stampedAt : null,
+    });
+    if (!stamped.ok) {
+      failures.push(
+        `${ask.id} metadata — ${describeBdFailure(stamped.failure)}`,
+      );
+      continue;
+    }
+    if (decision.kind === 'skipped') skipped += 1;
+    else answered += 1;
+  }
+
+  if (result.note != null) {
+    const wrote = await addComment(ctx, threadId, `NOTE: ${result.note}`);
+    if (!wrote.ok) {
+      failures.push(`${threadId} note — ${describeBdFailure(wrote.failure)}`);
+    } else {
+      const stamped = await mergeMetadata(ctx, threadId, {inboxAt: stampedAt});
+      if (!stamped.ok) {
+        failures.push(
+          `${threadId} inboxAt — ${describeBdFailure(stamped.failure)}`,
+        );
+      }
+    }
+  }
+
+  console.log('');
+  console.log(
+    `${answered} answered · ${skipped} skipped · note ${result.note == null ? 'none' : 'recorded'}`,
+  );
+  if (failures.length > 0) {
+    console.error('');
+    console.error('🚨 SOME ANSWERS DID NOT REACH bd:');
+    for (const failure of failures) console.error(`  ${failure}`);
+    console.error(
+      'Re-run, or write them by hand: cd ~/Dev/life && bun run bd comments add <askId> "..."',
+    );
+    return 1;
+  }
+
+  // The last line is the whole handoff back to Claude — printed verbatim so it
+  // can be pasted without editing.
+  console.log('');
+  console.log(`Answers recorded in ${threadId}. Run: justin-sdk thread inbox`);
+  return 0;
+}
