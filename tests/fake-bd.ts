@@ -30,11 +30,25 @@ export interface FakeIssue {
   type: string;
 }
 
+export interface FakeComment {
+  id: string;
+  text: string;
+}
+
 export interface FakeState {
   /** How many `create -t ask` calls have been made. Reset to retry a run. */
   askCreates?: number;
+  /** Every comment written, in order. */
+  comments?: FakeComment[];
   /** Fail the Nth `create -t ask` of each run (1-based). 0 = never fail. */
   failAskCreateAt: number;
+  /** Fail `comments add` for this bead id. Null = never fail. */
+  failCommentAddFor?: string | null;
+  /**
+   * Mutate, print the id, THEN die in auto-export (home-base-p1uj.10). The
+   * stderr is the measured one from bd 1.1.0 under the Claude Code sandbox.
+   */
+  exportFails?: boolean;
   issues: FakeIssue[];
   /** Every command line the SDK issued, in order. */
   log: string[];
@@ -62,6 +76,20 @@ function metadataFrom() {
   return JSON.parse(readFileSync(raw.slice(1), 'utf8'));
 }
 function out(value) { process.stdout.write(JSON.stringify(value)); }
+const EXPORT_STDERR = [
+  'beads: auto-export warning: no Dolt remote configured.',
+  'beads: .beads/issues.jsonl is an export, not cross-machine sync or source of truth.',
+  "beads: repair: add a git origin, then run 'bd dolt remote add origin <git-remote-url>' and 'bd dolt push'.",
+  "Error: auto-export: git add failed: exit status 128: fatal: Unable to create '/Users/jhaa/Dev/life/.git/index.lock': Operation not permitted",
+  'error: "bd" exited with code 1',
+].join('\\n');
+// Every MUTATION ends here: the write has already happened, so an export
+// failure exits non-zero with the id already on stdout.
+function finish() {
+  save();
+  if (state.exportFails) { console.error(EXPORT_STDERR); process.exit(1); }
+  process.exit(0);
+}
 
 const command = argv[0];
 
@@ -113,7 +141,7 @@ if (command === 'create') {
     type,
   });
   process.stdout.write(id);
-  save(); process.exit(0);
+  finish();
 }
 
 if (command === 'update') {
@@ -126,6 +154,23 @@ if (command === 'update') {
   if (argv.includes('--metadata')) {
     found.metadata = {...(found.metadata ?? {}), ...metadataFrom()};
   }
+  finish();
+}
+
+if (command === 'comments') {
+  if (argv[1] === 'add') {
+    const id = argv[2];
+    if (state.failCommentAddFor === id) {
+      save();
+      console.error('error: database is locked');
+      process.exit(1);
+    }
+    state.comments = state.comments ?? [];
+    state.comments.push({id, text: argv[3] ?? ''});
+    finish();
+  }
+  const id = argv[1];
+  out((state.comments ?? []).filter((c) => c.id === id).map((c) => ({author: 'jhaa', created_at: '2026-09-12T12:00:00Z', text: c.text})));
   save(); process.exit(0);
 }
 
@@ -134,7 +179,7 @@ if (command === 'close') {
   if (found == null) { console.error('no such issue'); process.exit(1); }
   found.status = 'closed';
   found.closeReason = flag('--reason') ?? '';
-  save(); process.exit(0);
+  finish();
 }
 
 function shape(i) {
@@ -163,8 +208,18 @@ export interface FakeBd {
   write: (state: FakeState) => void;
 }
 
-/** Build a throwaway workspace whose `bun run bd` is the fake. */
-export function createFakeBd(failAskCreateAt = 0): FakeBd {
+/**
+ * Build a throwaway workspace whose `bun run bd` is the fake.
+ *
+ * `failCommentAddFor` fails `comments add` for ONE bead id, which is how the
+ * answer walk's "a write failed, keep going" path is exercised: the failure has
+ * to land on a specific ask, mid-walk, with asks after it still to come.
+ */
+export function createFakeBd(
+  failAskCreateAt = 0,
+  failCommentAddFor: string | null = null,
+  exportFails = false,
+): FakeBd {
   const dir = mkdtempSync(join(tmpdir(), 'fake-bd-'));
   const script = join(dir, 'bd.ts');
   const statePath = join(dir, 'state.json');
@@ -177,7 +232,15 @@ export function createFakeBd(failAskCreateAt = 0): FakeBd {
     join(dir, 'package.json'),
     JSON.stringify({name: 'fake-life', scripts: {bd: `bun ${script}`}}),
   );
-  const initial: FakeState = {failAskCreateAt, issues: [], log: [], nextId: 1};
+  const initial: FakeState = {
+    comments: [],
+    exportFails,
+    failAskCreateAt,
+    failCommentAddFor,
+    issues: [],
+    log: [],
+    nextId: 1,
+  };
   writeFileSync(statePath, JSON.stringify(initial, null, 2));
   return {
     cleanup: () => {

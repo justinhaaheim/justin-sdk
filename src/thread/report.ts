@@ -30,6 +30,7 @@ import {readFileSync} from 'fs';
 import {archiveReport, spoolReport, type ArchivedReport} from './archive';
 import {
   bdContext,
+  EXPORT_UNSTAGED_WARNING,
   closeAsk,
   createAsk,
   createThread,
@@ -639,6 +640,9 @@ export async function runThreadReport(
     );
     return 2;
   }
+
+  // One line, on every path that wrote something (home-base-p1uj.10).
+  if (ctx.exportUnstaged) console.error(EXPORT_UNSTAGED_WARNING);
 
   if (outcome.status === 'bdFailed') {
     return notRecorded({

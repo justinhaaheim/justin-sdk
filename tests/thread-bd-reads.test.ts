@@ -42,7 +42,7 @@ function workspacePrinting(stdout: string): {
   );
   return {
     cleanup: () => rmSync(dir, {force: true, recursive: true}),
-    ctx: {env: process.env, lifeDir: dir},
+    ctx: {env: process.env, exportUnstaged: false, lifeDir: dir},
   };
 }
 
@@ -183,7 +183,7 @@ function workspaceFailing(stderr: string): {
     calls: () =>
       existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').length : 0,
     cleanup: () => rmSync(dir, {force: true, recursive: true}),
-    ctx: {env: process.env, lifeDir: dir},
+    ctx: {env: process.env, exportUnstaged: false, lifeDir: dir},
   };
 }
 

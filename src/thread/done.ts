@@ -29,6 +29,7 @@
 import {
   closeIssue,
   describeBdFailure,
+  EXPORT_UNSTAGED_WARNING,
   listOpenAsks,
   reopenIssue,
   type BdContext,
@@ -120,6 +121,9 @@ export async function runThreadDone(
   console.log(
     `  asks closed: ${closedAsks.length === 0 ? 'none were open' : closedAsks.join(', ')}`,
   );
+  // The close landed but its export did not stage (home-base-p1uj.10). Said out
+  // loud here too: an unstaged JSONL that nobody is told about is a silence.
+  if (ctx.exportUnstaged) console.error(EXPORT_UNSTAGED_WARNING);
   return 0;
 }
 
