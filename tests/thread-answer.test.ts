@@ -445,7 +445,7 @@ function seededFake(
 }
 
 function envFor(fake: FakeBd): Record<string, string | undefined> {
-  return {...fake.env, JUSTIN_THREADS_LIFE_DIR: fake.dir};
+  return {...fake.env, JUSTIN_THREADS_REPO_DIR: fake.dir};
 }
 
 /** Every `comments add` the SDK has issued so far, from bd's own log. */
@@ -471,6 +471,7 @@ describe('runThreadAnswer against bd', () => {
     };
 
     const code = await runThreadAnswer({
+      autoCommit: false,
       env: envFor(fake),
       io,
       threadId: 'jl-t1',
@@ -493,6 +494,7 @@ describe('runThreadAnswer against bd', () => {
     const fake = seededFake();
     const {logs} = captureConsole();
     const code = await runThreadAnswer({
+      autoCommit: false,
       env: envFor(fake),
       io: scriptedIo(['b', 'y'], ''),
       threadId: 'jl-t1',
@@ -510,6 +512,7 @@ describe('runThreadAnswer against bd', () => {
     const io = scriptedIo(['b', 'y'], '');
 
     const code = await runThreadAnswer({
+      autoCommit: false,
       env: envFor(fake),
       io,
       threadId: 'jl-t1',
@@ -525,7 +528,7 @@ describe('runThreadAnswer against bd', () => {
     expect(logs.join('\n')).toContain('1 answered · 0 skipped');
     expect(errors.join('\n')).toContain('jl-t1.1');
     expect(errors.join('\n')).toContain(
-      "cd ~/Dev/life && bun run bd comments add jl-t1.1 'ANSWER: b'",
+      "cd ~/Dev/threads && bun run bd comments add jl-t1.1 'ANSWER: b'",
     );
   });
 });
@@ -536,6 +539,7 @@ describe('a comment write that dies in auto-export (home-base-p1uj.10)', () => {
     const {errors, logs} = captureConsole();
 
     const code = await runThreadAnswer({
+      autoCommit: false,
       env: envFor(fake),
       io: scriptedIo(['b', 'y'], ''),
       threadId: 'jl-t1',
@@ -559,7 +563,7 @@ describe('the retry command', () => {
   test('an apostrophe in an answer cannot break out of the quoting', () => {
     expect(shellSingleQuote("don't ship")).toBe(`'don'\\''t ship'`);
     expect(retryCommandFor('jl-t1.1', 'ANSWER: `whoami`')).toBe(
-      "cd ~/Dev/life && bun run bd comments add jl-t1.1 'ANSWER: `whoami`'",
+      "cd ~/Dev/threads && bun run bd comments add jl-t1.1 'ANSWER: `whoami`'",
     );
   });
 });

@@ -1,12 +1,12 @@
 /**
- * The bd adapter — the ONLY place this SDK talks to ~/Dev/life's beads
- * (home-base-p1uj D2, D9).
+ * The bd adapter — the ONLY place this SDK talks to the threads repo's beads
+ * (home-base-p1uj D2 as amended by p1uj.11, D9).
  *
- * HOW bd IS REACHED. `bd` is a zsh alias for `bun run bd` inside ~/Dev/life; it
- * is not on a non-interactive PATH, so every call here is `bun run bd …` with
- * cwd set to the life workspace. The workspace is `JUSTIN_THREADS_LIFE_DIR`-
- * overridable, which is also how the "bd unreachable" path gets exercised for
- * real rather than mocked.
+ * HOW bd IS REACHED. `bd` is a devDependency of the threads repo, not a binary
+ * on a non-interactive PATH, so every call here is `bun run bd …` with cwd set
+ * to that workspace. The workspace is `JUSTIN_THREADS_REPO_DIR`-overridable,
+ * which is also how the "bd unreachable" path gets exercised for real rather
+ * than mocked.
  *
  * NOTHING HERE THROWS PAST THE ADAPTER. Every function returns a Result, and
  * the failure side is a tagged union rather than a string, because the four
@@ -44,7 +44,7 @@ import {mkdtempSync, rmSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
-import {lifeRepoDir} from './paths';
+import {threadsRepoDir} from './paths';
 
 import type {EnvLike} from './paths';
 
@@ -174,8 +174,8 @@ function classify(
     return {command, detail: text.trim().slice(0, 400), kind: 'sandbox-denied'};
   }
   // `Script not found "bd"` is what bun says when the workspace has no `bd`
-  // script — i.e. when JUSTIN_THREADS_LIFE_DIR points somewhere that is not the
-  // beads workspace. Measured 2026-09-12 while exercising the unreachable path.
+  // script or dependency — i.e. when the resolved threads repo is not a beads
+  // workspace. Measured 2026-09-12 while exercising the unreachable path.
   if (
     spawnError != null ||
     /ENOENT|command not found|no such file|script not found/i.test(text)
@@ -195,8 +195,10 @@ function classify(
 /**
  * Did this bd run WRITE, and then fail only while exporting? (home-base-p1uj.10)
  *
- * MEASURED 2026-09-12, in the Claude Code sandbox with ~/Dev/life/.beads
- * allowlisted and ~/Dev/life/.git not. `bd create … --silent`:
+ * MEASURED 2026-09-12, in the Claude Code sandbox with the beads workspace
+ * allowlisted and its `.git` not. The transcript below predates p1uj.11, so the
+ * paths in it are the old ~/Dev/life ones; the shape is what matters and it is
+ * identical in ~/Dev/threads. `bd create … --silent`:
  *
  *   exit 1
  *   stdout: jl-rg5a.1
@@ -229,19 +231,21 @@ export interface BdContext {
   /**
    * Set when a write landed in Dolt but its JSONL export was not git-staged.
    * A WARNING for the command to print, never a failure — and never silence:
-   * the repo is left in a state someone has to notice (D13).
+   * the repo is left in a state someone has to notice, and the tool's own
+   * commit (p1uj.11) is skipped rather than spent on a `.git` known to be
+   * unwritable.
    */
   exportUnstaged: boolean;
-  lifeDir: string;
+  repoDir: string;
 }
 
 export function bdContext(env: EnvLike = process.env): BdContext {
-  return {env, exportUnstaged: false, lifeDir: lifeRepoDir(env)};
+  return {env, exportUnstaged: false, repoDir: threadsRepoDir(env)};
 }
 
 /** The one line every command prints when `ctx.exportUnstaged` is set. */
 export const EXPORT_UNSTAGED_WARNING =
-  '⚠️ WARNING: recorded in Dolt, but .beads/issues.jsonl could not be git-staged (the sandbox denies ~/Dev/life/.git). Nothing was lost; `justin-sdk thread board` reminds you what is uncommitted.';
+  '⚠️ WARNING: recorded in Dolt, but .beads/issues.jsonl could not be git-staged and therefore was NOT committed (the sandbox denies ~/Dev/threads/.git). Nothing was lost; `justin-sdk thread board` reminds you what is uncommitted.';
 
 /**
  * Run one bd command, retrying only a `locked` failure.
@@ -258,7 +262,7 @@ async function runBd(
   let last: BdFailure | null = null;
   for (let attempt = 0; attempt < MAX_LOCK_ATTEMPTS; attempt += 1) {
     const result = spawnSync('bun', ['run', 'bd', ...args], {
-      cwd: ctx.lifeDir,
+      cwd: ctx.repoDir,
       encoding: 'utf8',
       env: ctx.env as NodeJS.ProcessEnv,
       maxBuffer: 64 * 1024 * 1024,
@@ -380,7 +384,7 @@ export async function checkThreadTypes(
 
 /** The fix `prepare` prints when a type is missing. */
 export const REGISTER_TYPES_COMMAND =
-  'cd ~/Dev/life && bun run bd config set types.custom docs,question,source-email,source-message,thread,ask';
+  'cd ~/Dev/threads && bun run bd config set types.custom thread,ask';
 
 /**
  * The thread bead for one session, or null when there genuinely is none.

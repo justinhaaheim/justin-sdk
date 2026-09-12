@@ -80,7 +80,11 @@ function recorder(options: {asks?: BdIssue[]; failOn?: string} = {}): Recorder {
 describe('thread done', () => {
   test('closes every open ask AND the thread, asks first', async () => {
     const {calls, deps} = recorder();
-    const code = await runThreadDone({deps, threadId: 'jl-a1'});
+    const code = await runThreadDone({
+      autoCommit: false,
+      deps,
+      threadId: 'jl-a1',
+    });
     expect(code).toBe(0);
     const closes = calls.filter((call) => call.startsWith('close:'));
     expect(closes).toHaveLength(3);
@@ -92,20 +96,29 @@ describe('thread done', () => {
 
   test('an ask is closed as "no longer relevant", never as answered', async () => {
     const {calls, deps} = recorder();
-    await runThreadDone({deps, reason: 'moving on', threadId: 'jl-a1'});
+    await runThreadDone({
+      autoCommit: false,
+      deps,
+      reason: 'moving on',
+      threadId: 'jl-a1',
+    });
     expect(calls).toContain('close:jl-a1.1:no longer relevant: moving on');
     expect(calls).toContain('close:jl-a1:moving on');
   });
 
   test('the default reason is used when none is given', async () => {
     const {calls, deps} = recorder();
-    await runThreadDone({deps, threadId: 'jl-a1'});
+    await runThreadDone({autoCommit: false, deps, threadId: 'jl-a1'});
     expect(calls).toContain(`close:jl-a1:${DEFAULT_DONE_REASON}`);
   });
 
   test('a FAILED ask close aborts — the thread is never closed', async () => {
     const {calls, deps} = recorder({failOn: 'jl-a1.2'});
-    const code = await runThreadDone({deps, threadId: 'jl-a1'});
+    const code = await runThreadDone({
+      autoCommit: false,
+      deps,
+      threadId: 'jl-a1',
+    });
     expect(code).toBe(1);
     // jl-a1.1 was closed, jl-a1.2 failed, and the THREAD was never attempted.
     expect(
@@ -116,7 +129,11 @@ describe('thread done', () => {
 
   test('a thread with no open asks still closes, and says so', async () => {
     const {calls, deps} = recorder({asks: []});
-    const code = await runThreadDone({deps, threadId: 'jl-a1'});
+    const code = await runThreadDone({
+      autoCommit: false,
+      deps,
+      threadId: 'jl-a1',
+    });
     expect(code).toBe(0);
     expect(calls.filter((call) => call.startsWith('close:'))).toHaveLength(1);
   });
@@ -131,7 +148,11 @@ describe('thread done', () => {
       },
       ok: false,
     });
-    const code = await runThreadDone({deps, threadId: 'jl-a1'});
+    const code = await runThreadDone({
+      autoCommit: false,
+      deps,
+      threadId: 'jl-a1',
+    });
     expect(code).toBe(1);
     expect(calls.filter((call) => call.startsWith('close:'))).toHaveLength(0);
   });
@@ -139,7 +160,9 @@ describe('thread done', () => {
   test('an unresolvable thread is exit 2, and nothing is closed', async () => {
     const {calls, deps} = recorder();
     deps.resolveThread = async () => ({message: 'no bead jl-zz', ok: false});
-    expect(await runThreadDone({deps, threadId: 'jl-zz'})).toBe(2);
+    expect(
+      await runThreadDone({autoCommit: false, deps, threadId: 'jl-zz'}),
+    ).toBe(2);
     expect(calls.filter((call) => call.startsWith('close:'))).toHaveLength(0);
   });
 });
@@ -148,6 +171,7 @@ describe('thread reopen', () => {
   test('reopens the THREAD ONLY — the asks stay closed', async () => {
     const {calls, deps} = recorder();
     const code = await runThreadReopen({
+      autoCommit: false,
       deps,
       reason: 'more to do',
       threadId: 'jl-a1',
@@ -166,6 +190,8 @@ describe('thread reopen', () => {
       failure: {command: 'bd reopen', detail: 'locked', kind: 'locked'},
       ok: false,
     });
-    expect(await runThreadReopen({deps, threadId: 'jl-a1'})).toBe(1);
+    expect(
+      await runThreadReopen({autoCommit: false, deps, threadId: 'jl-a1'}),
+    ).toBe(1);
   });
 });

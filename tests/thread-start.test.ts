@@ -92,7 +92,7 @@ function harness(
     cwd,
     env: {
       ...fake.env,
-      JUSTIN_THREADS_LIFE_DIR: fake.dir,
+      JUSTIN_THREADS_REPO_DIR: fake.dir,
       JUSTIN_THREADS_STATE_DIR: stateDir,
       // A transcript that does not exist: the facts collector records the miss
       // in autofillFailures instead of scanning ~/.claude/projects for it.
@@ -141,6 +141,7 @@ describe('the two knobs (D6 + p1uj.3)', () => {
   test('both absent: disabled, and NOTHING is created', async () => {
     const h = harness({});
     const outcome = await startThread({
+      autoCommit: false,
       cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
@@ -153,6 +154,7 @@ describe('the two knobs (D6 + p1uj.3)', () => {
   test('enabled on, startOnSessionStart off: still disabled, and it says which', async () => {
     const h = harness({enabled: true});
     const outcome = await startThread({
+      autoCommit: false,
       cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
@@ -166,6 +168,7 @@ describe('the two knobs (D6 + p1uj.3)', () => {
   test('startOnSessionStart on but enabled off: disabled — BOTH are required', async () => {
     const h = harness({startOnSessionStart: true});
     const outcome = await startThread({
+      autoCommit: false,
       cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
@@ -185,6 +188,7 @@ describe('both knobs on', () => {
   test('creates ONE in_progress thread bead, titled and keyed for this session', async () => {
     const h = harness({enabled: true, startOnSessionStart: true});
     const outcome = await startThread({
+      autoCommit: false,
       cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
@@ -212,7 +216,12 @@ describe('both knobs on', () => {
     // stamp would make the session's first real report either look superseded
     // or hunt for orphans among asks that cannot exist.
     const h = harness({enabled: true, startOnSessionStart: true});
-    await startThread({cwd: h.cwd, env: h.env, sessionId: SESSION});
+    await startThread({
+      autoCommit: false,
+      cwd: h.cwd,
+      env: h.env,
+      sessionId: SESSION,
+    });
     const meta = threads(h)[0]!.metadata ?? {};
 
     expect(meta.reportedAt).toBeNull();
@@ -230,6 +239,7 @@ describe('both knobs on', () => {
   test('a second run is a NO-OP that names the existing id', async () => {
     const h = harness({enabled: true, startOnSessionStart: true});
     const first = await startThread({
+      autoCommit: false,
       cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
@@ -237,6 +247,7 @@ describe('both knobs on', () => {
     if (first.kind !== 'created') throw new Error('unreachable');
 
     const second = await startThread({
+      autoCommit: false,
       cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
@@ -250,14 +261,25 @@ describe('both knobs on', () => {
 
   test('a DIFFERENT session gets its own bead', async () => {
     const h = harness({enabled: true, startOnSessionStart: true});
-    await startThread({cwd: h.cwd, env: h.env, sessionId: SESSION});
-    await startThread({cwd: h.cwd, env: h.env, sessionId: 'other-session-id'});
+    await startThread({
+      autoCommit: false,
+      cwd: h.cwd,
+      env: h.env,
+      sessionId: SESSION,
+    });
+    await startThread({
+      autoCommit: false,
+      cwd: h.cwd,
+      env: h.env,
+      sessionId: 'other-session-id',
+    });
     expect(threads(h)).toHaveLength(2);
   });
 
   test('--title replaces the placeholder', async () => {
     const h = harness({enabled: true, startOnSessionStart: true});
     const outcome = await startThread({
+      autoCommit: false,
       cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
@@ -276,7 +298,12 @@ describe('when it cannot do its job', () => {
   test('no session id: refuses, names why, creates nothing', async () => {
     const h = harness({enabled: true, startOnSessionStart: true});
     const env = {...h.env, CLAUDE_CODE_SESSION_ID: undefined};
-    const outcome = await startThread({cwd: h.cwd, env, sessionId: null});
+    const outcome = await startThread({
+      autoCommit: false,
+      cwd: h.cwd,
+      env,
+      sessionId: null,
+    });
     expect(outcome.kind).toBe('noSessionId');
     expect(threads(h)).toHaveLength(0);
   });
@@ -289,9 +316,14 @@ describe('when it cannot do its job', () => {
     // one — without it this exercises the missing-workspace path below instead.
     const empty = mkdtempSync(join(tmpdir(), 'not-life-'));
     mkdirSync(join(empty, '.beads'), {recursive: true});
-    const env = {...h.env, JUSTIN_THREADS_LIFE_DIR: empty};
+    const env = {...h.env, JUSTIN_THREADS_REPO_DIR: empty};
 
-    const outcome = await startThread({cwd: h.cwd, env, sessionId: SESSION});
+    const outcome = await startThread({
+      autoCommit: false,
+      cwd: h.cwd,
+      env,
+      sessionId: SESSION,
+    });
     expect(outcome.kind).toBe('bdFailed');
     if (outcome.kind !== 'bdFailed') throw new Error('unreachable');
     expect(outcome.failure.kind).toBe('unreachable');
@@ -307,12 +339,19 @@ describe('when it cannot do its job', () => {
 
   test('no life .beads directory: says so, and does NOT create one (F9)', async () => {
     const h = harness({enabled: true, startOnSessionStart: true});
-    const nowhere = join(mkdtempSync(join(tmpdir(), 'no-life-')), 'life');
-    const env = {...h.env, JUSTIN_THREADS_LIFE_DIR: nowhere};
+    const nowhere = join(mkdtempSync(join(tmpdir(), 'no-threads-')), 'threads');
+    const env = {...h.env, JUSTIN_THREADS_REPO_DIR: nowhere};
 
-    const outcome = await startThread({cwd: h.cwd, env, sessionId: SESSION});
-    expect(outcome.kind).toBe('lifeBeadsMissing');
-    expect(describeStartOutcome(outcome)).toContain('life beads dir missing');
+    const outcome = await startThread({
+      autoCommit: false,
+      cwd: h.cwd,
+      env,
+      sessionId: SESSION,
+    });
+    expect(outcome.kind).toBe('threadsBeadsMissing');
+    expect(describeStartOutcome(outcome)).toContain(
+      'threads beads dir missing',
+    );
     // The probe used to mkdir this into existence and then report it writable.
     expect(existsSync(nowhere)).toBe(false);
     expect(existsSync(join(nowhere, '.beads'))).toBe(false);
@@ -332,6 +371,7 @@ describe('when it cannot do its job', () => {
     for (const attended of ['0', 'false', '']) {
       const env = {...h.env, CLAUDE_CODE_SESSION_ATTENDED: attended};
       const outcome = await startThread({
+        autoCommit: false,
         cwd: h.cwd,
         env,
         sessionId: `${SESSION}-${attended}`,
@@ -358,7 +398,10 @@ describe('the SessionStart hook (thread start --hook)', () => {
       if (value === undefined) delete process.env[key];
     }
     try {
-      return await runThreadStartHook({stdin: JSON.stringify(payload)});
+      return await runThreadStartHook({
+        autoCommit: false,
+        stdin: JSON.stringify(payload),
+      });
     } finally {
       for (const key of Object.keys(process.env)) delete process.env[key];
       Object.assign(process.env, saved);
@@ -492,6 +535,7 @@ describe('a later `thread report` for the same session', () => {
   test('UPDATES the start-created bead instead of creating a second one', async () => {
     const h = harness({enabled: true, startOnSessionStart: true});
     const started = await startThread({
+      autoCommit: false,
       cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
@@ -507,7 +551,7 @@ describe('a later `thread report` for the same session', () => {
       throw new Error('fixture payload is invalid');
 
     const ctx = bdContext(h.env);
-    ctx.lifeDir = h.fake.dir;
+    ctx.repoDir = h.fake.dir;
     const result = await writeReportToBd({
       ctx,
       facts: reportFacts(),
@@ -544,7 +588,7 @@ describe('a later `thread report` for the same session', () => {
       throw new Error('fixture payload is invalid');
 
     const ctx = bdContext(h.env);
-    ctx.lifeDir = h.fake.dir;
+    ctx.repoDir = h.fake.dir;
     const reported = await writeReportToBd({
       ctx,
       facts: reportFacts(),
@@ -554,6 +598,7 @@ describe('a later `thread report` for the same session', () => {
     if (reported.status !== 'written') throw new Error('unreachable');
 
     const outcome: ThreadStartOutcome = await startThread({
+      autoCommit: false,
       cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
@@ -571,6 +616,7 @@ describe('a start whose write dies in auto-export (home-base-p1uj.10)', () => {
   test('the bead is CREATED and the unstaged export is flagged, not reported as a failure', async () => {
     const h = harness({enabled: true, startOnSessionStart: true}, true);
     const outcome = await startThread({
+      autoCommit: false,
       cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,

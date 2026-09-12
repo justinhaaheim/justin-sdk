@@ -39,7 +39,7 @@ describe('components: ordering', () => {
   });
 
   test('thread-hooks is opt-in only — its hook writes to a SHARED database', () => {
-    // Its SessionStart hook writes to ~/Dev/life's Dolt DB on every session
+    // Its SessionStart hook writes to ~/Dev/threads' Dolt DB on every session
     // start, so installing it everywhere would have every repo paying lock
     // contention for a feature only some sessions use (home-base-p1uj.3).
     expect(COMPONENT_NAMES).toContain('thread-hooks');

@@ -28,6 +28,7 @@
 import {readFileSync} from 'fs';
 
 import {archiveReport, spoolReport, type ArchivedReport} from './archive';
+import {commitThreadsRepo, describeCommit} from './commit';
 import {
   bdContext,
   EXPORT_UNSTAGED_WARNING,
@@ -95,6 +96,8 @@ function firstLine(text: string, cap: number): string {
 }
 
 export interface ReportOptions {
+  /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
+  autoCommit?: boolean;
   cwd?: string;
   env?: EnvLike;
   /** Path to the payload JSON; mutually exclusive with `stdin`. */
@@ -680,5 +683,18 @@ export async function runThreadReport(
     archivePath == null ? '  archive: FAILED' : `  archive: ${archivePath}`,
   );
   console.error(`  Justin answers with: justin-sdk thread answer ${threadId}`);
+
+  // The commit is part of finishing the write (p1uj.11, retiring D13): threads
+  // have their own repo now, so nothing else is racing this index.
+  const commitLine = describeCommit(
+    commitThreadsRepo(`thread ${threadId}: report #${reportCount}`, {
+      autoCommit: options.autoCommit,
+      dir: ctx.repoDir,
+      env,
+      exportUnstaged: ctx.exportUnstaged,
+    }),
+    'the threads repo',
+  );
+  if (commitLine != null) console.error(commitLine);
   return 0;
 }

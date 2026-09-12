@@ -47,13 +47,39 @@ export const THREAD_DEFAULT_ENABLED = false;
  */
 export const THREAD_DEFAULT_START_ON_SESSION_START = false;
 
+/**
+ * ON unless something says otherwise (home-base-p1uj.11) — the one knob here
+ * whose default is true.
+ *
+ * It can be, because it is not a feature gate: threads now live in their own
+ * repo whose only writer is this tool, so committing after a write is simply
+ * finishing the write. The knob exists to turn the commit OFF for someone who
+ * wants to batch them (or whose threads repo is not a git repo at all), not to
+ * arm something risky. D13 — "the tool does not commit" — was retracted with
+ * the move, because the hazard it named was racing ~/Dev/life's index, and
+ * there is no longer another writer to race.
+ */
+export const THREAD_DEFAULT_AUTO_COMMIT = true;
+
 /** Which layer decided one knob's value. */
 export type ThreadConfigSource = 'default' | 'project' | 'user';
 
 export interface ResolvedThreadConfig {
+  /** Whether the tool commits `.beads/issues.jsonl` after each write batch. */
+  autoCommit: boolean;
+  /** Which layer decided `autoCommit`. */
+  autoCommitSource: ThreadConfigSource;
   enabled: boolean;
   /** Human-readable config read problems. Empty means both files were fine. */
   problems: string[];
+  /**
+   * The configured threads repo, or null for "no layer said" — which is a
+   * DISTINCT answer from a path, and is what lets `paths.ts` fall through to
+   * its own default instead of treating a missing key as an empty directory.
+   */
+  repoDir: string | null;
+  /** Which layer decided `repoDir`. */
+  repoDirSource: ThreadConfigSource;
   /** Which layer decided `enabled`. */
   source: ThreadConfigSource;
   /** Whether the SessionStart hook may create this session's thread bead. */
@@ -71,7 +97,7 @@ export interface ResolvedThreadConfig {
  * would make an absent user file read as an explicit "off" that a project file
  * then has to argue with.
  */
-function threadFlagIn(config: unknown, key: string): boolean | null {
+function threadSectionIn(config: unknown): Record<string, unknown> | null {
   if (config == null || typeof config !== 'object') return null;
   const componentConfig = (config as {componentConfig?: unknown})
     .componentConfig;
@@ -81,8 +107,22 @@ function threadFlagIn(config: unknown, key: string): boolean | null {
     THREAD_CONFIG_KEY
   ];
   if (section == null || typeof section !== 'object') return null;
-  const value = (section as Record<string, unknown>)[key];
+  return section as Record<string, unknown>;
+}
+
+function threadFlagIn(config: unknown, key: string): boolean | null {
+  const section = threadSectionIn(config);
+  if (section == null) return null;
+  const value = section[key];
   return typeof value === 'boolean' ? value : null;
+}
+
+/** One string out of `componentConfig.thread`. Empty string counts as absent. */
+function threadStringIn(config: unknown, key: string): string | null {
+  const section = threadSectionIn(config);
+  if (section == null) return null;
+  const value = section[key];
+  return typeof value === 'string' && value !== '' ? value : null;
 }
 
 /** DEFAULT ← user file ← project file. */
@@ -126,11 +166,26 @@ export function resolveThreadConfig(
     'startOnSessionStart',
     THREAD_DEFAULT_START_ON_SESSION_START,
   );
+  const autoCommit = resolveFlag('autoCommit', THREAD_DEFAULT_AUTO_COMMIT);
+
+  let repoDir: string | null = null;
+  let repoDirSource: ThreadConfigSource = 'default';
+  for (const layer of layers) {
+    const read = threadStringIn(layer.config, 'repoDir');
+    if (read != null) {
+      repoDir = read;
+      repoDirSource = layer.name;
+    }
+  }
 
   return {
+    autoCommit: autoCommit.value,
+    autoCommitSource: autoCommit.source,
     enabled: enabled.value,
     problems,
     projectRoot,
+    repoDir,
+    repoDirSource,
     source: enabled.source,
     startOnSessionStart: start.value,
     startSource: start.source,

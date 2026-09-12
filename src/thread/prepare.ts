@@ -34,8 +34,8 @@ import {collectInboxAsks, readThreadNote, renderInboxAsk} from './inbox';
 import {collectThreadFacts} from './facts';
 import {draftPath} from './archive';
 import {
-  lifeBeadsDir,
-  lifeBeadsMissingLine,
+  threadsBeadsDir,
+  threadsBeadsMissingLine,
   probeWritable,
   SANDBOX_DENIED_LINE,
   threadsStateDir,
@@ -75,18 +75,18 @@ export async function runThreadPrepare(
   }
 
   // The two paths the Claude Code sandbox denies from any session outside
-  // ~/Dev/life. Probed BEFORE any bd command, so a denied session never spends
+  // the threads repo. Probed BEFORE any bd command, so a denied session never spends
   // a subprocess (or a permission prompt) on a call that cannot succeed.
   // The state dir is OURS to create; the beads dir is bd's (F9) — probing it
   // with `create` would fabricate a beads workspace on a machine that has none.
   const stateProbe = probeWritable(threadsStateDir(env), {create: true});
-  const beadsProbe = probeWritable(lifeBeadsDir(env), {create: false});
+  const beadsProbe = probeWritable(threadsBeadsDir(env), {create: false});
   if (stateProbe.kind === 'denied' || beadsProbe.kind === 'denied') {
     console.log(SANDBOX_DENIED_LINE);
     return 0;
   }
   if (beadsProbe.kind === 'missing') {
-    console.log(lifeBeadsMissingLine(beadsProbe.path));
+    console.log(threadsBeadsMissingLine(beadsProbe.path));
     return 0;
   }
 

@@ -24,7 +24,7 @@
  * says nothing.
  *
  * OPT-IN ONLY — same reasoning as usage-check, plus one of its own: this hook
- * writes to a SHARED Dolt database (~/Dev/life) on every session start, so the
+ * writes to a SHARED Dolt database (~/Dev/threads) on every session start, so the
  * cost of installing it everywhere is paid in lock contention by every other
  * session, not just by this repo. Excluded from `init` and the `all` preset (see
  * OPT_IN_ONLY in components.ts).

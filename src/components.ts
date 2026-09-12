@@ -72,7 +72,7 @@ export type ComponentName = (typeof COMPONENT_NAMES)[number];
  *     prompt AND after every tool batch. Opt in where long sessions need to
  *     know their own context size.
  *   - thread-hooks: its SessionStart hook writes to a SHARED Dolt database
- *     (~/Dev/life) on every session start, so installing it everywhere would
+ *     (~/Dev/threads) on every session start, so installing it everywhere would
  *     have every repo paying lock contention for a feature only some sessions
  *     use. Opt in where the session is worth tracking on the board.
  *   - critical-rules: it commits a generated rules file INTO the repo, and four
