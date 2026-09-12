@@ -120,6 +120,44 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Does this stderr describe a LOCK we should retry? (F10, p1uj.6.)
+ *
+ * The old test was a bare `/lock/i`, which matched the substring in "blocked"
+ * and "unlock" — so `Blocked by 3 open dependencies` earned three retries with
+ * backoff and a banner naming a cause that was not the cause. Both of those
+ * words are real bd output: `strings` over the shipped 1.1.0 binary (measured
+ * 2026-09-12) finds `Blocked by %d open dependencies: %v`, ` blocked by %s: %s
+ * [%s]`, `[blocked]  - Step is blocked by dependencies` and `depends on (is
+ * blocked by) the specified issue.`
+ *
+ * The WORD BOUNDARY is what fixes it, and it is not a coincidence that it does:
+ * `\block\b` cannot match inside "blocked" or "unlock", because in both the
+ * letters are welded to another word character. Everything else here is
+ * deliberately generous, because the real lock messages could NOT be provoked
+ * live — six concurrent `bd create`s against an isolated $TMPDIR workspace all
+ * exited 0 (the embedded backend serialises writers rather than failing them),
+ * so the catalogue below comes from the binary rather than from a reproduction,
+ * and may be incomplete:
+ *
+ *   embeddeddolt: another process holds the exclusive lock on %s; the embedded
+ *                 backend supports only one writer at a time
+ *   The Dolt database is locked.%s
+ *   Stale lock files detected: %s. Lock files from crashed or killed bd
+ *                 processes prevent new operations.
+ *   timed out after %s opening beads storage. Another bd process or stale
+ *                 storage lock may be blocking memory injection
+ *
+ * Under-matching here is the cheaper mistake: an unrecognised lock is reported
+ * as `failed`, which still prints the real stderr, still spools the payload and
+ * still exits non-zero — it only loses three retries.
+ */
+export function isLockedText(text: string): boolean {
+  if (/\block(s|ed|ing|file|files)?\b/i.test(text)) return true;
+  // EAGAIN from a non-blocking flock, which says nothing about locks at all.
+  return /resource temporarily unavailable/i.test(text);
+}
+
+/**
  * Sandbox denial FIRST, before the lock test. The sandbox's own message is
  * `openat LOCK: operation not permitted`, which matches both patterns — and
  * retrying it three times with backoff would be pure latency for a failure that
@@ -148,7 +186,7 @@ function classify(
       kind: 'unreachable',
     };
   }
-  if (/lock|database is locked|resource temporarily unavailable/i.test(text)) {
+  if (isLockedText(text)) {
     return {command, detail: text.trim().slice(0, 400), kind: 'locked'};
   }
   return {command, detail: text.trim().slice(0, 400), exitCode, kind: 'failed'};
@@ -516,6 +554,13 @@ export async function createThread(
  * Every field is sent every time, including the full metadata key set: update's
  * `--metadata` merges, so an omitted key would keep whatever the previous report
  * left there. Sending everything makes the merge a replacement.
+ *
+ * `-s in_progress` IS ENOUGH FOR A CLOSED THREAD — no `bd reopen` first (F8,
+ * retired by measurement; see `reopenIssue` for the transcript). A session that
+ * reports after `thread done` resurrects its bead cleanly: `closed_at` and
+ * `close_reason` are both cleared by the status change. That resurrection is
+ * intended, not a leak — the session is demonstrably still running, and a board
+ * that hid it would be claiming less is in flight than there is.
  */
 export async function updateThread(
   ctx: BdContext,
@@ -676,11 +721,24 @@ export async function closeIssue(
 /**
  * Reopen a closed bead.
  *
- * `bd reopen <id> -r <reason>` exists and is NOT the same as `bd update -s
- * open`: it clears `closed_at` and emits a Reopened event (measured 2026-09-12
- * from `bd reopen --help`). Checked rather than assumed — flag and subcommand
- * parity across bd subcommands is not guaranteed, which is how dispatch 2 found
- * that `bd create` has no `-s` at all.
+ * `bd reopen <id> -r <reason>` reopens AS `open` and emits a Reopened event.
+ *
+ * IT IS NOT NEEDED TO CLEAR `closed_at`, and the earlier claim here that it was
+ * has been retired (F8). MEASURED 2026-09-12 against real bd 1.1.0 in an
+ * isolated `bd init` workspace under $TMPDIR, `bd show --json` after each step:
+ *
+ *   bd close p…-0x5 --reason "probe close"
+ *     → status "closed",  closed_at "2026-09-12T14:26:48Z", close_reason set
+ *   bd update p…-0x5 -s in_progress
+ *     → status "in_progress", closed_at ABSENT, close_reason ABSENT,
+ *       started_at "2026-09-12T14:26:53Z"
+ *   bd reopen p…-a7l -r "probe reopen"   (a second, separately closed bead)
+ *     → status "open", closed_at ABSENT
+ *
+ * So `bd update -s in_progress` already clears `closed_at`, and it lands on the
+ * status D10 wants; `reopen` would need a second write to get there. That is
+ * why `updateThread` reuses a closed thread with a plain status update rather
+ * than reopening it first.
  */
 export async function reopenIssue(
   ctx: BdContext,

@@ -35,6 +35,8 @@
 
 import {z} from 'zod';
 
+import type {ThreadFacts} from './facts';
+
 /** Bumped when a field's MEANING changes, not when one is added. */
 export const THREAD_SCHEMA_VERSION = 1;
 
@@ -235,6 +237,64 @@ export type PayloadValidation =
 function formatIssuePath(path: readonly PropertyKey[]): string {
   if (path.length === 0) return '(root)';
   return path.map((segment) => String(segment)).join('.');
+}
+
+/**
+ * The AUTOFILLED half of an archived report (D7), as a schema (F11).
+ *
+ * The payload was always validated; `facts` was cast. That cast is what let a
+ * spooled file with no `reportedAt` reach the drain's supersede guard, where
+ * `"2026-…" > undefined` is false — so the guard concluded "not superseded" and
+ * APPLIED the payload, the one direction that overwrites newer state with
+ * older, and then rendered `undefined` into the bead.
+ *
+ * LOOSE, NOT STRICT, and the asymmetry with the payload is deliberate: a
+ * payload is written by Claude against a published contract, while these facts
+ * are written by an OLDER BUILD of this same tool and replayed by a newer one.
+ * An added key must not make yesterday's spooled report unreplayable. Every
+ * declared field keeps its `null`-means-unmeasured shape from `ThreadFacts` —
+ * only `reportedAt` and `cwd` are required, because those two are the ones the
+ * replay path reads before anything else can check them.
+ */
+export const threadFactsSchema = z.looseObject({
+  aheadBehind: z
+    .looseObject({ahead: z.number(), behind: z.number()})
+    .nullable(),
+  autofillFailures: z.array(z.string()),
+  branch: z.string().nullable(),
+  cwd: z.string(),
+  dirty: z.boolean().nullable(),
+  entrypoint: z.string().nullable(),
+  headSha: z.string().nullable(),
+  isWorktree: z.boolean().nullable(),
+  lastUserMessage: z.string().nullable(),
+  model: z.string().nullable(),
+  reportedAt: nonEmpty('facts.reportedAt').describe(
+    'The stamp the supersede guard compares. NEVER absent.',
+  ),
+  repo: z.string().nullable(),
+  repoPath: z.string().nullable(),
+  sessionId: z.string().nullable(),
+  startedAt: z.string().nullable(),
+  tokensAtStop: z.number().nullable(),
+  transcriptPath: z.string().nullable(),
+  worktreePath: z.string().nullable(),
+});
+
+export type FactsValidation =
+  | {status: 'ok'; facts: ThreadFacts}
+  | {status: 'invalid'; issues: string[]};
+
+/** Validate an archived facts document. Never throws. */
+export function validateThreadFacts(parsed: unknown): FactsValidation {
+  const result = threadFactsSchema.safeParse(parsed);
+  if (result.success) return {facts: result.data as ThreadFacts, status: 'ok'};
+  return {
+    issues: result.error.issues.map(
+      (issue) => `${formatIssuePath(issue.path)}: ${issue.message}`,
+    ),
+    status: 'invalid',
+  };
 }
 
 /** Validate a parsed payload. Never throws. */

@@ -206,6 +206,7 @@ describe('askKindTag', () => {
 describe('carried asks (F4)', () => {
   const carried = [
     {
+      askIndex: 0,
       blocking: true,
       fromReport: 1,
       id: 'jl-x7q.1',
@@ -263,7 +264,7 @@ IF UNANSWERED: I keep by-repo as the default.`,
   test('a bead with no recorded report number says so rather than inventing one', () => {
     const text = renderReport({
       askIds: [],
-      carried: [{...carried[0]!, fromReport: null}],
+      carried: [{...carried[0]!, askIndex: null, fromReport: null}],
       facts: facts(),
       payload: (() => {
         const p = payload();

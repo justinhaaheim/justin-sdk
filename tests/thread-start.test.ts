@@ -42,7 +42,9 @@ import {join} from 'path';
 
 import {createFakeBd} from './fake-bd';
 import {
+  describeStartOutcome,
   runThreadStartHook,
+  startExitCode,
   startThread,
   type ThreadStartOutcome,
 } from '../src/thread/start';
@@ -87,7 +89,6 @@ function harness(knobs: {
     cwd,
     env: {
       ...fake.env,
-      CLAUDE_CODE_SESSION_ATTENDED: '1',
       JUSTIN_THREADS_LIFE_DIR: fake.dir,
       JUSTIN_THREADS_STATE_DIR: stateDir,
       // A transcript that does not exist: the facts collector records the miss
@@ -281,7 +282,10 @@ describe('when it cannot do its job', () => {
     const h = harness({enabled: true, startOnSessionStart: true});
     // A directory that is not a beads workspace: `bun run bd` there fails with
     // `Script not found "bd"`, which the adapter classifies as `unreachable`.
+    // It gets a `.beads` directory because since F9 the probe REFUSES to create
+    // one — without it this exercises the missing-workspace path below instead.
     const empty = mkdtempSync(join(tmpdir(), 'not-life-'));
+    mkdirSync(join(empty, '.beads'), {recursive: true});
     const env = {...h.env, JUSTIN_THREADS_LIFE_DIR: empty};
 
     const outcome = await startThread({cwd: h.cwd, env, sessionId: SESSION});
@@ -296,6 +300,42 @@ describe('when it cannot do its job', () => {
       true,
     );
     expect(existsSync(join(h.stateDir, 'spool'))).toBe(false);
+  });
+
+  test('no life .beads directory: says so, and does NOT create one (F9)', async () => {
+    const h = harness({enabled: true, startOnSessionStart: true});
+    const nowhere = join(mkdtempSync(join(tmpdir(), 'no-life-')), 'life');
+    const env = {...h.env, JUSTIN_THREADS_LIFE_DIR: nowhere};
+
+    const outcome = await startThread({cwd: h.cwd, env, sessionId: SESSION});
+    expect(outcome.kind).toBe('lifeBeadsMissing');
+    expect(describeStartOutcome(outcome)).toContain('life beads dir missing');
+    // The probe used to mkdir this into existence and then report it writable.
+    expect(existsSync(nowhere)).toBe(false);
+    expect(existsSync(join(nowhere, '.beads'))).toBe(false);
+    expect(startExitCode(outcome)).toBe(0);
+  });
+
+  /**
+   * Item B (p1uj.7): the headless/unattended guard is GONE.
+   *
+   * It skipped any session whose CLAUDE_CODE_SESSION_ATTENDED was set to
+   * something other than "1" — a guard its own comment labelled conjecture,
+   * against D30, which wants a row for EVERY session. An unattended run is if
+   * anything the one most likely to stop where nobody notices.
+   */
+  test('an UNATTENDED session still gets a thread bead (D30, item B)', async () => {
+    const h = harness({enabled: true, startOnSessionStart: true});
+    for (const attended of ['0', 'false', '']) {
+      const env = {...h.env, CLAUDE_CODE_SESSION_ATTENDED: attended};
+      const outcome = await startThread({
+        cwd: h.cwd,
+        env,
+        sessionId: `${SESSION}-${attended}`,
+      });
+      expect(outcome.kind).toBe('created');
+    }
+    expect(threads(h)).toHaveLength(3);
   });
 });
 

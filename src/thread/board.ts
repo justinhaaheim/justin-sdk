@@ -37,6 +37,7 @@ import {
 import {bdContext} from './bd';
 import {drainSpool, renderDrain, type SpoolApplier} from './drain';
 import {lifeRepoDir} from './paths';
+import {readReportCount} from './metadata';
 
 import type {EnvLike} from './paths';
 
@@ -68,6 +69,8 @@ export interface BoardRow {
   openAsks: number;
   progress: number | null;
   repo: string | null;
+  /** True when this thread has never reported: `thread start` made it and stopped. */
+  reported: boolean;
   reportedAt: string | null;
   stopDetail: string | null;
   stopKind: string | null;
@@ -83,7 +86,7 @@ export interface BoardRow {
  * rewritten to assert nothing, which is how age formatting stops being tested.
  */
 export function formatAge(reportedAt: string | null, now: Date): string {
-  if (reportedAt == null) return 'age UNKNOWN';
+  if (reportedAt == null || reportedAt === '') return 'age UNKNOWN';
   const then = Date.parse(reportedAt);
   if (Number.isNaN(then)) return 'age UNKNOWN';
   const seconds = Math.round((now.getTime() - then) / 1000);
@@ -158,8 +161,26 @@ export function buildBoard(
     const meta = (thread.metadata ?? {}) as Record<string, unknown>;
     const mine = byThread.get(thread.id) ?? [];
     const progress = meta.progressPercent;
+    // A START-ONLY THREAD HAS AN AGE (p1uj.8, folded into p1uj.7 item A).
+    // `thread start` writes `reportedAt: null` on purpose — nothing has been
+    // reported — and the row read "age UNKNOWN ? --%", which says "I know
+    // nothing about this" about a session whose start time is right there in
+    // `threadStartedAt`. The stamp is chosen, never merged: `reportedAt` when
+    // this thread HAS reported, the start stamp when it has not, and the row
+    // says which it is showing rather than passing one off as the other.
+    const reportedAt = metaString(meta, 'reportedAt');
+    const startedAt =
+      metaString(meta, 'threadStartedAt') ?? metaString(meta, 'startedAt');
+    // `reportCount` is consulted as well as `reportedAt`, so a report whose
+    // stamp is missing is still a REPORT with an unknown age — never demoted to
+    // "no report yet", which would hide a real session's stop reason.
+    const reported = reportedAt != null || readReportCount(meta) > 0;
     return {
-      age: formatAge(metaString(meta, 'reportedAt'), now),
+      age: reported
+        ? formatAge(reportedAt, now)
+        : startedAt == null
+          ? 'age UNKNOWN'
+          : `started ${formatAge(startedAt, now)}`,
       blockingAsks: mine.filter(
         (ask) =>
           ((ask.metadata ?? {}) as Record<string, unknown>).blocking === true,
@@ -173,7 +194,8 @@ export function buildBoard(
           ? progress
           : null,
       repo: metaString(meta, 'repo'),
-      reportedAt: metaString(meta, 'reportedAt'),
+      reported,
+      reportedAt,
       stopDetail: metaString(meta, 'stopReasonDetail'),
       stopKind: metaString(meta, 'stopReasonKind'),
       title: thread.title ?? '(no title)',
@@ -189,6 +211,11 @@ function byReportedAtDesc(a: BoardRow, b: BoardRow): number {
 }
 
 function renderRow(row: BoardRow): string {
+  // A thread that has not reported says so, instead of rendering three columns
+  // of "I don't know" (`? --%`) for facts that do not exist yet.
+  if (!row.reported) {
+    return `  ${row.age.padStart(9)} ⏳ no report yet   ${row.title}\n             ${row.id}${row.branch == null ? '' : ` · ${row.branch}`}`;
+  }
   const glyph = row.stopKind == null ? '?' : (STOP_GLYPH[row.stopKind] ?? '•');
   const progress =
     row.progress == null ? ' --%' : `${String(row.progress).padStart(3)}%`;

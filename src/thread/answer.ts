@@ -45,10 +45,16 @@ import {
   type BdIssue,
 } from './bd';
 import {contextFor, resolveThread, type ThreadRef} from './resolve';
-import {optionLetter} from './render';
+import {
+  compareAsksForNumbering,
+  numberingFieldsOf,
+  optionLetter,
+} from './render';
 
 /** What one ask needs in order to be asked. Everything comes from the bead. */
 export interface AskView {
+  /** `metadata.askIndex`: its place in the report that created it (F12). */
+  askIndex: number | null;
   blocking: boolean;
   /** The ask bead's rendered description: kind tag, context, options, default. */
   description: string;
@@ -56,6 +62,8 @@ export interface AskView {
   id: string;
   kind: string;
   optionCount: number;
+  /** `metadata.reportCount`: which report created it. Null when unrecorded. */
+  reportCount: number | null;
   title: string;
 }
 
@@ -85,7 +93,9 @@ export interface WalkResult {
 /** Read an ask bead into the shape the walk needs. Unreadable metadata degrades loudly. */
 export function askViewOf(issue: BdIssue): AskView {
   const meta = (issue.metadata ?? {}) as Record<string, unknown>;
+  const numbering = numberingFieldsOf(meta);
   return {
+    askIndex: numbering.askIndex,
     blocking: meta.blocking === true,
     defaultAction:
       typeof meta.defaultAction === 'string' && meta.defaultAction !== ''
@@ -98,16 +108,21 @@ export function askViewOf(issue: BdIssue): AskView {
       typeof meta.optionCount === 'number' && Number.isFinite(meta.optionCount)
         ? Math.max(0, Math.floor(meta.optionCount))
         : 0,
+    reportCount: numbering.reportCount,
     title: issue.title ?? '',
   };
 }
 
-/** Blocking first, then by id, so the order matches the report's numbering. */
+/**
+ * The report's own order (F12), via the shared comparator.
+ *
+ * This used to be "blocking first, then `id.localeCompare`", which disagreed
+ * with the report in two ways at once: `.10` sorted before `.2`, and a carried
+ * ask landed wherever its id happened to fall instead of ahead of the new ones.
+ * "1 yes, 2 b" typed against the pasted report then walked onto different asks.
+ */
 export function orderAsks(asks: readonly AskView[]): AskView[] {
-  return [...asks].sort((a, b) => {
-    if (a.blocking !== b.blocking) return a.blocking ? -1 : 1;
-    return a.id.localeCompare(b.id);
-  });
+  return [...asks].sort(compareAsksForNumbering);
 }
 
 /** The prompt suffix for one ask — what SHAPE of reply this wants. */
@@ -169,8 +184,15 @@ export async function walkAsks(
 
   for (const [index, ask] of ordered.entries()) {
     io.print('');
+    // `index + 1` IS the number this ask carried in the report, because both
+    // sides sort with `compareAsksForNumbering` over the same set (F12). The
+    // origin report is named too: it is the only thing that still identifies an
+    // ask when the set HAS changed — Justin answered one yesterday, so today's
+    // walk is shorter than the report he is reading from.
+    const from =
+      ask.reportCount == null ? '' : ` · from report #${ask.reportCount}`;
     io.print(
-      `── ${index + 1}/${ordered.length} · ${ask.id} · ${ask.blocking ? 'BLOCKING' : 'non-blocking'} ──`,
+      `── ${index + 1}/${ordered.length} · ${ask.id} · ${ask.blocking ? 'BLOCKING' : 'non-blocking'}${from} ──`,
     );
     io.print(ask.description === '' ? ask.title : ask.description);
     io.print('');

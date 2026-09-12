@@ -14,7 +14,7 @@
  * something plausible.
  */
 
-import {mkdtempSync, readFileSync, writeFileSync} from 'fs';
+import {mkdirSync, mkdtempSync, readFileSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
@@ -168,6 +168,10 @@ export function createFakeBd(failAskCreateAt = 0): FakeBd {
   const dir = mkdtempSync(join(tmpdir(), 'fake-bd-'));
   const script = join(dir, 'bd.ts');
   const statePath = join(dir, 'state.json');
+  // A REAL beads workspace has a `.beads` directory, and since F9 the commands
+  // probe for it instead of creating it — a fake workspace without one now
+  // (correctly) reports "life beads dir missing" and never reaches bd at all.
+  mkdirSync(join(dir, '.beads'), {recursive: true});
   writeFileSync(script, SCRIPT);
   writeFileSync(
     join(dir, 'package.json'),

@@ -8,7 +8,7 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {chmodSync, mkdirSync} from 'fs';
+import {chmodSync, existsSync, mkdirSync, readdirSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {resolveThreadConfig} from '../src/thread/config';
@@ -140,8 +140,9 @@ describe('probeWritable', () => {
   test('a writable directory probes writable and leaves nothing behind', () => {
     const sb = track(createSandbox());
     const dir = join(sb.path, 'state');
-    expect(probeWritable(dir).kind).toBe('writable');
-    expect(probeWritable(dir).kind).toBe('writable');
+    expect(probeWritable(dir, {create: true}).kind).toBe('writable');
+    expect(probeWritable(dir, {create: true}).kind).toBe('writable');
+    expect(readdirSync(dir)).toEqual([]);
   });
 
   test('a read-only parent is DENIED, not merely failed', () => {
@@ -150,10 +151,51 @@ describe('probeWritable', () => {
     mkdirSync(locked, {recursive: true});
     chmodSync(locked, 0o500);
     try {
-      const probe = probeWritable(join(locked, 'state'));
+      const probe = probeWritable(join(locked, 'state'), {create: true});
       expect(probe.kind).toBe('denied');
     } finally {
       chmodSync(locked, 0o700);
     }
+  });
+
+  /**
+   * F9 — the probe used to `mkdirSync` whatever it was handed, so on a machine
+   * with no ~/Dev/life it CREATED ~/Dev/life/.beads and called it writable;
+   * every bd call then failed with `Script not found "bd"` against a workspace
+   * this tool had fabricated.
+   */
+  test('create:false does NOT create the directory — it reports it missing', () => {
+    const sb = track(createSandbox());
+    const beads = join(sb.path, 'life', '.beads');
+    const probe = probeWritable(beads, {create: false});
+    expect(probe.kind).toBe('missing');
+    expect(existsSync(beads)).toBe(false);
+    expect(existsSync(join(sb.path, 'life'))).toBe(false);
+  });
+
+  test('create:false probes an EXISTING directory for real', () => {
+    const sb = track(createSandbox());
+    const beads = join(sb.path, 'life', '.beads');
+    mkdirSync(beads, {recursive: true});
+    expect(probeWritable(beads, {create: false}).kind).toBe('writable');
+    expect(readdirSync(beads)).toEqual([]);
+  });
+
+  /**
+   * F9's other half: each run only ever removed its OWN pid-named file, so a
+   * probe killed between the write and the unlink left
+   * `.justin-threads-probe-<pid>` inside ~/Dev/life/.beads — untracked in the
+   * life repo forever, because that directory's .gitignore does not cover it.
+   */
+  test('a probe file left by a dead run is swept, not left to accumulate', () => {
+    const sb = track(createSandbox());
+    const dir = join(sb.path, 'state');
+    mkdirSync(dir, {recursive: true});
+    writeFileSync(join(dir, '.justin-threads-probe-999999'), 'probe\n');
+    writeFileSync(join(dir, '.justin-threads-probe-4242'), 'probe\n');
+    writeFileSync(join(dir, 'keep-me.json'), '{}');
+
+    expect(probeWritable(dir, {create: true}).kind).toBe('writable');
+    expect(readdirSync(dir)).toEqual(['keep-me.json']);
   });
 });
