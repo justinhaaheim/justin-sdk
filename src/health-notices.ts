@@ -176,6 +176,12 @@ export const SELECT_COMMANDS = [
  *    upgrade is available is noise at best and confusing at worst.
  *  - `skill` prints a document meant to be read whole, and `justin-loop
  *    handoff` prints a bead id on stdout that the runner parses.
+ *  - `thread` and `usage-now` are read by a RULE, not by a person
+ *    (home-base-p1uj D6): `thread prepare`'s first line is a branch point
+ *    (`THREADS: ENABLED|DISABLED|SANDBOX DENIED`), `thread report` prints a
+ *    document Claude pastes verbatim into its final message, and `usage-now`
+ *    prints one number. All three run at a session's wrap-up, which is the
+ *    worst possible moment to spend attention on an upgrade notice.
  *
  * `--help` needs no entry: yargs resolves help BEFORE middleware runs
  * (measured 2026-09-10), so a notice can never reach it.
@@ -185,9 +191,11 @@ export const NEVER_COMMANDS = [
   'prime',
   'skill',
   'sweep',
+  'thread',
   'time-check',
   'update',
   'usage-check',
+  'usage-now',
 ] as const;
 
 /**
@@ -216,9 +224,11 @@ export const ALL_COMMANDS = [
   'skill',
   'sweep',
   'sync-rules',
+  'thread',
   'time-check',
   'update',
   'usage-check',
+  'usage-now',
   'worktree-new',
 ] as const;
 

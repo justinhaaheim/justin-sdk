@@ -58,8 +58,25 @@ export type BdFailure =
 export type BdResult<T> =
   {ok: true; value: T} | {ok: false; failure: BdFailure};
 
+/**
+ * How much of a failing command line the banner shows.
+ *
+ * A bd write carries the whole rendered report in `--notes`, so the untruncated
+ * command is thousands of characters and buries the actual error under the very
+ * report the reader just looked at.
+ */
+const COMMAND_DISPLAY_CAP = 160;
+
+function shortCommand(command: string): string {
+  const oneLine = command.replace(/\s+/g, ' ');
+  return oneLine.length > COMMAND_DISPLAY_CAP
+    ? `${oneLine.slice(0, COMMAND_DISPLAY_CAP)}…`
+    : oneLine;
+}
+
 /** One line naming the failing command and why, for the NOT RECORDED banner. */
-export function describeBdFailure(failure: BdFailure): string {
+export function describeBdFailure(rawFailure: BdFailure): string {
+  const failure = {...rawFailure, command: shortCommand(rawFailure.command)};
   switch (failure.kind) {
     case 'sandbox-denied':
       return `${failure.command} — the sandbox refused it (${failure.detail})`;
@@ -117,9 +134,12 @@ function classify(
   if (/operation not permitted|EPERM|permission denied/i.test(text)) {
     return {command, detail: text.trim().slice(0, 400), kind: 'sandbox-denied'};
   }
+  // `Script not found "bd"` is what bun says when the workspace has no `bd`
+  // script — i.e. when JUSTIN_THREADS_LIFE_DIR points somewhere that is not the
+  // beads workspace. Measured 2026-09-12 while exercising the unreachable path.
   if (
     spawnError != null ||
-    /ENOENT|command not found|no such file/i.test(text)
+    /ENOENT|command not found|no such file|script not found/i.test(text)
   ) {
     return {
       command,
@@ -383,7 +403,16 @@ export interface ThreadBeadFields {
   title: string;
 }
 
-/** Create the session's thread bead. Returns its id. */
+/**
+ * Create the session's thread bead. Returns its id.
+ *
+ * NO STATUS FLAG HERE, deliberately: `bd create` has no `-s`/`--status` at all
+ * (measured 2026-09-12 — it fails with "unknown shorthand flag: 's'", which is
+ * precisely how this was found). `in_progress` is set by the finalising write
+ * that follows, which has to happen anyway to fold the ask ids into the notes.
+ * Another instance of the standing bd warning: do not assume flag parity across
+ * subcommands.
+ */
 export async function createThread(
   ctx: BdContext,
   fields: ThreadBeadFields,
@@ -402,8 +431,6 @@ export async function createThread(
       fields.notes,
       '--metadata',
       `@${metaPath}`,
-      '-s',
-      'in_progress',
       '--silent',
     ]),
   );
@@ -454,13 +481,35 @@ export async function updateThread(
   return {ok: true, value: true};
 }
 
-/** Update ONLY the notes field — used to fold ask ids into the report (D10). */
-export async function updateThreadNotes(
+/**
+ * The finalising write: the rendered report into `notes` (D10), the status into
+ * `in_progress` (D1), and the metadata AGAIN — now carrying the ask bead ids,
+ * which did not exist when the bead was first written.
+ *
+ * The metadata is rewritten rather than left alone because the first write
+ * necessarily recorded `askIds: []`, and an empty list there would read as
+ * "checked, and this report asked for nothing" — a measured zero standing in
+ * for a value that simply was not known yet. Exactly the substitution rule 6
+ * forbids, and it would be invisible: the report in `notes` shows the asks.
+ */
+export async function finalizeThread(
   ctx: BdContext,
   id: string,
   notes: string,
+  metadata: Record<string, unknown>,
 ): Promise<BdResult<true>> {
-  const result = await runBd(ctx, ['update', id, '--notes', notes]);
+  const result = await withMetadataFile(metadata, (metaPath) =>
+    runBd(ctx, [
+      'update',
+      id,
+      '--notes',
+      notes,
+      '--metadata',
+      `@${metaPath}`,
+      '-s',
+      'in_progress',
+    ]),
+  );
   if (!result.ok) return result;
   return {ok: true, value: true};
 }

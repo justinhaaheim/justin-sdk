@@ -37,7 +37,7 @@ import {
   findThreadBySession,
   listOpenAsks,
   updateThread,
-  updateThreadNotes,
+  finalizeThread,
   type BdContext,
   type BdFailure,
 } from './bd';
@@ -379,7 +379,14 @@ export async function runThreadReport(
   }
 
   const rendered = renderReport({askIds, facts, payload, threadId});
-  const notesWritten = await updateThreadNotes(ctx, threadId, rendered);
+  const notesWritten = await finalizeThread(
+    ctx,
+    threadId,
+    rendered,
+    // The metadata is rebuilt, not reused: the first write could only record
+    // `askIds: []`, because the asks did not exist yet.
+    buildThreadMetadata({askIds, facts, payload, reportCount}),
+  );
   if (!notesWritten.ok) {
     return notRecorded({
       archivePath,
