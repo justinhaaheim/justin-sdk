@@ -244,6 +244,149 @@ describe('drainSpool', () => {
   });
 });
 
+/**
+ * F11 — `document.facts` used to be CAST, never validated.
+ *
+ * A facts object with no `reportedAt` reached the supersede guard, where
+ * `"2026-…" > undefined` is false, so the guard concluded "not superseded" and
+ * the payload was APPLIED: the one direction that overwrites newer state with
+ * older, rendering `undefined` fields into the bead as it went.
+ */
+describe('the archived facts are validated, not cast (F11)', () => {
+  test('facts with no reportedAt are KEPT, and never reach the applier', async () => {
+    const bad = spooled('2026-09-12T10:00:00.000Z') as unknown as Record<
+      string,
+      unknown
+    >;
+    delete (bad.facts as Record<string, unknown>).reportedAt;
+    delete bad.reportedAt;
+    const file = writeSpool('sess-1-nofacts.json', bad);
+
+    let reached = 0;
+    const counting: SpoolApplier = async (report) => {
+      reached += 1;
+      return applied(report, CTX);
+    };
+    const summary = await drainSpool({apply: counting, ctx: CTX, env});
+
+    expect(reached).toBe(0);
+    expect(summary?.kept).toBe(1);
+    expect(existsSync(file)).toBe(true);
+    expect(summary?.outcomes[0]?.detail).toContain('facts no longer validate');
+    expect(summary?.outcomes[0]?.detail).toContain('reportedAt');
+  });
+
+  test('a wrong-typed fact is kept too — unparseable is its own outcome', async () => {
+    const bad = spooled('2026-09-12T10:00:00.000Z') as unknown as Record<
+      string,
+      unknown
+    >;
+    (bad.facts as Record<string, unknown>).tokensAtStop = 'lots';
+    const file = writeSpool('sess-1-badfact.json', bad);
+    const summary = await drainSpool({apply: applied, ctx: CTX, env});
+    expect(summary?.kept).toBe(1);
+    expect(existsSync(file)).toBe(true);
+  });
+
+  test('an UNKNOWN extra fact still replays — a newer build may have added it', async () => {
+    const forward = spooled('2026-09-12T10:00:00.000Z') as unknown as Record<
+      string,
+      unknown
+    >;
+    (forward.facts as Record<string, unknown>).somethingNew = 'from v2';
+    const file = writeSpool('sess-1-forward.json', forward);
+    const summary = await drainSpool({apply: applied, ctx: CTX, env});
+    expect(summary?.applied).toBe(1);
+    expect(existsSync(file)).toBe(false);
+  });
+});
+
+/**
+ * F10 — two `thread board` runs used to read the same listing and both apply
+ * every file in it. The loser wrote a duplicate report or got a refusal for
+ * asks the winner had already closed, then printed a 🚨 STILL SPOOLED line for a
+ * file that no longer existed. The lock is one atomic rename.
+ */
+describe('the drain lock (F10)', () => {
+  test('two concurrent drains apply each file EXACTLY once', async () => {
+    for (const name of ['sess-1-x.json', 'sess-1-y.json', 'sess-1-z.json']) {
+      writeSpool(name, spooled('2026-09-12T10:00:00.000Z'));
+    }
+    const seen: string[] = [];
+    // Yields between the claim and the apply, which is precisely the window the
+    // old code left open — both drains had listed all three files by then.
+    const slow: SpoolApplier = async (report) => {
+      await new Promise((done) => setTimeout(done, 5));
+      seen.push(report.reportedAt);
+      return applied(report, CTX);
+    };
+    const [a, b] = await Promise.all([
+      drainSpool({apply: slow, ctx: CTX, env}),
+      drainSpool({apply: slow, ctx: CTX, env}),
+    ]);
+
+    expect(seen).toHaveLength(3); // not 6
+    expect((a?.applied ?? 0) + (b?.applied ?? 0)).toBe(3);
+    expect((a?.kept ?? 0) + (b?.kept ?? 0)).toBe(0);
+    expect(
+      (a?.skippedConcurrent ?? 0) + (b?.skippedConcurrent ?? 0),
+    ).toBeGreaterThan(0);
+    expect(readdirSync(spoolDir(env))).toEqual([]);
+  });
+
+  test('a kept file goes back under its ORIGINAL name, ready for the next drain', async () => {
+    writeSpool('sess-1-keep.json', spooled('2026-09-12T10:00:00.000Z'));
+    const first = await drainSpool({apply: bdFailed, ctx: CTX, env});
+    expect(first?.kept).toBe(1);
+    expect(readdirSync(spoolDir(env))).toEqual(['sess-1-keep.json']);
+
+    // And the next drain, with bd back, applies it.
+    const second = await drainSpool({apply: applied, ctx: CTX, env});
+    expect(second?.applied).toBe(1);
+    expect(readdirSync(spoolDir(env))).toEqual([]);
+  });
+
+  test('a file stranded by a DEAD drain is reclaimed and replayed', async () => {
+    // 999999 is above macOS's pid ceiling, so `process.kill(pid, 0)` reports
+    // ESRCH — a MEASURED "that process is gone", not a guess.
+    writeSpool(
+      'sess-1-dead.json.inflight-999999',
+      spooled('2026-09-12T10:00:00.000Z'),
+    );
+    const summary = await drainSpool({apply: applied, ctx: CTX, env});
+    expect(summary?.reclaimed).toBe(1);
+    expect(summary?.applied).toBe(1);
+    expect(readdirSync(spoolDir(env))).toEqual([]);
+    expect(renderDrain(summary).join('\n')).toContain('reclaimed');
+  });
+
+  test('a file held by a LIVE drain is left alone', async () => {
+    const held = writeSpool(
+      `sess-1-live.json.inflight-${process.pid}`,
+      spooled('2026-09-12T10:00:00.000Z'),
+    );
+    const summary = await drainSpool({apply: applied, ctx: CTX, env});
+    expect(summary?.reclaimed).toBe(0);
+    expect(summary?.applied).toBe(0);
+    expect(existsSync(held)).toBe(true);
+  });
+
+  test('an inflight file is invisible to the listing — it cannot be applied twice', async () => {
+    writeSpool(
+      'sess-1-busy.json.inflight-1',
+      spooled('2026-09-12T10:00:00.000Z'),
+    );
+    let reached = 0;
+    const counting: SpoolApplier = async (report) => {
+      reached += 1;
+      return applied(report, CTX);
+    };
+    await drainSpool({apply: counting, ctx: CTX, env});
+    // pid 1 (launchd) is alive, so it is neither reclaimed nor drained.
+    expect(reached).toBe(0);
+  });
+});
+
 describe('renderDrain', () => {
   test('a kept file is loud; an applied one is a count', async () => {
     writeSpool('sess-1-e.json', spooled('2026-09-12T10:00:00.000Z'));

@@ -118,6 +118,74 @@ describe('formatAge', () => {
   });
 });
 
+/**
+ * A START-ONLY thread — `thread start` created the bead, the session has not
+ * reported (p1uj.8, folded into p1uj.7 item A).
+ *
+ * The row used to read "age UNKNOWN ? --%", which claims to know nothing about
+ * a session whose start time is sitting in `metadata.threadStartedAt`. Three of
+ * these on a morning board is three rows Justin cannot rank.
+ */
+describe('a thread that has not reported yet (item A)', () => {
+  const startOnly = thread('jl-s9', '(untitled) justin-sdk session 7f3c1e20', {
+    branch: 'thread-followups',
+    openAskCount: 0,
+    progressPercent: null,
+    reportCount: 0,
+    reportedAt: null,
+    repo: 'justin-sdk',
+    startedAt: '2026-09-12T09:00:00.000Z',
+    stopReasonKind: null,
+    threadStartedAt: '2026-09-12T10:00:00.000Z',
+  });
+
+  test('its age comes from threadStartedAt, and says that is what it is', () => {
+    const row = buildBoard([startOnly], [], NOW).rows[0]!;
+    expect(row.age).toBe('started 2h');
+    expect(row.reported).toBe(false);
+    expect(row.reportedAt).toBeNull();
+  });
+
+  test('the row says "no report yet" instead of rendering unknowns', () => {
+    const text = renderRecent(buildBoard([startOnly], [], NOW));
+    expect(text).toContain('started 2h');
+    expect(text).toContain('no report yet');
+    expect(text).not.toContain('age UNKNOWN');
+    expect(text).not.toContain('--%');
+  });
+
+  test('with NO start stamp either, it is honestly UNKNOWN', () => {
+    const bare = thread('jl-s8', 'no stamps at all', {reportCount: 0});
+    const row = buildBoard([bare], [], NOW).rows[0]!;
+    expect(row.age).toBe('age UNKNOWN');
+    expect(row.reported).toBe(false);
+  });
+
+  test('a REPORTED thread with a missing stamp stays a report, age unknown', () => {
+    // Demoting it to "no report yet" would hide a real session's stop reason
+    // behind a start-only row.
+    const odd = thread('jl-s7', 'reported, stamp lost', {
+      progressPercent: 40,
+      reportCount: 2,
+      reportedAt: null,
+      stopReasonKind: 'blocked',
+      threadStartedAt: '2026-09-12T10:00:00.000Z',
+    });
+    const row = buildBoard([odd], [], NOW).rows[0]!;
+    expect(row.reported).toBe(true);
+    expect(row.age).toBe('age UNKNOWN');
+    expect(renderRecent(buildBoard([odd], [], NOW))).toContain('40%');
+  });
+
+  test('a thread that HAS reported is untouched by any of this', () => {
+    const row = buildBoard(THREADS, ASKS, NOW).rows.find(
+      (entry) => entry.id === 'jl-a1',
+    );
+    expect(row?.age).toBe('2h');
+    expect(row?.reported).toBe(true);
+  });
+});
+
 describe('the ask → thread join', () => {
   test('prefers parent, falls back to metadata.threadId', () => {
     expect(threadIdOfAsk(ask('x.1', 'x', {threadId: 'other'}))).toBe('x');
