@@ -43,6 +43,21 @@ componentConfig.thread.startOnSessionStart — and both default false.
 
 Install the hook that runs this with:  justin-sdk add thread-hooks`;
 
+const ANSWER_NARRATIVE = `
+DEFAULT (--ui web): starts a server on 127.0.0.1, opens your browser, and shows
+one textarea per ask on one page.
+
+  every keystroke burst is saved to <state dir>/drafts/<threadId>/<askId>.txt
+  Enter inserts a newline · Tab moves focus · neither ever submits
+  Ctrl/Cmd-S opens a review panel; nothing reaches bd until you press Record
+  Ctrl/Cmd-K takes an ask's stated default · Esc opens a menu, never quits
+  Ctrl-C here, closing the tab, and quitting from the menu all KEEP the drafts
+
+--classic: the original readline walk in this terminal. Keep it for the iOS
+remote-control flow, which cannot reach a page on localhost.
+
+--ui ink: measured and rejected in the spike; the command says why and exits 2.`;
+
 export const threadCommand: CommandModule = {
   builder: (y: Argv) =>
     y
@@ -171,12 +186,19 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'answer [threadId]',
-        'Walk this thread’s open asks one at a time and record your answers as bd comments. Needs a terminal. Exit 0 walked · 1 a write failed · 2 could not start.',
+        'Answer this thread’s open asks. Opens a local page where drafts autosave to disk and no key discards text; --classic walks them in the terminal instead. Exit 0 recorded · 1 a write failed · 2 nothing recorded.',
         (yy) =>
           yy
+            .epilogue(ANSWER_NARRATIVE)
             .positional('threadId', {
               describe: 'Thread bead id. Omit for this session’s thread.',
               type: 'string' as const,
+            })
+            .option('classic', {
+              default: false,
+              describe:
+                'The original readline walk in this terminal — the iOS remote-control path',
+              type: 'boolean' as const,
             })
             .option('latest', {
               default: false,
@@ -186,14 +208,22 @@ export const threadCommand: CommandModule = {
             .option('session', {
               describe: 'Look up by this session id instead of the current one',
               type: 'string' as const,
+            })
+            .option('ui', {
+              choices: ['classic', 'ink', 'web'] as const,
+              describe:
+                'Override componentConfig.thread.answerUi for this run (default: web)',
+              type: 'string' as const,
             }),
         async (argv) => {
-          const {runThreadAnswer} = await import('./answer');
+          const {runThreadAnswerUi} = await import('./answer-ui');
           process.exit(
-            await runThreadAnswer({
+            await runThreadAnswerUi({
+              classic: argv.classic === true,
               latest: argv.latest === true,
               sessionId: argv.session ?? null,
               threadId: (argv.threadId as string | undefined) ?? null,
+              ui: (argv.ui as string | undefined) ?? null,
             }),
           );
         },
