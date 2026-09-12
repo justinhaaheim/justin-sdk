@@ -192,14 +192,56 @@ function classify(
   return {command, detail: text.trim().slice(0, 400), exitCode, kind: 'failed'};
 }
 
+/**
+ * Did this bd run WRITE, and then fail only while exporting? (home-base-p1uj.10)
+ *
+ * MEASURED 2026-09-12, in the Claude Code sandbox with ~/Dev/life/.beads
+ * allowlisted and ~/Dev/life/.git not. `bd create … --silent`:
+ *
+ *   exit 1
+ *   stdout: jl-rg5a.1
+ *   stderr: beads: auto-export warning: no Dolt remote configured.
+ *           …
+ *           Error: auto-export: git add failed: exit status 128: fatal: Unable
+ *           to create '/Users/jhaa/Dev/life/.git/index.lock': Operation not
+ *           permitted
+ *
+ * The bead EXISTS. Auto-export runs after the mutation has committed to Dolt,
+ * so an auto-export error is by construction a post-write failure — and calling
+ * it "the write failed" was manufacturing the opposite of the truth: `thread
+ * report` printed NOT RECORDED, spooled the payload, exited 1, and left a real
+ * thread bead behind, so the next `board` drain re-applied the report and
+ * doubled its asks.
+ *
+ * CONSERVATIVE ON PURPOSE. Both halves are required: an auto-export mention AND
+ * a git-staging failure. Anything else — including a bare EPERM, which is what
+ * a genuinely refused Dolt LOCK looks like — keeps the old loud path. Under-
+ * matching costs a spurious spool that drains cleanly; over-matching would
+ * report a write that never happened as recorded.
+ */
+export function isExportOnlyFailure(stderr: string): boolean {
+  if (!/auto-export/i.test(stderr)) return false;
+  return /git add failed|index\.lock|git-add failed/i.test(stderr);
+}
+
 export interface BdContext {
   env: EnvLike;
+  /**
+   * Set when a write landed in Dolt but its JSONL export was not git-staged.
+   * A WARNING for the command to print, never a failure — and never silence:
+   * the repo is left in a state someone has to notice (D13).
+   */
+  exportUnstaged: boolean;
   lifeDir: string;
 }
 
 export function bdContext(env: EnvLike = process.env): BdContext {
-  return {env, lifeDir: lifeRepoDir(env)};
+  return {env, exportUnstaged: false, lifeDir: lifeRepoDir(env)};
 }
+
+/** The one line every command prints when `ctx.exportUnstaged` is set. */
+export const EXPORT_UNSTAGED_WARNING =
+  '⚠️ WARNING: recorded in Dolt, but .beads/issues.jsonl could not be git-staged (the sandbox denies ~/Dev/life/.git). Nothing was lost; `justin-sdk thread board` reminds you what is uncommitted.';
 
 /**
  * Run one bd command, retrying only a `locked` failure.
@@ -223,6 +265,13 @@ async function runBd(
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     if (result.error == null && result.status === 0) {
+      return {ok: true, value: result.stdout ?? ''};
+    }
+    // The write LANDED and only its export failed (home-base-p1uj.10). Reported
+    // as success carrying a warning, because that is what happened — the
+    // alternative wrote a duplicate on the next drain.
+    if (result.error == null && isExportOnlyFailure(result.stderr ?? '')) {
+      ctx.exportUnstaged = true;
       return {ok: true, value: result.stdout ?? ''};
     }
     last = classify(

@@ -391,8 +391,11 @@ function captureConsole(): {errors: string[]; logs: string[]} {
 }
 
 /** A thread with two open asks, already in bd. */
-function seededFake(failCommentAddFor: string | null = null): FakeBd {
-  const fake = createFakeBd(0, failCommentAddFor);
+function seededFake(
+  failCommentAddFor: string | null = null,
+  exportFails = false,
+): FakeBd {
+  const fake = createFakeBd(0, failCommentAddFor, exportFails);
   const state: FakeState = fake.read();
   state.issues = [
     {
@@ -524,6 +527,31 @@ describe('runThreadAnswer against bd', () => {
     expect(errors.join('\n')).toContain(
       "cd ~/Dev/life && bun run bd comments add jl-t1.1 'ANSWER: b'",
     );
+  });
+});
+
+describe('a comment write that dies in auto-export (home-base-p1uj.10)', () => {
+  test('the answer counts as recorded, and the walk still ends clean', async () => {
+    const fake = seededFake(null, true);
+    const {errors, logs} = captureConsole();
+
+    const code = await runThreadAnswer({
+      env: envFor(fake),
+      io: scriptedIo(['b', 'y'], ''),
+      threadId: 'jl-t1',
+    });
+
+    // bd exited 1 on every comment add, AFTER writing it. Reporting that as a
+    // lost answer would send Justin to re-type answers bd already holds.
+    expect(code).toBe(0);
+    expect((fake.read().comments ?? []).map((comment) => comment.id)).toEqual([
+      'jl-t1.1',
+      'jl-t1.2',
+    ]);
+    expect(logs.join('\n')).toContain('2 answered · 0 skipped');
+    expect(logs.at(-1)).toBe('Tell Claude: answers in');
+    // Named, not silent: the JSONL is left unstaged and someone has to know.
+    expect(errors.join('\n')).toContain('could not be git-staged');
   });
 });
 

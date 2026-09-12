@@ -54,6 +54,7 @@ import {createInterface} from 'readline/promises';
 import {
   addComment,
   describeBdFailure,
+  EXPORT_UNSTAGED_WARNING,
   listOpenAsks,
   mergeMetadata,
   type BdContext,
@@ -422,6 +423,9 @@ export async function runThreadAnswer(
   } finally {
     if (closeIo != null) closeIo();
   }
+
+  // Before the summary, so the walk's last line stays the one Justin says.
+  if (ctx.exportUnstaged) console.error(EXPORT_UNSTAGED_WARNING);
 
   return summarizeWalk(result);
 }

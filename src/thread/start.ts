@@ -33,6 +33,7 @@ import {basename} from 'path';
 
 import {
   bdContext,
+  EXPORT_UNSTAGED_WARNING,
   createThread,
   describeBdFailure,
   findThreadBySession,
@@ -71,6 +72,8 @@ export type ThreadStartOutcome =
   | {kind: 'existing'; threadId: string; status: string | null; title: string}
   | {
       kind: 'created';
+      /** A write landed but its JSONL export was not git-staged (p1uj.10). */
+      exportUnstaged: boolean;
       threadId: string;
       title: string;
       /** null means the bead really is `in_progress`; a failure means it is still `open`. */
@@ -283,6 +286,7 @@ export async function startThread(
   // outcome carries both the id and the named failure.
   const status = await setThreadInProgress(ctx, created.value);
   return {
+    exportUnstaged: ctx.exportUnstaged,
     kind: 'created',
     statusFailure: status.ok ? null : status.failure,
     threadId: created.value,
@@ -403,6 +407,7 @@ export async function runThreadStartHook(args?: {
 
     if (outcome.kind === 'created') {
       console.log(describeStartOutcome(outcome));
+      if (outcome.exportUnstaged) console.error(EXPORT_UNSTAGED_WARNING);
       return 0;
     }
     // Everything below is stderr-only. `disabled` and `skippedSubagent` are the

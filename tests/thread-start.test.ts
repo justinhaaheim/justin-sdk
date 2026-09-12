@@ -70,11 +70,14 @@ interface Harness {
  * project root with no justin-sdk.config.json — so the USER file is the only
  * layer that speaks, which is how Justin actually operates the knob.
  */
-function harness(knobs: {
-  enabled?: boolean;
-  startOnSessionStart?: boolean;
-}): Harness {
-  const fake = createFakeBd(0);
+function harness(
+  knobs: {
+    enabled?: boolean;
+    startOnSessionStart?: boolean;
+  },
+  exportFails = false,
+): Harness {
+  const fake = createFakeBd(0, null, exportFails);
   const root = mkdtempSync(join(tmpdir(), 'thread-start-'));
   const xdg = join(root, 'xdg');
   const stateDir = join(root, 'state');
@@ -561,5 +564,22 @@ describe('a later `thread report` for the same session', () => {
     expect(all).toHaveLength(1);
     expect(all[0]!.title).toBe('Already reported');
     expect(all[0]!.metadata?.reportCount).toBe(1);
+  });
+});
+
+describe('a start whose write dies in auto-export (home-base-p1uj.10)', () => {
+  test('the bead is CREATED and the unstaged export is flagged, not reported as a failure', async () => {
+    const h = harness({enabled: true, startOnSessionStart: true}, true);
+    const outcome = await startThread({
+      cwd: h.cwd,
+      env: h.env,
+      sessionId: SESSION,
+    });
+    // bd exited 1, after creating the bead. Calling that "bdFailed" would put a
+    // session on nobody's board while its thread sat in Dolt.
+    expect(outcome.kind).toBe('created');
+    if (outcome.kind !== 'created') throw new Error('unreachable');
+    expect(outcome.exportUnstaged).toBe(true);
+    expect(threads(h)).toHaveLength(1);
   });
 });

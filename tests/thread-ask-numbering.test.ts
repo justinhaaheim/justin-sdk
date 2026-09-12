@@ -193,7 +193,7 @@ describe('the report and the walk number the same asks the same way', () => {
     // listing order, which is not an order at all. Its bd reads are stubbed
     // here — what is under test is the arrangement, not the comment fetch.
     const {collectInboxAsks} = await import('../src/thread/inbox');
-    const ctx = {env: {}, lifeDir: NO_BD_WORKSPACE};
+    const ctx = {env: {}, exportUnstaged: false, lifeDir: NO_BD_WORKSPACE};
     const collected = await collectInboxAsks(ctx, beads());
     // Every read failed (there is no bd there), which is itself the honest
     // path: the asks are still listed, each saying its answers are UNKNOWN.
