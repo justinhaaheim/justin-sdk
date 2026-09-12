@@ -1062,4 +1062,92 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
     expect(stderr).toContain('could not append');
     expect(stderr).toContain('EACCES');
   });
+
+  test('a HEAD read that FAILED is reported as unreadable, never as "no commit"', async () => {
+    // home-base-a1go. `gitHead` used to return null on failure, and the only
+    // caller compared two reads: two failures compare EQUAL, so an unreadable
+    // repo was reported as a session that committed nothing — a measurement
+    // nobody took, feeding both the dashboard and the no-progress circuit
+    // breaker (critical rule 6).
+    const rows = new Map<string, AgentRow>();
+    const ledger: LedgerRow[] = [];
+    let stdout = '';
+    let stderr = '';
+    let dispatched = 0;
+    const deps: RunnerDeps = {
+      appendLedgerRow: (_path, row) => {
+        ledger.push(row);
+        return {ok: true, reason: null};
+      },
+      br: (_cwd, args) =>
+        args[0] === 'list'
+          ? {
+              ok: true,
+              reason: null,
+              stdout:
+                dispatched === 0
+                  ? listJson([])
+                  : listJson([
+                      beadFrom('hoff-z', {
+                        disposition: 'done',
+                        from: 'the-arc-1',
+                      }),
+                    ]),
+            }
+          : {ok: true, reason: null, stdout: ''},
+      dispatch: async () => {
+        dispatched++;
+        rows.set('sess-1', {
+          id: 'sess-1',
+          name: 'n',
+          pid: 1,
+          sessionId: 'sess-1-full-uuid',
+          state: 'done',
+          status: 'idle',
+          waitingFor: null,
+        });
+        return 'backgrounded · sess-1 · n\n';
+      },
+      findAgent: async (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
+      gitHead: async () => ({
+        ok: false,
+        reason:
+          'git rev-parse HEAD did not finish within 10000ms and was SIGKILLed',
+      }),
+      notifyBlocked: () => {},
+      now: () => Date.UTC(2026, 8, 8, 11, 30),
+      preflight: async () => [],
+      readUsage: async () => null,
+      signalPid: () => true,
+      sleep: async () => {},
+      stopSession: async (_cwd, id) => {
+        rows.delete(id);
+        return {detail: 'stopped', ok: true};
+      },
+      write: (t) => {
+        stdout += t;
+      },
+      writeErr: (t) => {
+        stderr += t;
+      },
+    };
+    const exitCode = await runJustinLoop(
+      '/repo',
+      {label: 'the-arc', maxSessions: 1, usageGate: false},
+      deps,
+    );
+    expect(exitCode).toBe(0);
+    // The session line says UNKNOWN, and specifically claims neither verdict.
+    // (Matched with the surrounding separators, since the handoff bead's own
+    // text contains the word "committed".)
+    expect(stdout).toContain('· HEAD unreadable ·');
+    expect(stdout).not.toContain('· no commit');
+    expect(stdout).not.toContain('· committed');
+    // The reason reaches stderr rather than being swallowed…
+    expect(stderr).toContain('could not read HEAD');
+    expect(stderr).toContain('SIGKILLed');
+    // …and the ledger records "not measured", not `false`.
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]?.progressed).toBeNull();
+  });
 });
