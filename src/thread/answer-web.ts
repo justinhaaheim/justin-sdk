@@ -393,6 +393,16 @@ export function openInBrowser(url: string): {opened: boolean; reason: string} {
 
 export interface WebAnswerOptions extends ThreadRef {
   autoCommit?: boolean;
+  /**
+   * Called once the server is listening, with the live handle.
+   *
+   * This is the browser's seam. The whole command — thread resolution, the real
+   * bd writer, the commit, the exit code — runs unmodified, and the test plays
+   * the part of the human by fetching the same URLs the page fetches. Without it
+   * a test could only reach `createAnswerServer`, and the half that actually
+   * ships (`runThreadAnswerWeb`) would go unexercised.
+   */
+  onReady?: (server: AnswerServer) => void;
   /** Tests pin this false; the real command opens the browser. */
   openBrowser?: boolean;
   port?: number;
@@ -440,6 +450,7 @@ export async function runThreadAnswerWeb(
 
   console.log(`thread answer · ${thread.id} · ${asks.value.length} open asks`);
   console.log(server.url);
+  options.onReady?.(server);
   if (options.openBrowser !== false) {
     const opened = openInBrowser(server.url);
     if (!opened.opened) {
