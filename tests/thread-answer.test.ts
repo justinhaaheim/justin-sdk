@@ -257,6 +257,9 @@ describe('walkAsks', () => {
     expect(io.shown.join('\n')).toContain(
       'skipped; Claude will: I leave the knob on.',
     );
+    // And each write says so, by id — the line that replaces the old silence.
+    expect(io.shown).toContain('   ✓ recorded jl-a1.1');
+    expect(io.shown).toContain('   ✓ recorded jl-a1.2');
   });
 
   test('the ask is SHOWN before it is asked', async () => {
