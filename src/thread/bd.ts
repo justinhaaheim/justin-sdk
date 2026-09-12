@@ -56,7 +56,8 @@ export type BdFailure =
   | {kind: 'bad-json'; command: string; detail: string};
 
 export type BdResult<T> =
-  {ok: true; value: T} | {ok: false; failure: BdFailure};
+  | {ok: true; value: T}
+  | {ok: false; failure: BdFailure};
 
 /**
  * How much of a failing command line the banner shows.

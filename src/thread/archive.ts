@@ -39,7 +39,8 @@ export interface ArchivedReport {
 }
 
 export type WriteResult =
-  {ok: true; path: string} | {ok: false; path: string; error: string};
+  | {ok: true; path: string}
+  | {ok: false; path: string; error: string};
 
 /**
  * A filesystem-safe stamp. `:` is legal on APFS but is rendered as `/` by

@@ -430,7 +430,14 @@ export async function writeReportToBd(
     return {failure: notesWritten.failure, rendered, status: 'bdFailed'};
   }
 
-  return {askIds, closedAsks, rendered, reportCount, status: 'written', threadId};
+  return {
+    askIds,
+    closedAsks,
+    rendered,
+    reportCount,
+    status: 'written',
+    threadId,
+  };
 }
 
 /**
