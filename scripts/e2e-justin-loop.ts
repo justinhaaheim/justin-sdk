@@ -138,6 +138,12 @@ interface Options {
   scenarios: Scenario[];
   /** Wall-clock bound per scenario, ours — the runner's own is left at 0. */
   boundMin: number;
+  /**
+   * Write `permissions.allow: ['Bash']` into the fixture's settings (default).
+   * `--no-fixture-permissions` turns it off to measure what a REAL looped repo
+   * meets — see writeFixturePermissions.
+   */
+  fixturePermissions: boolean;
   keep: boolean;
   model: string;
   permissionMode: string;
@@ -165,6 +171,14 @@ const USAGE = `bun run e2e:justin-loop [options]
                        accepting the disclaimer first. Run
                        \`claude --dangerously-skip-permissions\` once
                        interactively" and exits 1.)
+  --no-fixture-permissions
+                       Do NOT write permissions.allow:["Bash"] into the
+                       fixture's .claude/settings.json (default: it is
+                       written). Turns the fixture back into what a real
+                       looped repo looks like, so the run MEASURES whether a
+                       session gets through the handoff without a permission
+                       prompt. A blocked run is a valid result here, not a
+                       flake — do not retry it, report it.
   --keep               Keep the fixture directory even when everything passes
   --help`;
 
@@ -172,6 +186,7 @@ function parseArgs(argv: string[]): Options {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const opts: Options = {
     boundMin: 12,
+    fixturePermissions: true,
     keep: false,
     model: 'haiku',
     permissionMode: 'auto',
@@ -202,6 +217,8 @@ function parseArgs(argv: string[]): Options {
       opts.model = value;
     } else if (flag === '--permission-mode') {
       opts.permissionMode = value;
+    } else if (arg === '--no-fixture-permissions') {
+      opts.fixturePermissions = false;
     } else if (arg === '--keep') {
       opts.keep = true;
     } else {
@@ -352,18 +369,26 @@ function writeShims(binDir: string, claudeBin: string, brBin: string): void {
  * change this script has no business making on anybody's behalf. So the
  * permission lives in the disposable fixture instead — a project settings file
  * inside the temp repo, which reaches these sessions and nothing else.
+ *
+ * `--no-fixture-permissions` (home-base-k7s0) drops the allow entry to turn that
+ * workaround off on purpose: with it, the run measures the loop; without it, the
+ * run measures what a REAL looped repo meets — whether a session can get through
+ * the handoff without being asked. The settings file is still written, empty, so
+ * the allow entry is the ONLY difference between the two fixtures.
  */
-function writeFixturePermissions(fixture: Fixture): void {
+function writeFixturePermissions(fixture: Fixture, allowBash: boolean): void {
   const dir = join(fixture.repo, '.claude');
   mkdirSync(dir, {recursive: true});
   writeFileSync(
     join(dir, 'settings.json'),
     `${JSON.stringify(
-      {
-        permissions: {
-          allow: ['Bash'],
-        },
-      },
+      allowBash
+        ? {
+            permissions: {
+              allow: ['Bash'],
+            },
+          }
+        : {},
       null,
       2,
     )}\n`,
@@ -374,6 +399,7 @@ function buildFixture(
   scenario: Scenario,
   claudeBin: string,
   brBin: string,
+  fixturePermissions: boolean,
 ): Fixture {
   // realpath because macOS hands out /var/folders/… symlinks while a process
   // inside reports /private/var/folders/…; the handoff bead's `worktree` is
@@ -404,7 +430,7 @@ function buildFixture(
       successorInstructions(fixture),
     );
   }
-  writeFixturePermissions(fixture);
+  writeFixturePermissions(fixture, fixturePermissions);
   mustRun(['git', 'add', '-A'], fixture.repo);
   mustRun(['git', 'commit', '-qm', 'chore: e2e fixture'], fixture.repo);
 
@@ -1107,7 +1133,12 @@ async function runScenario(
   claudeBin: string,
   brBin: string,
 ): Promise<{artifacts: Artifacts; ok: boolean}> {
-  const fixture = buildFixture(scenario, claudeBin, brBin);
+  const fixture = buildFixture(
+    scenario,
+    claudeBin,
+    brBin,
+    opts.fixturePermissions,
+  );
   const slug = slugFor(scenario);
   const recordDir = join(opts.recordDir, scenario);
 
@@ -1144,7 +1175,11 @@ async function runScenario(
         ];
 
   console.log(
-    `\n${BOLD}scenario ${scenario.toUpperCase()}${RESET} ${DIM}slug=${slug} model=${opts.model} perms=${opts.permissionMode}\n  fixture ${fixture.repo}\n  bound   ${opts.boundMin}m${RESET}`,
+    // fixture-perms is on the banner because it goes into the recorded stdout:
+    // a measurement run and a normal run are otherwise indistinguishable in the
+    // artifacts, and "did this one have the Bash allow entry" is the whole
+    // question a k7s0 recording is read to answer.
+    `\n${BOLD}scenario ${scenario.toUpperCase()}${RESET} ${DIM}slug=${slug} model=${opts.model} perms=${opts.permissionMode} fixture-perms=${opts.fixturePermissions ? 'allow:Bash' : 'none'}\n  fixture ${fixture.repo}\n  bound   ${opts.boundMin}m${RESET}`,
   );
 
   // A throw here must NOT skip the cleanup, and must not be reported as a run
