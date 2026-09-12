@@ -377,7 +377,7 @@ describe('AC2: stopAndVerify (D6)', () => {
     let stops = 0;
     const signals: string[] = [];
     const deps: StopDeps = {
-      findAgent: () => {
+      findAgent: async () => {
         const row = spec.rowAt(polls++);
         return row === 'unreadable'
           ? {ok: false, reason: 'claude agents --json exited 1'}
@@ -389,7 +389,7 @@ describe('AC2: stopAndVerify (D6)', () => {
         return true;
       },
       sleep: async () => {},
-      stopSession: () => {
+      stopSession: async () => {
         stops++;
         spec.onStop?.();
         return {detail: 'stopped', ok: true};
@@ -938,7 +938,7 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
                     ]),
             }
           : {ok: true, reason: null, stdout: ''},
-      dispatch: (_cwd, args) => {
+      dispatch: async (_cwd, args) => {
         dispatched++;
         rows.set('sess-1', {
           id: 'sess-1',
@@ -951,15 +951,15 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
         });
         return 'backgrounded · sess-1 · n\n';
       },
-      findAgent: (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
-      gitHead: () => 'abc',
+      findAgent: async (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
+      gitHead: async () => ({ok: true, sha: 'abc'}),
       notifyBlocked: () => {},
       now: () => Date.UTC(2026, 8, 8, 11, 30),
-      preflight: () => [],
-      readUsage: () => null,
+      preflight: async () => [],
+      readUsage: async () => null,
       signalPid: () => true,
       sleep: async () => {},
-      stopSession: (_cwd, id) => {
+      stopSession: async (_cwd, id) => {
         rows.delete(id);
         return {detail: 'stopped', ok: true};
       },
@@ -1018,7 +1018,7 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
                     ]),
             }
           : {ok: true, reason: null, stdout: ''},
-      dispatch: () => {
+      dispatch: async () => {
         dispatched++;
         rows.set('sess-1', {
           id: 'sess-1',
@@ -1031,15 +1031,15 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
         });
         return 'backgrounded · sess-1 · n\n';
       },
-      findAgent: (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
-      gitHead: () => 'abc',
+      findAgent: async (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
+      gitHead: async () => ({ok: true, sha: 'abc'}),
       notifyBlocked: () => {},
       now: () => Date.UTC(2026, 8, 8, 11, 30),
-      preflight: () => [],
-      readUsage: () => null,
+      preflight: async () => [],
+      readUsage: async () => null,
       signalPid: () => true,
       sleep: async () => {},
-      stopSession: (_cwd, id) => {
+      stopSession: async (_cwd, id) => {
         rows.delete(id);
         return {detail: 'stopped', ok: true};
       },

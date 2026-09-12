@@ -131,11 +131,11 @@ async function simulate(spec: {
   const deps: RunnerDeps = {
     appendLedgerRow: () => ({ok: true, reason: null}),
     br: () => ({ok: true, reason: null, stdout: '{"issues":[]}'}),
-    dispatch: (_cwd: string, dispatchArgs: string[]) => {
+    dispatch: async (_cwd: string, dispatchArgs: string[]) => {
       args = dispatchArgs;
       return 'backgrounded · sim-1 · 2026-09-08 04:30 the-arc-1\n';
     },
-    findAgent: () => {
+    findAgent: async () => {
       polls++;
       if (polls > maxPolls) {
         throw new Error(
@@ -147,18 +147,18 @@ async function simulate(spec: {
         ? {ok: false, reason: 'claude agents --json exited 1'}
         : {ok: true, row};
     },
-    gitHead: () => 'abc123',
+    gitHead: async () => ({ok: true, sha: 'abc123'}),
     notifyBlocked: () => {
       onBlockedCalls++;
     },
     now: () => clock,
-    preflight: () => [],
-    readUsage: () => null,
+    preflight: async () => [],
+    readUsage: async () => null,
     signalPid: () => true,
     sleep: async (ms: number) => {
       clock += ms;
     },
-    stopSession: () => ({detail: 'stopped sim-1', ok: true}),
+    stopSession: async () => ({detail: 'stopped sim-1', ok: true}),
     write: () => {},
     writeErr: () => {},
   };
@@ -448,18 +448,18 @@ describe('dispatch', () => {
     const deps: RunnerDeps = {
       appendLedgerRow: () => ({ok: true, reason: null}),
       br: () => ({ok: true, reason: null, stdout: '{"issues":[]}'}),
-      dispatch: () => 'error: could not start\n',
+      dispatch: async () => 'error: could not start\n',
       findAgent: (): never => {
         throw new Error('must not poll for a session that never started');
       },
-      gitHead: () => null,
+      gitHead: async () => ({ok: false, reason: 'not a git repository'}),
       notifyBlocked: () => {},
       now: () => 1_000_000,
-      preflight: () => [],
-      readUsage: () => null,
+      preflight: async () => [],
+      readUsage: async () => null,
       signalPid: () => true,
       sleep: async () => {},
-      stopSession: () => ({detail: 'x', ok: true}),
+      stopSession: async () => ({detail: 'x', ok: true}),
       write: () => {},
       writeErr: () => {},
     };

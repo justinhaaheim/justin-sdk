@@ -225,7 +225,11 @@ export async function runLoop(spec: {
       return {ok: true, reason: null};
     },
     br,
-    dispatch: (_cwd, args) => {
+    // Every child-call fake is `async` because the DEPENDENCY TYPES are
+    // Promise-returning (home-base-a1go): the runner may not make a synchronous
+    // spawn again, and a world whose fakes were sync would let one back in
+    // without a single test going red.
+    dispatch: async (_cwd, args) => {
       dispatches.push(args);
 
       // A `--resume` WAKES an existing session (MEASURED 2026-09-08): same id,
@@ -254,7 +258,7 @@ export async function runLoop(spec: {
       register(id, script, args[args.indexOf('--name') + 1] ?? '');
       return `backgrounded · ${id} · ${args[args.indexOf('--name') + 1] ?? ''}\n`;
     },
-    findAgent: (_cwd, id) => {
+    findAgent: async (_cwd, id) => {
       polls++;
       if (polls > MAX_POLLS) {
         throw new Error(
@@ -276,11 +280,11 @@ export async function runLoop(spec: {
       }
       return {ok: true, row};
     },
-    gitHead: () => `head-${dispatched}`,
+    gitHead: async () => ({ok: true, sha: `head-${dispatched}`}),
     notifyBlocked: () => {},
     now: () => clock,
-    preflight: () => [],
-    readUsage: () => null,
+    preflight: async () => [],
+    readUsage: async () => null,
     signalPid: (pid, sig) => {
       signals.push({pid, sig: String(sig)});
       for (const [id, row] of rows) {
@@ -293,7 +297,7 @@ export async function runLoop(spec: {
     sleep: async (ms) => {
       clock += ms;
     },
-    stopSession: (_cwd, id) => {
+    stopSession: async (_cwd, id) => {
       stopCalls.push(id);
       const behaviour = scriptOf.get(id)?.stop ?? 'clears';
       if (behaviour === 'clears') rows.delete(id);

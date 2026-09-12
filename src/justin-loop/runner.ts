@@ -31,9 +31,11 @@
  * before every session for free.
  */
 import {spawnSync} from 'node:child_process';
-import {appendFileSync, mkdirSync} from 'node:fs';
+import {appendFileSync, existsSync, mkdirSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
+
+import {describeChildFailure, runChild} from './child';
 
 import {
   type Disposition,
@@ -533,32 +535,81 @@ export type AgentListing =
 export type AgentLookup =
   {ok: true; row: AgentRow | null} | {ok: false; reason: string};
 
-export function listAgents(cwd: string): AgentListing {
-  const proc = spawnSync('claude', ['agents', '--json'], {
+// ---------------------------------------------------------------------------
+// Every child call the runner makes, and its bound (home-base-a1go)
+//
+// All of them go through `runChild` (src/justin-loop/child.ts): asynchronous,
+// timed, and answering as soon as the process WE spawned has exited rather than
+// when the pipe reaches EOF. The measurement behind that is in child.ts; the
+// consequence here is that no call can hold the runner, and that every failure
+// reason comes from `describeChildFailure`, whose ordering makes a timed-out
+// call that exited 0 a FAILURE rather than a success with truncated output.
+//
+// The bounds are the ones the old `spawnSync` calls carried, except the two that
+// carried NONE — the HEAD-sha read and the preflight `claude --version` — which
+// are the two calls that could hang forever and say nothing.
+// ---------------------------------------------------------------------------
+
+/** `claude agents --json`, once per poll. */
+export const AGENTS_TIMEOUT_MS = 60_000;
+/** `claude stop <id>`, one rung of the stop ladder. */
+export const STOP_TIMEOUT_MS = 60_000;
+/** `claude --bg …` — a spawn or a resume. The longest, because it does most. */
+export const DISPATCH_TIMEOUT_MS = 120_000;
+/** `claude -p /usage --output-format json`. */
+export const USAGE_TIMEOUT_MS = 60_000;
+/** `claude --version` in preflight. Was UNBOUNDED. */
+export const CLAUDE_VERSION_TIMEOUT_MS = 10_000;
+/** `git rev-parse HEAD`. Was UNBOUNDED, and is the positional suspect (a1go). */
+export const GIT_HEAD_TIMEOUT_MS = 10_000;
+
+/** The env var that overrides which `claude` every call here spawns. */
+export const CLAUDE_BIN_ENV = 'JUSTIN_LOOP_CLAUDE_BIN';
+
+/**
+ * Which `claude` binary to spawn, resolved fresh on every call.
+ *
+ * MEASURED 2026-09-12: in a cmux pane a `cmux-cli-shim` named `claude` sits
+ * ahead of the real CLI on PATH, and it turns `claude stop <id>` into a PROMPT
+ * TO THE MODEL — chatty output saying "Stopped" while stopping nothing. A stop
+ * ladder run against that shim would report success and leave the session alive,
+ * which is precisely the reassuring substitution the successor gate exists to
+ * refuse. So the real binary is resolved rather than inherited from PATH.
+ *
+ * Order, and why:
+ *   1. `JUSTIN_LOOP_CLAUDE_BIN` — the explicit override, FIRST so tests (and a
+ *      machine with claude installed elsewhere) can point every call at one
+ *      binary. An empty value is not a path and is ignored.
+ *   2. `~/.local/bin/claude` — where the real CLI lives on this machine, ahead
+ *      of PATH exactly because PATH is what the shim wins.
+ *   3. `claude` — the bare name, i.e. a PATH lookup, which is the old behaviour
+ *      and the only thing available on a machine that installs it elsewhere.
+ */
+export function resolveClaudeBin(): string {
+  const override = process.env[CLAUDE_BIN_ENV];
+  if (override != null && override !== '') return override;
+  const local = join(homedir(), '.local', 'bin', 'claude');
+  if (existsSync(local)) return local;
+  return 'claude';
+}
+
+export async function listAgents(
+  cwd: string,
+  timeoutMs: number = AGENTS_TIMEOUT_MS,
+): Promise<AgentListing> {
+  const outcome = await runChild(resolveClaudeBin(), ['agents', '--json'], {
     cwd,
-    encoding: 'utf-8',
-    env: process.env,
-    maxBuffer: 16 * 1024 * 1024,
-    timeout: 60_000,
+    timeoutMs,
   });
-  if (proc.error != null) {
-    return {
-      ok: false,
-      reason: `claude agents could not run: ${proc.error.message}`,
-    };
+  const failure = describeChildFailure('claude agents --json', outcome);
+  if (failure != null) {
+    return {ok: false, reason: failure};
   }
-  if (proc.status !== 0) {
-    const how =
-      proc.status != null
-        ? `exited ${proc.status}`
-        : `was killed (${proc.signal ?? 'unknown signal'})`;
-    return {ok: false, reason: `claude agents --json ${how}`};
-  }
-  if (proc.stdout == null) {
+  if (outcome.stdout.trim() === '') {
     return {ok: false, reason: 'claude agents --json produced no output'};
   }
   try {
-    const rows = JSON.parse(proc.stdout) as Array<Record<string, unknown>>;
+    const rows = JSON.parse(outcome.stdout) as Array<Record<string, unknown>>;
     if (!Array.isArray(rows)) {
       return {
         ok: false,
@@ -585,8 +636,12 @@ export function listAgents(cwd: string): AgentListing {
   }
 }
 
-export function findAgent(cwd: string, id: string): AgentLookup {
-  const listing = listAgents(cwd);
+export async function findAgent(
+  cwd: string,
+  id: string,
+  timeoutMs: number = AGENTS_TIMEOUT_MS,
+): Promise<AgentLookup> {
+  const listing = await listAgents(cwd, timeoutMs);
   if (!listing.ok) return {ok: false, reason: listing.reason};
   return {ok: true, row: listing.rows.find((r) => r.id === id) ?? null};
 }
@@ -606,27 +661,24 @@ export function isSessionEnded(row: AgentRow): boolean {
 }
 
 /** `claude stop <id>` — the measured stop. Injectable for tests. */
-export function stopSession(
+export async function stopSession(
   cwd: string,
   id: string,
-): {ok: boolean; detail: string} {
-  const proc = spawnSync('claude', ['stop', id], {
+  timeoutMs: number = STOP_TIMEOUT_MS,
+): Promise<{ok: boolean; detail: string}> {
+  const outcome = await runChild(resolveClaudeBin(), ['stop', id], {
     cwd,
-    encoding: 'utf-8',
-    env: process.env,
-    timeout: 60_000,
+    timeoutMs,
   });
-  if (proc.error != null) {
-    return {
-      detail: `claude stop could not run: ${proc.error.message}`,
-      ok: false,
-    };
+  const said = `${outcome.stdout}${outcome.stderr}`.trim().split('\n')[0] ?? '';
+  const failure = describeChildFailure(`claude stop ${id}`, outcome);
+  if (failure != null) {
+    // The reason comes first and whatever the CLI managed to say comes after:
+    // "exited 1" alone names no cause, and the sentence `claude` printed is
+    // usually the entire diagnosis.
+    return {detail: said !== '' ? `${failure}: ${said}` : failure, ok: false};
   }
-  const out = `${proc.stdout ?? ''}${proc.stderr ?? ''}`.trim().split('\n')[0];
-  return {
-    detail: out !== '' ? out : `claude stop exited ${proc.status ?? 'unknown'}`,
-    ok: proc.status === 0,
-  };
+  return {detail: said !== '' ? said : 'claude stop exited 0', ok: true};
 }
 
 /** Send a signal. Returns false when the process was already gone. */
@@ -668,11 +720,21 @@ export interface StopReport {
   notes: string[];
 }
 
+/**
+ * The child calls are Promise-TYPED on purpose (home-base-a1go), not merely
+ * implemented asynchronously: a synchronous spawn blocks the event loop, so no
+ * watchdog timer can fire while one is stuck, and the only durable guard against
+ * one creeping back is a type that will not accept it. `signalPid` stays
+ * synchronous because `process.kill` is a syscall, not a child.
+ */
 export interface StopDeps {
-  findAgent: (cwd: string, id: string) => AgentLookup;
+  findAgent: (cwd: string, id: string) => Promise<AgentLookup>;
   signalPid: (pid: number, sig: NodeJS.Signals) => boolean;
   sleep: (ms: number) => Promise<void>;
-  stopSession: (cwd: string, id: string) => {ok: boolean; detail: string};
+  stopSession: (
+    cwd: string,
+    id: string,
+  ) => Promise<{ok: boolean; detail: string}>;
 }
 
 /** Polls per verification attempt. Measured: the row goes within 5s. */
@@ -690,7 +752,7 @@ async function confirmGone(
   let consecutive = 0;
   for (let i = 0; i < STOP_VERIFY_POLLS; i++) {
     await deps.sleep(pollMs);
-    const look = deps.findAgent(cwd, id);
+    const look = await deps.findAgent(cwd, id);
     if (!look.ok) {
       // UNKNOWN IS NOT ABSENT. A listing we could not read says nothing about
       // whether the session is gone, so it resets the streak rather than
@@ -737,7 +799,7 @@ export async function stopAndVerify(
   deps: StopDeps,
 ): Promise<StopReport> {
   const notes: string[] = [];
-  const before = deps.findAgent(cwd, id);
+  const before = await deps.findAgent(cwd, id);
   if (before.ok && before.row == null) {
     return {
       notes: [`${id} was already absent from \`claude agents\``],
@@ -753,26 +815,26 @@ export async function stopAndVerify(
     );
   }
 
-  const attempts: Array<{label: string; act: () => boolean | null}> = [
+  const attempts: Array<{label: string; act: () => Promise<boolean | null>}> = [
     {
-      act: () => {
-        const r = deps.stopSession(cwd, id);
+      act: async () => {
+        const r = await deps.stopSession(cwd, id);
         notes.push(`claude stop ${id}: ${r.detail}`);
         return r.ok;
       },
       label: 'claude stop',
     },
     {
-      act: () => {
-        const r = deps.stopSession(cwd, id);
+      act: async () => {
+        const r = await deps.stopSession(cwd, id);
         notes.push(`claude stop ${id} (retry): ${r.detail}`);
         return r.ok;
       },
       label: 'claude stop retry',
     },
     {
-      act: () => {
-        const look = deps.findAgent(cwd, id);
+      act: async () => {
+        const look = await deps.findAgent(cwd, id);
         const row = look.ok ? look.row : null;
         if (row?.pid == null) {
           notes.push('SIGTERM skipped — no pid to signal');
@@ -787,8 +849,8 @@ export async function stopAndVerify(
       label: 'SIGTERM',
     },
     {
-      act: () => {
-        const look = deps.findAgent(cwd, id);
+      act: async () => {
+        const look = await deps.findAgent(cwd, id);
         const row = look.ok ? look.row : null;
         if (row?.pid == null) {
           notes.push('SIGKILL skipped — no pid to signal');
@@ -805,7 +867,7 @@ export async function stopAndVerify(
   ];
 
   for (const attempt of attempts) {
-    attempt.act();
+    await attempt.act();
     if (await confirmGone(cwd, id, pollMs, deps, notes)) {
       notes.push(
         `verified gone: ${id} absent from \`claude agents\` on ${STOP_CONSECUTIVE_ABSENT} consecutive polls after ${attempt.label}`,
@@ -815,7 +877,7 @@ export async function stopAndVerify(
     notes.push(`${attempt.label} did NOT clear the row — escalating`);
   }
 
-  const after = deps.findAgent(cwd, id);
+  const after = await deps.findAgent(cwd, id);
   if (!after.ok) {
     // The honest answer is that we do not know, and "do not know" must never be
     // spendable as "gone" (critical rule 6). Refuses the spawn like a failure.
@@ -1267,23 +1329,29 @@ export function parseUsage(raw: string): UsageSnapshot | null {
   };
 }
 
-/** Read the real quota. Costs zero tokens (verified: num_turns=0, cost=0). */
-export function readUsage(cwd: string): UsageSnapshot | null {
-  const proc = spawnSync(
-    'claude',
+/**
+ * Read the real quota. Costs zero tokens (verified: num_turns=0, cost=0).
+ *
+ * null means "could not read", and every caller fails CLOSED on it (`checkGate`
+ * turns it into `unreadable`, which stops the run) — it is never spent as 0%.
+ * The `describeChildFailure` ordering matters here too: before home-base-a1go
+ * this tested `status !== 0` first, so a call that timed out after the child
+ * exited 0 arrived as a success carrying truncated JSON.
+ */
+export async function readUsage(
+  cwd: string,
+  timeoutMs: number = USAGE_TIMEOUT_MS,
+): Promise<UsageSnapshot | null> {
+  const outcome = await runChild(
+    resolveClaudeBin(),
     ['-p', '/usage', '--output-format', 'json'],
-    {
-      cwd,
-      encoding: 'utf-8',
-      env: process.env,
-      timeout: 60_000,
-    },
+    {cwd, timeoutMs},
   );
-  if (proc.status !== 0 || proc.stdout == null) {
+  if (describeChildFailure('claude -p /usage', outcome) != null) {
     return null;
   }
   try {
-    const parsed = JSON.parse(proc.stdout) as {result?: string};
+    const parsed = JSON.parse(outcome.stdout) as {result?: string};
     return typeof parsed.result === 'string' ? parseUsage(parsed.result) : null;
   } catch {
     return null;
@@ -1314,17 +1382,17 @@ export type GateDecision =
  * AT ALL. "Skips the gate" must mean no `/usage` process is spawned, not that
  * one is spawned and its answer ignored.
  */
-export function checkGate(
+export async function checkGate(
   opts: Pick<
     JustinLoopOptions,
     'sessionStopPct' | 'usageGate' | 'weeklyStopPct'
   >,
-  readQuota: () => UsageSnapshot | null,
-): GateDecision {
+  readQuota: () => Promise<UsageSnapshot | null>,
+): Promise<GateDecision> {
   if (!opts.usageGate) {
     return {kind: 'disabled'};
   }
-  const usage = readQuota();
+  const usage = await readQuota();
   if (usage == null) {
     // Fail closed: if we cannot read the quota, we do not spend it.
     return {
@@ -1393,7 +1461,13 @@ export interface LedgerRow {
   stopOutcome: StopOutcome | null;
   /** From the handoff bead. null = not measured, never 0 (critical rule 6). */
   contextTokens: number | null;
-  progressed: boolean;
+  /**
+   * Did HEAD move while this session ran? null = one of the two `git rev-parse`
+   * reads FAILED, so it was never measured — never "it did not commit"
+   * (critical rule 6). No schema bump: no field was added or removed, and null
+   * already means "not measured" in `contextTokens` and `stopOutcome`.
+   */
+  progressed: boolean | null;
   /**
    * How many times this session had to be RESUMED and told to write a handoff
    * (D10). 0 is the normal case — it handed off on its own. Recorded because
@@ -1433,12 +1507,32 @@ export function appendLedgerRow(
 // Preflight
 // ---------------------------------------------------------------------------
 
-function gitHead(cwd: string): string | null {
-  const proc = spawnSync('git', ['rev-parse', 'HEAD'], {
+/**
+ * What `git rev-parse HEAD` said, or why it said nothing.
+ *
+ * `null` was not enough (critical rule 6): the only caller compared two reads
+ * for inequality, so a FAILED read compared unequal to a good one and the run
+ * reported "committed" — or, when both failed, `null !== null` is false and it
+ * reported "no commit", which is a measurement nobody took. The reason is a
+ * distinct member now, and it is printed.
+ */
+export type HeadRead = {ok: true; sha: string} | {ok: false; reason: string};
+
+export async function gitHead(
+  cwd: string,
+  timeoutMs: number = GIT_HEAD_TIMEOUT_MS,
+): Promise<HeadRead> {
+  const outcome = await runChild('git', ['rev-parse', 'HEAD'], {
     cwd,
-    encoding: 'utf-8',
+    timeoutMs,
   });
-  return proc.status === 0 ? proc.stdout.trim() : null;
+  const failure = describeChildFailure('git rev-parse HEAD', outcome);
+  if (failure != null) return {ok: false, reason: failure};
+  const sha = outcome.stdout.trim();
+  if (sha === '') {
+    return {ok: false, reason: 'git rev-parse HEAD printed no sha'};
+  }
+  return {ok: true, sha};
 }
 
 interface PreflightProblem {
@@ -1446,14 +1540,40 @@ interface PreflightProblem {
   message: string;
 }
 
-export function preflight(cwd: string): PreflightProblem[] {
+/**
+ * `timeoutMs` bounds both child calls below. It exists so the hang tests can
+ * drive the real preflight against a `claude` that never answers in about a
+ * second rather than ten.
+ */
+export async function preflight(
+  cwd: string,
+  timeoutMs: number = CLAUDE_VERSION_TIMEOUT_MS,
+): Promise<PreflightProblem[]> {
   const problems: PreflightProblem[] = [];
 
-  if (spawnSync('claude', ['--version'], {encoding: 'utf-8'}).status !== 0) {
-    problems.push({fatal: true, message: 'claude CLI not found on PATH'});
+  const bin = resolveClaudeBin();
+  // No `cwd` here on purpose: this probe asks whether the CLI works, and
+  // handing it a directory that may not exist would report a bad cwd as a bad
+  // `claude`. The HEAD read below is the one that judges the directory.
+  const version = await runChild(bin, ['--version'], {timeoutMs});
+  const versionFailure = describeChildFailure(`${bin} --version`, version);
+  if (versionFailure != null) {
+    problems.push({
+      fatal: true,
+      // A CLI that is INSTALLED but not answering is a different problem from
+      // one that is missing, and "not found on PATH" would send Justin looking
+      // for the wrong thing entirely.
+      message: version.timedOut
+        ? `${versionFailure} — the claude CLI is there but is not answering`
+        : `claude CLI unusable: ${versionFailure}`,
+    });
   }
-  if (gitHead(cwd) == null) {
-    problems.push({fatal: true, message: `not a git repository: ${cwd}`});
+  const head = await gitHead(cwd, timeoutMs);
+  if (!head.ok) {
+    problems.push({
+      fatal: true,
+      message: `could not read HEAD in ${cwd} (not a git repository?): ${head.reason}`,
+    });
   }
   // A stray API key silently bills credits while you believe you are on the
   // subscription — the SDK auth precedence puts it ahead of OAuth.
@@ -1587,11 +1707,11 @@ export function notifyBlocked(cwd: string, n: number, row: AgentRow): void {
  */
 export interface RunnerDeps extends StopDeps {
   /** Spawn the background session. Returns `claude`'s stdout (the banner). */
-  dispatch: (cwd: string, args: string[]) => string;
+  dispatch: (cwd: string, args: string[]) => Promise<string>;
   now: () => number;
   br: BrRunner;
-  gitHead: (cwd: string) => string | null;
-  readUsage: (cwd: string) => UsageSnapshot | null;
+  gitHead: (cwd: string) => Promise<HeadRead>;
+  readUsage: (cwd: string) => Promise<UsageSnapshot | null>;
   appendLedgerRow: (
     path: string,
     row: LedgerRow,
@@ -1600,7 +1720,7 @@ export interface RunnerDeps extends StopDeps {
   write: (text: string) => void;
   writeErr: (text: string) => void;
   /** Preflight is skipped entirely in tests; real runs pass the real one. */
-  preflight: (cwd: string) => PreflightProblem[];
+  preflight: (cwd: string) => Promise<PreflightProblem[]>;
 }
 
 export const REAL_DEPS: RunnerDeps = {
@@ -1622,26 +1742,15 @@ export const REAL_DEPS: RunnerDeps = {
    * On success the return value is byte-identical to what it always was: the
    * caller only ever runs `parseBackgroundedId` over it.
    */
-  dispatch: (cwd, args) => {
-    const proc = spawnSync('claude', args, {
+  dispatch: async (cwd, args) => {
+    const outcome = await runChild(resolveClaudeBin(), args, {
       cwd,
-      encoding: 'utf-8',
-      env: process.env,
-      timeout: 120_000,
+      timeoutMs: DISPATCH_TIMEOUT_MS,
     });
-    const stdout = proc.stdout ?? '';
-    if (proc.error != null) {
-      return `${stdout}claude --bg could not run: ${proc.error.message}`;
-    }
-    if (proc.status !== 0) {
-      const how =
-        proc.status != null
-          ? `exited ${proc.status}`
-          : `was killed (${proc.signal ?? 'unknown signal'})`;
-      const said = (proc.stderr ?? '').trim();
-      return `${stdout}claude --bg ${how}${said !== '' ? `: ${said}` : ''}`;
-    }
-    return stdout;
+    const failure = describeChildFailure('claude --bg', outcome);
+    if (failure == null) return outcome.stdout;
+    const said = outcome.stderr.trim();
+    return `${outcome.stdout}${failure}${said !== '' ? `: ${said}` : ''}`;
   },
   findAgent,
   gitHead,
@@ -1707,7 +1816,7 @@ export async function runSession(
   deps: RunnerDeps,
 ): Promise<SessionRun> {
   const started = deps.now();
-  const banner = deps.dispatch(cwd, [
+  const banner = await deps.dispatch(cwd, [
     '--bg',
     '--name',
     name,
@@ -1781,7 +1890,7 @@ async function watchSession(
 
   for (;;) {
     await deps.sleep(opts.pollSec * 1000);
-    const look = deps.findAgent(cwd, id);
+    const look = await deps.findAgent(cwd, id);
 
     if (!look.ok) {
       // A listing we could not read is NOT an ending and NOT a continuation —
@@ -2158,7 +2267,10 @@ export async function demandHandoff(
     );
 
     const started = deps.now();
-    const banner = deps.dispatch(ctx.cwd, resumeArgs(fullSessionId, demand));
+    const banner = await deps.dispatch(
+      ctx.cwd,
+      resumeArgs(fullSessionId, demand),
+    );
     const id = parseBackgroundedId(banner);
     if (id == null) {
       return {
@@ -2264,7 +2376,7 @@ async function waitForGate(
         `${DIM}resets ${current.sessionResetsAt ?? 'unknown'} · re-checking in ${opts.gatePollMin}m${RESET}\n`,
     );
     await deps.sleep(opts.gatePollMin * 60_000);
-    current = deps.readUsage(cwd);
+    current = await deps.readUsage(cwd);
   }
   return current;
 }
@@ -2276,7 +2388,7 @@ export async function runJustinLoop(
 ): Promise<number> {
   const opts: JustinLoopOptions = {...DEFAULT_OPTIONS, ...overrides};
 
-  for (const problem of deps.preflight(cwd)) {
+  for (const problem of await deps.preflight(cwd)) {
     deps.writeErr(
       `${problem.fatal ? `${RED}error` : `${YELLOW}warn `}${RESET} ${problem.message}\n`,
     );
@@ -2298,6 +2410,10 @@ export async function runJustinLoop(
         : `usage-gate=DISABLED`) +
       `${RESET}\n` +
       `${DIM}${timeoutDescription(opts.timeoutMin)}; ${blockedWaitDescription(opts.blockedWaitMin)}${RESET}\n` +
+      // WHICH `claude` this run will spawn, said out loud once. A cmux pane puts
+      // a shim first on PATH that answers `claude stop` by prompting the model
+      // (measured 2026-09-12), so "which binary" is not a detail.
+      `${DIM}claude=${resolveClaudeBin()}${RESET}\n` +
       `${DIM}ledger ${ledgerPath}${RESET}\n\n`,
   );
 
@@ -2324,7 +2440,7 @@ export async function runJustinLoop(
       );
       return 0;
     }
-    const usage = deps.readUsage(cwd);
+    const usage = await deps.readUsage(cwd);
     if (usage == null) {
       deps.writeErr(`${RED}error${RESET} could not read /usage\n`);
       return 1;
@@ -2358,7 +2474,7 @@ export async function runJustinLoop(
     const boot: BootContext = {cwd, label, plan: bootPlan};
 
     // --- gate (free) ---
-    const decision = checkGate(opts, () => deps.readUsage(cwd));
+    const decision = await checkGate(opts, () => deps.readUsage(cwd));
     if (decision.kind === 'unreadable') {
       end = {exitCode: 2, reason: decision.reason};
       break;
@@ -2391,11 +2507,25 @@ export async function runJustinLoop(
     deps.write(
       `${BOLD}#${n}/${opts.maxSessions}${RESET} ${DIM}${name}${RESET}\n`,
     );
-    const headBefore = deps.gitHead(cwd);
+    const headBefore = await deps.gitHead(cwd);
     const startedAt = new Date(deps.now()).toISOString();
     const run = await runSession(cwd, opts, n, boot, name, deps);
     sessionsRun++;
-    const progressed = headBefore !== deps.gitHead(cwd);
+    const headAfter = await deps.gitHead(cwd);
+    // UNKNOWN IS NOT "NO COMMIT" (critical rule 6). Either read failing means we
+    // do not know whether this session committed anything, and comparing a
+    // failure to a sha — or a failure to a failure — invents an answer: the old
+    // `null !== null` said "no commit", a measurement nobody took, and it feeds
+    // the circuit breaker below.
+    const progressed: boolean | null =
+      headBefore.ok && headAfter.ok ? headBefore.sha !== headAfter.sha : null;
+    for (const failed of [headBefore, headAfter]) {
+      if (!failed.ok) {
+        deps.writeErr(
+          `${YELLOW}warn ${RESET} could not read HEAD in ${cwd}: ${failed.reason}\n`,
+        );
+      }
+    }
 
     // How many times this session had to be resumed and TOLD to hand off (D10).
     // Reset per session, carried into the ledger row so a demanded handoff never
@@ -2431,7 +2561,7 @@ export async function runJustinLoop(
         );
       }
       deps.write(
-        `   ${outcomeColor(outcome)}${outcome}${RESET}${DIM} · ${Math.round(run.durationMs / 1000)}s · ${progressed ? 'committed' : 'no commit'}` +
+        `   ${outcomeColor(outcome)}${outcome}${RESET}${DIM} · ${Math.round(run.durationMs / 1000)}s · ${progressed == null ? 'HEAD unreadable' : progressed ? 'committed' : 'no commit'}` +
           (stopOutcome != null ? ` · stop=${stopOutcome}` : '') +
           `${RESET}\n`,
       );
@@ -2651,7 +2781,11 @@ export async function runJustinLoop(
       break;
     }
 
-    noProgressStreak = progressed ? 0 : noProgressStreak + 1;
+    // An UNREADABLE head counts toward the streak, like a session that did not
+    // commit. The two directions are not symmetric: treating unknown as progress
+    // resets the breaker and licenses looping forever on quota, while treating
+    // it as no-progress at worst stops a run early and says why.
+    noProgressStreak = progressed === true ? 0 : noProgressStreak + 1;
     if (noProgressStreak >= opts.noProgressAbort) {
       end = {
         exitCode: 2,
