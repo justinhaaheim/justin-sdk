@@ -145,6 +145,25 @@ describe('handoffDemand: what the session is actually told', () => {
     expect(text).toContain('br close <id> --reason=');
   });
 
+  test('shows the helper on ONE line and forbids backslash wrapping (D13)', () => {
+    // home-base-k7s0, measured 2026-09-09: the block happened on THIS path. The
+    // demand already printed the invocation on one line, but the model re-wrapped
+    // it with `\` continuations and Claude Code refused to run it without asking.
+    // So the demand carries the rule as well as the shape — and no continuation
+    // may creep into the demand text itself, whatever the invalid-bead list says.
+    const text = handoffDemand({
+      attempt: 1,
+      attempts: 3,
+      invalid: BROKEN,
+      label: 'the-arc-1',
+      reason: 'r',
+    });
+    expect(text).not.toContain('\\\n');
+    expect(text).toContain(
+      'Write it on one line - never wrap it with backslashes, which forces a permission prompt.',
+    );
+  });
+
   test('a no-handoff demand does not invent beads to fix', () => {
     const text = handoffDemand({
       attempt: 1,

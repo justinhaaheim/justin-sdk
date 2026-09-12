@@ -768,6 +768,28 @@ describe('sessionContract — the handoff protocol', () => {
     expect(contract).toContain('--flag=value');
   });
 
+  test('shows the helper on ONE line and forbids backslash wrapping (D13)', () => {
+    // MEASURED 2026-09-09 (home-base-k7s0): this example used to wrap over seven
+    // lines with `\` continuations. A session copied that shape for the REAL
+    // invocation and Claude Code refused to run it without asking ("Contains
+    // backslash-escaped whitespace") — so the one command the control channel
+    // depends on sat blocked on a prompt nobody was there to answer, and with
+    // `blockedWaitMin: null` the run waits for that answer forever.
+    //
+    // Asserted on the COMPOSED text as well: a boot preamble that reintroduced a
+    // continuation would hand the model the same shape by another route.
+    expect(contract).not.toContain('\\\n');
+    expect(bootContract(contract, pickupBoot)).not.toContain('\\\n');
+    // Verbatim, not flag-by-flag: the point is that the whole invocation is
+    // reachable as a single copyable line, which a per-flag check cannot see.
+    expect(contract).toContain(
+      `justin-sdk justin-loop handoff --from=${LABEL} --disposition=continue --arc=<epic or bead id> --worktree=<absolute path> --branch=<branch> --state='<2-4 sentences: where the work actually stands>' --next='<complete starting instructions for your successor>' --open-question='<what only Justin can settle>' --context-tokens=<number from the latest usage notice>`,
+    );
+    expect(contract).toContain(
+      'Write it on one line - never wrap it with backslashes, which forces a permission prompt.',
+    );
+  });
+
   test('forbids `br init` in a repo with no beads workspace', () => {
     // Creating a workspace unasked is exactly the o33r damage shape.
     expect(contract).toContain('do NOT run `br init`');
@@ -801,10 +823,13 @@ describe('sessionContract — the handoff protocol', () => {
   });
 
   test('the composed contract stays small enough to pay for every session', () => {
-    // Measured 2026-09-08, after 1r6d.33.9 added the cwd sentence to both
-    // halves: the contract alone is 4,484 chars, and 5,615 composed with the
-    // pickup preamble — the longest of the three boots — leaving ~385 chars of
-    // headroom under the cap. (The earlier revision measured 994 tokens /
+    // Measured 2026-09-12, after home-base-k7s0 (D13) unwrapped the helper
+    // example and added the one-line rule: the contract alone is 4,524 chars,
+    // and 5,655 composed with the pickup preamble — the longest of the three
+    // boots — leaving ~345 chars of headroom under the cap. (It was 4,484 /
+    // 5,615 / ~385 before that change, measured 2026-09-08 after 1r6d.33.9
+    // added the cwd sentence to both halves. Dropping six `\` continuations
+    // paid for most of the new sentence.) (The earlier revision measured 994 tokens /
     // 4,211 chars and 1,211 tokens / 5,047 chars with gpt-tokenizer,
     // cl100k_base, a stand-in for Claude's tokenizer; only the char counts are
     // re-measured here, at the ~4 chars/token that text ran.) Both numbers grow

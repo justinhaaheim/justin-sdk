@@ -200,6 +200,30 @@ export const DEFAULT_OPTIONS: JustinLoopOptions = {
 // ---------------------------------------------------------------------------
 
 /**
+ * The handoff invocation, on ONE physical line, shared by the contract and the
+ * demand so the two cannot drift apart.
+ *
+ * MEASURED 2026-09-09 (home-base-k7s0): the contract used to print this example
+ * wrapped over seven lines with `\` continuations, a session copied that shape
+ * for the real invocation, and Claude Code's command-safety heuristic refused to
+ * run it without asking — "Contains backslash-escaped whitespace". The session
+ * blocked on a permission prompt for THE command the whole control channel
+ * depends on, and with the default `blockedWaitMin: null` the run then waits for
+ * an answer forever. D13 takes the cheap targeted fix: never show the model a
+ * shape that trips the heuristic. So this string must stay on one line, and a
+ * unit test asserts no backslash-newline survives anywhere in either text.
+ */
+function handoffExample(label: string): string {
+  return `justin-sdk justin-loop handoff --from=${label} --disposition=continue --arc=<epic or bead id> --worktree=<absolute path> --branch=<branch> --state='<2-4 sentences: where the work actually stands>' --next='<complete starting instructions for your successor>' --open-question='<what only Justin can settle>' --context-tokens=<number from the latest usage notice>`;
+}
+
+/**
+ * The rule that goes with it (D13). Deliberately unwrapped in the source: it has
+ * to reach the model as one sentence, and the test asserts it verbatim.
+ */
+const ONE_LINE_RULE = `Write it on one line - never wrap it with backslashes, which forces a permission prompt.`;
+
+/**
  * The session contract, injected per-run rather than written into the skill.
  *
  * `/loop-session` is shared with the interactive path and shouldn't carry
@@ -278,17 +302,12 @@ with the helper — never by hand — doing these, in this order, LAST:
   2. Flush and commit \`.beads/\`, so the bead travels with the branch.
   3. Create the handoff bead:
 
-     justin-sdk justin-loop handoff --from=${opts.label} \\
-       --disposition=continue --arc=<epic or bead id> \\
-       --worktree=<absolute path> --branch=<branch> \\
-       --state='<2-4 sentences: where the work actually stands>' \\
-       --next='<complete starting instructions for your successor>' \\
-       --open-question='<what only Justin can settle>' \\
-       --context-tokens=<number from the latest usage notice>
+     ${handoffExample(opts.label)}
 
      --from must be exactly \`${opts.label}\`. Repeat --open-question per
      question, or leave it out. Use the --flag=value form for every value, so a
      value starting with a dash is not parsed as a flag.
+     ${ONE_LINE_RULE}
   4. End your turn. Do not keep working once the handoff exists.
 
 RUN THAT HELPER — and the \`br close\` that claims a handoff — FROM
@@ -2166,7 +2185,10 @@ export function handoffDemand(opts: {
     '',
     `  justin-sdk justin-loop handoff --from=${opts.label} --disposition=continue|done|blocked --arc=<bead id or arc name> --worktree=<absolute path> --branch=<branch> --state='<where the work actually stands>' --next='<the successor's complete starting instructions, written for a cold reader>' [--open-question='<...>']... [--context-tokens=<N>]`,
     '',
-    'Pick `continue` if work remains, `done` if the arc is finished, `blocked` if you need Justin. Write the bead with the helper, never by hand. Then end your turn.',
+    // D13: the measured block happened on THIS path — a demanded turn re-wrapped
+    // the one-line command with backslashes and was refused a permission prompt
+    // nobody was there to answer (home-base-k7s0).
+    `Pick \`continue\` if work remains, \`done\` if the arc is finished, \`blocked\` if you need Justin. ${ONE_LINE_RULE} Write the bead with the helper, never by hand. Then end your turn.`,
     '',
     `This is demand ${opts.attempt} of ${opts.attempts}. If there is still no valid handoff bead after the last one, the run stops and files a bug bead against this session.`,
   );
