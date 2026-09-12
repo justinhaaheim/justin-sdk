@@ -189,6 +189,26 @@ describe('runChild: a child that will not let go cannot hold the runner', () => 
     expect(describeChildFailure('claude stop', v)).toBe('claude stop exited 3');
   });
 
+  test('output past the buffer is TRUNCATED, not quietly short', async () => {
+    // A child that outruns `maxBufferBytes` is the fourth failure mode
+    // `describeChildFailure` orders, and the only one whose result still looks
+    // like a success: status 0, no timeout, and stdout that parses. Left
+    // unnamed it is critical rule 6 exactly — half a listing read as the whole
+    // listing, so a session that is still there reads as gone.
+    const v = await runChild(
+      '/bin/sh',
+      ['-c', 'printf "%s" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; exit 0'],
+      {maxBufferBytes: 8, timeoutMs: 5_000},
+    );
+    expect(v.status).toBe(0);
+    expect(v.timedOut).toBe(false);
+    expect(v.truncated).toBe(true);
+    expect(v.stdout).toHaveLength(8);
+    expect(describeChildFailure('claude agents --json', v)).toBe(
+      'claude agents --json produced more output than the buffer allows, so what came back is incomplete',
+    );
+  });
+
   test('output written just before the exit is not clipped', async () => {
     // The grace period exists for exactly this, and nothing else. Without it,
     // answering on `exit` would race the last write.
