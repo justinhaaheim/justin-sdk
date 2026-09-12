@@ -13,17 +13,22 @@
  * report dispositions them differently.
  */
 
-import {describe, expect, test} from 'bun:test';
+import {afterEach, describe, expect, spyOn, test} from 'bun:test';
 
 import {
   askViewOf,
   decisionFor,
   orderAsks,
   promptFor,
+  retryCommandFor,
+  runThreadAnswer,
+  shellSingleQuote,
   walkAsks,
   type AnswerIo,
+  type AnswerWriter,
   type AskView,
 } from '../src/thread/answer';
+import {createFakeBd, type FakeBd, type FakeState} from './fake-bd';
 
 import type {BdIssue} from '../src/thread/bd';
 
@@ -57,6 +62,24 @@ function scriptedIo(lines: string[], block = ''): AnswerIo & {shown: string[]} {
       shown.push(text);
     },
     shown,
+  };
+}
+
+/** A writer that always succeeds and remembers what it was handed. */
+function recordingWriter(): AnswerWriter & {wrote: string[]} {
+  const wrote: string[] = [];
+  return {
+    async ask(ask, decision) {
+      wrote.push(
+        `${ask.id}:${decision.kind === 'skipped' ? 'skip' : decision.text}`,
+      );
+      return {ok: true};
+    },
+    async note(text) {
+      wrote.push(`note:${text}`);
+      return {ok: true};
+    },
+    wrote,
   };
 }
 
@@ -218,7 +241,7 @@ describe('walkAsks', () => {
       }),
     ];
     const io = scriptedIo(['b', ''], 'also check the hook');
-    const result = await walkAsks(asks, io);
+    const result = await walkAsks(asks, io, recordingWriter());
 
     expect(result.decisions.map((entry) => entry.decision)).toEqual([
       {kind: 'answered', text: 'b'},
@@ -233,12 +256,20 @@ describe('walkAsks', () => {
 
   test('the ask is SHOWN before it is asked', async () => {
     const io = scriptedIo(['a']);
-    await walkAsks([view({description: 'THE FULL RENDERED ASK'})], io);
+    await walkAsks(
+      [view({description: 'THE FULL RENDERED ASK'})],
+      io,
+      recordingWriter(),
+    );
     expect(io.shown.join('\n')).toContain('THE FULL RENDERED ASK');
   });
 
   test('an empty note becomes null, not an empty string', async () => {
-    const result = await walkAsks([view()], scriptedIo(['a'], '   '));
+    const result = await walkAsks(
+      [view()],
+      scriptedIo(['a'], '   '),
+      recordingWriter(),
+    );
     expect(result.note).toBeNull();
   });
 
@@ -247,10 +278,252 @@ describe('walkAsks', () => {
       view({blocking: false, id: 'jl-a1.2'}),
       view({blocking: true, id: 'jl-a1.1'}),
     ];
-    const result = await walkAsks(asks, scriptedIo(['a', 'b']));
+    const result = await walkAsks(
+      asks,
+      scriptedIo(['a', 'b']),
+      recordingWriter(),
+    );
     expect(result.decisions.map((entry) => entry.ask.id)).toEqual([
       'jl-a1.1',
       'jl-a1.2',
     ]);
+  });
+
+  test('a failed write is reported on the spot and the walk carries on', async () => {
+    const io = scriptedIo(['a', 'b']);
+    const writer: AnswerWriter = {
+      async ask(ask) {
+        if (ask.id === 'jl-a1.1')
+          return {detail: 'comment — bd said no', ok: false, retry: 'fix me'};
+        return {ok: true};
+      },
+      async note() {
+        return {ok: true};
+      },
+    };
+    const result = await walkAsks(
+      [
+        view({blocking: true, id: 'jl-a1.1'}),
+        view({blocking: true, id: 'jl-a1.2'}),
+      ],
+      io,
+      writer,
+    );
+    // BOTH asks were walked — the failure did not end the walk.
+    expect(result.decisions.map((entry) => entry.ask.id)).toEqual([
+      'jl-a1.1',
+      'jl-a1.2',
+    ]);
+    expect(result.decisions.map((entry) => entry.recorded)).toEqual([
+      false,
+      true,
+    ]);
+    expect(result.failures).toEqual([
+      {detail: 'comment — bd said no', label: 'jl-a1.1', retry: 'fix me'},
+    ]);
+    expect(io.shown.join('\n')).toContain('NOT recorded on jl-a1.1');
+  });
+
+  test('no note means no note write, and no "recording…" that explains nothing', async () => {
+    const io = scriptedIo(['a'], '');
+    const writer = recordingWriter();
+    await walkAsks([view()], io, writer);
+    expect(writer.wrote).toEqual(['jl-a1.1:a']);
+    expect(io.shown.join('\n')).not.toContain('recording…');
+  });
+
+  test('the note write is announced BEFORE it is made (home-base-p1uj.9)', async () => {
+    // The keystroke this is about: Enter on the empty line after the note. The
+    // old walk did every bd write here, silently, for ~10s.
+    const shownWhenWriting: string[] = [];
+    const io = scriptedIo(['a'], 'also check the hook');
+    const writer: AnswerWriter = {
+      async ask() {
+        return {ok: true};
+      },
+      async note() {
+        shownWhenWriting.push(...io.shown);
+        return {ok: true};
+      },
+    };
+    await walkAsks([view()], io, writer);
+    expect(shownWhenWriting).toContain('recording…');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// End to end, against a real bd subprocess (tests/fake-bd.ts).
+//
+// The unit tests above prove the walk CALLS its writer between prompts. These
+// prove the whole command does, through the real adapter: what is observed is
+// the fake bd's own command log, sampled at the moment each prompt is shown.
+// ---------------------------------------------------------------------------
+
+const SESSION = 'sess-answer';
+
+const spies: {mockRestore: () => void}[] = [];
+afterEach(() => {
+  for (const spy of spies.splice(0)) spy.mockRestore();
+});
+
+function captureConsole(): {errors: string[]; logs: string[]} {
+  const errors: string[] = [];
+  const logs: string[] = [];
+  spies.push(
+    spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+      logs.push(args.join(' '));
+    }),
+  );
+  spies.push(
+    spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+      errors.push(args.join(' '));
+    }),
+  );
+  return {errors, logs};
+}
+
+/** A thread with two open asks, already in bd. */
+function seededFake(failCommentAddFor: string | null = null): FakeBd {
+  const fake = createFakeBd(0, failCommentAddFor);
+  const state: FakeState = fake.read();
+  state.issues = [
+    {
+      id: 'jl-t1',
+      metadata: {reportedAt: '2026-09-12T10:00:00.000Z', sessionId: SESSION},
+      notes: 'THE RENDERED REPORT',
+      parent: null,
+      status: 'in_progress',
+      title: 'A session',
+      type: 'thread',
+    },
+    {
+      description: '[Pick a/b] Ask one?',
+      id: 'jl-t1.1',
+      metadata: {
+        askIndex: 0,
+        blocking: true,
+        defaultAction: 'I take a.',
+        kind: 'pick',
+        optionCount: 2,
+        reportCount: 1,
+      },
+      parent: 'jl-t1',
+      status: 'open',
+      title: 'Ask one?',
+      type: 'ask',
+    },
+    {
+      description: '[Approve Y/n] Ask two?',
+      id: 'jl-t1.2',
+      metadata: {
+        askIndex: 1,
+        blocking: false,
+        defaultAction: 'I leave it.',
+        kind: 'approve',
+        optionCount: 0,
+        reportCount: 1,
+      },
+      parent: 'jl-t1',
+      status: 'open',
+      title: 'Ask two?',
+      type: 'ask',
+    },
+  ];
+  fake.write(state);
+  return fake;
+}
+
+function envFor(fake: FakeBd): Record<string, string | undefined> {
+  return {...fake.env, JUSTIN_THREADS_LIFE_DIR: fake.dir};
+}
+
+/** Every `comments add` the SDK has issued so far, from bd's own log. */
+function commentsAdded(fake: FakeBd): string[] {
+  return fake.read().log.filter((line) => line.startsWith('comments add'));
+}
+
+describe('runThreadAnswer against bd', () => {
+  test('each answer is in bd BEFORE the next ask is prompted (home-base-p1uj.9)', async () => {
+    const fake = seededFake();
+    captureConsole();
+    const atPrompt: string[][] = [];
+    const io: AnswerIo = {
+      async block() {
+        atPrompt.push(commentsAdded(fake));
+        return '';
+      },
+      async line() {
+        atPrompt.push(commentsAdded(fake));
+        return 'b';
+      },
+      print() {},
+    };
+
+    const code = await runThreadAnswer({
+      env: envFor(fake),
+      io,
+      threadId: 'jl-t1',
+    });
+
+    expect(code).toBe(0);
+    // Prompt 1: nothing written yet — there is nothing to write.
+    expect(atPrompt[0]).toEqual([]);
+    // Prompt 2: ask one's answer IS ALREADY IN bd. This is the whole fix; when
+    // the walk batched its writes, this array was empty and stayed empty until
+    // after the note prompt.
+    expect(atPrompt[1]).toHaveLength(1);
+    expect(atPrompt[1]![0]).toContain('jl-t1.1');
+    // The note prompt: both answers are in, so the only write left is the note.
+    expect(atPrompt[2]).toHaveLength(2);
+    expect(atPrompt[2]![1]).toContain('jl-t1.2');
+  });
+
+  test('the last line is what Justin says, not a command he cannot run', async () => {
+    const fake = seededFake();
+    const {logs} = captureConsole();
+    const code = await runThreadAnswer({
+      env: envFor(fake),
+      io: scriptedIo(['b', 'y'], ''),
+      threadId: 'jl-t1',
+    });
+    expect(code).toBe(0);
+    // `thread inbox` needs a session id his shell does not have, and it is
+    // Claude's own next step — so the walk ends by telling him what to SAY.
+    expect(logs.at(-1)).toBe('Tell Claude: answers in');
+    expect(logs.join('\n')).not.toContain('justin-sdk thread inbox');
+  });
+
+  test('a failed write names the ask, keeps walking, and prints the retry command', async () => {
+    const fake = seededFake('jl-t1.1');
+    const {errors, logs} = captureConsole();
+    const io = scriptedIo(['b', 'y'], '');
+
+    const code = await runThreadAnswer({
+      env: envFor(fake),
+      io,
+      threadId: 'jl-t1',
+    });
+
+    expect(code).toBe(1);
+    // The walk CONTINUED: the second ask was asked, and its answer landed.
+    expect((fake.read().comments ?? []).map((comment) => comment.id)).toEqual([
+      'jl-t1.2',
+    ]);
+    expect(io.shown.join('\n')).toContain('NOT recorded on jl-t1.1');
+    // The counts describe what REACHED bd — the lost answer is not counted.
+    expect(logs.join('\n')).toContain('1 answered · 0 skipped');
+    expect(errors.join('\n')).toContain('jl-t1.1');
+    expect(errors.join('\n')).toContain(
+      "cd ~/Dev/life && bun run bd comments add jl-t1.1 'ANSWER: b'",
+    );
+  });
+});
+
+describe('the retry command', () => {
+  test('an apostrophe in an answer cannot break out of the quoting', () => {
+    expect(shellSingleQuote("don't ship")).toBe(`'don'\\''t ship'`);
+    expect(retryCommandFor('jl-t1.1', 'ANSWER: `whoami`')).toBe(
+      "cd ~/Dev/life && bun run bd comments add jl-t1.1 'ANSWER: `whoami`'",
+    );
   });
 });
