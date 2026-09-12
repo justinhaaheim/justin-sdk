@@ -145,7 +145,8 @@ export function buildStartMetadata(input: {
     // than silently conflated: "the transcript says 09:04" and "I saw this
     // session for the first time at 09:04" are different claims.
     startedAt: facts.startedAt ?? startedAt,
-    startedAtSource: facts.startedAt != null ? 'transcript' : 'sessionStartHook',
+    startedAtSource:
+      facts.startedAt != null ? 'transcript' : 'sessionStartHook',
     stopReasonDetail: null,
     stopReasonKind: null,
     threadStartedAt: startedAt,
