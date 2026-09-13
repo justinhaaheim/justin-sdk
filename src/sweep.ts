@@ -125,6 +125,11 @@ import {
 } from './plugin/lib/rules-file';
 import {getSdkVersion, isQuiet, setQuiet, writeJson} from './setup-helpers';
 import {detectPackageManager, setupEnv, type PackageManager} from './setup-env';
+import {
+  formatSweepSource,
+  resolveSweepSource,
+  type SweepSource,
+} from './sweep-source';
 import {runSyncRules} from './sync-rules';
 
 export const SWEEP_BRANCH = 'worktree-sdk-sweep';
@@ -2518,6 +2523,19 @@ export interface SweepOptions {
   component?: string;
   /** Where the run log goes. Default SWEEP_LOG_DIR. */
   logDir?: string;
+  /**
+   * Sweep even though this justin-sdk is not a clean, tagged checkout
+   * (home-base-ovzv O3). Default false: a real sweep propagates THIS code to
+   * every enrolled repo, so running it from whatever a live session happens to
+   * have checked out has to be a deliberate act, not the default.
+   */
+  allowUnreleased?: boolean;
+  /**
+   * The provenance of the code this sweep is running. Default: MEASURED from
+   * the SDK's own package root. Injected by tests, which run from a working
+   * checkout (i.e. `unreleased`) and would otherwise all trip the gate.
+   */
+  source?: SweepSource;
 }
 
 export async function runSweep(options: SweepOptions = {}): Promise<number> {
@@ -2535,8 +2553,15 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
   const repos = explicit.length > 0 ? explicit : discoverSweepRepos(root);
   const dryRun = options.dryRun === true;
 
+  // WHAT CODE IS THIS? (home-base-ovzv). Measured unless injected, and named on
+  // the header's first line — the sweep propagates this very working tree to
+  // every enrolled repo, and until now nothing on screen said which tree.
+  const source = options.source ?? resolveSweepSource();
+  const sourceLabel = formatSweepSource(source);
   say(
-    `${BOLD}justin-sdk sweep${RESET} — ${repos.length} repo(s)` +
+    `${BOLD}justin-sdk sweep ${getSdkVersion()}${RESET} ` +
+      `${source.kind === 'unreleased' ? YELLOW : DIM}(${sourceLabel})${RESET}` +
+      ` — ${repos.length} repo(s)` +
       `${explicit.length > 0 ? ' (explicit)' : ` discovered under ${root}`}` +
       `${
         payload.mode === 'component'
@@ -2545,6 +2570,25 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
       }` +
       `${dryRun ? ` ${DIM}(dry-run)${RESET}` : ''}`,
   );
+
+  // THE GATE (ovzv O3). Before the run log, before the first repo: a refusal
+  // has to happen while "nothing was touched" is still true. A dry-run changes
+  // nothing by definition, so it proceeds on a warning — it is also the way to
+  // SEE what an unreleased sweep would do without shipping it.
+  if (source.kind === 'unreleased') {
+    if (!dryRun && options.allowUnreleased !== true) {
+      say(
+        `${RED}✗ REFUSING to sweep: this justin-sdk is not a released build — ${sourceLabel}.${RESET}\n` +
+          `${RED}  A sweep propagates THIS working tree to every enrolled repo. Check out a release tag (or release first with justin-sdk-publish), or pass --allow-unreleased to sweep from this checkout deliberately.${RESET}\n` +
+          `${RED}  Nothing was touched.${RESET}`,
+      );
+      return 1;
+    }
+    say(
+      `${YELLOW}⚠ sweeping from an UNRELEASED justin-sdk — ${sourceLabel} ` +
+        `(${dryRun ? 'dry-run: nothing will change' : '--allow-unreleased'}).${RESET}`,
+    );
+  }
 
   // Announced at the top AND at the bottom (ckc4 F2): a failure's worktree is
   // gone by the time the summary prints, so the log is the only evidence left

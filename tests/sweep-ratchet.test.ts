@@ -44,9 +44,28 @@ import {
   SWEEP_BRANCH,
   SWEEP_WORKTREE_SEGMENTS,
   tailLines,
+  type SweepOptions,
 } from '../src/sweep';
+import type {SweepSource} from '../src/sweep-source';
 import {git, write} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
+
+/**
+ * These tests drive REAL (non-dry-run) sweeps, and the provenance gate
+ * (home-base-ovzv) refuses those unless the running SDK is a clean, tagged
+ * checkout — which a test run, executing from a working checkout, never is.
+ * Injecting the provenance makes each test run the way a RELEASED sweep runs;
+ * the gate itself, including its refusal, is tested in sweep-source.test.ts.
+ */
+const AT_A_RELEASE_TAG: SweepSource = {
+  kind: 'tag',
+  sha: '1111111111111111111111111111111111111111',
+  tag: 'v9.9.9',
+};
+
+function runSweepAtRelease(options: SweepOptions): Promise<number> {
+  return runSweep({source: AT_A_RELEASE_TAG, ...options});
+}
 
 const sandboxes: Sandbox[] = [];
 function track(sb: Sandbox): Sandbox {
@@ -625,7 +644,7 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
     const logDir = join(sb.path, 'logs');
 
     const {out, value} = await captureLog(() =>
-      runSweep({component: 'gitignore', logDir, repos: [repo]}),
+      runSweepAtRelease({component: 'gitignore', logDir, repos: [repo]}),
     );
 
     expect(value).toBe(1);
@@ -645,7 +664,7 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
     const logDir = join(sb.path, 'logs');
 
     const {out, value} = await captureLog(() =>
-      runSweep({component: 'gitignore', logDir, repos: [repo]}),
+      runSweepAtRelease({component: 'gitignore', logDir, repos: [repo]}),
     );
 
     expect(value).toBe(1);
@@ -675,7 +694,7 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
     git(repo, ['config', 'user.email', '']);
 
     const {out, value} = await captureLog(() =>
-      runSweep({
+      runSweepAtRelease({
         component: 'gitignore',
         logDir: join(sb.path, 'logs'),
         repos: [repo],
@@ -706,7 +725,7 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
     const logDir = join(sb.path, 'logs');
 
     const {out, value} = await captureLog(() =>
-      runSweep({component: 'gitignore', logDir, repos: [repo]}),
+      runSweepAtRelease({component: 'gitignore', logDir, repos: [repo]}),
     );
 
     expect(value).toBe(0);
@@ -726,7 +745,7 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
     writeFileSync(join(repo, '.gitignore'), 'node_modules/\nbun.lock\nlocal\n');
 
     const {out, value} = await captureLog(() =>
-      runSweep({
+      runSweepAtRelease({
         component: 'gitignore',
         logDir: join(sb.path, 'logs'),
         repos: [repo],
@@ -755,7 +774,7 @@ describe('the ratchet gate, end to end (F3)', () => {
     });
 
     const {out, value} = await captureLog(() =>
-      runSweep({
+      runSweepAtRelease({
         component: 'gitignore',
         logDir: join(sb.path, 'logs'),
         repos: [repo],
@@ -784,7 +803,7 @@ describe('the ratchet gate, end to end (F3)', () => {
     const repo = e2eRepo(sb, 'already-red-summary', {signal: 'always-red'});
 
     const {out} = await captureLog(() =>
-      runSweep({
+      runSweepAtRelease({
         component: 'gitignore',
         logDir: join(sb.path, 'logs'),
         repos: [repo],
@@ -822,7 +841,7 @@ describe('the ratchet gate, end to end (F3)', () => {
     });
 
     const {out, value} = await captureLog(() =>
-      runSweep({
+      runSweepAtRelease({
         component: 'gitignore',
         logDir: join(sb.path, 'logs'),
         repos: [repo],
@@ -870,7 +889,7 @@ describe('the ratchet gate, end to end (F3)', () => {
     });
 
     const {out, value} = await captureLog(() =>
-      runSweep({
+      runSweepAtRelease({
         component: 'gitignore',
         logDir: join(sb.path, 'logs'),
         repos: [repo],
@@ -891,7 +910,7 @@ describe('the sweep commit passes --no-verify (F3b)', () => {
     const repo = e2eRepo(sb, 'hostile-pre-commit', {hostilePreCommit: true});
 
     const {out, value} = await captureLog(() =>
-      runSweep({
+      runSweepAtRelease({
         component: 'gitignore',
         logDir: join(sb.path, 'logs'),
         repos: [repo],
@@ -966,7 +985,7 @@ describe('skips are counted and separated (F4)', () => {
     git(stuckWorktree, ['commit', '-qm', 'work nobody else has']);
 
     const {out, value} = await captureLog(() =>
-      runSweep({
+      runSweepAtRelease({
         component: 'gitignore',
         logDir: join(sb.path, 'logs'),
         repos: [green, stuck, other],
@@ -1001,7 +1020,7 @@ describe('preflight removes a provably-empty leftover (F5)', () => {
     git(repo, ['worktree', 'add', '-q', '-b', SWEEP_BRANCH, worktree, 'main']);
 
     const {out, value} = await captureLog(() =>
-      runSweep({
+      runSweepAtRelease({
         component: 'gitignore',
         logDir: join(sb.path, 'logs'),
         repos: [repo],
@@ -1037,7 +1056,7 @@ describe('preflight removes a provably-empty leftover (F5)', () => {
     git(repo, ['worktree', 'add', '-q', '-b', SWEEP_BRANCH, worktree, 'main']);
 
     const {out, value} = await captureLog(() =>
-      runSweep({
+      runSweepAtRelease({
         component: 'gitignore',
         logDir: join(sb.path, 'logs'),
         repos: [repo],
@@ -1069,7 +1088,7 @@ describe('preflight removes a provably-empty leftover (F5)', () => {
     writeFileSync(join(worktree, 'a.txt'), 'unfinished work\n');
 
     const {out, value} = await captureLog(() =>
-      runSweep({
+      runSweepAtRelease({
         component: 'gitignore',
         logDir: join(sb.path, 'logs'),
         repos: [repo],
@@ -1090,7 +1109,7 @@ describe('preflight removes a provably-empty leftover (F5)', () => {
     git(repo, ['worktree', 'add', '-q', '-b', SWEEP_BRANCH, worktree, 'main']);
 
     const {out, value} = await captureLog(() =>
-      runSweep({
+      runSweepAtRelease({
         component: 'gitignore',
         dryRun: true,
         logDir: join(sb.path, 'logs'),

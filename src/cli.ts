@@ -45,6 +45,7 @@ import {runSyncRules} from './sync-rules';
 import {runTimeCheck} from './time-check';
 import {runUsageCheck} from './usage-check';
 import {runSetupEnv} from './setup-env-command';
+import {getSdkVersion} from './setup-helpers';
 import {runSignal} from './signal';
 import {runSweep} from './sweep';
 import {runUpdate} from './update';
@@ -942,10 +943,17 @@ void yargs(ARGV)
           choices: [...COMPONENT_NAMES],
           describe:
             'Scope the payload to ONE component and leave the SDK pin alone: no pin bump, no `update`, no other component re-applied — so a rules/config edit does not ship an SDK upgrade to the whole fleet. Repos not enrolled in the component are skipped. Same gates either way. Unknown name refuses the whole run.',
+        })
+        .option('allow-unreleased', {
+          type: 'boolean',
+          describe:
+            'Run the sweep from a checkout that is not exactly at a release tag — for testing a sweep change before tagging. Without it, a non-dry-run sweep from a branch, a detached HEAD or a dirty tree refuses before touching any repo (the header names the source either way; --dry-run always proceeds).',
+          default: false,
         }),
     async (argv) => {
       process.exit(
         await runSweep({
+          allowUnreleased: argv['allow-unreleased'],
           component: argv.component,
           dryRun: argv['dry-run'],
           repos: argv.repo,
@@ -991,4 +999,12 @@ void yargs(ARGV)
   // `justin-loop handoff`'s stdout contracts cannot afford. See cli-failure.ts.
   .fail(reportCliFailure)
   .help()
+  // EXPLICIT, because yargs' guess is wrong here (home-base-ovzv O1): left to
+  // itself it walked up from its own `node_modules/yargs` and printed
+  // home-base's `0.1.0` for the 0.28.1 SDK — measured 2026-09-12, from the SDK
+  // directory AND from an unrelated cwd. getSdkVersion() reads the SDK's own
+  // package.json, the same source the SDK_VERSION check and the sweep commit
+  // use, so `--version` and the pin a sweep writes can never disagree. One
+  // readFileSync on every invocation; it is the file `update` already reads.
+  .version(getSdkVersion())
   .parse();
