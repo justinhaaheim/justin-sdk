@@ -48,7 +48,7 @@ exports[`one fixture, three media markdown baseline 1`] = `
      If you don't answer: I leave it off everywhere but this machine.
 
 **Prior asks — closed by this report:**
-- jl-x7q.1 — answered: You said "yes, closing is right".
+- jl-x7q.1 ([Approve Y/n] Close ask beads when they are answered rather than deleting them?) — answered: You said "yes, closing is right".
 
 **Compact report.** Work product and beads touched are on the thread bead — \`justin-sdk thread show --full\`.
 
@@ -104,7 +104,7 @@ exports[`one fixture, three media ansi baseline 1`] = `
 \x1B[2m     If you don't answer: I leave it off everywhere but this machine.\x1B[0m
 
 \x1B[1m\x1B[4mPrior asks — closed by this report:\x1B[0m
-- jl-x7q.1 — answered: You said "yes, closing is right".
+- jl-x7q.1 ([Approve Y/n] Close ask beads when they are answered rather than deleting them?) — answered: You said "yes, closing is right".
 
 \x1B[2m**Compact report.** Work product and beads touched are on the thread bead — \`justin-sdk thread show --full\`.\x1B[0m
 
@@ -159,7 +159,7 @@ exports[`one fixture, three media html baseline 1`] = `
 <p class="askdetail p3">If you don&#39;t answer: I leave it off everywhere but this machine.</p>
 <h3>Prior asks — closed by this report</h3>
 <ul>
-<li>jl-x7q.1 — answered: You said &quot;yes, closing is right&quot;.</li>
+<li>jl-x7q.1 ([Approve Y/n] Close ask beads when they are answered rather than deleting them?) — answered: You said &quot;yes, closing is right&quot;.</li>
 </ul>
 <p class="note"><strong>Compact report.</strong> Work product and beads touched are on the thread bead — \`justin-sdk thread show --full\`.</p>
 <p class="command">Answer: justin-sdk thread answer th-eru</p>

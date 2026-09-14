@@ -48,7 +48,7 @@ exports[`renderMarkdown full report matches the committed baseline 1`] = `
      If you don't answer: I leave it off everywhere but this machine.
 
 **Prior asks — closed by this report:**
-- jl-x7q.1 — answered: You said "yes, closing is right".
+- jl-x7q.1 ([Approve Y/n] Close ask beads when they are answered rather than deleting them?) — answered: You said "yes, closing is right".
 
 **Work product:**
 - code: src/thread/ plus the bin symlink, on branch thread-reports

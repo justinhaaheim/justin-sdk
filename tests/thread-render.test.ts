@@ -60,8 +60,22 @@ const ASK_IDS = ['jl-x7q.2', 'jl-x7q.3'];
  * full form is what the thread bead stores (D10) and what `--full` prints, so it
  * is the document whose shape D11 promises. The compact form has its own tests.
  */
+/**
+ * The restated text of the ask the fixture report closes (F1,
+ * home-base-p1uj.18). Pinned here so the baseline shows the descriptive phrase
+ * the rule requires, rather than the bare `jl-x7q.1` the line used to print.
+ */
+const PRIOR_RESTATED = new Map([
+  [
+    'jl-x7q.1',
+    '[Approve Y/n] Close ask beads when they are answered rather than deleting them?\n\nContext: the walk currently leaves them open.',
+  ],
+]);
+
 function render(options: BuildReportModelOptions): string {
-  return renderMarkdown(buildReportModel({full: true, ...options}));
+  return renderMarkdown(
+    buildReportModel({full: true, priorAskRestated: PRIOR_RESTATED, ...options}),
+  );
 }
 
 describe('renderMarkdown', () => {
@@ -263,6 +277,75 @@ IF UNANSWERED: I keep by-repo as the default.`,
     expect(asksSection).toContain(
       'IF UNANSWERED: I keep by-repo as the default.',
     );
+  });
+
+  test('a closed prior ask carries its restated first line, never a bare id (F1)', () => {
+    const text = render({
+      askIds: ASK_IDS,
+      facts: facts(),
+      payload: payload(),
+      threadId: 'jl-x7q',
+    });
+    expect(text).toContain(
+      '- jl-x7q.1 ([Approve Y/n] Close ask beads when they are answered rather than deleting them?) — answered:',
+    );
+    // Only the FIRST line — the rest of the ask bead's body stays on the bead.
+    expect(text).not.toContain('Context: the walk currently leaves them open.');
+  });
+
+  test('an unreadable ask bead renders the id and disposition with NO parenthetical (F1)', () => {
+    // NEGATIVE CONTROL for the line above, and the reason `restated` is nullable:
+    // when the bead is not among the ones we could read, the line must degrade to
+    // the bare id rather than invent a phrase — an invented description reads as
+    // a fact, while a bare id is visibly incomplete.
+    const text = renderMarkdown(
+      buildReportModel({
+        askIds: ASK_IDS,
+        facts: facts(),
+        full: true,
+        payload: payload(),
+        priorAskRestated: new Map(),
+        threadId: 'jl-x7q',
+      }),
+    );
+    expect(text).toContain(
+      '- jl-x7q.1 — answered: You said "yes, closing is right".',
+    );
+    expect(text).not.toContain('jl-x7q.1 (');
+    expect(text).not.toContain('jl-x7q.1 ()');
+  });
+
+  test('the compact report caps the restated phrase to keep the line to one line', () => {
+    const long = `${'x'.repeat(200)}\nsecond line`;
+    const text = renderMarkdown(
+      buildReportModel({
+        askIds: ASK_IDS,
+        facts: facts(),
+        full: false,
+        payload: payload(),
+        priorAskRestated: new Map([['jl-x7q.1', long]]),
+        threadId: 'jl-x7q',
+      }),
+    );
+    const line = text
+      .split('\n')
+      .find((candidate) => candidate.startsWith('- jl-x7q.1'));
+    expect(line).toBeDefined();
+    expect(line).toContain(`(${'x'.repeat(79)}…)`);
+
+    // NEGATIVE CONTROL: --full keeps the whole phrase, so the cap is a compact
+    // choice rather than data loss.
+    const full = renderMarkdown(
+      buildReportModel({
+        askIds: ASK_IDS,
+        facts: facts(),
+        full: true,
+        payload: payload(),
+        priorAskRestated: new Map([['jl-x7q.1', long]]),
+        threadId: 'jl-x7q',
+      }),
+    );
+    expect(full).toContain(`(${'x'.repeat(200)})`);
   });
 
   test('carried asks are numbered ahead of new ones in the same sequence', () => {

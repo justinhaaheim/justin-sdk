@@ -180,7 +180,11 @@ export function renderMarkdown(model: ReportModel): string {
   lines.push('**Prior asks — closed by this report:**');
   if (model.priorClosed.length === 0) lines.push('- (none closed this time)');
   for (const prior of model.priorClosed) {
-    lines.push(`- ${prior.id} — ${prior.disposition}: ${prior.detail}`);
+    // The phrase in brackets is the rule's "every bead id gets a descriptive
+    // phrase" (F1, home-base-p1uj.18). It is dropped entirely — never faked, and
+    // never printed as empty brackets — when the ask bead could not be read.
+    const phrase = prior.restated == null ? '' : ` (${prior.restated})`;
+    lines.push(`- ${prior.id}${phrase} — ${prior.disposition}: ${prior.detail}`);
   }
 
   if (model.workProduct != null) {

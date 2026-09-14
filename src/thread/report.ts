@@ -286,6 +286,13 @@ export async function writeReportToBd(
 ): Promise<BdWriteOutcome> {
   const {ctx, facts, payload, sessionId} = input;
 
+  // Ask id → its restated text, for the prior asks this report closes (F1,
+  // home-base-p1uj.18). FILLED LATER, once the ask beads have been read, and
+  // read at render time through this closure — which is the point: a render on
+  // an early failure path has not read any asks yet, so it finds the map empty
+  // and prints bare ids, which is the honest rendering of "we could not look".
+  const priorAskRestated = new Map<string, string>();
+
   // ONE renderer for every path through this function (D14). `full` is what
   // the caller asked to be PRINTED; the notes field always stores the full
   // rendering, which is why `notesOf` pins it rather than passing it through.
@@ -299,6 +306,7 @@ export async function writeReportToBd(
         facts,
         full: extra.full ?? input.render?.full,
         payload,
+        priorAskRestated,
         wrapUpAt: input.render?.wrapUpAt,
       }),
     );
@@ -491,6 +499,14 @@ export async function writeReportToBd(
       .filter((prior) => !CLOSING_DISPOSITIONS.has(prior.disposition))
       .map((prior) => prior.id),
   );
+  // Every ask bead we hold, own and continued, keyed by id (F1). The asks this
+  // report CLOSES are still open at read time — they are closed further down —
+  // so they are all in here, and each closed line can name itself instead of
+  // printing a bare `th-9kq.2` that Justin cannot place.
+  for (const ask of [...openAsks, ...continuedOpenAsks]) {
+    priorAskRestated.set(ask.id, restateAsk(ask.description ?? ask.title ?? ''));
+  }
+
   const carriedAskOf = (ask: BdIssue, fromThread: string | null): CarriedAsk => {
     const meta = (ask.metadata ?? {}) as Record<string, unknown>;
     // askIndex and reportCount are what put this ask in the same position in

@@ -49,6 +49,15 @@ export const FULL_LAST_MESSAGE_CAP = 1500;
 /** How much of a closed prior ask's detail the compact report keeps. */
 export const COMPACT_PRIOR_DETAIL_CAP = 120;
 
+/**
+ * …and how much of the ask's restated phrase (F1).
+ *
+ * Shorter than the detail cap on purpose: the phrase is there to make the bead
+ * id recognisable, not to re-ask the question, and the compact report's promise
+ * is that a closed prior ask is ONE line.
+ */
+export const COMPACT_PRIOR_RESTATED_CAP = 80;
+
 const STOP_REASON_LABEL: Record<string, string> = {
   blocked: '🛑 Blocked on you',
   completed: '✅ Work completed',
@@ -205,12 +214,36 @@ export interface ReportModel {
   lastUserMessage: string | null;
   learned: {disposition: string; text: string}[];
   /** Prior asks CLOSED by this report. The carried ones are live asks, above. */
-  priorClosed: {detail: string; disposition: string; id: string}[];
+  priorClosed: ModelPriorAsk[];
   title: string;
   /** Goal, then Claude's next steps, then what remains — one list (D18). */
   whatHappensNext: string[];
   /** Null in the compact report (D18). */
   workProduct: {merged: string; pr: string | null; summary: string} | null;
+}
+
+/**
+ * One prior ask this report closes (home-base-p1uj.18, F1).
+ *
+ * `restated` is why this is a named type rather than an inline shape. The line
+ * used to print a BARE BEAD ID — `- th-9kq.2 — answered: …` — which the rule
+ * driving this whole tool explicitly forbids ("every bead id gets a descriptive
+ * phrase"): Justin does not know what `th-9kq.2` is and will not look it up. The
+ * phrase is the ask's own first line, taken from the bead report.ts already
+ * fetched, so it costs no extra read.
+ *
+ * NULL IS A REAL VALUE and it renders as nothing at all. It means the ask bead
+ * was not among the ones we could read — closed long ago, on a thread we did not
+ * fetch, or simply gone — and in that case the line prints the id alone. A
+ * fabricated phrase would be worse than a bare id, because a bare id is
+ * obviously incomplete and an invented description reads as a fact.
+ */
+export interface ModelPriorAsk {
+  detail: string;
+  disposition: string;
+  id: string;
+  /** The ask's first line, or null when the bead could not be read. */
+  restated: string | null;
 }
 
 export interface BuildReportModelOptions {
@@ -226,6 +259,13 @@ export interface BuildReportModelOptions {
   /** What a null `askIds` entry means — "(NOT RECORDED)" or "(ask ids pending)". */
   missingAskIdLabel?: string;
   payload: ThreadReportPayload;
+  /**
+   * Ask id → the ask's restated text, for the prior asks this report CLOSES
+   * (F1). Built by report.ts from the ask beads it has already fetched — its own
+   * and the continued thread's. An id that is absent from the map renders
+   * without a phrase; nothing is ever invented for it.
+   */
+  priorAskRestated?: ReadonlyMap<string, string>;
   /** Which report this is (1-based); orders this report's asks after carried ones. */
   reportCount?: number;
   /** The thread bead id, or null when bd never took the report. */
@@ -237,6 +277,33 @@ export interface BuildReportModelOptions {
    * same as a threshold of zero, and the renderers never invent one.
    */
   wrapUpAt?: number | null;
+}
+
+/**
+ * The one line of an ask that identifies it (F1).
+ *
+ * An ask bead's description is the whole ask — the form tag, the context, the
+ * lettered options, the default — and a closed-ask line has room for a phrase,
+ * not a paragraph. The first non-empty line is what Justin wrote the ask as, so
+ * it is the phrase that makes the id recognisable.
+ *
+ * An absent or all-whitespace source returns null, NOT an empty string: the
+ * renderers branch on null to drop the parenthetical entirely, and `''` would
+ * print an empty pair of brackets that looks like a bug.
+ */
+export function firstLineOfAsk(text: string | undefined): string | null {
+  if (text == null) return null;
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed !== '') return trimmed;
+  }
+  return null;
+}
+
+/** Keep the compact report's one-line promise; `--full` prints the whole phrase. */
+function capRestated(restated: string | null, full: boolean): string | null {
+  if (restated == null) return null;
+  return full ? restated : truncate(restated, COMPACT_PRIOR_RESTATED_CAP);
 }
 
 /** "unknown" is said out loud; it is never rendered as a reassuring value. */
@@ -407,7 +474,7 @@ export function buildReportModel(
   const asks = entries.map((entry, index) => entry.ask(index + 1));
 
   const did = full ? payload.did : payload.did.slice(0, COMPACT_DID_CAP);
-  const priorClosed = payload.priorAsks
+  const priorClosed: ModelPriorAsk[] = payload.priorAsks
     .filter((prior) => CLOSING_DISPOSITIONS.has(prior.disposition))
     .map((prior) => ({
       detail: full
@@ -415,6 +482,10 @@ export function buildReportModel(
         : truncate(prior.detail, COMPACT_PRIOR_DETAIL_CAP),
       disposition: prior.disposition,
       id: prior.id,
+      restated: capRestated(
+        firstLineOfAsk(options.priorAskRestated?.get(prior.id)),
+        full,
+      ),
     }));
 
   return {

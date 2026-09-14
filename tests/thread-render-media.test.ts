@@ -66,6 +66,21 @@ function payload(): ThreadReportPayload {
   return result.payload;
 }
 
+/**
+ * The restated text of the ask this report closes (F1, home-base-p1uj.18).
+ *
+ * In production report.ts builds this from the ask beads it already fetched.
+ * Here it is pinned, so the snapshots show what a closed prior-ask line looks
+ * like when the phrase IS available — the whole point of F1 is that the line
+ * must never be a bare `jl-x7q.1`.
+ */
+const PRIOR_RESTATED = new Map([
+  [
+    'jl-x7q.1',
+    '[Approve Y/n] Close ask beads when they are answered rather than deleting them?\n\nContext: the walk currently leaves them open.',
+  ],
+]);
+
 function model(
   overrides: {emojiHeader?: boolean; wrapUpAt?: number | null} = {},
 ): ReportModel {
@@ -73,6 +88,7 @@ function model(
     askIds: ASK_IDS,
     facts: FACTS,
     payload: payload(),
+    priorAskRestated: PRIOR_RESTATED,
     threadId: 'th-eru',
     ...overrides,
   });

@@ -100,8 +100,8 @@ The second glance badge. Pick exactly one:
      If you don't answer: I retire it.
 
 **Prior asks — closed by this report:**
-- th-9kq.2 — answered: you said "yes, closing is right"
-- th-9kq.3 — decided: took the default, kept the knob off
+- th-9kq.2 ([Approve Y/n] Close ask beads rather than deleting them?) — answered: you said "yes, closing is right"
+- th-9kq.3 ([Pick a/b] Where should the thread knob live?) — decided: took the default, kept the knob off
 
 **Compact report.** Work product and beads touched are on the thread bead — `justin-sdk thread show --full`.
 
@@ -124,14 +124,14 @@ Two more are in the **full** report and not the compact one: **Work product:** a
 - **Answers to your questions** — each restating the question before the answer. Short. Point at the section with the detail.
 - **Deviations** — see the writing rules. Never omitted; "none" when there were none.
 - **Asks** — numbered 1..N in one sequence across every priority, each carrying its form ([Approve Y/n], [Pick a/b/c], [Answer], [Do]), its context, its lettered options with (Recommended) marked, its bead id, and its default. Do not repeat an ask anywhere else.
-- **Prior asks — closed by this report** — one line each: the id, how it was dispositioned, and the detail.
+- **Prior asks — closed by this report** — one line each: the id, the ask restated in brackets so the id means something, how it was dispositioned, and the detail. The tool fills the bracketed phrase in from the ask bead; if the bead could not be read it prints the id alone rather than inventing a description.
 - Number dispatches (dispatch 1, 2, 3), never letter them.
 
 ## Thread reports (knob-gated, 2026-09-12; format v2 2026-09-14)
 
 When the `justin-sdk thread` tool is available, the report is also recorded as a bead so open asks survive across turns and sessions. At wrap-up:
 
-1. Run `justin-sdk thread prepare`. If the command is not found, or it prints `THREADS: DISABLED`, write the text report above and stop here. If it prints `THREADS: SANDBOX DENIED`, write the text report and put the denial (with the paths it names) in a non-blocking ask.
+1. Run `justin-sdk thread prepare`. If the command is not found, or it prints `THREADS: DISABLED`, write the text report above and stop here. If it prints `THREADS: SANDBOX DENIED`, write the text report and put the denial (with the paths it names) in a P2 ask.
 2. If it prints `THREADS: ENABLED`, it lists the session's open asks, the payload skeleton, and the priority calibration. Write the payload JSON to `$TMPDIR`, dispositioning every open ask it listed (carried / answered / decided / irrelevant), and run `justin-sdk thread report --file <path>`.
 3. Paste the rendered report it prints **verbatim** as your final message. It is the template above, with ask bead ids inline. If it printed `NOT RECORDED`, still paste the report and add the failure as an ask.
 
