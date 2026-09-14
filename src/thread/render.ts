@@ -1,42 +1,27 @@
 /**
- * The rendered text report (home-base-p1uj D11).
+ * SHARED REPORT PIECES (home-base-p1uj D11, D14) — the bits more than one
+ * surface needs.
  *
- * This is `~/Dev/prompts/src/rules/status-report-format.md`'s template, with
- * the four changes the sampling of ten real reports on 2026-09-12 asked for:
+ * The report RENDERING moved out on 2026-09-14 (D14): `report-model.ts` decides
+ * what a report says, and `render-markdown` / `render-ansi` / `render-html`
+ * decide how it looks. `renderReport` is retired, and callers now import the
+ * medium they mean — the single function had grown four different audiences
+ * (Claude's paste, Justin's terminal, the browser panel, the bead's notes) and
+ * was about to grow a compact form as well.
  *
- *  1. THE LAST INSTRUCTION IS RESTATED AT THE TOP. Justin has been away for
- *     hours and reads this on a phone; "You told me to…" is the hook his memory
- *     latches onto before anything else can mean anything.
- *  2. EVERY QUESTION IS RESTATED BEFORE ITS ANSWER. Answers used to arrive as
- *     "1. yes" against questions he could no longer see.
- *  3. ONE NUMBERED SEQUENCE FOR ASKS, options LETTERED. The old format numbered
- *     questions and also lettered options, which collided; and it split the
- *     things Justin has to do across "questions" and "next steps", which he
- *     said plainly are the same thing.
- *  4. EVERY ASK CARRIES ITS BEAD ID INLINE, so he can answer one by id days
- *     later.
+ * What stayed here is what is NOT a report: the ask-bead and thread-bead body
+ * text (which bd stores and every other surface reads back), the ask numbering
+ * contract shared by the report and the `thread answer` walk, and the small
+ * spellings — `P0`, `[Pick a/b]`, option letters — that every surface must agree
+ * on or Justin's "1 yes, 2 b" lands on the wrong ask.
  *
- * WHY IT IS PASTED RATHER THAN LINKED. Claude pastes this verbatim into its
- * final message. Justin reads reports through iOS remote control, where tool
- * output is unreliable and "see above" is not a thing that exists. The same
- * text is also the bead's `notes` field (D10), so `bd show` alone is a complete
- * status report if this tool ever breaks.
- *
- * PURE. No I/O, no clock, no environment — everything it prints is an argument.
- * That is what makes the snapshot test meaningful.
+ * PURE. No I/O, no clock, no environment.
  */
 
-import {formatTokens} from '../usage-check';
-
 import {readAskPriority} from './metadata';
-import {ASK_PRIORITY_BLOCKING, CLOSING_DISPOSITIONS} from './schema';
 
 import type {ThreadFacts} from './facts';
 import type {ThreadAsk, ThreadReportPayload} from './schema';
-
-const RULE_STOP = '🛑'.repeat(28);
-const RULE_OM = '🕉️'.repeat(29);
-const RULE_HANDOFF = '⏭️'.repeat(8);
 
 const STOP_REASON_LABEL: Record<string, string> = {
   blocked: '🛑 Blocked on you',
@@ -117,21 +102,9 @@ function renderWorktree(facts: ThreadFacts): string {
   return facts.worktreePath ?? 'yes (path UNKNOWN)';
 }
 
-function renderDivergence(facts: ThreadFacts): string {
-  if (facts.aheadBehind == null) return 'ahead/behind UNKNOWN';
-  const {ahead, behind} = facts.aheadBehind;
-  return `${ahead} ahead / ${behind} behind`;
-}
-
 function renderDirty(facts: ThreadFacts): string {
   if (facts.dirty == null) return 'dirty UNKNOWN';
   return facts.dirty ? 'UNCOMMITTED CHANGES' : 'clean';
-}
-
-function renderTokens(facts: ThreadFacts): string {
-  return facts.tokensAtStop == null
-    ? 'UNKNOWN (see autofill failures)'
-    : `${formatTokens(facts.tokensAtStop)} tokens of context`;
 }
 
 /**
@@ -219,243 +192,6 @@ export function numberingFieldsOf(metadata: unknown): {
     priority: readAskPriority(metadata),
     reportCount: asNumber(meta.reportCount),
   };
-}
-
-export interface RenderOptions {
-  /**
-   * Ask bead ids, parallel to `payload.asks`. A null entry means the bead was
-   * not created — the report still prints, and says so rather than implying an
-   * id that does not exist.
-   */
-  askIds: (string | null)[];
-  /** Still-open asks from earlier reports, rendered in the same sequence (F4). */
-  carried?: readonly CarriedAsk[];
-  facts: ThreadFacts;
-  /**
-   * What a null entry in `askIds` means. "(NOT RECORDED)" when bd never took
-   * the report; "(ask ids pending)" for the provisional write that happens
-   * BEFORE the asks exist, on a bead that is already the thread (F1).
-   */
-  missingAskIdLabel?: string;
-  payload: ThreadReportPayload;
-  /**
-   * Which report this is (1-based). Used ONLY to order this report's own asks
-   * after the carried ones (F12); absent means "newer than anything carried",
-   * which is the same thing every caller means by it.
-   */
-  reportCount?: number;
-  /** The thread bead id, or null when bd never took the report. */
-  threadId: string | null;
-}
-
-function renderAsk(
-  lines: string[],
-  ask: ThreadAsk,
-  id: string | null,
-  number: number,
-  missingLabel: string,
-): void {
-  const idTag = id == null ? missingLabel : `(${id})`;
-  lines.push(`  ${number}. ${askKindTag(ask)} ${ask.text} ${idTag}`);
-  lines.push(`     Context: ${ask.context}`);
-  ask.options.forEach((option, index) => {
-    const prefix = option.recommended ? '(Recommended) ' : '';
-    lines.push(`     ${optionLetter(index)}. ${prefix}${option.text}`);
-  });
-  lines.push(`     If you don't answer: ${ask.default}`);
-}
-
-function renderCarried(
-  lines: string[],
-  carried: CarriedAsk,
-  number: number,
-): void {
-  const from =
-    carried.fromReport == null
-      ? '(carried from an earlier report)'
-      : `(carried from report #${carried.fromReport})`;
-  lines.push(`  ${number}. ${from} (${carried.id})`);
-  for (const line of carried.restated.split('\n')) lines.push(`     ${line}`);
-}
-
-/** The whole report, as one string. Ends without a trailing newline. */
-export function renderReport(options: RenderOptions): string {
-  const {askIds, facts, payload, threadId} = options;
-  const lines: string[] = [];
-
-  lines.push(RULE_STOP);
-  lines.push('');
-  lines.push(`**Thread:** ${payload.title}`);
-  lines.push(
-    `**Repo:** ${orUnknown(facts.repo)} · **Branch:** ${orUnknown(facts.branch)} · **Worktree:** ${renderWorktree(facts)}`,
-  );
-  lines.push(
-    `**Tree:** ${renderDirty(facts)} · ${renderDivergence(facts)} · HEAD ${facts.headSha == null ? 'UNKNOWN' : facts.headSha.slice(0, 12)}`,
-  );
-  lines.push(
-    `**Stop reason:** ${STOP_REASON_LABEL[payload.stopReason.kind] ?? payload.stopReason.kind} — ${payload.stopReason.detail}`,
-  );
-  lines.push(`**Tokens at stop:** ${renderTokens(facts)}`);
-  lines.push(`**You asked me to:** ${payload.instruction}`);
-  if (facts.lastUserMessage != null) {
-    lines.push(`**Your last message, verbatim:** ${facts.lastUserMessage}`);
-  }
-  if (payload.continuesFrom != null && payload.continuesFrom !== '') {
-    lines.push(`**Continues from:** ${payload.continuesFrom}`);
-  }
-  lines.push('');
-
-  lines.push('**What I did:**');
-  if (payload.did.length === 0) lines.push('- (nothing completed this turn)');
-  for (const item of payload.did) lines.push(`- ✅ ${item}`);
-  lines.push('');
-
-  lines.push('**Progress toward goal:**');
-  lines.push(`- ⚽ Goal: ${payload.goal}`);
-  lines.push(`- 📈 Progress estimate: ${payload.progress.percent}%`);
-  lines.push('- 📋 Remaining:');
-  if (payload.progress.remaining.length === 0) {
-    lines.push('  - (nothing — this arc is done)');
-  }
-  for (const item of payload.progress.remaining) lines.push(`  - ${item}`);
-  lines.push('');
-
-  lines.push('**What I learned:**');
-  if (payload.learned.length === 0) lines.push('- (nothing worth recording)');
-  payload.learned.forEach((item, index) => {
-    lines.push(`${index + 1}. ${item.text} (${item.disposition})`);
-  });
-  lines.push('');
-
-  lines.push('**Answers to your questions:**');
-  if (payload.answers.length === 0)
-    lines.push('- (you asked nothing this turn)');
-  payload.answers.forEach((item, index) => {
-    lines.push(`${index + 1}. Q: ${item.question}`);
-    lines.push(`   A: ${item.answer}`);
-  });
-  lines.push('');
-
-  if (payload.discussion.length > 0) {
-    lines.push('**Discussion:**');
-    for (const item of payload.discussion) lines.push(`- ${item}`);
-    lines.push('');
-  }
-
-  // ONE numbered sequence across both groups, blocking first, so an answer can
-  // be "1. yes 2. b" and land unambiguously (D11). The order is
-  // `compareAsksForNumbering`'s, and `thread answer` walks the same order (F12)
-  // — that is the whole point of sorting here rather than concatenating groups
-  // by hand, which is what let the two drift apart.
-  lines.push('**Asks — everything I need from you:**');
-  const carriedAsks = options.carried ?? [];
-  const missingLabel = options.missingAskIdLabel ?? '(NOT RECORDED)';
-  const thisReport = options.reportCount ?? Number.MAX_SAFE_INTEGER;
-  const entries: {sort: NumberedAsk; render: (n: number) => void}[] = [
-    ...carriedAsks.map((carried) => ({
-      render: (n: number) => renderCarried(lines, carried, n),
-      sort: {
-        askIndex: carried.askIndex,
-        id: carried.id,
-        priority: carried.priority,
-        reportCount: carried.fromReport,
-      },
-    })),
-    ...payload.asks.map((ask, index) => ({
-      render: (n: number) =>
-        renderAsk(lines, ask, askIds[index] ?? null, n, missingLabel),
-      // A brand-new ask carries THIS report's number, so it sorts after every
-      // carried one. The id is only a tiebreak, and it may not exist yet.
-      sort: {
-        askIndex: index,
-        id: askIds[index] ?? '',
-        priority: ask.priority,
-        reportCount: thisReport,
-      },
-    })),
-  ].sort((a, b) => compareAsksForNumbering(a.sort, b.sort));
-  if (entries.length === 0) {
-    lines.push('- (nothing — you are not blocking anything)');
-  }
-  let number = 1;
-  const blockingEntries = entries.filter(
-    (entry) => entry.sort.priority === ASK_PRIORITY_BLOCKING,
-  );
-  const otherEntries = entries.filter(
-    (entry) => entry.sort.priority !== ASK_PRIORITY_BLOCKING,
-  );
-  if (blockingEntries.length > 0) {
-    lines.push('- Blocking:');
-    for (const entry of blockingEntries) {
-      entry.render(number);
-      number += 1;
-    }
-  }
-  if (otherEntries.length > 0) {
-    lines.push('- Non-blocking (I proceeded; you can override):');
-    for (const entry of otherEntries) {
-      entry.render(number);
-      number += 1;
-    }
-  }
-  lines.push('');
-
-  if (payload.nextSteps != null && payload.nextSteps.length > 0) {
-    // What CLAUDE does next. Anything Justin must do is an ask, above.
-    lines.push('**Next steps (mine, not yours):**');
-    for (const step of payload.nextSteps) lines.push(`- ➡️ ${step}`);
-    lines.push('');
-  }
-
-  // Only the ones CLOSED this time. The carried ones are live asks and are
-  // rendered above; repeating them here as bare ids is what F4 removed.
-  const closedPriors = payload.priorAsks.filter((prior) =>
-    CLOSING_DISPOSITIONS.has(prior.disposition),
-  );
-  lines.push('**Prior asks — closed by this report:**');
-  if (closedPriors.length === 0) {
-    lines.push('- (none closed this time)');
-  }
-  for (const prior of closedPriors) {
-    lines.push(`- ${prior.id} — ${prior.disposition}: ${prior.detail}`);
-  }
-  lines.push('');
-
-  lines.push('**Work product:**');
-  lines.push(`- ${payload.workProduct.kind}: ${payload.workProduct.summary}`);
-  lines.push(
-    `- Merge state: ${MERGE_LABEL[payload.workProduct.merged] ?? payload.workProduct.merged}${payload.workProduct.pr == null || payload.workProduct.pr === '' ? '' : ` · PR ${payload.workProduct.pr}`}`,
-  );
-  lines.push('');
-
-  lines.push('**Beads touched:**');
-  if (payload.beadsTouched.length === 0) lines.push('- (none)');
-  for (const bead of payload.beadsTouched) {
-    lines.push(`- ${bead.id} — ${bead.description}`);
-  }
-
-  if (facts.autofillFailures.length > 0) {
-    lines.push('');
-    lines.push('**Facts I could not measure:**');
-    for (const failure of facts.autofillFailures) lines.push(`- ⚠️ ${failure}`);
-  }
-
-  if (payload.handoff != null && payload.handoff !== '') {
-    lines.push('');
-    lines.push(RULE_HANDOFF);
-    lines.push(payload.handoff);
-    lines.push(RULE_HANDOFF);
-  }
-
-  lines.push('');
-  lines.push(
-    threadId == null
-      ? 'Answer: (no thread bead — this report was NOT recorded)'
-      : `Answer: justin-sdk thread answer ${threadId}`,
-  );
-  lines.push(RULE_OM);
-
-  return lines.join('\n');
 }
 
 /**

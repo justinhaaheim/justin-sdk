@@ -9,7 +9,7 @@
  * scatters carried asks through the new ones.
  *
  * THE PROOF IS ONE FIXTURE RENDERED BOTH WAYS. The same set of asks — two
- * carried beads and two new ones — goes through `renderReport` and through
+ * carried beads and two new ones — goes through `renderMarkdown` and through
  * `orderAsks(askViewOf(...))`, and the numbered ids from the report are compared
  * against the walk's sequence position by position. Anything that changes one
  * side's ordering without the other fails here.
@@ -18,7 +18,8 @@
 import {describe, expect, test} from 'bun:test';
 
 import {askViewOf, orderAsks} from '../src/thread/answer';
-import {renderReport} from '../src/thread/render';
+import {buildReportModel} from '../src/thread/report-model';
+import {renderMarkdown} from '../src/thread/render-markdown';
 import {validateThreadReport} from '../src/thread/schema';
 import {examplePayload} from './thread-schema.test';
 
@@ -148,24 +149,26 @@ function numberedAsks(report: string): [number, string][] {
 }
 
 describe('the report and the walk number the same asks the same way', () => {
-  const report = renderReport({
-    askIds: NEW_ASK_IDS,
-    carried: CARRIED,
-    facts: facts(),
-    payload: payload(),
-    reportCount: THIS_REPORT,
-    threadId: 'jl-t',
-  });
+  const report = renderMarkdown(
+    buildReportModel({
+      askIds: NEW_ASK_IDS,
+      carried: CARRIED,
+      facts: facts(),
+      payload: payload(),
+      reportCount: THIS_REPORT,
+      threadId: 'jl-t',
+    }),
+  );
   const printed = numberedAsks(report);
   const walked = orderAsks(beads().map(askViewOf));
 
   test('the report numbers all four asks in ONE sequence', () => {
     expect(printed.map(([number]) => number)).toEqual([1, 2, 3, 4]);
     expect(printed.map(([, id]) => id)).toEqual([
-      'jl-t.2', // carried, blocking — waited longest
-      'jl-t.12', // new, blocking
-      'jl-t.10', // carried, non-blocking
-      'jl-t.11', // new, non-blocking
+      'jl-t.2', // carried, P0 — waited longest
+      'jl-t.12', // new, P0
+      'jl-t.10', // carried, P3
+      'jl-t.11', // new, P3
     ]);
   });
 

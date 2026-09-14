@@ -53,11 +53,12 @@ import {collectThreadFacts} from './facts';
 import {
   numberingFieldsOf,
   renderAskDescription,
-  renderReport,
   renderThreadDescription,
   restateAsk,
   type CarriedAsk,
 } from './render';
+import {buildReportModel, type BuildReportModelOptions} from './report-model';
+import {renderMarkdown} from './render-markdown';
 import {
   CLOSING_DISPOSITIONS,
   THREAD_SCHEMA_VERSION,
@@ -102,6 +103,8 @@ export interface ReportOptions {
   env?: EnvLike;
   /** Path to the payload JSON; mutually exclusive with `stdin`. */
   file?: string | null;
+  /** Print everything (D18). The default prints the compact report. */
+  full?: boolean;
   now?: Date;
   sessionId?: string | null;
   stdin?: boolean;
@@ -208,6 +211,11 @@ export interface BdWriteInput {
   payload: ThreadReportPayload;
   sessionId: string;
   /**
+   * How the report should LOOK (D14, D18, D19). Absent takes the defaults:
+   * compact, emoji header, no wrap-up threshold.
+   */
+  render?: {emojiHeader?: boolean; full?: boolean; wrapUpAt?: number | null};
+  /**
    * Refuse to write a payload OLDER than the thread's current state.
    *
    * Off for a live report, which is the newest thing there is by construction.
@@ -240,13 +248,24 @@ export async function writeReportToBd(
 ): Promise<BdWriteOutcome> {
   const {ctx, facts, payload, sessionId} = input;
 
+  // ONE renderer for every path through this function (D14). `full` is what
+  // the caller asked to be PRINTED; the notes field always stores the full
+  // rendering, which is why `notesOf` pins it rather than passing it through.
+  const render = (
+    extra: Omit<BuildReportModelOptions, 'facts' | 'payload'>,
+  ): string =>
+    renderMarkdown(
+      buildReportModel({
+        ...extra,
+        emojiHeader: input.render?.emojiHeader,
+        facts,
+        full: extra.full ?? input.render?.full,
+        payload,
+        wrapUpAt: input.render?.wrapUpAt,
+      }),
+    );
   const renderWithoutBead = (): string =>
-    renderReport({
-      askIds: payload.asks.map(() => null),
-      facts,
-      payload,
-      threadId: null,
-    });
+    render({askIds: payload.asks.map(() => null), threadId: null});
 
   // --- 4. read the existing thread and its open asks ----------------------
   const existing = await findThreadBySession(ctx, sessionId);
@@ -412,13 +431,12 @@ export async function writeReportToBd(
   // exactly that sentence in the one field D10 promises is always readable.
   const provisionalNotes =
     existingThread == null
-      ? renderWithoutBead()
-      : renderReport({
+      ? render({askIds: payload.asks.map(() => null), full: true, threadId: null})
+      : render({
           askIds: payload.asks.map(() => null),
           carried: carriedOpenAsks,
-          facts,
+          full: true,
           missingAskIdLabel: '(ask ids pending)',
-          payload,
           reportCount,
           threadId: existingThread.id,
         });
@@ -478,11 +496,9 @@ export async function writeReportToBd(
       askIds.push(null);
       return {
         failure: created.failure,
-        rendered: renderReport({
+        rendered: render({
           askIds,
           carried: carriedOpenAsks,
-          facts,
-          payload,
           reportCount,
           threadId,
         }),
@@ -504,11 +520,9 @@ export async function writeReportToBd(
     if (!closed.ok) {
       return {
         failure: closed.failure,
-        rendered: renderReport({
+        rendered: render({
           askIds,
           carried: carriedOpenAsks,
-          facts,
-          payload,
           reportCount,
           threadId,
         }),
@@ -518,18 +532,25 @@ export async function writeReportToBd(
     closedAsks.push(prior.id);
   }
 
-  const rendered = renderReport({
+  const rendered = render({
     askIds,
     carried: carriedOpenAsks,
-    facts,
-    payload,
     reportCount,
     threadId,
   });
+  // THE BEAD ALWAYS CARRIES THE FULL RENDERING (D10, D14). `bd show` on the
+  // thread has to be a complete status report even when the printed one was
+  // compact — the compaction is a choice about a terminal, not about the record.
   const notesWritten = await finalizeThread(
     ctx,
     threadId,
-    rendered,
+    render({
+      askIds,
+      carried: carriedOpenAsks,
+      full: true,
+      reportCount,
+      threadId,
+    }),
     // The metadata is rebuilt, not reused: the first write could only record
     // `askIds: []`, because the asks did not exist yet.
     buildThreadMetadata({
@@ -635,7 +656,13 @@ export async function runThreadReport(
 
   // --- 4-6. the bd half, shared with the spool drain ----------------------
   const ctx: BdContext = bdContext(env);
-  const outcome = await writeReportToBd({ctx, facts, payload, sessionId});
+  const outcome = await writeReportToBd({
+    ctx,
+    facts,
+    payload,
+    render: {full: options.full === true},
+    sessionId,
+  });
 
   if (outcome.status === 'refused') {
     console.error(

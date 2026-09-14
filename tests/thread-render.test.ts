@@ -10,11 +10,12 @@
 
 import {describe, expect, test} from 'bun:test';
 
+import {askKindTag, renderThreadDescription} from '../src/thread/render';
 import {
-  askKindTag,
-  renderReport,
-  renderThreadDescription,
-} from '../src/thread/render';
+  buildReportModel,
+  type BuildReportModelOptions,
+} from '../src/thread/report-model';
+import {renderMarkdown} from '../src/thread/render-markdown';
 import {validateThreadReport} from '../src/thread/schema';
 import {examplePayload} from './thread-schema.test';
 
@@ -54,10 +55,19 @@ function payload(): ThreadReportPayload {
 
 const ASK_IDS = ['jl-x7q.2', 'jl-x7q.3'];
 
-describe('renderReport', () => {
+/**
+ * The FULL markdown rendering, which is what these assertions are about: the
+ * full form is what the thread bead stores (D10) and what `--full` prints, so it
+ * is the document whose shape D11 promises. The compact form has its own tests.
+ */
+function render(options: BuildReportModelOptions): string {
+  return renderMarkdown(buildReportModel({full: true, ...options}));
+}
+
+describe('renderMarkdown', () => {
   test('full report matches the committed baseline', () => {
     expect(
-      renderReport({
+      render({
         askIds: ASK_IDS,
         facts: facts(),
         payload: payload(),
@@ -67,7 +77,7 @@ describe('renderReport', () => {
   });
 
   test('restates the last instruction at the top (D11.1)', () => {
-    const out = renderReport({
+    const out = render({
       askIds: ASK_IDS,
       facts: facts(),
       payload: payload(),
@@ -84,7 +94,7 @@ describe('renderReport', () => {
   });
 
   test('restates each question before its answer (D11.2)', () => {
-    const out = renderReport({
+    const out = render({
       askIds: ASK_IDS,
       facts: facts(),
       payload: payload(),
@@ -96,23 +106,24 @@ describe('renderReport', () => {
     expect(out).toContain('   A: Yes — measured 2026-09-12');
   });
 
-  test('asks are ONE numbered sequence, blocking first, options lettered (D11.3)', () => {
-    const out = renderReport({
+  test('asks are ONE numbered sequence, P0 first, options lettered (D11.3)', () => {
+    const out = render({
       askIds: ASK_IDS,
       facts: facts(),
       payload: payload(),
       threadId: 'jl-x7q',
     });
-    // The blocking ask is 1, the non-blocking one continues the SAME sequence
-    // as 2 — it does not restart at 1 under its own heading.
-    expect(out).toContain('  1. [Approve Y/n] Approve closing ask beads');
-    expect(out).toContain('  2. [Pick a/b] Where should componentConfig');
+    // The P0 ask is 1, the P3 one continues the SAME sequence as 2 — it does
+    // not restart at 1 under a heading of its own (D15: the marker IS the
+    // grouping, and the numbers run straight through).
+    expect(out).toContain('  1. 🛑 P0 · [Approve Y/n] Approve closing ask beads');
+    expect(out).toContain('  2. (P3) · [Pick a/b] Where should componentConfig');
     expect(out).toContain('     a. (Recommended) Keep closing');
     expect(out).toContain('     b. Delete — tidier list');
   });
 
   test('every ask carries its bead id inline (D11.4)', () => {
-    const out = renderReport({
+    const out = render({
       askIds: ASK_IDS,
       facts: facts(),
       payload: payload(),
@@ -124,7 +135,7 @@ describe('renderReport', () => {
   });
 
   test('an ask whose bead was never created says so, never invents an id', () => {
-    const out = renderReport({
+    const out = render({
       askIds: [null, null],
       facts: facts(),
       payload: payload(),
@@ -135,7 +146,7 @@ describe('renderReport', () => {
   });
 
   test('unmeasured facts render as UNKNOWN, never as a reassuring value', () => {
-    const out = renderReport({
+    const out = render({
       askIds: ASK_IDS,
       facts: facts({
         aheadBehind: null,
@@ -148,7 +159,10 @@ describe('renderReport', () => {
     });
     expect(out).toContain('ahead/behind UNKNOWN');
     expect(out).toContain('dirty UNKNOWN');
-    expect(out).toContain('**Tokens at stop:** UNKNOWN');
+    // The emoji header shows the value without a title; the UNKNOWN sentence
+    // is the same either way, and it is a SENTENCE rather than a dash so it
+    // cannot be skimmed as "nothing used".
+    expect(out).toContain('🔢 UNKNOWN (see autofill failures)');
     // A zero would read as "clean, fully merged, nothing used" — the exact
     // conflation critical rule 6 exists to ban.
     expect(out).not.toContain('0 ahead / 0 behind');
@@ -225,7 +239,7 @@ IF UNANSWERED: I keep by-repo as the default.`,
   test('a report that carries a blocking ask and creates none still shows it', () => {
     const bare = payload();
     bare.asks = [];
-    const text = renderReport({
+    const text = render({
       askIds: [],
       carried,
       facts: facts(),
@@ -237,8 +251,12 @@ IF UNANSWERED: I keep by-repo as the default.`,
       text.indexOf('**Prior asks'),
     );
     expect(asksSection).not.toContain('you are not blocking anything');
-    expect(asksSection).toContain('- Blocking:');
-    expect(asksSection).toContain('1. (carried from report #1) (jl-x7q.1)');
+    // No group headings any more (D15): the P0 marker IS the grouping, and the
+    // numbers run straight through every priority.
+    expect(asksSection).not.toContain('- Blocking:');
+    expect(asksSection).toContain(
+      '1. 🛑 P0 · (carried from report #1) (jl-x7q.1)',
+    );
     // In FULL: the question, the form control, both options, and the default.
     expect(asksSection).toContain('[Pick a/b] Which default board view');
     expect(asksSection).toContain('a. (Recommended) Group by repo');
@@ -249,20 +267,20 @@ IF UNANSWERED: I keep by-repo as the default.`,
 
   test('carried asks are numbered ahead of new ones in the same sequence', () => {
     const withNew = payload();
-    const text = renderReport({
+    const text = render({
       askIds: ['jl-x7q.4'],
       carried,
       facts: facts(),
       payload: withNew,
       threadId: 'jl-x7q',
     });
-    expect(text).toContain('1. (carried from report #1) (jl-x7q.1)');
+    expect(text).toContain('1. 🛑 P0 · (carried from report #1) (jl-x7q.1)');
     expect(text).toContain('2.');
     expect(text.indexOf('jl-x7q.1')).toBeLessThan(text.indexOf('jl-x7q.4'));
   });
 
   test('a bead with no recorded report number says so rather than inventing one', () => {
-    const text = renderReport({
+    const text = render({
       askIds: [],
       carried: [{...carried[0]!, askIndex: null, fromReport: null}],
       facts: facts(),
@@ -276,21 +294,34 @@ IF UNANSWERED: I keep by-repo as the default.`,
     expect(text).toContain('(carried from an earlier report)');
   });
 
-  test('nextSteps render as MINE, separate from the asks (F5)', () => {
+  test('nextSteps render as MINE, merged with what remains (F5, D18)', () => {
     const p = payload();
     p.nextSteps = ['Merge the branch once the review clears'];
-    const text = renderReport({
+    const text = render({
       askIds: ['jl-x7q.4'],
       facts: facts(),
       payload: p,
       threadId: 'jl-x7q',
     });
-    expect(text).toContain('**Next steps (mine, not yours):**');
+    // ONE list, titled as Claude's own (D18). Justin said next steps and
+    // remaining work were the same thing split across two headings he had to
+    // reconcile himself; nextSteps leads because it is the immediate move.
+    expect(text).toContain('**What happens next (mine):**');
     expect(text).toContain('➡️ Merge the branch once the review clears');
+    expect(text.indexOf('Merge the branch')).toBeLessThan(
+      text.indexOf('the read path'),
+    );
+    // Anything JUSTIN must do is an ask, and stays out of this list entirely.
+    expect(
+      text.slice(
+        text.indexOf('**What happens next (mine):**'),
+        text.indexOf('**What I did:**'),
+      ),
+    ).not.toContain('Approve closing ask beads');
   });
 
   test('the provisional label replaces "(NOT RECORDED)" when ids are merely pending', () => {
-    const text = renderReport({
+    const text = render({
       askIds: [null],
       facts: facts(),
       missingAskIdLabel: '(ask ids pending)',

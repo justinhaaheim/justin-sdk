@@ -145,6 +145,12 @@ export const threadCommand: CommandModule = {
             // instead, where it lands on the same one-line/exit-2 path as every
             // other refusal. Exit 2 is the documented "refused, nothing was
             // written" code; a usage error is exactly that.
+            .option('full', {
+              default: false,
+              describe:
+                'Print everything: work product, beads touched, every What I did item, and the full last message. The default is the compact report; the thread bead always stores the full one.',
+              type: 'boolean' as const,
+            })
             .option('session', {
               describe:
                 'Session id to report for (default: $CLAUDE_CODE_SESSION_ID)',
@@ -155,6 +161,7 @@ export const threadCommand: CommandModule = {
           process.exit(
             await runThreadReport({
               file: argv.file ?? null,
+              full: argv.full === true,
               sessionId: argv.session ?? null,
               stdin: argv.stdin === true,
             }),
@@ -170,6 +177,12 @@ export const threadCommand: CommandModule = {
               describe: 'Thread bead id (e.g. jl-x7q). Omit for this session.',
               type: 'string' as const,
             })
+            .option('full', {
+              default: false,
+              describe:
+                'Print everything: work product, beads touched, every What I did item, and the full last message. The default is the compact report; the thread bead always stores the full one.',
+              type: 'boolean' as const,
+            })
             .option('session', {
               describe: 'Look up by this session id instead of the current one',
               type: 'string' as const,
@@ -178,6 +191,7 @@ export const threadCommand: CommandModule = {
           const {runThreadShow} = await import('./show');
           process.exit(
             await runThreadShow({
+              full: argv.full === true,
               sessionId: argv.session ?? null,
               threadId: (argv.threadId as string | undefined) ?? null,
             }),
