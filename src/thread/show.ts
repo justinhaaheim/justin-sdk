@@ -28,6 +28,8 @@ import {
 } from './bd';
 import {collectThreadFacts} from './facts';
 import {compactStoredReport} from './render-markdown';
+import {ansiFromReportText} from './render-ansi';
+import {shouldStyle} from '../repo-status/pretty';
 import {priorityLabel} from './render';
 import {readAskPriority} from './metadata';
 
@@ -111,9 +113,10 @@ export async function runThreadShow(
   out.push(
     notes == null || notes === ''
       ? '(this bead carries no rendered report — it may predate D10)'
-      : options.full === true
-        ? notes
-        : compactStoredReport(notes),
+      : ansiFromReportText(
+          options.full === true ? notes : compactStoredReport(notes),
+          {color: shouldStyle()},
+        ),
   );
   console.log(out.join('\n'));
 

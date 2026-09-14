@@ -222,6 +222,17 @@ const componentConfigSchema = z
           .describe(
             'Whether the SessionStart hook installed by `justin-sdk add thread-hooks` may create this session’s thread bead before it has reported anything (home-base-p1uj.3). DEFAULT FALSE, and gated by `enabled` as well: BOTH must be true. Separate from `enabled` because this one turns every session start and every resume into a Dolt write, so it is the expensive half and must be armed deliberately.',
           ),
+        render: z
+          .looseObject({
+            emojiHeader: z
+              .boolean()
+              .optional()
+              .describe(
+                'Whether the report header shows repo / branch / worktree / tokens as emoji-prefixed values with no field titles (home-base-p1uj D19). DEFAULT TRUE. False restores the titled fields (**Repo:** … **Branch:** …), which are longer but self-describing. Tokens render as "497k", or "497k / 470k" when usage-check has a numeric wrapUpAt for this session\u2019s role.',
+              ),
+          })
+          .optional()
+          .describe('thread: how the rendered report looks.'),
         answerUi: z
           .enum(['classic', 'ink', 'web'])
           .optional()

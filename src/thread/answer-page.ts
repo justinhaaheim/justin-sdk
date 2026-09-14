@@ -22,6 +22,7 @@
  */
 
 import {keyActionFor, KEYMAP_FOOTER} from './answer-keymap';
+import {htmlFromReportText} from './render-html';
 
 /** One ask, as the page needs it. Mirrors `AskView` plus its stored draft. */
 export interface PageAsk {
@@ -109,7 +110,21 @@ footer { position:fixed; left:0; right:0; bottom:0; background:var(--card); bord
 .panel h2 { margin:0 0 10px; font-size:16px; }
 .panel li { margin:5px 0; }
 details.report { margin:10px 0; }
-details.report pre { white-space:pre-wrap; font:12px/1.5 ui-monospace,Menlo,monospace; background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px; overflow:auto; }
+/* The report panel used to be one <pre> with nothing marking the P0 Justin was
+   meant to look at. It now goes through the shared html renderer (D14), so the
+   same priority classes the terminal colours are available here. */
+.report { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px; font-size:13px; line-height:1.5; overflow:auto; }
+.report h3 { margin:14px 0 4px; font-size:13px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+.report p { margin:3px 0; }
+.report ul { margin:3px 0 3px 18px; padding:0; }
+.report hr { border:0; border-top:1px solid var(--line); margin:10px 0; }
+.report .glance { font-weight:700; font-size:14px; }
+.report .where { color:var(--muted); font-size:12px; }
+.report .ask, .report .askdetail { font-family:ui-monospace,Menlo,monospace; font-size:12px; }
+.report .askdetail { padding-left:18px; }
+.report .p0 { color:var(--bad); font-weight:600; }
+.report .p3, .report .p4 { color:var(--muted); }
+.report .pUnknown { color:var(--warn); }
 .problems { border:1px solid var(--bad); color:var(--bad); border-radius:8px; padding:10px 12px; margin:10px 0; font-size:13px; }
 @media (max-width:520px){ main{padding:10px;} .card{padding:12px;} }
 `;
@@ -372,9 +387,9 @@ export function renderAnswerPage(data: PageData): string {
 </header>
 <main>
   ${problems}
-  <details class="report">
+  <details>
     <summary>The report this came from</summary>
-    <pre>${escapeHtml(data.report)}</pre>
+    ${htmlFromReportText(data.report)}
   </details>
   ${cards}
   <section class="card" data-id="${escapeHtml(data.noteId)}">

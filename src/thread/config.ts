@@ -25,6 +25,7 @@ import {
   readUserConfig,
 } from '../sdk-config';
 import {findProjectRoot} from '../health-notices';
+import {readUsageCheckConfig, resolveUsageCheckConfig} from '../usage-check';
 
 import type {EnvLike} from './paths';
 
@@ -62,6 +63,16 @@ export const THREAD_DEFAULT_START_ON_SESSION_START = false;
 export const THREAD_DEFAULT_AUTO_COMMIT = true;
 
 /**
+ * ON unless something says otherwise (home-base-p1uj.14, D19).
+ *
+ * Also not a feature gate: it picks between two spellings of the same header.
+ * True is the shorter one Justin asked for on 2026-09-14 — emoji-prefixed values
+ * with no field titles — and false restores the titled fields for anywhere the
+ * emoji do not render (a log file, a pipe into something that strips them).
+ */
+export const THREAD_DEFAULT_EMOJI_HEADER = true;
+
+/**
  * Which UI `thread answer` puts in front of Justin (home-base-p1uj.12).
  *
  * `ink` is a REAL member of this union even though no Ink UI ships, and that is
@@ -96,6 +107,10 @@ export type ThreadConfigSource = 'default' | 'project' | 'user';
 export interface ResolvedThreadConfig {
   /** Which UI `thread answer` opens. */
   answerUi: ThreadAnswerUi;
+  /** Whether the report header is emoji-prefixed values or titled fields (D19). */
+  emojiHeader: boolean;
+  /** Which layer decided `emojiHeader`. */
+  emojiHeaderSource: ThreadConfigSource;
   /** Which layer decided `answerUi`. */
   answerUiSource: ThreadConfigSource;
   /** Whether the tool commits `.beads/issues.jsonl` after each write batch. */
@@ -201,6 +216,23 @@ export function resolveThreadConfig(
   );
   const autoCommit = resolveFlag('autoCommit', THREAD_DEFAULT_AUTO_COMMIT);
 
+  // `render` is the one NESTED block in the thread section, so it needs its own
+  // walk rather than `resolveFlag`'s. Same layering: default, then user, then
+  // project, with "this layer says nothing" kept distinct from an explicit
+  // false — collapsing them would make an absent user file read as a deliberate
+  // "off" that the project file then has to argue with.
+  let emojiHeader = THREAD_DEFAULT_EMOJI_HEADER;
+  let emojiHeaderSource: ThreadConfigSource = 'default';
+  for (const layer of layers) {
+    const section = threadSectionIn(layer.config);
+    const render = section?.render;
+    if (render == null || typeof render !== 'object') continue;
+    const value = (render as Record<string, unknown>).emojiHeader;
+    if (typeof value !== 'boolean') continue;
+    emojiHeader = value;
+    emojiHeaderSource = layer.name;
+  }
+
   let repoDir: string | null = null;
   let repoDirSource: ThreadConfigSource = 'default';
   for (const layer of layers) {
@@ -235,6 +267,8 @@ export function resolveThreadConfig(
     answerUiSource,
     autoCommit: autoCommit.value,
     autoCommitSource: autoCommit.source,
+    emojiHeader,
+    emojiHeaderSource,
     enabled: enabled.value,
     problems,
     projectRoot,
@@ -244,4 +278,32 @@ export function resolveThreadConfig(
     startOnSessionStart: start.value,
     startSource: start.source,
   };
+}
+
+/**
+ * The wrap-up threshold the report header shows beside the token count (D19).
+ *
+ * REUSES usage-check's own resolver rather than re-reading the file: the
+ * threshold is folded into a ladder, can be nulled per role, and has a
+ * documented "absent means inherit" rule — three places for a second
+ * implementation to disagree, and the number is about to be printed next to a
+ * measurement as though it were one.
+ *
+ * NULL IS A REAL ANSWER, and it is the common one: usage-check is disabled in
+ * most repos, and `wrapUpAt` defaults to null even where it is on. Null means
+ * "no threshold is configured", so the header prints `497k` with no second
+ * number — never `497k / 0`, which would read as a budget that has been blown.
+ *
+ * The role is `session`, not `player`: a thread report is written by the main
+ * session at its wrap-up. A dispatched subagent inherits its parent's session id
+ * and never writes a thread of its own (the status-report rule says so
+ * explicitly), so there is no case here where the player budget is the right
+ * one.
+ */
+export function resolveReportWrapUpAt(projectRoot: string): number | null {
+  const resolved = resolveUsageCheckConfig(
+    readUsageCheckConfig(projectRoot),
+    'session',
+  );
+  return resolved?.wrapUpAt ?? null;
 }

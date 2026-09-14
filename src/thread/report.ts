@@ -50,6 +50,9 @@ import {
   readReportCount,
 } from './metadata';
 import {collectThreadFacts} from './facts';
+import {resolveReportWrapUpAt, resolveThreadConfig} from './config';
+import {ansiFromReportText} from './render-ansi';
+import {shouldStyle} from '../repo-status/pretty';
 import {
   numberingFieldsOf,
   renderAskDescription,
@@ -656,11 +659,21 @@ export async function runThreadReport(
 
   // --- 4-6. the bd half, shared with the spool drain ----------------------
   const ctx: BdContext = bdContext(env);
+  // HOW IT LOOKS, resolved once: the emoji header is a knob (D19), and the
+  // wrap-up threshold beside the token count comes from usage-check's own
+  // resolver rather than a second reading of the same file.
+  const threadConfig = resolveThreadConfig({cwd, env});
+  const renderConfig = {
+    emojiHeader: threadConfig.emojiHeader,
+    full: options.full === true,
+    wrapUpAt: resolveReportWrapUpAt(threadConfig.projectRoot),
+  };
+
   const outcome = await writeReportToBd({
     ctx,
     facts,
     payload,
-    render: {full: options.full === true},
+    render: renderConfig,
     sessionId,
   });
 
@@ -708,7 +721,14 @@ export async function runThreadReport(
   const {askIds, closedAsks, rendered, reportCount, threadId} = outcome;
 
   // --- 7. print ------------------------------------------------------------
-  console.log(rendered);
+  //
+  // ANSI ON A TTY, PLAIN MARKDOWN OTHERWISE, and the discriminator does exactly
+  // the right thing for both readers: Claude runs this through a captured pipe
+  // and gets the markdown it has to paste verbatim (escape codes would arrive in
+  // Justin's message as literal `\u001b[1m`), while Justin running it by hand
+  // gets the bold, underlined, priority-coloured version. `shouldStyle` is the
+  // same NO_COLOR/FORCE_COLOR-aware check repo-status uses.
+  console.log(ansiFromReportText(rendered, {color: shouldStyle()}));
   console.error('');
   console.error(`THREAD RECORDED: ${threadId} (report #${reportCount})`);
   console.error(
