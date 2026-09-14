@@ -40,7 +40,7 @@ import type {BdIssue} from '../src/thread/bd';
 function view(overrides: Partial<AskView> = {}): AskView {
   return {
     askIndex: 0,
-    blocking: false,
+    priority: 3,
     defaultAction: 'I take the recommended option.',
     description: '[Pick a/b] Ship it?',
     id: 'jl-a1.1',
@@ -95,7 +95,7 @@ describe('reading an ask bead', () => {
       id: 'jl-a1.1',
       metadata: {
         askIndex: 2,
-        blocking: true,
+        priority: 0,
         defaultAction: 'I ship it.',
         kind: 'pick',
         optionCount: 3,
@@ -105,7 +105,7 @@ describe('reading an ask bead', () => {
     };
     expect(askViewOf(issue)).toEqual({
       askIndex: 2,
-      blocking: true,
+      priority: 0,
       defaultAction: 'I ship it.',
       description: 'the rendered ask',
       id: 'jl-a1.1',
@@ -181,9 +181,9 @@ describe('decisionFor', () => {
 describe('orderAsks', () => {
   test('blocking asks come first, then payload order within one report', () => {
     const asks = [
-      view({askIndex: 1, blocking: false, id: 'jl-a1.3'}),
-      view({askIndex: 2, blocking: true, id: 'jl-a1.2'}),
-      view({askIndex: 0, blocking: false, id: 'jl-a1.1'}),
+      view({askIndex: 1, priority: 3, id: 'jl-a1.3'}),
+      view({askIndex: 2, priority: 0, id: 'jl-a1.2'}),
+      view({askIndex: 0, priority: 3, id: 'jl-a1.1'}),
     ];
     expect(orderAsks(asks).map((ask) => ask.id)).toEqual([
       'jl-a1.2',
@@ -197,8 +197,8 @@ describe('orderAsks', () => {
     // before "jl-a1.2" — so the walk asked them in an order the report never
     // printed, and "2. b" landed on the wrong ask.
     const asks = [
-      view({askIndex: 9, blocking: true, id: 'jl-a1.10'}),
-      view({askIndex: 1, blocking: true, id: 'jl-a1.2'}),
+      view({askIndex: 9, priority: 0, id: 'jl-a1.10'}),
+      view({askIndex: 1, priority: 0, id: 'jl-a1.2'}),
     ];
     expect(orderAsks(asks).map((ask) => ask.id)).toEqual([
       'jl-a1.2',
@@ -208,9 +208,9 @@ describe('orderAsks', () => {
 
   test('a CARRIED ask leads its group, exactly as the report prints it', () => {
     const asks = [
-      view({askIndex: 0, blocking: true, id: 'jl-a1.9', reportCount: 3}),
-      view({askIndex: 0, blocking: true, id: 'jl-a1.1', reportCount: 1}),
-      view({askIndex: 0, blocking: false, id: 'jl-a1.8', reportCount: 2}),
+      view({askIndex: 0, priority: 0, id: 'jl-a1.9', reportCount: 3}),
+      view({askIndex: 0, priority: 0, id: 'jl-a1.1', reportCount: 1}),
+      view({askIndex: 0, priority: 3, id: 'jl-a1.8', reportCount: 2}),
     ];
     expect(orderAsks(asks).map((ask) => ask.id)).toEqual([
       'jl-a1.1',
@@ -223,8 +223,8 @@ describe('orderAsks', () => {
     // It cannot have come from the report being rendered — that one stamps
     // every ask it creates — so it is carried by definition.
     const asks = [
-      view({askIndex: 0, blocking: true, id: 'jl-a1.4', reportCount: 1}),
-      view({askIndex: null, blocking: true, id: 'jl-a1.3', reportCount: null}),
+      view({askIndex: 0, priority: 0, id: 'jl-a1.4', reportCount: 1}),
+      view({askIndex: null, priority: 0, id: 'jl-a1.3', reportCount: null}),
     ];
     expect(orderAsks(asks).map((ask) => ask.id)).toEqual([
       'jl-a1.3',
@@ -236,9 +236,9 @@ describe('orderAsks', () => {
 describe('walkAsks', () => {
   test('one pick, one skip and a free-text note — the whole gate in one walk', async () => {
     const asks = [
-      view({blocking: true, id: 'jl-a1.1', kind: 'pick', optionCount: 2}),
+      view({priority: 0, id: 'jl-a1.1', kind: 'pick', optionCount: 2}),
       view({
-        blocking: false,
+        priority: 3,
         defaultAction: 'I leave the knob on.',
         id: 'jl-a1.2',
         kind: 'approve',
@@ -283,8 +283,8 @@ describe('walkAsks', () => {
 
   test('every ask is walked, in blocking-first order', async () => {
     const asks = [
-      view({blocking: false, id: 'jl-a1.2'}),
-      view({blocking: true, id: 'jl-a1.1'}),
+      view({priority: 3, id: 'jl-a1.2'}),
+      view({priority: 0, id: 'jl-a1.1'}),
     ];
     const result = await walkAsks(
       asks,
@@ -311,8 +311,8 @@ describe('walkAsks', () => {
     };
     const result = await walkAsks(
       [
-        view({blocking: true, id: 'jl-a1.1'}),
-        view({blocking: true, id: 'jl-a1.2'}),
+        view({priority: 0, id: 'jl-a1.1'}),
+        view({priority: 0, id: 'jl-a1.2'}),
       ],
       io,
       writer,
@@ -412,7 +412,7 @@ function seededFake(
       id: 'jl-t1.1',
       metadata: {
         askIndex: 0,
-        blocking: true,
+        priority: 0,
         defaultAction: 'I take a.',
         kind: 'pick',
         optionCount: 2,
@@ -428,7 +428,7 @@ function seededFake(
       id: 'jl-t1.2',
       metadata: {
         askIndex: 1,
-        blocking: false,
+        priority: 3,
         defaultAction: 'I leave it.',
         kind: 'approve',
         optionCount: 0,

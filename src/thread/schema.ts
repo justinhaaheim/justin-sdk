@@ -38,7 +38,20 @@ import {z} from 'zod';
 import type {ThreadFacts} from './facts';
 
 /** Bumped when a field's MEANING changes, not when one is added. */
-export const THREAD_SCHEMA_VERSION = 1;
+export const THREAD_SCHEMA_VERSION = 2;
+
+/**
+ * The version this schema still ACCEPTS and migrates (D15).
+ *
+ * Not politeness — necessity. `home-base/bin/justin-sdk` is a symlink into this
+ * source tree, so every Claude Code session on the machine runs whatever is
+ * checked out here, while the rule text that tells Claude what to write updates
+ * separately. For the whole interval between the two, live sessions and spooled
+ * reports carry v1 payloads. Rejecting them would not fall back to the plain
+ * text report either: the rule branches on `THREADS: DISABLED` and on
+ * command-not-found, and a validation refusal is neither.
+ */
+export const THREAD_SCHEMA_MIN_ACCEPTED_VERSION = 1;
 
 export const STOP_REASON_KINDS = [
   'completed',
@@ -51,6 +64,46 @@ export const STOP_REASON_KINDS = [
 
 /** Every ask is one of four things Justin has to do (D3). */
 export const ASK_KINDS = ['approve', 'pick', 'answer', 'act'] as const;
+
+/**
+ * What should happen next, in one word (D16). The second glance badge.
+ *
+ * Claude-supplied, because it is the one thing a measurement cannot know: the
+ * stop reason says why this turn ended, and this says what the next one is for.
+ */
+export const NEXT_STEPS = [
+  'handoff',
+  'answerAsks',
+  'continue',
+  'done',
+  'testOnDevice',
+] as const;
+
+export const ASK_PRIORITIES = [0, 1, 2, 3, 4] as const;
+
+/**
+ * The priority an ask gets when its bead records none (D15).
+ *
+ * P3, not P0: a v1 ask with `blocking: false` is exactly "informational, the
+ * default is fine", and an unreadable priority must not invent urgency.
+ */
+export const ASK_PRIORITY_DEFAULT = 3;
+
+/** The priority the old `blocking: true` meant. */
+export const ASK_PRIORITY_BLOCKING = 0;
+
+/**
+ * What each priority CLAIMS, in Justin's terms. Printed in the skeleton and in
+ * the rule text, because the calibration is the whole value of the scale: a
+ * report where everything is P0 is a report with no priorities at all.
+ */
+export const ASK_PRIORITY_MEANING: Record<number, string> = {
+  0: 'I cannot proceed without this',
+  1: 'decide before the next session builds on it',
+  2: 'decide this week',
+  3: 'informational — my default is fine',
+  4: 'FYI — no reply expected',
+};
 
 /** How a previously-open ask was handled this time round (D4). */
 export const ASK_DISPOSITIONS = [
@@ -90,6 +143,8 @@ export const CLOSING_DISPOSITIONS: ReadonlySet<string> = new Set([
 
 export type AskKind = (typeof ASK_KINDS)[number];
 export type AskDisposition = (typeof ASK_DISPOSITIONS)[number];
+export type NextStep = (typeof NEXT_STEPS)[number];
+export type AskPriority = (typeof ASK_PRIORITIES)[number];
 
 const nonEmpty = (what: string) =>
   z.string().min(1, `${what} must not be empty`);
@@ -104,9 +159,6 @@ const askOptionSchema = z.strictObject({
 });
 
 const askSchema = z.strictObject({
-  blocking: z
-    .boolean()
-    .describe('Blocking means the work genuinely cannot proceed without it.'),
   context: nonEmpty('ask.context').describe(
     'The hook back into what this is about — Justin has not been here for hours.',
   ),
@@ -118,6 +170,11 @@ const askSchema = z.strictObject({
     .array(askOptionSchema)
     .describe(
       'Lettered choices, rendered a/b/c. Empty for kinds that are not a choice.',
+    ),
+  priority: z
+    .literal([...ASK_PRIORITIES])
+    .describe(
+      'P0 you cannot proceed without · P1 decide before the next session · P2 this week · P3 informational, default is fine · P4 FYI. MOST ASKS ARE P3/P4. Do not inflate.',
     ),
   text: nonEmpty('ask.text').describe('The question or action, in one line.'),
 });
@@ -159,6 +216,11 @@ export const threadReportSchema = z.strictObject({
     .nullable()
     .optional()
     .describe('Thread bead id this session continues, when it continues one.'),
+  deviations: z
+    .array(z.string())
+    .describe(
+      'REQUIRED (D17). Anything that departs from what Justin specified or from the spec, plus anything he should know. Empty array when there were none — and an empty array is a CLAIM that you checked.',
+    ),
   did: z.array(z.string()).describe('Completed items only.'),
   discussion: z
     .array(z.string())
@@ -182,6 +244,11 @@ export const threadReportSchema = z.strictObject({
       }),
     )
     .describe('Each learning ends with where it now lives.'),
+  nextStep: z
+    .literal([...NEXT_STEPS])
+    .describe(
+      'ONE WORD for what happens next (D16): handoff | answerAsks | continue | done | testOnDevice. The second glance badge.',
+    ),
   nextSteps: z
     .array(z.string())
     .optional()
@@ -231,7 +298,19 @@ export type ThreadPriorAsk = z.infer<typeof priorAskSchema>;
  * round trip to find out which of forty fields was meant.
  */
 export type PayloadValidation =
-  | {status: 'ok'; payload: ThreadReportPayload}
+  | {
+      status: 'ok';
+      /**
+       * The version the payload ARRIVED as when it had to be migrated, and null
+       * when it was already current. Never absent: a migration is a real event
+       * that changed what the report says (a v1 `blocking: false` becomes a P3),
+       * and `thread report` prints a line naming it. Silently upgrading would be
+       * rule 6 through the validation layer — the report would look like it
+       * meant what it now says.
+       */
+      migratedFrom: number | null;
+      payload: ThreadReportPayload;
+    }
   | {status: 'invalid'; issues: string[]};
 
 function formatIssuePath(path: readonly PropertyKey[]): string {
@@ -297,10 +376,81 @@ export function validateThreadFacts(parsed: unknown): FactsValidation {
   };
 }
 
-/** Validate a parsed payload. Never throws. */
+/**
+ * Rewrite a v1 payload as a v2 one (D15). Pure; the input is not mutated.
+ *
+ * THE THREE MAPPINGS, each chosen so the migrated report says no more than the
+ * original did:
+ *
+ *  - `blocking: true → priority 0`, `false → priority 3`. True really did mean
+ *    "cannot proceed", and false really did mean "I proceeded with my default",
+ *    which is P3's definition. Nothing in between is invented.
+ *  - `nextStep: 'continue'`. The only value that claims nothing — a v1 payload
+ *    never said what should happen next, and 'done' or 'handoff' would be a
+ *    claim it did not make.
+ *  - `deviations: []`. An empty list here is the ONE place in this file where
+ *    empty does not mean "checked, and there were none"; `thread report` says
+ *    out loud that the payload was migrated, precisely so the empty section is
+ *    not read as a clean bill of health.
+ */
+export function migrateV1Payload(parsed: unknown): unknown {
+  if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return parsed;
+  }
+  const source = parsed as Record<string, unknown>;
+  const asks = Array.isArray(source.asks)
+    ? source.asks.map((ask) => {
+        if (ask == null || typeof ask !== 'object' || Array.isArray(ask)) {
+          return ask;
+        }
+        const {blocking, ...rest} = ask as Record<string, unknown>;
+        return {
+          ...rest,
+          priority:
+            blocking === true ? ASK_PRIORITY_BLOCKING : ASK_PRIORITY_DEFAULT,
+        };
+      })
+    : source.asks;
+  return {
+    ...source,
+    asks,
+    deviations: Array.isArray(source.deviations) ? source.deviations : [],
+    nextStep: typeof source.nextStep === 'string' ? source.nextStep : 'continue',
+    schemaVersion: THREAD_SCHEMA_VERSION,
+  };
+}
+
+function schemaVersionOf(parsed: unknown): number | null {
+  if (parsed == null || typeof parsed !== 'object') return null;
+  const value = (parsed as {schemaVersion?: unknown}).schemaVersion;
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Validate a parsed payload, migrating an accepted older version first. Never
+ * throws.
+ *
+ * The migration runs ONLY on a payload that declares an older version. A
+ * payload with no `schemaVersion`, or one that declares 2 but still carries
+ * `blocking`, fails with the key named — guessing at an undeclared shape is how
+ * a typo becomes a silently dropped field.
+ */
 export function validateThreadReport(parsed: unknown): PayloadValidation {
-  const result = threadReportSchema.safeParse(parsed);
-  if (result.success) return {payload: result.data, status: 'ok'};
+  const declared = schemaVersionOf(parsed);
+  const needsMigration =
+    declared != null &&
+    declared >= THREAD_SCHEMA_MIN_ACCEPTED_VERSION &&
+    declared < THREAD_SCHEMA_VERSION;
+  const candidate = needsMigration ? migrateV1Payload(parsed) : parsed;
+
+  const result = threadReportSchema.safeParse(candidate);
+  if (result.success) {
+    return {
+      migratedFrom: needsMigration ? declared : null,
+      payload: result.data,
+      status: 'ok',
+    };
+  }
   return {
     issues: result.error.issues.map(
       (issue) => `${formatIssuePath(issue.path)}: ${issue.message}`,
@@ -318,21 +468,41 @@ export function validateThreadReport(parsed: unknown): PayloadValidation {
  * The drift risk is real and is covered by a test that parses this skeleton's
  * key set against the schema's.
  */
+/**
+ * The calibration Claude needs to fill `priority` honestly (D15), printed
+ * beside the skeleton rather than inside it so the JSON stays copy-pasteable.
+ *
+ * It exists because a scale with no calibration collapses upward: every ask
+ * feels urgent to the session that just wrote it, and a report where everything
+ * is P0 has no priorities at all — it is the old boolean with more digits.
+ */
+export const PAYLOAD_PRIORITY_GUIDANCE: readonly string[] = [
+  'ASK PRIORITY (0-4) — most asks are P3 or P4. Do not inflate.',
+  ...ASK_PRIORITIES.map(
+    (priority) => `  P${priority} — ${ASK_PRIORITY_MEANING[priority]}`,
+  ),
+  '  P0 is for a session that is genuinely STOPPED. If you kept working, it was not P0.',
+  '  Asks are always NUMBERED (one sequence, every priority); only options get letters.',
+];
+
 export function payloadSkeleton(): string {
   const skeleton = {
     answers: [{answer: '<your answer>', question: '<his question, verbatim>'}],
     asks: [
       {
-        blocking: false,
         context: '<the hook back into what this is about>',
         default: '<what you will do if he never answers>',
         kind: 'approve',
         options: [{recommended: true, text: '<option a — upside/downside>'}],
+        priority: 3,
         text: '<the question or action, one line>',
       },
     ],
     beadsTouched: [{description: '<what this bead IS>', id: '<bead id>'}],
     continuesFrom: null,
+    deviations: [
+      '<anything that departs from what he specified, or that he should know — [] when there were none>',
+    ],
     did: ['<completed item>'],
     discussion: [],
     goal: '<the arc goal>',
@@ -341,6 +511,7 @@ export function payloadSkeleton(): string {
     learned: [
       {disposition: '<where it now lives>', text: '<what you learned>'},
     ],
+    nextStep: 'continue',
     nextSteps: [
       '<what I or the next session do next — NOT things you must do>',
     ],

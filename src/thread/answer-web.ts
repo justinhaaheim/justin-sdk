@@ -122,7 +122,6 @@ function pageAsksFor(
   stored: Map<string, StoredDraft>,
 ): PageAsk[] {
   return orderAsks(asks).map((ask, index) => ({
-    blocking: ask.blocking,
     defaultAction: ask.defaultAction,
     description: ask.description,
     draft: stored.get(ask.id)?.text ?? null,
@@ -130,6 +129,7 @@ function pageAsksFor(
     kind: ask.kind,
     number: index + 1,
     optionCount: ask.optionCount,
+    priority: ask.priority,
     reportCount: ask.reportCount,
     title: ask.title,
   }));

@@ -167,7 +167,7 @@ describe('renderReport', () => {
 describe('askKindTag', () => {
   test('names the shape of the answer each ask wants', () => {
     const base = {
-      blocking: false,
+      priority: 3 as const,
       context: 'c',
       default: 'd',
       options: [],
@@ -207,7 +207,7 @@ describe('carried asks (F4)', () => {
   const carried = [
     {
       askIndex: 0,
-      blocking: true,
+      priority: 0,
       fromReport: 1,
       id: 'jl-x7q.1',
       restated: `[Pick a/b] Which default board view do you want?

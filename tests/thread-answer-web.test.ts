@@ -70,7 +70,7 @@ function tempStateDir(): string {
 function askOne() {
   return {
     askIndex: 0,
-    blocking: true,
+    priority: 0,
     defaultAction: 'I take a.',
     description: '[Pick a/b] Ask one?',
     id: 'jl-t1.1',
@@ -84,7 +84,7 @@ function askOne() {
 function askTwo() {
   return {
     askIndex: 1,
-    blocking: false,
+    priority: 3,
     defaultAction: 'I leave it.',
     description: '[Approve Y/n] Ask two?',
     id: 'jl-t1.2',
@@ -378,7 +378,7 @@ describe('I3 · submit is explicit and separate from navigation', () => {
     const page = renderAnswerPage({
       asks: [
         {
-          blocking: true,
+          priority: 0,
           defaultAction: 'I take a.',
           description: 'Ask one?',
           draft: null,
@@ -557,7 +557,7 @@ describe('I6 · skipping is one keystroke and shows the default', () => {
     const page = renderAnswerPage({
       asks: [
         {
-          blocking: false,
+          priority: 3,
           defaultAction: 'I leave the knob on.',
           description: 'Ask two?',
           draft: null,
@@ -586,7 +586,7 @@ describe('I6 · skipping is one keystroke and shows the default', () => {
     const page = renderAnswerPage({
       asks: [
         {
-          blocking: false,
+          priority: 3,
           defaultAction: view.defaultAction,
           description: 'Ask nine?',
           draft: null,
@@ -634,7 +634,7 @@ function seededFake(): FakeBd {
       id: 'jl-t1.1',
       metadata: {
         askIndex: 0,
-        blocking: true,
+        priority: 0,
         defaultAction: 'I take a.',
         kind: 'pick',
         optionCount: 2,
@@ -650,7 +650,7 @@ function seededFake(): FakeBd {
       id: 'jl-t1.2',
       metadata: {
         askIndex: 1,
-        blocking: false,
+        priority: 3,
         defaultAction: 'I leave it.',
         kind: 'approve',
         optionCount: 0,

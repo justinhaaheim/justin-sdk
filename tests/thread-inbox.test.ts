@@ -121,7 +121,7 @@ describe('renderInboxAsk — the three shapes prepare and inbox share', () => {
     return {
       answers: [],
       askIndex: 0,
-      blocking: false,
+      priority: 3,
       defaultAction: 'I keep by-repo as the default.',
       id: 'jl-kigm.1',
       kind: 'pick',
@@ -174,7 +174,7 @@ describe('renderInboxAsk — the three shapes prepare and inbox share', () => {
 describe('an answer written after a skip reaches BOTH inbox and prepare', () => {
   test('skippedAt + a later real comment renders HIS ANSWER, not SKIPPED', () => {
     const metadata = {
-      blocking: true,
+      priority: 0,
       defaultAction: 'I keep by-repo.',
       kind: 'pick',
       skippedAt: '2026-09-12T10:00:00Z',
@@ -189,7 +189,7 @@ describe('an answer written after a skip reaches BOTH inbox and prepare', () => 
           .map((entry) => stripAnswerPrefix((entry.text ?? '').trim()))
           .filter((text) => text !== '' && text !== SKIP_COMMENT),
         askIndex: 0,
-        blocking: true,
+        priority: 0,
         defaultAction: 'I keep by-repo.',
         reportCount: 1,
         id: 'jl-x.1',
@@ -214,7 +214,7 @@ describe('renderInbox', () => {
       {
         answers: ['b'],
         askIndex: 0,
-        blocking: true,
+        priority: 0,
         defaultAction: 'I ship it behind the knob.',
         id: 'jl-e9f4.1',
         kind: 'pick',
@@ -226,7 +226,7 @@ describe('renderInbox', () => {
       {
         answers: [],
         askIndex: 1,
-        blocking: false,
+        priority: 3,
         defaultAction: 'I leave the knob on.',
         id: 'jl-e9f4.2',
         kind: 'approve',
@@ -238,7 +238,7 @@ describe('renderInbox', () => {
       {
         answers: [],
         askIndex: 2,
-        blocking: false,
+        priority: 3,
         defaultAction: 'I accept it and document the behaviour.',
         id: 'jl-e9f4.3',
         kind: 'approve',

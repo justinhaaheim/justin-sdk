@@ -55,7 +55,7 @@ function twoAskPayload(): ThreadReportPayload {
   const raw = examplePayload();
   raw.asks = [
     {
-      blocking: true,
+      priority: 0,
       context: 'the first question',
       default: 'I take a.',
       kind: 'pick',
@@ -66,7 +66,7 @@ function twoAskPayload(): ThreadReportPayload {
       text: 'Ask one?',
     },
     {
-      blocking: false,
+      priority: 3,
       context: 'the second question',
       default: 'I leave it.',
       kind: 'approve',

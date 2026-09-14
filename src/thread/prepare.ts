@@ -40,7 +40,8 @@ import {
   SANDBOX_DENIED_LINE,
   threadsStateDir,
 } from './paths';
-import {payloadSkeleton} from './schema';
+import {PAYLOAD_PRIORITY_GUIDANCE, payloadSkeleton} from './schema';
+import {priorityLabel} from './render';
 import {readReportCount} from './metadata';
 import {resolveThreadConfig} from './config';
 
@@ -151,7 +152,7 @@ export async function runThreadPrepare(
           out.push(
             ...renderInboxAsk(
               ask,
-              `  ${ask.id} · [${ask.kind}] ${ask.blocking ? 'BLOCKING' : 'non-blocking'} · ${ask.title}`,
+              `  ${ask.id} · [${ask.kind}] ${priorityLabel(ask.priority)} · ${ask.title}`,
               '     (no answer yet — disposition it as carried or decided)',
             ),
           );
@@ -199,6 +200,8 @@ export async function runThreadPrepare(
   out.push('  2. Run: justin-sdk thread report --file <that path>');
   out.push('');
   out.push(payloadSkeleton());
+  out.push('');
+  for (const line of PAYLOAD_PRIORITY_GUIDANCE) out.push(line);
 
   console.log(out.join('\n'));
   return 0;

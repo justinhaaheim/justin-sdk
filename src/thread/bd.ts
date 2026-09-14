@@ -694,9 +694,16 @@ export async function setThreadInProgress(
 }
 
 export interface AskBeadFields {
-  blocking: boolean;
   description: string;
   metadata: Record<string, unknown>;
+  /**
+   * The ask's own priority, 0-4 (D15), passed straight through as the bead's bd
+   * priority. The two scales mean the same thing here — the threads repo has
+   * exactly one writer, so nothing else is competing for what P0 means in it —
+   * and mapping them 1:1 is what makes `bd list -p 0` in that repo answer "what
+   * is Justin actually blocked on". It replaces `blocking ? '1' : '2'`.
+   */
+  priority: number;
   title: string;
 }
 
@@ -713,7 +720,7 @@ export async function createAsk(
       '-t',
       'ask',
       '-p',
-      fields.blocking ? '1' : '2',
+      String(Math.min(4, Math.max(0, Math.round(fields.priority)))),
       '--parent',
       threadId,
       '-d',

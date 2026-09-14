@@ -66,19 +66,21 @@ import {
   compareAsksForNumbering,
   numberingFieldsOf,
   optionLetter,
+  priorityLabel,
 } from './render';
 
 /** What one ask needs in order to be asked. Everything comes from the bead. */
 export interface AskView {
   /** `metadata.askIndex`: its place in the report that created it (F12). */
   askIndex: number | null;
-  blocking: boolean;
   /** The ask bead's rendered description: kind tag, context, options, default. */
   description: string;
   defaultAction: string;
   id: string;
   kind: string;
   optionCount: number;
+  /** 0-4 (D15), via `readAskPriority` so a v1 ask bead still sorts. */
+  priority: number;
   /** `metadata.reportCount`: which report created it. Null when unrecorded. */
   reportCount: number | null;
   title: string;
@@ -144,7 +146,6 @@ export function askViewOf(issue: BdIssue): AskView {
   const numbering = numberingFieldsOf(meta);
   return {
     askIndex: numbering.askIndex,
-    blocking: meta.blocking === true,
     defaultAction:
       typeof meta.defaultAction === 'string' && meta.defaultAction !== ''
         ? meta.defaultAction
@@ -156,6 +157,7 @@ export function askViewOf(issue: BdIssue): AskView {
       typeof meta.optionCount === 'number' && Number.isFinite(meta.optionCount)
         ? Math.max(0, Math.floor(meta.optionCount))
         : 0,
+    priority: numbering.priority,
     reportCount: numbering.reportCount,
     title: issue.title ?? '',
   };
@@ -244,7 +246,7 @@ export async function walkAsks(
     const from =
       ask.reportCount == null ? '' : ` · from report #${ask.reportCount}`;
     io.print(
-      `── ${index + 1}/${ordered.length} · ${ask.id} · ${ask.blocking ? 'BLOCKING' : 'non-blocking'}${from} ──`,
+      `── ${index + 1}/${ordered.length} · ${ask.id} · ${priorityLabel(ask.priority)}${from} ──`,
     );
     io.print(ask.description === '' ? ask.title : ask.description);
     io.print('');

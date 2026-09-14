@@ -27,6 +27,8 @@ import {
   type BdIssue,
 } from './bd';
 import {collectThreadFacts} from './facts';
+import {priorityLabel} from './render';
+import {readAskPriority} from './metadata';
 
 import type {EnvLike} from './paths';
 
@@ -117,7 +119,7 @@ export async function runThreadShow(
   for (const ask of asks.value) {
     const meta = (ask.metadata ?? {}) as Record<string, unknown>;
     tail.push(
-      `  ${ask.id} · [${String(meta.kind ?? 'UNKNOWN')}] ${meta.blocking === true ? 'BLOCKING' : 'non-blocking'} · ${ask.title ?? ''}`,
+      `  ${ask.id} · [${String(meta.kind ?? 'UNKNOWN')}] ${priorityLabel(readAskPriority(meta))} · ${ask.title ?? ''}`,
     );
     const comments = await readComments(ctx, ask.id);
     if (!comments.ok) {

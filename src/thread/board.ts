@@ -39,7 +39,9 @@ import {bdContext} from './bd';
 import {commitThreadsRepo, describeCommit} from './commit';
 import {drainSpool, renderDrain, type SpoolApplier} from './drain';
 import {threadsRepoDir} from './paths';
-import {readReportCount} from './metadata';
+import {readAskPriority, readReportCount} from './metadata';
+import {priorityLabel} from './render';
+import {ASK_PRIORITY_BLOCKING} from './schema';
 
 import type {EnvLike} from './paths';
 
@@ -53,8 +55,9 @@ const STOP_GLYPH: Record<string, string> = {
 };
 
 export interface BoardAsk {
-  blocking: boolean;
   id: string;
+  /** 0-4 (D15), via `readAskPriority` so a v1 ask bead still sorts. */
+  priority: number;
   repo: string | null;
   reportedAt: string | null;
   threadId: string;
@@ -146,8 +149,8 @@ export function buildBoard(
       // less waiting for him than there is.
       const meta = (ask.metadata ?? {}) as Record<string, unknown>;
       orphanAsks.push({
-        blocking: meta.blocking === true,
         id: ask.id,
+        priority: readAskPriority(meta),
         repo: null,
         reportedAt: metaString(meta, 'createdAt'),
         threadId: threadId ?? 'UNKNOWN',
@@ -185,9 +188,12 @@ export function buildBoard(
         : startedAt == null
           ? 'age UNKNOWN'
           : `started ${formatAge(startedAt, now)}`,
+      // P0 IS THE NEW BLOCKING (D15). The field keeps its name because the
+      // row's meaning is unchanged — "how many of these stop Justin" — and
+      // `readAskPriority` is what lets an ask bead written before this release,
+      // which carries only `blocking`, still be counted.
       blockingAsks: mine.filter(
-        (ask) =>
-          ((ask.metadata ?? {}) as Record<string, unknown>).blocking === true,
+        (ask) => readAskPriority(ask.metadata) === ASK_PRIORITY_BLOCKING,
       ).length,
       branch: metaString(meta, 'branch'),
       id: thread.id,
@@ -287,7 +293,7 @@ export function renderRecent(data: BoardData): string {
   return ['', ...rows.map(renderRow)].join('\n');
 }
 
-/** Every open ask across every thread: blocking first, then newest first. */
+/** Every open ask across every thread: P0 first, then newest first. */
 export function collectOpenAsks(
   threads: readonly BdIssue[],
   asks: readonly BdIssue[],
@@ -300,8 +306,8 @@ export function collectOpenAsks(
     const thread = threadId == null ? undefined : byId.get(threadId);
     const threadMeta = (thread?.metadata ?? {}) as Record<string, unknown>;
     rows.push({
-      blocking: meta.blocking === true,
       id: ask.id,
+      priority: readAskPriority(meta),
       repo: metaString(threadMeta, 'repo'),
       reportedAt: metaString(meta, 'createdAt'),
       threadId: threadId ?? 'UNKNOWN',
@@ -310,7 +316,7 @@ export function collectOpenAsks(
     });
   }
   return rows.sort((a, b) => {
-    if (a.blocking !== b.blocking) return a.blocking ? -1 : 1;
+    if (a.priority !== b.priority) return a.priority - b.priority;
     return (b.reportedAt ?? '').localeCompare(a.reportedAt ?? '');
   });
 }
@@ -322,7 +328,7 @@ export function renderOpenAsks(asks: readonly BoardAsk[]): string {
   const lines: string[] = [''];
   asks.forEach((ask, index) => {
     lines.push(
-      `  ${index + 1}. ${ask.blocking ? '🛑 BLOCKING' : '  non-blocking'} · ${ask.id}`,
+      `  ${index + 1}. ${ask.priority === ASK_PRIORITY_BLOCKING ? '🛑 P0' : `   ${priorityLabel(ask.priority)}`} · ${ask.id}`,
     );
     lines.push(`     ${ask.title}`);
     lines.push(

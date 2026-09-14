@@ -39,7 +39,12 @@ import {
   threadsStateDir,
 } from './paths';
 import {SKIP_COMMENT} from './answer';
-import {compareAsksForNumbering, numberingFieldsOf, restateAsk} from './render';
+import {
+  compareAsksForNumbering,
+  numberingFieldsOf,
+  priorityLabel,
+  restateAsk,
+} from './render';
 
 export type AskState = 'answered' | 'skipped' | 'unanswered';
 
@@ -47,10 +52,11 @@ export interface InboxAsk {
   answers: string[];
   /** `metadata.askIndex` — part of the one ask order (F12 follow-up). */
   askIndex: number | null;
-  blocking: boolean;
   defaultAction: string;
   id: string;
   kind: string;
+  /** 0-4 (D15), via `readAskPriority`. */
+  priority: number;
   /** `metadata.reportCount` — which report created this ask. */
   reportCount: number | null;
   restated: string;
@@ -175,7 +181,7 @@ export function renderInbox(view: InboxView): string {
     lines.push(
       ...renderInboxAsk(
         ask,
-        `  ${index + 1}. ${ask.id} · ${ask.blocking ? 'BLOCKING' : 'non-blocking'} · [${ask.kind}]`,
+        `  ${index + 1}. ${ask.id} · ${priorityLabel(ask.priority)} · [${ask.kind}]`,
       ),
     );
   }
@@ -198,7 +204,7 @@ export function renderInbox(view: InboxView): string {
   }
   for (const ask of waiting) {
     lines.push(
-      `  ${ask.id} · ${ask.blocking ? 'BLOCKING' : 'non-blocking'} · ${ask.title}`,
+      `  ${ask.id} · ${priorityLabel(ask.priority)} · ${ask.title}`,
     );
     lines.push(`      if he never answers: ${ask.defaultAction}`);
   }
@@ -229,7 +235,6 @@ export async function collectInboxAsks(
     const meta = metadataOf(ask);
     const base = {
       ...numberingFieldsOf(meta),
-      blocking: meta.blocking === true,
       defaultAction: stringOr(meta.defaultAction, 'UNKNOWN'),
       id: ask.id,
       kind: stringOr(meta.kind, 'UNKNOWN'),

@@ -377,9 +377,9 @@ export async function writeReportToBd(
       const numbering = numberingFieldsOf(meta);
       return {
         askIndex: numbering.askIndex,
-        blocking: meta.blocking === true,
         fromReport: numbering.reportCount,
         id: ask.id,
+        priority: numbering.priority,
         // The bead's own description is the full ask — form tag, context,
         // lettered options, default — so F4 reuses it rather than
         // reconstructing a question the payload no longer carries.
@@ -459,19 +459,19 @@ export async function writeReportToBd(
   const askIds: (string | null)[] = [];
   for (const [index, ask] of payload.asks.entries()) {
     const created = await createAsk(ctx, threadId, {
-      blocking: ask.blocking,
       description: renderAskDescription(ask, threadId),
       metadata: buildAskMetadata({
         askIndex: index,
-        blocking: ask.blocking,
         defaultAction: ask.default,
         kind: ask.kind,
         optionCount: ask.options.length,
+        priority: ask.priority,
         reportCount,
         reportedAt: facts.reportedAt,
         sessionId,
         threadId,
       }),
+      priority: ask.priority,
       title: firstLine(ask.text, ASK_TITLE_CAP),
     });
     if (!created.ok) {
@@ -590,6 +590,17 @@ export async function runThreadReport(
     return 2;
   }
   const payload: ThreadReportPayload = validation.payload;
+  if (validation.migratedFrom != null) {
+    // SAID OUT LOUD, every time (D15). A migrated payload is not the payload
+    // that was written: its `deviations` is empty because nobody was asked, not
+    // because there were none, and its `nextStep` says `continue` because the
+    // schema had to say something. Both are the reassuring direction, so the
+    // one place that knows the substitution happened is the place that has to
+    // name it.
+    console.error(
+      `thread report: this payload declared schemaVersion ${validation.migratedFrom} and was migrated to ${THREAD_SCHEMA_VERSION}. blocking true → P0, false → P3; nextStep → "continue"; deviations → empty (NOT "there were none" — nothing supplied them). Write v${THREAD_SCHEMA_VERSION} next time: run justin-sdk thread prepare for the current skeleton.`,
+    );
+  }
 
   // --- 2. facts -----------------------------------------------------------
   const facts: ThreadFacts = collectThreadFacts({

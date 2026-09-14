@@ -275,15 +275,16 @@ describe('views', () => {
     expect(positions[1]).toBeLessThan(positions[2]!);
   });
 
-  test('--open-asks puts blocking first, then newest first', () => {
+  test('--open-asks puts P0 first, then newest first', () => {
     const asks = collectOpenAsks(THREADS, ASKS);
     expect(asks.map((entry) => entry.id)).toEqual([
-      'jl-a1.1', // blocking
+      'jl-a1.1', // P0
       'jl-c3.1', // 11:30
       'jl-a1.2', // 10:00
     ]);
     const text = renderOpenAsks(asks);
-    expect(text).toContain('🛑 BLOCKING');
+    expect(text).toContain('🛑 P0');
+    expect(text).toContain('P3 · jl-c3.1');
     expect(text).toContain('justin-sdk');
     expect(text).toContain('Accept the subagent behaviour?');
   });

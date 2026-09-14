@@ -14,7 +14,11 @@
  * that was measured too.
  */
 
-import {THREAD_SCHEMA_VERSION} from './schema';
+import {
+  ASK_PRIORITY_BLOCKING,
+  ASK_PRIORITY_DEFAULT,
+  THREAD_SCHEMA_VERSION,
+} from './schema';
 
 import type {ThreadFacts} from './facts';
 import type {ThreadReportPayload} from './schema';
@@ -29,7 +33,7 @@ export interface ThreadMetadataInput {
    * 0`, which the board would read as "nothing is waiting for Justin" (rule 6,
    * and in the reassuring direction).
    */
-  carriedOpenAsks: readonly {blocking: boolean; id: string}[];
+  carriedOpenAsks: readonly {id: string; priority: number}[];
   facts: ThreadFacts;
   payload: ThreadReportPayload;
   reportCount: number;
@@ -45,13 +49,21 @@ export function buildThreadMetadata(
     askIds: createdIds,
     autofillFailures: facts.autofillFailures,
     beadsTouched: payload.beadsTouched,
+    // P0 IS THE NEW BLOCKING, and this key keeps its old name on purpose: the
+    // board, the drain and anything else already reading `blockingAskCount`
+    // means exactly "how many asks stop Justin's session", which is the count of
+    // P0s (D15). Renaming it would have made every existing reader read
+    // `undefined` — zero-shaped, in the reassuring direction.
     blockingAskCount:
-      payload.asks.filter((ask) => ask.blocking).length +
-      carriedOpenAsks.filter((ask) => ask.blocking).length,
+      payload.asks.filter((ask) => ask.priority === ASK_PRIORITY_BLOCKING)
+        .length +
+      carriedOpenAsks.filter((ask) => ask.priority === ASK_PRIORITY_BLOCKING)
+        .length,
     carriedAskIds: carriedOpenAsks.map((ask) => ask.id),
     branch: facts.branch,
     continuesFrom: payload.continuesFrom ?? null,
     cwd: facts.cwd,
+    deviations: payload.deviations,
     dirty: facts.dirty,
     entrypoint: facts.entrypoint,
     goal: payload.goal,
@@ -62,6 +74,7 @@ export function buildThreadMetadata(
     lastUserMessage: facts.lastUserMessage,
     mergeState: payload.workProduct.merged,
     model: facts.model,
+    nextStep: payload.nextStep,
     // The WHOLE thread's open asks after this report: the ones it just created
     // plus the ones it carried. Not "asks in this payload".
     openAskCount: createdIds.length + carriedOpenAsks.length,
@@ -121,6 +134,7 @@ export function buildStartMetadata(input: {
     branch: facts.branch,
     continuesFrom: null,
     cwd: facts.cwd,
+    deviations: [],
     dirty: facts.dirty,
     entrypoint: facts.entrypoint,
     goal: null,
@@ -131,6 +145,7 @@ export function buildStartMetadata(input: {
     lastUserMessage: facts.lastUserMessage,
     mergeState: null,
     model: facts.model,
+    nextStep: null,
     openAskCount: 0,
     pr: null,
     progressPercent: null,
@@ -159,10 +174,10 @@ export function buildStartMetadata(input: {
 
 export interface AskMetadataInput {
   askIndex: number;
-  blocking: boolean;
   defaultAction: string;
   kind: string;
   optionCount: number;
+  priority: number;
   /** Which report created this ask — read back by F4's "carried from report #N". */
   reportCount: number;
   reportedAt: string;
@@ -178,16 +193,54 @@ export function buildAskMetadata(
     // unanswered ask from one whose answer it failed to read.
     answeredAt: null,
     askIndex: input.askIndex,
-    blocking: input.blocking,
+    // BOTH KEYS, FOR ONE RELEASE (D15). `priority` is the truth; `blocking` is
+    // written alongside it so an ask bead created by this build is still legible
+    // to a reader that has not been updated — including an OLDER justin-sdk,
+    // which another checkout on this machine may well be running. Readers here
+    // all go through `readAskPriority`, which prefers `priority` and falls back.
+    blocking: input.priority === ASK_PRIORITY_BLOCKING,
     createdAt: input.reportedAt,
     defaultAction: input.defaultAction,
     kind: input.kind,
     optionCount: input.optionCount,
+    priority: input.priority,
     reportCount: input.reportCount,
     schemaVersion: THREAD_SCHEMA_VERSION,
     sessionId: input.sessionId,
     threadId: input.threadId,
   };
+}
+
+/**
+ * An ask bead's priority, 0-4 (D15). The ONE reader; everything else goes
+ * through it.
+ *
+ * `priority` first, then the v1 `blocking` boolean, then P3. The fallback order
+ * is the migration: an ask bead written before this release carries only
+ * `blocking`, and an ask bead written by a build that has neither carries
+ * nothing at all. The last case resolves to P3 rather than P0 deliberately — an
+ * unreadable priority must not manufacture urgency it cannot evidence, and P3's
+ * meaning ("my default is fine") is the honest thing to say about an ask whose
+ * urgency is unknown. It is surfaced, not silent: every renderer prints the
+ * priority it used.
+ */
+export function readAskPriority(metadata: unknown): number {
+  if (metadata == null || typeof metadata !== 'object') {
+    return ASK_PRIORITY_DEFAULT;
+  }
+  const meta = metadata as {blocking?: unknown; priority?: unknown};
+  if (
+    typeof meta.priority === 'number' &&
+    Number.isInteger(meta.priority) &&
+    meta.priority >= 0 &&
+    meta.priority <= 4
+  ) {
+    return meta.priority;
+  }
+  if (typeof meta.blocking === 'boolean') {
+    return meta.blocking ? ASK_PRIORITY_BLOCKING : ASK_PRIORITY_DEFAULT;
+  }
+  return ASK_PRIORITY_DEFAULT;
 }
 
 /** Read `reportCount` back off an existing bead. Absent or odd means 0. */

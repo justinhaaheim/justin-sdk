@@ -28,7 +28,8 @@
 
 import {formatTokens} from '../usage-check';
 
-import {CLOSING_DISPOSITIONS} from './schema';
+import {readAskPriority} from './metadata';
+import {ASK_PRIORITY_BLOCKING, CLOSING_DISPOSITIONS} from './schema';
 
 import type {ThreadFacts} from './facts';
 import type {ThreadAsk, ThreadReportPayload} from './schema';
@@ -66,6 +67,18 @@ const ANSWER_FOOTER_MARKER = 'Answer by commenting on this bead:';
 export function restateAsk(description: string): string {
   const cut = description.indexOf(ANSWER_FOOTER_MARKER);
   return (cut === -1 ? description : description.slice(0, cut)).trimEnd();
+}
+
+/**
+ * `P0`…`P4` — the one spelling of a priority across every text surface (D15).
+ *
+ * Out of range says so rather than clamping: a priority this code did not put
+ * there is a fact about the data, and rounding it to P4 would hide it.
+ */
+export function priorityLabel(priority: number): string {
+  return Number.isInteger(priority) && priority >= 0 && priority <= 4
+    ? `P${priority}`
+    : `P? (${priority})`;
 }
 
 /** a, b, c, … for an option index. */
@@ -134,10 +147,11 @@ function renderTokens(facts: ThreadFacts): string {
 export interface CarriedAsk {
   /** `metadata.askIndex` — its position within the report that created it. */
   askIndex: number | null;
-  blocking: boolean;
   /** The report number that first asked it, when the bead records one. */
   fromReport: number | null;
   id: string;
+  /** 0-4, read through `readAskPriority` so a v1 ask bead still sorts (D15). */
+  priority: number;
   /** The ask bead's description, footer stripped. */
   restated: string;
 }
@@ -153,7 +167,8 @@ export interface CarriedAsk {
  * different asks. Both sides now sort with this comparator, which is the
  * report's own rule written down:
  *
- *   1. BLOCKING FIRST. The report prints two labelled groups in that order.
+ *   1. PRIORITY ASCENDING — P0 first (D15, replacing "blocking first"). The
+ *      report prints one numbered sequence with the P0s at the top.
  *   2. OLDEST REPORT FIRST. A carried ask has waited longest and is the one
  *      most likely to have fallen out of Justin's head, so it leads its group.
  *      An ask whose bead records no `reportCount` sorts as OLDER than any that
@@ -167,8 +182,8 @@ export interface CarriedAsk {
  */
 export interface NumberedAsk {
   askIndex: number | null;
-  blocking: boolean;
   id: string;
+  priority: number;
   reportCount: number | null;
 }
 
@@ -176,7 +191,7 @@ export function compareAsksForNumbering(
   a: NumberedAsk,
   b: NumberedAsk,
 ): number {
-  if (a.blocking !== b.blocking) return a.blocking ? -1 : 1;
+  if (a.priority !== b.priority) return a.priority - b.priority;
   const reportA = a.reportCount ?? -1;
   const reportB = b.reportCount ?? -1;
   if (reportA !== reportB) return reportA - reportB;
@@ -186,9 +201,14 @@ export function compareAsksForNumbering(
   return a.id.localeCompare(b.id);
 }
 
-/** Read the numbering fields off an ask bead's metadata. Absent stays null. */
+/**
+ * Read the numbering fields off an ask bead's metadata. Absent stays null —
+ * except `priority`, which has a defined fallback (see `readAskPriority`) and so
+ * is a number here rather than a nullable one.
+ */
 export function numberingFieldsOf(metadata: unknown): {
   askIndex: number | null;
+  priority: number;
   reportCount: number | null;
 } {
   const meta = (metadata ?? {}) as Record<string, unknown>;
@@ -196,6 +216,7 @@ export function numberingFieldsOf(metadata: unknown): {
     typeof value === 'number' && Number.isFinite(value) ? value : null;
   return {
     askIndex: asNumber(meta.askIndex),
+    priority: readAskPriority(metadata),
     reportCount: asNumber(meta.reportCount),
   };
 }
@@ -335,8 +356,8 @@ export function renderReport(options: RenderOptions): string {
       render: (n: number) => renderCarried(lines, carried, n),
       sort: {
         askIndex: carried.askIndex,
-        blocking: carried.blocking,
         id: carried.id,
+        priority: carried.priority,
         reportCount: carried.fromReport,
       },
     })),
@@ -347,8 +368,8 @@ export function renderReport(options: RenderOptions): string {
       // carried one. The id is only a tiebreak, and it may not exist yet.
       sort: {
         askIndex: index,
-        blocking: ask.blocking,
         id: askIds[index] ?? '',
+        priority: ask.priority,
         reportCount: thisReport,
       },
     })),
@@ -357,8 +378,12 @@ export function renderReport(options: RenderOptions): string {
     lines.push('- (nothing — you are not blocking anything)');
   }
   let number = 1;
-  const blockingEntries = entries.filter((entry) => entry.sort.blocking);
-  const otherEntries = entries.filter((entry) => !entry.sort.blocking);
+  const blockingEntries = entries.filter(
+    (entry) => entry.sort.priority === ASK_PRIORITY_BLOCKING,
+  );
+  const otherEntries = entries.filter(
+    (entry) => entry.sort.priority !== ASK_PRIORITY_BLOCKING,
+  );
   if (blockingEntries.length > 0) {
     lines.push('- Blocking:');
     for (const entry of blockingEntries) {

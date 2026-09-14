@@ -25,7 +25,6 @@ import {keyActionFor, KEYMAP_FOOTER} from './answer-keymap';
 
 /** One ask, as the page needs it. Mirrors `AskView` plus its stored draft. */
 export interface PageAsk {
-  blocking: boolean;
   defaultAction: string;
   description: string;
   /** The draft already on disk for this ask, or null when there is none. */
@@ -35,6 +34,8 @@ export interface PageAsk {
   /** 1-based, matching the number this ask carried in the report. */
   number: number;
   optionCount: number;
+  /** 0-4 (D15). P0 is the old `blocking`. */
+  priority: number;
   reportCount: number | null;
   title: string;
 }
@@ -326,7 +327,7 @@ function askCard(ask: PageAsk, noteId: string): string {
   <section class="card" data-id="${id}">
     <div>
       <span class="tag">${ask.number}</span>
-      <span class="tag ${ask.blocking ? 'blocking' : ''}">${ask.blocking ? 'blocking' : 'non-blocking'}</span>
+      <span class="tag ${ask.priority === 0 ? 'blocking' : ''}">${ask.priority === 0 ? '🛑 P0' : `P${ask.priority}`}</span>
       <span class="tag">${escapeHtml(ask.kind)}</span>
       ${from}
       <span class="tag">${id}</span>

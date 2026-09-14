@@ -126,7 +126,7 @@ async function main(): Promise<number> {
     asks: [
       {
         askIndex: 0,
-        blocking: true,
+        priority: 0,
         defaultAction: 'I take option a.',
         description: '[Pick a/b] Which hook shape?',
         id: 'th-e2e.1',
@@ -137,7 +137,7 @@ async function main(): Promise<number> {
       },
       {
         askIndex: 1,
-        blocking: false,
+        priority: 3,
         defaultAction: 'I leave the script in place.',
         description: '[Approve Y/n] Retire the logger?',
         id: 'th-e2e.2',

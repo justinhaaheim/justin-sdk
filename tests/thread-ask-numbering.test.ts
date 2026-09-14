@@ -80,14 +80,14 @@ const NEW_ASK_IDS = ['jl-t.11', 'jl-t.12'];
 const CARRIED: CarriedAsk[] = [
   {
     askIndex: 1,
-    blocking: true,
+    priority: 0,
     fromReport: 1,
     id: 'jl-t.2',
     restated: '[Approve Y/n] Ship the lock?',
   },
   {
     askIndex: 0,
-    blocking: false,
+    priority: 3,
     fromReport: 2,
     id: 'jl-t.10',
     restated: '[Pick a/b] Which board view?',
@@ -101,9 +101,9 @@ function beads(): BdIssue[] {
     id: carried.id,
     metadata: {
       askIndex: carried.askIndex,
-      blocking: carried.blocking,
+      priority: carried.priority,
       defaultAction: 'the default',
-      kind: carried.blocking ? 'approve' : 'pick',
+      kind: carried.priority === 0 ? 'approve' : 'pick',
       optionCount: 2,
       reportCount: carried.fromReport,
     },
@@ -114,7 +114,7 @@ function beads(): BdIssue[] {
     id: NEW_ASK_IDS[index]!,
     metadata: {
       askIndex: index,
-      blocking: ask.blocking,
+      priority: ask.priority,
       defaultAction: ask.default,
       kind: ask.kind,
       optionCount: ask.options.length,
