@@ -210,6 +210,12 @@ const componentConfigSchema = z
           .describe(
             'Whether `thread` commits the threads repo’s `.beads/issues.jsonl` itself after every write batch (home-base-p1uj.11). DEFAULT TRUE — the only thread knob that defaults on, because threads live in their own repo whose sole writer is this tool, so committing is finishing the write rather than a new risk. Set it false to batch the commits by hand, or when the threads workspace is not a git repo. A commit that cannot be made is a WARNING, never a lost report.',
           ),
+        enforce: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether the `Stop` hook installed by `justin-sdk add thread-hooks` may BLOCK a session that ends on a status report it cannot prove was recorded (home-base-p1uj.15). DEFAULT FALSE, and the only knob here that can take a turn away from Claude: with it on, `thread stop-check` sees the report delimiters in the final message, finds no archived report newer than Justin’s last message, and exits 2 with a one-line reason telling the agent to run `thread prepare` and `thread report --file`. It blocks a turn at most once (a marker keyed by session and prompt id, plus Claude Code’s own stop_hook_active), never blocks a subagent, and passes silently whenever it cannot measure — a missing transcript, an unreadable archive, a payload that is not JSON. Installing the hook and arming it are two decisions; this is the arming one.',
+          ),
         repoDir: z
           .string()
           .optional()

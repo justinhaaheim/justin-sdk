@@ -49,6 +49,20 @@ export const THREAD_DEFAULT_ENABLED = false;
 export const THREAD_DEFAULT_START_ON_SESSION_START = false;
 
 /**
+ * Off unless something says otherwise (home-base-p1uj.15).
+ *
+ * This is the knob with the largest blast radius in the group, and the only one
+ * that can take a turn away from Claude: with it on, the `Stop` hook installed
+ * by `justin-sdk add thread-hooks` refuses to let a session finish on a report
+ * it did not record. Everything else here changes what gets printed or written;
+ * this changes whether a session may stop. It stays off until the hook has been
+ * watched behave on real sessions, and it is resolved through the same
+ * DEFAULT ← user ← project layering as the others so one line in the user file
+ * arms it everywhere and one line in a repo's config disarms it there.
+ */
+export const THREAD_DEFAULT_ENFORCE = false;
+
+/**
  * ON unless something says otherwise (home-base-p1uj.11) — the one knob here
  * whose default is true.
  *
@@ -118,6 +132,10 @@ export interface ResolvedThreadConfig {
   /** Which layer decided `autoCommit`. */
   autoCommitSource: ThreadConfigSource;
   enabled: boolean;
+  /** Whether the Stop hook may block a report it cannot prove was recorded. */
+  enforce: boolean;
+  /** Which layer decided `enforce`. */
+  enforceSource: ThreadConfigSource;
   /** Human-readable config read problems. Empty means both files were fine. */
   problems: string[];
   /**
@@ -215,6 +233,7 @@ export function resolveThreadConfig(
     THREAD_DEFAULT_START_ON_SESSION_START,
   );
   const autoCommit = resolveFlag('autoCommit', THREAD_DEFAULT_AUTO_COMMIT);
+  const enforce = resolveFlag('enforce', THREAD_DEFAULT_ENFORCE);
 
   // `render` is the one NESTED block in the thread section, so it needs its own
   // walk rather than `resolveFlag`'s. Same layering: default, then user, then
@@ -270,6 +289,8 @@ export function resolveThreadConfig(
     emojiHeader,
     emojiHeaderSource,
     enabled: enabled.value,
+    enforce: enforce.value,
+    enforceSource: enforce.source,
     problems,
     projectRoot,
     repoDir,

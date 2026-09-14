@@ -58,6 +58,20 @@ remote-control flow, which cannot reach a page on localhost.
 
 --ui ink: measured and rejected in the spike; the command says why and exits 2.`;
 
+const STOP_CHECK_NARRATIVE = `
+Installed by \`justin-sdk add thread-hooks\` as a Stop hook. It blocks exactly one
+case: the turn's final message carries the report delimiters (a run of 🛑 above
+it and 🕉️ below it) AND this session has archived no report since Justin's last
+message. The block is exit 2, the reason on stderr, and the same reason as JSON
+on stdout.
+
+It passes, silently and with exit 0, on everything else — the knob being off, a
+subagent's Stop, a turn it has already blocked, a final message that is not a
+report, and every case where it could not measure: no transcript, no session id,
+an unreadable archive, a payload that is not JSON.
+
+Needs componentConfig.thread.enforce, which defaults FALSE.`;
+
 export const threadCommand: CommandModule = {
   builder: (y: Argv) =>
     y
@@ -175,6 +189,23 @@ export const threadCommand: CommandModule = {
               sessionId: argv.session ?? null,
               stdin: argv.stdin === true,
             }),
+          );
+        },
+      )
+      .command(
+        'stop-check',
+        'Stop hook: refuse to let a session finish on a status report it cannot prove was recorded. Reads the hook payload on stdin. Exit 0 pass (silent) · 2 blocked. Needs componentConfig.thread.enforce.',
+        (yy) =>
+          yy.epilogue(STOP_CHECK_NARRATIVE).option('explain', {
+            default: false,
+            describe:
+              'Print the branch that decided and the elapsed ms to stderr. Off in hook mode, where every pass is silent.',
+            type: 'boolean' as const,
+          }),
+        async (argv) => {
+          const {runThreadStopCheck} = await import('./stop-check');
+          process.exit(
+            runThreadStopCheck({explain: argv.explain === true}).exitCode,
           );
         },
       )

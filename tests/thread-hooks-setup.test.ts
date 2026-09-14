@@ -1,9 +1,12 @@
 /**
- * `justin-sdk add thread-hooks` — the SessionStart installer (home-base-p1uj.3).
+ * `justin-sdk add thread-hooks` — the hook installer (home-base-p1uj.3, extended
+ * with the Stop hook by home-base-p1uj.15).
  *
  * Two properties matter and both are about NOT doing things twice: exactly one
- * SessionStart entry is appended however often the installer runs, and every
- * hook the repo already had survives it.
+ * entry per event is appended however often the installer runs, and every hook
+ * the repo already had survives it. With two events there is a third: the two
+ * installs must be independent, so a repo that ran this before the Stop hook
+ * existed gains the Stop entry and nothing else on a re-run.
  *
  * WHY THIS TESTS `addThreadStartHook` AND NOT THE WHOLE INSTALLER: Claude cannot
  * write any `.claude/settings.json` — the path is on the Bash sandbox's deny
@@ -25,15 +28,23 @@ import {describe, expect, test} from 'bun:test';
 
 import {
   addThreadStartHook,
+  addThreadStopHook,
   THREAD_HOOK_EVENT,
   THREAD_HOOK_MATCHER,
   THREAD_START_HOOK_COMMAND,
+  THREAD_STOP_HOOK_COMMAND,
+  THREAD_STOP_HOOK_EVENT,
 } from '../src/thread-hooks-setup';
 import {COMPONENT_NAMES, DEPENDENCY_ORDER} from '../src/components';
 
 function sessionStartEntries(settings: Record<string, unknown>): unknown[] {
   const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
   return (hooks[THREAD_HOOK_EVENT] as unknown[] | undefined) ?? [];
+}
+
+function stopEntries(settings: Record<string, unknown>): unknown[] {
+  const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
+  return (hooks[THREAD_STOP_HOOK_EVENT] as unknown[] | undefined) ?? [];
 }
 
 describe('addThreadStartHook', () => {
@@ -128,6 +139,73 @@ describe('addThreadStartHook', () => {
     };
     expect(addThreadStartHook(settings)).toBe(false);
     expect(sessionStartEntries(settings)).toHaveLength(1);
+  });
+});
+
+describe('addThreadStopHook (home-base-p1uj.15)', () => {
+  test('appends exactly ONE Stop entry, with NO matcher', () => {
+    const settings: Record<string, unknown> = {};
+    expect(addThreadStopHook(settings)).toBe(true);
+
+    const entries = stopEntries(settings);
+    expect(entries).toHaveLength(1);
+    // Stop has no matcher dimension — one would be silently ignored rather than
+    // helpfully restrictive, so the entry must not carry the key at all.
+    expect(entries[0]).toEqual({
+      hooks: [{command: THREAD_STOP_HOOK_COMMAND, type: 'command'}],
+    });
+    expect(entries[0]).not.toHaveProperty('matcher');
+  });
+
+  test('a re-run changes NOTHING', () => {
+    const settings: Record<string, unknown> = {};
+    expect(addThreadStopHook(settings)).toBe(true);
+    expect(addThreadStopHook(settings)).toBe(false);
+    expect(addThreadStopHook(settings)).toBe(false);
+    expect(stopEntries(settings)).toHaveLength(1);
+  });
+
+  test('the two hooks are independent — a repo with only the old one gains only Stop', () => {
+    // This is the upgrade path: every repo that ran `add thread-hooks` before
+    // p1uj.15 already has the SessionStart entry and none of them has the Stop
+    // one. Neither install may touch the other's event.
+    const settings: Record<string, unknown> = {};
+    addThreadStartHook(settings);
+    expect(stopEntries(settings)).toHaveLength(0);
+
+    expect(addThreadStopHook(settings)).toBe(true);
+    expect(addThreadStartHook(settings)).toBe(false);
+    expect(sessionStartEntries(settings)).toHaveLength(1);
+    expect(stopEntries(settings)).toHaveLength(1);
+  });
+
+  test('an unrelated Stop hook the repo already had survives', () => {
+    const other = {hooks: [{command: 'echo bye', type: 'command'}]};
+    const settings: Record<string, unknown> = {hooks: {Stop: [other]}};
+    expect(addThreadStopHook(settings)).toBe(true);
+
+    const entries = stopEntries(settings);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toEqual(other);
+  });
+
+  test('a hand-edited spelling of the command counts as installed', () => {
+    const settings: Record<string, unknown> = {
+      hooks: {
+        Stop: [
+          {
+            hooks: [
+              {
+                command: '/Users/jhaa/Dev/home-base/bin/justin-sdk thread stop-check',
+                type: 'command',
+              },
+            ],
+          },
+        ],
+      },
+    };
+    expect(addThreadStopHook(settings)).toBe(false);
+    expect(stopEntries(settings)).toHaveLength(1);
   });
 });
 
