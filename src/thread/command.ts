@@ -65,15 +65,25 @@ export const threadCommand: CommandModule = {
         'prepare',
         'Preflight a status report: the knob, the sandbox, this session’s thread, its open asks and their answers, the autofilled facts, and the payload skeleton. Always exits 0.',
         (yy) =>
-          yy.epilogue(PREPARE_NARRATIVE).option('session', {
-            describe:
-              'Session id to prepare for (default: $CLAUDE_CODE_SESSION_ID)',
-            type: 'string' as const,
-          }),
+          yy
+            .epilogue(PREPARE_NARRATIVE)
+            .option('continues-from', {
+              describe:
+                'Thread bead id this session continues: lists ITS open asks as ones this report must disposition, and prefills continuesFrom in the skeleton',
+              type: 'string' as const,
+            })
+            .option('session', {
+              describe:
+                'Session id to prepare for (default: $CLAUDE_CODE_SESSION_ID)',
+              type: 'string' as const,
+            }),
         async (argv) => {
           const {runThreadPrepare} = await import('./prepare');
           process.exit(
-            await runThreadPrepare({sessionId: argv.session ?? null}),
+            await runThreadPrepare({
+              continuesFrom: argv['continues-from'] ?? null,
+              sessionId: argv.session ?? null,
+            }),
           );
         },
       )
@@ -282,6 +292,12 @@ export const threadCommand: CommandModule = {
         'Every live thread: what it was, how far it got, why it stopped, and what it needs from you. Drains the spool first. Grouped by repo; --recent for a flat newest-first list; --open-asks for everything waiting on you.',
         (yy) =>
           yy
+            .option('all', {
+              default: false,
+              describe:
+                'Show continued threads too — by default a thread another session took over is folded away (unless it still has open asks)',
+              type: 'boolean' as const,
+            })
             .option('json', {
               default: false,
               describe: 'Print the board as JSON',
@@ -301,6 +317,7 @@ export const threadCommand: CommandModule = {
           const {runThreadBoard} = await import('./board');
           process.exit(
             await runThreadBoard({
+              includeContinued: argv.all === true,
               json: argv.json === true,
               view:
                 argv['open-asks'] === true

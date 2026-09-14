@@ -311,12 +311,32 @@ function modelAskFromPayload(
   };
 }
 
+/**
+ * "carried from report #3", "carried from th-eru report #7", or the honest
+ * vaguer forms when the bead records no report number (D21).
+ *
+ * The THREAD is named whenever the ask crossed a session boundary, because that
+ * is the case where "#7" on its own means nothing: it is report #7 of a thread
+ * this report is not.
+ */
+function carriedFromLabel(carried: CarriedAsk): string {
+  const thread =
+    carried.fromThread == null || carried.fromThread === ''
+      ? null
+      : carried.fromThread;
+  if (carried.fromReport == null) {
+    return thread == null
+      ? 'carried from an earlier report'
+      : `carried from ${thread}`;
+  }
+  return thread == null
+    ? `carried from report #${carried.fromReport}`
+    : `carried from ${thread} report #${carried.fromReport}`;
+}
+
 function modelAskFromCarried(carried: CarriedAsk, number: number): ModelAsk {
   return {
-    carriedFrom:
-      carried.fromReport == null
-        ? 'carried from an earlier report'
-        : `carried from report #${carried.fromReport}`,
+    carriedFrom: carriedFromLabel(carried),
     context: null,
     fallback: null,
     id: carried.id,

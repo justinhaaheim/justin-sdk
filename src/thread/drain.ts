@@ -372,7 +372,12 @@ export async function drainSpool(
     const detail =
       outcome.status === 'refused'
         ? `refused: open asks not dispositioned (${outcome.missing.join(', ')})`
-        : describeBdFailure(outcome.failure);
+        : outcome.status === 'refusedContinuation'
+          ? // KEPT, not discarded (D21): the spooled payload is fine and the
+            // thread it continues may simply not have existed yet when this ran.
+            // Dropping it would take the predecessor's open asks with it.
+            `refused: continuesFrom names ${outcome.continuesFrom}, but ${outcome.detail}`
+          : describeBdFailure(outcome.failure);
     summary.kept += 1;
     summary.outcomes.push({
       detail:

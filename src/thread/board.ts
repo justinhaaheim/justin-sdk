@@ -69,6 +69,11 @@ export interface BoardRow {
   age: string;
   blockingAsks: number;
   branch: string | null;
+  /**
+   * The successor thread that took this arc over (D21), when there is one —
+   * `metadata.continuedBy`, written by the session that continued it.
+   */
+  continuedBy: string | null;
   id: string;
   mergeState: string | null;
   openAsks: number;
@@ -127,6 +132,8 @@ export function threadIdOfAsk(ask: BdIssue): string | null {
 }
 
 export interface BoardData {
+  /** Continued threads left out of `rows` (D21). 0 means none were. */
+  hiddenContinued: number;
   orphanAsks: BoardAsk[];
   rows: BoardRow[];
 }
@@ -136,6 +143,7 @@ export function buildBoard(
   threads: readonly BdIssue[],
   asks: readonly BdIssue[],
   now: Date,
+  options: {includeContinued?: boolean} = {},
 ): BoardData {
   const byThread = new Map<string, BdIssue[]>();
   const orphanAsks: BoardAsk[] = [];
@@ -164,7 +172,7 @@ export function buildBoard(
     else bucket.push(ask);
   }
 
-  const rows = threads.map((thread): BoardRow => {
+  const allRows = threads.map((thread): BoardRow => {
     const meta = (thread.metadata ?? {}) as Record<string, unknown>;
     const mine = byThread.get(thread.id) ?? [];
     const progress = meta.progressPercent;
@@ -196,6 +204,7 @@ export function buildBoard(
         (ask) => readAskPriority(ask.metadata) === ASK_PRIORITY_BLOCKING,
       ).length,
       branch: metaString(meta, 'branch'),
+      continuedBy: metaString(meta, 'continuedBy'),
       id: thread.id,
       mergeState: metaString(meta, 'mergeState'),
       openAsks: mine.length,
@@ -214,7 +223,19 @@ export function buildBoard(
     };
   });
 
-  return {orphanAsks, rows};
+  // A CONTINUED THREAD IS FOLDED AWAY, NOT DROPPED (D21). Its arc lives on in
+  // its successor, so leaving it on the board makes every handover look like two
+  // live sessions — but it is hidden ONLY when nothing is still waiting on it.
+  // A continued thread with open asks stays visible whatever the flag says: the
+  // whole point of the board is what Justin still owes, and hiding an open ask
+  // because the session that asked it ended would be the reassuring direction of
+  // exactly the loss this epic exists to stop. The count line says how many were
+  // folded, so "fewer rows" is never silent.
+  const rows =
+    options.includeContinued === true
+      ? allRows
+      : allRows.filter((row) => row.continuedBy == null || row.openAsks > 0);
+  return {hiddenContinued: allRows.length - rows.length, orphanAsks, rows};
 }
 
 /**
@@ -380,9 +401,17 @@ export interface BoardOptions {
   /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
   autoCommit?: boolean;
   env?: EnvLike;
+  /** `--all`: show continued threads too (D21). They are folded away by default. */
+  includeContinued?: boolean;
   json?: boolean;
   now?: Date;
   view?: BoardView;
+}
+
+/** The line that keeps a folded-away thread from being a silent omission. */
+export function continuedHiddenLine(hidden: number): string | null {
+  if (hidden <= 0) return null;
+  return `${hidden} continued thread${hidden === 1 ? '' : 's'} hidden (--all shows them)`;
 }
 
 export async function runThreadBoard(
@@ -442,7 +471,9 @@ export async function runThreadBoard(
     return 1;
   }
 
-  const data = buildBoard(threads.value, asks.value, now);
+  const data = buildBoard(threads.value, asks.value, now, {
+    includeContinued: options.includeContinued,
+  });
 
   if (options.json === true) {
     console.log(
@@ -450,6 +481,7 @@ export async function runThreadBoard(
         {
           asks: collectOpenAsks(threads.value, asks.value),
           drain: drained,
+          hiddenContinued: data.hiddenContinued,
           rows: data.rows,
           uncommitted: uncommittedLine(env),
           view,
@@ -473,6 +505,15 @@ export async function runThreadBoard(
         `⚠️ ${data.orphanAsks.length} open ask(s) whose thread is closed or missing: ${data.orphanAsks.map((ask) => ask.id).join(', ')}`,
       );
     }
+  }
+
+  // Printed for every view, `--open-asks` included: that view is built from the
+  // full listing, so a hidden ROW never hides an ask — and the count is still
+  // the honest answer to "is this everything?".
+  const continuedLine = continuedHiddenLine(data.hiddenContinued);
+  if (continuedLine != null) {
+    console.log('');
+    console.log(continuedLine);
   }
 
   const uncommitted = uncommittedLine(env);

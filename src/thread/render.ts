@@ -122,6 +122,15 @@ export interface CarriedAsk {
   askIndex: number | null;
   /** The report number that first asked it, when the bead records one. */
   fromReport: number | null;
+  /**
+   * The PREDECESSOR thread it came from (D21), when this session continues
+   * another one — null for the ordinary case where the ask is this thread's own
+   * from an earlier report. It exists so the carried label can say "carried from
+   * th-eru report #7": a report number alone is ambiguous once the ask has
+   * crossed session boundaries, and "#7" of a thread Justin cannot name is
+   * exactly the bare-id failure the epic exists to stop.
+   */
+  fromThread?: string | null;
   id: string;
   /** 0-4, read through `readAskPriority` so a v1 ask bead still sorts (D15). */
   priority: number;

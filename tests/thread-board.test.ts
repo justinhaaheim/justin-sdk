@@ -15,6 +15,7 @@ import {describe, expect, test} from 'bun:test';
 import {
   buildBoard,
   collectOpenAsks,
+  continuedHiddenLine,
   formatAge,
   renderByRepo,
   renderOpenAsks,
@@ -240,6 +241,65 @@ describe('the ask → thread join', () => {
     expect(orphanAsks.map((entry) => entry.id)).toEqual(['jl-zz.1']);
     // and it is not silently attributed to some other thread
     expect(rows.reduce((sum, row) => sum + row.openAsks, 0)).toBe(3);
+  });
+});
+
+/**
+ * D21 — a thread another session took over is folded away, but never one that
+ * still has an open ask.
+ *
+ * NEGATIVE CONTROL (run 2026-09-14): the filter in `buildBoard` was reduced to
+ * `const rows = allRows;`. Exactly the first two tests below failed — "is hidden
+ * from the default board" (the row list still held `jl-old`) and "says how many
+ * it hid", which reported `Expected: "1 continued thread hidden (--all shows
+ * them)" Received: null` — while "STAYS VISIBLE while an ask is still open" and
+ * "--all shows it" stayed green, which is the right shape: only the hiding is
+ * being proved. Restoring the filter returned all four to green.
+ */
+describe('a continued thread (D21)', () => {
+  const continued = thread('jl-old', 'the session that handed over', {
+    continuedBy: 'jl-new',
+    repo: 'justin-sdk',
+    reportedAt: '2026-09-12T11:30:00.000Z',
+  });
+  const successor = thread('jl-new', 'the session that took it on', {
+    repo: 'justin-sdk',
+    reportedAt: '2026-09-12T11:55:00.000Z',
+  });
+
+  test('is hidden from the default board, and its successor is not', () => {
+    const data = buildBoard([continued, successor], [], NOW);
+    expect(data.rows.map((row) => row.id)).toEqual(['jl-new']);
+    expect(data.hiddenContinued).toBe(1);
+  });
+
+  test('says how many it hid, so fewer rows is never silent', () => {
+    const data = buildBoard([continued, successor], [], NOW);
+    expect(continuedHiddenLine(data.hiddenContinued)).toBe(
+      '1 continued thread hidden (--all shows them)',
+    );
+    expect(continuedHiddenLine(0)).toBeNull();
+  });
+
+  test('STAYS VISIBLE while an ask is still open on it', () => {
+    // The carry is what empties a continued thread; one that still holds an ask
+    // is holding something Justin owes, and hiding it would be the reassuring
+    // direction of exactly the loss this feature exists to stop.
+    const data = buildBoard(
+      [continued, successor],
+      [ask('jl-old.4', 'jl-old', {priority: 1})],
+      NOW,
+    );
+    expect(data.rows.map((row) => row.id)).toEqual(['jl-old', 'jl-new']);
+    expect(data.hiddenContinued).toBe(0);
+  });
+
+  test('--all shows it', () => {
+    const data = buildBoard([continued, successor], [], NOW, {
+      includeContinued: true,
+    });
+    expect(data.rows.map((row) => row.id)).toEqual(['jl-old', 'jl-new']);
+    expect(data.hiddenContinued).toBe(0);
   });
 });
 

@@ -38,6 +38,10 @@ import {
   describeBdFailure,
   findThreadBySession,
   listOpenAsks,
+  mergeMetadata,
+  reparentIssue,
+  setIssueDescription,
+  showIssue,
   updateThread,
   finalizeThread,
   type BdContext,
@@ -92,6 +96,29 @@ export function checkPriorAskCoverage(
   const dispositioned = new Set(priorAsks.map((prior) => prior.id));
   const missing = openAskIds.filter((id) => !dispositioned.has(id));
   return missing.length === 0 ? {ok: true} : {missing, ok: false};
+}
+
+/**
+ * The PREDECESSOR thread this payload continues, or null (D21).
+ *
+ * A session that names its OWN thread is not continuing anything: those asks are
+ * already the session's open asks, and reading the id as a second source would
+ * list, carry and re-parent every one of them twice.
+ */
+export function continuationOf(
+  continuesFrom: string | null | undefined,
+  ownThreadId: string | null,
+): string | null {
+  if (continuesFrom == null) return null;
+  const id = continuesFrom.trim();
+  if (id === '') return null;
+  if (ownThreadId != null && id === ownThreadId) return null;
+  return id;
+}
+
+/** The line a continued thread's description carries back to its successor. */
+export function continuedByLine(threadId: string): string {
+  return `Continued by ${threadId}`;
 }
 
 function firstLine(text: string, cap: number): string {
@@ -201,6 +228,14 @@ export type BdWriteOutcome =
     }
   | {status: 'bdFailed'; failure: BdFailure; rendered: string}
   | {status: 'refused'; missing: string[]}
+  /**
+   * `continuesFrom` names something that is not a thread bead (D21). REFUSED
+   * rather than ignored: `listOpenAsks` on an id with no children returns an
+   * empty list, so a typo'd predecessor would otherwise read as "that thread had
+   * no open asks" — a fabricated all-clear over exactly the asks this feature
+   * exists to carry.
+   */
+  | {status: 'refusedContinuation'; continuesFrom: string; detail: string}
   | {
       status: 'superseded';
       existingReportedAt: string;
@@ -370,7 +405,73 @@ export async function writeReportToBd(
   // are about to be recreated, so demanding a disposition for them would be
   // demanding one for a bead the retry itself is replacing.
   openAsks = openAsks.filter((ask) => !orphanIds.has(ask.id));
-  const openAskIds = openAsks.map((ask) => ask.id);
+
+  // --- 4c. THE PREDECESSOR THREAD'S OPEN ASKS (D21) -----------------------
+  //
+  // A new Claude Code session that continues an arc gets a NEW thread bead keyed
+  // on its own session id, so the asks the PREVIOUS session left open belong to
+  // a thread this session's `listOpenAsks` never looks at. Until this block they
+  // were invisible to D4 and silently skipped by the closing loop below — the
+  // cross-session loss the epic exists to stop, landing precisely at the moment
+  // an arc changes hands.
+  const continuesFrom = continuationOf(
+    payload.continuesFrom,
+    existingThread?.id ?? null,
+  );
+  let continuedThread: BdIssue | null = null;
+  let continuedOpenAsks: BdIssue[] = [];
+  if (continuesFrom != null) {
+    const found = await showIssue(ctx, continuesFrom);
+    if (!found.ok) {
+      return {
+        failure: found.failure,
+        rendered: renderWithoutBead(),
+        status: 'bdFailed',
+      };
+    }
+    continuedThread = found.value;
+    if (continuedThread == null) {
+      return {
+        continuesFrom,
+        detail: 'no bead with that id exists in the threads repo',
+        status: 'refusedContinuation',
+      };
+    }
+    // The type is checked only when bd REPORTS one. A present-and-wrong type is
+    // a fact (an ask id, a typo that hit another bead); an absent one is an
+    // unknown, and refusing a valid report over a field bd chose not to print
+    // would be the worse error.
+    if (
+      continuedThread.issue_type != null &&
+      continuedThread.issue_type !== 'thread'
+    ) {
+      return {
+        continuesFrom,
+        detail: `that bead is a ${continuedThread.issue_type}, not a thread — continuesFrom takes the THREAD bead id (see justin-sdk thread board)`,
+        status: 'refusedContinuation',
+      };
+    }
+    const asks = await listOpenAsks(ctx, continuesFrom);
+    if (!asks.ok) {
+      // Same reasoning as the session's own asks: a failed read is NOT "none".
+      return {
+        failure: asks.failure,
+        rendered: renderWithoutBead(),
+        status: 'bdFailed',
+      };
+    }
+    continuedOpenAsks = asks.value;
+  }
+
+  // THE D4 COVERAGE SET IS THE UNION (D21). Deduped by id, because an ask must
+  // never be demanded — or closed — twice.
+  const ownOpenAskIds = openAsks.map((ask) => ask.id);
+  const openAskIds = [
+    ...ownOpenAskIds,
+    ...continuedOpenAsks
+      .map((ask) => ask.id)
+      .filter((id) => !ownOpenAskIds.includes(id)),
+  ];
 
   // --- 5. D4 ---------------------------------------------------------------
   const coverage = checkPriorAskCoverage(openAskIds, payload.priorAsks);
@@ -390,24 +491,35 @@ export async function writeReportToBd(
       .filter((prior) => !CLOSING_DISPOSITIONS.has(prior.disposition))
       .map((prior) => prior.id),
   );
-  const carriedOpenAsks = openAsks
-    .filter((ask) => carriedIds.has(ask.id))
-    .map((ask): CarriedAsk => {
-      const meta = (ask.metadata ?? {}) as Record<string, unknown>;
-      // askIndex and reportCount are what put this ask in the same position in
-      // the report and in the `thread answer` walk (F12).
-      const numbering = numberingFieldsOf(meta);
-      return {
-        askIndex: numbering.askIndex,
-        fromReport: numbering.reportCount,
-        id: ask.id,
-        priority: numbering.priority,
-        // The bead's own description is the full ask — form tag, context,
-        // lettered options, default — so F4 reuses it rather than
-        // reconstructing a question the payload no longer carries.
-        restated: restateAsk(ask.description ?? ask.title ?? ''),
-      };
-    });
+  const carriedAskOf = (ask: BdIssue, fromThread: string | null): CarriedAsk => {
+    const meta = (ask.metadata ?? {}) as Record<string, unknown>;
+    // askIndex and reportCount are what put this ask in the same position in
+    // the report and in the `thread answer` walk (F12).
+    const numbering = numberingFieldsOf(meta);
+    return {
+      askIndex: numbering.askIndex,
+      fromReport: numbering.reportCount,
+      fromThread,
+      id: ask.id,
+      priority: numbering.priority,
+      // The bead's own description is the full ask — form tag, context,
+      // lettered options, default — so F4 reuses it rather than
+      // reconstructing a question the payload no longer carries.
+      restated: restateAsk(ask.description ?? ask.title ?? ''),
+    };
+  };
+  // The predecessor's carried asks are numbered in the SAME sequence as this
+  // thread's own (D21): they are what Justin still owes an answer on, and a
+  // separate "inherited" list would be the second numbering that "1 yes, 2 b"
+  // cannot survive.
+  const carriedOpenAsks = [
+    ...openAsks
+      .filter((ask) => carriedIds.has(ask.id))
+      .map((ask) => carriedAskOf(ask, null)),
+    ...continuedOpenAsks
+      .filter((ask) => carriedIds.has(ask.id))
+      .map((ask) => carriedAskOf(ask, continuesFrom)),
+  ];
 
   const provisionalMetadata = buildThreadMetadata({
     askIds: [],
@@ -434,7 +546,16 @@ export async function writeReportToBd(
   // exactly that sentence in the one field D10 promises is always readable.
   const provisionalNotes =
     existingThread == null
-      ? render({askIds: payload.asks.map(() => null), full: true, threadId: null})
+      ? // `carried` belongs here even on the create path: a session's FIRST
+        // report is exactly when a continued thread's asks arrive (D21), and a
+        // provisional note that omitted them would leave the one field D10
+        // promises is always readable silently missing what Justin still owes.
+        render({
+          askIds: payload.asks.map(() => null),
+          carried: carriedOpenAsks,
+          full: true,
+          threadId: null,
+        })
       : render({
           askIds: payload.asks.map(() => null),
           carried: carriedOpenAsks,
@@ -474,6 +595,76 @@ export async function writeReportToBd(
         rendered: renderWithoutBead(),
         status: 'bdFailed',
       };
+    }
+  }
+
+  // --- 6b. THE CONTINUATION ITSELF (D21) ----------------------------------
+  //
+  // The carried asks MOVE to this thread rather than being copied: an ask is one
+  // question, and two beads for it would be answered once and chased forever.
+  // `bd update --parent` re-parents in place and keeps the id (measured — see
+  // `reparentIssue`), so `th-eru.10` stays `th-eru.10` and every report, comment
+  // and message that already named it still points at the live bead.
+  //
+  // WHY THE PREDECESSOR IS NOT CLOSED: `thread done` is Justin's (D10). The link
+  // goes both ways instead — `continuedBy` in its metadata, one line in its
+  // description — so the board can fold it under its successor and anyone
+  // landing on the old bead is told where the arc went.
+  if (continuesFrom != null) {
+    for (const ask of continuedOpenAsks) {
+      if (!carriedIds.has(ask.id)) continue;
+      const moved = await reparentIssue(ctx, ask.id, threadId);
+      if (!moved.ok) {
+        return {
+          failure: moved.failure,
+          rendered: render({
+            askIds: [],
+            carried: carriedOpenAsks,
+            reportCount,
+            threadId,
+          }),
+          status: 'bdFailed',
+        };
+      }
+    }
+    const linked = await mergeMetadata(ctx, continuesFrom, {
+      continuedBy: threadId,
+    });
+    if (!linked.ok) {
+      return {
+        failure: linked.failure,
+        rendered: render({
+          askIds: [],
+          carried: carriedOpenAsks,
+          reportCount,
+          threadId,
+        }),
+        status: 'bdFailed',
+      };
+    }
+    // Idempotent by inspection, because every later report from this session
+    // runs this block again: the line is appended only when it is not already
+    // there, so a thread continued once carries one line, not one per report.
+    const line = continuedByLine(threadId);
+    const previous = continuedThread?.description ?? '';
+    if (!previous.includes(line)) {
+      const noted = await setIssueDescription(
+        ctx,
+        continuesFrom,
+        previous === '' ? line : `${previous}\n${line}`,
+      );
+      if (!noted.ok) {
+        return {
+          failure: noted.failure,
+          rendered: render({
+            askIds: [],
+            carried: carriedOpenAsks,
+            reportCount,
+            threadId,
+          }),
+          status: 'bdFailed',
+        };
+      }
     }
   }
 
@@ -686,6 +877,21 @@ export async function runThreadReport(
     console.error('Add one entry per id to priorAsks, then re-run:');
     console.error(
       '  {"id": "<id>", "disposition": "carried|answered|decided|irrelevant", "detail": "<quote the answer / name the default / say why>"}',
+    );
+    console.error(
+      archivePath == null
+        ? '  (the payload could not be archived)'
+        : `  the payload is archived at ${archivePath}`,
+    );
+    return 2;
+  }
+
+  if (outcome.status === 'refusedContinuation') {
+    console.error(
+      `thread report: REFUSED — continuesFrom names ${outcome.continuesFrom}, but ${outcome.detail}. Nothing was written.`,
+    );
+    console.error(
+      '  Find the thread you mean with: justin-sdk thread board --recent',
     );
     console.error(
       archivePath == null

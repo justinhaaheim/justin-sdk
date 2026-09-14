@@ -151,6 +151,9 @@ if (command === 'update') {
   if (flag('-d') != null) found.description = flag('-d');
   if (flag('--notes') != null) found.notes = flag('--notes');
   if (flag('-s') != null) found.status = flag('-s');
+  // RE-PARENT, mirroring real bd 1.1.0 (measured 2026-09-14 in a throwaway
+  // workspace): the parent changes, the ID DOES NOT, and metadata is untouched.
+  if (flag('--parent') != null) found.parent = flag('--parent');
   if (argv.includes('--metadata')) {
     found.metadata = {...(found.metadata ?? {}), ...metadataFrom()};
   }

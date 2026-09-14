@@ -831,6 +831,57 @@ export async function addComment(
 }
 
 /**
+ * Move a bead under a new parent — how a carried ask follows its arc into the
+ * session that is now acting on it (D21, home-base-p1uj.16).
+ *
+ * MEASURED 2026-09-14, real bd 1.1.0, in a throwaway `bd init` workspace under
+ * $TMPDIR (never against ~/Dev/threads):
+ *
+ *   create A, create B, create child --parent A   → child id `probe-gyg.1`
+ *   bd update probe-gyg.1 --parent probe-62o
+ *     → show: "parent": "probe-62o", the parent-child dependency now points at B
+ *     → bd list --parent probe-62o  finds it
+ *     → bd list --parent probe-gyg  no longer returns it
+ *     → the bead's `metadata` document is untouched (askIndex/reportCount/
+ *       priority all still there), and re-parenting back works the same way.
+ *
+ * So the recreate-and-close fallback D21 allowed for is NOT needed, and the ask
+ * KEEPS ITS ID: the `th-eru.10` Justin read in the previous report is the same
+ * id he answers under the new thread. The hierarchical id is not recomputed —
+ * `probe-gyg.1` stayed `probe-gyg.1` under parent `probe-62o` — which looks odd
+ * and is exactly right: an id that changed would break every report, comment and
+ * message that already named it.
+ */
+export async function reparentIssue(
+  ctx: BdContext,
+  id: string,
+  parentId: string,
+): Promise<BdResult<true>> {
+  const result = await runBd(ctx, ['update', id, '--parent', parentId]);
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
+
+/**
+ * Rewrite ONLY a bead's description.
+ *
+ * `updateThread` cannot be reused for the "Continued by <id>" line: it sends the
+ * title, notes and the full metadata document as well, and forces the status to
+ * `in_progress`. Writing that at a predecessor thread would overwrite its report
+ * with this session's, and resurrect a thread Justin had marked done — for what
+ * is meant to be one appended line.
+ */
+export async function setIssueDescription(
+  ctx: BdContext,
+  id: string,
+  description: string,
+): Promise<BdResult<true>> {
+  const result = await runBd(ctx, ['update', id, '-d', description]);
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
+
+/**
  * Merge a few keys into a bead's metadata, leaving the rest alone.
  *
  * THIS IS THE ONE PLACE THE MERGE SEMANTICS ARE WANTED. Everywhere else in this
@@ -838,6 +889,9 @@ export async function addComment(
  * instead of replacing (see the header). Here the merge IS the operation:
  * `thread answer` stamps `answeredAt` on an ask bead and must not disturb
  * `kind`, `blocking`, `defaultAction` or `threadId`, none of which it knows.
+ * `thread report` stamps `continuedBy` on a PREDECESSOR thread the same way
+ * (D21): it knows the successor's id and nothing else about that bead, and the
+ * report living in its metadata belongs to a session that has already ended.
  */
 export async function mergeMetadata(
   ctx: BdContext,

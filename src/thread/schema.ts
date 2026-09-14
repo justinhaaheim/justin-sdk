@@ -485,7 +485,17 @@ export const PAYLOAD_PRIORITY_GUIDANCE: readonly string[] = [
   '  Asks are always NUMBERED (one sequence, every priority); only options get letters.',
 ];
 
-export function payloadSkeleton(): string {
+/**
+ * The payload skeleton `thread prepare` prints.
+ *
+ * `continuesFrom` is PREFILLED when the session was told which thread it
+ * continues (D21), so the one field that carries another session's open asks
+ * cannot be left at `null` by a copy-paste — nothing else in the payload has the
+ * property that omitting it silently discards work Justin is waiting on.
+ */
+export function payloadSkeleton(
+  options: {continuesFrom?: string | null} = {},
+): string {
   const skeleton = {
     answers: [{answer: '<your answer>', question: '<his question, verbatim>'}],
     asks: [
@@ -499,7 +509,7 @@ export function payloadSkeleton(): string {
       },
     ],
     beadsTouched: [{description: '<what this bead IS>', id: '<bead id>'}],
-    continuesFrom: null,
+    continuesFrom: options.continuesFrom ?? null,
     deviations: [
       '<anything that departs from what he specified, or that he should know — [] when there were none>',
     ],
