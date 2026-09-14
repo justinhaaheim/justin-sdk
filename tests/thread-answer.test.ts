@@ -28,6 +28,7 @@ import {
   retryCommandFor,
   runThreadAnswer,
   shellSingleQuote,
+  trimAnswerText,
   walkAsks,
   type AnswerIo,
   type AnswerWriter,
@@ -175,6 +176,43 @@ describe('decisionFor', () => {
     expect(
       decisionFor(view({kind: 'answer', optionCount: 0}), 'do b, then a'),
     ).toEqual({kind: 'answered', text: 'do b, then a'});
+  });
+
+  test('LEADING INDENTATION survives (home-base-p1uj.13)', () => {
+    // `.trim()` ate the first line's spaces, so a pasted code block, quoted
+    // line or YAML fragment arrived at the next turn subtly wrong.
+    expect(
+      decisionFor(view({kind: 'answer', optionCount: 0}), '    indented\n'),
+    ).toEqual({kind: 'answered', text: '    indented'});
+  });
+});
+
+/**
+ * The one definition of "what is noise in an answer" (home-base-p1uj.13).
+ *
+ * NEGATIVE CONTROL (run 2026-09-14): the body was replaced with `return
+ * raw.trim();`. Exactly two tests in this file failed — "keeps the first line's
+ * indentation" (`Expected: "    keep me" Received: "keep me"`) and decisionFor's
+ * "LEADING INDENTATION survives" — while the whitespace-only and
+ * trailing-whitespace cases stayed green, since those are what `.trim()` did
+ * correctly and must keep doing. Restoring the body returned both to green.
+ */
+describe('trimAnswerText', () => {
+  test('keeps the first line’s indentation', () => {
+    expect(trimAnswerText('    keep me')).toBe('    keep me');
+    expect(trimAnswerText('\n\n    keep me')).toBe('    keep me');
+    expect(trimAnswerText('  a\n    b\n')).toBe('  a\n    b');
+  });
+
+  test('drops trailing whitespace and leading blank LINES', () => {
+    expect(trimAnswerText('answer\n\n  \n')).toBe('answer');
+    expect(trimAnswerText('\n \nanswer')).toBe('answer');
+  });
+
+  test('an all-whitespace answer is still EMPTY, which D3 reads as a skip', () => {
+    for (const blank of ['', '   ', '\n', ' \n\t \n ']) {
+      expect(trimAnswerText(blank)).toBe('');
+    }
   });
 });
 

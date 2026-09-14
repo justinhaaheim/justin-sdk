@@ -212,13 +212,29 @@ function toggleSkip(id) {
 function openMenu() { document.getElementById('menu').hidden = false; document.getElementById('menu-resume').focus(); }
 function closeMenu() { document.getElementById('menu').hidden = true; }
 
+// RAW, not trimmed (home-base-p1uj.13). The server applies trimAnswerText, the
+// same function the classic walk uses, so the two surfaces record identical
+// bytes (I8) — and the leading indentation of a pasted code block survives,
+// which a .trim() here would have eaten before it ever left the browser.
+// blank() is only ever used to decide whether a field counts as answered; it is
+// the same question trimAnswerText(x) === '' answers. (No backticks in this
+// file's page script: it is a template literal, and one would end it.)
+function blank(v) { return v.trim() === ''; }
 function decisions() {
   return DATA.asks.map(function (a) {
     const f = fields.get(a.id);
-    const text = f ? f.area.value.trim() : '';
-    if (skipped.has(a.id) || text === '') return {askId: a.id, kind: 'skipped', text: ''};
+    const text = f ? f.area.value : '';
+    if (skipped.has(a.id) || blank(text)) return {askId: a.id, kind: 'skipped', text: ''};
     return {askId: a.id, kind: 'answered', text: text};
   });
+}
+// Display only: the review list shows the first line that has something on it.
+function preview(t) {
+  const lines = t.replace(/\s+$/, '').split('\n');
+  let i = 0;
+  while (i < lines.length && lines[i].trim() === '') i++;
+  const first = lines[i] === undefined ? '' : lines[i];
+  return first.slice(0, 90) + (first.length > 90 || i + 1 < lines.length ? '…' : '');
 }
 
 function openReview() {
@@ -227,11 +243,11 @@ function openReview() {
   decisions().forEach(function (d, i) {
     const a = DATA.asks[i];
     const li = document.createElement('li');
-    li.textContent = (i + 1) + '. ' + a.id + ' — ' + (d.kind === 'skipped' ? 'SKIP, Claude will: ' + a.defaultAction : d.text.split('\n')[0].slice(0, 90) + (d.text.length > 90 ? '…' : ''));
+    li.textContent = (i + 1) + '. ' + a.id + ' — ' + (d.kind === 'skipped' ? 'SKIP, Claude will: ' + a.defaultAction : preview(d.text));
     list.appendChild(li);
   });
   const note = fields.get(DATA.noteId);
-  document.getElementById('review-note').textContent = note && note.area.value.trim() !== '' ? note.area.value.trim() : '(no note)';
+  document.getElementById('review-note').textContent = note && !blank(note.area.value) ? note.area.value : '(no note)';
   document.getElementById('review').hidden = false;
   document.getElementById('review-cancel').focus();
 }
@@ -243,7 +259,7 @@ async function record() {
   btn.textContent = 'recording…';
   const note = fields.get(DATA.noteId);
   const res = await api('/api/submit', {
-    body: JSON.stringify({decisions: decisions(), note: note ? note.area.value.trim() : ''}),
+    body: JSON.stringify({decisions: decisions(), note: note ? note.area.value : ''}),
     headers: {'content-type': 'application/json'},
     method: 'POST',
   });

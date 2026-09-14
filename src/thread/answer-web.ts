@@ -32,6 +32,7 @@ import {
   bdWriter,
   askViewOf,
   orderAsks,
+  trimAnswerText,
   type AnswerIo,
   type AnswerWriter,
   type AskDecision,
@@ -331,9 +332,13 @@ async function submit(
   for (const ask of ordered) {
     const entry = submitted.get(ask.id);
     if (entry == null) continue;
+    // THE SAME tidy-up the classic walk applies, on the same raw text (I8,
+    // p1uj.13). The page sends the textarea verbatim — leading indentation
+    // included — precisely so this one function decides what is recorded.
+    const answer = trimAnswerText(entry.text);
     const decision: AskDecision =
-      entry.kind === 'answered' && entry.text.trim() !== ''
-        ? {kind: 'answered', text: entry.text.trim()}
+      entry.kind === 'answered' && answer !== ''
+        ? {kind: 'answered', text: answer}
         : {kind: 'skipped'};
     const outcome = await options.writer.ask(byId.get(ask.id) ?? ask, decision);
     if (outcome.ok) {
@@ -348,7 +353,7 @@ async function submit(
     }
   }
 
-  const noteText = (parsed.note ?? '').trim();
+  const noteText = trimAnswerText(parsed.note ?? '');
   const note = noteText === '' ? null : noteText;
   if (note != null) {
     const outcome = await options.writer.note(note);

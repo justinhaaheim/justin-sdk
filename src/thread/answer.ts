@@ -188,6 +188,33 @@ export function promptFor(ask: AskView): string {
 }
 
 /**
+ * Tidy an answer WITHOUT touching its shape (home-base-p1uj.13).
+ *
+ * Both surfaces used to call `.trim()`, which also eats the leading spaces of
+ * the FIRST line — so an answer that opens with an indented code block or a
+ * quoted line arrived at the next Claude turn with that indentation gone, and a
+ * pasted diff or YAML fragment came back subtly wrong. What is actually noise is
+ * trailing whitespace (the newline the terminal or the textarea adds) and blank
+ * LINES above the first real one; indentation inside the answer is content.
+ *
+ * AN ALL-WHITESPACE ANSWER IS STILL EMPTY, and that matters: D3 defines empty as
+ * a SKIP — permission to take the stated default — which is recorded and read
+ * back differently from an answer. This function returns `''` for it, exactly as
+ * `.trim()` did, so that distinction is unchanged.
+ *
+ * ONE implementation for both UIs on purpose (I8): the classic walk and the web
+ * form must record byte-identical text, and two copies of "what counts as
+ * blank" is how they would stop doing so. The browser page therefore sends the
+ * textarea's RAW value and lets the server apply this.
+ */
+export function trimAnswerText(raw: string): string {
+  const lines = raw.replace(/\s+$/, '').split('\n');
+  let start = 0;
+  while (start < lines.length && lines[start]!.trim() === '') start += 1;
+  return lines.slice(start).join('\n');
+}
+
+/**
  * Turn one raw line into a decision.
  *
  * An empty line is a SKIP, which D3 defines as "take your default" — not an
@@ -196,7 +223,7 @@ export function promptFor(ask: AskView): string {
  * Justin had answered with silence.
  */
 export function decisionFor(ask: AskView, raw: string): AskDecision {
-  const text = raw.trim();
+  const text = trimAnswerText(raw);
   if (text === '') return {kind: 'skipped'};
   if (ask.kind === 'pick' && ask.optionCount > 0) {
     const letters = Array.from({length: ask.optionCount}, (_v, index) =>
@@ -277,7 +304,11 @@ export async function walkAsks(
   io.print('');
   io.print('── Anything else for Claude? (end with an empty line) ──');
   const raw = await io.block('> ');
-  const note = raw.trim() === '' ? null : raw.trim();
+  // The note gets the same treatment as an answer (p1uj.13): it is free text
+  // Justin may well have indented, and it reaches the next turn through the
+  // same bd comment.
+  const trimmedNote = trimAnswerText(raw);
+  const note = trimmedNote === '' ? null : trimmedNote;
   if (note == null) return {decisions, failures, note};
 
   // The one write that CANNOT be moved earlier — it is the thing he just typed.

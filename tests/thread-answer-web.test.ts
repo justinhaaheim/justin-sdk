@@ -714,6 +714,132 @@ function scriptedIo(lines: string[], block = ''): AnswerIo {
   };
 }
 
+/**
+ * home-base-p1uj.13 — an answer keeps the indentation it was typed with.
+ *
+ * THE BUG: both surfaces called `.trim()`, which eats the leading spaces of the
+ * FIRST line as well as the trailing newline. An answer opening with an indented
+ * code block, a quoted line or a pasted YAML fragment reached the next Claude
+ * turn subtly wrong, and neither surface recorded that anything had been
+ * removed.
+ *
+ * NEGATIVE CONTROL (run 2026-09-14): `trimAnswerText` was reverted to
+ * `return raw.trim();`. Exactly the indentation test below failed, on the answer
+ * AND the note:
+ *
+ *     - "ANSWER:     const x = 1;      + "ANSWER: const x = 1;
+ *     - "NOTE:       const x = 1;      + "NOTE: const x = 1;
+ *
+ * Both surfaces lost the same four spaces (they are byte-compared inside that
+ * one test), while the whitespace-only test and the I8 byte-comparison stayed
+ * green — I8 answers "b", so the two surfaces agreed either way, which is
+ * exactly why this needed its own test. Restoring the function returned it to
+ * green.
+ */
+describe('p1uj.13 · leading indentation survives, on both surfaces', () => {
+  const INDENTED = '    const x = 1;\n    return x;';
+
+  test('the classic walk records the indentation, and so does the web form', async () => {
+    captureConsole();
+
+    const classicFake = seededFake();
+    expect(
+      await runThreadAnswer({
+        autoCommit: false,
+        env: envFor(classicFake),
+        // A trailing blank line and an indented answer: the newline is noise,
+        // the four spaces are content.
+        io: scriptedIo([`${INDENTED}\n`, ''], `  ${INDENTED}`),
+        threadId: 'jl-t1',
+      }),
+    ).toBe(0);
+    const classic = classicFake.read();
+
+    const webFake = seededFake();
+    const webCode = await runThreadAnswerWeb({
+      autoCommit: false,
+      env: {...envFor(webFake), JUSTIN_THREADS_STATE_DIR: tempStateDir()},
+      openBrowser: false,
+      onReady: (server) => {
+        servers.push(server);
+        void fetch(api(server, '/api/submit'), {
+          // RAW, exactly as the browser page now sends it (it no longer trims).
+          body: JSON.stringify({
+            decisions: [
+              {askId: 'jl-t1.1', kind: 'answered', text: `${INDENTED}\n`},
+              {askId: 'jl-t1.2', kind: 'skipped', text: ''},
+            ],
+            note: `  ${INDENTED}`,
+          }),
+          method: 'POST',
+        });
+      },
+      threadId: 'jl-t1',
+    });
+    expect(webCode).toBe(0);
+    const web = webFake.read();
+
+    expect(classic.comments?.map((comment) => comment.text)).toEqual([
+      `ANSWER: ${INDENTED}`,
+      'skipped: use default',
+      `NOTE:   ${INDENTED}`,
+    ]);
+    // I8 still holds: the two surfaces record the same bytes.
+    expect(web.comments).toEqual(classic.comments);
+  }, 30_000);
+
+  test('the PAGE sends the textarea raw — it never trims in the browser', () => {
+    // The browser half cannot be driven from here, so what is asserted is the
+    // property that makes the server half sufficient: nothing in the page reads
+    // `.area.value.trim()`, so no answer is tidied before it is transmitted and
+    // `trimAnswerText` stays the single decision about what gets recorded.
+    const page = renderAnswerPage({
+      asks: [
+        {
+          defaultAction: 'I take a.',
+          description: 'Ask one?',
+          draft: null,
+          id: 'jl-t1.1',
+          kind: 'pick',
+          number: 1,
+          optionCount: 2,
+          priority: 0,
+          reportCount: 1,
+          title: 'Ask one?',
+        },
+      ],
+      noteDraft: null,
+      noteId: NOTE_DRAFT_ID,
+      problems: [],
+      report: 'R',
+      threadId: 'jl-t1',
+      threadTitle: 'A session',
+      token: 't',
+    });
+    expect(page).not.toContain('.area.value.trim()');
+    expect(page).toContain("const text = f ? f.area.value : '';");
+  });
+
+  test('a WHITESPACE-ONLY answer is still a skip, not an empty answer', async () => {
+    captureConsole();
+    const fake = seededFake();
+    expect(
+      await runThreadAnswer({
+        autoCommit: false,
+        env: envFor(fake),
+        io: scriptedIo(['   \n  ', ''], '   '),
+        threadId: 'jl-t1',
+      }),
+    ).toBe(0);
+    // D3: empty means "take your default", which is recorded differently from
+    // an answer — that distinction must survive the p1uj.13 fix unchanged.
+    expect(fake.read().comments?.map((comment) => comment.text)).toEqual([
+      'skipped: use default',
+      'skipped: use default',
+    ]);
+  }, 30_000);
+});
+
 describe('I8 · the web UI records exactly what the classic walk records', () => {
   test('same fixture, same answers — byte-identical bd traffic', async () => {
     captureConsole();
