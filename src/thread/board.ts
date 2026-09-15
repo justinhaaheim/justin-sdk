@@ -37,7 +37,12 @@ import {
   type BdIssue,
 } from './bd';
 import {bdContext} from './bd';
-import {commitThreadsRepo, describeCommit, PUSH_REMOTE} from './commit';
+import {
+  aheadOfOrigin,
+  commitThreadsRepo,
+  describeCommit,
+  PUSH_REMOTE,
+} from './commit';
 import {drainSpool, renderDrain, type SpoolApplier} from './drain';
 import {threadsRepoDir} from './paths';
 import {readAskPriority, readReportCount} from './metadata';
@@ -416,61 +421,22 @@ export function uncommittedLine(env: EnvLike, dir?: string): string | null {
  */
 export function unpushedLine(env: EnvLike, dir?: string): string | null {
   const repoDir = dir ?? threadsRepoDir(env);
-  const git = (args: string[]): {ok: boolean; out: string} => {
-    const result = spawnSync('git', args, {
-      cwd: repoDir,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const ok = result.error == null && result.status === 0;
-    return {
-      ok,
-      out: ok
-        ? (result.stdout ?? '').trim()
-        : (result.stderr ?? '').trim() || String(result.error ?? ''),
-    };
-  };
-
-  const remote = git(['config', '--get', `remote.${PUSH_REMOTE}.url`]);
-  // Absent origin and unreadable git are not separable here without the exit
-  // code, and both end the same way — no line. A board that nagged about a repo
-  // with no remote would be nagging about nothing, and a repo that is not a git
-  // repo at all already gets its UNKNOWN from `uncommittedLine` directly above:
-  // a second one would be the same fact twice, not a fact that would otherwise
-  // be missed.
-  if (!remote.ok || remote.out === '') return null;
-
-  const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
-  if (!branch.ok || branch.out === '' || branch.out === 'HEAD') {
-    return `📤 unpushed commits in ${repoDir}: UNKNOWN — no branch to compare (${branch.out.slice(0, 120)})`;
+  // The SAME measurement the commit path pushes on (`aheadOfOrigin`), so the
+  // warning at write time and the dashboard afterwards can never disagree about
+  // one repo.
+  const ahead = aheadOfOrigin(repoDir, env);
+  switch (ahead.kind) {
+    // No origin means there is nothing to be ahead OF, and a repo that is not a
+    // git repo at all already got its UNKNOWN from `uncommittedLine` directly
+    // above — a second one would be the same fact twice.
+    case 'no-remote':
+    case 'level':
+      return null;
+    case 'unknown':
+      return `📤 unpushed commits in ${repoDir}: UNKNOWN — ${ahead.reason}`;
+    case 'ahead':
+      return `📤 ${repoDir} is ${ahead.count} commit${ahead.count === 1 ? '' : 's'} ahead of ${PUSH_REMOTE}/${ahead.branch}, so a push this tool should have made did NOT happen. Push it: cd ${repoDir} && git push`;
   }
-  // Asked separately from the count so "never pushed" gets its own sentence
-  // instead of arriving as `fatal: ambiguous argument`. It is still UNKNOWN and
-  // not a number: nothing here measured how far ahead the branch is.
-  const tracked = git([
-    'rev-parse',
-    '--verify',
-    '--quiet',
-    `${PUSH_REMOTE}/${branch.out}`,
-  ]);
-  if (!tracked.ok) {
-    return `📤 unpushed commits in ${repoDir}: UNKNOWN — ${PUSH_REMOTE}/${branch.out} does not exist locally, so there is nothing to compare against (this branch has never been pushed, or ${PUSH_REMOTE} has never been fetched)`;
-  }
-  const ahead = git([
-    'rev-list',
-    '--count',
-    `${PUSH_REMOTE}/${branch.out}..HEAD`,
-  ]);
-  if (!ahead.ok) {
-    return `📤 unpushed commits in ${repoDir}: UNKNOWN — git could not be read (${ahead.out.slice(0, 120)})`;
-  }
-  const count = Number(ahead.out);
-  // `Number('')` is 0, and a 0 here would read as "everything is pushed".
-  if (ahead.out === '' || !Number.isFinite(count)) {
-    return `📤 unpushed commits in ${repoDir}: UNKNOWN — git printed ${JSON.stringify(ahead.out.slice(0, 40))}`;
-  }
-  if (count === 0) return null;
-  return `📤 ${repoDir} is ${count} commit${count === 1 ? '' : 's'} ahead of ${PUSH_REMOTE}/${branch.out}, so a push this tool should have made did NOT happen. Push it: cd ${repoDir} && git push`;
 }
 
 export type BoardView = 'repo' | 'recent' | 'openAsks';

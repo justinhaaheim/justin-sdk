@@ -199,7 +199,10 @@ describe('commitThreadsRepo', () => {
 
   test('success and no-op print nothing alarming; only failure warns', () => {
     expect(
-      describeCommit({kind: 'nothing-to-commit'}, 'the threads repo'),
+      describeCommit(
+        {kind: 'nothing-to-commit', push: {kind: 'not-ahead'}},
+        'the threads repo',
+      ),
     ).toBeNull();
     expect(describeCommit({kind: 'disabled'}, 'the threads repo')).toBeNull();
     expect(
@@ -244,6 +247,19 @@ describe('commitThreadsRepo', () => {
  *   a refused push made non-zero — `runThreadDone` changed to
  *     `if (…push.kind === 'failed') return 1`. "a REFUSED push still exits 0"
  *     failed with `Expected: 0 / Received: 1`, while its sibling stayed green.
+ *
+ * Three more for the ahead-of-origin change (conductor review), run the same
+ * way on 2026-09-15:
+ *
+ *   the no-op path stops pushing a backlog — the `nothing-to-commit` branch put
+ *     back to `push: {kind: 'not-ahead'}`, i.e. the pre-review behaviour. TWO
+ *     tests failed: "a BACKLOG is pushed" with `Expected: "pushed" / Received:
+ *     "not-ahead"`, and "a backlog that CANNOT be pushed still warns" with
+ *     `Expected: "failed" / Received: "not-ahead"`.
+ *   the level short-circuit removed — `if (ahead.kind === 'level')` weakened to
+ *     `if (false)`, so a repo level with origin hits the network anyway. "NO
+ *     push is attempted" failed with `Expected: "not-ahead" / Received:
+ *     "pushed"`.
  */
 describe('pushing after a commit', () => {
   test('a committed write reaches origin, and the branch is level again', () => {
@@ -369,9 +385,105 @@ describe('pushing after a commit', () => {
     }
   });
 
+  test('a BACKLOG is pushed even when this run has nothing to commit', () => {
+    // The real ~/Dev/threads on 2026-09-15: a commit the tool made before
+    // autoPush existed, sitting unpushed. Before the conductor's review this
+    // run would have returned `nothing-to-commit` and left it there, so
+    // "0 ahead after every write" was false in exactly the case the feature is
+    // for.
+    // NEGATIVE CONTROL (2026-09-15): with the `nothing-to-commit` branch put
+    // back to `return {kind: 'nothing-to-commit', push: {kind: 'not-ahead'}}`,
+    // this failed on `push.kind` (not-ahead vs pushed) AND on the bare repo's
+    // log, which never received the backlog commit.
+    const dir = makeRepo();
+    const bare = addBareRemote(dir);
+    try {
+      git(dir, ['push', '-q', 'origin', 'HEAD']);
+      appendBead(dir, 'th-30');
+      git(dir, ['commit', '-q', '-am', 'thread th-30: an unpushed write']);
+      expect(git(bare, ['log', '--oneline'])).not.toContain('th-30');
+
+      const outcome = commitThreadsRepo('thread th-30: report #2', {
+        autoCommit: true,
+        autoPush: true,
+        dir,
+        env: process.env,
+      });
+      expect(outcome.kind).toBe('nothing-to-commit');
+      if (outcome.kind !== 'nothing-to-commit') throw new Error('unreachable');
+      expect(outcome.push.kind).toBe('pushed');
+
+      expect(git(bare, ['log', '--oneline'])).toContain(
+        'thread th-30: an unpushed write',
+      );
+      expect(unpushedLine(process.env, dir)).toBeNull();
+    } finally {
+      rmSync(dir, {force: true, recursive: true});
+      rmSync(bare, {force: true, recursive: true});
+    }
+  });
+
+  test('level with origin and nothing to commit: NO push is attempted', () => {
+    // The network cost of the no-op path is the whole reason the ahead check is
+    // local. `not-ahead` is a measurement, not a shrug — it is what says the
+    // network was skipped because there was nothing to send.
+    // NEGATIVE CONTROL (2026-09-15): with `if (ahead.kind === 'level') return
+    // {kind: 'not-ahead'}` removed from `pushIfAhead`, this failed on
+    // `push.kind` with `Expected: "not-ahead" / Received: "pushed"`.
+    const dir = makeRepo();
+    const bare = addBareRemote(dir);
+    try {
+      git(dir, ['push', '-q', 'origin', 'HEAD']);
+      const outcome = commitThreadsRepo('thread th-31: report #2', {
+        autoCommit: true,
+        autoPush: true,
+        dir,
+        env: process.env,
+      });
+      expect(outcome.kind).toBe('nothing-to-commit');
+      if (outcome.kind !== 'nothing-to-commit') throw new Error('unreachable');
+      expect(outcome.push.kind).toBe('not-ahead');
+      expect(describeCommit(outcome, 'the threads repo')).toBeNull();
+    } finally {
+      rmSync(dir, {force: true, recursive: true});
+      rmSync(bare, {force: true, recursive: true});
+    }
+  });
+
+  test('a backlog that CANNOT be pushed still warns from the no-op path', () => {
+    const dir = makeRepo();
+    const bare = addBareRemote(dir);
+    try {
+      git(dir, ['push', '-q', 'origin', 'HEAD']);
+      appendBead(dir, 'th-32');
+      git(dir, ['commit', '-q', '-am', 'thread th-32: an unpushed write']);
+      advanceRemote(bare);
+
+      const outcome = commitThreadsRepo('thread th-32: report #2', {
+        autoCommit: true,
+        autoPush: true,
+        dir,
+        env: process.env,
+      });
+      expect(outcome.kind).toBe('nothing-to-commit');
+      if (outcome.kind !== 'nothing-to-commit') throw new Error('unreachable');
+      expect(outcome.push.kind).toBe('failed');
+      // Silence here is what the first cut did, and it is how a backlog goes on
+      // failing to leave the laptop without ever saying so. Its negative
+      // control is the first of the three recorded above.
+      const line = describeCommit(outcome, 'the threads repo');
+      expect((line ?? '').match(/WARNING/g)?.length).toBe(1);
+      expect(line).toContain('rejected');
+    } finally {
+      rmSync(dir, {force: true, recursive: true});
+      rmSync(bare, {force: true, recursive: true});
+    }
+  });
+
   test('describePush: only a failure warns; absence and the knob are silent', () => {
     expect(describePush({kind: 'no-remote'}, 'the threads repo')).toBeNull();
     expect(describePush({kind: 'disabled'}, 'the threads repo')).toBeNull();
+    expect(describePush({kind: 'not-ahead'}, 'the threads repo')).toBeNull();
     expect(
       describePush({kind: 'pushed', remote: 'origin'}, 'the threads repo'),
     ).toContain('origin');

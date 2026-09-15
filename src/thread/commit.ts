@@ -40,6 +40,15 @@
  * contract as the commit: the beads are already in Dolt and already committed,
  * so a push that cannot be made is ONE WARNING LINE and exit 0. Never
  * NOT RECORDED, never a retry loop, never `--force`.
+ *
+ * IT PUSHES WHENEVER THE BRANCH IS AHEAD, not only when this run committed
+ * (conductor review of p1uj.20). The first cut pushed only after a commit,
+ * which left one hole: a push that failed once stayed failed until the next
+ * real write, so "0 ahead after every write" — the sentence this bead is
+ * accepted against — was false in exactly the case the feature exists for. A
+ * `git rev-list --count origin/<branch>..HEAD` is LOCAL and costs no network,
+ * so the no-op path can ask before it decides, and still skips the network
+ * entirely when there is nothing to send.
  */
 
 import {spawnSync} from 'child_process';
@@ -83,8 +92,28 @@ export const BEADS_JSONL = '.beads/issues.jsonl';
 export type PushOutcome =
   | {kind: 'pushed'; remote: string}
   | {kind: 'no-remote'}
+  | {kind: 'not-ahead'}
   | {kind: 'disabled'}
   | {kind: 'failed'; command: string; detail: string};
+
+/**
+ * How this branch stands against origin — the cheap, LOCAL answer.
+ *
+ * No network: it reads `origin/<branch>` as the remote-tracking ref git already
+ * has, which is what `git push` itself updates on success. That is what makes
+ * it affordable on the no-op path, where the whole point is to skip the network
+ * when there is nothing to send.
+ *
+ * `unknown` carries the sentence the board prints, so there is one place where
+ * "why can this not be measured" is worded. It is NOT `level`: a branch whose
+ * `origin/<branch>` has never existed has everything to push, and calling that
+ * zero would be the reassuring reading of a failed measurement (rule 6).
+ */
+export type AheadOutcome =
+  | {branch: string; count: number; kind: 'ahead'}
+  | {branch: string; kind: 'level'}
+  | {kind: 'no-remote'}
+  | {kind: 'unknown'; reason: string};
 
 /**
  * A push is only ever reachable through a COMMIT that happened, and the types
@@ -94,7 +123,7 @@ export type PushOutcome =
  */
 export type CommitOutcome =
   | {kind: 'committed'; push: PushOutcome; sha: string; subject: string}
-  | {kind: 'nothing-to-commit'}
+  | {kind: 'nothing-to-commit'; push: PushOutcome}
   | {kind: 'disabled'}
   | {kind: 'skipped-export-unstaged'}
   | {kind: 'failed'; command: string; detail: string};
@@ -285,6 +314,86 @@ export const PUSH_REMOTE = 'origin';
 export const PUSH_TIMEOUT_MS = 20_000;
 
 /**
+ * How far ahead of `origin/<branch>` this repo is, measured locally.
+ *
+ * ONE implementation, two readers: the no-op commit path uses it to decide
+ * whether a push is worth a network round-trip, and `thread board` uses it to
+ * tell Justin how much exists only on this laptop. A second copy of this
+ * measurement is exactly the kind of thing that drifts until the warning and
+ * the dashboard disagree about the same repo.
+ */
+export function aheadOfOrigin(dir: string, env: EnvLike): AheadOutcome {
+  const remote = run(dir, ['config', '--get', `remote.${PUSH_REMOTE}.url`], env);
+  if (!remote.ok || remote.stdout.trim() === '') return {kind: 'no-remote'};
+
+  const branch = run(dir, ['rev-parse', '--abbrev-ref', 'HEAD'], env);
+  const name = branch.ok ? branch.stdout.trim() : '';
+  if (name === '' || name === 'HEAD') {
+    return {
+      kind: 'unknown',
+      reason: `no branch to compare (${(branch.ok ? name : branch.detail).slice(0, 120)})`,
+    };
+  }
+  // Asked separately from the count so "never pushed" gets its own sentence
+  // instead of arriving as `fatal: ambiguous argument`.
+  const tracked = run(
+    dir,
+    ['rev-parse', '--verify', '--quiet', `${PUSH_REMOTE}/${name}`],
+    env,
+  );
+  if (!tracked.ok) {
+    return {
+      kind: 'unknown',
+      reason: `${PUSH_REMOTE}/${name} does not exist locally, so there is nothing to compare against (this branch has never been pushed, or ${PUSH_REMOTE} has never been fetched)`,
+    };
+  }
+  const counted = run(
+    dir,
+    ['rev-list', '--count', `${PUSH_REMOTE}/${name}..HEAD`],
+    env,
+  );
+  if (!counted.ok) {
+    return {
+      kind: 'unknown',
+      reason: `git could not be read (${counted.detail.slice(0, 120)})`,
+    };
+  }
+  const raw = counted.stdout.trim();
+  const count = Number(raw);
+  // `Number('')` is 0, and a 0 here would read as "everything is pushed".
+  if (raw === '' || !Number.isFinite(count)) {
+    return {
+      kind: 'unknown',
+      reason: `git printed ${JSON.stringify(raw.slice(0, 40))}`,
+    };
+  }
+  return count === 0
+    ? {branch: name, kind: 'level'}
+    : {branch: name, count, kind: 'ahead'};
+}
+
+/**
+ * Push only if there is something to push — the no-op write's path.
+ *
+ * `level` is the ONLY answer that skips the push, and it is the only one that
+ * has measured there is nothing to send. `unknown` pushes: a push on a branch
+ * that turns out to be level is a harmless "Everything up-to-date", while
+ * treating an unreadable measurement as "nothing to do" is the reassuring
+ * substitution that leaves reports on one laptop.
+ */
+function pushIfAhead(
+  dir: string,
+  env: EnvLike,
+  autoPush: boolean,
+): PushOutcome {
+  if (!autoPush) return {kind: 'disabled'};
+  const ahead = aheadOfOrigin(dir, env);
+  if (ahead.kind === 'no-remote') return {kind: 'no-remote'};
+  if (ahead.kind === 'level') return {kind: 'not-ahead'};
+  return pushThreadsRepo(dir, env, autoPush);
+}
+
+/**
  * Push the current branch to `origin`, or say precisely why not (D22).
  *
  * `git push origin HEAD`, NOT a bare `git push`: the latter depends on
@@ -394,7 +503,14 @@ export function commitThreadsRepo(
       ['diff', '--cached', '--quiet', '--', BEADS_JSONL],
       env,
     );
-    if (staged.ok) return {kind: 'nothing-to-commit'};
+    // NOTHING NEW TO COMMIT IS NOT NOTHING TO PUSH. An earlier write may have
+    // committed and failed to push (offline, auth, a refused non-fast-forward),
+    // and that backlog would otherwise sit here until the next real write.
+    // The ahead check is local, so the common case — level with origin — still
+    // touches the network zero times.
+    if (staged.ok) {
+      return {kind: 'nothing-to-commit', push: pushIfAhead(dir, env, autoPush)};
+    }
 
     const committed = run(
       dir,
@@ -471,9 +587,13 @@ export function describePush(
     case 'pushed':
       return `  pushed ${repoDisplay} to ${outcome.remote}`;
     case 'failed':
-      return `⚠️ WARNING: recorded and committed, but ${repoDisplay} could NOT be pushed (${outcome.command} — ${condenseGitError(outcome.detail).slice(0, 200)}). Nothing was lost — the commit is local and the next write pushes it; \`justin-sdk thread board\` shows what is unpushed.`;
+      return `⚠️ WARNING: the beads are recorded and committed, but ${repoDisplay} could NOT be pushed (${outcome.command} — ${condenseGitError(outcome.detail).slice(0, 200)}). Nothing was lost — the commits are local and the next write pushes them; \`justin-sdk thread board\` shows what is unpushed.`;
+    // Three different reasons NOT to have pushed, all of them silent, and none
+    // of them a problem: the knob is off, there is no remote to push to, or
+    // origin already has everything this branch has.
     case 'disabled':
     case 'no-remote':
+    case 'not-ahead':
       return null;
   }
 }
@@ -491,10 +611,15 @@ export function describeCommit(
       const pushed = describePush(outcome.push, repoDisplay);
       return pushed == null ? committed : `${committed}\n${pushed}`;
     }
+    // Still silent when there was nothing to say — but a backlog this run
+    // pushed, or failed to push, is something to say. Returning null here
+    // unconditionally was how the first cut could clear (or fail to clear) a
+    // backlog without a word.
+    case 'nothing-to-commit':
+      return describePush(outcome.push, repoDisplay);
     case 'failed':
       return `⚠️ WARNING: recorded in Dolt, but ${repoDisplay} could NOT be committed (${outcome.command} — ${outcome.detail.slice(0, 200)}). Nothing was lost; \`justin-sdk thread board\` shows what is uncommitted.`;
     case 'disabled':
-    case 'nothing-to-commit':
     case 'skipped-export-unstaged':
       return null;
   }
