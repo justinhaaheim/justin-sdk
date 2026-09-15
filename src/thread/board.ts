@@ -18,12 +18,13 @@
  * here, before anything is shown, so the board never renders a view it knows to
  * be out of date. Nothing is printed when the spool was empty.
  *
- * THE LAST LINE IS AN EXCEPTION REPORT, NOT A REMINDER (p1uj.11, retiring D13).
- * The tool now commits the threads repo itself after every write, so a dirty
- * `issues.jsonl` means a commit FAILED and needs a human. Nothing is printed
- * when the repo is clean; an unmeasurable one says UNKNOWN rather than 0, since
- * "nothing to commit" is the reassuring reading and the reassuring reading is
- * the dangerous one.
+ * THE LAST LINES ARE AN EXCEPTION REPORT, NOT A REMINDER (p1uj.11 retiring D13,
+ * then p1uj.20/D22). The tool now commits the threads repo itself after every
+ * write AND pushes it, so a dirty `issues.jsonl` means a commit FAILED and a
+ * branch ahead of origin means a push FAILED — each needs a human. Nothing is
+ * printed when the repo is clean and pushed; an unmeasurable one says UNKNOWN
+ * rather than 0, since "nothing to commit" and "nothing to push" are the
+ * reassuring readings and the reassuring reading is the dangerous one.
  */
 
 import {spawnSync} from 'child_process';
@@ -36,7 +37,7 @@ import {
   type BdIssue,
 } from './bd';
 import {bdContext} from './bd';
-import {commitThreadsRepo, describeCommit} from './commit';
+import {commitThreadsRepo, describeCommit, PUSH_REMOTE} from './commit';
 import {drainSpool, renderDrain, type SpoolApplier} from './drain';
 import {threadsRepoDir} from './paths';
 import {readAskPriority, readReportCount} from './metadata';
@@ -393,6 +394,85 @@ export function uncommittedLine(env: EnvLike, dir?: string): string | null {
   return `📌 ${repoDir}/.beads/issues.jsonl has UNCOMMITTED changes (+${added ?? '?'}/-${removed ?? '?'} lines), so a commit this tool should have made did NOT happen. Commit it: cd ${repoDir} && git add .beads/issues.jsonl && git commit -m 'chore(beads): thread reports'`;
 }
 
+/**
+ * WHAT IS COMMITTED BUT NOT PUSHED — the second half of the same exception
+ * report (home-base-p1uj.20, D22).
+ *
+ * Since 2026-09-15 the tool pushes after every commit, so a branch that is
+ * ahead of origin means a push did NOT happen: `autoPush` is off, the machine
+ * was offline, auth failed, or origin moved and the push was refused. This is
+ * the ONLY surface that says so after the fact — the warning at the time of the
+ * failure scrolls away with the session that printed it.
+ *
+ * DELIBERATELY NOT GATED ON THE KNOB. With `autoPush` false the board still
+ * reports the backlog, because "how much of this exists only on this laptop" is
+ * a fact about the repo, not about a setting. What IS gated is having a remote:
+ * with no origin there is nothing to be ahead OF, and the line would be a
+ * standing complaint about a repo that is exactly as its owner wants it.
+ *
+ * UNKNOWN, never 0, when git cannot be read (rule 6) — a detached HEAD, an
+ * `origin/<branch>` that has never existed, an unreadable repo. Silence here
+ * means "measured, and there is nothing waiting".
+ */
+export function unpushedLine(env: EnvLike, dir?: string): string | null {
+  const repoDir = dir ?? threadsRepoDir(env);
+  const git = (args: string[]): {ok: boolean; out: string} => {
+    const result = spawnSync('git', args, {
+      cwd: repoDir,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const ok = result.error == null && result.status === 0;
+    return {
+      ok,
+      out: ok
+        ? (result.stdout ?? '').trim()
+        : (result.stderr ?? '').trim() || String(result.error ?? ''),
+    };
+  };
+
+  const remote = git(['config', '--get', `remote.${PUSH_REMOTE}.url`]);
+  // Absent origin and unreadable git are not separable here without the exit
+  // code, and both end the same way — no line. A board that nagged about a repo
+  // with no remote would be nagging about nothing, and a repo that is not a git
+  // repo at all already gets its UNKNOWN from `uncommittedLine` directly above:
+  // a second one would be the same fact twice, not a fact that would otherwise
+  // be missed.
+  if (!remote.ok || remote.out === '') return null;
+
+  const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (!branch.ok || branch.out === '' || branch.out === 'HEAD') {
+    return `📤 unpushed commits in ${repoDir}: UNKNOWN — no branch to compare (${branch.out.slice(0, 120)})`;
+  }
+  // Asked separately from the count so "never pushed" gets its own sentence
+  // instead of arriving as `fatal: ambiguous argument`. It is still UNKNOWN and
+  // not a number: nothing here measured how far ahead the branch is.
+  const tracked = git([
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `${PUSH_REMOTE}/${branch.out}`,
+  ]);
+  if (!tracked.ok) {
+    return `📤 unpushed commits in ${repoDir}: UNKNOWN — ${PUSH_REMOTE}/${branch.out} does not exist locally, so there is nothing to compare against (this branch has never been pushed, or ${PUSH_REMOTE} has never been fetched)`;
+  }
+  const ahead = git([
+    'rev-list',
+    '--count',
+    `${PUSH_REMOTE}/${branch.out}..HEAD`,
+  ]);
+  if (!ahead.ok) {
+    return `📤 unpushed commits in ${repoDir}: UNKNOWN — git could not be read (${ahead.out.slice(0, 120)})`;
+  }
+  const count = Number(ahead.out);
+  // `Number('')` is 0, and a 0 here would read as "everything is pushed".
+  if (ahead.out === '' || !Number.isFinite(count)) {
+    return `📤 unpushed commits in ${repoDir}: UNKNOWN — git printed ${JSON.stringify(ahead.out.slice(0, 40))}`;
+  }
+  if (count === 0) return null;
+  return `📤 ${repoDir} is ${count} commit${count === 1 ? '' : 's'} ahead of ${PUSH_REMOTE}/${branch.out}, so a push this tool should have made did NOT happen. Push it: cd ${repoDir} && git push`;
+}
+
 export type BoardView = 'repo' | 'recent' | 'openAsks';
 
 export interface BoardOptions {
@@ -484,6 +564,7 @@ export async function runThreadBoard(
           hiddenContinued: data.hiddenContinued,
           rows: data.rows,
           uncommitted: uncommittedLine(env),
+          unpushed: unpushedLine(env),
           view,
         },
         null,
@@ -520,6 +601,13 @@ export async function runThreadBoard(
   if (uncommitted != null) {
     console.log('');
     console.log(uncommitted);
+  }
+  // Both lines, not one or the other: a repo can be dirty AND behind on pushes,
+  // and they are two different things to fix.
+  const unpushed = unpushedLine(env);
+  if (unpushed != null) {
+    console.log('');
+    console.log(unpushed);
   }
   return 0;
 }

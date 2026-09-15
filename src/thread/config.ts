@@ -77,6 +77,21 @@ export const THREAD_DEFAULT_ENFORCE = false;
 export const THREAD_DEFAULT_AUTO_COMMIT = true;
 
 /**
+ * ON unless something says otherwise (home-base-p1uj.20, D22) — the second knob
+ * here whose default is true, and for the same reason as `autoCommit`.
+ *
+ * The threads repo got a private remote on 2026-09-15, and pushing is how the
+ * commit stops being a backup that only exists on one laptop. It is not a
+ * feature gate: nothing new becomes possible when it is on, and the failure it
+ * can produce is a warning about a push, never a lost report. It is a knob at
+ * all so a machine that should stay local — a clone with no remote, a laptop on
+ * a metered connection, a debugging run that should not touch the network — can
+ * say so in one line, and so the whole behaviour can be turned off without
+ * turning off the commit it follows.
+ */
+export const THREAD_DEFAULT_AUTO_PUSH = true;
+
+/**
  * ON unless something says otherwise (home-base-p1uj.14, D19).
  *
  * Also not a feature gate: it picks between two spellings of the same header.
@@ -131,6 +146,10 @@ export interface ResolvedThreadConfig {
   autoCommit: boolean;
   /** Which layer decided `autoCommit`. */
   autoCommitSource: ThreadConfigSource;
+  /** Whether a successful commit is followed by `git push origin HEAD` (D22). */
+  autoPush: boolean;
+  /** Which layer decided `autoPush`. */
+  autoPushSource: ThreadConfigSource;
   enabled: boolean;
   /** Whether the Stop hook may block a report it cannot prove was recorded. */
   enforce: boolean;
@@ -233,6 +252,7 @@ export function resolveThreadConfig(
     THREAD_DEFAULT_START_ON_SESSION_START,
   );
   const autoCommit = resolveFlag('autoCommit', THREAD_DEFAULT_AUTO_COMMIT);
+  const autoPush = resolveFlag('autoPush', THREAD_DEFAULT_AUTO_PUSH);
   const enforce = resolveFlag('enforce', THREAD_DEFAULT_ENFORCE);
 
   // `render` is the one NESTED block in the thread section, so it needs its own
@@ -286,6 +306,8 @@ export function resolveThreadConfig(
     answerUiSource,
     autoCommit: autoCommit.value,
     autoCommitSource: autoCommit.source,
+    autoPush: autoPush.value,
+    autoPushSource: autoPush.source,
     emojiHeader,
     emojiHeaderSource,
     enabled: enabled.value,

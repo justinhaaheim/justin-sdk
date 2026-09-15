@@ -28,6 +28,18 @@
  * tried and could not). Collapsing `failed` into `nothing-to-commit` is exactly
  * the reassuring-direction substitution that rule forbids: it would report a
  * repo full of uncommitted reports as clean.
+ *
+ * AND THEN IT PUSHES (home-base-p1uj.20, decision D22). The threads repo got a
+ * remote on 2026-09-15 (private, github.com/justinhaaheim/threads), and a
+ * backup that only exists on this laptop is not a backup. D22 rejected a
+ * watcher daemon of the dotfiles `gitwatch` shape for the same reason D13 was
+ * reversed: this tool is the repo's only writer, so the push belongs where the
+ * write finishes, not in a process that has to notice the write happened. The
+ * push is therefore part of `commitThreadsRepo` — every caller (report, start,
+ * answer, done, drain) gets it without opting in — and it carries the same
+ * contract as the commit: the beads are already in Dolt and already committed,
+ * so a push that cannot be made is ONE WARNING LINE and exit 0. Never
+ * NOT RECORDED, never a retry loop, never `--force`.
  */
 
 import {spawnSync} from 'child_process';
@@ -41,7 +53,11 @@ import {
 } from 'fs';
 import {join} from 'path';
 
-import {resolveThreadConfig} from './config';
+import {
+  resolveThreadConfig,
+  THREAD_DEFAULT_AUTO_COMMIT,
+  THREAD_DEFAULT_AUTO_PUSH,
+} from './config';
 import {threadsRepoDir, threadsStateDir} from './paths';
 
 import type {EnvLike} from './paths';
@@ -49,8 +65,35 @@ import type {EnvLike} from './paths';
 /** The file `thread` commits. Relative to the threads repo. */
 export const BEADS_JSONL = '.beads/issues.jsonl';
 
+/**
+ * What happened to the push — four facts, none of them each other (rule 6.1).
+ *
+ * `pushed` means GIT ACCEPTED IT: origin now has this commit. It covers the
+ * "Everything up-to-date" case too (a concurrent run pushed the same HEAD
+ * first), because the claim being made is about where the commit IS, not about
+ * whether bytes moved. `no-remote` is MEASURED absence — `git config --get`
+ * exited 1, its documented "key not found" code — and is silent, because a
+ * threads repo with no remote never promised a push. `disabled` is the knob.
+ * `failed` is "we tried and could not", and is the only one that warns.
+ *
+ * There is deliberately no `up-to-date` member and no `unknown`: the first is a
+ * distinction without a consequence, and the second would be a failure wearing
+ * a calmer word.
+ */
+export type PushOutcome =
+  | {kind: 'pushed'; remote: string}
+  | {kind: 'no-remote'}
+  | {kind: 'disabled'}
+  | {kind: 'failed'; command: string; detail: string};
+
+/**
+ * A push is only ever reachable through a COMMIT that happened, and the types
+ * say so: `push` lives on the `committed` member and nowhere else. A caller
+ * cannot read a push outcome off an outcome where no commit was made, so "we
+ * pushed" can never be printed about a write that never reached git.
+ */
 export type CommitOutcome =
-  | {kind: 'committed'; sha: string; subject: string}
+  | {kind: 'committed'; push: PushOutcome; sha: string; subject: string}
   | {kind: 'nothing-to-commit'}
   | {kind: 'disabled'}
   | {kind: 'skipped-export-unstaged'}
@@ -59,6 +102,8 @@ export type CommitOutcome =
 export interface CommitOptions {
   /** Overrides the resolved knob. Tests and `--no-commit` callers use it. */
   autoCommit?: boolean;
+  /** Overrides `componentConfig.thread.autoPush`. Tests pin it. */
+  autoPush?: boolean;
   /** The repo to commit in. Defaults to the resolved threads repo. */
   dir?: string;
   env?: EnvLike;
@@ -71,19 +116,46 @@ export interface CommitOptions {
   exportUnstaged?: boolean;
 }
 
+/**
+ * `status` is carried on the failure so a caller can tell git's DOCUMENTED exit
+ * codes apart — `git config --get` exits 1 for "key not found", which is a
+ * measurement, from 3/4/6 and a spawn error, which are breakage. Null means the
+ * process never produced a code (spawn error, or a signal such as the push
+ * timeout's SIGTERM), which is its own third answer and never a number.
+ */
+type RunResult =
+  | {ok: true; stdout: string}
+  | {detail: string; ok: false; status: number | null};
+
 function run(
   dir: string,
   args: string[],
   env: EnvLike,
-): {ok: true; stdout: string} | {ok: false; detail: string} {
+  options: {timeoutMs?: number} = {},
+): RunResult {
   const result = spawnSync('git', args, {
     cwd: dir,
     encoding: 'utf8',
     env: env as NodeJS.ProcessEnv,
     stdio: ['ignore', 'pipe', 'pipe'],
+    ...(options.timeoutMs == null ? {} : {timeout: options.timeoutMs}),
   });
   if (result.error != null) {
-    return {detail: result.error.message, ok: false};
+    return {detail: result.error.message, ok: false, status: null};
+  }
+  // A timeout kills the child with a SIGNAL, and `status` is then null. Reading
+  // that as a clean exit would turn "git hung on a credential prompt" into
+  // "git said nothing is wrong" — the exact substitution rule 6 forbids.
+  if (result.signal != null) {
+    const detail = (result.stderr ?? '').trim();
+    return {
+      detail:
+        `git was killed by ${result.signal}` +
+        (options.timeoutMs == null ? '' : ` after ${options.timeoutMs}ms`) +
+        (detail === '' ? '' : ` — ${detail}`),
+      ok: false,
+      status: null,
+    };
   }
   if (result.status !== 0) {
     const detail =
@@ -91,6 +163,7 @@ function run(
     return {
       detail: detail === '' ? `git exited ${result.status}` : detail,
       ok: false,
+      status: result.status,
     };
   }
   return {ok: true, stdout: result.stdout ?? ''};
@@ -195,20 +268,110 @@ export function releaseCommitLock(handle: LockHandle): void {
   }
 }
 
+/** The only remote `thread` will ever push to (D22). */
+export const PUSH_REMOTE = 'origin';
+
 /**
- * Stage and commit the threads repo's beads JSONL.
+ * A wrap-up must not hang on git.
+ *
+ * `GIT_TERMINAL_PROMPT=0` turns a credential prompt into an immediate error
+ * rather than a blocked session, but it does not cover every way a push can
+ * stall (an ssh passphrase is read from /dev/tty, a TCP connect to a dead
+ * network just waits), so the timeout is the backstop rather than the polish.
+ * Twenty seconds is chosen against what it costs to be wrong in each direction:
+ * too short only defers a push the next write will make anyway, while too long
+ * holds up the report Justin is waiting to read.
+ */
+export const PUSH_TIMEOUT_MS = 20_000;
+
+/**
+ * Push the current branch to `origin`, or say precisely why not (D22).
+ *
+ * `git push origin HEAD`, NOT a bare `git push`: the latter depends on
+ * `push.default` and on an upstream being configured, and a threads repo whose
+ * branch has no upstream would then warn on every single write. `origin HEAD`
+ * asks for exactly one thing — this branch, onto the same name on origin — and
+ * needs no tracking config to mean it.
+ *
+ * NEVER `--force`, and there is no retry. A rejected push means origin has work
+ * this machine does not (D22 puts pulling out of scope — for now the repo has
+ * one writing machine), and the answer to that is a human, not a louder push.
+ * Nothing is lost while it waits: the commit is local, the beads are in Dolt,
+ * the next successful push carries it, and `thread board` names the backlog
+ * until then.
+ */
+export function pushThreadsRepo(
+  dir: string,
+  env: EnvLike,
+  autoPush: boolean,
+): PushOutcome {
+  if (!autoPush) return {kind: 'disabled'};
+
+  const remote = run(
+    dir,
+    ['config', '--get', `remote.${PUSH_REMOTE}.url`],
+    env,
+  );
+  if (!remote.ok) {
+    // Exit 1 is git-config's DOCUMENTED "the section or key is invalid" — the
+    // measured fact that no origin is configured, which is silent by design.
+    // Any other code (3 = unparseable config, a spawn failure, a signal) is
+    // breakage, and breakage is never allowed to read as "there is no remote".
+    if (remote.status === 1) return {kind: 'no-remote'};
+    return {
+      command: `git config --get remote.${PUSH_REMOTE}.url`,
+      detail: remote.detail,
+      kind: 'failed',
+    };
+  }
+  if (remote.stdout.trim() === '') return {kind: 'no-remote'};
+
+  const pushed = run(
+    dir,
+    ['push', '--quiet', PUSH_REMOTE, 'HEAD'],
+    {...env, GIT_TERMINAL_PROMPT: '0'},
+    {timeoutMs: PUSH_TIMEOUT_MS},
+  );
+  if (!pushed.ok) {
+    return {
+      command: `git push ${PUSH_REMOTE} HEAD`,
+      detail: pushed.detail,
+      kind: 'failed',
+    };
+  }
+  return {kind: 'pushed', remote: PUSH_REMOTE};
+}
+
+/**
+ * Stage and commit the threads repo's beads JSONL, then push it.
  *
  * `message` is the whole commit subject, and the callers spell it
  * `thread <id>: <what>` so `git log --oneline` in the threads repo reads as a
  * ledger of which thread changed when.
+ *
+ * THE PUSH FOLLOWS A COMMIT AND ONLY A COMMIT (D22: "after a successful commit,
+ * git push"). Nothing is pushed on `nothing-to-commit`, which keeps the common
+ * no-op write free of a network round-trip and keeps the contract to one
+ * sentence. The cost is that a push which failed earlier stays failed until the
+ * next real write — so the gap is not left silent: `thread board` prints how
+ * many commits are waiting, and the next commit pushes all of them, not just
+ * its own.
  */
 export function commitThreadsRepo(
   message: string,
   options: CommitOptions = {},
 ): CommitOutcome {
   const env = options.env ?? process.env;
+  // One resolution for both knobs: reading the config twice would let a caller
+  // that pins neither see two different files if one changed mid-run.
+  const resolved =
+    options.autoCommit == null || options.autoPush == null
+      ? resolveThreadConfig({env})
+      : null;
   const autoCommit =
-    options.autoCommit ?? resolveThreadConfig({env}).autoCommit;
+    options.autoCommit ?? resolved?.autoCommit ?? THREAD_DEFAULT_AUTO_COMMIT;
+  const autoPush =
+    options.autoPush ?? resolved?.autoPush ?? THREAD_DEFAULT_AUTO_PUSH;
   if (!autoCommit) return {kind: 'disabled'};
   if (options.exportUnstaged === true) return {kind: 'skipped-export-unstaged'};
 
@@ -245,16 +408,25 @@ export function commitThreadsRepo(
         kind: 'failed',
       };
     }
+    // INSIDE THE LOCK, on purpose. Two sessions wrapping up together would
+    // otherwise push the same branch at once and one would be told its push is
+    // non-fast-forward — a WARNING about a race rather than about anything
+    // wrong. The cost is that a slow push holds the lock, which can make
+    // another process give up waiting (~2s) and commit unlocked; that is the
+    // cheaper failure, and it is why the push has a timeout at all.
+    const push = pushThreadsRepo(dir, env, autoPush);
+
     const head = run(dir, ['log', '-1', '--format=%h %s'], env);
     if (!head.ok) {
       // The commit happened; we just cannot read its sha back. Saying
       // "committed, sha unknown" is the honest shape — never a fabricated sha.
-      return {kind: 'committed', sha: 'UNKNOWN', subject: message};
+      return {kind: 'committed', push, sha: 'UNKNOWN', subject: message};
     }
     const line = head.stdout.trim();
     const space = line.indexOf(' ');
     return {
       kind: 'committed',
+      push,
       sha: space === -1 ? line : line.slice(0, space),
       subject: space === -1 ? message : line.slice(space + 1),
     };
@@ -272,13 +444,53 @@ export function commitThreadsRepo(
  * the commit would have produced. Only a real outcome (a sha) or a real problem
  * (a failure) earns a line.
  */
+/**
+ * A rejected push is six lines of git, four of them `hint:` prose aimed at
+ * someone who is about to type `git pull`. Truncating that at 200 characters
+ * spends the warning on the hint and cuts off mid-sentence, so the hints go and
+ * the remaining lines join up — the reader gets `! [rejected] HEAD -> main
+ * (fetch first)`, which is the fact, in the space available.
+ *
+ * Nothing is DROPPED except git's own hints: an unrecognised error keeps every
+ * line it had, because a failure this code has never seen before is exactly the
+ * one whose text must survive.
+ */
+function condenseGitError(detail: string): string {
+  const lines = detail
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('hint:'));
+  return lines.length === 0 ? detail.trim() : lines.join(' · ');
+}
+
+export function describePush(
+  outcome: PushOutcome,
+  repoDisplay: string,
+): string | null {
+  switch (outcome.kind) {
+    case 'pushed':
+      return `  pushed ${repoDisplay} to ${outcome.remote}`;
+    case 'failed':
+      return `⚠️ WARNING: recorded and committed, but ${repoDisplay} could NOT be pushed (${outcome.command} — ${condenseGitError(outcome.detail).slice(0, 200)}). Nothing was lost — the commit is local and the next write pushes it; \`justin-sdk thread board\` shows what is unpushed.`;
+    case 'disabled':
+    case 'no-remote':
+      return null;
+  }
+}
+
 export function describeCommit(
   outcome: CommitOutcome,
   repoDisplay: string,
 ): string | null {
   switch (outcome.kind) {
-    case 'committed':
-      return `  committed to ${repoDisplay}: ${outcome.sha} ${outcome.subject}`;
+    case 'committed': {
+      // The push line rides along with the commit line rather than being a
+      // second thing every call site has to remember to print. There are six
+      // callers; one that forgot would drop a WARNING on the floor.
+      const committed = `  committed to ${repoDisplay}: ${outcome.sha} ${outcome.subject}`;
+      const pushed = describePush(outcome.push, repoDisplay);
+      return pushed == null ? committed : `${committed}\n${pushed}`;
+    }
     case 'failed':
       return `⚠️ WARNING: recorded in Dolt, but ${repoDisplay} could NOT be committed (${outcome.command} — ${outcome.detail.slice(0, 200)}). Nothing was lost; \`justin-sdk thread board\` shows what is uncommitted.`;
     case 'disabled':

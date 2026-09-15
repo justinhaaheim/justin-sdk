@@ -210,6 +210,12 @@ const componentConfigSchema = z
           .describe(
             'Whether `thread` commits the threads repo’s `.beads/issues.jsonl` itself after every write batch (home-base-p1uj.11). DEFAULT TRUE — the only thread knob that defaults on, because threads live in their own repo whose sole writer is this tool, so committing is finishing the write rather than a new risk. Set it false to batch the commits by hand, or when the threads workspace is not a git repo. A commit that cannot be made is a WARNING, never a lost report.',
           ),
+        autoPush: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether a successful `thread` commit is followed by `git push origin HEAD` in the threads repo (home-base-p1uj.20, D22). DEFAULT TRUE, and effective only when a remote named `origin` exists — with no origin nothing is attempted and nothing is printed. It exists because a commit that only ever lives on one laptop is not a backup, and it replaces the watcher daemon the dotfiles repo uses: this tool is the threads repo’s only writer, so the push belongs where the write finishes. Never `--force` and never a retry; a push that fails (offline, auth, non-fast-forward) prints ONE warning line naming the git error and exits 0, the next write pushes the backlog, and `justin-sdk thread board` says how many commits are waiting meanwhile. Set it false on a machine that should stay local, or to keep the commit without the network round-trip.',
+          ),
         enforce: z
           .boolean()
           .optional()
