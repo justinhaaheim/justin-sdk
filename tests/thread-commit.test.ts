@@ -219,28 +219,31 @@ describe('commitThreadsRepo', () => {
 /**
  * THE PUSH (home-base-p1uj.20, D22).
  *
- * NEGATIVE CONTROLS, each run 2026-09-15 by editing the named line, watching
- * the named assertion fail, then restoring it:
+ * NEGATIVE CONTROLS, all six run 2026-09-15: each broke one line, watched the
+ * named assertion fail, and restored the line. Verbatim results:
  *
- *   pushed: with `pushThreadsRepo`'s `run(dir, ['push', …])` replaced by
- *     `{ok: true, stdout: ''}` (claiming a push nobody made), "a committed write
- *     reaches origin" failed on the bare repo's log — 1 commit found, 2
- *     expected — while `push.kind` still said `pushed`. That is the point of
- *     asserting against the REMOTE and not against the return value.
- *   refused: with the push's failure branch changed to
- *     `return {kind: 'pushed', remote: PUSH_REMOTE}`, "a refused push is one
- *     WARNING" failed on `push.kind` (pushed vs failed) and on the WARNING
- *     count (0 vs 1).
- *   no-remote: with `remote.status === 1` changed to `remote.status === 99` so
- *     an absent origin falls into the failure branch, "no origin: nothing is
- *     attempted and nothing is printed" failed on `push.kind` (failed vs
- *     no-remote) and on the silence assertion.
- *   knob off: with `if (!autoPush) return {kind: 'disabled'}` deleted,
- *     "autoPush false pushes NOTHING" failed on the bare repo's log — 2 commits
- *     found, 1 expected.
- *   the board line: with `if (count === 0) return null` changed to
- *     `if (count >= 0) return null`, "names the backlog when a push did NOT
- *     happen" failed on `toBeNull` — the line vanished exactly where it matters.
+ *   a push that claims success and does nothing — `['push', '--quiet',
+ *     PUSH_REMOTE, 'HEAD']` swapped for `['rev-parse', 'HEAD']`, so the outcome
+ *     still says `pushed`. "a committed write reaches origin" failed on the
+ *     BARE REPO's log: `Expected to contain: "thread th-10: report #1" /
+ *     Received: "3433564 seed\n"`. That is why these assert against the remote
+ *     and not against the return value.
+ *   a refused push reported as a success — `if (!pushed.ok)` weakened to
+ *     `if (false)`. "a refused push is ONE warning" failed with
+ *     `Expected: "failed" / Received: "pushed"`.
+ *   an absent origin treated as breakage — `remote.status === 1` changed to
+ *     `=== 99`. "no origin: nothing is attempted" failed with
+ *     `Expected: "no-remote" / Received: "failed"`.
+ *   the knob ignored — `if (!autoPush)` weakened to `if (false)`. "autoPush
+ *     false pushes NOTHING" failed with `Expected: "disabled" / Received:
+ *     "pushed"`.
+ *   the board's backlog line suppressed — `if (count === 0) return null`
+ *     changed to `if (count >= 0) return null`. TWO tests failed: "names the
+ *     backlog when a push did NOT happen" on `expect(received).not.toBeNull() /
+ *     Received: null`, and the knob-off test on its board assertion.
+ *   a refused push made non-zero — `runThreadDone` changed to
+ *     `if (…push.kind === 'failed') return 1`. "a REFUSED push still exits 0"
+ *     failed with `Expected: 0 / Received: 1`, while its sibling stayed green.
  */
 describe('pushing after a commit', () => {
   test('a committed write reaches origin, and the branch is level again', () => {
@@ -572,10 +575,10 @@ describe('a write batch commits without a manual step', () => {
     // layer: a push that git rejects must not turn a recorded report into a
     // non-zero exit, because the exit code is what the wrap-up rule reads to
     // decide whether anything was lost.
-    // NEGATIVE CONTROL (2026-09-15): with `runThreadDone`'s commit line changed
-    // to `return outcome.commit.kind === 'committed' && outcome.commit.push.kind
-    // === 'failed' ? 1 : 0`, this failed on `code` (1 vs 0) while the sibling
-    // test above stayed green.
+    // NEGATIVE CONTROL (2026-09-15): with `runThreadDone` changed to keep the
+    // commit outcome and `return 1` when its `push.kind === 'failed'`, this
+    // failed with `Expected: 0 / Received: 1` while the sibling test above
+    // stayed green.
     const dir = makeRepo();
     const bare = addBareRemote(dir);
     try {
