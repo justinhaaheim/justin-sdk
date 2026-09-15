@@ -38,18 +38,23 @@ import {z} from 'zod';
 import type {ThreadFacts} from './facts';
 
 /** Bumped when a field's MEANING changes, not when one is added. */
-export const THREAD_SCHEMA_VERSION = 2;
+export const THREAD_SCHEMA_VERSION = 3;
 
 /**
- * The version this schema still ACCEPTS and migrates (D15).
+ * The version this schema still ACCEPTS and migrates (D15, D24).
  *
  * Not politeness — necessity. `home-base/bin/justin-sdk` is a symlink into this
  * source tree, so every Claude Code session on the machine runs whatever is
  * checked out here, while the rule text that tells Claude what to write updates
  * separately. For the whole interval between the two, live sessions and spooled
- * reports carry v1 payloads. Rejecting them would not fall back to the plain
+ * reports carry older payloads. Rejecting them would not fall back to the plain
  * text report either: the rule branches on `THREADS: DISABLED` and on
  * command-not-found, and a validation refusal is neither.
+ *
+ * v1 is still accepted alongside v2 rather than retired with the v3 bump: the
+ * migrations chain (v1 → v2 → v3), so keeping it costs one function call, and
+ * dropping it would strand any v1 report still sitting in the spool — a report
+ * that cannot drain is a report that silently never reaches a bead.
  */
 export const THREAD_SCHEMA_MIN_ACCEPTED_VERSION = 1;
 
@@ -105,13 +110,50 @@ export const ASK_PRIORITY_MEANING: Record<number, string> = {
   4: 'FYI — no reply expected',
 };
 
-/** How a previously-open ask was handled this time round (D4). */
-export const ASK_DISPOSITIONS = [
-  'carried',
-  'answered',
-  'decided',
-  'irrelevant',
-] as const;
+/**
+ * How a previously-open ask was handled this time round (D4, rewritten by D24).
+ *
+ * TWO MEMBERS NOW, NOT FOUR. v2 had `carried` (still open) and `decided` (I took
+ * the default), and both are gone because the tool no longer needs to be told
+ * either one: EVERY open ask from the previous report is closed automatically as
+ * `decided: <the default the ask itself recorded>` unless this payload restates
+ * it (a new ask carrying `supersedes`) or dispositions it here. Justin, verbatim
+ * (2026-09-15): "If the human did not answer them and the agent went ahead with
+ * the default, the questions need to be closed."
+ *
+ * So what is left is only what the tool CANNOT work out for itself: that Justin
+ * answered (quote him) or that the question stopped applying (say why).
+ */
+export const ASK_DISPOSITIONS = ['answered', 'irrelevant'] as const;
+
+/**
+ * The v2 dispositions this build still MIGRATES, for one release.
+ *
+ * `decided` maps onto the auto-close, which says the same thing in the ask's own
+ * recorded words. `carried` cannot map onto anything — restating an ask is now a
+ * new ask with its own text, and a migration has no text to write — so it keeps
+ * the ask OPEN and `thread report` prints a warning naming it. See
+ * `migrateV2Payload`.
+ */
+export const V2_ONLY_ASK_DISPOSITIONS = ['carried', 'decided'] as const;
+
+/**
+ * What a deviation IS (D23). Justin's definition, 2026-09-15: a MISTAKE is
+ * "something careless, wrong, against the spec or the rules" — and it is the one
+ * kind that reaches the compact report, beside the P0/P1 asks.
+ *
+ * The other two exist so that `mistake` stays expensive: without somewhere to
+ * put "I chose X over Y" and "you should know Z", every departure would be filed
+ * as a mistake and the compact report would fill up with things Justin does not
+ * need to see above everything else.
+ */
+export const DEVIATION_KINDS = ['mistake', 'judgmentCall', 'fyi'] as const;
+
+export const DEVIATION_KIND_MEANING: Record<string, string> = {
+  fyi: 'you should know this, but nothing went wrong',
+  judgmentCall: 'a call I made that you might have made differently',
+  mistake: 'careless, wrong, against the spec or against the rules — MUST-SEE',
+};
 
 export const WORK_PRODUCT_KINDS = [
   'code',
@@ -130,19 +172,31 @@ export const MERGE_STATES = [
 ] as const;
 
 /**
- * Dispositions that CLOSE the ask. `carried` leaves it open by definition, and
- * a carried ask is therefore still one of the things Justin owes an answer on —
- * which is why the renderer puts it in the numbered Asks section rather than in
- * the historical "prior asks" list (F4).
+ * EVERY v3 disposition closes the ask (D24). The set is kept as a named constant
+ * because the invariant is worth stating: after this release there is no way for
+ * a payload to say "leave this one open" — an ask that should stay live is
+ * restated as a NEW ask that supersedes it, which is the whole of D24.
  */
-export const CLOSING_DISPOSITIONS: ReadonlySet<string> = new Set([
-  'answered',
-  'decided',
-  'irrelevant',
-]);
+export const CLOSING_DISPOSITIONS: ReadonlySet<string> = new Set(
+  ASK_DISPOSITIONS,
+);
+
+/** What `thread report` closes an unlisted, unrestated ask as (D24). */
+export const AUTO_CLOSE_DISPOSITION = 'decided';
+
+/**
+ * …and what it closes one as when the ask bead records no default.
+ *
+ * NOT `decided`: "decided" is a claim that Claude proceeded on a stated default,
+ * and an ask with no recorded default has none to have proceeded on. Saying
+ * `decided` there would put words in the report's mouth — the reassuring
+ * direction, since it reads as "handled".
+ */
+export const EXPIRED_DISPOSITION = 'expired';
 
 export type AskKind = (typeof ASK_KINDS)[number];
 export type AskDisposition = (typeof ASK_DISPOSITIONS)[number];
+export type DeviationKind = (typeof DEVIATION_KINDS)[number];
 export type NextStep = (typeof NEXT_STEPS)[number];
 export type AskPriority = (typeof ASK_PRIORITIES)[number];
 
@@ -174,14 +228,38 @@ const askSchema = z.strictObject({
   priority: z
     .literal([...ASK_PRIORITIES])
     .describe(
-      'P0 you cannot proceed without · P1 decide before the next session · P2 this week · P3 informational, default is fine · P4 FYI. MOST ASKS ARE P3/P4. Do not inflate.',
+      'P0 you cannot proceed without · P1 decide before the next session · P2 this week · P3 informational, default is fine · P4 FYI. MOST ASKS ARE P3/P4. Do not inflate. P0 and P1 are the ONLY asks that reach the compact report.',
+    ),
+  supersedes: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      'The ask bead id this one RESTATES (D24). The old ask is closed "superseded by <this ask>" and this one carries its lineage. Use it whenever a previous report’s question is still live — asks are never edited in place.',
     ),
   text: nonEmpty('ask.text').describe('The question or action, in one line.'),
 });
 
+/**
+ * One deviation, now typed by kind (D23).
+ *
+ * v2 made this a bare string, and the cost was that a careless mistake and a
+ * "you should know I used tabs here" were the same object — so the compact
+ * report could not show one and hide the other, which is the entire point of the
+ * must-see frame.
+ */
+const deviationSchema = z.strictObject({
+  kind: z
+    .literal([...DEVIATION_KINDS])
+    .describe(
+      'mistake = careless / wrong / against the spec or rules (Justin SEES this) · judgmentCall = a call he might have made differently · fyi = he should know, nothing went wrong.',
+    ),
+  text: nonEmpty('deviations.text'),
+});
+
 const priorAskSchema = z.strictObject({
   detail: nonEmpty('priorAsks.detail').describe(
-    'answered → quote the answer. decided → say which default you took. irrelevant → say why. carried → say why it is still open.',
+    'answered → quote what Justin said. irrelevant → say why the question stopped applying.',
   ),
   disposition: z.literal([...ASK_DISPOSITIONS]),
   id: nonEmpty('priorAsks.id').describe('The ask bead id, e.g. jl-x7q.2.'),
@@ -217,9 +295,9 @@ export const threadReportSchema = z.strictObject({
     .optional()
     .describe('Thread bead id this session continues, when it continues one.'),
   deviations: z
-    .array(z.string())
+    .array(deviationSchema)
     .describe(
-      'REQUIRED (D17). Anything that departs from what Justin specified or from the spec, plus anything he should know. Empty array when there were none — and an empty array is a CLAIM that you checked.',
+      'REQUIRED (D17, D23). Anything that departs from what Justin specified or from the spec, plus anything he should know, each with its kind. Empty array when there were none — and an empty array is a CLAIM that you checked.',
     ),
   did: z.array(z.string()).describe('Completed items only.'),
   discussion: z
@@ -257,8 +335,9 @@ export const threadReportSchema = z.strictObject({
     ),
   priorAsks: z
     .array(priorAskSchema)
+    .optional()
     .describe(
-      'EVERY open ask from the last report, dispositioned. The report is refused without them (D4).',
+      'OPTIONAL (D24). Only the open asks Justin ANSWERED (quote him) or that became IRRELEVANT (say why). Everything else from the last report is closed for you: "decided: <the default that ask recorded>". To keep a question alive, write it again as a new ask with supersedes: <old id>.',
     ),
   progress: z.strictObject({
     percent: z
@@ -291,6 +370,7 @@ export const threadReportSchema = z.strictObject({
 export type ThreadReportPayload = z.infer<typeof threadReportSchema>;
 export type ThreadAsk = z.infer<typeof askSchema>;
 export type ThreadPriorAsk = z.infer<typeof priorAskSchema>;
+export type ThreadDeviation = z.infer<typeof deviationSchema>;
 
 /**
  * Validation outcome. `invalid` carries one line per problem, each naming the
@@ -301,12 +381,28 @@ export type PayloadValidation =
   | {
       status: 'ok';
       /**
+       * Ask ids a MIGRATION is keeping open (D24) — the v2 `carried` bridge, and
+       * nothing else ever sets it.
+       *
+       * It lives on the validation result rather than in the payload because it
+       * is not part of the contract: a v3 payload has no way to say "leave this
+       * ask open", by design. Putting it in the schema would have published a
+       * second, easier spelling of the thing D24 exists to remove.
+       */
+      keepOpenAskIds: string[];
+      /**
+       * One line per substitution a migration actually made, for `thread report`
+       * to print. Empty when the payload was already current — an empty list
+       * here means "nothing was substituted", never "we did not look".
+       */
+      migrationNotes: string[];
+      /**
        * The version the payload ARRIVED as when it had to be migrated, and null
        * when it was already current. Never absent: a migration is a real event
-       * that changed what the report says (a v1 `blocking: false` becomes a P3),
-       * and `thread report` prints a line naming it. Silently upgrading would be
-       * rule 6 through the validation layer — the report would look like it
-       * meant what it now says.
+       * that changed what the report says (a v1 `blocking: false` becomes a P3,
+       * a v2 deviation string becomes an `fyi`), and `thread report` prints a
+       * line naming it. Silently upgrading would be rule 6 through the
+       * validation layer — the report would look like it meant what it now says.
        */
       migratedFrom: number | null;
       payload: ThreadReportPayload;
@@ -361,8 +457,7 @@ export const threadFactsSchema = z.looseObject({
 });
 
 export type FactsValidation =
-  | {status: 'ok'; facts: ThreadFacts}
-  | {status: 'invalid'; issues: string[]};
+  {status: 'ok'; facts: ThreadFacts} | {status: 'invalid'; issues: string[]};
 
 /** Validate an archived facts document. Never throws. */
 export function validateThreadFacts(parsed: unknown): FactsValidation {
@@ -415,8 +510,112 @@ export function migrateV1Payload(parsed: unknown): unknown {
     ...source,
     asks,
     deviations: Array.isArray(source.deviations) ? source.deviations : [],
-    nextStep: typeof source.nextStep === 'string' ? source.nextStep : 'continue',
-    schemaVersion: THREAD_SCHEMA_VERSION,
+    nextStep:
+      typeof source.nextStep === 'string' ? source.nextStep : 'continue',
+    // TWO, not THREAD_SCHEMA_VERSION: this function produces a v2 payload, and
+    // `migrateV2Payload` takes it the rest of the way. Stamping it "current"
+    // here would skip the second migration entirely the next time the version
+    // moves — the shape would be v2 wearing a v3 label.
+    schemaVersion: 2,
+  };
+}
+
+/** What a v2 → v3 migration CHANGED, in words `thread report` can print. */
+export interface V2MigrationResult {
+  /** Ask ids the v2 payload marked `carried`; they stay OPEN (D24). */
+  keepOpenAskIds: string[];
+  /** One line per substitution that was actually made. Empty when none were. */
+  notes: string[];
+  payload: unknown;
+}
+
+/**
+ * Rewrite a v2 payload as a v3 one (D24). Pure; the input is not mutated.
+ *
+ * THE THREE MAPPINGS, each chosen so the migrated report says no more than the
+ * original did — and each one REPORTED, because every one of them is in the
+ * reassuring direction if it goes unmentioned:
+ *
+ *  - `deviations: string[]` → `{kind: 'fyi', text}`. `fyi` is the kind that
+ *    claims nothing went wrong, and a v2 payload never said whether one had. A
+ *    v2 mistake therefore arrives looking like an FYI and will NOT appear in the
+ *    compact report; the printed migration line says so out loud.
+ *  - `priorAsks` with `disposition: 'decided'` → DROPPED, because the auto-close
+ *    does exactly that job and does it from the ask bead's own recorded default
+ *    rather than from the payload's retelling of it.
+ *  - `priorAsks` with `disposition: 'carried'` → dropped from priorAsks and
+ *    returned in `keepOpenAskIds`, so the ask stays open. This is the one thing
+ *    a v3 payload cannot express (restating is a new ask with text, and a
+ *    migration has no text to invent), so it is a bridge, not a feature: it
+ *    lives for one release and `thread report` warns on every use.
+ */
+export function migrateV2Payload(parsed: unknown): V2MigrationResult {
+  if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return {keepOpenAskIds: [], notes: [], payload: parsed};
+  }
+  const source = parsed as Record<string, unknown>;
+  const notes: string[] = [];
+
+  let deviations = source.deviations;
+  if (Array.isArray(deviations)) {
+    const strings = deviations.filter(
+      (item): item is string => typeof item === 'string',
+    );
+    if (strings.length > 0) {
+      deviations = deviations.map((item) =>
+        typeof item === 'string' ? {kind: 'fyi', text: item} : item,
+      );
+      notes.push(
+        `${strings.length} deviation${strings.length === 1 ? '' : 's'} arrived as plain text and were filed as "fyi" — NOT as "no mistakes"; nobody was asked which kind they were`,
+      );
+    }
+  }
+
+  const keepOpenAskIds: string[] = [];
+  let priorAsks = source.priorAsks;
+  if (Array.isArray(priorAsks)) {
+    const kept: unknown[] = [];
+    let decided = 0;
+    for (const prior of priorAsks) {
+      if (prior == null || typeof prior !== 'object' || Array.isArray(prior)) {
+        kept.push(prior);
+        continue;
+      }
+      const entry = prior as Record<string, unknown>;
+      if (entry.disposition === 'carried') {
+        if (typeof entry.id === 'string' && entry.id !== '') {
+          keepOpenAskIds.push(entry.id);
+        }
+        continue;
+      }
+      if (entry.disposition === 'decided') {
+        decided += 1;
+        continue;
+      }
+      kept.push(entry);
+    }
+    if (decided > 0) {
+      notes.push(
+        `${decided} prior ask${decided === 1 ? '' : 's'} marked "decided" are now closed by the automatic rule instead, using the default each ask bead itself recorded`,
+      );
+    }
+    if (keepOpenAskIds.length > 0) {
+      notes.push(
+        `${keepOpenAskIds.length} prior ask${keepOpenAskIds.length === 1 ? '' : 's'} marked "carried" are being LEFT OPEN (${keepOpenAskIds.join(', ')}). v3 has no "carried": restate the question as a new ask with "supersedes": "<old id>" so it carries this report's framing`,
+      );
+    }
+    priorAsks = kept;
+  }
+
+  return {
+    keepOpenAskIds,
+    notes,
+    payload: {
+      ...source,
+      deviations,
+      priorAsks,
+      schemaVersion: THREAD_SCHEMA_VERSION,
+    },
   };
 }
 
@@ -441,12 +640,28 @@ export function validateThreadReport(parsed: unknown): PayloadValidation {
     declared != null &&
     declared >= THREAD_SCHEMA_MIN_ACCEPTED_VERSION &&
     declared < THREAD_SCHEMA_VERSION;
-  const candidate = needsMigration ? migrateV1Payload(parsed) : parsed;
+
+  // THE MIGRATIONS CHAIN. A v1 payload goes v1 → v2 → v3, so each step only ever
+  // has to know about the one version in front of it; a v1 payload that skipped
+  // the v2 step would arrive with string deviations and a `carried` prior ask,
+  // and be refused by the version it declared support for.
+  let candidate = parsed;
+  let keepOpenAskIds: string[] = [];
+  let migrationNotes: string[] = [];
+  if (needsMigration) {
+    if (declared < 2) candidate = migrateV1Payload(candidate);
+    const v3 = migrateV2Payload(candidate);
+    candidate = v3.payload;
+    keepOpenAskIds = v3.keepOpenAskIds;
+    migrationNotes = v3.notes;
+  }
 
   const result = threadReportSchema.safeParse(candidate);
   if (result.success) {
     return {
+      keepOpenAskIds,
       migratedFrom: needsMigration ? declared : null,
+      migrationNotes,
       payload: result.data,
       status: 'ok',
     };
@@ -486,6 +701,41 @@ export const PAYLOAD_PRIORITY_GUIDANCE: readonly string[] = [
 ];
 
 /**
+ * THE TRIPLE-CHECK (D25) — printed beside the skeleton, and the reason the
+ * compact report can be trusted to be short.
+ *
+ * Justin, 2026-09-15, on why this is the important half of the change: "shift
+ * the mental framework wholesale from the human is going to read all this lovely
+ * text to the human will read the minimum bare essential text, so I need to
+ * focus on making that clear, actionable, and triple checking that it is as
+ * important and relevant as I think it is… and the human MAY read some of the
+ * rest. This is a shift from the human will answer all of these questions to
+ * give the human the opportunity to answer these questions."
+ *
+ * Nothing in the tool can enforce it — a P0 is whatever the payload says it is —
+ * so the prompt is the mechanism. It is deliberately a question rather than a
+ * rule: the failure mode is not ignorance of the scale, it is a session that has
+ * just spent hours on something and cannot tell any more what matters.
+ */
+export const PAYLOAD_MUST_SEE_GUIDANCE: readonly string[] = [
+  'MUST-SEE — what Justin actually reads. The compact report is ONLY:',
+  '  · your P0 and P1 asks, in full',
+  '  · your deviations of kind "mistake", in full',
+  '  Everything else (what you did, what you learned, your answers, P2-P4 asks,',
+  '  judgment calls, FYIs, next steps) is on the bead and behind --full. He MAY read it.',
+  '',
+  'BEFORE YOU REPORT, re-read every P0, every P1 and every mistake and ask:',
+  '  "is this as important as I think, and would Justin want to see it above everything else?"',
+  '  Most things are not must-see. Demote what is not. A compact report that is',
+  '  long is a compact report he stops reading.',
+  '',
+  'ASKS ARE WRITTEN ONCE (D24). Every open ask from your last report is closed for you:',
+  '  "decided: <the default that ask recorded>". To keep a question alive, write it',
+  '  AGAIN as a new ask with "supersedes": "<old ask id>" — never edit the old one.',
+  '  List an ask in priorAsks only if Justin ANSWERED it (quote him) or it became IRRELEVANT.',
+];
+
+/**
  * The payload skeleton `thread prepare` prints.
  *
  * `continuesFrom` is PREFILLED when the session was told which thread it
@@ -505,13 +755,17 @@ export function payloadSkeleton(
         kind: 'approve',
         options: [{recommended: true, text: '<option a — upside/downside>'}],
         priority: 3,
+        supersedes: null,
         text: '<the question or action, one line>',
       },
     ],
     beadsTouched: [{description: '<what this bead IS>', id: '<bead id>'}],
     continuesFrom: options.continuesFrom ?? null,
     deviations: [
-      '<anything that departs from what he specified, or that he should know — [] when there were none>',
+      {
+        kind: 'fyi',
+        text: '<mistake = careless/wrong/against the spec · judgmentCall = a call he might have made differently · fyi = he should know. [] when there were none>',
+      },
     ],
     did: ['<completed item>'],
     discussion: [],
@@ -527,9 +781,10 @@ export function payloadSkeleton(
     ],
     priorAsks: [
       {
-        detail: '<quote the answer / name the default / say why>',
+        detail:
+          '<answered → quote him · irrelevant → say why it stopped applying>',
         disposition: 'answered',
-        id: '<ask bead id>',
+        id: '<ask bead id — ONLY if he answered it or it became irrelevant>',
       },
     ],
     progress: {percent: 0, remaining: ['<next concrete step>']},

@@ -74,7 +74,11 @@ const PRIOR_RESTATED = new Map([
 
 function render(options: BuildReportModelOptions): string {
   return renderMarkdown(
-    buildReportModel({full: true, priorAskRestated: PRIOR_RESTATED, ...options}),
+    buildReportModel({
+      full: true,
+      priorAskRestated: PRIOR_RESTATED,
+      ...options,
+    }),
   );
 }
 
@@ -130,8 +134,12 @@ describe('renderMarkdown', () => {
     // The P0 ask is 1, the P3 one continues the SAME sequence as 2 — it does
     // not restart at 1 under a heading of its own (D15: the marker IS the
     // grouping, and the numbers run straight through).
-    expect(out).toContain('  1. 🛑 P0 · [Approve Y/n] Approve closing ask beads');
-    expect(out).toContain('  2. (P3) · [Pick a/b] Where should componentConfig');
+    expect(out).toContain(
+      '  1. 🛑 P0 · [Approve Y/n] Approve closing ask beads',
+    );
+    expect(out).toContain(
+      '  2. (P3) · [Pick a/b] Where should componentConfig',
+    );
     expect(out).toContain('     a. (Recommended) Keep closing');
     expect(out).toContain('     b. Delete — tidier list');
   });
@@ -315,27 +323,9 @@ IF UNANSWERED: I keep by-repo as the default.`,
     expect(text).not.toContain('jl-x7q.1 ()');
   });
 
-  test('the compact report caps the restated phrase to keep the line to one line', () => {
+  test('a closed prior ask names itself — never a bare id (F1)', () => {
     const long = `${'x'.repeat(200)}\nsecond line`;
     const text = renderMarkdown(
-      buildReportModel({
-        askIds: ASK_IDS,
-        facts: facts(),
-        full: false,
-        payload: payload(),
-        priorAskRestated: new Map([['jl-x7q.1', long]]),
-        threadId: 'jl-x7q',
-      }),
-    );
-    const line = text
-      .split('\n')
-      .find((candidate) => candidate.startsWith('- jl-x7q.1'));
-    expect(line).toBeDefined();
-    expect(line).toContain(`(${'x'.repeat(79)}…)`);
-
-    // NEGATIVE CONTROL: --full keeps the whole phrase, so the cap is a compact
-    // choice rather than data loss.
-    const full = renderMarkdown(
       buildReportModel({
         askIds: ASK_IDS,
         facts: facts(),
@@ -345,7 +335,16 @@ IF UNANSWERED: I keep by-repo as the default.`,
         threadId: 'jl-x7q',
       }),
     );
-    expect(full).toContain(`(${'x'.repeat(200)})`);
+    const line = text
+      .split('\n')
+      .find((candidate) => candidate.startsWith('- jl-x7q.1'));
+    expect(line).toBeDefined();
+    // The FIRST line of the ask, whole. v2 truncated it at 80 characters for
+    // the compact report; since D23 the compact report has no prior-asks
+    // section at all, so there is nothing left for the cap to buy and a phrase
+    // that stops mid-word is just a worse phrase.
+    expect(line).toContain(`(${'x'.repeat(200)})`);
+    expect(line).not.toContain('second line');
   });
 
   test('carried asks are numbered ahead of new ones in the same sequence', () => {

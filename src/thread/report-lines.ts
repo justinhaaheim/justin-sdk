@@ -36,9 +36,18 @@ export type ReportLineKind =
   | 'field'
   | 'glance'
   | 'heading'
+  /**
+   * A deviation of kind `mistake` (D23) — the one bullet that reaches the
+   * compact report, and the one every medium has to make unmissable. Its own
+   * kind rather than a `bullet`, because a mistake styled like a bullet is a
+   * mistake Justin scrolls past.
+   */
+  | 'mistake'
   /** A bold-prefixed aside that is not a field, e.g. the compact footer. */
   | 'note'
   | 'numbered'
+  /** The compact report's `📎 … everything: justin-sdk thread show …` pointer. */
+  | 'pointer'
   | 'rule'
   /**
    * NOTHING RECOGNISED IT. Kept as its own member rather than folded into
@@ -79,6 +88,19 @@ const NOTE_LINE = /^\*\*([^*]+)\*\*(.*)$/u;
 
 /** The line that ends every report. */
 const COMMAND_PREFIX = 'Answer: ';
+
+/**
+ * The bullet a `mistake` deviation wears (D23), and the only hook any surface
+ * has for finding one in a stored report.
+ *
+ * It lives HERE, in the file with no imports, and `render-markdown` builds its
+ * prefix from it — the other direction would be a cycle, and two literals would
+ * be a mistake that silently stopped being must-see.
+ */
+export const MISTAKE_BULLET = '- ⚠️ MISTAKE — ';
+
+/** The compact report's pointer line. */
+export const POINTER_PREFIX = '📎 ';
 
 const MARKER_PRIORITY: Record<string, number> = {
   '(P3)': 3,
@@ -188,6 +210,24 @@ export function classifyReportLine(
   }
   if (/^(?:📦|🌲) /u.test(text)) {
     return {kind: 'where', label: null, priority: null, rest: text, text};
+  }
+  if (text.startsWith(MISTAKE_BULLET)) {
+    return {
+      kind: 'mistake',
+      label: null,
+      priority: null,
+      rest: text.slice(MISTAKE_BULLET.length),
+      text,
+    };
+  }
+  if (text.startsWith(POINTER_PREFIX)) {
+    return {
+      kind: 'pointer',
+      label: null,
+      priority: null,
+      rest: text.slice(POINTER_PREFIX.length),
+      text,
+    };
   }
   if (text.startsWith('- ')) {
     return {

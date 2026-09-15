@@ -109,6 +109,7 @@ const applied: SpoolApplier = async () => ({
   reportCount: 2,
   status: 'written',
   threadId: 'jl-a1',
+  warnings: [],
 });
 
 const bdFailed: SpoolApplier = async () => ({

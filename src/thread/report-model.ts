@@ -29,34 +29,25 @@ import {formatTokens} from '../usage-check';
 import {askKindTag, compareAsksForNumbering, optionLetter} from './render';
 import {
   ASK_PRIORITY_BLOCKING,
-  CLOSING_DISPOSITIONS,
   type ThreadAsk,
+  type ThreadDeviation,
   type ThreadReportPayload,
 } from './schema';
 
 import type {CarriedAsk, NumberedAsk} from './render';
 import type {ThreadFacts} from './facts';
 
-/** How many `did` items the compact report prints before it says "+N more". */
-export const COMPACT_DID_CAP = 6;
-
-/** How much of Justin's last message the compact report echoes back (D18). */
-export const COMPACT_LAST_MESSAGE_CAP = 600;
+/**
+ * How much of Justin's last message the compact report echoes back (D23).
+ *
+ * 300, down from v2's 600: the compact report is now the must-see report, and
+ * the echo is a memory hook — enough to recognise the conversation, not enough
+ * to re-read it. The full report keeps the 1500-character version.
+ */
+export const COMPACT_LAST_MESSAGE_CAP = 300;
 
 /** …and the full one, which is the cap that has always applied. */
 export const FULL_LAST_MESSAGE_CAP = 1500;
-
-/** How much of a closed prior ask's detail the compact report keeps. */
-export const COMPACT_PRIOR_DETAIL_CAP = 120;
-
-/**
- * …and how much of the ask's restated phrase (F1).
- *
- * Shorter than the detail cap on purpose: the phrase is there to make the bead
- * id recognisable, not to re-ask the question, and the compact report's promise
- * is that a closed prior ask is ONE line.
- */
-export const COMPACT_PRIOR_RESTATED_CAP = 80;
 
 const STOP_REASON_LABEL: Record<string, string> = {
   blocked: '🛑 Blocked on you',
@@ -154,8 +145,23 @@ export interface ModelAsk {
   priority: number;
   /** The full restated body of a carried ask, line by line. Empty for a new one. */
   restated: string[];
+  /**
+   * The ask this one RESTATES, already labelled (D24), or null.
+   *
+   * It is a label rather than a bare id because a bare id is the failure the
+   * whole epic exists to stop: `th-9kq.2` tells Justin nothing, "supersedes
+   * th-9kq.2 from th-eru report #7" tells him this is the question he was asked
+   * last session and is now being asked again.
+   */
+  supersedes: {id: string; label: string} | null;
   /** The question or action. Empty for a carried ask (it is in `restated`). */
   text: string;
+}
+
+/** Where a superseded ask came from, for its label. Null means "not recorded". */
+export interface SupersedeSource {
+  fromReport: number | null;
+  fromThread: string | null;
 }
 
 /** A question Justin asked, restated before its answer. */
@@ -195,15 +201,15 @@ export interface ReportModel {
   /** The command Justin answers with, or the no-bead sentence. */
   answerLine: string;
   continuesFrom: string | null;
-  deviations: string[];
-  /** Completed items, already capped for the compact report. */
+  deviations: ThreadDeviation[];
+  /** Completed items. The compact report does not print them at all (D23). */
   did: string[];
-  /** How many `did` items the cap hid. 0 when none were. */
-  didOverflow: number;
   discussion: string[];
   /** Measurements that failed (D7). Never silently absent. */
   autofillFailures: string[];
   full: boolean;
+  /** How many deviations are of kind `mistake` — the only kind Justin SEES. */
+  mistakeCount: number;
   glance: ModelGlance;
   /** The ARC's goal, not this turn's. */
   goal: string;
@@ -251,6 +257,11 @@ export interface BuildReportModelOptions {
   askIds: (string | null)[];
   /** Still-open asks from earlier reports, numbered in the same sequence (F4). */
   carried?: readonly CarriedAsk[];
+  /**
+   * The asks this report closes, as the write path planned them (D24). Absent
+   * falls back to `payload.priorAsks` — see `buildReportModel`.
+   */
+  closed?: readonly {detail: string; disposition: string; id: string}[];
   /** D19. True (the default) = emoji-prefixed values; false = titled fields. */
   emojiHeader?: boolean;
   facts: ThreadFacts;
@@ -268,6 +279,11 @@ export interface BuildReportModelOptions {
   priorAskRestated?: ReadonlyMap<string, string>;
   /** Which report this is (1-based); orders this report's asks after carried ones. */
   reportCount?: number;
+  /**
+   * Superseded ask id → where it came from (D24), for the restating ask's label.
+   * An id absent from the map is labelled without lineage; nothing is invented.
+   */
+  supersedeSources?: ReadonlyMap<string, SupersedeSource>;
   /** The thread bead id, or null when bd never took the report. */
   threadId: string | null;
   /**
@@ -300,12 +316,6 @@ export function firstLineOfAsk(text: string | undefined): string | null {
   return null;
 }
 
-/** Keep the compact report's one-line promise; `--full` prints the whole phrase. */
-function capRestated(restated: string | null, full: boolean): string | null {
-  if (restated == null) return null;
-  return full ? restated : truncate(restated, COMPACT_PRIOR_RESTATED_CAP);
-}
-
 /** "unknown" is said out loud; it is never rendered as a reassuring value. */
 function orUnknown(value: string | null): string {
   return value == null || value === '' ? 'UNKNOWN' : value;
@@ -329,7 +339,9 @@ function renderTree(facts: ThreadFacts): string {
       ? 'ahead/behind UNKNOWN'
       : `${facts.aheadBehind.ahead} ahead / ${facts.aheadBehind.behind} behind`;
   const head =
-    facts.headSha == null ? 'HEAD UNKNOWN' : `HEAD ${facts.headSha.slice(0, 12)}`;
+    facts.headSha == null
+      ? 'HEAD UNKNOWN'
+      : `HEAD ${facts.headSha.slice(0, 12)}`;
   return `${dirty} · ${divergence} · ${head}`;
 }
 
@@ -355,11 +367,38 @@ function renderTokens(
   return wrapUpAt == null ? used : `${used} / ${compactTokens(wrapUpAt)}`;
 }
 
+/**
+ * "supersedes th-9kq.2 from th-eru report #7", and the honest shorter forms when
+ * the superseded bead records no report number or came from this same thread.
+ */
+export function supersedeLabel(
+  id: string,
+  source: SupersedeSource | undefined,
+): string {
+  const thread =
+    source?.fromThread == null || source.fromThread === ''
+      ? null
+      : source.fromThread;
+  const report = source?.fromReport ?? null;
+  const where =
+    report == null
+      ? thread == null
+        ? ''
+        : ` from ${thread}`
+      : thread == null
+        ? ` from report #${report}`
+        : ` from ${thread} report #${report}`;
+  return `Restated — supersedes ${id}${where}, now closed`;
+}
+
 function modelAskFromPayload(
   ask: ThreadAsk,
   id: string,
   number: number,
+  sources: ReadonlyMap<string, SupersedeSource> | undefined,
 ): ModelAsk {
+  const supersedes =
+    ask.supersedes == null || ask.supersedes === '' ? null : ask.supersedes;
   return {
     carriedFrom: null,
     context: ask.context,
@@ -374,6 +413,13 @@ function modelAskFromPayload(
     })),
     priority: ask.priority,
     restated: [],
+    supersedes:
+      supersedes == null
+        ? null
+        : {
+            id: supersedes,
+            label: supersedeLabel(supersedes, sources?.get(supersedes)),
+          },
     text: ask.text,
   };
 }
@@ -412,6 +458,7 @@ function modelAskFromCarried(carried: CarriedAsk, number: number): ModelAsk {
     options: [],
     priority: carried.priority,
     restated: carried.restated.split('\n'),
+    supersedes: null,
     text: '',
   };
 }
@@ -462,7 +509,12 @@ export function buildReportModel(
     })),
     ...payload.asks.map((ask, index) => ({
       ask: (n: number) =>
-        modelAskFromPayload(ask, askIds[index] ?? missingLabel, n),
+        modelAskFromPayload(
+          ask,
+          askIds[index] ?? missingLabel,
+          n,
+          options.supersedeSources,
+        ),
       sort: {
         askIndex: index,
         id: askIds[index] ?? '',
@@ -473,20 +525,19 @@ export function buildReportModel(
   ].sort((a, b) => compareAsksForNumbering(a.sort, b.sort));
   const asks = entries.map((entry, index) => entry.ask(index + 1));
 
-  const did = full ? payload.did : payload.did.slice(0, COMPACT_DID_CAP);
-  const priorClosed: ModelPriorAsk[] = payload.priorAsks
-    .filter((prior) => CLOSING_DISPOSITIONS.has(prior.disposition))
-    .map((prior) => ({
-      detail: full
-        ? prior.detail
-        : truncate(prior.detail, COMPACT_PRIOR_DETAIL_CAP),
-      disposition: prior.disposition,
-      id: prior.id,
-      restated: capRestated(
-        firstLineOfAsk(options.priorAskRestated?.get(prior.id)),
-        full,
-      ),
-    }));
+  const did = payload.did;
+  // The asks this report CLOSES, as report.ts planned them (D24): the ones the
+  // payload dispositioned, the ones the auto-close took the default on, and the
+  // ones a new ask superseded. `payload.priorAsks` is the fallback for callers
+  // that have no plan (tests, and the renderers' own fixtures) — it is the same
+  // list minus the two kinds only the write path can know about.
+  const closed = options.closed ?? payload.priorAsks ?? [];
+  const priorClosed: ModelPriorAsk[] = closed.map((prior) => ({
+    detail: prior.detail,
+    disposition: prior.disposition,
+    id: prior.id,
+    restated: firstLineOfAsk(options.priorAskRestated?.get(prior.id)),
+  }));
 
   return {
     answerLine:
@@ -511,9 +562,10 @@ export function buildReportModel(
         : payload.continuesFrom,
     deviations: payload.deviations,
     did,
-    didOverflow: payload.did.length - did.length,
     discussion: payload.discussion,
     full,
+    mistakeCount: payload.deviations.filter((item) => item.kind === 'mistake')
+      .length,
     glance: {
       nextStep: payload.nextStep,
       nextStepLabel: NEXT_STEP_LABEL[payload.nextStep] ?? payload.nextStep,
@@ -530,7 +582,9 @@ export function buildReportModel(
     },
     goal: payload.goal,
     handoff:
-      payload.handoff == null || payload.handoff === '' ? null : payload.handoff,
+      payload.handoff == null || payload.handoff === ''
+        ? null
+        : payload.handoff,
     header: {
       branch: orUnknown(facts.branch),
       emoji,
@@ -557,7 +611,8 @@ export function buildReportModel(
     workProduct: full
       ? {
           merged:
-            MERGE_LABEL[payload.workProduct.merged] ?? payload.workProduct.merged,
+            MERGE_LABEL[payload.workProduct.merged] ??
+            payload.workProduct.merged,
           pr:
             payload.workProduct.pr == null || payload.workProduct.pr === ''
               ? null

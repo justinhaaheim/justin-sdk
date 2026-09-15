@@ -377,7 +377,12 @@ export async function drainSpool(
             // thread it continues may simply not have existed yet when this ran.
             // Dropping it would take the predecessor's open asks with it.
             `refused: continuesFrom names ${outcome.continuesFrom}, but ${outcome.detail}`
-          : describeBdFailure(outcome.failure);
+          : outcome.status === 'refusedSupersede'
+            ? // KEPT for the same reason (D24): the ask a spooled payload
+              // supersedes may still have been open when it was written, and
+              // discarding the payload would lose both questions at once.
+              `refused: supersedes names an ask this report cannot close (${outcome.problems.join('; ')})`
+            : describeBdFailure(outcome.failure);
     summary.kept += 1;
     summary.outcomes.push({
       detail:

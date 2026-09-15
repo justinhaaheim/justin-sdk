@@ -182,6 +182,19 @@ export interface AskMetadataInput {
   reportCount: number;
   reportedAt: string;
   sessionId: string;
+  /**
+   * The ask this one RESTATES and where it came from (D24), or null.
+   *
+   * The lineage is stored, not just the id, because the id alone stops meaning
+   * anything the moment the old ask is closed: "th-eru.2, report #7" is what
+   * lets a later reader say WHICH report Justin was asked this in, on a thread
+   * that is not this one.
+   */
+  supersedes: {
+    fromReport: number | null;
+    fromThread: string | null;
+    id: string;
+  } | null;
   threadId: string;
 }
 
@@ -207,6 +220,12 @@ export function buildAskMetadata(
     reportCount: input.reportCount,
     schemaVersion: THREAD_SCHEMA_VERSION,
     sessionId: input.sessionId,
+    // Three keys rather than a nested object: bd's metadata filters match on
+    // flat keys, so `supersedesAskId` is queryable and `supersedes.id` is not.
+    // Explicit nulls, never absent — "this ask restates nothing" is a fact.
+    supersedesAskId: input.supersedes?.id ?? null,
+    supersedesFromReport: input.supersedes?.fromReport ?? null,
+    supersedesFromThread: input.supersedes?.fromThread ?? null,
     threadId: input.threadId,
   };
 }

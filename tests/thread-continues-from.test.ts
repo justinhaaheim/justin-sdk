@@ -108,6 +108,9 @@ function seedPreviousThread(): FakeState['issues'] {
       id: OLD_ASK_ONE,
       metadata: {
         askIndex: 0,
+        // The default the AUTO-CLOSE quotes back (D24). Its sibling below
+        // deliberately has none, so both halves of the rule are exercised.
+        defaultAction: 'I leave it open.',
         kind: 'answer',
         priority: 3,
         reportCount: 7,
@@ -139,13 +142,14 @@ function seedPreviousThread(): FakeState['issues'] {
 }
 
 function payloadFor(options: {
+  asks?: Record<string, unknown>[];
   continuesFrom?: string | null;
   priorAsks: ThreadPriorAsk[];
 }): ThreadReportPayload {
   const raw = examplePayload();
   raw.continuesFrom = options.continuesFrom ?? null;
   raw.priorAsks = options.priorAsks;
-  raw.asks = [
+  raw.asks = options.asks ?? [
     {
       context: 'the new session needs this',
       default: 'I take a.',
@@ -177,8 +181,12 @@ function fixture(): {
 }
 
 describe('a session that continues another session’s thread (D21)', () => {
-  test('REFUSES a report that ignores the continued thread’s open asks', async () => {
-    const {ctx} = fixture();
+  // D24 REPLACED THE REFUSAL WITH A CLOSE. v2 refused a payload that ignored the
+  // continued thread's open asks; refusing is no longer necessary, because
+  // ignoring them is now a decision with a defined meaning — Justin never
+  // answered, so Claude went with the stated default, so the ask is done.
+  test('AUTO-CLOSES the continued thread’s open asks the payload ignores', async () => {
+    const {ctx, fake} = fixture();
     const outcome = await writeReportToBd({
       ctx,
       facts: facts(),
@@ -186,43 +194,67 @@ describe('a session that continues another session’s thread (D21)', () => {
       sessionId: SESSION,
     });
 
-    expect(outcome.status).toBe('refused');
-    if (outcome.status !== 'refused') throw new Error('unreachable');
-    // BOTH ids, by name. A refusal that named one of them would let the other
-    // evaporate exactly as before.
-    expect(outcome.missing).toEqual([OLD_ASK_ONE, OLD_ASK_TWO]);
+    expect(outcome.status).toBe('written');
+    if (outcome.status !== 'written') throw new Error('unreachable');
+    const issue = (id: string) =>
+      fake.read().issues.find((row) => row.id === id);
+
+    // The ask that RECORDED a default closes quoting it back…
+    expect(issue(OLD_ASK_ONE)?.status).toBe('closed');
+    expect(issue(OLD_ASK_ONE)?.closeReason).toBe('decided: I leave it open.');
+    // …and the one that recorded NONE closes as `expired`, not as `decided`.
+    // "I took the default" on an ask with no default is a claim nobody made.
+    expect(issue(OLD_ASK_TWO)?.status).toBe('closed');
+    expect(issue(OLD_ASK_TWO)?.closeReason).toContain('expired:');
+    expect(issue(OLD_ASK_TWO)?.closeReason).toContain(
+      'no default was recorded',
+    );
+    expect(outcome.closedAsks).toEqual([OLD_ASK_ONE, OLD_ASK_TWO]);
   });
 
-  test('NEGATIVE CONTROL: the same payload WITHOUT continuesFrom is not refused', async () => {
-    const {ctx} = fixture();
+  test('NEGATIVE CONTROL: without continuesFrom the old thread is untouched', async () => {
+    const {ctx, fake} = fixture();
     const outcome = await writeReportToBd({
       ctx,
       facts: facts(),
       payload: payloadFor({continuesFrom: null, priorAsks: []}),
       sessionId: SESSION,
     });
-    // Proves the refusal above comes from the continuation and nothing else:
-    // the fixture, the session and the payload are otherwise identical.
+    // Proves the closes above come from the continuation and nothing else: the
+    // fixture, the session and the payload are otherwise identical.
     expect(outcome.status).toBe('written');
+    if (outcome.status !== 'written') throw new Error('unreachable');
+    expect(outcome.closedAsks).toEqual([]);
+    const open = fake
+      .read()
+      .issues.filter((row) => row.type === 'ask' && row.status === 'open');
+    expect(open.map((row) => row.id)).toContain(OLD_ASK_ONE);
+    expect(open.map((row) => row.id)).toContain(OLD_ASK_TWO);
   });
 
-  test('closes what was answered, MOVES what was carried, and links both threads', async () => {
+  test('closes what was answered, SUPERSEDES what is still live, and links both threads', async () => {
     const {ctx, fake} = fixture();
     const outcome = await writeReportToBd({
       ctx,
       facts: facts(),
       payload: payloadFor({
+        asks: [
+          {
+            context: 'the build still fails and I still cannot see the error',
+            default: 'I keep guessing from the exit code.',
+            kind: 'answer',
+            options: [],
+            priority: 0,
+            supersedes: OLD_ASK_ONE,
+            text: 'Paste the exact error text — I asked last session too?',
+          },
+        ],
         continuesFrom: OLD_THREAD,
         priorAsks: [
           {
             detail: '"local-only for now" — his words',
             disposition: 'answered',
             id: OLD_ASK_TWO,
-          },
-          {
-            detail: 'still unanswered',
-            disposition: 'carried',
-            id: OLD_ASK_ONE,
           },
         ],
       }),
@@ -232,6 +264,8 @@ describe('a session that continues another session’s thread (D21)', () => {
     expect(outcome.status).toBe('written');
     if (outcome.status !== 'written') throw new Error('unreachable');
     const newThreadId = outcome.threadId;
+    const newAskId = outcome.askIds[0];
+    if (newAskId == null) throw new Error('the restating ask was not created');
     const state = fake.read();
     const issue = (id: string) => state.issues.find((row) => row.id === id);
 
@@ -242,83 +276,102 @@ describe('a session that continues another session’s thread (D21)', () => {
     );
     expect(outcome.closedAsks).toContain(OLD_ASK_TWO);
 
-    // 2. The CARRIED ask is open, re-parented, and still carries its own id —
-    //    the id Justin already read in the previous report.
-    expect(issue(OLD_ASK_ONE)?.status).toBe('open');
-    expect(issue(OLD_ASK_ONE)?.parent).toBe(newThreadId);
-    expect(issue(OLD_ASK_ONE)?.metadata).toMatchObject({
-      askIndex: 0,
-      reportCount: 7,
+    // 2. The STILL-LIVE ask is CLOSED, not moved (D24 retracting D21). The
+    //    question survives as a new bead under this thread; the old bead says
+    //    where it went, so neither id dead-ends.
+    expect(issue(OLD_ASK_ONE)?.status).toBe('closed');
+    expect(issue(OLD_ASK_ONE)?.closeReason).toBe(
+      `superseded: restated as ${newAskId}`,
+    );
+    expect(issue(OLD_ASK_ONE)?.parent).toBe(OLD_THREAD);
+
+    // 3. The new ask carries the lineage, so a later reader can say WHICH
+    //    report on WHICH thread Justin was first asked this.
+    expect(issue(newAskId)?.parent).toBe(newThreadId);
+    expect(issue(newAskId)?.metadata).toMatchObject({
+      supersedesAskId: OLD_ASK_ONE,
+      supersedesFromReport: 7,
+      supersedesFromThread: OLD_THREAD,
     });
 
-    // 3. It renders in the NEW thread's one numbered sequence, labelled with
-    //    the thread it came from — never as a bare id under "prior asks".
+    // 4. And the report says it in words, never as a bare id.
     expect(outcome.rendered).toContain(
-      `carried from ${OLD_THREAD} report #7`,
+      `supersedes ${OLD_ASK_ONE} from ${OLD_THREAD} report #7`,
     );
-    expect(outcome.rendered).toContain(OLD_ASK_ONE);
-    expect(outcome.rendered).toContain('Paste the exact error text?');
 
-    // 4. The two threads point at each other.
+    // 5. The two threads point at each other.
     expect(issue(OLD_THREAD)?.metadata?.continuedBy).toBe(newThreadId);
     expect(issue(newThreadId)?.metadata?.continuesFrom).toBe(OLD_THREAD);
     expect(issue(OLD_THREAD)?.description).toContain(
       `Continued by ${newThreadId}`,
     );
 
-    // 5. The new thread's own counts include what it inherited: a carried ask
-    //    is still waiting on Justin, and a count that ignored it would be the
-    //    reassuring direction.
-    expect(issue(newThreadId)?.metadata?.openAskCount).toBe(2);
-    expect(issue(newThreadId)?.metadata?.carriedAskIds).toEqual([OLD_ASK_ONE]);
+    // 6. One open ask on the new thread: the restated one. Nothing is carried.
+    expect(issue(newThreadId)?.metadata?.openAskCount).toBe(1);
+    expect(issue(newThreadId)?.metadata?.carriedAskIds).toEqual([]);
+  });
+
+  test('REFUSES a supersedes that names an ask this report cannot close', async () => {
+    const {ctx, fake} = fixture();
+    const outcome = await writeReportToBd({
+      ctx,
+      facts: facts(),
+      payload: payloadFor({
+        asks: [
+          {
+            context: 'ctx',
+            default: 'I guess',
+            kind: 'answer',
+            options: [],
+            priority: 1,
+            supersedes: 'jl-a.99',
+            text: 'restating something that does not exist?',
+          },
+        ],
+        continuesFrom: OLD_THREAD,
+        priorAsks: [],
+      }),
+      sessionId: SESSION,
+    });
+
+    // NOT ignored. An unclosable supersedes would print "supersedes jl-a.99,
+    // now closed" under an ask while jl-a.99 stayed open — a report claiming in
+    // writing to have handled a question it did not touch.
+    expect(outcome.status).toBe('refusedSupersede');
+    if (outcome.status !== 'refusedSupersede') throw new Error('unreachable');
+    expect(outcome.problems.join('\n')).toContain('jl-a.99');
+    // Nothing was written: the refusal happens before the first write.
+    expect(
+      fake.read().issues.filter((row) => row.type === 'thread'),
+    ).toHaveLength(1);
   });
 
   test('a second report from the same session appends the link line ONCE', async () => {
     const {ctx, fake} = fixture();
-    const carried = (): ThreadReportPayload =>
-      payloadFor({
-        continuesFrom: OLD_THREAD,
-        priorAsks: [
-          {detail: 'still open', disposition: 'carried', id: OLD_ASK_ONE},
-          {detail: 'still open', disposition: 'carried', id: OLD_ASK_TWO},
-        ],
-      });
-
     const first = await writeReportToBd({
       ctx,
       facts: facts('2026-09-14T10:00:00.000Z'),
-      payload: carried(),
+      payload: payloadFor({continuesFrom: OLD_THREAD, priorAsks: []}),
       sessionId: SESSION,
     });
     expect(first.status).toBe('written');
     if (first.status !== 'written') throw new Error('unreachable');
 
-    // Report #2 from the same session. Both carried asks now live on the NEW
-    // thread, so they are its own open asks — and report #1's brand-new ask is
-    // open too, so D4 wants all three dispositioned.
-    const createdByFirst = first.askIds[0];
-    if (createdByFirst == null) throw new Error('report #1 created no ask');
+    // Report #2 from the same session, naming the same predecessor. Its own ask
+    // from report #1 is open and auto-closes; the predecessor's asks are already
+    // closed, so there is nothing left to close there — and the link line must
+    // still be appended exactly once.
     const second = await writeReportToBd({
       ctx,
       facts: facts('2026-09-14T11:00:00.000Z'),
-      payload: payloadFor({
-        continuesFrom: OLD_THREAD,
-        priorAsks: [
-          {detail: 'still open', disposition: 'carried', id: OLD_ASK_ONE},
-          {detail: 'still open', disposition: 'carried', id: OLD_ASK_TWO},
-          {
-            detail: 'I took a, as stated',
-            disposition: 'decided',
-            id: createdByFirst,
-          },
-        ],
-      }),
+      payload: payloadFor({continuesFrom: OLD_THREAD, priorAsks: []}),
       sessionId: SESSION,
     });
     expect(second.status).toBe('written');
 
     const description =
-      fake.read().issues.find((row) => row.id === OLD_THREAD)?.description ?? '';
+      fake.read().issues.find((row) => row.id === OLD_THREAD)?.description ??
+      '';
     const line = `Continued by ${first.threadId}`;
     expect(description.split(line).length - 1).toBe(1);
   });

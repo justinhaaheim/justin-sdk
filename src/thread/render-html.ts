@@ -62,6 +62,13 @@ function htmlLine(line: ReportLine): string {
       return '<hr />';
     case 'bullet':
       return `<li>${escapeReportHtml(line.rest)}</li>`;
+    case 'mistake':
+      // Its own class, not a list item: a mistake is one of the two things the
+      // compact report exists to show (D23), and the page's stylesheet has to be
+      // able to make it as loud as a P0.
+      return `<p class="mistake">${escaped}</p>`;
+    case 'pointer':
+      return `<p class="pointer">${escaped}</p>`;
     case 'note':
       return `<p class="note"><strong>${escapeReportHtml(line.label ?? '')}</strong>${escapeReportHtml(line.rest)}</p>`;
     case 'command':

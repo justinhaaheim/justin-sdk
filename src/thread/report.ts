@@ -7,8 +7,8 @@
  *   2. measure the facts               (facts.ts; failures are named, never faked)
  *   3. ARCHIVE the payload to disk     BEFORE any bd command touches anything
  *   4. read the session's thread + its open asks
- *   5. ENFORCE D4                      an undispositioned open ask → exit 2
- *   6. upsert the thread bead, create the ask beads, close the dispositioned ones
+ *   5. PLAN THE ASK LIFECYCLE (D24)    what closes, what supersedes what
+ *   6. upsert the thread bead, create the ask beads, close what the plan says
  *   7. print the rendered report
  *
  * Step 3 before step 4 is the whole of rule 6 here: the payload is the
@@ -22,7 +22,8 @@
  * where a failed write produces a quiet zero.
  *
  * EXIT CODES: 0 recorded · 1 NOT RECORDED (bd/archive failure) · 2 refused
- * (invalid payload, or an open ask left undispositioned).
+ * (invalid payload, a continuesFrom that names no thread, or a `supersedes`
+ * that names an ask this report cannot close).
  */
 
 import {readFileSync} from 'fs';
@@ -39,7 +40,6 @@ import {
   findThreadBySession,
   listOpenAsks,
   mergeMetadata,
-  reparentIssue,
   setIssueDescription,
   showIssue,
   updateThread,
@@ -64,10 +64,15 @@ import {
   restateAsk,
   type CarriedAsk,
 } from './render';
-import {buildReportModel, type BuildReportModelOptions} from './report-model';
+import {
+  buildReportModel,
+  type BuildReportModelOptions,
+  type SupersedeSource,
+} from './report-model';
 import {renderMarkdown} from './render-markdown';
 import {
-  CLOSING_DISPOSITIONS,
+  AUTO_CLOSE_DISPOSITION,
+  EXPIRED_DISPOSITION,
   THREAD_SCHEMA_VERSION,
   validateThreadReport,
 } from './schema';
@@ -81,6 +86,29 @@ const ASK_TITLE_CAP = 110;
 
 export type PriorAskCoverage = {ok: true} | {ok: false; missing: string[]};
 
+/** One ask this report closes, and the reason it will carry (D24). */
+export interface PlannedClose {
+  detail: string;
+  disposition: string;
+  id: string;
+}
+
+/**
+ * The default an ask bead RECORDED, or null when it recorded none.
+ *
+ * Null is load-bearing (rule 6): it is the difference between "Claude proceeded
+ * on the default this ask stated" and "this ask never stated one", and the two
+ * close the bead with different words. An empty string counts as none — a
+ * default of "" is not a default anybody could have proceeded on.
+ */
+export function defaultActionOf(ask: BdIssue | undefined): string | null {
+  const meta = (ask?.metadata ?? {}) as {defaultAction?: unknown};
+  return typeof meta.defaultAction === 'string' &&
+    meta.defaultAction.trim() !== ''
+    ? meta.defaultAction
+    : null;
+}
+
 /**
  * D4: every open ask must be dispositioned by this report.
  *
@@ -92,8 +120,12 @@ export type PriorAskCoverage = {ok: true} | {ok: false; missing: string[]};
 export function checkPriorAskCoverage(
   openAskIds: readonly string[],
   priorAsks: readonly ThreadPriorAsk[],
+  keepOpenAskIds: readonly string[] = [],
 ): PriorAskCoverage {
-  const dispositioned = new Set(priorAsks.map((prior) => prior.id));
+  const dispositioned = new Set([
+    ...priorAsks.map((prior) => prior.id),
+    ...keepOpenAskIds,
+  ]);
   const missing = openAskIds.filter((id) => !dispositioned.has(id));
   return missing.length === 0 ? {ok: true} : {missing, ok: false};
 }
@@ -225,9 +257,25 @@ export type BdWriteOutcome =
       rendered: string;
       reportCount: number;
       threadId: string;
+      /**
+       * Things that went differently from what the payload said, on a write that
+       * otherwise succeeded: a prior-ask id that named nothing open, an ask the
+       * v2 bridge left open. Empty means "nothing to say" — the caller prints
+       * every entry, so a silent substitution is not reachable from here.
+       */
+      warnings: string[];
     }
   | {status: 'bdFailed'; failure: BdFailure; rendered: string}
   | {status: 'refused'; missing: string[]}
+  /**
+   * An ask's `supersedes` names something this report cannot close (D24).
+   *
+   * REFUSED rather than ignored, and for the same reason `refusedContinuation`
+   * is: a typo'd id would leave the old ask OPEN and auto-closed as "decided"
+   * while the new one printed "supersedes th-x.2, now closed" underneath it —
+   * a report that says, in writing, that it handled a question it did not.
+   */
+  | {status: 'refusedSupersede'; problems: string[]}
   /**
    * `continuesFrom` names something that is not a thread bead (D21). REFUSED
    * rather than ignored: `listOpenAsks` on an id with no children returns an
@@ -246,6 +294,13 @@ export type BdWriteOutcome =
 export interface BdWriteInput {
   ctx: BdContext;
   facts: ThreadFacts;
+  /**
+   * Ask ids a v2 → v3 MIGRATION is keeping open (D24), from
+   * `validateThreadReport`. Empty for every payload written against the current
+   * schema: v3 has no way to say "leave this open", and this is the one-release
+   * bridge for v2's `carried`. See `migrateV2Payload`.
+   */
+  keepOpenAskIds?: readonly string[];
   payload: ThreadReportPayload;
   sessionId: string;
   /**
@@ -285,6 +340,14 @@ export async function writeReportToBd(
   input: BdWriteInput,
 ): Promise<BdWriteOutcome> {
   const {ctx, facts, payload, sessionId} = input;
+  // OPTIONAL SINCE v3 (D24): a payload that dispositions nothing is the normal
+  // case now, because the tool closes what Justin did not answer.
+  const priorAsks = payload.priorAsks ?? [];
+  const keepOpenAskIds = input.keepOpenAskIds ?? [];
+  // Asks this report leaves open behind it. Since v3 the ONLY way an ask stays
+  // open is the migration bridge (D24): every v3 disposition closes, so this set
+  // is empty for anything written against the current schema.
+  const carriedIds = new Set(keepOpenAskIds);
 
   // Ask id → its restated text, for the prior asks this report closes (F1,
   // home-base-p1uj.18). FILLED LATER, once the ask beads have been read, and
@@ -292,6 +355,13 @@ export async function writeReportToBd(
   // an early failure path has not read any asks yet, so it finds the map empty
   // and prints bare ids, which is the honest rendering of "we could not look".
   const priorAskRestated = new Map<string, string>();
+  // The asks this report closes and why (D24), and where each superseded ask
+  // came from. Both are FILLED LATER and read at render time through this
+  // closure, for the same reason `priorAskRestated` is: a render on an early
+  // failure path has planned nothing yet, and an empty plan is the honest
+  // rendering of "nothing has been closed".
+  const closePlan: PlannedClose[] = [];
+  const supersedeSources = new Map<string, SupersedeSource>();
 
   // ONE renderer for every path through this function (D14). `full` is what
   // the caller asked to be PRINTED; the notes field always stores the full
@@ -302,11 +372,13 @@ export async function writeReportToBd(
     renderMarkdown(
       buildReportModel({
         ...extra,
+        closed: closePlan,
         emojiHeader: input.render?.emojiHeader,
         facts,
         full: extra.full ?? input.render?.full,
         payload,
         priorAskRestated,
+        supersedeSources,
         wrapUpAt: input.render?.wrapUpAt,
       }),
     );
@@ -481,33 +553,130 @@ export async function writeReportToBd(
       .filter((id) => !ownOpenAskIds.includes(id)),
   ];
 
-  // --- 5. D4 ---------------------------------------------------------------
-  const coverage = checkPriorAskCoverage(openAskIds, payload.priorAsks);
-  if (!coverage.ok) return {missing: coverage.missing, status: 'refused'};
+  // --- 5. THE ASK LIFECYCLE (D24, replacing D4's refusal) -------------------
+  //
+  // D4 REFUSED a report that left an open ask undispositioned. That was the
+  // right rule when a disposition was the only thing standing between an ask and
+  // oblivion, and it is the wrong one now: Justin, 2026-09-15 — "If the human did
+  // not answer them and the agent went ahead with the default, the questions need
+  // to be closed… questions from the previous status report will be closed
+  // automatically unless they are explicitly kept open." So every open ask is
+  // closed here unless this payload restates it, and the refusal is gone.
+  //
+  // `checkPriorAskCoverage` survives (it is exported and tested) but nothing in
+  // this path calls it any more — the coverage it enforced is now unconditional.
+  const askById = new Map<string, BdIssue>();
+  for (const ask of openAsks) askById.set(ask.id, ask);
+  for (const ask of continuedOpenAsks) {
+    if (!askById.has(ask.id)) askById.set(ask.id, ask);
+  }
+  const ownIds = new Set(ownOpenAskIds);
+  /** The predecessor thread an ask came from, or null when it is ours. */
+  const fromThreadOf = (id: string): string | null =>
+    ownIds.has(id) ? null : continuesFrom;
+
+  // Which new ask restates which old one. Built before anything is written, so a
+  // bad `supersedes` costs nothing.
+  const supersededBy = new Map<string, number>();
+  const supersedeProblems: string[] = [];
+  payload.asks.forEach((ask, index) => {
+    const target = ask.supersedes == null ? '' : ask.supersedes.trim();
+    if (target === '') return;
+    if (!openAskIds.includes(target)) {
+      supersedeProblems.push(
+        `asks[${index}] supersedes ${target}, which is not an open ask on this thread${
+          continuesFrom == null ? '' : ` or on ${continuesFrom}`
+        }`,
+      );
+      return;
+    }
+    const already = supersededBy.get(target);
+    if (already != null) {
+      supersedeProblems.push(
+        `asks[${index}] and asks[${already}] both supersede ${target} — an ask is restated once, not twice`,
+      );
+      return;
+    }
+    supersededBy.set(target, index);
+  });
+  if (supersedeProblems.length > 0) {
+    return {problems: supersedeProblems, status: 'refusedSupersede'};
+  }
+
+  for (const oldId of supersededBy.keys()) {
+    supersedeSources.set(oldId, {
+      fromReport: numberingFieldsOf(askById.get(oldId)?.metadata).reportCount,
+      fromThread: fromThreadOf(oldId),
+    });
+  }
+
+  const warnings: string[] = [];
+  for (const id of keepOpenAskIds) {
+    if (!openAskIds.includes(id)) continue;
+    warnings.push(
+      `${id} was marked "carried" by a v2 payload, so it stays OPEN. v3 has no "carried": restate it as a new ask with "supersedes": "${id}".`,
+    );
+  }
+
+  // THE CLOSE PLAN, decided before anything is written so every rendering of
+  // this report — including the ones on the failure paths — says the same thing
+  // about what happened to each ask.
+  const dispositioned = new Map(priorAsks.map((prior) => [prior.id, prior]));
+  for (const prior of priorAsks) {
+    if (openAskIds.includes(prior.id)) continue;
+    warnings.push(
+      `priorAsks names ${prior.id} (${prior.disposition}), which is not an open ask on this thread — nothing was closed for it.`,
+    );
+  }
+  for (const id of openAskIds) {
+    if (carriedIds.has(id)) continue;
+    // Superseded asks are planned below, once their replacement has an id.
+    if (supersededBy.has(id)) continue;
+    const prior = dispositioned.get(id);
+    if (prior != null) {
+      closePlan.push({
+        detail: prior.detail,
+        disposition: prior.disposition,
+        id,
+      });
+      continue;
+    }
+    // THE AUTO-CLOSE (D24). The default comes off the ask BEAD, not out of this
+    // payload: the bead is what Justin was shown, so it is what "I took the
+    // default" has to mean. A bead with no readable default is `expired`, not
+    // `decided` — see EXPIRED_DISPOSITION.
+    const fallback = defaultActionOf(askById.get(id));
+    closePlan.push(
+      fallback == null
+        ? {
+            detail:
+              'no default was recorded on this ask, and this report did not restate it',
+            disposition: EXPIRED_DISPOSITION,
+            id,
+          }
+        : {detail: fallback, disposition: AUTO_CLOSE_DISPOSITION, id},
+    );
+  }
 
   // --- 6. write ------------------------------------------------------------
   const reportCount = readReportCount(existingThread?.metadata) + 1;
   const description = renderThreadDescription({facts, payload});
 
-  // Asks this report leaves open behind it: the `carried` ones. Everything else
-  // in priorAsks is about to be closed, so it is not part of what still waits
-  // for Justin. `blocking` is read from the ask bead's OWN metadata rather than
-  // assumed — an unreadable block is false, which under-reports urgency rather
-  // than inventing it.
-  const carriedIds = new Set(
-    payload.priorAsks
-      .filter((prior) => !CLOSING_DISPOSITIONS.has(prior.disposition))
-      .map((prior) => prior.id),
-  );
   // Every ask bead we hold, own and continued, keyed by id (F1). The asks this
   // report CLOSES are still open at read time — they are closed further down —
   // so they are all in here, and each closed line can name itself instead of
   // printing a bare `th-9kq.2` that Justin cannot place.
   for (const ask of [...openAsks, ...continuedOpenAsks]) {
-    priorAskRestated.set(ask.id, restateAsk(ask.description ?? ask.title ?? ''));
+    priorAskRestated.set(
+      ask.id,
+      restateAsk(ask.description ?? ask.title ?? ''),
+    );
   }
 
-  const carriedAskOf = (ask: BdIssue, fromThread: string | null): CarriedAsk => {
+  const carriedAskOf = (
+    ask: BdIssue,
+    fromThread: string | null,
+  ): CarriedAsk => {
     const meta = (ask.metadata ?? {}) as Record<string, unknown>;
     // askIndex and reportCount are what put this ask in the same position in
     // the report and in the `thread answer` walk (F12).
@@ -627,22 +796,13 @@ export async function writeReportToBd(
   // description — so the board can fold it under its successor and anyone
   // landing on the old bead is told where the arc went.
   if (continuesFrom != null) {
-    for (const ask of continuedOpenAsks) {
-      if (!carriedIds.has(ask.id)) continue;
-      const moved = await reparentIssue(ctx, ask.id, threadId);
-      if (!moved.ok) {
-        return {
-          failure: moved.failure,
-          rendered: render({
-            askIds: [],
-            carried: carriedOpenAsks,
-            reportCount,
-            threadId,
-          }),
-          status: 'bdFailed',
-        };
-      }
-    }
+    // RE-PARENTING IS RETRACTED (D24, retracting D21/p1uj.16). A continued
+    // thread's open asks used to MOVE onto the new thread with `bd update
+    // --parent`; they no longer move, because they no longer stay open — they
+    // are closed here and restated as new asks under this thread when they are
+    // still live. `reparentIssue` stays in bd.ts for one release, unused by this
+    // path, so that asks already re-parented by v2 keep working and so the
+    // measurement behind it is not lost; it goes when the v2 bridge does.
     const linked = await mergeMetadata(ctx, continuesFrom, {
       continuedBy: threadId,
     });
@@ -697,6 +857,16 @@ export async function writeReportToBd(
         reportCount,
         reportedAt: facts.reportedAt,
         sessionId,
+        supersedes:
+          ask.supersedes == null || ask.supersedes.trim() === ''
+            ? null
+            : {
+                ...(supersedeSources.get(ask.supersedes.trim()) ?? {
+                  fromReport: null,
+                  fromThread: null,
+                }),
+                id: ask.supersedes.trim(),
+              },
         threadId,
       }),
       priority: ask.priority,
@@ -718,10 +888,22 @@ export async function writeReportToBd(
     askIds.push(created.value);
   }
 
+  // The supersede closes could only be planned once their replacements existed:
+  // "superseded" is not a fact about the old ask until the new one has an id.
+  for (const [oldId, index] of supersededBy) {
+    const newId = askIds[index];
+    closePlan.push({
+      detail:
+        newId == null
+          ? 'restated in this report, whose ask bead was NOT RECORDED'
+          : `restated as ${newId}`,
+      disposition: 'superseded',
+      id: oldId,
+    });
+  }
+
   const closedAsks: string[] = [];
-  for (const prior of payload.priorAsks) {
-    if (!CLOSING_DISPOSITIONS.has(prior.disposition)) continue;
-    if (!openAskIds.includes(prior.id)) continue;
+  for (const prior of closePlan) {
     const closed = await closeAsk(
       ctx,
       prior.id,
@@ -782,6 +964,7 @@ export async function writeReportToBd(
     reportCount,
     status: 'written',
     threadId,
+    warnings,
   };
 }
 
@@ -829,8 +1012,14 @@ export async function runThreadReport(
     // one place that knows the substitution happened is the place that has to
     // name it.
     console.error(
-      `thread report: this payload declared schemaVersion ${validation.migratedFrom} and was migrated to ${THREAD_SCHEMA_VERSION}. blocking true → P0, false → P3; nextStep → "continue"; deviations → empty (NOT "there were none" — nothing supplied them). Write v${THREAD_SCHEMA_VERSION} next time: run justin-sdk thread prepare for the current skeleton.`,
+      `thread report: ⚠️ this payload declared schemaVersion ${validation.migratedFrom} and was migrated to ${THREAD_SCHEMA_VERSION}. Write v${THREAD_SCHEMA_VERSION} next time: run justin-sdk thread prepare for the current skeleton. What was substituted:`,
     );
+    if (validation.migratedFrom < 2) {
+      console.error(
+        '  · blocking true → P0, false → P3; nextStep → "continue"; deviations → empty (NOT "there were none" — nothing supplied them)',
+      );
+    }
+    for (const note of validation.migrationNotes) console.error(`  · ${note}`);
   }
 
   // --- 2. facts -----------------------------------------------------------
@@ -879,6 +1068,7 @@ export async function runThreadReport(
   const outcome = await writeReportToBd({
     ctx,
     facts,
+    keepOpenAskIds: validation.keepOpenAskIds,
     payload,
     render: renderConfig,
     sessionId,
@@ -886,14 +1076,32 @@ export async function runThreadReport(
 
   if (outcome.status === 'refused') {
     console.error(
-      'thread report: REFUSED — these open asks are not dispositioned in priorAsks (D4). Nothing was written.',
+      'thread report: REFUSED — these open asks are not dispositioned in priorAsks. Nothing was written.',
     );
     for (const id of outcome.missing) console.error(`  ${id}`);
     console.error('');
     console.error('Add one entry per id to priorAsks, then re-run:');
     console.error(
-      '  {"id": "<id>", "disposition": "carried|answered|decided|irrelevant", "detail": "<quote the answer / name the default / say why>"}',
+      '  {"id": "<id>", "disposition": "answered|irrelevant", "detail": "<quote him / say why it stopped applying>"}',
     );
+    console.error(
+      archivePath == null
+        ? '  (the payload could not be archived)'
+        : `  the payload is archived at ${archivePath}`,
+    );
+    return 2;
+  }
+
+  if (outcome.status === 'refusedSupersede') {
+    console.error(
+      'thread report: REFUSED — an ask supersedes something this report cannot close (D24). Nothing was written.',
+    );
+    for (const problem of outcome.problems) console.error(`  ${problem}`);
+    console.error('');
+    console.error(
+      '  "supersedes" takes the id of an ask that is OPEN on this session’s thread, or on the thread named by "continuesFrom".',
+    );
+    console.error('  See them with: justin-sdk thread prepare');
     console.error(
       archivePath == null
         ? '  (the payload could not be archived)'
@@ -940,7 +1148,8 @@ export async function runThreadReport(
     return 2;
   }
 
-  const {askIds, closedAsks, rendered, reportCount, threadId} = outcome;
+  const {askIds, closedAsks, rendered, reportCount, threadId, warnings} =
+    outcome;
 
   // --- 7. print ------------------------------------------------------------
   //
@@ -959,6 +1168,7 @@ export async function runThreadReport(
   console.error(
     `  prior asks closed: ${closedAsks.length === 0 ? 'none' : closedAsks.join(', ')}`,
   );
+  for (const warning of warnings) console.error(`  ⚠️ ${warning}`);
   console.error(
     archivePath == null ? '  archive: FAILED' : `  archive: ${archivePath}`,
   );

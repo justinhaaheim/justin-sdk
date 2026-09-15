@@ -61,7 +61,15 @@ const FACTS: ThreadFacts = {
 const ASK_IDS = ['th-eru.1', 'th-eru.2'];
 
 function payload(): ThreadReportPayload {
-  const result = validateThreadReport(examplePayload());
+  const raw = examplePayload();
+  // One deviation of each kind, so the snapshots show what a MISTAKE looks like
+  // in each medium (D23) — it is the only one that reaches the compact report,
+  // and "unmistakable" is a claim only a baseline can hold.
+  raw.deviations = [
+    {kind: 'mistake', text: 'I let the bin symlink point at a dirty branch'},
+    ...(raw.deviations as unknown[]),
+  ];
+  const result = validateThreadReport(raw);
   if (result.status !== 'ok') throw new Error('fixture payload is invalid');
   return result.payload;
 }
@@ -82,7 +90,11 @@ const PRIOR_RESTATED = new Map([
 ]);
 
 function model(
-  overrides: {emojiHeader?: boolean; wrapUpAt?: number | null} = {},
+  overrides: {
+    emojiHeader?: boolean;
+    full?: boolean;
+    wrapUpAt?: number | null;
+  } = {},
 ): ReportModel {
   return buildReportModel({
     askIds: ASK_IDS,
@@ -98,17 +110,56 @@ const MARKDOWN = renderMarkdown(model());
 const ANSI = renderAnsi(model(), {color: true});
 const HTML = renderHtml(model());
 
+// …and the same fixture in full. SIX baselines, not three (D23): compact and
+// full are now different documents rather than the same one minus two sections,
+// and a change to either has to be visible as a diff somebody approved.
+const MARKDOWN_FULL = renderMarkdown(model({full: true}));
+const ANSI_FULL = renderAnsi(model({full: true}), {color: true});
+const HTML_FULL = renderHtml(model({full: true}));
+
 describe('one fixture, three media', () => {
-  test('markdown baseline', () => {
+  test('markdown baseline — compact', () => {
     expect(MARKDOWN).toMatchSnapshot();
   });
 
-  test('ansi baseline', () => {
+  test('markdown baseline — full', () => {
+    expect(MARKDOWN_FULL).toMatchSnapshot();
+  });
+
+  test('ansi baseline — compact', () => {
     expect(ANSI).toMatchSnapshot();
   });
 
-  test('html baseline', () => {
+  test('ansi baseline — full', () => {
+    expect(ANSI_FULL).toMatchSnapshot();
+  });
+
+  test('html baseline — compact', () => {
     expect(HTML).toMatchSnapshot();
+  });
+
+  test('html baseline — full', () => {
+    expect(HTML_FULL).toMatchSnapshot();
+  });
+
+  test('a MISTAKE is unmistakable in every medium (D23)', () => {
+    const text = 'I let the bin symlink point at a dirty branch';
+    // Markdown: the marker the compactor keys on, in the compact report.
+    expect(MARKDOWN).toContain(`- ⚠️ MISTAKE — ${text}`);
+    // ANSI: the same weight as a P0 ask — bold red, not a dim bullet.
+    const mistakeLine = ANSI.split('\n').find((line) => line.includes(text));
+    expect(mistakeLine?.startsWith(BOLD_RED)).toBe(true);
+    // HTML: its own class, so the answer page can make it loud.
+    expect(HTML).toContain('<p class="mistake">');
+    // And the quieter kinds do NOT reach the compact report at all.
+    expect(MARKDOWN).not.toContain('Judgment call');
+    expect(MARKDOWN_FULL).toContain('⚖️ Judgment call — ');
+  });
+
+  test('the pointer line is dim in ansi and classed in html', () => {
+    const pointer = ANSI.split('\n').find((line) => line.includes('📎 '));
+    expect(pointer?.startsWith(DIM)).toBe(true);
+    expect(HTML).toContain('<p class="pointer">');
   });
 
   test('markdown has NO escape codes and a blank line between header groups', () => {
@@ -125,11 +176,13 @@ describe('one fixture, three media', () => {
 
   test('ansi bolds and UNDERLINES field names', () => {
     expect(ANSI).toContain(`${BOLD_UNDERLINE}Thread:${RESET} `);
-    expect(ANSI).toContain(`${BOLD_UNDERLINE}What I did:${RESET}`);
+    expect(ANSI_FULL).toContain(`${BOLD_UNDERLINE}What I did:${RESET}`);
   });
 
   test('ansi colours a P0 bold red and dims a P3, detail lines included', () => {
-    const lines = ANSI.split('\n');
+    // FULL, because a P3 no longer reaches the compact report at all — which is
+    // itself the point of D23, and is asserted in thread-render-compact.
+    const lines = ANSI_FULL.split('\n');
     const p0Index = lines.findIndex((line) => line.includes('🛑 P0 · ['));
     expect(p0Index).toBeGreaterThan(-1);
     expect(lines[p0Index]?.startsWith(BOLD_RED)).toBe(true);
@@ -149,8 +202,8 @@ describe('one fixture, three media', () => {
 
   test('html escapes everything and marks the P0 with a class', () => {
     expect(HTML).toContain('<p class="ask p0">');
-    expect(HTML).toContain('<p class="ask p3">');
-    expect(HTML).toContain('<h3>What I did</h3>');
+    expect(HTML_FULL).toContain('<p class="ask p3">');
+    expect(HTML_FULL).toContain('<h3>What I did</h3>');
     expect(HTML.includes(ESC)).toBe(false);
 
     const raw = examplePayload();

@@ -22,9 +22,25 @@
  * PURE. Everything it prints is in the model.
  */
 
-import {COMPACT_DID_CAP, priorityMarker} from './report-model';
+import {classifyReport, MISTAKE_BULLET, POINTER_PREFIX} from './report-lines';
+import {COMPACT_LAST_MESSAGE_CAP, priorityMarker} from './report-model';
 
 import type {ModelAsk, ReportModel} from './report-model';
+
+/**
+ * The compact report's cap on the echoed last message, applied to text that has
+ * already been through the model's own cap.
+ *
+ * Identical to `report-model`'s `truncate` on purpose: truncating the 1500-char
+ * full rendering to 300 has to give the same bytes as truncating the original to
+ * 300, or the compact-from-model and compact-from-stored-text paths disagree by
+ * one ellipsis.
+ */
+function truncateForCompact(text: string): string {
+  return text.length <= COMPACT_LAST_MESSAGE_CAP
+    ? text
+    : `${text.slice(0, COMPACT_LAST_MESSAGE_CAP - 1)}…`;
+}
 
 const RULE_STOP = '🛑'.repeat(28);
 const RULE_OM = '🕉️'.repeat(29);
@@ -35,19 +51,23 @@ export const ASKS_HEADING = '**Asks — everything I need from you:**';
 export const DID_HEADING = '**What I did:**';
 export const WORK_PRODUCT_HEADING = '**Work product:**';
 export const BEADS_TOUCHED_HEADING = '**Beads touched:**';
+export const DEVIATIONS_HEADING = '**Deviations from what you asked for:**';
 
-/** The two sections the compact report leaves on the bead (D18). */
-const COMPACT_DROPPED_HEADINGS: readonly string[] = [
-  WORK_PRODUCT_HEADING,
-  BEADS_TOUCHED_HEADING,
-];
+/**
+ * THE ONE SPELLING OF A MISTAKE (D23).
+ *
+ * The compactor finds must-see deviations by this exact prefix, so it is a
+ * constant rather than a literal: a mistake that lost its marker would silently
+ * stop reaching the compact report, and the only symptom would be a report that
+ * looked reassuringly short.
+ */
+export const MISTAKE_PREFIX = MISTAKE_BULLET.slice('- '.length);
 
-/** Says which report you are looking at, so "missing" is never a guess. */
-export const COMPACT_FOOTER =
-  '**Compact report.** Work product and beads touched are on the thread bead — `justin-sdk thread show --full`.';
-
-/** The line that ends every report, and the anchor the compactor inserts before. */
-const ANSWER_LINE_PREFIX = 'Answer: ';
+const DEVIATION_PREFIX: Record<string, string> = {
+  fyi: 'ℹ️ FYI — ',
+  judgmentCall: '⚖️ Judgment call — ',
+  mistake: MISTAKE_PREFIX,
+};
 
 function renderAsk(lines: string[], ask: ModelAsk): void {
   const marker = priorityMarker(ask.priority);
@@ -62,6 +82,9 @@ function renderAsk(lines: string[], ask: ModelAsk): void {
   lines.push(
     `  ${ask.number}. ${marker} · ${ask.kindTag} ${ask.text} (${ask.id})`,
   );
+  // The lineage line comes FIRST among the details (D24): "you have seen this
+  // question before" is the thing that changes how Justin reads the rest of it.
+  if (ask.supersedes != null) lines.push(`     ${ask.supersedes.label}`);
   if (ask.context != null) lines.push(`     Context: ${ask.context}`);
   for (const option of ask.options) {
     const prefix = option.recommended ? '(Recommended) ' : '';
@@ -72,8 +95,25 @@ function renderAsk(lines: string[], ask: ModelAsk): void {
   }
 }
 
-/** The whole report, as one markdown string. Ends without a trailing newline. */
+/**
+ * The whole report, as one markdown string. Ends without a trailing newline.
+ *
+ * COMPACT IS THE FULL REPORT, COMPACTED (D23). `renderMarkdown` renders the full
+ * document and then runs `compactStoredReport` over it, rather than rendering a
+ * second, shorter document from the same model. That is deliberate and it is the
+ * only way the two can be guaranteed identical: `thread show` has the bead's
+ * stored text and no model, so it MUST compact text — and if the printed compact
+ * report came from a separate rendering pass, the report Justin read in his
+ * terminal and the report he read in the paste could differ in ways no test
+ * would notice.
+ */
 export function renderMarkdown(model: ReportModel): string {
+  const full = renderFullMarkdown(model);
+  return model.full ? full : compactStoredReport(full);
+}
+
+/** The complete report — every section. What the thread bead's notes store. */
+function renderFullMarkdown(model: ReportModel): string {
   const lines: string[] = [];
 
   lines.push(RULE_STOP);
@@ -130,9 +170,6 @@ export function renderMarkdown(model: ReportModel): string {
   lines.push(DID_HEADING);
   if (model.did.length === 0) lines.push('- (nothing completed this turn)');
   for (const item of model.did) lines.push(`- ✅ ${item}`);
-  if (model.didOverflow > 0) {
-    lines.push(`- (+${model.didOverflow} more on the bead)`);
-  }
   lines.push('');
 
   lines.push('**What I learned:**');
@@ -155,9 +192,13 @@ export function renderMarkdown(model: ReportModel): string {
   // Between Answers and Asks, and ALWAYS printed. "none" is a claim that the
   // work matched what Justin asked for — an omitted section would let a report
   // simply not mention that it went somewhere else.
-  lines.push('**Deviations from what you asked for:**');
+  lines.push(DEVIATIONS_HEADING);
   if (model.deviations.length === 0) lines.push('- none');
-  for (const item of model.deviations) lines.push(`- ⚠️ ${item}`);
+  for (const item of model.deviations) {
+    lines.push(
+      `- ${DEVIATION_PREFIX[item.kind] ?? `${item.kind} — `}${item.text}`,
+    );
+  }
   lines.push('');
 
   if (model.discussion.length > 0) {
@@ -184,7 +225,9 @@ export function renderMarkdown(model: ReportModel): string {
     // phrase" (F1, home-base-p1uj.18). It is dropped entirely — never faked, and
     // never printed as empty brackets — when the ask bead could not be read.
     const phrase = prior.restated == null ? '' : ` (${prior.restated})`;
-    lines.push(`- ${prior.id}${phrase} — ${prior.disposition}: ${prior.detail}`);
+    lines.push(
+      `- ${prior.id}${phrase} — ${prior.disposition}: ${prior.detail}`,
+    );
   }
 
   if (model.workProduct != null) {
@@ -218,11 +261,6 @@ export function renderMarkdown(model: ReportModel): string {
     lines.push(RULE_HANDOFF);
   }
 
-  if (!model.full) {
-    lines.push('');
-    lines.push(COMPACT_FOOTER);
-  }
-
   lines.push('');
   lines.push(model.answerLine);
   lines.push(RULE_OM);
@@ -230,87 +268,166 @@ export function renderMarkdown(model: ReportModel): string {
   return lines.join('\n');
 }
 
+/** The heading the must-see block wears, and the marker that it IS one. */
+export const MUST_SEE_HEADING =
+  '**MUST-SEE — the only part you have to read:**';
+
 /**
- * COMPACT A REPORT THAT IS ALREADY TEXT (D18).
+ * The fields the compact report keeps, by their `**Label:**`.
  *
- * `thread show` prints the thread bead's stored `notes`, which D10 requires to
- * be the FULL rendering — the bead has to be a complete status report on its
- * own, and re-deriving one from metadata would give a second, subtly different
- * report for the same bead with no way to tell which one Justin had read. So
- * `--full`/compact at show time is a transformation of the stored text rather
- * than a second rendering pass: this drops the same two sections, applies the
- * same cap, and appends the same footer.
+ * The first three are the where-block as it renders with `emojiHeader: false`
+ * (D19) — with the knob ON those are emoji lines the classifier calls `where`,
+ * and with it off they are ordinary fields. Both spellings have to survive the
+ * cut, or turning the knob off silently deletes "which repo is this".
+ */
+const COMPACT_FIELDS: readonly string[] = [
+  'Repo',
+  'Tree',
+  'Tokens at stop',
+  'Thread',
+  'You asked me to',
+  'Your last message, verbatim',
+];
+
+/** The priorities that reach the compact report (D23). */
+const MUST_SEE_PRIORITIES: ReadonlySet<number> = new Set([0, 1]);
+
+/** The pointer line's marker — how every surface recognises it. */
+export const MORE_LINE_PREFIX = POINTER_PREFIX;
+
+function plural(count: number, one: string, many: string): string {
+  return count === 1 ? one : many;
+}
+
+/** `Answer: justin-sdk thread answer th-x` → `th-x`, or null when there is none. */
+function threadIdOfAnswerLine(line: string | null): string | null {
+  if (line == null) return null;
+  const match = /^Answer: justin-sdk thread answer (\S+)$/u.exec(line);
+  return match?.[1] ?? null;
+}
+
+/**
+ * COMPACT A REPORT THAT IS ALREADY TEXT (D23) — and the only definition of what
+ * "compact" means, since `renderMarkdown` runs its own output through this.
  *
- * IT IS PINNED TO THE RENDERER BY A TEST, not by hope:
- * `compactStoredReport(renderMarkdown(full))` must equal
- * `renderMarkdown(compact)` for the fixture. If the markdown ever moves a
- * heading this function looks for, that test fails rather than `thread show`
- * silently printing a full report with a "Compact report." footer on it.
+ * WHAT COMPACT IS NOW. v2's compact report was the full report minus two
+ * sections; Justin read one on 2026-09-15 and said the frame itself was wrong:
+ * "shift the mental framework wholesale from the human is going to read all this
+ * lovely text to the human will read the minimum bare essential text… and the
+ * human MAY read some of the rest." So compact is no longer a shorter report. It
+ * is the MUST-SEE report: where you are, what you were asked, the P0 and P1 asks
+ * in full, the mistakes in full, and a pointer to everything else. Nothing is
+ * lost — the thread bead's `notes` always store the FULL rendering (D10) and
+ * `--full` prints it.
+ *
+ * WHY THE PIECES ARE FOUND BY TEXT rather than by re-rendering a model: `thread
+ * show` has the bead's stored notes and no payload. A second rendering path for
+ * the same report is how the terminal and the paste drift apart, so there is
+ * one, and it reads the document.
+ *
+ * AN UNKNOWN PRIORITY IS KEPT, not hidden. A marker this build does not
+ * recognise is a fact about the data; dropping it into the "N more asks" count
+ * would be exactly the reassuring substitution rule 6 bans.
  */
 export function compactStoredReport(markdown: string): string {
-  const source = markdown.split('\n');
-  const out: string[] = [];
-  let dropping = false;
-  let didItems = 0;
-  let didHidden = 0;
-  let inDid = false;
+  // Already compact — recompacting would recount the hidden asks as zero, which
+  // is the one wrong answer this function can give.
+  if (markdown.includes(MUST_SEE_HEADING)) return markdown;
 
-  /** Close the What-I-did list, saying how many items the cap hid. */
-  const flushDid = (): void => {
-    if (inDid && didHidden > 0) out.push(`- (+${didHidden} more on the bead)`);
-    inDid = false;
-    didItems = 0;
-    didHidden = 0;
-  };
+  const head: string[] = [];
+  const where: string[] = [];
+  const mustSeeAsks: string[] = [];
+  const mustSeeMistakes: string[] = [];
+  let glance: string | null = null;
+  let answerLine: string | null = null;
+  let hiddenAsks = 0;
+  let hiddenDeviations = 0;
+  let keepingAsk = false;
+  let inDeviations = false;
 
-  for (const line of source) {
-    const isHeading = line.startsWith('**') && line.endsWith(':**');
-    if (isHeading || line === '') flushDid();
-    if (isHeading) {
-      inDid = line === DID_HEADING;
-      if (COMPACT_DROPPED_HEADINGS.includes(line)) {
-        dropping = true;
-        // The blank line that separated this section from the one above goes
-        // with it; otherwise every dropped section leaves a gap behind.
-        if (out[out.length - 1] === '') out.pop();
-        continue;
-      }
-      dropping = false;
-    } else if (dropping) {
-      // A dropped section ends at the next heading, at the handoff rule, or at
-      // the answer line — the three things that can follow it.
-      if (line.startsWith(ANSWER_LINE_PREFIX) || line.startsWith(RULE_HANDOFF)) {
-        dropping = false;
-      } else {
-        continue;
-      }
+  for (const line of classifyReport(markdown)) {
+    switch (line.kind) {
+      case 'glance':
+        glance = line.text;
+        break;
+      case 'where':
+        where.push(line.text);
+        break;
+      case 'heading':
+        inDeviations = line.text === DEVIATIONS_HEADING;
+        keepingAsk = false;
+        break;
+      case 'field':
+        if (line.label != null && COMPACT_FIELDS.includes(line.label)) {
+          head.push(
+            line.label === 'Your last message, verbatim'
+              ? `**${line.label}:** ${truncateForCompact(line.rest)}`
+              : line.text,
+          );
+        }
+        break;
+      case 'ask':
+        keepingAsk =
+          line.priority == null || MUST_SEE_PRIORITIES.has(line.priority);
+        if (keepingAsk) mustSeeAsks.push(line.text);
+        else hiddenAsks += 1;
+        break;
+      case 'askDetail':
+        if (keepingAsk) mustSeeAsks.push(line.text);
+        break;
+      case 'mistake':
+        mustSeeMistakes.push(line.text);
+        break;
+      case 'bullet':
+        // Only deviations are counted here: every other bulleted section is
+        // dropped wholesale and pointed at, not tallied.
+        if (inDeviations && line.text !== '- none') hiddenDeviations += 1;
+        break;
+      case 'command':
+        answerLine = line.text;
+        break;
+      default:
+        break;
     }
-
-    if (inDid && line.startsWith('- ✅ ')) {
-      didItems += 1;
-      if (didItems > COMPACT_DID_CAP) {
-        didHidden += 1;
-        continue;
-      }
-    }
-    out.push(line);
   }
-  flushDid();
 
-  // The footer goes exactly where `renderMarkdown` puts it: last, one blank
-  // line above the answer line. Whatever blank lines dropping a trailing
-  // section left behind are normalised away first, so the two agree byte for
-  // byte however many sections were removed.
-  const answerIndex = out.findIndex((line) =>
-    line.startsWith(ANSWER_LINE_PREFIX),
+  const threadId = threadIdOfAnswerLine(answerLine);
+  const out: string[] = [RULE_STOP, ''];
+  if (glance != null) out.push(glance, '');
+  if (where.length > 0) out.push(...where, '');
+  if (head.length > 0) out.push(...head, '');
+
+  out.push(MUST_SEE_HEADING);
+  if (mustSeeAsks.length === 0 && mustSeeMistakes.length === 0) {
+    out.push('- (nothing needs you — nothing went wrong, nothing is blocking)');
+  }
+  out.push(...mustSeeAsks);
+  // A blank line between the two halves: an ask and a mistake want different
+  // things from Justin (an answer, and knowing), and run together they read as
+  // one list of complaints.
+  if (mustSeeAsks.length > 0 && mustSeeMistakes.length > 0) out.push('');
+  out.push(...mustSeeMistakes);
+  out.push('');
+
+  out.push(
+    `${MORE_LINE_PREFIX}${
+      hiddenAsks === 0
+        ? 'no other asks'
+        : `${hiddenAsks} more ${plural(hiddenAsks, 'ask', 'asks')} (P2-P4)`
+    } · ${
+      hiddenDeviations === 0
+        ? 'nothing else to flag'
+        : `${hiddenDeviations} more ${plural(hiddenDeviations, 'deviation', 'deviations')}`
+    } · everything: ${
+      threadId == null
+        ? 'NOT RECORDED — no thread bead'
+        : `justin-sdk thread show ${threadId} --full`
+    }`,
   );
-  if (answerIndex > 0 && !out.includes(COMPACT_FOOTER)) {
-    let at = answerIndex;
-    while (at > 0 && out[at - 1] === '') {
-      out.splice(at - 1, 1);
-      at -= 1;
-    }
-    out.splice(at, 0, '', COMPACT_FOOTER, '');
-  }
+  out.push('');
+  out.push(
+    answerLine ?? 'Answer: (no thread bead — this report was NOT RECORDED)',
+  );
+  out.push(RULE_OM);
   return out.join('\n');
 }

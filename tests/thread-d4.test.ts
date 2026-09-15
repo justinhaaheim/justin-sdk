@@ -1,6 +1,13 @@
 /**
  * D4 — open asks carry forward and MUST be dispositioned.
  *
+ * SUPERSEDED BY D24 AT THE CALL SITE, 2026-09-15. `thread report` no longer
+ * refuses an undispositioned open ask: it CLOSES it, "decided: <the default that
+ * ask recorded>", which is the same housekeeping enforced from the other end.
+ * `checkPriorAskCoverage` itself is unchanged and still exported, and these
+ * tests still describe what it does — but nothing on the write path calls it any
+ * more. The lifecycle that replaced it is tested in thread-ask-lifecycle.test.ts.
+ *
  * This is the housekeeping rule the whole epic hangs on. The sampling that
  * motivated it (2026-09-12, ten recent reports) found three of five replies
  * answering ZERO pending questions: the asks did not get declined, they
@@ -52,17 +59,21 @@ describe('checkPriorAskCoverage (D4)', () => {
     expect(result.missing).toEqual(['jl-x7q.2']);
   });
 
-  test('accepts every disposition, carried included', () => {
-    for (const disposition of [
-      'carried',
-      'answered',
-      'decided',
-      'irrelevant',
-    ] as const) {
+  test('accepts every v3 disposition', () => {
+    for (const disposition of ['answered', 'irrelevant'] as const) {
       expect(
         checkPriorAskCoverage(['jl-x7q.1'], [prior('jl-x7q.1', disposition)]),
       ).toEqual({ok: true});
     }
+  });
+
+  // D24's one-release bridge: a v2 payload's `carried` ids reach this function
+  // as the third argument, and they COVER the ask — it stays open on purpose,
+  // which is a disposition even though it is not a `priorAsks` entry.
+  test('a migration-kept ask counts as covered', () => {
+    expect(checkPriorAskCoverage(['jl-x7q.1'], [], ['jl-x7q.1'])).toEqual({
+      ok: true,
+    });
   });
 
   test('dispositioning an ask that is not open is harmless', () => {

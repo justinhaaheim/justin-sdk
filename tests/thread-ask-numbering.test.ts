@@ -149,11 +149,15 @@ function numberedAsks(report: string): [number, string][] {
 }
 
 describe('the report and the walk number the same asks the same way', () => {
+  // FULL, because the compact report prints only the P0/P1 asks (D23) and what
+  // is under test here is the whole sequence. The compact numbering is a prefix
+  // of this one, which thread-render-compact asserts directly.
   const report = renderMarkdown(
     buildReportModel({
       askIds: NEW_ASK_IDS,
       carried: CARRIED,
       facts: facts(),
+      full: true,
       payload: payload(),
       reportCount: THIS_REPORT,
       threadId: 'jl-t',

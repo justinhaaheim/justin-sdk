@@ -1,6 +1,33 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
-exports[`one fixture, three media markdown baseline 1`] = `
+exports[`one fixture, three media markdown baseline — compact 1`] = `
+"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+
+⚡ ✅ Work completed · 🙋 needs your answers · 📈 70% · 🛑 1 P0 ask
+
+📦 home-base · 🌿 thread-v2 · 🌳 primary checkout · 🔢 497k
+🌲 clean · 2 ahead / 0 behind · HEAD 288f3912eed5
+
+**Thread:** thread-reports dispatch 2: the write path
+**You asked me to:** You told me to build dispatch 2 of the thread-reports epic.
+**Your last message, verbatim:** build the format v2 dispatch
+
+**MUST-SEE — the only part you have to read:**
+  1. 🛑 P0 · [Approve Y/n] Approve closing ask beads rather than deleting them? (th-eru.1)
+     Context: The adapter closes asks instead of deleting them, because bd delete wedges auto-export.
+     a. (Recommended) Keep closing — reversible, export stays healthy
+     b. Delete — tidier list, wedges the JSONL export
+     If you don't answer: I keep closing rather than deleting.
+
+- ⚠️ MISTAKE — I let the bin symlink point at a dirty branch
+
+📎 1 more ask (P2-P4) · 1 more deviation · everything: justin-sdk thread show th-eru --full
+
+Answer: justin-sdk thread answer th-eru
+🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️"
+`;
+
+exports[`one fixture, three media markdown baseline — full 1`] = `
 "🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
 
 ⚡ ✅ Work completed · 🙋 needs your answers · 📈 70% · 🛑 1 P0 ask
@@ -30,7 +57,8 @@ exports[`one fixture, three media markdown baseline 1`] = `
    A: Yes — measured 2026-09-12, it is the parent session id.
 
 **Deviations from what you asked for:**
-- ⚠️ The knob defaults off, which is not what the bead said — the bead said on.
+- ⚠️ MISTAKE — I let the bin symlink point at a dirty branch
+- ⚖️ Judgment call — The knob defaults off, which is not what the bead said — the bead said on.
 
 **Discussion:**
 - bd update --metadata MERGES; it does not replace.
@@ -50,13 +78,45 @@ exports[`one fixture, three media markdown baseline 1`] = `
 **Prior asks — closed by this report:**
 - jl-x7q.1 ([Approve Y/n] Close ask beads when they are answered rather than deleting them?) — answered: You said "yes, closing is right".
 
-**Compact report.** Work product and beads touched are on the thread bead — \`justin-sdk thread show --full\`.
+**Work product:**
+- code: src/thread/ plus the bin symlink, on branch thread-reports
+- Merge state: UNMERGED
+
+**Beads touched:**
+- home-base-p1uj.1 — the thread command group core
 
 Answer: justin-sdk thread answer th-eru
 🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️"
 `;
 
-exports[`one fixture, three media ansi baseline 1`] = `
+exports[`one fixture, three media ansi baseline — compact 1`] = `
+"\x1B[36m🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑\x1B[0m
+
+\x1B[1m⚡ ✅ Work completed · 🙋 needs your answers · 📈 70% · 🛑 1 P0 ask\x1B[0m
+
+\x1B[2m📦 home-base · 🌿 thread-v2 · 🌳 primary checkout · 🔢 497k\x1B[0m
+\x1B[2m🌲 clean · 2 ahead / 0 behind · HEAD 288f3912eed5\x1B[0m
+
+\x1B[1m\x1B[4mThread:\x1B[0m thread-reports dispatch 2: the write path
+\x1B[1m\x1B[4mYou asked me to:\x1B[0m You told me to build dispatch 2 of the thread-reports epic.
+\x1B[1m\x1B[4mYour last message, verbatim:\x1B[0m build the format v2 dispatch
+
+\x1B[1m\x1B[4mMUST-SEE — the only part you have to read:\x1B[0m
+\x1B[1m\x1B[31m  1. 🛑 P0 · [Approve Y/n] Approve closing ask beads rather than deleting them? (th-eru.1)\x1B[0m
+\x1B[1m\x1B[31m     Context: The adapter closes asks instead of deleting them, because bd delete wedges auto-export.\x1B[0m
+\x1B[1m\x1B[31m     a. (Recommended) Keep closing — reversible, export stays healthy\x1B[0m
+\x1B[1m\x1B[31m     b. Delete — tidier list, wedges the JSONL export\x1B[0m
+\x1B[1m\x1B[31m     If you don't answer: I keep closing rather than deleting.\x1B[0m
+
+\x1B[1m\x1B[31m- ⚠️ MISTAKE — I let the bin symlink point at a dirty branch\x1B[0m
+
+\x1B[2m📎 1 more ask (P2-P4) · 1 more deviation · everything: justin-sdk thread show th-eru --full\x1B[0m
+
+\x1B[1mAnswer: justin-sdk thread answer th-eru\x1B[0m
+\x1B[36m🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️\x1B[0m"
+`;
+
+exports[`one fixture, three media ansi baseline — full 1`] = `
 "\x1B[36m🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑\x1B[0m
 
 \x1B[1m⚡ ✅ Work completed · 🙋 needs your answers · 📈 70% · 🛑 1 P0 ask\x1B[0m
@@ -86,7 +146,8 @@ exports[`one fixture, three media ansi baseline 1`] = `
    A: Yes — measured 2026-09-12, it is the parent session id.
 
 \x1B[1m\x1B[4mDeviations from what you asked for:\x1B[0m
-- ⚠️ The knob defaults off, which is not what the bead said — the bead said on.
+\x1B[1m\x1B[31m- ⚠️ MISTAKE — I let the bin symlink point at a dirty branch\x1B[0m
+- ⚖️ Judgment call — The knob defaults off, which is not what the bead said — the bead said on.
 
 \x1B[1m\x1B[4mDiscussion:\x1B[0m
 - bd update --metadata MERGES; it does not replace.
@@ -106,13 +167,40 @@ exports[`one fixture, three media ansi baseline 1`] = `
 \x1B[1m\x1B[4mPrior asks — closed by this report:\x1B[0m
 - jl-x7q.1 ([Approve Y/n] Close ask beads when they are answered rather than deleting them?) — answered: You said "yes, closing is right".
 
-\x1B[2m**Compact report.** Work product and beads touched are on the thread bead — \`justin-sdk thread show --full\`.\x1B[0m
+\x1B[1m\x1B[4mWork product:\x1B[0m
+- code: src/thread/ plus the bin symlink, on branch thread-reports
+- Merge state: UNMERGED
+
+\x1B[1m\x1B[4mBeads touched:\x1B[0m
+- home-base-p1uj.1 — the thread command group core
 
 \x1B[1mAnswer: justin-sdk thread answer th-eru\x1B[0m
 \x1B[36m🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️\x1B[0m"
 `;
 
-exports[`one fixture, three media html baseline 1`] = `
+exports[`one fixture, three media html baseline — compact 1`] = `
+"<div class="report">
+<hr />
+<p class="glance">✅ Work completed · 🙋 needs your answers · 📈 70% · 🛑 1 P0 ask</p>
+<p class="where">📦 home-base · 🌿 thread-v2 · 🌳 primary checkout · 🔢 497k</p>
+<p class="where">🌲 clean · 2 ahead / 0 behind · HEAD 288f3912eed5</p>
+<p class="field"><strong>Thread:</strong> thread-reports dispatch 2: the write path</p>
+<p class="field"><strong>You asked me to:</strong> You told me to build dispatch 2 of the thread-reports epic.</p>
+<p class="field"><strong>Your last message, verbatim:</strong> build the format v2 dispatch</p>
+<h3>MUST-SEE — the only part you have to read</h3>
+<p class="ask p0"><strong>1.</strong> 🛑 P0 · [Approve Y/n] Approve closing ask beads rather than deleting them? (th-eru.1)</p>
+<p class="askdetail p0">Context: The adapter closes asks instead of deleting them, because bd delete wedges auto-export.</p>
+<p class="askdetail p0">a. (Recommended) Keep closing — reversible, export stays healthy</p>
+<p class="askdetail p0">b. Delete — tidier list, wedges the JSONL export</p>
+<p class="askdetail p0">If you don&#39;t answer: I keep closing rather than deleting.</p>
+<p class="mistake">- ⚠️ MISTAKE — I let the bin symlink point at a dirty branch</p>
+<p class="pointer">📎 1 more ask (P2-P4) · 1 more deviation · everything: justin-sdk thread show th-eru --full</p>
+<p class="command">Answer: justin-sdk thread answer th-eru</p>
+<hr />
+</div>"
+`;
+
+exports[`one fixture, three media html baseline — full 1`] = `
 "<div class="report">
 <hr />
 <p class="glance">✅ Work completed · 🙋 needs your answers · 📈 70% · 🛑 1 P0 ask</p>
@@ -139,8 +227,9 @@ exports[`one fixture, three media html baseline 1`] = `
 <p>1. Q: Is CLAUDE_CODE_SESSION_ID exported inside a subagent?</p>
 <p class="continuation">A: Yes — measured 2026-09-12, it is the parent session id.</p>
 <h3>Deviations from what you asked for</h3>
+<p class="mistake">- ⚠️ MISTAKE — I let the bin symlink point at a dirty branch</p>
 <ul>
-<li>⚠️ The knob defaults off, which is not what the bead said — the bead said on.</li>
+<li>⚖️ Judgment call — The knob defaults off, which is not what the bead said — the bead said on.</li>
 </ul>
 <h3>Discussion</h3>
 <ul>
@@ -161,7 +250,15 @@ exports[`one fixture, three media html baseline 1`] = `
 <ul>
 <li>jl-x7q.1 ([Approve Y/n] Close ask beads when they are answered rather than deleting them?) — answered: You said &quot;yes, closing is right&quot;.</li>
 </ul>
-<p class="note"><strong>Compact report.</strong> Work product and beads touched are on the thread bead — \`justin-sdk thread show --full\`.</p>
+<h3>Work product</h3>
+<ul>
+<li>code: src/thread/ plus the bin symlink, on branch thread-reports</li>
+<li>Merge state: UNMERGED</li>
+</ul>
+<h3>Beads touched</h3>
+<ul>
+<li>home-base-p1uj.1 — the thread command group core</li>
+</ul>
 <p class="command">Answer: justin-sdk thread answer th-eru</p>
 <hr />
 </div>"

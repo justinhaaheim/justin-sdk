@@ -30,7 +30,7 @@ exports[`renderMarkdown full report matches the committed baseline 1`] = `
    A: Yes — measured 2026-09-12, it is the parent session id.
 
 **Deviations from what you asked for:**
-- ⚠️ The knob defaults off, which is not what the bead said — the bead said on.
+- ⚖️ Judgment call — The knob defaults off, which is not what the bead said — the bead said on.
 
 **Discussion:**
 - bd update --metadata MERGES; it does not replace.

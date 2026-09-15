@@ -63,6 +63,14 @@ function styleLine(line: ReportLine): string {
       const style = priorityStyle(line.priority);
       return style === '' ? line.text : `${style}${line.text}${RESET}`;
     }
+    // A mistake is the only bullet that reaches the compact report (D23), and it
+    // gets the same weight as a P0 ask: bold red. Justin's definition is
+    // "careless, wrong, against the spec or the rules" — if it is dim, it is not
+    // a mistake, it is an FYI, and it should have been filed as one.
+    case 'mistake':
+      return `${BOLD}${RED}${line.text}${RESET}`;
+    case 'pointer':
+      return `${DIM}${line.text}${RESET}`;
     case 'rule':
       return `${CYAN}${line.text}${RESET}`;
     case 'note':
