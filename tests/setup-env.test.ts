@@ -14,7 +14,13 @@
 
 import {afterEach, describe, expect, test} from 'bun:test';
 import {spawnSync} from 'child_process';
-import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'fs';
 import {dirname, join, resolve} from 'path';
 
 import {healthNoticesPaths, STATE_SCHEMA_VERSION} from '../src/health-notices';
@@ -22,6 +28,7 @@ import {
   detectPackageManager,
   discoverHydrationScripts,
   formatMiseFailureDetail,
+  miseTrustArgv,
   parseSubmoduleStatus,
   planWorktreeIncludeCopies,
   probeSubmodules,
@@ -512,6 +519,166 @@ describe('formatMiseFailureDetail', () => {
     expect(formatMiseFailureDetail(1, 'spawn mise ENOENT')).toContain(
       '(spawn mise ENOENT)',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The MISE step verifies its EFFECT, not its exit code (home-base-e0ohc)
+// ---------------------------------------------------------------------------
+
+/**
+ * Install a fake `mise` on PATH for the duration of `body`.
+ *
+ * A shim rather than the real binary because the fact under test is precisely
+ * the one the real binary cannot be asked to demonstrate on demand: an exit 0
+ * that did not trust anything. Driving the real mise into that state means
+ * mutating the developer's own ~/.local/state trust store, which this SDK's
+ * rule forbids a test from doing. The shim also gives the assertions their
+ * negative control — the same code path, run against a mise that honours the
+ * request and against one that does not.
+ *
+ * `effective: false` IS the bug this step used to have: exit 0, nothing
+ * trusted, previously reported as `MISE done`.
+ */
+function withMiseShim<T>(
+  options: {dir: string; effective: boolean; preTrusted: boolean},
+  body: (log: () => string[]) => T,
+): T {
+  const shimDir = join(options.dir, '__shim');
+  const logPath = join(options.dir, '__shim.log');
+  const markerPath = join(options.dir, '__shim.trusted');
+  mkdirSync(shimDir, {recursive: true});
+  writeFileSync(
+    join(shimDir, 'mise'),
+    [
+      '#!/bin/sh',
+      'printf "%s\\n" "$*" >> "$MISE_SHIM_LOG"',
+      'if [ "$2" = "--show" ]; then',
+      '  if [ -f "$MISE_SHIM_MARKER" ]; then',
+      '    printf "%s: trusted\\n" "$MISE_SHIM_DIR"',
+      '  else',
+      '    printf "%s: untrusted\\n" "$MISE_SHIM_DIR"',
+      '  fi',
+      '  exit 0',
+      'fi',
+      // The write. An ineffective mise still exits 0 — that is the whole point.
+      'if [ "$MISE_SHIM_EFFECTIVE" = "1" ]; then : > "$MISE_SHIM_MARKER"; fi',
+      'exit 0',
+      '',
+    ].join('\n'),
+  );
+  chmodSync(join(shimDir, 'mise'), 0o755);
+  if (options.preTrusted) writeFileSync(markerPath, '');
+
+  const saved = {
+    dir: process.env.MISE_SHIM_DIR,
+    effective: process.env.MISE_SHIM_EFFECTIVE,
+    log: process.env.MISE_SHIM_LOG,
+    marker: process.env.MISE_SHIM_MARKER,
+    path: process.env.PATH,
+  };
+  process.env.PATH = `${shimDir}:${saved.path ?? ''}`;
+  process.env.MISE_SHIM_DIR = options.dir;
+  process.env.MISE_SHIM_EFFECTIVE = options.effective ? '1' : '0';
+  process.env.MISE_SHIM_LOG = logPath;
+  process.env.MISE_SHIM_MARKER = markerPath;
+  try {
+    return body(() =>
+      existsSync(logPath)
+        ? readFileSync(logPath, 'utf-8').split('\n').filter(Boolean)
+        : [],
+    );
+  } finally {
+    process.env.PATH = saved.path;
+    restoreEnv('MISE_SHIM_DIR', saved.dir);
+    restoreEnv('MISE_SHIM_EFFECTIVE', saved.effective);
+    restoreEnv('MISE_SHIM_LOG', saved.log);
+    restoreEnv('MISE_SHIM_MARKER', saved.marker);
+  }
+}
+
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
+describe('the MISE step', () => {
+  function miseSandbox(): string {
+    const sb = track(createSandbox());
+    writeFileSync(join(sb.path, 'mise.toml'), '[tools]\n');
+    return sb.path;
+  }
+
+  test('trusts the target’s own mise.toml by name, not the bare form', () => {
+    expect(miseTrustArgv('/repo/wt')).toEqual([
+      'mise',
+      'trust',
+      '/repo/wt/mise.toml',
+    ]);
+  });
+
+  test('reports done when the trust is verified afterwards', () => {
+    const dir = miseSandbox();
+    withMiseShim({dir, effective: true, preTrusted: false}, (log) => {
+      const result = setupEnv({target: dir});
+      expect(statuses(result.steps).MISE).toBe('done');
+      expect(detailFor(result.steps, 'MISE')).toContain('verified trusted');
+      expect(result.exitCode).toBe(0);
+      // Read, write, read — the second read is the verification.
+      expect(log()).toEqual([
+        `trust --show -C ${dir}`,
+        `trust ${join(dir, 'mise.toml')}`,
+        `trust --show -C ${dir}`,
+      ]);
+    });
+  });
+
+  /**
+   * THE REGRESSION. Before home-base-e0ohc this said `MISE done` on exactly
+   * this input, because exit 0 was read as evidence the trust happened.
+   */
+  test('reports unknown — never done — when exit 0 trusted nothing', () => {
+    const dir = miseSandbox();
+    withMiseShim({dir, effective: false, preTrusted: false}, () => {
+      const result = setupEnv({target: dir});
+      expect(statuses(result.steps).MISE).toBe('unknown');
+      expect(statuses(result.steps).MISE).not.toBe('done');
+      const detail = detailFor(result.steps, 'MISE');
+      expect(detail).toContain('exited 0');
+      expect(detail).toContain("'untrusted'");
+      expect(detail).toContain('trust is NOT confirmed');
+    });
+  });
+
+  /**
+   * An unconfirmed trust is not an error: nothing failed, and the later steps
+   * fail on their own terms if it mattered. Pinned because turning this into a
+   * nonzero exit would break every hydration that completes today.
+   */
+  test('an unconfirmed trust does not abort hydration', () => {
+    const dir = miseSandbox();
+    withMiseShim({dir, effective: false, preTrusted: false}, () => {
+      const result = setupEnv({target: dir});
+      expect(result.exitCode).toBe(0);
+      expect(result.steps.map((s) => s.label)).toContain('HYDRATE');
+    });
+  });
+
+  /**
+   * Trusting by name writes a trusted-configs entry even when mise already
+   * trusts the path via `trusted_config_paths` (measured 2026-09-16), so an
+   * unconditional trust would add one entry per hydration to a state dir that
+   * already holds >1200 — and would fail outright under a sandbox that blocks
+   * ~/.local/state.
+   */
+  test('writes nothing when the path is already trusted', () => {
+    const dir = miseSandbox();
+    withMiseShim({dir, effective: true, preTrusted: true}, (log) => {
+      const result = setupEnv({target: dir});
+      expect(statuses(result.steps).MISE).toBe('done');
+      expect(detailFor(result.steps, 'MISE')).toContain('already trusted');
+      expect(log()).toEqual([`trust --show -C ${dir}`]);
+    });
   });
 });
 
