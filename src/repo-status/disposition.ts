@@ -235,10 +235,33 @@ export function decideDisposition(
   // spent git calls on it, several first concluding the tool had a bug. Two
   // numbers for "commits not on main" that never explain each other is a defect
   // in the output whatever the code is doing.
-  const merges = divergence.ahead - proof.unaccountedCommits.length;
+  //
+  // THE GAP HAS TWO CAUSES AND THEY ARE NOT THE SAME FACT (home-base-qyu1.33.11
+  // F1). Attributing the whole remainder to merge commits was WRONG and said so
+  // confidently: `git cherry` omits merges entirely AND reports, as `-`, every
+  // commit whose patch-id is already on the baseline. On a branch with zero
+  // merges this printed "also counts 2 merge commits" over two ordinary commits
+  // that had already landed by another route — the opposite of what a reader
+  // needs, since "already on the baseline" is the reassuring half of the gap
+  // and "merge commit" is the inert half. All three round-3 blind reviewers
+  // caught it independently. Both numbers are already on the proof: every
+  // cherry line is a `uniqueCommits` entry, and `unaccountedCommits` is the
+  // subset still missing from the baseline.
+  const stillMissing = proof.unaccountedCommits.length;
+  const landedByContent = proof.uniqueCommits.length - stillMissing;
+  const mergeCommits = divergence.ahead - proof.uniqueCommits.length;
+  const gapParts: string[] = [];
+  if (landedByContent > 0) {
+    gapParts.push(
+      `${landedByContent} already on ${proof.baselineRef} by content`,
+    );
+  }
+  if (mergeCommits > 0) gapParts.push(plural(mergeCommits, 'merge commit'));
+  // Only when there IS a gap to explain. A row whose AHEAD equals its unique
+  // count has nothing to reconcile, and the arithmetic would read as noise.
   const mergeGap =
-    merges > 0
-      ? ` (the row's AHEAD ${divergence.ahead} also counts ${plural(merges, 'merge commit')}, which carry no work of their own)`
+    gapParts.length > 0
+      ? ` (AHEAD ${divergence.ahead} = ${stillMissing} not on ${proof.baselineRef} + ${gapParts.join(' + ')})`
       : '';
   const backupNote =
     mirror?.exists === true
