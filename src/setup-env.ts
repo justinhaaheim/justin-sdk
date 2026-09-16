@@ -82,8 +82,10 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   statSync,
 } from 'node:fs';
+import {homedir} from 'node:os';
 import {
   basename,
   dirname,
@@ -123,13 +125,20 @@ export const GITMODULES_FILE = '.gitmodules';
 /** No slashes: a slug names a directory leaf AND a branch leaf (D7). */
 export const SLUG_PATTERN = /^[A-Za-z0-9._-]+$/;
 
-export type StepStatus = 'done' | 'skipped' | 'failed';
+/**
+ * 'unknown' is the rule-6 member: the step RAN, the command did not fail, and
+ * we still could not confirm the effect happened. It exists so a step that
+ * cannot measure its own result has somewhere to report that is not 'done'.
+ * Never collapse it into 'done' (a false all-clear) or 'failed' (a claim the
+ * command errored, which it did not).
+ */
+export type StepStatus = 'done' | 'skipped' | 'failed' | 'unknown';
 
 export interface StepReport {
   /** Stable identifier — `HYDRATE:<script name>` for project-declared steps. */
   label: string;
   status: StepStatus;
-  /** What was done, or why it was skipped/failed. Always populated. */
+  /** What was done, or why it was skipped/failed/unconfirmed. Always populated. */
   detail: string;
 }
 
@@ -173,6 +182,9 @@ const STATUS_ICON: Record<StepStatus, string> = {
   done: `${GREEN}✓${RESET}`,
   failed: `${RED}✗${RESET}`,
   skipped: `${DIM}⊘${RESET}`,
+  // Deliberately NOT dim: an unconfirmed step must catch the eye, because the
+  // whole point of the status is that nobody would otherwise look.
+  unknown: `${YELLOW}?${RESET}`,
 };
 
 function reportStep(step: StepReport): void {
@@ -445,9 +457,7 @@ export function parseSubmoduleStatus(stdout: string): SubmoduleStatus {
 }
 
 export type SubmoduleProbe =
-  | {kind: 'known'; status: SubmoduleStatus}
-  | {kind: 'none'}
-  | {kind: 'unknown'};
+  {kind: 'known'; status: SubmoduleStatus} | {kind: 'none'} | {kind: 'unknown'};
 
 /**
  * What submodule work `target` needs, without changing anything.
@@ -770,6 +780,120 @@ export function discoverHydrationScripts(target: string): HydrationScript[] {
 }
 
 // ---------------------------------------------------------------------------
+// mise trust (READ-ONLY)
+// ---------------------------------------------------------------------------
+//
+// Lives here, next to the WRITER that consumes it, and is re-exported from
+// worktree-hydration (which reads it too) exactly as isLinkedWorktree already
+// is. The alternative — setup-env importing worktree-hydration — would close an
+// import cycle, since worktree-hydration already imports from this module.
+
+export type MiseTrustStatus = 'trusted' | 'unknown' | 'untrusted';
+
+/**
+ * Parse `mise trust --show` output for the line describing `targetDir` itself.
+ *
+ * Format (mise 2026.3.17, verified): one `<dir>: trusted|untrusted` line per
+ * config file found from the directory UPWARD, so a worktree nested under a
+ * mise-using primary checkout yields several lines and only the target's own
+ * matters — a parent's trust state is not this worktree's hydration problem.
+ * Paths under $HOME are printed tilde-abbreviated and are realpath-resolved
+ * (`/private/var/…` on macOS), so both sides are canonicalized before compare.
+ *
+ * Anything unrecognized returns 'unknown', which reports NO problem. A detector
+ * that guesses "untrusted" from unparsed output would block `signal` on a
+ * cosmetic upstream output change.
+ */
+export function parseMiseTrustStatus(
+  stdout: string,
+  targetDir: string,
+): MiseTrustStatus {
+  const wanted = canonicalPath(targetDir);
+  for (const line of stdout.split('\n')) {
+    const separator = line.lastIndexOf(': ');
+    if (separator <= 0) continue;
+    const pathPart = expandTilde(line.slice(0, separator).trim());
+    const statusPart = line.slice(separator + 2).trim();
+    if (canonicalPath(pathPart) !== wanted) continue;
+    if (statusPart === 'untrusted') return 'untrusted';
+    if (statusPart === 'trusted') return 'trusted';
+    return 'unknown';
+  }
+  return 'unknown';
+}
+
+function expandTilde(inputPath: string): string {
+  if (inputPath === '~') return homedir();
+  if (inputPath.startsWith('~/')) return join(homedir(), inputPath.slice(2));
+  return inputPath;
+}
+
+function canonicalPath(inputPath: string): string {
+  const absolute = resolve(inputPath);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+/**
+ * Trust status of `target`'s own mise.toml, using `mise trust --show` — which
+ * the mise docs describe as "Show the trusted status … Does not trust or
+ * untrust any files", and which was verified non-mutating here (the
+ * trusted-configs state dir was byte-for-byte unchanged across a run).
+ *
+ * Returns 'unknown' when there is no mise.toml or mise is not installed —
+ * absence of mise is not a hydration problem.
+ *
+ * This reports the trust mise ACTUALLY applies, which is wider than the
+ * trusted-configs state dir: a path covered by the `trusted_config_paths`
+ * setting reads 'trusted' here while writing no state entry at all (measured
+ * 2026-09-16, home-base-e0ohc). That gap is exactly why the state dir must
+ * never be consulted directly as evidence of trust.
+ */
+export function miseTrustStatus(target: string): MiseTrustStatus {
+  if (!existsSync(join(target, MISE_CONFIG_FILE))) return 'unknown';
+  let stdout: string;
+  try {
+    stdout = execFileSync('mise', ['trust', '--show', '-C', target], {
+      encoding: 'utf-8',
+      // Explicit, not inherited: Bun's execFileSync otherwise hands the child
+      // the env as it was at process START, ignoring later mutations — and
+      // MISE_TRUSTED_CONFIG_PATHS is exactly the kind of variable a caller may
+      // set programmatically.
+      env: process.env,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+  } catch {
+    return 'unknown';
+  }
+  return parseMiseTrustStatus(stdout, target);
+}
+
+/** The only config filename this step trusts, guards on, and verifies. */
+export const MISE_CONFIG_FILE = 'mise.toml';
+
+/**
+ * Trust the target's OWN config file, by name.
+ *
+ * The bare `mise trust` this replaced supplied `target` only as the child's
+ * cwd. That is not wrong in itself — measured 2026-09-16, bare trust does trust
+ * the nearest config, including in a git worktree nested under an
+ * already-trusted primary checkout. It is simply unverifiable: the command that
+ * ran and the file the step checked for were never tied together, so its exit
+ * code could not be read as a statement about THIS path.
+ *
+ * The file form, not `-C <dir>`, so the file trusted is by construction the
+ * file `existsSync` tested for and `miseTrustStatus` reads back. The read path
+ * keeps `-C` because `--show` is deliberately a query about the whole upward
+ * chain, not about one file.
+ */
+export function miseTrustArgv(target: string): string[] {
+  return ['mise', 'trust', join(target, MISE_CONFIG_FILE)];
+}
+
+// ---------------------------------------------------------------------------
 // worktree-setup
 // ---------------------------------------------------------------------------
 
@@ -808,9 +932,14 @@ function step(
 }
 
 function finish(result: SetupEnvResult): SetupEnvResult {
-  const counts = {done: 0, failed: 0, skipped: 0};
+  const counts = {done: 0, failed: 0, skipped: 0, unknown: 0};
   for (const s of result.steps) counts[s.status] += 1;
   const parts = [`${counts.done} done`, `${counts.skipped} skipped`];
+  // Counted in the summary line so an unconfirmed step is visible even to
+  // someone who only reads the last line of the report.
+  if (counts.unknown > 0) {
+    parts.push(`${YELLOW}${counts.unknown} unconfirmed${RESET}`);
+  }
   if (counts.failed > 0) parts.push(`${RED}${counts.failed} failed${RESET}`);
   report(`  ${DIM}${parts.join(', ')}${RESET}`);
   return result;
@@ -864,12 +993,31 @@ export function setupEnv(options: SetupEnvOptions = {}): SetupEnvResult {
   );
 
   // --- Step 2: mise trust --------------------------------------------------
-  if (!existsSync(join(target, 'mise.toml'))) {
-    step(steps, 'MISE', 'skipped', 'no mise.toml');
+  // READ, write only if needed, then VERIFY. An exit code is not an effect
+  // (home-base-e0ohc): `mise trust` exits 0 whenever it finds nothing to do,
+  // and "nothing to do" covers both "already trusted" and "did not consider
+  // the file you meant", which are opposite facts. Only reading the trust
+  // status back tells them apart, so only that is reported as done.
+  if (!existsSync(join(target, MISE_CONFIG_FILE))) {
+    step(steps, 'MISE', 'skipped', `no ${MISE_CONFIG_FILE}`);
   } else if (dryRun) {
     step(steps, 'MISE', 'skipped', 'dry-run: would run `mise trust`');
+  } else if (miseTrustStatus(target) === 'trusted') {
+    // No write at all on the already-trusted path. Trusting by name writes a
+    // trusted-configs entry even when mise already trusts the path via the
+    // `trusted_config_paths` setting (measured 2026-09-16), so trusting
+    // unconditionally would add one entry per hydration to a state dir that
+    // already holds >1200 — and would fail under a sandbox that blocks
+    // ~/.local/state, where this step currently no-ops harmlessly.
+    step(
+      steps,
+      'MISE',
+      'done',
+      'already trusted (verified by `mise trust --show`)',
+    );
   } else {
-    const child = runChild(['mise', 'trust'], target);
+    const argv = miseTrustArgv(target);
+    const child = runChild(argv, target);
     if (child.exitCode !== 0) {
       step(
         steps,
@@ -880,7 +1028,22 @@ export function setupEnv(options: SetupEnvOptions = {}): SetupEnvResult {
       result.exitCode = 1;
       return finish(result);
     }
-    step(steps, 'MISE', 'done', 'mise trust');
+    const verified = miseTrustStatus(target);
+    if (verified === 'trusted') {
+      step(steps, 'MISE', 'done', `${argv.join(' ')} — verified trusted`);
+    } else {
+      // Exit 0 and still not trusted. Not 'failed' — nothing errored — and
+      // emphatically not 'done'. Hydration CONTINUES: the later steps fail on
+      // their own terms if this actually mattered, and aborting here would
+      // newly break runs that complete today.
+      step(
+        steps,
+        'MISE',
+        'unknown',
+        `${argv.join(' ')} exited 0, but \`mise trust --show\` then reported ` +
+          `'${verified}' for this path — trust is NOT confirmed`,
+      );
+    }
   }
 
   // --- Step 3: git submodules ----------------------------------------------

@@ -45,13 +45,12 @@
  * and a detector that changes state is a bug.
  */
 
-import {execFileSync} from 'node:child_process';
-import {existsSync, lstatSync, readFileSync, realpathSync} from 'node:fs';
-import {homedir} from 'node:os';
+import {existsSync, lstatSync, readFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {satisfies, validRange} from 'semver';
 
 import {
+  miseTrustStatus,
   planWorktreeIncludeCopies,
   resolveGitTopology,
   resolvePrimaryCheckout,
@@ -64,6 +63,18 @@ import {
  * still exactly ONE implementation.
  */
 export {isLinkedWorktree} from './setup-env';
+
+/**
+ * Re-exported on the same principle. The mise trust reader moved next to the
+ * WRITER in setup-env, so the hydration step that trusts and the detector that
+ * reports untrust share one implementation instead of one knowing something the
+ * other does not (home-base-e0ohc).
+ */
+export {
+  miseTrustStatus,
+  parseMiseTrustStatus,
+  type MiseTrustStatus,
+} from './setup-env';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -228,88 +239,6 @@ export function hydrationFixCommand(
   return pkg?.scripts?.[LEGACY_WORKTREE_SETUP_SCRIPT] != null
     ? `bun run ${LEGACY_WORKTREE_SETUP_SCRIPT}`
     : SETUP_ENV_BUNX;
-}
-
-// ---------------------------------------------------------------------------
-// mise trust (READ-ONLY)
-// ---------------------------------------------------------------------------
-
-export type MiseTrustStatus = 'trusted' | 'unknown' | 'untrusted';
-
-/**
- * Parse `mise trust --show` output for the line describing `targetDir` itself.
- *
- * Format (mise 2026.3.17, verified): one `<dir>: trusted|untrusted` line per
- * config file found from the directory UPWARD, so a worktree nested under a
- * mise-using primary checkout yields several lines and only the target's own
- * matters — a parent's trust state is not this worktree's hydration problem.
- * Paths under $HOME are printed tilde-abbreviated and are realpath-resolved
- * (`/private/var/…` on macOS), so both sides are canonicalized before compare.
- *
- * Anything unrecognized returns 'unknown', which reports NO problem. A detector
- * that guesses "untrusted" from unparsed output would block `signal` on a
- * cosmetic upstream output change.
- */
-export function parseMiseTrustStatus(
-  stdout: string,
-  targetDir: string,
-): MiseTrustStatus {
-  const wanted = canonicalPath(targetDir);
-  for (const line of stdout.split('\n')) {
-    const separator = line.lastIndexOf(': ');
-    if (separator <= 0) continue;
-    const pathPart = expandTilde(line.slice(0, separator).trim());
-    const statusPart = line.slice(separator + 2).trim();
-    if (canonicalPath(pathPart) !== wanted) continue;
-    if (statusPart === 'untrusted') return 'untrusted';
-    if (statusPart === 'trusted') return 'trusted';
-    return 'unknown';
-  }
-  return 'unknown';
-}
-
-function expandTilde(inputPath: string): string {
-  if (inputPath === '~') return homedir();
-  if (inputPath.startsWith('~/')) return join(homedir(), inputPath.slice(2));
-  return inputPath;
-}
-
-function canonicalPath(inputPath: string): string {
-  const absolute = resolve(inputPath);
-  try {
-    return realpathSync(absolute);
-  } catch {
-    return absolute;
-  }
-}
-
-/**
- * Trust status of `target`'s own mise.toml, using `mise trust --show` — which
- * the mise docs describe as "Show the trusted status … Does not trust or
- * untrust any files", and which was verified non-mutating here (the
- * trusted-configs state dir was byte-for-byte unchanged across a run). Nothing
- * in this module may prompt or write.
- *
- * Returns 'unknown' when there is no mise.toml or mise is not installed —
- * absence of mise is not a hydration problem.
- */
-export function miseTrustStatus(target: string): MiseTrustStatus {
-  if (!existsSync(join(target, 'mise.toml'))) return 'unknown';
-  let stdout: string;
-  try {
-    stdout = execFileSync('mise', ['trust', '--show', '-C', target], {
-      encoding: 'utf-8',
-      // Explicit, not inherited: Bun's execFileSync otherwise hands the child
-      // the env as it was at process START, ignoring later mutations — and
-      // MISE_TRUSTED_CONFIG_PATHS is exactly the kind of variable a caller may
-      // set programmatically.
-      env: process.env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-  } catch {
-    return 'unknown';
-  }
-  return parseMiseTrustStatus(stdout, target);
 }
 
 // ---------------------------------------------------------------------------
