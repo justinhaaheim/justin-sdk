@@ -1,12 +1,12 @@
 /**
- * The bd adapter — the ONLY place this SDK talks to ~/Dev/life's beads
- * (home-base-p1uj D2, D9).
+ * The bd adapter — the ONLY place this SDK talks to the threads repo's beads
+ * (home-base-p1uj D2 as amended by p1uj.11, D9).
  *
- * HOW bd IS REACHED. `bd` is a zsh alias for `bun run bd` inside ~/Dev/life; it
- * is not on a non-interactive PATH, so every call here is `bun run bd …` with
- * cwd set to the life workspace. The workspace is `JUSTIN_THREADS_LIFE_DIR`-
- * overridable, which is also how the "bd unreachable" path gets exercised for
- * real rather than mocked.
+ * HOW bd IS REACHED. `bd` is a devDependency of the threads repo, not a binary
+ * on a non-interactive PATH, so every call here is `bun run bd …` with cwd set
+ * to that workspace. The workspace is `JUSTIN_THREADS_REPO_DIR`-overridable,
+ * which is also how the "bd unreachable" path gets exercised for real rather
+ * than mocked.
  *
  * NOTHING HERE THROWS PAST THE ADAPTER. Every function returns a Result, and
  * the failure side is a tagged union rather than a string, because the four
@@ -44,7 +44,7 @@ import {mkdtempSync, rmSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
-import {lifeRepoDir} from './paths';
+import {threadsRepoDir} from './paths';
 
 import type {EnvLike} from './paths';
 
@@ -120,6 +120,44 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
+ * Does this stderr describe a LOCK we should retry? (F10, p1uj.6.)
+ *
+ * The old test was a bare `/lock/i`, which matched the substring in "blocked"
+ * and "unlock" — so `Blocked by 3 open dependencies` earned three retries with
+ * backoff and a banner naming a cause that was not the cause. Both of those
+ * words are real bd output: `strings` over the shipped 1.1.0 binary (measured
+ * 2026-09-12) finds `Blocked by %d open dependencies: %v`, ` blocked by %s: %s
+ * [%s]`, `[blocked]  - Step is blocked by dependencies` and `depends on (is
+ * blocked by) the specified issue.`
+ *
+ * The WORD BOUNDARY is what fixes it, and it is not a coincidence that it does:
+ * `\block\b` cannot match inside "blocked" or "unlock", because in both the
+ * letters are welded to another word character. Everything else here is
+ * deliberately generous, because the real lock messages could NOT be provoked
+ * live — six concurrent `bd create`s against an isolated $TMPDIR workspace all
+ * exited 0 (the embedded backend serialises writers rather than failing them),
+ * so the catalogue below comes from the binary rather than from a reproduction,
+ * and may be incomplete:
+ *
+ *   embeddeddolt: another process holds the exclusive lock on %s; the embedded
+ *                 backend supports only one writer at a time
+ *   The Dolt database is locked.%s
+ *   Stale lock files detected: %s. Lock files from crashed or killed bd
+ *                 processes prevent new operations.
+ *   timed out after %s opening beads storage. Another bd process or stale
+ *                 storage lock may be blocking memory injection
+ *
+ * Under-matching here is the cheaper mistake: an unrecognised lock is reported
+ * as `failed`, which still prints the real stderr, still spools the payload and
+ * still exits non-zero — it only loses three retries.
+ */
+export function isLockedText(text: string): boolean {
+  if (/\block(s|ed|ing|file|files)?\b/i.test(text)) return true;
+  // EAGAIN from a non-blocking flock, which says nothing about locks at all.
+  return /resource temporarily unavailable/i.test(text);
+}
+
+/**
  * Sandbox denial FIRST, before the lock test. The sandbox's own message is
  * `openat LOCK: operation not permitted`, which matches both patterns — and
  * retrying it three times with backoff would be pure latency for a failure that
@@ -136,8 +174,8 @@ function classify(
     return {command, detail: text.trim().slice(0, 400), kind: 'sandbox-denied'};
   }
   // `Script not found "bd"` is what bun says when the workspace has no `bd`
-  // script — i.e. when JUSTIN_THREADS_LIFE_DIR points somewhere that is not the
-  // beads workspace. Measured 2026-09-12 while exercising the unreachable path.
+  // script or dependency — i.e. when the resolved threads repo is not a beads
+  // workspace. Measured 2026-09-12 while exercising the unreachable path.
   if (
     spawnError != null ||
     /ENOENT|command not found|no such file|script not found/i.test(text)
@@ -148,20 +186,66 @@ function classify(
       kind: 'unreachable',
     };
   }
-  if (/lock|database is locked|resource temporarily unavailable/i.test(text)) {
+  if (isLockedText(text)) {
     return {command, detail: text.trim().slice(0, 400), kind: 'locked'};
   }
   return {command, detail: text.trim().slice(0, 400), exitCode, kind: 'failed'};
 }
 
+/**
+ * Did this bd run WRITE, and then fail only while exporting? (home-base-p1uj.10)
+ *
+ * MEASURED 2026-09-12, in the Claude Code sandbox with the beads workspace
+ * allowlisted and its `.git` not. The transcript below predates p1uj.11, so the
+ * paths in it are the old ~/Dev/life ones; the shape is what matters and it is
+ * identical in ~/Dev/threads. `bd create … --silent`:
+ *
+ *   exit 1
+ *   stdout: jl-rg5a.1
+ *   stderr: beads: auto-export warning: no Dolt remote configured.
+ *           …
+ *           Error: auto-export: git add failed: exit status 128: fatal: Unable
+ *           to create '/Users/jhaa/Dev/life/.git/index.lock': Operation not
+ *           permitted
+ *
+ * The bead EXISTS. Auto-export runs after the mutation has committed to Dolt,
+ * so an auto-export error is by construction a post-write failure — and calling
+ * it "the write failed" was manufacturing the opposite of the truth: `thread
+ * report` printed NOT RECORDED, spooled the payload, exited 1, and left a real
+ * thread bead behind, so the next `board` drain re-applied the report and
+ * doubled its asks.
+ *
+ * CONSERVATIVE ON PURPOSE. Both halves are required: an auto-export mention AND
+ * a git-staging failure. Anything else — including a bare EPERM, which is what
+ * a genuinely refused Dolt LOCK looks like — keeps the old loud path. Under-
+ * matching costs a spurious spool that drains cleanly; over-matching would
+ * report a write that never happened as recorded.
+ */
+export function isExportOnlyFailure(stderr: string): boolean {
+  if (!/auto-export/i.test(stderr)) return false;
+  return /git add failed|index\.lock|git-add failed/i.test(stderr);
+}
+
 export interface BdContext {
   env: EnvLike;
-  lifeDir: string;
+  /**
+   * Set when a write landed in Dolt but its JSONL export was not git-staged.
+   * A WARNING for the command to print, never a failure — and never silence:
+   * the repo is left in a state someone has to notice, and the tool's own
+   * commit (p1uj.11) is skipped rather than spent on a `.git` known to be
+   * unwritable.
+   */
+  exportUnstaged: boolean;
+  repoDir: string;
 }
 
 export function bdContext(env: EnvLike = process.env): BdContext {
-  return {env, lifeDir: lifeRepoDir(env)};
+  return {env, exportUnstaged: false, repoDir: threadsRepoDir(env)};
 }
+
+/** The one line every command prints when `ctx.exportUnstaged` is set. */
+export const EXPORT_UNSTAGED_WARNING =
+  '⚠️ WARNING: recorded in Dolt, but .beads/issues.jsonl could not be git-staged and therefore was NOT committed (the sandbox denies ~/Dev/threads/.git). Nothing was lost; `justin-sdk thread board` reminds you what is uncommitted.';
 
 /**
  * Run one bd command, retrying only a `locked` failure.
@@ -178,13 +262,20 @@ async function runBd(
   let last: BdFailure | null = null;
   for (let attempt = 0; attempt < MAX_LOCK_ATTEMPTS; attempt += 1) {
     const result = spawnSync('bun', ['run', 'bd', ...args], {
-      cwd: ctx.lifeDir,
+      cwd: ctx.repoDir,
       encoding: 'utf8',
       env: ctx.env as NodeJS.ProcessEnv,
       maxBuffer: 64 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     if (result.error == null && result.status === 0) {
+      return {ok: true, value: result.stdout ?? ''};
+    }
+    // The write LANDED and only its export failed (home-base-p1uj.10). Reported
+    // as success carrying a warning, because that is what happened — the
+    // alternative wrote a duplicate on the next drain.
+    if (result.error == null && isExportOnlyFailure(result.stderr ?? '')) {
+      ctx.exportUnstaged = true;
       return {ok: true, value: result.stdout ?? ''};
     }
     last = classify(
@@ -293,7 +384,7 @@ export async function checkThreadTypes(
 
 /** The fix `prepare` prints when a type is missing. */
 export const REGISTER_TYPES_COMMAND =
-  'cd ~/Dev/life && bun run bd config set types.custom docs,question,source-email,source-message,thread,ask';
+  'cd ~/Dev/threads && bun run bd config set types.custom thread,ask';
 
 /**
  * The thread bead for one session, or null when there genuinely is none.
@@ -516,6 +607,13 @@ export async function createThread(
  * Every field is sent every time, including the full metadata key set: update's
  * `--metadata` merges, so an omitted key would keep whatever the previous report
  * left there. Sending everything makes the merge a replacement.
+ *
+ * `-s in_progress` IS ENOUGH FOR A CLOSED THREAD — no `bd reopen` first (F8,
+ * retired by measurement; see `reopenIssue` for the transcript). A session that
+ * reports after `thread done` resurrects its bead cleanly: `closed_at` and
+ * `close_reason` are both cleared by the status change. That resurrection is
+ * intended, not a leak — the session is demonstrably still running, and a board
+ * that hid it would be claiming less is in flight than there is.
  */
 export async function updateThread(
   ctx: BdContext,
@@ -575,10 +673,37 @@ export async function finalizeThread(
   return {ok: true, value: true};
 }
 
+/**
+ * Move a thread bead to `in_progress` and nothing else (home-base-p1uj.3).
+ *
+ * `thread start` needs this because `bd create` has no status flag at all (see
+ * createThread), so a freshly created bead lands as `open` and a second write is
+ * unavoidable. It does NOT reuse `finalizeThread`: that one rewrites notes and
+ * the whole metadata document, which at start time would mean sending the same
+ * bytes twice for no reason, on the one code path that is paying a session's
+ * startup latency. Each bd call costs ~1.3s wall clock (measured 2026-09-12),
+ * so the smaller command is the point, not tidiness.
+ */
+export async function setThreadInProgress(
+  ctx: BdContext,
+  id: string,
+): Promise<BdResult<true>> {
+  const result = await runBd(ctx, ['update', id, '-s', 'in_progress']);
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
+
 export interface AskBeadFields {
-  blocking: boolean;
   description: string;
   metadata: Record<string, unknown>;
+  /**
+   * The ask's own priority, 0-4 (D15), passed straight through as the bead's bd
+   * priority. The two scales mean the same thing here — the threads repo has
+   * exactly one writer, so nothing else is competing for what P0 means in it —
+   * and mapping them 1:1 is what makes `bd list -p 0` in that repo answer "what
+   * is Justin actually blocked on". It replaces `blocking ? '1' : '2'`.
+   */
+  priority: number;
   title: string;
 }
 
@@ -595,7 +720,7 @@ export async function createAsk(
       '-t',
       'ask',
       '-p',
-      fields.blocking ? '1' : '2',
+      String(Math.min(4, Math.max(0, Math.round(fields.priority)))),
       '--parent',
       threadId,
       '-d',
@@ -656,11 +781,24 @@ export async function closeIssue(
 /**
  * Reopen a closed bead.
  *
- * `bd reopen <id> -r <reason>` exists and is NOT the same as `bd update -s
- * open`: it clears `closed_at` and emits a Reopened event (measured 2026-09-12
- * from `bd reopen --help`). Checked rather than assumed — flag and subcommand
- * parity across bd subcommands is not guaranteed, which is how dispatch 2 found
- * that `bd create` has no `-s` at all.
+ * `bd reopen <id> -r <reason>` reopens AS `open` and emits a Reopened event.
+ *
+ * IT IS NOT NEEDED TO CLEAR `closed_at`, and the earlier claim here that it was
+ * has been retired (F8). MEASURED 2026-09-12 against real bd 1.1.0 in an
+ * isolated `bd init` workspace under $TMPDIR, `bd show --json` after each step:
+ *
+ *   bd close p…-0x5 --reason "probe close"
+ *     → status "closed",  closed_at "2026-09-12T14:26:48Z", close_reason set
+ *   bd update p…-0x5 -s in_progress
+ *     → status "in_progress", closed_at ABSENT, close_reason ABSENT,
+ *       started_at "2026-09-12T14:26:53Z"
+ *   bd reopen p…-a7l -r "probe reopen"   (a second, separately closed bead)
+ *     → status "open", closed_at ABSENT
+ *
+ * So `bd update -s in_progress` already clears `closed_at`, and it lands on the
+ * status D10 wants; `reopen` would need a second write to get there. That is
+ * why `updateThread` reuses a closed thread with a plain status update rather
+ * than reopening it first.
  */
 export async function reopenIssue(
   ctx: BdContext,
@@ -693,6 +831,57 @@ export async function addComment(
 }
 
 /**
+ * Move a bead under a new parent — how a carried ask follows its arc into the
+ * session that is now acting on it (D21, home-base-p1uj.16).
+ *
+ * MEASURED 2026-09-14, real bd 1.1.0, in a throwaway `bd init` workspace under
+ * $TMPDIR (never against ~/Dev/threads):
+ *
+ *   create A, create B, create child --parent A   → child id `probe-gyg.1`
+ *   bd update probe-gyg.1 --parent probe-62o
+ *     → show: "parent": "probe-62o", the parent-child dependency now points at B
+ *     → bd list --parent probe-62o  finds it
+ *     → bd list --parent probe-gyg  no longer returns it
+ *     → the bead's `metadata` document is untouched (askIndex/reportCount/
+ *       priority all still there), and re-parenting back works the same way.
+ *
+ * So the recreate-and-close fallback D21 allowed for is NOT needed, and the ask
+ * KEEPS ITS ID: the `th-eru.10` Justin read in the previous report is the same
+ * id he answers under the new thread. The hierarchical id is not recomputed —
+ * `probe-gyg.1` stayed `probe-gyg.1` under parent `probe-62o` — which looks odd
+ * and is exactly right: an id that changed would break every report, comment and
+ * message that already named it.
+ */
+export async function reparentIssue(
+  ctx: BdContext,
+  id: string,
+  parentId: string,
+): Promise<BdResult<true>> {
+  const result = await runBd(ctx, ['update', id, '--parent', parentId]);
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
+
+/**
+ * Rewrite ONLY a bead's description.
+ *
+ * `updateThread` cannot be reused for the "Continued by <id>" line: it sends the
+ * title, notes and the full metadata document as well, and forces the status to
+ * `in_progress`. Writing that at a predecessor thread would overwrite its report
+ * with this session's, and resurrect a thread Justin had marked done — for what
+ * is meant to be one appended line.
+ */
+export async function setIssueDescription(
+  ctx: BdContext,
+  id: string,
+  description: string,
+): Promise<BdResult<true>> {
+  const result = await runBd(ctx, ['update', id, '-d', description]);
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
+
+/**
  * Merge a few keys into a bead's metadata, leaving the rest alone.
  *
  * THIS IS THE ONE PLACE THE MERGE SEMANTICS ARE WANTED. Everywhere else in this
@@ -700,6 +889,9 @@ export async function addComment(
  * instead of replacing (see the header). Here the merge IS the operation:
  * `thread answer` stamps `answeredAt` on an ask bead and must not disturb
  * `kind`, `blocking`, `defaultAction` or `threadId`, none of which it knows.
+ * `thread report` stamps `continuedBy` on a PREDECESSOR thread the same way
+ * (D21): it knows the successor's id and nothing else about that bead, and the
+ * report living in its metadata belongs to a session that has already ended.
  */
 export async function mergeMetadata(
   ctx: BdContext,

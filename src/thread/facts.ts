@@ -261,6 +261,16 @@ export function userMessageText(record: TranscriptRecord): string | null {
 export interface TranscriptScan {
   entrypoint: string | null;
   lastUserMessage: string | null;
+  /**
+   * The ISO timestamp of the record `lastUserMessage` came from, or null when
+   * no user message was found.
+   *
+   * Added for the Stop hook (home-base-p1uj.15), which compares it against the
+   * newest archived report to tell a recorded report from a hand-written one.
+   * It is read from the SAME record as the text, in the same pass, so the two
+   * can never describe different messages.
+   */
+  lastUserMessageAt: string | null;
   model: string | null;
   startedAt: string | null;
 }
@@ -279,6 +289,7 @@ export function scanTranscriptForThread(path: string): TranscriptScan {
   const scan: TranscriptScan = {
     entrypoint: null,
     lastUserMessage: null,
+    lastUserMessageAt: null,
     model: null,
     startedAt: null,
   };
@@ -309,6 +320,10 @@ export function scanTranscriptForThread(path: string): TranscriptScan {
             text.length > LAST_USER_MESSAGE_CAP
               ? text.slice(0, LAST_USER_MESSAGE_CAP)
               : text;
+          // Same record, same pass — see the field's comment. A record with no
+          // usable timestamp leaves this null rather than borrowing a
+          // neighbour's, because the Stop hook compares it to a clock.
+          scan.lastUserMessageAt = asString(record.timestamp);
         }
       }
     }
@@ -523,6 +538,7 @@ export function collectThreadFacts(
   let scan: TranscriptScan = {
     entrypoint: null,
     lastUserMessage: null,
+    lastUserMessageAt: null,
     model: null,
     startedAt: null,
   };

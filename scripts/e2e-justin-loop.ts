@@ -138,11 +138,29 @@ interface Options {
   scenarios: Scenario[];
   /** Wall-clock bound per scenario, ours — the runner's own is left at 0. */
   boundMin: number;
+  /**
+   * Write `permissions.allow: ['Bash']` into the fixture's settings (default).
+   * `--no-fixture-permissions` turns it off to measure what a REAL looped repo
+   * meets — see writeFixturePermissions.
+   */
+  fixturePermissions: boolean;
   keep: boolean;
   model: string;
   permissionMode: string;
   recordDir: string;
   replayDir: string | null;
+  /**
+   * Forwarded to the runner as `--handoff-settle-min` (D15). 0 = not passed at
+   * all, which is the runner's own default.
+   *
+   * The harness CANNOT reproduce the stall this knob exists for — a session whose
+   * `claude agents` row never reaches `done` happened in 1 of 7 real runs and is
+   * not scriptable from out here. So what a run with this on measures is the
+   * other direction: that arming the second signal does NOT settle sessions that
+   * end normally. A `handoff-settled` outcome in the ledger of a scenario A run
+   * is a FALSE POSITIVE, not a pass.
+   */
+  settleMin: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,6 +183,19 @@ const USAGE = `bun run e2e:justin-loop [options]
                        accepting the disclaimer first. Run
                        \`claude --dangerously-skip-permissions\` once
                        interactively" and exits 1.)
+  --no-fixture-permissions
+                       Do NOT write permissions.allow:["Bash"] into the
+                       fixture's .claude/settings.json (default: it is
+                       written). Turns the fixture back into what a real
+                       looped repo looks like, so the run MEASURES whether a
+                       session gets through the handoff without a permission
+                       prompt. A blocked run is a valid result here, not a
+                       flake — do not retry it, report it.
+  --settle-min=<n>     Forward --handoff-settle-min=<n> to the runner (D15).
+                       0 (default) does not pass the flag at all. The stall it
+                       guards against is not reproducible here, so a run with
+                       this on measures the absence of a FALSE positive: no
+                       handoff-settled outcome in the ledger.
   --keep               Keep the fixture directory even when everything passes
   --help`;
 
@@ -172,12 +203,14 @@ function parseArgs(argv: string[]): Options {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const opts: Options = {
     boundMin: 12,
+    fixturePermissions: true,
     keep: false,
     model: 'haiku',
     permissionMode: 'auto',
     recordDir: join(REPO_ROOT, 'tmp', 'e2e-justin-loop', stamp),
     replayDir: null,
     scenarios: ['a', 'b'],
+    settleMin: 0,
   };
   for (const arg of argv) {
     const [flag, ...rest] = arg.split('=');
@@ -198,10 +231,18 @@ function parseArgs(argv: string[]): Options {
       const n = Number(value);
       if (!(n > 0)) fatal(`--bound-min must be greater than 0 (got ${value})`);
       opts.boundMin = n;
+    } else if (flag === '--settle-min') {
+      const n = Number(value);
+      // A typo'd value must not silently become 0 (= the knob off) on a run
+      // whose whole purpose is to have it on.
+      if (!(n >= 0)) fatal(`--settle-min must be 0 or greater (got ${value})`);
+      opts.settleMin = n;
     } else if (flag === '--model') {
       opts.model = value;
     } else if (flag === '--permission-mode') {
       opts.permissionMode = value;
+    } else if (arg === '--no-fixture-permissions') {
+      opts.fixturePermissions = false;
     } else if (arg === '--keep') {
       opts.keep = true;
     } else {
@@ -352,18 +393,26 @@ function writeShims(binDir: string, claudeBin: string, brBin: string): void {
  * change this script has no business making on anybody's behalf. So the
  * permission lives in the disposable fixture instead — a project settings file
  * inside the temp repo, which reaches these sessions and nothing else.
+ *
+ * `--no-fixture-permissions` (home-base-k7s0) drops the allow entry to turn that
+ * workaround off on purpose: with it, the run measures the loop; without it, the
+ * run measures what a REAL looped repo meets — whether a session can get through
+ * the handoff without being asked. The settings file is still written, empty, so
+ * the allow entry is the ONLY difference between the two fixtures.
  */
-function writeFixturePermissions(fixture: Fixture): void {
+function writeFixturePermissions(fixture: Fixture, allowBash: boolean): void {
   const dir = join(fixture.repo, '.claude');
   mkdirSync(dir, {recursive: true});
   writeFileSync(
     join(dir, 'settings.json'),
     `${JSON.stringify(
-      {
-        permissions: {
-          allow: ['Bash'],
-        },
-      },
+      allowBash
+        ? {
+            permissions: {
+              allow: ['Bash'],
+            },
+          }
+        : {},
       null,
       2,
     )}\n`,
@@ -374,6 +423,7 @@ function buildFixture(
   scenario: Scenario,
   claudeBin: string,
   brBin: string,
+  fixturePermissions: boolean,
 ): Fixture {
   // realpath because macOS hands out /var/folders/… symlinks while a process
   // inside reports /private/var/folders/…; the handoff bead's `worktree` is
@@ -404,7 +454,7 @@ function buildFixture(
       successorInstructions(fixture),
     );
   }
-  writeFixturePermissions(fixture);
+  writeFixturePermissions(fixture, fixturePermissions);
   mustRun(['git', 'add', '-A'], fixture.repo);
   mustRun(['git', 'commit', '-qm', 'chore: e2e fixture'], fixture.repo);
 
@@ -923,11 +973,17 @@ function checkScenarioA(a: Artifacts): Check[] {
       `${beads[0]?.id ?? '(no bead)'} status=${beads[0]?.status ?? 'n/a'}`,
     ),
   );
+  // D14 (home-base-r4fs): the `done` bead has no successor to claim it, so the
+  // RUNNER closes it as the last act of the run. Asserted over every handoff
+  // bead, not just the last: "no open handoff bead is left behind" is the fact
+  // that matters, and checking only beads[1] would miss a third one appearing.
   checks.push(
     check(
-      'the `done` handoff bead is still OPEN (nobody closes it — FINDING-1)',
-      beads[1]?.status === 'open',
-      `${beads[1]?.id ?? '(no bead)'} status=${beads[1]?.status ?? 'n/a'}`,
+      'both handoff beads are closed — the runner closes the `done` one (D14)',
+      beads.length === 2 && beads.every((b) => b.status === 'closed'),
+      beads.length === 0
+        ? '(no handoff beads to check)'
+        : beads.map((b) => `${b.id} status=${b.status}`).join(' · '),
     ),
   );
 
@@ -1107,7 +1163,12 @@ async function runScenario(
   claudeBin: string,
   brBin: string,
 ): Promise<{artifacts: Artifacts; ok: boolean}> {
-  const fixture = buildFixture(scenario, claudeBin, brBin);
+  const fixture = buildFixture(
+    scenario,
+    claudeBin,
+    brBin,
+    opts.fixturePermissions,
+  );
   const slug = slugFor(scenario);
   const recordDir = join(opts.recordDir, scenario);
 
@@ -1125,6 +1186,9 @@ async function runScenario(
     // outcome in the ledger instead of as our own SIGKILL, which says only
     // that something took too long.
     '--blocked-wait-min=2',
+    // Only when asked for (D15): a run with the knob off and a run with it on
+    // must be distinguishable in the recorded argv and stdout.
+    ...(opts.settleMin > 0 ? [`--handoff-settle-min=${opts.settleMin}`] : []),
   ];
   const args =
     scenario === 'a'
@@ -1144,7 +1208,11 @@ async function runScenario(
         ];
 
   console.log(
-    `\n${BOLD}scenario ${scenario.toUpperCase()}${RESET} ${DIM}slug=${slug} model=${opts.model} perms=${opts.permissionMode}\n  fixture ${fixture.repo}\n  bound   ${opts.boundMin}m${RESET}`,
+    // fixture-perms is on the banner because it goes into the recorded stdout:
+    // a measurement run and a normal run are otherwise indistinguishable in the
+    // artifacts, and "did this one have the Bash allow entry" is the whole
+    // question a k7s0 recording is read to answer.
+    `\n${BOLD}scenario ${scenario.toUpperCase()}${RESET} ${DIM}slug=${slug} model=${opts.model} perms=${opts.permissionMode} fixture-perms=${opts.fixturePermissions ? 'allow:Bash' : 'none'}\n  fixture ${fixture.repo}\n  bound   ${opts.boundMin}m${RESET}`,
   );
 
   // A throw here must NOT skip the cleanup, and must not be reported as a run

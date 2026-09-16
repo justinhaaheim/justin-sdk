@@ -152,6 +152,64 @@ describe('AC1: done and blocked stop the loop', () => {
     expect(r.ledger[0].outcome).toBe('done');
   });
 
+  // D14 (home-base-r4fs): a `done` bead has no successor, so nobody else would
+  // ever close it. Before D14 every finished chain left exactly one OPEN handoff
+  // bead behind, in every repo a loop had ever finished in.
+  test('done CLOSES the handoff bead through br, with a reason naming the run (D14)', async () => {
+    const r = await runLoop({
+      opts: {label: 'the-arc'},
+      scans: [
+        [],
+        [beadFrom('hoff-9', {disposition: 'done', from: 'the-arc-1'})],
+      ],
+    });
+    const closes = r.brCalls.filter((c) => c[0] === 'close');
+    expect(closes).toHaveLength(1);
+    // The runId is read off the ledger rather than hardcoded: it is built from
+    // the LOCAL-time stamp, so spelling it out would make this test pass or fail
+    // by timezone.
+    expect(closes[0]).toEqual([
+      'close',
+      'hoff-9',
+      `--reason=chain complete, read by justin-loop run ${r.ledger[0].runId}`,
+    ]);
+    expect(r.ledger[0].runId).toContain('the-arc');
+    expect(r.stdout).toContain('closed hoff-9');
+    expect(r.exitCode).toBe(0);
+  });
+
+  test('a br close that FAILS is printed on stderr WITH br’s reason, and the run still exits 0 (D14)', async () => {
+    const r = await runLoop({
+      brCloseFails: true,
+      opts: {label: 'the-arc'},
+      scans: [
+        [],
+        [beadFrom('hoff-9', {disposition: 'done', from: 'the-arc-1'})],
+      ],
+    });
+    // The arc finished. Only the hygiene failed, so the verdict is unchanged…
+    expect(r.exitCode).toBe(0);
+    // …and the failure is a fact on stderr, never a silent skip.
+    expect(r.stderr).toContain('hoff-9 could NOT be closed');
+    expect(r.stderr).toContain('br exited 1: no issue with id hoff-9');
+    expect(r.stderr).toContain('STILL OPEN');
+    expect(r.stdout).not.toContain('closed hoff-9');
+  });
+
+  test('blocked closes NOTHING and says the bead stays open on purpose (D14)', async () => {
+    const r = await runLoop({
+      opts: {label: 'the-arc'},
+      scans: [
+        [],
+        [beadFrom('hoff-b', {disposition: 'blocked', from: 'the-arc-1'})],
+      ],
+    });
+    expect(r.brCalls.filter((c) => c[0] === 'close')).toHaveLength(0);
+    expect(r.stdout).toContain(
+      'handoff hoff-b stays open — it is the question waiting for you',
+    );
+  });
+
   test('blocked stops at exit 2 and PRINTS the open questions', async () => {
     const r = await runLoop({
       opts: {label: 'the-arc'},
@@ -377,7 +435,7 @@ describe('AC2: stopAndVerify (D6)', () => {
     let stops = 0;
     const signals: string[] = [];
     const deps: StopDeps = {
-      findAgent: () => {
+      findAgent: async () => {
         const row = spec.rowAt(polls++);
         return row === 'unreadable'
           ? {ok: false, reason: 'claude agents --json exited 1'}
@@ -389,11 +447,15 @@ describe('AC2: stopAndVerify (D6)', () => {
         return true;
       },
       sleep: async () => {},
-      stopSession: () => {
+      stopSession: async () => {
         stops++;
         spec.onStop?.();
         return {detail: 'stopped', ok: true};
       },
+      // These tests assert on the REPORT; that the same notes also stream out
+      // through this writer as they are made is asserted in
+      // tests/justin-loop-liveness.test.ts.
+      write: () => {},
     };
     const report = await stopAndVerify('/repo', 'sess-1', 0, deps);
     return {polls, report, signals, stops};
@@ -938,7 +1000,7 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
                     ]),
             }
           : {ok: true, reason: null, stdout: ''},
-      dispatch: (_cwd, args) => {
+      dispatch: async (_cwd, args) => {
         dispatched++;
         rows.set('sess-1', {
           id: 'sess-1',
@@ -951,15 +1013,15 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
         });
         return 'backgrounded · sess-1 · n\n';
       },
-      findAgent: (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
-      gitHead: () => 'abc',
+      findAgent: async (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
+      gitHead: async () => ({ok: true, sha: 'abc'}),
       notifyBlocked: () => {},
       now: () => Date.UTC(2026, 8, 8, 11, 30),
-      preflight: () => [],
-      readUsage: () => null,
+      preflight: async () => [],
+      readUsage: async () => null,
       signalPid: () => true,
       sleep: async () => {},
-      stopSession: (_cwd, id) => {
+      stopSession: async (_cwd, id) => {
         rows.delete(id);
         return {detail: 'stopped', ok: true};
       },
@@ -1018,7 +1080,7 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
                     ]),
             }
           : {ok: true, reason: null, stdout: ''},
-      dispatch: () => {
+      dispatch: async () => {
         dispatched++;
         rows.set('sess-1', {
           id: 'sess-1',
@@ -1031,15 +1093,15 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
         });
         return 'backgrounded · sess-1 · n\n';
       },
-      findAgent: (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
-      gitHead: () => 'abc',
+      findAgent: async (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
+      gitHead: async () => ({ok: true, sha: 'abc'}),
       notifyBlocked: () => {},
       now: () => Date.UTC(2026, 8, 8, 11, 30),
-      preflight: () => [],
-      readUsage: () => null,
+      preflight: async () => [],
+      readUsage: async () => null,
       signalPid: () => true,
       sleep: async () => {},
-      stopSession: (_cwd, id) => {
+      stopSession: async (_cwd, id) => {
         rows.delete(id);
         return {detail: 'stopped', ok: true};
       },
@@ -1061,5 +1123,130 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
     // …and said, out loud, that the ledger did not get written.
     expect(stderr).toContain('could not append');
     expect(stderr).toContain('EACCES');
+  });
+
+  test('a HEAD read that FAILED is reported as unreadable, never as "no commit"', async () => {
+    // home-base-a1go. `gitHead` used to return null on failure, and the only
+    // caller compared two reads: two failures compare EQUAL, so an unreadable
+    // repo was reported as a session that committed nothing — a measurement
+    // nobody took, feeding both the dashboard and the no-progress circuit
+    // breaker (critical rule 6).
+    const rows = new Map<string, AgentRow>();
+    const ledger: LedgerRow[] = [];
+    let stdout = '';
+    let stderr = '';
+    let dispatched = 0;
+    const deps: RunnerDeps = {
+      appendLedgerRow: (_path, row) => {
+        ledger.push(row);
+        return {ok: true, reason: null};
+      },
+      br: (_cwd, args) =>
+        args[0] === 'list'
+          ? {
+              ok: true,
+              reason: null,
+              stdout:
+                dispatched === 0
+                  ? listJson([])
+                  : listJson([
+                      beadFrom('hoff-z', {
+                        disposition: 'done',
+                        from: 'the-arc-1',
+                      }),
+                    ]),
+            }
+          : {ok: true, reason: null, stdout: ''},
+      dispatch: async () => {
+        dispatched++;
+        rows.set('sess-1', {
+          id: 'sess-1',
+          name: 'n',
+          pid: 1,
+          sessionId: 'sess-1-full-uuid',
+          state: 'done',
+          status: 'idle',
+          waitingFor: null,
+        });
+        return 'backgrounded · sess-1 · n\n';
+      },
+      findAgent: async (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
+      gitHead: async () => ({
+        ok: false,
+        reason:
+          'git rev-parse HEAD did not finish within 10000ms and was SIGKILLed',
+      }),
+      notifyBlocked: () => {},
+      now: () => Date.UTC(2026, 8, 8, 11, 30),
+      preflight: async () => [],
+      readUsage: async () => null,
+      signalPid: () => true,
+      sleep: async () => {},
+      stopSession: async (_cwd, id) => {
+        rows.delete(id);
+        return {detail: 'stopped', ok: true};
+      },
+      write: (t) => {
+        stdout += t;
+      },
+      writeErr: (t) => {
+        stderr += t;
+      },
+    };
+    const exitCode = await runJustinLoop(
+      '/repo',
+      {label: 'the-arc', maxSessions: 1, usageGate: false},
+      deps,
+    );
+    expect(exitCode).toBe(0);
+    // The session line says UNKNOWN, and specifically claims neither verdict.
+    // (Matched with the surrounding separators, since the handoff bead's own
+    // text contains the word "committed".)
+    expect(stdout).toContain('· HEAD unreadable ·');
+    expect(stdout).not.toContain('· no commit');
+    expect(stdout).not.toContain('· committed');
+    // The reason reaches stderr rather than being swallowed…
+    expect(stderr).toContain('could not read HEAD');
+    expect(stderr).toContain('SIGKILLed');
+    // …and the ledger records "not measured", not `false`.
+    expect(ledger).toHaveLength(1);
+    expect(ledger[0]?.progressed).toBeNull();
+  });
+
+  test('the circuit breaker SAYS when the streak was unreadable, not just "no commit"', async () => {
+    // An unreadable HEAD counts toward the no-progress streak on purpose —
+    // unknown must never reset a breaker. But the abort reason is what Justin
+    // reads, and "2 sessions with no commit" is a claim about two measurements
+    // that were never taken. The reason names the doubt instead.
+    const r = await runLoop({
+      gitHeadFails: true,
+      opts: {label: 'the-arc', maxSessions: 3, noProgressAbort: 2},
+      scans: [
+        [],
+        [beadFrom('hoff-1', {from: 'the-arc-1'})],
+        [beadFrom('hoff-2', {from: 'the-arc-2'})],
+      ],
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stdout).toContain(
+      '2 sessions with no commit or an unreadable HEAD — circuit breaker',
+    );
+  });
+
+  test('a streak with no unreadable read keeps the plain wording', async () => {
+    // The other half: when every HEAD WAS read and simply did not move, the
+    // reason must not hedge. `gitHead` here returns one fixed sha, so the
+    // comparison is a real measurement that says "nothing was committed".
+    const r = await runLoop({
+      gitHeadStuck: true,
+      opts: {label: 'the-arc', maxSessions: 3, noProgressAbort: 2},
+      scans: [
+        [],
+        [beadFrom('hoff-1', {from: 'the-arc-1'})],
+        [beadFrom('hoff-2', {from: 'the-arc-2'})],
+      ],
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stdout).toContain('2 sessions with no commit — circuit breaker');
   });
 });

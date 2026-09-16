@@ -204,6 +204,53 @@ const componentConfigSchema = z
           .describe(
             'The PREFLIGHT BRANCH POINT for thread reports, not a master switch (home-base-p1uj D6; corrected 2026-09-12, F7b). DEFAULT FALSE. It decides one thing: whether `thread prepare` prints THREADS: ENABLED or THREADS: DISABLED, which is the line the wrap-up rule branches on to fall back to the plain text status report. It does NOT disable the command group — `thread report`, `board`, `answer` and `inbox` all still work when it is false, which is deliberate: a human running them by hand should not be silently refused.',
           ),
+        autoCommit: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether `thread` commits the threads repo’s `.beads/issues.jsonl` itself after every write batch (home-base-p1uj.11). DEFAULT TRUE — the only thread knob that defaults on, because threads live in their own repo whose sole writer is this tool, so committing is finishing the write rather than a new risk. Set it false to batch the commits by hand, or when the threads workspace is not a git repo. A commit that cannot be made is a WARNING, never a lost report.',
+          ),
+        autoPush: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether a successful `thread` commit is followed by `git push origin HEAD` in the threads repo (home-base-p1uj.20, D22). DEFAULT TRUE, and effective only when a remote named `origin` exists — with no origin nothing is attempted and nothing is printed. It exists because a commit that only ever lives on one laptop is not a backup, and it replaces the watcher daemon the dotfiles repo uses: this tool is the threads repo’s only writer, so the push belongs where the write finishes. Never `--force` and never a retry; a push that fails (offline, auth, non-fast-forward) prints ONE warning line naming the git error and exits 0, the next write pushes the backlog, and `justin-sdk thread board` says how many commits are waiting meanwhile. Set it false on a machine that should stay local, or to keep the commit without the network round-trip.',
+          ),
+        enforce: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether the `Stop` hook installed by `justin-sdk add thread-hooks` may BLOCK a session that ends on a status report it cannot prove was recorded (home-base-p1uj.15). DEFAULT FALSE, and the only knob here that can take a turn away from Claude: with it on, `thread stop-check` sees the report delimiters in the final message, finds no archived report newer than Justin’s last message, and exits 2 with a one-line reason telling the agent to run `thread prepare` and `thread report --file`. It blocks a turn at most once (a marker keyed by session and prompt id, plus Claude Code’s own stop_hook_active), never blocks a subagent, and passes silently whenever it cannot measure — a missing transcript, an unreadable archive, a payload that is not JSON. Installing the hook and arming it are two decisions; this is the arming one.',
+          ),
+        repoDir: z
+          .string()
+          .optional()
+          .describe(
+            'The bd workspace holding `thread` and `ask` beads (home-base-p1uj.11). DEFAULT ~/Dev/threads. Overridden by the JUSTIN_THREADS_REPO_DIR env var, which outranks both config files; the older JUSTIN_THREADS_LIFE_DIR still works for one release and prints a deprecation line.',
+          ),
+        startOnSessionStart: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether the SessionStart hook installed by `justin-sdk add thread-hooks` may create this session’s thread bead before it has reported anything (home-base-p1uj.3). DEFAULT FALSE, and gated by `enabled` as well: BOTH must be true. Separate from `enabled` because this one turns every session start and every resume into a Dolt write, so it is the expensive half and must be armed deliberately.',
+          ),
+        render: z
+          .looseObject({
+            emojiHeader: z
+              .boolean()
+              .optional()
+              .describe(
+                'Whether the report header shows repo / branch / worktree / tokens as emoji-prefixed values with no field titles (home-base-p1uj D19). DEFAULT TRUE. False restores the titled fields (**Repo:** … **Branch:** …), which are longer but self-describing. Tokens render as "497k", or "497k / 470k" when usage-check has a numeric wrapUpAt for this session\u2019s role.',
+              ),
+          })
+          .optional()
+          .describe('thread: how the rendered report looks.'),
+        answerUi: z
+          .enum(['classic', 'ink', 'web'])
+          .optional()
+          .describe(
+            'Which UI `thread answer` opens (home-base-p1uj.12). DEFAULT "web": a local page on 127.0.0.1 with one textarea per ask, autosaved to disk on every keystroke burst, where no key can discard text and Enter is a newline. "classic" is the original readline walk — keep it for the iOS remote-control flow, which cannot reach a localhost page. "ink" is accepted and REFUSED in one line: the spike measured it and found no maintained multi-line editor for Ink (ink-text-input is single-line; the multi-line packages are pre-1.0 with three-figure weekly downloads), so it was rejected rather than never considered. Overridden per run by `thread answer --ui <name>` / `--classic`.',
+          ),
       })
       .optional()
       .describe(

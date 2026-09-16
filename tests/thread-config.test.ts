@@ -8,13 +8,17 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {chmodSync, mkdirSync} from 'fs';
+import {chmodSync, existsSync, mkdirSync, readdirSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {resolveThreadConfig} from '../src/thread/config';
 import {
-  lifeBeadsDir,
+  threadsBeadsDir,
+  threadsRepoDir,
+  threadsRepoDirResolution,
+  LIFE_DIR_DEPRECATION_NOTICE,
   probeWritable,
+  resetDeprecationNoticeForTests,
   SANDBOX_DENIED_LINE,
   threadsStateDir,
 } from '../src/thread/paths';
@@ -116,13 +120,90 @@ describe('resolveThreadConfig (D6)', () => {
   });
 });
 
+describe('where the threads repo is (home-base-p1uj.11)', () => {
+  test('nothing configured resolves to ~/Dev/threads, not ~/Dev/life', () => {
+    const {env} = configWorld({});
+    const resolved = threadsRepoDirResolution(env);
+    expect(resolved.source).toBe('default');
+    expect(resolved.dir.endsWith('/Dev/threads')).toBe(true);
+  });
+
+  test('the config file moves it, and says which layer did', () => {
+    const {env} = configWorld({
+      user: {componentConfig: {thread: {repoDir: '/tmp/elsewhere'}}},
+    });
+    expect(threadsRepoDirResolution(env)).toEqual({
+      dir: '/tmp/elsewhere',
+      source: 'config',
+    });
+    expect(resolveThreadConfig({env}).repoDirSource).toBe('user');
+  });
+
+  test('the env var outranks the config file', () => {
+    const {env} = configWorld({
+      user: {componentConfig: {thread: {repoDir: '/tmp/from-config'}}},
+    });
+    expect(
+      threadsRepoDirResolution({
+        ...env,
+        JUSTIN_THREADS_REPO_DIR: '/tmp/from-env',
+      }),
+    ).toEqual({dir: '/tmp/from-env', source: 'env'});
+  });
+
+  test('JUSTIN_THREADS_LIFE_DIR still WORKS, and says once that it is deprecated', () => {
+    // Deprecated means honoured-with-a-notice for one release, not ignored: a
+    // shell or hook that still exports it must keep working, or the move
+    // silently sends that session's beads to a repo nobody is reading.
+    resetDeprecationNoticeForTests();
+    const env = {JUSTIN_THREADS_LIFE_DIR: '/tmp/old-home'};
+    expect(threadsRepoDirResolution(env)).toEqual({
+      dir: '/tmp/old-home',
+      source: 'deprecatedEnv',
+    });
+
+    const said: string[] = [];
+    const realError = console.error;
+    console.error = (...args: unknown[]) => {
+      said.push(args.map(String).join(' '));
+    };
+    try {
+      expect(threadsRepoDir(env)).toBe('/tmp/old-home');
+      expect(threadsRepoDir(env)).toBe('/tmp/old-home');
+      expect(threadsRepoDir(env)).toBe('/tmp/old-home');
+    } finally {
+      console.error = realError;
+    }
+    // ONCE per process: three calls, one line. A notice repeated on every
+    // internal call reads as three problems.
+    expect(said).toEqual([LIFE_DIR_DEPRECATION_NOTICE]);
+    expect(LIFE_DIR_DEPRECATION_NOTICE).toContain('DEPRECATED');
+    expect(LIFE_DIR_DEPRECATION_NOTICE).toContain('JUSTIN_THREADS_REPO_DIR');
+    resetDeprecationNoticeForTests();
+  });
+
+  test('autoCommit DEFAULTS ON — the only thread knob that does', () => {
+    const {cwd, env} = configWorld({});
+    expect(resolveThreadConfig({cwd, env}).autoCommit).toBe(true);
+  });
+
+  test('autoCommit can be turned off per repo', () => {
+    const {cwd, env} = configWorld({
+      project: {componentConfig: {thread: {autoCommit: false}}},
+    });
+    const resolved = resolveThreadConfig({cwd, env});
+    expect(resolved.autoCommit).toBe(false);
+    expect(resolved.autoCommitSource).toBe('project');
+  });
+});
+
 describe('paths', () => {
   test('both roots are env-overridable', () => {
     expect(threadsStateDir({JUSTIN_THREADS_STATE_DIR: '/tmp/x'})).toBe(
       '/tmp/x',
     );
-    expect(lifeBeadsDir({JUSTIN_THREADS_LIFE_DIR: '/tmp/life'})).toBe(
-      '/tmp/life/.beads',
+    expect(threadsBeadsDir({JUSTIN_THREADS_REPO_DIR: '/tmp/threads'})).toBe(
+      '/tmp/threads/.beads',
     );
   });
 
@@ -130,7 +211,7 @@ describe('paths', () => {
     expect(SANDBOX_DENIED_LINE.startsWith('THREADS: SANDBOX DENIED')).toBe(
       true,
     );
-    expect(SANDBOX_DENIED_LINE).toContain('~/Dev/life/.beads');
+    expect(SANDBOX_DENIED_LINE).toContain('~/Dev/threads');
     expect(SANDBOX_DENIED_LINE).toContain('~/.local/state/justin-threads');
     expect(SANDBOX_DENIED_LINE.toLowerCase()).not.toContain('disable');
   });
@@ -140,8 +221,9 @@ describe('probeWritable', () => {
   test('a writable directory probes writable and leaves nothing behind', () => {
     const sb = track(createSandbox());
     const dir = join(sb.path, 'state');
-    expect(probeWritable(dir).kind).toBe('writable');
-    expect(probeWritable(dir).kind).toBe('writable');
+    expect(probeWritable(dir, {create: true}).kind).toBe('writable');
+    expect(probeWritable(dir, {create: true}).kind).toBe('writable');
+    expect(readdirSync(dir)).toEqual([]);
   });
 
   test('a read-only parent is DENIED, not merely failed', () => {
@@ -150,10 +232,51 @@ describe('probeWritable', () => {
     mkdirSync(locked, {recursive: true});
     chmodSync(locked, 0o500);
     try {
-      const probe = probeWritable(join(locked, 'state'));
+      const probe = probeWritable(join(locked, 'state'), {create: true});
       expect(probe.kind).toBe('denied');
     } finally {
       chmodSync(locked, 0o700);
     }
+  });
+
+  /**
+   * F9 — the probe used to `mkdirSync` whatever it was handed, so on a machine
+   * with no ~/Dev/life it CREATED ~/Dev/life/.beads and called it writable;
+   * every bd call then failed with `Script not found "bd"` against a workspace
+   * this tool had fabricated.
+   */
+  test('create:false does NOT create the directory — it reports it missing', () => {
+    const sb = track(createSandbox());
+    const beads = join(sb.path, 'life', '.beads');
+    const probe = probeWritable(beads, {create: false});
+    expect(probe.kind).toBe('missing');
+    expect(existsSync(beads)).toBe(false);
+    expect(existsSync(join(sb.path, 'life'))).toBe(false);
+  });
+
+  test('create:false probes an EXISTING directory for real', () => {
+    const sb = track(createSandbox());
+    const beads = join(sb.path, 'life', '.beads');
+    mkdirSync(beads, {recursive: true});
+    expect(probeWritable(beads, {create: false}).kind).toBe('writable');
+    expect(readdirSync(beads)).toEqual([]);
+  });
+
+  /**
+   * F9's other half: each run only ever removed its OWN pid-named file, so a
+   * probe killed between the write and the unlink left
+   * `.justin-threads-probe-<pid>` inside ~/Dev/life/.beads — untracked in the
+   * life repo forever, because that directory's .gitignore does not cover it.
+   */
+  test('a probe file left by a dead run is swept, not left to accumulate', () => {
+    const sb = track(createSandbox());
+    const dir = join(sb.path, 'state');
+    mkdirSync(dir, {recursive: true});
+    writeFileSync(join(dir, '.justin-threads-probe-999999'), 'probe\n');
+    writeFileSync(join(dir, '.justin-threads-probe-4242'), 'probe\n');
+    writeFileSync(join(dir, 'keep-me.json'), '{}');
+
+    expect(probeWritable(dir, {create: true}).kind).toBe('writable');
+    expect(readdirSync(dir)).toEqual(['keep-me.json']);
   });
 });

@@ -18,11 +18,13 @@
  * here, before anything is shown, so the board never renders a view it knows to
  * be out of date. Nothing is printed when the spool was empty.
  *
- * THE LAST LINE IS THE D13 REMINDER: bd auto-exports `issues.jsonl` and git-adds
- * it, but committing stays manual, so every thread written today is one `git
- * commit` away from being real. The count is measured, and an unmeasurable one
- * says UNKNOWN rather than 0 — "nothing to commit" is the reassuring reading,
- * and the reassuring reading is the dangerous one.
+ * THE LAST LINES ARE AN EXCEPTION REPORT, NOT A REMINDER (p1uj.11 retiring D13,
+ * then p1uj.20/D22). The tool now commits the threads repo itself after every
+ * write AND pushes it, so a dirty `issues.jsonl` means a commit FAILED and a
+ * branch ahead of origin means a push FAILED — each needs a human. Nothing is
+ * printed when the repo is clean and pushed; an unmeasurable one says UNKNOWN
+ * rather than 0, since "nothing to commit" and "nothing to push" are the
+ * reassuring readings and the reassuring reading is the dangerous one.
  */
 
 import {spawnSync} from 'child_process';
@@ -35,8 +37,17 @@ import {
   type BdIssue,
 } from './bd';
 import {bdContext} from './bd';
+import {
+  aheadOfOrigin,
+  commitThreadsRepo,
+  describeCommit,
+  PUSH_REMOTE,
+} from './commit';
 import {drainSpool, renderDrain, type SpoolApplier} from './drain';
-import {lifeRepoDir} from './paths';
+import {threadsRepoDir} from './paths';
+import {readAskPriority, readReportCount} from './metadata';
+import {priorityLabel} from './render';
+import {ASK_PRIORITY_BLOCKING} from './schema';
 
 import type {EnvLike} from './paths';
 
@@ -50,8 +61,9 @@ const STOP_GLYPH: Record<string, string> = {
 };
 
 export interface BoardAsk {
-  blocking: boolean;
   id: string;
+  /** 0-4 (D15), via `readAskPriority` so a v1 ask bead still sorts. */
+  priority: number;
   repo: string | null;
   reportedAt: string | null;
   threadId: string;
@@ -63,12 +75,21 @@ export interface BoardRow {
   age: string;
   blockingAsks: number;
   branch: string | null;
+  /**
+   * The successor thread that took this arc over (D21), when there is one —
+   * `metadata.continuedBy`, written by the session that continued it.
+   */
+  continuedBy: string | null;
   id: string;
   mergeState: string | null;
   openAsks: number;
   progress: number | null;
   repo: string | null;
+  /** True when this thread has never reported: `thread start` made it and stopped. */
+  reported: boolean;
   reportedAt: string | null;
+  /** When the thread began — `threadStartedAt`, else the session's `startedAt`. */
+  startedAt: string | null;
   stopDetail: string | null;
   stopKind: string | null;
   title: string;
@@ -83,7 +104,7 @@ export interface BoardRow {
  * rewritten to assert nothing, which is how age formatting stops being tested.
  */
 export function formatAge(reportedAt: string | null, now: Date): string {
-  if (reportedAt == null) return 'age UNKNOWN';
+  if (reportedAt == null || reportedAt === '') return 'age UNKNOWN';
   const then = Date.parse(reportedAt);
   if (Number.isNaN(then)) return 'age UNKNOWN';
   const seconds = Math.round((now.getTime() - then) / 1000);
@@ -117,6 +138,8 @@ export function threadIdOfAsk(ask: BdIssue): string | null {
 }
 
 export interface BoardData {
+  /** Continued threads left out of `rows` (D21). 0 means none were. */
+  hiddenContinued: number;
   orphanAsks: BoardAsk[];
   rows: BoardRow[];
 }
@@ -126,6 +149,7 @@ export function buildBoard(
   threads: readonly BdIssue[],
   asks: readonly BdIssue[],
   now: Date,
+  options: {includeContinued?: boolean} = {},
 ): BoardData {
   const byThread = new Map<string, BdIssue[]>();
   const orphanAsks: BoardAsk[] = [];
@@ -139,8 +163,8 @@ export function buildBoard(
       // less waiting for him than there is.
       const meta = (ask.metadata ?? {}) as Record<string, unknown>;
       orphanAsks.push({
-        blocking: meta.blocking === true,
         id: ask.id,
+        priority: readAskPriority(meta),
         repo: null,
         reportedAt: metaString(meta, 'createdAt'),
         threadId: threadId ?? 'UNKNOWN',
@@ -154,17 +178,39 @@ export function buildBoard(
     else bucket.push(ask);
   }
 
-  const rows = threads.map((thread): BoardRow => {
+  const allRows = threads.map((thread): BoardRow => {
     const meta = (thread.metadata ?? {}) as Record<string, unknown>;
     const mine = byThread.get(thread.id) ?? [];
     const progress = meta.progressPercent;
+    // A START-ONLY THREAD HAS AN AGE (p1uj.8, folded into p1uj.7 item A).
+    // `thread start` writes `reportedAt: null` on purpose — nothing has been
+    // reported — and the row read "age UNKNOWN ? --%", which says "I know
+    // nothing about this" about a session whose start time is right there in
+    // `threadStartedAt`. The stamp is chosen, never merged: `reportedAt` when
+    // this thread HAS reported, the start stamp when it has not, and the row
+    // says which it is showing rather than passing one off as the other.
+    const reportedAt = metaString(meta, 'reportedAt');
+    const startedAt =
+      metaString(meta, 'threadStartedAt') ?? metaString(meta, 'startedAt');
+    // `reportCount` is consulted as well as `reportedAt`, so a report whose
+    // stamp is missing is still a REPORT with an unknown age — never demoted to
+    // "no report yet", which would hide a real session's stop reason.
+    const reported = reportedAt != null || readReportCount(meta) > 0;
     return {
-      age: formatAge(metaString(meta, 'reportedAt'), now),
+      age: reported
+        ? formatAge(reportedAt, now)
+        : startedAt == null
+          ? 'age UNKNOWN'
+          : `started ${formatAge(startedAt, now)}`,
+      // P0 IS THE NEW BLOCKING (D15). The field keeps its name because the
+      // row's meaning is unchanged — "how many of these stop Justin" — and
+      // `readAskPriority` is what lets an ask bead written before this release,
+      // which carries only `blocking`, still be counted.
       blockingAsks: mine.filter(
-        (ask) =>
-          ((ask.metadata ?? {}) as Record<string, unknown>).blocking === true,
+        (ask) => readAskPriority(ask.metadata) === ASK_PRIORITY_BLOCKING,
       ).length,
       branch: metaString(meta, 'branch'),
+      continuedBy: metaString(meta, 'continuedBy'),
       id: thread.id,
       mergeState: metaString(meta, 'mergeState'),
       openAsks: mine.length,
@@ -173,7 +219,9 @@ export function buildBoard(
           ? progress
           : null,
       repo: metaString(meta, 'repo'),
-      reportedAt: metaString(meta, 'reportedAt'),
+      reported,
+      reportedAt,
+      startedAt,
       stopDetail: metaString(meta, 'stopReasonDetail'),
       stopKind: metaString(meta, 'stopReasonKind'),
       title: thread.title ?? '(no title)',
@@ -181,14 +229,45 @@ export function buildBoard(
     };
   });
 
-  return {orphanAsks, rows};
+  // A CONTINUED THREAD IS FOLDED AWAY, NOT DROPPED (D21). Its arc lives on in
+  // its successor, so leaving it on the board makes every handover look like two
+  // live sessions — but it is hidden ONLY when nothing is still waiting on it.
+  // A continued thread with open asks stays visible whatever the flag says: the
+  // whole point of the board is what Justin still owes, and hiding an open ask
+  // because the session that asked it ended would be the reassuring direction of
+  // exactly the loss this epic exists to stop. The count line says how many were
+  // folded, so "fewer rows" is never silent.
+  const rows =
+    options.includeContinued === true
+      ? allRows
+      : allRows.filter((row) => row.continuedBy == null || row.openAsks > 0);
+  return {hiddenContinued: allRows.length - rows.length, orphanAsks, rows};
+}
+
+/**
+ * Newest activity first — a REPORT if there is one, otherwise when the thread
+ * started (conductor, extending item A).
+ *
+ * Sorting on `reportedAt` alone sent every start-only thread to the bottom,
+ * under threads last touched days ago: a session that started ten minutes ago
+ * is the most recent thing on the board, and burying it is the same mistake as
+ * printing its age as UNKNOWN. A thread with neither stamp sorts last, where an
+ * empty string puts it, rather than being dropped.
+ */
+function activityAt(row: BoardRow): string {
+  return row.reportedAt ?? row.startedAt ?? '';
 }
 
 function byReportedAtDesc(a: BoardRow, b: BoardRow): number {
-  return (b.reportedAt ?? '').localeCompare(a.reportedAt ?? '');
+  return activityAt(b).localeCompare(activityAt(a));
 }
 
 function renderRow(row: BoardRow): string {
+  // A thread that has not reported says so, instead of rendering three columns
+  // of "I don't know" (`? --%`) for facts that do not exist yet.
+  if (!row.reported) {
+    return `  ${row.age.padStart(9)} ⏳ no report yet   ${row.title}\n             ${row.id}${row.branch == null ? '' : ` · ${row.branch}`}`;
+  }
   const glyph = row.stopKind == null ? '?' : (STOP_GLYPH[row.stopKind] ?? '•');
   const progress =
     row.progress == null ? ' --%' : `${String(row.progress).padStart(3)}%`;
@@ -241,7 +320,7 @@ export function renderRecent(data: BoardData): string {
   return ['', ...rows.map(renderRow)].join('\n');
 }
 
-/** Every open ask across every thread: blocking first, then newest first. */
+/** Every open ask across every thread: P0 first, then newest first. */
 export function collectOpenAsks(
   threads: readonly BdIssue[],
   asks: readonly BdIssue[],
@@ -254,8 +333,8 @@ export function collectOpenAsks(
     const thread = threadId == null ? undefined : byId.get(threadId);
     const threadMeta = (thread?.metadata ?? {}) as Record<string, unknown>;
     rows.push({
-      blocking: meta.blocking === true,
       id: ask.id,
+      priority: readAskPriority(meta),
       repo: metaString(threadMeta, 'repo'),
       reportedAt: metaString(meta, 'createdAt'),
       threadId: threadId ?? 'UNKNOWN',
@@ -264,7 +343,7 @@ export function collectOpenAsks(
     });
   }
   return rows.sort((a, b) => {
-    if (a.blocking !== b.blocking) return a.blocking ? -1 : 1;
+    if (a.priority !== b.priority) return a.priority - b.priority;
     return (b.reportedAt ?? '').localeCompare(a.reportedAt ?? '');
   });
 }
@@ -276,7 +355,7 @@ export function renderOpenAsks(asks: readonly BoardAsk[]): string {
   const lines: string[] = [''];
   asks.forEach((ask, index) => {
     lines.push(
-      `  ${index + 1}. ${ask.blocking ? '🛑 BLOCKING' : '  non-blocking'} · ${ask.id}`,
+      `  ${index + 1}. ${ask.priority === ASK_PRIORITY_BLOCKING ? '🛑 P0' : `   ${priorityLabel(ask.priority)}`} · ${ask.id}`,
     );
     lines.push(`     ${ask.title}`);
     lines.push(
@@ -289,29 +368,75 @@ export function renderOpenAsks(asks: readonly BoardAsk[]): string {
 }
 
 /**
- * D13's reminder line. Measured, and UNKNOWN when it cannot be.
+ * WHAT IS STILL UNCOMMITTED — which, since p1uj.11, means SOMETHING FAILED.
  *
- * The tool deliberately does not commit life's `issues.jsonl` (a cross-repo
- * commit from every session's wrap-up is an index.lock hazard), so this is the
- * only thing standing between a written thread and a committed one.
+ * This used to be D13's standing reminder: the tool did not commit the beads
+ * JSONL, so the board nagged after every session. The tool now commits after
+ * every write batch (`commit.ts`), so a dirty `issues.jsonl` is no longer the
+ * normal state — it means a commit was refused (a denied `.git` under the
+ * sandbox, an `index.lock`, `autoCommit` turned off). Hence `null` for the
+ * clean case: the board says nothing when there is nothing wrong.
+ *
+ * UNKNOWN is still its own answer, and is still printed. "git could not be
+ * read" is not "there is nothing uncommitted" (rule 6) — and here the
+ * reassuring reading is the dangerous one, because it would hide exactly the
+ * reports that never reached git.
  */
-export function uncommittedLine(env: EnvLike, dir?: string): string {
-  const lifeDir = dir ?? lifeRepoDir(env);
+export function uncommittedLine(env: EnvLike, dir?: string): string | null {
+  const repoDir = dir ?? threadsRepoDir(env);
   const result = spawnSync(
     'git',
     ['diff', '--numstat', 'HEAD', '--', '.beads/issues.jsonl'],
-    {cwd: lifeDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']},
+    {cwd: repoDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']},
   );
   if (result.error != null || result.status !== 0) {
     const detail = (result.stderr ?? '').trim() || String(result.error ?? '');
-    return `📌 uncommitted beads in ~/Dev/life: UNKNOWN — git could not be read (${detail.slice(0, 120)})`;
+    return `📌 uncommitted beads in ${repoDir}: UNKNOWN — git could not be read (${detail.slice(0, 120)})`;
   }
   const line = (result.stdout ?? '').trim();
-  if (line === '') {
-    return '📌 ~/Dev/life/.beads/issues.jsonl: no uncommitted changes.';
-  }
+  if (line === '') return null;
   const [added, removed] = line.split('\n')[0]!.split('\t');
-  return `📌 ~/Dev/life/.beads/issues.jsonl has UNCOMMITTED changes (+${added ?? '?'}/-${removed ?? '?'} lines). Commit it so today's threads survive: cd ~/Dev/life && git add .beads/issues.jsonl && git commit -m 'chore(beads): thread reports'`;
+  return `📌 ${repoDir}/.beads/issues.jsonl has UNCOMMITTED changes (+${added ?? '?'}/-${removed ?? '?'} lines), so a commit this tool should have made did NOT happen. Commit it: cd ${repoDir} && git add .beads/issues.jsonl && git commit -m 'chore(beads): thread reports'`;
+}
+
+/**
+ * WHAT IS COMMITTED BUT NOT PUSHED — the second half of the same exception
+ * report (home-base-p1uj.20, D22).
+ *
+ * Since 2026-09-15 the tool pushes after every commit, so a branch that is
+ * ahead of origin means a push did NOT happen: `autoPush` is off, the machine
+ * was offline, auth failed, or origin moved and the push was refused. This is
+ * the ONLY surface that says so after the fact — the warning at the time of the
+ * failure scrolls away with the session that printed it.
+ *
+ * DELIBERATELY NOT GATED ON THE KNOB. With `autoPush` false the board still
+ * reports the backlog, because "how much of this exists only on this laptop" is
+ * a fact about the repo, not about a setting. What IS gated is having a remote:
+ * with no origin there is nothing to be ahead OF, and the line would be a
+ * standing complaint about a repo that is exactly as its owner wants it.
+ *
+ * UNKNOWN, never 0, when git cannot be read (rule 6) — a detached HEAD, an
+ * `origin/<branch>` that has never existed, an unreadable repo. Silence here
+ * means "measured, and there is nothing waiting".
+ */
+export function unpushedLine(env: EnvLike, dir?: string): string | null {
+  const repoDir = dir ?? threadsRepoDir(env);
+  // The SAME measurement the commit path pushes on (`aheadOfOrigin`), so the
+  // warning at write time and the dashboard afterwards can never disagree about
+  // one repo.
+  const ahead = aheadOfOrigin(repoDir, env);
+  switch (ahead.kind) {
+    // No origin means there is nothing to be ahead OF, and a repo that is not a
+    // git repo at all already got its UNKNOWN from `uncommittedLine` directly
+    // above — a second one would be the same fact twice.
+    case 'no-remote':
+    case 'level':
+      return null;
+    case 'unknown':
+      return `📤 unpushed commits in ${repoDir}: UNKNOWN — ${ahead.reason}`;
+    case 'ahead':
+      return `📤 ${repoDir} is ${ahead.count} commit${ahead.count === 1 ? '' : 's'} ahead of ${PUSH_REMOTE}/${ahead.branch}, so a push this tool should have made did NOT happen. Push it: cd ${repoDir} && git push`;
+  }
 }
 
 export type BoardView = 'repo' | 'recent' | 'openAsks';
@@ -319,10 +444,20 @@ export type BoardView = 'repo' | 'recent' | 'openAsks';
 export interface BoardOptions {
   /** Injected by tests so the drain can be exercised without a bd database. */
   apply?: SpoolApplier;
+  /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
+  autoCommit?: boolean;
   env?: EnvLike;
+  /** `--all`: show continued threads too (D21). They are folded away by default. */
+  includeContinued?: boolean;
   json?: boolean;
   now?: Date;
   view?: BoardView;
+}
+
+/** The line that keeps a folded-away thread from being a silent omission. */
+export function continuedHiddenLine(hidden: number): string | null {
+  if (hidden <= 0) return null;
+  return `${hidden} continued thread${hidden === 1 ? '' : 's'} hidden (--all shows them)`;
 }
 
 export async function runThreadBoard(
@@ -346,6 +481,25 @@ export async function runThreadBoard(
   if (options.json !== true) {
     for (const line of drainLines) console.log(line);
   }
+  // A drained report is a write like any other, so it gets the same commit
+  // (p1uj.11). One commit for the whole drain, not one per file: they land in
+  // the same JSONL in the same second, and N commits would say N things
+  // happened when one batch did.
+  if (drained != null && drained.applied > 0) {
+    const commitLine = describeCommit(
+      commitThreadsRepo(
+        `thread drain: applied ${drained.applied} spooled report${drained.applied === 1 ? '' : 's'}`,
+        {
+          autoCommit: options.autoCommit,
+          dir: ctx.repoDir,
+          env,
+          exportUnstaged: ctx.exportUnstaged,
+        },
+      ),
+      'the threads repo',
+    );
+    if (commitLine != null) console.error(commitLine);
+  }
 
   // 2. Exactly two bd calls. Everything below is client-side.
   const threads = await listThreads(ctx);
@@ -363,7 +517,9 @@ export async function runThreadBoard(
     return 1;
   }
 
-  const data = buildBoard(threads.value, asks.value, now);
+  const data = buildBoard(threads.value, asks.value, now, {
+    includeContinued: options.includeContinued,
+  });
 
   if (options.json === true) {
     console.log(
@@ -371,8 +527,10 @@ export async function runThreadBoard(
         {
           asks: collectOpenAsks(threads.value, asks.value),
           drain: drained,
+          hiddenContinued: data.hiddenContinued,
           rows: data.rows,
           uncommitted: uncommittedLine(env),
+          unpushed: unpushedLine(env),
           view,
         },
         null,
@@ -396,7 +554,26 @@ export async function runThreadBoard(
     }
   }
 
-  console.log('');
-  console.log(uncommittedLine(env));
+  // Printed for every view, `--open-asks` included: that view is built from the
+  // full listing, so a hidden ROW never hides an ask — and the count is still
+  // the honest answer to "is this everything?".
+  const continuedLine = continuedHiddenLine(data.hiddenContinued);
+  if (continuedLine != null) {
+    console.log('');
+    console.log(continuedLine);
+  }
+
+  const uncommitted = uncommittedLine(env);
+  if (uncommitted != null) {
+    console.log('');
+    console.log(uncommitted);
+  }
+  // Both lines, not one or the other: a repo can be dirty AND behind on pushes,
+  // and they are two different things to fix.
+  const unpushed = unpushedLine(env);
+  if (unpushed != null) {
+    console.log('');
+    console.log(unpushed);
+  }
   return 0;
 }

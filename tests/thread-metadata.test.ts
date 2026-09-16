@@ -52,8 +52,8 @@ describe('buildThreadMetadata', () => {
     const metadata = buildThreadMetadata({
       askIds: ['jl-x.4'],
       carriedOpenAsks: [
-        {blocking: true, id: 'jl-x.1'},
-        {blocking: false, id: 'jl-x.2'},
+        {priority: 0, id: 'jl-x.1'},
+        {priority: 3, id: 'jl-x.2'},
       ],
       facts: FACTS,
       payload: payload(),
@@ -68,7 +68,7 @@ describe('buildThreadMetadata', () => {
   test('a report that creates NOTHING while carrying a blocking ask still says so', () => {
     const metadata = buildThreadMetadata({
       askIds: [],
-      carriedOpenAsks: [{blocking: true, id: 'jl-x.1'}],
+      carriedOpenAsks: [{priority: 0, id: 'jl-x.1'}],
       facts: FACTS,
       payload: payload({asks: []}),
       reportCount: 2,

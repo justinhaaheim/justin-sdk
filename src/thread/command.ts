@@ -30,6 +30,48 @@ Run this BEFORE writing a report. It prints, in order:
 DISABLED means the knob is off — fall back to the plain text status report.
 SANDBOX DENIED names the two paths to allowlist and exits 0; fall back too.`;
 
+const START_NARRATIVE = `
+Creates the thread bead UP FRONT, status in_progress, titled "(untitled) <repo>
+session <id>" and noted "no report yet", so a session that never reaches its
+status report is still visible on the board instead of vanishing.
+
+It is the same upsert \`thread report\` uses: keyed on metadata.sessionId, so the
+first report REWRITES this bead rather than creating a second.
+
+Both knobs must be true — componentConfig.thread.enabled AND
+componentConfig.thread.startOnSessionStart — and both default false.
+
+Install the hook that runs this with:  justin-sdk add thread-hooks`;
+
+const ANSWER_NARRATIVE = `
+DEFAULT (--ui web): starts a server on 127.0.0.1, opens your browser, and shows
+one textarea per ask on one page.
+
+  every keystroke burst is saved to <state dir>/drafts/<threadId>/<askId>.txt
+  Enter inserts a newline · Tab moves focus · neither ever submits
+  Ctrl/Cmd-S opens a review panel; nothing reaches bd until you press Record
+  Ctrl/Cmd-K takes an ask's stated default · Esc opens a menu, never quits
+  Ctrl-C here, closing the tab, and quitting from the menu all KEEP the drafts
+
+--classic: the original readline walk in this terminal. Keep it for the iOS
+remote-control flow, which cannot reach a page on localhost.
+
+--ui ink: measured and rejected in the spike; the command says why and exits 2.`;
+
+const STOP_CHECK_NARRATIVE = `
+Installed by \`justin-sdk add thread-hooks\` as a Stop hook. It blocks exactly one
+case: the turn's final message carries the report delimiters (a run of 🛑 above
+it and 🕉️ below it) AND this session has archived no report since Justin's last
+message. The block is exit 2, the reason on stderr, and the same reason as JSON
+on stdout.
+
+It passes, silently and with exit 0, on everything else — the knob being off, a
+subagent's Stop, a turn it has already blocked, a final message that is not a
+report, and every case where it could not measure: no transcript, no session id,
+an unreadable archive, a payload that is not JSON.
+
+Needs componentConfig.thread.enforce, which defaults FALSE.`;
+
 export const threadCommand: CommandModule = {
   builder: (y: Argv) =>
     y
@@ -37,15 +79,67 @@ export const threadCommand: CommandModule = {
         'prepare',
         'Preflight a status report: the knob, the sandbox, this session’s thread, its open asks and their answers, the autofilled facts, and the payload skeleton. Always exits 0.',
         (yy) =>
-          yy.epilogue(PREPARE_NARRATIVE).option('session', {
-            describe:
-              'Session id to prepare for (default: $CLAUDE_CODE_SESSION_ID)',
-            type: 'string' as const,
-          }),
+          yy
+            .epilogue(PREPARE_NARRATIVE)
+            .option('continues-from', {
+              describe:
+                'Thread bead id this session continues: lists ITS open asks as ones this report must disposition, and prefills continuesFrom in the skeleton',
+              type: 'string' as const,
+            })
+            .option('session', {
+              describe:
+                'Session id to prepare for (default: $CLAUDE_CODE_SESSION_ID)',
+              type: 'string' as const,
+            }),
         async (argv) => {
           const {runThreadPrepare} = await import('./prepare');
           process.exit(
-            await runThreadPrepare({sessionId: argv.session ?? null}),
+            await runThreadPrepare({
+              continuesFrom: argv['continues-from'] ?? null,
+              sessionId: argv.session ?? null,
+            }),
+          );
+        },
+      )
+      .command(
+        'start',
+        'Create this session’s thread bead before it has reported anything, so an abandoned session is still on the board. Idempotent. Needs componentConfig.thread.enabled AND .startOnSessionStart.',
+        (yy) =>
+          yy
+            .epilogue(START_NARRATIVE)
+            .option('hook', {
+              default: false,
+              describe:
+                'SessionStart hook mode: read the payload from stdin, always exit 0, print at most one line',
+              type: 'boolean' as const,
+            })
+            .option('session', {
+              describe:
+                'Session id to start (default: $CLAUDE_CODE_SESSION_ID)',
+              type: 'string' as const,
+            })
+            .option('title', {
+              describe:
+                'Title instead of the "(untitled) <repo> session <id>" placeholder',
+              type: 'string' as const,
+            })
+            .option('transcript', {
+              describe:
+                'Transcript path, if known — skips the search under ~/.claude/projects',
+              type: 'string' as const,
+            }),
+        async (argv) => {
+          const {runThreadStart, runThreadStartHook} = await import('./start');
+          if (argv.hook === true) {
+            process.exit(await runThreadStartHook());
+            return;
+          }
+          process.exit(
+            await runThreadStart({
+              sessionId: argv.session ?? null,
+              title: argv.title ?? null,
+              transcriptPath: argv.transcript ?? null,
+            }),
           );
         },
       )
@@ -75,6 +169,12 @@ export const threadCommand: CommandModule = {
             // instead, where it lands on the same one-line/exit-2 path as every
             // other refusal. Exit 2 is the documented "refused, nothing was
             // written" code; a usage error is exactly that.
+            .option('full', {
+              default: false,
+              describe:
+                'Print everything: work product, beads touched, every What I did item, and the full last message. The default is the compact report; the thread bead always stores the full one.',
+              type: 'boolean' as const,
+            })
             .option('session', {
               describe:
                 'Session id to report for (default: $CLAUDE_CODE_SESSION_ID)',
@@ -85,9 +185,27 @@ export const threadCommand: CommandModule = {
           process.exit(
             await runThreadReport({
               file: argv.file ?? null,
+              full: argv.full === true,
               sessionId: argv.session ?? null,
               stdin: argv.stdin === true,
             }),
+          );
+        },
+      )
+      .command(
+        'stop-check',
+        'Stop hook: refuse to let a session finish on a status report it cannot prove was recorded. Reads the hook payload on stdin. Exit 0 pass (silent) · 2 blocked. Needs componentConfig.thread.enforce.',
+        (yy) =>
+          yy.epilogue(STOP_CHECK_NARRATIVE).option('explain', {
+            default: false,
+            describe:
+              'Print the branch that decided and the elapsed ms to stderr. Off in hook mode, where every pass is silent.',
+            type: 'boolean' as const,
+          }),
+        async (argv) => {
+          const {runThreadStopCheck} = await import('./stop-check');
+          process.exit(
+            runThreadStopCheck({explain: argv.explain === true}).exitCode,
           );
         },
       )
@@ -100,6 +218,12 @@ export const threadCommand: CommandModule = {
               describe: 'Thread bead id (e.g. jl-x7q). Omit for this session.',
               type: 'string' as const,
             })
+            .option('full', {
+              default: false,
+              describe:
+                'Print everything: work product, beads touched, every What I did item, and the full last message. The default is the compact report; the thread bead always stores the full one.',
+              type: 'boolean' as const,
+            })
             .option('session', {
               describe: 'Look up by this session id instead of the current one',
               type: 'string' as const,
@@ -108,6 +232,7 @@ export const threadCommand: CommandModule = {
           const {runThreadShow} = await import('./show');
           process.exit(
             await runThreadShow({
+              full: argv.full === true,
               sessionId: argv.session ?? null,
               threadId: (argv.threadId as string | undefined) ?? null,
             }),
@@ -116,12 +241,19 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'answer [threadId]',
-        'Walk this thread’s open asks one at a time and record your answers as bd comments. Needs a terminal. Exit 0 walked · 1 a write failed · 2 could not start.',
+        'Answer this thread’s open asks. Opens a local page where drafts autosave to disk and no key discards text; --classic walks them in the terminal instead. Exit 0 recorded · 1 a write failed · 2 nothing recorded.',
         (yy) =>
           yy
+            .epilogue(ANSWER_NARRATIVE)
             .positional('threadId', {
               describe: 'Thread bead id. Omit for this session’s thread.',
               type: 'string' as const,
+            })
+            .option('classic', {
+              default: false,
+              describe:
+                'The original readline walk in this terminal — the iOS remote-control path',
+              type: 'boolean' as const,
             })
             .option('latest', {
               default: false,
@@ -131,14 +263,22 @@ export const threadCommand: CommandModule = {
             .option('session', {
               describe: 'Look up by this session id instead of the current one',
               type: 'string' as const,
+            })
+            .option('ui', {
+              choices: ['classic', 'ink', 'web'] as const,
+              describe:
+                'Override componentConfig.thread.answerUi for this run (default: web)',
+              type: 'string' as const,
             }),
         async (argv) => {
-          const {runThreadAnswer} = await import('./answer');
+          const {runThreadAnswerUi} = await import('./answer-ui');
           process.exit(
-            await runThreadAnswer({
+            await runThreadAnswerUi({
+              classic: argv.classic === true,
               latest: argv.latest === true,
               sessionId: argv.session ?? null,
               threadId: (argv.threadId as string | undefined) ?? null,
+              ui: (argv.ui as string | undefined) ?? null,
             }),
           );
         },
@@ -183,6 +323,12 @@ export const threadCommand: CommandModule = {
         'Every live thread: what it was, how far it got, why it stopped, and what it needs from you. Drains the spool first. Grouped by repo; --recent for a flat newest-first list; --open-asks for everything waiting on you.',
         (yy) =>
           yy
+            .option('all', {
+              default: false,
+              describe:
+                'Show continued threads too — by default a thread another session took over is folded away (unless it still has open asks)',
+              type: 'boolean' as const,
+            })
             .option('json', {
               default: false,
               describe: 'Print the board as JSON',
@@ -202,6 +348,7 @@ export const threadCommand: CommandModule = {
           const {runThreadBoard} = await import('./board');
           process.exit(
             await runThreadBoard({
+              includeContinued: argv.all === true,
               json: argv.json === true,
               view:
                 argv['open-asks'] === true
@@ -273,7 +420,7 @@ export const threadCommand: CommandModule = {
       .demandCommand(1, 'Please specify a thread subcommand'),
   command: 'thread',
   describe:
-    'Status reports as beads: one thread bead per Claude Code session in ~/Dev/life, with a child ask bead for everything Justin has to do.',
+    'Status reports as beads: one thread bead per Claude Code session in ~/Dev/threads, with a child ask bead for everything Justin has to do.',
   handler: () => {
     // Subcommands do the work; demandCommand prints help for a bare `thread`.
   },

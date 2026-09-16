@@ -120,10 +120,12 @@ describe('renderInboxAsk — the three shapes prepare and inbox share', () => {
   function base(overrides: Partial<InboxAsk> = {}): InboxAsk {
     return {
       answers: [],
-      blocking: false,
+      askIndex: 0,
+      priority: 3,
       defaultAction: 'I keep by-repo as the default.',
       id: 'jl-kigm.1',
       kind: 'pick',
+      reportCount: 1,
       restated: restateAsk(ASK_DESCRIPTION),
       state: 'unanswered',
       title: 'Which default board view?',
@@ -172,7 +174,7 @@ describe('renderInboxAsk — the three shapes prepare and inbox share', () => {
 describe('an answer written after a skip reaches BOTH inbox and prepare', () => {
   test('skippedAt + a later real comment renders HIS ANSWER, not SKIPPED', () => {
     const metadata = {
-      blocking: true,
+      priority: 0,
       defaultAction: 'I keep by-repo.',
       kind: 'pick',
       skippedAt: '2026-09-12T10:00:00Z',
@@ -186,8 +188,10 @@ describe('an answer written after a skip reaches BOTH inbox and prepare', () => 
         answers: comments
           .map((entry) => stripAnswerPrefix((entry.text ?? '').trim()))
           .filter((text) => text !== '' && text !== SKIP_COMMENT),
-        blocking: true,
+        askIndex: 0,
+        priority: 0,
         defaultAction: 'I keep by-repo.',
+        reportCount: 1,
         id: 'jl-x.1',
         kind: 'pick',
         restated: '[Pick a/b] Which view?',
@@ -209,30 +213,36 @@ describe('renderInbox', () => {
     asks: [
       {
         answers: ['b'],
-        blocking: true,
+        askIndex: 0,
+        priority: 0,
         defaultAction: 'I ship it behind the knob.',
         id: 'jl-e9f4.1',
         kind: 'pick',
+        reportCount: 1,
         restated: restateAsk(ASK_DESCRIPTION),
         state: 'answered',
         title: 'Ship the prototype behind the knob, or wait?',
       },
       {
         answers: [],
-        blocking: false,
+        askIndex: 1,
+        priority: 3,
         defaultAction: 'I leave the knob on.',
         id: 'jl-e9f4.2',
         kind: 'approve',
+        reportCount: 1,
         restated: '[Approve Y/n] Leave the knob on?',
         state: 'skipped',
         title: 'Leave the knob on?',
       },
       {
         answers: [],
-        blocking: false,
+        askIndex: 2,
+        priority: 3,
         defaultAction: 'I accept it and document the behaviour.',
         id: 'jl-e9f4.3',
         kind: 'approve',
+        reportCount: 1,
         restated: '[Approve Y/n] Accept the subagent behaviour?',
         state: 'unanswered',
         title: 'Accept the subagent behaviour?',

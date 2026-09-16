@@ -55,7 +55,7 @@ function twoAskPayload(): ThreadReportPayload {
   const raw = examplePayload();
   raw.asks = [
     {
-      blocking: true,
+      priority: 0,
       context: 'the first question',
       default: 'I take a.',
       kind: 'pick',
@@ -66,7 +66,7 @@ function twoAskPayload(): ThreadReportPayload {
       text: 'Ask one?',
     },
     {
-      blocking: false,
+      priority: 3,
       context: 'the second question',
       default: 'I leave it.',
       kind: 'approve',
@@ -84,7 +84,7 @@ describe('a report interrupted between its two asks', () => {
   test('the retry SUCCEEDS: the orphan is closed and the asks are recreated', async () => {
     const fake = createFakeBd(2); // fail the 2nd `create -t ask`
     const ctx = bdContext(fake.env);
-    ctx.lifeDir = fake.dir;
+    ctx.repoDir = fake.dir;
     const payload = twoAskPayload();
 
     // --- attempt 1: dies after the first ask ---
@@ -140,7 +140,7 @@ describe('a report interrupted between its two asks', () => {
     // on, which is far worse than the bug it replaces.
     const fake = createFakeBd(0);
     const ctx = bdContext(fake.env);
-    ctx.lifeDir = fake.dir;
+    ctx.repoDir = fake.dir;
 
     const first = await writeReportToBd({
       ctx,
@@ -153,17 +153,15 @@ describe('a report interrupted between its two asks', () => {
     const liveAskIds = first.askIds.filter((id): id is string => id != null);
     expect(liveAskIds).toHaveLength(2);
 
-    // Report 2 carries both, as D4 requires.
+    // Report 2 keeps both open. Since D24 that is the v2 bridge's job, not a
+    // payload disposition: `keepOpenAskIds` is what `migrateV2Payload` returns
+    // for an ask a v2 payload marked `carried`.
     const carrying = twoAskPayload();
     carrying.asks = [];
-    carrying.priorAsks = liveAskIds.map((id) => ({
-      detail: 'still waiting on Justin',
-      disposition: 'carried' as const,
-      id,
-    }));
     const second = await writeReportToBd({
       ctx,
       facts: facts('2026-09-12T10:05:00.000Z'),
+      keepOpenAskIds: liveAskIds,
       payload: carrying,
       sessionId: SESSION,
     });
@@ -182,7 +180,7 @@ describe('a report interrupted between its two asks', () => {
   test('the carried asks reach the rendered report IN FULL (F4)', async () => {
     const fake = createFakeBd(0);
     const ctx = bdContext(fake.env);
-    ctx.lifeDir = fake.dir;
+    ctx.repoDir = fake.dir;
 
     const first = await writeReportToBd({
       ctx,
@@ -195,15 +193,15 @@ describe('a report interrupted between its two asks', () => {
 
     const carrying = twoAskPayload();
     carrying.asks = [];
-    carrying.priorAsks = liveAskIds.map((id) => ({
-      detail: 'still waiting',
-      disposition: 'carried' as const,
-      id,
-    }));
     const second = await writeReportToBd({
       ctx,
       facts: facts('2026-09-12T10:05:00.000Z'),
+      keepOpenAskIds: liveAskIds,
       payload: carrying,
+      // FULL: the compact report prints only P0/P1 asks and has no Asks heading
+      // at all (D23). What is under test is that a carried ask is reproduced in
+      // full rather than as a bare id, which is a property of the document.
+      render: {full: true},
       sessionId: SESSION,
     });
     if (second.status !== 'written') throw new Error('unreachable');
@@ -222,7 +220,7 @@ describe('a report interrupted between its two asks', () => {
   test('the PROVISIONAL write on an existing thread never says "no thread bead"', async () => {
     const fake = createFakeBd(0);
     const ctx = bdContext(fake.env);
-    ctx.lifeDir = fake.dir;
+    ctx.repoDir = fake.dir;
 
     await writeReportToBd({
       ctx,
@@ -243,14 +241,10 @@ describe('a report interrupted between its two asks', () => {
       .read()
       .issues.filter((i) => i.type === 'ask' && i.status === 'open');
     const retry = twoAskPayload();
-    retry.priorAsks = open.map((issue) => ({
-      detail: 'still waiting',
-      disposition: 'carried' as const,
-      id: issue.id,
-    }));
     const second = await writeReportToBd({
       ctx,
       facts: facts('2026-09-12T10:05:00.000Z'),
+      keepOpenAskIds: open.map((issue) => issue.id),
       payload: retry,
       sessionId: SESSION,
     });

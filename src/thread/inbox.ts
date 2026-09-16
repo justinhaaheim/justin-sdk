@@ -32,22 +32,33 @@ import {
 } from './bd';
 import {contextFor, resolveThread, type ThreadRef} from './resolve';
 import {
-  lifeBeadsDir,
+  threadsBeadsDir,
+  threadsBeadsMissingLine,
   probeWritable,
   SANDBOX_DENIED_LINE,
   threadsStateDir,
 } from './paths';
 import {SKIP_COMMENT} from './answer';
-import {restateAsk} from './render';
+import {
+  compareAsksForNumbering,
+  numberingFieldsOf,
+  priorityLabel,
+  restateAsk,
+} from './render';
 
 export type AskState = 'answered' | 'skipped' | 'unanswered';
 
 export interface InboxAsk {
   answers: string[];
-  blocking: boolean;
+  /** `metadata.askIndex` — part of the one ask order (F12 follow-up). */
+  askIndex: number | null;
   defaultAction: string;
   id: string;
   kind: string;
+  /** 0-4 (D15), via `readAskPriority`. */
+  priority: number;
+  /** `metadata.reportCount` — which report created this ask. */
+  reportCount: number | null;
   restated: string;
   state: AskState;
   title: string;
@@ -170,7 +181,7 @@ export function renderInbox(view: InboxView): string {
     lines.push(
       ...renderInboxAsk(
         ask,
-        `  ${index + 1}. ${ask.id} · ${ask.blocking ? 'BLOCKING' : 'non-blocking'} · [${ask.kind}]`,
+        `  ${index + 1}. ${ask.id} · ${priorityLabel(ask.priority)} · [${ask.kind}]`,
       ),
     );
   }
@@ -193,7 +204,7 @@ export function renderInbox(view: InboxView): string {
   }
   for (const ask of waiting) {
     lines.push(
-      `  ${ask.id} · ${ask.blocking ? 'BLOCKING' : 'non-blocking'} · ${ask.title}`,
+      `  ${ask.id} · ${priorityLabel(ask.priority)} · ${ask.title}`,
     );
     lines.push(`      if he never answers: ${ask.defaultAction}`);
   }
@@ -223,7 +234,7 @@ export async function collectInboxAsks(
   for (const ask of openAsks) {
     const meta = metadataOf(ask);
     const base = {
-      blocking: meta.blocking === true,
+      ...numberingFieldsOf(meta),
       defaultAction: stringOr(meta.defaultAction, 'UNKNOWN'),
       id: ask.id,
       kind: stringOr(meta.kind, 'UNKNOWN'),
@@ -250,6 +261,13 @@ export async function collectInboxAsks(
       state: askStateOf(meta, comments.value),
     });
   }
+  // ONE ORDER EVERYWHERE (F12, extended to inbox by the conductor). The report,
+  // the `thread answer` walk and this list are the three places an ask is shown
+  // with a number in front of it; this one used to print in bd's listing order,
+  // which is not an order at all. Sorting the RESULT rather than the input
+  // keeps the reads in whatever order bd handed them over — only what Justin
+  // reads is arranged.
+  asks.sort(compareAsksForNumbering);
   return {asks, readFailed};
 }
 
@@ -282,11 +300,17 @@ export async function runThreadInbox(
   // most needs to be told WHICH two paths to allowlist. Without this it got
   // `bd comments … — the sandbox refused it (…)` and exit 1: true, but not
   // actionable, and not the line the rule branches on.
-  const stateProbe = probeWritable(threadsStateDir(env));
-  const beadsProbe = probeWritable(lifeBeadsDir(env));
+  const stateProbe = probeWritable(threadsStateDir(env), {create: true});
+  const beadsProbe = probeWritable(threadsBeadsDir(env), {create: false});
   if (stateProbe.kind === 'denied' || beadsProbe.kind === 'denied') {
     console.log(SANDBOX_DENIED_LINE);
     return 0;
+  }
+  // NOT exit 0 (F9 + rule 6.2): "there is no beads workspace" must never reach
+  // the next turn looking like "he has not answered anything".
+  if (beadsProbe.kind === 'missing') {
+    console.error(threadsBeadsMissingLine(beadsProbe.path));
+    return 1;
   }
 
   const ctx: BdContext = contextFor(env);

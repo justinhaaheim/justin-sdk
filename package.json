@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.28.1",
+  "version": "0.36.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -11,7 +11,8 @@
   "scripts": {
     "test": "bun test",
     "test:watch": "bun test --watch",
-    "e2e:justin-loop": "bun scripts/e2e-justin-loop.ts"
+    "e2e:justin-loop": "bun scripts/e2e-justin-loop.ts",
+    "e2e:thread-answer-web": "bun scripts/e2e-thread-answer-web.ts"
   },
   "exports": {
     "./check-runner": "./src/check-runner.ts",

@@ -32,6 +32,21 @@
  * Exit 0 = walked · 1 = a bd write failed · 2 = could not start (no TTY, no
  * thread, nothing open). A failed comment write is NEVER swallowed: the whole
  * point of this command is that the answer reaches the bead.
+ *
+ * EACH ANSWER IS WRITTEN THE MOMENT IT IS GIVEN (home-base-p1uj.9). It used to
+ * collect every decision and write them all after the note prompt: two bd calls
+ * per ask at ~0.9s each, so Justin's first human walk (six asks) ended in ~10s
+ * of unexplained silence after he pressed Enter on "Anything else for Claude?".
+ * The total bd time is unchanged — it is the same calls — but it now lands
+ * between prompts, where he is reading the next ask anyway, and every write
+ * prints one line. What is left after the note prompt is the note's own write,
+ * announced by `recording…` rather than by nothing.
+ *
+ * A FAILED WRITE DOES NOT END THE WALK. It names the ask on the spot, the walk
+ * carries on to the next one, and the banner at the end repeats every failure
+ * with a copy-pasteable command that writes that exact answer by hand. Stopping
+ * would throw away the answers Justin had not yet given, which is a worse
+ * outcome than a bead that needs one command.
  */
 
 import {createInterface} from 'readline/promises';
@@ -39,23 +54,35 @@ import {createInterface} from 'readline/promises';
 import {
   addComment,
   describeBdFailure,
+  EXPORT_UNSTAGED_WARNING,
   listOpenAsks,
   mergeMetadata,
   type BdContext,
   type BdIssue,
 } from './bd';
+import {commitThreadsRepo, describeCommit} from './commit';
 import {contextFor, resolveThread, type ThreadRef} from './resolve';
-import {optionLetter} from './render';
+import {
+  compareAsksForNumbering,
+  numberingFieldsOf,
+  optionLetter,
+  priorityLabel,
+} from './render';
 
 /** What one ask needs in order to be asked. Everything comes from the bead. */
 export interface AskView {
-  blocking: boolean;
+  /** `metadata.askIndex`: its place in the report that created it (F12). */
+  askIndex: number | null;
   /** The ask bead's rendered description: kind tag, context, options, default. */
   description: string;
   defaultAction: string;
   id: string;
   kind: string;
   optionCount: number;
+  /** 0-4 (D15), via `readAskPriority` so a v1 ask bead still sorts. */
+  priority: number;
+  /** `metadata.reportCount`: which report created it. Null when unrecorded. */
+  reportCount: number | null;
   title: string;
 }
 
@@ -77,16 +104,48 @@ export interface AnswerIo {
   print(text: string): void;
 }
 
+/**
+ * The outcome of ONE write, as the walk needs to see it.
+ *
+ * `retry` is null when there is no single honest command that would finish the
+ * job — a metadata stamp goes through a JSON file, and printing a command that
+ * has never been run would be worse than printing none. Null here means "no
+ * command", never "it worked": the `ok: false` tag is what carries the failure.
+ */
+export type WriteOutcome =
+  | {ok: true}
+  | {detail: string; ok: false; retry: string | null};
+
+/** One failed write, kept for the banner at the end of the walk. */
+export interface WriteFailure {
+  detail: string;
+  /** What failed, in Justin's terms: an ask id, or the note. */
+  label: string;
+  retry: string | null;
+}
+
+/**
+ * Where an answer goes. Injected for the same reason `AnswerIo` is: the walk's
+ * ORDER — write, then prompt the next ask — is the behaviour under test, and it
+ * is only observable if both halves can be watched from outside.
+ */
+export interface AnswerWriter {
+  ask(ask: AskView, decision: AskDecision): Promise<WriteOutcome>;
+  note(text: string): Promise<WriteOutcome>;
+}
+
 export interface WalkResult {
-  decisions: {ask: AskView; decision: AskDecision}[];
+  decisions: {ask: AskView; decision: AskDecision; recorded: boolean}[];
+  failures: WriteFailure[];
   note: string | null;
 }
 
 /** Read an ask bead into the shape the walk needs. Unreadable metadata degrades loudly. */
 export function askViewOf(issue: BdIssue): AskView {
   const meta = (issue.metadata ?? {}) as Record<string, unknown>;
+  const numbering = numberingFieldsOf(meta);
   return {
-    blocking: meta.blocking === true,
+    askIndex: numbering.askIndex,
     defaultAction:
       typeof meta.defaultAction === 'string' && meta.defaultAction !== ''
         ? meta.defaultAction
@@ -98,16 +157,22 @@ export function askViewOf(issue: BdIssue): AskView {
       typeof meta.optionCount === 'number' && Number.isFinite(meta.optionCount)
         ? Math.max(0, Math.floor(meta.optionCount))
         : 0,
+    priority: numbering.priority,
+    reportCount: numbering.reportCount,
     title: issue.title ?? '',
   };
 }
 
-/** Blocking first, then by id, so the order matches the report's numbering. */
+/**
+ * The report's own order (F12), via the shared comparator.
+ *
+ * This used to be "blocking first, then `id.localeCompare`", which disagreed
+ * with the report in two ways at once: `.10` sorted before `.2`, and a carried
+ * ask landed wherever its id happened to fall instead of ahead of the new ones.
+ * "1 yes, 2 b" typed against the pasted report then walked onto different asks.
+ */
 export function orderAsks(asks: readonly AskView[]): AskView[] {
-  return [...asks].sort((a, b) => {
-    if (a.blocking !== b.blocking) return a.blocking ? -1 : 1;
-    return a.id.localeCompare(b.id);
-  });
+  return [...asks].sort(compareAsksForNumbering);
 }
 
 /** The prompt suffix for one ask — what SHAPE of reply this wants. */
@@ -123,6 +188,33 @@ export function promptFor(ask: AskView): string {
 }
 
 /**
+ * Tidy an answer WITHOUT touching its shape (home-base-p1uj.13).
+ *
+ * Both surfaces used to call `.trim()`, which also eats the leading spaces of
+ * the FIRST line — so an answer that opens with an indented code block or a
+ * quoted line arrived at the next Claude turn with that indentation gone, and a
+ * pasted diff or YAML fragment came back subtly wrong. What is actually noise is
+ * trailing whitespace (the newline the terminal or the textarea adds) and blank
+ * LINES above the first real one; indentation inside the answer is content.
+ *
+ * AN ALL-WHITESPACE ANSWER IS STILL EMPTY, and that matters: D3 defines empty as
+ * a SKIP — permission to take the stated default — which is recorded and read
+ * back differently from an answer. This function returns `''` for it, exactly as
+ * `.trim()` did, so that distinction is unchanged.
+ *
+ * ONE implementation for both UIs on purpose (I8): the classic walk and the web
+ * form must record byte-identical text, and two copies of "what counts as
+ * blank" is how they would stop doing so. The browser page therefore sends the
+ * textarea's RAW value and lets the server apply this.
+ */
+export function trimAnswerText(raw: string): string {
+  const lines = raw.replace(/\s+$/, '').split('\n');
+  let start = 0;
+  while (start < lines.length && lines[start]!.trim() === '') start += 1;
+  return lines.slice(start).join('\n');
+}
+
+/**
  * Turn one raw line into a decision.
  *
  * An empty line is a SKIP, which D3 defines as "take your default" — not an
@@ -131,7 +223,7 @@ export function promptFor(ask: AskView): string {
  * Justin had answered with silence.
  */
 export function decisionFor(ask: AskView, raw: string): AskDecision {
-  const text = raw.trim();
+  const text = trimAnswerText(raw);
   if (text === '') return {kind: 'skipped'};
   if (ask.kind === 'pick' && ask.optionCount > 0) {
     const letters = Array.from({length: ask.optionCount}, (_v, index) =>
@@ -154,40 +246,88 @@ export function decisionFor(ask: AskView, raw: string): AskDecision {
 }
 
 /**
- * The walk itself — PURE with respect to the terminal and to bd.
+ * The walk itself — the terminal AND bd behind interfaces.
  *
- * Everything interactive is behind `io`, and nothing is written here; the
- * caller records the result. That is what makes this testable at all: the TTY
+ * Everything interactive is behind `io` and every write is behind `writer`, so
+ * the whole sequence Justin experiences — ask, answer, write, next ask — is
+ * driveable from a test. That split is what makes this testable at all: the TTY
  * half is a dozen lines of adapter, and this is where the behaviour lives.
  */
 export async function walkAsks(
   asks: readonly AskView[],
   io: AnswerIo,
+  writer: AnswerWriter,
 ): Promise<WalkResult> {
-  const decisions: {ask: AskView; decision: AskDecision}[] = [];
+  const decisions: {ask: AskView; decision: AskDecision; recorded: boolean}[] =
+    [];
+  const failures: WriteFailure[] = [];
   const ordered = orderAsks(asks);
 
   for (const [index, ask] of ordered.entries()) {
     io.print('');
+    // `index + 1` IS the number this ask carried in the report, because both
+    // sides sort with `compareAsksForNumbering` over the same set (F12). The
+    // origin report is named too: it is the only thing that still identifies an
+    // ask when the set HAS changed — Justin answered one yesterday, so today's
+    // walk is shorter than the report he is reading from.
+    const from =
+      ask.reportCount == null ? '' : ` · from report #${ask.reportCount}`;
     io.print(
-      `── ${index + 1}/${ordered.length} · ${ask.id} · ${ask.blocking ? 'BLOCKING' : 'non-blocking'} ──`,
+      `── ${index + 1}/${ordered.length} · ${ask.id} · ${priorityLabel(ask.priority)}${from} ──`,
     );
     io.print(ask.description === '' ? ask.title : ask.description);
     io.print('');
     const raw = await io.line(promptFor(ask));
     const decision = decisionFor(ask, raw);
-    decisions.push({ask, decision});
     io.print(
       decision.kind === 'skipped'
         ? `   → skipped; Claude will: ${ask.defaultAction}`
-        : `   → recorded: ${decision.text}`,
+        : `   → answer: ${decision.text}`,
     );
+    // AWAITED, here, before the next ask is printed. Firing it off unawaited
+    // would hide the latency completely, and would also mean a walk that ends
+    // with ctrl-C leaves writes in flight with nothing to report them.
+    const outcome = await writer.ask(ask, decision);
+    decisions.push({ask, decision, recorded: outcome.ok});
+    if (outcome.ok) {
+      io.print(`   ✓ recorded ${ask.id}`);
+    } else {
+      io.print(`   🚨 NOT recorded on ${ask.id} — ${outcome.detail}`);
+      failures.push({
+        detail: outcome.detail,
+        label: ask.id,
+        retry: outcome.retry,
+      });
+    }
   }
 
   io.print('');
   io.print('── Anything else for Claude? (end with an empty line) ──');
-  const note = await io.block('> ');
-  return {decisions, note: note.trim() === '' ? null : note.trim()};
+  const raw = await io.block('> ');
+  // The note gets the same treatment as an answer (p1uj.13): it is free text
+  // Justin may well have indented, and it reaches the next turn through the
+  // same bd comment.
+  const trimmedNote = trimAnswerText(raw);
+  const note = trimmedNote === '' ? null : trimmedNote;
+  if (note == null) return {decisions, failures, note};
+
+  // The one write that CANNOT be moved earlier — it is the thing he just typed.
+  // Announced first, because this is the exact keystroke after which the old
+  // walk went quiet.
+  io.print('');
+  io.print('recording…');
+  const outcome = await writer.note(note);
+  if (outcome.ok) {
+    io.print('   ✓ recorded your note');
+  } else {
+    io.print(`   🚨 your note was NOT recorded — ${outcome.detail}`);
+    failures.push({
+      detail: outcome.detail,
+      label: 'your note',
+      retry: outcome.retry,
+    });
+  }
+  return {decisions, failures, note};
 }
 
 /**
@@ -248,6 +388,8 @@ function createTerminalIo(): {io: AnswerIo; close: () => void} {
 }
 
 export interface AnswerOptions extends ThreadRef {
+  /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
+  autoCommit?: boolean;
   /** Injected by tests; the real command uses the readline adapter. */
   io?: AnswerIo;
 }
@@ -309,89 +451,158 @@ export async function runThreadAnswer(
 
   let result: WalkResult;
   try {
-    result = await walkAsks(asks.value.map(askViewOf), io);
+    result = await walkAsks(
+      asks.value.map(askViewOf),
+      io,
+      bdWriter(ctx, thread.id),
+    );
   } finally {
     if (closeIo != null) closeIo();
   }
 
-  return recordAnswers(ctx, thread.id, result);
+  // Before the summary, so the walk's last line stays the one Justin says.
+  if (ctx.exportUnstaged) console.error(EXPORT_UNSTAGED_WARNING);
+
+  const commitLine = describeCommit(
+    commitThreadsRepo(`thread ${thread.id}: answers`, {
+      autoCommit: options.autoCommit,
+      dir: ctx.repoDir,
+      env,
+      exportUnstaged: ctx.exportUnstaged,
+    }),
+    'the threads repo',
+  );
+  if (commitLine != null) console.error(commitLine);
+
+  return summarizeWalk(result);
 }
 
 /**
- * Write the walk's result to bd.
+ * One argument, safely, for a command Justin will paste into zsh.
  *
- * Each answer is a COMMENT plus a metadata stamp, and the comment is written
- * FIRST: the comment is the answer Justin actually gave, the stamp is only
- * bookkeeping, and a run that died between them must lose the bookkeeping
- * rather than the answer. Every failure is counted and named; the exit code
- * reflects them.
+ * His answers contain apostrophes, quotes and backticks — the retry line is
+ * useless if it mangles them, and actively dangerous if a backtick in an answer
+ * becomes a substitution. Single quotes stop everything; the only character
+ * that needs work is the single quote itself.
  */
-async function recordAnswers(
-  ctx: BdContext,
-  threadId: string,
-  result: WalkResult,
-): Promise<number> {
-  const stampedAt = new Date().toISOString();
-  const failures: string[] = [];
-  let answered = 0;
-  let skipped = 0;
+export function shellSingleQuote(text: string): string {
+  return `'${text.split("'").join(`'\\''`)}'`;
+}
 
-  for (const {ask, decision} of result.decisions) {
-    const text =
-      decision.kind === 'skipped' ? SKIP_COMMENT : `ANSWER: ${decision.text}`;
-    const wrote = await addComment(ctx, ask.id, text);
+/** The comment text one decision becomes. Read back verbatim by `inbox`. */
+export function commentTextFor(decision: AskDecision): string {
+  return decision.kind === 'skipped'
+    ? SKIP_COMMENT
+    : `ANSWER: ${decision.text}`;
+}
+
+/** The exact command that writes one comment by hand, for the failure banner. */
+export function retryCommandFor(id: string, text: string): string {
+  return `cd ~/Dev/threads && bun run bd comments add ${id} ${shellSingleQuote(text)}`;
+}
+
+/**
+ * The real writer: a comment plus a metadata stamp, per answer.
+ *
+ * The COMMENT GOES FIRST. It is the answer Justin actually gave; the stamp is
+ * bookkeeping, and a write that dies between them must lose the bookkeeping
+ * rather than the answer. A failed stamp is therefore reported with that said
+ * out loud — telling him to re-type an answer bd already holds would be its own
+ * small lie.
+ */
+export function bdWriter(ctx: BdContext, threadId: string): AnswerWriter {
+  const writeComment = async (
+    id: string,
+    text: string,
+    stamp: Record<string, unknown>,
+  ): Promise<WriteOutcome> => {
+    const wrote = await addComment(ctx, id, text);
     if (!wrote.ok) {
-      failures.push(`${ask.id} comment — ${describeBdFailure(wrote.failure)}`);
-      continue;
+      return {
+        detail: `comment — ${describeBdFailure(wrote.failure)}`,
+        ok: false,
+        retry: retryCommandFor(id, text),
+      };
     }
-    // Both stamps exist, and only one is ever set: `inbox` has to tell an ask
-    // Justin ANSWERED from one he deliberately SKIPPED from one he never
-    // reached, and three facts need three states, not a boolean.
-    const stamped = await mergeMetadata(ctx, ask.id, {
-      answeredAt: decision.kind === 'answered' ? stampedAt : null,
-      skippedAt: decision.kind === 'skipped' ? stampedAt : null,
-    });
+    const stamped = await mergeMetadata(ctx, id, stamp);
     if (!stamped.ok) {
-      failures.push(
-        `${ask.id} metadata — ${describeBdFailure(stamped.failure)}`,
-      );
-      continue;
+      return {
+        detail: `metadata stamp — ${describeBdFailure(stamped.failure)} (the answer itself IS recorded)`,
+        ok: false,
+        // No command: the stamp goes through a JSON file, and a hand-written
+        // one is not something this has ever run. Naming the miss beats
+        // inventing a fix for it.
+        retry: null,
+      };
     }
-    if (decision.kind === 'skipped') skipped += 1;
-    else answered += 1;
-  }
+    return {ok: true};
+  };
 
-  if (result.note != null) {
-    const wrote = await addComment(ctx, threadId, `NOTE: ${result.note}`);
-    if (!wrote.ok) {
-      failures.push(`${threadId} note — ${describeBdFailure(wrote.failure)}`);
-    } else {
-      const stamped = await mergeMetadata(ctx, threadId, {inboxAt: stampedAt});
-      if (!stamped.ok) {
-        failures.push(
-          `${threadId} inboxAt — ${describeBdFailure(stamped.failure)}`,
-        );
-      }
-    }
-  }
+  return {
+    async ask(ask: AskView, decision: AskDecision): Promise<WriteOutcome> {
+      // Both stamps exist, and only one is ever set: `inbox` has to tell an ask
+      // Justin ANSWERED from one he deliberately SKIPPED from one he never
+      // reached, and three facts need three states, not a boolean.
+      const now = new Date().toISOString();
+      return writeComment(ask.id, commentTextFor(decision), {
+        answeredAt: decision.kind === 'answered' ? now : null,
+        skippedAt: decision.kind === 'skipped' ? now : null,
+      });
+    },
+    async note(text: string): Promise<WriteOutcome> {
+      return writeComment(threadId, `NOTE: ${text}`, {
+        inboxAt: new Date().toISOString(),
+      });
+    },
+  };
+}
+
+/**
+ * The last thing on screen: counts, then either the failure banner or the one
+ * line Justin says back to Claude.
+ *
+ * The counts describe what REACHED bd, not what he typed — an answer that
+ * failed to write is not an answer Claude will ever see, and counting it would
+ * be the reassuring kind of wrong.
+ */
+function summarizeWalk(result: WalkResult): number {
+  const answered = result.decisions.filter(
+    (entry) => entry.recorded && entry.decision.kind === 'answered',
+  ).length;
+  const skipped = result.decisions.filter(
+    (entry) => entry.recorded && entry.decision.kind === 'skipped',
+  ).length;
+  const noteState =
+    result.note == null
+      ? 'none'
+      : result.failures.some((failure) => failure.label === 'your note')
+        ? 'NOT recorded'
+        : 'recorded';
 
   console.log('');
-  console.log(
-    `${answered} answered · ${skipped} skipped · note ${result.note == null ? 'none' : 'recorded'}`,
-  );
-  if (failures.length > 0) {
+  console.log(`${answered} answered · ${skipped} skipped · note ${noteState}`);
+
+  if (result.failures.length > 0) {
     console.error('');
     console.error('🚨 SOME ANSWERS DID NOT REACH bd:');
-    for (const failure of failures) console.error(`  ${failure}`);
-    console.error(
-      'Re-run, or write them by hand: cd ~/Dev/life && bun run bd comments add <askId> "..."',
-    );
+    for (const failure of result.failures) {
+      console.error(`  ${failure.label} — ${failure.detail}`);
+    }
+    const retries = result.failures
+      .map((failure) => failure.retry)
+      .filter((retry): retry is string => retry != null);
+    if (retries.length > 0) {
+      console.error('');
+      console.error('Write them by hand:');
+      for (const retry of retries) console.error(`  ${retry}`);
+    }
     return 1;
   }
 
-  // The last line is the whole handoff back to Claude — printed verbatim so it
-  // can be pasted without editing.
+  // The last line is the whole handoff back to Claude. It is what JUSTIN says,
+  // not a command for him to run: `thread inbox` needs a session id his shell
+  // does not have, and it is Claude's own next step anyway (home-base-p1uj.9).
   console.log('');
-  console.log(`Answers recorded in ${threadId}. Run: justin-sdk thread inbox`);
+  console.log('Tell Claude: answers in');
   return 0;
 }

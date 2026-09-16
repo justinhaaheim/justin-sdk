@@ -27,12 +27,22 @@ import {
   type BdIssue,
 } from './bd';
 import {collectThreadFacts} from './facts';
+import {compactStoredReport} from './render-markdown';
+import {ansiFromReportText} from './render-ansi';
+import {shouldStyle} from '../repo-status/pretty';
+import {priorityLabel} from './render';
+import {readAskPriority} from './metadata';
 
 import type {EnvLike} from './paths';
 
 export interface ShowOptions {
   cwd?: string;
   env?: EnvLike;
+  /**
+   * Print the stored report as it is (D18). The default compacts it — the same
+   * two sections dropped and the same What-I-did cap `thread report` applies.
+   */
+  full?: boolean;
   /** Explicit thread bead id. Omit to look the current session's up. */
   threadId?: string | null;
   sessionId?: string | null;
@@ -96,10 +106,17 @@ export async function runThreadShow(
     `  session ${String(metadata.sessionId ?? 'UNKNOWN')} · report #${String(metadata.reportCount ?? 'UNKNOWN')} · reported ${String(metadata.reportedAt ?? 'UNKNOWN')}`,
   );
   out.push('');
+  // The stored notes are ALWAYS the full rendering (D10): the bead has to be a
+  // complete status report on its own. Compacting happens here, on the way out,
+  // so `--full` costs nothing and the record is never the compact one.
+  const notes = thread.notes;
   out.push(
-    thread.notes == null || thread.notes === ''
+    notes == null || notes === ''
       ? '(this bead carries no rendered report — it may predate D10)'
-      : thread.notes,
+      : ansiFromReportText(
+          options.full === true ? notes : compactStoredReport(notes),
+          {color: shouldStyle()},
+        ),
   );
   console.log(out.join('\n'));
 
@@ -117,7 +134,7 @@ export async function runThreadShow(
   for (const ask of asks.value) {
     const meta = (ask.metadata ?? {}) as Record<string, unknown>;
     tail.push(
-      `  ${ask.id} · [${String(meta.kind ?? 'UNKNOWN')}] ${meta.blocking === true ? 'BLOCKING' : 'non-blocking'} · ${ask.title ?? ''}`,
+      `  ${ask.id} · [${String(meta.kind ?? 'UNKNOWN')}] ${priorityLabel(readAskPriority(meta))} · ${ask.title ?? ''}`,
     );
     const comments = await readComments(ctx, ask.id);
     if (!comments.ok) {

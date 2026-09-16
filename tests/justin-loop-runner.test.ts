@@ -198,13 +198,13 @@ describe('checkGate', () => {
 
   /** A quota reader that records whether — and how often — it was consulted. */
   function countingReader(result: UsageSnapshot | null): {
-    read: () => UsageSnapshot | null;
+    read: () => Promise<UsageSnapshot | null>;
     calls: () => number;
   } {
     let calls = 0;
     return {
       calls: () => calls,
-      read: () => {
+      read: async () => {
         calls++;
         return result;
       },
@@ -213,39 +213,51 @@ describe('checkGate', () => {
 
   const THRESHOLDS = {sessionStopPct: 50, weeklyStopPct: 80};
 
-  test('gate off: skips the quota read entirely, never spawning /usage', () => {
+  test('gate off: skips the quota read entirely, never spawning /usage', async () => {
     // The load-bearing assertion is calls() === 0. "Skips the gate" has to mean
     // no process is spawned; reading the quota and then ignoring it would pass
     // a naive kind-only assertion while still hitting the broken /usage path
     // once per iteration.
     const reader = countingReader(snapshot(5, 10));
-    const decision = checkGate({...THRESHOLDS, usageGate: false}, reader.read);
+    const decision = await checkGate(
+      {...THRESHOLDS, usageGate: false},
+      reader.read,
+    );
     expect(decision.kind).toBe('disabled');
     expect(reader.calls()).toBe(0);
   });
 
-  test('gate off: reports no percentages at all — absent, not zero', () => {
+  test('gate off: reports no percentages at all — absent, not zero', async () => {
     // Critical rule 6. A disabled gate must not hand downstream code a
     // fabricated 0%, which would render as an empty quota bar and read as
     // "plenty of room left".
-    const decision = checkGate({...THRESHOLDS, usageGate: false}, () => null);
+    const decision = await checkGate(
+      {...THRESHOLDS, usageGate: false},
+      async () => null,
+    );
     expect(decision).toEqual({kind: 'disabled'});
     expect(decision).not.toHaveProperty('usage');
   });
 
-  test('gate on: an unreadable quota still fails closed', () => {
+  test('gate on: an unreadable quota still fails closed', async () => {
     // The default path, unchanged. This is the exact shape of the live bug:
     // the reader succeeds as a process but parses to null.
     const reader = countingReader(null);
-    const decision = checkGate({...THRESHOLDS, usageGate: true}, reader.read);
+    const decision = await checkGate(
+      {...THRESHOLDS, usageGate: true},
+      reader.read,
+    );
     expect(decision.kind).toBe('unreadable');
     expect(reader.calls()).toBe(1);
   });
 
-  test('gate on: the fail-closed reason names /usage so the stop is diagnosable', () => {
+  test('gate on: the fail-closed reason names /usage so the stop is diagnosable', async () => {
     // A bare "stopped" would have made the original bug much harder to find —
     // the run summary is the only surface a scheduled job leaves behind.
-    const decision = checkGate({...THRESHOLDS, usageGate: true}, () => null);
+    const decision = await checkGate(
+      {...THRESHOLDS, usageGate: true},
+      async () => null,
+    );
     expect(decision.kind === 'unreadable' ? decision.reason : '').toContain(
       '/usage',
     );
@@ -254,24 +266,27 @@ describe('checkGate', () => {
     );
   });
 
-  test('gate on: proceeds when both windows are under their thresholds', () => {
-    const decision = checkGate({...THRESHOLDS, usageGate: true}, () =>
-      snapshot(5, 10),
+  test('gate on: proceeds when both windows are under their thresholds', async () => {
+    const decision = await checkGate(
+      {...THRESHOLDS, usageGate: true},
+      async () => snapshot(5, 10),
     );
     expect(decision.kind).toBe('ok');
     expect(decision.kind === 'ok' ? decision.usage.sessionPct : null).toBe(5);
   });
 
-  test('gate on: trips at the session threshold, inclusive', () => {
-    const decision = checkGate({...THRESHOLDS, usageGate: true}, () =>
-      snapshot(50, 10),
+  test('gate on: trips at the session threshold, inclusive', async () => {
+    const decision = await checkGate(
+      {...THRESHOLDS, usageGate: true},
+      async () => snapshot(50, 10),
     );
     expect(decision.kind).toBe('tripped');
   });
 
-  test('gate on: trips at the weekly threshold, inclusive', () => {
-    const decision = checkGate({...THRESHOLDS, usageGate: true}, () =>
-      snapshot(5, 80),
+  test('gate on: trips at the weekly threshold, inclusive', async () => {
+    const decision = await checkGate(
+      {...THRESHOLDS, usageGate: true},
+      async () => snapshot(5, 80),
     );
     expect(decision.kind).toBe('tripped');
   });
@@ -427,6 +442,12 @@ describe('justin-loop --dry-run, end to end with a fake claude on PATH', () => {
 
     const env: Record<string, string | undefined> = {
       ...process.env,
+      // PATH alone is no longer the injection point: the runner resolves the
+      // real binary rather than inheriting PATH (home-base-a1go — a cmux shim
+      // named `claude` sits first on PATH and answers `claude stop` by
+      // prompting the model). The env override is the seam, and it is the one
+      // the fixture must use or the fake is never reached.
+      JUSTIN_LOOP_CLAUDE_BIN: fake,
       PATH: `${binDir}:${process.env.PATH ?? ''}`,
     };
     // preflight refuses to run at all when this is set, which would make both
@@ -514,10 +535,18 @@ describe('REAL_DEPS.dispatch — a failed dispatch says WHY', () => {
   });
 
   /**
-   * Put a scripted `claude` first on PATH. `REAL_DEPS.dispatch` resolves the
-   * binary from PATH at call time, so this is the whole injection point.
+   * Point `REAL_DEPS.dispatch` at a scripted `claude`.
+   *
+   * `JUSTIN_LOOP_CLAUDE_BIN` is the injection point since home-base-a1go:
+   * `resolveClaudeBin()` consults it FIRST, ahead of `~/.local/bin/claude`,
+   * which is exactly why the override exists — without it this fixture would
+   * silently drive the real CLI on any machine that has one installed there.
+   * PATH is still prepended so the fake also wins any bare lookup.
    */
-  function withFakeClaude<T>(body: string, run: (repo: string) => T): T {
+  async function withFakeClaude<T>(
+    body: string,
+    run: (repo: string) => Promise<T>,
+  ): Promise<T> {
     const sb = createSandbox();
     sandboxes.push(sb);
     const repo = initRepo(sb, 'project', {'README.md': '# fixture\n'});
@@ -526,16 +555,20 @@ describe('REAL_DEPS.dispatch — a failed dispatch says WHY', () => {
     const fake = join(binDir, 'claude');
     writeFileSync(fake, `#!/bin/sh\n${body}\n`);
     chmodSync(fake, 0o755);
-    const original = process.env.PATH;
-    process.env.PATH = `${binDir}:${original ?? ''}`;
+    const originalPath = process.env.PATH;
+    const originalBin = process.env.JUSTIN_LOOP_CLAUDE_BIN;
+    process.env.PATH = `${binDir}:${originalPath ?? ''}`;
+    process.env.JUSTIN_LOOP_CLAUDE_BIN = fake;
     try {
-      return run(repo);
+      return await run(repo);
     } finally {
-      process.env.PATH = original;
+      process.env.PATH = originalPath;
+      if (originalBin == null) delete process.env.JUSTIN_LOOP_CLAUDE_BIN;
+      else process.env.JUSTIN_LOOP_CLAUDE_BIN = originalBin;
     }
   }
 
-  test('a non-zero exit carries stderr into the banner, not an empty string', () => {
+  test('a non-zero exit carries stderr into the banner, not an empty string', async () => {
     // The real refusal, verbatim (measured 2026-09-09, claude 2.1.266):
     // `--bg` with bypassPermissions needs a one-time interactive acceptance.
     // Before home-base-1r6d.33.10 this reached the run summary as
@@ -543,9 +576,9 @@ describe('REAL_DEPS.dispatch — a failed dispatch says WHY', () => {
     // empty value, which is exactly what critical rule 6 forbids.
     const refusal =
       '--bg with bypassPermissions requires accepting the disclaimer first.';
-    const banner = withFakeClaude(
+    const banner = await withFakeClaude(
       `echo ${JSON.stringify(refusal)} >&2\nexit 1`,
-      (repo) => REAL_DEPS.dispatch(repo, ['--bg', 'hello']),
+      async (repo) => REAL_DEPS.dispatch(repo, ['--bg', 'hello']),
     );
     expect(banner).toContain(refusal);
     expect(banner).toContain('exited 1');
@@ -553,12 +586,12 @@ describe('REAL_DEPS.dispatch — a failed dispatch says WHY', () => {
     expect(parseBackgroundedId(banner)).toBeNull();
   });
 
-  test('a successful dispatch returns stdout unchanged, with nothing appended', () => {
+  test('a successful dispatch returns stdout unchanged, with nothing appended', async () => {
     // The negative control for the arm above: the failure text must never leak
     // into a good banner, and the id must still parse.
-    const banner = withFakeClaude(
+    const banner = await withFakeClaude(
       `echo "backgrounded · abc12345 · a name"\nexit 0`,
-      (repo) => REAL_DEPS.dispatch(repo, ['--bg', 'hello']),
+      async (repo) => REAL_DEPS.dispatch(repo, ['--bg', 'hello']),
     );
     expect(banner).toBe('backgrounded · abc12345 · a name\n');
     expect(parseBackgroundedId(banner)).toBe('abc12345');
@@ -735,6 +768,28 @@ describe('sessionContract — the handoff protocol', () => {
     expect(contract).toContain('--flag=value');
   });
 
+  test('shows the helper on ONE line and forbids backslash wrapping (D13)', () => {
+    // MEASURED 2026-09-09 (home-base-k7s0): this example used to wrap over seven
+    // lines with `\` continuations. A session copied that shape for the REAL
+    // invocation and Claude Code refused to run it without asking ("Contains
+    // backslash-escaped whitespace") — so the one command the control channel
+    // depends on sat blocked on a prompt nobody was there to answer, and with
+    // `blockedWaitMin: null` the run waits for that answer forever.
+    //
+    // Asserted on the COMPOSED text as well: a boot preamble that reintroduced a
+    // continuation would hand the model the same shape by another route.
+    expect(contract).not.toContain('\\\n');
+    expect(bootContract(contract, pickupBoot)).not.toContain('\\\n');
+    // Verbatim, not flag-by-flag: the point is that the whole invocation is
+    // reachable as a single copyable line, which a per-flag check cannot see.
+    expect(contract).toContain(
+      `justin-sdk justin-loop handoff --from=${LABEL} --disposition=continue --arc=<epic or bead id> --worktree=<absolute path> --branch=<branch> --state='<2-4 sentences: where the work actually stands>' --next='<complete starting instructions for your successor>' --open-question='<what only Justin can settle>' --context-tokens=<number from the latest usage notice>`,
+    );
+    expect(contract).toContain(
+      'Write it on one line - never wrap it with backslashes, which forces a permission prompt.',
+    );
+  });
+
   test('forbids `br init` in a repo with no beads workspace', () => {
     // Creating a workspace unasked is exactly the o33r damage shape.
     expect(contract).toContain('do NOT run `br init`');
@@ -768,10 +823,13 @@ describe('sessionContract — the handoff protocol', () => {
   });
 
   test('the composed contract stays small enough to pay for every session', () => {
-    // Measured 2026-09-08, after 1r6d.33.9 added the cwd sentence to both
-    // halves: the contract alone is 4,484 chars, and 5,615 composed with the
-    // pickup preamble — the longest of the three boots — leaving ~385 chars of
-    // headroom under the cap. (The earlier revision measured 994 tokens /
+    // Measured 2026-09-12, after home-base-k7s0 (D13) unwrapped the helper
+    // example and added the one-line rule: the contract alone is 4,524 chars,
+    // and 5,655 composed with the pickup preamble — the longest of the three
+    // boots — leaving ~345 chars of headroom under the cap. (It was 4,484 /
+    // 5,615 / ~385 before that change, measured 2026-09-08 after 1r6d.33.9
+    // added the cwd sentence to both halves. Dropping six `\` continuations
+    // paid for most of the new sentence.) (The earlier revision measured 994 tokens /
     // 4,211 chars and 1,211 tokens / 5,047 chars with gpt-tokenizer,
     // cl100k_base, a stand-in for Claude's tokenizer; only the char counts are
     // re-measured here, at the ~4 chars/token that text ran.) Both numbers grow

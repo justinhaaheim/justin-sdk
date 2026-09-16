@@ -29,26 +29,110 @@ import {
   findThreadBySession,
   listOpenAsks,
   REGISTER_TYPES_COMMAND,
+  showIssue,
 } from './bd';
 import {collectInboxAsks, readThreadNote, renderInboxAsk} from './inbox';
 import {collectThreadFacts} from './facts';
 import {draftPath} from './archive';
 import {
-  lifeBeadsDir,
+  threadsBeadsDir,
+  threadsBeadsMissingLine,
   probeWritable,
   SANDBOX_DENIED_LINE,
   threadsStateDir,
 } from './paths';
-import {payloadSkeleton} from './schema';
+import {
+  PAYLOAD_MUST_SEE_GUIDANCE,
+  PAYLOAD_PRIORITY_GUIDANCE,
+  payloadSkeleton,
+} from './schema';
+import {priorityLabel} from './render';
 import {readReportCount} from './metadata';
 import {resolveThreadConfig} from './config';
 
 import type {EnvLike} from './paths';
 
 export interface PrepareOptions {
+  /**
+   * The thread this session CONTINUES (D21). Its open asks are listed under the
+   * same MUST-disposition heading as the session's own, and `continuesFrom` is
+   * prefilled in the printed skeleton — the two halves of making a handed-over
+   * arc's asks impossible to lose.
+   */
+  continuesFrom?: string | null;
   cwd?: string;
   env?: EnvLike;
   sessionId?: string | null;
+}
+
+/**
+ * The one heading both ask listings appear under.
+ *
+ * It used to say "every one of these MUST appear in priorAsks (D4)", and the
+ * report was refused when one did not. D24 inverted that: they are closed FOR
+ * you, so what this heading has to tell a session is what will happen if it says
+ * nothing — which is the thing a session left to guess gets wrong.
+ */
+const OPEN_ASKS_HEADING =
+  'OPEN ASKS — each of these CLOSES automatically when you report (D24)';
+
+/** What happens to an open ask this payload does not mention. */
+const OPEN_ASKS_POLICY: readonly string[] = [
+  '  Unless you say otherwise, each is closed: "decided: <the default it recorded>".',
+  '  · Justin ANSWERED it → priorAsks {disposition: "answered", detail: "<quote him>"}',
+  '  · it stopped applying → priorAsks {disposition: "irrelevant", detail: "<why>"}',
+  '  · it is STILL LIVE → write it again as a NEW ask with "supersedes": "<its id>"',
+  '    (the old one closes as superseded; asks are never edited in place)',
+];
+
+/**
+ * One thread's open asks, rendered exactly as `thread inbox` renders them.
+ *
+ * Shared by the session's own thread and by a continued one (D21) so the two
+ * cannot drift into showing Justin's answers differently depending on which
+ * session is asking.
+ */
+async function openAsksSection(
+  ctx: ReturnType<typeof bdContext>,
+  threadId: string,
+): Promise<string[]> {
+  const out: string[] = [OPEN_ASKS_HEADING];
+  const asks = await listOpenAsks(ctx, threadId);
+  if (!asks.ok) {
+    // NOT "(none open)". A failed read and an empty thread are opposite facts,
+    // and this is the D4 entry point: "no asks" here is read as permission to
+    // write a report that disposition nothing.
+    out.push(`  UNKNOWN — ${describeBdFailure(asks.failure)}`);
+    return out;
+  }
+  if (asks.value.length === 0) {
+    out.push('  (none open)');
+    return out;
+  }
+  out.push(...OPEN_ASKS_POLICY);
+  // The SAME renderer `thread inbox` uses (home-base-p1uj.2 follow-up). This
+  // used to print every comment as `ANSWER (<time>): <text>`, which showed a
+  // deliberate skip as `ANSWER (...): skipped: use default` and a real answer as
+  // `ANSWER (...): ANSWER: a`. A skip is permission to take a stated default,
+  // not an answer, and this is the D4 entry point run before every report — the
+  // worst surface on which to confuse the two.
+  const collected = await collectInboxAsks(ctx, asks.value);
+  for (const ask of collected.asks) {
+    out.push(
+      ...renderInboxAsk(
+        ask,
+        `  ${ask.id} · [${ask.kind}] ${priorityLabel(ask.priority)} · ${ask.title}`,
+        '     (no answer yet — it will close as "decided: <its default>" unless you restate it)',
+      ),
+    );
+  }
+  const noteRead = await readThreadNote(ctx, threadId);
+  if (noteRead.note != null) {
+    out.push('');
+    out.push('NOTE FROM JUSTIN');
+    for (const line of noteRead.note.split('\n')) out.push(`  ${line}`);
+  }
+  return out;
 }
 
 /** Runs the preflight and prints it. Always resolves 0. */
@@ -74,12 +158,18 @@ export async function runThreadPrepare(
   }
 
   // The two paths the Claude Code sandbox denies from any session outside
-  // ~/Dev/life. Probed BEFORE any bd command, so a denied session never spends
+  // the threads repo. Probed BEFORE any bd command, so a denied session never spends
   // a subprocess (or a permission prompt) on a call that cannot succeed.
-  const stateProbe = probeWritable(threadsStateDir(env));
-  const beadsProbe = probeWritable(lifeBeadsDir(env));
+  // The state dir is OURS to create; the beads dir is bd's (F9) — probing it
+  // with `create` would fabricate a beads workspace on a machine that has none.
+  const stateProbe = probeWritable(threadsStateDir(env), {create: true});
+  const beadsProbe = probeWritable(threadsBeadsDir(env), {create: false});
   if (stateProbe.kind === 'denied' || beadsProbe.kind === 'denied') {
     console.log(SANDBOX_DENIED_LINE);
+    return 0;
+  }
+  if (beadsProbe.kind === 'missing') {
+    console.log(threadsBeadsMissingLine(beadsProbe.path));
     return 0;
   }
 
@@ -126,36 +216,45 @@ export async function runThreadPrepare(
         `  ${thread.id} · ${thread.title ?? '(no title)'} · report #${readReportCount(thread.metadata) + 1} · status ${thread.status ?? 'UNKNOWN'}`,
       );
       out.push('');
-      out.push('OPEN ASKS — every one of these MUST appear in priorAsks (D4)');
-      const asks = await listOpenAsks(ctx, thread.id);
-      if (!asks.ok) {
-        out.push(`  UNKNOWN — ${describeBdFailure(asks.failure)}`);
-      } else if (asks.value.length === 0) {
-        out.push('  (none open)');
-      } else {
-        // The SAME renderer `thread inbox` uses (home-base-p1uj.2 follow-up).
-        // This used to print every comment as `ANSWER (<time>): <text>`, which
-        // showed a deliberate skip as `ANSWER (...): skipped: use default` and a
-        // real answer as `ANSWER (...): ANSWER: a`. A skip is permission to take
-        // a stated default, not an answer, and this is the D4 entry point run
-        // before every report — the worst surface on which to confuse the two.
-        const collected = await collectInboxAsks(ctx, asks.value);
-        for (const ask of collected.asks) {
-          out.push(
-            ...renderInboxAsk(
-              ask,
-              `  ${ask.id} · [${ask.kind}] ${ask.blocking ? 'BLOCKING' : 'non-blocking'} · ${ask.title}`,
-              '     (no answer yet — disposition it as carried or decided)',
-            ),
-          );
-        }
-        const noteRead = await readThreadNote(ctx, thread.id);
-        if (noteRead.note != null) {
-          out.push('');
-          out.push('NOTE FROM JUSTIN');
-          for (const line of noteRead.note.split('\n')) out.push(`  ${line}`);
-        }
-      }
+      out.push(...(await openAsksSection(ctx, thread.id)));
+    }
+  }
+
+  // --- the thread this session CONTINUES (D21) -----------------------------
+  //
+  // A session that picks up someone else's arc has a brand-new thread bead and
+  // therefore no open asks of its own, while the asks Justin is actually waiting
+  // on sit under the PREVIOUS session's thread. Listing them here is what makes
+  // them dispositionable: `thread report` refuses a payload that leaves any of
+  // them out, and it can only refuse over asks the session was shown.
+  const continuesFrom =
+    options.continuesFrom == null || options.continuesFrom.trim() === ''
+      ? null
+      : options.continuesFrom.trim();
+  if (continuesFrom != null) {
+    out.push('');
+    out.push(`THREAD THIS SESSION CONTINUES — ${continuesFrom}`);
+    const continued = await showIssue(ctx, continuesFrom);
+    if (!continued.ok) {
+      out.push(`  UNKNOWN — ${describeBdFailure(continued.failure)}`);
+    } else if (continued.value == null) {
+      out.push(
+        '  NOT FOUND — no bead with that id. Check it with: justin-sdk thread board --recent',
+      );
+    } else {
+      const thread = continued.value;
+      out.push(
+        `  ${thread.title ?? '(no title)'} · report #${readReportCount(thread.metadata)} · status ${thread.status ?? 'UNKNOWN'}`,
+      );
+      out.push('');
+      out.push(...(await openAsksSection(ctx, continuesFrom)));
+      out.push('');
+      out.push(
+        `  "continuesFrom": "${continuesFrom}" in the payload below is what reaches them. They follow the same rule as your own:`,
+      );
+      out.push(
+        `  closed on ${continuesFrom} unless you restate one as a new ask (supersedes) or disposition it in priorAsks.`,
+      );
     }
   }
 
@@ -191,7 +290,14 @@ export async function runThreadPrepare(
   );
   out.push('  2. Run: justin-sdk thread report --file <that path>');
   out.push('');
-  out.push(payloadSkeleton());
+  out.push(payloadSkeleton({continuesFrom}));
+  out.push('');
+  for (const line of PAYLOAD_PRIORITY_GUIDANCE) out.push(line);
+  out.push('');
+  // D25. Printed AFTER the skeleton and last of all, because it is the thing a
+  // session should be holding in its head as it writes the payload — not a
+  // preamble it scrolled past on the way to the JSON.
+  for (const line of PAYLOAD_MUST_SEE_GUIDANCE) out.push(line);
 
   console.log(out.join('\n'));
   return 0;

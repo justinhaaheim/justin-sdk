@@ -15,6 +15,7 @@ import {describe, expect, test} from 'bun:test';
 import {
   buildBoard,
   collectOpenAsks,
+  continuedHiddenLine,
   formatAge,
   renderByRepo,
   renderOpenAsks,
@@ -118,6 +119,103 @@ describe('formatAge', () => {
   });
 });
 
+/**
+ * A START-ONLY thread — `thread start` created the bead, the session has not
+ * reported (p1uj.8, folded into p1uj.7 item A).
+ *
+ * The row used to read "age UNKNOWN ? --%", which claims to know nothing about
+ * a session whose start time is sitting in `metadata.threadStartedAt`. Three of
+ * these on a morning board is three rows Justin cannot rank.
+ */
+describe('a thread that has not reported yet (item A)', () => {
+  const startOnly = thread('jl-s9', '(untitled) justin-sdk session 7f3c1e20', {
+    branch: 'thread-followups',
+    openAskCount: 0,
+    progressPercent: null,
+    reportCount: 0,
+    reportedAt: null,
+    repo: 'justin-sdk',
+    startedAt: '2026-09-12T09:00:00.000Z',
+    stopReasonKind: null,
+    threadStartedAt: '2026-09-12T10:00:00.000Z',
+  });
+
+  test('its age comes from threadStartedAt, and says that is what it is', () => {
+    const row = buildBoard([startOnly], [], NOW).rows[0]!;
+    expect(row.age).toBe('started 2h');
+    expect(row.reported).toBe(false);
+    expect(row.reportedAt).toBeNull();
+  });
+
+  test('the row says "no report yet" instead of rendering unknowns', () => {
+    const text = renderRecent(buildBoard([startOnly], [], NOW));
+    expect(text).toContain('started 2h');
+    expect(text).toContain('no report yet');
+    expect(text).not.toContain('age UNKNOWN');
+    expect(text).not.toContain('--%');
+  });
+
+  test('with NO start stamp either, it is honestly UNKNOWN', () => {
+    const bare = thread('jl-s8', 'no stamps at all', {reportCount: 0});
+    const row = buildBoard([bare], [], NOW).rows[0]!;
+    expect(row.age).toBe('age UNKNOWN');
+    expect(row.reported).toBe(false);
+  });
+
+  test('a REPORTED thread with a missing stamp stays a report, age unknown', () => {
+    // Demoting it to "no report yet" would hide a real session's stop reason
+    // behind a start-only row.
+    const odd = thread('jl-s7', 'reported, stamp lost', {
+      progressPercent: 40,
+      reportCount: 2,
+      reportedAt: null,
+      stopReasonKind: 'blocked',
+      threadStartedAt: '2026-09-12T10:00:00.000Z',
+    });
+    const row = buildBoard([odd], [], NOW).rows[0]!;
+    expect(row.reported).toBe(true);
+    expect(row.age).toBe('age UNKNOWN');
+    expect(renderRecent(buildBoard([odd], [], NOW))).toContain('40%');
+  });
+
+  test('--recent sorts it by its START time, between two reported threads', () => {
+    // 10:30 sits between jl-c3's report at 11:30 and jl-a1's at 10:00. Sorting
+    // on reportedAt alone sent every start-only thread to the bottom, under
+    // threads last touched days ago.
+    const between = thread('jl-s6', 'started between the two', {
+      reportCount: 0,
+      reportedAt: null,
+      repo: 'justin-sdk',
+      threadStartedAt: '2026-09-12T10:30:00.000Z',
+    });
+    const text = renderRecent(buildBoard([...THREADS, between], ASKS, NOW));
+    const order = [
+      'Older justin-sdk work', // reported 11:30
+      'started between the two', // started 10:30
+      'Thread reports read path', // reported 10:00
+      'Mail scan sender guide', // reported two days ago
+    ].map((title) => text.indexOf(title));
+    expect(order.every((at) => at >= 0)).toBe(true);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+
+  test('a thread with NEITHER stamp sorts last rather than first', () => {
+    const bare = thread('jl-s5', 'no stamps at all', {reportCount: 0});
+    const text = renderRecent(buildBoard([bare, ...THREADS], ASKS, NOW));
+    expect(text.indexOf('no stamps at all')).toBeGreaterThan(
+      text.indexOf('Mail scan sender guide'),
+    );
+  });
+
+  test('a thread that HAS reported is untouched by any of this', () => {
+    const row = buildBoard(THREADS, ASKS, NOW).rows.find(
+      (entry) => entry.id === 'jl-a1',
+    );
+    expect(row?.age).toBe('2h');
+    expect(row?.reported).toBe(true);
+  });
+});
+
 describe('the ask → thread join', () => {
   test('prefers parent, falls back to metadata.threadId', () => {
     expect(threadIdOfAsk(ask('x.1', 'x', {threadId: 'other'}))).toBe('x');
@@ -143,6 +241,65 @@ describe('the ask → thread join', () => {
     expect(orphanAsks.map((entry) => entry.id)).toEqual(['jl-zz.1']);
     // and it is not silently attributed to some other thread
     expect(rows.reduce((sum, row) => sum + row.openAsks, 0)).toBe(3);
+  });
+});
+
+/**
+ * D21 — a thread another session took over is folded away, but never one that
+ * still has an open ask.
+ *
+ * NEGATIVE CONTROL (run 2026-09-14): the filter in `buildBoard` was reduced to
+ * `const rows = allRows;`. Exactly the first two tests below failed — "is hidden
+ * from the default board" (the row list still held `jl-old`) and "says how many
+ * it hid", which reported `Expected: "1 continued thread hidden (--all shows
+ * them)" Received: null` — while "STAYS VISIBLE while an ask is still open" and
+ * "--all shows it" stayed green, which is the right shape: only the hiding is
+ * being proved. Restoring the filter returned all four to green.
+ */
+describe('a continued thread (D21)', () => {
+  const continued = thread('jl-old', 'the session that handed over', {
+    continuedBy: 'jl-new',
+    repo: 'justin-sdk',
+    reportedAt: '2026-09-12T11:30:00.000Z',
+  });
+  const successor = thread('jl-new', 'the session that took it on', {
+    repo: 'justin-sdk',
+    reportedAt: '2026-09-12T11:55:00.000Z',
+  });
+
+  test('is hidden from the default board, and its successor is not', () => {
+    const data = buildBoard([continued, successor], [], NOW);
+    expect(data.rows.map((row) => row.id)).toEqual(['jl-new']);
+    expect(data.hiddenContinued).toBe(1);
+  });
+
+  test('says how many it hid, so fewer rows is never silent', () => {
+    const data = buildBoard([continued, successor], [], NOW);
+    expect(continuedHiddenLine(data.hiddenContinued)).toBe(
+      '1 continued thread hidden (--all shows them)',
+    );
+    expect(continuedHiddenLine(0)).toBeNull();
+  });
+
+  test('STAYS VISIBLE while an ask is still open on it', () => {
+    // The carry is what empties a continued thread; one that still holds an ask
+    // is holding something Justin owes, and hiding it would be the reassuring
+    // direction of exactly the loss this feature exists to stop.
+    const data = buildBoard(
+      [continued, successor],
+      [ask('jl-old.4', 'jl-old', {priority: 1})],
+      NOW,
+    );
+    expect(data.rows.map((row) => row.id)).toEqual(['jl-old', 'jl-new']);
+    expect(data.hiddenContinued).toBe(0);
+  });
+
+  test('--all shows it', () => {
+    const data = buildBoard([continued, successor], [], NOW, {
+      includeContinued: true,
+    });
+    expect(data.rows.map((row) => row.id)).toEqual(['jl-old', 'jl-new']);
+    expect(data.hiddenContinued).toBe(0);
   });
 });
 
@@ -178,15 +335,16 @@ describe('views', () => {
     expect(positions[1]).toBeLessThan(positions[2]!);
   });
 
-  test('--open-asks puts blocking first, then newest first', () => {
+  test('--open-asks puts P0 first, then newest first', () => {
     const asks = collectOpenAsks(THREADS, ASKS);
     expect(asks.map((entry) => entry.id)).toEqual([
-      'jl-a1.1', // blocking
+      'jl-a1.1', // P0
       'jl-c3.1', // 11:30
       'jl-a1.2', // 10:00
     ]);
     const text = renderOpenAsks(asks);
-    expect(text).toContain('🛑 BLOCKING');
+    expect(text).toContain('🛑 P0');
+    expect(text).toContain('P3 · jl-c3.1');
     expect(text).toContain('justin-sdk');
     expect(text).toContain('Accept the subagent behaviour?');
   });
