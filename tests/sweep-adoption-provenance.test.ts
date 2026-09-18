@@ -6,8 +6,9 @@
  * `sweep --component install --dry-run` printed `life: adopt: beads-setup`.
  * `~/Dev/life` is a Dolt (`bd`) workspace on purpose; beads-setup installs
  * beads_rust, and its migration step classifies a Dolt `.beads/` as `legacy`
- * and then `rmSync(.beads, {recursive: true, force: true})` — unattended, with
- * no flag, no prompt and no dry-run. The adoption came from
+ * and, until home-base-dchjw.20 made that step move-only, then ran
+ * `rmSync(.beads, {recursive: true, force: true})` — unattended, with no flag,
+ * no prompt and no dry-run. The adoption came from
  * `componentInstalledEvidence`, which is CORRECTLY generous for `install` (a
  * false "not installed" there would silently skip a component) and wrong for a
  * decision that WRITES a component name into a repo's committed config.
@@ -201,7 +202,7 @@ describe('a Dolt workspace never adopts beads', () => {
 // ---------------------------------------------------------------------------
 
 describe('beadsSetupRefusal', () => {
-  test('refuses a Dolt workspace, naming what it would have deleted', () => {
+  test('refuses a Dolt workspace, naming what it would have done to it', () => {
     const sb = track(createSandbox());
     const root = enrolled(sb, 'life-like');
     doltWorkspace(root);
@@ -209,7 +210,9 @@ describe('beadsSetupRefusal', () => {
     const refusal = beadsSetupRefusal(root);
     expect(refusal).not.toBeNull();
     expect(refusal).toContain('Dolt');
-    expect(refusal).toContain('DELETES');
+    // Was `DELETES` until home-base-dchjw.20 made the migration step move-only.
+    // The message has to describe what the step DOES now, not what it once did.
+    expect(refusal).toContain('MOVES');
     expect(refusal).toContain('Nothing has been written');
   });
 

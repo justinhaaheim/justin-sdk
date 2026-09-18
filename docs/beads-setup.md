@@ -88,16 +88,15 @@ Expected output should show the installed version (e.g., `br 0.1.34` or similar)
 
 ### If `.beads/` exists → Determine the backend and migrate.
 
-#### 2a. Back up existing data
+#### 2a. Move the existing data aside — never delete it
 
-**This step is mandatory.** Always back up before touching existing beads data. Put the backup in `./tmp/` (gitignored).
+**Nothing in this procedure deletes `.beads/`.** Move it next to itself, where `git status` shows it and no `tmp/` cleanup can take it (`tmp/` is gitignored and disposable by convention, which makes it the wrong home for the only surviving copy). This is what `beads-setup` itself does (home-base-dchjw.20).
 
 ```bash
-mkdir -p tmp
-cp -rf .beads "tmp/beads-backup-$(date +%Y%m%d-%H%M%S)"
+mv .beads ".beads.legacy-$(date +%Y-%m-%dT%H-%M-%S)"
 ```
 
-Verify the backup exists and contains the same files as `.beads/`.
+Verify the moved directory holds everything `.beads/` did, then carry on. Delete it yourself, later, once you have checked the import — never as part of the migration.
 
 #### 2b. Determine the current backend
 
@@ -122,13 +121,9 @@ If `bd` is not available or the Dolt server won't start, check if `.beads/issues
 
 Check if `.beads/issues.jsonl` exists. If so, it contains the exported issues and can be imported into the new beads_rust installation.
 
-#### 2d. Remove old beads data (keep backup)
+#### 2d. Nothing to remove
 
-**Confirm with the user before proceeding.** The backup from step 2a preserves all data.
-
-```bash
-rm -rf .beads
-```
+Step 2a already moved `.beads/` to `.beads.legacy-<timestamp>/`, so the path is clear for `br init` and every byte of the old workspace is still on disk. **Do not `rm -rf .beads`** — that instruction used to live here, and it is the shape of the defect home-base-dchjw.20 removed from the code: a deletion decided by a classification rather than by proof, with the only other copy in a disposable directory.
 
 ---
 
@@ -170,10 +165,10 @@ If you exported issues in Step 2:
 
 **From JSONL (most common):**
 
-If you have a `tmp/beads-backup-*/issues.jsonl` or `tmp/beads-backup-*/backup/issues.jsonl` file with content:
+If the directory you moved aside in step 2a has an `issues.jsonl` with content:
 
 ```bash
-cp -f tmp/beads-backup-*/backup/issues.jsonl .beads/issues.jsonl
+cp -f .beads.legacy-*/issues.jsonl .beads/issues.jsonl
 br sync --import-only
 ```
 
@@ -489,7 +484,7 @@ If the project has git worktrees, each worktree needs its own beads_rust setup b
 
 1. The `mise.toml` lives on each branch, so each worktree will have its own copy. Copy or create `mise.toml` in the worktree.
 2. Trust and install: `mise trust /path/to/worktree/mise.toml && mise install -C /path/to/worktree`
-3. Remove old `.beads/` (back up first): `rm -rf /path/to/worktree/.beads`
+3. Move old `.beads/` aside (never delete it): `mv /path/to/worktree/.beads "/path/to/worktree/.beads.legacy-$(date +%Y-%m-%dT%H-%M-%S)"`
 4. Init from the worktree directory: `cd /path/to/worktree && br init --prefix <project-name>`
 5. Import issues: copy the exported `issues.jsonl` to `.beads/issues.jsonl`, then `br sync --import-only`
 6. Generate AGENTS.md: `br agents --add --force`

@@ -101,6 +101,14 @@ export interface AddOptions {
    * omits it and base-setup uses the real SDK_REPO_URL (dchjw.17 F7).
    */
   sdkRepoUrl?: string;
+  /**
+   * `--yes`, forwarded to `beads` and to nothing else. It authorises exactly
+   * one thing: deleting the `.beads.legacy-<ts>/` directory that migration
+   * moved aside, and only after the issues in it have been imported and
+   * counted back (home-base-dchjw.20). It is NOT a general "approve
+   * destructive actions" flag — `add` has no others.
+   */
+  yes?: boolean;
 }
 
 /**
@@ -171,6 +179,7 @@ export async function runAdd(
       noCommit: single ? !opts.commit : true,
       projectRoot: opts.projectRoot,
       quiet: !single,
+      yes: opts.yes ?? false,
       ...(opts.sdkRepoUrl == null ? {} : {sdkRepoUrl: opts.sdkRepoUrl}),
     });
     setQuiet(false);

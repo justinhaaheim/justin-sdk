@@ -50,6 +50,14 @@ export interface ComponentRunArgs {
    * offline-safe (dchjw.17 F7).
    */
   sdkRepoUrl?: string;
+  /**
+   * beads only: `--yes`. Authorises deleting the `.beads.legacy-<ts>/`
+   * directory migration moved aside, and only after its issues were imported
+   * and counted back (home-base-dchjw.20). Defaults to false everywhere —
+   * `install`, `update` and every sweep leave it unset, so the moved directory
+   * survives every automated path.
+   */
+  yes?: boolean;
 }
 
 /** The {projectRoot, quiet, force} shape every installer accepts. */
@@ -85,6 +93,7 @@ const RUNNERS: Record<
       projectRoot: a.projectRoot,
       quiet: a.quiet,
       noCommit: a.noCommit ?? true,
+      yes: a.yes ?? false,
       ...(a.sdkRepoUrl == null ? {} : {sdkRepoUrl: a.sdkRepoUrl}),
     }),
   eas: (a) => runEasSetup(base(a)),

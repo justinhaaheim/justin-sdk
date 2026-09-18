@@ -297,12 +297,20 @@ void yargs(ARGV)
           describe:
             "Overwrite hand-modified files (currently: scripts/setup-env.ts) that differ from the SDK template and don't match a known-old hash",
           default: false,
+        })
+        .option('yes', {
+          alias: 'y',
+          type: 'boolean',
+          describe:
+            'Authorises exactly one deletion, in `beads` and nowhere else: after a legacy .beads/ has been MOVED to .beads.legacy-<timestamp>/ and its issues imported and counted back, delete that moved directory. Without it the moved directory is kept forever and you delete it yourself. It never licenses deleting anything the run could not verify.',
+          default: false,
         }),
     async (argv) => {
       const exitCode = await runAdd((argv.components as string[]) ?? [], {
         commit: argv.commit,
         force: argv.force,
         projectRoot: process.cwd(),
+        yes: argv.yes,
       });
       process.exit(exitCode);
     },
