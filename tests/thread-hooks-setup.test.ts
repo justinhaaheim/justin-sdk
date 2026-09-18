@@ -35,7 +35,7 @@ import {
   THREAD_STOP_HOOK_COMMAND,
   THREAD_STOP_HOOK_EVENT,
 } from '../src/thread-hooks-setup';
-import {COMPONENT_NAMES, DEPENDENCY_ORDER} from '../src/components';
+import {COMPONENT_NAMES, corePreset} from '../src/component-registry';
 
 function sessionStartEntries(settings: Record<string, unknown>): unknown[] {
   const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
@@ -196,7 +196,8 @@ describe('addThreadStopHook (home-base-p1uj.15)', () => {
           {
             hooks: [
               {
-                command: '/Users/jhaa/Dev/home-base/bin/justin-sdk thread stop-check',
+                command:
+                  '/Users/jhaa/Dev/home-base/bin/justin-sdk thread stop-check',
                 type: 'command',
               },
             ],
@@ -210,11 +211,14 @@ describe('addThreadStopHook (home-base-p1uj.15)', () => {
 });
 
 describe('the component registry', () => {
-  test('thread-hooks is registered and is OPT-IN ONLY', () => {
-    // Its hook writes to a SHARED Dolt database on every session start, so
-    // installing it via `init` or the `all` preset would have every repo paying
-    // lock contention for a feature only some sessions use.
+  test('thread-hooks is registered, and is part of core', () => {
+    // It was OPT_IN_ONLY until 2026-09-18, on the grounds that its SessionStart
+    // hook writes to a shared Dolt database. Justin's call (epic
+    // home-base-dchjw D3) is that it belongs in the default install; the hook
+    // stays INERT until componentConfig.thread.enabled AND
+    // .startOnSessionStart are both true, which is what actually bounds the
+    // cost, and that is a config decision rather than a preset one.
     expect(COMPONENT_NAMES).toContain('thread-hooks');
-    expect(DEPENDENCY_ORDER).not.toContain('thread-hooks');
+    expect(corePreset(process.cwd())).toContain('thread-hooks');
   });
 });

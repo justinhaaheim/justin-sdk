@@ -43,17 +43,20 @@ import {
 import {tmpdir} from 'os';
 import {dirname, join} from 'path';
 
-import {readSelectedModules, refreshIsVerified} from './critical-rules-setup';
-import {assembleSelected, PROMPTS_SOURCE_FAILURE} from './plugin/lib/prime';
+import {
+  readEnrollment,
+  refreshIsVerified,
+  warnRetiredModulesKey,
+} from './critical-rules-setup';
+import {assemble, PROMPTS_SOURCE_FAILURE} from './prime';
 import {
   artifactBody,
   contentHash,
   normalizeArtifactText,
   prettierMarkdown,
   projectRulesFilePath,
-  readDeployedStamp,
   RULES_UPDATE_CMD,
-} from './plugin/lib/rules-file';
+} from './rules/rules-file';
 import {fail, findLocalPrettier} from './setup-helpers';
 
 export const RULES_DIFF_EXIT = {
@@ -80,11 +83,11 @@ export interface RulesDiffOptions {
 
 /**
  * `artifactBody` (and the `normalizeArtifactText` shape it enforces) moved to
- * src/plugin/lib/rules-file.ts: the staleness checker the SessionStart hook
- * calls needs it, and the hook can only import from the plugin subtree
+ * src/rules/rules-file.ts: the staleness checker `session-start` calls needs it,
+ * and that module is deliberately free of console-writing helpers
  * (home-base-qjyj). Re-exported so this module's public surface is unchanged.
  */
-export {artifactBody} from './plugin/lib/rules-file';
+export {artifactBody} from './rules/rules-file';
 
 function cannotCheck(message: string): RulesDiffResult {
   return {
@@ -101,28 +104,30 @@ function cannotCheck(message: string): RulesDiffResult {
 export function rulesDiff(options: RulesDiffOptions = {}): RulesDiffResult {
   const projectRoot = options.projectRoot ?? process.cwd();
 
-  // Same reader as the write path (uniformity: one selection reader).
-  const selection = readSelectedModules(projectRoot);
-  if (!selection.ok) {
+  // Same reader as the write path (uniformity: one enrolment reader).
+  const enrollment = readEnrollment(projectRoot);
+  if (!enrollment.ok) {
     return cannotCheck(
-      `cannot check what is missing: ${selection.message}. Nothing about the rules is claimed here.`,
+      `cannot check what is missing: ${enrollment.message}. Nothing about the rules is claimed here.`,
     );
   }
 
   let assembled;
   try {
     // forceUpdate: the question is "what is new in the prompts", which is only
-    // answerable against a source we just refreshed.
-    assembled = assembleSelected(selection.modules, {
-      forceUpdate: true,
-      promptsDir: options.promptsDir,
-    });
+    // answerable against a source we just refreshed. The project root is passed
+    // so the predicates see this project as it is now (D2) — the answer to "what
+    // am I missing?" includes rules this repo has newly become eligible for.
+    assembled = assemble(
+      {forceUpdate: true, partition: 'full', promptsDir: options.promptsDir},
+      projectRoot,
+    );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     return cannotCheck(
       reason.startsWith(PROMPTS_SOURCE_FAILURE)
         ? `cannot check what is missing: ${reason}. This is NOT "your rules are current" — the source could not be read at all.`
-        : `cannot check what is missing: could not assemble the selected rules modules (${reason}).`,
+        : `cannot check what is missing: could not assemble the rules modules (${reason}).`,
     );
   }
   if (!refreshIsVerified(assembled.sourceRefresh)) {
@@ -152,8 +157,10 @@ export function rulesDiff(options: RulesDiffOptions = {}): RulesDiffResult {
   }
   const canonical = normalizeArtifactText(formatted.markdown);
   const shaShort =
-    assembled.sourceSha != null ? assembled.sourceSha.slice(0, 12) : 'unknown';
-  const moduleCount = `${selection.modules.length} module${selection.modules.length === 1 ? '' : 's'}`;
+    assembled.sourceCommit != null
+      ? assembled.sourceCommit.sha.slice(0, 12)
+      : 'unknown';
+  const moduleCount = `${assembled.names.length} module${assembled.names.length === 1 ? '' : 's'}`;
   // The same hash the writer stamps: it hashes the Prettier'd body, and
   // `normalize` only re-adds the single trailing newline it strips.
   const canonicalHash = contentHash(canonical.trimEnd());
@@ -181,17 +188,6 @@ export function rulesDiff(options: RulesDiffOptions = {}): RulesDiffResult {
   lines.push(unifiedDiff(current, canonical));
   lines.push('');
   lines.push(`Run \`${RULES_UPDATE_CMD}\` to regenerate and commit it.`);
-
-  // The stamp already claiming the canonical hash means `rules-update` will
-  // report "already up to date" and change nothing — stated as the fact it is,
-  // not diagnosed: a hand edit and a prettier upgrade produce the same signature.
-  if (exists && readDeployedStamp(file)?.contentHash === canonicalHash) {
-    lines.push(
-      `NOTE: the stamp already records this content hash, so plain \`rules-update\` will report "already up to date" — ` +
-        `the difference is in the file's bytes (edited by hand, or formatted by a different prettier). ` +
-        `Use \`${RULES_UPDATE_CMD} --force\`.`,
-    );
-  }
 
   return {
     exitCode: RULES_DIFF_EXIT.diff,
@@ -255,6 +251,10 @@ function unifiedDiff(current: string, canonical: string): string {
 }
 
 export function runRulesDiff(options: RulesDiffOptions = {}): number {
+  // The ONE place this command mentions the retired include-list (dchjw.3). It
+  // lives in the printing layer, not in `rulesDiff`, because that function's
+  // contract is to compute the answer without emitting anything.
+  warnRetiredModulesKey(options.projectRoot ?? process.cwd());
   const result = rulesDiff(options);
   if (result.outcome === 'cannot-check') {
     fail(`rules-diff: ${result.report}`);

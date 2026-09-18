@@ -50,12 +50,12 @@ Add these scripts to `package.json`. Preserve any existing scripts — merge, do
 {
   "scripts": {
     "setup-env": "bun scripts/setup-env.ts",
-    "signal": "bunx @justinhaaheim/justin-sdk signal --quiet",
-    "signal:verbose": "bunx @justinhaaheim/justin-sdk signal",
-    "signal:serial": "bunx @justinhaaheim/justin-sdk signal --serial",
-    "doctor": "bunx @justinhaaheim/justin-sdk doctor",
-    "doctor:fix": "bunx @justinhaaheim/justin-sdk doctor --fix",
-    "fix": "bunx @justinhaaheim/justin-sdk fix",
+    "signal": "justin-sdk signal --quiet",
+    "signal:verbose": "justin-sdk signal",
+    "signal:serial": "justin-sdk signal --serial",
+    "doctor": "justin-sdk doctor",
+    "doctor:fix": "justin-sdk doctor --fix",
+    "fix": "justin-sdk fix",
     "signal-source:TS": "tsc --noEmit",
     "signal-source:LINT": "eslint --report-unused-disable-directives --max-warnings 0 .",
     "signal-source:PRETTIER": "prettier --check ."

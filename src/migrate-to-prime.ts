@@ -5,17 +5,25 @@
  * the central prompts repo).
  *
  * End state per project: just its own CLAUDE.md. No docs/prompts/, no AGENTS.md,
- * no @-references to either, and no per-project prime SessionStart hook — the
- * `prime` Claude Code plugin injects the guidance globally (installed once per
- * machine), so a per-project `bunx @justinhaaheim/justin-sdk prime` hook would only
- * double-inject. This migration REMOVES any such hook it finds (home-base-t6a0.16).
+ * and no @-references to either.
  *
- * Design (home-base-t6a0.12, fable-advisor-reviewed):
- *  - SAFE DELETES ONLY. A file is deleted only if it is git-tracked AND clean
- *    (so the deletion is fully recoverable via git) AND — for docs/prompts —
- *    has a known auto-generated name. Anything untracked, dirty, unknown-named,
- *    or containing non-generated content is FLAGGED for manual review, never
- *    deleted.
+ * It used to ALSO strip the per-project `bun run justin-sdk prime` SessionStart
+ * hook, on the grounds that the `prime` Claude Code plugin injected the same
+ * guidance globally (home-base-t6a0.16). That step is GONE as of dchjw.8: D6
+ * retired the plugin, so a per-project SessionStart hook is now the mechanism
+ * rather than a duplicate of one, and a migration that removed hooks from
+ * `.claude/settings.json` would be tearing out what base-setup just installed.
+ *
+ * Design (home-base-t6a0.12, fable-advisor-reviewed; docs/prompts widened by
+ * Justin 2026-09-18, epic home-base-dchjw D3):
+ *  - SAFE DELETES ONLY. A file is deleted only if it is git-tracked AND clean,
+ *    so the deletion is fully recoverable from git history. Anything untracked
+ *    or dirty is FLAGGED for manual review, never deleted — the premise of the
+ *    whole cleanup is "these will still be in git history if we want them
+ *    back", and for those two cases that premise is false.
+ *  - docs/prompts/ goes ENTIRELY, not just the names the old installer wrote.
+ *    A file this SDK does not recognise is still deleted, but it is NAMED as it
+ *    goes so the session report can relay it.
  *  - CLAUDE.md: mechanically remove standalone @-ref lines only. @-refs embedded
  *    in prose are FLAGGED (file:line) for manual cleanup — no NLP-grade prose
  *    surgery.
@@ -30,9 +38,11 @@
  * home-base-t6a0.14 lands.
  */
 
+import {spawnSync} from 'child_process';
 import {existsSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'fs';
 import {basename, join, resolve} from 'path';
 
+import {unknownComponentNames} from './component-registry';
 import {
   exec,
   fail,
@@ -47,13 +57,23 @@ import {
 // Constants
 // ---------------------------------------------------------------------------
 
-const PRIME_HOOK_NEEDLE = 'justin-sdk prime';
 const AGENTS_MARKER = '<!-- br-agent-instructions-v1 -->';
 
 /**
+ * The exact wording of the line that names a file this SDK did not recognise as
+ * it deletes it. Exported because a test asserts it and the session report
+ * relays it — one spelling, in one place.
+ */
+export const BESPOKE_DELETED_PREFIX =
+  'bespoke file deleted (recoverable from git history): ';
+
+/**
  * Known auto-generated filenames under docs/prompts/ (installed by the old
- * `install-my-prompts` script). A file with one of these names that is also
- * git-tracked + clean is safe to delete; anything else is flagged.
+ * `install-my-prompts` script).
+ *
+ * This list no longer decides WHAT is deleted — the whole directory goes — only
+ * what is deleted QUIETLY. A name not in here is deleted too, and named on the
+ * way out (see BESPOKE_DELETED_PREFIX).
  */
 const KNOWN_PROMPT_FILES = new Set([
   'BEADS.md',
@@ -70,28 +90,58 @@ const KNOWN_PROMPT_FILES = new Set([
   'USE_SCRATCHPAD.md',
 ]);
 
-/** Components describing artifacts that no longer exist post-migration. */
+/**
+ * Components describing artifacts that no longer exist post-migration.
+ *
+ * Kept as a NAMED list even though `prompts-setup` and `claude-md-setup` were
+ * deleted from the registry in dchjw.5: this file is the cleanup for repos that
+ * still carry their output, so it is the one place in the SDK those two names
+ * legitimately still appear. Any OTHER unknown name is dropped too — by asking
+ * the registry rather than by guessing — so a config written by a newer SDK, or
+ * by hand, does not quietly keep a component nothing can run.
+ */
 const OBSOLETE_COMPONENTS = ['prompts-setup', 'claude-md-setup'];
 
 // ---------------------------------------------------------------------------
 // git helpers
 // ---------------------------------------------------------------------------
 
-/** True if `relPath` is tracked by git in this repo. */
+/**
+ * Both of these decide whether a file may be DELETED, and both used to build a
+ * shell string around a filename in single quotes (dchjw.17 F8). A path
+ * containing a quote would either break the command — a non-zero exit, which
+ * `isTracked` reads as "untracked", the safe direction — or, in `isClean`,
+ * change which paths git reported and let a dirty file read as clean, which is
+ * the unsafe one. argv never interpolates, so neither can happen.
+ */
 function isTracked(projectRoot: string, relPath: string): boolean {
   return (
-    exec(`git ls-files --error-unmatch -- '${relPath}'`, projectRoot)
+    gitArgv(projectRoot, ['ls-files', '--error-unmatch', '--', relPath])
       .exitCode === 0
   );
 }
 
 /** True if `relPath` has no uncommitted changes in the working tree/index. */
 function isClean(projectRoot: string, relPath: string): boolean {
-  const {stdout, exitCode} = exec(
-    `git status --porcelain -- '${relPath}'`,
-    projectRoot,
-  );
+  const {stdout, exitCode} = gitArgv(projectRoot, [
+    'status',
+    '--porcelain',
+    '--',
+    relPath,
+  ]);
   return exitCode === 0 && stdout.trim().length === 0;
+}
+
+/** `git <args>` with no shell in between. */
+function gitArgv(
+  cwd: string,
+  args: readonly string[],
+): {stdout: string; exitCode: number} {
+  const child = spawnSync('git', [...args], {cwd, encoding: 'utf-8'});
+  // A spawn that never ran is not an exit code of 0 (critical rule 6): report
+  // it as a failure so both callers take their cautious branch.
+  if (child.error != null) return {exitCode: 1, stdout: ''};
+  return {exitCode: child.status ?? 1, stdout: child.stdout ?? ''};
 }
 
 /** Safe to delete = git-tracked AND clean (deletion recoverable from git). */
@@ -109,68 +159,6 @@ interface Report {
 }
 
 // ---------------------------------------------------------------------------
-// Step: remove the per-project prime SessionStart hook (structure-aware,
-// idempotent). The `prime` plugin injects guidance globally, so a per-project
-// `bunx @justinhaaheim/justin-sdk prime` hook only double-injects — strip any we find, drop
-// the emptied groups, and preserve every other hook (setup-env etc.).
-// ---------------------------------------------------------------------------
-
-interface HookEntry {
-  type?: string;
-  command?: string;
-}
-interface HookGroup {
-  matcher?: string;
-  hooks?: HookEntry[];
-}
-
-function stepRemovePrimeHook(projectRoot: string, report: Report): void {
-  const settingsPath = resolve(projectRoot, '.claude', 'settings.json');
-  const settings = readJson(settingsPath);
-  if (settings == null) return; // no settings.json — nothing to remove
-
-  const hooks = settings.hooks as Record<string, unknown> | undefined;
-  const sessionStart = hooks?.SessionStart as HookGroup[] | undefined;
-  if (hooks == null || !Array.isArray(sessionStart)) return;
-
-  let removed = 0;
-  const nextGroups: HookGroup[] = [];
-  for (const group of sessionStart) {
-    const kept = (group.hooks ?? []).filter((h) => {
-      const isPrime =
-        typeof h.command === 'string' && h.command.includes(PRIME_HOOK_NEEDLE);
-      if (isPrime) removed++;
-      return !isPrime;
-    });
-    // Drop a now-empty group entirely; otherwise keep it with the survivors.
-    if (kept.length > 0) {
-      group.hooks = kept;
-      nextGroups.push(group);
-    }
-  }
-
-  if (removed === 0) {
-    report.did.push(
-      'No per-project prime hook in .claude/settings.json (nothing to remove)',
-    );
-    return;
-  }
-
-  if (nextGroups.length > 0) {
-    hooks.SessionStart = nextGroups;
-  } else {
-    delete hooks.SessionStart; // empty SessionStart array — drop the key
-    if (Object.keys(hooks).length === 0) {
-      delete (settings as Record<string, unknown>).hooks;
-    }
-  }
-  writeJson(settingsPath, settings);
-  report.did.push(
-    `Removed ${removed} per-project prime hook(s) from .claude/settings.json SessionStart`,
-  );
-}
-
-// ---------------------------------------------------------------------------
 // Step: remove docs/prompts/ (safe files only) + install-my-prompts script
 // ---------------------------------------------------------------------------
 
@@ -181,22 +169,30 @@ function stepDocsPrompts(projectRoot: string, report: Report): void {
     let remaining = 0;
     for (const entry of entries) {
       const rel = `docs/prompts/${entry.name}`;
-      if (
-        entry.isFile() &&
-        KNOWN_PROMPT_FILES.has(entry.name) &&
-        safeToDelete(projectRoot, rel)
-      ) {
+      if (entry.isFile() && safeToDelete(projectRoot, rel)) {
         rmSync(join(dir, entry.name));
-        report.did.push(`Removed ${rel}`);
+        // The whole directory goes now, not just the names the old installer
+        // wrote (Justin, 2026-09-18) — but a file this SDK does not recognise
+        // gets NAMED as it goes, so the session report can relay what was in
+        // there and he can pull it back out of git if it mattered.
+        report.did.push(
+          KNOWN_PROMPT_FILES.has(entry.name)
+            ? `Removed ${rel}`
+            : `${BESPOKE_DELETED_PREFIX}${rel}`,
+        );
       } else {
         remaining++;
+        // NOT "delete it anyway". The line above CLAIMS the deletion is
+        // recoverable from git history, and for an untracked or dirty file that
+        // claim is simply false — the bytes would be gone. Justin's instruction
+        // to delete the directory rests on "these will still be in git history
+        // if we want them back", so where that premise fails, so does the
+        // deletion (PRIME DIRECTIVE).
         const reason = !entry.isFile()
           ? 'not a regular file'
-          : !KNOWN_PROMPT_FILES.has(entry.name)
-            ? 'unknown filename (may be project-specific)'
-            : !isTracked(projectRoot, rel)
-              ? 'untracked'
-              : 'has uncommitted changes';
+          : !isTracked(projectRoot, rel)
+            ? 'untracked — deleting it would NOT be recoverable from git'
+            : 'has uncommitted changes — deleting it would lose them';
         report.flagged.push(
           `${rel} — NOT deleted (${reason}); review manually`,
         );
@@ -205,10 +201,30 @@ function stepDocsPrompts(projectRoot: string, report: Report): void {
     // Remove docs/prompts (and an empty docs/) only if fully cleared.
     if (remaining === 0) {
       rmSync(dir, {recursive: true, force: true});
+      report.did.push('Removed docs/prompts/');
       const docsDir = resolve(projectRoot, 'docs');
       if (existsSync(docsDir) && readdirSync(docsDir).length === 0) {
         rmSync(docsDir, {recursive: true, force: true});
       }
+    }
+  }
+
+  // The dotfile recording which prompts commit was installed. Useless once
+  // docs/prompts is gone, and its presence is one of doctor's legacy triggers.
+  const markerRel = 'docs/.prompts-installed-from.json';
+  const markerPath = resolve(projectRoot, markerRel);
+  if (existsSync(markerPath)) {
+    if (safeToDelete(projectRoot, markerRel)) {
+      rmSync(markerPath);
+      report.did.push(`Removed ${markerRel}`);
+      const docsDir = resolve(projectRoot, 'docs');
+      if (existsSync(docsDir) && readdirSync(docsDir).length === 0) {
+        rmSync(docsDir, {recursive: true, force: true});
+      }
+    } else {
+      report.flagged.push(
+        `${markerRel} — NOT deleted (${isTracked(projectRoot, markerRel) ? 'has uncommitted changes' : 'untracked — deleting it would NOT be recoverable from git'}); review manually`,
+      );
     }
   }
 
@@ -224,7 +240,11 @@ function stepDocsPrompts(projectRoot: string, report: Report): void {
       const scripts = pkg.scripts as Record<string, string> | undefined;
       if (scripts != null && 'install-my-prompts' in scripts) {
         delete scripts['install-my-prompts'];
-        writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
+        // writeJson, not a raw stringify: every JSON the SDK writes goes
+        // through the target repo's own prettier, or a migrated repo's very
+        // next commit hook reformats package.json and the migration's diff is
+        // suddenly two changes (dchjw.17 F8).
+        writeJson(pkgPath, pkg);
         report.did.push('Removed install-my-prompts script from package.json');
       }
     } catch {
@@ -353,14 +373,42 @@ function stepConfig(projectRoot: string, report: Report): void {
   const config = readJson(configPath);
   if (config == null) return;
 
-  const components = (config.components as string[] | undefined) ?? [];
-  const filtered = components.filter((c) => !OBSOLETE_COMPONENTS.includes(c));
-  if (filtered.length !== components.length) {
-    config.components = filtered;
-    writeJson(configPath, config);
-    const removed = components.filter((c) => OBSOLETE_COMPONENTS.includes(c));
-    report.did.push(
-      `Removed obsolete component(s) from justin-sdk.config.json: ${removed.join(', ')}`,
+  const raw = config.components;
+  if (raw == null) return; // No key: this repo already tracks the core preset.
+  if (!Array.isArray(raw)) {
+    report.flagged.push(
+      'justin-sdk.config.json "components" is not an array — NOT modified; fix it by hand',
+    );
+    return;
+  }
+
+  const components = raw.filter(
+    (entry): entry is string => typeof entry === 'string',
+  );
+  const retired = new Set([
+    ...OBSOLETE_COMPONENTS,
+    ...unknownComponentNames(components),
+  ]);
+  const filtered = components.filter((c) => !retired.has(c));
+  if (
+    filtered.length === components.length &&
+    components.length === raw.length
+  ) {
+    return;
+  }
+
+  config.components = filtered;
+  writeJson(configPath, config);
+  const removed = components.filter((c) => retired.has(c));
+  report.did.push(
+    `Removed component(s) this SDK no longer has from justin-sdk.config.json: ${removed.join(', ')}`,
+  );
+  if (filtered.length === 0) {
+    // An empty list is honoured as written — "this repo has no components" —
+    // which is a different statement from the absent key ("give me core"). Say
+    // so rather than picking one for him.
+    report.flagged.push(
+      'justin-sdk.config.json "components" is now an EMPTY list, which means this repo installs nothing. Delete the key entirely to track the `core` preset instead.',
     );
   }
 }
@@ -418,7 +466,6 @@ export function runMigrateToPrime(options: MigrateToPrimeOptions = {}): number {
 
   const report: Report = {did: [], flagged: []};
 
-  stepRemovePrimeHook(projectRoot, report);
   stepDocsPrompts(projectRoot, report);
   stepAgentsMd(projectRoot, report);
   stepClaudeMd(projectRoot, report);

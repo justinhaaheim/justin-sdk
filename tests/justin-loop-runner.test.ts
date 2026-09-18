@@ -368,15 +368,17 @@ describe('justin-loop CLI help (AC6)', () => {
     expect(help('justin-loop', '--help').out).not.toContain('--max-iterations');
   });
 
-  test('`ralph` prints the deprecation line and delegates (D1)', () => {
+  test('`ralph` is retired — no deprecation line, no delegation (dchjw.9)', () => {
     const result = help('ralph', '--help');
-    expect(result.out).toContain(
-      'ralph is now justin-loop; the ralph name goes away in the next release',
-    );
-    // Delegated, not merely warned about: this IS the justin-loop help.
-    expect(result.out).toContain('--max-sessions');
-    expect(result.out).toContain('handoff bead');
-    expect(result.status).toBe(0);
+    expect(result.out).not.toContain('ralph is now justin-loop');
+    // `--help` after an unknown word prints the TOP-LEVEL help (yargs answers
+    // help before it rejects the command), so the justin-loop flags are absent.
+    expect(result.out).not.toContain('--max-sessions');
+    // NEGATIVE CONTROL: the real command still delegates and still documents
+    // its flags, so this is `ralph` being gone rather than help being broken.
+    const real = help('justin-loop', '--help');
+    expect(real.out).toContain('--max-sessions');
+    expect(real.status).toBe(0);
   });
 });
 

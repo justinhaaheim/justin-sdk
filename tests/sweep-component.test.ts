@@ -31,13 +31,9 @@ import {join} from 'path';
 
 import {runBaseSetup} from '../src/base-setup';
 import {runComponentByName} from '../src/components';
-import {readDeployedStamp} from '../src/plugin/lib/rules-file';
-import {
-  getSdkVersion,
-  readJson,
-  todayIsoDate,
-  writeJson,
-} from '../src/setup-helpers';
+import {readDeployedStamp} from '../src/rules/rules-file';
+import {getSdkVersion} from '../src/sdk-identity';
+import {readJson, todayIsoDate, writeJson} from '../src/setup-helpers';
 import {
   applySweepPayload,
   committedConfigComponents,
@@ -57,7 +53,7 @@ import {
   SWEEP_WORKTREE_SEGMENTS,
   sweepCommitMessage,
 } from '../src/sweep';
-import {git, initRepo, write} from './git-fixtures';
+import {git, initRepo, sdkRemoteWithOwnTag, write} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const SDK_PKG = '@justinhaaheim/justin-sdk';
@@ -72,8 +68,17 @@ function track(sb: Sandbox): Sandbox {
   return sb;
 }
 afterEach(() => {
+  cachedRemote = null;
   while (sandboxes.length > 0) sandboxes.pop()?.cleanup();
 });
+
+/** The local bare remote for THIS test, built once. See sdkRemoteWithOwnTag. */
+let cachedRemote: string | null = null;
+
+function sdkRemote(): string {
+  cachedRemote ??= sdkRemoteWithOwnTag(track);
+  return cachedRemote;
+}
 
 // ---------------------------------------------------------------------------
 // Pure decisions
@@ -163,26 +168,46 @@ describe('sweepCommitMessage', () => {
 
 describe('parseConfigComponents', () => {
   test('reads the components array', () => {
+    const sb = track(createSandbox());
+    const repo = initRepo(sb, 'repo', {'a.txt': 'a\n'});
     expect(
-      parseConfigComponents('{"components":["base-setup","beads-setup"]}'),
-    ).toEqual({components: ['base-setup', 'beads-setup'], ok: true});
+      parseConfigComponents(
+        '{"components":["base-setup","beads-setup"]}',
+        repo,
+      ),
+    ).toEqual({
+      components: ['base-setup', 'beads-setup'],
+      ok: true,
+      source: 'config',
+    });
   });
 
-  test('a config with no components key declares none (a real, readable state)', () => {
-    expect(parseConfigComponents('{"version":"1.0.0"}')).toEqual({
-      components: [],
-      ok: true,
-    });
+  test('a config with NO components key means core, not nothing (dchjw.17 F3)', () => {
+    // The regression this guards: `init` writes no `components` key, and an
+    // empty list here made every repo it enrolled read as "not enrolled in X"
+    // — a silent skip of the whole fleet, in the reassuring direction.
+    const sb = track(createSandbox());
+    const repo = initRepo(sb, 'repo', {'a.txt': 'a\n'});
+    const result = parseConfigComponents('{"version":"1.0.0"}', repo);
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
+    expect(result.source).toBe('core');
+    expect(result.components).toContain('gitignore-setup');
+    expect(result.components.length).toBeGreaterThan(1);
   });
 
   test('unparseable content is NOT an empty list', () => {
     // Failure is not empty: a corrupt config must never read as "not enrolled".
-    const result = parseConfigComponents('{ this is not json');
+    const sb = track(createSandbox());
+    const repo = initRepo(sb, 'repo', {'a.txt': 'a\n'});
+    const result = parseConfigComponents('{ this is not json', repo);
     expect(result.ok).toBe(false);
   });
 
   test('a non-array components field is an error, not a coerced empty list', () => {
-    expect(parseConfigComponents('{"components":"beads-setup"}').ok).toBe(
+    const sb = track(createSandbox());
+    const repo = initRepo(sb, 'repo', {'a.txt': 'a\n'});
+    expect(parseConfigComponents('{"components":"beads-setup"}', repo).ok).toBe(
       false,
     );
   });
@@ -211,7 +236,8 @@ describe('committedConfigComponents', () => {
     });
     expect(committedConfigComponents(repo, 'main')).toEqual({
       components: ['base-setup', 'gitignore-setup'],
-      ok: true,
+      kind: 'enrolled',
+      source: 'config',
     });
   });
 
@@ -225,9 +251,44 @@ describe('committedConfigComponents', () => {
       components: ['gitignore-setup'],
     });
     const result = committedConfigComponents(repo, 'main');
-    expect(result.ok).toBe(false);
-    if (result.ok) throw new Error('unreachable');
+    expect(result.kind).toBe('unreadable');
+    if (result.kind !== 'unreadable') throw new Error('unreachable');
     expect(result.reason).toContain('not committed');
+  });
+
+  test('NO config anywhere is also unreadable — never a silent skip', () => {
+    // A repo the sweep was asked to sweep and cannot read the enrollment of is
+    // a repo the run failed to sweep (ckc4 F4). Discovery only yields repos
+    // that HAVE a config, so this shape comes from an explicit --repos list.
+    const sb = track(createSandbox());
+    const repo = initRepo(sb, 'repo', {'a.txt': 'a\n'});
+    const result = committedConfigComponents(repo, 'main');
+    expect(result.kind).toBe('unreadable');
+    if (result.kind !== 'unreadable') throw new Error('unreachable');
+    expect(result.reason).toContain('not committed');
+  });
+
+  test('a committed but CORRUPT config is unreadable, not "not enrolled"', () => {
+    // The two are different facts (rule 6): one is a repo out of scope, the
+    // other is a repo this run failed to sweep and must be counted as one.
+    const sb = track(createSandbox());
+    const repo = initRepo(sb, 'repo', {
+      'justin-sdk.config.json': '{ this is not json',
+    });
+    const result = committedConfigComponents(repo, 'main');
+    expect(result.kind).toBe('unreadable');
+  });
+
+  test('a committed config with NO components key is enrolled in core (dchjw.17 F3)', () => {
+    const sb = track(createSandbox());
+    const repo = initRepo(sb, 'repo', {
+      'justin-sdk.config.json': '{}',
+    });
+    const result = committedConfigComponents(repo, 'main');
+    expect(result.kind).toBe('enrolled');
+    if (result.kind !== 'enrolled') throw new Error('unreachable');
+    expect(result.source).toBe('core');
+    expect(isEnrolledIn(result.components, 'gitignore')).toBe(true);
   });
 });
 
@@ -257,20 +318,18 @@ async function enrolledProject(options?: {
   writeJson(join(root, 'package.json'), {name: 'fixture', version: '0.0.1'});
 
   const exitCode = await runBaseSetup({
-    extraComponents: ['gitignore-setup'],
     projectRoot: root,
     quiet: true,
+    sdkRepoUrl: sdkRemote(),
   });
   expect(exitCode).toBe(0);
 
   const cfgPath = join(root, 'justin-sdk.config.json');
   const pkgPath = join(root, 'package.json');
 
-  // Age the recorded SDK state so a bump would be visible.
-  const cfg = readJson(cfgPath) ?? {};
-  cfg.version = OLD_VERSION;
-  cfg.lastSynced = OLD_SYNCED;
-  writeJson(cfgPath, cfg);
+  // justin-sdk.config.json no longer records any SDK state to age (D3 deleted
+  // `version` and `lastSynced`). The package.json pin below is the whole
+  // remaining surface of the pin-neutrality contract.
 
   const pkg = readJson(pkgPath) ?? {};
   const devDeps = (pkg.devDependencies as Record<string, string>) ?? {};
@@ -322,8 +381,6 @@ describe('applySweepPayload (component mode) — the pin-neutrality contract', (
     expect(readFileSync(project.cfgPath, 'utf-8')).toBe(cfgBefore);
 
     // Field-level too, so a failure says WHICH field drifted.
-    expect((readJson(project.cfgPath) ?? {}).version).toBe(OLD_VERSION);
-    expect((readJson(project.cfgPath) ?? {}).lastSynced).toBe(OLD_SYNCED);
     const devDeps = (readJson(project.pkgPath) ?? {}).devDependencies as Record<
       string,
       string
@@ -333,22 +390,24 @@ describe('applySweepPayload (component mode) — the pin-neutrality contract', (
 
   test('NEGATIVE CONTROL: the same component run WITHOUT the payload wrapper DOES move the pin', async () => {
     // This is what `sweep --component` would silently do without the guard:
-    // stamp the orchestrator's version into a repo still pinned to an older
-    // SDK — a config that lies about which SDK the repo resolves.
-    const project = await enrolledProject();
+    // every installer chains base-setup, whose stepDepsHasSdk writes the pin
+    // into a repo that did not declare one — inside a run whose entire contract
+    // is that the pin does not move.
+    const project = await enrolledProject({declarePin: false});
 
     const exitCode = await runComponentByName('gitignore', {
       force: false,
       noCommit: true,
       projectRoot: project.root,
       quiet: true,
+      sdkRepoUrl: sdkRemote(),
     });
     expect(exitCode).toBe(0);
 
-    const cfg = readJson(project.cfgPath) ?? {};
-    expect(cfg.version).toBe(getSdkVersion());
-    expect(cfg.version).not.toBe(OLD_VERSION);
-    expect(cfg.lastSynced).toBe(todayIsoDate());
+    const devDeps = (readJson(project.pkgPath) ?? {}).devDependencies as
+      | Record<string, string>
+      | undefined;
+    expect(devDeps?.[SDK_PKG]).toBeDefined();
   });
 
   test('a component that would ADD the SDK pin to package.json has it taken back out', async () => {
@@ -377,6 +436,7 @@ describe('applySweepPayload (component mode) — the pin-neutrality contract', (
       noCommit: true,
       projectRoot: project.root,
       quiet: true,
+      sdkRepoUrl: sdkRemote(),
     });
     expect(exitCode).toBe(0);
 
@@ -393,13 +453,18 @@ describe('readPinSnapshot / restorePinSnapshot', () => {
     const project = await enrolledProject();
     const before = readPinSnapshot(project.root);
 
-    const cfg = readJson(project.cfgPath) ?? {};
-    cfg.version = '9.9.9';
-    writeJson(project.cfgPath, cfg);
+    const pkg = readJson(project.pkgPath) ?? {};
+    (pkg.devDependencies as Record<string, string>)[SDK_PKG] =
+      'github:justinhaaheim/justin-sdk#v9.9.9';
+    writeJson(project.pkgPath, pkg);
 
     const restored = restorePinSnapshot(project.root, before);
-    expect(restored).toEqual(['justin-sdk.config.json:version']);
-    expect((readJson(project.cfgPath) ?? {}).version).toBe(OLD_VERSION);
+    expect(restored).toEqual([`package.json:devDependencies.${SDK_PKG}`]);
+    const devDeps = (readJson(project.pkgPath) ?? {}).devDependencies as Record<
+      string,
+      string
+    >;
+    expect(devDeps[SDK_PKG]).toBe(OLD_PIN);
   });
 
   test('nothing drifted → nothing restored, and the files are not rewritten', async () => {
@@ -588,7 +653,7 @@ async function driftLikeTheDoctorGate(root: string): Promise<void> {
 
 describe('holdPinAfterGates — drift the GATES reintroduce', () => {
   test('a doctor-shaped drift after the payload is undone: the commit is pin-neutral', async () => {
-    const project = await enrolledProject();
+    const project = await enrolledProject({declarePin: false});
     commitProject(project.root);
     const payload = planSweepPayload('gitignore');
 
@@ -600,13 +665,18 @@ describe('holdPinAfterGates — drift the GATES reintroduce', () => {
 
     await driftLikeTheDoctorGate(project.root);
     // The arm cannot pass vacuously: prove the gate's drift is real first.
-    expect((readJson(project.cfgPath) ?? {}).version).toBe(getSdkVersion());
-    expect((readJson(project.cfgPath) ?? {}).lastSynced).toBe(todayIsoDate());
+    expect(
+      (
+        (readJson(project.pkgPath) ?? {}).devDependencies as Record<
+          string,
+          string
+        >
+      )[SDK_PKG],
+    ).toBeDefined();
 
     const held = holdPinAfterGates(project.root, payload, beforeGates);
 
-    expect(held).toContain('justin-sdk.config.json:version');
-    expect(held).toContain('justin-sdk.config.json:lastSynced');
+    expect(held).toContain(`package.json:devDependencies.${SDK_PKG}`);
     expect(readFileSync(project.pkgPath, 'utf-8')).toBe(pkgBefore);
     expect(readFileSync(project.cfgPath, 'utf-8')).toBe(cfgBefore);
     // And the thing that actually matters — what the commit would carry.
@@ -616,7 +686,7 @@ describe('holdPinAfterGates — drift the GATES reintroduce', () => {
   });
 
   test('NEGATIVE CONTROL: without the post-gate hold, that drift lands in the commit', async () => {
-    const project = await enrolledProject();
+    const project = await enrolledProject({declarePin: false});
     commitProject(project.root);
     const payload = planSweepPayload('gitignore');
     expect((await applySweepPayload(project.root, payload)).ok).toBe(true);
@@ -626,8 +696,15 @@ describe('holdPinAfterGates — drift the GATES reintroduce', () => {
     // No holdPinAfterGates call — this is the pre-F2 sweep, and the pin moves
     // inside the commit of a run whose contract says it cannot.
     const staged = stagedPaths(project.root);
-    expect(staged).toContain('justin-sdk.config.json');
-    expect((readJson(project.cfgPath) ?? {}).version).toBe(getSdkVersion());
+    expect(staged).toContain('package.json');
+    expect(
+      (
+        (readJson(project.pkgPath) ?? {}).devDependencies as Record<
+          string,
+          string
+        >
+      )[SDK_PKG],
+    ).toBeDefined();
   });
 
   test('a FULL sweep is never touched: there, moving the pin IS the payload', async () => {

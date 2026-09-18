@@ -54,7 +54,11 @@ import {existsSync, mkdirSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {countAhead, inspectArchiveMirror} from '../src/repo-status/content';
-import {buildPlan, executePlan, type CleanupPlan} from '../src/repo-status/plan';
+import {
+  buildPlan,
+  executePlan,
+  type CleanupPlan,
+} from '../src/repo-status/plan';
 import {
   buildReport,
   type BranchRow,
@@ -283,7 +287,9 @@ describe('countAhead reports failure as failure', () => {
     // be read.
     const report = reportFor(broken.repo);
     expect(report.branches).toBeNull();
-    expect(report.enumerationFailures?.map((f) => f.what)).toEqual(['branches']);
+    expect(report.enumerationFailures?.map((f) => f.what)).toEqual([
+      'branches',
+    ]);
   });
 
   test('inspectArchiveMirror says UNKNOWN, naming the ref it could not measure', () => {

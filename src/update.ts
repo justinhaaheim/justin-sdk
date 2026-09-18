@@ -3,19 +3,24 @@
  *
  * Brings an existing justin-sdk project up to whatever the SDK's current
  * pinned state is. Idempotent; designed to be run periodically (e.g.
- * after the SDK ships a new pin for prompts, prettier, eslint, etc.).
+ * after the SDK ships a new pin for prettier, eslint, etc.).
  *
  * Phases:
  *   1. Preflight       — justin-sdk.config.json must exist; tree must be
  *                        clean unless --allow-dirty
  *   2. Self-update     — bump the SDK in devDependencies; re-exec the
  *                        freshly installed CLI (unless --no-self-update)
- *   3. Components      — re-run every add-component listed in config
- *   4. Bump config     — set version + lastSynced in justin-sdk.config.json
- *   5. Self-check      — runDoctor; print warnings but don't fail update
- *   6. Git commit      — single "chore: sync justin-sdk to vX.Y.Z" commit
+ *   3. Reconcile       — delegate to `install`: add what the config lists and
+ *                        the repo lacks, re-apply the rest. It removes NOTHING
+ *                        (dchjw.17 F1/F2) and update never passes `prune`
+ *   4. Self-check      — runDoctor; print warnings but don't fail update
+ *   5. Git commit      — single "chore: sync justin-sdk to vX.Y.Z" commit
  *                        (skipped if working tree was already dirty, or
  *                        if --no-commit is passed)
+ *
+ * It writes NOTHING back to justin-sdk.config.json. The two SDK-version stamps
+ * it used to bump here were write-only (D3), and re-running a component is not a
+ * licence to edit the list of them.
  *
  * Re-exec dance: when self-update bumps the SDK, this process is still
  * running the OLD code. We re-exec the freshly installed CLI with
@@ -26,20 +31,20 @@ import {spawnSync} from 'child_process';
 import {existsSync, readFileSync} from 'fs';
 import {basename, resolve} from 'path';
 
-import {runComponentByConfigName} from './components';
+import {resolveComponents} from './component-registry';
 import {runDoctor} from './doctor';
+import {runInstall} from './install';
+import {getSdkVersion} from './sdk-identity';
+import {resolveWorktreeSdkBin, worktreeSdkArgv} from './sdk-invocation';
 import {selfUpdateSdk} from './self-update';
 import {
   exec,
   fail,
-  getSdkVersion,
   readJson,
   setQuiet,
   stepHeader,
   success,
-  todayIsoDate,
   warn,
-  writeJson,
 } from './setup-helpers';
 
 // ---------------------------------------------------------------------------
@@ -59,8 +64,6 @@ export interface UpdateOptions {
   allowDirty?: boolean;
   /** Pass --force through to each component. */
   force?: boolean;
-  /** Forwarded to runPromptsSetup (tests use this to skip the network). */
-  skipPromptsFetch?: boolean;
 }
 
 /**
@@ -70,6 +73,43 @@ export interface UpdateOptions {
  * execs the newly installed CLI and calls process.exit() with the
  * child's status.
  */
+/**
+ * The argv for the re-exec after a self-update, or the reason there is none.
+ *
+ * THE REPO'S OWN BINARY, BY PATH (dchjw.17 F4). This used to be `sdkRunArgv` —
+ * `bun run justin-sdk` — which is form D1(b) and correct for a hook, but wrong
+ * here: `bun run` falls through to PATH when `node_modules/.bin` is missing,
+ * and this machine carries a `justin-sdk` PATH shim. Re-execing the shim runs
+ * the ORCHESTRATOR's SDK against this repo and reports it as the repo's own
+ * update — the same fallthrough dchjw.15 F2 closed at the sweep gates. The
+ * self-update that just ran installed the new pin, so the binary is precisely
+ * what we mean to run; if it is not there, that install did not land and there
+ * is nothing honest to re-exec.
+ *
+ * Exported and pure-ish (one existence check) so the refusal is testable
+ * without a network, a release, or a real self-update.
+ */
+export function planUpdateReExec(
+  projectRoot: string,
+  flags: {
+    noCommit: boolean;
+    allowDirty: boolean;
+    force: boolean;
+    quiet: boolean;
+  },
+): {ok: true; argv: string[]} | {ok: false; detail: string} {
+  const bin = resolveWorktreeSdkBin(projectRoot);
+  if (!bin.ok) return {detail: bin.detail, ok: false};
+  // --no-self-update avoids infinite recursion; everything else is the flags
+  // the user cared about, passed through.
+  const args = ['update', '--no-self-update'];
+  if (flags.noCommit) args.push('--no-commit');
+  if (flags.allowDirty) args.push('--allow-dirty');
+  if (flags.force) args.push('--force');
+  if (flags.quiet) args.push('--quiet');
+  return {argv: worktreeSdkArgv(bin.path, args), ok: true};
+}
+
 export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
   const quiet = options.quiet ?? false;
   const projectRoot = resolve(options.projectRoot ?? process.cwd());
@@ -78,7 +118,6 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
   const dryRun = options.dryRun ?? false;
   const allowDirty = options.allowDirty ?? false;
   const force = options.force ?? false;
-  const skipPromptsFetch = options.skipPromptsFetch ?? false;
 
   setQuiet(quiet);
 
@@ -97,13 +136,20 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
   if (!existsSync(configPath)) {
     fail(
       'justin-sdk.config.json not found. ' +
-        'Run `bunx @justinhaaheim/justin-sdk init` (greenfield) or `bunx @justinhaaheim/justin-sdk add base-setup` first.',
+        'Run `bun run justin-sdk init` (greenfield) or `bun run justin-sdk add base-setup` first.',
     );
     return 1;
   }
   const config = readJson(configPath) ?? {};
-  const components = (config.components as string[] | undefined) ?? [];
-  success(`Found justin-sdk.config.json (${components.length} components)`);
+  const resolved = resolveComponents(config, projectRoot);
+  if (!resolved.ok) {
+    fail(`${resolved.reason} — fix it and re-run; nothing was applied.`);
+    return 1;
+  }
+  const components = resolved.components;
+  success(
+    `Found justin-sdk.config.json (${components.length} components, ${resolved.source === 'core' ? 'from the core preset — no `components` key' : 'listed'})`,
+  );
 
   const gitStatus = exec('git status --porcelain', projectRoot);
   const treeWasDirty =
@@ -129,16 +175,21 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
     stepHeader('2. Self-update SDK');
     const result = await selfUpdateSdk(projectRoot);
     if (result.shouldReExec) {
-      // Re-exec the freshly installed CLI with --no-self-update to avoid
-      // infinite recursion. Pass through every flag the user cared about.
+      const reExec = planUpdateReExec(projectRoot, {
+        allowDirty,
+        force,
+        noCommit,
+        quiet,
+      });
+      if (!reExec.ok) {
+        fail(
+          `Self-update installed ${result.newVersion ?? 'a new version'}, but the re-exec cannot run: ${reExec.detail} Nothing was reconciled; run \`bun install\` here and re-run \`update\`.`,
+        );
+        return 1;
+      }
       success(`Re-executing with new SDK (${result.newVersion}) …`);
-      const args = ['justin-sdk', 'update', '--no-self-update'];
-      if (noCommit) args.push('--no-commit');
-      if (allowDirty) args.push('--allow-dirty');
-      if (force) args.push('--force');
-      if (quiet) args.push('--quiet');
-      if (skipPromptsFetch) args.push('--skip-prompts-fetch');
-      const child = spawnSync('bunx', args, {
+      const [command, ...rest] = reExec.argv;
+      const child = spawnSync(command as string, rest, {
         cwd: projectRoot,
         stdio: 'inherit',
       });
@@ -150,82 +201,30 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
   }
 
   // -------------------------------------------------------------------------
-  // Phase 3: Re-apply each registered component
+  // Phase 3: Reconcile — `update` IS `install` with a pin bump in front (D3)
   // -------------------------------------------------------------------------
-  stepHeader('3. Re-apply components');
-  if (components.length === 0) {
-    warn(
-      'No components registered in justin-sdk.config.json; nothing to re-apply.',
-    );
-  }
-  for (const component of components) {
-    if (dryRun) {
-      success(`(dry-run) would re-apply ${component}`);
-      continue;
-    }
-    const result = runComponentByConfigName(component, {
-      projectRoot,
-      quiet: true,
-      force,
-      noCommit: true,
-      skipFetch: skipPromptsFetch,
-    });
-    if (result == null) {
-      warn(
-        `Unknown component "${component}" in justin-sdk.config.json — skipping. ` +
-          'Either remove it or upgrade the SDK to a version that knows about it.',
-      );
-      continue;
-    }
-    // Re-assert our quiet setting; sub-runners toggle the module-level flag.
-    setQuiet(quiet);
-    const exitCode = await result;
-    setQuiet(quiet);
-    if (exitCode !== 0) {
-      fail(
-        `Component ${component} failed (exit ${exitCode}); aborting update.`,
-      );
-      return exitCode;
-    }
-    success(`${component} re-applied`);
+  // This used to be a re-apply loop that could only ever grow a repo: it
+  // re-ran every listed component and had no way to notice one the config had
+  // stopped listing. Delegating to `install` means update reconciles in both
+  // directions, under install/remove's identity rules, with one implementation.
+  stepHeader('3. Reconcile components (install)');
+  setQuiet(quiet);
+  const installExit = await runInstall({
+    dryRun,
+    force,
+    projectRoot,
+    quiet,
+  });
+  setQuiet(quiet);
+  if (installExit !== 0) {
+    fail(`install failed (exit ${installExit}); aborting update.`);
+    return installExit;
   }
 
   // -------------------------------------------------------------------------
-  // Phase 4: Bump config version + lastSynced
+  // Phase 4: Self-check via doctor
   // -------------------------------------------------------------------------
-  if (!dryRun) {
-    stepHeader('4. Bump justin-sdk.config.json');
-    const sdkVersion = getSdkVersion();
-    const fresh = (readJson(configPath) ?? {}) as Record<string, unknown>;
-    const today = todayIsoDate();
-    let modified = false;
-    if (fresh.version !== sdkVersion) {
-      fresh.version = sdkVersion;
-      modified = true;
-    }
-    if (fresh.lastSynced !== today) {
-      fresh.lastSynced = today;
-      modified = true;
-    }
-    if (modified) {
-      writeJson(configPath, fresh);
-      success(
-        `Bumped justin-sdk.config.json (version=${sdkVersion}, lastSynced=${today})`,
-      );
-    } else {
-      success('justin-sdk.config.json already up to date');
-    }
-  } else {
-    stepHeader('4. Bump justin-sdk.config.json (dry-run)');
-    success(
-      `(dry-run) would set version=${getSdkVersion()}, lastSynced=${todayIsoDate()}`,
-    );
-  }
-
-  // -------------------------------------------------------------------------
-  // Phase 5: Self-check via doctor
-  // -------------------------------------------------------------------------
-  stepHeader('5. doctor (self-check)');
+  stepHeader('4. doctor (self-check)');
   if (dryRun) {
     success('(dry-run) skipping doctor');
   } else {
@@ -234,7 +233,7 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
     setQuiet(quiet);
     if (doctorExit !== 0) {
       warn(
-        'doctor reported issues — run `bunx @justinhaaheim/justin-sdk doctor` for details.',
+        'doctor reported issues — run `bun run justin-sdk doctor` for details.',
       );
     } else {
       success('All doctor checks passed');
@@ -242,27 +241,28 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
   }
 
   // -------------------------------------------------------------------------
-  // Phase 6: Single git commit
+  // Phase 5: Single git commit
   // -------------------------------------------------------------------------
   if (dryRun) {
-    stepHeader('6. Git commit (dry-run)');
+    stepHeader('5. Git commit (dry-run)');
     success('(dry-run) would commit changes if any');
   } else if (noCommit) {
-    stepHeader('6. Git commit');
+    stepHeader('5. Git commit');
     success('Skipping commit (--no-commit)');
   } else if (treeWasDirty) {
-    stepHeader('6. Git commit');
+    stepHeader('5. Git commit');
     warn(
       'Tree was already dirty before update — skipping commit so we do not bundle unrelated work. ' +
         'Stage and commit manually.',
     );
   } else {
-    stepHeader('6. Git commit');
+    stepHeader('5. Git commit');
     const after = exec('git status --porcelain', projectRoot);
     if (after.exitCode !== 0 || after.stdout.trim().length === 0) {
       success('Nothing to commit — already in sync');
     } else {
-      const sdkVersion = getSdkVersion();
+      // Prose, like init's scaffold commit: degrade visibly, do not refuse.
+      const sdkVersion = getSdkVersion() ?? 'unknown';
       const addResult = exec('git add -A', projectRoot);
       if (addResult.exitCode !== 0) {
         warn(
@@ -304,12 +304,12 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
 export function readConfigComponents(projectRoot: string): string[] | null {
   const configPath = resolve(projectRoot, 'justin-sdk.config.json');
   if (!existsSync(configPath)) return null;
+  let parsed: unknown;
   try {
-    const config = JSON.parse(readFileSync(configPath, 'utf-8')) as {
-      components?: string[];
-    };
-    return config.components ?? [];
+    parsed = JSON.parse(readFileSync(configPath, 'utf-8'));
   } catch {
     return null;
   }
+  const resolved = resolveComponents(parsed, projectRoot);
+  return resolved.ok ? resolved.components : null;
 }

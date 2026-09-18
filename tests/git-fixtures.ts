@@ -15,10 +15,10 @@
  */
 
 import {execFileSync} from 'child_process';
-import {mkdirSync, writeFileSync} from 'fs';
+import {mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {dirname, join} from 'path';
 
-import {type Sandbox} from './sandbox';
+import {createSandbox, type Sandbox} from './sandbox';
 
 export function git(cwd: string, args: string[]): string {
   return execFileSync('git', args, {
@@ -26,6 +26,42 @@ export function git(cwd: string, args: string[]): string {
     encoding: 'utf-8',
     stdio: ['pipe', 'pipe', 'pipe'],
   });
+}
+
+/**
+ * A bare git repo carrying the tag this SDK would pin to.
+ *
+ * WHY EVERY TEST THAT INSTALLS ANYTHING NEEDS ONE (dchjw.17 F7). `add`,
+ * `install`, `init` and every installer chain `base-setup`, whose
+ * `stepDepsHasSdk` verifies the pin tag with a real `git ls-remote` against
+ * github — once per component, per test. Measured with a logging `git` shim on
+ * PATH: 38 calls to github.com in one suite run. That is a suite that fails on
+ * a plane, that cannot be trusted offline, and whose "measured" outcomes are
+ * partly a network's opinion. Passing this as `sdkRepoUrl` makes the real
+ * verification run, hermetically.
+ *
+ * `register` is the caller's sandbox tracker: the fixture gets its OWN sandbox,
+ * because built inside a project sandbox it leaves two untracked directories
+ * there and `init`'s preflight then refuses the dirty tree — a failure that
+ * looks like the feature is broken and is not.
+ */
+export function sdkRemoteWithOwnTag(
+  register: (sb: Sandbox) => Sandbox,
+): string {
+  const host = register(createSandbox());
+  const work = join(host.path, 'remote-work');
+  mkdirSync(work, {recursive: true});
+  git(work, ['init', '-q', '-b', 'main', '.']);
+  git(work, ['config', 'user.email', 'test@example.com']);
+  git(work, ['config', 'user.name', 'Test']);
+  git(work, ['commit', '-q', '--allow-empty', '-m', 'init']);
+  const version = JSON.parse(
+    readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf-8'),
+  ) as {version: string};
+  git(work, ['tag', `v${version.version}`]);
+  const bare = join(host.path, 'remote.git');
+  git(host.path, ['clone', '-q', '--bare', work, bare]);
+  return bare;
 }
 
 /** Write a file under `root`, creating parent directories. */

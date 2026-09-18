@@ -21,12 +21,13 @@ import {execFileSync} from 'child_process';
 import {resolve} from 'path';
 
 import {
+  COMPONENT_INCLUDE_IF,
   COMPONENT_NAMES,
   configNameFor,
-  DEPENDENCY_ORDER,
+  IMPLICIT_COMPONENT,
   type ComponentName,
-} from './components';
-import {getSdkVersion} from './setup-helpers';
+} from './component-registry';
+import {getSdkVersion, UNKNOWN_VERSION} from './sdk-identity';
 
 /**
  * One line per component. Typed against ComponentName so a new component
@@ -34,19 +35,17 @@ import {getSdkVersion} from './setup-helpers';
  */
 const COMPONENT_BLURBS: Record<ComponentName, string> = {
   'base-setup':
-    'Foundation every other installer self-applies: justin-sdk.config.json, scripts/setup-env.ts, .claude/settings.json scaffolding, tmp/ in .gitignore, and the SDK as a devDependency.',
+    'Foundation every other installer self-applies: justin-sdk.config.json, the shared package.json scripts, the .claude/settings.json SessionStart hook, tmp/ in .gitignore, and the SDK as a devDependency. It DELETES a committed scripts/setup-env.ts whose bytes match a known SDK template — the `setup-env` command superseded it.',
   beads:
     'Issue tracking via beads. Installs the tool, seeds .beads/, and adds the workflow prompt.',
-  'claude-md': 'Generates/refreshes CLAUDE.md with the standard skeleton.',
   'critical-rules':
-    'Writes the COMMITTED rules artifact .claude/rules/justin-sdk/critical-rules.md (autoloaded at CLAUDE.md priority, no truncation cap, travels to web/CI/fresh clones). Module selection is opt-in per repo: componentConfig["critical-rules"].modules. Regenerate with `rules-update`; propagate with `sweep --component critical-rules`.',
-  eas: 'Expo/EAS build + update + ship scripts. App-only — wrong for a node CLI.',
+    'Writes the COMMITTED rules artifact .claude/rules/justin-sdk/critical-rules.md (autoloaded at CLAUDE.md priority, no truncation cap, travels to web/CI/fresh clones). Which modules it carries is decided by the prompts rules registry plus the project-type predicates, re-evaluated at EVERY refresh — there is no per-repo module list. Regenerate with `rules-update`; propagate with `sweep --component critical-rules`.',
+  eas: 'Expo/EAS build + update + ship scripts. Applies only to an Expo app (includeIf isExpo).',
   eslint: 'Shared ESLint config wired to the project.',
   'gh-actions': 'GitHub Actions workflows (signal on PR).',
   gitignore: 'The full baseline .gitignore.',
   husky: 'Git hooks (pre-commit → lint-staged).',
   prettier: 'Shared Prettier config + .prettierignore.',
-  prompts: 'Fetches the shared prompts library into the project.',
   'time-check':
     'UserPromptSubmit hook stamping the wall-clock into the transcript after a long gap or on a new working day. Config: componentConfig["time-check"].',
   'thread-hooks':
@@ -83,28 +82,41 @@ function captureCommandList(): string {
   }
 }
 
+/**
+ * Every component and its gate. There is no preset split to print any more: the
+ * `core` preset is every component whose `includeIf` passes IN THE REPO YOU ARE
+ * IN, so the only honest static table is the registry plus each entry's gate
+ * (epic home-base-dchjw D3). `justin-sdk config schema` prints the expansion for
+ * the current repo.
+ */
 function componentTable(): string {
-  const optIn = COMPONENT_NAMES.filter((n) => !DEPENDENCY_ORDER.includes(n));
   const rows: string[] = [];
-
-  rows.push('Installed by `add all` / `init`, in dependency order:');
-  for (const name of DEPENDENCY_ORDER) {
-    rows.push(`  ${name.padEnd(12)} (${configNameFor(name)})`);
-    rows.push(`      ${COMPONENT_BLURBS[name]}`);
-  }
+  rows.push(
+    '`core` = every component below whose includeIf passes for the repo, except the implicit ' +
+      `${IMPLICIT_COMPONENT} (every installer applies it itself). A config with no \`components\` key means core.`,
+  );
   rows.push('');
-  rows.push('OPT-IN ONLY — never installed by `add all` or `init`:');
-  for (const name of optIn) {
-    rows.push(`  ${name.padEnd(12)} (${configNameFor(name)})`);
+  for (const name of COMPONENT_NAMES) {
+    const gate = COMPONENT_INCLUDE_IF[name];
+    const suffix =
+      name === IMPLICIT_COMPONENT
+        ? '  [implicit]'
+        : gate != null && gate.length > 0
+          ? `  [includeIf ${gate.join(', ')}]`
+          : '';
+    rows.push(`  ${name.padEnd(14)} (${configNameFor(name)})${suffix}`);
     rows.push(`      ${COMPONENT_BLURBS[name]}`);
   }
   return rows.join('\n');
 }
 
 export function buildSkill(): string {
+  // Read ONCE: three places in this document quote it, and a document that
+  // disagreed with itself about which SDK wrote it would be worse than useless.
+  const sdkVersion = getSdkVersion();
   return `# justin-sdk — how to use it
 
-Version of the copy you are reading: ${getSdkVersion()}
+Version of the copy you are reading: ${sdkVersion ?? UNKNOWN_VERSION}
 
 Shared tooling for Justin's projects. It exists so the same script does not get
 copy-pasted into a dozen repos and then drift. When you are tempted to write a
@@ -112,40 +124,78 @@ build/lint/setup script that another project probably also needs, check whether
 the SDK already has it, and prefer adding it here over forking it there.
 
 
-## Two ways it runs
+## How to invoke it — exactly two forms (epic home-base-dchjw, D1)
 
-1. AS AN INSTALLED DEPENDENCY (the normal case). Projects declare
-   \`@justinhaaheim/justin-sdk\` in devDependencies and call \`bunx justin-sdk <cmd>\`.
-   \`bunx\` finds the LOCAL copy in node_modules — no network, fast enough for a
-   per-prompt hook (~80ms).
+1. IN AN ENROLLED REPO (the normal case), for you, for agents, and for hooks:
 
-2. AS A "STATIC METHOD" (bootstrapping). Before a project has the SDK — or to run
-   a one-off — invoke it straight from GitHub:
+       bun run justin-sdk <cmd>
 
-       bunx github:justinhaaheim/justin-sdk#<ref> <cmd>
+   \`bun run\` prepends node_modules/.bin to PATH, so this resolves the repo's own
+   pinned tag — no network, offline, fast enough for a per-prompt hook (~80ms).
+   Hooks run under \`sh\`, not under \`bun run\`, so a hook string must spell the
+   \`bun run\` prefix out in full.
 
-   Use this for \`add\`/\`init\` on a project that is not enrolled yet.
+   Inside a package.json SCRIPT VALUE, write the BARE bin instead —
+   \`"doctor": "justin-sdk doctor"\` — exactly as eslint/prettier/tsc are written.
+
+2. BOOTSTRAP ONLY, in a repo that has never installed the SDK:
+
+       bunx github:justinhaaheim/justin-sdk <cmd>
+
+   Use this for \`init\`/\`add\` on a project that is not enrolled yet, and nowhere
+   else. To run the newest published SDK from anywhere, use home-base's
+   \`justin-sdk-latest <cmd>\`.
+
+RETIRED, and rewritten by \`install\` wherever they are found: \`bunx
+@justinhaaheim/justin-sdk\` (falls through to the npm registry, where the scope is
+not demonstrably Justin's — home-base-2qhw), and the bare \`bunx justin-sdk\` /
+\`bunx jsdk\` / \`bunx j\` (same fallthrough; \`j\` and \`jsdk\` are REAL unrelated npm
+packages). The \`j\` and \`jsdk\` bins no longer exist.
 
 
-## Installing and upgrading
+## Installing and upgrading — the npm shape
 
-Enroll a project (or add one piece):
+The component commands mirror npm's, and the split is the point: \`add\` and
+\`remove\` edit the MANIFEST (\`justin-sdk.config.json#components\`), \`install\`
+makes the DISK match it, and \`update\` is \`install\` with a pin bump in front.
 
-    bunx github:justinhaaheim/justin-sdk#main add all       # the standard set
-    bunx github:justinhaaheim/justin-sdk#main add <name>    # one component
-    bunx justin-sdk add <name>                              # once enrolled
+    bunx github:justinhaaheim/justin-sdk init   # enrol: config + devDep + scripts, NO components
+    bun run justin-sdk list                     # every component: purpose, installed?, applies?, in config?
+    bun run justin-sdk add core                 # install everything that applies to THIS repo
+    bun run justin-sdk add beads prettier       # variadic: install specific ones
+    bun run justin-sdk remove prettier          # take one back out
+    bun run justin-sdk install                  # install what is listed + re-apply; NEVER removes
+    bun run justin-sdk install --prune --dry-run # what removing the unlisted ones would take out
+    bun run justin-sdk update                   # bump the SDK pin, then install
 
-Upgrade an enrolled project:
+\`init\` writes the manifest and nothing else — no component files. It leaves
+\`components\` OUT of the config, which means "track \`core\`"; \`add core\` is what
+installs it. \`add --help\` prints what \`core\` expands to in the repo you run it
+in, with the predicates actually evaluated.
 
-    bunx justin-sdk update        # re-applies every component in the config,
-                                  # self-updating to the latest tag first
+\`install\` installs what the config lists and the repo lacks, re-applies the
+rest, and NEVER REMOVES. Anything on disk that the config does not list is named
+and KEPT: "installed" is evidence like a filename or a matching line, which is
+not proof the SDK put it there — a \`.gitignore\` line someone wrote years before
+the repo was enrolled is byte-identical to the one the SDK appends.
+
+Removal takes an explicit act: \`remove <name…>\` (you name the component) or
+\`install --prune\` (you name the flag). Both remove by identity, never by name —
+a file goes only when its bytes are identical to what the component would write
+right now, an appended entry (script, ignore line, hook, config block) only on
+an exact match, and anything else prints \`left in place (modified): <path>\` and
+stays. Content the SDK cannot reconstruct (a beads database, the generated rules
+artifact, a composed husky hook) prints \`left in place (content not
+reconstructible)\` and is never deleted. There is no \`--force\`.
+\`install --prune --dry-run\` prints the whole plan first: every file, every line,
+every script, every hook entry and every config key, with its verdict.
 
 \`update\` runs \`self-update\` as its first step: it bumps the pin in
 devDependencies to the newest tag and re-execs, so the rest of the run uses the
-new code.
+new code. \`--no-self-update\` skips that and reconciles against the current pin.
 
 
-## !! bunx and #main: the thing that will bite you
+## !! bunx and #main: the thing that will bite you (bootstrap only)
 
 \`bunx github:justinhaaheim/justin-sdk#main <cmd>\` does NOT reliably give you the
 latest main. Verified 2026-08-06:
@@ -169,22 +219,26 @@ latest main. Verified 2026-08-06:
 
   Prefer a version tag when you want determinism:
 
-      bunx github:justinhaaheim/justin-sdk#v${getSdkVersion()} <cmd>
+      bunx github:justinhaaheim/justin-sdk#v${sdkVersion ?? 'X.Y.Z'} <cmd>
 
   TAG FORMAT: \`v\`-PREFIXED semver (\`v0.16.0\`), always (home-base-v170.15 /
   j2n7.4). The repo carried duplicate bare tags for a while (\`0.14.0\` even
   points at a DIFFERENT commit than \`v0.14.0\`) — never hand-type a bare
   \`#X.Y.Z\` pin; it can silently resolve the wrong tree.
 
-  Also: \`--version\` prints "unknown" when run via bunx-from-GitHub. Known bug;
-  it does not mean the install failed.
+  \`--version\` prints the SDK's OWN version, and \`--help\`'s first line names
+  that version and the directory the running copy lives in — which is how you
+  tell a pinned tarball in node_modules from a bunx cache dir from
+  home-base/pkg/justin-sdk. "${UNKNOWN_VERSION}" there means the SDK could not
+  read its own package.json, and nothing else.
 
 
 ## What it installs — components
 
-Every project carries \`justin-sdk.config.json\` listing the components it has.
-\`add <name>\` installs one; \`add all\` installs the standard set; \`update\`
-re-applies everything already listed.
+Every project carries \`justin-sdk.config.json\`. Its \`components\` key is
+OPTIONAL: absent means \`core\`, computed for that repo (D3). Only \`add\` and
+\`remove\` write it; \`install\` reads it and makes the disk match. \`base-setup\` is
+never listed — every installer applies it, so it is implicit.
 
 ${componentTable()}
 
@@ -192,14 +246,17 @@ Per-component settings live under \`componentConfig\` in justin-sdk.config.json,
 keyed by the SHORT component name:
 
     {
-      "version": "${getSdkVersion()}",
-      "components": ["base-setup", "time-check-setup"],
       "componentConfig": {
         "time-check": {"enabled": true, "gapHours": 8, "notifyOnNewDayBoundaryHour": 0}
       }
     }
 
-\`config schema\` prints every key of that file — and of the user-level
+That is a COMPLETE config: no \`components\` (so: core), and neither of the two
+SDK-version stamps it used to carry — both were write-only and are gone (D3).
+\`{}\` works too.
+
+\`config schema\` prints every key of that file, the resolved default of each,
+and what \`core\` expands to in the repo you run it in — and of the user-level
 \`~/.config/justin-sdk/config.json\`, which holds settings that should apply to
 every repo — with its type, default and description. Unknown keys are always
 accepted (a config written by a newer SDK must not fail an older one); a known

@@ -101,16 +101,8 @@ import ignore from 'ignore';
 // Constants and public types
 // ---------------------------------------------------------------------------
 
-/** Cost-ordered and cumulative: lint ⊂ js ⊂ native. */
 /** package.json script prefix, mirroring `signal-source:` / `fix-source:`. */
 export const SETUP_ENV_SOURCE_PREFIX = 'setup-env:';
-
-/**
- * The v170-era tiered prefix. Discovery still RECOGNIZES it — but only to
- * skip it with a rename hint, so a project carrying stale scripts gets one
- * clear line instead of silent non-execution.
- */
-export const LEGACY_WORKTREE_SOURCE_PREFIX = 'worktree-source:';
 
 /** Claude Code's own convention (D2) — byte-identical on purpose. */
 export const WORKTREE_DIR_SEGMENTS = ['.claude', 'worktrees'] as const;
@@ -457,7 +449,9 @@ export function parseSubmoduleStatus(stdout: string): SubmoduleStatus {
 }
 
 export type SubmoduleProbe =
-  {kind: 'known'; status: SubmoduleStatus} | {kind: 'none'} | {kind: 'unknown'};
+  | {kind: 'known'; status: SubmoduleStatus}
+  | {kind: 'none'}
+  | {kind: 'unknown'};
 
 /**
  * What submodule work `target` needs, without changing anything.
@@ -728,12 +722,6 @@ export interface HydrationScript {
   /** Full package.json script name, e.g. `setup-env:swift`. */
   name: string;
   label: string;
-  /**
-   * True for a v170-era `worktree-source:<tier>:<LABEL>` script. Legacy
-   * scripts are never RUN — they are reported with a rename hint, so stale
-   * ones surface as one clear line instead of silently not executing.
-   */
-  legacy: boolean;
 }
 
 /**
@@ -745,7 +733,10 @@ export interface HydrationScript {
  * command and is structurally excluded by the prefix — running it from here
  * would recurse.
  *
- * Also returns v170-era `worktree-source:` scripts as `legacy: true` entries.
+ * The v170-era `worktree-source:<tier>:<LABEL>` prefix is NOT recognised any
+ * more (retired 2026-09-18, home-base-dchjw.9): it had its one release of being
+ * reported with a rename hint, and a repo that still carries one now simply has
+ * a package.json script the SDK never asked for.
  */
 export function discoverHydrationScripts(target: string): HydrationScript[] {
   const pkgPath = join(target, 'package.json');
@@ -763,18 +754,10 @@ export function discoverHydrationScripts(target: string): HydrationScript[] {
 
   const found: HydrationScript[] = [];
   for (const name of Object.keys(scripts)) {
-    if (name.startsWith(SETUP_ENV_SOURCE_PREFIX)) {
-      const label = name.slice(SETUP_ENV_SOURCE_PREFIX.length);
-      if (label === '') continue;
-      found.push({label, legacy: false, name});
-      continue;
-    }
-    if (name.startsWith(LEGACY_WORKTREE_SOURCE_PREFIX)) {
-      const rest = name.slice(LEGACY_WORKTREE_SOURCE_PREFIX.length);
-      const separator = rest.indexOf(':');
-      const label = separator >= 0 ? rest.slice(separator + 1) : rest;
-      found.push({label, legacy: true, name});
-    }
+    if (!name.startsWith(SETUP_ENV_SOURCE_PREFIX)) continue;
+    const label = name.slice(SETUP_ENV_SOURCE_PREFIX.length);
+    if (label === '') continue;
+    found.push({label, name});
   }
   return found;
 }
@@ -894,7 +877,7 @@ export function miseTrustArgv(target: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// worktree-setup
+// setup-env
 // ---------------------------------------------------------------------------
 
 /**
@@ -1229,15 +1212,6 @@ export function setupEnv(options: SetupEnvOptions = {}): SetupEnvResult {
   } else {
     for (const script of scripts) {
       const label = `HYDRATE:${script.name}`;
-      if (script.legacy) {
-        step(
-          steps,
-          label,
-          'skipped',
-          `deprecated ${LEGACY_WORKTREE_SOURCE_PREFIX} script (tiers were removed) — rename to ${SETUP_ENV_SOURCE_PREFIX}${script.label} to run it, or delete it`,
-        );
-        continue;
-      }
       if (packageManager == null) {
         step(
           steps,

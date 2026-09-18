@@ -77,7 +77,13 @@ function gitRun(cwd: string, args: string[]): {status: number; stdout: string} {
 }
 
 /** The exact argv `changedPaths` runs, so a test measures the real stream. */
-const NAME_STATUS = ['-z', '--name-status', '--format=', '-m', '--first-parent'];
+const NAME_STATUS = [
+  '-z',
+  '--name-status',
+  '--format=',
+  '-m',
+  '--first-parent',
+];
 
 function nameStatus(cwd: string, sha: string, extra: string[] = []): string {
   return gitRun(cwd, ['show', ...NAME_STATUS, ...extra, sha]).stdout;
@@ -278,7 +284,10 @@ function buildFixture(sb: Sandbox): Fixture {
     copyFileSync(join(repo, srcPath(name)), join(repo, dstPath(name)));
   }
   write(repo, 'also.txt', 'also\n');
-  commit(repo, 'M2: take one rename in full, and only the add half of the rest');
+  commit(
+    repo,
+    'M2: take one rename in full, and only the add half of the rest',
+  );
 
   return {gauntletSha, halfLostSha, reflectedSha, repo};
 }
@@ -314,9 +323,9 @@ describe('the premise: rename detection fires, and the baseline holds both halve
     expect(gitRun(fx.repo, ['rev-parse', 'main:kept-src.txt']).status).toBe(0);
 
     // And the control's old half really is gone from the baseline.
-    expect(gitRun(fx.repo, ['rev-parse', 'main:moved-src.txt']).status).not.toBe(
-      0,
-    );
+    expect(
+      gitRun(fx.repo, ['rev-parse', 'main:moved-src.txt']).status,
+    ).not.toBe(0);
   });
 });
 

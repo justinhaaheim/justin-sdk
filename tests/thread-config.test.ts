@@ -16,9 +16,7 @@ import {
   threadsBeadsDir,
   threadsRepoDir,
   threadsRepoDirResolution,
-  LIFE_DIR_DEPRECATION_NOTICE,
   probeWritable,
-  resetDeprecationNoticeForTests,
   SANDBOX_DENIED_LINE,
   threadsStateDir,
 } from '../src/thread/paths';
@@ -151,35 +149,31 @@ describe('where the threads repo is (home-base-p1uj.11)', () => {
     ).toEqual({dir: '/tmp/from-env', source: 'env'});
   });
 
-  test('JUSTIN_THREADS_LIFE_DIR still WORKS, and says once that it is deprecated', () => {
-    // Deprecated means honoured-with-a-notice for one release, not ignored: a
-    // shell or hook that still exports it must keep working, or the move
-    // silently sends that session's beads to a repo nobody is reading.
-    resetDeprecationNoticeForTests();
-    const env = {JUSTIN_THREADS_LIFE_DIR: '/tmp/old-home'};
-    expect(threadsRepoDirResolution(env)).toEqual({
-      dir: '/tmp/old-home',
-      source: 'deprecatedEnv',
+  test('JUSTIN_THREADS_LIFE_DIR is RETIRED — it no longer decides anything', () => {
+    // The alias had its one release of being honoured-with-a-notice
+    // (home-base-dchjw.9). What matters now is that it does not quietly win
+    // over the layer that SHOULD decide: a shell that still exports it must
+    // fall through to the config file / the default, not to ~/Dev/life.
+    const {cwd, env} = configWorld({
+      user: {componentConfig: {thread: {repoDir: '/tmp/from-config'}}},
     });
-
-    const said: string[] = [];
-    const realError = console.error;
-    console.error = (...args: unknown[]) => {
-      said.push(args.map(String).join(' '));
-    };
-    try {
-      expect(threadsRepoDir(env)).toBe('/tmp/old-home');
-      expect(threadsRepoDir(env)).toBe('/tmp/old-home');
-      expect(threadsRepoDir(env)).toBe('/tmp/old-home');
-    } finally {
-      console.error = realError;
-    }
-    // ONCE per process: three calls, one line. A notice repeated on every
-    // internal call reads as three problems.
-    expect(said).toEqual([LIFE_DIR_DEPRECATION_NOTICE]);
-    expect(LIFE_DIR_DEPRECATION_NOTICE).toContain('DEPRECATED');
-    expect(LIFE_DIR_DEPRECATION_NOTICE).toContain('JUSTIN_THREADS_REPO_DIR');
-    resetDeprecationNoticeForTests();
+    expect(
+      threadsRepoDirResolution({
+        ...env,
+        JUSTIN_THREADS_LIFE_DIR: '/tmp/old-home',
+      }),
+    ).toEqual({dir: '/tmp/from-config', source: 'config'});
+    expect(
+      threadsRepoDir({...env, JUSTIN_THREADS_LIFE_DIR: '/tmp/old-home'}),
+    ).toBe('/tmp/from-config');
+    // NEGATIVE CONTROL for the layering above: the CURRENT env var still wins.
+    expect(
+      threadsRepoDirResolution({
+        ...env,
+        JUSTIN_THREADS_REPO_DIR: '/tmp/from-env',
+      }),
+    ).toEqual({dir: '/tmp/from-env', source: 'env'});
+    expect(cwd.length).toBeGreaterThan(0);
   });
 
   test('autoCommit DEFAULTS ON — the only thread knob that does', () => {

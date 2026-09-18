@@ -575,10 +575,12 @@ export function parseBackgroundedId(stdout: string): string | null {
  * substitution, arriving at the one decision this whole file exists to protect.
  */
 export type AgentListing =
-  {ok: true; rows: AgentRow[]} | {ok: false; reason: string};
+  | {ok: true; rows: AgentRow[]}
+  | {ok: false; reason: string};
 
 export type AgentLookup =
-  {ok: true; row: AgentRow | null} | {ok: false; reason: string};
+  | {ok: true; row: AgentRow | null}
+  | {ok: false; reason: string};
 
 // ---------------------------------------------------------------------------
 // Every child call the runner makes, and its bound (home-base-a1go)
@@ -752,7 +754,11 @@ export function signalPid(pid: number, sig: NodeJS.Signals): boolean {
  *               "it is gone" (critical rule 6).
  */
 export type StopOutcome =
-  'already-gone' | 'stopped' | 'no-pid' | 'kill-failed' | 'unverified';
+  | 'already-gone'
+  | 'stopped'
+  | 'no-pid'
+  | 'kill-failed'
+  | 'unverified';
 
 /** The two outcomes that mean the predecessor is provably not running. */
 export function isVerifiedGone(outcome: StopOutcome): boolean {
@@ -988,7 +994,8 @@ export async function stopAndVerify(
  * safe to describe as "nothing waiting" (critical rule 6).
  */
 export type HandoffScan =
-  {kind: 'unavailable'; reason: string} | {kind: 'ok'; rows: HandoffRow[]};
+  | {kind: 'unavailable'; reason: string}
+  | {kind: 'ok'; rows: HandoffRow[]};
 
 export function scanHandoffBeads(
   cwd: string,
@@ -2453,7 +2460,8 @@ export function handoffFailureDescription(opts: {
 
 /** Filing the failure bead is best-effort, and its failure is never silent. */
 export type FailureBeadResult =
-  {ok: true; id: string} | {ok: false; reason: string};
+  | {ok: true; id: string}
+  | {ok: false; reason: string};
 
 export function fileHandoffFailureBead(
   cwd: string,

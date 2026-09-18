@@ -10,21 +10,34 @@
 
 import type {CheckNode, CheckResult} from './check-runner';
 
-import {runCheckTree} from './check-runner';
+import {renderCheckTree, runCheckTree} from './check-runner';
 import {execSync} from 'child_process';
 import {existsSync, readFileSync, statSync} from 'fs';
 import {resolve} from 'path';
 
+import {SDK_BIN_SHADOW_SCRIPT, shadowsSdkBin} from './base-setup';
+import {resolveComponents} from './component-registry';
+import {ESLINT_CONFIG_NAMES} from './eslint-setup';
+import {buildComponentListing} from './list';
 import {
+  CRITICAL_RULES_CONFIG_KEY,
+  legacyModulesWarning,
   refreshCriticalRulesArtifact,
   refreshSucceeded,
+  RETIRED_MODULES_KEY,
 } from './critical-rules-setup';
-import {PINNED, PROMPTS_PIN} from './pinned-versions';
+import {PINNED} from './pinned-versions';
+import {SDK_RUN} from './sdk-invocation';
 import {
   checkRulesDrift,
   isRulesDriftProblem,
   rulesDriftAdvice,
-} from './plugin/lib/rules-drift';
+} from './rules/rules-drift';
+import {
+  checkUserLevelSessionStart,
+  userLevelHookAdvice,
+  USER_SETTINGS_DISPLAY,
+} from './user-level-hook';
 import {
   describeMissing,
   detectWorktreeHydration,
@@ -207,6 +220,45 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
     },
     {
       check: {
+        /**
+         * Is the USER-LEVEL SessionStart hook installed (epic home-base-dchjw D6)?
+         *
+         * It is not this repo's business in the narrow sense — the check passes
+         * or fails identically in every enrolled repo — but it is the only
+         * place the absence can be NOTICED. Nothing detected that the `prime`
+         * plugin had gone stale for a month, twice; putting its replacement's
+         * absence in front of a routine `doctor` run is the whole point.
+         *
+         * WARN, never error, and READ-ONLY WITH NO FIXER. `~/.claude/settings.json`
+         * is Justin's own file, outside every project boundary the SDK has, and
+         * a doctor check that edited it would be the SDK reaching into the
+         * user's machine on the strength of a heartbeat. The fix is printed and
+         * pasted by hand.
+         *
+         * `cannot-check` also warns, but says so in those words: an unreadable
+         * settings file is not evidence the hook is missing (rule 6).
+         */
+        label: 'USER_LEVEL_SESSION_START',
+        fn: (): CheckResult => {
+          const result = checkUserLevelSessionStart();
+          if (result.status === 'installed') {
+            return {message: result.message, pass: true};
+          }
+          return {
+            fix:
+              result.status === 'cannot-check'
+                ? `Read ${USER_SETTINGS_DISPLAY} by hand and confirm it registers \`session-start --user-level\``
+                : userLevelHookAdvice(),
+            message: result.message,
+            pass: false,
+            severity: 'warn',
+          };
+        },
+        severity: 'warn',
+      },
+    },
+    {
+      check: {
         label: 'PKG_SCRIPTS',
         fn: (): CheckResult => {
           const pkgPath = resolve(projectRoot, 'package.json');
@@ -248,6 +300,54 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
         },
       },
     },
+    // SCRIPT_SHADOWS_SDK_BIN (epic home-base-dchjw.4 F8). ERROR, not a warning:
+    // every SDK-owned alias and every hook in this repo is spelled
+    // `bun run justin-sdk …`, and `bun run` resolves a package.json SCRIPT
+    // before `node_modules/.bin`. So a script with that name silently redirects
+    // all of them somewhere else — and, because bun echoes `$ <command>` for a
+    // script and prints nothing for a bin, it also injects a line into the
+    // stdout of hooks whose output is parsed. Nothing on the fleet has one
+    // today (measured 2026-09-18); this is the tripwire.
+    //
+    // No fixCommand: the fix is to rename or delete a script this repo's owner
+    // wrote, which is a decision, not a scaffold repair.
+    {
+      check: {
+        label: 'SCRIPT_SHADOWS_SDK_BIN',
+        fn: (): CheckResult => {
+          const pkgPath = resolve(projectRoot, 'package.json');
+          if (!existsSync(pkgPath)) return {pass: true};
+          let scripts: Record<string, unknown> | undefined;
+          try {
+            scripts = (
+              JSON.parse(readFileSync(pkgPath, 'utf-8')) as {
+                scripts?: Record<string, unknown>;
+              }
+            ).scripts;
+          } catch {
+            // Unparseable package.json is JUSTIN_SDK_JSON's business, not this
+            // check's. Reporting "no shadow" here would be a claim we cannot
+            // make, so say so instead (critical rule 6).
+            return {
+              message: 'package.json could not be parsed — shadow not checked',
+              pass: false,
+              severity: 'warn',
+            };
+          }
+          if (!shadowsSdkBin(scripts)) {
+            return {
+              message: 'no script shadows the justin-sdk bin',
+              pass: true,
+            };
+          }
+          return {
+            fix: `Rename or remove the "${SDK_BIN_SHADOW_SCRIPT}" script in package.json. While it exists, \`${SDK_RUN} <cmd>\` runs that script instead of the SDK, and echoes "$ …" into hook stdout.`,
+            message: `package.json has a script named "${SDK_BIN_SHADOW_SCRIPT}", which shadows the justin-sdk bin under \`bun run\``,
+            pass: false,
+          };
+        },
+      },
+    },
     // CONFIG_SCHEMA (home-base-uxwc D9). A SIBLING of JUSTIN_SDK_JSON, not a
     // child: the user-level file still deserves validating in a repo that has
     // no project config yet. Warn-only — a config that parses but has one
@@ -275,7 +375,7 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
             .map((outcome) => describeConfigOutcome(outcome));
           if (problems.length > 0) {
             return {
-              fix: 'See every accepted key, its type and its default: bunx @justinhaaheim/justin-sdk config schema',
+              fix: 'See every accepted key, its type and its default: bun run justin-sdk config schema',
               message: problems.join(' | '),
               pass: false,
               severity: 'warn',
@@ -374,8 +474,8 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
               ? '.claude/worktrees is ignored only by a non-committed layer (global git ignore or .git/info/exclude) — that does NOT travel with the repo, so EAS Build and fresh clones still archive the worktrees'
               : '.claude/worktrees is not git-ignored';
           return {
-            fix: 'Run: bunx @justinhaaheim/justin-sdk add gitignore (adds .claude/worktrees/ to the committed .gitignore)',
-            fixCommand: 'bunx @justinhaaheim/justin-sdk add gitignore',
+            fix: 'Run: bun run justin-sdk add gitignore (adds .claude/worktrees/ to the committed .gitignore)',
+            fixCommand: 'bun run justin-sdk add gitignore',
             message,
             pass: false,
           };
@@ -644,8 +744,8 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           const installed = readPkgDevDep(projectRoot, 'prettier');
           if (installed == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prettier',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prettier',
+              fix: 'Run: bun run justin-sdk add prettier',
+              fixCommand: 'bun run justin-sdk add prettier',
               message: 'prettier not in package.json devDependencies',
               pass: false,
             };
@@ -668,8 +768,8 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
         fn: (): CheckResult => {
           if (!existsSync(resolve(projectRoot, '.prettierrc.json'))) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prettier',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prettier',
+              fix: 'Run: bun run justin-sdk add prettier',
+              fixCommand: 'bun run justin-sdk add prettier',
               message: '.prettierrc.json not found',
               pass: false,
             };
@@ -685,8 +785,8 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           const prettierIgnore = resolve(projectRoot, '.prettierignore');
           if (!existsSync(prettierIgnore)) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prettier',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prettier',
+              fix: 'Run: bun run justin-sdk add prettier',
+              fixCommand: 'bun run justin-sdk add prettier',
               message: '.prettierignore not found',
               pass: false,
             };
@@ -694,8 +794,8 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           const content = readFileSync(prettierIgnore, 'utf-8');
           if (!content.includes('.beads')) {
             return {
-              fix: 'Add .beads to .prettierignore (or re-run: bunx @justinhaaheim/justin-sdk add prettier)',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prettier',
+              fix: 'Add .beads to .prettierignore (or re-run: bun run justin-sdk add prettier)',
+              fixCommand: 'bun run justin-sdk add prettier',
               message: '.prettierignore does not include .beads',
               pass: false,
             };
@@ -711,8 +811,8 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           const script = readPkgScript(projectRoot, 'signal-source:PRETTIER');
           if (script == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prettier',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prettier',
+              fix: 'Run: bun run justin-sdk add prettier',
+              fixCommand: 'bun run justin-sdk add prettier',
               message: 'package.json missing signal-source:PRETTIER script',
               pass: false,
             };
@@ -728,8 +828,8 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           const script = readPkgScript(projectRoot, 'fix-source:PRETTIER');
           if (script == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prettier',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prettier',
+              fix: 'Run: bun run justin-sdk add prettier',
+              fixCommand: 'bun run justin-sdk add prettier',
               message: 'package.json missing fix-source:PRETTIER script',
               pass: false,
             };
@@ -754,8 +854,8 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
           const version = readPkgDevDep(projectRoot, 'typescript');
           if (version == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add tsconfig',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add tsconfig',
+              fix: 'Run: bun run justin-sdk add tsconfig',
+              fixCommand: 'bun run justin-sdk add tsconfig',
               message: 'typescript is not in devDependencies',
               pass: false,
             };
@@ -779,8 +879,8 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
           const version = readPkgDevDep(projectRoot, '@types/bun');
           if (version == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add tsconfig',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add tsconfig',
+              fix: 'Run: bun run justin-sdk add tsconfig',
+              fixCommand: 'bun run justin-sdk add tsconfig',
               message: '@types/bun is not in devDependencies',
               pass: false,
             };
@@ -795,8 +895,8 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
         fn: (): CheckResult => {
           if (!existsSync(resolve(projectRoot, 'tsconfig.json'))) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add tsconfig',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add tsconfig',
+              fix: 'Run: bun run justin-sdk add tsconfig',
+              fixCommand: 'bun run justin-sdk add tsconfig',
               message: 'tsconfig.json not found at project root',
               pass: false,
             };
@@ -846,8 +946,8 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
           const script = readPkgScript(projectRoot, 'signal-source:TS');
           if (script == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add tsconfig',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add tsconfig',
+              fix: 'Run: bun run justin-sdk add tsconfig',
+              fixCommand: 'bun run justin-sdk add tsconfig',
               message: 'package.json missing signal-source:TS script',
               pass: false,
             };
@@ -872,8 +972,8 @@ function makeGhActionsChecks(projectRoot: string): CheckNode[] {
           const workflow = resolve(projectRoot, '.github/workflows/signal.yml');
           if (!existsSync(workflow)) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add gh-actions',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add gh-actions',
+              fix: 'Run: bun run justin-sdk add gh-actions',
+              fixCommand: 'bun run justin-sdk add gh-actions',
               message: '.github/workflows/signal.yml not found',
               pass: false,
             };
@@ -894,7 +994,7 @@ function makeGhActionsChecks(projectRoot: string): CheckNode[] {
               const content = readFileSync(workflow, 'utf-8');
               if (!content.includes('oven-sh/setup-bun')) {
                 return {
-                  fix: 'Re-install with: bunx @justinhaaheim/justin-sdk add gh-actions --force',
+                  fix: 'Re-install with: bun run justin-sdk add gh-actions --force',
                   message:
                     '.github/workflows/signal.yml does not use oven-sh/setup-bun — may be a custom workflow',
                   pass: false,
@@ -910,123 +1010,12 @@ function makeGhActionsChecks(projectRoot: string): CheckNode[] {
 }
 
 // ---------------------------------------------------------------------------
-// Prompts checks (prompts-setup component)
-// ---------------------------------------------------------------------------
-
-function makePromptsChecks(projectRoot: string): CheckNode[] {
-  return [
-    {
-      check: {
-        label: 'PROMPTS_DIR',
-        fn: (): CheckResult => {
-          if (!existsSync(resolve(projectRoot, 'docs/prompts'))) {
-            return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prompts',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prompts',
-              message: 'docs/prompts/ not found',
-              pass: false,
-            };
-          }
-          return {pass: true};
-        },
-      },
-      children: [
-        {
-          check: {
-            label: 'IMPORTANT_GUIDELINES',
-            fn: (): CheckResult => {
-              if (
-                !existsSync(
-                  resolve(
-                    projectRoot,
-                    'docs/prompts/IMPORTANT_GUIDELINES_INLINED.md',
-                  ),
-                )
-              ) {
-                return {
-                  fix: 'Run: bunx @justinhaaheim/justin-sdk add prompts',
-                  fixCommand: 'bunx @justinhaaheim/justin-sdk add prompts',
-                  message:
-                    'docs/prompts/IMPORTANT_GUIDELINES_INLINED.md not found',
-                  pass: false,
-                };
-              }
-              return {pass: true};
-            },
-          },
-        },
-      ],
-    },
-    {
-      check: {
-        label: 'INSTALL_PROMPTS_SCRIPT',
-        fn: (): CheckResult => {
-          const script = readPkgScript(projectRoot, 'install-my-prompts');
-          if (script == null) {
-            return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prompts',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prompts',
-              message:
-                'package.json is missing the "install-my-prompts" script',
-              pass: false,
-            };
-          }
-          return {pass: true};
-        },
-      },
-    },
-    {
-      check: {
-        label: 'PROMPTS_PIN_MATCHES',
-        fn: (): CheckResult => {
-          const markerPath = resolve(
-            projectRoot,
-            'docs/.prompts-installed-from.json',
-          );
-          if (!existsSync(markerPath)) {
-            return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prompts --force',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prompts --force',
-              message:
-                'docs/.prompts-installed-from.json not found — prompts version unknown',
-              pass: false,
-            };
-          }
-          try {
-            const marker = JSON.parse(readFileSync(markerPath, 'utf-8')) as {
-              sha?: string;
-            };
-            if (marker.sha !== PROMPTS_PIN.sha) {
-              return {
-                fix: `Run: bunx @justinhaaheim/justin-sdk add prompts (currently ${marker.sha ?? '?'}, pinned ${PROMPTS_PIN.sha})`,
-                fixCommand: 'bunx @justinhaaheim/justin-sdk add prompts',
-                message: `prompts at ${marker.sha ?? '?'}, SDK pins ${PROMPTS_PIN.sha}`,
-                pass: false,
-              };
-            }
-            return {pass: true};
-          } catch {
-            return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add prompts --force',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add prompts --force',
-              message:
-                'docs/.prompts-installed-from.json is malformed — re-install prompts',
-              pass: false,
-            };
-          }
-        },
-      },
-    },
-  ];
-}
-
-// ---------------------------------------------------------------------------
 // Gitignore checks (gitignore-setup component)
 // ---------------------------------------------------------------------------
 
 function makeGitignoreChecks(projectRoot: string): CheckNode[] {
   const gitignorePath = resolve(projectRoot, '.gitignore');
-  const FIX_CMD = 'bunx @justinhaaheim/justin-sdk add gitignore';
+  const FIX_CMD = 'bun run justin-sdk add gitignore';
 
   function readGitignore(): string | null {
     if (!existsSync(gitignorePath)) return null;
@@ -1085,24 +1074,12 @@ function makeGitignoreChecks(projectRoot: string): CheckNode[] {
             },
           },
         },
-        {
-          check: {
-            label: 'GITIGNORE_HAS_ENV',
-            severity: 'warn',
-            fn: (): CheckResult => {
-              const content = readGitignore() ?? '';
-              if (!content.includes('.env')) {
-                return {
-                  fix: `Run: ${FIX_CMD}`,
-                  fixCommand: FIX_CMD,
-                  message: '.gitignore missing .env',
-                  pass: false,
-                };
-              }
-              return {pass: true};
-            },
-          },
-        },
+        // There is deliberately NO `.env` check here. The gitignore baseline
+        // stopped seeding `.env` / `.env.local` in dchjw.6 (Justin, 2026-09-18:
+        // the local pattern is `*.local`, `*.local.json`, `*.local.*`), so this
+        // check warned on every repo that was CORRECT, and its fix command —
+        // `add gitignore` — could not make it green. A check whose remedy does
+        // not work is worse than no check: it teaches people to ignore doctor.
       ],
     },
   ];
@@ -1111,6 +1088,18 @@ function makeGitignoreChecks(projectRoot: string): CheckNode[] {
 // ---------------------------------------------------------------------------
 // ESLint checks (eslint-setup component)
 // ---------------------------------------------------------------------------
+
+/**
+ * Every ESLint flat config actually on disk, in ESLint's own resolution order.
+ *
+ * The name list is IMPORTED from eslint-setup rather than retyped, so the
+ * check and the installer can never disagree about what counts as a config.
+ */
+function eslintConfigsPresent(projectRoot: string): string[] {
+  return ESLINT_CONFIG_NAMES.filter((name) =>
+    existsSync(resolve(projectRoot, name)),
+  );
+}
 
 function makeEslintChecks(projectRoot: string): CheckNode[] {
   return [
@@ -1121,8 +1110,8 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
           const installed = readPkgDevDep(projectRoot, 'eslint');
           if (installed == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add eslint',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add eslint',
+              fix: 'Run: bun run justin-sdk add eslint',
+              fixCommand: 'bun run justin-sdk add eslint',
               message: 'eslint not in package.json devDependencies',
               pass: false,
             };
@@ -1149,8 +1138,8 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
           );
           if (installed == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add eslint',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add eslint',
+              fix: 'Run: bun run justin-sdk add eslint',
+              fixCommand: 'bun run justin-sdk add eslint',
               message:
                 'eslint-config-jha-react-node not in package.json devDependencies',
               pass: false,
@@ -1167,26 +1156,47 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
       check: {
         label: 'ESLINT_CONFIG',
         fn: (): CheckResult => {
-          const candidates = [
-            'eslint.config.cjs',
-            'eslint.config.js',
-            'eslint.config.mjs',
-          ];
-          const found = candidates.find((name) =>
-            existsSync(resolve(projectRoot, name)),
-          );
-          if (found == null) {
+          const found = eslintConfigsPresent(projectRoot);
+          if (found.length === 0) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add eslint',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add eslint',
-              message:
-                'No eslint config found (looked for eslint.config.cjs, .js, .mjs)',
+              fix: 'Run: bun run justin-sdk add eslint',
+              fixCommand: 'bun run justin-sdk add eslint',
+              message: `No eslint config found (looked for ${ESLINT_CONFIG_NAMES.join(', ')})`,
               pass: false,
             };
           }
-          return {message: found, pass: true};
+          return {message: found[0], pass: true};
         },
       },
+      children: [
+        {
+          check: {
+            // Two flat configs is a SILENT misconfiguration: ESLint resolves
+            // the names in a fixed order and loads the FIRST one it finds, so
+            // the other is dead code that still looks authoritative in the
+            // editor. eslint-setup already refuses to create the second one
+            // (dchjw.6) — this reports the ones that are already there, which
+            // an installer that declines to write can never do.
+            //
+            // WARN, and no fixCommand: the remedy is deleting one of two files
+            // and only the author knows which, so offering `--fix` a choice
+            // here would be offering it a deletion.
+            label: 'ESLINT_CONFIG_UNIQUE',
+            severity: 'warn',
+            fn: (): CheckResult => {
+              const found = eslintConfigsPresent(projectRoot);
+              if (found.length <= 1) {
+                return {message: `one flat config: ${found[0]}`, pass: true};
+              }
+              return {
+                fix: `Delete all but one of ${found.join(', ')} — keep the one you actually maintain.`,
+                message: `${found.length} flat configs present (${found.join(', ')}); ESLint loads only ${found[0]} and the rest are dead code`,
+                pass: false,
+              };
+            },
+          },
+        },
+      ],
     },
     {
       check: {
@@ -1195,8 +1205,8 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
           const script = readPkgScript(projectRoot, 'signal-source:LINT');
           if (script == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add eslint',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add eslint',
+              fix: 'Run: bun run justin-sdk add eslint',
+              fixCommand: 'bun run justin-sdk add eslint',
               message: 'package.json missing signal-source:LINT script',
               pass: false,
             };
@@ -1212,8 +1222,8 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
           const script = readPkgScript(projectRoot, 'fix-source:LINT');
           if (script == null) {
             return {
-              fix: 'Run: bunx @justinhaaheim/justin-sdk add eslint',
-              fixCommand: 'bunx @justinhaaheim/justin-sdk add eslint',
+              fix: 'Run: bun run justin-sdk add eslint',
+              fixCommand: 'bun run justin-sdk add eslint',
               message: 'package.json missing fix-source:LINT script',
               pass: false,
             };
@@ -1226,59 +1236,11 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
 }
 
 // ---------------------------------------------------------------------------
-// CLAUDE.md checks (claude-md-setup component)
-// ---------------------------------------------------------------------------
-
-function makeClaudeMdChecks(projectRoot: string): CheckNode[] {
-  const claudeMdPath = resolve(projectRoot, 'CLAUDE.md');
-  const FIX_CMD = 'bunx @justinhaaheim/justin-sdk add claude-md';
-  const PROMPTS_REF = '@docs/prompts/IMPORTANT_GUIDELINES_INLINED.md';
-
-  return [
-    {
-      check: {
-        label: 'CLAUDE_MD_EXISTS',
-        fn: (): CheckResult => {
-          if (!existsSync(claudeMdPath)) {
-            return {
-              fix: `Run: ${FIX_CMD}`,
-              fixCommand: FIX_CMD,
-              message: 'CLAUDE.md not found at project root',
-              pass: false,
-            };
-          }
-          return {pass: true};
-        },
-      },
-      children: [
-        {
-          check: {
-            label: 'CLAUDE_MD_PROMPTS_REF',
-            fn: (): CheckResult => {
-              const content = readFileSync(claudeMdPath, 'utf-8');
-              if (!content.includes(PROMPTS_REF)) {
-                return {
-                  fix: `Run: ${FIX_CMD}`,
-                  fixCommand: FIX_CMD,
-                  message: `CLAUDE.md does not reference ${PROMPTS_REF}`,
-                  pass: false,
-                };
-              }
-              return {pass: true};
-            },
-          },
-        },
-      ],
-    },
-  ];
-}
-
-// ---------------------------------------------------------------------------
 // Husky checks (husky-setup component)
 // ---------------------------------------------------------------------------
 
 function makeHuskyChecks(projectRoot: string): CheckNode[] {
-  const FIX_CMD = 'bunx @justinhaaheim/justin-sdk add husky';
+  const FIX_CMD = 'bun run justin-sdk add husky';
   return [
     {
       check: {
@@ -1460,7 +1422,7 @@ function makeHuskyChecks(projectRoot: string): CheckNode[] {
 /**
  * Is the committed rules artifact the canonical one? (home-base-si46, D4/D5)
  *
- * The verdict comes from `checkRulesDrift` — the SAME function the plugin's
+ * The verdict comes from `checkRulesDrift` — the SAME function
  * SessionStart notice uses, so doctor and the session can never tell Justin two
  * different stories about one file. This check only decides how to say it.
  *
@@ -1503,6 +1465,35 @@ function makeCriticalRulesChecks(projectRoot: string): CheckNode[] {
   return [
     {
       check: {
+        /**
+         * The retired per-repo module include-list (epic home-base-dchjw D2).
+         *
+         * A config carrying `componentConfig["critical-rules"].modules` is not
+         * broken — the key is simply ignored — so this warns and never errors.
+         * There is no fixer: deleting a key from a human's config file is the
+         * fleet sweep's job (dchjw.10), not a session-start side effect.
+         *
+         * PURE, and it must stay pure: check-runner re-runs every check after a
+         * fix, so a latched "already warned once" flag here would report a
+         * still-present key as green on the second pass.
+         */
+        label: 'RULES_MODULES_LEGACY',
+        fn: (): CheckResult => {
+          const message = legacyModulesWarning(projectRoot);
+          return message == null
+            ? {pass: true}
+            : {
+                fix: `delete componentConfig["${CRITICAL_RULES_CONFIG_KEY}"].${RETIRED_MODULES_KEY} from justin-sdk.config.json`,
+                message,
+                pass: false,
+                severity: 'warn',
+              };
+        },
+        severity: 'warn',
+      },
+    },
+    {
+      check: {
         label: 'RULES_ARTIFACT',
         fn: (): CheckResult => {
           const drift = checkRulesDrift(projectRoot);
@@ -1540,6 +1531,178 @@ function makeCriticalRulesChecks(projectRoot: string): CheckNode[] {
 }
 
 // ---------------------------------------------------------------------------
+// Legacy-artifact checks (NOT keyed to a component — they run everywhere)
+// ---------------------------------------------------------------------------
+
+/**
+ * The leftovers of the retired `prompts` and `claude-md` components (epic
+ * home-base-dchjw D3, absorbing dchjw.9's legacy check).
+ *
+ * These deliberately belong to no component: the components that produced them
+ * are DELETED, so a check keyed to either retired name would only ever run in a
+ * repo whose config still names a component this SDK no longer has. The
+ * artifacts on disk are the evidence, not the config.
+ *
+ * `severity: 'warn'` — a repo carrying them is stale, not broken, and the remedy
+ * (`migrate-to-prime`) deletes files, so it is offered as advice and never as a
+ * `fixCommand` doctor could run for you.
+ */
+function makeLegacyArtifactChecks(projectRoot: string): CheckNode[] {
+  const ADVICE = 'Run: bun run justin-sdk migrate-to-prime';
+  return [
+    {
+      check: {
+        label: 'NO_LEGACY_PROMPTS',
+        severity: 'warn',
+        fn: (): CheckResult => {
+          const found: string[] = [];
+          if (existsSync(resolve(projectRoot, 'docs/prompts'))) {
+            found.push('docs/prompts/');
+          }
+          if (
+            existsSync(
+              resolve(projectRoot, 'docs/.prompts-installed-from.json'),
+            )
+          ) {
+            found.push('docs/.prompts-installed-from.json');
+          }
+          if (readPkgScript(projectRoot, 'install-my-prompts') != null) {
+            found.push('the install-my-prompts package.json script');
+          }
+          if (found.length === 0) return {pass: true};
+          return {
+            fix: ADVICE,
+            message: `${found.join(' + ')} left over from the retired prompts component — run migrate-to-prime`,
+            pass: false,
+          };
+        },
+      },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Components that APPLY here but are not installed (informational)
+// ---------------------------------------------------------------------------
+
+/**
+ * The one thing `list` can see that no per-component check can: a component
+ * whose `includeIf` predicates pass in this repo and which is simply not here —
+ * `eas` in an Expo app that was enrolled before the component existed.
+ *
+ * Components are a per-repo list, so a new one reaches the fleet only through a
+ * sweep (epic home-base-dchjw D3). This is the detector for the repos a sweep
+ * has not reached, and the reason it lives in doctor is that doctor is the
+ * thing that already runs everywhere.
+ *
+ * NEVER FAILS. It is an info line, not a verdict: nothing is wrong with a repo
+ * that has decided it does not want a component, and a check that went red over
+ * an available extra would fail SessionStart hooks and sweep gates fleet-wide.
+ * Passing checks print their message but are suppressed under `--quiet`, which
+ * is exactly the right audience — a human running `doctor`, not a hook.
+ */
+function makeComponentAvailabilityChecks(projectRoot: string): CheckNode[] {
+  return [
+    {
+      check: {
+        label: 'COMPONENTS_AVAILABLE',
+        fn: (): CheckResult => {
+          const listing = buildComponentListing(projectRoot);
+          if (listing.problem != null) {
+            // Rule 6: say that nothing was measured, never print the
+            // reassuring "everything that applies is installed".
+            return {
+              message: `could not resolve the config (${listing.problem}) — availability NOT checked`,
+              pass: true,
+            };
+          }
+          const available = listing.rows.filter(
+            (row) => row.applicable && !row.installed && !row.resolved,
+          );
+          if (available.length === 0) {
+            return {
+              message:
+                'every component that applies to this repo is installed or already listed',
+              pass: true,
+            };
+          }
+          const names = available.map((row) => row.name).join(', ');
+          return {
+            message: `applies here but is not installed: ${names} — add with \`${SDK_RUN} add ${available[0]?.name ?? ''}\``,
+            pass: true,
+          };
+        },
+      },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Making the advice runnable
+// ---------------------------------------------------------------------------
+
+/**
+ * `bun run justin-sdk …` resolves through `node_modules/.bin`, so in a checkout
+ * that has never been hydrated — a fresh worktree, a fresh clone, a cloud
+ * container before `setup-env` — every fix doctor offers fails with
+ * `error: Script not found` and the operator is left with advice that cannot
+ * work. Where the bin is absent, say what has to happen first.
+ *
+ * Applied in ONE place (`withRunnableFixes` below) rather than at each of the
+ * ~30 call sites, so a check added later gets it for free, and applied to the
+ * displayed `fix` as well as the executed `fixCommand` — prefixing only the
+ * latter would leave the printed advice the same dead end it was.
+ */
+function needsInstallFirst(projectRoot: string): boolean {
+  return !existsSync(
+    resolve(projectRoot, 'node_modules', '.bin', 'justin-sdk'),
+  );
+}
+
+const INSTALL_PREFIX = 'bun install && ';
+
+function prefixSdkCommands(text: string): string {
+  return text.split(SDK_RUN).join(`${INSTALL_PREFIX}${SDK_RUN}`);
+}
+
+/** Wrap every check in the tree so its result's fix advice is runnable here. */
+function withRunnableFixes(
+  nodes: CheckNode[],
+  projectRoot: string,
+): CheckNode[] {
+  if (!needsInstallFirst(projectRoot)) return nodes;
+  return nodes.map((node) => {
+    const original = node.check.fn;
+    return {
+      check:
+        original == null
+          ? node.check
+          : {
+              ...node.check,
+              fn: async (): Promise<CheckResult> => {
+                const result = await original();
+                if (result.fix == null && result.fixCommand == null) {
+                  return result;
+                }
+                return {
+                  ...result,
+                  ...(result.fix == null
+                    ? {}
+                    : {fix: prefixSdkCommands(result.fix)}),
+                  ...(result.fixCommand == null
+                    ? {}
+                    : {fixCommand: prefixSdkCommands(result.fixCommand)}),
+                };
+              },
+            },
+      ...(node.children == null
+        ? {}
+        : {children: withRunnableFixes(node.children, projectRoot)}),
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Component registry
 // ---------------------------------------------------------------------------
 
@@ -1551,14 +1714,12 @@ const componentCheckFactories: Record<
 > = {
   'base-setup': makeBaseChecks,
   'beads-setup': makeBeadsChecks,
-  'claude-md-setup': makeClaudeMdChecks,
   'critical-rules-setup': makeCriticalRulesChecks,
   'eslint-setup': makeEslintChecks,
   'gh-actions-setup': makeGhActionsChecks,
   'gitignore-setup': makeGitignoreChecks,
   'husky-setup': makeHuskyChecks,
   'prettier-setup': makePrettierChecks,
-  'prompts-setup': makePromptsChecks,
   'tsconfig-setup': makeTsconfigChecks,
 };
 
@@ -1574,7 +1735,105 @@ export interface DoctorOptions {
 }
 
 /**
- * Run doctor checks based on the components listed in justin-sdk.config.json.
+ * Doctor's own report, as text, rather than as something already printed.
+ *
+ * `report` is what a CLI run would have written to STDOUT, verbatim and with
+ * its ANSI colours intact — an empty string when there was nothing to say (a
+ * `--quiet` run where everything passed says one line, so that case is not it).
+ */
+export interface DoctorReport {
+  exitCode: number;
+  report: string;
+}
+
+/** Everything doctor needs before it can run, or why it cannot. */
+type DoctorPlan =
+  | {ok: true; nodes: CheckNode[]; componentCount: number}
+  | {ok: false; error: string};
+
+/**
+ * Resolve the config and assemble the check tree.
+ *
+ * Separated from running it so `runDoctor` and `renderDoctor` cannot drift:
+ * both take their checks, and their refusals, from here.
+ */
+function planDoctor(projectRoot: string): DoctorPlan {
+  const configPath = resolve(projectRoot, 'justin-sdk.config.json');
+
+  if (!existsSync(configPath)) {
+    return {
+      error:
+        'Error: justin-sdk.config.json not found. Create one — `{}` is a complete config (components defaults to the core preset) — or run `bun run justin-sdk add base-setup`.',
+      ok: false,
+    };
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, 'utf-8'));
+  } catch (error) {
+    return {
+      error: `Error: justin-sdk.config.json is not valid JSON (${error instanceof Error ? error.message : String(error)}). Doctor did not run — this is NOT a clean bill of health.`,
+      ok: false,
+    };
+  }
+
+  const resolved = resolveComponents(parsed, projectRoot);
+  if (!resolved.ok) {
+    return {
+      error: `Error: ${resolved.reason}. Doctor did not run — this is NOT a clean bill of health.`,
+      ok: false,
+    };
+  }
+  const components = resolved.components;
+
+  const nodes: CheckNode[] = [
+    ...makeLegacyArtifactChecks(projectRoot),
+    ...makeComponentAvailabilityChecks(projectRoot),
+  ];
+  for (const component of components) {
+    const factory = componentCheckFactories[component];
+    if (factory) {
+      nodes.push(...factory(projectRoot));
+    }
+  }
+
+  return {
+    componentCount: components.length,
+    nodes: withRunnableFixes(nodes, projectRoot),
+    ok: true,
+  };
+}
+
+/**
+ * With the legacy and availability checks always present this is unreachable,
+ * but it is kept as the honest answer if it ever becomes reachable again: say
+ * that nothing was checked, never imply that something was and passed.
+ */
+function emptyPlanMessage(componentCount: number): string {
+  return `No doctor checks registered for the ${componentCount} resolved component(s).`;
+}
+
+function checkTreeOptions(
+  options: DoctorOptions,
+): Parameters<typeof runCheckTree>[1] {
+  return {
+    align: true,
+    fix: options.fix,
+    quiet: options.quiet,
+    yes: options.yes,
+  };
+}
+
+/**
+ * Run doctor checks for the components this repo's config RESOLVES to, printing
+ * the report as it goes.
+ *
+ * "Resolves to", not "lists": an absent `components` key means the core preset
+ * (constraint F1). It used to mean an empty list, so a repo whose config had no
+ * `components` — which after D3 is the recommended shape — ran zero checks and
+ * printed a calm "No doctor checks registered", which reads as "nothing is
+ * wrong" and meant "I did not look" (critical rule 6).
  *
  * @param projectRoot - Path to the project root (defaults to cwd)
  * @param options - Doctor options (fix, quiet, yes)
@@ -1584,37 +1843,42 @@ export async function runDoctor(
   projectRoot: string = process.cwd(),
   options: DoctorOptions = {},
 ): Promise<number> {
-  const configPath = resolve(projectRoot, 'justin-sdk.config.json');
-
-  if (!existsSync(configPath)) {
-    console.error(
-      'Error: justin-sdk.config.json not found. Create one with at least {"version": "0.2.0", "components": ["base-setup"]}',
-    );
+  const plan = planDoctor(projectRoot);
+  if (!plan.ok) {
+    console.error(plan.error);
     return 1;
   }
-
-  const config = JSON.parse(readFileSync(configPath, 'utf-8')) as {
-    components?: string[];
-  };
-  const components = config.components ?? [];
-
-  const nodes: CheckNode[] = [];
-  for (const component of components) {
-    const factory = componentCheckFactories[component];
-    if (factory) {
-      nodes.push(...factory(projectRoot));
-    }
-  }
-
-  if (nodes.length === 0) {
-    console.log('No doctor checks registered for the listed components.');
+  if (plan.nodes.length === 0) {
+    console.log(emptyPlanMessage(plan.componentCount));
     return 0;
   }
+  return runCheckTree(plan.nodes, checkTreeOptions(options));
+}
 
-  return runCheckTree(nodes, {
-    align: true,
-    fix: options.fix,
-    quiet: options.quiet,
-    yes: options.yes,
-  });
+/**
+ * The same run, RETURNED instead of printed — for `session-start`, where stdout
+ * belongs to the SessionStart JSON envelope and anything doctor wrote there
+ * would corrupt it into unparseable text.
+ *
+ * This replaced monkey-patching `console.log` and `process.stdout.write` around
+ * `runDoctor` (needed because in Bun those are two independent channels), which
+ * worked but was a global side effect in front of arbitrary check code, and
+ * silently captured anything else the process happened to print meanwhile.
+ *
+ * A refusal is part of the REPORT here, not a stderr line: the caller is
+ * building a context block, and "doctor did not run" is exactly the thing that
+ * must not go missing from it (rule 6).
+ */
+export async function renderDoctor(
+  projectRoot: string = process.cwd(),
+  options: DoctorOptions = {},
+): Promise<DoctorReport> {
+  const plan = planDoctor(projectRoot);
+  if (!plan.ok) {
+    return {exitCode: 1, report: plan.error};
+  }
+  if (plan.nodes.length === 0) {
+    return {exitCode: 0, report: emptyPlanMessage(plan.componentCount)};
+  }
+  return renderCheckTree(plan.nodes, checkTreeOptions(options));
 }

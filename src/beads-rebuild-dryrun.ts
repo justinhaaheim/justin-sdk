@@ -314,9 +314,10 @@ function read(path: string, label: string): Side {
 
     const tables = new Map<string, number>();
     for (const t of db
-      .query<{name: string}, []>(
-        "select name from sqlite_master where type='table' and name not like 'sqlite_%'",
-      )
+      .query<
+        {name: string},
+        []
+      >("select name from sqlite_master where type='table' and name not like 'sqlite_%'")
       .all()) {
       tables.set(
         t.name,

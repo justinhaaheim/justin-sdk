@@ -15,7 +15,7 @@
  * Part of home-base-qyu1.1 / qyu1.4.
  */
 
-import {buildCoreInventory} from '../plugin/lib/repo-status/core';
+import {buildCoreInventory} from './core';
 import {
   countUnmergedByPatchId,
   proveContentOnBaseline,
@@ -38,7 +38,7 @@ import {
   fetchPullRequests,
   prForBranch,
   type PrIndex,
-} from '../plugin/lib/repo-status/prs';
+} from './prs';
 import {
   buildSubmoduleInventory,
   EMPTY_SUBMODULE_INVENTORY,
@@ -58,7 +58,7 @@ import type {
   FilterSummary,
   HiddenTip,
   WorktreeEntry,
-} from '../plugin/lib/repo-status/types';
+} from './types';
 
 /**
  * What the branches the ledger HIDES actually hold (home-base-qyu1.33.9, D4).

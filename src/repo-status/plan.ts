@@ -84,7 +84,7 @@
 import {execFileSync} from 'child_process';
 
 import {mirrorFullyPreserves, proveContentOnBaseline} from './content';
-import {ENUMERATION_FAILURES} from '../plugin/lib/repo-status/core';
+import {ENUMERATION_FAILURES} from './core';
 
 import type {BranchRow, RepoStatusReport} from './report';
 
@@ -368,7 +368,10 @@ export function buildPlan(report: RepoStatusReport): CleanupPlan | null {
       // checking `row.name` would propose `archive/archive/foo`.
       if (split.bare.startsWith(ARCHIVE_PREFIX)) {
         manual.push(
-          manualAction(row.name, `${row.why} — already under ${ARCHIVE_PREFIX}`),
+          manualAction(
+            row.name,
+            `${row.why} — already under ${ARCHIVE_PREFIX}`,
+          ),
         );
         continue;
       }
@@ -409,7 +412,9 @@ export function buildPlan(report: RepoStatusReport): CleanupPlan | null {
     // says nothing: a null there means "not found in a list that does not
     // exist", not "not checked out".
     if (worktreeStateUnknown) {
-      manual.push(manualAction(row.name, `${row.why} — ${unknownWorktreeNote}`));
+      manual.push(
+        manualAction(row.name, `${row.why} — ${unknownWorktreeNote}`),
+      );
       continue;
     }
 
@@ -754,7 +759,8 @@ function archiveRemoteBranch(
   // GUARD 1: the remote's own default branch, asked of the remote itself. The
   // static name list in buildPlan already covers the usual suspects; this
   // catches a repo whose default is something unguessable.
-  if (!headCache.has(remote)) headCache.set(remote, remoteHeadBranch(remote, cwd));
+  if (!headCache.has(remote))
+    headCache.set(remote, remoteHeadBranch(remote, cwd));
   const head = headCache.get(remote) ?? null;
   if (head != null && head === sourceBranch) {
     return skip(
@@ -766,7 +772,10 @@ function archiveRemoteBranch(
   // GUARD 2: the local remote-tracking ref must still be exactly what was
   // proven. If someone fetched between plan and apply, the proof described a
   // different commit than the one we would now archive.
-  const localTip = gitArgv(['rev-parse', '--verify', '--quiet', action.branch], cwd);
+  const localTip = gitArgv(
+    ['rev-parse', '--verify', '--quiet', action.branch],
+    cwd,
+  );
   if (!localTip.ok || localTip.out.trim() !== sha) {
     return skip(
       action,

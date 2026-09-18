@@ -3,7 +3,7 @@
  * a project's package.json, so they are uniform across projects instead of
  * copy-pasted and hand-maintained.
  *
- * The update/ship scripts delegate to the shared `bunx @justinhaaheim/justin-sdk eas-update`
+ * The update/ship scripts delegate to the shared `justin-sdk eas-update`
  * CLI command (there is no per-project publish script to keep in sync).
  *
  * Load-bearing pairing: `build:eas:base` is the clean `eas build --platform ios`
@@ -19,7 +19,7 @@
  * differs from canonical, warn and leave it unless `force` is set.
  *
  * Not part of `init` / the `all` preset (EAS is app-specific) — install it
- * explicitly with `bunx @justinhaaheim/justin-sdk add eas`. It self-registers `eas-setup` in
+ * explicitly with `bun run justin-sdk add eas`. It self-registers `eas-setup` in
  * justin-sdk.config.json so `update` re-applies it.
  */
 import {existsSync} from 'fs';
@@ -41,7 +41,7 @@ import {
  * project-specific build variants (e.g. build:development:jphone17) must live
  * under other names so `update --force` never clobbers them.
  */
-const EAS_SCRIPTS: ReadonlyArray<{key: string; value: string}> = [
+export const EAS_SCRIPTS: ReadonlyArray<{key: string; value: string}> = [
   {key: 'prebuild', value: 'npx @justinhaaheim/version-manager'},
   {key: 'eas-build-post-install', value: 'npx @justinhaaheim/version-manager'},
   {key: 'build:eas:base', value: 'eas build --platform ios'},
@@ -62,12 +62,12 @@ const EAS_SCRIPTS: ReadonlyArray<{key: string; value: string}> = [
   {
     key: 'eas:update:development',
     value:
-      'bun run prebuild && APP_VARIANT=development bunx @justinhaaheim/justin-sdk eas-update development',
+      'bun run prebuild && APP_VARIANT=development justin-sdk eas-update development',
   },
   {
     key: 'eas:update:preview',
     value:
-      'bun run prebuild && APP_VARIANT=preview bunx @justinhaaheim/justin-sdk eas-update preview',
+      'bun run prebuild && APP_VARIANT=preview justin-sdk eas-update preview',
   },
   {
     key: 'ship:development',
@@ -129,6 +129,12 @@ export interface EasSetupOptions {
   projectRoot: string;
   quiet: boolean;
   force: boolean;
+  /**
+   * The remote the SDK pin tag is verified against, forwarded to base-setup.
+   * Tests point it at a local bare repo so the install is hermetic; production
+   * omits it and base-setup uses the real SDK_REPO_URL (dchjw.17 F7).
+   */
+  sdkRepoUrl?: string;
 }
 
 export async function runEasSetup(opts: EasSetupOptions): Promise<number> {
@@ -141,7 +147,9 @@ export async function runEasSetup(opts: EasSetupOptions): Promise<number> {
   const baseExit = await runBaseSetup({
     projectRoot,
     quiet: true,
-    extraComponents: ['eas-setup'],
+    // dchjw.17 F7: hermetic when a caller supplies a remote; the real
+    // SDK_REPO_URL when nobody does.
+    ...(opts.sdkRepoUrl == null ? {} : {sdkRepoUrl: opts.sdkRepoUrl}),
   });
   if (baseExit !== 0) {
     return baseExit;

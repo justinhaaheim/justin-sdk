@@ -44,7 +44,11 @@ afterEach(() => {
   while (sandboxes.length > 0) sandboxes.pop()?.cleanup();
 });
 
-function git(cwd: string, args: string[], env?: Record<string, string>): string {
+function git(
+  cwd: string,
+  args: string[],
+  env?: Record<string, string>,
+): string {
   return execFileSync('git', args, {
     cwd,
     encoding: 'utf-8',
@@ -58,7 +62,12 @@ function daysAgo(days: number): string {
   return new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 }
 
-function commit(repo: string, file: string, msg: string, when?: string): string {
+function commit(
+  repo: string,
+  file: string,
+  msg: string,
+  when?: string,
+): string {
   writeFileSync(join(repo, file), `${msg}\n`);
   git(repo, ['add', file]);
   git(

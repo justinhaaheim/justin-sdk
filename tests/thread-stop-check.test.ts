@@ -376,7 +376,10 @@ function armedSandbox(enforce: boolean): {
         type: 'user',
       }),
       JSON.stringify({
-        message: {content: [{text: REPORT_TEXT, type: 'text'}], role: 'assistant'},
+        message: {
+          content: [{text: REPORT_TEXT, type: 'text'}],
+          role: 'assistant',
+        },
         timestamp: '2026-09-14T10:05:00.000Z',
         type: 'assistant',
       }),
@@ -495,7 +498,9 @@ describe('runThreadStopCheck', () => {
     const run = capture(() =>
       runThreadStopCheck({
         env: fixture.env,
-        stdin: payload(fixture, {last_assistant_message: 'Committed as a02701c.'}),
+        stdin: payload(fixture, {
+          last_assistant_message: 'Committed as a02701c.',
+        }),
       }),
     );
     expect(run.value.exitCode).toBe(0);

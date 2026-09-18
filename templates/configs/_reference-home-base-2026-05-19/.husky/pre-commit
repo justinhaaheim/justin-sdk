@@ -1,3 +1,0 @@
-npm run ts-check
-echo ""
-npx lint-staged

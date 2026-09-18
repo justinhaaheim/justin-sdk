@@ -457,7 +457,8 @@ export const threadFactsSchema = z.looseObject({
 });
 
 export type FactsValidation =
-  {status: 'ok'; facts: ThreadFacts} | {status: 'invalid'; issues: string[]};
+  | {status: 'ok'; facts: ThreadFacts}
+  | {status: 'invalid'; issues: string[]};
 
 /** Validate an archived facts document. Never throws. */
 export function validateThreadFacts(parsed: unknown): FactsValidation {

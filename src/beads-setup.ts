@@ -25,8 +25,8 @@ import {basename, dirname, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
 import {
-  appendIfMissing,
   ensureDir,
+  ensureIgnoreEntries,
   exec,
   fail,
   getPinnedToolVersion,
@@ -542,11 +542,11 @@ function stepImportIssues(
 
 function stepPrettierIgnore(projectRoot: string): boolean {
   const prettierIgnore = resolve(projectRoot, '.prettierignore');
-  const added = appendIfMissing(
-    prettierIgnore,
-    '.beads',
-    '\n# Beads issue tracker data\n.beads\n',
-  );
+  // Normalized-line matching, so an existing `.beads/` is recognised rather
+  // than joined by a second spelling (home-base-dchjw.6).
+  const {changed: added} = ensureIgnoreEntries(prettierIgnore, ['.beads'], {
+    sectionHeader: 'Beads issue tracker data',
+  });
   if (added) {
     success('Added .beads to .prettierignore');
   } else {
@@ -576,34 +576,6 @@ function stepClaudeSettings(projectRoot: string): boolean {
   return true;
 }
 
-function stepJustinSdkJson(projectRoot: string): boolean {
-  // base-setup ensures the config file exists; we just need to add the
-  // beads-setup component if it's not already there.
-  const configPath = resolve(projectRoot, 'justin-sdk.config.json');
-  const config = readJson(configPath);
-
-  if (config == null) {
-    fail(
-      'justin-sdk.config.json not found after base-setup — this should not happen',
-    );
-    return false;
-  }
-
-  const components = (
-    (config.components as string[] | undefined) ?? []
-  ).slice();
-  if (components.includes('beads-setup')) {
-    success('justin-sdk.config.json already includes beads-setup component');
-    return true;
-  }
-
-  components.push('beads-setup');
-  config.components = components;
-  writeJson(configPath, config);
-  success('Added beads-setup to justin-sdk.config.json components');
-  return true;
-}
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -615,6 +587,12 @@ export interface BeadsSetupOptions {
   projectRoot?: string;
   /** Suppress non-error output (useful for tests) */
   quiet?: boolean;
+  /**
+   * The remote the SDK pin tag is verified against, forwarded to base-setup.
+   * Tests point it at a local bare repo so the install is hermetic; production
+   * omits it and base-setup uses the real SDK_REPO_URL (dchjw.17 F7).
+   */
+  sdkRepoUrl?: string;
 }
 
 export async function runBeadsSetup(
@@ -640,7 +618,9 @@ export async function runBeadsSetup(
   const baseExit = await runBaseSetup({
     projectRoot,
     quiet: true,
-    extraComponents: ['beads-setup'],
+    // dchjw.17 F7: hermetic when a caller supplies a remote; the real
+    // SDK_REPO_URL when nobody does.
+    ...(options.sdkRepoUrl == null ? {} : {sdkRepoUrl: options.sdkRepoUrl}),
   });
   if (baseExit !== 0) {
     fail('base-setup failed — cannot proceed with beads-setup');
@@ -684,10 +664,6 @@ export async function runBeadsSetup(
   // Step 7: .claude/settings.json (add br to sandbox.excludedCommands)
   stepHeader('7. .claude/settings.json');
   if (!stepClaudeSettings(projectRoot)) return 1;
-
-  // Step 8: justin-sdk.config.json (ensure beads-setup is in components)
-  stepHeader('8. justin-sdk.config.json');
-  if (!stepJustinSdkJson(projectRoot)) return 1;
 
   // Step 9: Git commit
   if (options.noCommit !== true) {

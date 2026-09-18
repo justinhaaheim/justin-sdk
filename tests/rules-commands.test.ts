@@ -39,12 +39,13 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'fs';
 import {join, relative, resolve} from 'path';
 
 import {CRITICAL_RULES_CONFIG_KEY} from '../src/critical-rules-setup';
-import {projectRulesFilePath} from '../src/plugin/lib/rules-file';
+import {projectRulesFilePath} from '../src/rules/rules-file';
 import {rulesDiff, RULES_DIFF_EXIT} from '../src/rules-diff';
 import {
   describeGitState,
@@ -134,8 +135,13 @@ function editPrompts(dir: string): void {
 }
 
 interface ProjectOptions {
-  /** Pre-record a module selection. Omit for a repo that is not enrolled. */
+  /**
+   * Write the RETIRED `componentConfig["critical-rules"].modules` block, as the
+   * fleet configs still do. Nothing may honour it (epic home-base-dchjw D2).
+   */
   modules?: string[];
+  /** Leave critical-rules-setup OUT of `components` — an unenrolled repo. */
+  notEnrolled?: boolean;
   /** Extra committed files (something unrelated to dirty). */
   files?: Record<string, string>;
 }
@@ -146,23 +152,25 @@ function projectFixture(options: ProjectOptions = {}): string {
     'package.json': `${JSON.stringify({name: 'fixture'}, null, 2)}\n`,
     ...(options.files ?? {}),
   };
-  files['justin-sdk.config.json'] =
-    `${JSON.stringify(
-      {
-        components: ['base-setup', 'critical-rules-setup'],
-        ...(options.modules != null
-          ? {
-              componentConfig: {
-                [CRITICAL_RULES_CONFIG_KEY]: {modules: options.modules},
-              },
-            }
-          : {}),
-        lastSynced: '2000-01-01',
-        version: '0.0.1-fixture',
-      },
-      null,
-      2,
-    )}\n`;
+  files['justin-sdk.config.json'] = `${JSON.stringify(
+    {
+      components:
+        options.notEnrolled === true
+          ? ['base-setup']
+          : ['base-setup', 'critical-rules-setup'],
+      ...(options.modules != null
+        ? {
+            componentConfig: {
+              [CRITICAL_RULES_CONFIG_KEY]: {modules: options.modules},
+            },
+          }
+        : {}),
+      lastSynced: '2000-01-01',
+      version: '0.0.1-fixture',
+    },
+    null,
+    2,
+  )}\n`;
   return initRepoAt(join(sb.path, 'repo'), files);
 }
 
@@ -222,9 +230,12 @@ function gitExpectFail(repo: string, argv: string[]): void {
       encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    throw new Error(`expected \`git ${argv.join(' ')}\` to fail, but it passed`);
+    throw new Error(
+      `expected \`git ${argv.join(' ')}\` to fail, but it passed`,
+    );
   } catch (error) {
-    if (error instanceof Error && /expected `git/.test(error.message)) throw error;
+    if (error instanceof Error && /expected `git/.test(error.message))
+      throw error;
   }
 }
 
@@ -351,9 +362,9 @@ describe('rules-update commits the artifact and nothing else', () => {
     git(repo, ['add', '--', 'other.txt']);
     const dirtBefore = statusLines(repo);
 
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
 
     // The commit landed on the current branch, and carries one path.
     expect(git(repo, ['symbolic-ref', '--short', 'HEAD']).trim()).toBe(
@@ -380,10 +391,10 @@ describe('rules-update commits the artifact and nothing else', () => {
   test('pre-existing dirt UNDER the tool-owned folder is absorbed into the commit', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    const repo = projectFixture();
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
 
     // Someone edited the generated file and left a sibling behind; the folder is
     // tool-owned by contract (D2b), so this commit cleans up after them.
@@ -391,9 +402,9 @@ describe('rules-update commits the artifact and nothing else', () => {
     writeFileSync(join(repo, TOOL_DIR_REL, 'stale.md'), 'STALE\n');
     editPrompts(dir); // and there IS new content, so the artifact is rewritten
 
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
 
     expect(filesInHead(repo).sort()).toEqual(
       [ARTIFACT_REL, `${TOOL_DIR_REL}/stale.md`].sort(),
@@ -412,17 +423,17 @@ describe('rules-update commits the artifact and nothing else', () => {
   test('a second run is already-up-to-date: exit 0, no new commit', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    const repo = projectFixture();
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
     const commits = commitCount(repo);
     const bytes = readFileSync(projectRulesFilePath(repo), 'utf-8');
 
     // A different date, to prove the no-op is content-driven and not date-driven.
-    expect(
-      runRulesUpdate({now: '2099-01-01', projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
 
     expect(commitCount(repo)).toBe(commits);
     expect(readFileSync(projectRulesFilePath(repo), 'utf-8')).toBe(bytes);
@@ -432,10 +443,10 @@ describe('rules-update commits the artifact and nothing else', () => {
   test('--force on an already-current artifact makes no empty commit', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    const repo = projectFixture();
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
     const commits = commitCount(repo);
 
     // Same date -> byte-identical regeneration. `git commit` would exit
@@ -443,7 +454,6 @@ describe('rules-update commits the artifact and nothing else', () => {
     expect(
       runRulesUpdate({
         force: true,
-        now: NOW,
         projectRoot: repo,
         promptsDir: dir,
       }),
@@ -452,64 +462,51 @@ describe('rules-update commits the artifact and nothing else', () => {
     expect(statusLines(repo)).toBe('');
   });
 
-  test('an edit that PRESERVES the stamp is invisible to plain rules-update; --force heals it, in the tree and in a commit', () => {
+  test('an edit that PRESERVES the stamp is REPAIRED by plain rules-update, tree and history', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    const repo = projectFixture();
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
     const canonical = readFileSync(projectRulesFilePath(repo), 'utf-8');
     const stampLine = canonical.split('\n')[0] ?? '';
-    const commits = commitCount(repo);
 
-    // NOTE the shape: only an edit that KEEPS the stamp is invisible, because
-    // the refresh's idempotency gate reads the stamp's content hash. A wholesale
-    // replacement drops the stamp and is therefore regenerated normally — this
-    // is the narrow hole that rules-diff's --force note exists for.
+    // THE CASE THAT USED TO BE INVISIBLE. Keeping the stamp meant keeping its
+    // content hash, and the idempotency gate read that hash — so `rules-update`
+    // reported "already up to date" and left the wrong bytes in place, in a file
+    // loaded into every session. The gate is a BYTE comparison now.
     const edited = `${stampLine}\n\n# Critical Rules\n\nHAND EDITED\n`;
     writeFileSync(projectRulesFilePath(repo), edited);
 
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
-    expect(readFileSync(projectRulesFilePath(repo), 'utf-8')).toBe(edited);
-    expect(commitCount(repo)).toBe(commits);
-
-    // --force regenerates, restoring exactly what HEAD already holds — so the
-    // working tree is healed and there is correctly nothing to commit.
-    expect(
-      runRulesUpdate({
-        force: true,
-        now: NOW,
-        projectRoot: repo,
-        promptsDir: dir,
-      }),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
     expect(readFileSync(projectRulesFilePath(repo), 'utf-8')).toBe(canonical);
+    // Identical to HEAD again, so there is correctly nothing to commit.
     expect(statusLines(repo)).toBe('');
-    expect(commitCount(repo)).toBe(commits);
 
-    // And when the edit was COMMITTED, --force is what puts the canonical bytes
-    // back into history.
+    // NEGATIVE CONTROL: from the healed state the same call changes nothing, so
+    // the repair above was caused by the edit and not by an unconditional write.
+    const commits = commitCount(repo);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
+    expect(commitCount(repo)).toBe(commits);
+    expect(statusLines(repo)).toBe('');
+
+    // And when the edit was COMMITTED, plain rules-update puts the canonical
+    // bytes back into history — no --force needed any more.
     writeFileSync(projectRulesFilePath(repo), edited);
     git(repo, ['commit', '-qam', 'hand edit the generated file']);
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
-    expect(readFileSync(projectRulesFilePath(repo), 'utf-8')).toBe(edited);
-
-    expect(
-      runRulesUpdate({
-        force: true,
-        now: NOW,
-        projectRoot: repo,
-        promptsDir: dir,
-      }),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
     expect(readFileSync(projectRulesFilePath(repo), 'utf-8')).toBe(canonical);
     expect(filesInHead(repo)).toEqual([ARTIFACT_REL]);
-    expect(headSubject(repo)).toContain('chore(rules): update justin-sdk rules');
+    expect(headSubject(repo)).toContain(
+      'chore(rules): update justin-sdk rules',
+    );
   });
 });
 
@@ -517,33 +514,33 @@ describe('rules-update refuses, distinctly, and without writing', () => {
   test('a repo not enrolled in critical-rules: exit notEnrolled, no artifact, no commit', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture(); // no module selection recorded
+    const repo = projectFixture({notEnrolled: true});
     const commits = commitCount(repo);
 
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.notEnrolled);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.notEnrolled,
+    );
     expect(existsSync(projectRulesFilePath(repo))).toBe(false);
     expect(commitCount(repo)).toBe(commits);
 
     // NEGATIVE CONTROL: enrol the same repo and it succeeds, so the refusal is
     // about the missing selection, not about the fixture.
     const enrolled = projectFixture({modules: ['alpha']});
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: enrolled, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    expect(runRulesUpdate({projectRoot: enrolled, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
   });
 
   test('a detached HEAD: exit detachedHead and NOTHING is written', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     git(repo, ['checkout', '-q', '--detach']);
     const commits = commitCount(repo);
 
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.detachedHead);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.detachedHead,
+    );
     // The point of checking preconditions first: no orphaned generated file.
     expect(existsSync(projectRulesFilePath(repo))).toBe(false);
     expect(statusLines(repo)).toBe('');
@@ -551,31 +548,31 @@ describe('rules-update refuses, distinctly, and without writing', () => {
 
     // NEGATIVE CONTROL: re-attach and the same tree commits.
     git(repo, ['checkout', '-q', 'main']);
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
     expect(commitCount(repo)).toBe(commits + 1);
   });
 
   test('a merge in progress: exit operationInProgress and NOTHING is written', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     startConflictingMerge(repo);
     const dirtBefore = statusLines(repo);
 
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.operationInProgress);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.operationInProgress,
+    );
     expect(existsSync(projectRulesFilePath(repo))).toBe(false);
     // The half-done merge is left exactly as the human left it.
     expect(statusLines(repo)).toBe(dirtBefore);
 
     // NEGATIVE CONTROL: resolve + abort, and the same tree commits.
     git(repo, ['merge', '--abort']);
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
     expect(filesInHead(repo)).toEqual([ARTIFACT_REL]);
   });
 
@@ -585,10 +582,10 @@ describe('rules-update refuses, distinctly, and without writing', () => {
     // A real checkout with real content and NO working origin: the forced fetch
     // fails while the stale bytes stay perfectly readable. That is the trap.
     initRepoAt(cloneDir, RULES_FILES);
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     const commits = commitCount(repo);
 
-    expect(runRulesUpdate({now: NOW, projectRoot: repo})).toBe(
+    expect(runRulesUpdate({projectRoot: repo})).toBe(
       RULES_UPDATE_EXIT.cannotRefresh,
     );
     expect(existsSync(projectRulesFilePath(repo))).toBe(false);
@@ -602,11 +599,9 @@ describe('rules-update refuses, distinctly, and without writing', () => {
     const origin = initRepoAt(join(sandbox, 'origin'), RULES_FILES);
     mkdirSync(join(sandbox, 'justin-sdk'), {recursive: true});
     git(sandbox, ['clone', '-q', origin, cloneDir]);
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
 
-    expect(runRulesUpdate({now: NOW, projectRoot: repo})).toBe(
-      RULES_UPDATE_EXIT.ok,
-    );
+    expect(runRulesUpdate({projectRoot: repo})).toBe(RULES_UPDATE_EXIT.ok);
     expect(filesInHead(repo)).toEqual([ARTIFACT_REL]);
     expect(headSubject(repo)).toContain(
       git(origin, ['rev-parse', 'HEAD']).trim().slice(0, 12),
@@ -625,30 +620,33 @@ describe('rules-update refuses, distinctly, and without writing', () => {
     });
     const commits = commitCount(repo);
 
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.commitFailed);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.commitFailed,
+    );
     expect(commitCount(repo)).toBe(commits);
     // The regenerated file is left on disk on purpose: the write succeeded, only
     // the commit could not happen, and deleting it would hide the evidence.
     expect(existsSync(projectRulesFilePath(repo))).toBe(true);
 
     // NEGATIVE CONTROL: the same fixture without that ignore line commits.
-    const ok = projectFixture({modules: ['alpha', 'omega']});
-    expect(runRulesUpdate({now: NOW, projectRoot: ok, promptsDir: dir})).toBe(
+    const ok = projectFixture();
+    expect(runRulesUpdate({projectRoot: ok, promptsDir: dir})).toBe(
       RULES_UPDATE_EXIT.ok,
     );
     expect(filesInHead(ok)).toEqual([ARTIFACT_REL]);
   });
 
-  test('a broken module selection is assemblyFailed, not notEnrolled', () => {
+  test('a broken SOURCE is assemblyFailed, not notEnrolled', () => {
+    // The two are different facts and the exit codes must stay distinct: one
+    // means "this repo opted out", the other "the rules could not be built".
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'no-such-module']});
+    const repo = projectFixture();
+    rmSync(join(dir, 'src', 'rules', 'index.md'));
 
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.assemblyFailed);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.assemblyFailed,
+    );
     expect(existsSync(projectRulesFilePath(repo))).toBe(false);
   });
 });
@@ -661,10 +659,10 @@ describe('rules-diff', () => {
   test('after rules-update it reports IN SYNC naming the sha — and the run writes NOTHING in the repo', () => {
     setQuiet(true);
     const {dir, sha} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    const repo = projectFixture();
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
 
     const statusBefore = statusLines(repo);
     const filesBefore = snapshotFiles(repo);
@@ -687,10 +685,10 @@ describe('rules-diff', () => {
   test('new content in the prompts is a DIFF: exit 1, the new rule visible, one line naming rules-update', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    const repo = projectFixture();
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
     // NEGATIVE CONTROL for this whole test: in sync BEFORE the prompts change.
     expect(rulesDiff({projectRoot: repo, promptsDir: dir}).outcome).toBe(
       'in-sync',
@@ -716,7 +714,7 @@ describe('rules-diff', () => {
   test('a MISSING artifact while enrolled is diff-shaped, not a crash — and is not created', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
 
     const result = rulesDiff({projectRoot: repo, promptsDir: dir});
 
@@ -734,10 +732,10 @@ describe('rules-diff', () => {
   test('a hand-edited artifact is a diff that says plain rules-update will not fix it', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    const repo = projectFixture();
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
 
     // Keep the stamp, change the body: the file now certifies itself as
     // canonical while its bytes are not. This is the case where reading the
@@ -752,21 +750,23 @@ describe('rules-diff', () => {
     const result = rulesDiff({projectRoot: repo, promptsDir: dir});
     expect(result.outcome).toBe('diff');
     expect(result.report).toContain('SOMEONE EDITED THIS');
-    expect(result.report).toContain('--force');
-    expect(result.report).toMatch(/already up to date/);
+    // Plain `rules-update` now repairs this, so the report says exactly that
+    // and nothing about --force. The old NOTE told the reader to reach for a
+    // flag that is no longer needed.
+    expect(result.report).toContain('rules-update');
+    expect(result.report).not.toMatch(/already up to date/);
   });
 
   test('a stamp date change alone is NOT a diff (the date is excluded, D3)', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
-    expect(
-      runRulesUpdate({now: '2026-01-01', projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    const repo = projectFixture();
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
     expect(
       runRulesUpdate({
         force: true,
-        now: '2026-12-31',
         projectRoot: repo,
         promptsDir: dir,
       }),
@@ -782,7 +782,7 @@ describe('rules-diff', () => {
     setQuiet(true);
     const {cloneDir, sandbox} = sandboxedManagedClone();
     initRepoAt(cloneDir, RULES_FILES);
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
 
     const result = rulesDiff({projectRoot: repo});
 
@@ -799,7 +799,7 @@ describe('rules-diff', () => {
     const origin = initRepoAt(join(sandbox, 'origin'), RULES_FILES);
     mkdirSync(join(sandbox, 'justin-sdk'), {recursive: true});
     git(sandbox, ['clone', '-q', origin, cloneDir]);
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
 
     // No artifact yet, so the honest answer is "everything is new" — the point
     // is that it is an ANSWER (exit 1), not a cannot-check.
@@ -811,7 +811,7 @@ describe('rules-diff', () => {
   test('a repo that is not enrolled is CANNOT-CHECK, naming enrolment — never in sync', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture(); // no selection recorded
+    const repo = projectFixture({notEnrolled: true});
 
     const result = rulesDiff({projectRoot: repo, promptsDir: dir});
     expect(result.outcome).toBe('cannot-check');
@@ -820,14 +820,15 @@ describe('rules-diff', () => {
     expect(result.report).not.toMatch(/in sync/i);
   });
 
-  test('a broken module selection is CANNOT-CHECK, not an empty diff', () => {
+  test('a broken SOURCE is CANNOT-CHECK, not an empty diff', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'no-such-module']});
+    const repo = projectFixture();
+    rmSync(join(dir, 'src', 'rules', 'index.md'));
 
     const result = rulesDiff({projectRoot: repo, promptsDir: dir});
     expect(result.outcome).toBe('cannot-check');
-    expect(result.report).toContain('no-such-module');
+    expect(result.report).toContain('rules index');
     expect(result.report).not.toMatch(/in sync/i);
   });
 
@@ -839,11 +840,11 @@ describe('rules-diff', () => {
     const sb = track(createSandbox());
     for (const [rel, content] of Object.entries(RULES_FILES))
       sb.writeFile(rel, content);
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
 
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: sb.path}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: sb.path})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
     expect(headSubject(repo)).toContain('unknown');
 
     const result = rulesDiff({projectRoot: repo, promptsDir: sb.path});
@@ -857,7 +858,7 @@ describe('rules-diff', () => {
     const {dir} = gitPromptsFixture();
     delete process.env.JSDK_PRIME_PRETTIER; // prettier ON for this test only
     setQuiet(true);
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     const binDir = join(repo, 'node_modules', '.bin');
     mkdirSync(binDir, {recursive: true});
     const fake = join(binDir, 'prettier');
@@ -868,9 +869,9 @@ describe('rules-diff', () => {
     writeFileSync(fake, "#!/bin/sh\ncat\nprintf 'LOCAL_PRETTIER_RAN\\n'\n");
     chmodSync(fake, 0o755);
 
-    expect(
-      runRulesUpdate({now: NOW, projectRoot: repo, promptsDir: dir}),
-    ).toBe(RULES_UPDATE_EXIT.ok);
+    expect(runRulesUpdate({projectRoot: repo, promptsDir: dir})).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
     // The marker really is in play — without this the test could pass because
     // neither side ran prettier at all.
     expect(readFileSync(projectRulesFilePath(repo), 'utf-8')).toContain(
@@ -900,7 +901,7 @@ describe('CLI wiring', () => {
 
   test('the shipped commands really commit, then really report in sync', () => {
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     // Bun snapshots the environment at startup, so a child gets the fixture
     // settings only if they are passed explicitly.
     const env = {
@@ -937,7 +938,7 @@ describe('CLI wiring', () => {
 
   test('a repo that is not enrolled is told to run `add critical-rules`, on stderr, non-zero', () => {
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture();
+    const repo = projectFixture({notEnrolled: true});
     const env = {
       ...process.env,
       JSDK_PRIME_PRETTIER: '0',
@@ -960,5 +961,77 @@ describe('CLI wiring', () => {
     expect(diff.status).toBe(RULES_DIFF_EXIT.cannotCheck);
     expect(diff.stderr).toContain('add critical-rules');
     expect(diff.stdout).not.toMatch(/in sync/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The retired `modules` key: regenerate from the registry, warn exactly ONCE
+// (epic home-base-dchjw D2, acceptance criterion 2)
+// ---------------------------------------------------------------------------
+
+describe('a fleet config still carrying componentConfig["critical-rules"].modules', () => {
+  /** Run the real CLI so the warning is counted where a human would see it. */
+  function runCli(
+    repo: string,
+    promptsDir: string,
+    argv: string[],
+  ): {out: string; status: number | null} {
+    const run = spawnSync(process.execPath, [CLI, ...argv], {
+      cwd: repo,
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        JSDK_PRIME_PRETTIER: '0',
+        JSDK_PROMPTS_DIR: promptsDir,
+        JUSTIN_SDK_HEALTH_NOTICES: 'off',
+      },
+    });
+    return {out: `${run.stdout}${run.stderr}`, status: run.status};
+  }
+
+  /** How many times a run names the retired key. Must be exactly one. */
+  function warningCount(out: string): number {
+    return out.split('NO LONGER HONOURED').length - 1;
+  }
+
+  test('rules-update regenerates from the WHOLE registry and warns exactly once', () => {
+    const {dir} = gitPromptsFixture();
+    // A stale list naming one module, in an index that has two.
+    const repo = projectFixture({modules: ['alpha']});
+
+    const run = runCli(repo, dir, ['rules-update']);
+    expect(run.status).toBe(RULES_UPDATE_EXIT.ok);
+    expect(warningCount(run.out)).toBe(1);
+    expect(run.out).toContain('modules');
+
+    // The artifact carries BOTH modules — the list was ignored, not honoured.
+    const artifact = readFileSync(projectRulesFilePath(repo), 'utf-8');
+    expect(artifact).toContain('ALPHA_RULE');
+    expect(artifact).toContain('OMEGA_RULE');
+  });
+
+  test('rules-diff warns exactly once too', () => {
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture({modules: ['alpha']});
+    expect(runCli(repo, dir, ['rules-update']).status).toBe(
+      RULES_UPDATE_EXIT.ok,
+    );
+
+    const run = runCli(repo, dir, ['rules-diff']);
+    expect(run.status).toBe(RULES_DIFF_EXIT.inSync);
+    expect(warningCount(run.out)).toBe(1);
+  });
+
+  test('NEGATIVE CONTROL: a config without the key warns ZERO times', () => {
+    // Without this arm, "exactly one" would also pass for a run that printed
+    // the warning unconditionally.
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture();
+
+    const update = runCli(repo, dir, ['rules-update']);
+    expect(update.status).toBe(RULES_UPDATE_EXIT.ok);
+    expect(warningCount(update.out)).toBe(0);
+
+    expect(warningCount(runCli(repo, dir, ['rules-diff']).out)).toBe(0);
   });
 });

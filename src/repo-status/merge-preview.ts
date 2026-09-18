@@ -39,7 +39,7 @@
 
 import {execFileSync} from 'child_process';
 
-import {renderGitCommand} from '../plugin/lib/repo-status/core';
+import {renderGitCommand} from './core';
 
 /**
  * How many conflicted paths a preview carries. The COUNT is always exact; this
@@ -120,7 +120,6 @@ function runGit(argv: string[], cwd: string): GitRun {
 
 /** A 40-char sha1 or 64-char sha256 object id — what a real result starts with. */
 const OID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
-
 
 /** git's own complaint, first line only, collapsed to fit in a one-line `why`. */
 function firstLine(text: string): string {

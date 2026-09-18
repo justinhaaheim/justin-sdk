@@ -1,107 +1,225 @@
 /**
- * Tests for the shared component registry (components.ts) — the single
- * source of truth for component ordering, the short ↔ config-name mapping,
- * and name→installer dispatch that add/init/update all consume.
+ * Tests for the component registry (component-registry.ts) and the name →
+ * installer dispatch (components.ts).
  *
- * These are pure and offline. The actual installer dispatch is exercised
- * end-to-end by add.test.ts / init.test.ts / update.test.ts; here we only
- * cover the registry's own bookkeeping (and the unknown-name null path,
- * which must NOT run an installer).
+ * These are pure and offline apart from a package.json fixture, which is what
+ * the `includeIf` predicates read. The actual installer dispatch is exercised
+ * end-to-end by add.test.ts / init.test.ts / update.test.ts; here we cover the
+ * registry's own bookkeeping, the computed `core` preset, `resolveComponents`
+ * (epic home-base-dchjw D3, constraint F1) and the unknown-name null path, which
+ * must NOT run an installer.
  */
 
-import {describe, expect, test} from 'bun:test';
+import {afterAll, describe, expect, test} from 'bun:test';
+import {mkdtempSync, rmSync, writeFileSync} from 'fs';
+import {tmpdir} from 'os';
+import {join} from 'path';
 
 import {
+  COMPONENT_INCLUDE_IF,
   COMPONENT_NAMES,
+  componentApplicability,
+  componentNameForConfigName,
   configNameFor,
-  DEPENDENCY_ORDER,
-  runComponentByConfigName,
-} from '../src/components';
+  coreConfigNames,
+  corePreset,
+  resolveComponents,
+  unknownComponentNames,
+} from '../src/component-registry';
+import {runComponentByConfigName} from '../src/components';
 
-describe('components: ordering', () => {
+const roots: string[] = [];
+
+/** A project root whose package.json declares `deps` as dependencies. */
+function fixture(deps: string[]): string {
+  const root = mkdtempSync(join(tmpdir(), 'jsdk-components-'));
+  roots.push(root);
+  writeFileSync(
+    join(root, 'package.json'),
+    JSON.stringify({
+      dependencies: Object.fromEntries(deps.map((d) => [d, '*'])),
+      name: 'fixture',
+    }),
+  );
+  return root;
+}
+
+afterAll(() => {
+  for (const root of roots) rmSync(root, {force: true, recursive: true});
+});
+
+describe('component registry: ordering', () => {
   test('base-setup is first (the implicit foundation)', () => {
     expect(COMPONENT_NAMES[0]).toBe('base-setup');
   });
 
-  test('DEPENDENCY_ORDER is the canonical order minus the opt-in-only components', () => {
-    expect(DEPENDENCY_ORDER).toEqual(
-      COMPONENT_NAMES.filter(
-        (name) =>
-          name !== 'base-setup' &&
-          name !== 'eas' &&
-          name !== 'time-check' &&
-          name !== 'usage-check' &&
-          name !== 'thread-hooks' &&
-          name !== 'critical-rules',
-      ),
-    );
-    expect(DEPENDENCY_ORDER).not.toContain('base-setup');
-  });
-
-  test('thread-hooks is opt-in only — its hook writes to a SHARED database', () => {
-    // Its SessionStart hook writes to ~/Dev/threads' Dolt DB on every session
-    // start, so installing it everywhere would have every repo paying lock
-    // contention for a feature only some sessions use (home-base-p1uj.3).
-    expect(COMPONENT_NAMES).toContain('thread-hooks');
-    expect(DEPENDENCY_ORDER).not.toContain('thread-hooks');
-  });
-
-  test('time-check is opt-in only — its hook fires on every prompt', () => {
-    // Installing it via `init`/`all` would spend a process spawn per prompt in
-    // every project just to print nothing.
-    expect(COMPONENT_NAMES).toContain('time-check');
-    expect(DEPENDENCY_ORDER).not.toContain('time-check');
-  });
-
-  test('usage-check is opt-in only — its hooks fire on every prompt AND batch', () => {
-    // Same reasoning as time-check, doubled: it also runs after every tool
-    // batch, so it must never be installed implicitly (home-base-1r6d.1).
-    expect(COMPONENT_NAMES).toContain('usage-check');
-    expect(DEPENDENCY_ORDER).not.toContain('usage-check');
-  });
-
-  test('critical-rules is opt-in only — it commits rules into the repo', () => {
-    // Four enrolled repos are public; which rules a repo publishes is a
-    // deliberate per-repo decision, never a preset's (t6a0.21 D6/D12).
-    expect(COMPONENT_NAMES).toContain('critical-rules');
-    expect(DEPENDENCY_ORDER).not.toContain('critical-rules');
-  });
-
-  test('DEPENDENCY_ORDER matches the documented init/all order', () => {
-    expect(DEPENDENCY_ORDER).toEqual([
-      'gitignore',
-      'prettier',
-      'tsconfig',
-      'eslint',
-      'husky',
-      'gh-actions',
-      'prompts',
-      'claude-md',
-      'beads',
-    ]);
-  });
-});
-
-describe('components: name mapping', () => {
-  test('base-setup keeps its name; everything else gets a -setup suffix', () => {
-    expect(configNameFor('base-setup')).toBe('base-setup');
-    expect(configNameFor('beads')).toBe('beads-setup');
-    expect(configNameFor('gh-actions')).toBe('gh-actions-setup');
-    expect(configNameFor('claude-md')).toBe('claude-md-setup');
+  test('the retired prompts and claude-md components are gone', () => {
+    expect(COMPONENT_NAMES).not.toContain('prompts');
+    expect(COMPONENT_NAMES).not.toContain('claude-md');
   });
 
   test('config names are unique across all components', () => {
     const configNames = COMPONENT_NAMES.map(configNameFor);
     expect(new Set(configNames).size).toBe(configNames.length);
   });
+
+  test('base-setup keeps its name; everything else gets a -setup suffix', () => {
+    expect(configNameFor('base-setup')).toBe('base-setup');
+    expect(configNameFor('beads')).toBe('beads-setup');
+    expect(configNameFor('gh-actions')).toBe('gh-actions-setup');
+  });
 });
 
-describe('components: runComponentByConfigName', () => {
-  test('returns null for an unknown config name (runs no installer)', () => {
-    // Unknown names short-circuit to null BEFORE any installer is invoked,
-    // so this asserts the skip-with-warning path without side effects. The
-    // happy-path dispatch (real config name → installer) is covered e2e by
-    // add/init/update tests, which run in throwaway sandboxes.
+describe('component registry: core is computed, not listed', () => {
+  test('core is every component except the implicit base-setup, in a plain node project', () => {
+    const root = fixture(['typescript']);
+    expect(corePreset(root)).toEqual([
+      'gitignore',
+      'prettier',
+      'tsconfig',
+      'eslint',
+      'husky',
+      'gh-actions',
+      'beads',
+      'time-check',
+      'usage-check',
+      'thread-hooks',
+      'critical-rules',
+    ]);
+    expect(corePreset(root)).not.toContain('base-setup');
+  });
+
+  test('the four components the old OPT_IN_ONLY list withheld are in core', () => {
+    // Justin, 2026-09-18: time-check, usage-check, thread-hooks and
+    // critical-rules are part of the default install. The old `all` preset
+    // excluded all four — including critical-rules, which is the point of the
+    // SDK — while including the retired `prompts`.
+    const core: string[] = corePreset(fixture([]));
+    for (const name of [
+      'time-check',
+      'usage-check',
+      'thread-hooks',
+      'critical-rules',
+    ]) {
+      expect(core).toContain(name);
+    }
+  });
+
+  test('eas is gated on isExpo: absent without expo, present with it', () => {
+    expect(COMPONENT_INCLUDE_IF.eas).toEqual(['isExpo']);
+    expect(corePreset(fixture(['react', 'react-native']))).not.toContain('eas');
+    // The negative control for the gate: the ONLY difference is the dependency.
+    expect(corePreset(fixture(['react', 'expo']))).toContain('eas');
+  });
+
+  test('applicability names the gate that excluded a component', () => {
+    const entry = componentApplicability(fixture([])).find(
+      (e) => e.name === 'eas',
+    );
+    expect(entry).toBeDefined();
+    expect(entry?.applicable).toBe(false);
+    expect(entry?.includeIf).toEqual(['isExpo']);
+    expect(entry?.unknownPredicates).toEqual([]);
+  });
+
+  test('coreConfigNames is core in -setup spelling', () => {
+    const root = fixture([]);
+    expect(coreConfigNames(root)).toEqual(corePreset(root).map(configNameFor));
+  });
+});
+
+describe('component registry: resolveComponents', () => {
+  test('an ABSENT components key resolves to core, and says so', () => {
+    const root = fixture([]);
+    const resolved = resolveComponents({}, root);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.source).toBe('core');
+    // base-setup first (it is always installed), then core.
+    expect(resolved.components).toEqual([
+      'base-setup',
+      ...coreConfigNames(root),
+    ]);
+    // The whole point of F1: `{}` must not resolve to nothing.
+    expect(resolved.components.length).toBeGreaterThan(0);
+  });
+
+  test('a listed components key is honoured verbatim', () => {
+    const resolved = resolveComponents(
+      {components: ['base-setup', 'beads-setup']},
+      fixture([]),
+    );
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.source).toBe('config');
+    expect(resolved.components).toEqual(['base-setup', 'beads-setup']);
+    // base-setup is not duplicated when the config already names it.
+    expect(resolved.components.filter((n) => n === 'base-setup')).toHaveLength(
+      1,
+    );
+  });
+
+  test('an EMPTY array is a statement, not an absence — it does NOT become core', () => {
+    const root = fixture([]);
+    const resolved = resolveComponents({components: []}, root);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.source).toBe('config');
+    // Only the implicit foundation, which every enrolled repo has by
+    // construction — and none of the core components.
+    expect(resolved.components).toEqual(['base-setup']);
+    expect(resolved.components).not.toContain('beads-setup');
+  });
+
+  test('a components key of the wrong type FAILS — it never reads as empty', () => {
+    for (const bad of [{components: 'beads-setup'}, {components: [1, 2]}]) {
+      const resolved = resolveComponents(bad, fixture([]));
+      expect(resolved.ok).toBe(false);
+      if (resolved.ok) continue;
+      expect(resolved.reason).toContain('components');
+    }
+  });
+
+  test('a config that is not an object FAILS', () => {
+    expect(resolveComponents(null, fixture([])).ok).toBe(false);
+    expect(resolveComponents([], fixture([])).ok).toBe(false);
+    expect(resolveComponents('nope', fixture([])).ok).toBe(false);
+  });
+
+  test('a config that omits base-setup still resolves WITH it', () => {
+    // Doctor keys its BUN / ENV_HYDRATION / SDK-pin checks on base-setup. A
+    // repo that stopped listing it must not silently lose them.
+    const resolved = resolveComponents(
+      {components: ['beads-setup']},
+      fixture([]),
+    );
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.components).toEqual(['base-setup', 'beads-setup']);
+  });
+
+  test('unknown names survive resolution and are reported, not dropped', () => {
+    const resolved = resolveComponents(
+      {components: ['beads-setup', 'prompts-setup']},
+      fixture([]),
+    );
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.components).toContain('prompts-setup');
+    expect(unknownComponentNames(resolved.components)).toEqual([
+      'prompts-setup',
+    ]);
+  });
+});
+
+describe('components: dispatch', () => {
+  test('componentNameForConfigName maps back, and is null for a stranger', () => {
+    expect(componentNameForConfigName('beads-setup')).toBe('beads');
+    expect(componentNameForConfigName('base-setup')).toBe('base-setup');
+    expect(componentNameForConfigName('claude-md-setup')).toBeNull();
+  });
+
+  test('runComponentByConfigName returns null for an unknown config name (runs no installer)', () => {
     const result = runComponentByConfigName('totally-made-up-setup', {
       projectRoot: '/tmp/does-not-matter',
       quiet: true,

@@ -36,10 +36,7 @@ import {execFileSync} from 'child_process';
 import {writeFileSync} from 'fs';
 import {join} from 'path';
 
-import {
-  buildCoreInventory,
-  countDivergence,
-} from '../src/plugin/lib/repo-status/core';
+import {buildCoreInventory, countDivergence} from '../src/repo-status/core';
 import {proveContentOnBaseline} from '../src/repo-status/content';
 import {previewMerge} from '../src/repo-status/merge-preview';
 import {renderReportPretty} from '../src/repo-status/pretty';
@@ -285,7 +282,11 @@ describe('the fetch age behind every BEHIND-against-origin figure', () => {
   test('after a fetch, the age is the fetch, and the header prints it', () => {
     const sb = track(createSandbox());
     const repo = buildFixture(sb);
-    const remote = join(sb.path, '..', `${sb.path.split('/').pop()}-remote.git`);
+    const remote = join(
+      sb.path,
+      '..',
+      `${sb.path.split('/').pop()}-remote.git`,
+    );
     git(repo, ['init', '-q', '--bare', remote]);
     git(repo, ['remote', 'add', 'origin', remote]);
     git(repo, ['push', '-q', 'origin', 'main']);

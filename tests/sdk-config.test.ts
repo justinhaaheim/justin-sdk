@@ -38,6 +38,7 @@ import {
   userConfigSchema,
   xdgConfigHome,
 } from '../src/sdk-config';
+import {coreConfigNames} from '../src/component-registry';
 import {xdgStateHome} from '../src/health-notices';
 import {createSandbox, type Sandbox} from './sandbox';
 
@@ -188,13 +189,29 @@ describe('readProjectConfig outcomes', () => {
     expect(outcome.issues[0]).toContain('1|2|3|4');
   });
 
-  test('schema-violation: a malformed lastSynced is caught', () => {
+  test('schema-violation: a malformed components list is caught', () => {
+    // `lastSynced` used to be the example here; it is a retired key now (D3),
+    // and a retired key is an UNKNOWN key, which a loose schema accepts.
     const outcome = readProjectConfig(
-      projectWith(projectJson({lastSynced: 'yesterday'})),
+      projectWith(projectJson({components: 'beads-setup'})),
     );
     expect(outcome.status).toBe('schema-violation');
     if (outcome.status !== 'schema-violation') throw new Error('unreachable');
-    expect(outcome.issues[0]).toContain('lastSynced');
+    expect(outcome.issues[0]).toContain('components');
+  });
+
+  test('a retired key is simply unknown now, and parses', () => {
+    const outcome = readProjectConfig(
+      projectWith(projectJson({lastSynced: 'yesterday', version: '0.1.0'})),
+    );
+    expect(outcome.status).toBe('ok');
+  });
+
+  test('ok: `{}` is a COMPLETE project config (AC 6)', () => {
+    const outcome = readProjectConfig(projectWith('{}\n'));
+    expect(outcome.status).toBe('ok');
+    if (outcome.status !== 'ok') throw new Error('unreachable');
+    expect(outcome.config.components).toBeUndefined();
   });
 
   test('unknown keys pass at EVERY level — an older SDK never fails a newer config', () => {
@@ -464,19 +481,55 @@ describe('config schema', () => {
     );
   });
 
-  test('REQUIRED keys are marked, and optional ones are not (uxwc.5 F12b)', () => {
-    // Why it matters: a file missing a required key fails validation, and a
-    // file that fails contributes NOTHING — so a project justin-sdk.config.json
-    // without `version` silently loses its whole healthNotices block.
+  test('NOTHING is required any more, and the schema says so (D3)', () => {
+    // `components`, `version` and `lastSynced` were required until D3. A file
+    // missing a required key fails validation, and a file that fails
+    // contributes NOTHING — so a config that simply did not want to list its
+    // components silently lost its whole healthNotices block too.
     const rendered = renderConfigSchema({
       env: {XDG_CONFIG_HOME: '/xdg'},
       projectRoot: '/repo',
     });
-    for (const key of ['components', 'lastSynced', 'version']) {
-      expect(rendered).toMatch(new RegExp(`\\n {2}${key} +[^\\n]*· +required`));
+    expect(rendered).not.toMatch(/· +required/);
+    expect(rendered).toContain('NO key is required');
+    expect(rendered).toContain('`{}` is a complete, valid project config');
+  });
+
+  test('the core expansion for THIS repo is printed (AC 5)', () => {
+    const root = sandbox().path;
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({dependencies: {expo: '*'}, name: 'x'}),
+    );
+    const rendered = renderConfigSchema({
+      env: {XDG_CONFIG_HOME: '/xdg'},
+      projectRoot: root,
+    });
+    expect(rendered).toContain('absent means the `core` preset');
+    for (const name of coreConfigNames(root)) {
+      expect(rendered).toContain(name);
     }
-    expect(rendered).not.toMatch(/healthNotices[^\n]*· +required/);
-    expect(rendered).toContain('A key marked `required` must be present');
+    // Computed per repo: eas is in core here ONLY because expo is a dependency.
+    expect(rendered).toContain('eas-setup');
+  });
+
+  test('every componentConfig leaf with a default prints it (AC 5)', () => {
+    const rendered = renderConfigSchema({
+      env: {XDG_CONFIG_HOME: '/xdg'},
+      projectRoot: '/repo',
+    });
+    expect(rendered).toMatch(
+      /componentConfig\.time-check\.gapHours +number\|null +· +default 8/,
+    );
+    expect(rendered).toMatch(
+      /componentConfig\.thread\.enabled +boolean +· +default false/,
+    );
+    expect(rendered).toMatch(
+      /componentConfig\.thread\.answerUi +[^\n]*· +default "web"/,
+    );
+    expect(rendered).toMatch(
+      /componentConfig\.usage-check\.reArmDropFraction +number +· +default 0\.25/,
+    );
   });
 
   test('the promptTier scale is explained ONCE, not on all four keys (uxwc.5 F12e)', () => {

@@ -22,9 +22,9 @@
  * THE WORKSPACE MOVED (home-base-p1uj.11, Justin 2026-09-12). Thread and ask
  * beads used to live in ~/Dev/life (D2/D13); they now have their own repo, so
  * the tool can be the sole writer and commit after every write. `repoDir` is
- * resolved env → user/project config → `~/Dev/threads`, and the old
- * `JUSTIN_THREADS_LIFE_DIR` still works for one release as a deprecated alias
- * that says so once.
+ * resolved env → user/project config → `~/Dev/threads`. The old
+ * `JUSTIN_THREADS_LIFE_DIR` alias had its one release and is GONE (2026-09-18,
+ * home-base-dchjw.9): a shell that still exports it is simply not consulted.
  *
  * Both roots are env-overridable. `JUSTIN_THREADS_STATE_DIR` exists so a
  * sandboxed session (or a test) can point the archive somewhere writable;
@@ -45,13 +45,6 @@ export type EnvLike = Record<string, string | undefined>;
 export const STATE_DIR_ENV_VAR = 'JUSTIN_THREADS_STATE_DIR';
 export const REPO_DIR_ENV_VAR = 'JUSTIN_THREADS_REPO_DIR';
 
-/**
- * The pre-p1uj.11 spelling. Honoured for one release so a shell, hook or test
- * that still exports it keeps working — but it names the repo that no longer
- * holds threads, so every run that leans on it says so once.
- */
-export const LIFE_DIR_ENV_VAR = 'JUSTIN_THREADS_LIFE_DIR';
-
 /** Default archive/spool root. Shown verbatim in the SANDBOX DENIED line. */
 export const DEFAULT_STATE_DIR_DISPLAY = '~/.local/state/justin-threads';
 
@@ -61,9 +54,6 @@ export const DEFAULT_THREADS_BEADS_DISPLAY = '~/Dev/threads/.beads';
 /** The threads repo itself, as it is written in prose and remedies. */
 export const DEFAULT_THREADS_REPO_DISPLAY = '~/Dev/threads';
 
-/** The one line a run that still uses the old env var prints, once. */
-export const LIFE_DIR_DEPRECATION_NOTICE = `THREADS: ${LIFE_DIR_ENV_VAR} is DEPRECATED — threads moved out of ~/Dev/life into their own repo (home-base-p1uj.11). Honouring it for now; rename it to ${REPO_DIR_ENV_VAR}.`;
-
 /** Archive + spool root for report payloads. */
 export function threadsStateDir(env: EnvLike = process.env): string {
   const override = env[STATE_DIR_ENV_VAR];
@@ -72,7 +62,7 @@ export function threadsStateDir(env: EnvLike = process.env): string {
 }
 
 /** Which layer decided where the bd workspace is. */
-export type RepoDirSource = 'config' | 'default' | 'deprecatedEnv' | 'env';
+export type RepoDirSource = 'config' | 'default' | 'env';
 
 export interface RepoDirResolution {
   dir: string;
@@ -82,9 +72,8 @@ export interface RepoDirResolution {
 /**
  * Where the `thread`/`ask` beads live, and WHO said so.
  *
- * Pure and side-effect free on purpose: the deprecation notice is emitted by
- * `threadsRepoDir` below, so a test (or a caller that just wants to report the
- * layering) can ask the question without printing anything.
+ * The `source` is what makes a `thread config` render able to say which layer
+ * won, rather than only printing the path it landed on.
  */
 export function threadsRepoDirResolution(
   env: EnvLike = process.env,
@@ -93,10 +82,6 @@ export function threadsRepoDirResolution(
   if (override != null && override !== '') {
     return {dir: override, source: 'env'};
   }
-  const legacy = env[LIFE_DIR_ENV_VAR];
-  if (legacy != null && legacy !== '') {
-    return {dir: legacy, source: 'deprecatedEnv'};
-  }
   const configured = resolveThreadConfig({env}).repoDir;
   if (configured != null && configured !== '') {
     return {dir: configured, source: 'config'};
@@ -104,28 +89,9 @@ export function threadsRepoDirResolution(
   return {dir: join(homedir(), 'Dev', 'threads'), source: 'default'};
 }
 
-/**
- * Has this process already said the old env var is deprecated?
- *
- * Once per process, not once per call: `threadsRepoDir` is called several times
- * per command (the context, the probe, the board's git read), and a notice
- * repeated five times reads like five problems.
- */
-let deprecationAnnounced = false;
-
-/** Tests only: forget that the notice was printed. */
-export function resetDeprecationNoticeForTests(): void {
-  deprecationAnnounced = false;
-}
-
 /** The bd workspace that holds `thread` and `ask` beads (D2, as amended). */
 export function threadsRepoDir(env: EnvLike = process.env): string {
-  const resolution = threadsRepoDirResolution(env);
-  if (resolution.source === 'deprecatedEnv' && !deprecationAnnounced) {
-    deprecationAnnounced = true;
-    console.error(LIFE_DIR_DEPRECATION_NOTICE);
-  }
-  return resolution.dir;
+  return threadsRepoDirResolution(env).dir;
 }
 
 /** The `.beads` directory inside the bd workspace — the path that is denied. */

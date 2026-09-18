@@ -26,11 +26,23 @@ import {join, resolve} from 'path';
 
 import {z} from 'zod';
 
+import {coreConfigNames} from './component-registry';
 import {
   HEALTH_NOTICES_ENV_VAR,
   PROJECT_CONFIG_FILENAME,
   xdgConfigHome,
 } from './health-notices';
+import {TIME_CHECK_DEFAULTS} from './time-check';
+import {
+  THREAD_DEFAULT_ANSWER_UI,
+  THREAD_DEFAULT_AUTO_COMMIT,
+  THREAD_DEFAULT_AUTO_PUSH,
+  THREAD_DEFAULT_EMOJI_HEADER,
+  THREAD_DEFAULT_ENABLED,
+  THREAD_DEFAULT_ENFORCE,
+  THREAD_DEFAULT_START_ON_SESSION_START,
+} from './thread/defaults';
+import {USAGE_CHECK_DEFAULTS} from './usage-check';
 
 /** Environment as this module consumes it — `process.env` is assignable. */
 export type EnvLike = Record<string, string | undefined>;
@@ -157,25 +169,31 @@ export const healthNoticesSchema = z
   );
 
 /**
- * `componentConfig` sections. Described as LOOSE OBJECTS on purpose: each
- * component still owns and parses its own block (see `UsageCheckConfig` in
- * usage-check.ts and `TimeCheckConfig` in time-check.ts). What is written here
- * is a documentation and typo surface, not a second parser — migrating those
- * readers to zod is explicitly out of scope (home-base-uxwc).
+ * `componentConfig` sections: the ONE place every per-component knob is
+ * declared, described, and given the default `justin-sdk config schema` prints
+ * (epic home-base-dchjw D3).
+ *
+ * The defaults are IMPORTED from the component that owns each knob, never
+ * retyped here, so there is exactly one definition of each number. They are not
+ * zod `.default()`s, deliberately: a parser-filled default would break the
+ * DEFAULT ← user file ← project file layering these knobs resolve through —
+ * every parsed project file would then carry a value for every key, and a knob
+ * set once in the user file could never reach any repo. Absence has to keep
+ * meaning "inherit". `DEFAULT_COMPONENT_CONFIG` below is what the renderer
+ * prints, and `describeSchemaKeys` walks the two together.
+ *
+ * Each block stays a LOOSE object: an unknown key is documentation drift, not a
+ * violation, and a known key with the wrong type is what doctor reports.
  */
 const componentConfigSchema = z
   .looseObject({
-    'critical-rules': z
-      .looseObject({
-        modules: z
-          .array(z.string())
-          .optional()
-          .describe(
-            'Rules modules selected for this repo, in the order they are assembled into .claude/rules/justin-sdk/critical-rules.md.',
-          ),
-      })
-      .optional()
-      .describe('critical-rules: which rules modules this repo carries.'),
+    // NO 'critical-rules' SECTION, deliberately (epic home-base-dchjw D2). It
+    // held `modules`, a per-repo include-list frozen at enrolment, and it is
+    // retired: which rules a repo carries is decided by the prompts registry and
+    // the project-type predicates at every refresh, so there is nothing per-repo
+    // left to configure. `componentConfig` is a loose object, so a config that
+    // still carries the block still parses — and the SDK prints one warning
+    // naming the key and ignores it (see rules-enrollment.ts).
     'time-check': z
       .looseObject({
         enabled: z.boolean().optional(),
@@ -226,7 +244,7 @@ const componentConfigSchema = z
           .string()
           .optional()
           .describe(
-            'The bd workspace holding `thread` and `ask` beads (home-base-p1uj.11). DEFAULT ~/Dev/threads. Overridden by the JUSTIN_THREADS_REPO_DIR env var, which outranks both config files; the older JUSTIN_THREADS_LIFE_DIR still works for one release and prints a deprecation line.',
+            'The bd workspace holding `thread` and `ask` beads (home-base-p1uj.11). DEFAULT ~/Dev/threads. Overridden by the JUSTIN_THREADS_REPO_DIR env var, which outranks both config files.',
           ),
         startOnSessionStart: z
           .boolean()
@@ -308,22 +326,11 @@ export const projectConfigSchema = z
     componentConfig: componentConfigSchema.optional(),
     components: z
       .array(z.string())
+      .optional()
       .describe(
-        'Installed components. Doctor derives which checks to run from this list, so a component missing here has no checks.',
+        'The components this repo has, by their -setup names. OPTIONAL: absent means the `core` preset — every component applicable to this repo, computed at every read, so a repo tracks core as the registry grows. An EMPTY array is a different statement and is honoured as written: no components. Only `add` and `remove` write this key.',
       ),
     healthNotices: healthNoticesSchema.optional(),
-    lastSynced: z
-      .string()
-      .regex(
-        /^\d{4}-\d{2}-\d{2}$/,
-        'must be a YYYY-MM-DD date, e.g. "2026-09-10"',
-      )
-      .describe('Date this repo last ran a justin-sdk component installer.'),
-    version: z
-      .string()
-      .describe(
-        'The justin-sdk version that last wrote this file. Stamped by base-setup; not a pin.',
-      ),
   })
   .describe('Per-repo justin-sdk config, committed at the project root.');
 
@@ -498,6 +505,43 @@ export interface ResolvedHealthNoticesConfig {
     patch: SdkVersionKindConfig;
   };
 }
+
+/**
+ * The printed default of every `componentConfig` key, assembled from the
+ * constants the owning components export (D3). `justin-sdk config schema` walks
+ * this alongside the schema, so a key with no entry here prints no default — and
+ * that absence is visible rather than silently rendered as "none".
+ *
+ * NOT a resolution layer: nothing merges against this object. Each component
+ * resolves its own knobs against the same constants, which is why they are
+ * imported rather than restated.
+ */
+export const DEFAULT_COMPONENT_CONFIG = {
+  'time-check': {
+    enabled: TIME_CHECK_DEFAULTS.enabled,
+    gapHours: TIME_CHECK_DEFAULTS.gapHours,
+    notifyOnNewDayBoundaryHour: TIME_CHECK_DEFAULTS.notifyOnNewDayBoundaryHour,
+  },
+  thread: {
+    answerUi: THREAD_DEFAULT_ANSWER_UI,
+    autoCommit: THREAD_DEFAULT_AUTO_COMMIT,
+    autoPush: THREAD_DEFAULT_AUTO_PUSH,
+    enabled: THREAD_DEFAULT_ENABLED,
+    enforce: THREAD_DEFAULT_ENFORCE,
+    render: {emojiHeader: THREAD_DEFAULT_EMOJI_HEADER},
+    repoDir: '~/Dev/threads',
+    startOnSessionStart: THREAD_DEFAULT_START_ON_SESSION_START,
+  },
+  'usage-check': {
+    enabled: USAGE_CHECK_DEFAULTS.enabled,
+    reArmDropFraction: USAGE_CHECK_DEFAULTS.reArmDropFraction,
+    // `roles.player` has no default of its own: absent means "inherit the
+    // top-level value", so printing one would document a value that does not
+    // exist.
+    setpoints: USAGE_CHECK_DEFAULTS.setpoints,
+    wrapUpAt: USAGE_CHECK_DEFAULTS.wrapUpAt,
+  },
+} as const;
 
 /** Justin's numbers, in MINUTES (home-base-uxwc D2). */
 export const DEFAULT_HEALTH_NOTICES: ResolvedHealthNoticesConfig = {
@@ -740,7 +784,10 @@ function renderSection(
   schema: z.ZodType,
 ): string[] {
   const keys = describeSchemaKeys(z.toJSONSchema(schema) as JsonSchemaNode, {
-    defaults: {healthNotices: DEFAULT_HEALTH_NOTICES},
+    defaults: {
+      componentConfig: DEFAULT_COMPONENT_CONFIG,
+      healthNotices: DEFAULT_HEALTH_NOTICES,
+    },
   });
   const width = keys.reduce((max, line) => Math.max(max, line.key.length), 0);
   const out = [`${heading}  ${path}`, `  ${purpose}`, ''];
@@ -763,9 +810,13 @@ export function renderConfigSchema(
 ): string {
   const env = options.env ?? process.env;
   const projectRoot = options.projectRoot ?? process.cwd();
+  const core = coreConfigNames(projectRoot);
   const lines = [
     'justin-sdk config files. Unknown keys are ALWAYS allowed (a newer SDK’s config must not fail an older one); a known key with the wrong type is a violation, which `justin-sdk doctor` reports as CONFIG_SCHEMA.',
-    'A key marked `required` must be present: without it the WHOLE file fails validation, and a file that fails contributes nothing — so a project file missing `version` has its healthNotices block ignored entirely, and the user file (or the defaults) applies instead.',
+    'NO key is required. `{}` is a complete, valid project config: every key below either has the default shown or means "inherit". A file that fails validation contributes NOTHING — not half of itself — so a wrong-typed key costs you the whole file’s settings, and doctor names it.',
+    '',
+    `\`components\` is optional, and absent means the \`core\` preset. In ${projectRoot} core is ${core.length} component(s):`,
+    `    ${core.join(', ')}`,
     '',
     ...renderSection(
       'PROJECT',

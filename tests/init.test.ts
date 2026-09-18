@@ -10,11 +10,19 @@
 
 import {afterEach, beforeAll, describe, expect, test} from 'bun:test';
 import {execSync} from 'child_process';
-import {existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync} from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
 import {kebabCase, runInit} from '../src/init';
+import {resolveComponents} from '../src/component-registry';
+import {sdkRemoteWithOwnTag} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
 
 /**
@@ -84,6 +92,7 @@ function track(sandbox: Sandbox): Sandbox {
 }
 
 afterEach(() => {
+  cachedRemote = null;
   while (sandboxes.length > 0) {
     const sb = sandboxes.pop();
     sb?.cleanup();
@@ -92,14 +101,31 @@ afterEach(() => {
 
 /**
  * Standard offline options for every test.
+ *
+ * It was not actually offline until dchjw.17 F7: `skipPromptsFetch` covered the
+ * prompts clone, but `stepDepsHasSdk` still verified the pin tag with a real
+ * `git ls-remote` against github on every call. A FUNCTION rather than a const
+ * because the bare-remote fixture is built per test, alongside the sandbox it
+ * lives in.
  */
-const offlineOptions = {
-  noCommit: true,
-  quiet: true,
-  skipDoctor: true,
-  skipInstall: true,
-  skipPromptsFetch: true,
-};
+function offlineOptions() {
+  return {
+    noCommit: true,
+    quiet: true,
+    sdkRepoUrl: sdkRemote(),
+    skipDoctor: true,
+    skipInstall: true,
+    skipPromptsFetch: true,
+  };
+}
+
+/** The local bare remote for THIS test, built once. See sdkRemoteWithOwnTag. */
+let cachedRemote: string | null = null;
+
+function sdkRemote(): string {
+  cachedRemote ??= sdkRemoteWithOwnTag(track);
+  return cachedRemote;
+}
 
 /**
  * Initialize a real git repo in the sandbox so the dirty-tree preflight
@@ -149,7 +175,7 @@ describe('init: preflight', () => {
     const sb = track(createSandbox());
     // No .git/ in this sandbox.
     const exitCode = await runInit({
-      ...offlineOptions,
+      ...offlineOptions(),
       projectRoot: sb.path,
     });
     expect(exitCode).toBe(1);
@@ -162,7 +188,7 @@ describe('init: preflight', () => {
     writeFileSync(join(sb.path, 'untracked.txt'), 'hello\n');
 
     const exitCode = await runInit({
-      ...offlineOptions,
+      ...offlineOptions(),
       projectRoot: sb.path,
     });
     expect(exitCode).toBe(1);
@@ -178,7 +204,7 @@ describe('init: preflight', () => {
     writeFileSync(join(sb.path, 'untracked.txt'), 'hello\n');
 
     const exitCode = await runInit({
-      ...offlineOptions,
+      ...offlineOptions(),
       allowDirty: true,
       projectRoot: sb.path,
     });
@@ -197,7 +223,7 @@ describe('init: package.json scaffold', () => {
     initGitRepo(sb.path);
 
     const exitCode = await runInit({
-      ...offlineOptions,
+      ...offlineOptions(),
       projectRoot: sb.path,
     });
     expect(exitCode).toBe(0);
@@ -227,7 +253,7 @@ describe('init: package.json scaffold', () => {
     initGitRepo(oddDir);
 
     const exitCode = await runInit({
-      ...offlineOptions,
+      ...offlineOptions(),
       projectRoot: oddDir,
     });
     expect(exitCode).toBe(0);
@@ -259,7 +285,7 @@ describe('init: package.json scaffold', () => {
     execSync(`git commit -q -m 'initial'`, {cwd: sb.path});
 
     const exitCode = await runInit({
-      ...offlineOptions,
+      ...offlineOptions(),
       projectRoot: sb.path,
     });
     expect(exitCode).toBe(0);
@@ -276,8 +302,8 @@ describe('init: package.json scaffold', () => {
 // Phase 3 component pipeline
 // ---------------------------------------------------------------------------
 
-describe('init: component pipeline', () => {
-  test('runs every add component in order', async () => {
+describe('init: enrolment only, no components (D3)', () => {
+  test('installs NO component files, and the config resolves to core', async () => {
     if (!canRunFullPipeline) {
       console.log(
         "  (skipped — br not installed or mise can't use tmp-dir mise.toml)",
@@ -288,49 +314,42 @@ describe('init: component pipeline', () => {
     initGitRepo(sb.path);
 
     const exitCode = await runInit({
-      ...offlineOptions,
+      ...offlineOptions(),
       projectRoot: sb.path,
     });
     expect(exitCode).toBe(0);
 
-    // gitignore
-    expect(existsSync(join(sb.path, '.gitignore'))).toBe(true);
-    // prettier
-    expect(existsSync(join(sb.path, '.prettierrc.json'))).toBe(true);
-    // tsconfig
-    expect(existsSync(join(sb.path, 'tsconfig.json'))).toBe(true);
-    // eslint
-    expect(existsSync(join(sb.path, 'eslint.config.cjs'))).toBe(true);
-    // husky
-    expect(existsSync(join(sb.path, '.husky/pre-commit'))).toBe(true);
-    // gh-actions
-    expect(existsSync(join(sb.path, '.github/workflows/signal.yml'))).toBe(
-      true,
-    );
-    // claude-md
-    expect(existsSync(join(sb.path, 'CLAUDE.md'))).toBe(true);
-    // beads
-    expect(existsSync(join(sb.path, 'mise.toml'))).toBe(true);
+    // `init` is npm's `init`: the manifest, and nothing else. Scaffolding the
+    // whole preset here is what made enrolling a repo install a dozen
+    // components nobody asked for — including, until Part A, the retired
+    // `prompts` one. `add core` is the command that installs.
+    for (const artifact of [
+      '.prettierrc.json',
+      'tsconfig.json',
+      'eslint.config.cjs',
+      '.husky/pre-commit',
+      '.github/workflows/signal.yml',
+      'mise.toml',
+    ]) {
+      expect(existsSync(join(sb.path, artifact))).toBe(false);
+    }
 
-    // justin-sdk.config.json should list every component
+    // init writes NO `components` key on purpose (D3): absent means the core
+    // preset, so a repo enrolled today keeps tracking core as the registry
+    // grows rather than freezing today's list into a file nobody revisits.
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
     ) as {components?: string[]};
-    const components = config.components ?? [];
-    for (const expected of [
-      'base-setup',
-      'gitignore-setup',
-      'prettier-setup',
-      'tsconfig-setup',
-      'eslint-setup',
-      'husky-setup',
-      'gh-actions-setup',
-      'prompts-setup',
-      'claude-md-setup',
-      'beads-setup',
-    ]) {
-      expect(components).toContain(expected);
-    }
+    expect(config.components).toBeUndefined();
+    const resolved = resolveComponents(config, sb.path);
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.components).toContain('base-setup');
+    expect(resolved.components).toContain('beads-setup');
+    expect(resolved.components).toContain('critical-rules-setup');
+    // The retired components must never be scaffolded again.
+    expect(resolved.components).not.toContain('prompts-setup');
+    expect(resolved.components).not.toContain('claude-md-setup');
   });
 
   test('idempotent: second run returns 0 with no errors', async () => {
@@ -339,7 +358,7 @@ describe('init: component pipeline', () => {
     initGitRepo(sb.path);
 
     const first = await runInit({
-      ...offlineOptions,
+      ...offlineOptions(),
       projectRoot: sb.path,
     });
     expect(first).toBe(0);
@@ -349,7 +368,7 @@ describe('init: component pipeline', () => {
     execSync(`git commit -q -m 'first scaffold'`, {cwd: sb.path});
 
     const second = await runInit({
-      ...offlineOptions,
+      ...offlineOptions(),
       projectRoot: sb.path,
     });
     expect(second).toBe(0);
@@ -367,7 +386,7 @@ describe('init: commit behavior', () => {
     initGitRepo(sb.path);
 
     const exitCode = await runInit({
-      ...offlineOptions,
+      ...offlineOptions(),
       noCommit: true,
       projectRoot: sb.path,
     });

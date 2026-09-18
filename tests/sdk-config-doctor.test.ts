@@ -131,7 +131,11 @@ describe('CONFIG_SCHEMA doctor check', () => {
     );
     expect(output).toContain('⚠ CONFIG_SCHEMA');
     expect(output).toContain('healthNotices.sdkVersion.minor.promptTier');
-    expect(output).toContain('1 warn');
+    // The warn marker is asserted on CONFIG_SCHEMA's OWN line above, not by
+    // counting warns run-wide: doctor's check set is not fixed, and
+    // USER_LEVEL_SESSION_START (dchjw.8) warns on any machine — every test
+    // sandbox included — that has no user-level session-start hook.
+    expect(output).toMatch(/\d+ warn/);
     expect(output).toContain('config schema');
     // Warn severity: the exit code is what SessionStart and sweep gate on.
     expect(status).toBe(0);
@@ -167,5 +171,67 @@ describe('CONFIG_SCHEMA doctor check', () => {
     expect(output).toContain('⚠ CONFIG_SCHEMA');
     expect(output).toContain('not valid JSON');
     expect(output).not.toContain('not present');
+  });
+});
+
+/**
+ * F1 — an absent `components` key must resolve to the `core` preset, and doctor
+ * must therefore RUN checks (epic home-base-dchjw, AC 9).
+ *
+ * The bug this replaces: `config.components ?? []` read an absent list as an
+ * empty one, so a repo with no `components` key ran ZERO checks and printed "No
+ * doctor checks registered", which reads as a clean bill of health and meant "I
+ * did not look" (critical rule 6).
+ */
+describe('doctor resolves an absent components key to core', () => {
+  /** Labels that can ONLY come from a component in core, never from base-setup. */
+  const CORE_ONLY_LABELS = [
+    'GITIGNORE_EXISTS',
+    'PRETTIERRC',
+    'TSCONFIG',
+    'ESLINT_CONFIG',
+  ];
+
+  function countChecks(output: string): number {
+    return output
+      .split('\n')
+      .filter((line) => /^\s*[✓✗⚠]\s+[A-Z][A-Z0-9_]+/.test(line)).length;
+  }
+
+  test('a config of {} runs the core checks', () => {
+    const {output} = runDoctorCli(projectRoot({}), configHome(null));
+    expect(output).not.toContain('No doctor checks registered');
+    expect(countChecks(output)).toBeGreaterThan(0);
+    for (const label of CORE_ONLY_LABELS) {
+      expect(output).toContain(label);
+    }
+    // base-setup's own checks are there too: the resolved list always carries
+    // the implicit component.
+    expect(output).toContain('BUN');
+  });
+
+  test('NEGATIVE CONTROL: an EMPTY components list runs only base-setup checks', () => {
+    // Same fixture, same command — the ONLY difference is that `components` is
+    // present and empty, which is a deliberate statement rather than an
+    // absence. If this printed the core labels too, the test above would be
+    // passing for some reason other than the resolution under test.
+    const {output} = runDoctorCli(
+      projectRoot({components: []}),
+      configHome(null),
+    );
+    expect(output).toContain('BUN');
+    for (const label of CORE_ONLY_LABELS) {
+      expect(output).not.toContain(label);
+    }
+  });
+
+  test('a components key of the wrong type FAILS rather than checking nothing', () => {
+    const {output, status} = runDoctorCli(
+      projectRoot({components: 'beads-setup'}),
+      configHome(null),
+    );
+    expect(output).toContain('is not an array');
+    expect(output).toContain('NOT a clean bill of health');
+    expect(status).toBe(1);
   });
 });

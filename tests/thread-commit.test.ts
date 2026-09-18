@@ -489,7 +489,11 @@ describe('pushing after a commit', () => {
     ).toContain('origin');
     expect(
       describePush(
-        {command: 'git push origin HEAD', detail: 'auth failed', kind: 'failed'},
+        {
+          command: 'git push origin HEAD',
+          detail: 'auth failed',
+          kind: 'failed',
+        },
         'the threads repo',
       ),
     ).toContain('WARNING');

@@ -7,10 +7,16 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {existsSync, readFileSync, writeFileSync} from 'fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'fs';
 import {join} from 'path';
 
-import {runUpdate} from '../src/update';
+import {planUpdateReExec, runUpdate} from '../src/update';
 import {createProjectSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -26,6 +32,91 @@ function track(sb: Sandbox): Sandbox {
   sandboxes.push(sb);
   return sb;
 }
+
+describe('planUpdateReExec — the post-self-update re-exec (dchjw.17 F4)', () => {
+  const FLAGS = {
+    allowDirty: false,
+    force: false,
+    noCommit: false,
+    quiet: false,
+  };
+
+  test("runs the REPO'S OWN binary, by absolute path", () => {
+    const sb = track(createProjectSandbox());
+    const bin = join(sb.path, 'node_modules', '.bin', 'justin-sdk');
+    mkdirSync(join(sb.path, 'node_modules', '.bin'), {recursive: true});
+    writeFileSync(bin, '#!/bin/sh\nexit 0\n');
+    chmodSync(bin, 0o755);
+
+    const plan = planUpdateReExec(sb.path, FLAGS);
+    expect(plan.ok).toBe(true);
+    if (!plan.ok) throw new Error('unreachable');
+    expect(plan.argv[0]).toBe(bin);
+    expect(plan.argv).toContain('--no-self-update');
+    // The old spelling, which is what fell through to the PATH shim.
+    expect(plan.argv.slice(0, 3)).not.toEqual(['bun', 'run', 'justin-sdk']);
+  });
+
+  test('REFUSES when the worktree has no SDK binary — naming the path', () => {
+    const sb = track(createProjectSandbox());
+    const plan = planUpdateReExec(sb.path, FLAGS);
+    expect(plan.ok).toBe(false);
+    if (plan.ok) throw new Error('unreachable');
+    expect(plan.detail).toContain(
+      join(sb.path, 'node_modules', '.bin', 'justin-sdk'),
+    );
+    expect(plan.detail).toContain('Refusing to fall back');
+  });
+
+  test('NEGATIVE CONTROL: a justin-sdk shim on PATH does not satisfy it', () => {
+    // Under the old `sdkRunArgv` spelling this is exactly the shape that ran
+    // the orchestrator's SDK and exited 0. The refusal must be about THIS
+    // repo's node_modules, and nothing on PATH may change the answer.
+    const sb = track(createProjectSandbox());
+    const shimDir = join(sb.path, 'fake-path');
+    mkdirSync(shimDir, {recursive: true});
+    const shim = join(shimDir, 'justin-sdk');
+    writeFileSync(shim, '#!/bin/sh\necho THE SHIM RAN\n');
+    chmodSync(shim, 0o755);
+
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${shimDir}:${originalPath ?? ''}`;
+    try {
+      const plan = planUpdateReExec(sb.path, FLAGS);
+      expect(plan.ok).toBe(false);
+    } finally {
+      process.env.PATH = originalPath;
+    }
+  });
+
+  test('passes the flags the user cared about through', () => {
+    const sb = track(createProjectSandbox());
+    mkdirSync(join(sb.path, 'node_modules', '.bin'), {recursive: true});
+    const bin = join(sb.path, 'node_modules', '.bin', 'justin-sdk');
+    writeFileSync(bin, '#!/bin/sh\nexit 0\n');
+    chmodSync(bin, 0o755);
+
+    const plan = planUpdateReExec(sb.path, {
+      allowDirty: true,
+      force: true,
+      noCommit: true,
+      quiet: true,
+    });
+    if (!plan.ok) throw new Error('unreachable');
+    expect(plan.argv).toEqual([
+      bin,
+      'update',
+      '--no-self-update',
+      '--no-commit',
+      '--allow-dirty',
+      '--force',
+      '--quiet',
+    ]);
+    // update NEVER prunes: it is install with a pin bump in front, and install
+    // does not remove (dchjw.17 F1/F2).
+    expect(plan.argv).not.toContain('--prune');
+  });
+});
 
 describe('runUpdate', () => {
   test('bails when justin-sdk.config.json is missing', async () => {

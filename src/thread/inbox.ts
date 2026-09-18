@@ -203,9 +203,7 @@ export function renderInbox(view: InboxView): string {
     lines.push('  (none — checked, and there are none)');
   }
   for (const ask of waiting) {
-    lines.push(
-      `  ${ask.id} · ${priorityLabel(ask.priority)} · ${ask.title}`,
-    );
+    lines.push(`  ${ask.id} · ${priorityLabel(ask.priority)} · ${ask.title}`);
     lines.push(`      if he never answers: ${ask.defaultAction}`);
   }
 

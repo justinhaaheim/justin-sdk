@@ -348,10 +348,7 @@ describe('walkAsks', () => {
       },
     };
     const result = await walkAsks(
-      [
-        view({priority: 0, id: 'jl-a1.1'}),
-        view({priority: 0, id: 'jl-a1.2'}),
-      ],
+      [view({priority: 0, id: 'jl-a1.1'}), view({priority: 0, id: 'jl-a1.2'})],
       io,
       writer,
     );

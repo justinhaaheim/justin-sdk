@@ -11,15 +11,14 @@
  *
  * TWO LAYERS, deliberately separate (t6a0.21 D2 + the Dispatch-B addendum):
  *
- *   (a) refreshCriticalRulesArtifact() — reads the module selection ALREADY
- *       recorded in justin-sdk.config.json, assembles, and writes the artifact.
- *       Touches NOTHING else: no config rewrite, no SDK pin, no lastSynced. This
- *       is the layer `rules-update` (home-base-q1hp) calls, because it must
- *       commit only paths under .claude/rules/justin-sdk/.
+ *   (a) refreshCriticalRulesArtifact() — assembles the rules for THIS project
+ *       and writes the artifact. Touches NOTHING else: no config rewrite and no
+ *       SDK pin. This is the layer `rules-update` (home-base-q1hp)
+ *       calls, because it must commit only paths under .claude/rules/justin-sdk/.
  *
- *   (b) runCriticalRulesSetup() — enrollment: the base-setup chain, seeding the
- *       module list, then (a), then the `.claude/settings.json` exclusion that
- *       drops the USER-LEVEL duplicate (home-base-anhw). This is what
+ *   (b) runCriticalRulesSetup() — enrollment: the base-setup chain, then (a),
+ *       then the `.claude/settings.json` exclusion that drops the USER-LEVEL
+ *       duplicate (home-base-anhw). This is what
  *       `add critical-rules` and `sweep --component critical-rules` run; the
  *       sweep's pin-neutrality guard absorbs base-setup's config drift.
  *       The exclusion lives HERE and not in (a) on purpose: (a) is what
@@ -32,17 +31,30 @@
  * would otherwise load the universal rules TWICE (user-level + its own
  * artifact), so enrollment adds one `claudeMdExcludes` entry naming the
  * user-level file and nothing else. The hook's half of the same job is in
- * plugin/hooks/session-start.ts: it stops injecting rule text into a repo that
- * carries its own artifact.
+ * src/session-start.ts: it stops injecting rule text into a repo that carries
+ * its own artifact.
  *
- * OPT-IN MODULE SELECTION (D12): the selection is an EXPLICIT list of module
- * names in `componentConfig["critical-rules"].modules`, seeded ONCE at
- * enrollment by running the predicates and recording their RESULT. Assembly
- * never evaluates a predicate. That is what structurally kills the t6a0.20
- * failure class, where an includeIf naming a predicate the running SDK didn't
- * know silently deleted a module from delivery. The list is visible in config
- * and hand-editable, so "which rules does this repo get?" is answerable by
- * reading one file.
+ * THE REGISTRY DECIDES, AT EVERY REFRESH (epic home-base-dchjw D2). The prompts
+ * repo's rules index plus the project-type predicates, evaluated against the
+ * project AS IT IS NOW, are the whole answer. There is no per-repo include-list.
+ *
+ * The retired design (D12, deleted here) recorded the predicates' RESULT once at
+ * enrollment in `componentConfig["critical-rules"].modules` and assembled from
+ * that list forever after. Justin, verbatim: *"this seems like an ENORMOUS
+ * FOOTGUN, because it by definition will not include any NEW modules that are
+ * added to critical-rules, AND it seems to allow repos to effectively opt-out of
+ * rules … I just deleted beads-workflow and rules-update removed it from
+ * critical-rules. This is a terrible design and needs to be undone immediately."*
+ * It also froze the predicates: React/Native rules reached a repo only if
+ * expo/react-native was a dependency ON THE DAY it was enrolled. A config that
+ * still carries the key gets ONE warning and is otherwise ignored.
+ *
+ * What the old design was defending against — an `includeIf` naming a predicate
+ * the running SDK does not know, silently deleting a module (t6a0.20) — is still
+ * handled, but by being LOUD rather than by freezing: an unknown predicate
+ * excludes the module AND emits a warning through `assembled.warnings`, which
+ * this writer prints, and it moves the module fingerprint in the artifact header
+ * so the change is visible in the committed diff rather than silent.
  *
  * FRESHNESS IS NOT OPTIONAL FOR A WRITER (D15): the managed prompts clone
  * tolerates a failed refresh by keeping the old checkout — correct for a reader,
@@ -52,32 +64,34 @@
  */
 
 import {execFileSync} from 'child_process';
-import {existsSync, mkdirSync, renameSync, writeFileSync} from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'fs';
 import {basename, dirname, join, relative, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
 import {
-  assembleSelected,
-  describeIndexModules,
+  assemble,
   isDirtyCheckout,
   PROMPTS_SOURCE_FAILURE,
-  type IndexModule,
+  type PromptsCommit,
   type SourceRefresh,
-} from './plugin/lib/prime';
+} from './prime';
+import {legacyModulesWarning} from './rules/rules-enrollment';
 import {
-  CRITICAL_RULES_CONFIG_KEY,
-  readSelectedModules,
-} from './plugin/lib/rules-selection';
-import {
-  buildStamp,
+  buildArtifactStamp,
   contentHash,
+  moduleFingerprint,
   prettierEnabled,
   prettierMarkdown,
   projectRulesFilePath,
-  readDeployedStamp,
   rulesFilePath,
   RULES_UPDATE_CMD,
-} from './plugin/lib/rules-file';
+} from './rules/rules-file';
 import {
   fail,
   findLocalPrettier,
@@ -86,51 +100,38 @@ import {
   setQuiet,
   stepHeader,
   success,
-  todayIsoDate,
   warn,
   writeJson,
 } from './setup-helpers';
 
 /**
- * The selection reader MOVED to src/plugin/lib/rules-selection.ts, because the
- * SessionStart hook reaches it through `rules-drift` and a published plugin
- * package contains only `src/plugin` (home-base-qjyj). Re-exported here so the
- * installer-facing import site is unchanged — one definition, two names for the
- * same module (t6a0.21 D14: share, never fork).
+ * The enrolment reader and the retired-key detector live in
+ * src/rules/rules-enrollment.ts — see the header there for why they are split
+ * out. Re-exported here so the installer-facing import sites are unchanged —
+ * one definition, two names for the same module.
  */
 export {
+  CRITICAL_RULES_COMPONENT,
   CRITICAL_RULES_CONFIG_KEY,
-  readSelectedModules,
-  type SelectionRead,
-} from './plugin/lib/rules-selection';
+  hasRetiredModulesKey,
+  legacyModulesWarning,
+  readEnrollment,
+  RETIRED_MODULES_KEY,
+  type EnrollmentRead,
+} from './rules/rules-enrollment';
 
 /**
- * Universal modules kept OUT of the default seed.
+ * Print the retired-`modules`-key warning, if the repo still carries one.
  *
- * s2t-guidelines describes Justin's speech-to-text workflow and the "Dakota"
- * wake word. Four enrolled repos are public on GitHub and no tool can reliably
- * detect repo publicness, so the conservative default is OUT everywhere; Justin
- * opts it in per private repo by adding the name to the config (D6 refined by
- * D12).
+ * ONE emitter, called ONCE PER COMMAND at the entry point (`add critical-rules`,
+ * `rules-update`, `rules-diff`; doctor attaches the same text to a check instead
+ * of printing it). The refresh layer deliberately does NOT call it: doctor's
+ * fixer calls that layer, and a second emitter there would print the same
+ * warning twice in one doctor run.
  */
-export const DEFAULT_SEED_EXCLUDED: readonly string[] = ['s2t-guidelines'];
-
-// ---------------------------------------------------------------------------
-// Module selection
-// ---------------------------------------------------------------------------
-
-/**
- * The default seed (D12): every universal module except the explicitly excluded
- * ones, plus each project-type module whose predicates match RIGHT NOW. Index
- * order is preserved. Predicates run here, at enrollment, and nowhere else.
- */
-export function computeDefaultModules(
-  modules: readonly IndexModule[],
-): string[] {
-  return modules
-    .filter((m) => (m.includeIf.length === 0 ? true : m.matches))
-    .map((m) => m.name)
-    .filter((name) => !DEFAULT_SEED_EXCLUDED.includes(name));
+export function warnRetiredModulesKey(projectRoot: string): void {
+  const message = legacyModulesWarning(projectRoot);
+  if (message != null) warn(message);
 }
 
 // ---------------------------------------------------------------------------
@@ -142,18 +143,18 @@ export interface RefreshSuccess {
   /** Absolute path of the artifact. */
   file: string;
   contentHash: string;
-  /** The selection that was assembled, in config order. */
+  /** Modules actually inlined, in index order — the resolved set. */
   modules: string[];
-  /** Modules actually inlined (index order). */
-  assembled: string[];
-  /** prompts-repo HEAD sha, or null when the source isn't a git checkout. */
-  sourceSha: string | null;
+  /** `moduleFingerprint(modules)` — what the header records. */
+  moduleFingerprint: string;
+  /** prompts-repo HEAD commit, or null when the source isn't a git checkout. */
+  sourceCommit: PromptsCommit | null;
   sourceRefresh: SourceRefresh;
   warnings: string[];
 }
 
 export interface RefreshFailure {
-  status: 'not-enrolled' | 'cannot-refresh' | 'failed';
+  status: 'cannot-refresh' | 'failed';
   message: string;
 }
 
@@ -168,8 +169,6 @@ export function refreshSucceeded(
 export interface RefreshOptions {
   /** Rewrite even when the content hash is unchanged. */
   force?: boolean;
-  /** Stamp date (YYYY-MM-DD). Injectable so tests can pin it. */
-  now?: string;
   /** Read this prompts dir as-is instead of the managed clone (tests). */
   promptsDir?: string;
   /**
@@ -195,12 +194,17 @@ export function refreshIsVerified(refresh: SourceRefresh): boolean {
 }
 
 /**
- * Regenerate the committed artifact from the recorded module selection.
+ * Regenerate the committed artifact for this project, from the registry.
  *
  * Writes exactly one path — `.claude/rules/justin-sdk/critical-rules.md` — and
  * touches nothing else in the project, which is the property that lets
  * `rules-update` commit a rules-only change. Never commits: committing belongs
  * to `rules-update` and to the sweep.
+ *
+ * It does NOT gate on enrolment. Enrolment is the CALLER's question — it is what
+ * `rules-update` checks before anything is written, and it is what `add
+ * critical-rules` is in the middle of establishing when it calls this. A second
+ * gate here would have refused the very run that enrolls a repo.
  */
 export function refreshCriticalRulesArtifact(
   projectRoot: string,
@@ -208,31 +212,43 @@ export function refreshCriticalRulesArtifact(
 ): RefreshOutcome {
   if (options.quiet != null) setQuiet(options.quiet);
 
-  const selection = readSelectedModules(projectRoot);
-  if (!selection.ok) {
-    fail(`critical-rules: ${selection.message}`);
-    return {message: selection.message, status: selection.status};
-  }
-
   let assembled;
   try {
     // forceUpdate is hardcoded, not an option: a writer must always try to
     // refresh, so that a failure to do so is detectable rather than assumed.
-    assembled = assembleSelected(selection.modules, {
-      forceUpdate: true,
-      promptsDir: options.promptsDir,
-    });
+    // The project root is passed so the predicates run against THIS project as
+    // it is right now (D2) — never a list frozen at enrolment.
+    assembled = assemble(
+      {
+        forceUpdate: true,
+        partition: 'full',
+        promptsDir: options.promptsDir,
+      },
+      projectRoot,
+    );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     // "there is no usable prompts checkout at all" is a cannot-CHECK, not a
     // wrong-content — same class as a failed refresh, and it must not be
-    // reported as an assembly/selection defect.
+    // reported as an assembly defect.
     if (reason.startsWith(PROMPTS_SOURCE_FAILURE)) {
       const message = `${reason} — NOT writing the artifact`;
       fail(`critical-rules: ${message}`);
       return {message, status: 'cannot-refresh'};
     }
-    const message = `could not assemble the selected rules modules (${reason})`;
+    const message = `could not assemble the rules modules (${reason})`;
+    fail(`critical-rules: ${message}`);
+    return {message, status: 'failed'};
+  }
+
+  // An index that resolves to NOTHING is a failure, not an empty document. The
+  // artifact is committed and autoloaded: writing zero rules over a repo's rules
+  // file is the total-omission failure this component exists to prevent, and it
+  // would look exactly like success.
+  if (assembled.names.length === 0) {
+    const message =
+      `the rules index at ${assembled.sourceDir} resolved to NO modules for this project — ` +
+      `refusing to write an empty rules artifact`;
     fail(`critical-rules: ${message}`);
     return {message, status: 'failed'};
   }
@@ -269,45 +285,65 @@ export function refreshCriticalRulesArtifact(
   }
   const pretty = formatted.markdown;
   const hash = contentHash(pretty);
+  const fingerprint = moduleFingerprint(assembled.names);
 
   for (const warning of assembled.warnings) warn(warning);
 
   const common = {
-    assembled: assembled.names,
     contentHash: hash,
     file,
-    modules: selection.modules,
+    moduleFingerprint: fingerprint,
+    modules: assembled.names,
+    sourceCommit: assembled.sourceCommit,
     sourceRefresh: assembled.sourceRefresh,
-    sourceSha: assembled.sourceSha,
     warnings: assembled.warnings,
   };
 
-  if (options.force !== true && readDeployedStamp(file)?.contentHash === hash) {
-    success(
-      `rules already in sync (content ${hash}, ${selection.modules.length} module${
-        selection.modules.length === 1 ? '' : 's'
-      }) — no rewrite`,
-    );
-    return {...common, status: 'unchanged'};
-  }
-
   const shaShort =
-    assembled.sourceSha != null ? assembled.sourceSha.slice(0, 12) : 'unknown';
+    assembled.sourceCommit != null
+      ? assembled.sourceCommit.sha.slice(0, 12)
+      : 'unknown';
   const dirtySuffix =
-    assembled.sourceSha != null && isDirtyCheckout(assembled.sourceDir)
+    assembled.sourceCommit != null && isDirtyCheckout(assembled.sourceDir)
       ? '-dirty'
       : '';
-  // No SDK version in the stamp, on purpose (see buildStamp): an SDK release
-  // must not change the bytes of a committed file in twelve repos. A DATE rather
-  // than a timestamp keeps two same-day regenerations byte-identical, and the
-  // hash gate above means an in-sync repo never rewrites the date at all.
-  const stamp = buildStamp({
+  const stamp = buildArtifactStamp({
     command: RULES_UPDATE_CMD,
-    commit: `${shaShort}${dirtySuffix}`,
     contentHash: hash,
-    generated: options.now ?? todayIsoDate(),
+    moduleFingerprint: fingerprint,
+    // 'unknown' rather than today's date when the source is not a git checkout:
+    // the header states the PROMPTS COMMIT's date, and substituting the date of
+    // the run would be a measurement we did not make (critical rule 6).
+    promptsDate: assembled.sourceCommit?.date ?? 'unknown',
+    promptsSha: `${shaShort}${dirtySuffix}`,
   });
   const body = `${stamp}\n\n${pretty}\n`;
+
+  // IDEMPOTENCY IS A BYTE COMPARISON, not a stamp comparison. The header carries
+  // no generation timestamp (see buildArtifactStamp), so the bytes we would
+  // write are a pure function of the source and the project — which makes "is
+  // this file already what we would write?" answerable exactly, including for a
+  // file whose header still claims the right hashes but whose BODY was edited by
+  // hand. The old stamp-hash comparison certified precisely that file as
+  // "already in sync" and changed nothing.
+  if (options.force !== true && existsSync(file)) {
+    let onDisk: string | null;
+    try {
+      onDisk = readFileSync(file, 'utf-8');
+    } catch {
+      // Unreadable is not "different" and not "same" — fall through and rewrite,
+      // which is the outcome that leaves the repo correct either way.
+      onDisk = null;
+    }
+    if (onDisk === body) {
+      success(
+        `rules already in sync (content ${hash}, ${assembled.names.length} module${
+          assembled.names.length === 1 ? '' : 's'
+        }, fingerprint ${fingerprint}) — no rewrite`,
+      );
+      return {...common, status: 'unchanged'};
+    }
+  }
 
   // Atomic write (a session can start mid-write).
   mkdirSync(dirname(file), {recursive: true});
@@ -318,8 +354,9 @@ export function refreshCriticalRulesArtifact(
   verifyArtifactIsPrettierClean(projectRoot, file);
 
   success(
-    `wrote ${relative(projectRoot, file)}\n  commit ${shaShort}${dirtySuffix} · ` +
-      `${selection.modules.length} module${selection.modules.length === 1 ? '' : 's'} · content ${hash}`,
+    `wrote ${relative(projectRoot, file)}\n  prompts ${shaShort}${dirtySuffix} · ` +
+      `${assembled.names.length} module${assembled.names.length === 1 ? '' : 's'} · ` +
+      `modules ${fingerprint} · content ${hash}`,
   );
   return {...common, status: 'written'};
 }
@@ -346,7 +383,10 @@ export function refreshCriticalRulesArtifact(
  * Warn, don't fail: the file is already written, the sweep's own gate will go
  * red on it anyway, and this line is the explanation that gate cannot give.
  */
-function verifyArtifactIsPrettierClean(projectRoot: string, file: string): void {
+function verifyArtifactIsPrettierClean(
+  projectRoot: string,
+  file: string,
+): void {
   if (!prettierEnabled()) return;
   const binary = findLocalPrettier(dirname(file));
   if (binary == null) return; // no repo prettier ⇒ no repo prettier gate
@@ -365,91 +405,6 @@ function verifyArtifactIsPrettierClean(projectRoot: string, file: string): void 
         `generated stamp line; that is a bug in this tool, not in the repo.`,
     );
   }
-}
-
-// ---------------------------------------------------------------------------
-// Layer (b): enrollment
-// ---------------------------------------------------------------------------
-
-/**
- * Seed `componentConfig["critical-rules"].modules` with the default selection.
- *
- * Only writes when the block is absent — a repo whose selection has been tuned
- * by hand (s2t-guidelines opted in, a module dropped) must survive a re-run and
- * every future sweep untouched. That is the whole point of recording the
- * RESULT rather than re-deriving it.
- */
-export function stepCriticalRulesConfig(
-  projectRoot: string,
-  options: {promptsDir?: string} = {},
-): boolean {
-  const configPath = resolve(projectRoot, 'justin-sdk.config.json');
-  const config = readJson(configPath);
-  if (config == null) {
-    fail('justin-sdk.config.json missing or unparseable — run base-setup first');
-    return false;
-  }
-
-  const componentConfig = ((config.componentConfig as
-    | Record<string, unknown>
-    | undefined) ?? {}) as Record<string, unknown>;
-
-  if (componentConfig[CRITICAL_RULES_CONFIG_KEY] != null) {
-    const existing = readSelectedModules(projectRoot);
-    success(
-      `justin-sdk.config.json already selects modules for ${CRITICAL_RULES_CONFIG_KEY}` +
-        (existing.ok ? ` (${existing.modules.length})` : ''),
-    );
-    return true;
-  }
-
-  let described;
-  try {
-    described = describeIndexModules(projectRoot, {
-      forceUpdate: true,
-      promptsDir: options.promptsDir,
-    });
-  } catch (error) {
-    fail(
-      `could not read the rules index (${error instanceof Error ? error.message : String(error)})`,
-    );
-    return false;
-  }
-  if (!refreshIsVerified(described.sourceRefresh)) {
-    // Seeding from a stale index could record a module list that no longer
-    // matches the source — same refusal as the write path, same reason (D15).
-    fail(
-      `cannot refresh the prompts clone at ${described.sourceDir} ` +
-        `(refresh: ${described.sourceRefresh}) — not seeding a module selection from a possibly-stale index`,
-    );
-    return false;
-  }
-  for (const warning of described.warnings) warn(warning);
-
-  const modules = computeDefaultModules(described.modules);
-  if (modules.length === 0) {
-    fail(
-      `the rules index at ${described.sourceDir} yielded no modules — refusing to record an empty selection`,
-    );
-    return false;
-  }
-
-  componentConfig[CRITICAL_RULES_CONFIG_KEY] = {modules};
-  config.componentConfig = componentConfig;
-  writeJson(configPath, config);
-
-  const gated = described.modules
-    .filter((m) => m.includeIf.length > 0 && modules.includes(m.name))
-    .map((m) => m.name);
-  const excluded = described.modules
-    .filter((m) => !modules.includes(m.name))
-    .map((m) => m.name);
-  success(
-    `Added componentConfig.${CRITICAL_RULES_CONFIG_KEY} (${modules.length} modules)` +
-      (gated.length > 0 ? `\n  project-type modules detected: ${gated.join(', ')}` : '') +
-      (excluded.length > 0 ? `\n  not selected: ${excluded.join(', ')}` : ''),
-  );
-  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -573,15 +528,23 @@ export async function runCriticalRulesSetup(args: {
   force?: boolean;
   /** Read this prompts dir as-is instead of the managed clone (tests). */
   promptsDir?: string;
+  /**
+   * The remote the SDK pin tag is verified against, forwarded to base-setup.
+   * Tests point it at a local bare repo so the install is hermetic; production
+   * omits it and base-setup uses the real SDK_REPO_URL (dchjw.17 F7).
+   */
+  sdkRepoUrl?: string;
 }): Promise<number> {
   const {projectRoot, quiet} = args;
   setQuiet(quiet);
 
   stepHeader('0. base-setup (foundation layer)');
   const baseExit = await runBaseSetup({
-    extraComponents: ['critical-rules-setup'],
     projectRoot,
     quiet: true,
+    // dchjw.17 F7: hermetic when a caller supplies a remote; the real
+    // SDK_REPO_URL when nobody does.
+    ...(args.sdkRepoUrl == null ? {} : {sdkRepoUrl: args.sdkRepoUrl}),
   });
   if (baseExit !== 0) {
     fail('base-setup failed — cannot proceed with critical-rules-setup');
@@ -591,11 +554,10 @@ export async function runCriticalRulesSetup(args: {
   setQuiet(quiet);
   success('base-setup ready');
 
-  stepHeader('1. justin-sdk.config.json (module selection)');
-  if (!stepCriticalRulesConfig(projectRoot, {promptsDir: args.promptsDir}))
-    return 1;
+  // The ONE place this command mentions the retired include-list (dchjw.3).
+  warnRetiredModulesKey(projectRoot);
 
-  stepHeader('2. .claude/rules/justin-sdk/critical-rules.md (the artifact)');
+  stepHeader('1. .claude/rules/justin-sdk/critical-rules.md (the artifact)');
   const outcome = refreshCriticalRulesArtifact(projectRoot, {
     force: args.force,
     promptsDir: args.promptsDir,
@@ -607,14 +569,14 @@ export async function runCriticalRulesSetup(args: {
   // that refusal would cost this repo its rules entirely. Written second, the
   // worst case is the artifact landing without the exclusion: a DUPLICATE, which
   // is exactly today's behaviour and harmless, reported loudly either way.
-  stepHeader('3. .claude/settings.json (drop the user-level duplicate)');
+  stepHeader('2. .claude/settings.json (drop the user-level duplicate)');
   if (!stepUserLevelRulesExclude(projectRoot)) return 1;
 
   if (!isQuiet()) {
     console.log(
       `\n\x1b[32m\x1b[1mcritical-rules-setup ready\x1b[0m in ${basename(projectRoot)}.\n` +
         `The artifact is a GENERATED, COMMITTED file — commit it, and regenerate with \`${RULES_UPDATE_CMD}\`.\n` +
-        `Tune which modules it carries under componentConfig["${CRITICAL_RULES_CONFIG_KEY}"].modules.\n`,
+        `Which modules it carries is decided by the prompts rules registry and this project's type, every time it is regenerated — there is nothing to tune per repo.\n`,
     );
   }
 

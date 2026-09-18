@@ -16,7 +16,13 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync} from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from 'fs';
 import {join} from 'path';
 
 import {makeEnvHydrationChecks} from '../src/doctor';

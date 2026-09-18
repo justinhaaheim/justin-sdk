@@ -28,9 +28,10 @@ import {
   expandTarget,
   isPreset,
   PRESET_NAMES,
-  PRESETS,
   runAdd,
 } from '../src/add';
+import {corePreset} from '../src/component-registry';
+import {sdkRemoteWithOwnTag} from './git-fixtures';
 import {createProjectSandbox, type Sandbox} from './sandbox';
 
 // ---------------------------------------------------------------------------
@@ -88,11 +89,20 @@ function track(sandbox: Sandbox): Sandbox {
 }
 
 afterEach(() => {
+  cachedRemote = null;
   while (sandboxes.length > 0) {
     const sb = sandboxes.pop();
     sb?.cleanup();
   }
 });
+
+/** The local bare remote for THIS test, built once. See sdkRemoteWithOwnTag. */
+let cachedRemote: string | null = null;
+
+function sdkRemote(): string {
+  cachedRemote ??= sdkRemoteWithOwnTag(track);
+  return cachedRemote;
+}
 
 function initGitRepo(path: string): void {
   execSync('git init -q', {cwd: path});
@@ -116,108 +126,32 @@ function readComponents(projectRoot: string): string[] {
 // Preset definitions (pure — always run)
 // ---------------------------------------------------------------------------
 
-describe('add: preset definitions', () => {
-  test('exposes exactly the three presets', () => {
-    expect(new Set(PRESET_NAMES)).toEqual(new Set(['minimal', 'core', 'all']));
-  });
-
-  test('minimal = base-setup + beads', () => {
-    expect(PRESETS.minimal).toEqual(['base-setup', 'beads']);
-  });
-
-  test('core = code-quality + beads (no gh-actions/prompts/claude-md)', () => {
-    expect(PRESETS.core).toEqual([
-      'gitignore',
-      'prettier',
-      'tsconfig',
-      'eslint',
-      'husky',
-      'beads',
-    ]);
-    for (const excluded of ['gh-actions', 'prompts', 'claude-md']) {
-      expect(PRESETS.core).not.toContain(excluded);
-    }
-  });
-
-  test('all = every component except the opt-in-only ones', () => {
-    expect(new Set(PRESETS.all)).toEqual(
-      new Set(
-        COMPONENTS.filter(
-          (c) =>
-            c !== 'base-setup' &&
-            c !== 'eas' &&
-            c !== 'time-check' &&
-            c !== 'usage-check' &&
-            c !== 'thread-hooks' &&
-            c !== 'critical-rules',
-        ),
-      ),
-    );
-    // base-setup is implicit (every installer self-applies it).
-    expect(PRESETS.all).not.toContain('base-setup');
-    // time-check's hook runs on every prompt — never install it implicitly.
-    expect(PRESETS.all).not.toContain('time-check');
-    // usage-check's hooks run on every prompt AND after every tool batch.
-    expect(PRESETS.all).not.toContain('usage-check');
-    // thread-hooks' SessionStart hook writes to a SHARED Dolt database on every
-    // session start, so installing it everywhere makes every repo pay lock
-    // contention for a feature only some sessions use (home-base-p1uj.3).
-    expect(PRESETS.all).not.toContain('thread-hooks');
-    // critical-rules COMMITS rules into the repo, and four enrolled repos are
-    // public — enrolment is a per-repo decision, never a preset's (t6a0.21 D6).
-    expect(PRESETS.all).not.toContain('critical-rules');
-  });
-
-  test('all order mirrors init.ts dependency order', () => {
-    expect(PRESETS.all).toEqual([
-      'gitignore',
-      'prettier',
-      'tsconfig',
-      'eslint',
-      'husky',
-      'gh-actions',
-      'prompts',
-      'claude-md',
-      'beads',
-    ]);
-  });
-
-  test('core preserves the same relative order as all', () => {
-    expect(PRESETS.all.filter((c) => PRESETS.core.includes(c))).toEqual(
-      PRESETS.core,
-    );
-  });
-
-  test('every preset component is a real component', () => {
-    for (const list of Object.values(PRESETS)) {
-      for (const name of list) {
-        expect(COMPONENTS).toContain(name);
-      }
-    }
-  });
-});
-
 // ---------------------------------------------------------------------------
 // expandTarget / isPreset (pure — always run)
 // ---------------------------------------------------------------------------
 
 describe('add: expandTarget / isPreset', () => {
-  test('isPreset recognizes presets and rejects components', () => {
+  test('core is the only preset; a component is not one', () => {
+    expect(PRESET_NAMES).toEqual(['core']);
     expect(isPreset('core')).toBe(true);
-    expect(isPreset('all')).toBe(true);
-    expect(isPreset('minimal')).toBe(true);
     expect(isPreset('beads')).toBe(false);
-    expect(isPreset('nope')).toBe(false);
+    // The retired presets are not silently accepted as components either.
+    expect(isPreset('all')).toBe(false);
+    expect(isPreset('minimal')).toBe(false);
+    expect(ADD_TARGETS).not.toContain('all');
+    expect(ADD_TARGETS).not.toContain('minimal');
   });
 
   test('a single component expands to itself', () => {
-    expect(expandTarget('beads')).toEqual(['beads']);
-    expect(expandTarget('prettier')).toEqual(['prettier']);
+    const sb = track(createProjectSandbox());
+    expect(expandTarget('beads', sb.path)).toEqual(['beads']);
+    expect(expandTarget('prettier', sb.path)).toEqual(['prettier']);
   });
 
-  test('a preset expands to its component list', () => {
-    expect(expandTarget('minimal')).toEqual(['base-setup', 'beads']);
-    expect(expandTarget('all')).toEqual(PRESETS.all);
+  test('core expands to the computed core preset for THIS repo', () => {
+    const sb = track(createProjectSandbox());
+    expect(expandTarget('core', sb.path)).toEqual(corePreset(sb.path));
+    expect(expandTarget('core', sb.path)).not.toContain('base-setup');
   });
 
   test('ADD_TARGETS contains every component and every preset', () => {
@@ -235,17 +169,20 @@ describe('add: single component', () => {
     const sb = track(createProjectSandbox());
     initGitRepo(sb.path);
 
-    const exitCode = await runAdd('prettier', {
+    const exitCode = await runAdd(['prettier'], {
       commit: false,
       force: false,
       projectRoot: sb.path,
+      sdkRepoUrl: sdkRemote(),
     });
     expect(exitCode).toBe(0);
 
     expect(existsSync(join(sb.path, '.prettierrc.json'))).toBe(true);
     const components = readComponents(sb.path);
-    expect(components).toContain('base-setup');
     expect(components).toContain('prettier-setup');
+    // base-setup is IMPLICIT and is deliberately not written (F11): it is not a
+    // component anyone can choose or remove. `resolveComponents` puts it back.
+    expect(components).not.toContain('base-setup');
   });
 });
 
@@ -254,46 +191,25 @@ describe('add: single component', () => {
 // ---------------------------------------------------------------------------
 
 describe('add: preset install', () => {
-  test('add minimal registers base-setup + beads-setup', async () => {
+  test('add core registers every component core expands to, and nothing else', async () => {
     if (!canRunFullPipeline) return;
     const sb = track(createProjectSandbox());
     initGitRepo(sb.path);
 
-    const exitCode = await runAdd('minimal', {
+    const exitCode = await runAdd(['core'], {
       commit: false,
       force: false,
       projectRoot: sb.path,
+      sdkRepoUrl: sdkRemote(),
     });
     expect(exitCode).toBe(0);
 
     const components = readComponents(sb.path);
-    expect(components).toContain('base-setup');
-    expect(components).toContain('beads-setup');
-  });
-
-  test('add core registers the code-quality + beads set', async () => {
-    if (!canRunFullPipeline) return;
-    const sb = track(createProjectSandbox());
-    initGitRepo(sb.path);
-
-    const exitCode = await runAdd('core', {
-      commit: false,
-      force: false,
-      projectRoot: sb.path,
-    });
-    expect(exitCode).toBe(0);
-
-    const components = readComponents(sb.path);
-    for (const expected of PRESETS.core.map(toConfigName)) {
+    for (const expected of corePreset(sb.path).map(toConfigName)) {
       expect(components).toContain(expected);
     }
-    expect(components).toContain('base-setup');
-    // Things core deliberately omits must not be registered.
-    for (const omitted of [
-      'gh-actions-setup',
-      'prompts-setup',
-      'claude-md-setup',
-    ]) {
+    // The retired components must never be registered again.
+    for (const omitted of ['prompts-setup', 'claude-md-setup', 'base-setup']) {
       expect(components).not.toContain(omitted);
     }
   });

@@ -31,6 +31,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'fs';
 import {join, relative, resolve} from 'path';
@@ -41,13 +42,13 @@ import {
   refreshSucceeded,
 } from '../src/critical-rules-setup';
 import {runDoctor} from '../src/doctor';
-import {projectRulesFilePath} from '../src/plugin/lib/rules-file';
+import {projectRulesFilePath} from '../src/rules/rules-file';
 import {
   checkRulesDrift,
   isRulesDriftProblem,
   rulesDriftAdvice,
   type RulesDriftStatus,
-} from '../src/plugin/lib/rules-drift';
+} from '../src/rules/rules-drift';
 import {setQuiet} from '../src/setup-helpers';
 import {git} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -89,8 +90,16 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 const RULES_FILES: Record<string, string> = {
-  'src/rules/index.md': ['@./alpha.md', '@./omega.md'].join('\n\n'),
+  // rn-only sits in the index but is gated: a plain fixture resolves two
+  // modules, an Expo one resolves three. That difference is what the F3
+  // fingerprint arm needs, and it must be in the SHARED fixture so every other
+  // arm is running against an index that really can change shape.
+  'src/rules/index.md': ['@./alpha.md', '@./rn-only.md', '@./omega.md'].join(
+    '\n\n',
+  ),
   'src/rules/alpha.md': '# Alpha\n\nALPHA_RULE',
+  'src/rules/rn-only.md':
+    '---\nincludeIf: [isReactNative]\n---\n\n# React Native\n\nRN_ONLY_RULE',
   'src/rules/omega.md': '# Omega\n\nOMEGA_RULE',
 };
 
@@ -139,12 +148,25 @@ function projectFixture(
   options: {modules?: string[]; components?: string[]} = {},
 ): string {
   const sb = track(createSandbox());
+  // Complete enough to pass base-setup's own checks. `resolveComponents` always
+  // resolves base-setup in (it is implicit — every installer applies it), so a
+  // fixture that omitted CLAUDE.md or the scripts would fail doctor for reasons
+  // that have nothing to do with the rules artifact under test.
   const files: Record<string, string> = {
-    'package.json': `${JSON.stringify({name: 'fixture'}, null, 2)}\n`,
+    'CLAUDE.md': '# fixture\n',
+    '.gitignore': 'node_modules\ntmp/\n.claude/worktrees/\n',
+    'package.json': `${JSON.stringify(
+      {
+        name: 'fixture',
+        scripts: {doctor: 'true', 'setup-env': 'true', signal: 'true'},
+      },
+      null,
+      2,
+    )}\n`,
   };
   files['justin-sdk.config.json'] = `${JSON.stringify(
     {
-      components: options.components ?? ['base-setup', 'critical-rules-setup'],
+      components: options.components ?? ['critical-rules-setup'],
       ...(options.modules != null
         ? {
             componentConfig: {
@@ -164,24 +186,13 @@ function projectFixture(
 /** Write the artifact the way the real writer does, then commit it. */
 function writeArtifact(repo: string, promptsDir?: string): string {
   setQuiet(true);
-  const outcome = refreshCriticalRulesArtifact(repo, {now: NOW, promptsDir});
+  const outcome = refreshCriticalRulesArtifact(repo, {promptsDir});
   if (!refreshSucceeded(outcome)) {
     throw new Error(`fixture could not write the artifact: ${outcome.message}`);
   }
   git(repo, ['add', '-A']);
   git(repo, ['commit', '-qm', 'add rules artifact']);
   return outcome.file;
-}
-
-/** Rewrite just the module selection in an existing fixture repo. */
-function setModules(repo: string, modules: unknown): void {
-  const path = join(repo, 'justin-sdk.config.json');
-  const config = JSON.parse(readFileSync(path, 'utf-8')) as Record<
-    string,
-    unknown
-  >;
-  config.componentConfig = {[CRITICAL_RULES_CONFIG_KEY]: {modules}};
-  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
 }
 
 /**
@@ -230,29 +241,66 @@ function commitCount(repo: string): number {
 // Enrolment
 // ---------------------------------------------------------------------------
 
-describe('enrolment', () => {
-  test('a repo with no recorded selection is NOT-ENROLLED, never stale', () => {
+describe('enrolment (F2)', () => {
+  test('a repo with critical-rules-setup in components and NO modules key is ENROLLED', () => {
+    // THE F2 REGRESSION, in one test. Enrolment used to be keyed on the module
+    // include-list, so the moment dchjw.10 sweeps those blocks away every repo
+    // in the fleet would have reported `not-enrolled` — and `not-enrolled` is
+    // silent by design. Twelve repos would have stopped being checked at all,
+    // reporting nothing, which reads exactly like "everything is fine".
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture(); // no componentConfig block
+    const repo = projectFixture(); // no componentConfig block at all
+
+    const result = checkRulesDrift(repo, {promptsDir: dir});
+    expect(result.status).toBe('missing');
+    expect(isRulesDriftProblem(result.status)).toBe(true);
+
+    // …and once written, in-sync. Never `not-enrolled` in either state.
+    writeArtifact(repo, dir);
+    expect(checkRulesDrift(repo, {promptsDir: dir}).status).toBe('in-sync');
+  });
+
+  test('NEGATIVE CONTROL: a repo without the component and without an artifact IS not-enrolled', () => {
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture({components: ['base-setup']});
 
     const result = checkRulesDrift(repo, {promptsDir: dir});
     expect(result.status).toBe('not-enrolled');
     expect(isRulesDriftProblem(result.status)).toBe(false);
     expect(result.message).toContain('add critical-rules');
-
-    // NEGATIVE CONTROL: the same repo, with a selection, is judged.
-    const enrolled = projectFixture({modules: ['alpha', 'omega']});
-    expect(checkRulesDrift(enrolled, {promptsDir: dir}).status).toBe('missing');
   });
 
-  test('a selection that is not a list of names is CANNOT-CHECK, not empty', () => {
+  test('a repo carrying the ARTIFACT is judged even if the component is unlisted', () => {
+    // A committed artifact is loaded into every session in that repo. Declining
+    // to check it because a config key is missing would leave the file that IS
+    // steering the model unexamined.
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha']});
-    setModules(repo, 'alpha'); // a string, not an array
+    const repo = projectFixture({components: ['base-setup']});
+    writeArtifact(repo, dir);
+
+    expect(checkRulesDrift(repo, {promptsDir: dir}).status).toBe('in-sync');
+  });
+
+  test('an UNPARSEABLE config is CANNOT-CHECK, never not-enrolled', () => {
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture();
+    writeFileSync(join(repo, 'justin-sdk.config.json'), '{ not json');
 
     const result = checkRulesDrift(repo, {promptsDir: dir});
     expect(result.status).toBe('cannot-check');
-    expect(result.message).toContain('modules');
+    expect(isRulesDriftProblem(result.status)).toBe(true);
+  });
+
+  test('a config still carrying `modules` is judged on the registry, not on that list', () => {
+    const {dir} = gitPromptsFixture();
+    // A list naming ONE module, in a fixture index with several.
+    const repo = projectFixture({modules: ['alpha']});
+    writeArtifact(repo, dir);
+
+    const result = checkRulesDrift(repo, {promptsDir: dir});
+    expect(result.status).toBe('in-sync');
+    // The count is what the registry resolves, not what the stale list says.
+    expect(result.moduleCount).toBeGreaterThan(1);
   });
 });
 
@@ -263,12 +311,14 @@ describe('enrolment', () => {
 describe('the artifact against the source', () => {
   test('enrolled with no artifact is MISSING, naming the path and rules-update', () => {
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
 
     const result = checkRulesDrift(repo, {promptsDir: dir});
     expect(result.status).toBe('missing');
     expect(result.message).toContain(ARTIFACT_REL);
-    expect(result.moduleCount).toBe(2);
+    // No count: nothing was assembled, so "how many modules" was not measured.
+    // Reporting 0 here would be a manufactured number (critical rule 6).
+    expect(result.moduleCount).toBeNull();
     expect(rulesDriftAdvice(result.status)).toContain('rules-update');
 
     // NEGATIVE CONTROL: write it, and the same repo is in sync.
@@ -278,7 +328,7 @@ describe('the artifact against the source', () => {
 
   test('a freshly written artifact is IN-SYNC via the sha fast path', () => {
     const {dir, sha} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     writeArtifact(repo, dir);
 
     const result = checkRulesDrift(repo, {promptsDir: dir});
@@ -290,7 +340,7 @@ describe('the artifact against the source', () => {
 
   test('a rules change upstream is STALE, and the advice names rules-diff BEFORE rules-update', () => {
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     writeArtifact(repo, dir);
     expect(checkRulesDrift(repo, {promptsDir: dir}).status).toBe('in-sync');
 
@@ -309,7 +359,7 @@ describe('the artifact against the source', () => {
 
   test('a prompts commit that changes NO rule content does not nag (the false-nag guard)', () => {
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     writeArtifact(repo, dir);
 
     editPromptsUnrelated(dir);
@@ -333,7 +383,7 @@ describe('the artifact against the source', () => {
 describe('locally modified', () => {
   test('a stamp-preserving hand edit is LOCALLY-MODIFIED even though the sha matches', () => {
     const {dir, sha} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     const file = writeArtifact(repo, dir);
     const original = readFileSync(file, 'utf-8');
 
@@ -359,7 +409,7 @@ describe('locally modified', () => {
 
   test('an unstamped file at the artifact path is LOCALLY-MODIFIED, not in sync', () => {
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     const file = projectRulesFilePath(repo);
     mkdirSync(join(file, '..'), {recursive: true});
     writeFileSync(file, '# My own rules\n\nhand written\n');
@@ -380,7 +430,7 @@ describe('cannot check', () => {
     // Write a real, correct artifact from an override source FIRST, so the only
     // thing wrong in this test is the source refresh.
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     writeArtifact(repo, dir);
 
     // Now switch to a managed clone with real content and NO working origin:
@@ -396,9 +446,43 @@ describe('cannot check', () => {
     expect(rulesDriftAdvice('cannot-check')).toMatch(/unknown/i);
   });
 
+  /**
+   * dchjw.15. The WRITER refuses to write an artifact when the index resolves
+   * to no modules for this project; the reader used to call the same situation
+   * `stale` and advise `rules-update` — which then refused for the writer's
+   * reason. One instruction, impossible to carry out, on every session start.
+   */
+  test('an index that resolves to ZERO modules is cannot-check, not stale', () => {
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture();
+    writeArtifact(repo, dir);
+
+    // Every module now gated on a predicate this (non-Expo) fixture fails, so
+    // the resolution is empty while the source is perfectly readable and fresh.
+    writeFileSync(
+      join(dir, 'src/rules/alpha.md'),
+      '---\nincludeIf: [isReactNative]\n---\n\n# Alpha\n\nALPHA_RULE',
+    );
+    writeFileSync(
+      join(dir, 'src/rules/omega.md'),
+      '---\nincludeIf: [isReactNative]\n---\n\n# Omega\n\nOMEGA_RULE',
+    );
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'gate every module']);
+
+    const result = checkRulesDrift(repo);
+    expect(result.status).toBe('cannot-check');
+    expect(result.moduleCount).toBe(0);
+    expect(result.message).toContain('NO modules');
+    // NEGATIVE CONTROL for the retired behaviour: `stale` is what this
+    // returned, and its advice is the command that cannot work here.
+    expect(result.status).not.toBe('stale');
+    expect(rulesDriftAdvice(result.status)).not.toMatch(/to commit the update/);
+  });
+
   test('NEGATIVE CONTROL: the same sandboxed clone WITH a working origin answers', () => {
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     writeArtifact(repo, dir);
 
     const {cloneDir, sandbox} = sandboxedManagedClone();
@@ -416,7 +500,7 @@ describe('cannot check', () => {
     // is "we checked recently", not "we could not check". Same broken-origin
     // clone as the cannot-check arm — only the marker differs.
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     writeArtifact(repo, dir);
 
     const {cloneDir, sandbox} = sandboxedManagedClone();
@@ -430,7 +514,7 @@ describe('cannot check', () => {
 
   test('no prompts checkout at all is CANNOT-CHECK, not missing rules', () => {
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     writeArtifact(repo, dir);
 
     const {sandbox} = sandboxedManagedClone();
@@ -442,17 +526,88 @@ describe('cannot check', () => {
     expect(result.message).not.toMatch(/in sync/i);
   });
 
-  test('a module name that does not exist upstream is CANNOT-CHECK, naming it', () => {
+  test('an index that names a file which is not there is CANNOT-CHECK, not in-sync', () => {
+    // The nearest surviving shape of the retired "a typo in the module list"
+    // arm: the source itself is broken. It must never certify the artifact.
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     writeArtifact(repo, dir);
-    // The artifact still matches its own stamp; only the selection is broken.
-    setModules(repo, ['alpha', 'no-such-module']);
+    // Remove the index entirely — assembly cannot even start.
+    rmSync(join(dir, 'src', 'rules', 'index.md'));
 
     const result = checkRulesDrift(repo, {promptsDir: dir});
     expect(result.status).toBe('cannot-check');
-    expect(result.message).toContain('no-such-module');
     expect(result.message).not.toMatch(/in sync/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The module set is resolved fresh — F3's fingerprint gate
+// ---------------------------------------------------------------------------
+
+describe('a project whose own module set changed (F3)', () => {
+  test('gaining `expo` after the artifact was written is STALE, prompts sha unchanged', () => {
+    // THE F3 REGRESSION. The prompts source does not move at all here, so the
+    // sha fast path matches and would have returned a confident `in-sync` — to
+    // a session that is missing every React Native rule. Only the module
+    // fingerprint in the header can tell these two states apart.
+    const {dir, sha} = gitPromptsFixture();
+    const repo = projectFixture();
+    writeArtifact(repo, dir);
+    expect(checkRulesDrift(repo, {promptsDir: dir}).status).toBe('in-sync');
+
+    writeFileSync(
+      join(repo, 'package.json'),
+      `${JSON.stringify({dependencies: {expo: '*'}, name: 'fixture'}, null, 2)}\n`,
+    );
+
+    const result = checkRulesDrift(repo, {promptsDir: dir});
+    expect(result.status).toBe('stale');
+    // The shas are IDENTICAL — proof the fingerprint, not the sha, decided it.
+    expect(result.artifactSha).toBe(sha.slice(0, 12));
+    expect(result.sourceSha).toBe(sha.slice(0, 12));
+    expect(result.message).toMatch(/DIFFERENT set/);
+
+    // …and rules-update puts it back in sync.
+    writeArtifact(repo, dir);
+    expect(checkRulesDrift(repo, {promptsDir: dir}).status).toBe('in-sync');
+  });
+
+  test('a module ADDED to the registry is STALE for an already-enrolled repo', () => {
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture();
+    writeArtifact(repo, dir);
+    expect(checkRulesDrift(repo, {promptsDir: dir}).status).toBe('in-sync');
+
+    writeFileSync(
+      join(dir, 'src', 'rules', 'newcomer.md'),
+      '# Newcomer\n\nNEWCOMER_RULE',
+    );
+    writeFileSync(
+      join(dir, 'src', 'rules', 'index.md'),
+      `${readFileSync(join(dir, 'src', 'rules', 'index.md'), 'utf-8')}\n\n@./newcomer.md`,
+    );
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-qm', 'add newcomer module']);
+
+    expect(checkRulesDrift(repo, {promptsDir: dir}).status).toBe('stale');
+    writeArtifact(repo, dir);
+    expect(checkRulesDrift(repo, {promptsDir: dir}).status).toBe('in-sync');
+  });
+
+  test('NEGATIVE CONTROL: a dependency change that gates in NO module stays in-sync', () => {
+    // The false-nag guard for the project half: adding an unrelated dependency
+    // must not tell twelve repos to regenerate.
+    const {dir} = gitPromptsFixture();
+    const repo = projectFixture();
+    writeArtifact(repo, dir);
+
+    writeFileSync(
+      join(repo, 'package.json'),
+      `${JSON.stringify({dependencies: {lodash: '*'}, name: 'fixture'}, null, 2)}\n`,
+    );
+
+    expect(checkRulesDrift(repo, {promptsDir: dir}).status).toBe('in-sync');
   });
 });
 
@@ -494,14 +649,15 @@ describe('contract', () => {
 
   test('advice is LOCAL-FIRST inside an enrolled repo, github: only to enroll', () => {
     // home-base-r47v F4. Every problem state except not-enrolled is reachable
-    // ONLY in a repo that already pins the SDK, so the local alias resolves (fast,
-    // no network) — and a github: spec would be worse than slow here, because bunx
-    // caches those on the spec STRING and can serve the first commit it ever
-    // fetched. A staleness notice must not be answered by a stale binary.
+    // ONLY in a repo that already pins the SDK, so `bun run` resolves it out of
+    // node_modules (fast, no network, no registry fallthrough) — and a github:
+    // spec would be worse than slow here, because bunx caches those on the spec
+    // STRING and can serve the first commit it ever fetched. A staleness notice
+    // must not be answered by a stale binary.
     for (const status of ALL) {
       const advice = rulesDriftAdvice(status);
       if (advice == null || status === 'not-enrolled') continue;
-      expect(advice).toContain('bunx @justinhaaheim/justin-sdk');
+      expect(advice).toContain('bun run justin-sdk');
       expect(advice).not.toContain('github:');
     }
     // The one exception, and why: an unenrolled repo has no pin to resolve.
@@ -512,7 +668,7 @@ describe('contract', () => {
 
   test('checking a stale repo writes nothing inside it', () => {
     const {dir} = gitPromptsFixture();
-    const repo = projectFixture({modules: ['alpha', 'omega']});
+    const repo = projectFixture();
     writeArtifact(repo, dir);
     editPromptsRules(dir);
 
@@ -552,21 +708,21 @@ describe('doctor RULES_ARTIFACT check', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
-      modules: ['alpha', 'omega'],
     });
     writeArtifact(repo, dir);
 
     const run = doctor(repo);
     expect(run.status).toBe(0);
-    expect(run.out).toMatch(/All 1 checks passed/);
+    // --quiet prints nothing per-check when everything passes, and in
+    // particular says nothing about the rules.
     expect(run.out).not.toContain('RULES_ARTIFACT');
+    expect(run.out).not.toContain('RULES_MODULES_LEGACY');
   });
 
   test('stale: warns, names both commands, and does NOT fail the run', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
-      modules: ['alpha', 'omega'],
     });
     writeArtifact(repo, dir);
     editPromptsRules(dir);
@@ -576,7 +732,7 @@ describe('doctor RULES_ARTIFACT check', () => {
     expect(run.out).toContain('stale:');
     expect(run.out).toContain('rules-diff');
     expect(run.out).toContain('rules-update');
-    expect(run.out).toMatch(/1 warn/);
+    expect(run.out).toMatch(/⚠.*RULES_ARTIFACT/);
     // Stale rules nag; they do not break the environment. doctor runs at every
     // session start, so a non-zero here would redden unrelated work.
     expect(run.status).toBe(0);
@@ -589,7 +745,6 @@ describe('doctor RULES_ARTIFACT check', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({
       components: ['base-setup'],
-      modules: ['alpha', 'omega'],
     });
     writeArtifact(repo, dir);
     editPromptsRules(dir);
@@ -602,7 +757,6 @@ describe('doctor RULES_ARTIFACT check', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
-      modules: ['alpha', 'omega'],
     });
 
     const run = doctor(repo);
@@ -615,7 +769,6 @@ describe('doctor RULES_ARTIFACT check', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
-      modules: ['alpha', 'omega'],
     });
     const file = writeArtifact(repo, dir);
     writeFileSync(file, `${readFileSync(file, 'utf-8')}\nHAND EDITED\n`);
@@ -629,7 +782,6 @@ describe('doctor RULES_ARTIFACT check', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
-      modules: ['alpha', 'omega'],
     });
     writeArtifact(repo, dir);
     const {cloneDir} = sandboxedManagedClone();
@@ -637,15 +789,20 @@ describe('doctor RULES_ARTIFACT check', () => {
 
     const run = doctor(repo);
     expect(run.out).toContain('cannot-check:');
-    expect(run.out).toMatch(/1 warn/);
-    expect(run.out).not.toMatch(/All 1 checks passed/);
+    // Assert the RULES_ARTIFACT line itself carries the warn marker, rather
+    // than counting warns across the whole run: doctor's check set is not
+    // fixed (base-setup's checks are implicit, and USER_LEVEL_SESSION_START
+    // warns on any machine without the user-level hook), so a bare `1 warn`
+    // measured whether OTHER checks had warned too.
+    expect(run.out).toMatch(/⚠.*RULES_ARTIFACT/);
+    expect(run.out).toMatch(/\d+ warn/);
+    expect(run.out).not.toMatch(/All \d+ checks passed/);
   });
 
   test('doctor never writes in the repo it is checking', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
-      modules: ['alpha', 'omega'],
     });
     writeArtifact(repo, dir);
     editPromptsRules(dir);
@@ -660,7 +817,6 @@ describe('doctor RULES_ARTIFACT check', () => {
     expect(statusLines(repo)).toBe(status);
     expect(commitCount(repo)).toBe(commits);
   });
-
 });
 
 // ---------------------------------------------------------------------------
@@ -698,7 +854,6 @@ describe('doctor --fix --yes writes the artifact without committing it', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
-      modules: ['alpha', 'omega'],
     });
     const commits = commitCount(repo);
     const file = projectRulesFilePath(repo);
@@ -720,7 +875,6 @@ describe('doctor --fix --yes writes the artifact without committing it', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
-      modules: ['alpha', 'omega'],
     });
     const file = writeArtifact(repo, dir);
     editPromptsRules(dir);
@@ -742,7 +896,6 @@ describe('doctor --fix --yes writes the artifact without committing it', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
-      modules: ['alpha', 'omega'],
     });
     const file = writeArtifact(repo, dir);
     writeFileSync(file, `${readFileSync(file, 'utf-8')}\nHAND EDITED\n`);
@@ -761,7 +914,6 @@ describe('doctor --fix --yes writes the artifact without committing it', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
-      modules: ['alpha', 'omega'],
     });
     const file = writeArtifact(repo, dir);
     const artifact = readFileSync(file, 'utf-8');
@@ -782,7 +934,6 @@ describe('doctor --fix --yes writes the artifact without committing it', () => {
     const {dir} = gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
-      modules: ['alpha', 'omega'],
     });
     const commits = commitCount(repo);
     // cwd here is the SDK checkout the test runs from — deliberately NOT the

@@ -209,9 +209,9 @@ describe('the old names fail loudly instead of redirecting', () => {
     expect(legacy.err).toContain(ACK_FLAG);
     // The claim that matters most: it did not do the thing. `landed` is a
     // proven-safe branch, so an alias would have archived it right here.
-    expect(gitStatus(repo, ['rev-parse', '--verify', '--quiet', 'landed'])).toBe(
-      0,
-    );
+    expect(
+      gitStatus(repo, ['rev-parse', '--verify', '--quiet', 'landed']),
+    ).toBe(0);
     expect(
       gitStatus(repo, ['rev-parse', '--verify', '--quiet', 'archive/landed']),
     ).not.toBe(0);
@@ -281,9 +281,9 @@ describe('apply-experimental requires the risk acknowledgement to execute', () =
     expect(refused.err).toContain(`refusing to execute without ${ACK_FLAG}`);
     // Says what to do instead, not just what it would not do.
     expect(refused.err).toContain('plan-experimental --markdown');
-    expect(gitStatus(repo, ['rev-parse', '--verify', '--quiet', 'landed'])).toBe(
-      0,
-    );
+    expect(
+      gitStatus(repo, ['rev-parse', '--verify', '--quiet', 'landed']),
+    ).toBe(0);
     expect(
       gitStatus(repo, ['rev-parse', '--verify', '--quiet', 'archive/landed']),
     ).not.toBe(0);
@@ -332,9 +332,9 @@ describe('apply-experimental requires the risk acknowledgement to execute', () =
     expect(preview.err).toContain('# Cleanup plan (dry run)');
     expect(preview.err).toContain('refusing to act without --yes');
     expect(preview.err).not.toContain('refusing to execute without');
-    expect(gitStatus(repo, ['rev-parse', '--verify', '--quiet', 'landed'])).toBe(
-      0,
-    );
+    expect(
+      gitStatus(repo, ['rev-parse', '--verify', '--quiet', 'landed']),
+    ).toBe(0);
   });
 });
 

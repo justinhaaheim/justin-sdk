@@ -1,21 +1,19 @@
 /**
  * Tests for the critical-rules component — the COMMITTED per-repo rules
- * artifact (home-base-we85, t6a0.21 D12–D15).
+ * artifact (home-base-we85, t6a0.21 D13–D15, epic home-base-dchjw D2).
  *
  * FOUR CONTRACTS ARE UNDER TEST, and each one has a failure mode that is SILENT
  * in production, which is why the negative controls here matter more than the
  * positive assertions:
  *
- *  1. OPT-IN IS OPT-IN (D12). A module that is not in the recorded list must be
- *     ABSENT from the artifact — asserted with a marker string unique to that
- *     module ('Dakota', from s2t-guidelines), with the opposite arm proving the
- *     marker DOES appear once the module is selected. Without the second arm,
- *     "absent" would also pass for an artifact that was never written.
- *  2. PREDICATES NEVER RUN AT ASSEMBLY (D12). They run once, at enrollment, and
- *     the RESULT is recorded. So a selected module is emitted even when its own
- *     includeIf would say no — that is what structurally kills the t6a0.20
- *     class, where a predicate the running SDK didn't know silently deleted a
- *     module from delivery.
+ *  1. THE REGISTRY DECIDES, EVERY TIME (dchjw D2). A module added to the index
+ *     reaches an already-enrolled repo; a repo that gains `expo` picks up the
+ *     RN rules without the prompts source moving at all; a `modules` list left
+ *     in a config changes nothing. Each arm carries the opposite arm, because
+ *     "the module is absent" would also pass for an artifact never written.
+ *  2. NO MODULE NAME IS HARDCODED (dchjw.3). The retired DEFAULT_SEED_EXCLUDED
+ *     kept s2t-guidelines out of every repo from inside the SDK; it ships like
+ *     any other universal module now, and only the registry may decide.
  *  3. THE REFRESH LAYER TOUCHES ONE PATH (Dispatch-B addendum). `rules-update`
  *     commits only .claude/rules/justin-sdk/, so the layer it calls must not
  *     rewrite config or the SDK pin. Asserted git-status-shaped, with unrelated
@@ -45,16 +43,17 @@ import {join} from 'path';
 import {
   addUserLevelRulesExclude,
   CLAUDE_MD_EXCLUDES_KEY,
-  computeDefaultModules,
+  CRITICAL_RULES_COMPONENT,
   CRITICAL_RULES_CONFIG_KEY,
-  readSelectedModules,
+  hasRetiredModulesKey,
+  legacyModulesWarning,
+  readEnrollment,
   refreshCriticalRulesArtifact,
   refreshSucceeded,
   runCriticalRulesSetup,
-  stepCriticalRulesConfig,
   userLevelRulesExclude,
 } from '../src/critical-rules-setup';
-import {assembleSelected, describeIndexModules} from '../src/plugin/lib/prime';
+import {configNameFor} from '../src/component-registry';
 import {
   contentHash,
   deployedIsDirty,
@@ -63,9 +62,9 @@ import {
   readDeployedStamp,
   rulesFilePath,
   STAMP_PREFIX,
-} from '../src/plugin/lib/rules-file';
+} from '../src/rules/rules-file';
 import {rulesDiff} from '../src/rules-diff';
-import {checkRulesDrift} from '../src/plugin/lib/rules-drift';
+import {checkRulesDrift} from '../src/rules/rules-drift';
 import {readJson, setQuiet, writeJson} from '../src/setup-helpers';
 import {git} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -103,13 +102,10 @@ afterEach(() => {
 // Fixtures
 // ---------------------------------------------------------------------------
 
-/** The pinned stamp date, so artifact bytes are comparable across runs. */
-const NOW = '2026-08-17';
-
 /**
- * The rules-index shape that matters: universal modules, one excluded-by-default
- * universal module carrying a unique marker, and project-type-gated modules
- * sitting in the MIDDLE of the index (so an order bug is visible).
+ * The rules-index shape that matters: universal modules, one carrying a unique
+ * marker, and project-type-gated modules sitting in the MIDDLE of the index (so
+ * an order bug is visible).
  */
 const RULES_FILES: Record<string, string> = {
   'src/rules/index.md': [
@@ -121,8 +117,8 @@ const RULES_FILES: Record<string, string> = {
   ].join('\n\n'),
   'src/rules/alpha.md': '# Alpha\n\nALPHA_RULE',
   // 'Dakota' is the marker unique to s2t-guidelines in the real prompts repo —
-  // the wake word — and this module is excluded from the default seed there for
-  // the same reason it is here (four enrolled repos are public).
+  // the wake word. It ships to every repo (Justin, 2026-09-18); the SDK used to
+  // hold a hardcoded exclusion for exactly this module, and no longer may.
   'src/rules/s2t-guidelines.md': '# Speech to text\n\nThe Dakota wake word.',
   'src/rules/beads-only.md':
     '---\nincludeIf: [isBeadsRust]\n---\n\n# Beads\n\nBEADS_ONLY_RULE',
@@ -171,11 +167,14 @@ function initRepoAt(root: string, files: Record<string, string>): string {
 }
 
 interface ProjectOptions {
-  /** package.json dependencies — drives isReact/isReactNative at seed time. */
+  /** package.json dependencies — drives isReact/isReactNative at every refresh. */
   deps?: Record<string, string>;
   /** Write a beads_rust .beads/metadata.json — drives isBeadsRust. */
   beads?: boolean;
-  /** Pre-record a module selection (skips the seeding step). */
+  /**
+   * Write the RETIRED `componentConfig["critical-rules"].modules` block, as the
+   * fleet's configs still carry it. Nothing may honour it.
+   */
   modules?: string[];
   /** Omit justin-sdk.config.json entirely. */
   noConfig?: boolean;
@@ -242,157 +241,272 @@ function readArtifact(projectRoot: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// assembleSelected — explicit selection, index order, loud on typos (D14)
+// The registry decides, at EVERY refresh (epic home-base-dchjw D2)
+//
+// These are the tests the deleted design could not have passed. Under the
+// retired per-repo include-list, every one of them would have gone the other
+// way SILENTLY: a new registry module never reaching an enrolled repo, a repo
+// that became an Expo app never picking up the RN rules, and rules-drift
+// certifying both as in-sync. Each arm therefore carries its negative control,
+// so it cannot pass because the fixture was inert.
 // ---------------------------------------------------------------------------
 
-describe('assembleSelected', () => {
-  test('emits only the selected modules, in INDEX order regardless of argument order', () => {
+describe('assembly resolves the module set from the registry + predicates', () => {
+  test('a module ADDED to the index reaches an already-enrolled repo; removing it takes it away', () => {
+    setQuiet(true);
+    // The repo is enrolled and its artifact already written, from an index that
+    // does not mention `newcomer`.
     const dir = promptsFixture();
-    // Deliberately reversed: a hand-edited config must not be able to reshuffle
-    // the document (the numbering would then mean something different per repo).
-    const {markdown, names} = assembleSelected(['omega', 'alpha'], {
-      promptsDir: dir,
-    });
+    const root = projectFixture();
+    const first = refreshCriticalRulesArtifact(root, {promptsDir: dir});
+    if (!refreshSucceeded(first)) throw new Error(first.message);
+    expect(readArtifact(root)).not.toContain('NEWCOMER_RULE');
 
-    expect(names).toEqual(['alpha', 'omega']);
+    // Now the registry gains a module. Nothing about the repo changes.
+    writeFileSync(
+      join(dir, 'src/rules/newcomer.md'),
+      '# Newcomer\n\nNEWCOMER_RULE',
+    );
+    writeFileSync(
+      join(dir, 'src/rules/index.md'),
+      ['@./alpha.md', '@./newcomer.md', '@./omega.md'].join('\n\n'),
+    );
+    const second = refreshCriticalRulesArtifact(root, {promptsDir: dir});
+    if (!refreshSucceeded(second)) throw new Error(second.message);
+    expect(second.status).toBe('written');
+    expect(second.modules).toEqual(['alpha', 'newcomer', 'omega']);
+    expect(readArtifact(root)).toContain('NEWCOMER_RULE');
+
+    // NEGATIVE CONTROL: take it back out of the index and it leaves the repo.
+    writeFileSync(
+      join(dir, 'src/rules/index.md'),
+      ['@./alpha.md', '@./omega.md'].join('\n\n'),
+    );
+    const third = refreshCriticalRulesArtifact(root, {promptsDir: dir});
+    if (!refreshSucceeded(third)) throw new Error(third.message);
+    expect(third.modules).toEqual(['alpha', 'omega']);
+    expect(readArtifact(root)).not.toContain('NEWCOMER_RULE');
+  });
+
+  test('a repo that gains `expo` AFTER enrollment picks up the RN rules on the next refresh', () => {
+    setQuiet(true);
+    const dir = promptsFixture();
+    // Enrolled as a plain node project: no expo, so no RN module.
+    const root = projectFixture();
+    const before = refreshCriticalRulesArtifact(root, {promptsDir: dir});
+    if (!refreshSucceeded(before)) throw new Error(before.message);
+    expect(before.modules).not.toContain('rn-only');
+    expect(readArtifact(root)).not.toContain('RN_ONLY_RULE');
+
+    // The project becomes an Expo app. The prompts source does not move at all.
+    writeFileSync(
+      join(root, 'package.json'),
+      JSON.stringify({dependencies: {expo: '*'}, name: 'fixture'}, null, 2) +
+        '\n',
+    );
+    const after = refreshCriticalRulesArtifact(root, {promptsDir: dir});
+    if (!refreshSucceeded(after)) throw new Error(after.message);
+    expect(after.modules).toContain('rn-only');
+    expect(readArtifact(root)).toContain('RN_ONLY_RULE');
+    // The module set changed, so the header's fingerprint must have moved —
+    // that is what makes rules-drift report this as stale (F3).
+    expect(after.moduleFingerprint).not.toBe(before.moduleFingerprint);
+  });
+
+  test('predicates gate at every refresh: a beads repo gets the beads module, a plain one does not', () => {
+    setQuiet(true);
+    const dir = promptsFixture();
+    const beads = projectFixture({beads: true});
+    const plain = projectFixture();
+
+    const withBeads = refreshCriticalRulesArtifact(beads, {promptsDir: dir});
+    const without = refreshCriticalRulesArtifact(plain, {promptsDir: dir});
+    if (!refreshSucceeded(withBeads) || !refreshSucceeded(without)) {
+      throw new Error('unreachable');
+    }
+    expect(withBeads.modules).toContain('beads-only');
+    expect(without.modules).not.toContain('beads-only');
+  });
+
+  test('NO module name is hardcoded: s2t-guidelines ships like any other universal module', () => {
+    // The retired DEFAULT_SEED_EXCLUDED kept exactly this module out of every
+    // repo from inside the SDK. If a hardcoded exclusion ever comes back, this
+    // fails — the registry is the only thing allowed to decide.
+    setQuiet(true);
+    const dir = promptsFixture();
+    const root = projectFixture();
+    const outcome = refreshCriticalRulesArtifact(root, {promptsDir: dir});
+    if (!refreshSucceeded(outcome)) throw new Error(outcome.message);
+    expect(outcome.modules).toContain('s2t-guidelines');
+    expect(readArtifact(root)).toContain('Dakota');
+  });
+
+  test('index order is the document order, whatever the config says', () => {
+    setQuiet(true);
+    const dir = promptsFixture();
+    const root = projectFixture({modules: ['omega', 'alpha']});
+    const outcome = refreshCriticalRulesArtifact(root, {promptsDir: dir});
+    if (!refreshSucceeded(outcome)) throw new Error(outcome.message);
+    const markdown = readArtifact(root);
     expect(markdown.indexOf('ALPHA_RULE')).toBeLessThan(
       markdown.indexOf('OMEGA_RULE'),
     );
-    expect(markdown).not.toContain('Dakota');
-    expect(markdown).not.toContain('RN_ONLY_RULE');
-    // Numbering restarts from the selection, and the title stays unnumbered.
-    expect(markdown).toContain('# Critical Rules');
     expect(markdown).toContain('# 1. Alpha');
-    expect(markdown).toContain('# 2. Omega');
   });
 
-  test('a module name absent from index.md is a LOUD error naming it and the alternatives', () => {
-    const dir = promptsFixture();
-    expect(() =>
-      assembleSelected(['alpha', 'no-such-module'], {promptsDir: dir}),
-    ).toThrow(/no-such-module/);
-    // The error must also say what IS available, or a typo is a guessing game.
-    expect(() =>
-      assembleSelected(['no-such-module'], {promptsDir: dir}),
-    ).toThrow(/omega/);
-  });
-
-  test('includeIf is IGNORED: a gated module selected in a project it does not match is still emitted', () => {
-    // The whole t6a0.20 defence. assembleSelected takes no project at all, so
-    // there is nothing for a predicate to be evaluated against.
-    const dir = promptsFixture();
-    const {markdown, names} = assembleSelected(['rn-only'], {promptsDir: dir});
-    expect(names).toEqual(['rn-only']);
-    expect(markdown).toContain('RN_ONLY_RULE');
-  });
-
-  test('an unknown predicate name cannot delete a selected module', () => {
-    // Same shape as the t6a0.20 regression: the frontmatter names a predicate
-    // this SDK has never heard of. Under the old path that silently excluded the
-    // module; under selection it is emitted, because selection is the truth.
+  test('an unknown predicate excludes the module LOUDLY, never silently', () => {
+    // The t6a0.20 failure class. The retired design froze the predicate results
+    // to dodge it; the defence now is that the exclusion is WARNED about and
+    // moves the fingerprint, so it shows up in the committed diff.
+    setQuiet(true);
     const dir = promptsFixture({
       'src/rules/index.md': ['@./alpha.md', '@./future.md'].join('\n\n'),
       'src/rules/future.md':
         '---\nincludeIf: [isSomePredicateFromTheFuture]\n---\n\n# Future\n\nFUTURE_RULE',
     });
-    const {markdown} = assembleSelected(['alpha', 'future'], {promptsDir: dir});
-    expect(markdown).toContain('FUTURE_RULE');
+    const root = projectFixture();
+    const outcome = refreshCriticalRulesArtifact(root, {promptsDir: dir});
+    if (!refreshSucceeded(outcome)) throw new Error(outcome.message);
+    expect(outcome.modules).toEqual(['alpha']);
+    expect(readArtifact(root)).not.toContain('FUTURE_RULE');
+    expect(outcome.warnings.join('\n')).toContain(
+      'isSomePredicateFromTheFuture',
+    );
   });
 
-  test('a NESTED @-reference with includeIf is inlined, and warned about', () => {
-    const dir = promptsFixture({
-      'src/rules/index.md': ['@./alpha.md', '@./parent.md'].join('\n\n'),
-      'src/rules/parent.md': '# Parent\n\nPARENT_RULE\n\n@./nested-gated.md',
-      'src/rules/nested-gated.md':
-        '---\nincludeIf: [isReactNative]\n---\n\nNESTED_GATED_RULE',
-    });
-    const {markdown, warnings} = assembleSelected(['alpha', 'parent'], {
-      promptsDir: dir,
-    });
-    expect(markdown).toContain('NESTED_GATED_RULE');
-    // Included, but never SILENTLY: the choice is visible in the output.
-    expect(warnings.join('\n')).toContain('nested-gated');
-    expect(warnings.join('\n')).toContain('includeIf');
+  test('an index that resolves to NOTHING refuses to write an empty artifact', () => {
+    // An empty rules file that reports success is the total-omission failure
+    // this whole component exists to prevent.
+    setQuiet(true);
+    const dir = promptsFixture({'src/rules/index.md': '# Nothing here\n'});
+    const root = projectFixture();
+    const outcome = refreshCriticalRulesArtifact(root, {promptsDir: dir});
+    expect(refreshSucceeded(outcome)).toBe(false);
+    expect(existsSync(projectRulesFilePath(root))).toBe(false);
   });
 
   test('frontmatter never survives into the output', () => {
+    setQuiet(true);
     const dir = promptsFixture();
-    const {markdown} = assembleSelected(['alpha', 'rn-only'], {
-      promptsDir: dir,
-    });
+    const root = projectFixture({beads: true, deps: {expo: '*'}});
+    const outcome = refreshCriticalRulesArtifact(root, {promptsDir: dir});
+    if (!refreshSucceeded(outcome)) throw new Error(outcome.message);
+    const markdown = readArtifact(root);
     expect(markdown).not.toContain('includeIf');
     expect(markdown).not.toMatch(/^---/m);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Seeding — predicates run ONCE, here (D12)
+// The retired per-repo include-list: ignored, and said out loud (dchjw.3)
 // ---------------------------------------------------------------------------
 
-describe('module selection seeding', () => {
-  test('the default seed is universal-minus-excluded plus the DETECTED type modules', () => {
+describe('a config still carrying componentConfig["critical-rules"].modules', () => {
+  test('is IGNORED — the artifact regenerates from the whole registry', () => {
+    setQuiet(true);
     const dir = promptsFixture();
-    const rn = projectFixture({beads: true, deps: {expo: '*'}});
-    const plain = projectFixture();
+    // The exact shape the fleet carries today, and the exact harm: a list that
+    // omits most of the registry. Under the retired design this repo got two
+    // modules forever.
+    const root = projectFixture({modules: ['alpha']});
+    const outcome = refreshCriticalRulesArtifact(root, {promptsDir: dir});
+    if (!refreshSucceeded(outcome)) throw new Error(outcome.message);
 
-    const rnSeed = computeDefaultModules(
-      describeIndexModules(rn, {promptsDir: dir}).modules,
+    expect(outcome.modules).toEqual(['alpha', 's2t-guidelines', 'omega']);
+    const markdown = readArtifact(root);
+    expect(markdown).toContain('OMEGA_RULE');
+    expect(markdown).toContain('Dakota');
+  });
+
+  test('is DETECTED, with one shared warning naming the key', () => {
+    const root = projectFixture({modules: ['alpha']});
+    const message = legacyModulesWarning(root);
+    expect(message).not.toBeNull();
+    expect(message).toContain('critical-rules');
+    expect(message).toContain('modules');
+    expect(hasRetiredModulesKey(root)).toBe(true);
+  });
+
+  test('NEGATIVE CONTROL: a config without the key produces no warning at all', () => {
+    const root = projectFixture();
+    expect(legacyModulesWarning(root)).toBeNull();
+    expect(hasRetiredModulesKey(root)).toBe(false);
+  });
+
+  test('NEGATIVE CONTROL: a config with the BLOCK but no modules key is not flagged', () => {
+    // `componentConfig["critical-rules"]` may legitimately hold future keys.
+    // Only the retired one is the warning's subject.
+    const sb = track(createSandbox());
+    sb.writeFile('package.json', '{"name":"fixture"}');
+    sb.writeFile(
+      'justin-sdk.config.json',
+      JSON.stringify({
+        componentConfig: {[CRITICAL_RULES_CONFIG_KEY]: {}},
+        components: ['critical-rules-setup'],
+      }),
     );
-    const plainSeed = computeDefaultModules(
-      describeIndexModules(plain, {promptsDir: dir}).modules,
+    expect(hasRetiredModulesKey(sb.path)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Enrollment is the component list or the artifact — never the module list (F2)
+// ---------------------------------------------------------------------------
+
+describe('readEnrollment', () => {
+  test('a repo with critical-rules-setup in components and NO modules key is ENROLLED', () => {
+    // The whole point of F2: the retired reader answered "not enrolled" here,
+    // which silently switched off every rules check for the entire fleet the
+    // moment the modules blocks are swept away.
+    const root = projectFixture();
+    const read = readEnrollment(root);
+    expect(read.ok).toBe(true);
+    if (read.ok) expect(read.evidence).toBe('components');
+  });
+
+  test('a repo carrying the ARTIFACT is enrolled whatever its config says', () => {
+    const sb = track(createSandbox());
+    sb.writeFile(ARTIFACT_REL, '# Critical Rules\n');
+    const read = readEnrollment(sb.path);
+    expect(read.ok).toBe(true);
+    if (read.ok) expect(read.evidence).toBe('artifact');
+  });
+
+  test('NEGATIVE CONTROL: no component, no artifact = not-enrolled', () => {
+    const sb = track(createSandbox());
+    sb.writeFile(
+      'justin-sdk.config.json',
+      JSON.stringify({components: ['base-setup']}),
     );
-
-    expect(rnSeed).toEqual(['alpha', 'beads-only', 'rn-only', 'omega']);
-    expect(plainSeed).toEqual(['alpha', 'omega']);
-    // s2t-guidelines is universal and still excluded — in BOTH arms.
-    expect(rnSeed).not.toContain('s2t-guidelines');
-    expect(plainSeed).not.toContain('s2t-guidelines');
+    const read = readEnrollment(sb.path);
+    expect(read.ok).toBe(false);
+    if (!read.ok) expect(read.status).toBe('not-enrolled');
   });
 
-  test('an RN-shaped project records the react-native module in config; a plain one does not', () => {
-    setQuiet(true);
-    const dir = promptsFixture();
-    const rn = projectFixture({deps: {expo: '*'}});
-    const plain = projectFixture();
-
-    expect(stepCriticalRulesConfig(rn, {promptsDir: dir})).toBe(true);
-    expect(stepCriticalRulesConfig(plain, {promptsDir: dir})).toBe(true);
-
-    const rnRead = readSelectedModules(rn);
-    const plainRead = readSelectedModules(plain);
-    if (!rnRead.ok || !plainRead.ok) throw new Error('unreachable');
-    expect(rnRead.modules).toContain('rn-only');
-    expect(plainRead.modules).not.toContain('rn-only');
-    // The detection RESULT is what's recorded, in the config, readable by hand.
-    const block = (
-      (
-        readJson(join(rn, 'justin-sdk.config.json'))?.componentConfig as Record<
-          string,
-          unknown
-        >
-      )[CRITICAL_RULES_CONFIG_KEY] as {modules: string[]}
-    ).modules;
-    expect(block).toEqual(rnRead.modules);
+  test('an UNPARSEABLE config is a failure, never a "no" (critical rule 6)', () => {
+    const sb = track(createSandbox());
+    sb.writeFile('justin-sdk.config.json', '{ not json');
+    const read = readEnrollment(sb.path);
+    expect(read.ok).toBe(false);
+    if (!read.ok) expect(read.status).toBe('failed');
   });
 
-  test('a hand-tuned selection survives a re-run untouched', () => {
-    setQuiet(true);
-    const dir = promptsFixture();
-    // Justin's per-repo call: s2t opted IN, a universal module dropped.
-    const root = projectFixture({modules: ['alpha', 's2t-guidelines']});
-    const cfgPath = join(root, 'justin-sdk.config.json');
-    const before = readFileSync(cfgPath, 'utf-8');
-
-    expect(stepCriticalRulesConfig(root, {promptsDir: dir})).toBe(true);
-
-    expect(readFileSync(cfgPath, 'utf-8')).toBe(before);
+  test('a components key that is not an array is a failure, never a "no"', () => {
+    const sb = track(createSandbox());
+    sb.writeFile(
+      'justin-sdk.config.json',
+      JSON.stringify({components: 'critical-rules-setup'}),
+    );
+    const read = readEnrollment(sb.path);
+    expect(read.ok).toBe(false);
+    if (!read.ok) expect(read.status).toBe('failed');
   });
 
-  test('seeding without a justin-sdk.config.json fails instead of inventing one', () => {
-    setQuiet(true);
-    const dir = promptsFixture();
-    const root = projectFixture({noConfig: true});
-    expect(stepCriticalRulesConfig(root, {promptsDir: dir})).toBe(false);
+  test('the component name matches the one components.ts registers', () => {
+    // rules-enrollment.ts spells it by hand (it ships in the plugin's
+    // self-contained file set and may not import components.ts). This is the
+    // guard that the two never drift apart.
+    expect(CRITICAL_RULES_COMPONENT).toBe(configNameFor('critical-rules'));
   });
 });
 
@@ -401,24 +515,30 @@ describe('module selection seeding', () => {
 // ---------------------------------------------------------------------------
 
 describe('the committed artifact', () => {
-  test('writes .claude/rules/justin-sdk/critical-rules.md with an HTML-comment stamp carrying the prompts sha and the date', () => {
+  test('writes .claude/rules/justin-sdk/critical-rules.md with an HTML-comment stamp carrying the prompts commit, its date and the module fingerprint', () => {
     setQuiet(true);
     const {dir, sha} = gitPromptsFixture();
-    const root = projectFixture({modules: ['alpha', 'omega']});
+    const root = projectFixture();
 
     const outcome = refreshCriticalRulesArtifact(root, {
-      now: NOW,
       promptsDir: dir,
     });
     expect(outcome.status).toBe('written');
     if (!refreshSucceeded(outcome)) throw new Error('unreachable');
-    expect(outcome.sourceSha).toBe(sha);
+    expect(outcome.sourceCommit?.sha).toBe(sha);
 
     const body = readArtifact(root);
     const firstLine = body.split('\n')[0] ?? '';
     expect(firstLine.startsWith(STAMP_PREFIX)).toBe(true);
-    expect(firstLine).toContain(sha.slice(0, 12));
-    expect(firstLine).toContain(`generated ${NOW}`);
+    expect(firstLine).toContain(`prompts ${sha.slice(0, 12)}`);
+    // The prompts COMMIT date, in parentheses after the sha — not the date of
+    // this run, which would churn the bytes of twelve committed files daily.
+    const commitDate = git(dir, ['show', '-s', '--format=%cs', 'HEAD']).trim();
+    expect(firstLine).toContain(`(${commitDate})`);
+    expect(firstLine).toContain(`modules ${outcome.moduleFingerprint}`);
+    // NO SDK version (F6): an SDK release must not move these bytes.
+    expect(firstLine).not.toMatch(/· v\d/);
+    expect(firstLine).not.toContain('generated ');
     expect(firstLine.endsWith('-->')).toBe(true);
     // The stamp names the command that regenerates THIS file, not sync-rules
     // (which would regenerate the user-level one).
@@ -435,61 +555,70 @@ describe('the committed artifact', () => {
     // (no SDK version is stamped, so an SDK release can't move these bytes).
     const stamp = readDeployedStamp(projectRulesFilePath(root));
     expect(stamp?.contentHash).toBe(outcome.contentHash);
+    expect(stamp?.moduleFingerprint).toBe(outcome.moduleFingerprint);
+    expect(stamp?.promptsDate).toBe(commitDate);
     expect(deployedSourceSha(stamp)).toBe(sha.slice(0, 12));
     expect(deployedIsDirty(stamp)).toBe(false);
     expect(stamp?.version).toBe('unknown');
   });
 
-  test('a second run is a no-op; --force rewrites', () => {
+  test('a second run is a no-op, and --force reproduces the SAME bytes', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const root = projectFixture({modules: ['alpha', 'omega']});
+    const root = projectFixture();
 
-    expect(
-      refreshCriticalRulesArtifact(root, {now: NOW, promptsDir: dir}).status,
-    ).toBe('written');
+    expect(refreshCriticalRulesArtifact(root, {promptsDir: dir}).status).toBe(
+      'written',
+    );
     const bytes = readArtifact(root);
 
     const second = refreshCriticalRulesArtifact(root, {
-      now: '2099-01-01',
       promptsDir: dir,
     });
     expect(second.status).toBe('unchanged');
-    // Not rewritten — so the date in the stamp did not churn either. This is
-    // what keeps a branch and a swept main byte-identical across days (D3).
     expect(readArtifact(root)).toBe(bytes);
 
+    // --force rewrites, and the bytes come out IDENTICAL: the header carries no
+    // generation timestamp any more, so the artifact is a pure function of
+    // (prompts commit, project). That is what keeps a branch and a swept main
+    // byte-identical across days.
     expect(
       refreshCriticalRulesArtifact(root, {
         force: true,
-        now: '2099-01-01',
         promptsDir: dir,
       }).status,
     ).toBe('written');
-    expect(readArtifact(root)).not.toBe(bytes);
+    expect(readArtifact(root)).toBe(bytes);
   });
 
-  test('OPT-IN NEGATIVE CONTROL: the excluded module is absent by default and present when selected', () => {
+  test('a HAND EDIT that keeps the header is repaired by a plain refresh', () => {
+    // The retired idempotency gate was the stamp's own content hash, so an
+    // edited body under a header still claiming the canonical hash was reported
+    // "already in sync" and left wrong. It is a BYTE comparison now.
     setQuiet(true);
     const {dir} = gitPromptsFixture();
+    const root = projectFixture();
+    expect(refreshCriticalRulesArtifact(root, {promptsDir: dir}).status).toBe(
+      'written',
+    );
+    const canonical = readArtifact(root);
 
-    // Default seed (predicates + the exclusion list) — no marker.
-    const seeded = projectFixture();
-    expect(stepCriticalRulesConfig(seeded, {promptsDir: dir})).toBe(true);
-    expect(
-      refreshCriticalRulesArtifact(seeded, {now: NOW, promptsDir: dir}).status,
-    ).toBe('written');
-    expect(readArtifact(seeded)).not.toContain('Dakota');
+    writeFileSync(
+      projectRulesFilePath(root),
+      canonical.replace('ALPHA_RULE', 'HAND_EDITED'),
+    );
+    expect(readArtifact(root)).toContain('HAND_EDITED');
 
-    // Same fixture, module opted in by hand — the marker appears. Without this
-    // arm, "absent" would also pass for an artifact that assembled nothing.
-    const optedIn = projectFixture({
-      modules: ['alpha', 's2t-guidelines', 'omega'],
-    });
-    expect(
-      refreshCriticalRulesArtifact(optedIn, {now: NOW, promptsDir: dir}).status,
-    ).toBe('written');
-    expect(readArtifact(optedIn)).toContain('Dakota');
+    expect(refreshCriticalRulesArtifact(root, {promptsDir: dir}).status).toBe(
+      'written',
+    );
+    expect(readArtifact(root)).toBe(canonical);
+
+    // NEGATIVE CONTROL: with the edit gone, the very same call is a no-op — so
+    // the 'written' above really was caused by the edit.
+    expect(refreshCriticalRulesArtifact(root, {promptsDir: dir}).status).toBe(
+      'unchanged',
+    );
   });
 
   test('formats with the TARGET REPO’s own prettier when it has one', () => {
@@ -512,9 +641,9 @@ describe('the committed artifact', () => {
     writeFileSync(fake, "#!/bin/sh\ncat\nprintf 'LOCAL_PRETTIER_RAN\\n'\n");
     chmodSync(fake, 0o755);
 
-    expect(
-      refreshCriticalRulesArtifact(root, {now: NOW, promptsDir: dir}).status,
-    ).toBe('written');
+    expect(refreshCriticalRulesArtifact(root, {promptsDir: dir}).status).toBe(
+      'written',
+    );
     expect(readArtifact(root)).toContain('LOCAL_PRETTIER_RAN');
   });
 
@@ -533,7 +662,6 @@ describe('the committed artifact', () => {
     chmodSync(fake, 0o755);
 
     const outcome = refreshCriticalRulesArtifact(root, {
-      now: NOW,
       promptsDir: dir,
     });
     expect(outcome.status).toBe('failed');
@@ -604,9 +732,9 @@ describe('the committed artifact is byte-identical to the repo prettier output',
     });
     const prettier = installRealPrettier(root);
 
-    expect(
-      refreshCriticalRulesArtifact(root, {now: NOW, promptsDir}).status,
-    ).toBe('written');
+    expect(refreshCriticalRulesArtifact(root, {promptsDir}).status).toBe(
+      'written',
+    );
 
     const file = projectRulesFilePath(root);
     const bytes = readFileSync(file, 'utf-8');
@@ -663,9 +791,9 @@ describe('the committed artifact is byte-identical to the repo prettier output',
     });
     installRealPrettier(root);
 
-    expect(
-      refreshCriticalRulesArtifact(root, {now: NOW, promptsDir}).status,
-    ).toBe('written');
+    expect(refreshCriticalRulesArtifact(root, {promptsDir}).status).toBe(
+      'written',
+    );
 
     expect(checkRulesDrift(root, {promptsDir}).status).toBe('in-sync');
     expect(rulesDiff({projectRoot: root, promptsDir}).outcome).toBe('in-sync');
@@ -693,9 +821,9 @@ describe('the committed artifact is byte-identical to the repo prettier output',
       );
       chmodSync(fake, 0o755);
 
-      expect(
-        refreshCriticalRulesArtifact(root, {now: NOW, promptsDir}).status,
-      ).toBe('written');
+      expect(refreshCriticalRulesArtifact(root, {promptsDir}).status).toBe(
+        'written',
+      );
       const said = warns.mock.calls.flat().join('\n');
       expect(said).toContain('does NOT satisfy');
       expect(said).toContain(ARTIFACT_REL);
@@ -723,9 +851,9 @@ describe('the committed artifact is byte-identical to the repo prettier output',
       );
       chmodSync(fake, 0o755);
 
-      expect(
-        refreshCriticalRulesArtifact(root, {now: NOW, promptsDir}).status,
-      ).toBe('written');
+      expect(refreshCriticalRulesArtifact(root, {promptsDir}).status).toBe(
+        'written',
+      );
       expect(warns.mock.calls.flat().join('\n')).not.toContain(
         'does NOT satisfy',
       );
@@ -748,9 +876,9 @@ describe('the committed artifact is byte-identical to the repo prettier output',
       modules: ['alpha'],
     });
     installRealPrettier(root);
-    expect(
-      refreshCriticalRulesArtifact(root, {now: NOW, promptsDir}).status,
-    ).toBe('written');
+    expect(refreshCriticalRulesArtifact(root, {promptsDir}).status).toBe(
+      'written',
+    );
 
     const file = projectRulesFilePath(root);
     writeFileSync(
@@ -788,9 +916,9 @@ describe('refreshCriticalRulesArtifact touches ONE path', () => {
     );
     const pkgBytes = readFileSync(join(repo, 'package.json'), 'utf-8');
 
-    expect(
-      refreshCriticalRulesArtifact(repo, {now: NOW, promptsDir: dir}).status,
-    ).toBe('written');
+    expect(refreshCriticalRulesArtifact(repo, {promptsDir: dir}).status).toBe(
+      'written',
+    );
 
     const after = statusPaths(repo);
     const added = [...after].filter((p) => !before.has(p));
@@ -842,7 +970,7 @@ describe('refreshCriticalRulesArtifact touches ONE path', () => {
     ).not.toBe('0.0.1-fixture');
   });
 
-  test('the installer seeds the selection AND writes the artifact in one pass', async () => {
+  test('the installer writes the artifact from the registry in one pass', async () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
     const root = projectFixture({beads: true, deps: {expo: '*'}});
@@ -855,14 +983,35 @@ describe('refreshCriticalRulesArtifact touches ONE path', () => {
       }),
     ).toBe(0);
 
-    const read = readSelectedModules(root);
-    if (!read.ok)
-      throw new Error(`expected a seeded selection: ${read.message}`);
-    expect(read.modules).toEqual(['alpha', 'beads-only', 'rn-only', 'omega']);
     const body = readArtifact(root);
     expect(body).toContain('BEADS_ONLY_RULE');
     expect(body).toContain('RN_ONLY_RULE');
-    expect(body).not.toContain('Dakota');
+    // s2t-guidelines ships everywhere now (Justin, 2026-09-18) — the retired
+    // DEFAULT_SEED_EXCLUDED kept it out of every repo from inside the SDK.
+    expect(body).toContain('Dakota');
+    // It records NO module selection: there is no per-repo list to record.
+    const config = readJson(join(root, 'justin-sdk.config.json')) ?? {};
+    const block = (config.componentConfig as Record<string, unknown>)?.[
+      CRITICAL_RULES_CONFIG_KEY
+    ];
+    expect(block).toBeUndefined();
+  });
+
+  test('NEGATIVE CONTROL: a plain node project gets neither gated module', async () => {
+    setQuiet(true);
+    const {dir} = gitPromptsFixture();
+    const root = projectFixture();
+    expect(
+      await runCriticalRulesSetup({
+        projectRoot: root,
+        promptsDir: dir,
+        quiet: true,
+      }),
+    ).toBe(0);
+    const body = readArtifact(root);
+    expect(body).not.toContain('BEADS_ONLY_RULE');
+    expect(body).not.toContain('RN_ONLY_RULE');
+    expect(body).toContain('ALPHA_RULE');
   });
 });
 
@@ -871,72 +1020,43 @@ describe('refreshCriticalRulesArtifact touches ONE path', () => {
 // ---------------------------------------------------------------------------
 
 describe('refresh refusals are distinct and never write', () => {
-  test('no justin-sdk.config.json at all -> not-enrolled', () => {
+  test('a rules index that resolves to nothing is failed, not an empty artifact', () => {
+    setQuiet(true);
+    const dir = promptsFixture({'src/rules/index.md': '# no references\n'});
+    const root = projectFixture();
+    const outcome = refreshCriticalRulesArtifact(root, {promptsDir: dir});
+    expect(outcome.status).toBe('failed');
+    expect(existsSync(projectRulesFilePath(root))).toBe(false);
+  });
+
+  test('a MISSING rules index is failed and leaves any existing artifact alone', () => {
+    setQuiet(true);
+    const {dir} = gitPromptsFixture();
+    const root = projectFixture();
+    expect(refreshCriticalRulesArtifact(root, {promptsDir: dir}).status).toBe(
+      'written',
+    );
+    const good = readArtifact(root);
+
+    const outcome = refreshCriticalRulesArtifact(root, {
+      promptsDir: join(dir, 'no-such-prompts-checkout'),
+    });
+    expect(outcome.status).toBe('failed');
+    if (refreshSucceeded(outcome)) throw new Error('unreachable');
+    expect(outcome.message).toContain('rules index');
+    // A broken source must never silently shrink the delivered rules.
+    expect(readArtifact(root)).toBe(good);
+  });
+
+  test('a repo with NO justin-sdk.config.json still gets its artifact written', () => {
+    // The refresh layer does not gate on enrolment — `rules-update` does. This
+    // is the call `add critical-rules` makes while it is still enrolling.
     setQuiet(true);
     const dir = promptsFixture();
     const root = projectFixture({noConfig: true});
     const outcome = refreshCriticalRulesArtifact(root, {promptsDir: dir});
-    expect(outcome.status).toBe('not-enrolled');
-    expect(existsSync(projectRulesFilePath(root))).toBe(false);
-  });
-
-  test('a config with no module selection -> not-enrolled (and says so)', () => {
-    setQuiet(true);
-    const dir = promptsFixture();
-    const root = projectFixture();
-    const outcome = refreshCriticalRulesArtifact(root, {promptsDir: dir});
-    expect(outcome.status).toBe('not-enrolled');
-    if (refreshSucceeded(outcome)) throw new Error('unreachable');
-    expect(outcome.message).toContain(CRITICAL_RULES_CONFIG_KEY);
-    expect(existsSync(projectRulesFilePath(root))).toBe(false);
-  });
-
-  test('a CORRUPT config is failed, not not-enrolled — the two are different facts', () => {
-    setQuiet(true);
-    const dir = promptsFixture();
-    const root = projectFixture();
-    writeFileSync(join(root, 'justin-sdk.config.json'), '{ this is not json');
-    const outcome = refreshCriticalRulesArtifact(root, {promptsDir: dir});
-    expect(outcome.status).toBe('failed');
-    expect(existsSync(projectRulesFilePath(root))).toBe(false);
-  });
-
-  test('an EMPTY module list is failed, not an artifact stripped of every rule', () => {
-    setQuiet(true);
-    const dir = promptsFixture();
-    const root = projectFixture({modules: []});
-    const outcome = refreshCriticalRulesArtifact(root, {promptsDir: dir});
-    expect(outcome.status).toBe('failed');
-    expect(existsSync(projectRulesFilePath(root))).toBe(false);
-  });
-
-  test('a typo in the module list is failed and leaves any existing artifact alone', () => {
-    setQuiet(true);
-    const {dir} = gitPromptsFixture();
-    const root = projectFixture({modules: ['alpha', 'omega']});
-    expect(
-      refreshCriticalRulesArtifact(root, {now: NOW, promptsDir: dir}).status,
-    ).toBe('written');
-    const good = readArtifact(root);
-
-    const cfgPath = join(root, 'justin-sdk.config.json');
-    const cfg = readJson(cfgPath) ?? {};
-    (
-      (cfg.componentConfig as Record<string, {modules: string[]}>)[
-        CRITICAL_RULES_CONFIG_KEY
-      ] as {modules: string[]}
-    ).modules = ['alpha', 'ompga'];
-    writeJson(cfgPath, cfg);
-
-    const outcome = refreshCriticalRulesArtifact(root, {
-      now: NOW,
-      promptsDir: dir,
-    });
-    expect(outcome.status).toBe('failed');
-    if (refreshSucceeded(outcome)) throw new Error('unreachable');
-    expect(outcome.message).toContain('ompga');
-    // A bad selection must not silently shrink the delivered rules.
-    expect(readArtifact(root)).toBe(good);
+    expect(outcome.status).toBe('written');
+    expect(existsSync(projectRulesFilePath(root))).toBe(true);
   });
 });
 
@@ -968,7 +1088,7 @@ describe('D15 — cannot-refresh is not in-sync', () => {
     initRepoAt(cloneDir, RULES_FILES);
     const root = projectFixture({modules: ['alpha', 'omega']});
 
-    const outcome = refreshCriticalRulesArtifact(root, {now: NOW});
+    const outcome = refreshCriticalRulesArtifact(root, {});
 
     expect(outcome.status).toBe('cannot-refresh');
     if (refreshSucceeded(outcome)) throw new Error('unreachable');
@@ -987,12 +1107,14 @@ describe('D15 — cannot-refresh is not in-sync', () => {
     git(sandbox, ['clone', '-q', origin, cloneDir]);
     const root = projectFixture({modules: ['alpha', 'omega']});
 
-    const outcome = refreshCriticalRulesArtifact(root, {now: NOW});
+    const outcome = refreshCriticalRulesArtifact(root, {});
 
     expect(outcome.status).toBe('written');
     if (!refreshSucceeded(outcome)) throw new Error('unreachable');
     expect(outcome.sourceRefresh).toBe('pulled');
-    expect(outcome.sourceSha).toBe(git(origin, ['rev-parse', 'HEAD']).trim());
+    expect(outcome.sourceCommit?.sha).toBe(
+      git(origin, ['rev-parse', 'HEAD']).trim(),
+    );
     expect(readArtifact(root)).toContain('ALPHA_RULE');
   });
 
@@ -1003,21 +1125,25 @@ describe('D15 — cannot-refresh is not in-sync', () => {
     process.env.JSDK_PROMPTS_REPO_URL = join(sandbox, 'nope', 'missing.git');
     const root = projectFixture({modules: ['alpha', 'omega']});
 
-    const outcome = refreshCriticalRulesArtifact(root, {now: NOW});
+    const outcome = refreshCriticalRulesArtifact(root, {});
 
     expect(outcome.status).toBe('cannot-refresh');
     expect(existsSync(projectRulesFilePath(root))).toBe(false);
   });
 
-  test('seeding also refuses a stale index', () => {
+  test('the INSTALLER refuses a stale clone too, and writes no artifact', async () => {
+    // The installer's write goes through the same refresh layer, so a clone it
+    // could not refresh must stop enrollment rather than commit unverified
+    // rules into a repo (D15).
     setQuiet(true);
     const {cloneDir} = sandboxedManagedClone();
     initRepoAt(cloneDir, RULES_FILES);
     const root = projectFixture();
 
-    expect(stepCriticalRulesConfig(root)).toBe(false);
-    // …and recorded nothing, so nothing later reads a guessed selection.
-    expect(readSelectedModules(root).ok).toBe(false);
+    expect(
+      await runCriticalRulesSetup({projectRoot: root, quiet: true}),
+    ).not.toBe(0);
+    expect(existsSync(projectRulesFilePath(root))).toBe(false);
   });
 });
 
@@ -1026,59 +1152,77 @@ describe('D15 — cannot-refresh is not in-sync', () => {
 // ---------------------------------------------------------------------------
 
 describe('determinism', () => {
-  test('same prompts sha + same selection + same date -> byte-identical artifacts', () => {
+  test('same prompts commit + same project -> byte-identical artifacts', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const a = projectFixture({modules: ['alpha', 'omega']});
-    const b = projectFixture({modules: ['alpha', 'omega']});
+    const a = projectFixture();
+    const b = projectFixture();
 
-    refreshCriticalRulesArtifact(a, {now: NOW, promptsDir: dir});
-    refreshCriticalRulesArtifact(b, {now: NOW, promptsDir: dir});
+    refreshCriticalRulesArtifact(a, {promptsDir: dir});
+    refreshCriticalRulesArtifact(b, {promptsDir: dir});
 
     expect(readArtifact(a)).toBe(readArtifact(b));
   });
 
-  test('a different selection changes the bytes', () => {
+  test('the per-repo config CANNOT change the bytes any more', () => {
+    // The retired design's whole point was that these two repos differed. They
+    // must not: `modules` is ignored, so two identically-shaped projects get
+    // identical rules whatever their configs say.
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const a = projectFixture({modules: ['alpha', 'omega']});
+    const a = projectFixture({modules: ['alpha']});
     const b = projectFixture({modules: ['alpha', 's2t-guidelines', 'omega']});
 
-    refreshCriticalRulesArtifact(a, {now: NOW, promptsDir: dir});
-    refreshCriticalRulesArtifact(b, {now: NOW, promptsDir: dir});
+    refreshCriticalRulesArtifact(a, {promptsDir: dir});
+    refreshCriticalRulesArtifact(b, {promptsDir: dir});
 
-    expect(readArtifact(a)).not.toBe(readArtifact(b));
+    expect(readArtifact(a)).toBe(readArtifact(b));
+  });
+
+  test('a different PROJECT TYPE changes the bytes', () => {
+    // The negative control for the test above: something still moves the bytes,
+    // so "identical" is not an artefact of an inert fixture.
+    setQuiet(true);
+    const {dir} = gitPromptsFixture();
+    const plain = projectFixture();
+    const rn = projectFixture({deps: {expo: '*'}});
+
+    refreshCriticalRulesArtifact(plain, {promptsDir: dir});
+    refreshCriticalRulesArtifact(rn, {promptsDir: dir});
+
+    expect(readArtifact(plain)).not.toBe(readArtifact(rn));
+    expect(readArtifact(rn)).toContain('RN_ONLY_RULE');
   });
 
   test('a different prompts commit changes the bytes', () => {
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const root = projectFixture({modules: ['alpha', 'omega']});
-    refreshCriticalRulesArtifact(root, {now: NOW, promptsDir: dir});
+    const root = projectFixture();
+    refreshCriticalRulesArtifact(root, {promptsDir: dir});
     const before = readArtifact(root);
 
     writeFileSync(join(dir, 'src/rules/alpha.md'), '# Alpha\n\nALPHA_RULE_V2');
     git(dir, ['add', '-A']);
     git(dir, ['commit', '-qm', 'edit alpha']);
-    refreshCriticalRulesArtifact(root, {now: NOW, promptsDir: dir});
+    refreshCriticalRulesArtifact(root, {promptsDir: dir});
 
     expect(readArtifact(root)).not.toBe(before);
     expect(readArtifact(root)).toContain('ALPHA_RULE_V2');
   });
 
-  test('the assembly DATE is excluded from the content hash — only the stamp line moves', () => {
+  test('a REGENERATION on a later day is byte-identical — the header carries no run date', () => {
+    // The stamp used to carry `generated <today>`, so the same source produced
+    // different bytes tomorrow and a --force churned twelve repos' diffs. The
+    // date in the header is now the prompts COMMIT's, which only the source
+    // moves.
     setQuiet(true);
     const {dir} = gitPromptsFixture();
-    const root = projectFixture({modules: ['alpha', 'omega']});
+    const root = projectFixture();
 
-    const first = refreshCriticalRulesArtifact(root, {
-      now: '2026-01-01',
-      promptsDir: dir,
-    });
+    const first = refreshCriticalRulesArtifact(root, {promptsDir: dir});
     const firstBytes = readArtifact(root);
     const second = refreshCriticalRulesArtifact(root, {
       force: true,
-      now: '2026-12-31',
       promptsDir: dir,
     });
     const secondBytes = readArtifact(root);
@@ -1087,12 +1231,8 @@ describe('determinism', () => {
       throw new Error('unreachable');
     }
     expect(second.contentHash).toBe(first.contentHash);
-    expect(secondBytes).not.toBe(firstBytes);
-    // Every line after the stamp is identical…
-    expect(secondBytes.split('\n').slice(1)).toEqual(
-      firstBytes.split('\n').slice(1),
-    );
-    // …and the hash is the hash of that body, not of the stamped file.
+    expect(secondBytes).toBe(firstBytes);
+    // The stamped hash is the hash of the BODY, not of the stamped file.
     expect(contentHash(firstBytes.split('\n').slice(2).join('\n').trim())).toBe(
       first.contentHash,
     );
@@ -1214,7 +1354,8 @@ describe('the user-level rules exclusion', () => {
     sandboxHome();
     const repo = projectFixture({modules: ['alpha']});
     mkdirSync(join(repo, '.claude'), {recursive: true});
-    const corrupt = '{ "claudeMdExcludes": [ // a comment JSON does not allow\n';
+    const corrupt =
+      '{ "claudeMdExcludes": [ // a comment JSON does not allow\n';
     writeFileSync(settingsPathOf(repo), corrupt);
 
     const outcome = addUserLevelRulesExclude(repo);

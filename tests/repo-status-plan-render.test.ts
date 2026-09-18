@@ -233,7 +233,10 @@ describe('plan renderings', () => {
   test('--json and --markdown together is refused, not silently resolved', async () => {
     const work = fixture(track(createSandbox()));
 
-    const {code, stdout, stderr} = await runPlan(work, ['--json', '--markdown']);
+    const {code, stdout, stderr} = await runPlan(work, [
+      '--json',
+      '--markdown',
+    ]);
     expect(code).toBe(2);
     expect(stdout).toBe('');
     expect(stderr).toContain('pass at most one');

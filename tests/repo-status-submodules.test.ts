@@ -20,7 +20,7 @@ import {dirname, join, resolve} from 'path';
 
 import {renderReportPretty} from '../src/repo-status/pretty';
 import {buildReport, type RepoStatusReport} from '../src/repo-status/report';
-import {runDivergenceCheck} from '../src/plugin/lib/repo-status/prime-view';
+import {runDivergenceCheck} from '../src/repo-status/prime-view';
 import {
   buildSubmoduleInventory,
   Q_CURRENT_CODE,
@@ -67,7 +67,12 @@ function gitClone(cwd: string, args: string[]): string {
 }
 
 function initRepoAt(path: string, bare = false): void {
-  git(dirname(path), ['init', '-q', ...(bare ? ['--bare'] : ['-b', 'main']), path]);
+  git(dirname(path), [
+    'init',
+    '-q',
+    ...(bare ? ['--bare'] : ['-b', 'main']),
+    path,
+  ]);
   if (bare) return;
   git(path, ['config', 'user.email', 'test@example.com']);
   git(path, ['config', 'user.name', 'Test']);
@@ -156,7 +161,9 @@ function kinds(row: SubmoduleRow): string[] {
 function findingOf(row: SubmoduleRow, kind: string): SubmoduleFinding {
   const f = allFindings(row).find((x) => x.kind === kind);
   if (f == null) {
-    throw new Error(`expected a ${kind} finding, saw: ${kinds(row).join(', ')}`);
+    throw new Error(
+      `expected a ${kind} finding, saw: ${kinds(row).join(', ')}`,
+    );
   }
   return f;
 }
@@ -252,7 +259,11 @@ describe('a gitlink pointing at an unpushed submodule commit', () => {
     // Pushed from the other clone, so it genuinely IS on the remote — the
     // parent's submodule store has simply never fetched it.
     const pushed = pushFromSubWork(fx, 'v2');
-    recordPointer(fx, pushed, 'bump sub to a commit this store has not fetched');
+    recordPointer(
+      fx,
+      pushed,
+      'bump sub to a commit this store has not fetched',
+    );
 
     const row = subRow(report(fx.parent));
     const checkout = row.checkouts[0];
@@ -262,7 +273,9 @@ describe('a gitlink pointing at an unpushed submodule commit', () => {
 
     const absent = findingOf(row, 'pointer-absent-from-store');
     expect(absent.severity).toBe('advisory');
-    expect(absent.why).toContain('says nothing about whether the commit exists');
+    expect(absent.why).toContain(
+      'says nothing about whether the commit exists',
+    );
     expect(absent.fix).toContain('fetch');
     // The severe diagnosis is the WRONG answer here and must not be given.
     expect(kinds(row)).not.toContain('pointer-not-on-remote');
@@ -349,7 +362,14 @@ describe('a checkout behind its remote with nothing ahead', () => {
     expect(stale.fix).toContain('dependencies');
 
     // NEGATIVE CONTROL: bring the checkout up to date and it clears.
-    gitClone(fx.parent, ['submodule', 'update', '--init', '--remote', '--', 'sub']);
+    gitClone(fx.parent, [
+      'submodule',
+      'update',
+      '--init',
+      '--remote',
+      '--',
+      'sub',
+    ]);
     const fresh = subRow(report(fx.parent));
     expect(kinds(fresh)).not.toContain('stale-checkout');
     expect(fresh.checkouts[0]?.behind).toBe(0);
@@ -444,7 +464,10 @@ describe('uncommitted files in the submodule checkout', () => {
     // from rev-parse / for-each-ref / rev-list, none of which open the index,
     // so an unreadable index isolates exactly the new call.
     const dir = join(fx.parent, 'sub');
-    const index = resolve(dir, git(dir, ['rev-parse', '--git-path', 'index']).trim());
+    const index = resolve(
+      dir,
+      git(dir, ['rev-parse', '--git-path', 'index']).trim(),
+    );
     chmodSync(index, 0o000);
     try {
       const row = subRow(report(fx.parent));
@@ -482,7 +505,10 @@ describe('uncommitted files in the submodule checkout', () => {
     commitInParentSub(fx, 'local only');
     git(fx.parent, ['add', '--', 'sub']);
     git(fx.parent, ['commit', '-qm', 'bump sub']);
-    writeFileSync(join(fx.parent, 'sub', 'lib.txt'), 'edited after the commit\n');
+    writeFileSync(
+      join(fx.parent, 'sub', 'lib.txt'),
+      'edited after the commit\n',
+    );
 
     const r = report(fx.parent);
     const row = subRow(r);
@@ -714,7 +740,9 @@ describe('gitlinks recorded by other BRANCHES', () => {
     // Reported as "nothing to compare against" rather than as every branch
     // disagreeing, which would be a loud lie about a submodule nobody moved.
     expect(row?.branchPointers.checked).toBe(false);
-    expect(row?.branchPointers.note).toContain('does not record this submodule');
+    expect(row?.branchPointers.note).toContain(
+      'does not record this submodule',
+    );
     expect(branchFindings(row as SubmoduleRow)).toEqual([]);
   });
 
@@ -917,19 +945,27 @@ function transitiveImports(entry: string): string[] {
   return [...seen];
 }
 
-describe('cost to the prime session-start path', () => {
-  const HOOK = resolve(import.meta.dir, '../src/plugin/hooks/session-start.ts');
+describe('cost to the session-start path', () => {
+  // `src/session-start.ts`, not `cli.ts`: the CLI registers `repo-status`,
+  // which legitimately reaches the expensive modules. The cost claim is about
+  // the work the SessionStart hook does, and this module IS that work — it was
+  // `src/plugin/hooks/session-start.ts` until dchjw.8 retired the plugin.
+  const ENTRY = resolve(import.meta.dir, '../src/session-start.ts');
 
-  test('the session-start hook cannot reach the submodule module at all', () => {
-    const graph = transitiveImports(HOOK);
+  test('the session-start path cannot reach the submodule module at all', () => {
+    const graph = transitiveImports(ENTRY);
     // Sanity: the walker really does traverse, or the assertion below is vacuous.
-    expect(graph.some((f) => f.endsWith('/repo-status/prime-view.ts'))).toBe(true);
+    expect(graph.some((f) => f.endsWith('/repo-status/prime-view.ts'))).toBe(
+      true,
+    );
     expect(graph.some((f) => f.endsWith('/repo-status/core.ts'))).toBe(true);
 
-    expect(graph.filter((f) => f.endsWith('/repo-status/submodules.ts'))).toEqual(
+    expect(
+      graph.filter((f) => f.endsWith('/repo-status/submodules.ts')),
+    ).toEqual([]);
+    expect(graph.filter((f) => f.endsWith('/repo-status/report.ts'))).toEqual(
       [],
     );
-    expect(graph.filter((f) => f.endsWith('/repo-status/report.ts'))).toEqual([]);
   });
 
   test('the session-start view produces no submodule data on a repo that has one', () => {

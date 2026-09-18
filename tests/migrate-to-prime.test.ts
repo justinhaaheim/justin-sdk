@@ -11,7 +11,10 @@ import {execSync} from 'child_process';
 import {existsSync, readFileSync, writeFileSync, mkdirSync} from 'fs';
 import {join} from 'path';
 
-import {runMigrateToPrime} from '../src/migrate-to-prime';
+import {
+  BESPOKE_DELETED_PREFIX,
+  runMigrateToPrime,
+} from '../src/migrate-to-prime';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -44,6 +47,35 @@ function migrate(sb: Sandbox): number {
   return runMigrateToPrime({projectRoot: sb.path, quiet: true});
 }
 
+/**
+ * Run the migration VERBOSE and capture stdout, so a test can assert the lines
+ * it prints rather than only the files it leaves behind.
+ */
+function migrateCapturingOutput(sb: Sandbox): string {
+  const lines: string[] = [];
+  const originals = {
+    error: console.error,
+    log: console.log,
+    warn: console.warn,
+  };
+  const capture =
+    () =>
+    (...args: unknown[]): void => {
+      lines.push(args.map((a) => String(a)).join(' '));
+    };
+  console.log = capture();
+  console.warn = capture();
+  console.error = capture();
+  try {
+    runMigrateToPrime({projectRoot: sb.path, quiet: false});
+  } finally {
+    console.log = originals.log;
+    console.warn = originals.warn;
+    console.error = originals.error;
+  }
+  return lines.join('\n');
+}
+
 function readSettings(sb: Sandbox): {
   hooks?: {SessionStart?: {hooks?: {command?: string}[]}[]};
 } {
@@ -60,96 +92,51 @@ function sessionStartCommands(sb: Sandbox): string[] {
 }
 
 describe('migrate-to-prime', () => {
-  test('removes the prime hook, preserves setup-env, and is idempotent', () => {
+  /**
+   * The INVERSE of what three tests here used to assert (dchjw.8, D6).
+   *
+   * Until the `prime` plugin was retired this migration stripped per-project
+   * `justin-sdk prime` SessionStart hooks, because the plugin injected the same
+   * guidance globally. The plugin is gone and the per-project hook IS the
+   * mechanism now, so a migration that still edited `.claude/settings.json`
+   * would tear out what base-setup installs. It must leave the file alone —
+   * including a legacy `prime` hook, whose replacement is base-setup's job.
+   */
+  test('never touches .claude/settings.json, even one carrying a legacy prime hook', () => {
     const sb = track(createSandbox());
     initRepo(sb);
     mkdirSync(join(sb.path, '.claude'), {recursive: true});
-    writeFileSync(
-      join(sb.path, '.claude/settings.json'),
-      JSON.stringify(
-        {
-          hooks: {
-            SessionStart: [
-              {
-                hooks: [
-                  {type: 'command', command: 'bun run scripts/setup-env.ts'},
-                  {
-                    type: 'command',
-                    command: 'bunx justin-sdk prime --format hook',
-                  },
-                ],
-              },
-            ],
-          },
+    const settings = JSON.stringify(
+      {
+        hooks: {
+          SessionStart: [
+            {
+              hooks: [
+                {command: 'bun run scripts/setup-env.ts', type: 'command'},
+                {
+                  command: 'bunx justin-sdk prime --format hook',
+                  type: 'command',
+                },
+              ],
+            },
+          ],
         },
-        null,
-        2,
-      ),
+      },
+      null,
+      2,
     );
+    writeFileSync(join(sb.path, '.claude/settings.json'), settings);
     commitAll(sb);
 
     expect(migrate(sb)).toBe(0);
-    const cmds = sessionStartCommands(sb);
-    // prime hook gone
-    expect(cmds.some((c) => c.includes('justin-sdk prime'))).toBe(false);
-    // setup-env preserved
-    expect(cmds.some((c) => c.includes('setup-env'))).toBe(true);
-
-    // Idempotent: a second run is a no-op (still no prime, setup-env intact).
-    migrate(sb);
-    const cmds2 = sessionStartCommands(sb);
-    expect(cmds2.filter((c) => c.includes('justin-sdk prime'))).toHaveLength(0);
-    expect(cmds2.some((c) => c.includes('setup-env'))).toBe(true);
-  });
-
-  test('drops the SessionStart key when the prime hook was its only entry', () => {
-    const sb = track(createSandbox());
-    initRepo(sb);
-    mkdirSync(join(sb.path, '.claude'), {recursive: true});
-    writeFileSync(
-      join(sb.path, '.claude/settings.json'),
-      JSON.stringify(
-        {
-          hooks: {
-            SessionStart: [
-              {
-                hooks: [
-                  {
-                    type: 'command',
-                    command: 'bunx justin-sdk prime --format hook',
-                  },
-                ],
-              },
-            ],
-          },
-        },
-        null,
-        2,
-      ),
+    // Byte-identical, and git agrees nothing changed.
+    expect(readFileSync(join(sb.path, '.claude/settings.json'), 'utf-8')).toBe(
+      settings,
     );
-    commitAll(sb);
-
-    migrate(sb);
-    const s = readSettings(sb);
-    // emptied group dropped -> SessionStart removed entirely
-    expect(s.hooks?.SessionStart ?? []).toHaveLength(0);
-    expect(
-      sessionStartCommands(sb).some((c) => c.includes('justin-sdk prime')),
-    ).toBe(false);
-  });
-
-  test('is a no-op when settings.json has no prime hook', () => {
-    const sb = track(createSandbox());
-    initRepo(sb);
-    mkdirSync(join(sb.path, '.claude'), {recursive: true});
-    writeFileSync(join(sb.path, '.claude/settings.json'), '{}');
-    commitAll(sb);
-
-    migrate(sb);
-    // no prime hook was present; file untouched, working tree stays clean
     expect(git(sb.path, 'status --porcelain -- .claude/settings.json')).toBe(
       '',
     );
+    expect(sessionStartCommands(sb)).toHaveLength(2);
   });
 
   test('removes docs/prompts when all files are known + tracked + clean', () => {
@@ -164,7 +151,10 @@ describe('migrate-to-prime', () => {
     expect(existsSync(join(sb.path, 'docs/prompts'))).toBe(false);
   });
 
-  test('flags (does not delete) an unknown-named file in docs/prompts', () => {
+  test('deletes an unknown-named file too, and NAMES it as it goes (AC 11)', () => {
+    // Justin, 2026-09-18: "Delete the docs/prompts directory … If you encounter
+    // any other files that seem bespoke or whatever let me know in your report
+    // back, but you can still delete them." The line is the "let me know".
     const sb = track(createSandbox());
     initRepo(sb);
     mkdirSync(join(sb.path, 'docs/prompts'), {recursive: true});
@@ -173,15 +163,53 @@ describe('migrate-to-prime', () => {
       join(sb.path, 'docs/prompts/PROJECT_SPECIFIC.md'),
       'unique\n',
     );
+    writeFileSync(
+      join(sb.path, 'docs/.prompts-installed-from.json'),
+      '{"sha":"deadbeef"}\n',
+    );
     commitAll(sb);
 
-    migrate(sb);
-    // dir stays because a flagged file remains; the unknown file is preserved,
-    // the known file may be removed but the dir is not.
-    expect(existsSync(join(sb.path, 'docs/prompts/PROJECT_SPECIFIC.md'))).toBe(
+    const output = migrateCapturingOutput(sb);
+
+    expect(output).toContain(
+      `${BESPOKE_DELETED_PREFIX}docs/prompts/PROJECT_SPECIFIC.md`,
+    );
+    // A recognised name is deleted QUIETLY — the line is reserved for the ones
+    // he has to look at.
+    expect(output).not.toContain(
+      `${BESPOKE_DELETED_PREFIX}docs/prompts/IMPORTANT_GUIDELINES.md`,
+    );
+    expect(existsSync(join(sb.path, 'docs/prompts'))).toBe(false);
+    expect(existsSync(join(sb.path, 'docs/.prompts-installed-from.json'))).toBe(
+      false,
+    );
+    // The claim in the line is TRUE: the deletion is recoverable from git.
+    expect(git(sb.path, 'show HEAD:docs/prompts/PROJECT_SPECIFIC.md')).toBe(
+      'unique',
+    );
+  });
+
+  test('NEGATIVE CONTROL: an UNTRACKED bespoke file is kept, not deleted-and-named', () => {
+    // The printed line claims the bytes are recoverable from git history. For an
+    // untracked file that claim would be false, so the file survives and is
+    // flagged instead — and the directory survives with it.
+    const sb = track(createSandbox());
+    initRepo(sb);
+    mkdirSync(join(sb.path, 'docs/prompts'), {recursive: true});
+    writeFileSync(join(sb.path, 'docs/prompts/IMPORTANT_GUIDELINES.md'), 'x\n');
+    commitAll(sb);
+    writeFileSync(join(sb.path, 'docs/prompts/NEVER_COMMITTED.md'), 'mine\n');
+
+    const output = migrateCapturingOutput(sb);
+
+    expect(output).not.toContain(
+      `${BESPOKE_DELETED_PREFIX}docs/prompts/NEVER_COMMITTED.md`,
+    );
+    expect(existsSync(join(sb.path, 'docs/prompts/NEVER_COMMITTED.md'))).toBe(
       true,
     );
     expect(existsSync(join(sb.path, 'docs/prompts'))).toBe(true);
+    expect(output).toContain('untracked');
   });
 
   test('flags (does not delete) an untracked docs/prompts file', () => {

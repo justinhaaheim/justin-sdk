@@ -158,6 +158,9 @@ export const SELECT_COMMANDS = [
   'add',
   'fix',
   'init',
+  'install',
+  'list',
+  'remove',
   'rules-diff',
   'rules-update',
   'setup-env',
@@ -169,9 +172,12 @@ export const SELECT_COMMANDS = [
 /**
  * Commands that must NEVER carry a notice, for three different reasons:
  *
- *  - `time-check`, `usage-check` and `prime` are HOOKS. Their output is
- *    injected into a Claude session's context, and their cost is paid on every
- *    prompt Justin types.
+ *  - `time-check`, `usage-check`, `session-start` and `prime` are HOOKS. Their
+ *    output is injected into a Claude session's context, and their cost is paid
+ *    on every prompt Justin types. `session-start` is the strictest of them:
+ *    its entire stdout is ONE JSON envelope, so a notice printed there would
+ *    not be noise, it would make the envelope unparseable — except that notices
+ *    go to stderr, which is why this entry is belt AND braces.
  *  - `update` and `sweep` ARE the upgrade. Telling someone mid-upgrade that an
  *    upgrade is available is noise at best and confusing at worst.
  *  - `skill` prints a document meant to be read whole, and `justin-loop
@@ -189,6 +195,7 @@ export const SELECT_COMMANDS = [
 export const NEVER_COMMANDS = [
   'justin-loop handoff',
   'prime',
+  'session-start',
   'skill',
   'sweep',
   'thread',
@@ -213,12 +220,16 @@ export const ALL_COMMANDS = [
   'eas-update',
   'fix',
   'init',
+  'install',
   'justin-loop',
+  'list',
   'migrate-to-prime',
   'prime',
+  'remove',
   'repo-status',
   'rules-diff',
   'rules-update',
+  'session-start',
   'setup-env',
   'signal',
   'skill',
@@ -239,7 +250,6 @@ export const ALL_COMMANDS = [
  */
 export const COMMAND_ALIASES: Readonly<Record<string, string>> = {
   agent: 'skill',
-  'worktree-setup': 'setup-env',
 };
 
 /** Resolve an alias to its primary; anything else is returned unchanged. */
@@ -416,9 +426,11 @@ function homeDir(env: EnvLike): string {
  * {@link homeDir} with {@link xdgStateHome} so the two cannot drift apart —
  * which they had (uxwc.5 F4).
  *
- * `plugin/lib/prime.ts` keeps its OWN copy, still with the `''` fallback: the
- * plugin package may not import from outside `src/plugin`. It only ever READS
- * through it, so the worst case there is a clone it fails to find.
+ * `prime.ts` keeps its OWN copy, still with the `''` fallback. That copy was
+ * forced by the plugin's import closure, which dchjw.8 retired — it is now
+ * simply an unmerged duplicate, kept because `prime.ts` only ever READS through
+ * it (worst case: a clone it fails to find) and collapsing the two is a change
+ * to the session-start path that this bead had no reason to make.
  */
 export function xdgConfigHome(env: EnvLike = process.env): string {
   const fromEnv = env.XDG_CONFIG_HOME;
@@ -772,9 +784,9 @@ export interface SdkVersionCheckResult {
   checkedAt: string | null;
   /**
    * The running SDK version, or null when its own package.json could not be
-   * read (uxwc.5 F10). Never a placeholder: `getSdkVersion()` answers "0.0.0"
-   * for that case, which rendered as `justin-sdk 0.0.0 → 0.26.0 available
-   * (major)` — a measurement of a version nothing is running.
+   * read (uxwc.5 F10). Never a placeholder: the shared reader answered "0.0.0"
+   * for that case until D4, which rendered as `justin-sdk 0.0.0 → 0.26.0
+   * available (major)` — a measurement of a version nothing is running.
    */
   current: string | null;
   /**
@@ -926,7 +938,7 @@ export async function checkSdkVersion(options: {
 // ---------------------------------------------------------------------------
 
 /** What to run to take the notice's advice (D6). */
-export const UPGRADE_COMMAND = 'bunx @justinhaaheim/justin-sdk update';
+export const UPGRADE_COMMAND = 'bun run justin-sdk update';
 
 /**
  * How long the remote tag listing gets when it is a SIDE ERRAND (uxwc.5 F7).
@@ -960,9 +972,8 @@ export function renderNotice(
 export type NoticeOutcome =
   | {kind: VersionBumpKind; lines: string[]; status: 'notify'}
   | {
-      reason:
-        /** We tried to find out and could not. NOT the same as "nothing newer". */
-        | 'check-failed'
+      reason: /** We tried to find out and could not. NOT the same as "nothing newer". */
+      | 'check-failed'
         | 'disabled'
         /** Nobody has asked yet on this machine. NOT "nothing newer" (F11). */
         | 'never-checked'
@@ -1156,12 +1167,12 @@ export interface ProbeOptions {
 /**
  * The running SDK's own version, or null when it could not be read (F10).
  *
- * `getSdkVersion()` in setup-helpers answers `'0.0.0'` for the same failure,
- * which is right for stamping a config file and WRONG here: it made an
- * unreadable package.json render as `justin-sdk 0.0.0 → 0.26.0 available
- * (major)`, a bump measured against a version nothing is running. That
- * signature has many callers, so this is a local reader rather than a change
- * to it — and it keeps setup-helpers off this module's import path.
+ * `getSdkVersion()` in sdk-identity.ts now returns exactly this — `string |
+ * null`, never `'0.0.0'` (D4 fixed the shared reader, which is what forced the
+ * duplicate here). This copy survives for ONE reason only: keeping sdk-identity
+ * off this module's import path, because a NEVER-tier command must load this
+ * file, read the state table and return without pulling in anything else. If
+ * that constraint ever goes away, delete this and import the shared reader.
  */
 function runningSdkVersion(): string | null {
   try {
@@ -1428,7 +1439,7 @@ export function sdkVersionVerdict(
  */
 
 /** What to run for the full, unabridged version of the heartbeat's output. */
-export const DOCTOR_COMMAND = 'bunx @justinhaaheim/justin-sdk doctor';
+export const DOCTOR_COMMAND = 'bun run justin-sdk doctor';
 
 /** How long the child gets before it is killed (D3). */
 export const DOCTOR_HEARTBEAT_TIMEOUT_MS = 60_000;
@@ -1547,7 +1558,8 @@ export type DoctorHeartbeatSkipReason =
   | 'tier';
 
 export type DoctorHeartbeatDecision =
-  {reason: DoctorHeartbeatSkipReason; status: 'skip'} | {status: 'run'};
+  | {reason: DoctorHeartbeatSkipReason; status: 'skip'}
+  | {status: 'run'};
 
 /**
  * The pure gate (D2's order, minus the two steps that need the filesystem):
@@ -1573,8 +1585,8 @@ export function decideDoctorHeartbeat(options: {
   if (canonical === 'doctor') {
     return {reason: 'is-doctor', status: 'skip'};
   }
-  // NOT before hydration (uxwc.5 F6). `setup-env` (and its `worktree-setup`
-  // alias) is what the post-checkout hook runs on a BRAND NEW worktree: the
+  // NOT before hydration (uxwc.5 F6). `setup-env` is what the post-checkout
+  // hook runs on a BRAND NEW worktree: the
   // config file is committed, so the repo reads as enrolled, but node_modules
   // and the mise tools are not there yet. A heartbeat here reports the
   // failures hydration is seconds away from fixing — and stamps the hour, so

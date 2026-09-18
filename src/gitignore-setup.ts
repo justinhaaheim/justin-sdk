@@ -10,24 +10,24 @@
  *
  * Behavior:
  *  - If .gitignore is missing → copy the template verbatim.
- *  - If .gitignore exists → append only the baseline entries that are
- *    not already present, in a single grouped section.
+ *  - If .gitignore exists → reconcile the baseline through
+ *    `ensureIgnoreEntries`: append what is missing (one grouped section),
+ *    rewrite a near-miss spelling to the canonical one, collapse repeats.
  *
  * Idempotent: re-running produces no spurious changes. Preserves any
  * user-added entries.
  */
 
-import {copyFileSync, existsSync, readFileSync, appendFileSync} from 'fs';
+import {copyFileSync, existsSync} from 'fs';
 import {basename, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
 import {
+  ensureIgnoreEntries,
   fail,
-  readJson,
   setQuiet,
   stepHeader,
   success,
-  writeJson,
 } from './setup-helpers';
 
 // ---------------------------------------------------------------------------
@@ -38,8 +38,15 @@ import {
  * The fuller baseline of .gitignore entries every justin-sdk node-CLI
  * project should have. Order matters when appending into an existing
  * .gitignore (we keep the order stable so re-runs produce the same diff).
+ *
+ * `.env` and `.env.local` are deliberately ABSENT (Justin, 2026-09-18,
+ * home-base-dchjw.6). The local-only pattern across his repos is exactly the
+ * three `*.local` lines below, which already cover `.env.local`; a bare `.env`
+ * is not a pattern his projects use, and the SDK adding one to every repo was
+ * noise. Existing `.env` lines in a consumer's file are left untouched — this
+ * list only says what the SDK ADDS.
  */
-const BASELINE_ENTRIES: ReadonlyArray<string> = [
+export const BASELINE_ENTRIES: ReadonlyArray<string> = [
   'node_modules/',
   'dist/',
   'build/',
@@ -47,10 +54,9 @@ const BASELINE_ENTRIES: ReadonlyArray<string> = [
   '*.log',
   '*.tsbuildinfo',
   '.DS_Store',
-  '.env',
-  '.env.local',
   '*.local',
   '*.local.json',
+  '*.local.*',
   'tmp/',
   '.bv/',
   '.beads/.br_recovery/',
@@ -64,21 +70,6 @@ const BASELINE_ENTRIES: ReadonlyArray<string> = [
 // ---------------------------------------------------------------------------
 // Steps
 // ---------------------------------------------------------------------------
-
-/**
- * Parse a .gitignore into the set of meaningful (non-comment, non-blank)
- * lines, normalized for comparison. We compare on the trimmed line so
- * trailing whitespace differences don't cause spurious appends.
- */
-function existingEntries(content: string): Set<string> {
-  const entries = new Set<string>();
-  for (const rawLine of content.split('\n')) {
-    const line = rawLine.trim();
-    if (line === '' || line.startsWith('#')) continue;
-    entries.add(line);
-  }
-  return entries;
-}
 
 function stepGitignoreFile(projectRoot: string): boolean {
   const gitignorePath = resolve(projectRoot, '.gitignore');
@@ -101,57 +92,26 @@ function stepGitignoreFile(projectRoot: string): boolean {
     return true;
   }
 
-  const content = readFileSync(gitignorePath, 'utf-8');
-  const present = existingEntries(content);
-  const missing = BASELINE_ENTRIES.filter((entry) => !present.has(entry));
+  const result = ensureIgnoreEntries(gitignorePath, BASELINE_ENTRIES, {
+    sectionHeader: 'justin-sdk baseline (appended)',
+  });
 
-  if (missing.length === 0) {
+  if (!result.changed) {
     success('.gitignore already has baseline entries');
     return true;
   }
 
-  // Append a single grouped section. Ensure there's a blank-line separator
-  // before our section so we don't accidentally fuse onto the last line.
-  const needsLeadingNewline = !content.endsWith('\n');
-  let block = '';
-  if (needsLeadingNewline) block += '\n';
-  block += '\n# justin-sdk baseline (appended)\n';
-  for (const entry of missing) {
-    block += `${entry}\n`;
+  if (result.added.length > 0) {
+    success(`Added ${result.added.length} baseline entries to .gitignore`);
   }
-
-  appendFileSync(gitignorePath, block);
-  success(`Added ${missing.length} baseline entries to .gitignore`);
-  return true;
-}
-
-function stepJustinSdkJson(projectRoot: string): boolean {
-  // base-setup ensures the config file exists. We just need to add the
-  // gitignore-setup component if it's not already there.
-  const configPath = resolve(projectRoot, 'justin-sdk.config.json');
-  const config = readJson(configPath);
-
-  if (config == null) {
-    fail(
-      'justin-sdk.config.json not found after base-setup — this should not happen',
-    );
-    return false;
-  }
-
-  const components = (
-    (config.components as string[] | undefined) ?? []
-  ).slice();
-  if (components.includes('gitignore-setup')) {
+  for (const {from, to} of result.rewritten) {
     success(
-      'justin-sdk.config.json already includes gitignore-setup component',
+      `Rewrote .gitignore entry '${from}' → '${to}' (same paths, one spelling)`,
     );
-    return true;
   }
-
-  components.push('gitignore-setup');
-  config.components = components;
-  writeJson(configPath, config);
-  success('Added gitignore-setup to justin-sdk.config.json components');
+  for (const entry of result.removed) {
+    success(`Removed a duplicate .gitignore entry '${entry}'`);
+  }
   return true;
 }
 
@@ -169,6 +129,12 @@ export interface GitignoreSetupOptions {
    * destructive-overwrite path today, so this currently has no effect.
    */
   force?: boolean;
+  /**
+   * The remote the SDK pin tag is verified against, forwarded to base-setup.
+   * Tests point it at a local bare repo so the install is hermetic; production
+   * omits it and base-setup uses the real SDK_REPO_URL (dchjw.17 F7).
+   */
+  sdkRepoUrl?: string;
 }
 
 /**
@@ -197,7 +163,9 @@ export async function runGitignoreSetup(
   const baseExit = await runBaseSetup({
     projectRoot,
     quiet: true,
-    extraComponents: ['gitignore-setup'],
+    // dchjw.17 F7: hermetic when a caller supplies a remote; the real
+    // SDK_REPO_URL when nobody does.
+    ...(options.sdkRepoUrl == null ? {} : {sdkRepoUrl: options.sdkRepoUrl}),
   });
   if (baseExit !== 0) {
     fail('base-setup failed — cannot proceed with gitignore-setup');
@@ -210,10 +178,6 @@ export async function runGitignoreSetup(
   // Step 1: .gitignore (fuller baseline)
   stepHeader('1. .gitignore (full baseline)');
   if (!stepGitignoreFile(projectRoot)) return 1;
-
-  // Step 2: justin-sdk.config.json (ensure gitignore-setup is in components)
-  stepHeader('2. justin-sdk.config.json');
-  if (!stepJustinSdkJson(projectRoot)) return 1;
 
   if (!quiet) {
     console.log(

@@ -85,7 +85,8 @@ export interface Handoff {
 }
 
 export type HandoffParse =
-  {ok: true; handoff: Handoff} | {ok: false; errors: string[]};
+  | {ok: true; handoff: Handoff}
+  | {ok: false; errors: string[]};
 
 /**
  * A single row of `br list --json`, carrying the fields the runner decides from:
@@ -795,7 +796,8 @@ export type RawCreateFlags = Partial<
 };
 
 export type CreateFlagsParse =
-  {ok: true; input: HandoffInput} | {ok: false; errors: string[]};
+  | {ok: true; input: HandoffInput}
+  | {ok: false; errors: string[]};
 
 /** Turn argv into a `HandoffInput`, naming every flag that is wrong or absent. */
 export function parseCreateFlags(flags: RawCreateFlags): CreateFlagsParse {

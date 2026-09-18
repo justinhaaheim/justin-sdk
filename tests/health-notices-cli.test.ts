@@ -36,7 +36,7 @@ import {
   UPGRADE_COMMAND,
   type HealthNoticesState,
 } from '../src/health-notices';
-import {getSdkVersion} from '../src/setup-helpers';
+import {getSdkVersion} from '../src/sdk-identity';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const SRC = resolve(import.meta.dirname, '..', 'src');
@@ -138,7 +138,14 @@ function readSeeded(rigged: Rig): HealthNoticesState {
 }
 
 function expectedNotice(): string {
-  return `justin-sdk ${getSdkVersion()} → ${FAR_FUTURE} available (major)`;
+  const version = getSdkVersion();
+  // An unreadable version would otherwise build the string "justin-sdk null →
+  // …" and this suite would assert against it happily. It is a broken fixture,
+  // so say so here rather than three assertions later.
+  if (version == null) {
+    throw new Error('the SDK could not read its own version — fixture broken');
+  }
+  return `justin-sdk ${version} → ${FAR_FUTURE} available (major)`;
 }
 
 describe('the notice on an eligible command', () => {
@@ -677,9 +684,7 @@ describe('a heartbeat that really runs', () => {
       `justin-sdk doctor (heartbeat) found errors in ${projectRoot}:`,
     );
     expect(on.stderr).toContain('PKG_SCRIPTS');
-    expect(on.stderr).toContain(
-      'full run: bunx @justinhaaheim/justin-sdk doctor',
-    );
+    expect(on.stderr).toContain('full run: bun run justin-sdk doctor');
 
     // Not one byte of it reached stdout: signal's own output is untouched,
     // once its own per-check timings (which differ run to run) are normalised.

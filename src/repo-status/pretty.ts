@@ -44,10 +44,10 @@
  * Part of home-base-qyu1.33.4 / qyu1.33.5.
  */
 
-import {formatTouched} from '../plugin/lib/repo-status/prime-view';
+import {formatTouched} from './prime-view';
 import {PR_STATE_NOT_CHECKED} from './disposition';
 
-import type {FilterSummary} from '../plugin/lib/repo-status/types';
+import type {FilterSummary} from './types';
 import type {Disposition} from './disposition';
 import type {FetchAge} from './fetch-age';
 import type {SubmoduleShift} from './merge-preview';

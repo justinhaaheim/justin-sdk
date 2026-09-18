@@ -43,7 +43,11 @@ afterEach(() => {
 });
 
 function git(cwd: string, args: string[]): string {
-  return execFileSync('git', args, {cwd, encoding: 'utf-8', stdio: 'pipe'}).trim();
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf-8',
+    stdio: 'pipe',
+  }).trim();
 }
 
 function commit(repo: string, file: string, body: string, msg: string): string {

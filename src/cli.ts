@@ -10,10 +10,16 @@
 import yargs from 'yargs';
 import {hideBin} from 'yargs/helpers';
 
-import {ADD_TARGETS, PRESET_NAMES, runAdd} from './add';
+import {
+  ADD_TARGETS,
+  COMPONENTS,
+  corePresetHelpText,
+  PRESET_NAMES,
+  runAdd,
+} from './add';
 import {runBeadsRebuildDryRun} from './beads-rebuild-dryrun';
 import {reportCliFailure} from './cli-failure';
-import {COMPONENT_NAMES} from './components';
+import {COMPONENT_NAMES} from './component-registry';
 import {runDoctor} from './doctor';
 import {runEasUpdate} from './eas-update';
 import {runFix} from './fix';
@@ -28,7 +34,7 @@ import {
   validateHandoffs,
 } from './justin-loop/handoff';
 import {runMigrateToPrime} from './migrate-to-prime';
-import {runPrime} from './plugin/lib/prime';
+import {runPrime} from './prime';
 import {repoStatusCommand} from './repo-status/repo-status';
 // By reference, like repo-status. command.ts imports nothing but yargs TYPES
 // and `await import`s each handler, so zod (and the whole thread module graph)
@@ -40,40 +46,22 @@ import {
 } from './justin-loop/runner';
 import {runRulesDiff} from './rules-diff';
 import {runRulesUpdate} from './rules-update';
+import {
+  getSdkVersion,
+  helpHeader,
+  helpWrapWidth,
+  UNKNOWN_VERSION,
+} from './sdk-identity';
+import {runSessionStart} from './session-start';
 import {runSkill} from './skill';
 import {runSyncRules} from './sync-rules';
 import {runTimeCheck} from './time-check';
 import {runUsageCheck} from './usage-check';
 import {runSetupEnv} from './setup-env-command';
 import {runSignal} from './signal';
-import {runSweep} from './sweep';
+import {INSTALL_PAYLOAD_OPTION, runSweep} from './sweep';
 import {runUpdate} from './update';
 import {worktreeNew} from './worktree-new';
-
-/**
- * The v170 tier flags (--lint/--js/--native) were removed with the tier system
- * (home-base-j2n7) but are still ACCEPTED as hidden no-ops for one release:
- * `.strict()` would otherwise hard-fail any caller that predates the removal
- * (an old post-checkout preamble, a stale alias) instead of just hydrating.
- */
-const DEPRECATED_TIER_FLAGS = ['lint', 'js', 'native'] as const;
-
-function applyDeprecatedTierFlags<T>(y: import('yargs').Argv<T>) {
-  let out = y;
-  for (const flag of DEPRECATED_TIER_FLAGS) {
-    out = out.option(flag, {type: 'boolean', hidden: true});
-  }
-  return out;
-}
-
-function warnDeprecatedTierFlags(argv: Record<string, unknown>): void {
-  const passed = DEPRECATED_TIER_FLAGS.filter((f) => argv[f] === true);
-  if (passed.length > 0) {
-    console.error(
-      `Warning: ${passed.map((f) => `--${f}`).join(' ')} ignored — the tier system was removed (home-base-j2n7); setup-env runs all setup-env:<LABEL> scripts.`,
-    );
-  }
-}
 
 // Handled before yargs: `--skill` is a bare flag, and `demandCommand(1)` would
 // reject it. Mirrors the `tt --skill` convention.
@@ -81,23 +69,22 @@ if (hideBin(process.argv).includes('--skill')) {
   process.exit(runSkill());
 }
 
-const ARGV = hideBin(process.argv);
-
 /**
- * `ralph` is the old name for `justin-loop` (home-base-1r6d.33, D1). Kept for
- * ONE release as a hidden alias.
+ * RETIRED HERE (epic home-base-dchjw.9, 2026-09-18). Each of these had served
+ * its one-release grace period, and each now produces the ordinary yargs
+ * unknown-command / unknown-option error — which is the point: a no-op that
+ * silently accepts a dead spelling teaches callers it still works.
  *
- * Rewritten into `justin-loop` here, before yargs ever sees it, rather than
- * registered as a second command: an alias that shares no code cannot drift from
- * the real command, and `justin-sdk --help` never learns the dead name. Every
- * flag, including `--help`, is then handled by `justin-loop` itself.
+ *  - `ralph`, rewritten into `justin-loop` before yargs saw it (1r6d.33 D1).
+ *  - `worktree-setup`, the pre-j2n7 alias for `setup-env`.
+ *  - `--lint` / `--js` / `--native`, the v170 tier flags accepted as hidden
+ *    no-ops on `setup-env` and `worktree-new`.
+ *
+ * The SDK-owned caller of the dead spellings — the `.husky/post-checkout`
+ * preamble template — was moved to `setup-env` in the same commit, so nothing
+ * the SDK writes still types them.
  */
-if (ARGV[0] === 'ralph') {
-  console.error(
-    'ralph is now justin-loop; the ralph name goes away in the next release',
-  );
-  ARGV[0] = 'justin-loop';
-}
+const ARGV = hideBin(process.argv);
 
 /**
  * The health-notice middleware (home-base-uxwc D7).
@@ -159,8 +146,26 @@ async function healthNoticeMiddleware(argv: {
   }
 }
 
+/**
+ * D4's identity contract, in three parts.
+ *
+ *  - `.version()` is passed EXPLICITLY. Left to itself, yargs reads the
+ *    package.json nearest its own hoisted install, which in a consumer repo is
+ *    that repo's package.json — `justin-sdk --version` printed `0.5.0` in
+ *    ~/Dev/prompts and `0.2.0` in home-base (measured 2026-09-16).
+ *  - `HELP_HEADER` is the first line of `--help`: version plus the directory
+ *    this file is running from, which is the only thing that distinguishes a
+ *    pinned tarball from a bunx cache dir from home-base/pkg/justin-sdk.
+ *  - `.wrap()` exists so that header survives. See helpWrapWidth.
+ */
+const HELP_HEADER = helpHeader('justin-sdk', import.meta.dirname);
+
 void yargs(ARGV)
   .scriptName('justin-sdk')
+  .usage(`${HELP_HEADER}\n\n$0 <command>`)
+  .version(getSdkVersion() ?? UNKNOWN_VERSION)
+  .alias('v', 'version')
+  .wrap(helpWrapWidth(HELP_HEADER, Math.min(80, process.stdout.columns ?? 80)))
   .middleware(healthNoticeMiddleware)
   .command(
     'doctor',
@@ -215,8 +220,9 @@ void yargs(ARGV)
             // Lazy so `sdk-config` (and its 12-13ms of zod) stays out of the
             // CLI's eager module graph — the time-check/usage-check hooks pay
             // for anything imported at the top of this file.
-            const {configSchemaJson, renderConfigSchema} =
-              await import('./sdk-config');
+            const {configSchemaJson, renderConfigSchema} = await import(
+              './sdk-config'
+            );
             if (argv.json) {
               console.log(JSON.stringify(configSchemaJson(), null, 2));
             } else {
@@ -268,20 +274,22 @@ void yargs(ARGV)
     },
   )
   .command(
-    'add <target>',
-    `Add a justin-sdk component or preset (${PRESET_NAMES.join(', ')}) to the current project`,
+    'add <components..>',
+    `Add one or more justin-sdk components (or the preset ${PRESET_NAMES.join(', ')}) to the current project and record them in justin-sdk.config.json`,
     (y) =>
       y
-        .positional('target', {
+        .positional('components', {
           type: 'string',
-          describe:
-            'Component to add, or a preset that expands to several (minimal = base-setup + beads; core = code-quality + beads; all = everything)',
+          array: true,
+          // Computed against the CWD, so `add --help` tells you what `core`
+          // means HERE rather than reciting a list that has drifted (D3).
+          describe: `Components to add, and/or \`core\`. ${corePresetHelpText(process.cwd())}`,
           choices: ADD_TARGETS,
         })
         .option('commit', {
           type: 'boolean',
           describe:
-            'Create a git commit at the end (single-component beads only). Default is off — pass --commit to opt in. Without it, files change in the working tree but nothing is committed, so you can run it like a dry run and inspect the diff first. Presets are always no-commit and ignore this flag.',
+            'Create a git commit at the end (single-component beads only). Default is off — pass --commit to opt in. Without it, files change in the working tree but nothing is committed, so you can run it like a dry run and inspect the diff first. More than one component is always no-commit and ignores this flag.',
           default: false,
         })
         .option('force', {
@@ -291,7 +299,7 @@ void yargs(ARGV)
           default: false,
         }),
     async (argv) => {
-      const exitCode = await runAdd(argv.target as string, {
+      const exitCode = await runAdd((argv.components as string[]) ?? [], {
         commit: argv.commit,
         force: argv.force,
         projectRoot: process.cwd(),
@@ -300,15 +308,81 @@ void yargs(ARGV)
     },
   )
   .command(
-    'init',
-    'Scaffold a greenfield project (package.json + all add components; pass --commit to also commit)',
+    'remove <components..>',
+    'Remove one or more justin-sdk components from the current project. Deletes a file ONLY when its bytes are identical to what the component would write now, and an appended entry (script, ignore line, hook, config block) only on an exact match; anything else is reported and left in place.',
+    (y) =>
+      y.positional('components', {
+        type: 'string',
+        array: true,
+        describe:
+          'Components to remove. base-setup cannot be removed — every component applies it.',
+        choices: COMPONENTS as readonly string[],
+      }),
+    async (argv) => {
+      const {runRemove} = await import('./remove');
+      process.exit(
+        runRemove((argv.components as string[]) ?? [], {
+          projectRoot: process.cwd(),
+        }),
+      );
+    },
+  )
+  .command(
+    'install',
+    'Reconcile this repo against justin-sdk.config.json: install what it lists and the repo lacks, and re-apply the rest. It NEVER removes — anything on disk that the config does not list is named and kept, and taking it out is `remove <name…>` or `install --prune`. An absent `components` key means the core preset.',
     (y) =>
       y
-        .option('preset', {
+        .option('dry-run', {
+          type: 'boolean',
+          describe: 'Print the plan and change nothing',
+          default: false,
+        })
+        .option('prune', {
+          type: 'boolean',
+          describe:
+            'ALSO remove components that are on disk but absent from justin-sdk.config.json#components, under the same identity rules as `remove` (byte-identical files, exact-match entries; everything else reported and left). Read the plan first with `--prune --dry-run`.',
+          default: false,
+        })
+        .option('force', {
+          type: 'boolean',
+          describe: 'Pass --force to the underlying installers',
+          default: false,
+        })
+        .option('quiet', {
+          type: 'boolean',
+          describe: 'Suppress non-error output',
+          default: false,
+        }),
+    async (argv) => {
+      const {runInstall} = await import('./install');
+      const exitCode = await runInstall({
+        dryRun: argv['dry-run'],
+        force: argv.force,
+        projectRoot: process.cwd(),
+        prune: argv.prune,
+        quiet: argv.quiet,
+      });
+      process.exit(exitCode);
+    },
+  )
+  .command(
+    'list',
+    'List every justin-sdk component with its purpose, whether it is installed here, whether it applies to this repo, and whether the config asks for it',
+    (y) => y,
+    async () => {
+      const {runList} = await import('./list');
+      process.exit(runList(process.cwd()));
+    },
+  )
+  .command(
+    'init',
+    'Enrol a repo: write justin-sdk.config.json, declare the SDK devDependency (tag verified on the remote) and add the shared package.json scripts. NO components — `add core` installs every component that applies to the repo, and `add <name…>` picks specific ones.',
+    (y) =>
+      y
+        .option('components', {
           type: 'string',
-          describe: 'Preset to use',
-          default: 'node-cli',
-          choices: ['node-cli'],
+          describe:
+            'Comma-separated components to LIST in the new config (they are not installed — run `install`). Omit this and the config has no `components` key, which means it tracks the `core` preset as the registry grows.',
         })
         .option('allow-dirty', {
           type: 'boolean',
@@ -327,14 +401,16 @@ void yargs(ARGV)
           default: false,
         }),
     async (argv) => {
-      if (argv.preset !== 'node-cli') {
-        console.error(
-          `Error: preset '${argv.preset}' not yet supported (planned for future release)`,
-        );
-        process.exit(1);
-      }
+      const components =
+        argv.components == null
+          ? undefined
+          : String(argv.components)
+              .split(',')
+              .map((name) => name.trim())
+              .filter((name) => name.length > 0);
       const exitCode = await runInit({
         allowDirty: argv['allow-dirty'],
+        components,
         force: argv.force,
         noCommit: !argv.commit,
         projectRoot: process.cwd(),
@@ -375,11 +451,6 @@ void yargs(ARGV)
           describe: 'Pass --force to underlying add commands',
           default: false,
         })
-        .option('skip-prompts-fetch', {
-          type: 'boolean',
-          describe: 'Skip fetching the prompts library (used by tests)',
-          default: false,
-        })
         .option('quiet', {
           type: 'boolean',
           describe: 'Suppress non-error output',
@@ -394,7 +465,6 @@ void yargs(ARGV)
         noSelfUpdate: !argv['self-update'],
         projectRoot: process.cwd(),
         quiet: argv.quiet,
-        skipPromptsFetch: argv['skip-prompts-fetch'],
       });
       process.exit(exitCode);
     },
@@ -779,6 +849,20 @@ void yargs(ARGV)
     },
   )
   .command(
+    'session-start',
+    'SessionStart hook: the ONE command that runs at session start (epic home-base-dchjw D6, which retired the `prime` plugin). Remote (CLAUDE_CODE_REMOTE=true) hands off to setup-env. Locally it emits doctor --quiet, the repo-state block and the rules-drift notice as a SessionStart JSON envelope — repo state and doctor to the model, freshness verdicts to Justin. Read-only; always exits 0 so a failure can never silently swallow the session start.',
+    (y) =>
+      y.option('user-level', {
+        type: 'boolean',
+        default: false,
+        describe:
+          'Run as the USER-LEVEL hook in ~/.claude/settings.json: print NOTHING and exit 0 when the project root carries justin-sdk.config.json (the project hook owns that repo), otherwise print the rules pointer and the repo-state block. This is what keeps the repo state reaching UNENROLLED repos without two hooks ever both firing.',
+      }),
+    async (argv) => {
+      process.exit(await runSessionStart({userLevel: argv['user-level']}));
+    },
+  )
+  .command(
     ['skill', 'agent'],
     'Print the guide to justin-sdk: install/upgrade, how it runs, the component table and command list (both derived, so they cannot go stale)',
     (y) => y,
@@ -883,7 +967,7 @@ void yargs(ARGV)
   )
   .command(
     'migrate-to-prime',
-    'One-time migration to justin-sdk prime: remove docs/prompts + AGENTS.md (safe/recoverable only) + standalone CLAUDE.md @-refs + the now-redundant per-project prime SessionStart hook (the prime plugin injects globally), and flag anything needing manual review. Idempotent; default no-commit.',
+    'One-time migration to justin-sdk prime: remove docs/prompts + AGENTS.md (safe/recoverable only) + standalone CLAUDE.md @-refs, and flag anything needing manual review. Idempotent; default no-commit. It no longer touches .claude/settings.json — the per-project SessionStart hook is the mechanism now that dchjw.8 (D6) retired the plugin, not a duplicate of it.',
     (y) =>
       y
         .option('commit', {
@@ -907,24 +991,21 @@ void yargs(ARGV)
     },
   )
   .command(
-    ['setup-env', 'worktree-setup'],
-    'Hydrate this checkout (worktree, clone, or primary): mise trust, init submodules, install deps, copy the .worktreeinclude files from the primary checkout, run setup-env:<LABEL> scripts. Remote (CLAUDE_CODE_REMOTE=true) additionally bootstraps mise + PATH and runs doctor --fix --yes. Report goes to stderr; stdout stays empty. (`worktree-setup` is the deprecated pre-j2n7 name.)',
+    'setup-env',
+    'Hydrate this checkout (worktree, clone, or primary): mise trust, init submodules, install deps, copy the .worktreeinclude files from the primary checkout, run setup-env:<LABEL> scripts. Remote (CLAUDE_CODE_REMOTE=true) additionally bootstraps mise + PATH and runs doctor --fix --yes. Report goes to stderr; stdout stays empty.',
     (y) =>
-      applyDeprecatedTierFlags(
-        y
-          .option('target', {
-            type: 'string',
-            describe:
-              'Directory to hydrate (default: cwd). Lets you run this from the primary checkout, where the SDK is already installed.',
-          })
-          .option('dry-run', {
-            type: 'boolean',
-            describe: 'Print what would happen and change nothing',
-            default: false,
-          }),
-      ),
+      y
+        .option('target', {
+          type: 'string',
+          describe:
+            'Directory to hydrate (default: cwd). Lets you run this from the primary checkout, where the SDK is already installed.',
+        })
+        .option('dry-run', {
+          type: 'boolean',
+          describe: 'Print what would happen and change nothing',
+          default: false,
+        }),
     async (argv) => {
-      warnDeprecatedTierFlags(argv);
       const exitCode = await runSetupEnv({
         dryRun: argv['dry-run'],
         target: argv.target,
@@ -954,9 +1035,9 @@ void yargs(ARGV)
         })
         .option('component', {
           type: 'string',
-          choices: [...COMPONENT_NAMES],
+          choices: [...COMPONENT_NAMES, INSTALL_PAYLOAD_OPTION],
           describe:
-            'Scope the payload to ONE component and leave the SDK pin alone: no pin bump, no `update`, no other component re-applied — so a rules/config edit does not ship an SDK upgrade to the whole fleet. Repos not enrolled in the component are skipped. Same gates either way. Unknown name refuses the whole run.',
+            'Which payload to sweep. A COMPONENT NAME scopes the run to that one component and leaves the SDK pin alone: no pin bump, no `update`, no other component re-applied — so a rules/config edit does not ship an SDK upgrade to the whole fleet, and repos not enrolled in it are skipped. `install` is the ENROLLMENT REFRESH: in every enrolled repo it ADOPTS installed-but-unlisted components into justin-sdk.config.json, deletes the dead `version`/`lastSynced`/`componentConfig["critical-rules"].modules` keys, bumps the SDK pin to this release (tag verified on the remote first), and runs `install` with REMOVALS DISABLED — a sweep never removes a component; that is a per-repo decision made with `remove`. Omit the option for the historical full sweep (pin bump + `update`). Same gates for all three. Unknown name refuses the whole run.',
         }),
     async (argv) => {
       process.exit(
@@ -973,22 +1054,19 @@ void yargs(ARGV)
     'worktree-new <slug>',
     'Create a worktree the way Claude Code does — .claude/worktrees/<slug> on branch worktree-<slug> — then hydrate it. Prints exactly one stdout line, the absolute worktree path, for the `wt` shell function to cd into.',
     (y) =>
-      applyDeprecatedTierFlags(
-        y
-          .positional('slug', {
-            type: 'string',
-            describe:
-              'Names both the directory and the branch. [A-Za-z0-9._-] only — no slashes.',
-          })
-          .option('setup', {
-            type: 'boolean',
-            describe:
-              'Hydrate after creating (default). Pass --no-setup to create only.',
-            default: true,
-          }),
-      ),
+      y
+        .positional('slug', {
+          type: 'string',
+          describe:
+            'Names both the directory and the branch. [A-Za-z0-9._-] only — no slashes.',
+        })
+        .option('setup', {
+          type: 'boolean',
+          describe:
+            'Hydrate after creating (default). Pass --no-setup to create only.',
+          default: true,
+        }),
     (argv) => {
-      warnDeprecatedTierFlags(argv);
       const result = worktreeNew({
         noSetup: !argv.setup,
         slug: argv.slug as string,

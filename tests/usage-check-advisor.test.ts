@@ -365,7 +365,10 @@ describe('the reading itself', () => {
       }),
     );
     const path = join(dir, 'transcript.jsonl');
-    writeFileSync(path, `${records.map((r) => JSON.stringify(r)).join('\n')}\n`);
+    writeFileSync(
+      path,
+      `${records.map((r) => JSON.stringify(r)).join('\n')}\n`,
+    );
 
     const facts = readTranscriptFacts({
       lowestSetpoint: 100_000,

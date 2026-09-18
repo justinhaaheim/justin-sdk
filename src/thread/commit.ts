@@ -62,11 +62,8 @@ import {
 } from 'fs';
 import {join} from 'path';
 
-import {
-  resolveThreadConfig,
-  THREAD_DEFAULT_AUTO_COMMIT,
-  THREAD_DEFAULT_AUTO_PUSH,
-} from './config';
+import {resolveThreadConfig} from './config';
+import {THREAD_DEFAULT_AUTO_COMMIT, THREAD_DEFAULT_AUTO_PUSH} from './defaults';
 import {threadsRepoDir, threadsStateDir} from './paths';
 
 import type {EnvLike} from './paths';
@@ -323,7 +320,11 @@ export const PUSH_TIMEOUT_MS = 20_000;
  * the dashboard disagree about the same repo.
  */
 export function aheadOfOrigin(dir: string, env: EnvLike): AheadOutcome {
-  const remote = run(dir, ['config', '--get', `remote.${PUSH_REMOTE}.url`], env);
+  const remote = run(
+    dir,
+    ['config', '--get', `remote.${PUSH_REMOTE}.url`],
+    env,
+  );
   if (!remote.ok || remote.stdout.trim() === '') return {kind: 'no-remote'};
 
   const branch = run(dir, ['rev-parse', '--abbrev-ref', 'HEAD'], env);

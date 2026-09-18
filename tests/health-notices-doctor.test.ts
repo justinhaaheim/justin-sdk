@@ -360,16 +360,17 @@ describe('decideDoctorHeartbeat', () => {
     // The post-checkout hook runs this on a brand new worktree whose committed
     // config already reads as enrolled. Doctor would report the failures
     // hydration is about to fix, and stamp the hour on the way out.
-    for (const name of ['setup-env', 'worktree-setup']) {
-      expect(
-        decideDoctorHeartbeat({...base, commandName: name, config: config()}),
-      ).toEqual({reason: 'is-setup-env', status: 'skip'});
-    }
+    expect(
+      decideDoctorHeartbeat({
+        ...base,
+        commandName: 'setup-env',
+        config: config(),
+      }),
+    ).toEqual({reason: 'is-setup-env', status: 'skip'});
   });
 
   test('the version notice still speaks for setup-env — it needs nothing from the checkout', () => {
     expect(callsiteTier('setup-env')).toBe(3);
-    expect(callsiteTier('worktree-setup')).toBe(3);
   });
 
   test('a NEVER command is not eligible', () => {
@@ -742,7 +743,7 @@ describe('runDoctorHeartbeat', () => {
     const {calls, spawner} = spy(passed());
 
     const result = await runDoctorHeartbeat({
-      commandName: 'worktree-setup',
+      commandName: 'setup-env',
       env: rigged.env,
       projectRoot: rigged.projectRoot,
       spawner,

@@ -156,7 +156,7 @@ describe('beads-setup (file operations)', () => {
     expect(settings.sandbox?.excludedCommands).toContain('br');
   });
 
-  test('adds beads-setup to justin-sdk.config.json components', async () => {
+  test('does NOT touch justin-sdk.config.json components (F11)', async () => {
     if (!hasBr) return;
     const sb = track(
       createProjectSandbox({
@@ -168,8 +168,9 @@ describe('beads-setup (file operations)', () => {
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
     ) as {components?: string[]};
-    expect(config.components).toContain('base-setup');
-    expect(config.components).toContain('beads-setup');
+    // The INSTALLER no longer registers itself: only `add` and `remove` write
+    // `components`. The list is left exactly as the fixture wrote it.
+    expect(config.components).toEqual(['base-setup']);
   });
 });
 

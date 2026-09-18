@@ -10,7 +10,7 @@
 
 import {describe, test, expect, afterEach} from 'bun:test';
 
-import {assemble, numberHeaders} from '../src/plugin/lib/prime';
+import {assemble, numberHeaders} from '../src/prime';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -79,7 +79,7 @@ const BD_DOLT_METADATA =
 function beadsRuleIncluded(projectPath: string): boolean {
   const prompts = beadsPromptsFixture();
   const out = assemble(
-    {format: 'markdown', partition: 'conditional', promptsDir: prompts.path},
+    {partition: 'conditional', promptsDir: prompts.path},
     projectPath,
   );
   return out.text.includes('BEADS_ONLY');
@@ -107,9 +107,9 @@ describe('isBeadsRust predicate', () => {
   // Degrade toward showing the rules, not silently dropping them, if br's
   // metadata schema shifts under us.
   test('still matches if br changes its schema, so long as it is not dolt', () => {
-    expect(beadsRuleIncluded(beadsProject('{"database":"beads-v2.sqlite"}'))).toBe(
-      true,
-    );
+    expect(
+      beadsRuleIncluded(beadsProject('{"database":"beads-v2.sqlite"}')),
+    ).toBe(true);
   });
 });
 
@@ -178,7 +178,7 @@ describe('prime assemble() partition', () => {
   test("'universal' includes only non-includeIf modules (RN project)", () => {
     const prompts = promptsFixture();
     const out = assemble(
-      {format: 'markdown', partition: 'universal', promptsDir: prompts.path},
+      {partition: 'universal', promptsDir: prompts.path},
       RN_PROJECT(),
     );
     expect(out.text).toContain('UNIVERSAL_A');
@@ -190,7 +190,7 @@ describe('prime assemble() partition', () => {
   test("'conditional' includes only matching includeIf modules (RN project)", () => {
     const prompts = promptsFixture();
     const out = assemble(
-      {format: 'markdown', partition: 'conditional', promptsDir: prompts.path},
+      {partition: 'conditional', promptsDir: prompts.path},
       RN_PROJECT(),
     );
     expect(out.text).toContain('RN_ONLY');
@@ -202,7 +202,7 @@ describe('prime assemble() partition', () => {
   test("'conditional' is empty on a project the predicate doesn't match", () => {
     const prompts = promptsFixture();
     const out = assemble(
-      {format: 'markdown', partition: 'conditional', promptsDir: prompts.path},
+      {partition: 'conditional', promptsDir: prompts.path},
       PLAIN_PROJECT(),
     );
     expect(out.count).toBe(0);
@@ -212,7 +212,7 @@ describe('prime assemble() partition', () => {
   test("'full' includes universal + matching conditional (RN project)", () => {
     const prompts = promptsFixture();
     const out = assemble(
-      {format: 'markdown', partition: 'full', promptsDir: prompts.path},
+      {partition: 'full', promptsDir: prompts.path},
       RN_PROJECT(),
     );
     expect(out.text).toContain('UNIVERSAL_A');
@@ -224,7 +224,7 @@ describe('prime assemble() partition', () => {
   test("'full' drops a conditional whose predicate is false (plain project)", () => {
     const prompts = promptsFixture();
     const out = assemble(
-      {format: 'markdown', partition: 'full', promptsDir: prompts.path},
+      {partition: 'full', promptsDir: prompts.path},
       PLAIN_PROJECT(),
     );
     expect(out.text).toContain('UNIVERSAL_A');
@@ -234,17 +234,14 @@ describe('prime assemble() partition', () => {
 
   test('defaults to full when no partition is given', () => {
     const prompts = promptsFixture();
-    const out = assemble(
-      {format: 'markdown', promptsDir: prompts.path},
-      RN_PROJECT(),
-    );
+    const out = assemble({promptsDir: prompts.path}, RN_PROJECT());
     expect(out.count).toBe(3);
   });
 
   test('markdown carries an UNNUMBERED "# Critical Rules" title; text does not', () => {
     const prompts = promptsFixture();
     const out = assemble(
-      {format: 'markdown', partition: 'universal', promptsDir: prompts.path},
+      {partition: 'universal', promptsDir: prompts.path},
       RN_PROJECT(),
     );
     expect(out.markdown.startsWith('# Critical Rules\n')).toBe(true);
@@ -257,7 +254,7 @@ describe('prime assemble() partition', () => {
     sb.writeFile('src/rules/a.md', '# Alpha\n\n## Alpha sub');
     sb.writeFile('src/rules/b.md', '# Beta');
     const out = assemble(
-      {format: 'markdown', partition: 'universal', promptsDir: sb.path},
+      {partition: 'universal', promptsDir: sb.path},
       PLAIN_PROJECT(),
     );
     // The title takes no number and does not consume the "1" slot, and the
@@ -283,7 +280,7 @@ describe('prime assemble() partition', () => {
     );
     // Conditional partition (the hook injection) → P- prefix, starting at P-1.
     const cond = assemble(
-      {format: 'markdown', partition: 'conditional', promptsDir: sb.path},
+      {partition: 'conditional', promptsDir: sb.path},
       RN_PROJECT(),
     );
     expect(cond.text.split('\n').filter((l) => l.startsWith('#'))).toEqual([
@@ -293,7 +290,7 @@ describe('prime assemble() partition', () => {
     ]);
     // Universal partition (the autoloaded file) → plain, unaffected by the prefix.
     const uni = assemble(
-      {format: 'markdown', partition: 'universal', promptsDir: sb.path},
+      {partition: 'universal', promptsDir: sb.path},
       RN_PROJECT(),
     );
     expect(uni.text).toContain('# 1. Universal');
@@ -329,7 +326,7 @@ describe('prime assemble() partition — nested refs & invariants', () => {
   test('a nested conditional child travels with its universal parent (not lost)', () => {
     const prompts = nestedUniversalParent();
     const uni = assemble(
-      {format: 'markdown', partition: 'universal', promptsDir: prompts.path},
+      {partition: 'universal', promptsDir: prompts.path},
       RN_PROJECT(),
     );
     // parent is top-level universal -> kept, and its nested conditional child
@@ -338,7 +335,7 @@ describe('prime assemble() partition — nested refs & invariants', () => {
     expect(uni.text).toContain('NESTED_C');
     // conditional half gets neither (the whole subtree already went to universal)
     const cond = assemble(
-      {format: 'markdown', partition: 'conditional', promptsDir: prompts.path},
+      {partition: 'conditional', promptsDir: prompts.path},
       RN_PROJECT(),
     );
     expect(cond.text).toBe('');
@@ -347,13 +344,13 @@ describe('prime assemble() partition — nested refs & invariants', () => {
   test('a nested universal child travels with its conditional parent', () => {
     const prompts = nestedConditionalParent();
     const cond = assemble(
-      {format: 'markdown', partition: 'conditional', promptsDir: prompts.path},
+      {partition: 'conditional', promptsDir: prompts.path},
       RN_PROJECT(),
     );
     expect(cond.text).toContain('PARENT_C');
     expect(cond.text).toContain('NESTED_U');
     const uni = assemble(
-      {format: 'markdown', partition: 'universal', promptsDir: prompts.path},
+      {partition: 'universal', promptsDir: prompts.path},
       RN_PROJECT(),
     );
     expect(uni.text).toBe('');
@@ -392,7 +389,7 @@ describe('prime assemble() path fallback', () => {
   test('reads src/rules when present', () => {
     const prompts = promptsFixture('src/rules');
     const out = assemble(
-      {format: 'markdown', partition: 'universal', promptsDir: prompts.path},
+      {partition: 'universal', promptsDir: prompts.path},
       RN_PROJECT(),
     );
     expect(out.count).toBe(2);
@@ -401,7 +398,7 @@ describe('prime assemble() path fallback', () => {
   test('falls back to legacy src/guidelines when src/rules is absent', () => {
     const prompts = promptsFixture('src/guidelines');
     const out = assemble(
-      {format: 'markdown', partition: 'universal', promptsDir: prompts.path},
+      {partition: 'universal', promptsDir: prompts.path},
       RN_PROJECT(),
     );
     expect(out.text).toContain('UNIVERSAL_A');

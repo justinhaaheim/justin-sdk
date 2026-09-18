@@ -49,8 +49,11 @@ import {
 // Step implementations
 // ---------------------------------------------------------------------------
 
-const DEFAULT_LINT_STAGED_CONFIG: Record<string, string[]> = {
-  '*.{ts,tsx,js,jsx,cjs,mjs}': ['bun run lint-base -- --fix', 'prettier --write'],
+export const DEFAULT_LINT_STAGED_CONFIG: Record<string, string[]> = {
+  '*.{ts,tsx,js,jsx,cjs,mjs}': [
+    'bun run lint-base -- --fix',
+    'prettier --write',
+  ],
   '*.{json,md,yml,yaml}': ['prettier --write'],
 };
 
@@ -254,9 +257,9 @@ export const POST_CHECKOUT_MARKER_END = '# <<< justin-sdk:worktree-hydration';
  * The hand-rolled fresh-checkout block the managed preamble SUPERSEDES.
  *
  * home-base carried exactly this shape (`[ -d node_modules ] || { git submodule
- * update --init --recursive; bun install; }`) since 2026-06-06. `worktree-setup`
+ * update --init --recursive; bun install; }`) since 2026-06-06. `setup-env`
  * does submodules AND install as of SDK v0.12.1, plus mise trust,
- * `.worktreeinclude` copies, and the project's own `worktree-source:` scripts —
+ * `.worktreeinclude` copies, and the project's own `setup-env:<LABEL>` scripts —
  * so leaving the old block in place would only double the install.
  *
  * Recognized structurally (open line → first column-0 `}`) rather than by exact
@@ -526,6 +529,12 @@ export interface HuskySetupOptions {
    * user's existing `prepare` script — that's always preserved.
    */
   force?: boolean;
+  /**
+   * The remote the SDK pin tag is verified against, forwarded to base-setup.
+   * Tests point it at a local bare repo so the install is hermetic; production
+   * omits it and base-setup uses the real SDK_REPO_URL (dchjw.17 F7).
+   */
+  sdkRepoUrl?: string;
 }
 
 /**
@@ -558,7 +567,9 @@ export async function runHuskySetup(
   const baseExit = await runBaseSetup({
     projectRoot,
     quiet: true,
-    extraComponents: ['husky-setup'],
+    // dchjw.17 F7: hermetic when a caller supplies a remote; the real
+    // SDK_REPO_URL when nobody does.
+    ...(options.sdkRepoUrl == null ? {} : {sdkRepoUrl: options.sdkRepoUrl}),
   });
   if (baseExit !== 0) {
     fail('base-setup failed — cannot proceed with husky-setup');

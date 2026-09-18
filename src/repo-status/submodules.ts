@@ -68,7 +68,7 @@ import {execFileSync} from 'child_process';
 import {existsSync, realpathSync} from 'fs';
 import {join} from 'path';
 
-import type {WorktreeEntry} from '../plugin/lib/repo-status/types';
+import type {WorktreeEntry} from './types';
 
 import {readWorktreeState, type WorktreeState} from './worktree-state';
 
@@ -530,7 +530,9 @@ function readStore(dir: string): StoreFacts | null {
   // a submodule checkout is usually on a detached HEAD with no upstream at all.
   const unpushedCommits =
     hasRemoteRefs && head != null
-      ? toCount(gitArgv(['rev-list', '--count', 'HEAD', '--not', '--remotes'], dir))
+      ? toCount(
+          gitArgv(['rev-list', '--count', 'HEAD', '--not', '--remotes'], dir),
+        )
       : null;
 
   const upstreamRef = resolveUpstream(dir);
@@ -539,7 +541,15 @@ function readStore(dir: string): StoreFacts | null {
       ? toCount(gitArgv(['rev-list', '--count', `HEAD..${upstreamRef}`], dir))
       : null;
 
-  return {behind, branch, hasRemoteRefs, head, store, unpushedCommits, upstreamRef};
+  return {
+    behind,
+    branch,
+    hasRemoteRefs,
+    head,
+    store,
+    unpushedCommits,
+    upstreamRef,
+  };
 }
 
 function toCount(out: string | null): number | null {
@@ -607,7 +617,8 @@ function buildCheckout(
 ): SubmoduleCheckout {
   const recordedPointer = pointerInHead(worktree.path, subPath);
   const staged = pointerInIndex(worktree.path, subPath);
-  const stagedPointer = staged != null && staged !== recordedPointer ? staged : null;
+  const stagedPointer =
+    staged != null && staged !== recordedPointer ? staged : null;
 
   const dir = join(worktree.path, subPath);
   const facts = openStore ? readStore(dir) : null;
@@ -1265,9 +1276,7 @@ function decideRowFindings(
 function relativeToPrimary(path: string, primary: string | null): string {
   if (primary == null) return path;
   if (path === primary) return '.';
-  return path.startsWith(`${primary}/`)
-    ? path.slice(primary.length + 1)
-    : path;
+  return path.startsWith(`${primary}/`) ? path.slice(primary.length + 1) : path;
 }
 
 function summarise(

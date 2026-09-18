@@ -620,7 +620,10 @@ export function contextTokensFromUsage(usage: unknown): number | null {
   }
 
   let total = input;
-  for (const key of ['cache_creation_input_tokens', 'cache_read_input_tokens']) {
+  for (const key of [
+    'cache_creation_input_tokens',
+    'cache_read_input_tokens',
+  ]) {
     const value = fields[key];
     if (value == null) {
       continue;

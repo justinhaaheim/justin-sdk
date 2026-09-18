@@ -209,6 +209,12 @@ export interface TsconfigSetupOptions {
    * current expected state (currently: tsconfig.json + devDep versions).
    */
   force?: boolean;
+  /**
+   * The remote the SDK pin tag is verified against, forwarded to base-setup.
+   * Tests point it at a local bare repo so the install is hermetic; production
+   * omits it and base-setup uses the real SDK_REPO_URL (dchjw.17 F7).
+   */
+  sdkRepoUrl?: string;
 }
 
 /**
@@ -243,7 +249,9 @@ export async function runTsconfigSetup(
   const baseExit = await runBaseSetup({
     projectRoot,
     quiet: true,
-    extraComponents: ['tsconfig-setup'],
+    // dchjw.17 F7: hermetic when a caller supplies a remote; the real
+    // SDK_REPO_URL when nobody does.
+    ...(options.sdkRepoUrl == null ? {} : {sdkRepoUrl: options.sdkRepoUrl}),
   });
   if (baseExit !== 0) {
     fail('base-setup failed — cannot proceed with tsconfig-setup');

@@ -40,7 +40,7 @@
 
 import {execFileSync} from 'child_process';
 
-import {renderGitCommand} from '../plugin/lib/repo-status/core';
+import {renderGitCommand} from './core';
 import {previewMerge, type MergePreview} from './merge-preview';
 
 /** Pairs that may be merge-checked in one run, after the shared-file screen. */
@@ -48,7 +48,6 @@ export const DEFAULT_PAIR_CAP = 20;
 
 /** Cap on a reported shared-path LIST. Counts are never capped. */
 const SHARED_FILE_CAP = 12;
-
 
 /**
  * The paths a branch changed relative to its merge base with the baseline — or
@@ -214,9 +213,16 @@ export function buildOverlaps(
   // shared files first (most likely to actually collide), then most recently
   // touched (most likely to be live work someone is about to merge).
   pending.sort((x, y) => {
-    if (x.shared.length !== y.shared.length) return y.shared.length - x.shared.length;
-    const xDate = x.a.lastCommitDate > x.b.lastCommitDate ? x.a.lastCommitDate : x.b.lastCommitDate;
-    const yDate = y.a.lastCommitDate > y.b.lastCommitDate ? y.a.lastCommitDate : y.b.lastCommitDate;
+    if (x.shared.length !== y.shared.length)
+      return y.shared.length - x.shared.length;
+    const xDate =
+      x.a.lastCommitDate > x.b.lastCommitDate
+        ? x.a.lastCommitDate
+        : x.b.lastCommitDate;
+    const yDate =
+      y.a.lastCommitDate > y.b.lastCommitDate
+        ? y.a.lastCommitDate
+        : y.b.lastCommitDate;
     return yDate.localeCompare(xDate);
   });
 
@@ -228,9 +234,7 @@ export function buildOverlaps(
     return {
       a: p.a.name,
       b: p.b.name,
-      conflict: withinCap
-        ? previewMerge(p.a.name, p.b.name, opts.cwd)
-        : null,
+      conflict: withinCap ? previewMerge(p.a.name, p.b.name, opts.cwd) : null,
       sharedFileCount: p.shared.length,
       sharedFiles: truncated ? p.shared.slice(0, SHARED_FILE_CAP) : p.shared,
       sharedFilesTruncated: truncated,

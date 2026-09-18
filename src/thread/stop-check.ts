@@ -429,7 +429,10 @@ export function runThreadStopCheck(args?: {
       console.error(
         `[thread stop-check] not blocking: could not write the loop guard at ${mark.path} (${mark.error})`,
       );
-      return finish({action: 'pass', reason: null, why: 'markerWriteFailed'}, 0);
+      return finish(
+        {action: 'pass', reason: null, why: 'markerWriteFailed'},
+        0,
+      );
     }
 
     const reason = decision.reason ?? STOP_CHECK_BLOCK_REASON;

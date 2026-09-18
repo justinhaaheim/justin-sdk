@@ -9,7 +9,8 @@ import {describe, test, expect, afterEach} from 'bun:test';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
-import {runBaseSetup} from '../src/base-setup';
+import {addComponentsToConfig, runBaseSetup} from '../src/base-setup';
+import {sdkRemoteWithOwnTag} from './git-fixtures';
 import {createProjectSandbox, createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -20,50 +21,59 @@ function track(sandbox: Sandbox): Sandbox {
 }
 
 afterEach(() => {
+  cachedRemote = null;
   while (sandboxes.length > 0) {
     const sb = sandboxes.pop();
     sb?.cleanup();
   }
 });
 
+/** The local bare remote for THIS test, built once. See sdkRemoteWithOwnTag. */
+let cachedRemote: string | null = null;
+
+function sdkRemote(): string {
+  cachedRemote ??= sdkRemoteWithOwnTag(track);
+  return cachedRemote;
+}
+
 describe('base-setup', () => {
-  test('creates justin-sdk.config.json with sensible defaults', async () => {
+  test('creates an EMPTY justin-sdk.config.json — {} is a complete config', async () => {
     const sb = track(createProjectSandbox());
     const exitCode = await runBaseSetup({
       projectRoot: sb.path,
       quiet: true,
+      sdkRepoUrl: sdkRemote(),
     });
     expect(exitCode).toBe(0);
 
     expect(existsSync(join(sb.path, 'justin-sdk.config.json'))).toBe(true);
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
-    ) as {
-      version?: string;
-      components?: string[];
-      lastSynced?: string;
-    };
-    expect(config.version).toBeDefined();
-    expect(config.components).toContain('base-setup');
-    expect(config.lastSynced).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    ) as Record<string, unknown>;
+    // No components (absent = core), and neither write-only stamp (D3).
+    expect(config).toEqual({});
   });
 
-  test('extraComponents are added to justin-sdk.config.json', async () => {
+  test('addComponentsToConfig records a component, and never base-setup', async () => {
     const sb = track(createProjectSandbox());
     await runBaseSetup({
       projectRoot: sb.path,
       quiet: true,
-      extraComponents: ['beads-setup'],
+      sdkRepoUrl: sdkRemote(),
     });
+    expect(addComponentsToConfig(sb.path, ['beads-setup'])).toEqual([
+      'beads-setup',
+    ]);
+    // Idempotent: a second call adds nothing and reports nothing.
+    expect(addComponentsToConfig(sb.path, ['beads-setup'])).toEqual([]);
 
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
     ) as {components?: string[]};
-    expect(config.components).toContain('base-setup');
-    expect(config.components).toContain('beads-setup');
+    expect(config.components).toEqual(['beads-setup']);
   });
 
-  test('preserves existing justin-sdk.config.json fields', async () => {
+  test('preserves existing fields and DROPS the two retired stamps', async () => {
     const sb = track(
       createProjectSandbox({
         justinSdkConfig: {
@@ -75,7 +85,11 @@ describe('base-setup', () => {
       }),
     );
 
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
@@ -88,27 +102,28 @@ describe('base-setup', () => {
     expect(config.components).toContain('base-setup');
     expect(config.components).toContain('custom-thing');
     expect(config.customField).toBe('preserved');
-    // version is actively bumped to the current SDK's version (0.3.2+ behavior)
-    expect(config.version).not.toBe('0.2.0');
-    expect(config.version).toMatch(/^\d+\.\d+\.\d+/);
-    // lastSynced is updated
-    expect(config.lastSynced).not.toBe('2020-01-01');
+    // Both stamps are write-only and retired: base-setup deletes them rather
+    // than bumping them (D3).
+    expect(config.version).toBeUndefined();
+    expect(config.lastSynced).toBeUndefined();
   });
 
   test('adds required scripts to package.json', async () => {
     const sb = track(createProjectSandbox());
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
 
-    expect(pkg.scripts?.signal).toContain('bunx @justinhaaheim/justin-sdk');
-    expect(pkg.scripts?.doctor).toContain('bunx @justinhaaheim/justin-sdk');
+    expect(pkg.scripts?.signal).toContain('justin-sdk');
+    expect(pkg.scripts?.doctor).toContain('justin-sdk');
     // j2n7: the alias invokes the SDK command, not a committed copy.
-    expect(pkg.scripts?.['setup-env']).toBe(
-      'bunx @justinhaaheim/justin-sdk setup-env',
-    );
+    expect(pkg.scripts?.['setup-env']).toBe('justin-sdk setup-env');
   });
 
   test('overwrites stale SDK scripts that point at node_modules path', async () => {
@@ -125,18 +140,20 @@ describe('base-setup', () => {
         },
       }),
     );
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
-    expect(pkg.scripts?.signal).toBe(
-      'bunx @justinhaaheim/justin-sdk signal --quiet',
-    );
-    expect(pkg.scripts?.doctor).toBe('bunx @justinhaaheim/justin-sdk doctor');
+    expect(pkg.scripts?.signal).toBe('justin-sdk signal --quiet');
+    expect(pkg.scripts?.doctor).toBe('justin-sdk doctor');
   });
 
-  test('migrates BARE bunx aliases (bunx justin-sdk/jsdk/j) to the scoped name — the 2qhw hazard', async () => {
+  test('migrates BARE bunx aliases (bunx justin-sdk/jsdk/j) to the bare bin — the 2qhw hazard', async () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
@@ -151,16 +168,18 @@ describe('base-setup', () => {
         },
       }),
     );
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
-    expect(pkg.scripts?.signal).toBe(
-      'bunx @justinhaaheim/justin-sdk signal --quiet',
-    );
-    expect(pkg.scripts?.doctor).toBe('bunx @justinhaaheim/justin-sdk doctor');
-    expect(pkg.scripts?.fix).toBe('bunx @justinhaaheim/justin-sdk fix');
+    expect(pkg.scripts?.signal).toBe('justin-sdk signal --quiet');
+    expect(pkg.scripts?.doctor).toBe('justin-sdk doctor');
+    expect(pkg.scripts?.fix).toBe('justin-sdk fix');
     expect(pkg.scripts?.['signal:custom']).toBe(
       'bunx justin-sdk-lookalike thing',
     );
@@ -177,15 +196,17 @@ describe('base-setup', () => {
         },
       }),
     );
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
     // The old value points at a file stepSetupEnvScript deletes this same run.
-    expect(pkg.scripts?.['setup-env']).toBe(
-      'bunx @justinhaaheim/justin-sdk setup-env',
-    );
+    expect(pkg.scripts?.['setup-env']).toBe('justin-sdk setup-env');
   });
 
   test('preserves existing signal-source:* scripts (does not clobber)', async () => {
@@ -200,7 +221,11 @@ describe('base-setup', () => {
         },
       }),
     );
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
@@ -216,7 +241,11 @@ describe('base-setup', () => {
 
   test('does NOT create scripts/setup-env.ts (retired j2n7 — the SDK command supersedes the copy)', async () => {
     const sb = track(createProjectSandbox());
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     expect(existsSync(join(sb.path, 'scripts/setup-env.ts'))).toBe(false);
   });
@@ -234,7 +263,11 @@ describe('base-setup', () => {
     );
     sb.writeFile('scripts/setup-env.ts', readFileSync(templatePath, 'utf-8'));
 
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     expect(existsSync(join(sb.path, 'scripts/setup-env.ts'))).toBe(false);
   });
@@ -243,7 +276,11 @@ describe('base-setup', () => {
     const sb = track(createProjectSandbox());
     sb.writeFile('scripts/setup-env.ts', '// custom setup\n');
 
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const content = readFileSync(
       join(sb.path, 'scripts/setup-env.ts'),
@@ -256,14 +293,23 @@ describe('base-setup', () => {
     const sb = track(createProjectSandbox());
     sb.writeFile('scripts/setup-env.ts', '// custom setup\n');
 
-    await runBaseSetup({projectRoot: sb.path, quiet: true, force: true});
+    await runBaseSetup({
+      force: true,
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     expect(existsSync(join(sb.path, 'scripts/setup-env.ts'))).toBe(false);
   });
 
   test('adds @justinhaaheim/justin-sdk to devDependencies when missing', async () => {
     const sb = track(createProjectSandbox());
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
@@ -285,7 +331,11 @@ describe('base-setup', () => {
         },
       }),
     );
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
@@ -297,7 +347,7 @@ describe('base-setup', () => {
     expect(pkg.devDependencies?.['@justinhaaheim/justin-sdk']).toBeUndefined();
   });
 
-  test('rewrites stale local script wirings (bun scripts/doctor.ts → bunx)', async () => {
+  test('rewrites stale local script wirings (bun scripts/doctor.ts → the bare bin)', async () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
@@ -312,24 +362,20 @@ describe('base-setup', () => {
         },
       }),
     );
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
-    expect(pkg.scripts?.doctor).toBe('bunx @justinhaaheim/justin-sdk doctor');
-    expect(pkg.scripts?.['doctor:fix']).toBe(
-      'bunx @justinhaaheim/justin-sdk doctor --fix',
-    );
-    expect(pkg.scripts?.signal).toBe(
-      'bunx @justinhaaheim/justin-sdk signal --quiet',
-    );
-    expect(pkg.scripts?.['signal:verbose']).toBe(
-      'bunx @justinhaaheim/justin-sdk signal',
-    );
-    expect(pkg.scripts?.['signal:serial']).toBe(
-      'bunx @justinhaaheim/justin-sdk signal --serial',
-    );
+    expect(pkg.scripts?.doctor).toBe('justin-sdk doctor');
+    expect(pkg.scripts?.['doctor:fix']).toBe('justin-sdk doctor --fix');
+    expect(pkg.scripts?.signal).toBe('justin-sdk signal --quiet');
+    expect(pkg.scripts?.['signal:verbose']).toBe('justin-sdk signal');
+    expect(pkg.scripts?.['signal:serial']).toBe('justin-sdk signal --serial');
   });
 
   test('preserves custom script values that do not match a stale shape', async () => {
@@ -343,7 +389,11 @@ describe('base-setup', () => {
         },
       }),
     );
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
@@ -351,7 +401,7 @@ describe('base-setup', () => {
     expect(pkg.scripts?.signal).toBe('bun run prettier-check');
   });
 
-  test('actively bumps justin-sdk.config.json version on every run', async () => {
+  test('DROPS the retired version/lastSynced stamps rather than bumping them', async () => {
     const sb = track(
       createProjectSandbox({
         justinSdkConfig: {
@@ -361,18 +411,28 @@ describe('base-setup', () => {
         },
       }),
     );
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
-    ) as {version?: string};
-    expect(config.version).not.toBe('0.1.0');
-    expect(config.version).toMatch(/^\d+\.\d+\.\d+/);
+    ) as {version?: string; lastSynced?: string; components?: string[]};
+    expect(config.version).toBeUndefined();
+    expect(config.lastSynced).toBeUndefined();
+    // Everything else is left exactly as it was.
+    expect(config.components).toEqual(['base-setup']);
   });
 
   test('adds tmp/ and dynamic-version.local.* to .gitignore', async () => {
     const sb = track(createProjectSandbox());
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const gitignore = readFileSync(join(sb.path, '.gitignore'), 'utf-8');
     expect(gitignore).toContain('tmp/');
@@ -383,7 +443,11 @@ describe('base-setup', () => {
     const sb = track(createProjectSandbox());
     sb.writeFile('.gitignore', '# existing\nnode_modules\ndist/\n');
 
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const gitignore = readFileSync(join(sb.path, '.gitignore'), 'utf-8');
     expect(gitignore).toContain('node_modules');
@@ -393,7 +457,11 @@ describe('base-setup', () => {
 
   test('creates .claude/settings.json with sandbox scaffolding and SessionStart hook', async () => {
     const sb = track(createProjectSandbox());
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const settings = JSON.parse(
       readFileSync(join(sb.path, '.claude/settings.json'), 'utf-8'),
@@ -404,10 +472,12 @@ describe('base-setup', () => {
     expect(Array.isArray(settings.sandbox?.excludedCommands)).toBe(true);
     expect(Array.isArray(settings.hooks?.SessionStart)).toBe(true);
 
-    // The j2n7 hook line: remote runs setup-env, local runs read-only doctor.
+    // The j2n7 hook line: remote runs setup-env, local runs the read-only
+    // `session-start` (dchjw.8 D6 — it replaced `doctor --quiet` and folded in
+    // the repo-state block and the rules-drift notice the plugin used to add).
     const serialized = JSON.stringify(settings.hooks?.SessionStart);
     expect(serialized).toContain('justin-sdk setup-env');
-    expect(serialized).toContain('doctor --quiet');
+    expect(serialized).toContain('bun run justin-sdk session-start');
     expect(serialized).not.toContain('scripts/setup-env.ts');
   });
 
@@ -431,7 +501,11 @@ describe('base-setup', () => {
       }),
     );
 
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const settings = JSON.parse(
       readFileSync(join(sb.path, '.claude/settings.json'), 'utf-8'),
@@ -454,7 +528,11 @@ describe('base-setup', () => {
       }),
     );
 
-    await runBaseSetup({projectRoot: sb.path, quiet: true});
+    await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     const settings = JSON.parse(
       readFileSync(join(sb.path, '.claude/settings.json'), 'utf-8'),
@@ -471,20 +549,26 @@ describe('base-setup', () => {
   test('fully idempotent: second run produces same result', async () => {
     const sb = track(createProjectSandbox());
 
-    const first = await runBaseSetup({projectRoot: sb.path, quiet: true});
-    const second = await runBaseSetup({projectRoot: sb.path, quiet: true});
+    const first = await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
+    const second = await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
 
     expect(first).toBe(0);
     expect(second).toBe(0);
 
-    // Verify config hasn't grown duplicates
+    // base-setup writes no `components` key at all now (F11) — only `add` and
+    // `remove` do — so there is nothing here that could grow duplicates.
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
     ) as {components?: string[]};
-    const baseSetupCount = (config.components ?? []).filter(
-      (c) => c === 'base-setup',
-    ).length;
-    expect(baseSetupCount).toBe(1);
+    expect(config.components).toBeUndefined();
 
     // .gitignore has no duplicate tmp/ entries
     const gitignore = readFileSync(join(sb.path, '.gitignore'), 'utf-8');
@@ -495,7 +579,11 @@ describe('base-setup', () => {
   test('fails clearly if package.json does not exist', async () => {
     const sb = track(createSandbox());
     // No package.json in this sandbox
-    const exitCode = await runBaseSetup({projectRoot: sb.path, quiet: true});
+    const exitCode = await runBaseSetup({
+      projectRoot: sb.path,
+      quiet: true,
+      sdkRepoUrl: sdkRemote(),
+    });
     expect(exitCode).toBe(1);
   });
 });

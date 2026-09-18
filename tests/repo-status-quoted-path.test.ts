@@ -175,11 +175,7 @@ function initRepo(sb: Sandbox, name: string): string {
 }
 
 /** A branch off `M1` that deletes exactly `paths`, and nothing else. */
-function branchDeleting(
-  repo: string,
-  branch: string,
-  paths: string[],
-): string {
+function branchDeleting(repo: string, branch: string, paths: string[]): string {
   git(repo, ['checkout', '-q', '-b', branch, 'M1']);
   git(repo, ['rm', '-q', '--', ...paths]);
   const sha = commit(repo, `${branch}: drop ${paths.length} path(s)`);
@@ -235,7 +231,9 @@ function buildFixture(sb: Sandbox): Fixture {
   // a filesystem that normalised or refused one would make every assertion
   // below a statement about some OTHER file.
   const tracked = new Set(
-    git(repo, ['ls-files', '-z']).split('\0').filter((p) => p.length > 0),
+    git(repo, ['ls-files', '-z'])
+      .split('\0')
+      .filter((p) => p.length > 0),
   );
   for (const t of TRICKY) {
     for (const path of [keptPath(t), gonePath(t)]) {
@@ -251,11 +249,7 @@ function buildFixture(sb: Sandbox): Fixture {
   commit(repo, 'M1: edit anchor');
   git(repo, ['tag', 'M1']);
 
-  const dropKeptSha = branchDeleting(
-    repo,
-    'drop-kept',
-    TRICKY.map(keptPath),
-  );
+  const dropKeptSha = branchDeleting(repo, 'drop-kept', TRICKY.map(keptPath));
   const dropQuotedSha = branchDeleting(
     repo,
     'drop-quoted',
@@ -422,25 +416,29 @@ describe('a deletion the baseline did NOT take never reads as reflected', () => 
     expect(files).toHaveLength(TRICKY.length);
   });
 
-  test('the branch is refused, and the plan proposes nothing for it', () => {
-    const sb = track(createSandbox());
-    const fx = buildFixture(sb);
+  test(
+    'the branch is refused, and the plan proposes nothing for it',
+    () => {
+      const sb = track(createSandbox());
+      const fx = buildFixture(sb);
 
-    const proof = proveContentOnBaseline('drop-quoted', 'main', fx.repo);
-    expect(proof.allContentOnBaseline).toBe(false);
+      const proof = proveContentOnBaseline('drop-quoted', 'main', fx.repo);
+      expect(proof.allContentOnBaseline).toBe(false);
 
-    // Before the fix this row read `merged` / `provenSafe: true` — on a repo
-    // with nothing wrong with it — and the plan offered to archive and delete
-    // the branch. `drop-quoted` holds ONLY mangled names for exactly that
-    // reason: one correctly-read path would have masked the lie.
-    const row = byName(rowsFor(fx.repo), 'drop-quoted');
-    expect(row.provenSafe).toBe(false);
-    expect(row.disposition).not.toBe('merged');
+      // Before the fix this row read `merged` / `provenSafe: true` — on a repo
+      // with nothing wrong with it — and the plan offered to archive and delete
+      // the branch. `drop-quoted` holds ONLY mangled names for exactly that
+      // reason: one correctly-read path would have masked the lie.
+      const row = byName(rowsFor(fx.repo), 'drop-quoted');
+      expect(row.provenSafe).toBe(false);
+      expect(row.disposition).not.toBe('merged');
 
-    const plan = planFor(fx.repo);
-    expect(plan.safe.map((a) => a.branch)).not.toContain('drop-quoted');
-    expect(plan.needsJudgment.map((a) => a.branch)).toContain('drop-quoted');
-  }, GIT_FIXTURE_TIMEOUT_MS);
+      const plan = planFor(fx.repo);
+      expect(plan.safe.map((a) => a.branch)).not.toContain('drop-quoted');
+      expect(plan.needsJudgment.map((a) => a.branch)).toContain('drop-quoted');
+    },
+    GIT_FIXTURE_TIMEOUT_MS,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -448,50 +446,61 @@ describe('a deletion the baseline did NOT take never reads as reflected', () => 
 // ---------------------------------------------------------------------------
 
 describe('deletions the baseline DID take still read as reflected', () => {
-  test('tricky names included — this is the qyu1.24 classifier on live input', () => {
-    const sb = track(createSandbox());
-    const fx = buildFixture(sb);
+  test(
+    'tricky names included — this is the qyu1.24 classifier on live input',
+    () => {
+      const sb = track(createSandbox());
+      const fx = buildFixture(sb);
 
-    // `rev-parse main:gone/café.txt` fails here because the path is genuinely
-    // gone from main, so every one of these goes through the `:(literal)`
-    // ls-tree classifier — with a tab, a newline, a quote and a backslash in
-    // the pathspec. qyu1.24 shipped that classifier with its control-character
-    // behaviour explicitly unproven; this is the proof.
-    const files = verifyCommitFiles(fx.dropGoneSha, 'main', fx.repo);
-    expectAll(files, TRICKY.map(gonePath), 'deletion-reflected');
+      // `rev-parse main:gone/café.txt` fails here because the path is genuinely
+      // gone from main, so every one of these goes through the `:(literal)`
+      // ls-tree classifier — with a tab, a newline, a quote and a backslash in
+      // the pathspec. qyu1.24 shipped that classifier with its control-character
+      // behaviour explicitly unproven; this is the proof.
+      const files = verifyCommitFiles(fx.dropGoneSha, 'main', fx.repo);
+      expectAll(files, TRICKY.map(gonePath), 'deletion-reflected');
 
-    const row = byName(rowsFor(fx.repo), 'drop-gone');
-    expect({disposition: row.disposition, provenSafe: row.provenSafe}).toEqual({
-      disposition: 'merged',
-      provenSafe: true,
-    });
-  }, GIT_FIXTURE_TIMEOUT_MS);
+      const row = byName(rowsFor(fx.repo), 'drop-gone');
+      expect({
+        disposition: row.disposition,
+        provenSafe: row.provenSafe,
+      }).toEqual({
+        disposition: 'merged',
+        provenSafe: true,
+      });
+    },
+    GIT_FIXTURE_TIMEOUT_MS,
+  );
 
-  test('the ASCII control is still merged, and still acted on', () => {
-    const sb = track(createSandbox());
-    const fx = buildFixture(sb);
+  test(
+    'the ASCII control is still merged, and still acted on',
+    () => {
+      const sb = track(createSandbox());
+      const fx = buildFixture(sb);
 
-    const files = verifyCommitFiles(fx.genuineDeleteSha, 'main', fx.repo);
-    expect(statuses(files)).toEqual({
-      'also.txt': 'identical',
-      'gone1.txt': 'deletion-reflected',
-      'gone2.txt': 'deletion-reflected',
-    });
+      const files = verifyCommitFiles(fx.genuineDeleteSha, 'main', fx.repo);
+      expect(statuses(files)).toEqual({
+        'also.txt': 'identical',
+        'gone1.txt': 'deletion-reflected',
+        'gone2.txt': 'deletion-reflected',
+      });
 
-    // A healthy repo's per-file JSON carries no key that did not exist before
-    // qyu1.24 — the byte-identity bar, asserted rather than assumed.
-    for (const file of files) {
-      expect(Object.keys(file).sort()).toEqual(['path', 'status']);
-    }
+      // A healthy repo's per-file JSON carries no key that did not exist before
+      // qyu1.24 — the byte-identity bar, asserted rather than assumed.
+      for (const file of files) {
+        expect(Object.keys(file).sort()).toEqual(['path', 'status']);
+      }
 
-    const plan = planFor(fx.repo);
-    expect(
-      plan.safe
-        .filter((a) => a.action === 'archive-local-branch')
-        .map((a) => a.branch)
-        .sort(),
-    ).toEqual(['drop-gone', 'genuine-delete']);
-  }, GIT_FIXTURE_TIMEOUT_MS);
+      const plan = planFor(fx.repo);
+      expect(
+        plan.safe
+          .filter((a) => a.action === 'archive-local-branch')
+          .map((a) => a.branch)
+          .sort(),
+      ).toEqual(['drop-gone', 'genuine-delete']);
+    },
+    GIT_FIXTURE_TIMEOUT_MS,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -499,37 +508,41 @@ describe('deletions the baseline DID take still read as reflected', () => {
 // ---------------------------------------------------------------------------
 
 describe('a rename resolves to the post-state path', () => {
-  test('three records then two, with the delete after it still aligned', () => {
-    const sb = track(createSandbox());
-    const fx = buildFixture(sb);
+  test(
+    'three records then two, with the delete after it still aligned',
+    () => {
+      const sb = track(createSandbox());
+      const fx = buildFixture(sb);
 
-    const files = verifyCommitFiles(fx.renameSha, 'main', fx.repo);
-    // Two things at once: the rename answers `renamé-dst.txt` (not the `old`
-    // record, and not a quoted spelling), and the `D` record AFTER the triplet
-    // is still read as a status rather than as a path. An off-by-one there
-    // would put `zz-after-rename.txt` in the status slot and a status letter in
-    // the path slot — and a garbage path resolves nowhere, which is
-    // `deletion-reflected` all over again.
-    //
-    // `rename-src.txt` was NOT in this map when qyu1.26 wrote it, and its
-    // arrival is qyu1.27 landing rather than a regression: the rename's old
-    // half is now checked as the deletion it is, and main — which created
-    // `rename-src.txt` in M0 and never removed it — has not taken that
-    // deletion. Whole-map `toEqual` is what forced this to be declared instead
-    // of slipping through, which is exactly why it is written that way.
-    expect(statuses(files)).toEqual({
-      'keep/café.txt': 'deletion-not-reflected',
-      'rename-src.txt': 'deletion-not-reflected',
-      'renamé-dst.txt': 'absent-on-baseline',
-      'zz-after-rename.txt': 'deletion-not-reflected',
-    });
-    expect(files.find((f) => f.path === 'rename-src.txt')?.renamedTo).toBe(
-      RENAME_DST,
-    );
+      const files = verifyCommitFiles(fx.renameSha, 'main', fx.repo);
+      // Two things at once: the rename answers `renamé-dst.txt` (not the `old`
+      // record, and not a quoted spelling), and the `D` record AFTER the triplet
+      // is still read as a status rather than as a path. An off-by-one there
+      // would put `zz-after-rename.txt` in the status slot and a status letter in
+      // the path slot — and a garbage path resolves nowhere, which is
+      // `deletion-reflected` all over again.
+      //
+      // `rename-src.txt` was NOT in this map when qyu1.26 wrote it, and its
+      // arrival is qyu1.27 landing rather than a regression: the rename's old
+      // half is now checked as the deletion it is, and main — which created
+      // `rename-src.txt` in M0 and never removed it — has not taken that
+      // deletion. Whole-map `toEqual` is what forced this to be declared instead
+      // of slipping through, which is exactly why it is written that way.
+      expect(statuses(files)).toEqual({
+        'keep/café.txt': 'deletion-not-reflected',
+        'rename-src.txt': 'deletion-not-reflected',
+        'renamé-dst.txt': 'absent-on-baseline',
+        'zz-after-rename.txt': 'deletion-not-reflected',
+      });
+      expect(files.find((f) => f.path === 'rename-src.txt')?.renamedTo).toBe(
+        RENAME_DST,
+      );
 
-    const row = byName(rowsFor(fx.repo), 'rename-then-delete');
-    expect(row.provenSafe).toBe(false);
-  }, GIT_FIXTURE_TIMEOUT_MS);
+      const row = byName(rowsFor(fx.repo), 'rename-then-delete');
+      expect(row.provenSafe).toBe(false);
+    },
+    GIT_FIXTURE_TIMEOUT_MS,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -600,9 +613,9 @@ describe('`:(literal)` survives every filename family', () => {
 
     // The same absent path with no glob character fails, the way the rest of
     // this module assumes every absent path does.
-    expect(gitRun(fx.repo, ['rev-parse', 'main:gone/star.txt']).status).not.toBe(
-      0,
-    );
+    expect(
+      gitRun(fx.repo, ['rev-parse', 'main:gone/star.txt']).status,
+    ).not.toBe(0);
 
     // `:(literal)` is unaffected either way — it answers "absent" for both.
     for (const path of ['gone/star*.txt', 'gone/star.txt']) {

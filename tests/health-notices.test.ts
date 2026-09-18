@@ -790,7 +790,7 @@ describe('renderNotice', () => {
       'justin-sdk 0.24.0 → 0.26.0 available (minor)',
       `  upgrade: ${UPGRADE_COMMAND}`,
     ]);
-    expect(UPGRADE_COMMAND).toBe('bunx @justinhaaheim/justin-sdk update');
+    expect(UPGRADE_COMMAND).toBe('bun run justin-sdk update');
   });
 });
 
@@ -1206,9 +1206,13 @@ describe('callsiteTier', () => {
   });
 
   test('aliases are classified as the command they alias', () => {
-    expect(callsiteTier('worktree-setup')).toBe(callsiteTier('setup-env'));
+    // `worktree-setup` used to be the second entry here; the alias was retired
+    // in dchjw.9, so `agent` → `skill` is the whole table now.
     expect(callsiteTier('agent')).toBe(callsiteTier('skill'));
     expect(callsiteTier('agent')).toBeNull();
+    // NEGATIVE CONTROL: a name that is NOT an alias is classified as itself,
+    // so the equality above is the alias map doing work rather than two nulls.
+    expect(callsiteTier('setup-env')).toBe(3);
   });
 });
 
@@ -1241,6 +1245,9 @@ describe('commandNameFromArgv', () => {
   });
 
   test('an alias is canonicalised before classification', () => {
-    expect(commandNameFromArgv(['worktree-setup'])).toBe('setup-env');
+    expect(commandNameFromArgv(['agent'])).toBe('skill');
+    // A RETIRED alias is not canonicalised into anything — it is just a word
+    // the CLI will reject (dchjw.9).
+    expect(commandNameFromArgv(['worktree-setup'])).toBe('worktree-setup');
   });
 });

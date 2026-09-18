@@ -36,7 +36,7 @@ import {execFileSync, spawnSync} from 'child_process';
 import {existsSync, mkdirSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
-import {countDivergence} from '../src/plugin/lib/repo-status/core';
+import {countDivergence} from '../src/repo-status/core';
 import {describeMergeShape} from '../src/repo-status/merge-shape';
 import {
   buildPlan,
@@ -191,7 +191,9 @@ describe('countDivergence reports failure as failure', () => {
 
     // The bug, at its source: these two are unmeasurable and must say so.
     expect(countDivergence(fx.repo, 'main', 'corrupt-local')).toBeNull();
-    expect(countDivergence(fx.repo, 'main', 'origin/corrupt-remote')).toBeNull();
+    expect(
+      countDivergence(fx.repo, 'main', 'origin/corrupt-remote'),
+    ).toBeNull();
     // A baseline that resolves nowhere is the same class of failure.
     expect(countDivergence(fx.repo, 'no-such-baseline', 'main')).toBeNull();
 

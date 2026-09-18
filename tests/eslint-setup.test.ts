@@ -68,12 +68,13 @@ describe('eslint-setup', () => {
     expect(pkg.scripts?.['lint:fix']).toBe('bun run lint-base -- --fix .');
     expect(pkg.scripts?.['lint:fix:file']).toBe('bun run lint-base -- --fix');
 
-    // justin-sdk.config.json has eslint-setup in components
+    // The INSTALLER no longer registers itself in justin-sdk.config.json
+    // (constraint F11): only `add` and `remove` write `components`. Running the
+    // installer directly therefore leaves the key alone.
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
     ) as {components?: string[]};
-    expect(config.components).toContain('eslint-setup');
-    expect(config.components).toContain('base-setup');
+    expect(config.components).toBeUndefined();
   });
 
   test('fully idempotent: second run produces same files', async () => {
@@ -100,15 +101,12 @@ describe('eslint-setup', () => {
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
     ) as {components?: string[]};
-    const eslintSetupCount = (config.components ?? []).filter(
-      (c) => c === 'eslint-setup',
-    ).length;
-    expect(eslintSetupCount).toBe(1);
+    expect(config.components).toBeUndefined();
   });
 
   test('preserves user-customized eslint.config.cjs (does not overwrite)', async () => {
     const sb = track(createProjectSandbox());
-    const customContent = "// my custom eslint config\nmodule.exports = [];\n";
+    const customContent = '// my custom eslint config\nmodule.exports = [];\n';
     sb.writeFile('eslint.config.cjs', customContent);
 
     const exitCode = await runEslintSetup({
@@ -124,7 +122,7 @@ describe('eslint-setup', () => {
 
   test('--force overwrites a hand-modified eslint.config.cjs', async () => {
     const sb = track(createProjectSandbox());
-    const customContent = "// my custom eslint config\nmodule.exports = [];\n";
+    const customContent = '// my custom eslint config\nmodule.exports = [];\n';
     sb.writeFile('eslint.config.cjs', customContent);
 
     const exitCode = await runEslintSetup({
@@ -138,6 +136,86 @@ describe('eslint-setup', () => {
     expect(after).not.toBe(customContent);
     // Now matches the SDK template.
     expect(after).toContain('eslint-config-jha-react-node');
+  });
+
+  // home-base-dchjw.6. Justin, verbatim: "It adds eslint.config.cjs even if
+  // there's already eslint.config.js. BAD!" ESLint loads exactly one flat
+  // config, so the second file is dead code that looks live.
+  for (const existing of [
+    'eslint.config.js',
+    'eslint.config.mjs',
+    'eslint.config.ts',
+  ]) {
+    test(`does NOT write eslint.config.cjs when ${existing} exists`, async () => {
+      const sb = track(createProjectSandbox());
+      const userConfig = '// user flat config\nmodule.exports = [];\n';
+      sb.writeFile(existing, userConfig);
+
+      const exitCode = await runEslintSetup({
+        projectRoot: sb.path,
+        quiet: true,
+      });
+      expect(exitCode).toBe(0);
+
+      expect(existsSync(join(sb.path, 'eslint.config.cjs'))).toBe(false);
+      // The user's config is untouched.
+      expect(readFileSync(join(sb.path, existing), 'utf-8')).toBe(userConfig);
+      // The rest of the component still installs.
+      const pkg = JSON.parse(
+        readFileSync(join(sb.path, 'package.json'), 'utf-8'),
+      ) as {scripts?: Record<string, string>};
+      expect(pkg.scripts?.['signal-source:LINT']).toBe(
+        'eslint --report-unused-disable-directives --max-warnings 0 .',
+      );
+    });
+  }
+
+  test('--force does not create a second flat config either', async () => {
+    const sb = track(createProjectSandbox());
+    const userConfig = '// user flat config\nmodule.exports = [];\n';
+    sb.writeFile('eslint.config.js', userConfig);
+
+    const exitCode = await runEslintSetup({
+      force: true,
+      projectRoot: sb.path,
+      quiet: true,
+    });
+    expect(exitCode).toBe(0);
+
+    expect(existsSync(join(sb.path, 'eslint.config.cjs'))).toBe(false);
+    expect(readFileSync(join(sb.path, 'eslint.config.js'), 'utf-8')).toBe(
+      userConfig,
+    );
+  });
+
+  test('a repo that already has BOTH configs has neither rewritten', async () => {
+    const sb = track(createProjectSandbox());
+    const js = '// js flat config\nmodule.exports = [];\n';
+    const cjs = '// cjs flat config\nmodule.exports = [];\n';
+    sb.writeFile('eslint.config.js', js);
+    sb.writeFile('eslint.config.cjs', cjs);
+
+    const exitCode = await runEslintSetup({
+      force: true,
+      projectRoot: sb.path,
+      quiet: true,
+    });
+    expect(exitCode).toBe(0);
+
+    expect(readFileSync(join(sb.path, 'eslint.config.js'), 'utf-8')).toBe(js);
+    expect(readFileSync(join(sb.path, 'eslint.config.cjs'), 'utf-8')).toBe(cjs);
+  });
+
+  test('idempotent when a non-cjs config exists: second run still writes nothing', async () => {
+    const sb = track(createProjectSandbox());
+    sb.writeFile('eslint.config.mjs', 'export default [];\n');
+
+    await runEslintSetup({projectRoot: sb.path, quiet: true});
+    const firstPkg = readFileSync(join(sb.path, 'package.json'), 'utf-8');
+
+    await runEslintSetup({projectRoot: sb.path, quiet: true});
+    expect(readFileSync(join(sb.path, 'package.json'), 'utf-8')).toBe(firstPkg);
+    expect(existsSync(join(sb.path, 'eslint.config.cjs'))).toBe(false);
   });
 
   test('preserves existing devDependencies when adding eslint', async () => {

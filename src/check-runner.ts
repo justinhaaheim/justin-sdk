@@ -43,6 +43,49 @@ const COLOR_PALETTE = [
   '\x1b[31m', // red
 ];
 
+/**
+ * SGR colour sequences, as this file writes them. Built from a char code so the
+ * source carries no literal escape character.
+ */
+const ANSI_SGR = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
+
+/**
+ * Strip the colour codes from text that is going somewhere a terminal will not
+ * render them — a JSON envelope, a log file, a model's context window. Lives
+ * here because this file is what puts them in.
+ */
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_SGR, '');
+}
+
+// ---------------------------------------------------------------------------
+// Output sink
+// ---------------------------------------------------------------------------
+
+/**
+ * Where a run's output goes. The default writes to the terminal AS THE RUN
+ * HAPPENS; `renderCheckTree` swaps in a collector so the same code path can
+ * hand the report back as a string instead (home-base-dchjw.9).
+ *
+ * Two methods, because the two kinds of output are not interchangeable: `line`
+ * is a summary/progress line and supplies its own newline (it is `console.log`);
+ * `raw` is a child process's own bytes, already carrying whatever newlines it
+ * had. Collapsing them would insert newlines into streamed command output.
+ */
+export interface OutputSink {
+  line: (text: string) => void;
+  raw: (text: string) => void;
+}
+
+const CONSOLE_SINK: OutputSink = {
+  line: (text) => {
+    console.log(text);
+  },
+  raw: (text) => {
+    process.stdout.write(text);
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -247,6 +290,7 @@ interface ExecOptions {
   maxLabelLen: number;
   piped: boolean;
   quiet: boolean;
+  sink: OutputSink;
 }
 
 async function runShellCommand(
@@ -254,7 +298,7 @@ async function runShellCommand(
   opts: ExecOptions,
 ): Promise<InternalResult> {
   const {check, color} = entry;
-  const {align, maxLabelLen, piped, quiet} = opts;
+  const {align, maxLabelLen, piped, quiet, sink} = opts;
   const prefix = buildPrefix(check.label, color, align, maxLabelLen);
   const start = performance.now();
 
@@ -271,20 +315,24 @@ async function runShellCommand(
     stdout: shouldPipe ? 'pipe' : 'inherit',
   });
 
-  const sink: string[] | null = capture ? [] : null;
+  const classifierSink: string[] | null = capture ? [] : null;
   if (shouldPipe) {
     await Promise.all([
       consumeStream(
         proc.stdout,
         prefix,
-        quiet ? null : (text) => process.stdout.write(text),
-        sink,
+        // Through the SINK, so a captured run captures a shell check's output
+        // too rather than letting it escape to the real stdout.
+        quiet ? null : (text) => sink.raw(text),
+        classifierSink,
       ),
+      // STDERR stays on the real stderr, deliberately: it cannot corrupt a
+      // stdout envelope, and a check's errors belong in front of the operator.
       consumeStream(
         proc.stderr,
         prefix,
         (text) => process.stderr.write(text),
-        sink,
+        classifierSink,
       ),
     ]);
   }
@@ -295,7 +343,7 @@ async function runShellCommand(
   const classified =
     check.classify == null
       ? null
-      : check.classify({exitCode, output: (sink ?? []).join('')});
+      : check.classify({exitCode, output: (classifierSink ?? []).join('')});
 
   return {
     durationMs,
@@ -355,11 +403,17 @@ async function runOne(
 // Summary
 // ---------------------------------------------------------------------------
 
-function printSummary(
+/**
+ * The summary, as TEXT. Every line this used to `console.log` individually is
+ * now one joined string, which is byte-identical when printed with a single
+ * `console.log` and is also something a caller can keep (home-base-dchjw.9).
+ */
+function formatSummary(
   results: InternalResult[],
   totalMs: number,
   quiet: boolean,
-): void {
+): string {
+  const out: string[] = [];
   const measured = results.filter((r) => !r.skipped && r.notApplicable == null);
   const errors = measured.filter(
     (r) => r.exitCode !== 0 && r.severity === 'error',
@@ -383,13 +437,13 @@ function printSummary(
     skipped.length === 0 &&
     notApplicable.length === 0
   ) {
-    console.log(
+    out.push(
       `${GREEN}✓${RESET} All ${results.length} checks passed. ${DIM}[${formatDuration(totalMs)}]${RESET}`,
     );
-    return;
+    return out.join('\n');
   }
 
-  console.log('');
+  out.push('');
 
   for (const r of results) {
     if (r.skipped) {
@@ -397,14 +451,16 @@ function printSummary(
       if (quiet) continue;
 
       const label = `${DIM}${r.label}${RESET}`;
-      console.log(` ${DIM}↳${RESET} ${label} ${DIM}skipped (depends on ${r.skippedReason})${RESET}`);
+      out.push(
+        ` ${DIM}↳${RESET} ${label} ${DIM}skipped (depends on ${r.skippedReason})${RESET}`,
+      );
       continue;
     }
 
     if (r.notApplicable != null) {
       // Printed even in quiet mode: this check produced no verdict, and the
       // operator must be able to see that from the summary alone.
-      console.log(
+      out.push(
         ` ${YELLOW}○${RESET} ${YELLOW}${r.label}${RESET} ${DIM}[${formatDuration(r.durationMs)}]${RESET}` +
           `\n     ${DIM}not applicable — ${r.notApplicable}${RESET}`,
       );
@@ -442,21 +498,31 @@ function printSummary(
       line += `\n     ${YELLOW}Fix: ${r.checkResult.fix}${RESET}`;
     }
 
-    console.log(line);
+    out.push(line);
   }
 
-  console.log('');
-  if (passed.length > 0) console.log(` ${GREEN}${passed.length} pass${RESET}`);
+  out.push('');
+  if (passed.length > 0) out.push(` ${GREEN}${passed.length} pass${RESET}`);
   if (warnings.length > 0)
-    console.log(` ${YELLOW}${warnings.length} warn${RESET}`);
-  if (errors.length > 0) console.log(` ${RED}${errors.length} fail${RESET}`);
+    out.push(` ${YELLOW}${warnings.length} warn${RESET}`);
+  if (errors.length > 0) out.push(` ${RED}${errors.length} fail${RESET}`);
   if (notApplicable.length > 0)
-    console.log(` ${YELLOW}${notApplicable.length} not applicable${RESET}`);
-  if (skipped.length > 0)
-    console.log(` ${DIM}${skipped.length} skipped${RESET}`);
-  console.log(
+    out.push(` ${YELLOW}${notApplicable.length} not applicable${RESET}`);
+  if (skipped.length > 0) out.push(` ${DIM}${skipped.length} skipped${RESET}`);
+  out.push(
     `${BOLD}Ran ${results.length - skipped.length} checks. ${DIM}[${formatDuration(totalMs)}]${RESET}`,
   );
+  return out.join('\n');
+}
+
+/** Emit the summary through a run's sink. */
+function emitSummary(
+  results: InternalResult[],
+  totalMs: number,
+  quiet: boolean,
+  sink: OutputSink,
+): void {
+  sink.line(formatSummary(results, totalMs, quiet));
 }
 
 // ---------------------------------------------------------------------------
@@ -572,7 +638,13 @@ export async function runChecks(
 
   const maxLabelLen = Math.max(...entries.map((e) => e.check.label.length));
   const piped = !serial;
-  const opts: ExecOptions = {align, maxLabelLen, piped, quiet};
+  const opts: ExecOptions = {
+    align,
+    maxLabelLen,
+    piped,
+    quiet,
+    sink: CONSOLE_SINK,
+  };
 
   if (!quiet) {
     console.log(
@@ -597,7 +669,7 @@ export async function runChecks(
   }
 
   const totalMs = Math.round(performance.now() - totalStart);
-  printSummary(results, totalMs, quiet);
+  emitSummary(results, totalMs, quiet, CONSOLE_SINK);
 
   // Only errors affect exit code — not warnings, and not checks that measured
   // nothing (home-base-gsqz).
@@ -612,13 +684,16 @@ export async function runChecks(
 }
 
 /**
- * Run a tree of checks where children only run if their parent passes.
- * Always runs serially (tree dependencies require sequential execution).
- * Returns the process exit code (0 = all pass, 1 = any fail).
+ * The tree run, with every byte of output routed through a sink.
+ *
+ * `runCheckTree` passes the console sink (unchanged behaviour: output appears
+ * as it happens); `renderCheckTree` passes a collector and gets the report back
+ * as a string.
  */
-export async function runCheckTree(
+async function runCheckTreeWithSink(
   nodes: CheckNode[],
-  options: RunChecksOptions = {},
+  options: RunChecksOptions,
+  sink: OutputSink,
 ): Promise<number> {
   const {quiet = false, align = false, fix = false, yes = false} = options;
 
@@ -636,7 +711,7 @@ export async function runCheckTree(
 
   const allLabels = collectLabels(nodes);
   const maxLabelLen = Math.max(...allLabels.map((l) => l.length));
-  const opts: ExecOptions = {align, maxLabelLen, piped: true, quiet};
+  const opts: ExecOptions = {align, maxLabelLen, piped: true, quiet, sink};
 
   // Assign stable colors to each node (by position in the tree)
   function buildEntryMap(
@@ -702,7 +777,7 @@ export async function runCheckTree(
   }
 
   if (!quiet) {
-    console.log(`Running ${allLabels.length} checks...\n`);
+    sink.line(`Running ${allLabels.length} checks...\n`);
   }
 
   const totalStart = performance.now();
@@ -717,9 +792,7 @@ export async function runCheckTree(
         r.exitCode !== 0 &&
         hasFix(r.checkResult),
     );
-    const autoRun = allFixable.filter(
-      (r) => !r.checkResult?.requiresApproval,
-    );
+    const autoRun = allFixable.filter((r) => !r.checkResult?.requiresApproval);
     const needsApproval = allFixable.filter(
       (r) => r.checkResult?.requiresApproval,
     );
@@ -728,7 +801,7 @@ export async function runCheckTree(
     const runList = [...autoRun, ...(yes ? needsApproval : [])];
     if (runList.length > 0) {
       if (!quiet) {
-        console.log(
+        sink.line(
           `\n${YELLOW}Attempting fixes for ${runList.length} check(s)...${RESET}\n`,
         );
       }
@@ -739,7 +812,7 @@ export async function runCheckTree(
           const approvalNote = r.checkResult?.requiresApproval
             ? ` ${DIM}(approved via --yes)${RESET}`
             : '';
-          console.log(
+          sink.line(
             `  ${YELLOW}→${RESET} ${r.label}: ${DIM}${fixCmd}${RESET}${approvalNote}`,
           );
         }
@@ -747,28 +820,26 @@ export async function runCheckTree(
       }
 
       if (!quiet) {
-        console.log(`\n${YELLOW}Re-running all checks...${RESET}\n`);
+        sink.line(`\n${YELLOW}Re-running all checks...${RESET}\n`);
       }
       results = await walkTree(nodes);
     }
 
     // Report any approval-required fixes that were skipped
     if (!yes && needsApproval.length > 0 && !quiet) {
-      console.log(
+      sink.line(
         `\n${YELLOW}Skipped ${needsApproval.length} fix(es) that require approval:${RESET}`,
       );
       for (const r of needsApproval) {
         const fixCmd = fixDescription(r.checkResult);
-        console.log(`  ${DIM}•${RESET} ${r.label}: ${DIM}${fixCmd}${RESET}`);
+        sink.line(`  ${DIM}•${RESET} ${r.label}: ${DIM}${fixCmd}${RESET}`);
       }
-      console.log(
-        `\n  ${DIM}Run with --yes to approve these fixes.${RESET}\n`,
-      );
+      sink.line(`\n  ${DIM}Run with --yes to approve these fixes.${RESET}\n`);
     }
   }
 
   const totalMs = Math.round(performance.now() - totalStart);
-  printSummary(results, totalMs, quiet);
+  emitSummary(results, totalMs, quiet, sink);
 
   const hasErrors = results.some(
     (r) =>
@@ -778,6 +849,48 @@ export async function runCheckTree(
       r.severity === 'error',
   );
   return hasErrors ? 1 : 0;
+}
+
+/**
+ * Run a tree of checks where children only run if their parent passes.
+ * Always runs serially (tree dependencies require sequential execution).
+ * Returns the process exit code (0 = all pass, 1 = any fail).
+ */
+export async function runCheckTree(
+  nodes: CheckNode[],
+  options: RunChecksOptions = {},
+): Promise<number> {
+  return await runCheckTreeWithSink(nodes, options, CONSOLE_SINK);
+}
+
+/**
+ * The same run, with the report RETURNED instead of printed
+ * (home-base-dchjw.9).
+ *
+ * For callers that own stdout — `session-start` writes a JSON envelope there,
+ * and anything a check printed alongside it would corrupt the JSON into
+ * unparseable text. Every line this run would have written to stdout, including
+ * a shell check's own output, lands in `report` instead; stderr is untouched
+ * and still reaches the terminal.
+ *
+ * The colours are still in the text. Stripping them is the CALLER's decision
+ * (`stripAnsi`), because a caller writing to a log file may well want them.
+ */
+export async function renderCheckTree(
+  nodes: CheckNode[],
+  options: RunChecksOptions = {},
+): Promise<{exitCode: number; report: string}> {
+  const chunks: string[] = [];
+  const sink: OutputSink = {
+    line: (text) => {
+      chunks.push(`${text}\n`);
+    },
+    raw: (text) => {
+      chunks.push(text);
+    },
+  };
+  const exitCode = await runCheckTreeWithSink(nodes, options, sink);
+  return {exitCode, report: chunks.join('')};
 }
 
 // ---------------------------------------------------------------------------

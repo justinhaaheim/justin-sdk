@@ -1,11 +1,9 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.38.0",
+  "version": "0.39.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
-    "jsdk": "./src/cli.ts",
-    "j": "./src/cli.ts",
     "repo-status": "./src/repo-status/repo-status.ts"
   },
   "scripts": {
@@ -22,7 +20,6 @@
     "src",
     "templates",
     "docs",
-    ".claude-plugin",
     "versions.json"
   ],
   "dependencies": {

@@ -53,7 +53,11 @@ function gitOutcome(argv: string[], cwd: string): GitOutcome {
       ok: true,
       status: 0,
       stderr: '',
-      stdout: execFileSync('git', argv, {cwd, encoding: 'utf-8', stdio: 'pipe'}),
+      stdout: execFileSync('git', argv, {
+        cwd,
+        encoding: 'utf-8',
+        stdio: 'pipe',
+      }),
     };
   } catch (err: unknown) {
     const failure: {status?: unknown; stderr?: unknown} =
@@ -402,7 +406,8 @@ function changedPaths(sha: string, cwd: string): ChangedPath[] {
   // before any verdict is decided, because deciding whether a rename's old path
   // deserves a deletion check needs to know every OTHER record's post-state
   // path — which a single forward pass does not yet have.
-  const parsed: {letter: string; newPath: string; oldPath: string | null}[] = [];
+  const parsed: {letter: string; newPath: string; oldPath: string | null}[] =
+    [];
   for (let i = 0; i < records.length; i += 1) {
     const status = records[i];
     if (status == null || !STATUS_RECORD.test(status)) return [];

@@ -1,22 +1,23 @@
 /**
- * components.ts — the single source of truth for justin-sdk's components:
- * their canonical dependency order, the short ↔ config-name mapping, and the
- * one place that dispatches a component name to its installer.
+ * components.ts — the one place a component name becomes an installer call.
  *
- * Three commands consume this registry, each keyed on a different namespace:
+ * The other half of the registry — which components exist, their order, their
+ * `-setup` config names, their `includeIf` gates and `resolveComponents` — is in
+ * `component-registry.ts`, which imports no installers and so can be reached
+ * from inside them.
+ *
+ * Two commands consume this dispatch, each keyed on a different namespace:
  *   - `add`    (add.ts)    — short names the user types (beads, prettier, …)
- *   - `init`   (init.ts)   — short names, iterated in DEPENDENCY_ORDER
  *   - `update` (update.ts) — `-setup` config names read back from
  *                            justin-sdk.config.json (beads-setup, …)
- *
- * Before this module those three each had their own copy of the
- * name→installer dispatch and ordering, which could silently drift. Now the
- * dispatch and order live here; the commands just supply args and a name.
  */
 
 import {runBaseSetup} from './base-setup';
 import {runBeadsSetup} from './beads-setup';
-import {runClaudeMdSetup} from './claude-md-setup';
+import {
+  type ComponentName,
+  componentNameForConfigName,
+} from './component-registry';
 import {runCriticalRulesSetup} from './critical-rules-setup';
 import {runEasSetup} from './eas-setup';
 import {runEslintSetup} from './eslint-setup';
@@ -24,91 +25,10 @@ import {runGhActionsSetup} from './gh-actions-setup';
 import {runGitignoreSetup} from './gitignore-setup';
 import {runHuskySetup} from './husky-setup';
 import {runPrettierSetup} from './prettier-setup';
-import {runPromptsSetup} from './prompts-setup';
 import {runThreadHooksSetup} from './thread-hooks-setup';
 import {runTimeCheckSetup} from './time-check-setup';
 import {runTsconfigSetup} from './tsconfig-setup';
 import {runUsageCheckSetup} from './usage-check-setup';
-
-// ---------------------------------------------------------------------------
-// Names and ordering
-// ---------------------------------------------------------------------------
-
-/**
- * Every component, in dependency order. base-setup is first (it's the
- * foundation every other installer self-applies), followed by the order
- * `init` and the `all` preset install in. This is THE canonical ordering —
- * presets and init derive theirs from it rather than re-listing.
- */
-export const COMPONENT_NAMES = [
-  'base-setup',
-  'gitignore',
-  'prettier',
-  'tsconfig',
-  'eslint',
-  'husky',
-  'gh-actions',
-  'prompts',
-  'claude-md',
-  'beads',
-  'eas',
-  'time-check',
-  'usage-check',
-  'thread-hooks',
-  'critical-rules',
-] as const;
-
-export type ComponentName = (typeof COMPONENT_NAMES)[number];
-
-/**
- * Components that are only ever installed on explicit request (`add <name>`),
- * never by `init` or the `all` preset:
- *   - base-setup: the implicit foundation every installer self-applies.
- *   - eas: app-specific (Expo/RN); scaffolding it into a node CLI would be wrong.
- *   - time-check: its hook fires on EVERY prompt, so installing it everywhere
- *     "but disabled" would cost a process spawn per prompt in every project to
- *     print nothing. Opt in where the wall-clock actually matters.
- *   - usage-check: same reasoning, and more of it — its hooks fire on every
- *     prompt AND after every tool batch. Opt in where long sessions need to
- *     know their own context size.
- *   - thread-hooks: its SessionStart hook writes to a SHARED Dolt database
- *     (~/Dev/threads) on every session start, so installing it everywhere would
- *     have every repo paying lock contention for a feature only some sessions
- *     use. Opt in where the session is worth tracking on the board.
- *   - critical-rules: it commits a generated rules file INTO the repo, and four
- *     enrolled repos are public. Which rules a repo publishes is a deliberate
- *     per-repo decision, not something a preset should make (t6a0.21 D6/D12).
- * A future app-only component (e.g. `detox`) joins this set.
- */
-const OPT_IN_ONLY: ReadonlySet<ComponentName> = new Set([
-  'base-setup',
-  'eas',
-  'time-check',
-  'usage-check',
-  'thread-hooks',
-  'critical-rules',
-]);
-
-/**
- * The components to install when scaffolding "everything" (init and the
- * `all` preset): the canonical order minus the opt-in-only components.
- */
-export const DEPENDENCY_ORDER: ComponentName[] = COMPONENT_NAMES.filter(
-  (name) => !OPT_IN_ONLY.has(name),
-);
-
-/**
- * Map a short component name to the name it registers in
- * justin-sdk.config.json. Every component except base-setup uses a `-setup`
- * suffix (base-setup is already suffix-shaped).
- */
-export function configNameFor(name: ComponentName): string {
-  return name === 'base-setup' ? 'base-setup' : `${name}-setup`;
-}
-
-const NAME_BY_CONFIG = new Map<string, ComponentName>(
-  COMPONENT_NAMES.map((name) => [configNameFor(name), name]),
-);
 
 // ---------------------------------------------------------------------------
 // Dispatch
@@ -120,19 +40,31 @@ export interface ComponentRunArgs {
   force: boolean;
   /** beads only: skip the git commit at the end (defaults to true). */
   noCommit?: boolean;
-  /** prompts only: skip fetching the prompts library (defaults to false). */
-  skipFetch?: boolean;
+  /**
+   * The remote `stepDepsHasSdk` verifies the pin tag against, forwarded to the
+   * `base-setup` every installer chains.
+   *
+   * Absent in production: base-setup falls back to the real SDK_REPO_URL. It is
+   * threaded because a TEST that omits it makes a real `git ls-remote` to
+   * github — per component, per test — so the suite was neither hermetic nor
+   * offline-safe (dchjw.17 F7).
+   */
+  sdkRepoUrl?: string;
 }
 
 /** The {projectRoot, quiet, force} shape every installer accepts. */
 function base(args: ComponentRunArgs) {
-  return {projectRoot: args.projectRoot, quiet: args.quiet, force: args.force};
+  return {
+    force: args.force,
+    projectRoot: args.projectRoot,
+    quiet: args.quiet,
+    ...(args.sdkRepoUrl == null ? {} : {sdkRepoUrl: args.sdkRepoUrl}),
+  };
 }
 
 /**
- * The one place a component name becomes an installer call. Each entry is a
- * thin adapter that forwards only the options its installer understands
- * (beads has no `force` and takes `noCommit`; prompts takes `skipFetch`).
+ * Each entry is a thin adapter that forwards only the options its installer
+ * understands (beads has no `force` and takes `noCommit`).
  *
  * Typed as Record<ComponentName, …> so adding a name to COMPONENT_NAMES
  * without a runner here is a compile error.
@@ -148,14 +80,12 @@ const RUNNERS: Record<
   eslint: (a) => runEslintSetup(base(a)),
   husky: (a) => runHuskySetup(base(a)),
   'gh-actions': (a) => runGhActionsSetup(base(a)),
-  prompts: (a) =>
-    runPromptsSetup({...base(a), skipFetch: a.skipFetch ?? false}),
-  'claude-md': (a) => runClaudeMdSetup(base(a)),
   beads: (a) =>
     runBeadsSetup({
       projectRoot: a.projectRoot,
       quiet: a.quiet,
       noCommit: a.noCommit ?? true,
+      ...(a.sdkRepoUrl == null ? {} : {sdkRepoUrl: a.sdkRepoUrl}),
     }),
   eas: (a) => runEasSetup(base(a)),
   'time-check': (a) => runTimeCheckSetup(base(a)),
@@ -175,13 +105,13 @@ export function runComponentByName(
 /**
  * Run a component by its justin-sdk.config.json name (`-setup` suffixed).
  * Returns null for an unknown name so callers can skip-with-warning rather
- * than crash on a hand-edited or renamed config entry.
+ * than crash on a hand-edited, renamed, or retired config entry.
  */
 export function runComponentByConfigName(
   configName: string,
   args: ComponentRunArgs,
 ): Promise<number> | null {
-  const name = NAME_BY_CONFIG.get(configName);
+  const name = componentNameForConfigName(configName);
   if (name == null) return null;
   return RUNNERS[name](args);
 }

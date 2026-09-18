@@ -28,7 +28,13 @@
 
 import {afterEach, describe, expect, test} from 'bun:test';
 import {spawnSync} from 'child_process';
-import {existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync} from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'fs';
 import {dirname, join, relative, resolve} from 'path';
 
 import {
@@ -36,19 +42,19 @@ import {
   refreshCriticalRulesArtifact,
   refreshSucceeded,
 } from '../src/critical-rules-setup';
-import {projectRulesFilePath} from '../src/plugin/lib/rules-file';
+import {projectRulesFilePath} from '../src/rules/rules-file';
 import {setQuiet} from '../src/setup-helpers';
 import {git} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
 
-const HOOK = resolve(
-  import.meta.dirname,
-  '..',
-  'src',
-  'plugin',
-  'hooks',
-  'session-start.ts',
-);
+/**
+ * The command the project SessionStart hook runs, spawned exactly as `sh` would
+ * spawn it. Until dchjw.8 this pointed at `src/plugin/hooks/session-start.ts`;
+ * D6 retired the plugin and folded that hook's whole job into the CLI, so the
+ * entry point moved while every invariant below stayed put.
+ */
+const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
+const SESSION_START_ARGS = [CLI, 'session-start'];
 const NOW = '2026-08-17';
 
 const sandboxes: Sandbox[] = [];
@@ -118,12 +124,15 @@ function editPromptsRules(dir: string): void {
   git(dir, ['commit', '-qm', 'edit alpha']);
 }
 
-function projectFixture(modules?: string[]): string {
+function projectFixture(
+  options: {components?: string[]; modules?: string[]} = {},
+): string {
+  const {components, modules} = options;
   const sb = track(createSandbox());
   return initRepoAt(join(sb.path, 'repo'), {
     'justin-sdk.config.json': `${JSON.stringify(
       {
-        components: ['base-setup', 'critical-rules-setup'],
+        components: components ?? ['base-setup', 'critical-rules-setup'],
         ...(modules != null
           ? {
               componentConfig: {
@@ -142,7 +151,7 @@ function projectFixture(modules?: string[]): string {
 
 function writeArtifact(repo: string, promptsDir: string): string {
   setQuiet(true);
-  const outcome = refreshCriticalRulesArtifact(repo, {now: NOW, promptsDir});
+  const outcome = refreshCriticalRulesArtifact(repo, {promptsDir});
   if (!refreshSucceeded(outcome)) {
     throw new Error(`fixture could not write the artifact: ${outcome.message}`);
   }
@@ -166,7 +175,7 @@ interface HookRun {
 function runHook(
   repo: string,
   extraEnv: Record<string, string> = {},
-  hookPath: string = HOOK,
+  args: string[] = SESSION_START_ARGS,
 ): HookRun {
   const home = track(createSandbox());
   const env: Record<string, string> = {
@@ -176,7 +185,7 @@ function runHook(
     XDG_CONFIG_HOME: join(home.path, 'config'),
     ...extraEnv,
   };
-  const result = spawnSync(process.execPath, [hookPath], {
+  const result = spawnSync(process.execPath, args, {
     cwd: repo,
     encoding: 'utf-8',
     env,
@@ -222,7 +231,7 @@ function snapshotFiles(repo: string): Record<string, string> {
 describe('the repo-rules segment of the systemMessage', () => {
   test('in sync: a short green marker and no advice', () => {
     const dir = promptsFixture();
-    const repo = projectFixture(['alpha', 'omega']);
+    const repo = projectFixture();
     writeArtifact(repo, dir);
 
     const run = runHook(repo);
@@ -233,7 +242,7 @@ describe('the repo-rules segment of the systemMessage', () => {
 
   test('stale: names rules-diff first, then rules-update', () => {
     const dir = promptsFixture();
-    const repo = projectFixture(['alpha', 'omega']);
+    const repo = projectFixture();
     writeArtifact(repo, dir);
     editPromptsRules(dir);
 
@@ -253,14 +262,14 @@ describe('the repo-rules segment of the systemMessage', () => {
     // an enrolled repo, which has a pin to resolve, and bunx caches github specs
     // on the spec string — so that form can serve a stale binary to answer a
     // question about staleness.
-    expect(detail).toContain('bunx @justinhaaheim/justin-sdk rules-diff');
-    expect(detail).toContain('bunx @justinhaaheim/justin-sdk rules-update');
+    expect(detail).toContain('bun run justin-sdk rules-diff');
+    expect(detail).toContain('bun run justin-sdk rules-update');
     expect(detail).not.toContain('github:');
   });
 
   test('missing: names rules-update', () => {
     const dir = promptsFixture();
-    const repo = projectFixture(['alpha', 'omega']);
+    const repo = projectFixture();
 
     const run = runHook(repo);
     expect(run.systemMessage).toContain('repo rules ⚠️ MISSING');
@@ -269,7 +278,7 @@ describe('the repo-rules segment of the systemMessage', () => {
 
   test('locally modified: names rules-diff first, then rules-update --force', () => {
     const dir = promptsFixture();
-    const repo = projectFixture(['alpha', 'omega']);
+    const repo = projectFixture();
     const file = writeArtifact(repo, dir);
     writeFileSync(file, `${readFileSync(file, 'utf-8')}\nHAND EDITED\n`);
 
@@ -284,7 +293,7 @@ describe('the repo-rules segment of the systemMessage', () => {
 
   test('cannot check: says UNKNOWN, never claims in sync, still injects the rules', () => {
     const dir = promptsFixture();
-    const repo = projectFixture(['alpha', 'omega']);
+    const repo = projectFixture();
     writeArtifact(repo, dir);
     // A managed clone with readable-but-unrefreshable content: the trap (D5).
     const home = track(createSandbox());
@@ -305,7 +314,9 @@ describe('the repo-rules segment of the systemMessage', () => {
 
   test('a repo that is not enrolled says nothing about repo rules at all', () => {
     const dir = promptsFixture();
-    const repo = projectFixture(); // no selection recorded
+    // critical-rules is NOT among the repo's components and there is no
+    // artifact — the two pieces of evidence enrolment is keyed on (dchjw.3 F2).
+    const repo = projectFixture({components: ['base-setup']});
 
     const run = runHook(repo);
     expect(run.status).toBe(0);
@@ -313,14 +324,13 @@ describe('the repo-rules segment of the systemMessage', () => {
     expect(run.systemMessage).not.toContain('⚠️ repo rules:');
     // Sanity: the fixture IS otherwise identical to the enrolled ones, so this
     // silence is about enrolment and not about a broken run.
-    expect(run.systemMessage).toContain('justin-sdk prime ·');
+    expect(run.systemMessage).toContain('justin-sdk session-start ·');
 
-    // NEGATIVE CONTROL: record a selection, and the same repo gets a segment.
+    // NEGATIVE CONTROL: install the component, and the same repo gets a segment.
     writeFileSync(
       join(repo, 'justin-sdk.config.json'),
       `${JSON.stringify(
         {
-          componentConfig: {[CRITICAL_RULES_CONFIG_KEY]: {modules: ['alpha']}},
           components: ['critical-rules-setup'],
           version: '0.0.1-fixture',
         },
@@ -339,7 +349,7 @@ describe('the repo-rules segment of the systemMessage', () => {
 describe('the hook never writes inside the project', () => {
   test('a stale artifact is reported, not regenerated', () => {
     const dir = promptsFixture();
-    const repo = projectFixture(['alpha', 'omega']);
+    const repo = projectFixture();
     writeArtifact(repo, dir);
     editPromptsRules(dir);
 
@@ -357,177 +367,12 @@ describe('the hook never writes inside the project', () => {
 
   test('a MISSING artifact is not created either', () => {
     const dir = promptsFixture();
-    const repo = projectFixture(['alpha', 'omega']);
+    const repo = projectFixture();
 
     const run = runHook(repo);
     expect(run.systemMessage).toContain('repo rules ⚠️ MISSING');
     expect(existsSync(projectRulesFilePath(repo))).toBe(false);
     expect(statusLines(repo)).toBe('');
-  });
-});
-
-// ---------------------------------------------------------------------------
-// The plugin-cache constraint
-// ---------------------------------------------------------------------------
-
-/**
- * Every relative import reachable from `entry`, plus every bare specifier.
- *
- * `unresolved` matters as much as `files`: a relative specifier pointing at a
- * file that is not there is precisely the 0.5.0 shape (home-base-qjyj), and a
- * walker that just skipped it would report a clean graph for a hook that cannot
- * start. It is reported as the path the specifier POINTS AT, so the escape check
- * below can judge it the same way it judges a resolved file.
- */
-function importGraph(entry: string): {
-  files: string[];
-  bare: string[];
-  unresolved: string[];
-} {
-  const seen = new Set<string>();
-  const bare = new Set<string>();
-  const unresolved = new Set<string>();
-  const stack = [resolve(entry)];
-  while (stack.length > 0) {
-    const file = stack.pop();
-    if (file == null || seen.has(file)) continue;
-    seen.add(file);
-    const source = readFileSync(file, 'utf-8');
-    for (const match of source.matchAll(/from\s+'([^']+)'/g)) {
-      const spec = match[1];
-      if (spec == null) continue;
-      if (!spec.startsWith('.')) {
-        bare.add(spec);
-        continue;
-      }
-      const base = resolve(dirname(file), spec);
-      const resolved = [`${base}.ts`, join(base, 'index.ts')].find((candidate) =>
-        existsSync(candidate),
-      );
-      if (resolved == null) unresolved.add(base);
-      else stack.push(resolved);
-    }
-  }
-  return {bare: [...bare], files: [...seen], unresolved: [...unresolved]};
-}
-
-describe('the hook stays runnable from the marketplace cache (no node_modules)', () => {
-  /** Modules bun resolves without node_modules. */
-  const BUILTINS = new Set([
-    'child_process',
-    'crypto',
-    'fs',
-    'os',
-    'path',
-    'url',
-    'util',
-  ]);
-
-  test('nothing in the import graph needs a third-party package', () => {
-    const graph = importGraph(HOOK);
-    // Sanity: the walker really traversed into the new code, or this is vacuous.
-    expect(
-      graph.files.some((f) => f.endsWith('/src/plugin/lib/rules-drift.ts')),
-    ).toBe(true);
-    expect(
-      graph.files.some((f) => f.endsWith('/src/plugin/lib/rules-selection.ts')),
-    ).toBe(true);
-    expect(
-      graph.files.some((f) => f.endsWith('/src/plugin/lib/local-fs.ts')),
-    ).toBe(true);
-
-    const thirdParty = graph.bare.filter(
-      (spec) => !BUILTINS.has(spec.replace(/^node:/, '')),
-    );
-    expect(thirdParty).toEqual([]);
-  });
-
-  /**
-   * THE GUARD THAT WAS MISSING WHEN 0.5.0 SHIPPED (home-base-qjyj).
-   *
-   * `.claude-plugin/marketplace.json` publishes `"source": "./src/plugin"`, so
-   * that directory IS the plugin package: at runtime the hook is
-   * `<cache>/prime/<version>/hooks/session-start.ts` and nothing above it was
-   * copied. 0.5.0's hook imported `../../repo-status/prime-view` and
-   * `../../rules-drift`, which resolve fine in this repo and to nothing at all
-   * in the cache — so the hook exited 1 at import time in every real session for
-   * a week. It was invisible because Claude Code calls that a
-   * `hook_non_blocking_error`: the session starts, and nothing is printed.
-   *
-   * Neither existing test could catch it. The third-party test above passes with
-   * escaping imports (they are relative, not bare), and every behavioural test
-   * runs the hook from this repo, where the escape resolves.
-   */
-  test('no import escapes the published plugin subtree', () => {
-    const pluginRoot = resolve(import.meta.dirname, '..', 'src', 'plugin');
-    const graph = importGraph(HOOK);
-
-    // Sanity: the walk really traverses, or "no escapes" is vacuous. Asserted on
-    // a module the hook reaches through a NON-escaping import, deliberately —
-    // an assertion about the escaping half would collapse together with the
-    // thing under test and report the wrong failure.
-    expect(
-      graph.files.some((f) => f.endsWith('/src/plugin/lib/prime.ts')),
-    ).toBe(true);
-
-    // Judged together: an import that resolves OUTSIDE the package and one that
-    // resolves nowhere are the same production failure — a module the cache does
-    // not contain — and the second is what the escaping paths become once the
-    // SDK moves them, so neither may pass.
-    const escapes = [...graph.files, ...graph.unresolved].filter((file) =>
-      relative(pluginRoot, file).startsWith('..'),
-    );
-    expect(escapes).toEqual([]);
-    expect(graph.unresolved).toEqual([]);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// The published file set, executed the way the plugin cache executes it
-// ---------------------------------------------------------------------------
-
-/** Copy a directory tree — the marketplace's own "publish this subdir" act. */
-function copyTree(from: string, to: string): void {
-  mkdirSync(to, {recursive: true});
-  for (const entry of readdirSync(from, {withFileTypes: true})) {
-    const src = join(from, entry.name);
-    const dest = join(to, entry.name);
-    if (entry.isDirectory()) copyTree(src, dest);
-    else writeFileSync(dest, readFileSync(src));
-  }
-}
-
-describe('the hook runs from a copy of ONLY the published plugin files', () => {
-  /**
-   * The static guard above reads import specifiers; this one PROVES the result
-   * by doing what the marketplace does — copy `src/plugin` somewhere with
-   * nothing above it and run the hook from there. A specifier form the regex
-   * missed, or a runtime require, still fails here.
-   */
-  test('exit 0 and a valid envelope, with nothing outside src/plugin on disk', () => {
-    const dir = promptsFixture();
-    const repo = projectFixture(['alpha', 'omega']);
-    writeArtifact(repo, dir);
-
-    const sb = track(createSandbox());
-    const published = join(sb.path, 'prime', '0.0.0-test');
-    copyTree(resolve(import.meta.dirname, '..', 'src', 'plugin'), published);
-
-    // The cache really is only the plugin subtree: the SDK's own src/ is absent.
-    expect(existsSync(join(published, 'hooks', 'session-start.ts'))).toBe(true);
-    expect(existsSync(join(published, 'lib', 'rules-drift.ts'))).toBe(true);
-    expect(existsSync(join(sb.path, 'src'))).toBe(false);
-    expect(existsSync(join(published, 'node_modules'))).toBe(false);
-
-    const run = runHook(
-      repo,
-      {},
-      join(published, 'hooks', 'session-start.ts'),
-    );
-    // runHook already JSON.parses stdout and asserts the envelope's event name.
-    expect(run.status).toBe(0);
-    expect(run.stderr).toBe('');
-    expect(run.systemMessage).toContain('justin-sdk prime');
   });
 });
 
@@ -563,8 +408,6 @@ const GATED_RULES_FILES: Record<string, string> = {
   'src/rules/omega.md': '# Omega\n\nOMEGA_RULE',
 };
 
-const GATED_MODULES = ['alpha', 'rn-only', 'omega'];
-
 function gatedPromptsFixture(): string {
   process.env.JSDK_PRIME_PRETTIER = '0';
   const sb = track(createSandbox());
@@ -574,12 +417,15 @@ function gatedPromptsFixture(): string {
 }
 
 /** A React Native project, so the gated module is genuinely in the injection. */
-function rnProjectFixture(modules?: string[]): string {
+function rnProjectFixture(
+  options: {components?: string[]; modules?: string[]} = {},
+): string {
+  const {components, modules} = options;
   const sb = track(createSandbox());
   return initRepoAt(join(sb.path, 'repo'), {
     'justin-sdk.config.json': `${JSON.stringify(
       {
-        components: ['base-setup', 'critical-rules-setup'],
+        components: components ?? ['base-setup', 'critical-rules-setup'],
         ...(modules != null
           ? {componentConfig: {[CRITICAL_RULES_CONFIG_KEY]: {modules}}}
           : {}),
@@ -601,7 +447,7 @@ const REPO_STATE_HEADER = '# Current repo state';
 describe('the hook does not re-deliver rules the repo already carries', () => {
   test('NOT enrolled: rule text AND repo state, exactly as before anhw', () => {
     gatedPromptsFixture();
-    const repo = rnProjectFixture(); // no selection recorded
+    const repo = rnProjectFixture({components: ['base-setup']});
 
     const run = runHook(repo);
     expect(run.status).toBe(0);
@@ -614,7 +460,7 @@ describe('the hook does not re-deliver rules the repo already carries', () => {
 
   test('enrolled with the artifact PRESENT: repo state only, and it says so', () => {
     const dir = gatedPromptsFixture();
-    const repo = rnProjectFixture(GATED_MODULES);
+    const repo = rnProjectFixture();
     const artifact = writeArtifact(repo, dir);
 
     const run = runHook(repo);
@@ -640,7 +486,7 @@ describe('the hook does not re-deliver rules the repo already carries', () => {
 
   test('D20 — enrolled but the artifact is MISSING: keep injecting', () => {
     gatedPromptsFixture();
-    const repo = rnProjectFixture(GATED_MODULES); // enrolled, nothing written
+    const repo = rnProjectFixture(); // enrolled, nothing written
 
     const run = runHook(repo);
     expect(run.systemMessage).toContain('repo rules ⚠️ MISSING');
@@ -653,11 +499,14 @@ describe('the hook does not re-deliver rules the repo already carries', () => {
 
   test('D20 — cannot-check: a failed MEASUREMENT never suppresses', () => {
     gatedPromptsFixture();
-    const repo = rnProjectFixture(GATED_MODULES);
+    const repo = rnProjectFixture();
     writeArtifact(repo, gatedPromptsFixture());
     // A managed clone that exists but cannot be refreshed (D5's trap).
     const home = track(createSandbox());
-    initRepoAt(join(home.path, 'config', 'justin-sdk', 'prompts'), GATED_RULES_FILES);
+    initRepoAt(
+      join(home.path, 'config', 'justin-sdk', 'prompts'),
+      GATED_RULES_FILES,
+    );
 
     const run = runHook(repo, {
       HOME: home.path,
@@ -673,7 +522,7 @@ describe('the hook does not re-deliver rules the repo already carries', () => {
     const dir = gatedPromptsFixture();
 
     // stale: the artifact exists, the source moved past it.
-    const staleRepo = rnProjectFixture(GATED_MODULES);
+    const staleRepo = rnProjectFixture();
     writeArtifact(staleRepo, dir);
     writeFileSync(join(dir, 'src/rules/alpha.md'), '# Alpha\n\nALPHA_RULE_V2');
     git(dir, ['add', '-A']);
@@ -684,7 +533,7 @@ describe('the hook does not re-deliver rules the repo already carries', () => {
     expect(stale.additionalContext).toContain(REPO_STATE_HEADER);
 
     // locally modified: hand-edited bytes, stamp intact.
-    const editedRepo = rnProjectFixture(GATED_MODULES);
+    const editedRepo = rnProjectFixture();
     const file = writeArtifact(editedRepo, dir);
     writeFileSync(file, `${readFileSync(file, 'utf-8')}\nHAND EDITED\n`);
     const edited = runHook(editedRepo);

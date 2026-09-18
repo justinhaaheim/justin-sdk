@@ -1282,7 +1282,7 @@ describe('installer: settings and config wiring', () => {
     const settings: Record<string, unknown> = {
       hooks: {
         UserPromptSubmit: [
-          {hooks: [{command: 'bunx @justinhaaheim/justin-sdk time-check'}]},
+          {hooks: [{command: 'bun run justin-sdk time-check'}]},
         ],
       },
     };
@@ -1292,7 +1292,7 @@ describe('installer: settings and config wiring', () => {
     expect(hooks.UserPromptSubmit).toHaveLength(2);
     expect(JSON.stringify(hooks.UserPromptSubmit)).toContain('time-check');
     expect(JSON.stringify(hooks.UserPromptSubmit)).toContain(
-      'bunx @justinhaaheim/justin-sdk usage-check',
+      'bun run justin-sdk usage-check',
     );
   });
 
@@ -1300,7 +1300,9 @@ describe('installer: settings and config wiring', () => {
     const settings: Record<string, unknown> = {};
     expect(addUsageCheckHook(settings, 'PostToolBatch')).toBe(true);
     expect(addUsageCheckHook(settings, 'PostToolBatch')).toBe(false);
-    expect((settings.hooks as Record<string, unknown[]>).PostToolBatch).toHaveLength(1);
+    expect(
+      (settings.hooks as Record<string, unknown[]>).PostToolBatch,
+    ).toHaveLength(1);
   });
 
   test('writes both hooks and the config block into a real project', () => {
@@ -1316,7 +1318,7 @@ describe('installer: settings and config wiring', () => {
     ) as {hooks: Record<string, unknown[]>};
     for (const event of USAGE_CHECK_HOOK_EVENTS) {
       expect(JSON.stringify(settings.hooks[event])).toContain(
-        'bunx @justinhaaheim/justin-sdk usage-check',
+        'bun run justin-sdk usage-check',
       );
     }
 

@@ -821,11 +821,15 @@ describe('CLI: --prompt makes the run an ASK (D1/D6)', () => {
     expect(run.out).toContain('labels=my-arc-1…my-arc-3');
   });
 
-  test('the deprecated `ralph` name reaches the same runner (D1)', () => {
+  test('the RETIRED `ralph` name reaches nothing at all (dchjw.9)', () => {
+    // It was rewritten into `justin-loop` before yargs saw it, for one release
+    // (D1). That release is over: the word is now an unknown command, and the
+    // runner must not start — a rewrite that outlived its grace period keeps
+    // every stale caller believing the old name is current.
     const run = runLoopCli([], 'ralph');
-    expect(run.out).toContain('ralph is now justin-loop');
-    expect(run.out).toContain('picking up handoff hoff-new');
-    expect(run.status).toBe(0);
+    expect(run.out).not.toContain('ralph is now justin-loop');
+    expect(run.out).not.toContain('picking up handoff hoff-new');
+    expect(run.status).toBe(1);
   });
 
   test('--help still documents the default it no longer writes into argv', () => {

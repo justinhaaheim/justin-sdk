@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 describe('gh-actions-setup', () => {
-  test('fresh project: writes signal.yml and registers component', async () => {
+  test('fresh project: writes signal.yml, and registers NOTHING (F11)', async () => {
     const sb = track(createProjectSandbox());
 
     const exitCode = await runGhActionsSetup({
@@ -48,7 +48,9 @@ describe('gh-actions-setup', () => {
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
     ) as {components?: string[]};
-    expect(config.components).toContain('gh-actions-setup');
+    // The INSTALLER no longer registers itself (constraint F11): only `add` and
+    // `remove` write `components`.
+    expect(config.components).toBeUndefined();
   });
 
   test('idempotent: second run leaves workflow content unchanged', async () => {

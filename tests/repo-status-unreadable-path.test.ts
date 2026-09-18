@@ -241,7 +241,9 @@ describe('a missing tree makes the baseline lookup fail while the walk succeeds'
     const fx = buildFixture(sb);
 
     // Everything the proof needs to REACH the file comparison still works...
-    expect(gitRun(fx.repo, ['cherry', '-v', 'main', 'local-delete']).status).toBe(0);
+    expect(
+      gitRun(fx.repo, ['cherry', '-v', 'main', 'local-delete']).status,
+    ).toBe(0);
     expect(
       gitRun(fx.repo, [
         'show',
@@ -253,8 +255,12 @@ describe('a missing tree makes the baseline lookup fail while the walk succeeds'
       ]).stdout,
     ).toBe('D\td/foo');
     expect(
-      gitRun(fx.repo, ['rev-list', '--left-right', '--count', 'main...local-delete'])
-        .status,
+      gitRun(fx.repo, [
+        'rev-list',
+        '--left-right',
+        '--count',
+        'main...local-delete',
+      ]).status,
     ).toBe(0);
     // ...and the branch listing too, so the row is built rather than refused
     // upstream by the qyu1.23 enumeration guard.
@@ -263,7 +269,9 @@ describe('a missing tree makes the baseline lookup fail while the walk succeeds'
     // ...while the one question that decides the verdict cannot be answered.
     expect(gitRun(fx.repo, ['rev-parse', 'main:d/foo']).status).not.toBe(0);
     // And the path is REALLY there — this is a failed read, not an absence.
-    expect(gitRun(fx.repo, ['rev-parse', 'local-delete^:d/foo']).status).toBe(0);
+    expect(gitRun(fx.repo, ['rev-parse', 'local-delete^:d/foo']).status).toBe(
+      0,
+    );
   });
 
   test('stderr wording cannot tell the two apart, so the fix does not read it', () => {
@@ -285,7 +293,9 @@ describe('a missing tree makes the baseline lookup fail while the walk succeeds'
 
     // Byte-identical but for the path. Any `includes('does not exist in')` test
     // would classify the damaged tree as an absence and re-open the bug.
-    expect(unreadable.stderr).toBe("fatal: path 'd/foo' does not exist in 'HEAD'");
+    expect(unreadable.stderr).toBe(
+      "fatal: path 'd/foo' does not exist in 'HEAD'",
+    );
     expect(absent.stderr).toBe(
       "fatal: path 'never-existed' does not exist in 'HEAD'",
     );

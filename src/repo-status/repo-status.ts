@@ -31,6 +31,12 @@ import {hideBin} from 'yargs/helpers';
 
 import type {Argv} from 'yargs';
 
+import {
+  getSdkVersion,
+  helpHeader,
+  helpWrapWidth,
+  UNKNOWN_VERSION,
+} from '../sdk-identity';
 import {buildPlan, executePlan, executeRemotePlan, renderPlan} from './plan';
 import {DEFAULT_PAIR_CAP} from './overlap';
 import {renderReportPretty, shouldStyle} from './pretty';
@@ -946,14 +952,20 @@ export const repoStatusCommand = {
 };
 
 export async function runCli(argv: string[]): Promise<number> {
+  // D4's identity contract, applied to the STANDALONE bin only. The mounted
+  // `repoStatusCommand` deliberately gets no header of its own: it runs under
+  // `justin-sdk`, whose help already carries one, and a second would print two.
+  const header = helpHeader('repo-status', import.meta.dirname);
   await buildRepoStatus(
     yargs(hideBin(argv))
       .scriptName('repo-status')
-      .usage(`$0 <command> [options]\n\n${TOP_NARRATIVE}`),
+      .usage(`${header}\n\n$0 <command> [options]\n\n${TOP_NARRATIVE}`)
+      .version(getSdkVersion() ?? UNKNOWN_VERSION)
+      .alias('v', 'version'),
   )
     .strict()
     .help()
-    .wrap(Math.min(100, process.stdout.columns ?? 100))
+    .wrap(helpWrapWidth(header, Math.min(100, process.stdout.columns ?? 100)))
     .parseAsync();
 
   return typeof process.exitCode === 'number' ? process.exitCode : 0;

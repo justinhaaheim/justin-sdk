@@ -31,16 +31,13 @@ import {createSandbox, type Sandbox} from './sandbox';
 const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
 
 /**
- * A `br` that works with an arbitrary cwd. Plain `br` is preferred, but on this fleet it is a mise shim that resolves its version from the *current directory's* config — and the dry run deliberately runs br in a temp directory, where such a shim resolves to nothing. So fall back to the concrete binary path mise reports.
+ * The ONE `br` these tests use: the concrete binary this repo's mise.toml pins, asked for by path.
+ *
+ * Never the bare name. `br` on PATH is a mise SHIM that resolves its version from the CURRENT DIRECTORY's config, and both halves of every test here run outside this repo — the fixture is built in a temp sandbox, and the dry run deliberately rebuilds in another one. So a bare `br` silently resolved to whatever the machine's fallback br was (measured 2026-09-18: `br 0.5.12` from ~/.local/bin, against the pinned `br 0.1.37`), which made the fixture writer and the rebuilder two different schema generations and turned the cross-version test below into a DOWNGRADE. That reported a true finding (`issues.prerequisites` exists in 0.5.12 and not in 0.4.1) against a test that asserts safety — a red suite caused entirely by which br the shim felt like handing over.
+ *
+ * `mise which br` only, so there is no path by which this drifts again: a machine that cannot resolve it reports these tests as SKIPPED with a reason, never as green (critical rule 6 — silence must be a claim).
  */
 function resolveBrBinary(): string | null {
-  const direct = Bun.spawnSync(['br', '--version'], {
-    cwd: tmpdir(),
-    stderr: 'pipe',
-    stdout: 'pipe',
-  });
-  if (direct.exitCode === 0) return 'br';
-
   const viaMise = Bun.spawnSync(['mise', 'which', 'br'], {
     cwd: resolve(import.meta.dirname, '..'),
     stderr: 'pipe',
@@ -62,10 +59,30 @@ function brVersion(bin: string): string | null {
   return text === '' ? null : text;
 }
 
+/** The X.Y.Z triple out of a `br --version` line, or null when it does not look like one. */
+function brSemver(bin: string): [number, number, number] | null {
+  const match = /(\d+)\.(\d+)\.(\d+)/.exec(brVersion(bin) ?? '');
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+function isNewer(
+  a: [number, number, number],
+  b: [number, number, number],
+): boolean {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] > b[i];
+  }
+  return false;
+}
+
 /**
- * A SECOND br, from the 0.4 line — the version the fleet migration rebuilds WITH. Found by asking each installed mise build for its own `--version`, never by trusting a directory name. Absent on a machine that has only one br, in which case the cross-version test skips rather than pretending to have run.
+ * A SECOND br, NEWER than the pinned one — the direction the fleet migration actually runs: a workspace written by the old line, rebuilt by the new one. Found by asking each installed mise build for its own `--version`, never by trusting a directory name. Absent on a machine that has only one br, in which case the cross-version test skips rather than pretending to have run.
+ *
+ * NEWER, not "the 0.4 line", is the load-bearing part. A rebuild by an OLDER br is not the migration and is not safe: measured 2026-09-18, a 0.5.12 workspace rebuilt by 0.4.1 really does lose `issues.prerequisites`, and the dry run correctly says so. Pinning this to a version number instead of a direction is what silently inverted once already.
  */
-function resolveBr04(): string | null {
+function resolveNewerBr(pinned: string): string | null {
+  const pinnedVersion = brSemver(pinned);
+  if (pinnedVersion == null) return null;
   const root = join(
     homedir(),
     '.local/share/mise/installs/github-dicklesworthstone-beads-rust',
@@ -74,7 +91,8 @@ function resolveBr04(): string | null {
   for (const name of readdirSync(root).sort().reverse()) {
     const candidate = join(root, name, 'br');
     if (!existsSync(candidate)) continue;
-    if (brVersion(candidate)?.startsWith('br 0.4') === true) return candidate;
+    const version = brSemver(candidate);
+    if (version != null && isNewer(version, pinnedVersion)) return candidate;
   }
   return null;
 }
@@ -87,14 +105,23 @@ function requireBr(): string {
   return BR;
 }
 
-const BR_04 = resolveBr04();
-/** Only meaningful when the two builds really are different versions. */
-const hasCrossVersionBr =
-  hasBr && BR_04 != null && brVersion(requireBr()) !== brVersion(BR_04);
+const BR_NEWER = BR == null ? null : resolveNewerBr(BR);
+const hasCrossVersionBr = hasBr && BR_NEWER != null;
 
-function requireBr04(): string {
-  if (BR_04 == null) throw new Error('no br 0.4.x binary resolved');
-  return BR_04;
+function requireNewerBr(): string {
+  if (BR_NEWER == null) throw new Error('no newer br binary resolved');
+  return BR_NEWER;
+}
+
+// A skip must SAY it skipped and why. Silence here would read exactly like a green run.
+if (!hasBr) {
+  console.warn(
+    '[beads-rebuild-dryrun] SKIPPING every test: `mise which br` resolved no binary in pkg/justin-sdk. Install the pinned br (`mise install`) to run them.',
+  );
+} else if (!hasCrossVersionBr) {
+  console.warn(
+    `[beads-rebuild-dryrun] SKIPPING the cross-version test: no installed br is newer than the pinned ${brVersion(requireBr()) ?? '?'}. A rebuild by an OLDER br is a downgrade, not the migration, and would fail for a real reason.`,
+  );
 }
 
 const sandboxes: Sandbox[] = [];
@@ -325,14 +352,14 @@ describe('beads-rebuild-dryrun exit-code contract', () => {
   );
 
   /**
-   * The migration this gate exists for: the workspace was written by one br line and is rebuilt by another. Only here does `content_hash` get recomputed differently, which is why it sits in NOT_COMPARED — with it compared, this clean workspace reports one FATAL per issue and the gate blocks a migration that loses nothing.
+   * The migration this gate exists for: the workspace was written by the pinned br line and is rebuilt by a NEWER one. Only here does `content_hash` get recomputed differently, which is why it sits in NOT_COMPARED — with it compared, this clean workspace reports one FATAL per issue and the gate blocks a migration that loses nothing.
    */
   test.skipIf(!hasCrossVersionBr)(
-    'a rebuild by a DIFFERENT br version is safe, and the recomputed content_hash is not mistaken for loss',
+    'a rebuild by a NEWER br version is safe, and the recomputed content_hash is not mistaken for loss',
     () => {
       const beadsDir = workspace();
       const {exitCode, output} = captureOutput(() =>
-        runBeadsRebuildDryRun({beadsDir, brBin: requireBr04()}),
+        runBeadsRebuildDryRun({beadsDir, brBin: requireNewerBr()}),
       );
 
       // Proof the other br really did the rebuild rather than declining it.

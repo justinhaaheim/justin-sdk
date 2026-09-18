@@ -8,7 +8,7 @@
  * was written:
  *
  *  1. git runs post-checkout with cwd = the NEW worktree (so bare
- *     `worktree-setup`, which defaults to cwd, targets the right tree).
+ *     `setup-env`, which defaults to cwd, targets the right tree).
  *     A linked worktree shares the primary's .git/config, so husky's
  *     core.hooksPath is already set there — which is exactly why this works for
  *     worktrees and CANNOT work for a fresh `git clone`, where hooksPath is
@@ -151,7 +151,7 @@ function addWorktree(
 }
 
 describe('.husky/post-checkout auto-hydration over real git', () => {
-  test('a fresh worktree hydrates itself: worktree-setup runs, exit 0', () => {
+  test('a fresh worktree hydrates itself: setup-env runs, exit 0', () => {
     const sb = track(createSandbox());
     const primary = huskyPrimary(sb, {
       sdkBin: `#!/bin/sh\nexec bun ${JSON.stringify(join(SDK_ROOT, 'src', 'cli.ts'))} "$@"\n`,
@@ -162,8 +162,8 @@ describe('.husky/post-checkout auto-hydration over real git', () => {
 
     // The preamble fired (guard saw an absent node_modules) …
     expect(added.output).toContain('Fresh checkout detected');
-    // … the real worktree-setup ran, with cwd = the NEW tree …
-    expect(added.output).toContain('worktree-setup');
+    // … the real setup-env ran, with cwd = the NEW tree …
+    expect(added.output).toContain('setup-env');
     expect(existsSync(join(dest, MARKER_FILE))).toBe(true);
     // … and it hydrated THIS tree, not the primary.
     expect(existsSync(join(primary, MARKER_FILE))).toBe(false);
@@ -187,9 +187,10 @@ describe('.husky/post-checkout auto-hydration over real git', () => {
     expect(added.output).toContain('simulated hydrate failure');
     expect(added.output).toContain('this tree is NOT hydrated');
     // The warning names the exact manual command, the whole point of warning.
-    expect(added.output).toContain(
-      'bunx github:justinhaaheim/justin-sdk worktree-setup',
-    );
+    // It is `bun install` since epic home-base-dchjw D1 retired the unpinned
+    // `bunx github:` fallback: an unpinned spec is cached by spec STRING, so
+    // that line silently re-ran whatever it first fetched, from a git hook.
+    expect(added.output).toContain('Run: bun install');
     // Nothing was hydrated, and the tree still exists to be fixed by hand.
     expect(existsSync(join(dest, MARKER_FILE))).toBe(false);
     expect(existsSync(join(dest, 'package.json'))).toBe(true);

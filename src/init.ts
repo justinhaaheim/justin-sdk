@@ -1,32 +1,49 @@
 /**
- * init.ts — Greenfield scaffold orchestrator for `justin-sdk init`.
+ * init.ts — `justin-sdk init`: ENROL a repo, and nothing more (D3).
  *
- * Composes the 8 add-component installers (plus beads) into a single
- * one-shot scaffold for a brand-new project. The component installers
- * are called in-process (not via `bunx`), which keeps init fast and
- * lets tests run offline.
+ * This is npm's `init`. It writes the manifest — justin-sdk.config.json, the
+ * SDK devDependency (pinned to a tag verified on the remote) and the shared
+ * package.json scripts — and then stops. No components.
+ *
+ * It used to scaffold the whole preset, which is how enrolling a repo came to
+ * install a dozen components nobody asked for, including the retired `prompts`
+ * one. Components are `add`'s job; `add core` installs everything that applies.
  *
  * Phases:
  *   1. Preflight       — require .git/, clean tree (unless --allow-dirty)
  *   2. package.json    — scaffold a minimal one if missing
- *   3. Components      — run every add-component in dependency order
- *   4. bun install     — pull deps so future bunx calls work
- *   5. Self-check      — run doctor to confirm everything is healthy
- *   6. Git commit      — single "Initial scaffold" commit (unless --no-commit)
+ *   3. config          — justin-sdk.config.json (no `components` key unless
+ *                        --components was passed)
+ *   4. devDependency   — @justinhaaheim/justin-sdk, tag verified on the remote
+ *   5. scripts         — the shared package.json aliases
+ *   6. bun install     — pull deps so the local bin resolves
+ *   7. Self-check      — run doctor
+ *   8. Git commit      — single "Initial scaffold" commit (unless --no-commit)
  *
- * Idempotent: re-running on a partly-scaffolded directory is safe — each
- * component handles its own existing-state detection.
+ * Idempotent: re-running on a partly-enrolled directory is safe — every step
+ * handles its own existing-state detection.
  */
 
 import {existsSync, writeFileSync} from 'fs';
 import {basename, resolve} from 'path';
 
-import {DEPENDENCY_ORDER, runComponentByName} from './components';
+import {
+  addComponentsToConfig,
+  stepDepsHasSdk,
+  stepJustinSdkConfig,
+  stepPackageScripts,
+} from './base-setup';
+import {
+  type ComponentName,
+  COMPONENT_NAMES,
+  componentNameForConfigName,
+  configNameFor,
+} from './component-registry';
 import {runDoctor} from './doctor';
+import {getSdkVersion} from './sdk-identity';
 import {
   exec,
   fail,
-  getSdkVersion,
   kebabCase,
   setQuiet,
   stepHeader,
@@ -58,10 +75,19 @@ export interface InitOptions {
   force?: boolean;
   /** Skip `bun install` (default false — tests should set true) */
   skipInstall?: boolean;
-  /** Skip fetching the prompts library (forwarded to runPromptsSetup) */
-  skipPromptsFetch?: boolean;
-  /** Skip the `bunx @justinhaaheim/justin-sdk doctor` self-check at the end (default false) */
+  /** Skip the `bun run justin-sdk doctor` self-check at the end (default false) */
   skipDoctor?: boolean;
+  /**
+   * Write an explicit `components` list into the new config. Absent (the
+   * default) leaves the key out, which means "track the core preset".
+   */
+  components?: readonly string[];
+  /**
+   * The remote to verify the SDK tag against before writing the pin. Defaults
+   * to the real published repo; tests point it at a local bare repo so the real
+   * `git ls-remote` path runs without the suite reaching GitHub.
+   */
+  sdkRepoUrl?: string;
 }
 
 /**
@@ -72,9 +98,7 @@ export async function runInit(options: InitOptions = {}): Promise<number> {
   const projectRoot = resolve(options.projectRoot ?? process.cwd());
   const allowDirty = options.allowDirty ?? false;
   const noCommit = options.noCommit ?? false;
-  const force = options.force ?? false;
   const skipInstall = options.skipInstall ?? false;
-  const skipPromptsFetch = options.skipPromptsFetch ?? false;
   const skipDoctor = options.skipDoctor ?? false;
 
   setQuiet(quiet);
@@ -137,37 +161,52 @@ export async function runInit(options: InitOptions = {}): Promise<number> {
   }
 
   // -------------------------------------------------------------------------
-  // Phase 3: Run add components in dependency order
+  // Phase 3: enrol the repo — config, SDK dependency, base scripts. NO
+  // components (D3).
   // -------------------------------------------------------------------------
-  // Note: every component calls runBaseSetup internally — idempotent — so
-  // DEPENDENCY_ORDER omits base-setup and we don't apply it separately.
-  stepHeader('3. Components');
-  for (const name of DEPENDENCY_ORDER) {
-    // The shared QUIET flag flips during each sub-call (they restore quiet
-    // on the way in, but other code paths may not). Re-assert init's own
-    // quiet setting before each component so our headers/messages print
-    // when they should.
-    setQuiet(quiet);
-    const exitCode = await runComponentByName(name, {
-      projectRoot,
-      quiet: true,
-      force,
-      noCommit: true,
-      skipFetch: skipPromptsFetch,
-    });
-    setQuiet(quiet);
-    if (exitCode !== 0) {
-      fail(`add ${name} failed; aborting init.`);
-      return exitCode;
+  // `init` is npm's `init`: it creates the manifest and nothing else. It used
+  // to scaffold the whole core preset, which meant enrolling a repo installed a
+  // dozen components nobody asked for — including, until Part A, the retired
+  // `prompts` component. Components are `add`'s job now.
+  //
+  // `components` is left OUT of justin-sdk.config.json unless --components is
+  // passed (D3): absent means the core preset, so a repo scaffolded today keeps
+  // tracking core as the registry grows, instead of freezing today's list into
+  // a file nobody revisits. `add core` is what installs it.
+  stepHeader('3. justin-sdk.config.json');
+  if (!stepJustinSdkConfig(projectRoot)) return 1;
+  if (options.components != null && options.components.length > 0) {
+    const configNames = options.components.map((name) =>
+      (COMPONENT_NAMES as readonly string[]).includes(name)
+        ? configNameFor(name as ComponentName)
+        : name,
+    );
+    const unknown = configNames.filter(
+      (name) => componentNameForConfigName(name) == null,
+    );
+    if (unknown.length > 0) {
+      fail(
+        `--components names ${unknown.join(', ')}, which this SDK does not know. Run \`justin-sdk list\` for the component names. Nothing was written to components.`,
+      );
+      return 1;
     }
-    success(`add ${name} done`);
+    const added = addComponentsToConfig(projectRoot, configNames);
+    success(
+      `justin-sdk.config.json components = ${added.join(', ')} (run \`justin-sdk install\` to apply them)`,
+    );
   }
+
+  stepHeader('4. package.json: @justinhaaheim/justin-sdk devDependency');
+  if (!stepDepsHasSdk(projectRoot, {sdkRepoUrl: options.sdkRepoUrl})) return 1;
+
+  stepHeader('5. package.json scripts');
+  if (!stepPackageScripts(projectRoot)) return 1;
 
   // -------------------------------------------------------------------------
   // Phase 4: bun install
   // -------------------------------------------------------------------------
   if (!skipInstall) {
-    stepHeader('4. bun install');
+    stepHeader('6. bun install');
     const installResult = exec('bun install', projectRoot);
     if (installResult.exitCode !== 0) {
       warn(
@@ -205,13 +244,13 @@ export async function runInit(options: InitOptions = {}): Promise<number> {
   // Phase 5: Self-check via doctor
   // -------------------------------------------------------------------------
   if (!skipDoctor) {
-    stepHeader('5. doctor (self-check)');
+    stepHeader('7. doctor (self-check)');
     setQuiet(quiet);
     const doctorExit = await runDoctor(projectRoot, {quiet: true});
     setQuiet(quiet);
     if (doctorExit !== 0) {
       warn(
-        'doctor reported issues; review and re-run components or run `bunx @justinhaaheim/justin-sdk doctor` for details.',
+        'doctor reported issues; review and re-run components or run `bun run justin-sdk doctor` for details.',
       );
     } else {
       success('All doctor checks passed');
@@ -222,8 +261,10 @@ export async function runInit(options: InitOptions = {}): Promise<number> {
   // Phase 6: Final git commit
   // -------------------------------------------------------------------------
   if (!noCommit) {
-    stepHeader('6. Git commit');
-    const sdkVersion = getSdkVersion();
+    stepHeader('8. Git commit');
+    // A commit message is prose, so an unreadable version degrades to the word
+    // rather than refusing the commit — but it degrades VISIBLY (D4).
+    const sdkVersion = getSdkVersion() ?? 'unknown';
     const addResult = exec('git add -A', projectRoot);
     if (addResult.exitCode !== 0) {
       warn(`git add -A failed (exit ${addResult.exitCode}); skipping commit.`);

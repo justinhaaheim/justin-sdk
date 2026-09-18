@@ -13,13 +13,12 @@
  * pretend the word was a typo.
  */
 
+import {isThreadAnswerUi, resolveThreadConfig} from './config';
 import {
-  isThreadAnswerUi,
-  resolveThreadConfig,
   THREAD_ANSWER_UIS,
   THREAD_DEFAULT_ANSWER_UI,
   type ThreadAnswerUi,
-} from './config';
+} from './defaults';
 
 import type {EnvLike} from './paths';
 import type {ThreadRef} from './resolve';

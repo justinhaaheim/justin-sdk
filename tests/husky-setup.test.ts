@@ -106,12 +106,13 @@ describe('husky-setup', () => {
     const mode = statSync(hookPath).mode;
     expect(mode & 0o111).not.toBe(0);
 
-    // justin-sdk.config.json has husky-setup in components
+    // The INSTALLER no longer registers itself in justin-sdk.config.json
+    // (constraint F11): only `add` and `remove` write `components`. Running the
+    // installer directly therefore leaves the key alone.
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
     ) as {components?: string[]};
-    expect(config.components).toContain('husky-setup');
-    expect(config.components).toContain('base-setup');
+    expect(config.components).toBeUndefined();
   });
 
   test('fully idempotent: second run produces same files', async () => {
@@ -138,10 +139,7 @@ describe('husky-setup', () => {
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
     ) as {components?: string[]};
-    const huskySetupCount = (config.components ?? []).filter(
-      (c) => c === 'husky-setup',
-    ).length;
-    expect(huskySetupCount).toBe(1);
+    expect(config.components).toBeUndefined();
   });
 
   test('preserves user-customized "prepare" script', async () => {
@@ -380,25 +378,30 @@ ${VERSION_MANAGER_LINE}
     expect(hook).toBe(preamble());
     expect(hook).toContain(POST_CHECKOUT_MARKER_BEGIN);
     expect(hook).toContain(POST_CHECKOUT_MARKER_END);
-    expect(hook).toContain('worktree-setup');
+    expect(hook).toContain('setup-env');
     expect(
       statSync(join(sb.path, '.husky', 'post-checkout')).mode & 0o111,
     ).not.toBe(0);
   });
 
-  test('never installs a --native tier or a bare-name bunx invocation', () => {
+  test('never installs a retired tier flag, a retired command name, or a bare-name bunx invocation', () => {
     const hook = preamble();
-    expect(hook).toContain(
-      'bunx github:justinhaaheim/justin-sdk worktree-setup',
-    );
-    // Assert over the CODE only: both forbidden strings appear in the comments
-    // that forbid them, so a whole-file match would pass vacuously.
+    // Assert over the CODE only: every forbidden string also appears in the
+    // comments that forbid it, so a whole-file match would pass vacuously.
     const code = hook
       .split('\n')
       .filter((line) => !line.trimStart().startsWith('#'))
       .join('\n');
-    // NEVER --native from a hook: minutes of CocoaPods latency per worktree.
+    // The v170 tier flags are gone from the CLI (home-base-dchjw.9), so a hook
+    // that typed one would now hard-fail on an unknown option — and --native in
+    // particular was minutes of CocoaPods latency per worktree.
     expect(code).not.toContain('--native');
+    expect(code).not.toContain('--lint');
+    expect(code).not.toContain('--js');
+    // Same for the pre-j2n7 command name: `worktree-setup` is no longer an
+    // alias, so the hook must spell the real command.
+    expect(code).not.toContain('worktree-setup');
+    expect(code).toContain('setup-env');
     // Bare-name bunx falls through to the npm registry (home-base-2qhw): the
     // static fallback must name its source explicitly.
     expect(code).not.toMatch(/bunx\s+justin-sdk/);
@@ -415,7 +418,7 @@ ${VERSION_MANAGER_LINE}
     expect(await runHuskySetup({projectRoot: sb.path, quiet: true})).toBe(0);
 
     const hook = readHook(sb);
-    // The hand-rolled hydration is gone — worktree-setup does all of it now.
+    // The hand-rolled hydration is gone — setup-env does all of it now.
     expect(hook).not.toContain('git submodule update --init --recursive');
     expect(hook).not.toContain('initializing submodules + bun install');
     expect(hook).not.toContain('# Fresh worktrees/clones have no node_modules');

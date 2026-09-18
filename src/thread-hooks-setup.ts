@@ -30,11 +30,13 @@
  * true, so an accidental install costs one ~60ms process per session start and
  * says nothing.
  *
- * OPT-IN ONLY — same reasoning as usage-check, plus one of its own: this hook
- * writes to a SHARED Dolt database (~/Dev/threads) on every session start, so the
- * cost of installing it everywhere is paid in lock contention by every other
- * session, not just by this repo. Excluded from `init` and the `all` preset (see
- * OPT_IN_ONLY in components.ts).
+ * IN THE CORE PRESET since 2026-09-18 (epic home-base-dchjw D3, Justin's call).
+ * It was withheld from every preset before that, because this hook writes to a
+ * SHARED Dolt database (~/Dev/threads) on every session start and the cost of
+ * installing it everywhere would be paid in lock contention by every other
+ * session. What actually bounds that cost is the config, not the preset: the
+ * hook is INERT unless BOTH componentConfig.thread.enabled and
+ * .startOnSessionStart are true, and both default to false.
  *
  * Idempotent: re-running detects each existing hook by fingerprint and writes
  * nothing. The two are independent — a project that installed this before the
@@ -54,19 +56,23 @@ import {
   success,
   writeJson,
 } from './setup-helpers';
-
-/** The command the hook runs. Matches the usage-check / time-check spelling. */
-export const THREAD_START_HOOK_COMMAND =
-  'bunx @justinhaaheim/justin-sdk thread start --hook';
+import {sdkRun, sdkScript, upsertHookCommand} from './sdk-invocation';
 
 /**
- * Substring identifying an already-installed hook, whatever its bunx spelling.
- *
- * Matched against the serialised event array, so a hand-edited variant (a
- * different bunx form, an absolute path to the CLI) still counts as installed
- * and is left alone rather than duplicated.
+ * The SDK subcommand this hook runs. It — not any whole invocation — is what
+ * identifies an already-installed hook in every spelling (dchjw.15 F1): a
+ * hand-edited variant (a different bunx form, an absolute path to the CLI)
+ * still counts as installed and is left alone rather than duplicated.
  */
-export const THREAD_START_HOOK_FINGERPRINT = 'justin-sdk thread start';
+const THREAD_START_SUBCOMMAND = 'thread start';
+
+/** The command the hook runs. Matches the usage-check / time-check spelling. */
+export const THREAD_START_HOOK_COMMAND = sdkRun(
+  `${THREAD_START_SUBCOMMAND} --hook`,
+);
+
+/** The CURRENT spelling, for the component manifest's installed-evidence check. */
+export const THREAD_START_HOOK_FINGERPRINT = sdkScript(THREAD_START_SUBCOMMAND);
 
 /** The hook event this component registers. */
 export const THREAD_HOOK_EVENT = 'SessionStart';
@@ -74,12 +80,14 @@ export const THREAD_HOOK_EVENT = 'SessionStart';
 /** SessionStart sources this hook is wired to. See the file header. */
 export const THREAD_HOOK_MATCHER = 'startup|resume';
 
-/** The command the Stop hook runs (home-base-p1uj.15). */
-export const THREAD_STOP_HOOK_COMMAND =
-  'bunx @justinhaaheim/justin-sdk thread stop-check';
+/** The Stop hook's subcommand. Same rule as THREAD_START_SUBCOMMAND above. */
+const THREAD_STOP_SUBCOMMAND = 'thread stop-check';
 
-/** Substring identifying an already-installed Stop hook, whatever its spelling. */
-export const THREAD_STOP_HOOK_FINGERPRINT = 'justin-sdk thread stop-check';
+/** The command the Stop hook runs (home-base-p1uj.15). */
+export const THREAD_STOP_HOOK_COMMAND = sdkRun(THREAD_STOP_SUBCOMMAND);
+
+/** The CURRENT spelling, for the component manifest's installed-evidence check. */
+export const THREAD_STOP_HOOK_FINGERPRINT = sdkScript(THREAD_STOP_SUBCOMMAND);
 
 /** The second event. No matcher — see the file header. */
 export const THREAD_STOP_HOOK_EVENT = 'Stop';
@@ -88,37 +96,42 @@ export const THREAD_STOP_HOOK_EVENT = 'Stop';
  * Register one hook command under one event in a settings object.
  *
  * Hooks are ADDITIVE in Claude Code — several may be registered for one event
- * and all of them run — so this appends and leaves every existing entry alone.
- * Returns true when the object was modified, which is what makes a re-run a
- * no-op rather than a rewrite.
+ * and all of them run — so this leaves every FOREIGN entry alone. Its own entry
+ * it upserts: recognised by fingerprint, and its command string REWRITTEN when
+ * it has changed spelling (D1), which is how a repo installed against an older
+ * SDK moves forward instead of keeping the old form forever.
  *
- * The fingerprint is matched against the SERIALISED event array, so a
- * hand-edited variant (a different bunx form, an absolute path to the CLI) still
- * counts as installed and is left alone rather than duplicated.
+ * Returns true when the object was modified, which is what makes a re-run with
+ * nothing to change a no-op rather than a rewrite.
  */
 function addHook(
   settings: Record<string, unknown>,
   spec: {
     command: string;
     event: string;
-    fingerprint: string;
     matcher: string | null;
+    subcommand: string;
   },
 ): boolean {
   const hooks = ((settings.hooks as Record<string, unknown> | undefined) ??
     {}) as Record<string, unknown>;
   const registered = (hooks[spec.event] as unknown[] | undefined) ?? [];
 
-  if (JSON.stringify(registered).includes(spec.fingerprint)) {
-    return false;
-  }
+  const {changed, entries} = upsertHookCommand(
+    registered,
+    spec.subcommand,
+    spec.command,
+    () => {
+      const entry: Record<string, unknown> = {
+        hooks: [{command: spec.command, type: 'command'}],
+      };
+      if (spec.matcher != null) entry.matcher = spec.matcher;
+      return entry;
+    },
+  );
+  if (!changed) return false;
 
-  const entry: Record<string, unknown> = {
-    hooks: [{command: spec.command, type: 'command'}],
-  };
-  if (spec.matcher != null) entry.matcher = spec.matcher;
-  registered.push(entry);
-  hooks[spec.event] = registered;
+  hooks[spec.event] = entries;
   settings.hooks = hooks;
   return true;
 }
@@ -127,8 +140,8 @@ export function addThreadStartHook(settings: Record<string, unknown>): boolean {
   return addHook(settings, {
     command: THREAD_START_HOOK_COMMAND,
     event: THREAD_HOOK_EVENT,
-    fingerprint: THREAD_START_HOOK_FINGERPRINT,
     matcher: THREAD_HOOK_MATCHER,
+    subcommand: THREAD_START_SUBCOMMAND,
   });
 }
 
@@ -136,8 +149,8 @@ export function addThreadStopHook(settings: Record<string, unknown>): boolean {
   return addHook(settings, {
     command: THREAD_STOP_HOOK_COMMAND,
     event: THREAD_STOP_HOOK_EVENT,
-    fingerprint: THREAD_STOP_HOOK_FINGERPRINT,
     matcher: null,
+    subcommand: THREAD_STOP_SUBCOMMAND,
   });
 }
 
@@ -173,15 +186,23 @@ export async function runThreadHooksSetup(args: {
   projectRoot: string;
   quiet: boolean;
   force?: boolean;
+  /**
+   * The remote the SDK pin tag is verified against, forwarded to base-setup.
+   * Tests point it at a local bare repo so the install is hermetic; production
+   * omits it and base-setup uses the real SDK_REPO_URL (dchjw.17 F7).
+   */
+  sdkRepoUrl?: string;
 }): Promise<number> {
   const {projectRoot, quiet} = args;
   setQuiet(quiet);
 
   stepHeader('0. base-setup (foundation layer)');
   const baseExit = await runBaseSetup({
-    extraComponents: ['thread-hooks-setup'],
     projectRoot,
     quiet: true,
+    // dchjw.17 F7: hermetic when a caller supplies a remote; the real
+    // SDK_REPO_URL when nobody does.
+    ...(args.sdkRepoUrl == null ? {} : {sdkRepoUrl: args.sdkRepoUrl}),
   });
   if (baseExit !== 0) {
     fail('base-setup failed — cannot proceed with thread-hooks-setup');

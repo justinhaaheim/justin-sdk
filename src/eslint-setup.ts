@@ -113,15 +113,35 @@ function stepEslintDevDeps(projectRoot: string, force: boolean): boolean {
 }
 
 /**
+ * Every flat-config filename ESLint will load. ESLint resolves them in this
+ * order and uses the FIRST one it finds, so a repo with two of them has one
+ * config that silently does nothing.
+ */
+export const ESLINT_CONFIG_NAMES: ReadonlyArray<string> = [
+  'eslint.config.js',
+  'eslint.config.mjs',
+  'eslint.config.cjs',
+  'eslint.config.ts',
+];
+
+export const ESLINT_CONFIG_TARGET = 'eslint.config.cjs';
+
+/**
  * Write eslint.config.cjs from the template.
  *
  * Behavior:
- *  - Missing → copy template.
- *  - Exists and matches template byte-for-byte → noop.
- *  - Exists and differs → warn + skip (user-customized), unless `force`.
+ *  - A config under ANY of the four names already exists, and it is not our
+ *    .cjs → write NOTHING, name the file that exists, and say so. `--force`
+ *    does not override this: the SDK never creates a second flat config
+ *    (Justin, 2026-09-16: "It adds eslint.config.cjs even if there's already
+ *    eslint.config.js. BAD!" — home-base-dchjw.6).
+ *  - Nothing exists → copy template to eslint.config.cjs.
+ *  - Only eslint.config.cjs exists, matching the template → noop.
+ *  - Only eslint.config.cjs exists and differs → warn + skip
+ *    (user-customized), unless `force`, which overwrites that file.
  */
 function stepEslintConfig(projectRoot: string, force: boolean): boolean {
-  const targetPath = resolve(projectRoot, 'eslint.config.cjs');
+  const targetPath = resolve(projectRoot, ESLINT_CONFIG_TARGET);
   const templatePath = resolve(
     import.meta.dirname,
     '..',
@@ -134,9 +154,33 @@ function stepEslintConfig(projectRoot: string, force: boolean): boolean {
     return false;
   }
 
+  // Look for EVERY flat-config name, not just ours. Checking only .cjs is what
+  // made the SDK drop a second config next to an existing eslint.config.js.
+  const otherConfigs = ESLINT_CONFIG_NAMES.filter(
+    (name) =>
+      name !== ESLINT_CONFIG_TARGET && existsSync(resolve(projectRoot, name)),
+  );
+
+  if (otherConfigs.length > 0) {
+    const names = otherConfigs.join(', ');
+    warn(
+      `${names} already present — not writing ${ESLINT_CONFIG_TARGET}. ` +
+        `ESLint loads exactly one flat config, so a second one would be dead ` +
+        `code. --force will not add one either; delete the existing config ` +
+        `first if you want the SDK's.`,
+    );
+    if (existsSync(targetPath)) {
+      warn(
+        `${ESLINT_CONFIG_TARGET} exists alongside ${names} — ESLint reads only ` +
+          `the first it finds. Delete all but one.`,
+      );
+    }
+    return true;
+  }
+
   if (!existsSync(targetPath)) {
     cpSync(templatePath, targetPath);
-    success('Copied eslint.config.cjs from template');
+    success(`Copied ${ESLINT_CONFIG_TARGET} from template`);
     return true;
   }
 
@@ -161,11 +205,11 @@ function stepEslintConfig(projectRoot: string, force: boolean): boolean {
   return true;
 }
 
-const SIGNAL_SOURCE_LINT_KEY = 'signal-source:LINT';
-const SIGNAL_SOURCE_LINT_SCRIPT =
+export const SIGNAL_SOURCE_LINT_KEY = 'signal-source:LINT';
+export const SIGNAL_SOURCE_LINT_SCRIPT =
   'eslint --report-unused-disable-directives --max-warnings 0 .';
 
-const LINT_SCRIPTS: ReadonlyArray<{key: string; value: string}> = [
+export const LINT_SCRIPTS: ReadonlyArray<{key: string; value: string}> = [
   {
     key: 'lint-base',
     value: 'eslint --report-unused-disable-directives --max-warnings 0',
@@ -267,6 +311,12 @@ export interface EslintSetupOptions {
    * devDependency versions when they differ from what the SDK pins.
    */
   force?: boolean;
+  /**
+   * The remote the SDK pin tag is verified against, forwarded to base-setup.
+   * Tests point it at a local bare repo so the install is hermetic; production
+   * omits it and base-setup uses the real SDK_REPO_URL (dchjw.17 F7).
+   */
+  sdkRepoUrl?: string;
 }
 
 /**
@@ -299,7 +349,9 @@ export async function runEslintSetup(
   const baseExit = await runBaseSetup({
     projectRoot,
     quiet: true,
-    extraComponents: ['eslint-setup'],
+    // dchjw.17 F7: hermetic when a caller supplies a remote; the real
+    // SDK_REPO_URL when nobody does.
+    ...(options.sdkRepoUrl == null ? {} : {sdkRepoUrl: options.sdkRepoUrl}),
   });
   if (baseExit !== 0) {
     fail('base-setup failed — cannot proceed with eslint-setup');

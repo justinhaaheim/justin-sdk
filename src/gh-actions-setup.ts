@@ -3,9 +3,8 @@
  * runs `bun run signal` on push/PR.
  *
  * Runs base-setup as a precondition so the foundation layer is always
- * present before the workflow file is written. Registers itself as the
- * `gh-actions-setup` component in justin-sdk.config.json (via base-setup's
- * extraComponents mechanism).
+ * present before the workflow file is written. It does NOT register itself in
+ * justin-sdk.config.json — `add` writes `components` (constraint F11).
  *
  * Idempotent: every step detects existing state and only writes when
  * something actually needs to change.
@@ -28,7 +27,7 @@ import {
 // Step implementations
 // ---------------------------------------------------------------------------
 
-const WORKFLOW_RELATIVE_PATH = '.github/workflows/signal.yml';
+export const WORKFLOW_RELATIVE_PATH = '.github/workflows/signal.yml';
 
 function getTemplatePath(): string {
   return resolve(
@@ -112,13 +111,19 @@ export interface GhActionsSetupOptions {
   quiet?: boolean;
   /** Overwrite an existing hand-modified signal.yml */
   force?: boolean;
+  /**
+   * The remote the SDK pin tag is verified against, forwarded to base-setup.
+   * Tests point it at a local bare repo so the install is hermetic; production
+   * omits it and base-setup uses the real SDK_REPO_URL (dchjw.17 F7).
+   */
+  sdkRepoUrl?: string;
 }
 
 /**
  * Install the gh-actions-setup component into a project.
  *
- * Calls runBaseSetup first as a precondition (registering this component
- * via extraComponents), then writes the signal.yml workflow.
+ * Calls runBaseSetup first as a precondition, then writes the signal.yml
+ * workflow.
  */
 export async function runGhActionsSetup(
   options: GhActionsSetupOptions = {},
@@ -139,7 +144,9 @@ export async function runGhActionsSetup(
   const baseExit = await runBaseSetup({
     projectRoot,
     quiet: true,
-    extraComponents: ['gh-actions-setup'],
+    // dchjw.17 F7: hermetic when a caller supplies a remote; the real
+    // SDK_REPO_URL when nobody does.
+    ...(options.sdkRepoUrl == null ? {} : {sdkRepoUrl: options.sdkRepoUrl}),
   });
   if (baseExit !== 0) {
     fail('base-setup failed — cannot proceed with gh-actions-setup');

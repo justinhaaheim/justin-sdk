@@ -29,7 +29,7 @@ afterEach(() => {
 });
 
 describe('tsconfig-setup', () => {
-  test('fresh project: installs tsconfig + devDeps + script + registers component', async () => {
+  test('fresh project: installs tsconfig + devDeps + script, and registers NOTHING', async () => {
     const sb = track(createProjectSandbox());
 
     const exitCode = await runTsconfigSetup({
@@ -62,7 +62,9 @@ describe('tsconfig-setup', () => {
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
     ) as {components?: string[]};
-    expect(config.components).toContain('tsconfig-setup');
+    // The INSTALLER no longer registers itself (constraint F11): only `add` and
+    // `remove` write `components`.
+    expect(config.components).toBeUndefined();
   });
 
   test('does NOT install @types/node (Bun-targeted projects)', async () => {
@@ -102,14 +104,12 @@ describe('tsconfig-setup', () => {
       pkgAfterFirst,
     );
 
-    // No duplicate tsconfig-setup entry in components
+    // Nothing was written to `components` at all, so there is nothing that
+    // could have grown a duplicate (F11).
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
     ) as {components?: string[]};
-    const count = (config.components ?? []).filter(
-      (c) => c === 'tsconfig-setup',
-    ).length;
-    expect(count).toBe(1);
+    expect(config.components).toBeUndefined();
   });
 
   test('preserves existing tsconfig.json (warns + skips, still returns 0)', async () => {

@@ -177,24 +177,27 @@ describe('discoverHydrationScripts', () => {
       }),
     );
     expect(discoverHydrationScripts(sb.path)).toEqual([
-      {label: 'REAL', legacy: false, name: 'setup-env:REAL'},
+      {label: 'REAL', name: 'setup-env:REAL'},
     ]);
   });
 
-  test('a v170 worktree-source: script is surfaced as legacy, not dropped', () => {
+  // The v170 `worktree-source:<tier>:<LABEL>` prefix had its one release of
+  // being reported with a rename hint and is GONE (home-base-dchjw.9). Such a
+  // script is now an ordinary package.json entry the SDK knows nothing about.
+  test('a v170 worktree-source: script is no longer a hydration script at all', () => {
     const sb = track(createSandbox());
     sb.writeFile(
       'package.json',
       JSON.stringify({
         scripts: {
+          'setup-env:REAL': 'true',
           'worktree-source:lint:VERSION': 'true',
           'worktree-source:web:THING': 'true',
         },
       }),
     );
     expect(discoverHydrationScripts(sb.path)).toEqual([
-      {label: 'VERSION', legacy: true, name: 'worktree-source:lint:VERSION'},
-      {label: 'THING', legacy: true, name: 'worktree-source:web:THING'},
+      {label: 'REAL', name: 'setup-env:REAL'},
     ]);
   });
 
@@ -854,13 +857,13 @@ describe('worktreeSetup', () => {
     );
   });
 
-  describe('declaration order and legacy skip', () => {
+  describe('declaration order', () => {
     // ZEBRA is declared before ALPHA on purpose: a label-sorted runner (like
     // fix-source:) would invert them.
     const scripts = {
       'setup-env:ZEBRA': "sh -c 'echo zebra >> order.log'",
       'setup-env:ALPHA': "sh -c 'echo alpha >> order.log'",
-      'worktree-source:native:LEGACY': "sh -c 'echo legacy >> order.log'",
+      'worktree-source:native:RETIRED': "sh -c 'echo retired >> order.log'",
     };
 
     function fixture(sb: Sandbox): {linked: string; primary: string} {
@@ -881,21 +884,24 @@ describe('worktreeSetup', () => {
       return readFileSync(logPath, 'utf-8').trim().split('\n').filter(Boolean);
     }
 
-    test('runs setup-env: scripts in declaration order; legacy worktree-source: is skipped with a rename hint, NOT run', () => {
+    test('runs setup-env: scripts in declaration order; a retired worktree-source: script is neither run nor reported', () => {
       const sb = track(createSandbox());
       const {linked} = fixture(sb);
       const result = setupEnv({target: linked});
       expect(result.exitCode).toBe(0);
-      // legacy never executed — order.log has only the flat scripts, declared order
+      // Never executed — order.log has only the flat scripts, declared order.
       expect(order(linked)).toEqual(['zebra', 'alpha']);
       expect(statuses(result.steps)).toMatchObject({
         'HYDRATE:setup-env:ZEBRA': 'done',
         'HYDRATE:setup-env:ALPHA': 'done',
-        'HYDRATE:worktree-source:native:LEGACY': 'skipped',
       });
+      // The prefix is retired, so there is no step for it at all — not a
+      // skipped one, not a done one.
       expect(
-        detailFor(result.steps, 'HYDRATE:worktree-source:native:LEGACY'),
-      ).toContain('rename to setup-env:LEGACY');
+        Object.keys(statuses(result.steps)).filter((k) =>
+          k.includes('worktree-source:'),
+        ),
+      ).toEqual([]);
     });
   });
 
@@ -1422,12 +1428,16 @@ describe('CLI stdout purity', () => {
     expect(stderr).toContain('SCRIPT_STDOUT_NOISE');
   });
 
-  test('the deprecated worktree-setup command name still works (alias)', () => {
+  test('the retired worktree-setup command name fails, with stdout still empty', () => {
+    // The alias is GONE (home-base-dchjw.9). What this pins down is that the
+    // refusal keeps the stdout contract: `worktree-new` and `justin-loop
+    // handoff` print machine-read lines there, so a usage error must not.
     const sb = track(createSandbox());
     const primary = initPrimary(sb, {'a.txt': 'a\n'});
-    const {status, stdout} = runCli(['worktree-setup'], primary);
-    expect(status).toBe(0);
+    const {status, stdout, stderr} = runCli(['worktree-setup'], primary);
+    expect(status).toBe(1);
     expect(stdout).toBe('');
+    expect(stderr).toMatch(/Unknown arguments?:.*worktree-setup/);
   });
 
   test('worktree-new writes EXACTLY one stdout line: the absolute path', () => {
@@ -1512,16 +1522,21 @@ describe('CLI stdout purity', () => {
     },
   );
 
-  test('deprecated tier flags are accepted as no-ops with a warning (old preambles must not break)', () => {
+  test('retired tier flags are a usage error, and hydration does NOT run', () => {
+    // They were hidden no-ops for one release (home-base-dchjw.9 retired them).
+    // The important half is that the refusal happens at PARSE time: a flag that
+    // errored after hydrating would be a usage error with side effects.
     const sb = track(createSandbox());
     const primary = initPrimary(sb, {'a.txt': 'a\n'});
     const {status, stdout, stderr} = runCli(
       ['setup-env', '--lint', '--native'],
       primary,
     );
-    expect(status).toBe(0);
+    expect(status).toBe(1);
     expect(stdout).toBe('');
-    expect(stderr).toContain('ignored');
-    expect(stderr).toContain('tier system was removed');
+    expect(stderr).toMatch(/Unknown arguments?:/);
+    expect(stderr).not.toContain('tier system was removed');
+    // Nothing hydrated: no step report reached stderr at all.
+    expect(stderr).not.toContain('MISE');
   });
 });

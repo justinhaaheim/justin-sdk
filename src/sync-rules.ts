@@ -35,14 +35,14 @@ import {
 } from 'fs';
 import {dirname, join} from 'path';
 
-import {assemble, isDirtyCheckout} from './plugin/lib/prime';
+import {assemble, isDirtyCheckout} from './prime';
 import {
   buildStamp,
   contentHash,
   prettierMarkdown,
   readDeployedStamp,
   rulesFilePath,
-} from './plugin/lib/rules-file';
+} from './rules/rules-file';
 import {fail, setQuiet, success, warn} from './setup-helpers';
 
 const VM_DEFAULT_SPEC = 'github:justinhaaheim/version-manager';
@@ -124,7 +124,7 @@ export function runSyncRules(options: SyncRulesOptions = {}): number {
     // Universal partition is project-independent, so cwd doesn't matter.
     // forceUpdate pulls the managed clone to the latest remote first.
     assembled = assemble(
-      {format: 'markdown', partition: 'universal', forceUpdate: true},
+      {forceUpdate: true, partition: 'universal'},
       process.cwd(),
     );
   } catch (error) {
@@ -134,7 +134,7 @@ export function runSyncRules(options: SyncRulesOptions = {}): number {
     return 1;
   }
 
-  const {markdown, count, sourceDir, sourceSha} = assembled;
+  const {markdown, count, sourceDir, sourceCommit} = assembled;
   // Prettier the (already header-numbered) markdown, then hash the RESULT —
   // so meaningless formatting differences normalize out of the hash. The hook
   // recomputes this identically (same prettier, same env toggle).
@@ -161,8 +161,9 @@ export function runSyncRules(options: SyncRulesOptions = {}): number {
   if (version === 'unknown') {
     warn('version-manager unavailable — stamping version as "unknown"');
   }
-  const shaShort = sourceSha != null ? sourceSha.slice(0, 12) : 'unknown';
-  const commit = `${shaShort}${sourceSha != null && isDirtyCheckout(sourceDir) ? '-dirty' : ''}`;
+  const shaShort =
+    sourceCommit != null ? sourceCommit.sha.slice(0, 12) : 'unknown';
+  const commit = `${shaShort}${sourceCommit != null && isDirtyCheckout(sourceDir) ? '-dirty' : ''}`;
   const stamp = buildStamp({
     version,
     commit,

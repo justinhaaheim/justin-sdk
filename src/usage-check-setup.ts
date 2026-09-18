@@ -3,7 +3,7 @@
  *
  * Scaffolds three things in the consuming project:
  *   - a UserPromptSubmit hook in .claude/settings.json running
- *     `bunx @justinhaaheim/justin-sdk usage-check`
+ *     `bun run justin-sdk usage-check`
  *   - a PostToolBatch hook running the same command
  *   - a `componentConfig["usage-check"]` block in justin-sdk.config.json
  *     carrying the two switches (`enabled`, `wrapUpAt`) and deliberately NOT
@@ -17,11 +17,10 @@
  * covers exactly that gap. PostToolUse was rejected: it fires per-tool and runs
  * CONCURRENTLY for parallel calls, so copies would race and double-announce.
  *
- * OPT-IN ONLY, deliberately — same reasoning as time-check but more so, since
- * this fires after every tool batch as well as every prompt. It is excluded
- * from `init` and the `all` preset (see OPT_IN_ONLY in components.ts), and the
- * hook treats a missing config block as "disabled" so an accidental install is
- * inert rather than noisy.
+ * IN THE CORE PRESET since 2026-09-18 (epic home-base-dchjw D3, Justin's call).
+ * It was withheld from every preset before that because it fires after every
+ * tool batch as well as every prompt. The hook still treats a missing config
+ * block as "disabled", so installing it is not the same as arming it.
  *
  * Idempotent: re-running detects the existing hooks and config block and only
  * writes when something actually needs to change.
@@ -40,6 +39,7 @@ import {
   success,
   writeJson,
 } from './setup-helpers';
+import {sdkRun, sdkScript, upsertHookCommand} from './sdk-invocation';
 import {
   formatTokens,
   SETPOINT_CEILING_TOKENS,
@@ -48,11 +48,18 @@ import {
   USAGE_CHECK_DEFAULTS,
 } from './usage-check';
 
-/** The command the hooks run. Matches the time-check precedent. */
-const HOOK_COMMAND = 'bunx @justinhaaheim/justin-sdk usage-check';
+/**
+ * The SDK subcommand these hooks run. It — not any whole invocation — is what
+ * identifies an already-installed hook in every spelling (dchjw.15 F1).
+ */
+const HOOK_SUBCOMMAND = 'usage-check';
 
-/** Substring identifying an already-installed hook, whatever its bunx spelling. */
-const HOOK_FINGERPRINT = 'justin-sdk usage-check';
+/** The command the hooks run. Matches the time-check precedent. */
+export const USAGE_CHECK_HOOK_COMMAND = sdkRun(HOOK_SUBCOMMAND);
+const HOOK_COMMAND = USAGE_CHECK_HOOK_COMMAND;
+
+/** The CURRENT spelling, for the component manifest's installed-evidence check. */
+export const USAGE_CHECK_HOOK_FINGERPRINT = sdkScript(HOOK_SUBCOMMAND);
 
 /** The hook events this component registers, in the order they are written. */
 export const USAGE_CHECK_HOOK_EVENTS = [
@@ -76,12 +83,15 @@ export function addUsageCheckHook(
     {}) as Record<string, unknown>;
   const registered = (hooks[event] as unknown[] | undefined) ?? [];
 
-  if (JSON.stringify(registered).includes(HOOK_FINGERPRINT)) {
-    return false;
-  }
+  const {changed, entries} = upsertHookCommand(
+    registered,
+    HOOK_SUBCOMMAND,
+    HOOK_COMMAND,
+    () => ({hooks: [{command: HOOK_COMMAND, type: 'command'}]}),
+  );
+  if (!changed) return false;
 
-  registered.push({hooks: [{command: HOOK_COMMAND, type: 'command'}]});
-  hooks[event] = registered;
+  hooks[event] = entries;
   settings.hooks = hooks;
   return true;
 }
@@ -173,15 +183,23 @@ export async function runUsageCheckSetup(args: {
   projectRoot: string;
   quiet: boolean;
   force?: boolean;
+  /**
+   * The remote the SDK pin tag is verified against, forwarded to base-setup.
+   * Tests point it at a local bare repo so the install is hermetic; production
+   * omits it and base-setup uses the real SDK_REPO_URL (dchjw.17 F7).
+   */
+  sdkRepoUrl?: string;
 }): Promise<number> {
   const {projectRoot, quiet} = args;
   setQuiet(quiet);
 
   stepHeader('0. base-setup (foundation layer)');
   const baseExit = await runBaseSetup({
-    extraComponents: ['usage-check-setup'],
     projectRoot,
     quiet: true,
+    // dchjw.17 F7: hermetic when a caller supplies a remote; the real
+    // SDK_REPO_URL when nobody does.
+    ...(args.sdkRepoUrl == null ? {} : {sdkRepoUrl: args.sdkRepoUrl}),
   });
   if (baseExit !== 0) {
     fail('base-setup failed — cannot proceed with usage-check-setup');

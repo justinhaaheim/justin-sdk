@@ -22,7 +22,7 @@ import {basename, resolve} from 'path';
 import {runBaseSetup} from './base-setup';
 import {PINNED} from './pinned-versions';
 import {
-  appendIfMissing,
+  ensureIgnoreEntries,
   fail,
   readJson,
   setQuiet,
@@ -142,14 +142,22 @@ function stepPrettierrc(projectRoot: string, force: boolean): boolean {
   return true;
 }
 
-const PRETTIERIGNORE_BASELINE_ENTRIES: ReadonlyArray<string> = [
-  'node_modules',
-  'dist',
+/**
+ * What a .prettierignore must contain, in the SDK's canonical spelling.
+ *
+ * `node_modules` is deliberately absent: prettier ignores it by default and
+ * the SDK's own template says so in its first line, so appending it to every
+ * repo was noise. `/tmp` is root-anchored to match the template and Justin's
+ * own .prettierignore — `tmp` would be a different (broader) pattern, and
+ * these entries are matched by normalized line, not by substring.
+ */
+export const PRETTIERIGNORE_BASELINE_ENTRIES: ReadonlyArray<string> = [
   'build',
   'coverage',
+  '**/dist',
   '*.tsbuildinfo',
   '.beads',
-  'tmp',
+  '/tmp',
   '*.log',
   '**/.claude/worktrees/',
 ];
@@ -160,8 +168,9 @@ const PRETTIERIGNORE_BASELINE_ENTRIES: ReadonlyArray<string> = [
  * Behavior:
  *  - Missing → copy template (which already contains all baseline entries).
  *  - Exists and matches template byte-for-byte → noop.
- *  - Exists and differs → warn + skip overwrite, but `appendIfMissing` each
- *    of the baseline entries so we never leave a project missing essentials.
+ *  - Exists and differs → warn + skip overwrite, but reconcile the baseline
+ *    entries through `ensureIgnoreEntries` so we never leave a project
+ *    missing essentials — and never add a second spelling of one it has.
  *  - `force` → overwrite with template.
  */
 function stepPrettierignore(projectRoot: string, force: boolean): boolean {
@@ -199,29 +208,39 @@ function stepPrettierignore(projectRoot: string, force: boolean): boolean {
   }
 
   // User-customized file. Don't overwrite — but make sure baseline entries
-  // are present (append any that are missing).
-  let appendedAny = false;
-  for (const entry of PRETTIERIGNORE_BASELINE_ENTRIES) {
-    const added = appendIfMissing(targetPath, entry, `\n${entry}\n`);
-    if (added) {
-      success(`Appended ${entry} to .prettierignore`);
-      appendedAny = true;
-    }
-  }
-  if (!appendedAny) {
+  // are present, exactly once each, in the canonical spelling.
+  const result = ensureIgnoreEntries(
+    targetPath,
+    PRETTIERIGNORE_BASELINE_ENTRIES,
+    {sectionHeader: 'justin-sdk baseline (appended)'},
+  );
+
+  if (!result.changed) {
     success(
       '.prettierignore already has all baseline entries (user-customized)',
     );
-  } else {
-    warn(
-      '.prettierignore differs from SDK template (user-customized). Baseline entries were appended where missing. Re-run with --force to overwrite entirely.',
+    return true;
+  }
+
+  for (const entry of result.added) {
+    success(`Appended ${entry} to .prettierignore`);
+  }
+  for (const {from, to} of result.rewritten) {
+    success(
+      `Rewrote .prettierignore entry '${from}' → '${to}' (same paths, one spelling)`,
     );
   }
+  for (const entry of result.removed) {
+    success(`Removed a duplicate .prettierignore entry '${entry}'`);
+  }
+  warn(
+    '.prettierignore differs from SDK template (user-customized). Baseline entries were reconciled in place. Re-run with --force to overwrite entirely.',
+  );
   return true;
 }
 
-const SIGNAL_SOURCE_PRETTIER_SCRIPT = 'prettier --check .';
-const SIGNAL_SOURCE_PRETTIER_KEY = 'signal-source:PRETTIER';
+export const SIGNAL_SOURCE_PRETTIER_SCRIPT = 'prettier --check .';
+export const SIGNAL_SOURCE_PRETTIER_KEY = 'signal-source:PRETTIER';
 
 /**
  * Ensure package.json has a `signal-source:PRETTIER` script.
@@ -262,7 +281,7 @@ function stepSignalSourceScript(projectRoot: string): boolean {
 // command; `prettier:write:file` (single path, ignore-unknown) is what
 // lint-staged / pre-commit hooks call. `fix-source:PRETTIER` is the code-fix
 // counterpart to `signal-source:PRETTIER`, discovered by `justin-sdk fix`.
-const PRETTIER_SCRIPTS: ReadonlyArray<{key: string; value: string}> = [
+export const PRETTIER_SCRIPTS: ReadonlyArray<{key: string; value: string}> = [
   {key: 'prettier:check', value: 'prettier --check .'},
   {key: 'prettier:write', value: 'prettier --write .'},
   {key: 'prettier:write:file', value: 'prettier --write --ignore-unknown'},
@@ -323,6 +342,12 @@ export interface PrettierSetupOptions {
    * and the prettier devDependency version.
    */
   force?: boolean;
+  /**
+   * The remote the SDK pin tag is verified against, forwarded to base-setup.
+   * Tests point it at a local bare repo so the install is hermetic; production
+   * omits it and base-setup uses the real SDK_REPO_URL (dchjw.17 F7).
+   */
+  sdkRepoUrl?: string;
 }
 
 /**
@@ -353,7 +378,9 @@ export async function runPrettierSetup(
   const baseExit = await runBaseSetup({
     projectRoot,
     quiet: true,
-    extraComponents: ['prettier-setup'],
+    // dchjw.17 F7: hermetic when a caller supplies a remote; the real
+    // SDK_REPO_URL when nobody does.
+    ...(options.sdkRepoUrl == null ? {} : {sdkRepoUrl: options.sdkRepoUrl}),
   });
   if (baseExit !== 0) {
     fail('base-setup failed — cannot proceed with prettier-setup');

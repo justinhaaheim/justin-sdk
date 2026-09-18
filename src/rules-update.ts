@@ -40,11 +40,12 @@ import {existsSync} from 'fs';
 import {join} from 'path';
 
 import {
-  readSelectedModules,
+  readEnrollment,
   refreshCriticalRulesArtifact,
   refreshSucceeded,
+  warnRetiredModulesKey,
 } from './critical-rules-setup';
-import {PROJECT_RULES_SEGMENTS} from './plugin/lib/rules-file';
+import {PROJECT_RULES_SEGMENTS} from './rules/rules-file';
 import {fail, setQuiet, success} from './setup-helpers';
 
 /**
@@ -178,11 +179,9 @@ export function describeGitState(dir: string): GitState {
 export interface RulesUpdateOptions {
   /** Defaults to the cwd. */
   projectRoot?: string;
-  /** Regenerate even when the content hash says the artifact is current. */
+  /** Regenerate even when the artifact on disk is already what we would write. */
   force?: boolean;
   quiet?: boolean;
-  /** Stamp date (YYYY-MM-DD) — injectable so tests can pin the bytes. */
-  now?: string;
   /** Read this prompts dir as-is instead of the managed clone (tests). */
   promptsDir?: string;
 }
@@ -191,12 +190,18 @@ export function runRulesUpdate(options: RulesUpdateOptions = {}): number {
   const projectRoot = options.projectRoot ?? process.cwd();
   setQuiet(options.quiet ?? false);
 
-  // 1. Enrolment. Uses the ONE selection reader (uniformity: the refresh layer
-  //    reads the same function, so "enrolled" cannot mean two things).
-  const selection = readSelectedModules(projectRoot);
-  if (!selection.ok) {
-    fail(`rules-update: ${selection.message}`);
-    return selection.status === 'not-enrolled'
+  // 0. The ONE place this command mentions the retired include-list (dchjw.3).
+  //    Before the enrolment gate, because a repo carrying the key is exactly the
+  //    kind of repo whose config someone is about to look at.
+  warnRetiredModulesKey(projectRoot);
+
+  // 1. Enrolment. Uses the ONE enrolment reader (uniformity: `rules-drift`,
+  //    `rules-diff` and this command cannot disagree about what "enrolled" is).
+  //    A config that cannot be PARSED is a failure, not a "no" (F2).
+  const enrollment = readEnrollment(projectRoot);
+  if (!enrollment.ok) {
+    fail(`rules-update: ${enrollment.message}`);
+    return enrollment.status === 'not-enrolled'
       ? RULES_UPDATE_EXIT.notEnrolled
       : RULES_UPDATE_EXIT.assemblyFailed;
   }
@@ -211,31 +216,31 @@ export function runRulesUpdate(options: RulesUpdateOptions = {}): number {
   // 3. The write. Touches only the artifact path; refuses on a stale clone.
   const outcome = refreshCriticalRulesArtifact(projectRoot, {
     force: options.force,
-    now: options.now,
     promptsDir: options.promptsDir,
   });
   if (!refreshSucceeded(outcome)) {
     // refreshCriticalRulesArtifact already printed the reason.
-    switch (outcome.status) {
-      case 'not-enrolled':
-        return RULES_UPDATE_EXIT.notEnrolled;
-      case 'cannot-refresh':
-        return RULES_UPDATE_EXIT.cannotRefresh;
-      default:
-        return RULES_UPDATE_EXIT.assemblyFailed;
-    }
+    return outcome.status === 'cannot-refresh'
+      ? RULES_UPDATE_EXIT.cannotRefresh
+      : RULES_UPDATE_EXIT.assemblyFailed;
   }
 
   const shaShort =
-    outcome.sourceSha != null ? outcome.sourceSha.slice(0, 12) : 'unknown';
+    outcome.sourceCommit != null
+      ? outcome.sourceCommit.sha.slice(0, 12)
+      : 'unknown';
 
   if (outcome.status === 'unchanged') {
-    // The scoped contract (D2b): unchanged means NO commit. Note that dirt
-    // sitting under the tool-owned folder is therefore left alone here — it is
-    // absorbed only by a commit this command actually makes, and `--force`
-    // is the way to make one deliberately.
+    // The scoped contract (D2b): unchanged means NO commit. "Unchanged" is now a
+    // BYTE comparison against the file on disk, so a hand-edited artifact does
+    // not land here — it is rewritten and committed, which is what the old
+    // stamp-hash comparison could not do. Dirt sitting elsewhere under the
+    // tool-owned folder is still absorbed only by a commit this command actually
+    // makes, and `--force` is the way to make one deliberately.
     success(
-      `rules-update: already up to date (prompts ${shaShort}, content ${outcome.contentHash}) — nothing committed`,
+      `rules-update: already up to date (prompts ${shaShort}, ${outcome.modules.length} module${
+        outcome.modules.length === 1 ? '' : 's'
+      }, content ${outcome.contentHash}) — nothing committed`,
     );
     return RULES_UPDATE_EXIT.ok;
   }
@@ -255,13 +260,8 @@ export function runRulesUpdate(options: RulesUpdateOptions = {}): number {
   // commit, and reporting that as a failure would be a lie — it is a distinct,
   // successful state.
   const nothingStaged =
-    git(projectRoot, [
-      'diff',
-      '--cached',
-      '--quiet',
-      '--',
-      RULES_PATHSPEC,
-    ]) != null;
+    git(projectRoot, ['diff', '--cached', '--quiet', '--', RULES_PATHSPEC]) !=
+    null;
   if (nothingStaged) {
     success(
       `rules-update: regenerated ${outcome.file} — byte-identical to HEAD on ${state.branch}, nothing to commit`,

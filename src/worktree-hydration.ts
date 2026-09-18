@@ -59,7 +59,7 @@ import {
 
 /**
  * Re-exported so every consumer can get the predicate from this module without
- * needing to know that the git plumbing lives next to `worktree-setup`. There is
+ * needing to know that the git plumbing lives next to `setup-env`. There is
  * still exactly ONE implementation.
  */
 export {isLinkedWorktree} from './setup-env';
@@ -200,23 +200,25 @@ function nodeModulesMissing(problems: readonly HydrationProblem[]): boolean {
 /**
  * The exact command to print, given what is actually MISSING (finding F6).
  *
- * Per the conductor's install-universal ruling there is NO tier flag: install
- * runs at every tier, so the default (`js`) is always the right recommendation.
+ * There is no tier flag to recommend: the v170 tier system, and the
+ * `--lint`/`--js`/`--native` flags that survived it as no-ops, are gone
+ * (home-base-dchjw.9). `setup-env` runs every step the project declares.
  *
  * STATE-AWARE, and originally a SAFETY rule rather than an optimization. The
- * fleet convention for a `worktree:setup` alias is
- * `bunx @justinhaaheim/justin-sdk worktree-setup`, which is expected to resolve
- * the SDK out of the project's node_modules. In a worktree where node_modules is
- * MISSING that resolution fails and bunx falls through to the registry.
+ * fleet convention for a `worktree:setup` alias is `justin-sdk setup-env`,
+ * which resolves the SDK out of the project's node_modules via `bun run`'s
+ * PATH.
  *
- * When the alias still used the BARE name, that fallback fetched and EXECUTED
- * whatever `justin-sdk` resolved to on npm — an unclaimed, unscoped name anyone
- * could take. That hazard is narrowed: the aliases now name the `@justinhaaheim`
- * scope, so the fallback can only ever resolve to something published under that
- * scope, never to a top-level name a stranger can claim (home-base-2qhw). The
- * rule survives on the remaining ground — the scoped name is deliberately
- * unpublished, so the fallback simply FAILS, and printing it would hand the user
- * a command that cannot work in the exact state they are stuck in.
+ * Under the retired `bunx` spellings, a worktree with no node_modules made that
+ * resolution FALL THROUGH TO THE NPM REGISTRY — and with the bare name it
+ * fetched and EXECUTED whatever a stranger had published there
+ * (home-base-2qhw). Since epic home-base-dchjw D1 the aliases are
+ * `bun run justin-sdk …`, which does not fall through at all: with no local bin
+ * it exits 1 with `error: Script not found` (measured 2026-09-18).
+ *
+ * The rule survives, now on usability rather than supply-chain ground: printing
+ * that command to someone whose node_modules is missing hands them a command
+ * that cannot work in the exact state they are stuck in.
  *
  * Hence: node_modules missing ⇒ ALWAYS the explicit
  * `bunx github:justinhaaheim/justin-sdk` form, alias or no alias. The alias is

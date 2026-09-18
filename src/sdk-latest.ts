@@ -202,12 +202,36 @@ export function describeFetchFailure(
  * all means something is wrong and failing is the right answer.
  */
 export function fetchLatestSdkTag(
-  options: {timeoutMs?: number} = {},
+  options: {repoUrl?: string; timeoutMs?: number} = {},
 ): LatestTagOutcome {
+  const listed = listSdkTags(options);
+  if (listed.status === 'failed') return listed;
+  return latestTagFromLsRemote(listed.stdout);
+}
+
+/** Every tag ref the remote publishes, or why the question could not be asked. */
+export type SdkTagListOutcome =
+  | {error: string; status: 'failed'}
+  | {names: string[]; status: 'ok'; stdout: string};
+
+/**
+ * The ONE `git ls-remote --tags` in this codebase.
+ *
+ * `fetchLatestSdkTag` and `sdkTagExistsOnRemote` are two questions about the
+ * same listing, and they go through here so a fix to the spawn, the timeout or
+ * the parse cannot land in only one of them.
+ *
+ * `repoUrl` exists so a test can point this at a local BARE REPO and exercise
+ * the real spawn hermetically — the suite must never reach GitHub.
+ */
+export function listSdkTags(
+  options: {repoUrl?: string; timeoutMs?: number} = {},
+): SdkTagListOutcome {
   const timeoutMs = options.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
+  const repoUrl = options.repoUrl ?? SDK_REPO_URL;
   let stdout: string;
   try {
-    stdout = execFileSync('git', ['ls-remote', '--tags', SDK_REPO_URL], {
+    stdout = execFileSync('git', ['ls-remote', '--tags', repoUrl], {
       encoding: 'utf-8',
       env: {...process.env, GIT_TERMINAL_PROMPT: '0'},
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -216,5 +240,31 @@ export function fetchLatestSdkTag(
   } catch (error) {
     return {error: describeFetchFailure(error, timeoutMs), status: 'failed'};
   }
-  return latestTagFromLsRemote(stdout);
+  return {names: parseLsRemoteTags(stdout), status: 'ok', stdout};
+}
+
+/**
+ * Does the remote actually carry this tag?
+ *
+ * Asked before any pin is WRITTEN into a consumer's package.json
+ * (home-base-l9tz). A dev checkout whose package.json version was bumped but
+ * never released reports a version with no tag behind it, and pinning to it
+ * hands every consumer a `bun install` that 404s.
+ *
+ * Three outcomes, never two (critical rule 6): present, absent, and
+ * COULD-NOT-ASK. "The listing came back empty" and "git could not run" must
+ * not both read as "absent" — one is a finding, the other is no measurement,
+ * and the caller has to treat them differently.
+ */
+export type SdkTagExistsOutcome =
+  | {error: string; status: 'failed'}
+  | {exists: boolean; status: 'ok'};
+
+export function sdkTagExistsOnRemote(
+  tag: string,
+  options: {repoUrl?: string; timeoutMs?: number} = {},
+): SdkTagExistsOutcome {
+  const listed = listSdkTags(options);
+  if (listed.status === 'failed') return listed;
+  return {exists: listed.names.includes(tag), status: 'ok'};
 }

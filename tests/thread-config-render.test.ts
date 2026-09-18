@@ -13,10 +13,8 @@ import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
 import {tmpdir} from 'os';
 
-import {
-  resolveThreadConfig,
-  THREAD_DEFAULT_EMOJI_HEADER,
-} from '../src/thread/config';
+import {THREAD_DEFAULT_EMOJI_HEADER} from '../src/thread/defaults';
+import {resolveThreadConfig} from '../src/thread/config';
 
 const roots: string[] = [];
 
@@ -48,7 +46,10 @@ function repoWith(project: unknown | null, user: unknown | null) {
     // $XDG_CONFIG_HOME/justin-sdk/config.json is where readUserConfig looks.
     const configDir = join(home, 'justin-sdk');
     mkdirSync(configDir, {recursive: true});
-    writeFileSync(join(configDir, 'config.json'), JSON.stringify(user, null, 2));
+    writeFileSync(
+      join(configDir, 'config.json'),
+      JSON.stringify(user, null, 2),
+    );
   }
   return {cwd: dir, env: {XDG_CONFIG_HOME: home}};
 }
@@ -66,7 +67,9 @@ describe('the emojiHeader knob layers like every other thread knob', () => {
 
   test('the user file turns it off everywhere', () => {
     const resolved = resolveThreadConfig(
-      repoWith(null, {componentConfig: {thread: {render: {emojiHeader: false}}}}),
+      repoWith(null, {
+        componentConfig: {thread: {render: {emojiHeader: false}}},
+      }),
     );
     expect(resolved.emojiHeader).toBe(false);
     expect(resolved.emojiHeaderSource).toBe('user');

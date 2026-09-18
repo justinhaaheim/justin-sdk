@@ -15,7 +15,7 @@
 
 import {describe, expect, test} from 'bun:test';
 
-import {COMPONENT_NAMES, DEPENDENCY_ORDER} from '../src/components';
+import {COMPONENT_INCLUDE_IF, COMPONENT_NAMES} from '../src/component-registry';
 import {buildSkill} from '../src/skill';
 
 describe('skill: derived component table', () => {
@@ -27,25 +27,22 @@ describe('skill: derived component table', () => {
     }
   });
 
-  test('opt-in-only components are listed separately from the default set', () => {
-    const optIn = COMPONENT_NAMES.filter((n) => !DEPENDENCY_ORDER.includes(n));
-    expect(optIn.length).toBeGreaterThan(0);
-
-    const [before, after] = skill.split('OPT-IN ONLY');
-    expect(after).toBeDefined();
-    // Each opt-in component is described below the divider…
-    for (const name of optIn) {
-      expect(after).toContain(name);
+  test('a gated component prints its gate, and there is no opt-in divider', () => {
+    // The OPT-IN ONLY divider is gone with OPT_IN_ONLY itself (D3): a component
+    // is applicable to a repo or it is not, and the skill is a static document
+    // that cannot know which repo it will be read in. The gate is what it can
+    // honestly print.
+    expect(skill).not.toContain('OPT-IN ONLY');
+    for (const [name, gate] of Object.entries(COMPONENT_INCLUDE_IF)) {
+      expect(skill).toContain(`[includeIf ${(gate ?? []).join(', ')}]`);
+      expect(skill).toContain(name);
     }
-    // …and each default component above it.
-    for (const name of DEPENDENCY_ORDER) {
-      expect(before).toContain(name);
-    }
+    expect(skill).toContain('[implicit]');
   });
 
-  test('time-check is presented as opt-in, not default', () => {
-    const [, after] = skill.split('OPT-IN ONLY');
-    expect(after).toContain('time-check');
+  test('time-check is presented as part of core (D3), not as opt-in', () => {
+    expect(skill).not.toContain('OPT-IN ONLY');
+    expect(skill).toContain('time-check');
   });
 });
 

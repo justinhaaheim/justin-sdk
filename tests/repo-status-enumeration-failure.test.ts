@@ -52,9 +52,12 @@ import {
   buildCoreInventory,
   getBranchTips,
   getWorktrees,
-} from '../src/plugin/lib/repo-status/core';
+} from '../src/repo-status/core';
 import {buildPlan} from '../src/repo-status/plan';
-import {formatRepoState, runDivergenceCheck} from '../src/plugin/lib/repo-status/prime-view';
+import {
+  formatRepoState,
+  runDivergenceCheck,
+} from '../src/repo-status/prime-view';
 import {buildReport, type RepoStatusReport} from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
 
@@ -275,7 +278,12 @@ describe('the two listings report failure as failure', () => {
         'refs/heads',
         'refs/remotes',
       ]),
-      revParseMain: gitStatus(repo, ['rev-parse', '--verify', '--quiet', 'main']),
+      revParseMain: gitStatus(repo, [
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        'main',
+      ]),
       showToplevel: gitStatus(repo, ['rev-parse', '--show-toplevel']),
       worktreeList: gitStatus(repo, ['worktree', 'list', '--porcelain']),
     }).toEqual({
@@ -366,7 +374,9 @@ describe('status publishes the unknown rather than an empty ledger', () => {
     const parsed = JSON.parse(run.out) as RepoStatusReport;
     expect(parsed.branches).toBeNull();
     expect(parsed.summary).toBeNull();
-    expect(parsed.enumerationFailures?.map((f) => f.what)).toEqual(['branches']);
+    expect(parsed.enumerationFailures?.map((f) => f.what)).toEqual([
+      'branches',
+    ]);
     // A ledger missing its entire input is not a short ledger.
     expect(run.code).toBe(1);
     expect(run.err).toContain('severe: could not enumerate branches');
@@ -435,7 +445,9 @@ describe('plan and apply refuse a repo whose branches are unknown', () => {
     expect(applied.err).toContain('no plan');
     // The refs are exactly where they were, under their original names.
     expect(git(repo, ['rev-parse', 'broken']).trim()).toBe(before);
-    expect(gitStatus(repo, ['rev-parse', '--verify', '--quiet', 'archive/broken'])).not.toBe(0);
+    expect(
+      gitStatus(repo, ['rev-parse', '--verify', '--quiet', 'archive/broken']),
+    ).not.toBe(0);
   });
 });
 
@@ -449,7 +461,10 @@ describe('an unknown worktree state routes every local row to manual', () => {
     const fx = buildWorktreeFixture(sb);
     const shim = installWorktreeListShim(sb, 'fail');
 
-    const run = runCli(['plan-experimental', '--repo', fx.repo, '--json'], shim);
+    const run = runCli(
+      ['plan-experimental', '--repo', fx.repo, '--json'],
+      shim,
+    );
     expect(run.code).toBe(0);
     const plan = JSON.parse(run.out) as ReturnType<typeof buildPlan> & object;
 
@@ -485,9 +500,16 @@ describe('an unknown worktree state routes every local row to manual', () => {
     );
     expect(run.code).toBe(0);
     expect(JSON.parse(run.out)).toEqual([]);
-    expect(gitStatus(fx.repo, ['rev-parse', '--verify', '--quiet', 'landed'])).toBe(0);
     expect(
-      gitStatus(fx.repo, ['rev-parse', '--verify', '--quiet', 'archive/landed']),
+      gitStatus(fx.repo, ['rev-parse', '--verify', '--quiet', 'landed']),
+    ).toBe(0);
+    expect(
+      gitStatus(fx.repo, [
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        'archive/landed',
+      ]),
     ).not.toBe(0);
     expect(git(fx.worktree, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()).toBe(
       'landed',
@@ -533,7 +555,9 @@ describe('an unknown worktree state routes every local row to manual', () => {
     // The damage, stated as repo state rather than as a result string: the
     // branch is gone under its old name and the LIVE worktree is now sitting on
     // the archive ref, with nothing anywhere having said so.
-    expect(gitStatus(fx.repo, ['rev-parse', '--verify', '--quiet', 'landed'])).not.toBe(0);
+    expect(
+      gitStatus(fx.repo, ['rev-parse', '--verify', '--quiet', 'landed']),
+    ).not.toBe(0);
     expect(git(fx.worktree, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()).toBe(
       'archive/landed',
     );
@@ -574,7 +598,9 @@ describe('git does NOT refuse to rename a checked-out branch', () => {
     const tip = git(fx.repo, ['rev-parse', 'landed']).trim();
 
     expect(gitStatus(fx.repo, ['branch', '-D', 'landed'])).toBe(1);
-    expect(gitStatus(fx.repo, ['branch', '-m', 'landed', 'archive/landed'])).toBe(0);
+    expect(
+      gitStatus(fx.repo, ['branch', '-m', 'landed', 'archive/landed']),
+    ).toBe(0);
 
     expect(git(fx.worktree, ['rev-parse', '--abbrev-ref', 'HEAD']).trim()).toBe(
       'archive/landed',

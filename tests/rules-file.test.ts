@@ -14,7 +14,7 @@ import {
   prettierEnabled,
   prettierMarkdown,
   readDeployedStamp,
-} from '../src/plugin/lib/rules-file';
+} from '../src/rules/rules-file';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
