@@ -44,6 +44,7 @@ import {mkdtempSync, rmSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
+import {SDK_RUN} from '../sdk-invocation';
 import {threadsRepoDir} from './paths';
 
 import type {EnvLike} from './paths';
@@ -244,8 +245,7 @@ export function bdContext(env: EnvLike = process.env): BdContext {
 }
 
 /** The one line every command prints when `ctx.exportUnstaged` is set. */
-export const EXPORT_UNSTAGED_WARNING =
-  '⚠️ WARNING: recorded in Dolt, but .beads/issues.jsonl could not be git-staged and therefore was NOT committed (the sandbox denies ~/Dev/threads/.git). Nothing was lost; `justin-sdk thread board` reminds you what is uncommitted.';
+export const EXPORT_UNSTAGED_WARNING = `⚠️ WARNING: recorded in Dolt, but .beads/issues.jsonl could not be git-staged and therefore was NOT committed (the sandbox denies ~/Dev/threads/.git). Nothing was lost; \`${SDK_RUN} thread board\` reminds you what is uncommitted.`;
 
 /**
  * Run one bd command, retrying only a `locked` failure.

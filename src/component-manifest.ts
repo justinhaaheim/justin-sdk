@@ -30,6 +30,7 @@
 import {existsSync, readFileSync} from 'fs';
 import {resolve} from 'path';
 
+import {BEADS_MISE_TOOL_KEY} from './beads-setup';
 import {type ComponentName, COMPONENT_NAMES} from './component-registry';
 import {EAS_SCRIPTS} from './eas-setup';
 import {
@@ -40,13 +41,17 @@ import {
 } from './eslint-setup';
 import {WORKFLOW_RELATIVE_PATH} from './gh-actions-setup';
 import {BASELINE_ENTRIES as GITIGNORE_BASELINE_ENTRIES} from './gitignore-setup';
-import {DEFAULT_LINT_STAGED_CONFIG} from './husky-setup';
+import {
+  DEFAULT_LINT_STAGED_CONFIG,
+  POST_CHECKOUT_MARKER_BEGIN,
+} from './husky-setup';
 import {
   PRETTIER_SCRIPTS,
   PRETTIERIGNORE_BASELINE_ENTRIES,
   SIGNAL_SOURCE_PRETTIER_KEY,
   SIGNAL_SOURCE_PRETTIER_SCRIPT,
 } from './prettier-setup';
+import {isSdkEmittedCommand} from './sdk-invocation';
 import {
   THREAD_HOOK_EVENT,
   THREAD_START_HOOK_COMMAND,
@@ -168,6 +173,26 @@ export interface ComponentManifest {
    * never removed (user data, generated artifacts). Detection only.
    */
   markers: readonly string[];
+  /**
+   * Paths whose NAME ALONE is SDK provenance — nothing but this SDK creates a
+   * file at this path, so its existence proves the SDK was here even though its
+   * bytes cannot be reconstructed. `justin-sdk.config.json` and
+   * `.claude/rules/justin-sdk/` are the two; both carry the SDK's name in the
+   * path, which is exactly what makes them unambiguous.
+   */
+  sdkOwnedPaths: readonly string[];
+  /**
+   * A string only this SDK writes, inside a file it SHARES with humans and
+   * other tools. This is how a component whose artifact is composed or generated
+   * (so `pristine` is null, and a byte comparison is impossible) can still prove
+   * provenance.
+   *
+   * The `contains` string must be one nothing else would produce — see
+   * `BEADS_MISE_TOOL_KEY`, which is the whole quoted mise key rather than the
+   * word `beads_rust`, because a repo that says in a COMMENT that it removed
+   * beads_rust contains that word too.
+   */
+  provenanceMarkers: readonly {file: string; contains: string}[];
 }
 
 // ---------------------------------------------------------------------------
@@ -211,8 +236,10 @@ const EMPTY = {
   ignoreLines: [] as readonly OwnedIgnoreLines[],
   jsonBlocks: [] as readonly {key: string; value: unknown}[],
   markers: [] as readonly string[],
+  provenanceMarkers: [] as readonly {file: string; contains: string}[],
   removable: true,
   scripts: [] as readonly OwnedScript[],
+  sdkOwnedPaths: [] as readonly string[],
 };
 
 export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
@@ -225,6 +252,7 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
     purpose:
       'The foundation: justin-sdk.config.json, the SDK devDependency, the shared package.json scripts and the SessionStart hook. Implicit — every other component applies it.',
     removable: false,
+    sdkOwnedPaths: ['justin-sdk.config.json'],
   },
 
   gitignore: {
@@ -297,9 +325,29 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
       unreconstructible('.husky/post-checkout'),
     ],
     jsonBlocks: [{key: 'lint-staged', value: DEFAULT_LINT_STAGED_CONFIG}],
+    // The composed hook has no reconstructible bytes, but the managed block
+    // inside it is delimited by a marker only this SDK writes — so husky can
+    // still prove provenance without a template to diff (dchjw.19).
+    provenanceMarkers: [
+      {contains: POST_CHECKOUT_MARKER_BEGIN, file: '.husky/post-checkout'},
+    ],
     purpose:
       'Husky git hooks (pre-commit signal, post-checkout hydration) and the lint-staged block.',
-    scripts: [{key: 'prepare', value: 'husky'}],
+    scripts: [
+      {
+        key: 'prepare',
+        // NOT this component's alone, and the third case found by running the
+        // real fleet dry-run (dchjw.19, after the first two in OwnedScript's
+        // note). `prepare: "husky"` is the line husky's OWN `husky init`
+        // writes and its docs tell every user to add — so it is not evidence
+        // this SDK was here, and it is not ours to delete from a repo that
+        // uses husky on its own. Measured: apple-reminders-mcp (Swift) has it
+        // with no `.husky/post-checkout` and no SDK managed block at all, and
+        // was being adopted into husky-setup on the strength of it.
+        shared: true,
+        value: 'husky',
+      },
+    ],
   },
 
   'gh-actions': {
@@ -323,6 +371,11 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
     // it — not even byte-identically. Detection only.
     hooks: [],
     markers: ['.beads'],
+    // `.beads/` above is a MARKER, not provenance: `bd` (Dolt) writes exactly
+    // the same directory name, which is how the first fleet dry-run proposed
+    // adopting beads into ~/Dev/life. The mise tool key is the provenance —
+    // beads-setup is the only thing that writes it (dchjw.19).
+    provenanceMarkers: [{contains: BEADS_MISE_TOOL_KEY, file: 'mise.toml'}],
     // The purpose names three things and the manifest owns none of them, so
     // `remove beads` reports "0 artifact(s) removed" and looks broken. It is
     // not: .beads/ is the issue database, and the mise pin and the sandbox
@@ -419,6 +472,10 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
     configKeys: [{key: 'critical-rules', seeds: () => null}],
     purpose:
       'The committed .claude/rules/justin-sdk/critical-rules.md artifact, regenerated from the prompts registry.',
+    // Its bytes come from a prompts clone this command may not have, so they
+    // cannot be diffed — but the path is namespaced to the SDK and nothing else
+    // writes there, which is provenance enough to adopt on.
+    sdkOwnedPaths: ['.claude/rules/justin-sdk/critical-rules.md'],
   },
 };
 
@@ -502,6 +559,172 @@ export function componentInstalledEvidence(
   }
 
   return {installed: false};
+}
+
+/**
+ * Three outcomes, because "the SDK put this here", "something that looks like it
+ * is here" and "there is nothing here" are three different facts (critical rule
+ * 6) — and only the first may be acted on automatically.
+ */
+export type ProvenanceEvidence =
+  /** Something only this SDK writes. Safe to adopt. */
+  | {kind: 'sdk'; because: string}
+  /** A generic filename, directory or key. A human decides. */
+  | {kind: 'weak'; because: string}
+  /** Nothing at all — checked, and found none. */
+  | {kind: 'absent'};
+
+/**
+ * Did THIS SDK install this component here, or does the repo merely have
+ * something shaped like it? (dchjw.19)
+ *
+ * The distinction did not exist until the first full-fleet
+ * `sweep --component install --dry-run`, where `componentInstalledEvidence` —
+ * correctly generous, because its consumer is `install`, where a false "not
+ * installed" would silently skip a component — was reused to decide ADOPTION,
+ * which writes into a repo's committed config and thereby enrols it for every
+ * future install. On that reading `~/Dev/life` had beads (it has a `.beads/`
+ * directory; it is a Dolt workspace) and a Swift repo had prettier and husky
+ * (it has a `.prettierrc.json` and a `.husky/`). Generous detection plus a
+ * write is not the same tool as generous detection plus a report.
+ *
+ * `componentInstalledEvidence` is therefore UNCHANGED and still what `install`
+ * and `list` ask. This is the stricter question, and it has exactly four kinds
+ * of yes:
+ *
+ *   1. A path only the SDK ever creates (`justin-sdk.config.json`,
+ *      `.claude/rules/justin-sdk/…`).
+ *   2. A file whose bytes are IDENTICAL to what the component would write into
+ *      this repo right now — the dchjw.17 standard, reused verbatim.
+ *   3. A marker string only the SDK writes, inside a file it shares (the husky
+ *      managed-block delimiter, the beads mise tool key, the `# justin-sdk
+ *      baseline (appended)` section header).
+ *   4. An EXACT-VALUE entry: a non-shared package.json script whose value still
+ *      matches, a `lint-staged` block that still deep-equals the default, an
+ *      SDK-EMITTED hook command (`isSdkEmittedCommand`, so a hand-composed
+ *      `bun run justin-sdk time-check && my-own-thing` does NOT count), or a
+ *      `componentConfig.<key>` block — which can only be inside
+ *      `justin-sdk.config.json`, a file case 1 already establishes as ours.
+ *
+ * Anything else that `componentInstalledEvidence` would have accepted comes back
+ * `weak`, WITH the evidence it found, so the caller can print it and let a human
+ * decide rather than silently doing nothing.
+ */
+export function componentProvenanceEvidence(
+  projectRoot: string,
+  name: ComponentName,
+): ProvenanceEvidence {
+  const manifest = COMPONENT_MANIFESTS[name];
+  const read = (rel: string): string | null => {
+    const path = resolve(projectRoot, rel);
+    if (!existsSync(path)) return null;
+    try {
+      return readFileSync(path, 'utf-8');
+    } catch {
+      // Unreadable is not "matches" — fall through to the weaker answers.
+      return null;
+    }
+  };
+
+  // 1. Paths only the SDK creates.
+  for (const path of manifest.sdkOwnedPaths) {
+    if (existsSync(resolve(projectRoot, path))) {
+      return {because: `${path} (a path only justin-sdk writes)`, kind: 'sdk'};
+    }
+  }
+
+  // 2. Files byte-identical to the template this component would write today.
+  for (const file of manifest.files) {
+    const pristine = file.pristine();
+    if (pristine == null) continue;
+    const actual = read(file.path);
+    if (actual != null && actual === pristine) {
+      return {
+        because: `${file.path} (byte-identical to the template)`,
+        kind: 'sdk',
+      };
+    }
+  }
+
+  // 3. Marker strings only the SDK writes, in files it shares.
+  for (const marker of manifest.provenanceMarkers) {
+    if (read(marker.file)?.includes(marker.contains) === true) {
+      return {
+        because: `${marker.file} contains ${marker.contains}`,
+        kind: 'sdk',
+      };
+    }
+  }
+  for (const entry of manifest.ignoreLines) {
+    if (entry.sectionHeader == null) continue;
+    if (read(entry.file)?.includes(entry.sectionHeader) === true) {
+      return {
+        because: `${entry.file} contains "${entry.sectionHeader}"`,
+        kind: 'sdk',
+      };
+    }
+  }
+
+  // 4a. Exact-value package.json entries.
+  const pkg = readJsonFile(resolve(projectRoot, 'package.json'));
+  if (pkg != null) {
+    const scripts = (pkg.scripts ?? {}) as Record<string, unknown>;
+    for (const {key, shared, value} of manifest.scripts) {
+      if (shared === true) continue;
+      if (scripts[key] === value) {
+        return {
+          because: `package.json scripts.${key} (exact value)`,
+          kind: 'sdk',
+        };
+      }
+    }
+    for (const {key, value} of manifest.jsonBlocks) {
+      if (key in pkg && JSON.stringify(pkg[key]) === JSON.stringify(value)) {
+        return {because: `package.json ${key} (exact value)`, kind: 'sdk'};
+      }
+    }
+  }
+
+  // 4b. Hook commands the SDK itself emitted.
+  const settings = readJsonFile(
+    resolve(projectRoot, '.claude', 'settings.json'),
+  );
+  if (settings != null) {
+    for (const hook of manifest.hooks) {
+      const emitted = hookEntriesFor(settings, hook.event).find(
+        (command) =>
+          command.includes(hook.fingerprint) && isSdkEmittedCommand(command),
+      );
+      if (emitted != null) {
+        return {
+          because: `.claude/settings.json ${hook.event} runs an SDK-emitted command`,
+          kind: 'sdk',
+        };
+      }
+    }
+  }
+
+  // 4c. A componentConfig block — only ever inside justin-sdk.config.json.
+  const config = readJsonFile(resolve(projectRoot, 'justin-sdk.config.json'));
+  if (config != null) {
+    const componentConfig = (config.componentConfig ?? {}) as Record<
+      string,
+      unknown
+    >;
+    for (const {key} of manifest.configKeys) {
+      if (componentConfig[key] != null) {
+        return {
+          because: `justin-sdk.config.json componentConfig.${key}`,
+          kind: 'sdk',
+        };
+      }
+    }
+  }
+
+  // No provenance. Say whether there was anything here at all.
+  const generic = componentInstalledEvidence(projectRoot, name);
+  if (generic.installed) return {because: generic.because, kind: 'weak'};
+  return {kind: 'absent'};
 }
 
 /** Every hook COMMAND string registered for one event, flattened. */

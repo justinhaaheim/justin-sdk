@@ -28,6 +28,7 @@
 
 import {readFileSync} from 'fs';
 
+import {sdkRun, SDK_RUN} from '../sdk-invocation';
 import {archiveReport, spoolReport, type ArchivedReport} from './archive';
 import {commitThreadsRepo, describeCommit} from './commit';
 import {
@@ -527,7 +528,7 @@ export async function writeReportToBd(
     ) {
       return {
         continuesFrom,
-        detail: `that bead is a ${continuedThread.issue_type}, not a thread — continuesFrom takes the THREAD bead id (see justin-sdk thread board)`,
+        detail: `that bead is a ${continuedThread.issue_type}, not a thread — continuesFrom takes the THREAD bead id (see ${SDK_RUN} thread board)`,
         status: 'refusedContinuation',
       };
     }
@@ -1012,7 +1013,7 @@ export async function runThreadReport(
     // one place that knows the substitution happened is the place that has to
     // name it.
     console.error(
-      `thread report: ⚠️ this payload declared schemaVersion ${validation.migratedFrom} and was migrated to ${THREAD_SCHEMA_VERSION}. Write v${THREAD_SCHEMA_VERSION} next time: run justin-sdk thread prepare for the current skeleton. What was substituted:`,
+      `thread report: ⚠️ this payload declared schemaVersion ${validation.migratedFrom} and was migrated to ${THREAD_SCHEMA_VERSION}. Write v${THREAD_SCHEMA_VERSION} next time: run ${SDK_RUN} thread prepare for the current skeleton. What was substituted:`,
     );
     if (validation.migratedFrom < 2) {
       console.error(
@@ -1101,7 +1102,7 @@ export async function runThreadReport(
     console.error(
       '  "supersedes" takes the id of an ask that is OPEN on this session’s thread, or on the thread named by "continuesFrom".',
     );
-    console.error('  See them with: justin-sdk thread prepare');
+    console.error(`  See them with: ${sdkRun('thread prepare')}`);
     console.error(
       archivePath == null
         ? '  (the payload could not be archived)'
@@ -1115,7 +1116,7 @@ export async function runThreadReport(
       `thread report: REFUSED — continuesFrom names ${outcome.continuesFrom}, but ${outcome.detail}. Nothing was written.`,
     );
     console.error(
-      '  Find the thread you mean with: justin-sdk thread board --recent',
+      `  Find the thread you mean with: ${sdkRun('thread board --recent')}`,
     );
     console.error(
       archivePath == null
@@ -1172,7 +1173,9 @@ export async function runThreadReport(
   console.error(
     archivePath == null ? '  archive: FAILED' : `  archive: ${archivePath}`,
   );
-  console.error(`  Justin answers with: justin-sdk thread answer ${threadId}`);
+  console.error(
+    `  Justin answers with: ${sdkRun(`thread answer ${threadId}`)}`,
+  );
 
   // The commit is part of finishing the write (p1uj.11, retiring D13): threads
   // have their own repo now, so nothing else is racing this index.

@@ -67,6 +67,7 @@
 
 import {readFileSync} from 'fs';
 
+import {SDK_RUN} from '../sdk-invocation';
 import {resolveThreadConfig} from './config';
 import {newestArchivedReportAt, stopMarkExists, writeStopMark} from './archive';
 import {findTranscript, scanTranscriptForThread} from './facts';
@@ -96,7 +97,7 @@ const TRAILING_RULE = new RegExp(`(?:🕉️){${RULE_RUN_MIN},}\\s*$`, 'u');
  * with the stop-reason banner; the pair is what the template mandates and what
  * every renderer emits, so requiring both is the conservative test.
  *
- * Note what this deliberately does NOT look at: the `Answer: justin-sdk thread
+ * Note what this deliberately does NOT look at: the `Answer: bun run justin-sdk thread
  * answer <id>` line that a recorded report contains. That line is text like any
  * other and a hand-written report can copy it, so it proves nothing. The proof
  * is the archive timestamp, below.
@@ -166,8 +167,7 @@ export interface StopCheckDecision {
 }
 
 /** The one line a blocked turn is shown, in both channels. */
-export const STOP_CHECK_BLOCK_REASON =
-  'This report was not recorded; run justin-sdk thread prepare then thread report --file and paste its output.';
+export const STOP_CHECK_BLOCK_REASON = `This report was not recorded; run ${SDK_RUN} thread prepare then thread report --file and paste its output.`;
 
 /**
  * The whole decision, as a pure function. No filesystem, no clock, no env.

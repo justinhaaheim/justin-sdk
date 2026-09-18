@@ -24,6 +24,7 @@
  * PURE. No I/O, no clock, no environment — everything it reads is an argument.
  */
 
+import {sdkRun} from '../sdk-invocation';
 import {formatTokens} from '../usage-check';
 
 import {askKindTag, compareAsksForNumbering, optionLetter} from './render';
@@ -543,7 +544,7 @@ export function buildReportModel(
     answerLine:
       threadId == null
         ? 'Answer: (no thread bead — this report was NOT recorded)'
-        : `Answer: justin-sdk thread answer ${threadId}`,
+        : `Answer: ${sdkRun(`thread answer ${threadId}`)}`,
     answers: payload.answers.map((item) => ({
       answer: item.answer,
       question: item.question,

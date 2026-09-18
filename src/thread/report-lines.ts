@@ -29,7 +29,7 @@ export type ReportLineKind =
   | 'askDetail'
   | 'blank'
   | 'bullet'
-  /** `Answer: justin-sdk thread answer th-x` — the line Justin acts on. */
+  /** `Answer: bun run justin-sdk thread answer th-x` — the line Justin acts on. */
   | 'command'
   /** An indented continuation, e.g. the `A:` under a restated question. */
   | 'continuation'
@@ -46,7 +46,7 @@ export type ReportLineKind =
   /** A bold-prefixed aside that is not a field, e.g. the compact footer. */
   | 'note'
   | 'numbered'
-  /** The compact report's `📎 … everything: justin-sdk thread show …` pointer. */
+  /** The compact report's `📎 … everything: bun run justin-sdk thread show …` pointer. */
   | 'pointer'
   | 'rule'
   /**

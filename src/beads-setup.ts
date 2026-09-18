@@ -58,9 +58,21 @@ function getPinnedVersion(): string {
 // Step implementations
 // ---------------------------------------------------------------------------
 
+/**
+ * The mise tool KEY this component pins — and the fingerprint that proves the
+ * SDK pinned it (dchjw.19).
+ *
+ * Deliberately the whole quoted key, never the bare word `beads_rust`:
+ * `~/Dev/life`'s mise.toml carries a PROSE COMMENT saying beads_rust was
+ * removed in 2026-07, so a substring match on the word reads a repo that
+ * deliberately does not have br as one that does. Measured 2026-09-18 — that
+ * file contains `beads_rust` three times and this key zero times.
+ */
+export const BEADS_MISE_TOOL_KEY = '"github:Dicklesworthstone/beads_rust"';
+
 function stepMiseToml(projectRoot: string, version: string): boolean {
   const miseToml = resolve(projectRoot, 'mise.toml');
-  const entry = `"github:Dicklesworthstone/beads_rust" = { version = "${version}", exe = "br" }`;
+  const entry = `${BEADS_MISE_TOOL_KEY} = { version = "${version}", exe = "br" }`;
 
   if (!existsSync(miseToml)) {
     writeFileSync(miseToml, `[tools]\n${entry}\n`);
@@ -181,6 +193,33 @@ export type BeadsWorkspaceState =
   | {kind: 'legacy'; reason: string};
 
 /**
+ * The `legacy` reason that means "this is a DELIBERATE Dolt (`bd`) workspace",
+ * as opposed to a broken or half-migrated br one. Named so the refusal in
+ * `runBeadsSetup` matches on a constant rather than on prose that could be
+ * reworded out from under it (dchjw.19).
+ */
+export const DOLT_BACKEND_REASON = 'old Dolt (bd) backend';
+
+/**
+ * Why beads-setup must not run here, or null when it may (dchjw.19).
+ *
+ * A pure function so BOTH directions can be asserted without a network, a
+ * package manager or a `br` binary: a test that could only ever prove the
+ * refusal fires would pass just as well if it fired on everything.
+ */
+export function beadsSetupRefusal(projectRoot: string): string | null {
+  const workspace = detectBeadsWorkspace(projectRoot);
+  if (workspace.kind !== 'legacy' || workspace.reason !== DOLT_BACKEND_REASON) {
+    return null;
+  }
+  return (
+    `${projectRoot} is a Dolt (\`bd\`) beads workspace — refusing to run beads-setup. ` +
+    'This component sets up beads_rust (`br`), and its migration step DELETES `.beads/` to re-init. ' +
+    'Nothing has been written. If this repo really should move from bd to br, do it by hand, with the database backed up first.'
+  );
+}
+
+/**
  * Classify what kind of beads workspace (if any) `projectRoot` has.
  *
  * Ordering is load-bearing: the `br list` probe only runs when a database file
@@ -195,7 +234,7 @@ export function detectBeadsWorkspace(projectRoot: string): BeadsWorkspaceState {
   if (existsSync(metadataPath)) {
     try {
       if (readFileSync(metadataPath, 'utf-8').includes('"dolt"')) {
-        return {kind: 'legacy', reason: 'old Dolt (bd) backend'};
+        return {kind: 'legacy', reason: DOLT_BACKEND_REASON};
       }
     } catch {
       // Unreadable metadata decides nothing — fall through to the other probes.
@@ -607,6 +646,33 @@ export async function runBeadsSetup(
     console.log(
       `\n\x1b[1mSetting up beads_rust ${version} in ${basename(projectRoot)}\x1b[0m\n`,
     );
+  }
+
+  // Step -1: REFUSE on a Dolt workspace, before anything at all is written.
+  //
+  // This guard is the reason dchjw.19 exists. `stepMigrateOldBeads` classifies a
+  // Dolt `.beads/` as `legacy` and then `rmSync(.beads, {recursive: true, force:
+  // true})` — it DELETES the issue database, unattended, with no flag, no prompt
+  // and no dry-run, keeping only whatever `issues.jsonl` it happened to find in
+  // the copy it made first. `~/Dev/life` is a Dolt workspace ON PURPOSE (it uses
+  // `bd`, every coding repo uses `br`), and the first full-fleet
+  // `sweep --component install --dry-run` said `life: adopt: beads-setup` — one
+  // non-dry run away from destroying it.
+  //
+  // So the refusal is here, ahead of base-setup, rather than only in adoption and
+  // in the `includeIf` gate: those two decide what a SWEEP does, and this decides
+  // what the INSTALLER does however it is reached — `install` applies a listed
+  // component even when its includeIf fails ("Applying it anyway because the
+  // config asks for it"), and `justin-sdk beads` can be typed directly.
+  //
+  // There is deliberately NO --force. A flag here would turn "I cannot verify
+  // this is safe" into "delete it anyway", which is the hazard the whole
+  // remove-by-identity design exists to remove. Migrating a real bd workspace to
+  // br is a human-sized decision made with a human present, not a sweep payload.
+  const refusal = beadsSetupRefusal(projectRoot);
+  if (refusal != null) {
+    fail(refusal);
+    return 1;
   }
 
   // Step 0: Ensure base-setup is installed first (foundation layer).

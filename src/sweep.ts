@@ -122,6 +122,7 @@ import {silencedChildEnv} from './health-notices';
 import {runInstall} from './install';
 import {
   applyInstallPayloadConfig,
+  noProvenanceLine,
   planInstallPayload,
   renderInstallPayloadPlan,
 } from './sweep-install';
@@ -2016,6 +2017,10 @@ async function applyInstallSweepPayload(
       : 'no dead keys',
     pinWrite.note,
     'installed (removals disabled)',
+    // Carried into the run note, not just the dry-run plan: a component the
+    // sweep declined to adopt is a decision waiting for Justin, and a live run
+    // is the pass where it would otherwise never be mentioned (dchjw.19).
+    ...config.notAdopted.map(noProvenanceLine),
   ];
   return {
     note: notes.join(' · '),

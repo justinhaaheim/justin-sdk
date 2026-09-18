@@ -21,9 +21,9 @@ exports[`one fixture, three media markdown baseline — compact 1`] = `
 
 - ⚠️ MISTAKE — I let the bin symlink point at a dirty branch
 
-📎 1 more ask (P2-P4) · 1 more deviation · everything: justin-sdk thread show th-eru --full
+📎 1 more ask (P2-P4) · 1 more deviation · everything: bun run justin-sdk thread show th-eru --full
 
-Answer: justin-sdk thread answer th-eru
+Answer: bun run justin-sdk thread answer th-eru
 🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️"
 `;
 
@@ -85,7 +85,7 @@ exports[`one fixture, three media markdown baseline — full 1`] = `
 **Beads touched:**
 - home-base-p1uj.1 — the thread command group core
 
-Answer: justin-sdk thread answer th-eru
+Answer: bun run justin-sdk thread answer th-eru
 🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️"
 `;
 
@@ -110,9 +110,9 @@ exports[`one fixture, three media ansi baseline — compact 1`] = `
 
 \x1B[1m\x1B[31m- ⚠️ MISTAKE — I let the bin symlink point at a dirty branch\x1B[0m
 
-\x1B[2m📎 1 more ask (P2-P4) · 1 more deviation · everything: justin-sdk thread show th-eru --full\x1B[0m
+\x1B[2m📎 1 more ask (P2-P4) · 1 more deviation · everything: bun run justin-sdk thread show th-eru --full\x1B[0m
 
-\x1B[1mAnswer: justin-sdk thread answer th-eru\x1B[0m
+\x1B[1mAnswer: bun run justin-sdk thread answer th-eru\x1B[0m
 \x1B[36m🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️\x1B[0m"
 `;
 
@@ -174,7 +174,7 @@ exports[`one fixture, three media ansi baseline — full 1`] = `
 \x1B[1m\x1B[4mBeads touched:\x1B[0m
 - home-base-p1uj.1 — the thread command group core
 
-\x1B[1mAnswer: justin-sdk thread answer th-eru\x1B[0m
+\x1B[1mAnswer: bun run justin-sdk thread answer th-eru\x1B[0m
 \x1B[36m🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️\x1B[0m"
 `;
 
@@ -194,8 +194,8 @@ exports[`one fixture, three media html baseline — compact 1`] = `
 <p class="askdetail p0">b. Delete — tidier list, wedges the JSONL export</p>
 <p class="askdetail p0">If you don&#39;t answer: I keep closing rather than deleting.</p>
 <p class="mistake">- ⚠️ MISTAKE — I let the bin symlink point at a dirty branch</p>
-<p class="pointer">📎 1 more ask (P2-P4) · 1 more deviation · everything: justin-sdk thread show th-eru --full</p>
-<p class="command">Answer: justin-sdk thread answer th-eru</p>
+<p class="pointer">📎 1 more ask (P2-P4) · 1 more deviation · everything: bun run justin-sdk thread show th-eru --full</p>
+<p class="command">Answer: bun run justin-sdk thread answer th-eru</p>
 <hr />
 </div>"
 `;
@@ -259,7 +259,7 @@ exports[`one fixture, three media html baseline — full 1`] = `
 <ul>
 <li>home-base-p1uj.1 — the thread command group core</li>
 </ul>
-<p class="command">Answer: justin-sdk thread answer th-eru</p>
+<p class="command">Answer: bun run justin-sdk thread answer th-eru</p>
 <hr />
 </div>"
 `;

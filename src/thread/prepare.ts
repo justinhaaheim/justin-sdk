@@ -31,6 +31,7 @@ import {
   REGISTER_TYPES_COMMAND,
   showIssue,
 } from './bd';
+import {sdkRun} from '../sdk-invocation';
 import {collectInboxAsks, readThreadNote, renderInboxAsk} from './inbox';
 import {collectThreadFacts} from './facts';
 import {draftPath} from './archive';
@@ -239,7 +240,7 @@ export async function runThreadPrepare(
       out.push(`  UNKNOWN — ${describeBdFailure(continued.failure)}`);
     } else if (continued.value == null) {
       out.push(
-        '  NOT FOUND — no bead with that id. Check it with: justin-sdk thread board --recent',
+        `  NOT FOUND — no bead with that id. Check it with: ${sdkRun('thread board --recent')}`,
       );
     } else {
       const thread = continued.value;
@@ -288,7 +289,7 @@ export async function runThreadPrepare(
   out.push(
     `  1. Write this JSON (filled in) to ${sessionId == null ? '<a path>' : draftPath(sessionId, env)}`,
   );
-  out.push('  2. Run: justin-sdk thread report --file <that path>');
+  out.push(`  2. Run: ${sdkRun('thread report --file <that path>')}`);
   out.push('');
   out.push(payloadSkeleton({continuesFrom}));
   out.push('');

@@ -326,7 +326,7 @@ function wire() {
   document.getElementById('menu-quit').addEventListener('click', async function () {
     flushBeacon();
     await api('/api/quit', {method: 'POST'});
-    document.body.innerHTML = '<main><h1>Stopped. Every draft is still on disk.</h1><p>Run <code>justin-sdk thread answer</code> again to pick up exactly where you left off.</p></main>';
+    document.body.innerHTML = '<main><h1>Stopped. Every draft is still on disk.</h1><p>Run <code>bun run justin-sdk thread answer</code> again to pick up exactly where you left off.</p></main>';
   });
   document.getElementById('review-cancel').addEventListener('click', closeReview);
   document.getElementById('review-record').addEventListener('click', record);

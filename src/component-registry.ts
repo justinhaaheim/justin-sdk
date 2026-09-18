@@ -65,6 +65,22 @@ export const IMPLICIT_COMPONENT: ComponentName = 'base-setup';
  * repo or it is not; there is no third category of "applicable but withheld".
  */
 export const COMPONENT_INCLUDE_IF: Partial<Record<ComponentName, string[]>> = {
+  /**
+   * `~/Dev/life` is a Dolt (`bd`) workspace on purpose, and beads-setup installs
+   * beads_rust (`br`) — whose migration step deletes `.beads/` to re-init. The
+   * first full-fleet `sweep --component install --dry-run` said
+   * `life: adopt: beads-setup` (dchjw.19), so this gate is the SECOND of three
+   * that now have to fail before that can happen: adoption requires SDK
+   * provenance, `core` skips a component whose includeIf does not pass, and
+   * `runBeadsSetup` refuses a Dolt workspace outright however it is reached.
+   *
+   * `isBeadsRust` is false for a repo with NO `.beads/` at all, so `core` no
+   * longer scaffolds beads into a repo that has never had it — that is a
+   * deliberate narrowing: `justin-sdk add beads` still works there, because
+   * `install` applies an explicitly listed component whether or not its
+   * includeIf passes.
+   */
+  beads: ['isBeadsRust'],
   eas: ['isExpo'],
 };
 

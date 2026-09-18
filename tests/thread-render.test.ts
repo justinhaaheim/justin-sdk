@@ -153,7 +153,7 @@ describe('renderMarkdown', () => {
     });
     expect(out).toContain('(jl-x7q.2)');
     expect(out).toContain('(jl-x7q.3)');
-    expect(out).toContain('Answer: justin-sdk thread answer jl-x7q');
+    expect(out).toContain('Answer: bun run justin-sdk thread answer jl-x7q');
   });
 
   test('an ask whose bead was never created says so, never invents an id', () => {
@@ -413,6 +413,6 @@ IF UNANSWERED: I keep by-repo as the default.`,
     expect(text).toContain('(ask ids pending)');
     expect(text).not.toContain('(NOT RECORDED)');
     // and the footer names the real bead, not "no thread bead"
-    expect(text).toContain('justin-sdk thread answer jl-x7q');
+    expect(text).toContain('bun run justin-sdk thread answer jl-x7q');
   });
 });

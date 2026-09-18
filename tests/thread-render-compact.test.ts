@@ -197,7 +197,7 @@ describe('the compact report is the MUST-SEE report', () => {
 
   test('the pointer line names the command that shows everything', () => {
     expect(render(false)).toContain(
-      'everything: justin-sdk thread show th-x7q --full',
+      'everything: bun run justin-sdk thread show th-x7q --full',
     );
   });
 

@@ -252,7 +252,9 @@ describe('a report interrupted between its two asks', () => {
 
     const thread = fake.read().issues.find((issue) => issue.type === 'thread');
     expect(thread?.notes).not.toContain('no thread bead');
-    expect(thread?.notes).toContain(`justin-sdk thread answer ${thread?.id}`);
+    expect(thread?.notes).toContain(
+      `bun run justin-sdk thread answer ${thread?.id}`,
+    );
     expect(thread?.notes).toContain('(ask ids pending)');
   });
 });

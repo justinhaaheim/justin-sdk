@@ -36,6 +36,7 @@ import {
   type BdContext,
   type BdIssue,
 } from './bd';
+import {sdkRun} from '../sdk-invocation';
 import {bdContext} from './bd';
 import {
   aheadOfOrigin,
@@ -363,7 +364,7 @@ export function renderOpenAsks(asks: readonly BoardAsk[]): string {
     );
   });
   lines.push('');
-  lines.push('Answer them: justin-sdk thread answer <threadId>');
+  lines.push(`Answer them: ${sdkRun('thread answer <threadId>')}`);
   return lines.join('\n');
 }
 

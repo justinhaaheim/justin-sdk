@@ -11,7 +11,7 @@
  */
 
 import {afterAll, describe, expect, test} from 'bun:test';
-import {mkdtempSync, rmSync, writeFileSync} from 'fs';
+import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
@@ -71,7 +71,11 @@ describe('component registry: ordering', () => {
 });
 
 describe('component registry: core is computed, not listed', () => {
-  test('core is every component except the implicit base-setup, in a plain node project', () => {
+  test('core is every APPLICABLE component except the implicit base-setup, in a plain node project', () => {
+    // `beads` is absent, and that is the dchjw.19 change: it gained
+    // `includeIf: [isBeadsRust]`, which is false for a repo with no
+    // `.beads/metadata.json` — including this fixture. `eas` is absent for the
+    // same reason (isExpo).
     const root = fixture(['typescript']);
     expect(corePreset(root)).toEqual([
       'gitignore',
@@ -80,13 +84,32 @@ describe('component registry: core is computed, not listed', () => {
       'eslint',
       'husky',
       'gh-actions',
-      'beads',
       'time-check',
       'usage-check',
       'thread-hooks',
       'critical-rules',
     ]);
     expect(corePreset(root)).not.toContain('base-setup');
+  });
+
+  test('beads is in core for a beads_rust repo and NOT for a Dolt one', () => {
+    // The positive half matters as much as the negative: without it, deleting
+    // the component outright would pass the assertion above.
+    const br = fixture([]);
+    mkdirSync(join(br, '.beads'), {recursive: true});
+    writeFileSync(
+      join(br, '.beads', 'metadata.json'),
+      JSON.stringify({database: 'beads.db', jsonl_export: 'issues.jsonl'}),
+    );
+    expect(corePreset(br)).toContain('beads');
+
+    const dolt = fixture([]);
+    mkdirSync(join(dolt, '.beads'), {recursive: true});
+    writeFileSync(
+      join(dolt, '.beads', 'metadata.json'),
+      JSON.stringify({backend: 'dolt', database: 'dolt'}),
+    );
+    expect(corePreset(dolt)).not.toContain('beads');
   });
 
   test('the four components the old OPT_IN_ONLY list withheld are in core', () => {

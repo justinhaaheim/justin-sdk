@@ -345,8 +345,11 @@ describe('init: enrolment only, no components (D3)', () => {
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
     expect(resolved.components).toContain('base-setup');
-    expect(resolved.components).toContain('beads-setup');
     expect(resolved.components).toContain('critical-rules-setup');
+    // NOT beads-setup: this sandbox has no `.beads/`, and since dchjw.19 beads
+    // is gated on `isBeadsRust`, so `core` no longer scaffolds a beads
+    // workspace into a repo that has never had one. `add beads` still does.
+    expect(resolved.components).not.toContain('beads-setup');
     // The retired components must never be scaffolded again.
     expect(resolved.components).not.toContain('prompts-setup');
     expect(resolved.components).not.toContain('claude-md-setup');

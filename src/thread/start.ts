@@ -39,6 +39,7 @@ import {
   findThreadBySession,
   setThreadInProgress,
 } from './bd';
+import {sdkRun, SDK_RUN} from '../sdk-invocation';
 import {commitThreadsRepo, describeCommit} from './commit';
 import {collectThreadFacts} from './facts';
 import {
@@ -128,7 +129,7 @@ function startDescription(facts: ThreadFacts, startedAt: string): string {
     '',
     'Created at session start by the justin-sdk SessionStart hook so that a',
     'session which never reaches its status report is still on the board. The',
-    'first `justin-sdk thread report` for this session rewrites this bead in',
+    `first \`${SDK_RUN} thread report\` for this session rewrites this bead in`,
     'place — it does not create a second one.',
   ].join('\n');
 }
@@ -143,8 +144,8 @@ function startNotes(facts: ThreadFacts, startedAt: string): string {
     'list.',
     '',
     'To fill it in, from that session:',
-    '  justin-sdk thread prepare',
-    '  justin-sdk thread report --file <payload>',
+    `  ${sdkRun('thread prepare')}`,
+    `  ${sdkRun('thread report --file <payload>')}`,
     '',
     `session   ${facts.sessionId ?? 'UNKNOWN'}`,
     `transcript ${facts.transcriptPath ?? 'UNKNOWN'}`,

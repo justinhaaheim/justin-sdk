@@ -62,6 +62,7 @@ import {
 } from 'fs';
 import {join} from 'path';
 
+import {SDK_RUN} from '../sdk-invocation';
 import {resolveThreadConfig} from './config';
 import {THREAD_DEFAULT_AUTO_COMMIT, THREAD_DEFAULT_AUTO_PUSH} from './defaults';
 import {threadsRepoDir, threadsStateDir} from './paths';
@@ -588,7 +589,7 @@ export function describePush(
     case 'pushed':
       return `  pushed ${repoDisplay} to ${outcome.remote}`;
     case 'failed':
-      return `⚠️ WARNING: the beads are recorded and committed, but ${repoDisplay} could NOT be pushed (${outcome.command} — ${condenseGitError(outcome.detail).slice(0, 200)}). Nothing was lost — the commits are local and the next write pushes them; \`justin-sdk thread board\` shows what is unpushed.`;
+      return `⚠️ WARNING: the beads are recorded and committed, but ${repoDisplay} could NOT be pushed (${outcome.command} — ${condenseGitError(outcome.detail).slice(0, 200)}). Nothing was lost — the commits are local and the next write pushes them; \`${SDK_RUN} thread board\` shows what is unpushed.`;
     // Three different reasons NOT to have pushed, all of them silent, and none
     // of them a problem: the knob is off, there is no remote to push to, or
     // origin already has everything this branch has.
@@ -619,7 +620,7 @@ export function describeCommit(
     case 'nothing-to-commit':
       return describePush(outcome.push, repoDisplay);
     case 'failed':
-      return `⚠️ WARNING: recorded in Dolt, but ${repoDisplay} could NOT be committed (${outcome.command} — ${outcome.detail.slice(0, 200)}). Nothing was lost; \`justin-sdk thread board\` shows what is uncommitted.`;
+      return `⚠️ WARNING: recorded in Dolt, but ${repoDisplay} could NOT be committed (${outcome.command} — ${outcome.detail.slice(0, 200)}). Nothing was lost; \`${SDK_RUN} thread board\` shows what is uncommitted.`;
     case 'disabled':
     case 'skipped-export-unstaged':
       return null;

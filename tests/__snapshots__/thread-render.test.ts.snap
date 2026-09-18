@@ -57,6 +57,6 @@ exports[`renderMarkdown full report matches the committed baseline 1`] = `
 **Beads touched:**
 - home-base-p1uj.1 — the thread command group core
 
-Answer: justin-sdk thread answer jl-x7q
+Answer: bun run justin-sdk thread answer jl-x7q
 🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️"
 `;

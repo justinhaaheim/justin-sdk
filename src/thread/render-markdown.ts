@@ -22,6 +22,7 @@
  * PURE. Everything it prints is in the model.
  */
 
+import {sdkRun} from '../sdk-invocation';
 import {classifyReport, MISTAKE_BULLET, POINTER_PREFIX} from './report-lines';
 import {COMPACT_LAST_MESSAGE_CAP, priorityMarker} from './report-model';
 
@@ -299,10 +300,21 @@ function plural(count: number, one: string, many: string): string {
   return count === 1 ? one : many;
 }
 
-/** `Answer: justin-sdk thread answer th-x` → `th-x`, or null when there is none. */
+/**
+ * `Answer: bun run justin-sdk thread answer th-x` → `th-x`, or null when there
+ * is none.
+ *
+ * The `bun run` prefix is OPTIONAL because this parses reports that were
+ * already WRITTEN. Every thread bead recorded before dchjw.19 carries the bare
+ * spelling, and a parser that stopped recognising it would quietly return null
+ * for each of them — compacting an old report into one that no longer says how
+ * to answer it, with nothing anywhere reporting a failure.
+ */
 function threadIdOfAnswerLine(line: string | null): string | null {
   if (line == null) return null;
-  const match = /^Answer: justin-sdk thread answer (\S+)$/u.exec(line);
+  const match = /^Answer: (?:bun run )?justin-sdk thread answer (\S+)$/u.exec(
+    line,
+  );
   return match?.[1] ?? null;
 }
 
@@ -421,7 +433,7 @@ export function compactStoredReport(markdown: string): string {
     } · everything: ${
       threadId == null
         ? 'NOT RECORDED — no thread bead'
-        : `justin-sdk thread show ${threadId} --full`
+        : sdkRun(`thread show ${threadId} --full`)
     }`,
   );
   out.push('');
