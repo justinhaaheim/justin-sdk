@@ -27,17 +27,12 @@ import {existsSync, mkdtempSync, readdirSync, readFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
-import {
-  type Handoff,
-  HANDOFF_LABEL,
-  handoffJson,
-} from '../src/justin-loop/handoff';
-import {type BrRunner} from '../src/justin-loop/br';
+import {HANDOFF_LABEL} from '../src/justin-loop/handoff';
 import {
   type AgentRow,
   appendLedgerRow,
-  DEFAULT_OPTIONS,
   decideAfterSession,
+  DEFAULT_OPTIONS,
   deriveSlug,
   FALLBACK_SLUG,
   type HandoffScan,
@@ -45,23 +40,23 @@ import {
   type JustinLoopOptions,
   type LedgerRow,
   runJustinLoop,
-  runsJsonlPath,
   type RunnerDeps,
+  runsJsonlPath,
   runSlug,
   runStamp,
   sessionLabel,
   sessionName,
   slugify,
-  type StopDeps,
   stopAndVerify,
+  type StopDeps,
   type StopOutcome,
 } from '../src/justin-loop/runner';
-
 import {
   argOf,
-  type BeadSpec,
+  at,
   beadFrom,
-  handoff,
+  type BeadSpec,
+  ledgerReaderNeverCalled,
   listJson,
   type LoopResult,
   promptOf,
@@ -79,13 +74,13 @@ describe('AC1: an ended session with ONE valid continue-handoff boots a successo
     'Rewrite parseFoo so it rejects a relative worktree, then run bun test.';
 
   async function chain(): Promise<LoopResult> {
-    return runLoop({
+    return await runLoop({
+      opts: {label: 'the-arc', maxSessions: 3},
       scans: [
         [], // start of run: nothing waiting
         [beadFrom('hoff-1', {from: 'the-arc-1', next: CONTINUE_NEXT})],
         [beadFrom('hoff-2', {disposition: 'done', from: 'the-arc-2'})],
       ],
-      opts: {label: 'the-arc', maxSessions: 3},
     });
   }
 
@@ -98,14 +93,14 @@ describe('AC1: an ended session with ONE valid continue-handoff boots a successo
 
   test("the successor's PROMPT is the bead's `next`, verbatim (D6)", async () => {
     const r = await chain();
-    expect(promptOf(r.dispatches[1])).toContain(CONTINUE_NEXT);
+    expect(promptOf(at(r.dispatches, 1))).toContain(CONTINUE_NEXT);
     // …and not the run's own ask, which belonged to session 1.
-    expect(promptOf(r.dispatches[1])).not.toContain('/loop-session');
+    expect(promptOf(at(r.dispatches, 1))).not.toContain('/loop-session');
   });
 
   test("the successor's SYSTEM PROMPT is its own contract plus the pickup preamble naming the bead", async () => {
     const r = await chain();
-    const systemPrompt = argOf(r.dispatches[1], '--append-system-prompt');
+    const systemPrompt = argOf(at(r.dispatches, 1), '--append-system-prompt');
     // Its OWN label, not its predecessor's — this is what it stamps on --from.
     expect(systemPrompt).toContain('Your session label is `the-arc-2`');
     expect(systemPrompt).toContain('--from=the-arc-2');
@@ -120,20 +115,20 @@ describe('AC1: an ended session with ONE valid continue-handoff boots a successo
 
   test('session 1 gets no pickup preamble — nothing was waiting for it', async () => {
     const r = await chain();
-    expect(argOf(r.dispatches[0], '--append-system-prompt')).not.toContain(
+    expect(argOf(at(r.dispatches, 0), '--append-system-prompt')).not.toContain(
       'PICK UP THE HANDOFF FIRST',
     );
-    expect(argOf(r.dispatches[0], '--append-system-prompt')).toContain(
+    expect(argOf(at(r.dispatches, 0), '--append-system-prompt')).toContain(
       'Your session label is `the-arc-1`',
     );
   });
 
   test('the ledger records the continue and names the bead', async () => {
     const r = await chain();
-    expect(r.ledger[0].outcome).toBe('continue');
-    expect(r.ledger[0].handoffBead).toBe('hoff-1');
-    expect(r.ledger[0].label).toBe('the-arc-1');
-    expect(r.ledger[0].contextTokens).toBe(302_000);
+    expect(r.ledger[0]?.outcome).toBe('continue');
+    expect(r.ledger[0]?.handoffBead).toBe('hoff-1');
+    expect(r.ledger[0]?.label).toBe('the-arc-1');
+    expect(r.ledger[0]?.contextTokens).toBe(302_000);
   });
 });
 
@@ -149,7 +144,7 @@ describe('AC1: done and blocked stop the loop', () => {
     expect(r.exitCode).toBe(0);
     expect(r.dispatches).toHaveLength(1);
     expect(r.stdout).toContain('done');
-    expect(r.ledger[0].outcome).toBe('done');
+    expect(r.ledger[0]?.outcome).toBe('done');
   });
 
   // D14 (home-base-r4fs): a `done` bead has no successor, so nobody else would
@@ -171,9 +166,9 @@ describe('AC1: done and blocked stop the loop', () => {
     expect(closes[0]).toEqual([
       'close',
       'hoff-9',
-      `--reason=chain complete, read by justin-loop run ${r.ledger[0].runId}`,
+      `--reason=chain complete, read by justin-loop run ${r.ledger[0]?.runId}`,
     ]);
-    expect(r.ledger[0].runId).toContain('the-arc');
+    expect(r.ledger[0]?.runId).toContain('the-arc');
     expect(r.stdout).toContain('closed hoff-9');
     expect(r.exitCode).toBe(0);
   });
@@ -194,6 +189,25 @@ describe('AC1: done and blocked stop the loop', () => {
     expect(r.stderr).toContain('br exited 1: no issue with id hoff-9');
     expect(r.stderr).toContain('STILL OPEN');
     expect(r.stdout).not.toContain('closed hoff-9');
+  });
+
+  test('a br close failure shows ALL of br’s stderr, not just its first line (F4)', async () => {
+    // home-base-685h F4. `reason` is one line by design, and this print used to
+    // be `reason` alone — so a `br close` that failed with a usage block or a
+    // Dolt error showed the heading and threw away the lines that said what to
+    // do about it. The scripted failure here has three lines; all three land.
+    const r = await runLoop({
+      brCloseFails: true,
+      opts: {label: 'the-arc'},
+      scans: [
+        [],
+        [beadFrom('hoff-9', {disposition: 'done', from: 'the-arc-1'})],
+      ],
+    });
+    expect(r.stderr).toContain('did you mean hoff-8?');
+    expect(r.stderr).toContain('run `br list` to see what is open');
+    // Still exit 0: F4 widens the print, it does not change the verdict.
+    expect(r.exitCode).toBe(0);
   });
 
   test('blocked closes NOTHING and says the bead stays open on purpose (D14)', async () => {
@@ -233,7 +247,28 @@ describe('AC1: done and blocked stop the loop', () => {
       'Should the runner delete remote branches automatically?',
     );
     expect(r.stdout).toContain('Is 0.24.0 a breaking release?');
-    expect(r.ledger[0].outcome).toBe('blocked');
+    expect(r.ledger[0]?.outcome).toBe('blocked');
+  });
+
+  test('blocked prints the ANSWER command and the rerun command (D16)', async () => {
+    // home-base-1r6d.33.7. The run stops here with a question on the screen,
+    // and this is the moment Justin is looking at it — so both halves of the
+    // resume are printed with the real ids already filled in, rather than left
+    // for him to reconstruct from a helper he has never run.
+    const r = await runLoop({
+      opts: {label: 'pilot2'},
+      scans: [
+        [],
+        [beadFrom('hoff-b', {disposition: 'blocked', from: 'pilot2-1'})],
+      ],
+    });
+    expect(r.stdout).toContain(
+      "answer with: bun run justin-sdk justin-loop handoff answer hoff-b --answer '<your answer>'",
+    );
+    // The SLUG, not the label: `pilot2-1` is session 1 of the `pilot2` run.
+    expect(r.stdout).toContain(
+      'then re-run: bun run justin-sdk justin-loop --pickup --label pilot2\n',
+    );
   });
 
   test('a blocked handoff with no questions says so rather than printing nothing', async () => {
@@ -267,7 +302,7 @@ describe('AC1: zero, unreadable-only and two-open NEVER spawn', () => {
     expect(r.exitCode).toBe(2);
     expect(r.stdout).toContain('ended without creating a handoff bead');
     expect(r.stdout).toContain('the-arc-1');
-    expect(r.ledger[0].outcome).toBe('no-handoff');
+    expect(r.ledger[0]?.outcome).toBe('no-handoff');
     // Silence must be a claim: the run says WHY nothing was demanded.
     expect(r.stdout).toContain('--handoff-retries=0');
   });
@@ -279,7 +314,7 @@ describe('AC1: zero, unreadable-only and two-open NEVER spawn', () => {
     });
     expect(spawns(r.dispatches)).toHaveLength(1);
     expect(r.exitCode).toBe(2);
-    expect(r.ledger[0].outcome).toBe('no-handoff');
+    expect(r.ledger[0]?.outcome).toBe('no-handoff');
     expect(r.stdout).toContain('belong to other sessions');
   });
 
@@ -301,7 +336,7 @@ describe('AC1: zero, unreadable-only and two-open NEVER spawn', () => {
     expect(r.stdout).toContain('UNREADABLE');
     // Ledgered differently from "wrote nothing": one of these MIGHT be its
     // handoff, and that is a different problem to demand a fix for.
-    expect(r.ledger[0].outcome).toBe('invalid-handoff');
+    expect(r.ledger[0]?.outcome).toBe('invalid-handoff');
     expect(r.stdout).toContain('may be this session');
   });
 
@@ -321,7 +356,7 @@ describe('AC1: zero, unreadable-only and two-open NEVER spawn', () => {
     expect(r.exitCode).toBe(2);
     expect(r.stdout).toContain('hoff-a');
     expect(r.stdout).toContain('hoff-b');
-    expect(r.ledger[0].outcome).toBe('multiple-handoffs');
+    expect(r.ledger[0]?.outcome).toBe('multiple-handoffs');
     expect(r.stdout).toContain('forked');
   });
 
@@ -330,7 +365,7 @@ describe('AC1: zero, unreadable-only and two-open NEVER spawn', () => {
     expect(spawns(r.dispatches)).toHaveLength(1);
     expect(r.exitCode).toBe(2);
     expect(r.stdout).toContain('rather than guessing that none exist');
-    expect(r.ledger[0].outcome).toBe('br-unavailable');
+    expect(r.ledger[0]?.outcome).toBe('br-unavailable');
   });
 
   test('POSITIVE CONTROL: the same harness DOES spawn on a valid continue', async () => {
@@ -416,46 +451,57 @@ describe('decideAfterSession — the pure decision (D5)', () => {
 
 describe('AC2: stopAndVerify (D6)', () => {
   interface StopWorld {
-    report: Awaited<ReturnType<typeof stopAndVerify>>;
-    stops: number;
-    signals: string[];
     polls: number;
+    report: Awaited<ReturnType<typeof stopAndVerify>>;
+    signals: string[];
+    stops: number;
   }
 
   async function runStop(spec: {
+    /**
+     * Rows the listing SKIPPED on each poll (F7, 33.13). A readable listing
+     * that threw rows away is not a full reading of `claude agents`, and one of
+     * the rows it threw away could be the session being watched.
+     */
+    malformedAt?: (poll: number) => number;
+    onSignal?: (sig: string) => void;
+    onStop?: () => void;
     /**
      * The row as seen on each poll: null = absent, `'unreadable'` = the
      * `claude agents --json` call itself failed.
      */
     rowAt: (poll: number) => AgentRow | null | 'unreadable';
-    onStop?: () => void;
-    onSignal?: (sig: string) => void;
   }): Promise<StopWorld> {
     let polls = 0;
     let stops = 0;
     const signals: string[] = [];
     const deps: StopDeps = {
-      findAgent: async () => {
-        const row = spec.rowAt(polls++);
-        return row === 'unreadable'
-          ? {ok: false, reason: 'claude agents --json exited 1'}
-          : {ok: true, row};
+      findAgent: () => {
+        const poll = polls++;
+        const row = spec.rowAt(poll);
+        return Promise.resolve(
+          row === 'unreadable'
+            ? {ok: false, reason: 'claude agents --json exited 1'}
+            : {malformed: spec.malformedAt?.(poll) ?? 0, ok: true, row},
+        );
       },
       signalPid: (_pid, sig) => {
         signals.push(String(sig));
         spec.onSignal?.(String(sig));
         return true;
       },
-      sleep: async () => {},
-      stopSession: async () => {
+      sleep: () => Promise.resolve(),
+      stopSession: () => {
         stops++;
         spec.onStop?.();
-        return {detail: 'stopped', ok: true};
+        return Promise.resolve({detail: 'stopped', ok: true});
       },
       // These tests assert on the REPORT; that the same notes also stream out
       // through this writer as they are made is asserted in
       // tests/justin-loop-liveness.test.ts.
-      write: () => {},
+      write: () => {
+        /* stdout is not asserted in this test */
+      },
     };
     const report = await stopAndVerify('/repo', 'sess-1', 0, deps);
     return {polls, report, signals, stops};
@@ -626,6 +672,85 @@ describe('AC2: stopAndVerify (D6)', () => {
       expect(w.report.notes.join('\n')).toContain('NOT assuming it is gone');
     });
   });
+
+  /**
+   * 33.13 — a listing that SKIPPED rows is not a full reading of `claude
+   * agents`, so an id missing from it is not absent.
+   *
+   * `listAgents` skips rows with no usable `id` and counts them (F7);
+   * `findAgent` matches by id, so a skipped row can never match the session
+   * being watched. The lookup then says "absent" for a listing in which one of
+   * the rows it threw away might BE that session — and two absences license
+   * spawning a successor into the predecessor's worktree (D6). Same shape as
+   * the unreadable case above, one layer in: the call succeeded, the READING
+   * did not.
+   */
+  describe('a listing with malformed rows is UNKNOWN, never absence (33.13)', () => {
+    test('NEGATIVE CONTROL: absent + malformed never reaches `stopped`', async () => {
+      let cleared = false;
+      const w = await runStop({
+        malformedAt: () => 1,
+        onStop: () => {
+          cleared = true;
+        },
+        rowAt: () => (cleared ? null : live),
+      });
+      expect(w.report.outcome).toBe('unverified');
+      expect(isVerifiedGone(w.report.outcome)).toBe(false);
+      expect(w.report.notes.join('\n')).toContain('NOT counted as absent');
+      // The note says WHY, naming the id that one of those rows could be.
+      expect(w.report.notes.join('\n')).toContain('could BE sess-1');
+      expect(w.report.notes.join('\n')).toContain('UNVERIFIED');
+    });
+
+    test('POSITIVE CONTROL: the same polls with a clean listing DO reach `stopped`', async () => {
+      // Without this, the test above would also pass if the ladder could never
+      // confirm anything at all.
+      let cleared = false;
+      const w = await runStop({
+        malformedAt: () => 0,
+        onStop: () => {
+          cleared = true;
+        },
+        rowAt: () => (cleared ? null : live),
+      });
+      expect(w.report.outcome).toBe('stopped');
+      expect(w.report.notes.join('\n')).not.toContain('could BE sess-1');
+    });
+
+    test('a malformed poll RESETS the streak rather than counting', async () => {
+      // absent+malformed, absent, absent → only the final clean pair is proof.
+      let poll = 0;
+      const w = await runStop({
+        malformedAt: () => (poll === 3 ? 2 : 0),
+        rowAt: () => {
+          poll++;
+          return poll === 1 ? live : null;
+        },
+      });
+      expect(w.report.outcome).toBe('stopped');
+      expect(w.report.notes.join('\n')).toContain('skipped 2 rows with no id');
+    });
+
+    test('a malformed INITIAL check never shortcuts to already-gone', async () => {
+      // The one-lookup answer, which is the cheapest path to a spawn.
+      const w = await runStop({
+        malformedAt: (poll) => (poll === 0 ? 1 : 0),
+        rowAt: () => null,
+      });
+      expect(w.report.outcome).not.toBe('already-gone');
+      expect(w.stops).toBeGreaterThan(0);
+      expect(w.report.notes.join('\n')).toContain('proceeding with the stop');
+    });
+
+    test('a PRESENT row is still proof of presence, malformed or not', async () => {
+      // The guard only ever weakens an ABSENCE. Rows it could not read say
+      // nothing about the row it COULD read, and a present row is present.
+      const w = await runStop({malformedAt: () => 3, rowAt: () => live});
+      expect(w.report.outcome).toBe('kill-failed');
+      expect(w.report.notes.join('\n')).toContain('STILL PRESENT');
+    });
+  });
 });
 
 describe('AC2: the loop refuses to spawn when it cannot see `claude agents`', () => {
@@ -641,8 +766,40 @@ describe('AC2: the loop refuses to spawn when it cannot see `claude agents`', ()
     });
     expect(r.dispatches).toHaveLength(1);
     expect(r.exitCode).toBe(2);
-    expect(r.ledger[0].stopOutcome).toBe('unverified');
+    expect(r.ledger[0]?.stopOutcome).toBe('unverified');
     expect(r.stdout).toContain('REFUSING TO SPAWN');
+  });
+
+  test('a listing that SKIPPED rows also blocks the successor (33.13)', async () => {
+    // The listing is readable — `claude agents --json` answered — but it threw
+    // rows away, and `findAgent` matches by id, so one of the rows it threw
+    // away could be the predecessor. Absence in that listing is not absence.
+    const r = await runLoop({
+      // Poll 1 is the session poll (sees `done`); everything after it is the
+      // stop verification, and every one of those listings skipped a row.
+      malformedAt: (poll) => (poll > 1 ? 1 : 0),
+      opts: {label: 'the-arc'},
+      scans: [[], [beadFrom('hoff-1', {from: 'the-arc-1'})]],
+    });
+    expect(spawns(r.dispatches)).toHaveLength(1);
+    expect(r.exitCode).toBe(2);
+    expect(r.ledger[0]?.stopOutcome).toBe('unverified');
+    expect(r.stdout).toContain('REFUSING TO SPAWN');
+    expect(r.stdout).toContain('could BE sess-1');
+    // The handoff bead was perfectly good: it is the STOP that was not proven,
+    // and the bead stays open for the next run.
+    expect(r.ledger[0]?.outcome).toBe('continue');
+  });
+
+  test('NEGATIVE CONTROL: the same run with a clean listing DOES spawn', async () => {
+    const r = await runLoop({
+      malformedAt: () => 0,
+      opts: {label: 'the-arc'},
+      scans: [[], [beadFrom('hoff-1', {from: 'the-arc-1'})], []],
+    });
+    expect(spawns(r.dispatches)).toHaveLength(2);
+    expect(r.ledger[0]?.stopOutcome).toBe('stopped');
+    expect(r.stdout).not.toContain('REFUSING TO SPAWN');
   });
 
   test('losing sight of a session mid-run stops the run, naming what failed', async () => {
@@ -654,7 +811,7 @@ describe('AC2: the loop refuses to spawn when it cannot see `claude agents`', ()
     });
     expect(r.dispatches).toHaveLength(1);
     expect(r.exitCode).toBe(2);
-    expect(r.ledger[0].outcome).toBe('agents-unreadable');
+    expect(r.ledger[0]?.outcome).toBe('agents-unreadable');
     expect(r.stdout).toContain('lost sight of session the-arc-1');
     expect(r.stdout).toContain('claude agents --json');
     // The beads were never consulted: a session we stopped watching may still
@@ -676,7 +833,7 @@ describe('AC2: the loop refuses to spawn onto a live predecessor', () => {
     expect(r.exitCode).toBe(2);
     expect(r.stdout).toContain('REFUSING TO SPAWN');
     expect(r.stdout).toContain('still present in `claude agents`');
-    expect(r.ledger[0].stopOutcome).toBe('kill-failed');
+    expect(r.ledger[0]?.stopOutcome).toBe('kill-failed');
   });
 
   test('a pidless survivor also refuses the spawn', async () => {
@@ -687,7 +844,7 @@ describe('AC2: the loop refuses to spawn onto a live predecessor', () => {
     });
     expect(r.dispatches).toHaveLength(1);
     expect(r.exitCode).toBe(2);
-    expect(r.ledger[0].stopOutcome).toBe('no-pid');
+    expect(r.ledger[0]?.stopOutcome).toBe('no-pid');
   });
 
   test('hitting --max-sessions with a continue-handoff SAYS the bead is still open', async () => {
@@ -719,7 +876,7 @@ describe('AC2: the loop refuses to spawn onto a live predecessor', () => {
       sessions: [{stop: 'clears'}],
     });
     expect(spawns(r.dispatches)).toHaveLength(2);
-    expect(r.ledger[0].stopOutcome).toBe('stopped');
+    expect(r.ledger[0]?.stopOutcome).toBe('stopped');
   });
 
   test('the stop outcome is printed AND ledgered on every path', async () => {
@@ -732,7 +889,7 @@ describe('AC2: the loop refuses to spawn onto a live predecessor', () => {
     });
     expect(r.stdout).toContain('verified gone');
     expect(r.stdout).toContain('stop=stopped');
-    expect(r.ledger[0].stopOutcome).toBe('stopped');
+    expect(r.ledger[0]?.stopOutcome).toBe('stopped');
   });
 
   test('a session that vanished on its own is already-gone, not a failure', async () => {
@@ -741,7 +898,7 @@ describe('AC2: the loop refuses to spawn onto a live predecessor', () => {
       scans: [[], [beadFrom('hoff-1', {from: 'the-arc-1'})]],
       sessions: [{vanishes: true}],
     });
-    expect(r.ledger[0].stopOutcome).toBe('already-gone');
+    expect(r.ledger[0]?.stopOutcome).toBe('already-gone');
     expect(spawns(r.dispatches)).toHaveLength(2);
   });
 
@@ -777,7 +934,7 @@ describe('AC3: --timeout-min', () => {
       sessions: [{worksForPolls: 300}],
     });
     expect(r.exitCode).toBe(0);
-    expect(r.ledger[0].outcome).toBe('done');
+    expect(r.ledger[0]?.outcome).toBe('done');
   });
 
   test('a configured timeout stops the session and CONFIRMS it is gone first', async () => {
@@ -791,7 +948,7 @@ describe('AC3: --timeout-min', () => {
     expect(r.stopCalls).toEqual(['sess-1']);
     expect(r.stdout).toContain('verified gone');
     expect(r.exitCode).toBe(2);
-    expect(r.ledger[0].outcome).toBe('no-handoff');
+    expect(r.ledger[0]?.outcome).toBe('no-handoff');
     expect(r.stdout).toContain('--timeout-min');
   });
 
@@ -816,8 +973,8 @@ describe('AC3: --timeout-min', () => {
     expect(r.stopCalls[0]).toBe('sess-1');
     expect(r.stdout).toContain('verified gone');
     expect(r.stdout).toContain('reading its handoff beads anyway');
-    expect(r.ledger[0].outcome).toBe('continue');
-    expect(r.ledger[0].handoffBead).toBe('hoff-1');
+    expect(r.ledger[0]?.outcome).toBe('continue');
+    expect(r.ledger[0]?.handoffBead).toBe('hoff-1');
     expect(spawns(r.dispatches)).toHaveLength(2);
     expect(r.exitCode).toBe(0);
     // The load-bearing pair. Under V-f the timeout took the no-handoff path, so
@@ -825,7 +982,7 @@ describe('AC3: --timeout-min', () => {
     // had already written it — the same successor, one wasted turn later. These
     // two say the bead was honoured directly.
     expect(resumes(r.dispatches)).toHaveLength(0);
-    expect(r.ledger[0].demands).toBe(0);
+    expect(r.ledger[0]?.demands).toBe(0);
   });
 
   test('NEGATIVE CONTROL: the discarded-beads behaviour would ledger no-handoff', async () => {
@@ -837,8 +994,8 @@ describe('AC3: --timeout-min', () => {
       scans: [[], []],
       sessions: [{worksForPolls: 10_000}],
     });
-    expect(r.ledger[0].outcome).toBe('no-handoff');
-    expect(r.ledger[0].handoffBead).toBeNull();
+    expect(r.ledger[0]?.outcome).toBe('no-handoff');
+    expect(r.ledger[0]?.handoffBead).toBeNull();
     expect(spawns(r.dispatches)).toHaveLength(1);
   });
 
@@ -850,7 +1007,7 @@ describe('AC3: --timeout-min', () => {
       sessions: [{worksForPolls: 20}],
     });
     expect(spawns(r.dispatches)).toHaveLength(2);
-    expect(r.ledger[0].outcome).toBe('continue');
+    expect(r.ledger[0]?.outcome).toBe('continue');
   });
 });
 
@@ -930,8 +1087,8 @@ describe('AC4: labels and session names (D3)', () => {
     });
     const names = r.dispatches.map((d) => argOf(d, '--name'));
     expect(names).toHaveLength(2);
-    const stamp = names[0].slice(0, 16);
-    expect(names[1].startsWith(stamp)).toBe(true);
+    const stamp = at(names, 0).slice(0, 16);
+    expect(at(names, 1).startsWith(stamp)).toBe(true);
     expect(names[0]).toBe(`${stamp} the-arc-1`);
     expect(names[1]).toBe(`${stamp} the-arc-2`);
   });
@@ -941,10 +1098,85 @@ describe('AC4: labels and session names (D3)', () => {
       opts: {label: 'the-arc'},
       scans: [[], [beadFrom('h', {disposition: 'done', from: 'the-arc-1'})]],
     });
-    expect(r.ledger[0].name).toBe(argOf(r.dispatches[0], '--name'));
-    expect(r.ledger[0].name).toMatch(
+    expect(r.ledger[0]?.name).toBe(argOf(at(r.dispatches, 0), '--name'));
+    expect(r.ledger[0]?.name).toMatch(
       /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} the-arc-1$/,
     );
+  });
+
+  /**
+   * 33.11 — the numbering survives a `--pickup` restart.
+   *
+   * `justin-loop --pickup --label pilot2` is the command the blocked stop prints
+   * (D16) and the one a chain that ran out of `--max-sessions` is resumed with.
+   * It used to name its next session `pilot2-1`, whatever the arc had already
+   * done. The unit cases are in tests/justin-loop-boot.test.ts; these drive the
+   * whole loop, because the number has to reach three separate places — the
+   * `--name`, the ledger row and the banner — and a change that moved only one
+   * of them would leave the others quietly disagreeing.
+   */
+  describe('a resumed chain keeps counting (33.11)', () => {
+    test('a pickup of pilot2-2’s bead names the successor pilot2-3', async () => {
+      const r = await runLoop({
+        opts: {label: 'pilot2', maxSessions: 1, pickup: true},
+        scans: [
+          // Waiting when the run starts: what pilot2-2 left behind.
+          [beadFrom('hoff-2', {from: 'pilot2-2'})],
+          // What the session this run boots writes when it ends.
+          [beadFrom('hoff-3', {disposition: 'done', from: 'pilot2-3'})],
+        ],
+      });
+      expect(argOf(at(r.dispatches, 0), '--name')).toMatch(/ pilot2-3$/);
+      expect(r.ledger[0]?.label).toBe('pilot2-3');
+      expect(r.ledger[0]?.n).toBe(3);
+      expect(r.stdout).toContain('labels=pilot2-3…pilot2-3');
+      expect(r.stdout).toContain('numbering continues from pilot2-2');
+      // The RUN's own position is still 1 of 1 — the arc's number and this
+      // run's position are different facts and both are printed.
+      expect(r.stdout).toContain('#1/1');
+    });
+
+    test('NEGATIVE CONTROL: a run with nothing waiting still starts at 1', async () => {
+      const r = await runLoop({
+        opts: {label: 'pilot2', maxSessions: 1, pickup: true},
+        scans: [[], [beadFrom('h', {disposition: 'done', from: 'pilot2-1'})]],
+      });
+      expect(r.ledger[0]?.label).toBe('pilot2-1');
+      expect(r.stdout).toContain('labels=pilot2-1…pilot2-1');
+      expect(r.stdout).not.toContain('numbering continues from');
+    });
+
+    test('another arc’s handoff does NOT move this run’s numbering', async () => {
+      // A cross-arc pickup is legal — one arc per run, newest wins — but the
+      // number belongs to `other-arc`, and spending it here would claim
+      // sessions `pilot2` never ran.
+      const r = await runLoop({
+        opts: {label: 'pilot2', maxSessions: 1, pickup: true},
+        scans: [
+          [beadFrom('hoff-x', {from: 'other-arc-7'})],
+          [beadFrom('h', {disposition: 'done', from: 'pilot2-1'})],
+        ],
+      });
+      expect(r.ledger[0]?.label).toBe('pilot2-1');
+      expect(r.stdout).not.toContain('numbering continues from');
+    });
+
+    test('the chain then continues from there: pilot2-3, pilot2-4', async () => {
+      const r = await runLoop({
+        opts: {label: 'pilot2', maxSessions: 2, pickup: true},
+        scans: [
+          [beadFrom('hoff-2', {from: 'pilot2-2'})],
+          [beadFrom('hoff-3', {from: 'pilot2-3'})],
+          [beadFrom('hoff-4', {disposition: 'done', from: 'pilot2-4'})],
+        ],
+      });
+      expect(r.ledger.map((row) => row.label)).toEqual([
+        'pilot2-3',
+        'pilot2-4',
+      ]);
+      expect(r.ledger.map((row) => row.n)).toEqual([3, 4]);
+      expect(r.stdout).toContain('labels=pilot2-3…pilot2-4');
+    });
   });
 });
 
@@ -989,6 +1221,7 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
           ? {
               ok: true,
               reason: null,
+              stderr: null,
               stdout:
                 dispatched === 0
                   ? listJson([])
@@ -999,8 +1232,8 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
                       }),
                     ]),
             }
-          : {ok: true, reason: null, stdout: ''},
-      dispatch: async (_cwd, args) => {
+          : {ok: true, reason: null, stderr: null, stdout: ''},
+      dispatch: (_cwd, args) => {
         dispatched++;
         rows.set('sess-1', {
           id: 'sess-1',
@@ -1011,22 +1244,31 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
           status: 'idle',
           waitingFor: null,
         });
-        return 'backgrounded · sess-1 · n\n';
+        return Promise.resolve('backgrounded · sess-1 · n\n');
       },
-      findAgent: async (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
-      gitHead: async () => ({ok: true, sha: 'abc'}),
-      notifyBlocked: () => {},
+      findAgent: (_cwd, id) =>
+        Promise.resolve({malformed: 0, ok: true, row: rows.get(id) ?? null}),
+      gitHead: () => Promise.resolve({ok: true, sha: 'abc'}),
+      notifyBlocked: () => {
+        /* nothing is notified in the fake world */
+      },
       now: () => Date.UTC(2026, 8, 8, 11, 30),
-      preflight: async () => [],
-      readUsage: async () => null,
+      preflight: () => Promise.resolve([]),
+      readLedgerSessionId: ledgerReaderNeverCalled,
+      readUsage: () =>
+        Promise.resolve({kind: 'failed', reason: 'no /usage in this fixture'}),
       signalPid: () => true,
-      sleep: async () => {},
-      stopSession: async (_cwd, id) => {
+      sleep: () => Promise.resolve(),
+      stopSession: (_cwd, id) => {
         rows.delete(id);
-        return {detail: 'stopped', ok: true};
+        return Promise.resolve({detail: 'stopped', ok: true});
       },
-      write: () => {},
-      writeErr: () => {},
+      write: () => {
+        /* stdout is not asserted in this test */
+      },
+      writeErr: () => {
+        /* stderr is not asserted in this test */
+      },
     };
     const exitCode = await runJustinLoop(
       '/repo',
@@ -1039,16 +1281,23 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
     expect(existsSync(path)).toBe(true);
     const lines = readFileSync(path, 'utf8').trim().split('\n');
     expect(lines).toHaveLength(1);
-    const row = JSON.parse(lines[0]) as LedgerRow;
-    // 2 since home-base-1r6d.33.3 added `demands`.
-    expect(row.schemaVersion).toBe(2);
+    const row = JSON.parse(at(lines, 0)) as LedgerRow;
+    // 2 since home-base-1r6d.33.3 added `demands`, 3 since 33.12 added
+    // `fullSessionId`.
+    expect(row.schemaVersion).toBe(3);
     expect(row.demands).toBe(0);
     expect(row.n).toBe(1);
     expect(row.label).toBe('the-arc-1');
     expect(row.outcome).toBe('done');
     expect(row.handoffBead).toBe('hoff-z');
     expect(row.stopOutcome).toBe('stopped');
+    // BOTH ids, and they are not the same string (33.12): `sessionId` is the
+    // 8-character `claude agents` id and `fullSessionId` is the one a thread
+    // bead is keyed on. A later `--pickup` run reads the second one; reading
+    // the first would send `thread prepare` looking up a session that does not
+    // exist and reporting the miss as a fact about the predecessor.
     expect(row.sessionId).toBe('sess-1');
+    expect(row.fullSessionId).toBe('sess-1-full-uuid');
     expect(row.runId).toContain('the-arc');
     expect(typeof row.startedAt).toBe('string');
     expect(typeof row.endedAt).toBe('string');
@@ -1069,6 +1318,7 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
           ? {
               ok: true,
               reason: null,
+              stderr: null,
               stdout:
                 dispatched === 0
                   ? listJson([])
@@ -1079,8 +1329,8 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
                       }),
                     ]),
             }
-          : {ok: true, reason: null, stdout: ''},
-      dispatch: async () => {
+          : {ok: true, reason: null, stderr: null, stdout: ''},
+      dispatch: () => {
         dispatched++;
         rows.set('sess-1', {
           id: 'sess-1',
@@ -1091,19 +1341,24 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
           status: 'idle',
           waitingFor: null,
         });
-        return 'backgrounded · sess-1 · n\n';
+        return Promise.resolve('backgrounded · sess-1 · n\n');
       },
-      findAgent: async (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
-      gitHead: async () => ({ok: true, sha: 'abc'}),
-      notifyBlocked: () => {},
+      findAgent: (_cwd, id) =>
+        Promise.resolve({malformed: 0, ok: true, row: rows.get(id) ?? null}),
+      gitHead: () => Promise.resolve({ok: true, sha: 'abc'}),
+      notifyBlocked: () => {
+        /* nothing is notified in the fake world */
+      },
       now: () => Date.UTC(2026, 8, 8, 11, 30),
-      preflight: async () => [],
-      readUsage: async () => null,
+      preflight: () => Promise.resolve([]),
+      readLedgerSessionId: ledgerReaderNeverCalled,
+      readUsage: () =>
+        Promise.resolve({kind: 'failed', reason: 'no /usage in this fixture'}),
       signalPid: () => true,
-      sleep: async () => {},
-      stopSession: async (_cwd, id) => {
+      sleep: () => Promise.resolve(),
+      stopSession: (_cwd, id) => {
         rows.delete(id);
-        return {detail: 'stopped', ok: true};
+        return Promise.resolve({detail: 'stopped', ok: true});
       },
       write: (t) => {
         stdout += t;
@@ -1146,6 +1401,7 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
           ? {
               ok: true,
               reason: null,
+              stderr: null,
               stdout:
                 dispatched === 0
                   ? listJson([])
@@ -1156,8 +1412,8 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
                       }),
                     ]),
             }
-          : {ok: true, reason: null, stdout: ''},
-      dispatch: async () => {
+          : {ok: true, reason: null, stderr: null, stdout: ''},
+      dispatch: () => {
         dispatched++;
         rows.set('sess-1', {
           id: 'sess-1',
@@ -1168,23 +1424,29 @@ describe('AC5: the ledger lives outside the repo (D9)', () => {
           status: 'idle',
           waitingFor: null,
         });
-        return 'backgrounded · sess-1 · n\n';
+        return Promise.resolve('backgrounded · sess-1 · n\n');
       },
-      findAgent: async (_cwd, id) => ({ok: true, row: rows.get(id) ?? null}),
-      gitHead: async () => ({
-        ok: false,
-        reason:
-          'git rev-parse HEAD did not finish within 10000ms and was SIGKILLed',
-      }),
-      notifyBlocked: () => {},
+      findAgent: (_cwd, id) =>
+        Promise.resolve({malformed: 0, ok: true, row: rows.get(id) ?? null}),
+      gitHead: () =>
+        Promise.resolve({
+          ok: false,
+          reason:
+            'git rev-parse HEAD did not finish within 10000ms and was SIGKILLed',
+        }),
+      notifyBlocked: () => {
+        /* nothing is notified in the fake world */
+      },
       now: () => Date.UTC(2026, 8, 8, 11, 30),
-      preflight: async () => [],
-      readUsage: async () => null,
+      preflight: () => Promise.resolve([]),
+      readLedgerSessionId: ledgerReaderNeverCalled,
+      readUsage: () =>
+        Promise.resolve({kind: 'failed', reason: 'no /usage in this fixture'}),
       signalPid: () => true,
-      sleep: async () => {},
-      stopSession: async (_cwd, id) => {
+      sleep: () => Promise.resolve(),
+      stopSession: (_cwd, id) => {
         rows.delete(id);
-        return {detail: 'stopped', ok: true};
+        return Promise.resolve({detail: 'stopped', ok: true});
       },
       write: (t) => {
         stdout += t;

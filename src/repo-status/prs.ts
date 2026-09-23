@@ -24,22 +24,22 @@ const DEFAULT_LIMIT = 300;
 export type PrState = 'OPEN' | 'CLOSED' | 'MERGED';
 
 export interface PullRequest {
-  number: number;
-  title: string;
-  state: PrState;
-  isDraft: boolean;
-  url: string;
-  headRefName: string;
   baseRefName: string;
+  headRefName: string;
+  isDraft: boolean;
   mergedAt: string | null;
+  number: number;
+  state: PrState;
+  title: string;
+  url: string;
 }
 
 export interface PrIndex {
   available: boolean;
-  /** Why PR data is missing — sandbox TLS, not authenticated, offline, no remote. */
-  unavailableReason: string | null;
   /** Head branch name -> its PRs, newest first. */
   byHeadRef: Map<string, PullRequest[]>;
+  /** Why PR data is missing — sandbox TLS, not authenticated, offline, no remote. */
+  unavailableReason: string | null;
 }
 
 export const EMPTY_PR_INDEX: PrIndex = {
@@ -50,8 +50,31 @@ export const EMPTY_PR_INDEX: PrIndex = {
 
 export interface PrOptions {
   cwd: string;
-  timeoutMs?: number;
   limit?: number;
+  timeoutMs?: number;
+}
+
+/** Turn gh's noisy failure text into one actionable line. */
+function summariseGhFailure(text: string): string {
+  const t = text.toLowerCase();
+  if (t.includes('etimedout') || t.includes('timed out')) return 'gh timed out';
+  if (t.includes('x509') || t.includes('certificate') || t.includes('tls'))
+    return 'gh TLS/certificate failure (typical inside the Claude Code sandbox — retry unsandboxed)';
+  if (t.includes('auth') || t.includes('gh auth login'))
+    return 'gh is not authenticated (run: gh auth login)';
+  if (t.includes('enoent') || t.includes('not found'))
+    return 'gh CLI is not installed or not on PATH';
+  if (t.includes('no git remote') || t.includes('not a git repository'))
+    return 'no GitHub remote for this repository';
+  if (t.includes('network') || t.includes('dial tcp') || t.includes('dns'))
+    return 'network unavailable';
+  return 'gh call failed';
+}
+
+function rank(state: PrState): number {
+  if (state === 'MERGED') return 0;
+  if (state === 'OPEN') return 1;
+  return 2;
 }
 
 /**
@@ -117,29 +140,6 @@ export function fetchPullRequests(opts: PrOptions): PrIndex {
   }
 
   return {available: true, byHeadRef, unavailableReason: null};
-}
-
-function rank(state: PrState): number {
-  if (state === 'MERGED') return 0;
-  if (state === 'OPEN') return 1;
-  return 2;
-}
-
-/** Turn gh's noisy failure text into one actionable line. */
-function summariseGhFailure(text: string): string {
-  const t = text.toLowerCase();
-  if (t.includes('etimedout') || t.includes('timed out')) return 'gh timed out';
-  if (t.includes('x509') || t.includes('certificate') || t.includes('tls'))
-    return 'gh TLS/certificate failure (typical inside the Claude Code sandbox — retry unsandboxed)';
-  if (t.includes('auth') || t.includes('gh auth login'))
-    return 'gh is not authenticated (run: gh auth login)';
-  if (t.includes('enoent') || t.includes('not found'))
-    return 'gh CLI is not installed or not on PATH';
-  if (t.includes('no git remote') || t.includes('not a git repository'))
-    return 'no GitHub remote for this repository';
-  if (t.includes('network') || t.includes('dial tcp') || t.includes('dns'))
-    return 'network unavailable';
-  return 'gh call failed';
 }
 
 /**

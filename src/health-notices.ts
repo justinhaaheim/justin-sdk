@@ -48,6 +48,13 @@
  * having loaded nothing but this file.
  */
 
+import type {
+  EnvLike,
+  PromptTier,
+  ResolvedHealthNoticesConfig,
+} from './sdk-config';
+import type {SdkTagFetcher} from './sdk-latest';
+
 import {
   existsSync,
   mkdirSync,
@@ -58,13 +65,6 @@ import {
 } from 'fs';
 import {homedir} from 'os';
 import {dirname, join, resolve} from 'path';
-
-import type {
-  EnvLike,
-  PromptTier,
-  ResolvedHealthNoticesConfig,
-} from './sdk-config';
-import type {SdkTagFetcher} from './sdk-latest';
 
 /**
  * Env var that switches every health notice off for one invocation (D2).
@@ -389,6 +389,19 @@ export interface HealthNoticesPaths {
 }
 
 /**
+ * `$HOME`, or the OS's idea of it when the variable is unset or EMPTY.
+ *
+ * `resolve('', '.config')` is CWD-relative, so an empty HOME silently turns a
+ * user-level path into a per-repo one — a config nobody wrote, or a state file
+ * dropped inside whichever checkout happened to be current. `homedir()` reads
+ * the passwd entry, which is right even in the environments (launchd agents,
+ * some CI images, `env -i`) where HOME went missing.
+ */
+function homeDir(env: EnvLike): string {
+  return env.HOME != null && env.HOME.length > 0 ? env.HOME : homedir();
+}
+
+/**
  * `$XDG_STATE_HOME`, or `$HOME/.local/state` — the same directory the
  * justin-loop ledger uses (src/justin-loop/runner.ts DEFAULT_STATE_DIR).
  *
@@ -401,19 +414,6 @@ export function xdgStateHome(env: EnvLike = process.env): string {
   const fromEnv = env.XDG_STATE_HOME;
   if (fromEnv != null && fromEnv.length > 0) return fromEnv;
   return resolve(homeDir(env), '.local', 'state');
-}
-
-/**
- * `$HOME`, or the OS's idea of it when the variable is unset or EMPTY.
- *
- * `resolve('', '.config')` is CWD-relative, so an empty HOME silently turns a
- * user-level path into a per-repo one — a config nobody wrote, or a state file
- * dropped inside whichever checkout happened to be current. `homedir()` reads
- * the passwd entry, which is right even in the environments (launchd agents,
- * some CI images, `env -i`) where HOME went missing.
- */
-function homeDir(env: EnvLike): string {
-  return env.HOME != null && env.HOME.length > 0 ? env.HOME : homedir();
 }
 
 /**
@@ -649,6 +649,12 @@ export function isStateWritable(paths: HealthNoticesPaths): boolean {
  */
 export const STATE_RETENTION_DAYS = 30;
 
+function minutesBetween(now: Date, isoEarlier: string): number | null {
+  const earlier = Date.parse(isoEarlier);
+  if (Number.isNaN(earlier)) return null;
+  return (now.getTime() - earlier) / 60000;
+}
+
 function isExpired(now: Date, iso: string, retentionDays: number): boolean {
   const age = minutesBetween(now, iso);
   // Unparseable or future stamps are NOT expired: "we cannot read this" is not
@@ -827,12 +833,6 @@ export function bumpKindFromDiff(diff: string | null): VersionBumpKind | null {
     default:
       return null;
   }
-}
-
-function minutesBetween(now: Date, isoEarlier: string): number | null {
-  const earlier = Date.parse(isoEarlier);
-  if (Number.isNaN(earlier)) return null;
-  return (now.getTime() - earlier) / 60000;
 }
 
 /**

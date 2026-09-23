@@ -10,6 +10,9 @@
  * than asserted-around.
  */
 
+import type {OutputStyle} from '../src/cli-style';
+import type {BdIssue} from '../src/thread/bd';
+
 import {describe, expect, test} from 'bun:test';
 
 import {
@@ -22,8 +25,6 @@ import {
   renderRecent,
   threadIdOfAsk,
 } from '../src/thread/board';
-
-import type {BdIssue} from '../src/thread/bd';
 
 const NOW = new Date('2026-09-12T12:00:00.000Z');
 
@@ -56,23 +57,23 @@ const THREADS: BdIssue[] = [
     branch: 'thread-reports',
     mergeState: 'unmerged',
     progressPercent: 70,
-    reportedAt: '2026-09-12T10:00:00.000Z',
     repo: 'justin-sdk',
+    reportedAt: '2026-09-12T10:00:00.000Z',
     stopReasonKind: 'needsYou',
   }),
   thread('jl-b2', 'Mail scan sender guide', {
     branch: 'main',
     mergeState: 'merged',
     progressPercent: 100,
-    reportedAt: '2026-09-10T12:00:00.000Z',
     repo: 'home-base',
+    reportedAt: '2026-09-10T12:00:00.000Z',
     stopReasonKind: 'completed',
   }),
   thread('jl-c3', 'Older justin-sdk work', {
     branch: 'main',
     progressPercent: 40,
-    reportedAt: '2026-09-12T11:30:00.000Z',
     repo: 'justin-sdk',
+    reportedAt: '2026-09-12T11:30:00.000Z',
     stopReasonKind: 'blocked',
   }),
 ];
@@ -132,9 +133,9 @@ describe('a thread that has not reported yet (item A)', () => {
     branch: 'thread-followups',
     openAskCount: 0,
     progressPercent: null,
+    repo: 'justin-sdk',
     reportCount: 0,
     reportedAt: null,
-    repo: 'justin-sdk',
     startedAt: '2026-09-12T09:00:00.000Z',
     stopReasonKind: null,
     threadStartedAt: '2026-09-12T10:00:00.000Z',
@@ -183,9 +184,9 @@ describe('a thread that has not reported yet (item A)', () => {
     // on reportedAt alone sent every start-only thread to the bottom, under
     // threads last touched days ago.
     const between = thread('jl-s6', 'started between the two', {
+      repo: 'justin-sdk',
       reportCount: 0,
       reportedAt: null,
-      repo: 'justin-sdk',
       threadStartedAt: '2026-09-12T10:30:00.000Z',
     });
     const text = renderRecent(buildBoard([...THREADS, between], ASKS, NOW));
@@ -354,5 +355,144 @@ describe('views', () => {
       'checked, and there are none',
     );
     expect(renderOpenAsks([])).toContain('checked, and there are none');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// K11 — the man-page layout (home-base-k0b8n.10). Justin: "I 100% need an empty
+// line between every single list/bullet/ask item", headers near the edge,
+// everything else indented, colour with meaning, wrapping only on a terminal.
+// ---------------------------------------------------------------------------
+
+const ESC = '\u001b[';
+const COLOR: OutputStyle = {color: true, width: null};
+
+/** The display column `needle` starts at on `line`. */
+function columnOf(line: string, needle: string): number {
+  const at = line.indexOf(needle);
+  expect(at).toBeGreaterThanOrEqual(0);
+  return Bun.stringWidth(line.slice(0, at));
+}
+
+describe('K11 layout (k0b8n.10)', () => {
+  test('a blank line between every row and every repo group, and nothing stacked', () => {
+    const text = renderByRepo(buildBoard(THREADS, ASKS, NOW), 'thread');
+    const blocks = text.replace(/^\n+/u, '').split('\n\n');
+    const headers = blocks.filter((block) => block.startsWith('  📦'));
+    const rows = blocks.filter((block) => !block.startsWith('  📦'));
+    expect(headers).toHaveLength(2);
+    expect(rows).toHaveLength(3);
+    // A row is exactly its headline and its id line — never two rows run
+    // together, which is what the old board printed.
+    for (const row of rows) expect(row.split('\n')).toHaveLength(2);
+    expect(text).not.toMatch(/\n\n\n/u);
+  });
+
+  test('headers at column 2, rows at the body column, id and branch at the detail column', () => {
+    const lines = renderByRepo(buildBoard(THREADS, ASKS, NOW), 'thread').split(
+      '\n',
+    );
+    const header = lines.find((line) => line.includes('justin-sdk  ('));
+    expect(header).toStartWith('  📦 justin-sdk');
+    const headline = lines.find((line) =>
+      line.includes('Thread reports read path'),
+    );
+    expect(headline).toMatch(/^ {6}\S/u);
+    expect(lines).toContain('         jl-a1 · thread-reports');
+  });
+
+  test('plain style emits no escape byte; colour style paints what means something', () => {
+    const data = buildBoard(THREADS, ASKS, NOW);
+    expect(renderByRepo(data, 'thread')).not.toContain('\u001b');
+    const painted = renderByRepo(data, 'thread', COLOR);
+    expect(painted).toContain(`${ESC}1;35mjustin-sdk${ESC}0m`); // header: bold accent
+    expect(painted).toContain(`${ESC}1;31m🛑 1/2 ask${ESC}0m`); // P0 count: bold red
+    expect(painted).toContain(`${ESC}33mUNMERGED${ESC}0m`); // merge state: yellow
+    expect(painted).toContain(`${ESC}2mjl-a1 · thread-reports${ESC}0m`); // ids: dim
+  });
+
+  test('every title in a view starts at the same DISPLAY column, emoji and all', () => {
+    // Three kinds of row whose state columns differ in width, one of them an
+    // emoji count that `padEnd` measured as two columns too narrow.
+    const mixed: BdIssue[] = [
+      ...THREADS,
+      thread('jl-s1', 'a start-only thread', {
+        repo: 'justin-sdk',
+        reportCount: 0,
+        threadStartedAt: '2026-09-12T11:00:00.000Z',
+      }),
+      thread('jl-f1', 'a backfilled session', {
+        repo: 'justin-sdk',
+        reportCount: 0,
+        source: 'backfill',
+        threadStartedAt: '2026-09-02T11:00:00.000Z',
+      }),
+    ];
+    const lines = renderRecent(
+      buildBoard(mixed, ASKS, NOW, {includeBackfilled: true}),
+    ).split('\n');
+    const titles = [
+      'Thread reports read path',
+      'Mail scan sender guide',
+      'Older justin-sdk work',
+      'a start-only thread',
+      'a backfilled session',
+    ];
+    const columns = titles.map((title) =>
+      columnOf(lines.find((line) => line.includes(title)) ?? '', title),
+    );
+    expect(new Set(columns).size).toBe(1);
+  });
+
+  test('on a terminal a long title hangs at the title column; piped it never wraps', () => {
+    const long = `${'word '.repeat(60)}end`;
+    const data = buildBoard(
+      [
+        thread('jl-w1', long, {
+          progressPercent: 10,
+          repo: 'justin-sdk',
+          reportedAt: '2026-09-12T11:00:00.000Z',
+          stopReasonKind: 'completed',
+        }),
+      ],
+      [],
+      NOW,
+    );
+    // Piped: the headline is ONE line, however long (critical rule 14).
+    const piped = renderRecent(data).trim().split('\n');
+    expect(piped).toHaveLength(2);
+    // Terminal: the same row wraps, every continuation hangs at the column the
+    // title started at, and no line is wider than the terminal.
+    const wrapped = renderRecent(data, {color: false, width: 80})
+      .split('\n')
+      .filter((line) => line !== '');
+    expect(wrapped.length).toBeGreaterThan(3);
+    const titleColumn = columnOf(wrapped[0] ?? '', 'word');
+    for (const line of wrapped.slice(1, -1)) {
+      expect(line).toMatch(new RegExp(`^ {${titleColumn}}(word|end)`, 'u'));
+    }
+    expect(wrapped.at(-1)).toBe('         jl-w1');
+    for (const line of wrapped) {
+      expect(Bun.stringWidth(line)).toBeLessThanOrEqual(80);
+    }
+  });
+
+  test('--open-asks: a blank line between asks, the ask at the body column, its lines at the detail column', () => {
+    const text = renderOpenAsks(collectOpenAsks(THREADS, ASKS));
+    const blocks = text.trim().split('\n\n');
+    // Three asks and the Answer line — each its own block.
+    expect(blocks).toHaveLength(4);
+    const first = text
+      .split('\n\n')[0]
+      ?.split('\n')
+      .filter((l) => l !== '');
+    expect(first?.[0]).toStartWith('      1. 🛑 P0 · jl-a1.1');
+    expect(first?.[1]).toBe('         Accept the subagent behaviour?');
+    expect(first?.[2]).toStartWith('         justin-sdk · ');
+    expect(blocks.at(-1)).toStartWith('  Answer them: ');
+    const painted = renderOpenAsks(collectOpenAsks(THREADS, ASKS), COLOR);
+    expect(painted).toContain(`${ESC}1;31m🛑 P0${ESC}0m`);
+    expect(painted).toContain(`${ESC}2m   P3${ESC}0m`);
+    expect(painted).toContain(`${ESC}36mbun run justin-sdk thread answer`);
   });
 });

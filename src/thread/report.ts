@@ -26,51 +26,60 @@
  * that names an ask this report cannot close).
  */
 
+import type {ThreadFacts} from './facts';
+import type {EnvLike} from './paths';
+import type {ThreadPriorAsk, ThreadReportPayload} from './schema';
+
 import {readFileSync} from 'fs';
 
-import {sdkRun, SDK_RUN} from '../sdk-invocation';
-import {archiveReport, spoolReport, type ArchivedReport} from './archive';
-import {commitThreadsRepo, describeCommit} from './commit';
+import {shouldStyle, terminalWidth} from '../cli-style';
+import {SDK_RUN, sdkRun} from '../sdk-invocation';
+import {type ArchivedReport, archiveReport, spoolReport} from './archive';
 import {
+  type BdContext,
   bdContext,
-  EXPORT_UNSTAGED_WARNING,
+  type BdFailure,
+  type BdIssue,
   closeAsk,
   createAsk,
   createThread,
   describeBdFailure,
+  EXPORT_UNSTAGED_WARNING,
+  finalizeThread,
   findThreadBySession,
   listOpenAsks,
   mergeMetadata,
   setIssueDescription,
   showIssue,
   updateThread,
-  finalizeThread,
-  type BdContext,
-  type BdFailure,
-  type BdIssue,
 } from './bd';
+import {commitThreadsRepo, describeCommit} from './commit';
+import {resolveReportWrapUpAt, resolveThreadConfig} from './config';
+import {collectThreadFacts} from './facts';
 import {
   buildAskMetadata,
   buildThreadMetadata,
   readReportCount,
 } from './metadata';
-import {collectThreadFacts} from './facts';
-import {resolveReportWrapUpAt, resolveThreadConfig} from './config';
-import {ansiFromReportText} from './render-ansi';
-import {shouldStyle} from '../repo-status/pretty';
 import {
+  applyPredecessor,
+  predecessorSessionId,
+  resolvePredecessor,
+} from './predecessor';
+import {
+  type CarriedAsk,
   numberingFieldsOf,
   renderAskDescription,
   renderThreadDescription,
   restateAsk,
-  type CarriedAsk,
 } from './render';
+import {ansiFromReportText} from './render-ansi';
+import {renderMarkdown} from './render-markdown';
 import {
   buildReportModel,
   type BuildReportModelOptions,
   type SupersedeSource,
 } from './report-model';
-import {renderMarkdown} from './render-markdown';
 import {
   AUTO_CLOSE_DISPOSITION,
   EXPIRED_DISPOSITION,
@@ -78,14 +87,10 @@ import {
   validateThreadReport,
 } from './schema';
 
-import type {EnvLike} from './paths';
-import type {ThreadFacts} from './facts';
-import type {ThreadPriorAsk, ThreadReportPayload} from './schema';
-
 /** bd title length before it stops being a title and starts being a paragraph. */
 const ASK_TITLE_CAP = 110;
 
-export type PriorAskCoverage = {ok: true} | {ok: false; missing: string[]};
+export type PriorAskCoverage = {ok: true} | {missing: string[]; ok: false};
 
 /** One ask this report closes, and the reason it will carry (D24). */
 export interface PlannedClose {
@@ -162,6 +167,13 @@ function firstLine(text: string, cap: number): string {
 export interface ReportOptions {
   /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
   autoCommit?: boolean;
+  /**
+   * The PREDECESSOR'S CLAUDE SESSION id (D18), resolved to its thread bead and
+   * used as `continuesFrom` when the payload names none. A justin-loop successor
+   * does not type it: the runner sets `JUSTIN_LOOP_PREDECESSOR_SESSION_ID` on
+   * the dispatch, which is read when this is absent.
+   */
+  continuesFromSession?: string | null;
   cwd?: string;
   env?: EnvLike;
   /** Path to the payload JSON; mutually exclusive with `stdin`. */
@@ -213,8 +225,8 @@ function notRecorded(args: {
   archivePath: string | null;
   env: EnvLike;
   failure: BdFailure | string;
-  report: ArchivedReport;
   rendered: string;
+  report: ArchivedReport;
 }): number {
   const reason =
     typeof args.failure === 'string'
@@ -252,11 +264,11 @@ function notRecorded(args: {
  */
 export type BdWriteOutcome =
   | {
-      status: 'written';
       askIds: (string | null)[];
       closedAsks: string[];
       rendered: string;
       reportCount: number;
+      status: 'written';
       threadId: string;
       /**
        * Things that went differently from what the payload said, on a write that
@@ -266,8 +278,8 @@ export type BdWriteOutcome =
        */
       warnings: string[];
     }
-  | {status: 'bdFailed'; failure: BdFailure; rendered: string}
-  | {status: 'refused'; missing: string[]}
+  | {failure: BdFailure; rendered: string; status: 'bdFailed'}
+  | {missing: string[]; status: 'refused'}
   /**
    * An ask's `supersedes` names something this report cannot close (D24).
    *
@@ -276,7 +288,7 @@ export type BdWriteOutcome =
    * while the new one printed "supersedes th-x.2, now closed" underneath it —
    * a report that says, in writing, that it handled a question it did not.
    */
-  | {status: 'refusedSupersede'; problems: string[]}
+  | {problems: string[]; status: 'refusedSupersede'}
   /**
    * `continuesFrom` names something that is not a thread bead (D21). REFUSED
    * rather than ignored: `listOpenAsks` on an id with no children returns an
@@ -284,11 +296,11 @@ export type BdWriteOutcome =
    * no open asks" — a fabricated all-clear over exactly the asks this feature
    * exists to carry.
    */
-  | {status: 'refusedContinuation'; continuesFrom: string; detail: string}
+  | {continuesFrom: string; detail: string; status: 'refusedContinuation'}
   | {
-      status: 'superseded';
-      existingReportedAt: string;
       existingReportCount: number;
+      existingReportedAt: string;
+      status: 'superseded';
       threadId: string;
     };
 
@@ -303,12 +315,12 @@ export interface BdWriteInput {
    */
   keepOpenAskIds?: readonly string[];
   payload: ThreadReportPayload;
-  sessionId: string;
   /**
    * How the report should LOOK (D14, D18, D19). Absent takes the defaults:
    * compact, emoji header, no wrap-up threshold.
    */
   render?: {emojiHeader?: boolean; full?: boolean; wrapUpAt?: number | null};
+  sessionId: string;
   /**
    * Refuse to write a payload OLDER than the thread's current state.
    *
@@ -447,10 +459,7 @@ export async function writeReportToBd(
   // finalise never ran". The thread's own reportedAt is the key, not the
   // payload's: a live retry regenerates facts.reportedAt and would match
   // nothing. This gives metadata.askIds its first real reader.
-  const threadMeta = (existingThread?.metadata ?? {}) as Record<
-    string,
-    unknown
-  >;
+  const threadMeta = existingThread?.metadata ?? {};
   const lastReportedAt =
     typeof threadMeta.reportedAt === 'string' ? threadMeta.reportedAt : null;
   const recordedAskIds = new Set(
@@ -462,7 +471,7 @@ export async function writeReportToBd(
     lastReportedAt == null
       ? []
       : openAsks.filter((ask) => {
-          const meta = (ask.metadata ?? {}) as Record<string, unknown>;
+          const meta = ask.metadata ?? {};
           return (
             meta.createdAt === lastReportedAt && !recordedAskIds.has(ask.id)
           );
@@ -678,7 +687,7 @@ export async function writeReportToBd(
     ask: BdIssue,
     fromThread: string | null,
   ): CarriedAsk => {
-    const meta = (ask.metadata ?? {}) as Record<string, unknown>;
+    const meta = ask.metadata ?? {};
     // askIndex and reportCount are what put this ask in the same position in
     // the report and in the `thread answer` walk (F12).
     const numbering = numberingFieldsOf(meta);
@@ -1039,9 +1048,25 @@ export async function runThreadReport(
   const sessionId = facts.sessionId;
 
   // --- 3. archive, before bd ---------------------------------------------
+  //
+  // The predecessor SESSION id is stamped onto the payload HERE, before the
+  // archive and therefore before any bd call (home-base-685h F9). It is read
+  // from the flag or the environment, which is the only place it exists — and
+  // by the time a spooled payload is drained, that environment is long gone.
+  // Recording the id is not the same as resolving it: resolution is a bd call,
+  // and bd calls stay strictly after the archive (see 4a).
+  const archivedPayload: ThreadReportPayload = {
+    ...payload,
+    // Flag, then environment, then whatever the payload already carried — that
+    // last one only so re-reporting an archived payload does not silently blank
+    // a field this code wrote itself. Never `''`.
+    continuesFromSession:
+      predecessorSessionId(options.continuesFromSession, env) ??
+      predecessorSessionId(payload.continuesFromSession, {}),
+  };
   const report: ArchivedReport = {
     facts,
-    payload,
+    payload: archivedPayload,
     reportedAt: facts.reportedAt,
     schemaVersion: THREAD_SCHEMA_VERSION,
     sessionId,
@@ -1066,11 +1091,38 @@ export async function runThreadReport(
     wrapUpAt: resolveReportWrapUpAt(threadConfig.projectRoot),
   };
 
+  // --- 4a. WHICH THREAD DOES THIS ONE CONTINUE? (D18) ---------------------
+  //
+  // Resolved AFTER the archive, never before: the archive-before-bd ordering is
+  // the rule-6 property this file exists to guarantee, and `runBd` is an
+  // unbounded `spawnSync`. A hung bd must cost the link, not the payload.
+  //
+  // THE DRAIN is covered by F9: the archived payload carries
+  // `continuesFromSession` (stamped in step 3, before any bd call), and
+  // `applyViaBd` resolves it there. So a spooled report written by a justin-loop
+  // successor links to its predecessor even though the environment that supplied
+  // the id is gone by drain time.
+  //
+  // A miss NEVER refuses. `refusedContinuation` below stays for an explicit
+  // `continuesFrom` naming a bad bead, where a typo would swallow the very asks
+  // the feature carries. Nobody typed this one.
+  const predecessor = await resolvePredecessor({
+    ctx,
+    env,
+    explicit: options.continuesFromSession,
+  });
+  const applied = applyPredecessor(archivedPayload.continuesFrom, predecessor);
+  if (applied.note != null) console.error(`thread report: ${applied.note}`);
+  const linkedPayload: ThreadReportPayload =
+    applied.continuesFrom === (archivedPayload.continuesFrom ?? null)
+      ? archivedPayload
+      : {...archivedPayload, continuesFrom: applied.continuesFrom};
+
   const outcome = await writeReportToBd({
     ctx,
     facts,
     keepOpenAskIds: validation.keepOpenAskIds,
-    payload,
+    payload: linkedPayload,
     render: renderConfig,
     sessionId,
   });
@@ -1160,7 +1212,12 @@ export async function runThreadReport(
   // Justin's message as literal `\u001b[1m`), while Justin running it by hand
   // gets the bold, underlined, priority-coloured version. `shouldStyle` is the
   // same NO_COLOR/FORCE_COLOR-aware check repo-status uses.
-  console.log(ansiFromReportText(rendered, {color: shouldStyle()}));
+  console.log(
+    ansiFromReportText(rendered, {
+      color: shouldStyle(),
+      width: terminalWidth(),
+    }),
+  );
   console.error('');
   console.error(`THREAD RECORDED: ${threadId} (report #${reportCount})`);
   console.error(

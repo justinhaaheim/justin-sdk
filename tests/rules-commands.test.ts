@@ -46,7 +46,7 @@ import {join, relative, resolve} from 'path';
 
 import {CRITICAL_RULES_CONFIG_KEY} from '../src/critical-rules-setup';
 import {projectRulesFilePath} from '../src/rules/rules-file';
-import {rulesDiff, RULES_DIFF_EXIT} from '../src/rules-diff';
+import {RULES_DIFF_EXIT, rulesDiff} from '../src/rules-diff';
 import {
   describeGitState,
   RULES_UPDATE_EXIT,
@@ -60,7 +60,6 @@ const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
 const ARTIFACT_REL = '.claude/rules/justin-sdk/critical-rules.md';
 const TOOL_DIR_REL = '.claude/rules/justin-sdk';
 /** Pinned stamp date, so artifact bytes are comparable across runs. */
-const NOW = '2026-08-17';
 
 const sandboxes: Sandbox[] = [];
 function track(sb: Sandbox): Sandbox {
@@ -94,8 +93,8 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 const RULES_FILES: Record<string, string> = {
-  'src/rules/index.md': ['@./alpha.md', '@./omega.md'].join('\n\n'),
   'src/rules/alpha.md': '# Alpha\n\nALPHA_RULE',
+  'src/rules/index.md': ['@./alpha.md', '@./omega.md'].join('\n\n'),
   'src/rules/omega.md': '# Omega\n\nOMEGA_RULE',
 };
 
@@ -135,6 +134,8 @@ function editPrompts(dir: string): void {
 }
 
 interface ProjectOptions {
+  /** Extra committed files (something unrelated to dirty). */
+  files?: Record<string, string>;
   /**
    * Write the RETIRED `componentConfig["critical-rules"].modules` block, as the
    * fleet configs still do. Nothing may honour it (epic home-base-dchjw D2).
@@ -142,8 +143,6 @@ interface ProjectOptions {
   modules?: string[];
   /** Leave critical-rules-setup OUT of `components` — an unenrolled repo. */
   notEnrolled?: boolean;
-  /** Extra committed files (something unrelated to dirty). */
-  files?: Record<string, string>;
 }
 
 function projectFixture(options: ProjectOptions = {}): string {
@@ -234,7 +233,7 @@ function gitExpectFail(repo: string, argv: string[]): void {
       `expected \`git ${argv.join(' ')}\` to fail, but it passed`,
     );
   } catch (error) {
-    if (error instanceof Error && /expected `git/.test(error.message))
+    if (error instanceof Error && error.message.includes('expected `git'))
       throw error;
   }
 }
@@ -348,7 +347,7 @@ describe('rules-update commits the artifact and nothing else', () => {
     setQuiet(true);
     const {dir, sha} = gitPromptsFixture();
     const repo = projectFixture({
-      files: {'src/app.ts': 'export const a = 1;\n', 'other.txt': 'one\n'},
+      files: {'other.txt': 'one\n', 'src/app.ts': 'export const a = 1;\n'},
       modules: ['alpha', 'omega'],
     });
     const mainBefore = git(repo, ['rev-parse', 'main']).trim();

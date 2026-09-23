@@ -130,10 +130,10 @@ export function resolveConfig(
 // ---------------------------------------------------------------------------
 
 export interface TranscriptFacts {
-  /** Timestamp of the most recent assistant message, if any. */
-  lastMessage: Date | null;
   /** Timestamp of the most recent time-check we emitted, if any. */
   lastCheck: Date | null;
+  /** Timestamp of the most recent assistant message, if any. */
+  lastMessage: Date | null;
 }
 
 /**
@@ -360,7 +360,7 @@ export function runTimeCheck(args: {now?: Date; stdin?: string}): number {
   }
 
   // decide() returns non-null only when lastMessage is set.
-  const report = formatReport(now, lastMessage as Date);
+  const report = formatReport(now, lastMessage!);
 
   // Emit BOTH channels. They reach different readers and neither implies the
   // other: `systemMessage` renders in Justin's terminal but never enters the

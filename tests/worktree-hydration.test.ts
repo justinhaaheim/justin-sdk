@@ -35,13 +35,13 @@ import {
   formatUnhydratedWorktreeBanner,
   hasBlockingProblem,
   hydrationFixCommand,
+  type HydrationProblem,
+  type HydrationProblemKind,
   isBlockingProblem,
   isLinkedWorktree,
   miseTrustStatus,
   parseMiseTrustStatus,
   SETUP_ENV_BUNX,
-  type HydrationProblem,
-  type HydrationProblemKind,
   type WorktreeHydrationStatus,
 } from '../src/worktree-hydration';
 import {addLinkedWorktree, git, initPrimary} from './git-fixtures';

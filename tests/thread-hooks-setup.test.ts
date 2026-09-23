@@ -26,6 +26,7 @@
 
 import {describe, expect, test} from 'bun:test';
 
+import {COMPONENT_NAMES, corePreset} from '../src/component-registry';
 import {
   addThreadStartHook,
   addThreadStopHook,
@@ -35,7 +36,6 @@ import {
   THREAD_STOP_HOOK_COMMAND,
   THREAD_STOP_HOOK_EVENT,
 } from '../src/thread-hooks-setup';
-import {COMPONENT_NAMES, corePreset} from '../src/component-registry';
 
 function sessionStartEntries(settings: Record<string, unknown>): unknown[] {
   const hooks = (settings.hooks ?? {}) as Record<string, unknown>;

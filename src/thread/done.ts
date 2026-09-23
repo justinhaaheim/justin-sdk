@@ -27,14 +27,14 @@
  */
 
 import {
+  type BdContext,
   closeIssue,
   describeBdFailure,
   EXPORT_UNSTAGED_WARNING,
   listOpenAsks,
   reopenIssue,
-  type BdContext,
 } from './bd';
-import {commitThreadsRepo, describeCommit, type CommitOutcome} from './commit';
+import {type CommitOutcome, commitThreadsRepo, describeCommit} from './commit';
 import {contextFor, resolveThread, type ThreadRef} from './resolve';
 
 export const DEFAULT_DONE_REASON = 'thread closed by Justin';

@@ -6,14 +6,14 @@
  * and writes the hook file), so they're fully offline and fast.
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
-import {existsSync, readFileSync, statSync, writeFileSync, mkdirSync} from 'fs';
+import {afterEach, describe, expect, test} from 'bun:test';
+import {existsSync, mkdirSync, readFileSync, statSync, writeFileSync} from 'fs';
 import {join, resolve} from 'path';
 
 import {
+  composePostCheckout,
   POST_CHECKOUT_MARKER_BEGIN,
   POST_CHECKOUT_MARKER_END,
-  composePostCheckout,
   readPostCheckoutPreamble,
   runHuskySetup,
 } from '../src/husky-setup';
@@ -58,13 +58,13 @@ const VERSION_MANAGER_LINE =
 
 function readPkg(sb: Sandbox): {
   devDependencies?: Record<string, string>;
-  scripts?: Record<string, string>;
   ['lint-staged']?: Record<string, string[]>;
+  scripts?: Record<string, string>;
 } {
   return JSON.parse(readFileSync(join(sb.path, 'package.json'), 'utf-8')) as {
     devDependencies?: Record<string, string>;
-    scripts?: Record<string, string>;
     ['lint-staged']?: Record<string, string[]>;
+    scripts?: Record<string, string>;
   };
 }
 
@@ -170,8 +170,8 @@ describe('husky-setup', () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
-          name: 'test-project',
           ['lint-staged']: customLintStaged,
+          name: 'test-project',
         },
       }),
     );
@@ -214,9 +214,9 @@ describe('husky-setup', () => {
     );
 
     const exitCode = await runHuskySetup({
+      force: true,
       projectRoot: sb.path,
       quiet: true,
-      force: true,
     });
     expect(exitCode).toBe(0);
 
@@ -253,8 +253,8 @@ describe('husky-setup', () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
-          name: 'test-project',
           devDependencies: {someOther: '1.0.0'},
+          name: 'test-project',
         },
       }),
     );
@@ -296,8 +296,8 @@ describe('husky-setup', () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
-          name: 'test-project',
           devDependencies: {husky: '8.0.0'},
+          name: 'test-project',
         },
       }),
     );
@@ -318,16 +318,16 @@ describe('husky-setup', () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
-          name: 'test-project',
           devDependencies: {husky: '8.0.0', 'lint-staged': '13.0.0'},
+          name: 'test-project',
         },
       }),
     );
 
     const exitCode = await runHuskySetup({
+      force: true,
       projectRoot: sb.path,
       quiet: true,
-      force: true,
     });
     expect(exitCode).toBe(0);
 
@@ -362,7 +362,7 @@ ${VERSION_MANAGER_LINE}
   function preamble(): string {
     const text = readPostCheckoutPreamble();
     expect(text).not.toBeNull();
-    return text as string;
+    return text!;
   }
 
   function readHook(sb: Sandbox): string {

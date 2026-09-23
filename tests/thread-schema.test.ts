@@ -27,7 +27,6 @@ export function examplePayload(): Record<string, unknown> {
     ],
     asks: [
       {
-        priority: 0,
         context:
           'The adapter closes asks instead of deleting them, because bd delete wedges auto-export.',
         default: 'I keep closing rather than deleting.',
@@ -42,10 +41,10 @@ export function examplePayload(): Record<string, unknown> {
             text: 'Delete — tidier list, wedges the JSONL export',
           },
         ],
+        priority: 0,
         text: 'Approve closing ask beads rather than deleting them?',
       },
       {
-        priority: 3,
         context:
           'The knob defaults off, so nothing changes for other sessions.',
         default: 'I leave it off everywhere but this machine.',
@@ -54,6 +53,7 @@ export function examplePayload(): Record<string, unknown> {
           {recommended: true, text: 'a — user config only'},
           {recommended: false, text: 'b — every enrolled repo'},
         ],
+        priority: 3,
         text: 'Where should componentConfig.thread.enabled live?',
       },
     ],
@@ -121,10 +121,35 @@ describe('thread report schema', () => {
     expect(result.status).toBe('ok');
   });
 
+  /**
+   * Keys the TOOL writes, which a session must never fill in by hand — so they
+   * are deliberately absent from the skeleton (home-base-685h F9).
+   *
+   * Listed rather than pattern-matched: the whole value of the test below is
+   * that a new schema key has to be thought about once, and a rule that
+   * exempted keys automatically would exempt the next one silently.
+   */
+  const TOOL_WRITTEN_KEYS = ['continuesFromSession'];
+
   test('the skeleton names every key the schema knows about', () => {
     const skeleton = JSON.parse(payloadSkeleton()) as Record<string, unknown>;
-    const schemaKeys = Object.keys(threadReportSchema.shape).sort();
+    const schemaKeys = Object.keys(threadReportSchema.shape)
+      .filter((key) => !TOOL_WRITTEN_KEYS.includes(key))
+      .sort();
     expect(Object.keys(skeleton).sort()).toEqual(schemaKeys);
+  });
+
+  test('the skeleton does NOT offer the tool-written keys (F9)', () => {
+    // `continuesFromSession` is stamped by `thread report` from the flag or the
+    // environment. Prompting for it would invite a hand-typed session id that
+    // the tool then overwrites — a field that looks authored and is not.
+    const skeleton = JSON.parse(payloadSkeleton()) as Record<string, unknown>;
+    for (const key of TOOL_WRITTEN_KEYS) {
+      expect(Object.keys(skeleton)).not.toContain(key);
+      // …but the schema must still accept it, or an archived payload carrying
+      // one would stop validating at drain time.
+      expect(Object.keys(threadReportSchema.shape)).toContain(key);
+    }
   });
 
   test('REJECTS a bare bead id — beadsTouched needs a description', () => {
@@ -202,6 +227,19 @@ describe('thread report schema', () => {
   });
 });
 
+/** A v2 payload: string deviations, and the two dispositions v3 dropped. */
+function v2Payload(): Record<string, unknown> {
+  const payload = examplePayload();
+  payload.schemaVersion = 2;
+  payload.deviations = ['the knob defaults off, which the bead did not say'];
+  payload.priorAsks = [
+    {detail: 'You said "yes".', disposition: 'answered', id: 'jl-x7q.1'},
+    {detail: 'I took the default', disposition: 'decided', id: 'jl-x7q.2'},
+    {detail: 'still waiting on you', disposition: 'carried', id: 'jl-x7q.3'},
+  ];
+  return payload;
+}
+
 /**
  * THE v1 BRIDGE (D15).
  *
@@ -225,19 +263,6 @@ function v1Payload(): Record<string, unknown> {
       return {...rest, blocking: index === 0};
     },
   );
-  return payload;
-}
-
-/** A v2 payload: string deviations, and the two dispositions v3 dropped. */
-function v2Payload(): Record<string, unknown> {
-  const payload = examplePayload();
-  payload.schemaVersion = 2;
-  payload.deviations = ['the knob defaults off, which the bead did not say'];
-  payload.priorAsks = [
-    {detail: 'You said "yes".', disposition: 'answered', id: 'jl-x7q.1'},
-    {detail: 'I took the default', disposition: 'decided', id: 'jl-x7q.2'},
-    {detail: 'still waiting on you', disposition: 'carried', id: 'jl-x7q.3'},
-  ];
   return payload;
 }
 

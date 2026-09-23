@@ -285,25 +285,6 @@ export type BeadsWorkspaceState =
 export const DOLT_BACKEND_REASON = 'old Dolt (bd) backend';
 
 /**
- * Why beads-setup must not run here, or null when it may (dchjw.19).
- *
- * A pure function so BOTH directions can be asserted without a network, a
- * package manager or a `br` binary: a test that could only ever prove the
- * refusal fires would pass just as well if it fired on everything.
- */
-export function beadsSetupRefusal(projectRoot: string): string | null {
-  const workspace = detectBeadsWorkspace(projectRoot);
-  if (workspace.kind !== 'legacy' || workspace.reason !== DOLT_BACKEND_REASON) {
-    return null;
-  }
-  return (
-    `${projectRoot} is a Dolt (\`bd\`) beads workspace — refusing to run beads-setup. ` +
-    'This component sets up beads_rust (`br`), and its migration step MOVES `.beads/` aside to re-init. ' +
-    'Nothing has been written. If this repo really should move from bd to br, do it by hand, with the database backed up first.'
-  );
-}
-
-/**
  * Classify what kind of beads workspace (if any) `projectRoot` has.
  *
  * Ordering is load-bearing: the `br list` probe only runs when a database file
@@ -344,6 +325,25 @@ export function detectBeadsWorkspace(projectRoot: string): BeadsWorkspaceState {
     kind: 'legacy',
     reason: '.beads/ exists with neither a database nor a tracked config',
   };
+}
+
+/**
+ * Why beads-setup must not run here, or null when it may (dchjw.19).
+ *
+ * A pure function so BOTH directions can be asserted without a network, a
+ * package manager or a `br` binary: a test that could only ever prove the
+ * refusal fires would pass just as well if it fired on everything.
+ */
+export function beadsSetupRefusal(projectRoot: string): string | null {
+  const workspace = detectBeadsWorkspace(projectRoot);
+  if (workspace.kind !== 'legacy' || workspace.reason !== DOLT_BACKEND_REASON) {
+    return null;
+  }
+  return (
+    `${projectRoot} is a Dolt (\`bd\`) beads workspace — refusing to run beads-setup. ` +
+    'This component sets up beads_rust (`br`), and its migration step MOVES `.beads/` aside to re-init. ' +
+    'Nothing has been written. If this repo really should move from bd to br, do it by hand, with the database backed up first.'
+  );
 }
 
 /**
@@ -1060,7 +1060,7 @@ export async function runBeadsSetup(
         `Kept ${moved}/ — the pre-migration .beads/, moved aside intact. Delete it yourself once you have checked the import, or re-run with --yes.`,
       );
     } else if (importResult.kind === 'verified') {
-      rmSync(migration.movedTo, {recursive: true, force: true});
+      rmSync(migration.movedTo, {force: true, recursive: true});
       success(
         `--yes: removed ${moved}/ after verifying all ${importResult.count} issues imported.`,
       );

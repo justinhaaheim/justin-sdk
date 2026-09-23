@@ -123,9 +123,9 @@ describe('runUpdate', () => {
     const sb = track(createProjectSandbox());
 
     const exitCode = await runUpdate({
-      projectRoot: sb.path,
-      noSelfUpdate: true,
       noCommit: true,
+      noSelfUpdate: true,
+      projectRoot: sb.path,
       quiet: true,
     });
 
@@ -139,9 +139,9 @@ describe('runUpdate', () => {
       configPath,
       JSON.stringify(
         {
-          version: '0.0.1',
           components: ['base-setup'],
           lastSynced: '2000-01-01',
+          version: '0.0.1',
         },
         null,
         2,
@@ -150,11 +150,11 @@ describe('runUpdate', () => {
     const before = readFileSync(configPath, 'utf-8');
 
     const exitCode = await runUpdate({
-      projectRoot: sb.path,
-      noSelfUpdate: true,
-      noCommit: true,
-      dryRun: true,
       allowDirty: true,
+      dryRun: true,
+      noCommit: true,
+      noSelfUpdate: true,
+      projectRoot: sb.path,
       quiet: true,
     });
 
@@ -169,9 +169,9 @@ describe('runUpdate', () => {
       join(sb.path, 'justin-sdk.config.json'),
       JSON.stringify(
         {
-          version: '0.0.1',
           components: ['totally-fake-component'],
           lastSynced: '2000-01-01',
+          version: '0.0.1',
         },
         null,
         2,
@@ -179,11 +179,11 @@ describe('runUpdate', () => {
     );
 
     const exitCode = await runUpdate({
-      projectRoot: sb.path,
-      noSelfUpdate: true,
-      noCommit: true,
-      dryRun: true,
       allowDirty: true,
+      dryRun: true,
+      noCommit: true,
+      noSelfUpdate: true,
+      projectRoot: sb.path,
       quiet: true,
     });
 
@@ -197,7 +197,7 @@ describe('runUpdate', () => {
     const sb = track(createProjectSandbox());
     writeFileSync(
       join(sb.path, 'justin-sdk.config.json'),
-      JSON.stringify({version: '0.0.1', components: []}, null, 2),
+      JSON.stringify({components: [], version: '0.0.1'}, null, 2),
     );
     // git init + untracked file → dirty
     const {execSync} = await import('child_process');
@@ -205,9 +205,9 @@ describe('runUpdate', () => {
     writeFileSync(join(sb.path, 'README.md'), 'hello');
 
     const exitCode = await runUpdate({
-      projectRoot: sb.path,
-      noSelfUpdate: true,
       noCommit: true,
+      noSelfUpdate: true,
+      projectRoot: sb.path,
       quiet: true,
     });
 
@@ -220,15 +220,15 @@ describe('runUpdate (config integrity)', () => {
     const sb = track(createProjectSandbox());
     writeFileSync(
       join(sb.path, 'justin-sdk.config.json'),
-      JSON.stringify({version: '0.0.1', components: []}, null, 2),
+      JSON.stringify({components: [], version: '0.0.1'}, null, 2),
     );
     // Make tree clean by avoiding git entirely; runUpdate's git status
     // call exits non-zero (no .git), which leaves treeWasDirty=false.
 
     const exitCode = await runUpdate({
-      projectRoot: sb.path,
-      noSelfUpdate: true,
       noCommit: true,
+      noSelfUpdate: true,
+      projectRoot: sb.path,
       quiet: true,
     });
 

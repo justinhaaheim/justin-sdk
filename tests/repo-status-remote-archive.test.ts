@@ -29,8 +29,8 @@ import {
   remoteArchiveCommands,
   renderPlan,
 } from '../src/repo-status/plan';
-import {buildReport} from '../src/repo-status/report';
 import {runCli} from '../src/repo-status/repo-status';
+import {buildReport} from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -51,10 +51,10 @@ function git(cwd: string, args: string[]): string {
 }
 
 interface Fixture {
-  /** The clone we plan and apply from. */
-  work: string;
   /** The bare repo standing in for GitHub. */
   remote: string;
+  /** The clone we plan and apply from. */
+  work: string;
 }
 
 function setupFixture(sb: Sandbox): Fixture {
@@ -201,8 +201,8 @@ describe('buildPlan — remote candidates', () => {
     for (const cmd of commands) expect(rendered).toContain(cmd);
     // The push must be shown before the delete — the ordering IS the safety
     // argument, so a dry run that implied the reverse would be a lie.
-    expect(rendered.indexOf(commands[0] as string)).toBeLessThan(
-      rendered.indexOf(commands[1] as string),
+    expect(rendered.indexOf(commands[0]!)).toBeLessThan(
+      rendered.indexOf(commands[1]!),
     );
     expect(rendered).toContain('--include-remote');
   });
@@ -427,7 +427,9 @@ describe('apply --include-remote (through the CLI)', () => {
     const log = console.log;
     const err = console.error;
     console.log = (...a: unknown[]) => void logged.push(a.join(' '));
-    console.error = () => {};
+    console.error = () => {
+      /* swallowed for the duration of this test */
+    };
     const previousExitCode = process.exitCode;
     try {
       await runCli([

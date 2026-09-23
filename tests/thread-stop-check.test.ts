@@ -19,6 +19,7 @@ import {afterEach, describe, expect, test} from 'bun:test';
 import {chmodSync, mkdirSync, readdirSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
+import {newestArchivedReportAt} from '../src/thread/archive';
 import {
   decideStopCheck,
   describeStopCheck,
@@ -29,7 +30,6 @@ import {
   type StopCheckInputs,
   type StopCheckWhy,
 } from '../src/thread/stop-check';
-import {newestArchivedReportAt} from '../src/thread/archive';
 import {createProjectSandbox, createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -66,6 +66,7 @@ const BLOCKING: StopCheckInputs = {
 };
 
 interface BranchCase {
+  action: 'block' | 'pass';
   /** The one-field patch that must flip this row's outcome. */
   control: Partial<StopCheckInputs>;
   controlAction: 'block' | 'pass';
@@ -73,7 +74,6 @@ interface BranchCase {
   name: string;
   patch: Partial<StopCheckInputs>;
   why: StopCheckWhy;
-  action: 'block' | 'pass';
 }
 
 const BRANCHES: BranchCase[] = [

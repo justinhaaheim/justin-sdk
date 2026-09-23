@@ -41,7 +41,7 @@ const entry = (...commands: string[]): unknown => ({
 
 const commandsOf = (entries: readonly unknown[]): string[][] =>
   entries.map((e) =>
-    ((e as {hooks?: Array<{command?: string}>}).hooks ?? []).map(
+    ((e as {hooks?: {command?: string}[]}).hooks ?? []).map(
       (hook) => hook.command ?? '',
     ),
   );

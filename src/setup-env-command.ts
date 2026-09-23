@@ -28,7 +28,7 @@ import {appendFileSync, existsSync} from 'node:fs';
 import {delimiter, resolve} from 'node:path';
 
 import {runDoctor} from './doctor';
-import {report, setupEnv, YELLOW, RESET, DIM} from './setup-env';
+import {DIM, report, RESET, setupEnv, YELLOW} from './setup-env';
 
 const HOME = process.env.HOME ?? '/root';
 const MISE_BIN = resolve(HOME, '.local/bin/mise');

@@ -21,15 +21,15 @@
 
 import {
   mkdirSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'fs';
 import {join} from 'path';
 
-import {threadsStateDir, type EnvLike} from './paths';
+import {type EnvLike, threadsStateDir} from './paths';
 
 /** The reserved ask id for the final free-text note (invariant I7). */
 export const NOTE_DRAFT_ID = '__note__';

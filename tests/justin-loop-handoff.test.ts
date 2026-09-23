@@ -21,18 +21,24 @@
  * because the flags and the JSON shape are the half a fake cannot vouch for.
  */
 
-import {describe, expect, test, afterEach} from 'bun:test';
-import {existsSync} from 'fs';
-import {homedir} from 'os';
+import {afterEach, describe, expect, test} from 'bun:test';
+import {chmodSync, existsSync, mkdtempSync, writeFileSync} from 'fs';
+import {homedir, tmpdir} from 'os';
 import {dirname, join} from 'path';
 
-import {type BrOutcome, type BrRunner, runBr} from '../src/justin-loop/br';
+import {
+  BR_STDERR_LINES,
+  brFailureDetail,
+  type BrOutcome,
+  type BrRunner,
+  runBr,
+} from '../src/justin-loop/br';
 import {
   checkErrors,
   createHandoff,
   findFromConflicts,
-  HANDOFF_LABEL,
   type Handoff,
+  HANDOFF_LABEL,
   type HandoffInput,
   handoffJson,
   handoffTitle,
@@ -56,6 +62,96 @@ function track(sb: Sandbox): Sandbox {
   sandboxes.push(sb);
   return sb;
 }
+
+/**
+ * `runBr` keeps everything br said on stderr (home-base-685h F4).
+ *
+ * Driven through a SCRIPTED `br` on PATH rather than a stub of `spawnSync`,
+ * because what is under test is the capture itself: a stub would assert that
+ * the field is copied from a value the test supplied, which proves nothing
+ * about whether a real child's stderr reaches it.
+ */
+describe('runBr captures the whole stderr (F4)', () => {
+  /** Put a `br` on PATH that prints `stderrBody` and exits `code`. */
+  function withScriptedBr<T>(
+    stderrBody: string,
+    code: number,
+    body: () => T,
+  ): T {
+    const dir = mkdtempSync(join(tmpdir(), 'justin-loop-br-'));
+    writeFileSync(
+      join(dir, 'br'),
+      `#!/bin/sh\ncat >&2 <<'BR_EOF'\n${stderrBody}\nBR_EOF\nexit ${code}\n`,
+    );
+    chmodSync(join(dir, 'br'), 0o755);
+    const original = process.env.PATH;
+    process.env.PATH = `${dir}:${original ?? ''}`;
+    try {
+      return body();
+    } finally {
+      process.env.PATH = original;
+    }
+  }
+
+  const THREE_LINES = [
+    'error: unexpected argument --notes',
+    "  tip: a similar argument exists: '--note'",
+    'Usage: br update <ID> --note <NOTE>',
+  ].join('\n');
+
+  test('a failure with three stderr lines keeps all three, with reason as line 1', () => {
+    const out = withScriptedBr(THREE_LINES, 1, () =>
+      runBr(import.meta.dirname, ['update', 'x']),
+    );
+    expect(out.ok).toBe(false);
+    // `reason` stays ONE line — nothing downstream that renders it inline breaks.
+    expect(out.reason).toBe('br exited 1: error: unexpected argument --notes');
+    expect(out.reason).not.toContain('\n');
+    // …and the two lines that actually say what to do are no longer thrown away.
+    expect(out.stderr).toBe(THREE_LINES);
+    expect(brFailureDetail(out)).toEqual([
+      "  tip: a similar argument exists: '--note'",
+      'Usage: br update <ID> --note <NOTE>',
+    ]);
+  });
+
+  test('stderr is null when br printed none — never the empty string', () => {
+    // Critical rule 7 / the null rule: '' would claim br produced an empty
+    // diagnostic, which is not the same fact as producing none.
+    const out = withScriptedBr('', 1, () =>
+      runBr(import.meta.dirname, ['update', 'x']),
+    );
+    expect(out.stderr).toBeNull();
+    expect(brFailureDetail(out)).toEqual([]);
+    // With nothing extra to show, the print is exactly what it was before F4.
+    expect(out.reason).toBe('br exited 1');
+  });
+
+  test('more stderr than the bound is TRUNCATED with a count, never trailed off', () => {
+    const many = Array.from({length: 9}, (_, i) => `line ${i + 1}`).join('\n');
+    const out = withScriptedBr(many, 1, () =>
+      runBr(import.meta.dirname, ['update', 'x']),
+    );
+    const detail = brFailureDetail(out);
+    expect(detail.slice(0, 4)).toEqual([
+      'line 2',
+      'line 3',
+      'line 4',
+      'line 5',
+    ]);
+    expect(detail.at(-1)).toBe('… and 4 more lines from br');
+    expect(detail).toHaveLength(BR_STDERR_LINES);
+  });
+
+  test('a SUCCESSFUL call keeps its stderr too (br warns and exits 0)', () => {
+    const out = withScriptedBr('beads: auto-export warning', 0, () =>
+      runBr(import.meta.dirname, ['list']),
+    );
+    expect(out.ok).toBe(true);
+    expect(out.reason).toBeNull();
+    expect(out.stderr).toBe('beads: auto-export warning');
+  });
+});
 
 /**
  * Several paragraphs, a tab, and embedded double quotes — the realistic shape
@@ -236,7 +332,7 @@ describe('parseHandoff', () => {
 // Row parsing and id parsing
 // ---------------------------------------------------------------------------
 
-function listJson(rows: Array<Record<string, unknown>>): string {
+function listJson(rows: Record<string, unknown>[]): string {
   return JSON.stringify({
     has_more: false,
     issues: rows,
@@ -328,7 +424,7 @@ const INPUT: HandoffInput = {
 };
 
 /** A scripted `br`: each call is matched against `replies` in order of key. */
-function scriptedBr(replies: Array<(args: string[]) => BrOutcome | null>): {
+function scriptedBr(replies: ((args: string[]) => BrOutcome | null)[]): {
   run: BrRunner;
   seen: () => string[][];
 } {
@@ -347,7 +443,7 @@ function scriptedBr(replies: Array<(args: string[]) => BrOutcome | null>): {
 }
 
 function ok(stdout: string): BrOutcome {
-  return {ok: true, reason: null, stdout};
+  return {ok: true, reason: null, stderr: null, stdout};
 }
 
 describe('createHandoff', () => {
@@ -538,6 +634,7 @@ describe('createHandoff', () => {
     const br: BrRunner = () => ({
       ok: false,
       reason: 'br exited 1: no workspace',
+      stderr: null,
       stdout: '',
     });
     const out = createHandoff('/repo', INPUT, br);
@@ -566,7 +663,12 @@ describe('createHandoff', () => {
           : null,
       (a) =>
         a[0] === 'update'
-          ? {ok: false, reason: 'br exited 1: db locked', stdout: ''}
+          ? {
+              ok: false,
+              reason: 'br exited 1: db locked',
+              stderr: null,
+              stdout: '',
+            }
           : null,
     ]);
     const out = createHandoff('/repo', INPUT, br.run);
@@ -669,6 +771,7 @@ describe('validateHandoffs / renderValidate', () => {
     const br: BrRunner = () => ({
       ok: false,
       reason: 'br could not run: spawnSync br ENOENT',
+      stderr: null,
       stdout: '',
     });
     const report = renderValidate(validateHandoffs('/repo', null, br));
@@ -897,7 +1000,9 @@ for (const version of BR_VERSIONS) {
         if (parse?.ok !== true) return;
         expect(parse.handoff.next).toBe(MULTI_PARAGRAPH_NEXT);
         expect(parse.handoff.contextTokens).toBe(312_000);
-        expect(parse.handoff.openQuestions).toEqual([VALID.openQuestions[0]]);
+        expect(parse.handoff.openQuestions).toEqual(
+          VALID.openQuestions.slice(0, 1),
+        );
         expect(back.checks[0]?.title).toBe(`HANDOFF continue: ${VALID.arc}`);
       },
     );

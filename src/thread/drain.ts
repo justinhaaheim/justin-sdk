@@ -27,17 +27,18 @@
  * deletion safe.
  */
 
+import type {ArchivedReport} from './archive';
+import type {EnvLike} from './paths';
+
 import {readdirSync, readFileSync, renameSync, rmSync} from 'fs';
 import {join} from 'path';
 
-import {bdContext, type BdContext} from './bd';
-import {describeBdFailure} from './bd';
 import {spoolDir} from './archive';
+import {type BdContext, bdContext} from './bd';
+import {describeBdFailure} from './bd';
+import {linkArchivedPredecessor} from './predecessor';
+import {type BdWriteOutcome, writeReportToBd} from './report';
 import {validateThreadFacts, validateThreadReport} from './schema';
-import {writeReportToBd, type BdWriteOutcome} from './report';
-
-import type {ArchivedReport} from './archive';
-import type {EnvLike} from './paths';
 
 export type SpoolOutcomeKind = 'applied' | 'superseded' | 'kept';
 
@@ -68,15 +69,29 @@ export type SpoolApplier = (
   ctx: BdContext,
 ) => Promise<BdWriteOutcome>;
 
-/** The real applier: the same write path a live report takes, plus the guard. */
-export const applyViaBd: SpoolApplier = async (report, ctx) =>
-  writeReportToBd({
+/**
+ * The real applier: the same write path a live report takes, plus the guard.
+ *
+ * The predecessor link is resolved HERE (home-base-685h F9), from the id the
+ * payload was archived with. `thread report` resolves the predecessor after the
+ * archive — deliberately, because archive-before-bd is the rule-6 property it
+ * exists to guarantee — so a report bd refused and that is drained later would
+ * otherwise be written UNLINKED, with nothing anywhere saying it should have
+ * been linked. A failed lookup does not fail the drain: linking is metadata, and
+ * losing the report to protect a link would be the wrong trade in both
+ * directions.
+ */
+export const applyViaBd: SpoolApplier = async (report, ctx) => {
+  const linked = await linkArchivedPredecessor(report.payload, ctx);
+  if (linked.note != null) console.error(`thread drain: ${linked.note}`);
+  return await writeReportToBd({
     ctx,
     facts: report.facts,
-    payload: report.payload,
+    payload: linked.payload,
     sessionId: report.sessionId,
     supersedeGuard: true,
   });
+};
 
 /**
  * THE DRAIN LOCK (F10), and it is one `rename(2)` rather than a lock file.
@@ -159,7 +174,7 @@ function reclaimAbandoned(dir: string): number {
 type Claim =
   | {kind: 'claimed'; path: string}
   | {kind: 'taken'}
-  | {kind: 'failed'; error: string};
+  | {error: string; kind: 'failed'};
 
 /** Take one spool file, atomically. ENOENT means a concurrent drain won. */
 function claimSpoolFile(dir: string, name: string): Claim {
@@ -212,7 +227,7 @@ function spoolFiles(dir: string): string[] | null {
  */
 function readSpooled(
   path: string,
-): {ok: true; report: ArchivedReport} | {ok: false; detail: string} {
+): {ok: true; report: ArchivedReport} | {detail: string; ok: false} {
   let raw: string;
   try {
     raw = readFileSync(path, 'utf8');

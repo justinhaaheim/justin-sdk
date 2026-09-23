@@ -24,6 +24,8 @@ import {mkdirSync, writeFileSync} from 'fs';
 import {join, resolve} from 'path';
 import {z} from 'zod';
 
+import {coreConfigNames} from '../src/component-registry';
+import {xdgStateHome} from '../src/health-notices';
 import {
   configSchemaJson,
   DEFAULT_HEALTH_NOTICES,
@@ -38,8 +40,6 @@ import {
   userConfigSchema,
   xdgConfigHome,
 } from '../src/sdk-config';
-import {coreConfigNames} from '../src/component-registry';
-import {xdgStateHome} from '../src/health-notices';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
@@ -400,7 +400,7 @@ describe('resolveHealthNoticesConfig layering', () => {
 });
 
 describe('resolveHealthNoticesConfig kill switches', () => {
-  const cases: Array<[string, Record<string, string>]> = [
+  const cases: [string, Record<string, string>][] = [
     ['JUSTIN_SDK_HEALTH_NOTICES=off', {JUSTIN_SDK_HEALTH_NOTICES: 'off'}],
     ['CI=1', {CI: '1'}],
     ['CI=true', {CI: 'true'}],

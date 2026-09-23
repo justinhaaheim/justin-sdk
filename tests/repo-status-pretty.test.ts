@@ -27,7 +27,7 @@ import {join} from 'path';
 
 import {PR_STATE_NOT_CHECKED} from '../src/repo-status/disposition';
 import {renderReportPretty} from '../src/repo-status/pretty';
-import {buildReport, type RepoStatusReport} from '../src/repo-status/report';
+import {buildReport} from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const CLI = join(import.meta.dir, '../src/repo-status/repo-status.ts');

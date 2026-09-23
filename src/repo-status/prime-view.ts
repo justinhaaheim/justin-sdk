@@ -18,14 +18,14 @@
  * importing it across that boundary all along.
  */
 
-import {buildCoreInventory} from './core';
-import {EMPTY_PR_INDEX, fetchPullRequests, prForBranch} from './prs';
-
 import type {
   BranchDivergence,
   EnumerationFailure,
   FilterSummary,
 } from './types';
+
+import {buildCoreInventory} from './core';
+import {EMPTY_PR_INDEX, fetchPullRequests, prForBranch} from './prs';
 
 /**
  * PR fetching is OFF by default here, and that default is measured rather than
@@ -43,8 +43,6 @@ const PRIME_PR_TIMEOUT_MS = 2000;
 
 /** Branches sharing a tip sha — usually one, but >1 hints at the same underlying work. */
 export interface DivergentGroup {
-  tipSha: string;
-  branches: BranchDivergence[];
   /**
    * Null when the divergence could not be measured (home-base-qyu1.21). Such a
    * group is still SURFACED: this view exists so unmerged work is never missed,
@@ -53,15 +51,16 @@ export interface DivergentGroup {
    * was written to prevent.
    */
   aheadOfCurrent: number | null;
-  lastCommitDate: string;
+  branches: BranchDivergence[];
   hasWorktree: boolean;
+  lastCommitDate: string;
   /** e.g. "PR #12 open". Null when PR data was not requested or unavailable. */
   prNote: string | null;
+  tipSha: string;
 }
 
 export interface DivergenceReport {
   currentBranch: string;
-  groups: DivergentGroup[];
   /**
    * Halves of the core walk git could not read (home-base-qyu1.23). NON-EMPTY
    * MEANS `groups` IS NOT A COMPLETE ANSWER, and in the `for-each-ref` case it
@@ -85,14 +84,11 @@ export interface DivergenceReport {
    * rather than about a subset the reader cannot see (home-base-qyu1.33.1).
    */
   filtered: FilterSummary;
+  groups: DivergentGroup[];
 }
 
 export interface RunOptions {
   cwd: string;
-  /** Branches with no commits within this many days are ignored unless they have a worktree. Default 30. */
-  sinceDays?: number;
-  /** Include PR state. Off by default — see PRIME_PR_TIMEOUT_MS above for why. */
-  prs?: boolean;
   /**
    * Hide `archive/*` mirrors. Default TRUE here: this section answers "what
    * work might I not know about", and an archive mirror is by definition work a
@@ -101,6 +97,22 @@ export interface RunOptions {
    * noise at session start is what makes the real rows get skimmed past.
    */
   excludeArchive?: boolean;
+  /** Include PR state. Off by default — see PRIME_PR_TIMEOUT_MS above for why. */
+  prs?: boolean;
+  /** Branches with no commits within this many days are ignored unless they have a worktree. Default 30. */
+  sinceDays?: number;
+}
+
+function prNoteFor(
+  branches: BranchDivergence[],
+  prIndex: ReturnType<typeof fetchPullRequests>,
+): string | null {
+  if (!prIndex.available) return null;
+  for (const b of branches) {
+    const pr = prForBranch(prIndex, b.name);
+    if (pr != null) return `PR #${pr.number} ${pr.state.toLowerCase()}`;
+  }
+  return null;
 }
 
 export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
@@ -143,11 +155,11 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
       aheadOfCurrent: branches[0]?.divergence?.ahead ?? null,
       branches,
       hasWorktree: branches.some((b) => b.worktreePath != null),
-      prNote: prNoteFor(branches, prIndex),
       lastCommitDate: branches.reduce(
         (latest, b) => (b.lastCommitDate > latest ? b.lastCommitDate : latest),
         branches[0]?.lastCommitDate ?? '',
       ),
+      prNote: prNoteFor(branches, prIndex),
       tipSha,
     }),
   );
@@ -168,18 +180,6 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
     filtered: inventory.filtered,
     groups,
   };
-}
-
-function prNoteFor(
-  branches: BranchDivergence[],
-  prIndex: ReturnType<typeof fetchPullRequests>,
-): string | null {
-  if (!prIndex.available) return null;
-  for (const b of branches) {
-    const pr = prForBranch(prIndex, b.name);
-    if (pr != null) return `PR #${pr.number} ${pr.state.toLowerCase()}`;
-  }
-  return null;
 }
 
 // ---------------------------------------------------------------------------

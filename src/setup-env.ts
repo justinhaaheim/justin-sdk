@@ -76,6 +76,7 @@
  * stdout must stay clean.
  */
 
+import ignore from 'ignore';
 import {execFileSync, spawnSync} from 'node:child_process';
 import {
   copyFileSync,
@@ -95,7 +96,6 @@ import {
   resolve,
   sep,
 } from 'node:path';
-import ignore from 'ignore';
 
 // ---------------------------------------------------------------------------
 // Constants and public types
@@ -127,11 +127,11 @@ export const SLUG_PATTERN = /^[A-Za-z0-9._-]+$/;
 export type StepStatus = 'done' | 'skipped' | 'failed' | 'unknown';
 
 export interface StepReport {
+  /** What was done, or why it was skipped/failed/unconfirmed. Always populated. */
+  detail: string;
   /** Stable identifier — `HYDRATE:<script name>` for project-declared steps. */
   label: string;
   status: StepStatus;
-  /** What was done, or why it was skipped/failed/unconfirmed. Always populated. */
-  detail: string;
 }
 
 export interface SetupEnvOptions {
@@ -359,8 +359,8 @@ export function resolvePrimaryCheckout(
 // ---------------------------------------------------------------------------
 
 export interface ChildResult {
-  exitCode: number;
   error: string | null;
+  exitCode: number;
 }
 
 /**
@@ -371,16 +371,16 @@ export interface ChildResult {
  */
 export function runChild(argv: string[], cwd: string): ChildResult {
   const [cmd, ...args] = argv;
-  if (cmd == null) return {exitCode: 1, error: 'empty command'};
+  if (cmd == null) return {error: 'empty command', exitCode: 1};
   const result = spawnSync(cmd, args, {
     cwd,
     env: process.env,
     stdio: ['ignore', 2, 2],
   });
-  if (result.error) {
-    return {exitCode: 1, error: result.error.message};
+  if (result.error != null) {
+    return {error: result.error.message, exitCode: 1};
   }
-  return {exitCode: result.status ?? 1, error: null};
+  return {error: null, exitCode: result.status ?? 1};
 }
 
 // ---------------------------------------------------------------------------
@@ -484,7 +484,7 @@ function describeSubmodulePaths(paths: string[]): string {
 // Package manager detection
 // ---------------------------------------------------------------------------
 
-const LOCKFILES: ReadonlyArray<readonly [string, PackageManager]> = [
+const LOCKFILES: readonly (readonly [string, PackageManager])[] = [
   ['bun.lock', 'bun'],
   ['bun.lockb', 'bun'],
   ['package-lock.json', 'npm'],
@@ -524,9 +524,9 @@ export function detectPackageManager(target: string): PackageManagerDetection {
 // ---------------------------------------------------------------------------
 
 export interface CopyPlanEntry {
+  action: 'copy' | 'skip-exists';
   /** Repo-relative POSIX path, identical in primary and target. */
   relPath: string;
-  action: 'copy' | 'skip-exists';
 }
 
 export interface CopyPlan {
@@ -629,6 +629,36 @@ function collectCandidates(primary: string, manifestLines: string[]): string[] {
 }
 
 /**
+ * Which manifest lines contributed nothing (F3).
+ *
+ * Attribution is done against the FINAL entries, using a fresh single-line
+ * matcher per pattern. Two consequences, both deliberate:
+ *   - a pattern whose only candidate was removed by a later `!` negation is
+ *     correctly reported as contributing nothing;
+ *   - a pattern that jointly matches an entry another line also matched still
+ *     gets credit, so `ios/` alongside `ios/.xcode.env.local` is NOT warned
+ *     about — it really did name the file that got copied.
+ * `skip-exists` entries count as contributions: the pattern named a copyable
+ * file, it just happened to already be in the target.
+ */
+function findUnmatchedPatterns(
+  content: string,
+  entries: CopyPlanEntry[],
+): string[] {
+  const unmatched: string[] = [];
+  for (const raw of content.split('\n')) {
+    const line = raw.trim();
+    if (line === '' || line.startsWith('#') || line.startsWith('!')) continue;
+    const single = ignore().add(line);
+    if (entries.some((entry) => matchesManifest(single, entry.relPath))) {
+      continue;
+    }
+    unmatched.push(line);
+  }
+  return unmatched;
+}
+
+/**
  * Decide what `.worktreeinclude` would copy from `primary` into `target`,
  * without touching the filesystem. A file is copied only if it MATCHES the
  * manifest AND is gitignored AND is absent from the target:
@@ -660,8 +690,8 @@ export function planWorktreeIncludeCopies(
     if (!matchesManifest(matcher, relPath)) continue;
     if (!gitSucceeds(['check-ignore', '-q', '--', relPath], primary)) continue;
     entries.push({
-      relPath,
       action: existsSync(join(target, relPath)) ? 'skip-exists' : 'copy',
+      relPath,
     });
   }
 
@@ -671,36 +701,6 @@ export function planWorktreeIncludeCopies(
     manifestPath,
     unmatchedPatterns: findUnmatchedPatterns(content, entries),
   };
-}
-
-/**
- * Which manifest lines contributed nothing (F3).
- *
- * Attribution is done against the FINAL entries, using a fresh single-line
- * matcher per pattern. Two consequences, both deliberate:
- *   - a pattern whose only candidate was removed by a later `!` negation is
- *     correctly reported as contributing nothing;
- *   - a pattern that jointly matches an entry another line also matched still
- *     gets credit, so `ios/` alongside `ios/.xcode.env.local` is NOT warned
- *     about — it really did name the file that got copied.
- * `skip-exists` entries count as contributions: the pattern named a copyable
- * file, it just happened to already be in the target.
- */
-function findUnmatchedPatterns(
-  content: string,
-  entries: CopyPlanEntry[],
-): string[] {
-  const unmatched: string[] = [];
-  for (const raw of content.split('\n')) {
-    const line = raw.trim();
-    if (line === '' || line.startsWith('#') || line.startsWith('!')) continue;
-    const single = ignore().add(line);
-    if (entries.some((entry) => matchesManifest(single, entry.relPath))) {
-      continue;
-    }
-    unmatched.push(line);
-  }
-  return unmatched;
 }
 
 /**
@@ -719,9 +719,9 @@ function explainUnmatchedPattern(pattern: string): string {
 // ---------------------------------------------------------------------------
 
 export interface HydrationScript {
+  label: string;
   /** Full package.json script name, e.g. `setup-env:swift`. */
   name: string;
-  label: string;
 }
 
 /**
@@ -773,6 +773,21 @@ export function discoverHydrationScripts(target: string): HydrationScript[] {
 
 export type MiseTrustStatus = 'trusted' | 'unknown' | 'untrusted';
 
+function canonicalPath(inputPath: string): string {
+  const absolute = resolve(inputPath);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+function expandTilde(inputPath: string): string {
+  if (inputPath === '~') return homedir();
+  if (inputPath.startsWith('~/')) return join(homedir(), inputPath.slice(2));
+  return inputPath;
+}
+
 /**
  * Parse `mise trust --show` output for the line describing `targetDir` itself.
  *
@@ -803,21 +818,6 @@ export function parseMiseTrustStatus(
     return 'unknown';
   }
   return 'unknown';
-}
-
-function expandTilde(inputPath: string): string {
-  if (inputPath === '~') return homedir();
-  if (inputPath.startsWith('~/')) return join(homedir(), inputPath.slice(2));
-  return inputPath;
-}
-
-function canonicalPath(inputPath: string): string {
-  const absolute = resolve(inputPath);
-  try {
-    return realpathSync(absolute);
-  } catch {
-    return absolute;
-  }
 }
 
 /**

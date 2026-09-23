@@ -18,9 +18,15 @@
  * report dispositions them differently.
  */
 
+import type {BdIssue} from '../src/thread/bd';
+
 import {afterEach, describe, expect, spyOn, test} from 'bun:test';
 
+import {PLAIN_STYLE} from '../src/cli-style';
 import {
+  type AnswerIo,
+  type AnswerWriter,
+  type AskView,
   askViewOf,
   decisionFor,
   orderAsks,
@@ -30,23 +36,18 @@ import {
   shellSingleQuote,
   trimAnswerText,
   walkAsks,
-  type AnswerIo,
-  type AnswerWriter,
-  type AskView,
 } from '../src/thread/answer';
 import {createFakeBd, type FakeBd, type FakeState} from './fake-bd';
-
-import type {BdIssue} from '../src/thread/bd';
 
 function view(overrides: Partial<AskView> = {}): AskView {
   return {
     askIndex: 0,
-    priority: 3,
     defaultAction: 'I take the recommended option.',
     description: '[Pick a/b] Ship it?',
     id: 'jl-a1.1',
     kind: 'pick',
     optionCount: 2,
+    priority: 3,
     reportCount: 1,
     title: 'Ship it?',
     ...overrides,
@@ -58,11 +59,11 @@ function scriptedIo(lines: string[], block = ''): AnswerIo & {shown: string[]} {
   const queue = [...lines];
   const shown: string[] = [];
   return {
-    async block() {
-      return block;
+    block() {
+      return Promise.resolve(block);
     },
-    async line() {
-      return queue.shift() ?? '';
+    line() {
+      return Promise.resolve(queue.shift() ?? '');
     },
     print(text: string) {
       shown.push(text);
@@ -75,15 +76,15 @@ function scriptedIo(lines: string[], block = ''): AnswerIo & {shown: string[]} {
 function recordingWriter(): AnswerWriter & {wrote: string[]} {
   const wrote: string[] = [];
   return {
-    async ask(ask, decision) {
+    ask(ask, decision) {
       wrote.push(
         `${ask.id}:${decision.kind === 'skipped' ? 'skip' : decision.text}`,
       );
-      return {ok: true};
+      return Promise.resolve({ok: true});
     },
-    async note(text) {
+    note(text) {
       wrote.push(`note:${text}`);
-      return {ok: true};
+      return Promise.resolve({ok: true});
     },
     wrote,
   };
@@ -96,22 +97,22 @@ describe('reading an ask bead', () => {
       id: 'jl-a1.1',
       metadata: {
         askIndex: 2,
-        priority: 0,
         defaultAction: 'I ship it.',
         kind: 'pick',
         optionCount: 3,
+        priority: 0,
         reportCount: 4,
       },
       title: 'Ship it?',
     };
     expect(askViewOf(issue)).toEqual({
       askIndex: 2,
-      priority: 0,
       defaultAction: 'I ship it.',
       description: 'the rendered ask',
       id: 'jl-a1.1',
       kind: 'pick',
       optionCount: 3,
+      priority: 0,
       reportCount: 4,
       title: 'Ship it?',
     });
@@ -219,9 +220,9 @@ describe('trimAnswerText', () => {
 describe('orderAsks', () => {
   test('blocking asks come first, then payload order within one report', () => {
     const asks = [
-      view({askIndex: 1, priority: 3, id: 'jl-a1.3'}),
-      view({askIndex: 2, priority: 0, id: 'jl-a1.2'}),
-      view({askIndex: 0, priority: 3, id: 'jl-a1.1'}),
+      view({askIndex: 1, id: 'jl-a1.3', priority: 3}),
+      view({askIndex: 2, id: 'jl-a1.2', priority: 0}),
+      view({askIndex: 0, id: 'jl-a1.1', priority: 3}),
     ];
     expect(orderAsks(asks).map((ask) => ask.id)).toEqual([
       'jl-a1.2',
@@ -235,8 +236,8 @@ describe('orderAsks', () => {
     // before "jl-a1.2" — so the walk asked them in an order the report never
     // printed, and "2. b" landed on the wrong ask.
     const asks = [
-      view({askIndex: 9, priority: 0, id: 'jl-a1.10'}),
-      view({askIndex: 1, priority: 0, id: 'jl-a1.2'}),
+      view({askIndex: 9, id: 'jl-a1.10', priority: 0}),
+      view({askIndex: 1, id: 'jl-a1.2', priority: 0}),
     ];
     expect(orderAsks(asks).map((ask) => ask.id)).toEqual([
       'jl-a1.2',
@@ -246,9 +247,9 @@ describe('orderAsks', () => {
 
   test('a CARRIED ask leads its group, exactly as the report prints it', () => {
     const asks = [
-      view({askIndex: 0, priority: 0, id: 'jl-a1.9', reportCount: 3}),
-      view({askIndex: 0, priority: 0, id: 'jl-a1.1', reportCount: 1}),
-      view({askIndex: 0, priority: 3, id: 'jl-a1.8', reportCount: 2}),
+      view({askIndex: 0, id: 'jl-a1.9', priority: 0, reportCount: 3}),
+      view({askIndex: 0, id: 'jl-a1.1', priority: 0, reportCount: 1}),
+      view({askIndex: 0, id: 'jl-a1.8', priority: 3, reportCount: 2}),
     ];
     expect(orderAsks(asks).map((ask) => ask.id)).toEqual([
       'jl-a1.1',
@@ -261,8 +262,8 @@ describe('orderAsks', () => {
     // It cannot have come from the report being rendered — that one stamps
     // every ask it creates — so it is carried by definition.
     const asks = [
-      view({askIndex: 0, priority: 0, id: 'jl-a1.4', reportCount: 1}),
-      view({askIndex: null, priority: 0, id: 'jl-a1.3', reportCount: null}),
+      view({askIndex: 0, id: 'jl-a1.4', priority: 0, reportCount: 1}),
+      view({askIndex: null, id: 'jl-a1.3', priority: 0, reportCount: null}),
     ];
     expect(orderAsks(asks).map((ask) => ask.id)).toEqual([
       'jl-a1.3',
@@ -274,13 +275,13 @@ describe('orderAsks', () => {
 describe('walkAsks', () => {
   test('one pick, one skip and a free-text note — the whole gate in one walk', async () => {
     const asks = [
-      view({priority: 0, id: 'jl-a1.1', kind: 'pick', optionCount: 2}),
+      view({id: 'jl-a1.1', kind: 'pick', optionCount: 2, priority: 0}),
       view({
-        priority: 3,
         defaultAction: 'I leave the knob on.',
         id: 'jl-a1.2',
         kind: 'approve',
         optionCount: 0,
+        priority: 3,
       }),
     ];
     const io = scriptedIo(['b', ''], 'also check the hook');
@@ -296,8 +297,47 @@ describe('walkAsks', () => {
       'skipped; Claude will: I leave the knob on.',
     );
     // And each write says so, by id — the line that replaces the old silence.
-    expect(io.shown).toContain('   ✓ recorded jl-a1.1');
-    expect(io.shown).toContain('   ✓ recorded jl-a1.2');
+    // At the body column, under the ask (K11, k0b8n.10).
+    expect(io.shown).toContain('      ✓ recorded jl-a1.1');
+    expect(io.shown).toContain('      ✓ recorded jl-a1.2');
+  });
+
+  test('K11: the ask is laid out man-page style — header at 2, body at 6, a blank line between options, one letter each', async () => {
+    const io = scriptedIo(['a']);
+    await walkAsks(
+      [
+        view({
+          description: [
+            '[Pick a/b] Ship it?',
+            '',
+            'CONTEXT: the knob defaults off.',
+            '',
+            'OPTIONS:',
+            '  a. (Recommended) a. Ship it now',
+            '  b. b. Wait',
+            '',
+            'IF UNANSWERED: I ship it.',
+          ].join('\n'),
+          id: 'jl-a1.1',
+          kind: 'pick',
+          optionCount: 2,
+          priority: 0,
+        }),
+      ],
+      io,
+      recordingWriter(),
+    );
+    const shown = io.shown;
+    expect(shown.find((line) => line.includes('1/1'))).toMatch(
+      /^ {2}── 1\/1 · jl-a1\.1 · P0/u,
+    );
+    const optionA = shown.indexOf('      a. (Recommended) Ship it now');
+    const optionB = shown.indexOf('      b. Wait');
+    expect(optionA).toBeGreaterThan(0);
+    expect(shown[optionA - 1]).toBe('');
+    expect(optionB).toBe(optionA + 2);
+    expect(shown).toContain('      CONTEXT: the knob defaults off.');
+    expect(shown.join('\n')).not.toContain('a. (Recommended) a.');
   });
 
   test('the ask is SHOWN before it is asked', async () => {
@@ -321,8 +361,8 @@ describe('walkAsks', () => {
 
   test('every ask is walked, in blocking-first order', async () => {
     const asks = [
-      view({priority: 3, id: 'jl-a1.2'}),
-      view({priority: 0, id: 'jl-a1.1'}),
+      view({id: 'jl-a1.2', priority: 3}),
+      view({id: 'jl-a1.1', priority: 0}),
     ];
     const result = await walkAsks(
       asks,
@@ -338,17 +378,21 @@ describe('walkAsks', () => {
   test('a failed write is reported on the spot and the walk carries on', async () => {
     const io = scriptedIo(['a', 'b']);
     const writer: AnswerWriter = {
-      async ask(ask) {
+      ask(ask) {
         if (ask.id === 'jl-a1.1')
-          return {detail: 'comment — bd said no', ok: false, retry: 'fix me'};
-        return {ok: true};
+          return Promise.resolve({
+            detail: 'comment — bd said no',
+            ok: false,
+            retry: 'fix me',
+          });
+        return Promise.resolve({ok: true});
       },
-      async note() {
-        return {ok: true};
+      note() {
+        return Promise.resolve({ok: true});
       },
     };
     const result = await walkAsks(
-      [view({priority: 0, id: 'jl-a1.1'}), view({priority: 0, id: 'jl-a1.2'})],
+      [view({id: 'jl-a1.1', priority: 0}), view({id: 'jl-a1.2', priority: 0})],
       io,
       writer,
     );
@@ -381,12 +425,12 @@ describe('walkAsks', () => {
     const shownWhenWriting: string[] = [];
     const io = scriptedIo(['a'], 'also check the hook');
     const writer: AnswerWriter = {
-      async ask() {
-        return {ok: true};
+      ask() {
+        return Promise.resolve({ok: true});
       },
-      async note() {
+      note() {
         shownWhenWriting.push(...io.shown);
-        return {ok: true};
+        return Promise.resolve({ok: true});
       },
     };
     await walkAsks([view()], io, writer);
@@ -429,6 +473,7 @@ function captureConsole(): {errors: string[]; logs: string[]} {
 function seededFake(
   failCommentAddFor: string | null = null,
   exportFails = false,
+  notes = 'THE RENDERED REPORT',
 ): FakeBd {
   const fake = createFakeBd(0, failCommentAddFor, exportFails);
   const state: FakeState = fake.read();
@@ -436,7 +481,7 @@ function seededFake(
     {
       id: 'jl-t1',
       metadata: {reportedAt: '2026-09-12T10:00:00.000Z', sessionId: SESSION},
-      notes: 'THE RENDERED REPORT',
+      notes,
       parent: null,
       status: 'in_progress',
       title: 'A session',
@@ -447,10 +492,10 @@ function seededFake(
       id: 'jl-t1.1',
       metadata: {
         askIndex: 0,
-        priority: 0,
         defaultAction: 'I take a.',
         kind: 'pick',
         optionCount: 2,
+        priority: 0,
         reportCount: 1,
       },
       parent: 'jl-t1',
@@ -463,10 +508,10 @@ function seededFake(
       id: 'jl-t1.2',
       metadata: {
         askIndex: 1,
-        priority: 3,
         defaultAction: 'I leave it.',
         kind: 'approve',
         optionCount: 0,
+        priority: 3,
         reportCount: 1,
       },
       parent: 'jl-t1',
@@ -494,15 +539,17 @@ describe('runThreadAnswer against bd', () => {
     captureConsole();
     const atPrompt: string[][] = [];
     const io: AnswerIo = {
-      async block() {
+      block() {
         atPrompt.push(commentsAdded(fake));
-        return '';
+        return Promise.resolve('');
       },
-      async line() {
+      line() {
         atPrompt.push(commentsAdded(fake));
-        return 'b';
+        return Promise.resolve('b');
       },
-      print() {},
+      print() {
+        /* the fake renders nothing; the calls are what is asserted */
+      },
     };
 
     const code = await runThreadAnswer({
@@ -523,6 +570,39 @@ describe('runThreadAnswer against bd', () => {
     // The note prompt: both answers are in, so the only write left is the note.
     expect(atPrompt[2]).toHaveLength(2);
     expect(atPrompt[2]![1]).toContain('jl-t1.2');
+  });
+
+  test('k0b8n.10 e: the replayed report goes through the report renderer, not printed raw', async () => {
+    // A report as stored before the letter fix: the double letter, and asks
+    // and options stacked with no blank line between them.
+    const stored = [
+      '🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑',
+      '',
+      '⚡ 🙋 needs your answers · 📈 50% · 🛑 1 P0 ask',
+      '',
+      '**Asks — everything I need from you:**',
+      '  1. 🛑 P0 · [Pick a/b] Merge it? (jl-t1.1)',
+      '     Context: it is ready.',
+      '     a. (Recommended) a. Merge it now',
+      '     b. b. Wait',
+      "     If you don't answer: I wait.",
+    ].join('\n');
+    const fake = seededFake(null, false, stored);
+    const {logs} = captureConsole();
+    await runThreadAnswer({
+      autoCommit: false,
+      env: envFor(fake),
+      io: scriptedIo(['b', 'y'], ''),
+      style: PLAIN_STYLE,
+      threadId: 'jl-t1',
+    });
+    const replay = logs[0] ?? '';
+    // Piped (tests are not a TTY): the normalised markdown — one letter per
+    // option, a blank line between every option, no escapes.
+    expect(replay).toContain('a. (Recommended) Merge it now');
+    expect(replay).not.toContain('a. (Recommended) a.');
+    expect(replay).toMatch(/Merge it now\n\n\s+- b\. Wait/u);
+    expect(replay).not.toContain('\u001b');
   });
 
   test('the last line is what Justin says, not a command he cannot run', async () => {

@@ -13,11 +13,11 @@ import {join} from 'path';
 
 import {resolveThreadConfig} from '../src/thread/config';
 import {
+  probeWritable,
+  SANDBOX_DENIED_LINE,
   threadsBeadsDir,
   threadsRepoDir,
   threadsRepoDirResolution,
-  probeWritable,
-  SANDBOX_DENIED_LINE,
   threadsStateDir,
 } from '../src/thread/paths';
 import {createSandbox, type Sandbox} from './sandbox';

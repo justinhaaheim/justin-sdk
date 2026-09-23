@@ -6,7 +6,7 @@
  * offline and fast.
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
+import {afterEach, describe, expect, test} from 'bun:test';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
@@ -64,7 +64,7 @@ describe('eslint-setup', () => {
     expect(pkg.scripts?.['lint-base']).toBe(
       'eslint --report-unused-disable-directives --max-warnings 0',
     );
-    expect(pkg.scripts?.['lint']).toBe('bun run lint-base -- .');
+    expect(pkg.scripts?.lint).toBe('bun run lint-base -- .');
     expect(pkg.scripts?.['lint:fix']).toBe('bun run lint-base -- --fix .');
     expect(pkg.scripts?.['lint:fix:file']).toBe('bun run lint-base -- --fix');
 
@@ -126,9 +126,9 @@ describe('eslint-setup', () => {
     sb.writeFile('eslint.config.cjs', customContent);
 
     const exitCode = await runEslintSetup({
+      force: true,
       projectRoot: sb.path,
       quiet: true,
-      force: true,
     });
     expect(exitCode).toBe(0);
 
@@ -222,8 +222,8 @@ describe('eslint-setup', () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
-          name: 'test',
           devDependencies: {someOther: '1.0.0'},
+          name: 'test',
         },
       }),
     );
@@ -290,7 +290,7 @@ describe('eslint-setup', () => {
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),
     ) as {scripts?: Record<string, string>};
     // User's lint script preserved untouched.
-    expect(pkg.scripts?.['lint']).toBe('echo custom');
+    expect(pkg.scripts?.lint).toBe('echo custom');
     // But the other convenience scripts were still added.
     expect(pkg.scripts?.['lint-base']).toBe(
       'eslint --report-unused-disable-directives --max-warnings 0',

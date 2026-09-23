@@ -35,11 +35,11 @@ import {runUsageCheckSetup} from './usage-check-setup';
 // ---------------------------------------------------------------------------
 
 export interface ComponentRunArgs {
-  projectRoot: string;
-  quiet: boolean;
   force: boolean;
   /** beads only: skip the git commit at the end (defaults to true). */
   noCommit?: boolean;
+  projectRoot: string;
+  quiet: boolean;
   /**
    * The remote `stepDepsHasSdk` verifies the pin tag against, forwarded to the
    * `base-setup` every installer chains.
@@ -82,25 +82,25 @@ const RUNNERS: Record<
   (args: ComponentRunArgs) => Promise<number>
 > = {
   'base-setup': (a) => runBaseSetup(base(a)),
-  gitignore: (a) => runGitignoreSetup(base(a)),
-  prettier: (a) => runPrettierSetup(base(a)),
-  tsconfig: (a) => runTsconfigSetup(base(a)),
-  eslint: (a) => runEslintSetup(base(a)),
-  husky: (a) => runHuskySetup(base(a)),
-  'gh-actions': (a) => runGhActionsSetup(base(a)),
   beads: (a) =>
     runBeadsSetup({
+      noCommit: a.noCommit ?? true,
       projectRoot: a.projectRoot,
       quiet: a.quiet,
-      noCommit: a.noCommit ?? true,
       yes: a.yes ?? false,
       ...(a.sdkRepoUrl == null ? {} : {sdkRepoUrl: a.sdkRepoUrl}),
     }),
-  eas: (a) => runEasSetup(base(a)),
-  'time-check': (a) => runTimeCheckSetup(base(a)),
-  'usage-check': (a) => runUsageCheckSetup(base(a)),
-  'thread-hooks': (a) => runThreadHooksSetup(base(a)),
   'critical-rules': (a) => runCriticalRulesSetup(base(a)),
+  eas: (a) => runEasSetup(base(a)),
+  eslint: (a) => runEslintSetup(base(a)),
+  'gh-actions': (a) => runGhActionsSetup(base(a)),
+  gitignore: (a) => runGitignoreSetup(base(a)),
+  husky: (a) => runHuskySetup(base(a)),
+  prettier: (a) => runPrettierSetup(base(a)),
+  'thread-hooks': (a) => runThreadHooksSetup(base(a)),
+  'time-check': (a) => runTimeCheckSetup(base(a)),
+  tsconfig: (a) => runTsconfigSetup(base(a)),
+  'usage-check': (a) => runUsageCheckSetup(base(a)),
 };
 
 /** Run a component by its short name. */

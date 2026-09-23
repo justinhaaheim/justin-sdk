@@ -18,10 +18,10 @@
  * not be read are opposite facts, and the number is read by wrap-up logic.
  */
 
-import {findTranscript} from './facts';
-import {formatTokens, readTranscriptFacts} from '../usage-check';
-
 import type {EnvLike} from './paths';
+
+import {formatTokens, readTranscriptFacts} from '../usage-check';
+import {findTranscript} from './facts';
 
 export interface UsageNowOptions {
   env?: EnvLike;

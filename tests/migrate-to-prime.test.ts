@@ -6,9 +6,9 @@
  * "git-tracked AND clean".
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
+import {afterEach, describe, expect, test} from 'bun:test';
 import {execSync} from 'child_process';
-import {existsSync, readFileSync, writeFileSync, mkdirSync} from 'fs';
+import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {
@@ -307,9 +307,9 @@ describe('migrate-to-prime', () => {
       join(sb.path, 'justin-sdk.config.json'),
       JSON.stringify(
         {
-          version: '0.6.1',
           components: ['base-setup', 'beads-setup', 'claude-md-setup'],
           lastSynced: '2026-06-24',
+          version: '0.6.1',
         },
         null,
         2,

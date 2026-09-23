@@ -18,14 +18,14 @@
  * nowhere.
  */
 
+import type {ThreadFacts} from './facts';
+import type {EnvLike} from './paths';
+import type {ThreadReportPayload} from './schema';
+
 import {mkdirSync, readdirSync, statSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {probeErrorMessage, threadsStateDir} from './paths';
-
-import type {EnvLike} from './paths';
-import type {ThreadFacts} from './facts';
-import type {ThreadReportPayload} from './schema';
 
 /** What gets written to disk: the payload, the facts, and the provenance. */
 export interface ArchivedReport {
@@ -40,7 +40,7 @@ export interface ArchivedReport {
 
 export type WriteResult =
   | {ok: true; path: string}
-  | {ok: false; path: string; error: string};
+  | {error: string; ok: false; path: string};
 
 /**
  * A filesystem-safe stamp. `:` is legal on APFS but is rendered as `/` by
@@ -62,11 +62,23 @@ function writeJson(path: string, dir: string, body: unknown): WriteResult {
   }
 }
 
+/**
+ * The parent of every per-session archive directory.
+ *
+ * Exported because `thread search` (k0b8n.2, K8) reads the whole archive rather
+ * than one session's, and the directory layout must be spelled in exactly one
+ * place: a search that hardcoded `<state>/reports` would go quietly blind the
+ * day this moved.
+ */
+export function reportsRootDir(env: EnvLike = process.env): string {
+  return join(threadsStateDir(env), 'reports');
+}
+
 export function reportsDir(
   sessionId: string,
   env: EnvLike = process.env,
 ): string {
-  return join(threadsStateDir(env), 'reports', sessionId);
+  return join(reportsRootDir(env), sessionId);
 }
 
 export function spoolDir(env: EnvLike = process.env): string {
@@ -161,6 +173,86 @@ export function stopMarkPath(
   );
 }
 
+/**
+ * Where every session's messages are logged (home-base-k0b8n.9, K10 b/e).
+ *
+ * One `<sessionId>.jsonl` per session: an append-only line per prompt and per
+ * final Claude message, written by the `thread capture` hook and rewritten from
+ * the transcript by `thread backfill`. It is an INDEX of the transcript, not an
+ * archive of it — the transcript stays the source of truth — so it lives here
+ * beside the report archive (D5), is never committed to the threads repo and is
+ * never pushed (K10 anti-decision 2).
+ */
+export function messagesDir(env: EnvLike = process.env): string {
+  return join(threadsStateDir(env), 'messages');
+}
+
+export function messageLogPath(
+  sessionId: string,
+  env: EnvLike = process.env,
+): string {
+  return join(messagesDir(env), `${sessionId}.jsonl`);
+}
+
+/**
+ * The capture child's per-session lock and its dirty stamp (K10 c).
+ *
+ * The lock serialises bd writers for ONE session: at most one child per session
+ * talks to bd at a time. A child that finds it held writes the dirty stamp and
+ * leaves; the holder sees the stamp and runs once more, so the newest message
+ * always lands without two writers racing.
+ */
+export function captureLocksDir(env: EnvLike = process.env): string {
+  return join(threadsStateDir(env), 'capture-locks');
+}
+
+export function captureLockPath(
+  sessionId: string,
+  env: EnvLike = process.env,
+): string {
+  return join(captureLocksDir(env), `${sessionId}.lock`);
+}
+
+export function captureDirtyPath(
+  sessionId: string,
+  env: EnvLike = process.env,
+): string {
+  return join(captureLocksDir(env), `${sessionId}.dirty`);
+}
+
+/**
+ * The SEEDED stamp (home-base-k0b8n.16): present once the capture child has
+ * rewritten this session's log from its transcript. A sidecar rather than a
+ * line in the log, so the log stays pure message lines for every reader and
+ * the backfill's authoritative rewrite cannot erase it. Only a SUCCESSFUL
+ * seed writes it; a seed that could not read the transcript leaves it absent,
+ * so the next capture tries again.
+ */
+export function captureSeedStampPath(
+  sessionId: string,
+  env: EnvLike = process.env,
+): string {
+  return join(captureLocksDir(env), `${sessionId}.seeded`);
+}
+
+/**
+ * One JSON line per `thread stop-check` run, passes included (k0b8n.11, K12),
+ * so "has the refusal ever kicked in" is `thread stop-check --stats`, not an
+ * archaeology dig through transcripts.
+ */
+export function stopCheckLogPath(env: EnvLike = process.env): string {
+  return join(threadsStateDir(env), 'stop-check.jsonl');
+}
+
+/**
+ * One JSON line per capture-child run: what it did to which bead, or why it
+ * could not (K10 c). The child runs detached with its stdio ignored, so this
+ * file is the ONLY place a bd failure can be loud.
+ */
+export function captureRunLogPath(env: EnvLike = process.env): string {
+  return join(threadsStateDir(env), 'capture.jsonl');
+}
+
 /** Drop the marker. A failure is NAMED — the caller must not block without it. */
 export function writeStopMark(
   sessionId: string,
@@ -204,8 +296,8 @@ export function stopMarkExists(
  */
 export type ArchiveProbe =
   | {kind: 'none'}
-  | {kind: 'newest'; at: number}
-  | {kind: 'unknown'; error: string};
+  | {at: number; kind: 'newest'}
+  | {error: string; kind: 'unknown'};
 
 export function newestArchivedReportAt(
   sessionId: string,

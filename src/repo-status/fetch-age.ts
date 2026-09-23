@@ -33,7 +33,7 @@ import {resolve} from 'path';
 
 export type FetchAge =
   /** A fetch has happened in this checkout; `at` is when the last one finished. */
-  | {kind: 'fetched'; at: string}
+  | {at: string; kind: 'fetched'}
   /** No FETCH_HEAD: nothing has ever been fetched into this checkout. */
   | {kind: 'never'}
   /** The age could not be determined. NOT "recent" and not "never". */

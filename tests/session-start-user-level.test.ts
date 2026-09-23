@@ -25,8 +25,8 @@ import {mkdirSync, writeFileSync} from 'fs';
 import {join, resolve} from 'path';
 
 import {projectHookOwnsRepo, sessionProjectRoot} from '../src/session-start';
-import {createSandbox} from './sandbox';
 import {git} from './git-fixtures';
+import {createSandbox} from './sandbox';
 
 function enrol(root: string): void {
   writeFileSync(
@@ -147,7 +147,7 @@ const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
 function runUserLevel(
   projectRoot: string,
   promptsDir?: string,
-): {stdout: string; status: number} {
+): {status: number; stdout: string} {
   const home = createSandbox();
   try {
     const result = execFileSync(

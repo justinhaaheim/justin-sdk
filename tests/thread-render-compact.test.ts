@@ -16,12 +16,11 @@
  * NEGATIVE CONTROLS are recorded beside the tests that have one.
  */
 
+import type {ThreadFacts} from '../src/thread/facts';
+import type {ThreadReportPayload} from '../src/thread/schema';
+
 import {describe, expect, test} from 'bun:test';
 
-import {
-  buildReportModel,
-  COMPACT_LAST_MESSAGE_CAP,
-} from '../src/thread/report-model';
 import {
   BEADS_TOUCHED_HEADING,
   compactStoredReport,
@@ -31,11 +30,13 @@ import {
   renderMarkdown,
   WORK_PRODUCT_HEADING,
 } from '../src/thread/render-markdown';
+import {
+  buildReportModel,
+  COMPACT_LAST_MESSAGE_CAP,
+  FULL_LAST_MESSAGE_CAP,
+} from '../src/thread/report-model';
 import {validateThreadReport} from '../src/thread/schema';
 import {examplePayload} from './thread-schema.test';
-
-import type {ThreadFacts} from '../src/thread/facts';
-import type {ThreadReportPayload} from '../src/thread/schema';
 
 function facts(overrides: Partial<ThreadFacts> = {}): ThreadFacts {
   return {
@@ -45,13 +46,19 @@ function facts(overrides: Partial<ThreadFacts> = {}): ThreadFacts {
     cwd: '/Users/jhaa/Dev/home-base/projects/justin-sdk',
     dirty: false,
     entrypoint: 'cli',
+    firstUserMessage: 'kick this off',
+    firstUserMessageAt: null,
     headSha: '8dc0fd1abc9912345678',
     isWorktree: false,
+    lastAssistantMessage: 'Done — here is the report.',
+    lastAssistantMessageAt: null,
     lastUserMessage: 'go build the must-see report',
+    lastUserMessageAt: null,
     model: 'claude-opus-5',
-    reportedAt: '2026-09-15T09:00:00.000Z',
     repo: 'justin-sdk',
     repoPath: '/Users/jhaa/Dev/home-base/projects/justin-sdk',
+    reportedAt: '2026-09-15T09:00:00.000Z',
+    resumeCommand: "cd '/repo' && claude --resume session-1",
     sessionId: '5b9ad9b0-89c5-48ca-a5b2-8e6b9bdabf3d',
     startedAt: '2026-09-15T07:00:00.000Z',
     tokensAtStop: 497_312,
@@ -139,13 +146,13 @@ describe('the compact report is the MUST-SEE report', () => {
     // Everything that is not must-see is gone — not shortened, gone.
     for (const heading of [
       DID_HEADING,
-      '**What I learned:**',
-      '**Answers to your questions:**',
-      '**Deviations from what you asked for:**',
-      '**Prior asks — closed by this report:**',
+      '**💡 What I learned:**',
+      '**💬 Answers to your questions:**',
+      '**⚠️ Deviations from what you asked for:**',
+      '**🗂️ Prior asks — closed by this report:**',
       WORK_PRODUCT_HEADING,
       BEADS_TOUCHED_HEADING,
-      '**What happens next (mine):**',
+      '**▶️ What happens next (mine):**',
     ]) {
       expect(compact).not.toContain(heading);
     }
@@ -155,13 +162,13 @@ describe('the compact report is the MUST-SEE report', () => {
     const full = render(true);
     for (const heading of [
       DID_HEADING,
-      '**What I learned:**',
-      '**Answers to your questions:**',
-      '**Deviations from what you asked for:**',
-      '**Prior asks — closed by this report:**',
+      '**💡 What I learned:**',
+      '**💬 Answers to your questions:**',
+      '**⚠️ Deviations from what you asked for:**',
+      '**🗂️ Prior asks — closed by this report:**',
       WORK_PRODUCT_HEADING,
       BEADS_TOUCHED_HEADING,
-      '**What happens next (mine):**',
+      '**▶️ What happens next (mine):**',
     ]) {
       expect(full).toContain(heading);
     }
@@ -176,7 +183,9 @@ describe('the compact report is the MUST-SEE report', () => {
     expect(compact).toContain("If you don't answer: I keep closing");
     // P1, in full.
     expect(compact).toContain('Which priorities belong in the compact report?');
-    expect(compact).toContain('a. (Recommended) a. P0+P1');
+    // The payload wrote 'a. P0+P1'; the letter is printed ONCE (k0b8n.10).
+    expect(compact).toContain('- a. (Recommended) P0+P1');
+    expect(compact).not.toContain('a. (Recommended) a.');
     // P2 and P3: not a word of them.
     expect(compact).not.toContain('Keep the emoji header on by default?');
     expect(compact).not.toContain(
@@ -246,6 +255,18 @@ describe('the compact report is the MUST-SEE report', () => {
     const compact = render(false, {lastUserMessage: long});
     expect(compact).toContain(`${'x'.repeat(COMPACT_LAST_MESSAGE_CAP - 1)}…`);
     expect(render(true, {lastUserMessage: long})).toContain('x'.repeat(900));
+  });
+
+  test('the FULL report caps at 1500 — the only cap left since k0b8n.1', () => {
+    // `ThreadFacts.lastUserMessage` used to arrive pre-truncated at 1500, so
+    // this cap never fired. The bead now stores the message whole (K4), which
+    // makes the renderer the one and only place anything is shortened — and an
+    // uncapped 20 KB brief printed into a status report is not what Justin
+    // asked for. `thread show`'s MESSAGES block is where the whole text lives.
+    const long = 'x'.repeat(20000);
+    const full = render(true, {lastUserMessage: long});
+    expect(full).toContain(`${'x'.repeat(FULL_LAST_MESSAGE_CAP - 1)}…`);
+    expect(full).not.toContain('x'.repeat(FULL_LAST_MESSAGE_CAP + 1));
   });
 
   test('the glance line carries all four badges', () => {

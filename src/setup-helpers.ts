@@ -39,29 +39,29 @@ export function isQuiet(): boolean {
 
 export interface ExecResult {
   exitCode: number;
-  stdout: string;
   stderr: string;
+  stdout: string;
 }
 
 export function exec(cmd: string, cwd: string): ExecResult {
   try {
     const stdout = execSync(cmd, {
       cwd,
+      encoding: 'utf-8',
       // Pass the live process env explicitly. This is a no-op in normal use
       // (the default already inherits the environment), but Bun's execSync
       // snapshots env at startup and ignores later `process.env` mutations
       // unless `env` is passed — tests rely on setting env vars at runtime.
       env: process.env,
-      encoding: 'utf-8',
       stdio: ['pipe', 'pipe', 'pipe'],
     }).trim();
-    return {exitCode: 0, stdout, stderr: ''};
+    return {exitCode: 0, stderr: '', stdout};
   } catch (error) {
-    const err = error as {status?: number; stdout?: string; stderr?: string};
+    const err = error as {status?: number; stderr?: string; stdout?: string};
     return {
       exitCode: err.status ?? 1,
-      stdout: (err.stdout ?? '').toString().trim(),
       stderr: (err.stderr ?? '').toString().trim(),
+      stdout: (err.stdout ?? '').toString().trim(),
     };
   }
 }
@@ -202,13 +202,13 @@ function isIgnoreEntryLine(line: string): boolean {
 
 export interface EnsureIgnoreEntriesResult {
   /** Entries that were not present in any spelling and were appended. */
-  added: ReadonlyArray<string>;
-  /** Lines rewritten from a different spelling to the canonical one. */
-  rewritten: ReadonlyArray<{from: string; to: string}>;
-  /** Redundant repeats of a canonical entry that were collapsed away. */
-  removed: ReadonlyArray<string>;
+  added: readonly string[];
   /** True when the file was written. */
   changed: boolean;
+  /** Redundant repeats of a canonical entry that were collapsed away. */
+  removed: readonly string[];
+  /** Lines rewritten from a different spelling to the canonical one. */
+  rewritten: readonly {from: string; to: string}[];
 }
 
 /**
@@ -230,16 +230,16 @@ export interface EnsureIgnoreEntriesResult {
  */
 export function ensureIgnoreEntries(
   filePath: string,
-  entries: ReadonlyArray<string>,
+  entries: readonly string[],
   options: {sectionHeader?: string} = {},
 ): EnsureIgnoreEntriesResult {
   const original = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : '';
   // `null` marks a line scheduled for removal; filtered out at the end.
-  const lines: Array<string | null> =
+  const lines: (string | null)[] =
     original === '' ? [] : original.replace(/\n$/, '').split('\n');
 
   const added: string[] = [];
-  const rewritten: Array<{from: string; to: string}> = [];
+  const rewritten: {from: string; to: string}[] = [];
   const removed: string[] = [];
 
   for (const entry of entries) {
@@ -251,13 +251,16 @@ export function ensureIgnoreEntries(
       if (normalizeIgnorePattern(line) === wanted) matches.push(i);
     }
 
-    if (matches.length === 0) {
+    // `keep` is taken first so "there was a match" is the compiler's fact and
+    // not a length test it cannot connect to the index below.
+    const keep = matches[0];
+    if (keep == null) {
       added.push(entry);
       continue;
     }
 
-    const [keep, ...extras] = matches;
-    const existing = lines[keep] as string;
+    const extras = matches.slice(1);
+    const existing = lines[keep]!;
     // NEVER STRIP A TRAILING SLASH (dchjw.15). The slash is not a spelling
     // variant: `tmp/` ignores the DIRECTORY tmp and `tmp` ignores anything of
     // that name, file included. Normalizing it away is right for MATCHING (the
@@ -275,7 +278,7 @@ export function ensureIgnoreEntries(
       lines[keep] = target;
     }
     for (const idx of extras) {
-      removed.push((lines[idx] as string).trim());
+      removed.push(lines[idx]!.trim());
       lines[idx] = null;
     }
   }

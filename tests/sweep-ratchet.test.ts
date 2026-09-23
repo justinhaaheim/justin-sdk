@@ -436,20 +436,20 @@ describe('assessSweepLeftover (F5)', () => {
 // ---------------------------------------------------------------------------
 
 interface E2EOptions {
+  /** A dependency bun cannot resolve, so hydration really fails. */
+  breakHydration?: boolean;
   /** Exit code of the read-only `doctor` baseline. */
   doctorExit?: number;
   /** Exit code of the `doctor --fix` gate. */
   doctorFixExit?: number;
+  /** A pre-commit hook that exits non-zero (health-logger-rn's shape). */
+  hostilePreCommit?: boolean;
   /**
    * always-green      — signal passes before and after (the ordinary repo)
    * always-red        — signal fails before and after (userscripts-j's shape)
    * red-when-swept    — signal fails exactly once the payload's bytes land
    */
   signal?: 'always-green' | 'always-red' | 'red-when-swept';
-  /** A pre-commit hook that exits non-zero (health-logger-rn's shape). */
-  hostilePreCommit?: boolean;
-  /** A dependency bun cannot resolve, so hydration really fails. */
-  breakHydration?: boolean;
 }
 
 /**
@@ -592,7 +592,7 @@ function e2eRepo(sb: Sandbox, name: string, options: E2EOptions = {}): string {
 
 async function captureLog<T>(
   fn: () => Promise<T>,
-): Promise<{value: T; out: string}> {
+): Promise<{out: string; value: T}> {
   const original = console.log;
   const lines: string[] = [];
   console.log = (...args: unknown[]) => {
@@ -632,9 +632,9 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
     expect(out).toContain('hydration failed twice');
     expectNoSweepRemains(repo);
 
-    const logPath = out.match(/failure log: (\S+\.log)/)?.[1];
+    const logPath = /failure log: (\S+\.log)/.exec(out)?.[1];
     expect(logPath).toBeDefined();
-    const written = readFileSync(logPath as string, 'utf-8');
+    const written = readFileSync(logPath!, 'utf-8');
     expect(written).toContain('broken-hydration · step: hydrate');
     expect(written).toContain('INSTALL failed');
   });
@@ -656,8 +656,8 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
       'justin-sdk baseline',
     );
 
-    const logPath = out.match(/failure log: (\S+\.log)/)?.[1];
-    const written = readFileSync(logPath as string, 'utf-8');
+    const logPath = /failure log: (\S+\.log)/.exec(out)?.[1];
+    const written = readFileSync(logPath!, 'utf-8');
     expect(written).toContain('payload-breaks-it · step: signal');
     expect(written).toContain('--- BASELINE (signal, before the payload) ---');
     expect(written).toContain('fixture signal: payload applied = false');
@@ -686,8 +686,8 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
     expect(out).toContain('commit failed');
     expectNoSweepRemains(repo);
 
-    const logPath = out.match(/failure log: (\S+\.log)/)?.[1];
-    const written = readFileSync(logPath as string, 'utf-8');
+    const logPath = /failure log: (\S+\.log)/.exec(out)?.[1];
+    const written = readFileSync(logPath!, 'utf-8');
     expect(written).toContain('uncommittable · step: commit');
     // The raw command output, not just our own summary of it.
     expect(written).toContain('empty ident name');

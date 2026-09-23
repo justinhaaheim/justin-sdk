@@ -34,6 +34,7 @@ import {
 import {
   type BootContext,
   bootContract,
+  type BootPlan,
   bootPreamble,
   composeBootPrompt,
   crashBootPlan,
@@ -41,6 +42,7 @@ import {
   planStartBoot,
   scanHandoffBeads,
   sessionPrompt,
+  startSessionNumber,
 } from '../src/justin-loop/runner';
 import {initRepo} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -74,14 +76,14 @@ function handoff(over: Partial<Handoff> = {}): Handoff {
 
 /** `br list --json` output carrying the notes and labels the runner reads. */
 function listJson(
-  rows: Array<{
+  rows: {
     id: string;
-    title?: string;
-    status?: string;
-    notes?: string | null;
     labels?: string[];
+    notes?: string | null;
+    status?: string;
+    title?: string;
     updated_at?: string | null;
-  }>,
+  }[],
 ): string {
   return JSON.stringify({
     issues: rows.map((r) => ({
@@ -108,7 +110,7 @@ function fakeBr(stdout: string): {
   return {
     run: (_cwd: string, args: string[]) => {
       seen.push(args);
-      return {ok: true, reason: null, stdout};
+      return {ok: true, reason: null, stderr: null, stdout};
     },
     seen: () => seen,
   };
@@ -116,7 +118,7 @@ function fakeBr(stdout: string): {
 
 /** A `br` that always fails, the way a repo with no beads workspace does. */
 function brokenBr(reason: string): (cwd: string, args: string[]) => BrOutcome {
-  return () => ({ok: false, reason, stdout: ''});
+  return () => ({ok: false, reason, stderr: null, stdout: ''});
 }
 
 function row(over: Partial<HandoffRow> = {}): HandoffRow {
@@ -432,18 +434,103 @@ describe('planStartBoot — an explicit --prompt is an ASK (D1)', () => {
   });
 });
 
+/**
+ * 33.11 — which NUMBER the first session of a run takes.
+ *
+ * `sessionLabel` counted from 1 on every invocation, so the run that resumes an
+ * arc (`--pickup --label pilot2`, the command the blocked stop prints) called its
+ * next session `pilot2-1` again. Nothing broke — the stamp keeps `claude agents`
+ * names unique and only an OPEN same-`from` bead is refused (D5) — but the claim
+ * reason `picked up by pilot2-1` on a bead written by `pilot2-2` reads as a
+ * chain running backwards, and every ledger row of the arc claims to be its
+ * first session.
+ */
+describe('startSessionNumber — a resumed chain keeps counting (33.11)', () => {
+  function planFrom(from: string): BootPlan {
+    const start = planStartBoot({
+      kind: 'ok',
+      rows: [row({notes: handoffJson(handoff({from}))})],
+    });
+    // The whole point of building the plan through the real function: if the
+    // bead ever stopped being eligible, a hand-built plan would still say 3.
+    expect(start.plan.kind).toBe('handoff');
+    return start.plan;
+  }
+
+  test('a pickup of `<slug>-2` starts this run at 3', () => {
+    expect(startSessionNumber('pilot2', planFrom('pilot2-2'))).toBe(3);
+  });
+
+  test('a FRESH boot starts at 1, as it always did', () => {
+    expect(startSessionNumber('pilot2', {kind: 'fresh'})).toBe(1);
+  });
+
+  test('a RECONSTRUCT boot starts at 1 — it has no bead to count from', () => {
+    const plan = crashBootPlan(2, 'stopped after 45m (--timeout-min)');
+    expect(startSessionNumber('pilot2', plan)).toBe(1);
+  });
+
+  test('another arc’s slug never moves THIS run’s numbering', () => {
+    // A cross-arc pickup is legal (one arc per run, newest wins), but
+    // `other-arc-7` says nothing about how many sessions `pilot2` has had, and
+    // borrowing its length would stamp a number the ledger has no rows for.
+    expect(startSessionNumber('pilot2', planFrom('other-arc-7'))).toBe(1);
+  });
+
+  test('a `from` carrying no number is 1 rather than a guess', () => {
+    expect(startSessionNumber('pilot2', planFrom('pilot2'))).toBe(1);
+  });
+
+  test('an absurd number is 1 rather than a label past the safe-integer range', () => {
+    // `Number('12345678901234567890') + 1` is not the next label — it is not
+    // even an integer any more. Falling back to the old behaviour is the safe
+    // direction: a restart is confusing, a jump skips labels the ledger holds.
+    expect(
+      startSessionNumber('pilot2', planFrom('pilot2-12345678901234567890')),
+    ).toBe(1);
+  });
+
+  test('the number is taken from `from`, not from the bead id or the title', () => {
+    // The bead id (`hoff-1`) and the title both carry digits of their own; only
+    // the label the predecessor stamped on itself means anything here.
+    const start = planStartBoot({
+      kind: 'ok',
+      rows: [
+        row({
+          id: 'hoff-9',
+          notes: handoffJson(handoff({from: 'pilot2-4'})),
+          title: 'HANDOFF continue: arc 77',
+        }),
+      ],
+    });
+    expect(startSessionNumber('pilot2', start.plan)).toBe(5);
+  });
+});
+
 describe('bootPreamble', () => {
   const label = 'the-arc-2';
   const cwd = '/Users/jhaa/Dev/home-base';
 
   test('a fresh boot says nothing extra', () => {
-    expect(bootPreamble({cwd, label, plan: {kind: 'fresh'}})).toBeNull();
+    expect(
+      bootPreamble({
+        cwd,
+        label,
+        plan: {kind: 'fresh'},
+        predecessorSessionId: null,
+      }),
+    ).toBeNull();
   });
 
   test('a handoff boot names the bead, the claim, and the worktree', () => {
     const match = {handoff: handoff(), row: row({id: 'hoff-42'})};
     const preamble =
-      bootPreamble({cwd, label, plan: {kind: 'handoff', match}}) ?? '';
+      bootPreamble({
+        cwd,
+        label,
+        plan: {kind: 'handoff', match},
+        predecessorSessionId: null,
+      }) ?? '';
     expect(preamble).toContain('hoff-42');
     expect(preamble).toContain('br show hoff-42');
     expect(preamble).toContain(
@@ -474,6 +561,7 @@ describe('bootPreamble', () => {
         cwd: '/Users/jhaa/Dev/nature-sounds',
         label,
         plan: {kind: 'handoff', match},
+        predecessorSessionId: null,
       }) ?? '';
     expect(preamble).toContain('`/Users/jhaa/Dev/nature-sounds`');
     // Attached to the claim, not merely mentioned somewhere in the preamble.
@@ -489,7 +577,8 @@ describe('bootPreamble', () => {
 
   test('a reconstruct boot says NO handoff exists and never calls itself one', () => {
     const plan = crashBootPlan(2, 'stopped after 45m (--timeout-min)');
-    const preamble = bootPreamble({cwd, label, plan}) ?? '';
+    const preamble =
+      bootPreamble({cwd, label, plan, predecessorSessionId: null}) ?? '';
     expect(preamble).toContain('NO HANDOFF EXISTS');
     expect(preamble).toContain('session 2 ended without handing anything over');
     expect(preamble).toContain('--timeout-min');
@@ -504,7 +593,12 @@ describe('sessionPrompt and composeBootPrompt', () => {
   const cwd = '/Users/jhaa/Dev/home-base';
 
   test('a fresh boot runs the base prompt, untouched', () => {
-    const boot: BootContext = {cwd, label, plan: {kind: 'fresh'}};
+    const boot: BootContext = {
+      cwd,
+      label,
+      plan: {kind: 'fresh'},
+      predecessorSessionId: null,
+    };
     expect(sessionPrompt('/loop-session', boot)).toBe('/loop-session');
     expect(composeBootPrompt('/loop-session', boot)).toBe('/loop-session');
   });
@@ -515,7 +609,12 @@ describe('sessionPrompt and composeBootPrompt', () => {
     // of it — session 2 of an arc is not asked the question session 1 was.
     const next = 'Rewrite parseFoo, then run bun test and report the count.';
     const match = {handoff: handoff({next}), row: row()};
-    const boot: BootContext = {cwd, label, plan: {kind: 'handoff', match}};
+    const boot: BootContext = {
+      cwd,
+      label,
+      plan: {kind: 'handoff', match},
+      predecessorSessionId: null,
+    };
     expect(sessionPrompt('/loop-session', boot)).toBe(next);
     const composed = composeBootPrompt('/loop-session', boot);
     expect(composed.startsWith(next)).toBe(true);
@@ -530,6 +629,7 @@ describe('sessionPrompt and composeBootPrompt', () => {
       cwd,
       label,
       plan: crashBootPlan(1, 'no handoff bead'),
+      predecessorSessionId: null,
     };
     const composed = composeBootPrompt('/loop-session', boot);
     expect(composed.startsWith('/loop-session')).toBe(true);
@@ -540,7 +640,12 @@ describe('sessionPrompt and composeBootPrompt', () => {
     // Delivered twice on purpose: a skill that ignores its arguments would drop
     // the prompt copy silently.
     const match = {handoff: handoff(), row: row({id: 'hoff-42'})};
-    const boot: BootContext = {cwd, label, plan: {kind: 'handoff', match}};
+    const boot: BootContext = {
+      cwd,
+      label,
+      plan: {kind: 'handoff', match},
+      predecessorSessionId: null,
+    };
     expect(bootContract('CONTRACT', boot)).toContain('hoff-42');
     expect(bootContract('CONTRACT', boot).startsWith('CONTRACT')).toBe(true);
   });
@@ -632,6 +737,7 @@ describe('scripted simulation: a handoff bead round-trips through real br', () =
           cwd: repo,
           label: 'x-1',
           plan: start.plan,
+          predecessorSessionId: null,
         }),
       ).toBe(payload.next);
 
@@ -817,8 +923,21 @@ describe('CLI: --prompt makes the run an ASK (D1/D6)', () => {
   });
 
   test('the header names every label the chain may use', () => {
+    // `my-arc` is nobody's slug in this fixture — both waiting beads are from
+    // `other-*` — so the numbering starts where it always did.
     const run = runLoopCli(['--label', 'my-arc', '--max-sessions', '3']);
     expect(run.out).toContain('labels=my-arc-1…my-arc-3');
+  });
+
+  test('resuming the arc those beads belong to CONTINUES the numbering (33.11)', () => {
+    // The same fixture, run the way the blocked stop tells Justin to resume:
+    // `--label other` picks up `hoff-new`, whose `from` is `other-2`, so this
+    // run's three sessions are the arc's third, fourth and fifth. Through the
+    // real CLI because the banner is composed before anything is dispatched,
+    // and a dry run is enough to see it.
+    const run = runLoopCli(['--label', 'other', '--max-sessions', '3']);
+    expect(run.out).toContain('labels=other-3…other-5');
+    expect(run.out).toContain('numbering continues from other-2');
   });
 
   test('the RETIRED `ralph` name reaches nothing at all (dchjw.9)', () => {

@@ -74,6 +74,8 @@ bunx github:justinhaaheim/justin-sdk init
 | `justin-sdk install` | Reconcile the disk to `justin-sdk.config.json`, both directions |
 | `justin-sdk update` | Bump the SDK pin to the newest tag, then `install` |
 | `justin-sdk session-start` | The SessionStart hook (see below) |
+| `justin-sdk justin-loop` | Chain Claude Code sessions on one arc through handoff beads (see below) |
+| `justin-sdk thread` | Status reports as beads, one per session (see below) |
 | `justin-sdk --help` | Command reference |
 
 The CLI is exposed under ONE name, `justin-sdk`. The short `jsdk` and `j` bins were removed in v0.39 (epic home-base-dchjw D1): they existed only for typing ease, and both names resolve to real, unrelated packages on the npm registry, so every place one of them was typed after `bunx` was a live hazard.
@@ -107,6 +109,65 @@ It is read-only and always exits 0. Locally it emits `doctor --quiet`, the repo-
 ```
 
 The guard is in the hook string on purpose: an enrolled repo (the project hook owns it) and a machine without home-base's `justin-sdk-latest` on PATH both short-circuit before anything is spawned, so neither ever touches the network. `--user-level` re-checks enrolment itself, because `CLAUDE_PROJECT_DIR` is not guaranteed to be set. The project root is `$CLAUDE_PROJECT_DIR`, else the git toplevel of the cwd, else the cwd — never a walk up the parent chain, so a session in `~/Downloads` or inside a subdirectory is not silenced by an unrelated ancestor.
+
+## Chaining sessions: `justin-loop`
+
+```bash
+bun run justin-sdk justin-loop --help          # the runner's knobs
+bun run justin-sdk justin-loop handoff --help  # the fields a session writes
+```
+
+`justin-loop` runs a chain of Claude Code sessions on one arc. Each session ends by writing a **handoff bead** — what happened, and the successor's full starting instructions — and that bead is also what tells the runner whether to spawn a successor at all. There is no verdict file: the control channel is a committed bead, so the state of the chain survives in git rather than in the runner's memory.
+
+A handoff carries one of three dispositions, and the runner acts on it:
+
+| `--disposition` | What the runner does |
+| --- | --- |
+| `continue` | Boots a successor whose prompt is the handoff's `--next`, verbatim |
+| `done` | The arc is finished — the run stops and the bead is closed |
+| `blocked` | Only Justin can answer `--open-question` — the run stops with exit 2 |
+
+**Answering a blocked chain** (added 2026-09-19): `justin-sdk justin-loop handoff answer <id>` folds your answers into that bead's `next`, flips it to `continue`, and prints the command that restarts the arc from it. The answers come from `--answer` (repeat it to answer several questions IN ORDER, or give one to answer them all), `--answer-file` for anything multi-paragraph, or stdin when you pass neither. It refuses anything that is not an open, readable, blocked handoff. `handoff validate [id]` re-checks a bead against the schema — with no id, every open handoff.
+
+**The knobs that bound a run** are the ones to choose deliberately. `--help` prints each one's current default, and every other flag besides.
+
+| Flag | What it bounds |
+| --- | --- |
+| `--max-sessions` | How many sessions the chain may spawn in total |
+| `--timeout-min` | Per-session wall clock. Off by default — a session is then bounded by the ~300k wrap-up notice rather than by the clock |
+| `--handoff-settle-min` | Opt-in belt for the measured D15 stall: a session whose handoff bead is written while its `claude agents` row never reaches `done`. No scan is made until you set it, because settling can stop a session mid-commit |
+| `--blocked-wait-min` | How long a blocked session waits for Justin. Omitted, it waits indefinitely — blocked means waiting for him, and the runner does not decide he took too long |
+| `--session-stop-pct` / `--weekly-stop-pct` | The 5-hour and weekly quota windows. `--usage-gate` is ON and refuses to run when /usage cannot be read — an unreadable quota is reported as UNKNOWN, never as 0% |
+| `--model` / `--permission-mode` | What every session in the chain is spawned with |
+
+`--dry-run` prints the quota and what is waiting, then exits without spawning. Run state is appended to `runs.jsonl` under `--state-dir` (`~/.local/state/justin-sdk/justin-loop`), outside git on purpose — the facts you read live in the committed handoff beads.
+
+**Run it from a real terminal, never from inside a Claude session** — the runner warns, and a nested `claude` may EPERM. The pilot invocation, kept current on `home-base-1r6d.33.5`:
+
+```bash
+cd ~/Dev/home-base && bun run justin-sdk justin-loop --max-sessions 3 --model fable --label pilot2 --timeout-min 45 --handoff-settle-min 3 --prompt '/conductor <ask>'
+```
+
+Design and decisions live on epic **`home-base-1r6d.33`** — read it before changing runner behaviour, and run `bun run e2e:justin-loop` before a release (it is the only thing that drives a real `claude --bg` and a real `br`, and it cannot run in CI; the reasons are in `CLAUDE.md`). One `--help` quirk worth knowing: yargs repeats the runner's own options under every subcommand, so the fields that actually belong to `handoff` — `--from`, `--disposition`, `--arc`, `--worktree`, `--branch`, `--state`, `--next`, `--open-question`, `--context-tokens` — are at the END of that listing.
+
+## Status reports as beads: `thread`
+
+```bash
+bun run justin-sdk thread --help    # every subcommand
+bun run justin-sdk thread prepare   # ALWAYS run this before writing a report
+```
+
+`thread` turns the end-of-session status report from prose Justin has to parse into data: one **thread bead** per Claude Code session in `~/Dev/threads`, with a child **ask bead** for every single thing he has to do, so open asks survive across turns and sessions instead of evaporating with the conversation.
+
+The write path is `prepare` → payload JSON → `report`. `prepare` prints `THREADS: ENABLED | DISABLED | SANDBOX DENIED` (the line the wrap-up rule branches on), this session's thread bead, every open ask with Justin's answers verbatim, the facts the report will attach (you type none of them), and the payload skeleton with where to write it. Then `thread report --file <path>` validates, archives, upserts the bead with its child asks, and prints the rendered report — **exit 0 recorded · 1 NOT RECORDED · 2 refused**, so a report that was not recorded can never be mistaken for one that was.
+
+The read path is `thread board` (every live thread, grouped by repo, `--open-asks` for everything waiting on him), `thread show [threadId]`, `thread search <query…>` (which session was that phrase written in, plus the command that resumes it) and `thread inbox` — what a session reads at the START of a turn to pick up what Justin answered or skipped. `thread answer` is his side of it; `thread backfill` writes a bead for every session of the last 30 days that never reported.
+
+**Linking a successor to its predecessor** (added 2026-09-19, `home-base-k0b8n.5`): `prepare` and `report` both take `--continues-from-session <claude session id>`, which resolves that session to its thread bead and uses it as `continuesFrom` — for `prepare`, listing ITS open asks as ones this report must disposition. Both fall back to **`$JUSTIN_LOOP_PREDECESSOR_SESSION_ID`**, which the `justin-loop` runner sets on a successor's dispatch, so a chained session links itself with no flag typed anywhere. A payload's own `continuesFrom` always wins, and a predecessor with no thread bead is named out loud while the report is still written, unlinked. `--continues-from <threadId>` names the thread bead directly instead.
+
+It is knob-gated and off by default: `componentConfig.thread.enabled` is the preflight branch point rather than a master switch (the commands still work by hand when it is false), `.startOnSessionStart` creates the bead at session start, and `.enforce` arms the Stop hook that can block a session ending on a report it cannot prove was recorded. Run `bun run justin-sdk config schema` for every key, its default and the reasoning behind it; the hooks themselves come from `add thread-hooks`.
+
+Design lives on epics **`home-base-p1uj`** (the write and read paths) and **`home-base-k0b8n`** (searchable session memory, the verbatim messages, `continuesFrom`). The report FORMAT — the glance line, the ask priorities, the section order — is specified by a rule in the prompts repo (`src/rules/status-report-format.md`); this command renders it.
 
 ## Components
 

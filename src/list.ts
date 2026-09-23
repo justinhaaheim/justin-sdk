@@ -18,31 +18,33 @@ import {existsSync} from 'fs';
 import {resolve} from 'path';
 
 import {
-  type ComponentName,
+  COMPONENT_MANIFESTS,
+  componentInstalledEvidence,
+} from './component-manifest';
+import {
   componentApplicability,
+  type ComponentName,
   componentNameForConfigName,
   configNameFor,
   resolveComponents,
 } from './component-registry';
-import {
-  COMPONENT_MANIFESTS,
-  componentInstalledEvidence,
-} from './component-manifest';
 import {readJson} from './setup-helpers';
 
 export interface ComponentListRow {
-  name: ComponentName;
-  purpose: string;
-  installed: boolean;
-  /** Why we say it is installed, or null when it is not. */
-  installedBecause: string | null;
   applicable: boolean;
   /** Predicate names gating it; empty means it applies everywhere. */
   includeIf: readonly string[];
+  installed: boolean;
+  /** Why we say it is installed, or null when it is not. */
+  installedBecause: string | null;
+  name: ComponentName;
+  purpose: string;
   resolved: boolean;
 }
 
 export interface ComponentListing {
+  /** Set when the config could not be resolved; rows still carry disk facts. */
+  problem: string | null;
   rows: ComponentListRow[];
   /**
    * Where the "in config" column came from: 'config' (a `components` key),
@@ -50,8 +52,6 @@ export interface ComponentListing {
    * justin-sdk.config.json at all) or 'unreadable'.
    */
   source: 'config' | 'core' | 'not-enrolled' | 'unreadable';
-  /** Set when the config could not be resolved; rows still carry disk facts. */
-  problem: string | null;
 }
 
 /** Gather the listing. Pure read — nothing here writes. */

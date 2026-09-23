@@ -25,10 +25,11 @@
  *     message in the same run.
  */
 
+import type {Check, CheckNode} from '../src/check-runner';
+
 import {describe, expect, spyOn, test} from 'bun:test';
 
-import type {Check, CheckNode} from '../src/check-runner';
-import {runCheckTree, runChecks} from '../src/check-runner';
+import {runChecks, runCheckTree} from '../src/check-runner';
 
 const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';
@@ -45,7 +46,9 @@ function continuationLine(message: string): string {
 async function captureLog(
   run: () => Promise<number>,
 ): Promise<{exitCode: number; said: string}> {
-  const logs = spyOn(console, 'log').mockImplementation(() => {});
+  const logs = spyOn(console, 'log').mockImplementation(() => {
+    /* swallowed: the call is asserted, not its output */
+  });
   try {
     const exitCode = await run();
     const said = logs.mock.calls.map((call) => String(call[0])).join('\n');
@@ -65,15 +68,15 @@ function lineAfter(said: string, label: string): string {
 
 function passingCheck(label: string, message?: string): Check {
   return {
-    label,
     fn: () => (message == null ? {pass: true} : {message, pass: true}),
+    label,
   };
 }
 
 function failingCheck(label: string, message: string): Check {
   return {
-    label,
     fn: () => ({fix: 'Run: the fix', message, pass: false}),
+    label,
   };
 }
 

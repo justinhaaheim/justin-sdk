@@ -30,17 +30,17 @@ const SDK_PKG = '@justinhaaheim/justin-sdk';
 const SDK_REPO = 'justinhaaheim/justin-sdk';
 
 export interface SelfUpdateResult {
-  updated: boolean;
-  /** Version pinned in the project's node_modules before this call. */
-  previousVersion: string | null;
   /** Version we ended up with (same as previous if `updated: false`). */
   newVersion: string | null;
+  /** Version pinned in the project's node_modules before this call. */
+  previousVersion: string | null;
   /**
    * True iff the SDK was actually bumped. The caller (`justin-sdk update`) should
    * re-exec the freshly installed CLI so subsequent steps run against
    * the new code, not the stale process that started the update.
    */
   shouldReExec: boolean;
+  updated: boolean;
 }
 
 /**
@@ -66,21 +66,19 @@ function readInstalledSdkVersion(projectRoot: string): string | null {
  * Bump the SDK pin in the project's devDependencies to the latest tag
  * (if behind). See SelfUpdateResult for the return shape's meaning.
  */
-export async function selfUpdateSdk(
-  projectRoot: string,
-): Promise<SelfUpdateResult> {
+export function selfUpdateSdk(projectRoot: string): Promise<SelfUpdateResult> {
   const previousVersion = readInstalledSdkVersion(projectRoot);
   if (previousVersion == null) {
     fail(
       `${SDK_PKG} is not installed in this project. ` +
         'Run `bun run justin-sdk add base-setup` to bootstrap, then re-run update.',
     );
-    return {
-      updated: false,
-      previousVersion: null,
+    return Promise.resolve({
       newVersion: null,
+      previousVersion: null,
       shouldReExec: false,
-    };
+      updated: false,
+    });
   }
 
   const outcome = fetchLatestSdkTag();
@@ -89,12 +87,12 @@ export async function selfUpdateSdk(
       `Could not query latest SDK tag (${outcome.error}). ` +
         `Continuing with installed ${previousVersion}.`,
     );
-    return {
-      updated: false,
-      previousVersion,
+    return Promise.resolve({
       newVersion: previousVersion,
+      previousVersion,
       shouldReExec: false,
-    };
+      updated: false,
+    });
   }
   const latest = outcome.tag;
 
@@ -110,12 +108,12 @@ export async function selfUpdateSdk(
       : latest === previousVersion;
   if (alreadyCurrent) {
     success(`SDK already at latest tag (${latest})`);
-    return {
-      updated: false,
-      previousVersion,
+    return Promise.resolve({
       newVersion: previousVersion,
+      previousVersion,
       shouldReExec: false,
-    };
+      updated: false,
+    });
   }
 
   // Bump. `bun add -d` rewrites both package.json and the lockfile and
@@ -128,19 +126,19 @@ export async function selfUpdateSdk(
         'Continuing with installed version.',
     );
     if (installResult.stderr.length > 0) warn(installResult.stderr);
-    return {
-      updated: false,
-      previousVersion,
+    return Promise.resolve({
       newVersion: previousVersion,
+      previousVersion,
       shouldReExec: false,
-    };
+      updated: false,
+    });
   }
 
   success(`Bumped ${SDK_PKG}: ${previousVersion} → ${latest}`);
-  return {
-    updated: true,
-    previousVersion,
+  return Promise.resolve({
     newVersion: latest,
+    previousVersion,
     shouldReExec: true,
-  };
+    updated: true,
+  });
 }

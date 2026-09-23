@@ -51,22 +51,20 @@ export const DEFAULT_CONFLICT_FILE_CAP = 20;
 export type MergePreviewKind = 'clean' | 'conflicts' | 'unmeasured';
 
 export interface MergePreview {
-  kind: MergePreviewKind;
-  /** What this field answers, stated so a reader never re-derives it by hand. */
-  question: string;
-  /** The verdict in one line. Never phrased as reassurance when unmeasured. */
-  why: string;
+  /** The command that failed. Populated only when `kind` is `unmeasured`. */
+  command: string | null;
+  /** Exact count, uncapped. Null when nothing was measured. */
+  conflictedFileCount: number | null;
   /**
    * Paths git reported as conflicting. `[]` when the merge is clean (measured,
    * and there are none); NULL when nothing was measured at all.
    */
   conflictedFiles: string[] | null;
-  /** Exact count, uncapped. Null when nothing was measured. */
-  conflictedFileCount: number | null;
   /** True when `conflictedFiles` was cut to the cap; the count is still exact. */
   conflictedFilesTruncated: boolean;
-  /** The command that failed. Populated only when `kind` is `unmeasured`. */
-  command: string | null;
+  kind: MergePreviewKind;
+  /** What this field answers, stated so a reader never re-derives it by hand. */
+  question: string;
   /**
    * Submodule pointers the merge would move. EMPTY means checked and none move;
    * NULL means the check did not run (no submodule paths were supplied), which
@@ -76,6 +74,8 @@ export interface MergePreview {
    * the reason this field exists — see `SubmoduleShift`.
    */
   submoduleShifts: SubmoduleShift[] | null;
+  /** The verdict in one line. Never phrased as reassurance when unmeasured. */
+  why: string;
 }
 
 const QUESTION =
@@ -85,8 +85,8 @@ const QUESTION =
 interface GitRun {
   /** Exit code; null when the process could not be spawned or was signalled. */
   status: number | null;
-  stdout: string;
   stderr: string;
+  stdout: string;
 }
 
 /**
@@ -188,23 +188,18 @@ function parseConflictedPaths(stdout: string): string[] | null {
  *               in the submodule's object store, most often). NOT reassuring.
  */
 export interface SubmoduleShift {
-  path: string;
   /** The gitlink the baseline records today. */
   baselineSha: string;
+  direction: 'advance' | 'divergent' | 'regression' | 'unknown';
   /** The gitlink the merged tree would record. */
   mergedSha: string;
-  direction: 'advance' | 'divergent' | 'regression' | 'unknown';
+  path: string;
   why: string;
 }
 
 export interface MergePreviewOptions {
   /** Cap on the reported path LIST. The count is never capped. */
   maxFiles?: number;
-  /**
-   * Submodule paths to check the merged tree against. Empty means the check did
-   * not run, which is reported as such rather than as "no submodule moved".
-   */
-  submodulePaths?: string[];
   /**
    * The commits the two ref names resolved to at the top of the walk
    * (home-base-qyu1.33.6, D1). When present, EVERY git argv below uses these
@@ -218,6 +213,11 @@ export interface MergePreviewOptions {
    * pinned walk behind it: the names are then measured as they resolve now.
    */
   pins?: {baseline: string; branch: string};
+  /**
+   * Submodule paths to check the merged tree against. Empty means the check did
+   * not run, which is reported as such rather than as "no submodule moved".
+   */
+  submodulePaths?: string[];
 }
 
 /** The gitlink a tree-ish records at `path`, or null when there is none/unreadable. */

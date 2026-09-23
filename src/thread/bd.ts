@@ -39,6 +39,8 @@
  *   - `bd comments <id> --json` lists; `bd comments list <id>` is an error.
  */
 
+import type {EnvLike} from './paths';
+
 import {spawnSync} from 'child_process';
 import {mkdtempSync, rmSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
@@ -47,18 +49,16 @@ import {join} from 'path';
 import {SDK_RUN} from '../sdk-invocation';
 import {threadsRepoDir} from './paths';
 
-import type {EnvLike} from './paths';
-
 export type BdFailure =
-  | {kind: 'sandbox-denied'; command: string; detail: string}
-  | {kind: 'unreachable'; command: string; detail: string}
-  | {kind: 'locked'; command: string; detail: string}
-  | {kind: 'failed'; command: string; exitCode: number | null; detail: string}
-  | {kind: 'bad-json'; command: string; detail: string};
+  | {command: string; detail: string; kind: 'sandbox-denied'}
+  | {command: string; detail: string; kind: 'unreachable'}
+  | {command: string; detail: string; kind: 'locked'}
+  | {command: string; detail: string; exitCode: number | null; kind: 'failed'}
+  | {command: string; detail: string; kind: 'bad-json'};
 
 export type BdResult<T> =
   | {ok: true; value: T}
-  | {ok: false; failure: BdFailure};
+  | {failure: BdFailure; ok: false};
 
 /**
  * How much of a failing command line the banner shows.
@@ -95,11 +95,11 @@ export function describeBdFailure(rawFailure: BdFailure): string {
 
 export interface BdIssue {
   close_reason?: string | null;
+  description?: string | null;
   id: string;
   issue_type?: string;
   metadata?: Record<string, unknown>;
   notes?: string | null;
-  description?: string | null;
   parent?: string | null;
   priority?: number;
   status?: string;
@@ -641,6 +641,37 @@ export async function updateThread(
 }
 
 /**
+ * Rewrite a thread bead's whole body and LEAVE ITS STATUS ALONE (k0b8n.3, K5).
+ *
+ * `updateThread` cannot be reused: it forces `-s in_progress`, which for a
+ * backfilled bead would claim a session that ended days ago is running — and
+ * would resurrect one Justin had closed. A backfilled thread is `open` because
+ * it is a record, not a live session, and refreshing it must not change that.
+ */
+export async function updateThreadBody(
+  ctx: BdContext,
+  id: string,
+  fields: ThreadBeadFields,
+): Promise<BdResult<true>> {
+  const result = await withMetadataFile(fields.metadata, (metaPath) =>
+    runBd(ctx, [
+      'update',
+      id,
+      '--title',
+      fields.title,
+      '-d',
+      fields.description,
+      '--notes',
+      fields.notes,
+      '--metadata',
+      `@${metaPath}`,
+    ]),
+  );
+  if (!result.ok) return result;
+  return {ok: true, value: true};
+}
+
+/**
  * The finalising write: the rendered report into `notes` (D10), the status into
  * `in_progress` (D1), and the metadata AGAIN — now carrying the ask bead ids,
  * which did not exist when the bead was first written.
@@ -746,22 +777,6 @@ export async function createAsk(
 }
 
 /**
- * Close one ask with its disposition as the reason (D4).
- *
- * Closing, never deleting: `bd delete` leaves records in the JSONL that Dolt no
- * longer has, and every subsequent auto-export refuses until someone runs a
- * manual `bd export`. A wedged export means later reports silently never reach
- * git, which is precisely the shape of failure this system exists to prevent.
- */
-export async function closeAsk(
-  ctx: BdContext,
-  id: string,
-  reason: string,
-): Promise<BdResult<true>> {
-  return closeIssue(ctx, id, reason);
-}
-
-/**
  * Close any bead — a thread (`thread done`) or an ask — with its reason.
  *
  * `closeAsk` is the D4 spelling of this and delegates here; they were one
@@ -776,6 +791,22 @@ export async function closeIssue(
   const result = await runBd(ctx, ['close', id, '--reason', reason]);
   if (!result.ok) return result;
   return {ok: true, value: true};
+}
+
+/**
+ * Close one ask with its disposition as the reason (D4).
+ *
+ * Closing, never deleting: `bd delete` leaves records in the JSONL that Dolt no
+ * longer has, and every subsequent auto-export refuses until someone runs a
+ * manual `bd export`. A wedged export means later reports silently never reach
+ * git, which is precisely the shape of failure this system exists to prevent.
+ */
+export async function closeAsk(
+  ctx: BdContext,
+  id: string,
+  reason: string,
+): Promise<BdResult<true>> {
+  return await closeIssue(ctx, id, reason);
 }
 
 /**

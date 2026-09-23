@@ -24,11 +24,11 @@
  * filter returned all five to green. Recorded on home-base-p1uj.1.
  */
 
+import type {ThreadPriorAsk} from '../src/thread/schema';
+
 import {describe, expect, test} from 'bun:test';
 
 import {checkPriorAskCoverage} from '../src/thread/report';
-
-import type {ThreadPriorAsk} from '../src/thread/schema';
 
 function prior(
   id: string,

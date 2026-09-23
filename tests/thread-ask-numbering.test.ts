@@ -15,18 +15,18 @@
  * side's ordering without the other fails here.
  */
 
+import type {BdIssue} from '../src/thread/bd';
+import type {ThreadFacts} from '../src/thread/facts';
+import type {CarriedAsk} from '../src/thread/render';
+import type {ThreadReportPayload} from '../src/thread/schema';
+
 import {describe, expect, test} from 'bun:test';
 
 import {askViewOf, orderAsks} from '../src/thread/answer';
+import {ASKS_HEADING, renderMarkdown} from '../src/thread/render-markdown';
 import {buildReportModel} from '../src/thread/report-model';
-import {renderMarkdown} from '../src/thread/render-markdown';
 import {validateThreadReport} from '../src/thread/schema';
 import {examplePayload} from './thread-schema.test';
-
-import type {BdIssue} from '../src/thread/bd';
-import type {CarriedAsk} from '../src/thread/render';
-import type {ThreadFacts} from '../src/thread/facts';
-import type {ThreadReportPayload} from '../src/thread/schema';
 
 const THIS_REPORT = 3;
 
@@ -41,13 +41,19 @@ function facts(): ThreadFacts {
     cwd: '/Users/jhaa/Dev/home-base/projects/justin-sdk',
     dirty: false,
     entrypoint: 'cli',
+    firstUserMessage: 'kick this off',
+    firstUserMessageAt: null,
     headSha: 'ed7bdf2abcdef0123456',
     isWorktree: false,
+    lastAssistantMessage: 'Done — here is the report.',
+    lastAssistantMessageAt: null,
     lastUserMessage: 'fix the numbering',
+    lastUserMessageAt: null,
     model: 'claude-opus-5',
-    reportedAt: '2026-09-12T15:00:00.000Z',
     repo: 'justin-sdk',
     repoPath: '/Users/jhaa/Dev/home-base/projects/justin-sdk',
+    reportedAt: '2026-09-12T15:00:00.000Z',
+    resumeCommand: "cd '/repo' && claude --resume session-1",
     sessionId: 'sess-numbering',
     startedAt: '2026-09-12T13:00:00.000Z',
     tokensAtStop: 100,
@@ -81,16 +87,16 @@ const NEW_ASK_IDS = ['jl-t.11', 'jl-t.12'];
 const CARRIED: CarriedAsk[] = [
   {
     askIndex: 1,
-    priority: 0,
     fromReport: 1,
     id: 'jl-t.2',
+    priority: 0,
     restated: '[Approve Y/n] Ship the lock?',
   },
   {
     askIndex: 0,
-    priority: 3,
     fromReport: 2,
     id: 'jl-t.10',
+    priority: 3,
     restated: '[Pick a/b] Which board view?',
   },
 ];
@@ -102,10 +108,10 @@ function beads(): BdIssue[] {
     id: carried.id,
     metadata: {
       askIndex: carried.askIndex,
-      priority: carried.priority,
       defaultAction: 'the default',
       kind: carried.priority === 0 ? 'approve' : 'pick',
       optionCount: 2,
+      priority: carried.priority,
       reportCount: carried.fromReport,
     },
     title: carried.restated,
@@ -115,10 +121,10 @@ function beads(): BdIssue[] {
     id: NEW_ASK_IDS[index]!,
     metadata: {
       askIndex: index,
-      priority: ask.priority,
       defaultAction: ask.default,
       kind: ask.kind,
       optionCount: ask.options.length,
+      priority: ask.priority,
       reportCount: THIS_REPORT,
     },
     title: ask.text,
@@ -129,13 +135,10 @@ function beads(): BdIssue[] {
 
 /** `[number, askId]` for every numbered line in the report's Asks section. */
 function numberedAsks(report: string): [number, string][] {
-  const start = report.indexOf('**Asks — everything I need from you:**');
-  const endMarkers = ['**Next steps', '**Prior asks', '**Work product'];
-  const end = endMarkers
-    .map((marker) => report.indexOf(marker, start))
-    .filter((at) => at > start)
-    .sort((a, b) => a - b)[0];
-  const section = report.slice(start, end ?? report.length);
+  const start = report.indexOf(ASKS_HEADING);
+  // The section ends at the next heading line, whatever it is.
+  const next = report.indexOf('\n**', start + 1);
+  const section = report.slice(start, next === -1 ? report.length : next);
   const found: [number, string][] = [];
   for (const line of section.split('\n')) {
     const numbered = /^ {2}(\d+)\. /.exec(line);

@@ -20,8 +20,8 @@ import {
 import {tmpdir} from 'os';
 import {join} from 'path';
 
-import {kebabCase, runInit} from '../src/init';
 import {resolveComponents} from '../src/component-registry';
+import {kebabCase, runInit} from '../src/init';
 import {sdkRemoteWithOwnTag} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
 
@@ -52,7 +52,7 @@ beforeAll(() => {
     // ignore
   }
   const existing = process.env.MISE_TRUSTED_CONFIG_PATHS;
-  if (existing) trustPaths.add(existing);
+  if (existing != null && existing !== '') trustPaths.add(existing);
   process.env.MISE_TRUSTED_CONFIG_PATHS = Array.from(trustPaths).join(':');
 
   try {
@@ -99,6 +99,11 @@ afterEach(() => {
   }
 });
 
+function sdkRemote(): string {
+  cachedRemote ??= sdkRemoteWithOwnTag(track);
+  return cachedRemote;
+}
+
 /**
  * Standard offline options for every test.
  *
@@ -121,11 +126,6 @@ function offlineOptions() {
 
 /** The local bare remote for THIS test, built once. See sdkRemoteWithOwnTag. */
 let cachedRemote: string | null = null;
-
-function sdkRemote(): string {
-  cachedRemote ??= sdkRemoteWithOwnTag(track);
-  return cachedRemote;
-}
 
 /**
  * Initialize a real git repo in the sandbox so the dirty-tree preflight
@@ -233,9 +233,9 @@ describe('init: package.json scaffold', () => {
 
     const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as {
       name?: string;
-      version?: string;
-      type?: string;
       private?: boolean;
+      type?: string;
+      version?: string;
     };
     expect(pkg.type).toBe('module');
     expect(pkg.version).toBe('0.0.1');
@@ -273,8 +273,8 @@ describe('init: package.json scaffold', () => {
       JSON.stringify(
         {
           name: 'custom',
-          version: '1.2.3',
           scripts: {foo: 'echo'},
+          version: '1.2.3',
         },
         null,
         2,

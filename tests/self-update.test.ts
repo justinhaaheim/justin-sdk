@@ -37,10 +37,10 @@ describe('selfUpdateSdk', () => {
     const result = await selfUpdateSdk(sb.path);
 
     expect(result).toEqual({
-      updated: false,
-      previousVersion: null,
       newVersion: null,
+      previousVersion: null,
       shouldReExec: false,
+      updated: false,
     });
   });
 

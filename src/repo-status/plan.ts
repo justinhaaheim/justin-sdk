@@ -81,12 +81,12 @@
  * Part of home-base-qyu1.7 / qyu1.13 / qyu1.17.
  */
 
+import type {RepoStatusReport} from './report';
+
 import {execFileSync} from 'child_process';
 
 import {mirrorFullyPreserves, proveContentOnBaseline} from './content';
 import {ENUMERATION_FAILURES} from './core';
-
-import type {BranchRow, RepoStatusReport} from './report';
 
 const ARCHIVE_PREFIX = 'archive/';
 
@@ -124,27 +124,22 @@ export type PlanActionKind =
  * can print the exact commands rather than a description of them.
  */
 export interface RemoteArchiveSpec {
-  /** The remote to act on, e.g. `origin`. */
-  remote: string;
-  /** The branch name AS IT EXISTS ON THE REMOTE (no `origin/` prefix). */
-  sourceBranch: string;
   /** Where it lands on the remote, e.g. `archive/foo`. */
   archiveBranch: string;
+  /** The remote to act on, e.g. `origin`. */
+  remote: string;
   /**
    * The exact tip that was proven safe. Pinned, never re-resolved: if the remote
    * has moved off this sha the archive is refused rather than retargeted.
    */
   sha: string;
+  /** The branch name AS IT EXISTS ON THE REMOTE (no `origin/` prefix). */
+  sourceBranch: string;
 }
 
 export interface PlanAction {
-  branch: string;
   action: PlanActionKind;
-  /** Where the branch ends up, for either archive kind. Remote-qualified for remote refs. */
-  target: string | null;
-  reason: string;
-  /** Set only for `archive-remote-branch`; null for every local action. */
-  remoteArchive: RemoteArchiveSpec | null;
+  branch: string;
   /**
    * The literal git commands this action would run, in execution order.
    *
@@ -164,11 +159,26 @@ export interface PlanAction {
    * so the line is safe to paste — a branch name may legally contain `$( )`.
    */
   commands: string[] | null;
+  reason: string;
+  /** Set only for `archive-remote-branch`; null for every local action. */
+  remoteArchive: RemoteArchiveSpec | null;
+  /** Where the branch ends up, for either archive kind. Remote-qualified for remote refs. */
+  target: string | null;
 }
 
 export interface CleanupPlan {
-  repoRoot: string;
   baselineRef: string;
+  /** The repo's default branch, so remote execution can refuse to archive it. */
+  defaultBranch: string | null;
+  /** Proven safe but deliberately left manual (worktrees, already-archived). */
+  manual: PlanAction[];
+  /** Never automated. Listed so they are visible, not so they are actioned. */
+  needsJudgment: PlanAction[];
+  /** What `apply-experimental --safe-only --include-remote` additionally executes. */
+  remote: PlanAction[];
+  repoRoot: string;
+  /** What `apply-experimental --safe-only` will execute. LOCAL ONLY, by construction. */
+  safe: PlanAction[];
   /**
    * ALPHA, carried on the object itself (home-base-qyu1.29).
    *
@@ -183,20 +193,10 @@ export interface CleanupPlan {
    * silently keeping a branch of code that no longer applies.
    */
   stability: 'alpha';
-  /** The repo's default branch, so remote execution can refuse to archive it. */
-  defaultBranch: string | null;
-  /** What `apply-experimental --safe-only` will execute. LOCAL ONLY, by construction. */
-  safe: PlanAction[];
-  /** What `apply-experimental --safe-only --include-remote` additionally executes. */
-  remote: PlanAction[];
-  /** Proven safe but deliberately left manual (worktrees, already-archived). */
-  manual: PlanAction[];
-  /** Never automated. Listed so they are visible, not so they are actioned. */
-  needsJudgment: PlanAction[];
 }
 
 /** `origin/claude/foo` -> `{remote: 'origin', bare: 'claude/foo'}`. */
-function splitRemoteRef(name: string): {remote: string; bare: string} | null {
+function splitRemoteRef(name: string): {bare: string; remote: string} | null {
   const idx = name.indexOf('/');
   if (idx <= 0 || idx === name.length - 1) return null;
   return {bare: name.slice(idx + 1), remote: name.slice(0, idx)};
@@ -583,8 +583,8 @@ export interface ApplyResult {
      * the state a reader must not have to infer.
      */
     | 'archived-original-remains';
-  target: string | null;
   reason: string;
+  target: string | null;
 }
 
 function gitArgv(argv: string[], cwd: string): {ok: boolean; out: string} {
@@ -688,6 +688,15 @@ export function executePlan(plan: CleanupPlan, cwd: string): ApplyResult[] {
   });
 }
 
+function firstLine(out: string): string {
+  return (
+    out
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.length > 0) ?? 'git failed with no output'
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Remote archiving
 // ---------------------------------------------------------------------------
@@ -701,7 +710,7 @@ function lsRemoteSha(
   remote: string,
   ref: string,
   cwd: string,
-): {ok: boolean; sha: string | null; error: string} {
+): {error: string; ok: boolean; sha: string | null} {
   const result = gitArgv(['ls-remote', remote, ref], cwd);
   if (!result.ok) {
     return {error: firstLine(result.out), ok: false, sha: null};
@@ -710,15 +719,6 @@ function lsRemoteSha(
     .split('\n')
     .find((l) => l.trim().length > 0 && l.includes('\t'));
   return {error: '', ok: true, sha: line?.split('\t')[0]?.trim() ?? null};
-}
-
-function firstLine(out: string): string {
-  return (
-    out
-      .split('\n')
-      .map((l) => l.trim())
-      .find((l) => l.length > 0) ?? 'git failed with no output'
-  );
 }
 
 /** The branch the remote itself calls HEAD, straight from the remote. */

@@ -30,10 +30,10 @@
  * module, not a gitignore file, so no gitignore parser applies there.
  */
 
+import ignore from 'ignore';
 import {execFileSync} from 'node:child_process';
 import {existsSync, readFileSync} from 'node:fs';
 import {isAbsolute, resolve, sep} from 'node:path';
-import ignore from 'ignore';
 
 /** A representative path under a live worktree — every surface is tested against it. */
 export const WORKTREE_PROBE = '.claude/worktrees/probe.ts';
@@ -114,10 +114,10 @@ const ESLINT_CONFIG_FILES = [
 export interface SurfaceStatus {
   /** Whether the tool is configured in this project at all. */
   applicable: boolean;
-  /** Whether `.claude/worktrees` is ignored on this surface. */
-  covered: boolean;
   /** The relevant config file (for messaging), or null. */
   configFile: string | null;
+  /** Whether `.claude/worktrees` is ignored on this surface. */
+  covered: boolean;
 }
 
 /**
@@ -130,7 +130,7 @@ export function eslintWorktreeStatus(projectRoot: string): SurfaceStatus {
     existsSync(resolve(projectRoot, name)),
   );
   if (present.length === 0) {
-    return {applicable: false, covered: false, configFile: null};
+    return {applicable: false, configFile: null, covered: false};
   }
   const covered = present.some((name) => {
     const content = readFileSync(resolve(projectRoot, name), 'utf-8');
@@ -138,7 +138,7 @@ export function eslintWorktreeStatus(projectRoot: string): SurfaceStatus {
       ? ignoreContentCovers(content)
       : content.includes('.claude/worktrees');
   });
-  return {applicable: true, covered, configFile: present[0] ?? null};
+  return {applicable: true, configFile: present[0] ?? null, covered};
 }
 
 const PRETTIER_CONFIG_FILES = [
@@ -189,11 +189,11 @@ export function prettierWorktreeStatus(
     ) ||
     hasPrettierDep(projectRoot);
   if (!configured) {
-    return {applicable: false, covered: false, configFile: null};
+    return {applicable: false, configFile: null, covered: false};
   }
   if (gitStatus === 'committed') {
-    return {applicable: true, covered: true, configFile: '.gitignore'};
+    return {applicable: true, configFile: '.gitignore', covered: true};
   }
   const covered = ignoreContentCovers(readIfExists(prettierIgnorePath));
-  return {applicable: true, covered, configFile: '.prettierignore'};
+  return {applicable: true, configFile: '.prettierignore', covered};
 }

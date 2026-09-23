@@ -46,14 +46,14 @@ import {copyFileSync, mkdirSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {
+  type FileVerdict,
   proveContentOnBaseline,
   verifyCommitFiles,
-  type FileVerdict,
 } from '../src/repo-status/content';
 import {buildPlan, type CleanupPlan} from '../src/repo-status/plan';
 import {
-  buildReport,
   type BranchRow,
+  buildReport,
   type RepoStatusReport,
 } from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -192,13 +192,13 @@ const srcPath = (name: string): string => `${GAUNTLET_SRC}/${name}`;
 const dstPath = (name: string): string => `${GAUNTLET_DST}/${name}`;
 
 interface Fixture {
-  repo: string;
+  /** Three hostile-named renames, all of whose old halves the baseline kept. */
+  gauntletSha: string;
   /** `git mv kept-src -> kept-dst`; the baseline kept BOTH. The bug. */
   halfLostSha: string;
   /** `git mv moved-src -> moved-dst`; the baseline took the whole rename. */
   reflectedSha: string;
-  /** Three hostile-named renames, all of whose old halves the baseline kept. */
-  gauntletSha: string;
+  repo: string;
 }
 
 /**

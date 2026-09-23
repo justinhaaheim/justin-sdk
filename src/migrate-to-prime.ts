@@ -39,7 +39,7 @@
  */
 
 import {spawnSync} from 'child_process';
-import {existsSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'fs';
+import {existsSync, readdirSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {basename, join, resolve} from 'path';
 
 import {unknownComponentNames} from './component-registry';
@@ -102,6 +102,18 @@ const KNOWN_PROMPT_FILES = new Set([
  */
 const OBSOLETE_COMPONENTS = ['prompts-setup', 'claude-md-setup'];
 
+/** `git <args>` with no shell in between. */
+function gitArgv(
+  cwd: string,
+  args: readonly string[],
+): {exitCode: number; stdout: string} {
+  const child = spawnSync('git', [...args], {cwd, encoding: 'utf-8'});
+  // A spawn that never ran is not an exit code of 0 (critical rule 6): report
+  // it as a failure so both callers take their cautious branch.
+  if (child.error != null) return {exitCode: 1, stdout: ''};
+  return {exitCode: child.status ?? 1, stdout: child.stdout ?? ''};
+}
+
 // ---------------------------------------------------------------------------
 // git helpers
 // ---------------------------------------------------------------------------
@@ -130,18 +142,6 @@ function isClean(projectRoot: string, relPath: string): boolean {
     relPath,
   ]);
   return exitCode === 0 && stdout.trim().length === 0;
-}
-
-/** `git <args>` with no shell in between. */
-function gitArgv(
-  cwd: string,
-  args: readonly string[],
-): {stdout: string; exitCode: number} {
-  const child = spawnSync('git', [...args], {cwd, encoding: 'utf-8'});
-  // A spawn that never ran is not an exit code of 0 (critical rule 6): report
-  // it as a failure so both callers take their cautious branch.
-  if (child.error != null) return {exitCode: 1, stdout: ''};
-  return {exitCode: child.status ?? 1, stdout: child.stdout ?? ''};
 }
 
 /** Safe to delete = git-tracked AND clean (deletion recoverable from git). */
@@ -200,11 +200,11 @@ function stepDocsPrompts(projectRoot: string, report: Report): void {
     }
     // Remove docs/prompts (and an empty docs/) only if fully cleared.
     if (remaining === 0) {
-      rmSync(dir, {recursive: true, force: true});
+      rmSync(dir, {force: true, recursive: true});
       report.did.push('Removed docs/prompts/');
       const docsDir = resolve(projectRoot, 'docs');
       if (existsSync(docsDir) && readdirSync(docsDir).length === 0) {
-        rmSync(docsDir, {recursive: true, force: true});
+        rmSync(docsDir, {force: true, recursive: true});
       }
     }
   }
@@ -219,7 +219,7 @@ function stepDocsPrompts(projectRoot: string, report: Report): void {
       report.did.push(`Removed ${markerRel}`);
       const docsDir = resolve(projectRoot, 'docs');
       if (existsSync(docsDir) && readdirSync(docsDir).length === 0) {
-        rmSync(docsDir, {recursive: true, force: true});
+        rmSync(docsDir, {force: true, recursive: true});
       }
     } else {
       report.flagged.push(
@@ -441,10 +441,10 @@ function stepRepoGrep(projectRoot: string, report: Report): void {
 // ---------------------------------------------------------------------------
 
 export interface MigrateToPrimeOptions {
-  projectRoot?: string;
-  quiet?: boolean;
   /** Commit the migration at the end. Default false (inspect the diff first). */
   commit?: boolean;
+  projectRoot?: string;
+  quiet?: boolean;
 }
 
 export function runMigrateToPrime(options: MigrateToPrimeOptions = {}): number {

@@ -52,18 +52,18 @@ import {
 // ---------------------------------------------------------------------------
 
 export interface UpdateOptions {
-  projectRoot?: string;
-  quiet?: boolean;
-  /** Skip the SDK self-update step (used by the re-exec dance). */
-  noSelfUpdate?: boolean;
-  /** Skip the final git commit. */
-  noCommit?: boolean;
-  /** Print the plan without writing. */
-  dryRun?: boolean;
   /** Allow running with uncommitted changes. */
   allowDirty?: boolean;
+  /** Print the plan without writing. */
+  dryRun?: boolean;
   /** Pass --force through to each component. */
   force?: boolean;
+  /** Skip the final git commit. */
+  noCommit?: boolean;
+  /** Skip the SDK self-update step (used by the re-exec dance). */
+  noSelfUpdate?: boolean;
+  projectRoot?: string;
+  quiet?: boolean;
 }
 
 /**
@@ -92,12 +92,12 @@ export interface UpdateOptions {
 export function planUpdateReExec(
   projectRoot: string,
   flags: {
-    noCommit: boolean;
     allowDirty: boolean;
     force: boolean;
+    noCommit: boolean;
     quiet: boolean;
   },
-): {ok: true; argv: string[]} | {ok: false; detail: string} {
+): {argv: string[]; ok: true} | {detail: string; ok: false} {
   const bin = resolveWorktreeSdkBin(projectRoot);
   if (!bin.ok) return {detail: bin.detail, ok: false};
   // --no-self-update avoids infinite recursion; everything else is the flags
@@ -189,7 +189,7 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
       }
       success(`Re-executing with new SDK (${result.newVersion}) …`);
       const [command, ...rest] = reExec.argv;
-      const child = spawnSync(command as string, rest, {
+      const child = spawnSync(command!, rest, {
         cwd: projectRoot,
         stdio: 'inherit',
       });

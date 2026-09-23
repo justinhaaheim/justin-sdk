@@ -105,12 +105,12 @@ function stepWriteSignalWorkflow(projectRoot: string, force: boolean): boolean {
 // ---------------------------------------------------------------------------
 
 export interface GhActionsSetupOptions {
+  /** Overwrite an existing hand-modified signal.yml */
+  force?: boolean;
   /** Project root (defaults to cwd) */
   projectRoot?: string;
   /** Suppress non-error output (for tests and chaining) */
   quiet?: boolean;
-  /** Overwrite an existing hand-modified signal.yml */
-  force?: boolean;
   /**
    * The remote the SDK pin tag is verified against, forwarded to base-setup.
    * Tests point it at a local bare repo so the install is hermetic; production

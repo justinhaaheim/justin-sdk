@@ -20,6 +20,7 @@
 import {basename, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
+import {sdkRun, sdkScript, upsertHookCommand} from './sdk-invocation';
 import {
   ensureDir,
   fail,
@@ -30,7 +31,6 @@ import {
   success,
   writeJson,
 } from './setup-helpers';
-import {sdkRun, sdkScript, upsertHookCommand} from './sdk-invocation';
 import {TIME_CHECK_CONFIG_KEY, TIME_CHECK_DEFAULTS} from './time-check';
 
 /**
@@ -65,9 +65,8 @@ export function stepTimeCheckHook(projectRoot: string): boolean {
   const settingsPath = resolve(settingsDir, 'settings.json');
   ensureDir(settingsDir);
 
-  const settings = (readJson(settingsPath) ?? {}) as Record<string, unknown>;
-  const hooks = ((settings.hooks as Record<string, unknown> | undefined) ??
-    {}) as Record<string, unknown>;
+  const settings = readJson(settingsPath) ?? {};
+  const hooks = (settings.hooks as Record<string, unknown> | undefined) ?? {};
   const userPromptSubmit =
     (hooks.UserPromptSubmit as unknown[] | undefined) ?? [];
 
@@ -103,9 +102,8 @@ export function stepTimeCheckConfig(projectRoot: string): boolean {
     return false;
   }
 
-  const componentConfig = ((config.componentConfig as
-    | Record<string, unknown>
-    | undefined) ?? {}) as Record<string, unknown>;
+  const componentConfig =
+    (config.componentConfig as Record<string, unknown> | undefined) ?? {};
 
   if (componentConfig[TIME_CHECK_CONFIG_KEY] != null) {
     success(
@@ -126,9 +124,9 @@ export function stepTimeCheckConfig(projectRoot: string): boolean {
 }
 
 export async function runTimeCheckSetup(args: {
+  force?: boolean;
   projectRoot: string;
   quiet: boolean;
-  force?: boolean;
   /**
    * The remote the SDK pin tag is verified against, forwarded to base-setup.
    * Tests point it at a local bare repo so the install is hermetic; production

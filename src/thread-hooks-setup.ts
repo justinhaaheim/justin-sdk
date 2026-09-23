@@ -1,12 +1,17 @@
 /**
- * thread-hooks-setup — installs the two thread hooks in a consuming project.
+ * thread-hooks-setup — installs the thread hooks in a consuming project.
  *
- * Scaffolds exactly TWO entries in `.claude/settings.json`:
+ * Scaffolds exactly FOUR entries in `.claude/settings.json`:
  *
  *  - `SessionStart` [startup|resume] → `thread start --hook`, which creates the
  *    session's thread bead before it has reported anything (home-base-p1uj.3).
  *  - `Stop` (no matcher) → `thread stop-check`, which refuses to let a session
  *    finish on a status report it cannot prove was recorded (home-base-p1uj.15).
+ *  - `UserPromptSubmit` and `Stop` (no matcher) → `thread capture`, which logs
+ *    every prompt and every Claude yield and keeps the thread bead's last
+ *    messages current (home-base-k0b8n.9, K10). Its own entry on Stop, beside
+ *    stop-check's rather than inside it: the two have different knobs and
+ *    different contracts (K10 anti-decision 1).
  *
  * WHY THE STOP HOOK TAKES NO MATCHER: `Stop` has no matcher dimension — it fires
  * once per turn end, for main sessions and subagents alike, and the hook's own
@@ -46,6 +51,7 @@
 import {basename, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
+import {sdkRun, sdkScript, upsertHookCommand} from './sdk-invocation';
 import {
   ensureDir,
   fail,
@@ -56,7 +62,6 @@ import {
   success,
   writeJson,
 } from './setup-helpers';
-import {sdkRun, sdkScript, upsertHookCommand} from './sdk-invocation';
 
 /**
  * The SDK subcommand this hook runs. It — not any whole invocation — is what
@@ -93,6 +98,28 @@ export const THREAD_STOP_HOOK_FINGERPRINT = sdkScript(THREAD_STOP_SUBCOMMAND);
 export const THREAD_STOP_HOOK_EVENT = 'Stop';
 
 /**
+ * The capture subcommand (home-base-k0b8n.9, K10). ONE command on TWO events —
+ * it reads `hook_event_name` from its payload — so the same identity rule finds
+ * it under either event, and it never collides with `thread stop-check`, which
+ * shares the Stop event but not the subcommand.
+ */
+const THREAD_CAPTURE_SUBCOMMAND = 'thread capture';
+
+/** The command both capture hooks run. */
+export const THREAD_CAPTURE_HOOK_COMMAND = sdkRun(THREAD_CAPTURE_SUBCOMMAND);
+
+/** The CURRENT spelling, for the component manifest's installed-evidence check. */
+export const THREAD_CAPTURE_HOOK_FINGERPRINT = sdkScript(
+  THREAD_CAPTURE_SUBCOMMAND,
+);
+
+/**
+ * The two events capture records. Neither takes a matcher: UserPromptSubmit and
+ * Stop have no matcher dimension (see the Stop note in the file header).
+ */
+export const THREAD_CAPTURE_HOOK_EVENTS = ['UserPromptSubmit', 'Stop'] as const;
+
+/**
  * Register one hook command under one event in a settings object.
  *
  * Hooks are ADDITIVE in Claude Code — several may be registered for one event
@@ -113,8 +140,7 @@ function addHook(
     subcommand: string;
   },
 ): boolean {
-  const hooks = ((settings.hooks as Record<string, unknown> | undefined) ??
-    {}) as Record<string, unknown>;
+  const hooks = (settings.hooks as Record<string, unknown> | undefined) ?? {};
   const registered = (hooks[spec.event] as unknown[] | undefined) ?? [];
 
   const {changed, entries} = upsertHookCommand(
@@ -154,17 +180,38 @@ export function addThreadStopHook(settings: Record<string, unknown>): boolean {
   });
 }
 
+/**
+ * Register `thread capture` on UserPromptSubmit AND Stop (K10). Returns the
+ * events it changed, empty when both were already there in today's spelling.
+ */
+export function addThreadCaptureHooks(
+  settings: Record<string, unknown>,
+): string[] {
+  const changed: string[] = [];
+  for (const event of THREAD_CAPTURE_HOOK_EVENTS) {
+    const added = addHook(settings, {
+      command: THREAD_CAPTURE_HOOK_COMMAND,
+      event,
+      matcher: null,
+      subcommand: THREAD_CAPTURE_SUBCOMMAND,
+    });
+    if (added) changed.push(event);
+  }
+  return changed;
+}
+
 export function stepThreadStartHook(projectRoot: string): boolean {
   const settingsDir = resolve(projectRoot, '.claude');
   const settingsPath = resolve(settingsDir, 'settings.json');
   ensureDir(settingsDir);
 
-  const settings = (readJson(settingsPath) ?? {}) as Record<string, unknown>;
+  const settings = readJson(settingsPath) ?? {};
   const addedStart = addThreadStartHook(settings);
   const addedStop = addThreadStopHook(settings);
+  const addedCapture = addThreadCaptureHooks(settings);
 
-  if (!addedStart && !addedStop) {
-    success('.claude/settings.json already has both thread hooks');
+  if (!addedStart && !addedStop && addedCapture.length === 0) {
+    success('.claude/settings.json already has every thread hook');
     return true;
   }
 
@@ -179,13 +226,16 @@ export function stepThreadStartHook(projectRoot: string): boolean {
       `Updated .claude/settings.json (${THREAD_STOP_HOOK_EVENT} → thread stop-check)`,
     );
   }
+  for (const event of addedCapture) {
+    success(`Updated .claude/settings.json (${event} → thread capture)`);
+  }
   return true;
 }
 
 export async function runThreadHooksSetup(args: {
+  force?: boolean;
   projectRoot: string;
   quiet: boolean;
-  force?: boolean;
   /**
    * The remote the SDK pin tag is verified against, forwarded to base-setup.
    * Tests point it at a local bare repo so the install is hermetic; production
@@ -213,7 +263,7 @@ export async function runThreadHooksSetup(args: {
   success('base-setup ready');
 
   stepHeader(
-    `1. .claude/settings.json (${THREAD_HOOK_EVENT}, ${THREAD_STOP_HOOK_EVENT})`,
+    `1. .claude/settings.json (${THREAD_HOOK_EVENT}, ${THREAD_STOP_HOOK_EVENT}, ${THREAD_CAPTURE_HOOK_EVENTS.join(', ')} capture)`,
   );
   if (!stepThreadStartHook(projectRoot)) return 1;
 
@@ -225,7 +275,9 @@ export async function runThreadHooksSetup(args: {
         '  {"componentConfig": {"thread": {"enabled": true, "startOnSessionStart": true}}}\n\n' +
         'SessionStart (thread start) needs enabled AND startOnSessionStart.\n' +
         'Stop (thread stop-check) needs "enforce": true, and it is the one that can\n' +
-        'refuse to let a session finish — arm it only once you have watched it pass.\n\n' +
+        'refuse to let a session finish — arm it only once you have watched it pass.\n' +
+        'UserPromptSubmit + Stop (thread capture) need only "enabled": true — "capture"\n' +
+        'defaults on; set it false in one repo to opt that repo out.\n\n' +
         'No componentConfig block was written here on purpose: a project-level value\n' +
         'outranks the user file, so it would silently override those switches.\n',
     );

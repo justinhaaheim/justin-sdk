@@ -31,13 +31,13 @@ import {join} from 'path';
 
 import {
   countSdkKeyDeclarations,
+  type DepSection,
   readSdkDeclarations,
   runSweep,
   sdkWorkspaceSatisfaction,
   verifySinglePin,
   workspacePatternsOf,
   writeSdkPin,
-  type DepSection,
 } from '../src/sweep';
 import {initRepo} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -60,13 +60,13 @@ afterEach(() => {
 type Manager = 'bun' | 'npm' | 'yarn';
 
 interface PinFixture {
-  root: string;
-  pkgPath: string;
   /** The pin `writeSdkPin` is asked to land. */
   newPin: string;
   /** The stale spec the fixture starts out declaring. */
   oldPin: string;
+  pkgPath: string;
   read: () => string;
+  root: string;
 }
 
 function writePkg(path: string, pkg: unknown): void {
@@ -83,9 +83,9 @@ function writePkg(path: string, pkg: unknown): void {
  * fake away.
  */
 function pinFixture(options: {
+  install?: boolean;
   manager?: Manager;
   sections?: readonly DepSection[];
-  install?: boolean;
 }): PinFixture {
   const manager = options.manager ?? 'bun';
   const sections = options.sections ?? ['devDependencies'];
@@ -234,7 +234,7 @@ describe('verifySinglePin', () => {
   const map = (
     entries: Record<string, string>,
   ): ReadonlyMap<DepSection, string> =>
-    new Map(Object.entries(entries) as Array<[DepSection, string]>);
+    new Map(Object.entries(entries) as [DepSection, string][]);
 
   test('exactly one devDependencies declaration at the pin is the contract', () => {
     expect(verifySinglePin(map({devDependencies: PIN}), PIN)).toEqual({
@@ -510,7 +510,7 @@ describe('writeSdkPin — npm and yarn (AC4)', () => {
 });
 
 describe('writeSdkPin — the workspace consumer (D21)', () => {
-  function homeBaseLike(): {root: string; read: () => string} {
+  function homeBaseLike(): {read: () => string; root: string} {
     const sb = track(createSandbox());
     const root = join(sb.path, 'repo');
     mkdirSync(join(root, 'projects', 'justin-sdk'), {recursive: true});

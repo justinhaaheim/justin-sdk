@@ -8,7 +8,7 @@
  * predicates). We build both in sandboxes.
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
+import {afterEach, describe, expect, test} from 'bun:test';
 
 import {assemble, numberHeaders} from '../src/prime';
 import {createSandbox, type Sandbox} from './sandbox';

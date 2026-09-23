@@ -75,8 +75,8 @@ export type UserLevelHookStatus =
   | 'cannot-check';
 
 export interface UserLevelHookResult {
-  status: UserLevelHookStatus;
   message: string;
+  status: UserLevelHookStatus;
 }
 
 /** Does this command string invoke `session-start --user-level`, however spelled? */

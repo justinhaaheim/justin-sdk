@@ -13,23 +13,43 @@
  *   - a RESUME (`--bg --resume <full sessionId> <prompt>`) wakes the session
  *     that id belongs to — same id, same conversation, MEASURED 2026-09-08.
  */
+import {type BrRunner} from '../src/justin-loop/br';
 import {
   type Handoff,
   HANDOFF_LABEL,
   handoffJson,
 } from '../src/justin-loop/handoff';
-import {type BrRunner} from '../src/justin-loop/br';
 import {
   type AgentRow,
   type BootContext,
   DEFAULT_OPTIONS,
   type JustinLoopOptions,
   type LedgerRow,
+  type LedgerSessionIdRead,
   runJustinLoop,
   type RunnerDeps,
   runSession,
   type SessionRun,
 } from '../src/justin-loop/runner';
+
+/**
+ * A ledger reader that must never be called (33.12).
+ *
+ * Only `runJustinLoop`, and only when the run BOOTS from a picked-up handoff
+ * bead, looks a predecessor up. Every world that drives `runSession` directly —
+ * and every loop world whose run starts fresh — gets this, so a future change
+ * that started reading the ledger from somewhere else fails loudly here instead
+ * of quietly reading the REAL `~/.local/state/justin-sdk/justin-loop/runs.jsonl`
+ * from inside a unit test.
+ */
+export function ledgerReaderNeverCalled(
+  path: string,
+  label: string,
+): LedgerSessionIdRead {
+  throw new Error(
+    `readLedgerSessionId(${path}, ${label}) was called in a world that has no ledger`,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -54,9 +74,9 @@ export function handoff(over: Partial<Handoff> = {}): Handoff {
 
 export interface BeadSpec {
   id: string;
+  labels?: string[];
   notes?: string | null;
   title?: string;
-  labels?: string[];
 }
 
 export function listJson(beads: BeadSpec[]): string {
@@ -94,38 +114,47 @@ export type StopBehaviour =
   | 'clears-on-signal';
 
 export interface SessionScript {
-  /** The row's `state` while the runner polls it. Default: ends immediately. */
-  state?: string;
-  /** Poll count before the state above flips to `done`. Default 0. */
-  worksForPolls?: number;
-  stop?: StopBehaviour;
-  /** Never register a row at all — the session vanished before the first poll. */
-  vanishes?: boolean;
-  /**
-   * Publish no `sessionId` on the row. The runner then has nothing `--resume`
-   * would continue rather than copy, so no demand can be delivered
-   * (home-base-1r6d.33.3).
-   */
-  noSessionId?: boolean;
   /**
    * What each RESUMED turn does, in order. A demand beyond this list behaves
    * like `{}`: the woken session ends on its first poll and its stop clears the
    * row, which is the measured normal case.
    */
   demandTurns?: SessionScript[];
+  /**
+   * Publish no `sessionId` on the row. The runner then has nothing `--resume`
+   * would continue rather than copy, so no demand can be delivered
+   * (home-base-1r6d.33.3).
+   */
+  noSessionId?: boolean;
+  /** The row's `state` while the runner polls it. Default: ends immediately. */
+  state?: string;
+  stop?: StopBehaviour;
+  /** Never register a row at all — the session vanished before the first poll. */
+  vanishes?: boolean;
+  /** Poll count before the state above flips to `done`. Default 0. */
+  worksForPolls?: number;
+}
+
+/**
+ * One `claude --bg` invocation, argv and environment TOGETHER (D18).
+ *
+ * One record rather than two index-aligned arrays: "which env went with which
+ * argv" must not be answerable only by counting, or a test that asserts an env
+ * var on the wrong dispatch reads as green (critical rule 7 — half a measurement
+ * must be unrepresentable).
+ */
+export interface DispatchCall {
+  args: string[];
+  env: Record<string, string>;
 }
 
 export interface LoopResult {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-  /** Every `claude --bg` argv, in order. */
-  dispatches: string[][];
-  stopCalls: string[];
-  signals: Array<{pid: number; sig: string}>;
-  ledger: LedgerRow[];
   /** br argv, in order. */
   brCalls: string[][];
+  /** Every `claude --bg` invocation, argv AND env, in order. */
+  dispatchCalls: DispatchCall[];
+  /** Every `claude --bg` argv, in order. Derived from `dispatchCalls`. */
+  dispatches: string[][];
   /**
    * Every dispatch, stop and `br` call INTERLEAVED, in the order they happened:
    * `dispatch:spawn`, `dispatch:resume`, `stop:<id>`, `br:<subcommand>`.
@@ -137,6 +166,12 @@ export interface LoopResult {
    * only that both happened.
    */
   events: string[];
+  exitCode: number;
+  ledger: LedgerRow[];
+  signals: {pid: number; sig: string}[];
+  stderr: string;
+  stdout: string;
+  stopCalls: string[];
 }
 
 export const MAX_POLLS = 500;
@@ -150,19 +185,16 @@ export const MAX_POLLS = 500;
  * honest default for a repo where nothing is waiting.
  */
 export async function runLoop(spec: {
-  opts?: Partial<JustinLoopOptions>;
-  scans?: Array<BeadSpec[] | 'unavailable'>;
-  sessions?: SessionScript[];
   /** false on a given global poll = `claude agents --json` failed that time. */
   agentsReadable?: (poll: number) => boolean;
-  /** Make `br create` fail, so the failure bead cannot be filed. */
-  brCreateFails?: boolean;
   /**
    * Make `br close` fail, so the `done` bead cannot be closed (D14). The run
    * still finished, so this must be loud on stderr and must NOT change the exit
    * code — which is exactly what this knob exists to prove.
    */
   brCloseFails?: boolean;
+  /** Make `br create` fail, so the failure bead cannot be filed. */
+  brCreateFails?: boolean;
   /**
    * Make every HEAD read fail, so `progressed` is null — NOT false
    * (home-base-a1go). The normal world hands back a different sha per dispatch,
@@ -172,6 +204,24 @@ export async function runLoop(spec: {
   gitHeadFails?: boolean;
   /** Hand back one fixed sha, so every session is MEASURED to have committed nothing. */
   gitHeadStuck?: boolean;
+  /**
+   * Rows already in `runs.jsonl` when this run starts, oldest first (33.12).
+   * What a `--pickup` run finds when it looks up the session that wrote the
+   * bead it is booting from. `fullSessionId: null` is a session whose `claude
+   * agents` row was never read — a failed measurement, not an absent one.
+   */
+  ledgerSeed?: {fullSessionId: string | null; label: string}[];
+  /** The ledger file itself could not be read, and this is why. */
+  ledgerUnreadable?: string;
+  /**
+   * Rows the listing SKIPPED on a given global poll (F7, 33.13). The listing is
+   * still READABLE — `claude agents --json` answered — but it did not answer in
+   * full, so an id missing from it is not proof of absence.
+   */
+  malformedAt?: (poll: number) => number;
+  opts?: Partial<JustinLoopOptions>;
+  scans?: (BeadSpec[] | 'unavailable')[];
+  sessions?: SessionScript[];
 }): Promise<LoopResult> {
   const rows = new Map<string, AgentRow>();
   const scriptOf = new Map<string, SessionScript>();
@@ -180,9 +230,9 @@ export async function runLoop(spec: {
   /** The original script of each session, so its demand turns can be replayed. */
   const bornAs = new Map<string, SessionScript>();
   const demandsFor = new Map<string, number>();
-  const dispatches: string[][] = [];
+  const dispatchCalls: DispatchCall[] = [];
   const stopCalls: string[] = [];
-  const signals: Array<{pid: number; sig: string}> = [];
+  const signals: {pid: number; sig: string}[] = [];
   const ledger: LedgerRow[] = [];
   const brCalls: string[][] = [];
   const events: string[] = [];
@@ -203,6 +253,7 @@ export async function runLoop(spec: {
         return {
           ok: false,
           reason: 'br exited 1: no beads workspace',
+          stderr: null,
           stdout: '',
         };
       }
@@ -211,26 +262,49 @@ export async function runLoop(spec: {
       return {
         ok: true,
         reason: null,
+        stderr: null,
         stdout: `✓ Created fx-bug${created}: ${args[1] ?? ''}\n`,
       };
     }
     if (args[0] === 'close') {
       if (spec.brCloseFails === true) {
+        // Three stderr lines, the shape a real `br close` failure has (F4):
+        // the summary line `reason` keeps, and the two that say WHY.
         return {
           ok: false,
           reason: 'br exited 1: no issue with id hoff-9',
+          stderr: [
+            'no issue with id hoff-9',
+            'did you mean hoff-8?',
+            'run `br list` to see what is open',
+          ].join('\n'),
           stdout: '',
         };
       }
-      return {ok: true, reason: null, stdout: `✓ Closed ${args[1] ?? ''}\n`};
+      return {
+        ok: true,
+        reason: null,
+        stderr: null,
+        stdout: `✓ Closed ${args[1] ?? ''}\n`,
+      };
     }
     if (args[0] !== 'list')
-      return {ok: true, reason: null, stdout: '{"issues":[]}'};
+      return {ok: true, reason: null, stderr: null, stdout: '{"issues":[]}'};
     const answer = (spec.scans ?? [])[scanIndex++];
     if (answer === 'unavailable') {
-      return {ok: false, reason: 'br exited 1: no beads workspace', stdout: ''};
+      return {
+        ok: false,
+        reason: 'br exited 1: no beads workspace',
+        stderr: null,
+        stdout: '',
+      };
     }
-    return {ok: true, reason: null, stdout: listJson(answer ?? [])};
+    return {
+      ok: true,
+      reason: null,
+      stderr: null,
+      stdout: listJson(answer ?? []),
+    };
   };
 
   /**
@@ -271,8 +345,8 @@ export async function runLoop(spec: {
     // Promise-returning (home-base-a1go): the runner may not make a synchronous
     // spawn again, and a world whose fakes were sync would let one back in
     // without a single test going red.
-    dispatch: async (_cwd, args) => {
-      dispatches.push(args);
+    dispatch: (_cwd, args, env) => {
+      dispatchCalls.push({args, env});
       events.push(
         args.includes('--resume') ? 'dispatch:resume' : 'dispatch:spawn',
       );
@@ -287,13 +361,13 @@ export async function runLoop(spec: {
         const id = idBySessionId.get(full);
         if (id == null) {
           // The real CLI prints an error and no banner for an unknown id.
-          return `No session matching '${full}'.\n`;
+          return Promise.resolve(`No session matching '${full}'.\n`);
         }
         const turn = demandsFor.get(id) ?? 0;
         demandsFor.set(id, turn + 1);
         const script = (bornAs.get(id)?.demandTurns ?? [])[turn] ?? {};
         register(id, script, 'resumed');
-        return `backgrounded · ${id} · resumed\n`;
+        return Promise.resolve(`backgrounded · ${id} · resumed\n`);
       }
 
       dispatched++;
@@ -301,9 +375,11 @@ export async function runLoop(spec: {
       const script = (spec.sessions ?? [])[dispatched - 1] ?? {};
       bornAs.set(id, script);
       register(id, script, args[args.indexOf('--name') + 1] ?? '');
-      return `backgrounded · ${id} · ${args[args.indexOf('--name') + 1] ?? ''}\n`;
+      return Promise.resolve(
+        `backgrounded · ${id} · ${args[args.indexOf('--name') + 1] ?? ''}\n`,
+      );
     },
-    findAgent: async (_cwd, id) => {
+    findAgent: (_cwd, id) => {
       polls++;
       if (polls > MAX_POLLS) {
         throw new Error(
@@ -311,36 +387,71 @@ export async function runLoop(spec: {
         );
       }
       if (spec.agentsReadable?.(polls) === false) {
-        return {ok: false, reason: 'claude agents --json exited 1'};
+        return Promise.resolve({
+          ok: false,
+          reason: 'claude agents --json exited 1',
+        });
       }
+      const malformed = spec.malformedAt?.(polls) ?? 0;
       const row = rows.get(id);
-      if (row == null) return {ok: true, row: null};
+      if (row == null) return Promise.resolve({malformed, ok: true, row: null});
       const script = scriptOf.get(id) ?? {};
       const seen = (pollsFor.get(id) ?? 0) + 1;
       pollsFor.set(id, seen);
       // A session that "works for N polls" flips to done afterwards, so a
       // timeout test can hold it working forever with a large N.
       if (script.worksForPolls != null && seen > script.worksForPolls) {
-        return {ok: true, row: {...row, state: 'done'}};
+        return Promise.resolve({
+          malformed,
+          ok: true,
+          row: {...row, state: 'done'},
+        });
       }
-      return {ok: true, row};
+      return Promise.resolve({malformed, ok: true, row});
     },
-    gitHead: async () =>
-      spec.gitHeadFails === true
-        ? {
-            ok: false,
-            reason:
-              'git rev-parse HEAD did not finish within 10000ms and was SIGKILLed',
-          }
-        : {
-            ok: true,
-            sha:
-              spec.gitHeadStuck === true ? 'head-fixed' : `head-${dispatched}`,
-          },
-    notifyBlocked: () => {},
+    gitHead: () =>
+      Promise.resolve(
+        spec.gitHeadFails === true
+          ? {
+              ok: false,
+              reason:
+                'git rev-parse HEAD did not finish within 10000ms and was SIGKILLed',
+            }
+          : {
+              ok: true,
+              sha:
+                spec.gitHeadStuck === true
+                  ? 'head-fixed'
+                  : `head-${dispatched}`,
+            },
+      ),
+    notifyBlocked: () => {
+      /* nothing is notified in the fake world */
+    },
     now: () => clock,
-    preflight: async () => [],
-    readUsage: async () => null,
+    preflight: () => Promise.resolve([]),
+    readLedgerSessionId: (_path, label) => {
+      if (spec.ledgerUnreadable != null) {
+        return {kind: 'unreadable', reason: spec.ledgerUnreadable};
+      }
+      // Newest first, and the search STOPS at the newest match — the same rule
+      // the real reader follows, so a null id here can never fall through to an
+      // older row belonging to a different run's session of the same name.
+      const row = [...(spec.ledgerSeed ?? [])]
+        .reverse()
+        .find((r) => r.label === label);
+      if (row == null) {
+        return {detail: `no ledger row for \`${label}\``, kind: 'no-row'};
+      }
+      return row.fullSessionId == null
+        ? {
+            detail: `the newest ledger row for \`${label}\` carries no fullSessionId`,
+            kind: 'no-session-id',
+          }
+        : {kind: 'found', sessionId: row.fullSessionId};
+    },
+    readUsage: () =>
+      Promise.resolve({kind: 'failed', reason: 'no /usage in this fixture'}),
     signalPid: (pid, sig) => {
       signals.push({pid, sig: String(sig)});
       for (const [id, row] of rows) {
@@ -350,10 +461,11 @@ export async function runLoop(spec: {
       }
       return true;
     },
-    sleep: async (ms) => {
+    sleep: (ms) => {
       clock += ms;
+      return Promise.resolve();
     },
-    stopSession: async (_cwd, id) => {
+    stopSession: (_cwd, id) => {
       stopCalls.push(id);
       events.push(`stop:${id}`);
       const behaviour = scriptOf.get(id)?.stop ?? 'clears';
@@ -362,7 +474,7 @@ export async function runLoop(spec: {
         const row = rows.get(id);
         if (row != null) rows.set(id, {...row, pid: null});
       }
-      return {detail: `stopped ${id}`, ok: true};
+      return Promise.resolve({detail: `stopped ${id}`, ok: true});
     },
     write: (text) => {
       stdout += text;
@@ -379,7 +491,8 @@ export async function runLoop(spec: {
   );
   return {
     brCalls,
-    dispatches,
+    dispatchCalls,
+    dispatches: dispatchCalls.map((call) => call.args),
     events,
     exitCode,
     ledger,
@@ -395,13 +508,13 @@ export async function runLoop(spec: {
 // ---------------------------------------------------------------------------
 
 export interface SessionSim {
-  run: SessionRun;
+  /** Every `br` argv the watch made, in order. */
+  brCalls: string[][];
   /** Simulated minutes from dispatch to return. */
   elapsedMin: number;
   polls: number;
+  run: SessionRun;
   stdout: string;
-  /** Every `br` argv the watch made, in order. */
-  brCalls: string[][];
 }
 
 /**
@@ -420,18 +533,18 @@ export interface SessionSim {
  * are not worth re-baselining for a helper move.
  */
 export async function simulateSession(spec: {
-  opts?: Partial<JustinLoopOptions>;
-  /** The session's label — the `from` its handoff bead must carry. */
-  label?: string;
-  /** 1-based on the poll number. `'unreadable'` = `claude agents` failed. */
-  rowAt: (poll: number) => AgentRow | null | 'unreadable';
   /**
    * Answer to the Nth (1-based) `br list -l handoff --json` the watch makes.
    * Omitted = every scan finds no beads at all, which is what a repo with
    * nothing waiting looks like.
    */
   beadsAt?: (call: number) => BeadSpec[] | 'unavailable';
+  /** The session's label — the `from` its handoff bead must carry. */
+  label?: string;
   maxPolls?: number;
+  opts?: Partial<JustinLoopOptions>;
+  /** 1-based on the poll number. `'unreadable'` = `claude agents` failed. */
+  rowAt: (poll: number) => AgentRow | null | 'unreadable';
 }): Promise<SessionSim> {
   const opts: JustinLoopOptions = {
     ...DEFAULT_OPTIONS,
@@ -441,7 +554,12 @@ export async function simulateSession(spec: {
     ...spec.opts,
   };
   const label = spec.label ?? 'the-arc-1';
-  const boot: BootContext = {cwd: '/repo', label, plan: {kind: 'fresh'}};
+  const boot: BootContext = {
+    cwd: '/repo',
+    label,
+    plan: {kind: 'fresh'},
+    predecessorSessionId: null,
+  };
   const maxPolls = spec.maxPolls ?? 400;
 
   let clock = 1_000_000;
@@ -456,14 +574,20 @@ export async function simulateSession(spec: {
     br: (_cwd, args) => {
       brCalls.push(args);
       if (args[0] !== 'list')
-        return {ok: true, reason: null, stdout: '{"issues":[]}'};
+        return {ok: true, reason: null, stderr: null, stdout: '{"issues":[]}'};
       const answer = spec.beadsAt?.(++listCalls) ?? [];
       return answer === 'unavailable'
-        ? {ok: false, reason: 'br exited 1: no beads workspace', stdout: ''}
-        : {ok: true, reason: null, stdout: listJson(answer)};
+        ? {
+            ok: false,
+            reason: 'br exited 1: no beads workspace',
+            stderr: null,
+            stdout: '',
+          }
+        : {ok: true, reason: null, stderr: null, stdout: listJson(answer)};
     },
-    dispatch: async () => `backgrounded · sim-1 · 2026-09-08 04:30 ${label}\n`,
-    findAgent: async () => {
+    dispatch: () =>
+      Promise.resolve(`backgrounded · sim-1 · 2026-09-08 04:30 ${label}\n`),
+    findAgent: () => {
       polls++;
       if (polls > maxPolls) {
         throw new Error(
@@ -471,24 +595,33 @@ export async function simulateSession(spec: {
         );
       }
       const row = spec.rowAt(polls);
-      return row === 'unreadable'
-        ? {ok: false, reason: 'claude agents --json exited 1'}
-        : {ok: true, row};
+      return Promise.resolve(
+        row === 'unreadable'
+          ? {ok: false, reason: 'claude agents --json exited 1'}
+          : {malformed: 0, ok: true, row},
+      );
     },
-    gitHead: async () => ({ok: true, sha: 'abc123'}),
-    notifyBlocked: () => {},
+    gitHead: () => Promise.resolve({ok: true, sha: 'abc123'}),
+    notifyBlocked: () => {
+      /* nothing is notified in the fake world */
+    },
     now: () => clock,
-    preflight: async () => [],
-    readUsage: async () => null,
+    preflight: () => Promise.resolve([]),
+    readLedgerSessionId: ledgerReaderNeverCalled,
+    readUsage: () =>
+      Promise.resolve({kind: 'failed', reason: 'no /usage in this fixture'}),
     signalPid: () => true,
-    sleep: async (ms: number) => {
+    sleep: (ms: number) => {
       clock += ms;
+      return Promise.resolve();
     },
-    stopSession: async () => ({detail: 'stopped sim-1', ok: true}),
+    stopSession: () => Promise.resolve({detail: 'stopped sim-1', ok: true}),
     write: (text) => {
       stdout += text;
     },
-    writeErr: () => {},
+    writeErr: () => {
+      /* stderr is not asserted in this test */
+    },
   };
 
   const run = await runSession(
@@ -506,6 +639,24 @@ export async function simulateSession(spec: {
     run,
     stdout,
   };
+}
+
+/**
+ * The n-th element, or a thrown failure.
+ *
+ * An indexed read is `T | undefined`, and defaulting that away would let "there
+ * was no such dispatch" pass as "the dispatch was empty" — the assertion would
+ * then be about the wrong thing, and would report the wrong thing when it went
+ * red (critical rule 6). Throwing names the index and the length instead.
+ */
+export function at<T>(items: readonly T[], index: number): T {
+  const value = items[index];
+  if (value === undefined) {
+    throw new Error(
+      `expected an element at index ${index}, but there were ${items.length}`,
+    );
+  }
+  return value;
 }
 
 export function argOf(args: string[], flag: string): string {
@@ -532,4 +683,9 @@ export function spawns(dispatches: string[][]): string[][] {
 /** Dispatches that WAKE the session that is already there. */
 export function resumes(dispatches: string[][]): string[][] {
   return dispatches.filter((d) => d.includes('--resume'));
+}
+
+/** `spawns`, but keeping each call's environment attached to its argv (D18). */
+export function spawnCalls(calls: DispatchCall[]): DispatchCall[] {
+  return calls.filter((call) => !call.args.includes('--resume'));
 }

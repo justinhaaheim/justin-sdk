@@ -25,17 +25,17 @@
 import {existsSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {resolve} from 'path';
 
-import {
-  type ComponentName,
-  COMPONENT_NAMES,
-  configNameFor,
-} from './component-registry';
+import {removeComponentsFromConfig} from './base-setup';
 import {
   COMPONENT_MANIFESTS,
   componentInstalledEvidence,
   hookEntriesFor,
 } from './component-manifest';
-import {removeComponentsFromConfig} from './base-setup';
+import {
+  COMPONENT_NAMES,
+  type ComponentName,
+  configNameFor,
+} from './component-registry';
 import {
   fail,
   readJson,
@@ -56,10 +56,10 @@ export type RemovalOutcome =
   | {kind: 'unreconstructible'; what: string};
 
 export interface RemovalReport {
-  name: ComponentName;
-  outcomes: RemovalOutcome[];
   /** True when the component's name was dropped from `components`. */
   deregistered: boolean;
+  name: ComponentName;
+  outcomes: RemovalOutcome[];
 }
 
 /**
@@ -112,62 +112,11 @@ export interface RemovalOptions {
   dryRun?: boolean;
 }
 
-/**
- * Take one component back out of a repo. Returns what it did (or what it
- * WOULD do, under `dryRun`) and what it refused to do; writes nothing it
- * cannot justify byte-for-byte.
- */
-export function removeComponent(
-  projectRoot: string,
-  name: ComponentName,
-  options: RemovalOptions = {},
-): RemovalReport {
-  const dryRun = options.dryRun ?? false;
-  const manifest = COMPONENT_MANIFESTS[name];
-  const outcomes: RemovalOutcome[] = [];
-
-  const removedFiles = new Set<string>();
-  for (const owned of manifest.files) {
-    const absolute = resolve(projectRoot, owned.path);
-    if (!existsSync(absolute)) continue;
-
-    const pristine = owned.pristine();
-    if (pristine == null) {
-      outcomes.push({kind: 'unreconstructible', what: owned.path});
-      continue;
-    }
-
-    let actual: string;
-    try {
-      actual = readFileSync(absolute, 'utf-8');
-    } catch {
-      // Unreadable is not "absent" and is certainly not "matches": report it
-      // the same way as anything else we could not verify.
-      outcomes.push({kind: 'unreconstructible', what: owned.path});
-      continue;
-    }
-
-    if (actual !== pristine) {
-      outcomes.push({kind: 'modified', what: owned.path});
-      continue;
-    }
-
-    if (!dryRun) rmSync(absolute);
-    removedFiles.add(owned.path);
-    outcomes.push({kind: 'removed', what: owned.path});
-  }
-
-  outcomes.push(...removeIgnoreLines(projectRoot, name, removedFiles, dryRun));
-  outcomes.push(...removePackageJsonEntries(projectRoot, name, dryRun));
-  outcomes.push(...removeSettingsHooks(projectRoot, name, dryRun));
-  outcomes.push(...removeConfigKeys(projectRoot, name, dryRun));
-
-  const dropped = removeComponentsFromConfig(
-    projectRoot,
-    [configNameFor(name)],
-    {dryRun},
-  );
-  return {deregistered: dropped.length > 0, name, outcomes};
+function writeTextPreservingTrailingNewline(
+  absolute: string,
+  content: string,
+): void {
+  writeFileSync(absolute, content.endsWith('\n') ? content : `${content}\n`);
 }
 
 /**
@@ -236,13 +185,6 @@ function removeIgnoreLines(
     }
   }
   return outcomes;
-}
-
-function writeTextPreservingTrailingNewline(
-  absolute: string,
-  content: string,
-): void {
-  writeFileSync(absolute, content.endsWith('\n') ? content : `${content}\n`);
 }
 
 /** Remove owned package.json scripts (exact value) and owned top-level blocks. */
@@ -337,8 +279,8 @@ function removeSettingsHooks(
     const entries = hooks[owned.event];
     if (!Array.isArray(entries)) continue;
     if (
-      !hookEntriesFor(settings as Record<string, unknown>, owned.event).some(
-        (command) => command.includes(owned.fingerprint),
+      !hookEntriesFor(settings, owned.event).some((command) =>
+        command.includes(owned.fingerprint),
       )
     ) {
       continue;
@@ -456,6 +398,64 @@ function removeConfigKeys(
     writeJson(configPath, config);
   }
   return outcomes;
+}
+
+/**
+ * Take one component back out of a repo. Returns what it did (or what it
+ * WOULD do, under `dryRun`) and what it refused to do; writes nothing it
+ * cannot justify byte-for-byte.
+ */
+export function removeComponent(
+  projectRoot: string,
+  name: ComponentName,
+  options: RemovalOptions = {},
+): RemovalReport {
+  const dryRun = options.dryRun ?? false;
+  const manifest = COMPONENT_MANIFESTS[name];
+  const outcomes: RemovalOutcome[] = [];
+
+  const removedFiles = new Set<string>();
+  for (const owned of manifest.files) {
+    const absolute = resolve(projectRoot, owned.path);
+    if (!existsSync(absolute)) continue;
+
+    const pristine = owned.pristine();
+    if (pristine == null) {
+      outcomes.push({kind: 'unreconstructible', what: owned.path});
+      continue;
+    }
+
+    let actual: string;
+    try {
+      actual = readFileSync(absolute, 'utf-8');
+    } catch {
+      // Unreadable is not "absent" and is certainly not "matches": report it
+      // the same way as anything else we could not verify.
+      outcomes.push({kind: 'unreconstructible', what: owned.path});
+      continue;
+    }
+
+    if (actual !== pristine) {
+      outcomes.push({kind: 'modified', what: owned.path});
+      continue;
+    }
+
+    if (!dryRun) rmSync(absolute);
+    removedFiles.add(owned.path);
+    outcomes.push({kind: 'removed', what: owned.path});
+  }
+
+  outcomes.push(...removeIgnoreLines(projectRoot, name, removedFiles, dryRun));
+  outcomes.push(...removePackageJsonEntries(projectRoot, name, dryRun));
+  outcomes.push(...removeSettingsHooks(projectRoot, name, dryRun));
+  outcomes.push(...removeConfigKeys(projectRoot, name, dryRun));
+
+  const dropped = removeComponentsFromConfig(
+    projectRoot,
+    [configNameFor(name)],
+    {dryRun},
+  );
+  return {deregistered: dropped.length > 0, name, outcomes};
 }
 
 // ---------------------------------------------------------------------------

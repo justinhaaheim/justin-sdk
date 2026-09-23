@@ -21,9 +21,9 @@ import {join} from 'node:path';
 import {exec} from './setup-helpers';
 
 export interface EasUpdateOptions {
-  channel: string;
   /** Changelog text; defaults to the project's latest commit subject. */
   changelog?: string | null;
+  channel: string;
   /**
    * EAS "environment" (which env-var set to resolve) — required by recent EAS
    * CLIs in --non-interactive mode. Defaults to APP_VARIANT, then the channel.

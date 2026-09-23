@@ -89,8 +89,8 @@ import {
   prettierEnabled,
   prettierMarkdown,
   projectRulesFilePath,
-  rulesFilePath,
   RULES_UPDATE_CMD,
+  rulesFilePath,
 } from './rules/rules-file';
 import {
   fail,
@@ -113,11 +113,11 @@ import {
 export {
   CRITICAL_RULES_COMPONENT,
   CRITICAL_RULES_CONFIG_KEY,
+  type EnrollmentRead,
   hasRetiredModulesKey,
   legacyModulesWarning,
   readEnrollment,
   RETIRED_MODULES_KEY,
-  type EnrollmentRead,
 } from './rules/rules-enrollment';
 
 /**
@@ -139,23 +139,23 @@ export function warnRetiredModulesKey(projectRoot: string): void {
 // ---------------------------------------------------------------------------
 
 export interface RefreshSuccess {
-  status: 'written' | 'unchanged';
+  contentHash: string;
   /** Absolute path of the artifact. */
   file: string;
-  contentHash: string;
-  /** Modules actually inlined, in index order — the resolved set. */
-  modules: string[];
   /** `moduleFingerprint(modules)` — what the header records. */
   moduleFingerprint: string;
+  /** Modules actually inlined, in index order — the resolved set. */
+  modules: string[];
   /** prompts-repo HEAD commit, or null when the source isn't a git checkout. */
   sourceCommit: PromptsCommit | null;
   sourceRefresh: SourceRefresh;
+  status: 'written' | 'unchanged';
   warnings: string[];
 }
 
 export interface RefreshFailure {
-  status: 'cannot-refresh' | 'failed';
   message: string;
+  status: 'cannot-refresh' | 'failed';
 }
 
 export type RefreshOutcome = RefreshSuccess | RefreshFailure;
@@ -191,6 +191,52 @@ export interface RefreshOptions {
  */
 export function refreshIsVerified(refresh: SourceRefresh): boolean {
   return refresh === 'override' || refresh === 'cloned' || refresh === 'pulled';
+}
+
+/**
+ * The bytes we just committed must be a FIXPOINT of the repo's own prettier —
+ * that is the literal thing `sweep --component critical-rules` gates on, via
+ * `signal-source:PRETTIER`.
+ *
+ * The body is formatted, but the stamp is prepended AFTERWARDS (it carries the
+ * hash OF the formatted body, so it cannot be present while that body is being
+ * formatted). Whether prettier leaves a stamped file alone is therefore an
+ * assumption — an empirically solid one (an HTML comment followed by a blank
+ * line is an untouched markdown `html` node; measured against prettier 3.6 with
+ * a real fleet config), but this bead exists because an assumption about
+ * prettier went unchecked. So: check it, on every real write, in every repo.
+ *
+ * `--check` rather than a second `--write`: it answers the same question
+ * without mutating a file whose stamp already claims a hash for the body on
+ * disk. Run with cwd = projectRoot and WITHOUT the ignore override, so this
+ * mirrors the repo's own `prettier --check .` exactly — including a repo that
+ * ignores the artifact, where there is genuinely nothing to satisfy.
+ *
+ * Warn, don't fail: the file is already written, the sweep's own gate will go
+ * red on it anyway, and this line is the explanation that gate cannot give.
+ */
+function verifyArtifactIsPrettierClean(
+  projectRoot: string,
+  file: string,
+): void {
+  if (!prettierEnabled()) return;
+  const binary = findLocalPrettier(dirname(file));
+  if (binary == null) return; // no repo prettier ⇒ no repo prettier gate
+  try {
+    execFileSync(binary, ['--check', file], {
+      cwd: projectRoot,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 60_000,
+    });
+  } catch {
+    warn(
+      `critical-rules: ${relative(projectRoot, file)} does NOT satisfy this repo's own ` +
+        `\`prettier --check\` — the repo's signal/lint-staged gate will fail on it. ` +
+        `The rules BODY was formatted with ${binary}, so the difference is in the ` +
+        `generated stamp line; that is a bug in this tool, not in the repo.`,
+    );
+  }
 }
 
 /**
@@ -361,52 +407,6 @@ export function refreshCriticalRulesArtifact(
   return {...common, status: 'written'};
 }
 
-/**
- * The bytes we just committed must be a FIXPOINT of the repo's own prettier —
- * that is the literal thing `sweep --component critical-rules` gates on, via
- * `signal-source:PRETTIER`.
- *
- * The body is formatted, but the stamp is prepended AFTERWARDS (it carries the
- * hash OF the formatted body, so it cannot be present while that body is being
- * formatted). Whether prettier leaves a stamped file alone is therefore an
- * assumption — an empirically solid one (an HTML comment followed by a blank
- * line is an untouched markdown `html` node; measured against prettier 3.6 with
- * a real fleet config), but this bead exists because an assumption about
- * prettier went unchecked. So: check it, on every real write, in every repo.
- *
- * `--check` rather than a second `--write`: it answers the same question
- * without mutating a file whose stamp already claims a hash for the body on
- * disk. Run with cwd = projectRoot and WITHOUT the ignore override, so this
- * mirrors the repo's own `prettier --check .` exactly — including a repo that
- * ignores the artifact, where there is genuinely nothing to satisfy.
- *
- * Warn, don't fail: the file is already written, the sweep's own gate will go
- * red on it anyway, and this line is the explanation that gate cannot give.
- */
-function verifyArtifactIsPrettierClean(
-  projectRoot: string,
-  file: string,
-): void {
-  if (!prettierEnabled()) return;
-  const binary = findLocalPrettier(dirname(file));
-  if (binary == null) return; // no repo prettier ⇒ no repo prettier gate
-  try {
-    execFileSync(binary, ['--check', file], {
-      cwd: projectRoot,
-      encoding: 'utf-8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 60_000,
-    });
-  } catch {
-    warn(
-      `critical-rules: ${relative(projectRoot, file)} does NOT satisfy this repo's own ` +
-        `\`prettier --check\` — the repo's signal/lint-staged gate will fail on it. ` +
-        `The rules BODY was formatted with ${binary}, so the difference is in the ` +
-        `generated stamp line; that is a bug in this tool, not in the repo.`,
-    );
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Layer (b): suppress the USER-LEVEL duplicate (home-base-anhw)
 // ---------------------------------------------------------------------------
@@ -456,7 +456,7 @@ export function userLevelRulesExclude(): string {
 
 export type ExcludeOutcome =
   | {status: 'added' | 'already-present'; value: string}
-  | {status: 'failed'; message: string};
+  | {message: string; status: 'failed'};
 
 /**
  * Add the user-level exclusion to the repo's `.claude/settings.json`, ADDITIVELY.
@@ -523,11 +523,11 @@ export function stepUserLevelRulesExclude(projectRoot: string): boolean {
 }
 
 export async function runCriticalRulesSetup(args: {
-  projectRoot: string;
-  quiet: boolean;
   force?: boolean;
+  projectRoot: string;
   /** Read this prompts dir as-is instead of the managed clone (tests). */
   promptsDir?: string;
+  quiet: boolean;
   /**
    * The remote the SDK pin tag is verified against, forwarded to base-setup.
    * Tests point it at a local bare repo so the install is hermetic; production

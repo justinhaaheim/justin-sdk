@@ -50,19 +50,19 @@ import {spawn} from 'node:child_process';
  * short output.
  */
 export interface ChildOutcome {
-  /** Exit code, or null when the child was killed or never exited. */
-  status: number | null;
-  /** The signal that killed it, if any. */
-  signal: string | null;
-  stdout: string;
-  stderr: string;
-  /** The timeout fired and we SIGKILLed the child. */
-  timedOut: boolean;
+  durationMs: number;
   /** The child could not be spawned at all (ENOENT, EACCES …). */
   error: string | null;
+  /** The signal that killed it, if any. */
+  signal: string | null;
+  /** Exit code, or null when the child was killed or never exited. */
+  status: number | null;
+  stderr: string;
+  stdout: string;
+  /** The timeout fired and we SIGKILLed the child. */
+  timedOut: boolean;
   /** The bound this call was given, so a failure message can name it. */
   timeoutMs: number;
-  durationMs: number;
   /** Output exceeded `maxBufferBytes` and what is here is NOT all of it. */
   truncated: boolean;
 }
@@ -85,11 +85,11 @@ export const DEFAULT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 export interface ChildOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
-  /** Required on purpose: an unbounded child call is the bug this file is about. */
-  timeoutMs: number;
-  maxBufferBytes?: number;
   /** Injected by tests only, so the grace period can be exercised in ms. */
   graceMs?: number;
+  maxBufferBytes?: number;
+  /** Required on purpose: an unbounded child call is the bug this file is about. */
+  timeoutMs: number;
 }
 
 /**
@@ -185,8 +185,15 @@ export function runChild(
     });
     // A destroyed pipe can emit EPIPE/ECONNRESET after we have answered. That is
     // not a failure of the call and must not become an unhandled error.
-    child.stdout?.on('error', () => {});
-    child.stderr?.on('error', () => {});
+    // A stream error here is the child going away mid-write, which the exit
+    // handling below already reports; an unhandled 'error' event would crash
+    // the process instead.
+    child.stdout?.on('error', () => {
+      /* reported via the child's exit, not here */
+    });
+    child.stderr?.on('error', () => {
+      /* reported via the child's exit, not here */
+    });
 
     child.on('error', (e: Error) => {
       error = e.message;

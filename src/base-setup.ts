@@ -21,11 +21,10 @@
  */
 
 import {createHash} from 'crypto';
-import {existsSync, readFileSync, rmSync, writeFileSync} from 'fs';
+import {existsSync, readFileSync, rmSync} from 'fs';
 import {basename, resolve} from 'path';
 
 import {coreConfigNames} from './component-registry';
-import {SDK_REPO_URL, sdkTagExistsOnRemote} from './sdk-latest';
 import {getSdkVersion} from './sdk-identity';
 import {
   invokesSdk,
@@ -36,30 +35,29 @@ import {
   sdkScript,
   STALE_SDK_INVOCATION_RE,
 } from './sdk-invocation';
-import {findTypeScriptSources} from './ts-inputs';
+import {SDK_REPO_URL, sdkTagExistsOnRemote} from './sdk-latest';
 import {
   appendIfMissing,
   ensureDir,
-  exec,
   fail,
   readJson,
   setQuiet,
   stepHeader,
   success,
-  todayIsoDate,
   warn,
   writeJson,
 } from './setup-helpers';
+import {findTypeScriptSources} from './ts-inputs';
 
 // ---------------------------------------------------------------------------
 // Step implementations
 // ---------------------------------------------------------------------------
 
 const DEFAULT_SIGNAL_SOURCE_SCRIPTS: Record<string, string> = {
-  'signal-source:TS': 'tsc --noEmit',
   'signal-source:LINT':
     'eslint --report-unused-disable-directives --max-warnings 0 .',
   'signal-source:PRETTIER': 'prettier --check .',
+  'signal-source:TS': 'tsc --noEmit',
 };
 
 /**
@@ -71,13 +69,13 @@ const DEFAULT_SIGNAL_SOURCE_SCRIPTS: Record<string, string> = {
  * every repo on the fleet; the SDK was the odd one out.
  */
 const SDK_SCRIPTS: Record<string, string> = {
-  'setup-env': sdkScript('setup-env'),
-  signal: sdkScript('signal --quiet'),
-  'signal:verbose': sdkScript('signal'),
-  'signal:serial': sdkScript('signal --serial'),
   doctor: sdkScript('doctor'),
   'doctor:fix': sdkScript('doctor --fix'),
   fix: sdkScript('fix'),
+  'setup-env': sdkScript('setup-env'),
+  signal: sdkScript('signal --quiet'),
+  'signal:serial': sdkScript('signal --serial'),
+  'signal:verbose': sdkScript('signal'),
 };
 
 /**
@@ -194,6 +192,47 @@ const OWN_SESSION_START_SHAPE =
 const RETIRED_SETUP_ENV_PATH = 'scripts/setup-env.ts';
 
 /**
+ * Replace this installer's own command(s) inside one entry, keeping the entry's
+ * other keys (its `matcher`) and its foreign hooks exactly where they are. A
+ * second hook that would rewrite to the same command is dropped rather than
+ * duplicated — one entry running the hook twice is the same bug at a smaller
+ * scale.
+ */
+function rewriteOwnSessionStartEntry(
+  entry: unknown,
+  /** True when an earlier entry already carries the command. */
+  alreadyPlaced: boolean,
+): unknown | null {
+  const candidate = entry as {[key: string]: unknown; hooks?: unknown};
+  if (!Array.isArray(candidate.hooks)) return entry;
+
+  let alreadyWrote = alreadyPlaced;
+  const hooks: unknown[] = [];
+  for (const hook of candidate.hooks) {
+    const command = (hook as {command?: unknown}).command;
+    const mine =
+      typeof command === 'string' &&
+      (OWN_SESSION_START_SHAPE.test(command) ||
+        isSdkEmittedCommand(command) ||
+        command.includes(RETIRED_SETUP_ENV_PATH));
+    if (!mine) {
+      hooks.push(hook);
+      continue;
+    }
+    if (alreadyWrote) continue;
+    alreadyWrote = true;
+    hooks.push({
+      ...(hook as Record<string, unknown>),
+      command: SESSION_START_HOOK_COMMAND,
+    });
+  }
+  // A later duplicate whose only content WAS the command has nothing left to
+  // say; dropping it is how two entries become one.
+  if (hooks.length === 0) return null;
+  return {...candidate, hooks};
+}
+
+/**
  * The SessionStart array this installer wants, built by EDITING the one it was
  * given — never by rebuilding it as `[...foreign, mine]` (dchjw.15 F3).
  *
@@ -247,47 +286,6 @@ export function upsertSessionStartHook(
     });
   }
   return entries;
-}
-
-/**
- * Replace this installer's own command(s) inside one entry, keeping the entry's
- * other keys (its `matcher`) and its foreign hooks exactly where they are. A
- * second hook that would rewrite to the same command is dropped rather than
- * duplicated — one entry running the hook twice is the same bug at a smaller
- * scale.
- */
-function rewriteOwnSessionStartEntry(
-  entry: unknown,
-  /** True when an earlier entry already carries the command. */
-  alreadyPlaced: boolean,
-): unknown | null {
-  const candidate = entry as {hooks?: unknown; [key: string]: unknown};
-  if (!Array.isArray(candidate.hooks)) return entry;
-
-  let alreadyWrote = alreadyPlaced;
-  const hooks: unknown[] = [];
-  for (const hook of candidate.hooks) {
-    const command = (hook as {command?: unknown}).command;
-    const mine =
-      typeof command === 'string' &&
-      (OWN_SESSION_START_SHAPE.test(command) ||
-        isSdkEmittedCommand(command) ||
-        command.includes(RETIRED_SETUP_ENV_PATH));
-    if (!mine) {
-      hooks.push(hook);
-      continue;
-    }
-    if (alreadyWrote) continue;
-    alreadyWrote = true;
-    hooks.push({
-      ...(hook as Record<string, unknown>),
-      command: SESSION_START_HOOK_COMMAND,
-    });
-  }
-  // A later duplicate whose only content WAS the command has nothing left to
-  // say; dropping it is how two entries become one.
-  if (hooks.length === 0) return null;
-  return {...candidate, hooks};
 }
 
 /**
@@ -420,8 +418,7 @@ export function stepPackageScripts(projectRoot: string): boolean {
     return false;
   }
 
-  const scripts = ((pkg.scripts as Record<string, string> | undefined) ??
-    {}) as Record<string, string>;
+  const scripts = (pkg.scripts as Record<string, string> | undefined) ?? {};
   let modified = false;
 
   // REFUSE rather than write scripts that would be routed somewhere else
@@ -599,17 +596,17 @@ export function stepSetupEnvScript(
  */
 export function stepGitignore(projectRoot: string): boolean {
   const gitignore = resolve(projectRoot, '.gitignore');
-  const entries: Array<{search: string; append: string; label: string}> = [
+  const entries: {append: string; label: string; search: string}[] = [
     {
-      search: 'tmp/',
       append: '\n# Temporary / scratch files\ntmp/\n',
       label: 'tmp/',
+      search: 'tmp/',
     },
     {
-      search: 'dynamic-version.local',
       append:
         '\n# Dynamic version artifacts (local-only)\ndynamic-version.local.json\ndynamic-version.local.d.ts\n',
       label: 'dynamic-version.local.*',
+      search: 'dynamic-version.local',
     },
   ];
 
@@ -637,12 +634,12 @@ export function stepClaudeSettings(projectRoot: string): boolean {
   const settingsPath = resolve(settingsDir, 'settings.json');
   ensureDir(settingsDir);
 
-  const settings = (readJson(settingsPath) ?? {}) as Record<string, unknown>;
+  const settings = readJson(settingsPath) ?? {};
   let modified = false;
 
   // Ensure sandbox.excludedCommands exists (empty is fine)
-  const sandbox = ((settings.sandbox as Record<string, unknown> | undefined) ??
-    {}) as Record<string, unknown>;
+  const sandbox =
+    (settings.sandbox as Record<string, unknown> | undefined) ?? {};
   if (!Array.isArray(sandbox.excludedCommands)) {
     sandbox.excludedCommands = [];
     modified = true;
@@ -653,8 +650,7 @@ export function stepClaudeSettings(projectRoot: string): boolean {
   // pre-j2n7 entry that ran the committed scripts/setup-env.ts copy, which is
   // being deleted by stepSetupEnvScript (an un-migrated hook would error at
   // every session start pointing at a file that no longer exists).
-  const hooks = ((settings.hooks as Record<string, unknown> | undefined) ??
-    {}) as Record<string, unknown>;
+  const hooks = (settings.hooks as Record<string, unknown> | undefined) ?? {};
   const sessionStart = (hooks.SessionStart as unknown[] | undefined) ?? [];
   const desired = upsertSessionStartHook(sessionStart);
   // Compare the whole desired array, not "is a hook of this shape present":
@@ -775,15 +771,15 @@ export function stepDepsHasSdk(
 // ---------------------------------------------------------------------------
 
 export interface BaseSetupOptions {
-  /** Project root (defaults to cwd) */
-  projectRoot?: string;
-  /** Suppress non-error output (for tests and for use from other setup commands) */
-  quiet?: boolean;
   /**
    * Force-DELETE a hand-modified scripts/setup-env.ts (one whose hash matches
    * no known SDK template). Hash-recognized copies are deleted without it.
    */
   force?: boolean;
+  /** Project root (defaults to cwd) */
+  projectRoot?: string;
+  /** Suppress non-error output (for tests and for use from other setup commands) */
+  quiet?: boolean;
   /**
    * The remote to verify the SDK tag against before writing a pin. Defaults to
    * the real published repo; tests point it at a local bare repo so the real
@@ -799,42 +795,41 @@ export interface BaseSetupOptions {
  * precondition from other setup commands (e.g., beads-setup calls this
  * to ensure the foundation is in place before it adds its own content).
  */
-export async function runBaseSetup(
-  options: BaseSetupOptions = {},
-): Promise<number> {
+export function runBaseSetup(options: BaseSetupOptions = {}): Promise<number> {
   setQuiet(options.quiet ?? false);
   const projectRoot = options.projectRoot ?? process.cwd();
   const force = options.force ?? false;
 
-  if (!options.quiet) {
+  if (options.quiet !== true) {
     console.log(
       `\n\x1b[1mInstalling justin-sdk base-setup in ${basename(projectRoot)}\x1b[0m\n`,
     );
   }
 
   stepHeader('1. justin-sdk.config.json');
-  if (!stepJustinSdkConfig(projectRoot)) return 1;
+  if (!stepJustinSdkConfig(projectRoot)) return Promise.resolve(1);
 
   stepHeader('2. package.json: @justinhaaheim/justin-sdk dep');
-  if (!stepDepsHasSdk(projectRoot, {sdkRepoUrl: options.sdkRepoUrl})) return 1;
+  if (!stepDepsHasSdk(projectRoot, {sdkRepoUrl: options.sdkRepoUrl}))
+    return Promise.resolve(1);
 
   stepHeader('3. package.json scripts');
-  if (!stepPackageScripts(projectRoot)) return 1;
+  if (!stepPackageScripts(projectRoot)) return Promise.resolve(1);
 
   stepHeader('4. scripts/setup-env.ts (retired — remove committed copy)');
-  if (!stepSetupEnvScript(projectRoot, force)) return 1;
+  if (!stepSetupEnvScript(projectRoot, force)) return Promise.resolve(1);
 
   stepHeader('5. .gitignore');
-  if (!stepGitignore(projectRoot)) return 1;
+  if (!stepGitignore(projectRoot)) return Promise.resolve(1);
 
   stepHeader('6. .claude/settings.json');
-  if (!stepClaudeSettings(projectRoot)) return 1;
+  if (!stepClaudeSettings(projectRoot)) return Promise.resolve(1);
 
-  if (!options.quiet) {
+  if (options.quiet !== true) {
     console.log(
       `\n\x1b[32m\x1b[1mbase-setup ready\x1b[0m in ${basename(projectRoot)}.\n`,
     );
   }
 
-  return 0;
+  return Promise.resolve(0);
 }

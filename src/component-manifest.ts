@@ -31,7 +31,7 @@ import {existsSync, readFileSync} from 'fs';
 import {resolve} from 'path';
 
 import {BEADS_MISE_TOOL_KEY} from './beads-setup';
-import {type ComponentName, COMPONENT_NAMES} from './component-registry';
+import {COMPONENT_NAMES, type ComponentName} from './component-registry';
 import {EAS_SCRIPTS} from './eas-setup';
 import {
   ESLINT_CONFIG_TARGET,
@@ -53,6 +53,9 @@ import {
 } from './prettier-setup';
 import {isSdkEmittedCommand} from './sdk-invocation';
 import {
+  THREAD_CAPTURE_HOOK_COMMAND,
+  THREAD_CAPTURE_HOOK_EVENTS,
+  THREAD_CAPTURE_HOOK_FINGERPRINT,
   THREAD_HOOK_EVENT,
   THREAD_START_HOOK_COMMAND,
   THREAD_START_HOOK_FINGERPRINT,
@@ -60,16 +63,16 @@ import {
   THREAD_STOP_HOOK_EVENT,
   THREAD_STOP_HOOK_FINGERPRINT,
 } from './thread-hooks-setup';
+import {TIME_CHECK_CONFIG_KEY, TIME_CHECK_DEFAULTS} from './time-check';
 import {
   TIME_CHECK_HOOK_COMMAND,
   TIME_CHECK_HOOK_FINGERPRINT,
 } from './time-check-setup';
-import {TIME_CHECK_CONFIG_KEY, TIME_CHECK_DEFAULTS} from './time-check';
+import {USAGE_CHECK_CONFIG_KEY, USAGE_CHECK_DEFAULTS} from './usage-check';
 import {
   USAGE_CHECK_HOOK_COMMAND,
   USAGE_CHECK_HOOK_FINGERPRINT,
 } from './usage-check-setup';
-import {USAGE_CHECK_CONFIG_KEY, USAGE_CHECK_DEFAULTS} from './usage-check';
 
 // ---------------------------------------------------------------------------
 // Shapes
@@ -92,7 +95,6 @@ export interface OwnedFile {
 /** A package.json script the component adds, with the value it writes. */
 export interface OwnedScript {
   key: string;
-  value: string;
   /**
    * True when this key is NOT this component's alone — something else writes
    * it, or a repo without this component legitimately has it. A shared script
@@ -110,17 +112,11 @@ export interface OwnedScript {
    *     reconcile would have broken a repo that never had the component.
    */
   shared?: boolean;
+  value: string;
 }
 
 /** A `.claude/settings.json` hook entry, identified the way its installer does. */
 export interface OwnedHook {
-  event: string;
-  /**
-   * Substring of the hook command that identifies it across every generation of
-   * spelling. DETECTION only: it answers "is this component's hook here?", not
-   * "is this command mine to delete" (dchjw.17 F5).
-   */
-  fingerprint: string;
   /**
    * The exact command the installer writes TODAY. Removal deletes a hook only
    * on `command === this`; anything else that merely contains the fingerprint —
@@ -129,6 +125,13 @@ export interface OwnedHook {
    * file's bytes.
    */
   command: string;
+  event: string;
+  /**
+   * Substring of the hook command that identifies it across every generation of
+   * spelling. DETECTION only: it answers "is this component's hook here?", not
+   * "is this command mine to delete" (dchjw.17 F5).
+   */
+  fingerprint: string;
 }
 
 /** Lines a component appends to an ignore file it does not own outright. */
@@ -141,17 +144,6 @@ export interface OwnedIgnoreLines {
 }
 
 export interface ComponentManifest {
-  /** One line, for `justin-sdk list`. */
-  purpose: string;
-  /**
-   * False for base-setup only: it is the foundation every installer applies,
-   * so "removing" it would leave a repo that still has it, minus its config.
-   */
-  removable: boolean;
-  files: readonly OwnedFile[];
-  scripts: readonly OwnedScript[];
-  hooks: readonly OwnedHook[];
-  ignoreLines: readonly OwnedIgnoreLines[];
   /**
    * `componentConfig.<key>` blocks the component seeds, with the EXACT value it
    * seeds. Subject to the same identity rule as a file: a block someone tuned
@@ -163,6 +155,9 @@ export interface ComponentManifest {
    * human or by a retired SDK, so it is reported and never deleted.
    */
   configKeys: readonly {key: string; seeds: () => unknown | null}[];
+  files: readonly OwnedFile[];
+  hooks: readonly OwnedHook[];
+  ignoreLines: readonly OwnedIgnoreLines[];
   /**
    * package.json top-level blocks the component seeds, removed only when they
    * still deep-equal the default it wrote.
@@ -174,14 +169,6 @@ export interface ComponentManifest {
    */
   markers: readonly string[];
   /**
-   * Paths whose NAME ALONE is SDK provenance — nothing but this SDK creates a
-   * file at this path, so its existence proves the SDK was here even though its
-   * bytes cannot be reconstructed. `justin-sdk.config.json` and
-   * `.claude/rules/justin-sdk/` are the two; both carry the SDK's name in the
-   * path, which is exactly what makes them unambiguous.
-   */
-  sdkOwnedPaths: readonly string[];
-  /**
    * A string only this SDK writes, inside a file it SHARES with humans and
    * other tools. This is how a component whose artifact is composed or generated
    * (so `pristine` is null, and a byte comparison is impossible) can still prove
@@ -192,7 +179,23 @@ export interface ComponentManifest {
    * word `beads_rust`, because a repo that says in a COMMENT that it removed
    * beads_rust contains that word too.
    */
-  provenanceMarkers: readonly {file: string; contains: string}[];
+  provenanceMarkers: readonly {contains: string; file: string}[];
+  /** One line, for `justin-sdk list`. */
+  purpose: string;
+  /**
+   * False for base-setup only: it is the foundation every installer applies,
+   * so "removing" it would leave a repo that still has it, minus its config.
+   */
+  removable: boolean;
+  scripts: readonly OwnedScript[];
+  /**
+   * Paths whose NAME ALONE is SDK provenance — nothing but this SDK creates a
+   * file at this path, so its existence proves the SDK was here even though its
+   * bytes cannot be reconstructed. `justin-sdk.config.json` and
+   * `.claude/rules/justin-sdk/` are the two; both carry the SDK's name in the
+   * path, which is exactly what makes them unambiguous.
+   */
+  sdkOwnedPaths: readonly string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -236,7 +239,7 @@ const EMPTY = {
   ignoreLines: [] as readonly OwnedIgnoreLines[],
   jsonBlocks: [] as readonly {key: string; value: unknown}[],
   markers: [] as readonly string[],
-  provenanceMarkers: [] as readonly {file: string; contains: string}[],
+  provenanceMarkers: [] as readonly {contains: string; file: string}[],
   removable: true,
   scripts: [] as readonly OwnedScript[],
   sdkOwnedPaths: [] as readonly string[],
@@ -255,49 +258,57 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
     sdkOwnedPaths: ['justin-sdk.config.json'],
   },
 
-  gitignore: {
+  beads: {
     ...EMPTY,
-    files: [fromTemplate('.gitignore', 'configs', '.gitignore.node-cli')],
-    ignoreLines: [
-      {
-        file: '.gitignore',
-        lines: GITIGNORE_BASELINE_ENTRIES,
-        sectionHeader: '# justin-sdk baseline (appended)',
-      },
-    ],
-    purpose: 'The baseline .gitignore entries every repo of Justin’s needs.',
-  },
-
-  prettier: {
-    ...EMPTY,
-    files: [
-      fromTemplate('.prettierrc.json', 'configs', '.prettierrc.json'),
-      fromTemplate('.prettierignore', 'configs', '.prettierignore'),
-    ],
-    ignoreLines: [
-      {
-        file: '.prettierignore',
-        lines: PRETTIERIGNORE_BASELINE_ENTRIES,
-        sectionHeader: null,
-      },
-    ],
+    // .beads/ IS THE ISSUE DATABASE. It is user data, it is the thing every
+    // rule in this repo calls the durable memory, and nothing here may delete
+    // it — not even byte-identically. Detection only.
+    hooks: [],
+    markers: ['.beads'],
+    // `.beads/` above is a MARKER, not provenance: `bd` (Dolt) writes exactly
+    // the same directory name, which is how the first fleet dry-run proposed
+    // adopting beads into ~/Dev/life. The mise tool key is the provenance —
+    // beads-setup is the only thing that writes it (dchjw.19).
+    provenanceMarkers: [{contains: BEADS_MISE_TOOL_KEY, file: 'mise.toml'}],
+    // The purpose names three things and the manifest owns none of them, so
+    // `remove beads` reports "0 artifact(s) removed" and looks broken. It is
+    // not: .beads/ is the issue database, and the mise pin and the sandbox
+    // exclusion live in files (mise.toml, .claude/settings.json) that other
+    // components and humans also write, so neither is reconstructible as an
+    // exact value this component owns. Say that in the purpose rather than
+    // letting the number imply nothing was found (dchjw.17 F8).
     purpose:
-      'Prettier config, ignore file and the prettier:*/signal-source:PRETTIER scripts.',
-    scripts: [
-      {
-        key: SIGNAL_SOURCE_PRETTIER_KEY,
-        shared: true,
-        value: SIGNAL_SOURCE_PRETTIER_SCRIPT,
-      },
-      ...PRETTIER_SCRIPTS,
-    ],
+      'The beads issue tracker: the br toolchain pin, .beads/, and the sandbox exclusion that lets br run. `remove` deletes NONE of them — .beads/ is your issue database, and the pin and the exclusion sit in files shared with other components; it un-lists the component and leaves every artifact in place.',
   },
 
-  tsconfig: {
+  'critical-rules': {
     ...EMPTY,
-    files: [fromTemplate('tsconfig.json', 'configs', 'tsconfig.node-cli.json')],
-    purpose: 'tsconfig.json and the signal-source:TS type-check entry.',
-    scripts: [{key: 'signal-source:TS', shared: true, value: 'tsc --noEmit'}],
+    // Nothing under this key is written by the installer any more: a repo that
+    // has it has a human's block, or the retired `modules` include-list the
+    // fleet sweep removes. Reported, never deleted.
+    configKeys: [{key: 'critical-rules', seeds: () => null}],
+    // The artifact is generated from the prompts registry at install time, so
+    // its bytes depend on a clone this command may not have. Never deleted.
+    files: [unreconstructible('.claude/rules/justin-sdk/critical-rules.md')],
+    purpose:
+      'The committed .claude/rules/justin-sdk/critical-rules.md artifact, regenerated from the prompts registry.',
+    // Its bytes come from a prompts clone this command may not have, so they
+    // cannot be diffed — but the path is namespaced to the SDK and nothing else
+    // writes there, which is provenance enough to adopt on.
+    sdkOwnedPaths: ['.claude/rules/justin-sdk/critical-rules.md'],
+  },
+
+  eas: {
+    ...EMPTY,
+    purpose: 'Expo/EAS build and update scripts (applies only to an Expo app).',
+    scripts: EAS_SCRIPTS.map((script) => ({
+      ...script,
+      // `prebuild` and `eas-build-post-install` both run version-manager, which
+      // plenty of non-Expo repos use on its own. They are not eas's to claim or
+      // to delete — only the eas-shaped names below identify the component.
+      shared:
+        script.key === 'prebuild' || script.key === 'eas-build-post-install',
+    })),
   },
 
   eslint: {
@@ -313,6 +324,33 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
       },
       ...LINT_SCRIPTS,
     ],
+  },
+
+  'gh-actions': {
+    ...EMPTY,
+    files: [
+      fromTemplate(
+        WORKFLOW_RELATIVE_PATH,
+        'configs',
+        '.github',
+        'workflows',
+        'signal.yml',
+      ),
+    ],
+    purpose: 'The GitHub Actions workflow that runs `signal` on every push.',
+  },
+
+  gitignore: {
+    ...EMPTY,
+    files: [fromTemplate('.gitignore', 'configs', '.gitignore.node-cli')],
+    ignoreLines: [
+      {
+        file: '.gitignore',
+        lines: GITIGNORE_BASELINE_ENTRIES,
+        sectionHeader: '# justin-sdk baseline (appended)',
+      },
+    ],
+    purpose: 'The baseline .gitignore entries every repo of Justin’s needs.',
   },
 
   husky: {
@@ -350,54 +388,54 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
     ],
   },
 
-  'gh-actions': {
+  prettier: {
     ...EMPTY,
     files: [
-      fromTemplate(
-        WORKFLOW_RELATIVE_PATH,
-        'configs',
-        '.github',
-        'workflows',
-        'signal.yml',
-      ),
+      fromTemplate('.prettierrc.json', 'configs', '.prettierrc.json'),
+      fromTemplate('.prettierignore', 'configs', '.prettierignore'),
     ],
-    purpose: 'The GitHub Actions workflow that runs `signal` on every push.',
-  },
-
-  beads: {
-    ...EMPTY,
-    // .beads/ IS THE ISSUE DATABASE. It is user data, it is the thing every
-    // rule in this repo calls the durable memory, and nothing here may delete
-    // it — not even byte-identically. Detection only.
-    hooks: [],
-    markers: ['.beads'],
-    // `.beads/` above is a MARKER, not provenance: `bd` (Dolt) writes exactly
-    // the same directory name, which is how the first fleet dry-run proposed
-    // adopting beads into ~/Dev/life. The mise tool key is the provenance —
-    // beads-setup is the only thing that writes it (dchjw.19).
-    provenanceMarkers: [{contains: BEADS_MISE_TOOL_KEY, file: 'mise.toml'}],
-    // The purpose names three things and the manifest owns none of them, so
-    // `remove beads` reports "0 artifact(s) removed" and looks broken. It is
-    // not: .beads/ is the issue database, and the mise pin and the sandbox
-    // exclusion live in files (mise.toml, .claude/settings.json) that other
-    // components and humans also write, so neither is reconstructible as an
-    // exact value this component owns. Say that in the purpose rather than
-    // letting the number imply nothing was found (dchjw.17 F8).
+    ignoreLines: [
+      {
+        file: '.prettierignore',
+        lines: PRETTIERIGNORE_BASELINE_ENTRIES,
+        sectionHeader: null,
+      },
+    ],
     purpose:
-      'The beads issue tracker: the br toolchain pin, .beads/, and the sandbox exclusion that lets br run. `remove` deletes NONE of them — .beads/ is your issue database, and the pin and the exclusion sit in files shared with other components; it un-lists the component and leaves every artifact in place.',
+      'Prettier config, ignore file and the prettier:*/signal-source:PRETTIER scripts.',
+    scripts: [
+      {
+        key: SIGNAL_SOURCE_PRETTIER_KEY,
+        shared: true,
+        value: SIGNAL_SOURCE_PRETTIER_SCRIPT,
+      },
+      ...PRETTIER_SCRIPTS,
+    ],
   },
 
-  eas: {
+  'thread-hooks': {
     ...EMPTY,
-    purpose: 'Expo/EAS build and update scripts (applies only to an Expo app).',
-    scripts: EAS_SCRIPTS.map((script) => ({
-      ...script,
-      // `prebuild` and `eas-build-post-install` both run version-manager, which
-      // plenty of non-Expo repos use on its own. They are not eas's to claim or
-      // to delete — only the eas-shaped names below identify the component.
-      shared:
-        script.key === 'prebuild' || script.key === 'eas-build-post-install',
-    })),
+    hooks: [
+      {
+        command: THREAD_START_HOOK_COMMAND,
+        event: THREAD_HOOK_EVENT,
+        fingerprint: THREAD_START_HOOK_FINGERPRINT,
+      },
+      {
+        command: THREAD_STOP_HOOK_COMMAND,
+        event: THREAD_STOP_HOOK_EVENT,
+        fingerprint: THREAD_STOP_HOOK_FINGERPRINT,
+      },
+      // One entry per event: `remove` deletes by event + exact command, and
+      // capture is registered on both (k0b8n.9, K10).
+      ...THREAD_CAPTURE_HOOK_EVENTS.map((event) => ({
+        command: THREAD_CAPTURE_HOOK_COMMAND,
+        event,
+        fingerprint: THREAD_CAPTURE_HOOK_FINGERPRINT,
+      })),
+    ],
+    purpose:
+      'SessionStart/Stop/UserPromptSubmit hooks that open a thread bead, capture every prompt and yield, and refuse to end a session without a report.',
   },
 
   'time-check': {
@@ -414,6 +452,13 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
     ],
     purpose:
       'The UserPromptSubmit hook that tells a session how long it has been since the last message.',
+  },
+
+  tsconfig: {
+    ...EMPTY,
+    files: [fromTemplate('tsconfig.json', 'configs', 'tsconfig.node-cli.json')],
+    purpose: 'tsconfig.json and the signal-source:TS type-check entry.',
+    scripts: [{key: 'signal-source:TS', shared: true, value: 'tsc --noEmit'}],
   },
 
   'usage-check': {
@@ -442,41 +487,6 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
     purpose:
       'The hooks that report a session’s context usage against its wrap-up threshold.',
   },
-
-  'thread-hooks': {
-    ...EMPTY,
-    hooks: [
-      {
-        command: THREAD_START_HOOK_COMMAND,
-        event: THREAD_HOOK_EVENT,
-        fingerprint: THREAD_START_HOOK_FINGERPRINT,
-      },
-      {
-        command: THREAD_STOP_HOOK_COMMAND,
-        event: THREAD_STOP_HOOK_EVENT,
-        fingerprint: THREAD_STOP_HOOK_FINGERPRINT,
-      },
-    ],
-    purpose:
-      'SessionStart/Stop hooks that open a thread bead and refuse to end a session without a report.',
-  },
-
-  'critical-rules': {
-    ...EMPTY,
-    // The artifact is generated from the prompts registry at install time, so
-    // its bytes depend on a clone this command may not have. Never deleted.
-    files: [unreconstructible('.claude/rules/justin-sdk/critical-rules.md')],
-    // Nothing under this key is written by the installer any more: a repo that
-    // has it has a human's block, or the retired `modules` include-list the
-    // fleet sweep removes. Reported, never deleted.
-    configKeys: [{key: 'critical-rules', seeds: () => null}],
-    purpose:
-      'The committed .claude/rules/justin-sdk/critical-rules.md artifact, regenerated from the prompts registry.',
-    // Its bytes come from a prompts clone this command may not have, so they
-    // cannot be diffed — but the path is namespaced to the SDK and nothing else
-    // writes there, which is provenance enough to adopt on.
-    sdkOwnedPaths: ['.claude/rules/justin-sdk/critical-rules.md'],
-  },
 };
 
 // ---------------------------------------------------------------------------
@@ -484,8 +494,50 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
 // ---------------------------------------------------------------------------
 
 export type InstalledEvidence =
-  | {installed: true; because: string}
+  | {because: string; installed: true}
   | {installed: false};
+
+/**
+ * JSON.parse a file, or null when it is missing OR unparseable.
+ *
+ * The two are conflated ON PURPOSE here and only here: every caller above asks
+ * "does this file give me evidence of an install", and neither a missing file
+ * nor an unreadable one does. No caller deletes anything on the strength of a
+ * null — removal reads the file itself and refuses separately.
+ */
+function readJsonFile(path: string): Record<string, unknown> | null {
+  if (!existsSync(path)) return null;
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'));
+    if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return null;
+    }
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** Every hook COMMAND string registered for one event, flattened. */
+export function hookEntriesFor(
+  settings: Record<string, unknown>,
+  event: string,
+): string[] {
+  const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
+  const entries = hooks[event];
+  if (!Array.isArray(entries)) return [];
+  const commands: string[] = [];
+  for (const entry of entries) {
+    if (entry == null || typeof entry !== 'object') continue;
+    const inner = (entry as {hooks?: unknown}).hooks;
+    if (!Array.isArray(inner)) continue;
+    for (const hook of inner) {
+      const command = (hook as {command?: unknown} | null)?.command;
+      if (typeof command === 'string') commands.push(command);
+    }
+  }
+  return commands;
+}
 
 /**
  * Is this component present on disk? Evidence-based, and it SAYS what the
@@ -568,9 +620,9 @@ export function componentInstalledEvidence(
  */
 export type ProvenanceEvidence =
   /** Something only this SDK writes. Safe to adopt. */
-  | {kind: 'sdk'; because: string}
+  | {because: string; kind: 'sdk'}
   /** A generic filename, directory or key. A human decides. */
-  | {kind: 'weak'; because: string}
+  | {because: string; kind: 'weak'}
   /** Nothing at all — checked, and found none. */
   | {kind: 'absent'};
 
@@ -725,48 +777,6 @@ export function componentProvenanceEvidence(
   const generic = componentInstalledEvidence(projectRoot, name);
   if (generic.installed) return {because: generic.because, kind: 'weak'};
   return {kind: 'absent'};
-}
-
-/** Every hook COMMAND string registered for one event, flattened. */
-export function hookEntriesFor(
-  settings: Record<string, unknown>,
-  event: string,
-): string[] {
-  const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
-  const entries = hooks[event];
-  if (!Array.isArray(entries)) return [];
-  const commands: string[] = [];
-  for (const entry of entries) {
-    if (entry == null || typeof entry !== 'object') continue;
-    const inner = (entry as {hooks?: unknown}).hooks;
-    if (!Array.isArray(inner)) continue;
-    for (const hook of inner) {
-      const command = (hook as {command?: unknown} | null)?.command;
-      if (typeof command === 'string') commands.push(command);
-    }
-  }
-  return commands;
-}
-
-/**
- * JSON.parse a file, or null when it is missing OR unparseable.
- *
- * The two are conflated ON PURPOSE here and only here: every caller above asks
- * "does this file give me evidence of an install", and neither a missing file
- * nor an unreadable one does. No caller deletes anything on the strength of a
- * null — removal reads the file itself and refuses separately.
- */
-function readJsonFile(path: string): Record<string, unknown> | null {
-  if (!existsSync(path)) return null;
-  try {
-    const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'));
-    if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return null;
-    }
-    return parsed as Record<string, unknown>;
-  } catch {
-    return null;
-  }
 }
 
 /** Every component name, for `list`. */

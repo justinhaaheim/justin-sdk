@@ -64,11 +64,11 @@
  * Part of home-base-qyu1.14.
  */
 
+import type {WorktreeEntry} from './types';
+
 import {execFileSync} from 'child_process';
 import {existsSync, realpathSync} from 'fs';
 import {join} from 'path';
-
-import type {WorktreeEntry} from './types';
 
 import {readWorktreeState, type WorktreeState} from './worktree-state';
 
@@ -123,36 +123,22 @@ export type SubmoduleFindingKind =
   | 'no-remote-refs';
 
 export interface SubmoduleFinding {
-  kind: SubmoduleFindingKind;
-  severity: SubmoduleSeverity;
-  /** Which question this finding's numbers answer. */
-  question: SubmoduleQuestion;
-  /** One line, plain language — the same discipline as a branch row's `why`. */
-  why: string;
   /** A concrete next action, or null when there is nothing to run. */
   fix: string | null;
+  kind: SubmoduleFindingKind;
+  /** Which question this finding's numbers answer. */
+  question: SubmoduleQuestion;
+  severity: SubmoduleSeverity;
+  /** One line, plain language — the same discipline as a branch row's `why`. */
+  why: string;
 }
 
 /** One submodule as seen from ONE of the parent repo's worktrees. */
 export interface SubmoduleCheckout {
-  /** The parent worktree this row describes. */
-  worktree: string;
-  isPrimary: boolean;
-  /** True for the worktree `repo-status` was pointed at. */
-  isCurrent: boolean;
-  /** The gitlink in this worktree's HEAD — what a clone of this branch gets. */
-  recordedPointer: string | null;
-  /** The gitlink staged in this worktree's index, when it differs from HEAD. */
-  stagedPointer: string | null;
-  /**
-   * The submodule object store this row was evaluated against. Reachability is
-   * a property of this store alone — never of "the repo".
-   */
-  store: string | null;
-  /** Why `store` is null, when it is. */
-  storeNote: string | null;
-  checkoutHead: string | null;
+  /** Commits `upstreamRef` has that the checkout does not — the stale-base number. */
+  behind: number | null;
   checkoutBranch: string | null;
+  checkoutHead: string | null;
   /**
    * What this checkout is holding that no commit has (home-base-qyu1.33.8).
    *
@@ -163,17 +149,31 @@ export interface SubmoduleCheckout {
    * the YAML. A bare boolean on this field would have collapsed two of them.
    */
   checkoutState: WorktreeState | null;
+  findings: SubmoduleFinding[];
+  /** True for the worktree `repo-status` was pointed at. */
+  isCurrent: boolean;
+  isPrimary: boolean;
   /** Whether `recordedPointer` resolves to a commit in `store`. */
   pointerInStore: boolean | null;
   /** Remote-tracking refs in `store` that contain `recordedPointer`. */
   pointerOnRemotes: string[] | null;
+  /** The gitlink in this worktree's HEAD — what a clone of this branch gets. */
+  recordedPointer: string | null;
+  severity: SubmoduleSeverity;
+  /** The gitlink staged in this worktree's index, when it differs from HEAD. */
+  stagedPointer: string | null;
+  /**
+   * The submodule object store this row was evaluated against. Reachability is
+   * a property of this store alone — never of "the repo".
+   */
+  store: string | null;
+  /** Why `store` is null, when it is. */
+  storeNote: string | null;
   /** Commits reachable from the checkout's HEAD but from no remote-tracking ref. */
   unpushedCommits: number | null;
-  /** Commits `upstreamRef` has that the checkout does not — the stale-base number. */
-  behind: number | null;
   upstreamRef: string | null;
-  findings: SubmoduleFinding[];
-  severity: SubmoduleSeverity;
+  /** The parent worktree this row describes. */
+  worktree: string;
 }
 
 /**
@@ -194,12 +194,15 @@ export interface BranchRef {
   tipSha: string;
 }
 
+/** Whether `sha` is a commit object in the store at `dir`. */
+function inStore(dir: string, sha: string): boolean {
+  return gitArgv(['cat-file', '-t', sha], dir)?.trim() === 'commit';
+}
+
 /** What one branch records for one submodule, when it differs from the baseline. */
 export interface SubmoduleBranchPointer {
   /** Branch name as the ledger spells it — short for locals, `origin/x` for remote-only. */
   branch: string;
-  /** The gitlink `branch` records for this submodule. */
-  pointer: string;
   /**
    * Whether `pointer` is an object in the store this row was evaluated against.
    * Null when no store was open to ask. False is the ORDINARY case for a branch
@@ -208,6 +211,8 @@ export interface SubmoduleBranchPointer {
   inStore: boolean | null;
   /** Remote-tracking refs containing `pointer`; `[]` is the severe case. */
   onRemotes: string[] | null;
+  /** The gitlink `branch` records for this submodule. */
+  pointer: string;
   /**
    * How `pointer` relates to the baseline's pointer in submodule history — the
    * fact that decides how to unify them. Null when either sha is absent from the
@@ -229,40 +234,40 @@ export interface SubmoduleBranchPointer {
  * submodule at all), and those two states must not be spelled the same way.
  */
 export interface BranchPointerAudit {
-  /** True when branch refs were actually read and compared. */
-  checked: boolean;
-  /** Why nothing was compared, when `checked` is false. */
-  note: string | null;
-  /** The ref every branch was compared against. */
-  baselineRef: string | null;
   /** The gitlink the baseline records for this submodule. */
   baselinePointer: string | null;
+  /** The ref every branch was compared against. */
+  baselineRef: string | null;
   /** How many branches recorded this submodule and were compared. */
   branchesCompared: number;
+  /** True when branch refs were actually read and compared. */
+  checked: boolean;
   /** Only the branches that DISAGREE with the baseline. Empty means all agree. */
   divergent: SubmoduleBranchPointer[];
+  /** Why nothing was compared, when `checked` is false. */
+  note: string | null;
 }
 
 export interface SubmoduleRow {
-  /** Path within the parent repo, e.g. `projects/justin-sdk`. */
-  path: string;
-  url: string | null;
-  severity: SubmoduleSeverity;
-  /** One line: the worst finding, or the all-clear. */
-  why: string;
-  /** Distinct pointers recorded across the parent's worktrees; >1 means they disagree. */
-  pointersAcrossWorktrees: number;
   /** Per-BRANCH gitlink comparison against the baseline; see the type's note on silence. */
   branchPointers: BranchPointerAudit;
+  checkouts: SubmoduleCheckout[];
   /** Findings about the submodule as a whole rather than one checkout. */
   findings: SubmoduleFinding[];
-  checkouts: SubmoduleCheckout[];
+  /** Path within the parent repo, e.g. `projects/justin-sdk`. */
+  path: string;
+  /** Distinct pointers recorded across the parent's worktrees; >1 means they disagree. */
+  pointersAcrossWorktrees: number;
+  severity: SubmoduleSeverity;
+  url: string | null;
+  /** One line: the worst finding, or the all-clear. */
+  why: string;
 }
 
 export interface SubmoduleInventory {
-  enabled: boolean;
   /** True when EVERY worktree's store was opened, not just the current one. */
   allWorktreeStores: boolean;
+  enabled: boolean;
   /** One row per submodule; explicitly empty when the repo has none. */
   entries: SubmoduleRow[];
 }
@@ -274,6 +279,26 @@ export const EMPTY_SUBMODULE_INVENTORY: SubmoduleInventory = {
 };
 
 export interface SubmoduleOptions {
+  /**
+   * Open every worktree's submodule store, not just the current one. Off by
+   * default: it is the only part of this module that reaches into directories
+   * outside the worktree being inspected.
+   */
+  allWorktreeStores?: boolean;
+  /** The NAME of the ref every branch's gitlink is compared against — for the findings. */
+  baselineRef?: string | null;
+  /**
+   * The commit that name resolved to at the top of the walk, which is what the
+   * comparison actually reads (home-base-qyu1.33.6, D1). Null means an unpinned
+   * caller and the name is read as it resolves now.
+   */
+  baselineSha?: string | null;
+  /**
+   * The branch rows to compare gitlinks across. One `ls-tree` per branch, total,
+   * however many submodules the repo has. Omit and the per-branch comparison is
+   * reported as NOT CHECKED rather than as agreement.
+   */
+  branches?: BranchRef[];
   /** The worktree `repo-status` was pointed at. */
   cwd: string;
   repoRoot: string;
@@ -285,26 +310,6 @@ export interface SubmoduleOptions {
    * seen rather than all of them.
    */
   worktrees: WorktreeEntry[] | null;
-  /**
-   * Open every worktree's submodule store, not just the current one. Off by
-   * default: it is the only part of this module that reaches into directories
-   * outside the worktree being inspected.
-   */
-  allWorktreeStores?: boolean;
-  /**
-   * The branch rows to compare gitlinks across. One `ls-tree` per branch, total,
-   * however many submodules the repo has. Omit and the per-branch comparison is
-   * reported as NOT CHECKED rather than as agreement.
-   */
-  branches?: BranchRef[];
-  /** The NAME of the ref every branch's gitlink is compared against — for the findings. */
-  baselineRef?: string | null;
-  /**
-   * The commit that name resolved to at the top of the walk, which is what the
-   * comparison actually reads (home-base-qyu1.33.6, D1). Null means an unpinned
-   * caller and the name is read as it resolves now.
-   */
-  baselineSha?: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -391,7 +396,7 @@ function worstSeverity(findings: SubmoduleFinding[]): SubmoduleSeverity {
 export function discoverSubmodules(
   cwd: string,
   repoRoot: string,
-): Array<{path: string; url: string | null}> {
+): {path: string; url: string | null}[] {
   const urls = new Map<string, string>();
   const paths = new Map<string, string | null>();
 
@@ -490,13 +495,45 @@ function pointerInIndex(worktree: string, subPath: string): string | null {
 // ---------------------------------------------------------------------------
 
 interface StoreFacts {
-  store: string;
-  head: string | null;
+  behind: number | null;
   branch: string | null;
   hasRemoteRefs: boolean;
+  head: string | null;
+  store: string;
   unpushedCommits: number | null;
   upstreamRef: string | null;
-  behind: number | null;
+}
+
+function toCount(out: string | null): number | null {
+  if (out == null) return null;
+  const n = Number(out.trim());
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * What "current" means for this checkout: its configured upstream when it has
+ * one, else the remote's own default branch. Submodules are usually on a
+ * detached HEAD, so the fallback is the common path, not the exotic one.
+ */
+function resolveUpstream(dir: string): string | null {
+  const upstream = gitArgv(
+    ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'],
+    dir,
+  )?.trim();
+  if (upstream != null && upstream.length > 0) return upstream;
+
+  const symbolic = gitArgv(
+    ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+    dir,
+  )?.trim();
+  if (symbolic != null && symbolic.length > 0) return symbolic;
+
+  for (const candidate of ['origin/main', 'origin/master']) {
+    if (gitOk(['rev-parse', '--verify', '--quiet', candidate], dir)) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 /**
@@ -552,38 +589,6 @@ function readStore(dir: string): StoreFacts | null {
   };
 }
 
-function toCount(out: string | null): number | null {
-  if (out == null) return null;
-  const n = Number(out.trim());
-  return Number.isFinite(n) ? n : null;
-}
-
-/**
- * What "current" means for this checkout: its configured upstream when it has
- * one, else the remote's own default branch. Submodules are usually on a
- * detached HEAD, so the fallback is the common path, not the exotic one.
- */
-function resolveUpstream(dir: string): string | null {
-  const upstream = gitArgv(
-    ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'],
-    dir,
-  )?.trim();
-  if (upstream != null && upstream.length > 0) return upstream;
-
-  const symbolic = gitArgv(
-    ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
-    dir,
-  )?.trim();
-  if (symbolic != null && symbolic.length > 0) return symbolic;
-
-  for (const candidate of ['origin/main', 'origin/master']) {
-    if (gitOk(['rev-parse', '--verify', '--quiet', candidate], dir)) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
 /**
  * Remote-tracking refs in this store that contain `sha`.
  *
@@ -603,6 +608,166 @@ function remotesContaining(dir: string, sha: string): string[] {
     .map((l) => l.trim())
     .filter((l) => l.startsWith('refs/remotes/') && !l.endsWith('/HEAD'))
     .map((l) => l.slice('refs/remotes/'.length));
+}
+
+/**
+ * How the checked-out commit relates to the one the parent recorded.
+ *
+ * Callers MUST have established that both shas are objects in `dir` first:
+ * `merge-base` exits non-zero on a missing object, which this reads as
+ * "divergent from" — a confident lie about a commit that is one fetch away.
+ */
+function describeRelation(
+  dir: string,
+  head: string,
+  recorded: string,
+): PointerRelation {
+  if (gitOk(['merge-base', '--is-ancestor', head, recorded], dir)) {
+    return 'behind';
+  }
+  if (gitOk(['merge-base', '--is-ancestor', recorded, head], dir)) {
+    return 'ahead of';
+  }
+  return 'divergent from';
+}
+
+function decideCheckoutFindings(ctx: {
+  checkoutState: WorktreeState;
+  dir: string;
+  facts: StoreFacts;
+  pointerInStore: boolean | null;
+  pointerOnRemotes: string[] | null;
+  recordedPointer: string | null;
+  subPath: string;
+  worktree: WorktreeEntry;
+}): SubmoduleFinding[] {
+  const {
+    checkoutState,
+    dir,
+    facts,
+    pointerInStore,
+    pointerOnRemotes,
+    recordedPointer,
+    worktree,
+  } = ctx;
+  const findings: SubmoduleFinding[] = [];
+
+  // --- Is the recorded pointer usable anywhere but here? -------------------
+  if (recordedPointer != null && pointerInStore === false) {
+    // The benign-looking twin of the severe case below, and the one a bare
+    // `git cat-file` cannot tell apart from it. Object stores are per-checkout,
+    // so absence here is evidence about THIS store and nothing else.
+    findings.push({
+      fix: `git -C ${dir} fetch --all, then re-run`,
+      kind: 'pointer-absent-from-store',
+      question: Q_RESOLVABLE,
+      severity: 'advisory',
+      why: `recorded pointer ${short(recordedPointer)} is not an object in this checkout's store (${facts.store}) — object stores are per-checkout, so this says nothing about whether the commit exists on the remote`,
+    });
+  } else if (recordedPointer != null && pointerInStore === true) {
+    if (!facts.hasRemoteRefs) {
+      findings.push({
+        fix: `git -C ${dir} fetch --all, then re-run`,
+        kind: 'no-remote-refs',
+        question: Q_RESOLVABLE,
+        severity: 'advisory',
+        why: `this checkout's store (${facts.store}) has no remote-tracking refs at all, so whether ${short(recordedPointer)} was ever pushed cannot be judged from here`,
+      });
+    } else if (pointerOnRemotes?.length === 0) {
+      findings.push({
+        fix: `git -C ${dir} push ${facts.branch != null ? `origin ${facts.branch}` : `origin HEAD`} (fetch first if the remote-tracking refs may be stale)`,
+        kind: 'pointer-not-on-remote',
+        question: Q_RESOLVABLE,
+        severity: 'severe',
+        why: `recorded pointer ${short(recordedPointer)} exists here but is on no remote-tracking branch — a fresh clone, a CI checkout and \`git worktree add\` all fail on it with "upload-pack: not our ref"`,
+      });
+    }
+  }
+
+  // --- Is work at risk in this store? --------------------------------------
+  if (facts.unpushedCommits != null && facts.unpushedCommits > 0) {
+    const storeDies = !worktree.isPrimary;
+    findings.push({
+      fix: `git -C ${dir} push`,
+      kind: 'unpushed-commits',
+      question: Q_WORK_AT_RISK,
+      severity: 'severe',
+      why: `the submodule checkout has ${plural(facts.unpushedCommits, 'commit')} on no remote, held only in ${facts.store}${storeDies ? ' — that store belongs to a linked worktree and `git worktree remove` deletes it, taking the commits with it' : ''}`,
+    });
+  }
+
+  // AFTER the unpushed-commits finding, deliberately: this leaves `summarise`
+  // picking the same one-liner it always has, and the pretty renderer now
+  // prints every further non-ok finding under the entry rather than only the
+  // worst one — which is what stopped the dirt from being hidden behind the
+  // commit count (epic design D3).
+  if (checkoutState.dirty === true) {
+    findings.push({
+      fix: `commit or stash inside ${dir} before touching this worktree`,
+      kind: 'uncommitted-changes',
+      question: Q_WORK_AT_RISK,
+      severity: 'severe',
+      why: `the submodule checkout has ${plural(checkoutState.changedPaths ?? 0, 'uncommitted path')} (${sampleList(checkoutState)}) — on no branch and in no commit; \`git submodule update\`, \`git worktree remove\` and a checkout switch all discard them`,
+    });
+  } else if (checkoutState.dirty == null) {
+    // NEVER SILENCE. A `git status` that could not run is not a clean checkout,
+    // and the whole point of this finding is that it is the fragile half — an
+    // unreadable one has to say so out loud.
+    findings.push({
+      fix: null,
+      kind: 'uncommitted-changes',
+      question: Q_WORK_AT_RISK,
+      severity: 'advisory',
+      why: `whether the submodule checkout at ${dir} holds uncommitted work is UNKNOWN — ${checkoutState.unreadableReason ?? `\`git -C ${dir} status --porcelain\` failed`}`,
+    });
+  }
+
+  // --- Am I building on current code? --------------------------------------
+  if (facts.behind != null && facts.behind > 0 && facts.upstreamRef != null) {
+    const nothingAhead = facts.unpushedCommits === 0;
+    findings.push({
+      fix: `git -C ${dir} fetch && git -C ${worktree.path} submodule update --init -- ${ctx.subPath}, then reinstall the submodule's dependencies (a stale checkout usually means stale node_modules too)`,
+      kind: 'stale-checkout',
+      question: Q_CURRENT_CODE,
+      severity: 'advisory',
+      why: `checkout is ${plural(facts.behind, 'commit')} behind ${facts.upstreamRef}${nothingAhead ? ' with nothing unpushed — no work is at risk' : ''}, so this is a stale base and probably stale dependencies, not a data-loss risk`,
+    });
+  }
+
+  // --- Does the parent agree with what is checked out? ---------------------
+  //
+  // Only when the recorded pointer is actually IN this store. Comparing against
+  // an object you do not have cannot produce an answer, and `merge-base` simply
+  // FAILS on it — which reads as "divergent" and prints a confident lie about a
+  // commit that is merely one fetch away. The absent-from-store finding above
+  // already covers that case, and covers it correctly.
+  if (
+    recordedPointer != null &&
+    pointerInStore === true &&
+    facts.head != null &&
+    facts.head !== recordedPointer
+  ) {
+    const relation = describeRelation(dir, facts.head, recordedPointer);
+    findings.push(
+      relation === 'behind'
+        ? {
+            fix: `git -C ${worktree.path} submodule update --init -- ${ctx.subPath}`,
+            kind: 'checkout-behind-pointer',
+            question: Q_CURRENT_CODE,
+            severity: 'advisory',
+            why: `this worktree has ${short(facts.head)} checked out, an ANCESTOR of the ${short(recordedPointer)} the parent records — you are building against older submodule code than the parent asks for`,
+          }
+        : {
+            fix: `git -C ${worktree.path} add -- ${ctx.subPath} && git -C ${worktree.path} commit (or \`git -C ${worktree.path} submodule update -- ${ctx.subPath}\` to discard)`,
+            kind: 'pointer-bump-uncommitted',
+            question: Q_RESOLVABLE,
+            severity: 'advisory',
+            why: `this worktree has ${short(facts.head)} checked out (${relation} the recorded pointer) but the parent still records ${short(recordedPointer)}, so every other clone and worktree gets ${short(recordedPointer)}`,
+          },
+    );
+  }
+
+  return findings;
 }
 
 // ---------------------------------------------------------------------------
@@ -724,168 +889,8 @@ function buildCheckout(
   };
 }
 
-function decideCheckoutFindings(ctx: {
-  checkoutState: WorktreeState;
-  dir: string;
-  facts: StoreFacts;
-  pointerInStore: boolean | null;
-  pointerOnRemotes: string[] | null;
-  recordedPointer: string | null;
-  subPath: string;
-  worktree: WorktreeEntry;
-}): SubmoduleFinding[] {
-  const {
-    checkoutState,
-    dir,
-    facts,
-    pointerInStore,
-    pointerOnRemotes,
-    recordedPointer,
-    worktree,
-  } = ctx;
-  const findings: SubmoduleFinding[] = [];
-
-  // --- Is the recorded pointer usable anywhere but here? -------------------
-  if (recordedPointer != null && pointerInStore === false) {
-    // The benign-looking twin of the severe case below, and the one a bare
-    // `git cat-file` cannot tell apart from it. Object stores are per-checkout,
-    // so absence here is evidence about THIS store and nothing else.
-    findings.push({
-      fix: `git -C ${dir} fetch --all, then re-run`,
-      kind: 'pointer-absent-from-store',
-      question: Q_RESOLVABLE,
-      severity: 'advisory',
-      why: `recorded pointer ${short(recordedPointer)} is not an object in this checkout's store (${facts.store}) — object stores are per-checkout, so this says nothing about whether the commit exists on the remote`,
-    });
-  } else if (recordedPointer != null && pointerInStore === true) {
-    if (!facts.hasRemoteRefs) {
-      findings.push({
-        fix: `git -C ${dir} fetch --all, then re-run`,
-        kind: 'no-remote-refs',
-        question: Q_RESOLVABLE,
-        severity: 'advisory',
-        why: `this checkout's store (${facts.store}) has no remote-tracking refs at all, so whether ${short(recordedPointer)} was ever pushed cannot be judged from here`,
-      });
-    } else if (pointerOnRemotes != null && pointerOnRemotes.length === 0) {
-      findings.push({
-        fix: `git -C ${dir} push ${facts.branch != null ? `origin ${facts.branch}` : `origin HEAD`} (fetch first if the remote-tracking refs may be stale)`,
-        kind: 'pointer-not-on-remote',
-        question: Q_RESOLVABLE,
-        severity: 'severe',
-        why: `recorded pointer ${short(recordedPointer)} exists here but is on no remote-tracking branch — a fresh clone, a CI checkout and \`git worktree add\` all fail on it with "upload-pack: not our ref"`,
-      });
-    }
-  }
-
-  // --- Is work at risk in this store? --------------------------------------
-  if (facts.unpushedCommits != null && facts.unpushedCommits > 0) {
-    const storeDies = !worktree.isPrimary;
-    findings.push({
-      fix: `git -C ${dir} push`,
-      kind: 'unpushed-commits',
-      question: Q_WORK_AT_RISK,
-      severity: 'severe',
-      why: `the submodule checkout has ${plural(facts.unpushedCommits, 'commit')} on no remote, held only in ${facts.store}${storeDies ? ' — that store belongs to a linked worktree and `git worktree remove` deletes it, taking the commits with it' : ''}`,
-    });
-  }
-
-  // AFTER the unpushed-commits finding, deliberately: this leaves `summarise`
-  // picking the same one-liner it always has, and the pretty renderer now
-  // prints every further non-ok finding under the entry rather than only the
-  // worst one — which is what stopped the dirt from being hidden behind the
-  // commit count (epic design D3).
-  if (checkoutState.dirty === true) {
-    findings.push({
-      fix: `commit or stash inside ${dir} before touching this worktree`,
-      kind: 'uncommitted-changes',
-      question: Q_WORK_AT_RISK,
-      severity: 'severe',
-      why: `the submodule checkout has ${plural(checkoutState.changedPaths ?? 0, 'uncommitted path')} (${sampleList(checkoutState)}) — on no branch and in no commit; \`git submodule update\`, \`git worktree remove\` and a checkout switch all discard them`,
-    });
-  } else if (checkoutState.dirty == null) {
-    // NEVER SILENCE. A `git status` that could not run is not a clean checkout,
-    // and the whole point of this finding is that it is the fragile half — an
-    // unreadable one has to say so out loud.
-    findings.push({
-      fix: null,
-      kind: 'uncommitted-changes',
-      question: Q_WORK_AT_RISK,
-      severity: 'advisory',
-      why: `whether the submodule checkout at ${dir} holds uncommitted work is UNKNOWN — ${checkoutState.unreadableReason ?? `\`git -C ${dir} status --porcelain\` failed`}`,
-    });
-  }
-
-  // --- Am I building on current code? --------------------------------------
-  if (facts.behind != null && facts.behind > 0 && facts.upstreamRef != null) {
-    const nothingAhead = facts.unpushedCommits === 0;
-    findings.push({
-      fix: `git -C ${dir} fetch && git -C ${worktree.path} submodule update --init -- ${ctx.subPath}, then reinstall the submodule's dependencies (a stale checkout usually means stale node_modules too)`,
-      kind: 'stale-checkout',
-      question: Q_CURRENT_CODE,
-      severity: 'advisory',
-      why: `checkout is ${plural(facts.behind, 'commit')} behind ${facts.upstreamRef}${nothingAhead ? ' with nothing unpushed — no work is at risk' : ''}, so this is a stale base and probably stale dependencies, not a data-loss risk`,
-    });
-  }
-
-  // --- Does the parent agree with what is checked out? ---------------------
-  //
-  // Only when the recorded pointer is actually IN this store. Comparing against
-  // an object you do not have cannot produce an answer, and `merge-base` simply
-  // FAILS on it — which reads as "divergent" and prints a confident lie about a
-  // commit that is merely one fetch away. The absent-from-store finding above
-  // already covers that case, and covers it correctly.
-  if (
-    recordedPointer != null &&
-    pointerInStore === true &&
-    facts.head != null &&
-    facts.head !== recordedPointer
-  ) {
-    const relation = describeRelation(dir, facts.head, recordedPointer);
-    findings.push(
-      relation === 'behind'
-        ? {
-            fix: `git -C ${worktree.path} submodule update --init -- ${ctx.subPath}`,
-            kind: 'checkout-behind-pointer',
-            question: Q_CURRENT_CODE,
-            severity: 'advisory',
-            why: `this worktree has ${short(facts.head)} checked out, an ANCESTOR of the ${short(recordedPointer)} the parent records — you are building against older submodule code than the parent asks for`,
-          }
-        : {
-            fix: `git -C ${worktree.path} add -- ${ctx.subPath} && git -C ${worktree.path} commit (or \`git -C ${worktree.path} submodule update -- ${ctx.subPath}\` to discard)`,
-            kind: 'pointer-bump-uncommitted',
-            question: Q_RESOLVABLE,
-            severity: 'advisory',
-            why: `this worktree has ${short(facts.head)} checked out (${relation} the recorded pointer) but the parent still records ${short(recordedPointer)}, so every other clone and worktree gets ${short(recordedPointer)}`,
-          },
-    );
-  }
-
-  return findings;
-}
-
 /** How one submodule commit sits relative to another in submodule history. */
 export type PointerRelation = 'ahead of' | 'behind' | 'divergent from';
-
-/**
- * How the checked-out commit relates to the one the parent recorded.
- *
- * Callers MUST have established that both shas are objects in `dir` first:
- * `merge-base` exits non-zero on a missing object, which this reads as
- * "divergent from" — a confident lie about a commit that is one fetch away.
- */
-function describeRelation(
-  dir: string,
-  head: string,
-  recorded: string,
-): PointerRelation {
-  if (gitOk(['merge-base', '--is-ancestor', head, recorded], dir)) {
-    return 'behind';
-  }
-  if (gitOk(['merge-base', '--is-ancestor', recorded, head], dir)) {
-    return 'ahead of';
-  }
-  return 'divergent from';
-}
 
 // ---------------------------------------------------------------------------
 // Per-branch gitlinks
@@ -907,11 +912,11 @@ function describeRelation(
 
 /** Every branch's gitlinks, read once for the whole inventory. */
 interface BranchPointerScan {
+  baselinePointers: Map<string, string>;
+  baselineRef: string | null;
+  byBranch: {name: string; pointers: Map<string, string>}[];
   checked: boolean;
   note: string | null;
-  baselineRef: string | null;
-  baselinePointers: Map<string, string>;
-  byBranch: Array<{name: string; pointers: Map<string, string>}>;
 }
 
 function scanBranchPointers(ctx: {
@@ -962,9 +967,60 @@ function scanBranchPointers(ctx: {
   };
 }
 
-/** Whether `sha` is a commit object in the store at `dir`. */
-function inStore(dir: string, sha: string): boolean {
-  return gitArgv(['cat-file', '-t', sha], dir)?.trim() === 'commit';
+function branchFinding(ctx: {
+  audit: BranchPointerAudit;
+  dir: string | null;
+  divergence: SubmoduleBranchPointer;
+  repoRoot: string;
+  store: string | null;
+  subPath: string;
+}): SubmoduleFinding {
+  const {audit, dir, divergence: d, repoRoot, store, subPath} = ctx;
+  const both = `branch ${d.branch} records ${short(d.pointer)} for this submodule where the baseline ${audit.baselineRef} records ${short(audit.baselinePointer)}`;
+
+  // SEVERE inherits qyu1.14's framing for exactly its case: the commit is HERE
+  // and on no remote, so merging this branch publishes a gitlink nobody else
+  // can resolve. This is the only branch state that deserves an alarm.
+  if (d.inStore === true && d.onRemotes?.length === 0) {
+    return {
+      fix: `git -C ${dir} fetch --all first (remote-tracking refs may be stale); if ${short(d.pointer)} is still on no remote, push it from a checkout that has it BEFORE merging ${d.branch}`,
+      kind: 'pointer-diverges-across-branches',
+      question: Q_MERGE_POINTER,
+      severity: 'severe',
+      why: `${both}, and ${short(d.pointer)} is on no remote-tracking branch — merging ${d.branch} would record a gitlink that no fresh clone, CI checkout or \`git worktree add\` can resolve ("upload-pack: not our ref")`,
+    };
+  }
+
+  // NOT KNOWING IS NOT A PROBLEM HERE. A branch someone else pushed routinely
+  // points at a submodule commit this store has never fetched. qyu1.14 makes
+  // that an advisory for the pointer THIS checkout must build against, where it
+  // really does block a build; for another branch's pointer it is the ordinary
+  // case, and alarming on it would fire on almost every repo forever.
+  if (d.inStore !== true) {
+    const reason =
+      d.inStore === false
+        ? `${short(d.pointer)} is not an object in this checkout's store (${store})`
+        : 'no submodule store was open to judge it';
+    return {
+      fix: dir != null ? `git -C ${dir} fetch --all, then re-run` : null,
+      kind: 'pointer-diverges-across-branches',
+      question: Q_MERGE_POINTER,
+      severity: 'ok',
+      why: `${both}, so merging ${d.branch} moves the recorded gitlink — but ${reason}, and object stores are per-checkout, so whether that pointer resolves anywhere else cannot be judged from here`,
+    };
+  }
+
+  const relation =
+    d.relationToBaseline != null
+      ? ` (${d.relationToBaseline} it in submodule history)`
+      : '';
+  return {
+    fix: `git -C ${repoRoot} diff ${audit.baselineRef} ${d.branch} -- ${subPath} shows the exact pointer move; decide which submodule commit wins BEFORE merging, because git resolves a gitlink conflict with neither side's content`,
+    kind: 'pointer-diverges-across-branches',
+    question: Q_MERGE_POINTER,
+    severity: 'ok',
+    why: `${both}${relation}, so merging ${d.branch} moves the recorded gitlink — and if the baseline has moved it too since they parted, the merge conflicts on the gitlink and resolving it is a submodule decision, not a text merge`,
+  };
 }
 
 /** Compare every branch's gitlink for ONE submodule against the baseline's. */
@@ -1068,60 +1124,123 @@ function auditBranchPointers(ctx: {
   };
 }
 
-function branchFinding(ctx: {
-  audit: BranchPointerAudit;
-  dir: string | null;
-  divergence: SubmoduleBranchPointer;
-  repoRoot: string;
-  store: string | null;
-  subPath: string;
-}): SubmoduleFinding {
-  const {audit, dir, divergence: d, repoRoot, store, subPath} = ctx;
-  const both = `branch ${d.branch} records ${short(d.pointer)} for this submodule where the baseline ${audit.baselineRef} records ${short(audit.baselinePointer)}`;
+function distinctPointers(checkouts: SubmoduleCheckout[]): string[] {
+  return [
+    ...new Set(
+      checkouts
+        .map(effectivePointer)
+        .filter((sha): sha is string => sha != null),
+    ),
+  ];
+}
 
-  // SEVERE inherits qyu1.14's framing for exactly its case: the commit is HERE
-  // and on no remote, so merging this branch publishes a gitlink nobody else
-  // can resolve. This is the only branch state that deserves an alarm.
-  if (d.inStore === true && d.onRemotes != null && d.onRemotes.length === 0) {
-    return {
-      fix: `git -C ${dir} fetch --all first (remote-tracking refs may be stale); if ${short(d.pointer)} is still on no remote, push it from a checkout that has it BEFORE merging ${d.branch}`,
-      kind: 'pointer-diverges-across-branches',
-      question: Q_MERGE_POINTER,
-      severity: 'severe',
-      why: `${both}, and ${short(d.pointer)} is on no remote-tracking branch — merging ${d.branch} would record a gitlink that no fresh clone, CI checkout or \`git worktree add\` can resolve ("upload-pack: not our ref")`,
-    };
-  }
+/** `.` / `.claude/worktrees/foo` instead of five absolute paths in one line. */
+function relativeToPrimary(path: string, primary: string | null): string {
+  if (primary == null) return path;
+  if (path === primary) return '.';
+  return path.startsWith(`${primary}/`) ? path.slice(primary.length + 1) : path;
+}
 
-  // NOT KNOWING IS NOT A PROBLEM HERE. A branch someone else pushed routinely
-  // points at a submodule commit this store has never fetched. qyu1.14 makes
-  // that an advisory for the pointer THIS checkout must build against, where it
-  // really does block a build; for another branch's pointer it is the ordinary
-  // case, and alarming on it would fire on almost every repo forever.
-  if (d.inStore !== true) {
-    const reason =
-      d.inStore === false
-        ? `${short(d.pointer)} is not an object in this checkout's store (${store})`
-        : 'no submodule store was open to judge it';
-    return {
-      fix: dir != null ? `git -C ${dir} fetch --all, then re-run` : null,
-      kind: 'pointer-diverges-across-branches',
-      question: Q_MERGE_POINTER,
-      severity: 'ok',
-      why: `${both}, so merging ${d.branch} moves the recorded gitlink — but ${reason}, and object stores are per-checkout, so whether that pointer resolves anywhere else cannot be judged from here`,
-    };
-  }
+function decideRowFindings(
+  checkouts: SubmoduleCheckout[],
+  subPath: string,
+): SubmoduleFinding[] {
+  const pointers = distinctPointers(checkouts);
+  if (pointers.length < 2) return [];
 
-  const relation =
-    d.relationToBaseline != null
-      ? ` (${d.relationToBaseline} it in submodule history)`
+  const primary = checkouts.find((c) => c.isPrimary)?.worktree ?? null;
+  const detail = checkouts
+    .filter((c) => effectivePointer(c) != null)
+    .map(
+      (c) =>
+        `${relativeToPrimary(c.worktree, primary)}: ${short(effectivePointer(c))}`,
+    )
+    .join(', ');
+
+  // The merge-base is the honest size of the divergence. A tip-to-tip
+  // `git diff --stat` is NOT: it counts every line either side changed since
+  // they parted, which reads as a huge conflict even when the two sides touch
+  // disjoint files. Deliberately no line count is reported here.
+  const store = checkouts.find((c) => c.store != null);
+  const mergeBase =
+    store != null
+      ? gitArgv(
+          ['merge-base', ...pointers],
+          join(store.worktree, subPath),
+        )?.trim()
+      : null;
+  const base =
+    mergeBase != null && mergeBase.length > 0
+      ? `; merge-base ${short(mergeBase)}`
       : '';
-  return {
-    fix: `git -C ${repoRoot} diff ${audit.baselineRef} ${d.branch} -- ${subPath} shows the exact pointer move; decide which submodule commit wins BEFORE merging, because git resolves a gitlink conflict with neither side's content`,
-    kind: 'pointer-diverges-across-branches',
-    question: Q_MERGE_POINTER,
-    severity: 'ok',
-    why: `${both}${relation}, so merging ${d.branch} moves the recorded gitlink — and if the baseline has moved it too since they parted, the merge conflicts on the gitlink and resolving it is a submodule decision, not a text merge`,
-  };
+
+  // SEVERITY. Divergent pointers on their own are the NORMAL state of a
+  // multi-worktree repo — each worktree branched at a different time, and
+  // nothing is at risk. Flagging that as a problem forever would repeat, in a
+  // new costume, exactly the mistake of treating "behind" as an alarm. It
+  // escalates only when two opened stores each hold work of their own, which
+  // is the state where `git worktree remove` can destroy a unique copy.
+  const opened = checkouts.filter((c) => c.store != null);
+  const withUnpushed = opened.filter(
+    (c) => c.unpushedCommits != null && c.unpushedCommits > 0,
+  );
+  const escalate = withUnpushed.length >= 2;
+  const unopened = checkouts.length - opened.length;
+  const tail = escalate
+    ? ` — ${withUnpushed.length} of those checkouts hold commits on no remote, so removing the wrong worktree destroys a unique copy`
+    : unopened > 0
+      ? ` — divergence alone is normal; pass --submodule-stores to check whether any of the ${unopened} unopened store(s) holds work of its own`
+      : '';
+
+  return [
+    {
+      fix: "check each checkout's unpushed count before removing any worktree — `git worktree remove` deletes that worktree's submodule object store",
+      kind: 'pointer-diverges-across-worktrees',
+      question: Q_WORK_AT_RISK,
+      severity: escalate ? 'advisory' : 'ok',
+      why: `the parent's worktrees record different submodule commits (${detail}${base}) and each worktree has its OWN object store, so a commit present in one may be unresolvable in another${tail}`,
+    },
+  ];
+}
+
+function summarise(
+  findings: SubmoduleFinding[],
+  checkouts: SubmoduleCheckout[],
+  severity: SubmoduleSeverity,
+  branchAudit: BranchPointerAudit,
+): string {
+  if (severity !== 'ok') {
+    const worst = findings.find((f) => f.severity === severity);
+    if (worst != null) return worst.why;
+  }
+
+  const current = checkouts.find((c) => c.isCurrent) ?? checkouts[0];
+  if (current == null) return 'no checkout of this submodule in any worktree';
+
+  // Divergence that did not rise to an advisory still belongs in the one-liner:
+  // it is the fact a reader needs in order to decide whether to escalate.
+  const spread = distinctPointers(checkouts).length;
+  const branchNote =
+    branchAudit.checked && branchAudit.divergent.length > 0
+      ? `; ${branchAudit.divergent.length} of ${branchAudit.branchesCompared} branches record a different pointer than ${branchAudit.baselineRef} (see findings)`
+      : '';
+  const note =
+    (spread > 1
+      ? `; the parent's worktrees record ${spread} different pointers (see findings)`
+      : '') + branchNote;
+
+  if (current.store == null) {
+    return `recorded pointer ${short(current.recordedPointer)}; no store was opened for this worktree${note}`;
+  }
+  const on =
+    current.pointerOnRemotes != null && current.pointerOnRemotes.length > 0
+      ? current.pointerOnRemotes[0]
+      : 'a remote';
+  const level =
+    current.upstreamRef != null && current.behind === 0
+      ? `, level with ${current.upstreamRef}`
+      : '';
+  return `recorded pointer ${short(current.recordedPointer)} is on ${on}${level}, and the checkout has nothing unpushed${note}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1198,123 +1317,4 @@ export function buildSubmoduleInventory(
 /** The pointer each worktree would hand a clone: staged when bumped, else HEAD's. */
 function effectivePointer(checkout: SubmoduleCheckout): string | null {
   return checkout.stagedPointer ?? checkout.recordedPointer;
-}
-
-function distinctPointers(checkouts: SubmoduleCheckout[]): string[] {
-  return [
-    ...new Set(
-      checkouts
-        .map(effectivePointer)
-        .filter((sha): sha is string => sha != null),
-    ),
-  ];
-}
-
-function decideRowFindings(
-  checkouts: SubmoduleCheckout[],
-  subPath: string,
-): SubmoduleFinding[] {
-  const pointers = distinctPointers(checkouts);
-  if (pointers.length < 2) return [];
-
-  const primary = checkouts.find((c) => c.isPrimary)?.worktree ?? null;
-  const detail = checkouts
-    .filter((c) => effectivePointer(c) != null)
-    .map(
-      (c) =>
-        `${relativeToPrimary(c.worktree, primary)}: ${short(effectivePointer(c))}`,
-    )
-    .join(', ');
-
-  // The merge-base is the honest size of the divergence. A tip-to-tip
-  // `git diff --stat` is NOT: it counts every line either side changed since
-  // they parted, which reads as a huge conflict even when the two sides touch
-  // disjoint files. Deliberately no line count is reported here.
-  const store = checkouts.find((c) => c.store != null);
-  const mergeBase =
-    store != null
-      ? gitArgv(
-          ['merge-base', ...pointers],
-          join(store.worktree, subPath),
-        )?.trim()
-      : null;
-  const base =
-    mergeBase != null && mergeBase.length > 0
-      ? `; merge-base ${short(mergeBase)}`
-      : '';
-
-  // SEVERITY. Divergent pointers on their own are the NORMAL state of a
-  // multi-worktree repo — each worktree branched at a different time, and
-  // nothing is at risk. Flagging that as a problem forever would repeat, in a
-  // new costume, exactly the mistake of treating "behind" as an alarm. It
-  // escalates only when two opened stores each hold work of their own, which
-  // is the state where `git worktree remove` can destroy a unique copy.
-  const opened = checkouts.filter((c) => c.store != null);
-  const withUnpushed = opened.filter(
-    (c) => c.unpushedCommits != null && c.unpushedCommits > 0,
-  );
-  const escalate = withUnpushed.length >= 2;
-  const unopened = checkouts.length - opened.length;
-  const tail = escalate
-    ? ` — ${withUnpushed.length} of those checkouts hold commits on no remote, so removing the wrong worktree destroys a unique copy`
-    : unopened > 0
-      ? ` — divergence alone is normal; pass --submodule-stores to check whether any of the ${unopened} unopened store(s) holds work of its own`
-      : '';
-
-  return [
-    {
-      fix: "check each checkout's unpushed count before removing any worktree — `git worktree remove` deletes that worktree's submodule object store",
-      kind: 'pointer-diverges-across-worktrees',
-      question: Q_WORK_AT_RISK,
-      severity: escalate ? 'advisory' : 'ok',
-      why: `the parent's worktrees record different submodule commits (${detail}${base}) and each worktree has its OWN object store, so a commit present in one may be unresolvable in another${tail}`,
-    },
-  ];
-}
-
-/** `.` / `.claude/worktrees/foo` instead of five absolute paths in one line. */
-function relativeToPrimary(path: string, primary: string | null): string {
-  if (primary == null) return path;
-  if (path === primary) return '.';
-  return path.startsWith(`${primary}/`) ? path.slice(primary.length + 1) : path;
-}
-
-function summarise(
-  findings: SubmoduleFinding[],
-  checkouts: SubmoduleCheckout[],
-  severity: SubmoduleSeverity,
-  branchAudit: BranchPointerAudit,
-): string {
-  if (severity !== 'ok') {
-    const worst = findings.find((f) => f.severity === severity);
-    if (worst != null) return worst.why;
-  }
-
-  const current = checkouts.find((c) => c.isCurrent) ?? checkouts[0];
-  if (current == null) return 'no checkout of this submodule in any worktree';
-
-  // Divergence that did not rise to an advisory still belongs in the one-liner:
-  // it is the fact a reader needs in order to decide whether to escalate.
-  const spread = distinctPointers(checkouts).length;
-  const branchNote =
-    branchAudit.checked && branchAudit.divergent.length > 0
-      ? `; ${branchAudit.divergent.length} of ${branchAudit.branchesCompared} branches record a different pointer than ${branchAudit.baselineRef} (see findings)`
-      : '';
-  const note =
-    (spread > 1
-      ? `; the parent's worktrees record ${spread} different pointers (see findings)`
-      : '') + branchNote;
-
-  if (current.store == null) {
-    return `recorded pointer ${short(current.recordedPointer)}; no store was opened for this worktree${note}`;
-  }
-  const on =
-    current.pointerOnRemotes != null && current.pointerOnRemotes.length > 0
-      ? current.pointerOnRemotes[0]
-      : 'a remote';
-  const level =
-    current.upstreamRef != null && current.behind === 0
-      ? `, level with ${current.upstreamRef}`
-      : '';
-  return `recorded pointer ${short(current.recordedPointer)} is on ${on}${level}, and the checkout has nothing unpushed${note}`;
 }

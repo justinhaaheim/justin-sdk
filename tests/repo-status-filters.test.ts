@@ -24,7 +24,7 @@
 
 import {afterEach, describe, expect, test} from 'bun:test';
 import {execFileSync} from 'child_process';
-import {existsSync, chmodSync, rmSync, writeFileSync} from 'fs';
+import {chmodSync, existsSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {renderReportPretty} from '../src/repo-status/pretty';

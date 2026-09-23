@@ -295,7 +295,7 @@ describe('installInPrimary — what actually happens in the primary', () => {
 
 async function captureLog<T>(
   fn: () => Promise<T>,
-): Promise<{value: T; out: string}> {
+): Promise<{out: string; value: T}> {
   const original = console.log;
   const lines: string[] = [];
   console.log = (...args: unknown[]) => {

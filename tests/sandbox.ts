@@ -5,7 +5,7 @@
  * macOS, /tmp on Linux). Cleanup is automatic via afterEach.
  */
 
-import {mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync} from 'fs';
+import {mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
@@ -37,14 +37,14 @@ process.env.MISE_TRUSTED_CONFIG_PATHS =
 process.env.JUSTIN_SDK_HEALTH_NOTICES = 'off';
 
 export interface Sandbox {
-  /** Absolute path to the sandbox directory */
-  path: string;
   /** Clean up the sandbox (called automatically via afterEach) */
   cleanup: () => void;
-  /** Write a file inside the sandbox (creates parent dirs) */
-  writeFile: (relativePath: string, content: string) => void;
   /** Create an empty directory inside the sandbox */
   mkdir: (relativePath: string) => void;
+  /** Absolute path to the sandbox directory */
+  path: string;
+  /** Write a file inside the sandbox (creates parent dirs) */
+  writeFile: (relativePath: string, content: string) => void;
 }
 
 export function createSandbox(): Sandbox {
@@ -54,20 +54,20 @@ export function createSandbox(): Sandbox {
   const path = realpathSync(mkdtempSync(join(tmpdir(), 'justin-sdk-test-')));
 
   return {
-    path,
     cleanup: () => {
-      rmSync(path, {recursive: true, force: true});
-    },
-    writeFile: (relativePath: string, content: string) => {
-      const fullPath = join(path, relativePath);
-      const dir = fullPath.substring(0, fullPath.lastIndexOf('/'));
-      if (dir && dir !== path) {
-        mkdirSync(dir, {recursive: true});
-      }
-      writeFileSync(fullPath, content);
+      rmSync(path, {force: true, recursive: true});
     },
     mkdir: (relativePath: string) => {
       mkdirSync(join(path, relativePath), {recursive: true});
+    },
+    path,
+    writeFile: (relativePath: string, content: string) => {
+      const fullPath = join(path, relativePath);
+      const dir = fullPath.substring(0, fullPath.lastIndexOf('/'));
+      if (dir !== '' && dir !== path) {
+        mkdirSync(dir, {recursive: true});
+      }
+      writeFileSync(fullPath, content);
     },
   };
 }
@@ -78,8 +78,8 @@ export function createSandbox(): Sandbox {
  */
 export function createProjectSandbox(options?: {
   claudeMd?: string;
-  packageJson?: Record<string, unknown>;
   justinSdkConfig?: Record<string, unknown>;
+  packageJson?: Record<string, unknown>;
 }): Sandbox {
   const sandbox = createSandbox();
   sandbox.writeFile(
@@ -93,7 +93,7 @@ export function createProjectSandbox(options?: {
   if (options?.claudeMd !== undefined) {
     sandbox.writeFile('CLAUDE.md', options.claudeMd);
   }
-  if (options?.justinSdkConfig) {
+  if (options?.justinSdkConfig != null) {
     sandbox.writeFile(
       'justin-sdk.config.json',
       JSON.stringify(options.justinSdkConfig, null, 2) + '\n',

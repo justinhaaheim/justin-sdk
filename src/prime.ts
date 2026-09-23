@@ -49,8 +49,9 @@ export type Partition = 'universal' | 'conditional' | 'full';
 
 /** How to obtain the prompts source. Shared by every assembly entry point. */
 export interface SourceOptions {
-  promptsDir?: string; // override: read this dir as-is (skip clone/pull)
-  forceUpdate?: boolean; // force a fetch/pull of the managed clone, bypassing the staleness gate
+  // override: read this dir as-is (skip clone/pull)
+  forceUpdate?: boolean;
+  promptsDir?: string; // force a fetch/pull of the managed clone, bypassing the staleness gate
 }
 
 /** What `assemble` needs: where the source comes from, and which slice to take. */
@@ -77,18 +78,6 @@ export interface ProjectContext {
 // named is/has predicate framework (t6a0.5) is still deferred — this stays a
 // small hand-written registry until that's worth building.
 export const PREDICATES: Record<string, (ctx: ProjectContext) => boolean> = {
-  /**
-   * An Expo app. NARROWER than isReactNative on purpose: the `eas` component
-   * scaffolds EAS Build/Update config, which a bare react-native (non-Expo)
-   * project has no use for.
-   */
-  isExpo: (ctx) => ctx.deps.has('expo'),
-  isReact: (ctx) =>
-    ctx.deps.has('react') ||
-    ctx.deps.has('expo') ||
-    ctx.deps.has('react-native'),
-  isReactNative: (ctx) => ctx.deps.has('expo') || ctx.deps.has('react-native'),
-
   /**
    * True for beads_rust (`br`) projects — NOT Yegge's Dolt-backed `bd`.
    *
@@ -117,6 +106,17 @@ export const PREDICATES: Record<string, (ctx: ProjectContext) => boolean> = {
       return false;
     }
   },
+  /**
+   * An Expo app. NARROWER than isReactNative on purpose: the `eas` component
+   * scaffolds EAS Build/Update config, which a bare react-native (non-Expo)
+   * project has no use for.
+   */
+  isExpo: (ctx) => ctx.deps.has('expo'),
+  isReact: (ctx) =>
+    ctx.deps.has('react') ||
+    ctx.deps.has('expo') ||
+    ctx.deps.has('react-native'),
+  isReactNative: (ctx) => ctx.deps.has('expo') || ctx.deps.has('react-native'),
 };
 
 export function loadProjectContext(projectRoot: string): ProjectContext {
@@ -190,10 +190,10 @@ function git(args: string[], cwd?: string): void {
  * invented date, and never a date that outlives its sha.
  */
 export interface PromptsCommit {
-  /** Full HEAD sha. */
-  sha: string;
   /** Committer date, YYYY-MM-DD (git's `%cs`). */
   date: string;
+  /** Full HEAD sha. */
+  sha: string;
 }
 
 /**
@@ -337,7 +337,7 @@ function ensurePromptsSource(opts: SourceOptions): PromptsSource {
   }
   if (existsSync(join(dir, '.git', 'shallow'))) {
     // Migrate a pre-r3pb shallow clone to a full one, self-healing.
-    rmSync(dir, {recursive: true, force: true});
+    rmSync(dir, {force: true, recursive: true});
     return clone();
   }
   if (opts.forceUpdate === true || isStale(maxAge)) {
@@ -358,17 +358,8 @@ function ensurePromptsSource(opts: SourceOptions): PromptsSource {
 // --- frontmatter + inlining ------------------------------------------------
 
 interface Frontmatter {
-  includeIf: string[];
   body: string;
-}
-
-function stripFrontmatter(raw: string): Frontmatter {
-  if (!raw.startsWith('---')) return {includeIf: [], body: raw};
-  const end = raw.indexOf('\n---', 3);
-  if (end === -1) return {includeIf: [], body: raw};
-  const fm = raw.slice(3, end).trim();
-  const body = raw.slice(end + 4).replace(/^\r?\n+/, '');
-  return {includeIf: parseIncludeIf(fm), body};
+  includeIf: string[];
 }
 
 function parseIncludeIf(frontmatter: string): string[] {
@@ -394,6 +385,15 @@ function parseIncludeIf(frontmatter: string): string[] {
   return names;
 }
 
+function stripFrontmatter(raw: string): Frontmatter {
+  if (!raw.startsWith('---')) return {body: raw, includeIf: []};
+  const end = raw.indexOf('\n---', 3);
+  if (end === -1) return {body: raw, includeIf: []};
+  const fm = raw.slice(3, end).trim();
+  const body = raw.slice(end + 4).replace(/^\r?\n+/, '');
+  return {body, includeIf: parseIncludeIf(fm)};
+}
+
 /**
  * Evaluate a list of predicate names against a project.
  *
@@ -410,7 +410,7 @@ export function evaluateInclude(
   if (unknown.length > 0) return {included: false, unknown};
   const included = includeIf.every((name) => {
     const pred = PREDICATES[name];
-    return pred != null && pred(ctx);
+    return pred?.(ctx) === true;
   });
   return {included, unknown};
 }
@@ -418,10 +418,10 @@ export function evaluateInclude(
 const AT_REFERENCE = /^\s*@(\S+)\s*$/;
 
 interface InlineResult {
-  text: string;
   count: number;
   /** Basenames (no .md) of the modules that were included, in order. */
   names: string[];
+  text: string;
   warnings: string[];
 }
 
@@ -454,8 +454,8 @@ function inlineFile(
   if (depth > MAX_INLINE_DEPTH) {
     return {
       count: 0,
-      text: '',
       names: [],
+      text: '',
       warnings: [`max inline depth at ${filePath}`],
     };
   }
@@ -507,7 +507,7 @@ function inlineFile(
     warnings.push(...nested.warnings);
   }
 
-  return {count, text: out.join('\n').trim(), names, warnings};
+  return {count, names, text: out.join('\n').trim(), warnings};
 }
 
 // --- header ----------------------------------------------------------------
@@ -550,7 +550,12 @@ export function numberHeaders(markdown: string, prefix = ''): string {
       if (inFence) return line;
       const m = /^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(line);
       if (m == null) return line;
-      const level = m[1].length;
+      // The hash run is a mandatory group, so this cannot be absent — but a
+      // regex whose shape changed should leave the line alone rather than
+      // number it from an assumed level.
+      const hashes = m[1];
+      if (hashes == null) return line;
+      const level = hashes.length;
       // Pad any skipped intermediate levels (e.g. an H1 followed by an H3) so
       // the dotted path stays well-formed.
       while (counters.length < level - 1) counters.push(1);
@@ -571,19 +576,19 @@ export function numberHeaders(markdown: string, prefix = ''): string {
 
 export interface Assembled {
   count: number;
-  /** Basenames (no .md) of the included modules, in order. */
-  names: string[];
-  /** Raw inlined content, no header — for callers that compose their own framing. */
-  text: string;
   /** buildHeader() + text — the standalone rules document. */
   markdown: string;
-  warnings: string[];
-  /** The prompts dir actually read (the managed clone, unless overridden). */
-  sourceDir: string;
+  /** Basenames (no .md) of the included modules, in order. */
+  names: string[];
   /** HEAD sha + date of sourceDir, or null (non-git fixture / unavailable). */
   sourceCommit: PromptsCommit | null;
+  /** The prompts dir actually read (the managed clone, unless overridden). */
+  sourceDir: string;
   /** Whether the source was actually refreshed — writers MUST check this (D15). */
   sourceRefresh: SourceRefresh;
+  /** Raw inlined content, no header — for callers that compose their own framing. */
+  text: string;
+  warnings: string[];
 }
 
 /**
@@ -631,13 +636,13 @@ export function assemble(
   const numbered = numberHeaders(text, prefix);
   return {
     count,
-    names,
-    text: numbered,
     markdown: `${buildHeader()}\n\n${numbered}`.trim(),
-    warnings,
+    names,
     sourceCommit: headCommit(source),
     sourceDir: source,
     sourceRefresh: refresh,
+    text: numbered,
+    warnings,
   };
 }
 

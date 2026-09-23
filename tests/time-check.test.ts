@@ -27,10 +27,10 @@ import {
   formatReport,
   readTimeCheckConfig,
   resolveConfig,
+  runTimeCheck,
   scanTranscript,
   TIME_CHECK_DEFAULTS,
   TIME_CHECK_MARKER,
-  runTimeCheck,
   workingDayKey,
 } from '../src/time-check';
 

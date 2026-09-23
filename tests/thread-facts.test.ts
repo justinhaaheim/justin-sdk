@@ -20,8 +20,8 @@ import {join} from 'path';
 import {
   collectThreadFacts,
   findTranscript,
-  stripInjectedNoise,
   scanTranscriptForThread,
+  stripInjectedNoise,
   userMessageText,
 } from '../src/thread/facts';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -41,27 +41,25 @@ const RECORDS: unknown[] = [
   {
     cwd: '/Users/jhaa/Dev/home-base',
     entrypoint: 'cli',
-    timestamp: '2026-09-12T07:00:00.000Z',
-    type: 'user',
     isMeta: true,
     message: {content: '<command-name>/kickoff</command-name>', role: 'user'},
+    timestamp: '2026-09-12T07:00:00.000Z',
+    type: 'user',
   },
   {
-    timestamp: '2026-09-12T07:00:05.000Z',
-    type: 'user',
     message: {
       content: [
         {
-          type: 'text',
           text: '<system-reminder>\nCodebase instructions here.\n</system-reminder>Build the thread command group, and keep zod off the hot path.',
+          type: 'text',
         },
       ],
       role: 'user',
     },
+    timestamp: '2026-09-12T07:00:05.000Z',
+    type: 'user',
   },
   {
-    timestamp: '2026-09-12T07:01:00.000Z',
-    type: 'assistant',
     message: {
       model: 'claude-opus-5',
       role: 'assistant',
@@ -71,43 +69,45 @@ const RECORDS: unknown[] = [
         input_tokens: 34,
       },
     },
+    timestamp: '2026-09-12T07:01:00.000Z',
+    type: 'assistant',
   },
   {
-    timestamp: '2026-09-12T07:02:00.000Z',
-    type: 'user',
-    toolUseResult: {stdout: 'ok'},
     message: {
       content: [
-        {type: 'tool_result', content: 'file written', tool_use_id: 'x'},
+        {content: 'file written', tool_use_id: 'x', type: 'tool_result'},
       ],
       role: 'user',
     },
+    timestamp: '2026-09-12T07:02:00.000Z',
+    toolUseResult: {stdout: 'ok'},
+    type: 'user',
   },
   {
-    timestamp: '2026-09-12T07:03:00.000Z',
-    type: 'user',
     message: {
       content: '<task-notification>Agent player finished.</task-notification>',
       role: 'user',
     },
+    timestamp: '2026-09-12T07:03:00.000Z',
+    type: 'user',
   },
   {
-    timestamp: '2026-09-12T07:04:00.000Z',
-    type: 'user',
     isSidechain: true,
     message: {
       content: 'Subagent prompt written by Claude, not Justin.',
       role: 'user',
     },
+    timestamp: '2026-09-12T07:04:00.000Z',
+    type: 'user',
   },
   {
-    timestamp: '2026-09-12T07:05:00.000Z',
-    type: 'user',
     message: {
       content:
         '<system-reminder>\nA reminder with no closing tag in this record',
       role: 'user',
     },
+    timestamp: '2026-09-12T07:05:00.000Z',
+    type: 'user',
   },
 ];
 

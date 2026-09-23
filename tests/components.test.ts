@@ -244,9 +244,9 @@ describe('components: dispatch', () => {
 
   test('runComponentByConfigName returns null for an unknown config name (runs no installer)', () => {
     const result = runComponentByConfigName('totally-made-up-setup', {
+      force: false,
       projectRoot: '/tmp/does-not-matter',
       quiet: true,
-      force: false,
     });
     expect(result).toBeNull();
   });

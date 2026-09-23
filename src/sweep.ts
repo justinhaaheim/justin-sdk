@@ -105,41 +105,37 @@ import {
   appendFileSync,
   existsSync,
   mkdirSync,
-  readFileSync,
   readdirSync,
+  readFileSync,
 } from 'node:fs';
 import {homedir} from 'node:os';
 import {basename, join, relative, resolve} from 'node:path';
 
 import {
   COMPONENT_NAMES,
+  type ComponentName,
   configNameFor,
   resolveComponents,
-  type ComponentName,
 } from './component-registry';
 import {runComponentByName} from './components';
 import {silencedChildEnv} from './health-notices';
 import {runInstall} from './install';
-import {
-  applyInstallPayloadConfig,
-  noProvenanceLine,
-  planInstallPayload,
-  renderInstallPayloadPlan,
-} from './sweep-install';
-import {sdkTagExistsOnRemote} from './sdk-latest';
 import {
   readDeployedStamp,
   rulesFilePath,
   SYNC_RULES_CMD,
 } from './rules/rules-file';
 import {getSdkVersion} from './sdk-identity';
-import {
-  resolveWorktreeSdkBin,
-  SDK_BIN,
-  worktreeSdkArgv,
-} from './sdk-invocation';
+import {resolveWorktreeSdkBin, worktreeSdkArgv} from './sdk-invocation';
+import {sdkTagExistsOnRemote} from './sdk-latest';
+import {detectPackageManager, type PackageManager, setupEnv} from './setup-env';
 import {isQuiet, setQuiet, writeJson} from './setup-helpers';
-import {detectPackageManager, setupEnv, type PackageManager} from './setup-env';
+import {
+  applyInstallPayloadConfig,
+  noProvenanceLine,
+  planInstallPayload,
+  renderInstallPayloadPlan,
+} from './sweep-install';
 import {runSyncRules} from './sync-rules';
 
 export const SWEEP_BRANCH = 'worktree-sdk-sweep';
@@ -178,10 +174,10 @@ export type RepoOutcome =
   | 'skipped'; // out of scope for this payload (not enrolled). Expected, not a failure.
 
 export interface RepoResult {
-  repo: string;
-  outcome: RepoOutcome;
   /** One line: what happened / why it stopped. */
   detail: string;
+  outcome: RepoOutcome;
+  repo: string;
 }
 
 function say(line: string): void {
@@ -269,7 +265,7 @@ function run(
    * operator must always be able to see what is currently running.
    */
   options: {quiet?: boolean} = {},
-): {exitCode: number; error: string | null; output: string} {
+): {error: string | null; exitCode: number; output: string} {
   const [cmd, ...args] = argv;
   if (cmd == null) return {error: 'empty command', exitCode: 1, output: ''};
   say(`  ${DIM}$ ${argv.join(' ')}${RESET}`);
@@ -285,7 +281,8 @@ function run(
   const output = `${child.stdout ?? ''}${child.stderr ?? ''}`;
   const trimmed = output.replace(/\n+$/, '');
   if (trimmed !== '' && options.quiet !== true) say(trimmed);
-  if (child.error) return {error: child.error.message, exitCode: 1, output};
+  if (child.error != null)
+    return {error: child.error.message, exitCode: 1, output};
   return {error: null, exitCode: child.status ?? 1, output};
 }
 
@@ -336,15 +333,15 @@ export const SWEEP_LOG_DIR = join(
 export interface SweepRunLog {
   /** Where the failures WOULD be written — printed at the top of every run. */
   readonly path: string;
-  /** Has anything actually been written? (An empty run writes no file.) */
-  wrote: () => boolean;
   record: (entry: {
-    repo: string;
-    step: string;
     detail: string;
     /** null = this step reports steps rather than raw command output. */
     output: string | null;
+    repo: string;
+    step: string;
   }) => void;
+  /** Has anything actually been written? (An empty run writes no file.) */
+  wrote: () => boolean;
 }
 
 /**
@@ -447,9 +444,9 @@ export function isWorktreeRegistered(repo: string, path: string): boolean {
 }
 
 export interface CleanupResult {
-  ok: boolean;
   /** What was removed, or exactly what survived. Never "probably gone". */
   detail: string;
+  ok: boolean;
 }
 
 /**
@@ -501,8 +498,8 @@ export function cleanupWorktreeAndBranch(
 }
 
 export interface WorktreeAddResult {
-  ok: boolean;
   detail: string;
+  ok: boolean;
   /** The add's own output, for the run log. */
   output: string;
 }
@@ -654,7 +651,7 @@ export function frozenInstallRecipe(
 }
 
 export type PrimaryInstallPlan =
-  | {kind: 'run'; argv: string[]}
+  | {argv: string[]; kind: 'run'}
   | {kind: 'skip'; reason: string};
 
 /**
@@ -715,14 +712,28 @@ export function planPrimaryInstall(input: {
 }
 
 interface PrimaryInstallResult {
-  /** false ONLY when an install really ran and really went red. */
-  ok: boolean;
-  /** The clause appended to this repo's summary line. Never empty. */
-  note: string;
-  /** A failed install's stdout+stderr, for the run log. null when none ran. */
-  output: string | null;
   /** What ran (or would have), so the operator can repeat it by hand. */
   argv: string[] | null;
+  /** The clause appended to this repo's summary line. Never empty. */
+  note: string;
+  /** false ONLY when an install really ran and really went red. */
+  ok: boolean;
+  /** A failed install's stdout+stderr, for the run log. null when none ran. */
+  output: string | null;
+}
+
+/** Paths from `git status --porcelain`, both rename sides included. */
+export function parsePorcelainPaths(porcelain: string): string[] {
+  const paths: string[] = [];
+  for (const raw of porcelain.split('\n')) {
+    if (raw.length < 4) continue;
+    const body = raw.slice(3);
+    for (const side of body.split(' -> ')) {
+      const trimmed = side.trim();
+      if (trimmed !== '') paths.push(trimmed);
+    }
+  }
+  return paths;
 }
 
 /**
@@ -827,7 +838,7 @@ function dryRunInstallNote(repo: string): string {
  */
 export type SweepPayload =
   | {mode: 'full'}
-  | {mode: 'component'; component: ComponentName}
+  | {component: ComponentName; mode: 'component'}
   | {mode: 'install'};
 
 /**
@@ -854,7 +865,7 @@ export function planSweepPayload(
  */
 export function parseComponentOption(
   raw: string | undefined,
-): {ok: true; component: ComponentName | null} | {ok: false; error: string} {
+): {component: ComponentName | null; ok: true} | {error: string; ok: false} {
   if (raw == null) return {component: null, ok: true};
   const wanted = raw.trim();
   for (const name of COMPONENT_NAMES) {
@@ -879,8 +890,8 @@ export function parseComponentOption(
  */
 export function parseSweepPayloadOption(
   raw: string | undefined,
-): {ok: true; payload: SweepPayload} | {ok: false; error: string} {
-  if (raw != null && raw.trim() === INSTALL_PAYLOAD_OPTION) {
+): {ok: true; payload: SweepPayload} | {error: string; ok: false} {
+  if (raw?.trim() === INSTALL_PAYLOAD_OPTION) {
     return {ok: true, payload: {mode: 'install'}};
   }
   const parsed = parseComponentOption(raw);
@@ -929,7 +940,7 @@ export function sweepCommitMessage(payload: SweepPayload): string {
 export function beadsConfigGuard(
   payload: SweepPayload,
   changedFiles: readonly string[],
-): {ok: true} | {ok: false; offenders: string[]; reason: string} {
+): {ok: true} | {offenders: string[]; ok: false; reason: string} {
   // Every payload EXCEPT a deliberate `--component beads`. The install payload
   // (dchjw.10) re-applies whatever the repo has, unattended, across the fleet —
   // if that reaches `.beads/config.yaml` it is the same accident this guard was
@@ -941,8 +952,8 @@ export function beadsConfigGuard(
   );
   if (offenders.length === 0) return {ok: true};
   return {
-    ok: false,
     offenders,
+    ok: false,
     reason:
       `HARD STOP (home-base-o33r): the payload changed ${offenders.join(', ')}. ` +
       'A full sweep must never rewrite a beads config — it carries the issue ' +
@@ -979,6 +990,24 @@ export function componentContractPaths(
     default:
       return null;
   }
+}
+
+/**
+ * Does `file` fall inside `contract`? An entry ending in `/` is a directory
+ * prefix, anything else is an exact path.
+ *
+ * Shared by the commit's scope filter and the preflight leftover check (ckc4
+ * F5) on purpose: "paths this component owns" must mean the same thing when
+ * deciding what may be committed and when deciding what may be deleted.
+ * Pure.
+ */
+export function matchesContract(
+  contract: readonly string[],
+  file: string,
+): boolean {
+  return contract.some((entry) =>
+    entry.endsWith('/') ? file.startsWith(entry) : file === entry,
+  );
 }
 
 /**
@@ -1026,24 +1055,6 @@ export function partitionByComponentContract(
   };
 }
 
-/**
- * Does `file` fall inside `contract`? An entry ending in `/` is a directory
- * prefix, anything else is an exact path.
- *
- * Shared by the commit's scope filter and the preflight leftover check (ckc4
- * F5) on purpose: "paths this component owns" must mean the same thing when
- * deciding what may be committed and when deciding what may be deleted.
- * Pure.
- */
-export function matchesContract(
-  contract: readonly string[],
-  file: string,
-): boolean {
-  return contract.some((entry) =>
-    entry.endsWith('/') ? file.startsWith(entry) : file === entry,
-  );
-}
-
 // ---------------------------------------------------------------------------
 // Preflight: leftovers from an earlier run (home-base-ckc4 F5)
 // ---------------------------------------------------------------------------
@@ -1064,7 +1075,7 @@ export function allowedLeftoverPaths(payload: SweepPayload): readonly string[] {
 
 export type LeftoverAssessment =
   | {present: false}
-  | {present: true; safe: boolean; reason: string};
+  | {present: true; reason: string; safe: boolean};
 
 /**
  * May the sweep delete the leftover worktree/branch it found, or must it refuse
@@ -1210,7 +1221,7 @@ export function assessSweepLeftover(
 export function stageForCommit(
   worktreePath: string,
   payload: SweepPayload,
-): {staged: string[]; excluded: string[]} {
+): {excluded: string[]; staged: string[]} {
   const readStaged = (): string[] => {
     const out = git(worktreePath, ['diff', '--cached', '--name-only']);
     return out == null ? [] : out.split('\n').filter((line) => line !== '');
@@ -1234,7 +1245,7 @@ export function isEnrolledIn(
 }
 
 export type ConfigComponents =
-  | {ok: true; components: string[]; source: 'config' | 'core'}
+  | {components: string[]; ok: true; source: 'config' | 'core'}
   | {ok: false; reason: string};
 
 /**
@@ -1295,7 +1306,7 @@ export function parseConfigComponents(
  * become a quiet skip.
  */
 export type CommittedEnrollment =
-  | {kind: 'enrolled'; components: string[]; source: 'config' | 'core'}
+  | {components: string[]; kind: 'enrolled'; source: 'config' | 'core'}
   | {kind: 'unreadable'; reason: string};
 
 export function committedConfigComponents(
@@ -1371,9 +1382,9 @@ const SDK_PKG = '@justinhaaheim/justin-sdk';
  */
 interface PinField {
   file: string;
+  key: string;
   /** Containing object path; [] = top level. */
   parents: readonly string[];
-  key: string;
 }
 
 const PIN_FIELDS: readonly PinField[] = [
@@ -1382,10 +1393,10 @@ const PIN_FIELDS: readonly PinField[] = [
 ];
 
 interface PinFieldValue {
-  /** Did the field itself exist? */
-  present: boolean;
   /** Did its containing object exist? (Absent parent must not be left as {}.) */
   parentPresent: boolean;
+  /** Did the field itself exist? */
+  present: boolean;
   value: unknown;
 }
 
@@ -1538,20 +1549,6 @@ export function holdPinAfterGates(
   return restorePinSnapshot(worktree, beforeGates);
 }
 
-/** Paths from `git status --porcelain`, both rename sides included. */
-export function parsePorcelainPaths(porcelain: string): string[] {
-  const paths: string[] = [];
-  for (const raw of porcelain.split('\n')) {
-    if (raw.length < 4) continue;
-    const body = raw.slice(3);
-    for (const side of body.split(' -> ')) {
-      const trimmed = side.trim();
-      if (trimmed !== '') paths.push(trimmed);
-    }
-  }
-  return paths;
-}
-
 // ---------------------------------------------------------------------------
 // The pin write (full payload only) — home-base-apus.1
 // ---------------------------------------------------------------------------
@@ -1571,7 +1568,7 @@ export type DepSection = (typeof SDK_DEP_SECTIONS)[number];
 export function readSdkDeclarations(
   root: string,
 ):
-  | {ok: true; declared: ReadonlyMap<DepSection, string>}
+  | {declared: ReadonlyMap<DepSection, string>; ok: true}
   | {ok: false; reason: string} {
   const path = join(root, 'package.json');
   if (!existsSync(path)) return {ok: false, reason: 'package.json not found'};
@@ -1644,7 +1641,7 @@ function expandWorkspacePattern(root: string, pattern: string): string[] {
  * still run.
  */
 export type WorkspaceSatisfaction =
-  | {satisfied: true; reason: string}
+  | {reason: string; satisfied: true}
   | {satisfied: false};
 
 export function sdkWorkspaceSatisfaction(
@@ -1653,7 +1650,7 @@ export function sdkWorkspaceSatisfaction(
 ): WorkspaceSatisfaction {
   for (const section of SDK_DEP_SECTIONS) {
     const spec = declared.get(section);
-    if (spec != null && spec.startsWith('workspace:')) {
+    if (spec?.startsWith('workspace:') === true) {
       return {reason: `${section}.${SDK_PKG} is "${spec}"`, satisfied: true};
     }
   }
@@ -1662,7 +1659,7 @@ export function sdkWorkspaceSatisfaction(
   for (const pattern of workspacePatternsOf(pkg)) {
     for (const dir of expandWorkspacePattern(root, pattern)) {
       const member = readJsonObject(join(dir, 'package.json'));
-      if (member != null && member.name === SDK_PKG) {
+      if (member?.name === SDK_PKG) {
         return {
           reason: `workspaces member ${relative(root, dir)} IS ${SDK_PKG}`,
           satisfied: true,
@@ -1723,7 +1720,7 @@ export function verifySinglePin(
       reason: `the pin step left ${SDK_PKG} declared ${entries.length} times (${shown}) — exactly one declaration, in devDependencies, is the contract`,
     };
   }
-  const [section, spec] = entries[0] as [DepSection, string];
+  const [section, spec] = entries[0]!;
   if (section !== 'devDependencies') {
     return {
       ok: false,
@@ -1764,8 +1761,8 @@ export function verifySinglePin(
  * successful refresh read as skipped.
  */
 export type UserRulesOutcome =
-  | {status: 'refreshed' | 'current' | 'dry-run'; detail: string}
-  | {status: 'failed'; detail: string};
+  | {detail: string; status: 'refreshed' | 'current' | 'dry-run'}
+  | {detail: string; status: 'failed'};
 
 /** null ⇒ this payload has no business touching the user-level file. */
 export function refreshUserLevelRules(
@@ -1828,8 +1825,8 @@ export function refreshUserLevelRules(
 
 export type PayloadOutcome =
   | {
-      ok: true;
       note: string;
+      ok: true;
       /**
        * A short phrase that must survive into the repo's SUMMARY line, not just
        * the inline chatter — reserved for payload facts an operator would
@@ -1838,231 +1835,7 @@ export type PayloadOutcome =
        */
       summaryNote?: string;
     }
-  | {ok: false; detail: string};
-
-/**
- * Apply `payload` to an already-hydrated worktree. Exported because this is
- * the one step `--component` changes, so it is also the step whose pin
- * neutrality has to be provable against a fixture repo without standing up
- * the whole sweep (hydration, the doctor/signal subprocesses, git plumbing).
- */
-export async function applySweepPayload(
-  worktree: string,
-  payload: SweepPayload,
-  /**
-   * Injection points for the `install` payload, so the fixture test can run the
-   * REAL code path offline: `pin` stands in for the published tag (a `file:`
-   * spec resolves without a registry) and `sdkRepoUrl` for the remote the tag
-   * is verified against (a local bare repo is a real remote to git).
-   */
-  options: {pin?: string; sdkRepoUrl?: string} = {},
-): Promise<PayloadOutcome> {
-  if (payload.mode === 'install') {
-    return applyInstallSweepPayload(worktree, options);
-  }
-  if (payload.mode === 'component') {
-    // D11: run the orchestrator's OWN component code in-process. The
-    // alternative — `bun run justin-sdk update --component` —
-    // resolves the TARGET's pinned SDK, so it would fail against every repo
-    // until each pin was bumped once, which is the exact coupling this flag
-    // exists to break.
-    const before = readPinSnapshot(worktree);
-    let exitCode: number;
-    try {
-      exitCode = await runComponentByName(payload.component, {
-        force: false,
-        noCommit: true,
-        projectRoot: worktree,
-        quiet: true,
-      });
-    } catch (error) {
-      return {
-        detail: `component ${payload.component} threw: ${
-          error instanceof Error ? error.message : String(error)
-        } — worktree left for inspection`,
-        ok: false,
-      };
-    }
-    // Restore even on failure: a half-applied component must not leave a
-    // moved pin behind in the worktree an operator is about to inspect.
-    const restored = restorePinSnapshot(worktree, before);
-    if (exitCode !== 0) {
-      return {
-        detail: `component ${payload.component} failed (exit ${exitCode}) — worktree left for inspection`,
-        ok: false,
-      };
-    }
-    return {
-      note:
-        `applied ${payload.component}` +
-        (restored.length > 0
-          ? ` (pin held: ${restored.join(', ')})`
-          : ' (pin untouched)'),
-      ok: true,
-    };
-  }
-
-  // --- Full payload: pin + update ------------------------------------------
-  // The SWEEP pins the target, deterministically, to ITS OWN version — it IS
-  // the latest SDK. Learned live on the first sweep run (raycast-j-recent,
-  // pinned 0.6.1-era): delegating the bump to the TARGET's `justin-sdk update`
-  // self-update means trusting every ancient self-update code path in the
-  // fleet, and 0.6.1's silently failed to move the pin at all. Pin first,
-  // then run the NEW code with --no-self-update — no gh tag query, no old
-  // code trusted, fleet version === orchestrator version by construction.
-  // The pin is written with the repo's OWN package manager (third live-sweep
-  // finding: raycast-j-recent is an npm repo — Raycast tooling — and `bun
-  // add` there migrated package-lock.json and died in a resolver loop).
-  // Mixing managers is exactly the class of nondeterminism this script
-  // exists to avoid.
-  const sdkVersion = getSdkVersion();
-  if (sdkVersion == null) {
-    return {
-      detail:
-        'the running SDK could not read its own package.json, so it cannot pin the fleet to itself — refusing rather than writing an unresolvable ref (D4, critical rule 6)',
-      ok: false,
-    };
-  }
-  const pinWrite = writeSdkPin(
-    worktree,
-    `github:justinhaaheim/justin-sdk#v${sdkVersion}`,
-  );
-  if (!pinWrite.ok) return pinWrite;
-  const update = runSweepUpdate(worktree);
-  if (!update.ok) return update;
-  return {
-    ...pinWrite,
-    note: `${pinWrite.note} + re-applied components`,
-  };
-}
-
-/**
- * The ENROLLMENT REFRESH payload (dchjw.10 SWEEP SEMANTICS), in order:
- *
- *   1. ADOPT installed-but-unlisted components into justin-sdk.config.json.
- *   2. DELETE the dead keys (`version`, `lastSynced`, the retired rules
- *      `modules` include-list).
- *   3. BUMP the SDK pin to this release — the tag verified on the remote first,
- *      because pinning twelve repos to a tag that was never pushed gives all of
- *      them a `bun install` that 404s (home-base-l9tz, at fleet scale).
- *   4. `install` with REMOVALS DISABLED, which rewrites the D1 script/hook
- *      spellings and regenerates the rules artifact from the registry.
- *
- * Steps 1 and 3 are in the SAME run on purpose: a repo whose `modules` block is
- * gone but whose pin is old reads as not-enrolled to its own rules check, so
- * that window must be one run rather than one release.
- *
- * NOTHING IS EVER REMOVED. See sweep-install.ts for why that is the rule and
- * not a timidity.
- */
-async function applyInstallSweepPayload(
-  worktree: string,
-  options: {pin?: string; sdkRepoUrl?: string},
-): Promise<PayloadOutcome> {
-  const config = applyInstallPayloadConfig(worktree);
-  if ('error' in config) {
-    return {
-      detail: `${config.error} — worktree left for inspection`,
-      ok: false,
-    };
-  }
-
-  const pin = options.pin ?? defaultSweepPin();
-  if (pin == null) {
-    return {
-      detail:
-        'the running SDK could not read its own package.json, so it cannot pin the fleet to itself — refusing rather than writing an unresolvable ref (D4, critical rule 6)',
-      ok: false,
-    };
-  }
-  // A CONFIRMED-ABSENT tag refuses. Could-not-ask is a third state and is
-  // reported, not refused: an unreachable remote must not make the whole fleet
-  // unsweepable, and the pin is the same one this SDK is running from.
-  const tagNote = verifySweepPinTag(pin, options.sdkRepoUrl);
-  if (tagNote.refuse) return {detail: tagNote.detail, ok: false};
-
-  const pinWrite = writeSdkPin(worktree, pin);
-  if (!pinWrite.ok) return pinWrite;
-
-  let exitCode: number;
-  try {
-    // No `prune`, here or anywhere in the sweep: install does not remove by
-    // default (dchjw.17 F1), and a sweep is the one caller that must never be
-    // the thing that discovers an exception (dchjw.17 F2).
-    exitCode = await runInstall({
-      projectRoot: worktree,
-      quiet: true,
-    });
-  } catch (error) {
-    return {
-      detail: `install threw: ${
-        error instanceof Error ? error.message : String(error)
-      } — worktree left for inspection`,
-      ok: false,
-    };
-  }
-  if (exitCode !== 0) {
-    return {
-      detail: `install failed (exit ${exitCode}) — worktree left for inspection`,
-      ok: false,
-    };
-  }
-
-  const notes = [
-    config.adopted.length > 0
-      ? `adopted ${config.adopted.join(', ')}`
-      : 'adopted nothing',
-    config.dropped.length > 0
-      ? `dropped ${config.dropped.join(', ')}`
-      : 'no dead keys',
-    pinWrite.note,
-    'installed (removals disabled)',
-    // Carried into the run note, not just the dry-run plan: a component the
-    // sweep declined to adopt is a decision waiting for Justin, and a live run
-    // is the pass where it would otherwise never be mentioned (dchjw.19).
-    ...config.notAdopted.map(noProvenanceLine),
-  ];
-  return {
-    note: notes.join(' · '),
-    ok: true,
-    ...(config.adopted.length > 0
-      ? {summaryNote: `adopted ${config.adopted.length} component(s)`}
-      : {}),
-  };
-}
-
-/** The pin this SDK would write: its own version, as a published tag. */
-function defaultSweepPin(): string | null {
-  const version = getSdkVersion();
-  return version == null ? null : `github:justinhaaheim/justin-sdk#v${version}`;
-}
-
-/**
- * Check the tag behind a `github:` pin against the remote. Anything that is not
- * a `github:…#tag` spec (a `file:` fixture pin) is not a tag question at all.
- */
-function verifySweepPinTag(
-  pin: string,
-  repoUrl: string | undefined,
-): {refuse: false} | {refuse: true; detail: string} {
-  const tag = /^github:justinhaaheim\/justin-sdk#(.+)$/.exec(pin)?.[1];
-  if (tag == null) return {refuse: false};
-  const published = sdkTagExistsOnRemote(tag, {repoUrl});
-  if (published.status === 'ok' && !published.exists) {
-    return {
-      detail:
-        `${repoUrl ?? 'the SDK remote'} has no tag ${tag}, so pinning the fleet to it would give every repo an install that 404s ` +
-        '(home-base-l9tz at fleet scale). Publish the release first — nothing was written.',
-      refuse: true,
-    };
-  }
-  if (published.status === 'failed') {
-    say(
-      `  ${YELLOW}⚠${RESET} could not verify tag ${tag} on the remote (${published.error}) — pinning anyway, UNVERIFIED`,
-    );
-  }
-  return {refuse: false};
-}
+  | {detail: string; ok: false};
 
 /**
  * Write `pin` as the repo's ONE SDK declaration, using the repo's own package
@@ -2192,29 +1965,133 @@ export function writeSdkPin(worktree: string, pin: string): PayloadOutcome {
     : {note: `pinned ${pin}`, ok: true};
 }
 
+/** The pin this SDK would write: its own version, as a published tag. */
+function defaultSweepPin(): string | null {
+  const version = getSdkVersion();
+  return version == null ? null : `github:justinhaaheim/justin-sdk#v${version}`;
+}
+
 /**
- * `justin-sdk update` inside the worktree — the second half of the full
- * payload, shared by the pinned and the workspace-satisfied paths so the
- * skip cannot accidentally skip the component re-apply too.
+ * Check the tag behind a `github:` pin against the remote. Anything that is not
+ * a `github:…#tag` spec (a `file:` fixture pin) is not a tag question at all.
  */
+function verifySweepPinTag(
+  pin: string,
+  repoUrl: string | undefined,
+): {refuse: false} | {detail: string; refuse: true} {
+  const tag = /^github:justinhaaheim\/justin-sdk#(.+)$/.exec(pin)?.[1];
+  if (tag == null) return {refuse: false};
+  const published = sdkTagExistsOnRemote(tag, {repoUrl});
+  if (published.status === 'ok' && !published.exists) {
+    return {
+      detail:
+        `${repoUrl ?? 'the SDK remote'} has no tag ${tag}, so pinning the fleet to it would give every repo an install that 404s ` +
+        '(home-base-l9tz at fleet scale). Publish the release first — nothing was written.',
+      refuse: true,
+    };
+  }
+  if (published.status === 'failed') {
+    say(
+      `  ${YELLOW}⚠${RESET} could not verify tag ${tag} on the remote (${published.error}) — pinning anyway, UNVERIFIED`,
+    );
+  }
+  return {refuse: false};
+}
+
 /**
- * The exact flags the sweep gives `update`.
+ * The ENROLLMENT REFRESH payload (dchjw.10 SWEEP SEMANTICS), in order:
  *
- * `--allow-dirty` because the tree IS dirty by design at this point: the
- * sweep's own pin bump is sitting uncommitted (fourth live-sweep finding —
- * update's dirty guard correctly refused). The sweep makes the one commit
- * itself after the gates.
+ *   1. ADOPT installed-but-unlisted components into justin-sdk.config.json.
+ *   2. DELETE the dead keys (`version`, `lastSynced`, the retired rules
+ *      `modules` include-list).
+ *   3. BUMP the SDK pin to this release — the tag verified on the remote first,
+ *      because pinning twelve repos to a tag that was never pushed gives all of
+ *      them a `bun install` that 404s (home-base-l9tz, at fleet scale).
+ *   4. `install` with REMOVALS DISABLED, which rewrites the D1 script/hook
+ *      spellings and regenerates the rules artifact from the registry.
  *
- * A NAMED CONSTANT so a test can read the whole argv the fleet path runs and
- * assert what is NOT in it — nothing that removes (dchjw.17 F2). An argv built
- * inline is only assertable by spawning twelve repos' worth of sweep.
+ * Steps 1 and 3 are in the SAME run on purpose: a repo whose `modules` block is
+ * gone but whose pin is old reads as not-enrolled to its own rules check, so
+ * that window must be one run rather than one release.
+ *
+ * NOTHING IS EVER REMOVED. See sweep-install.ts for why that is the rule and
+ * not a timidity.
  */
-export const SWEEP_UPDATE_ARGS = [
-  'update',
-  '--no-self-update',
-  '--allow-dirty',
-  '--quiet',
-] as const;
+async function applyInstallSweepPayload(
+  worktree: string,
+  options: {pin?: string; sdkRepoUrl?: string},
+): Promise<PayloadOutcome> {
+  const config = applyInstallPayloadConfig(worktree);
+  if ('error' in config) {
+    return {
+      detail: `${config.error} — worktree left for inspection`,
+      ok: false,
+    };
+  }
+
+  const pin = options.pin ?? defaultSweepPin();
+  if (pin == null) {
+    return {
+      detail:
+        'the running SDK could not read its own package.json, so it cannot pin the fleet to itself — refusing rather than writing an unresolvable ref (D4, critical rule 6)',
+      ok: false,
+    };
+  }
+  // A CONFIRMED-ABSENT tag refuses. Could-not-ask is a third state and is
+  // reported, not refused: an unreachable remote must not make the whole fleet
+  // unsweepable, and the pin is the same one this SDK is running from.
+  const tagNote = verifySweepPinTag(pin, options.sdkRepoUrl);
+  if (tagNote.refuse) return {detail: tagNote.detail, ok: false};
+
+  const pinWrite = writeSdkPin(worktree, pin);
+  if (!pinWrite.ok) return pinWrite;
+
+  let exitCode: number;
+  try {
+    // No `prune`, here or anywhere in the sweep: install does not remove by
+    // default (dchjw.17 F1), and a sweep is the one caller that must never be
+    // the thing that discovers an exception (dchjw.17 F2).
+    exitCode = await runInstall({
+      projectRoot: worktree,
+      quiet: true,
+    });
+  } catch (error) {
+    return {
+      detail: `install threw: ${
+        error instanceof Error ? error.message : String(error)
+      } — worktree left for inspection`,
+      ok: false,
+    };
+  }
+  if (exitCode !== 0) {
+    return {
+      detail: `install failed (exit ${exitCode}) — worktree left for inspection`,
+      ok: false,
+    };
+  }
+
+  const notes = [
+    config.adopted.length > 0
+      ? `adopted ${config.adopted.join(', ')}`
+      : 'adopted nothing',
+    config.dropped.length > 0
+      ? `dropped ${config.dropped.join(', ')}`
+      : 'no dead keys',
+    pinWrite.note,
+    'installed (removals disabled)',
+    // Carried into the run note, not just the dry-run plan: a component the
+    // sweep declined to adopt is a decision waiting for Justin, and a live run
+    // is the pass where it would otherwise never be mentioned (dchjw.19).
+    ...config.notAdopted.map(noProvenanceLine),
+  ];
+  return {
+    note: notes.join(' · '),
+    ok: true,
+    ...(config.adopted.length > 0
+      ? {summaryNote: `adopted ${config.adopted.length} component(s)`}
+      : {}),
+  };
+}
 
 export function runSweepUpdate(worktree: string): PayloadOutcome {
   // dchjw.15 F2: the worktree's OWN binary, by path. `bun run justin-sdk` here
@@ -2238,6 +2115,126 @@ export function runSweepUpdate(worktree: string): PayloadOutcome {
   // written, normalized, or deliberately skipped.
   return {note: 'components re-applied', ok: true};
 }
+
+/**
+ * Apply `payload` to an already-hydrated worktree. Exported because this is
+ * the one step `--component` changes, so it is also the step whose pin
+ * neutrality has to be provable against a fixture repo without standing up
+ * the whole sweep (hydration, the doctor/signal subprocesses, git plumbing).
+ */
+export async function applySweepPayload(
+  worktree: string,
+  payload: SweepPayload,
+  /**
+   * Injection points for the `install` payload, so the fixture test can run the
+   * REAL code path offline: `pin` stands in for the published tag (a `file:`
+   * spec resolves without a registry) and `sdkRepoUrl` for the remote the tag
+   * is verified against (a local bare repo is a real remote to git).
+   */
+  options: {pin?: string; sdkRepoUrl?: string} = {},
+): Promise<PayloadOutcome> {
+  if (payload.mode === 'install') {
+    return await applyInstallSweepPayload(worktree, options);
+  }
+  if (payload.mode === 'component') {
+    // D11: run the orchestrator's OWN component code in-process. The
+    // alternative — `bun run justin-sdk update --component` —
+    // resolves the TARGET's pinned SDK, so it would fail against every repo
+    // until each pin was bumped once, which is the exact coupling this flag
+    // exists to break.
+    const before = readPinSnapshot(worktree);
+    let exitCode: number;
+    try {
+      exitCode = await runComponentByName(payload.component, {
+        force: false,
+        noCommit: true,
+        projectRoot: worktree,
+        quiet: true,
+      });
+    } catch (error) {
+      return {
+        detail: `component ${payload.component} threw: ${
+          error instanceof Error ? error.message : String(error)
+        } — worktree left for inspection`,
+        ok: false,
+      };
+    }
+    // Restore even on failure: a half-applied component must not leave a
+    // moved pin behind in the worktree an operator is about to inspect.
+    const restored = restorePinSnapshot(worktree, before);
+    if (exitCode !== 0) {
+      return {
+        detail: `component ${payload.component} failed (exit ${exitCode}) — worktree left for inspection`,
+        ok: false,
+      };
+    }
+    return {
+      note:
+        `applied ${payload.component}` +
+        (restored.length > 0
+          ? ` (pin held: ${restored.join(', ')})`
+          : ' (pin untouched)'),
+      ok: true,
+    };
+  }
+
+  // --- Full payload: pin + update ------------------------------------------
+  // The SWEEP pins the target, deterministically, to ITS OWN version — it IS
+  // the latest SDK. Learned live on the first sweep run (raycast-j-recent,
+  // pinned 0.6.1-era): delegating the bump to the TARGET's `justin-sdk update`
+  // self-update means trusting every ancient self-update code path in the
+  // fleet, and 0.6.1's silently failed to move the pin at all. Pin first,
+  // then run the NEW code with --no-self-update — no gh tag query, no old
+  // code trusted, fleet version === orchestrator version by construction.
+  // The pin is written with the repo's OWN package manager (third live-sweep
+  // finding: raycast-j-recent is an npm repo — Raycast tooling — and `bun
+  // add` there migrated package-lock.json and died in a resolver loop).
+  // Mixing managers is exactly the class of nondeterminism this script
+  // exists to avoid.
+  const sdkVersion = getSdkVersion();
+  if (sdkVersion == null) {
+    return {
+      detail:
+        'the running SDK could not read its own package.json, so it cannot pin the fleet to itself — refusing rather than writing an unresolvable ref (D4, critical rule 6)',
+      ok: false,
+    };
+  }
+  const pinWrite = writeSdkPin(
+    worktree,
+    `github:justinhaaheim/justin-sdk#v${sdkVersion}`,
+  );
+  if (!pinWrite.ok) return pinWrite;
+  const update = runSweepUpdate(worktree);
+  if (!update.ok) return update;
+  return {
+    ...pinWrite,
+    note: `${pinWrite.note} + re-applied components`,
+  };
+}
+
+/**
+ * `justin-sdk update` inside the worktree — the second half of the full
+ * payload, shared by the pinned and the workspace-satisfied paths so the
+ * skip cannot accidentally skip the component re-apply too.
+ */
+/**
+ * The exact flags the sweep gives `update`.
+ *
+ * `--allow-dirty` because the tree IS dirty by design at this point: the
+ * sweep's own pin bump is sitting uncommitted (fourth live-sweep finding —
+ * update's dirty guard correctly refused). The sweep makes the one commit
+ * itself after the gates.
+ *
+ * A NAMED CONSTANT so a test can read the whole argv the fleet path runs and
+ * assert what is NOT in it — nothing that removes (dchjw.17 F2). An argv built
+ * inline is only assertable by spawning twelve repos' worth of sweep.
+ */
+export const SWEEP_UPDATE_ARGS = [
+  'update',
+  '--no-self-update',
+  '--allow-dirty',
+  '--quiet',
+] as const;
 
 // ---------------------------------------------------------------------------
 // The ratchet gate — regression, not absolute health (home-base-ckc4 F3)
@@ -2322,9 +2319,9 @@ export function measureBaseline(
 
 interface SweepContext {
   dryRun: boolean;
-  payload: SweepPayload;
   /** Where a red step's evidence goes now that the worktree does not survive. */
   log: SweepRunLog;
+  payload: SweepPayload;
 }
 
 /**
@@ -2796,19 +2793,19 @@ async function sweepOneRepo(
 // ---------------------------------------------------------------------------
 
 export interface SweepOptions {
-  dryRun?: boolean;
-  /** Explicit repo paths — overrides discovery entirely when non-empty. */
-  repos?: string[];
-  /** Discovery root. Default ~/Dev. */
-  root?: string;
   /**
    * Scope the payload to ONE component (short or `-setup` name) and leave the
    * SDK pin alone. Unknown name = the whole run refuses, before any repo is
    * touched. Default (absent) = the historical pin-bump-and-re-apply-all sweep.
    */
   component?: string;
+  dryRun?: boolean;
   /** Where the run's failure log goes. Default SWEEP_LOG_DIR. */
   logDir?: string;
+  /** Explicit repo paths — overrides discovery entirely when non-empty. */
+  repos?: string[];
+  /** Discovery root. Default ~/Dev. */
+  root?: string;
 }
 
 export async function runSweep(options: SweepOptions = {}): Promise<number> {

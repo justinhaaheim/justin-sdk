@@ -24,8 +24,8 @@ import {execFileSync} from 'child_process';
 import {writeFileSync} from 'fs';
 import {join, resolve} from 'path';
 
-import {createSandbox} from './sandbox';
 import {git} from './git-fixtures';
+import {createSandbox} from './sandbox';
 
 const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
 const ESC = String.fromCharCode(27);

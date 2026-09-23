@@ -33,9 +33,9 @@
  * "bd unreachable" path is exercised for real.
  */
 
+import {mkdirSync, readdirSync, rmSync, statSync, writeFileSync} from 'fs';
 import {homedir} from 'os';
 import {join} from 'path';
-import {mkdirSync, readdirSync, rmSync, statSync, writeFileSync} from 'fs';
 
 import {resolveThreadConfig} from './config';
 
@@ -117,8 +117,8 @@ export function threadsBeadsDir(env: EnvLike = process.env): string {
 export type WriteProbe =
   | {kind: 'writable'; path: string}
   | {kind: 'missing'; path: string}
-  | {kind: 'denied'; path: string; error: string}
-  | {kind: 'failed'; path: string; error: string};
+  | {error: string; kind: 'denied'; path: string}
+  | {error: string; kind: 'failed'; path: string};
 
 /** True for the errnos the Claude Code sandbox raises when it refuses a write. */
 function isDenial(error: unknown): boolean {

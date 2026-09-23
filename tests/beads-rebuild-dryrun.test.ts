@@ -62,14 +62,18 @@ function brVersion(bin: string): string | null {
 /** The X.Y.Z triple out of a `br --version` line, or null when it does not look like one. */
 function brSemver(bin: string): [number, number, number] | null {
   const match = /(\d+)\.(\d+)\.(\d+)/.exec(brVersion(bin) ?? '');
-  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+  return match != null
+    ? [Number(match[1]), Number(match[2]), Number(match[3])]
+    : null;
 }
 
 function isNewer(
   a: [number, number, number],
   b: [number, number, number],
 ): boolean {
-  for (let i = 0; i < 3; i++) {
+  // Literal indices: a tuple read with a plain `number` is `number |
+  // undefined`, while `0 | 1 | 2` reads the three slots the type guarantees.
+  for (const i of [0, 1, 2] as const) {
     if (a[i] !== b[i]) return a[i] > b[i];
   }
   return false;
@@ -156,10 +160,10 @@ interface FixtureIds {
   alpha: string;
   /** One comment, one label. */
   beta: string;
-  /** Depends on ALPHA. No content of its own. */
-  gamma: string;
   /** Deliberately bare: no comments, dependencies or labels, so dropping it from the JSONL loses exactly ONE thing and the count in the report stays readable. */
   delta: string;
+  /** Depends on ALPHA. No content of its own. */
+  gamma: string;
 }
 
 let ids: FixtureIds | null = null;
@@ -243,11 +247,11 @@ function workspace(): string {
  * Every JSONL record, in file order. The exporter writes one issue per line with its labels, dependencies and comments nested inside — so removing a nested entry here, and leaving the issue itself in place, is exactly the drift shape where an issue survives the rebuild and a piece of its content does not.
  */
 interface JsonlIssue {
+  [key: string]: unknown;
+  comments?: {text: string}[];
+  dependencies?: {depends_on_id: string}[];
   id: string;
   labels?: string[];
-  dependencies?: {depends_on_id: string}[];
-  comments?: {text: string}[];
-  [key: string]: unknown;
 }
 
 function readJsonl(beadsDir: string): JsonlIssue[] {
@@ -291,7 +295,7 @@ function dropJsonlIssue(beadsDir: string, id: string): void {
   writeJsonl(beadsDir, kept);
 }
 
-function captureOutput(fn: () => number): {output: string; exitCode: number} {
+function captureOutput(fn: () => number): {exitCode: number; output: string} {
   const lines: string[] = [];
   const collect =
     () =>

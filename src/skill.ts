@@ -23,9 +23,9 @@ import {resolve} from 'path';
 import {
   COMPONENT_INCLUDE_IF,
   COMPONENT_NAMES,
+  type ComponentName,
   configNameFor,
   IMPLICIT_COMPONENT,
-  type ComponentName,
 } from './component-registry';
 import {getSdkVersion, UNKNOWN_VERSION} from './sdk-identity';
 
@@ -46,10 +46,10 @@ const COMPONENT_BLURBS: Record<ComponentName, string> = {
   gitignore: 'The full baseline .gitignore.',
   husky: 'Git hooks (pre-commit → lint-staged).',
   prettier: 'Shared Prettier config + .prettierignore.',
+  'thread-hooks':
+    'SessionStart hook (startup|resume) running `thread start`, which creates this session’s thread bead in ~/Dev/threads up front so a session that never reaches a status report is still on the board. INERT until BOTH componentConfig.thread.enabled and .startOnSessionStart are true — set them in the USER file; this installer writes no componentConfig block, because a project-level value would outrank it. Also UserPromptSubmit + Stop hooks running `thread capture`, which log every prompt and every Claude yield to ~/.local/state/justin-threads/messages/<sessionId>.jsonl and keep the thread bead’s last messages current (componentConfig.thread.capture, default ON once .enabled is true), and a Stop hook running `thread stop-check` (armed by .enforce).',
   'time-check':
     'UserPromptSubmit hook stamping the wall-clock into the transcript after a long gap or on a new working day. Config: componentConfig["time-check"].',
-  'thread-hooks':
-    'SessionStart hook (startup|resume) running `thread start`, which creates this session’s thread bead in ~/Dev/threads up front so a session that never reaches a status report is still on the board. INERT until BOTH componentConfig.thread.enabled and .startOnSessionStart are true — set them in the USER file; this installer writes no componentConfig block, because a project-level value would outrank it.',
   tsconfig: 'Shared TypeScript config.',
   'usage-check':
     'UserPromptSubmit + PostToolBatch hook telling the session how many tokens of its OWN context it has used — NOT subscription quota — once per setpoint, every 100k tokens by default. PostToolBatch is what reaches an autonomous session mid-turn. The wrap-up directive is experimental and OFF unless the project sets a numeric wrapUpAt. Config: componentConfig["usage-check"].',
@@ -67,7 +67,7 @@ function captureCommandList(): string {
     // than on the shape of a command line, which wraps unpredictably when
     // stdout is a pipe rather than a TTY.
     const lines = help.split('\n');
-    const start = lines.findIndex((l) => /^Commands:/.test(l));
+    const start = lines.findIndex((l) => l.startsWith('Commands:'));
     if (start === -1) return help.trim();
     const out: string[] = [];
     for (let i = start + 1; i < lines.length; i += 1) {

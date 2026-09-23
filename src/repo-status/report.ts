@@ -15,23 +15,32 @@
  * Part of home-base-qyu1.1 / qyu1.4.
  */
 
-import {buildCoreInventory} from './core';
+import type {
+  BranchDivergence,
+  EnumerationFailure,
+  FilterSummary,
+  HiddenTip,
+  WorktreeEntry,
+} from './types';
+
 import {
-  countUnmergedByPatchId,
-  proveContentOnBaseline,
   type ArchiveMirror,
   type CommitVerdict,
+  countUnmergedByPatchId,
+  proveContentOnBaseline,
 } from './content';
+import {buildCoreInventory} from './core';
 import {decideDisposition, type Disposition} from './disposition';
-import {readFetchAge, type FetchAge} from './fetch-age';
+import {type FetchAge, readFetchAge} from './fetch-age';
+import {type LastWork, readLastWork} from './last-work';
+import {type MergePreview, previewMerge} from './merge-preview';
 import {describeMergeShape, type MergeShape} from './merge-shape';
-import {previewMerge, type MergePreview} from './merge-preview';
 import {
   buildOverlaps,
-  OVERLAPS_NOT_RUN,
-  readChangedFiles,
   type ChangedFileSet,
   type OverlapReport,
+  OVERLAPS_NOT_RUN,
+  readChangedFiles,
 } from './overlap';
 import {
   EMPTY_PR_INDEX,
@@ -44,21 +53,12 @@ import {
   EMPTY_SUBMODULE_INVENTORY,
   type SubmoduleInventory,
 } from './submodules';
-import {readLastWork, type LastWork} from './last-work';
 import {
   readUpstreamDivergence,
   readWorktreeState,
   readWorktreeStates,
   type WorktreeState,
 } from './worktree-state';
-
-import type {
-  BranchDivergence,
-  EnumerationFailure,
-  FilterSummary,
-  HiddenTip,
-  WorktreeEntry,
-} from './types';
 
 /**
  * What the branches the ledger HIDES actually hold (home-base-qyu1.33.9, D4).
@@ -101,22 +101,14 @@ export function measureHiddenUnmerged(
 }
 
 export interface PrSummary {
+  baseRefName: string;
+  isDraft: boolean;
   number: number;
   state: string;
-  isDraft: boolean;
-  baseRefName: string;
   url: string;
 }
 
 export interface BranchRow {
-  name: string;
-  isRemoteOnly: boolean;
-  /**
-   * The tip commit. Carried through from the core inventory so a plan can PIN
-   * the exact commit it proved rather than re-resolving a ref later and
-   * silently acting on whatever it has become by then.
-   */
-  tipSha: string;
   /**
    * Kept because it is the standard metric and reads fine — but see `why`.
    *
@@ -133,26 +125,8 @@ export interface BranchRow {
    * a fact `mergeShape` and `why` already carry.
    */
   ahead: number | null;
+  archiveMirror: ArchiveMirror | null;
   behind: number | null;
-  /**
-   * What those two numbers already prove about merging this branch into the
-   * baseline: fast-forward, real merge commit, or nothing to do.
-   *
-   * Always present, on every row including `merged` and `mirrored` ones. It is a
-   * sha-reachability fact, orthogonal to the content-based `disposition`, and
-   * the rows where the two disagree are the informative ones — a squash-merged
-   * branch is `merged` yet cannot be fast-forwarded. Derived arithmetically from
-   * `ahead`/`behind`; it costs no git invocation, and reports `unknown` when
-   * those two numbers do not exist. See `merge-shape.ts`.
-   */
-  mergeShape: MergeShape;
-  /**
-   * Whether the merge `mergeShape` describes would actually APPLY, and which
-   * files break if not. Null when there was nothing to preview — no unique
-   * commits, an unmeasured divergence, or the enrichment switched off — which
-   * is a different statement from `kind: 'clean'`. See `merge-preview.ts`.
-   */
-  mergePreview: MergePreview | null;
   /**
    * How many files this branch changed relative to its merge base with the
    * baseline — the cheapest available proxy for how big a merge this is. Null
@@ -160,6 +134,12 @@ export interface BranchRow {
    * only in the `branch` deep-dive.
    */
   changedFileCount: number | null;
+  /** Same: the full changed-file list is deep-dive detail, not ledger material. */
+  changedFiles?: string[];
+  /** Populated only by the `branch` deep-dive, which is where detail belongs. */
+  commits?: CommitVerdict[];
+  disposition: Disposition;
+  isRemoteOnly: boolean;
   lastCommitDate: string;
   /**
    * The newest commit the branch has that the baseline does not, EXCLUDING
@@ -176,6 +156,40 @@ export interface BranchRow {
    * Null when the branch has no unique commits, or when it was not computed.
    */
   lastWork: {date: string; sha: string; subject: string} | null;
+  /**
+   * Whether the merge `mergeShape` describes would actually APPLY, and which
+   * files break if not. Null when there was nothing to preview — no unique
+   * commits, an unmeasured divergence, or the enrichment switched off — which
+   * is a different statement from `kind: 'clean'`. See `merge-preview.ts`.
+   */
+  mergePreview: MergePreview | null;
+  /**
+   * What those two numbers already prove about merging this branch into the
+   * baseline: fast-forward, real merge commit, or nothing to do.
+   *
+   * Always present, on every row including `merged` and `mirrored` ones. It is a
+   * sha-reachability fact, orthogonal to the content-based `disposition`, and
+   * the rows where the two disagree are the informative ones — a squash-merged
+   * branch is `merged` yet cannot be fast-forwarded. Derived arithmetically from
+   * `ahead`/`behind`; it costs no git invocation, and reports `unknown` when
+   * those two numbers do not exist. See `merge-shape.ts`.
+   */
+  mergeShape: MergeShape;
+  name: string;
+  pr: PrSummary | null;
+  provenSafe: boolean;
+  /**
+   * Where else this branch exists. Null means NO remote has it — the branch is
+   * on this disk only, and losing the disk loses the work.
+   */
+  remote: {inSync: boolean; ref: string; sha: string} | null;
+  /**
+   * The tip commit. Carried through from the core inventory so a plan can PIN
+   * the exact commit it proved rather than re-resolving a ref later and
+   * silently acting on whatever it has become by then.
+   */
+  tipSha: string;
+  why: string;
   worktree: string | null;
   /**
    * Uncommitted work in this branch's checkout. Null when the branch has no
@@ -186,29 +200,15 @@ export interface BranchRow {
    * without looking at one.
    */
   worktreeState: WorktreeState | null;
-  /**
-   * Where else this branch exists. Null means NO remote has it — the branch is
-   * on this disk only, and losing the disk loses the work.
-   */
-  remote: {inSync: boolean; ref: string; sha: string} | null;
-  disposition: Disposition;
-  why: string;
-  provenSafe: boolean;
-  pr: PrSummary | null;
-  archiveMirror: ArchiveMirror | null;
-  /** Populated only by the `branch` deep-dive, which is where detail belongs. */
-  commits?: CommitVerdict[];
-  /** Same: the full changed-file list is deep-dive detail, not ledger material. */
-  changedFiles?: string[];
 }
 
 export interface RepoStatusSummary {
   branches: number;
   merged: number;
   mirrored: number;
-  review: number;
   needsJudgment: number;
   provenSafe: number;
+  review: number;
 }
 
 /**
@@ -230,10 +230,35 @@ export interface RepoStatusSummary {
  * reader noticing an absent key.
  */
 export interface RepoStatusReport {
+  /** Null when `git for-each-ref` failed — NOT the same as "no branches". */
+  branches: BranchRow[] | null;
+  enrichments: {
+    content: boolean;
+    mergePreview: boolean;
+    overlaps: boolean;
+    prs: boolean;
+    prsUnavailableReason: string | null;
+    submodules: boolean;
+    /**
+     * Whether working trees were inspected. False means every "nothing to lose"
+     * reading in this report is about COMMITS only, which the renderer has to
+     * say rather than let the reader assume.
+     */
+    worktreeState: boolean;
+  };
+  enumerationFailures?: EnumerationFailure[];
+  /**
+   * What the walk DROPPED before `branches` was built. Always present, so a
+   * short ledger can never be mistaken for a small repo (home-base-qyu1.33.1).
+   */
+  filtered: FilterSummary;
+  /**
+   * Which of the branches above are in each other's way. Every count is null
+   * when the enrichment did not run, so "no overlaps" and "did not look" stay
+   * distinguishable.
+   */
+  overlaps: OverlapReport;
   repo: {
-    root: string;
-    currentBranch: string | null;
-    defaultBranch: string | null;
     /** The baseline's NAME — what every sentence in this report calls it. */
     baselineRef: string;
     /**
@@ -248,12 +273,8 @@ export interface RepoStatusReport {
      * output said so.
      */
     baselineSha: string;
-    /**
-     * When this checkout last fetched — the unstated precondition under every
-     * `N behind origin/*` figure in this report. `origin/main` is a local ref,
-     * so "0 behind" means "0 behind what this disk last downloaded".
-     */
-    remoteRefs: FetchAge;
+    currentBranch: string | null;
+    defaultBranch: string | null;
     /**
      * The state of the checkout the caller is standing in.
      *
@@ -268,63 +289,25 @@ export interface RepoStatusReport {
       /** Divergence from this branch's upstream. Null when there is none. */
       upstream: {ahead: number; behind: number; ref: string} | null;
     } | null;
+    /**
+     * When this checkout last fetched — the unstated precondition under every
+     * `N behind origin/*` figure in this report. `origin/main` is a local ref,
+     * so "0 behind" means "0 behind what this disk last downloaded".
+     */
+    remoteRefs: FetchAge;
+    root: string;
   };
+  submodules: SubmoduleInventory;
   /** Null when the branch listing failed — there is nothing to summarise. */
   summary: RepoStatusSummary | null;
-  enrichments: {
-    content: boolean;
-    prs: boolean;
-    prsUnavailableReason: string | null;
-    submodules: boolean;
-    mergePreview: boolean;
-    overlaps: boolean;
-    /**
-     * Whether working trees were inspected. False means every "nothing to lose"
-     * reading in this report is about COMMITS only, which the renderer has to
-     * say rather than let the reader assume.
-     */
-    worktreeState: boolean;
-  };
-  /**
-   * What the walk DROPPED before `branches` was built. Always present, so a
-   * short ledger can never be mistaken for a small repo (home-base-qyu1.33.1).
-   */
-  filtered: FilterSummary;
-  /**
-   * Which of the branches above are in each other's way. Every count is null
-   * when the enrichment did not run, so "no overlaps" and "did not look" stay
-   * distinguishable.
-   */
-  overlaps: OverlapReport;
-  enumerationFailures?: EnumerationFailure[];
   /** Null when `git worktree list` failed — NOT the same as "no worktrees". */
   worktrees: WorktreeEntry[] | null;
-  /** Null when `git for-each-ref` failed — NOT the same as "no branches". */
-  branches: BranchRow[] | null;
-  submodules: SubmoduleInventory;
 }
 
 export interface ReportOptions {
-  cwd: string;
   /** Run the per-commit content proofs. Local but heavy. */
   content?: boolean;
-  /** Query GitHub for PR state. Network. Independent of `content`. */
-  prs?: boolean;
-  /**
-   * Inspect submodule gitlink state. Local and cheap, and independent of both
-   * `content` and `prs`. The `prime` session-start path never calls
-   * `buildReport` at all, so this costs it nothing whatever it is set to.
-   */
-  submodules?: boolean;
-  /**
-   * Open EVERY worktree's submodule object store rather than just the current
-   * one. Off by default because it is the only part that reaches outside the
-   * worktree being inspected; on, it answers the work-at-risk question per
-   * store, which is what catches commits that `git worktree remove` would eat.
-   */
-  submoduleStores?: boolean;
-  /** Age gate; null keeps every branch however old (what reconcile wants). */
-  sinceDays?: number | null;
+  cwd: string;
   /**
    * Drop `archive/*` mirrors from the ledger. They are finished work a previous
    * reconcile already dealt with, and in a repo that has been reconciled a few
@@ -337,6 +320,8 @@ export interface ReportOptions {
    * (~0.1s), answering whether the merge applies cleanly.
    */
   mergePreview?: boolean;
+  /** Restrict to one branch (the `branch <name>` deep-dive). */
+  only?: string;
   /**
    * Read each candidate's changed-file set and cross-compare them. Populates
    * `changedFileCount` on every row with unique work AND the `overlaps` section.
@@ -345,13 +330,28 @@ export interface ReportOptions {
   overlaps?: boolean;
   /** Max pairs to merge-check after the shared-file screen. */
   pairCap?: number;
+  /** Query GitHub for PR state. Network. Independent of `content`. */
+  prs?: boolean;
+  /** Age gate; null keeps every branch however old (what reconcile wants). */
+  sinceDays?: number | null;
+  /**
+   * Open EVERY worktree's submodule object store rather than just the current
+   * one. Off by default because it is the only part that reaches outside the
+   * worktree being inspected; on, it answers the work-at-risk question per
+   * store, which is what catches commits that `git worktree remove` would eat.
+   */
+  submoduleStores?: boolean;
+  /**
+   * Inspect submodule gitlink state. Local and cheap, and independent of both
+   * `content` and `prs`. The `prime` session-start path never calls
+   * `buildReport` at all, so this costs it nothing whatever it is set to.
+   */
+  submodules?: boolean;
   /**
    * Run `git status` in every checkout, so "nothing to lose" is a claim about a
    * working tree rather than only about commits. One call per worktree.
    */
   worktreeState?: boolean;
-  /** Restrict to one branch (the `branch <name>` deep-dive). */
-  only?: string;
 }
 
 const DISPOSITION_ORDER: Disposition[] = [
@@ -360,6 +360,104 @@ const DISPOSITION_ORDER: Disposition[] = [
   'mirrored',
   'merged',
 ];
+
+function buildRow(
+  branch: BranchDivergence,
+  /** The baseline's NAME: every sentence on this row. */
+  baselineRef: string,
+  /** The baseline's pinned COMMIT: every git walk under this row. */
+  baselineSha: string,
+  cwd: string,
+  ctx: {
+    changed: ChangedFileSet | null;
+    content: boolean;
+    lastWork: LastWork | null;
+    mergePreview: boolean;
+    only: string | undefined;
+    prIndex: PrIndex;
+    submodulePaths: string[];
+    worktreeState: WorktreeState | null;
+  },
+): BranchRow {
+  // Skip the expensive proof when the branch has nothing unique — there is
+  // nothing for it to prove, and on a large repo that is most of the work.
+  //
+  // Skip it too when the divergence is UNKNOWN, which is a different reason:
+  // the proof enumerates "commits the baseline lacks" by walking the same
+  // history with the same git that just failed to walk it, so whatever it
+  // returned would describe an unknown subset of the branch. The disposition
+  // engine refuses such a row before reading any proof anyway (qyu1.21); not
+  // computing one keeps the row from carrying evidence nobody may rely on.
+  const proof =
+    ctx.content && branch.divergence != null && branch.divergence.ahead > 0
+      ? proveContentOnBaseline(branch.name, baselineRef, cwd, {
+          baseline: baselineSha,
+          branch: branch.tipSha,
+        })
+      : null;
+
+  const pr = prForBranch(ctx.prIndex, branch.name);
+  const {disposition, provenSafe, why} = decideDisposition({
+    baselineRef,
+    branch,
+    pr,
+    prDataAvailable: ctx.prIndex.available,
+    proof,
+  });
+
+  // Same gate as the proof, for the same two reasons: a branch with no unique
+  // commits has nothing to merge, and one with an unmeasured divergence would
+  // be previewed by the same git that just failed to walk it. `null` here means
+  // NOT PREVIEWED, which is deliberately not expressible as `kind: 'clean'`.
+  const preview =
+    ctx.mergePreview && branch.divergence != null && branch.divergence.ahead > 0
+      ? previewMerge(baselineRef, branch.name, cwd, {
+          pins: {baseline: baselineSha, branch: branch.tipSha},
+          submodulePaths: ctx.submodulePaths,
+        })
+      : null;
+
+  return {
+    ahead: branch.divergence?.ahead ?? null,
+    archiveMirror: proof?.archiveMirror ?? null,
+    behind: branch.divergence?.behind ?? null,
+    // A branch with no unique commits has no unique footprint either: its merge
+    // base with the baseline IS its tip, so the diff is empty. Deriving the 0
+    // rather than leaving the cell blank costs no git call and keeps "measured
+    // zero" distinguishable from "not measured", which a blank is not.
+    changedFileCount:
+      ctx.changed?.count ?? (branch.divergence?.ahead === 0 ? 0 : null),
+    ...(ctx.only != null && ctx.changed?.files != null
+      ? {changedFiles: ctx.changed.files}
+      : {}),
+    ...(ctx.only != null && proof != null
+      ? {commits: proof.uniqueCommits}
+      : {}),
+    disposition,
+    isRemoteOnly: branch.isRemoteOnly,
+    lastCommitDate: branch.lastCommitDate,
+    lastWork: ctx.lastWork,
+    mergePreview: preview,
+    mergeShape: describeMergeShape(branch.divergence, baselineRef),
+    name: branch.name,
+    pr:
+      pr != null
+        ? {
+            baseRefName: pr.baseRefName,
+            isDraft: pr.isDraft,
+            number: pr.number,
+            state: pr.state,
+            url: pr.url,
+          }
+        : null,
+    provenSafe,
+    remote: branch.remote,
+    tipSha: branch.tipSha,
+    why,
+    worktree: branch.worktreePath,
+    worktreeState: ctx.worktreeState,
+  };
+}
 
 export function buildReport(opts: ReportOptions): RepoStatusReport | null {
   const {
@@ -494,7 +592,7 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
             )
             .filter((r) => changedByBranch.has(r.name))
             .map((r) => ({
-              changed: changedByBranch.get(r.name) as ChangedFileSet,
+              changed: changedByBranch.get(r.name)!,
               lastCommitDate: r.lastCommitDate,
               name: r.name,
             })),
@@ -572,6 +670,7 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
       remoteRefs,
       root: inventory.repoRoot,
     },
+    submodules: submoduleInventory,
     summary:
       rows == null
         ? null
@@ -585,105 +684,6 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
             provenSafe: rows.filter((r) => r.provenSafe).length,
             review: rows.filter((r) => r.disposition === 'review').length,
           },
-    submodules: submoduleInventory,
     worktrees: inventory.worktrees,
-  };
-}
-
-function buildRow(
-  branch: BranchDivergence,
-  /** The baseline's NAME: every sentence on this row. */
-  baselineRef: string,
-  /** The baseline's pinned COMMIT: every git walk under this row. */
-  baselineSha: string,
-  cwd: string,
-  ctx: {
-    changed: ChangedFileSet | null;
-    content: boolean;
-    lastWork: LastWork | null;
-    mergePreview: boolean;
-    only: string | undefined;
-    prIndex: PrIndex;
-    submodulePaths: string[];
-    worktreeState: WorktreeState | null;
-  },
-): BranchRow {
-  // Skip the expensive proof when the branch has nothing unique — there is
-  // nothing for it to prove, and on a large repo that is most of the work.
-  //
-  // Skip it too when the divergence is UNKNOWN, which is a different reason:
-  // the proof enumerates "commits the baseline lacks" by walking the same
-  // history with the same git that just failed to walk it, so whatever it
-  // returned would describe an unknown subset of the branch. The disposition
-  // engine refuses such a row before reading any proof anyway (qyu1.21); not
-  // computing one keeps the row from carrying evidence nobody may rely on.
-  const proof =
-    ctx.content && branch.divergence != null && branch.divergence.ahead > 0
-      ? proveContentOnBaseline(branch.name, baselineRef, cwd, {
-          baseline: baselineSha,
-          branch: branch.tipSha,
-        })
-      : null;
-
-  const pr = prForBranch(ctx.prIndex, branch.name);
-  const {disposition, provenSafe, why} = decideDisposition({
-    baselineRef,
-    branch,
-    pr,
-    prDataAvailable: ctx.prIndex.available,
-    proof,
-  });
-
-  // Same gate as the proof, for the same two reasons: a branch with no unique
-  // commits has nothing to merge, and one with an unmeasured divergence would
-  // be previewed by the same git that just failed to walk it. `null` here means
-  // NOT PREVIEWED, which is deliberately not expressible as `kind: 'clean'`.
-  const preview =
-    ctx.mergePreview && branch.divergence != null && branch.divergence.ahead > 0
-      ? previewMerge(baselineRef, branch.name, cwd, {
-          pins: {baseline: baselineSha, branch: branch.tipSha},
-          submodulePaths: ctx.submodulePaths,
-        })
-      : null;
-
-  return {
-    ahead: branch.divergence?.ahead ?? null,
-    archiveMirror: proof?.archiveMirror ?? null,
-    behind: branch.divergence?.behind ?? null,
-    // A branch with no unique commits has no unique footprint either: its merge
-    // base with the baseline IS its tip, so the diff is empty. Deriving the 0
-    // rather than leaving the cell blank costs no git call and keeps "measured
-    // zero" distinguishable from "not measured", which a blank is not.
-    changedFileCount:
-      ctx.changed?.count ?? (branch.divergence?.ahead === 0 ? 0 : null),
-    ...(ctx.only != null && ctx.changed?.files != null
-      ? {changedFiles: ctx.changed.files}
-      : {}),
-    ...(ctx.only != null && proof != null
-      ? {commits: proof.uniqueCommits}
-      : {}),
-    disposition,
-    isRemoteOnly: branch.isRemoteOnly,
-    lastCommitDate: branch.lastCommitDate,
-    lastWork: ctx.lastWork,
-    mergePreview: preview,
-    mergeShape: describeMergeShape(branch.divergence, baselineRef),
-    name: branch.name,
-    pr:
-      pr != null
-        ? {
-            baseRefName: pr.baseRefName,
-            isDraft: pr.isDraft,
-            number: pr.number,
-            state: pr.state,
-            url: pr.url,
-          }
-        : null,
-    provenSafe,
-    remote: branch.remote,
-    tipSha: branch.tipSha,
-    why,
-    worktree: branch.worktreePath,
-    worktreeState: ctx.worktreeState,
   };
 }

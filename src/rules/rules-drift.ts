@@ -96,26 +96,26 @@ export type RulesDriftStatus =
   | 'cannot-check';
 
 export interface RulesDriftResult {
-  status: RulesDriftStatus;
+  /** 12-char prompts sha the artifact was generated from, when stamped. */
+  artifactSha: string | null;
+  /** Absolute artifact path (known for every status except not-enrolled). */
+  file: string | null;
   /**
    * What was found, as a statement of fact with no advice in it — the advice is
    * `rulesDriftAdvice`, so both consumers word it identically.
    */
   message: string;
-  /** Absolute artifact path (known for every status except not-enrolled). */
-  file: string | null;
-  /** 12-char prompts sha the artifact was generated from, when stamped. */
-  artifactSha: string | null;
-  /** 12-char prompts-clone HEAD at check time, when the source was reached. */
-  sourceSha: string | null;
-  /** How the source was obtained — null when we never got that far. */
-  sourceRefresh: SourceRefresh | null;
   /**
    * How many rules modules this project resolves to RIGHT NOW. null whenever the
    * source was never assembled (not-enrolled, missing, locally-modified,
    * cannot-check) — "not measured" is not a count of zero.
    */
   moduleCount: number | null;
+  /** How the source was obtained — null when we never got that far. */
+  sourceRefresh: SourceRefresh | null;
+  /** 12-char prompts-clone HEAD at check time, when the source was reached. */
+  sourceSha: string | null;
+  status: RulesDriftStatus;
 }
 
 export interface RulesDriftOptions {
@@ -185,33 +185,6 @@ function result(
     status,
     ...extra,
   };
-}
-
-/**
- * Decide whether this repo's committed rules artifact is the canonical one.
- *
- * Reads only. The one thing it may write is OUTSIDE the repo: resolving the
- * prompts source can refresh the managed clone under ~/.config/justin-sdk (D9 —
- * the session-start path never writes inside the project).
- */
-export function checkRulesDrift(
-  projectRoot: string,
-  options: RulesDriftOptions = {},
-): RulesDriftResult {
-  try {
-    return check(projectRoot, options);
-  } catch (error) {
-    // Total by contract: an unexpected throw here would take down a session's
-    // whole prime injection, and "the check crashed" is a cannot-check — never a
-    // clean bill of health.
-    return result(
-      'cannot-check',
-      `the rules staleness check failed unexpectedly (${
-        error instanceof Error ? error.message : String(error)
-      })`,
-      {file: projectRulesFilePath(projectRoot)},
-    );
-  }
 }
 
 function check(
@@ -421,4 +394,31 @@ function check(
     }, ${why} — this session loaded the OLD rules`,
     withSource,
   );
+}
+
+/**
+ * Decide whether this repo's committed rules artifact is the canonical one.
+ *
+ * Reads only. The one thing it may write is OUTSIDE the repo: resolving the
+ * prompts source can refresh the managed clone under ~/.config/justin-sdk (D9 —
+ * the session-start path never writes inside the project).
+ */
+export function checkRulesDrift(
+  projectRoot: string,
+  options: RulesDriftOptions = {},
+): RulesDriftResult {
+  try {
+    return check(projectRoot, options);
+  } catch (error) {
+    // Total by contract: an unexpected throw here would take down a session's
+    // whole prime injection, and "the check crashed" is a cannot-check — never a
+    // clean bill of health.
+    return result(
+      'cannot-check',
+      `the rules staleness check failed unexpectedly (${
+        error instanceof Error ? error.message : String(error)
+      })`,
+      {file: projectRulesFilePath(projectRoot)},
+    );
+  }
 }

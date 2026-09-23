@@ -5,13 +5,13 @@
  * and only run when `yes: true` is passed.
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
-import {existsSync, readFileSync} from 'fs';
+import type {CheckNode} from '../src/check-runner';
+
+import {afterEach, describe, expect, test} from 'bun:test';
+import {existsSync} from 'fs';
 import {join} from 'path';
 
-import type {CheckNode} from '../src/check-runner';
 import {runCheckTree} from '../src/check-runner';
-
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -37,7 +37,6 @@ describe('check-runner approval gating', () => {
     const nodes: CheckNode[] = [
       {
         check: {
-          label: 'MARKER',
           fn: () => {
             checked = true;
             if (existsSync(markerFile)) return {pass: true};
@@ -48,6 +47,7 @@ describe('check-runner approval gating', () => {
               pass: false,
             };
           },
+          label: 'MARKER',
         },
       },
     ];
@@ -65,7 +65,6 @@ describe('check-runner approval gating', () => {
     const nodes: CheckNode[] = [
       {
         check: {
-          label: 'INSTALL',
           fn: () => {
             if (existsSync(markerFile)) return {pass: true};
             return {
@@ -76,6 +75,7 @@ describe('check-runner approval gating', () => {
               requiresApproval: true,
             };
           },
+          label: 'INSTALL',
         },
       },
     ];
@@ -94,7 +94,6 @@ describe('check-runner approval gating', () => {
     const nodes: CheckNode[] = [
       {
         check: {
-          label: 'INSTALL',
           fn: () => {
             if (existsSync(markerFile)) return {pass: true};
             return {
@@ -105,6 +104,7 @@ describe('check-runner approval gating', () => {
               requiresApproval: true,
             };
           },
+          label: 'INSTALL',
         },
       },
     ];
@@ -126,7 +126,6 @@ describe('check-runner approval gating', () => {
     const nodes: CheckNode[] = [
       {
         check: {
-          label: 'LOCAL',
           fn: () => {
             if (existsSync(localMarker)) return {pass: true};
             return {
@@ -136,11 +135,11 @@ describe('check-runner approval gating', () => {
               pass: false,
             };
           },
+          label: 'LOCAL',
         },
       },
       {
         check: {
-          label: 'INSTALL',
           fn: () => {
             if (existsSync(installMarker)) return {pass: true};
             return {
@@ -151,6 +150,7 @@ describe('check-runner approval gating', () => {
               requiresApproval: true,
             };
           },
+          label: 'INSTALL',
         },
       },
     ];
@@ -168,7 +168,6 @@ describe('check-runner approval gating', () => {
     const nodes: CheckNode[] = [
       {
         check: {
-          label: 'LOCAL',
           fn: () => {
             if (existsSync(localMarker)) return {pass: true};
             return {
@@ -178,11 +177,11 @@ describe('check-runner approval gating', () => {
               pass: false,
             };
           },
+          label: 'LOCAL',
         },
       },
       {
         check: {
-          label: 'INSTALL',
           fn: () => {
             if (existsSync(installMarker)) return {pass: true};
             return {
@@ -193,6 +192,7 @@ describe('check-runner approval gating', () => {
               requiresApproval: true,
             };
           },
+          label: 'INSTALL',
         },
       },
     ];

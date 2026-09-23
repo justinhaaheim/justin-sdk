@@ -55,7 +55,6 @@ import {createSandbox, type Sandbox} from './sandbox';
  */
 const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
 const SESSION_START_ARGS = [CLI, 'session-start'];
-const NOW = '2026-08-17';
 
 const sandboxes: Sandbox[] = [];
 function track(sb: Sandbox): Sandbox {
@@ -87,8 +86,8 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 const RULES_FILES: Record<string, string> = {
-  'src/rules/index.md': ['@./alpha.md', '@./omega.md'].join('\n\n'),
   'src/rules/alpha.md': '# Alpha\n\nALPHA_RULE',
+  'src/rules/index.md': ['@./alpha.md', '@./omega.md'].join('\n\n'),
   'src/rules/omega.md': '# Omega\n\nOMEGA_RULE',
 };
 
@@ -161,10 +160,10 @@ function writeArtifact(repo: string, promptsDir: string): string {
 }
 
 interface HookRun {
+  additionalContext: string;
   status: number | null;
   stderr: string;
   systemMessage: string;
-  additionalContext: string;
 }
 
 /**
@@ -251,7 +250,7 @@ describe('the repo-rules segment of the systemMessage', () => {
     expect(run.systemMessage).toContain('repo rules ⚠️ STALE');
     const detail = run.systemMessage
       .split('\n')
-      .find((line) => line.startsWith('   → ')) as string;
+      .find((line) => line.startsWith('   → '))!;
     expect(detail).toContain('rules-diff');
     expect(detail).toContain('rules-update');
     expect(detail.indexOf('rules-diff')).toBeLessThan(
@@ -268,7 +267,7 @@ describe('the repo-rules segment of the systemMessage', () => {
   });
 
   test('missing: names rules-update', () => {
-    const dir = promptsFixture();
+    promptsFixture();
     const repo = projectFixture();
 
     const run = runHook(repo);
@@ -286,7 +285,7 @@ describe('the repo-rules segment of the systemMessage', () => {
     expect(run.systemMessage).toContain('repo rules ⚠️ LOCALLY MODIFIED');
     const detail = run.systemMessage
       .split('\n')
-      .find((line) => line.startsWith('   → ')) as string;
+      .find((line) => line.startsWith('   → '))!;
     expect(detail).toContain('rules-diff');
     expect(detail).toContain('rules-update --force');
   });
@@ -313,7 +312,7 @@ describe('the repo-rules segment of the systemMessage', () => {
   });
 
   test('a repo that is not enrolled says nothing about repo rules at all', () => {
-    const dir = promptsFixture();
+    promptsFixture();
     // critical-rules is NOT among the repo's components and there is no
     // artifact — the two pieces of evidence enrolment is keyed on (dchjw.3 F2).
     const repo = projectFixture({components: ['base-setup']});
@@ -366,7 +365,7 @@ describe('the hook never writes inside the project', () => {
   });
 
   test('a MISSING artifact is not created either', () => {
-    const dir = promptsFixture();
+    promptsFixture();
     const repo = projectFixture();
 
     const run = runHook(repo);
@@ -399,13 +398,13 @@ describe('the hook never writes inside the project', () => {
  * with a bug that dropped them everywhere.
  */
 const GATED_RULES_FILES: Record<string, string> = {
+  'src/rules/alpha.md': '# Alpha\n\nALPHA_RULE',
   'src/rules/index.md': ['@./alpha.md', '@./rn-only.md', '@./omega.md'].join(
     '\n\n',
   ),
-  'src/rules/alpha.md': '# Alpha\n\nALPHA_RULE',
+  'src/rules/omega.md': '# Omega\n\nOMEGA_RULE',
   'src/rules/rn-only.md':
     '---\nincludeIf: [isReactNative]\n---\n\n# React Native\n\nRN_ONLY_RULE',
-  'src/rules/omega.md': '# Omega\n\nOMEGA_RULE',
 };
 
 function gatedPromptsFixture(): string {

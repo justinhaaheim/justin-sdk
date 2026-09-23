@@ -82,7 +82,7 @@ const FAKES: Record<string, string[]> = {
 let fakeDir: string;
 
 /** The absolute path of one fake, named as `claude` inside its own directory. */
-function fake(name: keyof typeof FAKES | string): string {
+function fake(name: keyof typeof FAKES): string {
   return join(fakeDir, name, 'claude');
 }
 

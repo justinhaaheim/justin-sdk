@@ -70,12 +70,11 @@ function stepEslintDevDeps(projectRoot: string, force: boolean): boolean {
     return false;
   }
 
-  const devDeps = ((pkg.devDependencies as
-    | Record<string, string>
-    | undefined) ?? {}) as Record<string, string>;
+  const devDeps =
+    (pkg.devDependencies as Record<string, string> | undefined) ?? {};
   let modified = false;
 
-  const targets: Array<{name: string; version: string}> = [
+  const targets: {name: string; version: string}[] = [
     {name: 'eslint', version: PINNED.eslint},
     {name: 'typescript', version: PINNED.typescript},
     {
@@ -117,7 +116,7 @@ function stepEslintDevDeps(projectRoot: string, force: boolean): boolean {
  * order and uses the FIRST one it finds, so a repo with two of them has one
  * config that silently does nothing.
  */
-export const ESLINT_CONFIG_NAMES: ReadonlyArray<string> = [
+export const ESLINT_CONFIG_NAMES: readonly string[] = [
   'eslint.config.js',
   'eslint.config.mjs',
   'eslint.config.cjs',
@@ -209,7 +208,7 @@ export const SIGNAL_SOURCE_LINT_KEY = 'signal-source:LINT';
 export const SIGNAL_SOURCE_LINT_SCRIPT =
   'eslint --report-unused-disable-directives --max-warnings 0 .';
 
-export const LINT_SCRIPTS: ReadonlyArray<{key: string; value: string}> = [
+export const LINT_SCRIPTS: readonly {key: string; value: string}[] = [
   {
     key: 'lint-base',
     value: 'eslint --report-unused-disable-directives --max-warnings 0',
@@ -240,8 +239,7 @@ function stepSignalSourceScript(projectRoot: string): boolean {
     return false;
   }
 
-  const scripts = ((pkg.scripts as Record<string, string> | undefined) ??
-    {}) as Record<string, string>;
+  const scripts = (pkg.scripts as Record<string, string> | undefined) ?? {};
 
   if (SIGNAL_SOURCE_LINT_KEY in scripts) {
     success(`${SIGNAL_SOURCE_LINT_KEY} script already present`);
@@ -275,8 +273,7 @@ function stepLintScripts(projectRoot: string): boolean {
     return false;
   }
 
-  const scripts = ((pkg.scripts as Record<string, string> | undefined) ??
-    {}) as Record<string, string>;
+  const scripts = (pkg.scripts as Record<string, string> | undefined) ?? {};
   let modified = false;
 
   for (const {key, value} of LINT_SCRIPTS) {
@@ -302,15 +299,15 @@ function stepLintScripts(projectRoot: string): boolean {
 // ---------------------------------------------------------------------------
 
 export interface EslintSetupOptions {
-  /** Project root (defaults to cwd) */
-  projectRoot?: string;
-  /** Suppress non-error output (for tests and for use from other setup commands) */
-  quiet?: boolean;
   /**
    * Force-overwrite hand-modified files (eslint.config.cjs) and pinned
    * devDependency versions when they differ from what the SDK pins.
    */
   force?: boolean;
+  /** Project root (defaults to cwd) */
+  projectRoot?: string;
+  /** Suppress non-error output (for tests and for use from other setup commands) */
+  quiet?: boolean;
   /**
    * The remote the SDK pin tag is verified against, forwarded to base-setup.
    * Tests point it at a local bare repo so the install is hermetic; production

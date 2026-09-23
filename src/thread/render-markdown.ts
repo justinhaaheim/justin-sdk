@@ -11,8 +11,19 @@
  *
  * NO COLOUR AND NO UNDERLINE, deliberately. Claude Code renders neither, so an
  * escape code here would be pasted into Justin's message as literal `[1m`.
- * Bold field names and a blank line between header groups are the whole of the
- * typography, and they survive the paste.
+ * Bold field names, one emoji per section heading, and blank lines are the
+ * whole of the typography, and they survive the paste.
+ *
+ * BLANK LINES EVERYWHERE (Justin, 2026-09-23, home-base-k0b8n.10, K11 rules 1,
+ * 5, 6): "I 100% need an empty line between every single list/bullet/ask item.
+ * And each item itself needs empty lines between the options you provide me."
+ * So there is a blank line between every field, every list item, every ask,
+ * and every line INSIDE an ask — its context, each option, its default. The
+ * options are a nested list under their numbered ask, which the chat UI renders
+ * as one. `normalizeReportText` is the one definition of that spacing: the
+ * renderer runs its own output through it, and so does every surface that
+ * shows a report stored before this change — the stored notes of an older
+ * thread come out spaced like a new one.
  *
  * WHAT CHANGED ON 2026-09-14 (Justin, after reading reports #4-#7): a glance
  * line on top; the goal, Claude's next steps and the remaining work merged into
@@ -22,11 +33,19 @@
  * PURE. Everything it prints is in the model.
  */
 
-import {sdkRun} from '../sdk-invocation';
-import {classifyReport, MISTAKE_BULLET, POINTER_PREFIX} from './report-lines';
-import {COMPACT_LAST_MESSAGE_CAP, priorityMarker} from './report-model';
-
+import type {ReportLine} from './report-lines';
 import type {ModelAsk, ReportModel} from './report-model';
+
+import {sdkRun} from '../sdk-invocation';
+import {stripOptionLabel} from './render';
+import {
+  classifyReport,
+  isRenderedReport,
+  MISTAKE_BULLET,
+  parseOptionLine,
+  POINTER_PREFIX,
+} from './report-lines';
+import {COMPACT_LAST_MESSAGE_CAP, priorityMarker} from './report-model';
 
 /**
  * The compact report's cap on the echoed last message, applied to text that has
@@ -47,12 +66,44 @@ const RULE_STOP = '🛑'.repeat(28);
 const RULE_OM = '🕉️'.repeat(29);
 const RULE_HANDOFF = '⏭️'.repeat(8);
 
+/**
+ * ONE EMOJI PER SECTION, from a fixed map (K11 rule 5). Not per line: the
+ * items keep the badges they already had (✅, ➡️, ⚠️), and nothing else.
+ *
+ * Keyed by the heading's plain label, which is also how a report stored before
+ * 2026-09-23 spells it — `normalizeReportText` looks the old heading up here and
+ * gives it its emoji, so the compactor, which finds Deviations and MUST-SEE by
+ * their exact heading, reads old and new reports the same way.
+ */
+const HEADING_EMOJI: ReadonlyMap<string, string> = new Map([
+  ['What happens next (mine)', '▶️'],
+  ['What I did', '✅'],
+  ['What I learned', '💡'],
+  ['Answers to your questions', '💬'],
+  ['Deviations from what you asked for', '⚠️'],
+  ['Discussion', '🗣️'],
+  ['Asks — everything I need from you', '🙋'],
+  ['Prior asks — closed by this report', '🗂️'],
+  ['Work product', '🛠️'],
+  ['Beads touched', '📿'],
+  ['Facts I could not measure', '❓'],
+  ['MUST-SEE — the only part you have to read', '👀'],
+]);
+
+/** `**<emoji> <label>:**` — a section heading as the markdown spells it. */
+function headingLine(label: string): string {
+  const emoji = HEADING_EMOJI.get(label);
+  return `**${emoji == null ? '' : `${emoji} `}${label}:**`;
+}
+
 /** The heading every renderer and the stored-text classifier agree on. */
-export const ASKS_HEADING = '**Asks — everything I need from you:**';
-export const DID_HEADING = '**What I did:**';
-export const WORK_PRODUCT_HEADING = '**Work product:**';
-export const BEADS_TOUCHED_HEADING = '**Beads touched:**';
-export const DEVIATIONS_HEADING = '**Deviations from what you asked for:**';
+export const ASKS_HEADING = headingLine('Asks — everything I need from you');
+export const DID_HEADING = headingLine('What I did');
+export const WORK_PRODUCT_HEADING = headingLine('Work product');
+export const BEADS_TOUCHED_HEADING = headingLine('Beads touched');
+export const DEVIATIONS_HEADING = headingLine(
+  'Deviations from what you asked for',
+);
 
 /**
  * THE ONE SPELLING OF A MISTAKE (D23).
@@ -69,6 +120,19 @@ const DEVIATION_PREFIX: Record<string, string> = {
   judgmentCall: '⚖️ Judgment call — ',
   mistake: MISTAKE_PREFIX,
 };
+
+/**
+ * `     - a. (Recommended) text` — an option as an item of a nested list under
+ * its numbered ask (K11 rule 6), its letter printed once (rule 7).
+ */
+function optionLine(option: {
+  letter: string;
+  recommended: boolean;
+  text: string;
+}): string {
+  const prefix = option.recommended ? '(Recommended) ' : '';
+  return `     - ${option.letter}. ${prefix}${stripOptionLabel(option.letter, option.text)}`;
+}
 
 function renderAsk(lines: string[], ask: ModelAsk): void {
   const marker = priorityMarker(ask.priority);
@@ -87,30 +151,10 @@ function renderAsk(lines: string[], ask: ModelAsk): void {
   // question before" is the thing that changes how Justin reads the rest of it.
   if (ask.supersedes != null) lines.push(`     ${ask.supersedes.label}`);
   if (ask.context != null) lines.push(`     Context: ${ask.context}`);
-  for (const option of ask.options) {
-    const prefix = option.recommended ? '(Recommended) ' : '';
-    lines.push(`     ${option.letter}. ${prefix}${option.text}`);
-  }
+  for (const option of ask.options) lines.push(optionLine(option));
   if (ask.fallback != null) {
     lines.push(`     If you don't answer: ${ask.fallback}`);
   }
-}
-
-/**
- * The whole report, as one markdown string. Ends without a trailing newline.
- *
- * COMPACT IS THE FULL REPORT, COMPACTED (D23). `renderMarkdown` renders the full
- * document and then runs `compactStoredReport` over it, rather than rendering a
- * second, shorter document from the same model. That is deliberate and it is the
- * only way the two can be guaranteed identical: `thread show` has the bead's
- * stored text and no model, so it MUST compact text — and if the printed compact
- * report came from a separate rendering pass, the report Justin read in his
- * terminal and the report he read in the paste could differ in ways no test
- * would notice.
- */
-export function renderMarkdown(model: ReportModel): string {
-  const full = renderFullMarkdown(model);
-  return model.full ? full : compactStoredReport(full);
 }
 
 /** The complete report — every section. What the thread bead's notes store. */
@@ -160,7 +204,7 @@ function renderFullMarkdown(model: ReportModel): string {
   lines.push('');
 
   // --- ONE LIST FOR EVERYTHING THAT IS MINE (D18) -------------------------
-  lines.push('**What happens next (mine):**');
+  lines.push(headingLine('What happens next (mine)'));
   lines.push(`- ⚽ Goal: ${model.goal}`);
   if (model.whatHappensNext.length === 0) {
     lines.push('- (nothing — this arc is done)');
@@ -173,14 +217,14 @@ function renderFullMarkdown(model: ReportModel): string {
   for (const item of model.did) lines.push(`- ✅ ${item}`);
   lines.push('');
 
-  lines.push('**What I learned:**');
+  lines.push(headingLine('What I learned'));
   if (model.learned.length === 0) lines.push('- (nothing worth recording)');
   model.learned.forEach((item, index) => {
     lines.push(`${index + 1}. ${item.text} (${item.disposition})`);
   });
   lines.push('');
 
-  lines.push('**Answers to your questions:**');
+  lines.push(headingLine('Answers to your questions'));
   if (model.answers.length === 0) lines.push('- (you asked nothing this turn)');
   model.answers.forEach((item, index) => {
     lines.push(`${index + 1}. Q: ${item.question}`);
@@ -203,7 +247,7 @@ function renderFullMarkdown(model: ReportModel): string {
   lines.push('');
 
   if (model.discussion.length > 0) {
-    lines.push('**Discussion:**');
+    lines.push(headingLine('Discussion'));
     for (const item of model.discussion) lines.push(`- ${item}`);
     lines.push('');
   }
@@ -219,7 +263,7 @@ function renderFullMarkdown(model: ReportModel): string {
   for (const ask of model.asks) renderAsk(lines, ask);
   lines.push('');
 
-  lines.push('**Prior asks — closed by this report:**');
+  lines.push(headingLine('Prior asks — closed by this report'));
   if (model.priorClosed.length === 0) lines.push('- (none closed this time)');
   for (const prior of model.priorClosed) {
     // The phrase in brackets is the rule's "every bead id gets a descriptive
@@ -251,7 +295,7 @@ function renderFullMarkdown(model: ReportModel): string {
 
   if (model.autofillFailures.length > 0) {
     lines.push('');
-    lines.push('**Facts I could not measure:**');
+    lines.push(headingLine('Facts I could not measure'));
     for (const failure of model.autofillFailures) lines.push(`- ⚠️ ${failure}`);
   }
 
@@ -266,56 +310,66 @@ function renderFullMarkdown(model: ReportModel): string {
   lines.push(model.answerLine);
   lines.push(RULE_OM);
 
-  return lines.join('\n');
-}
-
-/** The heading the must-see block wears, and the marker that it IS one. */
-export const MUST_SEE_HEADING =
-  '**MUST-SEE — the only part you have to read:**';
-
-/**
- * The fields the compact report keeps, by their `**Label:**`.
- *
- * The first three are the where-block as it renders with `emojiHeader: false`
- * (D19) — with the knob ON those are emoji lines the classifier calls `where`,
- * and with it off they are ordinary fields. Both spellings have to survive the
- * cut, or turning the knob off silently deletes "which repo is this".
- */
-const COMPACT_FIELDS: readonly string[] = [
-  'Repo',
-  'Tree',
-  'Tokens at stop',
-  'Thread',
-  'You asked me to',
-  'Your last message, verbatim',
-];
-
-/** The priorities that reach the compact report (D23). */
-const MUST_SEE_PRIORITIES: ReadonlySet<number> = new Set([0, 1]);
-
-/** The pointer line's marker — how every surface recognises it. */
-export const MORE_LINE_PREFIX = POINTER_PREFIX;
-
-function plural(count: number, one: string, many: string): string {
-  return count === 1 ? one : many;
+  return normalizeReportText(lines.join('\n'));
 }
 
 /**
- * `Answer: bun run justin-sdk thread answer th-x` → `th-x`, or null when there
- * is none.
+ * THE ONE DEFINITION OF A REPORT'S SPACING (home-base-k0b8n.10, K11 rules 1, 6,
+ * 7) — and the upgrade that makes a report stored before it look like one
+ * rendered after it.
  *
- * The `bun run` prefix is OPTIONAL because this parses reports that were
- * already WRITTEN. Every thread bead recorded before dchjw.19 carries the bare
- * spelling, and a parser that stopped recognising it would quietly return null
- * for each of them — compacting an old report into one that no longer says how
- * to answer it, with nothing anywhere reporting a failure.
+ * Three things, all idempotent, so running it twice changes nothing:
+ *
+ *  1. A BLANK LINE BETWEEN ANY TWO LINES that are not already separated — every
+ *     field, list item, ask, and every line inside an ask. The one exception is
+ *     a line nothing recognised (`text`): that is the second line of a
+ *     multi-line value (Justin's last message, verbatim), and a blank line
+ *     inserted into it would change what he said. A blank line never lands
+ *     inside one; one still follows the rule that opens a handoff.
+ *  2. OPTIONS BECOME A NESTED LIST, `     - a. …`, with a leading label that
+ *     repeats the letter stripped (`a. (Recommended) a. Merge` was in Justin's
+ *     screenshot). A stored report's bare `     a. …` lines are rewritten the
+ *     same way, and so are the options of a carried ask, whose bead
+ *     description indents them two columns deeper.
+ *  3. A HEADING GETS ITS EMOJI when it is one of the fixed set and does not
+ *     have it yet — which is exactly the case of a report stored before the
+ *     emojis existed. Without this the compactor, which finds the Deviations
+ *     heading by its exact text, would count a stored report's deviations as
+ *     zero: "nothing else to flag", said about a report nobody read (rule 7).
+ *
+ * A line of spaces becomes an empty line.
  */
-function threadIdOfAnswerLine(line: string | null): string | null {
-  if (line == null) return null;
-  const match = /^Answer: (?:bun run )?justin-sdk thread answer (\S+)$/u.exec(
-    line,
-  );
-  return match?.[1] ?? null;
+export function normalizeReportText(markdown: string): string {
+  const out: string[] = [];
+  let previous: ReportLine | null = null;
+  for (const line of classifyReport(markdown)) {
+    if (line.kind === 'blank') {
+      out.push('');
+      previous = null;
+      continue;
+    }
+    if (
+      previous != null &&
+      (line.kind !== 'text' || previous.kind === 'rule')
+    ) {
+      out.push('');
+    }
+    out.push(upgradeLine(line));
+    previous = line;
+  }
+  return out.join('\n');
+}
+
+/** Steps 2 and 3 of `normalizeReportText`, for one line. */
+function upgradeLine(line: ReportLine): string {
+  if (line.kind === 'heading' && line.label != null) {
+    return HEADING_EMOJI.has(line.label) ? headingLine(line.label) : line.text;
+  }
+  if (line.kind === 'askDetail') {
+    const option = parseOptionLine(line.rest);
+    if (option != null) return optionLine(option);
+  }
+  return line.text;
 }
 
 /**
@@ -340,11 +394,23 @@ function threadIdOfAnswerLine(line: string | null): string | null {
  * AN UNKNOWN PRIORITY IS KEPT, not hidden. A marker this build does not
  * recognise is a fact about the data; dropping it into the "N more asks" count
  * would be exactly the reassuring substitution rule 6 bans.
+ *
+ * TEXT THAT IS NOT A REPORT IS RETURNED AS IT IS (home-base-k0b8n.14). A thread
+ * bead `thread start` or `thread capture` made carries "NO REPORT YET." notes;
+ * compacting those printed a MUST-SEE block saying "nothing needs you — nothing
+ * went wrong, nothing is blocking" and "NOT RECORDED — no thread bead", about a
+ * session that had reported nothing and a bead that existed. Nothing here may
+ * turn "not reported" into a measured all-clear.
+ *
+ * The input is normalized first (see `normalizeReportText`), so a report stored
+ * before 2026-09-23 compacts exactly like a new one.
  */
 export function compactStoredReport(markdown: string): string {
+  if (!isRenderedReport(markdown)) return markdown;
+  const normalized = normalizeReportText(markdown);
   // Already compact — recompacting would recount the hidden asks as zero, which
   // is the one wrong answer this function can give.
-  if (markdown.includes(MUST_SEE_HEADING)) return markdown;
+  if (normalized.includes(MUST_SEE_HEADING)) return normalized;
 
   const head: string[] = [];
   const where: string[] = [];
@@ -357,7 +423,7 @@ export function compactStoredReport(markdown: string): string {
   let keepingAsk = false;
   let inDeviations = false;
 
-  for (const line of classifyReport(markdown)) {
+  for (const line of classifyReport(normalized)) {
     switch (line.kind) {
       case 'glance':
         glance = line.text;
@@ -441,5 +507,78 @@ export function compactStoredReport(markdown: string): string {
     answerLine ?? 'Answer: (no thread bead — this report was NOT RECORDED)',
   );
   out.push(RULE_OM);
-  return out.join('\n');
+  return normalizeReportText(out.join('\n'));
+}
+
+/**
+ * The whole report, as one markdown string. Ends without a trailing newline.
+ *
+ * COMPACT IS THE FULL REPORT, COMPACTED (D23). `renderMarkdown` renders the full
+ * document and then runs `compactStoredReport` over it, rather than rendering a
+ * second, shorter document from the same model. That is deliberate and it is the
+ * only way the two can be guaranteed identical: `thread show` has the bead's
+ * stored text and no model, so it MUST compact text — and if the printed compact
+ * report came from a separate rendering pass, the report Justin read in his
+ * terminal and the report he read in the paste could differ in ways no test
+ * would notice.
+ */
+export function renderMarkdown(model: ReportModel): string {
+  const full = renderFullMarkdown(model);
+  return model.full ? full : compactStoredReport(full);
+}
+
+/** The heading the must-see block wears, and the marker that it IS one. */
+export const MUST_SEE_HEADING = headingLine(
+  'MUST-SEE — the only part you have to read',
+);
+
+/**
+ * The fields the compact report keeps, by their `**Label:**`.
+ *
+ * The first three are the where-block as it renders with `emojiHeader: false`
+ * (D19) — with the knob ON those are emoji lines the classifier calls `where`,
+ * and with it off they are ordinary fields. Both spellings have to survive the
+ * cut, or turning the knob off silently deletes "which repo is this".
+ */
+const COMPACT_FIELDS: readonly string[] = [
+  'Repo',
+  'Tree',
+  'Tokens at stop',
+  'Thread',
+  // D18 (home-base-k0b8n.5). Added 2026-09-19: it was measured to be MISSING
+  // from the compact report, so `thread show` on a justin-loop successor — the
+  // whole point of linking the chain — did not name the predecessor unless you
+  // knew to pass `--full`. It is one short line and it appears only on a report
+  // that actually continues something.
+  'Continues from',
+  'You asked me to',
+  'Your last message, verbatim',
+];
+
+/** The priorities that reach the compact report (D23). */
+const MUST_SEE_PRIORITIES: ReadonlySet<number> = new Set([0, 1]);
+
+/** The pointer line's marker — how every surface recognises it. */
+export const MORE_LINE_PREFIX = POINTER_PREFIX;
+
+function plural(count: number, one: string, many: string): string {
+  return count === 1 ? one : many;
+}
+
+/**
+ * `Answer: bun run justin-sdk thread answer th-x` → `th-x`, or null when there
+ * is none.
+ *
+ * The `bun run` prefix is OPTIONAL because this parses reports that were
+ * already WRITTEN. Every thread bead recorded before dchjw.19 carries the bare
+ * spelling, and a parser that stopped recognising it would quietly return null
+ * for each of them — compacting an old report into one that no longer says how
+ * to answer it, with nothing anywhere reporting a failure.
+ */
+function threadIdOfAnswerLine(line: string | null): string | null {
+  if (line == null) return null;
+  const match = /^Answer: (?:bun run )?justin-sdk thread answer (\S+)$/u.exec(
+    line,
+  );
+  return match?.[1] ?? null;
 }

@@ -7,6 +7,7 @@
  * Provides doctor checks, signal (code quality) checks, and more.
  */
 
+import {readFileSync} from 'node:fs';
 import yargs from 'yargs';
 import {hideBin} from 'yargs/helpers';
 
@@ -25,25 +26,24 @@ import {runEasUpdate} from './eas-update';
 import {runFix} from './fix';
 import {runInit} from './init';
 import {
+  answerHandoff,
   createHandoff,
   DISPOSITIONS,
   emit,
   parseCreateFlags,
+  renderAnswer,
   renderCreate,
   renderValidate,
+  resolveAnswers,
   validateHandoffs,
 } from './justin-loop/handoff';
-import {runMigrateToPrime} from './migrate-to-prime';
-import {runPrime} from './prime';
-import {repoStatusCommand} from './repo-status/repo-status';
-// By reference, like repo-status. command.ts imports nothing but yargs TYPES
-// and `await import`s each handler, so zod (and the whole thread module graph)
-// stays off the eager path the time-check/usage-check hooks pay for.
-import {threadCommand, usageNowCommand} from './thread/command';
 import {
   DEFAULT_OPTIONS as LOOP_DEFAULTS,
   runJustinLoop,
 } from './justin-loop/runner';
+import {runMigrateToPrime} from './migrate-to-prime';
+import {runPrime} from './prime';
+import {repoStatusCommand} from './repo-status/repo-status';
 import {runRulesDiff} from './rules-diff';
 import {runRulesUpdate} from './rules-update';
 import {
@@ -53,14 +53,18 @@ import {
   UNKNOWN_VERSION,
 } from './sdk-identity';
 import {runSessionStart} from './session-start';
-import {runSkill} from './skill';
-import {runSyncRules} from './sync-rules';
-import {runTimeCheck} from './time-check';
-import {runUsageCheck} from './usage-check';
 import {runSetupEnv} from './setup-env-command';
 import {runSignal} from './signal';
+import {runSkill} from './skill';
 import {INSTALL_PAYLOAD_OPTION, runSweep} from './sweep';
+import {runSyncRules} from './sync-rules';
+// By reference, like repo-status. command.ts imports nothing but yargs TYPES
+// and `await import`s each handler, so zod (and the whole thread module graph)
+// stays off the eager path the time-check/usage-check hooks pay for.
+import {threadCommand, usageNowCommand} from './thread/command';
+import {runTimeCheck} from './time-check';
 import {runUpdate} from './update';
+import {runUsageCheck} from './usage-check';
 import {worktreeNew} from './worktree-new';
 
 // Handled before yargs: `--skill` is a bare flag, and `demandCommand(1)` would
@@ -173,21 +177,21 @@ void yargs(ARGV)
     (y) =>
       y
         .option('fix', {
-          type: 'boolean',
-          describe: 'Attempt to auto-fix failures',
           default: false,
+          describe: 'Attempt to auto-fix failures',
+          type: 'boolean',
         })
         .option('quiet', {
-          type: 'boolean',
-          describe: 'Summary only (one-liner on all-pass)',
           default: false,
+          describe: 'Summary only (one-liner on all-pass)',
+          type: 'boolean',
         })
         .option('yes', {
           alias: 'y',
-          type: 'boolean',
+          default: false,
           describe:
             'Pre-approve fixes that modify system state (installs, global packages). Without this, those fixes are reported but skipped.',
-          default: false,
+          type: 'boolean',
         }),
     async (argv) => {
       const exitCode = await runDoctor(process.cwd(), {
@@ -211,10 +215,10 @@ void yargs(ARGV)
           'Print every key of both config files with its type, resolved default and description. Derived from the schemas themselves, so it cannot drift from what is actually accepted.',
           (yy) =>
             yy.option('json', {
-              type: 'boolean',
+              default: false,
               describe:
                 'Print JSON Schema for both files as {project, user} instead of the human-readable tree.',
-              default: false,
+              type: 'boolean',
             }),
           async (argv) => {
             // Lazy so `sdk-config` (and its 12-13ms of zod) stays out of the
@@ -232,7 +236,9 @@ void yargs(ARGV)
           },
         )
         .demandCommand(1, 'Please specify a config subcommand'),
-    () => {},
+    () => {
+      /* unreachable: demandCommand(1) above refuses a bare `config` */
+    },
   )
   .command(
     'signal',
@@ -240,14 +246,14 @@ void yargs(ARGV)
     (y) =>
       y
         .option('quiet', {
-          type: 'boolean',
-          describe: 'Summary only (one-liner on all-pass)',
           default: false,
+          describe: 'Summary only (one-liner on all-pass)',
+          type: 'boolean',
         })
         .option('serial', {
-          type: 'boolean',
-          describe: 'Run checks sequentially instead of in parallel',
           default: false,
+          describe: 'Run checks sequentially instead of in parallel',
+          type: 'boolean',
         }),
     async (argv) => {
       const exitCode = await runSignal(process.cwd(), {
@@ -262,9 +268,9 @@ void yargs(ARGV)
     'Auto-fix code from package.json fix-source:* scripts (eslint --fix, prettier --write). Runs serially and mutates files. Distinct from doctor, which fixes scaffolding (configs/deps), not code.',
     (y) =>
       y.option('quiet', {
-        type: 'boolean',
-        describe: 'Summary only (one-liner on all-pass)',
         default: false,
+        describe: 'Summary only (one-liner on all-pass)',
+        type: 'boolean',
       }),
     async (argv) => {
       const exitCode = await runFix(process.cwd(), {
@@ -279,34 +285,34 @@ void yargs(ARGV)
     (y) =>
       y
         .positional('components', {
-          type: 'string',
           array: true,
+          choices: ADD_TARGETS,
           // Computed against the CWD, so `add --help` tells you what `core`
           // means HERE rather than reciting a list that has drifted (D3).
           describe: `Components to add, and/or \`core\`. ${corePresetHelpText(process.cwd())}`,
-          choices: ADD_TARGETS,
+          type: 'string',
         })
         .option('commit', {
-          type: 'boolean',
+          default: false,
           describe:
             'Create a git commit at the end (single-component beads only). Default is off — pass --commit to opt in. Without it, files change in the working tree but nothing is committed, so you can run it like a dry run and inspect the diff first. More than one component is always no-commit and ignores this flag.',
-          default: false,
+          type: 'boolean',
         })
         .option('force', {
-          type: 'boolean',
+          default: false,
           describe:
             "Overwrite hand-modified files (currently: scripts/setup-env.ts) that differ from the SDK template and don't match a known-old hash",
-          default: false,
+          type: 'boolean',
         })
         .option('yes', {
           alias: 'y',
-          type: 'boolean',
+          default: false,
           describe:
             'Authorises exactly one deletion, in `beads` and nowhere else: after a legacy .beads/ has been MOVED to .beads.legacy-<timestamp>/ and its issues imported and counted back, delete that moved directory. Without it the moved directory is kept forever and you delete it yourself. It never licenses deleting anything the run could not verify.',
-          default: false,
+          type: 'boolean',
         }),
     async (argv) => {
-      const exitCode = await runAdd((argv.components as string[]) ?? [], {
+      const exitCode = await runAdd(argv.components! ?? [], {
         commit: argv.commit,
         force: argv.force,
         projectRoot: process.cwd(),
@@ -320,16 +326,16 @@ void yargs(ARGV)
     'Remove one or more justin-sdk components from the current project. Deletes a file ONLY when its bytes are identical to what the component would write now, and an appended entry (script, ignore line, hook, config block) only on an exact match; anything else is reported and left in place.',
     (y) =>
       y.positional('components', {
-        type: 'string',
         array: true,
+        choices: COMPONENTS as readonly string[],
         describe:
           'Components to remove. base-setup cannot be removed — every component applies it.',
-        choices: COMPONENTS as readonly string[],
+        type: 'string',
       }),
     async (argv) => {
       const {runRemove} = await import('./remove');
       process.exit(
-        runRemove((argv.components as string[]) ?? [], {
+        runRemove(argv.components! ?? [], {
           projectRoot: process.cwd(),
         }),
       );
@@ -341,25 +347,25 @@ void yargs(ARGV)
     (y) =>
       y
         .option('dry-run', {
-          type: 'boolean',
-          describe: 'Print the plan and change nothing',
           default: false,
+          describe: 'Print the plan and change nothing',
+          type: 'boolean',
         })
         .option('prune', {
-          type: 'boolean',
+          default: false,
           describe:
             'ALSO remove components that are on disk but absent from justin-sdk.config.json#components, under the same identity rules as `remove` (byte-identical files, exact-match entries; everything else reported and left). Read the plan first with `--prune --dry-run`.',
-          default: false,
+          type: 'boolean',
         })
         .option('force', {
-          type: 'boolean',
-          describe: 'Pass --force to the underlying installers',
           default: false,
+          describe: 'Pass --force to the underlying installers',
+          type: 'boolean',
         })
         .option('quiet', {
-          type: 'boolean',
-          describe: 'Suppress non-error output',
           default: false,
+          describe: 'Suppress non-error output',
+          type: 'boolean',
         }),
     async (argv) => {
       const {runInstall} = await import('./install');
@@ -388,25 +394,25 @@ void yargs(ARGV)
     (y) =>
       y
         .option('components', {
-          type: 'string',
           describe:
             'Comma-separated components to LIST in the new config (they are not installed — run `install`). Omit this and the config has no `components` key, which means it tracks the `core` preset as the registry grows.',
+          type: 'string',
         })
         .option('allow-dirty', {
-          type: 'boolean',
-          describe: 'Allow running with uncommitted changes',
           default: false,
+          describe: 'Allow running with uncommitted changes',
+          type: 'boolean',
         })
         .option('commit', {
-          type: 'boolean',
+          default: false,
           describe:
             'Create a single git commit at the end. Default is off — pass --commit to opt in. Without it, files change in the working tree but nothing is committed, so you can inspect the diff first.',
-          default: false,
+          type: 'boolean',
         })
         .option('force', {
-          type: 'boolean',
-          describe: 'Pass --force to underlying add commands',
           default: false,
+          describe: 'Pass --force to underlying add commands',
+          type: 'boolean',
         }),
     async (argv) => {
       const components =
@@ -432,37 +438,37 @@ void yargs(ARGV)
     (y) =>
       y
         .option('self-update', {
-          type: 'boolean',
+          default: true,
           describe:
             'Bump the SDK in devDependencies first, then re-exec the new CLI (use --no-self-update to skip)',
-          default: true,
+          type: 'boolean',
         })
         .option('commit', {
-          type: 'boolean',
+          default: false,
           describe:
             'Create a single git commit at the end. Default is off — pass --commit to opt in.',
-          default: false,
+          type: 'boolean',
         })
         .option('allow-dirty', {
-          type: 'boolean',
+          default: false,
           describe:
             'Allow running with uncommitted changes (commit step still respects --commit)',
-          default: false,
+          type: 'boolean',
         })
         .option('dry-run', {
-          type: 'boolean',
-          describe: 'Print the plan without writing',
           default: false,
+          describe: 'Print the plan without writing',
+          type: 'boolean',
         })
         .option('force', {
-          type: 'boolean',
-          describe: 'Pass --force to underlying add commands',
           default: false,
+          describe: 'Pass --force to underlying add commands',
+          type: 'boolean',
         })
         .option('quiet', {
-          type: 'boolean',
-          describe: 'Suppress non-error output',
           default: false,
+          describe: 'Suppress non-error output',
+          type: 'boolean',
         }),
     async (argv) => {
       const exitCode = await runUpdate({
@@ -483,26 +489,24 @@ void yargs(ARGV)
     (y) =>
       y
         .positional('channel', {
-          type: 'string',
           describe: 'EAS channel (development / preview / production)',
+          type: 'string',
         })
         .positional('changelog', {
-          type: 'string',
           array: true,
           describe: 'Changelog text; defaults to the latest commit subject',
+          type: 'string',
         })
         .option('platform', {
-          type: 'string',
-          describe: 'EAS platform',
           default: 'ios',
+          describe: 'EAS platform',
+          type: 'string',
         }),
     (argv) => {
-      const changelog = ((argv.changelog as string[] | undefined) ?? [])
-        .join(' ')
-        .trim();
+      const changelog = (argv.changelog ?? []).join(' ').trim();
       const exitCode = runEasUpdate(process.cwd(), {
-        channel: argv.channel as string,
         changelog: changelog !== '' ? changelog : null,
+        channel: argv.channel!,
         platform: argv.platform,
       });
       process.exit(exitCode);
@@ -533,9 +537,9 @@ void yargs(ARGV)
                 'Re-check a handoff bead against the schema. With no id, checks every OPEN handoff bead. Exit 0 all valid (or none exist), 1 any invalid, 2 br unavailable.',
                 (y3) =>
                   y3.positional('id', {
-                    type: 'string',
                     describe:
                       'One bead to check, closed ones included. Omit to check every open handoff bead.',
+                    type: 'string',
                   }),
                 (argv) => {
                   process.exit(
@@ -547,49 +551,102 @@ void yargs(ARGV)
                   );
                 },
               )
+              // D16 (home-base-1r6d.33.7): the resume path for a BLOCKED
+              // handoff, which stops the loop and stays open as the question
+              // waiting for Justin. Answering it here is what makes the bead
+              // eligible for the start-of-run pickup again — the runner grew no
+              // second gate for "answered" beads.
+              .command(
+                'answer <id>',
+                'Answer a BLOCKED handoff bead: folds your answers into its `next`, flips it to `continue`, and prints the command that restarts the arc from it. Refuses anything that is not an open, readable, blocked handoff.',
+                (y3) =>
+                  y3
+                    .positional('id', {
+                      describe: 'The blocked handoff bead to answer.',
+                      type: 'string',
+                    })
+                    .option('answer', {
+                      array: true,
+                      describe:
+                        'Your answer. Repeat it to answer several open questions IN ORDER, or give ONE to answer them all at once. Use --answer=… so a value starting with "-" survives.',
+                      type: 'string',
+                    })
+                    .option('answer-file', {
+                      describe:
+                        'Read the answer from a file instead — the sane path for a multi-paragraph answer, which is miserable to quote on a command line. With neither flag, the answer is read from stdin.',
+                      type: 'string',
+                    }),
+                (argv) => {
+                  const resolved = resolveAnswers(
+                    {
+                      answer: argv.answer,
+                      answerFile: argv['answer-file'],
+                      stdinIsTty: process.stdin.isTTY === true,
+                    },
+                    (path) => readFileSync(path, 'utf-8'),
+                    () => readFileSync(0, 'utf-8'),
+                  );
+                  if (!resolved.ok) {
+                    for (const err of resolved.errors) console.error(err);
+                    console.error('No bead was changed.');
+                    process.exit(1);
+                  }
+                  process.exit(
+                    emit(
+                      renderAnswer(
+                        answerHandoff(
+                          process.cwd(),
+                          argv.id!,
+                          resolved.answers,
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              )
               .option('from', {
-                type: 'string',
                 describe:
                   'The session label the runner gave this session. Identity: only one OPEN handoff may exist per label.',
+                type: 'string',
               })
               .option('disposition', {
-                type: 'string',
                 choices: DISPOSITIONS,
                 describe:
                   'continue = boot a successor from --next; done = the arc is finished, stop; blocked = only Justin can answer --open-question, stop.',
+                type: 'string',
               })
               .option('arc', {
-                type: 'string',
                 describe: 'Epic/bead id or short name for this arc of work.',
+                type: 'string',
               })
               .option('worktree', {
-                type: 'string',
                 describe:
                   'ABSOLUTE path to the worktree the successor must work in.',
+                type: 'string',
               })
               .option('branch', {
-                type: 'string',
                 describe: 'Branch to work on.',
+                type: 'string',
               })
               .option('state', {
-                type: 'string',
                 describe: '2–4 sentences: where things stand right now.',
+                type: 'string',
               })
               .option('next', {
-                type: 'string',
                 describe:
                   'The successor’s FULL starting instructions — this text becomes its prompt verbatim. Required for every disposition; for done/blocked it is what a future session would need to know.',
+                type: 'string',
               })
               .option('open-question', {
-                type: 'string',
                 array: true,
                 describe:
                   'A question only Justin can answer. Repeatable. Use --open-question=… so a value starting with "-" survives.',
+                type: 'string',
               })
               .option('context-tokens', {
-                type: 'number',
                 describe:
                   'Context tokens from the latest usage notice. Omit when unknown — it is recorded as null, never as 0.',
+                type: 'number',
               }),
           (argv) => {
             const flags = parseCreateFlags({
@@ -616,52 +673,52 @@ void yargs(ARGV)
           },
         )
         .option('prompt', {
-          type: 'string',
+          defaultDescription: LOOP_DEFAULTS.prompt,
           describe:
             'Prompt for the FIRST session (a slash command works). Giving one explicitly makes this run an ASK: the start-of-run handoff scan still reports what is waiting, but does not put it in front of your prompt. Pass --pickup to start from the newest handoff anyway. Every LATER session is prompted with its predecessor’s handoff bead instead, never with this.',
-          defaultDescription: LOOP_DEFAULTS.prompt,
+          type: 'string',
         })
         .option('pickup', {
-          type: 'boolean',
+          default: LOOP_DEFAULTS.pickup,
           describe:
             'Start from the newest waiting handoff bead even though --prompt was given explicitly. Without --prompt this is already the behaviour.',
-          default: LOOP_DEFAULTS.pickup,
+          type: 'boolean',
         })
         .option('label', {
-          type: 'string',
+          defaultDescription: 'derived from the prompt',
           describe:
             'Slug for this run’s session labels: <label>-1, <label>-2, … Normalised to [a-z0-9-] so it is safe unquoted in the --from the session contract writes. Omit to derive one from the prompt.',
-          defaultDescription: 'derived from the prompt',
+          type: 'string',
         })
         .option('max-sessions', {
-          type: 'number',
+          default: LOOP_DEFAULTS.maxSessions,
           describe:
             'Chain length: how many sessions this run may spawn in total',
-          default: LOOP_DEFAULTS.maxSessions,
+          type: 'number',
         })
         .option('max-iterations', {
-          type: 'number',
-          hidden: true,
           describe:
             'Deprecated alias for --max-sessions. Goes away in the next release.',
+          hidden: true,
+          type: 'number',
         })
         .option('timeout-min', {
-          type: 'number',
+          default: LOOP_DEFAULTS.timeoutMin,
           describe:
             'Per-session wall-clock timeout in minutes. 0 (the default) is NONE: a session is bounded by the ~300k wrap-up notice, not by the clock. When set, an expired session is stopped and CONFIRMED gone, and its handoff beads are then read exactly like any other ending — a valid handoff written before it hung is honoured rather than thrown away.',
-          default: LOOP_DEFAULTS.timeoutMin,
+          type: 'number',
         })
         .option('handoff-retries', {
-          type: 'number',
+          default: LOOP_DEFAULTS.handoffRetries,
           describe:
             'How many times a session that ended without a valid handoff bead is RESUMED and told to write one before the run gives up, files a bug bead and exits 2. 0 disables the demand and just stops the run.',
-          default: LOOP_DEFAULTS.handoffRetries,
+          type: 'number',
         })
         .option('handoff-settle-min', {
-          type: 'number',
+          default: LOOP_DEFAULTS.handoffSettleMin,
           describe:
             'MEASURED defect belt (D15): a `claude --bg` session can finish its turn — handoff bead written and committed — while its `claude agents` row stays `working` forever, and the runner then waits on a session that is already done. Set N to treat this session’s own valid open handoff bead as evidence it finished: if the row still is not `done` N minutes after that bead is first seen, the session is stopped, CONFIRMED gone, and its beads are read exactly like any other ending. 0 (the default) makes no scan at all. Settling can stop a session mid-commit, which is why it is opt-in.',
-          default: LOOP_DEFAULTS.handoffSettleMin,
+          type: 'number',
         })
         .check((argv) => {
           const settle = argv['handoff-settle-min'];
@@ -684,10 +741,10 @@ void yargs(ARGV)
         // blocked session waits for you indefinitely. Passing a number is how
         // you opt into a bound for an UNATTENDED run.
         .option('blocked-wait-min', {
-          type: 'number',
+          defaultDescription: 'wait indefinitely',
           describe:
             'Bound how long a blocked session waits for your answer before it is stopped. Omitted (the default) waits indefinitely — blocked means waiting for you, and the runner does not decide you took too long.',
-          defaultDescription: 'wait indefinitely',
+          type: 'number',
         })
         .check((argv) => {
           const wait = argv['blocked-wait-min'];
@@ -702,71 +759,71 @@ void yargs(ARGV)
           return true;
         })
         .option('poll-sec', {
-          type: 'number',
-          describe: 'Seconds between `claude agents --json` polls',
           default: LOOP_DEFAULTS.pollSec,
+          describe: 'Seconds between `claude agents --json` polls',
+          type: 'number',
         })
         .option('stop-poll-sec', {
-          type: 'number',
+          default: LOOP_DEFAULTS.stopPollSec,
           describe:
             'Seconds between polls while CONFIRMING a stopped session has left `claude agents`',
-          default: LOOP_DEFAULTS.stopPollSec,
+          type: 'number',
         })
         .option('usage-gate', {
-          type: 'boolean',
+          default: LOOP_DEFAULTS.usageGate,
           describe:
             'Read your real /usage quota before every session and refuse to run when it cannot be read. Pass --no-usage-gate to skip the gate entirely — no /usage call is made and quota is reported as UNKNOWN, never 0%. Use it only when the spend is bounded up front (e.g. --max-sessions 1), not for long chains.',
-          default: LOOP_DEFAULTS.usageGate,
+          type: 'boolean',
         })
         .option('session-stop-pct', {
-          type: 'number',
+          default: LOOP_DEFAULTS.sessionStopPct,
           describe:
             'Pause/exit when the 5-hour session window reaches this percent',
-          default: LOOP_DEFAULTS.sessionStopPct,
+          type: 'number',
         })
         .option('weekly-stop-pct', {
-          type: 'number',
-          describe: 'Pause/exit when the weekly window reaches this percent',
           default: LOOP_DEFAULTS.weeklyStopPct,
+          describe: 'Pause/exit when the weekly window reaches this percent',
+          type: 'number',
         })
         .option('on-gate-hit', {
-          type: 'string',
           choices: ['pause', 'exit'] as const,
-          describe: 'Wait for quota to reset, or stop the run',
           default: LOOP_DEFAULTS.onGateHit,
+          describe: 'Wait for quota to reset, or stop the run',
+          type: 'string',
         })
         .option('gate-poll-min', {
-          type: 'number',
-          describe: 'Minutes between (free) quota re-checks while paused',
           default: LOOP_DEFAULTS.gatePollMin,
+          describe: 'Minutes between (free) quota re-checks while paused',
+          type: 'number',
         })
         .option('model', {
-          type: 'string',
-          describe: 'Model for each session',
           default: LOOP_DEFAULTS.model,
+          describe: 'Model for each session',
+          type: 'string',
         })
         .option('permission-mode', {
-          type: 'string',
-          describe: 'Permission mode for each session',
           default: LOOP_DEFAULTS.permissionMode,
+          describe: 'Permission mode for each session',
+          type: 'string',
         })
         .option('no-progress-abort', {
-          type: 'number',
+          default: LOOP_DEFAULTS.noProgressAbort,
           describe:
             'Abort after this many consecutive sessions with no new commit',
-          default: LOOP_DEFAULTS.noProgressAbort,
+          type: 'number',
         })
         .option('state-dir', {
-          type: 'string',
-          describe:
-            'Where runs.jsonl is appended. Outside git on purpose — the facts you read live in the committed handoff beads.',
           default: LOOP_DEFAULTS.stateDir,
           defaultDescription: '~/.local/state/justin-sdk/justin-loop',
+          describe:
+            'Where runs.jsonl is appended. Outside git on purpose — the facts you read live in the committed handoff beads.',
+          type: 'string',
         })
         .option('dry-run', {
-          type: 'boolean',
-          describe: 'Show quota + what is waiting, and exit without spawning',
           default: false,
+          describe: 'Show quota + what is waiting, and exit without spawning',
+          type: 'boolean',
         }),
     async (argv) => {
       if (argv['max-iterations'] !== undefined) {
@@ -784,7 +841,7 @@ void yargs(ARGV)
         maxSessions: argv['max-iterations'] ?? argv['max-sessions'],
         model: argv.model,
         noProgressAbort: argv['no-progress-abort'],
-        onGateHit: argv['on-gate-hit'] as 'pause' | 'exit',
+        onGateHit: argv['on-gate-hit'],
         permissionMode: argv['permission-mode'],
         pickup: argv.pickup,
         pollSec: argv['poll-sec'],
@@ -814,44 +871,44 @@ void yargs(ARGV)
     (y) =>
       y
         .option('format', {
-          type: 'string',
           choices: ['markdown', 'hook'] as const,
           default: 'markdown',
           describe:
             'markdown = human-readable (default); hook = SessionStart additionalContext JSON envelope',
+          type: 'string',
         })
         .option('full', {
-          type: 'boolean',
           default: false,
           describe:
             'Print the complete rules (universal + all matching conditional). This is already the default; the flag is a stable, memorable command to hand to Claude ("run prime --full") when the hook injection was truncated.',
+          type: 'boolean',
         })
         .option('partition', {
-          type: 'string',
           choices: ['universal', 'conditional', 'full'] as const,
           default: 'full',
           describe:
             'Which slice of the rules to emit: universal (always-on) | conditional (project-type-gated) | full (both). Default full. --full forces full.',
+          type: 'string',
         })
         .option('prompts-dir', {
-          type: 'string',
           describe:
             'Override the prompts repo location (default: $JSDK_PROMPTS_DIR or ~/Dev/prompts)',
+          type: 'string',
         })
         .option('force-update', {
-          type: 'boolean',
+          default: false,
           describe:
             'Force a fetch/pull of the managed prompts clone, bypassing the staleness gate',
-          default: false,
+          type: 'boolean',
         }),
     (argv) => {
       const exitCode = runPrime(process.cwd(), {
+        forceUpdate: argv['force-update'],
         format: argv.format as 'markdown' | 'hook',
         partition: argv.full
           ? 'full'
           : (argv.partition as 'universal' | 'conditional' | 'full'),
         promptsDir: argv['prompts-dir'],
-        forceUpdate: argv['force-update'],
       });
       process.exit(exitCode);
     },
@@ -861,10 +918,10 @@ void yargs(ARGV)
     'SessionStart hook: the ONE command that runs at session start (epic home-base-dchjw D6, which retired the `prime` plugin). Remote (CLAUDE_CODE_REMOTE=true) hands off to setup-env. Locally it emits doctor --quiet, the repo-state block and the rules-drift notice as a SessionStart JSON envelope — repo state and doctor to the model, freshness verdicts to Justin. Read-only; always exits 0 so a failure can never silently swallow the session start.',
     (y) =>
       y.option('user-level', {
-        type: 'boolean',
         default: false,
         describe:
           'Run as the USER-LEVEL hook in ~/.claude/settings.json: print NOTHING and exit 0 when the project root carries justin-sdk.config.json (the project hook owns that repo), otherwise print the rules pointer and the repo-state block. This is what keeps the repo state reaching UNENROLLED repos without two hooks ever both firing.',
+        type: 'boolean',
       }),
     async (argv) => {
       process.exit(await runSessionStart({userLevel: argv['user-level']}));
@@ -902,14 +959,14 @@ void yargs(ARGV)
     (y) =>
       y
         .option('force', {
-          type: 'boolean',
           default: false,
           describe: 'Rewrite even when the content hash is unchanged',
+          type: 'boolean',
         })
         .option('quiet', {
-          type: 'boolean',
           default: false,
           describe: 'Suppress non-error output',
+          type: 'boolean',
         }),
     (argv) => {
       process.exit(runSyncRules({force: argv.force, quiet: argv.quiet}));
@@ -921,15 +978,15 @@ void yargs(ARGV)
     (y) =>
       y
         .option('force', {
-          type: 'boolean',
           default: false,
           describe:
             'Regenerate even when the content hash says the artifact is current (use when the file was edited by hand)',
+          type: 'boolean',
         })
         .option('quiet', {
-          type: 'boolean',
           default: false,
           describe: 'Suppress non-error output',
+          type: 'boolean',
         }),
     (argv) => {
       process.exit(runRulesUpdate({force: argv.force, quiet: argv.quiet}));
@@ -949,19 +1006,19 @@ void yargs(ARGV)
     (y) =>
       y
         .option('beads', {
-          type: 'string',
           describe: 'The beads workspace to check (default: .beads)',
+          type: 'string',
         })
         .option('br', {
-          type: 'string',
           describe:
             'The `br` binary to rebuild WITH — i.e. the one that will perform the real migration (default: br from PATH). Pass a full path when `br` is a version-manager shim: the rebuild runs in a temp directory, where a shim may resolve to nothing.',
+          type: 'string',
         })
         .option('keep', {
-          type: 'boolean',
           default: false,
           describe:
             'Leave the temp working copy behind for inspection instead of removing it',
+          type: 'boolean',
         }),
     (argv) => {
       process.exit(
@@ -979,15 +1036,15 @@ void yargs(ARGV)
     (y) =>
       y
         .option('commit', {
-          type: 'boolean',
+          default: false,
           describe:
             'Commit the migration at the end. Default off — inspect the diff and resolve flagged items first.',
-          default: false,
+          type: 'boolean',
         })
         .option('quiet', {
-          type: 'boolean',
-          describe: 'Suppress non-error output',
           default: false,
+          describe: 'Suppress non-error output',
+          type: 'boolean',
         }),
     (argv) => {
       const exitCode = runMigrateToPrime({
@@ -1004,14 +1061,14 @@ void yargs(ARGV)
     (y) =>
       y
         .option('target', {
-          type: 'string',
           describe:
             'Directory to hydrate (default: cwd). Lets you run this from the primary checkout, where the SDK is already installed.',
+          type: 'string',
         })
         .option('dry-run', {
-          type: 'boolean',
-          describe: 'Print what would happen and change nothing',
           default: false,
+          describe: 'Print what would happen and change nothing',
+          type: 'boolean',
         }),
     async (argv) => {
       const exitCode = await runSetupEnv({
@@ -1027,25 +1084,25 @@ void yargs(ARGV)
     (y) =>
       y
         .option('dry-run', {
-          type: 'boolean',
-          describe: 'List discovered repos and planned actions; change nothing',
           default: false,
+          describe: 'List discovered repos and planned actions; change nothing',
+          type: 'boolean',
         })
         .option('repo', {
-          type: 'string',
           array: true,
           describe:
             'Explicit repo path(s) — overrides discovery entirely (use for a single-repo run or for repos outside --root, e.g. a Dropbox-remote repo)',
+          type: 'string',
         })
         .option('root', {
-          type: 'string',
           describe: 'Discovery root (default ~/Dev)',
+          type: 'string',
         })
         .option('component', {
-          type: 'string',
           choices: [...COMPONENT_NAMES, INSTALL_PAYLOAD_OPTION],
           describe:
             'Which payload to sweep. A COMPONENT NAME scopes the run to that one component and leaves the SDK pin alone: no pin bump, no `update`, no other component re-applied — so a rules/config edit does not ship an SDK upgrade to the whole fleet, and repos not enrolled in it are skipped. `install` is the ENROLLMENT REFRESH: in every enrolled repo it ADOPTS installed-but-unlisted components into justin-sdk.config.json, deletes the dead `version`/`lastSynced`/`componentConfig["critical-rules"].modules` keys, bumps the SDK pin to this release (tag verified on the remote first), and runs `install` with REMOVALS DISABLED — a sweep never removes a component; that is a per-repo decision made with `remove`. Omit the option for the historical full sweep (pin bump + `update`). Same gates for all three. Unknown name refuses the whole run.',
+          type: 'string',
         }),
     async (argv) => {
       process.exit(
@@ -1064,20 +1121,20 @@ void yargs(ARGV)
     (y) =>
       y
         .positional('slug', {
-          type: 'string',
           describe:
             'Names both the directory and the branch. [A-Za-z0-9._-] only — no slashes.',
+          type: 'string',
         })
         .option('setup', {
-          type: 'boolean',
+          default: true,
           describe:
             'Hydrate after creating (default). Pass --no-setup to create only.',
-          default: true,
+          type: 'boolean',
         }),
     (argv) => {
       const result = worktreeNew({
         noSetup: !argv.setup,
-        slug: argv.slug as string,
+        slug: argv.slug!,
       });
       process.exit(result.exitCode);
     },

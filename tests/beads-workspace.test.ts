@@ -22,8 +22,8 @@ import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
 import {
-  detectBeadsWorkspace,
   deriveBeadsPrefix,
+  detectBeadsWorkspace,
   mainCheckoutRoot,
   mergeBeadsSyncConfig,
   runBeadsSetup,

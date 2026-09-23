@@ -41,7 +41,7 @@ import {
  * project-specific build variants (e.g. build:development:jphone17) must live
  * under other names so `update --force` never clobbers them.
  */
-export const EAS_SCRIPTS: ReadonlyArray<{key: string; value: string}> = [
+export const EAS_SCRIPTS: readonly {key: string; value: string}[] = [
   {key: 'prebuild', value: 'npx @justinhaaheim/version-manager'},
   {key: 'eas-build-post-install', value: 'npx @justinhaaheim/version-manager'},
   {key: 'build:eas:base', value: 'eas build --platform ios'},
@@ -95,8 +95,7 @@ function stepEasScripts(projectRoot: string, force: boolean): boolean {
     return false;
   }
 
-  const scripts = ((pkg.scripts as Record<string, string> | undefined) ??
-    {}) as Record<string, string>;
+  const scripts = (pkg.scripts as Record<string, string> | undefined) ?? {};
 
   let changed = false;
   for (const {key, value} of EAS_SCRIPTS) {
@@ -126,9 +125,9 @@ function stepEasScripts(projectRoot: string, force: boolean): boolean {
 }
 
 export interface EasSetupOptions {
+  force: boolean;
   projectRoot: string;
   quiet: boolean;
-  force: boolean;
   /**
    * The remote the SDK pin tag is verified against, forwarded to base-setup.
    * Tests point it at a local bare repo so the install is hermetic; production

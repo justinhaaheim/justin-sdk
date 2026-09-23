@@ -85,9 +85,9 @@ export type MergeShapeKind =
   | 'unknown';
 
 export interface MergeShape {
+  kind: MergeShapeKind;
   /** Which question this row's ahead/behind numbers answer. */
   question: typeof Q_MERGE_SHAPE;
-  kind: MergeShapeKind;
   /** One line, plain language — the same discipline as a branch row's `why`. */
   why: string;
 }

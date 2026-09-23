@@ -10,15 +10,13 @@
 
 import type {CheckNode, CheckResult} from './check-runner';
 
-import {renderCheckTree, runCheckTree} from './check-runner';
 import {execSync} from 'child_process';
 import {existsSync, readFileSync, statSync} from 'fs';
 import {resolve} from 'path';
 
 import {SDK_BIN_SHADOW_SCRIPT, shadowsSdkBin} from './base-setup';
+import {renderCheckTree, runCheckTree} from './check-runner';
 import {resolveComponents} from './component-registry';
-import {ESLINT_CONFIG_NAMES} from './eslint-setup';
-import {buildComponentListing} from './list';
 import {
   CRITICAL_RULES_CONFIG_KEY,
   legacyModulesWarning,
@@ -26,17 +24,19 @@ import {
   refreshSucceeded,
   RETIRED_MODULES_KEY,
 } from './critical-rules-setup';
+import {ESLINT_CONFIG_NAMES} from './eslint-setup';
+import {buildComponentListing} from './list';
 import {PINNED} from './pinned-versions';
-import {SDK_RUN} from './sdk-invocation';
 import {
   checkRulesDrift,
   isRulesDriftProblem,
   rulesDriftAdvice,
 } from './rules/rules-drift';
+import {SDK_RUN} from './sdk-invocation';
 import {
   checkUserLevelSessionStart,
-  userLevelHookAdvice,
   USER_SETTINGS_DISPLAY,
+  userLevelHookAdvice,
 } from './user-level-hook';
 import {
   describeMissing,
@@ -97,7 +97,7 @@ function parseMiseToml(projectRoot: string): Record<string, string> | null {
   while ((match = toolPattern.exec(content)) !== null) {
     const tool = match[1];
     const version = match[2] ?? match[3];
-    if (tool && version) {
+    if (tool != null && tool !== '' && version != null && version !== '') {
       versions[tool] = version;
     }
   }
@@ -131,7 +131,6 @@ export function makeEnvHydrationChecks(projectRoot: string): CheckNode[] {
   return [
     {
       check: {
-        label: 'ENV_HYDRATION',
         fn: (): CheckResult => {
           const linked = isLinkedWorktree(projectRoot);
           const status = detectWorktreeHydration(projectRoot);
@@ -165,6 +164,7 @@ export function makeEnvHydrationChecks(projectRoot: string): CheckNode[] {
             severity: linked ? 'error' : 'warn',
           };
         },
+        label: 'ENV_HYDRATION',
       },
     },
   ];
@@ -183,7 +183,6 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
     ...makeEnvHydrationChecks(projectRoot),
     {
       check: {
-        label: 'BUN',
         fn: (): CheckResult => {
           const {stdout, exitCode} = exec('bun --version', projectRoot);
           if (exitCode !== 0) {
@@ -205,21 +204,37 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
           }
           return {message: `bun ${stdout}`, pass: true};
         },
+        label: 'BUN',
       },
     },
     {
       check: {
-        label: 'CLAUDE_MD',
         fn: (): CheckResult => {
           if (!existsSync(resolve(projectRoot, 'CLAUDE.md'))) {
             return {message: 'No CLAUDE.md found', pass: false};
           }
           return {pass: true};
         },
+        label: 'CLAUDE_MD',
       },
     },
     {
       check: {
+        fn: (): CheckResult => {
+          const result = checkUserLevelSessionStart();
+          if (result.status === 'installed') {
+            return {message: result.message, pass: true};
+          }
+          return {
+            fix:
+              result.status === 'cannot-check'
+                ? `Read ${USER_SETTINGS_DISPLAY} by hand and confirm it registers \`session-start --user-level\``
+                : userLevelHookAdvice(),
+            message: result.message,
+            pass: false,
+            severity: 'warn',
+          };
+        },
         /**
          * Is the USER-LEVEL SessionStart hook installed (epic home-base-dchjw D6)?
          *
@@ -239,27 +254,11 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
          * settings file is not evidence the hook is missing (rule 6).
          */
         label: 'USER_LEVEL_SESSION_START',
-        fn: (): CheckResult => {
-          const result = checkUserLevelSessionStart();
-          if (result.status === 'installed') {
-            return {message: result.message, pass: true};
-          }
-          return {
-            fix:
-              result.status === 'cannot-check'
-                ? `Read ${USER_SETTINGS_DISPLAY} by hand and confirm it registers \`session-start --user-level\``
-                : userLevelHookAdvice(),
-            message: result.message,
-            pass: false,
-            severity: 'warn',
-          };
-        },
         severity: 'warn',
       },
     },
     {
       check: {
-        label: 'PKG_SCRIPTS',
         fn: (): CheckResult => {
           const pkgPath = resolve(projectRoot, 'package.json');
           if (!existsSync(pkgPath)) {
@@ -283,11 +282,11 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
 
           return {pass: true};
         },
+        label: 'PKG_SCRIPTS',
       },
     },
     {
       check: {
-        label: 'JUSTIN_SDK_JSON',
         fn: (): CheckResult => {
           if (!existsSync(resolve(projectRoot, 'justin-sdk.config.json'))) {
             return {
@@ -298,6 +297,7 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+        label: 'JUSTIN_SDK_JSON',
       },
     },
     // SCRIPT_SHADOWS_SDK_BIN (epic home-base-dchjw.4 F8). ERROR, not a warning:
@@ -313,7 +313,6 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
     // wrote, which is a decision, not a scaffold repair.
     {
       check: {
-        label: 'SCRIPT_SHADOWS_SDK_BIN',
         fn: (): CheckResult => {
           const pkgPath = resolve(projectRoot, 'package.json');
           if (!existsSync(pkgPath)) return {pass: true};
@@ -346,6 +345,7 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
             pass: false,
           };
         },
+        label: 'SCRIPT_SHADOWS_SDK_BIN',
       },
     },
     // CONFIG_SCHEMA (home-base-uxwc D9). A SIBLING of JUSTIN_SDK_JSON, not a
@@ -361,7 +361,6 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
     // usage-check hook path, which runs on every prompt Justin types.
     {
       check: {
-        label: 'CONFIG_SCHEMA',
         fn: async (): Promise<CheckResult> => {
           const {
             describeConfigOutcome,
@@ -388,6 +387,7 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
             pass: true,
           };
         },
+        label: 'CONFIG_SCHEMA',
         severity: 'warn',
       },
     },
@@ -402,7 +402,6 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
     // mean a network call.
     {
       check: {
-        label: 'SDK_VERSION',
         fn: async (): Promise<CheckResult> => {
           const {
             NOTICE_FETCH_TIMEOUT_MS,
@@ -452,6 +451,7 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
               return {message: verdict.message, pass: true};
           }
         },
+        label: 'SDK_VERSION',
         severity: 'warn',
       },
     },
@@ -463,7 +463,6 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
     // TS skips dot-dirs, so .claude/worktrees is already invisible to tsc.
     {
       check: {
-        label: 'WORKTREE_GITIGNORE',
         fn: (): CheckResult => {
           const status = worktreeGitStatus(projectRoot);
           if (status === 'committed' || status === 'not-git') {
@@ -480,12 +479,11 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
             pass: false,
           };
         },
+        label: 'WORKTREE_GITIGNORE',
       },
     },
     {
       check: {
-        label: 'WORKTREE_ESLINT',
-        severity: 'warn',
         fn: (): CheckResult => {
           const status = eslintWorktreeStatus(projectRoot);
           if (!status.applicable || status.covered) return {pass: true};
@@ -496,12 +494,12 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
             severity: 'warn',
           };
         },
+        label: 'WORKTREE_ESLINT',
+        severity: 'warn',
       },
     },
     {
       check: {
-        label: 'WORKTREE_PRETTIER',
-        severity: 'warn',
         fn: (): CheckResult => {
           const status = prettierWorktreeStatus(
             projectRoot,
@@ -516,6 +514,8 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
             severity: 'warn',
           };
         },
+        label: 'WORKTREE_PRETTIER',
+        severity: 'warn',
       },
     },
   ];
@@ -533,8 +533,6 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
     // and siblings of (not parents of) the BR check.
     {
       check: {
-        label: 'MISE',
-        severity: 'warn',
         fn: (): CheckResult => {
           const {stdout, exitCode} = exec('mise --version', projectRoot);
           if (exitCode !== 0) {
@@ -552,12 +550,12 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
           }
           return {message: `mise ${stdout}`, pass: true};
         },
+        label: 'MISE',
+        severity: 'warn',
       },
     },
     {
       check: {
-        label: 'MISE_TOML',
-        severity: 'warn',
         fn: (): CheckResult => {
           if (!existsSync(resolve(projectRoot, 'mise.toml'))) {
             return {
@@ -568,11 +566,12 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+        label: 'MISE_TOML',
+        severity: 'warn',
       },
     },
     {
       check: {
-        label: 'BR',
         fn: (): CheckResult => {
           const {stdout, exitCode} = exec('br --version', projectRoot);
           if (exitCode !== 0) {
@@ -583,11 +582,17 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
             // the version.
             const centralVersion = getCentralBeadsVersion();
             const miseVersions = parseMiseToml(projectRoot);
-            const beadsKey = miseVersions
-              ? Object.keys(miseVersions).find((k) => k.includes('beads_rust'))
-              : null;
+            const beadsKey =
+              miseVersions != null
+                ? Object.keys(miseVersions).find((k) =>
+                    k.includes('beads_rust'),
+                  )
+                : null;
             const version =
-              centralVersion ?? (beadsKey ? miseVersions![beadsKey] : null);
+              centralVersion ??
+              (beadsKey != null && beadsKey !== ''
+                ? miseVersions![beadsKey]
+                : null);
             const versionTag =
               version != null && !version.startsWith('v')
                 ? `v${version}`
@@ -611,11 +616,15 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
           const actual = stdout.replace(/^br\s*/, '').trim();
           const centralVersion = getCentralBeadsVersion();
           const miseVersions = parseMiseToml(projectRoot);
-          const beadsKey = miseVersions
-            ? Object.keys(miseVersions).find((k) => k.includes('beads_rust'))
-            : null;
+          const beadsKey =
+            miseVersions != null
+              ? Object.keys(miseVersions).find((k) => k.includes('beads_rust'))
+              : null;
           const expected =
-            centralVersion ?? (beadsKey ? miseVersions![beadsKey] : null);
+            centralVersion ??
+            (beadsKey != null && beadsKey !== ''
+              ? miseVersions![beadsKey]
+              : null);
 
           if (expected != null && actual !== expected) {
             const source =
@@ -634,11 +643,11 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
             pass: true,
           };
         },
+        label: 'BR',
       },
       children: [
         {
           check: {
-            label: 'BR_DB',
             fn: (): CheckResult => {
               if (!existsSync(resolve(projectRoot, '.beads/beads.db'))) {
                 return {
@@ -661,6 +670,7 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
 
               return {pass: true};
             },
+            label: 'BR_DB',
           },
           // AGENTS.md is no longer generated or required: cross-project guidance
           // is delivered by `justin-sdk prime` (SessionStart hook), and the
@@ -673,7 +683,6 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
     },
     {
       check: {
-        label: 'PRETTIER_IGNORE_BEADS',
         fn: (): CheckResult => {
           const prettierIgnore = resolve(projectRoot, '.prettierignore');
           if (!existsSync(prettierIgnore)) {
@@ -695,6 +704,7 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
 
           return {pass: true};
         },
+        label: 'PRETTIER_IGNORE_BEADS',
       },
     },
   ];
@@ -709,8 +719,8 @@ function readPkgDevDep(projectRoot: string, name: string): string | null {
   if (!existsSync(pkgPath)) return null;
   try {
     const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as {
-      devDependencies?: Record<string, string>;
       dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
     };
     return pkg.devDependencies?.[name] ?? pkg.dependencies?.[name] ?? null;
   } catch {
@@ -739,7 +749,6 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
   return [
     {
       check: {
-        label: 'PRETTIER_INSTALLED',
         fn: (): CheckResult => {
           const installed = readPkgDevDep(projectRoot, 'prettier');
           if (installed == null) {
@@ -760,11 +769,11 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           }
           return {message: `prettier ${installed}`, pass: true};
         },
+        label: 'PRETTIER_INSTALLED',
       },
     },
     {
       check: {
-        label: 'PRETTIERRC',
         fn: (): CheckResult => {
           if (!existsSync(resolve(projectRoot, '.prettierrc.json'))) {
             return {
@@ -776,11 +785,11 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+        label: 'PRETTIERRC',
       },
     },
     {
       check: {
-        label: 'PRETTIERIGNORE',
         fn: (): CheckResult => {
           const prettierIgnore = resolve(projectRoot, '.prettierignore');
           if (!existsSync(prettierIgnore)) {
@@ -802,11 +811,11 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+        label: 'PRETTIERIGNORE',
       },
     },
     {
       check: {
-        label: 'SIGNAL_SOURCE_PRETTIER',
         fn: (): CheckResult => {
           const script = readPkgScript(projectRoot, 'signal-source:PRETTIER');
           if (script == null) {
@@ -819,11 +828,11 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+        label: 'SIGNAL_SOURCE_PRETTIER',
       },
     },
     {
       check: {
-        label: 'FIX_SOURCE_PRETTIER',
         fn: (): CheckResult => {
           const script = readPkgScript(projectRoot, 'fix-source:PRETTIER');
           if (script == null) {
@@ -836,6 +845,7 @@ function makePrettierChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+        label: 'FIX_SOURCE_PRETTIER',
       },
     },
   ];
@@ -849,7 +859,6 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
   return [
     {
       check: {
-        label: 'TS_INSTALLED',
         fn: (): CheckResult => {
           const version = readPkgDevDep(projectRoot, 'typescript');
           if (version == null) {
@@ -870,11 +879,11 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
           }
           return {message: `typescript ${version}`, pass: true};
         },
+        label: 'TS_INSTALLED',
       },
     },
     {
       check: {
-        label: 'TYPES_BUN_INSTALLED',
         fn: (): CheckResult => {
           const version = readPkgDevDep(projectRoot, '@types/bun');
           if (version == null) {
@@ -887,11 +896,11 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
           }
           return {message: `@types/bun ${version}`, pass: true};
         },
+        label: 'TYPES_BUN_INSTALLED',
       },
     },
     {
       check: {
-        label: 'TSCONFIG',
         fn: (): CheckResult => {
           if (!existsSync(resolve(projectRoot, 'tsconfig.json'))) {
             return {
@@ -903,11 +912,11 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+        label: 'TSCONFIG',
       },
       children: [
         {
           check: {
-            label: 'TSCONFIG_STRICT',
             fn: (): CheckResult => {
               const tsconfigPath = resolve(projectRoot, 'tsconfig.json');
               const raw = readFileSync(tsconfigPath, 'utf-8');
@@ -935,13 +944,13 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
                 };
               }
             },
+            label: 'TSCONFIG_STRICT',
           },
         },
       ],
     },
     {
       check: {
-        label: 'SIGNAL_SOURCE_TS',
         fn: (): CheckResult => {
           const script = readPkgScript(projectRoot, 'signal-source:TS');
           if (script == null) {
@@ -954,6 +963,7 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+        label: 'SIGNAL_SOURCE_TS',
       },
     },
   ];
@@ -967,7 +977,6 @@ function makeGhActionsChecks(projectRoot: string): CheckNode[] {
   return [
     {
       check: {
-        label: 'GH_ACTIONS_SIGNAL',
         fn: (): CheckResult => {
           const workflow = resolve(projectRoot, '.github/workflows/signal.yml');
           if (!existsSync(workflow)) {
@@ -980,12 +989,11 @@ function makeGhActionsChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+        label: 'GH_ACTIONS_SIGNAL',
       },
       children: [
         {
           check: {
-            label: 'GH_ACTIONS_SIGNAL_BUN',
-            severity: 'warn',
             fn: (): CheckResult => {
               const workflow = resolve(
                 projectRoot,
@@ -1002,6 +1010,8 @@ function makeGhActionsChecks(projectRoot: string): CheckNode[] {
               }
               return {pass: true};
             },
+            label: 'GH_ACTIONS_SIGNAL_BUN',
+            severity: 'warn',
           },
         },
       ],
@@ -1025,7 +1035,6 @@ function makeGitignoreChecks(projectRoot: string): CheckNode[] {
   return [
     {
       check: {
-        label: 'GITIGNORE_EXISTS',
         fn: (): CheckResult => {
           if (readGitignore() == null) {
             return {
@@ -1037,11 +1046,11 @@ function makeGitignoreChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+        label: 'GITIGNORE_EXISTS',
       },
       children: [
         {
           check: {
-            label: 'GITIGNORE_HAS_NODE_MODULES',
             fn: (): CheckResult => {
               const content = readGitignore() ?? '';
               if (!content.includes('node_modules/')) {
@@ -1054,12 +1063,11 @@ function makeGitignoreChecks(projectRoot: string): CheckNode[] {
               }
               return {pass: true};
             },
+            label: 'GITIGNORE_HAS_NODE_MODULES',
           },
         },
         {
           check: {
-            label: 'GITIGNORE_HAS_TMP',
-            severity: 'warn',
             fn: (): CheckResult => {
               const content = readGitignore() ?? '';
               if (!content.includes('tmp/')) {
@@ -1072,6 +1080,8 @@ function makeGitignoreChecks(projectRoot: string): CheckNode[] {
               }
               return {pass: true};
             },
+            label: 'GITIGNORE_HAS_TMP',
+            severity: 'warn',
           },
         },
         // There is deliberately NO `.env` check here. The gitignore baseline
@@ -1105,7 +1115,6 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
   return [
     {
       check: {
-        label: 'ESLINT_INSTALLED',
         fn: (): CheckResult => {
           const installed = readPkgDevDep(projectRoot, 'eslint');
           if (installed == null) {
@@ -1126,11 +1135,11 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
           }
           return {message: `eslint ${installed}`, pass: true};
         },
+        label: 'ESLINT_INSTALLED',
       },
     },
     {
       check: {
-        label: 'JHA_CONFIG_INSTALLED',
         fn: (): CheckResult => {
           const installed = readPkgDevDep(
             projectRoot,
@@ -1150,11 +1159,11 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
             pass: true,
           };
         },
+        label: 'JHA_CONFIG_INSTALLED',
       },
     },
     {
       check: {
-        label: 'ESLINT_CONFIG',
         fn: (): CheckResult => {
           const found = eslintConfigsPresent(projectRoot);
           if (found.length === 0) {
@@ -1167,10 +1176,22 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
           }
           return {message: found[0], pass: true};
         },
+        label: 'ESLINT_CONFIG',
       },
       children: [
         {
           check: {
+            fn: (): CheckResult => {
+              const found = eslintConfigsPresent(projectRoot);
+              if (found.length <= 1) {
+                return {message: `one flat config: ${found[0]}`, pass: true};
+              }
+              return {
+                fix: `Delete all but one of ${found.join(', ')} — keep the one you actually maintain.`,
+                message: `${found.length} flat configs present (${found.join(', ')}); ESLint loads only ${found[0]} and the rest are dead code`,
+                pass: false,
+              };
+            },
             // Two flat configs is a SILENT misconfiguration: ESLint resolves
             // the names in a fixed order and loads the FIRST one it finds, so
             // the other is dead code that still looks authoritative in the
@@ -1183,24 +1204,12 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
             // here would be offering it a deletion.
             label: 'ESLINT_CONFIG_UNIQUE',
             severity: 'warn',
-            fn: (): CheckResult => {
-              const found = eslintConfigsPresent(projectRoot);
-              if (found.length <= 1) {
-                return {message: `one flat config: ${found[0]}`, pass: true};
-              }
-              return {
-                fix: `Delete all but one of ${found.join(', ')} — keep the one you actually maintain.`,
-                message: `${found.length} flat configs present (${found.join(', ')}); ESLint loads only ${found[0]} and the rest are dead code`,
-                pass: false,
-              };
-            },
           },
         },
       ],
     },
     {
       check: {
-        label: 'SIGNAL_SOURCE_LINT',
         fn: (): CheckResult => {
           const script = readPkgScript(projectRoot, 'signal-source:LINT');
           if (script == null) {
@@ -1213,11 +1222,11 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+        label: 'SIGNAL_SOURCE_LINT',
       },
     },
     {
       check: {
-        label: 'FIX_SOURCE_LINT',
         fn: (): CheckResult => {
           const script = readPkgScript(projectRoot, 'fix-source:LINT');
           if (script == null) {
@@ -1230,6 +1239,7 @@ function makeEslintChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+        label: 'FIX_SOURCE_LINT',
       },
     },
   ];
@@ -1244,7 +1254,6 @@ function makeHuskyChecks(projectRoot: string): CheckNode[] {
   return [
     {
       check: {
-        label: 'HUSKY_INSTALLED',
         fn: (): CheckResult => {
           const installed = readPkgDevDep(projectRoot, 'husky');
           if (installed == null) {
@@ -1265,11 +1274,11 @@ function makeHuskyChecks(projectRoot: string): CheckNode[] {
           }
           return {message: `husky ${installed}`, pass: true};
         },
+        label: 'HUSKY_INSTALLED',
       },
     },
     {
       check: {
-        label: 'LINT_STAGED_INSTALLED',
         fn: (): CheckResult => {
           const installed = readPkgDevDep(projectRoot, 'lint-staged');
           if (installed == null) {
@@ -1290,11 +1299,11 @@ function makeHuskyChecks(projectRoot: string): CheckNode[] {
           }
           return {message: `lint-staged ${installed}`, pass: true};
         },
+        label: 'LINT_STAGED_INSTALLED',
       },
     },
     {
       check: {
-        label: 'HUSKY_PRECOMMIT',
         fn: (): CheckResult => {
           const hookPath = resolve(projectRoot, '.husky/pre-commit');
           if (!existsSync(hookPath)) {
@@ -1326,11 +1335,11 @@ function makeHuskyChecks(projectRoot: string): CheckNode[] {
           }
           return {pass: true};
         },
+        label: 'HUSKY_PRECOMMIT',
       },
     },
     {
       check: {
-        label: 'PREPARE_SCRIPT',
         fn: (): CheckResult => {
           const script = readPkgScript(projectRoot, 'prepare');
           if (script == null) {
@@ -1351,11 +1360,11 @@ function makeHuskyChecks(projectRoot: string): CheckNode[] {
           }
           return {message: `prepare: ${script}`, pass: true};
         },
+        label: 'PREPARE_SCRIPT',
       },
     },
     {
       check: {
-        label: 'LINT_STAGED_CONFIG',
         fn: (): CheckResult => {
           // lint-staged reads config from a package.json key OR a standalone
           // config file — home-base uses lint-staged.config.mjs (it filters
@@ -1410,6 +1419,7 @@ function makeHuskyChecks(projectRoot: string): CheckNode[] {
             };
           }
         },
+        label: 'LINT_STAGED_CONFIG',
       },
     },
   ];
@@ -1465,6 +1475,17 @@ function makeCriticalRulesChecks(projectRoot: string): CheckNode[] {
   return [
     {
       check: {
+        fn: (): CheckResult => {
+          const message = legacyModulesWarning(projectRoot);
+          return message == null
+            ? {pass: true}
+            : {
+                fix: `delete componentConfig["${CRITICAL_RULES_CONFIG_KEY}"].${RETIRED_MODULES_KEY} from justin-sdk.config.json`,
+                message,
+                pass: false,
+                severity: 'warn',
+              };
+        },
         /**
          * The retired per-repo module include-list (epic home-base-dchjw D2).
          *
@@ -1478,23 +1499,11 @@ function makeCriticalRulesChecks(projectRoot: string): CheckNode[] {
          * still-present key as green on the second pass.
          */
         label: 'RULES_MODULES_LEGACY',
-        fn: (): CheckResult => {
-          const message = legacyModulesWarning(projectRoot);
-          return message == null
-            ? {pass: true}
-            : {
-                fix: `delete componentConfig["${CRITICAL_RULES_CONFIG_KEY}"].${RETIRED_MODULES_KEY} from justin-sdk.config.json`,
-                message,
-                pass: false,
-                severity: 'warn',
-              };
-        },
         severity: 'warn',
       },
     },
     {
       check: {
-        label: 'RULES_ARTIFACT',
         fn: (): CheckResult => {
           const drift = checkRulesDrift(projectRoot);
           if (!isRulesDriftProblem(drift.status)) return {pass: true};
@@ -1524,6 +1533,7 @@ function makeCriticalRulesChecks(projectRoot: string): CheckNode[] {
             severity: 'warn',
           };
         },
+        label: 'RULES_ARTIFACT',
         severity: 'warn',
       },
     },
@@ -1552,8 +1562,6 @@ function makeLegacyArtifactChecks(projectRoot: string): CheckNode[] {
   return [
     {
       check: {
-        label: 'NO_LEGACY_PROMPTS',
-        severity: 'warn',
         fn: (): CheckResult => {
           const found: string[] = [];
           if (existsSync(resolve(projectRoot, 'docs/prompts'))) {
@@ -1576,6 +1584,8 @@ function makeLegacyArtifactChecks(projectRoot: string): CheckNode[] {
             pass: false,
           };
         },
+        label: 'NO_LEGACY_PROMPTS',
+        severity: 'warn',
       },
     },
   ];
@@ -1605,7 +1615,6 @@ function makeComponentAvailabilityChecks(projectRoot: string): CheckNode[] {
   return [
     {
       check: {
-        label: 'COMPONENTS_AVAILABLE',
         fn: (): CheckResult => {
           const listing = buildComponentListing(projectRoot);
           if (listing.problem != null) {
@@ -1632,6 +1641,7 @@ function makeComponentAvailabilityChecks(projectRoot: string): CheckNode[] {
             pass: true,
           };
         },
+        label: 'COMPONENTS_AVAILABLE',
       },
     },
   ];
@@ -1748,8 +1758,8 @@ export interface DoctorReport {
 
 /** Everything doctor needs before it can run, or why it cannot. */
 type DoctorPlan =
-  | {ok: true; nodes: CheckNode[]; componentCount: number}
-  | {ok: false; error: string};
+  | {componentCount: number; nodes: CheckNode[]; ok: true}
+  | {error: string; ok: false};
 
 /**
  * Resolve the config and assemble the check tree.
@@ -1793,7 +1803,7 @@ function planDoctor(projectRoot: string): DoctorPlan {
   ];
   for (const component of components) {
     const factory = componentCheckFactories[component];
-    if (factory) {
+    if (factory != null) {
       nodes.push(...factory(projectRoot));
     }
   }
@@ -1852,7 +1862,7 @@ export async function runDoctor(
     console.log(emptyPlanMessage(plan.componentCount));
     return 0;
   }
-  return runCheckTree(plan.nodes, checkTreeOptions(options));
+  return await runCheckTree(plan.nodes, checkTreeOptions(options));
 }
 
 /**
@@ -1880,5 +1890,5 @@ export async function renderDoctor(
   if (plan.nodes.length === 0) {
     return {exitCode: 0, report: emptyPlanMessage(plan.componentCount)};
   }
-  return renderCheckTree(plan.nodes, checkTreeOptions(options));
+  return await renderCheckTree(plan.nodes, checkTreeOptions(options));
 }

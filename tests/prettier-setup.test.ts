@@ -6,7 +6,7 @@
  * offline and fast.
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
+import {afterEach, describe, expect, test} from 'bun:test';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
@@ -212,8 +212,8 @@ describe('prettier-setup', () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
-          name: 'test',
           devDependencies: {someOther: '1.0.0'},
+          name: 'test',
         },
       }),
     );
@@ -258,8 +258,8 @@ describe('prettier-setup', () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
-          name: 'test',
           devDependencies: {prettier: '2.0.0'},
+          name: 'test',
         },
       }),
     );
@@ -281,16 +281,16 @@ describe('prettier-setup', () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
-          name: 'test',
           devDependencies: {prettier: '2.0.0'},
+          name: 'test',
         },
       }),
     );
 
     const exitCode = await runPrettierSetup({
+      force: true,
       projectRoot: sb.path,
       quiet: true,
-      force: true,
     });
     expect(exitCode).toBe(0);
 

@@ -37,7 +37,8 @@
  * second step fails is reported loudly with the id, never as a plain failure.
  */
 
-import {type BrOutcome, type BrRunner, runBr} from './br';
+import {sdkRun} from '../sdk-invocation';
+import {type BrOutcome, brFailureDetail, type BrRunner, runBr} from './br';
 
 /**
  * The label that makes a bead a handoff bead (D3). The runner's whole scan is
@@ -63,30 +64,30 @@ export const DISPOSITIONS: readonly Disposition[] = [
 ];
 
 export interface Handoff {
-  schemaVersion: number;
-  /** The session label the runner gave this session. Identity, per D5. */
-  from: string;
+  /** Epic/bead id or short name for the arc of work. */
+  arc: string;
+  branch: string;
+  /** From the latest usage notice. `null` = not measured, never 0. */
+  contextTokens: number | null;
   /** ISO-8601. */
   createdAt: string;
   disposition: Disposition;
-  /** Epic/bead id or short name for the arc of work. */
-  arc: string;
-  /** ABSOLUTE path — a relative one means nothing to the successor's process. */
-  worktree: string;
-  branch: string;
-  /** 2–4 sentences: where things stand. */
-  state: string;
+  /** The session label the runner gave this session. Identity, per D5. */
+  from: string;
   /** The successor's full starting instructions. This text IS its prompt. */
   next: string;
   /** Always present. `[]` means "asked and there are none", never "unknown". */
   openQuestions: string[];
-  /** From the latest usage notice. `null` = not measured, never 0. */
-  contextTokens: number | null;
+  schemaVersion: number;
+  /** 2–4 sentences: where things stand. */
+  state: string;
+  /** ABSOLUTE path — a relative one means nothing to the successor's process. */
+  worktree: string;
 }
 
 export type HandoffParse =
-  | {ok: true; handoff: Handoff}
-  | {ok: false; errors: string[]};
+  | {handoff: Handoff; ok: true}
+  | {errors: string[]; ok: false};
 
 /**
  * A single row of `br list --json`, carrying the fields the runner decides from:
@@ -102,11 +103,11 @@ export type HandoffParse =
  */
 export interface HandoffRow {
   id: string;
-  title: string;
-  status: string;
-  notes: string | null;
   /** MEASURED: br omits the key entirely when a bead has no labels. */
   labels: string[];
+  notes: string | null;
+  status: string;
+  title: string;
   updatedAt: string | null;
 }
 
@@ -127,7 +128,7 @@ export function parseHandoffRows(stdout: string): HandoffRow[] | null {
   }
   if (!Array.isArray(parsed.issues)) return null;
   const rows: HandoffRow[] = [];
-  for (const raw of parsed.issues as Array<Record<string, unknown>>) {
+  for (const raw of parsed.issues as Record<string, unknown>[]) {
     if (
       typeof raw.id !== 'string' ||
       raw.id === '' ||
@@ -303,17 +304,17 @@ export function parseHandoff(notes: string | null | undefined): HandoffParse {
 
   return {
     handoff: {
-      arc: arc as string,
-      branch: branch as string,
+      arc: arc!,
+      branch: branch!,
       contextTokens,
-      createdAt: createdAt as string,
-      disposition: disposition as Disposition,
-      from: from as string,
-      next: next as string,
-      openQuestions: openQuestions as string[],
+      createdAt: createdAt!,
+      disposition: disposition!,
+      from: from!,
+      next: next!,
+      openQuestions: openQuestions!,
       schemaVersion: HANDOFF_SCHEMA_VERSION,
-      state: state as string,
-      worktree: worktree as string,
+      state: state!,
+      worktree: worktree!,
     },
     ok: true,
   };
@@ -323,17 +324,17 @@ export function parseHandoff(notes: string | null | undefined): HandoffParse {
 export function handoffJson(handoff: Handoff): string {
   return JSON.stringify(
     {
-      schemaVersion: handoff.schemaVersion,
-      from: handoff.from,
+      arc: handoff.arc,
+      branch: handoff.branch,
+      contextTokens: handoff.contextTokens,
       createdAt: handoff.createdAt,
       disposition: handoff.disposition,
-      arc: handoff.arc,
-      worktree: handoff.worktree,
-      branch: handoff.branch,
-      state: handoff.state,
+      from: handoff.from,
       next: handoff.next,
       openQuestions: handoff.openQuestions,
-      contextTokens: handoff.contextTokens,
+      schemaVersion: handoff.schemaVersion,
+      state: handoff.state,
+      worktree: handoff.worktree,
     },
     null,
     2,
@@ -378,15 +379,15 @@ export function handoffDescription(handoff: Handoff): string {
 
 /** Everything `justin-loop handoff` needs, already validated by the CLI layer. */
 export interface HandoffInput {
-  from: string;
-  disposition: Disposition;
   arc: string;
-  worktree: string;
   branch: string;
-  state: string;
+  contextTokens: number | null;
+  disposition: Disposition;
+  from: string;
   next: string;
   openQuestions: string[];
-  contextTokens: number | null;
+  state: string;
+  worktree: string;
 }
 
 /**
@@ -405,9 +406,9 @@ export interface HandoffInput {
  * loudly on stderr, with the command to clean it up, and creation proceeds.
  */
 export interface HandoffConflict {
+  detail: string;
   id: string;
   kind: 'same-from' | 'unreadable';
-  detail: string;
 }
 
 /**
@@ -423,20 +424,32 @@ export interface FromScanFindings {
 }
 
 export type CreateHandoffOutcome =
-  | {kind: 'created'; id: string; json: string; warnings: HandoffConflict[]}
-  | {kind: 'refused'; conflicts: HandoffConflict[]; warnings: HandoffConflict[]}
+  | {id: string; json: string; kind: 'created'; warnings: HandoffConflict[]}
+  | {conflicts: HandoffConflict[]; kind: 'refused'; warnings: HandoffConflict[]}
   /** The bead exists but its notes were never written — the two-step gap. */
   | {
-      kind: 'incomplete';
       id: string;
       json: string;
+      kind: 'incomplete';
       reason: string;
       warnings: HandoffConflict[];
     }
   | {kind: 'unavailable'; reason: string};
 
+/**
+ * A failed `br` call, rendered for whoever has to fix it.
+ *
+ * The one-line `reason` first, then the rest of br's stderr up to the bound
+ * (home-base-685h F4). Every refusal this file prints goes through here, so a
+ * `handoff answer` that dies on a clap usage block or a Dolt error shows the
+ * lines that say WHICH argument or WHICH constraint — the one-line shape showed
+ * the heading and dropped the diagnosis.
+ */
 function brFailure(out: BrOutcome): string {
-  return out.reason ?? 'br failed for an unrecorded reason';
+  return [
+    out.reason ?? 'br failed for an unrecorded reason',
+    ...brFailureDetail(out),
+  ].join('\n');
 }
 
 /**
@@ -569,8 +582,6 @@ export function createHandoff(
 
 export interface HandoffCheck {
   id: string;
-  title: string;
-  status: string;
   /**
    * A handoff bead that lost its `handoff` label is invisible to the runner's
    * scan, so it is invalid however good its JSON is — that failure is exactly
@@ -578,6 +589,8 @@ export interface HandoffCheck {
    */
   labelled: boolean;
   parse: HandoffParse;
+  status: string;
+  title: string;
 }
 
 function checkRow(row: HandoffRow): HandoffCheck {
@@ -602,9 +615,9 @@ export function checkErrors(check: HandoffCheck): string[] {
 }
 
 export type ValidateHandoffOutcome =
-  | {kind: 'checked'; checks: HandoffCheck[]}
+  | {checks: HandoffCheck[]; kind: 'checked'}
   /** A named id that br does not have — distinct from "checked and invalid". */
-  | {kind: 'missing'; id: string}
+  | {id: string; kind: 'missing'}
   | {kind: 'unavailable'; reason: string};
 
 /**
@@ -648,9 +661,9 @@ export function validateHandoffs(
  * as "there is nothing there".
  */
 export interface CommandReport {
-  stdout: string[];
-  stderr: string[];
   exitCode: number;
+  stderr: string[];
+  stdout: string[];
 }
 
 /**
@@ -771,6 +784,411 @@ export function emit(report: CommandReport): number {
   return report.exitCode;
 }
 
+// ---------------------------------------------------------------------------
+// ANSWERING A BLOCKED HANDOFF (home-base-1r6d.33.7, epic decision D16)
+//
+// A `blocked` handoff bead stops the loop and stays OPEN on purpose (D14): it IS
+// the question waiting for Justin. Nothing then restarted the arc, because
+// `planStartBoot` only ever boots from a `continue` bead (D10).
+//
+// D16 closes that gap with a helper rather than a second gate in the runner:
+// `handoff answer <id>` folds Justin's answers into `next` and flips the
+// disposition to `continue`, so the bead the runner already knows how to pick up
+// becomes eligible. Hand-editing the notes JSON stays a valid (undocumented)
+// path for exactly the same reason — no "was it answered?" flag exists to lie.
+//
+// Everything here REFUSES loudly rather than patching a bead it does not fully
+// understand: this is an in-place rewrite of the only control channel the loop
+// has, and a half-understood rewrite is worse than no helper.
+// ---------------------------------------------------------------------------
+
+/**
+ * `<slug>-<n>` → `<slug>`.
+ *
+ * The runner's `sessionLabel` builds every label as `${slug}-${n}`, so the slug
+ * to re-run with is the label minus that suffix. Kept HERE rather than imported
+ * from the runner because the runner imports this file; the other direction
+ * would be a cycle.
+ *
+ * A label that does not end in `-<n>` is its own slug — and so is a label that
+ * would strip to nothing (`-1`), because an empty `--label` is exactly the
+ * value the runner refuses.
+ */
+export function slugFromLabel(from: string): string {
+  const stripped = from.replace(/-\d+$/, '');
+  return stripped === '' ? from : stripped;
+}
+
+/**
+ * The command that restarts the arc from an answered bead.
+ *
+ * Built with `sdkRun` (F8, epic home-base-dchjw D1): this string is printed for
+ * Justin to paste into a TERMINAL, and the bare `justin-sdk` form is form 1 —
+ * legal only inside a package.json script value. The contract text a SESSION
+ * reads is deliberately NOT changed: a loop session runs the bare form on PATH
+ * via home-base/bin, and the e2e shims it there.
+ */
+export function rerunCommand(from: string): string {
+  return sdkRun(`justin-loop --pickup --label ${slugFromLabel(from)}`);
+}
+
+/**
+ * Why the rerun command carries no `--model`.
+ *
+ * VERIFIED 2026-09-19: `LedgerRow` (src/justin-loop/runner.ts) has no `model`
+ * field — not a null one, none at all — so the ledger cannot tell what the
+ * chain was run with. Printing `--model opus` would be inventing the fact, and
+ * a rerun that silently switched model is exactly the kind of substitution
+ * critical rule 7 is about. So the flag is omitted and the omission is said out
+ * loud.
+ */
+export const RERUN_MODEL_NOTE =
+  'the ledger does not record the --model a run was started with, so this command carries none and the runner default applies — add --model yourself if this chain was run with another one';
+
+/**
+ * The command Justin runs to answer a blocked handoff. One line, per D13, and
+ * `bun run justin-sdk …` per F8 — he pastes it into a terminal.
+ */
+export function answerCommand(id: string): string {
+  return sdkRun(`justin-loop handoff answer ${id} --answer '<your answer>'`);
+}
+
+/**
+ * Statuses a bead may carry and still be answerable.
+ *
+ * VERIFIED 2026-09-19 against home-base's own `.beads/issues.jsonl`: br emits
+ * exactly four — `open`, `in_progress`, `closed` and `tombstone`. The first two
+ * are a live question waiting for an answer; `closed` is refused as claimed or
+ * finished, and `tombstone` falls through to the unexpected-status refusal,
+ * which is the right end for it — rewriting a deleted bead in place is not
+ * something this helper should decide to do on its own.
+ */
+const ANSWERABLE_STATUSES = ['open', 'in_progress'] as const;
+
+/**
+ * Why a bead could not be answered. Every case is named, because "it did not
+ * work" is not something Justin can act on at 1am with a stalled chain.
+ */
+export type AnswerRefusal =
+  | {answers: number; id: string; kind: 'answer-count'; questions: number}
+  | {disposition: Disposition; id: string; kind: 'not-blocked'}
+  | {errors: string[]; id: string; kind: 'unparseable'}
+  | {id: string; kind: 'closed'}
+  | {id: string; kind: 'missing'}
+  | {id: string; kind: 'not-labelled'}
+  | {id: string; kind: 'unexpected-status'; status: string};
+
+export type AnswerHandoffOutcome =
+  | {
+      handoff: Handoff;
+      id: string;
+      json: string;
+      kind: 'answered';
+      rerun: string;
+    }
+  /** The rewrite was refused; the bead is untouched. */
+  | {kind: 'refused'; refusal: AnswerRefusal}
+  /** br failed on the write, so the bead may be half-rewritten. */
+  | {id: string; json: string; kind: 'incomplete'; reason: string}
+  | {kind: 'unavailable'; reason: string};
+
+/** `YYYY-MM-DD`, UTC — the date stamped onto the answers block. */
+function isoDate(when: Date): string {
+  return when.toISOString().slice(0, 10);
+}
+
+/**
+ * The block appended to `next`, which IS the successor's prompt — so it is
+ * written to be read by a session that has never seen this conversation.
+ *
+ * Three shapes, because the counts genuinely differ in meaning:
+ *   - one answer per question: paired, in order;
+ *   - one answer, several questions: every question quoted, then the single
+ *     answer, said out loud to be one answer for all of them (guessing which
+ *     sentence answered which question would be fabricating the pairing);
+ *   - no questions at all (a blocked bead that listed none — reachable, and the
+ *     runner prints "listed no open questions" for it): the answer alone, with
+ *     the absence stated rather than rendered as an empty list.
+ */
+export function answersBlock(
+  questions: string[],
+  answers: string[],
+  when: Date,
+): string {
+  const head = `ANSWERS FROM JUSTIN (${isoDate(when)}):`;
+  if (questions.length === 0) {
+    return [
+      head,
+      '(this handoff recorded no open questions)',
+      '',
+      ...answers.map((a) => `A: ${a}`),
+    ].join('\n');
+  }
+  if (answers.length === 1) {
+    const only = answers[0]!;
+    const preface =
+      questions.length === 1
+        ? ''
+        : '(one answer for all of the questions below)\n';
+    return `${head}\n${preface}\n${questions
+      .map((q) => `Q: ${q}`)
+      .join('\n')}\nA: ${only}`;
+  }
+  const pairs = questions.map((q, i) => `Q: ${q}\nA: ${answers[i]!}`);
+  return `${head}\n\n${pairs.join('\n\n')}`;
+}
+
+/**
+ * Turn a blocked handoff bead into a `continue` one carrying Justin's answers.
+ *
+ * `now` is injected so the fixture tests can pin the date the block is stamped
+ * with. The rewrite is ONE `br update`: title, description and notes move
+ * together or not at all, so a failed write cannot leave a bead whose title
+ * says `continue` while its notes still say `blocked`.
+ */
+export function answerHandoff(
+  cwd: string,
+  id: string,
+  answers: string[],
+  run: BrRunner = runBr,
+  now: () => Date = () => new Date(),
+): AnswerHandoffOutcome {
+  // `-a` so a CLOSED bead is still FOUND: "already claimed" and "no such bead"
+  // are different answers and must not collapse into one (critical rule 7).
+  const args = ['list', '--id', id, '-a', '--json'];
+  const listed = run(cwd, args);
+  if (!listed.ok) return {kind: 'unavailable', reason: brFailure(listed)};
+  const rows = parseHandoffRows(listed.stdout);
+  if (rows == null) {
+    return {
+      kind: 'unavailable',
+      reason: `could not parse \`br ${args.join(' ')}\``,
+    };
+  }
+  const row = rows.find((r) => r.id === id);
+  if (row == null) return {kind: 'refused', refusal: {id, kind: 'missing'}};
+
+  if (row.status === 'closed') {
+    return {kind: 'refused', refusal: {id, kind: 'closed'}};
+  }
+  if (!(ANSWERABLE_STATUSES as readonly string[]).includes(row.status)) {
+    // A status this code has never seen is not evidence that answering is safe.
+    return {
+      kind: 'refused',
+      refusal: {id, kind: 'unexpected-status', status: row.status},
+    };
+  }
+  if (!row.labels.includes(HANDOFF_LABEL)) {
+    return {kind: 'refused', refusal: {id, kind: 'not-labelled'}};
+  }
+  const parsed = parseHandoff(row.notes);
+  if (!parsed.ok) {
+    return {
+      kind: 'refused',
+      refusal: {errors: parsed.errors, id, kind: 'unparseable'},
+    };
+  }
+  const before = parsed.handoff;
+  if (before.disposition !== 'blocked') {
+    return {
+      kind: 'refused',
+      refusal: {disposition: before.disposition, id, kind: 'not-blocked'},
+    };
+  }
+  // One answer may stand for every question; several must line up one to one,
+  // because the order is the only thing saying which answer belongs to which
+  // question.
+  if (answers.length > 1 && answers.length !== before.openQuestions.length) {
+    return {
+      kind: 'refused',
+      refusal: {
+        answers: answers.length,
+        id,
+        kind: 'answer-count',
+        questions: before.openQuestions.length,
+      },
+    };
+  }
+
+  const after: Handoff = {
+    ...before,
+    disposition: 'continue',
+    next: `${before.next}\n\n${answersBlock(before.openQuestions, answers, now())}`,
+    // The questions are answered; they are IN `next` now. Leaving them here
+    // would make the bead read as still-blocked to anything that looks.
+    openQuestions: [],
+  };
+  const json = handoffJson(after);
+  const updated = run(cwd, [
+    'update',
+    id,
+    `--title=${handoffTitle(after)}`,
+    `--description=${handoffDescription(after)}`,
+    `--notes=${json}`,
+  ]);
+  if (!updated.ok) {
+    return {id, json, kind: 'incomplete', reason: brFailure(updated)};
+  }
+  return {
+    handoff: after,
+    id,
+    json,
+    kind: 'answered',
+    rerun: rerunCommand(before.from),
+  };
+}
+
+export function renderAnswer(outcome: AnswerHandoffOutcome): CommandReport {
+  switch (outcome.kind) {
+    case 'answered':
+      return {
+        exitCode: 0,
+        stderr: [
+          `✓ handoff bead ${outcome.id} answered — disposition is now continue and the answers are in \`next\``,
+          `  ${RERUN_MODEL_NOTE}`,
+        ],
+        // The id first, then the command that restarts the arc: both are meant
+        // to be copied, and nothing else is on stdout.
+        stdout: [outcome.id, outcome.rerun],
+      };
+    case 'incomplete':
+      return {
+        exitCode: 2,
+        stderr: [
+          `INCOMPLETE: bead ${outcome.id} could NOT be rewritten: ${outcome.reason}`,
+          'It is still a BLOCKED handoff and the loop will not pick it up. Apply this by hand, or re-run this command:',
+          `  br update ${outcome.id} --notes='<the JSON below>'`,
+          outcome.json,
+        ],
+        stdout: [],
+      };
+    case 'unavailable':
+      return {
+        exitCode: 2,
+        stderr: [
+          `br unavailable: ${outcome.reason}`,
+          'Nothing was read and nothing was rewritten.',
+        ],
+        stdout: [],
+      };
+    case 'refused':
+      return {
+        exitCode: 1,
+        stderr: [...refusalLines(outcome.refusal), 'The bead was NOT changed.'],
+        stdout: [],
+      };
+  }
+}
+
+/** Every refusal says what was found AND what to do about it. */
+function refusalLines(refusal: AnswerRefusal): string[] {
+  switch (refusal.kind) {
+    case 'missing':
+      return [`REFUSED: no bead ${refusal.id} — nothing to answer.`];
+    case 'closed':
+      return [
+        `REFUSED: bead ${refusal.id} is CLOSED — a claimed or finished handoff is not a question waiting for an answer.`,
+      ];
+    case 'unexpected-status':
+      return [
+        `REFUSED: bead ${refusal.id} has status \`${refusal.status}\`, which this helper does not know how to treat (it answers ${ANSWERABLE_STATUSES.join(' or ')} beads).`,
+      ];
+    case 'not-labelled':
+      return [
+        `REFUSED: bead ${refusal.id} is not labelled \`${HANDOFF_LABEL}\`, so it is not a handoff bead and the runner would never see it.`,
+      ];
+    case 'unparseable':
+      return [
+        `REFUSED: bead ${refusal.id} does not carry readable handoff JSON, so there is nothing to rewrite safely:`,
+        ...refusal.errors.map((e) => `    ${e}`),
+      ];
+    case 'not-blocked':
+      return [
+        `REFUSED: bead ${refusal.id} has disposition \`${refusal.disposition}\`, not \`blocked\` — only a blocked handoff is a question waiting for you.`,
+      ];
+    case 'answer-count':
+      return [
+        `REFUSED: ${refusal.answers} answers for ${refusal.questions} open question(s) on bead ${refusal.id}.`,
+        '  Pass ONE --answer to answer them all at once, or exactly one per question, in order.',
+      ];
+  }
+}
+
+export interface AnswerSources {
+  /** Repeatable `--answer`. */
+  answer: string[] | undefined;
+  /** `--answer-file <path>`. */
+  answerFile: string | undefined;
+  /** Reading stdin would hang with nobody to type into it. */
+  stdinIsTty: boolean;
+}
+
+export type AnswerResolve =
+  | {answers: string[]; ok: true}
+  | {errors: string[]; ok: false};
+
+/**
+ * Where the answer text comes from: `--answer` (repeatable), `--answer-file`,
+ * or stdin.
+ *
+ * The file and stdin paths exist because the e2e showed the CLI-quoted form
+ * fails for the answers that actually matter: a multi-paragraph answer with
+ * quotes in it is miserable to type as a shell argument and easy to mangle.
+ * Both readers are injected so this is testable without touching the real fs.
+ */
+export function resolveAnswers(
+  sources: AnswerSources,
+  readFile: (path: string) => string,
+  readStdin: () => string,
+): AnswerResolve {
+  const flagged = (sources.answer ?? []).filter((a) => a.trim() !== '');
+  if (sources.answerFile !== undefined && flagged.length > 0) {
+    return {
+      errors: [
+        'pass --answer OR --answer-file, not both — two sources of the answer is one too many to guess between',
+      ],
+      ok: false,
+    };
+  }
+  if (flagged.length > 0) return {answers: flagged, ok: true};
+
+  if (sources.answerFile !== undefined) {
+    let text: string;
+    try {
+      text = readFile(sources.answerFile);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return {
+        errors: [
+          `could not read --answer-file ${sources.answerFile}: ${detail}`,
+        ],
+        ok: false,
+      };
+    }
+    if (text.trim() === '') {
+      return {
+        errors: [`--answer-file ${sources.answerFile} is empty`],
+        ok: false,
+      };
+    }
+    return {answers: [text.trimEnd()], ok: true};
+  }
+
+  if (sources.stdinIsTty) {
+    return {
+      errors: [
+        'no answer given: pass --answer=<text>, --answer-file=<path>, or pipe the answer in on stdin',
+      ],
+      ok: false,
+    };
+  }
+  const piped = readStdin();
+  if (piped.trim() === '') {
+    return {errors: ['the answer read from stdin was empty'], ok: false};
+  }
+  return {answers: [piped.trimEnd()], ok: true};
+}
+
 /**
  * Flags the creator cannot do without.
  *
@@ -791,13 +1209,13 @@ export const REQUIRED_CREATE_FLAGS = [
 export type RawCreateFlags = Partial<
   Record<(typeof REQUIRED_CREATE_FLAGS)[number], string | undefined>
 > & {
-  openQuestions?: string[];
   contextTokens?: number;
+  openQuestions?: string[];
 };
 
 export type CreateFlagsParse =
-  | {ok: true; input: HandoffInput}
-  | {ok: false; errors: string[]};
+  | {input: HandoffInput; ok: true}
+  | {errors: string[]; ok: false};
 
 /** Turn argv into a `HandoffInput`, naming every flag that is wrong or absent. */
 export function parseCreateFlags(flags: RawCreateFlags): CreateFlagsParse {
@@ -829,15 +1247,15 @@ export function parseCreateFlags(flags: RawCreateFlags): CreateFlagsParse {
 
   return {
     input: {
-      arc: flags.arc as string,
-      branch: flags.branch as string,
+      arc: flags.arc!,
+      branch: flags.branch!,
       contextTokens: contextTokens ?? null,
       disposition: disposition as Disposition,
-      from: flags.from as string,
-      next: flags.next as string,
+      from: flags.from!,
+      next: flags.next!,
       openQuestions: flags.openQuestions ?? [],
-      state: flags.state as string,
-      worktree: worktree as string,
+      state: flags.state!,
+      worktree: worktree!,
     },
     ok: true,
   };

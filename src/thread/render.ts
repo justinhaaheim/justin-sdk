@@ -18,10 +18,10 @@
  * PURE. No I/O, no clock, no environment.
  */
 
-import {readAskPriority} from './metadata';
-
 import type {ThreadFacts} from './facts';
 import type {ThreadAsk, ThreadReportPayload} from './schema';
+
+import {readAskPriority} from './metadata';
 
 const STOP_REASON_LABEL: Record<string, string> = {
   blocked: '🛑 Blocked on you',
@@ -35,8 +35,8 @@ const STOP_REASON_LABEL: Record<string, string> = {
 const MERGE_LABEL: Record<string, string> = {
   merged: 'merged',
   notApplicable: 'not applicable',
-  unmerged: 'UNMERGED',
   unknown: 'UNKNOWN',
+  unmerged: 'UNMERGED',
 };
 
 /** The footer `renderAskDescription` appends, and the marker for removing it. */
@@ -69,6 +69,51 @@ export function priorityLabel(priority: number): string {
 /** a, b, c, … for an option index. */
 export function optionLetter(index: number): string {
   return String.fromCharCode(97 + index);
+}
+
+/**
+ * Option text minus a leading label that repeats the letter about to be
+ * printed in front of it (home-base-k0b8n.10, K11 rule 7).
+ *
+ * Justin's screenshot showed `a. (Recommended) a. Merge …`: the payload's option
+ * text already began with its own letter, and every surface printed a second
+ * one. Stripped here, once, for every surface: `a.`, `a)`, `(a)`, `a:` and the
+ * dash forms `a —` / `a -` (the payload skeleton itself used to say
+ * `<option a — …>`, which is where those came from). Case-insensitive, and only
+ * when the label MATCHES `letter` — option b's text may begin "a. …" and mean it.
+ * Repeated labels are all stripped, so this is idempotent. Text that would be
+ * left empty is returned unchanged: a label with nothing after it is still the
+ * option, and printing nothing would lose it.
+ */
+export function stripOptionLabel(letter: string, text: string): string {
+  const escaped = letter.replace(/[^a-z]/giu, '');
+  if (escaped === '') return text;
+  const label = new RegExp(
+    `^(?:\\(${escaped}\\)|${escaped}[.):]|${escaped}\\s+[—–-])(?:\\s+|$)`,
+    'iu',
+  );
+  let current = text;
+  for (;;) {
+    const match = label.exec(current);
+    if (match == null) break;
+    const next = current.slice(match[0].length);
+    if (next.trim() === '') break;
+    current = next;
+  }
+  return current;
+}
+
+/**
+ * `a. (Recommended) text` — the one spelling of an option line's content, letter
+ * de-duplicated. Every surface that prints an option builds it here.
+ */
+export function formatOption(
+  index: number,
+  option: {recommended: boolean; text: string},
+): string {
+  const letter = optionLetter(index);
+  const prefix = option.recommended ? '(Recommended) ' : '';
+  return `${letter}. ${prefix}${stripOptionLabel(letter, option.text)}`;
 }
 
 /**
@@ -241,8 +286,7 @@ export function renderAskDescription(ask: ThreadAsk, threadId: string): string {
   if (ask.options.length > 0) {
     lines.push('', 'OPTIONS:');
     ask.options.forEach((option, index) => {
-      const prefix = option.recommended ? '(Recommended) ' : '';
-      lines.push(`  ${optionLetter(index)}. ${prefix}${option.text}`);
+      lines.push(`  ${formatOption(index, option)}`);
     });
   }
   lines.push('', `IF UNANSWERED: ${ask.default}`);

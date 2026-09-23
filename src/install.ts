@@ -41,16 +41,16 @@
 import {existsSync} from 'fs';
 import {resolve} from 'path';
 
+import {componentInstalledEvidence} from './component-manifest';
 import {
-  type ComponentName,
   COMPONENT_NAMES,
   componentApplicability,
+  type ComponentName,
   componentNameForConfigName,
   configNameFor,
   resolveComponents,
   unknownComponentNames,
 } from './component-registry';
-import {componentInstalledEvidence} from './component-manifest';
 import {runComponentByName} from './components';
 import {removeComponent, renderOutcome, summarizeRemoval} from './remove';
 import {
@@ -63,11 +63,10 @@ import {
 } from './setup-helpers';
 
 export interface InstallOptions {
-  projectRoot: string;
-  quiet?: boolean;
-  force?: boolean;
   /** Print the plan and change nothing. */
   dryRun?: boolean;
+  force?: boolean;
+  projectRoot: string;
   /**
    * Also REMOVE components that are on disk but absent from `components`.
    *
@@ -77,6 +76,7 @@ export interface InstallOptions {
    * habit or by a code path that did not type the word.
    */
   prune?: boolean;
+  quiet?: boolean;
   /**
    * The remote `stepDepsHasSdk` verifies the pin tag against. Tests point this
    * at a local bare repo so an install is hermetic; production omits it and gets
@@ -88,6 +88,10 @@ export interface InstallOptions {
 export interface InstallPlan {
   /** Config names to apply, in dependency order. */
   apply: ComponentName[];
+  /** Listed components whose `includeIf` does not pass in this repo. */
+  listedButNotApplicable: ComponentName[];
+  /** Names in `components` that no longer name a component. */
+  unknown: string[];
   /**
    * Components with evidence on disk that the config does not list.
    *
@@ -97,10 +101,6 @@ export interface InstallPlan {
    * deletion into it (dchjw.17 F1).
    */
   unlisted: ComponentName[];
-  /** Names in `components` that no longer name a component. */
-  unknown: string[];
-  /** Listed components whose `includeIf` does not pass in this repo. */
-  listedButNotApplicable: ComponentName[];
 }
 
 /**
@@ -143,6 +143,23 @@ export function planInstall(
   }
 
   return {apply, listedButNotApplicable, unknown, unlisted};
+}
+
+/**
+ * ONE loud line for a config that still carries the retired per-repo rules
+ * include-list (D2). It is not deleted here: it is a human's list, and the
+ * fleet sweep is what takes it out. Saying nothing would let a repo go on
+ * believing its module selection was being honoured.
+ */
+function warnOnRetiredModules(config: Record<string, unknown>): void {
+  const componentConfig = config.componentConfig;
+  if (componentConfig == null || typeof componentConfig !== 'object') return;
+  const rules = (componentConfig as Record<string, unknown>)['critical-rules'];
+  if (rules == null || typeof rules !== 'object') return;
+  if (!('modules' in (rules as Record<string, unknown>))) return;
+  warn(
+    'componentConfig.critical-rules.modules is no longer honoured — delete it. The rules a repo gets are decided by the prompts registry and its predicates at every refresh, never by a list frozen at enrollment (D2).',
+  );
 }
 
 /** Run `install`. Returns an exit code (0 = success). */
@@ -280,21 +297,4 @@ export async function runInstall(options: InstallOptions): Promise<number> {
   }
 
   return 0;
-}
-
-/**
- * ONE loud line for a config that still carries the retired per-repo rules
- * include-list (D2). It is not deleted here: it is a human's list, and the
- * fleet sweep is what takes it out. Saying nothing would let a repo go on
- * believing its module selection was being honoured.
- */
-function warnOnRetiredModules(config: Record<string, unknown>): void {
-  const componentConfig = config.componentConfig;
-  if (componentConfig == null || typeof componentConfig !== 'object') return;
-  const rules = (componentConfig as Record<string, unknown>)['critical-rules'];
-  if (rules == null || typeof rules !== 'object') return;
-  if (!('modules' in (rules as Record<string, unknown>))) return;
-  warn(
-    'componentConfig.critical-rules.modules is no longer honoured — delete it. The rules a repo gets are decided by the prompts registry and its predicates at every refresh, never by a list frozen at enrollment (D2).',
-  );
 }

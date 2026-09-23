@@ -21,9 +21,10 @@
 
 import type {Check} from './check-runner';
 
-import {runChecks} from './check-runner';
 import {existsSync, readFileSync} from 'fs';
 import {resolve} from 'path';
+
+import {runChecks} from './check-runner';
 
 const FIX_SOURCE_PREFIX = 'fix-source:';
 
@@ -62,8 +63,8 @@ export async function runFix(
   for (const [name, command] of Object.entries(scripts)) {
     if (name.startsWith(FIX_SOURCE_PREFIX)) {
       const label = name.slice(FIX_SOURCE_PREFIX.length);
-      if (label) {
-        checks.push({label, command});
+      if (label !== '') {
+        checks.push({command, label});
       }
     }
   }
@@ -81,7 +82,7 @@ export async function runFix(
   // serially regardless of how `signal` is configured.
   checks.sort((a, b) => a.label.localeCompare(b.label));
 
-  return runChecks(checks, {
+  return await runChecks(checks, {
     quiet: options.quiet,
     serial: true,
   });

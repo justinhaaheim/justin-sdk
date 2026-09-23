@@ -40,6 +40,7 @@ import {
 } from 'fs';
 import {join} from 'path';
 
+import {configNameFor} from '../src/component-registry';
 import {
   addUserLevelRulesExclude,
   CLAUDE_MD_EXCLUDES_KEY,
@@ -53,7 +54,7 @@ import {
   runCriticalRulesSetup,
   userLevelRulesExclude,
 } from '../src/critical-rules-setup';
-import {configNameFor} from '../src/component-registry';
+import {checkRulesDrift} from '../src/rules/rules-drift';
 import {
   contentHash,
   deployedIsDirty,
@@ -64,7 +65,6 @@ import {
   STAMP_PREFIX,
 } from '../src/rules/rules-file';
 import {rulesDiff} from '../src/rules-diff';
-import {checkRulesDrift} from '../src/rules/rules-drift';
 import {readJson, setQuiet, writeJson} from '../src/setup-helpers';
 import {git} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -77,8 +77,8 @@ function track(sb: Sandbox): Sandbox {
 
 const SAVED_ENV = {
   home: process.env.HOME,
-  promptsDir: process.env.JSDK_PROMPTS_DIR,
   prettier: process.env.JSDK_PRIME_PRETTIER,
+  promptsDir: process.env.JSDK_PROMPTS_DIR,
   repoUrl: process.env.JSDK_PROMPTS_REPO_URL,
   xdg: process.env.XDG_CONFIG_HOME,
 };
@@ -108,6 +108,9 @@ afterEach(() => {
  * an order bug is visible).
  */
 const RULES_FILES: Record<string, string> = {
+  'src/rules/alpha.md': '# Alpha\n\nALPHA_RULE',
+  'src/rules/beads-only.md':
+    '---\nincludeIf: [isBeadsRust]\n---\n\n# Beads\n\nBEADS_ONLY_RULE',
   'src/rules/index.md': [
     '@./alpha.md',
     '@./s2t-guidelines.md',
@@ -115,16 +118,13 @@ const RULES_FILES: Record<string, string> = {
     '@./rn-only.md',
     '@./omega.md',
   ].join('\n\n'),
-  'src/rules/alpha.md': '# Alpha\n\nALPHA_RULE',
+  'src/rules/omega.md': '# Omega\n\nOMEGA_RULE',
+  'src/rules/rn-only.md':
+    '---\nincludeIf: [isReactNative]\n---\n\n# React Native\n\nRN_ONLY_RULE',
   // 'Dakota' is the marker unique to s2t-guidelines in the real prompts repo —
   // the wake word. It ships to every repo (Justin, 2026-09-18); the SDK used to
   // hold a hardcoded exclusion for exactly this module, and no longer may.
   'src/rules/s2t-guidelines.md': '# Speech to text\n\nThe Dakota wake word.',
-  'src/rules/beads-only.md':
-    '---\nincludeIf: [isBeadsRust]\n---\n\n# Beads\n\nBEADS_ONLY_RULE',
-  'src/rules/rn-only.md':
-    '---\nincludeIf: [isReactNative]\n---\n\n# React Native\n\nRN_ONLY_RULE',
-  'src/rules/omega.md': '# Omega\n\nOMEGA_RULE',
 };
 
 /** A non-git prompts fixture, pointed at via JSDK_PROMPTS_DIR. */
@@ -136,15 +136,6 @@ function promptsFixture(extra: Record<string, string> = {}): string {
   }
   process.env.JSDK_PROMPTS_DIR = sb.path;
   return sb.path;
-}
-
-/** The same content as a REAL git checkout, so headSha() is non-null. */
-function gitPromptsFixture(): {dir: string; sha: string} {
-  process.env.JSDK_PRIME_PRETTIER = '0';
-  const sb = track(createSandbox());
-  const dir = initRepoAt(join(sb.path, 'prompts'), RULES_FILES);
-  process.env.JSDK_PROMPTS_DIR = dir;
-  return {dir, sha: git(dir, ['rev-parse', 'HEAD']).trim()};
 }
 
 /** initRepo, but at an explicit path (the shared helper derives it from a name). */
@@ -166,11 +157,24 @@ function initRepoAt(root: string, files: Record<string, string>): string {
   return root;
 }
 
+/** The same content as a REAL git checkout, so headSha() is non-null. */
+function gitPromptsFixture(): {dir: string; sha: string} {
+  process.env.JSDK_PRIME_PRETTIER = '0';
+  const sb = track(createSandbox());
+  const dir = initRepoAt(join(sb.path, 'prompts'), RULES_FILES);
+  process.env.JSDK_PROMPTS_DIR = dir;
+  return {dir, sha: git(dir, ['rev-parse', 'HEAD']).trim()};
+}
+
 interface ProjectOptions {
-  /** package.json dependencies — drives isReact/isReactNative at every refresh. */
-  deps?: Record<string, string>;
   /** Write a beads_rust .beads/metadata.json — drives isBeadsRust. */
   beads?: boolean;
+  /** package.json dependencies — drives isReact/isReactNative at every refresh. */
+  deps?: Record<string, string>;
+  /** Extra files (used to give a git fixture something unrelated to dirty). */
+  files?: Record<string, string>;
+  /** Make it a real git repo (for the git-status-shaped assertions). */
+  git?: boolean;
   /**
    * Write the RETIRED `componentConfig["critical-rules"].modules` block, as the
    * fleet's configs still carry it. Nothing may honour it.
@@ -178,10 +182,6 @@ interface ProjectOptions {
   modules?: string[];
   /** Omit justin-sdk.config.json entirely. */
   noConfig?: boolean;
-  /** Extra files (used to give a git fixture something unrelated to dirty). */
-  files?: Record<string, string>;
-  /** Make it a real git repo (for the git-status-shaped assertions). */
-  git?: boolean;
 }
 
 function projectFixture(options: ProjectOptions = {}): string {
@@ -360,9 +360,9 @@ describe('assembly resolves the module set from the registry + predicates', () =
     // moves the fingerprint, so it shows up in the committed diff.
     setQuiet(true);
     const dir = promptsFixture({
-      'src/rules/index.md': ['@./alpha.md', '@./future.md'].join('\n\n'),
       'src/rules/future.md':
         '---\nincludeIf: [isSomePredicateFromTheFuture]\n---\n\n# Future\n\nFUTURE_RULE',
+      'src/rules/index.md': ['@./alpha.md', '@./future.md'].join('\n\n'),
     });
     const root = projectFixture();
     const outcome = refreshCriticalRulesArtifact(root, {promptsDir: dir});
@@ -808,8 +808,12 @@ describe('the committed artifact is byte-identical to the repo prettier output',
     const promptsDir = promptsFixture();
     delete process.env.JSDK_PRIME_PRETTIER;
     setQuiet(false); // warn() is suppressed in quiet mode
-    const warns = spyOn(console, 'warn').mockImplementation(() => {});
-    const logs = spyOn(console, 'log').mockImplementation(() => {});
+    const warns = spyOn(console, 'warn').mockImplementation(() => {
+      /* swallowed: the call is asserted, not its output */
+    });
+    const logs = spyOn(console, 'log').mockImplementation(() => {
+      /* swallowed: the call is asserted, not its output */
+    });
     try {
       const root = projectFixture({modules: ['alpha']});
       const binDir = join(root, 'node_modules', '.bin');
@@ -837,8 +841,12 @@ describe('the committed artifact is byte-identical to the repo prettier output',
     const promptsDir = promptsFixture();
     delete process.env.JSDK_PRIME_PRETTIER;
     setQuiet(false);
-    const warns = spyOn(console, 'warn').mockImplementation(() => {});
-    const logs = spyOn(console, 'log').mockImplementation(() => {});
+    const warns = spyOn(console, 'warn').mockImplementation(() => {
+      /* swallowed: the call is asserted, not its output */
+    });
+    const logs = spyOn(console, 'log').mockImplementation(() => {
+      /* swallowed: the call is asserted, not its output */
+    });
     try {
       const root = projectFixture({modules: ['alpha']});
       const binDir = join(root, 'node_modules', '.bin');
@@ -965,9 +973,9 @@ describe('refreshCriticalRulesArtifact touches ONE path', () => {
     expect(
       readFileSync(join(repo, 'justin-sdk.config.json'), 'utf-8'),
     ).not.toBe(cfgBytes);
-    expect(
-      (readJson(join(repo, 'justin-sdk.config.json')) ?? {}).version,
-    ).not.toBe('0.0.1-fixture');
+    expect(readJson(join(repo, 'justin-sdk.config.json'))?.version).not.toBe(
+      '0.0.1-fixture',
+    );
   });
 
   test('the installer writes the artifact from the registry in one pass', async () => {
@@ -1295,7 +1303,11 @@ describe('the user-level rules exclusion', () => {
     sandboxHome();
     const repo = projectFixture({modules: ['alpha']});
     addUserLevelRulesExclude(repo);
-    const [entry] = readExcludes(repo) as string[];
+    const entry = (readExcludes(repo) as string[])[0];
+    // Thrown, not defaulted: "there was no exclude entry" and "the entry was
+    // empty" are different failures, and every assertion below is about the
+    // entry's exact spelling.
+    if (entry == null) throw new Error('no user-level exclude entry was added');
 
     // No glob metacharacter anywhere: an exact path can match exactly one file,
     // which is what makes "does it also hit the repo's artifact?" answerable at

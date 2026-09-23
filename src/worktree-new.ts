@@ -10,25 +10,25 @@
  * absolute worktree path, which the `wt` zsh function captures to `cd`.
  */
 
+import type {SetupEnvResult} from './setup-env';
+
 import {existsSync} from 'node:fs';
 import {join, resolve} from 'node:path';
-
-import type {SetupEnvResult} from './setup-env';
 
 import {
   BOLD,
   DIM,
-  RED,
-  RESET,
-  YELLOW,
   gitSucceeds,
+  RED,
   report,
+  RESET,
   resolvePrimaryCheckout,
   runChild,
   setupEnv,
   SLUG_PATTERN,
   WORKTREE_BRANCH_PREFIX,
   WORKTREE_DIR_SEGMENTS,
+  YELLOW,
 } from './setup-env';
 
 /**

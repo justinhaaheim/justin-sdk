@@ -54,17 +54,17 @@ import {fail, setQuiet, success} from './setup-helpers';
  * without parsing prose, and none of them may be confusable with success.
  */
 export const RULES_UPDATE_EXIT = {
-  ok: 0,
-  notEnrolled: 1,
-  /** The prompts clone could not be refreshed — nothing was written (D15). */
-  cannotRefresh: 2,
-  notARepo: 3,
-  operationInProgress: 4,
-  detachedHead: 5,
   /** Config/selection/assembly is broken — a content fault, not a source fault. */
   assemblyFailed: 6,
+  /** The prompts clone could not be refreshed — nothing was written (D15). */
+  cannotRefresh: 2,
   /** The write succeeded but git add/commit did not. */
   commitFailed: 7,
+  detachedHead: 5,
+  notARepo: 3,
+  notEnrolled: 1,
+  ok: 0,
+  operationInProgress: 4,
 } as const;
 
 /** The tool-owned directory, as a git pathspec (derived, so it cannot drift). */
@@ -99,7 +99,7 @@ function gitRun(dir: string, argv: string[]): GitRun {
     });
     return {ok: true, stderr: ''};
   } catch (error) {
-    const err = error as {stderr?: string; stdout?: string; message?: string};
+    const err = error as {message?: string; stderr?: string; stdout?: string};
     const text = `${err.stderr ?? ''}${err.stdout ?? ''}`.trim();
     return {ok: false, stderr: text.length > 0 ? text : (err.message ?? '')};
   }
@@ -123,8 +123,8 @@ const IN_PROGRESS_MARKERS: readonly (readonly [string, string])[] = [
 ];
 
 export type GitState =
-  | {ok: true; branch: string}
-  | {ok: false; code: number; message: string};
+  | {branch: string; ok: true}
+  | {code: number; message: string; ok: false};
 
 /**
  * Is this checkout in a state where committing one file is a safe, meaningful
@@ -177,13 +177,13 @@ export function describeGitState(dir: string): GitState {
 // ---------------------------------------------------------------------------
 
 export interface RulesUpdateOptions {
-  /** Defaults to the cwd. */
-  projectRoot?: string;
   /** Regenerate even when the artifact on disk is already what we would write. */
   force?: boolean;
-  quiet?: boolean;
+  /** Defaults to the cwd. */
+  projectRoot?: string;
   /** Read this prompts dir as-is instead of the managed clone (tests). */
   promptsDir?: string;
+  quiet?: boolean;
 }
 
 export function runRulesUpdate(options: RulesUpdateOptions = {}): number {

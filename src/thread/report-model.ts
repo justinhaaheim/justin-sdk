@@ -24,9 +24,11 @@
  * PURE. No I/O, no clock, no environment — everything it reads is an argument.
  */
 
+import type {ThreadFacts} from './facts';
+import type {CarriedAsk, NumberedAsk} from './render';
+
 import {sdkRun} from '../sdk-invocation';
 import {formatTokens} from '../usage-check';
-
 import {askKindTag, compareAsksForNumbering, optionLetter} from './render';
 import {
   ASK_PRIORITY_BLOCKING,
@@ -34,9 +36,6 @@ import {
   type ThreadDeviation,
   type ThreadReportPayload,
 } from './schema';
-
-import type {CarriedAsk, NumberedAsk} from './render';
-import type {ThreadFacts} from './facts';
 
 /**
  * How much of Justin's last message the compact report echoes back (D23).
@@ -76,8 +75,8 @@ const NEXT_STEP_LABEL: Record<string, string> = {
 const MERGE_LABEL: Record<string, string> = {
   merged: 'merged',
   notApplicable: 'not applicable',
-  unmerged: 'UNMERGED',
   unknown: 'UNKNOWN',
+  unmerged: 'UNMERGED',
 };
 
 /**
@@ -130,13 +129,13 @@ export interface ModelOption {
  * an ask; letters belong to `options` and nowhere else.
  */
 export interface ModelAsk {
+  /** "carried from report #3", when this ask came from an earlier report. */
+  carriedFrom: string | null;
   /** The hook back into what this is about. Null for a carried ask, whose
    *  restated body already carries its own context. */
   context: string | null;
   /** What Claude does if this is never answered. Null for a carried ask. */
   fallback: string | null;
-  /** "carried from report #3", when this ask came from an earlier report. */
-  carriedFrom: string | null;
   /** The ask bead id, or the missing-id label. */
   id: string;
   /** "[Approve Y/n]" etc. Null for a carried ask. */
@@ -172,10 +171,10 @@ export interface ModelAnswer {
 }
 
 export interface ModelGlance {
-  /** How many P0 asks are open after this report — carried ones included. */
-  p0Count: number;
   nextStep: string;
   nextStepLabel: string;
+  /** How many P0 asks are open after this report — carried ones included. */
+  p0Count: number;
   progressPercent: number;
   stopReasonDetail: string;
   stopReasonLabel: string;
@@ -187,30 +186,28 @@ export interface ModelHeader {
   /** Emoji-prefixed values with no field titles (D19), or titled fields. */
   emoji: boolean;
   repo: string;
-  /** "clean · 2 ahead / 0 behind · HEAD abc123456789" */
-  tree: string;
   /** "497k", "497k / 470k", or the UNKNOWN sentence. */
   tokens: string;
+  /** "clean · 2 ahead / 0 behind · HEAD abc123456789" */
+  tree: string;
   worktree: string;
 }
 
 export interface ReportModel {
-  answers: ModelAnswer[];
-  asks: ModelAsk[];
-  /** Null in the compact report, which leaves them on the bead (D18). */
-  beadsTouched: {description: string; id: string}[] | null;
   /** The command Justin answers with, or the no-bead sentence. */
   answerLine: string;
+  answers: ModelAnswer[];
+  asks: ModelAsk[];
+  /** Measurements that failed (D7). Never silently absent. */
+  autofillFailures: string[];
+  /** Null in the compact report, which leaves them on the bead (D18). */
+  beadsTouched: {description: string; id: string}[] | null;
   continuesFrom: string | null;
   deviations: ThreadDeviation[];
   /** Completed items. The compact report does not print them at all (D23). */
   did: string[];
   discussion: string[];
-  /** Measurements that failed (D7). Never silently absent. */
-  autofillFailures: string[];
   full: boolean;
-  /** How many deviations are of kind `mistake` — the only kind Justin SEES. */
-  mistakeCount: number;
   glance: ModelGlance;
   /** The ARC's goal, not this turn's. */
   goal: string;
@@ -220,6 +217,8 @@ export interface ReportModel {
   /** Justin's last message, verbatim, capped. Null when it could not be read. */
   lastUserMessage: string | null;
   learned: {disposition: string; text: string}[];
+  /** How many deviations are of kind `mistake` — the only kind Justin SEES. */
+  mistakeCount: number;
   /** Prior asks CLOSED by this report. The carried ones are live asks, above. */
   priorClosed: ModelPriorAsk[];
   title: string;
@@ -565,8 +564,6 @@ export function buildReportModel(
     did,
     discussion: payload.discussion,
     full,
-    mistakeCount: payload.deviations.filter((item) => item.kind === 'mistake')
-      .length,
     glance: {
       nextStep: payload.nextStep,
       nextStepLabel: NEXT_STEP_LABEL[payload.nextStep] ?? payload.nextStep,
@@ -606,6 +603,8 @@ export function buildReportModel(
       disposition: item.disposition,
       text: item.text,
     })),
+    mistakeCount: payload.deviations.filter((item) => item.kind === 'mistake')
+      .length,
     priorClosed,
     title: payload.title,
     whatHappensNext: buildWhatHappensNext(payload),

@@ -44,20 +44,20 @@
  * Part of home-base-qyu1.33.4 / qyu1.33.5.
  */
 
-import {formatTouched} from './prime-view';
-import {PR_STATE_NOT_CHECKED} from './disposition';
-
-import type {FilterSummary} from './types';
 import type {Disposition} from './disposition';
 import type {FetchAge} from './fetch-age';
 import type {SubmoduleShift} from './merge-preview';
 import type {BranchOverlap, OverlapReport} from './overlap';
-import type {RepoStatusReport, BranchRow} from './report';
+import type {BranchRow, RepoStatusReport} from './report';
 import type {
   SubmoduleFinding,
   SubmoduleInventory,
   SubmoduleRow,
 } from './submodules';
+import type {FilterSummary} from './types';
+
+import {PR_STATE_NOT_CHECKED} from './disposition';
+import {formatTouched} from './prime-view';
 
 /**
  * Section names and blurbs, in reading order.
@@ -111,7 +111,8 @@ const GROUPS: {blurb: string; heading: string; key: Disposition}[] = [
 /**
  * ANSI styling, on ONLY for an interactive terminal.
  *
- * The caller decides (`shouldStyle()` below) and passes the answer in, so this
+ * The caller decides (`shouldStyle()` in src/cli-style.ts, the one NO_COLOR /
+ * TTY gate every SDK command shares) and passes the answer in, so this
  * module stays pure. Piped output, a redirect to a file, and every agent
  * reading this through a tool call get plain text — which is what they want,
  * since escape sequences in a transcript are noise the reader has to parse past.
@@ -141,15 +142,6 @@ const ANSI: Styler = {
   heading: (s) => `${ESC}1m${ESC}4m${s}${ESC}0m`,
   ok: (s) => `${ESC}32m${s}${ESC}0m`,
 };
-
-/** Whether this process should emit ANSI. Honours the NO_COLOR convention. */
-export function shouldStyle(): boolean {
-  if (process.env.NO_COLOR != null && process.env.NO_COLOR !== '') return false;
-  if (process.env.FORCE_COLOR != null && process.env.FORCE_COLOR !== '') {
-    return true;
-  }
-  return process.stdout.isTTY === true;
-}
 
 // ---------------------------------------------------------------------------
 // Small formatters

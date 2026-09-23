@@ -36,7 +36,7 @@ const results: {detail: string; name: string; ok: boolean}[] = [];
 function check(name: string, ok: boolean, detail = ''): void {
   results.push({detail, name, ok});
   console.log(
-    `${ok ? '  ok  ' : '  FAIL'} ${name}${detail ? ` — ${detail}` : ''}`,
+    `${ok ? '  ok  ' : '  FAIL'} ${name}${detail !== '' ? ` — ${detail}` : ''}`,
   );
 }
 
@@ -126,23 +126,23 @@ async function main(): Promise<number> {
     asks: [
       {
         askIndex: 0,
-        priority: 0,
         defaultAction: 'I take option a.',
         description: '[Pick a/b] Which hook shape?',
         id: 'th-e2e.1',
         kind: 'pick',
         optionCount: 2,
+        priority: 0,
         reportCount: 1,
         title: 'Which hook shape?',
       },
       {
         askIndex: 1,
-        priority: 3,
         defaultAction: 'I leave the script in place.',
         description: '[Approve Y/n] Retire the logger?',
         id: 'th-e2e.2',
         kind: 'approve',
         optionCount: 0,
+        priority: 3,
         reportCount: 1,
         title: 'Retire the logger?',
       },
@@ -152,15 +152,15 @@ async function main(): Promise<number> {
     threadId: 'th-e2e',
     threadTitle: 'e2e: the answer UI in a real browser',
     writer: {
-      async ask(ask, decision) {
+      ask(ask, decision) {
         wrote.push(
           `${ask.id}:${decision.kind === 'skipped' ? 'skip' : decision.text}`,
         );
-        return {ok: true};
+        return Promise.resolve({ok: true});
       },
-      async note(text) {
+      note(text) {
         wrote.push(`note:${text}`);
-        return {ok: true};
+        return Promise.resolve({ok: true});
       },
     },
   });

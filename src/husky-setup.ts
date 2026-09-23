@@ -50,11 +50,11 @@ import {
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_LINT_STAGED_CONFIG: Record<string, string[]> = {
+  '*.{json,md,yml,yaml}': ['prettier --write'],
   '*.{ts,tsx,js,jsx,cjs,mjs}': [
     'bun run lint-base -- --fix',
     'prettier --write',
   ],
-  '*.{json,md,yml,yaml}': ['prettier --write'],
 };
 
 interface DevDepSpec {
@@ -62,7 +62,7 @@ interface DevDepSpec {
   pinned: string;
 }
 
-const HUSKY_DEV_DEPS: ReadonlyArray<DevDepSpec> = [
+const HUSKY_DEV_DEPS: readonly DevDepSpec[] = [
   {name: 'husky', pinned: PINNED.husky},
   {name: 'lint-staged', pinned: PINNED['lint-staged']},
 ];
@@ -91,9 +91,8 @@ function stepHuskyDeps(projectRoot: string, force: boolean): boolean {
     return false;
   }
 
-  const devDeps = ((pkg.devDependencies as
-    | Record<string, string>
-    | undefined) ?? {}) as Record<string, string>;
+  const devDeps =
+    (pkg.devDependencies as Record<string, string> | undefined) ?? {};
   let modified = false;
 
   for (const {name, pinned} of HUSKY_DEV_DEPS) {
@@ -151,8 +150,7 @@ function stepPrepareScript(projectRoot: string): boolean {
     return false;
   }
 
-  const scripts = ((pkg.scripts as Record<string, string> | undefined) ??
-    {}) as Record<string, string>;
+  const scripts = (pkg.scripts as Record<string, string> | undefined) ?? {};
   const existing = scripts.prepare;
 
   if (existing == null) {
@@ -352,10 +350,10 @@ export function stripLegacyHydrationBlock(content: string): {
 }
 
 export type PostCheckoutComposition =
-  | {kind: 'created'; content: string}
-  | {kind: 'replaced'; content: string; legacyStripped: boolean}
-  | {kind: 'inserted'; content: string; legacyStripped: boolean}
-  | {kind: 'unchanged'; content: string}
+  | {content: string; kind: 'created'}
+  | {content: string; kind: 'replaced'; legacyStripped: boolean}
+  | {content: string; kind: 'inserted'; legacyStripped: boolean}
+  | {content: string; kind: 'unchanged'}
   | {kind: 'unterminated'};
 
 /**
@@ -519,16 +517,16 @@ function stepLintStagedConfig(projectRoot: string): boolean {
 // ---------------------------------------------------------------------------
 
 export interface HuskySetupOptions {
-  /** Project root (defaults to cwd) */
-  projectRoot?: string;
-  /** Suppress non-error output (for tests and chaining) */
-  quiet?: boolean;
   /**
    * Force-overwrite hand-modified .husky/pre-commit and any husky/lint-staged
    * devDependency versions that differ from PINNED. Does NOT overwrite a
    * user's existing `prepare` script — that's always preserved.
    */
   force?: boolean;
+  /** Project root (defaults to cwd) */
+  projectRoot?: string;
+  /** Suppress non-error output (for tests and chaining) */
+  quiet?: boolean;
   /**
    * The remote the SDK pin tag is verified against, forwarded to base-setup.
    * Tests point it at a local bare repo so the install is hermetic; production

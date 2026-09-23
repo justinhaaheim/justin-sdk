@@ -8,19 +8,19 @@
  * future edit cannot quietly undo one of them and re-bless the snapshot.
  */
 
+import type {ThreadFacts} from '../src/thread/facts';
+import type {ThreadReportPayload} from '../src/thread/schema';
+
 import {describe, expect, test} from 'bun:test';
 
 import {askKindTag, renderThreadDescription} from '../src/thread/render';
+import {renderMarkdown} from '../src/thread/render-markdown';
 import {
   buildReportModel,
   type BuildReportModelOptions,
 } from '../src/thread/report-model';
-import {renderMarkdown} from '../src/thread/render-markdown';
 import {validateThreadReport} from '../src/thread/schema';
 import {examplePayload} from './thread-schema.test';
-
-import type {ThreadFacts} from '../src/thread/facts';
-import type {ThreadReportPayload} from '../src/thread/schema';
 
 function facts(overrides: Partial<ThreadFacts> = {}): ThreadFacts {
   return {
@@ -30,13 +30,19 @@ function facts(overrides: Partial<ThreadFacts> = {}): ThreadFacts {
     cwd: '/Users/jhaa/Dev/home-base/projects/justin-sdk',
     dirty: true,
     entrypoint: 'cli',
+    firstUserMessage: 'kick this off',
+    firstUserMessageAt: null,
     headSha: '8dc0fd1abc9912345678',
     isWorktree: false,
+    lastAssistantMessage: 'Done — here is the report.',
+    lastAssistantMessageAt: null,
     lastUserMessage: 'go build dispatch 2',
+    lastUserMessageAt: null,
     model: 'claude-opus-5',
-    reportedAt: '2026-09-12T09:00:00.000Z',
     repo: 'justin-sdk',
     repoPath: '/Users/jhaa/Dev/home-base/projects/justin-sdk',
+    reportedAt: '2026-09-12T09:00:00.000Z',
+    resumeCommand: "cd '/repo' && claude --resume session-1",
     sessionId: '5b9ad9b0-89c5-48ca-a5b2-8e6b9bdabf3d',
     startedAt: '2026-09-12T07:00:00.000Z',
     tokensAtStop: 243093,
@@ -106,7 +112,7 @@ describe('renderMarkdown', () => {
       .findIndex((line) => line.startsWith('**You asked me to:**'));
     const didLine = out
       .split('\n')
-      .findIndex((line) => line === '**What I did:**');
+      .findIndex((line) => line === '**✅ What I did:**');
     expect(instructionLine).toBeGreaterThan(-1);
     expect(instructionLine).toBeLessThan(didLine);
   });
@@ -140,8 +146,9 @@ describe('renderMarkdown', () => {
     expect(out).toContain(
       '  2. (P3) · [Pick a/b] Where should componentConfig',
     );
-    expect(out).toContain('     a. (Recommended) Keep closing');
-    expect(out).toContain('     b. Delete — tidier list');
+    // Options are a nested list under their ask (K11 rule 6, k0b8n.10).
+    expect(out).toContain('     - a. (Recommended) Keep closing');
+    expect(out).toContain('     - b. Delete — tidier list');
   });
 
   test('every ask carries its bead id inline (D11.4)', () => {
@@ -188,7 +195,7 @@ describe('renderMarkdown', () => {
     // A zero would read as "clean, fully merged, nothing used" — the exact
     // conflation critical rule 6 exists to ban.
     expect(out).not.toContain('0 ahead / 0 behind');
-    expect(out).toContain('**Facts I could not measure:**');
+    expect(out).toContain('**❓ Facts I could not measure:**');
   });
 
   test('the bead description is the ten-second read (D10)', () => {
@@ -203,10 +210,10 @@ describe('renderMarkdown', () => {
 describe('askKindTag', () => {
   test('names the shape of the answer each ask wants', () => {
     const base = {
-      priority: 3 as const,
       context: 'c',
       default: 'd',
       options: [],
+      priority: 3 as const,
       text: 't',
     };
     expect(askKindTag({...base, kind: 'approve'})).toBe('[Approve Y/n]');
@@ -243,9 +250,9 @@ describe('carried asks (F4)', () => {
   const carried = [
     {
       askIndex: 0,
-      priority: 0,
       fromReport: 1,
       id: 'jl-x7q.1',
+      priority: 0,
       restated: `[Pick a/b] Which default board view do you want?
 
 CONTEXT: you have not been here for hours; this is the dashboard's landing view.
@@ -269,8 +276,8 @@ IF UNANSWERED: I keep by-repo as the default.`,
       threadId: 'jl-x7q',
     });
     const asksSection = text.slice(
-      text.indexOf('**Asks — everything I need from you:**'),
-      text.indexOf('**Prior asks'),
+      text.indexOf('**🙋 Asks — everything I need from you:**'),
+      text.indexOf('**🗂️ Prior asks'),
     );
     expect(asksSection).not.toContain('you are not blocking anything');
     // No group headings any more (D15): the P0 marker IS the grouping, and the
@@ -388,7 +395,7 @@ IF UNANSWERED: I keep by-repo as the default.`,
     // ONE list, titled as Claude's own (D18). Justin said next steps and
     // remaining work were the same thing split across two headings he had to
     // reconcile himself; nextSteps leads because it is the immediate move.
-    expect(text).toContain('**What happens next (mine):**');
+    expect(text).toContain('**▶️ What happens next (mine):**');
     expect(text).toContain('➡️ Merge the branch once the review clears');
     expect(text.indexOf('Merge the branch')).toBeLessThan(
       text.indexOf('the read path'),
@@ -396,8 +403,8 @@ IF UNANSWERED: I keep by-repo as the default.`,
     // Anything JUSTIN must do is an ask, and stays out of this list entirely.
     expect(
       text.slice(
-        text.indexOf('**What happens next (mine):**'),
-        text.indexOf('**What I did:**'),
+        text.indexOf('**▶️ What happens next (mine):**'),
+        text.indexOf('**✅ What I did:**'),
       ),
     ).not.toContain('Approve closing ask beads');
   });

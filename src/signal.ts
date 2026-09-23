@@ -19,10 +19,10 @@
 
 import type {Check} from './check-runner';
 
-import {runChecks} from './check-runner';
 import {existsSync, readFileSync} from 'fs';
 import {resolve} from 'path';
 
+import {runChecks} from './check-runner';
 import {classifyTsCheckOutcome} from './ts-inputs';
 import {
   detectWorktreeHydration,
@@ -98,7 +98,7 @@ export async function runSignal(
   for (const [name, command] of Object.entries(scripts)) {
     if (name.startsWith(SIGNAL_SOURCE_PREFIX)) {
       const label = name.slice(SIGNAL_SOURCE_PREFIX.length);
-      if (label) {
+      if (label !== '') {
         // Every check gets the TS classifier (home-base-gsqz). It keys on
         // TS18003 in the OUTPUT rather than on the label or the command text,
         // so it works whether the script is `tsc --noEmit` or a wrapper — and
@@ -122,7 +122,7 @@ export async function runSignal(
     return 1;
   }
 
-  return runChecks(checks, {
+  return await runChecks(checks, {
     quiet: options.quiet,
     serial: options.serial,
   });

@@ -18,11 +18,15 @@
  * never become markup.
  */
 
-import {classifyReport} from './report-lines';
-import {renderMarkdown} from './render-markdown';
-
 import type {ReportLine} from './report-lines';
 import type {ReportModel} from './report-model';
+
+import {normalizeReportText, renderMarkdown} from './render-markdown';
+import {
+  classifyReport,
+  isRenderedReport,
+  parseOptionLine,
+} from './report-lines';
 
 /** The one escaper. Order matters: `&` first, or the others are double-escaped. */
 export function escapeReportHtml(value: string): string {
@@ -54,8 +58,17 @@ function htmlLine(line: ReportLine): string {
       return `<p class="field"><strong>${escapeReportHtml(line.label ?? '')}:</strong> ${escapeReportHtml(line.rest)}</p>`;
     case 'ask':
       return `<p class="ask ${priorityClass(line.priority)}"><strong>${escapeReportHtml(line.label ?? '')}.</strong> ${escapeReportHtml(line.rest)}</p>`;
-    case 'askDetail':
-      return `<p class="askdetail ${priorityClass(line.priority)}">${escapeReportHtml(line.rest)}</p>`;
+    case 'askDetail': {
+      // An option arrives as a nested-list item (`- a. …`, K11 rule 6); the
+      // page shows it as the lettered paragraph it always was — the markdown's
+      // list marker is for the chat UI, not for this page's structure.
+      const option = parseOptionLine(line.rest);
+      const shown =
+        option == null
+          ? line.rest
+          : `${option.letter}. ${option.recommended ? '(Recommended) ' : ''}${option.text}`;
+      return `<p class="askdetail ${priorityClass(line.priority)}">${escapeReportHtml(shown)}</p>`;
+    }
     case 'rule':
       // The emoji rules are a scrollback delimiter for a terminal; in a page
       // they are a horizontal line and nothing else.
@@ -86,12 +99,19 @@ function htmlLine(line: ReportLine): string {
  * which has the thread bead's stored notes and no model.
  *
  * Consecutive bullets are wrapped in one `<ul>`, so a list reads as a list
- * rather than as loose `<li>`s the browser has to guess at.
+ * rather than as loose `<li>`s the browser has to guess at. The blank line the
+ * markdown now puts between list items (K11 rule 1) does not end the list —
+ * only a line that is not a bullet does — so the page's structure is the same
+ * as before the spacing change; its breathing room comes from the stylesheet.
  */
 export function htmlFromReportText(markdown: string): string {
   const out: string[] = ['<div class="report">'];
   let inList = false;
-  for (const line of classifyReport(markdown)) {
+  const text = isRenderedReport(markdown)
+    ? normalizeReportText(markdown)
+    : markdown;
+  for (const line of classifyReport(text)) {
+    if (line.kind === 'blank') continue;
     const html = htmlLine(line);
     if (line.kind === 'bullet') {
       if (!inList) {

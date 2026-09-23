@@ -26,20 +26,21 @@
  * Part of home-base-qyu1.
  */
 
+import type {Argv} from 'yargs';
+
 import yargs from 'yargs';
 import {hideBin} from 'yargs/helpers';
 
-import type {Argv} from 'yargs';
-
+import {shouldStyle} from '../cli-style';
 import {
   getSdkVersion,
   helpHeader,
   helpWrapWidth,
   UNKNOWN_VERSION,
 } from '../sdk-identity';
-import {buildPlan, executePlan, executeRemotePlan, renderPlan} from './plan';
 import {DEFAULT_PAIR_CAP} from './overlap';
-import {renderReportPretty, shouldStyle} from './pretty';
+import {buildPlan, executePlan, executeRemotePlan, renderPlan} from './plan';
+import {renderReportPretty} from './pretty';
 import {buildReport, type RepoStatusReport} from './report';
 
 /**
@@ -526,94 +527,120 @@ function emit(report: RepoStatusReport | null, format: Format): number {
 // Handlers set `process.exitCode` rather than calling `process.exit`, so
 // hosting these inside a larger CLI can never terminate it mid-parse.
 
+/**
+ * What each handler reads off `argv`, DERIVED from the builder beside it.
+ *
+ * yargs types a command object's handler argument as `any`, and that `any` is
+ * not a formality: every `args.foo` in a handler was an unchecked read, so a
+ * flag renamed in the builder arrived as `undefined` at runtime with nothing
+ * failing to compile. Deriving the type from `typeof <name>Builder` rather
+ * than restating the flags by hand is what keeps that true after the next edit
+ * — a restated shape is just a second thing to forget to update.
+ *
+ * `GlobalArgs` is intersected in because `--repo` and `--json` are declared on
+ * the ROOT parser (buildRepoStatus), not on any subcommand builder, so they
+ * reach the handler through yargs' index signature as `any` otherwise.
+ */
+interface GlobalArgs {
+  json: boolean;
+  repo: string;
+}
+
+type ArgsOf<B extends (y: never) => {argv: unknown}> = Awaited<
+  ReturnType<B>['argv']
+>;
+
+const statusBuilder = (y: Argv<GlobalArgs>) =>
+  y
+    .epilogue(STATUS_NARRATIVE)
+    .option('content', {
+      default: true,
+      describe: 'Run per-commit content proofs (local, thorough)',
+      type: 'boolean' as const,
+    })
+    .option('prs', {
+      default: true,
+      describe: 'Query GitHub for PR state (network)',
+      type: 'boolean' as const,
+    })
+    .option('submodules', {
+      default: true,
+      describe: 'Report submodule gitlink state (local, cheap)',
+      type: 'boolean' as const,
+    })
+    .option('submodule-stores', {
+      default: false,
+      describe:
+        "Open every worktree's submodule object store, not just this worktree's",
+      type: 'boolean' as const,
+    })
+    // NO yargs `default` on these two, deliberately. A yargs default lands in
+    // `argv` exactly like a typed flag, so `.conflicts()` below would fire on
+    // every single run — measured. The defaults are applied in the handler
+    // instead, and stated in the describe text so `--help` still carries them.
+    .option('since-days', {
+      describe: `Ignore branches with no commits in this many days (default: ${DEFAULT_STATUS_SINCE_DAYS})`,
+      type: 'number' as const,
+    })
+    .option('include-archive', {
+      describe: 'Also list archive/* mirrors (default: hidden)',
+      type: 'boolean' as const,
+    })
+    .option('all', {
+      default: false,
+      describe:
+        'No filtering at all: every branch, however old, archive/* included',
+      type: 'boolean' as const,
+    })
+    .option('merge-preview', {
+      default: true,
+      describe:
+        'Run `git merge-tree` per unmerged branch to see if it merges cleanly',
+      type: 'boolean' as const,
+    })
+    .option('overlaps', {
+      default: true,
+      describe:
+        "Read each branch's changed files and cross-compare them for collisions",
+      type: 'boolean' as const,
+    })
+    .option('pair-cap', {
+      default: DEFAULT_PAIR_CAP,
+      describe: 'Max branch pairs to merge-check, after the shared-file screen',
+      type: 'number' as const,
+    })
+    // No yargs `default` here, for the same measured reason as `since-days`
+    // above: a default lands in `argv` exactly like a typed flag, so a
+    // `.conflicts('json', 'yaml')` would refuse every run. The two are
+    // checked against each other in the handler instead.
+    .option('yaml', {
+      describe:
+        'Emit the full typed object as YAML instead of the ledger (default: ledger)',
+      type: 'boolean' as const,
+    })
+    // Retained so anything that learned `--pretty` when it was opt-in keeps
+    // working. It now selects what it would have got anyway.
+    .option('pretty', {
+      default: false,
+      describe: 'Deprecated no-op — the readable ledger is now the default',
+      hidden: true,
+      type: 'boolean' as const,
+    })
+    // An explicit --all next to an explicit --since-days is a contradiction —
+    // two different windows — and is refused rather than silently resolved,
+    // the same reflex as plan-experimental refusing --json with --markdown.
+    // --include-archive is NOT in that class: alongside --all it is merely
+    // redundant, and --all winning errs toward showing MORE, which is the
+    // safe direction for a filter.
+    .conflicts('all', 'since-days');
+
+type StatusArgs = ArgsOf<typeof statusBuilder>;
+
 const statusCommand = {
-  builder: (y: Argv) =>
-    y
-      .epilogue(STATUS_NARRATIVE)
-      .option('content', {
-        default: true,
-        describe: 'Run per-commit content proofs (local, thorough)',
-        type: 'boolean' as const,
-      })
-      .option('prs', {
-        default: true,
-        describe: 'Query GitHub for PR state (network)',
-        type: 'boolean' as const,
-      })
-      .option('submodules', {
-        default: true,
-        describe: 'Report submodule gitlink state (local, cheap)',
-        type: 'boolean' as const,
-      })
-      .option('submodule-stores', {
-        default: false,
-        describe:
-          "Open every worktree's submodule object store, not just this worktree's",
-        type: 'boolean' as const,
-      })
-      // NO yargs `default` on these two, deliberately. A yargs default lands in
-      // `argv` exactly like a typed flag, so `.conflicts()` below would fire on
-      // every single run — measured. The defaults are applied in the handler
-      // instead, and stated in the describe text so `--help` still carries them.
-      .option('since-days', {
-        describe: `Ignore branches with no commits in this many days (default: ${DEFAULT_STATUS_SINCE_DAYS})`,
-        type: 'number' as const,
-      })
-      .option('include-archive', {
-        describe: 'Also list archive/* mirrors (default: hidden)',
-        type: 'boolean' as const,
-      })
-      .option('all', {
-        default: false,
-        describe:
-          'No filtering at all: every branch, however old, archive/* included',
-        type: 'boolean' as const,
-      })
-      .option('merge-preview', {
-        default: true,
-        describe:
-          'Run `git merge-tree` per unmerged branch to see if it merges cleanly',
-        type: 'boolean' as const,
-      })
-      .option('overlaps', {
-        default: true,
-        describe:
-          "Read each branch's changed files and cross-compare them for collisions",
-        type: 'boolean' as const,
-      })
-      .option('pair-cap', {
-        default: DEFAULT_PAIR_CAP,
-        describe:
-          'Max branch pairs to merge-check, after the shared-file screen',
-        type: 'number' as const,
-      })
-      // No yargs `default` here, for the same measured reason as `since-days`
-      // above: a default lands in `argv` exactly like a typed flag, so a
-      // `.conflicts('json', 'yaml')` would refuse every run. The two are
-      // checked against each other in the handler instead.
-      .option('yaml', {
-        describe:
-          'Emit the full typed object as YAML instead of the ledger (default: ledger)',
-        type: 'boolean' as const,
-      })
-      // Retained so anything that learned `--pretty` when it was opt-in keeps
-      // working. It now selects what it would have got anyway.
-      .option('pretty', {
-        default: false,
-        describe: 'Deprecated no-op — the readable ledger is now the default',
-        hidden: true,
-        type: 'boolean' as const,
-      })
-      // An explicit --all next to an explicit --since-days is a contradiction —
-      // two different windows — and is refused rather than silently resolved,
-      // the same reflex as plan-experimental refusing --json with --markdown.
-      // --include-archive is NOT in that class: alongside --all it is merely
-      // redundant, and --all winning errs toward showing MORE, which is the
-      // safe direction for a filter.
-      .conflicts('all', 'since-days'),
+  builder: statusBuilder,
   command: ['status', '$0'],
   describe: 'Per-branch disposition ledger for the repo',
-  handler: (args: any) => {
+  handler: (args: StatusArgs) => {
     if (args.json === true && args.yaml === true) {
       console.error(
         '--json and --yaml select different renderings; pass at most one',
@@ -642,15 +669,19 @@ const statusCommand = {
   },
 };
 
+const branchBuilder = (y: Argv<GlobalArgs>) =>
+  y
+    .epilogue(BRANCH_NARRATIVE)
+    .positional('name', {demandOption: true, type: 'string' as const})
+    .option('prs', {default: true, type: 'boolean' as const});
+
+type BranchArgs = ArgsOf<typeof branchBuilder>;
+
 const branchCommand = {
-  builder: (y: Argv) =>
-    y
-      .epilogue(BRANCH_NARRATIVE)
-      .positional('name', {demandOption: true, type: 'string' as const})
-      .option('prs', {default: true, type: 'boolean' as const}),
+  builder: branchBuilder,
   command: 'branch <name>',
   describe: 'Comprehensive commit-by-commit deep-dive on one branch',
-  handler: (args: any) => {
+  handler: (args: BranchArgs) => {
     const report = buildReport({
       content: true,
       cwd: args.repo,
@@ -670,7 +701,7 @@ const branchCommand = {
     // `branches == null` is NOT "no such branch" — the listing failed, so this
     // branch's absence from it says nothing about the branch. `emit` reports
     // that case for what it is.
-    if (report?.branches != null && report.branches.length === 0) {
+    if (report?.branches?.length === 0) {
       console.error(`no such branch: ${args.name}`);
       process.exitCode = 1;
       return;
@@ -683,17 +714,40 @@ const branchCommand = {
   },
 };
 
+const planBuilder = (y: Argv<GlobalArgs>) =>
+  y.epilogue(PLAN_NARRATIVE).option('markdown', {
+    default: false,
+    describe: 'Render the prose dry run for a human instead of YAML',
+    type: 'boolean' as const,
+  });
+
+type PlanArgs = ArgsOf<typeof planBuilder>;
+
+/**
+ * Why there is no plan, on stderr, and nothing on stdout.
+ *
+ * `buildPlan` returns null only when the branch listing failed, and the whole
+ * point of that null is that an empty plan would have read as "nothing to clean
+ * up" (home-base-qyu1.23). Printing an empty object here would put that reading
+ * straight back, so the commands print the reason and exit non-zero instead.
+ */
+function reportNoPlan(report: RepoStatusReport): void {
+  console.error(
+    'no plan: the repo\'s branches could not be enumerated, so there is no branch set to plan over — this is NOT "nothing to clean up"',
+  );
+  for (const failure of report.enumerationFailures ?? []) {
+    console.error(
+      `  ${failure.what}: \`${failure.command}\` failed. ${failure.why}. ${failure.diagnose}`,
+    );
+  }
+}
+
 const planCommand = {
-  builder: (y: Argv) =>
-    y.epilogue(PLAN_NARRATIVE).option('markdown', {
-      default: false,
-      describe: 'Render the prose dry run for a human instead of YAML',
-      type: 'boolean' as const,
-    }),
+  builder: planBuilder,
   command: 'plan-experimental',
   describe:
     'ALPHA (unstable, verdicts have been wrong) — proposed cleanup as a dry run',
-  handler: (args: any) => {
+  handler: (args: PlanArgs) => {
     // Before anything, including the argument checks below: the banner must not
     // be something a caller can miss by getting a flag wrong.
     warnAlpha();
@@ -709,8 +763,6 @@ const planCommand = {
     const report = buildReport({
       content: true,
       cwd: args.repo,
-      prs: true,
-      sinceDays: null,
       // The plan only ever archives BRANCHES, so submodule state would be
       // computed and then discarded. `status` is where it belongs — and the
       // same goes for the merge preview and the overlap walk, which say how
@@ -720,6 +772,8 @@ const planCommand = {
       // silently partial, which is the one thing a plan may not be.
       mergePreview: false,
       overlaps: false,
+      prs: true,
+      sinceDays: null,
       submodules: false,
       // Same reasoning: a plan archives BRANCHES, so a `git status` in every
       // worktree would be run and thrown away. `status` is where that belongs.
@@ -742,55 +796,40 @@ const planCommand = {
   },
 };
 
-/**
- * Why there is no plan, on stderr, and nothing on stdout.
- *
- * `buildPlan` returns null only when the branch listing failed, and the whole
- * point of that null is that an empty plan would have read as "nothing to clean
- * up" (home-base-qyu1.23). Printing an empty object here would put that reading
- * straight back, so the commands print the reason and exit non-zero instead.
- */
-function reportNoPlan(report: RepoStatusReport): void {
-  console.error(
-    'no plan: the repo\'s branches could not be enumerated, so there is no branch set to plan over — this is NOT "nothing to clean up"',
-  );
-  for (const failure of report.enumerationFailures ?? []) {
-    console.error(
-      `  ${failure.what}: \`${failure.command}\` failed. ${failure.why}. ${failure.diagnose}`,
-    );
-  }
-}
+const applyBuilder = (y: Argv<GlobalArgs>) =>
+  y
+    .epilogue(APPLY_NARRATIVE)
+    .option('safe-only', {
+      default: false,
+      describe: 'Required. Act only on branches proven safe',
+      type: 'boolean' as const,
+    })
+    .option('include-remote', {
+      default: false,
+      describe:
+        'Also archive proven-safe REMOTE branches (pushes archive/<name>, then deletes the original)',
+      type: 'boolean' as const,
+    })
+    .option('yes', {
+      default: false,
+      describe: 'Required. Confirm the repo will be modified',
+      type: 'boolean' as const,
+    })
+    .option(RISK_ACK_FLAG, {
+      default: false,
+      describe:
+        'Required to execute. Acknowledges that this is alpha, that its safety verdicts have been wrong, and that --include-remote deletes remote branches irreversibly',
+      type: 'boolean' as const,
+    });
+
+type ApplyArgs = ArgsOf<typeof applyBuilder>;
 
 const applyCommand = {
-  builder: (y: Argv) =>
-    y
-      .epilogue(APPLY_NARRATIVE)
-      .option('safe-only', {
-        default: false,
-        describe: 'Required. Act only on branches proven safe',
-        type: 'boolean' as const,
-      })
-      .option('include-remote', {
-        default: false,
-        describe:
-          'Also archive proven-safe REMOTE branches (pushes archive/<name>, then deletes the original)',
-        type: 'boolean' as const,
-      })
-      .option('yes', {
-        default: false,
-        describe: 'Required. Confirm the repo will be modified',
-        type: 'boolean' as const,
-      })
-      .option(RISK_ACK_FLAG, {
-        default: false,
-        describe:
-          'Required to execute. Acknowledges that this is alpha, that its safety verdicts have been wrong, and that --include-remote deletes remote branches irreversibly',
-        type: 'boolean' as const,
-      }),
+  builder: applyBuilder,
   command: 'apply-experimental',
   describe:
     'ALPHA (unstable, destructive) — execute the proven-safe cleanup; modifies the repo',
-  handler: (args: any) => {
+  handler: (args: ApplyArgs) => {
     warnAlpha();
     // THE ACKNOWLEDGEMENT GATES EXECUTION, NOT INSPECTION (home-base-qyu1.29).
     //
@@ -818,8 +857,6 @@ const applyCommand = {
     const report = buildReport({
       content: true,
       cwd: args.repo,
-      prs: true,
-      sinceDays: null,
       // The plan only ever archives BRANCHES, so submodule state would be
       // computed and then discarded. `status` is where it belongs — and the
       // same goes for the merge preview and the overlap walk, which say how
@@ -829,6 +866,8 @@ const applyCommand = {
       // silently partial, which is the one thing a plan may not be.
       mergePreview: false,
       overlaps: false,
+      prs: true,
+      sinceDays: null,
       submodules: false,
       // Same reasoning: a plan archives BRANCHES, so a `git status` in every
       // worktree would be run and thrown away. `status` is where that belongs.

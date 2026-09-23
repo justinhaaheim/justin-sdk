@@ -46,7 +46,7 @@ import {
  * noise. Existing `.env` lines in a consumer's file are left untouched — this
  * list only says what the SDK ADDS.
  */
-export const BASELINE_ENTRIES: ReadonlyArray<string> = [
+export const BASELINE_ENTRIES: readonly string[] = [
   'node_modules/',
   'dist/',
   'build/',
@@ -120,15 +120,15 @@ function stepGitignoreFile(projectRoot: string): boolean {
 // ---------------------------------------------------------------------------
 
 export interface GitignoreSetupOptions {
-  /** Project root (defaults to cwd) */
-  projectRoot?: string;
-  /** Suppress non-error output (useful for tests / chained setup commands) */
-  quiet?: boolean;
   /**
    * Reserved for future use. The gitignore component has no
    * destructive-overwrite path today, so this currently has no effect.
    */
   force?: boolean;
+  /** Project root (defaults to cwd) */
+  projectRoot?: string;
+  /** Suppress non-error output (useful for tests / chained setup commands) */
+  quiet?: boolean;
   /**
    * The remote the SDK pin tag is verified against, forwarded to base-setup.
    * Tests point it at a local bare repo so the install is hermetic; production

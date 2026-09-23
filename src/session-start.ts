@@ -54,8 +54,8 @@ import {
   contentHash,
   deployedIsDirty,
   deployedSourceSha,
-  PRIME_FULL_CMD,
   prettierMarkdown,
+  PRIME_FULL_CMD,
   readDeployedStamp,
   rulesFilePath,
   SYNC_RULES_CMD,
@@ -65,10 +65,10 @@ import {runSetupEnv} from './setup-env-command';
 const RULES_FILE_DISPLAY = '~/.claude/rules/justin-sdk/critical-rules.md';
 
 export interface SessionStartOptions {
-  /** User-level hook mode: stay completely silent in an enrolled repo. */
-  userLevel?: boolean;
   /** Override the starting directory (tests). Default `process.cwd()`. */
   cwd?: string;
+  /** User-level hook mode: stay completely silent in an enrolled repo. */
+  userLevel?: boolean;
 }
 
 /**
@@ -233,9 +233,7 @@ export function composeSessionStart(projectRoot: string): Injection {
   let driftUnknown: string | null = null;
   if (!fileMissing && rulesFailed == null) {
     const shaMatch =
-      deployedSha != null &&
-      cloneSha != null &&
-      deployedSha === cloneSha.slice(0, 12);
+      deployedSha != null && deployedSha === cloneSha?.slice(0, 12);
     if (!shaMatch && sourceDir != null) {
       try {
         const universal = assemble(
@@ -353,7 +351,7 @@ export async function runSessionStart(
   // User-level mode never takes this branch: it is reached only through the
   // local ~/.claude/settings.json hook.
   if (options.userLevel !== true && process.env.CLAUDE_CODE_REMOTE === 'true') {
-    return runSetupEnv({});
+    return await runSetupEnv({});
   }
 
   const projectRoot = sessionProjectRoot(cwd);

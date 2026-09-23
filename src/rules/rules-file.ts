@@ -78,6 +78,33 @@ export type PrettierMarkdownResult =
 /** An ignore file with no rules in it. See `prettierMarkdown` for why. */
 const IGNORE_NOTHING = '/dev/null';
 
+/** One line naming what actually went wrong, stderr included — the whole point
+ * of not swallowing the error. Kept local so this module stays import-free. */
+function describeExecFailure(error: unknown): string {
+  const e = error as {
+    code?: unknown;
+    signal?: unknown;
+    status?: unknown;
+    stderr?: unknown;
+  };
+  const bits: string[] = [];
+  if (e?.status != null) bits.push(`exit ${String(e.status)}`);
+  if (e?.signal != null) bits.push(`signal ${String(e.signal)}`);
+  if (e?.code != null) bits.push(String(e.code));
+  const stderr =
+    typeof e?.stderr === 'string'
+      ? e.stderr
+      : e?.stderr != null
+        ? String(e.stderr)
+        : '';
+  const trimmed = stderr.trim().split('\n').slice(0, 5).join(' / ');
+  if (trimmed.length > 0) bits.push(trimmed);
+  if (bits.length === 0) {
+    bits.push(error instanceof Error ? error.message : String(error));
+  }
+  return bits.join(' — ');
+}
+
 /**
  * Format markdown with prettier, resolving that repo's OWN configuration.
  *
@@ -172,33 +199,6 @@ export function prettierMarkdown(
   return {markdown: out.trimEnd(), status: 'formatted'};
 }
 
-/** One line naming what actually went wrong, stderr included — the whole point
- * of not swallowing the error. Kept local so this module stays import-free. */
-function describeExecFailure(error: unknown): string {
-  const e = error as {
-    code?: unknown;
-    signal?: unknown;
-    status?: unknown;
-    stderr?: unknown;
-  };
-  const bits: string[] = [];
-  if (e?.status != null) bits.push(`exit ${String(e.status)}`);
-  if (e?.signal != null) bits.push(`signal ${String(e.signal)}`);
-  if (e?.code != null) bits.push(String(e.code));
-  const stderr =
-    typeof e?.stderr === 'string'
-      ? e.stderr
-      : e?.stderr != null
-        ? String(e.stderr)
-        : '';
-  const trimmed = stderr.trim().split('\n').slice(0, 5).join(' / ');
-  if (trimmed.length > 0) bits.push(trimmed);
-  if (bits.length === 0) {
-    bits.push(error instanceof Error ? error.message : String(error));
-  }
-  return bits.join(' — ');
-}
-
 /**
  * Universal invocations — the spelling for commands that must run from ANY
  * project, INCLUDING ones that have never heard of the SDK. This is the D1(c)
@@ -276,7 +276,6 @@ export function projectRulesFilePath(projectRoot: string): string {
 }
 
 export interface RulesStamp {
-  version: string;
   /** Source commit sha (12 hex), possibly suffixed '-dirty', or 'unknown'. */
   commit: string;
   contentHash: string | null;
@@ -288,6 +287,7 @@ export interface RulesStamp {
   moduleFingerprint: string | null;
   /** Committer date of the prompts commit (YYYY-MM-DD), when stated. */
   promptsDate: string | null;
+  version: string;
 }
 
 /** Parse the stamp from a deployed rules file. null = file missing, unreadable,
@@ -303,7 +303,6 @@ export function readDeployedStamp(file: string): RulesStamp | null {
   }
   if (!firstLine.startsWith(STAMP_PREFIX)) return null;
   return {
-    version: /· v(\S+)/.exec(firstLine)?.[1] ?? 'unknown',
     // `commit <sha>` is the user-level file's spelling; `prompts <sha> (<date>)`
     // is the committed artifact's (dchjw.3). ONE parser for both, so "which sha
     // was this generated from" cannot mean two different things.
@@ -312,6 +311,7 @@ export function readDeployedStamp(file: string): RulesStamp | null {
     moduleFingerprint: /modules ([0-9a-f]+)/.exec(firstLine)?.[1] ?? null,
     promptsDate:
       /· prompts \S+ \((\d{4}-\d{2}-\d{2})\)/.exec(firstLine)?.[1] ?? null,
+    version: /· v(\S+)/.exec(firstLine)?.[1] ?? 'unknown',
   };
 }
 
@@ -322,11 +322,12 @@ export function readDeployedStamp(file: string): RulesStamp | null {
  * builder at all — see `buildArtifactStamp`.
  */
 export function buildStamp(opts: {
-  version?: string;
+  // ISO timestamp or YYYY-MM-DD date
+  command?: string;
   commit: string; // sha, sha-dirty, or 'unknown'
   contentHash: string;
-  generated: string; // ISO timestamp or YYYY-MM-DD date
-  command?: string;
+  generated: string;
+  version?: string;
 }): string {
   const version =
     opts.version != null && opts.version.length > 0
@@ -365,13 +366,13 @@ export function buildStamp(opts: {
  *    field an edited artifact would be certified in sync by its own stamp.
  */
 export function buildArtifactStamp(opts: {
-  /** 12-char prompts sha, optionally '-dirty'-suffixed, or 'unknown'. */
-  promptsSha: string;
+  command?: string;
+  contentHash: string;
+  moduleFingerprint: string;
   /** Prompts commit date (YYYY-MM-DD), or 'unknown' — never a fabricated one. */
   promptsDate: string;
-  moduleFingerprint: string;
-  contentHash: string;
-  command?: string;
+  /** 12-char prompts sha, optionally '-dirty'-suffixed, or 'unknown'. */
+  promptsSha: string;
 }): string {
   return (
     `${STAMP_PREFIX} · prompts ${opts.promptsSha} (${opts.promptsDate})` +

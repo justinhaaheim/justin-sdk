@@ -31,13 +31,25 @@
  * before every session for free.
  */
 import {spawnSync} from 'node:child_process';
-import {appendFileSync, existsSync, mkdirSync} from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  statSync,
+} from 'node:fs';
 import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
 
+import {type BrOutcome, brFailureDetail, type BrRunner, runBr} from './br';
 import {describeChildFailure, runChild} from './child';
-
+// Re-exported (not redefined) so the runner's own callers and tests can name the
+// variable without a second spelling of it — see predecessor-env.ts.
+import {PREDECESSOR_SESSION_ENV} from './predecessor-env';
 import {
+  answerCommand,
   type Disposition,
   type Handoff,
   HANDOFF_LABEL,
@@ -45,8 +57,9 @@ import {
   parseCreatedId,
   parseHandoff,
   parseHandoffRows,
+  rerunCommand,
+  slugFromLabel,
 } from './handoff';
-import {type BrOutcome, type BrRunner, runBr} from './br';
 
 export {HANDOFF_LABEL};
 
@@ -55,15 +68,15 @@ export {HANDOFF_LABEL};
 // ---------------------------------------------------------------------------
 
 export interface UsageSnapshot {
-  /** Percent of the 5-hour session window consumed (0-100). */
-  sessionPct: number;
-  /** Percent of the weekly all-models window consumed (0-100). */
-  weekPct: number;
-  sessionResetsAt: string | null;
-  weekResetsAt: string | null;
   /** True when the account is on a subscription rather than API billing. */
   isSubscription: boolean;
   raw: string;
+  /** Percent of the 5-hour session window consumed (0-100). */
+  sessionPct: number;
+  sessionResetsAt: string | null;
+  /** Percent of the weekly all-models window consumed (0-100). */
+  weekPct: number;
+  weekResetsAt: string | null;
 }
 
 export interface JustinLoopOptions {
@@ -239,9 +252,27 @@ export const DEFAULT_OPTIONS: JustinLoopOptions = {
  * shape that trips the heuristic. So this string must stay on one line, and a
  * unit test asserts no backslash-newline survives anywhere in either text.
  */
-function handoffExample(label: string): string {
-  return `justin-sdk justin-loop handoff --from=${label} --disposition=continue --arc=<epic or bead id> --worktree=<absolute path> --branch=<branch> --state='<2-4 sentences: where the work actually stands>' --next='<complete starting instructions for your successor>' --open-question='<what only Justin can settle>' --context-tokens=<number from the latest usage notice>`;
+export function handoffExample(
+  label: string,
+  /**
+   * What goes after `--disposition=`. The contract shows one disposition
+   * because it explains the three separately just below; the DEMAND (F2) shows
+   * all three, because a demanded turn is being told the whole command in one
+   * message and nothing else there lists them.
+   *
+   * A parameter rather than a `.replace()` at the call site on purpose: a
+   * substitution that stopped matching would silently hand a demanded session
+   * an example with only `continue` in it, which is the reassuring direction —
+   * the session would write a `continue` handoff and spawn a successor for an
+   * arc that was finished or blocked.
+   */
+  disposition: string = 'continue',
+): string {
+  return `justin-sdk justin-loop handoff --from=${label} --disposition=${disposition} --arc=<epic or bead id> --worktree=<absolute path> --branch=<branch> --state='<2-4 sentences: where the work actually stands>' --next='<complete starting instructions for your successor>' --open-question='<what only Justin can settle>' --context-tokens=<number from the latest usage notice>`;
 }
+
+/** Every disposition, as the demand's example spells them (D3). */
+const DEMAND_DISPOSITIONS = 'continue|done|blocked';
 
 /**
  * The rule that goes with it (D13). Deliberately unwrapped in the source: it has
@@ -267,8 +298,6 @@ const ONE_LINE_RULE = `Write it on one line - never wrap it with backslashes, wh
  * the composed text at 6,000 characters.
  */
 export function sessionContract(opts: {
-  /** The runner's name for this session. Must equal the handoff's `--from`. */
-  label: string;
   /** The run's `blockedWaitMin`. null = the default, wait indefinitely. */
   blockedWaitMin: number | null;
   /**
@@ -280,6 +309,8 @@ export function sessionContract(opts: {
    * handoff at all (home-base-1r6d.33.9).
    */
   cwd: string;
+  /** The runner's name for this session. Must equal the handoff's `--from`. */
+  label: string;
 }): string {
   // What the model is told about blocking has to match what the runner will
   // actually do, so it is generated from the same setting rather than written
@@ -300,7 +331,7 @@ successor from what you handed it. Your session label is \`${opts.label}\`.
 
 NOTHING SURVIVES IN CONTEXT. Your successor is a new session that can read only
 git, the beads database, and the working tree. Whatever you do not commit or
-write into a bead is gone when this session ends. Act accordingly.
+write into a bead is gone when this session ends.
 
 Rules for this session:
 - Before concluding something is unimplemented, search for it. A failed search
@@ -345,12 +376,17 @@ if your work lives in a worktree.
 - continue: work remains. A successor is spawned, and your --next IS its prompt.
 - done: the arc is finished. The loop stops; no successor is spawned.
 - blocked: you need a decision only Justin can make. The loop stops and shows
-  him your open questions.
+  him your open questions; he answers with \`justin-sdk justin-loop handoff answer <id>\`,
+  which folds his answers into your --next and flips this bead to continue, so a
+  successor boots from that text.
 
 WRITE --next FOR A COLD READER. Your successor knows nothing that you know. It
 needs the worktree to work in, the branch, the state the work is in, the next
 concrete step, and the open questions — as instructions to act on, not as a
 summary of your session. If you could not start from it, it is not finished.
+If your successor should run under a skill, START --next with that slash command
+(e.g. \`/conductor <ask>\`): your --next is its whole prompt, and a slash command
+only counts when it leads.
 
 EXACTLY ONE HANDOFF PER SESSION. Never create a second one: the helper refuses
 it, and two would fork the chain into two successors.
@@ -543,8 +579,8 @@ export const ENDED_STATE = 'done';
 
 export interface AgentRow {
   id: string;
-  pid: number | null;
   name: string;
+  pid: number | null;
   /**
    * The FULL session id (`11205a3b-34c4-435b-b21f-4289486061a0`), which is the
    * only thing `--resume` accepts (home-base-1r6d.33.3 — the short `id` starts a
@@ -560,7 +596,7 @@ export interface AgentRow {
 /** Parse the `backgrounded · <id> · <name>` banner. */
 export function parseBackgroundedId(stdout: string): string | null {
   const match = /backgrounded\s*·\s*(\S+)/.exec(stdout);
-  return match != null ? match[1] : null;
+  return match?.[1] ?? null;
 }
 
 /**
@@ -575,11 +611,24 @@ export function parseBackgroundedId(stdout: string): string | null {
  * substitution, arriving at the one decision this whole file exists to protect.
  */
 export type AgentListing =
-  | {ok: true; rows: AgentRow[]}
+  | {
+      /**
+       * Rows `claude agents --json` returned that carried no usable `id`
+       * (home-base-685h F7). They are SKIPPED, not repaired: the old code
+       * mapped them to `id: ''`, a rule-7 sentinel that is also a legal string,
+       * so a malformed row entered the runner looking like a session whose id
+       * happened to be empty. Counted rather than dropped silently, because
+       * "there are no sessions" and "there are three rows I could not read" are
+       * different facts and only one of them is reassuring.
+       */
+      malformed: number;
+      ok: true;
+      rows: AgentRow[];
+    }
   | {ok: false; reason: string};
 
 export type AgentLookup =
-  | {ok: true; row: AgentRow | null}
+  | {malformed: number; ok: true; row: AgentRow | null}
   | {ok: false; reason: string};
 
 // ---------------------------------------------------------------------------
@@ -656,17 +705,34 @@ export async function listAgents(
     return {ok: false, reason: 'claude agents --json produced no output'};
   }
   try {
-    const rows = JSON.parse(outcome.stdout) as Array<Record<string, unknown>>;
+    const rows = JSON.parse(outcome.stdout) as Record<string, unknown>[];
     if (!Array.isArray(rows)) {
       return {
         ok: false,
         reason: 'claude agents --json did not return an array',
       };
     }
+    // F7: a row with no string `id` is SKIPPED and COUNTED, never coerced to
+    // `''`. The id is the only handle the runner has on a session — it is what
+    // `claude stop` takes and what absence is proven against — so a row without
+    // one is not a session we can reason about, and `''` made it look like one.
+    const usable = rows.filter(
+      (r) => typeof r.id === 'string' && r.id.trim() !== '',
+    );
+    const malformed = rows.length - usable.length;
+    if (rows.length > 0 && usable.length === 0) {
+      // EVERY row unreadable is not an empty listing (critical rule 6/7). An
+      // empty listing licenses a spawn; this must not.
+      return {
+        ok: false,
+        reason: `claude agents --json returned ${rows.length} row${rows.length === 1 ? '' : 's'} and NONE carried a string id — the output shape changed; this is not an empty listing`,
+      };
+    }
     return {
+      malformed,
       ok: true,
-      rows: rows.map((r) => ({
-        id: String(r.id ?? ''),
+      rows: usable.map((r) => ({
+        id: String(r.id),
         name: String(r.name ?? ''),
         pid: typeof r.pid === 'number' ? r.pid : null,
         sessionId: typeof r.sessionId === 'string' ? r.sessionId : null,
@@ -690,7 +756,11 @@ export async function findAgent(
 ): Promise<AgentLookup> {
   const listing = await listAgents(cwd, timeoutMs);
   if (!listing.ok) return {ok: false, reason: listing.reason};
-  return {ok: true, row: listing.rows.find((r) => r.id === id) ?? null};
+  return {
+    malformed: listing.malformed,
+    ok: true,
+    row: listing.rows.find((r) => r.id === id) ?? null,
+  };
 }
 
 /**
@@ -712,7 +782,7 @@ export async function stopSession(
   cwd: string,
   id: string,
   timeoutMs: number = STOP_TIMEOUT_MS,
-): Promise<{ok: boolean; detail: string}> {
+): Promise<{detail: string; ok: boolean}> {
   const outcome = await runChild(resolveClaudeBin(), ['stop', id], {
     cwd,
     timeoutMs,
@@ -766,9 +836,9 @@ export function isVerifiedGone(outcome: StopOutcome): boolean {
 }
 
 export interface StopReport {
-  outcome: StopOutcome;
   /** Everything we did and saw, for the dashboard and the ledger. */
   notes: string[];
+  outcome: StopOutcome;
 }
 
 /**
@@ -785,7 +855,7 @@ export interface StopDeps {
   stopSession: (
     cwd: string,
     id: string,
-  ) => Promise<{ok: boolean; detail: string}>;
+  ) => Promise<{detail: string; ok: boolean}>;
   /**
    * Where each note goes AS IT HAPPENS (home-base-a1go). The ladder used to
    * return its notes and let the caller print them afterwards, which is fine
@@ -795,6 +865,33 @@ export interface StopDeps {
    * wall of text. The array survives for the ledger; this is the live channel.
    */
   write: (text: string) => void;
+}
+
+/**
+ * Why a listing that skipped rows proves nothing about an ABSENT id
+ * (home-base-1r6d.33.13).
+ *
+ * `listAgents` skips rows carrying no usable `id` and counts them (F7), and
+ * `findAgent` matches by id — so a skipped row can never match the session being
+ * watched, and the lookup comes back "absent" for a listing in which one of the
+ * rows it threw away might BE that session. Two absences license spawning a
+ * successor into the predecessor's worktree (D6), which is the one decision this
+ * file exists to protect, so a listing with `malformed > 0` is treated exactly
+ * as an UNREADABLE one: unknown, never absence.
+ *
+ * NOT a hypothetical fix for a measured failure: `claude agents --json` has never
+ * been observed to emit a row without an id (2.1.263, 2.1.269, 2.1.278), and the
+ * ALL-malformed case is already `ok: false`. This is the MIXED case, and the cost
+ * of the guard is that a permanently-malformed listing can never verify a stop —
+ * which stops the run and says why, the cautious direction.
+ */
+export function malformedBlocksAbsence(
+  id: string,
+  malformed: number,
+): string | null {
+  return malformed === 0
+    ? null
+    : `the row is absent but the listing skipped ${malformed} row${malformed === 1 ? '' : 's'} with no id — one of them could BE ${id}, so this is NOT counted as absent`;
 }
 
 /** Polls per verification attempt. Measured: the row goes within 5s. */
@@ -828,6 +925,14 @@ async function confirmGone(
       continue;
     }
     if (look.row == null) {
+      // A listing that skipped rows is unknown, not absence (33.13) — the same
+      // treatment as the unreadable one above, and for the same reason.
+      const blocked = malformedBlocksAbsence(id, look.malformed);
+      if (blocked != null) {
+        note(blocked);
+        consecutive = 0;
+        continue;
+      }
       consecutive++;
       if (consecutive >= STOP_CONSECUTIVE_ABSENT) return true;
     } else {
@@ -872,8 +977,15 @@ export async function stopAndVerify(
 
   const before = await deps.findAgent(cwd, id);
   if (before.ok && before.row == null) {
-    note(`${id} was already absent from \`claude agents\``);
-    return {notes, outcome: 'already-gone'};
+    // `already-gone` licenses a spawn on the strength of ONE lookup, so that
+    // lookup has to have read every row (33.13). A listing that skipped some
+    // falls through to the ladder instead — stopping is idempotent.
+    const blocked = malformedBlocksAbsence(id, before.malformed);
+    if (blocked == null) {
+      note(`${id} was already absent from \`claude agents\``);
+      return {notes, outcome: 'already-gone'};
+    }
+    note(`${blocked} — proceeding with the stop`);
   }
   if (!before.ok) {
     // We cannot even tell whether there is anything to stop. Stopping is
@@ -884,7 +996,7 @@ export async function stopAndVerify(
     );
   }
 
-  const attempts: Array<{label: string; act: () => Promise<boolean | null>}> = [
+  const attempts: {act: () => Promise<boolean | null>; label: string}[] = [
     {
       act: async () => {
         const r = await deps.stopSession(cwd, id);
@@ -954,9 +1066,17 @@ export async function stopAndVerify(
     return {notes, outcome: 'unverified'};
   }
   if (after.row == null) {
-    // Vanished between the last poll and now. Absence is absence.
-    note(`${id} is absent on the final check`);
-    return {notes, outcome: 'stopped'};
+    const blocked = malformedBlocksAbsence(id, after.malformed);
+    if (blocked == null) {
+      // Vanished between the last poll and now. Absence is absence.
+      note(`${id} is absent on the final check`);
+      return {notes, outcome: 'stopped'};
+    }
+    // Absent in a listing that could not be read in full is the same answer as
+    // a listing that could not be read at all (33.13): UNKNOWN, which refuses
+    // the spawn rather than spending "we could not look" as "it is gone".
+    note(`UNVERIFIED on the final check: ${blocked}`);
+    return {notes, outcome: 'unverified'};
   }
   const outcome: StopOutcome = after.row.pid == null ? 'no-pid' : 'kill-failed';
   note(
@@ -1045,8 +1165,8 @@ export function closeDoneHandoff(
 
 /** A handoff bead the runner could read, with its parsed contract. */
 export interface HandoffMatch {
-  row: HandoffRow;
   handoff: Handoff;
+  row: HandoffRow;
 }
 
 /**
@@ -1055,9 +1175,9 @@ export interface HandoffMatch {
  * would turn "we could not read your handoff" into "you did not write one".
  */
 export interface InvalidHandoff {
+  errors: string[];
   id: string;
   title: string;
-  errors: string[];
 }
 
 /**
@@ -1069,17 +1189,25 @@ export interface InvalidHandoff {
  * that path spawns anything.
  */
 export type SessionOutcome =
-  | {kind: 'continue'; match: HandoffMatch; invalid: InvalidHandoff[]}
-  | {kind: 'done'; match: HandoffMatch; invalid: InvalidHandoff[]}
-  | {kind: 'blocked'; match: HandoffMatch; invalid: InvalidHandoff[]}
+  | {invalid: InvalidHandoff[]; kind: 'continue'; match: HandoffMatch}
+  | {invalid: InvalidHandoff[]; kind: 'done'; match: HandoffMatch}
+  | {invalid: InvalidHandoff[]; kind: 'blocked'; match: HandoffMatch}
   | {
+      invalid: InvalidHandoff[];
       kind: 'enforce';
+      reason: string;
       /** Which of the two enforce cases this is — they ledger differently. */
       sub: 'no-handoff' | 'invalid-handoff';
-      reason: string;
-      invalid: InvalidHandoff[];
     }
-  | {kind: 'multiple'; matches: HandoffMatch[]; invalid: InvalidHandoff[]}
+  // A non-empty tuple, not a plain array: `multiple` is only ever built from
+  // two or more matches, and saying so in the type is what lets the consumer
+  // read `matches[0]` without inventing a fallback id for a state that cannot
+  // happen (critical rule 6).
+  | {
+      invalid: InvalidHandoff[];
+      kind: 'multiple';
+      matches: [HandoffMatch, ...HandoffMatch[]];
+    }
   | {kind: 'br-unavailable'; reason: string};
 
 /**
@@ -1133,15 +1261,18 @@ export function decideAfterSession(
     }
   }
 
-  if (matches.length > 1) {
-    return {invalid, kind: 'multiple', matches};
+  // Destructured rather than length-tested so the narrowing is the compiler's,
+  // not a comment's: `first` carries the "there was at least one" fact into
+  // both branches below.
+  const [first, ...rest] = matches;
+  if (first != null && rest.length > 0) {
+    return {invalid, kind: 'multiple', matches: [first, ...rest]};
   }
-  if (matches.length === 1) {
-    const match = matches[0];
+  if (first != null) {
     return {
       invalid,
-      kind: DISPOSITION_TO_KIND[match.handoff.disposition],
-      match,
+      kind: DISPOSITION_TO_KIND[first.handoff.disposition],
+      match: first,
     };
   }
   const others =
@@ -1172,7 +1303,14 @@ export function decideAfterSession(
 export type SettleScan =
   | {kind: 'unavailable'; reason: string}
   | {kind: 'none'}
-  | {kind: 'seen'; beadId: string};
+  /**
+   * EVERY valid open handoff from this label, not just the first
+   * (home-base-685h F5). The settle check has to ask whether the bead it
+   * SIGHTED is still there, and one id cannot answer that: a scan that came
+   * back naming a different bead would be indistinguishable from one that came
+   * back naming the same one. `beadIds[0]` is the one the ending names.
+   */
+  | {beadIds: string[]; kind: 'seen'};
 
 /**
  * Has this session already written its handoff bead (D15)?
@@ -1199,9 +1337,9 @@ export function scanForOwnHandoff(
     case 'continue':
     case 'done':
     case 'blocked':
-      return {beadId: outcome.match.row.id, kind: 'seen'};
+      return {beadIds: [outcome.match.row.id], kind: 'seen'};
     case 'multiple':
-      return {beadId: outcome.matches[0].row.id, kind: 'seen'};
+      return {beadIds: outcome.matches.map((m) => m.row.id), kind: 'seen'};
     case 'enforce':
       return {kind: 'none'};
   }
@@ -1223,15 +1361,27 @@ export type BootPlan =
   | {kind: 'reconstruct'; reason: string};
 
 export interface BootContext {
-  plan: BootPlan;
-  /** Names the session in claim reasons and in `--from`, e.g. `fix-hydration-2`. */
-  label: string;
   /**
    * The runner's own directory, ABSOLUTE — the beads workspace the runner scans.
    * The preamble names it so the claim `br close` is run there rather than in
    * the worktree the handoff points at (home-base-1r6d.33.9).
    */
   cwd: string;
+  /** Names the session in claim reasons and in `--from`, e.g. `fix-hydration-2`. */
+  label: string;
+  plan: BootPlan;
+  /**
+   * The PREDECESSOR session's full claude session id, so the successor's thread
+   * bead can link to its predecessor's without anyone typing an id (D18).
+   *
+   * null is load-bearing (critical rule 7): it means "no predecessor, or its id
+   * was never observed" — the first session of a run, or one whose `claude
+   * agents` row was never read. It is NEVER an empty string, and a null here
+   * emits no env var at all rather than an empty one, because
+   * `JUSTIN_LOOP_PREDECESSOR_SESSION_ID=''` would look to the thread tool like a
+   * predecessor whose thread simply could not be found.
+   */
+  predecessorSessionId: string | null;
 }
 
 /**
@@ -1240,10 +1390,10 @@ export interface BootContext {
  * else — see JustinLoopOptions.promptExplicit.
  */
 export interface StartBootPolicy {
-  /** The human typed `--prompt`: this run has an ASK, not a standing job. */
-  promptExplicit: boolean;
   /** `--pickup`: take the newest waiting handoff anyway. */
   pickup: boolean;
+  /** The human typed `--prompt`: this run has an ASK, not a standing job. */
+  promptExplicit: boolean;
 }
 
 /**
@@ -1322,7 +1472,12 @@ export function planStartBoot(
     return a.row.id < b.row.id ? -1 : 1;
   });
 
-  if (ordered.length === 0) {
+  // Taken before the early return, so "there is one to pick up" is a fact the
+  // compiler carries down to the pick-up below rather than one this function
+  // has to re-assert with an assertion.
+  const chosen = ordered[0];
+
+  if (chosen == null) {
     return {
       plan: {kind: 'fresh'},
       report: [
@@ -1347,7 +1502,7 @@ export function planStartBoot(
     };
   }
 
-  const [chosen, ...deferred] = ordered;
+  const deferred = ordered.slice(1);
   const report = [`picking up handoff ${chosen.row.id} — ${chosen.row.title}`];
   if (deferred.length > 0) {
     report.push(
@@ -1358,6 +1513,76 @@ export function planStartBoot(
   }
   report.push(...ineligible);
   return {plan: {kind: 'handoff', match: chosen}, report};
+}
+
+/**
+ * Which number the FIRST session of this run takes (home-base-1r6d.33.11).
+ *
+ * `sessionLabel` numbered from 1 on every invocation, so a chain resumed with
+ * `--pickup` — after `--max-sessions` ran out, or after `handoff answer` flipped
+ * a blocked bead (D16) — called its next session `<slug>-1` all over again.
+ * Nothing BROKE: the run stamp keeps `claude agents` names unique, and only an
+ * OPEN handoff with the same `from` is refused (D5), so the closed `<slug>-1`
+ * bead does not collide. What it cost was legibility — `picked up by pilot2-1`
+ * in the claim reason of a bead written by `pilot2-2` reads as a chain running
+ * backwards, and the ledger rows for one arc all claim to be session 1.
+ *
+ * The number comes from the bead this run BOOTS from, and only when that bead's
+ * `from` carries THIS run's slug: a handoff written by `other-arc-4` says
+ * nothing about where `pilot2`'s numbering should resume, and continuing from it
+ * would stamp an unrelated arc's length onto this arc's labels.
+ *
+ * Anything unreadable is 1 — the old behaviour, and the safe direction here: a
+ * label that restarts is merely confusing, while one that jumped forward on a
+ * misread number would skip labels the ledger already holds rows for, which is
+ * the half of this that another session has to reason about later (33.12).
+ */
+export function startSessionNumber(slug: string, plan: BootPlan): number {
+  if (plan.kind !== 'handoff') return 1;
+  const from = plan.match.handoff.from;
+  if (slugFromLabel(from) !== slug) return 1;
+  // At most six digits: a chain of a million sessions is not a thing, and a
+  // longer run of digits leaves `Number`'s safe-integer range, where `k + 1` is
+  // no longer the next label at all. An unreadable tail falls through to 1.
+  const k = /-(\d{1,6})$/.exec(from)?.[1];
+  if (k == null) return 1;
+  return Number(k) + 1;
+}
+
+/**
+ * The one line naming the predecessor's session id (D18) — the VISIBLE half of
+ * the channel whose automatic half is `PREDECESSOR_SESSION_ENV` on the dispatch.
+ *
+ * Both halves are sent because they fail differently: the env var arrives
+ * without anyone reading it (MEASURED to propagate, see the dispatch site), and
+ * this line survives a session that never runs `thread prepare` at all.
+ *
+ * An unknown id says UNKNOWN out loud rather than being omitted (critical rule
+ * 7): a missing line is indistinguishable from a feature that did not run, while
+ * "UNKNOWN" is a fact about what the runner observed.
+ */
+function predecessorLine(predecessorSessionId: string | null): string {
+  return predecessorSessionId == null
+    ? "Your predecessor's session id is UNKNOWN — your thread cannot be linked to its thread automatically."
+    : `Your predecessor's session id is ${predecessorSessionId} (also in $${PREDECESSOR_SESSION_ENV}); \`thread prepare\` and \`thread report\` link your thread to its thread automatically.`;
+}
+
+export {PREDECESSOR_SESSION_ENV};
+
+/**
+ * What this dispatch adds to the session's environment (D18).
+ *
+ * An UNKNOWN predecessor sets NOTHING. It does not set the variable to `''`,
+ * which is the whole point (critical rule 7): the thread tool reads a present
+ * variable as "there is a predecessor, go look it up", and an empty one would
+ * send it looking for the thread of a session with no id — reported back as
+ * "predecessor has no thread bead", which is a manufactured measurement about a
+ * predecessor that was never observed in the first place.
+ */
+export function dispatchEnv(boot: BootContext): Record<string, string> {
+  return boot.predecessorSessionId == null
+    ? {}
+    : {[PREDECESSOR_SESSION_ENV]: boot.predecessorSessionId};
 }
 
 /**
@@ -1373,7 +1598,8 @@ Nothing was passed to you: whatever it was doing survives only in git and beads.
 Read \`git log\`, \`git status\` and the open beads to work out where it got to,
 and SAY in your handoff --state that you reconstructed rather than picked up a
 handoff. Do not assume it finished cleanly, and do not use destructive git
-commands to tidy up what it left behind.`;
+commands to tidy up what it left behind.
+${predecessorLine(boot.predecessorSessionId)}`;
   }
   const {row, handoff} = boot.plan.match;
   return `PICK UP THE HANDOFF FIRST.
@@ -1391,6 +1617,7 @@ bead ${row.id} ("${row.title}"). Before anything else:
   3. If it is ALREADY CLOSED when you get there, another session claimed it
      first. Do NOT redo its work: say so plainly and stop — hand off with
      --disposition=done, saying in --state that the arc was already claimed.
+${predecessorLine(boot.predecessorSessionId)}
 The task below is the \`next\` field of that bead, quoted verbatim.`;
 }
 
@@ -1472,39 +1699,75 @@ export function parseUsage(raw: string): UsageSnapshot | null {
     isSubscription: /using your subscription/i.test(raw),
     raw,
     sessionPct: Number(session[1]),
-    sessionResetsAt: sessionResets != null ? sessionResets[1].trim() : null,
+    sessionResetsAt: sessionResets?.[1]?.trim() ?? null,
     weekPct: Number(week[1]),
-    weekResetsAt: weekResets != null ? weekResets[1].trim() : null,
+    weekResetsAt: weekResets?.[1]?.trim() ?? null,
   };
 }
 
 /**
+ * What one `/usage` read produced (home-base-685h F1).
+ *
+ * Shaped like `HeadRead`, and for the same reason: "the quota could not be
+ * read" and "the quota is N%" are different facts, and the failure has to carry
+ * WHY (critical rule 7). The predecessor of this type was `UsageSnapshot |
+ * null`, which collapsed four distinct failures — the command failed, it
+ * printed JSON nobody could parse, the JSON carried no `result`, the `/usage`
+ * text did not match — into one null. That was safe only because `checkGate`
+ * failed closed on it; nothing downstream could ever say which had happened,
+ * and a stopped scheduled run left a summary that named none of them.
+ */
+export type UsageRead =
+  | {kind: 'ok'; usage: UsageSnapshot}
+  | {kind: 'failed'; reason: string};
+
+/**
  * Read the real quota. Costs zero tokens (verified: num_turns=0, cost=0).
  *
- * null means "could not read", and every caller fails CLOSED on it (`checkGate`
- * turns it into `unreadable`, which stops the run) — it is never spent as 0%.
- * The `describeChildFailure` ordering matters here too: before home-base-a1go
- * this tested `status !== 0` first, so a call that timed out after the child
- * exited 0 arrived as a success carrying truncated JSON.
+ * Every caller fails CLOSED on `failed` (`checkGate` turns it into
+ * `unreadable`, which stops the run) — it is never spent as 0%. The
+ * `describeChildFailure` ordering matters here too: before home-base-a1go this
+ * tested `status !== 0` first, so a call that timed out after the child exited 0
+ * arrived as a success carrying truncated JSON.
  */
 export async function readUsage(
   cwd: string,
   timeoutMs: number = USAGE_TIMEOUT_MS,
-): Promise<UsageSnapshot | null> {
+): Promise<UsageRead> {
   const outcome = await runChild(
     resolveClaudeBin(),
     ['-p', '/usage', '--output-format', 'json'],
     {cwd, timeoutMs},
   );
-  if (describeChildFailure('claude -p /usage', outcome) != null) {
-    return null;
+  const failure = describeChildFailure('claude -p /usage', outcome);
+  if (failure != null) {
+    return {kind: 'failed', reason: failure};
   }
+  let parsed: {result?: unknown};
   try {
-    const parsed = JSON.parse(outcome.stdout) as {result?: string};
-    return typeof parsed.result === 'string' ? parseUsage(parsed.result) : null;
-  } catch {
-    return null;
+    parsed = JSON.parse(outcome.stdout) as {result?: unknown};
+  } catch (err) {
+    return {
+      kind: 'failed',
+      reason: `claude -p /usage printed unparseable JSON: ${err instanceof Error ? err.message : String(err)}`,
+    };
   }
+  if (typeof parsed.result !== 'string') {
+    return {
+      kind: 'failed',
+      reason:
+        'claude -p /usage returned JSON with no string `result` field — the shape of the output changed',
+    };
+  }
+  const usage = parseUsage(parsed.result);
+  if (usage == null) {
+    return {
+      kind: 'failed',
+      reason:
+        'claude -p /usage printed no recognisable quota lines (expected `Current session: N% used` and `Current week (all models): N% used`)',
+    };
+  }
+  return {kind: 'ok', usage};
 }
 
 /**
@@ -1536,20 +1799,24 @@ export async function checkGate(
     JustinLoopOptions,
     'sessionStopPct' | 'usageGate' | 'weeklyStopPct'
   >,
-  readQuota: () => Promise<UsageSnapshot | null>,
+  readQuota: () => Promise<UsageRead>,
 ): Promise<GateDecision> {
   if (!opts.usageGate) {
     return {kind: 'disabled'};
   }
-  const usage = await readQuota();
-  if (usage == null) {
-    // Fail closed: if we cannot read the quota, we do not spend it.
+  const read = await readQuota();
+  if (read.kind === 'failed') {
+    // Fail closed: if we cannot read the quota, we do not spend it. The reason
+    // the reader gave is carried through verbatim (F1) — the run summary is the
+    // only surface a scheduled job leaves behind, and "could not read /usage" on
+    // its own does not say whether claude is missing, timed out, or changed the
+    // shape of its output.
     return {
       kind: 'unreadable',
-      reason:
-        'could not read /usage — failing closed rather than spending unknown quota',
+      reason: `could not read /usage: ${read.reason} — failing closed rather than spending unknown quota`,
     };
   }
+  const usage = read.usage;
   if (
     usage.sessionPct >= opts.sessionStopPct ||
     usage.weekPct >= opts.weeklyStopPct
@@ -1569,8 +1836,15 @@ export async function checkGate(
 // would be invented.
 // ---------------------------------------------------------------------------
 
-/** 2 adds `demands` (home-base-1r6d.33.3). */
-export const LEDGER_SCHEMA_VERSION = 2;
+/**
+ * 2 adds `demands` (home-base-1r6d.33.3); 3 adds `fullSessionId` (33.12).
+ *
+ * A row written by an older runner simply has no `fullSessionId` key, and
+ * `readLedgerSessionId` reports that as its own outcome rather than as a session
+ * whose id was never observed — the two are different facts and only one of them
+ * is about the session.
+ */
+export const LEDGER_SCHEMA_VERSION = 3;
 
 /** Every way a session can end, as the ledger names it. */
 export type LedgerOutcome =
@@ -1602,29 +1876,8 @@ export type LedgerOutcome =
   | 'agents-unreadable';
 
 export interface LedgerRow {
-  schemaVersion: number;
-  runId: string;
-  n: number;
-  label: string;
-  name: string;
-  /** The `claude agents` id. null when dispatch never produced one. */
-  sessionId: string | null;
-  startedAt: string;
-  endedAt: string;
-  outcome: LedgerOutcome;
-  /** The handoff bead this session wrote. null when there was none to read. */
-  handoffBead: string | null;
-  /** null when we never had a session to stop. */
-  stopOutcome: StopOutcome | null;
   /** From the handoff bead. null = not measured, never 0 (critical rule 6). */
   contextTokens: number | null;
-  /**
-   * Did HEAD move while this session ran? null = one of the two `git rev-parse`
-   * reads FAILED, so it was never measured — never "it did not commit"
-   * (critical rule 6). No schema bump: no field was added or removed, and null
-   * already means "not measured" in `contextTokens` and `stopOutcome`.
-   */
-  progressed: boolean | null;
   /**
    * How many times this session had to be RESUMED and told to write a handoff
    * (D10). 0 is the normal case — it handed off on its own. Recorded because
@@ -1633,6 +1886,43 @@ export interface LedgerRow {
    * whole reason the ledger exists.
    */
   demands: number;
+  endedAt: string;
+  /**
+   * The FULL claude session id, the only one that identifies a session anywhere
+   * else (33.12). `sessionId` below is the 8-character `claude agents` id, which
+   * is a TRUNCATION of this: `--resume` given the short one forks a copy, and a
+   * thread bead is keyed on the full one, so the short id resolves to nothing.
+   *
+   * It is here because it is the only durable copy. Within one run the loop
+   * carries the predecessor's id in memory (D18); a run STARTED from a picked-up
+   * handoff bead has no such memory, and this row — found by the bead's `from`,
+   * which is the `label` field beside it — is where it gets one.
+   *
+   * null means the session's `claude agents` row was never read, never "we did
+   * not write the field": a row from before schema 3 has no key here at all, and
+   * the reader tells those two apart.
+   */
+  fullSessionId: string | null;
+  /** The handoff bead this session wrote. null when there was none to read. */
+  handoffBead: string | null;
+  label: string;
+  n: number;
+  name: string;
+  outcome: LedgerOutcome;
+  /**
+   * Did HEAD move while this session ran? null = one of the two `git rev-parse`
+   * reads FAILED, so it was never measured — never "it did not commit"
+   * (critical rule 6). No schema bump: no field was added or removed, and null
+   * already means "not measured" in `contextTokens` and `stopOutcome`.
+   */
+  progressed: boolean | null;
+  runId: string;
+  schemaVersion: number;
+  /** The `claude agents` id. null when dispatch never produced one. */
+  sessionId: string | null;
+  startedAt: string;
+  /** null when we never had a session to stop. */
+  stopOutcome: StopOutcome | null;
 }
 
 export function runsJsonlPath(stateDir: string): string {
@@ -1658,6 +1948,136 @@ export function appendLedgerRow(
       reason: err instanceof Error ? err.message : String(err),
     };
   }
+}
+
+/**
+ * What the ledger could tell us about one session label (33.12).
+ *
+ * FOUR outcomes because there are four facts, and the three misses must never
+ * collapse into one (critical rule 7): they are "the file could not be read",
+ * "the file was read and holds no row for this label", and "the newest row for
+ * this label carries no id" — which is itself either a session whose `claude
+ * agents` row was never read or a row written before the field existed, and the
+ * `detail` says which. Only `found` produces an id, and it is never `''`.
+ */
+export type LedgerSessionIdRead =
+  | {detail: string; kind: 'no-row'}
+  | {detail: string; kind: 'no-session-id'}
+  | {kind: 'found'; sessionId: string}
+  | {kind: 'unreadable'; reason: string};
+
+/**
+ * How much of the ledger one lookup reads, from the END.
+ *
+ * The ledger is append-only and never pruned, so it is the one file here that
+ * grows without bound. 256 KiB is roughly the last six hundred rows at the size
+ * they are written today — far more than any arc — and reading a fixed tail
+ * rather than the whole file keeps a lookup's cost the same on a ledger that has
+ * been running for years.
+ */
+export const LEDGER_TAIL_BYTES = 256 * 1024;
+
+/**
+ * The predecessor's FULL session id, found by the label the handoff bead names.
+ *
+ * D18 hands a successor its predecessor's session id so their thread beads link
+ * without anyone typing one. Within a run that id is in memory. A run STARTED
+ * from a picked-up handoff bead — `--pickup` after `--max-sessions` ran out, or
+ * after `handoff answer` flipped a blocked bead (D16) — has no memory of the
+ * session that wrote that bead, and used to boot its first session with the
+ * predecessor UNKNOWN. The bead's `from` IS a ledger row's `label`, so the id is
+ * on disk; this reads it back.
+ *
+ * NEWEST MATCHING ROW WINS, AND THE SEARCH STOPS THERE. Two runs can write the
+ * same label (that is what 33.11 is about), and an older row with that label is
+ * a DIFFERENT session: falling past a null id to an older row that has one would
+ * link the successor's thread to a session from another run — a fabricated fact,
+ * and a quiet one.
+ */
+export function readLedgerSessionId(
+  path: string,
+  label: string,
+  maxBytes: number = LEDGER_TAIL_BYTES,
+): LedgerSessionIdRead {
+  let text: string;
+  let truncated = false;
+  try {
+    const size = statSync(path).size;
+    const start = Math.max(0, size - maxBytes);
+    truncated = start > 0;
+    const length = size - start;
+    if (length === 0) {
+      text = '';
+    } else {
+      const fd = openSync(path, 'r');
+      try {
+        const buffer = Buffer.alloc(length);
+        const read = readSync(fd, buffer, 0, length, start);
+        text = buffer.subarray(0, read).toString('utf8');
+      } finally {
+        closeSync(fd);
+      }
+    }
+  } catch (err) {
+    return {
+      kind: 'unreadable',
+      reason: err instanceof Error ? err.message : String(err),
+    };
+  }
+
+  const lines = text.split('\n');
+  // Reading from an offset lands mid-row. That first fragment is not a row and
+  // must not be parsed as one — a torn `{"label":"pilot2-3"…` could match on a
+  // field that happens to survive the cut.
+  if (truncated) lines.shift();
+
+  let scanned = 0;
+  let unreadable = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]?.trim() ?? '';
+    if (line === '') continue;
+    scanned++;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      unreadable++;
+      continue;
+    }
+    if (typeof parsed !== 'object' || parsed == null) {
+      unreadable++;
+      continue;
+    }
+    const row = parsed as Record<string, unknown>;
+    if (typeof row.label !== 'string') {
+      // A row with no label is a row we cannot place. Counted, not skipped
+      // silently: "I read 40 rows and none matched" and "I read 40 rows, 12 of
+      // which I could not place" are different claims.
+      unreadable++;
+      continue;
+    }
+    if (row.label !== label) continue;
+
+    const full = row.fullSessionId;
+    if (typeof full === 'string' && full.trim() !== '') {
+      return {kind: 'found', sessionId: full.trim()};
+    }
+    return {
+      detail:
+        full === undefined
+          ? `the newest ledger row for \`${label}\` predates the fullSessionId field (schemaVersion ${typeof row.schemaVersion === 'number' ? row.schemaVersion : 'unrecorded'}), so the id was never written down`
+          : `the newest ledger row for \`${label}\` carries no fullSessionId — that session's \`claude agents\` row was never read`,
+      kind: 'no-session-id',
+    };
+  }
+
+  return {
+    detail:
+      `no ledger row for \`${label}\` in the ${scanned} row${scanned === 1 ? '' : 's'} read from the end of ${path}` +
+      (truncated ? ` (the last ${maxBytes} bytes of it)` : '') +
+      (unreadable > 0 ? `; ${unreadable} of them could not be read` : ''),
+    kind: 'no-row',
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1879,21 +2299,39 @@ export function notifyBlocked(cwd: string, n: number, row: AgentRow): void {
  * fake clock and a scripted sequence of agent rows they run in milliseconds.
  */
 export interface RunnerDeps extends StopDeps {
-  /** Spawn the background session. Returns `claude`'s stdout (the banner). */
-  dispatch: (cwd: string, args: string[]) => Promise<string>;
-  now: () => number;
-  br: BrRunner;
-  gitHead: (cwd: string) => Promise<HeadRead>;
-  readUsage: (cwd: string) => Promise<UsageSnapshot | null>;
   appendLedgerRow: (
     path: string,
     row: LedgerRow,
   ) => {ok: boolean; reason: string | null};
+  br: BrRunner;
+  /**
+   * Spawn the background session. Returns `claude`'s stdout (the banner).
+   *
+   * `env` is MERGED over the runner's own environment, never a replacement:
+   * `claude` needs the whole inherited environment (PATH, HOME, the login
+   * state) to run at all. It is a plain object rather than an optional third
+   * argument with a default so the injected world can assert on exactly what
+   * was added (D18).
+   */
+  dispatch: (
+    cwd: string,
+    args: string[],
+    env: Record<string, string>,
+  ) => Promise<string>;
+  gitHead: (cwd: string) => Promise<HeadRead>;
   notifyBlocked: (cwd: string, n: number, row: AgentRow) => void;
-  write: (text: string) => void;
-  writeErr: (text: string) => void;
+  now: () => number;
   /** Preflight is skipped entirely in tests; real runs pass the real one. */
   preflight: (cwd: string) => Promise<PreflightProblem[]>;
+  /**
+   * Read a predecessor's session id back out of the ledger (33.12). Injected
+   * like every other file access here so no test touches the real `runs.jsonl`
+   * — the reader itself is exercised against temp files in its own tests.
+   */
+  readLedgerSessionId: (path: string, label: string) => LedgerSessionIdRead;
+  readUsage: (cwd: string) => Promise<UsageRead>;
+  write: (text: string) => void;
+  writeErr: (text: string) => void;
 }
 
 export const REAL_DEPS: RunnerDeps = {
@@ -1915,9 +2353,24 @@ export const REAL_DEPS: RunnerDeps = {
    * On success the return value is byte-identical to what it always was: the
    * caller only ever runs `parseBackgroundedId` over it.
    */
-  dispatch: async (cwd, args) => {
+  dispatch: async (cwd, args, env) => {
     const outcome = await runChild(resolveClaudeBin(), args, {
       cwd,
+      // MEASURED 2026-09-19, claude 2.1.278 (`bun run probe:bg-env`, one haiku
+      // `--bg` session told to `echo "$JUSTIN_LOOP_PROBE_VALUE"` into a file):
+      // a variable set on the `claude --bg` invocation DOES reach the spawned
+      // session's Bash tool — the file came back
+      // `PROBE_RESULT=[PROPAGATED-<uuid>]`, not `PROBE_RESULT=[]`. So D18's
+      // automatic channel works and the preamble line is the belt, not the
+      // whole mechanism. Before this the only thing measured was PATH
+      // inheritance (e2e, 2026-09-09), which is not evidence about arbitrary
+      // variables: a launcher can rebuild PATH deliberately while dropping
+      // everything else. Re-run the probe when this claims to matter again.
+      //
+      // Spread over `process.env` rather than passed alone: `runChild` hands
+      // `env` straight to `spawn`, where a bare object REPLACES the whole
+      // environment and `claude` loses PATH, HOME and its login state.
+      env: {...process.env, ...env},
       timeoutMs: DISPATCH_TIMEOUT_MS,
     });
     const failure = describeChildFailure('claude --bg', outcome);
@@ -1930,6 +2383,7 @@ export const REAL_DEPS: RunnerDeps = {
   notifyBlocked,
   now: () => Date.now(),
   preflight,
+  readLedgerSessionId,
   readUsage,
   signalPid,
   sleep,
@@ -1941,7 +2395,7 @@ export const REAL_DEPS: RunnerDeps = {
 /** How one session's own run ended, before any bead is consulted. */
 export type SessionEnding =
   | {kind: 'ended'}
-  | {kind: 'timeout'; afterMin: number}
+  | {afterMin: number; kind: 'timeout'}
   /**
    * The session wrote its handoff bead and its row never reached `done` (D15,
    * `--handoff-settle-min`). A DISTINCT member rather than a reuse of `timeout`:
@@ -1949,16 +2403,16 @@ export type SessionEnding =
    * — how often does the CLI defect actually happen — is unanswerable if this one
    * is filed under the clock running out.
    */
-  | {kind: 'handoff-settled'; afterMin: number; beadId: string}
+  | {afterMin: number; beadId: string; kind: 'handoff-settled'}
   | {kind: 'blocked-timeout'; waitingFor: string | null}
-  | {kind: 'dispatch-failed'; banner: string}
+  | {banner: string; kind: 'dispatch-failed'}
   /**
    * `claude agents --json` could not be read enough times in a row that we have
    * stopped pretending to be watching. Without this the default
    * `--timeout-min 0` would poll a dead daemon forever, and every poll would be
    * an unknown the runner was quietly treating as "keep waiting".
    */
-  | {kind: 'agents-unreadable'; reason: string; failures: number};
+  | {failures: number; kind: 'agents-unreadable'; reason: string};
 
 /** Consecutive unreadable `claude agents` polls before a session is abandoned. */
 export const AGENTS_FAILURE_LIMIT = 5;
@@ -1977,9 +2431,8 @@ export const AGENTS_FAILURE_LIMIT = 5;
 export const LIVENESS_INTERVAL_MS = 60_000;
 
 export interface SessionRun {
+  durationMs: number;
   ending: SessionEnding;
-  /** The `claude agents` id. null only when dispatch failed. */
-  id: string | null;
   /**
    * The FULL session id read off the agents row while the session was running —
    * the only id `--resume` will continue rather than copy (D10). null means we
@@ -1991,101 +2444,8 @@ export interface SessionRun {
    * demand happens after the stop.
    */
   fullSessionId: string | null;
-  durationMs: number;
-}
-
-/**
- * Run one background session to its end.
- *
- * "Its end" is `state === 'done'` or an absent row, and NOTHING else — see the
- * measured lifecycle above. There is no verdict file to wait for (D2), so an
- * ended session goes straight to the bead scan.
- */
-export async function runSession(
-  cwd: string,
-  opts: JustinLoopOptions,
-  n: number,
-  boot: BootContext,
-  name: string,
-  deps: RunnerDeps,
-): Promise<SessionRun> {
-  const started = deps.now();
-  const banner = await deps.dispatch(cwd, [
-    '--bg',
-    '--name',
-    name,
-    '--model',
-    opts.model,
-    '--permission-mode',
-    opts.permissionMode,
-    '--append-system-prompt',
-    bootContract(
-      sessionContract({
-        blockedWaitMin: opts.blockedWaitMin,
-        // The runner's cwd IS the beads workspace it scans for the handoff, so
-        // the session is told to run `br` there (home-base-1r6d.33.9).
-        cwd,
-        label: boot.label,
-      }),
-      boot,
-    ),
-    composeBootPrompt(opts.prompt, boot),
-  ]);
-
-  const id = parseBackgroundedId(banner);
-  if (id == null) {
-    return {
-      durationMs: deps.now() - started,
-      ending: {banner: banner.trim(), kind: 'dispatch-failed'},
-      fullSessionId: null,
-      id: null,
-    };
-  }
-
-  deps.write(
-    `   ${DIM}background ${id} · inspect: claude logs ${id} · step in: claude attach ${id}${RESET}\n`,
-  );
-
-  return watchSession(cwd, opts, n, boot.label, id, started, deps);
-}
-
-/**
- * The one dim line a liveness tick prints.
- *
- * Every part of it is a FACT ABOUT A MEASUREMENT, never a substitute for one
- * (critical rule 6): a listing that has never been read successfully says so
- * rather than borrowing "no row", which means read-and-absent; and an
- * unreadable listing names its reason and its streak next to whatever row we
- * last actually saw, so a stale row can never read as a current one.
- */
-function livenessLine(state: {
-  elapsedMs: number;
-  polls: number;
-  everRead: boolean;
-  lastSeen: AgentRow | null;
-  agentsFailures: number;
-  lastUnreadable: string | null;
-  /**
-   * What the handoff-settle scan found on this tick, when the knob is on (D15).
-   * null = nothing to say, which is also every run with the knob off — so the
-   * default line is byte-for-byte the one home-base-a1go shipped.
-   */
-  settle: string | null;
-}): string {
-  const minutes = Math.round(state.elapsedMs / 60_000);
-  const what = !state.everRead
-    ? 'no listing read yet'
-    : state.lastSeen == null
-      ? 'no row'
-      : state.lastSeen.state === 'blocked'
-        ? `blocked: ${state.lastSeen.waitingFor ?? 'unknown'}`
-        : `${state.lastSeen.state ?? 'unknown'}/${state.lastSeen.status ?? 'unknown'}`;
-  const agents =
-    state.agentsFailures === 0
-      ? 'agents ok'
-      : `agents unreadable ×${state.agentsFailures}: ${state.lastUnreadable ?? 'unknown'}`;
-  const settle = state.settle == null ? '' : ` · ${state.settle}`;
-  return `   ${DIM}watching ${minutes}m · ${state.polls} polls · ${what} · ${agents}${settle}${RESET}\n`;
+  /** The `claude agents` id. null only when dispatch failed. */
+  id: string | null;
 }
 
 /**
@@ -2135,6 +2495,8 @@ async function watchSession(
   let everRead = false;
   let lastSeen: AgentRow | null = null;
   let lastUnreadable: string | null = null;
+  /** Malformed rows in the last listing we READ (F7). 0 until one is read. */
+  let lastMalformed = 0;
 
   /**
    * When this session's own handoff bead was FIRST seen, and which bead it was
@@ -2154,6 +2516,7 @@ async function watchSession(
     if (look.ok) {
       everRead = true;
       lastSeen = look.row;
+      lastMalformed = look.malformed;
       // Captured the instant it is readable, not further down: the handoff-settle
       // tick below can return from ABOVE the old capture point, and a demand with
       // no full session id cannot be delivered at all (D10).
@@ -2184,8 +2547,7 @@ async function watchSession(
       if (
         opts.handoffSettleMin > 0 &&
         look.ok &&
-        look.row != null &&
-        look.row.state === 'working'
+        look.row?.state === 'working'
       ) {
         const scan = scanForOwnHandoff(scanHandoffBeads(cwd, deps.br), label);
         const parts: string[] = [];
@@ -2194,15 +2556,43 @@ async function watchSession(
           // waiting without an answer rather than printing a silent tick.
           parts.push(`handoff scan unavailable: ${scan.reason}`);
         } else if (scan.kind === 'seen' && handoffSeenAt == null) {
-          handoffSeenAt = nowMs;
-          handoffBead = scan.beadId;
+          // Armed only WITH an id: a sighting whose bead cannot be named is a
+          // clock running toward an ending that could not say what ended it.
+          const first = scan.beadIds[0];
+          if (first != null) {
+            handoffSeenAt = nowMs;
+            handoffBead = first;
+          }
         }
         if (handoffSeenAt != null && handoffBead != null) {
           const waitedMin = Math.round((nowMs - handoffSeenAt) / 60_000);
-          parts.push(
-            `handoff ${handoffBead} seen ${waitedMin}m ago (settles at ${opts.handoffSettleMin}m)`,
-          );
-          settleNow = nowMs - handoffSeenAt >= opts.handoffSettleMin * 60_000;
+          const due = nowMs - handoffSeenAt >= opts.handoffSettleMin * 60_000;
+          // F5: the sighting is sticky between ticks, but it is RE-CHECKED at
+          // the moment it would settle. A bead closed in the meantime (someone
+          // picked it up, the session withdrew it) must not end a session that
+          // is still working: the ending would name a closed bead, the
+          // post-stop read would find no handoff, and the demand path would
+          // wake a session the runner had just confirmed gone.
+          //
+          // An UNAVAILABLE scan keeps the sighting and settles. "I could not
+          // look" is not "it is closed" (critical rule 6) — and dropping on it
+          // would let a flapping `br` postpone the settle forever, which is the
+          // stall D15 exists to end.
+          const stillValid =
+            scan.kind === 'unavailable' ||
+            (scan.kind === 'seen' && scan.beadIds.includes(handoffBead));
+          if (due && !stillValid) {
+            parts.push(
+              `handoff ${handoffBead} is no longer an open valid handoff — sighting DROPPED, still watching`,
+            );
+            handoffSeenAt = null;
+            handoffBead = null;
+          } else {
+            parts.push(
+              `handoff ${handoffBead} seen ${waitedMin}m ago (settles at ${opts.handoffSettleMin}m)`,
+            );
+            settleNow = due;
+          }
         }
         settle = parts.length > 0 ? parts.join(' · ') : null;
       }
@@ -2214,6 +2604,7 @@ async function watchSession(
           everRead,
           lastSeen,
           lastUnreadable,
+          malformed: lastMalformed,
           polls,
           settle,
         }),
@@ -2307,6 +2698,115 @@ async function watchSession(
   }
 }
 
+/**
+ * Run one background session to its end.
+ *
+ * "Its end" is `state === 'done'` or an absent row, and NOTHING else — see the
+ * measured lifecycle above. There is no verdict file to wait for (D2), so an
+ * ended session goes straight to the bead scan.
+ */
+export async function runSession(
+  cwd: string,
+  opts: JustinLoopOptions,
+  n: number,
+  boot: BootContext,
+  name: string,
+  deps: RunnerDeps,
+): Promise<SessionRun> {
+  const started = deps.now();
+  const banner = await deps.dispatch(
+    cwd,
+    [
+      '--bg',
+      '--name',
+      name,
+      '--model',
+      opts.model,
+      '--permission-mode',
+      opts.permissionMode,
+      '--append-system-prompt',
+      bootContract(
+        sessionContract({
+          blockedWaitMin: opts.blockedWaitMin,
+          // The runner's cwd IS the beads workspace it scans for the handoff, so
+          // the session is told to run `br` there (home-base-1r6d.33.9).
+          cwd,
+          label: boot.label,
+        }),
+        boot,
+      ),
+      composeBootPrompt(opts.prompt, boot),
+    ],
+    dispatchEnv(boot),
+  );
+
+  const id = parseBackgroundedId(banner);
+  if (id == null) {
+    return {
+      durationMs: deps.now() - started,
+      ending: {banner: banner.trim(), kind: 'dispatch-failed'},
+      fullSessionId: null,
+      id: null,
+    };
+  }
+
+  deps.write(
+    `   ${DIM}background ${id} · inspect: claude logs ${id} · step in: claude attach ${id}${RESET}\n`,
+  );
+
+  return await watchSession(cwd, opts, n, boot.label, id, started, deps);
+}
+
+/**
+ * The one dim line a liveness tick prints.
+ *
+ * Every part of it is a FACT ABOUT A MEASUREMENT, never a substitute for one
+ * (critical rule 6): a listing that has never been read successfully says so
+ * rather than borrowing "no row", which means read-and-absent; and an
+ * unreadable listing names its reason and its streak next to whatever row we
+ * last actually saw, so a stale row can never read as a current one.
+ */
+function livenessLine(state: {
+  agentsFailures: number;
+  elapsedMs: number;
+  everRead: boolean;
+  lastSeen: AgentRow | null;
+  lastUnreadable: string | null;
+  /**
+   * Rows the LAST successful listing could not read (F7). Printed only when
+   * non-zero, so the ordinary line is byte-for-byte the one a1go shipped — but
+   * when `claude agents` starts returning rows without ids, the tick that would
+   * otherwise say a calm "no row" says how many it threw away.
+   */
+  malformed: number;
+  polls: number;
+  /**
+   * What the handoff-settle scan found on this tick, when the knob is on (D15).
+   * null = nothing to say, which is also every run with the knob off — so the
+   * default line is byte-for-byte the one home-base-a1go shipped.
+   */
+  settle: string | null;
+}): string {
+  const minutes = Math.round(state.elapsedMs / 60_000);
+  const what = !state.everRead
+    ? 'no listing read yet'
+    : state.lastSeen == null
+      ? 'no row'
+      : state.lastSeen.state === 'blocked'
+        ? `blocked: ${state.lastSeen.waitingFor ?? 'unknown'}`
+        : `${state.lastSeen.state ?? 'unknown'}/${state.lastSeen.status ?? 'unknown'}`;
+  const agents =
+    state.agentsFailures === 0
+      ? 'agents ok'
+      : `agents unreadable ×${state.agentsFailures}: ${state.lastUnreadable ?? 'unknown'}`;
+  const malformed =
+    state.malformed === 0
+      ? ''
+      : ` · ${state.malformed} malformed row${state.malformed === 1 ? '' : 's'}`;
+  const settle = state.settle == null ? '' : ` · ${state.settle}`;
+  return `   ${DIM}watching ${minutes}m · ${state.polls} polls · ${what} · ${agents}${malformed}${settle}${RESET}\n`;
+}
+
 // ---------------------------------------------------------------------------
 // Yield enforcement: resume the session and DEMAND a handoff (D10)
 //
@@ -2331,12 +2831,25 @@ async function watchSession(
 //   flags you passed started a copy as 0ea9def1. Without flags, the same command
 //   continues 11205a3b itself." A copy is a SECOND live session on the same
 //   worktree, i.e. the 1r6d.31/.32 failure, so `resumeArgs` passes the prompt and
-//   nothing else. The woken session keeps its own model, permission mode and
-//   system prompt, so the demand text has to stand on its own.
+//   nothing else. The woken session keeps its own model and permission mode —
+//   and, INFERRED rather than measured, its system prompt (see the 2026-09-19
+//   note below) — so the demand text has to stand on its own.
 //
 //   A `claude stop` does not prevent a later resume (the row is gone from the
 //   default list but the conversation is not). The banner is the usual
 //   `backgrounded · <id> · <name>`, so `parseBackgroundedId` works unchanged.
+//
+// 2026-09-19 (home-base-1r6d.33.8 asked whether a wake-up still carries the
+// appended system prompt). WHAT WAS MEASURED above is the saved-options
+// behaviour: the CLI's own note named `--name, --model, --permission-mode`, and
+// any flag passed on the resume forks a copy. `--append-system-prompt` was NOT
+// among the flags the note listed, and no probe read the woken session's system
+// prompt back, so "the woken session keeps its original system prompt" is
+// INFERRED from that behaviour, not measured. What IS measured is the half the
+// demand depends on: nothing new can be appended on a resume without forking a
+// copy, so the demand text must stand on its own either way. If a future change
+// wants to RELY on the original contract still being in force after a wake-up,
+// measure it first.
 //
 // The short `id` is the first 8 characters of `sessionId`, and that near-miss is
 // exactly the hazard: `--resume <short id>` silently forks a copy. The runner
@@ -2371,9 +2884,9 @@ export function resumeArgs(fullSessionId: string, demand: string): string[] {
  * notes, or is looking at someone else's broken bead.
  */
 export function handoffDemand(opts: {
-  label: string;
-  /** The enforce outcome's own words for what the runner looked for and found. */
-  reason: string;
+  /** 1-based. */
+  attempt: number;
+  attempts: number;
   /**
    * The unreadable open handoff beads, if any. Deliberately NOT keyed off the
    * enforce `sub`: whether to tell the session about a broken bead depends on
@@ -2382,9 +2895,9 @@ export function handoffDemand(opts: {
    * flag said so would be the failure this whole file is about.)
    */
   invalid: InvalidHandoff[];
-  /** 1-based. */
-  attempt: number;
-  attempts: number;
+  label: string;
+  /** The enforce outcome's own words for what the runner looked for and found. */
+  reason: string;
 }): string {
   const lines: string[] = [
     `[justin-loop runner] This message is from the runner that started you, not from a person. Your session label is \`${opts.label}\`.`,
@@ -2410,7 +2923,14 @@ export function handoffDemand(opts: {
   lines.push(
     'THEN commit your code and your `.beads/` changes, and run this ONCE:',
     '',
-    `  justin-sdk justin-loop handoff --from=${opts.label} --disposition=continue|done|blocked --arc=<bead id or arc name> --worktree=<absolute path> --branch=<branch> --state='<where the work actually stands>' --next='<the successor's complete starting instructions, written for a cold reader>' [--open-question='<...>']... [--context-tokens=<N>]`,
+    // F2: DERIVED from the contract's example rather than written a second time.
+    // The two had drifted — different placeholders, and a second copy that any
+    // edit to the helper's flags would have had to find. A session that is being
+    // demanded is the one least able to notice that the example it was handed is
+    // out of date.
+    `  ${handoffExample(opts.label, DEMAND_DISPOSITIONS)}`,
+    '',
+    'Repeat --open-question per question, or leave it out; --context-tokens too.',
     '',
     // D13: the measured block happened on THIS path — a demanded turn re-wrapped
     // the one-line command with backslashes and was refused a permission prompt
@@ -2434,11 +2954,11 @@ export function handoffFailureTitle(label: string, demands: number): string {
 }
 
 export function handoffFailureDescription(opts: {
-  label: string;
-  demands: number;
-  reason: string;
-  invalid: InvalidHandoff[];
   cwd: string;
+  demands: number;
+  invalid: InvalidHandoff[];
+  label: string;
+  reason: string;
 }): string {
   const lines = [
     `Session \`${opts.label}\` (in ${opts.cwd}) was resumed ${opts.demands} time(s) and told to write a handoff bead with \`justin-sdk justin-loop handoff --from=${opts.label} ...\`, and there is still no valid open handoff bead with that \`from\`.`,
@@ -2460,16 +2980,16 @@ export function handoffFailureDescription(opts: {
 
 /** Filing the failure bead is best-effort, and its failure is never silent. */
 export type FailureBeadResult =
-  | {ok: true; id: string}
+  | {id: string; ok: true}
   | {ok: false; reason: string};
 
 export function fileHandoffFailureBead(
   cwd: string,
   opts: {
-    label: string;
     demands: number;
-    reason: string;
     invalid: InvalidHandoff[];
+    label: string;
+    reason: string;
   },
   run: BrRunner,
 ): FailureBeadResult {
@@ -2501,13 +3021,13 @@ export function fileHandoffFailureBead(
 /** Everything the demand loop needs about the session it is chasing. */
 export interface DemandContext {
   cwd: string;
-  opts: JustinLoopOptions;
+  /** The FULL sessionId. null = we never saw a row, so no demand can be sent. */
+  fullSessionId: string | null;
   /** The session's label — the `from` every handoff bead must carry. */
   label: string;
   /** Session number in the chain, for the blocked notification. */
   n: number;
-  /** The FULL sessionId. null = we never saw a row, so no demand can be sent. */
-  fullSessionId: string | null;
+  opts: JustinLoopOptions;
 }
 
 /**
@@ -2518,30 +3038,41 @@ export interface DemandContext {
 export type DemandResult =
   /** The session answered: this is the re-scan's verdict, whatever it is. */
   | {
+      demands: number;
       kind: 'resolved';
       outcome: ResolvedOutcome;
       stop: StopReport;
-      demands: number;
     }
   /** Every demand spent, still no readable handoff. */
   | {
-      kind: 'exhausted';
-      enforce: EnforceOutcome;
-      stop: StopReport;
       demands: number;
+      enforce: EnforceOutcome;
+      kind: 'exhausted';
+      stop: StopReport;
     }
   /**
    * We stopped being able to ask, or to watch the answer. Distinct from
    * `exhausted`, which is a session that WAS asked and did not comply.
    */
   | {
-      kind: 'aborted';
-      reason: string;
-      ledgerOutcome: LedgerOutcome;
-      stop: StopReport;
       demands: number;
       enforce: EnforceOutcome;
+      kind: 'aborted';
+      ledgerOutcome: LedgerOutcome;
+      reason: string;
+      stop: StopReport;
     };
+
+function renderInvalid(
+  invalid: InvalidHandoff[],
+  write: (t: string) => void,
+): void {
+  for (const bad of invalid) {
+    write(
+      `   ${YELLOW}!${RESET} handoff bead ${bad.id} ("${bad.title}") is UNREADABLE: ${bad.errors.join('; ')}\n`,
+    );
+  }
+}
 
 /**
  * Resume the session and demand a handoff, up to `--handoff-retries` times.
@@ -2611,9 +3142,14 @@ export async function demandHandoff(
     );
 
     const started = deps.now();
+    // NO predecessor env on a RESUME. This wakes the SAME session, which is its
+    // own predecessor's successor and already carries whatever environment it
+    // was spawned with; adding one here would tell a session that it continues
+    // itself.
     const banner = await deps.dispatch(
       ctx.cwd,
       resumeArgs(fullSessionId, demand),
+      {},
     );
     const id = parseBackgroundedId(banner);
     if (id == null) {
@@ -2697,19 +3233,8 @@ export async function demandHandoff(
 
 /** Why the run stopped, and what the process should exit with. */
 export interface RunEnd {
-  reason: string;
   exitCode: number;
-}
-
-function renderInvalid(
-  invalid: InvalidHandoff[],
-  write: (t: string) => void,
-): void {
-  for (const bad of invalid) {
-    write(
-      `   ${YELLOW}!${RESET} handoff bead ${bad.id} ("${bad.title}") is UNREADABLE: ${bad.errors.join('; ')}\n`,
-    );
-  }
+  reason: string;
 }
 
 /**
@@ -2722,12 +3247,11 @@ async function waitForGate(
   opts: JustinLoopOptions,
   usage: UsageSnapshot,
   deps: RunnerDeps,
-): Promise<UsageSnapshot | null> {
-  let current: UsageSnapshot | null = usage;
+): Promise<UsageRead> {
+  let current: UsageSnapshot = usage;
   while (
-    current != null &&
-    (current.sessionPct >= opts.sessionStopPct ||
-      current.weekPct >= opts.weeklyStopPct)
+    current.sessionPct >= opts.sessionStopPct ||
+    current.weekPct >= opts.weeklyStopPct
   ) {
     const which =
       current.sessionPct >= opts.sessionStopPct ? 'session' : 'weekly';
@@ -2736,9 +3260,13 @@ async function waitForGate(
         `${DIM}resets ${current.sessionResetsAt ?? 'unknown'} · re-checking in ${opts.gatePollMin}m${RESET}\n`,
     );
     await deps.sleep(opts.gatePollMin * 60_000);
-    current = await deps.readUsage(cwd);
+    // A re-read that FAILS ends the wait with its reason, rather than being
+    // returned as a bare null the caller has to re-describe (F1).
+    const reread = await deps.readUsage(cwd);
+    if (reread.kind === 'failed') return reread;
+    current = reread.usage;
   }
-  return current;
+  return {kind: 'ok', usage: current};
 }
 
 export async function runJustinLoop(
@@ -2762,10 +3290,26 @@ export async function runJustinLoop(
   const ledgerPath = runsJsonlPath(opts.stateDir);
   const settleDescription = handoffSettleDescription(opts.handoffSettleMin);
 
+  // Printed BEFORE the scan below, alone, so the process says what it is the
+  // moment it starts. `br` is bounded at 60s but not instant, and D12's rule is
+  // that silence is never a state — the rest of the banner cannot come first
+  // because it names the labels, which is the scan's answer (33.11).
+  deps.write(`\n${BOLD}justin-loop${RESET} ${DIM}→${RESET} ${cwd}\n`);
+
+  // The pickup path (D1/D10): a run that starts with an open handoff bead
+  // waiting is a continuation, not a fresh start. Read-only, and reported in dry
+  // runs too — "is anything waiting in this repo?" is exactly what a dry run is
+  // for. The scan ALWAYS runs; an explicit `--prompt` changes whether its result
+  // is acted on, never whether the human gets to see it.
+  const startBoot = planStartBoot(scanHandoffBeads(cwd, deps.br), {
+    pickup: opts.pickup,
+    promptExplicit: opts.promptExplicit,
+  });
+  const startN = startSessionNumber(slug, startBoot.plan);
+
   deps.write(
-    `\n${BOLD}justin-loop${RESET} ${DIM}→${RESET} ${cwd}\n` +
-      `${DIM}prompt=${opts.prompt}  model=${opts.model}  perms=${opts.permissionMode}  ` +
-      `max=${opts.maxSessions} sessions  labels=${slug}-1…${slug}-${opts.maxSessions}  ` +
+    `${DIM}prompt=${opts.prompt}  model=${opts.model}  perms=${opts.permissionMode}  ` +
+      `max=${opts.maxSessions} sessions  labels=${sessionLabel(slug, startN)}…${sessionLabel(slug, startN + opts.maxSessions - 1)}  ` +
       (opts.usageGate
         ? `session-stop=${opts.sessionStopPct}%  week-stop=${opts.weeklyStopPct}%`
         : `usage-gate=DISABLED`) +
@@ -2782,17 +3326,15 @@ export async function runJustinLoop(
       `${DIM}ledger ${ledgerPath}${RESET}\n\n`,
   );
 
-  // The pickup path (D1/D10): a run that starts with an open handoff bead
-  // waiting is a continuation, not a fresh start. Read-only, and reported in dry
-  // runs too — "is anything waiting in this repo?" is exactly what a dry run is
-  // for. The scan ALWAYS runs; an explicit `--prompt` changes whether its result
-  // is acted on, never whether the human gets to see it.
-  const startBoot = planStartBoot(scanHandoffBeads(cwd, deps.br), {
-    pickup: opts.pickup,
-    promptExplicit: opts.promptExplicit,
-  });
   for (const line of startBoot.report) {
     deps.write(`${DIM}handoff${RESET} ${line}\n`);
+  }
+  if (startN > 1 && startBoot.plan.kind === 'handoff') {
+    // Said out loud, because the alternative is a run whose labels jump for a
+    // reason nobody can see (33.11).
+    deps.write(
+      `${DIM}handoff${RESET} numbering continues from ${startBoot.plan.match.handoff.from} — this run's first session is ${sessionLabel(slug, startN)}\n`,
+    );
   }
 
   if (opts.dryRun) {
@@ -2805,11 +3347,14 @@ export async function runJustinLoop(
       );
       return 0;
     }
-    const usage = await deps.readUsage(cwd);
-    if (usage == null) {
-      deps.writeErr(`${RED}error${RESET} could not read /usage\n`);
+    const read = await deps.readUsage(cwd);
+    if (read.kind === 'failed') {
+      deps.writeErr(
+        `${RED}error${RESET} could not read /usage: ${read.reason}\n`,
+      );
       return 1;
     }
+    const usage = read.usage;
     deps.write(
       `${DIM}dry run — no sessions spawned${RESET}\n` +
         `  subscription  ${usage.isSubscription ? 'yes' : `${YELLOW}NO — check billing${RESET}`}\n` +
@@ -2838,11 +3383,55 @@ export async function runJustinLoop(
    * like the arc finishing: the bead stays OPEN, and the next run picks it up.
    */
   let unspentHandoff: string | null = null;
+  /**
+   * The full claude session id of the session BEFORE this one in this run (D18),
+   * carried to the successor on the dispatch environment and named in its
+   * preamble so its thread bead links to its predecessor's.
+   *
+   * null for the first session of a run — and for any successor whose
+   * predecessor's `claude agents` row was never read, which is a DIFFERENT fact
+   * from "there was no predecessor" but has the same consequence here: nothing
+   * to link to, and the successor is told so rather than handed an empty string.
+   */
+  let predecessorSessionId: string | null = null;
 
-  for (let n = 1; n <= opts.maxSessions; n++) {
+  // A run that BOOTS from a picked-up handoff bead has a predecessor it never
+  // watched, so there is nothing in memory to hand its first session (33.12).
+  // The bead's `from` is a ledger row's `label`, and that row carries the full
+  // session id — so the thread link survives a `--pickup` restart. Every outcome
+  // is printed: a miss must never look like a feature that did not run.
+  if (startBoot.plan.kind === 'handoff') {
+    const from = startBoot.plan.match.handoff.from;
+    const read = deps.readLedgerSessionId(ledgerPath, from);
+    if (read.kind === 'found') {
+      predecessorSessionId = read.sessionId;
+      deps.write(
+        `${DIM}handoff${RESET} predecessor session ${read.sessionId} recovered from the ledger (row ${from})\n`,
+      );
+    } else {
+      deps.write(
+        `${DIM}handoff${RESET} predecessor session UNKNOWN — ${
+          read.kind === 'unreadable'
+            ? `could not read ${ledgerPath}: ${read.reason}`
+            : read.detail
+        }; this session's thread will not be linked to ${from}'s\n`,
+      );
+    }
+  }
+
+  // `i` is this run's position (`#2/3`), `n` is the session's number in the ARC
+  // (33.11): they are the same thing only for a run that starts fresh, and the
+  // label, the ledger row and the notification all want the arc's number.
+  for (let i = 1; i <= opts.maxSessions; i++) {
+    const n = startN + i - 1;
     const label = sessionLabel(slug, n);
     const name = sessionName(stamp, label);
-    const boot: BootContext = {cwd, label, plan: bootPlan};
+    const boot: BootContext = {
+      cwd,
+      label,
+      plan: bootPlan,
+      predecessorSessionId,
+    };
 
     // --- gate (free) ---
     const decision = await checkGate(opts, () => deps.readUsage(cwd));
@@ -2864,19 +3453,19 @@ export async function runJustinLoop(
         break;
       }
       const resumed = await waitForGate(cwd, opts, decision.usage, deps);
-      if (resumed == null) {
+      if (resumed.kind === 'failed') {
         end = {
           exitCode: 2,
-          reason: 'could not read /usage while paused — failing closed',
+          reason: `could not read /usage while paused: ${resumed.reason} — failing closed`,
         };
         break;
       }
-      usage = resumed;
+      usage = resumed.usage;
     }
 
     // --- work ---
     deps.write(
-      `${BOLD}#${n}/${opts.maxSessions}${RESET} ${DIM}${name}${RESET}\n`,
+      `${BOLD}#${i}/${opts.maxSessions}${RESET} ${DIM}${name}${RESET}\n`,
     );
     const headBefore = await deps.gitHead(cwd);
     const startedAt = new Date(deps.now()).toISOString();
@@ -2913,6 +3502,9 @@ export async function runJustinLoop(
         contextTokens,
         demands,
         endedAt: new Date(deps.now()).toISOString(),
+        // The FULL id, beside the short one — this row is where a later
+        // `--pickup` run finds its predecessor (33.12).
+        fullSessionId: run.fullSessionId,
         handoffBead,
         label,
         n,
@@ -2955,7 +3547,7 @@ export async function runJustinLoop(
       break;
     }
 
-    const sessionId = run.id as string;
+    const sessionId = run.id!;
 
     // --- STOP AND VERIFY, ALWAYS, BEFORE ANYTHING ELSE (D6) ---
     // Measured: an ended session lingers in `claude agents` as state='done' with
@@ -3152,8 +3744,15 @@ export async function runJustinLoop(
         // exit code of 2 here would report a completed chain as a failed run,
         // and a silent skip would leave an open bead nobody knows about
         // (critical rule 6 — the print is what makes the failure a fact).
+        // F4: everything br said, not just its first line. A `br close` that
+        // fails usually fails with a usage block or a Dolt error whose second
+        // and third lines are the diagnosis; the one-line shape printed the
+        // heading and dropped the content.
+        const detail = brFailureDetail(closed)
+          .map((line) => `  ${line}\n`)
+          .join('');
         deps.writeErr(
-          `${RED}!${RESET} handoff bead ${match.row.id} could NOT be closed (${closed.reason ?? 'br failed for an unrecorded reason'}) — it is STILL OPEN; close it by hand.\n`,
+          `${RED}!${RESET} handoff bead ${match.row.id} could NOT be closed (${closed.reason ?? 'br failed for an unrecorded reason'}) — it is STILL OPEN; close it by hand.\n${detail}`,
         );
       }
       end = {
@@ -3169,8 +3768,14 @@ export async function runJustinLoop(
       // Said out loud so the open bead reads as deliberate (D14). The `done`
       // path closes its bead one branch up; a reader who saw that and then found
       // this one open would otherwise be right to suspect the close had failed.
+      // D16 (home-base-1r6d.33.7): the two commands that resume the arc, so
+      // Justin never has to remember either. Printed here rather than only in
+      // the helper's own output because THIS is the moment he is looking at —
+      // the run has just stopped with a question on the screen.
       deps.write(
-        `   ${DIM}handoff ${match.row.id} stays open — it is the question waiting for you${RESET}\n`,
+        `   ${DIM}handoff ${match.row.id} stays open — it is the question waiting for you${RESET}\n` +
+          `   answer with: ${answerCommand(match.row.id)}\n` +
+          `   then re-run: ${rerunCommand(match.handoff.from)}\n`,
       );
       end = {
         exitCode: 2,
@@ -3208,6 +3813,10 @@ export async function runJustinLoop(
     }
 
     bootPlan = {kind: 'handoff', match};
+    // The session that just ended is the next one's predecessor (D18). Read off
+    // `SessionRun`, which captured it from the agents row DURING the run —
+    // `claude stop` has already removed that row by the time we get here.
+    predecessorSessionId = run.fullSessionId;
     unspentHandoff = match.row.id;
     deps.write(`   ${DIM}next session boots from ${match.row.id}${RESET}\n`);
   }

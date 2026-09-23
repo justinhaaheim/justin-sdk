@@ -56,12 +56,12 @@ import {join} from 'path';
 import {countAhead, inspectArchiveMirror} from '../src/repo-status/content';
 import {
   buildPlan,
-  executePlan,
   type CleanupPlan,
+  executePlan,
 } from '../src/repo-status/plan';
 import {
-  buildReport,
   type BranchRow,
+  buildReport,
   type RepoStatusReport,
 } from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -170,7 +170,7 @@ function buildFixture(sb: Sandbox): {repo: string} {
  *   will-break          C0 -- W1
  *   archive/will-break  C0 -- W1 -- W2   <- W2 is the object to destroy
  */
-function buildBrokenMirrorRepo(sb: Sandbox): {repo: string; mirrorTip: string} {
+function buildBrokenMirrorRepo(sb: Sandbox): {mirrorTip: string; repo: string} {
   const repo = initRepo(sb, 'broken');
   const base = commit(repo, 'README.md', 'c0');
   git(repo, ['checkout', '-q', '-b', 'will-break', base]);

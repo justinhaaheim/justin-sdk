@@ -25,8 +25,8 @@ import {join} from 'path';
 
 import {
   buildOverlaps,
-  readChangedFiles,
   type OverlapCandidate,
+  readChangedFiles,
 } from '../src/repo-status/overlap';
 import {buildReport, type RepoStatusReport} from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';

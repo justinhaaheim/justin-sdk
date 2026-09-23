@@ -19,8 +19,8 @@ import {chmodSync, existsSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {dirname, join, resolve} from 'path';
 
 import {renderReportPretty} from '../src/repo-status/pretty';
-import {buildReport, type RepoStatusReport} from '../src/repo-status/report';
 import {runDivergenceCheck} from '../src/repo-status/prime-view';
+import {buildReport, type RepoStatusReport} from '../src/repo-status/report';
 import {
   buildSubmoduleInventory,
   Q_CURRENT_CODE,
@@ -47,12 +47,12 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 interface Fixture {
+  /** The parent repo, with the submodule at `sub`. */
+  parent: string;
   /** Bare repo standing in for the submodule's GitHub. */
   subRemote: string;
   /** A second clone of the submodule, used to push commits the parent's checkout has never seen. */
   subWork: string;
-  /** The parent repo, with the submodule at `sub`. */
-  parent: string;
 }
 
 /**
@@ -743,7 +743,7 @@ describe('gitlinks recorded by other BRANCHES', () => {
     expect(row?.branchPointers.note).toContain(
       'does not record this submodule',
     );
-    expect(branchFindings(row as SubmoduleRow)).toEqual([]);
+    expect(branchFindings(row!)).toEqual([]);
   });
 
   test('one finding per divergent branch, naming the branch, BOTH shas and the merge consequence', () => {

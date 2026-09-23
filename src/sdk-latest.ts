@@ -54,7 +54,9 @@ export type SdkTagFetcher = (options: {timeoutMs: number}) => LatestTagOutcome;
  */
 export function parseSdkVersion(tag: string): [number, number, number] | null {
   const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(tag.trim());
-  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+  return match != null
+    ? [Number(match[1]), Number(match[2]), Number(match[3])]
+    : null;
 }
 
 /** Compare two parsed versions: >0 if a is newer, <0 if older, 0 if equal. */
@@ -62,7 +64,10 @@ export function compareSdkVersions(
   a: [number, number, number],
   b: [number, number, number],
 ): number {
-  for (let i = 0; i < 3; i++) {
+  // Literal indices, not a counter: a tuple indexed by a plain `number` is
+  // `number | undefined` under noUncheckedIndexedAccess, while `0 | 1 | 2`
+  // reads the three slots the type guarantees.
+  for (const i of [0, 1, 2] as const) {
     if (a[i] !== b[i]) return a[i] - b[i];
   }
   return 0;
@@ -193,28 +198,6 @@ export function describeFetchFailure(
 }
 
 /**
- * Ask the SDK repo for its newest tag. Never throws.
- *
- * `execFileSync` (not a shell string) so the URL cannot be re-parsed by a
- * shell, and so `timeout` is a real kill rather than an advisory deadline.
- * `GIT_TERMINAL_PROMPT=0` because a credential prompt on a pipe is how a
- * "fast" command becomes a hung one — the repo is public, so being asked at
- * all means something is wrong and failing is the right answer.
- */
-export function fetchLatestSdkTag(
-  options: {repoUrl?: string; timeoutMs?: number} = {},
-): LatestTagOutcome {
-  const listed = listSdkTags(options);
-  if (listed.status === 'failed') return listed;
-  return latestTagFromLsRemote(listed.stdout);
-}
-
-/** Every tag ref the remote publishes, or why the question could not be asked. */
-export type SdkTagListOutcome =
-  | {error: string; status: 'failed'}
-  | {names: string[]; status: 'ok'; stdout: string};
-
-/**
  * The ONE `git ls-remote --tags` in this codebase.
  *
  * `fetchLatestSdkTag` and `sdkTagExistsOnRemote` are two questions about the
@@ -242,6 +225,28 @@ export function listSdkTags(
   }
   return {names: parseLsRemoteTags(stdout), status: 'ok', stdout};
 }
+
+/**
+ * Ask the SDK repo for its newest tag. Never throws.
+ *
+ * `execFileSync` (not a shell string) so the URL cannot be re-parsed by a
+ * shell, and so `timeout` is a real kill rather than an advisory deadline.
+ * `GIT_TERMINAL_PROMPT=0` because a credential prompt on a pipe is how a
+ * "fast" command becomes a hung one — the repo is public, so being asked at
+ * all means something is wrong and failing is the right answer.
+ */
+export function fetchLatestSdkTag(
+  options: {repoUrl?: string; timeoutMs?: number} = {},
+): LatestTagOutcome {
+  const listed = listSdkTags(options);
+  if (listed.status === 'failed') return listed;
+  return latestTagFromLsRemote(listed.stdout);
+}
+
+/** Every tag ref the remote publishes, or why the question could not be asked. */
+export type SdkTagListOutcome =
+  | {error: string; status: 'failed'}
+  | {names: string[]; status: 'ok'; stdout: string};
 
 /**
  * Does the remote actually carry this tag?

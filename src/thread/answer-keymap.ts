@@ -27,11 +27,11 @@
 export interface KeyEventLike {
   altKey: boolean;
   ctrlKey: boolean;
+  /** True when the event came from one of the answer textareas. */
+  inTextarea: boolean;
   key: string;
   metaKey: boolean;
   shiftKey: boolean;
-  /** True when the event came from one of the answer textareas. */
-  inTextarea: boolean;
 }
 
 export type KeyAction =

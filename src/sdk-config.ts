@@ -23,7 +23,6 @@
 
 import {readFileSync} from 'fs';
 import {join, resolve} from 'path';
-
 import {z} from 'zod';
 
 import {coreConfigNames} from './component-registry';
@@ -32,16 +31,19 @@ import {
   PROJECT_CONFIG_FILENAME,
   xdgConfigHome,
 } from './health-notices';
-import {TIME_CHECK_DEFAULTS} from './time-check';
 import {
   THREAD_DEFAULT_ANSWER_UI,
   THREAD_DEFAULT_AUTO_COMMIT,
   THREAD_DEFAULT_AUTO_PUSH,
+  THREAD_DEFAULT_CAPTURE,
   THREAD_DEFAULT_EMOJI_HEADER,
   THREAD_DEFAULT_ENABLED,
   THREAD_DEFAULT_ENFORCE,
+  THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
+  THREAD_DEFAULT_ENFORCE_MODE,
   THREAD_DEFAULT_START_ON_SESSION_START,
 } from './thread/defaults';
+import {TIME_CHECK_DEFAULTS} from './time-check';
 import {USAGE_CHECK_DEFAULTS} from './usage-check';
 
 /** Environment as this module consumes it — `process.env` is assignable. */
@@ -187,6 +189,85 @@ export const healthNoticesSchema = z
  */
 const componentConfigSchema = z
   .looseObject({
+    thread: z
+      .looseObject({
+        answerUi: z
+          .enum(['classic', 'ink', 'web'])
+          .optional()
+          .describe(
+            'Which UI `thread answer` opens (home-base-p1uj.12). DEFAULT "web": a local page on 127.0.0.1 with one textarea per ask, autosaved to disk on every keystroke burst, where no key can discard text and Enter is a newline. "classic" is the original readline walk — keep it for the iOS remote-control flow, which cannot reach a localhost page. "ink" is accepted and REFUSED in one line: the spike measured it and found no maintained multi-line editor for Ink (ink-text-input is single-line; the multi-line packages are pre-1.0 with three-figure weekly downloads), so it was rejected rather than never considered. Overridden per run by `thread answer --ui <name>` / `--classic`.',
+          ),
+        autoCommit: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether `thread` commits the threads repo’s `.beads/issues.jsonl` itself after every write batch (home-base-p1uj.11). DEFAULT TRUE — the only thread knob that defaults on, because threads live in their own repo whose sole writer is this tool, so committing is finishing the write rather than a new risk. Set it false to batch the commits by hand, or when the threads workspace is not a git repo. A commit that cannot be made is a WARNING, never a lost report.',
+          ),
+        autoPush: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether a successful `thread` commit is followed by `git push origin HEAD` in the threads repo (home-base-p1uj.20, D22). DEFAULT TRUE, and effective only when a remote named `origin` exists — with no origin nothing is attempted and nothing is printed. It exists because a commit that only ever lives on one laptop is not a backup, and it replaces the watcher daemon the dotfiles repo uses: this tool is the threads repo’s only writer, so the push belongs where the write finishes. Never `--force` and never a retry; a push that fails (offline, auth, non-fast-forward) prints ONE warning line naming the git error and exits 0, the next write pushes the backlog, and `bun run justin-sdk thread board` says how many commits are waiting meanwhile. Set it false on a machine that should stay local, or to keep the commit without the network round-trip.',
+          ),
+        capture: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether the `thread capture` hooks installed by `justin-sdk add thread-hooks` record every user prompt (UserPromptSubmit) and every final Claude message (Stop) of a session (home-base-k0b8n.9, K10). DEFAULT TRUE, and gated by `enabled` as well: BOTH must be true. Each turn appends one line to ~/.local/state/justin-threads/messages/<sessionId>.jsonl (local only — never committed, never pushed) and a detached child keeps the thread bead’s last user message / last Claude response current, creating the bead if the session has none, so threads stay up to date whether or not a status report is ever written. Subagents, `claude -p` runs (CLAUDE_CODE_ENTRYPOINT=sdk-cli) and empty messages are never captured. The hook always exits 0 and prints nothing. Set it false in a repo’s justin-sdk.config.json to opt that repo out.',
+          ),
+        enabled: z
+          .boolean()
+          .optional()
+          .describe(
+            'The PREFLIGHT BRANCH POINT for thread reports, not a master switch (home-base-p1uj D6; corrected 2026-09-12, F7b). DEFAULT FALSE. It decides one thing: whether `thread prepare` prints THREADS: ENABLED or THREADS: DISABLED, which is the line the wrap-up rule branches on to fall back to the plain text status report. It does NOT disable the command group — `thread report`, `board`, `answer` and `inbox` all still work when it is false, which is deliberate: a human running them by hand should not be silently refused.',
+          ),
+        enforce: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether the `Stop` hook installed by `justin-sdk add thread-hooks` may BLOCK a session that ends on a status report it cannot prove was recorded (home-base-p1uj.15). DEFAULT FALSE, and the only knob here that can take a turn away from Claude: with it on, `thread stop-check` sees the report delimiters in the final message, finds no archived report newer than Justin’s last message, and exits 2 with a one-line reason telling the agent to run `thread prepare` and `thread report --file`. It blocks a turn at most once (a marker keyed by session and prompt id, plus Claude Code’s own stop_hook_active), never blocks a subagent, and passes silently whenever it cannot measure — a missing transcript, an unreadable archive, a payload that is not JSON. Installing the hook and arming it are two decisions; this is the arming one.',
+          ),
+        enforceMinTurnMinutes: z
+          .number()
+          .positive()
+          .optional()
+          .describe(
+            'With enforceMode "workTurns": a turn at least this many minutes long (from Justin’s last message to the Stop) counts as real work, like a `git commit` does (home-base-k0b8n.11, K12). DEFAULT 20.',
+          ),
+        enforceMode: z
+          .enum(['reportShaped', 'workTurns'])
+          .optional()
+          .describe(
+            'WHAT an armed `thread stop-check` refuses (home-base-k0b8n.11, K12 — the refusal experiment). DEFAULT "reportShaped": only a final message shaped like a status report that was not recorded, which has never fired in practice. "workTurns" ALSO refuses, once per turn, a turn that ran a `git commit` or lasted at least enforceMinTurnMinutes and yields with no report archived since Justin’s last message. Needs `enforce: true`. Every decision, pass or block, is logged to ~/.local/state/justin-threads/stop-check.jsonl; `thread stop-check --stats` summarises it.',
+          ),
+        render: z
+          .looseObject({
+            emojiHeader: z
+              .boolean()
+              .optional()
+              .describe(
+                'Whether the report header shows repo / branch / worktree / tokens as emoji-prefixed values with no field titles (home-base-p1uj D19). DEFAULT TRUE. False restores the titled fields (**Repo:** … **Branch:** …), which are longer but self-describing. Tokens render as "497k", or "497k / 470k" when usage-check has a numeric wrapUpAt for this session\u2019s role.',
+              ),
+          })
+          .optional()
+          .describe('thread: how the rendered report looks.'),
+        repoDir: z
+          .string()
+          .optional()
+          .describe(
+            'The bd workspace holding `thread` and `ask` beads (home-base-p1uj.11). DEFAULT ~/Dev/threads. Overridden by the JUSTIN_THREADS_REPO_DIR env var, which outranks both config files.',
+          ),
+        startOnSessionStart: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether the SessionStart hook installed by `justin-sdk add thread-hooks` may create this session’s thread bead before it has reported anything (home-base-p1uj.3). DEFAULT FALSE, and gated by `enabled` as well: BOTH must be true. Separate from `enabled` because this one turns every session start and every resume into a Dolt write, so it is the expensive half and must be armed deliberately.',
+          ),
+      })
+      .optional()
+      .describe(
+        'thread: status reports as beads. Set in the user file to turn it on everywhere; override per repo in the project file.',
+      ),
     // NO 'critical-rules' SECTION, deliberately (epic home-base-dchjw D2). It
     // held `modules`, a per-repo include-list frozen at enrolment, and it is
     // retired: which rules a repo carries is decided by the prompts registry and
@@ -214,66 +295,6 @@ const componentConfigSchema = z
       })
       .optional()
       .describe('time-check: the elapsed-time notice.'),
-    thread: z
-      .looseObject({
-        enabled: z
-          .boolean()
-          .optional()
-          .describe(
-            'The PREFLIGHT BRANCH POINT for thread reports, not a master switch (home-base-p1uj D6; corrected 2026-09-12, F7b). DEFAULT FALSE. It decides one thing: whether `thread prepare` prints THREADS: ENABLED or THREADS: DISABLED, which is the line the wrap-up rule branches on to fall back to the plain text status report. It does NOT disable the command group — `thread report`, `board`, `answer` and `inbox` all still work when it is false, which is deliberate: a human running them by hand should not be silently refused.',
-          ),
-        autoCommit: z
-          .boolean()
-          .optional()
-          .describe(
-            'Whether `thread` commits the threads repo’s `.beads/issues.jsonl` itself after every write batch (home-base-p1uj.11). DEFAULT TRUE — the only thread knob that defaults on, because threads live in their own repo whose sole writer is this tool, so committing is finishing the write rather than a new risk. Set it false to batch the commits by hand, or when the threads workspace is not a git repo. A commit that cannot be made is a WARNING, never a lost report.',
-          ),
-        autoPush: z
-          .boolean()
-          .optional()
-          .describe(
-            'Whether a successful `thread` commit is followed by `git push origin HEAD` in the threads repo (home-base-p1uj.20, D22). DEFAULT TRUE, and effective only when a remote named `origin` exists — with no origin nothing is attempted and nothing is printed. It exists because a commit that only ever lives on one laptop is not a backup, and it replaces the watcher daemon the dotfiles repo uses: this tool is the threads repo’s only writer, so the push belongs where the write finishes. Never `--force` and never a retry; a push that fails (offline, auth, non-fast-forward) prints ONE warning line naming the git error and exits 0, the next write pushes the backlog, and `bun run justin-sdk thread board` says how many commits are waiting meanwhile. Set it false on a machine that should stay local, or to keep the commit without the network round-trip.',
-          ),
-        enforce: z
-          .boolean()
-          .optional()
-          .describe(
-            'Whether the `Stop` hook installed by `justin-sdk add thread-hooks` may BLOCK a session that ends on a status report it cannot prove was recorded (home-base-p1uj.15). DEFAULT FALSE, and the only knob here that can take a turn away from Claude: with it on, `thread stop-check` sees the report delimiters in the final message, finds no archived report newer than Justin’s last message, and exits 2 with a one-line reason telling the agent to run `thread prepare` and `thread report --file`. It blocks a turn at most once (a marker keyed by session and prompt id, plus Claude Code’s own stop_hook_active), never blocks a subagent, and passes silently whenever it cannot measure — a missing transcript, an unreadable archive, a payload that is not JSON. Installing the hook and arming it are two decisions; this is the arming one.',
-          ),
-        repoDir: z
-          .string()
-          .optional()
-          .describe(
-            'The bd workspace holding `thread` and `ask` beads (home-base-p1uj.11). DEFAULT ~/Dev/threads. Overridden by the JUSTIN_THREADS_REPO_DIR env var, which outranks both config files.',
-          ),
-        startOnSessionStart: z
-          .boolean()
-          .optional()
-          .describe(
-            'Whether the SessionStart hook installed by `justin-sdk add thread-hooks` may create this session’s thread bead before it has reported anything (home-base-p1uj.3). DEFAULT FALSE, and gated by `enabled` as well: BOTH must be true. Separate from `enabled` because this one turns every session start and every resume into a Dolt write, so it is the expensive half and must be armed deliberately.',
-          ),
-        render: z
-          .looseObject({
-            emojiHeader: z
-              .boolean()
-              .optional()
-              .describe(
-                'Whether the report header shows repo / branch / worktree / tokens as emoji-prefixed values with no field titles (home-base-p1uj D19). DEFAULT TRUE. False restores the titled fields (**Repo:** … **Branch:** …), which are longer but self-describing. Tokens render as "497k", or "497k / 470k" when usage-check has a numeric wrapUpAt for this session\u2019s role.',
-              ),
-          })
-          .optional()
-          .describe('thread: how the rendered report looks.'),
-        answerUi: z
-          .enum(['classic', 'ink', 'web'])
-          .optional()
-          .describe(
-            'Which UI `thread answer` opens (home-base-p1uj.12). DEFAULT "web": a local page on 127.0.0.1 with one textarea per ask, autosaved to disk on every keystroke burst, where no key can discard text and Enter is a newline. "classic" is the original readline walk — keep it for the iOS remote-control flow, which cannot reach a localhost page. "ink" is accepted and REFUSED in one line: the spike measured it and found no maintained multi-line editor for Ink (ink-text-input is single-line; the multi-line packages are pre-1.0 with three-figure weekly downloads), so it was rejected rather than never considered. Overridden per run by `thread answer --ui <name>` / `--classic`.',
-          ),
-      })
-      .optional()
-      .describe(
-        'thread: status reports as beads. Set in the user file to turn it on everywhere; override per repo in the project file.',
-      ),
     'usage-check': z
       .looseObject({
         enabled: z.boolean().optional(),
@@ -487,17 +508,17 @@ export interface SdkVersionKindConfig {
 }
 
 export interface ResolvedHealthNoticesConfig {
+  doctor: {
+    intervalMinutes: number;
+    promptTier: PromptTier;
+    showOnPass: boolean;
+  };
   /**
    * Master switch. Settable in either file and forced to false by the env kill
    * switch (see resolveHealthNoticesConfig). Per-notice silencing is what
    * `promptTier: 1` is for; this is the whole layer at once.
    */
   enabled: boolean;
-  doctor: {
-    intervalMinutes: number;
-    promptTier: PromptTier;
-    showOnPass: boolean;
-  };
   sdkVersion: {
     checkIntervalMinutes: number;
     major: SdkVersionKindConfig;
@@ -517,20 +538,23 @@ export interface ResolvedHealthNoticesConfig {
  * imported rather than restated.
  */
 export const DEFAULT_COMPONENT_CONFIG = {
-  'time-check': {
-    enabled: TIME_CHECK_DEFAULTS.enabled,
-    gapHours: TIME_CHECK_DEFAULTS.gapHours,
-    notifyOnNewDayBoundaryHour: TIME_CHECK_DEFAULTS.notifyOnNewDayBoundaryHour,
-  },
   thread: {
     answerUi: THREAD_DEFAULT_ANSWER_UI,
     autoCommit: THREAD_DEFAULT_AUTO_COMMIT,
     autoPush: THREAD_DEFAULT_AUTO_PUSH,
+    capture: THREAD_DEFAULT_CAPTURE,
     enabled: THREAD_DEFAULT_ENABLED,
     enforce: THREAD_DEFAULT_ENFORCE,
+    enforceMinTurnMinutes: THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
+    enforceMode: THREAD_DEFAULT_ENFORCE_MODE,
     render: {emojiHeader: THREAD_DEFAULT_EMOJI_HEADER},
     repoDir: '~/Dev/threads',
     startOnSessionStart: THREAD_DEFAULT_START_ON_SESSION_START,
+  },
+  'time-check': {
+    enabled: TIME_CHECK_DEFAULTS.enabled,
+    gapHours: TIME_CHECK_DEFAULTS.gapHours,
+    notifyOnNewDayBoundaryHour: TIME_CHECK_DEFAULTS.notifyOnNewDayBoundaryHour,
   },
   'usage-check': {
     enabled: USAGE_CHECK_DEFAULTS.enabled,
@@ -613,25 +637,6 @@ function layerFrom(
 }
 
 /**
- * DEFAULTS ← user file ← project file, merged per field, then the env kill
- * switch (D2).
- *
- * Off in CI and in remote Claude Code sessions because both are non-interactive
- * and neither can act on the notice: the point is to nudge Justin at a
- * keyboard, not to spend a network call on a build agent.
- */
-export function resolveHealthNoticesConfig(
-  projectRoot: string,
-  env: EnvLike = process.env,
-): ResolvedHealthNoticesConfig {
-  return resolveHealthNoticesConfigFrom({
-    env,
-    project: readProjectConfig(projectRoot),
-    user: readUserConfig(env),
-  });
-}
-
-/**
  * The same resolution, for a caller that has ALREADY read both files
  * (home-base-uxwc.5 F9).
  *
@@ -660,6 +665,25 @@ export function resolveHealthNoticesConfigFrom(options: {
     env.CLAUDE_CODE_REMOTE === 'true';
 
   return killed ? {...resolved, enabled: false} : resolved;
+}
+
+/**
+ * DEFAULTS ← user file ← project file, merged per field, then the env kill
+ * switch (D2).
+ *
+ * Off in CI and in remote Claude Code sessions because both are non-interactive
+ * and neither can act on the notice: the point is to nudge Justin at a
+ * keyboard, not to spend a network call on a build agent.
+ */
+export function resolveHealthNoticesConfig(
+  projectRoot: string,
+  env: EnvLike = process.env,
+): ResolvedHealthNoticesConfig {
+  return resolveHealthNoticesConfigFrom({
+    env,
+    project: readProjectConfig(projectRoot),
+    user: readUserConfig(env),
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -711,7 +735,7 @@ function unwrapNullable(node: JsonSchemaNode): {
   nullable: boolean;
 } {
   const branches = node.anyOf;
-  if (branches == null || branches.length !== 2) return {node, nullable: false};
+  if (branches?.length !== 2) return {node, nullable: false};
   const nullIndex = branches.findIndex((branch) => branch.type === 'null');
   if (nullIndex === -1) return {node, nullable: false};
   const other = branches[1 - nullIndex];

@@ -71,9 +71,9 @@ export {isLinkedWorktree} from './setup-env';
  * other does not (home-base-e0ohc).
  */
 export {
+  type MiseTrustStatus,
   miseTrustStatus,
   parseMiseTrustStatus,
-  type MiseTrustStatus,
 } from './setup-env';
 
 // ---------------------------------------------------------------------------
@@ -89,11 +89,11 @@ export type HydrationProblemKind =
   | 'worktreeinclude';
 
 export interface HydrationProblem {
+  /** One sentence naming the CONSEQUENCE, for doctor's message. */
+  detail: string;
   kind: HydrationProblemKind;
   /** Terse noun phrase for the `Missing:` list, e.g. `node_modules`. */
   label: string;
-  /** One sentence naming the CONSEQUENCE, for doctor's message. */
-  detail: string;
 }
 
 export interface WorktreeHydrationStatus {

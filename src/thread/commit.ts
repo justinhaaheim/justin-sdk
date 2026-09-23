@@ -51,6 +51,8 @@
  * entirely when there is nothing to send.
  */
 
+import type {EnvLike} from './paths';
+
 import {spawnSync} from 'child_process';
 import {
   closeSync,
@@ -66,8 +68,6 @@ import {SDK_RUN} from '../sdk-invocation';
 import {resolveThreadConfig} from './config';
 import {THREAD_DEFAULT_AUTO_COMMIT, THREAD_DEFAULT_AUTO_PUSH} from './defaults';
 import {threadsRepoDir, threadsStateDir} from './paths';
-
-import type {EnvLike} from './paths';
 
 /** The file `thread` commits. Relative to the threads repo. */
 export const BEADS_JSONL = '.beads/issues.jsonl';
@@ -92,7 +92,7 @@ export type PushOutcome =
   | {kind: 'no-remote'}
   | {kind: 'not-ahead'}
   | {kind: 'disabled'}
-  | {kind: 'failed'; command: string; detail: string};
+  | {command: string; detail: string; kind: 'failed'};
 
 /**
  * How this branch stands against origin — the cheap, LOCAL answer.
@@ -124,7 +124,7 @@ export type CommitOutcome =
   | {kind: 'nothing-to-commit'; push: PushOutcome}
   | {kind: 'disabled'}
   | {kind: 'skipped-export-unstaged'}
-  | {kind: 'failed'; command: string; detail: string};
+  | {command: string; detail: string; kind: 'failed'};
 
 export interface CommitOptions {
   /** Overrides the resolved knob. Tests and `--no-commit` callers use it. */
@@ -224,8 +224,13 @@ function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-/** true = running, false = MEASURED gone, null = could not tell (rule 6). */
-function pidAlive(pid: number): boolean | null {
+/**
+ * true = running, false = MEASURED gone, null = could not tell (rule 6).
+ *
+ * Exported for `thread capture`'s per-session lock (k0b8n.9), which steals a
+ * dead holder's lock by exactly this test.
+ */
+export function pidAlive(pid: number): boolean | null {
   try {
     process.kill(pid, 0);
     return true;
@@ -375,27 +380,6 @@ export function aheadOfOrigin(dir: string, env: EnvLike): AheadOutcome {
 }
 
 /**
- * Push only if there is something to push — the no-op write's path.
- *
- * `level` is the ONLY answer that skips the push, and it is the only one that
- * has measured there is nothing to send. `unknown` pushes: a push on a branch
- * that turns out to be level is a harmless "Everything up-to-date", while
- * treating an unreadable measurement as "nothing to do" is the reassuring
- * substitution that leaves reports on one laptop.
- */
-function pushIfAhead(
-  dir: string,
-  env: EnvLike,
-  autoPush: boolean,
-): PushOutcome {
-  if (!autoPush) return {kind: 'disabled'};
-  const ahead = aheadOfOrigin(dir, env);
-  if (ahead.kind === 'no-remote') return {kind: 'no-remote'};
-  if (ahead.kind === 'level') return {kind: 'not-ahead'};
-  return pushThreadsRepo(dir, env, autoPush);
-}
-
-/**
  * Push the current branch to `origin`, or say precisely why not (D22).
  *
  * `git push origin HEAD`, NOT a bare `git push`: the latter depends on
@@ -451,6 +435,27 @@ export function pushThreadsRepo(
     };
   }
   return {kind: 'pushed', remote: PUSH_REMOTE};
+}
+
+/**
+ * Push only if there is something to push — the no-op write's path.
+ *
+ * `level` is the ONLY answer that skips the push, and it is the only one that
+ * has measured there is nothing to send. `unknown` pushes: a push on a branch
+ * that turns out to be level is a harmless "Everything up-to-date", while
+ * treating an unreadable measurement as "nothing to do" is the reassuring
+ * substitution that leaves reports on one laptop.
+ */
+function pushIfAhead(
+  dir: string,
+  env: EnvLike,
+  autoPush: boolean,
+): PushOutcome {
+  if (!autoPush) return {kind: 'disabled'};
+  const ahead = aheadOfOrigin(dir, env);
+  if (ahead.kind === 'no-remote') return {kind: 'no-remote'};
+  if (ahead.kind === 'level') return {kind: 'not-ahead'};
+  return pushThreadsRepo(dir, env, autoPush);
 }
 
 /**

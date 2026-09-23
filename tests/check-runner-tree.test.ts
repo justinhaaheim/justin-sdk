@@ -3,9 +3,10 @@
  * when their parent fails with error severity, not warn severity.
  */
 
-import {describe, test, expect} from 'bun:test';
-
 import type {CheckNode} from '../src/check-runner';
+
+import {describe, expect, test} from 'bun:test';
+
 import {runCheckTree} from '../src/check-runner';
 
 describe('check-runner tree walking', () => {
@@ -14,21 +15,21 @@ describe('check-runner tree walking', () => {
     const nodes: CheckNode[] = [
       {
         check: {
-          label: 'WARN_PARENT',
-          severity: 'warn',
           fn: () => ({
             message: 'warning only',
             pass: false,
           }),
+          label: 'WARN_PARENT',
+          severity: 'warn',
         },
         children: [
           {
             check: {
-              label: 'CHILD',
               fn: () => {
                 childRan = true;
                 return {pass: true};
               },
+              label: 'CHILD',
             },
           },
         ],
@@ -45,20 +46,20 @@ describe('check-runner tree walking', () => {
     const nodes: CheckNode[] = [
       {
         check: {
-          label: 'ERROR_PARENT',
           fn: () => ({
             message: 'real failure',
             pass: false,
           }),
+          label: 'ERROR_PARENT',
         },
         children: [
           {
             check: {
-              label: 'CHILD',
               fn: () => {
                 childRan = true;
                 return {pass: true};
               },
+              label: 'CHILD',
             },
           },
         ],
@@ -75,18 +76,18 @@ describe('check-runner tree walking', () => {
     const nodes: CheckNode[] = [
       {
         check: {
+          fn: () => ({message: 'warn', pass: false}),
           label: 'WARN_SIBLING',
           severity: 'warn',
-          fn: () => ({message: 'warn', pass: false}),
         },
       },
       {
         check: {
-          label: 'OTHER',
           fn: () => {
             siblingRan = true;
             return {pass: true};
           },
+          label: 'OTHER',
         },
       },
     ];

@@ -33,8 +33,8 @@ import {join} from 'path';
 
 import {
   buildPlan,
-  remoteArchiveArgv,
   type CleanupPlan,
+  remoteArchiveArgv,
 } from '../src/repo-status/plan';
 import {buildReport} from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -63,8 +63,8 @@ function git(cwd: string, args: string[]): string {
 }
 
 interface Fixture {
-  work: string;
   remote: string;
+  work: string;
 }
 
 function setupFixture(sb: Sandbox): Fixture {
@@ -159,7 +159,7 @@ function installGitShim(sb: Sandbox): {
 }
 
 /** Run the shipped `apply` with the shim first on PATH. */
-function runApply(fx: Fixture, shimDir: string): {status: number; err: string} {
+function runApply(fx: Fixture, shimDir: string): {err: string; status: number} {
   const result = spawnSync(
     'bun',
     [
@@ -274,9 +274,6 @@ describe('the printed commands are the executed commands', () => {
     // printed the old, unquoted way expands to a DIFFERENT command — one that
     // runs `id` and then deletes a ref nobody proved anything about.
     const unquoted = `git push origin --delete ${hostile} --force-with-lease=refs/heads/${hostile}:${sha}`;
-    expect(shellWords(unquoted)).not.toEqual([
-      'git',
-      ...(executed[1] as string[]),
-    ]);
+    expect(shellWords(unquoted)).not.toEqual(['git', ...executed[1]!]);
   });
 });

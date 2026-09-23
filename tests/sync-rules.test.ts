@@ -6,7 +6,7 @@
  * write into a sandbox instead of ~/.claude.
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
+import {afterEach, describe, expect, test} from 'bun:test';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
@@ -57,9 +57,9 @@ describe('sync-rules', () => {
     promptsFixture();
     const out = outFile();
     const rc = runSyncRules({
-      quiet: true,
-      outFile: out,
       now: '2020-01-01',
+      outFile: out,
+      quiet: true,
     });
     expect(rc).toBe(0);
     expect(existsSync(out)).toBe(true);
@@ -79,16 +79,16 @@ describe('sync-rules', () => {
     promptsFixture();
     const out = outFile();
     runSyncRules({
-      quiet: true,
-      outFile: out,
       now: '2020-01-01T00:00:00Z',
+      outFile: out,
+      quiet: true,
     });
     // second run with a DIFFERENT timestamp: if idempotent, the file keeps the
     // original timestamp (never rewritten).
     runSyncRules({
-      quiet: true,
-      outFile: out,
       now: '2099-12-31T00:00:00Z',
+      outFile: out,
+      quiet: true,
     });
     const content = readFileSync(out, 'utf-8');
     expect(content).toContain('2020-01-01T00:00:00Z');
@@ -99,15 +99,15 @@ describe('sync-rules', () => {
     promptsFixture();
     const out = outFile();
     runSyncRules({
-      quiet: true,
-      outFile: out,
       now: '2020-01-01T00:00:00Z',
+      outFile: out,
+      quiet: true,
     });
     runSyncRules({
-      quiet: true,
-      outFile: out,
-      now: '2099-12-31T00:00:00Z',
       force: true,
+      now: '2099-12-31T00:00:00Z',
+      outFile: out,
+      quiet: true,
     });
     const content = readFileSync(out, 'utf-8');
     expect(content).toContain('2099-12-31T00:00:00Z');

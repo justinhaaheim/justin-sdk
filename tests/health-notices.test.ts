@@ -7,6 +7,8 @@
  * keeps an offline laptop from spending 5 seconds on every command.
  */
 
+import type {LatestTagOutcome, SdkTagFetcher} from '../src/sdk-latest';
+
 import {afterEach, describe, expect, test} from 'bun:test';
 import {mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {join} from 'path';
@@ -20,6 +22,7 @@ import {
   emptyState,
   findProjectRoot,
   healthNoticesPaths,
+  type HealthNoticesState,
   isStateWritable,
   maybeNotifySdkVersion,
   probeSdkVersion,
@@ -27,6 +30,8 @@ import {
   readState,
   recordNotified,
   renderNotice,
+  type SdkVersionCheckResult,
+  type SdkVersionProbe,
   sdkVersionVerdict,
   STATE_SCHEMA_VERSION,
   tierAllows,
@@ -34,9 +39,6 @@ import {
   UPGRADE_COMMAND,
   writeState,
   xdgStateHome,
-  type HealthNoticesState,
-  type SdkVersionCheckResult,
-  type SdkVersionProbe,
 } from '../src/health-notices';
 import {
   DEFAULT_HEALTH_NOTICES,
@@ -44,7 +46,6 @@ import {
   type PromptTier,
   type ResolvedHealthNoticesConfig,
 } from '../src/sdk-config';
-import type {LatestTagOutcome, SdkTagFetcher} from '../src/sdk-latest';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -106,7 +107,7 @@ function config(
 
 describe('xdgStateHome', () => {
   test('prefers XDG_STATE_HOME', () => {
-    expect(xdgStateHome({XDG_STATE_HOME: '/x/state', HOME: '/home/j'})).toBe(
+    expect(xdgStateHome({HOME: '/home/j', XDG_STATE_HOME: '/x/state'})).toBe(
       '/x/state',
     );
   });
@@ -302,7 +303,7 @@ describe('pruneState (uxwc.5 F2)', () => {
 
   test('drops a repo whose newest notice stamp is older than the window', () => {
     const pruned = run({
-      lastNotified: {'/old': {minor: ANCIENT}, '/new': {minor: RECENT}},
+      lastNotified: {'/new': {minor: RECENT}, '/old': {minor: ANCIENT}},
     });
     expect(Object.keys(pruned.lastNotified)).toEqual(['/new']);
   });
@@ -343,7 +344,7 @@ describe('pruneState (uxwc.5 F2)', () => {
     const {paths} = stateEnv();
     const state: HealthNoticesState = {
       ...emptyState(),
-      lastNotified: {'/old': {minor: ANCIENT}, '/new': {minor: RECENT}},
+      lastNotified: {'/new': {minor: RECENT}, '/old': {minor: ANCIENT}},
     };
     expect(writeState(paths, state, NOW)).toBe(true);
     const outcome = readState(paths);

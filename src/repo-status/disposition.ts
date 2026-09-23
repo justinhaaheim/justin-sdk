@@ -23,11 +23,11 @@
  * Part of home-base-qyu1.1.
  */
 
-import {findUnreadableEvidence, mirrorFullyPreserves} from './content';
-
 import type {ContentProof} from './content';
 import type {PullRequest} from './prs';
 import type {BranchDivergence} from './types';
+
+import {findUnreadableEvidence, mirrorFullyPreserves} from './content';
 
 export type Disposition =
   /** Every unique commit is demonstrably on the baseline. Nothing to lose. */
@@ -52,28 +52,28 @@ export const PR_STATE_NOT_CHECKED = '; PR state not checked';
 
 export interface BranchDisposition {
   disposition: Disposition;
-  /** One line explaining the verdict, in plain language. */
-  why: string;
   /**
    * True ONLY when the tool can prove no work would be lost by deleting this
    * branch. `apply` acts on nothing else.
    */
   provenSafe: boolean;
+  /** One line explaining the verdict, in plain language. */
+  why: string;
 }
 
 export interface DispositionInputs {
-  branch: BranchDivergence;
   /**
    * The ref divergence was measured against. Named in the verdict, so a reader
    * of a failed measurement can see WHICH comparison could not be made.
    */
   baselineRef: string;
-  /** Null when the +content enrichment was not run. */
-  proof: ContentProof | null;
+  branch: BranchDivergence;
   /** Null when there is no PR, or when +prs was not run / unavailable. */
   pr: PullRequest | null;
   /** Whether PR data was actually available (absent data != absence of a PR). */
   prDataAvailable: boolean;
+  /** Null when the +content enrichment was not run. */
+  proof: ContentProof | null;
 }
 
 function plural(n: number, word: string): string {

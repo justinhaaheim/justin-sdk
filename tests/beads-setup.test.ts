@@ -9,7 +9,7 @@
  */
 
 import {Database} from 'bun:sqlite';
-import {describe, test, expect, afterEach, beforeAll} from 'bun:test';
+import {afterEach, beforeAll, describe, expect, test} from 'bun:test';
 import {execSync} from 'child_process';
 import {existsSync, readdirSync, readFileSync, writeFileSync} from 'fs';
 import {join} from 'path';
@@ -52,8 +52,8 @@ describe('beads-setup (file operations)', () => {
     if (!hasBr) return; // full run requires br for install step
     const sb = track(createProjectSandbox());
     const exitCode = await runBeadsSetup({
-      projectRoot: sb.path,
       noCommit: true,
+      projectRoot: sb.path,
       quiet: true,
     });
     expect(exitCode).toBe(0);
@@ -69,7 +69,7 @@ describe('beads-setup (file operations)', () => {
   test('writes no prompt files (no AGENTS.md, no docs/prompts/BEADS.md)', async () => {
     if (!hasBr) return;
     const sb = track(createProjectSandbox());
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+    await runBeadsSetup({noCommit: true, projectRoot: sb.path, quiet: true});
 
     expect(existsSync(join(sb.path, 'docs/prompts/BEADS.md'))).toBe(false);
     expect(existsSync(join(sb.path, 'AGENTS.md'))).toBe(false);
@@ -80,7 +80,7 @@ describe('beads-setup (file operations)', () => {
     const originalClaudeMd = '# Test Project\n\nSome existing content.\n';
     const sb = track(createProjectSandbox({claudeMd: originalClaudeMd}));
 
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+    await runBeadsSetup({noCommit: true, projectRoot: sb.path, quiet: true});
 
     const updated = readFileSync(join(sb.path, 'CLAUDE.md'), 'utf-8');
     expect(updated).toBe(originalClaudeMd);
@@ -91,8 +91,8 @@ describe('beads-setup (file operations)', () => {
     if (!hasBr) return;
     const sb = track(createProjectSandbox({claudeMd: '# Test\n'}));
 
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+    await runBeadsSetup({noCommit: true, projectRoot: sb.path, quiet: true});
+    await runBeadsSetup({noCommit: true, projectRoot: sb.path, quiet: true});
 
     const content = readFileSync(join(sb.path, 'CLAUDE.md'), 'utf-8');
     expect(content).toBe('# Test\n');
@@ -101,7 +101,7 @@ describe('beads-setup (file operations)', () => {
   test('adds .beads to .prettierignore (creates if missing)', async () => {
     if (!hasBr) return;
     const sb = track(createProjectSandbox());
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+    await runBeadsSetup({noCommit: true, projectRoot: sb.path, quiet: true});
 
     const content = readFileSync(join(sb.path, '.prettierignore'), 'utf-8');
     expect(content).toContain('.beads');
@@ -110,8 +110,8 @@ describe('beads-setup (file operations)', () => {
   test('idempotent: second run does not duplicate .prettierignore entry', async () => {
     if (!hasBr) return;
     const sb = track(createProjectSandbox());
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+    await runBeadsSetup({noCommit: true, projectRoot: sb.path, quiet: true});
+    await runBeadsSetup({noCommit: true, projectRoot: sb.path, quiet: true});
 
     const content = readFileSync(join(sb.path, '.prettierignore'), 'utf-8');
     const occurrences = content.match(/^\.beads$/gm) ?? [];
@@ -121,7 +121,7 @@ describe('beads-setup (file operations)', () => {
   test('adds br to .claude/settings.json sandbox exclusions', async () => {
     if (!hasBr) return;
     const sb = track(createProjectSandbox());
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+    await runBeadsSetup({noCommit: true, projectRoot: sb.path, quiet: true});
 
     const settings = JSON.parse(
       readFileSync(join(sb.path, '.claude/settings.json'), 'utf-8'),
@@ -143,7 +143,7 @@ describe('beads-setup (file operations)', () => {
         sandbox: {excludedCommands: ['gh']},
       }),
     );
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+    await runBeadsSetup({noCommit: true, projectRoot: sb.path, quiet: true});
 
     const settings = JSON.parse(
       readFileSync(join(sb.path, '.claude/settings.json'), 'utf-8'),
@@ -160,10 +160,10 @@ describe('beads-setup (file operations)', () => {
     if (!hasBr) return;
     const sb = track(
       createProjectSandbox({
-        justinSdkConfig: {version: '0.2.0', components: ['base-setup']},
+        justinSdkConfig: {components: ['base-setup'], version: '0.2.0'},
       }),
     );
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+    await runBeadsSetup({noCommit: true, projectRoot: sb.path, quiet: true});
 
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
@@ -186,8 +186,8 @@ describe('beads-setup (full install)', () => {
     }
     const sb = track(createProjectSandbox());
     const exitCode = await runBeadsSetup({
-      projectRoot: sb.path,
       noCommit: true,
+      projectRoot: sb.path,
       quiet: true,
     });
     expect(exitCode).toBe(0);
@@ -208,7 +208,7 @@ describe('beads-setup (full install)', () => {
   test('no stray AGENTS.md.bak in project root after run (home-base-s9p)', async () => {
     if (!hasBr) return;
     const sb = track(createProjectSandbox());
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+    await runBeadsSetup({noCommit: true, projectRoot: sb.path, quiet: true});
 
     expect(existsSync(join(sb.path, 'AGENTS.md.bak'))).toBe(false);
   });
@@ -229,8 +229,8 @@ This project uses **bd** (beads) for issue tracking. Run \`bd onboard\` to get s
     sb.writeFile('AGENTS.md', staleAgentsMd);
 
     const exitCode = await runBeadsSetup({
-      projectRoot: sb.path,
       noCommit: true,
+      projectRoot: sb.path,
       quiet: true,
     });
     expect(exitCode).toBe(0);
@@ -255,13 +255,13 @@ This project uses **bd** (beads) for issue tracking. Run \`bd onboard\` to get s
     const sb = track(createProjectSandbox({claudeMd: '# Test\n'}));
 
     const first = await runBeadsSetup({
-      projectRoot: sb.path,
       noCommit: true,
+      projectRoot: sb.path,
       quiet: true,
     });
     const second = await runBeadsSetup({
-      projectRoot: sb.path,
       noCommit: true,
+      projectRoot: sb.path,
       quiet: true,
     });
 
@@ -278,7 +278,7 @@ describe('beads-setup (safety)', () => {
   test('does not overwrite working beads_rust db on rerun', async () => {
     if (!hasBr) return;
     const sb = track(createProjectSandbox());
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+    await runBeadsSetup({noCommit: true, projectRoot: sb.path, quiet: true});
 
     // Create a bead so we can verify the db is preserved
     execSync(`br create --title "Test bead" --type task --priority 2`, {
@@ -289,14 +289,14 @@ describe('beads-setup (safety)', () => {
     });
 
     // Second run should not wipe the db
-    await runBeadsSetup({projectRoot: sb.path, noCommit: true, quiet: true});
+    await runBeadsSetup({noCommit: true, projectRoot: sb.path, quiet: true});
 
     const list = execSync('br list --json', {
       cwd: sb.path,
       encoding: 'utf-8',
       env: process.env,
     });
-    const parsed = JSON.parse(list) as {issues?: Array<{title?: string}>};
+    const parsed = JSON.parse(list) as {issues?: {title?: string}[]};
     expect(parsed.issues?.some((i) => i.title === 'Test bead')).toBe(true);
   });
 
@@ -306,8 +306,8 @@ describe('beads-setup (safety)', () => {
     sb.writeFile('package.json', JSON.stringify({name: 'no-claude-md'}));
 
     const exitCode = await runBeadsSetup({
-      projectRoot: sb.path,
       noCommit: true,
+      projectRoot: sb.path,
       quiet: true,
     });
     expect(exitCode).toBe(0);

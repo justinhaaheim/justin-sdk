@@ -39,12 +39,6 @@ import {dirname, join} from 'path';
 
 import {setQuiet} from '../src/setup-helpers';
 import {
-  addUsageCheckHook,
-  stepUsageCheckConfig,
-  stepUsageCheckHooks,
-  USAGE_CHECK_HOOK_EVENTS,
-} from '../src/usage-check-setup';
-import {
   buildSetpointLadder,
   contextTokensFromUsage,
   decide,
@@ -52,6 +46,7 @@ import {
   formatTokens,
   readTranscriptFacts,
   readUsageCheckConfig,
+  type ResolvedUsageCheckConfig,
   resolveMeasurementTarget,
   resolveUsageCheckConfig,
   runUsageCheck,
@@ -59,11 +54,16 @@ import {
   USAGE_CHECK_CONFIG_KEY,
   USAGE_CHECK_DEFAULTS,
   USAGE_CHECK_MARKER,
-  WRAP_UP_DIRECTIVE,
-  type ResolvedUsageCheckConfig,
   type UsageCheckConfig,
   type UsageCheckRole,
+  WRAP_UP_DIRECTIVE,
 } from '../src/usage-check';
+import {
+  addUsageCheckHook,
+  stepUsageCheckConfig,
+  stepUsageCheckHooks,
+  USAGE_CHECK_HOOK_EVENTS,
+} from '../src/usage-check-setup';
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'usage-check-'));
@@ -735,7 +735,7 @@ describe('runUsageCheck: end to end over real files', () => {
     expect(first).toContain('setpoint=200000');
 
     // Claude Code writes the notice into the transcript; that IS the state.
-    recordNotice(transcriptPath, first as string);
+    recordNotice(transcriptPath, first!);
 
     expect(runCapturing(input)).toBeNull();
     appendFileSync(
@@ -756,7 +756,7 @@ describe('runUsageCheck: end to end over real files', () => {
     const at110 = noticeOf(runCapturing(input));
     expect(at110).toContain('setpoint=100000');
     expect(at110).not.toContain(WRAP_UP_DIRECTIVE);
-    recordNotice(transcriptPath, at110 as string);
+    recordNotice(transcriptPath, at110!);
 
     appendFileSync(
       transcriptPath,
@@ -765,7 +765,7 @@ describe('runUsageCheck: end to end over real files', () => {
     const at205 = noticeOf(runCapturing(input));
     expect(at205).toContain('setpoint=200000');
     expect(at205).not.toContain(WRAP_UP_DIRECTIVE);
-    recordNotice(transcriptPath, at205 as string);
+    recordNotice(transcriptPath, at205!);
 
     appendFileSync(
       transcriptPath,
@@ -774,7 +774,7 @@ describe('runUsageCheck: end to end over real files', () => {
     const at312 = noticeOf(runCapturing(input));
     expect(at312).toContain('setpoint=300000');
     expect(at312).toContain(WRAP_UP_DIRECTIVE);
-    recordNotice(transcriptPath, at312 as string);
+    recordNotice(transcriptPath, at312!);
 
     // Still above wrapUpAt, but the ladder is at its top: no repeat nagging.
     appendFileSync(
@@ -845,7 +845,7 @@ describe('runUsageCheck: end to end over real files', () => {
     const at205 = noticeOf(runCapturing(input));
     expect(at205).toContain('setpoint=200000');
     expect(at205).not.toContain(WRAP_UP_DIRECTIVE);
-    recordNotice(transcriptPath, at205 as string);
+    recordNotice(transcriptPath, at205!);
 
     appendFileSync(
       transcriptPath,
@@ -866,7 +866,7 @@ describe('runUsageCheck: end to end over real files', () => {
 
     const before = noticeOf(runCapturing(input));
     expect(before).toContain('setpoint=300000');
-    recordNotice(transcriptPath, before as string);
+    recordNotice(transcriptPath, before!);
 
     // Compaction: the context collapses. Below the lowest setpoint, so silent.
     appendFileSync(
@@ -908,10 +908,10 @@ function sidechainEntry(entry: unknown, agentId: string): unknown {
  *   <dir>/session/subagents/agent-<agentId>.jsonl
  */
 function subagentFixture(args: {
-  usageCheck: UsageCheckConfig;
-  sessionTokens: number;
-  agentTokens: number;
   agentId: string;
+  agentTokens: number;
+  sessionTokens: number;
+  usageCheck: UsageCheckConfig;
 }) {
   const dir = tempDir();
   writeConfig(dir, args.usageCheck);
@@ -1198,9 +1198,7 @@ describe('runUsageCheck: a player is measured on ITS OWN transcript', () => {
     // Record it exactly as Claude Code does — into the subagent's file.
     appendFileSync(
       fx.agentPath,
-      `${JSON.stringify(
-        sidechainEntry(noticeEntry(first as string), AGENT),
-      )}\n`,
+      `${JSON.stringify(sidechainEntry(noticeEntry(first!), AGENT))}\n`,
     );
     expect(runCapturing(input)).toBeNull();
   });

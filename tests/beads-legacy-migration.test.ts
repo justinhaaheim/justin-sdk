@@ -16,7 +16,7 @@
  * pass a test that only ever proves it fired.
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
+import {afterEach, describe, expect, test} from 'bun:test';
 import {
   existsSync,
   lstatSync,

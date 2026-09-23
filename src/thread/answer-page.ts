@@ -43,10 +43,10 @@ export interface PageAsk {
 
 export interface PageData {
   asks: PageAsk[];
-  /** The reserved id the final free-text note is stored under (I7). */
-  noteId: string;
   /** The note's draft, or null. */
   noteDraft: string | null;
+  /** The reserved id the final free-text note is stored under (I7). */
+  noteId: string;
   /** Anything that went wrong READING the drafts — shown, never swallowed. */
   problems: string[];
   /** The rendered status report from the thread bead (D10). */
@@ -87,12 +87,12 @@ header { padding:20px 20px 8px; border-bottom:1px solid var(--line); }
 h1 { font-size:17px; margin:0 0 4px; }
 .sub { color:var(--muted); font-size:13px; }
 main { max-width:860px; margin:0 auto; padding:16px; }
-.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin:14px 0; }
+.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin:24px 0; }
 .card.focus { border-color:var(--accent); box-shadow:0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent); }
 .card.skipped { opacity:.62; }
 .tag { display:inline-block; font-size:11px; text-transform:uppercase; letter-spacing:.06em; padding:2px 7px; border-radius:999px; border:1px solid var(--line); color:var(--muted); margin-right:6px; }
 .tag.blocking { color:var(--warn); border-color:var(--warn); }
-.askbody { white-space:pre-wrap; margin:8px 0 10px; }
+.askbody { white-space:pre-wrap; margin:12px 0 14px; line-height:1.8; }
 textarea { width:100%; min-height:132px; resize:vertical; font:14px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace; padding:10px; border:1px solid var(--line); border-radius:8px; background:var(--bg); color:var(--fg); }
 textarea:focus { outline:2px solid var(--accent); outline-offset:1px; }
 .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:8px; }
@@ -121,7 +121,9 @@ details.report { margin:10px 0; }
 .report .glance { font-weight:700; font-size:14px; }
 .report .where { color:var(--muted); font-size:12px; }
 .report .ask, .report .askdetail { font-family:ui-monospace,Menlo,monospace; font-size:12px; }
-.report .askdetail { padding-left:18px; }
+.report .ask { margin:18px 0 6px; }
+.report .askdetail { padding-left:18px; margin:8px 0; }
+.report li { margin:8px 0; }
 .report .p0 { color:var(--bad); font-weight:600; }
 .report .p3, .report .p4 { color:var(--muted); }
 .report .pUnknown { color:var(--warn); }
@@ -339,7 +341,7 @@ function wire() {
 wire();
 `;
 
-function askCard(ask: PageAsk, noteId: string): string {
+function askCard(ask: PageAsk): string {
   const id = escapeHtml(ask.id);
   const body = escapeHtml(ask.description === '' ? ask.title : ask.description);
   const from =
@@ -376,7 +378,7 @@ function askCard(ask: PageAsk, noteId: string): string {
 
 /** The whole document. Pure: same data in, same bytes out — so a test can read it. */
 export function renderAnswerPage(data: PageData): string {
-  const cards = data.asks.map((ask) => askCard(ask, data.noteId)).join('\n');
+  const cards = data.asks.map((ask) => askCard(ask)).join('\n');
   const problems =
     data.problems.length === 0
       ? ''

@@ -28,17 +28,24 @@ import {existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
+import {type AnswerIo, askViewOf, runThreadAnswer} from '../src/thread/answer';
 import {
+  type KeyAction,
+  keyActionFor,
+  type KeyEventLike,
+  KEYMAP_FOOTER,
+} from '../src/thread/answer-keymap';
+import {escapeHtml, renderAnswerPage} from '../src/thread/answer-page';
+import {
+  INK_REFUSAL,
+  resolveAnswerUi,
+  runThreadAnswerUi,
+} from '../src/thread/answer-ui';
+import {
+  type AnswerServer,
   createAnswerServer,
   runThreadAnswerWeb,
-  type AnswerServer,
 } from '../src/thread/answer-web';
-import {
-  keyActionFor,
-  KEYMAP_FOOTER,
-  type KeyAction,
-  type KeyEventLike,
-} from '../src/thread/answer-keymap';
 import {
   draftPath,
   listDrafts,
@@ -46,13 +53,6 @@ import {
   readDraft,
   writeDraft,
 } from '../src/thread/drafts';
-import {
-  INK_REFUSAL,
-  resolveAnswerUi,
-  runThreadAnswerUi,
-} from '../src/thread/answer-ui';
-import {escapeHtml, renderAnswerPage} from '../src/thread/answer-page';
-import {askViewOf, runThreadAnswer, type AnswerIo} from '../src/thread/answer';
 import {createFakeBd, type FakeBd, type FakeState} from './fake-bd';
 
 const SESSION = 'sess-answer-web';
@@ -70,12 +70,12 @@ function tempStateDir(): string {
 function askOne() {
   return {
     askIndex: 0,
-    priority: 0,
     defaultAction: 'I take a.',
     description: '[Pick a/b] Ask one?',
     id: 'jl-t1.1',
     kind: 'pick',
     optionCount: 2,
+    priority: 0,
     reportCount: 1,
     title: 'Ask one?',
   };
@@ -84,12 +84,12 @@ function askOne() {
 function askTwo() {
   return {
     askIndex: 1,
-    priority: 3,
     defaultAction: 'I leave it.',
     description: '[Approve Y/n] Ask two?',
     id: 'jl-t1.2',
     kind: 'approve',
     optionCount: 0,
+    priority: 3,
     reportCount: 1,
     title: 'Ask two?',
   };
@@ -98,13 +98,13 @@ function askTwo() {
 function okWriter() {
   const wrote: string[] = [];
   return {
-    async ask(ask: {id: string}, decision: {kind: string}) {
+    ask(ask: {id: string}, decision: {kind: string}) {
       wrote.push(`${ask.id}:${decision.kind}`);
-      return {ok: true} as const;
+      return Promise.resolve({ok: true} as const);
     },
-    async note(text: string) {
+    note(text: string) {
       wrote.push(`note:${text}`);
-      return {ok: true} as const;
+      return Promise.resolve({ok: true} as const);
     },
     wrote,
   };
@@ -378,7 +378,6 @@ describe('I3 · submit is explicit and separate from navigation', () => {
     const page = renderAnswerPage({
       asks: [
         {
-          priority: 0,
           defaultAction: 'I take a.',
           description: 'Ask one?',
           draft: null,
@@ -386,6 +385,7 @@ describe('I3 · submit is explicit and separate from navigation', () => {
           kind: 'pick',
           number: 1,
           optionCount: 2,
+          priority: 0,
           reportCount: 1,
           title: 'Ask one?',
         },
@@ -512,11 +512,15 @@ describe('I4 · Esc opens a menu and never quits', () => {
     const stateDir = tempStateDir();
     const server = serve(stateDir, {
       writer: {
-        async ask() {
-          return {detail: 'bd said no', ok: false, retry: null};
+        ask() {
+          return Promise.resolve({
+            detail: 'bd said no',
+            ok: false,
+            retry: null,
+          });
         },
-        async note() {
-          return {ok: true};
+        note() {
+          return Promise.resolve({ok: true});
         },
       },
     });
@@ -557,7 +561,6 @@ describe('I6 · skipping is one keystroke and shows the default', () => {
     const page = renderAnswerPage({
       asks: [
         {
-          priority: 3,
           defaultAction: 'I leave the knob on.',
           description: 'Ask two?',
           draft: null,
@@ -565,6 +568,7 @@ describe('I6 · skipping is one keystroke and shows the default', () => {
           kind: 'approve',
           number: 1,
           optionCount: 0,
+          priority: 3,
           reportCount: 1,
           title: 'Ask two?',
         },
@@ -586,7 +590,6 @@ describe('I6 · skipping is one keystroke and shows the default', () => {
     const page = renderAnswerPage({
       asks: [
         {
-          priority: 3,
           defaultAction: view.defaultAction,
           description: 'Ask nine?',
           draft: null,
@@ -594,6 +597,7 @@ describe('I6 · skipping is one keystroke and shows the default', () => {
           kind: 'answer',
           number: 1,
           optionCount: 0,
+          priority: 3,
           reportCount: null,
           title: 'Ask nine?',
         },
@@ -634,10 +638,10 @@ function seededFake(): FakeBd {
       id: 'jl-t1.1',
       metadata: {
         askIndex: 0,
-        priority: 0,
         defaultAction: 'I take a.',
         kind: 'pick',
         optionCount: 2,
+        priority: 0,
         reportCount: 1,
       },
       parent: 'jl-t1',
@@ -650,10 +654,10 @@ function seededFake(): FakeBd {
       id: 'jl-t1.2',
       metadata: {
         askIndex: 1,
-        priority: 3,
         defaultAction: 'I leave it.',
         kind: 'approve',
         optionCount: 0,
+        priority: 3,
         reportCount: 1,
       },
       parent: 'jl-t1',
@@ -704,13 +708,15 @@ function captureConsole(): {errors: string[]; logs: string[]} {
 function scriptedIo(lines: string[], block = ''): AnswerIo {
   const queue = [...lines];
   return {
-    async block() {
-      return block;
+    block() {
+      return Promise.resolve(block);
     },
-    async line() {
-      return queue.shift() ?? '';
+    line() {
+      return Promise.resolve(queue.shift() ?? '');
     },
-    print() {},
+    print() {
+      /* the fake renders nothing; the calls are what is asserted */
+    },
   };
 }
 
@@ -759,7 +765,6 @@ describe('p1uj.13 · leading indentation survives, on both surfaces', () => {
     const webCode = await runThreadAnswerWeb({
       autoCommit: false,
       env: {...envFor(webFake), JUSTIN_THREADS_STATE_DIR: tempStateDir()},
-      openBrowser: false,
       onReady: (server) => {
         servers.push(server);
         void fetch(api(server, '/api/submit'), {
@@ -774,6 +779,7 @@ describe('p1uj.13 · leading indentation survives, on both surfaces', () => {
           method: 'POST',
         });
       },
+      openBrowser: false,
       threadId: 'jl-t1',
     });
     expect(webCode).toBe(0);
@@ -861,7 +867,6 @@ describe('I8 · the web UI records exactly what the classic walk records', () =>
     const webCode = await runThreadAnswerWeb({
       autoCommit: false,
       env: {...envFor(webFake), JUSTIN_THREADS_STATE_DIR: stateDir},
-      openBrowser: false,
       onReady: (server) => {
         servers.push(server);
         void fetch(api(server, '/api/submit'), {
@@ -877,6 +882,7 @@ describe('I8 · the web UI records exactly what the classic walk records', () =>
           method: 'POST',
         });
       },
+      openBrowser: false,
       threadId: 'jl-t1',
     });
     expect(webCode).toBe(0);

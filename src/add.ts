@@ -20,8 +20,8 @@
 
 import {addComponentsToConfig} from './base-setup';
 import {
-  type ComponentName,
   COMPONENT_NAMES,
+  type ComponentName,
   configNameFor,
   corePreset,
 } from './component-registry';
@@ -87,14 +87,14 @@ export function expandTarget(
 // ---------------------------------------------------------------------------
 
 export interface AddOptions {
-  projectRoot: string;
-  /** Force-overwrite hand-modified files (passed to each installer). */
-  force: boolean;
   /**
    * Single-component `add beads`: commit at the end (noCommit = !commit).
    * Presets are always no-commit and ignore this flag.
    */
   commit: boolean;
+  /** Force-overwrite hand-modified files (passed to each installer). */
+  force: boolean;
+  projectRoot: string;
   /**
    * The remote the SDK pin tag is verified against, forwarded to base-setup.
    * Tests point it at a local bare repo so an `add` is hermetic; production
@@ -126,6 +126,26 @@ export function expandTargets(
     for (const name of expandTarget(target, projectRoot)) wanted.add(name);
   }
   return COMPONENT_NAMES.filter((name) => wanted.has(name));
+}
+
+/**
+ * Record what was just installed in `justin-sdk.config.json#components`.
+ *
+ * THE SEAM Part B builds on: `remove` is the mirror of this call, and `install`
+ * reconciles against exactly the list these two maintain. Nothing else in the
+ * SDK writes `components`.
+ */
+function registerInstalled(
+  projectRoot: string,
+  components: readonly ComponentName[],
+): void {
+  const added = addComponentsToConfig(
+    projectRoot,
+    components.map(configNameFor),
+  );
+  if (added.length > 0) {
+    success(`justin-sdk.config.json components += ${added.join(', ')}`);
+  }
 }
 
 /**
@@ -192,24 +212,4 @@ export async function runAdd(
 
   registerInstalled(opts.projectRoot, components);
   return 0;
-}
-
-/**
- * Record what was just installed in `justin-sdk.config.json#components`.
- *
- * THE SEAM Part B builds on: `remove` is the mirror of this call, and `install`
- * reconciles against exactly the list these two maintain. Nothing else in the
- * SDK writes `components`.
- */
-function registerInstalled(
-  projectRoot: string,
-  components: readonly ComponentName[],
-): void {
-  const added = addComponentsToConfig(
-    projectRoot,
-    components.map(configNameFor),
-  );
-  if (added.length > 0) {
-    success(`justin-sdk.config.json components += ${added.join(', ')}`);
-  }
 }

@@ -13,15 +13,15 @@
  * pretend the word was a typo.
  */
 
+import type {EnvLike} from './paths';
+import type {ThreadRef} from './resolve';
+
 import {isThreadAnswerUi, resolveThreadConfig} from './config';
 import {
   THREAD_ANSWER_UIS,
   THREAD_DEFAULT_ANSWER_UI,
   type ThreadAnswerUi,
 } from './defaults';
-
-import type {EnvLike} from './paths';
-import type {ThreadRef} from './resolve';
 
 export type AnswerUiSource = 'config' | 'default' | 'flag';
 
@@ -110,7 +110,7 @@ export async function runThreadAnswerUi(
 
   if (resolution.ui === 'classic') {
     const {runThreadAnswer} = await import('./answer');
-    return runThreadAnswer({
+    return await runThreadAnswer({
       autoCommit: options.autoCommit,
       env: options.env,
       latest: options.latest,
@@ -120,7 +120,7 @@ export async function runThreadAnswerUi(
   }
 
   const {runThreadAnswerWeb} = await import('./answer-web');
-  return runThreadAnswerWeb({
+  return await runThreadAnswerWeb({
     autoCommit: options.autoCommit,
     env: options.env,
     latest: options.latest,

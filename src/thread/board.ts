@@ -27,16 +27,34 @@
  * reassuring readings and the reassuring reading is the dangerous one.
  */
 
+import type {EnvLike} from './paths';
+
 import {spawnSync} from 'child_process';
 
 import {
+  BODY_COLUMN,
+  DETAIL_COLUMN,
+  displayWidth,
+  HEADER_COLUMN,
+  type OutputStyle,
+  outputStyle,
+  pad,
+  padEndWidth,
+  paint,
+  PLAIN_STYLE,
+  sectionHeader,
+  spacedList,
+  type StyleName,
+  wrapHanging,
+} from '../cli-style';
+import {sdkRun} from '../sdk-invocation';
+import {
+  type BdContext,
+  type BdIssue,
   describeBdFailure,
   listAsks,
   listThreads,
-  type BdContext,
-  type BdIssue,
 } from './bd';
-import {sdkRun} from '../sdk-invocation';
 import {bdContext} from './bd';
 import {
   aheadOfOrigin,
@@ -45,12 +63,11 @@ import {
   PUSH_REMOTE,
 } from './commit';
 import {drainSpool, renderDrain, type SpoolApplier} from './drain';
-import {threadsRepoDir} from './paths';
 import {readAskPriority, readReportCount} from './metadata';
+import {threadsRepoDir} from './paths';
 import {priorityLabel} from './render';
+import {priorityStyles} from './render-ansi';
 import {ASK_PRIORITY_BLOCKING} from './schema';
-
-import type {EnvLike} from './paths';
 
 const STOP_GLYPH: Record<string, string> = {
   blocked: '🛑',
@@ -74,6 +91,11 @@ export interface BoardAsk {
 
 export interface BoardRow {
   age: string;
+  /**
+   * True when `thread backfill` made this row from a transcript rather than a
+   * session reporting (K6). Hidden by default, tagged under `--all`.
+   */
+  backfilled: boolean;
   blockingAsks: number;
   branch: string | null;
   /**
@@ -134,11 +156,13 @@ function metaString(meta: Record<string, unknown>, key: string): string | null {
  */
 export function threadIdOfAsk(ask: BdIssue): string | null {
   if (ask.parent != null && ask.parent !== '') return ask.parent;
-  const meta = (ask.metadata ?? {}) as Record<string, unknown>;
+  const meta = ask.metadata ?? {};
   return metaString(meta, 'threadId');
 }
 
 export interface BoardData {
+  /** Backfilled threads left out of `rows` (K6). 0 means none were. */
+  hiddenBackfilled: number;
   /** Continued threads left out of `rows` (D21). 0 means none were. */
   hiddenContinued: number;
   orphanAsks: BoardAsk[];
@@ -150,7 +174,7 @@ export function buildBoard(
   threads: readonly BdIssue[],
   asks: readonly BdIssue[],
   now: Date,
-  options: {includeContinued?: boolean} = {},
+  options: {includeBackfilled?: boolean; includeContinued?: boolean} = {},
 ): BoardData {
   const byThread = new Map<string, BdIssue[]>();
   const orphanAsks: BoardAsk[] = [];
@@ -162,7 +186,7 @@ export function buildBoard(
       // An ask whose thread is closed or missing. NOT dropped: it is still open
       // and still Justin's, and a board that hid it would be claiming there is
       // less waiting for him than there is.
-      const meta = (ask.metadata ?? {}) as Record<string, unknown>;
+      const meta = ask.metadata ?? {};
       orphanAsks.push({
         id: ask.id,
         priority: readAskPriority(meta),
@@ -180,7 +204,7 @@ export function buildBoard(
   }
 
   const allRows = threads.map((thread): BoardRow => {
-    const meta = (thread.metadata ?? {}) as Record<string, unknown>;
+    const meta = thread.metadata ?? {};
     const mine = byThread.get(thread.id) ?? [];
     const progress = meta.progressPercent;
     // A START-ONLY THREAD HAS AN AGE (p1uj.8, folded into p1uj.7 item A).
@@ -203,6 +227,7 @@ export function buildBoard(
         : startedAt == null
           ? 'age UNKNOWN'
           : `started ${formatAge(startedAt, now)}`,
+      backfilled: metaString(meta, 'source') === 'backfill',
       // P0 IS THE NEW BLOCKING (D15). The field keeps its name because the
       // row's meaning is unchanged — "how many of these stop Justin" — and
       // `readAskPriority` is what lets an ask bead written before this release,
@@ -238,11 +263,29 @@ export function buildBoard(
   // because the session that asked it ended would be the reassuring direction of
   // exactly the loss this epic exists to stop. The count line says how many were
   // folded, so "fewer rows" is never silent.
-  const rows =
-    options.includeContinued === true
-      ? allRows
-      : allRows.filter((row) => row.continuedBy == null || row.openAsks > 0);
-  return {hiddenContinued: allRows.length - rows.length, orphanAsks, rows};
+  // A BACKFILLED THREAD IS FOLDED AWAY THE SAME WAY (K6). `thread backfill`
+  // makes a row for every session of the last 30 days, which is exactly what
+  // search needs and exactly what a board does not: the board is what is still
+  // live, and a few hundred rows for sessions that ended would bury the dozen
+  // that have not. The same open-asks exemption applies, for the same reason —
+  // though a backfilled bead has no ask children, so it is a guard, not a case.
+  // A row that is both continued and backfilled counts as continued: it is
+  // folded once, by the first rule that matches.
+  let hiddenContinued = 0;
+  let hiddenBackfilled = 0;
+  const rows = allRows.filter((row) => {
+    if (row.openAsks > 0) return true;
+    if (options.includeContinued !== true && row.continuedBy != null) {
+      hiddenContinued += 1;
+      return false;
+    }
+    if (options.includeBackfilled !== true && row.backfilled) {
+      hiddenBackfilled += 1;
+      return false;
+    }
+    return true;
+  });
+  return {hiddenBackfilled, hiddenContinued, orphanAsks, rows};
 }
 
 /**
@@ -263,33 +306,115 @@ function byReportedAtDesc(a: BoardRow, b: BoardRow): number {
   return activityAt(b).localeCompare(activityAt(a));
 }
 
-function renderRow(row: BoardRow): string {
+/**
+ * The row's state column — what the session is doing, before its title — in
+ * plain and painted form. The plain form is what the column is measured by.
+ */
+function rowState(row: BoardRow, color: boolean): string {
+  // A BACKFILLED ROW SAYS SO (K6). It is only ever shown under `--all`, and
+  // without the tag it is indistinguishable from a session that started and
+  // then went quiet — two different facts about whether anything is running.
+  // Dim: it is a record of a session that ended, not something live.
+  if (row.backfilled) return paint('📼 backfill', ['dim'], color);
   // A thread that has not reported says so, instead of rendering three columns
   // of "I don't know" (`? --%`) for facts that do not exist yet.
-  if (!row.reported) {
-    return `  ${row.age.padStart(9)} ⏳ no report yet   ${row.title}\n             ${row.id}${row.branch == null ? '' : ` · ${row.branch}`}`;
-  }
+  if (!row.reported) return '⏳ no report yet';
   const glyph = row.stopKind == null ? '?' : (STOP_GLYPH[row.stopKind] ?? '•');
   const progress =
     row.progress == null ? ' --%' : `${String(row.progress).padStart(3)}%`;
+  // P0 asks are the one count on the board that means "you are blocking
+  // something", so it is the one that is loud (K11 rule 4).
   const asks =
     row.openAsks === 0
-      ? '        '
+      ? ''
       : row.blockingAsks > 0
-        ? `🛑 ${row.blockingAsks}/${row.openAsks} ask`.padEnd(8)
-        : `${row.openAsks} ask`.padEnd(8);
-  const merge =
-    row.mergeState === 'unmerged'
-      ? ' UNMERGED'
-      : row.mergeState === 'unknown'
-        ? ' merge UNKNOWN'
-        : '';
-  return `  ${row.age.padStart(9)} ${glyph} ${progress} ${asks} ${row.title}${merge}\n             ${row.id}${row.branch == null ? '' : ` · ${row.branch}`}`;
+        ? ` ${paint(`🛑 ${row.blockingAsks}/${row.openAsks} ask`, ['bold', 'red'], color)}`
+        : ` ${row.openAsks} ask`;
+  return `${glyph} ${progress}${asks}`;
 }
 
-/** Default view: by repo, then by branch. A thread with no repo is its own group. */
-export function renderByRepo(data: BoardData, groupLabel: string): string {
-  const lines: string[] = [];
+/** The merge suffix after a title: yellow, because both are "look at this". */
+function mergeSuffix(row: BoardRow, color: boolean): string {
+  if (row.mergeState === 'unmerged') {
+    return ` ${paint('UNMERGED', ['yellow'], color)}`;
+  }
+  if (row.mergeState === 'unknown') {
+    return ` ${paint('merge UNKNOWN', ['yellow'], color)}`;
+  }
+  return '';
+}
+
+/**
+ * The widths a view's rows line up to, so every title in the view starts at
+ * the same column. Measured in DISPLAY columns, which is what `padEnd` got
+ * wrong: it counts UTF-16 units, so `✅` and `⏳` (one unit, two columns) and a
+ * `🛑 1/4 ask` wider than its fixed 8-unit field all pushed titles out of line.
+ */
+interface RowColumns {
+  age: number;
+  state: number;
+}
+
+function rowColumns(rows: readonly BoardRow[]): RowColumns {
+  let age = 0;
+  let state = 0;
+  for (const row of rows) {
+    age = Math.max(age, displayWidth(row.age));
+    state = Math.max(state, displayWidth(rowState(row, false)));
+  }
+  return {age, state};
+}
+
+/** Two spaces between the age, the state and the title. */
+const GUTTER = 2;
+
+/**
+ * One thread, man-page style (K11 rules 2–4): the headline at the body column —
+ * age, state, title — with a long title hanging at the title column on a
+ * terminal, then the id and branch on their own line at the detail column, dim.
+ */
+function renderRow(
+  row: BoardRow,
+  columns: RowColumns,
+  style: OutputStyle,
+): string {
+  const {color, width} = style;
+  const lead = `${padEndWidth(row.age, columns.age)}${pad(GUTTER)}${padEndWidth(rowState(row, color), columns.state)}${pad(GUTTER)}`;
+  const headline = wrapHanging(
+    `${lead}${row.title}${mergeSuffix(row, color)}`,
+    {
+      hang: BODY_COLUMN + columns.age + GUTTER + columns.state + GUTTER,
+      indent: BODY_COLUMN,
+      width,
+    },
+  );
+  const where = `${row.id}${row.branch == null ? '' : ` · ${row.branch}`}`;
+  return `${headline}\n${pad(DETAIL_COLUMN)}${paint(where, ['dim'], color)}`;
+}
+
+/** Every row of a view, one blank line apart (K11 rule 1). */
+function renderRows(
+  rows: readonly BoardRow[],
+  columns: RowColumns,
+  style: OutputStyle,
+): string {
+  return spacedList(rows.map((row) => renderRow(row, columns, style)));
+}
+
+const NO_OPEN_THREADS = `${pad(HEADER_COLUMN)}(no open threads — checked, and there are none)`;
+
+/**
+ * Default view: by repo, then by branch. A thread with no repo is its own group.
+ *
+ * Each repo is a section — `📦 <repo>` in bold accent at the header column,
+ * its count dim beside it — and its rows sit under it at the body column, a
+ * blank line between every row and between every group.
+ */
+export function renderByRepo(
+  data: BoardData,
+  groupLabel: string,
+  style: OutputStyle = PLAIN_STYLE,
+): string {
   const groups = new Map<string, BoardRow[]>();
   for (const row of data.rows) {
     // Never dropped: a thread whose repo could not be measured still happened.
@@ -299,26 +424,25 @@ export function renderByRepo(data: BoardData, groupLabel: string): string {
     else bucket.push(row);
   }
   const names = [...groups.keys()].sort((a, b) => a.localeCompare(b));
-  if (names.length === 0) {
-    lines.push('(no open threads — checked, and there are none)');
-  }
-  for (const name of names) {
+  if (names.length === 0) return `\n${NO_OPEN_THREADS}`;
+  // One set of columns for the whole board, so titles line up across groups.
+  const columns = rowColumns(data.rows);
+  const sections = names.map((name) => {
     const rows = (groups.get(name) ?? []).sort(byReportedAtDesc);
-    lines.push('');
-    lines.push(
-      `${name}  (${rows.length} ${groupLabel}${rows.length === 1 ? '' : 's'})`,
-    );
-    for (const row of rows) lines.push(renderRow(row));
-  }
-  return lines.join('\n');
+    const count = `(${rows.length} ${groupLabel}${rows.length === 1 ? '' : 's'})`;
+    const header = `${sectionHeader(name, {color: style.color, emoji: '📦'})}  ${paint(count, ['dim'], style.color)}`;
+    return spacedList([header, renderRows(rows, columns, style)]);
+  });
+  return `\n${spacedList(sections)}`;
 }
 
-export function renderRecent(data: BoardData): string {
+export function renderRecent(
+  data: BoardData,
+  style: OutputStyle = PLAIN_STYLE,
+): string {
   const rows = [...data.rows].sort(byReportedAtDesc);
-  if (rows.length === 0) {
-    return '(no open threads — checked, and there are none)';
-  }
-  return ['', ...rows.map(renderRow)].join('\n');
+  if (rows.length === 0) return `\n${NO_OPEN_THREADS}`;
+  return `\n${renderRows(rows, rowColumns(rows), style)}`;
 }
 
 /** Every open ask across every thread: P0 first, then newest first. */
@@ -329,10 +453,10 @@ export function collectOpenAsks(
   const byId = new Map(threads.map((thread) => [thread.id, thread]));
   const rows: BoardAsk[] = [];
   for (const ask of asks) {
-    const meta = (ask.metadata ?? {}) as Record<string, unknown>;
+    const meta = ask.metadata ?? {};
     const threadId = threadIdOfAsk(ask);
     const thread = threadId == null ? undefined : byId.get(threadId);
-    const threadMeta = (thread?.metadata ?? {}) as Record<string, unknown>;
+    const threadMeta = thread?.metadata ?? {};
     rows.push({
       id: ask.id,
       priority: readAskPriority(meta),
@@ -349,23 +473,42 @@ export function collectOpenAsks(
   });
 }
 
-export function renderOpenAsks(asks: readonly BoardAsk[]): string {
+/**
+ * `--open-asks`: every open ask, numbered at the body column with its priority
+ * coloured the way the report colours it (K11 rule 4), its title and its thread
+ * on their own lines at the detail column, and a blank line between asks.
+ */
+export function renderOpenAsks(
+  asks: readonly BoardAsk[],
+  style: OutputStyle = PLAIN_STYLE,
+): string {
+  const {color, width} = style;
   if (asks.length === 0) {
-    return '(no open asks — checked, and there are none)';
+    return `\n${pad(HEADER_COLUMN)}(no open asks — checked, and there are none)`;
   }
-  const lines: string[] = [''];
-  asks.forEach((ask, index) => {
-    lines.push(
-      `  ${index + 1}. ${ask.priority === ASK_PRIORITY_BLOCKING ? '🛑 P0' : `   ${priorityLabel(ask.priority)}`} · ${ask.id}`,
+  const blocks = asks.map((ask, index) => {
+    const label =
+      ask.priority === ASK_PRIORITY_BLOCKING
+        ? '🛑 P0'
+        : `   ${priorityLabel(ask.priority)}`;
+    const head = `${pad(BODY_COLUMN)}${index + 1}. ${paint(label, priorityStyles(ask.priority), color)} · ${paint(ask.id, ['dim'], color)}`;
+    const title = wrapHanging(ask.title, {
+      hang: DETAIL_COLUMN,
+      indent: DETAIL_COLUMN,
+      width,
+    });
+    const thread = wrapHanging(
+      paint(
+        `${ask.repo ?? 'UNKNOWN repo'} · ${ask.threadTitle} (${ask.threadId})`,
+        ['dim'],
+        color,
+      ),
+      {hang: DETAIL_COLUMN, indent: DETAIL_COLUMN, width},
     );
-    lines.push(`     ${ask.title}`);
-    lines.push(
-      `     ${ask.repo ?? 'UNKNOWN repo'} · ${ask.threadTitle} (${ask.threadId})`,
-    );
+    return [head, title, thread].join('\n');
   });
-  lines.push('');
-  lines.push(`Answer them: ${sdkRun('thread answer <threadId>')}`);
-  return lines.join('\n');
+  const answer = `${pad(HEADER_COLUMN)}Answer them: ${paint(sdkRun('thread answer <threadId>'), ['cyan'], color)}`;
+  return `\n${spacedList([...blocks, answer])}`;
 }
 
 /**
@@ -391,7 +534,8 @@ export function uncommittedLine(env: EnvLike, dir?: string): string | null {
     {cwd: repoDir, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe']},
   );
   if (result.error != null || result.status !== 0) {
-    const detail = (result.stderr ?? '').trim() || String(result.error ?? '');
+    const stderrText = (result.stderr ?? '').trim();
+    const detail = stderrText !== '' ? stderrText : String(result.error ?? '');
     return `📌 uncommitted beads in ${repoDir}: UNKNOWN — git could not be read (${detail.slice(0, 120)})`;
   }
   const line = (result.stdout ?? '').trim();
@@ -448,10 +592,14 @@ export interface BoardOptions {
   /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
   autoCommit?: boolean;
   env?: EnvLike;
+  /** `--all`: show backfilled threads too (K6). They are folded away by default. */
+  includeBackfilled?: boolean;
   /** `--all`: show continued threads too (D21). They are folded away by default. */
   includeContinued?: boolean;
   json?: boolean;
   now?: Date;
+  /** Colour and wrap width; from the stdout stream when absent. */
+  style?: OutputStyle;
   view?: BoardView;
 }
 
@@ -459,6 +607,12 @@ export interface BoardOptions {
 export function continuedHiddenLine(hidden: number): string | null {
   if (hidden <= 0) return null;
   return `${hidden} continued thread${hidden === 1 ? '' : 's'} hidden (--all shows them)`;
+}
+
+/** The same, for the sessions `thread backfill` recorded (K6). */
+export function backfilledHiddenLine(hidden: number): string | null {
+  if (hidden <= 0) return null;
+  return `${hidden} backfilled session${hidden === 1 ? '' : 's'} hidden (--all shows them)`;
 }
 
 export async function runThreadBoard(
@@ -519,6 +673,7 @@ export async function runThreadBoard(
   }
 
   const data = buildBoard(threads.value, asks.value, now, {
+    includeBackfilled: options.includeBackfilled,
     includeContinued: options.includeContinued,
   });
 
@@ -528,6 +683,7 @@ export async function runThreadBoard(
         {
           asks: collectOpenAsks(threads.value, asks.value),
           drain: drained,
+          hiddenBackfilled: data.hiddenBackfilled,
           hiddenContinued: data.hiddenContinued,
           rows: data.rows,
           uncommitted: uncommittedLine(env),
@@ -541,40 +697,50 @@ export async function runThreadBoard(
     return 0;
   }
 
+  const style = options.style ?? outputStyle();
   if (view === 'openAsks') {
-    console.log(renderOpenAsks(collectOpenAsks(threads.value, asks.value)));
+    console.log(
+      renderOpenAsks(collectOpenAsks(threads.value, asks.value), style),
+    );
   } else if (view === 'recent') {
-    console.log(renderRecent(data));
+    console.log(renderRecent(data, style));
   } else {
-    console.log(renderByRepo(data, 'thread'));
-    if (data.orphanAsks.length > 0) {
-      console.log('');
-      console.log(
-        `⚠️ ${data.orphanAsks.length} open ask(s) whose thread is closed or missing: ${data.orphanAsks.map((ask) => ask.id).join(', ')}`,
-      );
-    }
+    console.log(renderByRepo(data, 'thread', style));
+  }
+  // Everything after the rows is a footnote: at the header column, a blank
+  // line before each, wrapped with a hang so a long command stays readable.
+  const footnote = (line: string, styles: StyleName[]): void => {
+    console.log('');
+    console.log(
+      wrapHanging(paint(line, styles, style.color), {
+        hang: BODY_COLUMN,
+        indent: HEADER_COLUMN,
+        width: style.width,
+      }),
+    );
+  };
+  if (view === 'repo' && data.orphanAsks.length > 0) {
+    footnote(
+      `⚠️ ${data.orphanAsks.length} open ask(s) whose thread is closed or missing: ${data.orphanAsks.map((ask) => ask.id).join(', ')}`,
+      ['yellow'],
+    );
   }
 
   // Printed for every view, `--open-asks` included: that view is built from the
   // full listing, so a hidden ROW never hides an ask — and the count is still
   // the honest answer to "is this everything?".
   const continuedLine = continuedHiddenLine(data.hiddenContinued);
-  if (continuedLine != null) {
-    console.log('');
-    console.log(continuedLine);
-  }
+  if (continuedLine != null) footnote(continuedLine, ['dim']);
+  const backfilledLine = backfilledHiddenLine(data.hiddenBackfilled);
+  if (backfilledLine != null) footnote(backfilledLine, ['dim']);
 
+  // Yellow: each of these means a write this tool should have made did not
+  // happen, and each carries the command that fixes it.
   const uncommitted = uncommittedLine(env);
-  if (uncommitted != null) {
-    console.log('');
-    console.log(uncommitted);
-  }
+  if (uncommitted != null) footnote(uncommitted, ['yellow']);
   // Both lines, not one or the other: a repo can be dirty AND behind on pushes,
   // and they are two different things to fix.
   const unpushed = unpushedLine(env);
-  if (unpushed != null) {
-    console.log('');
-    console.log(unpushed);
-  }
+  if (unpushed != null) footnote(unpushed, ['yellow']);
   return 0;
 }

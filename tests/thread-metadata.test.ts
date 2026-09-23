@@ -11,14 +11,14 @@
  * a null, so it gets a test.
  */
 
+import type {ThreadFacts} from '../src/thread/facts';
+import type {ThreadReportPayload} from '../src/thread/schema';
+
 import {describe, expect, test} from 'bun:test';
 
 import {buildThreadMetadata, readReportCount} from '../src/thread/metadata';
 import {validateThreadReport} from '../src/thread/schema';
 import {examplePayload} from './thread-schema.test';
-
-import type {ThreadFacts} from '../src/thread/facts';
-import type {ThreadReportPayload} from '../src/thread/schema';
 
 const FACTS: ThreadFacts = {
   aheadBehind: null,
@@ -27,13 +27,19 @@ const FACTS: ThreadFacts = {
   cwd: '/repo',
   dirty: false,
   entrypoint: 'cli',
+  firstUserMessage: 'kick this off',
+  firstUserMessageAt: null,
   headSha: 'abc123',
   isWorktree: false,
+  lastAssistantMessage: 'Done — here is the report.',
+  lastAssistantMessageAt: null,
   lastUserMessage: 'go',
+  lastUserMessageAt: null,
   model: 'claude-opus-5',
-  reportedAt: '2026-09-12T09:00:00.000Z',
   repo: 'justin-sdk',
   repoPath: '/repo',
+  reportedAt: '2026-09-12T09:00:00.000Z',
+  resumeCommand: "cd '/repo' && claude --resume session-1",
   sessionId: 'session-1',
   startedAt: '2026-09-12T07:00:00.000Z',
   tokensAtStop: 1000,
@@ -52,8 +58,8 @@ describe('buildThreadMetadata', () => {
     const metadata = buildThreadMetadata({
       askIds: ['jl-x.4'],
       carriedOpenAsks: [
-        {priority: 0, id: 'jl-x.1'},
-        {priority: 3, id: 'jl-x.2'},
+        {id: 'jl-x.1', priority: 0},
+        {id: 'jl-x.2', priority: 3},
       ],
       facts: FACTS,
       payload: payload(),
@@ -68,7 +74,7 @@ describe('buildThreadMetadata', () => {
   test('a report that creates NOTHING while carrying a blocking ask still says so', () => {
     const metadata = buildThreadMetadata({
       askIds: [],
-      carriedOpenAsks: [{priority: 0, id: 'jl-x.1'}],
+      carriedOpenAsks: [{id: 'jl-x.1', priority: 0}],
       facts: FACTS,
       payload: payload({asks: []}),
       reportCount: 2,

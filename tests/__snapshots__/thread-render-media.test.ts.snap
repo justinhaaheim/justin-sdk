@@ -6,17 +6,25 @@ exports[`one fixture, three media markdown baseline — compact 1`] = `
 ⚡ ✅ Work completed · 🙋 needs your answers · 📈 70% · 🛑 1 P0 ask
 
 📦 home-base · 🌿 thread-v2 · 🌳 primary checkout · 🔢 497k
+
 🌲 clean · 2 ahead / 0 behind · HEAD 288f3912eed5
 
 **Thread:** thread-reports dispatch 2: the write path
+
 **You asked me to:** You told me to build dispatch 2 of the thread-reports epic.
+
 **Your last message, verbatim:** build the format v2 dispatch
 
-**MUST-SEE — the only part you have to read:**
+**👀 MUST-SEE — the only part you have to read:**
+
   1. 🛑 P0 · [Approve Y/n] Approve closing ask beads rather than deleting them? (th-eru.1)
+
      Context: The adapter closes asks instead of deleting them, because bd delete wedges auto-export.
-     a. (Recommended) Keep closing — reversible, export stays healthy
-     b. Delete — tidier list, wedges the JSONL export
+
+     - a. (Recommended) Keep closing — reversible, export stays healthy
+
+     - b. Delete — tidier list, wedges the JSONL export
+
      If you don't answer: I keep closing rather than deleting.
 
 - ⚠️ MISTAKE — I let the bin symlink point at a dirty branch
@@ -24,6 +32,7 @@ exports[`one fixture, three media markdown baseline — compact 1`] = `
 📎 1 more ask (P2-P4) · 1 more deviation · everything: bun run justin-sdk thread show th-eru --full
 
 Answer: bun run justin-sdk thread answer th-eru
+
 🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️"
 `;
 
@@ -33,59 +42,89 @@ exports[`one fixture, three media markdown baseline — full 1`] = `
 ⚡ ✅ Work completed · 🙋 needs your answers · 📈 70% · 🛑 1 P0 ask
 
 📦 home-base · 🌿 thread-v2 · 🌳 primary checkout · 🔢 497k
+
 🌲 clean · 2 ahead / 0 behind · HEAD 288f3912eed5
 
 **Thread:** thread-reports dispatch 2: the write path
+
 **Stop reason:** Dispatch 2 is built and verified.
+
 **You asked me to:** You told me to build dispatch 2 of the thread-reports epic.
+
 **Your last message, verbatim:** build the format v2 dispatch
 
-**What happens next (mine):**
+**▶️ What happens next (mine):**
+
 - ⚽ Goal: Status reports as beads, one thread bead per session
+
 - ➡️ the read path
+
 - ➡️ the rules edit
 
-**What I did:**
+**✅ What I did:**
+
 - ✅ Built the thread command group
+
 - ✅ Wired the bin symlink
 
-**What I learned:**
+**💡 What I learned:**
+
 1. bd update --metadata merges rather than replaces (✅ written into src/thread/bd.ts)
 
-**Answers to your questions:**
+**💬 Answers to your questions:**
+
 1. Q: Is CLAUDE_CODE_SESSION_ID exported inside a subagent?
+
    A: Yes — measured 2026-09-12, it is the parent session id.
 
-**Deviations from what you asked for:**
+**⚠️ Deviations from what you asked for:**
+
 - ⚠️ MISTAKE — I let the bin symlink point at a dirty branch
+
 - ⚖️ Judgment call — The knob defaults off, which is not what the bead said — the bead said on.
 
-**Discussion:**
+**🗣️ Discussion:**
+
 - bd update --metadata MERGES; it does not replace.
 
-**Asks — everything I need from you:**
+**🙋 Asks — everything I need from you:**
+
   1. 🛑 P0 · [Approve Y/n] Approve closing ask beads rather than deleting them? (th-eru.1)
+
      Context: The adapter closes asks instead of deleting them, because bd delete wedges auto-export.
-     a. (Recommended) Keep closing — reversible, export stays healthy
-     b. Delete — tidier list, wedges the JSONL export
+
+     - a. (Recommended) Keep closing — reversible, export stays healthy
+
+     - b. Delete — tidier list, wedges the JSONL export
+
      If you don't answer: I keep closing rather than deleting.
+
   2. (P3) · [Pick a/b] Where should componentConfig.thread.enabled live? (th-eru.2)
+
      Context: The knob defaults off, so nothing changes for other sessions.
-     a. (Recommended) a — user config only
-     b. b — every enrolled repo
+
+     - a. (Recommended) user config only
+
+     - b. every enrolled repo
+
      If you don't answer: I leave it off everywhere but this machine.
 
-**Prior asks — closed by this report:**
+**🗂️ Prior asks — closed by this report:**
+
 - jl-x7q.1 ([Approve Y/n] Close ask beads when they are answered rather than deleting them?) — answered: You said "yes, closing is right".
 
-**Work product:**
+**🛠️ Work product:**
+
 - code: src/thread/ plus the bin symlink, on branch thread-reports
+
 - Merge state: UNMERGED
 
-**Beads touched:**
+**📿 Beads touched:**
+
 - home-base-p1uj.1 — the thread command group core
 
 Answer: bun run justin-sdk thread answer th-eru
+
 🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️"
 `;
 
@@ -94,25 +133,34 @@ exports[`one fixture, three media ansi baseline — compact 1`] = `
 
 \x1B[1m⚡ ✅ Work completed · 🙋 needs your answers · 📈 70% · 🛑 1 P0 ask\x1B[0m
 
-\x1B[2m📦 home-base · 🌿 thread-v2 · 🌳 primary checkout · 🔢 497k\x1B[0m
-\x1B[2m🌲 clean · 2 ahead / 0 behind · HEAD 288f3912eed5\x1B[0m
+  \x1B[2m📦 home-base · 🌿 thread-v2 · 🌳 primary checkout · 🔢 497k\x1B[0m
 
-\x1B[1m\x1B[4mThread:\x1B[0m thread-reports dispatch 2: the write path
-\x1B[1m\x1B[4mYou asked me to:\x1B[0m You told me to build dispatch 2 of the thread-reports epic.
-\x1B[1m\x1B[4mYour last message, verbatim:\x1B[0m build the format v2 dispatch
+  \x1B[2m🌲 clean · 2 ahead / 0 behind · HEAD 288f3912eed5\x1B[0m
 
-\x1B[1m\x1B[4mMUST-SEE — the only part you have to read:\x1B[0m
-\x1B[1m\x1B[31m  1. 🛑 P0 · [Approve Y/n] Approve closing ask beads rather than deleting them? (th-eru.1)\x1B[0m
-\x1B[1m\x1B[31m     Context: The adapter closes asks instead of deleting them, because bd delete wedges auto-export.\x1B[0m
-\x1B[1m\x1B[31m     a. (Recommended) Keep closing — reversible, export stays healthy\x1B[0m
-\x1B[1m\x1B[31m     b. Delete — tidier list, wedges the JSONL export\x1B[0m
-\x1B[1m\x1B[31m     If you don't answer: I keep closing rather than deleting.\x1B[0m
+      \x1B[1;4mThread:\x1B[0m thread-reports dispatch 2: the write path
 
-\x1B[1m\x1B[31m- ⚠️ MISTAKE — I let the bin symlink point at a dirty branch\x1B[0m
+      \x1B[1;4mYou asked me to:\x1B[0m You told me to build dispatch 2 of the thread-reports epic.
 
-\x1B[2m📎 1 more ask (P2-P4) · 1 more deviation · everything: bun run justin-sdk thread show th-eru --full\x1B[0m
+      \x1B[1;4mYour last message, verbatim:\x1B[0m build the format v2 dispatch
 
-\x1B[1mAnswer: bun run justin-sdk thread answer th-eru\x1B[0m
+  \x1B[1;35m👀 MUST-SEE — the only part you have to read\x1B[0m
+
+      \x1B[1;31m1. 🛑 P0 · [Approve Y/n] Approve closing ask beads rather than deleting them?\x1B[0m \x1B[2m(th-eru.1)\x1B[0m
+
+         \x1B[31;1mContext:\x1B[0m\x1B[31m The adapter closes asks instead of deleting them, because bd delete wedges auto-export.\x1B[0m
+
+         \x1B[31;1ma.\x1B[0m \x1B[32m(Recommended) Keep closing — reversible, export stays healthy\x1B[0m
+
+         \x1B[31;1mb.\x1B[0m \x1B[31mDelete — tidier list, wedges the JSONL export\x1B[0m
+
+         \x1B[31;1mIf you don't answer:\x1B[0m\x1B[31m I keep closing rather than deleting.\x1B[0m
+
+      \x1B[1;31m• ⚠️ MISTAKE — I let the bin symlink point at a dirty branch\x1B[0m
+
+  \x1B[2m📎 1 more ask (P2-P4) · 1 more deviation · everything: \x1B[0m\x1B[36mbun run justin-sdk thread show th-eru --full\x1B[0m
+
+  \x1B[1mAnswer:\x1B[0m \x1B[36mbun run justin-sdk thread answer th-eru\x1B[0m
+
 \x1B[36m🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️\x1B[0m"
 `;
 
@@ -121,60 +169,90 @@ exports[`one fixture, three media ansi baseline — full 1`] = `
 
 \x1B[1m⚡ ✅ Work completed · 🙋 needs your answers · 📈 70% · 🛑 1 P0 ask\x1B[0m
 
-\x1B[2m📦 home-base · 🌿 thread-v2 · 🌳 primary checkout · 🔢 497k\x1B[0m
-\x1B[2m🌲 clean · 2 ahead / 0 behind · HEAD 288f3912eed5\x1B[0m
+  \x1B[2m📦 home-base · 🌿 thread-v2 · 🌳 primary checkout · 🔢 497k\x1B[0m
 
-\x1B[1m\x1B[4mThread:\x1B[0m thread-reports dispatch 2: the write path
-\x1B[1m\x1B[4mStop reason:\x1B[0m Dispatch 2 is built and verified.
-\x1B[1m\x1B[4mYou asked me to:\x1B[0m You told me to build dispatch 2 of the thread-reports epic.
-\x1B[1m\x1B[4mYour last message, verbatim:\x1B[0m build the format v2 dispatch
+  \x1B[2m🌲 clean · 2 ahead / 0 behind · HEAD 288f3912eed5\x1B[0m
 
-\x1B[1m\x1B[4mWhat happens next (mine):\x1B[0m
-- ⚽ Goal: Status reports as beads, one thread bead per session
-- ➡️ the read path
-- ➡️ the rules edit
+      \x1B[1;4mThread:\x1B[0m thread-reports dispatch 2: the write path
 
-\x1B[1m\x1B[4mWhat I did:\x1B[0m
-- ✅ Built the thread command group
-- ✅ Wired the bin symlink
+      \x1B[1;4mStop reason:\x1B[0m Dispatch 2 is built and verified.
 
-\x1B[1m\x1B[4mWhat I learned:\x1B[0m
-1. bd update --metadata merges rather than replaces (✅ written into src/thread/bd.ts)
+      \x1B[1;4mYou asked me to:\x1B[0m You told me to build dispatch 2 of the thread-reports epic.
 
-\x1B[1m\x1B[4mAnswers to your questions:\x1B[0m
-1. Q: Is CLAUDE_CODE_SESSION_ID exported inside a subagent?
-   A: Yes — measured 2026-09-12, it is the parent session id.
+      \x1B[1;4mYour last message, verbatim:\x1B[0m build the format v2 dispatch
 
-\x1B[1m\x1B[4mDeviations from what you asked for:\x1B[0m
-\x1B[1m\x1B[31m- ⚠️ MISTAKE — I let the bin symlink point at a dirty branch\x1B[0m
-- ⚖️ Judgment call — The knob defaults off, which is not what the bead said — the bead said on.
+  \x1B[1;35m▶️ What happens next (mine)\x1B[0m
 
-\x1B[1m\x1B[4mDiscussion:\x1B[0m
-- bd update --metadata MERGES; it does not replace.
+      \x1B[2m•\x1B[0m ⚽ Goal: Status reports as beads, one thread bead per session
 
-\x1B[1m\x1B[4mAsks — everything I need from you:\x1B[0m
-\x1B[1m\x1B[31m  1. 🛑 P0 · [Approve Y/n] Approve closing ask beads rather than deleting them? (th-eru.1)\x1B[0m
-\x1B[1m\x1B[31m     Context: The adapter closes asks instead of deleting them, because bd delete wedges auto-export.\x1B[0m
-\x1B[1m\x1B[31m     a. (Recommended) Keep closing — reversible, export stays healthy\x1B[0m
-\x1B[1m\x1B[31m     b. Delete — tidier list, wedges the JSONL export\x1B[0m
-\x1B[1m\x1B[31m     If you don't answer: I keep closing rather than deleting.\x1B[0m
-\x1B[2m  2. (P3) · [Pick a/b] Where should componentConfig.thread.enabled live? (th-eru.2)\x1B[0m
-\x1B[2m     Context: The knob defaults off, so nothing changes for other sessions.\x1B[0m
-\x1B[2m     a. (Recommended) a — user config only\x1B[0m
-\x1B[2m     b. b — every enrolled repo\x1B[0m
-\x1B[2m     If you don't answer: I leave it off everywhere but this machine.\x1B[0m
+      \x1B[2m•\x1B[0m ➡️ the read path
 
-\x1B[1m\x1B[4mPrior asks — closed by this report:\x1B[0m
-- jl-x7q.1 ([Approve Y/n] Close ask beads when they are answered rather than deleting them?) — answered: You said "yes, closing is right".
+      \x1B[2m•\x1B[0m ➡️ the rules edit
 
-\x1B[1m\x1B[4mWork product:\x1B[0m
-- code: src/thread/ plus the bin symlink, on branch thread-reports
-- Merge state: UNMERGED
+  \x1B[1;35m✅ What I did\x1B[0m
 
-\x1B[1m\x1B[4mBeads touched:\x1B[0m
-- home-base-p1uj.1 — the thread command group core
+      \x1B[2m•\x1B[0m ✅ Built the thread command group
 
-\x1B[1mAnswer: bun run justin-sdk thread answer th-eru\x1B[0m
+      \x1B[2m•\x1B[0m ✅ Wired the bin symlink
+
+  \x1B[1;35m💡 What I learned\x1B[0m
+
+      1. bd update --metadata merges rather than replaces (✅ written into src/thread/bd.ts)
+
+  \x1B[1;35m💬 Answers to your questions\x1B[0m
+
+      1. Q: Is CLAUDE_CODE_SESSION_ID exported inside a subagent?
+
+         A: Yes — measured 2026-09-12, it is the parent session id.
+
+  \x1B[1;35m⚠️ Deviations from what you asked for\x1B[0m
+
+      \x1B[1;31m• ⚠️ MISTAKE — I let the bin symlink point at a dirty branch\x1B[0m
+
+      \x1B[2m•\x1B[0m ⚖️ Judgment call — The knob defaults off, which is not what the bead said — the bead said on.
+
+  \x1B[1;35m🗣️ Discussion\x1B[0m
+
+      \x1B[2m•\x1B[0m bd update --metadata MERGES; it does not replace.
+
+  \x1B[1;35m🙋 Asks — everything I need from you\x1B[0m
+
+      \x1B[1;31m1. 🛑 P0 · [Approve Y/n] Approve closing ask beads rather than deleting them?\x1B[0m \x1B[2m(th-eru.1)\x1B[0m
+
+         \x1B[31;1mContext:\x1B[0m\x1B[31m The adapter closes asks instead of deleting them, because bd delete wedges auto-export.\x1B[0m
+
+         \x1B[31;1ma.\x1B[0m \x1B[32m(Recommended) Keep closing — reversible, export stays healthy\x1B[0m
+
+         \x1B[31;1mb.\x1B[0m \x1B[31mDelete — tidier list, wedges the JSONL export\x1B[0m
+
+         \x1B[31;1mIf you don't answer:\x1B[0m\x1B[31m I keep closing rather than deleting.\x1B[0m
+
+      \x1B[2m2. (P3) · [Pick a/b] Where should componentConfig.thread.enabled live?\x1B[0m \x1B[2m(th-eru.2)\x1B[0m
+
+         \x1B[2mContext:\x1B[0m\x1B[2m The knob defaults off, so nothing changes for other sessions.\x1B[0m
+
+         \x1B[2ma.\x1B[0m \x1B[2;32m(Recommended) user config only\x1B[0m
+
+         \x1B[2mb.\x1B[0m \x1B[2mevery enrolled repo\x1B[0m
+
+         \x1B[2mIf you don't answer:\x1B[0m\x1B[2m I leave it off everywhere but this machine.\x1B[0m
+
+  \x1B[1;35m🗂️ Prior asks — closed by this report\x1B[0m
+
+      \x1B[2m•\x1B[0m \x1B[2mjl-x7q.1\x1B[0m ([Approve Y/n] Close ask beads when they are answered rather than deleting them?) — answered: You said "yes, closing is right".
+
+  \x1B[1;35m🛠️ Work product\x1B[0m
+
+      \x1B[2m•\x1B[0m code: src/thread/ plus the bin symlink, on branch thread-reports
+
+      \x1B[2m•\x1B[0m Merge state: UNMERGED
+
+  \x1B[1;35m📿 Beads touched\x1B[0m
+
+      \x1B[2m•\x1B[0m \x1B[2mhome-base-p1uj.1\x1B[0m — the thread command group core
+
+  \x1B[1mAnswer:\x1B[0m \x1B[36mbun run justin-sdk thread answer th-eru\x1B[0m
+
 \x1B[36m🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️🕉️\x1B[0m"
 `;
 
@@ -187,7 +265,7 @@ exports[`one fixture, three media html baseline — compact 1`] = `
 <p class="field"><strong>Thread:</strong> thread-reports dispatch 2: the write path</p>
 <p class="field"><strong>You asked me to:</strong> You told me to build dispatch 2 of the thread-reports epic.</p>
 <p class="field"><strong>Your last message, verbatim:</strong> build the format v2 dispatch</p>
-<h3>MUST-SEE — the only part you have to read</h3>
+<h3>👀 MUST-SEE — the only part you have to read</h3>
 <p class="ask p0"><strong>1.</strong> 🛑 P0 · [Approve Y/n] Approve closing ask beads rather than deleting them? (th-eru.1)</p>
 <p class="askdetail p0">Context: The adapter closes asks instead of deleting them, because bd delete wedges auto-export.</p>
 <p class="askdetail p0">a. (Recommended) Keep closing — reversible, export stays healthy</p>
@@ -210,32 +288,32 @@ exports[`one fixture, three media html baseline — full 1`] = `
 <p class="field"><strong>Stop reason:</strong> Dispatch 2 is built and verified.</p>
 <p class="field"><strong>You asked me to:</strong> You told me to build dispatch 2 of the thread-reports epic.</p>
 <p class="field"><strong>Your last message, verbatim:</strong> build the format v2 dispatch</p>
-<h3>What happens next (mine)</h3>
+<h3>▶️ What happens next (mine)</h3>
 <ul>
 <li>⚽ Goal: Status reports as beads, one thread bead per session</li>
 <li>➡️ the read path</li>
 <li>➡️ the rules edit</li>
 </ul>
-<h3>What I did</h3>
+<h3>✅ What I did</h3>
 <ul>
 <li>✅ Built the thread command group</li>
 <li>✅ Wired the bin symlink</li>
 </ul>
-<h3>What I learned</h3>
+<h3>💡 What I learned</h3>
 <p>1. bd update --metadata merges rather than replaces (✅ written into src/thread/bd.ts)</p>
-<h3>Answers to your questions</h3>
+<h3>💬 Answers to your questions</h3>
 <p>1. Q: Is CLAUDE_CODE_SESSION_ID exported inside a subagent?</p>
 <p class="continuation">A: Yes — measured 2026-09-12, it is the parent session id.</p>
-<h3>Deviations from what you asked for</h3>
+<h3>⚠️ Deviations from what you asked for</h3>
 <p class="mistake">- ⚠️ MISTAKE — I let the bin symlink point at a dirty branch</p>
 <ul>
 <li>⚖️ Judgment call — The knob defaults off, which is not what the bead said — the bead said on.</li>
 </ul>
-<h3>Discussion</h3>
+<h3>🗣️ Discussion</h3>
 <ul>
 <li>bd update --metadata MERGES; it does not replace.</li>
 </ul>
-<h3>Asks — everything I need from you</h3>
+<h3>🙋 Asks — everything I need from you</h3>
 <p class="ask p0"><strong>1.</strong> 🛑 P0 · [Approve Y/n] Approve closing ask beads rather than deleting them? (th-eru.1)</p>
 <p class="askdetail p0">Context: The adapter closes asks instead of deleting them, because bd delete wedges auto-export.</p>
 <p class="askdetail p0">a. (Recommended) Keep closing — reversible, export stays healthy</p>
@@ -243,19 +321,19 @@ exports[`one fixture, three media html baseline — full 1`] = `
 <p class="askdetail p0">If you don&#39;t answer: I keep closing rather than deleting.</p>
 <p class="ask p3"><strong>2.</strong> (P3) · [Pick a/b] Where should componentConfig.thread.enabled live? (th-eru.2)</p>
 <p class="askdetail p3">Context: The knob defaults off, so nothing changes for other sessions.</p>
-<p class="askdetail p3">a. (Recommended) a — user config only</p>
-<p class="askdetail p3">b. b — every enrolled repo</p>
+<p class="askdetail p3">a. (Recommended) user config only</p>
+<p class="askdetail p3">b. every enrolled repo</p>
 <p class="askdetail p3">If you don&#39;t answer: I leave it off everywhere but this machine.</p>
-<h3>Prior asks — closed by this report</h3>
+<h3>🗂️ Prior asks — closed by this report</h3>
 <ul>
 <li>jl-x7q.1 ([Approve Y/n] Close ask beads when they are answered rather than deleting them?) — answered: You said &quot;yes, closing is right&quot;.</li>
 </ul>
-<h3>Work product</h3>
+<h3>🛠️ Work product</h3>
 <ul>
 <li>code: src/thread/ plus the bin symlink, on branch thread-reports</li>
 <li>Merge state: UNMERGED</li>
 </ul>
-<h3>Beads touched</h3>
+<h3>📿 Beads touched</h3>
 <ul>
 <li>home-base-p1uj.1 — the thread command group core</li>
 </ul>

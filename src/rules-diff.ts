@@ -60,16 +60,16 @@ import {
 import {fail, findLocalPrettier} from './setup-helpers';
 
 export const RULES_DIFF_EXIT = {
-  inSync: 0,
-  diff: 1,
   cannotCheck: 2,
+  diff: 1,
+  inSync: 0,
 } as const;
 
 export type RulesDiffOutcome = 'in-sync' | 'diff' | 'cannot-check';
 
 export interface RulesDiffResult {
-  outcome: RulesDiffOutcome;
   exitCode: number;
+  outcome: RulesDiffOutcome;
   /** Everything the command has to say, already assembled in print order. */
   report: string;
 }
@@ -95,6 +95,60 @@ function cannotCheck(message: string): RulesDiffResult {
     outcome: 'cannot-check',
     report: message,
   };
+}
+
+/**
+ * `git diff --no-index` between two temp files.
+ *
+ * Both sides are written OUTSIDE the repo, into a temp dir whose subdirectory
+ * names become the diff's `a/`…`b/` labels, so the header reads
+ * `current/critical-rules.md` → `canonical/critical-rules.md` instead of two
+ * unreadable temp paths. Exit status 1 means "they differ" and is the expected
+ * result, not an error. Falls back to a plain marker-line dump if git is
+ * unavailable, so the command still answers the question.
+ */
+function unifiedDiff(current: string, canonical: string): string {
+  const dir = mkdtempSync(join(tmpdir(), 'jsdk-rules-diff-'));
+  try {
+    const currentDir = join(dir, 'current');
+    const canonicalDir = join(dir, 'canonical');
+    mkdirSync(currentDir, {recursive: true});
+    mkdirSync(canonicalDir, {recursive: true});
+    const name = 'critical-rules.md';
+    writeFileSync(join(currentDir, name), current);
+    writeFileSync(join(canonicalDir, name), canonical);
+    try {
+      const out = execFileSync(
+        'git',
+        [
+          '--no-pager',
+          'diff',
+          '--no-index',
+          // Colour only when a terminal will render it: the output is captured
+          // and returned, so escape codes in a pipe would be noise.
+          `--color=${process.stdout.isTTY === true ? 'always' : 'never'}`,
+          '--',
+          `current/${name}`,
+          `canonical/${name}`,
+        ],
+        {cwd: dir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe']},
+      );
+      return out.trimEnd();
+    } catch (error) {
+      // status 1 = "files differ", with the diff on stdout. Anything else is a
+      // real git failure, and must not be reported as an empty diff.
+      const err = error as {status?: number; stderr?: string; stdout?: string};
+      const out = (err.stdout ?? '').toString();
+      if (err.status === 1 && out.trim().length > 0) return out.trimEnd();
+      return (
+        `(could not render a unified diff: git exited ${err.status ?? 'abnormally'}` +
+        `${(err.stderr ?? '').toString().trim().length > 0 ? ` — ${(err.stderr ?? '').toString().trim()}` : ''})\n` +
+        `The files DO differ; the canonical content is ${canonical.split('\n').length} lines.`
+      );
+    }
+  } finally {
+    rmSync(dir, {force: true, recursive: true});
+  }
 }
 
 /**
@@ -194,60 +248,6 @@ export function rulesDiff(options: RulesDiffOptions = {}): RulesDiffResult {
     outcome: 'diff',
     report: lines.join('\n'),
   };
-}
-
-/**
- * `git diff --no-index` between two temp files.
- *
- * Both sides are written OUTSIDE the repo, into a temp dir whose subdirectory
- * names become the diff's `a/`…`b/` labels, so the header reads
- * `current/critical-rules.md` → `canonical/critical-rules.md` instead of two
- * unreadable temp paths. Exit status 1 means "they differ" and is the expected
- * result, not an error. Falls back to a plain marker-line dump if git is
- * unavailable, so the command still answers the question.
- */
-function unifiedDiff(current: string, canonical: string): string {
-  const dir = mkdtempSync(join(tmpdir(), 'jsdk-rules-diff-'));
-  try {
-    const currentDir = join(dir, 'current');
-    const canonicalDir = join(dir, 'canonical');
-    mkdirSync(currentDir, {recursive: true});
-    mkdirSync(canonicalDir, {recursive: true});
-    const name = 'critical-rules.md';
-    writeFileSync(join(currentDir, name), current);
-    writeFileSync(join(canonicalDir, name), canonical);
-    try {
-      const out = execFileSync(
-        'git',
-        [
-          '--no-pager',
-          'diff',
-          '--no-index',
-          // Colour only when a terminal will render it: the output is captured
-          // and returned, so escape codes in a pipe would be noise.
-          `--color=${process.stdout.isTTY === true ? 'always' : 'never'}`,
-          '--',
-          `current/${name}`,
-          `canonical/${name}`,
-        ],
-        {cwd: dir, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe']},
-      );
-      return out.trimEnd();
-    } catch (error) {
-      // status 1 = "files differ", with the diff on stdout. Anything else is a
-      // real git failure, and must not be reported as an empty diff.
-      const err = error as {status?: number; stdout?: string; stderr?: string};
-      const out = (err.stdout ?? '').toString();
-      if (err.status === 1 && out.trim().length > 0) return out.trimEnd();
-      return (
-        `(could not render a unified diff: git exited ${err.status ?? 'abnormally'}` +
-        `${(err.stderr ?? '').toString().trim().length > 0 ? ` — ${(err.stderr ?? '').toString().trim()}` : ''})\n` +
-        `The files DO differ; the canonical content is ${canonical.split('\n').length} lines.`
-      );
-    }
-  } finally {
-    rmSync(dir, {force: true, recursive: true});
-  }
 }
 
 export function runRulesDiff(options: RulesDiffOptions = {}): number {

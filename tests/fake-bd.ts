@@ -40,15 +40,22 @@ export interface FakeState {
   askCreates?: number;
   /** Every comment written, in order. */
   comments?: FakeComment[];
-  /** Fail the Nth `create -t ask` of each run (1-based). 0 = never fail. */
-  failAskCreateAt: number;
-  /** Fail `comments add` for this bead id. Null = never fail. */
-  failCommentAddFor?: string | null;
   /**
    * Mutate, print the id, THEN die in auto-export (home-base-p1uj.10). The
    * stderr is the measured one from bd 1.1.0 under the Claude Code sandbox.
    */
   exportFails?: boolean;
+  /** Fail the Nth `create -t ask` of each run (1-based). 0 = never fail. */
+  failAskCreateAt: number;
+  /** Fail `comments add` for this bead id. Null = never fail. */
+  failCommentAddFor?: string | null;
+  /**
+   * Fail ONLY the `list -t thread --metadata-field sessionId=<this>` lookup
+   * (home-base-k0b8n.5). Narrow on purpose: "the predecessor lookup failed" and
+   * "bd is down" are different facts, and a fake that could only produce the
+   * second could not exercise the first at all.
+   */
+  failThreadLookupFor?: string | null;
   issues: FakeIssue[];
   /** Every command line the SDK issued, in order. */
   log: string[];
@@ -103,6 +110,11 @@ if (command === 'list') {
   if (parent != null) rows = rows.filter((i) => i.parent === parent);
   if (field != null) {
     const [key, value] = field.split('=');
+    if (key === 'sessionId' && state.failThreadLookupFor === value) {
+      save();
+      console.error('error: could not open database: permission denied');
+      process.exit(1);
+    }
     rows = rows.filter((i) => String((i.metadata ?? {})[key]) === value);
   }
   if (!argv.includes('--all')) rows = rows.filter((i) => i.status !== 'closed');
@@ -240,6 +252,7 @@ export function createFakeBd(
     exportFails,
     failAskCreateAt,
     failCommentAddFor,
+    failThreadLookupFor: null,
     issues: [],
     log: [],
     nextId: 1,

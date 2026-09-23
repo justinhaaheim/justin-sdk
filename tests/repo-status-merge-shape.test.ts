@@ -33,7 +33,7 @@ import {chmodSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {describeMergeShape} from '../src/repo-status/merge-shape';
-import {buildReport, type BranchRow} from '../src/repo-status/report';
+import {type BranchRow, buildReport} from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const CLI = join(import.meta.dir, '../src/repo-status/repo-status.ts');

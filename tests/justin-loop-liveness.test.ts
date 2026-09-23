@@ -38,8 +38,8 @@ import {afterEach, describe, expect, test} from 'bun:test';
 
 import {
   type AgentRow,
-  DEFAULT_OPTIONS,
   type BootContext,
+  DEFAULT_OPTIONS,
   type JustinLoopOptions,
   LIVENESS_INTERVAL_MS,
   type RunnerDeps,
@@ -47,7 +47,7 @@ import {
   stopAndVerify,
   type StopDeps,
 } from '../src/justin-loop/runner';
-import {beadFrom, runLoop} from './justin-loop-world';
+import {beadFrom, ledgerReaderNeverCalled, runLoop} from './justin-loop-world';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -76,10 +76,10 @@ function occurrences(haystack: string, needle: string): number {
 }
 
 interface Watched {
-  stdout: string;
   /** Simulated seconds from dispatch to return. */
   elapsedSec: number;
   polls: number;
+  stdout: string;
 }
 
 /**
@@ -89,9 +89,11 @@ interface Watched {
  * loop's only consumer of time, so poll N happens at exactly `N × pollSec`.
  */
 async function watch(spec: {
+  /** Rows the listing at poll N could not read (F7). Default 0. */
+  malformedAt?: (poll: number) => number;
+  maxPolls?: number;
   pollSec: number;
   rowAt: (poll: number) => AgentRow | null | 'unreadable';
-  maxPolls?: number;
 }): Promise<Watched> {
   const sb = createSandbox();
   sandboxes.push(sb);
@@ -101,6 +103,7 @@ async function watch(spec: {
     cwd: sb.path,
     label: 'the-arc-1',
     plan: {kind: 'fresh'},
+    predecessorSessionId: null,
   };
   const maxPolls = spec.maxPolls ?? 100;
 
@@ -111,32 +114,42 @@ async function watch(spec: {
 
   const deps: RunnerDeps = {
     appendLedgerRow: () => ({ok: true, reason: null}),
-    br: () => ({ok: true, reason: null, stdout: '{"issues":[]}'}),
-    dispatch: async () => 'backgrounded · sim-1 · 2026-09-08 04:30 the-arc-1\n',
-    findAgent: async () => {
+    br: () => ({ok: true, reason: null, stderr: null, stdout: '{"issues":[]}'}),
+    dispatch: () =>
+      Promise.resolve('backgrounded · sim-1 · 2026-09-08 04:30 the-arc-1\n'),
+    findAgent: () => {
       polls++;
       if (polls > maxPolls) {
         throw new Error(`watchSession did not terminate within ${maxPolls}`);
       }
       const row = spec.rowAt(polls);
-      return row === 'unreadable'
-        ? {ok: false, reason: 'claude agents --json exited 1'}
-        : {ok: true, row};
+      return Promise.resolve(
+        row === 'unreadable'
+          ? {ok: false, reason: 'claude agents --json exited 1'}
+          : {malformed: spec.malformedAt?.(polls) ?? 0, ok: true, row},
+      );
     },
-    gitHead: async () => ({ok: true, sha: 'abc123'}),
-    notifyBlocked: () => {},
+    gitHead: () => Promise.resolve({ok: true, sha: 'abc123'}),
+    notifyBlocked: () => {
+      /* nothing is notified in the fake world */
+    },
     now: () => clock,
-    preflight: async () => [],
-    readUsage: async () => null,
+    preflight: () => Promise.resolve([]),
+    readLedgerSessionId: ledgerReaderNeverCalled,
+    readUsage: () =>
+      Promise.resolve({kind: 'failed', reason: 'no /usage in this fixture'}),
     signalPid: () => true,
-    sleep: async (ms: number) => {
+    sleep: (ms: number) => {
       clock += ms;
+      return Promise.resolve();
     },
-    stopSession: async () => ({detail: 'stopped sim-1', ok: true}),
+    stopSession: () => Promise.resolve({detail: 'stopped sim-1', ok: true}),
     write: (text: string) => {
       stdout += text;
     },
-    writeErr: () => {},
+    writeErr: () => {
+      /* stderr is not asserted in this test */
+    },
   };
 
   await runSession(sb.path, opts, 1, boot, 'sim name', deps);
@@ -182,6 +195,43 @@ describe('liveness: a quiet session never looks like a wedged runner', () => {
     expect(LIVENESS_INTERVAL_MS).toBe(60_000);
     expect(occurrences(w.stdout, 'watching ')).toBe(1);
     expect(w.stdout).toContain('watching 1m · 12 polls ·');
+  });
+
+  test('malformed agents rows are COUNTED on the liveness line (F7)', async () => {
+    // home-base-685h F7. A `claude agents --json` that starts returning rows
+    // without ids used to be invisible: each one became a row with `id: ''`,
+    // which matched nothing, so the tick said a calm "no row" while three real
+    // sessions sat unread. The count is the only thing that makes it a fact.
+    const w = await watch({
+      malformedAt: () => 3,
+      pollSec: 20,
+      rowAt: (poll) => (poll <= 3 ? WORKING : DONE),
+    });
+    expect(w.stdout).toContain('3 malformed rows');
+  });
+
+  test('a clean listing says NOTHING about malformed rows (F7)', async () => {
+    // The ordinary line is byte-for-byte the one home-base-a1go shipped. A
+    // "0 malformed rows" on every tick would be noise, and noise is what gets
+    // ignored when the count is not zero.
+    const w = await watch({
+      pollSec: 20,
+      rowAt: (poll) => (poll <= 3 ? WORKING : DONE),
+    });
+    expect(w.stdout).not.toContain('malformed');
+    expect(w.stdout).toContain(
+      'watching 1m · 3 polls · working/idle · agents ok',
+    );
+  });
+
+  test('one malformed row is singular (F7)', async () => {
+    const w = await watch({
+      malformedAt: () => 1,
+      pollSec: 20,
+      rowAt: (poll) => (poll <= 3 ? WORKING : DONE),
+    });
+    expect(w.stdout).toContain('· 1 malformed row');
+    expect(w.stdout).not.toContain('malformed rows');
   });
 
   test('an unreadable listing is reported as unreadable, with its streak and reason', async () => {
@@ -241,14 +291,16 @@ describe('the stop ladder narrates itself as it climbs', () => {
     const live: AgentRow = agentRow({id: 'sess-1', state: 'done'});
 
     const deps: StopDeps = {
-      findAgent: async () => ({ok: true, row: stopped ? null : live}),
+      findAgent: () =>
+        Promise.resolve({malformed: 0, ok: true, row: stopped ? null : live}),
       signalPid: () => true,
-      sleep: async () => {
+      sleep: () => {
         duringSleep.push(out);
+        return Promise.resolve();
       },
-      stopSession: async () => {
+      stopSession: () => {
         stopped = true;
-        return {detail: 'stopped sess-1', ok: true};
+        return Promise.resolve({detail: 'stopped sess-1', ok: true});
       },
       write: (text) => {
         out += text;
@@ -272,10 +324,10 @@ describe('the stop ladder narrates itself as it climbs', () => {
     // this note was printed by the caller's loop, which is now gone.
     let out = '';
     const deps: StopDeps = {
-      findAgent: async () => ({ok: true, row: null}),
+      findAgent: () => Promise.resolve({malformed: 0, ok: true, row: null}),
       signalPid: () => true,
-      sleep: async () => {},
-      stopSession: async () => ({detail: 'unreachable', ok: true}),
+      sleep: () => Promise.resolve(),
+      stopSession: () => Promise.resolve({detail: 'unreachable', ok: true}),
       write: (text) => {
         out += text;
       },

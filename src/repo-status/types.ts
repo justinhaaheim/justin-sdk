@@ -30,23 +30,20 @@
 
 /** A checked-out working tree of the repo (the primary clone, or a linked worktree). */
 export interface WorktreeEntry {
-  path: string;
   /** Short branch name, or null when the worktree is on a detached HEAD. */
   branch: string | null;
   /** True for the original clone; false for `git worktree add` linked trees. */
   isPrimary: boolean;
+  path: string;
 }
 
 /** A branch tip, local or remote-only. */
 export interface BranchTip {
-  /** Short name for locals (`main`), remote-qualified for remote-only (`origin/foo`). */
-  name: string;
   isRemoteOnly: boolean;
-  tipSha: string;
   /** ISO 8601 committer date of the tip commit. */
   lastCommitDate: string;
-  /** Path of the worktree that has this branch checked out, if any. */
-  worktreePath: string | null;
+  /** Short name for locals (`main`), remote-qualified for remote-only (`origin/foo`). */
+  name: string;
   /**
    * The remote-tracking ref carrying this branch, or null when NO remote has it.
    *
@@ -65,6 +62,9 @@ export interface BranchTip {
    * differ, so a reader is never told a stale remote copy is a backup.
    */
   remote: {inSync: boolean; ref: string; sha: string} | null;
+  tipSha: string;
+  /** Path of the worktree that has this branch checked out, if any. */
+  worktreePath: string | null;
 }
 
 /**
@@ -123,9 +123,9 @@ export interface BranchDivergence extends BranchTip {
 export interface HiddenTip {
   /** Short name for locals, remote-qualified for remote-only — as listed. */
   name: string;
-  tipSha: string;
   /** Which filter removed it. Matches the `filtered` counts one-for-one. */
   reason: 'archive' | 'stale';
+  tipSha: string;
 }
 
 /**
@@ -146,14 +146,14 @@ export interface HiddenTip {
  * representable or it gets reported as evidence of absence.
  */
 export interface EnumerationFailure {
-  /** Which half of the core walk could not be read. */
-  what: 'branches' | 'worktrees';
   /** The exact git command that failed, shell-quoted so it is safe to paste. */
   command: string;
-  /** What is NOT known as a result. Never phrased as a reassurance. */
-  why: string;
   /** What to run to find out why. */
   diagnose: string;
+  /** Which half of the core walk could not be read. */
+  what: 'branches' | 'worktrees';
+  /** What is NOT known as a result. Never phrased as a reassurance. */
+  why: string;
 }
 
 /**
@@ -164,11 +164,6 @@ export interface EnumerationFailure {
  * different statement from `[]` — see `EnumerationFailure`.
  */
 export interface CoreInventory {
-  repoRoot: string;
-  /** Null on a detached HEAD or outside a git repo. */
-  currentBranch: string | null;
-  /** The repo's default branch (`main`/`master`), if one could be determined. */
-  defaultBranch: string | null;
   /**
    * The NAME of the ref the walk measures against — for prose, and for the
    * name-based lookups (`archive/<name>`, `origin/<name>`) that only a name can
@@ -195,8 +190,14 @@ export interface CoreInventory {
   baselineSha: string;
   /** Null when the branch listing failed — NOT the same as "no branches". */
   branches: BranchDivergence[] | null;
-  /** Null when the worktree listing failed — NOT the same as "no worktrees". */
-  worktrees: WorktreeEntry[] | null;
+  /** Null on a detached HEAD or outside a git repo. */
+  currentBranch: string | null;
+  /** The repo's default branch (`main`/`master`), if one could be determined. */
+  defaultBranch: string | null;
+  /** Empty when the whole walk was readable. One entry per failed half. */
+  enumerationFailures: EnumerationFailure[];
+  /** What was dropped before `branches` was built. Always present. */
+  filtered: FilterSummary;
   /**
    * The tips the filters dropped, so a caller that wants to can measure them.
    * Null when the branch listing failed — there was no set to filter, which is
@@ -204,10 +205,9 @@ export interface CoreInventory {
    * nothing. NO git runs to produce this. See `HiddenTip`.
    */
   hiddenTips: HiddenTip[] | null;
-  /** Empty when the whole walk was readable. One entry per failed half. */
-  enumerationFailures: EnumerationFailure[];
-  /** What was dropped before `branches` was built. Always present. */
-  filtered: FilterSummary;
+  repoRoot: string;
+  /** Null when the worktree listing failed — NOT the same as "no worktrees". */
+  worktrees: WorktreeEntry[] | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -215,7 +215,6 @@ export interface CoreInventory {
 // ---------------------------------------------------------------------------
 
 export interface CoreOptions {
-  cwd: string;
   /**
    * What to measure divergence against. `current` is what the prime
    * session-start view wants ("work you might not know about from where you
@@ -223,12 +222,7 @@ export interface CoreOptions {
    * An explicit ref string overrides both.
    */
   baseline?: 'current' | 'default' | (string & {});
-  /**
-   * Branches with no commit inside this window are dropped unless they have a
-   * worktree. Set to null to disable the filter entirely (reconcile wants every
-   * branch, however old; the session-start view wants only recent ones).
-   */
-  sinceDays?: number | null;
+  cwd: string;
   /**
    * Drop `archive/*` refs from the walk. They are mirrors of finished work —
    * the thing a reconcile already dealt with — so on the "what is still open?"
@@ -242,6 +236,12 @@ export interface CoreOptions {
    * unfiltered walk (`plan`, `apply`) get it by not asking.
    */
   excludeArchive?: boolean;
+  /**
+   * Branches with no commit inside this window are dropped unless they have a
+   * worktree. Set to null to disable the filter entirely (reconcile wants every
+   * branch, however old; the session-start view wants only recent ones).
+   */
+  sinceDays?: number | null;
 }
 
 /**
@@ -262,11 +262,6 @@ export interface CoreOptions {
  * happened, and this is the module that must not manufacture one.
  */
 export interface FilterSummary {
-  /**
-   * The age window applied, in days. Null means no age gate: every branch was
-   * considered however old. Not the same as `0`.
-   */
-  sinceDays: number | null;
   /** Whether `archive/*` refs were dropped from the ledger. */
   excludeArchive: boolean;
   /**
@@ -282,13 +277,6 @@ export interface FilterSummary {
    * the total dropped rather than double-counting a stale archive mirror.
    */
   excludedAsStale: number | null;
-  /**
-   * Branches that matched a filter but were kept anyway for having a worktree.
-   * A checked-out branch is never hidden — an old branch someone still has
-   * open is precisely the thing worth surfacing — and this says how often that
-   * exemption fired, so the kept row is not mistaken for a filter bug.
-   */
-  keptForWorktree: number | null;
   /**
    * What the HIDDEN branches actually hold — or NULL, meaning NOT COMPUTED
    * (home-base-qyu1.33.9, epic decision D4).
@@ -318,4 +306,16 @@ export interface FilterSummary {
     /** Hidden branches whose check failed. UNKNOWN, never counted as clean. */
     unmeasured: number;
   } | null;
+  /**
+   * Branches that matched a filter but were kept anyway for having a worktree.
+   * A checked-out branch is never hidden — an old branch someone still has
+   * open is precisely the thing worth surfacing — and this says how often that
+   * exemption fired, so the kept row is not mistaken for a filter bug.
+   */
+  keptForWorktree: number | null;
+  /**
+   * The age window applied, in days. Null means no age gate: every branch was
+   * considered however old. Not the same as `0`.
+   */
+  sinceDays: number | null;
 }

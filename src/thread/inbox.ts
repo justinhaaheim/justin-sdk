@@ -23,28 +23,41 @@
  */
 
 import {
-  describeBdFailure,
-  listOpenAsks,
-  readComments,
+  BODY_COLUMN,
+  DETAIL_COLUMN,
+  HEADER_COLUMN,
+  type OutputStyle,
+  outputStyle,
+  paint,
+  PLAIN_STYLE,
+  sectionHeader,
+  spacedList,
+  wrapHanging,
+} from '../cli-style';
+import {SKIP_COMMENT} from './answer';
+import {
   type BdComment,
   type BdContext,
   type BdIssue,
+  describeBdFailure,
+  listOpenAsks,
+  readComments,
 } from './bd';
-import {contextFor, resolveThread, type ThreadRef} from './resolve';
 import {
-  threadsBeadsDir,
-  threadsBeadsMissingLine,
   probeWritable,
   SANDBOX_DENIED_LINE,
+  threadsBeadsDir,
+  threadsBeadsMissingLine,
   threadsStateDir,
 } from './paths';
-import {SKIP_COMMENT} from './answer';
 import {
   compareAsksForNumbering,
   numberingFieldsOf,
   priorityLabel,
   restateAsk,
 } from './render';
+import {layRestatedAsk, priorityStyles} from './render-ansi';
+import {contextFor, resolveThread, type ThreadRef} from './resolve';
 
 export type AskState = 'answered' | 'skipped' | 'unanswered';
 
@@ -109,7 +122,7 @@ export function askStateOf(
 }
 
 function metadataOf(issue: BdIssue): Record<string, unknown> {
-  return (issue.metadata ?? {}) as Record<string, unknown>;
+  return issue.metadata ?? {};
 }
 
 function stringOr(value: unknown, fallback: string): string {
@@ -143,75 +156,115 @@ export function renderInboxAsk(
   ask: InboxAsk,
   heading: string,
   unansweredNote: string | null = null,
+  style: OutputStyle = PLAIN_STYLE,
 ): string[] {
-  const lines = [heading];
-  for (const line of ask.restated.split('\n')) lines.push(`     ${line}`);
+  const {color, width} = style;
+  const lines = [heading, ...layRestatedAsk(ask.restated, style)];
+  const at = (text: string): string =>
+    wrapHanging(text, {hang: DETAIL_COLUMN, indent: DETAIL_COLUMN, width});
   if (ask.state === 'skipped') {
-    lines.push(`     >>> SKIPPED — use your default: ${ask.defaultAction}`);
+    lines.push('');
+    lines.push(
+      at(
+        `${paint('>>> SKIPPED — use your default:', ['bold', 'yellow'], color)} ${ask.defaultAction}`,
+      ),
+    );
     return lines;
   }
   if (ask.state === 'unanswered') {
-    if (unansweredNote != null) lines.push(unansweredNote);
+    if (unansweredNote != null) {
+      lines.push('');
+      lines.push(unansweredNote);
+    }
     return lines;
   }
+  lines.push('');
   for (const answer of ask.answers) {
     for (const [position, line] of answer.split('\n').entries()) {
-      lines.push(`     >>> ${position === 0 ? 'HIS ANSWER: ' : ''}${line}`);
+      const label = position === 0 ? '>>> HIS ANSWER:' : '>>>';
+      lines.push(at(`${paint(label, ['bold', 'green'], color)} ${line}`));
     }
   }
   return lines;
 }
 
-export function renderInbox(view: InboxView): string {
-  const lines: string[] = [];
-  lines.push(`INBOX for ${view.threadId} · ${view.threadTitle}`);
-
+/**
+ * The inbox, man-page style: the title line at column 0, each section a bold
+ * accent header at column 2 with one emoji, its body at column 6, and every ask
+ * a block of its own with a blank line on each side (K11).
+ */
+export function renderInbox(
+  view: InboxView,
+  style: OutputStyle = PLAIN_STYLE,
+): string {
+  const {color, width} = style;
+  const body = (text: string): string =>
+    wrapHanging(text, {hang: BODY_COLUMN, indent: BODY_COLUMN, width});
+  const head = (id: string, priority: number, rest: string): string =>
+    body(
+      `${paint(id, ['dim'], color)} · ${paint(priorityLabel(priority), priorityStyles(priority), color)} · ${rest}`,
+    );
   const touched = view.asks.filter((ask) => ask.state !== 'unanswered');
   const waiting = view.asks.filter((ask) => ask.state === 'unanswered');
 
-  lines.push('');
-  lines.push('WHAT JUSTIN DECIDED');
-  if (touched.length === 0) {
-    lines.push(
-      '  (nothing — checked, and he has not answered or skipped anything since the last report)',
-    );
-  }
-  for (const [index, ask] of touched.entries()) {
-    lines.push('');
-    lines.push(
-      ...renderInboxAsk(
-        ask,
-        `  ${index + 1}. ${ask.id} · ${priorityLabel(ask.priority)} · [${ask.kind}]`,
-      ),
-    );
-  }
-
-  lines.push('');
-  lines.push('HIS NOTE');
-  lines.push(
+  const decided =
+    touched.length === 0
+      ? [
+          body(
+            '(nothing — checked, and he has not answered or skipped anything since the last report)',
+          ),
+        ]
+      : touched.map((ask, index) =>
+          renderInboxAsk(
+            ask,
+            body(
+              `${index + 1}. ${paint(ask.id, ['dim'], color)} · ${paint(priorityLabel(ask.priority), priorityStyles(ask.priority), color)} · [${ask.kind}]`,
+            ),
+            null,
+            style,
+          ).join('\n'),
+        );
+  const note =
     view.note == null
-      ? '  (none — checked, and he left none)'
+      ? body('(none — checked, and he left none)')
       : view.note
           .split('\n')
-          .map((line) => `  ${line}`)
-          .join('\n'),
-  );
+          .map((line) => (line.trim() === '' ? '' : body(line)))
+          .join('\n');
+  const stillWaiting =
+    waiting.length === 0
+      ? [body('(none — checked, and there are none)')]
+      : waiting.map((ask) =>
+          [
+            head(ask.id, ask.priority, ask.title),
+            wrapHanging(`if he never answers: ${ask.defaultAction}`, {
+              hang: DETAIL_COLUMN,
+              indent: DETAIL_COLUMN,
+              width,
+            }),
+          ].join('\n'),
+        );
 
-  lines.push('');
-  lines.push('STILL WAITING ON HIM');
-  if (waiting.length === 0) {
-    lines.push('  (none — checked, and there are none)');
-  }
-  for (const ask of waiting) {
-    lines.push(`  ${ask.id} · ${priorityLabel(ask.priority)} · ${ask.title}`);
-    lines.push(`      if he never answers: ${ask.defaultAction}`);
-  }
-
-  lines.push('');
-  lines.push(
-    'These are still OPEN asks: every one of them must appear in the next report’s priorAsks (D4).',
-  );
-  return lines.join('\n');
+  return spacedList([
+    wrapHanging(
+      paint(
+        `INBOX for ${view.threadId} · ${view.threadTitle}`,
+        ['bold'],
+        color,
+      ),
+      {hang: HEADER_COLUMN, indent: 0, width},
+    ),
+    sectionHeader('WHAT JUSTIN DECIDED', {color, emoji: '💬'}),
+    ...decided,
+    sectionHeader('HIS NOTE', {color, emoji: '📝'}),
+    note,
+    sectionHeader('STILL WAITING ON HIM', {color, emoji: '🙋'}),
+    ...stillWaiting,
+    wrapHanging(
+      'These are still OPEN asks: every one of them must appear in the next report’s priorAsks (D4).',
+      {hang: HEADER_COLUMN, indent: HEADER_COLUMN, width},
+    ),
+  ]);
 }
 
 /**
@@ -340,7 +393,9 @@ export async function runThreadInbox(
   };
 
   console.log(
-    options.json === true ? JSON.stringify(view, null, 2) : renderInbox(view),
+    options.json === true
+      ? JSON.stringify(view, null, 2)
+      : renderInbox(view, outputStyle()),
   );
   return readFailed ? 1 : 0;
 }

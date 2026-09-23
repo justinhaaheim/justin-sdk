@@ -33,9 +33,9 @@ import {join, resolve} from 'path';
  * The load-bearing contract. `cannotCheck` exists so that "I measured, and there is loss" and "I could not measure" can never be confused for one another (critical rule 6).
  */
 export const BEADS_REBUILD_DRYRUN_EXIT = {
+  cannotCheck: 2,
   safe: 0,
   wouldLoseContent: 1,
-  cannotCheck: 2,
 } as const;
 
 export interface BeadsRebuildDryRunOptions {
@@ -140,8 +140,8 @@ function rebuild(brBin: string, scratch: string, work: string): string {
   try {
     proc = Bun.spawnSync([brBin, 'sync', '--import-only'], {
       cwd: scratch,
-      stdout: 'pipe',
       stderr: 'pipe',
+      stdout: 'pipe',
     });
   } catch (error) {
     cannotCheck(`could not run \`${brBin}\`: ${String(error)}`);
@@ -206,8 +206,8 @@ function renderEmpty(value: string | null): string {
 type DriftDirection = 'db-newer' | 'jsonl-newer' | 'unknown';
 
 interface Finding {
-  message: string;
   direction: DriftDirection;
+  message: string;
 }
 
 /** A normalized timestamp this tool is willing to ORDER: plain UTC, fixed-width down to the seconds, fraction without trailing zeros — the exact shape `norm` emits, so lexicographic order is chronological order. Anything else (absent, empty, a non-UTC offset, a non-timestamp) is null, meaning the direction cannot be established. */
@@ -225,8 +225,8 @@ function comparableStamp(value: unknown): string | null {
  * CAVEAT, stated because it is load-bearing: this trusts `updated_at` monotonicity. A writer that ever set that field backwards would make the direction call WRONG, and a wrong direction call is worse than no direction call — it is the bug this function exists to fix, pointed the other way. So every case that cannot be established returns 'unknown', which suppresses the flush advice rather than guessing at it.
  */
 function issueDirection(oldRow: Row, newRow: Row): DriftDirection {
-  const dbStamp = comparableStamp(oldRow['updated_at']);
-  const jsonlStamp = comparableStamp(newRow['updated_at']);
+  const dbStamp = comparableStamp(oldRow.updated_at);
+  const jsonlStamp = comparableStamp(newRow.updated_at);
   if (dbStamp == null || jsonlStamp == null) return 'unknown';
   if (dbStamp === jsonlStamp) return 'unknown';
   return dbStamp > jsonlStamp ? 'db-newer' : 'jsonl-newer';
@@ -241,9 +241,9 @@ const DIRECTION_TAG: Record<DriftDirection, string> = {
 
 interface Side {
   cols: string[];
-  issues: Map<string, Row>;
   comments: Map<string, Set<string>>;
   deps: Map<string, Set<string>>;
+  issues: Map<string, Row>;
   labels: Map<string, Set<string>>;
   tables: Map<string, number>;
 }
@@ -333,18 +333,18 @@ function read(path: string, label: string): Side {
 }
 
 interface Comparison {
-  /** Content the rebuild would DESTROY, each carrying which side is newer. Non-empty means not safe. */
-  fatal: Finding[];
-  /** Beads TOMBSTONED in the database and still live in the JSONL: the rebuild does not lose these, it RESURRECTS them. Called out separately because "brings a deleted bead back" reads nothing like "loses a field", and a reader skimming a wall of FATALs would miss it. */
-  resurrections: string[];
-  /** Content the rebuild would restore or add. Informational. */
-  restored: string[];
-  /** Table-level row-count changes — derived caches and audit trails. */
-  notes: string[];
-  /** Fields that are empty on BOTH sides but not in the same way (`''` vs `NULL`). Reported so the two states are never conflated; not loss, so never fatal. */
-  emptyStates: string[];
   /** Every table present on either side that was compared by ROW COUNT ONLY, named so that the limit of the comparison is stated rather than assumed. */
   countOnlyTables: string[];
+  /** Fields that are empty on BOTH sides but not in the same way (`''` vs `NULL`). Reported so the two states are never conflated; not loss, so never fatal. */
+  emptyStates: string[];
+  /** Content the rebuild would DESTROY, each carrying which side is newer. Non-empty means not safe. */
+  fatal: Finding[];
+  /** Table-level row-count changes — derived caches and audit trails. */
+  notes: string[];
+  /** Content the rebuild would restore or add. Informational. */
+  restored: string[];
+  /** Beads TOMBSTONED in the database and still live in the JSONL: the rebuild does not lose these, it RESURRECTS them. Called out separately because "brings a deleted bead back" reads nothing like "loses a field", and a reader skimming a wall of FATALs would miss it. */
+  resurrections: string[];
 }
 
 function compare(
@@ -406,7 +406,7 @@ function compare(
   );
   for (const [id, oldRow] of before.issues) {
     const newRow = after.issues.get(id);
-    if (!newRow) continue;
+    if (newRow == null) continue;
     const direction = issueDirection(oldRow, newRow);
     for (const c of compareCols) {
       const a = norm(oldRow[c]);
@@ -713,7 +713,7 @@ export function runBeadsRebuildDryRun(
     }
     if (scratch != null && !keep) {
       try {
-        rmSync(scratch, {recursive: true, force: true});
+        rmSync(scratch, {force: true, recursive: true});
       } catch (error) {
         // A leftover temp directory is not a failed measurement, so it must not change the verdict — but it must not be silent either.
         console.error(

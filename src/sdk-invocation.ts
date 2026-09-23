@@ -89,7 +89,7 @@ export function sdkRunArgv(args: string[]): string[] {
  */
 export type SdkBinResolution =
   | {ok: true; path: string}
-  | {ok: false; detail: string};
+  | {detail: string; ok: false};
 
 export function resolveWorktreeSdkBin(projectRoot: string): SdkBinResolution {
   const path = join(projectRoot, 'node_modules', '.bin', SDK_BIN);
@@ -145,8 +145,8 @@ export function invokesSdk(command: string): boolean {
 
 /** One `{hooks: [{command, type}], matcher?}` entry in a settings.json event array. */
 interface HookEntry {
-  hooks?: unknown;
   [key: string]: unknown;
+  hooks?: unknown;
 }
 
 /**

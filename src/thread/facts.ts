@@ -25,29 +25,29 @@
  * couple the SDK to home-base's layout.
  */
 
-import {closeSync, openSync, readdirSync, readSync, statSync} from 'fs';
-import {basename, dirname, join, resolve} from 'path';
-import {homedir} from 'os';
-import {execFileSync} from 'child_process';
-
-import {readTranscriptFacts} from '../usage-check';
-
 import type {EnvLike} from './paths';
 
-/** How many characters of Justin's last message are kept (D7). */
-export const LAST_USER_MESSAGE_CAP = 1500;
+import {execFileSync} from 'child_process';
+import {readdirSync, statSync} from 'fs';
+import {homedir} from 'os';
+import {basename, dirname, join, resolve} from 'path';
 
-/** Bytes read from the tail of a transcript per attempt, before growing. */
-const TAIL_WINDOW_BYTES = 512 * 1024;
+import {readTranscriptFacts} from '../usage-check';
+import {
+  extractTranscriptMessages,
+  stripHarnessNoise,
+  substantiveUserText,
+} from './transcript-messages';
 
-/** Stop growing the tail window here; a transcript can be 44MB. */
-const MAX_TAIL_BYTES = 8 * 1024 * 1024;
-
-/** Bytes read from the head, for the session's first timestamp. */
-const HEAD_BYTES = 64 * 1024;
-
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * Justin's messages are stored UNCAPPED (home-base-k0b8n K4).
+ *
+ * The cap that used to live here truncated the message on its way to the BEAD,
+ * so the full text was gone forever and `thread search` (k0b8n.2) could never
+ * find a phrase past character 1500. Capping is a RENDERING concern and now
+ * lives in `report-model.ts` — `COMPACT_LAST_MESSAGE_CAP` and
+ * `FULL_LAST_MESSAGE_CAP` — where it only shortens what is printed.
+ */
 
 export interface AheadBehind {
   ahead: number;
@@ -69,17 +69,29 @@ export interface ThreadFacts {
   dirty: boolean | null;
   /** `cli`, `remote`, … as the transcript records it. */
   entrypoint: string | null;
+  /** Justin's FIRST real message, verbatim, noise stripped, uncapped (K2). */
+  firstUserMessage: string | null;
+  /** The timestamp of the record `firstUserMessage` came from. */
+  firstUserMessageAt: string | null;
   headSha: string | null;
   isWorktree: boolean | null;
-  /** Justin's last real message, verbatim, noise stripped, capped. */
+  /** Claude's last response, verbatim, uncapped (K3). */
+  lastAssistantMessage: string | null;
+  /** The timestamp of the record `lastAssistantMessage` came from. */
+  lastAssistantMessageAt: string | null;
+  /** Justin's last real message, verbatim, noise stripped, uncapped (K2). */
   lastUserMessage: string | null;
+  /** The timestamp of the record `lastUserMessage` came from. */
+  lastUserMessageAt: string | null;
   model: string | null;
-  /** ISO timestamp this report was produced. */
-  reportedAt: string;
   /** Repository NAME (the main checkout's directory name), not the worktree's. */
   repo: string | null;
   /** Absolute path of this checkout's top level. */
   repoPath: string | null;
+  /** ISO timestamp this report was produced. */
+  reportedAt: string;
+  /** `cd '<dir>' && claude --resume <id>`, ready to paste (K4). */
+  resumeCommand: string | null;
   sessionId: string | null;
   /** First timestamp in the transcript. */
   startedAt: string | null;
@@ -106,9 +118,9 @@ export function transcriptsRoot(env: EnvLike = process.env): string {
 }
 
 export type TranscriptLookup =
-  | {status: 'found'; path: string}
-  | {status: 'not-found'; searched: string}
-  | {status: 'failed'; error: string};
+  | {path: string; status: 'found'}
+  | {searched: string; status: 'not-found'}
+  | {error: string; status: 'failed'};
 
 /**
  * Find `<sessionId>.jsonl` anywhere under the transcripts root.
@@ -147,119 +159,31 @@ export function findTranscript(
 // Transcript reading
 // ---------------------------------------------------------------------------
 
-interface TranscriptRecord {
-  isMeta?: unknown;
-  isSidechain?: unknown;
-  entrypoint?: unknown;
-  message?: {content?: unknown; model?: unknown; role?: unknown};
-  timestamp?: unknown;
-  toolUseResult?: unknown;
-  type?: unknown;
-}
-
-function readChunk(path: string, start: number, length: number): string {
-  const fd = openSync(path, 'r');
-  try {
-    const buf = Buffer.alloc(length);
-    const bytes = readSync(fd, buf, 0, length, start);
-    return buf.subarray(0, bytes).toString('utf8');
-  } finally {
-    closeSync(fd);
-  }
-}
-
-function parseLines(
-  chunk: string,
-  dropFirst: boolean,
-  dropLast: boolean,
-): TranscriptRecord[] {
-  const lines = chunk.split('\n');
-  const start = dropFirst ? 1 : 0;
-  const end = dropLast ? lines.length - 1 : lines.length;
-  const records: TranscriptRecord[] = [];
-  for (let i = start; i < end; i += 1) {
-    const line = lines[i]?.trim();
-    if (line == null || line === '') continue;
-    try {
-      records.push(JSON.parse(line) as TranscriptRecord);
-    } catch {
-      // A partially-written trailing line is normal on a live transcript.
-    }
-  }
-  return records;
-}
-
 function asString(value: unknown): string | null {
   return typeof value === 'string' && value !== '' ? value : null;
 }
 
 /**
- * Noise Claude Code injects INTO a user turn. None of it is something Justin
- * typed, and every one of them has been observed sitting in front of a real
- * message rather than replacing it — so these are stripped from the text, not
- * used to reject the record.
- */
-const NOISE_BLOCKS = [
-  /<system-reminder>[\s\S]*?<\/system-reminder>/g,
-  /<task-notification>[\s\S]*?<\/task-notification>/g,
-  /<local-command-stdout>[\s\S]*?<\/local-command-stdout>/g,
-  /<command-name>[\s\S]*?<\/command-name>/g,
-  /<command-message>[\s\S]*?<\/command-message>/g,
-  /<command-args>[\s\S]*?<\/command-args>/g,
-  /<user-prompt-submit-hook>[\s\S]*?<\/user-prompt-submit-hook>/g,
-];
-
-/**
- * An UNCLOSED injected block at the end of the text. A system-reminder is
- * sometimes the last thing in a record and its closing tag lands in the next
- * one; without this the whole reminder would be reported as Justin's message.
- */
-const TRAILING_OPEN_BLOCK = /<(system-reminder|task-notification)>[\s\S]*$/;
-
-/** Strip everything Claude Code injected, leaving only what Justin typed. */
-export function stripInjectedNoise(text: string): string {
-  let out = text;
-  for (const pattern of NOISE_BLOCKS) out = out.replace(pattern, '');
-  out = out.replace(TRAILING_OPEN_BLOCK, '');
-  return out.trim();
-}
-
-/**
- * The human-authored text of one user record, or null when it has none.
+ * Strip everything Claude Code injected, leaving only what Justin typed.
  *
- * `tool_result` blocks are tool output wearing a user record's clothes — they
- * are the bulk of the `type: "user"` records in any real transcript — so a
- * record is read only for its `text` blocks, and a record carrying
- * `toolUseResult` is skipped outright. `isMeta` marks Claude Code's own
- * injections (the session preamble, `/clear`, hook envelopes).
+ * The implementation moved to `transcript-messages.ts` (K1: one noise list, one
+ * definition of substantive, shared by the report path and the backfill). This
+ * name is kept because it is the one the existing callers and tests import.
  */
-export function userMessageText(record: TranscriptRecord): string | null {
-  if (record.type !== 'user') return null;
-  if (record.isMeta === true) return null;
-  if (record.toolUseResult != null) return null;
-  const content = record.message?.content;
-  let raw: string;
-  if (typeof content === 'string') {
-    raw = content;
-  } else if (Array.isArray(content)) {
-    const parts: string[] = [];
-    for (const block of content) {
-      if (block == null || typeof block !== 'object') continue;
-      const typed = block as {text?: unknown; type?: unknown};
-      // Anything that is not a text block is tool traffic or an image.
-      if (typed.type !== 'text') return null;
-      if (typeof typed.text === 'string') parts.push(typed.text);
-    }
-    raw = parts.join('\n');
-  } else {
-    return null;
-  }
-  const stripped = stripInjectedNoise(raw);
-  return stripped === '' ? null : stripped;
-}
+export const stripInjectedNoise = stripHarnessNoise;
+
+/** The human-authored text of one user record, or null. See K2. */
+export const userMessageText = substantiveUserText;
 
 export interface TranscriptScan {
   entrypoint: string | null;
+  /** Justin's FIRST real message, verbatim and UNCAPPED. */
+  firstUserMessage: string | null;
+  firstUserMessageAt: string | null;
+  /** Claude's last response, verbatim and UNCAPPED (K3). */
+  lastAssistantMessage: string | null;
+  lastAssistantMessageAt: string | null;
+  /** Justin's last real message, verbatim and UNCAPPED (K2/K4). */
   lastUserMessage: string | null;
   /**
    * The ISO timestamp of the record `lastUserMessage` came from, or null when
@@ -271,86 +195,46 @@ export interface TranscriptScan {
    * can never describe different messages.
    */
   lastUserMessageAt: string | null;
+  /** One line per field the extractor could not measure (rule 7). */
+  messageFailures: string[];
   model: string | null;
+  /** `cd '<dir>' && claude --resume <id>` (K4), or null. */
+  resumeCommand: string | null;
   startedAt: string | null;
 }
 
 /**
- * Scan a transcript for the four fields only it can answer.
+ * Scan a transcript for the fields only it can answer.
  *
- * The tail is read first and GROWN until a user message is found or the file is
- * exhausted, because a long tool-driven stretch can push Justin's last message
- * a long way back. The head is read once, for the session's first timestamp.
- *
- * Sidechain records are skipped: they belong to subagents, and a subagent's
- * prompt is written by Claude, not by Justin.
+ * A THIN ADAPTER over `extractTranscriptMessages` since k0b8n.1 — the tail-
+ * window-growing backward scan that used to live here is gone, and with it the
+ * two ways this repo had of deciding what counts as one of Justin's messages.
+ * The extractor makes one forward streaming pass, which also gets the FIRST
+ * message and the last assistant response for free; the old reader could only
+ * ever have answered "the last one".
  */
 export function scanTranscriptForThread(path: string): TranscriptScan {
-  const scan: TranscriptScan = {
-    entrypoint: null,
-    lastUserMessage: null,
-    lastUserMessageAt: null,
-    model: null,
-    startedAt: null,
+  const messages = extractTranscriptMessages(path);
+  return {
+    entrypoint: messages.entrypoint,
+    firstUserMessage: messages.firstUserMessage,
+    firstUserMessageAt: messages.firstUserMessageAt,
+    lastAssistantMessage: messages.lastAssistantMessage,
+    lastAssistantMessageAt: messages.lastAssistantMessageAt,
+    lastUserMessage: messages.lastUserMessage,
+    lastUserMessageAt: messages.lastUserMessageAt,
+    messageFailures: messages.failures,
+    model: messages.model,
+    resumeCommand: messages.resumeCommand,
+    startedAt: messages.firstTimestamp,
   };
-
-  const size = statSync(path).size;
-
-  let tailBytes = Math.min(TAIL_WINDOW_BYTES, Math.max(size, 1));
-  for (;;) {
-    const readWholeFile = size <= tailBytes;
-    const chunk = readChunk(
-      path,
-      readWholeFile ? 0 : size - tailBytes,
-      readWholeFile ? size : tailBytes,
-    );
-    const records = parseLines(chunk, !readWholeFile, false);
-    for (let i = records.length - 1; i >= 0; i -= 1) {
-      const record = records[i];
-      if (record == null) continue;
-      if (record.isSidechain === true) continue;
-      scan.entrypoint ??= asString(record.entrypoint);
-      if (scan.model == null && record.type === 'assistant') {
-        scan.model = asString(record.message?.model);
-      }
-      if (scan.lastUserMessage == null) {
-        const text = userMessageText(record);
-        if (text != null) {
-          scan.lastUserMessage =
-            text.length > LAST_USER_MESSAGE_CAP
-              ? text.slice(0, LAST_USER_MESSAGE_CAP)
-              : text;
-          // Same record, same pass — see the field's comment. A record with no
-          // usable timestamp leaves this null rather than borrowing a
-          // neighbour's, because the Stop hook compares it to a clock.
-          scan.lastUserMessageAt = asString(record.timestamp);
-        }
-      }
-    }
-    const exhausted = readWholeFile || tailBytes >= MAX_TAIL_BYTES;
-    if (scan.lastUserMessage != null || exhausted) break;
-    tailBytes = Math.min(tailBytes * 4, MAX_TAIL_BYTES, size);
-  }
-
-  const headRecords = parseLines(
-    readChunk(path, 0, Math.min(size, HEAD_BYTES)),
-    false,
-    size > HEAD_BYTES,
-  );
-  for (const record of headRecords) {
-    scan.startedAt ??= asString(record.timestamp);
-    scan.entrypoint ??= asString(record.entrypoint);
-    if (scan.startedAt != null && scan.entrypoint != null) break;
-  }
-
-  return scan;
 }
 
 // ---------------------------------------------------------------------------
 // Git
 // ---------------------------------------------------------------------------
 
-type GitRead = {ok: true; value: string} | {ok: false; error: string};
+type GitRead = {ok: true; value: string} | {error: string; ok: false};
 
 function git(cwd: string, args: string[]): GitRead {
   try {
@@ -482,12 +366,12 @@ export function readGitFacts(cwd: string): GitFacts {
 export interface CollectFactsOptions {
   cwd?: string;
   env?: EnvLike;
+  /** Injectable clock, so the renderer snapshot tests are deterministic. */
+  now?: Date;
   /** Overrides CLAUDE_CODE_SESSION_ID (the `--session` flag). */
   sessionId?: string | null;
   /** Overrides transcript discovery entirely (the `--transcript` flag). */
   transcriptPath?: string | null;
-  /** Injectable clock, so the renderer snapshot tests are deterministic. */
-  now?: Date;
 }
 
 /**
@@ -537,9 +421,15 @@ export function collectThreadFacts(
   let tokensAtStop: number | null = null;
   let scan: TranscriptScan = {
     entrypoint: null,
+    firstUserMessage: null,
+    firstUserMessageAt: null,
+    lastAssistantMessage: null,
+    lastAssistantMessageAt: null,
     lastUserMessage: null,
     lastUserMessageAt: null,
+    messageFailures: [],
     model: null,
+    resumeCommand: null,
     startedAt: null,
   };
   if (transcriptPath != null) {
@@ -564,17 +454,18 @@ export function collectThreadFacts(
     }
     try {
       scan = scanTranscriptForThread(transcriptPath);
+      // The extractor already names every field it could not measure — the
+      // messages, the resume command, any unparseable line. Adopting its list
+      // wholesale is what keeps D7's promise that a null here always arrives
+      // with a reason, without this function second-guessing which nulls the
+      // extractor meant.
+      autofillFailures.push(...scan.messageFailures);
     } catch (error) {
       autofillFailures.push(`transcript scan: ${errorMessage(error)}`);
     }
-    if (scan.lastUserMessage == null) {
-      autofillFailures.push(
-        `lastUserMessage: no human-authored user record found in ${transcriptPath}`,
-      );
-    }
   } else {
     autofillFailures.push(
-      'tokensAtStop, lastUserMessage, startedAt, model: no transcript to read',
+      'tokensAtStop, firstUserMessage, lastUserMessage, lastAssistantMessage, resumeCommand, startedAt, model: no transcript to read',
     );
   }
 
@@ -588,13 +479,19 @@ export function collectThreadFacts(
     cwd,
     dirty: gitFacts.dirty,
     entrypoint: scan.entrypoint,
+    firstUserMessage: scan.firstUserMessage,
+    firstUserMessageAt: scan.firstUserMessageAt,
     headSha: gitFacts.headSha,
     isWorktree: gitFacts.isWorktree,
+    lastAssistantMessage: scan.lastAssistantMessage,
+    lastAssistantMessageAt: scan.lastAssistantMessageAt,
     lastUserMessage: scan.lastUserMessage,
+    lastUserMessageAt: scan.lastUserMessageAt,
     model: scan.model,
-    reportedAt: now.toISOString(),
     repo: gitFacts.repo,
     repoPath: gitFacts.repoPath,
+    reportedAt: now.toISOString(),
+    resumeCommand: scan.resumeCommand,
     sessionId,
     startedAt: scan.startedAt,
     tokensAtStop,

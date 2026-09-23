@@ -72,12 +72,11 @@ export function stepTypescriptDevDeps(
     return false;
   }
 
-  const devDeps = ((pkg.devDependencies as
-    | Record<string, string>
-    | undefined) ?? {}) as Record<string, string>;
+  const devDeps =
+    (pkg.devDependencies as Record<string, string> | undefined) ?? {};
   let modified = false;
 
-  const targets: Array<{name: 'typescript' | '@types/bun'; version: string}> = [
+  const targets: {name: 'typescript' | '@types/bun'; version: string}[] = [
     {name: 'typescript', version: PINNED.typescript},
     {name: '@types/bun', version: PINNED['@types/bun']},
   ];
@@ -178,8 +177,7 @@ export function stepSignalSourceTsScript(projectRoot: string): boolean {
     return false;
   }
 
-  const scripts = ((pkg.scripts as Record<string, string> | undefined) ??
-    {}) as Record<string, string>;
+  const scripts = (pkg.scripts as Record<string, string> | undefined) ?? {};
 
   if (scripts['signal-source:TS'] != null) {
     success(
@@ -200,15 +198,15 @@ export function stepSignalSourceTsScript(projectRoot: string): boolean {
 // ---------------------------------------------------------------------------
 
 export interface TsconfigSetupOptions {
-  /** Project root (defaults to cwd) */
-  projectRoot?: string;
-  /** Suppress non-error output (for tests / nested invocation) */
-  quiet?: boolean;
   /**
    * Force-overwrite files that already exist and differ from the SDK's
    * current expected state (currently: tsconfig.json + devDep versions).
    */
   force?: boolean;
+  /** Project root (defaults to cwd) */
+  projectRoot?: string;
+  /** Suppress non-error output (for tests / nested invocation) */
+  quiet?: boolean;
   /**
    * The remote the SDK pin tag is verified against, forwarded to base-setup.
    * Tests point it at a local bare repo so the install is hermetic; production

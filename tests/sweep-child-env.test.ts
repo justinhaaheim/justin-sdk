@@ -48,7 +48,9 @@ function newSandbox(): Sandbox {
 function childSees(variable: string): {exitCode: number | null; value: string} {
   const box = newSandbox();
   const original = console.log;
-  console.log = () => {};
+  console.log = () => {
+    /* swallowed for the duration of this test */
+  };
   try {
     const result = measureBaseline(['printenv', variable], box.path);
     return {exitCode: result.exitCode, value: result.output};

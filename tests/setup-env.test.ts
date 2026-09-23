@@ -34,8 +34,8 @@ import {
   probeSubmodules,
   resolvePrimaryCheckout,
   setupEnv,
-  WORKTREE_INCLUDE_FILE,
   type StepReport,
+  WORKTREE_INCLUDE_FILE,
 } from '../src/setup-env';
 import {worktreeNew} from '../src/worktree-new';
 import {
@@ -147,15 +147,19 @@ describe('detectPackageManager', () => {
 describe('discoverHydrationScripts', () => {
   test('preserves package.json declaration order, not label order', () => {
     const sb = track(createSandbox());
+    // Built from PAIRS, not an object literal: declaration order is the thing
+    // under test here, and an object literal's key order is something
+    // formatters and the sort-keys lint rule will happily rewrite — which
+    // silently turns this into a test of nothing.
     sb.writeFile(
       'package.json',
       JSON.stringify({
-        scripts: {
-          'setup-env:ZEBRA': 'true',
-          build: 'true',
-          'setup-env:ALPHA': 'true',
-          'setup-env:MIDDLE': 'true',
-        },
+        scripts: Object.fromEntries([
+          ['setup-env:ZEBRA', 'true'],
+          ['build', 'true'],
+          ['setup-env:ALPHA', 'true'],
+          ['setup-env:MIDDLE', 'true'],
+        ]),
       }),
     );
     expect(discoverHydrationScripts(sb.path).map((s) => s.label)).toEqual([
@@ -525,6 +529,11 @@ describe('formatMiseFailureDetail', () => {
   });
 });
 
+function restoreEnv(name: string, value: string | undefined): void {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+}
+
 // ---------------------------------------------------------------------------
 // The MISE step verifies its EFFECT, not its exit code (home-base-e0ohc)
 // ---------------------------------------------------------------------------
@@ -598,11 +607,6 @@ function withMiseShim<T>(
     restoreEnv('MISE_SHIM_LOG', saved.log);
     restoreEnv('MISE_SHIM_MARKER', saved.marker);
   }
-}
-
-function restoreEnv(name: string, value: string | undefined): void {
-  if (value === undefined) delete process.env[name];
-  else process.env[name] = value;
 }
 
 describe('the MISE step', () => {
@@ -702,12 +706,12 @@ describe('worktreeSetup', () => {
     expect(result.exitCode).toBe(0);
     expect(result.primary).toBe(primary);
     expect(statuses(result.steps)).toEqual({
-      RESOLVE: 'done',
-      MISE: 'skipped',
-      SUBMODULES: 'skipped',
-      INSTALL: 'skipped',
-      WORKTREEINCLUDE: 'skipped',
       HYDRATE: 'skipped',
+      INSTALL: 'skipped',
+      MISE: 'skipped',
+      RESOLVE: 'done',
+      SUBMODULES: 'skipped',
+      WORKTREEINCLUDE: 'skipped',
     });
     // AC2: the overwhelming majority of repos have no submodules, and they must
     // see a reason rather than a bare new line in the report.
@@ -859,12 +863,14 @@ describe('worktreeSetup', () => {
 
   describe('declaration order', () => {
     // ZEBRA is declared before ALPHA on purpose: a label-sorted runner (like
-    // fix-source:) would invert them.
-    const scripts = {
-      'setup-env:ZEBRA': "sh -c 'echo zebra >> order.log'",
-      'setup-env:ALPHA': "sh -c 'echo alpha >> order.log'",
-      'worktree-source:native:RETIRED': "sh -c 'echo retired >> order.log'",
-    };
+    // fix-source:) would invert them. Built from PAIRS rather than an object
+    // literal so that deliberate order cannot be rewritten by a formatter or
+    // by the sort-keys lint rule.
+    const scripts = Object.fromEntries([
+      ['setup-env:ZEBRA', "sh -c 'echo zebra >> order.log'"],
+      ['setup-env:ALPHA', "sh -c 'echo alpha >> order.log'"],
+      ['worktree-source:native:RETIRED', "sh -c 'echo retired >> order.log'"],
+    ]);
 
     function fixture(sb: Sandbox): {linked: string; primary: string} {
       const primary = initPrimary(sb, {
@@ -892,8 +898,8 @@ describe('worktreeSetup', () => {
       // Never executed — order.log has only the flat scripts, declared order.
       expect(order(linked)).toEqual(['zebra', 'alpha']);
       expect(statuses(result.steps)).toMatchObject({
-        'HYDRATE:setup-env:ZEBRA': 'done',
         'HYDRATE:setup-env:ALPHA': 'done',
+        'HYDRATE:setup-env:ZEBRA': 'done',
       });
       // The prefix is retired, so there is no step for it at all — not a
       // skipped one, not a done one.
@@ -908,13 +914,16 @@ describe('worktreeSetup', () => {
   test('a failing hydration script stops the run and later scripts do not run', () => {
     const sb = track(createSandbox());
     const primary = initPrimary(sb, {
+      // Pairs, not an object literal: FIRST must run before BOOM and BOOM
+      // before NEVER, and that order is exactly what an object literal's keys
+      // are liable to lose to a formatter or the sort-keys lint rule.
       'package.json': JSON.stringify({
         name: 'p',
-        scripts: {
-          'setup-env:FIRST': "sh -c 'echo first >> order.log'",
-          'setup-env:BOOM': 'false',
-          'setup-env:NEVER': "sh -c 'echo never >> order.log'",
-        },
+        scripts: Object.fromEntries([
+          ['setup-env:FIRST', "sh -c 'echo first >> order.log'"],
+          ['setup-env:BOOM', 'false'],
+          ['setup-env:NEVER', "sh -c 'echo never >> order.log'"],
+        ]),
       }),
     });
     const linked = addLinkedWorktree(

@@ -18,8 +18,6 @@
  * regression test for exactly this.
  */
 
-import {execFileSync} from 'child_process';
-
 import type {
   BranchDivergence,
   BranchTip,
@@ -30,6 +28,8 @@ import type {
   HiddenTip,
   WorktreeEntry,
 } from './types';
+
+import {execFileSync} from 'child_process';
 
 const DEFAULT_SINCE_DAYS = 30;
 
@@ -256,7 +256,7 @@ export function getBranchTips(
   const worktreeByBranch = new Map(
     (worktrees ?? [])
       .filter((w) => w.branch != null)
-      .map((w) => [w.branch as string, w.path]),
+      .map((w) => [w.branch!, w.path]),
   );
 
   const local = new Map<string, BranchTip>();

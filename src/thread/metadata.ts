@@ -14,14 +14,14 @@
  * that was measured too.
  */
 
+import type {ThreadFacts} from './facts';
+import type {ThreadReportPayload} from './schema';
+
 import {
   ASK_PRIORITY_BLOCKING,
   ASK_PRIORITY_DEFAULT,
   THREAD_SCHEMA_VERSION,
 } from './schema';
-
-import type {ThreadFacts} from './facts';
-import type {ThreadReportPayload} from './schema';
 
 export interface ThreadMetadataInput {
   askIds: (string | null)[];
@@ -59,20 +59,34 @@ export function buildThreadMetadata(
         .length +
       carriedOpenAsks.filter((ask) => ask.priority === ASK_PRIORITY_BLOCKING)
         .length,
-    carriedAskIds: carriedOpenAsks.map((ask) => ask.id),
     branch: facts.branch,
+    carriedAskIds: carriedOpenAsks.map((ask) => ask.id),
     continuesFrom: payload.continuesFrom ?? null,
     cwd: facts.cwd,
     deviations: payload.deviations,
     dirty: facts.dirty,
     entrypoint: facts.entrypoint,
+    // The three messages, VERBATIM AND UNCAPPED (home-base-k0b8n K4). They are
+    // what makes a thread bead searchable and what `thread show` prints; the
+    // renderers cap what they PRINT, nothing caps what is stored.
+    firstUserMessage: facts.firstUserMessage,
+    firstUserMessageAt: facts.firstUserMessageAt,
     goal: payload.goal,
     handoffPresent: payload.handoff != null && payload.handoff !== '',
     headSha: facts.headSha,
     instruction: payload.instruction,
     isWorktree: facts.isWorktree,
+    lastAssistantMessage: facts.lastAssistantMessage,
+    lastAssistantMessageAt: facts.lastAssistantMessageAt,
     lastUserMessage: facts.lastUserMessage,
+    lastUserMessageAt: facts.lastUserMessageAt,
     mergeState: payload.workProduct.merged,
+    // WHO LAST WROTE THE VERBATIM MESSAGES (k0b8n.3, K5). `thread backfill`
+    // stamps 'backfill' when it fills in messages a bead never had; a real
+    // report overwrites both the messages and this key, because `bd update
+    // --metadata` MERGES and a stale 'backfill' here would keep claiming the
+    // transcript scanner wrote what the report just rewrote.
+    messagesSource: 'report',
     model: facts.model,
     nextStep: payload.nextStep,
     // The WHOLE thread's open asks after this report: the ones it just created
@@ -80,12 +94,21 @@ export function buildThreadMetadata(
     openAskCount: createdIds.length + carriedOpenAsks.length,
     pr: payload.workProduct.pr,
     progressPercent: payload.progress.percent,
-    reportCount,
-    reportedAt: facts.reportedAt,
     repo: facts.repo,
     repoPath: facts.repoPath,
+    reportCount,
+    reportedAt: facts.reportedAt,
+    // Copy-pasteable, and measured rather than composed by a reader: the cwd it
+    // cds to is the one whose slug IS this transcript's project directory (K4).
+    resumeCommand: facts.resumeCommand,
     schemaVersion: THREAD_SCHEMA_VERSION,
     sessionId: facts.sessionId,
+    // WHAT MADE THIS BEAD (k0b8n.3, K5). Written on every report precisely so
+    // that a bead `thread backfill` created is no longer a backfill bead once
+    // its session reports: the board hides `backfill` rows, and the merge
+    // semantics of `--metadata` mean an omitted key would leave the row hidden
+    // forever.
+    source: 'report',
     startedAt: facts.startedAt,
     stopReasonDetail: payload.stopReason.detail,
     stopReasonKind: payload.stopReason.kind,
@@ -130,31 +153,50 @@ export function buildStartMetadata(input: {
     autofillFailures: facts.autofillFailures,
     beadsTouched: [],
     blockingAskCount: 0,
-    carriedAskIds: [],
     branch: facts.branch,
+    carriedAskIds: [],
     continuesFrom: null,
     cwd: facts.cwd,
     deviations: [],
     dirty: facts.dirty,
     entrypoint: facts.entrypoint,
+    // MEASURED even at session start, not null-because-early: the transcript
+    // already exists when the SessionStart hook runs (D7 finds it by UUID), and
+    // a session that dies without ever reporting is exactly the one whose first
+    // message is the only record of what it was for.
+    firstUserMessage: facts.firstUserMessage,
+    firstUserMessageAt: facts.firstUserMessageAt,
     goal: null,
     handoffPresent: false,
     headSha: facts.headSha,
     instruction: null,
     isWorktree: facts.isWorktree,
+    lastAssistantMessage: facts.lastAssistantMessage,
+    lastAssistantMessageAt: facts.lastAssistantMessageAt,
     lastUserMessage: facts.lastUserMessage,
+    lastUserMessageAt: facts.lastUserMessageAt,
     mergeState: null,
+    /** See buildThreadMetadata: 'start' means the SessionStart hook read them. */
+    messagesSource: 'start',
     model: facts.model,
     nextStep: null,
     openAskCount: 0,
     pr: null,
     progressPercent: null,
-    reportCount: 0,
-    reportedAt: null,
     repo: facts.repo,
     repoPath: facts.repoPath,
+    reportCount: 0,
+    reportedAt: null,
+    resumeCommand: facts.resumeCommand,
     schemaVersion: THREAD_SCHEMA_VERSION,
     sessionId: facts.sessionId,
+    /**
+     * A REAL session made this bead, not the backfill (k0b8n.3, K5). It is not
+     * 'report' — nothing has been reported yet — and it is not absent, because
+     * `thread backfill` treats anything that is not 'backfill' as a bead whose
+     * body belongs to the report path and may only have its messages filled in.
+     */
+    source: 'start',
     // When the SESSION began where that is readable from the transcript, and
     // otherwise when the hook ran. Distinguished in `startedAtSource` rather
     // than silently conflated: "the transcript says 09:04" and "I saw this

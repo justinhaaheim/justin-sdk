@@ -52,30 +52,45 @@
 import {createInterface} from 'readline/promises';
 
 import {
+  BODY_COLUMN,
+  HEADER_COLUMN,
+  type OutputStyle,
+  outputStyle,
+  pad,
+  paint,
+  PLAIN_STYLE,
+  wrapHanging,
+} from '../cli-style';
+import {
   addComment,
+  type BdContext,
+  type BdIssue,
   describeBdFailure,
   EXPORT_UNSTAGED_WARNING,
   listOpenAsks,
   mergeMetadata,
-  type BdContext,
-  type BdIssue,
 } from './bd';
 import {commitThreadsRepo, describeCommit} from './commit';
-import {contextFor, resolveThread, type ThreadRef} from './resolve';
 import {
   compareAsksForNumbering,
   numberingFieldsOf,
   optionLetter,
   priorityLabel,
 } from './render';
+import {
+  ansiFromReportText,
+  layRestatedAsk,
+  priorityStyles,
+} from './render-ansi';
+import {contextFor, resolveThread, type ThreadRef} from './resolve';
 
 /** What one ask needs in order to be asked. Everything comes from the bead. */
 export interface AskView {
   /** `metadata.askIndex`: its place in the report that created it (F12). */
   askIndex: number | null;
+  defaultAction: string;
   /** The ask bead's rendered description: kind tag, context, options, default. */
   description: string;
-  defaultAction: string;
   id: string;
   kind: string;
   optionCount: number;
@@ -142,7 +157,7 @@ export interface WalkResult {
 
 /** Read an ask bead into the shape the walk needs. Unreadable metadata degrades loudly. */
 export function askViewOf(issue: BdIssue): AskView {
-  const meta = (issue.metadata ?? {}) as Record<string, unknown>;
+  const meta = issue.metadata ?? {};
   const numbering = numberingFieldsOf(meta);
   return {
     askIndex: numbering.askIndex,
@@ -257,11 +272,17 @@ export async function walkAsks(
   asks: readonly AskView[],
   io: AnswerIo,
   writer: AnswerWriter,
+  style: OutputStyle = PLAIN_STYLE,
 ): Promise<WalkResult> {
+  const {color, width} = style;
   const decisions: {ask: AskView; decision: AskDecision; recorded: boolean}[] =
     [];
   const failures: WriteFailure[] = [];
   const ordered = orderAsks(asks);
+  // What follows an ask — the answer echoed, the write's outcome — sits at the
+  // body column under it (K11 rule 2).
+  const result = (text: string): string =>
+    wrapHanging(text, {hang: BODY_COLUMN + 2, indent: BODY_COLUMN, width});
 
   for (const [index, ask] of ordered.entries()) {
     io.print('');
@@ -273,16 +294,28 @@ export async function walkAsks(
     const from =
       ask.reportCount == null ? '' : ` · from report #${ask.reportCount}`;
     io.print(
-      `── ${index + 1}/${ordered.length} · ${ask.id} · ${priorityLabel(ask.priority)}${from} ──`,
+      `${pad(HEADER_COLUMN)}${paint(`── ${index + 1}/${ordered.length} · ${ask.id} ·`, ['bold'], color)} ${paint(priorityLabel(ask.priority), priorityStyles(ask.priority), color)}${paint(`${from} ──`, ['bold'], color)}`,
     );
-    io.print(ask.description === '' ? ask.title : ask.description);
+    io.print('');
+    // The ask bead's description at the body column, a blank line between
+    // every paragraph and every option, the recommended option green — the
+    // same layout `inbox` and `prepare` give it (K11).
+    for (const line of layRestatedAsk(
+      ask.description === '' ? ask.title : ask.description,
+      style,
+      BODY_COLUMN,
+    )) {
+      io.print(line);
+    }
     io.print('');
     const raw = await io.line(promptFor(ask));
     const decision = decisionFor(ask, raw);
     io.print(
-      decision.kind === 'skipped'
-        ? `   → skipped; Claude will: ${ask.defaultAction}`
-        : `   → answer: ${decision.text}`,
+      result(
+        decision.kind === 'skipped'
+          ? `→ skipped; Claude will: ${ask.defaultAction}`
+          : `→ answer: ${decision.text}`,
+      ),
     );
     // AWAITED, here, before the next ask is printed. Firing it off unawaited
     // would hide the latency completely, and would also mean a walk that ends
@@ -290,9 +323,17 @@ export async function walkAsks(
     const outcome = await writer.ask(ask, decision);
     decisions.push({ask, decision, recorded: outcome.ok});
     if (outcome.ok) {
-      io.print(`   ✓ recorded ${ask.id}`);
+      io.print(result(paint(`✓ recorded ${ask.id}`, ['green'], color)));
     } else {
-      io.print(`   🚨 NOT recorded on ${ask.id} — ${outcome.detail}`);
+      io.print(
+        result(
+          paint(
+            `🚨 NOT recorded on ${ask.id} — ${outcome.detail}`,
+            ['bold', 'red'],
+            color,
+          ),
+        ),
+      );
       failures.push({
         detail: outcome.detail,
         label: ask.id,
@@ -338,7 +379,7 @@ export async function walkAsks(
  * wrong moment would hang the command — the exact failure this file refuses to
  * ship.
  */
-function createTerminalIo(): {io: AnswerIo; close: () => void} {
+function createTerminalIo(): {close: () => void; io: AnswerIo} {
   const rl = createInterface({input: process.stdin, output: process.stdout});
   let closed = false;
   rl.on('close', () => {
@@ -392,113 +433,8 @@ export interface AnswerOptions extends ThreadRef {
   autoCommit?: boolean;
   /** Injected by tests; the real command uses the readline adapter. */
   io?: AnswerIo;
-}
-
-export async function runThreadAnswer(
-  options: AnswerOptions = {},
-): Promise<number> {
-  const env = options.env ?? process.env;
-  const ctx: BdContext = contextFor(env);
-
-  const resolved = await resolveThread(ctx, options);
-  if (!resolved.ok) {
-    console.error(`thread answer: ${resolved.message}`);
-    return 2;
-  }
-  const thread = resolved.issue;
-
-  const asks = await listOpenAsks(ctx, thread.id);
-  if (!asks.ok) {
-    // NOT "there is nothing to answer": we could not look.
-    console.error(
-      `thread answer: could not read the asks on ${thread.id} — ${describeBdFailure(asks.failure)}`,
-    );
-    return 1;
-  }
-
-  // The report first, so Justin knows what he is answering. D10 put the whole
-  // rendered report in `notes` precisely so it can be replayed here.
-  console.log(
-    thread.notes == null || thread.notes === ''
-      ? `THREAD ${thread.id} · ${thread.title ?? '(no title)'} (no rendered report on this bead)`
-      : thread.notes,
-  );
-
-  if (asks.value.length === 0) {
-    console.log('');
-    console.log(
-      `No open asks on ${thread.id} — checked, and there are none. Nothing to answer.`,
-    );
-    return 0;
-  }
-
-  let io = options.io ?? null;
-  let closeIo: (() => void) | null = null;
-  if (io == null) {
-    // The guard the vetted library did not provide. A non-TTY run must fail
-    // loudly and immediately: this command blocks on a human, and a background
-    // or piped invocation that waited would hang a session forever.
-    if (process.stdin.isTTY !== true) {
-      console.error(
-        'thread answer: stdin is not a terminal, and this command has to ask you things. Run it in a terminal, or use `bd comments add <askId> "..."` directly.',
-      );
-      return 2;
-    }
-    const terminal = createTerminalIo();
-    io = terminal.io;
-    closeIo = terminal.close;
-  }
-
-  let result: WalkResult;
-  try {
-    result = await walkAsks(
-      asks.value.map(askViewOf),
-      io,
-      bdWriter(ctx, thread.id),
-    );
-  } finally {
-    if (closeIo != null) closeIo();
-  }
-
-  // Before the summary, so the walk's last line stays the one Justin says.
-  if (ctx.exportUnstaged) console.error(EXPORT_UNSTAGED_WARNING);
-
-  const commitLine = describeCommit(
-    commitThreadsRepo(`thread ${thread.id}: answers`, {
-      autoCommit: options.autoCommit,
-      dir: ctx.repoDir,
-      env,
-      exportUnstaged: ctx.exportUnstaged,
-    }),
-    'the threads repo',
-  );
-  if (commitLine != null) console.error(commitLine);
-
-  return summarizeWalk(result);
-}
-
-/**
- * One argument, safely, for a command Justin will paste into zsh.
- *
- * His answers contain apostrophes, quotes and backticks — the retry line is
- * useless if it mangles them, and actively dangerous if a backtick in an answer
- * becomes a substitution. Single quotes stop everything; the only character
- * that needs work is the single quote itself.
- */
-export function shellSingleQuote(text: string): string {
-  return `'${text.split("'").join(`'\\''`)}'`;
-}
-
-/** The comment text one decision becomes. Read back verbatim by `inbox`. */
-export function commentTextFor(decision: AskDecision): string {
-  return decision.kind === 'skipped'
-    ? SKIP_COMMENT
-    : `ANSWER: ${decision.text}`;
-}
-
-/** The exact command that writes one comment by hand, for the failure banner. */
-export function retryCommandFor(id: string, text: string): string {
-  return `cd ~/Dev/threads && bun run bd comments add ${id} ${shellSingleQuote(text)}`;
+  /** Colour and wrap width; from stdout when absent. Tests pin it. */
+  style?: OutputStyle;
 }
 
 /**
@@ -544,13 +480,13 @@ export function bdWriter(ctx: BdContext, threadId: string): AnswerWriter {
       // Justin ANSWERED from one he deliberately SKIPPED from one he never
       // reached, and three facts need three states, not a boolean.
       const now = new Date().toISOString();
-      return writeComment(ask.id, commentTextFor(decision), {
+      return await writeComment(ask.id, commentTextFor(decision), {
         answeredAt: decision.kind === 'answered' ? now : null,
         skippedAt: decision.kind === 'skipped' ? now : null,
       });
     },
     async note(text: string): Promise<WriteOutcome> {
-      return writeComment(threadId, `NOTE: ${text}`, {
+      return await writeComment(threadId, `NOTE: ${text}`, {
         inboxAt: new Date().toISOString(),
       });
     },
@@ -605,4 +541,116 @@ function summarizeWalk(result: WalkResult): number {
   console.log('');
   console.log('Tell Claude: answers in');
   return 0;
+}
+
+export async function runThreadAnswer(
+  options: AnswerOptions = {},
+): Promise<number> {
+  const env = options.env ?? process.env;
+  const ctx: BdContext = contextFor(env);
+
+  const resolved = await resolveThread(ctx, options);
+  if (!resolved.ok) {
+    console.error(`thread answer: ${resolved.message}`);
+    return 2;
+  }
+  const thread = resolved.issue;
+
+  const asks = await listOpenAsks(ctx, thread.id);
+  if (!asks.ok) {
+    // NOT "there is nothing to answer": we could not look.
+    console.error(
+      `thread answer: could not read the asks on ${thread.id} — ${describeBdFailure(asks.failure)}`,
+    );
+    return 1;
+  }
+
+  // The report first, so Justin knows what he is answering. D10 put the whole
+  // rendered report in `notes` precisely so it can be replayed here — through
+  // the SAME renderer `thread show` uses (k0b8n.10 e): it was printed raw, so
+  // the walk showed the stored markdown with its double letters and no
+  // man-page layout. Text that is not a report passes through as written.
+  const style = options.style ?? outputStyle();
+  console.log(
+    thread.notes == null || thread.notes === ''
+      ? `THREAD ${thread.id} · ${thread.title ?? '(no title)'} (no rendered report on this bead)`
+      : ansiFromReportText(thread.notes, style),
+  );
+
+  if (asks.value.length === 0) {
+    console.log('');
+    console.log(
+      `No open asks on ${thread.id} — checked, and there are none. Nothing to answer.`,
+    );
+    return 0;
+  }
+
+  let io = options.io ?? null;
+  let closeIo: (() => void) | null = null;
+  if (io == null) {
+    // The guard the vetted library did not provide. A non-TTY run must fail
+    // loudly and immediately: this command blocks on a human, and a background
+    // or piped invocation that waited would hang a session forever.
+    if (process.stdin.isTTY !== true) {
+      console.error(
+        'thread answer: stdin is not a terminal, and this command has to ask you things. Run it in a terminal, or use `bd comments add <askId> "..."` directly.',
+      );
+      return 2;
+    }
+    const terminal = createTerminalIo();
+    io = terminal.io;
+    closeIo = terminal.close;
+  }
+
+  let result: WalkResult;
+  try {
+    result = await walkAsks(
+      asks.value.map(askViewOf),
+      io,
+      bdWriter(ctx, thread.id),
+      style,
+    );
+  } finally {
+    if (closeIo != null) closeIo();
+  }
+
+  // Before the summary, so the walk's last line stays the one Justin says.
+  if (ctx.exportUnstaged) console.error(EXPORT_UNSTAGED_WARNING);
+
+  const commitLine = describeCommit(
+    commitThreadsRepo(`thread ${thread.id}: answers`, {
+      autoCommit: options.autoCommit,
+      dir: ctx.repoDir,
+      env,
+      exportUnstaged: ctx.exportUnstaged,
+    }),
+    'the threads repo',
+  );
+  if (commitLine != null) console.error(commitLine);
+
+  return summarizeWalk(result);
+}
+
+/**
+ * One argument, safely, for a command Justin will paste into zsh.
+ *
+ * His answers contain apostrophes, quotes and backticks — the retry line is
+ * useless if it mangles them, and actively dangerous if a backtick in an answer
+ * becomes a substitution. Single quotes stop everything; the only character
+ * that needs work is the single quote itself.
+ */
+export function shellSingleQuote(text: string): string {
+  return `'${text.split("'").join(`'\\''`)}'`;
+}
+
+/** The comment text one decision becomes. Read back verbatim by `inbox`. */
+export function commentTextFor(decision: AskDecision): string {
+  return decision.kind === 'skipped'
+    ? SKIP_COMMENT
+    : `ANSWER: ${decision.text}`;
+}
+
+/** The exact command that writes one comment by hand, for the failure banner. */
+export function retryCommandFor(id: string, text: string): string {
+  return `cd ~/Dev/threads && bun run bd comments add ${id} ${shellSingleQuote(text)}`;
 }

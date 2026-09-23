@@ -7,14 +7,14 @@
  * output.
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
+import {afterEach, describe, expect, test} from 'bun:test';
 import {execFileSync, execSync} from 'child_process';
 import {writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {
-  runDivergenceCheck,
   formatRepoState,
+  runDivergenceCheck,
 } from '../src/repo-status/prime-view';
 import {createSandbox, type Sandbox} from './sandbox';
 
@@ -72,7 +72,7 @@ describe('project-prime', () => {
     const report = runDivergenceCheck({cwd: sb.path});
     expect(report).not.toBeNull();
     expect(report?.groups).toEqual([]);
-    const text = formatRepoState(report!);
+    const text = formatRepoState(report);
     expect(text).toContain('# Current repo state');
     expect(text).toContain('no unmerged work');
   });
@@ -91,7 +91,7 @@ describe('project-prime', () => {
     expect(report?.groups[0]?.aheadOfCurrent).toBe(1);
     expect(report?.groups[0]?.hasWorktree).toBe(false);
 
-    const text = formatRepoState(report!);
+    const text = formatRepoState(report);
     expect(text).toContain('# Current repo state');
     expect(text).toContain('feature-x');
     expect(text).toContain('1 commit ahead');
@@ -130,7 +130,7 @@ describe('project-prime', () => {
     expect(report?.filtered.hiddenUnmerged).toBeNull();
     expect(report?.filtered.excludedAsStale).toBe(1);
 
-    const text = formatRepoState(report!);
+    const text = formatRepoState(report);
     // The hidden line is EXACTLY what it was before the field existed.
     expect(text).toContain('Not listed: 1 branch(es) with no commit in 30d');
     // And the null renders as nothing at all — in particular not as a "none",
@@ -175,7 +175,7 @@ describe('project-prime', () => {
     const names = report?.groups[0]?.branches.map((b) => b.name).sort();
     expect(names).toEqual(['feature-a', 'feature-b']);
 
-    const text = formatRepoState(report!);
+    const text = formatRepoState(report);
     expect(text).toContain('same tip');
   });
 
@@ -210,7 +210,7 @@ describe('project-prime', () => {
     // assert the shape explicitly so the intent is pinned.
     const report = runDivergenceCheck({cwd: sb.path});
     expect(report?.groups[0]?.prNote).toBeNull();
-    expect(formatRepoState(report!)).not.toContain('PR #');
+    expect(formatRepoState(report)).not.toContain('PR #');
   });
 
   test('a branch fully merged into current (ahead=0) is not flagged', () => {

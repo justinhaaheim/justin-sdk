@@ -43,6 +43,77 @@ componentConfig.thread.startOnSessionStart — and both default false.
 
 Install the hook that runs this with:  justin-sdk add thread-hooks`;
 
+/**
+ * Kept HERE rather than imported from backfill.ts on purpose: nothing heavy is
+ * imported at the top of this file (see the header), and backfill.ts pulls in
+ * bd, git, the schema and the transcript reader.
+ */
+const BACKFILL_NARRATIVE = `
+READS   every ~/.claude/projects/<project>/<uuid>.jsonl, one level deep.
+        Subagent transcripts (agent-*.jsonl, and <uuid>/subagents/) are skipped
+        — a subagent is not a session. READ ONLY: nothing under
+        ~/.claude/projects is ever written, moved or deleted.
+WRITES  a thread bead for every session that has none, status OPEN with
+        metadata.source=backfill, plus ONE git commit of ~/Dev/threads per run.
+        AND rewrites <state dir>/messages/<sessionId>.jsonl for every session in
+        the window — every prompt and every turn's final Claude message, from
+        the transcript — keeping any line \`thread capture\` logged after the
+        transcript's last record. Local only; never committed.
+NEVER   touches a CLOSED thread, and never touches the title, description, notes
+        or status of a thread a real session created — for those it fills in
+        ONLY the verbatim messages they never had, and only when those are
+        missing or the transcript has moved on since.
+
+A session's last activity is the LAST RECORD'S TIMESTAMP inside the file, never
+the file's mtime: resuming a session in cmux touches the file without adding a
+record. Sessions with nothing Justin actually said (\`claude -p\` probes,
+hook-only runs) are counted and reported, never imported. A transcript with no
+timestamp on ANY record can be placed neither inside nor outside the window: it
+is skipped, named under a \`note:\` line every run, and is NOT a run failure.
+
+Idempotent: run it as often as you like. A second run with no new transcript
+activity writes nothing. \`thread board\` hides what this creates; \`--all\`
+shows it.`;
+
+/**
+ * Kept HERE for the same reason BACKFILL_NARRATIVE is: search.ts pulls in bd,
+ * the board and the archive reader, and nothing heavy loads at the top of this
+ * file.
+ */
+const SEARCH_NARRATIVE = `
+SEARCHES, per session, in this order — the order decides which field the one
+snippet comes from when several match, and the snippet line says how many other
+fields matched and names them:
+
+  title · firstUserMessage · lastUserMessage · lastAssistantMessage
+  notes (the stored report) · description
+  then EVERY line of the session's message log, <state dir>/messages/
+  <sessionId>.jsonl — every prompt and every final Claude message, named
+  \`you · <local time>\` or \`Claude · <local time>\`
+  then EVERY string in every archived report JSON under
+  <state dir>/reports/<sessionId>/, which is what covers reports written before
+  the verbatim messages were stored on the bead at all.
+
+CORPUS  one \`bd list -t thread --all\` — closed threads included — plus the
+        report archive. Sessions \`thread backfill\` recorded are in it, which is
+        what makes a session that never reported findable.
+
+MATCHES the words you type joined into ONE phrase, case-insensitively, as a
+        plain substring — except that a space matches ANY run of whitespace, so
+        a phrase still matches where a dictated message put a newline in the
+        middle of it. Everything else is literal: \`what?\` finds a question
+        mark. --regex switches to a JS regular expression instead (the \`i\`
+        flag is always on); an invalid one exits 2 with the engine's message.
+
+EXIT    0 something matched · 1 NOTHING matched, and the line says how many
+        sessions that was measured over · 2 could not search — a failed bd read,
+        an unreadable archive, or a bad regex. 2 is never silently a 1: anything
+        found is still printed, with a line saying the corpus was incomplete.
+
+--days filters on last activity (lastActivityAt, else reportedAt, else
+startedAt). A session that dates itself NOWHERE is never filtered out — an
+unknown date is not proof that it is old.`;
+
 const ANSWER_NARRATIVE = `
 DEFAULT (--ui web): starts a server on 127.0.0.1, opens your browser, and shows
 one textarea per ask on one page.
@@ -59,18 +130,64 @@ remote-control flow, which cannot reach a page on localhost.
 --ui ink: measured and rejected in the spike; the command says why and exits 2.`;
 
 const STOP_CHECK_NARRATIVE = `
-Installed by \`justin-sdk add thread-hooks\` as a Stop hook. It blocks exactly one
-case: the turn's final message carries the report delimiters (a run of 🛑 above
-it and 🕉️ below it) AND this session has archived no report since Justin's last
-message. The block is exit 2, the reason on stderr, and the same reason as JSON
-on stdout.
+Installed by \`justin-sdk add thread-hooks\` as a Stop hook. In the default mode
+(enforceMode "reportShaped") it blocks exactly one case: the turn's final message
+carries the report delimiters (a run of 🛑 above it and 🕉️ below it) AND this
+session has archived no report since Justin's last message. The block is exit 2,
+the reason on stderr, and the same reason as JSON on stdout.
+
+With enforceMode "workTurns" (the K12 refusal experiment) it ALSO blocks a
+plain-prose yield when the turn since Justin's last message ran a \`git commit\`
+or lasted at least enforceMinTurnMinutes (default 20), and no report was
+archived since that message. The reason names which.
 
 It passes, silently and with exit 0, on everything else — the knob being off, a
 subagent's Stop, a turn it has already blocked, a final message that is not a
-report, and every case where it could not measure: no transcript, no session id,
-an unreadable archive, a payload that is not JSON.
+report (in reportShaped), and every case where it could not measure: no
+transcript, no session id, an unreadable archive, a payload that is not JSON.
+
+Every run appends one line to ~/.local/state/justin-threads/stop-check.jsonl,
+passes included; --stats counts them by action and why.
 
 Needs componentConfig.thread.enforce, which defaults FALSE.`;
+
+const CAPTURE_NARRATIVE = `
+Installed by \`justin-sdk add thread-hooks\` on TWO events. It reads the hook
+payload (JSON) on stdin:
+
+  UserPromptSubmit   records the prompt as a "user" line
+  Stop               records last_assistant_message (the message Claude just
+                     yielded) as an "assistant" line
+  anything else      does nothing
+
+WRITES, synchronously, one JSON line
+  {role, at, text, event, cwd}
+to <state dir>/messages/<sessionId>.jsonl (default state dir:
+~/.local/state/justin-threads). Text is verbatim and uncapped; harness noise is
+stripped from prompts exactly as \`thread backfill\` strips it. The log is local:
+never committed, never pushed. A repeat of the last line (a hook firing twice)
+is not appended again.
+
+THEN starts a DETACHED child (\`thread capture --apply <sessionId>\`) and returns
+at once. The child finds this session's thread bead in ~/Dev/threads — or
+creates it exactly as \`thread start\` would — and sets its last user message,
+last Claude response, lastActivityAt and messageCount from the log's newest
+lines. It never touches the title, description, notes or status of a bead a
+report wrote; a bead \`thread backfill\` made moves from open to in_progress.
+It commits the threads repo and never pushes. Each child run appends one line
+to <state dir>/capture.jsonl — that is where a bd failure shows up.
+
+SKIPS subagents (agent_id in the payload), \`claude -p\` runs
+(CLAUDE_CODE_ENTRYPOINT=sdk-cli), messages that are empty after stripping, and
+repos where the knob is off.
+
+ALWAYS EXITS 0 and prints nothing on stdout — a prompt hook's stdout would be
+fed to the model. --explain prints the decision and the synchronous wall time
+to stderr.
+
+KNOB: componentConfig.thread.capture, DEFAULT TRUE, and it needs
+componentConfig.thread.enabled too. Set "capture": false in a repo's
+justin-sdk.config.json to opt that repo out.`;
 
 export const threadCommand: CommandModule = {
   builder: (y: Argv) =>
@@ -86,6 +203,11 @@ export const threadCommand: CommandModule = {
                 'Thread bead id this session continues: lists ITS open asks as ones this report must disposition, and prefills continuesFrom in the skeleton',
               type: 'string' as const,
             })
+            .option('continues-from-session', {
+              describe:
+                'The PREDECESSOR\u2019s claude session id, resolved to its thread bead and then used exactly like --continues-from. Falls back to $JUSTIN_LOOP_PREDECESSOR_SESSION_ID, which the justin-loop runner sets on a successor\u2019s dispatch. A predecessor with no thread bead is named and prepare carries on unlinked.',
+              type: 'string' as const,
+            })
             .option('session', {
               describe:
                 'Session id to prepare for (default: $CLAUDE_CODE_SESSION_ID)',
@@ -96,6 +218,7 @@ export const threadCommand: CommandModule = {
           process.exit(
             await runThreadPrepare({
               continuesFrom: argv['continues-from'] ?? null,
+              continuesFromSession: argv['continues-from-session'] ?? null,
               sessionId: argv.session ?? null,
             }),
           );
@@ -132,7 +255,6 @@ export const threadCommand: CommandModule = {
           const {runThreadStart, runThreadStartHook} = await import('./start');
           if (argv.hook === true) {
             process.exit(await runThreadStartHook());
-            return;
           }
           process.exit(
             await runThreadStart({
@@ -175,6 +297,11 @@ export const threadCommand: CommandModule = {
                 'Print everything: work product, beads touched, every What I did item, and the full last message. The default is the compact report; the thread bead always stores the full one.',
               type: 'boolean' as const,
             })
+            .option('continues-from-session', {
+              describe:
+                'The PREDECESSOR\u2019s claude session id, resolved to its thread bead and used as continuesFrom when the payload names none. Falls back to $JUSTIN_LOOP_PREDECESSOR_SESSION_ID (set by the justin-loop runner). A payload continuesFrom always wins; a predecessor with no thread bead is named and the report is written unlinked.',
+              type: 'string' as const,
+            })
             .option('session', {
               describe:
                 'Session id to report for (default: $CLAUDE_CODE_SESSION_ID)',
@@ -184,6 +311,7 @@ export const threadCommand: CommandModule = {
           const {runThreadReport} = await import('./report');
           process.exit(
             await runThreadReport({
+              continuesFromSession: argv['continues-from-session'] ?? null,
               file: argv.file ?? null,
               full: argv.full === true,
               sessionId: argv.session ?? null,
@@ -196,16 +324,81 @@ export const threadCommand: CommandModule = {
         'stop-check',
         'Stop hook: refuse to let a session finish on a status report it cannot prove was recorded. Reads the hook payload on stdin. Exit 0 pass (silent) · 2 blocked. Needs componentConfig.thread.enforce.',
         (yy) =>
-          yy.epilogue(STOP_CHECK_NARRATIVE).option('explain', {
-            default: false,
-            describe:
-              'Print the branch that decided and the elapsed ms to stderr. Off in hook mode, where every pass is silent.',
-            type: 'boolean' as const,
-          }),
+          yy
+            .epilogue(STOP_CHECK_NARRATIVE)
+            .option('explain', {
+              default: false,
+              describe:
+                'Print the branch that decided and the elapsed ms to stderr. Off in hook mode, where every pass is silent.',
+              type: 'boolean' as const,
+            })
+            .option('stats', {
+              default: false,
+              describe:
+                'Read no payload: print how many times stop-check passed and blocked, and why, from its decision log (~/.local/state/justin-threads/stop-check.jsonl). "Has it ever kicked in?" in one command (K12).',
+              type: 'boolean' as const,
+            }),
         async (argv) => {
-          const {runThreadStopCheck} = await import('./stop-check');
+          const stopCheck = await import('./stop-check');
+          if (argv.stats === true) {
+            process.exit(stopCheck.runStopCheckStats());
+          }
           process.exit(
-            runThreadStopCheck({explain: argv.explain === true}).exitCode,
+            stopCheck.runThreadStopCheck({explain: argv.explain === true})
+              .exitCode,
+          );
+        },
+      )
+      .command(
+        'capture',
+        'Hook: record this prompt (UserPromptSubmit) or Claude’s yield (Stop) in the session’s message log, and keep its thread bead’s last messages current in the background. Reads the payload on stdin. Always exits 0. Needs componentConfig.thread.enabled; .capture defaults true.',
+        (yy) =>
+          yy
+            .epilogue(CAPTURE_NARRATIVE)
+            .option('apply', {
+              describe:
+                'INTERNAL — the detached child: apply <sessionId>’s message log to its thread bead. The hook starts this itself.',
+              type: 'string' as const,
+            })
+            .option('cwd', {
+              describe:
+                'With --apply: the session’s working directory (for the knobs and, when the bead is created, its repo facts)',
+              type: 'string' as const,
+            })
+            .option('explain', {
+              default: false,
+              describe:
+                'Print the decision and the synchronous wall time (ms) to stderr',
+              type: 'boolean' as const,
+            })
+            .option('hook-ms', {
+              describe:
+                'INTERNAL — with --apply: the hook’s synchronous wall time up to the spawn, recorded in capture.jsonl as hookElapsedMs',
+              type: 'number' as const,
+            })
+            .option('transcript', {
+              describe:
+                'With --apply: the transcript path from the payload, which saves a search when the bead is created',
+              type: 'string' as const,
+            }),
+        async (argv) => {
+          const capture = await import('./capture');
+          if (argv.apply != null && argv.apply !== '') {
+            process.exit(
+              await capture.runThreadCaptureApply({
+                cwd: argv.cwd ?? null,
+                hookElapsedMs:
+                  argv['hook-ms'] != null && Number.isFinite(argv['hook-ms'])
+                    ? argv['hook-ms']
+                    : null,
+                sessionId: argv.apply,
+                transcriptPath: argv.transcript ?? null,
+              }),
+            );
+          }
+          process.exit(
+            capture.runThreadCaptureHook({explain: argv.explain === true})
+              .exitCode,
           );
         },
       )
@@ -224,6 +417,12 @@ export const threadCommand: CommandModule = {
                 'Print everything: work product, beads touched, every What I did item, and the full last message. The default is the compact report; the thread bead always stores the full one.',
               type: 'boolean' as const,
             })
+            .option('messages', {
+              default: false,
+              describe:
+                'Print the session’s whole message log (every prompt and every Claude yield that capture or the backfill recorded) instead of the report.',
+              type: 'boolean' as const,
+            })
             .option('session', {
               describe: 'Look up by this session id instead of the current one',
               type: 'string' as const,
@@ -233,8 +432,9 @@ export const threadCommand: CommandModule = {
           process.exit(
             await runThreadShow({
               full: argv.full === true,
+              messages: argv.messages === true,
               sessionId: argv.session ?? null,
-              threadId: (argv.threadId as string | undefined) ?? null,
+              threadId: argv.threadId ?? null,
             }),
           );
         },
@@ -277,7 +477,7 @@ export const threadCommand: CommandModule = {
               classic: argv.classic === true,
               latest: argv.latest === true,
               sessionId: argv.session ?? null,
-              threadId: (argv.threadId as string | undefined) ?? null,
+              threadId: argv.threadId ?? null,
               ui: (argv.ui as string | undefined) ?? null,
             }),
           );
@@ -313,7 +513,7 @@ export const threadCommand: CommandModule = {
               json: argv.json === true,
               latest: argv.latest === true,
               sessionId: argv.session ?? null,
-              threadId: (argv.threadId as string | undefined) ?? null,
+              threadId: argv.threadId ?? null,
             }),
           );
         },
@@ -326,7 +526,7 @@ export const threadCommand: CommandModule = {
             .option('all', {
               default: false,
               describe:
-                'Show continued threads too — by default a thread another session took over is folded away (unless it still has open asks)',
+                'Show the folded-away threads too — by default a thread another session took over, and a session `thread backfill` recorded, are both hidden (unless they still have open asks)',
               type: 'boolean' as const,
             })
             .option('json', {
@@ -348,6 +548,7 @@ export const threadCommand: CommandModule = {
           const {runThreadBoard} = await import('./board');
           process.exit(
             await runThreadBoard({
+              includeBackfilled: argv.all === true,
               includeContinued: argv.all === true,
               json: argv.json === true,
               view:
@@ -356,6 +557,87 @@ export const threadCommand: CommandModule = {
                   : argv.recent === true
                     ? 'recent'
                     : 'repo',
+            }),
+          );
+        },
+      )
+      .command(
+        'backfill',
+        'A thread bead for every Claude Code session of the last 30 days that never reported, read from the transcripts Claude Code already wrote. Idempotent; run it as often as you like.',
+        (yy) =>
+          yy
+            .epilogue(BACKFILL_NARRATIVE)
+            .option('days', {
+              default: 30,
+              describe:
+                'How far back to look. A session is in the window when its LAST RECORD (never the file mtime) is inside it.',
+              type: 'number' as const,
+            })
+            .option('dry-run', {
+              default: false,
+              describe:
+                'Say what would be created and refreshed; write nothing, to bd or to git',
+              type: 'boolean' as const,
+            })
+            .option('json', {
+              default: false,
+              describe: 'Print the summary as JSON, including every skip count',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          const {runThreadBackfill} = await import('./backfill');
+          process.exit(
+            await runThreadBackfill({
+              days: argv.days,
+              dryRun: argv['dry-run'] === true,
+              json: argv.json === true,
+            }),
+          );
+        },
+      )
+      .command(
+        'search <query..>',
+        'Find the session in which a phrase was written. Searches every thread bead (the three verbatim messages, the title, the stored report) and every archived report JSON; prints repo · age · title · session id, the matching snippet, and the command that resumes it.',
+        (yy) =>
+          yy
+            .epilogue(SEARCH_NARRATIVE)
+            .positional('query', {
+              describe:
+                'The phrase to look for. Several words are ONE phrase, not separate terms.',
+              type: 'string' as const,
+            })
+            .option('days', {
+              describe:
+                'Only sessions whose last activity is within this many days (default: all of them)',
+              type: 'number' as const,
+            })
+            .option('json', {
+              default: false,
+              describe:
+                'Print the rows, the counts and any read failure as JSON. Snippets are unstyled.',
+              type: 'boolean' as const,
+            })
+            .option('limit', {
+              default: 20,
+              describe: 'How many rows to print. 0 prints every match.',
+              type: 'number' as const,
+            })
+            .option('regex', {
+              default: false,
+              describe:
+                'Treat the query as a JS regular expression instead of a literal phrase',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          const {runThreadSearch} = await import('./search');
+          const words = (argv.query as string[] | string | undefined) ?? [];
+          process.exit(
+            await runThreadSearch({
+              days: argv.days ?? null,
+              json: argv.json === true,
+              limit: argv.limit,
+              query: (Array.isArray(words) ? words : [words]).join(' '),
+              regex: argv.regex === true,
             }),
           );
         },
@@ -389,7 +671,7 @@ export const threadCommand: CommandModule = {
               latest: argv.latest === true,
               reason: argv.reason ?? null,
               sessionId: argv.session ?? null,
-              threadId: (argv.threadId as string | undefined) ?? null,
+              threadId: argv.threadId ?? null,
             }),
           );
         },
@@ -412,7 +694,7 @@ export const threadCommand: CommandModule = {
           process.exit(
             await runThreadReopen({
               reason: argv.reason ?? null,
-              threadId: (argv.threadId as string | undefined) ?? null,
+              threadId: argv.threadId ?? null,
             }),
           );
         },

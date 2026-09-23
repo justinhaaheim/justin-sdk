@@ -42,13 +42,13 @@ import {
   refreshSucceeded,
 } from '../src/critical-rules-setup';
 import {runDoctor} from '../src/doctor';
-import {projectRulesFilePath} from '../src/rules/rules-file';
 import {
   checkRulesDrift,
   isRulesDriftProblem,
   rulesDriftAdvice,
   type RulesDriftStatus,
 } from '../src/rules/rules-drift';
+import {projectRulesFilePath} from '../src/rules/rules-file';
 import {setQuiet} from '../src/setup-helpers';
 import {git} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -56,7 +56,6 @@ import {createSandbox, type Sandbox} from './sandbox';
 const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
 const ARTIFACT_REL = '.claude/rules/justin-sdk/critical-rules.md';
 /** Pinned stamp date, so artifact bytes are comparable across runs. */
-const NOW = '2026-08-17';
 
 const sandboxes: Sandbox[] = [];
 function track(sb: Sandbox): Sandbox {
@@ -90,6 +89,7 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 const RULES_FILES: Record<string, string> = {
+  'src/rules/alpha.md': '# Alpha\n\nALPHA_RULE',
   // rn-only sits in the index but is gated: a plain fixture resolves two
   // modules, an Expo one resolves three. That difference is what the F3
   // fingerprint arm needs, and it must be in the SHARED fixture so every other
@@ -97,10 +97,9 @@ const RULES_FILES: Record<string, string> = {
   'src/rules/index.md': ['@./alpha.md', '@./rn-only.md', '@./omega.md'].join(
     '\n\n',
   ),
-  'src/rules/alpha.md': '# Alpha\n\nALPHA_RULE',
+  'src/rules/omega.md': '# Omega\n\nOMEGA_RULE',
   'src/rules/rn-only.md':
     '---\nincludeIf: [isReactNative]\n---\n\n# React Native\n\nRN_ONLY_RULE',
-  'src/rules/omega.md': '# Omega\n\nOMEGA_RULE',
 };
 
 function initRepoAt(root: string, files: Record<string, string>): string {
@@ -145,7 +144,7 @@ function editPromptsUnrelated(dir: string): void {
 }
 
 function projectFixture(
-  options: {modules?: string[]; components?: string[]} = {},
+  options: {components?: string[]; modules?: string[]} = {},
 ): string {
   const sb = track(createSandbox());
   // Complete enough to pass base-setup's own checks. `resolveComponents` always
@@ -153,8 +152,8 @@ function projectFixture(
   // fixture that omitted CLAUDE.md or the scripts would fail doctor for reasons
   // that have nothing to do with the rules artifact under test.
   const files: Record<string, string> = {
-    'CLAUDE.md': '# fixture\n',
     '.gitignore': 'node_modules\ntmp/\n.claude/worktrees/\n',
+    'CLAUDE.md': '# fixture\n',
     'package.json': `${JSON.stringify(
       {
         name: 'fixture',
@@ -692,7 +691,7 @@ describe('doctor RULES_ARTIFACT check', () => {
   function doctor(
     repo: string,
     args: string[] = ['--quiet'],
-  ): {status: number | null; out: string} {
+  ): {out: string; status: number | null} {
     const result = spawnSync(process.execPath, [CLI, 'doctor', ...args], {
       cwd: repo,
       encoding: 'utf-8',
@@ -754,7 +753,7 @@ describe('doctor RULES_ARTIFACT check', () => {
   });
 
   test('missing artifact: warns naming rules-update', () => {
-    const {dir} = gitPromptsFixture();
+    gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
     });
@@ -838,7 +837,7 @@ describe('doctor RULES_ARTIFACT check', () => {
  * repo — could ever have noticed.
  */
 describe('doctor --fix --yes writes the artifact without committing it', () => {
-  function doctorFix(repo: string): {status: number | null; out: string} {
+  function doctorFix(repo: string): {out: string; status: number | null} {
     const result = spawnSync(
       process.execPath,
       [CLI, 'doctor', '--fix', '--yes'],
@@ -931,7 +930,7 @@ describe('doctor --fix --yes writes the artifact without committing it', () => {
   });
 
   test('in-process: the fixer writes the CHECKED root, not the cwd (home-base-6dni)', async () => {
-    const {dir} = gitPromptsFixture();
+    gitPromptsFixture();
     const repo = projectFixture({
       components: ['critical-rules-setup'],
     });

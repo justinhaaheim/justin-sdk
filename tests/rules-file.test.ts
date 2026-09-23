@@ -3,7 +3,7 @@
  * reader (SessionStart hook drift check) must agree, so round-trip it.
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
+import {afterEach, describe, expect, test} from 'bun:test';
 import {chmodSync, existsSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
@@ -33,10 +33,10 @@ function writeStamped(commit: string): string {
   const sb = track(createSandbox());
   const file = join(sb.path, 'critical-rules.md');
   const stamp = buildStamp({
-    version: '0.4.14',
     commit,
     contentHash: '84bf3e47bf75',
     generated: '2026-07-16T00:00:00Z',
+    version: '0.4.14',
   });
   writeFileSync(file, `${stamp}\n\n# Critical Rules\n\nbody\n`);
   return file;

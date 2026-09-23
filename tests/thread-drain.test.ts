@@ -23,6 +23,10 @@
  * assert the opposite. Restoring the branch returned all of them to green.
  */
 
+import type {ArchivedReport} from '../src/thread/archive';
+import type {BdContext} from '../src/thread/bd';
+import type {ThreadFacts} from '../src/thread/facts';
+
 import {afterEach, beforeEach, describe, expect, test} from 'bun:test';
 import {
   existsSync,
@@ -35,14 +39,10 @@ import {
 import {tmpdir} from 'os';
 import {join} from 'path';
 
-import {drainSpool, renderDrain, type SpoolApplier} from '../src/thread/drain';
 import {spoolDir} from '../src/thread/archive';
+import {drainSpool, renderDrain, type SpoolApplier} from '../src/thread/drain';
 import {validateThreadReport} from '../src/thread/schema';
 import {examplePayload} from './thread-schema.test';
-
-import type {ArchivedReport} from '../src/thread/archive';
-import type {BdContext} from '../src/thread/bd';
-import type {ThreadFacts} from '../src/thread/facts';
 
 let stateDir: string;
 let env: Record<string, string | undefined>;
@@ -57,13 +57,19 @@ function facts(reportedAt: string): ThreadFacts {
     cwd: '/Users/jhaa/Dev/home-base/projects/justin-sdk',
     dirty: true,
     entrypoint: 'cli',
+    firstUserMessage: 'kick this off',
+    firstUserMessageAt: null,
     headSha: 'c79a686abcdef0123456',
     isWorktree: false,
+    lastAssistantMessage: 'Done — here is the report.',
+    lastAssistantMessageAt: null,
     lastUserMessage: 'build the read path',
+    lastUserMessageAt: null,
     model: 'claude-opus-5',
-    reportedAt,
     repo: 'justin-sdk',
     repoPath: '/Users/jhaa/Dev/home-base/projects/justin-sdk',
+    reportedAt,
+    resumeCommand: "cd '/repo' && claude --resume session-1",
     sessionId: 'sess-1',
     startedAt: '2026-09-12T07:00:00.000Z',
     tokensAtStop: 1000,
@@ -102,37 +108,41 @@ afterEach(() => {
   rmSync(stateDir, {force: true, recursive: true});
 });
 
-const applied: SpoolApplier = async () => ({
-  askIds: ['jl-a1.1'],
-  closedAsks: [],
-  rendered: 'REPORT',
-  reportCount: 2,
-  status: 'written',
-  threadId: 'jl-a1',
-  warnings: [],
-});
+const applied: SpoolApplier = () =>
+  Promise.resolve({
+    askIds: ['jl-a1.1'],
+    closedAsks: [],
+    rendered: 'REPORT',
+    reportCount: 2,
+    status: 'written',
+    threadId: 'jl-a1',
+    warnings: [],
+  });
 
-const bdFailed: SpoolApplier = async () => ({
-  failure: {
-    command: 'bd update jl-a1',
-    detail: 'database is locked',
-    kind: 'locked',
-  },
-  rendered: 'REPORT',
-  status: 'bdFailed',
-});
+const bdFailed: SpoolApplier = () =>
+  Promise.resolve({
+    failure: {
+      command: 'bd update jl-a1',
+      detail: 'database is locked',
+      kind: 'locked',
+    },
+    rendered: 'REPORT',
+    status: 'bdFailed',
+  });
 
-const refused: SpoolApplier = async () => ({
-  missing: ['jl-a1.7'],
-  status: 'refused',
-});
+const refused: SpoolApplier = () =>
+  Promise.resolve({
+    missing: ['jl-a1.7'],
+    status: 'refused',
+  });
 
-const superseded: SpoolApplier = async () => ({
-  existingReportCount: 4,
-  existingReportedAt: '2026-09-12T11:00:00.000Z',
-  status: 'superseded',
-  threadId: 'jl-a1',
-});
+const superseded: SpoolApplier = () =>
+  Promise.resolve({
+    existingReportCount: 4,
+    existingReportedAt: '2026-09-12T11:00:00.000Z',
+    status: 'superseded',
+    threadId: 'jl-a1',
+  });
 
 describe('drainSpool', () => {
   test('an APPLIED report removes its spool file', async () => {
@@ -234,7 +244,7 @@ describe('drainSpool', () => {
     const seen: string[] = [];
     const recording: SpoolApplier = async (report) => {
       seen.push(report.reportedAt);
-      return applied(report, CTX);
+      return await applied(report, CTX);
     };
     await drainSpool({apply: recording, ctx: CTX, env});
     expect(seen).toEqual([
@@ -266,7 +276,7 @@ describe('the archived facts are validated, not cast (F11)', () => {
     let reached = 0;
     const counting: SpoolApplier = async (report) => {
       reached += 1;
-      return applied(report, CTX);
+      return await applied(report, CTX);
     };
     const summary = await drainSpool({apply: counting, ctx: CTX, env});
 
@@ -319,7 +329,7 @@ describe('the drain lock (F10)', () => {
     const slow: SpoolApplier = async (report) => {
       await new Promise((done) => setTimeout(done, 5));
       seen.push(report.reportedAt);
-      return applied(report, CTX);
+      return await applied(report, CTX);
     };
     const [a, b] = await Promise.all([
       drainSpool({apply: slow, ctx: CTX, env}),
@@ -380,7 +390,7 @@ describe('the drain lock (F10)', () => {
     let reached = 0;
     const counting: SpoolApplier = async (report) => {
       reached += 1;
-      return applied(report, CTX);
+      return await applied(report, CTX);
     };
     await drainSpool({apply: counting, ctx: CTX, env});
     // pid 1 (launchd) is alive, so it is neither reclaimed nor drained.

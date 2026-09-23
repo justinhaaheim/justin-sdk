@@ -46,6 +46,7 @@ import {
   runSession,
   type SessionRun,
 } from '../src/justin-loop/runner';
+import {ledgerReaderNeverCalled} from './justin-loop-world';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -83,13 +84,13 @@ const BLOCKED = agentRow({
 });
 
 interface Sim {
-  run: SessionRun;
-  /** Simulated minutes from dispatch to return. */
-  elapsedMin: number;
-  polls: number;
-  onBlockedCalls: number;
   /** The argv the loop handed `claude --bg`. */
   args: string[];
+  /** Simulated minutes from dispatch to return. */
+  elapsedMin: number;
+  onBlockedCalls: number;
+  polls: number;
+  run: SessionRun;
 }
 
 /**
@@ -100,10 +101,10 @@ interface Sim {
  * than hanging the suite until bun's timeout kills it with no explanation.
  */
 async function simulate(spec: {
+  maxPolls?: number;
   opts?: Partial<JustinLoopOptions>;
   /** `'unreadable'` = `claude agents --json` failed on that poll. */
   rowAt: (poll: number) => AgentRow | null | 'unreadable';
-  maxPolls?: number;
 }): Promise<Sim> {
   const sb = createSandbox();
   sandboxes.push(sb);
@@ -119,6 +120,7 @@ async function simulate(spec: {
     cwd: sb.path,
     label: 'the-arc-1',
     plan: {kind: 'fresh'},
+    predecessorSessionId: null,
   };
   const maxPolls = spec.maxPolls ?? 400;
 
@@ -130,12 +132,14 @@ async function simulate(spec: {
 
   const deps: RunnerDeps = {
     appendLedgerRow: () => ({ok: true, reason: null}),
-    br: () => ({ok: true, reason: null, stdout: '{"issues":[]}'}),
-    dispatch: async (_cwd: string, dispatchArgs: string[]) => {
+    br: () => ({ok: true, reason: null, stderr: null, stdout: '{"issues":[]}'}),
+    dispatch: (_cwd: string, dispatchArgs: string[]) => {
       args = dispatchArgs;
-      return 'backgrounded · sim-1 · 2026-09-08 04:30 the-arc-1\n';
+      return Promise.resolve(
+        'backgrounded · sim-1 · 2026-09-08 04:30 the-arc-1\n',
+      );
     },
-    findAgent: async () => {
+    findAgent: () => {
       polls++;
       if (polls > maxPolls) {
         throw new Error(
@@ -143,24 +147,33 @@ async function simulate(spec: {
         );
       }
       const row = spec.rowAt(polls);
-      return row === 'unreadable'
-        ? {ok: false, reason: 'claude agents --json exited 1'}
-        : {ok: true, row};
+      return Promise.resolve(
+        row === 'unreadable'
+          ? {ok: false, reason: 'claude agents --json exited 1'}
+          : {malformed: 0, ok: true, row},
+      );
     },
-    gitHead: async () => ({ok: true, sha: 'abc123'}),
+    gitHead: () => Promise.resolve({ok: true, sha: 'abc123'}),
     notifyBlocked: () => {
       onBlockedCalls++;
     },
     now: () => clock,
-    preflight: async () => [],
-    readUsage: async () => null,
+    preflight: () => Promise.resolve([]),
+    readLedgerSessionId: ledgerReaderNeverCalled,
+    readUsage: () =>
+      Promise.resolve({kind: 'failed', reason: 'no /usage in this fixture'}),
     signalPid: () => true,
-    sleep: async (ms: number) => {
+    sleep: (ms: number) => {
       clock += ms;
+      return Promise.resolve();
     },
-    stopSession: async () => ({detail: 'stopped sim-1', ok: true}),
-    write: () => {},
-    writeErr: () => {},
+    stopSession: () => Promise.resolve({detail: 'stopped sim-1', ok: true}),
+    write: () => {
+      /* stdout is not asserted in this test */
+    },
+    writeErr: () => {
+      /* stderr is not asserted in this test */
+    },
   };
 
   const run = await runSession(sb.path, opts, 1, boot, 'sim name', deps);
@@ -256,10 +269,10 @@ describe('blocked waits for Justin by default (D3)', () => {
 describe('--blocked-wait-min is an opt-in bound (D3)', () => {
   test('a 1m bound ends the session as blocked-timeout, carrying the question', async () => {
     const sim = await simulate({
+      maxPolls: 30,
       opts: {blockedWaitMin: 1, timeoutMin: 45},
       // Blocked forever — only the bound can end this.
       rowAt: () => BLOCKED,
-      maxPolls: 30,
     });
 
     expect(sim.run.ending.kind).toBe('blocked-timeout');
@@ -290,9 +303,9 @@ describe('no wall-clock timeout by default (D7)', () => {
     // The default. 500 simulated minutes of work, far past the old 45-minute
     // timeout, and nothing reaps it — the wrap-up notice does that job now.
     const sim = await simulate({
+      maxPolls: 600,
       opts: {timeoutMin: 0},
       rowAt: (poll) => (poll <= 500 ? WORKING : DONE),
-      maxPolls: 600,
     });
     expect(sim.run.ending.kind).toBe('ended');
     expect(sim.elapsedMin).toBeGreaterThan(500);
@@ -300,9 +313,9 @@ describe('no wall-clock timeout by default (D7)', () => {
 
   test('timeoutMin 0 never fires on a session that blocks forever either', async () => {
     const sim = await simulate({
+      maxPolls: 400,
       opts: {blockedWaitMin: null, timeoutMin: 0},
       rowAt: (poll) => (poll <= 300 ? BLOCKED : DONE),
-      maxPolls: 400,
     });
     expect(sim.run.ending.kind).toBe('ended');
   });
@@ -330,13 +343,13 @@ describe('blocked time does not count toward timeoutMin (D3)', () => {
     // The session blocks for 60 minutes and then works forever. The timeout must
     // still fire — at 10 + 60 minutes of working time, not at 10.
     const sim = await simulate({
+      maxPolls: 200,
       opts: {blockedWaitMin: null, timeoutMin: 10},
       rowAt: (poll) => {
         if (poll <= 3) return WORKING;
         if (poll <= 63) return BLOCKED;
         return WORKING;
       },
-      maxPolls: 200,
     });
 
     expect(sim.run.ending.kind).toBe('timeout');
@@ -350,9 +363,9 @@ describe('blocked time does not count toward timeoutMin (D3)', () => {
     // "the timeout was quietly disabled". A runaway session is exactly what an
     // opt-in timeoutMin exists for.
     const sim = await simulate({
+      maxPolls: 60,
       opts: {blockedWaitMin: null, timeoutMin: 10},
       rowAt: () => WORKING,
-      maxPolls: 60,
     });
 
     expect(sim.run.ending.kind).toBe('timeout');
@@ -363,9 +376,9 @@ describe('blocked time does not count toward timeoutMin (D3)', () => {
     // The false-positive regression, end to end: 30 polls of the measured
     // respawn shape must not be read as an ending.
     const sim = await simulate({
+      maxPolls: 60,
       opts: {timeoutMin: 0},
       rowAt: (poll) => (poll <= 30 ? RESPAWNING : DONE),
-      maxPolls: 60,
     });
     expect(sim.run.ending.kind).toBe('ended');
     expect(sim.polls).toBeGreaterThan(30);
@@ -408,9 +421,9 @@ describe('an unreadable `claude agents` is neither an ending nor a continuation'
     // silently. AGENTS_FAILURE_LIMIT consecutive failures end the session with
     // its own distinct ending, naming what failed.
     const sim = await simulate({
+      maxPolls: 40,
       opts: {timeoutMin: 0},
       rowAt: () => 'unreadable',
-      maxPolls: 40,
     });
     expect(sim.run.ending.kind).toBe('agents-unreadable');
     expect(
@@ -447,27 +460,46 @@ describe('dispatch', () => {
     sandboxes.push(sb);
     const deps: RunnerDeps = {
       appendLedgerRow: () => ({ok: true, reason: null}),
-      br: () => ({ok: true, reason: null, stdout: '{"issues":[]}'}),
-      dispatch: async () => 'error: could not start\n',
+      br: () => ({
+        ok: true,
+        reason: null,
+        stderr: null,
+        stdout: '{"issues":[]}',
+      }),
+      dispatch: () => Promise.resolve('error: could not start\n'),
       findAgent: (): never => {
         throw new Error('must not poll for a session that never started');
       },
-      gitHead: async () => ({ok: false, reason: 'not a git repository'}),
-      notifyBlocked: () => {},
+      gitHead: () =>
+        Promise.resolve({ok: false, reason: 'not a git repository'}),
+      notifyBlocked: () => {
+        /* nothing is notified in the fake world */
+      },
       now: () => 1_000_000,
-      preflight: async () => [],
-      readUsage: async () => null,
+      preflight: () => Promise.resolve([]),
+      readLedgerSessionId: ledgerReaderNeverCalled,
+      readUsage: () =>
+        Promise.resolve({kind: 'failed', reason: 'no /usage in this fixture'}),
       signalPid: () => true,
-      sleep: async () => {},
-      stopSession: async () => ({detail: 'x', ok: true}),
-      write: () => {},
-      writeErr: () => {},
+      sleep: () => Promise.resolve(),
+      stopSession: () => Promise.resolve({detail: 'x', ok: true}),
+      write: () => {
+        /* stdout is not asserted in this test */
+      },
+      writeErr: () => {
+        /* stderr is not asserted in this test */
+      },
     };
     const run = await runSession(
       sb.path,
       DEFAULT_OPTIONS,
       1,
-      {cwd: sb.path, label: 'the-arc-1', plan: {kind: 'fresh'}},
+      {
+        cwd: sb.path,
+        label: 'the-arc-1',
+        plan: {kind: 'fresh'},
+        predecessorSessionId: null,
+      },
       'sim name',
       deps,
     );

@@ -258,7 +258,7 @@ async function consumeStream(
   writer: ((text: string) => void) | null,
   sink: string[] | null,
 ): Promise<void> {
-  if (!stream) return;
+  if (stream == null) return;
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let trailing = '';
@@ -268,15 +268,15 @@ async function consumeStream(
     if (done) break;
     if (value == null) continue;
     const text = decoder.decode(value);
-    if (sink) sink.push(text);
-    if (writer) {
+    if (sink != null) sink.push(text);
+    if (writer != null) {
       const result = prefixLines(text, prefix, trailing);
       writer(result.output);
       trailing = result.trailing;
     }
   }
 
-  if (writer && trailing) {
+  if (writer != null && trailing !== '') {
     writer(`${prefix} ${trailing}\n`);
   }
 }
@@ -393,7 +393,7 @@ async function runOne(
   entry: InternalEntry,
   opts: ExecOptions,
 ): Promise<InternalResult> {
-  if (entry.check.fn) {
+  if (entry.check.fn != null) {
     return await runFnCheck(entry);
   }
   return await runShellCommand(entry, opts);
@@ -414,7 +414,9 @@ function formatSummary(
   quiet: boolean,
 ): string {
   const out: string[] = [];
-  const measured = results.filter((r) => !r.skipped && r.notApplicable == null);
+  const measured = results.filter(
+    (r) => r.skipped !== true && r.notApplicable == null,
+  );
   const errors = measured.filter(
     (r) => r.exitCode !== 0 && r.severity === 'error',
   );
@@ -424,7 +426,7 @@ function formatSummary(
   const passed = measured.filter((r) => r.exitCode === 0);
   const skipped = results.filter((r) => r.skipped);
   const notApplicable = results.filter(
-    (r) => !r.skipped && r.notApplicable != null,
+    (r) => r.skipped !== true && r.notApplicable != null,
   );
 
   // In quiet mode, only print if there are errors, warnings, skipped, or
@@ -446,7 +448,7 @@ function formatSummary(
   out.push('');
 
   for (const r of results) {
-    if (r.skipped) {
+    if (r.skipped === true) {
       // In quiet mode, skip the skipped checks too
       if (quiet) continue;
 
@@ -491,10 +493,10 @@ function formatSummary(
     // (they `continue` above), and an all-pass quiet run returns earlier still.
     // Only `fn` checks ever carry a checkResult, so this can never dump a shell
     // command's captured output.
-    if (r.checkResult?.message) {
+    if (r.checkResult?.message != null && r.checkResult?.message !== '') {
       line += `\n     ${DIM}${r.checkResult.message}${RESET}`;
     }
-    if (!ok && r.checkResult?.fix) {
+    if (!ok && r.checkResult?.fix != null && r.checkResult?.fix !== '') {
       line += `\n     ${YELLOW}Fix: ${r.checkResult.fix}${RESET}`;
     }
 
@@ -606,9 +608,9 @@ async function attemptFixes(
 
   for (let i = 0; i < updatedResults.length; i++) {
     const result = updatedResults[i];
-    if (result && fixedLabels.has(result.label)) {
+    if (result != null && fixedLabels.has(result.label)) {
       const entry = entries.find((e) => e.check.label === result.label);
-      if (entry) {
+      if (entry != null) {
         updatedResults[i] = await runOne(entry, opts);
       }
     }
@@ -675,7 +677,7 @@ export async function runChecks(
   // nothing (home-base-gsqz).
   const hasErrors = results.some(
     (r) =>
-      !r.skipped &&
+      r.skipped !== true &&
       r.notApplicable == null &&
       r.exitCode !== 0 &&
       r.severity === 'error',
@@ -702,7 +704,7 @@ async function runCheckTreeWithSink(
     const labels: string[] = [];
     for (const node of nodeList) {
       labels.push(node.check.label);
-      if (node.children) {
+      if (node.children != null) {
         labels.push(...collectLabels(node.children));
       }
     }
@@ -726,7 +728,7 @@ async function runCheckTreeWithSink(
         color: COLOR_PALETTE[idx % COLOR_PALETTE.length] ?? '\x1b[36m',
       });
       idx++;
-      if (node.children) {
+      if (node.children != null) {
         const child = buildEntryMap(node.children, idx);
         for (const [k, v] of child.entries) entries.set(k, v);
         idx = child.nextIndex;
@@ -745,7 +747,7 @@ async function runCheckTreeWithSink(
     for (const node of nodeList) {
       const entry = entryMap.get(node.check.label)!;
 
-      if (skipReason) {
+      if (skipReason != null && skipReason !== '') {
         results.push({
           durationMs: 0,
           exitCode: 1,
@@ -754,7 +756,7 @@ async function runCheckTreeWithSink(
           skipped: true,
           skippedReason: skipReason,
         });
-        if (node.children) {
+        if (node.children != null) {
           results.push(...(await walkTree(node.children, skipReason)));
         }
         continue;
@@ -767,9 +769,9 @@ async function runCheckTreeWithSink(
       // Warnings don't block children.
       const blockedChildren =
         result.exitCode !== 0 && result.severity === 'error';
-      if (blockedChildren && node.children) {
+      if (blockedChildren && node.children != null) {
         results.push(...(await walkTree(node.children, node.check.label)));
-      } else if (node.children) {
+      } else if (node.children != null) {
         results.push(...(await walkTree(node.children)));
       }
     }
@@ -787,12 +789,14 @@ async function runCheckTreeWithSink(
     // Separate fixable failures into auto-run vs. approval-required.
     const allFixable = results.filter(
       (r) =>
-        !r.skipped &&
+        r.skipped !== true &&
         r.notApplicable == null &&
         r.exitCode !== 0 &&
         hasFix(r.checkResult),
     );
-    const autoRun = allFixable.filter((r) => !r.checkResult?.requiresApproval);
+    const autoRun = allFixable.filter(
+      (r) => r.checkResult?.requiresApproval !== true,
+    );
     const needsApproval = allFixable.filter(
       (r) => r.checkResult?.requiresApproval,
     );
@@ -809,9 +813,10 @@ async function runCheckTreeWithSink(
       for (const r of runList) {
         const fixCmd = fixDescription(r.checkResult);
         if (!quiet) {
-          const approvalNote = r.checkResult?.requiresApproval
-            ? ` ${DIM}(approved via --yes)${RESET}`
-            : '';
+          const approvalNote =
+            r.checkResult?.requiresApproval === true
+              ? ` ${DIM}(approved via --yes)${RESET}`
+              : '';
           sink.line(
             `  ${YELLOW}→${RESET} ${r.label}: ${DIM}${fixCmd}${RESET}${approvalNote}`,
           );
@@ -843,7 +848,7 @@ async function runCheckTreeWithSink(
 
   const hasErrors = results.some(
     (r) =>
-      !r.skipped &&
+      r.skipped !== true &&
       r.notApplicable == null &&
       r.exitCode !== 0 &&
       r.severity === 'error',
@@ -953,6 +958,6 @@ async function cliMain(): Promise<void> {
 // Run CLI if executed directly
 const isDirectExecution =
   import.meta.path === Bun.main || process.argv[1]?.endsWith('check-runner.ts');
-if (isDirectExecution) {
+if (isDirectExecution === true) {
   void cliMain();
 }

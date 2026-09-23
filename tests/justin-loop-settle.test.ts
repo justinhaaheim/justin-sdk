@@ -90,7 +90,7 @@ function listCalls(brCalls: string[][]): string[][] {
 describe('scanForOwnHandoff accepts exactly what decideAfterSession accepts', () => {
   test('a valid open handoff with from == label is SEEN, and names the bead', () => {
     expect(scanForOwnHandoff(ownBead(), 'the-arc-1')).toEqual({
-      beadId: 'hoff-1',
+      beadIds: ['hoff-1'],
       kind: 'seen',
     });
   });
@@ -131,8 +131,11 @@ describe('scanForOwnHandoff accepts exactly what decideAfterSession accepts', ()
       rows: JSON.parse(listJson([beadFrom('hoff-1'), beadFrom('hoff-2')]))
         .issues,
     };
+    // BOTH ids, not just the first (F5): the settle re-check asks whether the
+    // bead it sighted is still open, and a one-id answer cannot tell "the same
+    // bead is still there" from "a different one is".
     expect(scanForOwnHandoff(scan, 'the-arc-1')).toEqual({
-      beadId: 'hoff-1',
+      beadIds: ['hoff-1', 'hoff-2'],
       kind: 'seen',
     });
   });
@@ -145,12 +148,12 @@ describe('scanForOwnHandoff accepts exactly what decideAfterSession accepts', ()
 describe('handoffSettleMin 0 — the default — makes no scan at all', () => {
   test('a session watched for 100 minutes consults `br` zero times', async () => {
     const sim = await simulateSession({
-      // The default is not restated in `opts` on purpose: this asserts what a
-      // run that says nothing about the knob does.
-      rowAt: (poll) => (poll <= 100 ? STUCK : DONE),
       // Armed and loaded: the bead IS there. Nothing may look at it.
       beadsAt: () => [beadFrom('hoff-1')],
       maxPolls: 120,
+      // The default is not restated in `opts` on purpose: this asserts what a
+      // run that says nothing about the knob does.
+      rowAt: (poll) => (poll <= 100 ? STUCK : DONE),
     });
 
     expect(sim.run.ending.kind).toBe('ended');
@@ -181,10 +184,10 @@ describe('handoffSettleMin 0 — the default — makes no scan at all', () => {
 describe('armed, a session that reaches done never settles', () => {
   test('a row that goes done ends the watch, and nothing is scanned after it', async () => {
     const sim = await simulateSession({
+      beadsAt: () => [beadFrom('hoff-1')],
       opts: {handoffSettleMin: 3},
       // Stuck-looking for two ticks, then the row transitions like D8 says.
       rowAt: (poll) => (poll <= 2 ? STUCK : DONE),
-      beadsAt: () => [beadFrom('hoff-1')],
     });
 
     expect(sim.run.ending.kind).toBe('ended');
@@ -196,9 +199,9 @@ describe('armed, a session that reaches done never settles', () => {
 
   test('a session that ends on its first poll is never scanned', async () => {
     const sim = await simulateSession({
+      beadsAt: () => [beadFrom('hoff-1')],
       opts: {handoffSettleMin: 1},
       rowAt: () => DONE,
-      beadsAt: () => [beadFrom('hoff-1')],
     });
 
     expect(sim.run.ending.kind).toBe('ended');
@@ -209,10 +212,10 @@ describe('armed, a session that reaches done never settles', () => {
     // Blocked means waiting for Justin (D3). It is not a stall, and settling it
     // would stop the session he is on his way to answer.
     const sim = await simulateSession({
-      opts: {blockedWaitMin: null, handoffSettleMin: 1},
-      rowAt: (poll) => (poll <= 50 ? BLOCKED : DONE),
       beadsAt: () => [beadFrom('hoff-1')],
       maxPolls: 60,
+      opts: {blockedWaitMin: null, handoffSettleMin: 1},
+      rowAt: (poll) => (poll <= 50 ? BLOCKED : DONE),
     });
 
     expect(sim.run.ending.kind).toBe('ended');
@@ -227,11 +230,11 @@ describe('armed, a session that reaches done never settles', () => {
 describe('armed, a stuck row with this session’s handoff bead settles', () => {
   test('the ending is handoff-settled, N minutes after the bead is first seen', async () => {
     const sim = await simulateSession({
+      beadsAt: () => [beadFrom('hoff-1')],
+      maxPolls: 20,
       opts: {handoffSettleMin: 3},
       // The defect: never anything but `working`.
       rowAt: () => STUCK,
-      beadsAt: () => [beadFrom('hoff-1')],
-      maxPolls: 20,
     });
 
     expect(sim.run.ending).toEqual({
@@ -249,10 +252,10 @@ describe('armed, a stuck row with this session’s handoff bead settles', () => 
     // 9 polls of 20s = 3 minutes = 3 ticks. A scan per poll would be 9 `br`
     // calls a minute in a real run.
     const sim = await simulateSession({
-      opts: {handoffSettleMin: 60, pollSec: 20},
-      rowAt: (poll) => (poll <= 9 ? STUCK : DONE),
       beadsAt: () => [beadFrom('hoff-1')],
       maxPolls: 12,
+      opts: {handoffSettleMin: 60, pollSec: 20},
+      rowAt: (poll) => (poll <= 9 ? STUCK : DONE),
     });
 
     expect(sim.run.ending.kind).toBe('ended');
@@ -262,10 +265,10 @@ describe('armed, a stuck row with this session’s handoff bead settles', () => 
 
   test('the liveness line says the bead was seen and when it will settle', async () => {
     const sim = await simulateSession({
-      opts: {handoffSettleMin: 3},
-      rowAt: () => STUCK,
       beadsAt: () => [beadFrom('hoff-1')],
       maxPolls: 20,
+      opts: {handoffSettleMin: 3},
+      rowAt: () => STUCK,
     });
 
     expect(sim.stdout).toContain('hoff-1 seen 0m ago (settles at 3m)');
@@ -282,10 +285,10 @@ describe('armed, a stuck row with this session’s handoff bead settles', () => 
 describe('armed, an unavailable scan is not a missing bead', () => {
   test('a `br` that never answers settles nothing, and says why every minute', async () => {
     const sim = await simulateSession({
-      opts: {handoffSettleMin: 1},
-      rowAt: (poll) => (poll <= 10 ? STUCK : DONE),
       beadsAt: () => 'unavailable',
       maxPolls: 20,
+      opts: {handoffSettleMin: 1},
+      rowAt: (poll) => (poll <= 10 ? STUCK : DONE),
     });
 
     // The session ran to its own ending. `unavailable` bought no settle at all,
@@ -302,10 +305,10 @@ describe('armed, an unavailable scan is not a missing bead', () => {
     // The point of the previous test is that unavailable is UNKNOWN, not "no" —
     // so a scan that starts working must still be able to settle.
     const sim = await simulateSession({
-      opts: {handoffSettleMin: 1},
-      rowAt: () => STUCK,
       beadsAt: (call) => (call <= 2 ? 'unavailable' : [beadFrom('hoff-1')]),
       maxPolls: 20,
+      opts: {handoffSettleMin: 1},
+      rowAt: () => STUCK,
     });
 
     expect(sim.run.ending.kind).toBe('handoff-settled');
@@ -315,12 +318,12 @@ describe('armed, an unavailable scan is not a missing bead', () => {
 
   test('a handoff bead from ANOTHER session settles nothing', async () => {
     const sim = await simulateSession({
+      beadsAt: () => [beadFrom('hoff-1')],
       label: 'the-arc-2',
+      maxPolls: 20,
       opts: {handoffSettleMin: 1},
       // The bead on offer says from=the-arc-1 (the fixture default).
       rowAt: (poll) => (poll <= 10 ? STUCK : DONE),
-      beadsAt: () => [beadFrom('hoff-1')],
-      maxPolls: 20,
     });
 
     expect(sim.run.ending.kind).toBe('ended');
@@ -329,14 +332,129 @@ describe('armed, an unavailable scan is not a missing bead', () => {
 
   test('an unreadable bead settles nothing either', async () => {
     const sim = await simulateSession({
-      opts: {handoffSettleMin: 1},
-      rowAt: (poll) => (poll <= 10 ? STUCK : DONE),
       beadsAt: () => [{id: 'hoff-x', notes: '{"schemaVersion":1}'}],
       maxPolls: 20,
+      opts: {handoffSettleMin: 1},
+      rowAt: (poll) => (poll <= 10 ? STUCK : DONE),
     });
 
     expect(sim.run.ending.kind).toBe('ended');
     expect(sim.stdout).not.toContain('settles at');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The sighting is re-checked at the moment it would settle (home-base-685h F5)
+//
+// The sighting stays sticky BETWEEN ticks — a flapping scan must not be able to
+// postpone the settle forever, which is the stall D15 exists to end. What F5
+// adds is one re-check at the instant it matters. Before it, a bead closed
+// between the sighting and the deadline still settled: the ending named a bead
+// that was no longer open, the post-stop read then found no valid handoff, and
+// the run fell through to the DEMAND path — waking, with a resume, a session the
+// stop ladder had just confirmed gone.
+// ---------------------------------------------------------------------------
+
+describe('a sighting whose bead is closed before the deadline is DROPPED (F5)', () => {
+  test('the session keeps being watched, and ends on its own row', async () => {
+    const sim = await simulateSession({
+      // Tick 1 sights hoff-1; it is closed by tick 2, which is the deadline.
+      beadsAt: (call) => (call === 1 ? [beadFrom('hoff-1')] : []),
+      maxPolls: 20,
+      opts: {handoffSettleMin: 1},
+      rowAt: (poll) => (poll <= 5 ? STUCK : DONE),
+    });
+
+    expect(sim.run.ending.kind).toBe('ended');
+    expect(sim.stdout).toContain(
+      'handoff hoff-1 is no longer an open valid handoff — sighting DROPPED, still watching',
+    );
+    // Watched all the way to the row's own `done`, not stopped at the deadline.
+    expect(sim.elapsedMin).toBe(6);
+  });
+
+  test('a REPLACEMENT bead written afterwards starts its own clock', async () => {
+    // Dropping is not giving up. The session may close one handoff and write
+    // another (the answer helper does exactly that); the new bead is a new
+    // sighting with its own N minutes, not an inheritance of the old one's.
+    const sim = await simulateSession({
+      beadsAt: (call) =>
+        call === 1
+          ? [beadFrom('hoff-1')]
+          : call === 2
+            ? []
+            : [beadFrom('hoff-2')],
+      maxPolls: 20,
+      opts: {handoffSettleMin: 1},
+      rowAt: () => STUCK,
+    });
+
+    expect(sim.run.ending).toEqual({
+      afterMin: 1,
+      beadId: 'hoff-2',
+      kind: 'handoff-settled',
+    });
+    // Sighted on 1, dropped on 2, re-sighted on 3, settled on 4 — never on 2,
+    // which is what inheriting the first sighting's clock would have done.
+    expect(sim.elapsedMin).toBe(4);
+  });
+
+  test('a scan that is UNAVAILABLE at the deadline keeps the sighting and settles', async () => {
+    // "I could not look" is not "it is closed" (critical rule 6). The bead was
+    // seen; nothing since has said otherwise.
+    const sim = await simulateSession({
+      beadsAt: (call) => (call === 1 ? [beadFrom('hoff-1')] : 'unavailable'),
+      maxPolls: 20,
+      opts: {handoffSettleMin: 1},
+      rowAt: () => STUCK,
+    });
+
+    expect(sim.run.ending).toEqual({
+      afterMin: 1,
+      beadId: 'hoff-1',
+      kind: 'handoff-settled',
+    });
+    expect(sim.stdout).not.toContain('DROPPED');
+  });
+
+  test('a bead still open at the deadline settles exactly as before', async () => {
+    // The control for the three above: F5 must not have made the ordinary
+    // settle conditional on anything new.
+    const sim = await simulateSession({
+      beadsAt: () => [beadFrom('hoff-1')],
+      maxPolls: 20,
+      opts: {handoffSettleMin: 1},
+      rowAt: () => STUCK,
+    });
+
+    expect(sim.run.ending).toEqual({
+      afterMin: 1,
+      beadId: 'hoff-1',
+      kind: 'handoff-settled',
+    });
+    expect(sim.stdout).not.toContain('DROPPED');
+  });
+
+  test('a SECOND bead appearing beside the sighted one still settles on the sighted one', async () => {
+    // A forked chain (two open handoffs from one label) is a stop, not a
+    // reason to keep waiting — F6, declined deliberately. The re-check must
+    // not turn it into one: the sighted bead is still open, so it settles.
+    const sim = await simulateSession({
+      beadsAt: (call) =>
+        call === 1
+          ? [beadFrom('hoff-1')]
+          : [beadFrom('hoff-1'), beadFrom('hoff-2')],
+      maxPolls: 20,
+      opts: {handoffSettleMin: 1},
+      rowAt: () => STUCK,
+    });
+
+    expect(sim.run.ending).toEqual({
+      afterMin: 1,
+      beadId: 'hoff-1',
+      kind: 'handoff-settled',
+    });
+    expect(sim.stdout).not.toContain('DROPPED');
   });
 });
 
@@ -387,8 +505,8 @@ describe('a settled session takes the D7 timeout path exactly', () => {
       'done',
     ]);
     // The disposition is not lost — the row still names the bead it read.
-    expect(res.ledger[0].handoffBead).toBe('hoff-1');
-    expect(res.ledger[0].stopOutcome).toBe('stopped');
+    expect(res.ledger[0]?.handoffBead).toBe('hoff-1');
+    expect(res.ledger[0]?.stopOutcome).toBe('stopped');
     expect(spawns(res.dispatches).length).toBe(2);
     expect(res.stdout).toContain('was still `working` 1m later');
     expect(res.exitCode).toBe(0);

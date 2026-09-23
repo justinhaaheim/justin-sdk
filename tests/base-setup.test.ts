@@ -5,7 +5,7 @@
  * any external tools (no br, no mise) — just filesystem operations.
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
+import {afterEach, describe, expect, test} from 'bun:test';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
@@ -77,10 +77,10 @@ describe('base-setup', () => {
     const sb = track(
       createProjectSandbox({
         justinSdkConfig: {
-          version: '0.2.0',
           components: ['base-setup', 'custom-thing'],
-          lastSynced: '2020-01-01',
           customField: 'preserved',
+          lastSynced: '2020-01-01',
+          version: '0.2.0',
         },
       }),
     );
@@ -94,10 +94,10 @@ describe('base-setup', () => {
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
     ) as {
-      version?: string;
       components?: string[];
       customField?: string;
       lastSynced?: string;
+      version?: string;
     };
     expect(config.components).toContain('base-setup');
     expect(config.components).toContain('custom-thing');
@@ -132,10 +132,10 @@ describe('base-setup', () => {
         packageJson: {
           name: 'test',
           scripts: {
-            signal:
-              'bun node_modules/@justinhaaheim/justin-sdk/src/cli.ts signal --quiet',
             doctor:
               'bun node_modules/@justinhaaheim/justin-sdk/src/cli.ts doctor',
+            signal:
+              'bun node_modules/@justinhaaheim/justin-sdk/src/cli.ts signal --quiet',
           },
         },
       }),
@@ -159,9 +159,9 @@ describe('base-setup', () => {
         packageJson: {
           name: 'test',
           scripts: {
-            signal: 'bunx justin-sdk signal --quiet',
             doctor: 'bunx jsdk doctor',
             fix: 'bunx j fix',
+            signal: 'bunx justin-sdk signal --quiet',
             // NOT SDK-emitted — a custom value must survive untouched.
             'signal:custom': 'bunx justin-sdk-lookalike thing',
           },
@@ -326,8 +326,8 @@ describe('base-setup', () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
-          name: 'test',
           dependencies: {'@justinhaaheim/justin-sdk': 'workspace:*'},
+          name: 'test',
         },
       }),
     );
@@ -356,8 +356,8 @@ describe('base-setup', () => {
             doctor: 'bun scripts/doctor.ts',
             'doctor:fix': 'bun scripts/doctor.ts --fix',
             signal: 'bun scripts/signal.ts --quiet',
-            'signal:verbose': 'bun scripts/signal.ts',
             'signal:serial': 'bun scripts/signal.ts --serial',
+            'signal:verbose': 'bun scripts/signal.ts',
           },
         },
       }),
@@ -405,9 +405,9 @@ describe('base-setup', () => {
     const sb = track(
       createProjectSandbox({
         justinSdkConfig: {
-          version: '0.1.0',
           components: ['base-setup'],
           lastSynced: '2020-01-01',
+          version: '0.1.0',
         },
       }),
     );
@@ -419,7 +419,7 @@ describe('base-setup', () => {
 
     const config = JSON.parse(
       readFileSync(join(sb.path, 'justin-sdk.config.json'), 'utf-8'),
-    ) as {version?: string; lastSynced?: string; components?: string[]};
+    ) as {components?: string[]; lastSynced?: string; version?: string};
     expect(config.version).toBeUndefined();
     expect(config.lastSynced).toBeUndefined();
     // Everything else is left exactly as it was.
@@ -466,8 +466,8 @@ describe('base-setup', () => {
     const settings = JSON.parse(
       readFileSync(join(sb.path, '.claude/settings.json'), 'utf-8'),
     ) as {
-      sandbox?: {excludedCommands?: unknown};
       hooks?: {SessionStart?: unknown[]};
+      sandbox?: {excludedCommands?: unknown};
     };
     expect(Array.isArray(settings.sandbox?.excludedCommands)).toBe(true);
     expect(Array.isArray(settings.hooks?.SessionStart)).toBe(true);
@@ -491,8 +491,8 @@ describe('base-setup', () => {
             {
               hooks: [
                 {
-                  type: 'command',
                   command: 'bun run "$CLAUDE_PROJECT_DIR/scripts/setup-env.ts"',
+                  type: 'command',
                 },
               ],
             },
@@ -537,9 +537,9 @@ describe('base-setup', () => {
     const settings = JSON.parse(
       readFileSync(join(sb.path, '.claude/settings.json'), 'utf-8'),
     ) as {
+      hooks?: {SessionStart?: unknown};
       permissions?: {allow?: string[]};
       sandbox?: {excludedCommands?: string[]};
-      hooks?: {SessionStart?: unknown};
     };
     expect(settings.permissions?.allow).toContain('Bash(ls:*)');
     expect(settings.sandbox?.excludedCommands).toContain('gh');

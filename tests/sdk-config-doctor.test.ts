@@ -53,7 +53,7 @@ function projectRoot(config: Record<string, unknown>): string {
     JSON.stringify(
       {
         name: 'test-project',
-        scripts: {doctor: 'true', signal: 'true', 'setup-env': 'true'},
+        scripts: {doctor: 'true', 'setup-env': 'true', signal: 'true'},
         version: '0.0.1',
       },
       null,
@@ -157,7 +157,7 @@ describe('CONFIG_SCHEMA doctor check', () => {
       'package.json',
       JSON.stringify({
         name: 'p',
-        scripts: {doctor: 'true', signal: 'true', 'setup-env': 'true'},
+        scripts: {doctor: 'true', 'setup-env': 'true', signal: 'true'},
       }),
     );
     // doctor itself parses the config to find components, so the file has to be

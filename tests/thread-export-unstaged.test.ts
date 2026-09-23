@@ -14,16 +14,16 @@
  * verbatim below. The bead was there afterwards.
  */
 
+import type {ThreadFacts} from '../src/thread/facts';
+import type {ThreadReportPayload} from '../src/thread/schema';
+
 import {describe, expect, test} from 'bun:test';
 
 import {bdContext, isExportOnlyFailure} from '../src/thread/bd';
-import {createFakeBd} from './fake-bd';
-import {validateThreadReport} from '../src/thread/schema';
 import {writeReportToBd} from '../src/thread/report';
+import {validateThreadReport} from '../src/thread/schema';
+import {createFakeBd} from './fake-bd';
 import {examplePayload} from './thread-schema.test';
-
-import type {ThreadFacts} from '../src/thread/facts';
-import type {ThreadReportPayload} from '../src/thread/schema';
 
 const SESSION = 'sess-export-unstaged';
 
@@ -44,13 +44,19 @@ function facts(): ThreadFacts {
     cwd: '/tmp',
     dirty: false,
     entrypoint: 'cli',
+    firstUserMessage: 'kick this off',
+    firstUserMessageAt: null,
     headSha: 'abc123',
     isWorktree: false,
+    lastAssistantMessage: 'Done — here is the report.',
+    lastAssistantMessageAt: null,
     lastUserMessage: 'go',
+    lastUserMessageAt: null,
     model: 'claude-opus-5',
-    reportedAt: '2026-09-12T19:00:00.000Z',
     repo: 'justin-sdk',
     repoPath: '/tmp',
+    reportedAt: '2026-09-12T19:00:00.000Z',
+    resumeCommand: "cd '/repo' && claude --resume session-1",
     sessionId: SESSION,
     startedAt: '2026-09-12T18:00:00.000Z',
     tokensAtStop: 1,

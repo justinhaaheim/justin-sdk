@@ -32,11 +32,11 @@ import {execFileSync} from 'child_process';
  * case that would otherwise report clean and then be reported as safe.
  */
 export interface WorktreeState {
-  path: string;
-  /** Null when `git status` failed — never assume clean. */
-  dirty: boolean | null;
   /** How many paths are modified/untracked. Null when unmeasured. */
   changedPaths: number | null;
+  /** Null when `git status` failed — never assume clean. */
+  dirty: boolean | null;
+  path: string;
   /** A few of them, for the report. Empty when clean, null when unmeasured. */
   samplePaths: string[] | null;
   /** Why it could not be read. Null when it could. */

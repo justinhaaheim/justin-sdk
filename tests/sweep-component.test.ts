@@ -32,8 +32,7 @@ import {join} from 'path';
 import {runBaseSetup} from '../src/base-setup';
 import {runComponentByName} from '../src/components';
 import {readDeployedStamp} from '../src/rules/rules-file';
-import {getSdkVersion} from '../src/sdk-identity';
-import {readJson, todayIsoDate, writeJson} from '../src/setup-helpers';
+import {readJson, writeJson} from '../src/setup-helpers';
 import {
   applySweepPayload,
   committedConfigComponents,
@@ -59,8 +58,6 @@ import {createSandbox, type Sandbox} from './sandbox';
 const SDK_PKG = '@justinhaaheim/justin-sdk';
 /** Deliberately not a real tag: the tests must never resolve this anywhere. */
 const OLD_PIN = 'github:justinhaaheim/justin-sdk#v0.0.1-fixture';
-const OLD_VERSION = '0.0.1-fixture';
-const OLD_SYNCED = '2000-01-01';
 
 const sandboxes: Sandbox[] = [];
 function track(sb: Sandbox): Sandbox {
@@ -297,9 +294,9 @@ describe('committedConfigComponents', () => {
 // ---------------------------------------------------------------------------
 
 interface Project {
-  root: string;
-  pkgPath: string;
   cfgPath: string;
+  pkgPath: string;
+  root: string;
 }
 
 /**
@@ -381,7 +378,7 @@ describe('applySweepPayload (component mode) — the pin-neutrality contract', (
     expect(readFileSync(project.cfgPath, 'utf-8')).toBe(cfgBefore);
 
     // Field-level too, so a failure says WHICH field drifted.
-    const devDeps = (readJson(project.pkgPath) ?? {}).devDependencies as Record<
+    const devDeps = readJson(project.pkgPath)?.devDependencies as Record<
       string,
       string
     >;
@@ -404,7 +401,7 @@ describe('applySweepPayload (component mode) — the pin-neutrality contract', (
     });
     expect(exitCode).toBe(0);
 
-    const devDeps = (readJson(project.pkgPath) ?? {}).devDependencies as
+    const devDeps = readJson(project.pkgPath)?.devDependencies as
       | Record<string, string>
       | undefined;
     expect(devDeps?.[SDK_PKG]).toBeDefined();
@@ -415,8 +412,8 @@ describe('applySweepPayload (component mode) — the pin-neutrality contract', (
     const pkgBefore = readFileSync(project.pkgPath, 'utf-8');
     // No dependency declaration at all — not even an empty container. (The
     // script aliases mention the package name, so assert on the field.)
-    expect((readJson(project.pkgPath) ?? {}).devDependencies).toBeUndefined();
-    expect((readJson(project.pkgPath) ?? {}).dependencies).toBeUndefined();
+    expect(readJson(project.pkgPath)?.devDependencies).toBeUndefined();
+    expect(readJson(project.pkgPath)?.dependencies).toBeUndefined();
 
     const result = await applySweepPayload(project.root, {
       component: 'gitignore',
@@ -440,7 +437,7 @@ describe('applySweepPayload (component mode) — the pin-neutrality contract', (
     });
     expect(exitCode).toBe(0);
 
-    const devDeps = (readJson(project.pkgPath) ?? {}).devDependencies as Record<
+    const devDeps = readJson(project.pkgPath)?.devDependencies as Record<
       string,
       string
     >;
@@ -460,7 +457,7 @@ describe('readPinSnapshot / restorePinSnapshot', () => {
 
     const restored = restorePinSnapshot(project.root, before);
     expect(restored).toEqual([`package.json:devDependencies.${SDK_PKG}`]);
-    const devDeps = (readJson(project.pkgPath) ?? {}).devDependencies as Record<
+    const devDeps = readJson(project.pkgPath)?.devDependencies as Record<
       string,
       string
     >;
@@ -483,7 +480,7 @@ describe('readPinSnapshot / restorePinSnapshot', () => {
 
 async function captureLog<T>(
   fn: () => Promise<T>,
-): Promise<{value: T; out: string}> {
+): Promise<{out: string; value: T}> {
   const original = console.log;
   const lines: string[] = [];
   console.log = (...args: unknown[]) => {
@@ -666,12 +663,9 @@ describe('holdPinAfterGates — drift the GATES reintroduce', () => {
     await driftLikeTheDoctorGate(project.root);
     // The arm cannot pass vacuously: prove the gate's drift is real first.
     expect(
-      (
-        (readJson(project.pkgPath) ?? {}).devDependencies as Record<
-          string,
-          string
-        >
-      )[SDK_PKG],
+      (readJson(project.pkgPath)?.devDependencies as Record<string, string>)[
+        SDK_PKG
+      ],
     ).toBeDefined();
 
     const held = holdPinAfterGates(project.root, payload, beforeGates);
@@ -698,12 +692,9 @@ describe('holdPinAfterGates — drift the GATES reintroduce', () => {
     const staged = stagedPaths(project.root);
     expect(staged).toContain('package.json');
     expect(
-      (
-        (readJson(project.pkgPath) ?? {}).devDependencies as Record<
-          string,
-          string
-        >
-      )[SDK_PKG],
+      (readJson(project.pkgPath)?.devDependencies as Record<string, string>)[
+        SDK_PKG
+      ],
     ).toBeDefined();
   });
 
@@ -719,7 +710,7 @@ describe('holdPinAfterGates — drift the GATES reintroduce', () => {
     expect(
       holdPinAfterGates(project.root, planSweepPayload(null), beforeGates),
     ).toEqual([]);
-    expect((readJson(project.cfgPath) ?? {}).version).toBe('9.9.9');
+    expect(readJson(project.cfgPath)?.version).toBe('9.9.9');
   });
 
   test('no snapshot means no restore — never a guess at what the pin was', async () => {
@@ -731,7 +722,7 @@ describe('holdPinAfterGates — drift the GATES reintroduce', () => {
     expect(
       holdPinAfterGates(project.root, planSweepPayload('gitignore'), null),
     ).toEqual([]);
-    expect((readJson(project.cfgPath) ?? {}).version).toBe('9.9.9');
+    expect(readJson(project.cfgPath)?.version).toBe('9.9.9');
   });
 });
 
@@ -891,9 +882,7 @@ describe('runSweep --component critical-rules · the user-level line (D17)', () 
     );
 
     expect(value).toBe(0);
-    const line = out
-      .split('\n')
-      .find((l) => l.includes('user-level rules')) as string;
+    const line = out.split('\n').find((l) => l.includes('user-level rules'))!;
     expect(line).toBeDefined();
     expect(line).toContain(file);
     // It is NOT attached to a repo: the repo has its own line, and that line

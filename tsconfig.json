@@ -1,12 +1,23 @@
 {
+  // The SDK type-checks against the very tsconfig it hands to consumer repos,
+  // so the package that ships the gate is held to it too. Extending the
+  // template rather than restating the flags keeps this file identical to
+  // home-base's root tsconfig without a second copy of the list, and keeps the
+  // published snapshot self-contained: templates/ travels with it, ../../ does
+  // not. It also means typescript-eslint's type-aware rules see the same types
+  // `tsc` does — with a looser config here they "fixed" away assertions that
+  // the root config needs (home-base-dchjw.13).
+  "extends": "./templates/configs/tsconfig.node-cli.json",
   "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "scripts/**/*.ts"]
+  // templates/ is included so the scripts the SDK copies into other repos are
+  // type-checked and lintable here; without it eslint's project service cannot
+  // resolve them at all.
+  "include": [
+    "src/**/*.ts",
+    "tests/**/*.ts",
+    "scripts/**/*.ts",
+    "templates/**/*.ts"
+  ]
 }

@@ -29,12 +29,12 @@ import {join} from 'path';
 
 import {
   buildPlan,
+  type CleanupPlan,
   remoteArchiveCommands,
   renderPlan,
-  type CleanupPlan,
 } from '../src/repo-status/plan';
-import {buildReport} from '../src/repo-status/report';
 import {runCli} from '../src/repo-status/repo-status';
+import {buildReport} from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const CLI = join(import.meta.dir, '../src/repo-status/repo-status.ts');
@@ -121,8 +121,8 @@ function planFor(repo: string): CleanupPlan {
 
 interface CliRun {
   code: number;
-  stdout: string;
   stderr: string;
+  stdout: string;
 }
 
 /**

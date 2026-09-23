@@ -102,7 +102,7 @@ function sdkRemote(): string {
  */
 async function captureOutput<T>(
   fn: () => Promise<T>,
-): Promise<{value: T; out: string}> {
+): Promise<{out: string; value: T}> {
   const originalLog = console.log;
   const originalWarn = console.warn;
   const lines: string[] = [];
@@ -121,12 +121,12 @@ async function captureOutput<T>(
 }
 
 function readConfig(root: string): {
-  components?: string[];
   componentConfig?: Record<string, unknown>;
+  components?: string[];
 } {
   return JSON.parse(
     readFileSync(join(root, 'justin-sdk.config.json'), 'utf-8'),
-  ) as {components?: string[]; componentConfig?: Record<string, unknown>};
+  ) as {componentConfig?: Record<string, unknown>; components?: string[]};
 }
 
 function readScripts(root: string): Record<string, string> {
@@ -412,7 +412,7 @@ describe('remove: pristine artifacts go, modified ones stay (AC 2, AC 10)', () =
     // template could not be read, which must never silently pass for "matches".
     const pristine = pristineFor('eslint', 'eslint.config.cjs');
     expect(pristine).not.toBeNull();
-    expect(readFileSync(target, 'utf-8')).toBe(pristine as string);
+    expect(readFileSync(target, 'utf-8')).toBe(pristine!);
 
     const report = removeComponent(sb.path, 'eslint');
 
@@ -973,7 +973,7 @@ describe('list reports installed / applicable / resolved separately (AC 4)', () 
 
     // And removal leaves it alone even on an exact value match.
     removeComponent(sb.path, 'eas');
-    expect(readScripts(sb.path)['prebuild']).toBe(
+    expect(readScripts(sb.path).prebuild).toBe(
       'npx @justinhaaheim/version-manager',
     );
   });

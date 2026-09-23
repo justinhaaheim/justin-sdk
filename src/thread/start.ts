@@ -29,34 +29,35 @@
  * hand-run payload can still see it.
  */
 
+import type {WriteResult} from './archive';
+import type {BdContext, BdFailure, ThreadBeadFields} from './bd';
+import type {CommitOutcome} from './commit';
+import type {ThreadFacts} from './facts';
+import type {EnvLike} from './paths';
+
 import {basename} from 'path';
 
+import {SDK_RUN, sdkRun} from '../sdk-invocation';
+import {recordStartFailure} from './archive';
 import {
   bdContext,
-  EXPORT_UNSTAGED_WARNING,
   createThread,
   describeBdFailure,
+  EXPORT_UNSTAGED_WARNING,
   findThreadBySession,
   setThreadInProgress,
+  updateThread,
 } from './bd';
-import {sdkRun, SDK_RUN} from '../sdk-invocation';
 import {commitThreadsRepo, describeCommit} from './commit';
 import {collectThreadFacts} from './facts';
+import {buildStartMetadata} from './metadata';
 import {
-  threadsBeadsDir,
-  threadsBeadsMissingLine,
   probeWritable,
   SANDBOX_DENIED_LINE,
+  threadsBeadsDir,
+  threadsBeadsMissingLine,
   threadsStateDir,
 } from './paths';
-import {buildStartMetadata} from './metadata';
-import {recordStartFailure} from './archive';
-
-import type {BdFailure} from './bd';
-import type {CommitOutcome} from './commit';
-import type {EnvLike} from './paths';
-import type {ThreadFacts} from './facts';
-import type {WriteResult} from './archive';
 
 /**
  * What one `thread start` did. A tagged union rather than a boolean-and-a-string
@@ -68,23 +69,23 @@ import type {WriteResult} from './archive';
  */
 export type ThreadStartOutcome =
   | {kind: 'disabled'; reason: string}
-  | {kind: 'skippedSubagent'; agentId: string}
-  | {kind: 'sandboxDenied'; path: string; error: string}
+  | {agentId: string; kind: 'skippedSubagent'}
+  | {error: string; kind: 'sandboxDenied'; path: string}
   | {kind: 'threadsBeadsMissing'; path: string}
   | {kind: 'noSessionId'; reason: string}
-  | {kind: 'existing'; threadId: string; status: string | null; title: string}
+  | {kind: 'existing'; status: string | null; threadId: string; title: string}
   | {
-      kind: 'created';
       /** What became of the tool's own commit of the JSONL (p1uj.11). */
       commit: CommitOutcome;
       /** A write landed but its JSONL export was not git-staged (p1uj.10). */
       exportUnstaged: boolean;
-      threadId: string;
-      title: string;
+      kind: 'created';
       /** null means the bead really is `in_progress`; a failure means it is still `open`. */
       statusFailure: BdFailure | null;
+      threadId: string;
+      title: string;
     }
-  | {kind: 'bdFailed'; failure: BdFailure; record: WriteResult | null};
+  | {failure: BdFailure; kind: 'bdFailed'; record: WriteResult | null};
 
 export interface ThreadStartOptions {
   /** Present only for a subagent's tool call — see runThreadStartHook. */
@@ -150,6 +151,64 @@ function startNotes(facts: ThreadFacts, startedAt: string): string {
     `session   ${facts.sessionId ?? 'UNKNOWN'}`,
     `transcript ${facts.transcriptPath ?? 'UNKNOWN'}`,
   ].join('\n');
+}
+
+/**
+ * The fields a brand-new session's thread bead is created with — the
+ * placeholder title, the "NO REPORT YET" body and the start metadata.
+ *
+ * Exported for `thread capture` (home-base-k0b8n.9, K10 c), which creates a
+ * session's bead when capture sees it first — in a repo where
+ * `startOnSessionStart` is off, or a session that began before the hooks were
+ * installed. ONE definition of what a fresh thread bead looks like, so the
+ * first report finds the same bead shape whichever hook made it.
+ */
+export function startThreadFields(input: {
+  facts: ThreadFacts;
+  sessionId: string;
+  startedAt: string;
+  title?: string | null;
+}): ThreadBeadFields {
+  const {facts, sessionId, startedAt} = input;
+  return {
+    description: startDescription(facts, startedAt),
+    metadata: buildStartMetadata({facts, startedAt}),
+    notes: startNotes(facts, startedAt),
+    title:
+      input.title != null && input.title !== ''
+        ? input.title
+        : startTitle(facts, sessionId),
+  };
+}
+
+/**
+ * Steps 6–7 of `startThread` for a session with NO bead: create it, then move
+ * it to `in_progress` (shared with `thread capture`, K10 c).
+ *
+ * The caller commits: `thread start` commits with the configured push, and
+ * `thread capture` commits once after its own metadata write with the push
+ * forced off (K10 d).
+ */
+export async function createStartThread(
+  ctx: BdContext,
+  fields: ThreadBeadFields,
+): Promise<
+  | {failure: BdFailure; ok: false}
+  | {ok: true; statusFailure: BdFailure | null; threadId: string}
+> {
+  const created = await createThread(ctx, fields);
+  if (!created.ok) return {failure: created.failure, ok: false};
+
+  // 7. STATUS. `bd create` has no status flag, so `in_progress` (D10) costs a
+  // second write. If it fails the bead still EXISTS — reporting that as a plain
+  // failure would be its own rule-6 violation in the other direction, so the
+  // outcome carries both the id and the named failure.
+  const status = await setThreadInProgress(ctx, created.value);
+  return {
+    ok: true,
+    statusFailure: status.ok ? null : status.failure,
+    threadId: created.value,
+  };
 }
 
 /**
@@ -256,25 +315,74 @@ export async function startThread(
     };
   }
   if (existing.value != null) {
-    return {
-      kind: 'existing',
-      status: existing.value.status ?? null,
-      threadId: existing.value.id,
-      title: existing.value.title ?? '(no title)',
-    };
+    const existingMeta = (existing.value.metadata ?? {}) as {source?: unknown};
+    const isBackfill = existingMeta.source === 'backfill';
+    // ADOPT A BACKFILLED BEAD RATHER THAN LEAVING IT (k0b8n.3, K5). `thread
+    // backfill` makes an OPEN bead with `source: 'backfill'` for a session that
+    // ended without reporting; the board hides those. When that same session is
+    // resumed, this hook fires again — and returning `existing` here would leave
+    // a session that is demonstrably running hidden from the board, which is the
+    // exact failure `thread start` exists to prevent. A CLOSED bead is never
+    // adopted: Justin closed it, and `updateThread` would resurrect it.
+    if (!isBackfill || existing.value.status === 'closed') {
+      return {
+        kind: 'existing',
+        status: existing.value.status ?? null,
+        threadId: existing.value.id,
+        title: existing.value.title ?? '(no title)',
+      };
+    }
   }
 
-  // 6. CREATE.
-  const title =
-    options.title != null && options.title !== ''
-      ? options.title
-      : startTitle(facts, sessionId);
-  const created = await createThread(ctx, {
-    description: startDescription(facts, startedAt),
-    metadata: buildStartMetadata({facts, startedAt}),
-    notes: startNotes(facts, startedAt),
-    title,
+  // 6. CREATE — or ADOPT the backfilled bead this session already has.
+  const adopting = existing.value;
+  // THE BACKFILLED TITLE SURVIVES. It is the first line of what Justin actually
+  // said, which is strictly more useful than "(untitled) home-base session
+  // 5a3c3420" — and the placeholder exists only because at session start there
+  // is usually nothing better. Everything else in the body IS rewritten, so the
+  // bead stops claiming "backfilled — this session never reported" about a
+  // session that is running right now.
+  const fields = startThreadFields({
+    facts,
+    sessionId,
+    startedAt,
+    title:
+      options.title != null && options.title !== ''
+        ? options.title
+        : (adopting?.title ?? null),
   });
+  const title = fields.title;
+  if (adopting != null) {
+    // `updateThread` sends every field including the whole metadata document
+    // and `-s in_progress`, which is exactly the rewrite an adoption is.
+    const adopted = await updateThread(ctx, adopting.id, fields);
+    if (!adopted.ok) {
+      return {
+        failure: adopted.failure,
+        kind: 'bdFailed',
+        record: recordStartFailure(
+          {facts, sessionId, startedAt},
+          describeBdFailure(adopted.failure),
+          env,
+        ),
+      };
+    }
+    const commit = commitThreadsRepo(`thread ${adopting.id}: start (adopted)`, {
+      autoCommit: options.autoCommit,
+      dir: ctx.repoDir,
+      env,
+      exportUnstaged: ctx.exportUnstaged,
+    });
+    return {
+      commit,
+      exportUnstaged: ctx.exportUnstaged,
+      kind: 'created',
+      statusFailure: null,
+      threadId: adopting.id,
+      title,
+    };
+  }
+  const created = await createStartThread(ctx, fields);
   if (!created.ok) {
     return {
       failure: created.failure,
@@ -287,15 +395,9 @@ export async function startThread(
     };
   }
 
-  // 7. STATUS. `bd create` has no status flag, so `in_progress` (D10) costs a
-  // second write. If it fails the bead still EXISTS — reporting that as a plain
-  // failure would be its own rule-6 violation in the other direction, so the
-  // outcome carries both the id and the named failure.
-  const status = await setThreadInProgress(ctx, created.value);
-
   // 8. COMMIT (p1uj.11). The beads are in Dolt either way; this is the step
   // that makes them durable in git, and its failure is a warning, never a loss.
-  const commit = commitThreadsRepo(`thread ${created.value}: start`, {
+  const commit = commitThreadsRepo(`thread ${created.threadId}: start`, {
     autoCommit: options.autoCommit,
     dir: ctx.repoDir,
     env,
@@ -306,8 +408,8 @@ export async function startThread(
     commit,
     exportUnstaged: ctx.exportUnstaged,
     kind: 'created',
-    statusFailure: status.ok ? null : status.failure,
-    threadId: created.value,
+    statusFailure: created.statusFailure,
+    threadId: created.threadId,
     title,
   };
 }
@@ -406,8 +508,8 @@ interface SessionStartHookInput {
 export async function runThreadStartHook(args?: {
   /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
   autoCommit?: boolean;
-  stdin?: string;
   now?: Date;
+  stdin?: string;
 }): Promise<number> {
   let input: SessionStartHookInput = {};
   try {

@@ -7,7 +7,7 @@
  * No external tools needed — pure filesystem ops.
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
+import {afterEach, describe, expect, test} from 'bun:test';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
@@ -99,9 +99,9 @@ describe('gh-actions-setup', () => {
     sb.writeFile('.github/workflows/signal.yml', customWorkflow);
 
     const exitCode = await runGhActionsSetup({
+      force: true,
       projectRoot: sb.path,
       quiet: true,
-      force: true,
     });
     expect(exitCode).toBe(0);
 

@@ -23,9 +23,14 @@ import {
   DOCTOR_COMMAND,
   DOCTOR_HEARTBEAT_TIMEOUT_MS,
   doctorHeartbeatRequest,
+  type DoctorRunRow,
+  type DoctorSpawner,
+  type DoctorSpawnOutcome,
+  type DoctorSpawnRequest,
   emptyState,
   HEALTH_NOTICES_ENV_VAR,
   healthNoticesPaths,
+  type HealthNoticesState,
   parseDoctorSummary,
   printNotice,
   readState,
@@ -33,11 +38,6 @@ import {
   runDoctorHeartbeat,
   silencedChildEnv,
   writeState,
-  type DoctorRunRow,
-  type DoctorSpawnOutcome,
-  type DoctorSpawnRequest,
-  type DoctorSpawner,
-  type HealthNoticesState,
 } from '../src/health-notices';
 import {
   DEFAULT_HEALTH_NOTICES,
@@ -75,7 +75,7 @@ interface Rig {
  * default — a `justin-sdk.config.json` is what makes doctor applicable at all.
  */
 function rig(
-  options: {healthNotices?: Record<string, unknown>; enrolled?: boolean} = {},
+  options: {enrolled?: boolean; healthNotices?: Record<string, unknown>} = {},
 ): Rig {
   const home = newSandbox();
   const project = newSandbox();
@@ -151,9 +151,9 @@ function spy(outcome: DoctorSpawnOutcome): {
   const calls: DoctorSpawnRequest[] = [];
   return {
     calls,
-    spawner: async (request) => {
+    spawner: (request) => {
       calls.push(request);
-      return outcome;
+      return Promise.resolve(outcome);
     },
   };
 }
@@ -694,7 +694,7 @@ describe('runDoctorHeartbeat', () => {
 
   test('a spawner that THROWS becomes a recorded failure, not an exception', async () => {
     const rigged = rig();
-    const spawner: DoctorSpawner = async () => {
+    const spawner: DoctorSpawner = () => {
       throw new Error('the seam blew up');
     };
 
@@ -921,12 +921,12 @@ describe('runDoctorHeartbeat', () => {
       commandName: 'signal',
       env: rigged.env,
       projectRoot: rigged.projectRoot,
-      spawner: async () => {
+      spawner: () => {
         writeState(rigged.paths, {
           ...emptyState(),
           lastNotified: {'/another/repo': {major: stamp}},
         });
-        return passed();
+        return Promise.resolve(passed());
       },
     });
 
@@ -974,8 +974,9 @@ describe('runDoctorHeartbeat', () => {
     let captured = '';
     try {
       captured = (
-        await captureStderr(async () => {
+        await captureStderr(() => {
           printNotice(['a line']);
+          return Promise.resolve();
         })
       ).stderr;
     } finally {

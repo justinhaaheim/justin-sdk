@@ -13,16 +13,16 @@
  *  - `reopen` touches the thread and NOTHING else.
  */
 
+import type {BdIssue, BdResult} from '../src/thread/bd';
+
 import {describe, expect, test} from 'bun:test';
 
 import {
   DEFAULT_DONE_REASON,
+  type DoneDeps,
   runThreadDone,
   runThreadReopen,
-  type DoneDeps,
 } from '../src/thread/done';
-
-import type {BdIssue, BdResult} from '../src/thread/bd';
 
 const THREAD: BdIssue = {
   id: 'jl-a1',
@@ -47,31 +47,31 @@ function recorder(options: {asks?: BdIssue[]; failOn?: string} = {}): Recorder {
   return {
     calls,
     deps: {
-      async closeIssue(_ctx, id, reason): Promise<BdResult<true>> {
+      closeIssue(_ctx, id, reason): Promise<BdResult<true>> {
         calls.push(`close:${id}:${reason}`);
         if (options.failOn === id) {
-          return {
+          return Promise.resolve({
             failure: {
               command: `bd close ${id}`,
               detail: 'database is locked',
               kind: 'locked',
             },
             ok: false,
-          };
+          });
         }
-        return {ok: true, value: true};
+        return Promise.resolve({ok: true, value: true});
       },
-      async listOpenAsks(): Promise<BdResult<BdIssue[]>> {
+      listOpenAsks(): Promise<BdResult<BdIssue[]>> {
         calls.push('listOpenAsks');
-        return {ok: true, value: asks};
+        return Promise.resolve({ok: true, value: asks});
       },
-      async reopenIssue(_ctx, id, reason): Promise<BdResult<true>> {
+      reopenIssue(_ctx, id, reason): Promise<BdResult<true>> {
         calls.push(`reopen:${id}:${reason}`);
-        return {ok: true, value: true};
+        return Promise.resolve({ok: true, value: true});
       },
-      async resolveThread() {
+      resolveThread() {
         calls.push('resolveThread');
-        return {issue: THREAD, ok: true as const};
+        return Promise.resolve({issue: THREAD, ok: true as const});
       },
     },
   };
@@ -140,14 +140,15 @@ describe('thread done', () => {
 
   test('an unreadable ask list aborts rather than stranding them', async () => {
     const {calls, deps} = recorder();
-    deps.listOpenAsks = async () => ({
-      failure: {
-        command: 'bd list',
-        detail: 'bd is unreachable',
-        kind: 'unreachable',
-      },
-      ok: false,
-    });
+    deps.listOpenAsks = () =>
+      Promise.resolve({
+        failure: {
+          command: 'bd list',
+          detail: 'bd is unreachable',
+          kind: 'unreachable',
+        },
+        ok: false,
+      });
     const code = await runThreadDone({
       autoCommit: false,
       deps,
@@ -159,7 +160,8 @@ describe('thread done', () => {
 
   test('an unresolvable thread is exit 2, and nothing is closed', async () => {
     const {calls, deps} = recorder();
-    deps.resolveThread = async () => ({message: 'no bead jl-zz', ok: false});
+    deps.resolveThread = () =>
+      Promise.resolve({message: 'no bead jl-zz', ok: false});
     expect(
       await runThreadDone({autoCommit: false, deps, threadId: 'jl-zz'}),
     ).toBe(2);
@@ -186,10 +188,11 @@ describe('thread reopen', () => {
 
   test('a failed reopen is exit 1, never a quiet success', async () => {
     const {deps} = recorder();
-    deps.reopenIssue = async () => ({
-      failure: {command: 'bd reopen', detail: 'locked', kind: 'locked'},
-      ok: false,
-    });
+    deps.reopenIssue = () =>
+      Promise.resolve({
+        failure: {command: 'bd reopen', detail: 'locked', kind: 'locked'},
+        ok: false,
+      });
     expect(
       await runThreadReopen({autoCommit: false, deps, threadId: 'jl-a1'}),
     ).toBe(1);

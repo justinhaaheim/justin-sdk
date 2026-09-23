@@ -144,14 +144,6 @@ export interface FileVerdict {
 }
 
 export interface CommitVerdict {
-  sha: string;
-  subject: string;
-  /**
-   * True when `git cherry` found a patch-id-equivalent commit on the baseline.
-   * This is what sees through squash-merge, rebase and cherry-pick: a different
-   * sha carrying identical content.
-   */
-  patchIdPresent: boolean;
   /**
    * For commits with NO patch-id equivalent: whether every path the commit
    * touched is nonetheless already reflected on the baseline. A commit can land
@@ -160,14 +152,17 @@ export interface CommitVerdict {
    */
   allFilesReflected: boolean | null;
   files: FileVerdict[];
+  /**
+   * True when `git cherry` found a patch-id-equivalent commit on the baseline.
+   * This is what sees through squash-merge, rebase and cherry-pick: a different
+   * sha carrying identical content.
+   */
+  patchIdPresent: boolean;
+  sha: string;
+  subject: string;
 }
 
 export interface ArchiveMirror {
-  /** The mirror ref inspected, e.g. `archive/enhance-tamagui-theme`. */
-  ref: string;
-  exists: boolean;
-  /** True when the branch IS itself an archive/* mirror, so has no mirror of its own. */
-  isArchiveRef: boolean;
   /**
    * The worst case across the branch and its remote counterpart: how many
    * commits exist that the mirror does NOT have. ANY value above zero means the
@@ -179,6 +174,12 @@ export interface ArchiveMirror {
    * and it must be earned by a comparison that actually ran.
    */
   commitsMissingFromMirror: number | null;
+  exists: boolean;
+  /** True when the branch IS itself an archive/* mirror, so has no mirror of its own. */
+  isArchiveRef: boolean;
+  isExact: boolean;
+  /** The mirror ref inspected, e.g. `archive/enhance-tamagui-theme`. */
+  ref: string;
   /** Which ref produced that worst case (useful when it is the remote, not the local). */
   staleAgainst: string | null;
   /**
@@ -187,7 +188,6 @@ export interface ArchiveMirror {
    * failed and re-run it by hand.
    */
   unmeasuredAgainst: string | null;
-  isExact: boolean;
 }
 
 /**
@@ -210,25 +210,25 @@ export interface ArchiveMirror {
  * out loud what it refuses.
  */
 export function mirrorFullyPreserves(mirror: ArchiveMirror | null): boolean {
-  if (mirror == null || !mirror.exists) return false;
+  if (mirror?.exists !== true) return false;
   if (mirror.commitsMissingFromMirror == null) return false;
   return mirror.commitsMissingFromMirror === 0;
 }
 
 export interface ContentProof {
-  baselineRef: string;
-  branch: string;
-  /** Commits the branch has that the baseline lacks by sha. */
-  uniqueCommits: CommitVerdict[];
-  /** Unique commits whose content is NOT demonstrably present on the baseline. */
-  unaccountedCommits: CommitVerdict[];
-  archiveMirror: ArchiveMirror | null;
   /**
    * The load-bearing conclusion. True ONLY when every unique commit is proven
    * present on the baseline by content. Archive mirroring is reported
    * separately and deliberately does NOT feed this flag.
    */
   allContentOnBaseline: boolean;
+  archiveMirror: ArchiveMirror | null;
+  baselineRef: string;
+  branch: string;
+  /** Unique commits whose content is NOT demonstrably present on the baseline. */
+  unaccountedCommits: CommitVerdict[];
+  /** Commits the branch has that the baseline lacks by sha. */
+  uniqueCommits: CommitVerdict[];
 }
 
 // ---------------------------------------------------------------------------
@@ -247,7 +247,7 @@ export interface ContentProof {
 export type PathOnRef =
   | {kind: 'present'; sha: string}
   | {kind: 'absent'}
-  | {kind: 'unreadable'; command: string; detail: string};
+  | {command: string; detail: string; kind: 'unreadable'};
 
 /**
  * Ask a ref for a path, distinguishing "not there" from "could not look".
@@ -457,46 +457,6 @@ function unreadableVerdict(
 }
 
 /**
- * Compare every path a commit touched against the baseline.
- *
- * This is the comprehensive fallback for commits patch-id could not match. It
- * compares blob shas, so it is exact rather than a heuristic spot-check — the
- * motivating reconcile got burned by checking one signature file and
- * generalising from it.
- *
- * "Every path a commit touched" now includes the path a rename moved AWAY from,
- * which is a second entry with the same `sha` and a `D` status (qyu1.27).
- */
-export function verifyCommitFiles(
-  sha: string,
-  /** What to LOOK UP against — a pinned commit from the walk, or a ref name. */
-  baselineRev: string,
-  cwd: string,
-  /**
-   * What to CALL it in the verdict a failed lookup carries, which
-   * `disposition.ts` prints as "could not read <path> on <ref>". Defaults to
-   * whatever was looked up, which is right when that was a name.
-   */
-  baselineName: string = baselineRev,
-): FileVerdict[] {
-  return changedPaths(sha, cwd).map(
-    ({path, renamedTo, status}): FileVerdict => {
-      const verdict = verifyChangedPath(
-        path,
-        status,
-        sha,
-        {name: baselineName, rev: baselineRev},
-        cwd,
-      );
-      // The annotation rides on whatever the verdict turned out to be,
-      // `unreadable` included — which is where a reader is MOST likely to
-      // wonder why a path absent from the post-state is being looked up at all.
-      return renamedTo == null ? verdict : {...verdict, renamedTo};
-    },
-  );
-}
-
-/**
  * One path's verdict against the baseline.
  *
  * A FAILED LOOK IS NOT A FINDING (home-base-qyu1.24), and it is checked first,
@@ -552,6 +512,46 @@ function verifyChangedPath(
         ? 'identical'
         : 'differs',
   };
+}
+
+/**
+ * Compare every path a commit touched against the baseline.
+ *
+ * This is the comprehensive fallback for commits patch-id could not match. It
+ * compares blob shas, so it is exact rather than a heuristic spot-check — the
+ * motivating reconcile got burned by checking one signature file and
+ * generalising from it.
+ *
+ * "Every path a commit touched" now includes the path a rename moved AWAY from,
+ * which is a second entry with the same `sha` and a `D` status (qyu1.27).
+ */
+export function verifyCommitFiles(
+  sha: string,
+  /** What to LOOK UP against — a pinned commit from the walk, or a ref name. */
+  baselineRev: string,
+  cwd: string,
+  /**
+   * What to CALL it in the verdict a failed lookup carries, which
+   * `disposition.ts` prints as "could not read <path> on <ref>". Defaults to
+   * whatever was looked up, which is right when that was a name.
+   */
+  baselineName: string = baselineRev,
+): FileVerdict[] {
+  return changedPaths(sha, cwd).map(
+    ({path, renamedTo, status}): FileVerdict => {
+      const verdict = verifyChangedPath(
+        path,
+        status,
+        sha,
+        {name: baselineName, rev: baselineRev},
+        cwd,
+      );
+      // The annotation rides on whatever the verdict turned out to be,
+      // `unreadable` included — which is where a reader is MOST likely to
+      // wonder why a path absent from the post-state is being looked up at all.
+      return renamedTo == null ? verdict : {...verdict, renamedTo};
+    },
+  );
 }
 
 /**

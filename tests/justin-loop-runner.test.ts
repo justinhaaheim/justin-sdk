@@ -37,12 +37,17 @@ import {
   type BootContext,
   bootContract,
   checkGate,
+  CLAUDE_BIN_ENV,
   DEFAULT_OPTIONS,
+  handoffDemand,
+  handoffExample,
   parseBackgroundedId,
   parseUsage,
+  readUsage,
   REAL_DEPS,
   sessionContract,
   timeoutDescription,
+  type UsageRead,
   type UsageSnapshot,
 } from '../src/justin-loop/runner';
 import {initRepo} from './git-fixtures';
@@ -197,19 +202,25 @@ describe('checkGate', () => {
   }
 
   /** A quota reader that records whether — and how often — it was consulted. */
-  function countingReader(result: UsageSnapshot | null): {
-    read: () => Promise<UsageSnapshot | null>;
+  function countingReader(result: UsageRead): {
     calls: () => number;
+    read: () => Promise<UsageRead>;
   } {
     let calls = 0;
     return {
       calls: () => calls,
-      read: async () => {
+      read: () => {
         calls++;
-        return result;
+        return Promise.resolve(result);
       },
     };
   }
+
+  /** The reason a `failed` read carries, when the test does not care which. */
+  const UNREADABLE: UsageRead = {
+    kind: 'failed',
+    reason: 'claude -p /usage printed no recognisable quota lines',
+  };
 
   const THRESHOLDS = {sessionStopPct: 50, weeklyStopPct: 80};
 
@@ -218,7 +229,7 @@ describe('checkGate', () => {
     // no process is spawned; reading the quota and then ignoring it would pass
     // a naive kind-only assertion while still hitting the broken /usage path
     // once per iteration.
-    const reader = countingReader(snapshot(5, 10));
+    const reader = countingReader({kind: 'ok', usage: snapshot(5, 10)});
     const decision = await checkGate(
       {...THRESHOLDS, usageGate: false},
       reader.read,
@@ -231,9 +242,8 @@ describe('checkGate', () => {
     // Critical rule 6. A disabled gate must not hand downstream code a
     // fabricated 0%, which would render as an empty quota bar and read as
     // "plenty of room left".
-    const decision = await checkGate(
-      {...THRESHOLDS, usageGate: false},
-      async () => null,
+    const decision = await checkGate({...THRESHOLDS, usageGate: false}, () =>
+      Promise.resolve(UNREADABLE),
     );
     expect(decision).toEqual({kind: 'disabled'});
     expect(decision).not.toHaveProperty('usage');
@@ -242,7 +252,7 @@ describe('checkGate', () => {
   test('gate on: an unreadable quota still fails closed', async () => {
     // The default path, unchanged. This is the exact shape of the live bug:
     // the reader succeeds as a process but parses to null.
-    const reader = countingReader(null);
+    const reader = countingReader(UNREADABLE);
     const decision = await checkGate(
       {...THRESHOLDS, usageGate: true},
       reader.read,
@@ -254,9 +264,8 @@ describe('checkGate', () => {
   test('gate on: the fail-closed reason names /usage so the stop is diagnosable', async () => {
     // A bare "stopped" would have made the original bug much harder to find —
     // the run summary is the only surface a scheduled job leaves behind.
-    const decision = await checkGate(
-      {...THRESHOLDS, usageGate: true},
-      async () => null,
+    const decision = await checkGate({...THRESHOLDS, usageGate: true}, () =>
+      Promise.resolve(UNREADABLE),
     );
     expect(decision.kind === 'unreadable' ? decision.reason : '').toContain(
       '/usage',
@@ -266,29 +275,115 @@ describe('checkGate', () => {
     );
   });
 
+  test("gate on: the fail-closed reason CARRIES the reader's own reason (F1)", async () => {
+    // The point of `UsageRead`: four different failures used to arrive here as
+    // one null, so the stop said the same words whichever had happened.
+    const decision = await checkGate({...THRESHOLDS, usageGate: true}, () =>
+      Promise.resolve({
+        kind: 'failed',
+        reason: 'claude -p /usage timed out after 60000ms',
+      }),
+    );
+    expect(decision.kind === 'unreadable' ? decision.reason : '').toContain(
+      'timed out after 60000ms',
+    );
+  });
+
   test('gate on: proceeds when both windows are under their thresholds', async () => {
-    const decision = await checkGate(
-      {...THRESHOLDS, usageGate: true},
-      async () => snapshot(5, 10),
+    const decision = await checkGate({...THRESHOLDS, usageGate: true}, () =>
+      Promise.resolve({kind: 'ok', usage: snapshot(5, 10)}),
     );
     expect(decision.kind).toBe('ok');
     expect(decision.kind === 'ok' ? decision.usage.sessionPct : null).toBe(5);
   });
 
   test('gate on: trips at the session threshold, inclusive', async () => {
-    const decision = await checkGate(
-      {...THRESHOLDS, usageGate: true},
-      async () => snapshot(50, 10),
+    const decision = await checkGate({...THRESHOLDS, usageGate: true}, () =>
+      Promise.resolve({kind: 'ok', usage: snapshot(50, 10)}),
     );
     expect(decision.kind).toBe('tripped');
   });
 
   test('gate on: trips at the weekly threshold, inclusive', async () => {
-    const decision = await checkGate(
-      {...THRESHOLDS, usageGate: true},
-      async () => snapshot(5, 80),
+    const decision = await checkGate({...THRESHOLDS, usageGate: true}, () =>
+      Promise.resolve({kind: 'ok', usage: snapshot(5, 80)}),
     );
     expect(decision.kind).toBe('tripped');
+  });
+});
+
+/**
+ * `readUsage` names WHICH failure happened (home-base-685h F1).
+ *
+ * Every one of these used to be the same `null`. They are driven through a
+ * scripted `claude` binary rather than a stub, because the thing under test is
+ * exactly the seam between a real child process and the parse — a stub of
+ * `runChild` would assert the branch structure and prove nothing about which
+ * shapes of real output land in which branch.
+ */
+describe('readUsage names the failure (F1)', () => {
+  /** Point `resolveClaudeBin()` at a script that prints `body` and exits `code`. */
+  function scriptedClaude(body: string, code = 0): string {
+    const dir = mkdtempSync(join(tmpdir(), 'justin-loop-usage-'));
+    const bin = join(dir, 'claude');
+    writeFileSync(
+      bin,
+      `#!/bin/sh\ncat <<'USAGE_EOF'\n${body}\nUSAGE_EOF\nexit ${code}\n`,
+    );
+    chmodSync(bin, 0o755);
+    return bin;
+  }
+
+  async function read(body: string, code = 0): Promise<UsageRead> {
+    const previous = process.env[CLAUDE_BIN_ENV];
+    process.env[CLAUDE_BIN_ENV] = scriptedClaude(body, code);
+    try {
+      return await readUsage(import.meta.dirname, 10_000);
+    } finally {
+      if (previous == null) delete process.env[CLAUDE_BIN_ENV];
+      else process.env[CLAUDE_BIN_ENV] = previous;
+    }
+  }
+
+  test('a COMMAND FAILURE is named as one, with the exit code', async () => {
+    const outcome = await read('boom', 3);
+    expect(outcome.kind).toBe('failed');
+    expect(outcome.kind === 'failed' ? outcome.reason : '').toContain(
+      'claude -p /usage',
+    );
+    expect(outcome.kind === 'failed' ? outcome.reason : '').toContain('3');
+  });
+
+  test('UNPARSEABLE JSON is named as unparseable JSON', async () => {
+    const outcome = await read('not json at all');
+    expect(outcome.kind === 'failed' ? outcome.reason : '').toContain(
+      'unparseable JSON',
+    );
+  });
+
+  test('a MISSING `result` field is named as a missing field', async () => {
+    const outcome = await read('{"type":"result","subtype":"success"}');
+    expect(outcome.kind === 'failed' ? outcome.reason : '').toContain(
+      'no string `result` field',
+    );
+  });
+
+  test('quota TEXT that does not match is named separately from bad JSON', async () => {
+    const outcome = await read('{"result":"Credit balance: $12.00"}');
+    const reason = outcome.kind === 'failed' ? outcome.reason : '';
+    expect(reason).toContain('no recognisable quota lines');
+    expect(reason).not.toContain('unparseable JSON');
+  });
+
+  test('a readable quota comes back as `ok` carrying the snapshot', async () => {
+    const outcome = await read(
+      JSON.stringify({
+        result: 'Current session: 7% used\nCurrent week (all models): 11% used',
+      }),
+    );
+    expect(outcome.kind).toBe('ok');
+    expect(outcome.kind === 'ok' ? outcome.usage.sessionPct : null).toBe(7);
+    expect(outcome.kind === 'ok' ? outcome.usage.weekPct : null).toBe(11);
   });
 });
 
@@ -409,9 +504,9 @@ describe('justin-loop --dry-run, end to end with a fake claude on PATH', () => {
   });
 
   interface Fixture {
-    repo: string;
     callLog: string;
     env: Record<string, string | undefined>;
+    repo: string;
   }
 
   function fixture(): Fixture {
@@ -461,7 +556,7 @@ describe('justin-loop --dry-run, end to end with a fake claude on PATH', () => {
   function runDryRun(
     f: Fixture,
     args: string[],
-  ): {out: string; status: number | null; calls: string[]} {
+  ): {calls: string[]; out: string; status: number | null} {
     const proc = spawnSync('bun', [CLI, 'justin-loop', '--dry-run', ...args], {
       cwd: f.repo,
       encoding: 'utf-8',
@@ -580,7 +675,7 @@ describe('REAL_DEPS.dispatch — a failed dispatch says WHY', () => {
       '--bg with bypassPermissions requires accepting the disclaimer first.';
     const banner = await withFakeClaude(
       `echo ${JSON.stringify(refusal)} >&2\nexit 1`,
-      async (repo) => REAL_DEPS.dispatch(repo, ['--bg', 'hello']),
+      async (repo) => await REAL_DEPS.dispatch(repo, ['--bg', 'hello'], {}),
     );
     expect(banner).toContain(refusal);
     expect(banner).toContain('exited 1');
@@ -593,7 +688,7 @@ describe('REAL_DEPS.dispatch — a failed dispatch says WHY', () => {
     // into a good banner, and the id must still parse.
     const banner = await withFakeClaude(
       `echo "backgrounded · abc12345 · a name"\nexit 0`,
-      async (repo) => REAL_DEPS.dispatch(repo, ['--bg', 'hello']),
+      async (repo) => await REAL_DEPS.dispatch(repo, ['--bg', 'hello'], {}),
     );
     expect(banner).toBe('backgrounded · abc12345 · a name\n');
     expect(parseBackgroundedId(banner)).toBe('abc12345');
@@ -670,6 +765,10 @@ describe('sessionContract — the handoff protocol', () => {
         },
       },
     },
+    // The worst case for size is a KNOWN predecessor: the id and the sentence
+    // naming it are longer than the UNKNOWN line (D18, and D19's cap is
+    // measured against the longest boot there is).
+    predecessorSessionId: '01998c54-3f3a-7b21-9d0e-2f5ab0c4e7d1',
   };
 
   test('tells the session its own label, and stamps it onto --from (D5)', () => {
@@ -757,6 +856,83 @@ describe('sessionContract — the handoff protocol', () => {
     expect(contract).toContain('the open questions');
   });
 
+  test('says --next must LEAD with the successor’s slash command (D17)', () => {
+    // home-base-1r6d.33.8. `bead.next` is the successor's WHOLE prompt
+    // (sessionPrompt), and a slash command is only recognised when it leads —
+    // so a /conductor session that writes prose in --next hands its successor a
+    // session with no skill loaded, and nothing anywhere would say why.
+    const flat = contract.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      'If your successor should run under a skill, START --next with that slash command (e.g. `/conductor <ask>`): your --next is its whole prompt, and a slash command only counts when it leads.',
+    );
+  });
+
+  test('neither helper example shows a --next that contradicts D17', () => {
+    // AC2 of 1r6d.33.8: an example whose --next were prose would teach exactly
+    // the shape the sentence above forbids. Both stay angle-bracket
+    // placeholders, in the contract and in the demand the runner sends.
+    const demand = handoffDemand({
+      attempt: 1,
+      attempts: 3,
+      invalid: [],
+      label: LABEL,
+      reason: 'no open handoff bead carries from=justin-loop-3.',
+    });
+    for (const text of [contract, demand]) {
+      expect(text).toContain("--next='<");
+    }
+  });
+
+  test('the demand example is DERIVED from the contract example (F2)', () => {
+    // home-base-685h F2. The demand used to carry its own hand-written copy of
+    // the helper invocation, so the two could drift — and did: different
+    // placeholders, and any change to the helper's flags had to be made twice.
+    // A demanded session is the one least able to notice its example is stale.
+    //
+    // The property asserted is FLAG PARITY, not string equality: the demand
+    // legitimately differs in its --disposition (it shows all three), and it is
+    // indented. Every flag NAME must be the same set, both ways.
+    const demand = handoffDemand({
+      attempt: 1,
+      attempts: 3,
+      invalid: [],
+      label: LABEL,
+      reason: 'no open handoff bead carries from=justin-loop-3.',
+    });
+    const flags = (text: string): string[] => [
+      ...new Set(text.match(/--[a-z][a-z-]*/g) ?? []),
+    ];
+    const exampleFlags = flags(handoffExample(LABEL)).sort();
+    const demandLine =
+      demand.split('\n').find((line) => line.includes('justin-loop handoff')) ??
+      '';
+    expect(demandLine).not.toBe('');
+    expect(flags(demandLine).sort()).toEqual(exampleFlags);
+    // Parity alone would not have caught the drift that prompted F2 — the old
+    // hand-written copy carried the same nine flags with different placeholders.
+    // So the demand's line must BE the contract's example, disposition aside.
+    expect(demandLine).toContain(
+      handoffExample(LABEL, 'continue|done|blocked'),
+    );
+    // And the demand shows all three dispositions, which is the one difference.
+    expect(demandLine).toContain('--disposition=continue|done|blocked');
+    // D13: the demand is the path the permission-prompt block was MEASURED on,
+    // so its example has to stay a single unwrapped line.
+    expect(demand).not.toContain('\\\n');
+    expect(demandLine.trim().split('\n')).toHaveLength(1);
+  });
+
+  test('the blocked disposition says what happens after Justin answers (D16)', () => {
+    // home-base-1r6d.33.7. Without this the model knows only that blocking
+    // stops the loop — it cannot tell its successor-to-be that the answers will
+    // arrive appended to its own --next, which is the text that successor boots
+    // from.
+    const flat = contract.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      'he answers with `justin-sdk justin-loop handoff answer <id>`, which folds his answers into your --next and flips this bead to continue, so a successor boots from that text.',
+    );
+  });
+
   test('names the wrap-up notice as the normal ending (D11)', () => {
     // Sessions here are bounded by context, not by the clock — the notice is
     // the trigger, so the contract has to say so or the session runs on.
@@ -825,6 +1001,27 @@ describe('sessionContract — the handoff protocol', () => {
   });
 
   test('the composed contract stays small enough to pay for every session', () => {
+    // RE-MEASURED 2026-09-19 (home-base-k0b8n.5, epic D18/D19): the contract
+    // alone is still 4,872 chars — that bead changed no contract text — and
+    // 6,224 composed with the pickup preamble carrying a KNOWN predecessor
+    // session id, which is now the worst case of the three boots. The D18 line
+    // cost 230 chars (5,994 → 6,224) and leaves 276 under the cap. The cap is
+    // NOT raised: D19 allows one raise, it was spent below, and later dispatches
+    // fit under 6,500. The UNKNOWN-predecessor form of the same line is 6,125,
+    // so the fixture pins the longer one deliberately.
+    //
+    // RE-MEASURED 2026-09-19 (home-base-1r6d.33.7 + .33.8, epic D19): the
+    // contract alone is 4,872 chars and 5,994 composed with the pickup preamble
+    // — the longest of the three boots. The cap is raised HERE, once, from
+    // 6,000 to 6,500, which is the single raise D19 allows: two sentences the
+    // model cannot work without were added (D16 — how a blocked bead is
+    // answered and what happens next; D17 — --next must LEAD with the
+    // successor's slash command), costing ~330 chars against ~345 of headroom.
+    // Trimming was tried first and bought only 23 chars ("Act accordingly." and
+    // a tightened D16 clause), so it could not pay for them. Later dispatches
+    // fit UNDER 6,500 and re-measure; no further raise without a conductor
+    // decision.
+    //
     // Measured 2026-09-12, after home-base-k7s0 (D13) unwrapped the helper
     // example and added the one-line rule: the contract alone is 4,524 chars,
     // and 5,655 composed with the pickup preamble — the longest of the three
@@ -837,8 +1034,8 @@ describe('sessionContract — the handoff protocol', () => {
     // re-measured here, at the ~4 chars/token that text ran.) Both numbers grow
     // with the length of the interpolated cwd and worktree paths, which is why
     // this fixture uses realistic ones rather than short stubs.
-    expect(contract.length).toBeLessThan(6000);
-    expect(bootContract(contract, pickupBoot).length).toBeLessThan(6000);
+    expect(contract.length).toBeLessThan(6500);
+    expect(bootContract(contract, pickupBoot).length).toBeLessThan(6500);
   });
 });
 

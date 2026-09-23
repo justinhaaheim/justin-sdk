@@ -23,13 +23,13 @@
  * last arm here re-pins it side by side with a fixFn in the same run.
  */
 
+import type {CheckNode} from '../src/check-runner';
+
 import {afterEach, describe, expect, spyOn, test} from 'bun:test';
 import {existsSync} from 'fs';
 import {join} from 'path';
 
-import type {CheckNode} from '../src/check-runner';
-import {runCheckTree, runChecks} from '../src/check-runner';
-
+import {runChecks, runCheckTree} from '../src/check-runner';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -54,7 +54,6 @@ function markerCheck(
 ): CheckNode {
   return {
     check: {
-      label: options.label ?? 'MARKER',
       fn: () => {
         if (existsSync(marker)) return {pass: true};
         return {
@@ -72,6 +71,7 @@ function markerCheck(
             : {}),
         };
       },
+      label: options.label ?? 'MARKER',
     },
   };
 }
@@ -119,7 +119,9 @@ describe('runCheckTree honors fixFn', () => {
   test('a THROWING fixFn is reported loudly and the check stays red', async () => {
     const sb = track(createSandbox());
     const marker = join(sb.path, 'never-written.txt');
-    const errors = spyOn(console, 'error').mockImplementation(() => {});
+    const errors = spyOn(console, 'error').mockImplementation(() => {
+      /* swallowed: the call is asserted, not its output */
+    });
 
     let exitCode: number;
     let said: string;
@@ -148,7 +150,9 @@ describe('runCheckTree honors fixFn', () => {
     const sb = track(createSandbox());
     const broken = join(sb.path, 'broken.txt');
     const sibling = join(sb.path, 'sibling.txt');
-    const errors = spyOn(console, 'error').mockImplementation(() => {});
+    const errors = spyOn(console, 'error').mockImplementation(() => {
+      /* swallowed: the call is asserted, not its output */
+    });
 
     try {
       await runCheckTree(
@@ -173,7 +177,6 @@ describe('runCheckTree honors fixFn', () => {
     const nodes: CheckNode[] = [
       {
         check: {
-          label: 'ASYNC',
           fn: () => {
             if (existsSync(marker)) return {pass: true};
             return {
@@ -185,6 +188,7 @@ describe('runCheckTree honors fixFn', () => {
               pass: false,
             };
           },
+          label: 'ASYNC',
         },
       },
     ];
@@ -234,7 +238,6 @@ describe('runChecks (the flat runner) honors fixFn too', () => {
       [
         markerCheck(fnMarker, {label: 'FN'}).check,
         {
-          label: 'SHELL',
           fn: () => {
             if (existsSync(shellMarker)) return {pass: true};
             return {
@@ -243,6 +246,7 @@ describe('runChecks (the flat runner) honors fixFn too', () => {
               pass: false,
             };
           },
+          label: 'SHELL',
         },
       ],
       {fix: true, quiet: true},

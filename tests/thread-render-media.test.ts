@@ -14,28 +14,36 @@
  * collision was one of the things that made the old format unanswerable.
  */
 
+import type {BdIssue} from '../src/thread/bd';
+import type {ThreadFacts} from '../src/thread/facts';
+import type {ReportModel} from '../src/thread/report-model';
+import type {ThreadReportPayload} from '../src/thread/schema';
+
 import {describe, expect, test} from 'bun:test';
 
 import {askViewOf, orderAsks} from '../src/thread/answer';
 import {renderAnswerPage} from '../src/thread/answer-page';
-import {buildReportModel} from '../src/thread/report-model';
-import {classifyReport} from '../src/thread/report-lines';
 import {renderAnsi} from '../src/thread/render-ansi';
 import {renderHtml} from '../src/thread/render-html';
 import {renderMarkdown} from '../src/thread/render-markdown';
+import {classifyReport} from '../src/thread/report-lines';
+import {buildReportModel} from '../src/thread/report-model';
 import {validateThreadReport} from '../src/thread/schema';
 import {examplePayload} from './thread-schema.test';
 
-import type {BdIssue} from '../src/thread/bd';
-import type {ReportModel} from '../src/thread/report-model';
-import type {ThreadFacts} from '../src/thread/facts';
-import type {ThreadReportPayload} from '../src/thread/schema';
-
 const ESC = '\u001b[';
-const BOLD_UNDERLINE = `${ESC}1m${ESC}4m`;
-const BOLD_RED = `${ESC}1m${ESC}31m`;
+// cli-style emits one combined SGR sequence per styled piece (k0b8n.10).
+const BOLD_UNDERLINE = `${ESC}1;4m`;
+const BOLD_ACCENT = `${ESC}1;35m`;
+const BOLD_RED = `${ESC}1;31m`;
+const RED = `${ESC}31m`;
 const DIM = `${ESC}2m`;
 const RESET = `${ESC}0m`;
+
+/** A line with its layout indentation removed, escapes kept. */
+function unindented(line: string | undefined): string {
+  return (line ?? '').trimStart();
+}
 
 const FACTS: ThreadFacts = {
   aheadBehind: {ahead: 2, behind: 0},
@@ -44,13 +52,19 @@ const FACTS: ThreadFacts = {
   cwd: '/Users/jhaa/Dev/home-base/projects/justin-sdk',
   dirty: false,
   entrypoint: 'cli',
+  firstUserMessage: 'kick this off',
+  firstUserMessageAt: null,
   headSha: '288f3912eed5d51ede9f',
   isWorktree: false,
+  lastAssistantMessage: 'Done — here is the report.',
+  lastAssistantMessageAt: null,
   lastUserMessage: 'build the format v2 dispatch',
+  lastUserMessageAt: null,
   model: 'claude-opus-5',
-  reportedAt: '2026-09-14T09:00:00.000Z',
   repo: 'home-base',
   repoPath: '/Users/jhaa/Dev/home-base',
+  reportedAt: '2026-09-14T09:00:00.000Z',
+  resumeCommand: "cd '/repo' && claude --resume session-1",
   sessionId: '0afafc56-cf96-47cd-85bb-92a5e6e56da6',
   startedAt: '2026-09-14T07:00:00.000Z',
   tokensAtStop: 497_312,
@@ -148,7 +162,7 @@ describe('one fixture, three media', () => {
     expect(MARKDOWN).toContain(`- ⚠️ MISTAKE — ${text}`);
     // ANSI: the same weight as a P0 ask — bold red, not a dim bullet.
     const mistakeLine = ANSI.split('\n').find((line) => line.includes(text));
-    expect(mistakeLine?.startsWith(BOLD_RED)).toBe(true);
+    expect(unindented(mistakeLine).startsWith(BOLD_RED)).toBe(true);
     // HTML: its own class, so the answer page can make it loud.
     expect(HTML).toContain('<p class="mistake">');
     // And the quieter kinds do NOT reach the compact report at all.
@@ -158,25 +172,27 @@ describe('one fixture, three media', () => {
 
   test('the pointer line is dim in ansi and classed in html', () => {
     const pointer = ANSI.split('\n').find((line) => line.includes('📎 '));
-    expect(pointer?.startsWith(DIM)).toBe(true);
+    expect(unindented(pointer).startsWith(DIM)).toBe(true);
     expect(HTML).toContain('<p class="pointer">');
   });
 
-  test('markdown has NO escape codes and a blank line between header groups', () => {
+  test('markdown has NO escape codes and a blank line between every line of the header', () => {
     expect(MARKDOWN.includes(ESC)).toBe(false);
     const lines = MARKDOWN.split('\n');
-    // rule · blank · glance · blank · where · tree · blank · thread…
+    // rule · blank · glance · blank · where · blank · tree · blank · thread… (K11 rule 1)
     expect(lines[1]).toBe('');
     expect(lines[2]?.startsWith('⚡ ')).toBe(true);
     expect(lines[3]).toBe('');
     expect(lines[4]?.startsWith('📦 ')).toBe(true);
-    expect(lines[6]).toBe('');
-    expect(lines[7]?.startsWith('**Thread:**')).toBe(true);
+    expect(lines[5]).toBe('');
+    expect(lines[6]?.startsWith('🌲 ')).toBe(true);
+    expect(lines[7]).toBe('');
+    expect(lines[8]?.startsWith('**Thread:**')).toBe(true);
   });
 
-  test('ansi bolds and UNDERLINES field names', () => {
+  test('ansi bolds and UNDERLINES field names; headings are bold accent with their emoji', () => {
     expect(ANSI).toContain(`${BOLD_UNDERLINE}Thread:${RESET} `);
-    expect(ANSI_FULL).toContain(`${BOLD_UNDERLINE}What I did:${RESET}`);
+    expect(ANSI_FULL).toContain(`  ${BOLD_ACCENT}✅ What I did${RESET}`);
   });
 
   test('ansi colours a P0 bold red and dims a P3, detail lines included', () => {
@@ -185,13 +201,18 @@ describe('one fixture, three media', () => {
     const lines = ANSI_FULL.split('\n');
     const p0Index = lines.findIndex((line) => line.includes('🛑 P0 · ['));
     expect(p0Index).toBeGreaterThan(-1);
-    expect(lines[p0Index]?.startsWith(BOLD_RED)).toBe(true);
-    // A continuation line inherits its ask's priority — the context under a P0
-    // must not come out unstyled because the line before it was indented.
-    expect(lines[p0Index + 1]?.startsWith(BOLD_RED)).toBe(true);
+    expect(unindented(lines[p0Index]).startsWith(BOLD_RED)).toBe(true);
+    // A detail line inherits its ask's COLOUR — the context under a P0 must not
+    // come out unstyled because a blank line (K11 rule 1) now separates it from
+    // the ask. It is red, not bold red: bold is the ask line's own.
+    expect(lines[p0Index + 1]).toBe('');
+    expect(
+      unindented(lines[p0Index + 2]).startsWith(`${ESC}31;1mContext:`),
+    ).toBe(true);
+    expect(lines[p0Index + 2]).toContain(`${RED} The adapter`);
     const p3Index = lines.findIndex((line) => line.includes('(P3) · ['));
-    expect(lines[p3Index]?.startsWith(DIM)).toBe(true);
-    expect(lines[p3Index + 1]?.startsWith(DIM)).toBe(true);
+    expect(unindented(lines[p3Index]).startsWith(DIM)).toBe(true);
+    expect(unindented(lines[p3Index + 2]).startsWith(DIM)).toBe(true);
   });
 
   test('ansi with color:false is the markdown, byte for byte', () => {
@@ -203,7 +224,7 @@ describe('one fixture, three media', () => {
   test('html escapes everything and marks the P0 with a class', () => {
     expect(HTML).toContain('<p class="ask p0">');
     expect(HTML_FULL).toContain('<p class="ask p3">');
-    expect(HTML_FULL).toContain('<h3>What I did</h3>');
+    expect(HTML_FULL).toContain('<h3>✅ What I did</h3>');
     expect(HTML.includes(ESC)).toBe(false);
 
     const raw = examplePayload();
@@ -334,7 +355,7 @@ describe('no surface letters an ask', () => {
     ] as const) {
       const lettered = text
         .split('\n')
-        .map((line) => line.replace(/<[^>]*>/gu, ''))
+        .map((line) => Bun.stripANSI(line).replace(/<[^>]*>/gu, ''))
         .filter((line) => LETTERED_ASK.test(line));
       expect([surface, lettered]).toEqual([surface, []]);
     }
@@ -342,13 +363,13 @@ describe('no surface letters an ask', () => {
     // …and the numbers really are there, so an empty "no letters" result cannot
     // be an empty document passing by default.
     expect(MARKDOWN).toContain('  1. 🛑 P0 · [Approve Y/n]');
-    expect(ANSI).toContain('  1. 🛑 P0 · [Approve Y/n]');
+    expect(Bun.stripANSI(ANSI)).toContain('      1. 🛑 P0 · [Approve Y/n]');
     expect(HTML).toContain('<strong>1.</strong>');
     expect(walk).toContain('1/2 · th-eru.9');
     expect(page).toContain('th-eru.9');
 
     // The OPTIONS, by contrast, are lettered — so the filter above is looking
     // at a document that really does contain lettered lines.
-    expect(MARKDOWN).toContain('     a. (Recommended) Keep closing');
+    expect(MARKDOWN).toContain('     - a. (Recommended) Keep closing');
   });
 });

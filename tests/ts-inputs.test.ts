@@ -21,12 +21,12 @@ import {existsSync, readFileSync} from 'fs';
 import {dirname, join, resolve} from 'path';
 
 import {stepSetupEnvScript} from '../src/base-setup';
+import {setQuiet} from '../src/setup-helpers';
 import {
   classifyTsCheckOutcome,
   findTypeScriptSources,
   TS_NO_INPUTS_CODE,
 } from '../src/ts-inputs';
-import {setQuiet} from '../src/setup-helpers';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const SDK_ROOT = resolve(import.meta.dirname, '..');
@@ -123,7 +123,7 @@ function tsFixture(
 }
 
 /** Run the SDK's own `signal` in `cwd` and return its combined output. */
-function runSignalCli(cwd: string): {output: string; exitCode: number} {
+function runSignalCli(cwd: string): {exitCode: number; output: string} {
   const proc = Bun.spawnSync(
     ['bun', join(SDK_ROOT, 'src', 'cli.ts'), 'signal'],
     {

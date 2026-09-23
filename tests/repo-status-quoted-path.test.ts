@@ -48,14 +48,14 @@ import {mkdirSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {
+  type FileVerdict,
   proveContentOnBaseline,
   verifyCommitFiles,
-  type FileVerdict,
 } from '../src/repo-status/content';
 import {buildPlan, type CleanupPlan} from '../src/repo-status/plan';
 import {
-  buildReport,
   type BranchRow,
+  buildReport,
   type RepoStatusReport,
 } from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -184,12 +184,12 @@ function branchDeleting(repo: string, branch: string, paths: string[]): string {
 }
 
 interface Fixture {
+  /** Deletes every `gone/*` name — the baseline dropped them too. */
+  dropGoneSha: string;
   /** Deletes every `keep/*` name — the baseline still has every one of them. */
   dropKeptSha: string;
   /** Deletes only the names the old parser mangled. */
   dropQuotedSha: string;
-  /** Deletes every `gone/*` name — the baseline dropped them too. */
-  dropGoneSha: string;
   /** The ASCII control: deletions genuinely reflected, plus an identical add. */
   genuineDeleteSha: string;
   /** A rename and a delete in ONE commit — three records then two. */
@@ -570,16 +570,16 @@ describe('`:(literal)` survives every filename family', () => {
         `:(literal)${gonePath(t)}`,
       ]);
       return {
-        absent: {status: absent.status, empty: absent.stdout.trim() === ''},
-        present: {status: present.status, empty: present.stdout.trim() === ''},
+        absent: {empty: absent.stdout.trim() === '', status: absent.status},
+        present: {empty: present.stdout.trim() === '', status: present.status},
         slug: t.slug,
       };
     });
 
     expect(results).toEqual(
       TRICKY.map((t) => ({
-        absent: {status: 0, empty: true},
-        present: {status: 0, empty: false},
+        absent: {empty: true, status: 0},
+        present: {empty: false, status: 0},
         slug: t.slug,
       })),
     );

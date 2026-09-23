@@ -14,16 +14,16 @@
  * because what is under test is what bd LEAVES BEHIND when it dies mid-sequence.
  */
 
+import type {ThreadFacts} from '../src/thread/facts';
+import type {ThreadReportPayload} from '../src/thread/schema';
+
 import {describe, expect, test} from 'bun:test';
 
 import {bdContext} from '../src/thread/bd';
-import {createFakeBd} from './fake-bd';
-import {validateThreadReport} from '../src/thread/schema';
 import {writeReportToBd} from '../src/thread/report';
+import {validateThreadReport} from '../src/thread/schema';
+import {createFakeBd} from './fake-bd';
 import {examplePayload} from './thread-schema.test';
-
-import type {ThreadFacts} from '../src/thread/facts';
-import type {ThreadReportPayload} from '../src/thread/schema';
 
 const SESSION = 'sess-orphan';
 
@@ -35,13 +35,19 @@ function facts(reportedAt: string): ThreadFacts {
     cwd: '/tmp',
     dirty: false,
     entrypoint: 'cli',
+    firstUserMessage: 'kick this off',
+    firstUserMessageAt: null,
     headSha: 'abc123',
     isWorktree: false,
+    lastAssistantMessage: 'Done — here is the report.',
+    lastAssistantMessageAt: null,
     lastUserMessage: 'go',
+    lastUserMessageAt: null,
     model: 'claude-opus-5',
-    reportedAt,
     repo: 'justin-sdk',
     repoPath: '/tmp',
+    reportedAt,
+    resumeCommand: "cd '/repo' && claude --resume session-1",
     sessionId: SESSION,
     startedAt: '2026-09-12T07:00:00.000Z',
     tokensAtStop: 1,
@@ -55,7 +61,6 @@ function twoAskPayload(): ThreadReportPayload {
   const raw = examplePayload();
   raw.asks = [
     {
-      priority: 0,
       context: 'the first question',
       default: 'I take a.',
       kind: 'pick',
@@ -63,14 +68,15 @@ function twoAskPayload(): ThreadReportPayload {
         {recommended: true, text: 'a. do it'},
         {recommended: false, text: 'b. wait'},
       ],
+      priority: 0,
       text: 'Ask one?',
     },
     {
-      priority: 3,
       context: 'the second question',
       default: 'I leave it.',
       kind: 'approve',
       options: [],
+      priority: 3,
       text: 'Ask two?',
     },
   ];
@@ -207,12 +213,14 @@ describe('a report interrupted between its two asks', () => {
     if (second.status !== 'written') throw new Error('unreachable');
 
     const asksSection = second.rendered.slice(
-      second.rendered.indexOf('**Asks — everything I need from you:**'),
-      second.rendered.indexOf('**Prior asks'),
+      second.rendered.indexOf('**🙋 Asks — everything I need from you:**'),
+      second.rendered.indexOf('**🗂️ Prior asks'),
     );
     expect(asksSection).not.toContain('you are not blocking anything');
     expect(asksSection).toContain('Ask one?');
-    expect(asksSection).toContain('a. do it');
+    // The option text was written as 'a. do it'; its letter prints ONCE (k0b8n.10).
+    expect(asksSection).toContain('- a. (Recommended) do it');
+    expect(asksSection).not.toContain('a. (Recommended) a.');
     expect(asksSection).toContain('IF UNANSWERED: I take a.');
     expect(asksSection).toContain('(carried from report #1)');
   });

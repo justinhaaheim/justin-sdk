@@ -32,16 +32,16 @@
  * returned all of them to green.
  */
 
+import type {ThreadFacts} from '../src/thread/facts';
+import type {ThreadPriorAsk, ThreadReportPayload} from '../src/thread/schema';
+
 import {describe, expect, test} from 'bun:test';
 
 import {bdContext} from '../src/thread/bd';
-import {createFakeBd, type FakeState} from './fake-bd';
-import {validateThreadReport} from '../src/thread/schema';
 import {writeReportToBd} from '../src/thread/report';
+import {validateThreadReport} from '../src/thread/schema';
+import {createFakeBd, type FakeState} from './fake-bd';
 import {examplePayload} from './thread-schema.test';
-
-import type {ThreadFacts} from '../src/thread/facts';
-import type {ThreadPriorAsk, ThreadReportPayload} from '../src/thread/schema';
 
 const OLD_THREAD = 'jl-a';
 const OLD_ASK_ONE = 'jl-a.1';
@@ -56,13 +56,19 @@ function facts(reportedAt = '2026-09-14T10:00:00.000Z'): ThreadFacts {
     cwd: '/tmp',
     dirty: false,
     entrypoint: 'cli',
+    firstUserMessage: 'kick this off',
+    firstUserMessageAt: null,
     headSha: 'abc123',
     isWorktree: false,
+    lastAssistantMessage: 'Done — here is the report.',
+    lastAssistantMessageAt: null,
     lastUserMessage: 'keep going',
+    lastUserMessageAt: null,
     model: 'claude-opus-5',
-    reportedAt,
     repo: 'justin-sdk',
     repoPath: '/tmp',
+    reportedAt,
+    resumeCommand: "cd '/repo' && claude --resume session-1",
     sessionId: SESSION,
     startedAt: '2026-09-14T09:00:00.000Z',
     tokensAtStop: 1,

@@ -174,8 +174,26 @@ export function coreConfigNames(projectRoot: string): string[] {
  * like an empty list — doctor would print "no checks registered" and exit 0.
  */
 export type ResolvedComponents =
-  | {ok: true; components: string[]; source: 'config' | 'core'}
+  | {components: string[]; ok: true; source: 'config' | 'core'}
   | {ok: false; reason: string};
+
+/**
+ * base-setup, first, then the rest — deduped.
+ *
+ * The resolved list answers "what does this repo HAVE", and the answer always
+ * includes base-setup: every installer applies it, so an enrolled repo has it by
+ * construction, and the config file that asks the question was written by it.
+ * Leaving it out would switch off doctor's base checks (BUN, ENV_HYDRATION, the
+ * SDK pin) for every repo that stopped listing it — the most valuable checks
+ * there are, silently skipped.
+ *
+ * It is still kept OUT of what `add` WRITES: it is not a component anyone can
+ * choose or remove, so listing it in every config in the fleet is noise.
+ */
+function withImplicit(configNames: readonly string[]): string[] {
+  const implicit = configNameFor(IMPLICIT_COMPONENT);
+  return [implicit, ...configNames.filter((name) => name !== implicit)];
+}
 
 /**
  * Expand a parsed `justin-sdk.config.json` to the `-setup` component names it
@@ -223,24 +241,6 @@ export function resolveComponents(
     };
   }
   return {components: withImplicit(raw), ok: true, source: 'config'};
-}
-
-/**
- * base-setup, first, then the rest — deduped.
- *
- * The resolved list answers "what does this repo HAVE", and the answer always
- * includes base-setup: every installer applies it, so an enrolled repo has it by
- * construction, and the config file that asks the question was written by it.
- * Leaving it out would switch off doctor's base checks (BUN, ENV_HYDRATION, the
- * SDK pin) for every repo that stopped listing it — the most valuable checks
- * there are, silently skipped.
- *
- * It is still kept OUT of what `add` WRITES: it is not a component anyone can
- * choose or remove, so listing it in every config in the fleet is noise.
- */
-function withImplicit(configNames: readonly string[]): string[] {
-  const implicit = configNameFor(IMPLICIT_COMPONENT);
-  return [implicit, ...configNames.filter((name) => name !== implicit)];
 }
 
 /**

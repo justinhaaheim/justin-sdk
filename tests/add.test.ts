@@ -50,7 +50,7 @@ beforeAll(() => {
     // ignore
   }
   const existing = process.env.MISE_TRUSTED_CONFIG_PATHS;
-  if (existing) trustPaths.add(existing);
+  if (existing != null && existing !== '') trustPaths.add(existing);
   process.env.MISE_TRUSTED_CONFIG_PATHS = Array.from(trustPaths).join(':');
 
   try {

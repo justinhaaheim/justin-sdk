@@ -33,9 +33,9 @@
  * hooks (time-check, usage-check) never pay for it. See src/cli.ts.
  */
 
-import {z} from 'zod';
-
 import type {ThreadFacts} from './facts';
+
+import {z} from 'zod';
 
 /** Bumped when a field's MEANING changes, not when one is added. */
 export const THREAD_SCHEMA_VERSION = 3;
@@ -294,6 +294,13 @@ export const threadReportSchema = z.strictObject({
     .nullable()
     .optional()
     .describe('Thread bead id this session continues, when it continues one.'),
+  continuesFromSession: z
+    .string()
+    .nullable()
+    .optional()
+    .describe(
+      'NOT WRITTEN BY HAND. The predecessor CLAUDE SESSION id in force when the report was archived (home-base-685h F9), so a spool drain can still resolve the link after the environment that supplied it is gone.',
+    ),
   deviations: z
     .array(deviationSchema)
     .describe(
@@ -379,7 +386,6 @@ export type ThreadDeviation = z.infer<typeof deviationSchema>;
  */
 export type PayloadValidation =
   | {
-      status: 'ok';
       /**
        * Ask ids a MIGRATION is keeping open (D24) — the v2 `carried` bridge, and
        * nothing else ever sets it.
@@ -391,12 +397,6 @@ export type PayloadValidation =
        */
       keepOpenAskIds: string[];
       /**
-       * One line per substitution a migration actually made, for `thread report`
-       * to print. Empty when the payload was already current — an empty list
-       * here means "nothing was substituted", never "we did not look".
-       */
-      migrationNotes: string[];
-      /**
        * The version the payload ARRIVED as when it had to be migrated, and null
        * when it was already current. Never absent: a migration is a real event
        * that changed what the report says (a v1 `blocking: false` becomes a P3,
@@ -405,9 +405,16 @@ export type PayloadValidation =
        * validation layer — the report would look like it meant what it now says.
        */
       migratedFrom: number | null;
+      /**
+       * One line per substitution a migration actually made, for `thread report`
+       * to print. Empty when the payload was already current — an empty list
+       * here means "nothing was substituted", never "we did not look".
+       */
+      migrationNotes: string[];
       payload: ThreadReportPayload;
+      status: 'ok';
     }
-  | {status: 'invalid'; issues: string[]};
+  | {issues: string[]; status: 'invalid'};
 
 function formatIssuePath(path: readonly PropertyKey[]): string {
   if (path.length === 0) return '(root)';
@@ -440,15 +447,29 @@ export const threadFactsSchema = z.looseObject({
   cwd: z.string(),
   dirty: z.boolean().nullable(),
   entrypoint: z.string().nullable(),
+  // The k0b8n K4 message fields, all `.default(null)`. That default is the
+  // "yesterday's spooled report must still replay" rule above, applied: a facts
+  // document archived before these existed carries no such key, and a bare
+  // `.nullable()` would reject it outright. `null` here therefore means EITHER
+  // "the build that wrote this could not read it" OR "the build that wrote this
+  // did not know about it" — which is why `autofillFailures` is the thing that
+  // says why, and why a reader prints "(not captured: …)" from that list rather
+  // than inferring a reason from the null.
+  firstUserMessage: z.string().nullable().default(null),
+  firstUserMessageAt: z.string().nullable().default(null),
   headSha: z.string().nullable(),
   isWorktree: z.boolean().nullable(),
+  lastAssistantMessage: z.string().nullable().default(null),
+  lastAssistantMessageAt: z.string().nullable().default(null),
   lastUserMessage: z.string().nullable(),
+  lastUserMessageAt: z.string().nullable().default(null),
   model: z.string().nullable(),
+  repo: z.string().nullable(),
+  repoPath: z.string().nullable(),
   reportedAt: nonEmpty('facts.reportedAt').describe(
     'The stamp the supersede guard compares. NEVER absent.',
   ),
-  repo: z.string().nullable(),
-  repoPath: z.string().nullable(),
+  resumeCommand: z.string().nullable().default(null),
   sessionId: z.string().nullable(),
   startedAt: z.string().nullable(),
   tokensAtStop: z.number().nullable(),
@@ -457,8 +478,8 @@ export const threadFactsSchema = z.looseObject({
 });
 
 export type FactsValidation =
-  | {status: 'ok'; facts: ThreadFacts}
-  | {status: 'invalid'; issues: string[]};
+  | {facts: ThreadFacts; status: 'ok'}
+  | {issues: string[]; status: 'invalid'};
 
 /** Validate an archived facts document. Never throws. */
 export function validateThreadFacts(parsed: unknown): FactsValidation {
@@ -699,6 +720,10 @@ export const PAYLOAD_PRIORITY_GUIDANCE: readonly string[] = [
   ),
   '  P0 is for a session that is genuinely STOPPED. If you kept working, it was not P0.',
   '  Asks are always NUMBERED (one sequence, every priority); only options get letters.',
+  // k0b8n.10 (K11 rule 7): an option written as "a. Merge" printed as
+  // "a. (Recommended) a. Merge". The renderer strips a matching label now, but
+  // the payload should not carry one in the first place.
+  '  Write option text WITHOUT a letter — no "a.", "(a)" or "a —": the renderer prints the letters.',
 ];
 
 /**
@@ -722,17 +747,16 @@ export const PAYLOAD_MUST_SEE_GUIDANCE: readonly string[] = [
   'MUST-SEE — what Justin actually reads. The compact report is ONLY:',
   '  · your P0 and P1 asks, in full',
   '  · your deviations of kind "mistake", in full',
-  '  Everything else (what you did, what you learned, your answers, P2-P4 asks,',
-  '  judgment calls, FYIs, next steps) is on the bead and behind --full. He MAY read it.',
+  // One sentence, one line (critical rule 14, k0b8n.10): these were wrapped by
+  // hand at ~80 columns, which is wrong in every terminal but an 80-column one.
+  '  Everything else (what you did, what you learned, your answers, P2-P4 asks, judgment calls, FYIs, next steps) is on the bead and behind --full. He MAY read it.',
   '',
   'BEFORE YOU REPORT, re-read every P0, every P1 and every mistake and ask:',
   '  "is this as important as I think, and would Justin want to see it above everything else?"',
-  '  Most things are not must-see. Demote what is not. A compact report that is',
-  '  long is a compact report he stops reading.',
+  '  Most things are not must-see. Demote what is not. A compact report that is long is a compact report he stops reading.',
   '',
-  'ASKS ARE WRITTEN ONCE (D24). Every open ask from your last report is closed for you:',
-  '  "decided: <the default that ask recorded>". To keep a question alive, write it',
-  '  AGAIN as a new ask with "supersedes": "<old ask id>" — never edit the old one.',
+  'ASKS ARE WRITTEN ONCE (D24).',
+  '  Every open ask from your last report is closed for you: "decided: <the default that ask recorded>". To keep a question alive, write it AGAIN as a new ask with "supersedes": "<old ask id>" — never edit the old one.',
   '  List an ask in priorAsks only if Justin ANSWERED it (quote him) or it became IRRELEVANT.',
 ];
 
@@ -754,7 +778,12 @@ export function payloadSkeleton(
         context: '<the hook back into what this is about>',
         default: '<what you will do if he never answers>',
         kind: 'approve',
-        options: [{recommended: true, text: '<option a — upside/downside>'}],
+        options: [
+          {
+            recommended: true,
+            text: '<the option itself, NO letter — upside/downside>',
+          },
+        ],
         priority: 3,
         supersedes: null,
         text: '<the question or action, one line>',

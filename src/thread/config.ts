@@ -18,29 +18,40 @@
  * about.
  */
 
+import type {EnvLike} from './paths';
+
+import {findProjectRoot} from '../health-notices';
 import {
-  isConfigProblem,
   describeConfigOutcome,
+  isConfigProblem,
   readProjectConfig,
   readUserConfig,
 } from '../sdk-config';
-import {findProjectRoot} from '../health-notices';
 import {readUsageCheckConfig, resolveUsageCheckConfig} from '../usage-check';
-
 import {
   THREAD_ANSWER_UIS,
   THREAD_CONFIG_KEY,
   THREAD_DEFAULT_ANSWER_UI,
   THREAD_DEFAULT_AUTO_COMMIT,
   THREAD_DEFAULT_AUTO_PUSH,
+  THREAD_DEFAULT_CAPTURE,
   THREAD_DEFAULT_EMOJI_HEADER,
   THREAD_DEFAULT_ENABLED,
   THREAD_DEFAULT_ENFORCE,
+  THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
+  THREAD_DEFAULT_ENFORCE_MODE,
   THREAD_DEFAULT_START_ON_SESSION_START,
+  THREAD_ENFORCE_MODES,
   type ThreadAnswerUi,
+  type ThreadEnforceMode,
 } from './defaults';
 
-import type {EnvLike} from './paths';
+function isThreadEnforceMode(value: unknown): value is ThreadEnforceMode {
+  return (
+    typeof value === 'string' &&
+    (THREAD_ENFORCE_MODES as readonly string[]).includes(value)
+  );
+}
 
 export function isThreadAnswerUi(value: unknown): value is ThreadAnswerUi {
   return (
@@ -55,10 +66,6 @@ export type ThreadConfigSource = 'default' | 'project' | 'user';
 export interface ResolvedThreadConfig {
   /** Which UI `thread answer` opens. */
   answerUi: ThreadAnswerUi;
-  /** Whether the report header is emoji-prefixed values or titled fields (D19). */
-  emojiHeader: boolean;
-  /** Which layer decided `emojiHeader`. */
-  emojiHeaderSource: ThreadConfigSource;
   /** Which layer decided `answerUi`. */
   answerUiSource: ThreadConfigSource;
   /** Whether the tool commits `.beads/issues.jsonl` after each write batch. */
@@ -69,13 +76,34 @@ export interface ResolvedThreadConfig {
   autoPush: boolean;
   /** Which layer decided `autoPush`. */
   autoPushSource: ThreadConfigSource;
+  /**
+   * Whether the `thread capture` hooks record every prompt and yield (K10).
+   * The RAW knob — capture runs only when this AND `enabled` are true; use
+   * `captureActive` for that answer.
+   */
+  capture: boolean;
+  /** `enabled && capture`: what the hook actually branches on (K10). */
+  captureActive: boolean;
+  /** Which layer decided `capture`. */
+  captureSource: ThreadConfigSource;
+  /** Whether the report header is emoji-prefixed values or titled fields (D19). */
+  emojiHeader: boolean;
+  /** Which layer decided `emojiHeader`. */
+  emojiHeaderSource: ThreadConfigSource;
   enabled: boolean;
   /** Whether the Stop hook may block a report it cannot prove was recorded. */
   enforce: boolean;
+  /** `workTurns` turns of at least this many minutes count as work (K12). */
+  enforceMinTurnMinutes: number;
+  enforceMinTurnMinutesSource: ThreadConfigSource;
+  /** What the armed Stop hook refuses (K12). Default `reportShaped`. */
+  enforceMode: ThreadEnforceMode;
+  enforceModeSource: ThreadConfigSource;
   /** Which layer decided `enforce`. */
   enforceSource: ThreadConfigSource;
   /** Human-readable config read problems. Empty means both files were fine. */
   problems: string[];
+  projectRoot: string;
   /**
    * The configured threads repo, or null for "no layer said" — which is a
    * DISTINCT answer from a path, and is what lets `paths.ts` fall through to
@@ -90,7 +118,6 @@ export interface ResolvedThreadConfig {
   startOnSessionStart: boolean;
   /** Which layer decided `startOnSessionStart`. */
   startSource: ThreadConfigSource;
-  projectRoot: string;
 }
 
 /**
@@ -173,6 +200,7 @@ export function resolveThreadConfig(
   const autoCommit = resolveFlag('autoCommit', THREAD_DEFAULT_AUTO_COMMIT);
   const autoPush = resolveFlag('autoPush', THREAD_DEFAULT_AUTO_PUSH);
   const enforce = resolveFlag('enforce', THREAD_DEFAULT_ENFORCE);
+  const capture = resolveFlag('capture', THREAD_DEFAULT_CAPTURE);
 
   // `render` is the one NESTED block in the thread section, so it needs its own
   // walk rather than `resolveFlag`'s. Same layering: default, then user, then
@@ -220,6 +248,42 @@ export function resolveThreadConfig(
     answerUiSource = layer.name;
   }
 
+  // K12: a misspelled mode is NAMED and ignored, exactly like answerUi — a
+  // refusal experiment that silently reads as off would be invisible.
+  let enforceMode: ThreadEnforceMode = THREAD_DEFAULT_ENFORCE_MODE;
+  let enforceModeSource: ThreadConfigSource = 'default';
+  let enforceMinTurnMinutes = THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES;
+  let enforceMinTurnMinutesSource: ThreadConfigSource = 'default';
+  for (const layer of layers) {
+    const section = threadSectionIn(layer.config);
+    const mode = section?.enforceMode;
+    if (mode !== undefined) {
+      if (isThreadEnforceMode(mode)) {
+        enforceMode = mode;
+        enforceModeSource = layer.name;
+      } else {
+        problems.push(
+          `componentConfig.thread.enforceMode in the ${layer.name} config is ${JSON.stringify(mode)}, which is not one of ${THREAD_ENFORCE_MODES.join(', ')} — ignoring it and using ${enforceMode}.`,
+        );
+      }
+    }
+    const minutes = section?.enforceMinTurnMinutes;
+    if (minutes !== undefined) {
+      if (
+        typeof minutes === 'number' &&
+        Number.isFinite(minutes) &&
+        minutes > 0
+      ) {
+        enforceMinTurnMinutes = minutes;
+        enforceMinTurnMinutesSource = layer.name;
+      } else {
+        problems.push(
+          `componentConfig.thread.enforceMinTurnMinutes in the ${layer.name} config is ${JSON.stringify(minutes)}, which is not a positive number — ignoring it and using ${enforceMinTurnMinutes}.`,
+        );
+      }
+    }
+  }
+
   return {
     answerUi,
     answerUiSource,
@@ -227,10 +291,17 @@ export function resolveThreadConfig(
     autoCommitSource: autoCommit.source,
     autoPush: autoPush.value,
     autoPushSource: autoPush.source,
+    capture: capture.value,
+    captureActive: enabled.value && capture.value,
+    captureSource: capture.source,
     emojiHeader,
     emojiHeaderSource,
     enabled: enabled.value,
     enforce: enforce.value,
+    enforceMinTurnMinutes,
+    enforceMinTurnMinutesSource,
+    enforceMode,
+    enforceModeSource,
     enforceSource: enforce.source,
     problems,
     projectRoot,

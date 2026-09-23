@@ -88,12 +88,12 @@ function promptsFixture(sb: Sandbox): string {
 }
 
 interface Fixture {
-  root: string;
   config: () => Record<string, unknown>;
   pkg: () => {
     devDependencies?: Record<string, string>;
     scripts?: Record<string, string>;
   };
+  root: string;
 }
 
 /**
@@ -144,16 +144,16 @@ function enrolledRepo(sb: Sandbox): Fixture {
     'justin-sdk.config.json',
     `${JSON.stringify(
       {
-        components: [
-          'gitignore-setup',
-          'prettier-setup',
-          'critical-rules-setup',
-        ],
         componentConfig: {
           'critical-rules': {modules: ['alpha', 'omega']},
           'time-check': {gapHours: 4},
           'usage-check': {enabled: true},
         },
+        components: [
+          'gitignore-setup',
+          'prettier-setup',
+          'critical-rules-setup',
+        ],
         lastSynced: '2000-01-01',
         version: '0.0.1-fixture',
       },
@@ -167,8 +167,7 @@ function enrolledRepo(sb: Sandbox): Fixture {
   git(root, ['commit', '-qm', 'enrolled, old style']);
 
   return {
-    config: () =>
-      readJson(join(root, 'justin-sdk.config.json')) as Record<string, unknown>,
+    config: () => readJson(join(root, 'justin-sdk.config.json'))!,
     pkg: () =>
       JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8')) as {
         devDependencies?: Record<string, string>;

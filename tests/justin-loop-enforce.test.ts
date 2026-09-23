@@ -32,6 +32,7 @@ import {
 } from '../src/justin-loop/runner';
 import {
   argOf,
+  at,
   beadFrom,
   type LoopResult,
   promptOf,
@@ -184,7 +185,7 @@ describe('handoffDemand: what the session is actually told', () => {
 describe('AC2: an ended session with no handoff is resumed and told to write one', () => {
   /** Session 1 hands off nothing, then complies on the first demand. */
   async function compliesOnDemandOne(): Promise<LoopResult> {
-    return runLoop({
+    return await runLoop({
       opts: {label: 'the-arc', maxSessions: 1},
       scans: [
         [], // start of run: nothing waiting
@@ -199,13 +200,13 @@ describe('AC2: an ended session with no handoff is resumed and told to write one
     const demands = resumes(r.dispatches);
     expect(demands).toHaveLength(1);
     // `sess-1-full-uuid`, not `sess-1`: the short id would start a copy.
-    expect(demands[0][2]).toBe('sess-1-full-uuid');
-    expect(demands[0][2]).not.toBe('sess-1');
+    expect(at(at(demands, 0), 2)).toBe('sess-1-full-uuid');
+    expect(at(at(demands, 0), 2)).not.toBe('sess-1');
   });
 
   test('the demand names the helper command and this session label', async () => {
     const r = await compliesOnDemandOne();
-    const text = promptOf(resumes(r.dispatches)[0]);
+    const text = promptOf(at(resumes(r.dispatches), 0));
     expect(text).toContain('justin-sdk justin-loop handoff');
     expect(text).toContain('--from=the-arc-1');
     expect(r.stdout).toContain('demand 1/3');
@@ -232,13 +233,15 @@ describe('AC2: an ended session with no handoff is resumed and told to write one
     expect(spawns(r.dispatches)).toHaveLength(2);
     // The successor is prompted with the demanded bead's `next`, exactly as if
     // it had been written unprompted.
-    expect(promptOf(spawns(r.dispatches)[1])).toContain('Finish the parser');
+    expect(promptOf(at(spawns(r.dispatches), 1))).toContain(
+      'Finish the parser',
+    );
     expect(r.exitCode).toBe(0);
-    expect(r.ledger[0].outcome).toBe('continue');
-    expect(r.ledger[0].handoffBead).toBe('hoff-1');
+    expect(r.ledger[0]?.outcome).toBe('continue');
+    expect(r.ledger[0]?.handoffBead).toBe('hoff-1');
     // The provenance survives: this handoff had to be asked for.
-    expect(r.ledger[0].demands).toBe(1);
-    expect(r.ledger[1].demands).toBe(0);
+    expect(r.ledger[0]?.demands).toBe(1);
+    expect(r.ledger[1]?.demands).toBe(0);
   });
 
   test('a demanded `done` stops the loop at 0 and spawns nothing', async () => {
@@ -252,8 +255,8 @@ describe('AC2: an ended session with no handoff is resumed and told to write one
     });
     expect(r.exitCode).toBe(0);
     expect(spawns(r.dispatches)).toHaveLength(1);
-    expect(r.ledger[0].outcome).toBe('done');
-    expect(r.ledger[0].demands).toBe(1);
+    expect(r.ledger[0]?.outcome).toBe('done');
+    expect(r.ledger[0]?.demands).toBe(1);
   });
 
   test('a demanded `blocked` stops the loop at 2 and shows the question', async () => {
@@ -274,7 +277,7 @@ describe('AC2: an ended session with no handoff is resumed and told to write one
     expect(r.exitCode).toBe(2);
     expect(spawns(r.dispatches)).toHaveLength(1);
     expect(r.stdout).toContain('Do you want the remote branch deleted?');
-    expect(r.ledger[0].outcome).toBe('blocked');
+    expect(r.ledger[0]?.outcome).toBe('blocked');
   });
 
   test('a second demand quotes the beads the FIRST demand failed to fix', async () => {
@@ -294,7 +297,7 @@ describe('AC2: an ended session with no handoff is resumed and told to write one
       expect(text).toContain('br close <id> --reason=');
     }
     expect(texts[1]).toContain('demand 2 of 3');
-    expect(r.ledger[0].demands).toBe(2);
+    expect(r.ledger[0]?.demands).toBe(2);
   });
 });
 
@@ -303,7 +306,7 @@ describe('AC2: after 3 failed demands the run stops, ledgers, and files a bead',
   async function neverComplies(
     opts: Parameters<typeof runLoop>[0] = {},
   ): Promise<LoopResult> {
-    return runLoop({
+    return await runLoop({
       opts: {label: 'the-arc', maxSessions: 2},
       // Every scan after the first answers "no open handoff beads".
       scans: [[]],
@@ -334,16 +337,16 @@ describe('AC2: after 3 failed demands the run stops, ledgers, and files a bead',
   test('the ledger says no-handoff-after-demands, with the count', async () => {
     const r = await neverComplies();
     expect(r.ledger).toHaveLength(1);
-    expect(r.ledger[0].outcome).toBe('no-handoff-after-demands');
-    expect(r.ledger[0].demands).toBe(3);
-    expect(r.ledger[0].handoffBead).toBeNull();
+    expect(r.ledger[0]?.outcome).toBe('no-handoff-after-demands');
+    expect(r.ledger[0]?.demands).toBe(3);
+    expect(r.ledger[0]?.handoffBead).toBeNull();
   });
 
   test('a bug bead is filed through br, naming the session and the demands', async () => {
     const r = await neverComplies();
     const create = created(r);
     expect(create).not.toBeNull();
-    const args = create as string[];
+    const args = create!;
     expect(args[1]).toBe(handoffFailureTitle('the-arc-1', 3));
     expect(args).toContain('bug');
     // NOT labelled `handoff`: a bug report about a missing handoff must never be
@@ -359,7 +362,7 @@ describe('AC2: after 3 failed demands the run stops, ledgers, and files a bead',
     const r = await neverComplies({brCreateFails: true});
     expect(r.exitCode).toBe(2);
     expect(r.stdout).toContain('could not file the failure bead');
-    expect(r.ledger[0].outcome).toBe('no-handoff-after-demands');
+    expect(r.ledger[0]?.outcome).toBe('no-handoff-after-demands');
   });
 
   test('NEGATIVE CONTROL: --handoff-retries 0 demands nothing and says so', async () => {
@@ -374,8 +377,8 @@ describe('AC2: after 3 failed demands the run stops, ledgers, and files a bead',
     // A session nobody asked gets no bug bead filed against it…
     expect(created(r)).toBeNull();
     // …and the ledger says plainly which of the two failures this was.
-    expect(r.ledger[0].outcome).toBe('no-handoff');
-    expect(r.ledger[0].demands).toBe(0);
+    expect(r.ledger[0]?.outcome).toBe('no-handoff');
+    expect(r.ledger[0]?.demands).toBe(0);
   });
 
   test('POSITIVE CONTROL: the same world DOES spawn when a handoff appears', async () => {
@@ -408,8 +411,8 @@ describe('a demand that cannot be DELIVERED is not a session that refused', () =
     expect(r.stdout).toContain('full session id was never seen');
     expect(r.stdout).toContain('would start a COPY');
     // A DIFFERENT ledger outcome from "asked three times and refused".
-    expect(r.ledger[0].outcome).toBe('demand-undeliverable');
-    expect(r.ledger[0].demands).toBe(0);
+    expect(r.ledger[0]?.outcome).toBe('demand-undeliverable');
+    expect(r.ledger[0]?.demands).toBe(0);
     // And no bug bead accusing a session that was never actually asked.
     expect(created(r)).toBeNull();
   });
@@ -426,7 +429,7 @@ describe('a demand that cannot be DELIVERED is not a session that refused', () =
     expect(spawns(r.dispatches)).toHaveLength(1);
     expect(r.exitCode).toBe(2);
     expect(r.stdout).toContain('REFUSING TO DEMAND');
-    expect(r.ledger[0].stopOutcome).toBe('kill-failed');
+    expect(r.ledger[0]?.stopOutcome).toBe('kill-failed');
     expect(created(r)).toBeNull();
   });
 
@@ -455,7 +458,7 @@ describe('a demand that cannot be DELIVERED is not a session that refused', () =
     expect(spawns(r.dispatches)).toHaveLength(1);
     expect(r.exitCode).toBe(2);
     expect(r.stdout).toContain('blocked while being asked for a handoff');
-    expect(r.ledger[0].outcome).toBe('blocked');
+    expect(r.ledger[0]?.outcome).toBe('blocked');
   });
 });
 

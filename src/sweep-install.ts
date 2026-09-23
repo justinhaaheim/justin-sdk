@@ -35,9 +35,9 @@ import {resolve} from 'path';
 
 import {componentProvenanceEvidence} from './component-manifest';
 import {
+  COMPONENT_NAMES,
   componentApplicability,
   type ComponentName,
-  COMPONENT_NAMES,
   configNameFor,
   resolveComponents,
 } from './component-registry';
@@ -65,10 +65,10 @@ export interface NotAdopted {
 }
 
 export interface AdoptionResult {
-  /** The config object to write — a copy; the input is never mutated. */
-  config: Record<string, unknown>;
   /** `-setup` names written into `components` that were not there before. */
   adopted: string[];
+  /** The config object to write — a copy; the input is never mutated. */
+  config: Record<string, unknown>;
   /**
    * Looked installed, was not adopted, and why. NEVER an empty list standing in
    * for "I did not look" — every component is classified on every pass, and a
@@ -220,12 +220,12 @@ export function dropDeadConfigKeys(
 export interface InstallPayloadPlan {
   /** `-setup` names this payload would write into `components`. */
   adopted: string[];
-  /** Components that looked installed but were left for a human to decide. */
-  notAdopted: NotAdopted[];
-  /** Dead key paths this payload would delete. */
-  dropped: string[];
   /** Components `install` will (re-)apply afterwards. */
   apply: ComponentName[];
+  /** Dead key paths this payload would delete. */
+  dropped: string[];
+  /** Components that looked installed but were left for a human to decide. */
+  notAdopted: NotAdopted[];
   /**
    * What a REMOVAL-ENABLED install would delete from this repo AS IT STANDS
    * TODAY — i.e. measured against the config BEFORE adoption, which is the only
@@ -249,10 +249,7 @@ export function planInstallPayload(
     return {error: `${SDK_CONFIG_FILE} is not valid JSON`};
   }
 
-  const adoption = adoptInstalledComponents(
-    projectRoot,
-    config as Record<string, unknown>,
-  );
+  const adoption = adoptInstalledComponents(projectRoot, config);
   const dead = dropDeadConfigKeys(adoption.config);
 
   // What will be APPLIED is decided by the config as this payload will LEAVE it
@@ -275,11 +272,11 @@ export function planInstallPayload(
 
 export interface ConfigRewriteResult {
   adopted: string[];
+  /** True when justin-sdk.config.json was written. */
+  changed: boolean;
   dropped: string[];
   /** Looked installed, left alone — the caller prints these. */
   notAdopted: NotAdopted[];
-  /** True when justin-sdk.config.json was written. */
-  changed: boolean;
 }
 
 /**
@@ -297,10 +294,7 @@ export function applyInstallPayloadConfig(
   const config = readJson(configPath);
   if (config == null) return {error: `${SDK_CONFIG_FILE} is not valid JSON`};
 
-  const adoption = adoptInstalledComponents(
-    projectRoot,
-    config as Record<string, unknown>,
-  );
+  const adoption = adoptInstalledComponents(projectRoot, config);
   const dead = dropDeadConfigKeys(adoption.config);
   const changed = adoption.adopted.length > 0 || dead.dropped.length > 0;
   if (changed) writeJson(configPath, dead.config);

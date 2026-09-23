@@ -41,7 +41,7 @@
 import {execFileSync} from 'child_process';
 
 import {renderGitCommand} from './core';
-import {previewMerge, type MergePreview} from './merge-preview';
+import {type MergePreview, previewMerge} from './merge-preview';
 
 /** Pairs that may be merge-checked in one run, after the shared-file screen. */
 export const DEFAULT_PAIR_CAP = 20;
@@ -59,12 +59,12 @@ const SHARED_FILE_CAP = 12;
  * which is the one that does damage.
  */
 export interface ChangedFileSet {
-  /** Null when the diff could not be read. */
-  files: string[] | null;
-  /** Null when the diff could not be read. Exact; never capped. */
-  count: number | null;
   /** The command that failed. Null when it did not. */
   command: string | null;
+  /** Null when the diff could not be read. Exact; never capped. */
+  count: number | null;
+  /** Null when the diff could not be read. */
+  files: string[] | null;
 }
 
 function changedFilesArgv(baselineRev: string, branchRev: string): string[] {
@@ -107,45 +107,45 @@ export function readChangedFiles(
 }
 
 export interface OverlapCandidate {
-  name: string;
-  lastCommitDate: string;
   changed: ChangedFileSet;
+  lastCommitDate: string;
+  name: string;
 }
 
 export interface BranchOverlap {
   a: string;
   b: string;
-  /** Paths both branches touch. Capped for display; see `sharedFileCount`. */
-  sharedFiles: string[];
-  sharedFileCount: number;
-  sharedFilesTruncated: boolean;
   /**
    * The three-way merge of the two branches with each other. NULL means NOT
    * CHECKED — the pair cap was reached — never "checked and clean". `why` on
    * the report says how many such pairs there are.
    */
   conflict: MergePreview | null;
+  sharedFileCount: number;
+  /** Paths both branches touch. Capped for display; see `sharedFileCount`. */
+  sharedFiles: string[];
+  sharedFilesTruncated: boolean;
 }
 
 export interface OverlapReport {
+  /** Branches whose footprint was read and compared. */
+  candidates: number | null;
+  pairCap: number;
   /**
    * Null when there was no branch set to compare — the listing failed, or the
    * enrichment was switched off. NOT the same as an empty array, which means
    * "compared them and none share a file".
    */
   pairs: BranchOverlap[] | null;
-  /** Branches whose footprint was read and compared. */
-  candidates: number | null;
+  pairsConflictChecked: number | null;
+  pairsConsidered: number | null;
+  pairsSkippedByCap: number | null;
+  pairsWithSharedFiles: number | null;
   /**
    * Candidates whose `git diff` failed. They are in NO pair, so they are
    * named here rather than silently reading as colliding with nothing.
    */
   unmeasuredBranches: string[] | null;
-  pairsConsidered: number | null;
-  pairsWithSharedFiles: number | null;
-  pairsConflictChecked: number | null;
-  pairsSkippedByCap: number | null;
-  pairCap: number;
   /** What the numbers above amount to, in one line. */
   why: string;
 }
@@ -154,11 +154,11 @@ export interface OverlapReport {
 export const OVERLAPS_NOT_RUN: OverlapReport = {
   candidates: null,
   pairCap: DEFAULT_PAIR_CAP,
+  pairs: null,
   pairsConflictChecked: null,
   pairsConsidered: null,
   pairsSkippedByCap: null,
   pairsWithSharedFiles: null,
-  pairs: null,
   unmeasuredBranches: null,
   why: 'cross-branch overlap was not computed, so nothing here says branches do or do not collide',
 };
@@ -167,6 +167,42 @@ export interface OverlapOptions {
   cwd: string;
   /** Max pairs to merge-check after the shared-file screen. */
   pairCap?: number;
+}
+
+function describeOverlaps(n: {
+  candidates: number;
+  checked: number;
+  pairsConsidered: number;
+  skipped: number;
+  unmeasured: number;
+  withShared: number;
+}): string {
+  // The unmeasured note is appended to EVERY branch of this function, including
+  // this early one. A repo with one readable branch and one unreadable one hits
+  // this path, and saying only "there is no pair to compare" there would drop
+  // the single most important fact — that a branch was left out because its
+  // footprint could not be read.
+  const unmeasuredNote =
+    n.unmeasured > 0
+      ? `. ${n.unmeasured} branch(es) could not have their changed files read and appear in NO pair, so nothing here rules out a collision with them`
+      : '';
+
+  if (n.candidates < 2) {
+    const only =
+      n.candidates === 0
+        ? 'no branch has unique work'
+        : 'only one branch has unique work';
+    return `${only}, so there is no pair to compare — this is not a statement that branches agree${unmeasuredNote}`;
+  }
+  const base =
+    n.withShared === 0
+      ? `compared all ${n.pairsConsidered} pair(s) of the ${n.candidates} branch(es) with unique work: none touch a common file`
+      : `${n.withShared} of ${n.pairsConsidered} pair(s) touch a common file; ${n.checked} merge-checked against each other`;
+  const capNote =
+    n.skipped > 0
+      ? `, and ${n.skipped} more shared files but were NOT merge-checked (pair cap) — those are unknown, not clean`
+      : '';
+  return `${base}${capNote}${unmeasuredNote}`;
 }
 
 /**
@@ -245,11 +281,11 @@ export function buildOverlaps(
   return {
     candidates: measured.length,
     pairCap,
+    pairs,
     pairsConflictChecked: checked,
     pairsConsidered,
     pairsSkippedByCap: skipped,
     pairsWithSharedFiles: pending.length,
-    pairs,
     unmeasuredBranches,
     why: describeOverlaps({
       candidates: measured.length,
@@ -260,40 +296,4 @@ export function buildOverlaps(
       withShared: pending.length,
     }),
   };
-}
-
-function describeOverlaps(n: {
-  candidates: number;
-  checked: number;
-  pairsConsidered: number;
-  skipped: number;
-  unmeasured: number;
-  withShared: number;
-}): string {
-  // The unmeasured note is appended to EVERY branch of this function, including
-  // this early one. A repo with one readable branch and one unreadable one hits
-  // this path, and saying only "there is no pair to compare" there would drop
-  // the single most important fact — that a branch was left out because its
-  // footprint could not be read.
-  const unmeasuredNote =
-    n.unmeasured > 0
-      ? `. ${n.unmeasured} branch(es) could not have their changed files read and appear in NO pair, so nothing here rules out a collision with them`
-      : '';
-
-  if (n.candidates < 2) {
-    const only =
-      n.candidates === 0
-        ? 'no branch has unique work'
-        : 'only one branch has unique work';
-    return `${only}, so there is no pair to compare — this is not a statement that branches agree${unmeasuredNote}`;
-  }
-  const base =
-    n.withShared === 0
-      ? `compared all ${n.pairsConsidered} pair(s) of the ${n.candidates} branch(es) with unique work: none touch a common file`
-      : `${n.withShared} of ${n.pairsConsidered} pair(s) touch a common file; ${n.checked} merge-checked against each other`;
-  const capNote =
-    n.skipped > 0
-      ? `, and ${n.skipped} more shared files but were NOT merge-checked (pair cap) — those are unknown, not clean`
-      : '';
-  return `${base}${capNote}${unmeasuredNote}`;
 }

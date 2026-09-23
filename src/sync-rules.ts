@@ -81,8 +81,6 @@ function computeVersion(sourceDir: string): string | null {
     execSync(`bunx ${spec}`, {
       cwd: sourceDir,
       encoding: 'utf-8',
-      stdio: 'pipe',
-      timeout: 120_000,
       env: {
         ...process.env,
         MISE_TRUSTED_CONFIG_PATHS: [
@@ -92,6 +90,8 @@ function computeVersion(sourceDir: string): string | null {
           .filter(Boolean)
           .join(':'),
       },
+      stdio: 'pipe',
+      timeout: 120_000,
     });
     const jsonPath = join(sourceDir, 'dynamic-version.local.json');
     if (existsSync(jsonPath)) {
@@ -107,13 +107,13 @@ function computeVersion(sourceDir: string): string | null {
 }
 
 export interface SyncRulesOptions {
-  quiet?: boolean;
   /** Rewrite even when the content hash is unchanged. */
   force?: boolean;
   /** ISO timestamp for the stamp (injectable for deterministic tests). */
   now?: string;
   /** Override the output path (defaults to ~/.claude/rules/justin-sdk/…). */
   outFile?: string;
+  quiet?: boolean;
 }
 
 export function runSyncRules(options: SyncRulesOptions = {}): number {
@@ -150,7 +150,7 @@ export function runSyncRules(options: SyncRulesOptions = {}): number {
   const hash = contentHash(pretty);
   const file = options.outFile ?? rulesFilePath();
 
-  if (!options.force && readDeployedStamp(file)?.contentHash === hash) {
+  if (options.force !== true && readDeployedStamp(file)?.contentHash === hash) {
     success(
       `rules already in sync (content ${hash}, ${count} module${count === 1 ? '' : 's'}) — no rewrite`,
     );
@@ -165,10 +165,10 @@ export function runSyncRules(options: SyncRulesOptions = {}): number {
     sourceCommit != null ? sourceCommit.sha.slice(0, 12) : 'unknown';
   const commit = `${shaShort}${sourceCommit != null && isDirtyCheckout(sourceDir) ? '-dirty' : ''}`;
   const stamp = buildStamp({
-    version,
     commit,
     contentHash: hash,
     generated: options.now ?? new Date().toISOString(),
+    version,
   });
   const body = `${stamp}\n\n${pretty}\n`;
 

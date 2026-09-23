@@ -29,6 +29,9 @@
  *     idempotency it proves is `report`'s, not `start`'s.
  */
 
+import type {ThreadFacts} from '../src/thread/facts';
+import type {FakeBd} from './fake-bd';
+
 import {afterEach, describe, expect, spyOn, test} from 'bun:test';
 import {
   existsSync,
@@ -40,7 +43,9 @@ import {
 import {tmpdir} from 'os';
 import {join} from 'path';
 
-import {createFakeBd} from './fake-bd';
+import {bdContext} from '../src/thread/bd';
+import {writeReportToBd} from '../src/thread/report';
+import {validateThreadReport} from '../src/thread/schema';
 import {
   describeStartOutcome,
   runThreadStartHook,
@@ -48,13 +53,8 @@ import {
   startThread,
   type ThreadStartOutcome,
 } from '../src/thread/start';
-import {bdContext} from '../src/thread/bd';
+import {createFakeBd} from './fake-bd';
 import {examplePayload} from './thread-schema.test';
-import {validateThreadReport} from '../src/thread/schema';
-import {writeReportToBd} from '../src/thread/report';
-
-import type {FakeBd} from './fake-bd';
-import type {ThreadFacts} from '../src/thread/facts';
 
 const SESSION = '7f3c1e20-aaaa-4bbb-8ccc-0123456789ab';
 
@@ -517,13 +517,19 @@ describe('a later `thread report` for the same session', () => {
       cwd: '/tmp',
       dirty: false,
       entrypoint: 'cli',
+      firstUserMessage: 'kick this off',
+      firstUserMessageAt: null,
       headSha: 'deadbee',
       isWorktree: false,
+      lastAssistantMessage: 'Done — here is the report.',
+      lastAssistantMessageAt: null,
       lastUserMessage: 'go',
+      lastUserMessageAt: null,
       model: 'claude-opus-5',
-      reportedAt: '2026-09-12T12:00:00.000Z',
       repo: 'justin-sdk',
       repoPath: '/tmp',
+      reportedAt: '2026-09-12T12:00:00.000Z',
+      resumeCommand: "cd '/repo' && claude --resume session-1",
       sessionId: SESSION,
       startedAt: '2026-09-12T11:00:00.000Z',
       tokensAtStop: 42,
@@ -627,5 +633,152 @@ describe('a start whose write dies in auto-export (home-base-p1uj.10)', () => {
     if (outcome.kind !== 'created') throw new Error('unreachable');
     expect(outcome.exportUnstaged).toBe(true);
     expect(threads(h)).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The three verbatim messages (home-base-k0b8n K4)
+// ---------------------------------------------------------------------------
+
+/** The report-path facts, with the K4 fields filled in. */
+function messageFacts(): ThreadFacts {
+  return {
+    aheadBehind: {ahead: 1, behind: 0},
+    autofillFailures: [],
+    branch: 'thread-start',
+    cwd: '/tmp',
+    dirty: false,
+    entrypoint: 'cli',
+    firstUserMessage: 'kick this off',
+    firstUserMessageAt: '2026-09-12T11:00:00.000Z',
+    headSha: 'deadbee',
+    isWorktree: false,
+    lastAssistantMessage: 'Done — here is the report.',
+    lastAssistantMessageAt: '2026-09-12T11:30:00.000Z',
+    lastUserMessage: 'go',
+    lastUserMessageAt: '2026-09-12T11:31:00.000Z',
+    model: 'claude-opus-5',
+    repo: 'justin-sdk',
+    repoPath: '/tmp',
+    reportedAt: '2026-09-12T12:00:00.000Z',
+    resumeCommand: "cd '/repo' && claude --resume session-1",
+    sessionId: SESSION,
+    startedAt: '2026-09-12T11:00:00.000Z',
+    tokensAtStop: 42,
+    transcriptPath: '/tmp/t.jsonl',
+    worktreePath: null,
+  };
+}
+
+describe('the K4 message fields land on the bead from BOTH writers', () => {
+  /**
+   * Point the harness at a transcripts root holding a real-shaped transcript
+   * for this session, filed under the slug of the cwd it records — so the resume
+   * command is built the way it is in the wild.
+   */
+  function seedTranscript(h: Harness, cwd: string): void {
+    const root = join(h.stateDir, 'transcripts');
+    const slug = cwd.replace(/[^a-zA-Z0-9]/g, '-');
+    mkdirSync(join(root, slug), {recursive: true});
+    const records = [
+      {
+        cwd,
+        entrypoint: 'cli',
+        message: {
+          content:
+            '\n\n<pasted_content id="aa">\nbuild the thread messages\n</pasted_content id="aa">',
+          role: 'user',
+        },
+        sessionId: SESSION,
+        timestamp: '2026-09-12T11:00:00.000Z',
+        type: 'user',
+      },
+      {
+        cwd,
+        message: {
+          content: [
+            {text: 'Here is what I built.', type: 'text'},
+            {id: 'toolu_1', input: {}, name: 'Bash', type: 'tool_use'},
+          ],
+          model: 'claude-opus-5',
+          role: 'assistant',
+        },
+        sessionId: SESSION,
+        timestamp: '2026-09-12T11:30:00.000Z',
+        type: 'assistant',
+      },
+      {
+        cwd,
+        message: {
+          content: '<task-notification>a player finished</task-notification>',
+          role: 'user',
+        },
+        sessionId: SESSION,
+        timestamp: '2026-09-12T11:31:00.000Z',
+        type: 'user',
+      },
+    ];
+    writeFileSync(
+      join(root, slug, `${SESSION}.jsonl`),
+      `${records.map((r) => JSON.stringify(r)).join('\n')}\n`,
+    );
+    h.env.JUSTIN_THREADS_TRANSCRIPTS_ROOT = root;
+  }
+
+  test('`thread start` writes them, so a session that never reports is still findable', async () => {
+    const h = harness({enabled: true, startOnSessionStart: true});
+    seedTranscript(h, h.cwd);
+    const started = await startThread({
+      autoCommit: false,
+      cwd: h.cwd,
+      env: h.env,
+      sessionId: SESSION,
+    });
+    expect(started.kind).toBe('created');
+    const bead = threads(h)[0]!;
+    expect(bead.metadata?.firstUserMessage).toBe('build the thread messages');
+    // Never the task notification that arrived after it.
+    expect(bead.metadata?.lastUserMessage).toBe('build the thread messages');
+    expect(bead.metadata?.lastAssistantMessage).toBe('Here is what I built.');
+    expect(bead.metadata?.resumeCommand).toBe(
+      `cd '${h.cwd}' && claude --resume ${SESSION}`,
+    );
+    expect(bead.metadata?.firstUserMessageAt).toBe('2026-09-12T11:00:00.000Z');
+    expect(bead.metadata?.lastAssistantMessageAt).toBe(
+      '2026-09-12T11:30:00.000Z',
+    );
+  });
+
+  test('`thread report` writes them too, and UNCAPPED', async () => {
+    const h = harness({enabled: true, startOnSessionStart: true});
+    const raw = examplePayload();
+    raw.priorAsks = [];
+    raw.asks = [];
+    const validated = validateThreadReport(raw);
+    if (validated.status !== 'ok')
+      throw new Error('fixture payload is invalid');
+    const ctx = bdContext(h.env);
+    ctx.repoDir = h.fake.dir;
+    // 4,000 characters — past the 1,500 the old facts collector truncated at,
+    // which is what made a phrase late in a long brief unsearchable forever.
+    const long = `${'z'.repeat(3990)} NEEDLE`;
+    const result = await writeReportToBd({
+      ctx,
+      facts: {
+        ...messageFacts(),
+        firstUserMessage: long,
+        lastAssistantMessage: 'the status report',
+      },
+      payload: validated.payload,
+      sessionId: SESSION,
+    });
+    expect(result.status).toBe('written');
+    const bead = threads(h)[0]!;
+    expect(bead.metadata?.firstUserMessage).toHaveLength(long.length);
+    expect(String(bead.metadata?.firstUserMessage)).toEndWith('NEEDLE');
+    expect(bead.metadata?.lastAssistantMessage).toBe('the status report');
+    expect(bead.metadata?.resumeCommand).toBe(
+      "cd '/repo' && claude --resume session-1",
+    );
   });
 });

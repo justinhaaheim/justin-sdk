@@ -95,9 +95,9 @@ function hookCommands(
   event: string,
 ): string[] {
   const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
-  const entries = (hooks[event] ?? []) as Array<{
-    hooks?: Array<{command?: string}>;
-  }>;
+  const entries = (hooks[event] ?? []) as {
+    hooks?: {command?: string}[];
+  }[];
   return entries.flatMap((entry) =>
     (entry.hooks ?? []).map((hook) => hook.command ?? ''),
   );
@@ -312,7 +312,7 @@ describe('upsertHookCommand recognises every spelling (dchjw.15 F1/F6)', () => {
   });
   const commandsOf = (entries: readonly unknown[]): string[] =>
     entries.flatMap((entry) =>
-      ((entry as {hooks?: Array<{command?: string}>}).hooks ?? []).map(
+      ((entry as {hooks?: {command?: string}[]}).hooks ?? []).map(
         (hook) => hook.command ?? '',
       ),
     );

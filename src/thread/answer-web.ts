@@ -29,33 +29,33 @@
  */
 
 import {
-  bdWriter,
-  askViewOf,
-  orderAsks,
-  trimAnswerText,
   type AnswerIo,
   type AnswerWriter,
   type AskDecision,
   type AskView,
+  askViewOf,
+  bdWriter,
+  orderAsks,
+  trimAnswerText,
   type WriteFailure,
 } from './answer';
+import {type PageAsk, renderAnswerPage} from './answer-page';
 import {
+  type BdContext,
   describeBdFailure,
   EXPORT_UNSTAGED_WARNING,
   listOpenAsks,
-  type BdContext,
 } from './bd';
 import {commitThreadsRepo, describeCommit} from './commit';
-import {contextFor, resolveThread, type ThreadRef} from './resolve';
 import {
   clearDrafts,
   listDrafts,
   NOTE_DRAFT_ID,
-  writeDraft,
   type StoredDraft,
+  writeDraft,
 } from './drafts';
 import {threadsStateDir} from './paths';
-import {renderAnswerPage, type PageAsk} from './answer-page';
+import {contextFor, resolveThread, type ThreadRef} from './resolve';
 
 export interface SubmitDecision {
   askId: string;
@@ -144,6 +144,74 @@ function json(value: unknown, status = 200): Response {
 }
 
 /**
+ * Write every decision, in the report's own order, through the classic walk's
+ * writer.
+ *
+ * A failed write does NOT stop the rest, for the same reason the classic walk
+ * carries on: the answers already given are worth more than a tidy abort. Every
+ * failure is named, and the drafts are kept in that case so nothing has to be
+ * retyped.
+ */
+async function submit(
+  body: unknown,
+  ordered: readonly AskView[],
+  byId: Map<string, AskView>,
+  options: AnswerServerOptions,
+): Promise<WebOutcome> {
+  const parsed = body as {decisions?: SubmitDecision[]; note?: string};
+  const submitted = new Map(
+    (parsed.decisions ?? []).map((entry) => [entry.askId, entry]),
+  );
+  const failures: WriteFailure[] = [];
+  let answered = 0;
+  let skipped = 0;
+
+  for (const ask of ordered) {
+    const entry = submitted.get(ask.id);
+    if (entry == null) continue;
+    // THE SAME tidy-up the classic walk applies, on the same raw text (I8,
+    // p1uj.13). The page sends the textarea verbatim — leading indentation
+    // included — precisely so this one function decides what is recorded.
+    const answer = trimAnswerText(entry.text);
+    const decision: AskDecision =
+      entry.kind === 'answered' && answer !== ''
+        ? {kind: 'answered', text: answer}
+        : {kind: 'skipped'};
+    const outcome = await options.writer.ask(byId.get(ask.id) ?? ask, decision);
+    if (outcome.ok) {
+      if (decision.kind === 'answered') answered += 1;
+      else skipped += 1;
+    } else {
+      failures.push({
+        detail: outcome.detail,
+        label: ask.id,
+        retry: outcome.retry,
+      });
+    }
+  }
+
+  const noteText = trimAnswerText(parsed.note ?? '');
+  const note = noteText === '' ? null : noteText;
+  if (note != null) {
+    const outcome = await options.writer.note(note);
+    if (!outcome.ok) {
+      failures.push({
+        detail: outcome.detail,
+        label: 'your note',
+        retry: outcome.retry,
+      });
+    }
+  }
+
+  // Drafts are cleared ONLY when every write landed. Anything less and they stay
+  // exactly where they are — the answer is in the file even when bd refused it.
+  const draftsKept = failures.length > 0;
+  if (!draftsKept) clearDrafts(options.stateDir, options.threadId);
+
+  return {answered, draftsKept, failures, kind: 'submitted', note, skipped};
+}
+
+/**
  * The server.
  *
  * Exported and injectable because this is where every invariant actually lives:
@@ -156,7 +224,9 @@ export function createAnswerServer(options: AnswerServerOptions): AnswerServer {
   const ordered = orderAsks(options.asks);
   const byId = new Map(ordered.map((ask) => [ask.id, ask]));
 
-  let settle: (outcome: WebOutcome) => void = () => {};
+  let settle: (outcome: WebOutcome) => void = () => {
+    /* replaced by the real resolver below before anything can call it */
+  };
   let settled = false;
   const done = new Promise<WebOutcome>((resolve) => {
     settle = (outcome) => {
@@ -169,10 +239,6 @@ export function createAnswerServer(options: AnswerServerOptions): AnswerServer {
   const authorised = (url: URL): boolean => url.searchParams.get('t') === token;
 
   const server = Bun.serve({
-    // 127.0.0.1, never 0.0.0.0: this page can write to Justin's bead ledger and
-    // has no business being reachable from the network.
-    hostname: '127.0.0.1',
-    port: options.port ?? 0,
     async fetch(request): Promise<Response> {
       const url = new URL(request.url);
       if (!authorised(url)) {
@@ -279,6 +345,10 @@ export function createAnswerServer(options: AnswerServerOptions): AnswerServer {
 
       return new Response('not found', {status: 404});
     },
+    // 127.0.0.1, never 0.0.0.0: this page can write to Justin's bead ledger and
+    // has no business being reachable from the network.
+    hostname: '127.0.0.1',
+    port: options.port ?? 0,
   });
 
   // `Bun.serve().port` is optional in the types because a unix-socket server has
@@ -306,74 +376,6 @@ export function createAnswerServer(options: AnswerServerOptions): AnswerServer {
   };
 }
 
-/**
- * Write every decision, in the report's own order, through the classic walk's
- * writer.
- *
- * A failed write does NOT stop the rest, for the same reason the classic walk
- * carries on: the answers already given are worth more than a tidy abort. Every
- * failure is named, and the drafts are kept in that case so nothing has to be
- * retyped.
- */
-async function submit(
-  body: unknown,
-  ordered: readonly AskView[],
-  byId: Map<string, AskView>,
-  options: AnswerServerOptions,
-): Promise<WebOutcome> {
-  const parsed = body as {decisions?: SubmitDecision[]; note?: string};
-  const submitted = new Map(
-    (parsed.decisions ?? []).map((entry) => [entry.askId, entry]),
-  );
-  const failures: WriteFailure[] = [];
-  let answered = 0;
-  let skipped = 0;
-
-  for (const ask of ordered) {
-    const entry = submitted.get(ask.id);
-    if (entry == null) continue;
-    // THE SAME tidy-up the classic walk applies, on the same raw text (I8,
-    // p1uj.13). The page sends the textarea verbatim — leading indentation
-    // included — precisely so this one function decides what is recorded.
-    const answer = trimAnswerText(entry.text);
-    const decision: AskDecision =
-      entry.kind === 'answered' && answer !== ''
-        ? {kind: 'answered', text: answer}
-        : {kind: 'skipped'};
-    const outcome = await options.writer.ask(byId.get(ask.id) ?? ask, decision);
-    if (outcome.ok) {
-      if (decision.kind === 'answered') answered += 1;
-      else skipped += 1;
-    } else {
-      failures.push({
-        detail: outcome.detail,
-        label: ask.id,
-        retry: outcome.retry,
-      });
-    }
-  }
-
-  const noteText = trimAnswerText(parsed.note ?? '');
-  const note = noteText === '' ? null : noteText;
-  if (note != null) {
-    const outcome = await options.writer.note(note);
-    if (!outcome.ok) {
-      failures.push({
-        detail: outcome.detail,
-        label: 'your note',
-        retry: outcome.retry,
-      });
-    }
-  }
-
-  // Drafts are cleared ONLY when every write landed. Anything less and they stay
-  // exactly where they are — the answer is in the file even when bd refused it.
-  const draftsKept = failures.length > 0;
-  if (!draftsKept) clearDrafts(options.stateDir, options.threadId);
-
-  return {answered, draftsKept, failures, kind: 'submitted', note, skipped};
-}
-
 /** Ask the OS to open the page. Failure is a printed URL, never a dead end. */
 export function openInBrowser(url: string): {opened: boolean; reason: string} {
   const command =
@@ -398,6 +400,8 @@ export function openInBrowser(url: string): {opened: boolean; reason: string} {
 
 export interface WebAnswerOptions extends ThreadRef {
   autoCommit?: boolean;
+  /** Unused here — accepted so the two UIs share one options shape. */
+  io?: AnswerIo;
   /**
    * Called once the server is listening, with the live handle.
    *
@@ -411,8 +415,6 @@ export interface WebAnswerOptions extends ThreadRef {
   /** Tests pin this false; the real command opens the browser. */
   openBrowser?: boolean;
   port?: number;
-  /** Unused here — accepted so the two UIs share one options shape. */
-  io?: AnswerIo;
 }
 
 export async function runThreadAnswerWeb(

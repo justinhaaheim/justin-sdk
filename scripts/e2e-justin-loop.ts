@@ -40,6 +40,8 @@
  * agents` listing each fail the check that depends on them, by name, rather
  * than degrading into "0 beads", "no rows" or "nothing left over".
  */
+import type {LedgerRow} from '../src/justin-loop/runner';
+
 import {spawnSync} from 'node:child_process';
 import {
   cpSync,
@@ -55,7 +57,6 @@ import {homedir, tmpdir} from 'node:os';
 import {join} from 'node:path';
 
 import {parseHandoff} from '../src/justin-loop/handoff';
-import type {LedgerRow} from '../src/justin-loop/runner';
 import {getPinnedToolVersion} from '../src/setup-helpers';
 
 const REPO_ROOT = join(import.meta.dirname, '..');
@@ -76,21 +77,21 @@ type Scenario = 'a' | 'b';
 
 /** One assertion. `ok: false` is the only thing that fails the run. */
 interface Check {
-  name: string;
-  ok: boolean;
   /** What was actually measured — printed for passes and failures alike. */
   detail: string;
+  name: string;
+  ok: boolean;
 }
 
 /** A bead as `.beads/issues.jsonl` writes it (the committed artifact). */
 interface BeadRow {
+  createdAt: string | null;
   id: string;
-  title: string;
-  status: string;
+  labels: string[];
   /** Absent in the file when the bead's notes were never set. */
   notes: string | null;
-  labels: string[];
-  createdAt: string | null;
+  status: string;
+  title: string;
 }
 
 /**
@@ -100,32 +101,32 @@ interface BeadRow {
  * fact as "nothing was left over" and must never be spent as one.
  */
 interface AgentsSweep {
+  leftover: string[] | null;
   ok: boolean;
   reason: string | null;
-  stopped: string[];
   removed: string[];
-  leftover: string[] | null;
+  stopped: string[];
 }
 
 /** Everything an assertion is allowed to look at. */
 interface Artifacts {
-  scenario: Scenario;
-  /** The `--label` slug; session labels are `<slug>-1`, `<slug>-2`, … */
-  slug: string;
-  repo: string;
-  /** null when the runner never exited on its own (we killed it). */
-  exitCode: number | null;
-  timedOut: boolean;
-  wallMs: number;
-  stdout: string;
-  stderr: string;
   /** null = `.beads/issues.jsonl` could not be read or parsed. */
   beads: BeadRow[] | null;
   beadsReason: string | null;
+  /** null when the runner never exited on its own (we killed it). */
+  exitCode: number | null;
   /** null = `runs.jsonl` could not be read or parsed. */
   ledger: LedgerRow[] | null;
   ledgerReason: string | null;
+  repo: string;
+  scenario: Scenario;
+  /** The `--label` slug; session labels are `<slug>-1`, `<slug>-2`, … */
+  slug: string;
+  stderr: string;
+  stdout: string;
   sweep: AgentsSweep;
+  timedOut: boolean;
+  wallMs: number;
 }
 
 /** The half of Artifacts that is not a raw text file (see recordArtifacts). */
@@ -135,7 +136,6 @@ type ArtifactsMeta = Omit<
 >;
 
 interface Options {
-  scenarios: Scenario[];
   /** Wall-clock bound per scenario, ours — the runner's own is left at 0. */
   boundMin: number;
   /**
@@ -149,6 +149,7 @@ interface Options {
   permissionMode: string;
   recordDir: string;
   replayDir: string | null;
+  scenarios: Scenario[];
   /**
    * Forwarded to the runner as `--handoff-settle-min` (D15). 0 = not passed at
    * all, which is the runner's own default.
@@ -198,6 +199,11 @@ const USAGE = `bun run e2e:justin-loop [options]
                        handoff-settled outcome in the ledger.
   --keep               Keep the fixture directory even when everything passes
   --help`;
+
+function fatal(message: string): never {
+  console.error(`${RED}error${RESET} ${message}`);
+  process.exit(1);
+}
 
 function parseArgs(argv: string[]): Options {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -252,11 +258,6 @@ function parseArgs(argv: string[]): Options {
     }
   }
   return opts;
-}
-
-function fatal(message: string): never {
-  console.error(`${RED}error${RESET} ${message}`);
-  process.exit(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -314,22 +315,22 @@ function resolveBr(): string {
 // ---------------------------------------------------------------------------
 
 interface Fixture {
-  /** Everything this run created. Removed wholesale on success. */
-  root: string;
-  /** The git + beads repo the loop runs in. */
-  repo: string;
-  /** Where the ledger goes — outside the repo, like the real one. */
-  stateDir: string;
   /** Prepended to PATH: `justin-sdk`, `br` and `claude` under test. */
   binDir: string;
+  /** The git + beads repo the loop runs in. */
+  repo: string;
+  /** Everything this run created. Removed wholesale on success. */
+  root: string;
+  /** Where the ledger goes — outside the repo, like the real one. */
+  stateDir: string;
 }
 
 function run(
   cmd: string[],
   cwd: string,
   env?: Record<string, string>,
-): {ok: boolean; stdout: string; stderr: string} {
-  const proc = spawnSync(cmd[0] as string, cmd.slice(1), {
+): {ok: boolean; stderr: string; stdout: string} {
+  const proc = spawnSync(cmd[0]!, cmd.slice(1), {
     cwd,
     encoding: 'utf-8',
     env: env ?? (process.env as Record<string, string>),
@@ -365,7 +366,7 @@ function mustRun(cmd: string[], cwd: string, env?: Record<string, string>) {
  */
 function writeShims(binDir: string, claudeBin: string, brBin: string): void {
   mkdirSync(binDir, {recursive: true});
-  const shims: Array<[string, string]> = [
+  const shims: [string, string][] = [
     ['justin-sdk', `exec "${process.execPath}" "${CLI}" "$@"`],
     ['br', `exec "${brBin}" "$@"`],
     ['claude', `exec "${claudeBin}" "$@"`],
@@ -419,6 +420,26 @@ function writeFixturePermissions(fixture: Fixture, allowBash: boolean): void {
   );
 }
 
+/** The `next` of scenario A's first handoff — i.e. session 2's whole prompt. */
+function successorInstructions(fixture: Fixture): string {
+  return `AUTOMATED END-TO-END TEST OF THE JUSTIN-LOOP CHAIN, session 2 of 2. This repository is a disposable fixture and there is no real work to do in it. Do NOT write code, do NOT explore the repository, do NOT commit anything, do NOT create any bead except through the one command in step 2.
+
+Step 1. Claim the handoff bead you were told to pick up: run the exact 'br close <id> --reason=...' command your instructions give you, from the directory they name.
+
+Step 2. Run exactly this ONE command, replacing YOUR-LABEL with the session label your system prompt gave you:
+
+  justin-sdk justin-loop handoff --from=YOUR-LABEL --disposition=done --arc=${ARC} --worktree=${fixture.repo} --branch=main --state='e2e chain complete: session 2 claimed the handoff bead and finished the arc' --next='Nothing remains. This was an automated end-to-end test of the justin-loop plumbing.'
+
+Then end your turn immediately. Do not run any other command.`;
+}
+
+function envFor(fixture: Fixture): Record<string, string> {
+  return {
+    ...(process.env as Record<string, string>),
+    PATH: `${fixture.binDir}:${process.env.PATH ?? ''}`,
+  };
+}
+
 function buildFixture(
   scenario: Scenario,
   claudeBin: string,
@@ -467,13 +488,6 @@ function buildFixture(
   return fixture;
 }
 
-function envFor(fixture: Fixture): Record<string, string> {
-  return {
-    ...(process.env as Record<string, string>),
-    PATH: `${fixture.binDir}:${process.env.PATH ?? ''}`,
-  };
-}
-
 // ---------------------------------------------------------------------------
 // What the fixture sessions are told
 //
@@ -488,19 +502,6 @@ function envFor(fixture: Fixture): Record<string, string> {
 
 /** The arc every fixture handoff belongs to. Constant: it is not an identity. */
 const ARC = 'e2e-fixture';
-
-/** The `next` of scenario A's first handoff — i.e. session 2's whole prompt. */
-function successorInstructions(fixture: Fixture): string {
-  return `AUTOMATED END-TO-END TEST OF THE JUSTIN-LOOP CHAIN, session 2 of 2. This repository is a disposable fixture and there is no real work to do in it. Do NOT write code, do NOT explore the repository, do NOT commit anything, do NOT create any bead except through the one command in step 2.
-
-Step 1. Claim the handoff bead you were told to pick up: run the exact 'br close <id> --reason=...' command your instructions give you, from the directory they name.
-
-Step 2. Run exactly this ONE command, replacing YOUR-LABEL with the session label your system prompt gave you:
-
-  justin-sdk justin-loop handoff --from=YOUR-LABEL --disposition=done --arc=${ARC} --worktree=${fixture.repo} --branch=main --state='e2e chain complete: session 2 claimed the handoff bead and finished the arc' --next='Nothing remains. This was an automated end-to-end test of the justin-loop plumbing.'
-
-Then end your turn immediately. Do not run any other command.`;
-}
 
 /** Scenario A's first prompt. */
 function scenarioAPrompt(fixture: Fixture): string {
@@ -526,9 +527,9 @@ const SCENARIO_B_PROMPT =
 
 interface RunnerResult {
   exitCode: number | null;
-  timedOut: boolean;
-  stdout: string;
   stderr: string;
+  stdout: string;
+  timedOut: boolean;
   wallMs: number;
 }
 
@@ -551,8 +552,14 @@ async function drain(
 ): Promise<string> {
   const decoder = new TextDecoder();
   let text = '';
-  for await (const chunk of stream) {
-    const piece = decoder.decode(chunk, {stream: true});
+  // An explicit reader rather than `for await`: a DOM `ReadableStream` has no
+  // `[Symbol.asyncIterator]` in the lib this project compiles against, so the
+  // loop only worked by accident of the runtime.
+  const reader = stream.getReader();
+  for (;;) {
+    const {done, value} = await reader.read();
+    if (done === true || value === undefined) break;
+    const piece = decoder.decode(value, {stream: true});
     text += piece;
     echo(piece);
   }
@@ -605,9 +612,9 @@ async function runRunner(
 // ---------------------------------------------------------------------------
 
 interface AgentRowLite {
+  cwd: string;
   id: string;
   name: string;
-  cwd: string;
 }
 
 function listAgents(
@@ -631,7 +638,7 @@ function listAgents(
     };
   }
   try {
-    const raw = JSON.parse(proc.stdout ?? '') as Array<Record<string, unknown>>;
+    const raw = JSON.parse(proc.stdout ?? '') as Record<string, unknown>[];
     if (!Array.isArray(raw)) {
       return {
         ok: false,
@@ -775,31 +782,6 @@ function readFileOrNull(path: string): string | null {
   }
 }
 
-/**
- * Copy the four artifacts into `dir` and return what they say.
- *
- * Raw text files, deliberately: every artifact stays hand-editable, which is
- * what makes `--replay` usable as a negative-control harness.
- */
-function recordArtifacts(
-  dir: string,
-  meta: ArtifactsMeta,
-  fixture: Fixture,
-  runner: RunnerResult,
-): Artifacts {
-  mkdirSync(dir, {recursive: true});
-  writeFileSync(join(dir, 'stdout.txt'), runner.stdout);
-  writeFileSync(join(dir, 'stderr.txt'), runner.stderr);
-  writeFileSync(join(dir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`);
-  for (const [from, to] of [
-    [join(fixture.repo, '.beads', 'issues.jsonl'), join(dir, 'issues.jsonl')],
-    [join(fixture.stateDir, 'runs.jsonl'), join(dir, 'runs.jsonl')],
-  ] as Array<[string, string]>) {
-    if (existsSync(from)) cpSync(from, to);
-  }
-  return loadArtifacts(dir);
-}
-
 /** Read a recording back. The only input `--replay` has. */
 function loadArtifacts(dir: string): Artifacts {
   const metaText = readFileOrNull(join(dir, 'meta.json'));
@@ -826,6 +808,31 @@ function loadArtifacts(dir: string): Artifacts {
     stderr: readFileOrNull(join(dir, 'stderr.txt')) ?? '',
     stdout: readFileOrNull(join(dir, 'stdout.txt')) ?? '',
   };
+}
+
+/**
+ * Copy the four artifacts into `dir` and return what they say.
+ *
+ * Raw text files, deliberately: every artifact stays hand-editable, which is
+ * what makes `--replay` usable as a negative-control harness.
+ */
+function recordArtifacts(
+  dir: string,
+  meta: ArtifactsMeta,
+  fixture: Fixture,
+  runner: RunnerResult,
+): Artifacts {
+  mkdirSync(dir, {recursive: true});
+  writeFileSync(join(dir, 'stdout.txt'), runner.stdout);
+  writeFileSync(join(dir, 'stderr.txt'), runner.stderr);
+  writeFileSync(join(dir, 'meta.json'), `${JSON.stringify(meta, null, 2)}\n`);
+  for (const [from, to] of [
+    [join(fixture.repo, '.beads', 'issues.jsonl'), join(dir, 'issues.jsonl')],
+    [join(fixture.stateDir, 'runs.jsonl'), join(dir, 'runs.jsonl')],
+  ] as [string, string][]) {
+    if (existsSync(from)) cpSync(from, to);
+  }
+  return loadArtifacts(dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -901,13 +908,26 @@ function exitCheck(a: Artifacts): Check[] {
 function sweepCheck(a: Artifacts): Check {
   return check(
     'no fixture session rows remain in `claude agents --all` after cleanup',
-    a.sweep.leftover != null && a.sweep.leftover.length === 0,
+    a.sweep.leftover?.length === 0,
     a.sweep.leftover == null
       ? `the listing could NOT be read (${a.sweep.reason ?? 'unrecorded reason'}), so "nothing left over" was never established`
       : a.sweep.leftover.length === 0
         ? `stopped ${a.sweep.stopped.length}, removed ${a.sweep.removed.length}, 0 rows match slug \`${a.slug}\` or cwd ${a.repo}`
         : `still listed: ${a.sweep.leftover.join(', ')}`,
   );
+}
+
+/**
+ * The bead ids, or an explicit "(none)".
+ *
+ * A helper rather than `join(', ') || '(none)'` at each call site: the
+ * fallback has to distinguish an empty list from a list of ids, and an
+ * implicit-truthiness expression is exactly what the strict-boolean rule
+ * refuses to let stand.
+ */
+function beadIdList(beads: BeadRow[]): string {
+  const ids = beads.map((b) => b.id);
+  return ids.length === 0 ? '(none)' : ids.join(', ');
 }
 
 function checkScenarioA(a: Artifacts): Check[] {
@@ -920,7 +940,7 @@ function checkScenarioA(a: Artifacts): Check[] {
       a.beads != null && beads.length === 2,
       a.beads == null
         ? `issues.jsonl could NOT be read: ${a.beadsReason ?? 'unrecorded reason'}`
-        : `${beads.length} handoff-labelled bead(s): ${beads.map((b) => b.id).join(', ') || '(none)'}`,
+        : `${beads.length} handoff-labelled bead(s): ${beadIdList(beads)}`,
     ),
   );
 
@@ -991,7 +1011,7 @@ function checkScenarioA(a: Artifacts): Check[] {
   checks.push(
     check(
       'the ledger is readable and holds exactly 2 rows',
-      ledger != null && ledger.length === 2,
+      ledger?.length === 2,
       ledger == null
         ? `runs.jsonl could NOT be read: ${a.ledgerReason ?? 'unrecorded reason'}`
         : `${ledger.length} row(s), labels [${ledger.map((r) => r.label).join(', ')}]`,
@@ -1010,8 +1030,7 @@ function checkScenarioA(a: Artifacts): Check[] {
   checks.push(
     check(
       'each ledger row names the handoff bead that session wrote',
-      ledger != null &&
-        ledger.length === 2 &&
+      ledger?.length === 2 &&
         ledger[0]?.handoffBead === beads[0]?.id &&
         ledger[1]?.handoffBead === beads[1]?.id,
       `ledger handoffBead = [${(ledger ?? []).map((r) => r.handoffBead ?? 'null').join(', ')}], beads = [${beads.map((b) => b.id).join(', ')}]`,
@@ -1033,14 +1052,12 @@ function checkScenarioA(a: Artifacts): Check[] {
   checks.push(
     check(
       'the stop was confirmed BEFORE the second session was dispatched',
-      confirmed >= 0 &&
-        dispatches.length >= 2 &&
-        confirmed < (dispatches[1] as number),
+      confirmed >= 0 && dispatches.length >= 2 && confirmed < dispatches[1]!,
       confirmed < 0
         ? 'no stop-confirmation line in the runner transcript at all'
         : dispatches.length < 2
           ? `only ${dispatches.length} session dispatch line(s) in the transcript`
-          : `confirmation at line ${confirmed + 1}, second dispatch at line ${(dispatches[1] as number) + 1}`,
+          : `confirmation at line ${confirmed + 1}, second dispatch at line ${dispatches[1]! + 1}`,
     ),
   );
 
@@ -1079,7 +1096,7 @@ function checkScenarioB(a: Artifacts): Check[] {
       a.beads != null && beads.length === 1,
       a.beads == null
         ? `issues.jsonl could NOT be read: ${a.beadsReason ?? 'unrecorded reason'}`
-        : `${beads.length} handoff-labelled bead(s): ${beads.map((b) => b.id).join(', ') || '(none)'}`,
+        : `${beads.length} handoff-labelled bead(s): ${beadIdList(beads)}`,
     ),
   );
 
@@ -1100,7 +1117,7 @@ function checkScenarioB(a: Artifacts): Check[] {
   checks.push(
     check(
       'the ledger is readable, holds 1 row, and records demands >= 1',
-      ledger != null && ledger.length === 1 && (ledger[0]?.demands ?? 0) >= 1,
+      ledger?.length === 1 && (ledger[0]?.demands ?? 0) >= 1,
       ledger == null
         ? `runs.jsonl could NOT be read: ${a.ledgerReason ?? 'unrecorded reason'}`
         : `${ledger.length} row(s), demands = ${ledger[0]?.demands ?? 'absent'}`,

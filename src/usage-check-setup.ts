@@ -29,6 +29,7 @@
 import {basename, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
+import {sdkRun, sdkScript, upsertHookCommand} from './sdk-invocation';
 import {
   ensureDir,
   fail,
@@ -39,7 +40,6 @@ import {
   success,
   writeJson,
 } from './setup-helpers';
-import {sdkRun, sdkScript, upsertHookCommand} from './sdk-invocation';
 import {
   formatTokens,
   SETPOINT_CEILING_TOKENS,
@@ -79,8 +79,7 @@ export function addUsageCheckHook(
   settings: Record<string, unknown>,
   event: string,
 ): boolean {
-  const hooks = ((settings.hooks as Record<string, unknown> | undefined) ??
-    {}) as Record<string, unknown>;
+  const hooks = (settings.hooks as Record<string, unknown> | undefined) ?? {};
   const registered = (hooks[event] as unknown[] | undefined) ?? [];
 
   const {changed, entries} = upsertHookCommand(
@@ -101,7 +100,7 @@ export function stepUsageCheckHooks(projectRoot: string): boolean {
   const settingsPath = resolve(settingsDir, 'settings.json');
   ensureDir(settingsDir);
 
-  const settings = (readJson(settingsPath) ?? {}) as Record<string, unknown>;
+  const settings = readJson(settingsPath) ?? {};
   const added: string[] = [];
   for (const event of USAGE_CHECK_HOOK_EVENTS) {
     if (addUsageCheckHook(settings, event)) {
@@ -148,9 +147,8 @@ export function stepUsageCheckConfig(projectRoot: string): boolean {
     return false;
   }
 
-  const componentConfig = ((config.componentConfig as
-    | Record<string, unknown>
-    | undefined) ?? {}) as Record<string, unknown>;
+  const componentConfig =
+    (config.componentConfig as Record<string, unknown> | undefined) ?? {};
 
   if (componentConfig[USAGE_CHECK_CONFIG_KEY] != null) {
     success(
@@ -180,9 +178,9 @@ export function stepUsageCheckConfig(projectRoot: string): boolean {
 }
 
 export async function runUsageCheckSetup(args: {
+  force?: boolean;
   projectRoot: string;
   quiet: boolean;
-  force?: boolean;
   /**
    * The remote the SDK pin tag is verified against, forwarded to base-setup.
    * Tests point it at a local bare repo so the install is hermetic; production

@@ -40,11 +40,11 @@ import {countDivergence} from '../src/repo-status/core';
 import {describeMergeShape} from '../src/repo-status/merge-shape';
 import {
   buildPlan,
+  type CleanupPlan,
   executePlan,
   executeRemotePlan,
-  type CleanupPlan,
 } from '../src/repo-status/plan';
-import {buildReport, type BranchRow} from '../src/repo-status/report';
+import {type BranchRow, buildReport} from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const CLI = join(import.meta.dir, '../src/repo-status/repo-status.ts');
@@ -84,9 +84,9 @@ function destroyObject(repo: string, sha: string): void {
 }
 
 interface Fixture {
-  repo: string;
   /** A bare repo standing in for `origin`. */
   remote: string;
+  repo: string;
 }
 
 /**

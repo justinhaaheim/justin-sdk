@@ -45,13 +45,13 @@ import {
   componentProvenanceEvidence,
 } from '../src/component-manifest';
 import {COMPONENT_INCLUDE_IF} from '../src/component-registry';
-import {THREAD_START_HOOK_COMMAND} from '../src/thread-hooks-setup';
 import {
   adoptInstalledComponents,
   noProvenanceLine,
   planInstallPayload,
   renderInstallPayloadPlan,
 } from '../src/sweep-install';
+import {THREAD_START_HOOK_COMMAND} from '../src/thread-hooks-setup';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];

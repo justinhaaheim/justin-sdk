@@ -34,8 +34,8 @@ import {
   stepPackageScripts,
 } from './base-setup';
 import {
-  type ComponentName,
   COMPONENT_NAMES,
+  type ComponentName,
   componentNameForConfigName,
   configNameFor,
 } from './component-registry';
@@ -65,29 +65,29 @@ export {kebabCase} from './setup-helpers';
 // ---------------------------------------------------------------------------
 
 export interface InitOptions {
-  projectRoot?: string;
-  quiet?: boolean;
   /** Allow running with uncommitted changes (default false) */
   allowDirty?: boolean;
-  /** Skip the final git commit (default false) */
-  noCommit?: boolean;
-  /** Pass --force to underlying add commands (default false) */
-  force?: boolean;
-  /** Skip `bun install` (default false — tests should set true) */
-  skipInstall?: boolean;
-  /** Skip the `bun run justin-sdk doctor` self-check at the end (default false) */
-  skipDoctor?: boolean;
   /**
    * Write an explicit `components` list into the new config. Absent (the
    * default) leaves the key out, which means "track the core preset".
    */
   components?: readonly string[];
+  /** Pass --force to underlying add commands (default false) */
+  force?: boolean;
+  /** Skip the final git commit (default false) */
+  noCommit?: boolean;
+  projectRoot?: string;
+  quiet?: boolean;
   /**
    * The remote to verify the SDK tag against before writing the pin. Defaults
    * to the real published repo; tests point it at a local bare repo so the real
    * `git ls-remote` path runs without the suite reaching GitHub.
    */
   sdkRepoUrl?: string;
+  /** Skip the `bun run justin-sdk doctor` self-check at the end (default false) */
+  skipDoctor?: boolean;
+  /** Skip `bun install` (default false — tests should set true) */
+  skipInstall?: boolean;
 }
 
 /**
@@ -144,10 +144,10 @@ export async function runInit(options: InitOptions = {}): Promise<number> {
     const name = kebabCase(rawName);
     const pkg = {
       name: name.length > 0 ? name : 'unnamed-project',
-      version: '0.0.1',
-      type: 'module',
       private: true,
       scripts: {},
+      type: 'module',
+      version: '0.0.1',
     };
     writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
     success(`Created package.json (name: "${pkg.name}")`);

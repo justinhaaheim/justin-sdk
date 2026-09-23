@@ -65,15 +65,37 @@
  * process the same rule holds: every unexpected throw returns 0.
  */
 
-import {readFileSync} from 'fs';
-
-import {SDK_RUN} from '../sdk-invocation';
-import {resolveThreadConfig} from './config';
-import {newestArchivedReportAt, stopMarkExists, writeStopMark} from './archive';
-import {findTranscript, scanTranscriptForThread} from './facts';
-
 import type {ArchiveProbe} from './archive';
+import type {ThreadEnforceMode} from './defaults';
 import type {EnvLike} from './paths';
+
+import {appendFileSync, mkdirSync, readFileSync} from 'fs';
+import {dirname} from 'path';
+
+import {
+  BODY_COLUMN,
+  DETAIL_COLUMN,
+  outputStyle,
+  pad,
+  padEndWidth,
+  paint,
+  sectionHeader,
+  spacedList,
+} from '../cli-style';
+import {SDK_RUN} from '../sdk-invocation';
+import {
+  newestArchivedReportAt,
+  stopCheckLogPath,
+  stopMarkExists,
+  writeStopMark,
+} from './archive';
+import {resolveThreadConfig} from './config';
+import {THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES} from './defaults';
+import {findTranscript, scanTranscriptForThread} from './facts';
+import {
+  forEachTranscriptLine,
+  substantiveUserText,
+} from './transcript-messages';
 
 /**
  * How many delimiter glyphs in a row count as a report rule line.
@@ -128,9 +150,24 @@ export type StopCheckWhy =
   | 'archiveUnknown'
   | 'archiveNewer'
   | 'notRecorded'
+  // K12 `workTurns` only (k0b8n.11): a non-report yield after real work.
+  | 'turnUnknown'
+  | 'lightTurn'
+  | 'workTurnCommitted'
+  | 'workTurnLong'
   | 'unreadablePayload'
   | 'markerWriteFailed'
   | 'internalFailure';
+
+/**
+ * What the turn since Justin's last message did (K12), measured by the IO
+ * wrapper in ONE forward pass and handed in, so `decideStopCheck` stays pure.
+ * `commits` counts Bash tool calls whose command runs `git commit`.
+ */
+export interface TurnMeasure {
+  commits: number;
+  minutes: number;
+}
 
 export interface StopCheckInputs {
   /** Present only for a subagent's Stop. Its presence is the role discriminant. */
@@ -153,10 +190,20 @@ export interface StopCheckInputs {
   lastUserMessageAt: number | null;
   /** Have we already blocked this exact turn? */
   markerExists: boolean;
+  /** `workTurns`: a turn at least this long is work. Default 20 (K12). */
+  minTurnMinutes?: number;
+  /**
+   * `componentConfig.thread.enforceMode`. ABSENT means `reportShaped`, which
+   * is today's behaviour exactly — so every caller written before K12 keeps
+   * it without a change (k0b8n.11).
+   */
+  mode?: ThreadEnforceMode;
   /** Null when there is no session id to key anything by. */
   sessionId: string | null;
   /** Claude Code's own loop guard: a Stop hook already blocked this turn. */
   stopHookActive: boolean;
+  /** `workTurns` only. Null or absent means "not measured", which passes. */
+  turn?: TurnMeasure | null;
 }
 
 export interface StopCheckDecision {
@@ -168,6 +215,21 @@ export interface StopCheckDecision {
 
 /** The one line a blocked turn is shown, in both channels. */
 export const STOP_CHECK_BLOCK_REASON = `This report was not recorded; run ${SDK_RUN} thread prepare then thread report --file and paste its output.`;
+
+/**
+ * The block line for a `workTurns` refusal (K12): it names WHY this turn
+ * counts as work, then gives the same instruction as the report-shaped block.
+ */
+export function workTurnBlockReason(
+  why: 'workTurnCommitted' | 'workTurnLong',
+  turn: TurnMeasure,
+): string {
+  const did =
+    why === 'workTurnCommitted'
+      ? 'committed work'
+      : `ran ${Math.floor(turn.minutes)} minutes`;
+  return `This turn ${did} and no report was recorded; run ${SDK_RUN} thread prepare then thread report --file and paste its output.`;
+}
 
 /**
  * The whole decision, as a pure function. No filesystem, no clock, no env.
@@ -190,8 +252,10 @@ export function decideStopCheck(inputs: StopCheckInputs): StopCheckDecision {
   if (inputs.agentId != null && inputs.agentId !== '') return pass('subagent');
   if (inputs.stopHookActive) return pass('stopHookActive');
   if (inputs.markerExists) return pass('markerPresent');
-  if (!looksLikeStatusReport(inputs.lastAssistantMessage))
-    return pass('notAReport');
+  // K12: in `reportShaped` (the default, and an absent mode) a non-report
+  // passes HERE, exactly as before. Only `workTurns` looks past it.
+  const reportShaped = looksLikeStatusReport(inputs.lastAssistantMessage);
+  if (!reportShaped && inputs.mode !== 'workTurns') return pass('notAReport');
   if (inputs.sessionId == null || inputs.sessionId === '')
     return pass('noSessionId');
 
@@ -207,11 +271,35 @@ export function decideStopCheck(inputs: StopCheckInputs): StopCheckDecision {
     return pass('archiveNewer');
   }
 
-  return {
-    action: 'block',
-    reason: STOP_CHECK_BLOCK_REASON,
-    why: 'notRecorded',
-  };
+  if (reportShaped) {
+    return {
+      action: 'block',
+      reason: STOP_CHECK_BLOCK_REASON,
+      why: 'notRecorded',
+    };
+  }
+
+  // `workTurns`, a plain-prose yield, no report since his last message: did
+  // this turn do real work? Unmeasured passes (rule 7 — never block on a
+  // guess), and so does a NaN dressed as a measurement.
+  const turn = inputs.turn ?? null;
+  if (
+    turn == null ||
+    !Number.isFinite(turn.commits) ||
+    !Number.isFinite(turn.minutes)
+  ) {
+    return pass('turnUnknown');
+  }
+  const minTurnMinutes =
+    inputs.minTurnMinutes ?? THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES;
+  const why: 'workTurnCommitted' | 'workTurnLong' | null =
+    turn.commits > 0
+      ? 'workTurnCommitted'
+      : turn.minutes >= minTurnMinutes
+        ? 'workTurnLong'
+        : null;
+  if (why == null) return pass('lightTurn');
+  return {action: 'block', reason: workTurnBlockReason(why, turn), why};
 }
 
 /** One human-readable line per branch, for `--explain` and the debug log. */
@@ -237,6 +325,14 @@ export function describeStopCheck(decision: StopCheckDecision): string {
       return 'pass: a report was archived after the last user message';
     case 'notRecorded':
       return 'BLOCK: a report was written but none was archived for this turn';
+    case 'turnUnknown':
+      return 'pass: UNKNOWN — could not measure what this turn did (workTurns)';
+    case 'lightTurn':
+      return 'pass: no commit and a short turn (workTurns)';
+    case 'workTurnCommitted':
+      return 'BLOCK: this turn committed work and no report was recorded (workTurns)';
+    case 'workTurnLong':
+      return 'BLOCK: this turn ran long and no report was recorded (workTurns)';
     case 'unreadablePayload':
       return 'pass: the hook payload was missing or was not JSON';
     case 'markerWriteFailed':
@@ -316,6 +412,240 @@ function measureLastUserMessageAt(
 }
 
 /**
+ * A Bash command that RUNS `git commit` — `git commit -m …`, `cd x && git
+ * commit`, `git -C dir commit` — but not `git commit-tree` or `git log --grep
+ * commit` (K12). A quoted `"git commit"` inside an echo also matches; that
+ * false positive blocks one turn at most, which is the cheap direction.
+ */
+export const GIT_COMMIT_COMMAND =
+  /\bgit\s+(?:-[Cc]\s+\S+\s+|--?[\w-]+(?:=\S+)?\s+)*commit(?![\w-])/;
+
+/** How many `git commit`s one assistant record's Bash tool calls run. */
+function commitsIn(record: {message?: {content?: unknown}}): number {
+  const content = record.message?.content;
+  if (!Array.isArray(content)) return 0;
+  let commits = 0;
+  for (const block of content) {
+    if (block == null || typeof block !== 'object') continue;
+    const typed = block as {input?: unknown; name?: unknown; type?: unknown};
+    if (typed.type !== 'tool_use' || typed.name !== 'Bash') continue;
+    const command =
+      typed.input != null && typeof typed.input === 'object'
+        ? (typed.input as {command?: unknown}).command
+        : null;
+    if (typeof command === 'string' && GIT_COMMIT_COMMAND.test(command))
+      commits += 1;
+  }
+  return commits;
+}
+
+/**
+ * Justin's last message AND what the turn since it did, in ONE forward pass
+ * (K12). "Last message" is `substantiveUserText`'s definition — the same one
+ * `scanTranscriptForThread` uses — so the two modes agree on when a turn began.
+ * The transcript lags the in-memory turn by at most the final message, which
+ * carries no tool call, so the commit count is complete.
+ */
+export function measureTurnInTranscript(
+  path: string,
+  nowMs: number,
+): {at: number | null; turn: TurnMeasure | null} {
+  let at: number | null = null;
+  let seen = false;
+  let commits = 0;
+  forEachTranscriptLine(path, (line) => {
+    if (line.trim() === '') return;
+    let record: {
+      isSidechain?: unknown;
+      message?: {content?: unknown};
+      timestamp?: unknown;
+      type?: unknown;
+    };
+    try {
+      record = JSON.parse(line) as typeof record;
+    } catch {
+      return;
+    }
+    if (record.isSidechain === true) return;
+    if (record.type === 'user') {
+      if (
+        substantiveUserText(
+          record as Parameters<typeof substantiveUserText>[0],
+        ) == null
+      )
+        return;
+      seen = true;
+      at = epochMs(
+        typeof record.timestamp === 'string' ? record.timestamp : null,
+      );
+      commits = 0;
+      return;
+    }
+    if (record.type === 'assistant') commits += commitsIn(record);
+  });
+  if (!seen || at == null) return {at: null, turn: null};
+  return {at, turn: {commits, minutes: (nowMs - at) / 60_000}};
+}
+
+/**
+ * `workTurns`' measurement (K12): the same transcript resolution as
+ * `measureLastUserMessageAt`, then ONE pass for both facts. Every failure is
+ * `{at: null, turn: null}` with the reason, which passes.
+ */
+function measureTurn(
+  sessionId: string,
+  transcriptPath: string | null,
+  env: EnvLike,
+  nowMs: number,
+): {at: number | null; error: string | null; turn: TurnMeasure | null} {
+  let path = transcriptPath;
+  if (path == null || path === '') {
+    const lookup = findTranscript(sessionId, env);
+    if (lookup.status !== 'found') {
+      return {
+        at: null,
+        error:
+          lookup.status === 'failed'
+            ? lookup.error
+            : `no transcript for ${sessionId} under ${lookup.searched}`,
+        turn: null,
+      };
+    }
+    path = lookup.path;
+  }
+  try {
+    const measured = measureTurnInTranscript(path, nowMs);
+    return {
+      ...measured,
+      error: measured.at == null ? `no user message in ${path}` : null,
+    };
+  } catch (error) {
+    return {
+      at: null,
+      error: `read ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      turn: null,
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The decision log (K12)
+// ---------------------------------------------------------------------------
+
+/** What one run knew when it decided; null = never measured on that path. */
+interface DecisionLogContext {
+  cwd: string | null;
+  mode: ThreadEnforceMode | null;
+  sessionId: string | null;
+  turnCommits: number | null;
+  turnMinutes: number | null;
+}
+
+/** One line per run, passes included. FAILS SOFT: returns the error, never throws. */
+export function appendStopCheckLog(
+  env: EnvLike,
+  line: Record<string, unknown>,
+): string | null {
+  const path = stopCheckLogPath(env);
+  try {
+    mkdirSync(dirname(path), {recursive: true});
+    appendFileSync(path, `${JSON.stringify(line)}\n`);
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
+/** `thread stop-check --stats`: counts by action and why over the log. */
+export function renderStopCheckStats(
+  text: string,
+  path: string,
+  color: boolean,
+): string {
+  const counts = new Map<string, Map<string, number>>();
+  let total = 0;
+  let malformed = 0;
+  let first: string | null = null;
+  let last: string | null = null;
+  for (const raw of text.split('\n')) {
+    if (raw.trim() === '') continue;
+    let entry: {action?: unknown; at?: unknown; why?: unknown};
+    try {
+      entry = JSON.parse(raw) as typeof entry;
+    } catch {
+      malformed += 1;
+      continue;
+    }
+    if (typeof entry.action !== 'string' || typeof entry.why !== 'string') {
+      malformed += 1;
+      continue;
+    }
+    total += 1;
+    if (typeof entry.at === 'string') {
+      if (first == null || entry.at < first) first = entry.at;
+      if (last == null || entry.at > last) last = entry.at;
+    }
+    const byWhy = counts.get(entry.action) ?? new Map<string, number>();
+    byWhy.set(entry.why, (byWhy.get(entry.why) ?? 0) + 1);
+    counts.set(entry.action, byWhy);
+  }
+  const blocks: string[] = [
+    sectionHeader('STOP-CHECK DECISIONS', {color, emoji: '🛑'}),
+    `${pad(BODY_COLUMN)}${total} decisions logged · ${first ?? '?'} → ${last ?? '?'}\n${pad(BODY_COLUMN)}${paint(path, ['dim'], color)}`,
+  ];
+  for (const action of ['block', 'pass']) {
+    const byWhy = counts.get(action);
+    const n =
+      byWhy == null ? 0 : [...byWhy.values()].reduce((a, b) => a + b, 0);
+    const head = `${pad(BODY_COLUMN)}${paint(`${action} ${n}`, action === 'block' && n > 0 ? ['bold', 'red'] : ['bold'], color)}`;
+    const rows = [...(byWhy ?? new Map<string, number>()).entries()]
+      .sort((a, b) => (b[1] !== a[1] ? b[1] - a[1] : a[0].localeCompare(b[0])))
+      .map(
+        ([why, count]) =>
+          `${pad(DETAIL_COLUMN)}${padEndWidth(why, 24)}${count}`,
+      );
+    blocks.push([head, ...rows].join('\n'));
+  }
+  if (malformed > 0) {
+    blocks.push(
+      `${pad(BODY_COLUMN)}${paint(`${malformed} line(s) were not decision lines and were skipped`, ['yellow'], color)}`,
+    );
+  }
+  return `${spacedList(blocks)}\n`;
+}
+
+/** ALWAYS resolves. 0 = printed (an absent log is a measured "none yet"), 1 = unreadable. */
+export function runStopCheckStats(args: {env?: EnvLike} = {}): number {
+  const env = args.env ?? process.env;
+  const path = stopCheckLogPath(env);
+  const {color} = outputStyle(process.stdout, env);
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (error) {
+    const code =
+      error != null && typeof error === 'object' && 'code' in error
+        ? String((error as {code: unknown}).code)
+        : '';
+    if (code === 'ENOENT') {
+      console.log(
+        `${spacedList([
+          sectionHeader('STOP-CHECK DECISIONS', {color, emoji: '🛑'}),
+          `${pad(BODY_COLUMN)}none logged yet — there is no log at ${paint(path, ['dim'], color)}`,
+        ])}\n`,
+      );
+      return 0;
+    }
+    console.error(
+      `thread stop-check --stats: could not read ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return 1;
+  }
+  process.stdout.write(renderStopCheckStats(text, path, color));
+  return 0;
+}
+
+/**
  * Run the hook. ALWAYS resolves; never throws.
  *
  * Returns 0 with nothing on stdout on every pass. Returns 2 on a block, with the
@@ -325,17 +655,42 @@ function measureLastUserMessageAt(
 export function runThreadStopCheck(args?: {
   env?: EnvLike;
   explain?: boolean;
+  /** The clock for the turn length and the log line. Tests pin it. */
+  now?: Date;
   stdin?: string;
 }): StopCheckRunResult {
   const started = Date.now();
   const env = args?.env ?? process.env;
   const explain = args?.explain === true;
+  const nowMs = args?.now?.getTime() ?? started;
+  const logged: DecisionLogContext = {
+    cwd: null,
+    mode: null,
+    sessionId: null,
+    turnCommits: null,
+    turnMinutes: null,
+  };
 
   const finish = (
     decision: StopCheckDecision,
     exitCode: number,
   ): StopCheckRunResult => {
     const elapsedMs = Date.now() - started;
+    // K12: EVERY decision is logged, passes included. Fail soft — the
+    // decision was made before this line and nothing here can change it.
+    const logError = appendStopCheckLog(env, {
+      action: decision.action,
+      at: new Date(nowMs).toISOString(),
+      cwd: logged.cwd,
+      mode: logged.mode,
+      sessionId: logged.sessionId,
+      turnCommits: logged.turnCommits,
+      turnMinutes: logged.turnMinutes,
+      why: decision.why,
+    });
+    if (explain && logError != null) {
+      console.error(`[thread stop-check] decision NOT logged: ${logError}`);
+    }
     if (explain) {
       console.error(`[thread stop-check] ${describeStopCheck(decision)}`);
       console.error(`[thread stop-check] ${elapsedMs}ms`);
@@ -357,11 +712,17 @@ export function runThreadStopCheck(args?: {
     const agentId = input.agent_id ?? null;
     const stopHookActive = input.stop_hook_active === true;
     const lastAssistantMessage = input.last_assistant_message ?? null;
+    logged.sessionId = sessionId;
+    logged.cwd = input.cwd ?? null;
 
     // The knob and the subagent test come before ANY filesystem work, so the
     // overwhelmingly common Stop — knob off, or a player finishing — costs one
     // config read and nothing else.
-    const enforce = resolveThreadConfig({cwd: input.cwd, env}).enforce;
+    const config = resolveThreadConfig({cwd: input.cwd, env});
+    const enforce = config.enforce;
+    const mode = config.enforceMode;
+    const minTurnMinutes = config.enforceMinTurnMinutes;
+    logged.mode = mode;
     const cheap = decideStopCheck({
       agentId,
       archive: {error: 'not measured yet', kind: 'unknown'},
@@ -369,6 +730,8 @@ export function runThreadStopCheck(args?: {
       lastAssistantMessage,
       lastUserMessageAt: null,
       markerExists: false,
+      minTurnMinutes,
+      mode,
       sessionId,
       stopHookActive,
     });
@@ -381,14 +744,23 @@ export function runThreadStopCheck(args?: {
     if (cheap.why !== 'lastUserMessageUnknown') return finish(cheap, 0);
 
     // Past here the text IS a report, the knob is on, and we have a session id.
-    const id = sessionId as string;
+    const id = sessionId!;
     const turnKey = input.prompt_id ?? null;
 
-    const measured = measureLastUserMessageAt(
-      id,
-      input.transcript_path ?? null,
-      env,
-    );
+    // reportShaped keeps its measurement exactly; workTurns needs the turn's
+    // commits too, and gets both from ONE pass.
+    const measured =
+      mode === 'workTurns'
+        ? measureTurn(id, input.transcript_path ?? null, env, nowMs)
+        : {
+            ...measureLastUserMessageAt(id, input.transcript_path ?? null, env),
+            turn: null,
+          };
+    logged.turnCommits = measured.turn?.commits ?? null;
+    logged.turnMinutes =
+      measured.turn == null
+        ? null
+        : Math.round(measured.turn.minutes * 10) / 10;
     const archive = newestArchivedReportAt(id, env);
 
     // The turn's identity: `prompt_id` when Claude Code supplies it (it is the
@@ -405,8 +777,11 @@ export function runThreadStopCheck(args?: {
       lastAssistantMessage,
       lastUserMessageAt: measured.at,
       markerExists,
+      minTurnMinutes,
+      mode,
       sessionId,
       stopHookActive,
+      turn: measured.turn,
     });
 
     if (explain) {

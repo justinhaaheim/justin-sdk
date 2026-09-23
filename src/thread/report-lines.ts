@@ -59,9 +59,9 @@ export type ReportLineKind =
   | 'where';
 
 export interface ReportLine {
+  kind: ReportLineKind;
   /** The `**Field:**` label, without the asterisks. Null when there is none. */
   label: string | null;
-  kind: ReportLineKind;
   /**
    * The ask priority this line belongs to, 0-4. Null on every line that is not
    * part of an ask — NOT 0, which is a real priority and the loudest one.
@@ -141,7 +141,10 @@ export function classifyReportLine(
   text: string,
   carry: AskCarry | null,
 ): ReportLine {
-  if (text === '') {
+  // A line of spaces is a blank line. A carried ask reproduces its bead's
+  // description under a five-space indent, so every blank line in that
+  // description arrives here as `     ` — and it separates, it does not say.
+  if (text.trim() === '') {
     return {kind: 'blank', label: null, priority: null, rest: '', text};
   }
   if (/^(?:🛑|🕉️|⏭️)+$/u.test(text)) {
@@ -256,6 +259,13 @@ export function classifyReportLine(
 /**
  * Classify a whole rendered report, threading the current ask's priority
  * through its continuation lines.
+ *
+ * THE CARRY SURVIVES BLANK LINES (home-base-k0b8n.10, K11 rule 1). An ask's
+ * context, options and default are now separated from each other by a blank
+ * line, so "the previous line was not a detail" no longer means "this ask is
+ * over". Only a line that starts something else — a heading, a field, a bullet,
+ * the next ask — ends it. An unrecognised `text` line keeps it too: that is a
+ * multi-line value (a context with a newline in it) still being printed.
  */
 export function classifyReport(markdown: string): ReportLine[] {
   const lines: ReportLine[] = [];
@@ -263,8 +273,58 @@ export function classifyReport(markdown: string): ReportLine[] {
   for (const text of markdown.split('\n')) {
     const line = classifyReportLine(text, carry);
     if (line.kind === 'ask') carry = {priority: line.priority};
-    else if (line.kind !== 'askDetail') carry = null;
+    else if (
+      line.kind !== 'askDetail' &&
+      line.kind !== 'blank' &&
+      line.kind !== 'text'
+    ) {
+      carry = null;
+    }
     lines.push(line);
   }
   return lines;
+}
+
+/** One lettered option, as a surface needs it to style one. */
+export interface OptionLine {
+  letter: string;
+  recommended: boolean;
+  text: string;
+}
+
+/**
+ * `- a. (Recommended) text` or `a. (Recommended) text` → its parts, or null
+ * when the detail line is not an option.
+ *
+ * Both spellings, because both exist: the nested-list form is what the markdown
+ * renders now (K11 rule 6), and every report stored before 2026-09-23 has the
+ * bare form. Expects the line's `rest` — indentation already removed.
+ */
+export function parseOptionLine(rest: string): OptionLine | null {
+  const match = /^(?:- )?([a-z])\. (\(Recommended\) )?(.*)$/u.exec(rest);
+  if (match == null) return null;
+  return {
+    letter: match[1] ?? '',
+    recommended: match[2] != null,
+    text: match[3] ?? '',
+  };
+}
+
+/**
+ * Does this text look like a RENDERED REPORT at all (home-base-k0b8n.14)?
+ *
+ * A thread bead that `thread start` or `thread capture` made carries
+ * placeholder notes ("NO REPORT YET. …"), not a report, and every report
+ * surface used to style them as one — the compactor turned "nothing reported"
+ * into "nothing needs you — nothing went wrong, nothing is blocking", which is
+ * a measured reassurance nobody measured (rule 7). Every rendered report, v1
+ * included, opens with the 🛑 rule; every v2 report carries the ⚡ glance line.
+ * Text with neither is passed through as what it is.
+ */
+export function isRenderedReport(text: string): boolean {
+  return classifyReport(text).some(
+    (line) =>
+      line.kind === 'glance' ||
+      (line.kind === 'rule' && line.text.startsWith('🛑')),
+  );
 }

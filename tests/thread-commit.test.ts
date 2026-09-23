@@ -24,11 +24,11 @@
 
 import {describe, expect, test} from 'bun:test';
 import {execFileSync} from 'child_process';
-import {mkdtempSync, readFileSync, rmSync, writeFileSync} from 'fs';
-import {mkdirSync} from 'fs';
+import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
+import {uncommittedLine, unpushedLine} from '../src/thread/board';
 import {
   acquireCommitLock,
   commitThreadsRepo,
@@ -37,7 +37,6 @@ import {
   releaseCommitLock,
 } from '../src/thread/commit';
 import {runThreadDone} from '../src/thread/done';
-import {uncommittedLine, unpushedLine} from '../src/thread/board';
 
 function git(dir: string, args: string[]): string {
   return execFileSync('git', args, {cwd: dir, encoding: 'utf8'});
@@ -660,16 +659,18 @@ describe('a write batch commits without a manual step', () => {
       // NEGATIVE CONTROL (2026-09-12): commenting out the commitThreadsRepo
       // call in runThreadDone made this fail at `log.length` with 1 vs 2.
       const deps = {
-        closeIssue: async () => {
+        closeIssue: () => {
           appendBead(dir, 'th-6');
-          return {ok: true as const, value: true as const};
+          return Promise.resolve({ok: true as const, value: true as const});
         },
-        listOpenAsks: async () => ({ok: true as const, value: []}),
-        reopenIssue: async () => ({ok: true as const, value: true as const}),
-        resolveThread: async () => ({
-          issue: {id: 'th-6', title: 'a thread'},
-          ok: true as const,
-        }),
+        listOpenAsks: () => Promise.resolve({ok: true as const, value: []}),
+        reopenIssue: () =>
+          Promise.resolve({ok: true as const, value: true as const}),
+        resolveThread: () =>
+          Promise.resolve({
+            issue: {id: 'th-6', title: 'a thread'},
+            ok: true as const,
+          }),
       };
       const code = await runThreadDone({
         autoCommit: true,
@@ -701,16 +702,18 @@ describe('a write batch commits without a manual step', () => {
       git(dir, ['push', '-q', 'origin', 'HEAD']);
       advanceRemote(bare);
       const deps = {
-        closeIssue: async () => {
+        closeIssue: () => {
           appendBead(dir, 'th-7');
-          return {ok: true as const, value: true as const};
+          return Promise.resolve({ok: true as const, value: true as const});
         },
-        listOpenAsks: async () => ({ok: true as const, value: []}),
-        reopenIssue: async () => ({ok: true as const, value: true as const}),
-        resolveThread: async () => ({
-          issue: {id: 'th-7', title: 'a thread'},
-          ok: true as const,
-        }),
+        listOpenAsks: () => Promise.resolve({ok: true as const, value: []}),
+        reopenIssue: () =>
+          Promise.resolve({ok: true as const, value: true as const}),
+        resolveThread: () =>
+          Promise.resolve({
+            issue: {id: 'th-7', title: 'a thread'},
+            ok: true as const,
+          }),
       };
       const code = await runThreadDone({
         autoCommit: true,

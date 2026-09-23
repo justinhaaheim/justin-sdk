@@ -6,7 +6,7 @@
  * package.json directly so tests stay fast and offline.
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
+import {afterEach, describe, expect, test} from 'bun:test';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
@@ -117,9 +117,9 @@ describe('tsconfig-setup', () => {
     const customTsconfig = JSON.stringify(
       {
         compilerOptions: {
+          customFlag: 'preserved',
           strict: false,
           target: 'ES2020',
-          customFlag: 'preserved',
         },
       },
       null,
@@ -145,9 +145,9 @@ describe('tsconfig-setup', () => {
     );
 
     const exitCode = await runTsconfigSetup({
+      force: true,
       projectRoot: sb.path,
       quiet: true,
-      force: true,
     });
     expect(exitCode).toBe(0);
 
@@ -160,8 +160,8 @@ describe('tsconfig-setup', () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
-          name: 'test',
           devDependencies: {someOther: '1.0.0'},
+          name: 'test',
         },
       }),
     );
@@ -214,8 +214,8 @@ describe('tsconfig-setup', () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
-          name: 'test',
           devDependencies: {typescript: '5.0.0'},
+          name: 'test',
         },
       }),
     );
@@ -238,12 +238,12 @@ describe('tsconfig-setup', () => {
     const sb = track(
       createProjectSandbox({
         packageJson: {
-          name: 'test',
           devDependencies: {typescript: '5.0.0'},
+          name: 'test',
         },
       }),
     );
-    await runTsconfigSetup({projectRoot: sb.path, quiet: true, force: true});
+    await runTsconfigSetup({force: true, projectRoot: sb.path, quiet: true});
 
     const pkg = JSON.parse(
       readFileSync(join(sb.path, 'package.json'), 'utf-8'),

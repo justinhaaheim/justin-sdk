@@ -13,7 +13,7 @@
  * anchors on the quoted TOOL KEY at the start of a line.
  */
 
-import {describe, test, expect} from 'bun:test';
+import {describe, expect, test} from 'bun:test';
 
 import {applyBeadsMiseToolPin, BEADS_MISE_TOOL_KEY} from '../src/beads-setup';
 

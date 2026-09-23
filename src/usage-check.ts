@@ -107,6 +107,8 @@ export const WRAP_UP_DIRECTIVE =
  * switch the component off for one role and not the other.
  */
 export interface UsageCheckRoleConfig {
+  /** Fractional drop below the last announced setpoint that re-arms the ladder. */
+  reArmDropFraction?: number;
   /**
    * Ascending token thresholds; each announces once. Explicit null disables the
    * ladder; ABSENT takes the generated default (see USAGE_CHECK_DEFAULTS), so
@@ -128,8 +130,6 @@ export interface UsageCheckRoleConfig {
    * the on switch, and null-vs-number is the whole of it.
    */
   wrapUpAt?: number | null;
-  /** Fractional drop below the last announced setpoint that re-arms the ladder. */
-  reArmDropFraction?: number;
 }
 
 /**
@@ -250,6 +250,7 @@ export const USAGE_CHECK_DEFAULTS: {
 };
 
 export interface ResolvedUsageCheckConfig {
+  reArmDropFraction: number;
   /**
    * Ascending and deduped. When `wrapUpAt` is a number the ladder is also
    * guaranteed to contain it (see resolveUsageCheckConfig); when `wrapUpAt` is
@@ -259,7 +260,6 @@ export interface ResolvedUsageCheckConfig {
   setpoints: number[];
   /** null means the wrap-up directive is off entirely — the default (D8). */
   wrapUpAt: number | null;
-  reArmDropFraction: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -435,7 +435,7 @@ export type MeasurementScope = 'session' | 'subagent';
  */
 export type MeasurementTarget =
   | {kind: 'session'; path: string}
-  | {kind: 'subagent'; path: string; agentId: string}
+  | {agentId: string; kind: 'subagent'; path: string}
   | {kind: 'unknown'; reason: string};
 
 /**
@@ -497,8 +497,8 @@ export function subagentTranscriptPath(
  * no usage yet, and the two need different messages.
  */
 export function resolveMeasurementTarget(args: {
-  transcriptPath: string | null | undefined;
   agentId: string | null | undefined;
+  transcriptPath: string | null | undefined;
 }): MeasurementTarget {
   const {agentId, transcriptPath} = args;
   if (transcriptPath == null || transcriptPath === '') {
@@ -552,8 +552,8 @@ export interface TranscriptFacts {
 }
 
 interface TailWindow {
-  text: string;
   reachedStart: boolean;
+  text: string;
 }
 
 /**
@@ -870,11 +870,11 @@ const INITIAL_WINDOW_BYTES = 1024 * 1024;
  * lands near the tail and every later call is a 1MB read again.
  */
 export function readTranscriptFacts(args: {
-  transcriptPath: string;
-  lowestSetpoint: number;
   initialWindowBytes?: number;
+  lowestSetpoint: number;
   /** Defaults to 'session' — the shape every caller had before 1r6d.23. */
   scope?: MeasurementScope;
+  transcriptPath: string;
 }): TranscriptFacts {
   const state: ScanState = {contextTokens: null, lastAnnouncedSetpoint: null};
   let windowBytes = args.initialWindowBytes ?? INITIAL_WINDOW_BYTES;
@@ -908,12 +908,12 @@ export function readTranscriptFacts(args: {
 export type FireReason = 'first' | 'ascend' | 're-arm';
 
 export interface UsageDecision {
+  contextTokens: number;
+  reason: FireReason;
   /** The setpoint being announced: the highest one at or below the context. */
   setpoint: number;
-  contextTokens: number;
   /** Whether to append WRAP_UP_DIRECTIVE. */
   wrapUp: boolean;
-  reason: FireReason;
 }
 
 function highestAtOrBelow(setpoints: number[], value: number): number | null {
@@ -997,9 +997,9 @@ export function formatTokens(value: number): string {
 
 /** Who the notice is about — see formatNotice. */
 export interface NoticeSubject {
-  scope: MeasurementScope;
   /** `agent_type` from the hook payload ("player", "Explore", …), when given. */
   agentType?: string | null;
+  scope: MeasurementScope;
 }
 
 /** The default subject: the top-level session, as it was before 1r6d.23. */
@@ -1044,9 +1044,6 @@ export function formatNotice(
 // ---------------------------------------------------------------------------
 
 interface HookInput {
-  cwd?: string;
-  transcript_path?: string;
-  hook_event_name?: string;
   /**
    * Present when and only when the tool call originated inside a subagent
    * (measured 2026-09-03: 61 of 102 PostToolUse rows on a conductor session
@@ -1055,6 +1052,9 @@ interface HookInput {
    */
   agent_id?: string;
   agent_type?: string;
+  cwd?: string;
+  hook_event_name?: string;
+  transcript_path?: string;
 }
 
 /** The events this hook is wired to; anything else still echoes its own name. */
@@ -1101,7 +1101,8 @@ export function runUsageCheck(args?: {stdin?: string}): number {
   }
 
   // Presence of agent_id is the whole discriminant (see HookInput.agent_id).
-  const role: UsageCheckRole = input.agent_id ? 'player' : 'session';
+  const role: UsageCheckRole =
+    input.agent_id != null && input.agent_id !== '' ? 'player' : 'session';
   const config = resolveUsageCheckConfig(rawConfig, role);
   if (config == null) {
     return 0; // Resolved to an empty ladder — nothing could ever fire.
@@ -1112,7 +1113,7 @@ export function runUsageCheck(args?: {stdin?: string}): number {
     transcriptPath: input.transcript_path,
   });
   if (target.kind === 'unknown') {
-    if (input.agent_id) {
+    if (input.agent_id != null && input.agent_id !== '') {
       // UNKNOWN, said out loud. Never a fallback to input.transcript_path.
       console.error(`${USAGE_CHECK_MARKER} UNKNOWN: ${target.reason}`);
     }
@@ -1120,7 +1121,7 @@ export function runUsageCheck(args?: {stdin?: string}): number {
   }
 
   const facts = readTranscriptFacts({
-    lowestSetpoint: config.setpoints[0] as number,
+    lowestSetpoint: config.setpoints[0]!,
     scope: target.kind,
     transcriptPath: target.path,
   });

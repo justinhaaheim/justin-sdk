@@ -57,8 +57,8 @@ export const CRITICAL_RULES_CONFIG_KEY = 'critical-rules';
 export const RETIRED_MODULES_KEY = 'modules';
 
 export type EnrollmentRead =
-  | {ok: true; evidence: 'components' | 'artifact'}
-  | {ok: false; status: 'not-enrolled' | 'failed'; message: string};
+  | {evidence: 'components' | 'artifact'; ok: true}
+  | {message: string; ok: false; status: 'not-enrolled' | 'failed'};
 
 /** Is this repo enrolled in critical-rules? */
 export function readEnrollment(projectRoot: string): EnrollmentRead {

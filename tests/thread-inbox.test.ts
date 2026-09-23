@@ -12,21 +12,21 @@
  * being rendered as "he said nothing", which reads as permission.
  */
 
+import type {BdComment} from '../src/thread/bd';
+
 import {describe, expect, test} from 'bun:test';
 
+import {SKIP_COMMENT} from '../src/thread/answer';
 import {
   askStateOf,
+  type InboxAsk,
+  type InboxView,
   noteFrom,
   renderInbox,
   renderInboxAsk,
   stripAnswerPrefix,
-  type InboxAsk,
-  type InboxView,
 } from '../src/thread/inbox';
-import {SKIP_COMMENT} from '../src/thread/answer';
 import {restateAsk} from '../src/thread/render';
-
-import type {BdComment} from '../src/thread/bd';
 
 function comment(text: string): BdComment {
   return {author: 'jhaa', created_at: '2026-09-12T10:00:00Z', text};
@@ -121,10 +121,10 @@ describe('renderInboxAsk — the three shapes prepare and inbox share', () => {
     return {
       answers: [],
       askIndex: 0,
-      priority: 3,
       defaultAction: 'I keep by-repo as the default.',
       id: 'jl-kigm.1',
       kind: 'pick',
+      priority: 3,
       reportCount: 1,
       restated: restateAsk(ASK_DESCRIPTION),
       state: 'unanswered',
@@ -142,7 +142,8 @@ describe('renderInboxAsk — the three shapes prepare and inbox share', () => {
       '  jl-kigm.1 · [pick] BLOCKING · Which default board view?',
     );
     expect(lines.join('\n')).toContain('a. (Recommended) Ship it now');
-    expect(lines[lines.length - 1]).toBe('     >>> HIS ANSWER: a');
+    // K11 (k0b8n.10): the ask's own lines sit at the detail column.
+    expect(lines[lines.length - 1]).toBe('         >>> HIS ANSWER: a');
     // The raw comment prefix never leaks through.
     expect(lines.join('\n')).not.toContain('ANSWER: ANSWER:');
   });
@@ -150,7 +151,7 @@ describe('renderInboxAsk — the three shapes prepare and inbox share', () => {
   test('SKIPPED: ">>> SKIPPED — use your default: <default>", never an answer', () => {
     const lines = renderInboxAsk(base({state: 'skipped'}), '  head');
     expect(lines[lines.length - 1]).toBe(
-      '     >>> SKIPPED — use your default: I keep by-repo as the default.',
+      '         >>> SKIPPED — use your default: I keep by-repo as the default.',
     );
     expect(lines.join('\n')).not.toContain('HIS ANSWER');
     // The bug this replaced: the skip comment rendered as an answer.
@@ -163,8 +164,64 @@ describe('renderInboxAsk — the three shapes prepare and inbox share', () => {
     expect(lines[lines.length - 1]).toBe(note);
     expect(lines.join('\n')).not.toContain('HIS ANSWER');
     expect(lines.join('\n')).not.toContain('SKIPPED');
-    // With no note supplied (inbox's case) the ask still renders, bare.
-    expect(renderInboxAsk(base(), '  head')).toHaveLength(lines.length - 1);
+    // With no note supplied (inbox's case) the ask still renders, bare — two
+    // lines shorter: the note and the blank line that sets it apart (K11).
+    expect(renderInboxAsk(base(), '  head')).toHaveLength(lines.length - 2);
+  });
+
+  test('K11: a blank line between every paragraph and every option, and no trailing whitespace', () => {
+    const lines = renderInboxAsk(base(), '      head');
+    const at = (text: string): number =>
+      lines.findIndex((line) => line.includes(text));
+    const optionA = at('a. (Recommended) Ship it now');
+    const optionB = at('b. Wait for the hook');
+    expect(lines[optionA]).toBe(
+      '         a. (Recommended) Ship it now — dogfooding starts today',
+    );
+    // OPTIONS:, blank, a., blank, b. — never two options stacked.
+    expect(lines[optionA - 1]).toBe('');
+    expect(lines[optionA - 2]).toBe('         OPTIONS:');
+    expect(lines[optionB - 1]).toBe('');
+    expect(optionB).toBe(optionA + 2);
+    for (const line of lines) expect(line).not.toMatch(/\s$/u);
+  });
+
+  test('K11 rule 7: an ask bead that STORED the double letter reads back with one', () => {
+    // Every ask bead written before k0b8n.10 carries `a. (Recommended) a. …`,
+    // and inbox and prepare are where those are read back.
+    const legacy = base({
+      restated: restateAsk(
+        ASK_DESCRIPTION.replace(
+          'a. (Recommended) Ship',
+          'a. (Recommended) a. Ship',
+        ).replace('b. Wait', 'b. b. Wait'),
+      ),
+    });
+    const text = renderInboxAsk(legacy, 'head').join('\n');
+    expect(text).toContain('a. (Recommended) Ship it now');
+    expect(text).toContain('b. Wait for the hook');
+    expect(text).not.toContain('a. (Recommended) a.');
+    expect(text).not.toContain('b. b.');
+  });
+
+  test('K11 colour: labels bold, the recommended option green, the answer bold green', () => {
+    const style = {color: true, width: null};
+    const text = renderInboxAsk(
+      base({answers: ['a'], state: 'answered'}),
+      'head',
+      null,
+      style,
+    ).join('\n');
+    expect(text).toContain('\u001b[1mCONTEXT:\u001b[0m');
+    expect(text).toContain(
+      '\u001b[32m(Recommended) Ship it now — dogfooding starts today\u001b[0m',
+    );
+    expect(text).toContain('\u001b[1;32m>>> HIS ANSWER:\u001b[0m a');
+    expect(
+      renderInboxAsk(base({answers: ['a'], state: 'answered'}), 'head').join(
+        '\n',
+      ),
+    ).not.toContain('\u001b');
   });
 });
 
@@ -174,9 +231,9 @@ describe('renderInboxAsk — the three shapes prepare and inbox share', () => {
 describe('an answer written after a skip reaches BOTH inbox and prepare', () => {
   test('skippedAt + a later real comment renders HIS ANSWER, not SKIPPED', () => {
     const metadata = {
-      priority: 0,
       defaultAction: 'I keep by-repo.',
       kind: 'pick',
+      priority: 0,
       skippedAt: '2026-09-12T10:00:00Z',
     };
     const comments = [comment(SKIP_COMMENT), comment('ANSWER: do b')];
@@ -189,11 +246,11 @@ describe('an answer written after a skip reaches BOTH inbox and prepare', () => 
           .map((entry) => stripAnswerPrefix((entry.text ?? '').trim()))
           .filter((text) => text !== '' && text !== SKIP_COMMENT),
         askIndex: 0,
-        priority: 0,
         defaultAction: 'I keep by-repo.',
-        reportCount: 1,
         id: 'jl-x.1',
         kind: 'pick',
+        priority: 0,
+        reportCount: 1,
         restated: '[Pick a/b] Which view?',
         state,
         title: 'Which view?',
@@ -214,10 +271,10 @@ describe('renderInbox', () => {
       {
         answers: ['b'],
         askIndex: 0,
-        priority: 0,
         defaultAction: 'I ship it behind the knob.',
         id: 'jl-e9f4.1',
         kind: 'pick',
+        priority: 0,
         reportCount: 1,
         restated: restateAsk(ASK_DESCRIPTION),
         state: 'answered',
@@ -226,10 +283,10 @@ describe('renderInbox', () => {
       {
         answers: [],
         askIndex: 1,
-        priority: 3,
         defaultAction: 'I leave the knob on.',
         id: 'jl-e9f4.2',
         kind: 'approve',
+        priority: 3,
         reportCount: 1,
         restated: '[Approve Y/n] Leave the knob on?',
         state: 'skipped',
@@ -238,10 +295,10 @@ describe('renderInbox', () => {
       {
         answers: [],
         askIndex: 2,
-        priority: 3,
         defaultAction: 'I accept it and document the behaviour.',
         id: 'jl-e9f4.3',
         kind: 'approve',
+        priority: 3,
         reportCount: 1,
         restated: '[Approve Y/n] Accept the subagent behaviour?',
         state: 'unanswered',

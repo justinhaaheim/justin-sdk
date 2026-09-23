@@ -32,9 +32,9 @@ import {dirname, join, resolve} from 'path';
 
 import {
   healthNoticesPaths,
+  type HealthNoticesState,
   STATE_SCHEMA_VERSION,
   UPGRADE_COMMAND,
-  type HealthNoticesState,
 } from '../src/health-notices';
 import {getSdkVersion} from '../src/sdk-identity';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -58,15 +58,15 @@ function newSandbox(): Sandbox {
 }
 
 interface Rig {
+  /** The same, with the kill switch. */
+  off: Record<string, string>;
+  /** Env for a child that SHOULD emit notices. */
+  on: Record<string, string>;
   /** cwd for the child — a bare project with no justin-sdk.config.json. */
   projectRoot: string;
   /** The `lastCheck.at` written into the state file. */
   seededAt: string;
   stateFile: string;
-  /** Env for a child that SHOULD emit notices. */
-  on: Record<string, string>;
-  /** The same, with the kill switch. */
-  off: Record<string, string>;
 }
 
 /**
@@ -256,11 +256,11 @@ describe('the repo a notice is about (uxwc.5 F2)', () => {
     const rigged = rig();
     const {root, subdirs} = enrolledRepo(rigged);
 
-    const first = runFrom(subdirs[0] as string, rigged.on);
+    const first = runFrom(subdirs[0]!, rigged.on);
     expect(first.stderr).toContain('available (major)');
 
     // A DIFFERENT subdirectory of the same repo, inside the throttle window.
-    const second = runFrom(subdirs[1] as string, rigged.on);
+    const second = runFrom(subdirs[1]!, rigged.on);
     expect(second.stderr).toBe('');
 
     // And the stamp is keyed by the ROOT — one key, not one per directory.
@@ -339,7 +339,7 @@ describe('doctor SDK_VERSION', () => {
   // Built from a char code so the file carries no literal control character.
   const ANSI = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, 'g');
 
-  function doctorOutput(rigged: Rig, env: Record<string, string>): string {
+  function doctorOutput(env: Record<string, string>): string {
     const box = newSandbox();
     box.writeFile('CLAUDE.md', '# test\n');
     box.writeFile(
@@ -367,7 +367,7 @@ describe('doctor SDK_VERSION', () => {
 
   test('reports a newer version as a WARNING that does not fail the run', () => {
     const rigged = rig();
-    const output = doctorOutput(rigged, rigged.on);
+    const output = doctorOutput(rigged.on);
     expect(output).toContain('⚠ SDK_VERSION');
     expect(output).toContain(`→ ${FAR_FUTURE} available (major)`);
     expect(output).toContain(UPGRADE_COMMAND);
@@ -415,7 +415,7 @@ describe('doctor SDK_VERSION', () => {
 
   test('with notices off it says "not checked" — never that the SDK is current', () => {
     const rigged = rig();
-    const output = doctorOutput(rigged, rigged.off);
+    const output = doctorOutput(rigged.off);
     expect(output).not.toContain('⚠ SDK_VERSION');
     expect(output).not.toContain('is the latest tag');
   });

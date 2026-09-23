@@ -30,7 +30,7 @@
  * the new tree.
  */
 
-import {describe, test, expect, afterEach} from 'bun:test';
+import {afterEach, describe, expect, test} from 'bun:test';
 import {spawnSync} from 'child_process';
 import {chmodSync, existsSync, mkdirSync, writeFileSync} from 'fs';
 import {join, resolve} from 'path';
@@ -96,7 +96,7 @@ function preamble(): string {
  */
 function huskyPrimary(
   sb: Sandbox,
-  options: {sdkBin: string; hookText?: string},
+  options: {hookText?: string; sdkBin: string},
 ): string {
   const composed = composePostCheckout(options.hookText ?? null, preamble());
   if (!('content' in composed)) {

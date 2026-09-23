@@ -20,17 +20,17 @@ import {tmpdir} from 'os';
 import {join} from 'path';
 
 import {
+  type BdContext,
   checkBdReachable,
   describeBdFailure,
   isLockedText,
   readComments,
-  type BdContext,
 } from '../src/thread/bd';
 
 /** A fake life workspace whose `bd` script prints whatever we want. */
 function workspacePrinting(stdout: string): {
-  ctx: BdContext;
   cleanup: () => void;
+  ctx: BdContext;
 } {
   const dir = mkdtempSync(join(tmpdir(), 'thread-bd-'));
   mkdirSync(join(dir, 'bin'), {recursive: true});

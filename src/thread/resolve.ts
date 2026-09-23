@@ -19,18 +19,18 @@
  * not look".
  */
 
+import type {EnvLike} from './paths';
+
 import {
+  type BdContext,
   bdContext,
+  type BdIssue,
   describeBdFailure,
   findThreadBySession,
   listThreads,
   showIssue,
-  type BdContext,
-  type BdIssue,
 } from './bd';
 import {collectThreadFacts} from './facts';
-
-import type {EnvLike} from './paths';
 
 export interface ThreadRef {
   cwd?: string;
@@ -42,8 +42,8 @@ export interface ThreadRef {
 }
 
 export type ThreadResolution =
-  | {ok: true; issue: BdIssue}
-  | {ok: false; message: string};
+  | {issue: BdIssue; ok: true}
+  | {message: string; ok: false};
 
 /** `metadata.reportedAt` as a sortable string, or null when unreadable. */
 export function reportedAtOf(issue: BdIssue): string | null {

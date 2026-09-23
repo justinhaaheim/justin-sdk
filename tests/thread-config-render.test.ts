@@ -10,11 +10,11 @@
 
 import {afterAll, describe, expect, test} from 'bun:test';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'fs';
-import {join} from 'path';
 import {tmpdir} from 'os';
+import {join} from 'path';
 
-import {THREAD_DEFAULT_EMOJI_HEADER} from '../src/thread/defaults';
 import {resolveThreadConfig} from '../src/thread/config';
+import {THREAD_DEFAULT_EMOJI_HEADER} from '../src/thread/defaults';
 
 const roots: string[] = [];
 

@@ -36,8 +36,8 @@ import {execFileSync} from 'child_process';
 import {writeFileSync} from 'fs';
 import {join} from 'path';
 
-import {buildCoreInventory, countDivergence} from '../src/repo-status/core';
 import {proveContentOnBaseline} from '../src/repo-status/content';
+import {buildCoreInventory, countDivergence} from '../src/repo-status/core';
 import {previewMerge} from '../src/repo-status/merge-preview';
 import {renderReportPretty} from '../src/repo-status/pretty';
 import {buildReport, type RepoStatusReport} from '../src/repo-status/report';

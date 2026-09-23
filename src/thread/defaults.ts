@@ -47,6 +47,46 @@ export const THREAD_DEFAULT_START_ON_SESSION_START = false;
 export const THREAD_DEFAULT_ENFORCE = false;
 
 /**
+ * WHAT the armed Stop hook refuses (home-base-k0b8n.11, epic decision K12).
+ *
+ * `reportShaped` (the default, and the only behaviour before K12): a final
+ * message carrying the report delimiters that was not recorded. `workTurns`
+ * ALSO refuses a turn that did real work — a `git commit`, or a turn of at
+ * least `enforceMinTurnMinutes` since Justin's last message — and yields
+ * without a report archived since that message. It is the refusal EXPERIMENT:
+ * stop-check had never blocked a session (measured 2026-09-23), because the
+ * sessions that skip the tool end in plain prose. Only meaningful with
+ * `enforce` on.
+ */
+export type ThreadEnforceMode = 'reportShaped' | 'workTurns';
+
+export const THREAD_ENFORCE_MODES: readonly ThreadEnforceMode[] = [
+  'reportShaped',
+  'workTurns',
+];
+
+export const THREAD_DEFAULT_ENFORCE_MODE: ThreadEnforceMode = 'reportShaped';
+
+/** A `workTurns` turn this long (minutes since Justin's last message) is work. */
+export const THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES = 20;
+
+/**
+ * ON unless something says otherwise (home-base-k0b8n.9, K10) — and gated by
+ * `enabled` like `startOnSessionStart` is: capture runs only where BOTH are
+ * true, so a machine that never turned threads on captures nothing.
+ *
+ * Default TRUE because Justin asked for it by default (2026-09-23: "by default
+ * all user messages and all claude yield messages are captured"). The `thread
+ * capture` hook appends every prompt and every final Claude message of a
+ * session to a local message log and keeps the thread bead's last messages
+ * current without any `thread report`. The knob exists so ONE repo can opt out
+ * with one line in its `justin-sdk.config.json`, not to arm something risky:
+ * the log never leaves this machine, and the bead write happens in a detached
+ * child that never delays a turn.
+ */
+export const THREAD_DEFAULT_CAPTURE = true;
+
+/**
  * ON unless something says otherwise (home-base-p1uj.11) — the one knob here
  * whose default is true.
  *

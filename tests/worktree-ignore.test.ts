@@ -63,12 +63,9 @@ describe('ignoreContentCovers', () => {
     ['', false],
     [null, false],
     ['# only a comment', false],
-  ] as Array<[string | null, boolean]>)(
-    'covers(%p) === %p',
-    (content, expected) => {
-      expect(ignoreContentCovers(content)).toBe(expected);
-    },
-  );
+  ] as [string | null, boolean][])('covers(%p) === %p', (content, expected) => {
+    expect(ignoreContentCovers(content)).toBe(expected);
+  });
 });
 
 describe('worktreeGitStatus', () => {
@@ -130,8 +127,8 @@ describe('eslintWorktreeStatus', () => {
     );
     expect(eslintWorktreeStatus(sb.path)).toMatchObject({
       applicable: true,
-      covered: false,
       configFile: 'eslint.config.js',
+      covered: false,
     });
   });
 

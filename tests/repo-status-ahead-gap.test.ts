@@ -24,7 +24,7 @@ import {execFileSync} from 'child_process';
 import {mkdirSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
-import {buildReport, type BranchRow} from '../src/repo-status/report';
+import {type BranchRow, buildReport} from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];

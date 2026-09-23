@@ -46,14 +46,14 @@ import {existsSync, mkdirSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {
+  type FileVerdict,
   proveContentOnBaseline,
   verifyCommitFiles,
-  type FileVerdict,
 } from '../src/repo-status/content';
 import {buildPlan, type CleanupPlan} from '../src/repo-status/plan';
 import {
-  buildReport,
   type BranchRow,
+  buildReport,
   type RepoStatusReport,
 } from '../src/repo-status/report';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -126,13 +126,13 @@ function addEvilMergeDeleter(repo: string, name: string, mark: string): void {
 }
 
 interface Fixture {
+  /** The fully-reflected control commit. */
+  genuineDeleteSha: string;
   /** The branch's delete commit — the one whose D-status path is unreadable. */
   localDeleteSha: string;
   /** The tree object destroyed: main's `d/`. */
   missingTree: string;
   repo: string;
-  /** The fully-reflected control commit. */
-  genuineDeleteSha: string;
 }
 
 /**
@@ -345,7 +345,7 @@ describe('verifyCommitFiles reports a failed read as a failed read', () => {
 
     const files = verifyCommitFiles(fx.localDeleteSha, 'main', fx.repo);
     expect(files).toHaveLength(1);
-    const verdict = files[0] as FileVerdict;
+    const verdict = files[0]!;
     expect({path: verdict.path, status: verdict.status}).toEqual({
       path: 'd/foo',
       status: 'unreadable',
