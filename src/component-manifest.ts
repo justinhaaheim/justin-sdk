@@ -56,8 +56,8 @@ import {
   THREAD_CAPTURE_HOOK_COMMAND,
   THREAD_CAPTURE_HOOK_EVENTS,
   THREAD_CAPTURE_HOOK_FINGERPRINT,
-  THREAD_HOOK_EVENT,
   THREAD_START_HOOK_COMMAND,
+  THREAD_START_HOOK_EVENT,
   THREAD_START_HOOK_FINGERPRINT,
   THREAD_STOP_HOOK_COMMAND,
   THREAD_STOP_HOOK_EVENT,
@@ -183,6 +183,18 @@ export interface ComponentManifest {
   /** One line, for `justin-sdk list`. */
   purpose: string;
   /**
+   * Hooks this component's installer USED to write and no longer does
+   * (home-base-39co9 D3: thread-hooks' SessionStart `thread start --hook`).
+   *
+   * A separate list rather than a flag on `hooks`, so the two evidence checks —
+   * which iterate `hooks` — cannot count one by forgetting to test a flag: a
+   * retired entry is evidence of an OLD install, not of this component being
+   * present today. `remove` / `install --prune` still delete one under the same
+   * identity rule as `hooks` (exact command only), so un-installing a repo that
+   * never re-applied after the retirement does not strand it.
+   */
+  retiredHooks: readonly OwnedHook[];
+  /**
    * False for base-setup only: it is the foundation every installer applies,
    * so "removing" it would leave a repo that still has it, minus its config.
    */
@@ -241,6 +253,7 @@ const EMPTY = {
   markers: [] as readonly string[],
   provenanceMarkers: [] as readonly {contains: string; file: string}[],
   removable: true,
+  retiredHooks: [] as readonly OwnedHook[],
   scripts: [] as readonly OwnedScript[],
   sdkOwnedPaths: [] as readonly string[],
 };
@@ -417,11 +430,6 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
     ...EMPTY,
     hooks: [
       {
-        command: THREAD_START_HOOK_COMMAND,
-        event: THREAD_HOOK_EVENT,
-        fingerprint: THREAD_START_HOOK_FINGERPRINT,
-      },
-      {
         command: THREAD_STOP_HOOK_COMMAND,
         event: THREAD_STOP_HOOK_EVENT,
         fingerprint: THREAD_STOP_HOOK_FINGERPRINT,
@@ -435,7 +443,16 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
       })),
     ],
     purpose:
-      'SessionStart/Stop/UserPromptSubmit hooks that open a thread bead, capture every prompt and yield, and refuse to end a session without a report.',
+      'UserPromptSubmit/Stop hooks that capture every prompt and yield (creating the thread bead on the first prompt) and refuse to end a session without a report.',
+    // Retired 2026-10-05 (home-base-39co9 D3): no longer written, no longer
+    // evidence, still removable by exact command.
+    retiredHooks: [
+      {
+        command: THREAD_START_HOOK_COMMAND,
+        event: THREAD_START_HOOK_EVENT,
+        fingerprint: THREAD_START_HOOK_FINGERPRINT,
+      },
+    ],
   },
 
   'time-check': {

@@ -40,7 +40,6 @@ import {
   THREAD_DEFAULT_ENFORCE,
   THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
   THREAD_DEFAULT_ENFORCE_MODE,
-  THREAD_DEFAULT_START_ON_SESSION_START,
   THREAD_ENFORCE_MODES,
   type ThreadAnswerUi,
   type ThreadEnforceMode,
@@ -114,10 +113,10 @@ export interface ResolvedThreadConfig {
   repoDirSource: ThreadConfigSource;
   /** Which layer decided `enabled`. */
   source: ThreadConfigSource;
-  /** Whether the SessionStart hook may create this session's thread bead. */
-  startOnSessionStart: boolean;
-  /** Which layer decided `startOnSessionStart`. */
-  startSource: ThreadConfigSource;
+  // NO `startOnSessionStart`. It is DEPRECATED (home-base-39co9 D2) and gates
+  // nothing, so it is not resolved at all: a resolved field nobody reads would
+  // look like a live switch. Configs carrying it still parse — sdk-config.ts
+  // keeps the key in the schema and `config schema` names it deprecated.
 }
 
 /**
@@ -193,10 +192,6 @@ export function resolveThreadConfig(
   }
 
   const enabled = resolveFlag('enabled', THREAD_DEFAULT_ENABLED);
-  const start = resolveFlag(
-    'startOnSessionStart',
-    THREAD_DEFAULT_START_ON_SESSION_START,
-  );
   const autoCommit = resolveFlag('autoCommit', THREAD_DEFAULT_AUTO_COMMIT);
   const autoPush = resolveFlag('autoPush', THREAD_DEFAULT_AUTO_PUSH);
   const enforce = resolveFlag('enforce', THREAD_DEFAULT_ENFORCE);
@@ -308,8 +303,6 @@ export function resolveThreadConfig(
     repoDir,
     repoDirSource,
     source: enabled.source,
-    startOnSessionStart: start.value,
-    startSource: start.source,
   };
 }
 

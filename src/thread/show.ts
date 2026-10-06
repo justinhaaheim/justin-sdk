@@ -55,6 +55,7 @@ import {
   readComments,
   showIssue,
 } from './bd';
+import {backfillOwnership} from './backfill-ownership';
 import {collectThreadFacts} from './facts';
 import {isSafeSessionId, readMessageLog} from './message-log';
 import {readAskPriority} from './metadata';
@@ -300,38 +301,80 @@ export function renderShowHeader(
   ];
 }
 
+/** The parts of a thread bead `show` decides the notes' rendering on. */
+export type StoredNotesThread = Pick<
+  BdIssue,
+  'description' | 'metadata' | 'notes'
+>;
+
+/**
+ * Does `show` print this bead's notes AS A STORED REPORT?
+ *
+ * Two conditions (home-base-k0b8n.20):
+ *
+ *  1. The notes look like a rendered report (`isRenderedReport`, k0b8n.14).
+ *  2. The body is NOT backfill's own. A backfill body quotes the session's last
+ *     Claude response verbatim, and that response is often a status report, so
+ *     the quoted 🛑 rule and ⚡ glance made condition 1 true for a bead that
+ *     records zero reports. `show` then compacted the quote into "nothing needs
+ *     you — nothing went wrong" and "NOT RECORDED — no thread bead", about a
+ *     bead that exists and reported nothing.
+ *
+ * Condition 2 is `backfillOwnership` (k0b8n.19 D-A), reused rather than
+ * re-derived: only an `owned` verdict (source backfill, reportCount 0,
+ * reportedAt null, the backfill description marker) turns report styling off.
+ * `reported`, `unproven` and `notBackfill` all keep the k0b8n.14 rule, so an
+ * odd or legacy record renders exactly as before — the cautious direction for a
+ * display, where a real report is never hidden.
+ *
+ * Exported so scripts/restore-thread-records.ts predicts with the decision
+ * `show` makes, not a copy of it.
+ */
+export function showsNotesAsReport(thread: StoredNotesThread): boolean {
+  const notes = thread.notes;
+  if (notes == null || notes.trim() === '') return false;
+  if (backfillOwnership(thread).kind === 'owned') return false;
+  return isRenderedReport(notes);
+}
+
 /**
  * The stored notes, as `show` prints them.
  *
- * A rendered report is compacted unless `full`, then styled for the terminal
- * (or left as markdown in a pipe). ANYTHING ELSE — a start placeholder, notes
- * nobody rendered — is not a report and is never styled as one (k0b8n.14): it
- * is printed as it is, under the body indent, identically with and without
- * `--full`, beneath a glance line that says only what was measured:
+ * A stored report (`showsNotesAsReport`) is compacted unless `full`, then styled
+ * for the terminal (or left as markdown in a pipe). ANYTHING ELSE — a start
+ * placeholder, notes nobody rendered, a backfill body that quotes a report — is
+ * not a report and is never styled as one (k0b8n.14, k0b8n.20): it is printed
+ * as it is, under the body indent, identically with and without `--full`,
+ * beneath a glance line that says only what was measured:
  *
  *  - `reportCount` 0 → `no report yet` (the bead itself says none was made);
  *  - `reportCount` > 0 → the notes are not the report the bead says exists;
  *  - `reportCount` absent → the count is UNKNOWN, and so is whether one exists.
+ *
+ * A backfill-owned bead always lands on the first: ownership requires
+ * `reportCount` to be exactly 0.
  */
 export function renderStoredNotes(
-  notes: string | null | undefined,
-  options: ShowStyle & {full: boolean; reportCount: number | null},
+  thread: StoredNotesThread,
+  options: ShowStyle & {full: boolean},
 ): string {
+  const notes = thread.notes;
   if (notes == null || notes.trim() === '') {
     return `${' '.repeat(BODY_COLUMN)}(this bead carries no rendered report — it may predate D10)`;
   }
-  if (isRenderedReport(notes)) {
+  if (showsNotesAsReport(thread)) {
     return ansiFromReportText(
       options.full ? notes : compactStoredReport(notes),
       {color: options.color, width: options.width},
     );
   }
+  const reportCount = recordedReportCount(thread.metadata ?? {});
   const glance =
-    options.reportCount === 0
+    reportCount === 0
       ? NO_REPORT_GLANCE
-      : options.reportCount == null
+      : reportCount == null
         ? '⚡ ❓ report count UNKNOWN — these notes are not a rendered report'
-        : `⚡ ❓ this bead records ${options.reportCount} report${options.reportCount === 1 ? '' : 's'}, but its notes are not a rendered report`;
+        : `⚡ ❓ this bead records ${reportCount} report${reportCount === 1 ? '' : 's'}, but its notes are not a rendered report`;
   return [
     paint(glance, ['bold'], options.color),
     '',
@@ -339,8 +382,15 @@ export function renderStoredNotes(
   ].join('\n');
 }
 
-/** `metadata.reportCount` as recorded — null when absent, never a guessed 0. */
-function recordedReportCount(metadata: Record<string, unknown>): number | null {
+/**
+ * `metadata.reportCount` as recorded — null when absent, never a guessed 0.
+ *
+ * Exported so scripts/restore-thread-records.ts prints the exact input `show`
+ * decides on, rather than a copy of this line that could drift from it.
+ */
+export function recordedReportCount(
+  metadata: Record<string, unknown>,
+): number | null {
   const value = metadata.reportCount;
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
@@ -427,13 +477,7 @@ export async function runThreadShow(
   // The stored notes are ALWAYS the full rendering (D10): the bead has to be a
   // complete status report on its own. Compacting happens here, on the way out,
   // so `--full` costs nothing and the record is never the compact one.
-  out.push(
-    renderStoredNotes(thread.notes, {
-      ...style,
-      full: options.full === true,
-      reportCount: recordedReportCount(metadata),
-    }),
-  );
+  out.push(renderStoredNotes(thread, {...style, full: options.full === true}));
   out.push(
     ...renderMessagesBlock(
       metadata,

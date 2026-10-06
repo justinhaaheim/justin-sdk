@@ -27,6 +27,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   writeFileSync,
 } from 'fs';
 import {tmpdir} from 'os';
@@ -384,6 +385,45 @@ describe('readUsage names the failure (F1)', () => {
     expect(outcome.kind).toBe('ok');
     expect(outcome.kind === 'ok' ? outcome.usage.sessionPct : null).toBe(7);
     expect(outcome.kind === 'ok' ? outcome.usage.weekPct : null).toBe(11);
+  });
+});
+
+/**
+ * home-base-jptgj F1 (2026-09-26): the gate's `claude -p /usage` must NOT run in
+ * the loop's repository. There it fires the repo's SessionStart hook, which
+ * creates a thread bead for every gate read. The caller still passes its repo;
+ * the child must run in the OS temp dir anyway.
+ */
+describe('readUsage runs from a neutral directory, not the repo (jptgj F1)', () => {
+  test('the child claude runs in the OS temp dir even though the caller passes a repo', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'justin-loop-usage-cwd-'));
+    const pwdFile = join(dir, 'pwd');
+    const panelFile = join(dir, 'panel.json');
+    writeFileSync(
+      panelFile,
+      JSON.stringify({
+        result: 'Current session: 7% used\nCurrent week (all models): 11% used',
+      }),
+    );
+    const bin = join(dir, 'claude');
+    writeFileSync(
+      bin,
+      `#!/bin/sh\npwd -P > '${pwdFile}'\ncat '${panelFile}'\n`,
+    );
+    chmodSync(bin, 0o755);
+    const repo = resolve(import.meta.dirname, '..');
+    const previous = process.env[CLAUDE_BIN_ENV];
+    process.env[CLAUDE_BIN_ENV] = bin;
+    try {
+      const read = await readUsage(repo, 10_000);
+      expect(read.kind).toBe('ok');
+      const ranIn = readFileSync(pwdFile, 'utf-8').trim();
+      expect(ranIn).toBe(realpathSync(tmpdir()));
+      expect(ranIn).not.toBe(realpathSync(repo));
+    } finally {
+      if (previous == null) delete process.env[CLAUDE_BIN_ENV];
+      else process.env[CLAUDE_BIN_ENV] = previous;
+    }
   });
 });
 

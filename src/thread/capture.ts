@@ -74,6 +74,8 @@ import {resolveThreadConfig} from './config';
 import {findTranscript} from './facts';
 import {
   appendMessageLine,
+  capturedAssistantText,
+  capturedUserText,
   isSafeSessionId,
   readMessageLog,
   syncMessageLogFromTurns,
@@ -82,7 +84,6 @@ import {probeErrorMessage} from './paths';
 import {
   buildResumeCommand,
   extractTranscriptTurns,
-  stripHarnessNoise,
   type TranscriptTurns,
 } from './transcript-messages';
 
@@ -132,33 +133,6 @@ export type CaptureDecision =
       sessionId: string;
       transcriptPath: string | null;
     };
-
-/**
- * A slash command with no arguments (`/copy`, `/loop-session`).
- *
- * K2 renders such an envelope as NOTHING in the transcript, so a backfilled log
- * never contains it; capturing it live would make the two logs of one session
- * disagree. With arguments it is Justin's brief (`/conductor <the brief>`) and
- * is kept verbatim, exactly as K2 keeps it.
- */
-const BARE_SLASH_COMMAND = /^\/\S+$/;
-
-/** A prompt's text as K2 would store it. '' means "nothing of his". */
-export function capturedUserText(prompt: string): string {
-  const trimmed = prompt.trim();
-  if (BARE_SLASH_COMMAND.test(trimmed)) return '';
-  return stripHarnessNoise(prompt);
-}
-
-/**
- * A yield's text as K3's `assistantText` would store it: trimmed, and nothing
- * else. NOT noise-stripped — Claude quoting `<system-reminder>` in a reply is
- * Claude's words, and the backfill does not strip assistant text either, so
- * stripping here would make a live line differ from its backfilled twin.
- */
-export function capturedAssistantText(text: string): string {
-  return text.trim();
-}
 
 /**
  * Everything the hook decides BEFORE the knob, as a pure function.
@@ -676,7 +650,7 @@ export function isLogSeeded(sessionId: string, env: EnvLike): boolean {
  * starts mid-session — the conductor's held four Stop lines and no user line,
  * so its bead's "Last user message" stayed on a four-day-old brief. The fix is
  * the backfill's own authoritative rewrite (`syncMessageLogFromTurns`, with its
- * carry rule for live lines newer than the transcript), run by the capture
+ * carry rule for live lines the transcript does not have), run by the capture
  * child the first time it sees the session, then never again: the sidecar
  * stamp marks it. Called with the per-session lock held, before the first
  * pass, so the pass applies the seeded log's tail.

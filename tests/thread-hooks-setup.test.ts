@@ -1,144 +1,297 @@
 /**
  * `justin-sdk add thread-hooks` — the hook installer (home-base-p1uj.3, extended
- * with the Stop hook by home-base-p1uj.15).
+ * with the Stop hook by home-base-p1uj.15, the capture hooks by k0b8n.9, and
+ * the SessionStart entry RETIRED by home-base-39co9.1).
  *
- * Two properties matter and both are about NOT doing things twice: exactly one
- * entry per event is appended however often the installer runs, and every hook
- * the repo already had survives it. With two events there is a third: the two
- * installs must be independent, so a repo that ran this before the Stop hook
- * existed gains the Stop entry and nothing else on a re-run.
+ * Three properties matter. Exactly one entry per event is appended however
+ * often the installer runs, and every hook the repo already had survives it.
+ * The hooks are independent, so a repo installed by an older SDK gains only
+ * what it lacks. And the retired SessionStart `thread start --hook` entry is
+ * taken back out on re-apply ONLY when it is byte-identical to what the SDK
+ * wrote (epic home-base-39co9 D3, identity rule F7) — a hand-edited variant is
+ * reported and kept.
  *
- * WHY THIS TESTS `addThreadStartHook` AND NOT THE WHOLE INSTALLER: Claude cannot
- * write any `.claude/settings.json` — the path is on the Bash sandbox's deny
- * list — so the end-to-end `runThreadHooksSetup` run against a scratch repo is
- * something Justin performs by hand (see home-base-p1uj.3). What can be proved
- * here is the function that decides what goes into the file, exercised over the
- * settings shapes a real repo has: empty, hooks-but-not-this-one, and already
- * installed.
+ * The retirement tests drive `stepThreadHooks` against a real
+ * `.claude/settings.json` in a scratch project (the full `runThreadHooksSetup`
+ * also runs base-setup, which needs a git remote for the SDK pin and is covered
+ * elsewhere). Run unsandboxed, like the rest of the suite.
  *
- * NEGATIVE CONTROL (run 2026-09-12, recorded on home-base-p1uj.3): the
- * fingerprint check `if (JSON.stringify(registered).includes(...)) return false`
- * was deleted. 4 pass / 3 fail — "a re-run changes NOTHING" (`Expected: false
- * Received: true`), "three runs still leave exactly one entry" (`Expected
- * length: 1 Received length: 3`) and "a hand-edited spelling counts as
- * installed" (`Expected: false Received: true`). Restored → 7/0.
+ * NEGATIVE CONTROLS: recorded on home-base-39co9.1's notes — each with the line
+ * broken and the assertion that went red.
  */
 
-import {describe, expect, test} from 'bun:test';
+import {afterEach, describe, expect, spyOn, test} from 'bun:test';
+import {mkdirSync, readFileSync, writeFileSync} from 'fs';
+import {join} from 'path';
 
-import {COMPONENT_NAMES, corePreset} from '../src/component-registry';
+import {stripAnsi} from '../src/check-runner';
 import {
-  addThreadStartHook,
+  componentInstalledEvidence,
+  componentProvenanceEvidence,
+} from '../src/component-manifest';
+import {COMPONENT_NAMES, corePreset} from '../src/component-registry';
+import {removeComponent, renderOutcome} from '../src/remove';
+import {setQuiet} from '../src/setup-helpers';
+import {
   addThreadStopHook,
-  THREAD_HOOK_EVENT,
-  THREAD_HOOK_MATCHER,
+  stepThreadHooks,
+  THREAD_CAPTURE_HOOK_COMMAND,
   THREAD_START_HOOK_COMMAND,
+  THREAD_START_HOOK_EVENT,
   THREAD_STOP_HOOK_COMMAND,
   THREAD_STOP_HOOK_EVENT,
 } from '../src/thread-hooks-setup';
-
-function sessionStartEntries(settings: Record<string, unknown>): unknown[] {
-  const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
-  return (hooks[THREAD_HOOK_EVENT] as unknown[] | undefined) ?? [];
-}
+import {createSandbox, type Sandbox} from './sandbox';
 
 function stopEntries(settings: Record<string, unknown>): unknown[] {
   const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
   return (hooks[THREAD_STOP_HOOK_EVENT] as unknown[] | undefined) ?? [];
 }
 
-describe('addThreadStartHook', () => {
-  test('appends exactly ONE SessionStart entry to empty settings', () => {
-    const settings: Record<string, unknown> = {};
-    expect(addThreadStartHook(settings)).toBe(true);
+const sandboxes: Sandbox[] = [];
+const spies: {mockRestore: () => void}[] = [];
+afterEach(() => {
+  while (sandboxes.length > 0) sandboxes.pop()?.cleanup();
+  for (const spy of spies.splice(0)) spy.mockRestore();
+  setQuiet(false);
+});
 
-    const entries = sessionStartEntries(settings);
-    expect(entries).toHaveLength(1);
-    expect(entries[0]).toEqual({
-      hooks: [{command: THREAD_START_HOOK_COMMAND, type: 'command'}],
-      matcher: THREAD_HOOK_MATCHER,
+/** A scratch project with an optional `.claude/settings.json`. */
+function project(settings: Record<string, unknown> | null): string {
+  const sb = createSandbox();
+  sandboxes.push(sb);
+  const root = join(sb.path, 'repo');
+  mkdirSync(join(root, '.claude'), {recursive: true});
+  if (settings != null) {
+    writeFileSync(
+      join(root, '.claude', 'settings.json'),
+      `${JSON.stringify(settings, null, 2)}\n`,
+    );
+  }
+  return root;
+}
+
+function readSettings(root: string): Record<string, unknown> {
+  return JSON.parse(
+    readFileSync(join(root, '.claude', 'settings.json'), 'utf8'),
+  ) as Record<string, unknown>;
+}
+
+/** Every command under one event, flattened. */
+function commandsUnder(
+  settings: Record<string, unknown>,
+  event: string,
+): string[] {
+  const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
+  const entries = (hooks[event] as unknown[] | undefined) ?? [];
+  return entries.flatMap((entry) =>
+    ((entry as {hooks?: {command?: string}[]}).hooks ?? []).map(
+      (hook) => hook.command ?? '',
+    ),
+  );
+}
+
+/** console.log lines, ANSI stripped. */
+function captureStdout(): string[] {
+  const lines: string[] = [];
+  const spy = spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+    lines.push(stripAnsi(args.join(' ')));
+  });
+  spies.push(spy);
+  return lines;
+}
+
+/** The entry the pre-2026-10-05 installer wrote, exactly. */
+const RETIRED_ENTRY = {
+  hooks: [{command: THREAD_START_HOOK_COMMAND, type: 'command'}],
+  matcher: 'startup|resume',
+};
+
+/** base-setup's own SessionStart hook, which must never be touched here. */
+const SESSION_START_ENTRY = {
+  hooks: [{command: 'bun run justin-sdk session-start', type: 'command'}],
+};
+
+describe('the retired SessionStart entry (home-base-39co9 D3)', () => {
+  test('the retired command is exactly what the old installer wrote', () => {
+    // The identity a re-apply deletes on. If this ever changes, every repo's
+    // retired entry stops matching and is reported "modified" instead of
+    // removed — safe, but the cleanup silently stops happening.
+    expect(THREAD_START_HOOK_COMMAND).toBe(
+      'bun run justin-sdk thread start --hook',
+    );
+    expect(THREAD_START_HOOK_EVENT).toBe('SessionStart');
+  });
+
+  test('a FRESH install writes no SessionStart entry — only capture and stop-check', () => {
+    const root = project(null);
+    expect(stepThreadHooks(root)).toBe(true);
+
+    const settings = readSettings(root);
+    const hooks = settings.hooks as Record<string, unknown>;
+    expect(hooks).not.toHaveProperty('SessionStart');
+    expect(Object.keys(hooks).sort()).toEqual(['Stop', 'UserPromptSubmit']);
+    expect(commandsUnder(settings, 'UserPromptSubmit')).toEqual([
+      THREAD_CAPTURE_HOOK_COMMAND,
+    ]);
+    expect(commandsUnder(settings, 'Stop').sort()).toEqual(
+      [THREAD_CAPTURE_HOOK_COMMAND, THREAD_STOP_HOOK_COMMAND].sort(),
+    );
+  });
+
+  test('re-apply over the EXACT retired entry removes it, says so, and keeps base-setup’s hook', () => {
+    const root = project({
+      hooks: {SessionStart: [SESSION_START_ENTRY, RETIRED_ENTRY]},
+    });
+    const out = captureStdout();
+
+    expect(stepThreadHooks(root)).toBe(true);
+
+    const settings = readSettings(root);
+    expect(commandsUnder(settings, 'SessionStart')).toEqual([
+      'bun run justin-sdk session-start',
+    ]);
+    expect(out).toContain(
+      `  removed: .claude/settings.json SessionStart hook (${THREAD_START_HOOK_COMMAND}) — retired; the thread bead is now created on the first prompt (home-base-39co9)`,
+    );
+    // And the current hooks arrived in the same run.
+    expect(commandsUnder(settings, 'UserPromptSubmit')).toEqual([
+      THREAD_CAPTURE_HOOK_COMMAND,
+    ]);
+  });
+
+  test('the retired entry ALONE under SessionStart leaves no empty SessionStart array behind', () => {
+    const root = project({hooks: {SessionStart: [RETIRED_ENTRY]}});
+    captureStdout();
+    stepThreadHooks(root);
+    const hooks = readSettings(root).hooks as Record<string, unknown>;
+    expect(hooks).not.toHaveProperty('SessionStart');
+  });
+
+  test('a foreign command bundled into the same entry survives, in place', () => {
+    const root = project({
+      hooks: {
+        SessionStart: [
+          {
+            hooks: [
+              {command: 'echo hello', type: 'command'},
+              {command: THREAD_START_HOOK_COMMAND, type: 'command'},
+            ],
+            matcher: 'startup|resume',
+          },
+        ],
+      },
+    });
+    captureStdout();
+    stepThreadHooks(root);
+    const hooks = readSettings(root).hooks as Record<string, unknown>;
+    expect(hooks.SessionStart).toEqual([
+      {
+        hooks: [{command: 'echo hello', type: 'command'}],
+        matcher: 'startup|resume',
+      },
+    ]);
+  });
+
+  test('re-apply over a HAND-EDITED variant leaves it, and reports it as modified', () => {
+    const variants = [
+      '/Users/jhaa/Dev/home-base/bin/justin-sdk thread start --hook',
+      `${THREAD_START_HOOK_COMMAND} && echo mine`,
+      'bunx github:justinhaaheim/justin-sdk#v0.38.0 thread start --hook',
+    ];
+    const root = project({
+      hooks: {
+        SessionStart: variants.map((command) => ({
+          hooks: [{command, type: 'command'}],
+          matcher: 'startup',
+        })),
+      },
+    });
+    const out = captureStdout();
+
+    expect(stepThreadHooks(root)).toBe(true);
+
+    expect(commandsUnder(readSettings(root), 'SessionStart')).toEqual(variants);
+    for (const command of variants) {
+      expect(out).toContain(
+        `  left in place (modified): .claude/settings.json SessionStart hook (${command}) — not the exact command the SDK wrote, so it is yours to delete; \`thread start --hook\` is inert either way`,
+      );
+    }
+    expect(out.some((line) => line.includes('removed:'))).toBe(false);
+  });
+
+  test('the removal line prints even in QUIET mode — how install, update and the sweep run it', () => {
+    const root = project({hooks: {SessionStart: [RETIRED_ENTRY]}});
+    setQuiet(true);
+    const out = captureStdout();
+    stepThreadHooks(root);
+    expect(
+      out.some((line) =>
+        line.includes('removed: .claude/settings.json SessionStart hook'),
+      ),
+    ).toBe(true);
+    // The routine "Updated …" lines stay quiet.
+    expect(
+      out.some((line) => line.includes('Updated .claude/settings.json')),
+    ).toBe(false);
+  });
+
+  test('a second re-apply is a no-op: nothing removed, nothing written', () => {
+    const root = project({hooks: {SessionStart: [RETIRED_ENTRY]}});
+    captureStdout();
+    stepThreadHooks(root);
+    const before = readFileSync(join(root, '.claude', 'settings.json'), 'utf8');
+    const out = captureStdout();
+    stepThreadHooks(root);
+    expect(readFileSync(join(root, '.claude', 'settings.json'), 'utf8')).toBe(
+      before,
+    );
+    expect(out.some((line) => line.includes('removed:'))).toBe(false);
+  });
+
+  test('the component still reads as INSTALLED after the retired entry is gone', () => {
+    const root = project({hooks: {SessionStart: [RETIRED_ENTRY]}});
+    captureStdout();
+    stepThreadHooks(root);
+    const evidence = componentInstalledEvidence(root, 'thread-hooks');
+    expect(evidence.installed).toBe(true);
+    if (!evidence.installed) throw new Error('unreachable');
+    expect(evidence.because).not.toContain('SessionStart');
+  });
+
+  test('the retired entry ALONE is not evidence of an install, of either kind', () => {
+    // It proves an OLD install, not that this component is present today — the
+    // manifest keeps it in `retiredHooks`, which the evidence checks never read.
+    const root = project({hooks: {SessionStart: [RETIRED_ENTRY]}});
+    expect(componentInstalledEvidence(root, 'thread-hooks')).toEqual({
+      installed: false,
+    });
+    expect(componentProvenanceEvidence(root, 'thread-hooks')).toEqual({
+      kind: 'absent',
     });
   });
 
-  test('the matcher is startup|resume — not clear or compact', () => {
-    // clear and compact keep the SAME session id, so the command would find the
-    // existing bead and no-op: a bd round trip bought for nothing, right after a
-    // compaction, when the session is already paying to rebuild its context.
-    expect(THREAD_HOOK_MATCHER).toBe('startup|resume');
-  });
-
-  test('a re-run changes NOTHING', () => {
-    const settings: Record<string, unknown> = {};
-    addThreadStartHook(settings);
-    const before = JSON.stringify(settings);
-
-    expect(addThreadStartHook(settings)).toBe(false);
-    expect(JSON.stringify(settings)).toBe(before);
-  });
-
-  test('three runs still leave exactly one entry', () => {
-    const settings: Record<string, unknown> = {};
-    addThreadStartHook(settings);
-    addThreadStartHook(settings);
-    addThreadStartHook(settings);
-    expect(sessionStartEntries(settings)).toHaveLength(1);
-  });
-
-  test('existing hooks survive — including another SessionStart hook', () => {
-    const settings: Record<string, unknown> = {
-      hooks: {
-        PostToolUse: [
-          {hooks: [{command: 'bun run lint:fix:file', type: 'command'}]},
-        ],
-        SessionStart: [
-          {hooks: [{command: 'bun scripts/setup-env.ts', type: 'command'}]},
-        ],
-        UserPromptSubmit: [
-          {
-            hooks: [
-              {
-                command: 'bunx @justinhaaheim/justin-sdk usage-check',
-                type: 'command',
-              },
-            ],
-          },
-        ],
-      },
-    };
-
-    expect(addThreadStartHook(settings)).toBe(true);
-
-    const entries = sessionStartEntries(settings);
-    expect(entries).toHaveLength(2);
-    expect(JSON.stringify(entries[0])).toContain('scripts/setup-env.ts');
-    expect(JSON.stringify(entries[1])).toContain('thread start --hook');
-    // Untouched events stay untouched.
-    const hooks = settings.hooks as Record<string, unknown>;
-    expect(JSON.stringify(hooks.PostToolUse)).toContain('lint:fix:file');
-    expect(JSON.stringify(hooks.UserPromptSubmit)).toContain('usage-check');
-  });
-
-  test('a hand-edited spelling of the command counts as installed', () => {
-    // The fingerprint is the command SUBSTRING, not the exact string, so a
-    // local absolute-path invocation is recognised rather than duplicated.
-    const settings: Record<string, unknown> = {
+  test('`remove thread-hooks` still takes the exact retired entry out, and keeps a variant', () => {
+    const variant =
+      '/Users/jhaa/Dev/home-base/bin/justin-sdk thread start --hook';
+    const root = project({
       hooks: {
         SessionStart: [
-          {
-            hooks: [
-              {
-                command:
-                  '/Users/jhaa/Dev/home-base/bin/justin-sdk thread start --hook',
-                type: 'command',
-              },
-            ],
-            matcher: 'startup',
-          },
+          RETIRED_ENTRY,
+          {hooks: [{command: variant, type: 'command'}]},
         ],
       },
-    };
-    expect(addThreadStartHook(settings)).toBe(false);
-    expect(sessionStartEntries(settings)).toHaveLength(1);
+    });
+    const plan = removeComponent(root, 'thread-hooks', {dryRun: true});
+    const lines = plan.outcomes.map((outcome) =>
+      renderOutcome(outcome, {planned: true}),
+    );
+    expect(lines).toContain(
+      `would remove: .claude/settings.json SessionStart hook (${THREAD_START_HOOK_COMMAND})`,
+    );
+    expect(lines).toContain(
+      `left in place (modified): .claude/settings.json SessionStart hook (${variant})`,
+    );
   });
 });
 
@@ -165,18 +318,18 @@ describe('addThreadStopHook (home-base-p1uj.15)', () => {
     expect(stopEntries(settings)).toHaveLength(1);
   });
 
-  test('the two hooks are independent — a repo with only the old one gains only Stop', () => {
-    // This is the upgrade path: every repo that ran `add thread-hooks` before
-    // p1uj.15 already has the SessionStart entry and none of them has the Stop
-    // one. Neither install may touch the other's event.
-    const settings: Record<string, unknown> = {};
-    addThreadStartHook(settings);
-    expect(stopEntries(settings)).toHaveLength(0);
-
-    expect(addThreadStopHook(settings)).toBe(true);
-    expect(addThreadStartHook(settings)).toBe(false);
-    expect(sessionStartEntries(settings)).toHaveLength(1);
-    expect(stopEntries(settings)).toHaveLength(1);
+  test('a repo with only the old SessionStart entry gains Stop and capture, and loses the retired entry', () => {
+    // The upgrade path for every repo that ran `add thread-hooks` before
+    // p1uj.15: it has the SessionStart entry and nothing else.
+    const root = project({hooks: {SessionStart: [RETIRED_ENTRY]}});
+    captureStdout();
+    stepThreadHooks(root);
+    const settings = readSettings(root);
+    expect(commandsUnder(settings, 'SessionStart')).toEqual([]);
+    expect(commandsUnder(settings, 'Stop')).toContain(THREAD_STOP_HOOK_COMMAND);
+    expect(commandsUnder(settings, 'UserPromptSubmit')).toEqual([
+      THREAD_CAPTURE_HOOK_COMMAND,
+    ]);
   });
 
   test('an unrelated Stop hook the repo already had survives', () => {
@@ -212,12 +365,12 @@ describe('addThreadStopHook (home-base-p1uj.15)', () => {
 
 describe('the component registry', () => {
   test('thread-hooks is registered, and is part of core', () => {
-    // It was OPT_IN_ONLY until 2026-09-18, on the grounds that its SessionStart
-    // hook writes to a shared Dolt database. Justin's call (epic
-    // home-base-dchjw D3) is that it belongs in the default install; the hook
-    // stays INERT until componentConfig.thread.enabled AND
-    // .startOnSessionStart are both true, which is what actually bounds the
-    // cost, and that is a config decision rather than a preset one.
+    // It was OPT_IN_ONLY until 2026-09-18, on the grounds that its (now
+    // retired) SessionStart hook wrote to a shared Dolt database. Justin's call
+    // (epic home-base-dchjw D3) is that it belongs in the default install; the
+    // hooks stay INERT until componentConfig.thread.enabled is true, which is
+    // what actually bounds the cost, and that is a config decision rather than
+    // a preset one.
     expect(COMPONENT_NAMES).toContain('thread-hooks');
     expect(corePreset(process.cwd())).toContain('thread-hooks');
   });

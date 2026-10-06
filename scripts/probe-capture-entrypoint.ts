@@ -37,6 +37,8 @@ import {
 import {homedir, tmpdir} from 'node:os';
 import {join} from 'node:path';
 
+import {gateSpend} from './spend-gate';
+
 const HELP = `probe-capture-entrypoint — what a hook sees in a \`claude -p\` vs a \`claude --bg\` session
 
 Usage: bun run probe:capture-entrypoint [options]
@@ -44,6 +46,8 @@ Usage: bun run probe:capture-entrypoint [options]
   --model <m>        Model for both sessions (default: haiku).
   --timeout-min <n>  How long to wait for the --bg session's Stop hook (default: 5).
   --skip-bg          Measure only \`claude -p\`.
+  --spend-real-tokens  REQUIRED to run: this starts real Claude Code sessions
+                     and spends tokens on your account.
   --help             Print this and do nothing else.
 
 For each mode it prints: the hook's CLAUDE_CODE_ENTRYPOINT at UserPromptSubmit
@@ -209,7 +213,13 @@ function cleanEnv(): NodeJS.ProcessEnv {
 }
 
 async function main(): Promise<number> {
-  const opts = parseArgs(process.argv.slice(2));
+  const opts = parseArgs(
+    gateSpend(process.argv.slice(2), {
+      script: 'bun run probe:capture-entrypoint',
+      spends:
+        'two short sessions (one claude -p, one claude --bg), on haiku unless --model says otherwise',
+    }),
+  );
   if (opts == null) {
     process.stdout.write(HELP);
     return 0;

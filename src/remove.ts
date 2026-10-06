@@ -258,7 +258,10 @@ function removeSettingsHooks(
   dryRun: boolean,
 ): RemovalOutcome[] {
   const manifest = COMPONENT_MANIFESTS[name];
-  if (manifest.hooks.length === 0) return [];
+  // A RETIRED hook (home-base-39co9 D3) is taken back out under exactly the
+  // same identity rule as a current one: only an exact command match goes.
+  const ownedHooks = [...manifest.hooks, ...manifest.retiredHooks];
+  if (ownedHooks.length === 0) return [];
   const settingsPath = resolve(projectRoot, '.claude', 'settings.json');
   if (!existsSync(settingsPath)) return [];
   const settings = readJson(settingsPath);
@@ -275,7 +278,7 @@ function removeSettingsHooks(
   const hooks = (settings.hooks ?? {}) as Record<string, unknown>;
   let changed = false;
 
-  for (const owned of manifest.hooks) {
+  for (const owned of ownedHooks) {
     const entries = hooks[owned.event];
     if (!Array.isArray(entries)) continue;
     if (

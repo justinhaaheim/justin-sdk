@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.40.0",
+  "version": "0.41.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -13,10 +13,13 @@
     "e2e:thread-answer-web": "bun scripts/e2e-thread-answer-web.ts",
     "probe:bg-env": "bun scripts/probe-bg-env.ts",
     "probe:capture-entrypoint": "bun scripts/probe-capture-entrypoint.ts",
-    "probe:capture-live": "bun scripts/probe-capture-live.ts"
+    "probe:capture-live": "bun scripts/probe-capture-live.ts",
+    "tmp:restore-threads-k0b8n19": "bun scripts/restore-thread-records.ts th-fs3 th-ttp th-mq0 --from 1b912a6~1 --damaged-at 1b912a6"
   },
   "exports": {
     "./check-runner": "./src/check-runner.ts",
+    "./claude-usage": "./src/claude-usage.ts",
+    "./cli-style": "./src/cli-style.ts",
     "./date": "./src/date.ts"
   },
   "files": [

@@ -17,6 +17,9 @@
  * WHAT IT NEVER TOUCHES: a CLOSED thread bead, and the title/description/notes/
  * status of any thread a real session created. Those belong to the report path;
  * all this command may do to them is fill in verbatim messages they never had.
+ * A thread labelled `source: backfill` counts as ours only when its report
+ * fields and description PROVE it (k0b8n.19 D-A, backfill-ownership.ts); one
+ * that carries a report is relabelled `source: report` and nothing more (D-B).
  *
  * IDEMPOTENT BY CONSTRUCTION. Sessions are keyed on `metadata.sessionId` (D1),
  * the same key `thread start` and `thread report` upsert on, so a session that
@@ -50,6 +53,11 @@ import {
 } from '../cli-style';
 import {SDK_RUN} from '../sdk-invocation';
 import {
+  BACKFILL_DESCRIPTION_MARKER,
+  BACKFILL_SOURCE,
+  backfillOwnership,
+} from './backfill-ownership';
+import {
   bdContext,
   createThread,
   describeBdFailure,
@@ -57,14 +65,12 @@ import {
   mergeMetadata,
   updateThreadBody,
 } from './bd';
+import {NON_INTERACTIVE_ENTRYPOINT} from './capture';
 import {commitThreadsRepo, describeCommit} from './commit';
 import {readGitFacts, transcriptsRoot} from './facts';
 import {syncMessageLogFromTranscript} from './message-log';
 import {THREAD_SCHEMA_VERSION} from './schema';
 import {extractTranscriptMessages} from './transcript-messages';
-
-/** `metadata.source` on a bead this command created. */
-export const BACKFILL_SOURCE = 'backfill';
 
 /** `metadata.messagesSource` when the verbatim messages were read by this command. */
 export const BACKFILL_MESSAGES_SOURCE = 'backfill';
@@ -260,10 +266,16 @@ export interface BackfillSession {
 
 export interface ScanResult {
   failures: string[];
-  /** Read, dated, inside the window, and carrying at least one real user message. */
+  /** Read, dated, inside the window, interactive, and carrying at least one real user message. */
   sessions: BackfillSession[];
-  /** Inside the window but with nothing Justin said — `claude -p` probes, hook-only runs. */
+  /** Inside the window, interactive, but with nothing Justin said — hook-only runs. */
   skippedNoUserMessage: number;
+  /**
+   * Inside the window but a `claude -p` run: the transcript's entrypoint is
+   * exactly `sdk-cli` (home-base-k0b8n.13, K5). Counted and reported, never
+   * imported — see `scanSessions`.
+   */
+  skippedNonInteractive: number;
   /** Read but last active before the window. */
   skippedOutOfWindow: number;
   /** Read but with no readable timestamp at all: cannot be placed in or out. */
@@ -294,6 +306,20 @@ export interface ScanResult {
  * the run did not do its job: a projects directory that could not be read, a
  * transcript that could not be opened, a failed bd read, and any write that did
  * not land.
+ *
+ * A `claude -p` SESSION IS COUNTED, NEVER IMPORTED (home-base-k0b8n.13, K5).
+ * It used to be imported whenever it had a prompt — which every `-p` run has —
+ * so each one became an OPEN `source: backfill` thread (823 such transcripts
+ * on this machine on 2026-09-23). The discriminator is the one `thread
+ * capture` uses live (`NON_INTERACTIVE_ENTRYPOINT`, measured by
+ * scripts/probe-capture-entrypoint.ts): a `-p` transcript records entrypoint
+ * `sdk-cli`, a justin-loop `--bg` session records `cli`. ONLY that exact value
+ * is skipped: an absent or unrecognised entrypoint is not evidence of a probe,
+ * so it is imported as before. The check runs after the window and before the
+ * user-message check, so `skippedNonInteractive` counts every in-window `-p`
+ * run, prompt or not. A skipped session is not in `sessions`, so nothing
+ * downstream sees it: no bead is created or refreshed and no message log is
+ * written (`syncSessionLogs`, `planBackfill` both read `sessions` only).
  */
 export function scanSessions(
   files: readonly DiscoveredFile[],
@@ -303,6 +329,7 @@ export function scanSessions(
     failures: [],
     sessions: [],
     skippedNoUserMessage: 0,
+    skippedNonInteractive: 0,
     skippedOutOfWindow: 0,
     skippedUndated: 0,
     undatedFiles: [],
@@ -328,6 +355,10 @@ export function scanSessions(
     // parse per file for no extra truth.
     if (messages.lastTimestamp < floor) {
       result.skippedOutOfWindow += 1;
+      continue;
+    }
+    if (messages.entrypoint === NON_INTERACTIVE_ENTRYPOINT) {
+      result.skippedNonInteractive += 1;
       continue;
     }
     if (messages.firstUserMessage == null) {
@@ -363,6 +394,11 @@ export type BackfillAction =
   | {
       kind: 'refreshMessages';
       patch: Record<string, unknown>;
+      /**
+       * D-B (k0b8n.19): the report evidence on a thread labelled `backfill`,
+       * when this patch also relabels it `source: 'report'`. Null otherwise.
+       */
+      relabel: string | null;
       session: BackfillSession;
       threadId: string;
     }
@@ -437,12 +473,18 @@ function patchWouldChange(
  * still a session's one bead (D1): reading only open threads would make this
  * create a second bead for every session Justin has finished, which is the one
  * outcome that would make the board worse rather than better.
+ *
+ * `notOwned` holds one line per thread labelled `backfill` whose body this
+ * command could not prove it owns (k0b8n.19 D-A). Each is a named skip, not a
+ * failure: the thread is handled safely, and the line repeats every run until
+ * someone looks at it.
  */
 export function planBackfill(
   sessions: readonly BackfillSession[],
   threads: readonly BdIssue[],
-): {actions: BackfillAction[]; failures: string[]} {
+): {actions: BackfillAction[]; failures: string[]; notOwned: string[]} {
   const failures: string[] = [];
+  const notOwned: string[] = [];
   const bySession = new Map<string, BdIssue[]>();
   for (const thread of threads) {
     const sessionId = metaString(metaOf(thread), 'sessionId');
@@ -486,7 +528,14 @@ export function planBackfill(
       return stored == null || session.lastTimestamp > stored;
     })();
 
-    if (metaString(meta, 'source') === BACKFILL_SOURCE) {
+    // OWNERSHIP IS PROVEN, NOT DECLARED (k0b8n.19 D-A). This used to be
+    // `source === 'backfill'` alone, and that label outlived real reports
+    // written by an SDK older than 7e637d8 — so on 2026-09-25 this branch
+    // rewrote the reports on th-fs3, th-ttp and th-mq0. Only a bead whose
+    // label, report fields AND description all say "backfill wrote this and
+    // nobody has reported onto it" gets its body rewritten.
+    const ownership = backfillOwnership(existing);
+    if (ownership.kind === 'owned') {
       // WE own this bead's whole body, so the refresh rewrites all of it — but
       // only when the transcript actually moved. An hourly job that rewrote
       // every backfilled bead every hour would churn the threads repo's git
@@ -504,14 +553,28 @@ export function planBackfill(
       continue;
     }
 
-    // A thread a REAL session created (`source` absent, 'start' or 'report').
+    // A thread a REAL session created (`source` absent, 'start' or 'report'),
+    // or one labelled `backfill` that this command cannot prove is its own.
     // The report path owns its title, description, notes and status; all this
     // may do is fill in the verbatim messages, which every bead written before
     // 2026-09-19 lacks entirely (K5, and k0b8n.1's note about th-lve).
+    //
+    // REPAIR THE LABEL (k0b8n.19 D-B). A thread labelled `backfill` that
+    // carries a report is a reported thread: the patch also writes `source:
+    // 'report'`, which is what the report path would have written, so the board
+    // stops hiding it. An UNPROVEN one keeps its label — "we could not read its
+    // report fields" is not evidence that it reported — and is named instead.
+    const relabel = ownership.kind === 'reported' ? ownership.evidence : null;
+    if (ownership.kind === 'unproven') {
+      notOwned.push(
+        `${existing.id} is labelled source=backfill, but backfill cannot prove it owns the body (${ownership.why}). Its title, description, notes and label were left alone; only its verbatim messages may be refreshed (k0b8n.19 D-A).`,
+      );
+    }
     const anyMessageMissing = MESSAGE_KEYS.some(
       (key) => metaString(meta, key) == null,
     );
-    if (!anyMessageMissing && !advanced) {
+    const messagesDue = anyMessageMissing || advanced;
+    if (!messagesDue && relabel == null) {
       actions.push({
         kind: 'unchanged',
         reason: 'its messages are present and the transcript has not advanced',
@@ -520,7 +583,11 @@ export function planBackfill(
       });
       continue;
     }
-    const patch = messagePatch(session);
+    const patch: Record<string, unknown> = {
+      ...(messagesDue ? messagePatch(session) : {}),
+      // The value `buildThreadMetadata` (metadata.ts) writes on every report.
+      ...(relabel == null ? {} : {source: 'report'}),
+    };
     if (!patchWouldChange(patch, meta)) {
       // The trigger fired but there is nothing to write: a field is null
       // because the TRANSCRIPT has no such message (a session Claude never
@@ -537,11 +604,12 @@ export function planBackfill(
     actions.push({
       kind: 'refreshMessages',
       patch,
+      relabel,
       session,
       threadId: existing.id,
     });
   }
-  return {actions, failures};
+  return {actions, failures, notOwned};
 }
 
 // ---------------------------------------------------------------------------
@@ -596,7 +664,8 @@ export function backfillDescription(
 ): string {
   const {messages} = session;
   return [
-    'BACKFILLED FROM THE TRANSCRIPT — this session never reported.',
+    // The first line is the ownership marker (k0b8n.19 D-A); keep it first.
+    `${BACKFILL_DESCRIPTION_MARKER} — this session never reported.`,
     '',
     `repo          ${git.repo ?? 'UNKNOWN'}`,
     `branch        ${git.branch ?? 'UNKNOWN'}`,
@@ -690,7 +759,7 @@ export function backfillMetadata(
  * down, and a bead is refreshed even when its log was already current.
  */
 export interface MessageLogCounts {
-  /** Live lines newer than the transcript's end, kept after a rewrite. */
+  /** Live lines whose text the transcript does not have, kept after a rewrite. */
   carried: number;
   failed: number;
   /** Lines in the logs written (or, on a dry run, that would be written). */
@@ -703,16 +772,15 @@ export interface MessageLogCounts {
  * Rewrite `messages/<sessionId>.jsonl` from the transcript for EVERY session in
  * the window (K10 e) — reported or not, bead or not.
  *
- * AUTHORITATIVE: the transcript's every turn replaces whatever the log held,
- * and only a live line newer than the transcript's last record is kept after
- * it (`carriedLiveLines`). Run BEFORE the bd read, on purpose: search reads the
- * logs directly, so a locked Dolt database must not also cost the run its
- * message coverage.
+ * AUTHORITATIVE: the transcript's every message replaces whatever the log held,
+ * and a live line is kept only when the transcript does not have its text
+ * (`carriedLiveLines`, home-base-k0b8n.18 D-18C). Run BEFORE the bd read, on
+ * purpose: search reads the logs directly, so a locked Dolt database must not
+ * also cost the run its message coverage.
  *
- * `claude -p` sessions are NOT excluded here, although `thread capture` skips
- * them live: the brief says every session in the window, and whether the
- * backfill should import `-p` sessions at all is a separate question
- * (home-base-k0b8n.9's notes name the bead that asks it).
+ * `claude -p` sessions never reach here (home-base-k0b8n.13): `scanSessions`
+ * leaves them out of `sessions`, so the logs match what `thread capture`
+ * records live, which skips them by the same entrypoint.
  */
 export function syncSessionLogs(
   sessions: readonly BackfillSession[],
@@ -755,15 +823,31 @@ export interface BackfillSummary {
   failures: string[];
   /** The per-session message logs (K10 e). */
   messageLogs: MessageLogCounts;
+  /**
+   * One line per thread labelled `backfill` that this command could not prove
+   * it owns (k0b8n.19 D-A). Its body and label were left alone. A named skip,
+   * not a failure.
+   */
+  notOwned: string[];
   refreshed: number;
   refreshedBackfill: number;
+  /** Metadata-merge writes: the verbatim messages, the D-B label, or both. */
   refreshedMessages: number;
+  /**
+   * One line per thread labelled `backfill` that carries a real report and was
+   * relabelled `source: report` (k0b8n.19 D-B), or would be on a dry run. Its
+   * title, description and notes were not touched. Each is also counted in
+   * `refreshed` and `refreshedMessages`, since it is the same write.
+   */
+  relabelled: string[];
   /** Discovery + read counts, so a reduced scan is never silent. */
   scan: {
     filesRead: number;
     skippedAgentFiles: number;
     skippedFixtureDirs: string[];
     skippedNoUserMessage: number;
+    /** In-window `claude -p` runs (entrypoint `sdk-cli`), never imported (k0b8n.13). */
+    skippedNonInteractive: number;
     skippedNonSessionFiles: number;
     skippedOldMtime: number;
     skippedOutOfWindow: number;
@@ -800,7 +884,7 @@ export function describeBackfill(
     `${pad(HEADER_COLUMN)}📼 ${paint(title, ['bold'], color)}`,
     body(`${summary.sessionsInWindow} sessions in window`),
     body(
-      `${summary.created} created, ${summary.refreshed} refreshed, ${summary.scan.skippedNoUserMessage} skipped (no user message), ${summary.unchanged} unchanged`,
+      `${summary.created} created, ${summary.refreshed} refreshed, ${summary.scan.skippedNoUserMessage} skipped (no user message), ${summary.scan.skippedNonInteractive} skipped (claude -p, non-interactive), ${summary.unchanged} unchanged`,
     ),
     body(
       `message logs: ${logs.written} ${summary.dryRun ? 'would be written' : 'written'} (${logs.messages} messages), ${logs.unchanged} unchanged${failed}`,
@@ -849,6 +933,15 @@ export interface BackfillOptions {
   now?: Date;
 }
 
+/** The one line D-B prints per relabelled thread: which, and why (k0b8n.19). */
+function relabelLine(
+  action: {threadId: string},
+  evidence: string,
+  dryRun: boolean,
+): string {
+  return `${action.threadId} ${dryRun ? 'would be relabelled' : 'relabelled'} source=backfill → report: it carries a real report (${evidence}). Its title, description and notes were not touched (k0b8n.19 D-B).`;
+}
+
 /**
  * The decision half: scan, diff, write. Returns the summary; prints nothing.
  */
@@ -871,14 +964,17 @@ export async function backfillThreads(
     dryRun,
     failures: [...discovery.failures, ...scan.failures, ...logs.failures],
     messageLogs: logs.counts,
+    notOwned: [],
     refreshed: 0,
     refreshedBackfill: 0,
     refreshedMessages: 0,
+    relabelled: [],
     scan: {
       filesRead: discovery.files.length,
       skippedAgentFiles: discovery.skippedAgentFiles,
       skippedFixtureDirs: discovery.skippedFixtureDirs,
       skippedNoUserMessage: scan.skippedNoUserMessage,
+      skippedNonInteractive: scan.skippedNonInteractive,
       skippedNonSessionFiles: discovery.skippedNonSessionFiles,
       skippedOldMtime: discovery.skippedOldMtime,
       skippedOutOfWindow: scan.skippedOutOfWindow,
@@ -901,6 +997,7 @@ export async function backfillThreads(
 
   const plan = planBackfill(scan.sessions, threads.value);
   summary.failures.push(...plan.failures);
+  summary.notOwned.push(...plan.notOwned);
 
   for (const action of plan.actions) {
     if (action.kind === 'unchanged') {
@@ -915,6 +1012,9 @@ export async function backfillThreads(
       } else {
         summary.refreshed += 1;
         summary.refreshedMessages += 1;
+        if (action.relabel != null) {
+          summary.relabelled.push(relabelLine(action, action.relabel, true));
+        }
       }
       continue;
     }
@@ -959,19 +1059,46 @@ export async function backfillThreads(
       continue;
     }
 
-    // refreshMessages: the message fields and nothing else (K5).
+    // refreshMessages: the message fields and, for D-B, the label — nothing
+    // else (K5, k0b8n.19).
     const merged = await mergeMetadata(ctx, action.threadId, action.patch);
     if (!merged.ok) {
       summary.failures.push(
-        `NOT REFRESHED — ${action.threadId} (session ${action.session.sessionId}): ${describeBdFailure(merged.failure)}`,
+        `NOT REFRESHED — ${action.threadId} (session ${action.session.sessionId})${action.relabel == null ? '' : ', and NOT relabelled source=report'}: ${describeBdFailure(merged.failure)}`,
       );
       continue;
     }
     summary.refreshed += 1;
     summary.refreshedMessages += 1;
+    if (action.relabel != null) {
+      summary.relabelled.push(relabelLine(action, action.relabel, false));
+    }
   }
 
   return summary;
+}
+
+/**
+ * The `note:` lines for the k0b8n.19 ownership checks — relabelled threads
+ * (D-B) first, then the ones whose ownership could not be proven (D-A) — or
+ * null when there were none. One line per thread, at column 2 with a hanging
+ * indent (K11), a blank line between each.
+ */
+export function describeOwnership(
+  summary: BackfillSummary,
+  style: OutputStyle = PLAIN_STYLE,
+): string | null {
+  const lines = [...summary.relabelled, ...summary.notOwned];
+  if (lines.length === 0) return null;
+  return spacedList(
+    lines.map((line) =>
+      wrapHanging(`note: ${line}`, {
+        hang: BODY_COLUMN,
+        indent: HEADER_COLUMN,
+        width: style.width,
+      }),
+    ),
+  );
 }
 
 /**
@@ -998,6 +1125,11 @@ export async function runThreadBackfill(
     // alone; --json carries the same facts in `scan.undatedFiles`. A blank line
     // before each block (K11 rule 1).
     // The note goes to STDERR, so its width is measured there.
+    const ownership = describeOwnership(summary, outputStyle(process.stderr));
+    if (ownership != null) {
+      console.error('');
+      console.error(ownership);
+    }
     const note = describeUndated(summary, outputStyle(process.stderr));
     if (note != null) {
       console.error('');

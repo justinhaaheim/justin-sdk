@@ -36,7 +36,7 @@ import {
   messageLogPath,
   messagesDir,
 } from '../src/thread/archive';
-import {BACKFILL_SOURCE} from '../src/thread/backfill';
+import {BACKFILL_SOURCE} from '../src/thread/backfill-ownership';
 import {
   applyCapture,
   CAPTURE_MESSAGES_SOURCE,
@@ -86,7 +86,12 @@ interface Harness {
  * interactive session): the suite itself may run under `sdk-cli`.
  */
 function harness(
-  knobs: {capture?: boolean; enabled?: boolean} = {enabled: true},
+  knobs: {
+    capture?: boolean;
+    enabled?: boolean;
+    /** DEPRECATED, gates nothing (home-base-39co9 D2) — written to prove it. */
+    startOnSessionStart?: boolean;
+  } = {enabled: true},
 ): Harness {
   const fake = createFakeBd();
   const root = mkdtempSync(join(tmpdir(), 'thread-capture-'));
@@ -596,6 +601,68 @@ test('the REAL CLI child (--apply --hook-ms) exits 0 and records the hook timing
 // K10 c — the detached child: create, adopt, ownership, convergence
 // ---------------------------------------------------------------------------
 
+/** The apply request the hook handed to its (stubbed) spawn, by index. */
+function spawnedAt(h: Harness, index: number): ApplyRequest {
+  const request = h.spawned[index];
+  if (request == null) throw new Error(`no spawn #${index}`);
+  return request;
+}
+
+describe('the FIRST prompt creates the thread (home-base-39co9 D1)', () => {
+  /**
+   * The whole of D1, end to end except for the detached spawn: the hook runs on
+   * a real UserPromptSubmit payload, and the child is run with EXACTLY the
+   * request the hook handed to its spawn. No `thread start` runs anywhere —
+   * nothing happens at SessionStart any more — so this is the only creator.
+   * Both values of the deprecated knob, to prove it gates nothing.
+   */
+  for (const startOnSessionStart of [false, true]) {
+    test(`first prompt → exactly ONE bead; second prompt → none more (startOnSessionStart ${String(startOnSessionStart)})`, async () => {
+      const h = harness({enabled: true, startOnSessionStart});
+      expect(threads(h)).toHaveLength(0);
+
+      const first = hook(
+        h,
+        payload(h, 'UserPromptSubmit', 'build the first-prompt thread'),
+        new Date('2026-10-05T10:00:00.000Z'),
+      );
+      expect(first.decision.kind).toBe('capture');
+      expect(h.spawned).toHaveLength(1);
+      const firstApply = await applyCapture({
+        ...spawnedAt(h, 0),
+        autoCommit: false,
+      });
+      expect(firstApply).toMatchObject({kind: 'ran', last: {created: true}});
+      const created = onlyThread(h);
+      expect(created.status).toBe('in_progress');
+      expect(created.metadata).toMatchObject({
+        firstUserMessage: 'build the first-prompt thread',
+        sessionId: SESSION,
+      });
+
+      hook(
+        h,
+        payload(h, 'UserPromptSubmit', 'and the second prompt'),
+        new Date('2026-10-05T10:05:00.000Z'),
+      );
+      expect(h.spawned).toHaveLength(2);
+      const secondApply = await applyCapture({
+        ...spawnedAt(h, 1),
+        autoCommit: false,
+      });
+      expect(secondApply).toMatchObject({
+        kind: 'ran',
+        last: {created: false, threadId: created.id},
+      });
+      const after = onlyThread(h); // still exactly one
+      expect(after.id).toBe(created.id);
+      expect(after.metadata).toMatchObject({
+        lastUserMessage: 'and the second prompt',
+      });
+    });
+  }
+});
+
 describe('K10 c · the bead update', () => {
   test('no thread yet: it is CREATED through the start path, then carries the log', async () => {
     const h = harness();
@@ -714,6 +781,44 @@ describe('K10 c · the bead update', () => {
       reportCount: 2,
     });
     // No status write was issued at all.
+    expect(
+      h.fake.read().log.filter((entry) => entry.includes('-s in_progress')),
+    ).toEqual([]);
+  });
+
+  test('k0b8n.19 D-D: the erased shape (labelled backfill, carrying a report) keeps its body under capture', async () => {
+    // The audit's regression guard. Capture decides nothing about the body
+    // from `source`: its only backfill special case moves an OPEN bead to
+    // in_progress, and its patch carries message keys alone. This pins both
+    // for the shape th-fs3 had before 2026-09-25 — in_progress, so no status
+    // write either.
+    const h = harness();
+    const reportedAt = '2026-09-20T01:22:16.133Z';
+    seedThread(h, {
+      description: 'GOAL: the report description',
+      metadata: {
+        messagesSource: 'backfill',
+        reportCount: 1,
+        reportedAt,
+        sessionId: SESSION,
+        source: BACKFILL_SOURCE,
+      },
+      notes: 'THE RENDERED STATUS REPORT',
+      status: 'in_progress',
+      title: 'the reported title',
+    });
+    hook(h, payload(h, 'Stop', 'a live yield after the report'));
+    await applyCapture({autoCommit: false, env: h.env, sessionId: SESSION});
+    const thread = onlyThread(h);
+    expect(thread.title).toBe('the reported title');
+    expect(thread.description).toBe('GOAL: the report description');
+    expect(thread.notes).toBe('THE RENDERED STATUS REPORT');
+    expect(thread.status).toBe('in_progress');
+    expect(thread.metadata).toMatchObject({
+      lastAssistantMessage: 'a live yield after the report',
+      reportCount: 1,
+      reportedAt,
+    });
     expect(
       h.fake.read().log.filter((entry) => entry.includes('-s in_progress')),
     ).toEqual([]);
@@ -858,13 +963,13 @@ describe('K10 e · extractTranscriptTurns', () => {
     expect(turns.turns).toHaveLength(2);
     const [one, two] = turns.turns;
     expect(one?.user?.text.startsWith('You are the /conductor.')).toBe(true);
-    expect(one?.assistant?.text).toBe(
+    expect(one?.yields.map((y) => y.text)).toEqual([
       "Dispatch 1 is running in the worktree.\n\nWaiting on the player's return before the next step.",
-    );
+    ]);
     expect(two?.user?.text).toBe('go ahead and dispatch 2');
     // The turn ends in a thinking-only record and a tool_use-only record, and
     // nothing Claude SAID: no yield, rather than a tool call or a thought.
-    expect(two?.assistant).toBeNull();
+    expect(two?.yields).toEqual([]);
     // The sidechain prompt is Claude's words to a subagent, never a turn.
     const all = JSON.stringify(turns.turns);
     expect(all).not.toContain('A SUBAGENT PROMPT');
@@ -926,11 +1031,13 @@ describe('K10 e · extractTranscriptTurns', () => {
     const turns = extractTranscriptTurns(path).turns;
     expect(turns).toHaveLength(1);
     expect(turns[0]?.user?.text).toBe('fix the bug');
-    expect(turns[0]?.assistant).toEqual({
-      at: '2026-09-23T10:00:04.000Z',
-      cwd: '/w',
-      text: 'Fixed and tested.',
-    });
+    expect(turns[0]?.yields).toEqual([
+      {
+        at: '2026-09-23T10:00:04.000Z',
+        cwd: '/w',
+        text: 'Fixed and tested.',
+      },
+    ]);
   });
 });
 

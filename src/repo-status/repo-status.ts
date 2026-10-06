@@ -574,10 +574,14 @@ const statusBuilder = (y: Argv<GlobalArgs>) =>
         "Open every worktree's submodule object store, not just this worktree's",
       type: 'boolean' as const,
     })
-    // NO yargs `default` on these two, deliberately. A yargs default lands in
-    // `argv` exactly like a typed flag, so `.conflicts()` below would fire on
-    // every single run — measured. The defaults are applied in the handler
-    // instead, and stated in the describe text so `--help` still carries them.
+    // NO yargs `default` on these three, deliberately. A yargs default lands in
+    // `argv` exactly like a typed flag, so `.conflicts('all', 'since-days')`
+    // below fires on every run that passes the other one — measured, twice:
+    // `all` carried `default: false` until home-base-6i5jz, and every
+    // `--since-days` run printed the help screen instead of the ledger. The
+    // defaults are applied in the handler instead (an absent `all` reads as
+    // off there), and stated in the describe text so `--help` still carries
+    // them.
     .option('since-days', {
       describe: `Ignore branches with no commits in this many days (default: ${DEFAULT_STATUS_SINCE_DAYS})`,
       type: 'number' as const,
@@ -587,9 +591,8 @@ const statusBuilder = (y: Argv<GlobalArgs>) =>
       type: 'boolean' as const,
     })
     .option('all', {
-      default: false,
       describe:
-        'No filtering at all: every branch, however old, archive/* included',
+        'No filtering at all: every branch, however old, archive/* included (default: off)',
       type: 'boolean' as const,
     })
     .option('merge-preview', {

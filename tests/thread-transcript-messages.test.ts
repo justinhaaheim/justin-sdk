@@ -81,6 +81,45 @@ describe('K2 · the first substantive user message', () => {
     ).toBe('/handoff tell me what is in flight');
   });
 
+  test('a context-compaction summary is not a message (home-base-lj3x9)', () => {
+    // Shape copied from nature-sounds session 50f1491b, where the summary was
+    // reported as Justin's last message.
+    const summary = {
+      isCompactSummary: true,
+      isSidechain: false,
+      isVisibleInTranscriptOnly: true,
+      message: {
+        content:
+          'This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.',
+        role: 'user',
+      },
+      type: 'user',
+      userType: 'external',
+    };
+    expect(substantiveUserText(summary as never)).toBeNull();
+
+    const dir = mkdtempSync(join(tmpdir(), 'compact-summary-'));
+    const path = join(dir, 'session.jsonl');
+    writeFileSync(
+      path,
+      [
+        {
+          cwd: '/x',
+          message: {content: 'the real last prompt', role: 'user'},
+          sessionId: 's',
+          timestamp: '2026-09-12T01:00:00.000Z',
+          type: 'user',
+        },
+        {...summary, sessionId: 's', timestamp: '2026-09-12T02:00:00.000Z'},
+      ]
+        .map((record) => JSON.stringify(record))
+        .join('\n'),
+    );
+    expect(extractTranscriptMessages(path).lastUserMessage).toBe(
+      'the real last prompt',
+    );
+  });
+
   test('a record that is ONLY a system-reminder is not a message', () => {
     expect(
       substantiveUserText({

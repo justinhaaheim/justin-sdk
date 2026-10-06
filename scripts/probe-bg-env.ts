@@ -37,6 +37,8 @@ import {
 import {homedir, tmpdir} from 'node:os';
 import {join} from 'node:path';
 
+import {gateSpend} from './spend-gate';
+
 const BOLD = '\u001B[1m';
 const DIM = '\u001B[2m';
 const RED = '\u001B[31m';
@@ -52,6 +54,8 @@ Usage: bun run probe:bg-env [options]
   --model <m>        Model for the probe session (default: haiku).
   --timeout-min <n>  How long to wait for the session to write the file (default: 5).
   --keep             Leave the fixture directory and the agent row in place.
+  --spend-real-tokens  REQUIRED to run: this starts real Claude Code sessions
+                     and spends tokens on your account.
   --help             Print this and do nothing else.
 
 Spawns ONE background session, sets ${PROBE_ENV_VAR} on its invocation, and asks
@@ -119,7 +123,13 @@ function parseBackgroundedId(banner: string): string | null {
 }
 
 async function main(): Promise<number> {
-  const opts = parseArgs(process.argv.slice(2));
+  const opts = parseArgs(
+    gateSpend(process.argv.slice(2), {
+      script: 'bun run probe:bg-env',
+      spends:
+        'one short background session, on haiku unless --model says otherwise',
+    }),
+  );
   if (opts == null) {
     process.stdout.write(HELP);
     return 0;

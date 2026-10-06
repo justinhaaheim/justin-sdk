@@ -45,6 +45,13 @@ export interface FakeState {
    * stderr is the measured one from bd 1.1.0 under the Claude Code sandbox.
    */
   exportFails?: boolean;
+  /**
+   * After every mutation, write `.beads/issues.jsonl` from the issues, one
+   * `bd show`-shaped record per line — the fake's stand-in for real bd's
+   * auto-export. Opt-in (k0b8n.19 D-E): only a test that commits the threads
+   * repo needs it, and every older test keeps the fake exactly as it was.
+   */
+  exportJsonl?: boolean;
   /** Fail the Nth `create -t ask` of each run (1-based). 0 = never fail. */
   failAskCreateAt: number;
   /** Fail `comments add` for this bead id. Null = never fail. */
@@ -65,6 +72,7 @@ export interface FakeState {
 /** The script body written into the fake workspace. Kept as source, not a build artefact. */
 const SCRIPT = `
 import {readFileSync, writeFileSync} from 'fs';
+import {dirname, join} from 'path';
 
 const statePath = process.env.FAKE_BD_STATE;
 if (statePath == null) { console.error('FAKE_BD_STATE unset'); process.exit(1); }
@@ -92,8 +100,14 @@ const EXPORT_STDERR = [
 ].join('\\n');
 // Every MUTATION ends here: the write has already happened, so an export
 // failure exits non-zero with the id already on stdout.
+function exportJsonl() {
+  if (state.exportJsonl !== true) return;
+  const path = join(dirname(statePath), '.beads', 'issues.jsonl');
+  writeFileSync(path, state.issues.map((i) => JSON.stringify(shape(i))).join('\\n') + '\\n');
+}
 function finish() {
   save();
+  exportJsonl();
   if (state.exportFails) { console.error(EXPORT_STDERR); process.exit(1); }
   process.exit(0);
 }

@@ -33,6 +33,7 @@ import {join, resolve} from 'node:path';
 
 import {captureRunLogPath, messagesDir} from '../src/thread/archive';
 import {readMessageLogAt} from '../src/thread/message-log';
+import {gateSpend} from './spend-gate';
 
 const HELP = `probe-capture-live — one real claude --bg session, and what thread capture did with it
 
@@ -46,6 +47,8 @@ Usage: bun run probe:capture-live [options]
                      script lives in). Its .claude/settings.json must already
                      carry \`thread capture\` on UserPromptSubmit AND Stop.
   --timeout-min <n>  How long to wait for the Stop's capture child (default: 5).
+  --spend-real-tokens  REQUIRED to run: this starts real Claude Code sessions
+                     and spends tokens on your account.
   --help             Print this and do nothing else.
 
 Prints the session's message log, the capture.jsonl records for it, and the
@@ -207,7 +210,13 @@ function stopHookTimings(cwd: string, sessionId: string): string[] {
 }
 
 async function main(): Promise<number> {
-  const opts = parseArgs(process.argv.slice(2));
+  const opts = parseArgs(
+    gateSpend(process.argv.slice(2), {
+      script: 'bun run probe:capture-live',
+      spends:
+        'one short background session, on haiku unless --model says otherwise',
+    }),
+  );
   if (opts == null) {
     process.stdout.write(HELP);
     return 0;

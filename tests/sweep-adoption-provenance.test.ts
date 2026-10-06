@@ -51,7 +51,7 @@ import {
   planInstallPayload,
   renderInstallPayloadPlan,
 } from '../src/sweep-install';
-import {THREAD_START_HOOK_COMMAND} from '../src/thread-hooks-setup';
+import {THREAD_STOP_HOOK_COMMAND} from '../src/thread-hooks-setup';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -324,12 +324,14 @@ describe('a generic config file is evidence, not provenance', () => {
     expect(adoptedNames(root)).toContain('husky-setup');
   });
 
-  function withSessionStartHook(root: string, command: string): void {
+  // A Stop hook, not SessionStart: the SessionStart `thread start --hook` entry
+  // is RETIRED (home-base-39co9 D3) and is evidence of nothing any more.
+  function withStopHook(root: string, command: string): void {
     write(
       root,
       '.claude/settings.json',
       `${JSON.stringify({
-        hooks: {SessionStart: [{hooks: [{command, type: 'command'}]}]},
+        hooks: {Stop: [{hooks: [{command, type: 'command'}]}]},
       })}\n`,
     );
   }
@@ -341,7 +343,7 @@ describe('a generic config file is evidence, not provenance', () => {
     // did not emit is not grounds to enrol a repo in the component.
     const sb = track(createSandbox());
     const root = enrolled(sb, 'handmade');
-    withSessionStartHook(root, 'cd /repo && justin-sdk thread start --hook');
+    withStopHook(root, 'cd /repo && justin-sdk thread stop-check');
 
     expect(componentInstalledEvidence(root, 'thread-hooks').installed).toBe(
       true,
@@ -353,7 +355,7 @@ describe('a generic config file is evidence, not provenance', () => {
   test('NEGATIVE CONTROL: the command the SDK emits IS provenance', () => {
     const sb = track(createSandbox());
     const root = enrolled(sb, 'ours');
-    withSessionStartHook(root, THREAD_START_HOOK_COMMAND);
+    withStopHook(root, THREAD_STOP_HOOK_COMMAND);
     expect(componentProvenanceEvidence(root, 'thread-hooks').kind).toBe('sdk');
     expect(adoptedNames(root)).toContain('thread-hooks-setup');
   });

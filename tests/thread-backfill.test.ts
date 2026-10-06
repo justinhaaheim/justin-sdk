@@ -13,6 +13,7 @@
  * the line that was broken, the assertion that went red, and the restore.
  */
 
+import type {BackfillOwnership} from '../src/thread/backfill-ownership';
 import type {ThreadFacts} from '../src/thread/facts';
 
 import {afterEach, describe, expect, spyOn, test} from 'bun:test';
@@ -27,12 +28,19 @@ import {
   runThreadBackfill,
   scanSessions,
 } from '../src/thread/backfill';
+import {
+  BACKFILL_DESCRIPTION_MARKER,
+  backfillOwnership,
+  readReportCountEvidence,
+  readReportedAtEvidence,
+} from '../src/thread/backfill-ownership';
 import {bdContext} from '../src/thread/bd';
 import {
   backfilledHiddenLine,
   buildBoard,
   renderByRepo,
 } from '../src/thread/board';
+import {readMessageLog} from '../src/thread/message-log';
 import {writeReportToBd} from '../src/thread/report';
 import {validateThreadReport} from '../src/thread/schema';
 import {startThread} from '../src/thread/start';
@@ -88,6 +96,12 @@ interface TranscriptSpec {
   atime?: Date;
   branch?: string;
   cwd?: string;
+  /**
+   * The `entrypoint` every record carries: `sdk-cli` for a `claude -p` run,
+   * `cli` for an interactive or `--bg` one (k0b8n.13). Absent by default, as
+   * in every transcript these tests wrote before it.
+   */
+  entrypoint?: string;
   /** Override the FILENAME's session id (default: sessionId). */
   fileName?: string;
   lines?: string[];
@@ -121,6 +135,7 @@ function userRecord(
 ): Record<string, unknown> {
   return {
     cwd: spec.cwd ?? CWD,
+    ...(spec.entrypoint == null ? {} : {entrypoint: spec.entrypoint}),
     gitBranch: spec.branch ?? 'main',
     message: {content: text, role: 'user'},
     sessionId: spec.sessionId ?? SESSION,
@@ -136,6 +151,7 @@ function assistantRecord(
 ): Record<string, unknown> {
   return {
     cwd: spec.cwd ?? CWD,
+    ...(spec.entrypoint == null ? {} : {entrypoint: spec.entrypoint}),
     gitBranch: spec.branch ?? 'main',
     message: {
       content: [{text, type: 'text'}],
@@ -1043,6 +1059,458 @@ describe('adoption: a backfilled session that later runs keeps ONE bead', () => 
 });
 
 // ---------------------------------------------------------------------------
+// Ownership is proven, not declared (home-base-k0b8n.19)
+// ---------------------------------------------------------------------------
+
+/**
+ * The shape th-fs3, th-ttp and th-mq0 had at threads 1b912a6~1, just before the
+ * backfill run that erased them (read from the threads repo, 2026-09-25):
+ * created by backfill, then reported onto by an SDK older than 7e637d8, which
+ * never flipped `source`. So the label says backfill while `reportCount`,
+ * `reportedAt`, the description and the notes are all the REPORT's.
+ */
+function reportedUnderBackfillLabel(
+  now: Date,
+  metadata: Record<string, unknown> = {},
+): FakeIssue {
+  const reportedAt = new Date(now.getTime() - 2 * DAY).toISOString();
+  return {
+    description: 'GOAL: Finish epic health-logger-rn-g8p (SQLite local cache)',
+    id: 'jl-t9',
+    metadata: {
+      cwd: '/Users/jhaa/Dev/health-logger-rn',
+      lastActivityAt: reportedAt,
+      messagesSource: 'backfill',
+      reportCount: 1,
+      reportedAt,
+      sessionId: SESSION,
+      source: 'backfill',
+      ...metadata,
+    },
+    notes: 'THE RENDERED STATUS REPORT — 13,457 characters in the real th-fs3',
+    parent: null,
+    status: 'in_progress',
+    title: 'health-logger-rn g8p finish conductor',
+    type: 'thread',
+  };
+}
+
+/**
+ * A bead that passes every D-A check EXCEPT what `metadata` overrides: the
+ * backfill label, reportCount 0, reportedAt null, and a description that
+ * starts with the marker. The notes are a human's, so a rewrite is visible.
+ */
+function backfillBodied(
+  now: Date,
+  metadata: Record<string, unknown>,
+  description = `${BACKFILL_DESCRIPTION_MARKER} — this session never reported.`,
+): FakeIssue {
+  return {
+    description,
+    id: 'jl-t9',
+    metadata: {
+      lastActivityAt: new Date(now.getTime() - 2 * DAY).toISOString(),
+      reportCount: 0,
+      reportedAt: null,
+      sessionId: SESSION,
+      source: 'backfill',
+      ...metadata,
+    },
+    notes: 'notes a human wrote, which no backfill may replace',
+    parent: null,
+    status: 'open',
+    title: 'a title a human chose',
+    type: 'thread',
+  };
+}
+
+function seed(h: Harness, issue: FakeIssue): void {
+  h.fake.write({...h.fake.read(), issues: [issue]});
+}
+
+function onlyThread(h: Harness): FakeIssue {
+  const all = threads(h);
+  if (all.length !== 1) {
+    throw new Error(`expected exactly one thread bead, found ${all.length}`);
+  }
+  const [bead] = all;
+  if (bead == null) throw new Error('unreachable');
+  return bead;
+}
+
+/** Write a REAL report onto the session's bead, through `writeReportToBd`. */
+async function reportOnto(h: Harness, now: Date): Promise<void> {
+  const raw = examplePayload();
+  raw.asks = [];
+  raw.priorAsks = [];
+  raw.title = 'the session finally reported';
+  const validated = validateThreadReport(raw);
+  if (validated.status !== 'ok') {
+    throw new Error('the example payload stopped validating');
+  }
+  const ctx = bdContext(h.env);
+  ctx.repoDir = h.fake.dir;
+  const result = await writeReportToBd({
+    ctx,
+    facts: reportFacts(now),
+    payload: validated.payload,
+    sessionId: SESSION,
+  });
+  if (result.status !== 'written') {
+    throw new Error(`the report was not written: ${result.status}`);
+  }
+}
+
+/** Resume the session in its transcript: two more records, at `at`. */
+function advanceTranscript(path: string, first: Date, at: Date): void {
+  writeFileSync(
+    path,
+    [
+      JSON.stringify(userRecord('the brief', first)),
+      JSON.stringify(assistantRecord('I did the thing.', first)),
+      JSON.stringify(userRecord('one more thing', at)),
+      JSON.stringify(assistantRecord('the newest answer', at)),
+      '',
+    ].join('\n'),
+  );
+}
+
+describe('k0b8n.19: backfill rewrites a body only when it can PROVE it wrote it', () => {
+  test('D-C: thread report onto a backfill bead writes source report and messagesSource report, through the merge', async () => {
+    const h = harness();
+    const now = new Date();
+    writeSession(h, 1, {now, user: 'the brief'});
+    await backfillThreads({days: 30, env: h.env, now});
+    const backfilled = onlyThread(h);
+    expect(metaOf(backfilled)).toMatchObject({
+      messagesSource: 'backfill',
+      reportCount: 0,
+      reportedAt: null,
+      source: 'backfill',
+    });
+    const backfillActivity = metaOf(backfilled).lastActivityAt;
+    silence();
+
+    await reportOnto(h, now);
+
+    const bead = onlyThread(h);
+    // The fixture MERGES, as bd 1.1.0 does (metadata.ts): a key the report does
+    // not send survives. Without this the two assertions below could pass on
+    // a fixture that replaces, and would prove nothing about an omitted key.
+    expect(metaOf(bead).lastActivityAt).toBe(backfillActivity);
+    expect(metaOf(bead).source).toBe('report');
+    expect(metaOf(bead).messagesSource).toBe('report');
+    expect(metaOf(bead).reportCount).toBe(1);
+    expect(backfillOwnership(bead).kind).toBe('notBackfill');
+  });
+
+  test('AC 1: a backfill-created thread that REPORTED keeps its report when the transcript advances', async () => {
+    const h = harness();
+    const now = new Date();
+    const first = new Date(now.getTime() - DAY);
+    const path = writeSession(h, 1, {now, user: 'the brief'});
+    await backfillThreads({days: 30, env: h.env, now});
+    silence();
+    await reportOnto(h, now);
+    const reported = onlyThread(h);
+    expect(reported.description).not.toContain(BACKFILL_DESCRIPTION_MARKER);
+
+    // The session is resumed AFTER its report and says more.
+    const later = new Date(now.getTime() + 60 * 60 * 1000);
+    advanceTranscript(path, first, later);
+    const summary = await backfillThreads({
+      days: 30,
+      env: h.env,
+      now: new Date(later.getTime() + 60 * 1000),
+    });
+
+    expect(summary.refreshedBackfill).toBe(0);
+    const bead = onlyThread(h);
+    expect(bead.title).toBe(reported.title);
+    expect(bead.description).toBe(reported.description ?? '');
+    expect(bead.notes).toBe(reported.notes ?? '');
+    expect(metaOf(bead).reportCount).toBe(1);
+    expect(metaOf(bead).reportedAt).toBe(metaOf(reported).reportedAt);
+    expect(metaOf(bead).source).toBe('report');
+    // What backfill IS allowed to do to a reported thread still happened.
+    expect(metaOf(bead).lastUserMessage).toBe('one more thing');
+  });
+
+  test('AC 2, THE NEGATIVE CONTROL: the erased shape keeps its body and is relabelled source report (D-B)', async () => {
+    const h = harness();
+    const now = new Date();
+    // Last record a day ago; the report was two days ago — so the transcript
+    // HAS advanced, which is the condition that fired the erasure.
+    writeSession(h, 1, {now, user: 'the brief'});
+    const before = reportedUnderBackfillLabel(now);
+    seed(h, before);
+
+    const summary = await backfillThreads({days: 30, env: h.env, now});
+
+    const bead = onlyThread(h);
+    // THE BODY IS THE REPORT'S. These four are what 1b912a6 destroyed.
+    expect(bead.title).toBe(before.title);
+    expect(bead.description).toBe(before.description ?? '');
+    expect(bead.notes).toBe(before.notes ?? '');
+    expect(metaOf(bead).reportCount).toBe(1);
+    expect(metaOf(bead).reportedAt).toBe(metaOf(before).reportedAt);
+    // The refresh also rewrote cwd from the transcript; it must not.
+    expect(metaOf(bead).cwd).toBe('/Users/jhaa/Dev/health-logger-rn');
+    expect(bead.status).toBe('in_progress');
+    // D-B: the label is repaired, so the board stops hiding a reported thread.
+    expect(metaOf(bead).source).toBe('report');
+    expect(summary.refreshedBackfill).toBe(0);
+    expect(summary.relabelled).toHaveLength(1);
+    expect(summary.relabelled[0]).toContain('jl-t9 relabelled');
+    expect(summary.relabelled[0]).toContain('reportCount 1');
+    expect(summary.notOwned).toEqual([]);
+    expect(summary.failures).toEqual([]);
+  });
+
+  test('D-B relabels even when nothing else is due, and prints one line naming the thread and why', async () => {
+    const h = harness();
+    const now = new Date();
+    writeSession(h, 3, {now, user: 'the brief'});
+    const at = new Date(now.getTime() - 3 * DAY).toISOString();
+    // Every message present and the transcript NOT advanced: before D-B this
+    // thread would be `unchanged` for ever, and hidden from the board for ever.
+    seed(
+      h,
+      reportedUnderBackfillLabel(now, {
+        firstUserMessage: 'the brief',
+        firstUserMessageAt: at,
+        lastActivityAt: now.toISOString(),
+        lastAssistantMessage: 'I did the thing.',
+        lastAssistantMessageAt: at,
+        lastUserMessage: 'the brief',
+        lastUserMessageAt: at,
+        reportedAt: now.toISOString(),
+        resumeCommand: `cd '${CWD}' && claude --resume ${SESSION}`,
+      }),
+    );
+    captureStdout();
+    const err = captureStderr();
+
+    const code = await runThreadBackfill({
+      autoCommit: false,
+      days: 30,
+      env: h.env,
+      now,
+    });
+
+    expect(code).toBe(0);
+    const bead = onlyThread(h);
+    expect(metaOf(bead).source).toBe('report');
+    // ONLY the label was written: the messages were already right.
+    expect(metaOf(bead).messagesSource).toBe('backfill');
+    expect(bead.notes).toContain('THE RENDERED STATUS REPORT');
+    const noteLines = err
+      .join('\n')
+      .split('\n')
+      .filter((line) => {
+        return line.includes('note: jl-t9');
+      });
+    expect(noteLines).toHaveLength(1);
+    expect(noteLines[0]).toContain(
+      'note: jl-t9 relabelled source=backfill → report',
+    );
+    expect(err.join('\n')).toContain('it carries a real report (reportCount 1');
+  });
+
+  test('a second run after the relabel writes nothing and prints nothing about it', async () => {
+    const h = harness();
+    const now = new Date();
+    writeSession(h, 1, {now});
+    seed(h, reportedUnderBackfillLabel(now));
+    await backfillThreads({days: 30, env: h.env, now});
+
+    const logBefore = h.fake.read().log.length;
+    const second = await backfillThreads({days: 30, env: h.env, now});
+
+    expect(second.relabelled).toEqual([]);
+    expect(second.notOwned).toEqual([]);
+    expect(second.refreshed).toBe(0);
+    expect(h.fake.read().log.length - logBefore).toBe(1); // the list, nothing else
+  });
+
+  test.each([
+    ['a string', '1'],
+    ['null', null],
+    ['a negative number', -1],
+    ['a fraction', 1.5],
+  ])(
+    'AC 2: a MALFORMED reportCount (%s) is not-ours — body and label left alone, and named',
+    async (_label, reportCount) => {
+      const h = harness();
+      const now = new Date();
+      writeSession(h, 1, {now, user: 'the brief'});
+      const before = backfillBodied(now, {reportCount});
+      seed(h, before);
+
+      const summary = await backfillThreads({days: 30, env: h.env, now});
+
+      const bead = onlyThread(h);
+      expect(bead.title).toBe(before.title);
+      expect(bead.description).toBe(before.description ?? '');
+      expect(bead.notes).toBe(before.notes ?? '');
+      expect(metaOf(bead).reportCount).toEqual(reportCount);
+      // UNKNOWN is not evidence of a report: the label stays.
+      expect(metaOf(bead).source).toBe('backfill');
+      expect(summary.refreshedBackfill).toBe(0);
+      expect(summary.relabelled).toEqual([]);
+      expect(summary.notOwned).toHaveLength(1);
+      expect(summary.notOwned[0]).toContain('jl-t9');
+      expect(summary.notOwned[0]).toContain('is not a report count');
+      // A named skip, not a run failure.
+      expect(summary.failures).toEqual([]);
+    },
+  );
+
+  test('a backfill-labelled bead whose description lost the marker is not-ours', async () => {
+    const h = harness();
+    const now = new Date();
+    writeSession(h, 1, {now});
+    const before = backfillBodied(now, {}, 'a description a human rewrote');
+    seed(h, before);
+
+    const summary = await backfillThreads({days: 30, env: h.env, now});
+
+    const bead = onlyThread(h);
+    expect(bead.description).toBe('a description a human rewrote');
+    expect(bead.notes).toBe(before.notes ?? '');
+    expect(summary.refreshedBackfill).toBe(0);
+    expect(summary.notOwned[0]).toContain('does not start with');
+  });
+
+  test('the positive control: a bead that passes every check IS still refreshed', async () => {
+    const h = harness();
+    const now = new Date();
+    writeSession(h, 1, {assistant: 'the newest answer', now});
+    seed(h, backfillBodied(now, {}));
+
+    const summary = await backfillThreads({days: 30, env: h.env, now});
+
+    expect(summary.refreshedBackfill).toBe(1);
+    expect(summary.notOwned).toEqual([]);
+    const bead = onlyThread(h);
+    expect(bead.notes).toContain('the newest answer');
+    expect(bead.description).toStartWith(BACKFILL_DESCRIPTION_MARKER);
+  });
+});
+
+describe('k0b8n.19 D-D: thread start adopts only a bead backfill provably owns', () => {
+  test('the erased shape is NOT adopted: its report survives a resume', async () => {
+    const h = harness();
+    const now = new Date();
+    const before = reportedUnderBackfillLabel(now);
+    seed(h, before);
+
+    const outcome = await startThread({
+      autoCommit: false,
+      cwd: h.root,
+      env: h.env,
+      sessionId: SESSION,
+    });
+
+    expect(outcome.kind).toBe('existing');
+    const bead = onlyThread(h);
+    expect(bead.description).toBe(before.description ?? '');
+    expect(bead.notes).toBe(before.notes ?? '');
+    expect(bead.title).toBe(before.title);
+    expect(metaOf(bead)).toEqual(before.metadata ?? {});
+  });
+
+  test('a backfill-labelled bead with a malformed reportCount is NOT adopted', async () => {
+    const h = harness();
+    const now = new Date();
+    const before = backfillBodied(now, {reportCount: 'three'});
+    seed(h, before);
+
+    const outcome = await startThread({
+      autoCommit: false,
+      cwd: h.root,
+      env: h.env,
+      sessionId: SESSION,
+    });
+
+    expect(outcome.kind).toBe('existing');
+    expect(onlyThread(h).notes).toBe(before.notes ?? '');
+  });
+});
+
+describe('k0b8n.19: the ownership verdict, field by field', () => {
+  test('reportCount keeps absent, zero, positive and malformed apart (rule 7)', () => {
+    expect(readReportCountEvidence({})).toEqual({kind: 'absent'});
+    expect(readReportCountEvidence({reportCount: 0})).toEqual({kind: 'zero'});
+    expect(readReportCountEvidence({reportCount: 2})).toEqual({
+      kind: 'positive',
+      value: 2,
+    });
+    for (const raw of [null, '0', -1, 0.5, Number.NaN, Infinity, true]) {
+      expect(readReportCountEvidence({reportCount: raw}).kind).toBe(
+        'malformed',
+      );
+    }
+  });
+
+  test('reportedAt keeps absent, null, set and malformed apart', () => {
+    expect(readReportedAtEvidence({})).toEqual({kind: 'absent'});
+    expect(readReportedAtEvidence({reportedAt: null})).toEqual({kind: 'null'});
+    expect(
+      readReportedAtEvidence({reportedAt: '2026-09-20T01:22:16Z'}),
+    ).toEqual({kind: 'set', value: '2026-09-20T01:22:16Z'});
+    for (const raw of ['', '  ', 0, false, {}]) {
+      expect(readReportedAtEvidence({reportedAt: raw}).kind).toBe('malformed');
+    }
+  });
+
+  const marker = `${BACKFILL_DESCRIPTION_MARKER} — this session never reported.`;
+  const owned = {reportCount: 0, reportedAt: null, source: 'backfill'};
+
+  // [case, expected verdict, metadata, description]
+  test.each<
+    [string, BackfillOwnership['kind'], Record<string, unknown>, string]
+  >([
+    ['proven', 'owned', owned, marker],
+    ['a report label', 'notBackfill', {...owned, source: 'report'}, marker],
+    ['a start label', 'notBackfill', {...owned, source: 'start'}, marker],
+    ['no label', 'notBackfill', {reportCount: 0, reportedAt: null}, marker],
+    ['reportCount 1', 'reported', {...owned, reportCount: 1}, marker],
+    [
+      'a reportedAt stamp alone',
+      'reported',
+      {...owned, reportedAt: '2026-09-20T01:22:16Z'},
+      marker,
+    ],
+    ['a malformed count', 'unproven', {...owned, reportCount: '1'}, marker],
+    [
+      'a malformed count beside a stamp',
+      'unproven',
+      {...owned, reportCount: 'x', reportedAt: '2026-09-20T01:22:16Z'},
+      marker,
+    ],
+    ['a malformed stamp', 'unproven', {...owned, reportedAt: 7}, marker],
+    [
+      'no reportCount',
+      'unproven',
+      {reportedAt: null, source: 'backfill'},
+      marker,
+    ],
+    ['no reportedAt', 'unproven', {reportCount: 0, source: 'backfill'}, marker],
+    ['no marker', 'unproven', owned, 'GOAL: a report description'],
+    ['a leading blank line', 'unproven', owned, `\n${marker}`],
+  ])('%s → %s', (_label, expected, metadata, description) => {
+    expect(backfillOwnership({description, metadata}).kind).toBe(expected);
+  });
+
+  test('a bead with no metadata at all is not a backfill bead', () => {
+    expect(backfillOwnership({description: marker, metadata: null}).kind).toBe(
+      'notBackfill',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // The board (K6)
 // ---------------------------------------------------------------------------
 
@@ -1123,5 +1591,159 @@ describe('the board hides backfilled sessions by default (K6)', () => {
     expect(backfilledHiddenLine(7)).toBe(
       '7 backfilled sessions hidden (--all shows them)',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-k0b8n.13 — a `claude -p` session is counted, never imported (K5)
+// ---------------------------------------------------------------------------
+
+const OTHER_SESSION = '5a1b2c3d-1111-4222-8333-444455556666';
+
+describe('k0b8n.13: a claude -p session (entrypoint sdk-cli) is counted, never imported', () => {
+  test('a -p transcript WITH a real prompt is skippedNonInteractive: no bead, no message log', async () => {
+    const h = harness();
+    const now = new Date();
+    writeSession(h, 1, {
+      entrypoint: 'sdk-cli',
+      now,
+      user: 'summarise this diff in one line',
+    });
+
+    const summary = await backfillThreads({days: 30, env: h.env, now});
+
+    expect(summary.scan.skippedNonInteractive).toBe(1);
+    // It HAD a prompt: the no-user-message rule is not what skipped it.
+    expect(summary.scan.skippedNoUserMessage).toBe(0);
+    expect(summary.sessionsInWindow).toBe(0);
+    expect(summary.created).toBe(0);
+    expect(summary.failures).toEqual([]);
+    expect(threads(h)).toHaveLength(0);
+    expect(summary.messageLogs.written).toBe(0);
+    expect(readMessageLog(SESSION, h.env).kind).toBe('missing');
+  });
+
+  test('a -p session gets NO message log, as live capture records none (syncSessionLogs)', async () => {
+    const h = harness();
+    const now = new Date();
+    writeSession(h, 1, {entrypoint: 'sdk-cli', now, user: 'a -p probe'});
+
+    const summary = await backfillThreads({days: 30, env: h.env, now});
+
+    expect(readMessageLog(SESSION, h.env).kind).toBe('missing');
+    expect(summary.messageLogs).toEqual({
+      carried: 0,
+      failed: 0,
+      messages: 0,
+      unchanged: 0,
+      written: 0,
+    });
+  });
+
+  test('a --bg transcript (entrypoint cli) in the same run is still imported, bead and message log', async () => {
+    const h = harness();
+    const now = new Date();
+    writeSession(h, 1, {entrypoint: 'sdk-cli', now, user: 'a -p probe'});
+    writeSession(h, 1, {
+      entrypoint: 'cli',
+      now,
+      sessionId: OTHER_SESSION,
+      user: 'run the loop iteration',
+    });
+
+    const summary = await backfillThreads({days: 30, env: h.env, now});
+
+    expect(summary.scan.skippedNonInteractive).toBe(1);
+    expect(summary.created).toBe(1);
+    const bead = onlyThread(h);
+    expect(metaOf(bead).sessionId).toBe(OTHER_SESSION);
+    expect(metaOf(bead).entrypoint).toBe('cli');
+    expect(bead.title).toBe('run the loop iteration');
+    expect(readMessageLog(OTHER_SESSION, h.env).kind).toBe('read');
+    expect(readMessageLog(SESSION, h.env).kind).toBe('missing');
+  });
+
+  test('an ABSENT or unrecognised entrypoint is imported as before: unknown is not evidence of a probe', async () => {
+    const h = harness();
+    const now = new Date();
+    writeSession(h, 1, {now, user: 'no entrypoint on any record'});
+    writeSession(h, 1, {
+      entrypoint: 'sdk-ts',
+      now,
+      sessionId: OTHER_SESSION,
+      user: 'an entrypoint nobody measured',
+    });
+
+    const summary = await backfillThreads({days: 30, env: h.env, now});
+
+    expect(summary.scan.skippedNonInteractive).toBe(0);
+    expect(summary.created).toBe(2);
+  });
+
+  test('the summary line names the count', async () => {
+    const h = harness();
+    const now = new Date();
+    writeSession(h, 1, {entrypoint: 'sdk-cli', now});
+
+    const summary = await backfillThreads({
+      days: 30,
+      dryRun: true,
+      env: h.env,
+      now,
+    });
+
+    expect(describeBackfill(summary)).toContain(
+      '0 skipped (no user message), 1 skipped (claude -p, non-interactive), 0 unchanged',
+    );
+  });
+
+  test('--json names the count', async () => {
+    const h = harness();
+    const now = new Date();
+    writeSession(h, 1, {entrypoint: 'sdk-cli', now});
+
+    const out = captureStdout();
+    captureStderr();
+    const exitCode = await runThreadBackfill({
+      autoCommit: false,
+      days: 30,
+      env: h.env,
+      json: true,
+      now,
+    });
+    expect(exitCode).toBe(0);
+    expect(out).toHaveLength(1);
+    const parsed = JSON.parse(out[0] ?? '') as {
+      created: number;
+      scan: {skippedNonInteractive: number};
+    };
+    expect(parsed.scan.skippedNonInteractive).toBe(1);
+    expect(parsed.created).toBe(0);
+    expect(threads(h)).toHaveLength(0);
+  });
+
+  test('a -p session that ALREADY has a backfill bead is left exactly as it is', async () => {
+    // The 27 existing sdk-cli beads in the real store (conductor decision,
+    // 2026-09-26: leave them). The positive control is k0b8n.19's "a bead that
+    // passes every check IS still refreshed": the same bead and transcript
+    // without `sdk-cli` are rewritten.
+    const h = harness();
+    const now = new Date();
+    writeSession(h, 1, {
+      assistant: 'the newest answer',
+      entrypoint: 'sdk-cli',
+      now,
+    });
+    seed(h, backfillBodied(now, {entrypoint: 'sdk-cli'}));
+    const before = onlyThread(h);
+    const logBefore = h.fake.read().log.length;
+
+    const summary = await backfillThreads({days: 30, env: h.env, now});
+
+    expect(summary.scan.skippedNonInteractive).toBe(1);
+    expect(summary.refreshed).toBe(0);
+    expect(onlyThread(h)).toEqual(before);
+    // ONE bd command: the up-front list. Nothing was written to the bead.
+    expect(h.fake.read().log.length - logBefore).toBe(1);
   });
 });

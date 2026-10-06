@@ -8,7 +8,8 @@
  *
  *  - `thread capture` APPENDS one line per hook run (UserPromptSubmit, Stop).
  *  - `thread backfill` REWRITES the whole file from the transcript, which is
- *    authoritative, and keeps any live line newer than the transcript's end.
+ *    authoritative, and keeps every live line whose text the transcript does
+ *    not have (`carriedLiveLines`, home-base-k0b8n.18 D-18C).
  *
  * Readers — `thread search`, `thread show --messages`, the capture child — all
  * go through `readMessageLog`.
@@ -44,7 +45,7 @@ import {dirname} from 'path';
 
 import {messageLogPath} from './archive';
 import {probeErrorMessage} from './paths';
-import {extractTranscriptTurns} from './transcript-messages';
+import {extractTranscriptTurns, stripHarnessNoise} from './transcript-messages';
 
 export type MessageRole = 'assistant' | 'user';
 
@@ -82,6 +83,40 @@ export const DUPLICATE_PROMPT_WINDOW_MS = 5_000;
  * within five seconds of anything anyway.
  */
 export const TAIL_READ_BYTES = 1024 * 1024;
+
+/**
+ * A slash command with no arguments (`/copy`, `/loop-session`).
+ *
+ * K2 renders such an envelope as NOTHING in the transcript, so a backfilled log
+ * never contains it; capturing it live would make the two logs of one session
+ * disagree. With arguments it is Justin's brief (`/conductor <the brief>`) and
+ * is kept verbatim, exactly as K2 keeps it.
+ */
+const BARE_SLASH_COMMAND = /^\/\S+$/;
+
+/**
+ * A prompt's text as K2 would store it. '' means "nothing of his".
+ *
+ * Lives HERE, beside the log format, rather than in capture.ts: the live hook
+ * writes with it AND the backfill's carry rule compares with it
+ * (`carriedLiveLines`, home-base-k0b8n.18 D-18C), so the two sides of that
+ * comparison are one function.
+ */
+export function capturedUserText(prompt: string): string {
+  const trimmed = prompt.trim();
+  if (BARE_SLASH_COMMAND.test(trimmed)) return '';
+  return stripHarnessNoise(prompt);
+}
+
+/**
+ * A yield's text as K3's `assistantText` would store it: trimmed, and nothing
+ * else. NOT noise-stripped — Claude quoting `<system-reminder>` in a reply is
+ * Claude's words, and the backfill does not strip assistant text either, so
+ * stripping here would make a live line differ from its backfilled twin.
+ */
+export function capturedAssistantText(text: string): string {
+  return text.trim();
+}
 
 /** One line, keys in a fixed order so equal messages serialise identically. */
 export function serializeMessageLine(line: MessageLine): string {
@@ -336,7 +371,10 @@ export function appendMessageLine(
 // The backfill rewrite (K10 e)
 // ---------------------------------------------------------------------------
 
-/** The transcript's turns as log lines, in order: user then yield, per turn. */
+/**
+ * The transcript's turns as log lines, in file order: the user message, then
+ * every yield of that turn (one per Stop, home-base-k0b8n.18 D-18A).
+ */
 export function linesFromTurns(
   turns: readonly TranscriptTurn[],
 ): MessageLine[] {
@@ -351,13 +389,13 @@ export function linesFromTurns(
         text: turn.user.text,
       });
     }
-    if (turn.assistant != null) {
+    for (const yielded of turn.yields) {
       lines.push({
-        at: turn.assistant.at,
-        cwd: turn.assistant.cwd,
+        at: yielded.at,
+        cwd: yielded.cwd,
         event: 'backfill',
         role: 'assistant',
-        text: turn.assistant.text,
+        text: yielded.text,
       });
     }
   }
@@ -365,32 +403,101 @@ export function linesFromTurns(
 }
 
 /**
- * Live lines the transcript does not have yet, to keep after a rewrite.
+ * What makes two lines the SAME message, however each was written (D-18C):
+ * the role, and the text normalized by the function the live hook writes with
+ * (`capturedUserText` / `capturedAssistantText`), applied to BOTH sides.
  *
- * The transcript is AUTHORITATIVE up to its last record; a live line stamped
- * after that record is newer than anything the rewrite knows, and dropping it
- * would lose a message the hook already recorded (K10 e: "capture appends
- * after it"). A carried line whose text equals the transcript's last message of
- * the same role is the SAME message seen twice — the hook's clock and the
- * transcript's differ by milliseconds — and is not carried.
+ * MEASURED 2026-09-25, read-only: all 109 distinct texts the live capture ever
+ * recorded on a thread bead (105 `thread <id>: capture` commits in the threads
+ * repo, 11 sessions), and every live line in the 4 message logs that still held
+ * any (23 lines), are byte-for-byte equal to a transcript-derived line of the
+ * same role. So the normalization changes nothing measured today; it is there so a
+ * difference in trimming or harness-noise stripping between the two writers
+ * can never turn one message into two lines.
+ */
+function sameMessageKey(line: MessageLine): string {
+  const text =
+    line.role === 'user'
+      ? capturedUserText(line.text)
+      : capturedAssistantText(line.text);
+  return `${line.role}\u0000${text}`;
+}
+
+/**
+ * Live lines to keep after a rewrite: every one whose message the transcript
+ * does not have (home-base-k0b8n.18 D-18C).
+ *
+ * NEVER DROPPED FOR ITS TIMESTAMP ALONE. The old rule kept only live lines
+ * stamped after the transcript's last record, on the theory that the
+ * transcript already held everything older. It did not: a conductor's Stop
+ * yields between two human messages, and every message Justin queued mid-turn,
+ * were in the live log and nowhere in the transcript-derived lines, and one
+ * rewrite erased them (15 of 19 yields on session 5a3c3420). Now the only
+ * reason a live line goes is that the transcript has the same message
+ * (`sameMessageKey`), in which case it appears once, as the transcript's line.
+ *
+ * SET, NOT COUNT: a live "yes" is dropped when the transcript has any "yes".
+ * The transcript is authoritative and lags the live log by at most the turn in
+ * flight, so a repeat it does not have yet reaches the log on the next rewrite;
+ * counting copies instead would turn every hook that fired twice into a
+ * permanent duplicate.
  */
 export function carriedLiveLines(
   existing: readonly MessageLine[],
   fromTranscript: readonly MessageLine[],
-  transcriptLastTimestamp: string | null,
 ): MessageLine[] {
-  const lastText: Record<MessageRole, string | null> = {
-    assistant: null,
-    user: null,
-  };
-  for (const line of fromTranscript) lastText[line.role] = line.text;
-  return existing.filter((line) => {
-    if (line.event === 'backfill') return false;
-    if (line.at == null) return false;
-    if (transcriptLastTimestamp != null && line.at <= transcriptLastTimestamp)
-      return false;
-    return line.text !== lastText[line.role];
-  });
+  const known = new Set(fromTranscript.map(sameMessageKey));
+  return existing.filter(
+    (line) => line.event !== 'backfill' && !known.has(sameMessageKey(line)),
+  );
+}
+
+/** A line's `at` as epoch ms, or null when it has none or it does not parse. */
+function lineMs(line: MessageLine): number | null {
+  if (line.at == null) return null;
+  const ms = Date.parse(line.at);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * The rewritten log: the transcript's lines in FILE order, with each carried
+ * live line placed before the first transcript line stamped later than it
+ * (D-18C: "merged into the output in `at` order").
+ *
+ * The transcript's own order is never changed, even where its stamps are not
+ * monotonic — a queued prompt sits where Claude Code injected it but carries
+ * the moment Justin sent it, which can be before the text above it. A carried
+ * line with no usable `at` goes last rather than being dropped (rule 7: "no
+ * timestamp" is not "not a message").
+ */
+export function mergeCarriedLines(
+  fromTranscript: readonly MessageLine[],
+  carried: readonly MessageLine[],
+): MessageLine[] {
+  const timed = carried
+    .map((line) => ({line, ms: lineMs(line)}))
+    .filter(
+      (entry): entry is {line: MessageLine; ms: number} => entry.ms != null,
+    )
+    // Array.prototype.sort is stable, so equal stamps keep their log order.
+    .sort((a, b) => a.ms - b.ms);
+  const untimed = carried.filter((line) => lineMs(line) == null);
+  const out: MessageLine[] = [];
+  let next = 0;
+  for (const line of fromTranscript) {
+    const ms = lineMs(line);
+    if (ms != null) {
+      for (let entry = timed[next]; entry != null && entry.ms < ms; ) {
+        out.push(entry.line);
+        next += 1;
+        entry = timed[next];
+      }
+    }
+    out.push(line);
+  }
+  for (const entry of timed.slice(next)) out.push(entry.line);
+  out.push(...untimed);
+  return out;
 }
 
 /** Temp file + rename, so a reader never sees half a rewrite. */
@@ -437,7 +544,6 @@ export function syncMessageLogFromTurns(input: {
   const env = input.env ?? process.env;
   const path = messageLogPath(input.sessionId, env);
   const fromTranscript = linesFromTurns(input.extracted.turns);
-  const lastTimestamp = input.extracted.lastTimestamp;
   const existing = readMessageLogAt(path);
   if (existing.kind === 'failed') {
     // Rewriting a log we could not read would throw away live lines we cannot
@@ -447,9 +553,8 @@ export function syncMessageLogFromTurns(input: {
   const carried = carriedLiveLines(
     existing.kind === 'read' ? existing.lines : [],
     fromTranscript,
-    lastTimestamp,
   );
-  const lines = [...fromTranscript, ...carried];
+  const lines = mergeCarriedLines(fromTranscript, carried);
   const content = lines.map(serializeMessageLine).join('');
   let current: string | null = null;
   if (existing.kind === 'read') {

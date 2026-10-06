@@ -15,7 +15,11 @@
 import type {BdComment} from '../src/thread/bd';
 
 import {describe, expect, test} from 'bun:test';
+import {mkdtempSync, writeFileSync} from 'fs';
+import {tmpdir} from 'os';
+import {join} from 'path';
 
+import {PLAIN_STYLE} from '../src/cli-style';
 import {SKIP_COMMENT} from '../src/thread/answer';
 import {
   askStateOf,
@@ -24,9 +28,14 @@ import {
   noteFrom,
   renderInbox,
   renderInboxAsk,
+  runThreadInbox,
   stripAnswerPrefix,
 } from '../src/thread/inbox';
+import {PREDECESSOR_SESSION_ENV} from '../src/thread/predecessor';
+import {runThreadPrepare} from '../src/thread/prepare';
 import {restateAsk} from '../src/thread/render';
+import {OPEN_ASKS_GUIDANCE} from '../src/thread/schema';
+import {createFakeBd, type FakeState} from './fake-bd';
 
 function comment(text: string): BdComment {
   return {author: 'jhaa', created_at: '2026-09-12T10:00:00Z', text};
@@ -344,5 +353,166 @@ describe('renderInbox', () => {
     });
     expect(text).toContain('he has not answered or skipped anything');
     expect(text).toContain('(none — checked, and he left none)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-k0b8n.17 — the inbox's closing guidance is D24, never D4
+// ---------------------------------------------------------------------------
+
+/**
+ * The D24 wording, typed out LITERALLY rather than read from the constant: a
+ * test that only compared the inbox against `OPEN_ASKS_GUIDANCE` would stay
+ * green if the constant itself were put back to the D4 rule.
+ */
+const D24_HEADING =
+  'OPEN ASKS — each of these CLOSES automatically when you report (D24)';
+const D24_POLICY = [
+  'Unless you say otherwise, each is closed: "decided: <the default it recorded>".',
+  '· Justin ANSWERED it → priorAsks {disposition: "answered", detail: "<quote him>"}',
+  '· it stopped applying → priorAsks {disposition: "irrelevant", detail: "<why>"}',
+  '· it is STILL LIVE → write it again as a NEW ask with "supersedes": "<its id>" (the old one closes as superseded; asks are never edited in place)',
+];
+const RETIRED_D4 = 'must appear in the next report’s priorAsks';
+
+const K17_SESSION = 'sess-k17-uuid-0001';
+const K17_THREAD = 'jl-k17';
+
+/** Run `fn` with console.log captured; returns its exit code and stdout. */
+async function captureLog(
+  fn: () => Promise<number>,
+): Promise<{exitCode: number; stdout: string}> {
+  let stdout = '';
+  const realLog = console.log;
+  console.log = (...parts: unknown[]) => {
+    stdout += `${parts.map(String).join(' ')}\n`;
+  };
+  try {
+    return {exitCode: await fn(), stdout};
+  } finally {
+    console.log = realLog;
+  }
+}
+
+/** A fake threads workspace holding one thread with one open, untouched ask. */
+function k17Fixture(): {cwd: string; env: Record<string, string | undefined>} {
+  const fake = createFakeBd();
+  const state: FakeState = fake.read();
+  state.issues = [
+    {
+      description: 'GOAL: the arc',
+      id: K17_THREAD,
+      metadata: {askIds: [`${K17_THREAD}.1`], reportCount: 1},
+      notes: '',
+      parent: null,
+      status: 'in_progress',
+      title: 'the thread whose asks are open',
+      type: 'thread',
+    },
+    {
+      description: [
+        '[Approve Y/n] Keep the knob off?',
+        '',
+        'IF UNANSWERED: I keep it off.',
+        '',
+        `Thread: ${K17_THREAD}`,
+      ].join('\n'),
+      id: `${K17_THREAD}.1`,
+      metadata: {
+        askIndex: 0,
+        defaultAction: 'I keep it off.',
+        kind: 'approve',
+        priority: 3,
+        reportCount: 1,
+        threadId: K17_THREAD,
+      },
+      notes: '',
+      parent: K17_THREAD,
+      status: 'open',
+      title: 'Keep the knob off?',
+      type: 'ask',
+    },
+  ];
+  fake.write(state);
+  const cwd = mkdtempSync(join(tmpdir(), 'thread-k17-'));
+  // `prepare` is knob-gated; the fixture cwd turns the knob on, and the
+  // user-level config layer is pointed away so the machine's real one cannot
+  // decide it.
+  writeFileSync(
+    join(cwd, 'justin-sdk.config.json'),
+    JSON.stringify({componentConfig: {thread: {enabled: true}}}),
+  );
+  const env: Record<string, string | undefined> = {
+    ...fake.env,
+    JUSTIN_THREADS_REPO_DIR: fake.dir,
+    JUSTIN_THREADS_STATE_DIR: cwd,
+    NO_COLOR: '1',
+    XDG_CONFIG_HOME: join(cwd, 'xdg'),
+  };
+  // A justin-loop session running this suite must not hand prepare a
+  // predecessor of its own.
+  delete env[PREDECESSOR_SESSION_ENV];
+  return {cwd, env};
+}
+
+describe('the inbox closes with the D24 guidance, word for word with prepare (k0b8n.17)', () => {
+  test('renderInbox carries the D24 heading and policy, and never the retired D4 line', () => {
+    const text = renderInbox({
+      asks: [],
+      note: null,
+      threadId: 'jl-x',
+      threadTitle: 't',
+    });
+    expect(text).not.toContain(RETIRED_D4);
+    expect(text).not.toContain('(D4)');
+    expect(text).toContain(D24_HEADING);
+    for (const line of D24_POLICY) expect(text).toContain(line);
+    // It is the CLOSING guidance: nothing but the policy follows the heading.
+    const tail = text.slice(text.indexOf(D24_HEADING) + D24_HEADING.length);
+    expect(
+      tail
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== ''),
+    ).toEqual(D24_POLICY);
+  });
+
+  test('inbox and prepare take it from ONE constant, and it is the D24 text', () => {
+    expect(OPEN_ASKS_GUIDANCE.heading).toBe(D24_HEADING);
+    expect([...OPEN_ASKS_GUIDANCE.policy]).toEqual(D24_POLICY);
+  });
+
+  test('end to end: every guidance line `thread prepare` prints, `thread inbox` prints identically', async () => {
+    const f = k17Fixture();
+    const inbox = await captureLog(() =>
+      runThreadInbox({env: f.env, threadId: K17_THREAD}),
+    );
+    const prepare = await captureLog(() =>
+      runThreadPrepare({
+        continuesFrom: K17_THREAD,
+        cwd: f.cwd,
+        env: f.env,
+        sessionId: K17_SESSION,
+        style: PLAIN_STYLE,
+      }),
+    );
+    expect(inbox.exitCode).toBe(0);
+    expect(prepare.exitCode).toBe(0);
+    // Both surfaces were reached: prepare listed the continued thread's ask.
+    expect(prepare.stdout).toContain(`${K17_THREAD}.1`);
+    expect(inbox.stdout).toContain(`${K17_THREAD}.1`);
+
+    expect(prepare.stdout).toContain(D24_HEADING);
+    expect(inbox.stdout).toContain(D24_HEADING);
+    expect(inbox.stdout).not.toContain(RETIRED_D4);
+    // The policy lines byte for byte, indentation included — the same text
+    // at the same body column on both surfaces.
+    const printed = (stdout: string, line: string): string | undefined =>
+      stdout.split('\n').find((row) => row.trim() === line);
+    for (const line of D24_POLICY) {
+      const fromPrepare = printed(prepare.stdout, line);
+      expect(fromPrepare).toBeDefined();
+      expect(printed(inbox.stdout, line)).toBe(fromPrepare);
+    }
   });
 });

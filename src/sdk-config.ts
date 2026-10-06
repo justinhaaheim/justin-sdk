@@ -41,7 +41,6 @@ import {
   THREAD_DEFAULT_ENFORCE,
   THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
   THREAD_DEFAULT_ENFORCE_MODE,
-  THREAD_DEFAULT_START_ON_SESSION_START,
 } from './thread/defaults';
 import {TIME_CHECK_DEFAULTS} from './time-check';
 import {USAGE_CHECK_DEFAULTS} from './usage-check';
@@ -261,7 +260,7 @@ const componentConfigSchema = z
           .boolean()
           .optional()
           .describe(
-            'Whether the SessionStart hook installed by `justin-sdk add thread-hooks` may create this session’s thread bead before it has reported anything (home-base-p1uj.3). DEFAULT FALSE, and gated by `enabled` as well: BOTH must be true. Separate from `enabled` because this one turns every session start and every resume into a Dolt write, so it is the expensive half and must be armed deliberately.',
+            'DEPRECATED (2026-10-05, home-base-39co9 D2): it has NO EFFECT. It used to let a SessionStart hook create the session’s thread bead before anything happened in it; the bead is now created by `thread capture` on the session’s first prompt, and `thread start --hook` does nothing. Still accepted so configs that carry it keep parsing; delete it from your config when convenient.',
           ),
       })
       .optional()
@@ -549,7 +548,8 @@ export const DEFAULT_COMPONENT_CONFIG = {
     enforceMode: THREAD_DEFAULT_ENFORCE_MODE,
     render: {emojiHeader: THREAD_DEFAULT_EMOJI_HEADER},
     repoDir: '~/Dev/threads',
-    startOnSessionStart: THREAD_DEFAULT_START_ON_SESSION_START,
+    // No `startOnSessionStart`: deprecated, no effect, so no default to print
+    // (home-base-39co9 D2).
   },
   'time-check': {
     enabled: TIME_CHECK_DEFAULTS.enabled,

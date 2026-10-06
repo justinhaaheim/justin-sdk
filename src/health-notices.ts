@@ -188,11 +188,15 @@ export const SELECT_COMMANDS = [
  *    document Claude pastes verbatim into its final message, and `usage-now`
  *    prints one number. All three run at a session's wrap-up, which is the
  *    worst possible moment to spend attention on an upgrade notice.
+ *  - `forensics` is read by AGENTS, not by a person (home-base-wxa4c D-W2):
+ *    conductor and investigator sessions consume its output as evidence (one
+ *    `forensics repo` run is ~500 KB of it), the same class as `thread`.
  *
  * `--help` needs no entry: yargs resolves help BEFORE middleware runs
  * (measured 2026-09-10), so a notice can never reach it.
  */
 export const NEVER_COMMANDS = [
+  'forensics',
   'justin-loop handoff',
   'prime',
   'session-start',
@@ -219,6 +223,7 @@ export const ALL_COMMANDS = [
   'doctor',
   'eas-update',
   'fix',
+  'forensics',
   'init',
   'install',
   'justin-loop',

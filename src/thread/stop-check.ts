@@ -91,7 +91,7 @@ import {
 } from './archive';
 import {resolveThreadConfig} from './config';
 import {THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES} from './defaults';
-import {findTranscript, scanTranscriptForThread} from './facts';
+import {findTranscript} from './facts';
 import {
   forEachTranscriptLine,
   substantiveUserText,
@@ -372,46 +372,6 @@ export interface StopCheckRunResult {
 }
 
 /**
- * Measure the last user message's timestamp for this session.
- *
- * Prefers the payload's `transcript_path` and falls back to the by-session-id
- * search, which is what `facts.ts` exists for — a transcript follows its session
- * into a worktree, so the path in the payload is the cheap answer and the search
- * is the correct one.
- *
- * Null means UNKNOWN in every failing case, and the caller passes on it.
- */
-function measureLastUserMessageAt(
-  sessionId: string,
-  transcriptPath: string | null,
-  env: EnvLike,
-): {at: number | null; error: string | null} {
-  let path = transcriptPath;
-  if (path == null || path === '') {
-    const lookup = findTranscript(sessionId, env);
-    if (lookup.status !== 'found') {
-      return {
-        at: null,
-        error:
-          lookup.status === 'failed'
-            ? lookup.error
-            : `no transcript for ${sessionId} under ${lookup.searched}`,
-      };
-    }
-    path = lookup.path;
-  }
-  try {
-    const at = epochMs(scanTranscriptForThread(path).lastUserMessageAt);
-    return {at, error: at == null ? `no user message in ${path}` : null};
-  } catch (error) {
-    return {
-      at: null,
-      error: `read ${path}: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
-}
-
-/**
  * A Bash command that RUNS `git commit` — `git commit -m …`, `cd x && git
  * commit`, `git -C dir commit` — but not `git commit-tree` or `git log --grep
  * commit` (K12). A quoted `"git commit"` inside an echo also matches; that
@@ -440,9 +400,22 @@ function commitsIn(record: {message?: {content?: unknown}}): number {
 }
 
 /**
- * Justin's last message AND what the turn since it did, in ONE forward pass
- * (K12). "Last message" is `substantiveUserText`'s definition — the same one
- * `scanTranscriptForThread` uses — so the two modes agree on when a turn began.
+ * Justin's last TYPED message AND what the turn since it did, in ONE forward
+ * pass (K12). This is stop-check's ONLY measurement of "his last message":
+ * `reportShaped` and `workTurns` both read `at` from here, so the two modes
+ * cannot disagree on when a turn began (home-base-k0b8n.21).
+ *
+ * RULE (a), k0b8n.21: a message he QUEUED while Claude worked (a
+ * `queued_command` attachment, `queuedPromptText`) does NOT start a new turn.
+ * It joins the turn already running, which began at his last typed message —
+ * a user record that `substantiveUserText` keeps — and runs to the Stop. So
+ * attachments are deliberately not read here: a queued message neither moves
+ * `at` nor resets the commit count. The report's facts are a different
+ * question and DO count the queued message (`extractTranscriptMessages`,
+ * D-18B); only this turn boundary ignores it. Before k0b8n.21, reportShaped
+ * read the facts' timestamp instead, so a report archived before a later
+ * queued message was refused as "not recorded".
+ *
  * The transcript lags the in-memory turn by at most the final message, which
  * carries no tool call, so the commit count is complete.
  */
@@ -488,9 +461,16 @@ export function measureTurnInTranscript(
 }
 
 /**
- * `workTurns`' measurement (K12): the same transcript resolution as
- * `measureLastUserMessageAt`, then ONE pass for both facts. Every failure is
- * `{at: null, turn: null}` with the reason, which passes.
+ * Both modes' measurement (K12, k0b8n.21): find the transcript, then ONE pass
+ * of `measureTurnInTranscript` for his last typed message and the turn since.
+ *
+ * Prefers the payload's `transcript_path` and falls back to the by-session-id
+ * search, which is what `facts.ts` exists for — a transcript follows its session
+ * into a worktree, so the path in the payload is the cheap answer and the search
+ * is the correct one.
+ *
+ * Every failure is `{at: null, turn: null}` with the reason: UNKNOWN, which
+ * the caller passes on.
  */
 function measureTurn(
   sessionId: string,
@@ -747,15 +727,18 @@ export function runThreadStopCheck(args?: {
     const id = sessionId!;
     const turnKey = input.prompt_id ?? null;
 
-    // reportShaped keeps its measurement exactly; workTurns needs the turn's
-    // commits too, and gets both from ONE pass.
+    // ONE measurement of his last typed message for both modes (k0b8n.21).
+    // reportShaped decides on that timestamp alone, so its turn stays
+    // unmeasured: `decideStopCheck` never reads it there, and its decision log
+    // line keeps `turnCommits: null` as before.
+    const measuredTurn = measureTurn(
+      id,
+      input.transcript_path ?? null,
+      env,
+      nowMs,
+    );
     const measured =
-      mode === 'workTurns'
-        ? measureTurn(id, input.transcript_path ?? null, env, nowMs)
-        : {
-            ...measureLastUserMessageAt(id, input.transcript_path ?? null, env),
-            turn: null,
-          };
+      mode === 'workTurns' ? measuredTurn : {...measuredTurn, turn: null};
     logged.turnCommits = measured.turn?.commits ?? null;
     logged.turnMinutes =
       measured.turn == null

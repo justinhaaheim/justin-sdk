@@ -55,6 +55,7 @@ import {
 } from 'node:fs';
 import {homedir, tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {gateSpend} from './spend-gate';
 
 import {parseHandoff} from '../src/justin-loop/handoff';
 import {getPinnedToolVersion} from '../src/setup-helpers';
@@ -198,6 +199,8 @@ const USAGE = `bun run e2e:justin-loop [options]
                        this on measures the absence of a FALSE positive: no
                        handoff-settled outcome in the ledger.
   --keep               Keep the fixture directory even when everything passes
+  --spend-real-tokens  REQUIRED to run (not for --replay): this starts real
+                       Claude Code sessions and spends tokens on your account.
   --help`;
 
 function fatal(message: string): never {
@@ -1290,7 +1293,14 @@ async function runScenario(
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<number> {
-  const opts = parseArgs(process.argv.slice(2));
+  const opts = parseArgs(
+    gateSpend(process.argv.slice(2), {
+      exempt: (argv) => argv.some((arg) => arg.startsWith('--replay')),
+      script: 'bun run e2e:justin-loop',
+      spends:
+        'several real background sessions per scenario (scenarios a and b by default), on haiku unless --model says otherwise; --replay spawns nothing and needs no flag',
+    }),
+  );
 
   if (opts.replayDir != null) {
     // Assertions only, over a recording. This is the negative-control harness:

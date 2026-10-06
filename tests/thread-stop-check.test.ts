@@ -16,18 +16,32 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {chmodSync, mkdirSync, readdirSync, writeFileSync} from 'fs';
+import {
+  chmodSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  utimesSync,
+  writeFileSync,
+} from 'fs';
 import {join} from 'path';
 
-import {newestArchivedReportAt} from '../src/thread/archive';
+import {
+  newestArchivedReportAt,
+  reportsDir,
+  stopCheckLogPath,
+} from '../src/thread/archive';
+import {collectThreadFacts} from '../src/thread/facts';
 import {
   decideStopCheck,
   describeStopCheck,
   epochMs,
   looksLikeStatusReport,
+  measureTurnInTranscript,
   runThreadStopCheck,
   STOP_CHECK_BLOCK_REASON,
   type StopCheckInputs,
+  type StopCheckRunResult,
   type StopCheckWhy,
 } from '../src/thread/stop-check';
 import {createProjectSandbox, createSandbox, type Sandbox} from './sandbox';
@@ -583,4 +597,214 @@ describe('runThreadStopCheck', () => {
     );
     expect(run.value.elapsedMs).toBeLessThan(500);
   });
+});
+
+// ---------------------------------------------------------------------------
+// A message Justin queued mid-turn (home-base-k0b8n.21, rule a)
+// ---------------------------------------------------------------------------
+
+/**
+ * RULE (a): for stop-check, a queued mid-turn message does NOT start a new
+ * turn. It joins the turn already running, which began at his last TYPED
+ * message. The report's facts are a different question and keep the queued
+ * message as "your last message".
+ *
+ * The transcript: he types at 10:00, Claude commits at 10:02, a report is
+ * archived at 10:03, he queues a message at 10:04 (a `queued_command`
+ * attachment, never a user record), Claude yields at 10:05, the Stop fires at
+ * 10:06. Both modes must measure the turn from 10:00.
+ *
+ * NEGATIVE CONTROLS (run, recorded on home-base-k0b8n.21's notes): on the code
+ * before this fix, reportShaped measured his last message at the queued 10:04,
+ * so the 10:03 report did not count and the turn was blocked with "This report
+ * was not recorded". Making `measureTurnInTranscript` open a turn at a queued
+ * prompt (rule b) turns the workTurns rows red on turnMinutes and on the
+ * commit count.
+ */
+const TYPED_AT = '2026-09-14T10:00:00.000Z';
+const QUEUED_AT = '2026-09-14T10:04:00.000Z';
+const QUEUED_TEXT = 'Also mention the flaky test in the report.';
+const STOP_AT = new Date('2026-09-14T10:06:00.000Z');
+
+type QueuedMode = 'reportShaped' | 'workTurns';
+
+function queuedTurnSandbox(mode: QueuedMode): {
+  env: Record<string, string | undefined>;
+  project: Sandbox;
+  transcriptPath: string;
+} {
+  const project = track(createProjectSandbox());
+  const state = track(createSandbox());
+  const xdg = track(createSandbox());
+  mkdirSync(join(xdg.path, 'justin-sdk'), {recursive: true});
+  writeFileSync(
+    join(xdg.path, 'justin-sdk', 'config.json'),
+    `${JSON.stringify({componentConfig: {thread: {enforce: true, enforceMode: mode}}}, null, 2)}\n`,
+  );
+  const transcripts = track(createSandbox());
+  const projectDir = join(transcripts.path, '-tmp-queued');
+  mkdirSync(projectDir, {recursive: true});
+  const transcriptPath = join(projectDir, `${SESSION_ID}.jsonl`);
+  const records: Record<string, unknown>[] = [
+    {
+      message: {content: 'fix the flaky test and commit', role: 'user'},
+      timestamp: TYPED_AT,
+      type: 'user',
+    },
+    {
+      message: {
+        content: [
+          {
+            id: 't1',
+            input: {command: "git commit -m 'fix'"},
+            name: 'Bash',
+            type: 'tool_use',
+          },
+        ],
+        role: 'assistant',
+      },
+      timestamp: '2026-09-14T10:02:00.000Z',
+      type: 'assistant',
+    },
+    {
+      message: {
+        content: [{content: 'ok', tool_use_id: 't1', type: 'tool_result'}],
+        role: 'user',
+      },
+      timestamp: '2026-09-14T10:02:01.000Z',
+      toolUseResult: {stdout: 'ok'},
+      type: 'user',
+    },
+    // Sent while Claude worked: the harness writes an attachment, not a user
+    // record (home-base-k0b8n.18 D-18B).
+    {
+      attachment: {
+        commandMode: 'prompt',
+        prompt: QUEUED_TEXT,
+        timestamp: QUEUED_AT,
+        type: 'queued_command',
+      },
+      timestamp: QUEUED_AT,
+      type: 'attachment',
+    },
+    {
+      message: {
+        content: [{text: REPORT_TEXT, type: 'text'}],
+        role: 'assistant',
+      },
+      timestamp: '2026-09-14T10:05:00.000Z',
+      type: 'assistant',
+    },
+  ];
+  writeFileSync(
+    transcriptPath,
+    records.map((value) => `${JSON.stringify(value)}\n`).join(''),
+  );
+  return {
+    env: {
+      HOME: project.path,
+      JUSTIN_THREADS_STATE_DIR: state.path,
+      JUSTIN_THREADS_TRANSCRIPTS_ROOT: transcripts.path,
+      XDG_CONFIG_HOME: xdg.path,
+    },
+    project,
+    transcriptPath,
+  };
+}
+
+/** Archive one report for the session, with its mtime pinned to `at`. */
+function archiveReportAt(
+  env: Record<string, string | undefined>,
+  at: string,
+): void {
+  const dir = reportsDir(SESSION_ID, env);
+  mkdirSync(dir, {recursive: true});
+  const file = join(dir, 'report.json');
+  writeFileSync(file, '{}\n');
+  const when = new Date(at);
+  utimesSync(file, when, when);
+}
+
+function runQueuedStop(
+  mode: QueuedMode,
+  fixture: ReturnType<typeof queuedTurnSandbox>,
+): {captured: Captured; value: StopCheckRunResult} {
+  return capture(() =>
+    runThreadStopCheck({
+      env: fixture.env,
+      now: STOP_AT,
+      stdin: JSON.stringify({
+        cwd: fixture.project.path,
+        hook_event_name: 'Stop',
+        // reportShaped only looks at a report; workTurns is exercised on prose.
+        last_assistant_message:
+          mode === 'reportShaped' ? REPORT_TEXT : 'Done: fixed and committed.',
+        prompt_id: 'c0ffee00-1111-2222-3333-444444444444',
+        session_id: SESSION_ID,
+        transcript_path: fixture.transcriptPath,
+      }),
+    }),
+  );
+}
+
+describe('a queued mid-turn message does not start a new turn for stop-check (k0b8n.21)', () => {
+  test('measureTurnInTranscript: the turn starts at his last TYPED message, and the queued one does not reset it', () => {
+    const fixture = queuedTurnSandbox('workTurns');
+    expect(
+      measureTurnInTranscript(fixture.transcriptPath, STOP_AT.getTime()),
+    ).toEqual({at: Date.parse(TYPED_AT), turn: {commits: 1, minutes: 6}});
+  });
+
+  test('the report facts still carry the queued message as his last message', () => {
+    const fixture = queuedTurnSandbox('reportShaped');
+    const facts = collectThreadFacts({
+      cwd: fixture.project.path,
+      env: fixture.env,
+      now: STOP_AT,
+      sessionId: SESSION_ID,
+      transcriptPath: fixture.transcriptPath,
+    });
+    expect(facts.lastUserMessage).toBe(QUEUED_TEXT);
+    expect(facts.lastUserMessageAt).toBe(QUEUED_AT);
+  });
+
+  for (const mode of ['reportShaped', 'workTurns'] as const) {
+    test(`${mode}: a report archived after his typed message and before the queued one satisfies the turn, silently`, () => {
+      const fixture = queuedTurnSandbox(mode);
+      archiveReportAt(fixture.env, '2026-09-14T10:03:00.000Z');
+      const run = runQueuedStop(mode, fixture);
+      expect(run.value.decision.why).toBe('archiveNewer');
+      expect(run.value.exitCode).toBe(0);
+      // A report WAS recorded this turn, so nothing may say it was not.
+      expect(run.captured.out).toBe('');
+      expect(run.captured.err).not.toContain('not recorded');
+      expect(run.captured.err).not.toContain('no report was recorded');
+    });
+
+    test(`${mode}: control — a report archived before his typed message does not count, and the turn is refused`, () => {
+      const fixture = queuedTurnSandbox(mode);
+      archiveReportAt(fixture.env, '2026-09-14T09:59:00.000Z');
+      const run = runQueuedStop(mode, fixture);
+      expect(run.value.exitCode).toBe(2);
+      expect(run.value.decision.why).toBe(
+        mode === 'reportShaped' ? 'notRecorded' : 'workTurnCommitted',
+      );
+      if (mode === 'workTurns') {
+        // Measured from 10:00, the typed message: the 10:02 commit is in the
+        // turn and the turn is 6 minutes long, not 2.
+        const logged = readFileSync(stopCheckLogPath(fixture.env), 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(logged).toMatchObject([
+          {
+            action: 'block',
+            turnCommits: 1,
+            turnMinutes: 6,
+            why: 'workTurnCommitted',
+          },
+        ]);
+      }
+    });
+  }
 });

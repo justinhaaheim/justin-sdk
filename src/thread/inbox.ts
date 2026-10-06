@@ -58,6 +58,7 @@ import {
 } from './render';
 import {layRestatedAsk, priorityStyles} from './render-ansi';
 import {contextFor, resolveThread, type ThreadRef} from './resolve';
+import {OPEN_ASKS_GUIDANCE} from './schema';
 
 export type AskState = 'answered' | 'skipped' | 'unanswered';
 
@@ -260,10 +261,13 @@ export function renderInbox(
     note,
     sectionHeader('STILL WAITING ON HIM', {color, emoji: '🙋'}),
     ...stillWaiting,
-    wrapHanging(
-      'These are still OPEN asks: every one of them must appear in the next report’s priorAsks (D4).',
-      {hang: HEADER_COLUMN, indent: HEADER_COLUMN, width},
-    ),
+    // What the next report does with every ask above (D24), word for word what
+    // `thread prepare` prints above them (home-base-k0b8n.17). This line used to
+    // say every open ask "must appear in the next report’s priorAsks (D4)" — the
+    // rule D24 retired, told to a session at the start of the very turn it reads
+    // Justin's answers.
+    sectionHeader(OPEN_ASKS_GUIDANCE.heading, {color, emoji: '📌'}),
+    ...OPEN_ASKS_GUIDANCE.policy.map((line) => body(line)),
   ]);
 }
 

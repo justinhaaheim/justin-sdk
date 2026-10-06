@@ -7,9 +7,18 @@
  * that ran out of context, crashed, or were abandoned half way — were exactly
  * the ones that appeared nowhere (Justin, 2026-09-12: "that session isn't in
  * danger of sort of being ignored because it didn't get to the status report
- * kind of final step"). Creating the bead at session start makes the board's
+ * kind of final step"). Creating the bead before the report makes the board's
  * silence mean "no session", instead of "no session that finished politely".
  * That is rule 6 applied to the board itself.
+ *
+ * WHO CALLS IT (home-base-39co9 D1, 2026-10-05). The bead is created on the
+ * session's FIRST PROMPT, by `thread capture`'s detached child, which reuses
+ * `startThreadFields` + `createStartThread` below. Nothing creates it at
+ * SessionStart any more — Justin: "Otherwise any session I open creates a
+ * thread … what really matters is when I have sent a message". So a session
+ * that is opened and never prompted leaves no thread. The hand-run command is
+ * kept for a human who wants a session on the board before its first prompt
+ * is captured (or in a repo where capture is opted out).
  *
  * IT IS AN UPSERT'S FIRST HALF, NOT A SECOND WRITER. The bead is keyed on
  * `metadata.sessionId` exactly as `thread report` keys its upsert (D1), so the
@@ -17,16 +26,15 @@
  * than creating a second. `buildStartMetadata` writes the same key set with
  * explicit nulls precisely so that rewrite is a clean overwrite.
  *
- * TWO KNOBS, BOTH REQUIRED: `componentConfig.thread.enabled` AND
- * `componentConfig.thread.startOnSessionStart`, both default false (D6, and see
- * config.ts for why they are separate). With either off this command creates
- * nothing and says so in one line — and in hook mode says nothing at all.
+ * ONE KNOB: `componentConfig.thread.enabled` (D6). The old second knob,
+ * `startOnSessionStart`, is DEPRECATED (home-base-39co9 D2): configs carrying
+ * it still parse, and it gates nothing.
  *
- * THE HOOK MAY NEVER BLOCK A SESSION. `runThreadStartHook` always resolves 0,
- * never throws, and writes nothing to stdout except — on the one path where a
- * bead was actually created — a single short line. Its stdout becomes model
- * context, so every diagnostic goes to stderr, where `claude --debug` and a
- * hand-run payload can still see it.
+ * `--hook` IS INERT (home-base-39co9 D3). Repos installed before 2026-10-05
+ * carry a SessionStart entry running `thread start --hook`; the behaviour has
+ * to change with the SDK pin bump alone, before any installer re-runs there, so
+ * that form exits 0 at once — no payload read, no knob read, no bd call, no
+ * output. See `runThreadStartHook`.
  */
 
 import type {WriteResult} from './archive';
@@ -39,11 +47,11 @@ import {basename} from 'path';
 
 import {SDK_RUN, sdkRun} from '../sdk-invocation';
 import {recordStartFailure} from './archive';
+import {backfillOwnership} from './backfill-ownership';
 import {
   bdContext,
   createThread,
   describeBdFailure,
-  EXPORT_UNSTAGED_WARNING,
   findThreadBySession,
   setThreadInProgress,
   updateThread,
@@ -88,7 +96,11 @@ export type ThreadStartOutcome =
   | {failure: BdFailure; kind: 'bdFailed'; record: WriteResult | null};
 
 export interface ThreadStartOptions {
-  /** Present only for a subagent's tool call — see runThreadStartHook. */
+  /**
+   * A hook payload's `agent_id`, present only for a subagent's tool call. No
+   * caller passes it since the SessionStart hook went inert (home-base-39co9
+   * D3); the guard stays so a hook-driven caller cannot forget it.
+   */
   agentId?: string | null;
   /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
   autoCommit?: boolean;
@@ -128,10 +140,10 @@ function startDescription(facts: ThreadFacts, startedAt: string): string {
     `branch     ${facts.branch ?? 'UNKNOWN'}`,
     `cwd        ${facts.cwd}`,
     '',
-    'Created at session start by the justin-sdk SessionStart hook so that a',
-    'session which never reaches its status report is still on the board. The',
-    `first \`${SDK_RUN} thread report\` for this session rewrites this bead in`,
-    'place — it does not create a second one.',
+    'Created by justin-sdk when this session’s first prompt was captured (or by',
+    'a hand-run `thread start`) so that a session which never reaches its status',
+    `report is still on the board. The first \`${SDK_RUN} thread report\` for`,
+    'this session rewrites this bead in place — it does not create a second one.',
   ].join('\n');
 }
 
@@ -139,7 +151,7 @@ function startNotes(facts: ThreadFacts, startedAt: string): string {
   return [
     'NO REPORT YET.',
     '',
-    `This thread bead was created at session start (${startedAt}). Everything a`,
+    `This thread bead was created before any report (${startedAt}). Everything a`,
     'status report would say — goal, what was done, stop reason, progress, asks —',
     'is still unknown, and is recorded as null rather than as a zero or an empty',
     'list.',
@@ -157,11 +169,10 @@ function startNotes(facts: ThreadFacts, startedAt: string): string {
  * The fields a brand-new session's thread bead is created with — the
  * placeholder title, the "NO REPORT YET" body and the start metadata.
  *
- * Exported for `thread capture` (home-base-k0b8n.9, K10 c), which creates a
- * session's bead when capture sees it first — in a repo where
- * `startOnSessionStart` is off, or a session that began before the hooks were
- * installed. ONE definition of what a fresh thread bead looks like, so the
- * first report finds the same bead shape whichever hook made it.
+ * Exported for `thread capture` (home-base-k0b8n.9, K10 c), which creates every
+ * session's bead on its first captured prompt (home-base-39co9 D1). ONE
+ * definition of what a fresh thread bead looks like, so the first report finds
+ * the same bead shape whether capture or a hand-run `thread start` made it.
  */
 export function startThreadFields(input: {
   facts: ThreadFacts;
@@ -242,19 +253,21 @@ export async function startThread(
   // B). The subagent skip above stays: that one is measured, and it prevents a
   // player from creating its conductor's bead.
 
-  // 2. KNOBS. Read before anything that costs a subprocess or a write probe.
+  // 2. THE KNOB. Read before anything that costs a subprocess or a write probe.
+  // `enabled` alone (home-base-39co9 D2): `startOnSessionStart` is deprecated
+  // and is deliberately not consulted — a config still carrying it must not
+  // change what a hand-run start does.
   const {resolveThreadConfig} = await import('./config');
   const config = resolveThreadConfig({cwd, env});
-  if (!config.enabled || !config.startOnSessionStart) {
-    const off = !config.enabled
-      ? `componentConfig.thread.enabled is not true (resolved from: ${config.source})`
-      : `componentConfig.thread.startOnSessionStart is not true (resolved from: ${config.startSource})`;
-    return {kind: 'disabled', reason: off};
+  if (!config.enabled) {
+    return {
+      kind: 'disabled',
+      reason: `componentConfig.thread.enabled is not true (resolved from: ${config.source})`,
+    };
   }
 
-  // 3. FACTS. `transcriptPath` comes from the hook payload when there is one,
-  // which skips scanning every directory under ~/.claude/projects for a file
-  // that, at `source: startup`, does not exist yet anyway.
+  // 3. FACTS. `transcriptPath` comes from `--transcript` when the caller knows
+  // it, which skips scanning every directory under ~/.claude/projects.
   const facts = collectThreadFacts({
     cwd,
     env,
@@ -297,8 +310,8 @@ export async function startThread(
 
   const ctx = bdContext(env);
 
-  // 5. IDEMPOTENCY. A resume fires SessionStart again with the same session id,
-  // and `thread report` may already have created the bead, so the lookup is the
+  // 5. IDEMPOTENCY. `thread capture` or `thread report` may already have created
+  // the bead, and a human may run this twice, so the lookup is the
   // load-bearing half of "run me as often as you like". A FAILED lookup is not
   // "there is none": returning bdFailed here is what stops a locked database
   // from producing a second thread bead for a session that already has one.
@@ -315,16 +328,26 @@ export async function startThread(
     };
   }
   if (existing.value != null) {
-    const existingMeta = (existing.value.metadata ?? {}) as {source?: unknown};
-    const isBackfill = existingMeta.source === 'backfill';
     // ADOPT A BACKFILLED BEAD RATHER THAN LEAVING IT (k0b8n.3, K5). `thread
     // backfill` makes an OPEN bead with `source: 'backfill'` for a session that
     // ended without reporting; the board hides those. When that same session is
-    // resumed, this hook fires again — and returning `existing` here would leave
+    // started by hand later, returning `existing` here would leave
     // a session that is demonstrably running hidden from the board, which is the
     // exact failure `thread start` exists to prevent. A CLOSED bead is never
     // adopted: Justin closed it, and `updateThread` would resurrect it.
-    if (!isBackfill || existing.value.status === 'closed') {
+    //
+    // ONLY A BEAD BACKFILL PROVABLY OWNS (k0b8n.19 D-A, D-D). Adoption rewrites
+    // the description, the notes and the whole metadata document (reportCount
+    // back to 0, reportedAt to null). This used to fire on `source ===
+    // 'backfill'` alone, the same flaw that let `thread backfill` erase three
+    // reports on 2026-09-25 — and those three threads were `in_progress`, so a
+    // resume of any of them would have erased its report here too. A bead
+    // labelled backfill that carries a report, or whose fields cannot be read,
+    // is a real session's bead and is returned as `existing`, untouched.
+    if (
+      backfillOwnership(existing.value).kind !== 'owned' ||
+      existing.value.status === 'closed'
+    ) {
       return {
         kind: 'existing',
         status: existing.value.status ?? null,
@@ -338,7 +361,7 @@ export async function startThread(
   const adopting = existing.value;
   // THE BACKFILLED TITLE SURVIVES. It is the first line of what Justin actually
   // said, which is strictly more useful than "(untitled) home-base session
-  // 5a3c3420" — and the placeholder exists only because at session start there
+  // 5a3c3420" — and the placeholder exists only because before a report there
   // is usually nothing better. Everything else in the body IS rewritten, so the
   // bead stops claiming "backfilled — this session never reported" about a
   // session that is running right now.
@@ -471,87 +494,23 @@ export async function runThreadStart(
 }
 
 /**
- * The SessionStart hook payload, as Claude Code writes it on stdin.
+ * `justin-sdk thread start --hook`: the RETIRED SessionStart entry point. INERT.
  *
- * `source` is SessionStart-only (startup | resume | clear | compact) and is not
- * branched on here: the installed matcher already restricts the hook to startup
- * and resume, and for the other two the session id is unchanged, so this command
- * is a no-op anyway. It is read purely so the stderr diagnostics can name it.
+ * Every repo installed before 2026-10-05 carries a SessionStart entry running
+ * this, and the installer only takes it out on a re-apply (home-base-39co9 D3).
+ * So the change of behaviour has to arrive with the SDK pin bump alone: this
+ * returns 0 at once, and does NOTHING else — it reads no payload, consults no
+ * knob, makes no bd call, writes no file and prints nothing. A thread bead is
+ * created on the session's first prompt instead, by `thread capture` (D1).
+ *
+ * NOT reading stdin is deliberate. The payload is a few hundred bytes, which
+ * fits the pipe buffer, so Claude Code's write completes whether or not anyone
+ * reads it; parsing it would only buy a way to fail.
+ *
+ * Kept as a command rather than deleted: an unknown `--hook` flag or a missing
+ * `start` subcommand would make the retired entry exit non-zero at the top of
+ * every session in every repo that still carries it.
  */
-interface SessionStartHookInput {
-  agent_id?: string;
-  agent_type?: string;
-  cwd?: string;
-  hook_event_name?: string;
-  session_id?: string;
-  source?: string;
-  transcript_path?: string;
-}
-
-/**
- * `justin-sdk thread start --hook`: the SessionStart entry point.
- *
- * ALWAYS RESOLVES 0, from every path including a thrown one. A SessionStart hook
- * that fails can take the session with it, and no status-reporting convenience
- * is worth that.
- *
- * STDOUT IS MODEL CONTEXT. Exactly one path writes to it — a bead was created,
- * one short line naming its id, because the session genuinely needs to know the
- * id it will report to. Everything else (disabled, skipped, denied, failed, and
- * even "the thread already existed") goes to stderr or nowhere: a line printed
- * at the top of every session in every repo is a line Justin stops reading.
- *
- * The payload's `session_id`, `transcript_path` and `cwd` are PREFERRED over the
- * environment. Inside the hook process the env may describe a different session
- * than the one starting, and the payload is authoritative by construction.
- */
-export async function runThreadStartHook(args?: {
-  /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
-  autoCommit?: boolean;
-  now?: Date;
-  stdin?: string;
-}): Promise<number> {
-  let input: SessionStartHookInput = {};
-  try {
-    const {readFileSync} = await import('fs');
-    const raw = args?.stdin ?? readFileSync(0, 'utf8');
-    input = raw.trim() === '' ? {} : (JSON.parse(raw) as SessionStartHookInput);
-  } catch {
-    // An unreadable or malformed payload is not worth a word: there is nothing
-    // actionable to say and nowhere useful to say it at session start.
-    return 0;
-  }
-
-  try {
-    const outcome = await startThread({
-      agentId: input.agent_id ?? null,
-      autoCommit: args?.autoCommit,
-      cwd: input.cwd,
-      now: args?.now,
-      sessionId: input.session_id ?? null,
-      transcriptPath: input.transcript_path ?? null,
-    });
-
-    if (outcome.kind === 'created') {
-      console.log(describeStartOutcome(outcome));
-      if (outcome.exportUnstaged) console.error(EXPORT_UNSTAGED_WARNING);
-      const commitLine = describeCommit(outcome.commit, 'the threads repo');
-      if (commitLine != null) console.error(commitLine);
-      return 0;
-    }
-    // Everything below is stderr-only. `disabled` and `skippedSubagent` are the
-    // overwhelmingly common cases and say nothing at all — they are normal.
-    if (outcome.kind === 'disabled' || outcome.kind === 'skippedSubagent') {
-      return 0;
-    }
-    console.error(
-      `[thread start] ${describeStartOutcome(outcome)}${input.source == null ? '' : ` (source=${input.source})`}`,
-    );
-    return 0;
-  } catch (error) {
-    console.error(
-      `[thread start] unexpected failure, session not started: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return 0;
-  }
+export function runThreadStartHook(): number {
+  return 0;
 }

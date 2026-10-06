@@ -23,7 +23,7 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {execFileSync} from 'child_process';
+import {execFileSync, spawnSync} from 'child_process';
 import {chmodSync, existsSync, rmSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
@@ -430,5 +430,82 @@ describe('what the hidden set holds', () => {
     // No sentence in the output may spend that as a "none".
     expect(out).not.toContain('none of the');
     expect(out).not.toContain('more hidden');
+  });
+});
+
+/**
+ * The window flags have to survive the PARSER, not just `buildReport`
+ * (home-base-6i5jz). `--all` used to declare `default: false`, and a yargs
+ * default lands in argv exactly like a typed flag, so
+ * `.conflicts('all', 'since-days')` fired on every `--since-days` run and
+ * printed the help screen instead of the ledger. Every test above drives
+ * `buildReport` directly and could not see that. These drive the shipped CLI in
+ * a subprocess: in-process, a yargs validation failure calls `process.exit`,
+ * and the handler sets `process.exitCode`.
+ *
+ * `--no-prs` keeps each run hermetic (no `gh` spawn). It has nothing to do with
+ * the window flags.
+ */
+const CLI = join(import.meta.dir, '../src/repo-status/repo-status.ts');
+
+function runStatus(
+  args: string[],
+  cwd: string,
+): {err: string; out: string; status: number | null} {
+  const result = spawnSync('bun', [CLI, 'status', '--no-prs', ...args], {
+    cwd,
+    encoding: 'utf-8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return {err: result.stderr, out: result.stdout, status: result.status};
+}
+
+describe('the status CLI parses the window flags', () => {
+  test('--since-days alone prints the ledger for the current directory', () => {
+    const repo = buildFixture(track(createSandbox()));
+    const run = runStatus(['--since-days', '30'], repo);
+
+    expect(run.err).not.toContain('mutually exclusive');
+    expect(run.status).toBe(0);
+    expect(run.out).toContain('recent-work');
+    // 30 is not the default (90), so this line proves the flag's value reached
+    // the handler rather than merely being accepted by the parser.
+    expect(run.out).toContain('no commit in the last 30 days');
+  });
+
+  test('--since-days with --repo prints the ledger for the named repo', () => {
+    const repo = buildFixture(track(createSandbox()));
+    // Run from a directory that is not a git repo at all, so a --repo that was
+    // ignored could not produce a ledger naming the fixture's branches.
+    const elsewhere = track(createSandbox()).path;
+    const run = runStatus(['--repo', repo, '--since-days', '30'], elsewhere);
+
+    expect(run.err).not.toContain('mutually exclusive');
+    expect(run.status).toBe(0);
+    expect(run.out).toContain('recent-work');
+    expect(run.out).toContain('no commit in the last 30 days');
+  });
+
+  test('--all alone still disables the window', () => {
+    const repo = buildFixture(track(createSandbox()));
+    const run = runStatus(['--all'], repo);
+
+    expect(run.status).toBe(0);
+    // Both are hidden by default; --all is the only thing that shows them.
+    expect(run.out).toContain('old-work');
+    expect(run.out).toContain('archive/finished');
+  });
+
+  test('--all with --since-days is refused, non-zero, with a one-line reason', () => {
+    const repo = buildFixture(track(createSandbox()));
+    const run = runStatus(['--all', '--since-days', '30'], repo);
+
+    expect(run.status).not.toBe(0);
+    expect(run.status).not.toBeNull();
+    expect(run.err.trim().split('\n').at(-1)).toBe(
+      'Arguments all and since-days are mutually exclusive',
+    );
+    // Refused at parse time: the handler never ran, so no ledger was printed.
+    expect(run.out).not.toContain('recent-work');
   });
 });

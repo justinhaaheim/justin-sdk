@@ -79,13 +79,23 @@ export interface TranscriptMessages {
 }
 
 interface TranscriptRecord {
+  /** `type: "attachment"` records only; see `queuedPromptText`. */
+  attachment?: {
+    commandMode?: unknown;
+    prompt?: unknown;
+    timestamp?: unknown;
+    type?: unknown;
+  };
   cwd?: unknown;
   entrypoint?: unknown;
   gitBranch?: unknown;
+  isCompactSummary?: unknown;
   isMeta?: unknown;
   isSidechain?: unknown;
   message?: {content?: unknown; model?: unknown; role?: unknown};
   sessionId?: unknown;
+  /** `type: "system"` records only; see `isStopMarker`. */
+  subtype?: unknown;
   timestamp?: unknown;
   toolUseResult?: unknown;
   type?: unknown;
@@ -220,24 +230,13 @@ export function stripHarnessNoise(text: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * The human-authored text of one user record, or null when it has none (K2).
- *
- * `tool_result` blocks are tool output wearing a user record's clothes and are
- * the bulk of the `type: "user"` records in any real transcript. A record
- * carrying `toolUseResult`, or any `tool_result` block, is skipped outright.
- * Other non-text blocks (images, most often) are IGNORED rather than
- * disqualifying: Justin routinely pastes a screenshot with a sentence attached,
- * and the old rule threw that sentence away.
- *
- * `isMeta` marks Claude Code's own injections — the session preamble, the skill
- * text a slash command expands to, cross-session envelopes.
+ * What remains of a user-side content value once the harness noise is gone, or
+ * null. The ONE place a string-or-block-array becomes Justin's words, shared by
+ * a user record (`substantiveUserText`) and a queued prompt
+ * (`queuedPromptText`), so the two can never disagree on what "substantive"
+ * means (K1).
  */
-export function substantiveUserText(record: TranscriptRecord): string | null {
-  if (record.type !== 'user') return null;
-  if (record.isMeta === true) return null;
-  if (record.isSidechain === true) return null;
-  if (record.toolUseResult != null) return null;
-  const content = record.message?.content;
+function humanText(content: unknown): string | null {
   let raw: string;
   if (typeof content === 'string') {
     raw = content;
@@ -257,6 +256,101 @@ export function substantiveUserText(record: TranscriptRecord): string | null {
   }
   const stripped = stripHarnessNoise(raw);
   return stripped === '' ? null : stripped;
+}
+
+/**
+ * The human-authored text of one user record, or null when it has none (K2).
+ *
+ * `tool_result` blocks are tool output wearing a user record's clothes and are
+ * the bulk of the `type: "user"` records in any real transcript. A record
+ * carrying `toolUseResult`, or any `tool_result` block, is skipped outright.
+ * Other non-text blocks (images, most often) are IGNORED rather than
+ * disqualifying: Justin routinely pastes a screenshot with a sentence attached,
+ * and the old rule threw that sentence away.
+ *
+ * `isMeta` marks Claude Code's own injections — the session preamble, the skill
+ * text a slash command expands to, cross-session envelopes.
+ *
+ * `isCompactSummary` marks the "This session is being continued from a previous
+ * conversation…" summary Claude Code writes when it compacts context. It is a
+ * `type: "user"` record Claude wrote, and without this check it became "your
+ * last message" for every session that compacted after Justin's last prompt
+ * (found 2026-09-25 by `forensics repo`, home-base-lj3x9: nature-sounds session
+ * 50f1491b reported a 14,000-character summary as his last message).
+ */
+export function substantiveUserText(record: TranscriptRecord): string | null {
+  if (record.type !== 'user') return null;
+  if (record.isMeta === true) return null;
+  if (record.isCompactSummary === true) return null;
+  if (record.isSidechain === true) return null;
+  if (record.toolUseResult != null) return null;
+  return humanText(record.message?.content);
+}
+
+/**
+ * The human text of a message Justin sent WHILE Claude was working, or null
+ * (home-base-k0b8n.18 D-18B).
+ *
+ * Claude Code does not write such a message as a `type: "user"` record. It
+ * writes `{type: "attachment", attachment: {type: "queued_command",
+ * commandMode, prompt, timestamp, …}}` at the point it injects the message
+ * into the running turn, so a reader of user records alone never sees it.
+ * MEASURED 2026-09-25 over 1,771 local transcripts: 964 queued_command
+ * attachments; 693 have commandMode `task-notification` (a finished
+ * background task — noise, like the `<task-notification>` block K2 strips) and
+ * 271 `prompt`. Of the 271, 228 are Justin's words; the other 43 are peers:
+ * 28 `<agent-message …>` subagent hand-backs and 15
+ * `<cross-session-message …>` envelopes, which `stripHarnessNoise` already
+ * reduces to '' (0 leaked). Every `prompt` seen was a string; a block array is
+ * handled the same way a user record's is. None of the 228 also appears as a
+ * user record, so counting both cannot double a message.
+ */
+export function queuedPromptText(record: TranscriptRecord): string | null {
+  if (record.type !== 'attachment') return null;
+  if (record.isSidechain === true) return null;
+  const attachment = record.attachment;
+  if (attachment?.type !== 'queued_command') return null;
+  if (attachment.commandMode !== 'prompt') return null;
+  return humanText(attachment.prompt);
+}
+
+/**
+ * When a queued prompt was sent: its own timestamp, which is the moment Justin
+ * pressed Enter (the live UserPromptSubmit hook fires ~90 ms later, measured on
+ * session 3078e057). Transcripts older than ~v2.1.170 carry none, and there
+ * the record's timestamp is the only one there is. Where both exist they were
+ * equal in every case measured.
+ */
+function queuedPromptTimestamp(record: TranscriptRecord): string | null {
+  return asString(record.attachment?.timestamp) ?? asString(record.timestamp);
+}
+
+/**
+ * Is this record one of Claude Code's two marks that a turn ENDED — a Stop
+ * (home-base-k0b8n.18 D-18A)?
+ *
+ * MEASURED 2026-09-25 over 1,771 local transcripts, 4,004 Stops. Neither mark
+ * is on every Stop, so either one counts:
+ *  - `stop_hook_summary` is written when the Stop hooks run. 1,301 Stops have
+ *    only turn_duration: most in 214 sessions with no summary at all (the
+ *    newest from 2026-08), and 247 in sessions that otherwise have one — the
+ *    ones inspected are turns that ENDED IN AN ERROR (API 529, session limit),
+ *    where the hooks do not run.
+ *  - `turn_duration` is missing from 317 Stops. The one inspected is a Stop
+ *    hook refusing the yield (stop-check's block: `hookErrors` set, and the
+ *    turn went on).
+ *  - 2,386 Stops carry both, the summary first, at most 1.6 s apart. They are
+ *    ONE Stop: the second mark finds nothing new since the first emitted the
+ *    yield, so it emits nothing.
+ * A session with NEITHER mark (1,163 files, 755 of them `claude -p`) has only
+ * the before-the-next-message and end-of-file rules, which is the old model.
+ */
+function isStopMarker(record: TranscriptRecord): boolean {
+  return (
+    record.type === 'system' &&
+    (record.subtype === 'stop_hook_summary' ||
+      record.subtype === 'turn_duration')
+  );
 }
 
 /**
@@ -527,16 +621,25 @@ export function extractTranscriptMessages(
       return;
     }
 
+    // A user record, or a message Justin queued while Claude worked (D-18B):
+    // the same "substantive" either way, so the last thing he said is right
+    // even when he said it mid-turn.
+    let text: string | null = null;
+    let at: string | null = null;
     if (record.type === 'user') {
-      const text = substantiveUserText(record);
-      if (text == null) return;
-      if (result.firstUserMessage == null) {
-        result.firstUserMessage = text;
-        result.firstUserMessageAt = timestamp;
-      }
-      result.lastUserMessage = text;
-      result.lastUserMessageAt = timestamp;
+      text = substantiveUserText(record);
+      at = timestamp;
+    } else if (record.type === 'attachment') {
+      text = queuedPromptText(record);
+      at = queuedPromptTimestamp(record);
     }
+    if (text == null) return;
+    if (result.firstUserMessage == null) {
+      result.firstUserMessage = text;
+      result.firstUserMessageAt = at;
+    }
+    result.lastUserMessage = text;
+    result.lastUserMessageAt = at;
   });
 
   // A partially-written LAST line is normal on a live transcript and is not a
@@ -591,7 +694,8 @@ export interface TurnMessage {
 }
 
 /**
- * One turn: a substantive user message and that turn's yield (K10 e).
+ * One human turn: a substantive user message and EVERY yield Claude made before
+ * the next one (K10 e, home-base-k0b8n.18 D-18A).
  *
  * `user` is null for exactly one case — Claude text that comes BEFORE the first
  * substantive user message (a session opened by a bare `/command`, whose
@@ -599,12 +703,15 @@ export interface TurnMessage {
  * important reply of such a session unsearchable, so it becomes a leading turn
  * with no user half rather than vanishing.
  *
- * `assistant` is null when the turn has no text-bearing assistant record at
- * all: a turn that died mid-tool, or the live tail of a session still thinking.
+ * `yields` holds one entry per Stop, in file order. It has more than one when
+ * Claude yielded several times with no human message between — a conductor
+ * woken by task notifications yields at every one of them. It is empty when the
+ * turn has no text-bearing assistant record at all: a turn that died mid-tool,
+ * or the live tail of a session still thinking.
  */
 export interface TranscriptTurn {
-  assistant: TurnMessage | null;
   user: TurnMessage | null;
+  yields: TurnMessage[];
 }
 
 export interface TranscriptTurns {
@@ -627,21 +734,35 @@ export interface TranscriptTurns {
 
 /**
  * Every turn of a session, in file order: each substantive user message and
- * its YIELD (K10 e).
+ * its YIELDS (K10 e, home-base-k0b8n.18).
  *
- * THE YIELD is the LAST text-bearing assistant record before the next
- * substantive user message, or the end of the file. Everything Claude said in
- * between — "let me check X", the narration between tool calls — is not the
- * message Justin reads when the turn ends, and is not what the Stop hook's
- * `last_assistant_message` carries either, so a backfilled log and a live one
- * converge on the same text. A tool_use-only tail is skipped by construction:
- * `assistantText` returns null for it, so the previous text-bearing record
- * stays the yield (K3).
+ * A YIELD IS A STOP (D-18A). At every Stop marker (`isStopMarker`) the last
+ * text-bearing assistant record since the previous yield is emitted. That is
+ * the text the Stop hook's `last_assistant_message` carries, so a backfilled
+ * log and a live one converge on it. The old rule — one yield per human
+ * message — kept only the last of a conductor's many task-notification Stops
+ * and lost the rest (15 of 19 on session 5a3c3420). Everything Claude said
+ * between Stops — "let me check X", the narration between tool calls — is not
+ * a yield. A tool_use-only tail is skipped by construction: `assistantText`
+ * returns null for it, so the previous text-bearing record stays the yield
+ * (K3).
  *
- * SAME DEFINITIONS AS `extractTranscriptMessages` — `substantiveUserText` and
- * `assistantText`, one streaming pass, sidechains excluded — so "substantive"
- * and "noise" exist exactly once (K1). THROWS on an unreadable file, like the
- * extractor: "could not open" must not look like "no turns".
+ * TWO FALLBACKS, for a turn that ended with no Stop marker:
+ *  - the next substantive USER RECORD emits what is pending — an Esc-interrupted
+ *    turn, or a session with no markers at all (`claude -p`, very old ones);
+ *  - the END OF THE FILE emits what is pending — the live tail.
+ * Each text is emitted at most once: whichever rule fires first consumes it.
+ *
+ * A QUEUED PROMPT (D-18B, `queuedPromptText`) opens a new turn but emits
+ * NOTHING: it is injected INTO the running turn, which goes on to its own
+ * Stop, so the narration before it was never a yield. Measured: 224 of the
+ * 228 queued human prompts on this machine arrived mid-turn.
+ *
+ * SAME DEFINITIONS AS `extractTranscriptMessages` — `substantiveUserText`,
+ * `queuedPromptText` and `assistantText`, one streaming pass, sidechains
+ * excluded — so "substantive" and "noise" exist exactly once (K1). THROWS on an
+ * unreadable file, like the extractor: "could not open" must not look like "no
+ * turns".
  */
 export function extractTranscriptTurns(
   transcriptPath: string,
@@ -659,9 +780,25 @@ export function extractTranscriptTurns(
     turns: [],
   };
   let current: TranscriptTurn | null = null;
+  // The last text-bearing assistant record not yet emitted as a yield.
+  let pending: TurnMessage | null = null;
   let malformed = 0;
   let lastMalformedIndex = -1;
   let lastIndex = -1;
+
+  const emitPending = (): void => {
+    if (pending == null) return;
+    if (current == null) {
+      current = {user: null, yields: []};
+      result.turns.push(current);
+    }
+    current.yields.push(pending);
+    pending = null;
+  };
+  const openTurn = (user: TurnMessage): void => {
+    current = {user, yields: []};
+    result.turns.push(current);
+  };
 
   forEachTranscriptLine(transcriptPath, (line, index) => {
     lastIndex = index;
@@ -685,23 +822,33 @@ export function extractTranscriptTurns(
       result.lastCwd = cwd;
     }
 
+    if (isStopMarker(record)) {
+      emitPending();
+      return;
+    }
     if (record.type === 'user') {
       const text = substantiveUserText(record);
       if (text == null) return;
-      current = {assistant: null, user: {at: timestamp, cwd, text}};
-      result.turns.push(current);
+      // A new human turn with no Stop since the last text: an interrupted
+      // turn, whose last text is still its yield.
+      emitPending();
+      openTurn({at: timestamp, cwd, text});
+      return;
+    }
+    if (record.type === 'attachment') {
+      const text = queuedPromptText(record);
+      if (text == null) return;
+      // Mid-turn: `pending` stays pending for this turn's own Stop.
+      openTurn({at: queuedPromptTimestamp(record), cwd, text});
       return;
     }
     if (record.type === 'assistant') {
       const text = assistantText(record);
       if (text == null) return;
-      if (current == null) {
-        current = {assistant: null, user: null};
-        result.turns.push(current);
-      }
-      current.assistant = {at: timestamp, cwd, text};
+      pending = {at: timestamp, cwd, text};
     }
   });
+  emitPending();
 
   const trailingPartial = lastMalformedIndex === lastIndex && malformed > 0;
   const realMalformed = trailingPartial ? malformed - 1 : malformed;

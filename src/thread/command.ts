@@ -31,17 +31,23 @@ DISABLED means the knob is off — fall back to the plain text status report.
 SANDBOX DENIED names the two paths to allowlist and exits 0; fall back too.`;
 
 const START_NARRATIVE = `
-Creates the thread bead UP FRONT, status in_progress, titled "(untitled) <repo>
-session <id>" and noted "no report yet", so a session that never reaches its
-status report is still visible on the board instead of vanishing.
+Creates the thread bead BEFORE any report, status in_progress, titled
+"(untitled) <repo> session <id>" and noted "no report yet", so a session that
+never reaches its status report is still visible on the board.
+
+You rarely need it by hand: \`thread capture\` creates the same bead on the
+session's FIRST PROMPT. Nothing creates one at SessionStart, so a session that
+is opened and never prompted leaves no thread.
 
 It is the same upsert \`thread report\` uses: keyed on metadata.sessionId, so the
 first report REWRITES this bead rather than creating a second.
 
-Both knobs must be true — componentConfig.thread.enabled AND
-componentConfig.thread.startOnSessionStart — and both default false.
+Needs componentConfig.thread.enabled (default false).
+componentConfig.thread.startOnSessionStart is DEPRECATED and changes nothing.
 
-Install the hook that runs this with:  justin-sdk add thread-hooks`;
+--hook is RETIRED and INERT: it exits 0 and does nothing, so the SessionStart
+entry older installs carry stops creating threads with the SDK pin bump alone.
+Re-running \`justin-sdk add thread-hooks\` (or \`install\`) removes that entry.`;
 
 /**
  * Kept HERE rather than imported from backfill.ts on purpose: nothing heavy is
@@ -56,20 +62,27 @@ READS   every ~/.claude/projects/<project>/<uuid>.jsonl, one level deep.
 WRITES  a thread bead for every session that has none, status OPEN with
         metadata.source=backfill, plus ONE git commit of ~/Dev/threads per run.
         AND rewrites <state dir>/messages/<sessionId>.jsonl for every session in
-        the window — every prompt and every turn's final Claude message, from
-        the transcript — keeping any line \`thread capture\` logged after the
-        transcript's last record. Local only; never committed.
+        the window — every prompt (including ones queued mid-turn) and every
+        message Claude yielded at a Stop, from the transcript — keeping every
+        line \`thread capture\` logged whose text the transcript does not have.
+        Local only; never committed.
 NEVER   touches a CLOSED thread, and never touches the title, description, notes
         or status of a thread a real session created — for those it fills in
         ONLY the verbatim messages they never had, and only when those are
-        missing or the transcript has moved on since.
+        missing or the transcript has moved on since. A thread labelled
+        source=backfill counts as its own only while reportCount is 0,
+        reportedAt is null and the description still starts with the backfill
+        marker. One that carries a report is relabelled source=report, body
+        untouched; one it cannot read is left alone. Each is named under note:.
 
 A session's last activity is the LAST RECORD'S TIMESTAMP inside the file, never
 the file's mtime: resuming a session in cmux touches the file without adding a
-record. Sessions with nothing Justin actually said (\`claude -p\` probes,
-hook-only runs) are counted and reported, never imported. A transcript with no
-timestamp on ANY record can be placed neither inside nor outside the window: it
-is skipped, named under a \`note:\` line every run, and is NOT a run failure.
+record. \`claude -p\` runs (transcript entrypoint sdk-cli, which \`thread capture\`
+skips live too) and sessions with nothing Justin actually said (hook-only runs)
+are counted and reported, never imported: no bead, no message log. A transcript
+with no timestamp on ANY record can be placed neither inside nor outside the
+window: it is skipped, named under a \`note:\` line every run, and is NOT a run
+failure.
 
 Idempotent: run it as often as you like. A second run with no new transcript
 activity writes nothing. \`thread board\` hides what this creates; \`--all\`
@@ -226,14 +239,14 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'start',
-        'Create this session’s thread bead before it has reported anything, so an abandoned session is still on the board. Idempotent. Needs componentConfig.thread.enabled AND .startOnSessionStart.',
+        'Create this session’s thread bead by hand, before it has reported anything. `thread capture` normally does this on the first prompt. Idempotent. Needs componentConfig.thread.enabled.',
         (yy) =>
           yy
             .epilogue(START_NARRATIVE)
             .option('hook', {
               default: false,
               describe:
-                'SessionStart hook mode: read the payload from stdin, always exit 0, print at most one line',
+                'RETIRED SessionStart hook mode: INERT — exits 0 at once, reads nothing, creates nothing, prints nothing (home-base-39co9)',
               type: 'boolean' as const,
             })
             .option('session', {
@@ -254,7 +267,7 @@ export const threadCommand: CommandModule = {
         async (argv) => {
           const {runThreadStart, runThreadStartHook} = await import('./start');
           if (argv.hook === true) {
-            process.exit(await runThreadStartHook());
+            process.exit(runThreadStartHook());
           }
           process.exit(
             await runThreadStart({

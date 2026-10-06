@@ -167,12 +167,19 @@ describe('a thread with no report is shown as one (home-base-k0b8n.14)', () => {
     expect(ansiFromReportText(placeholder, {color: true})).toBe(placeholder);
   });
 
+  /** A thread bead carrying `notes`, with `reportCount` recorded (or absent). */
+  function bead(
+    notes: string,
+    reportCount: number | null,
+  ): {metadata: Record<string, unknown>; notes: string} {
+    return {metadata: reportCount == null ? {} : {reportCount}, notes};
+  }
+
   test('show says "no report yet", prints the notes, and claims nothing it did not measure', () => {
     for (const full of [false, true]) {
-      const out = renderStoredNotes(placeholder, {
+      const out = renderStoredNotes(bead(placeholder, 0), {
         color: false,
         full,
-        reportCount: 0,
         width: null,
       });
       expect(out.split('\n')[0]).toBe('⚡ ⏳ no report yet');
@@ -187,29 +194,26 @@ describe('a thread with no report is shown as one (home-base-k0b8n.14)', () => {
       }
     }
     // --full and the compact default print the same thing for a placeholder.
-    const args = {color: false, reportCount: 0, width: null};
-    expect(renderStoredNotes(placeholder, {...args, full: false})).toBe(
-      renderStoredNotes(placeholder, {...args, full: true}),
-    );
+    const args = {color: false, width: null};
+    expect(
+      renderStoredNotes(bead(placeholder, 0), {...args, full: false}),
+    ).toBe(renderStoredNotes(bead(placeholder, 0), {...args, full: true}));
   });
 
   test('"no report yet" is said only when the bead records zero reports', () => {
     const base = {color: false, full: false, width: null};
     expect(
-      renderStoredNotes(placeholder, {...base, reportCount: null}).split(
-        '\n',
-      )[0],
+      renderStoredNotes(bead(placeholder, null), base).split('\n')[0],
     ).toContain('report count UNKNOWN');
     expect(
-      renderStoredNotes(placeholder, {...base, reportCount: 2}).split('\n')[0],
+      renderStoredNotes(bead(placeholder, 2), base).split('\n')[0],
     ).toContain('records 2 reports, but its notes are not a rendered report');
   });
 
   test('a real report is still compacted exactly as before', () => {
-    const out = renderStoredNotes(LEGACY, {
+    const out = renderStoredNotes(bead(LEGACY, 1), {
       color: false,
       full: false,
-      reportCount: 1,
       width: null,
     });
     expect(out).toContain('MUST-SEE');

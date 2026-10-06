@@ -11,6 +11,11 @@ import {afterEach, describe, expect, test} from 'bun:test';
 import {chmodSync, existsSync, mkdirSync, readdirSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
+import {
+  readProjectConfig,
+  readUserConfig,
+  renderConfigSchema,
+} from '../src/sdk-config';
 import {resolveThreadConfig} from '../src/thread/config';
 import {
   probeWritable,
@@ -55,6 +60,49 @@ function configWorld(options: {
   }
   return {cwd, env: {XDG_CONFIG_HOME: join(sb.path, 'config')}};
 }
+
+describe('startOnSessionStart is DEPRECATED (home-base-39co9 D2)', () => {
+  /**
+   * health-logger-rn commits `startOnSessionStart: true`, and the user file on
+   * this machine may carry it too. Both must keep parsing: a schema violation
+   * would cost the WHOLE file's settings, `enabled` included.
+   */
+  test('a config carrying it (true) in BOTH files parses with no problem', () => {
+    const {cwd, env} = configWorld({
+      project: {componentConfig: {thread: {startOnSessionStart: true}}},
+      user: {
+        componentConfig: {thread: {enabled: true, startOnSessionStart: true}},
+      },
+    });
+    expect(readProjectConfig(cwd).status).toBe('ok');
+    expect(readUserConfig(env).status).toBe('ok');
+    const resolved = resolveThreadConfig({cwd, env});
+    expect(resolved.problems).toEqual([]);
+    expect(resolved.enabled).toBe(true);
+    expect(resolved.source).toBe('user');
+    // Not resolved at all: a field nobody reads would look like a live switch.
+    expect(resolved).not.toHaveProperty('startOnSessionStart');
+  });
+
+  test('`justin-sdk config schema` names it deprecated, and prints no default for it', () => {
+    const rendered = renderConfigSchema({
+      env: {XDG_CONFIG_HOME: '/xdg'},
+      projectRoot: '/repo',
+    });
+    const lines = rendered
+      .split('\n')
+      .filter((line) =>
+        line.includes('componentConfig.thread.startOnSessionStart'),
+      );
+    // Once in the PROJECT section, once in the USER section.
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+      expect(line).toContain('DEPRECATED');
+      expect(line).toContain('NO EFFECT');
+      expect(line).not.toContain('default ');
+    }
+  });
+});
 
 describe('resolveThreadConfig (D6)', () => {
   test('DEFAULTS OFF when neither file says anything', () => {

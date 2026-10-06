@@ -761,6 +761,37 @@ export const PAYLOAD_MUST_SEE_GUIDANCE: readonly string[] = [
 ];
 
 /**
+ * What happens to an open ask the next report does not mention (D24): the
+ * heading and policy `thread prepare` prints above a thread's open asks, and
+ * `thread inbox` prints at the end of every inbox.
+ *
+ * ONE constant for both (home-base-k0b8n.17). They were two copies, and when
+ * D24 inverted D4 only prepare's was rewritten: the inbox went on telling the
+ * session, at the start of the very turn it reads Justin's answers, that
+ * "every one of them must appear in the next report’s priorAsks (D4)" — the
+ * rule D24 retired. The heading used to say "every one of these MUST appear in
+ * priorAsks (D4)" here too, and the report was refused when one did not; now
+ * they are closed FOR the session, so what the text has to say is what happens
+ * when it says nothing — the thing a session left to guess gets wrong.
+ *
+ * One line per point, never hand-wrapped (critical rule 14): whatever displays
+ * it wraps it.
+ */
+export const OPEN_ASKS_GUIDANCE: {
+  readonly heading: string;
+  readonly policy: readonly string[];
+} = {
+  heading:
+    'OPEN ASKS — each of these CLOSES automatically when you report (D24)',
+  policy: [
+    'Unless you say otherwise, each is closed: "decided: <the default it recorded>".',
+    '· Justin ANSWERED it → priorAsks {disposition: "answered", detail: "<quote him>"}',
+    '· it stopped applying → priorAsks {disposition: "irrelevant", detail: "<why>"}',
+    '· it is STILL LIVE → write it again as a NEW ask with "supersedes": "<its id>" (the old one closes as superseded; asks are never edited in place)',
+  ],
+};
+
+/**
  * The payload skeleton `thread prepare` prints.
  *
  * `continuesFrom` is PREFILLED when the session was told which thread it

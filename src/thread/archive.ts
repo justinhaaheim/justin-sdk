@@ -118,9 +118,10 @@ export function archiveReport(
  * first real report still creates the bead. So this is an audit trail, not a
  * queue, and nothing drains it.
  *
- * It exists at all because the alternative is silence: a hook that swallows
- * every bd failure at session start is exactly the calm, invisible failure
- * rule 6 is about.
+ * It exists at all because the alternative is silence: a start that swallows
+ * every bd failure is exactly the calm, invisible failure rule 6 is about.
+ * (Only a hand-run `thread start` writes here since the SessionStart hook went
+ * inert, home-base-39co9 D3; capture's child logs to capture.jsonl instead.)
  */
 export function startFailuresDir(env: EnvLike = process.env): string {
   return join(threadsStateDir(env), 'start-failures');

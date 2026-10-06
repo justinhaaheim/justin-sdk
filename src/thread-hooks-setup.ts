@@ -1,57 +1,77 @@
 /**
  * thread-hooks-setup — installs the thread hooks in a consuming project.
  *
- * Scaffolds exactly FOUR entries in `.claude/settings.json`:
+ * Scaffolds exactly THREE entries in `.claude/settings.json`:
  *
- *  - `SessionStart` [startup|resume] → `thread start --hook`, which creates the
- *    session's thread bead before it has reported anything (home-base-p1uj.3).
- *  - `Stop` (no matcher) → `thread stop-check`, which refuses to let a session
- *    finish on a status report it cannot prove was recorded (home-base-p1uj.15).
  *  - `UserPromptSubmit` and `Stop` (no matcher) → `thread capture`, which logs
  *    every prompt and every Claude yield and keeps the thread bead's last
- *    messages current (home-base-k0b8n.9, K10). Its own entry on Stop, beside
- *    stop-check's rather than inside it: the two have different knobs and
- *    different contracts (K10 anti-decision 1).
+ *    messages current (home-base-k0b8n.9, K10). The session's FIRST captured
+ *    prompt is also what CREATES its thread bead (home-base-39co9 D1), so a
+ *    session that is opened and never prompted leaves no thread.
+ *  - `Stop` (no matcher) → `thread stop-check`, which refuses to let a session
+ *    finish on a status report it cannot prove was recorded (home-base-p1uj.15).
+ *    Its own entry on Stop, beside capture's rather than inside it: the two
+ *    have different knobs and different contracts (K10 anti-decision 1).
+ *
+ * THE RETIRED FOURTH ENTRY (home-base-39co9 D3, 2026-10-05). Until then this
+ * also wrote `SessionStart` [startup|resume] → `thread start --hook`, which
+ * created a thread bead for every session that was merely OPENED. Justin:
+ * "Otherwise any session I open creates a thread, and there is no reason to do
+ * this on session start". It is retired in three layers:
+ *
+ *   1. `thread start --hook` is INERT in the SDK itself, so a repo that still
+ *      carries the entry stops creating threads with the pin bump alone.
+ *   2. This installer no longer writes it.
+ *   3. On re-apply it REMOVES the entry, but only when the command is
+ *      byte-identical to what it used to write (`THREAD_START_HOOK_COMMAND`) —
+ *      the identity rule `remove` follows (F7). Any other command that runs
+ *      `thread start` is somebody's edit: it is reported as `left in place
+ *      (modified)` and kept. Both lines print even in quiet mode, because a
+ *      deletion nobody sees is the failure F7 exists to prevent.
+ *
+ * Layer 3 does not contradict "install NEVER removes" (dchjw.17 F1). That rule
+ * is about whole COMPONENTS the config does not list, judged on generic
+ * evidence. This is a listed component re-applying itself and taking back one
+ * entry it can prove it wrote — the same migration base-setup already performs
+ * on the retired setup-env SessionStart entry (`upsertSessionStartHook`).
  *
  * WHY THE STOP HOOK TAKES NO MATCHER: `Stop` has no matcher dimension — it fires
  * once per turn end, for main sessions and subagents alike, and the hook's own
  * first two tests (the `enforce` knob, then `agent_id`) are what narrow it. A
  * matcher string here would be silently ignored rather than helpfully restrictive.
  *
- * WHY `startup|resume` AND NOT THE OTHER TWO SOURCES. SessionStart fires with
- * source startup | resume | clear | compact. `clear` and `compact` keep the SAME
- * session id, so the command would find the existing bead and no-op — a bd
- * round-trip bought for nothing, at the worst possible moment (immediately after
- * a compaction, when the session is already paying to rebuild its context).
- *
  * WHAT THIS INSTALLER DELIBERATELY DOES NOT WRITE: a
- * `componentConfig.thread` block in justin-sdk.config.json. Both thread knobs
+ * `componentConfig.thread` block in justin-sdk.config.json. The thread knobs
  * resolve DEFAULT ← user file ← project file, so seeding a project-level
- * `{enabled: false, startOnSessionStart: false}` would OUTRANK the user file —
- * Justin turns the feature on once, machine-wide, and every repo that ran this
- * installer would silently stay off, with the config that overrode him sitting
- * in a file he never edited. Installing the hook and choosing to arm it are two
- * decisions, and this one only installs. The hook is inert until both knobs are
- * true, so an accidental install costs one ~60ms process per session start and
- * says nothing.
+ * `{enabled: false}` would OUTRANK the user file — Justin turns the feature on
+ * once, machine-wide, and every repo that ran this installer would silently
+ * stay off, with the config that overrode him sitting in a file he never
+ * edited. Installing the hooks and choosing to arm them are two decisions, and
+ * this one only installs. Every hook here is inert until
+ * `componentConfig.thread.enabled` is true (stop-check also needs `.enforce`),
+ * so an accidental install costs a short-lived process per prompt and per turn
+ * end, and says nothing.
  *
  * IN THE CORE PRESET since 2026-09-18 (epic home-base-dchjw D3, Justin's call).
- * It was withheld from every preset before that, because this hook writes to a
- * SHARED Dolt database (~/Dev/threads) on every session start and the cost of
- * installing it everywhere would be paid in lock contention by every other
- * session. What actually bounds that cost is the config, not the preset: the
- * hook is INERT unless BOTH componentConfig.thread.enabled and
- * .startOnSessionStart are true, and both default to false.
+ * It was withheld from every preset before that, because the retired
+ * SessionStart hook wrote to a SHARED Dolt database (~/Dev/threads) on every
+ * session start. What actually bounds the cost is the config, not the preset:
+ * `componentConfig.thread.enabled` defaults to false.
  *
  * Idempotent: re-running detects each existing hook by fingerprint and writes
- * nothing. The two are independent — a project that installed this before the
- * Stop hook existed gains only the Stop entry on a re-run.
+ * nothing. The hooks are independent — a project that installed this before
+ * the Stop hook existed gains only the Stop entry on a re-run.
  */
 
 import {basename, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
-import {sdkRun, sdkScript, upsertHookCommand} from './sdk-invocation';
+import {
+  invokesSdk,
+  sdkRun,
+  sdkScript,
+  upsertHookCommand,
+} from './sdk-invocation';
 import {
   ensureDir,
   fail,
@@ -64,28 +84,30 @@ import {
 } from './setup-helpers';
 
 /**
- * The SDK subcommand this hook runs. It — not any whole invocation — is what
- * identifies an already-installed hook in every spelling (dchjw.15 F1): a
- * hand-edited variant (a different bunx form, an absolute path to the CLI)
- * still counts as installed and is left alone rather than duplicated.
+ * The RETIRED hook's subcommand (home-base-39co9 D3). It — not any whole
+ * invocation — is what recognises the retired entry in every spelling
+ * (dchjw.15 F1), so a hand-edited variant is REPORTED rather than silently
+ * skipped. Recognising is all it does: only `THREAD_START_HOOK_COMMAND`,
+ * byte for byte, is ever removed.
  */
 const THREAD_START_SUBCOMMAND = 'thread start';
 
-/** The command the hook runs. Matches the usage-check / time-check spelling. */
+/**
+ * RETIRED (home-base-39co9 D3): the exact command this installer wrote under
+ * SessionStart until 2026-10-05. It is no longer written. It is kept as the
+ * IDENTITY that a re-apply here and `remove thread-hooks` delete on.
+ */
 export const THREAD_START_HOOK_COMMAND = sdkRun(
   `${THREAD_START_SUBCOMMAND} --hook`,
 );
 
-/** The CURRENT spelling, for the component manifest's installed-evidence check. */
+/** RETIRED: the retired entry's fingerprint, for the manifest's `retiredHooks`. */
 export const THREAD_START_HOOK_FINGERPRINT = sdkScript(THREAD_START_SUBCOMMAND);
 
-/** The hook event this component registers. */
-export const THREAD_HOOK_EVENT = 'SessionStart';
+/** RETIRED: the event the retired entry lives under. */
+export const THREAD_START_HOOK_EVENT = 'SessionStart';
 
-/** SessionStart sources this hook is wired to. See the file header. */
-export const THREAD_HOOK_MATCHER = 'startup|resume';
-
-/** The Stop hook's subcommand. Same rule as THREAD_START_SUBCOMMAND above. */
+/** The Stop hook's subcommand. Same identity rule as THREAD_START_SUBCOMMAND. */
 const THREAD_STOP_SUBCOMMAND = 'thread stop-check';
 
 /** The command the Stop hook runs (home-base-p1uj.15). */
@@ -162,15 +184,6 @@ function addHook(
   return true;
 }
 
-export function addThreadStartHook(settings: Record<string, unknown>): boolean {
-  return addHook(settings, {
-    command: THREAD_START_HOOK_COMMAND,
-    event: THREAD_HOOK_EVENT,
-    matcher: THREAD_HOOK_MATCHER,
-    subcommand: THREAD_START_SUBCOMMAND,
-  });
-}
-
 export function addThreadStopHook(settings: Record<string, unknown>): boolean {
   return addHook(settings, {
     command: THREAD_STOP_HOOK_COMMAND,
@@ -200,26 +213,118 @@ export function addThreadCaptureHooks(
   return changed;
 }
 
-export function stepThreadStartHook(projectRoot: string): boolean {
+/**
+ * What re-applying did to one SessionStart command that runs `thread start`.
+ * The same two verdicts, spelled the same way, as `remove` prints (remove.ts).
+ */
+export type RetiredStartHookOutcome =
+  | {command: string; kind: 'modified'}
+  | {command: string; kind: 'removed'};
+
+/**
+ * Take the RETIRED SessionStart `thread start --hook` entry back out
+ * (home-base-39co9 D3), editing `settings` in place.
+ *
+ * BY IDENTITY, NEVER BY NAME (F7). A command byte-identical to
+ * `THREAD_START_HOOK_COMMAND` is removed — the inner hook only, so a foreign
+ * command bundled into the same entry survives in place, and an entry left
+ * with no hooks is dropped. Any OTHER command that runs the SDK's `thread
+ * start` (an absolute path, an older `bunx` spelling, `… && my-own-thing`) is
+ * reported `modified` and left exactly where it is. Commands that are not this
+ * hook at all are untouched and not mentioned.
+ *
+ * The event key is deleted when its array empties, and `hooks` when it does,
+ * mirroring remove.ts, so the file does not keep an empty `SessionStart: []`.
+ */
+export function removeRetiredThreadStartHook(
+  settings: Record<string, unknown>,
+): RetiredStartHookOutcome[] {
+  const hooks = settings.hooks;
+  if (hooks == null || typeof hooks !== 'object' || Array.isArray(hooks)) {
+    return [];
+  }
+  const byEvent = hooks as Record<string, unknown>;
+  const entries = byEvent[THREAD_START_HOOK_EVENT];
+  if (!Array.isArray(entries)) return [];
+
+  const outcomes: RetiredStartHookOutcome[] = [];
+  let removedAny = false;
+  const nextEntries: unknown[] = [];
+  for (const entry of entries) {
+    const inner =
+      entry != null && typeof entry === 'object'
+        ? (entry as {hooks?: unknown}).hooks
+        : undefined;
+    if (!Array.isArray(inner)) {
+      nextEntries.push(entry);
+      continue;
+    }
+    const kept = inner.filter((hook) => {
+      const command = (hook as {command?: unknown} | null)?.command;
+      if (typeof command !== 'string') return true;
+      if (command === THREAD_START_HOOK_COMMAND) {
+        outcomes.push({command, kind: 'removed'});
+        return false;
+      }
+      if (invokesSdk(command) && command.includes(THREAD_START_SUBCOMMAND)) {
+        outcomes.push({command, kind: 'modified'});
+      }
+      return true;
+    });
+    if (kept.length === inner.length) {
+      nextEntries.push(entry);
+      continue;
+    }
+    removedAny = true;
+    if (kept.length > 0) nextEntries.push({...(entry as object), hooks: kept});
+  }
+
+  if (removedAny) {
+    if (nextEntries.length === 0) {
+      delete byEvent[THREAD_START_HOOK_EVENT];
+    } else {
+      byEvent[THREAD_START_HOOK_EVENT] = nextEntries;
+    }
+    if (Object.keys(byEvent).length === 0) delete settings.hooks;
+  }
+  return outcomes;
+}
+
+/** One line per outcome, in remove.ts's wording, so both commands read alike. */
+export function describeRetiredStartHookOutcome(
+  outcome: RetiredStartHookOutcome,
+): string {
+  const what = `.claude/settings.json ${THREAD_START_HOOK_EVENT} hook (${outcome.command})`;
+  return outcome.kind === 'removed'
+    ? `removed: ${what} — retired; the thread bead is now created on the first prompt (home-base-39co9)`
+    : `left in place (modified): ${what} — not the exact command the SDK wrote, so it is yours to delete; \`thread start --hook\` is inert either way`;
+}
+
+export function stepThreadHooks(projectRoot: string): boolean {
   const settingsDir = resolve(projectRoot, '.claude');
   const settingsPath = resolve(settingsDir, 'settings.json');
   ensureDir(settingsDir);
 
   const settings = readJson(settingsPath) ?? {};
-  const addedStart = addThreadStartHook(settings);
+  const retired = removeRetiredThreadStartHook(settings);
+  const removedRetired = retired.some((outcome) => outcome.kind === 'removed');
   const addedStop = addThreadStopHook(settings);
   const addedCapture = addThreadCaptureHooks(settings);
 
-  if (!addedStart && !addedStop && addedCapture.length === 0) {
-    success('.claude/settings.json already has every thread hook');
-    return true;
+  if (removedRetired || addedStop || addedCapture.length > 0) {
+    writeJson(settingsPath, settings);
   }
 
-  writeJson(settingsPath, settings);
-  if (addedStart) {
-    success(
-      `Updated .claude/settings.json (${THREAD_HOOK_EVENT} [${THREAD_HOOK_MATCHER}] → thread start)`,
-    );
+  // NOT through success(): these print even in quiet mode, which is how every
+  // installer runs under `install`, `update` and the sweep. A deletion is the
+  // one thing an installer must never do silently.
+  for (const outcome of retired) {
+    console.log(`  ${describeRetiredStartHookOutcome(outcome)}`);
+  }
+
+  if (!removedRetired && !addedStop && addedCapture.length === 0) {
+    success('.claude/settings.json already has every thread hook');
+    return true;
   }
   if (addedStop) {
     success(
@@ -263,21 +368,22 @@ export async function runThreadHooksSetup(args: {
   success('base-setup ready');
 
   stepHeader(
-    `1. .claude/settings.json (${THREAD_HOOK_EVENT}, ${THREAD_STOP_HOOK_EVENT}, ${THREAD_CAPTURE_HOOK_EVENTS.join(', ')} capture)`,
+    `1. .claude/settings.json (${THREAD_CAPTURE_HOOK_EVENTS.join(', ')} capture, ${THREAD_STOP_HOOK_EVENT} stop-check; retired ${THREAD_START_HOOK_EVENT} entry)`,
   );
-  if (!stepThreadStartHook(projectRoot)) return 1;
+  if (!stepThreadHooks(projectRoot)) return 1;
 
   if (!isQuiet()) {
     console.log(
       `\n\x1b[32m\x1b[1mthread-hooks-setup ready\x1b[0m in ${basename(projectRoot)}.\n` +
-        'BOTH hooks are INERT until their knobs are true. Turn them on machine-wide\n' +
+        'The hooks are INERT until their knobs are true. Turn them on machine-wide\n' +
         'in ~/.config/justin-sdk/config.json:\n\n' +
-        '  {"componentConfig": {"thread": {"enabled": true, "startOnSessionStart": true}}}\n\n' +
-        'SessionStart (thread start) needs enabled AND startOnSessionStart.\n' +
+        '  {"componentConfig": {"thread": {"enabled": true}}}\n\n' +
+        'UserPromptSubmit + Stop (thread capture) need only "enabled": true — "capture"\n' +
+        "defaults on; set it false in one repo to opt that repo out. The session's\n" +
+        'thread bead is created on its FIRST PROMPT; nothing happens at SessionStart.\n' +
         'Stop (thread stop-check) needs "enforce": true, and it is the one that can\n' +
         'refuse to let a session finish — arm it only once you have watched it pass.\n' +
-        'UserPromptSubmit + Stop (thread capture) need only "enabled": true — "capture"\n' +
-        'defaults on; set it false in one repo to opt that repo out.\n\n' +
+        '"startOnSessionStart" is DEPRECATED and does nothing; delete it if you have it.\n\n' +
         'No componentConfig block was written here on purpose: a project-level value\n' +
         'outranks the user file, so it would silently override those switches.\n',
     );

@@ -18,19 +18,12 @@ export const THREAD_CONFIG_KEY = 'thread';
 /** Off unless something says otherwise (D6). */
 export const THREAD_DEFAULT_ENABLED = false;
 
-/**
- * Off unless something says otherwise (home-base-p1uj.3).
- *
- * A SECOND knob rather than a reuse of `enabled`, deliberately. `enabled` is
- * the preflight branch point a human-driven wrap-up reads; `startOnSessionStart`
- * arms a HOOK that fires on every session start and every resume, in every repo
- * that installed it, and turns each one into a Dolt write. Those two want
- * different blast radii: Justin can dogfood `thread prepare`/`report` by hand
- * for a week before he is willing to pay a bd round-trip at the top of every
- * session. Folding them together would make the cheap decision imply the
- * expensive one.
- */
-export const THREAD_DEFAULT_START_ON_SESSION_START = false;
+// NO DEFAULT FOR `startOnSessionStart`. It armed a SessionStart hook that
+// created the thread bead before the session had done anything; since
+// 2026-10-05 the bead is created on the first captured prompt instead, and the
+// key is DEPRECATED and gates nothing (home-base-39co9 D1, D2). It stays in the
+// schema (sdk-config.ts) only so configs that carry it keep parsing; a printed
+// default would document a switch that no longer exists.
 
 /**
  * Off unless something says otherwise (home-base-p1uj.15).
@@ -72,8 +65,9 @@ export const THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES = 20;
 
 /**
  * ON unless something says otherwise (home-base-k0b8n.9, K10) — and gated by
- * `enabled` like `startOnSessionStart` is: capture runs only where BOTH are
- * true, so a machine that never turned threads on captures nothing.
+ * `enabled`: capture runs only where BOTH are true, so a machine that never
+ * turned threads on captures nothing. Capture is also what CREATES a session's
+ * thread bead, on its first prompt (home-base-39co9 D1).
  *
  * Default TRUE because Justin asked for it by default (2026-09-23: "by default
  * all user messages and all claude yield messages are captured"). The `thread

@@ -120,8 +120,9 @@ export function buildThreadMetadata(
 }
 
 /**
- * The metadata for a thread bead created at SESSION START, before the session
- * has reported anything (home-base-p1uj.3).
+ * The metadata for a thread bead created BEFORE the session has reported
+ * anything (home-base-p1uj.3) — by `thread capture` on its first prompt
+ * (home-base-39co9 D1), or by a hand-run `thread start`.
  *
  * THE SAME KEY SET as `buildThreadMetadata`, with an explicit `null` everywhere
  * the answer is genuinely not known yet. That is the whole point: `bd update
@@ -160,9 +161,9 @@ export function buildStartMetadata(input: {
     deviations: [],
     dirty: facts.dirty,
     entrypoint: facts.entrypoint,
-    // MEASURED even at session start, not null-because-early: the transcript
-    // already exists when the SessionStart hook runs (D7 finds it by UUID), and
-    // a session that dies without ever reporting is exactly the one whose first
+    // MEASURED even before any report, not null-because-early: the transcript
+    // already exists by the first captured prompt (D7 finds it by UUID), and a
+    // session that dies without ever reporting is exactly the one whose first
     // message is the only record of what it was for.
     firstUserMessage: facts.firstUserMessage,
     firstUserMessageAt: facts.firstUserMessageAt,
@@ -176,7 +177,7 @@ export function buildStartMetadata(input: {
     lastUserMessage: facts.lastUserMessage,
     lastUserMessageAt: facts.lastUserMessageAt,
     mergeState: null,
-    /** See buildThreadMetadata: 'start' means the SessionStart hook read them. */
+    /** See buildThreadMetadata: 'start' means the start path read them. */
     messagesSource: 'start',
     model: facts.model,
     nextStep: null,
@@ -198,9 +199,13 @@ export function buildStartMetadata(input: {
      */
     source: 'start',
     // When the SESSION began where that is readable from the transcript, and
-    // otherwise when the hook ran. Distinguished in `startedAtSource` rather
-    // than silently conflated: "the transcript says 09:04" and "I saw this
-    // session for the first time at 09:04" are different claims.
+    // otherwise when this bead was created. Distinguished in `startedAtSource`
+    // rather than silently conflated: "the transcript says 09:04" and "I saw
+    // this session for the first time at 09:04" are different claims. The
+    // value 'sessionStartHook' is a STORED spelling kept from when the
+    // SessionStart hook made these beads; it now means "when the bead was
+    // created" (first captured prompt, or a hand-run start). Nothing reads it,
+    // and renaming it would split the historical data (home-base-39co9).
     startedAt: facts.startedAt ?? startedAt,
     startedAtSource:
       facts.startedAt != null ? 'transcript' : 'sessionStartHook',

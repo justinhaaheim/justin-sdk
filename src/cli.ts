@@ -24,6 +24,7 @@ import {COMPONENT_NAMES} from './component-registry';
 import {runDoctor} from './doctor';
 import {runEasUpdate} from './eas-update';
 import {runFix} from './fix';
+import {forensicsCommand} from './forensics/command';
 import {runInit} from './init';
 import {
   answerHandoff,
@@ -1140,6 +1141,7 @@ void yargs(ARGV)
     },
   )
   .command(repoStatusCommand)
+  .command(forensicsCommand)
   .command(threadCommand)
   .command(usageNowCommand)
   .demandCommand(1, 'Please specify a command')

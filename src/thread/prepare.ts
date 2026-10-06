@@ -61,6 +61,7 @@ import {applyPredecessor, resolvePredecessor} from './predecessor';
 import {priorityLabel} from './render';
 import {priorityStyles} from './render-ansi';
 import {
+  OPEN_ASKS_GUIDANCE,
   PAYLOAD_MUST_SEE_GUIDANCE,
   PAYLOAD_PRIORITY_GUIDANCE,
   payloadSkeleton,
@@ -88,28 +89,6 @@ export interface PrepareOptions {
   /** Colour and wrap width; from stdout when absent. */
   style?: OutputStyle;
 }
-
-/**
- * The one heading both ask listings appear under.
- *
- * It used to say "every one of these MUST appear in priorAsks (D4)", and the
- * report was refused when one did not. D24 inverted that: they are closed FOR
- * you, so what this heading has to tell a session is what will happen if it says
- * nothing — which is the thing a session left to guess gets wrong.
- */
-const OPEN_ASKS_HEADING =
-  'OPEN ASKS — each of these CLOSES automatically when you report (D24)';
-
-/**
- * What happens to an open ask this payload does not mention. One line per
- * point, never hand-wrapped (critical rule 14): whatever displays it wraps it.
- */
-const OPEN_ASKS_POLICY: readonly string[] = [
-  'Unless you say otherwise, each is closed: "decided: <the default it recorded>".',
-  '· Justin ANSWERED it → priorAsks {disposition: "answered", detail: "<quote him>"}',
-  '· it stopped applying → priorAsks {disposition: "irrelevant", detail: "<why>"}',
-  '· it is STILL LIVE → write it again as a NEW ask with "supersedes": "<its id>" (the old one closes as superseded; asks are never edited in place)',
-];
 
 /** The one emoji each prepare section carries (K11 rule 5). */
 const SECTION_EMOJI = {
@@ -163,7 +142,12 @@ async function openAsksSection(
 ): Promise<string[]> {
   const {color} = style;
   const out: string[] = [
-    sectionHeader(OPEN_ASKS_HEADING, {color, emoji: SECTION_EMOJI.openAsks}),
+    // Both ask listings appear under this heading, and `thread inbox` ends
+    // with the same heading and policy: one constant (home-base-k0b8n.17).
+    sectionHeader(OPEN_ASKS_GUIDANCE.heading, {
+      color,
+      emoji: SECTION_EMOJI.openAsks,
+    }),
     '',
   ];
   const asks = await listOpenAsks(ctx, threadId);
@@ -179,9 +163,9 @@ async function openAsksSection(
     return out;
   }
   out.push(
-    ...spacedList(OPEN_ASKS_POLICY.map((line) => bodyLine(line, style))).split(
-      '\n',
-    ),
+    ...spacedList(
+      OPEN_ASKS_GUIDANCE.policy.map((line) => bodyLine(line, style)),
+    ).split('\n'),
   );
   // The SAME renderer `thread inbox` uses (home-base-p1uj.2 follow-up). This
   // used to print every comment as `ANSWER (<time>): <text>`, which showed a

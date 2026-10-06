@@ -34,7 +34,6 @@ import {spawnSync} from 'node:child_process';
 import {
   appendFileSync,
   closeSync,
-  existsSync,
   mkdirSync,
   openSync,
   readSync,
@@ -43,6 +42,13 @@ import {
 import {homedir} from 'node:os';
 import {dirname, join} from 'node:path';
 
+import {resolveClaudeBin} from '../claude-bin';
+import {
+  parseUsagePanel,
+  readUsagePanel,
+  resetsTextWithoutZone,
+  type UsagePanel,
+} from '../claude-usage';
 import {type BrOutcome, brFailureDetail, type BrRunner, runBr} from './br';
 import {describeChildFailure, runChild} from './child';
 // Re-exported (not redefined) so the runner's own callers and tests can name the
@@ -62,6 +68,7 @@ import {
 } from './handoff';
 
 export {HANDOFF_LABEL};
+export {CLAUDE_BIN_ENV, resolveClaudeBin} from '../claude-bin';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -659,35 +666,9 @@ export const CLAUDE_VERSION_TIMEOUT_MS = 10_000;
 /** `git rev-parse HEAD`. Was UNBOUNDED, and is the positional suspect (a1go). */
 export const GIT_HEAD_TIMEOUT_MS = 10_000;
 
-/** The env var that overrides which `claude` every call here spawns. */
-export const CLAUDE_BIN_ENV = 'JUSTIN_LOOP_CLAUDE_BIN';
-
-/**
- * Which `claude` binary to spawn, resolved fresh on every call.
- *
- * MEASURED 2026-09-12: in a cmux pane a `cmux-cli-shim` named `claude` sits
- * ahead of the real CLI on PATH, and it turns `claude stop <id>` into a PROMPT
- * TO THE MODEL — chatty output saying "Stopped" while stopping nothing. A stop
- * ladder run against that shim would report success and leave the session alive,
- * which is precisely the reassuring substitution the successor gate exists to
- * refuse. So the real binary is resolved rather than inherited from PATH.
- *
- * Order, and why:
- *   1. `JUSTIN_LOOP_CLAUDE_BIN` — the explicit override, FIRST so tests (and a
- *      machine with claude installed elsewhere) can point every call at one
- *      binary. An empty value is not a path and is ignored.
- *   2. `~/.local/bin/claude` — where the real CLI lives on this machine, ahead
- *      of PATH exactly because PATH is what the shim wins.
- *   3. `claude` — the bare name, i.e. a PATH lookup, which is the old behaviour
- *      and the only thing available on a machine that installs it elsewhere.
- */
-export function resolveClaudeBin(): string {
-  const override = process.env[CLAUDE_BIN_ENV];
-  if (override != null && override !== '') return override;
-  const local = join(homedir(), '.local', 'bin', 'claude');
-  if (existsSync(local)) return local;
-  return 'claude';
-}
+// `CLAUDE_BIN_ENV` and `resolveClaudeBin()` live in ../claude-bin.ts since
+// home-base-jptgj.1 (the /usage reader there needs them too) and are
+// re-exported at the top of this file, so every caller still finds them here.
 
 export async function listAgents(
   cwd: string,
@@ -1679,30 +1660,40 @@ export function bootContract(base: string, boot: BootContext): string {
 // ---------------------------------------------------------------------------
 
 /**
+ * The gate's view of a parsed panel. `sessionResetsAt`/`weekResetsAt` keep the
+ * form they have always had — the printed reset text without its zone
+ * (`Jul 16 at 10:50pm`) — because the pause banner prints it as-is.
+ */
+function snapshotFromPanel(panel: UsagePanel, raw: string): UsageSnapshot {
+  return {
+    isSubscription: panel.isSubscription,
+    raw,
+    sessionPct: panel.session.pct,
+    sessionResetsAt:
+      panel.session.resetsText == null
+        ? null
+        : resetsTextWithoutZone(panel.session.resetsText),
+    weekPct: panel.week.pct,
+    weekResetsAt:
+      panel.week.resetsText == null
+        ? null
+        : resetsTextWithoutZone(panel.week.resetsText),
+  };
+}
+
+/**
  * Parse the text `/usage` prints. Returns null when the shape is unrecognized,
  * which callers MUST treat as fail-closed: if we cannot read the quota we do not
  * spend it.
+ *
+ * A thin view over the SDK's one panel parser, `parseUsagePanel` in
+ * ../claude-usage.ts (home-base-jptgj.1): the panel is read in exactly one
+ * place. The sample time only feeds the absolute reset instants, which this
+ * snapshot does not carry, so "now" is as good as any.
  */
 export function parseUsage(raw: string): UsageSnapshot | null {
-  const session = /Current session:\s*(\d+)%\s*used/.exec(raw);
-  const week = /Current week \(all models\):\s*(\d+)%\s*used/.exec(raw);
-  if (session == null || week == null) {
-    return null;
-  }
-  const sessionResets = /Current session:[^·\n]*·\s*resets\s*([^\n(]+)/.exec(
-    raw,
-  );
-  const weekResets =
-    /Current week \(all models\):[^·\n]*·\s*resets\s*([^\n(]+)/.exec(raw);
-
-  return {
-    isSubscription: /using your subscription/i.test(raw),
-    raw,
-    sessionPct: Number(session[1]),
-    sessionResetsAt: sessionResets?.[1]?.trim() ?? null,
-    weekPct: Number(week[1]),
-    weekResetsAt: weekResets?.[1]?.trim() ?? null,
-  };
+  const parsed = parseUsagePanel(raw, new Date());
+  return parsed.kind === 'ok' ? snapshotFromPanel(parsed.panel, raw) : null;
 }
 
 /**
@@ -1729,45 +1720,29 @@ export type UsageRead =
  * `describeChildFailure` ordering matters here too: before home-base-a1go this
  * tested `status !== 0` first, so a call that timed out after the child exited 0
  * arrived as a success carrying truncated JSON.
+ *
+ * The spawn, the four failure reasons and the parse all live in the SDK's
+ * `readUsagePanel` (../claude-usage.ts, home-base-jptgj.1), which also adds
+ * `--no-session-persistence` so a gate read leaves no transcript behind.
+ *
+ * `_cwd` is IGNORED on purpose (home-base-jptgj F1). Callers pass the loop's
+ * repository, and a `claude -p` run there fires that repo's SessionStart hook,
+ * which creates a thread bead per gate read. `readUsagePanel` always runs from a
+ * neutral directory instead; the parameter stays only so `RunnerDeps` and its
+ * callers keep their shape.
  */
 export async function readUsage(
-  cwd: string,
+  _cwd: string,
   timeoutMs: number = USAGE_TIMEOUT_MS,
 ): Promise<UsageRead> {
-  const outcome = await runChild(
-    resolveClaudeBin(),
-    ['-p', '/usage', '--output-format', 'json'],
-    {cwd, timeoutMs},
-  );
-  const failure = describeChildFailure('claude -p /usage', outcome);
-  if (failure != null) {
-    return {kind: 'failed', reason: failure};
+  const read = await readUsagePanel({
+    claudeBin: resolveClaudeBin(),
+    timeoutMs,
+  });
+  if (read.kind === 'failed') {
+    return {kind: 'failed', reason: read.reason};
   }
-  let parsed: {result?: unknown};
-  try {
-    parsed = JSON.parse(outcome.stdout) as {result?: unknown};
-  } catch (err) {
-    return {
-      kind: 'failed',
-      reason: `claude -p /usage printed unparseable JSON: ${err instanceof Error ? err.message : String(err)}`,
-    };
-  }
-  if (typeof parsed.result !== 'string') {
-    return {
-      kind: 'failed',
-      reason:
-        'claude -p /usage returned JSON with no string `result` field — the shape of the output changed',
-    };
-  }
-  const usage = parseUsage(parsed.result);
-  if (usage == null) {
-    return {
-      kind: 'failed',
-      reason:
-        'claude -p /usage printed no recognisable quota lines (expected `Current session: N% used` and `Current week (all models): N% used`)',
-    };
-  }
-  return {kind: 'ok', usage};
+  return {kind: 'ok', usage: snapshotFromPanel(read.panel, read.raw)};
 }
 
 /**

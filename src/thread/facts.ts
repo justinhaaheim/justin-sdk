@@ -189,10 +189,11 @@ export interface TranscriptScan {
    * The ISO timestamp of the record `lastUserMessage` came from, or null when
    * no user message was found.
    *
-   * Added for the Stop hook (home-base-p1uj.15), which compares it against the
-   * newest archived report to tell a recorded report from a hand-written one.
    * It is read from the SAME record as the text, in the same pass, so the two
-   * can never describe different messages.
+   * can never describe different messages. Like the text, it counts a message
+   * he queued mid-turn (k0b8n.18 D-18B). The Stop hook deliberately does NOT
+   * read it: stop-check measures his last TYPED message with
+   * `measureTurnInTranscript` (home-base-k0b8n.21, rule a).
    */
   lastUserMessageAt: string | null;
   /** One line per field the extractor could not measure (rule 7). */
