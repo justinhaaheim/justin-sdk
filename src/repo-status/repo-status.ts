@@ -26,12 +26,13 @@
  * Part of home-base-qyu1.
  */
 
+import type {SessionsSection} from './views';
 import type {Argv} from 'yargs';
 
 import yargs from 'yargs';
 import {hideBin} from 'yargs/helpers';
 
-import {shouldStyle} from '../cli-style';
+import {outputStyle, shouldStyle} from '../cli-style';
 import {
   getSdkVersion,
   helpHeader,
@@ -42,6 +43,7 @@ import {DEFAULT_PAIR_CAP} from './overlap';
 import {buildPlan, executePlan, executeRemotePlan, renderPlan} from './plan';
 import {renderReportPretty} from './pretty';
 import {buildReport, type RepoStatusReport} from './report';
+import {renderCheckouts, renderSessions} from './views';
 
 /**
  * The default age window for `status`, in days.
@@ -61,6 +63,10 @@ TYPICAL USAGE
   Reconciling a repo is: get the facts, judge the residual, then act.
 
     repo-status status               the ledger — every branch, by disposition
+    repo-status status --checkouts --sessions
+                                     the ledger, then every checkout's own
+                                     state and every recent Claude session
+    repo-status repos                every repo with a Claude session lately
     repo-status branch <name>        one branch, commit by commit, with proof
     repo-status plan-experimental    ALPHA. the proposed cleanup, as a dry run
     repo-status apply-experimental   ALPHA. archive finished branches (mutates)
@@ -245,6 +251,28 @@ is never confusable with "did not look".
   repo-status status --no-merge-preview --no-overlaps
                                      skip the merge questions entirely
 
+CHECKOUTS AND SESSIONS (opt-in; home-base-39co9.5). Two sections that print
+AFTER the ledger, and only when asked for, so the default ledger is unchanged:
+
+  repo-status status --checkouts     every checkout of the repo, primary first:
+                                     its merge state (the ledger row's verdict,
+                                     by content — never a commit count),
+                                     evidence, pull request, upstream and
+                                     unpushed commits, last commit, uncommitted
+                                     paths, and open beads only its branch has
+  repo-status status --sessions      every Claude Code session LAUNCHED in the
+                                     repo or its worktrees in the last
+                                     --sessions-days (14): its thread, your
+                                     first and last message, Claude's last
+                                     response, and the command that resumes it
+  repo-status status --sessions --message-chars 0
+                                     the same, messages uncut (default 400)
+
+Sessions are read from the transcripts under ~/.claude/projects, and LAST
+ACTIVITY is each transcript's last record, never the file's mtime. A session
+started elsewhere that cd'd in is listed by 'repo-status repos', not here.
+'--json' and '--yaml' carry both sections whole, messages uncapped.
+
 FORMAT. The readable ledger above is the DEFAULT, for agents as much as for
 people: it carries the same answers in roughly a fifteenth of the bytes, and the
 questions an agent asks of this tool turn out to be the questions a person asks.
@@ -256,6 +284,31 @@ nothing of its own.
 ANSI styling appears only on an interactive terminal (and never when NO_COLOR is
 set), so piped and tool-call output stays plain text.
 `.trim();
+
+const REPOS_NARRATIVE = `
+Every repo with a Claude Code session in the window, most recently active
+first: how many sessions, when it was last active, how many of them recorded a
+thread report, and its primary checkout's branch, checkout count, uncommitted
+paths, upstream and last commit.
+
+READ ONLY. It reads the transcripts under ~/.claude/projects, the thread beads
+and git; nothing is fetched or written. A repo is its main checkout: sessions in
+its worktrees and subdirectories count toward it. LAST ACTIVITY is each
+transcript's last record, never the file's mtime (cmux's resume touches old
+transcripts).
+
+  repo-status repos                  the last 14 days, repos under ~/Dev
+  repo-status repos --days 3         a shorter window
+  repo-status repos --root /         every directory, temp-dir test probes too
+  repo-status repos --json           the summaries as JSON
+
+Next, for one repo: repo-status status --repo <path> --checkouts --sessions
+`.trim();
+
+/** The default window of `--sessions` and `repos`, in days. */
+const DEFAULT_SESSION_DAYS = 14;
+/** Where `--sessions` cuts each message preview; 0 prints them whole. */
+const DEFAULT_MESSAGE_CHARS = 400;
 
 const BRANCH_NARRATIVE = `
 The comprehensive deep-dive on ONE branch. Use it on anything 'status' marked
@@ -460,7 +513,40 @@ function render(obj: unknown, json: boolean): string {
  */
 type Format = 'json' | 'ledger' | 'yaml';
 
-function emit(report: RepoStatusReport | null, format: Format): number {
+/**
+ * `--sessions`' section, in both of the forms `emit` may need: the typed one
+ * the ledger renders, and the JSON-safe one the structured formats carry.
+ * Null when `--sessions` was not asked for.
+ */
+interface SessionsOutput {
+  json: object;
+  section: SessionsSection;
+}
+
+/**
+ * The ledger, then the opt-in sections after it (39co9.5). Appended, never
+ * interleaved: the ledger's own bytes are exactly `renderReportPretty`'s, so
+ * the default output cannot change because a section exists.
+ */
+function renderLedger(
+  report: RepoStatusReport,
+  sessions: SessionsOutput | null,
+): string {
+  const style = outputStyle();
+  return [
+    renderReportPretty(report, {color: shouldStyle()}),
+    renderCheckouts(report, style),
+    sessions == null ? '' : renderSessions(sessions.section, new Date(), style),
+  ]
+    .filter((block) => block !== '')
+    .join('\n\n');
+}
+
+function emit(
+  report: RepoStatusReport | null,
+  format: Format,
+  sessions: SessionsOutput | null = null,
+): number {
   if (report == null) {
     console.error(
       'not a git repository (or no baseline branch could be found)',
@@ -470,8 +556,11 @@ function emit(report: RepoStatusReport | null, format: Format): number {
   const ledger = format === 'ledger';
   console.log(
     ledger
-      ? renderReportPretty(report, {color: shouldStyle()})
-      : render(report, format === 'json'),
+      ? renderLedger(report, sessions)
+      : render(
+          sessions == null ? report : {...report, sessions: sessions.json},
+          format === 'json',
+        ),
   );
   if (
     !report.enrichments.prs &&
@@ -612,6 +701,29 @@ const statusBuilder = (y: Argv<GlobalArgs>) =>
       describe: 'Max branch pairs to merge-check, after the shared-file screen',
       type: 'number' as const,
     })
+    .option('checkouts', {
+      default: false,
+      describe:
+        "After the ledger: every checkout's merge state, PR, upstream, last commit, uncommitted paths and branch-only beads",
+      type: 'boolean' as const,
+    })
+    .option('sessions', {
+      default: false,
+      describe:
+        "After the ledger: every Claude Code session in the repo in the window, with its thread, your first and last message, Claude's last response and its resume command",
+      type: 'boolean' as const,
+    })
+    .option('sessions-days', {
+      default: DEFAULT_SESSION_DAYS,
+      describe: "--sessions' window, by each transcript's last record",
+      type: 'number' as const,
+    })
+    .option('message-chars', {
+      default: DEFAULT_MESSAGE_CHARS,
+      describe:
+        '--sessions cuts each message preview at this many characters; 0 prints them whole',
+      type: 'number' as const,
+    })
     // No yargs `default` here, for the same measured reason as `since-days`
     // above: a default lands in `argv` exactly like a typed flag, so a
     // `.conflicts('json', 'yaml')` would refuse every run. The two are
@@ -639,36 +751,130 @@ const statusBuilder = (y: Argv<GlobalArgs>) =>
 
 type StatusArgs = ArgsOf<typeof statusBuilder>;
 
+/**
+ * What `status` reads off its flags. A plain interface rather than the yargs
+ * argv, so the retired `forensics repo` alias can run exactly this command
+ * (39co9.5 R3) without going through a parser.
+ */
+export interface StatusRunArgs {
+  all?: boolean;
+  checkouts: boolean;
+  content: boolean;
+  includeArchive?: boolean;
+  json?: boolean;
+  mergePreview: boolean;
+  messageChars: number;
+  overlaps: boolean;
+  pairCap: number;
+  prs: boolean;
+  repo: string;
+  sessions: boolean;
+  sessionsDays: number;
+  sinceDays?: number;
+  submoduleStores: boolean;
+  submodules: boolean;
+  yaml?: boolean;
+}
+
+/** `repo-status status`, start to finish. Returns the exit code. */
+export async function runStatus(args: StatusRunArgs): Promise<number> {
+  if (args.json === true && args.yaml === true) {
+    console.error(
+      '--json and --yaml select different renderings; pass at most one',
+    );
+    return 2;
+  }
+  const report = buildReport({
+    checkouts: args.checkouts,
+    content: args.content,
+    cwd: args.repo,
+    excludeArchive: !(args.all === true || args.includeArchive === true),
+    mergePreview: args.mergePreview,
+    overlaps: args.overlaps,
+    pairCap: args.pairCap,
+    prs: args.prs,
+    sinceDays:
+      args.all === true ? null : (args.sinceDays ?? DEFAULT_STATUS_SINCE_DAYS),
+    submoduleStores: args.submoduleStores,
+    submodules: args.submodules,
+  });
+  let sessions: SessionsOutput | null = null;
+  if (args.sessions && report != null) {
+    // LAZY, on purpose: views-run reaches zod, and this module is imported
+    // eagerly by cli.ts (see views-run.ts).
+    const run = await import('./views-run');
+    const section = await run.scanSessionsSection({
+      chars: args.messageChars,
+      days: args.sessionsDays,
+      now: new Date(),
+      repoRoot: report.repo.root,
+    });
+    sessions = {json: run.sessionsJson(section), section};
+  }
+  return emit(
+    report,
+    args.json === true ? 'json' : args.yaml === true ? 'yaml' : 'ledger',
+    sessions,
+  );
+}
+
 const statusCommand = {
   builder: statusBuilder,
   command: ['status', '$0'],
   describe: 'Per-branch disposition ledger for the repo',
-  handler: (args: StatusArgs) => {
-    if (args.json === true && args.yaml === true) {
-      console.error(
-        '--json and --yaml select different renderings; pass at most one',
-      );
-      process.exitCode = 2;
-      return;
-    }
-    process.exitCode = emit(
-      buildReport({
-        content: args.content,
-        cwd: args.repo,
-        excludeArchive: !(args.all === true || args.includeArchive === true),
-        mergePreview: args.mergePreview,
-        overlaps: args.overlaps,
-        pairCap: args.pairCap,
-        prs: args.prs,
-        sinceDays:
-          args.all === true
-            ? null
-            : (args.sinceDays ?? DEFAULT_STATUS_SINCE_DAYS),
-        submoduleStores: args.submoduleStores,
-        submodules: args.submodules,
-      }),
-      args.json === true ? 'json' : args.yaml === true ? 'yaml' : 'ledger',
-    );
+  handler: async (args: StatusArgs) => {
+    process.exitCode = await runStatus({
+      all: args.all,
+      checkouts: args.checkouts,
+      content: args.content,
+      includeArchive: args.includeArchive,
+      json: args.json,
+      mergePreview: args.mergePreview,
+      messageChars: args.messageChars,
+      overlaps: args.overlaps,
+      pairCap: args.pairCap,
+      prs: args.prs,
+      repo: args.repo,
+      sessions: args.sessions,
+      sessionsDays: args.sessionsDays,
+      sinceDays: args.sinceDays,
+      submoduleStores: args.submoduleStores,
+      submodules: args.submodules,
+      yaml: args.yaml,
+    });
+  },
+};
+
+const reposBuilder = (y: Argv<GlobalArgs>) =>
+  y
+    .epilogue(REPOS_NARRATIVE)
+    .option('days', {
+      default: DEFAULT_SESSION_DAYS,
+      describe: "Window, by each transcript's last record",
+      type: 'number' as const,
+    })
+    .option('root', {
+      default: '~/Dev',
+      describe:
+        'Only list repos inside this directory; the rest are counted, not listed. `/` lists everything, including test probes in temp directories',
+      type: 'string' as const,
+    });
+
+type ReposArgs = ArgsOf<typeof reposBuilder>;
+
+const reposCommand = {
+  builder: reposBuilder,
+  command: 'repos',
+  describe:
+    'Every repo with a Claude Code session in the window: sessions, last activity, thread coverage, and its primary checkout',
+  handler: async (args: ReposArgs) => {
+    // LAZY for the same reason as `--sessions` above.
+    const {runRepos} = await import('./views-run');
+    process.exitCode = await runRepos({
+      days: args.days,
+      json: args.json,
+      root: args.root,
+    });
   },
 };
 
@@ -972,6 +1178,7 @@ function buildRepoStatus(y: Argv): Argv {
       type: 'boolean',
     })
     .command(statusCommand)
+    .command(reposCommand)
     .command(branchCommand)
     .command(planCommand)
     .command(applyCommand)

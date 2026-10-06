@@ -6,9 +6,11 @@
  *  - justin-sdk.config.json at project root (tracks SDK version + components)
  *  - package.json scripts (signal/doctor/setup-env calling the bare `justin-sdk` bin)
  *  - .gitignore entries (tmp/, dynamic-version.local.*, .beads/.br_recovery/)
- *  - .claude/settings.json with sandbox.excludedCommands scaffolding
- *    and the j2n7 SessionStart hook line (remote: setup-env bootstrap;
- *    local: read-only doctor --quiet)
+ *  - .claude/settings.json with sandbox.excludedCommands scaffolding,
+ *    the j2n7 SessionStart hook line (remote: setup-env bootstrap;
+ *    local: read-only `session-start`), and the UserPromptSubmit
+ *    `repo-state --hook` line that delivers the repo state on the first
+ *    prompt (home-base-39co9.4 M5)
  *
  * Removes (home-base-j2n7): the committed scripts/setup-env.ts copy, which
  * the SDK `setup-env` command supersedes — deleted when hash-recognized as an
@@ -34,6 +36,7 @@ import {
   sdkRun,
   sdkScript,
   STALE_SDK_INVOCATION_RE,
+  upsertHookCommand,
 } from './sdk-invocation';
 import {SDK_REPO_URL, sdkTagExistsOnRemote} from './sdk-latest';
 import {
@@ -112,10 +115,11 @@ export function shadowsSdkBin(
  *    manager and installs, which is the whole point of calling it. A cloud
  *    container's bunx cache is cold, so this always fetches the latest
  *    published SDK, which is what a bootstrap wants.
- *  - LOCAL session start: READ-ONLY by ruling (write actions need a trigger,
- *    not a heartbeat) — so it runs `session-start`, which wraps `doctor
- *    --quiet` (and its ENV_HYDRATION staleness warning) together with the
- *    repo-state block and the rules-drift notice. `bun run` (D1(b)) resolves
+ *  - LOCAL session start: READ-ONLY in the repo by ruling (write actions need
+ *    a trigger, not a heartbeat) — so it runs `session-start`, which wraps
+ *    `doctor --quiet` (and its ENV_HYDRATION staleness warning) together with
+ *    the rules-drift notice, and arms the first-prompt repo-state hook (its
+ *    marker lives in XDG state, outside the repo). `bun run` (D1(b)) resolves
  *    the project's own devDep pin: fast, offline, pinned, and no registry
  *    fallthrough. `|| true` keeps a fresh clone (nothing resolvable yet) from
  *    greeting every session with a hard hook error.
@@ -133,6 +137,39 @@ export function shadowsSdkBin(
  * merely "looks installed".
  */
 export const SESSION_START_HOOK_COMMAND = `if [ "$CLAUDE_CODE_REMOTE" = "true" ]; then ${SDK_BOOTSTRAP} setup-env; else ${sdkRun('session-start')} || true; fi`;
+
+/** The SDK subcommand of the first-prompt hook; identifies it in any spelling. */
+const REPO_STATE_HOOK_SUBCOMMAND = 'repo-state';
+
+/**
+ * The UserPromptSubmit hook that injects the repo-state block on the FIRST
+ * prompt after each SessionStart (home-base-39co9.4, M1/M5). Written by the
+ * same component as the SessionStart hook that arms it, so a sweep that brings
+ * one brings the other. Remote sessions are handled inside the command (it is
+ * silent there, as session-start's remote branch always was), so this needs no
+ * shell branch. No `|| true`, like the other UserPromptSubmit hooks
+ * (time-check, usage-check): the command itself always exits 0.
+ */
+export const REPO_STATE_HOOK_COMMAND = sdkRun(
+  `${REPO_STATE_HOOK_SUBCOMMAND} --hook`,
+);
+
+/**
+ * Add the first-prompt repo-state hook under UserPromptSubmit, or rewrite an
+ * older SDK-emitted spelling of it in place. A hand-edited variant is left
+ * exactly as it is (`upsertHookCommand`'s contract).
+ */
+export function upsertRepoStateHook(registered: readonly unknown[]): {
+  changed: boolean;
+  entries: unknown[];
+} {
+  return upsertHookCommand(
+    registered,
+    REPO_STATE_HOOK_SUBCOMMAND,
+    REPO_STATE_HOOK_COMMAND,
+    () => ({hooks: [{command: REPO_STATE_HOOK_COMMAND, type: 'command'}]}),
+  );
+}
 
 /**
  * Recognises THIS hook, in any generation of spelling, so that installing over
@@ -660,11 +697,23 @@ export function stepClaudeSettings(projectRoot: string): boolean {
     hooks.SessionStart = desired;
     modified = true;
   }
+
+  // The first-prompt half of the same feature (M5): SessionStart arms, this
+  // UserPromptSubmit hook fires.
+  const userPromptSubmit =
+    (hooks.UserPromptSubmit as unknown[] | undefined) ?? [];
+  const repoState = upsertRepoStateHook(userPromptSubmit);
+  if (repoState.changed) {
+    hooks.UserPromptSubmit = repoState.entries;
+    modified = true;
+  }
   settings.hooks = hooks;
 
   if (modified) {
     writeJson(settingsPath, settings);
-    success('Updated .claude/settings.json (sandbox + SessionStart hook)');
+    success(
+      'Updated .claude/settings.json (sandbox + SessionStart and first-prompt repo-state hooks)',
+    );
   } else {
     success('.claude/settings.json already has base-setup scaffolding');
   }

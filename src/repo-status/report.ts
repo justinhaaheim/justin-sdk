@@ -23,6 +23,7 @@ import type {
   WorktreeEntry,
 } from './types';
 
+import {type CheckoutsReport, readCheckouts} from './checkouts';
 import {
   type ArchiveMirror,
   type CommitVerdict,
@@ -232,6 +233,14 @@ export interface RepoStatusSummary {
 export interface RepoStatusReport {
   /** Null when `git for-each-ref` failed — NOT the same as "no branches". */
   branches: BranchRow[] | null;
+  /**
+   * Every checkout's own facts — uncommitted files, upstream, last commit,
+   * open beads only its branch carries (home-base-39co9.5). PRESENT ONLY when
+   * `--checkouts` asked for it, so the default report is the object it always
+   * was. Merge state is deliberately not in here: it is the matching row's
+   * `disposition`, proven by content.
+   */
+  checkouts?: CheckoutsReport;
   enrichments: {
     content: boolean;
     mergePreview: boolean;
@@ -305,6 +314,11 @@ export interface RepoStatusReport {
 }
 
 export interface ReportOptions {
+  /**
+   * Read every checkout's own facts into `checkouts` (home-base-39co9.5). A few
+   * git reads per checkout; off by default.
+   */
+  checkouts?: boolean;
   /** Run the per-commit content proofs. Local but heavy. */
   content?: boolean;
   cwd: string;
@@ -461,6 +475,7 @@ function buildRow(
 
 export function buildReport(opts: ReportOptions): RepoStatusReport | null {
   const {
+    checkouts = false,
     content = true,
     cwd,
     excludeArchive = false,
@@ -616,6 +631,17 @@ export function buildReport(opts: ReportOptions): RepoStatusReport | null {
 
   return {
     branches: rows,
+    // Present only when asked for, so the default object — and every byte of
+    // the default ledger — is what it was before this key existed.
+    ...(checkouts
+      ? {
+          checkouts: readCheckouts(
+            inventory.repoRoot,
+            {name: inventory.baselineRef, sha: inventory.baselineSha},
+            worktreeStates,
+          ),
+        }
+      : {}),
     enrichments: {
       content,
       mergePreview,

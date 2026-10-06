@@ -20,11 +20,18 @@
  */
 
 import {describe, expect, test} from 'bun:test';
+import {mkdirSync, readFileSync, writeFileSync} from 'fs';
+import {join} from 'path';
 
 import {
+  REPO_STATE_HOOK_COMMAND,
   SESSION_START_HOOK_COMMAND,
+  stepClaudeSettings,
+  upsertRepoStateHook,
   upsertSessionStartHook,
 } from '../src/base-setup';
+import {setQuiet} from '../src/setup-helpers';
+import {createSandbox} from './sandbox';
 
 /** An older spelling of THIS installer's own entry — the `if` shell branch. */
 const OLD_OWN =
@@ -120,5 +127,65 @@ describe('upsertSessionStartHook', () => {
       [SESSION_START_HOOK_COMMAND],
       ['echo hello'],
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The first-prompt half (home-base-39co9.4, M5; acceptance criterion 5)
+// ---------------------------------------------------------------------------
+
+describe('the UserPromptSubmit repo-state hook base-setup writes', () => {
+  const TIME_CHECK = 'bun run justin-sdk time-check';
+
+  test('the command is the repo pin running `repo-state --hook`', () => {
+    expect(REPO_STATE_HOOK_COMMAND).toBe(
+      'bun run justin-sdk repo-state --hook',
+    );
+  });
+
+  test('appended after the hooks already there, which keep their order', () => {
+    const {changed, entries} = upsertRepoStateHook([entry(TIME_CHECK)]);
+    expect(changed).toBe(true);
+    expect(commandsOf(entries)).toEqual([
+      [TIME_CHECK],
+      [REPO_STATE_HOOK_COMMAND],
+    ]);
+  });
+
+  test('a second run changes nothing', () => {
+    const once = upsertRepoStateHook([entry(TIME_CHECK)]).entries;
+    expect(upsertRepoStateHook(once)).toEqual({changed: false, entries: once});
+  });
+
+  test('stepClaudeSettings writes it into .claude/settings.json beside SessionStart', () => {
+    const sb = createSandbox();
+    const path = join(sb.path, '.claude', 'settings.json');
+    try {
+      mkdirSync(join(sb.path, '.claude'), {recursive: true});
+      writeFileSync(
+        path,
+        `${JSON.stringify({hooks: {UserPromptSubmit: [entry(TIME_CHECK)]}}, null, 2)}\n`,
+      );
+      setQuiet(true);
+      expect(stepClaudeSettings(sb.path)).toBe(true);
+      const settings = JSON.parse(readFileSync(path, 'utf-8')) as {
+        hooks: Record<string, unknown[]>;
+      };
+      expect(commandsOf(settings.hooks.UserPromptSubmit ?? [])).toEqual([
+        [TIME_CHECK],
+        [REPO_STATE_HOOK_COMMAND],
+      ]);
+      expect(commandsOf(settings.hooks.SessionStart ?? [])).toEqual([
+        [SESSION_START_HOOK_COMMAND],
+      ]);
+
+      // Idempotent on disk too: a re-run leaves the bytes alone.
+      const before = readFileSync(path, 'utf-8');
+      expect(stepClaudeSettings(sb.path)).toBe(true);
+      expect(readFileSync(path, 'utf-8')).toBe(before);
+    } finally {
+      setQuiet(false);
+      sb.cleanup();
+    }
   });
 });

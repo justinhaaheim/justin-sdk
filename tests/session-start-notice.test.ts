@@ -37,6 +37,7 @@ import {
 } from 'fs';
 import {dirname, join, relative, resolve} from 'path';
 
+import {REPO_STATE_HOOK_COMMAND} from '../src/base-setup';
 import {
   CRITICAL_RULES_CONFIG_KEY,
   refreshCriticalRulesArtifact,
@@ -123,12 +124,30 @@ function editPromptsRules(dir: string): void {
   git(dir, ['commit', '-qm', 'edit alpha']);
 }
 
+/**
+ * The project hooks base-setup writes. The UserPromptSubmit `repo-state --hook`
+ * matters here: without it session-start injects the repo state itself
+ * (home-base-39co9.4), and these fixtures model an up-to-date enrolled repo.
+ */
+const PROJECT_SETTINGS = `${JSON.stringify(
+  {
+    hooks: {
+      UserPromptSubmit: [
+        {hooks: [{command: REPO_STATE_HOOK_COMMAND, type: 'command'}]},
+      ],
+    },
+  },
+  null,
+  2,
+)}\n`;
+
 function projectFixture(
   options: {components?: string[]; modules?: string[]} = {},
 ): string {
   const {components, modules} = options;
   const sb = track(createSandbox());
   return initRepoAt(join(sb.path, 'repo'), {
+    '.claude/settings.json': PROJECT_SETTINGS,
     'justin-sdk.config.json': `${JSON.stringify(
       {
         components: components ?? ['base-setup', 'critical-rules-setup'],
@@ -167,10 +186,13 @@ interface HookRun {
 }
 
 /**
- * Run the hook the way Claude Code does. HOME is a throwaway directory, so the
- * USER-level rules file is absent and this can never read or write Justin's real
- * one; XDG_CONFIG_HOME is sandboxed so the managed clone is never touched.
+ * Run the hook the way Claude Code does, SessionStart payload on stdin. HOME is
+ * a throwaway directory, so the USER-level rules file is absent and this can
+ * never read or write Justin's real one; XDG_CONFIG_HOME is sandboxed so the
+ * managed clone is never touched, and XDG_STATE_HOME so the first-prompt
+ * marker (home-base-39co9.4) lands in the sandbox too.
  */
+let sessionCounter = 0;
 function runHook(
   repo: string,
   extraEnv: Record<string, string> = {},
@@ -182,12 +204,19 @@ function runHook(
     CLAUDE_PROJECT_DIR: repo,
     HOME: home.path,
     XDG_CONFIG_HOME: join(home.path, 'config'),
+    XDG_STATE_HOME: join(home.path, 'state'),
     ...extraEnv,
   };
+  sessionCounter += 1;
   const result = spawnSync(process.execPath, args, {
     cwd: repo,
     encoding: 'utf-8',
     env,
+    input: JSON.stringify({
+      hook_event_name: 'SessionStart',
+      session_id: `notice-test-${sessionCounter}`,
+      source: 'startup',
+    }),
   });
   const stdout = result.stdout ?? '';
   // The contract is ONE JSON object and nothing else. JSON.parse is the
@@ -196,7 +225,10 @@ function runHook(
     hookSpecificOutput?: {additionalContext?: string; hookEventName?: string};
     systemMessage?: string;
   };
-  expect(parsed.hookSpecificOutput?.hookEventName).toBe('SessionStart');
+  // hookSpecificOutput is present exactly when something goes to Claude.
+  if (parsed.hookSpecificOutput != null) {
+    expect(parsed.hookSpecificOutput.hookEventName).toBe('SessionStart');
+  }
   return {
     additionalContext: parsed.hookSpecificOutput?.additionalContext ?? '',
     status: result.status,
@@ -422,6 +454,7 @@ function rnProjectFixture(
   const {components, modules} = options;
   const sb = track(createSandbox());
   return initRepoAt(join(sb.path, 'repo'), {
+    '.claude/settings.json': PROJECT_SETTINGS,
     'justin-sdk.config.json': `${JSON.stringify(
       {
         components: components ?? ['base-setup', 'critical-rules-setup'],
@@ -444,7 +477,7 @@ function rnProjectFixture(
 const REPO_STATE_HEADER = '# Current repo state';
 
 describe('the hook does not re-deliver rules the repo already carries', () => {
-  test('NOT enrolled: rule text AND repo state, exactly as before anhw', () => {
+  test('NOT enrolled: rule text, mirrored to Justin; the repo state waits for the first prompt', () => {
     gatedPromptsFixture();
     const repo = rnProjectFixture({components: ['base-setup']});
 
@@ -453,11 +486,16 @@ describe('the hook does not re-deliver rules the repo already carries', () => {
     // The positive control the suppression arms depend on: this content really
     // does travel through the hook when nothing suppresses it.
     expect(run.additionalContext).toContain('RN_ONLY_RULE');
-    expect(run.additionalContext).toContain(REPO_STATE_HEADER);
     expect(run.systemMessage).not.toContain('rule text NOT injected');
+    // M3: what Claude got, Justin sees.
+    expect(run.systemMessage).toContain('↓ also sent to Claude');
+    expect(run.systemMessage).toContain('RN_ONLY_RULE');
+    // M1: the repo state is no longer a SessionStart injection.
+    expect(run.additionalContext).not.toContain(REPO_STATE_HEADER);
+    expect(run.systemMessage).toContain('repo state → your first prompt');
   });
 
-  test('enrolled with the artifact PRESENT: repo state only, and it says so', () => {
+  test('enrolled with the artifact PRESENT: nothing injected at all, and it says so', () => {
     const dir = gatedPromptsFixture();
     const repo = rnProjectFixture();
     const artifact = writeArtifact(repo, dir);
@@ -475,12 +513,16 @@ describe('the hook does not re-deliver rules the repo already carries', () => {
     expect(committed).toContain('RN_ONLY_RULE');
     expect(committed).toContain('ALPHA_RULE');
 
-    // Repo state still ships, for every repo, enrolled or not (Justin).
-    expect(run.additionalContext).toContain(REPO_STATE_HEADER);
-    // And the systemMessage says what happened, so "where did my rules go?" is
+    // And the repo state now arrives on the first prompt (M1), so SessionStart
+    // injects NOTHING into Claude here — no hookSpecificOutput at all.
+    expect(run.additionalContext).toBe('');
+    expect(run.systemMessage).not.toContain('↓ also sent to Claude');
+    // The systemMessage says what happened, so "where did my rules go?" is
     // answerable from one line instead of by reading this file.
     expect(run.systemMessage).toContain('rule text NOT injected');
-    expect(run.systemMessage).toContain('NOT injected — already in this repo');
+    expect(run.systemMessage).toContain(
+      'conditional rule modules that apply here (already in this repo’s rules artifact, not injected):\n  1. rn-only',
+    );
   });
 
   test('D20 — enrolled but the artifact is MISSING: keep injecting', () => {
@@ -529,7 +571,7 @@ describe('the hook does not re-deliver rules the repo already carries', () => {
     const stale = runHook(staleRepo);
     expect(stale.systemMessage).toContain('repo rules ⚠️ STALE');
     expect(stale.additionalContext).not.toContain('RN_ONLY_RULE');
-    expect(stale.additionalContext).toContain(REPO_STATE_HEADER);
+    expect(stale.additionalContext).toBe('');
 
     // locally modified: hand-edited bytes, stamp intact.
     const editedRepo = rnProjectFixture();
@@ -538,6 +580,57 @@ describe('the hook does not re-deliver rules the repo already carries', () => {
     const edited = runHook(editedRepo);
     expect(edited.systemMessage).toContain('repo rules ⚠️ LOCALLY MODIFIED');
     expect(edited.additionalContext).not.toContain('RN_ONLY_RULE');
-    expect(edited.additionalContext).toContain(REPO_STATE_HEADER);
+    expect(edited.additionalContext).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What Justin is told at session start (home-base-39co9.4, M2; criterion 3)
+// ---------------------------------------------------------------------------
+
+describe('the SessionStart systemMessage names staleness and the conditional modules', () => {
+  test('a STALE artifact and the gated module that applies, in one message', () => {
+    const dir = gatedPromptsFixture();
+    const repo = rnProjectFixture();
+    writeArtifact(repo, dir);
+    editPromptsRules(dir);
+
+    const run = runHook(repo);
+    expect(run.systemMessage).toContain('repo rules ⚠️ STALE');
+    expect(run.systemMessage).toContain('bun run justin-sdk rules-update');
+    expect(run.systemMessage).toMatch(
+      /conditional rule modules that apply here \([^)]*\):\n {2}1\. rn-only/,
+    );
+  });
+
+  test('a repo the gated module does NOT apply to says "none", not nothing', () => {
+    gatedPromptsFixture();
+    // Same prompts, but not a React Native project: rn-only's includeIf fails.
+    const repo = projectFixture();
+
+    const run = runHook(repo);
+    expect(run.systemMessage).toContain(
+      'conditional rule modules that apply here: none',
+    );
+    expect(run.systemMessage).not.toContain('rn-only');
+  });
+
+  test('rules that cannot be loaded say UNKNOWN, never "none"', () => {
+    const repo = projectFixture();
+    const run = runHook(repo, {
+      JSDK_PROMPTS_DIR: join(track(createSandbox()).path, 'no-such-prompts'),
+    });
+    expect(run.status).toBe(0);
+    expect(run.systemMessage).toContain('conditional rule modules: UNKNOWN');
+    expect(run.systemMessage).not.toContain('apply here: none');
+  });
+
+  test('doctor’s report goes to Justin, not into Claude’s context', () => {
+    promptsFixture();
+    const repo = projectFixture();
+    const run = runHook(repo);
+    // A check label only doctor emits.
+    expect(run.systemMessage).toContain('Ran ');
+    expect(run.additionalContext).not.toContain('Ran ');
   });
 });

@@ -13,8 +13,9 @@
  *  - PROJECT mode (default), from the hook base-setup writes into an enrolled
  *    repo's `.claude/settings.json`: `bun run justin-sdk session-start`. Remote
  *    (CLAUDE_CODE_REMOTE=true) hands straight off to `setup-env` — a cloud
- *    container needs hydrating, not advising. Locally it emits doctor's
- *    scaffolding verdict, the repo-state block and the rules-drift notice.
+ *    container needs hydrating, not advising. Locally it reports doctor's
+ *    scaffolding verdict, the rules-drift notice and the conditional rule
+ *    modules, and arms the first-prompt repo-state hook.
  *  - USER-LEVEL mode (`--user-level`), from the hook in ~/.claude/settings.json:
  *    `justin-sdk-latest session-start --user-level`. It exits 0 printing
  *    NOTHING when the project root is enrolled, because the project hook owns
@@ -24,26 +25,38 @@
  * standing requirement, preserved rather than reversed — through one mechanism
  * instead of two.
  *
- * WHAT GOES WHERE ON STDOUT. The output is the SessionStart JSON envelope, and
- * its two halves have different audiences; conflating them is how a warning
- * stops being seen:
- *   - `additionalContext` is injected into the MODEL's context and is not shown
- *     to Justin. Doctor's output and the repo state go here, which is where
- *     each of them already went before this command existed.
- *   - `systemMessage` is shown to JUSTIN and the model never reads it. The
- *     rules freshness and drift verdicts go here, as they did in the plugin.
+ * THE REPO STATE ARRIVES ON THE FIRST PROMPT, NOT HERE (home-base-39co9.4, M1).
+ * This command ARMS a per-session marker (src/first-prompt.ts) before it does
+ * anything slow, and `repo-state --hook` — a UserPromptSubmit hook installed
+ * beside this one — injects the block on the session's first prompt, measured
+ * then. Only when the marker cannot be written does this command inject the
+ * block itself, and it says so in the header.
  *
- * That split is also why only ONE half is stripped of ANSI: see emitEnvelope.
+ * WHAT GOES WHERE (M2, M3). `systemMessage` is for JUSTIN: the one-line
+ * status header, the repo-rules drift advice, the conditional rule modules that
+ * apply to this repo (or "none"), and doctor's report. `additionalContext` is
+ * for CLAUDE and now carries only rule text, and only in a repo that does not
+ * carry its own rules artifact. Everything Claude gets is mirrored into
+ * `systemMessage` by `src/hook-output.ts`, the one place hook JSON is built.
  */
 
 import {execFileSync} from 'child_process';
 import {existsSync} from 'fs';
 import {resolve} from 'path';
 
-import {stripAnsi} from './check-runner';
 import {renderDoctor} from './doctor';
+import {
+  armFirstPrompt,
+  type ArmResult,
+  claimFirstPrompt,
+  composeRepoState,
+  type HookPayload,
+  readHookPayload,
+  repoStateHookPresence,
+  safeSessionId,
+} from './first-prompt';
+import {emitHookOutput} from './hook-output';
 import {assemble} from './prime';
-import {formatRepoState, runDivergenceCheck} from './repo-status/prime-view';
 import {
   checkRulesDrift,
   isRulesDriftProblem,
@@ -60,6 +73,7 @@ import {
   rulesFilePath,
   SYNC_RULES_CMD,
 } from './rules/rules-file';
+import {SDK_LATEST, sdkRun} from './sdk-invocation';
 import {runSetupEnv} from './setup-env-command';
 
 const RULES_FILE_DISPLAY = '~/.claude/rules/justin-sdk/critical-rules.md';
@@ -67,8 +81,22 @@ const RULES_FILE_DISPLAY = '~/.claude/rules/justin-sdk/critical-rules.md';
 export interface SessionStartOptions {
   /** Override the starting directory (tests). Default `process.cwd()`. */
   cwd?: string;
+  /**
+   * The hook payload. Default: read from stdin (never from a TTY). `null`
+   * means "there is none", which is what a hand-typed run has.
+   */
+  payload?: HookPayload | null;
   /** User-level hook mode: stay completely silent in an enrolled repo. */
   userLevel?: boolean;
+}
+
+/**
+ * How to invoke the SDK in text this command prints for a reader: the repo's
+ * own pin under the project hook, `justin-sdk-latest` under the user-level one
+ * (an unenrolled repo has no `bun run justin-sdk` to resolve).
+ */
+function sdkCommand(args: string, userLevel: boolean): string {
+  return userLevel ? `${SDK_LATEST} ${args}` : sdkRun(args);
 }
 
 /**
@@ -112,9 +140,14 @@ export function projectHookOwnsRepo(projectRoot: string): boolean {
   return existsSync(resolve(projectRoot, 'justin-sdk.config.json'));
 }
 
-interface Injection {
-  additionalContext: string;
-  systemMessage: string;
+/** What one SessionStart run says, before doctor's report is added. */
+export interface SessionStartMessage {
+  /** Text injected into Claude's context. '' when there is none. */
+  forClaude: string;
+  /** For Justin only: the status header, drift advice and rule modules. */
+  forJustin: string;
+  /** Prints the full Claude-bound text, for a mirror that had to be cut. */
+  fullTextCommand: string | null;
 }
 
 /**
@@ -153,22 +186,55 @@ function pointerLine(missing: boolean): string {
 }
 
 /**
- * Assemble the rules pointer, the conditional rules, the repo state and the
- * freshness verdicts — the whole of what the plugin's SessionStart hook did.
+ * The conditional rule modules that apply to this repo, as Justin reads them
+ * (M2). Always says something — "none" is a finding, "UNKNOWN" is a failure,
+ * and the two must never look alike (critical rule 7).
+ */
+function conditionalModulesSection(args: {
+  names: string[] | null;
+  rulesFailed: string | null;
+  suppressed: boolean;
+}): string {
+  const {names, rulesFailed, suppressed} = args;
+  if (names == null) {
+    return `conditional rule modules: UNKNOWN (${rulesFailed ?? 'the rules could not be assembled'})`;
+  }
+  if (names.length === 0) {
+    return 'conditional rule modules that apply here: none';
+  }
+  // The label has to track suppression: naming these "injected" while they
+  // were dropped is the systemMessage telling Justin something untrue.
+  const label = suppressed
+    ? 'already in this repo’s rules artifact, not injected'
+    : 'injected into this session';
+  return (
+    `conditional rule modules that apply here (${label}):\n` +
+    names.map((n, i) => `  ${i + 1}. ${n}`).join('\n')
+  );
+}
+
+/**
+ * Assemble the rules pointer, the conditional rules and the freshness verdicts
+ * — what the plugin's SessionStart hook did, minus the repo state, which now
+ * waits for the first prompt (M1) unless `firstPrompt` says it could not.
  *
  * Every step is individually fail-soft, and each failure is REPORTED rather
- * than smoothed into a clean bill of health (rule 6): a rules load that throws
- * says so, a drift comparison that could not be made says `UNKNOWN`, and a git
- * walk that throws omits the repo-state block instead of printing an empty one.
+ * than smoothed into a clean bill of health (rule 7): a rules load that throws
+ * says so, a drift comparison that could not be made says `UNKNOWN`, and the
+ * module list says UNKNOWN rather than "none" when it was never computed.
  */
-export function composeSessionStart(projectRoot: string): Injection {
+export function composeSessionStart(
+  projectRoot: string,
+  options: {firstPrompt: ArmResult; userLevel: boolean},
+): SessionStartMessage {
+  const {firstPrompt, userLevel} = options;
   const RULES_FILE = rulesFilePath();
   const stamp = readDeployedStamp(RULES_FILE);
   const fileMissing = stamp == null;
 
   // --- rules (may throw if the prompts source can't be loaded) --------------
   let ruleText = '';
-  let condNames: string[] = [];
+  let condNames: string[] | null = null;
   let cloneSha: string | null = null;
   let sourceDir: string | null = null;
   let rulesFailed: string | null = null;
@@ -180,9 +246,17 @@ export function composeSessionStart(projectRoot: string): Injection {
       {partition: fileMissing ? 'full' : 'conditional'},
       projectRoot,
     );
-    condNames = assembled.names;
     cloneSha = assembled.sourceCommit?.sha ?? null;
     sourceDir = assembled.sourceDir;
+    // The FULL partition's names are every module, universal ones included,
+    // so the conditional subset is asked for separately — from the same clone,
+    // so nothing is fetched twice.
+    condNames = fileMissing
+      ? assemble(
+          {partition: 'conditional', promptsDir: assembled.sourceDir},
+          projectRoot,
+        ).names
+      : assembled.names;
     const body = fileMissing ? assembled.markdown : assembled.text;
     ruleText = [pointerLine(fileMissing), body]
       .filter((s) => s.length > 0)
@@ -196,35 +270,20 @@ export function composeSessionStart(projectRoot: string): Injection {
   const repoRules = checkRulesDrift(projectRoot);
   const suppressRuleText = REPO_CARRIES_RULES[repoRules.status];
 
-  // --- repo state (branch/worktree divergence) -----------------------------
-  let repoState = '';
-  try {
-    // PR state is a network call on the session-start hot path (~600ms against
-    // ~150ms for the core walk) and pays a full timeout when `gh` cannot reach
-    // GitHub. Opt in per-machine rather than making every session pay the tail.
-    const wantPrs = process.env.JUSTIN_SDK_PRIME_PRS === '1';
-    repoState = formatRepoState(
-      runDivergenceCheck({cwd: projectRoot, prs: wantPrs}),
-    );
-  } catch {
-    // Non-fatal: a git-inspection failure just omits the repo-state block.
-  }
+  // --- repo state: only when the first-prompt hook could not be armed -------
+  const repoState = firstPrompt.ok ? '' : composeRepoState(projectRoot);
 
   // --- compose + Prettier the injection (for the model) --------------------
-  // repoState is injected for EVERY repo, enrolled or not (Justin's explicit
-  // requirement): the branch/worktree picture is per-session state no committed
-  // file can carry, so it is never the duplicate half.
-  let additionalContext = [suppressRuleText ? '' : ruleText, repoState]
-    .filter((b) => b.length > 0)
-    .join('\n\n');
-  if (additionalContext.length > 0) {
+  let forClaude = suppressRuleText ? '' : ruleText;
+  if (forClaude.length > 0) {
     // Presentation only — this text is injected, never hashed or committed — so
     // a prettier failure legitimately degrades to the unformatted (still
     // complete) markdown. The drift hash below is a MEASUREMENT, handled
     // differently.
-    const formatted = prettierMarkdown(additionalContext);
-    if (formatted.status !== 'failed') additionalContext = formatted.markdown;
+    const formatted = prettierMarkdown(forClaude);
+    if (formatted.status !== 'failed') forClaude = formatted.markdown;
   }
+  forClaude = [forClaude, repoState].filter((b) => b.length > 0).join('\n\n');
 
   // --- drift check (fast path: sha; slow path: Prettier'd content hash) -----
   const deployedSha = deployedSourceSha(stamp);
@@ -259,7 +318,7 @@ export function composeSessionStart(projectRoot: string): Injection {
     }
   }
 
-  // --- systemMessage (for Justin; the model does NOT read it) --------------
+  // --- for Justin (Claude reads none of this) -------------------------------
   const parts: string[] = [];
   if (rulesFailed != null) {
     parts.push(`⚠️ FAILED to load rules (${rulesFailed})`);
@@ -285,54 +344,71 @@ export function composeSessionStart(projectRoot: string): Injection {
   if (suppressRuleText) {
     parts.push('rule text NOT injected (this repo carries its own)');
   }
-  let systemMessage = `justin-sdk session-start · ${parts.join(' · ')}`;
+  // Same for the repo state: where it went, or why it did not go there.
+  parts.push(
+    firstPrompt.ok
+      ? 'repo state → your first prompt'
+      : `⚠️ repo state injected NOW, not on the first prompt (${firstPrompt.error})`,
+  );
+  let forJustin = `justin-sdk session-start · ${parts.join(' · ')}`;
 
   // The detail sits immediately under the header line — closest to the marker
   // it explains, and above the module list, because it is the only part of this
   // message that ever asks Justin to DO something.
   if (isRulesDriftProblem(repoRules.status)) {
-    systemMessage += `\n⚠️ repo rules: ${repoRules.message}\n   → ${rulesDriftAdvice(repoRules.status)}`;
+    forJustin += `\n⚠️ repo rules: ${repoRules.message}\n   → ${rulesDriftAdvice(repoRules.status)}`;
   }
 
-  // Numbered summary of the modules the injection WOULD carry. The label has to
-  // track suppression: naming these "injected" while they were dropped is the
-  // systemMessage telling Justin something that is not true.
-  if (condNames.length > 0) {
-    const label = suppressRuleText
-      ? 'conditional modules (NOT injected — already in this repo’s artifact)'
-      : fileMissing
-        ? 'modules injected (full)'
-        : 'conditional modules (session-start injection)';
-    systemMessage +=
-      `\n${label}:\n` + condNames.map((n, i) => `  ${i + 1}. ${n}`).join('\n');
-  }
+  forJustin += `\n${conditionalModulesSection({
+    names: condNames,
+    rulesFailed,
+    suppressed: suppressRuleText,
+  })}`;
 
-  return {additionalContext, systemMessage};
+  return {
+    forClaude,
+    forJustin,
+    fullTextCommand:
+      forClaude === ''
+        ? null
+        : sdkCommand(
+            fileMissing ? 'prime --full' : 'prime --partition conditional',
+            userLevel,
+          ),
+  };
 }
 
 /**
- * Serialise the SessionStart hook envelope. Empty halves are omitted.
- *
- * ANSI IS STRIPPED FROM `additionalContext` (home-base-dchjw.9). Doctor's
- * report is coloured for a terminal, and nothing downstream of here is one: the
- * escapes go into the MODEL's context window, where they render as literal
- * `[32m` noise, cost tokens, and are a small but real prompt-injection surface.
- * Measured in home-base 2026-09-18: 2216 → 2014 bytes, 202 saved (9.1%), all of
- * it from doctor's half (1694 → 1492). `systemMessage` keeps its colours — that
- * half IS shown in a terminal, to Justin.
+ * Arm the first-prompt hook for this session, or say why it could not be —
+ * including when no `repo-state --hook` is installed to fire, which would
+ * otherwise turn "repo state → your first prompt" into a promise nothing keeps.
  */
-function emitEnvelope(injection: Injection): void {
-  const {additionalContext, systemMessage} = injection;
-  if (additionalContext.length === 0 && systemMessage.length === 0) return;
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: {
-        additionalContext: stripAnsi(additionalContext),
-        hookEventName: 'SessionStart',
-      },
-      systemMessage,
-    }),
-  );
+function armForSession(
+  projectRoot: string,
+  payload: HookPayload | null,
+  userLevel: boolean,
+): ArmResult {
+  const presence = repoStateHookPresence(projectRoot, userLevel);
+  if (presence.kind !== 'installed') {
+    const fix = userLevel
+      ? 'add the user-level UserPromptSubmit hook to ~/.claude/settings.json (doctor prints the JSON in any enrolled repo)'
+      : `run \`${sdkRun('install')}\``;
+    return {
+      error:
+        presence.kind === 'absent'
+          ? `no \`repo-state --hook\` UserPromptSubmit hook is installed — ${fix}`
+          : `whether a \`repo-state --hook\` UserPromptSubmit hook is installed is UNKNOWN: ${presence.why}`,
+      ok: false,
+    };
+  }
+  const sessionId = safeSessionId(payload);
+  if (sessionId == null) {
+    return {
+      error: 'the hook payload carried no usable session_id',
+      ok: false,
+    };
+  }
+  return armFirstPrompt(sessionId, payload?.source ?? null);
 }
 
 /**
@@ -345,35 +421,121 @@ export async function runSessionStart(
   options: SessionStartOptions = {},
 ): Promise<number> {
   const cwd = options.cwd ?? process.cwd();
+  const userLevel = options.userLevel === true;
 
   // REMOTE: a cloud container has no node_modules and no hydrated tree. It
   // needs `setup-env`, not advice, and setup-env keeps stdout empty by contract.
   // User-level mode never takes this branch: it is reached only through the
   // local ~/.claude/settings.json hook.
-  if (options.userLevel !== true && process.env.CLAUDE_CODE_REMOTE === 'true') {
+  if (!userLevel && process.env.CLAUDE_CODE_REMOTE === 'true') {
     return await runSetupEnv({});
   }
 
   const projectRoot = sessionProjectRoot(cwd);
 
-  if (options.userLevel === true) {
-    // The project hook owns enrolled repos. Silence here is the whole point:
-    // both hooks firing would deliver the repo state twice.
-    if (projectHookOwnsRepo(projectRoot)) return 0;
-    emitEnvelope(composeSessionStart(projectRoot));
+  // The project hook owns enrolled repos. Silence here is the whole point:
+  // both hooks firing would deliver everything twice.
+  if (userLevel && projectHookOwnsRepo(projectRoot)) return 0;
+
+  // ARM FIRST, before the rules and doctor (which take a second or more): the
+  // reference says SessionStart hooks "run in the background. You can type
+  // right away", so a prompt can race this hook. Arming early narrows that
+  // window; first-prompt.ts covers the rest by firing on a missing marker.
+  const payload =
+    options.payload !== undefined ? options.payload : readHookPayload();
+  const firstPrompt = armForSession(projectRoot, payload, userLevel);
+
+  const message = composeSessionStart(projectRoot, {firstPrompt, userLevel});
+
+  let forJustin = message.forJustin;
+  if (!userLevel) {
+    // RETURNED, not captured: doctor hands its report back as text, so stdout
+    // stays the envelope's alone. `exitCode` is deliberately unused — this hook
+    // always exits 0, and the verdict is in the report it just produced. It is
+    // Justin's to act on (M2), so it goes to him and not into Claude's context.
+    const doctor = await renderDoctor(projectRoot, {quiet: true});
+    forJustin = [forJustin, doctor.report.trim()]
+      .filter((block) => block.length > 0)
+      .join('\n\n');
+  }
+
+  emitHookOutput({
+    event: 'SessionStart',
+    forClaude: message.forClaude,
+    forJustin,
+    fullTextCommand: message.fullTextCommand,
+  });
+  return 0;
+}
+
+export interface RepoStateOptions {
+  cwd?: string;
+  /** Run as the UserPromptSubmit hook: read the payload, fire at most once. */
+  hook?: boolean;
+  /** The hook payload (tests). Default: read from stdin, never from a TTY. */
+  payload?: HookPayload | null;
+  /** User-level hook mode: silent in an enrolled repo, like session-start. */
+  userLevel?: boolean;
+}
+
+/**
+ * `justin-sdk repo-state` — print the repo-state block; with `--hook`, the
+ * UserPromptSubmit hook that injects it on a session's first prompt (M1).
+ *
+ * Always exits 0 as a hook: a UserPromptSubmit hook that exits 2 BLOCKS the
+ * prompt, and nothing here is worth costing Justin a turn.
+ */
+export function runRepoState(options: RepoStateOptions = {}): number {
+  const cwd = options.cwd ?? process.cwd();
+  const userLevel = options.userLevel === true;
+
+  if (options.hook !== true) {
+    const block = composeRepoState(sessionProjectRoot(cwd));
+    if (block === '') {
+      console.error(
+        'repo-state: nothing to report here (not a git repository, or a detached HEAD)',
+      );
+      return 0;
+    }
+    console.log(block);
     return 0;
   }
 
-  const injection = composeSessionStart(projectRoot);
-  // RETURNED, not captured: doctor hands its report back as text, so stdout
-  // stays the envelope's alone. `exitCode` is deliberately unused — this hook
-  // always exits 0, and the verdict is in the report it just produced.
-  const doctor = await renderDoctor(projectRoot, {quiet: true});
-  emitEnvelope({
-    additionalContext: [doctor.report.trimEnd(), injection.additionalContext]
-      .filter((block) => block.length > 0)
-      .join('\n\n'),
-    systemMessage: injection.systemMessage,
+  // Remote sessions never had a repo-state block (session-start hands remote
+  // straight to setup-env), and this hook does not start giving them one.
+  if (!userLevel && process.env.CLAUDE_CODE_REMOTE === 'true') return 0;
+
+  const projectRoot = sessionProjectRoot(cwd);
+  if (userLevel && projectHookOwnsRepo(projectRoot)) return 0;
+
+  const payload =
+    options.payload !== undefined ? options.payload : readHookPayload();
+  const sessionId = safeSessionId(payload);
+  if (sessionId == null) {
+    // stderr, not the envelope: without a session id there is no "first"
+    // prompt to speak of, and printing on every prompt would be worse.
+    console.error(
+      'repo-state --hook: the hook payload carried no usable session_id, so nothing was injected',
+    );
+    return 0;
+  }
+
+  const claim = claimFirstPrompt(sessionId);
+  if (!claim.fire) {
+    if (claim.why === 'cannot-record') {
+      console.error(`repo-state --hook: nothing injected — ${claim.error}`);
+    }
+    return 0;
+  }
+
+  emitHookOutput({
+    event: 'UserPromptSubmit',
+    forClaude: composeRepoState(projectRoot),
+    forJustin:
+      claim.recordError == null
+        ? ''
+        : `⚠️ repo-state: ${claim.recordError} — the next prompt may get this block again`,
+    fullTextCommand: sdkCommand('repo-state', userLevel),
   });
   return 0;
 }

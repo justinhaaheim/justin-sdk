@@ -29,6 +29,8 @@
 import {readFileSync} from 'fs';
 import {resolve} from 'path';
 
+import {emitHookOutput} from './hook-output';
+
 /** Marks our own output so a later run can find it in the transcript. */
 export const TIME_CHECK_MARKER = '[Automated Time Check]';
 
@@ -368,15 +370,8 @@ export function runTimeCheck(args: {now?: Date; stdin?: string}): number {
   // relies on), while `additionalContext` goes to the model and is invisible to
   // Justin. Printing only stdout — as this did originally — meant the model got
   // the stamp and Justin saw nothing, which is a confusing way for a tool to
-  // behave when its whole job is telling you what time it is.
-  console.log(
-    JSON.stringify({
-      hookSpecificOutput: {
-        additionalContext: report,
-        hookEventName: 'UserPromptSubmit',
-      },
-      systemMessage: report,
-    }),
-  );
+  // behave when its whole job is telling you what time it is. The mirror is
+  // now the shared helper's job (home-base-39co9.4 M3).
+  emitHookOutput({event: 'UserPromptSubmit', forClaude: report});
   return 0;
 }

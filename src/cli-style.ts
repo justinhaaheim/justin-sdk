@@ -227,6 +227,38 @@ export function sectionHeader(
 }
 
 /**
+ * One indent level, the same at every depth (home-base CLAUDE.md, Justin
+ * 2026-10-05: "Indent in one uniform step"; deep, uneven indents read as ragged,
+ * not as structure). A view built on it puts its header at HEADER_COLUMN, its
+ * records one step in (BODY_COLUMN), a record's fields one step further, and
+ * anything listed under a field's sub-heading one step beyond that.
+ *
+ * BODY_COLUMN and DETAIL_COLUMN above predate this rule (6 then 9 is a step of
+ * 4 then 3) and stay as they are for the views already built on them; new
+ * views step by this constant instead.
+ */
+export const INDENT_STEP = 4;
+
+/** The column `levels` uniform steps in from the body. */
+export function stepColumn(levels: number): number {
+  return BODY_COLUMN + levels * INDENT_STEP;
+}
+
+/** One labelled value in a vertical field list. */
+export interface Field {
+  label: string;
+  value: string;
+}
+
+/** The label column a set of fields needs: the widest `label:` plus two spaces. */
+export function fieldLabelWidth(fields: readonly Field[]): number {
+  return fields.reduce(
+    (widest, field) => Math.max(widest, displayWidth(`${field.label}:`) + 2),
+    0,
+  );
+}
+
+/**
  * Blocks joined by exactly one blank line — the K11 rule-1 separator.
  * Empty blocks are dropped, so a caller never has to guard against a double
  * blank line.
@@ -410,6 +442,41 @@ export function wrapHanging(text: string, options: WrapOptions): string {
         ...options,
         indent: index === 0 ? options.indent : options.hang,
       }),
+    )
+    .join('\n');
+}
+
+/**
+ * Parallel fields stacked VERTICALLY, one per line, with a bold label and every
+ * value starting in one column (home-base CLAUDE.md, Justin 2026-10-05: never
+ * join parallel fields into one long `·`-separated line).
+ *
+ * `labelWidth` lets sibling records share a value column, so the same field
+ * sits in the same place in every record; it defaults to these fields' own.
+ * A value that wraps (TTY only) hangs at the value column, not under the
+ * label, and so does every line after an explicit newline in a value — which
+ * is how a field holds a list (one path per line).
+ */
+export function fieldLines(
+  fields: readonly Field[],
+  options: {
+    color: boolean;
+    indent: number;
+    labelWidth?: number;
+    width: number | null;
+  },
+): string {
+  const labelWidth = options.labelWidth ?? fieldLabelWidth(fields);
+  return fields
+    .map((field) =>
+      wrapHanging(
+        `${paint(`${field.label}:`, ['bold'], options.color)}${pad(labelWidth - displayWidth(`${field.label}:`))}${field.value}`,
+        {
+          hang: options.indent + labelWidth,
+          indent: options.indent,
+          width: options.width,
+        },
+      ),
     )
     .join('\n');
 }

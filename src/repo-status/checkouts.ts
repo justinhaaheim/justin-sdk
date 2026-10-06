@@ -1,10 +1,18 @@
 /**
- * WORKTREE FACTS for `justin-sdk forensics repo` (home-base-lj3x9).
+ * CHECKOUT FACTS for `repo-status status --checkouts` (home-base-39co9.5; first
+ * built as `justin-sdk forensics repo`, home-base-lj3x9).
  *
  * The facts a project-forensics investigator assembled by hand on 2026-09-18,
  * about twenty git commands per repo: every checkout's branch, what is
- * uncommitted in it, how far it is from the baseline, whether it was ever
- * pushed, when it last moved, and which open beads exist only on it.
+ * uncommitted in it, whether it was ever pushed, when it last moved, and which
+ * open beads exist only on it.
+ *
+ * MERGE STATE IS NOT HERE, ON PURPOSE. The digest this came from counted
+ * commits by identity and printed "N commits not on main", which a squash-merge
+ * or a rebase makes false. Whether a checkout's branch is on the baseline is the
+ * ledger row's `disposition` and `why` (patch-id, then file by file), and the
+ * renderer reads it from there (39co9.5 R1). Nothing in this module computes or
+ * implies it.
  *
  * READ ONLY. Every git call here reads; nothing is checked out, fetched or
  * written. `git show <sha>:.beads/issues.jsonl` is how a branch's beads are read
@@ -14,15 +22,12 @@
  * are different facts, and so are "no beads file on this branch" and "no beads
  * only on this branch". Each unmeasured field is null plus a named entry in
  * `failures`; none of them is ever a zero standing in for "I could not tell".
- *
- * AHEAD/BEHIND HERE IS BY COMMIT IDENTITY. A squash-merged or rebased branch
- * still shows commits "ahead" although its content is on the baseline. That is
- * `repo-status`'s job to prove (it compares by patch-id and by file); this
- * module says so in its output rather than pretending to be that tool.
  */
 
 import {execFileSync} from 'child_process';
 import {existsSync} from 'fs';
+
+import {readWorktreeState, type WorktreeState} from './worktree-state';
 
 export type GitRead = {error: string; ok: false} | {ok: true; value: string};
 
@@ -60,7 +65,13 @@ export function gitRead(cwd: string, args: readonly string[]): GitRead {
   }
 }
 
-export interface WorktreeEntry {
+/**
+ * One entry of `git worktree list --porcelain`, with the fields core.ts's
+ * listing does not keep (HEAD, locked, prunable, bare). core.ts stays the
+ * listing the ledger is built on; this one is read only when `--checkouts`
+ * asks for the per-checkout view.
+ */
+export interface PorcelainWorktree {
   bare: boolean;
   /** Short branch name, or null for a detached HEAD. */
   branch: string | null;
@@ -72,9 +83,9 @@ export interface WorktreeEntry {
 }
 
 /** Parse `git worktree list --porcelain`. The first entry is the primary checkout. */
-export function parseWorktreePorcelain(text: string): WorktreeEntry[] {
-  const entries: WorktreeEntry[] = [];
-  let current: WorktreeEntry | null = null;
+export function parseWorktreePorcelain(text: string): PorcelainWorktree[] {
+  const entries: PorcelainWorktree[] = [];
+  let current: PorcelainWorktree | null = null;
   for (const line of text.split('\n')) {
     if (line.startsWith('worktree ')) {
       current = {
@@ -102,39 +113,6 @@ export function parseWorktreePorcelain(text: string): WorktreeEntry[] {
     }
   }
   return entries;
-}
-
-/**
- * The branch everything is measured against: origin/HEAD's branch when it
- * exists locally, else `main`, else `master`. Null (with the reason) when none
- * exists — never a guess.
- */
-export function resolveBaseline(repo: string): GitRead {
-  const candidates: string[] = [];
-  const originHead = gitRead(repo, [
-    'symbolic-ref',
-    '--quiet',
-    '--short',
-    'refs/remotes/origin/HEAD',
-  ]);
-  if (originHead.ok) {
-    const name = originHead.value.trim().replace(/^origin\//u, '');
-    if (name !== '') candidates.push(name);
-  }
-  candidates.push('main', 'master');
-  for (const name of candidates) {
-    const exists = gitRead(repo, [
-      'rev-parse',
-      '--verify',
-      '--quiet',
-      `refs/heads/${name}`,
-    ]);
-    if (exists.ok) return {ok: true, value: name};
-  }
-  return {
-    error: `baseline: none of ${[...new Set(candidates)].join(', ')} exists as a local branch in ${repo}`,
-    ok: false,
-  };
 }
 
 /** `rev-list --left-right --count A...B` → {left, right}. */
@@ -282,7 +260,7 @@ export type BranchBeads =
   | {beads: BeadRef[]; kind: 'measured'}
   | {kind: 'no-beads-file'};
 
-export interface WorktreeFacts {
+export interface CheckoutFacts {
   branch: string | null;
   /** Open beads only this branch carries. Null when unmeasured (see failures). */
   branchOnlyBeads: BranchBeads | null;
@@ -295,33 +273,35 @@ export interface WorktreeFacts {
   locked: boolean;
   path: string;
   prunable: boolean;
-  /** `git status --porcelain` lines. `[]` = checked and clean; null = not checked. */
-  uncommitted: string[] | null;
+  /**
+   * What is uncommitted here, from the same reader as the ledger's
+   * `worktreeState`. Null when the directory is gone, so it was never read.
+   */
+  state: WorktreeState | null;
   upstream: 'none' | Upstream | null;
-  /** Commits by identity against the baseline. Null when unmeasured. */
-  vsBaseline: {ahead: number; behind: number} | null;
 }
 
 /** Read the baseline's beads file once; null when it has none. */
 export function readBaselineBeads(
   repo: string,
-  baseline: string,
+  baselineRev: string,
 ): GitRead | {ok: true; value: null} {
-  const read = gitRead(repo, ['show', `${baseline}:${BEADS_PATH}`]);
+  const read = gitRead(repo, ['show', `${baselineRev}:${BEADS_PATH}`]);
   if (read.ok) return read;
   if (isMissingPath(read.error)) return {ok: true, value: null};
   return read;
 }
 
-export function readWorktreeFacts(
+export function readCheckoutFacts(
   repo: string,
-  entry: WorktreeEntry,
+  entry: PorcelainWorktree,
   isPrimary: boolean,
-  baseline: string | null,
+  baselineName: string,
   baselineBeads: string | null | undefined,
-): WorktreeFacts {
+  knownStates: ReadonlyMap<string, WorktreeState>,
+): CheckoutFacts {
   const failures: string[] = [];
-  const facts: WorktreeFacts = {
+  const facts: CheckoutFacts = {
     branch: entry.branch,
     branchOnlyBeads: null,
     exists: existsSync(entry.path),
@@ -332,24 +312,14 @@ export function readWorktreeFacts(
     locked: entry.locked,
     path: entry.path,
     prunable: entry.prunable,
-    uncommitted: null,
+    state: null,
     upstream: null,
-    vsBaseline: null,
   };
 
   if (facts.exists) {
-    const status = gitRead(entry.path, [
-      'status',
-      '--porcelain=v1',
-      '--untracked-files=normal',
-    ]);
-    if (status.ok) {
-      facts.uncommitted = status.value
-        .split('\n')
-        .filter((line) => line.trim() !== '');
-    } else {
-      failures.push(`uncommitted: ${status.error}`);
-    }
+    // The ledger already ran `git status` in every checkout it knows; reuse
+    // that reading rather than run a second one that could disagree with it.
+    facts.state = knownStates.get(entry.path) ?? readWorktreeState(entry.path);
   } else {
     failures.push(
       `uncommitted: ${entry.path} does not exist on disk${entry.prunable ? ' (git marks it prunable)' : ''}`,
@@ -371,23 +341,13 @@ export function readWorktreeFacts(
     );
   }
 
-  if (baseline == null) {
-    failures.push('vs baseline: no baseline branch could be resolved');
-  } else {
-    const counts = leftRight(repo, baseline, head);
-    if ('error' in counts) failures.push(`vs baseline: ${counts.error}`);
-    else facts.vsBaseline = {ahead: counts.right, behind: counts.left};
-  }
-
   if (entry.branch != null) {
     facts.upstream = readUpstream(repo, entry.branch, failures);
   } else {
     failures.push('upstream: detached HEAD, no branch to have one');
   }
 
-  if (baseline == null) {
-    failures.push('branch-only beads: no baseline branch to compare against');
-  } else if (entry.branch === baseline) {
+  if (entry.branch === baselineName) {
     facts.branchOnlyBeads = {beads: [], kind: 'measured'};
   } else if (baselineBeads === undefined) {
     failures.push(
@@ -412,43 +372,116 @@ export function readWorktreeFacts(
   return facts;
 }
 
-export interface RepoWorktrees {
-  baseline: string | null;
+/**
+ * One repo at a glance, for `repo-status repos`: its primary checkout's branch,
+ * uncommitted work, upstream and last commit, and how many checkouts it has.
+ *
+ * These are the per-repo facts the retired cross-project scanner gave (home-base
+ * 39co9.5 R6 inventory), now read with the same readers as `--checkouts`.
+ * Every field is null when unmeasured, with the reason in `failures`.
+ */
+export interface RepoGlance {
+  branch: string | null;
+  /** How many checkouts `git worktree list` names; null when it failed. */
+  checkouts: number | null;
   failures: string[];
-  repo: string;
-  worktrees: WorktreeFacts[];
+  lastCommitAt: string | null;
+  state: WorktreeState | null;
+  upstream: 'none' | Upstream | null;
 }
 
-/** Every checkout of `repo`, primary first. */
-export function readRepoWorktrees(repo: string): RepoWorktrees {
+export function readRepoGlance(repo: string): RepoGlance {
   const failures: string[] = [];
-  const result: RepoWorktrees = {
-    baseline: null,
+  const glance: RepoGlance = {
+    branch: null,
+    checkouts: null,
     failures,
-    repo,
-    worktrees: [],
+    lastCommitAt: null,
+    state: null,
+    upstream: null,
   };
   const list = gitRead(repo, ['worktree', 'list', '--porcelain']);
   if (!list.ok) {
-    failures.push(`worktrees: ${list.error}`);
-    return result;
+    failures.push(`checkouts: ${list.error}`);
+    return glance;
   }
-  const baseline = resolveBaseline(repo);
-  if (baseline.ok) result.baseline = baseline.value;
-  else failures.push(baseline.error);
+  const entries = parseWorktreePorcelain(list.value).filter((e) => !e.bare);
+  glance.checkouts = entries.length;
+  const primary = entries[0];
+  if (primary == null) {
+    failures.push('checkouts: git worktree list named no checkout');
+    return glance;
+  }
+  glance.branch = primary.branch;
+  if (existsSync(primary.path)) {
+    glance.state = readWorktreeState(primary.path);
+  } else {
+    failures.push(`uncommitted: ${primary.path} does not exist on disk`);
+  }
+  if (primary.branch != null) {
+    glance.upstream = readUpstream(repo, primary.branch, failures);
+  }
+  if (primary.head == null) {
+    failures.push('last commit: git worktree list gave no HEAD');
+  } else {
+    const last = gitRead(repo, ['log', '-1', '--format=%cI', primary.head]);
+    if (last.ok && last.value.trim() !== '') {
+      glance.lastCommitAt = last.value.trim();
+    } else {
+      failures.push(
+        `last commit: ${last.ok ? 'git log printed no date' : last.error}`,
+      );
+    }
+  }
+  return glance;
+}
+
+/**
+ * Every checkout of the repo, primary first. `checkouts` is NULL, with the
+ * reason in `failures`, when git could not list them — never an empty list
+ * standing in for "could not tell".
+ */
+export interface CheckoutsReport {
+  checkouts: CheckoutFacts[] | null;
+  failures: string[];
+}
+
+/**
+ * Every checkout of `repo`, read against the ledger's PINNED baseline: the
+ * baseline's beads are read at `baseline.sha`, the commit every ledger row was
+ * measured against, so the two halves of one report describe one repo state.
+ */
+export function readCheckouts(
+  repo: string,
+  baseline: {name: string; sha: string},
+  knownStates: ReadonlyMap<string, WorktreeState>,
+): CheckoutsReport {
+  const failures: string[] = [];
+  const list = gitRead(repo, ['worktree', 'list', '--porcelain']);
+  if (!list.ok) {
+    failures.push(`checkouts: ${list.error}`);
+    return {checkouts: null, failures};
+  }
 
   let baselineBeads: string | null | undefined;
-  if (result.baseline != null) {
-    const read = readBaselineBeads(repo, result.baseline);
-    if (read.ok) baselineBeads = read.value;
-    else failures.push(`baseline beads: ${read.error}`);
-  }
+  const read = readBaselineBeads(repo, baseline.sha);
+  if (read.ok) baselineBeads = read.value;
+  else failures.push(`baseline beads: ${read.error}`);
 
   const entries = parseWorktreePorcelain(list.value).filter(
     (entry) => !entry.bare,
   );
-  result.worktrees = entries.map((entry, index) =>
-    readWorktreeFacts(repo, entry, index === 0, result.baseline, baselineBeads),
-  );
-  return result;
+  return {
+    checkouts: entries.map((entry, index) =>
+      readCheckoutFacts(
+        repo,
+        entry,
+        index === 0,
+        baseline.name,
+        baselineBeads,
+        knownStates,
+      ),
+    ),
+    failures,
+  };
 }

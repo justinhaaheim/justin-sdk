@@ -81,6 +81,8 @@
 import {closeSync, openSync, readFileSync, readSync, statSync} from 'fs';
 import {join, resolve} from 'path';
 
+import {emitHookOutput} from './hook-output';
+
 /** Marks our own output so a later run can find it in the transcript. */
 export const USAGE_CHECK_MARKER = '[Automated Usage Check]';
 
@@ -1150,15 +1152,11 @@ export function runUsageCheck(args?: {stdin?: string}): number {
   // `systemMessage` renders in Justin's terminal but never enters the model's
   // context, while `additionalContext` goes to the model and is invisible to
   // Justin. The model is the one that has to act on this; Justin is the one who
-  // needs to know why it suddenly started wrapping up.
-  console.log(
-    JSON.stringify({
-      hookSpecificOutput: {
-        additionalContext: notice,
-        hookEventName: input.hook_event_name ?? DEFAULT_HOOK_EVENT,
-      },
-      systemMessage: notice,
-    }),
-  );
+  // needs to know why it suddenly started wrapping up. The mirror is the shared
+  // helper's job (home-base-39co9.4 M3).
+  emitHookOutput({
+    event: input.hook_event_name ?? DEFAULT_HOOK_EVENT,
+    forClaude: notice,
+  });
   return 0;
 }

@@ -48,11 +48,10 @@ import {
   restorePinSnapshot,
   runSweep,
   stageForCommit,
-  SWEEP_BRANCH,
-  SWEEP_WORKTREE_SEGMENTS,
   sweepCommitMessage,
 } from '../src/sweep';
 import {git, initRepo, sdkRemoteWithOwnTag, write} from './git-fixtures';
+import {expectNoSweepRemains} from './sweep-e2e-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const SDK_PKG = '@justinhaaheim/justin-sdk';
@@ -494,10 +493,9 @@ async function captureLog<T>(
   }
 }
 
-/** No sweep worktree, no sweep branch, no working-tree change. */
+/** No sweep worktree, no sweep branch (any run's name), no working-tree change. */
 function expectUntouched(repo: string): void {
-  expect(existsSync(join(repo, ...SWEEP_WORKTREE_SEGMENTS))).toBe(false);
-  expect(git(repo, ['branch', '--list', SWEEP_BRANCH]).trim()).toBe('');
+  expectNoSweepRemains(repo);
   expect(git(repo, ['status', '--porcelain']).trim()).toBe('');
 }
 
@@ -537,7 +535,11 @@ describe('runSweep --component', () => {
     const repo = repoWithComponents(sb, 'other', ['base-setup', 'beads-setup']);
 
     const {out, value} = await captureLog(() =>
-      runSweep({component: 'gitignore', repos: [repo]}),
+      runSweep({
+        component: 'gitignore',
+        logDir: join(sb.path, 'logs'),
+        repos: [repo],
+      }),
     );
 
     // A skip is a normal outcome, not a failure.
@@ -551,7 +553,11 @@ describe('runSweep --component', () => {
     const repo = initRepo(sb, 'uncommitted', {'a.txt': 'a\n'});
 
     const {out, value} = await captureLog(() =>
-      runSweep({component: 'gitignore', repos: [repo]}),
+      runSweep({
+        component: 'gitignore',
+        logDir: join(sb.path, 'logs'),
+        repos: [repo],
+      }),
     );
 
     // ckc4 F4: "I could not read this repo's enrollment" is a repo the run
@@ -560,8 +566,7 @@ describe('runSweep --component', () => {
     expect(value).toBe(1);
     expect(out).toContain('cannot read enrollment');
     expect(out).toContain('COULD NOT SWEEP: uncommitted');
-    expect(existsSync(join(repo, ...SWEEP_WORKTREE_SEGMENTS))).toBe(false);
-    expect(git(repo, ['branch', '--list', SWEEP_BRANCH]).trim()).toBe('');
+    expectNoSweepRemains(repo);
   });
 
   test('--dry-run with --component reports the scoped plan per repo and changes nothing', async () => {
@@ -878,7 +883,11 @@ describe('runSweep --component critical-rules · the user-level line (D17)', () 
     const repo = repoWithComponents(sb, 'other', ['base-setup']);
 
     const {out, value} = await captureLog(() =>
-      runSweep({component: 'critical-rules', repos: [repo]}),
+      runSweep({
+        component: 'critical-rules',
+        logDir: join(sb.path, 'logs'),
+        repos: [repo],
+      }),
     );
 
     expect(value).toBe(0);
@@ -915,7 +924,11 @@ describe('runSweep --component critical-rules · the user-level line (D17)', () 
     const repo = repoWithComponents(sb, 'other', ['base-setup']);
 
     const {out, value} = await captureLog(() =>
-      runSweep({component: 'critical-rules', repos: [repo]}),
+      runSweep({
+        component: 'critical-rules',
+        logDir: join(sb.path, 'logs'),
+        repos: [repo],
+      }),
     );
 
     // The run is red — a silent 0 here would be the failure-shaped-as-silence
@@ -938,7 +951,11 @@ describe('runSweep --component critical-rules · the user-level line (D17)', () 
     const repo = initRepo(sb, 'uncommitted', {'a.txt': 'a\n'});
 
     const {out} = await captureLog(() =>
-      runSweep({component: 'critical-rules', repos: [repo]}),
+      runSweep({
+        component: 'critical-rules',
+        logDir: join(sb.path, 'logs'),
+        repos: [repo],
+      }),
     );
 
     expect(out).toContain('cannot read enrollment');

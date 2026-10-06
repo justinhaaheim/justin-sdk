@@ -25,6 +25,7 @@ import {mkdirSync, writeFileSync} from 'fs';
 import {join, resolve} from 'path';
 
 import {projectHookOwnsRepo, sessionProjectRoot} from '../src/session-start';
+import {USER_LEVEL_PROMPT_HOOK_COMMAND} from '../src/user-level-hook';
 import {git} from './git-fixtures';
 import {createSandbox} from './sandbox';
 
@@ -149,6 +150,13 @@ function runUserLevel(
   promptsDir?: string,
 ): {status: number; stdout: string} {
   const home = createSandbox();
+  // Justin's user settings carry the user-level prompt hook, as doctor tells
+  // him to paste — so session-start can promise the first prompt the repo state.
+  mkdirSync(join(home.path, '.claude'), {recursive: true});
+  writeFileSync(
+    join(home.path, '.claude', 'settings.json'),
+    `${JSON.stringify({hooks: {UserPromptSubmit: [{hooks: [{command: USER_LEVEL_PROMPT_HOOK_COMMAND, type: 'command'}]}]}}, null, 2)}\n`,
+  );
   try {
     const result = execFileSync(
       process.execPath,
@@ -166,7 +174,15 @@ function runUserLevel(
           JSDK_PRIME_PRETTIER: '0',
           ...(promptsDir != null ? {JSDK_PROMPTS_DIR: promptsDir} : {}),
           XDG_CONFIG_HOME: join(home.path, 'config'),
+          XDG_STATE_HOME: join(home.path, 'state'),
         },
+        // The payload Claude Code sends, so the first-prompt hook is armed
+        // (home-base-39co9.4) rather than taking the no-payload fallback.
+        input: JSON.stringify({
+          hook_event_name: 'SessionStart',
+          session_id: 'user-level-test',
+          source: 'startup',
+        }),
       },
     );
     return {status: 0, stdout: result};
@@ -194,7 +210,7 @@ describe('session-start --user-level', () => {
    * vacuous: with the enrolment check removed this arm and the one above would
    * print the same thing, and only one of them can be right.
    */
-  test('an UNENROLLED repo gets the rules pointer and the repo-state block', () => {
+  test('an UNENROLLED repo gets the rules pointer (mirrored), and the repo state is armed for the first prompt', () => {
     const prompts = promptsFixture();
     const sb = createSandbox();
     initRepoAt(sb.path);
@@ -209,7 +225,16 @@ describe('session-start --user-level', () => {
     expect(parsed.hookSpecificOutput?.hookEventName).toBe('SessionStart');
     const context = parsed.hookSpecificOutput?.additionalContext ?? '';
     expect(context).toContain('~/.claude/rules/justin-sdk/critical-rules.md');
-    expect(context).toContain('# Current repo state');
+    // M3: Justin sees what Claude got.
+    expect(parsed.systemMessage ?? '').toContain(
+      '~/.claude/rules/justin-sdk/critical-rules.md',
+    );
+    // M1: the repo state now waits for the first prompt (tests/first-prompt.test.ts
+    // drives that half end to end).
+    expect(context).not.toContain('# Current repo state');
+    expect(parsed.systemMessage ?? '').toContain(
+      'repo state → your first prompt',
+    );
     sb.cleanup();
   });
 });

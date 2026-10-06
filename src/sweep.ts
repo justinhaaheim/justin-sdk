@@ -2,8 +2,10 @@
  * sweep.ts — `justin-sdk sweep`: the fleet propagation orchestrator
  * (home-base-j2n7, decisions of 2026-08-08).
  *
- * WHAT IT DOES, per enrolled repo: fresh worktree off the local default
- * branch → hydrate → measure the BASELINE doctor/signal → `justin-sdk update`
+ * WHAT IT DOES, per enrolled repo: list (and, when provably empty, remove)
+ * earlier runs' leftovers → fetch the default branch's upstream and
+ * fast-forward or refuse (39co9.6 S5) → fresh worktree named for THIS run off
+ * the local default branch (S1) → hydrate → measure the BASELINE doctor/signal → `justin-sdk update`
  * (self-update the pin + re-apply components) → prettier-normalize the
  * SDK-written JSON → gate on the repo's own signal + doctor AS A RATCHET
  * (regression, not absolute health) → commit → merge --ff-only into the
@@ -29,6 +31,17 @@
  * evidence goes to a durable per-run log instead — failing step, exit code, and
  * the last 60 lines of its stdout+stderr. The two deliberate `merge-pending`
  * returns are the only paths that keep a worktree, and they say so.
+ *
+ * ONE NAME PER RUN (home-base-39co9.6, 2026-10-05). Even with cleanup on every
+ * red step, an INTERRUPTED run still stranded the fixed-name worktree, and its
+ * commit then made the repo "COULD NOT SWEEP" until someone cleared it by hand
+ * (three repos, 2026-10-05). So each run stamps its branch and worktree with
+ * the run-log stamp, earlier leftovers are listed rather than blocking (still
+ * removed when provably empty, never when they hold a commit), and the log is
+ * written from the start so a killed run says how far it got. A push that fails
+ * after the local merge is its own red outcome, and it and merge-pending both
+ * fail the run (S7) — "0 failed" over four unpushed repos was the report that
+ * prompted it.
  *
  * THE RATCHET CONTRACT (Justin, verbatim-adjacent: "the more deterministic
  * we can make this, the better"): this script stays DUMB. It never grows
@@ -138,12 +151,81 @@ import {
 } from './sweep-install';
 import {runSyncRules} from './sync-rules';
 
-export const SWEEP_BRANCH = 'worktree-sdk-sweep';
-export const SWEEP_WORKTREE_SEGMENTS = [
-  '.claude',
-  'worktrees',
-  'sdk-sweep',
-] as const;
+// ---------------------------------------------------------------------------
+// Run identity — one timestamped branch + worktree per run (home-base-39co9.6 S1)
+// ---------------------------------------------------------------------------
+
+/**
+ * The directory the sweep's worktrees live in, relative to each repo — Claude
+ * Code's own worktree convention, so the sweep's trees sit beside the ones the
+ * worktree tool makes and are ignored on the same three surfaces.
+ */
+export const SWEEP_WORKTREES_DIR = ['.claude', 'worktrees'] as const;
+
+/**
+ * The FIXED name every run used until 2026-10-05 (branch `worktree-sdk-sweep`
+ * at `.claude/worktrees/sdk-sweep`). No run creates it any more; it is kept
+ * only so the leftover scan still recognises what those runs left behind.
+ *
+ * WHY THE FIXED NAME HAD TO GO (S1, Justin 2026-10-05): one name per repo meant
+ * one stranded run blocked every later sweep of that repo. On 2026-10-05 three
+ * repos were blocked by 2026-09-18 leftovers, each holding one sweep commit
+ * that never merged. With a name per run, an older leftover can never collide
+ * with a new run, so it is REPORTED (S2) instead of blocking.
+ */
+export const LEGACY_SWEEP_NAME = 'sdk-sweep';
+
+/**
+ * A run's stamp: the ISO start time with the colons swapped for dashes (legal
+ * on macOS but hostile in shell arguments and Finder). The SAME string names
+ * the run log, the branch and the worktree, so any one of them finds the other
+ * two. Pure.
+ */
+export function sweepRunStamp(now: Date): string {
+  return now.toISOString().replace(/:/g, '-');
+}
+
+/** Matches exactly what `sweepRunStamp` produces, and nothing looser. */
+const SWEEP_STAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:\.\d{3})?Z$/;
+
+export interface SweepRunNames {
+  branch: string;
+  /** The worktree directory's name under `.claude/worktrees/`. */
+  name: string;
+  worktreeSegments: readonly string[];
+}
+
+/** The branch and worktree one run uses. Pure. */
+export function sweepRunNames(stamp: string): SweepRunNames {
+  const name = `${LEGACY_SWEEP_NAME}-${stamp}`;
+  return {
+    branch: `worktree-${name}`,
+    name,
+    worktreeSegments: [...SWEEP_WORKTREES_DIR, name],
+  };
+}
+
+/**
+ * Is `name` a worktree name the sweep itself made — the legacy fixed name, or
+ * `sdk-sweep-<stamp>` with a stamp `sweepRunStamp` could have produced? Strict
+ * on purpose: the leftover scan may auto-REMOVE what this matches (when it is
+ * provably empty), so a person's own `sdk-sweep-notes` worktree must not match.
+ * Pure.
+ */
+export function isSweepWorktreeName(name: string): boolean {
+  if (name === LEGACY_SWEEP_NAME) return true;
+  const prefix = `${LEGACY_SWEEP_NAME}-`;
+  return (
+    name.startsWith(prefix) &&
+    SWEEP_STAMP_PATTERN.test(name.slice(prefix.length))
+  );
+}
+
+/** The branch a sweep worktree name goes with (Claude Code's `worktree-<name>`). */
+export function sweepBranchFor(name: string): string {
+  return `worktree-${name}`;
+}
 
 /** SDK-written files whose formatting rarely matches a repo's prettier config
  * (the t6a0.13 gotcha, reconfirmed on the j2n7 canary). */
@@ -167,17 +249,24 @@ const YELLOW = '\x1b[33m';
 export type RepoOutcome =
   | 'clean' // updated, gated green, merged, pushed
   | 'current' // nothing to do — already at the latest state
-  | 'merge-pending' // green + committed, but the merge/push could not complete safely
+  | 'merge-pending' // green + committed, but the merge could not complete safely. Fails the run (S7: work not delivered).
   | 'install-failed' // merged, but the primary's post-merge install went red — it still runs the OLD SDK (bgfl)
+  | 'push-failed' // merged LOCALLY, push rejected/failed — the default branch holds a commit the remote lacks (S6/S7). Fails the run.
   | 'failed' // a step went red; worktree removed, evidence in the run log
   | 'blocked' // COULD NOT sweep — preflight refused (ckc4 F4). Fails the run.
   | 'skipped'; // out of scope for this payload (not enrolled). Expected, not a failure.
 
-export interface RepoResult {
+/** What a repo's sweep decided, before its leftover report is attached. */
+export interface RepoVerdict {
   /** One line: what happened / why it stopped. */
   detail: string;
   outcome: RepoOutcome;
   repo: string;
+}
+
+export interface RepoResult extends RepoVerdict {
+  /** Earlier runs' worktrees/branches found in this repo (39co9.6 S2). */
+  leftovers: LeftoverScanReport;
 }
 
 function say(line: string): void {
@@ -331,8 +420,16 @@ export const SWEEP_LOG_DIR = join(
 );
 
 export interface SweepRunLog {
-  /** Where the failures WOULD be written — printed at the top of every run. */
+  /** The run's log file — printed at the top and the bottom of every run. */
   readonly path: string;
+  /** false for a dry run, which writes nothing anywhere (the path is still printed). */
+  readonly persisted: boolean;
+  /**
+   * A progress line, appended the moment it happens (S4): worktree created,
+   * committed, merged, pushed, a leftover found. `repo` null = the run itself.
+   */
+  note: (repo: string | null, line: string) => void;
+  /** A red step: its detail plus the tail of its output (ckc4 F2). */
   record: (entry: {
     detail: string;
     /** null = this step reports steps rather than raw command output. */
@@ -340,56 +437,82 @@ export interface SweepRunLog {
     repo: string;
     step: string;
   }) => void;
-  /** Has anything actually been written? (An empty run writes no file.) */
-  wrote: () => boolean;
+  /** Has any red step been recorded? Decides the "failure log:" line at the end. */
+  recordedFailure: () => boolean;
 }
 
 /**
- * Lazily-created: the path is decided (and printed) up front, but nothing is
- * written until something fails, so a clean run leaves no litter behind.
+ * Written FROM THE START of the run, and appended to as each step happens
+ * (home-base-39co9.6 S4).
  *
- * A log-write failure is REPORTED and never swallowed — but it also never
- * changes a repo's verdict. Losing the evidence of a failure is bad; turning a
+ * WHY NOT LAZILY ANY MORE: until 2026-10-05 nothing was written until a step
+ * went red, so a clean run left no litter — and an INTERRUPTED run left no
+ * trace either. That is exactly what three repos showed on 2026-10-05: each
+ * held a 2026-09-18 sweep commit that never merged, and no log survived to say
+ * which run made it or how far it got. Now the header names the run's branch
+ * and worktree, and every step that changes something appends a line before
+ * the next one starts, so a run killed after committing has said so on disk.
+ *
+ * A log-write failure is REPORTED (once, loudly) and never swallowed — but it
+ * also never changes a repo's verdict. Losing the evidence is bad; turning a
  * green repo red because a directory was unwritable would be worse.
  */
 export function createRunLog(
   dir: string = SWEEP_LOG_DIR,
   now: Date = new Date(),
+  options: {header?: readonly string[]; persist?: boolean} = {},
 ): SweepRunLog {
-  // Colons are legal on macOS but hostile in shell arguments and Finder.
-  const stamp = now.toISOString().replace(/:/g, '-');
+  const stamp = sweepRunStamp(now);
   const path = join(dir, `${stamp}.log`);
-  let written = false;
+  const persisted = options.persist !== false;
+  let failureRecorded = false;
+  let writeError: string | null = null;
+
+  const append = (text: string): void => {
+    if (!persisted || writeError != null) return;
+    try {
+      mkdirSync(dir, {recursive: true});
+      appendFileSync(path, text);
+    } catch (error) {
+      writeError = error instanceof Error ? error.message : String(error);
+      say(
+        `  ${RED}✗${RESET} could not write the run log at ${path}: ${writeError} — ` +
+          'this run keeps going, but nothing more will reach that file',
+      );
+    }
+  };
+
+  append(
+    [
+      `justin-sdk sweep — run ${stamp}, started ${now.toISOString()}`,
+      ...(options.header ?? []),
+      '',
+    ].join('\n'),
+  );
+
   return {
-    path,
-    record: ({detail, output, repo, step}) => {
-      const body = [
-        '',
-        '─'.repeat(72),
-        `${repo} · step: ${step}`,
-        detail,
-        output == null
-          ? '(this step reports steps, not raw command output — see the detail above)'
-          : `--- last ${FAILURE_TAIL_LINES} lines of stdout+stderr ---\n${tailLines(output)}`,
-        '',
-      ].join('\n');
-      try {
-        mkdirSync(dir, {recursive: true});
-        appendFileSync(
-          path,
-          written
-            ? body
-            : `justin-sdk sweep — failure log for the run started ${now.toISOString()}\n${body}`,
-        );
-        written = true;
-      } catch (error) {
-        say(
-          `  ${RED}✗${RESET} could not write the failure log at ${path}: ` +
-            `${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
+    note: (repo, line) => {
+      const time = new Date().toISOString().slice(11, 19);
+      append(`[${time}] ${repo == null ? '' : `${repo}: `}${line}\n`);
     },
-    wrote: () => written,
+    path,
+    persisted,
+    record: ({detail, output, repo, step}) => {
+      failureRecorded = true;
+      append(
+        [
+          '',
+          '─'.repeat(72),
+          `${repo} · step: ${step}`,
+          detail,
+          output == null
+            ? '(this step reports steps, not raw command output — see the detail above)'
+            : `--- last ${FAILURE_TAIL_LINES} lines of stdout+stderr ---\n${tailLines(output)}`,
+          '',
+        ].join('\n'),
+      );
+    },
+    recordedFailure: () => failureRecorded,
   };
 }
 
@@ -520,6 +643,28 @@ export function addSweepWorktree(
   branch: string,
   baseSha: string,
 ): WorktreeAddResult {
+  // NAME ALREADY TAKEN → refuse, and touch NOTHING (39co9.6). The failure path
+  // below removes the branch and the worktree to undo a half-made add — which
+  // is only right when this call made them. With the fixed name the preflight
+  // had always cleared the name first; with a name per run, something already
+  // holding it is another run's (two runs in the same millisecond, or a leftover
+  // that was kept because it holds work), and the salvage would `branch -D` it.
+  const taken = [
+    existsSync(worktreePath) ? `directory ${worktreePath}` : null,
+    isWorktreeRegistered(repo, worktreePath)
+      ? `worktree registration for ${worktreePath}`
+      : null,
+    gitOk(repo, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
+      ? `branch ${branch}`
+      : null,
+  ].filter((entry): entry is string => entry != null);
+  if (taken.length > 0) {
+    return {
+      detail: `this run's name is already taken (${taken.join('; ')}) — nothing created, nothing removed`,
+      ok: false,
+      output: '',
+    };
+  }
   const add = run(
     [
       'git',
@@ -617,6 +762,260 @@ export function mergeSafety(
     };
   }
   return {ok: true, reason: ''};
+}
+
+// ---------------------------------------------------------------------------
+// Fetch first — build on the default branch as the REMOTE has it (39co9.6 S5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where the local default branch stands against its upstream.
+ *
+ * MEASURED 2026-10-05: browser-automation-central's local main was 9 commits
+ * behind origin/main (pushed from another machine 2026-09-26..28). The sweep
+ * branched from the stale local main, merged its commit into it, and the push
+ * was rejected as non-fast-forward — leaving local main DIVERGED. So the sweep
+ * now fetches before it branches, and compares.
+ *
+ * `unknown` is its own state, never folded into "up to date" (rule 7): a fetch
+ * that failed says nothing about whether the base is stale.
+ */
+export type UpstreamComparison =
+  | {
+      kind: 'compared';
+      /** `git log --oneline` of what only the local branch has. */
+      localOnly: string[];
+      /** `git log --oneline` of what only the upstream has. */
+      remoteOnly: string[];
+      /** e.g. `origin/main`. */
+      upstream: string;
+      upstreamSha: string;
+    }
+  | {detail: string; kind: 'no-upstream'}
+  | {detail: string; kind: 'unknown'; output: string | null};
+
+export type FreshBasePlan =
+  | {kind: 'block'; reason: string}
+  | {kind: 'fast-forward'; note: string; upstreamSha: string}
+  | {kind: 'proceed'; note: string | null};
+
+/** How many commits of each side a COULD NOT SWEEP line prints. */
+export const COMMIT_LIST_LIMIT = 25;
+
+/** A commit list for a summary line: indented, capped, the cap stated. Pure. */
+export function formatCommitList(
+  commits: readonly string[],
+  limit = COMMIT_LIST_LIMIT,
+): string {
+  const shown = commits.slice(0, limit).map((line) => `        ${line}`);
+  if (commits.length > limit) {
+    shown.push(`        … and ${commits.length - limit} more`);
+  }
+  return shown.join('\n');
+}
+
+/**
+ * Fast-forward, proceed, or refuse the repo up front? A pure decision over the
+ * measurements, so the whole table is unit-testable (S5).
+ *
+ *   up to date            → proceed.
+ *   ahead only            → proceed, with a note: the push will publish those
+ *                           local commits too (the sweep's long-standing shape,
+ *                           now said out loud).
+ *   strictly behind       → fast-forward, but ONLY when the primary is on the
+ *                           default branch and has no tracked changes; otherwise
+ *                           COULD NOT SWEEP — building on the stale base is the
+ *                           2026-10-05 failure, and moving someone's checkout
+ *                           out from under them is not the sweep's call.
+ *   diverged              → COULD NOT SWEEP, both commit lists, no work done.
+ *   no upstream           → proceed (nothing to fetch, nothing to fall behind).
+ *   unknown               → COULD NOT SWEEP: a base that cannot be shown fresh
+ *                           is not assumed fresh (rule 7's cautious verdict).
+ *
+ * `primaryTrackedClean` null = the status could not be read, which is not clean.
+ * Untracked files do not count as dirty: `git merge --ff-only` refuses rather
+ * than overwrite one, and that refusal is caught as COULD NOT SWEEP below.
+ */
+export function planFreshBase(input: {
+  comparison: UpstreamComparison;
+  defaultBranch: string;
+  primaryBranch: string | null;
+  primaryTrackedClean: boolean | null;
+  repo: string;
+}): FreshBasePlan {
+  const {comparison, defaultBranch, primaryBranch, primaryTrackedClean, repo} =
+    input;
+  if (comparison.kind === 'no-upstream') {
+    return {kind: 'proceed', note: comparison.detail};
+  }
+  if (comparison.kind === 'unknown') {
+    return {
+      kind: 'block',
+      reason: `could not compare ${defaultBranch} with its upstream — ${comparison.detail}. A base that cannot be shown fresh is not assumed fresh; nothing was done here`,
+    };
+  }
+  const {localOnly, remoteOnly, upstream} = comparison;
+  if (localOnly.length > 0 && remoteOnly.length > 0) {
+    return {
+      kind: 'block',
+      reason:
+        `${defaultBranch} and ${upstream} have DIVERGED — nothing was done here. ` +
+        `Reconcile them by hand (\`git -C ${repo} pull --rebase\` or a merge), then re-sweep.\n` +
+        `      only on ${defaultBranch} (${localOnly.length}):\n${formatCommitList(localOnly)}\n` +
+        `      only on ${upstream} (${remoteOnly.length}):\n${formatCommitList(remoteOnly)}`,
+    };
+  }
+  if (remoteOnly.length > 0) {
+    const where =
+      primaryBranch !== defaultBranch
+        ? `the primary checkout is on ${primaryBranch ?? 'a detached HEAD'}, not ${defaultBranch}`
+        : primaryTrackedClean == null
+          ? 'the primary checkout’s status could not be read'
+          : primaryTrackedClean
+            ? null
+            : 'the primary checkout has uncommitted changes to tracked files';
+    if (where != null) {
+      return {
+        kind: 'block',
+        reason:
+          `${defaultBranch} is ${remoteOnly.length} commit(s) behind ${upstream} and ${where}, ` +
+          'so the sweep cannot fast-forward it — and will not build on a stale base. ' +
+          `Bring ${defaultBranch} up to date (\`git -C ${repo} pull --ff-only\` on ${defaultBranch}), then re-sweep.\n` +
+          `      only on ${upstream} (${remoteOnly.length}):\n${formatCommitList(remoteOnly)}`,
+      };
+    }
+    return {
+      kind: 'fast-forward',
+      note: `${defaultBranch} was ${remoteOnly.length} commit(s) behind ${upstream} — fast-forwarded before branching`,
+      upstreamSha: comparison.upstreamSha,
+    };
+  }
+  if (localOnly.length > 0) {
+    return {
+      kind: 'proceed',
+      note: `${defaultBranch} is ${localOnly.length} commit(s) ahead of ${upstream} — the push will publish them too`,
+    };
+  }
+  return {kind: 'proceed', note: null};
+}
+
+/**
+ * `git config --get`, keeping "unset" (exit 1) apart from "git failed" (any
+ * other exit) — `git()` folds both into null, and here one means "no upstream,
+ * proceed" while the other means "could not tell" (rule 7).
+ */
+function gitConfigValue(
+  repo: string,
+  key: string,
+): {kind: 'error'} | {kind: 'unset'} | {kind: 'value'; value: string} {
+  const child = spawnSync('git', ['-C', repo, 'config', '--get', key], {
+    encoding: 'utf-8',
+  });
+  if (child.status === 0) return {kind: 'value', value: child.stdout.trim()};
+  if (child.status === 1) return {kind: 'unset'};
+  return {kind: 'error'};
+}
+
+/**
+ * Fetch the default branch's upstream (unless `fetch` is false — a dry run
+ * writes nothing, so it compares against the LAST fetch and says so), then
+ * compare the two refs.
+ */
+export function compareWithUpstream(
+  repo: string,
+  defaultBranch: string,
+  options: {fetch: boolean},
+): UpstreamComparison {
+  const remote = gitConfigValue(repo, `branch.${defaultBranch}.remote`);
+  if (remote.kind === 'error') {
+    return {
+      detail: `\`git config branch.${defaultBranch}.remote\` failed`,
+      kind: 'unknown',
+      output: null,
+    };
+  }
+  if (remote.kind === 'unset') {
+    return {
+      detail: `${defaultBranch} tracks no upstream — nothing fetched`,
+      kind: 'no-upstream',
+    };
+  }
+  // `.` is a LOCAL upstream: nothing to fetch, but still worth comparing.
+  if (options.fetch && remote.value !== '.') {
+    const fetched = run(
+      ['git', '-C', repo, 'fetch', '--quiet', remote.value],
+      repo,
+      {quiet: true},
+    );
+    if (fetched.exitCode !== 0 || fetched.error != null) {
+      return {
+        detail: `\`git fetch ${remote.value}\` failed (${fetched.error ?? `exit ${fetched.exitCode}`})`,
+        kind: 'unknown',
+        output: fetched.output,
+      };
+    }
+  }
+  const asOf = options.fetch
+    ? ''
+    : ' (as of the last fetch — a dry run does not fetch)';
+  const upstream = git(repo, [
+    'rev-parse',
+    '--abbrev-ref',
+    '--symbolic-full-name',
+    `${defaultBranch}@{upstream}`,
+  ]);
+  const upstreamSha = git(repo, [
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `${defaultBranch}@{upstream}`,
+  ]);
+  const localSha = git(repo, [
+    'rev-parse',
+    '--verify',
+    '--quiet',
+    `refs/heads/${defaultBranch}`,
+  ]);
+  if (upstream == null || upstreamSha == null || localSha == null) {
+    return {
+      detail: `${defaultBranch}'s upstream is configured but does not resolve${asOf}`,
+      kind: 'unknown',
+      output: null,
+    };
+  }
+  const localOnly = commitsBeyond(repo, upstreamSha, localSha);
+  const remoteOnly = commitsBeyond(repo, localSha, upstreamSha);
+  if (localOnly == null || remoteOnly == null) {
+    return {
+      detail: `could not list the commits between ${defaultBranch} and ${upstream}`,
+      kind: 'unknown',
+      output: null,
+    };
+  }
+  return {
+    kind: 'compared',
+    localOnly,
+    remoteOnly,
+    upstream: `${upstream}${asOf}`,
+    upstreamSha,
+  };
+}
+
+/**
+ * Tracked changes in the primary (`--untracked-files=no`), or null when the
+ * status could not be read — never `[]` for "could not look".
+ */
+function trackedChanges(repo: string): string[] | null {
+  try {
+    const out = execFileSync(
+      'git',
+      ['-C', repo, 'status', '--porcelain', '--untracked-files=no'],
+      {encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe']},
+    );
+    return parsePorcelainPaths(out);
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1078,14 +1477,13 @@ export type LeftoverAssessment =
   | {present: true; reason: string; safe: boolean};
 
 /**
- * May the sweep delete the leftover worktree/branch it found, or must it refuse
- * to sweep this repo? (ckc4 F5.)
+ * May the sweep delete the leftover worktree/branch it found, or must it keep
+ * it? (ckc4 F5; 39co9.6 S2/S3.) A kept leftover no longer blocks the repo — each
+ * run has its own name — it is listed in the summary and the log instead.
  *
- * WHY AUTO-CLEAN AT ALL: the worktree name is FIXED, so one leftover blocks
- * every future sweep of that repo permanently, and the seven that had
- * accumulated by 2026-09-04 all held nothing — zero commits, and at most a
- * regenerable rules file. "Resolve it by hand, then re-sweep" is a chore that
- * nobody does, which is how a propagation tool silently stops propagating.
+ * WHY AUTO-CLEAN AT ALL: the seven leftovers that had accumulated by 2026-09-04
+ * all held nothing — zero commits, and at most a regenerable rules file — and
+ * an empty leftover is pure litter. "Resolve it by hand" is a chore nobody does.
  *
  * SAFE means PROVABLY EMPTY, and every leg is measured:
  *   - no commits beyond the default branch, on the branch AND in the worktree;
@@ -1202,6 +1600,222 @@ export function assessSweepLeftover(
         : ''),
     safe: true,
   };
+}
+
+/**
+ * Every earlier sweep's worktree or branch still present in `repo`, by NAME
+ * (39co9.6 S2). Three places are read, because each can survive without the
+ * others: registered worktrees, `refs/heads/worktree-<name>` branches, and
+ * directories under `.claude/worktrees/` git no longer knows about.
+ *
+ * `ok: false` when any of the three could not be read — "could not look" is
+ * never reported as "no leftovers" (rule 7). Sorted: stamps sort by time, and
+ * the legacy fixed name sorts first.
+ */
+export type SweepLeftoverScan =
+  | {names: string[]; ok: true}
+  | {ok: false; reason: string};
+
+export function findSweepLeftoverNames(repo: string): SweepLeftoverScan {
+  const names = new Set<string>();
+
+  const porcelain = git(repo, ['worktree', 'list', '--porcelain']);
+  if (porcelain == null) {
+    return {ok: false, reason: '`git worktree list --porcelain` failed'};
+  }
+  const suffix = `/${SWEEP_WORKTREES_DIR.join('/')}/`;
+  for (const path of parseWorktreePaths(porcelain)) {
+    const at = path.lastIndexOf(suffix);
+    if (at < 0) continue;
+    const name = path.slice(at + suffix.length);
+    if (isSweepWorktreeName(name)) names.add(name);
+  }
+
+  const refs = git(repo, [
+    'for-each-ref',
+    '--format=%(refname)',
+    'refs/heads/',
+  ]);
+  if (refs == null) {
+    return {ok: false, reason: '`git for-each-ref refs/heads/` failed'};
+  }
+  for (const ref of refs.split('\n')) {
+    const branch = ref.replace(/^refs\/heads\//, '');
+    if (!branch.startsWith('worktree-')) continue;
+    const name = branch.slice('worktree-'.length);
+    if (isSweepWorktreeName(name)) names.add(name);
+  }
+
+  const dir = join(repo, ...SWEEP_WORKTREES_DIR);
+  if (existsSync(dir)) {
+    try {
+      for (const entry of readdirSync(dir)) {
+        if (isSweepWorktreeName(entry)) names.add(entry);
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        reason: `could not list ${dir}: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+  return {names: [...names].sort(), ok: true};
+}
+
+/** One earlier run's leftover, as this run dealt with it. */
+export interface LeftoverReport {
+  /** removed = gone now; would-remove = dry run; kept = still present, on purpose. */
+  action: 'kept' | 'removed' | 'would-remove';
+  branch: string;
+  /**
+   * `git log --oneline` of what it holds beyond the default branch (branch and
+   * worktree HEAD, deduplicated). null = could not be listed, which is not the
+   * same as none. Empty for anything removed.
+   */
+  commits: string[] | null;
+  /** Commands that show exactly what it holds. Empty for anything removed. */
+  inspect: string[];
+  name: string;
+  reason: string;
+  worktreePath: string;
+}
+
+/** What one repo's leftover scan found, or why it could not look. */
+export type LeftoverScanReport =
+  | {items: LeftoverReport[]; kind: 'scanned'}
+  | {kind: 'failed'; reason: string}
+  /** The repo was refused before the scan (not a repo, no default branch). */
+  | {kind: 'not-scanned'};
+
+/** `git log --oneline` of `<defaultBranch>..<ref>`, or null when git cannot say. */
+function commitsBeyond(
+  cwd: string,
+  defaultBranch: string,
+  ref: string,
+): string[] | null {
+  const out = git(cwd, [
+    'log',
+    '--oneline',
+    '--no-decorate',
+    `${defaultBranch}..${ref}`,
+  ]);
+  return out == null ? null : out.split('\n').filter((line) => line !== '');
+}
+
+/**
+ * Find every earlier sweep's leftover in `repo`, auto-remove the provably empty
+ * ones (as before), and KEEP and describe the rest (S2/S3). Never blocks: each
+ * run has its own name, so nothing found here can collide with this run.
+ *
+ * Kept means kept: the only removal path is `cleanupWorktreeAndBranch` on a
+ * leftover `assessSweepLeftover` called safe — so a leftover holding a commit
+ * the default branch lacks is never deleted (S3).
+ */
+export function handleSweepLeftovers(
+  repo: string,
+  defaultBranch: string,
+  allowedPaths: readonly string[],
+  options: {dryRun: boolean},
+): LeftoverScanReport {
+  const scan = findSweepLeftoverNames(repo);
+  if (!scan.ok) return {kind: 'failed', reason: scan.reason};
+
+  const items: LeftoverReport[] = [];
+  for (const name of scan.names) {
+    const worktreePath = join(repo, ...SWEEP_WORKTREES_DIR, name);
+    const branch = sweepBranchFor(name);
+    const assessment = assessSweepLeftover(
+      repo,
+      worktreePath,
+      branch,
+      defaultBranch,
+      allowedPaths,
+    );
+    if (!assessment.present) continue;
+    const base = {branch, name, worktreePath};
+
+    if (assessment.safe) {
+      if (options.dryRun) {
+        items.push({
+          ...base,
+          action: 'would-remove',
+          commits: [],
+          inspect: [],
+          reason: assessment.reason,
+        });
+        continue;
+      }
+      const cleaned = cleanupWorktreeAndBranch(repo, worktreePath, branch);
+      if (cleaned.ok) {
+        items.push({
+          ...base,
+          action: 'removed',
+          commits: [],
+          inspect: [],
+          reason: assessment.reason,
+        });
+        continue;
+      }
+      // Provably empty but not removable: kept, and said so — it no longer
+      // blocks anything, so it is news rather than a refusal.
+      items.push({
+        ...base,
+        action: 'kept',
+        commits: [],
+        inspect: inspectCommands(repo, defaultBranch, worktreePath, branch),
+        reason: `${assessment.reason}, but it could not be removed — ${cleaned.detail}`,
+      });
+      continue;
+    }
+
+    items.push({
+      ...base,
+      action: 'kept',
+      commits: leftoverCommits(repo, defaultBranch, worktreePath, branch),
+      inspect: inspectCommands(repo, defaultBranch, worktreePath, branch),
+      reason: assessment.reason,
+    });
+  }
+  return {items, kind: 'scanned'};
+}
+
+/** The commits a kept leftover holds beyond the default branch, deduplicated. */
+function leftoverCommits(
+  repo: string,
+  defaultBranch: string,
+  worktreePath: string,
+  branch: string,
+): string[] | null {
+  const lists: (string[] | null)[] = [];
+  if (
+    gitOk(repo, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
+  ) {
+    lists.push(commitsBeyond(repo, defaultBranch, `refs/heads/${branch}`));
+  }
+  if (isWorktreeRegistered(repo, worktreePath) && existsSync(worktreePath)) {
+    lists.push(commitsBeyond(worktreePath, defaultBranch, 'HEAD'));
+  }
+  if (lists.some((list) => list == null)) return null;
+  return [...new Set(lists.flatMap((list) => list ?? []))];
+}
+
+/** The exact commands that show what a kept leftover holds. */
+function inspectCommands(
+  repo: string,
+  defaultBranch: string,
+  worktreePath: string,
+  branch: string,
+): string[] {
+  const commands: string[] = [];
+  if (
+    gitOk(repo, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
+  ) {
+    commands.push(`git -C ${repo} log --stat ${defaultBranch}..${branch}`);
+  }
+  if (existsSync(worktreePath)) {
+    commands.push(`git -C ${worktreePath} status --short`);
+  }
+  return commands;
 }
 
 /**
@@ -2319,8 +2933,10 @@ export function measureBaseline(
 
 interface SweepContext {
   dryRun: boolean;
-  /** Where a red step's evidence goes now that the worktree does not survive. */
+  /** The run log: progress from the start (S4), and every red step's evidence. */
   log: SweepRunLog;
+  /** This run's own branch and worktree name (S1). */
+  names: SweepRunNames;
   payload: SweepPayload;
 }
 
@@ -2356,12 +2972,75 @@ function dryRunPinNote(repo: string): string {
     : '';
 }
 
+/**
+ * One repo, start to finish: the steps decide the verdict, and the leftover
+ * report the scan produced along the way is attached to it — whatever the
+ * verdict, because a kept leftover is news in a failed repo too.
+ */
 async function sweepOneRepo(
   repo: string,
   context: SweepContext,
 ): Promise<RepoResult> {
+  const scan: {report: LeftoverScanReport} = {report: {kind: 'not-scanned'}};
+  const verdict = await sweepRepoSteps(repo, context, scan);
+  context.log.note(verdict.repo, `${verdict.outcome} — ${verdict.detail}`);
+  return {...verdict, leftovers: scan.report};
+}
+
+/** Print (and log) what the leftover scan did, one leftover at a time. */
+function reportLeftovers(
+  name: string,
+  report: LeftoverScanReport,
+  log: SweepRunLog,
+): void {
+  if (report.kind === 'failed') {
+    say(
+      `  ${YELLOW}⚠${RESET} could not list earlier sweeps' leftovers — ${report.reason}`,
+    );
+    log.note(name, `leftover scan FAILED — ${report.reason}`);
+    return;
+  }
+  if (report.kind !== 'scanned') return;
+  for (const item of report.items) {
+    const label =
+      item.action === 'removed'
+        ? 'auto-removed a leftover from an earlier run'
+        : item.action === 'would-remove'
+          ? 'would auto-remove a leftover'
+          : 'a leftover from an earlier run was left alone';
+    say(`  ${YELLOW}⚠${RESET} ${label} (${item.name}) — ${item.reason}`);
+    log.note(name, `${label} (${item.name}) — ${item.reason}`);
+    for (const line of leftoverDetailLines(item)) {
+      say(`    ${line}`);
+      log.note(name, `  ${line}`);
+    }
+  }
+}
+
+/** The commits + inspect lines under a KEPT leftover. Empty otherwise. Pure. */
+export function leftoverDetailLines(item: LeftoverReport): string[] {
+  if (item.action !== 'kept') return [];
+  const lines: string[] = [];
+  if (item.commits == null) {
+    lines.push('commits beyond the default branch: COULD NOT BE LISTED');
+  } else if (item.commits.length > 0) {
+    lines.push(
+      `${item.commits.length} commit(s) beyond the default branch:`,
+      ...item.commits.map((commit) => `  ${commit}`),
+    );
+  }
+  for (const command of item.inspect) lines.push(`inspect: ${command}`);
+  return lines;
+}
+
+async function sweepRepoSteps(
+  repo: string,
+  context: SweepContext,
+  scan: {report: LeftoverScanReport},
+): Promise<RepoVerdict> {
   const name = basename(repo);
-  const worktreePath = join(repo, ...SWEEP_WORKTREE_SEGMENTS);
+  const {branch} = context.names;
+  const worktreePath = join(repo, ...context.names.worktreeSegments);
   let worktreeCreated = false;
 
   /**
@@ -2375,7 +3054,7 @@ async function sweepOneRepo(
     step: string,
     detail: string,
     output: string | null,
-  ): RepoResult => {
+  ): RepoVerdict => {
     context.log.record({detail, output, repo: name, step});
     if (output != null && output.trim() !== '') {
       say(`  ${RED}✗${RESET} ${step} — last ${FAILURE_TAIL_LINES} lines:`);
@@ -2383,11 +3062,7 @@ async function sweepOneRepo(
     }
     let cleanupNote = '';
     if (worktreeCreated) {
-      const cleaned = cleanupWorktreeAndBranch(
-        repo,
-        worktreePath,
-        SWEEP_BRANCH,
-      );
+      const cleaned = cleanupWorktreeAndBranch(repo, worktreePath, branch);
       cleanupNote = cleaned.ok ? ' [worktree removed]' : ` [${cleaned.detail}]`;
       if (!cleaned.ok) say(`  ${RED}✗${RESET} ${cleaned.detail}`);
     }
@@ -2399,7 +3074,7 @@ async function sweepOneRepo(
   };
 
   /** Preflight said this repo cannot be swept at all (ckc4 F4). */
-  const blocked = (detail: string): RepoResult => ({
+  const blocked = (detail: string): RepoVerdict => ({
     detail,
     outcome: 'blocked',
     repo: name,
@@ -2424,9 +3099,8 @@ async function sweepOneRepo(
   //
   // DECIDED here but ACTED ON below the leftover block, because the two answer
   // different questions: enrollment says whether the PAYLOAD applies to this
-  // repo, while a leftover is the SWEEP's own litter — a fixed-name worktree at
-  // a fixed path that blocks every future sweep of the repo whatever the
-  // payload. Tidying that is not payload-scoped, so it happens either way.
+  // repo, while a leftover is the SWEEP's own litter, whatever the payload.
+  // Tidying and reporting it is not payload-scoped, so it happens either way.
   /** Non-null = this repo is out of scope, and this is the line that says so. */
   let notEnrolled: string | null = null;
   if (context.payload.mode === 'component') {
@@ -2446,63 +3120,82 @@ async function sweepOneRepo(
     }
   }
 
-  // --- Leftovers from an earlier run (ckc4 F5) -----------------------------
-  const leftover = assessSweepLeftover(
+  // --- Leftovers from earlier runs (ckc4 F5; 39co9.6 S2/S3) ----------------
+  // NEVER blocking any more: this run's branch and worktree carry its own
+  // stamp, so nothing an earlier run left can collide with it. Empty leftovers
+  // are removed as before; the rest are KEPT and listed — here, in the log, and
+  // under this repo's summary line, each with the command that shows it.
+  scan.report = handleSweepLeftovers(
     repo,
-    worktreePath,
-    SWEEP_BRANCH,
     defaultBranch,
     allowedLeftoverPaths(context.payload),
+    {dryRun: context.dryRun},
   );
-  if (leftover.present) {
-    if (!leftover.safe) {
-      // A leftover holding real work is a repo that CANNOT be swept — but only
-      // if this run was going to sweep it. In a repo the payload does not apply
-      // to, the same leftover is reported on the skip line instead of failing a
-      // run that had no business touching that repo.
-      return notEnrolled == null
-        ? blocked(`leftover from an earlier run — ${leftover.reason}`)
-        : {
-            detail: `${notEnrolled}, and a leftover was left alone: ${leftover.reason}`,
-            outcome: 'skipped',
-            repo: name,
-          };
-    }
-    if (context.dryRun) {
-      say(
-        `  ${YELLOW}⚠${RESET} would auto-remove a leftover — ${leftover.reason}`,
-      );
-    } else {
-      const cleaned = cleanupWorktreeAndBranch(
-        repo,
-        worktreePath,
-        SWEEP_BRANCH,
-      );
-      if (!cleaned.ok) {
-        return blocked(
-          `leftover was provably empty but could not be removed — ${cleaned.detail}`,
-        );
-      }
-      say(
-        `  ${YELLOW}⚠${RESET} auto-removed a leftover from an earlier run — ${leftover.reason}`,
-      );
-    }
-  }
+  reportLeftovers(name, scan.report, context.log);
+  const wouldRemove =
+    scan.report.kind === 'scanned' &&
+    scan.report.items.some((item) => item.action === 'would-remove');
 
   if (notEnrolled != null) {
     return {detail: notEnrolled, outcome: 'skipped', repo: name};
   }
 
+  // --- Fetch first (39co9.6 S5) --------------------------------------------
+  // Before anything is created: a base that is behind its upstream is brought
+  // up to date (when that is safe), and one that has diverged — or cannot be
+  // compared at all — is refused here, with no work done.
+  const comparison = compareWithUpstream(repo, defaultBranch, {
+    fetch: !context.dryRun,
+  });
+  const changes = trackedChanges(repo);
+  const fresh = planFreshBase({
+    comparison,
+    defaultBranch,
+    primaryBranch: git(repo, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
+    primaryTrackedClean: changes == null ? null : changes.length === 0,
+    repo,
+  });
+  if (fresh.kind === 'block') {
+    if (comparison.kind === 'unknown' && comparison.output != null) {
+      say(tailLines(comparison.output));
+    }
+    context.log.note(name, `COULD NOT SWEEP (fetch first) — ${fresh.reason}`);
+    return blocked(fresh.reason);
+  }
+  let freshNote = fresh.note == null ? '' : ` [${fresh.note}]`;
+  if (fresh.kind === 'fast-forward') {
+    if (context.dryRun) {
+      freshNote = ` [would fast-forward first: ${fresh.note}]`;
+    } else {
+      const forwarded = run(
+        ['git', '-C', repo, 'merge', '--ff-only', '--quiet', fresh.upstreamSha],
+        repo,
+      );
+      const nowAt = git(repo, ['rev-parse', `refs/heads/${defaultBranch}`]);
+      if (forwarded.exitCode !== 0 || nowAt !== fresh.upstreamSha) {
+        context.log.note(name, 'fast-forward to the upstream FAILED');
+        return blocked(
+          `${fresh.note.replace(/ — fast-forwarded before branching$/, '')}, and the fast-forward FAILED (exit ${forwarded.exitCode}): ${tailLines(forwarded.output, 5)} — nothing was done here`,
+        );
+      }
+    }
+  }
+  if (freshNote !== '') {
+    say(`  ${DIM}${freshNote.trim()}${RESET}`);
+    context.log.note(name, freshNote.trim().replace(/^\[|\]$/g, ''));
+  }
+
   if (context.dryRun) {
     return {
       detail:
-        (leftover.present ? 'would auto-remove a leftover, then ' : '') +
+        (wouldRemove ? 'would auto-remove a leftover, then ' : '') +
         (context.payload.mode === 'component'
           ? `would apply ${context.payload.component} off ${defaultBranch} (pin untouched)`
           : context.payload.mode === 'install'
             ? `would refresh enrollment off ${defaultBranch}${dryRunPinNote(repo)}\n      ${dryRunInstallPayloadPlan(repo).join('\n      ')}`
             : `would sweep off ${defaultBranch}${dryRunPinNote(repo)}`) +
-        dryRunInstallNote(repo),
+        dryRunInstallNote(repo) +
+        freshNote,
       outcome: 'current',
       repo: name,
     };
@@ -2513,9 +3206,13 @@ async function sweepOneRepo(
   if (baseSha == null) {
     return fail('resolve-base', `cannot resolve ${defaultBranch}`, null);
   }
-  const add = addSweepWorktree(repo, worktreePath, SWEEP_BRANCH, baseSha);
+  const add = addSweepWorktree(repo, worktreePath, branch, baseSha);
   if (!add.ok) return fail('worktree-add', add.detail, add.output);
   worktreeCreated = true;
+  context.log.note(
+    name,
+    `created worktree ${worktreePath} on branch ${branch} off ${defaultBranch} ${baseSha.slice(0, 12)}`,
+  );
 
   // --- Hydrate (retry once — home-base-dl0q) -------------------------------
   let hydrated = setupEnv({target: worktreePath});
@@ -2664,9 +3361,9 @@ async function sweepOneRepo(
 
   const changedFiles = stage.staged;
   if (changedFiles.length === 0) {
-    const cleaned = cleanupWorktreeAndBranch(repo, worktreePath, SWEEP_BRANCH);
+    const cleaned = cleanupWorktreeAndBranch(repo, worktreePath, branch);
     return {
-      detail: `already current${payloadNote}${scopeNote}${blindNote}${
+      detail: `already current${freshNote}${payloadNote}${scopeNote}${blindNote}${
         cleaned.ok ? '' : ` [${cleaned.detail}]`
       }`,
       outcome: 'current',
@@ -2677,6 +3374,10 @@ async function sweepOneRepo(
   if (!beadsGuard.ok) {
     return fail('beads-config-guard', beadsGuard.reason, null);
   }
+  // Logged BEFORE the commit runs, as well as after (S4): git writes the
+  // commit before its post-commit hook finishes, so a run killed inside the
+  // commit step has already made a commit that only this line points at.
+  context.log.note(name, `committing on ${branch}: ${changedFiles.join(', ')}`);
   const commit = run(
     [
       'git',
@@ -2705,6 +3406,11 @@ async function sweepOneRepo(
       commit.output,
     );
   }
+  const sweepSha = git(repo, ['rev-parse', `refs/heads/${branch}`]);
+  context.log.note(
+    name,
+    `committed ${sweepSha?.slice(0, 12) ?? '(sha unreadable)'} on ${branch}: ${changedFiles.join(', ')}`,
+  );
 
   // --- Merge safety + merge -----------------------------------------------
   const primaryBranch = git(repo, [
@@ -2724,25 +3430,28 @@ async function sweepOneRepo(
     // One of the two paths that DELIBERATELY keeps its worktree and branch
     // (ckc4 F2): the commit is green and still has to be merged by a human, so
     // deleting it would delete the work. Says so explicitly, because everything
-    // else now cleans up.
+    // else now cleans up. It FAILS the run (S7): the payload did not reach the
+    // default branch, and an exit 0 would say it had.
     return {
-      detail: `green + committed on ${SWEEP_BRANCH}${pinGateNote}${payloadNote}${scopeNote}${blindNote}, but merge deferred: ${safety.reason} — worktree + branch KEPT ON PURPOSE (they hold the commit)`,
+      detail: `green + committed on ${branch}${freshNote}${pinGateNote}${payloadNote}${scopeNote}${blindNote}, but merge deferred: ${safety.reason} — worktree + branch KEPT ON PURPOSE (they hold the commit). Merge it by hand once ${defaultBranch} is checked out: \`git -C ${repo} merge --ff-only ${branch}\``,
       outcome: 'merge-pending',
       repo: name,
     };
   }
-  const merge = run(
-    ['git', '-C', repo, 'merge', '--ff-only', SWEEP_BRANCH],
-    repo,
-  );
+  const preMergeSha = git(repo, ['rev-parse', `refs/heads/${defaultBranch}`]);
+  const merge = run(['git', '-C', repo, 'merge', '--ff-only', branch], repo);
   if (merge.exitCode !== 0) {
     // The second deliberate keep — same reason: the commit lives on that branch.
     return {
-      detail: `merge --ff-only failed (diverged?)${payloadNote}${scopeNote}${blindNote} — worktree + branch ${SWEEP_BRANCH} KEPT ON PURPOSE (they hold the commit)`,
+      detail: `merge --ff-only failed (diverged?)${payloadNote}${scopeNote}${blindNote} — worktree + branch ${branch} KEPT ON PURPOSE (they hold the commit)`,
       outcome: 'merge-pending',
       repo: name,
     };
   }
+  context.log.note(
+    name,
+    `merged ${branch} into ${defaultBranch} (${preMergeSha?.slice(0, 12) ?? '?'} → ${sweepSha?.slice(0, 12) ?? '?'})`,
+  );
 
   // --- Post-merge install in the primary (home-base-bgfl) ------------------
   // D1: here, immediately after the merge and BEFORE the push. The push does
@@ -2766,26 +3475,96 @@ async function sweepOneRepo(
   }
 
   // --- Push + cleanup ------------------------------------------------------
-  let pushNote = 'no remote';
+  // "no remote" is a success (there is nowhere to deliver to). A push that was
+  // rejected or failed is a RED STEP (S6/S7): the default branch now holds a
+  // commit the remote lacks, which is the browser-automation-central state of
+  // 2026-10-05, and it used to be a quiet clause on a green line in a run that
+  // exited 0. An unreadable remote list is not "no remote" (rule 7).
   const remotes = git(repo, ['remote']);
-  if (remotes != null && remotes !== '') {
+  let pushFailure: {detail: string; output: string | null} | null = null;
+  let pushNote = 'no remote';
+  if (remotes == null) {
+    pushFailure = {
+      detail:
+        '`git remote` failed, so whether this repo needed a push is UNKNOWN',
+      output: null,
+    };
+  } else if (remotes !== '') {
     const push = run(['git', '-C', repo, 'push'], repo);
-    pushNote =
-      push.exitCode === 0
-        ? 'pushed'
-        : 'PUSH FAILED (remote ahead?) — merged locally, push by hand';
+    if (push.exitCode === 0 && push.error == null) {
+      pushNote = 'pushed';
+      context.log.note(name, 'pushed');
+    } else {
+      pushFailure = {
+        detail: `\`git push\` failed (${push.error ?? `exit ${push.exitCode}`})`,
+        output: push.output,
+      };
+    }
   }
-  const cleaned = cleanupWorktreeAndBranch(repo, worktreePath, SWEEP_BRANCH);
+  const cleaned = cleanupWorktreeAndBranch(repo, worktreePath, branch);
+  context.log.note(name, cleaned.detail);
+  const cleanupNote = cleaned.ok ? '' : ` [${cleaned.detail}]`;
+
+  if (pushFailure != null) {
+    const recovery = pushRecovery({
+      defaultBranch,
+      preMergeSha,
+      repo,
+      sweepSha,
+    });
+    const detail = `merged into ${defaultBranch} LOCALLY, but ${pushFailure.detail}.\n${recovery}`;
+    context.log.record({
+      detail,
+      output: pushFailure.output,
+      repo: name,
+      step: 'push',
+    });
+    if (pushFailure.output != null && pushFailure.output.trim() !== '') {
+      say(`  ${RED}✗${RESET} push — last ${FAILURE_TAIL_LINES} lines:`);
+      say(tailLines(pushFailure.output));
+    }
+    return {
+      detail: `PUSH FAILED — ${detail}${freshNote}${pinGateNote}${payloadNote}${scopeNote}${blindNote}${cleanupNote}${install.note} — see ${context.log.path}`,
+      outcome: 'push-failed',
+      repo: name,
+    };
+  }
   return {
     // The install clause goes LAST, after even the cleanup note: it is the
     // answer to "does this repo now RUN the new SDK?", which is the question
     // the whole line exists to answer.
-    detail: `updated, merged into ${defaultBranch}, ${pushNote}${pinGateNote}${payloadNote}${scopeNote}${blindNote}${
-      cleaned.ok ? '' : ` [${cleaned.detail}]`
-    }${install.note}`,
+    detail: `updated, merged into ${defaultBranch}, ${pushNote}${freshNote}${pinGateNote}${payloadNote}${scopeNote}${blindNote}${cleanupNote}${install.note}`,
     outcome: install.ok ? 'clean' : 'install-failed',
     repo: name,
   };
+}
+
+/**
+ * The recovery steps for a push that failed after the local merge (S6). The
+ * sweep commit is regenerable — the next sweep makes it again — so dropping it
+ * is a real option, not just replaying it. Pure.
+ */
+export function pushRecovery(input: {
+  defaultBranch: string;
+  preMergeSha: string | null;
+  repo: string;
+  sweepSha: string | null;
+}): string {
+  const {defaultBranch, preMergeSha, repo, sweepSha} = input;
+  const commit =
+    sweepSha == null
+      ? 'the sweep commit'
+      : `sweep commit ${sweepSha.slice(0, 12)}`;
+  const lines = [
+    `      ${defaultBranch} in ${repo} now holds ${commit}, which the remote does not have. Recover with ONE of:`,
+    `        replay it onto the remote:  git -C ${repo} pull --rebase  then  git -C ${repo} push`,
+  ];
+  lines.push(
+    preMergeSha == null
+      ? `        or drop it and re-sweep:    reset ${defaultBranch} to the commit before the sweep (its sha could not be read), then re-sweep`
+      : `        or drop it and re-sweep:    git -C ${repo} reset --keep ${preMergeSha.slice(0, 12)}  then re-sweep`,
+  );
+  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -2800,12 +3579,44 @@ export interface SweepOptions {
    */
   component?: string;
   dryRun?: boolean;
-  /** Where the run's failure log goes. Default SWEEP_LOG_DIR. */
+  /** Where the run log goes. Default SWEEP_LOG_DIR. */
   logDir?: string;
+  /**
+   * The run's start time, which names its log, branch and worktree (S1).
+   * Default now. Tests pass it so two runs cannot share a stamp.
+   */
+  now?: Date;
   /** Explicit repo paths — overrides discovery entirely when non-empty. */
   repos?: string[];
   /** Discovery root. Default ~/Dev. */
   root?: string;
+}
+
+/** Every KEPT leftover across the run, as `repo/name` pairs. Pure. */
+function keptLeftovers(results: readonly RepoResult[]): string[] {
+  return results.flatMap((result) =>
+    result.leftovers.kind === 'scanned'
+      ? result.leftovers.items
+          .filter((item) => item.action === 'kept')
+          .map((item) => `${result.repo}/${item.name}`)
+      : [],
+  );
+}
+
+/** The lines printed under a repo's summary line: its kept leftovers. Pure. */
+export function summaryLeftoverLines(result: RepoResult): string[] {
+  if (result.leftovers.kind === 'failed') {
+    return [
+      `could not list earlier sweeps' leftovers — ${result.leftovers.reason}`,
+    ];
+  }
+  if (result.leftovers.kind !== 'scanned') return [];
+  return result.leftovers.items
+    .filter((item) => item.action === 'kept')
+    .flatMap((item) => [
+      `leftover from an earlier run, KEPT: ${item.name} (branch ${item.branch}) — ${item.reason}`,
+      ...leftoverDetailLines(item).map((line) => `  ${line}`),
+    ]);
 }
 
 export async function runSweep(options: SweepOptions = {}): Promise<number> {
@@ -2822,6 +3633,14 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
   const explicit = (options.repos ?? []).map((repoPath) => resolve(repoPath));
   const repos = explicit.length > 0 ? explicit : discoverSweepRepos(root);
   const dryRun = options.dryRun === true;
+  const now = options.now ?? new Date();
+  const names = sweepRunNames(sweepRunStamp(now));
+  const payloadLabel =
+    payload.mode === 'component'
+      ? `component ${payload.component} (SDK pin NOT bumped)`
+      : payload.mode === 'install'
+        ? 'install (enrollment refresh)'
+        : 'full (pin bump + re-apply)';
 
   say(
     `${BOLD}justin-sdk sweep${RESET} — ${repos.length} repo(s)` +
@@ -2834,17 +3653,32 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
       `${dryRun ? ` ${DIM}(dry-run)${RESET}` : ''}`,
   );
 
-  // Announced at the top AND at the bottom (ckc4 F2): a failure's worktree is
-  // gone by the time the summary prints, so the log is the only evidence left
-  // and the operator has to know where it is before the run starts scrolling.
-  const log = createRunLog(options.logDir ?? SWEEP_LOG_DIR);
+  // Announced at the top AND at the bottom (ckc4 F2), and written FROM THE
+  // START (S4): the header names this run's branch and worktree, so a run
+  // killed mid-way can be matched to whatever it left in a repo.
+  const log = createRunLog(options.logDir ?? SWEEP_LOG_DIR, now, {
+    header: [
+      `payload: ${payload.mode === 'component' ? payload.component : payload.mode}`,
+      `branch: ${names.branch}`,
+      `worktree: <repo>/${names.worktreeSegments.join('/')}`,
+      `repos (${repos.length}): ${repos.join(', ')}`,
+    ],
+    persist: !dryRun,
+  });
   say(
-    `${DIM}failure log (written only if something fails): ${log.path}${RESET}`,
+    dryRun
+      ? `${DIM}run log: none (a dry run writes nothing) — a real run would write ${log.path}${RESET}`
+      : `${DIM}run log: ${log.path}${RESET}`,
+  );
+  say(
+    `${DIM}this run's branch: ${names.branch} (worktree .claude/worktrees/${names.name})${RESET}`,
   );
 
   const results: RepoResult[] = [];
   for (const repo of repos) {
-    results.push(await sweepOneRepo(repo, {dryRun, log, payload}));
+    results.push(
+      await sweepOneRepo(repo, {dryRun, log, names, payload: payload}),
+    );
   }
 
   // D17. Unconditional on the repo results by design (see refreshUserLevelRules):
@@ -2852,6 +3686,7 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
   const userRules = refreshUserLevelRules(payload, {dryRun});
 
   say(`\n${BOLD}Summary${RESET}`);
+  log.note(null, `summary (${payloadLabel}):`);
   const ICON: Record<RepoOutcome, string> = {
     blocked: `${RED}⊘${RESET}`,
     clean: `${GREEN}✓${RESET}`,
@@ -2859,12 +3694,18 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
     failed: `${RED}✗${RESET}`,
     'install-failed': `${RED}⚠${RESET}`,
     'merge-pending': `${YELLOW}⏸${RESET}`,
+    'push-failed': `${RED}✗${RESET}`,
     skipped: `${DIM}⊘${RESET}`,
   };
   for (const result of results) {
     say(
       `  ${ICON[result.outcome]} ${result.repo} ${DIM}${result.detail}${RESET}`,
     );
+    log.note(null, `  ${result.outcome} ${result.repo} ${result.detail}`);
+    for (const line of summaryLeftoverLines(result)) {
+      say(`      ${YELLOW}${line}${RESET}`);
+      log.note(null, `      ${line}`);
+    }
   }
   if (userRules != null) {
     // Its OWN line, visibly not a repo: the two surfaces succeed and fail
@@ -2879,29 +3720,48 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
     say(
       `  ${USER_ICON[userRules.status]} ${BOLD}user-level rules${RESET} ${DIM}${userRules.detail}${RESET}`,
     );
+    log.note(
+      null,
+      `  user-level rules ${userRules.status}: ${userRules.detail}`,
+    );
   }
   const of = (outcome: RepoOutcome): RepoResult[] =>
     results.filter((result) => result.outcome === outcome);
   const failed = of('failed');
   const pending = of('merge-pending');
+  const pushFailed = of('push-failed');
   const blocked = of('blocked');
   const skipped = of('skipped');
   const installFailed = of('install-failed');
+  const kept = keptLeftovers(results);
 
-  if (failed.length + pending.length > 0) {
-    say(
-      `\n${YELLOW}${failed.length} failed (worktree removed; evidence in the run log), ${pending.length} merge-pending (worktree kept — it holds the commit). Fix the CAUSE in the SDK (ratchet contract), then re-sweep.${RESET}`,
-    );
+  if (failed.length + pending.length + pushFailed.length > 0) {
+    const line =
+      `${failed.length} failed (worktree removed; evidence in the run log), ` +
+      `${pushFailed.length} push-failed (merged locally, NOT pushed — recovery on each line above), ` +
+      `${pending.length} merge-pending (worktree kept — it holds the commit). ` +
+      'None of these delivered the payload, so the run fails. Fix the CAUSE in the SDK (ratchet contract), then re-sweep.';
+    say(`\n${YELLOW}${line}${RESET}`);
+    log.note(null, line);
   }
-  if (log.wrote()) {
+  if (log.recordedFailure()) {
     say(`${YELLOW}failure log: ${log.path}${RESET}`);
+  } else if (log.persisted) {
+    say(`${DIM}run log: ${log.path}${RESET}`);
+  }
+  // S2: listed, never blocking, never failing the run on their own — but
+  // printed at the tail, because a kept leftover is a commit nobody merged.
+  if (kept.length > 0) {
+    const line = `${kept.length} leftover(s) from earlier runs KEPT (they hold work the default branch lacks; inspect commands under each repo above): ${kept.join(', ')}`;
+    say(`${YELLOW}${line}${RESET}`);
+    log.note(null, line);
   }
   // ckc4 F4. Two things that both used to be "skipped" and both used to exit 0:
   // a repo this payload does not apply to (expected), and a repo this run COULD
-  // NOT SWEEP (a leftover it may not delete, an unreadable enrollment, a
-  // non-repo). The second is a propagation failure — the fleet is now out of
-  // sync and nothing said so — and it is printed LAST, where a long run's tail
-  // is actually read.
+  // NOT SWEEP (an unreadable enrollment, a diverged or unfetchable default
+  // branch, a non-repo). The second is a propagation failure — the fleet is now
+  // out of sync and nothing said so — and it is printed LAST, where a long
+  // run's tail is actually read.
   if (skipped.length > 0) {
     say(
       `${DIM}${skipped.length} not enrolled in this payload (expected, not a failure): ${skipped
@@ -2921,6 +3781,16 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
         `\n${RED}Run the install named on each line above, in that repo, then re-check with doctor.${RESET}`,
     );
   }
+  // S6/S7. Its own red tail: the default branch of each of these now holds a
+  // commit its remote lacks, which nothing else on screen would make urgent.
+  if (pushFailed.length > 0) {
+    say(
+      `\n${RED}${pushFailed.length} MERGED LOCALLY BUT NOT PUSHED: ${pushFailed
+        .map((result) => result.repo)
+        .join(', ')}${RESET}` +
+        `\n${RED}Each one's default branch holds the sweep commit and its remote does not. Recover with the steps on its line above.${RESET}`,
+    );
+  }
   if (blocked.length > 0) {
     say(
       `\n${RED}${blocked.length} COULD NOT SWEEP: ${blocked
@@ -2929,13 +3799,21 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
         `\n${RED}These repos did NOT receive the payload. Resolve each (see its line above), then re-sweep.${RESET}`,
     );
   }
-  // A failed user-level refresh is a real failure and must not exit 0 — that
-  // would be the silence-shaped kind. It is attributed to its own surface, never
-  // to a repo, and the remedy is one command rather than another whole sweep.
-  return failed.length > 0 ||
+  const exitCode =
+    failed.length > 0 ||
+    pending.length > 0 ||
+    pushFailed.length > 0 ||
     blocked.length > 0 ||
     installFailed.length > 0 ||
     userRules?.status === 'failed'
-    ? 1
-    : 0;
+      ? 1
+      : 0;
+  log.note(null, `exit ${exitCode}`);
+  // A failed user-level refresh is a real failure and must not exit 0 — that
+  // would be the silence-shaped kind. It is attributed to its own surface, never
+  // to a repo, and the remedy is one command rather than another whole sweep.
+  // S7: merge-pending and push-failed fail the run too — each is a repo whose
+  // payload did not reach its remote, and "0 failed" over four unpushed repos
+  // is exactly the 2026-10-05 report this replaces.
+  return exitCode;
 }

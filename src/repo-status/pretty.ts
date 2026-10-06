@@ -253,9 +253,21 @@ function filesCell(row: BranchRow): string {
  * (`enrichments.prs` is `prIndex.available`, the same flag `decideDisposition`
  * receives as `prDataAvailable`), so the fact can never go missing from both.
  */
-function whyLine(why: string, prsChecked: boolean): string {
+export function whyLine(why: string, prsChecked: boolean): string {
   if (prsChecked || !why.endsWith(PR_STATE_NOT_CHECKED)) return why;
   return why.slice(0, why.length - PR_STATE_NOT_CHECKED.length);
+}
+
+/**
+ * The row's pull request as its own detail line, or null when there is none or
+ * when the verdict line already names it (`; PR #12 is open`, `PR #12 is merged
+ * into main, but …`). Repeating it there would say one fact twice.
+ */
+export function prDetail(row: BranchRow): string | null {
+  if (row.pr == null) return null;
+  if (row.why.includes(`PR #${row.pr.number} `)) return null;
+  const draft = row.pr.isDraft ? ' (draft)' : '';
+  return `PR #${row.pr.number} is ${row.pr.state.toLowerCase()}${draft}, into ${row.pr.baseRefName}`;
 }
 
 /**
@@ -933,6 +945,13 @@ export function renderReportPretty(
       if (!(row.disposition === 'merged' && row.ahead === 0)) {
         detail.push(whyLine(row.why, report.enrichments.prs));
       }
+      // EVERY ROW WITH A PR SAYS SO (home-base-39co9.5 R4). The verdict line
+      // names the PR only on the dispositions whose reasoning used it, so a
+      // merged or archived branch with a PR showed none, and a merged row with
+      // nothing unique prints no verdict line at all. Rows without a PR get no
+      // line, which is what keeps a PR-less repo's ledger byte-identical.
+      const prLine = prDetail(row);
+      if (prLine != null) detail.push(prLine);
       // A submodule pointer moving the wrong way is invisible in a conflict
       // list — git takes the only side that moved and reports success — so it
       // gets its own line, above the overlap detail, on any row that has one.

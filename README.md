@@ -74,6 +74,7 @@ bunx github:justinhaaheim/justin-sdk init
 | `justin-sdk install` | Reconcile the disk to `justin-sdk.config.json`, both directions |
 | `justin-sdk update` | Bump the SDK pin to the newest tag, then `install` |
 | `justin-sdk session-start` | The SessionStart hook (see below) |
+| `justin-sdk repo-state` | Print the repo-state block; `--hook` is the first-prompt hook (see below) |
 | `justin-sdk justin-loop` | Chain Claude Code sessions on one arc through handoff beads (see below) |
 | `justin-sdk thread` | Status reports as beads, one per session (see below) |
 | `justin-sdk --help` | Command reference |
@@ -84,12 +85,16 @@ The CLI is exposed under ONE name, `justin-sdk`. The short `jsdk` and `j` bins w
 
 `justin-sdk session-start` is the whole of what runs when a Claude Code session opens. It replaced the `prime` Claude Code plugin in v0.39 (epic home-base-dchjw D6) — the plugin was a second, independently-versioned copy of this logic installed from a marketplace with no `autoUpdate`, and it sat 178 commits stale for a month, twice, with nothing detecting it. There is now one implementation, versioned by the repo's own pin.
 
-It is read-only and always exits 0. Locally it emits `doctor --quiet`, the repo-state block (unmerged work on other branches and worktrees) and the rules-drift notice, as a SessionStart JSON envelope: the repo state and doctor's report go to the model, the rules freshness verdicts go to you. Remotely (`CLAUDE_CODE_REMOTE=true`) it hands off to `setup-env`, because a fresh container needs hydrating rather than advising.
+It never writes inside the repo and always exits 0. Locally it shows you `doctor --quiet`, the rules freshness and repo-rules drift verdicts, and the conditional rule modules that apply to this repo. The only thing it injects into the model is rule text, and only in a repo that does not carry its own rules artifact. Remotely (`CLAUDE_CODE_REMOTE=true`) it hands off to `setup-env`, because a fresh container needs hydrating rather than advising.
 
-**Two hooks call it, and they never both act.**
+**The repo-state block (unmerged work on other branches and worktrees) arrives on the FIRST PROMPT, not at session start** (home-base-39co9.4). `session-start` arms a per-session marker under `$XDG_STATE_HOME/justin-sdk/first-prompt/`, and `repo-state --hook`, a UserPromptSubmit hook, injects the block on the first prompt after each SessionStart (startup, resume, clear, compact), measured at that moment. Later prompts print nothing.
 
-1. **The project hook**, written into an enrolled repo's `.claude/settings.json` by `base-setup`. Nothing to do by hand — `add base-setup` or `install` writes it, and rewrites an older spelling in place.
-2. **The user-level hook**, in `~/.claude/settings.json`. This is what keeps the repo-state block reaching repos that are _not_ enrolled. **It is the one manual step**, because justin-sdk never writes your user-level settings — `doctor` warns when it is missing (`USER_LEVEL_SESSION_START`) and prints this, which you paste in:
+**Everything a hook injects into the model is shown to you too.** `src/hook-output.ts` mirrors it into the hook's `systemMessage`, cut at 40 lines with the command that prints the rest.
+
+**Two pairs of hooks run these, and they never both act.**
+
+1. **The project hooks**, written into an enrolled repo's `.claude/settings.json` by `base-setup`: SessionStart runs `session-start`, UserPromptSubmit runs `repo-state --hook`. Nothing to do by hand — `add base-setup` or `install` writes them, and rewrites an older spelling in place.
+2. **The user-level hooks**, in `~/.claude/settings.json`. They keep the repo-state block reaching repos that are _not_ enrolled. **This is the one manual step**, because justin-sdk never writes your user-level settings — `doctor` warns when either is missing (`USER_LEVEL_SESSION_START`) and prints this, which you paste in:
 
 ```json
 {
@@ -103,12 +108,22 @@ It is read-only and always exits 0. Locally it emits `doctor --quiet`, the repo-
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -e \"${CLAUDE_PROJECT_DIR:-.}/justin-sdk.config.json\" ] || ! command -v justin-sdk-latest >/dev/null || justin-sdk-latest repo-state --hook --user-level"
+          }
+        ]
+      }
     ]
   }
 }
 ```
 
-The guard is in the hook string on purpose: an enrolled repo (the project hook owns it) and a machine without home-base's `justin-sdk-latest` on PATH both short-circuit before anything is spawned, so neither ever touches the network. `--user-level` re-checks enrolment itself, because `CLAUDE_PROJECT_DIR` is not guaranteed to be set. The project root is `$CLAUDE_PROJECT_DIR`, else the git toplevel of the cwd, else the cwd — never a walk up the parent chain, so a session in `~/Downloads` or inside a subdirectory is not silenced by an unrelated ancestor.
+The guard is in the hook string on purpose: an enrolled repo (the project hook owns it) and a machine without home-base's `justin-sdk-latest` on PATH both short-circuit before anything is spawned, so neither ever touches the network. In an unenrolled repo the UserPromptSubmit hook does run `justin-sdk-latest` on every prompt, which resolves the newest sha with `git ls-remote` each time. `--user-level` re-checks enrolment itself, because `CLAUDE_PROJECT_DIR` is not guaranteed to be set. The project root is `$CLAUDE_PROJECT_DIR`, else the git toplevel of the cwd, else the cwd — never a walk up the parent chain, so a session in `~/Downloads` or inside a subdirectory is not silenced by an unrelated ancestor.
 
 ## Chaining sessions: `justin-loop`
 

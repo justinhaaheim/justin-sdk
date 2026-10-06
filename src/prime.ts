@@ -17,7 +17,9 @@
  * Output: `--format markdown` (default) prints human-readable markdown + a status
  * line on stderr. `--format hook` emits the SessionStart JSON envelope with
  * `additionalContext` (the guidance) and a `systemMessage` (a visible one-liner
- * with the compiled count, or a visible failure notice). Part of home-base t6a0.
+ * with the compiled count, or a visible failure notice, followed by a mirror of
+ * the guidance — home-base-39co9.4 M3). Part of home-base t6a0. No hook the SDK
+ * installs runs `--format hook` today; the retired `prime` plugin was its caller.
  */
 
 import {execSync} from 'child_process';
@@ -30,6 +32,9 @@ import {
   writeFileSync,
 } from 'fs';
 import {basename, dirname, join, resolve} from 'path';
+
+import {emitHookOutput} from './hook-output';
+import {sdkRun} from './sdk-invocation';
 
 const DEFAULT_REPO_URL = 'https://github.com/justinhaaheim/prompts.git';
 const DEFAULT_MAX_AGE_SECONDS = 300;
@@ -654,7 +659,11 @@ export function runPrime(projectRoot: string, opts: PrimeOptions): number {
     const reason = error instanceof Error ? error.message : String(error);
     const failMsg = `justin-sdk prime · FAILED to load rules (${reason}). No rules injected — provide them manually or troubleshoot.`;
     if (opts.format === 'hook') {
-      process.stdout.write(JSON.stringify({systemMessage: failMsg}));
+      emitHookOutput({
+        event: 'SessionStart',
+        forClaude: '',
+        forJustin: failMsg,
+      });
     } else {
       process.stderr.write(`${failMsg}\n`);
     }
@@ -667,15 +676,14 @@ export function runPrime(projectRoot: string, opts: PrimeOptions): number {
     (warnings.length > 0 ? ` · ${warnings.length} warning(s)` : '');
 
   if (opts.format === 'hook') {
-    process.stdout.write(
-      JSON.stringify({
-        hookSpecificOutput: {
-          additionalContext: markdown,
-          hookEventName: 'SessionStart',
-        },
-        systemMessage: status,
-      }),
-    );
+    // Built by the shared helper (home-base-39co9.4 M3), which mirrors the
+    // injected rules to Justin under the status line, cut at 40 lines.
+    emitHookOutput({
+      event: 'SessionStart',
+      forClaude: markdown,
+      forJustin: status,
+      fullTextCommand: sdkRun(`prime --partition ${opts.partition ?? 'full'}`),
+    });
   } else {
     process.stdout.write(`${markdown}\n`);
     process.stderr.write(`\n${status}\n`);

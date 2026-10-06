@@ -228,7 +228,7 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
           return {
             fix:
               result.status === 'cannot-check'
-                ? `Read ${USER_SETTINGS_DISPLAY} by hand and confirm it registers \`session-start --user-level\``
+                ? `Read ${USER_SETTINGS_DISPLAY} by hand and confirm it registers \`session-start --user-level\` (SessionStart) and \`repo-state --hook --user-level\` (UserPromptSubmit)`
                 : userLevelHookAdvice(),
             message: result.message,
             pass: false,

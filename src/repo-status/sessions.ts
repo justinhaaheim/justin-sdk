@@ -1,5 +1,12 @@
 /**
- * SESSIONS for `justin-sdk forensics` (home-base-lj3x9).
+ * SESSIONS for `repo-status status --sessions` and `repo-status repos`
+ * (home-base-39co9.5; first built as `justin-sdk forensics`, home-base-lj3x9).
+ *
+ * IMPORTED LAZILY, ALWAYS. This module reaches thread/backfill.ts and with it
+ * zod, and repo-status.ts is imported eagerly by cli.ts, the entry for the hooks
+ * that run on every prompt (home-base-wxa4c D-W1;
+ * tests/health-notices-cli.test.ts fails if zod becomes statically reachable).
+ * Only views-run.ts imports it, and only views-run.ts is `await import`ed.
  *
  * Which Claude Code sessions ran in a repo inside a window, and for each: the
  * three messages Justin reads to get his bearings (his first message, his last
@@ -19,8 +26,8 @@
  *
  * A session is found only under the directory Claude Code filed its transcript
  * in, which is where it was LAUNCHED. A session launched elsewhere that later
- * `cd`'d into the repo is found by `forensics repos` (full scan) and missed by
- * `forensics repo` (which only opens the repo's own transcript directories).
+ * `cd`'d into the repo is found by `repo-status repos` (full scan) and missed by
+ * `status --sessions` (which only opens the repo's own transcript directories).
  */
 
 import type {EnvLike} from '../thread/paths';
@@ -41,7 +48,7 @@ import {
   listThreads,
 } from '../thread/bd';
 import {projectDirSlug} from '../thread/transcript-messages';
-import {gitRead} from './worktrees';
+import {gitRead} from './checkouts';
 
 const WORKTREE_MARKER = '/.claude/worktrees/';
 
@@ -162,7 +169,7 @@ export async function readThreadIndex(
   return {bySession: buildThreadIndex(threads.value, asks.value), ok: true};
 }
 
-export interface ForensicsSession {
+export interface SessionFacts {
   branch: string | null;
   cwd: string | null;
   failures: string[];
@@ -185,7 +192,7 @@ export interface ForensicsSession {
 
 export interface SessionScan {
   failures: string[];
-  sessions: ForensicsSession[];
+  sessions: SessionFacts[];
   threads: ThreadIndex;
   windowStart: string;
 }
@@ -200,11 +207,11 @@ export interface ScanOptions {
   threads?: ThreadIndex;
 }
 
-function toForensicsSession(
+function toSessionFacts(
   session: BackfillSession,
   cache: Map<string, RepoResolution>,
   index: ThreadIndex,
-): ForensicsSession {
+): SessionFacts {
   const {messages} = session;
   const cwd = messages.cwd ?? messages.firstCwd;
   const repo = resolveRepoRoot(cwd, cache);
@@ -234,7 +241,7 @@ function toForensicsSession(
  * Every session whose LAST RECORD falls inside the window, newest first,
  * optionally narrowed to one repo.
  */
-export async function scanForensicsSessions(
+export async function scanRepoSessions(
   options: ScanOptions,
 ): Promise<SessionScan> {
   const now = options.now ?? new Date();
@@ -255,7 +262,7 @@ export async function scanForensicsSessions(
   const threads = options.threads ?? (await readThreadIndex(env));
   const cache = new Map<string, RepoResolution>();
   let sessions = scan.sessions.map((session) =>
-    toForensicsSession(session, cache, threads),
+    toSessionFacts(session, cache, threads),
   );
   if (repoRoot != null) {
     sessions = sessions.filter((session) => session.repoRoot === repoRoot);
@@ -312,7 +319,7 @@ export interface OutsideRoot {
  * What the limit hides is COUNTED in `outsideRoot`, so the report can say so.
  */
 export function summarizeRepos(
-  sessions: readonly ForensicsSession[],
+  sessions: readonly SessionFacts[],
   threadsReadable: boolean,
   root: string | null = null,
 ): {outsideRoot: OutsideRoot; summaries: RepoSummary[]; unplaced: number} {

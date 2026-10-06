@@ -37,28 +37,55 @@ import {join} from 'path';
 
 import {SDK_LATEST} from './sdk-invocation';
 
-/** `~/.claude/settings.json` — Justin's user-level Claude Code settings. */
-export function userSettingsPath(): string {
-  return join(homedir(), '.claude', 'settings.json');
+/**
+ * `~/.claude/settings.json` — Justin's user-level Claude Code settings.
+ *
+ * `$HOME` first, then `homedir()`: Bun's `homedir()` does not follow a HOME
+ * changed after startup, which let a test that pointed HOME at a sandbox read
+ * the real file instead (measured 2026-10-05, home-base-39co9.4).
+ */
+export function userSettingsPath(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  const home = env.HOME != null && env.HOME.length > 0 ? env.HOME : homedir();
+  return join(home, '.claude', 'settings.json');
 }
 
 /** Display form, for messages. Never used to open anything. */
 export const USER_SETTINGS_DISPLAY = '~/.claude/settings.json';
 
+/** The guard both user-level hooks share. See the file header. */
+const USER_LEVEL_GUARD = `[ -e "\${CLAUDE_PROJECT_DIR:-.}/justin-sdk.config.json" ] || ! command -v ${SDK_LATEST} >/dev/null`;
+
 /** The one-line shell command the user-level SessionStart hook runs. See above. */
-export const USER_LEVEL_HOOK_COMMAND = `[ -e "\${CLAUDE_PROJECT_DIR:-.}/justin-sdk.config.json" ] || ! command -v ${SDK_LATEST} >/dev/null || ${SDK_LATEST} session-start --user-level`;
+export const USER_LEVEL_HOOK_COMMAND = `${USER_LEVEL_GUARD} || ${SDK_LATEST} session-start --user-level`;
+
+/**
+ * The user-level UserPromptSubmit hook (home-base-39co9.4, M5): the first-prompt
+ * repo-state block for UNENROLLED repos, behind the same guard, so an enrolled
+ * repo never spawns it.
+ *
+ * A KNOWN COST, stated rather than hidden: `justin-sdk-latest` resolves the
+ * newest sha with `git ls-remote` on every run, so in an unenrolled repo every
+ * prompt pays that network round trip, not only the first. Measured and
+ * reported on home-base-39co9.4.
+ */
+export const USER_LEVEL_PROMPT_HOOK_COMMAND = `${USER_LEVEL_GUARD} || ${SDK_LATEST} repo-state --hook --user-level`;
 
 /**
  * The exact JSON to merge into `~/.claude/settings.json`.
  *
  * Built by serialising the real structure rather than typed as a string
- * literal, so the command above cannot drift from the snippet advice prints.
+ * literal, so the commands above cannot drift from the snippet advice prints.
  */
 export const USER_LEVEL_HOOK_JSON = JSON.stringify(
   {
     hooks: {
       SessionStart: [
         {hooks: [{command: USER_LEVEL_HOOK_COMMAND, type: 'command'}]},
+      ],
+      UserPromptSubmit: [
+        {hooks: [{command: USER_LEVEL_PROMPT_HOOK_COMMAND, type: 'command'}]},
       ],
     },
   },
@@ -84,11 +111,20 @@ function isUserLevelSessionStart(command: string): boolean {
   return command.includes('session-start') && command.includes('--user-level');
 }
 
-/** Every `command` string under `hooks.SessionStart`, defensively walked. */
-function sessionStartCommands(settings: unknown): string[] {
+/** Does this command string invoke `repo-state --hook --user-level`, however spelled? */
+function isUserLevelRepoState(command: string): boolean {
+  return (
+    command.includes('repo-state') &&
+    command.includes('--hook') &&
+    command.includes('--user-level')
+  );
+}
+
+/** Every `command` string under `hooks.<event>`, defensively walked. */
+function eventCommands(settings: unknown, event: string): string[] {
   const hooks = (settings as {hooks?: unknown}).hooks;
   if (hooks == null || typeof hooks !== 'object') return [];
-  const events = (hooks as {SessionStart?: unknown}).SessionStart;
+  const events = (hooks as Record<string, unknown>)[event];
   if (!Array.isArray(events)) return [];
 
   const commands: string[] = [];
@@ -104,7 +140,12 @@ function sessionStartCommands(settings: unknown): string[] {
 }
 
 /**
- * Is the user-level SessionStart hook installed?
+ * Are the user-level hooks installed — SessionStart AND, since
+ * home-base-39co9.4, the first-prompt UserPromptSubmit one?
+ *
+ * BOTH, because the SessionStart half alone no longer delivers the repo state:
+ * it arms, and only the prompt hook fires. A machine that pasted the older
+ * one-hook snippet is therefore `absent`, and is told which half is missing.
  *
  * READ-ONLY. A missing file is `absent` (a real, measured answer: there is no
  * hook), but a file that cannot be READ or PARSED is `cannot-check` and must
@@ -132,15 +173,28 @@ export function checkUserLevelSessionStart(): UserLevelHookResult {
     };
   }
 
-  return sessionStartCommands(settings).some(isUserLevelSessionStart)
-    ? {
-        message: `${SDK_LATEST} session-start --user-level is registered in ${USER_SETTINGS_DISPLAY}`,
-        status: 'installed',
-      }
-    : {
-        message: `${USER_SETTINGS_DISPLAY} has no session-start --user-level hook, so UNENROLLED repos get no repo-state block at session start`,
-        status: 'absent',
-      };
+  const hasStart = eventCommands(settings, 'SessionStart').some(
+    isUserLevelSessionStart,
+  );
+  const hasPrompt = eventCommands(settings, 'UserPromptSubmit').some(
+    isUserLevelRepoState,
+  );
+  if (hasStart && hasPrompt) {
+    return {
+      message: `${SDK_LATEST} session-start --user-level and repo-state --hook --user-level are registered in ${USER_SETTINGS_DISPLAY}`,
+      status: 'installed',
+    };
+  }
+  const missing = [
+    ...(hasStart ? [] : ['the SessionStart `session-start --user-level` hook']),
+    ...(hasPrompt
+      ? []
+      : ['the UserPromptSubmit `repo-state --hook --user-level` hook']),
+  ];
+  return {
+    message: `${USER_SETTINGS_DISPLAY} is missing ${missing.join(' and ')}, so UNENROLLED repos get no repo-state block on their first prompt`,
+    status: 'absent',
+  };
 }
 
 /** The advice line for the doctor check: what to do, and where. */

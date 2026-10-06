@@ -38,15 +38,31 @@ import {
   cleanupWorktreeAndBranch,
   createRunLog,
   isWorktreeRegistered,
+  LEGACY_SWEEP_NAME,
   parseWorktreePaths,
   ratchetVerdict,
   runSweep,
-  SWEEP_BRANCH,
-  SWEEP_WORKTREE_SEGMENTS,
+  sweepBranchFor,
+  SWEEP_WORKTREES_DIR,
   tailLines,
 } from '../src/sweep';
+import {
+  captureLog,
+  e2eRepo,
+  expectNoSweepRemains,
+  sweepRemains,
+} from './sweep-e2e-fixtures';
 import {git, write} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
+
+/**
+ * The FIXED name every run used until 2026-10-05 (39co9.6 S1). Runs now stamp
+ * their own name; these tests build leftovers under the old one because that is
+ * what the pre-2026-10-05 runs left in the fleet, and the scan must still find
+ * and judge them.
+ */
+const SWEEP_BRANCH = sweepBranchFor(LEGACY_SWEEP_NAME);
+const SWEEP_WORKTREE_SEGMENTS = [...SWEEP_WORKTREES_DIR, LEGACY_SWEEP_NAME];
 
 const sandboxes: Sandbox[] = [];
 function track(sb: Sandbox): Sandbox {
@@ -153,11 +169,31 @@ describe('allowedLeftoverPaths', () => {
 });
 
 describe('createRunLog', () => {
-  test('writes nothing until something fails', () => {
+  test('S4: the log exists from the moment the run starts, header first', () => {
+    // Reversed 2026-10-05 (39co9.6 S4). It used to write nothing until a step
+    // went red, so an INTERRUPTED run left no trace at all.
     const sb = track(createSandbox());
-    const log = createRunLog(join(sb.path, 'logs'));
-    expect(log.wrote()).toBe(false);
-    expect(existsSync(log.path)).toBe(false);
+    const log = createRunLog(join(sb.path, 'logs'), new Date(), {
+      header: ['branch: worktree-sdk-sweep-x'],
+    });
+    expect(log.recordedFailure()).toBe(false);
+    expect(existsSync(log.path)).toBe(true);
+    expect(readFileSync(log.path, 'utf-8')).toContain(
+      'branch: worktree-sdk-sweep-x',
+    );
+    log.note('some-repo', 'committed abc on worktree-sdk-sweep-x');
+    expect(readFileSync(log.path, 'utf-8')).toContain(
+      'some-repo: committed abc on worktree-sdk-sweep-x',
+    );
+  });
+
+  test('a dry run writes nothing anywhere', () => {
+    const sb = track(createSandbox());
+    const log = createRunLog(join(sb.path, 'logs'), new Date(), {
+      persist: false,
+    });
+    log.note('some-repo', 'would do things');
+    expect(existsSync(join(sb.path, 'logs'))).toBe(false);
   });
 
   test('a failure records the repo, the step, the detail and the output TAIL', () => {
@@ -170,7 +206,7 @@ describe('createRunLog', () => {
       step: 'signal',
     });
 
-    expect(log.wrote()).toBe(true);
+    expect(log.recordedFailure()).toBe(true);
     const written = readFileSync(log.path, 'utf-8');
     expect(written).toContain('some-repo · step: signal');
     expect(written).toContain('signal red after the update');
@@ -432,189 +468,6 @@ describe('assessSweepLeftover (F5)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The hermetic end-to-end harness
-// ---------------------------------------------------------------------------
-
-interface E2EOptions {
-  /** A dependency bun cannot resolve, so hydration really fails. */
-  breakHydration?: boolean;
-  /** Exit code of the read-only `doctor` baseline. */
-  doctorExit?: number;
-  /** Exit code of the `doctor --fix` gate. */
-  doctorFixExit?: number;
-  /** A pre-commit hook that exits non-zero (health-logger-rn's shape). */
-  hostilePreCommit?: boolean;
-  /**
-   * always-green      — signal passes before and after (the ordinary repo)
-   * always-red        — signal fails before and after (userscripts-j's shape)
-   * red-when-swept    — signal fails exactly once the payload's bytes land
-   */
-  signal?: 'always-green' | 'always-red' | 'red-when-swept';
-}
-
-/**
- * A committed repo the WHOLE sweep pipeline can run against, offline.
- *
- * The two `file:` dependencies are what make it hermetic: `bunx
- * @justinhaaheim/justin-sdk doctor` and `bunx prettier` both resolve the
- * repo's own node_modules first, so the fixture decides what the gates do
- * without any network or any installed SDK.
- */
-function e2eRepo(sb: Sandbox, name: string, options: E2EOptions = {}): string {
-  const doctorExit = options.doctorExit ?? 0;
-  const doctorFixExit = options.doctorFixExit ?? doctorExit;
-
-  const sdkDir = join(sb.path, `${name}-tools`, 'fake-sdk');
-  mkdirSync(sdkDir, {recursive: true});
-  writeFileSync(
-    join(sdkDir, 'package.json'),
-    JSON.stringify({
-      bin: {'justin-sdk': './cli.js'},
-      name: '@justinhaaheim/justin-sdk',
-      version: '0.0.0-fixture',
-    }) + '\n',
-  );
-  writeFileSync(
-    join(sdkDir, 'cli.js'),
-    [
-      '#!/usr/bin/env node',
-      'const args = process.argv.slice(2);',
-      "console.log('fixture justin-sdk ' + args.join(' '));",
-      `process.exit(args.includes('--fix') ? ${doctorFixExit} : ${doctorExit});`,
-      '',
-    ].join('\n'),
-  );
-  // WITHOUT the exec bit bunx cannot run the local bin and silently falls back
-  // to the registry — measured: the doctor gate then reported npm's 404 as the
-  // repo's doctor exit code, and `bunx prettier` fetched the real prettier.
-  chmodSync(join(sdkDir, 'cli.js'), 0o755);
-
-  const prettierDir = join(sb.path, `${name}-tools`, 'fake-prettier');
-  mkdirSync(prettierDir, {recursive: true});
-  writeFileSync(
-    join(prettierDir, 'package.json'),
-    JSON.stringify({
-      bin: {prettier: './cli.js'},
-      name: 'prettier',
-      version: '0.0.0-fixture',
-    }) + '\n',
-  );
-  writeFileSync(
-    join(prettierDir, 'cli.js'),
-    '#!/usr/bin/env node\nprocess.exit(0);\n',
-  );
-  chmodSync(join(prettierDir, 'cli.js'), 0o755);
-
-  const root = join(sb.path, name);
-  mkdirSync(root, {recursive: true});
-  git(root, ['init', '-q', '-b', 'main', '.']);
-  git(root, ['config', 'user.email', 'test@example.com']);
-  git(root, ['config', 'user.name', 'Test']);
-  const excludes = join(root, '.git', 'controlled-excludes');
-  writeFileSync(excludes, '');
-  git(root, ['config', 'core.excludesFile', excludes]);
-
-  const dependencies: Record<string, string> = {
-    '@justinhaaheim/justin-sdk': `file:${sdkDir}`,
-    prettier: `file:${prettierDir}`,
-  };
-  if (options.breakHydration === true) {
-    dependencies['fixture-missing-dep'] = `file:${join(sb.path, 'nowhere')}`;
-  }
-  write(
-    root,
-    'package.json',
-    JSON.stringify(
-      {
-        devDependencies: dependencies,
-        name,
-        scripts: {signal: 'bun run scripts/fixture-signal.ts'},
-        version: '0.0.1',
-      },
-      null,
-      2,
-    ) + '\n',
-  );
-  write(
-    root,
-    'justin-sdk.config.json',
-    JSON.stringify(
-      {
-        components: ['base-setup', 'gitignore-setup'],
-        lastSynced: '2000-01-01',
-        version: '0.0.1-fixture',
-      },
-      null,
-      2,
-    ) + '\n',
-  );
-  // node_modules and the lockfile must not ride along in the sweep's commit.
-  // The gitignore component only APPENDS its missing baseline entries, so these
-  // survive the payload.
-  write(root, '.gitignore', 'node_modules/\nbun.lock\n');
-
-  // The repo's own signal, as a real script that inspects the tree: in
-  // `red-when-swept` mode it goes red precisely when the payload's bytes land,
-  // so the green→red case below is caused by the payload rather than staged.
-  const body =
-    options.signal === 'always-red'
-      ? "console.log('fixture signal: pre-existing red'); process.exit(1);"
-      : options.signal === 'red-when-swept'
-        ? [
-            "const ignore = readFileSync('.gitignore', 'utf-8');",
-            "const swept = ignore.includes('justin-sdk baseline');",
-            "console.log('fixture signal: payload applied = ' + swept);",
-            'process.exit(swept ? 1 : 0);',
-          ].join('\n')
-        : "console.log('fixture signal: green'); process.exit(0);";
-  write(
-    root,
-    'scripts/fixture-signal.ts',
-    `import {readFileSync} from 'node:fs';\nvoid readFileSync;\n${body}\n`,
-  );
-
-  if (options.hostilePreCommit === true) {
-    write(
-      root,
-      '.husky/pre-commit',
-      '#!/bin/sh\necho "husky - pre-commit (ts-check) FAILED"\nexit 1\n',
-    );
-    chmodSync(join(root, '.husky', 'pre-commit'), 0o755);
-    git(root, ['config', 'core.hooksPath', '.husky']);
-  }
-
-  git(root, ['add', '-A']);
-  // --no-verify: the hostile pre-commit fixture would otherwise be unable to
-  // make its own first commit.
-  git(root, ['commit', '--no-verify', '-qm', 'init']);
-  return root;
-}
-
-async function captureLog<T>(
-  fn: () => Promise<T>,
-): Promise<{out: string; value: T}> {
-  const original = console.log;
-  const lines: string[] = [];
-  console.log = (...args: unknown[]) => {
-    lines.push(args.map((a) => String(a)).join(' '));
-  };
-  try {
-    const value = await fn();
-    return {out: lines.join('\n'), value};
-  } finally {
-    console.log = original;
-  }
-}
-
-/** Nothing of the sweep survives in `repo`: no directory, no registration, no branch. */
-function expectNoSweepRemains(repo: string): void {
-  const worktree = join(repo, ...SWEEP_WORKTREE_SEGMENTS);
-  expect(existsSync(worktree)).toBe(false);
-  expect(isWorktreeRegistered(repo, worktree)).toBe(false);
-  expect(git(repo, ['branch', '--list', SWEEP_BRANCH]).trim()).toBe('');
-}
-
-// ---------------------------------------------------------------------------
 // F2 — a red step cleans up and leaves its evidence in the log
 // ---------------------------------------------------------------------------
 
@@ -693,7 +546,8 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
     expect(written).toContain('empty ident name');
   });
 
-  test('a green run writes no log file at all', async () => {
+  test('a green run writes a run log (S4) but no failure section', async () => {
+    // Was "a green run writes no log file at all" until 39co9.6 S4.
     const sb = track(createSandbox());
     const repo = e2eRepo(sb, 'green');
     const logDir = join(sb.path, 'logs');
@@ -704,12 +558,17 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
 
     expect(value).toBe(0);
     expect(out).not.toContain('\nfailure log:');
-    expect(existsSync(logDir)).toBe(false);
     expect(out).not.toContain('registry.npmjs.org');
     expectNoSweepRemains(repo);
+    const logPath = /run log: (\S+\.log)/.exec(out)?.[1];
+    const written = readFileSync(logPath!, 'utf-8');
+    expect(written).toContain('green: committed');
+    expect(written).toContain('green: merged worktree-sdk-sweep-');
+    expect(written).toContain('exit 0');
+    expect(written).not.toContain('· step:');
   });
 
-  test('a merge-pending run KEEPS its worktree on purpose, and says so', async () => {
+  test('a merge-pending run KEEPS its worktree on purpose, says so, and FAILS the run (S7)', async () => {
     const sb = track(createSandbox());
     const repo = e2eRepo(sb, 'merge-deferred');
     // The primary is dirty on a file the sweep changes → mergeSafety refuses,
@@ -724,11 +583,20 @@ describe('a red step removes the worktree and logs the evidence (F2)', () => {
       }),
     );
 
-    expect(value).toBe(0);
+    // S7 (2026-10-05): a merge-deferred repo did not get the payload, so the
+    // run exits non-zero. It used to exit 0 and say "0 failed".
+    expect(value).toBe(1);
     expect(out).toContain('merge deferred');
     expect(out).toContain('KEPT ON PURPOSE');
-    expect(existsSync(join(repo, ...SWEEP_WORKTREE_SEGMENTS))).toBe(true);
-    expect(git(repo, ['branch', '--list', SWEEP_BRANCH]).trim()).not.toBe('');
+    expect(out).toContain('1 merge-pending');
+    // Kept under THIS run's stamped name, branch and directory alike.
+    const [kept, ...others] = sweepRemains(repo);
+    expect(others).toEqual([]);
+    expect(kept).toMatch(/^sdk-sweep-\d{4}-/);
+    expect(existsSync(join(repo, ...SWEEP_WORKTREES_DIR, kept!))).toBe(true);
+    expect(
+      git(repo, ['branch', '--list', sweepBranchFor(kept!)]).trim(),
+    ).not.toBe('');
   });
 });
 
@@ -880,21 +748,13 @@ describe('skips are counted and separated (F4)', () => {
     );
     git(other, ['add', '-A']);
     git(other, ['commit', '-qm', 'drop the component']);
-    // …and b carries a leftover the sweep may NOT delete.
-    const stuckWorktree = join(stuck, ...SWEEP_WORKTREE_SEGMENTS);
-    mkdirSync(join(stuck, '.claude', 'worktrees'), {recursive: true});
-    git(stuck, [
-      'worktree',
-      'add',
-      '-q',
-      '-b',
-      SWEEP_BRANCH,
-      stuckWorktree,
-      'main',
-    ]);
-    writeFileSync(join(stuckWorktree, 'a.txt'), 'unfinished work\n');
-    git(stuckWorktree, ['add', '-A']);
-    git(stuckWorktree, ['commit', '-qm', 'work nobody else has']);
+    // …and b's committed enrollment cannot be read. (Until 39co9.6 the blocker
+    // here was a leftover holding work; a leftover no longer blocks — S2 — so
+    // the could-not-sweep case is now built from an unreadable config.)
+    write(stuck, 'justin-sdk.config.json', '{ not json\n');
+    git(stuck, ['add', '-A']);
+    git(stuck, ['commit', '-qm', 'corrupt the config']);
+    const stuckHead = git(stuck, ['rev-parse', 'HEAD']).trim();
 
     const {out, value} = await captureLog(() =>
       runSweep({
@@ -919,7 +779,8 @@ describe('skips are counted and separated (F4)', () => {
       'justin-sdk baseline',
     );
     // And b was left exactly as it was.
-    expect(existsSync(stuckWorktree)).toBe(true);
+    expect(git(stuck, ['rev-parse', 'HEAD']).trim()).toBe(stuckHead);
+    expectNoSweepRemains(stuck);
   });
 });
 
@@ -1008,7 +869,7 @@ describe('preflight removes a provably-empty leftover (F5)', () => {
     );
 
     expect(value).toBe(0);
-    expect(out).toContain('a leftover was left alone');
+    expect(out).toContain('a leftover from an earlier run was left alone');
     expect(out).not.toContain('COULD NOT SWEEP');
     expect(existsSync(worktree)).toBe(true);
   });

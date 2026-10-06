@@ -53,7 +53,7 @@ import {
   helpWrapWidth,
   UNKNOWN_VERSION,
 } from './sdk-identity';
-import {runSessionStart} from './session-start';
+import {runRepoState, runSessionStart} from './session-start';
 import {runSetupEnv} from './setup-env-command';
 import {runSignal} from './signal';
 import {runSkill} from './skill';
@@ -916,16 +916,39 @@ void yargs(ARGV)
   )
   .command(
     'session-start',
-    'SessionStart hook: the ONE command that runs at session start (epic home-base-dchjw D6, which retired the `prime` plugin). Remote (CLAUDE_CODE_REMOTE=true) hands off to setup-env. Locally it emits doctor --quiet, the repo-state block and the rules-drift notice as a SessionStart JSON envelope — repo state and doctor to the model, freshness verdicts to Justin. Read-only; always exits 0 so a failure can never silently swallow the session start.',
+    'SessionStart hook: the ONE command that runs at session start (epic home-base-dchjw D6, which retired the `prime` plugin). Remote (CLAUDE_CODE_REMOTE=true) hands off to setup-env. Locally it shows Justin the rules freshness, the repo-rules drift advice, the conditional rule modules that apply here and doctor --quiet, and arms `repo-state --hook` so the repo-state block reaches Claude on the FIRST PROMPT instead (home-base-39co9.4). Anything it does inject into Claude (rule text, in a repo without its own rules artifact) is mirrored to Justin. Reads the hook payload on stdin; always exits 0 so a failure can never silently swallow the session start.',
     (y) =>
       y.option('user-level', {
         default: false,
         describe:
-          'Run as the USER-LEVEL hook in ~/.claude/settings.json: print NOTHING and exit 0 when the project root carries justin-sdk.config.json (the project hook owns that repo), otherwise print the rules pointer and the repo-state block. This is what keeps the repo state reaching UNENROLLED repos without two hooks ever both firing.',
+          'Run as the USER-LEVEL hook in ~/.claude/settings.json: print NOTHING and exit 0 when the project root carries justin-sdk.config.json (the project hook owns that repo), otherwise report the rules and arm the first-prompt repo-state hook. This is what keeps the repo state reaching UNENROLLED repos without two hooks ever both firing.',
         type: 'boolean',
       }),
     async (argv) => {
       process.exit(await runSessionStart({userLevel: argv['user-level']}));
+    },
+  )
+  .command(
+    'repo-state',
+    'Print the repo-state block (this branch, and the other branches and worktrees with unmerged work). With --hook it is the UserPromptSubmit hook that injects that block on the FIRST prompt after each SessionStart (startup, resume, clear, compact), measured at that moment, and mirrors it to Justin; later prompts print nothing (home-base-39co9.4). Always exits 0.',
+    (y) =>
+      y
+        .option('hook', {
+          default: false,
+          describe:
+            'Run as the UserPromptSubmit hook: read the payload on stdin and inject the block only on the first prompt after a SessionStart.',
+          type: 'boolean',
+        })
+        .option('user-level', {
+          default: false,
+          describe:
+            'With --hook, run as the USER-LEVEL hook: print NOTHING when the project root carries justin-sdk.config.json (its project hook owns that repo).',
+          type: 'boolean',
+        }),
+    (argv) => {
+      process.exit(
+        runRepoState({hook: argv.hook, userLevel: argv['user-level']}),
+      );
     },
   )
   .command(
@@ -1081,7 +1104,7 @@ void yargs(ARGV)
   )
   .command(
     'sweep',
-    'Fleet propagation: for every repo under --root with a justin-sdk.config.json, update the SDK in a fresh worktree (j update), gate on the repo’s own signal + doctor AS A RATCHET (each measured before and after the payload — only green→red fails, a repo that was already red proceeds with a loud note), then merge --ff-only into the default branch and push. Green = fully automatic; red = worktree AND branch removed, the failing step + output tail written to ~/Dev/home-base/tmp/sdk-sweep/<run>.log, non-zero exit. Repos that could not be swept at all are counted and named last, and also exit non-zero. Deterministic by contract (home-base-j2n7): failures get fixed in the SDK, never papered over here.',
+    'Fleet propagation: for every repo under --root with a justin-sdk.config.json, fetch the default branch’s upstream first (fast-forward when strictly behind and the primary is on it with no tracked changes; diverged or unfetchable = COULD NOT SWEEP up front, nothing created), update the SDK in a fresh worktree named for this run (.claude/worktrees/sdk-sweep-<stamp>, branch worktree-sdk-sweep-<stamp>), gate on the repo’s own signal + doctor AS A RATCHET (each measured before and after the payload — only green→red fails, a repo that was already red proceeds with a loud note), then merge --ff-only into the default branch and push. Earlier runs’ leftovers never block: empty ones are removed, ones holding commits are kept and listed with an inspect command. The run log ~/Dev/home-base/tmp/sdk-sweep/<stamp>.log is written from the start, one line per step, plus each red step’s output tail. Exit is non-zero when any repo failed, could not be swept, was merged but not pushed (recovery steps on its line), or was left merge-pending. Deterministic by contract (home-base-j2n7): failures get fixed in the SDK, never papered over here.',
     (y) =>
       y
         .option('dry-run', {

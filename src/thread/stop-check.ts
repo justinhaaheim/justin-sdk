@@ -82,6 +82,7 @@ import {
   sectionHeader,
   spacedList,
 } from '../cli-style';
+import {stopBlockJson} from '../hook-output';
 import {SDK_RUN} from '../sdk-invocation';
 import {
   newestArchivedReportAt,
@@ -794,9 +795,9 @@ export function runThreadStopCheck(args?: {
     }
 
     const reason = decision.reason ?? STOP_CHECK_BLOCK_REASON;
-    console.log(
-      JSON.stringify({decision: 'block', reason, systemMessage: reason}),
-    );
+    // Built by the shared helper, which mirrors the reason into systemMessage
+    // (home-base-39co9.4 M3) — the same JSON this printed before.
+    console.log(JSON.stringify(stopBlockJson(reason)));
     console.error(reason);
     return finish(decision, 2);
   } catch (error) {
