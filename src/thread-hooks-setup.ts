@@ -1,7 +1,9 @@
 /**
  * thread-hooks-setup — installs the thread hooks in a consuming project.
  *
- * Scaffolds exactly THREE entries in `.claude/settings.json`:
+ * Scaffolds exactly FOUR entries in `.claude/settings.json` (the fourth, the
+ * PostToolUse [Bash] `thread nudge` commit nudge, added by home-base-vzwbj.4.4
+ * and inert until componentConfig.thread.sessionBeads is on):
  *
  *  - `UserPromptSubmit` and `Stop` (no matcher) → `thread capture`, which logs
  *    every prompt and every Claude yield and keeps the thread bead's last
@@ -142,6 +144,24 @@ export const THREAD_CAPTURE_HOOK_FINGERPRINT = sdkScript(
 export const THREAD_CAPTURE_HOOK_EVENTS = ['UserPromptSubmit', 'Stop'] as const;
 
 /**
+ * The commit nudge (home-base-vzwbj.4.4, epic D3): `thread nudge` on
+ * PostToolUse, matcher `Bash` — PostToolUse DOES have a matcher dimension (the
+ * tool name), so this one entry runs after Bash calls only. Same identity rule
+ * as the others: found by its subcommand, rewritten when its spelling moves.
+ */
+const THREAD_NUDGE_SUBCOMMAND = 'thread nudge';
+
+/** The command the PostToolUse hook runs. */
+export const THREAD_NUDGE_HOOK_COMMAND = sdkRun(THREAD_NUDGE_SUBCOMMAND);
+
+/** The CURRENT spelling, for the component manifest's installed-evidence check. */
+export const THREAD_NUDGE_HOOK_FINGERPRINT = sdkScript(THREAD_NUDGE_SUBCOMMAND);
+
+export const THREAD_NUDGE_HOOK_EVENT = 'PostToolUse';
+
+export const THREAD_NUDGE_HOOK_MATCHER = 'Bash';
+
+/**
  * Register one hook command under one event in a settings object.
  *
  * Hooks are ADDITIVE in Claude Code — several may be registered for one event
@@ -190,6 +210,16 @@ export function addThreadStopHook(settings: Record<string, unknown>): boolean {
     event: THREAD_STOP_HOOK_EVENT,
     matcher: null,
     subcommand: THREAD_STOP_SUBCOMMAND,
+  });
+}
+
+/** Register `thread nudge` on PostToolUse with matcher Bash (home-base-vzwbj.4.4). */
+export function addThreadNudgeHook(settings: Record<string, unknown>): boolean {
+  return addHook(settings, {
+    command: THREAD_NUDGE_HOOK_COMMAND,
+    event: THREAD_NUDGE_HOOK_EVENT,
+    matcher: THREAD_NUDGE_HOOK_MATCHER,
+    subcommand: THREAD_NUDGE_SUBCOMMAND,
   });
 }
 
@@ -310,8 +340,9 @@ export function stepThreadHooks(projectRoot: string): boolean {
   const removedRetired = retired.some((outcome) => outcome.kind === 'removed');
   const addedStop = addThreadStopHook(settings);
   const addedCapture = addThreadCaptureHooks(settings);
+  const addedNudge = addThreadNudgeHook(settings);
 
-  if (removedRetired || addedStop || addedCapture.length > 0) {
+  if (removedRetired || addedStop || addedCapture.length > 0 || addedNudge) {
     writeJson(settingsPath, settings);
   }
 
@@ -322,9 +353,19 @@ export function stepThreadHooks(projectRoot: string): boolean {
     console.log(`  ${describeRetiredStartHookOutcome(outcome)}`);
   }
 
-  if (!removedRetired && !addedStop && addedCapture.length === 0) {
+  if (
+    !removedRetired &&
+    !addedStop &&
+    addedCapture.length === 0 &&
+    !addedNudge
+  ) {
     success('.claude/settings.json already has every thread hook');
     return true;
+  }
+  if (addedNudge) {
+    success(
+      `Updated .claude/settings.json (${THREAD_NUDGE_HOOK_EVENT} [${THREAD_NUDGE_HOOK_MATCHER}] → thread nudge)`,
+    );
   }
   if (addedStop) {
     success(
@@ -368,7 +409,7 @@ export async function runThreadHooksSetup(args: {
   success('base-setup ready');
 
   stepHeader(
-    `1. .claude/settings.json (${THREAD_CAPTURE_HOOK_EVENTS.join(', ')} capture, ${THREAD_STOP_HOOK_EVENT} stop-check; retired ${THREAD_START_HOOK_EVENT} entry)`,
+    `1. .claude/settings.json (${THREAD_CAPTURE_HOOK_EVENTS.join(', ')} capture, ${THREAD_STOP_HOOK_EVENT} stop-check, ${THREAD_NUDGE_HOOK_EVENT} [${THREAD_NUDGE_HOOK_MATCHER}] nudge; retired ${THREAD_START_HOOK_EVENT} entry)`,
   );
   if (!stepThreadHooks(projectRoot)) return 1;
 

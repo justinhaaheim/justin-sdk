@@ -41,6 +41,9 @@ import {
   THREAD_DEFAULT_ENFORCE,
   THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
   THREAD_DEFAULT_ENFORCE_MODE,
+  THREAD_DEFAULT_NUDGE,
+  THREAD_DEFAULT_SESSION_BEADS,
+  THREAD_DEFAULT_STAGES,
 } from './thread/defaults';
 import {TIME_CHECK_DEFAULTS} from './time-check';
 import {USAGE_CHECK_DEFAULTS} from './usage-check';
@@ -239,6 +242,12 @@ const componentConfigSchema = z
           .describe(
             'WHAT an armed `thread stop-check` refuses (home-base-k0b8n.11, K12 — the refusal experiment). DEFAULT "reportShaped": only a final message shaped like a status report that was not recorded, which has never fired in practice. "workTurns" ALSO refuses, once per turn, a turn that ran a `git commit` or lasted at least enforceMinTurnMinutes and yields with no report archived since Justin’s last message. Needs `enforce: true`. Every decision, pass or block, is logged to ~/.local/state/justin-threads/stop-check.jsonl; `thread stop-check --stats` summarises it.',
           ),
+        nudge: z
+          .boolean()
+          .optional()
+          .describe(
+            'STATUS REPORT V4 (home-base-vzwbj.4 D3, built 2026-10-11 by home-base-vzwbj.4.4). DEFAULT TRUE, but inert unless `sessionBeads` is on too. The PostToolUse hook `thread nudge` (matcher Bash, installed by thread-hooks) prints ONE line into Claude’s context — at most once per turn, never blocking — when a Bash command ran `git commit` and the session has no request in progress: "[thread] you committed but no request is in progress for this session — …". Set false to silence it.',
+          ),
         render: z
           .looseObject({
             emojiHeader: z
@@ -255,6 +264,18 @@ const componentConfigSchema = z
           .optional()
           .describe(
             'The bd workspace holding `thread` and `ask` beads (home-base-p1uj.11). DEFAULT ~/Dev/threads. Overridden by the JUSTIN_THREADS_REPO_DIR env var, which outranks both config files.',
+          ),
+        sessionBeads: z
+          .boolean()
+          .optional()
+          .describe(
+            'STATUS REPORT V4 (home-base-vzwbj.4 D6, built 2026-10-11 by home-base-vzwbj.4.1). DEFAULT FALSE. With it on, the `thread capture` hook ALSO files a `session` bead (in_progress, labels session / sid:<id> / auto-title, plus cmux-surface: / cmux-workspace: when known) in the repo’s OWN beads workspace on a session’s first captured prompt, records which DB holds it in ~/.local/state/justin-threads/sessions.jsonl, and injects one `[thread] session …` line into Claude’s context on every prompt (mirrored to you). `thread request` and `thread title` need it. A repo with no br workspace gets no bead and no line. Off: none of that happens anywhere, and the ~/Dev/threads thread bead is written exactly as before either way. Rides on capture, so `enabled` and `capture` must be on too.',
+          ),
+        stages: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'STATUS REPORT V4 (home-base-vzwbj.4 D1, built 2026-10-11 by home-base-vzwbj.4.3): the ladder a request climbs, in order. `thread stage <request> <name>…` labels the request `stage:<name>` and refuses any name not in this list (printing the list); Part 1 of `thread status` / `thread show` shows the highest stage reached and the next one. Names are plain tokens (letters, digits, . _ -), distinct, at least one; a list that breaks that is named as a config problem and the default is used.',
           ),
         startOnSessionStart: z
           .boolean()
@@ -546,8 +567,11 @@ export const DEFAULT_COMPONENT_CONFIG = {
     enforce: THREAD_DEFAULT_ENFORCE,
     enforceMinTurnMinutes: THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
     enforceMode: THREAD_DEFAULT_ENFORCE_MODE,
+    nudge: THREAD_DEFAULT_NUDGE,
     render: {emojiHeader: THREAD_DEFAULT_EMOJI_HEADER},
     repoDir: '~/Dev/threads',
+    sessionBeads: THREAD_DEFAULT_SESSION_BEADS,
+    stages: THREAD_DEFAULT_STAGES,
     // No `startOnSessionStart`: deprecated, no effect, so no default to print
     // (home-base-39co9 D2).
   },

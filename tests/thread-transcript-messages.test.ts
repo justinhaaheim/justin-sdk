@@ -36,9 +36,59 @@ import {
   extractTranscriptMessages,
   forEachTranscriptLine,
   projectDirSlug,
+  readLastRecordTimestamp,
   stripHarnessNoise,
   substantiveUserText,
 } from '../src/thread/transcript-messages';
+
+// P5 (home-base-vzwbj.4.9): hook and system records are written AT the yield,
+// so they must not date the session's last activity (🏃 Working).
+describe('readLastRecordTimestamp: conversation records only (P5)', () => {
+  function transcript(records: object[]): string {
+    const dir = mkdtempSync(join(tmpdir(), 'last-record-'));
+    const path = join(dir, 's.jsonl');
+    writeFileSync(
+      path,
+      `${records.map((record) => JSON.stringify(record)).join('\n')}\n`,
+    );
+    return path;
+  }
+
+  test('a transcript ending in system and hook records uses the prior assistant time', () => {
+    const path = transcript([
+      {timestamp: '2030-01-01T10:00:00.000Z', type: 'user'},
+      {timestamp: '2030-01-01T10:05:00.000Z', type: 'assistant'},
+      {
+        subtype: 'stop_hook_summary',
+        timestamp: '2030-01-01T10:05:02.000Z',
+        type: 'system',
+      },
+      {timestamp: '2030-01-01T10:05:03.000Z', type: 'attachment'},
+    ]);
+    expect(readLastRecordTimestamp(path)).toEqual({
+      at: '2030-01-01T10:05:00.000Z',
+      kind: 'found',
+    });
+  });
+
+  test('a user record (a tool result counts as one) is activity', () => {
+    const path = transcript([
+      {timestamp: '2030-01-01T10:05:00.000Z', type: 'assistant'},
+      {timestamp: '2030-01-01T10:06:00.000Z', type: 'user'},
+    ]);
+    expect(readLastRecordTimestamp(path)).toEqual({
+      at: '2030-01-01T10:06:00.000Z',
+      kind: 'found',
+    });
+  });
+
+  test('no conversation record at all is a measured none, not a time', () => {
+    const path = transcript([
+      {timestamp: '2030-01-01T10:05:02.000Z', type: 'system'},
+    ]);
+    expect(readLastRecordTimestamp(path).kind).toBe('none');
+  });
+});
 
 const FIXTURE = join(
   dirname(new URL(import.meta.url).pathname),

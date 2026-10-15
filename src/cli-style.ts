@@ -267,6 +267,23 @@ export function spacedList(blocks: readonly string[]): string {
   return blocks.filter((block) => block !== '').join('\n\n');
 }
 
+/**
+ * What separates two SIBLING LIST ITEMS in markdown that Claude Code will draw
+ * (home-base-j8q3e.1.7.2): TWO empty lines. Claude Code's terminal drops ONE
+ * empty line between list items, stacking them, and draws two (or more) as one
+ * empty row with the numbering kept (measured 2026-10-15 on Claude Code
+ * 2.1.300: docs/reference/claude-code-markdown-rendering.md rows 1, 29–34).
+ * Between blocks that are not list items (paragraphs, headings, quotes, rules)
+ * one empty line already shows, so `spacedList` stays right there. A terminal
+ * print (ANSI) is not collapsed, so it keeps one blank line.
+ */
+export const MARKDOWN_ITEM_GAP = '\n\n\n';
+
+/** Sibling markdown list items, two empty lines apart; empty items dropped. */
+export function markdownItems(items: readonly string[]): string {
+  return items.filter((item) => item !== '').join(MARKDOWN_ITEM_GAP);
+}
+
 // ---------------------------------------------------------------------------
 // Wrapping
 // ---------------------------------------------------------------------------

@@ -1,0 +1,14 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`the ask renderer ANSI: bold question, red P0 badge, green recommendation, italic default, the same blank lines 1`] = `
+"      \x1B[1m1. \x1B[0m\x1B[1;33m🟡 P2\x1B[0m · \x1B[36m[Pick a/b]\x1B[0m \x1B[1mWhich database should the export use?\x1B[0m \x1B[2m(t-abc.2)\x1B[0m
+
+         \x1B[2m-\x1B[0m The nightly export reads every table.
+         \x1B[2m-\x1B[0m Postgres is already running.
+
+         \x1B[1ma.\x1B[0m \x1B[1;32m(Recommended)\x1B[0m \x1B[1;32mPostgres\x1B[0m — already running
+
+         \x1B[1mb.\x1B[0m \x1B[1mSQLite\x1B[0m — no server
+
+         \x1B[3mIf you don't answer: I use Postgres.\x1B[0m"
+`;

@@ -53,6 +53,7 @@ import {
 import {fileURLToPath} from 'url';
 
 import {silencedChildEnv} from '../health-notices';
+import {emitHookOutput} from '../hook-output';
 import {
   captureDirtyPath,
   captureLockPath,
@@ -81,6 +82,8 @@ import {
   syncMessageLogFromTurns,
 } from './message-log';
 import {probeErrorMessage} from './paths';
+import {ensureSessionBead, type SessionBeadOutcome} from './session-bead';
+import {sessionContextLine} from './session-line';
 import {
   buildResumeCommand,
   extractTranscriptTurns,
@@ -226,6 +229,13 @@ export function decideCapture(
 export const CLI_PATH = fileURLToPath(new URL('../cli.ts', import.meta.url));
 
 export interface ApplyRequest {
+  /**
+   * What computing the prompt-time context line cost, ms (status report v4,
+   * home-base-vzwbj.4.1); null when no line was computed (knob off, a Stop).
+   * Already INCLUDED in `hookElapsedMs`; recorded apart so its share is
+   * visible in capture.jsonl.
+   */
+  contextLineMs?: number | null;
   cwd: string | null;
   env: EnvLike;
   /**
@@ -259,6 +269,9 @@ export function spawnDetachedApply(request: ApplyRequest): SpawnOutcome {
   }
   if (request.hookElapsedMs != null) {
     args.push('--hook-ms', String(request.hookElapsedMs));
+  }
+  if (request.contextLineMs != null) {
+    args.push('--line-ms', String(request.contextLineMs));
   }
   try {
     const child = spawn(process.execPath, args, {
@@ -299,6 +312,14 @@ export function describeCaptureHook(
 
 export interface CaptureHookResult {
   append: AppendOutcome | null;
+  /**
+   * The one line injected into Claude's context (status report v4,
+   * home-base-vzwbj.4.1), or null when none was printed: knob off, not a
+   * UserPromptSubmit, or nothing to say.
+   */
+  contextLine: string | null;
+  /** What computing it cost, ms; null when it was not computed. */
+  contextLineMs: number | null;
   decision: CaptureDecision;
   /** Wall time of the synchronous part, ms (K10 b budget: < 50). */
   elapsedMs: number;
@@ -308,8 +329,38 @@ export interface CaptureHookResult {
 }
 
 /**
- * The hook. SYNCHRONOUS, ALWAYS RETURNS exit 0, never throws, prints nothing
- * to stdout.
+ * The prompt-time context line, guarded: a failure here must never cost the
+ * capture, so it is said on stderr and the line is dropped (status report v4,
+ * home-base-vzwbj.4.1).
+ */
+function computeContextLine(
+  decision: Extract<CaptureDecision, {kind: 'capture'}>,
+  env: EnvLike,
+): string | null {
+  try {
+    return sessionContextLine({
+      cwd: decision.cwd,
+      env,
+      sessionId: decision.sessionId,
+    });
+  } catch (error) {
+    console.error(
+      `[thread capture] the session context line could not be built: ${probeErrorMessage(error)}`,
+    );
+    return null;
+  }
+}
+
+/**
+ * The hook. SYNCHRONOUS, ALWAYS RETURNS exit 0, never throws.
+ *
+ * STDOUT: nothing — EXCEPT, with `componentConfig.thread.sessionBeads` on, ONE
+ * JSON line on a UserPromptSubmit carrying the session context line to Claude
+ * (`additionalContext`) and its mirror to Justin (`systemMessage`), through
+ * hook-output.ts like every other SDK hook (M3). Claude Code adds a
+ * UserPromptSubmit hook's context to the model's context; that is the point
+ * of the line (epic home-base-vzwbj.4 D3). With the knob off this hook still
+ * never writes stdout.
  */
 export function runThreadCaptureHook(
   args: {
@@ -326,16 +377,40 @@ export function runThreadCaptureHook(
   const explain = args.explain === true;
   let append: AppendOutcome | null = null;
   let spawned: SpawnOutcome | null = null;
+  let contextLine: string | null = null;
+  let contextLineMs: number | null = null;
+  // P3 (home-base-vzwbj.4.9): the line is printed AT MOST ONCE. If anything in
+  // finish() throws after the emit (the --explain writes, say), the catch below
+  // calls finish() again — and a second JSON document on stdout would reach
+  // Claude as a second, duplicate context block.
+  let emitted = false;
 
   const finish = (decision: CaptureDecision): CaptureHookResult => {
+    if (contextLine != null && !emitted) {
+      emitted = true;
+      emitHookOutput({event: 'UserPromptSubmit', forClaude: contextLine});
+    }
     const elapsedMs = Math.round((performance.now() - started) * 10) / 10;
     if (explain) {
       console.error(
         `[thread capture] ${describeCaptureHook(decision, append, spawned)}`,
       );
+      if (contextLineMs != null) {
+        console.error(
+          `[thread capture] context line ${contextLine == null ? 'not printed' : 'printed'} (${contextLineMs}ms)`,
+        );
+      }
       console.error(`[thread capture] ${elapsedMs}ms (synchronous part)`);
     }
-    return {append, decision, elapsedMs, exitCode: 0, spawn: spawned};
+    return {
+      append,
+      contextLine,
+      contextLineMs,
+      decision,
+      elapsedMs,
+      exitCode: 0,
+      spawn: spawned,
+    };
   };
 
   let input: CaptureHookInput;
@@ -375,6 +450,14 @@ export function runThreadCaptureHook(
       });
     }
 
+    // Before the spawn, so `hookElapsedMs` includes its cost (the ~60 ms
+    // budget is measured on that field). Reads files only; never calls br.
+    if (decision.event === 'UserPromptSubmit' && config.sessionBeads) {
+      const lineStarted = performance.now();
+      contextLine = computeContextLine(decision, env);
+      contextLineMs = Math.round((performance.now() - lineStarted) * 10) / 10;
+    }
+
     append = appendMessageLine(
       messageLogPath(decision.sessionId, env),
       decision.line,
@@ -390,6 +473,7 @@ export function runThreadCaptureHook(
     // again is harmless and is what heals a bead a failed child left behind.
     const spawnApply = args.spawnApply ?? spawnDetachedApply;
     spawned = spawnApply({
+      ...(contextLineMs != null ? {contextLineMs} : {}),
       cwd: decision.cwd,
       env,
       hookElapsedMs: Math.round((performance.now() - started) * 10) / 10,
@@ -710,11 +794,24 @@ export type ApplyPassOutcome =
 export interface ApplyOptions {
   /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
   autoCommit?: boolean;
+  /** The spawning hook's context-line ms (`--line-ms`), recorded as-is. */
+  contextLineMs?: number | null;
   cwd?: string | null;
+  /**
+   * F2: true when `cwd` is the CLI's own directory because `--apply` was run
+   * without `--cwd`; the run record then names the default.
+   */
+  cwdDefaulted?: boolean;
   env?: EnvLike;
   /** The spawning hook's synchronous ms (`--hook-ms`), recorded as-is. */
   hookElapsedMs?: number | null;
   now?: Date;
+  /**
+   * Whether to file the session bead in the repo (status report v4,
+   * home-base-vzwbj.4.1). `runThreadCaptureApply` resolves it from
+   * componentConfig.thread.sessionBeads when absent; absent here means off.
+   */
+  sessionBeads?: boolean;
   sessionId: string;
   transcriptPath?: string | null;
 }
@@ -904,7 +1001,41 @@ export type CaptureApplyOutcome =
       passes: number;
       /** What the one-time seed did before the first pass (k0b8n.16). */
       seed: SeedOutcome;
+      /**
+       * What filing the repo's session bead did (status report v4,
+       * home-base-vzwbj.4.1); null when componentConfig.thread.sessionBeads
+       * is off, so a knob-off run records nothing new.
+       */
+      sessionBead: SessionBeadOutcome | null;
     };
+
+/**
+ * File the session bead from the log's first user line. A thrown ensure is a
+ * failed one, never a lost capture.
+ */
+function ensureSessionBeadFromLog(
+  options: ApplyOptions,
+  env: EnvLike,
+): SessionBeadOutcome {
+  try {
+    const log = readMessageLog(options.sessionId, env);
+    const firstUser =
+      log.kind === 'read' ? summarizeLog(log.lines).firstUser : null;
+    return ensureSessionBead({
+      cwd: options.cwd ?? null,
+      env,
+      firstPrompt:
+        firstUser != null ? {at: firstUser.at, text: firstUser.text} : null,
+      now: options.now ?? new Date(),
+      sessionId: options.sessionId,
+    });
+  } catch (error) {
+    return {
+      detail: `threw: ${probeErrorMessage(error)}`,
+      kind: 'failed',
+    };
+  }
+}
 
 /**
  * The child's whole job: take the lock, apply until no newer message is
@@ -939,6 +1070,7 @@ export async function applyCapture(
   let wrote = false;
   let threadId: string | null = null;
   let seed: SeedOutcome = {kind: 'alreadySeeded'};
+  let sessionBead: SessionBeadOutcome | null = null;
   try {
     // Under the lock, before the first pass: the pass then applies the seeded
     // log's tail. A thrown seed is a failed one, never a lost capture.
@@ -946,6 +1078,14 @@ export async function applyCapture(
       seed = seedMessageLogOnce(options, transcript);
     } catch (error) {
       seed = {error: probeErrorMessage(error), kind: 'failed'};
+    }
+    // Status report v4 (home-base-vzwbj.4.1): the repo's session bead, IN
+    // ADDITION to the ~/Dev/threads thread bead below, which is untouched.
+    // Under the lock, so two children of one session never file two beads;
+    // after the seed, so the log's first user line is the session's first
+    // prompt even when capture started mid-session.
+    if (options.sessionBeads === true) {
+      sessionBead = ensureSessionBeadFromLog(options, env);
     }
     for (;;) {
       do {
@@ -990,7 +1130,7 @@ export async function applyCapture(
       exportUnstaged: ctx.exportUnstaged,
     });
   }
-  return {commit, kind: 'ran', last, passes, seed};
+  return {commit, kind: 'ran', last, passes, seed, sessionBead};
 }
 
 /** The one JSON line a child run appends to `<stateDir>/capture.jsonl`. */
@@ -1000,10 +1140,23 @@ export function captureRunRecord(
   elapsedMs: number,
   now: Date,
   hookElapsedMs: number | null = null,
+  contextLineMs: number | null = null,
+  cwdDefaulted: string | null = null,
 ): Record<string, unknown> {
   // hookElapsedMs is null when the child was started by hand (no --hook-ms):
-  // "not measured", never 0.
-  const base = {at: now.toISOString(), elapsedMs, hookElapsedMs, sessionId};
+  // "not measured", never 0. contextLineMs is written only when the hook
+  // measured one (status report v4), so a knob-off record is unchanged.
+  // cwdDefaulted (F2) only when `--apply` ran without --cwd.
+  const base = {
+    at: now.toISOString(),
+    ...(contextLineMs != null ? {contextLineMs} : {}),
+    ...(cwdDefaulted != null
+      ? {cwdDefaulted: `cwd defaulted to ${cwdDefaulted}`}
+      : {}),
+    elapsedMs,
+    hookElapsedMs,
+    sessionId,
+  };
   if (outcome.kind === 'threw') {
     return {...base, error: outcome.error, outcome: 'threw'};
   }
@@ -1020,6 +1173,16 @@ export function captureRunRecord(
     // seeded, and from what" is answered after the fact.
     seed: outcome.seed,
   };
+  // Status report v4: present only when the knob is on.
+  if (outcome.sessionBead != null) {
+    record.sessionBead =
+      cwdDefaulted != null
+        ? {
+            ...outcome.sessionBead,
+            detail: `${outcome.sessionBead.detail} (cwd defaulted to ${cwdDefaulted})`,
+          }
+        : outcome.sessionBead;
+  }
   if (last.kind === 'applied') {
     record.threadId = last.threadId;
     record.created = last.created;
@@ -1052,9 +1215,24 @@ export async function runThreadCaptureApply(
 ): Promise<number> {
   const env = options.env ?? process.env;
   const started = performance.now();
+  // F2 (home-base-vzwbj.4.9): the hook always passes --cwd; a hand-run
+  // `--apply` without it gets the current directory from the CLI, which says
+  // so here, and the run record names it — rather than failing as "the hook
+  // payload carried no cwd". Defaulted in the CLI only: a programmatic caller
+  // with no cwd keeps null, so a test run from inside a real beads checkout
+  // can never file a bead there by accident.
+  const cwdDefaulted =
+    options.cwdDefaulted === true && options.cwd != null ? options.cwd : null;
+  const cwd = options.cwd ?? null;
   let outcome: CaptureApplyOutcome | {error: string; kind: 'threw'};
   try {
-    outcome = await applyCapture(options);
+    // The session-bead knob is read HERE, from the session's cwd, unless the
+    // caller pinned it: the hook only spawns this child when capture is on,
+    // so on top of that this is the raw sessionBeads switch.
+    const sessionBeads =
+      options.sessionBeads ??
+      resolveThreadConfig({cwd: cwd ?? undefined, env}).sessionBeads;
+    outcome = await applyCapture({...options, cwd, sessionBeads});
   } catch (error) {
     outcome = {error: probeErrorMessage(error), kind: 'threw'};
   }
@@ -1063,7 +1241,7 @@ export async function runThreadCaptureApply(
     mkdirSync(captureLocksDir(env), {recursive: true});
     appendFileSync(
       captureRunLogPath(env),
-      `${JSON.stringify(captureRunRecord(options.sessionId, outcome, elapsedMs, new Date(), options.hookElapsedMs ?? null))}\n`,
+      `${JSON.stringify(captureRunRecord(options.sessionId, outcome, elapsedMs, new Date(), options.hookElapsedMs ?? null, options.contextLineMs ?? null, cwdDefaulted))}\n`,
     );
   } catch {
     // Nowhere left to say it: stdio is ignored. The message log still holds

@@ -254,6 +254,38 @@ export function captureRunLogPath(env: EnvLike = process.env): string {
   return join(threadsStateDir(env), 'capture.jsonl');
 }
 
+/**
+ * The sessions index (status report v4, home-base-vzwbj.4 D1 "INDEX"): one
+ * JSON line per sighting of a session's beads in a checkout — which beads DB
+ * holds which session. Pointers only; see session-index.ts.
+ */
+export function sessionIndexPath(env: EnvLike = process.env): string {
+  return join(threadsStateDir(env), 'sessions.jsonl');
+}
+
+/**
+ * `thread nudge`'s once-per-turn marker (home-base-vzwbj.4.4): which turn —
+ * keyed by the time of the session's last user message — it already spoke in.
+ */
+export function nudgeMarkPath(
+  sessionId: string,
+  env: EnvLike = process.env,
+): string {
+  return join(threadsStateDir(env), 'nudge-marks', `${sessionId}.json`);
+}
+
+/**
+ * Which answered questions Claude has already been shown in this session
+ * (home-base-vzwbj.4.9 R1): a JSON list of question bead ids, written by the
+ * prompt-time line and by `thread answers` after they print.
+ */
+export function answersDeliveredPath(
+  sessionId: string,
+  env: EnvLike = process.env,
+): string {
+  return join(threadsStateDir(env), 'answers-delivered', `${sessionId}.json`);
+}
+
 /** Drop the marker. A failure is NAMED — the caller must not block without it. */
 export function writeStopMark(
   sessionId: string,

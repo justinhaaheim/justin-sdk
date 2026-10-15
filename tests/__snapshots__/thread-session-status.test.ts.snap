@@ -1,0 +1,415 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`fixture 1: a question-only session Part 1 snapshot, markdown and ANSI 1`] = `
+"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+
+**Session:** [QUESTION-REPO] What does the nightly export do with deleted rows?
+
+---
+
+- **Started:** Tue 2030-01-01 9:00 am
+- **Last activity:** Tue 2030-01-01 9:05 am
+
+* **Status:** 💬 Answered
+* **You need to:** **Nothing. Read the answer if you have not:** \`bun run justin-sdk thread show t-SESS\`
+
+---
+
+## Progress
+
+**No requests filed.**
+
+---
+
+**Your first message:**
+
+> "What does the nightly export do with deleted rows?"
+
+---
+
+- **Repo:** question-repo
+- **Branch:** main (this is main)
+- **Worktree:** primary checkout
+- **Context:** 41k tokens
+- **Unpushed:** no upstream branch is configured, so nothing shows these commits were pushed anywhere
+- **Commits this session:** 0
+
+* **Resume:** \`claude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\`
+
+────────────────────────────"
+`;
+
+exports[`fixture 1: a question-only session Part 1 snapshot, markdown and ANSI 2`] = `
+"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+
+      \x1B[1mSession:\x1B[0m               [QUESTION-REPO] What does the nightly export do with deleted rows?
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+      \x1B[1mStarted:\x1B[0m               Tue 2030-01-01 9:00 am
+      \x1B[1mLast activity:\x1B[0m         Tue 2030-01-01 9:05 am
+
+      \x1B[1mStatus:\x1B[0m                💬 Answered
+      \x1B[1mYou need to:\x1B[0m           \x1B[1mNothing. Read the answer if you have not:\x1B[0m \x1B[36mbun run justin-sdk thread\x1B[0m
+                             \x1B[36mshow t-SESS\x1B[0m
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+  📈 \x1B[1;35mProgress\x1B[0m
+
+      \x1B[1mNo requests filed.\x1B[0m
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+      \x1B[1mYour first message:\x1B[0m
+         \x1B[2m▎\x1B[0m \x1B[3m"What does the nightly export do with deleted rows?"\x1B[0m
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+      \x1B[1mRepo:\x1B[0m                  question-repo
+      \x1B[1mBranch:\x1B[0m                main (this is main)
+      \x1B[1mWorktree:\x1B[0m              primary checkout
+      \x1B[1mContext:\x1B[0m               41k tokens
+      \x1B[1mUnpushed:\x1B[0m              no upstream branch is configured, so nothing shows these commits were
+                             pushed anywhere
+      \x1B[1mCommits this session:\x1B[0m  0
+
+      \x1B[1mResume:\x1B[0m                \x1B[36mclaude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\x1B[0m
+
+────────────────────────────"
+`;
+
+exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part 1 snapshot, markdown and ANSI 1`] = `
+"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+
+**Session:** [WORK-REPO] Make the nightly export twice as fast
+
+---
+
+- **Started:** Tue 2030-01-01 9:00 am
+- **Last activity:** Tue 2030-01-01 11:30 am
+
+* **Status:** 🛑 Waiting on you (1 blocking question, 1 optional question)
+* **You need to:** **Answer: Which S3 bucket should the runbook point at?** \`bun run justin-sdk thread answer t-SESS\`
+* **Optional:** 1 optional question; its default applies if you skip it. To answer: \`bun run justin-sdk thread answer t-SESS\`
+
+---
+
+## Progress
+
+**0 of 2 requests done**
+
+1. 🔲 **Make the nightly export twice as fast** (t-SESS.1)
+
+   **Stage:** tested — next: built
+
+   - ✅ Profile the slow query (t-SESS.1.1)
+
+
+   - 🔲 Add the missing index (t-SESS.1.2)
+
+
+2. 🛑 **Write the export runbook** (t-SESS.2) — blocked on question 1
+
+---
+
+**Your first message:**
+
+> "Make the nightly export twice as fast, and write a runbook for it."
+
+**Your last message:**
+
+> "keep going"
+
+---
+
+## Questions for you
+
+1. 🛑 P0 · [Pick a/b] **Which S3 bucket should the runbook point at?** (t-SESS.3)
+
+   - The runbook has to name the bucket the export writes to.
+
+
+   - a. (Recommended) exports-prod — the bucket the cron job uses
+
+
+   - b. exports-archive — the older bucket
+
+   *If you don't answer: I stop here; this one is yours.*
+
+
+2. ⚪ P3 · [Answer] **Should the export also gzip its output?** (t-SESS.4)
+
+   - Compressed files are a third of the size.
+
+   *If you don't answer: I leave the output uncompressed.*
+
+---
+
+- **Repo:** work-repo
+- **Branch:** feature/export (not merged into main)
+- **Worktree:** .claude/worktrees/export
+- **Context:** 312k tokens
+- **Uncommitted:** RUNBOOK.md
+- **Unpushed:** no upstream branch is configured, so nothing shows these commits were pushed anywhere
+- **Commits this session:** 2
+
+* **Resume:** \`claude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\`
+* **Pane:** \`cmux select-workspace --workspace A1B2C3D4-0000-4000-8000-00000000000W\` (surface A1B2C3D4-0000-4000-8000-00000000000S)
+
+────────────────────────────"
+`;
+
+exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part 1 snapshot, markdown and ANSI 2`] = `
+"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+
+      \x1B[1mSession:\x1B[0m               [WORK-REPO] Make the nightly export twice as fast
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+      \x1B[1mStarted:\x1B[0m               Tue 2030-01-01 9:00 am
+      \x1B[1mLast activity:\x1B[0m         Tue 2030-01-01 11:30 am
+
+      \x1B[1mStatus:\x1B[0m                🛑 Waiting on you (1 blocking question, 1 optional question)
+      \x1B[1mYou need to:\x1B[0m           \x1B[1mAnswer: Which S3 bucket should the runbook point at?\x1B[0m \x1B[36mbun run justin-sdk\x1B[0m
+                             \x1B[36mthread answer t-SESS\x1B[0m
+      \x1B[1mOptional:\x1B[0m              1 optional question; its default applies if you skip it. To answer: \x1B[36mbun\x1B[0m
+                             \x1B[36mrun justin-sdk thread answer t-SESS\x1B[0m
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+  📈 \x1B[1;35mProgress\x1B[0m
+
+      \x1B[1m0 of 2 requests done\x1B[0m
+
+      \x1B[1m1. \x1B[0m🔲 \x1B[1mMake the nightly export twice as fast\x1B[0m \x1B[2m(t-SESS.1)\x1B[0m
+
+         \x1B[1mStage:\x1B[0m tested — next: built
+
+         \x1B[2m-\x1B[0m ✅ Profile the slow query \x1B[2m(t-SESS.1.1)\x1B[0m
+
+         \x1B[2m-\x1B[0m 🔲 Add the missing index \x1B[2m(t-SESS.1.2)\x1B[0m
+
+      \x1B[1m2. \x1B[0m🛑 \x1B[1mWrite the export runbook\x1B[0m \x1B[2m(t-SESS.2)\x1B[0m — \x1B[1;31mblocked on question 1\x1B[0m
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+      \x1B[1mYour first message:\x1B[0m
+         \x1B[2m▎\x1B[0m \x1B[3m"Make the nightly export twice as fast, and write a runbook for it."\x1B[0m
+
+      \x1B[1mYour last message:\x1B[0m
+         \x1B[2m▎\x1B[0m \x1B[3m"keep going"\x1B[0m
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+  🙋 \x1B[1;35mQuestions for you\x1B[0m
+
+      \x1B[1m1. \x1B[0m\x1B[1;31m🛑 P0\x1B[0m · \x1B[36m[Pick a/b]\x1B[0m \x1B[1mWhich S3 bucket should the runbook point at?\x1B[0m \x1B[2m(t-SESS.3)\x1B[0m
+
+         \x1B[2m-\x1B[0m The runbook has to name the bucket the export writes to.
+
+         \x1B[1ma.\x1B[0m \x1B[1;32m(Recommended)\x1B[0m \x1B[1;32mexports-prod\x1B[0m — the bucket the cron job uses
+
+         \x1B[1mb.\x1B[0m \x1B[1mexports-archive\x1B[0m — the older bucket
+
+         \x1B[3mIf you don't answer: I stop here; this one is yours.\x1B[0m
+
+      \x1B[1m2. \x1B[0m\x1B[2m⚪ P3\x1B[0m · \x1B[36m[Answer]\x1B[0m \x1B[1mShould the export also gzip its output?\x1B[0m \x1B[2m(t-SESS.4)\x1B[0m
+
+         \x1B[2m-\x1B[0m Compressed files are a third of the size.
+
+         \x1B[3mIf you don't answer: I leave the output uncompressed.\x1B[0m
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+      \x1B[1mRepo:\x1B[0m                  work-repo
+      \x1B[1mBranch:\x1B[0m                feature/export (not merged into main)
+      \x1B[1mWorktree:\x1B[0m              .claude/worktrees/export
+      \x1B[1mContext:\x1B[0m               312k tokens
+      \x1B[1mUncommitted:\x1B[0m           RUNBOOK.md
+      \x1B[1mUnpushed:\x1B[0m              no upstream branch is configured, so nothing shows these commits were
+                             pushed anywhere
+      \x1B[1mCommits this session:\x1B[0m  2
+
+      \x1B[1mResume:\x1B[0m                \x1B[36mclaude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\x1B[0m
+      \x1B[1mPane:\x1B[0m                  \x1B[36mcmux select-workspace --workspace A1B2C3D4-0000-4000-8000-00000000000W\x1B[0m
+                             (surface A1B2C3D4-0000-4000-8000-00000000000S)
+
+────────────────────────────"
+`;
+
+exports[`fixture 3: a session whose checkout is gone Part 1 snapshot, markdown and ANSI 1`] = `
+"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+
+**Session:** [GONE-REPO] ⚠️ title unknown (its beads could not be read; see Progress)
+
+---
+
+- **Started:** Tue 2030-01-01 9:00 am
+- **Last activity:** Tue 2030-01-01 9:20 am
+
+* **Status:** ❔ Unknown — checkout unreadable: <sandbox>/gone-repo no longer exists; <sandbox>/gone-repo/.beads/issues.jsonl does not exist
+* **You need to:** **Check it by hand: checkout unreadable: <sandbox>/gone-repo no longer exists; <sandbox>/gone-repo/.beads/issues.jsonl does not exist**
+
+---
+
+## Progress
+
+**Requests: unknown (the beads could not be read)**
+
+⚠️ <sandbox>/gone-repo/.beads/issues.jsonl does not exist — requests and questions there are not shown.
+
+---
+
+**Your first message:**
+
+> "Clean up the old export cron entries."
+
+---
+
+- **Repo:** gone-repo
+- **Checkout:** ⚠️ <sandbox>/gone-repo no longer exists
+- **Branch:** unknown (checkout unreadable)
+- **Worktree:** unknown (checkout unreadable)
+- **Context:** 88k tokens
+- **Uncommitted:** unknown (checkout unreadable)
+- **Unpushed:** unknown (checkout unreadable)
+- **Commits this session:** unknown (checkout unreadable)
+
+* **Resume:** \`claude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\`
+
+────────────────────────────"
+`;
+
+exports[`fixture 3: a session whose checkout is gone Part 1 snapshot, markdown and ANSI 2`] = `
+"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+
+      \x1B[1mSession:\x1B[0m               [GONE-REPO] ⚠️ title unknown (its beads could not be read; see Progress)
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+      \x1B[1mStarted:\x1B[0m               Tue 2030-01-01 9:00 am
+      \x1B[1mLast activity:\x1B[0m         Tue 2030-01-01 9:20 am
+
+      \x1B[1mStatus:\x1B[0m                ❔ Unknown — checkout unreadable: <sandbox>/gone-repo no longer exists; <sandbox>/gone-repo/.beads/issues.jsonl does not exist
+      \x1B[1mYou need to:\x1B[0m           \x1B[1mCheck it by hand: checkout unreadable: <sandbox>/gone-repo no longer exists; <sandbox>/gone-repo/.beads/issues.jsonl does not exist\x1B[0m
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+  📈 \x1B[1;35mProgress\x1B[0m
+
+      \x1B[1mRequests: unknown (the beads could not be read)\x1B[0m
+
+      ⚠️ <sandbox>/gone-repo/.beads/issues.jsonl does not exist — requests and questions there are not shown.
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+      \x1B[1mYour first message:\x1B[0m
+         \x1B[2m▎\x1B[0m \x1B[3m"Clean up the old export cron entries."\x1B[0m
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+      \x1B[1mRepo:\x1B[0m                  gone-repo
+      \x1B[1mCheckout:\x1B[0m              ⚠️ <sandbox>/gone-repo no longer exists
+      \x1B[1mBranch:\x1B[0m                unknown (checkout unreadable)
+      \x1B[1mWorktree:\x1B[0m              unknown (checkout unreadable)
+      \x1B[1mContext:\x1B[0m               88k tokens
+      \x1B[1mUncommitted:\x1B[0m           unknown (checkout unreadable)
+      \x1B[1mUnpushed:\x1B[0m              unknown (checkout unreadable)
+      \x1B[1mCommits this session:\x1B[0m  unknown (checkout unreadable)
+
+      \x1B[1mResume:\x1B[0m                \x1B[36mclaude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\x1B[0m
+
+────────────────────────────"
+`;
+
+exports[`fixture 4: 14 commit commands that matched nothing here (F14) Part 1 snapshot, markdown and ANSI 1`] = `
+"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+
+**Session:** [COMMITS-REPO] Tidy the release scripts in the other checkout.
+
+---
+
+- **Started:** Tue 2030-01-01 9:00 am
+- **Last activity:** Tue 2030-01-01 9:40 am
+
+* **Status:** ⚠️ Open work, no blocker
+* **You need to:** **Claude stopped with commits made in another checkout, no request filed, and no question for you. Resume it and say continue.**
+
+---
+
+## Progress
+
+**No requests filed.**
+
+---
+
+**Your first message:**
+
+> "Tidy the release scripts in the other checkout."
+
+---
+
+- **Repo:** commits-repo
+- **Branch:** main (this is main)
+- **Worktree:** primary checkout
+- **Context:** 52k tokens
+- **Unpushed:** no upstream branch is configured, so nothing shows these commits were pushed anywhere
+- **Commits this session:** 0
+  - ⚠️ 14 commit commands matched no commit in this checkout (committed elsewhere, or failed); 2 confirmation lines belong to another checkout
+    - \`git -C ../the-release-checkout commit -qm "script 1: drop…\`
+    - \`git -C ../the-release-checkout commit -qm "script 2: drop…\`
+    - \`git -C ../the-release-checkout commit -qm "script 3: drop…\`
+    - and 11 more
+
+* **Resume:** \`claude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\`
+
+────────────────────────────"
+`;
+
+exports[`fixture 4: 14 commit commands that matched nothing here (F14) Part 1 snapshot, markdown and ANSI 2`] = `
+"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+
+      \x1B[1mSession:\x1B[0m               [COMMITS-REPO] Tidy the release scripts in the other checkout.
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+      \x1B[1mStarted:\x1B[0m               Tue 2030-01-01 9:00 am
+      \x1B[1mLast activity:\x1B[0m         Tue 2030-01-01 9:40 am
+
+      \x1B[1mStatus:\x1B[0m                ⚠️ Open work, no blocker
+      \x1B[1mYou need to:\x1B[0m           \x1B[1mClaude stopped with commits made in another checkout, no request filed,\x1B[0m
+                             \x1B[1mand no question for you. Resume it and say continue.\x1B[0m
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+  📈 \x1B[1;35mProgress\x1B[0m
+
+      \x1B[1mNo requests filed.\x1B[0m
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+      \x1B[1mYour first message:\x1B[0m
+         \x1B[2m▎\x1B[0m \x1B[3m"Tidy the release scripts in the other checkout."\x1B[0m
+
+  \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
+
+      \x1B[1mRepo:\x1B[0m                  commits-repo
+      \x1B[1mBranch:\x1B[0m                main (this is main)
+      \x1B[1mWorktree:\x1B[0m              primary checkout
+      \x1B[1mContext:\x1B[0m               52k tokens
+      \x1B[1mUnpushed:\x1B[0m              no upstream branch is configured, so nothing shows these commits were
+                             pushed anywhere
+      \x1B[1mCommits this session:\x1B[0m  0
+                             \x1B[2m-\x1B[0m ⚠️ 14 commit commands matched no commit in this checkout (committed
+                               elsewhere, or failed); 2 confirmation lines belong to another
+                               checkout
+                               \x1B[2m-\x1B[0m \x1B[36mgit -C ../the-release-checkout commit -qm "script 1: drop…\x1B[0m
+                               \x1B[2m-\x1B[0m \x1B[36mgit -C ../the-release-checkout commit -qm "script 2: drop…\x1B[0m
+                               \x1B[2m-\x1B[0m \x1B[36mgit -C ../the-release-checkout commit -qm "script 3: drop…\x1B[0m
+                               \x1B[2m-\x1B[0m and 11 more
+
+      \x1B[1mResume:\x1B[0m                \x1B[36mclaude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\x1B[0m
+
+────────────────────────────"
+`;

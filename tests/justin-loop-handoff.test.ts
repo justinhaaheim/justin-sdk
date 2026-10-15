@@ -32,7 +32,7 @@ import {
   type BrOutcome,
   type BrRunner,
   runBr,
-} from '../src/justin-loop/br';
+} from '../src/beads/br';
 import {
   checkErrors,
   createHandoff,

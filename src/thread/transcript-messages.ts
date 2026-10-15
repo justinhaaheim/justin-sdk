@@ -683,6 +683,104 @@ export function extractTranscriptMessages(
 }
 
 // ---------------------------------------------------------------------------
+// The last record's time, from the tail (home-base-vzwbj.4.3)
+// ---------------------------------------------------------------------------
+
+/** The first window `readLastRecordTimestamp` reads from the end. */
+const LAST_RECORD_WINDOW_BYTES = 256 * 1024;
+
+export type LastRecordRead =
+  | {at: string; kind: 'found'}
+  | {kind: 'failed'; reason: string}
+  | {kind: 'none'; reason: string};
+
+/**
+ * The timestamp of the transcript's last CONVERSATION record — the last
+ * non-sidechain `type: user` or `type: assistant` record carrying one (a tool
+ * result is a user record; hook, system and attachment records do not count:
+ * they are written at the yield, home-base-vzwbj.4.9 P5); NEVER the file
+ * mtime, which a cmux resume touches — read from the END of the file instead
+ * of a full pass. (`extractTranscriptMessages`' `lastTimestamp` counts every
+ * record; this one deliberately does not.)
+ *
+ * Status report v4 asks "is this session working right now?" (epic
+ * home-base-vzwbj.4 D2: last record under 3 minutes old) for every session it
+ * shows, and a full streaming parse of a 30 MB transcript per session is the
+ * wrong price for one timestamp. The window starts at 256 KB and doubles until
+ * a timestamped record is found or the whole file has been read. `none` is
+ * measured (no record carries a timestamp); `failed` is not.
+ */
+export function readLastRecordTimestamp(
+  path: string,
+  options: {sidechain?: boolean} = {},
+): LastRecordRead {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch (error) {
+    return {
+      kind: 'failed',
+      reason: `could not open ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  try {
+    const size = statSync(path).size;
+    for (let window = LAST_RECORD_WINDOW_BYTES; ; window *= 2) {
+      const length = Math.min(size, window);
+      const start = size - length;
+      const buffer = Buffer.alloc(length);
+      let read = 0;
+      while (read < length) {
+        const bytes = readSync(fd, buffer, read, length - read, start + read);
+        if (bytes === 0) break;
+        read += bytes;
+      }
+      let text = buffer.toString('utf8', 0, read);
+      // Started mid-file: the first fragment is half a line. Drop it.
+      if (start > 0) {
+        const newline = text.indexOf('\n');
+        text = newline === -1 ? '' : text.slice(newline + 1);
+      }
+      const lines = text.split('\n');
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        const line = lines[index] ?? '';
+        if (line.trim() === '') continue;
+        let record: TranscriptRecord;
+        try {
+          record = JSON.parse(line) as TranscriptRecord;
+        } catch {
+          // A partial last line on a live transcript; keep walking back.
+          continue;
+        }
+        // A subagent transcript is ALL sidechain records (pkg CLAUDE.md), so
+        // its reader opts in (home-base-vzwbj.4.9 F6); the main transcript's
+        // reader skips them.
+        if (record.isSidechain === true && options.sidechain !== true) continue;
+        // P5 (home-base-vzwbj.4.9): only conversation records date activity.
+        // Hook and system records are written AT the yield, so counting them
+        // kept a just-stopped session "working" for three minutes.
+        if (record.type !== 'user' && record.type !== 'assistant') continue;
+        const timestamp = asString(record.timestamp);
+        if (timestamp != null) return {at: timestamp, kind: 'found'};
+      }
+      if (start === 0) {
+        return {
+          kind: 'none',
+          reason: `no user or assistant record in ${path} carries a timestamp`,
+        };
+      }
+    }
+  } catch (error) {
+    return {
+      kind: 'failed',
+      reason: `could not read ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Every turn (K10 e)
 // ---------------------------------------------------------------------------
 

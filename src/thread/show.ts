@@ -399,8 +399,9 @@ export interface ShowOptions {
   cwd?: string;
   env?: EnvLike;
   /**
-   * Print the stored report as it is (D18). The default compacts it — the same
-   * two sections dropped and the same What-I-did cap `thread report` applies.
+   * Print the stored report as it is. The default since 2026-10-07 (Justin:
+   * show everything); `--compact` opts into the D18 short form, with the same
+   * sections dropped that `thread report --compact` drops.
    */
   full?: boolean;
   /**

@@ -24,7 +24,7 @@ import {execFileSync} from 'child_process';
 import {chmodSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {dirname, join} from 'path';
 
-import {type BrOutcome, runBr} from '../src/justin-loop/br';
+import {type BrOutcome, runBr} from '../src/beads/br';
 import {
   type Handoff,
   HANDOFF_LABEL,

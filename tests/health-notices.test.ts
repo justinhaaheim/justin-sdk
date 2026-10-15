@@ -723,11 +723,20 @@ describe('probeSdkVersion', () => {
       commandName: 'signal',
       env,
       fetcher: () => {
-        writeState(paths, {
-          ...emptyState(),
-          doctorRuns: {'/another/repo': foreign},
-          lastNotified: {'/another/repo': {patch: '2026-09-10T11:59:00.000Z'}},
-        });
+        // The fixture's clock, not the real one: the write prunes against its
+        // `now`, and these stamps expire 30 days after 2026-09-10
+        // (home-base-sway2).
+        writeState(
+          paths,
+          {
+            ...emptyState(),
+            doctorRuns: {'/another/repo': foreign},
+            lastNotified: {
+              '/another/repo': {patch: '2026-09-10T11:59:00.000Z'},
+            },
+          },
+          AT('2026-09-10T12:00:00.000Z'),
+        );
         // A version no tag will ever reach, so the notice definitely fires and
         // BOTH of this process's writes (the check row, then the throttle
         // stamp) are exercised.

@@ -13,7 +13,7 @@
  *   - a RESUME (`--bg --resume <full sessionId> <prompt>`) wakes the session
  *     that id belongs to — same id, same conversation, MEASURED 2026-09-08.
  */
-import {type BrRunner} from '../src/justin-loop/br';
+import {type BrRunner} from '../src/beads/br';
 import {
   type Handoff,
   HANDOFF_LABEL,

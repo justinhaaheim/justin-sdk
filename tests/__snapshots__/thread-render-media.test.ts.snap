@@ -21,11 +21,14 @@ exports[`one fixture, three media markdown baseline — compact 1`] = `
 
      Context: The adapter closes asks instead of deleting them, because bd delete wedges auto-export.
 
+
      - a. (Recommended) Keep closing — reversible, export stays healthy
+
 
      - b. Delete — tidier list, wedges the JSONL export
 
      If you don't answer: I keep closing rather than deleting.
+
 
 - ⚠️ MISTAKE — I let the bin symlink point at a dirty branch
 
@@ -57,13 +60,16 @@ exports[`one fixture, three media markdown baseline — full 1`] = `
 
 - ⚽ Goal: Status reports as beads, one thread bead per session
 
+
 - ➡️ the read path
+
 
 - ➡️ the rules edit
 
 **✅ What I did:**
 
 - ✅ Built the thread command group
+
 
 - ✅ Wired the bin symlink
 
@@ -81,6 +87,7 @@ exports[`one fixture, three media markdown baseline — full 1`] = `
 
 - ⚠️ MISTAKE — I let the bin symlink point at a dirty branch
 
+
 - ⚖️ Judgment call — The knob defaults off, which is not what the bead said — the bead said on.
 
 **🗣️ Discussion:**
@@ -93,17 +100,22 @@ exports[`one fixture, three media markdown baseline — full 1`] = `
 
      Context: The adapter closes asks instead of deleting them, because bd delete wedges auto-export.
 
+
      - a. (Recommended) Keep closing — reversible, export stays healthy
+
 
      - b. Delete — tidier list, wedges the JSONL export
 
      If you don't answer: I keep closing rather than deleting.
 
+
   2. (P3) · [Pick a/b] Where should componentConfig.thread.enabled live? (th-eru.2)
 
      Context: The knob defaults off, so nothing changes for other sessions.
 
+
      - a. (Recommended) user config only
+
 
      - b. every enrolled repo
 
@@ -116,6 +128,7 @@ exports[`one fixture, three media markdown baseline — full 1`] = `
 **🛠️ Work product:**
 
 - code: src/thread/ plus the bin symlink, on branch thread-reports
+
 
 - Merge state: UNMERGED
 

@@ -373,7 +373,9 @@ export function ansiFromReportText(
     if (line.kind === 'heading') section = line.label;
     const laid = layLine(line, color, section);
     if (laid == null) {
-      out.push('');
+      // One empty line in a terminal: the markdown's two between sibling items
+      // (F7, home-base-j8q3e.1.10) are for Claude Code, which drops one.
+      if (out.at(-1) !== '') out.push('');
       continue;
     }
     out.push(

@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.42.0",
+  "version": "0.43.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -11,10 +11,17 @@
     "test:watch": "bun test --watch",
     "e2e:justin-loop": "bun scripts/e2e-justin-loop.ts",
     "e2e:thread-answer-web": "bun scripts/e2e-thread-answer-web.ts",
+    "measure:br-export-clobber": "bun scripts/measure-br-export-clobber.ts",
+    "measure:br-import-only": "bun scripts/measure-br-import-only.ts",
+    "measure:thread-hook": "bun scripts/measure-thread-hook.ts",
+    "measure:inbox": "bun scripts/measure-inbox.ts",
+    "measure:session-line": "bun scripts/measure-session-line.ts",
+    "measure:session-tree": "bun scripts/measure-session-tree.ts",
     "probe:bg-env": "bun scripts/probe-bg-env.ts",
     "probe:capture-entrypoint": "bun scripts/probe-capture-entrypoint.ts",
     "probe:capture-live": "bun scripts/probe-capture-live.ts",
-    "tmp:restore-threads-k0b8n19": "bun scripts/restore-thread-records.ts th-fs3 th-ttp th-mq0 --from 1b912a6~1 --damaged-at 1b912a6"
+    "tmp:restore-threads-k0b8n19": "bun scripts/restore-thread-records.ts th-fs3 th-ttp th-mq0 --from 1b912a6~1 --damaged-at 1b912a6",
+    "tmp:migrate-ask-parents": "bun scripts/migrate-ask-parents.ts"
   },
   "exports": {
     "./check-runner": "./src/check-runner.ts",

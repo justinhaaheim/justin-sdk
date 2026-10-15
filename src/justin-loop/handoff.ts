@@ -37,8 +37,13 @@
  * second step fails is reported loudly with the id, never as a plain failure.
  */
 
+import {
+  type BrOutcome,
+  brFailureDetail,
+  type BrRunner,
+  runBr,
+} from '../beads/br';
 import {sdkRun} from '../sdk-invocation';
-import {type BrOutcome, brFailureDetail, type BrRunner, runBr} from './br';
 
 /**
  * The label that makes a bead a handoff bead (D3). The runner's whole scan is

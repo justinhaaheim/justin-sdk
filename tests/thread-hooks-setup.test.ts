@@ -33,9 +33,13 @@ import {COMPONENT_NAMES, corePreset} from '../src/component-registry';
 import {removeComponent, renderOutcome} from '../src/remove';
 import {setQuiet} from '../src/setup-helpers';
 import {
+  addThreadNudgeHook,
   addThreadStopHook,
   stepThreadHooks,
   THREAD_CAPTURE_HOOK_COMMAND,
+  THREAD_NUDGE_HOOK_COMMAND,
+  THREAD_NUDGE_HOOK_EVENT,
+  THREAD_NUDGE_HOOK_MATCHER,
   THREAD_START_HOOK_COMMAND,
   THREAD_START_HOOK_EVENT,
   THREAD_STOP_HOOK_COMMAND,
@@ -123,14 +127,18 @@ describe('the retired SessionStart entry (home-base-39co9 D3)', () => {
     expect(THREAD_START_HOOK_EVENT).toBe('SessionStart');
   });
 
-  test('a FRESH install writes no SessionStart entry — only capture and stop-check', () => {
+  test('a FRESH install writes no SessionStart entry — only capture, stop-check and the nudge', () => {
     const root = project(null);
     expect(stepThreadHooks(root)).toBe(true);
 
     const settings = readSettings(root);
     const hooks = settings.hooks as Record<string, unknown>;
     expect(hooks).not.toHaveProperty('SessionStart');
-    expect(Object.keys(hooks).sort()).toEqual(['Stop', 'UserPromptSubmit']);
+    expect(Object.keys(hooks).sort()).toEqual([
+      'PostToolUse',
+      'Stop',
+      'UserPromptSubmit',
+    ]);
     expect(commandsUnder(settings, 'UserPromptSubmit')).toEqual([
       THREAD_CAPTURE_HOOK_COMMAND,
     ]);
@@ -292,6 +300,73 @@ describe('the retired SessionStart entry (home-base-39co9 D3)', () => {
     expect(lines).toContain(
       `left in place (modified): .claude/settings.json SessionStart hook (${variant})`,
     );
+  });
+});
+
+describe('the commit nudge entry (home-base-vzwbj.4.4)', () => {
+  test('a fresh install writes exactly ONE PostToolUse entry, matcher Bash, running thread nudge', () => {
+    const root = project(null);
+    stepThreadHooks(root);
+    const hooks = readSettings(root).hooks as Record<string, unknown>;
+    expect(hooks[THREAD_NUDGE_HOOK_EVENT]).toEqual([
+      {
+        hooks: [{command: THREAD_NUDGE_HOOK_COMMAND, type: 'command'}],
+        matcher: THREAD_NUDGE_HOOK_MATCHER,
+      },
+    ]);
+    expect(THREAD_NUDGE_HOOK_COMMAND).toBe('bun run justin-sdk thread nudge');
+    expect(THREAD_NUDGE_HOOK_EVENT).toBe('PostToolUse');
+    expect(THREAD_NUDGE_HOOK_MATCHER).toBe('Bash');
+  });
+
+  test('re-apply is idempotent: the file is byte-identical and the step says every hook is there', () => {
+    const root = project(null);
+    stepThreadHooks(root);
+    const path = join(root, '.claude', 'settings.json');
+    const before = readFileSync(path, 'utf8');
+    const lines = captureStdout();
+    stepThreadHooks(root);
+    expect(readFileSync(path, 'utf8')).toBe(before);
+    expect(lines.join('\n')).toContain('already has every thread hook');
+    expect(addThreadNudgeHook(readSettings(root))).toBe(false);
+  });
+
+  test('a repo installed before the nudge existed gains ONLY the PostToolUse entry; a foreign PostToolUse hook survives', () => {
+    const foreign = {
+      hooks: [{command: 'bun run justin-sdk usage-check', type: 'command'}],
+      matcher: '*',
+    };
+    const root = project({
+      hooks: {
+        PostToolUse: [foreign],
+        Stop: [
+          {hooks: [{command: THREAD_STOP_HOOK_COMMAND, type: 'command'}]},
+          {hooks: [{command: THREAD_CAPTURE_HOOK_COMMAND, type: 'command'}]},
+        ],
+        UserPromptSubmit: [
+          {hooks: [{command: THREAD_CAPTURE_HOOK_COMMAND, type: 'command'}]},
+        ],
+      },
+    });
+    const lines = captureStdout();
+    stepThreadHooks(root);
+    const settings = readSettings(root);
+    expect((settings.hooks as Record<string, unknown[]>).PostToolUse).toEqual([
+      foreign,
+      {
+        hooks: [{command: THREAD_NUDGE_HOOK_COMMAND, type: 'command'}],
+        matcher: 'Bash',
+      },
+    ]);
+    expect(commandsUnder(settings, 'Stop')).toHaveLength(2);
+    expect(lines.join('\n')).toContain('PostToolUse [Bash] → thread nudge');
+  });
+
+  test('`remove thread-hooks` takes the exact nudge entry out', () => {
+    const root = project(null);
+    stepThreadHooks(root);
+    removeComponent(root, 'thread-hooks', {dryRun: false});
+    expect(commandsUnder(readSettings(root), 'PostToolUse')).toEqual([]);
   });
 });
 

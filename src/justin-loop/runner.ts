@@ -49,7 +49,12 @@ import {
   resetsTextWithoutZone,
   type UsagePanel,
 } from '../claude-usage';
-import {type BrOutcome, brFailureDetail, type BrRunner, runBr} from './br';
+import {
+  type BrOutcome,
+  brFailureDetail,
+  type BrRunner,
+  runBr,
+} from '../beads/br';
 import {describeChildFailure, runChild} from './child';
 // Re-exported (not redefined) so the runner's own callers and tests can name the
 // variable without a second spelling of it — see predecessor-env.ts.

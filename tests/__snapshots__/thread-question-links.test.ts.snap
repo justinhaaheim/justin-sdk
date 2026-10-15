@@ -1,0 +1,20 @@
+// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+
+exports[`G2: thread status says what to do with each open request when the yield would be ⚠️ AC4: one entry per open request, the close command, --force only for old-shape question children, an open child listed instead 1`] = `
+"**What to mark:**
+
+- Request t-SESS.1 ("Find out why the export is slow") is in progress and nothing blocks it.
+  - work done → \`br close t-SESS.1 --reason "…"\` (its open question for Justin stays open; questions never keep a request open)
+  - not done → file the P0 that blocks it: \`bun run justin-sdk thread ask "…" --priority 0 --to t-SESS.1\` — or hand off: \`bun run justin-sdk thread handoff\`
+
+- Request t-SESS.3 ("Find out which change broke search") is in progress and nothing blocks it.
+  - work done → \`br close t-SESS.3 --reason "…" --force\` (--force because its open question for Justin is a child bead of the request, the old way, and br will not close a parent with open children; --force closes the request and leaves the question open)
+  - not done → file the P0 that blocks it: \`bun run justin-sdk thread ask "…" --priority 0 --to t-SESS.3\` — or hand off: \`bun run justin-sdk thread handoff\`
+
+- Request t-SESS.4 ("Write the export runbook") is in progress and nothing blocks it.
+  - work done → 1 child bead is still open: t-SESS.4.1 — close it first
+  - not done → file the P0 that blocks it: \`bun run justin-sdk thread ask "…" --priority 0 --to t-SESS.4\` — or hand off: \`bun run justin-sdk thread handoff\`
+
+If you stop now the inbox will say: ⚠️ Open work, no blocker — Justin will be told to resume this session.
+Close what is done, file the P0 that blocks you, or run \`bun run justin-sdk thread handoff\`."
+`;

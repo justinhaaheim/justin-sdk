@@ -889,16 +889,21 @@ describe('runDoctorHeartbeat', () => {
     // heartbeat writes second. Holding a state snapshot from before the
     // notice's write would erase lastNotified and un-throttle every notice.
     const rigged = rig();
+    // Every write is pruned against its `now` (uxwc.5 F2), so a fixed-date
+    // stamp written on the real clock expires once the date is 30 days past.
+    // The clock is the fixture's, on every write (home-base-sway2).
+    const now = AT('2026-09-10T12:00:00.000Z');
     const seeded: HealthNoticesState = {
       ...emptyState(),
       lastNotified: {[rigged.projectRoot]: {minor: '2026-09-10T11:00:00.000Z'}},
     };
-    expect(writeState(rigged.paths, seeded)).toBe(true);
+    expect(writeState(rigged.paths, seeded, now)).toBe(true);
 
     const {spawner} = spy(passed());
     await runDoctorHeartbeat({
       commandName: 'signal',
       env: rigged.env,
+      now,
       projectRoot: rigged.projectRoot,
       spawner,
     });
@@ -916,16 +921,24 @@ describe('runDoctorHeartbeat', () => {
     // taken before the child started. The SPAWNER is that other process.
     const rigged = rig();
     const stamp = '2026-09-10T11:59:00.000Z';
+    // The fixture's clock on BOTH writes: each one prunes against its `now`,
+    // and the real clock would expire `stamp` (home-base-sway2).
+    const now = AT('2026-09-10T12:00:00.000Z');
 
     const result = await runDoctorHeartbeat({
       commandName: 'signal',
       env: rigged.env,
+      now,
       projectRoot: rigged.projectRoot,
       spawner: () => {
-        writeState(rigged.paths, {
-          ...emptyState(),
-          lastNotified: {'/another/repo': {major: stamp}},
-        });
+        writeState(
+          rigged.paths,
+          {
+            ...emptyState(),
+            lastNotified: {'/another/repo': {major: stamp}},
+          },
+          now,
+        );
         return Promise.resolve(passed());
       },
     });

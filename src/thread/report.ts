@@ -178,7 +178,7 @@ export interface ReportOptions {
   env?: EnvLike;
   /** Path to the payload JSON; mutually exclusive with `stdin`. */
   file?: string | null;
-  /** Print everything (D18). The default prints the compact report. */
+  /** Print everything. The default since 2026-10-07 (Justin: show everything); `--compact` opts into the old D18 short form. */
   full?: boolean;
   now?: Date;
   sessionId?: string | null;

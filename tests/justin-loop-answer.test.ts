@@ -24,7 +24,7 @@
 
 import {describe, expect, test} from 'bun:test';
 
-import {type BrOutcome, type BrRunner} from '../src/justin-loop/br';
+import {type BrOutcome, type BrRunner} from '../src/beads/br';
 import {
   answerCommand,
   answerHandoff,

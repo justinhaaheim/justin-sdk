@@ -84,11 +84,21 @@ interface Harness {
  * project directory with no justin-sdk.config.json — so the USER file is the
  * only layer that speaks. CLAUDE_CODE_ENTRYPOINT is pinned to `cli` (an
  * interactive session): the suite itself may run under `sdk-cli`.
+ *
+ * F12 (home-base-vzwbj.4.9, bead .4.12): NO test here may resolve the thread
+ * knobs from the checkout the suite runs in. home-base's own
+ * justin-sdk.config.json has `sessionBeads: true`, and a capture child that
+ * read it from process.cwd() filed session bead home-base-oa5t6 into this
+ * worktree's real beads DB (the REAL CLI `--apply` test spawned with no cwd,
+ * 2026-10-11). So: `sessionBeads` is written into the user config explicitly
+ * (false unless a test says otherwise), every child call passes the sandbox
+ * cwd AND pins `sessionBeads`, and every CLI spawn runs with `cwd: h.cwd`.
  */
 function harness(
   knobs: {
     capture?: boolean;
     enabled?: boolean;
+    sessionBeads?: boolean;
     /** DEPRECATED, gates nothing (home-base-39co9 D2) — written to prove it. */
     startOnSessionStart?: boolean;
   } = {enabled: true},
@@ -102,7 +112,11 @@ function harness(
   mkdirSync(cwd, {recursive: true});
   writeFileSync(
     join(xdg, 'justin-sdk', 'config.json'),
-    JSON.stringify({componentConfig: {thread: knobs}}),
+    JSON.stringify({
+      componentConfig: {
+        thread: {...knobs, sessionBeads: knobs.sessionBeads ?? false},
+      },
+    }),
   );
   return {
     cwd,
@@ -504,8 +518,10 @@ describe('exit 0 on every failure — a capture never blocks a turn', () => {
     expect(
       await runThreadCaptureApply({
         autoCommit: false,
+        cwd: h.cwd,
         env,
         hookElapsedMs: 3.2,
+        sessionBeads: false,
         sessionId: SESSION,
       }),
     ).toBe(0);
@@ -531,7 +547,9 @@ describe('exit 0 on every failure — a capture never blocks a turn', () => {
     expect(
       await runThreadCaptureApply({
         autoCommit: false,
+        cwd: h.cwd,
         env: {...h.env, JUSTIN_THREADS_STATE_DIR: join(blocker, 'state')},
+        sessionBeads: false,
         sessionId: SESSION,
       }),
     ).toBe(0);
@@ -553,6 +571,7 @@ describe('exit 0 on every failure — a capture never blocks a turn', () => {
       const result = Bun.spawnSync(
         [process.execPath, cli, 'thread', 'capture'],
         {
+          cwd: h.cwd,
           env: {...run.env, JUSTIN_SDK_HEALTH_NOTICES: 'off'},
           stdin: Buffer.from(run.stdin),
         },
@@ -583,7 +602,9 @@ test('the REAL CLI child (--apply --hook-ms) exits 0 and records the hook timing
       '--hook-ms',
       '4.5',
     ],
-    {env},
+    // F12: never the suite's own cwd — with no --cwd the CLI files from the
+    // current directory (F2), which would be this worktree's real beads DB.
+    {cwd: h.cwd, env},
   );
   expect(result.exitCode).toBe(0);
   expect(result.stdout.toString()).toBe('');

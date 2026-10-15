@@ -40,6 +40,9 @@ import {
   THREAD_DEFAULT_ENFORCE,
   THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
   THREAD_DEFAULT_ENFORCE_MODE,
+  THREAD_DEFAULT_NUDGE,
+  THREAD_DEFAULT_SESSION_BEADS,
+  THREAD_DEFAULT_STAGES,
   THREAD_ENFORCE_MODES,
   type ThreadAnswerUi,
   type ThreadEnforceMode,
@@ -100,6 +103,13 @@ export interface ResolvedThreadConfig {
   enforceModeSource: ThreadConfigSource;
   /** Which layer decided `enforce`. */
   enforceSource: ThreadConfigSource;
+  /**
+   * Whether the PostToolUse `thread nudge` may speak (home-base-vzwbj.4.4).
+   * It also needs `sessionBeads`.
+   */
+  nudge: boolean;
+  /** Which layer decided `nudge`. */
+  nudgeSource: ThreadConfigSource;
   /** Human-readable config read problems. Empty means both files were fine. */
   problems: string[];
   projectRoot: string;
@@ -111,8 +121,25 @@ export interface ResolvedThreadConfig {
   repoDir: string | null;
   /** Which layer decided `repoDir`. */
   repoDirSource: ThreadConfigSource;
+  /**
+   * Whether capture files a session bead in the repo and injects the
+   * prompt-time line, and `thread request` / `thread title` work (status report
+   * v4, home-base-vzwbj.4.1). The RAW knob: the hook only runs when
+   * `captureActive` is true as well.
+   */
+  sessionBeads: boolean;
+  /** Which layer decided `sessionBeads`. */
+  sessionBeadsSource: ThreadConfigSource;
   /** Which layer decided `enabled`. */
   source: ThreadConfigSource;
+  /**
+   * The request stage ladder, in order (home-base-vzwbj.4.3): what `thread
+   * stage` accepts and Part 1 ranks. A layer whose value is not a non-empty
+   * list of distinct non-empty strings is NAMED in `problems` and ignored.
+   */
+  stages: readonly string[];
+  /** Which layer decided `stages`. */
+  stagesSource: ThreadConfigSource;
   // NO `startOnSessionStart`. It is DEPRECATED (home-base-39co9 D2) and gates
   // nothing, so it is not resolved at all: a resolved field nobody reads would
   // look like a live switch. Configs carrying it still parse — sdk-config.ts
@@ -196,6 +223,11 @@ export function resolveThreadConfig(
   const autoPush = resolveFlag('autoPush', THREAD_DEFAULT_AUTO_PUSH);
   const enforce = resolveFlag('enforce', THREAD_DEFAULT_ENFORCE);
   const capture = resolveFlag('capture', THREAD_DEFAULT_CAPTURE);
+  const sessionBeads = resolveFlag(
+    'sessionBeads',
+    THREAD_DEFAULT_SESSION_BEADS,
+  );
+  const nudge = resolveFlag('nudge', THREAD_DEFAULT_NUDGE);
 
   // `render` is the one NESTED block in the thread section, so it needs its own
   // walk rather than `resolveFlag`'s. Same layering: default, then user, then
@@ -241,6 +273,33 @@ export function resolveThreadConfig(
     }
     answerUi = read;
     answerUiSource = layer.name;
+  }
+
+  // The stage ladder (home-base-vzwbj.4.3). A malformed list is NAMED and
+  // ignored like answerUi: a ladder that silently fell back would refuse every
+  // stage Justin configured, with nothing saying why.
+  let stages: readonly string[] = THREAD_DEFAULT_STAGES;
+  let stagesSource: ThreadConfigSource = 'default';
+  for (const layer of layers) {
+    const value = threadSectionIn(layer.config)?.stages;
+    if (value === undefined) continue;
+    const ok =
+      Array.isArray(value) &&
+      value.length > 0 &&
+      value.every(
+        (entry) =>
+          typeof entry === 'string' &&
+          /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry),
+      ) &&
+      new Set(value).size === value.length;
+    if (!ok) {
+      problems.push(
+        `componentConfig.thread.stages in the ${layer.name} config is ${JSON.stringify(value)}, which is not a non-empty list of distinct plain names (letters, digits, . _ -) — ignoring it and using ${stages.join(', ')}.`,
+      );
+      continue;
+    }
+    stages = value as string[];
+    stagesSource = layer.name;
   }
 
   // K12: a misspelled mode is NAMED and ignored, exactly like answerUi — a
@@ -298,11 +357,17 @@ export function resolveThreadConfig(
     enforceMode,
     enforceModeSource,
     enforceSource: enforce.source,
+    nudge: nudge.value,
+    nudgeSource: nudge.source,
     problems,
     projectRoot,
     repoDir,
     repoDirSource,
+    sessionBeads: sessionBeads.value,
+    sessionBeadsSource: sessionBeads.source,
     source: enabled.source,
+    stages,
+    stagesSource,
   };
 }
 

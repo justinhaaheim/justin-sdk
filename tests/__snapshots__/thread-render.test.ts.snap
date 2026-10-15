@@ -21,13 +21,16 @@ exports[`renderMarkdown full report matches the committed baseline 1`] = `
 
 - ⚽ Goal: Status reports as beads, one thread bead per session
 
+
 - ➡️ the read path
+
 
 - ➡️ the rules edit
 
 **✅ What I did:**
 
 - ✅ Built the thread command group
+
 
 - ✅ Wired the bin symlink
 
@@ -55,17 +58,22 @@ exports[`renderMarkdown full report matches the committed baseline 1`] = `
 
      Context: The adapter closes asks instead of deleting them, because bd delete wedges auto-export.
 
+
      - a. (Recommended) Keep closing — reversible, export stays healthy
+
 
      - b. Delete — tidier list, wedges the JSONL export
 
      If you don't answer: I keep closing rather than deleting.
 
+
   2. (P3) · [Pick a/b] Where should componentConfig.thread.enabled live? (jl-x7q.3)
 
      Context: The knob defaults off, so nothing changes for other sessions.
 
+
      - a. (Recommended) user config only
+
 
      - b. every enrolled repo
 
@@ -78,6 +86,7 @@ exports[`renderMarkdown full report matches the committed baseline 1`] = `
 **🛠️ Work product:**
 
 - code: src/thread/ plus the bin symlink, on branch thread-reports
+
 
 - Merge state: UNMERGED
 

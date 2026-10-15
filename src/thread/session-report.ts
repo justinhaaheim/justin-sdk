@@ -1,0 +1,657 @@
+/**
+ * `thread status` and the v4 `thread show` (status report v4, epic
+ * home-base-vzwbj.4 D3/D4; built by home-base-vzwbj.4.3). Both print Part 1
+ * from the session model; they differ in who reads them and what follows.
+ *
+ * `thread status` — Claude, before yielding on a work turn (D3):
+ *   SESSION BEADS: ENABLED
+ *   Part 1, ready to paste (its status is the one the session will have once
+ *     Claude stops: never 🏃, and Claude's yield counted as the last message)
+ *   What to mark — ONLY what cannot be derived (session-status.ts
+ *     `whatToMark`), or "Nothing to mark." When the yield would be ⚠️, one
+ *     entry per open request with the close command, the P0 and the handoff
+ *     (home-base-vzwbj.4.16 G2).
+ *   If you stop now the inbox will say: <status> — and for ⚠️ only, what that
+ *     leads to and the way out, on a second line (G2)
+ * With the knob off it prints `SESSION BEADS: DISABLED` and exits 0 — the line
+ * the v4 rule branches on to write the legacy report instead (D6).
+ *
+ * `thread show [session bead | request or question id | --session <uuid>]` —
+ * Justin (or Claude), knob on: Part 1 LIVE (🏃 when the session is running),
+ * then `From Claude:` and the last message Claude yielded with any pasted Part
+ * 1 stripped (it was stale the moment it was pasted), then `Your messages:` —
+ * every prompt, newest last, each cut at 400 characters (`--full`: uncut).
+ *
+ * Exit: 0 printed · 1 no session bead, or the sessions index unreadable.
+ */
+
+import type {OutputStyle} from '../cli-style';
+import type {MessageLine} from './message-log';
+import type {Piece} from './part-one';
+import type {EnvLike} from './paths';
+import type {ActionLine, OptionalLine} from './session-card';
+import type {SessionModel} from './session-model';
+import type {MarkItem, SessionStatus, StatusCounts} from './session-status';
+
+import {readFileSync} from 'fs';
+import {join} from 'path';
+
+import {
+  BODY_COLUMN,
+  outputStyle,
+  pad,
+  paint,
+  sectionHeader,
+  spacedList,
+  wrapHanging,
+} from '../cli-style';
+import {sdkRun} from '../sdk-invocation';
+import {parseInstant} from './answer-store';
+import {
+  partOneView,
+  renderPartOne,
+  statusWords,
+  stripPastedPartOne,
+  tildeText,
+  whenWords,
+} from './part-one';
+import {threadsBeadsDir} from './paths';
+import {deriveAction, optionalLine} from './session-card';
+import {readSessionIndex} from './session-index';
+import {
+  lastAssistantLine,
+  loadSession,
+  resolveSessionId,
+  userLines,
+} from './session-model';
+import {
+  deriveStatus,
+  statusCounts,
+  statusFactsOf,
+  whatToMark,
+} from './session-status';
+
+/** `thread show` cuts each of Justin's messages here unless `--full`. */
+export const USER_MESSAGE_CUT = 400;
+
+/**
+ * Every legacy thread id (the ~/Dev/threads store) starts with this: 847 of
+ * 847 in its export, measured 2026-10-11.
+ */
+export const LEGACY_THREAD_ID_PREFIX = 'th-';
+
+/**
+ * R8 (home-base-vzwbj.4.9): with componentConfig.thread.sessionBeads on,
+ * `thread show <id>` and `thread answer <id>` take v4 selectors, which left
+ * every legacy thread id unreachable (exit 1). True when the selector
+ * resolves to NO v4 session AND is a legacy id: the `th-` shape, or an id the
+ * legacy store's export holds. A selector v4 resolves always stays v4.
+ */
+export function routesToLegacyThread(input: {
+  cwd: string;
+  env: EnvLike;
+  selector: string | null;
+}): boolean {
+  const selector = input.selector?.trim() ?? '';
+  if (selector === '') return false;
+  const resolved = resolveSessionId({
+    cwd: input.cwd,
+    env: input.env,
+    selector,
+    sessionIdOption: null,
+  });
+  if (resolved.kind === 'found') return false;
+  if (selector.startsWith(LEGACY_THREAD_ID_PREFIX)) return true;
+  try {
+    return readFileSync(
+      join(threadsBeadsDir(input.env), 'issues.jsonl'),
+      'utf8',
+    ).includes(`"id":${JSON.stringify(selector)}`);
+  } catch {
+    // No legacy export to look in: the id is not shown to be a legacy one,
+    // and the v4 handler's refusal names what it searched.
+    return false;
+  }
+}
+
+export const SESSION_BEADS_ENABLED_LINE = 'SESSION BEADS: ENABLED';
+export const SESSION_BEADS_DISABLED_LINE = 'SESSION BEADS: DISABLED';
+
+interface CommonOptions {
+  cwd?: string;
+  env?: EnvLike;
+  now?: Date;
+  style?: OutputStyle;
+  /** IANA zone for printed times; undefined = this machine's. */
+  timeZone?: string;
+}
+
+export type ReportLoad =
+  | {
+      /** The dashboard's "You need to" line (deriveAction), for Part 1. */
+      action: ActionLine;
+      counts: StatusCounts;
+      kind: 'loaded';
+      model: SessionModel;
+      /** The dashboard's "Optional" line, null when no P1–P4 is open. */
+      optional: OptionalLine | null;
+      status: SessionStatus;
+    }
+  | {detail: string; kind: 'unreadable'}
+  | {kind: 'disabled'; reason: string}
+  | {kind: 'noSession'; reason: string};
+
+async function knobOn(
+  cwd: string,
+  env: EnvLike,
+): Promise<{ok: false; reason: string} | {ok: true}> {
+  const {resolveThreadConfig} = await import('./config');
+  const config = resolveThreadConfig({cwd, env});
+  return config.sessionBeads
+    ? {ok: true}
+    : {
+        ok: false,
+        reason: `componentConfig.thread.sessionBeads is not true (resolved from: ${config.sessionBeadsSource})`,
+      };
+}
+
+/**
+ * The successor's Claude session id, as the inbox resolves it (D3 rule 3): the
+ * sessions index line that CREATED the successor's session bead. Null when
+ * there is no successor, no such line, or the index could not be read — then
+ * deriveAction points at the handoff in Claude's last message instead of
+ * naming a session to resume, which is the cautious line, not a reassuring one.
+ */
+function successorSessionIdOf(
+  successor: string | null,
+  env: EnvLike,
+): string | null {
+  if (successor == null) return null;
+  const index = readSessionIndex(env);
+  if (index.kind !== 'read') return null;
+  for (const indexed of index.sessions) {
+    for (const sighting of indexed.sightings) {
+      if (sighting.event === 'created' && sighting.beadId === successor) {
+        return indexed.sessionId;
+      }
+    }
+  }
+  return null;
+}
+
+async function loadForReport(input: {
+  asIfYielded: boolean;
+  cwd: string;
+  env: EnvLike;
+  now: Date;
+  selector: string | null;
+  sessionId: string | null;
+}): Promise<ReportLoad> {
+  const knob = await knobOn(input.cwd, input.env);
+  if (!knob.ok) return {kind: 'disabled', reason: knob.reason};
+  const loaded = await loadSession({
+    cwd: input.cwd,
+    env: input.env,
+    selector: input.selector,
+    sessionIdOption: input.sessionId,
+  });
+  if (loaded.kind !== 'loaded') return loaded;
+  const {model} = loaded;
+  const facts = statusFactsOf(model);
+  const status = deriveStatus(facts, {
+    asIfYielded: input.asIfYielded,
+    now: input.now,
+  });
+  const counts = statusCounts(model);
+  return {
+    // home-base-j8q3e.1.7.2 item 3: Part 1's "You need to" is the dashboard's
+    // line, from the same function, so the two never disagree.
+    action: deriveAction({
+      model,
+      status,
+      successorSessionId: successorSessionIdOf(facts.successor, input.env),
+    }),
+    counts,
+    kind: 'loaded',
+    model,
+    optional: optionalLine(counts, model.sessionBeadId),
+    status,
+  };
+}
+
+function refusalLines(
+  command: string,
+  load: Exclude<ReportLoad, {kind: 'loaded'}>,
+): string[] {
+  switch (load.kind) {
+    case 'disabled':
+      return [`${SESSION_BEADS_DISABLED_LINE} — ${load.reason}.`];
+    case 'noSession':
+      return [`${command}: ${load.reason}`];
+    case 'unreadable':
+      return [`${command}: could not read — ${load.detail}`];
+  }
+}
+
+// ---------------------------------------------------------------------------
+// thread status
+// ---------------------------------------------------------------------------
+
+export interface ThreadStatusOptions extends CommonOptions {
+  sessionId: string | null;
+}
+
+/**
+ * One "What to mark" entry, in plain words, with the command that fixes it,
+ * and (home-base-vzwbj.4.16 G2) the lines under it — `[]` for every kind but
+ * `requestOpenNoBlocker`.
+ */
+export interface MarkView {
+  code: string | null;
+  sub: Piece[][];
+  text: string;
+}
+
+function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+/**
+ * G2: what to do with an open request when the yield would be ⚠️. Plain
+ * words, one request per entry: the close command when its work is done, the
+ * P0 or the handoff when it is not. `--force` appears HERE ONLY, for a request
+ * whose open questions are old-shape children (br refuses to close a parent
+ * with open children); a request with an open real child lists the child
+ * instead of a close command.
+ */
+function requestOpenLines(
+  item: Extract<MarkItem, {kind: 'requestOpenNoBlocker'}>,
+): MarkView {
+  const {request} = item;
+  const where =
+    request.status === 'in_progress'
+      ? 'is in progress'
+      : `is still open (status ${request.status})`;
+  const allClosed = item.childrenAllClosed
+    ? ', every child bead is closed,'
+    : '';
+  const close = `br close ${request.id} --reason "…"`;
+  let done: Piece[];
+  if (item.openChildren.length > 0) {
+    const n = item.openChildren.length;
+    done = [
+      `work done → ${plural(n, 'child bead is', 'child beads are')} still open: ${item.openChildren.map((child) => child.id).join(', ')} — close ${n === 1 ? 'it' : 'them'} first`,
+    ];
+  } else if (item.oldShapeQuestions.length > 0) {
+    const n = item.oldShapeQuestions.length;
+    done = [
+      'work done → ',
+      {code: `${close} --force`},
+      ` (--force because ${n === 1 ? 'its open question for Justin is a child bead' : `its ${n} open questions for Justin are child beads`} of the request, the old way, and br will not close a parent with open children; --force closes the request and leaves ${n === 1 ? 'the question' : 'them'} open)`,
+    ];
+  } else {
+    const n = item.openQuestions.length;
+    done = [
+      'work done → ',
+      {code: close},
+      n === 0
+        ? ''
+        : ` (${n === 1 ? 'its open question for Justin stays open' : `its ${n} open questions for Justin stay open`}; questions never keep a request open)`,
+    ];
+  }
+  return {
+    code: null,
+    sub: [
+      done,
+      [
+        'not done → file the P0 that blocks it: ',
+        {code: sdkRun(`thread ask "…" --priority 0 --to ${request.id}`)},
+        ' — or hand off: ',
+        {code: sdkRun('thread handoff')},
+      ],
+    ],
+    text: `Request ${request.id} ("${request.title}") ${where}${allClosed} and nothing blocks it.`,
+  };
+}
+
+/** One "What to mark" entry, in plain words, with the command that fixes it. */
+export function markLine(item: MarkItem): MarkView {
+  switch (item.kind) {
+    case 'requestChildrenClosed':
+      return {
+        code: `br close ${item.request.id} --reason "…"`,
+        sub: [],
+        text: `Request ${item.request.id} ("${item.request.title}") has every child closed but is still open: close it, or say in your message what remains.`,
+      };
+    case 'requestOpenNoBlocker':
+      return requestOpenLines(item);
+    case 'noRequest': {
+      const what = [
+        item.commits > 0
+          ? `${item.commits} commit${item.commits === 1 ? '' : 's'}`
+          : null,
+        item.uncommitted > 0
+          ? `${item.uncommitted} uncommitted path${item.uncommitted === 1 ? '' : 's'}`
+          : null,
+        // R3: commit evidence that matched no commit in this checkout.
+        item.unmatchedCommits > 0
+          ? `${item.unmatchedCommits} commit command${item.unmatchedCommits === 1 ? '' : 's'} that matched no commit here`
+          : null,
+      ]
+        .filter((part): part is string => part != null)
+        .join(' and ');
+      return {
+        code: sdkRun('thread request "…"'),
+        sub: [],
+        text: `${what} in this session, and no request filed: file one for the work Justin asked for.`,
+      };
+    }
+    case 'autoTitle':
+      return {
+        code: sdkRun('thread title "…"'),
+        sub: [],
+        text: `The session is still titled with the first line of Justin's first prompt ("${item.title}"): give it a plain-words name.`,
+      };
+    case 'unchecked':
+      return {
+        code: null,
+        sub: [],
+        text: `⚠️ Could not check ${item.what}: ${item.reason}.`,
+      };
+  }
+}
+
+export const VERDICT_LABEL = 'If you stop now the inbox will say:';
+
+/**
+ * home-base-vzwbj.4.16 G2: what a ⚠️ yield leads to, and the way out — said on
+ * the verdict line, for ⚠️ ONLY (every other verdict is a real place to stop).
+ */
+export const OPEN_WORK_CONSEQUENCE =
+  ' — Justin will be told to resume this session.';
+
+function pieces(parts: readonly Piece[], color: boolean): string {
+  return parts
+    .map((part) => {
+      if (typeof part === 'string') return tildeText(part);
+      if ('strong' in part) {
+        const text = tildeText(part.strong);
+        return color ? paint(text, ['bold'], true) : `**${text}**`;
+      }
+      return color ? paint(part.code, ['cyan'], true) : `\`${part.code}\``;
+    })
+    .join('');
+}
+
+/** The verdict: one line, and for ⚠️ a second saying what to do (G2). */
+export function verdictLines(
+  status: SessionStatus,
+  style: OutputStyle,
+): string[] {
+  const words = tildeText(statusWords(status));
+  const head = style.color
+    ? `${pad(2)}${paint(VERDICT_LABEL, ['bold'], true)} ${words}`
+    : `${VERDICT_LABEL} ${words}`;
+  if (status.kind !== 'openWork') return [head];
+  return [
+    `${head}${OPEN_WORK_CONSEQUENCE}`,
+    `${style.color ? pad(2) : ''}${pieces(
+      [
+        'Close what is done, file the P0 that blocks you, or run ',
+        {code: sdkRun('thread handoff')},
+        '.',
+      ],
+      style.color,
+    )}`,
+  ];
+}
+
+export function renderThreadStatus(
+  load: Extract<ReportLoad, {kind: 'loaded'}>,
+  options: {now: Date; style: OutputStyle; timeZone?: string},
+): string {
+  const {style} = options;
+  const partOne = renderPartOne(
+    partOneView({
+      action: load.action,
+      counts: load.counts,
+      model: load.model,
+      now: options.now,
+      optional: load.optional,
+      status: load.status,
+      timeZone: options.timeZone,
+    }),
+    style,
+  );
+  const marks = whatToMark(load.model, load.status)
+    .map(markLine)
+    .map((mark) => ({...mark, text: tildeText(mark.text)}));
+  let markBlock: string;
+  if (marks.length === 0) {
+    markBlock = style.color ? `${pad(2)}Nothing to mark.` : 'Nothing to mark.';
+  } else if (style.color) {
+    markBlock = [
+      sectionHeader('What to mark', {color: true, emoji: '✏️'}),
+      ...marks.map((mark) =>
+        [
+          wrapHanging(
+            `${paint('-', ['dim'], true)} ${mark.text}${mark.code == null ? '' : ` ${paint(mark.code, ['cyan'], true)}`}`,
+            {hang: BODY_COLUMN + 2, indent: BODY_COLUMN, width: style.width},
+          ),
+          ...mark.sub.map((line) =>
+            wrapHanging(`${paint('-', ['dim'], true)} ${pieces(line, true)}`, {
+              hang: BODY_COLUMN + 4,
+              indent: BODY_COLUMN + 2,
+              width: style.width,
+            }),
+          ),
+        ].join('\n'),
+      ),
+    ].join('\n\n');
+  } else {
+    markBlock = [
+      '**What to mark:**',
+      ...marks.map((mark) =>
+        [
+          `- ${mark.text}${mark.code == null ? '' : ` \`${mark.code}\``}`,
+          ...mark.sub.map((line) => `  - ${pieces(line, false)}`),
+        ].join('\n'),
+      ),
+    ].join('\n\n');
+  }
+  return spacedList([
+    SESSION_BEADS_ENABLED_LINE,
+    partOne,
+    markBlock,
+    verdictLines(load.status, style).join('\n'),
+  ]);
+}
+
+/** `thread status`: print, return the exit code. */
+export async function runThreadStatus(
+  options: ThreadStatusOptions,
+): Promise<number> {
+  const env = options.env ?? process.env;
+  const cwd = options.cwd ?? process.cwd();
+  const now = options.now ?? new Date();
+  const style = options.style ?? outputStyle(process.stdout);
+  const load = await loadForReport({
+    asIfYielded: true,
+    cwd,
+    env,
+    now,
+    selector: null,
+    sessionId: options.sessionId,
+  });
+  if (load.kind === 'disabled') {
+    // Exit 0: "off" is an answer the rule branches on, not a failure (D6).
+    console.log(refusalLines('thread status', load).join('\n'));
+    return 0;
+  }
+  if (load.kind !== 'loaded') {
+    console.error(refusalLines('thread status', load).join('\n'));
+    return 1;
+  }
+  console.log(
+    renderThreadStatus(load, {now, style, timeZone: options.timeZone}),
+  );
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// thread show (v4)
+// ---------------------------------------------------------------------------
+
+export interface SessionShowOptions extends CommonOptions {
+  /** `--full`: Justin's messages uncut. */
+  full: boolean;
+  /** A session bead id, a session id, or a request/question id. */
+  selector: string | null;
+  sessionId: string | null;
+}
+
+/** One of Justin's messages, cut at USER_MESSAGE_CUT unless `full`. */
+export function cutMessage(text: string, full: boolean): string {
+  const trimmed = text.trim();
+  if (full || trimmed.length <= USER_MESSAGE_CUT) return trimmed;
+  const rest = trimmed.length - USER_MESSAGE_CUT;
+  return `${trimmed.slice(0, USER_MESSAGE_CUT).trimEnd()}… (${rest} more character${rest === 1 ? '' : 's'}; --full shows them)`;
+}
+
+function messageStamp(
+  line: MessageLine,
+  now: Date,
+  timeZone?: string,
+): string | null {
+  const ms = parseInstant(line.at);
+  return ms == null ? null : whenWords(new Date(ms), now, timeZone);
+}
+
+export function renderSessionShow(
+  load: Extract<ReportLoad, {kind: 'loaded'}>,
+  options: {full: boolean; now: Date; style: OutputStyle; timeZone?: string},
+): string {
+  const {now, style, timeZone} = options;
+  const {model} = load;
+  const partOne = renderPartOne(
+    partOneView({
+      action: load.action,
+      counts: load.counts,
+      model,
+      now,
+      optional: load.optional,
+      status: load.status,
+      timeZone,
+    }),
+    style,
+  );
+
+  // ---- From Claude ----
+  const last = lastAssistantLine(model.log);
+  let claude: string;
+  if (!last.ok) claude = `⚠️ Unknown: ${last.reason}.`;
+  else if (last.value == null)
+    claude = '(Claude has not yielded in this session yet.)';
+  else {
+    const stripped = stripPastedPartOne(last.value.text);
+    claude =
+      stripped === ''
+        ? '(Claude’s last message was only a pasted Part 1.)'
+        : stripped;
+  }
+
+  // ---- Your messages ----
+  const users = userLines(model.log);
+  let mine: string[];
+  if (!users.ok) mine = [`⚠️ Unknown: ${users.reason}.`];
+  else if (users.value.length === 0) mine = ['(None captured.)'];
+  else {
+    mine = users.value.map((line, index) => {
+      const marker = `${index + 1}. `;
+      const stamp = messageStamp(line, now, timeZone);
+      const text = cutMessage(line.text, options.full);
+      const body = stamp == null ? text : `(${stamp}) ${text}`;
+      const [head = '', ...rest] = body.split('\n');
+      return [
+        `${marker}${head}`,
+        ...rest.map((entry) =>
+          entry === '' ? '' : `${pad(marker.length)}${entry}`,
+        ),
+      ].join('\n');
+    });
+  }
+
+  if (!style.color) {
+    return spacedList([
+      partOne,
+      '**From Claude:**',
+      claude,
+      '**Your messages:**',
+      ...mine,
+    ]);
+  }
+  const indent = (text: string): string =>
+    text
+      .split('\n')
+      .map((entry) =>
+        entry === ''
+          ? ''
+          : wrapHanging(entry, {
+              hang: BODY_COLUMN,
+              indent: BODY_COLUMN,
+              width: style.width,
+            }),
+      )
+      .join('\n');
+  return spacedList([
+    partOne,
+    sectionHeader('From Claude', {color: true, emoji: '💬'}),
+    indent(claude),
+    sectionHeader('Your messages', {color: true, emoji: '🗣️'}),
+    ...mine.map(indent),
+  ]);
+}
+
+/** `thread show` with the knob on: print, return the exit code. */
+export async function runSessionShow(
+  options: SessionShowOptions,
+): Promise<number> {
+  const env = options.env ?? process.env;
+  const cwd = options.cwd ?? process.cwd();
+  const now = options.now ?? new Date();
+  const style = options.style ?? outputStyle(process.stdout);
+  const load = await loadForReport({
+    asIfYielded: false,
+    cwd,
+    env,
+    now,
+    selector: options.selector,
+    sessionId: options.sessionId,
+  });
+  if (load.kind !== 'loaded') {
+    const lines = refusalLines('thread show', load);
+    console.error(lines.join('\n'));
+    return 1;
+  }
+  console.log(
+    renderSessionShow(load, {
+      full: options.full,
+      now,
+      style,
+      timeZone: options.timeZone,
+    }),
+  );
+  return 0;
+}
+
+/** For tests and the inbox: the loaded report without printing. */
+export async function loadSessionReport(input: {
+  asIfYielded: boolean;
+  cwd: string;
+  env: EnvLike;
+  now: Date;
+  selector: string | null;
+  sessionId: string | null;
+}): Promise<ReportLoad> {
+  return await loadForReport(input);
+}

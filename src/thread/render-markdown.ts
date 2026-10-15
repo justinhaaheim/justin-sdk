@@ -338,26 +338,62 @@ function renderFullMarkdown(model: ReportModel): string {
  *     zero: "nothing else to flag", said about a report nobody read (rule 7).
  *
  * A line of spaces becomes an empty line.
+ *
+ * TWO EMPTY LINES BEFORE A SIBLING LIST ITEM (home-base-j8q3e.1.10 F7): a list
+ * item whose previous line belongs to the same list (an item, or a detail or
+ * continuation under one) gets two empty lines above it, not one. Measured on
+ * Claude Code 2.1.300 (docs/reference/claude-code-markdown-rendering.md): one
+ * empty line between list items is dropped on screen, two show as one empty
+ * row. The first item under a heading keeps one. Existing empty lines are
+ * kept and only topped up, so this stays idempotent.
  */
 export function normalizeReportText(markdown: string): string {
   const out: string[] = [];
-  let previous: ReportLine | null = null;
+  let previous: {kind: ReportLine['kind']; text: string} | null = null;
+  let emptyLines = 0;
   for (const line of classifyReport(markdown)) {
     if (line.kind === 'blank') {
       out.push('');
-      previous = null;
+      emptyLines += 1;
       continue;
     }
-    if (
-      previous != null &&
-      (line.kind !== 'text' || previous.kind === 'rule')
-    ) {
-      out.push('');
-    }
-    out.push(upgradeLine(line));
-    previous = line;
+    // Judged on the UPGRADED text: a stored `     a. …` option becomes
+    // `     - a. …` here, and a second pass must see the same thing.
+    const current = {kind: line.kind, text: upgradeLine(line)};
+    const wanted =
+      previous == null
+        ? 0
+        : line.kind === 'text' && previous.kind !== 'rule'
+          ? 0
+          : opensSiblingItem(previous, current)
+            ? 2
+            : 1;
+    for (; emptyLines < wanted; emptyLines += 1) out.push('');
+    out.push(current.text);
+    previous = current;
+    emptyLines = 0;
   }
   return out.join('\n');
+}
+
+/** A line that opens a markdown list item: `- …`, `1. …`, at any indent. */
+const LIST_ITEM_LINE = /^ *(?:\d+\.|[-*]) /u;
+
+/**
+ * Whether `line` opens a list item that follows another part of the same list
+ * (see `normalizeReportText`). A `text` line is never one: it is the inside of
+ * a multi-line value, and its spacing is what Justin wrote.
+ */
+function opensSiblingItem(
+  previous: {kind: ReportLine['kind']; text: string},
+  line: {kind: ReportLine['kind']; text: string},
+): boolean {
+  if (line.kind === 'text' || !LIST_ITEM_LINE.test(line.text)) return false;
+  return (
+    LIST_ITEM_LINE.test(previous.text) ||
+    previous.kind === 'askDetail' ||
+    previous.kind === 'continuation'
+  );
 }
 
 /** Steps 2 and 3 of `normalizeReportText`, for one line. */

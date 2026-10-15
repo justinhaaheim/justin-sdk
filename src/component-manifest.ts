@@ -59,6 +59,9 @@ import {
   THREAD_START_HOOK_COMMAND,
   THREAD_START_HOOK_EVENT,
   THREAD_START_HOOK_FINGERPRINT,
+  THREAD_NUDGE_HOOK_COMMAND,
+  THREAD_NUDGE_HOOK_EVENT,
+  THREAD_NUDGE_HOOK_FINGERPRINT,
   THREAD_STOP_HOOK_COMMAND,
   THREAD_STOP_HOOK_EVENT,
   THREAD_STOP_HOOK_FINGERPRINT,
@@ -441,6 +444,12 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
         event,
         fingerprint: THREAD_CAPTURE_HOOK_FINGERPRINT,
       })),
+      // The commit nudge (home-base-vzwbj.4.4): PostToolUse, matcher Bash.
+      {
+        command: THREAD_NUDGE_HOOK_COMMAND,
+        event: THREAD_NUDGE_HOOK_EVENT,
+        fingerprint: THREAD_NUDGE_HOOK_FINGERPRINT,
+      },
     ],
     purpose:
       'UserPromptSubmit/Stop hooks that capture every prompt and yield (creating the thread bead on the first prompt) and refuse to end a session without a report.',

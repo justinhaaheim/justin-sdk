@@ -81,6 +81,43 @@ export const THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES = 20;
 export const THREAD_DEFAULT_CAPTURE = true;
 
 /**
+ * OFF unless something says otherwise (status report v4, epic
+ * home-base-vzwbj.4 D6; built by home-base-vzwbj.4.1, 2026-10-11).
+ *
+ * With it on, the capture hook ALSO files a `session` bead in the repo's own
+ * beads workspace on a session's first captured prompt, records it in the
+ * sessions index, and injects one context line on every prompt; `thread
+ * request` and `thread title` work. With it off nothing of that happens
+ * anywhere — the ~/Dev/threads thread bead is written either way. It rides on
+ * capture, so it does nothing unless `enabled` and `capture` are on too.
+ */
+export const THREAD_DEFAULT_SESSION_BEADS = false;
+
+/**
+ * Whether `thread nudge` (a PostToolUse hook on Bash, home-base-vzwbj.4.4,
+ * epic D3) tells Claude — once per turn — that it committed while no request
+ * is in progress for its session. DEFAULT TRUE, but it acts only when
+ * `sessionBeads` is on as well, so it costs nothing until v4 is switched on.
+ * Never blocks.
+ */
+export const THREAD_DEFAULT_NUDGE = true;
+
+/**
+ * How far a request can get, in order (status report v4, epic
+ * home-base-vzwbj.4 D1 "STAGES"; built by home-base-vzwbj.4.3). `thread stage
+ * <request> <name>` labels the request `stage:<name>`, and Part 1 shows the
+ * highest one reached and the next. A name outside this ladder is refused.
+ * Not a feature gate: it only names the rungs.
+ */
+export const THREAD_DEFAULT_STAGES: readonly string[] = [
+  'code-done',
+  'tested',
+  'built',
+  'link-sent',
+  'approved',
+];
+
+/**
  * ON unless something says otherwise (home-base-p1uj.11) — the one knob here
  * whose default is true.
  *

@@ -297,6 +297,77 @@ export function readLogTail(
   }
 }
 
+/**
+ * When Claude last yielded: the newest `role: 'assistant'` line (status report
+ * v4, home-base-vzwbj.4.2 — "answers since you last yielded").
+ *
+ * `none` is measured: no log (capture never ran) or a log with no assistant
+ * line (Claude has not yielded yet). `failed` is not, and no caller may read it
+ * as `none` (rule 7).
+ */
+export type LastAssistantRead =
+  | {error: string; kind: 'failed'; path: string}
+  | {kind: 'found'; line: MessageLine}
+  | {kind: 'none'};
+
+/**
+ * Read backwards from EOF (the prompt hook calls this, K10 b): the last
+ * `maxBytes` first, and the whole file only when that window holds no
+ * assistant line and the file is longer than it.
+ */
+export function readLastAssistantLine(
+  path: string,
+  maxBytes: number = TAIL_READ_BYTES,
+): LastAssistantRead {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return {kind: 'none'};
+    return {error: probeErrorMessage(error), kind: 'failed', path};
+  }
+  let text: string;
+  let start: number;
+  try {
+    const size = fstatSync(fd).size;
+    const length = Math.min(size, maxBytes);
+    start = size - length;
+    const buffer = Buffer.alloc(length);
+    let read = 0;
+    while (read < length) {
+      const bytes = readSync(fd, buffer, read, length - read, start + read);
+      if (bytes === 0) break;
+      read += bytes;
+    }
+    text = buffer.toString('utf8', 0, read);
+  } catch (error) {
+    return {error: probeErrorMessage(error), kind: 'failed', path};
+  } finally {
+    closeSync(fd);
+  }
+  if (start > 0) {
+    const newline = text.indexOf('\n');
+    text = newline === -1 ? '' : text.slice(newline + 1);
+  }
+  const lines = text.split('\n');
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const raw = lines[index] ?? '';
+    if (raw.trim() === '') continue;
+    const parsed = parseMessageLine(raw);
+    if (parsed?.role === 'assistant') return {kind: 'found', line: parsed};
+  }
+  if (start === 0) return {kind: 'none'};
+  const whole = readMessageLogAt(path);
+  if (whole.kind === 'failed') {
+    return {error: whole.error, kind: 'failed', path};
+  }
+  if (whole.kind === 'missing') return {kind: 'none'};
+  const last = [...whole.lines]
+    .reverse()
+    .find((line) => line.role === 'assistant');
+  return last == null ? {kind: 'none'} : {kind: 'found', line: last};
+}
+
 // ---------------------------------------------------------------------------
 // The live append (K10 b)
 // ---------------------------------------------------------------------------

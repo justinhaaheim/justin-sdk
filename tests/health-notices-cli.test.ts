@@ -468,21 +468,33 @@ function staticImportGraph(entry: string): Set<string> {
 }
 
 describe('the CLI hot path', () => {
-  test('zod is NOT statically reachable from cli.ts (review addition C)', () => {
-    // cli.ts is the entry for the time-check and usage-check hooks, which run
-    // on every prompt Justin types. zod costs 12-13ms to import against a
-    // 40-50ms startup, so sdk-config (and health-notices, and doctor's two
-    // config checks) must all be reached by `await import` only.
-    const bare = staticImportGraph(CLI);
+  // home-base-vzwbj.4.9 F8: cli.ts is now a thin entry that answers the
+  // `thread nudge` fast path and otherwise `await import`s cli-main.ts, which
+  // holds the whole command tree and is what every other hook loads. So the
+  // zod rule is checked on cli-main.ts, and cli.ts itself must stay bare.
+  const CLI_MAIN = join(SRC, 'cli-main.ts');
+
+  test('zod is NOT statically reachable from the command tree cli.ts loads (review addition C)', () => {
+    // cli-main.ts is what the time-check and usage-check hooks load, on every
+    // prompt Justin types. zod costs 12-13ms to import against a 40-50ms
+    // startup, so sdk-config (and health-notices, and doctor's two config
+    // checks) must all be reached by `await import` only.
+    const bare = staticImportGraph(CLI_MAIN);
     expect([...bare].sort()).not.toContain('zod');
   });
 
   test('the graph walker actually walks (it is not silently empty)', () => {
     // Without this, the assertion above passes for the wrong reason the moment
     // the regex stops matching anything.
-    const bare = staticImportGraph(CLI);
+    const bare = staticImportGraph(CLI_MAIN);
     expect(bare.has('yargs')).toBe(true);
     expect(bare.size).toBeGreaterThan(2);
+  });
+
+  test('F8: cli.ts itself statically reaches no package at all — not yargs, not zod', () => {
+    const bare = staticImportGraph(CLI);
+    expect(bare.has('yargs')).toBe(false);
+    expect(bare.has('zod')).toBe(false);
   });
 
   test('sdk-config DOES import zod statically — so the check above is meaningful', () => {
