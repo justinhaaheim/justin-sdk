@@ -20,6 +20,8 @@
 
 import type {EnvLike} from './paths';
 
+import {existsSync} from 'fs';
+
 import {findProjectRoot} from '../health-notices';
 import {
   describeConfigOutcome,
@@ -40,6 +42,7 @@ import {
   THREAD_DEFAULT_ENFORCE,
   THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
   THREAD_DEFAULT_ENFORCE_MODE,
+  THREAD_DEFAULT_NAME_WORKSPACES,
   THREAD_DEFAULT_NUDGE,
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
@@ -61,6 +64,9 @@ export function isThreadAnswerUi(value: unknown): value is ThreadAnswerUi {
     (THREAD_ANSWER_UIS as readonly string[]).includes(value)
   );
 }
+
+/** A declared `projectTag`: 1–12 of A-Z, 0-9 and "-" (home-base-bomy5.7.1). */
+export const PROJECT_TAG_FORMAT = /^[A-Z0-9-]{1,12}$/;
 
 /** Which layer decided one knob's value. */
 export type ThreadConfigSource = 'default' | 'project' | 'user';
@@ -104,6 +110,13 @@ export interface ResolvedThreadConfig {
   /** Which layer decided `enforce`. */
   enforceSource: ThreadConfigSource;
   /**
+   * Whether a session names its cmux workspace after its title
+   * (home-base-j8q3e.5 D6). Off by default.
+   */
+  nameWorkspaces: boolean;
+  /** Which layer decided `nameWorkspaces`. */
+  nameWorkspacesSource: ThreadConfigSource;
+  /**
    * Whether the PostToolUse `thread nudge` may speak (home-base-vzwbj.4.4).
    * It also needs `sessionBeads`.
    */
@@ -113,6 +126,14 @@ export interface ResolvedThreadConfig {
   /** Human-readable config read problems. Empty means both files were fine. */
   problems: string[];
   projectRoot: string;
+  /**
+   * The repo's declared short tag (top-level `projectTag` of the PROJECT file
+   * only, home-base-bomy5.7.1), or null when it declares none or declares one
+   * that breaks the format — the latter is ALSO named in `problems`, so a bad
+   * tag never reads as an absent one (critical rule 7). Display code wants
+   * `resolveRepoTag`, which adds the folder-name fallback.
+   */
+  projectTag: string | null;
   /**
    * The configured threads repo, or null for "no layer said" — which is a
    * DISTINCT answer from a path, and is what lets `paths.ts` fall through to
@@ -228,6 +249,10 @@ export function resolveThreadConfig(
     THREAD_DEFAULT_SESSION_BEADS,
   );
   const nudge = resolveFlag('nudge', THREAD_DEFAULT_NUDGE);
+  const nameWorkspaces = resolveFlag(
+    'nameWorkspaces',
+    THREAD_DEFAULT_NAME_WORKSPACES,
+  );
 
   // `render` is the one NESTED block in the thread section, so it needs its own
   // walk rather than `resolveFlag`'s. Same layering: default, then user, then
@@ -338,6 +363,22 @@ export function resolveThreadConfig(
     }
   }
 
+  // home-base-bomy5.7.1: the project file only — a user-level tag would put
+  // one tag on every repo. A bad value is NAMED and ignored, like `stages`.
+  let projectTag: string | null = null;
+  if (project.status === 'ok') {
+    const declared = (project.config as {projectTag?: unknown}).projectTag;
+    if (declared !== undefined) {
+      if (typeof declared === 'string' && PROJECT_TAG_FORMAT.test(declared)) {
+        projectTag = declared;
+      } else {
+        problems.push(
+          `projectTag in ${project.path} is ${JSON.stringify(declared)}, which is not 1 to 12 characters from A-Z, 0-9 and "-" — ignoring it and naming sessions after the repo folder.`,
+        );
+      }
+    }
+  }
+
   return {
     answerUi,
     answerUiSource,
@@ -357,10 +398,13 @@ export function resolveThreadConfig(
     enforceMode,
     enforceModeSource,
     enforceSource: enforce.source,
+    nameWorkspaces: nameWorkspaces.value,
+    nameWorkspacesSource: nameWorkspaces.source,
     nudge: nudge.value,
     nudgeSource: nudge.source,
     problems,
     projectRoot,
+    projectTag,
     repoDir,
     repoDirSource,
     sessionBeads: sessionBeads.value,
@@ -369,6 +413,42 @@ export function resolveThreadConfig(
     stages,
     stagesSource,
   };
+}
+
+/**
+ * The tag a session's name starts with (home-base-bomy5.7.1), read from THAT
+ * session's checkout — never the caller's, so a cross-repo inbox shows each
+ * repo's own tag. The declared `projectTag` when it is valid; otherwise the
+ * repo folder name uppercased (a bad tag is also a config problem, which
+ * `resolveThreadConfig` names); null only when the repo itself is unknown.
+ *
+ * A checkout that is gone (or null) has no file to read, so it falls back to
+ * the folder name: that session's Checkout line already says it is gone.
+ */
+export function resolveRepoTag(input: {
+  checkout: string | null;
+  env?: EnvLike;
+  repo: string;
+}): string;
+export function resolveRepoTag(input: {
+  checkout: string | null;
+  env?: EnvLike;
+  repo: string | null;
+}): string | null;
+export function resolveRepoTag(input: {
+  checkout: string | null;
+  env?: EnvLike;
+  repo: string | null;
+}): string | null {
+  if (input.repo == null) return null;
+  if (input.checkout != null && existsSync(input.checkout)) {
+    const declared = resolveThreadConfig({
+      cwd: input.checkout,
+      env: input.env,
+    }).projectTag;
+    if (declared != null) return declared;
+  }
+  return input.repo.toUpperCase();
 }
 
 /**

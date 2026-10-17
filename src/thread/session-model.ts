@@ -49,6 +49,7 @@ import {readMessageLog} from './message-log';
 import {
   CMUX_SURFACE_LABEL_PREFIX,
   CMUX_WORKSPACE_LABEL_PREFIX,
+  labelValue,
   SID_LABEL_PREFIX,
 } from './session-bead';
 import {
@@ -68,7 +69,7 @@ import {
   readBeadsExport,
   readSessionTree,
 } from './session-tree';
-import {readLastRecordTimestamp} from './transcript-messages';
+import {readHelperTail, readLastRecordTimestamp} from './transcript-messages';
 
 /** A measurement: its value, or why it could not be taken. Never a stand-in. */
 export type Measured<T> = {ok: false; reason: string} | {ok: true; value: T};
@@ -119,8 +120,19 @@ export interface GitMeasurements {
   worktree: Measured<WorktreeKind>;
 }
 
+/** A helper agent (subagent) still in flight, and its newest record (null = undated). */
+export interface HelperInFlight {
+  agentFile: string;
+  lastRecordAt: string | null;
+}
+
 export interface TranscriptMeasurements {
   contextTokens: Measured<number>;
+  /**
+   * F10 (home-base-j8q3e.1.10): the session's helper agents still in flight,
+   * read in the same pass as `lastRecordAt`; unmeasured exactly when it is.
+   */
+  helpers: Measured<HelperInFlight[]>;
   lastRecordAt: Measured<string>;
   path: string | null;
 }
@@ -133,6 +145,12 @@ export interface SessionModel {
   log: MessageLogRead;
   /** The repo's name, from the index (else git); null when neither knows. */
   repo: string | null;
+  /**
+   * The tag the session's name starts with (home-base-bomy5.7.1), resolved
+   * once from the session's OWN checkout: its `projectTag`, else `repo`
+   * uppercased; null exactly when `repo` is.
+   */
+  repoTag: string | null;
   sessionBeadId: string;
   sessionId: string;
   /** Every sighting the index holds for this session, newest first. */
@@ -688,12 +706,25 @@ export async function measureGit(input: {
  * The listing or any subagent file that cannot be READ makes the whole answer
  * unmeasured, naming it (critical rule 7): the newest of the files that could
  * be read is not the newest activity when one file is unknown.
+ *
+ * From the same reads, the helper agents still in flight (F10,
+ * home-base-j8q3e.1.10; `readHelperTail` says how a helper's tail is read).
+ * Whatever makes the last activity unmeasured makes the helpers unmeasured
+ * too, with the same reason.
  */
-export function readLastActivityAt(transcriptPath: string): Measured<string> {
+export function readActivity(
+  transcriptPath: string,
+): Pick<TranscriptMeasurements, 'helpers' | 'lastRecordAt'> {
+  const fail = (
+    reason: string,
+  ): Pick<TranscriptMeasurements, 'helpers' | 'lastRecordAt'> => ({
+    helpers: unmeasured(reason),
+    lastRecordAt: unmeasured(reason),
+  });
   const main = readLastRecordTimestamp(transcriptPath);
-  if (main.kind === 'failed') return unmeasured(main.reason);
+  if (main.kind === 'failed') return fail(main.reason);
   const subagents = subagentTranscripts(transcriptPath);
-  if (!subagents.ok) return unmeasured(subagents.reason);
+  if (!subagents.ok) return fail(subagents.reason);
   let newest: {at: string; ms: number} | null = null;
   const consider = (at: string): void => {
     const ms = Date.parse(at);
@@ -701,22 +732,34 @@ export function readLastActivityAt(transcriptPath: string): Measured<string> {
     if (newest == null || ms > newest.ms) newest = {at, ms};
   };
   if (main.kind === 'found') consider(main.at);
+  const inFlight: HelperInFlight[] = [];
   for (const file of subagents.files) {
-    const read = readLastRecordTimestamp(file, {sidechain: true});
-    if (read.kind === 'failed') return unmeasured(read.reason);
-    if (read.kind === 'found') consider(read.at);
+    const read = readHelperTail(file);
+    if (read.kind === 'failed') return fail(read.reason);
+    if (read.kind !== 'found') continue;
+    if (read.at != null) consider(read.at);
+    if (read.inFlight) inFlight.push({agentFile: file, lastRecordAt: read.at});
   }
+  const helpers = measured(inFlight);
   const found = newest as {at: string; ms: number} | null;
-  if (found != null) return measured(found.at);
+  if (found != null) return {helpers, lastRecordAt: measured(found.at)};
   if (main.kind === 'found') {
     // Found, but not a date Date.parse reads: the raw value, as before F6.
-    return measured(main.at);
+    return {helpers, lastRecordAt: measured(main.at)};
   }
-  return unmeasured(
-    subagents.files.length === 0
-      ? main.reason
-      : `${main.reason}; nor does any of its ${subagents.files.length} subagent transcripts`,
-  );
+  return {
+    helpers,
+    lastRecordAt: unmeasured(
+      subagents.files.length === 0
+        ? main.reason
+        : `${main.reason}; nor does any of its ${subagents.files.length} subagent transcripts`,
+    ),
+  };
+}
+
+/** `readActivity`'s last activity alone (its doc above `readActivity`). */
+export function readLastActivityAt(transcriptPath: string): Measured<string> {
+  return readActivity(transcriptPath).lastRecordAt;
 }
 
 /**
@@ -747,7 +790,7 @@ export function measureTranscriptAt(path: string): TranscriptMeasurements {
       `could not read the context size from ${path}: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
-  return {contextTokens, lastRecordAt: readLastActivityAt(path), path};
+  return {contextTokens, ...readActivity(path), path};
 }
 
 export function measureTranscript(
@@ -762,6 +805,7 @@ export function measureTranscript(
         : `could not look for the transcript: ${lookup.error}`;
     return {
       contextTokens: unmeasured(reason),
+      helpers: unmeasured(reason),
       lastRecordAt: unmeasured(reason),
       path: null,
     };
@@ -859,11 +903,6 @@ function startedFromDescription(description: string | null): string | null {
     .find((entry) => entry.startsWith('Started: '));
   const value = line?.slice('Started: '.length).trim() ?? '';
   return value === '' ? null : value;
-}
-
-function labelValue(labels: readonly string[], prefix: string): string | null {
-  const label = labels.find((entry) => entry.startsWith(prefix));
-  return label == null ? null : label.slice(prefix.length);
 }
 
 /**
@@ -982,9 +1021,14 @@ export async function loadSession(input: {
   // Config (the ladder, the wrap-up threshold) is the session checkout's when
   // it exists, else the caller's directory.
   const configDir = existsSync(git.checkout) ? git.checkout : cwd;
-  const {resolveReportWrapUpAt, resolveThreadConfig} = await import('./config');
+  const {resolveReportWrapUpAt, resolveRepoTag, resolveThreadConfig} =
+    await import('./config');
   const stages = resolveThreadConfig({cwd: configDir, env}).stages;
   const wrapUpAt = resolveReportWrapUpAt(findProjectRoot(configDir));
+  const repo = created.repo ?? git.repo;
+  // The tag, unlike the ladder, never falls back to the caller's directory: a
+  // cross-repo inbox would print the caller's tag on every repo's sessions.
+  const repoTag = resolveRepoTag({checkout: git.checkout, env, repo});
 
   // The cmux ids are display-only pointers: an unreadable session bead (said
   // on the Session line) simply shows no pane line.
@@ -1005,7 +1049,8 @@ export async function loadSession(input: {
       },
       git,
       log,
-      repo: created.repo ?? git.repo,
+      repo,
+      repoTag,
       sessionBeadId: created.beadId,
       sessionId,
       sightings,

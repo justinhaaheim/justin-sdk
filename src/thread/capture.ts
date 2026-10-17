@@ -35,6 +35,7 @@
  */
 
 import type {BdContext, BdFailure, BdIssue} from './bd';
+import type {CmuxRunner} from './cmux';
 import type {CommitOutcome} from './commit';
 import type {AppendOutcome, MessageLine} from './message-log';
 import type {EnvLike} from './paths';
@@ -89,6 +90,8 @@ import {
   extractTranscriptTurns,
   type TranscriptTurns,
 } from './transcript-messages';
+import {type WorkspaceSyncOutcome, workspaceSyncRecord} from './workspace-name';
+import {syncWorkspaceForCapture} from './workspace-name-session';
 
 /** The entrypoint a `claude -p` session runs under (measured, see below). */
 export const NON_INTERACTIVE_ENTRYPOINT = 'sdk-cli';
@@ -794,6 +797,8 @@ export type ApplyPassOutcome =
 export interface ApplyOptions {
   /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
   autoCommit?: boolean;
+  /** The cmux runner for workspace naming; tests inject a fake. */
+  cmux?: CmuxRunner;
   /** The spawning hook's context-line ms (`--line-ms`), recorded as-is. */
   contextLineMs?: number | null;
   cwd?: string | null;
@@ -805,6 +810,12 @@ export interface ApplyOptions {
   env?: EnvLike;
   /** The spawning hook's synchronous ms (`--hook-ms`), recorded as-is. */
   hookElapsedMs?: number | null;
+  /**
+   * Whether to name the session's cmux workspace after the bead is ensured
+   * (home-base-j8q3e.5 D4 a). `runThreadCaptureApply` resolves it from
+   * componentConfig.thread.nameWorkspaces when absent; absent here means off.
+   */
+  nameWorkspaces?: boolean;
   now?: Date;
   /**
    * Whether to file the session bead in the repo (status report v4,
@@ -1007,6 +1018,11 @@ export type CaptureApplyOutcome =
        * is off, so a knob-off run records nothing new.
        */
       sessionBead: SessionBeadOutcome | null;
+      /**
+       * What naming the cmux workspace did (home-base-j8q3e.5 D4 a); null
+       * when no session bead was ensured or nameWorkspaces is off.
+       */
+      workspaceName: WorkspaceSyncOutcome | null;
     };
 
 /**
@@ -1071,6 +1087,7 @@ export async function applyCapture(
   let threadId: string | null = null;
   let seed: SeedOutcome = {kind: 'alreadySeeded'};
   let sessionBead: SessionBeadOutcome | null = null;
+  let workspaceName: WorkspaceSyncOutcome | null = null;
   try {
     // Under the lock, before the first pass: the pass then applies the seeded
     // log's tail. A thrown seed is a failed one, never a lost capture.
@@ -1086,6 +1103,28 @@ export async function applyCapture(
     // prompt even when capture started mid-session.
     if (options.sessionBeads === true) {
       sessionBead = ensureSessionBeadFromLog(options, env);
+      // D4 a: under the per-session lock, so two children of one session
+      // never race on the record. Every cmux call has a timeout.
+      if (
+        options.nameWorkspaces === true &&
+        (sessionBead.kind === 'created' || sessionBead.kind === 'exists')
+      ) {
+        try {
+          workspaceName = await syncWorkspaceForCapture({
+            cwd: options.cwd ?? process.cwd(),
+            enabled: true,
+            env,
+            run: options.cmux,
+            sessionId: options.sessionId,
+          });
+        } catch (error) {
+          workspaceName = {
+            kind: 'failed',
+            reason: `threw: ${probeErrorMessage(error)}`,
+            workspaceId: null,
+          };
+        }
+      }
     }
     for (;;) {
       do {
@@ -1130,7 +1169,7 @@ export async function applyCapture(
       exportUnstaged: ctx.exportUnstaged,
     });
   }
-  return {commit, kind: 'ran', last, passes, seed, sessionBead};
+  return {commit, kind: 'ran', last, passes, seed, sessionBead, workspaceName};
 }
 
 /** The one JSON line a child run appends to `<stateDir>/capture.jsonl`. */
@@ -1183,6 +1222,9 @@ export function captureRunRecord(
           }
         : outcome.sessionBead;
   }
+  if (outcome.workspaceName != null) {
+    record.workspaceName = workspaceSyncRecord(outcome.workspaceName);
+  }
   if (last.kind === 'applied') {
     record.threadId = last.threadId;
     record.created = last.created;
@@ -1232,7 +1274,16 @@ export async function runThreadCaptureApply(
     const sessionBeads =
       options.sessionBeads ??
       resolveThreadConfig({cwd: cwd ?? undefined, env}).sessionBeads;
-    outcome = await applyCapture({...options, cwd, sessionBeads});
+    const nameWorkspaces =
+      options.nameWorkspaces ??
+      (sessionBeads &&
+        resolveThreadConfig({cwd: cwd ?? undefined, env}).nameWorkspaces);
+    outcome = await applyCapture({
+      ...options,
+      cwd,
+      nameWorkspaces,
+      sessionBeads,
+    });
   } catch (error) {
     outcome = {error: probeErrorMessage(error), kind: 'threw'};
   }

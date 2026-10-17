@@ -1081,11 +1081,16 @@ describe('stageForCommit (real git index)', () => {
     const sb = track(createSandbox());
     const repo = churnedRepo(sb);
 
-    const result = stageForCommit(repo, {
-      component: 'critical-rules',
-      mode: 'component',
-    });
+    const result = stageForCommit(
+      repo,
+      {
+        component: 'critical-rules',
+        mode: 'component',
+      },
+      repo,
+    );
 
+    if (result.kind !== 'staged') throw new Error(result.detail);
     expect(result.staged).toEqual([
       '.claude/rules/justin-sdk/critical-rules.md',
     ]);
@@ -1108,8 +1113,9 @@ describe('stageForCommit (real git index)', () => {
     const sb = track(createSandbox());
     const repo = churnedRepo(sb);
 
-    const result = stageForCommit(repo, {mode: 'full'});
+    const result = stageForCommit(repo, {mode: 'full'}, repo);
 
+    if (result.kind !== 'staged') throw new Error(result.detail);
     expect(result.excluded).toEqual([]);
     expect(result.staged).toEqual([
       '.claude/rules/justin-sdk/critical-rules.md',
@@ -1127,11 +1133,16 @@ describe('stageForCommit (real git index)', () => {
     });
     write(repo, '.claude/rules/justin-sdk/critical-rules.md', 'NEW RULES\n');
 
-    const result = stageForCommit(repo, {
-      component: 'critical-rules',
-      mode: 'component',
-    });
+    const result = stageForCommit(
+      repo,
+      {
+        component: 'critical-rules',
+        mode: 'component',
+      },
+      repo,
+    );
 
+    if (result.kind !== 'staged') throw new Error(result.detail);
     expect(result.staged).toEqual([
       '.claude/rules/justin-sdk/critical-rules.md',
     ]);

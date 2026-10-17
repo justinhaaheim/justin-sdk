@@ -264,6 +264,15 @@ export function sessionIndexPath(env: EnvLike = process.env): string {
 }
 
 /**
+ * The record of every cmux workspace name the tool set (home-base-j8q3e.5
+ * D2): append-only JSON Lines, written BEFORE each rename. It is how the tool
+ * tells its own names from Justin's, and the recovery copy of his.
+ */
+export function workspaceNamesPath(env: EnvLike = process.env): string {
+  return join(threadsStateDir(env), 'workspace-names.jsonl');
+}
+
+/**
  * `thread nudge`'s once-per-turn marker (home-base-vzwbj.4.4): which turn —
  * keyed by the time of the session's last user message — it already spoke in.
  */

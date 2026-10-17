@@ -1819,35 +1819,139 @@ function inspectCommands(
 }
 
 /**
- * Stage the worktree for the sweep's one commit, honouring the component
- * contract (home-base-926v).
+ * husky's generated hooks directory: husky writes it on `prepare`, together
+ * with a `.gitignore` of `*` that keeps it out of git. A sweep commit never
+ * carries anything under it (home-base-j8q3e.1.11).
+ */
+export const HUSKY_GENERATED_DIR = '.husky/_/';
+
+/**
+ * Which of `paths` the PRIMARY checkout ignores (home-base-j8q3e.1.11).
+ * `null` means git could not answer. It never means "none".
  *
- * `git add -A` first, then UNSTAGE anything the component does not own, then
- * re-read the index — the returned list is what git actually holds, not what
- * the partition predicted, so a reset that silently failed cannot be reported
- * as a scoped commit.
+ * `git check-ignore` without `--no-index` never reports a path the primary
+ * TRACKS, so a payload's change to a tracked file is never caught here, even
+ * when that file matches an ignore pattern. Exit 1 is git's "none of them are
+ * ignored"; any other non-zero exit is a failure (rule 7).
+ */
+export function ignoredInPrimary(
+  primary: string,
+  paths: readonly string[],
+): string[] | null {
+  if (paths.length === 0) return [];
+  const child = spawnSync(
+    'git',
+    ['-C', primary, 'check-ignore', '--stdin', '-z'],
+    {
+      encoding: 'utf-8',
+      input: `${paths.join('\0')}\0`,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    },
+  );
+  if (child.error != null) return null;
+  if (child.status === 1) return [];
+  if (child.status !== 0) return null;
+  return child.stdout.split('\0').filter((path) => path !== '');
+}
+
+/**
+ * Split staged paths into what the sweep may commit and what is generated
+ * state that the primary checkout keeps out of git (home-base-j8q3e.1.11). Pure.
+ *
+ * WHY. In a repo that uses Git LFS and husky, git's hooks path is `.husky/_`.
+ * husky creates that directory on `prepare`, and bun never runs `prepare`, so a
+ * fresh sweep worktree has no `.husky/_` and no `.gitignore` inside it. The
+ * first git command that refreshes the index there runs git-lfs's filter, and
+ * git-lfs writes its four hooks into the missing directory (measured
+ * 2026-10-15, git-lfs 3.7.1: `git status` alone does it). `git add -A` then
+ * staged them. screenshot-app's sweep commit e9a87c9 carried them, and its
+ * fast-forward overwrote the primary's ignored husky stubs with git-lfs's.
+ *
+ * TWO LEGS. `.husky/_/` is excluded by name, because a primary that never ran
+ * `prepare` has no `.gitignore` there to ask. Any path the primary ignores is
+ * excluded too, which covers the same failure from any other tool that keeps
+ * its output out of git with an untracked `.gitignore`.
+ */
+export function partitionGeneratedPaths(
+  staged: readonly string[],
+  ignoredByPrimary: readonly string[],
+): {commit: string[]; generated: string[]} {
+  const ignored = new Set(ignoredByPrimary);
+  const isGenerated = (path: string): boolean =>
+    path.startsWith(HUSKY_GENERATED_DIR) || ignored.has(path);
+  return {
+    commit: staged.filter((path) => !isGenerated(path)),
+    generated: staged.filter(isGenerated),
+  };
+}
+
+export type StageResult =
+  | {
+      /** Staged, but outside the component's contract: un-staged. */
+      excluded: string[];
+      /** Generated state the primary keeps out of git: un-staged. */
+      generated: string[];
+      kind: 'staged';
+      /** What git's index holds now, read back after the resets. */
+      staged: string[];
+    }
+  | {detail: string; kind: 'unmeasurable'};
+
+/**
+ * Stage the worktree for the sweep's one commit, honouring the component
+ * contract (home-base-926v) and leaving out generated state
+ * (home-base-j8q3e.1.11).
+ *
+ * `git add -A` first, then UNSTAGE the generated paths and anything the
+ * component does not own, then re-read the index — the returned list is what
+ * git actually holds, not what the partition predicted, so a reset that
+ * silently failed cannot be reported as a scoped commit.
  *
  * Un-staged, never reverted: the file keeps its new content in the worktree, so
  * an operator inspecting a red run still sees exactly what `doctor --fix` did.
  * On a green run the worktree is removed and the change dies with it — which is
  * what already happens today, just without the commit.
+ *
+ * `unmeasurable` when the index or the primary's ignore rules cannot be read:
+ * "could not read what is staged" is not "nothing to commit" (rule 7), and
+ * committing without knowing what the primary ignores is the shape that pushed
+ * git-lfs's hooks.
  */
 export function stageForCommit(
   worktreePath: string,
   payload: SweepPayload,
-): {excluded: string[]; staged: string[]} {
-  const readStaged = (): string[] => {
+  primary: string,
+): StageResult {
+  const readStaged = (): string[] | null => {
     const out = git(worktreePath, ['diff', '--cached', '--name-only']);
-    return out == null ? [] : out.split('\n').filter((line) => line !== '');
+    return out == null ? null : out.split('\n').filter((line) => line !== '');
+  };
+  const unreadable: StageResult = {
+    detail: `\`git diff --cached\` failed in ${worktreePath}, so what the commit would hold is UNKNOWN`,
+    kind: 'unmeasurable',
   };
 
   git(worktreePath, ['add', '-A']);
-  const scope = partitionByComponentContract(payload, readStaged());
-  if (scope.outOfScope.length === 0)
-    return {excluded: [], staged: scope.inScope};
+  const added = readStaged();
+  if (added == null) return unreadable;
+  const ignored = ignoredInPrimary(primary, added);
+  if (ignored == null) {
+    return {
+      detail: `\`git check-ignore\` failed in ${primary}, so which staged files are generated state is UNKNOWN`,
+      kind: 'unmeasurable',
+    };
+  }
+  const {commit, generated} = partitionGeneratedPaths(added, ignored);
+  const scope = partitionByComponentContract(payload, commit);
+  const unstage = [...generated, ...scope.outOfScope];
+  if (unstage.length === 0) {
+    return {excluded: [], generated: [], kind: 'staged', staged: scope.inScope};
+  }
 
-  git(worktreePath, ['reset', '-q', '--', ...scope.outOfScope]);
-  return {excluded: scope.outOfScope, staged: readStaged()};
+  git(worktreePath, ['reset', '-q', '--', ...unstage]);
+  const staged = readStaged();
+  if (staged == null) return unreadable;
+  return {excluded: scope.outOfScope, generated, kind: 'staged', staged};
 }
 
 /** Is `component` registered in a repo's justin-sdk.config.json list? Pure. */
@@ -3350,12 +3454,23 @@ async function sweepRepoSteps(
   const blindNote = blindNotes.length > 0 ? ` [${blindNotes.join('; ')}]` : '';
 
   // --- Commit --------------------------------------------------------------
-  const stage = stageForCommit(worktreePath, context.payload);
+  const stage = stageForCommit(worktreePath, context.payload, repo);
+  if (stage.kind === 'unmeasurable') {
+    return fail('stage', stage.detail, null);
+  }
   let scopeNote = '';
   if (stage.excluded.length > 0) {
     scopeNote = ` [NOT committed, outside this component's contract: ${stage.excluded.join(', ')}]`;
     say(
       `  ${YELLOW}⚠${RESET} left uncommitted (outside the component's contract): ${stage.excluded.join(', ')}`,
+    );
+  }
+  // Named, not silent (j8q3e.1.11): a repo whose sweep worktree grows generated
+  // files every run should say so on its summary line.
+  if (stage.generated.length > 0) {
+    scopeNote += ` [NOT committed, generated state the primary keeps out of git: ${stage.generated.join(', ')}]`;
+    say(
+      `  ${DIM}left uncommitted (generated state the primary keeps out of git): ${stage.generated.join(', ')}${RESET}`,
     );
   }
 

@@ -41,6 +41,7 @@ import {
   THREAD_DEFAULT_ENFORCE,
   THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
   THREAD_DEFAULT_ENFORCE_MODE,
+  THREAD_DEFAULT_NAME_WORKSPACES,
   THREAD_DEFAULT_NUDGE,
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
@@ -242,6 +243,12 @@ const componentConfigSchema = z
           .describe(
             'WHAT an armed `thread stop-check` refuses (home-base-k0b8n.11, K12 — the refusal experiment). DEFAULT "reportShaped": only a final message shaped like a status report that was not recorded, which has never fired in practice. "workTurns" ALSO refuses, once per turn, a turn that ran a `git commit` or lasted at least enforceMinTurnMinutes and yields with no report archived since Justin’s last message. Needs `enforce: true`. Every decision, pass or block, is logged to ~/.local/state/justin-threads/stop-check.jsonl; `thread stop-check --stats` summarises it.',
           ),
+        nameWorkspaces: z
+          .boolean()
+          .optional()
+          .describe(
+            'CMUX WORKSPACE NAMES (home-base-j8q3e.5, built 2026-10-16). DEFAULT FALSE: off until Justin has read `thread workspace-name --all --dry-run` and turns it on. When true, a session whose bead has a real title (no `auto-title` label) names the cmux workspace holding its surface "[REPO] <session title>", on each prompt and Stop (the capture child) and after `thread request` / `thread title`. A name Justin set himself is kept after it in parentheses; every name the tool sets is first written to ~/.local/state/justin-threads/workspace-names.jsonl, and `thread workspace-name --restore` puts the old names back. Needs `sessionBeads`.',
+          ),
         nudge: z
           .boolean()
           .optional()
@@ -372,6 +379,17 @@ export const projectConfigSchema = z
         'The components this repo has, by their -setup names. OPTIONAL: absent means the `core` preset — every component applicable to this repo, computed at every read, so a repo tracks core as the registry grows. An EMPTY array is a different statement and is honoured as written: no components. Only `add` and `remove` write this key.',
       ),
     healthNotices: healthNoticesSchema.optional(),
+    // home-base-bomy5.7.1: the type only. The FORMAT (1–12 of A-Z 0-9 -) is
+    // checked by thread/config.ts, which names a bad value as a problem and
+    // falls back to the repo name. A format rule here would make a bad tag a
+    // schema violation, and a violating file contributes nothing at all: one
+    // typo in the tag would switch every thread knob in the repo off.
+    projectTag: z
+      .string()
+      .optional()
+      .describe(
+        'The short tag every session name of this repo starts with, written without brackets: "HOME" makes "[HOME] <title>" in thread status, the handoff block, the inbox, the threads TUI and the cmux workspace name (home-base-bomy5.7.1). 1 to 12 characters from A-Z, 0-9 and "-". Absent: the repo folder name, uppercased. A value that breaks the format is named as a config problem and the folder name is used. Read only from this repo’s own file, never the user file.',
+      ),
   })
   .describe('Per-repo justin-sdk config, committed at the project root.');
 
@@ -567,6 +585,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     enforce: THREAD_DEFAULT_ENFORCE,
     enforceMinTurnMinutes: THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
     enforceMode: THREAD_DEFAULT_ENFORCE_MODE,
+    nameWorkspaces: THREAD_DEFAULT_NAME_WORKSPACES,
     nudge: THREAD_DEFAULT_NUDGE,
     render: {emojiHeader: THREAD_DEFAULT_EMOJI_HEADER},
     repoDir: '~/Dev/threads',

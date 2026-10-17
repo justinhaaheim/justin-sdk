@@ -50,6 +50,15 @@ export const CMUX_SURFACE_LABEL_PREFIX = 'cmux-surface:';
  * UUID is 49 and keeps its name.
  */
 export const CMUX_WORKSPACE_LABEL_PREFIX = 'cmux-ws:';
+
+/** The value of the first label with this prefix, or null when none has it. */
+export function labelValue(
+  labels: readonly string[],
+  prefix: string,
+): string | null {
+  const label = labels.find((entry) => entry.startsWith(prefix));
+  return label == null ? null : label.slice(prefix.length);
+}
 export const SID_LABEL_PREFIX = 'sid:';
 /**
  * A request's stage labels are `stage:<name>`, the names from

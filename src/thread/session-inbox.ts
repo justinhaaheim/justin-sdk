@@ -71,6 +71,7 @@ import {
 } from '../cli-style';
 import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
+import {resolveRepoTag} from './config';
 import {readMessageLog} from './message-log';
 import {ageWords, tildeText} from './part-one';
 import {
@@ -90,6 +91,7 @@ import {
   loadSession,
   newestLogAt,
 } from './session-model';
+import {sessionDisplayName} from './session-name';
 import {deriveStatus, statusCounts, statusFactsOf} from './session-status';
 import {
   carriesTestDataMarker,
@@ -437,6 +439,11 @@ export async function readInbox(input: {
           age: ageOf(activity, now),
           detail,
           repo: sighting.repo,
+          repoTag: resolveRepoTag({
+            checkout: sighting.checkoutPath,
+            env,
+            repo: sighting.repo,
+          }),
           sessionId: indexed.sessionId,
           title,
         }),
@@ -696,7 +703,7 @@ function youAskedLines(asked: YouAsked): string[] {
 }
 
 function headingText(card: SessionCard): string {
-  return `${card.emoji} [${(card.repo ?? 'unknown repo').toUpperCase()}] ${tildeText(card.title)}`;
+  return `${card.emoji} ${tildeText(sessionDisplayName(card.repoTag, card.title))}`;
 }
 
 function markdownCard(card: SessionCard, showSection: boolean): string {
@@ -999,8 +1006,12 @@ function oldReportsJson(old: InboxRead['untracked']['oldReports']): unknown {
  * git facts, the counts, the status and the model with the message log
  * summarised. `summary` is the summary block's entries (Done and Archived
  * included, since a reader of the JSON filters for itself).
+ *
+ * Its return type is inferred and exported as `InboxJson` (F11,
+ * home-base-j8q3e.1.10): the threads TUI checks its parser against it, so a
+ * new card shape here fails that check instead of the TUI refusing to load.
  */
-export function inboxJson(read: InboxRead): unknown {
+export function inboxJson(read: InboxRead) {
   const sorted = [...read.rows].sort(byNewest);
   return {
     corrupt: read.corrupt,
@@ -1069,6 +1080,9 @@ export function inboxJson(read: InboxRead): unknown {
     },
   };
 }
+
+/** The record `thread inbox --json` prints (before JSON serialisation). */
+export type InboxJson = ReturnType<typeof inboxJson>;
 
 export interface ThreadInboxOptions {
   all: boolean;

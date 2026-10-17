@@ -128,6 +128,13 @@ export interface CardAction {
   text: string;
 }
 
+/** D3 rule 2's words; F10: helper agents in flight say so. */
+export function workingText(helpers: number): string {
+  return helpers > 0
+    ? "Nothing yet. Claude's helper agents are still working."
+    : 'Nothing yet. Claude is working.';
+}
+
 /** D4: stages after this one are LANDING stages; rule 7 looks only at them. */
 export const LANDED_AFTER_STAGE = 'tested';
 
@@ -297,7 +304,7 @@ export function deriveAction(input: ActionInput): ActionLine {
       };
     }
     case 'working':
-      return {command: null, rule: 2, text: 'Nothing yet. Claude is working.'};
+      return {command: null, rule: 2, text: workingText(status.helpers)};
     case 'handedOff':
       return successorSessionId != null
         ? {
@@ -519,6 +526,11 @@ export interface SessionCard {
   /** The cmux pane, when one is recorded. */
   pane: string | null;
   repo: string | null;
+  /**
+   * The tag the heading's "[TAG] <title>" starts with, resolved from this
+   * session's own checkout (home-base-bomy5.7.1). `repo` stays the folder name.
+   */
+  repoTag: string | null;
   resume: string;
   section: InboxSection;
   sectionEmoji: string;
@@ -736,6 +748,7 @@ export function buildCard(input: CardInput): SessionCard {
     optional: optionalLine(counts, model.sessionBeadId),
     pane: paneOf(model),
     repo: model.repo,
+    repoTag: model.repoTag,
     resume: `claude --resume ${model.sessionId}`,
     section,
     sectionEmoji: info.emoji,
@@ -751,6 +764,8 @@ export function unreadableCard(input: {
   age: string | null;
   detail: string;
   repo: string | null;
+  /** Resolved by the caller from the session's recorded checkout. */
+  repoTag: string | null;
   sessionId: string;
   title: string;
 }): SessionCard {
@@ -763,6 +778,7 @@ export function unreadableCard(input: {
     optional: null,
     pane: null,
     repo: input.repo,
+    repoTag: input.repoTag,
     resume: `claude --resume ${input.sessionId}`,
     section: 'checkByHand',
     sectionEmoji: info.emoji,

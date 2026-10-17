@@ -103,6 +103,13 @@ export const THREAD_DEFAULT_SESSION_BEADS = false;
 export const THREAD_DEFAULT_NUDGE = true;
 
 /**
+ * Whether a session names its cmux workspace "[REPO] <session title>"
+ * (home-base-j8q3e.5 D6). Off until Justin has read the preview and turns it
+ * on (feature-knobs rule).
+ */
+export const THREAD_DEFAULT_NAME_WORKSPACES = false;
+
+/**
  * How far a request can get, in order (status report v4, epic
  * home-base-vzwbj.4 D1 "STAGES"; built by home-base-vzwbj.4.3). `thread stage
  * <request> <name>` labels the request `stage:<name>`, and Part 1 shows the

@@ -27,6 +27,7 @@
  */
 
 import type {BeadsWorkspace, BrTarget} from '../beads/br';
+import type {CmuxRunner} from './cmux';
 import type {EnvLike} from './paths';
 import type {SessionResolution} from './session-bead';
 
@@ -50,6 +51,7 @@ import {
 import {linkContinuation} from './session-handoff';
 import {appendSessionSighting, readSessionSightings} from './session-index';
 import {sessionBeadsKnob, sessionIdFrom} from './session-select';
+import {workspaceNameFollowUp} from './workspace-name-session';
 
 export interface ThreadRequestOptions {
   /**
@@ -62,6 +64,8 @@ export interface ThreadRequestOptions {
   agentId?: string | null;
   /** `--bead <id>`: adopt this bead instead of creating one. */
   bead: string | null;
+  /** The cmux runner for the workspace-name follow-up; tests inject a fake. */
+  cmux?: CmuxRunner;
   /**
    * `--continues <old session bead id>` (home-base-vzwbj.4.4): link this
    * session to the one it picks up from — `continues:<old>` on this session's
@@ -121,6 +125,11 @@ export type ThreadRequestOutcome =
       /** Set when the title rule renamed the session bead. */
       renamedSession: {beadId: string; title: string} | null;
       title: string;
+      /**
+       * The workspace-name follow-up (home-base-j8q3e.5 D4 b): one soft line,
+       * or null. Never a followUpFailure and never an exit-code change.
+       */
+      workspaceNote: string | null;
     }
   | {agentId: string; kind: 'subagent'}
   | {id: string; kind: 'notFound'; searched: string[]}
@@ -529,6 +538,10 @@ export async function fileRequest(
       renamedSession = {beadId: usable.bead.id, title: filedTitle};
     }
   }
+  const workspaceNote =
+    renamedSession != null
+      ? await workspaceNameFollowUp({cwd, env, run: options.cmux, sessionId})
+      : null;
 
   // ---- --continues with a request: link after filing ----
   let continued: {oldBeadId: string; oldTitle: string} | null = null;
@@ -564,6 +577,7 @@ export async function fileRequest(
     mode,
     renamedSession,
     title: filedTitle,
+    workspaceNote,
   };
 }
 
@@ -589,6 +603,9 @@ export function describeRequestOutcome(outcome: ThreadRequestOutcome): {
         lines.push(
           `session ${outcome.renamedSession.beadId} renamed: "${outcome.renamedSession.title}"`,
         );
+      }
+      if (outcome.workspaceNote != null) {
+        lines.push(`  ${outcome.workspaceNote}`);
       }
       if (outcome.continued != null) {
         lines.push(
@@ -659,6 +676,8 @@ export async function runThreadRequest(
 
 export interface ThreadTitleOptions {
   agentId?: string | null;
+  /** The cmux runner for the workspace-name follow-up; tests inject a fake. */
+  cmux?: CmuxRunner;
   cwd?: string;
   env?: EnvLike;
   sessionId: string | null;
@@ -667,7 +686,13 @@ export interface ThreadTitleOptions {
 
 export type ThreadTitleOutcome =
   | {agentId: string; kind: 'subagent'}
-  | {beadId: string; kind: 'renamed'; title: string}
+  | {
+      beadId: string;
+      kind: 'renamed';
+      title: string;
+      /** The workspace-name follow-up (D4 b); never changes the exit code. */
+      workspaceNote: string | null;
+    }
   | {checkoutPath: string; kind: 'checkoutMissing'}
   | {kind: 'disabled'; reason: string}
   | {kind: 'failed'; reason: string}
@@ -706,7 +731,13 @@ export async function renameSession(
       reason: `br update failed, the title is unchanged: ${describeBrFailed(renamed)}`,
     };
   }
-  return {beadId: found.bead.id, kind: 'renamed', title};
+  const workspaceNote = await workspaceNameFollowUp({
+    cwd,
+    env,
+    run: options.cmux,
+    sessionId: session.id,
+  });
+  return {beadId: found.bead.id, kind: 'renamed', title, workspaceNote};
 }
 
 export function describeTitleOutcome(outcome: ThreadTitleOutcome): {
@@ -717,7 +748,12 @@ export function describeTitleOutcome(outcome: ThreadTitleOutcome): {
     case 'renamed':
       return {
         exitCode: 0,
-        lines: [`session ${outcome.beadId} · ${outcome.title}`],
+        lines: [
+          `session ${outcome.beadId} · ${outcome.title}`,
+          ...(outcome.workspaceNote != null
+            ? [`  ${outcome.workspaceNote}`]
+            : []),
+        ],
       };
     case 'checkoutMissing':
       return {

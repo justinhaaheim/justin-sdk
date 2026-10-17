@@ -83,6 +83,7 @@ import {ARCHIVED_PREFIX, DONE_PREFIX} from './ask-format';
 import {renderAsks, sortAsks} from './ask-render';
 import {cutOnWord} from './session-bead';
 import {firstUserLine, newestLogAt, userLines} from './session-model';
+import {sessionDisplayName} from './session-name';
 import {isOpen, openQuestions, stageReached} from './session-status';
 
 /** The legacy report's rule (render-markdown.ts RULE_STOP), kept identical. */
@@ -502,7 +503,6 @@ export function partOneView(input: PartOneInput): PartOneView {
   const {beads, git, transcript} = model;
 
   // ---- Session / Your first message / Started / Last activity ----
-  const repoTag = `[${(model.repo ?? 'unknown repo').toUpperCase()}]`;
   // An unreadable export is named once, under Requests; here it is pointed at.
   const title =
     beads.session != null
@@ -781,7 +781,10 @@ export function partOneView(input: PartOneInput): PartOneView {
     questions: openQuestions(model),
     requests,
     resume: tilded(resume),
-    session: field('Session', tildeText(`${repoTag} ${title}`)),
+    session: field(
+      'Session',
+      tildeText(sessionDisplayName(model.repoTag, title)),
+    ),
     state: tilded(state),
     times: tilded(times),
   };

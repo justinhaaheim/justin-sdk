@@ -780,6 +780,134 @@ export function readLastRecordTimestamp(
   }
 }
 
+/** The tool a helper agent hands its report back with; its result ends the helper's transcript. */
+export const HANDBACK_TOOL = 'SubagentHandback';
+
+export type HelperTailRead =
+  | {at: string | null; inFlight: boolean; kind: 'found'}
+  | {kind: 'failed'; reason: string}
+  | {kind: 'none'; reason: string};
+
+function contentBlocks(record: TranscriptRecord): Record<string, unknown>[] {
+  const content = record.message?.content;
+  if (!Array.isArray(content)) return [];
+  return content.filter(
+    (block): block is Record<string, unknown> =>
+      block != null && typeof block === 'object',
+  );
+}
+
+/**
+ * A subagent (helper agent) transcript's tail, in ONE backwards read
+ * (home-base-j8q3e.1.10 F10): the newest conversation record's timestamp,
+ * as `readLastRecordTimestamp(path, {sidechain: true})` gives it, and whether
+ * the helper is still IN FLIGHT. Measured on the conductor session's 14
+ * helpers (2026-10-15): all 12 finished ones, players and general-purpose
+ * alike, end with a user record whose tool_result answers SubagentHandback;
+ * the 2 running ones end with an assistant tool_use (Bash). So the last
+ * conversation record says it:
+ *
+ *   in flight  an assistant record with a tool_use other than SubagentHandback;
+ *              an assistant record of thinking only; a user record that does
+ *              not answer SubagentHandback (a tool result, or the prompt)
+ *   finished   an assistant record handing back (its result not yet written),
+ *              or ending in text with no tool_use; the handback's result
+ *
+ * A tool_result's tool is looked up by id in the records before it; the
+ * window doubles until that id is found or the whole file has been read (an
+ * id found nowhere answers no handback).
+ */
+export function readHelperTail(path: string): HelperTailRead {
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch (error) {
+    return {
+      kind: 'failed',
+      reason: `could not open ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  try {
+    const size = statSync(path).size;
+    for (let window = LAST_RECORD_WINDOW_BYTES; ; window *= 2) {
+      const length = Math.min(size, window);
+      const start = size - length;
+      const buffer = Buffer.alloc(length);
+      let read = 0;
+      while (read < length) {
+        const bytes = readSync(fd, buffer, read, length - read, start + read);
+        if (bytes === 0) break;
+        read += bytes;
+      }
+      let text = buffer.toString('utf8', 0, read);
+      if (start > 0) {
+        const newline = text.indexOf('\n');
+        text = newline === -1 ? '' : text.slice(newline + 1);
+      }
+      const records: TranscriptRecord[] = [];
+      for (const line of text.split('\n')) {
+        if (line.trim() === '') continue;
+        try {
+          const record = JSON.parse(line) as TranscriptRecord;
+          if (record.type === 'user' || record.type === 'assistant') {
+            records.push(record);
+          }
+        } catch {
+          // A partial last line on a live transcript.
+        }
+      }
+      const last = records.at(-1);
+      if (last == null) {
+        if (start === 0) {
+          return {
+            kind: 'none',
+            reason: `no user or assistant record in ${path}`,
+          };
+        }
+        continue;
+      }
+      const at =
+        records
+          .map((record) => asString(record.timestamp))
+          .findLast((value) => value != null) ?? null;
+      if (at == null && start > 0) continue;
+      const blocks = contentBlocks(last);
+      if (last.type === 'assistant') {
+        const tools = blocks
+          .filter((block) => block.type === 'tool_use')
+          .map((block) => block.name);
+        const thinkingOnly =
+          blocks.length > 0 &&
+          blocks.every((block) => block.type === 'thinking');
+        const inFlight =
+          tools.some((name) => name !== HANDBACK_TOOL) || thinkingOnly;
+        return {at, inFlight, kind: 'found'};
+      }
+      const answered = blocks
+        .filter((block) => block.type === 'tool_result')
+        .map((block) => block.tool_use_id);
+      if (answered.length === 0) return {at, inFlight: true, kind: 'found'};
+      const names = new Map<unknown, unknown>();
+      for (const record of records) {
+        for (const block of contentBlocks(record)) {
+          if (block.type === 'tool_use') names.set(block.id, block.name);
+        }
+      }
+      const unresolved = answered.some((id) => !names.has(id));
+      if (unresolved && start > 0) continue;
+      const handedBack = answered.some((id) => names.get(id) === HANDBACK_TOOL);
+      return {at, inFlight: !handedBack, kind: 'found'};
+    }
+  } catch (error) {
+    return {
+      kind: 'failed',
+      reason: `could not read ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  } finally {
+    closeSync(fd);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Every turn (K10 e)
 // ---------------------------------------------------------------------------

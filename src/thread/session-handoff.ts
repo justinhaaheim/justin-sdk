@@ -45,6 +45,7 @@ import {
 import {readSessionIndex, readSessionSightings} from './session-index';
 import {appendNote} from './session-marks';
 import {loadSession} from './session-model';
+import {sessionDisplayName} from './session-name';
 import {selectSession, sessionBeadsKnob} from './session-select';
 import {
   deriveStatus,
@@ -256,9 +257,8 @@ export async function handoffBlock(input: {
     now: input.now,
   });
   const title = model.beads.session?.title ?? '(title unknown)';
-  const repo = `[${(model.repo ?? 'unknown repo').toUpperCase()}]`;
   const fields = [
-    `- **Session:** ${repo} ${title} (${input.sessionBeadId})`,
+    `- **Session:** ${sessionDisplayName(model.repoTag, title)} (${input.sessionBeadId})`,
     `- **Status:** ${statusWords(status)}`,
     `- **Handed off:** ${absoluteWhen(input.now, input.timeZone)}`,
     ...(input.note == null ? [] : [`- **Note:** ${input.note}`]),

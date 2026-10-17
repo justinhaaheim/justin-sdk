@@ -543,6 +543,7 @@ describe('deriveStatus follows epic D2 exactly', () => {
     commits: counted(0),
     contextTokens: 100_000,
     handedOff: false,
+    helpersInFlight: [],
     lastMessageRole: 'assistant',
     lastRecordAt: at('11:00'),
     merged: measured<MergeState>('merged'),
@@ -1267,7 +1268,11 @@ describe('F6: last activity reads the subagent transcripts too', () => {
     );
     const load = await report(w, false);
     expect(load.model.transcript.lastRecordAt).toEqual(measured(at('11:58')));
-    expect(load.status).toEqual({kind: 'working', lastRecordAt: at('11:58')});
+    expect(load.status).toEqual({
+      helpers: 0,
+      kind: 'working',
+      lastRecordAt: at('11:58'),
+    });
     expect(partOne(load, false)).toContain(
       '**Last activity:** Tue 2030-01-01 11:58 am',
     );

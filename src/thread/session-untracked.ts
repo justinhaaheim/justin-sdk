@@ -41,7 +41,12 @@ import type {
   CardGitInput,
   SessionCard,
 } from './session-card';
-import type {CheckoutGit, LoadCache, Measured} from './session-model';
+import type {
+  CheckoutGit,
+  HelperInFlight,
+  LoadCache,
+  Measured,
+} from './session-model';
 
 import {existsSync, readFileSync} from 'fs';
 import {homedir} from 'os';
@@ -54,13 +59,13 @@ import {
   resolveRepoRoot,
 } from '../repo-status/sessions';
 import {discoverSessionFiles, scanSessions} from './backfill';
-import {resolveReportWrapUpAt} from './config';
+import {resolveReportWrapUpAt, resolveRepoTag} from './config';
 import {readMessageLog} from './message-log';
 import {readAskPriority} from './metadata';
 import {ageWords, FIRST_MESSAGE_CUT, firstLineOf, tildeText} from './part-one';
 import {threadsRepoDir} from './paths';
 import {ASK_PRIORITY_BLOCKING} from './schema';
-import {gitFacts, landItText, sectionInfo} from './session-card';
+import {gitFacts, landItText, sectionInfo, workingText} from './session-card';
 import {
   firstUserLine,
   lastAssistantLine,
@@ -70,7 +75,8 @@ import {
   unmeasured,
   userLines,
 } from './session-model';
-import {WORKING_WINDOW_MS} from './session-status';
+import {sessionDisplayName} from './session-name';
+import {recentHelpers, WORKING_WINDOW_MS} from './session-status';
 
 /** D6: "every Claude Code session ... under ~/Dev". */
 export function defaultDevRoot(): string {
@@ -202,6 +208,11 @@ export interface UntrackedSession {
   firstMessageAt: string | null;
   git: CardGitInput;
   /** The newest record of the transcript and its subagents. */
+  /**
+   * F10 (home-base-j8q3e.1.10): its helper agents still in flight, read with
+   * `lastActivityAt` (unmeasured exactly when it is).
+   */
+  helpers: Measured<HelperInFlight[]>;
   lastActivityAt: Measured<string>;
   /** His last message, one line; null = none captured. */
   lastMessage: string | null;
@@ -215,6 +226,11 @@ export interface UntrackedSession {
   repo: string;
   repoResolvedBy: 'git' | 'path';
   repoRoot: string;
+  /**
+   * The tag its name starts with, from its OWN checkout's `projectTag`, else
+   * `repo` uppercased (home-base-bomy5.7.1).
+   */
+  repoTag: string;
   resume: string;
   /** The main transcript's last record, from the scan: the order's fallback. */
   scannedLastAt: string;
@@ -287,6 +303,14 @@ export function untrackedVerdict(
   } else {
     missing.push(session.lastActivityAt.reason);
   }
+  // F10: a helper agent in flight keeps it working (same rule as deriveStatus).
+  const helpers = session.helpers.ok
+    ? recentHelpers(
+        session.helpers.value.map((helper) => helper.lastRecordAt),
+        now,
+      ).length
+    : 0;
+  if (helpers > 0) working = true;
   if (working) evidence.push('working');
 
   // v4 D2's rule: out of context only when both numbers are known (an
@@ -324,7 +348,7 @@ export function untrackedVerdict(
       text: `Check it by hand: ${tildeText(unique.join('; '))}`,
     };
   } else if (working) {
-    action = {command: null, rule: 2, text: 'Nothing yet. Claude is working.'};
+    action = {command: null, rule: 2, text: workingText(helpers)};
   } else if (outOfContext) {
     action = {
       command: session.resume,
@@ -434,6 +458,7 @@ export function untrackedCard(
     optional: null,
     pane: null,
     repo: session.repo,
+    repoTag: session.repoTag,
     resume: session.resume,
     section: 'notTracked',
     sectionEmoji: info.emoji,
@@ -469,7 +494,7 @@ export function untrackedLine(
       : card.age == null
         ? ''
         : ` (${card.age})`;
-  return `❔ [${(card.repo ?? 'unknown repo').toUpperCase()}] ${tildeText(message)}${when} · nothing open found`;
+  return `❔ ${sessionDisplayName(card.repoTag, tildeText(message))}${when} · nothing open found`;
 }
 
 /**
@@ -626,6 +651,13 @@ export async function readUntracked(input: {
         }
         wrapUpAt = wrapUpByRoot.get(projectRoot) ?? null;
       }
+      // The session's own checkout decides its tag (home-base-bomy5.7.1);
+      // a checkout that is gone names it after the repo folder.
+      const repoTag = resolveRepoTag({
+        checkout: existsSync(configDir) ? configDir : null,
+        env,
+        repo: basename(repo.root),
+      });
       const transcript = measureTranscriptAt(session.transcriptPath);
       const {messages} = session;
 
@@ -659,6 +691,7 @@ export async function readUntracked(input: {
           ? (first.value?.at ?? null)
           : messages.firstUserMessageAt,
         git: checkoutGitInput(shared),
+        helpers: transcript.helpers,
         lastActivityAt: transcript.lastRecordAt,
         lastMessage: fromLog
           ? oneLine(users.ok ? (users.value.at(-1)?.text ?? null) : null)
@@ -671,6 +704,7 @@ export async function readUntracked(input: {
         repo: basename(repo.root),
         repoResolvedBy: repo.by,
         repoRoot: repo.root,
+        repoTag,
         resume:
           messages.resumeCommand ?? `claude --resume ${session.sessionId}`,
         scannedLastAt: session.lastTimestamp,

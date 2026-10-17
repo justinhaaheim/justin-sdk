@@ -58,6 +58,7 @@ function session(
         upstream: 'origin/main',
       }),
     },
+    helpers: measured([]),
     lastActivityAt: measured(day(n)),
     lastMessage: null,
     lastReply: 'Ran the daily loop.',
@@ -66,6 +67,7 @@ function session(
     repo: 'life',
     repoResolvedBy: 'git',
     repoRoot: '/dev/life',
+    repoTag: 'LIFE',
     resume: `claude --resume s-${n}`,
     scannedLastAt: day(n),
     sessionId: `s-${n}`,
@@ -210,7 +212,7 @@ describe('F6: repeated one-liners fold into one line', () => {
       }),
     ),
     // Same message in another repo: its own line.
-    row(session(3, {repo: 'home-base'})),
+    row(session(3, {repo: 'home-base', repoTag: 'HOME-BASE'})),
   ];
 
   test('the newest of each group stands for all of it, across sessions between them', () => {

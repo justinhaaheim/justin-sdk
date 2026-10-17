@@ -549,7 +549,7 @@ describe('G2: thread status says what to do with each open request when the yiel
   test('AC5: the verdict line carries the consequence for ⚠️ and for no other verdict', () => {
     const statuses: SessionStatus[] = [
       {kind: 'waiting', openP0: 1},
-      {kind: 'working', lastRecordAt: at('11:59')},
+      {helpers: 0, kind: 'working', lastRecordAt: at('11:59')},
       {kind: 'handedOff', successor: null},
       {contextTokens: 900_000, kind: 'outOfContext', wrapUpAt: 800_000},
       {by: 'requests', kind: 'done', reason: null},

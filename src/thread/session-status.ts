@@ -5,7 +5,10 @@
  * from the session model by one pure function, in the epic's precedence:
  *
  *   1. 🛑 Waiting on you   an open P0 question
- *   2. 🏃 Working          the transcript's last record is under 3 minutes old
+ *   2. 🏃 Working          a helper agent is in flight with its last record
+ *                          under 15 minutes old (F10, home-base-j8q3e.1.10;
+ *                          counted "if you stop now" too); or the transcript's
+ *                          last record is under 3 minutes old
  *   3. 🤝 Handed off       the session bead carries `handed-off`
  *   4. 🧯 Out of context   context tokens at or above usage-check's wrapUpAt
  *   5. ✅ Done             Justin closed the session (`done: Justin…`, and —
@@ -50,6 +53,28 @@ import {lastLogLine, measured, unmeasured} from './session-model';
 export const WORKING_WINDOW_MS = 3 * 60_000;
 
 /**
+ * F10 (home-base-j8q3e.1.10): a helper agent in flight keeps its session
+ * working while its newest record is younger than this. Longer than Bash's
+ * 10-minute cap, so one long tool call does not drop it; the cost is that a
+ * KILLED helper keeps the session working for up to this long.
+ */
+export const HELPER_WINDOW_MS = 15 * 60_000;
+
+/** F10: the in-flight helpers whose newest record is inside the helper window. */
+export function recentHelpers(
+  helpersInFlight: readonly (string | null)[] | null,
+  now: Date,
+): string[] {
+  if (helpersInFlight == null) return [];
+  return helpersInFlight.filter((at): at is string => {
+    const ms = at == null ? null : parseInstant(at);
+    if (ms == null) return false;
+    const age = now.getTime() - ms;
+    return age >= 0 && age < HELPER_WINDOW_MS;
+  });
+}
+
+/**
  * The session's commits as `deriveStatus` reads them (home-base-vzwbj.4.9 R3):
  * counted; PARTIAL — some commit evidence matched no commit in the checkout
  * (`git -C ../other commit`, a script's commit elsewhere), so `matched` is a
@@ -68,6 +93,12 @@ export interface StatusFacts {
   /** Context tokens at the last record; null when not measured. */
   contextTokens: number | null;
   handedOff: boolean;
+  /**
+   * F10 (home-base-j8q3e.1.10): the newest record of each helper agent still
+   * in flight (null = that helper's records carry no time); null when the
+   * helpers could not be measured, which never claims working (rule 7).
+   */
+  helpersInFlight: (string | null)[] | null;
   /** Whose line ends the message log; null when the log is empty or unread. */
   lastMessageRole: 'assistant' | 'user' | null;
   /** The transcript's last record, ISO; null when not measured. */
@@ -105,7 +136,8 @@ export type SessionStatus =
   | {kind: 'openWork'}
   | {kind: 'unknown'; reasons: string[]}
   | {kind: 'waiting'; openP0: number}
-  | {kind: 'working'; lastRecordAt: string};
+  /** `helpers`: helper agents in flight (F10); 0 = Claude's own records are recent. */
+  | {helpers: number; kind: 'working'; lastRecordAt: string};
 
 export interface DeriveOptions {
   /** The verdict "if you stop now": no 🏃, and Claude's yield is the last line. */
@@ -127,12 +159,25 @@ export function deriveStatus(
 ): SessionStatus {
   if (facts.openP0 > 0) return {kind: 'waiting', openP0: facts.openP0};
 
+  // F10: helpers in flight count even "if you stop now" (asIfYielded): a
+  // session waiting on its own helpers is not a reflexive yield, and Part 1
+  // and the inbox must not disagree (conductor decision, 2026-10-15).
+  const helpers = recentHelpers(facts.helpersInFlight, options.now);
+  if (helpers.length > 0) {
+    return {
+      helpers: helpers.length,
+      kind: 'working',
+      lastRecordAt:
+        facts.lastRecordAt ?? helpers.reduce((a, b) => (a > b ? a : b)),
+    };
+  }
+
   if (!options.asIfYielded && facts.lastRecordAt != null) {
     const at = parseInstant(facts.lastRecordAt);
     if (at != null) {
       const age = options.now.getTime() - at;
       if (age >= 0 && age < WORKING_WINDOW_MS) {
-        return {kind: 'working', lastRecordAt: facts.lastRecordAt};
+        return {helpers: 0, kind: 'working', lastRecordAt: facts.lastRecordAt};
       }
     }
   }
@@ -245,6 +290,9 @@ export function statusFactsOf(model: SessionModel): StatusFacts {
       ? transcript.contextTokens.value
       : null,
     handedOff: session?.labels.includes(HANDED_OFF_LABEL) === true,
+    helpersInFlight: transcript.helpers.ok
+      ? transcript.helpers.value.map((helper) => helper.lastRecordAt)
+      : null,
     lastMessageRole: last.ok && last.value != null ? last.value.role : null,
     lastRecordAt: transcript.lastRecordAt.ok
       ? transcript.lastRecordAt.value

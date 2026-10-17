@@ -163,6 +163,7 @@ function fixture(over: {
       path: '/state/log.jsonl',
     },
     repo: 'app',
+    repoTag: 'APP',
     sessionBeadId: 't-1',
     sessionId: SID,
     sightings: [],
@@ -170,6 +171,7 @@ function fixture(over: {
     startedAt: measured('2030-01-01T09:00:00.000Z'),
     transcript: {
       contextTokens: measured(50_000),
+      helpers: measured([]),
       lastRecordAt: measured('2030-01-01T09:30:00.000Z'),
       path: '/projects/x.jsonl',
       ...over.transcript,
@@ -225,6 +227,32 @@ describe('D3 rule 1: an open P0 question', () => {
 });
 
 describe('D3 rule 2: working', () => {
+  // F10 (home-base-j8q3e.1.10): Claude's own last record is an hour old (a
+  // long tool call inside a helper writes nothing), but a helper is in flight
+  // with a record 10 minutes old.
+  test('a helper in flight: "Nothing yet. Claude\'s helper agents are still working."', () => {
+    const result = action(
+      fixture({
+        requests: [open('t-2', 'Refactor the parser')],
+        transcript: {
+          helpers: measured([
+            {
+              agentFile: '/projects/x/subagents/agent-a1.jsonl',
+              lastRecordAt: '2030-01-01T11:50:00.000Z',
+            },
+          ]),
+          lastRecordAt: measured('2030-01-01T11:00:00.000Z'),
+        },
+      }),
+    );
+    expect(result).toEqual({
+      command: null,
+      kind: 'working',
+      rule: 2,
+      text: "Nothing yet. Claude's helper agents are still working.",
+    });
+  });
+
   test('a record under 3 minutes old: "Nothing yet. Claude is working."', () => {
     const result = action(
       fixture({

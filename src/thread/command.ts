@@ -708,6 +708,54 @@ export const threadCommand: CommandModule = {
         },
       )
       .command(
+        'workspace-name',
+        'Name this session’s cmux workspace "[REPO] <session title>", keeping a name Justin set in parentheses (home-base-j8q3e.5). Every name it sets is written first to workspace-names.jsonl under the threads state dir. Needs componentConfig.thread.nameWorkspaces, except --dry-run. Exit 0 done or nothing to do · 1 not set (the reason is printed) · 2 usage.',
+        (yy) =>
+          yy
+            .option('all', {
+              default: false,
+              describe:
+                'With --dry-run: the preview over EVERY open cmux workspace (its name now, what it would become, the rule, the session that would name it). Read-only. Refused without --dry-run.',
+              type: 'boolean' as const,
+            })
+            .option('dry-run', {
+              default: false,
+              describe:
+                'Print the name it would set and which rule decided; read cmux, write nothing. Works with the knob off.',
+              type: 'boolean' as const,
+            })
+            .option('restore', {
+              default: false,
+              describe:
+                'Put back every name the tool replaced, for each recorded workspace whose name is still the tool’s; one renamed since is left alone and listed. With --dry-run it lists what it would do.',
+              type: 'boolean' as const,
+            })
+            .option('session', {
+              describe:
+                'Session id or session bead id (default: $CLAUDE_CODE_SESSION_ID)',
+              type: 'string' as const,
+            })
+            .option('workspace', {
+              describe:
+                'Workspace uuid to name (or, with --restore, the only one to restore) instead of the one holding the session’s surface. Never defaults to the caller’s.',
+              type: 'string' as const,
+            }),
+        async (argv) => {
+          const {runThreadWorkspaceName} = await import(
+            './workspace-name-session'
+          );
+          process.exit(
+            await runThreadWorkspaceName({
+              all: argv.all,
+              dryRun: argv['dry-run'],
+              restore: argv.restore,
+              session: argv.session ?? null,
+              workspace: argv.workspace ?? null,
+            }),
+          );
+        },
+      )
+      .command(
         'ask <question..>',
         'File a question for Justin as a bead (type question, labels ask + sid:<id>) under this session’s bead, the moment you need it — it does not block. --to links it to a request. P0 = the session stops without it (no --default); P1–P3 need --default; P4 = FYI. Needs componentConfig.thread.sessionBeads. Exit 0 filed · 1 no session/br failed · 2 the ask is invalid.',
         (yy) =>
@@ -1063,7 +1111,7 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'inbox [threadId]',
-        'With componentConfig.thread.sessionBeads ON: your dashboard — every session you started (last 30 days) as one card each, newest activity first, after a summary that counts the sessions per section (Needs you, To land, Stopped with work open, Check by hand, Working, Handed off or out of context, Answered, Done with questions for you, Not tracked; --all adds Done and Archived). Each card says what you asked for, where it stands (status and the git facts that matter), the ONE thing you need to do, any optional questions and how to resume it. Not tracked: every other Claude Code session under ~/Dev in the window (no session bead; found the way `repo-status repos` finds them), shown from facts only — a full card when something is open (a branch not merged, uncommitted files, working now, out of context, a blocking question in its old report) or could not be read, else one line saying nothing open was found. --by-status groups the cards by section, --by-repo by repo. A session that cannot be read is a ❔ card, never dropped. Knob OFF (legacy): what Justin answered or skipped since the last report, each ask restated in full. Marks nothing.',
+        'With componentConfig.thread.sessionBeads ON: your dashboard — every session you started (last 30 days) as one card each, newest activity first, after a summary that counts the sessions per section (Needs you, To land, Stopped with work open, Check by hand, Working, Handed off or out of context, Answered, Done with questions for you, Not tracked; --all adds Done and Archived). Each card says what you asked for, where it stands (status and the git facts that matter), the ONE thing you need to do, any optional questions and how to resume it. Not tracked: every other Claude Code session under ~/Dev in the window (no session bead; found the way `repo-status repos` finds them), shown from facts only — a full card when something is open (a branch not merged, uncommitted files, working now, out of context, a blocking question in its old report) or could not be read, else one line saying nothing open was found. Working means its last record is under 3 minutes old, or one of its helper agents (subagents) is still in flight with a record under 15 minutes old, so a helper inside one long tool call keeps it Working; a helper that was killed keeps it Working for up to 15 minutes. --by-status groups the cards by section, --by-repo by repo. A session that cannot be read is a ❔ card, never dropped. Knob OFF (legacy): what Justin answered or skipped since the last report, each ask restated in full. Marks nothing.',
         (yy) =>
           yy
             .positional('threadId', {
@@ -1152,13 +1200,13 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'board',
-        'Every live thread: what it was, how far it got, why it stopped, and what it needs from you. Drains the spool first. Grouped by repo; --recent for a flat newest-first list; --open-asks for everything waiting on you.',
+        'Drains the report spool, prints the threads repo’s uncommitted and unpushed backlog, and points to the session dashboard: `threads` (full screen) or `thread inbox` (text). The old per-thread list of September reports is still here under a flag: --recent for newest first, --all for every thread grouped by repo, --open-asks for everything waiting on you, --json for the data.',
         (yy) =>
           yy
             .option('all', {
               default: false,
               describe:
-                'Show the folded-away threads too — by default a thread another session took over, and a session `thread backfill` recorded, are both hidden (unless they still have open asks)',
+                'The old per-thread list grouped by repo, with the folded-away threads too — otherwise a thread another session took over, and a session `thread backfill` recorded, are both hidden (unless they still have open asks). With --recent, the flat list with them included.',
               type: 'boolean' as const,
             })
             .option('json', {

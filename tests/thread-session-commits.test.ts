@@ -283,6 +283,7 @@ describe('R3: the three inputs that used to read as "0 commits" are partial, nev
     beadProblems: [],
     contextTokens: 1000,
     handedOff: false,
+    helpersInFlight: [],
     lastMessageRole: 'assistant' as const,
     lastRecordAt: null,
     merged: measured<'isDefault' | 'merged' | 'notMerged'>('isDefault'),

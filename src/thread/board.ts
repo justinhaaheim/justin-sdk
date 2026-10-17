@@ -615,6 +615,53 @@ export function backfilledHiddenLine(hidden: number): string | null {
   return `${hidden} backfilled session${hidden === 1 ? '' : 's'} hidden (--all shows them)`;
 }
 
+/**
+ * BARE `thread board` POINTS TO THE SESSION DASHBOARD (home-base-j8q3e.1.6,
+ * conductor's option a, 2026-10-15). Two dashboards was the problem: this one
+ * reads the September report store, and `threads` / `thread inbox` read the
+ * session beads. So the bare command stops drawing its own list and says where
+ * the dashboard is.
+ *
+ * Only the bare command. `--recent`, `--open-asks`, `--all` and `--json` keep
+ * their output exactly, because SDK messages and skills still send people to
+ * them (`thread board --recent` in prepare.ts and report.ts). And the bare
+ * command keeps its two jobs that are not a list: it drains the spool (nothing
+ * else does) and it prints the threads repo's commit and push backlog, which the
+ * SDK's own warnings tell you to read here.
+ */
+export function isPointerView(options: BoardOptions): boolean {
+  return (
+    (options.view ?? 'repo') === 'repo' &&
+    options.json !== true &&
+    options.includeBackfilled !== true &&
+    options.includeContinued !== true
+  );
+}
+
+/** What bare `thread board` prints where the per-thread list used to be. */
+export function renderBoardPointer(style: OutputStyle = PLAIN_STYLE): string {
+  const {color} = style;
+  const command = (text: string): string =>
+    paint(padEndWidth(text, 34), ['cyan'], color);
+  const header = sectionHeader('Your session dashboard has moved', {
+    color,
+    emoji: '🧭',
+  });
+  const where = [
+    `${pad(BODY_COLUMN)}${command('threads')}full screen`,
+    `${pad(BODY_COLUMN)}${command(sdkRun('thread inbox'))}the same, as text`,
+  ].join('\n');
+  const old = wrapHanging(
+    paint(
+      'The old per-thread list is still here: --recent (newest first), --all (grouped by repo, nothing hidden), --open-asks (everything waiting on you), --json (the data).',
+      ['dim'],
+      color,
+    ),
+    {hang: BODY_COLUMN, indent: BODY_COLUMN, width: style.width},
+  );
+  return `\n${spacedList([header, where, old])}`;
+}
+
 export async function runThreadBoard(
   options: BoardOptions = {},
 ): Promise<number> {
@@ -622,6 +669,29 @@ export async function runThreadBoard(
   const now = options.now ?? new Date();
   const view = options.view ?? 'repo';
   const ctx: BdContext = bdContext(env);
+  const style = options.style ?? outputStyle();
+  // Everything after the rows is a footnote: at the header column, a blank
+  // line before each, wrapped with a hang so a long command stays readable.
+  const footnote = (line: string, styles: StyleName[]): void => {
+    console.log('');
+    console.log(
+      wrapHanging(paint(line, styles, style.color), {
+        hang: BODY_COLUMN,
+        indent: HEADER_COLUMN,
+        width: style.width,
+      }),
+    );
+  };
+  // Yellow: each of these means a write this tool should have made did not
+  // happen, and each carries the command that fixes it. Both lines, not one or
+  // the other: a repo can be dirty AND behind on pushes, and they are two
+  // different things to fix.
+  const printBacklog = (): void => {
+    const uncommitted = uncommittedLine(env);
+    if (uncommitted != null) footnote(uncommitted, ['yellow']);
+    const unpushed = unpushedLine(env);
+    if (unpushed != null) footnote(unpushed, ['yellow']);
+  };
 
   // 1. The spool, before anything is shown (D5).
   const drained = await drainSpool({apply: options.apply, ctx, env});
@@ -656,7 +726,16 @@ export async function runThreadBoard(
     if (commitLine != null) console.error(commitLine);
   }
 
-  // 2. Exactly two bd calls. Everything below is client-side.
+  // 2. Bare `thread board`: the pointer instead of the list, then the backlog.
+  // No bd listing, so nothing below can fail it — the drain above is already
+  // printed, and a bd that cannot be read is not this command's news any more.
+  if (isPointerView(options)) {
+    console.log(renderBoardPointer(style));
+    printBacklog();
+    return 0;
+  }
+
+  // 3. Exactly two bd calls. Everything below is client-side.
   const threads = await listThreads(ctx);
   if (!threads.ok) {
     console.error(
@@ -697,7 +776,6 @@ export async function runThreadBoard(
     return 0;
   }
 
-  const style = options.style ?? outputStyle();
   if (view === 'openAsks') {
     console.log(
       renderOpenAsks(collectOpenAsks(threads.value, asks.value), style),
@@ -707,18 +785,6 @@ export async function runThreadBoard(
   } else {
     console.log(renderByRepo(data, 'thread', style));
   }
-  // Everything after the rows is a footnote: at the header column, a blank
-  // line before each, wrapped with a hang so a long command stays readable.
-  const footnote = (line: string, styles: StyleName[]): void => {
-    console.log('');
-    console.log(
-      wrapHanging(paint(line, styles, style.color), {
-        hang: BODY_COLUMN,
-        indent: HEADER_COLUMN,
-        width: style.width,
-      }),
-    );
-  };
   if (view === 'repo' && data.orphanAsks.length > 0) {
     footnote(
       `⚠️ ${data.orphanAsks.length} open ask(s) whose thread is closed or missing: ${data.orphanAsks.map((ask) => ask.id).join(', ')}`,
@@ -734,13 +800,6 @@ export async function runThreadBoard(
   const backfilledLine = backfilledHiddenLine(data.hiddenBackfilled);
   if (backfilledLine != null) footnote(backfilledLine, ['dim']);
 
-  // Yellow: each of these means a write this tool should have made did not
-  // happen, and each carries the command that fixes it.
-  const uncommitted = uncommittedLine(env);
-  if (uncommitted != null) footnote(uncommitted, ['yellow']);
-  // Both lines, not one or the other: a repo can be dirty AND behind on pushes,
-  // and they are two different things to fix.
-  const unpushed = unpushedLine(env);
-  if (unpushed != null) footnote(unpushed, ['yellow']);
+  printBacklog();
   return 0;
 }
