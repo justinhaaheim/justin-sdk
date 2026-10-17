@@ -1,0 +1,12 @@
+
+────────────────────────────────────────────────────────────────────────────────────────
+❯ keep going
+────────────────────────────────────────────────────────────────────────────────────────
+  I  ✱ Fable 5.1 ✦ high  …/ home-base/…/󰊢 conductor-inbox-truth  worktree-conduc…
+  ◔ █░░░░ 22% (223k)  T-70m ███░░ 60%  T-6h ███░░ 51% 
+  ⧉ 97%   2h 5m   17m 55s 
+  ◈ v2.1.302   ⌗ 17ded0a9-30bf-4d07-bb90-b34fabc8213d
+  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← 19 agents
+  
+  ⏺ main
+  ◯ player  Committing pane-backfill.test.ts and CLAUDE.md   18m 46s · ↓ 297.3k tokens

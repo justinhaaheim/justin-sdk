@@ -23,10 +23,21 @@
  * has one, for its open questions.
  *
  * FULL CARD OR ONE LINE (D6). A full card when there is evidence of open work —
- * a branch not merged into the default branch, uncommitted files in its
- * checkout, working now, out of context, or an open blocking question in its
- * old report — else one line, "nothing open found": honest, because nothing
- * open was FOUND, not because the session is done.
+ * a branch not merged into the default branch, uncommitted files IT wrote
+ * (below), working now, out of context, or an open blocking question in its
+ * old report — else one line. The line says "no request recorded; whether it
+ * is finished is unknown" (home-base-j8q3e.7 D4): no request was ever filed,
+ * so git showing nothing open says nothing about whether Justin's request was
+ * done. It used to say "nothing open found", which he read as "safe to close".
+ *
+ * ITS OWN UNCOMMITTED FILES ONLY (home-base-j8q3e.6 D1-D3, session-writes.ts).
+ * A checkout's dirty paths count against a session only when its transcript
+ * shows it writing that path after the path's last commit. The rest of a
+ * checkout's dirt is one note per checkout after the list (`unattributed`).
+ * A transcript that cannot be read leaves the files unattributed: rule 10.
+ *
+ * ITS PANE (home-base-j8q3e.7 D7): every card and every line with a live pane
+ * shows it, from the run's pid/tty join (pane-join.ts).
  *
  * CRITICAL RULE 7. Anything the verdict needs that could not be measured — the
  * checkout, a git call, the last activity, the old reports — makes a FULL card
@@ -34,6 +45,7 @@
  * other rule. Never the one-liner.
  */
 
+import type {PaneLookup} from './pane-join';
 import type {EnvLike} from './paths';
 import type {
   CardAction,
@@ -47,6 +59,7 @@ import type {
   LoadCache,
   Measured,
 } from './session-model';
+import type {WriteEvidence} from './session-writes';
 
 import {existsSync, readFileSync} from 'fs';
 import {homedir} from 'os';
@@ -65,10 +78,19 @@ import {readAskPriority} from './metadata';
 import {ageWords, FIRST_MESSAGE_CUT, firstLineOf, tildeText} from './part-one';
 import {threadsRepoDir} from './paths';
 import {ASK_PRIORITY_BLOCKING} from './schema';
-import {gitFacts, landItText, sectionInfo, workingText} from './session-card';
+import {
+  gitFacts,
+  landItText,
+  paneCommandOf,
+  paneFactOf,
+  sectionInfo,
+  selectWorkspaceCommand,
+  workingText,
+} from './session-card';
 import {
   firstUserLine,
   lastAssistantLine,
+  lastCommitCached,
   measureCheckoutCached,
   measured,
   measureTranscriptAt,
@@ -77,6 +99,11 @@ import {
 } from './session-model';
 import {sessionDisplayName} from './session-name';
 import {recentHelpers, WORKING_WINDOW_MS} from './session-status';
+import {
+  ownDirtyPaths,
+  readWrittenPaths,
+  writtenDirtyPaths,
+} from './session-writes';
 
 /** D6: "every Claude Code session ... under ~/Dev". */
 export function defaultDevRoot(): string {
@@ -202,6 +229,14 @@ export interface UntrackedSession {
   checkout: string;
   /** Context tokens at the last record (usage-check's reader). */
   contextTokens: Measured<number>;
+  /**
+   * j8q3e.6 D3: its checkout's dirty paths and which of them this session
+   * wrote after their last commit. `git.uncommitted` carries `own` (so every
+   * word the card says about uncommitted files is about this session's), or
+   * the checkout's own failure. Null when the checkout's dirty paths are
+   * themselves unknown (`git.uncommitted` says why).
+   */
+  dirt: UncommittedDirt | null;
   /** His first message, one line; null = none captured. */
   firstMessage: string | null;
   /** When he sent it; null = not known. */
@@ -245,6 +280,118 @@ export interface UntrackedSession {
   wrapUpAt: number | null;
 }
 
+/** j8q3e.6 D3: a checkout's dirty paths, and the ones one session wrote. */
+export interface UncommittedDirt {
+  /** Every dirty `git status --porcelain` entry of the checkout, `.beads/` excluded. */
+  checkout: string[];
+  /** Of `checkout`, the ones this session wrote after their last commit; unmeasured = could not be attributed. */
+  own: Measured<string[]>;
+  /** The checkout's top (git's), which the per-checkout note groups by. */
+  top: string;
+}
+
+function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
+}
+
+/**
+ * j8q3e.6 D1-D3: which of the checkout's dirty paths this session wrote after
+ * their last commit. Its transcript is read only when the checkout is dirty,
+ * and `git log` runs only for the dirty paths it wrote. A transcript, or a
+ * `git log`, that cannot be read makes `own` unmeasured (D2, rule 7), never [].
+ * `readWrites` is injected by the tests.
+ */
+export async function attributeUncommitted(input: {
+  cache: LoadCache | null;
+  readWrites?: (
+    transcriptPath: string,
+  ) => {evidence: WriteEvidence; ok: true} | {ok: false; reason: string};
+  shared: CheckoutGit;
+  transcriptPath: string;
+}): Promise<UncommittedDirt | null> {
+  const {cache, shared} = input;
+  if (shared.kind === 'failed' || !shared.uncommitted.ok) return null;
+  const {top} = shared;
+  const dirty = shared.uncommitted.value;
+  if (dirty.length === 0) return {checkout: [], own: measured([]), top};
+  // No count in the words: the checkout's count moves whenever another
+  // session edits there, and this card must not (j8q3e.6 AC 4).
+  const cannot = (why: string): UncommittedDirt => ({
+    checkout: dirty,
+    own: unmeasured(
+      `the uncommitted files in ${top} could not be attributed to this session: ${why}`,
+    ),
+    top,
+  });
+  const writes = (input.readWrites ?? readWrittenPaths)(input.transcriptPath);
+  if (!writes.ok) return cannot(writes.reason);
+  const written = writtenDirtyPaths(dirty, top, writes.evidence);
+  const commits = await Promise.all(
+    written.map(
+      async (path) => [path, await lastCommitCached(top, path, cache)] as const,
+    ),
+  );
+  const lastCommitMs = new Map<string, number | null>();
+  for (const [path, commit] of commits) {
+    if (!commit.ok) return cannot(commit.reason);
+    lastCommitMs.set(path, commit.value);
+  }
+  return {
+    checkout: dirty,
+    own: measured(
+      ownDirtyPaths({
+        dirty: written,
+        evidence: writes.evidence,
+        lastCommitMs,
+        top,
+      }),
+    ),
+    top,
+  };
+}
+
+/**
+ * j8q3e.6 D3: per checkout, its dirty paths that no listed untracked session's
+ * transcript names as written — printed once, after the list, instead of on
+ * every session that ever ran there. Not "that no session wrote" (j8q3e.13
+ * F4): `bun add` or `prettier --write .` dirty files without naming them.
+ * `unchecked` counts that checkout's sessions whose files could not be
+ * attributed (their writes may be among `paths`).
+ */
+export interface UnattributedDirt {
+  checkout: string;
+  paths: string[];
+  unchecked: number;
+}
+
+export function unattributedDirt(
+  sessions: readonly Pick<UntrackedSession, 'dirt'>[],
+): UnattributedDirt[] {
+  const byTop = new Map<
+    string,
+    {checkout: string[]; own: Set<string>; unchecked: number}
+  >();
+  for (const {dirt} of sessions) {
+    if (dirt == null || dirt.checkout.length === 0) continue;
+    const entry = byTop.get(dirt.top) ?? {
+      checkout: dirt.checkout,
+      own: new Set<string>(),
+      unchecked: 0,
+    };
+    if (dirt.own.ok) for (const path of dirt.own.value) entry.own.add(path);
+    else entry.unchecked += 1;
+    byTop.set(dirt.top, entry);
+  }
+  const out: UnattributedDirt[] = [];
+  for (const [top, entry] of byTop) {
+    const paths = entry.checkout.filter((path) => !entry.own.has(path));
+    if (paths.length > 0) {
+      out.push({checkout: top, paths, unchecked: entry.unchecked});
+    }
+  }
+  return out.sort((a, b) => a.checkout.localeCompare(b.checkout));
+}
+
 /**
  * The test-data marker of the prompts rule test-data-marker.md,
  * `[TEST_DATA_DELETABLE <uuid> ]` (F5, home-base-j8q3e.1.10). A real UUID is
@@ -278,8 +425,9 @@ export interface UntrackedVerdict {
 /**
  * D6's verdict, pure: the evidence of open work, what could not be measured,
  * the display, and the "You need to" line. Rule 10 first (critical rule 7: an
- * unread fact never ends in "nothing open found"), then D3 rules 2, 4 and 6,
- * then D6's "Read Claude's last reply".
+ * unread fact never ends in the one-liner), then D3 rules 2, 4 and 6, then
+ * D6's "Read Claude's last reply". `git.uncommitted` is the session's OWN
+ * uncommitted files (j8q3e.6), so rule 6 never names another session's.
  */
 export function untrackedVerdict(
   session: UntrackedSession,
@@ -381,10 +529,6 @@ export function untrackedActivityAt(session: UntrackedSession): string {
     : session.scannedLastAt;
 }
 
-function plural(count: number, one: string, many: string): string {
-  return `${count} ${count === 1 ? one : many}`;
-}
-
 /** The title `thread backfill` gives a thread it found with no report. */
 const UNTITLED_PREFIX = '(untitled)';
 
@@ -419,12 +563,17 @@ function untrackedWhere(evidence: readonly OpenWorkEvidence[]): string {
   return '❔ Not tracked: it has no session bead, so this is read from git, its transcript and any old report';
 }
 
-/** D6's full card, as data (the inbox renders it like any other card). */
+/**
+ * D6's full card, as data (the inbox renders it like any other card). `panes`
+ * is the run's live lookup (j8q3e.7 D7); an untracked session recorded no pane.
+ */
 export function untrackedCard(
   session: UntrackedSession,
   verdict: UntrackedVerdict,
   now: Date,
+  panes: PaneLookup,
 ): SessionCard {
+  const paneFact = paneFactOf(panes, session.sessionId, null);
   const facts: CardFact[] = gitFacts(session.git);
   const {oldReport} = session;
   if (!oldReport.ok) {
@@ -456,7 +605,8 @@ export function untrackedCard(
     emoji: where.split(' ')[0] ?? '❔',
     facts,
     optional: null,
-    pane: null,
+    pane: paneCommandOf(paneFact),
+    paneFact,
     repo: session.repo,
     repoTag: session.repoTag,
     resume: session.resume,
@@ -474,10 +624,17 @@ export function untrackedCard(
   };
 }
 
+/** j8q3e.7 D4: what a one-liner says instead of "nothing open found". */
+export const NO_REQUEST_RECORDED =
+  'no request recorded; whether it is finished is unknown';
+
 /**
- * D6's one-line entry: "[REPO] his first message, cut (age) · nothing open
- * found". `repeats` > 1 is a folded line (F6, home-base-j8q3e.1.10): "(× 6,
- * newest 2 days ago)", the age being the newest session's.
+ * D6's one-line entry: "[REPO] his first message, cut (age) · no request
+ * recorded; whether it is finished is unknown" (j8q3e.7 D4), then its live
+ * pane when the join found one (D7; a line with no live pane says nothing
+ * more, and the summary counts the lookup). `repeats` > 1 is a folded line
+ * (F6, home-base-j8q3e.1.10): "(× 6, newest 2 days ago)", the age being the
+ * newest session's.
  */
 export function untrackedLine(
   card: SessionCard,
@@ -494,7 +651,11 @@ export function untrackedLine(
       : card.age == null
         ? ''
         : ` (${card.age})`;
-  return `❔ ${sessionDisplayName(card.repoTag, tildeText(message))}${when} · nothing open found`;
+  const pane =
+    card.paneFact.kind === 'live'
+      ? ` · Pane: ${selectWorkspaceCommand(card.paneFact.workspaceId)} (surface ${card.paneFact.surfaceId})`
+      : '';
+  return `❔ ${sessionDisplayName(card.repoTag, tildeText(message))}${when} · ${NO_REQUEST_RECORDED}${pane}`;
 }
 
 /**
@@ -520,6 +681,8 @@ export interface UntrackedRead {
   /** Sessions whose repo is outside the dev root (test probes in $TMPDIR). */
   outsideRoot: {directories: number; sessions: number};
   sessions: UntrackedSession[];
+  /** j8q3e.6 D3: per checkout, the dirty paths no listed session wrote. */
+  unattributed: UnattributedDirt[];
   /** Sessions no record of which names a working directory: no repo to place. */
   unplaced: number;
 }
@@ -640,6 +803,12 @@ export async function readUntracked(input: {
   const sessions = await Promise.all(
     placed.map(async ({cwd, repo, session}): Promise<UntrackedSession> => {
       const shared = await measureCheckoutCached(cwd, cache);
+      const dirt = await attributeUncommitted({
+        cache,
+        shared,
+        transcriptPath: session.transcriptPath,
+      });
+      const checkoutGit = checkoutGitInput(shared);
       const configDir = shared.kind === 'measured' ? shared.top : cwd;
       const projectRoot = existsSync(configDir)
         ? findProjectRoot(configDir)
@@ -685,13 +854,19 @@ export async function readUntracked(input: {
       return {
         checkout: cwd,
         contextTokens: transcript.contextTokens,
+        dirt,
         firstMessage: fromLog
           ? oneLine(first.value?.text ?? null)
           : oneLine(messages.firstUserMessage),
         firstMessageAt: fromLog
           ? (first.value?.at ?? null)
           : messages.firstUserMessageAt,
-        git: checkoutGitInput(shared),
+        // j8q3e.6: only the files THIS session wrote; the checkout's own
+        // failure when its dirty paths could not be listed.
+        git: {
+          ...checkoutGit,
+          uncommitted: dirt == null ? checkoutGit.uncommitted : dirt.own,
+        },
         helpers: transcript.helpers,
         lastActivityAt: transcript.lastRecordAt,
         lastMessage: fromLog
@@ -725,6 +900,7 @@ export async function readUntracked(input: {
     oldReports,
     outsideRoot: {directories: outsideDirs.size, sessions: outsideSessions},
     sessions,
+    unattributed: unattributedDirt(sessions),
     unplaced,
   };
 }

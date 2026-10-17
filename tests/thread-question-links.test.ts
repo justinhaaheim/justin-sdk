@@ -144,6 +144,26 @@ function sessionIn(
   return {env, repo, sb: base.sb, session, sessionBead: filed.beadId};
 }
 
+/**
+ * A minimal transcript for `w`'s session (home-base-vzwbj.4.19): What to mark
+ * reads the beads the session created from it, and a session with no
+ * transcript prints "could not check" there (rule 7), never "Nothing to mark".
+ */
+function writeTranscriptFor(w: World): void {
+  const dir = join(w.sb.path, 'projects', w.repo.replace(/[^a-zA-Z0-9]/g, '-'));
+  mkdirSync(dir, {recursive: true});
+  writeFileSync(
+    join(dir, `${w.session}.jsonl`),
+    `${JSON.stringify({
+      cwd: w.repo,
+      message: {content: 'hello', role: 'user'},
+      sessionId: w.session,
+      timestamp: at('09:00'),
+      type: 'user',
+    })}\n`,
+  );
+}
+
 function world(): World {
   const base = newSandbox();
   return sessionIn(
@@ -477,6 +497,7 @@ function marksBlock(text: string): string {
 describe('G2: thread status says what to do with each open request when the yield would be ⚠️', () => {
   async function threeRequests() {
     const w = world();
+    writeTranscriptFor(w);
     const linked = await request(w, 'Find out why the export is slow');
     await ask(w, {
       default: 'I leave it uncompressed.',
@@ -499,7 +520,7 @@ describe('G2: thread status says what to do with each open request when the yiel
     const {child, linked, oldShape, w, withChild} = await threeRequests();
     const load = await report(w, true);
     expect(load.status.kind).toBe('openWork');
-    const marks = whatToMark(load.model, load.status).filter(
+    const marks = whatToMark(load.model, load.status, load.created).filter(
       (mark) => mark.kind === 'requestOpenNoBlocker',
     );
     expect(
@@ -532,18 +553,21 @@ describe('G2: thread status says what to do with each open request when the yiel
     await ask(w, {priority: '0', question: 'Which bucket?', to: linked});
     const waiting = await report(w, true);
     expect(waiting.status.kind).toBe('waiting');
-    const kinds = whatToMark(waiting.model, waiting.status).map(
-      (mark) => mark.kind,
-    );
+    const kinds = whatToMark(
+      waiting.model,
+      waiting.status,
+      waiting.created,
+    ).map((mark) => mark.kind);
     expect(kinds).not.toContain('requestOpenNoBlocker');
     expect(
       renderThreadStatus(waiting, {now: NOW, style: PLAIN_STYLE, timeZone: TZ}),
     ).not.toContain('nothing blocks it');
 
     const answered = world();
+    writeTranscriptFor(answered);
     const quiet = await report(answered, true);
     expect(quiet.status.kind).toBe('answered');
-    expect(whatToMark(quiet.model, quiet.status)).toEqual([]);
+    expect(whatToMark(quiet.model, quiet.status, quiet.created)).toEqual([]);
   });
 
   test('AC5: the verdict line carries the consequence for ⚠️ and for no other verdict', () => {

@@ -30,7 +30,8 @@ import type {MessageLine} from './message-log';
 import type {Piece} from './part-one';
 import type {EnvLike} from './paths';
 import type {ActionLine, OptionalLine} from './session-card';
-import type {SessionModel} from './session-model';
+import type {CreatedBeads} from './session-created';
+import type {Measured, SessionModel} from './session-model';
 import type {MarkItem, SessionStatus, StatusCounts} from './session-status';
 
 import {readFileSync} from 'fs';
@@ -57,6 +58,7 @@ import {
 } from './part-one';
 import {threadsBeadsDir} from './paths';
 import {deriveAction, optionalLine} from './session-card';
+import {loadCreatedBeads} from './session-created';
 import {readSessionIndex} from './session-index';
 import {
   lastAssistantLine,
@@ -131,6 +133,13 @@ export type ReportLoad =
       /** The dashboard's "You need to" line (deriveAction), for Part 1. */
       action: ActionLine;
       counts: StatusCounts;
+      /**
+       * The beads this session created with a plain `br create`, for What to
+       * mark (home-base-vzwbj.4.19 D2). Read here, not in loadSession, so the
+       * inbox — which never prints What to mark — does not pay for a second
+       * pass over every transcript.
+       */
+      created: Measured<CreatedBeads>;
       kind: 'loaded';
       model: SessionModel;
       /** The dashboard's "Optional" line, null when no P1–P4 is open. */
@@ -203,6 +212,13 @@ async function loadForReport(input: {
     now: input.now,
   });
   const counts = statusCounts(model);
+  const created = loadCreatedBeads({
+    sessionDirs: [...new Set(model.sightings.map((entry) => entry.beadsDir))],
+    transcriptPath: model.transcript.path,
+    transcriptProblem: model.transcript.lastRecordAt.ok
+      ? 'the transcript path is not known'
+      : model.transcript.lastRecordAt.reason,
+  });
   return {
     // home-base-j8q3e.1.7.2 item 3: Part 1's "You need to" is the dashboard's
     // line, from the same function, so the two never disagree.
@@ -212,6 +228,7 @@ async function loadForReport(input: {
       successorSessionId: successorSessionIdOf(facts.successor, input.env),
     }),
     counts,
+    created,
     kind: 'loaded',
     model,
     optional: optionalLine(counts, model.sessionBeadId),
@@ -346,6 +363,44 @@ export function markLine(item: MarkItem): MarkView {
         text: `${what} in this session, and no request filed: file one for the work Justin asked for.`,
       };
     }
+    case 'adoptCandidate': {
+      // home-base-vzwbj.4.19 D2.
+      const n = item.under.length;
+      const under =
+        n === 0
+          ? ''
+          : ` (nor ${n === 1 ? 'is the bead' : `are the ${n} beads`} this session filed under it)`;
+      return {
+        code: sdkRun(`thread request --bead ${item.bead.id}`),
+        sub: [],
+        text: `This session created ${item.bead.id} ("${item.bead.title}", ${item.bead.status.replace(/_/g, ' ')}), which is not a request${under}. If Justin asked for this, adopt it:`,
+      };
+    }
+    case 'createdNotFound': {
+      const ids = item.missing.map((entry) => entry.id);
+      const searched = [
+        ...new Set(item.missing.flatMap((entry) => entry.searched)),
+      ];
+      return {
+        code: null,
+        sub: [],
+        text: `⚠️ Could not check whether ${ids.join(', ')}, created by this session with br create, ${ids.length === 1 ? 'is a request' : 'are requests'} Justin asked for: ${ids.length === 1 ? 'it is' : 'they are'} not in ${searched.length > 0 ? searched.join(' or ') : 'any beads export this session names'}.`,
+      };
+    }
+    case 'createdNotThen':
+      // home-base-j8q3e.13 F6.
+      return {
+        code: null,
+        sub: [],
+        text: `ℹ️ Named in the output of a br create in this session, but not created by it then, so not listed to adopt: ${item.beads.map((bead) => `${bead.id} (${bead.why})`).join('; ')}.`,
+      };
+    case 'undecided':
+      // home-base-vzwbj.4.19 D3.
+      return {
+        code: sdkRun('thread request "…"'),
+        sub: [],
+        text: `Every request is closed, but "${item.bead.title}" (${item.bead.id}) is still undecided. If it decides work Justin wants, that work is an open request:`,
+      };
     case 'autoTitle':
       return {
         code: sdkRun('thread title "…"'),
@@ -423,7 +478,7 @@ export function renderThreadStatus(
     }),
     style,
   );
-  const marks = whatToMark(load.model, load.status)
+  const marks = whatToMark(load.model, load.status, load.created)
     .map(markLine)
     .map((mark) => ({...mark, text: tildeText(mark.text)}));
   let markBlock: string;

@@ -35,15 +35,17 @@
  */
 
 import type {SessionCommits} from './session-commits';
+import type {CreatedBeads} from './session-created';
 import type {Measured, MergeState, SessionModel} from './session-model';
-import type {RequestNode, TreeIssue} from './session-tree';
+import type {RequestNode, SessionTree, TreeIssue} from './session-tree';
 
 import {parseInstant} from './answer-store';
-import {ARCHIVED_PREFIX, DONE_PREFIX} from './ask-format';
+import {ARCHIVED_PREFIX, ASK_LABEL, DONE_PREFIX} from './ask-format';
 import {
   AUTO_TITLE_LABEL,
   CONTINUED_BY_LABEL_PREFIX,
   HANDED_OFF_LABEL,
+  REQUEST_LABEL,
   STAGE_LABEL_PREFIX,
 } from './session-bead';
 import {unmatchedCommitEvidence} from './session-commits';
@@ -428,7 +430,86 @@ export type MarkItem =
       openQuestions: TreeIssue[];
       request: TreeIssue;
     }
+  /**
+   * home-base-vzwbj.4.19 D2: a bead this session created with a plain `br
+   * create` that is not a request or a question and hangs under no request —
+   * the shape of session 7a59f2e5's decision bead, which Part 1 never saw.
+   * `under`: other such beads it created below this one (adopting this one
+   * makes them its children), so a filed epic is one line, not one per task.
+   */
+  | {bead: TreeIssue; kind: 'adoptCandidate'; under: TreeIssue[]}
+  /** D2: ids a `br create` in the transcript reported that no export holds. */
+  | {kind: 'createdNotFound'; missing: {id: string; searched: string[]}[]}
+  /**
+   * home-base-j8q3e.13 F6: ids a `br create` call's output named that the call
+   * did not create (their created_at is outside its window). One line, so
+   * they are said, not silently dropped from the adopt list.
+   */
+  | {beads: {id: string; why: string}[]; kind: 'createdNotThen'}
+  /**
+   * D3: every request is closed, but this open question for Justin, or this
+   * open bead the session created, is still undecided.
+   */
+  | {bead: TreeIssue; kind: 'undecided'}
   | {kind: 'unchecked'; reason: string; what: string};
+
+/** Oldest first by created_at, then by id, so the order is stable. */
+function byCreatedAt(a: TreeIssue, b: TreeIssue): number {
+  const at = parseInstant(a.createdAt);
+  const bt = parseInstant(b.createdAt);
+  if (at != null && bt != null && at !== bt) return at - bt;
+  return a.id.localeCompare(b.id, 'en', {numeric: true});
+}
+
+/**
+ * D2: the beads this session created that nothing in the session tree holds:
+ * not the session bead, a request, a request's child or a question; not
+ * labelled `request` or `ask` (adopted by any session); and not the child of
+ * a request or of a request's child (it already hangs under a request). One
+ * entry per topmost bead: a candidate whose parent is another candidate is
+ * listed under it. Oldest first.
+ */
+export function adoptCandidates(
+  beads: SessionTree,
+  found: readonly TreeIssue[],
+): {bead: TreeIssue; under: TreeIssue[]}[] {
+  const requestish = new Set<string>();
+  for (const node of beads.requests) {
+    requestish.add(node.request.id);
+    for (const child of node.children) requestish.add(child.id);
+  }
+  const held = new Set(requestish);
+  for (const question of beads.questions) held.add(question.id);
+  if (beads.session != null) held.add(beads.session.id);
+  const candidates = found.filter(
+    (bead) =>
+      !held.has(bead.id) &&
+      !bead.labels.includes(REQUEST_LABEL) &&
+      !bead.labels.includes(ASK_LABEL) &&
+      !bead.parentIds.some((parent) => requestish.has(parent)),
+  );
+  const ids = new Map(candidates.map((bead) => [bead.id, bead]));
+  const topOf = (bead: TreeIssue): TreeIssue => {
+    let top = bead;
+    const seen = new Set<string>([bead.id]);
+    for (;;) {
+      const parent = top.parentIds
+        .map((id) => ids.get(id))
+        .find((entry) => entry != null && !seen.has(entry.id));
+      if (parent == null) return top;
+      seen.add(parent.id);
+      top = parent;
+    }
+  };
+  const groups = new Map<string, {bead: TreeIssue; under: TreeIssue[]}>();
+  for (const bead of [...candidates].sort(byCreatedAt)) {
+    const top = topOf(bead);
+    const group = groups.get(top.id) ?? {bead: top, under: []};
+    if (top.id !== bead.id) group.under.push(bead);
+    groups.set(top.id, group);
+  }
+  return [...groups.values()].sort((a, b) => byCreatedAt(a.bead, b.bead));
+}
 
 /**
  * Every REAL child of the request is closed (at least one). Questions never
@@ -465,10 +546,18 @@ function isOldShapeQuestion(node: RequestNode, question: TreeIssue): boolean {
  * The auto-title nag is for work sessions only: a question-only session (no
  * request, no commit, no edit) keeps its first line as its name, and prints
  * "Nothing to mark." (epic D3, AC 1).
+ *
+ * home-base-vzwbj.4.19: `created` is the beads this session made with a plain
+ * `br create` (session-created.ts). D2: one `adoptCandidate` per such bead the
+ * tree does not hold, a `createdNotFound` for ids no export holds, and an
+ * `unchecked` when the transcript could not be read. D3: when every request
+ * is closed (at least one), one `undecided` per open question and per open
+ * candidate (or open bead under one).
  */
 export function whatToMark(
   model: SessionModel,
   status: SessionStatus,
+  created: Measured<CreatedBeads>,
 ): MarkItem[] {
   const items: MarkItem[] = [];
   const {beads, git} = model;
@@ -500,6 +589,46 @@ export function whatToMark(
       });
     } else if (childrenAllClosed(node)) {
       items.push({kind: 'requestChildrenClosed', request: node.request});
+    }
+  }
+
+  // D2 (home-base-vzwbj.4.19): beads this session created that are not
+  // requests. Rule 7: an unreadable transcript is said, never "none".
+  const candidates = created.ok
+    ? adoptCandidates(beads, created.value.found)
+    : [];
+  if (!created.ok) {
+    items.push({
+      kind: 'unchecked',
+      reason: created.reason,
+      what: 'which beads this session created',
+    });
+  } else {
+    for (const candidate of candidates) {
+      items.push({kind: 'adoptCandidate', ...candidate});
+    }
+    if (created.value.missing.length > 0) {
+      items.push({kind: 'createdNotFound', missing: created.value.missing});
+    }
+    if (created.value.notCreatedThen.length > 0) {
+      items.push({beads: created.value.notCreatedThen, kind: 'createdNotThen'});
+    }
+  }
+
+  // D3: every request closed, but something the session raised is still
+  // undecided. Only P0 blocks; this is a prompt to keep the work visible.
+  const allRequestsClosed =
+    beads.problems.length === 0 &&
+    beads.requests.length > 0 &&
+    beads.requests.every((node) => !isOpen(node.request));
+  if (allRequestsClosed) {
+    for (const question of openQuestions(model)) {
+      items.push({bead: question, kind: 'undecided'});
+    }
+    for (const candidate of candidates) {
+      if (isOpen(candidate.bead) || candidate.under.some(isOpen)) {
+        items.push({bead: candidate.bead, kind: 'undecided'});
+      }
     }
   }
 

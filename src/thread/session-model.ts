@@ -69,6 +69,7 @@ import {
   readBeadsExport,
   readSessionTree,
 } from './session-tree';
+import {porcelainSides} from './session-writes';
 import {readHelperTail, readLastRecordTimestamp} from './transcript-messages';
 
 /** A measurement: its value, or why it could not be taken. Never a stand-in. */
@@ -544,12 +545,73 @@ export type CheckoutGit =
 export interface LoadCache {
   checkouts: Map<string, Promise<CheckoutGit>>;
   exports: Map<string, ExportRead>;
+  /** `lastCommitCached`'s answers, by checkout top and path (j8q3e.6 D3). */
+  lastCommits: Map<string, Promise<Measured<number | null>>>;
   /** Each directory's declared `projectTag`, for `resolveRepoTag` (bomy5.7.2). */
   repoTags: Map<string, string | null>;
 }
 
 export function createLoadCache(): LoadCache {
-  return {checkouts: new Map(), exports: new Map(), repoTags: new Map()};
+  return {
+    checkouts: new Map(),
+    exports: new Map(),
+    lastCommits: new Map(),
+    repoTags: new Map(),
+  };
+}
+
+/** One plain path's last commit time, cached per (checkout, path) per run. */
+async function lastCommitOfPath(
+  top: string,
+  side: string,
+  cache: LoadCache | null,
+): Promise<Measured<number | null>> {
+  const key = `${top}\n${side}`;
+  let pending = cache?.lastCommits.get(key);
+  if (pending == null) {
+    const args = ['log', '-1', '--format=%ct', '--', side];
+    pending = runGit(top, args).then((run): Measured<number | null> => {
+      if (run.kind !== 'ok') return unmeasured(gitFailure(args, run));
+      const text = run.stdout.trim();
+      if (text === '') return measured(null);
+      return /^\d+$/.test(text)
+        ? measured(Number(text) * 1000)
+        : unmeasured(`git ${args.join(' ')} printed ${JSON.stringify(text)}`);
+    });
+    cache?.lastCommits.set(key, pending);
+  }
+  return await pending;
+}
+
+/**
+ * When `path` (a `git status --porcelain` entry, relative to `top`) was last
+ * committed, in ms; null = never committed. home-base-j8q3e.6 D3 reads it only
+ * for the few dirty paths a session wrote, once per path per run.
+ *
+ * A rename entry (`old -> new`) takes the NEWER of its two sides' last commits
+ * (home-base-j8q3e.13 F10): a write matches either side (newestWriteOf), so a
+ * session that wrote the old path before it was committed must not be blamed
+ * when someone else later renames it (the new side, never committed, would
+ * otherwise make any write count). Either side failing is unmeasured.
+ */
+export async function lastCommitCached(
+  top: string,
+  path: string,
+  cache: LoadCache | null,
+): Promise<Measured<number | null>> {
+  const sides = await Promise.all(
+    porcelainSides(path).map(
+      async (side) => await lastCommitOfPath(top, side, cache),
+    ),
+  );
+  let newest: number | null = null;
+  for (const side of sides) {
+    if (!side.ok) return side;
+    if (side.value != null && (newest == null || side.value > newest)) {
+      newest = side.value;
+    }
+  }
+  return measured(newest);
 }
 
 async function measureCheckout(checkout: string): Promise<CheckoutGit> {

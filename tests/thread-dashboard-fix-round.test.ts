@@ -13,6 +13,7 @@
  * dispatch 8 records which assertion failed.
  */
 
+import type {PaneLookup} from '../src/thread/pane-join';
 import type {InboxRead, InboxRow} from '../src/thread/session-inbox';
 import type {Unpushed} from '../src/thread/session-model';
 import type {UntrackedSession} from '../src/thread/session-untracked';
@@ -31,6 +32,9 @@ import {
 } from '../src/thread/session-untracked';
 
 const NOW = new Date('2030-01-10T12:00:00.000Z');
+
+/** No pane lookup in these tests (j8q3e.7 D6). */
+const NO_PANES: PaneLookup = {ok: false, reason: 'not looked up in this test'};
 const day = (d: number): string =>
   `2030-01-${String(d).padStart(2, '0')}T09:00:00.000Z`;
 
@@ -44,6 +48,7 @@ function session(
   return {
     checkout: '/dev/life',
     contextTokens: measured(40_000),
+    dirt: null,
     firstMessage: DAILY(n),
     firstMessageAt: day(n),
     git: {
@@ -80,7 +85,7 @@ function session(
 
 function row(s: UntrackedSession): InboxRow {
   const verdict = untrackedVerdict(s, NOW);
-  const card = untrackedCard(s, verdict, NOW);
+  const card = untrackedCard(s, verdict, NOW, NO_PANES);
   return {
     card,
     display: verdict.display,
@@ -106,12 +111,14 @@ function read(rows: InboxRow[]): InboxRead {
     hiddenByAge: {},
     indexPath: '/state/sessions.jsonl',
     missing: false,
+    panes: NO_PANES,
     ...shapeRows(rows),
     untracked: {
       devRoot: '/dev',
       failures: [],
       oldReports: null,
       outsideRoot: {directories: 0, sessions: 0},
+      unattributed: [],
       unplaced: 0,
     },
   };
@@ -244,10 +251,10 @@ describe('F6: repeated one-liners fold into one line', () => {
       .filter((line) => line.startsWith('❔ [LIFE] /daily-loop'));
     expect(folded).toHaveLength(2);
     expect(folded[0]).toMatch(
-      / \(× 3, newest 27 hours ago\) · nothing open found$/,
+      / \(× 3, newest 27 hours ago\) · no request recorded; whether it is finished is unknown$/,
     );
     expect(text).toContain(
-      '- **❔ Not tracked:** 7 (1 with something open or unreadable, 6 with nothing open found)',
+      '- **❔ Not tracked:** 7 (1 with something open or unreadable, 6 with no request recorded)',
     );
     const json = inboxJson(read(rows())) as {
       sessions: {repeats: unknown; untracked: {line: string | null}}[];

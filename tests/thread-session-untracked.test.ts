@@ -14,26 +14,41 @@
  * NEGATIVE CONTROLS: recorded in home-base-j8q3e.1.2's notes.
  */
 
+import type {PaneLookup, UnplacedKind} from '../src/thread/pane-join';
 import type {UntrackedSession} from '../src/thread/session-untracked';
 import type {Sandbox} from './sandbox';
 
 import {afterAll, beforeAll, describe, expect, test} from 'bun:test';
-import {mkdirSync, rmSync, utimesSync, writeFileSync} from 'fs';
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'fs';
 import {dirname, join} from 'path';
 
 import {runBr} from '../src/beads/br';
 import {PLAIN_STYLE} from '../src/cli-style';
 import {messageLogPath} from '../src/thread/archive';
 import {serializeMessageLine} from '../src/thread/message-log';
+import {lookupPanes as realLookupPanes} from '../src/thread/pane-join';
 import {ensureSessionBead} from '../src/thread/session-bead';
+import {paneFactOf, paneLineParts} from '../src/thread/session-card';
 import {
   inboxJson,
   type InboxRead,
   readInbox,
   renderInbox,
 } from '../src/thread/session-inbox';
-import {measured, unmeasured} from '../src/thread/session-model';
 import {
+  measured,
+  uncommittedFromPorcelain,
+  unmeasured,
+} from '../src/thread/session-model';
+import {
+  attributeUncommitted,
   untrackedCard,
   untrackedLine,
   untrackedVerdict,
@@ -45,6 +60,15 @@ import {createSandbox} from './sandbox';
 const NOW = new Date('2030-01-01T12:00:00.000Z');
 const t = (hhmm: string): string => `2030-01-01T${hhmm}:00.000Z`;
 
+/** No pane lookup (j8q3e.7 D6): every card says its pane is unknown. */
+const NO_PANES: PaneLookup = {ok: false, reason: 'not looked up in this test'};
+/** A lookup whose status-line source found nothing left to place. */
+const NO_UNPLACED: Extract<PaneLookup, {ok: true}>['statusLine'] = {
+  failure: null,
+  unknownSessions: new Map(),
+  unplaced: [],
+};
+
 // ---------------------------------------------------------------------------
 // Pure: the verdict
 // ---------------------------------------------------------------------------
@@ -53,6 +77,7 @@ function fixture(over: Partial<UntrackedSession> = {}): UntrackedSession {
   return {
     checkout: '/dev/alpha',
     contextTokens: measured(40_000),
+    dirt: null,
     firstMessage: 'Speed up the importer',
     firstMessageAt: t('09:00'),
     git: {
@@ -86,7 +111,7 @@ function fixture(over: Partial<UntrackedSession> = {}): UntrackedSession {
 const RESUME = "cd '/dev/alpha' && claude --resume s-1";
 
 describe('D6 verdict: one line when nothing open is found', () => {
-  test('a stopped session on a clean default branch is one line, "nothing open found"', () => {
+  test('a stopped session on a clean default branch is one line, "no request recorded" (j8q3e.7 D4)', () => {
     const session = fixture();
     const verdict = untrackedVerdict(session, NOW);
     expect(verdict).toEqual({
@@ -99,9 +124,9 @@ describe('D6 verdict: one line when nothing open is found', () => {
       evidence: [],
       unmeasured: [],
     });
-    const card = untrackedCard(session, verdict, NOW);
+    const card = untrackedCard(session, verdict, NOW, NO_PANES);
     expect(untrackedLine(card, session.firstMessage)).toBe(
-      '❔ [ALPHA] Speed up the importer (2 hours ago) · nothing open found',
+      '❔ [ALPHA] Speed up the importer (2 hours ago) · no request recorded; whether it is finished is unknown',
     );
     expect(card.section).toBe('notTracked');
   });
@@ -211,7 +236,7 @@ describe('D6 verdict: a full card for each kind of evidence of open work', () =>
     expect(verdict.action.text).toBe(
       'Read Claude\'s last reply: "The importer now streams rows."',
     );
-    const card = untrackedCard(session, verdict, NOW);
+    const card = untrackedCard(session, verdict, NOW, NO_PANES);
     expect(card.facts).toContainEqual({
       label: 'Old report',
       value: '2 open questions, 1 blocking (thread th-1)',
@@ -241,7 +266,7 @@ describe('D6 verdict: what could not be measured is rule 10, never one line (cri
       rule: 10,
       text: `Check it by hand: ${reason}`,
     });
-    expect(untrackedCard(session, verdict, NOW).facts).toEqual([
+    expect(untrackedCard(session, verdict, NOW, NO_PANES).facts).toEqual([
       {label: 'Checkout', value: '⚠️ /dev/gone no longer exists'},
     ]);
   });
@@ -267,6 +292,48 @@ describe('D6 verdict: what could not be measured is rule 10, never one line (cri
       NOW,
     );
     expect(verdict.action.rule).toBe(10);
+  });
+
+  test('j8q3e.6 AC5: uncommitted files that could not be attributed, alone, are rule 10 with the reason on the Uncommitted line', async () => {
+    const shared = {
+      aheadOfDefault: measured(0),
+      branch: measured('main'),
+      commonDir: '/dev/alpha/.git',
+      defaultBranch: measured('main'),
+      kind: 'measured' as const,
+      merged: measured('isDefault' as const),
+      repo: 'alpha',
+      top: '/dev/alpha',
+      uncommitted: measured(['a.ts']),
+      unpushed: measured({kind: 'noUpstream' as const}),
+      worktree: measured({kind: 'primary' as const}),
+    };
+    const dirt = await attributeUncommitted({
+      cache: null,
+      readWrites: () => ({ok: false, reason: 'could not read t.jsonl: EACCES'}),
+      shared,
+      transcriptPath: '/projects/t.jsonl',
+    });
+    const reason =
+      'the uncommitted files in /dev/alpha could not be attributed to this session: could not read t.jsonl: EACCES';
+    expect(dirt).toEqual({
+      checkout: ['a.ts'],
+      own: {ok: false, reason},
+      top: '/dev/alpha',
+    });
+    const session = fixture({
+      dirt,
+      git: {...fixture().git, uncommitted: unmeasured(reason)},
+    });
+    const verdict = untrackedVerdict(session, NOW);
+    expect(verdict.action).toEqual({
+      command: RESUME,
+      rule: 10,
+      text: `Check it by hand: ${reason}`,
+    });
+    expect(untrackedCard(session, verdict, NOW, NO_PANES).facts).toContainEqual(
+      {label: 'Uncommitted', value: `unknown (${reason})`},
+    );
   });
 
   test('unknown last activity, or old reports that could not be read, are rule 10 too', () => {
@@ -308,17 +375,23 @@ function writeFile(path: string, text: string): void {
   writeFileSync(path, text);
 }
 
-/** A transcript for session `n`, run in `cwd`, dated so the window holds it. */
+/**
+ * A transcript for session `n`, run in `cwd`, dated so the window holds it.
+ * `between` goes between the user record and the last reply (tool_use
+ * records: `toolUse` builds them).
+ */
 function transcript(
   n: number,
   cwd: string,
   first: string,
   reply: string,
   lastAt: string,
+  between: object[] = [],
+  root: string = sb.path,
 ): string {
   const id = sid(n);
   const path = join(
-    sb.path,
+    root,
     'projects',
     cwd.replace(/[^a-zA-Z0-9]/g, '-'),
     `${id}.jsonl`,
@@ -335,6 +408,7 @@ function transcript(
         type: 'user',
         uuid: `${id}-u`,
       },
+      ...between,
       {
         cwd,
         message: {
@@ -359,6 +433,25 @@ function transcript(
   // pre-filter), and the window here is in 2030.
   utimesSync(path, NOW, NOW);
   return id;
+}
+
+let toolIds = 0;
+
+/** An assistant record with one tool_use (j8q3e.6 D1's write evidence). */
+function toolUse(
+  name: 'Bash' | 'Edit' | 'MultiEdit' | 'NotebookEdit' | 'Write',
+  input: Record<string, unknown>,
+  at: string,
+): object {
+  toolIds += 1;
+  return {
+    message: {
+      content: [{id: `toolu_${toolIds}`, input, name, type: 'tool_use'}],
+      role: 'assistant',
+    },
+    timestamp: at,
+    type: 'assistant',
+  };
 }
 
 beforeAll(() => {
@@ -418,8 +511,15 @@ beforeAll(() => {
   );
   // 2 unmerged: the feature worktree, one commit main lacks
   transcript(2, feature, 'Build the feature', 'Built it.', t('09:30'));
-  // 3 uncommitted: beta has a file not committed; its message log says more
-  const s3 = transcript(3, beta, 'Draft the notes', 'Drafted.', t('09:20'));
+  // 3 uncommitted: beta has a file not committed, which session 3 wrote
+  // (j8q3e.6: only its own writes count); its message log says more
+  const s3 = transcript(3, beta, 'Draft the notes', 'Drafted.', t('09:20'), [
+    toolUse(
+      'Write',
+      {content: 'not committed\n', file_path: join(beta, 'draft.md')},
+      t('09:10'),
+    ),
+  ]);
   writeFile(
     messageLogPath(s3, env),
     [
@@ -512,12 +612,15 @@ afterAll(() => {
   sb.cleanup();
 });
 
-async function read(): Promise<InboxRead> {
+async function read(
+  lookupPanes?: () => Promise<PaneLookup>,
+): Promise<InboxRead> {
   const result = await readInbox({
     cwd: alpha,
     days: 30,
     devRoot,
     env,
+    lookupPanes,
     now: NOW,
     repo: null,
   });
@@ -675,7 +778,7 @@ describe('thread inbox lists every session under the dev root (D6, end to end)',
         evidence: [],
         firstMessage: 'What does the importer do?',
         lastReply: 'It reads rows.',
-        line: '❔ [ALPHA] What does the importer do? (2 hours ago) · nothing open found',
+        line: '❔ [ALPHA] What does the importer do? (2 hours ago) · no request recorded; whether it is finished is unknown',
         messagesFrom: 'transcript',
         oldReport: {ok: true, value: null},
         repo: 'alpha',
@@ -704,10 +807,10 @@ describe('thread inbox lists every session under the dev root (D6, end to end)',
       timeZone: 'UTC',
     });
     expect(text).toContain(
-      '- **❔ Not tracked:** 7 (6 with something open or unreadable, 1 with nothing open found)',
+      '- **❔ Not tracked:** 7 (6 with something open or unreadable, 1 with no request recorded)',
     );
     expect(text).toContain(
-      '❔ [ALPHA] What does the importer do? (2 hours ago) · nothing open found',
+      '❔ [ALPHA] What does the importer do? (2 hours ago) · no request recorded; whether it is finished is unknown',
     );
     expect(text).toContain(
       'outside <dev> is not listed'.replace(
@@ -715,5 +818,600 @@ describe('thread inbox lists every session under the dev root (D6, end to end)',
         devRoot.replace(process.env.HOME ?? '', '~'),
       ),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// j8q3e.7 D7/D8: the Pane line and the open-panes count (end to end)
+// ---------------------------------------------------------------------------
+
+describe('every card shows its pane from the live join (j8q3e.7, end to end)', () => {
+  const live = (
+    statusLine: Extract<PaneLookup, {ok: true}>['statusLine'] = NO_UNPLACED,
+  ): (() => Promise<PaneLookup>) => {
+    return () =>
+      Promise.resolve({
+        bySession: new Map([
+          [
+            sid(1),
+            {source: 'hook-store', surfaceId: 'SF-1', workspaceId: 'WS-1'},
+          ],
+          // j8q3e.17 D2: a status-line pane prints the same way.
+          [
+            sid(2),
+            {source: 'status-line', surfaceId: 'SF-2', workspaceId: 'WS-2'},
+          ],
+          [
+            sid(9),
+            {source: 'hook-store', surfaceId: 'SF-9', workspaceId: 'WS-9'},
+          ],
+        ]),
+        ok: true,
+        statusLine,
+      });
+  };
+
+  test('a live pane prints its select-workspace command on cards and lines; no pane says "none found by the pid/tty join or the status line"', async () => {
+    const r = await read(live());
+    const text = renderInbox(r, {
+      all: false,
+      days: 30,
+      now: NOW,
+      order: 'recent',
+      style: PLAIN_STYLE,
+      timeZone: 'UTC',
+    });
+    // An untracked full card (session 2) and a tracked one (session 9).
+    expect(rowOf(r, 2)[0]?.card.paneFact).toEqual({
+      kind: 'live',
+      surfaceId: 'SF-2',
+      workspaceId: 'WS-2',
+    });
+    expect(rowOf(r, 2)[0]?.card.pane).toBe(
+      'cmux select-workspace --workspace WS-2',
+    );
+    expect(text).toContain(
+      '- **Pane:** `cmux select-workspace --workspace WS-2` (surface SF-2)',
+    );
+    expect(rowOf(r, 9)[0]?.card.paneFact.kind).toBe('live');
+    // The one-liner (session 1) names its pane.
+    expect(text).toContain(
+      '❔ [ALPHA] What does the importer do? (2 hours ago) · no request recorded; whether it is finished is unknown · Pane: cmux select-workspace --workspace WS-1 (surface SF-1)',
+    );
+    // A session the join did not find (session 4).
+    expect(rowOf(r, 4)[0]?.card.paneFact).toEqual({kind: 'none'});
+    expect(rowOf(r, 4)[0]?.card.pane).toBeNull();
+    expect(text).toContain(
+      '- **Pane:** none found by the pid/tty join or the status line',
+    );
+    // D8: untracked sessions 1 and 2 have live panes; tracked 9 is not counted.
+    expect(text).toContain('- **🪟 Open panes with no request record:** 2');
+    // Every Claude pane was placed, so no unplaced-panes line.
+    expect(text).not.toContain('Claude panes no source could place');
+    expect(inboxJson(r)).toMatchObject({
+      openPanesWithoutRequest: {count: 2, ok: true},
+      panes: {ok: true, sessions: 3, statusLineSessions: 1, unplaced: []},
+    });
+  });
+
+  test('j8q3e.17 D3: a session whose pane screen could not be read is unknown, never none; the unplaced panes are counted', async () => {
+    const pane = (ref: number, kind: UnplacedKind, detail: string) => ({
+      detail,
+      fileSessionId: null,
+      kind,
+      screenSessionId: null,
+      surface: {
+        id: `SF-${ref}`,
+        paneRef: `pane:${ref}`,
+        ref: `surface:${ref}`,
+        title: null,
+        tty: `ttys${ref}`,
+        type: 'terminal',
+        workspaceId: 'WS-X',
+        workspaceRef: 'workspace:1',
+        workspaceTitle: null,
+      },
+    });
+    const why =
+      "the screen of surface:40, where cmux's session file puts it, could not be read";
+    const r = await read(
+      live({
+        failure: null,
+        unknownSessions: new Map([[sid(4), why]]),
+        unplaced: [
+          pane(40, 'unreadableScreen', 'cmux could not read the screen: x'),
+          pane(41, 'unconfirmedId', 'the status line shows a, but b'),
+          pane(42, 'unconfirmedId', 'the status line shows c, but d'),
+        ],
+      }),
+    );
+    const text = renderInbox(r, {
+      all: false,
+      days: 30,
+      now: NOW,
+      order: 'recent',
+      style: PLAIN_STYLE,
+      timeZone: 'UTC',
+    });
+    expect(rowOf(r, 4)[0]?.card.paneFact).toEqual({
+      kind: 'unknown',
+      reason: `the pid/tty join found none, and the status line could not be checked: ${why}`,
+      recorded: null,
+    });
+    expect(text).toContain(
+      `- **Pane:** unknown (the pid/tty join found none, and the status line could not be checked: ${why})`,
+    );
+    expect(text).toContain(
+      "- **🪟 Claude panes no source could place:** 3: 2 with an id cmux's session file does not confirm, 1 whose screen could not be read",
+    );
+  });
+
+  test('j8q3e.17 D3: a session file that cannot be read makes every unplaced session unknown, never none', async () => {
+    const failure =
+      'cmux session file: no cmux session file at /x/session.json';
+    const r = await read(
+      live({failure, unknownSessions: new Map(), unplaced: []}),
+    );
+    const text = renderInbox(r, {
+      all: false,
+      days: 30,
+      now: NOW,
+      order: 'recent',
+      style: PLAIN_STYLE,
+      timeZone: 'UTC',
+    });
+    expect(text).not.toContain('none found');
+    expect(rowOf(r, 4)[0]?.card.paneFact).toMatchObject({kind: 'unknown'});
+    expect(rowOf(r, 2)[0]?.card.paneFact.kind).toBe('live');
+  });
+
+  test('a failed lookup is "unknown (<reason>)" on every card and in the summary, never "none found" (rule 7)', async () => {
+    const reason =
+      'ps refused: Operation not permitted, as inside the Claude Code sandbox';
+    const r = await read(() => Promise.resolve({ok: false, reason}));
+    const text = renderInbox(r, {
+      all: false,
+      days: 30,
+      now: NOW,
+      order: 'recent',
+      style: PLAIN_STYLE,
+      timeZone: 'UTC',
+    });
+    expect(text).not.toContain('none found');
+    expect(text).toContain(`- **Pane:** unknown (${reason})`);
+    expect(text).toContain(
+      `- **🪟 Open panes with no request record:** unknown (${reason})`,
+    );
+    for (const row of r.rows) {
+      expect(row.card.paneFact).toMatchObject({kind: 'unknown', reason});
+    }
+  });
+});
+
+describe('the Pane line words (j8q3e.7 D7, pure)', () => {
+  test('a failed lookup adds the pane recorded at session start, labelled as recorded', () => {
+    const failed: PaneLookup = {ok: false, reason: 'no socket'};
+    expect(
+      paneLineParts(
+        paneFactOf(failed, 's-1', {surface: 'SF-R', workspace: 'WS-R'}),
+      ),
+    ).toEqual({
+      after: ' (surface SF-R)',
+      before: 'unknown (no socket); recorded at session start: ',
+      command: 'cmux select-workspace --workspace WS-R',
+    });
+    // A lookup that worked ignores the (stale) recorded labels.
+    expect(
+      paneFactOf(
+        {bySession: new Map(), ok: true, statusLine: NO_UNPLACED},
+        's-1',
+        {
+          surface: 'SF-R',
+          workspace: 'WS-R',
+        },
+      ),
+    ).toEqual({kind: 'none'});
+  });
+});
+
+describe('j8q3e.13 F10: a rename takes the newer of its two sides last commits', () => {
+  test("a rename entry whose old side was committed after the session's write is not blamed; a later write still is", async () => {
+    const box = createSandbox();
+    try {
+      const repo = initRepo(box, 'Dev/renamed', {'README.md': '# r\n'});
+      write(repo, 'old.txt', 'v1\n');
+      git(repo, ['add', 'old.txt']);
+      git(repo, ['commit', '-qm', 'old']);
+      // Another session renames it; the new side was never committed.
+      git(repo, ['mv', 'old.txt', 'new.txt']);
+      const entries = uncommittedFromPorcelain(
+        git(repo, ['status', '--porcelain']),
+      );
+      expect(entries).toEqual(['old.txt -> new.txt']);
+      const shared = {
+        aheadOfDefault: measured(0),
+        branch: measured('main'),
+        commonDir: join(repo, '.git'),
+        defaultBranch: measured('main'),
+        kind: 'measured' as const,
+        merged: measured('isDefault' as const),
+        repo: 'renamed',
+        top: repo,
+        uncommitted: measured(entries),
+        unpushed: measured({kind: 'noUpstream' as const}),
+        worktree: measured({kind: 'primary' as const}),
+      };
+      // This session wrote old.txt, dated before the commit (git dated it now).
+      const wroteOldAt = async (writtenAt: string) =>
+        await attributeUncommitted({
+          cache: null,
+          readWrites: () => ({
+            evidence: {
+              commands: [],
+              files: ['t.jsonl'],
+              paths: [
+                {file: 't.jsonl', path: join(repo, 'old.txt'), writtenAt},
+              ],
+              unparsedLines: 0,
+            },
+            ok: true,
+          }),
+          shared,
+          transcriptPath: 't.jsonl',
+        });
+      expect((await wroteOldAt('2020-01-01T00:00:00.000Z'))?.own).toEqual(
+        measured([]),
+      );
+      expect((await wroteOldAt('2999-01-01T00:00:00.000Z'))?.own).toEqual(
+        measured(['old.txt -> new.txt']),
+      );
+    } finally {
+      box.cleanup();
+    }
+  });
+});
+
+describe('j8q3e.13 F8: two stored sessions on one pid count one pane at most (end to end, the real lookupPanes)', () => {
+  // Untracked sessions 1 and 2 both name pid 4242, the claude on surface:42
+  // (one claude process after a /clear).
+  const tree = {
+    windows: [
+      {
+        ref: 'window:1',
+        workspaces: [
+          {
+            id: 'WS-42',
+            panes: [
+              {
+                ref: 'pane:42',
+                surfaces: [
+                  {
+                    id: 'SF-42',
+                    ref: 'surface:42',
+                    title: 'Claude Code',
+                    tty: 'ttys042',
+                    type: 'terminal',
+                  },
+                ],
+              },
+            ],
+            ref: 'workspace:42',
+            title: 'alpha',
+          },
+        ],
+      },
+    ],
+  };
+  const lookupFor =
+    (screen: string | null) => async (): Promise<PaneLookup> => {
+      sb.writeFile(
+        'f8-store.json',
+        JSON.stringify({
+          sessions: {
+            [sid(1)]: {pid: 4242, sessionId: sid(1), workspaceId: 'WS-42'},
+            [sid(2)]: {pid: 4242, sessionId: sid(2), workspaceId: 'WS-42'},
+          },
+        }),
+      );
+      return await realLookupPanes({
+        cmux: (args) =>
+          Promise.resolve(
+            args[0] !== 'read-screen'
+              ? {kind: 'ok', stdout: JSON.stringify(tree)}
+              : screen == null
+                ? {kind: 'failed', reason: 'Failed to read terminal text'}
+                : {kind: 'ok', stdout: screen},
+          ),
+        hookStorePath: join(sb.path, 'f8-store.json'),
+        ps: () =>
+          Promise.resolve({
+            kind: 'ok',
+            stdout:
+              '  PID  PPID TTY      ELAPSED COMMAND\n 4242     1 ttys042    09:00 /Users/x/.local/bin/claude',
+          }),
+        sessionFilePath: join(sb.path, 'f8-no-session-file.json'),
+      });
+    };
+
+  test('a screen that names neither: both cards are unknown and the open-panes count is 0, not 2', async () => {
+    const r = await read(lookupFor(null));
+    expect(inboxJson(r).openPanesWithoutRequest).toEqual({count: 0, ok: true});
+    expect(rowOf(r, 1)[0]?.card.paneFact.kind).toBe('unknown');
+    expect(rowOf(r, 2)[0]?.card.paneFact.kind).toBe('unknown');
+  });
+
+  test('a screen whose ⌗ id is session 1: only session 1 holds the pane, and the count is 1', async () => {
+    const screen = readFileSync(
+      join(import.meta.dir, 'fixtures', 'pane-screen-s24-0655.txt'),
+      'utf8',
+    ).replace('b7a11012-82a6-45ad-ae5d-a9e4c7c673e1', sid(1));
+    const r = await read(lookupFor(screen));
+    expect(rowOf(r, 1)[0]?.card.paneFact).toEqual({
+      kind: 'live',
+      surfaceId: 'SF-42',
+      workspaceId: 'WS-42',
+    });
+    expect(rowOf(r, 2)[0]?.card.paneFact).toEqual({kind: 'none'});
+    expect(inboxJson(r)).toMatchObject({
+      openPanesWithoutRequest: {count: 1, ok: true},
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// j8q3e.6: an untracked card names only the files its own session wrote
+// ---------------------------------------------------------------------------
+
+describe('uncommitted files are attributed to the session that wrote them (j8q3e.6, end to end)', () => {
+  let sb2: Sandbox;
+  let env2: Record<string, string | undefined>;
+  let dev2: string;
+  let shared: string;
+  let agent: string;
+  const A = 11; // wrote notes.md (never committed)
+  const B = 12; // wrote nothing in the checkout
+  const C = 13; // wrote config.json BEFORE it was committed
+  const D = 14; // wrote config.json AFTER it was committed
+  const E = 15; // its transcript cannot be read for writes
+  const F = 16; // only READ config.json (cat, jq, git diff), after its commit
+
+  beforeAll(() => {
+    sb2 = createSandbox();
+    dev2 = join(sb2.path, 'Dev');
+    const xdg = join(sb2.path, 'xdg');
+    writeFile(
+      join(xdg, 'justin-sdk', 'config.json'),
+      JSON.stringify({
+        componentConfig: {thread: {enabled: true, sessionBeads: true}},
+      }),
+    );
+    env2 = {
+      CLAUDE_CODE_ENTRYPOINT: 'cli',
+      JUSTIN_SDK_HEALTH_NOTICES: 'off',
+      JUSTIN_THREADS_REPO_DIR: join(sb2.path, 'threads'),
+      JUSTIN_THREADS_STATE_DIR: join(sb2.path, 'state'),
+      JUSTIN_THREADS_TRANSCRIPTS_ROOT: join(sb2.path, 'projects'),
+      XDG_CONFIG_HOME: xdg,
+    };
+    shared = initRepo(sb2, 'Dev/shared', {'README.md': '# s\n'});
+    // C's write is dated before the commit below, which git dates now.
+    transcript(
+      C,
+      shared,
+      'Seed the config',
+      'Seeded.',
+      t('08:30'),
+      [
+        toolUse(
+          'Write',
+          {content: '{}\n', file_path: join(shared, 'config.json')},
+          '2020-01-01T00:00:00.000Z',
+        ),
+      ],
+      sb2.path,
+    );
+    write(shared, 'config.json', '{}\n');
+    git(shared, ['add', 'config.json']);
+    git(shared, ['commit', '-qm', 'config']);
+    // Dirty again, by D (dated after the commit), never by C.
+    write(shared, 'config.json', '{"a": 1}\n');
+    transcript(
+      D,
+      shared,
+      'Tune the config',
+      'Tuned.',
+      t('08:40'),
+      [
+        toolUse(
+          'Edit',
+          {
+            file_path: join(shared, 'config.json'),
+            new_string: '{"a": 1}',
+            old_string: '{}',
+          },
+          t('08:35'),
+        ),
+      ],
+      sb2.path,
+    );
+    // j8q3e.13 F3: F read config.json after its commit and wrote nothing.
+    transcript(
+      F,
+      shared,
+      'Show me the config',
+      'Here it is.',
+      t('08:50'),
+      [
+        toolUse('Bash', {command: 'cat config.json'}, t('08:45')),
+        toolUse(
+          'Bash',
+          {command: 'jq . config.json && git diff config.json'},
+          t('08:46'),
+        ),
+      ],
+      sb2.path,
+    );
+    write(shared, 'notes.md', 'mine\n');
+    transcript(
+      A,
+      shared,
+      'Write the notes',
+      'Wrote them.',
+      t('08:20'),
+      [
+        toolUse(
+          'Write',
+          {content: 'mine\n', file_path: join(shared, 'notes.md')},
+          t('08:10'),
+        ),
+      ],
+      sb2.path,
+    );
+    transcript(
+      B,
+      shared,
+      'What is in this repo?',
+      'A readme.',
+      t('08:15'),
+      [toolUse('Bash', {command: 'ls -la'}, t('08:12'))],
+      sb2.path,
+    );
+    // A file no session wrote: the checkout's own note, not anyone's card.
+    write(shared, 'other.txt', 'whose?\n');
+    transcript(E, shared, 'Look around', 'Looked.', t('08:05'), [], sb2.path);
+    agent = join(
+      sb2.path,
+      'projects',
+      shared.replace(/[^a-zA-Z0-9]/g, '-'),
+      sid(E),
+      'subagents',
+      'agent-x.jsonl',
+    );
+    writeFile(agent, '{}\n');
+    chmodSync(agent, 0o000);
+  });
+
+  afterAll(() => {
+    chmodSync(agent, 0o600);
+    sb2.cleanup();
+  });
+
+  async function read2(): Promise<InboxRead> {
+    const result = await readInbox({
+      cwd: shared,
+      days: 30,
+      devRoot: dev2,
+      env: env2,
+      now: NOW,
+      repo: null,
+    });
+    if (result.kind !== 'read') throw new Error(result.reason);
+    return result.read;
+  }
+
+  const rowFor = (r: InboxRead, n: number) =>
+    r.rows.find((row) => row.sessionId === sid(n));
+
+  test('AC2: the session that wrote the dirty file is told to commit it; the other session in the same checkout is not', async () => {
+    const r = await read2();
+    // B first: being blamed for another session's file is the defect.
+    expect(rowFor(r, B)?.untracked?.session.git.uncommitted).toEqual({
+      ok: true,
+      value: [],
+    });
+    expect(rowFor(r, B)?.untracked?.verdict.evidence).toEqual([]);
+    expect(rowFor(r, B)?.display).toBe('line');
+    expect(rowFor(r, A)?.card.action).toEqual({
+      command: null,
+      rule: 6,
+      text: 'Land it: commit the 1 uncommitted file on main',
+    });
+    expect(rowFor(r, A)?.untracked?.session.git.uncommitted).toEqual({
+      ok: true,
+      value: ['notes.md'],
+    });
+  });
+
+  test("AC3: a write older than the path's last commit is not blamed; a newer one is", async () => {
+    const r = await read2();
+    expect(rowFor(r, C)?.untracked?.session.git.uncommitted).toEqual({
+      ok: true,
+      value: [],
+    });
+    expect(rowFor(r, C)?.display).toBe('line');
+    expect(rowFor(r, D)?.untracked?.session.git.uncommitted).toEqual({
+      ok: true,
+      value: ['config.json'],
+    });
+    expect(rowFor(r, D)?.card.action.rule).toBe(6);
+  });
+
+  test('j8q3e.13 F3: a session that only ran cat, jq and git diff on the file after its commit is not blamed; the one that edited it is', async () => {
+    const r = await read2();
+    expect(rowFor(r, F)?.untracked?.session.git.uncommitted).toEqual({
+      ok: true,
+      value: [],
+    });
+    expect(rowFor(r, F)?.display).toBe('line');
+    expect(rowFor(r, D)?.untracked?.session.git.uncommitted).toEqual({
+      ok: true,
+      value: ['config.json'],
+    });
+  });
+
+  test('the dirt no transcript names is one note on the checkout, after the list; it claims only what the transcripts say (j8q3e.13 F4)', async () => {
+    const r = await read2();
+    expect(r.untracked.unattributed).toEqual([
+      {checkout: shared, paths: ['other.txt'], unchecked: 1},
+    ]);
+    const text = renderInbox(r, {
+      all: false,
+      days: 30,
+      now: NOW,
+      order: 'recent',
+      style: PLAIN_STYLE,
+      timeZone: 'UTC',
+    });
+    expect(text).toContain(
+      `${shared.replace(process.env.HOME ?? '', '~')}: 1 uncommitted file that no Not-tracked session's transcript names (other.txt); 1 session there could not be checked.`,
+    );
+    // F4: never a claim that no session wrote the files.
+    expect(text).toContain('transcript names');
+    expect(text).not.toMatch(/no session (?:under Not tracked )?wrote/u);
+  });
+
+  test('AC5: a transcript that cannot be read never yields "nothing written": the files are unattributed and it is Check it by hand', async () => {
+    const r = await read2();
+    const e = rowFor(r, E);
+    expect(e?.card.action.rule).toBe(10);
+    const uncommitted = e?.untracked?.session.git.uncommitted;
+    expect(uncommitted?.ok).toBe(false);
+    expect(uncommitted?.ok === false ? uncommitted.reason : '').toMatch(
+      /^the uncommitted files in .*\/Dev\/shared could not be attributed to this session: could not read .*agent-x\.jsonl/,
+    );
+    const fact = e?.card.facts.find((entry) => entry.label === 'Uncommitted');
+    expect(fact?.value).toMatch(/^unknown \(the uncommitted files in /);
+  });
+
+  test('AC4: an unrelated edit in the checkout between two runs leaves every untracked card the same', async () => {
+    const before = await read2();
+    write(shared, 'scratch-by-another-session.txt', 'live edit\n');
+    try {
+      const after = await read2();
+      const cards = (r: InboxRead) =>
+        Object.fromEntries(
+          r.rows
+            .filter((row) => !row.tracked)
+            .map((row) => [row.sessionId, row.card]),
+        );
+      expect(cards(after)).toEqual(cards(before));
+      // Only the checkout's note moved.
+      expect(after.untracked.unattributed[0]?.paths).toEqual([
+        'other.txt',
+        'scratch-by-another-session.txt',
+      ]);
+    } finally {
+      rmSync(join(shared, 'scratch-by-another-session.txt'), {force: true});
+    }
   });
 });

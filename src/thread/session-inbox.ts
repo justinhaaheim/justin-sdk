@@ -34,6 +34,15 @@
  * shown only with --all, in every order. `--flat` (the old "no repo groups")
  * is kept as an alias of the default.
  *
+ * EVERY CARD SAYS WHERE ITS PANE IS (home-base-j8q3e.7 D5-D8): the live
+ * pid/tty join of pane-join.ts, and since home-base-j8q3e.17 the status line
+ * confirmed by cmux's session file, run once per run (`lookupPanes`), and each
+ * card prints its select-workspace command, "none found by the pid/tty join or
+ * the status line", or "unknown (<reason>)" when a source could not check (a
+ * tracked card then adds the pane recorded at session start, labelled as
+ * recorded). The summary counts the open panes whose session has no request
+ * record, and the live Claude panes neither source could place.
+ *
  * NEVER DROPPED (rule 7): a session that cannot be loaded is a ❔ card under
  * "Check by hand", with what could not be read; index lines that do not parse
  * are counted and named at the end. Relative ages appear here (computed live)
@@ -41,6 +50,7 @@
  */
 
 import type {Field, OutputStyle} from '../cli-style';
+import type {PaneLookup, UnplacedKind} from './pane-join';
 import type {EnvLike} from './paths';
 import type {
   CardGit,
@@ -73,6 +83,7 @@ import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
 import {resolveRepoTag} from './config';
 import {readMessageLog} from './message-log';
+import {lookupPanes as lookupLivePanes, realPaneSources} from './pane-join';
 import {ageWords, tildeText} from './part-one';
 import {
   buildCard,
@@ -80,6 +91,7 @@ import {
   cardGit,
   deriveAction,
   INBOX_SECTIONS,
+  paneLineParts,
   sectionFor,
   sectionInfo,
   unreadableCard,
@@ -105,6 +117,9 @@ import {
 } from './session-untracked';
 
 export const INBOX_DEFAULT_DAYS = 30;
+
+/** Why a card's pane is unknown when the caller ran no lookup (j8q3e.7 D6). */
+export const PANES_NOT_LOOKED_UP = 'the pane lookup was not run';
 
 /** j8q3e.1 D5: newest first (the default), by D5 section, or by repo. */
 export type InboxOrder = 'recent' | 'repo' | 'status';
@@ -201,6 +216,8 @@ export interface InboxRead {
   indexPath: string;
   /** No index file yet (nothing ever recorded) — a measured answer. */
   missing: boolean;
+  /** j8q3e.7 D6: the run's live pane lookup, once, or why it failed. */
+  panes: PaneLookup;
   rows: InboxRow[];
   /**
    * F5 (home-base-j8q3e.1.10): sessions whose first message carries the
@@ -235,12 +252,15 @@ function isTestSession(row: InboxRow): boolean {
  * (`repeatKey`) become ONE line, at the newest one's place, carrying the
  * count. Only one-liners fold — a card is never hidden inside a count — and
  * the fold is over the whole list, not only neighbours: life's daily runs are
- * one a day, so other sessions sit between them (measured 2026-10-15).
+ * one a day, so other sessions sit between them (measured 2026-10-15). A line
+ * whose session has a live cmux pane (j8q3e.7 D7) never folds: a folded line
+ * cannot name each session's pane.
  */
 export function foldRepeats(rows: readonly InboxRow[]): InboxRow[] {
   const groups = new Map<string, InboxRow[]>();
   for (const row of [...rows].sort(byNewest)) {
     if (row.display !== 'line' || row.untracked == null) continue;
+    if (row.card.paneFact.kind === 'live') continue;
     const key = repeatKey(
       row.untracked.session.repo,
       row.untracked.session.firstMessage,
@@ -326,6 +346,12 @@ export async function readInbox(input: {
   /** D6: untracked sessions are listed only under this directory (~/Dev). */
   devRoot?: string;
   env: EnvLike;
+  /**
+   * j8q3e.7 D6: the live pane lookup, run once per inbox run. Omitted, no
+   * lookup runs and every card says its pane is unknown — `thread inbox`
+   * passes the real one; tests pass a fake; a hook (workspace naming) none.
+   */
+  lookupPanes?: () => Promise<PaneLookup>;
   now: Date;
   repo: string | null;
 }): Promise<
@@ -339,6 +365,11 @@ export async function readInbox(input: {
       reason: `the sessions index is unreadable: ${read.path}: ${read.error}`,
     };
   }
+  // Started first, so cmux and ps run while the sessions load.
+  const pendingPanes: Promise<PaneLookup> =
+    input.lookupPanes == null
+      ? Promise.resolve({ok: false, reason: PANES_NOT_LOOKED_UP})
+      : input.lookupPanes();
   // No index yet is a measured answer (no session bead was ever filed): there
   // are no tracked sessions, and every session is listed as untracked (D6).
   const index =
@@ -422,9 +453,10 @@ export async function readInbox(input: {
     now,
     repo: input.repo,
   });
-  const [loads, untracked] = await Promise.all([
+  const [loads, untracked, panes] = await Promise.all([
     pendingLoads,
     pendingUntracked,
+    pendingPanes,
   ]);
   for (const [position, candidate] of candidates.entries()) {
     const {activity, indexed, old, sighting} = candidate;
@@ -438,6 +470,7 @@ export async function readInbox(input: {
         card: unreadableCard({
           age: ageOf(activity, now),
           detail,
+          panes,
           repo: sighting.repo,
           repoTag: resolveRepoTag({
             cache: cache.repoTags,
@@ -502,6 +535,7 @@ export async function readInbox(input: {
         age: ageOf(lastActivityAt, now),
         counts,
         model,
+        panes,
         section,
         status,
         title,
@@ -525,7 +559,7 @@ export async function readInbox(input: {
   }
   for (const session of untracked.sessions) {
     const verdict = untrackedVerdict(session, now);
-    const card = untrackedCard(session, verdict, now);
+    const card = untrackedCard(session, verdict, now, panes);
     rows.push({
       card,
       display: verdict.display,
@@ -550,6 +584,7 @@ export async function readInbox(input: {
     failures: untracked.failures,
     oldReports: untracked.oldReports,
     outsideRoot: untracked.outsideRoot,
+    unattributed: untracked.unattributed,
     unplaced: untracked.unplaced,
   };
   const shaped = shapeRows(rows);
@@ -563,6 +598,7 @@ export async function readInbox(input: {
       hiddenByAge,
       indexPath: index.path,
       missing: read.kind === 'missing',
+      panes,
       rows: shaped.rows,
       testSessions: shaped.testSessions,
       untracked: untrackedRead,
@@ -615,11 +651,66 @@ export function inboxSummary(
     .filter((entry) => entry.count > 0);
 }
 
-/** A summary entry's value: the count, and for Not tracked what it holds. */
+/**
+ * A summary entry's value: the count, and for Not tracked what it holds
+ * (j8q3e.7 D4: a one-liner is "no request recorded", never "nothing open").
+ */
 function summaryValue(entry: {count: number; lines: number}): string {
   if (entry.lines === 0) return String(entry.count);
   const cards = entry.count - entry.lines;
-  return `${entry.count} (${cards} with something open or unreadable, ${entry.lines} with nothing open found)`;
+  return `${entry.count} (${cards} with something open or unreadable, ${entry.lines} with no request recorded)`;
+}
+
+/** j8q3e.7 D8's label: the panes Justin cannot yet close safely. */
+export const OPEN_PANES_LABEL = 'Open panes with no request record';
+
+/**
+ * j8q3e.7 D8: how many untracked sessions (no request record) a live cmux
+ * pane holds — a count, or why it is unknown.
+ */
+export function openPanesWithoutRequest(
+  rows: readonly InboxRow[],
+  panes: PaneLookup,
+): {count: number; ok: true} | {ok: false; reason: string} {
+  if (!panes.ok) return {ok: false, reason: panes.reason};
+  return {
+    count: rows.filter(
+      (row) => !row.tracked && row.card.paneFact.kind === 'live',
+    ).length,
+    ok: true,
+  };
+}
+
+/** j8q3e.17 D3's label: live Claude panes whose session no source could name. */
+export const UNPLACED_PANES_LABEL = 'Claude panes no source could place';
+
+const UNPLACED_WORDS: Record<UnplacedKind, string> = {
+  conflict: 'with an id another pane already holds',
+  noScreenId: 'with no session id on screen',
+  unconfirmedId: "with an id cmux's session file does not confirm",
+  unreadableScreen: 'whose screen could not be read',
+  unreadableSessionFile: "unchecked: cmux's session file could not be read",
+};
+
+/**
+ * j8q3e.17 D3: how many live Claude panes neither the pid/tty join nor the
+ * status line placed, by why; null when the lookup failed (the open-panes
+ * line already says unknown) or every Claude pane was placed.
+ */
+export function unplacedPanesValue(panes: PaneLookup): string | null {
+  if (!panes.ok || panes.statusLine.unplaced.length === 0) return null;
+  const byKind = new Map<UnplacedKind, number>();
+  for (const pane of panes.statusLine.unplaced) {
+    byKind.set(pane.kind, (byKind.get(pane.kind) ?? 0) + 1);
+  }
+  const parts = [...byKind.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([kind, count]) => `${count} ${UNPLACED_WORDS[kind]}`);
+  const failure =
+    panes.statusLine.failure == null
+      ? ''
+      : ` (${tildeText(panes.statusLine.failure)})`;
+  return `${panes.statusLine.unplaced.length}: ${parts.join(', ')}${failure}`;
 }
 
 /**
@@ -628,6 +719,28 @@ function summaryValue(entry: {count: number; lines: number}): string {
  */
 export function untrackedNotes(notes: InboxRead['untracked']): string[] {
   const lines: string[] = [];
+  // j8q3e.6 D3: a checkout's dirt that no untracked session's transcript
+  // names, once. j8q3e.13 F4: the words claim only what was checked. A
+  // session that ran `bun add`, `prettier --write .` or a code generator
+  // dirtied files without naming them, so "no session wrote" could be false.
+  for (const dirt of notes.unattributed) {
+    const files = plural(
+      dirt.paths.length,
+      'uncommitted file',
+      'uncommitted files',
+    );
+    const named =
+      dirt.paths.length <= 3
+        ? ` (${dirt.paths.map(tildeText).join(', ')})`
+        : '';
+    const unchecked =
+      dirt.unchecked > 0
+        ? `; ${plural(dirt.unchecked, 'session', 'sessions')} there could not be checked`
+        : '';
+    lines.push(
+      `${tildeText(dirt.checkout)}: ${files} that no Not-tracked session's transcript names${named}${unchecked}.`,
+    );
+  }
   const {outsideRoot} = notes;
   if (outsideRoot.sessions > 0) {
     lines.push(
@@ -731,7 +844,11 @@ function markdownCard(card: SessionCard, showSection: boolean): string {
     );
   }
   lines.push(`- **Resume:** \`${card.resume}\``);
-  if (card.pane != null) lines.push(`- **Pane:** \`${card.pane}\``);
+  // j8q3e.7 D7: every card says where its pane is, or why that is unknown.
+  const pane = paneLineParts(card.paneFact);
+  lines.push(
+    `- **Pane:** ${pane.before}${pane.command == null ? '' : `\`${pane.command}\``}${pane.after}`,
+  );
   return [
     `**${headingText(card)}**${card.age == null ? '' : ` (${card.age})`}`,
     lines.join('\n'),
@@ -787,7 +904,11 @@ function ansiCard(
     });
   }
   fields.push({label: 'Resume', value: code(card.resume)});
-  if (card.pane != null) fields.push({label: 'Pane', value: code(card.pane)});
+  const pane = paneLineParts(card.paneFact);
+  fields.push({
+    label: 'Pane',
+    value: `${pane.before}${pane.command == null ? '' : code(pane.command)}${pane.after}`,
+  });
   const heading = `${paint(headingText(card), ['bold'], color)}${card.age == null ? '' : `  ${paint(`(${card.age})`, ['dim'], color)}`}`;
   return [
     wrapHanging(heading, {hang: BODY_COLUMN + 3, indent: BODY_COLUMN, width}),
@@ -903,6 +1024,19 @@ export function renderInbox(
       label: `${entry.emoji} ${entry.title}`,
       value: summaryValue(entry),
     }));
+    // j8q3e.7 D8: the panes he cannot yet close safely.
+    const openPanes = openPanesWithoutRequest(visible, read.panes);
+    fields.push({
+      label: `🪟 ${OPEN_PANES_LABEL}`,
+      value: openPanes.ok
+        ? String(openPanes.count)
+        : `unknown (${tildeText(openPanes.reason)})`,
+    });
+    // j8q3e.17 D3: panes whose session no source could name, said once.
+    const unplaced = unplacedPanesValue(read.panes);
+    if (unplaced != null) {
+      fields.push({label: `🪟 ${UNPLACED_PANES_LABEL}`, value: unplaced});
+    }
     blocks.push(
       style.color
         ? fieldLines(fields, {
@@ -1019,6 +1153,27 @@ export function inboxJson(read: InboxRead) {
     hiddenByAge: read.hiddenByAge,
     indexPath: read.indexPath,
     missing: read.missing,
+    // j8q3e.7 D6/D8: how the panes were looked up (the Map would print as
+    // `{}`, which reads as "no panes"), and the D8 count.
+    openPanesWithoutRequest: openPanesWithoutRequest(sorted, read.panes),
+    // j8q3e.17 D2/D3: how many each source placed, and the Claude panes
+    // neither placed, each with why.
+    panes: read.panes.ok
+      ? {
+          ok: true,
+          sessions: read.panes.bySession.size,
+          statusLineFailure: read.panes.statusLine.failure,
+          statusLineSessions: [...read.panes.bySession.values()].filter(
+            (pane) => pane.source === 'status-line',
+          ).length,
+          unplaced: read.panes.statusLine.unplaced.map((pane) => ({
+            detail: pane.detail,
+            kind: pane.kind,
+            surface: pane.surface.ref,
+            surfaceId: pane.surface.id ?? null,
+          })),
+        }
+      : {ok: false, reason: read.panes.reason},
     sessions: sorted.map((row) => ({
       action: row.card.action,
       card: row.card,
@@ -1091,6 +1246,8 @@ export interface ThreadInboxOptions {
   days: number;
   env?: EnvLike;
   json: boolean;
+  /** Default: the real lookup (cmux, ps, the hook store). */
+  lookupPanes?: () => Promise<PaneLookup>;
   now?: Date;
   order: InboxOrder;
   repo: string | null;
@@ -1109,7 +1266,17 @@ export async function runSessionInbox(
     Number.isFinite(options.days) && options.days > 0
       ? options.days
       : INBOX_DEFAULT_DAYS;
-  const result = await readInbox({cwd, days, env, now, repo: options.repo});
+  const result = await readInbox({
+    cwd,
+    days,
+    env,
+    // j8q3e.7 D6: the live pane lookup, once per run (tests inject theirs).
+    lookupPanes:
+      options.lookupPanes ??
+      (async () => await lookupLivePanes(realPaneSources(env))),
+    now,
+    repo: options.repo,
+  });
   if (result.kind === 'failed') {
     console.error(`thread inbox: ${result.reason}`);
     return 1;

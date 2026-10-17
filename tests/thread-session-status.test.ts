@@ -24,7 +24,7 @@ import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, test} from 'bun:test';
 import {execFileSync} from 'child_process';
-import {mkdirSync, rmSync, writeFileSync} from 'fs';
+import {mkdirSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {dirname, join} from 'path';
 
 import {brClose, brCreate, brShow, runBr} from '../src/beads/br';
@@ -908,7 +908,7 @@ describe('fixture 1: a question-only session', () => {
     expect(load.model.git.uncommitted).toEqual(measured([]));
     expect(load.model.transcript.contextTokens).toEqual(measured(41_200));
     expect(load.status).toEqual({kind: 'answered'});
-    expect(whatToMark(load.model, load.status)).toEqual([]);
+    expect(whatToMark(load.model, load.status, load.created)).toEqual([]);
   });
 
   test('Part 1 snapshot, markdown and ANSI', async () => {
@@ -1363,7 +1363,7 @@ describe('whatToMark', () => {
     // The yield would be ⚠️: G2's entry (home-base-vzwbj.4.16) supersedes
     // requestChildrenClosed and carries it as childrenAllClosed.
     expect(load.status.kind).toBe('openWork');
-    const marks = whatToMark(load.model, load.status);
+    const marks = whatToMark(load.model, load.status, load.created);
     expect(
       marks.map((mark) => [
         mark.kind,
@@ -1372,9 +1372,11 @@ describe('whatToMark', () => {
     ).toEqual([['requestOpenNoBlocker', true]]);
     // Under any other verdict, requestChildrenClosed fires as before.
     expect(
-      whatToMark(load.model, {by: 'requests', kind: 'done', reason: null}).map(
-        (mark) => mark.kind,
-      ),
+      whatToMark(
+        load.model,
+        {by: 'requests', kind: 'done', reason: null},
+        load.created,
+      ).map((mark) => mark.kind),
     ).toEqual(['requestChildrenClosed']);
     const out = renderThreadStatus(load, {
       now: NOW,
@@ -1412,7 +1414,9 @@ describe('whatToMark', () => {
     );
     const load = await report(w, true);
     expect(
-      whatToMark(load.model, load.status).map((mark) => mark.kind),
+      whatToMark(load.model, load.status, load.created).map(
+        (mark) => mark.kind,
+      ),
     ).toEqual(['noRequest', 'autoTitle']);
     const out = renderThreadStatus(load, {
       now: NOW,
@@ -1432,12 +1436,344 @@ describe('whatToMark', () => {
     const w = questionOnly();
     writeFileSync(join(w.repo, 'scratch.ts'), 'x\n');
     const load = await report(w, true);
-    expect(whatToMark(load.model, load.status)[0]).toEqual({
+    expect(whatToMark(load.model, load.status, load.created)[0]).toEqual({
       commits: 0,
       kind: 'noRequest',
       uncommitted: 1,
       unmatchedCommits: 0,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What to mark: beads this session created (home-base-vzwbj.4.19 D2, D3)
+// ---------------------------------------------------------------------------
+
+describe('whatToMark: beads this session created with br create', () => {
+  const HOOKS_REQUEST =
+    'Think through how hooks are managed across projects: keep per-repo hook entries, or go back to a justin-sdk plugin';
+  const DECISION =
+    'Decide how Claude Code hooks reach every repo: one config-driven dispatcher, a plugin, or per-repo entries as now';
+
+  /**
+   * The tool_use + tool_result of one `br create`, as Claude Code records it.
+   * `at` is when the call ran: a real br stamps the bead's created_at with the
+   * real clock, and j8q3e.13 F6 checks the bead was made in the call's window,
+   * so a test that files real beads passes the time it filed them.
+   */
+  function brCreateCall(
+    w: World,
+    input: {at?: string; command: string; id: string; output: string},
+  ): object[] {
+    const callAt = input.at ?? '2030-01-01T09:20:00.000Z';
+    return bashCallRecords({
+      at: callAt,
+      command: input.command,
+      cwd: w.repo,
+      endAt: new Date(Date.parse(callAt) + 1000).toISOString(),
+      id: input.id,
+      output: input.output,
+      sessionId: SESSION,
+    });
+  }
+
+  /**
+   * Session 7a59f2e5's shape (2026-10-17): one "think through" request,
+   * answered and closed; the decision filed with a plain `br create`, linked
+   * to nothing; and a bead some OTHER session filed, which must not be named.
+   */
+  async function sevenA59Shape(): Promise<{
+    decision: string;
+    other: string;
+    request: string;
+    w: World;
+  }> {
+    const w = world({firstPrompt: HOOKS_REQUEST});
+    writeLog(w, [
+      user('09:00', w.repo, HOOKS_REQUEST),
+      claude('09:30', w.repo, 'Here is how hooks reach your repos today.'),
+    ]);
+    const filed = await fileRequest({
+      bead: null,
+      cwd: w.repo,
+      doneWhen: null,
+      env: w.env,
+      here: false,
+      now: NOW,
+      sessionId: null,
+      title: HOOKS_REQUEST,
+    });
+    if (filed.kind !== 'filed') throw new Error('request not filed');
+    brClose({cwd: w.repo}, filed.id, 'answered in the message');
+    const filedAt = new Date().toISOString();
+    const decision = brCreate({cwd: w.repo}, {title: DECISION, type: 'task'});
+    const other = brCreate(
+      {cwd: w.repo},
+      {title: 'A bead another session filed', type: 'task'},
+    );
+    if (decision.kind !== 'ok' || other.kind !== 'ok') {
+      throw new Error('beads not filed');
+    }
+    writeTranscript(
+      w,
+      w.repo,
+      '09:30',
+      41_200,
+      brCreateCall(w, {
+        at: filedAt,
+        command: `br create "${DECISION}" -t task -p 2`,
+        id: 'toolu_decision',
+        output: `✓ Created ${decision.id}: ${DECISION}`,
+      }),
+    );
+    return {decision: decision.id, other: other.id, request: filed.id, w};
+  }
+
+  test('AC2: the decision bead a br create made is named with the adopt command, and as undecided once every request is closed', async () => {
+    const {decision, other, request, w} = await sevenA59Shape();
+    const load = await report(w, true);
+    expect(load.model.beads.requests.map((node) => node.request.id)).toEqual([
+      request,
+    ]);
+    const marks = whatToMark(load.model, load.status, load.created);
+    expect(
+      marks.map((mark) => [mark.kind, 'bead' in mark ? mark.bead.id : null]),
+    ).toEqual([
+      ['adoptCandidate', decision],
+      ['undecided', decision],
+    ]);
+    const out = renderThreadStatus(load, {
+      now: NOW,
+      style: PLAIN_STYLE,
+      timeZone: TZ,
+    });
+    expect(out).toContain(
+      `- This session created ${decision} ("${DECISION}", open), which is not a request. If Justin asked for this, adopt it: \`bun run justin-sdk thread request --bead ${decision}\``,
+    );
+    expect(out).toContain(
+      `- Every request is closed, but "${DECISION}" (${decision}) is still undecided. If it decides work Justin wants, that work is an open request: \`bun run justin-sdk thread request "…"\``,
+    );
+    expect(out).not.toContain(other);
+    expect(out).not.toContain('Nothing to mark.');
+  });
+
+  test('AC2: adopting the bead with the printed command clears both lines', async () => {
+    const {decision, w} = await sevenA59Shape();
+    const adopted = await fileRequest({
+      bead: decision,
+      cwd: w.repo,
+      doneWhen: null,
+      env: w.env,
+      here: false,
+      now: NOW,
+      sessionId: null,
+      title: null,
+    });
+    if (adopted.kind !== 'filed') throw new Error(JSON.stringify(adopted));
+    const load = await report(w, true);
+    const kinds = whatToMark(load.model, load.status, load.created).map(
+      (mark) => mark.kind,
+    );
+    expect(kinds).not.toContain('adoptCandidate');
+    expect(kinds).not.toContain('undecided');
+    // Adopted, it is an open request: the ⚠️ entry for it says what to do.
+    expect(kinds).toEqual(['requestOpenNoBlocker']);
+  });
+
+  test('D2: a transcript that cannot be found is "could not check", never silence', async () => {
+    const w = questionOnly();
+    rmSync(join(w.sb.path, 'projects'), {force: true, recursive: true});
+    const load = await report(w, true);
+    const unchecked = whatToMark(load.model, load.status, load.created).find(
+      (mark) =>
+        mark.kind === 'unchecked' &&
+        mark.what === 'which beads this session created',
+    );
+    expect(unchecked?.kind === 'unchecked' ? unchecked.reason : null).toContain(
+      'could not look for the transcript',
+    );
+    expect(
+      renderThreadStatus(load, {now: NOW, style: PLAIN_STYLE, timeZone: TZ}),
+    ).toContain('⚠️ Could not check which beads this session created: ');
+  });
+
+  test('D2: an id no export holds is said, with the exports searched', async () => {
+    const w = questionOnly();
+    writeTranscript(
+      w,
+      w.repo,
+      '09:30',
+      41_200,
+      brCreateCall(w, {
+        command: 'br create "Filed in another repo" -t task --db /elsewhere.db',
+        id: 'toolu_elsewhere',
+        output: '✓ Created t-zzzz9: Filed in another repo',
+      }),
+    );
+    const load = await report(w, true);
+    const out = renderThreadStatus(load, {
+      now: NOW,
+      style: PLAIN_STYLE,
+      timeZone: TZ,
+    });
+    expect(normalize(out, w)).toContain(
+      '- ⚠️ Could not check whether t-zzzz9, created by this session with br create, is a request Justin asked for: it is not in <sandbox>/question-repo/.beads/issues.jsonl.',
+    );
+  });
+
+  test('D2: a bead under a request, or labelled request, is not listed; an epic and its child are one line', async () => {
+    const w = questionOnly();
+    const filed = await fileRequest({
+      bead: null,
+      cwd: w.repo,
+      doneWhen: null,
+      env: w.env,
+      here: false,
+      now: NOW,
+      sessionId: null,
+      title: 'Speed up the export',
+    });
+    if (filed.kind !== 'filed') throw new Error('request not filed');
+    const filedAt = new Date().toISOString();
+    const underRequest = brCreate(
+      {cwd: w.repo},
+      {parent: filed.id, title: 'Profile the export query', type: 'task'},
+    );
+    const labelled = brCreate(
+      {cwd: w.repo},
+      {labels: ['request'], title: 'Another session took this', type: 'task'},
+    );
+    const epic = brCreate(
+      {cwd: w.repo},
+      {title: 'Rework the export pipeline', type: 'epic'},
+    );
+    if (
+      underRequest.kind !== 'ok' ||
+      labelled.kind !== 'ok' ||
+      epic.kind !== 'ok'
+    ) {
+      throw new Error('beads not filed');
+    }
+    const task = brCreate(
+      {cwd: w.repo},
+      {parent: epic.id, title: 'Split the export job', type: 'task'},
+    );
+    if (task.kind !== 'ok') throw new Error('task not filed');
+    const calls = [underRequest.id, labelled.id, epic.id, task.id].flatMap(
+      (id, index) =>
+        brCreateCall(w, {
+          at: filedAt,
+          command: `br create "bead ${index}" -t task --silent`,
+          id: `toolu_${index}`,
+          output: `${id}\n`,
+        }),
+    );
+    writeTranscript(w, w.repo, '09:30', 41_200, calls);
+    const load = await report(w, true);
+    const marks = whatToMark(load.model, load.status, load.created).filter(
+      (mark) => mark.kind === 'adoptCandidate',
+    );
+    expect(
+      marks.map((mark) =>
+        mark.kind === 'adoptCandidate'
+          ? [mark.bead.id, mark.under.map((bead) => bead.id)]
+          : null,
+      ),
+    ).toEqual([[epic.id, [task.id]]]);
+    expect(
+      renderThreadStatus(load, {now: NOW, style: PLAIN_STYLE, timeZone: TZ}),
+    ).toContain(
+      `- This session created ${epic.id} ("Rework the export pipeline", open), which is not a request (nor is the bead this session filed under it). If Justin asked for this, adopt it:`,
+    );
+  });
+
+  test('j8q3e.13 F5: a br q call whose result is the bare id makes that id an adopt candidate', async () => {
+    const w = questionOnly();
+    const filedAt = new Date().toISOString();
+    const quick = brCreate({cwd: w.repo}, {title: 'Decide X', type: 'task'});
+    if (quick.kind !== 'ok') throw new Error('bead not filed');
+    // br q prints the id alone (measured 2026-10-17, session-created.ts).
+    writeTranscript(
+      w,
+      w.repo,
+      '09:30',
+      41_200,
+      brCreateCall(w, {
+        at: filedAt,
+        command: 'br q "Decide X"',
+        id: 'toolu_quick',
+        output: `${quick.id}\n`,
+      }),
+    );
+    const load = await report(w, true);
+    const marks = whatToMark(load.model, load.status, load.created);
+    expect(
+      marks
+        .filter((mark) => mark.kind === 'adoptCandidate')
+        .map((mark) => (mark.kind === 'adoptCandidate' ? mark.bead.id : null)),
+    ).toEqual([quick.id]);
+  });
+
+  test('j8q3e.13 F6: br create --json … && br show Y --json, with Y made a day earlier: Y is not an adopt candidate, and one line names it', async () => {
+    const w = questionOnly();
+    const older = brCreate({cwd: w.repo}, {title: 'Older bead', type: 'task'});
+    if (older.kind !== 'ok') throw new Error('bead not filed');
+    const filedAt = new Date().toISOString();
+    const made = brCreate({cwd: w.repo}, {title: 'New bead', type: 'task'});
+    if (made.kind !== 'ok') throw new Error('bead not filed');
+    // br cannot file a bead in the past, so Y's export line is backdated.
+    const exportPath = join(w.repo, '.beads', 'issues.jsonl');
+    const dayBefore = new Date(Date.parse(filedAt) - 86_400_000).toISOString();
+    writeFileSync(
+      exportPath,
+      readFileSync(exportPath, 'utf8')
+        .split('\n')
+        .map((line) =>
+          line.includes(`"id":"${older.id}"`)
+            ? JSON.stringify({
+                ...(JSON.parse(line) as object),
+                created_at: dayBefore,
+              })
+            : line,
+        )
+        .join('\n'),
+    );
+    writeTranscript(
+      w,
+      w.repo,
+      '09:30',
+      41_200,
+      brCreateCall(w, {
+        at: filedAt,
+        command: `br create "New bead" -t task --json && br show ${older.id} --json`,
+        id: 'toolu_json',
+        output: `{"id":"${made.id}","title":"New bead"}\n[{"id":"${older.id}","title":"Older bead"}]`,
+      }),
+    );
+    const load = await report(w, true);
+    const marks = whatToMark(load.model, load.status, load.created);
+    expect(
+      marks
+        .filter((mark) => mark.kind === 'adoptCandidate')
+        .map((mark) => (mark.kind === 'adoptCandidate' ? mark.bead.id : null)),
+    ).toEqual([made.id]);
+    const notThen = marks.find((mark) => mark.kind === 'createdNotThen');
+    expect(
+      notThen?.kind === 'createdNotThen'
+        ? notThen.beads.map((bead) => bead.id)
+        : null,
+    ).toEqual([older.id]);
+    const out = renderThreadStatus(load, {
+      now: NOW,
+      style: PLAIN_STYLE,
+      timeZone: TZ,
+    });
+    expect(out).toContain(
+      `- ℹ️ Named in the output of a br create in this session, but not created by it then, so not listed to adopt: ${older.id} (created ${dayBefore}`,
+    );
+    expect(out).not.toContain(
+      `adopt it: \`bun run justin-sdk thread request --bead ${older.id}\``,
+    );
   });
 });
 

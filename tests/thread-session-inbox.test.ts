@@ -346,6 +346,8 @@ describe('thread inbox: sections (j8q3e.1 D5)', () => {
         '- **🏃 Working:** 1',
         '- **🤝 Handed off or out of context:** 1',
         '- **💬 Answered:** 1',
+        // j8q3e.7 D8: this test runs no pane lookup.
+        '- **🪟 Open panes with no request record:** unknown (the pane lookup was not run)',
         '',
         '## 🕒 Sessions, newest first',
       ].join('\n'),

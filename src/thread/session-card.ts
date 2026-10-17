@@ -21,6 +21,7 @@
  * A count that could not be taken is said as unknown, never as 0.
  */
 
+import type {PaneLookup} from './pane-join';
 import type {MergeState, SessionModel} from './session-model';
 import type {SessionStatus, StatusCounts} from './session-status';
 import type {TreeIssue} from './session-tree';
@@ -28,6 +29,7 @@ import type {TreeIssue} from './session-tree';
 import {sdkRun} from '../sdk-invocation';
 import {ARCHIVED_PREFIX, oneLine, parseAsk} from './ask-format';
 import {sortAsks} from './ask-render';
+import {SHARED_PANE_REASON} from './pane-join';
 import {FIRST_MESSAGE_CUT, firstLineOf, tildeText} from './part-one';
 import {firstUserLine} from './session-model';
 import {isOpen, openQuestions, stageReached} from './session-status';
@@ -523,8 +525,14 @@ export interface SessionCard {
   facts: CardFact[];
   /** The open P1–P4 questions (D2 "Optional"), or null when there are none. */
   optional: OptionalLine | null;
-  /** The cmux pane, when one is recorded. */
+  /**
+   * The command that selects its cmux pane (`paneCommandOf`): the live one,
+   * else, when the live lookup failed, the one recorded at session start;
+   * null when neither. The threads TUI runs it on `o`.
+   */
   pane: string | null;
+  /** D7 (home-base-j8q3e.7): what the card's Pane line says. */
+  paneFact: PaneFact;
   repo: string | null;
   /**
    * The tag the heading's "[TAG] <title>" starts with, resolved from this
@@ -709,13 +717,131 @@ function youAskedOf(model: SessionModel): YouAsked {
   };
 }
 
-function paneOf(model: SessionModel): string | null {
-  if (model.cmux.workspace != null) {
-    return `cmux select-workspace --workspace ${model.cmux.workspace}`;
+// ---------------------------------------------------------------------------
+// The Pane line (home-base-j8q3e.7 D7)
+// ---------------------------------------------------------------------------
+
+/** The pane a session bead recorded when it was filed (its cmux labels). */
+export interface RecordedPane {
+  surface: string | null;
+  workspace: string | null;
+}
+
+/**
+ * D7: where a session's cmux pane is. `live` and `none` come from the run's
+ * live lookup (pane-join.ts); `unknown` is a lookup that failed, carrying the
+ * pane a tracked session recorded at its start (never presented as live: the
+ * labels are written once and go stale).
+ */
+export type PaneFact =
+  | {kind: 'live'; surfaceId: string; workspaceId: string}
+  | {kind: 'none'}
+  | {kind: 'unknown'; reason: string; recorded: RecordedPane | null};
+
+export function selectWorkspaceCommand(workspaceId: string): string {
+  return `cmux select-workspace --workspace ${workspaceId}`;
+}
+
+/** D7: the session's pane fact from the run's lookup. */
+export function paneFactOf(
+  panes: PaneLookup,
+  sessionId: string,
+  recorded: RecordedPane | null,
+): PaneFact {
+  const known =
+    recorded != null && (recorded.workspace != null || recorded.surface != null)
+      ? recorded
+      : null;
+  if (!panes.ok) {
+    return {kind: 'unknown', reason: panes.reason, recorded: known};
   }
-  return model.cmux.surface == null
-    ? null
-    : `cmux surface ${model.cmux.surface} (no workspace id recorded)`;
+  const live = panes.bySession.get(sessionId);
+  if (live != null) {
+    return {
+      kind: 'live',
+      surfaceId: live.surfaceId,
+      workspaceId: live.workspaceId,
+    };
+  }
+  // j8q3e.17 D3: "none" only when the status line could check too.
+  const {failure, unknownSessions} = panes.statusLine;
+  const why = failure ?? unknownSessions.get(sessionId) ?? null;
+  if (why != null) {
+    return {
+      kind: 'unknown',
+      // j8q3e.13 F8: a shared pane's reason says what the join found itself.
+      reason:
+        failure == null && why.startsWith(SHARED_PANE_REASON)
+          ? why
+          : `the pid/tty join found none, and the status line could not be checked: ${why}`,
+      recorded: known,
+    };
+  }
+  return {kind: 'none'};
+}
+
+/** j8q3e.17 D3: the Pane line for a session neither source placed. */
+export const PANE_NONE_FOUND =
+  'none found by the pid/tty join or the status line';
+
+/**
+ * The command that selects the pane, for `card.pane` (the threads TUI runs it
+ * on `o`): the live one; when the lookup failed, the one recorded at session
+ * start (what `card.pane` always was); null when there is neither, or the join
+ * found no live pane.
+ */
+export function paneCommandOf(fact: PaneFact): string | null {
+  if (fact.kind === 'live') return selectWorkspaceCommand(fact.workspaceId);
+  if (fact.kind === 'unknown' && fact.recorded?.workspace != null) {
+    return selectWorkspaceCommand(fact.recorded.workspace);
+  }
+  return null;
+}
+
+/**
+ * D7's words for the Pane line, in three parts so a renderer can style the
+ * command: `before`, the command (or null), `after`. The command's format is
+ * part-one.ts's Pane line: `cmux select-workspace --workspace <ws> (surface <id>)`.
+ */
+export function paneLineParts(fact: PaneFact): {
+  after: string;
+  before: string;
+  command: string | null;
+} {
+  switch (fact.kind) {
+    case 'live':
+      return {
+        after: ` (surface ${fact.surfaceId})`,
+        before: '',
+        command: selectWorkspaceCommand(fact.workspaceId),
+      };
+    case 'none':
+      return {
+        after: '',
+        before: PANE_NONE_FOUND,
+        command: null,
+      };
+    case 'unknown': {
+      const unknown = `unknown (${tildeText(fact.reason)})`;
+      const {recorded} = fact;
+      if (recorded?.workspace != null) {
+        return {
+          after:
+            recorded.surface == null ? '' : ` (surface ${recorded.surface})`,
+          before: `${unknown}; recorded at session start: `,
+          command: selectWorkspaceCommand(recorded.workspace),
+        };
+      }
+      if (recorded?.surface != null) {
+        return {
+          after: '',
+          before: `${unknown}; recorded at session start: cmux surface ${recorded.surface} (no workspace id recorded)`,
+          command: null,
+        };
+      }
+      return {after: '', before: unknown, command: null};
+    }
+  }
 }
 
 export interface CardInput {
@@ -723,6 +849,8 @@ export interface CardInput {
   age: string | null;
   counts: StatusCounts;
   model: SessionModel;
+  /** The run's live pane lookup (j8q3e.7 D6). */
+  panes: PaneLookup;
   section: InboxSection;
   status: SessionStatus;
   title: string;
@@ -733,6 +861,7 @@ export interface CardInput {
 /** D2: a loaded session's card. */
 export function buildCard(input: CardInput): SessionCard {
   const {action, counts, model, section, status} = input;
+  const paneFact = paneFactOf(input.panes, model.sessionId, model.cmux);
   const where = whereWords(status);
   const facts = gitFacts(model.git);
   // Rule 10 already says what could not be read; any other line would hide it.
@@ -746,7 +875,8 @@ export function buildCard(input: CardInput): SessionCard {
     emoji: where.split(' ')[0] ?? '❔',
     facts,
     optional: optionalLine(counts, model.sessionBeadId),
-    pane: paneOf(model),
+    pane: paneCommandOf(paneFact),
+    paneFact,
     repo: model.repo,
     repoTag: model.repoTag,
     resume: `claude --resume ${model.sessionId}`,
@@ -763,6 +893,8 @@ export function buildCard(input: CardInput): SessionCard {
 export function unreadableCard(input: {
   age: string | null;
   detail: string;
+  /** The run's live pane lookup (j8q3e.7 D7: every card prints Pane). */
+  panes: PaneLookup;
   repo: string | null;
   /** Resolved by the caller from the session's recorded checkout. */
   repoTag: string | null;
@@ -770,13 +902,15 @@ export function unreadableCard(input: {
   title: string;
 }): SessionCard {
   const info = sectionInfo('checkByHand');
+  const paneFact = paneFactOf(input.panes, input.sessionId, null);
   return {
     action: unreadableAction(input.detail),
     age: input.age,
     emoji: '❔',
     facts: [],
     optional: null,
-    pane: null,
+    pane: paneCommandOf(paneFact),
+    paneFact,
     repo: input.repo,
     repoTag: input.repoTag,
     resume: `claude --resume ${input.sessionId}`,

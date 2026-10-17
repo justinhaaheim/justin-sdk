@@ -306,12 +306,18 @@ Run it BEFORE YIELDING on a work turn (status report v4). It prints, in order:
       and the transcript, never typed
   What to mark — ONLY what cannot be derived: a request whose children are
       all closed but which is still open; commits or uncommitted edits with
-      no request filed; a session still titled with the first prompt's line
-      — or "Nothing to mark." When stopping would leave ⚠️ open work, one
-      entry per open request: close it (work done) or file the P0 that
-      blocks it / hand off (not done).
+      no request filed; a session still titled with the first prompt's line;
+      a bead this session filed with br create or br q that is not a request
+      (adopt it with thread request --bead <id> if Justin asked for it; an
+      id the call printed but did not create then is named, never offered);
+      when every request is closed, each open question or filed bead that
+      is still undecided — or "Nothing to mark." When stopping would leave
+      ⚠️ open work, one entry per open request: close it (work done) or
+      file the P0 that blocks it / hand off (not done).
       When a request is finished: br close <id> --reason "…". Your open
-      questions to Justin never keep it open.
+      questions to Justin never keep it open. A change is finished when it
+      exists or Justin declines it; a question when the answer is in your
+      message.
   If you stop now the inbox will say: <status> — for ⚠️ open work also what
       that leads to (Justin is told to resume the session) and the way out
 

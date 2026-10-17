@@ -222,6 +222,7 @@ describe('untrackedVerdict with helpers (F10)', () => {
   const session = (over: Partial<UntrackedSession>): UntrackedSession => ({
     checkout: '/dev/alpha',
     contextTokens: measured(40_000),
+    dirt: null,
     firstMessage: 'Build it',
     firstMessageAt: at('09:00'),
     git: {
@@ -267,7 +268,7 @@ describe('untrackedVerdict with helpers (F10)', () => {
     );
   });
 
-  test('no helper in flight: one line, nothing open found', () => {
+  test('no helper in flight: one line, no request recorded', () => {
     const verdict = untrackedVerdict(session({}), NOW);
     expect(verdict.evidence).toEqual([]);
     expect(verdict.display).toBe('line');
