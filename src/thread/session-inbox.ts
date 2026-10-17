@@ -440,6 +440,7 @@ export async function readInbox(input: {
           detail,
           repo: sighting.repo,
           repoTag: resolveRepoTag({
+            cache: cache.repoTags,
             checkout: sighting.checkoutPath,
             env,
             repo: sighting.repo,

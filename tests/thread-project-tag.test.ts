@@ -13,13 +13,24 @@ import type {InboxRead} from '../src/thread/session-inbox';
 import type {Sandbox} from './sandbox';
 
 import {afterAll, beforeAll, describe, expect, test} from 'bun:test';
-import {mkdirSync, utimesSync, writeFileSync} from 'fs';
-import {dirname, join} from 'path';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'fs';
+import {basename, dirname, join} from 'path';
 
 import {runBr} from '../src/beads/br';
 import {PLAIN_STYLE} from '../src/cli-style';
 import {messageLogPath} from '../src/thread/archive';
-import {resolveRepoTag, resolveThreadConfig} from '../src/thread/config';
+import {
+  primaryCheckoutOf,
+  resolveRepoTag,
+  resolveThreadConfig,
+} from '../src/thread/config';
 import {serializeMessageLine} from '../src/thread/message-log';
 import {partOneView, renderPartOne} from '../src/thread/part-one';
 import {ensureSessionBead} from '../src/thread/session-bead';
@@ -27,7 +38,7 @@ import {unreadableAction} from '../src/thread/session-card';
 import {handoffBlock} from '../src/thread/session-handoff';
 import {inboxJson, readInbox, renderInbox} from '../src/thread/session-inbox';
 import {untrackedLine} from '../src/thread/session-untracked';
-import {initRepo} from './git-fixtures';
+import {addLinkedWorktree, initRepo} from './git-fixtures';
 import {needBr} from './pinned-br';
 import {createSandbox} from './sandbox';
 
@@ -328,5 +339,127 @@ describe('Part 1 and the handoff block (AC 1)', () => {
     expect(block.text).toContain(
       `- **Session:** [AJ] ${title} (${beads[title] ?? ''})`,
     );
+  });
+});
+
+/**
+ * home-base-bomy5.7.2: a worktree that branched before its repo committed the
+ * tag has no `projectTag` in its own config, and must still show the repo's
+ * tag. The tag comes from the PRIMARY checkout; the session's own checkout and
+ * then the folder name are the fallbacks.
+ */
+describe('a worktree shows its PRIMARY checkout tag (home-base-bomy5.7.2)', () => {
+  const wt: Record<string, string> = {};
+  const IN_WORKTREE = '1b0c0000-1111-4222-8333-0000000000ee';
+
+  /** A linked worktree whose own justin-sdk.config.json is `config` (null: none). */
+  function worktree(primary: string, dest: string, config: object | null) {
+    addLinkedWorktree(primary, dest, basename(dest));
+    const file = join(dest, 'justin-sdk.config.json');
+    rmSync(file, {force: true});
+    if (config != null) writeFile(file, `${JSON.stringify(config)}\n`);
+    return dest;
+  }
+
+  beforeAll(() => {
+    const home = repos['home-base'] ?? '';
+    const aj = repos['audio-journal-1'] ?? '';
+    const plain = repos.plain ?? '';
+    const broken = repos.broken ?? '';
+    // The live case: branched before the tag commit, so its own file lacks it.
+    wt.underClaude = worktree(
+      home,
+      join(home, '.claude', 'worktrees', 'old-branch'),
+      {componentConfig: {thread: {enabled: true}}},
+    );
+    // Never created: a session whose worktree was removed.
+    wt.gone = join(aj, '.claude', 'worktrees', 'gone-branch');
+    // A linked worktree outside .claude/worktrees: only its .git file knows.
+    wt.elsewhere = worktree(aj, join(sb.path, 'elsewhere', 'aj-side'), {});
+    wt.plainOwnTag = worktree(
+      plain,
+      join(plain, '.claude', 'worktrees', 'own-tag'),
+      {projectTag: 'PW'},
+    );
+    wt.plainNoTag = worktree(
+      plain,
+      join(plain, '.claude', 'worktrees', 'no-tag'),
+      null,
+    );
+    wt.brokenOwnTag = worktree(
+      broken,
+      join(broken, '.claude', 'worktrees', 'own-tag'),
+      {projectTag: 'BRK'},
+    );
+    // An untracked session that ran in the HOME worktree.
+    transcript(IN_WORKTREE, wt.underClaude, 'Work in the old branch');
+  });
+
+  const tagOf = (checkout: string, repo: string): string =>
+    resolveRepoTag({checkout, env, repo});
+
+  test('a worktree under <primary>/.claude/worktrees whose own config lacks the key shows the primary tag', () => {
+    const own = resolveThreadConfig({cwd: wt.underClaude, env});
+    // The fixture is what the test claims: its own file declares no tag.
+    expect(own.projectRoot).toBe(wt.underClaude ?? '');
+    expect(own.projectTag).toBeNull();
+    expect(tagOf(wt.underClaude ?? '', 'home-base')).toBe('HOME');
+  });
+
+  test('a gone worktree path under .claude/worktrees shows the primary tag', () => {
+    expect(existsSync(wt.gone ?? '')).toBe(false);
+    expect(primaryCheckoutOf(wt.gone ?? '')).toBe(
+      repos['audio-journal-1'] ?? '',
+    );
+    expect(tagOf(wt.gone ?? '', 'audio-journal-1')).toBe('AJ');
+  });
+
+  test('a worktree outside .claude/worktrees is traced through its .git file to the primary', () => {
+    const dotGit = readFileSync(join(wt.elsewhere ?? '', '.git'), 'utf8');
+    expect(dotGit).toStartWith('gitdir: ');
+    expect(dotGit).toContain(join('.git', 'worktrees'));
+    expect(primaryCheckoutOf(wt.elsewhere ?? '')).toBe(
+      repos['audio-journal-1'] ?? '',
+    );
+    expect(tagOf(wt.elsewhere ?? '', 'audio-journal-1')).toBe('AJ');
+  });
+
+  test('a primary checkout is its own primary; a submodule-style gitdir is not traced', () => {
+    expect(primaryCheckoutOf(repos['home-base'] ?? '')).toBe(
+      repos['home-base'] ?? '',
+    );
+    const fake = join(sb.path, 'fake-submodule');
+    writeFile(join(fake, '.git'), 'gitdir: ../plain/.git/modules/fake\n');
+    expect(primaryCheckoutOf(fake)).toBe(fake);
+  });
+
+  test('a primary without the key falls back to the checkout config, then the folder name', () => {
+    expect(tagOf(wt.plainOwnTag ?? '', 'plain')).toBe('PW');
+    expect(tagOf(wt.plainNoTag ?? '', 'plain')).toBe('PLAIN');
+    // An INVALID primary tag is skipped the same way, and still reported.
+    expect(tagOf(wt.brokenOwnTag ?? '', 'broken')).toBe('BRK');
+    expect(
+      resolveThreadConfig({cwd: repos.broken, env}).problems.join('\n'),
+    ).toContain('"home base!"');
+  });
+
+  test('one cache reads each primary once', () => {
+    const cache = new Map<string, string | null>();
+    expect(
+      resolveRepoTag({cache, checkout: wt.underClaude ?? '', env, repo: 'x'}),
+    ).toBe('HOME');
+    expect([...cache]).toEqual([[repos['home-base'] ?? '', 'HOME']]);
+    // A cached answer is used as is: the file is not read again.
+    cache.set(repos['home-base'] ?? '', 'CACHED');
+    expect(
+      resolveRepoTag({cache, checkout: wt.underClaude ?? '', env, repo: 'x'}),
+    ).toBe('CACHED');
+  });
+
+  test('thread inbox --json: the session in the HOME worktree carries HOME, not HOME-BASE', async () => {
+    const json = inboxJson(await read());
+    const session = json.sessions.find((s) => s.sessionId === IN_WORKTREE);
+    expect(session?.card.repo).toBe('home-base');
+    expect(session?.card.repoTag).toBe('HOME');
   });
 });

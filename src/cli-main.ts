@@ -67,6 +67,9 @@ import {runTimeCheck} from './time-check';
 import {runUpdate} from './update';
 import {runUsageCheck} from './usage-check';
 import {worktreeNew} from './worktree-new';
+// By reference, like thread: command.ts imports only yargs TYPES and loads each
+// handler on demand (home-base-us739 D1).
+import {worktreeSalvageCommand} from './worktree-salvage/command';
 
 // Handled before yargs: `--skill` is a bare flag, and `demandCommand(1)` would
 // reject it. Mirrors the `tt --skill` convention.
@@ -1167,6 +1170,7 @@ void yargs(ARGV)
   .command(forensicsCommand)
   .command(threadCommand)
   .command(usageNowCommand)
+  .command(worktreeSalvageCommand)
   .demandCommand(1, 'Please specify a command')
   .strict()
   // The CLI reports its OWN failures (uxwc.5 F1). Without this, yargs' default

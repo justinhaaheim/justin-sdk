@@ -544,10 +544,12 @@ export type CheckoutGit =
 export interface LoadCache {
   checkouts: Map<string, Promise<CheckoutGit>>;
   exports: Map<string, ExportRead>;
+  /** Each directory's declared `projectTag`, for `resolveRepoTag` (bomy5.7.2). */
+  repoTags: Map<string, string | null>;
 }
 
 export function createLoadCache(): LoadCache {
-  return {checkouts: new Map(), exports: new Map()};
+  return {checkouts: new Map(), exports: new Map(), repoTags: new Map()};
 }
 
 async function measureCheckout(checkout: string): Promise<CheckoutGit> {
@@ -1028,7 +1030,12 @@ export async function loadSession(input: {
   const repo = created.repo ?? git.repo;
   // The tag, unlike the ladder, never falls back to the caller's directory: a
   // cross-repo inbox would print the caller's tag on every repo's sessions.
-  const repoTag = resolveRepoTag({checkout: git.checkout, env, repo});
+  const repoTag = resolveRepoTag({
+    ...(cache != null ? {cache: cache.repoTags} : {}),
+    checkout: git.checkout,
+    env,
+    repo,
+  });
 
   // The cmux ids are display-only pointers: an unreadable session bead (said
   // on the Session line) simply shows no pane line.

@@ -270,6 +270,11 @@ ${captureCommandList()}
 Run \`justin-sdk <cmd> --help\` for any command's flags.
 
 
+## Before removing a worktree by hand
+
+A worktree's uncommitted and untracked files exist nowhere else. Before any \`git worktree remove\`, \`rm -rf\` of a worktree or other hand cleanup, run \`bun run justin-sdk worktree-salvage save <worktree>\`: it copies every modified and untracked file, with a sha256-verified manifest, to the configured archive (\`~/.config/worktree-salvage/config.json\`), and lists the ignored paths it did not copy. Remove the worktree only after it prints Saved (or says there is nothing to save). \`worktree-salvage list\` shows every save by repo root and worktree; \`worktree-salvage restore <stamp dir> --into <checkout>\` puts one back, verifying each file. reclaim does this itself at \`reclaim inspect\` (epic home-base-us739).
+
+
 ## Gotchas that have cost real time
 
 - **beads is SPLIT across the fleet, on purpose.** Coding repos use beads_rust

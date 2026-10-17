@@ -20,7 +20,8 @@
 
 import type {EnvLike} from './paths';
 
-import {existsSync} from 'fs';
+import {existsSync, readFileSync, statSync} from 'fs';
+import {basename, dirname, join, resolve} from 'path';
 
 import {findProjectRoot} from '../health-notices';
 import {
@@ -415,38 +416,106 @@ export function resolveThreadConfig(
   };
 }
 
+/** Where Claude Code puts a repo's worktrees: `<primary>/.claude/worktrees/<name>`. */
+const CLAUDE_WORKTREES_SEGMENT = '/.claude/worktrees/';
+
+/**
+ * The repo's PRIMARY checkout for a session checkout (home-base-bomy5.7.2),
+ * found without spawning git:
+ *   1. a path containing "/.claude/worktrees/" → the prefix before it (a pure
+ *      string rule, so it also works for a worktree that is gone);
+ *   2. a checkout whose `.git` is a FILE reading
+ *      `gitdir: <primary>/.git/worktrees/<name>` → `<primary>`;
+ *   3. otherwise the checkout itself.
+ *
+ * Rule 3 also covers "could not tell" (no `.git`, an unreadable one, a gitdir
+ * that is a submodule's or a bare repo's): the tag then comes from the
+ * checkout's own config, which is what it did before this rule existed. The
+ * answer only picks which config file names the tag; nothing decides safety
+ * from it.
+ */
+export function primaryCheckoutOf(checkout: string): string {
+  const at = checkout.indexOf(CLAUDE_WORKTREES_SEGMENT);
+  if (at > 0) return checkout.slice(0, at);
+  const dotGit = join(checkout, '.git');
+  let text: string;
+  try {
+    if (!statSync(dotGit).isFile()) return checkout;
+    text = readFileSync(dotGit, 'utf8');
+  } catch {
+    return checkout;
+  }
+  const match = /^gitdir:\s*(.+?)\s*$/m.exec(text);
+  if (match?.[1] == null) return checkout;
+  const gitdir = resolve(checkout, match[1]);
+  const worktrees = dirname(gitdir);
+  const common = dirname(worktrees);
+  if (basename(worktrees) !== 'worktrees' || basename(common) !== '.git') {
+    return checkout;
+  }
+  return dirname(common);
+}
+
+/**
+ * One directory's declared `projectTag` (null: none, invalid, or no such
+ * directory), read once per directory when `cache` is given.
+ */
+function declaredTagAt(
+  dir: string,
+  env: EnvLike | undefined,
+  cache: Map<string, string | null> | undefined,
+): string | null {
+  if (cache?.has(dir) === true) return cache.get(dir) ?? null;
+  const declared = existsSync(dir)
+    ? resolveThreadConfig({cwd: dir, env}).projectTag
+    : null;
+  cache?.set(dir, declared);
+  return declared;
+}
+
 /**
  * The tag a session's name starts with (home-base-bomy5.7.1), read from THAT
- * session's checkout — never the caller's, so a cross-repo inbox shows each
- * repo's own tag. The declared `projectTag` when it is valid; otherwise the
- * repo folder name uppercased (a bad tag is also a config problem, which
- * `resolveThreadConfig` names); null only when the repo itself is unknown.
+ * session's repo — never the caller's, so a cross-repo inbox shows each repo's
+ * own tag. In order:
+ *   1. the `projectTag` of the repo's PRIMARY checkout (`primaryCheckoutOf`,
+ *      home-base-bomy5.7.2): one tag per project, so a worktree that branched
+ *      before the tag was committed still shows it;
+ *   2. the `projectTag` of the session's own checkout, when the primary
+ *      declares none (or is gone, or declares an invalid one);
+ *   3. the repo folder name uppercased.
+ * An invalid tag is skipped at its step and is also a config problem, which
+ * `resolveThreadConfig` names. Null only when the repo itself is unknown.
  *
- * A checkout that is gone (or null) has no file to read, so it falls back to
- * the folder name: that session's Checkout line already says it is gone.
+ * `cache` (one inbox build's, keyed by directory) reads each primary's config
+ * once however many sessions share it.
  */
 export function resolveRepoTag(input: {
+  cache?: Map<string, string | null>;
   checkout: string | null;
   env?: EnvLike;
   repo: string;
 }): string;
 export function resolveRepoTag(input: {
+  cache?: Map<string, string | null>;
   checkout: string | null;
   env?: EnvLike;
   repo: string | null;
 }): string | null;
 export function resolveRepoTag(input: {
+  cache?: Map<string, string | null>;
   checkout: string | null;
   env?: EnvLike;
   repo: string | null;
 }): string | null {
   if (input.repo == null) return null;
-  if (input.checkout != null && existsSync(input.checkout)) {
-    const declared = resolveThreadConfig({
-      cwd: input.checkout,
-      env: input.env,
-    }).projectTag;
-    if (declared != null) return declared;
+  if (input.checkout != null) {
+    const primary = primaryCheckoutOf(input.checkout);
+    const dirs =
+      primary === input.checkout ? [primary] : [primary, input.checkout];
+    for (const dir of dirs) {
+      const declared = declaredTagAt(dir, input.env, input.cache);
+      if (declared != null) return declared;
+    }
   }
   return input.repo.toUpperCase();
 }

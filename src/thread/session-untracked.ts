@@ -654,6 +654,7 @@ export async function readUntracked(input: {
       // The session's own checkout decides its tag (home-base-bomy5.7.1);
       // a checkout that is gone names it after the repo folder.
       const repoTag = resolveRepoTag({
+        cache: cache.repoTags,
         checkout: existsSync(configDir) ? configDir : null,
         env,
         repo: basename(repo.root),

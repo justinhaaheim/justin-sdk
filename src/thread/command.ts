@@ -18,6 +18,29 @@
 
 import type {Argv, CommandModule} from 'yargs';
 
+import {dirname} from 'node:path';
+
+import {helpHeader} from '../sdk-identity';
+
+const RESPAWN_SUMMARY =
+  'Continue this session in a fresh one with no keystroke: run `thread handoff`, write the block to a file, and start the successor in a new cmux workspace (home-base-1r6d.34.5). Run it from inside a cmux pane. Exit 0 successor started · 1 a step failed · 2 refused, nothing written.';
+
+const RESPAWN_NARRATIVE = `
+WHAT IT DOES, in order. Each failure exits non-zero and names the step.
+
+  1. Refuses (exit 2, nothing written) outside a cmux pane, without a session bead (as \`thread handoff\` does), or when cmux cannot be reached.
+  2. Runs \`thread handoff\`: labels the session bead handed-off, appends the note, builds the block.
+  3. Writes the block to <threads state dir>/handoffs/<session id>.md.
+  4. Opens a new cmux workspace in this session's checkout, running \`claude [--model <m>] [--settings <file>] '<kickoff>'\`. The kickoff tells the successor to read the block file and to run \`thread request --continues <this session's bead>\` first, which links the two sessions.
+  5. With --close-after N, closes THIS workspace N seconds later from a detached child, so the Bash call returns at once and the last message and Stop hook run first.
+  6. Prints what it did, ending with what you do next: write your last message and end the turn.
+
+KNOBS. --close-after defaults to 0 (off: the old pane stays open, idle). --successor-socket defaults to off.
+
+SANDBOX HINT. The Claude Code sandbox blocks the cmux socket. When cmux cannot be reached, the refusal prints the setting that allows it, {"sandbox":{"network":{"allowUnixSockets":["<socket path>"]}}}, for your Claude Code user settings. Otherwise retry the command with the sandbox disabled.
+
+WHY --successor-socket IS OFF. It passes that same setting to the successor with \`claude --settings\`. Justin's user settings have autoAllowBashIfSandboxed true, so with the socket allowed every sandboxed cmux command in the successor runs with no permission check at all, including \`cmux send\` into any other pane. Without the flag the successor gets no --settings.`;
+
 const PREPARE_NARRATIVE = `
 Run this BEFORE writing a report. It prints, in order:
 
@@ -678,6 +701,70 @@ export const threadCommand: CommandModule = {
               note: argv.note ?? null,
               sessionId: argv.session ?? null,
               to: argv.to ?? null,
+            }),
+          );
+        },
+      )
+      .command(
+        'respawn',
+        RESPAWN_SUMMARY,
+        (yy) =>
+          yy
+            // The same first line as `justin-sdk --help` (D4), built only
+            // when this command is chosen: sdk-identity reads package.json.
+            .usage(
+              `${helpHeader('justin-sdk', dirname(import.meta.dirname))}\n\n$0 thread respawn\n\n${RESPAWN_SUMMARY}`,
+            )
+            .epilogue(RESPAWN_NARRATIVE)
+            .option('note', {
+              describe:
+                'What the successor must know, one line (goes in the block and the session bead’s notes)',
+              type: 'string' as const,
+            })
+            .option('model', {
+              describe:
+                'The successor’s model (`claude --model`); default: claude’s own default',
+              type: 'string' as const,
+            })
+            .option('close-after', {
+              default: 0,
+              describe:
+                'Close THIS workspace N seconds after the successor starts, from a detached child, so the last message and Stop hook run first. 0 = off (the default): the old pane stays open.',
+              type: 'number' as const,
+            })
+            .option('kickoff', {
+              describe:
+                'An extra one-line instruction appended to the successor’s first message',
+              type: 'string' as const,
+            })
+            .option('successor-socket', {
+              default: false,
+              describe:
+                'Give the successor `claude --settings` allowing the cmux socket in its sandbox, so it can respawn sandboxed too. OFF by default: see below.',
+              type: 'boolean' as const,
+            })
+            .option('dry-run', {
+              default: false,
+              describe:
+                'Print every path, the cmux argument array and the kickoff; write nothing, spawn nothing',
+              type: 'boolean' as const,
+            })
+            .option('session', {
+              describe:
+                'Session id to hand off (default: $CLAUDE_CODE_SESSION_ID)',
+              type: 'string' as const,
+            }),
+        async (argv) => {
+          const {runThreadRespawn} = await import('./respawn');
+          process.exit(
+            await runThreadRespawn({
+              closeAfter: argv['close-after'],
+              dryRun: argv['dry-run'] === true,
+              kickoff: argv.kickoff ?? null,
+              model: argv.model ?? null,
+              note: argv.note ?? null,
+              sessionId: argv.session ?? null,
+              successorSocket: argv['successor-socket'] === true,
             }),
           );
         },

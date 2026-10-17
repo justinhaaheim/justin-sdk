@@ -192,6 +192,10 @@ export const SELECT_COMMANDS = [
  *  - `forensics` is read by AGENTS, not by a person (home-base-wxa4c D-W2):
  *    conductor and investigator sessions consume its output as evidence (one
  *    `forensics repo` run is ~500 KB of it), the same class as `thread`.
+ *  - `worktree-salvage` runs right before a worktree is removed, and its
+ *    `hook` mode (home-base-us739 D9) is a PreToolUse hook on ExitWorktree, so
+ *    it is in the hooks' class: an upgrade notice there is noise at the moment
+ *    a removal decision is being made.
  *
  * `--help` needs no entry: yargs resolves help BEFORE middleware runs
  * (measured 2026-09-10), so a notice can never reach it.
@@ -209,6 +213,7 @@ export const NEVER_COMMANDS = [
   'update',
   'usage-check',
   'usage-now',
+  'worktree-salvage',
 ] as const;
 
 /**
@@ -249,6 +254,7 @@ export const ALL_COMMANDS = [
   'usage-check',
   'usage-now',
   'worktree-new',
+  'worktree-salvage',
 ] as const;
 
 /**
