@@ -607,6 +607,73 @@ export function statusLineIdOf(text: string): string | null {
   return box == null ? null : screenSessionId(lines, box);
 }
 
+/**
+ * Where the pane's current state is drawn: everything after the last ⏺ (the
+ * bullet of Claude's latest message or tool call) above `end`, so a line from
+ * an earlier turn does not count. 0 when there is no ⏺. Moved here from
+ * scripts/pane-backfill-classify.ts with workingIndicator (home-base-yukaf.2);
+ * that module's dialogOnScreen imports it back.
+ */
+export function liveRegionStart(lines: readonly string[], end: number): number {
+  for (let index = end - 1; index >= 0; index -= 1) {
+    if ((lines[index] ?? '').startsWith('⏺')) return index + 1;
+  }
+  return 0;
+}
+
+const SPINNER_LINE = /^[·✢✳✶✻✽]\s+\S.*…/u;
+const WAITING_LINE = /^[·✢✳✶✻✽]\s+Waiting for \d+ background/u;
+const TOOL_RUNNING = /^\s+⎿\s+Running…/u;
+const ELAPSED_TOKENS =
+  /\((?:\d+h\s+)?(?:\d+m\s+)?\d+s\s+·\s+[↓↑]\s*[\d.]+[kKmM]?\s+tokens/u;
+const ESC_TO_INTERRUPT = /esc to interrupt/iu;
+
+/**
+ * The line that says Claude is working (mid-turn), or null when none does.
+ * ONE IMPLEMENTATION (home-base-yukaf.2, D-UNDO-SAFETY gate 2): moved here from
+ * scripts/pane-backfill-classify.ts, which imports it back, so pane-backfill
+ * and `thread open --undo` read "working" the same way. Measured on Claude
+ * Code 2.1.302 (see that module's header): a working pane shows a spinner
+ * glyph, a gerund and "…" directly above the box ("✢ Inferring… (2m 40s · ↓
+ * 9.8k tokens)"); a finished turn leaves "✻ Cooked for 38m 13s", with no "…".
+ */
+export function workingIndicator(lines: readonly string[]): string | null {
+  const box = findInputBox(lines);
+  const end = box?.top ?? lines.length;
+  const start = liveRegionStart(lines, end);
+  for (const line of lines.slice(start, end)) {
+    if (
+      SPINNER_LINE.test(line) ||
+      WAITING_LINE.test(line) ||
+      TOOL_RUNNING.test(line) ||
+      ELAPSED_TOKENS.test(line)
+    ) {
+      return line.trim();
+    }
+  }
+  for (const line of lines.slice(start)) {
+    if (ESC_TO_INTERRUPT.test(line)) return line.trim();
+  }
+  return null;
+}
+
+const SHELL_NAMES: ReadonlySet<string> = new Set([
+  'login',
+  'zsh',
+  '-zsh',
+  'bash',
+  '-bash',
+]);
+
+/**
+ * login and the shell itself; anything else on a tty is running. Moved here
+ * from scripts/cmux-arrange-close.ts (home-base-yukaf.2), which imports it
+ * back.
+ */
+export function isShellScaffolding(proc: Proc): boolean {
+  return SHELL_NAMES.has(proc.name);
+}
+
 /** One screen read: its text, or why cmux could not read it. */
 export type ScreenRead =
   | {kind: 'read'; text: string}
@@ -628,6 +695,73 @@ export async function readScreen(
   }
   if (call.kind === 'failed') return {kind: 'unreadable', reason: call.reason};
   return {kind: 'read', text: call.stdout};
+}
+
+/** `lines` without its trailing empty lines. */
+function withoutTrailingBlank(lines: readonly string[]): string[] {
+  let end = lines.length;
+  while (end > 0 && (lines[end - 1] ?? '') === '') end -= 1;
+  return lines.slice(0, end);
+}
+
+/**
+ * F6 (home-base-yukaf.14), pure: the input box of a pane whose draft is
+ * taller than the screen, so the box's top rule and ❯ line scrolled off the
+ * viewport. `viewport` shows Justin's status row (`⌗ <uuid>`) but no box;
+ * `scrollback` is the same surface read with --scrollback. The box found in
+ * the scrollback counts only when it is the box on screen now: the viewport is
+ * the scrollback's last lines, the box's ❯ line is above that suffix, and its
+ * bottom rule is inside it. Anything else (a dialog in place of the box, an
+ * old box in the history, a screen that changed between the two reads) gives
+ * null, so the caller keeps what the viewport alone said.
+ */
+export function scrolledBoxText(
+  viewport: string,
+  scrollback: string,
+): string | null {
+  const shown = withoutTrailingBlank(screenLines(viewport));
+  const all = withoutTrailingBlank(screenLines(scrollback));
+  if (shown.length === 0 || findInputBox(shown) != null) return null;
+  if (!shown.some((line) => SCREEN_SESSION_ID.test(line))) return null;
+  const suffixStart = all.length - shown.length;
+  if (suffixStart <= 0) return null;
+  for (let index = 0; index < shown.length; index += 1) {
+    if (all[suffixStart + index] !== shown[index]) return null;
+  }
+  const box = findInputBox(all);
+  if (box == null || box.prompt >= suffixStart || box.bottom < suffixStart) {
+    return null;
+  }
+  return all.join('\n');
+}
+
+/**
+ * readScreen, plus F6: when the screen shows the status row but no input box,
+ * ONE more read with --scrollback, and the scrollback's text when
+ * scrolledBoxText accepts it. Read-only. A failed second read keeps the first.
+ */
+export async function readScreenForBox(
+  run: CmuxRunner,
+  ref: string,
+): Promise<ScreenRead> {
+  const first = await readScreen(run, ref);
+  if (first.kind !== 'read') return first;
+  const lines = screenLines(first.text);
+  if (
+    findInputBox(lines) != null ||
+    !lines.some((line) => SCREEN_SESSION_ID.test(line))
+  ) {
+    return first;
+  }
+  let call: Awaited<ReturnType<CmuxRunner>>;
+  try {
+    call = await run(['read-screen', '--surface', ref, '--scrollback']);
+  } catch {
+    return first;
+  }
+  if (call.kind === 'failed') return first;
+  const text = scrolledBoxText(first.text, call.stdout);
+  return text == null ? first : {kind: 'read', text};
 }
 
 // ---------------------------------------------------------------------------

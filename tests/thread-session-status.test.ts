@@ -51,6 +51,7 @@ import {loadSession, measured, unmeasured} from '../src/thread/session-model';
 import {
   cutMessage,
   loadSessionReport,
+  markLine,
   renderSessionShow,
   renderThreadStatus,
   routesToLegacyThread,
@@ -1540,6 +1541,8 @@ describe('whatToMark: beads this session created with br create', () => {
       marks.map((mark) => [mark.kind, 'bead' in mark ? mark.bead.id : null]),
     ).toEqual([
       ['adoptCandidate', decision],
+      // home-base-yukaf.3: every request closed → his first message, quoted.
+      ['allRequestsClosed', null],
       ['undecided', decision],
     ]);
     const out = renderThreadStatus(load, {
@@ -1773,6 +1776,128 @@ describe('whatToMark: beads this session created with br create', () => {
     );
     expect(out).not.toContain(
       `adopt it: \`bun run justin-sdk thread request --bead ${older.id}\``,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What to mark: every request closed (home-base-yukaf.3)
+// ---------------------------------------------------------------------------
+
+describe('whatToMark: every request closed quotes Justin’s first message', () => {
+  const FIRST = `Do some research for me on X, Y and Z.\n\nIf one of them fits, set it up for the sync job.`;
+
+  /** A session whose first message is `first`, with `titles` filed and `closed` of them closed. */
+  async function session(
+    first: string,
+    titles: string[],
+    closed: number,
+  ): Promise<World> {
+    const w = world({firstPrompt: first});
+    writeLog(w, [
+      user('09:00', w.repo, first),
+      claude('09:30', w.repo, 'Here is the comparison.'),
+    ]);
+    writeTranscript(w, w.repo, '09:30', 41_200);
+    for (const [index, title] of titles.entries()) {
+      const filed = await fileRequest({
+        bead: null,
+        cwd: w.repo,
+        doneWhen: null,
+        env: w.env,
+        here: false,
+        now: NOW,
+        sessionId: null,
+        title,
+      });
+      if (filed.kind !== 'filed') throw new Error('request not filed');
+      if (index < closed) brClose({cwd: w.repo}, filed.id, 'done');
+    }
+    return w;
+  }
+
+  function allClosed(load: Awaited<ReturnType<typeof report>>) {
+    return whatToMark(load.model, load.status, load.created).filter(
+      (mark) => mark.kind === 'allRequestsClosed',
+    );
+  }
+
+  test('one request, closed: the line quotes his first message, whitespace collapsed', async () => {
+    const w = await session(FIRST, ['Research X, Y and Z'], 1);
+    const load = await report(w, true);
+    expect(allClosed(load)).toEqual([
+      {
+        closedCount: 1,
+        firstMessage: measured(FIRST),
+        kind: 'allRequestsClosed',
+      },
+    ]);
+    const out = renderThreadStatus(load, {
+      now: NOW,
+      style: PLAIN_STYLE,
+      timeZone: TZ,
+    });
+    expect(out).toContain(
+      `- The one request is closed. Justin's first message was: "Do some research for me on X, Y and Z. If one of them fits, set it up for the sync job.". If anything he asked for there, or later, does not exist and is not answered in your message, it is still a request: \`bun run justin-sdk thread request "…"\``,
+    );
+    expect(out).not.toContain('Nothing to mark.');
+  });
+
+  test('two requests, both closed: "All 2 requests are closed", and a long message is cut at 300 characters', async () => {
+    const long = `${'word '.repeat(80)}END`;
+    const w = await session(long, ['First thing', 'Second thing'], 2);
+    const load = await report(w, true);
+    const [mark] = allClosed(load);
+    expect(mark?.kind === 'allRequestsClosed' ? mark.closedCount : null).toBe(
+      2,
+    );
+    const view = mark == null ? null : markLine(mark);
+    expect(view?.text).toStartWith(
+      `All 2 requests are closed. Justin's first message was: "${'word '.repeat(60).trimEnd()}…". If anything he asked for there`,
+    );
+    expect(view?.text).not.toContain('END');
+  });
+
+  test('absent while a request is open, and in a session with no request', async () => {
+    const open = await session(FIRST, ['First thing', 'Second thing'], 1);
+    expect(allClosed(await report(open, true))).toEqual([]);
+    expect(allClosed(await report(questionOnly(), true))).toEqual([]);
+  });
+
+  test('rule 7: an unreadable message log is said, never dropped', async () => {
+    const w = await session(FIRST, ['Research X, Y and Z'], 1);
+    const logPath = messageLogPath(SESSION, w.env);
+    rmSync(logPath, {force: true});
+    mkdirSync(logPath); // a directory: the read fails
+    const load = await report(w, true);
+    const [mark] = allClosed(load);
+    expect(mark?.kind).toBe('allRequestsClosed');
+    expect(
+      mark?.kind === 'allRequestsClosed' ? mark.firstMessage.ok : null,
+    ).toBe(false);
+    const out = renderThreadStatus(load, {
+      now: NOW,
+      style: PLAIN_STYLE,
+      timeZone: TZ,
+    });
+    expect(out).toContain(
+      `- ⚠️ The one request is closed, but Justin's first message could not be read (`,
+    );
+    expect(out).toContain(logPath);
+    expect(out).toContain(
+      'Read it in the transcript. If anything he asked for there, or later, does not exist and is not answered in your message, it is still a request: `bun run justin-sdk thread request "…"`',
+    );
+  });
+
+  test('a log with no message from Justin says so', () => {
+    expect(
+      markLine({
+        closedCount: 3,
+        firstMessage: measured(null),
+        kind: 'allRequestsClosed',
+      }).text,
+    ).toStartWith(
+      '⚠️ All 3 requests are closed, but the message log holds no message from Justin, so his first message cannot be quoted. Read it in the transcript. If anything he asked for there, or later, does not exist and is not answered in your message, it is still a request:',
     );
   });
 });

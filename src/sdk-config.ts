@@ -36,6 +36,7 @@ import {
   THREAD_DEFAULT_AUTO_COMMIT,
   THREAD_DEFAULT_AUTO_PUSH,
   THREAD_DEFAULT_CAPTURE,
+  THREAD_DEFAULT_DASHBOARD_UI,
   THREAD_DEFAULT_EMOJI_HEADER,
   THREAD_DEFAULT_ENABLED,
   THREAD_DEFAULT_ENFORCE,
@@ -43,6 +44,8 @@ import {
   THREAD_DEFAULT_ENFORCE_MODE,
   THREAD_DEFAULT_NAME_WORKSPACES,
   THREAD_DEFAULT_NUDGE,
+  THREAD_DEFAULT_OPEN_SINCE,
+  THREAD_DEFAULT_PINNED_PROJECTS,
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
 } from './thread/defaults';
@@ -218,6 +221,12 @@ const componentConfigSchema = z
           .describe(
             'Whether the `thread capture` hooks installed by `justin-sdk add thread-hooks` record every user prompt (UserPromptSubmit) and every final Claude message (Stop) of a session (home-base-k0b8n.9, K10). DEFAULT TRUE, and gated by `enabled` as well: BOTH must be true. Each turn appends one line to ~/.local/state/justin-threads/messages/<sessionId>.jsonl (local only — never committed, never pushed) and a detached child keeps the thread bead’s last user message / last Claude response current, creating the bead if the session has none, so threads stay up to date whether or not a status report is ever written. Subagents, `claude -p` runs (CLAUDE_CODE_ENTRYPOINT=sdk-cli) and empty messages are never captured. The hook always exits 0 and prints nothing. Set it false in a repo’s justin-sdk.config.json to opt that repo out.',
           ),
+        dashboardUi: z
+          .enum(['tui', 'web'])
+          .optional()
+          .describe(
+            'Which dashboard `thread dashboard` opens (home-base-yukaf.11 D-WEB, built 2026-10-18). DEFAULT "tui": the full-screen terminal dashboard (`bun run threads` in home-base). "web" is the EXPERIMENT: a page on 127.0.0.1 (ephemeral port, a per-run token in the URL) listing the inbox sections as cards with Open in cmux / Archive / Done / Mark read or unread buttons. Each button names the session by id and session bead id plus the card’s version; the server re-reads the inbox and refuses (409, reason shown on the page) when the session is gone, its bead id differs or the card changed since the page showed it, and only then runs the same command the TUI key runs. Every action is logged to ~/.local/state/justin-threads/dashboard-web.jsonl. Overridden per run by `thread dashboard --web` / `--tui`.',
+          ),
         enabled: z
           .boolean()
           .optional()
@@ -254,6 +263,18 @@ const componentConfigSchema = z
           .optional()
           .describe(
             'STATUS REPORT V4 (home-base-vzwbj.4 D3, built 2026-10-11 by home-base-vzwbj.4.4). DEFAULT TRUE, but inert unless `sessionBeads` is on too. The PostToolUse hook `thread nudge` (matcher Bash, installed by thread-hooks) prints ONE line into Claude’s context — at most once per turn, never blocking — when a Bash command ran `git commit` and the session has no request in progress: "[thread] you committed but no request is in progress for this session — …". Set false to silence it.',
+          ),
+        openSince: z
+          .string()
+          .optional()
+          .describe(
+            'THREAD OPEN WINDOW (home-base-yukaf.22, built 2026-10-19). DEFAULT "7d". How far back `thread open` looks for unfinished sessions when neither --since nor --days is given: a whole number and h (hours), d (days) or w (weeks), like "24h", "3d", "2w". A value in any other shape is named as a config problem and ignored (the default applies). --since <duration> or --days <n> override it per run.',
+          ),
+        pinnedProjects: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'PINNED PROJECTS (home-base-yukaf.9 D-PINS, built 2026-10-18). DEFAULT []. Repo folder names (as `thread inbox` shows them, e.g. "home-base") that `thread inbox --by-repo` and the threads TUI’s "by repo" grouping (g) list first, in this order; the other repos follow, newest session first. Matched ignoring case; a pinned repo with no session in view adds nothing. A later config layer replaces the list. Only reorders: nothing is hidden or added.',
           ),
         render: z
           .looseObject({
@@ -581,12 +602,15 @@ export const DEFAULT_COMPONENT_CONFIG = {
     autoCommit: THREAD_DEFAULT_AUTO_COMMIT,
     autoPush: THREAD_DEFAULT_AUTO_PUSH,
     capture: THREAD_DEFAULT_CAPTURE,
+    dashboardUi: THREAD_DEFAULT_DASHBOARD_UI,
     enabled: THREAD_DEFAULT_ENABLED,
     enforce: THREAD_DEFAULT_ENFORCE,
     enforceMinTurnMinutes: THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
     enforceMode: THREAD_DEFAULT_ENFORCE_MODE,
     nameWorkspaces: THREAD_DEFAULT_NAME_WORKSPACES,
     nudge: THREAD_DEFAULT_NUDGE,
+    openSince: THREAD_DEFAULT_OPEN_SINCE,
+    pinnedProjects: THREAD_DEFAULT_PINNED_PROJECTS,
     render: {emojiHeader: THREAD_DEFAULT_EMOJI_HEADER},
     repoDir: '~/Dev/threads',
     sessionBeads: THREAD_DEFAULT_SESSION_BEADS,

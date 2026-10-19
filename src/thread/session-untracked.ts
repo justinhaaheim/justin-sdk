@@ -620,6 +620,7 @@ export function untrackedCard(
       oldTitle != null && !oldTitle.startsWith(UNTITLED_PREFIX)
         ? oldTitle
         : (session.firstMessage ?? '(no message of yours was captured)'),
+    unsent: null,
     youAsked: {firstMessage: session.firstMessage, kind: 'untracked'},
   };
 }

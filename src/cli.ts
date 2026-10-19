@@ -13,14 +13,15 @@
  * nudge`, 2026-10-11). So when argv is exactly `thread nudge` (optionally
  * `--explain`), the payload is read HERE:
  *
- *  - a Bash command that does not contain the word `commit` exits 0 silently.
- *    That is the full hook's own answer, not an approximation: the decision
- *    table is silent on "not a git commit", and isGitCommitCommand cannot match
- *    a command without that word (it only strips quoted text, then needs
- *    `git … commit`).
- *  - anything else (a commit, a payload this cannot read) goes to the full
- *    hook, runThreadNudgeHook, with the payload already read — stdin can be
- *    read only once.
+ *  - a Bash command that contains neither the word `commit` nor the word
+ *    `close` exits 0 silently. That is the full hook's own answer, not an
+ *    approximation: its two decision tables are silent on "not a git commit"
+ *    and "not a br close of a bead id", isGitCommitCommand cannot match a
+ *    command without `commit`, and brCloseIds (the last-request warning,
+ *    home-base-yukaf.3) cannot find an id without a `close` token.
+ *  - anything else (a commit, a close, a payload this cannot read) goes to the
+ *    full hook, runThreadNudgeHook, with the payload already read — stdin can
+ *    be read only once.
  *
  * Every other argv — `thread nudge --help` included — goes to cli-main.ts
  * untouched, so help still prints help and does nothing else.
@@ -30,10 +31,10 @@ import {readFileSync} from 'node:fs';
 
 /**
  * True only when the payload is a JSON object whose `tool_input.command` is a
- * string WITHOUT the word `commit`. Anything not provably that is false, and
- * the full hook decides.
+ * string WITHOUT the word `commit` and WITHOUT the word `close`. Anything not
+ * provably that is false, and the full hook decides.
  */
-function provablyNotACommit(raw: string): boolean {
+function provablySilent(raw: string): boolean {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -46,7 +47,11 @@ function provablyNotACommit(raw: string): boolean {
     input != null && typeof input === 'object'
       ? (input as {command?: unknown}).command
       : undefined;
-  return typeof command === 'string' && !command.includes('commit');
+  return (
+    typeof command === 'string' &&
+    !command.includes('commit') &&
+    !command.includes('close')
+  );
 }
 
 const argv = process.argv.slice(2);
@@ -62,10 +67,10 @@ if (
   } catch {
     raw = '';
   }
-  if (provablyNotACommit(raw)) {
+  if (provablySilent(raw)) {
     if (explain) {
       console.error(
-        'thread nudge: silent — not a git commit (fast path: the command tree was not loaded)',
+        'thread nudge: silent — not a git commit or a br close (fast path: the command tree was not loaded)',
       );
     }
     process.exit(0);

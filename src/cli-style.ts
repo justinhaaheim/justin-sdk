@@ -36,13 +36,19 @@
  * leak onto the indentation of the line below.
  */
 
-/** A style this module knows how to emit. `accent` is the section-header colour. */
+/**
+ * A style this module knows how to emit. `accent` is the section-header colour;
+ * `highlight` is the highlighter pen: black text on a yellow BACKGROUND, the one
+ * background style (home-base-yukaf.5, D-SEARCH-STYLE). Use `highlight()` rather
+ * than painting it directly, so piped output still marks the text.
+ */
 export type StyleName =
   | 'accent'
   | 'bold'
   | 'cyan'
   | 'dim'
   | 'green'
+  | 'highlight'
   | 'italic'
   | 'red'
   | 'underline'
@@ -87,6 +93,9 @@ const SGR: Record<StyleName, string> = {
   cyan: '36',
   dim: '2',
   green: '32',
+  // Yellow background (43), black foreground (30). Both are closed by the full
+  // reset `paint` always ends with; `applySgr` also understands 49.
+  highlight: '43;30',
   italic: '3',
   red: '31',
   underline: '4',
@@ -167,6 +176,24 @@ export function paint(
 ): string {
   if (!color || styles.length === 0 || text === '') return text;
   return `${ESC}${styles.map((style) => SGR[style]).join(';')}m${text}${RESET}`;
+}
+
+/** The marks around highlighted text when there is no colour to carry it. */
+export const HIGHLIGHT_OPEN = '»';
+export const HIGHLIGHT_CLOSE = '«';
+
+/**
+ * `text` as if run over with a highlighter: black on a yellow background when
+ * colour is on, and `»text«` when it is off (home-base-yukaf.5).
+ *
+ * Unlike `paint`, colour off does NOT mean unchanged. A highlight says WHERE
+ * something is (the match inside a snippet), and a piped reader — Claude, a
+ * file — still needs to know where, so the position survives as plain marks.
+ */
+export function highlight(text: string, color: boolean): string {
+  if (text === '') return text;
+  if (!color) return `${HIGHLIGHT_OPEN}${text}${HIGHLIGHT_CLOSE}`;
+  return paint(text, ['highlight'], true);
 }
 
 /**
@@ -299,6 +326,7 @@ interface Run {
 const SGR_PATTERN = new RegExp(`${ESC.replace('[', '\\[')}([0-9;]*)m`, 'gu');
 
 const FOREGROUND = /^(?:3[0-7]|9[0-7]|38)$/u;
+const BACKGROUND = /^(?:4[0-7]|10[0-7]|48)$/u;
 
 /** Apply one SGR parameter list to the active set. */
 function applySgr(active: string[], params: string): string[] {
@@ -310,6 +338,7 @@ function applySgr(active: string[], params: string): string[] {
     else if (code === '23') next = next.filter((c) => c !== '3');
     else if (code === '24') next = next.filter((c) => c !== '4');
     else if (code === '39') next = next.filter((c) => !FOREGROUND.test(c));
+    else if (code === '49') next = next.filter((c) => !BACKGROUND.test(c));
     else if (!next.includes(code)) next.push(code);
   }
   return next;

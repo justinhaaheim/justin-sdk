@@ -331,9 +331,55 @@ function requestOpenLines(
   };
 }
 
+/** How much of Justin's first message the all-closed line quotes. */
+export const FIRST_MESSAGE_CUT = 300;
+
+/** The first message as one line, cut at FIRST_MESSAGE_CUT characters. */
+export function firstMessageQuote(text: string): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length <= FIRST_MESSAGE_CUT
+    ? flat
+    : `${flat.slice(0, FIRST_MESSAGE_CUT).trimEnd()}…`;
+}
+
+/** home-base-yukaf.3: every request closed — check his first message first. */
+function allRequestsClosedLine(
+  item: Extract<MarkItem, {kind: 'allRequestsClosed'}>,
+): MarkView {
+  const closed =
+    item.closedCount === 1
+      ? 'The one request is closed'
+      : `All ${item.closedCount} requests are closed`;
+  const still =
+    'does not exist and is not answered in your message, it is still a request:';
+  const code = sdkRun('thread request "…"');
+  const first = item.firstMessage;
+  if (!first.ok) {
+    return {
+      code,
+      sub: [],
+      text: `⚠️ ${closed}, but Justin's first message could not be read (${first.reason}). Read it in the transcript. If anything he asked for there, or later, ${still}`,
+    };
+  }
+  if (first.value == null) {
+    return {
+      code,
+      sub: [],
+      text: `⚠️ ${closed}, but the message log holds no message from Justin, so his first message cannot be quoted. Read it in the transcript. If anything he asked for there, or later, ${still}`,
+    };
+  }
+  return {
+    code,
+    sub: [],
+    text: `${closed}. Justin's first message was: "${firstMessageQuote(first.value)}". If anything he asked for there, or later, ${still}`,
+  };
+}
+
 /** One "What to mark" entry, in plain words, with the command that fixes it. */
 export function markLine(item: MarkItem): MarkView {
   switch (item.kind) {
+    case 'allRequestsClosed':
+      return allRequestsClosedLine(item);
     case 'requestChildrenClosed':
       return {
         code: `br close ${item.request.id} --reason "…"`,

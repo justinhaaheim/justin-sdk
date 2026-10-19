@@ -39,6 +39,7 @@
  * a few hundred beads and the measured wall time is on home-base-k0b8n.2.
  */
 
+import type {Field} from '../cli-style';
 import type {BdIssue} from './bd';
 import type {MessageLine} from './message-log';
 import type {EnvLike} from './paths';
@@ -48,7 +49,11 @@ import {join} from 'path';
 
 import {
   BODY_COLUMN,
+  displayWidth,
+  fieldLabelWidth,
+  fieldLines,
   HEADER_COLUMN,
+  highlight,
   pad,
   paint,
   shouldStyle,
@@ -817,24 +822,87 @@ export function moreLine(result: SearchResult): string | null {
 }
 
 /**
- * ' (+N more fields: a, b)', or '' when only one field matched (F4).
+ * A matched field's name as the terminal shows it: every ` · ` the stored name
+ * carries becomes parentheses — `you · 2026-09-23 14:05` prints as
+ * `you (2026-09-23 14:05)`.
+ *
+ * DISPLAY ONLY (home-base-yukaf.5). The stored names keep their ` · ` because
+ * they are part of `--json` (`hit.field`, `matchedFields`), which must not
+ * change; the terminal must never show a `·`-joined value (Justin's terminal
+ * style rule), so the join is undone here and nowhere else.
+ */
+export function displayFieldName(field: string): string {
+  const [head = field, ...rest] = field.split(' · ');
+  return rest.length === 0 ? head : `${head} (${rest.join(', ')})`;
+}
+
+/**
+ * '+N more fields: a, b, c', or null when only one field matched (F4).
  *
  * N is the TRUE number of other fields; at most MATCHED_FIELDS_NAMED of them
  * are spelled out, with a '…' when the list was cut — a row whose phrase is in
  * twenty JSON paths of an archived report should say twenty, not print twenty.
  */
-export function moreFieldsSuffix(matchedFields: readonly string[]): string {
+export function moreFieldsText(
+  matchedFields: readonly string[],
+): string | null {
   const others = matchedFields.slice(1);
-  if (others.length === 0) return '';
-  const named = others.slice(0, MATCHED_FIELDS_NAMED);
+  if (others.length === 0) return null;
+  const named = others.slice(0, MATCHED_FIELDS_NAMED).map(displayFieldName);
   const cut = others.length > named.length ? ', …' : '';
-  return ` (+${others.length} more field${others.length === 1 ? '' : 's'}: ${named.join(', ')}${cut})`;
+  return `+${others.length} more field${others.length === 1 ? '' : 's'}: ${named.join(', ')}${cut}`;
+}
+
+/** Every label a result can print, so every result's values share one column. */
+const SEARCH_LABELS = [
+  'Repo',
+  'When',
+  'Session',
+  'Matched',
+  'Also in',
+  'Match',
+  'Resume',
+] as const;
+
+/** The label column: the widest `label:` plus two spaces (10 today). */
+export const SEARCH_LABEL_WIDTH = fieldLabelWidth(
+  SEARCH_LABELS.map((label) => ({label, value: ''})),
+);
+
+/**
+ * `3d (2026-10-15 14:05)`: the age first, then the date and time it counts
+ * from. Exported for the threads TUI's card of a search hit outside the inbox.
+ */
+export function whenValue(activityAt: string | null, now: Date): string | null {
+  if (activityAt == null) return null;
+  const at = new Date(activityAt);
+  if (Number.isNaN(at.getTime())) return null;
+  return `${formatAge(activityAt, now)} (${formatLocalDate(at)} ${formatLocalTime(at).slice(0, 5)})`;
 }
 
 /**
- * One row, man-page style (K11 rules 2–4): the header at the header column in
- * bold with the session id dim; under it at the body column the snippet (the
- * field name dim, the match bold) and the resume command in cyan. The header
+ * One result, man-page style (D-SEARCH-STYLE, home-base-yukaf.5). Justin,
+ * 2026-10-17: "don't put them one right after the other in a horizontal line …
+ * Put them stacked on top of each other", and a "highlighter type formatting"
+ * on the match.
+ *
+ *     ␣␣<title, bold>
+ *     ␣␣␣␣␣␣Repo:␣␣␣␣␣home-base
+ *     ␣␣␣␣␣␣When:␣␣␣␣␣3d (2026-10-15 14:05)
+ *     ␣␣␣␣␣␣Session:␣␣<id>
+ *     ␣␣␣␣␣␣Matched:␣␣<field>
+ *     ␣␣␣␣␣␣Also in:␣␣+2 more fields: a, b        (only when more matched)
+ *     ␣␣␣␣␣␣Match:
+ *     ␣␣␣␣␣␣␣␣␣␣␣␣␣␣␣␣…before <match> after…     (the value column, 1–3 lines)
+ *     ␣␣␣␣␣␣Resume:␣␣␣<command, cyan>
+ *
+ * Eight lines for a one-line snippet, eleven at most with `Also in` and a
+ * three-line snippet. THE SNIPPET HAS LINES OF ITS OWN under its label, in the
+ * value column: it is the one long value, and starting it on the label's line
+ * would leave it a narrow column beside a short stack. No line joins values
+ * with `·` (the stored field names that carry one go through
+ * displayFieldName). The match is black on yellow with colour on and `»…«`
+ * without (cli-style `highlight`). What is missing says so, dimmed. The title
  * and snippet hang-wrap on a terminal; the resume command NEVER wraps, because
  * a command broken across lines no longer pastes as one.
  */
@@ -845,22 +913,47 @@ export function renderSearchRow(
 ): string {
   const color = options.color === true;
   const width = options.width ?? null;
-  const heading = [
-    row.repo ?? '(repo unknown)',
-    formatAge(row.activityAt, now),
-    oneLine(row.title),
-  ].join(' · ');
-  const header = `${paint(heading, ['bold'], color)} · ${paint(row.sessionId ?? '(no session id)', ['dim'], color)}`;
+  const missing = (text: string): string => paint(text, ['dim'], color);
+  const label = (name: (typeof SEARCH_LABELS)[number]): string =>
+    `${paint(`${name}:`, ['bold'], color)}${pad(SEARCH_LABEL_WIDTH - displayWidth(`${name}:`))}`;
+  const valueColumn = BODY_COLUMN + SEARCH_LABEL_WIDTH;
+
+  const also = moreFieldsText(row.matchedFields);
+  const fields: Field[] = [
+    {label: 'Repo', value: row.repo ?? missing('no repo recorded')},
+    {
+      label: 'When',
+      value:
+        whenValue(row.activityAt, now) ?? missing('no activity date recorded'),
+    },
+    {label: 'Session', value: row.sessionId ?? missing('no session id')},
+    {label: 'Matched', value: displayFieldName(row.hit.field)},
+    ...(also == null ? [] : [{label: 'Also in', value: also}]),
+  ];
   const {after, before, match} = row.hit.snippet;
-  const snippet = `${paint(`${row.hit.field}:`, ['dim'], color)} ${before}${paint(match, ['bold'], color)}${after}${paint(moreFieldsSuffix(row.matchedFields), ['dim'], color)}`;
   const resume =
     row.resumeCommand == null
-      ? '(no resume command recorded)'
+      ? missing('no resume command recorded')
       : paint(row.resumeCommand, ['cyan'], color);
   return [
-    wrapHanging(header, {hang: BODY_COLUMN, indent: HEADER_COLUMN, width}),
-    wrapHanging(snippet, {hang: BODY_COLUMN, indent: BODY_COLUMN, width}),
-    `${pad(BODY_COLUMN)}${resume}`,
+    wrapHanging(paint(oneLine(row.title), ['bold'], color), {
+      hang: BODY_COLUMN,
+      indent: HEADER_COLUMN,
+      width,
+    }),
+    fieldLines(fields, {
+      color,
+      indent: BODY_COLUMN,
+      labelWidth: SEARCH_LABEL_WIDTH,
+      width,
+    }),
+    `${pad(BODY_COLUMN)}${paint('Match:', ['bold'], color)}`,
+    wrapHanging(`${before}${highlight(match, color)}${after}`, {
+      hang: valueColumn,
+      indent: valueColumn,
+      width,
+    }),
+    `${pad(BODY_COLUMN)}${label('Resume')}${resume}`,
   ].join('\n');
 }
 
@@ -873,18 +966,119 @@ export function incompleteLine(failures: readonly string[]): string {
 // The command
 // ---------------------------------------------------------------------------
 
-export interface SearchOptions {
-  color?: boolean;
+/** What `searchSessions` takes: the query and the window, nothing about printing. */
+export interface SearchSessionsOptions {
   days?: number | null;
   env?: EnvLike;
-  json?: boolean;
   limit?: number;
   now?: Date;
   query: string;
   regex?: boolean;
+}
+
+export interface SearchOptions extends SearchSessionsOptions {
+  color?: boolean;
+  json?: boolean;
   /** Wrap width; `terminalWidth()` when absent, null never wraps. */
   width?: number | null;
 }
+
+/**
+ * What one search found, or why it could not search at all.
+ *
+ * `ok: false` is a search that did not run (a bad regex, an unreadable bead
+ * store): there are no rows, and that is NOT a measured zero. `ok: true` with
+ * `complete: false` is a search that ran over part of the corpus: its rows are
+ * real, and `failures` names what it could not read (critical rule 7).
+ */
+export type SearchSessionsResult =
+  | {error: string; ok: false}
+  | {
+      complete: boolean;
+      counts: SearchCounts;
+      failures: string[];
+      ok: true;
+      result: SearchResult;
+    };
+
+/**
+ * The search pipeline without the printing (home-base-yukaf.10): the corpus,
+ * the window, the matching and the limit, exactly as `thread search` runs
+ * them, so another caller gets the rows `--json` prints. `thread search` is
+ * built on it.
+ */
+export async function searchSessions(
+  options: SearchSessionsOptions,
+): Promise<SearchSessionsResult> {
+  const env = options.env ?? process.env;
+  const now = options.now ?? new Date();
+
+  const compiled = compileQuery(options.query, {regex: options.regex});
+  if (!compiled.ok) {
+    // Before any read: nothing was searched, and the message is the engine's own
+    // so the user can see which character it choked on.
+    return {
+      error: `thread search: invalid regex /${options.query}/ — ${compiled.error}`,
+      ok: false,
+    };
+  }
+
+  const ctx = bdContext(env);
+  const threads = await listThreads(ctx, {includeClosed: true});
+  if (!threads.ok) {
+    return {
+      error: `thread search: could not read the thread beads — ${describeBdFailure(threads.failure)}`,
+      ok: false,
+    };
+  }
+
+  const archive = readArchivedReports(env);
+  const logs = readMessageLogs(env);
+  // A log that could not be read makes the search INCOMPLETE exactly as an
+  // unreadable archive does (rule 7): exit 2, never a calm "no matches".
+  const failures = [...archive.failures, ...logs.failures];
+  const corpus = withinWindow(
+    buildCorpus(threads.value, archive.files, logs.logs),
+    options.days ?? null,
+    now,
+  );
+  return {
+    complete: failures.length === 0,
+    counts: countCorpus(corpus),
+    failures,
+    ok: true,
+    result: searchCorpus(corpus, compiled.value, {limit: options.limit}),
+  };
+}
+
+/**
+ * The object `thread search --json` prints for a search that ran. The TUI's
+ * search schema (src/threads-dash/state.ts) must accept this type: its test
+ * assigns one to the other, so a change here fails `bun run ts-check` there.
+ */
+export function searchJson(
+  found: Extract<SearchSessionsResult, {ok: true}>,
+  options: SearchSessionsOptions,
+) {
+  return {
+    // BOTH archive numbers (F3): files, and the sessions they sit under.
+    archivedReportSessionsSearched: found.counts.archivedReportSessions,
+    archivedReportsSearched: found.counts.archivedReports,
+    complete: found.complete,
+    days: options.days ?? null,
+    failures: found.failures,
+    matched: found.result.matched,
+    messageLogsSearched: found.counts.messageLogs,
+    query: options.query,
+    regex: options.regex === true,
+    rows: found.result.rows,
+    sessionsSearched: found.counts.sessions,
+    shown: found.result.rows.length,
+    threadsSearched: found.counts.threads,
+  };
+}
+
+export type SearchJson = ReturnType<typeof searchJson>;
 
 /**
  * `justin-sdk thread search <query…>`.
@@ -894,67 +1088,22 @@ export interface SearchOptions {
  * incomplete is still finding something, and throwing it away would help nobody.
  */
 export async function runThreadSearch(options: SearchOptions): Promise<number> {
-  const env = options.env ?? process.env;
   const now = options.now ?? new Date();
   const json = options.json === true;
   const color = options.color ?? (json ? false : shouldStyle());
 
-  const compiled = compileQuery(options.query, {regex: options.regex});
-  if (!compiled.ok) {
-    // Before any read: nothing was searched, and the message is the engine's own
-    // so the user can see which character it choked on.
-    const line = `thread search: invalid regex /${options.query}/ — ${compiled.error}`;
-    if (json) console.log(JSON.stringify({error: line, ok: false}, null, 2));
-    else console.error(line);
+  const found = await searchSessions({...options, now});
+  if (!found.ok) {
+    if (json) {
+      console.log(JSON.stringify({error: found.error, ok: false}, null, 2));
+    } else console.error(found.error);
     return 2;
   }
-
-  const ctx = bdContext(env);
-  const threads = await listThreads(ctx, {includeClosed: true});
-  if (!threads.ok) {
-    const line = `thread search: could not read the thread beads — ${describeBdFailure(threads.failure)}`;
-    if (json) console.log(JSON.stringify({error: line, ok: false}, null, 2));
-    else console.error(line);
-    return 2;
-  }
-
-  const archive = readArchivedReports(env);
-  const logs = readMessageLogs(env);
-  // A log that could not be read makes the search INCOMPLETE exactly as an
-  // unreadable archive does (rule 7): exit 2, never a calm "no matches".
-  const corpusFailures = [...archive.failures, ...logs.failures];
-  const corpus = withinWindow(
-    buildCorpus(threads.value, archive.files, logs.logs),
-    options.days ?? null,
-    now,
-  );
-  const counts = countCorpus(corpus);
-  const result = searchCorpus(corpus, compiled.value, {limit: options.limit});
-  const complete = corpusFailures.length === 0;
+  const {complete, counts, result} = found;
+  const corpusFailures = found.failures;
 
   if (json) {
-    console.log(
-      JSON.stringify(
-        {
-          // BOTH archive numbers (F3): files, and the sessions they sit under.
-          archivedReportSessionsSearched: counts.archivedReportSessions,
-          archivedReportsSearched: counts.archivedReports,
-          complete,
-          days: options.days ?? null,
-          failures: corpusFailures,
-          matched: result.matched,
-          messageLogsSearched: counts.messageLogs,
-          query: options.query,
-          regex: options.regex === true,
-          rows: result.rows,
-          sessionsSearched: counts.sessions,
-          shown: result.rows.length,
-          threadsSearched: counts.threads,
-        },
-        null,
-        2,
-      ),
-    );
+    console.log(JSON.stringify(searchJson(found, options), null, 2));
     for (const failure of corpusFailures) console.error(`  ⚠️ ${failure}`);
     if (!complete) return 2;
     return result.rows.length > 0 ? 0 : 1;
@@ -988,7 +1137,16 @@ export async function runThreadSearch(options: SearchOptions): Promise<number> {
     return 2;
   }
   if (result.matched === 0) {
-    console.log(noMatchesLine(counts));
+    // At the header column with a blank line before it, like the more line
+    // (home-base-yukaf.5).
+    console.log('');
+    console.log(
+      wrapHanging(noMatchesLine(counts), {
+        hang: BODY_COLUMN,
+        indent: HEADER_COLUMN,
+        width,
+      }),
+    );
     return 1;
   }
   return 0;

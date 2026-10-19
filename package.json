@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.45.1",
+  "version": "0.46.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -17,6 +17,7 @@
     "measure:inbox": "bun scripts/measure-inbox.ts",
     "measure:session-line": "bun scripts/measure-session-line.ts",
     "measure:session-tree": "bun scripts/measure-session-tree.ts",
+    "measure:status-write": "bun scripts/measure-status-write.ts",
     "probe:bg-env": "bun scripts/probe-bg-env.ts",
     "probe:capture-entrypoint": "bun scripts/probe-capture-entrypoint.ts",
     "probe:capture-live": "bun scripts/probe-capture-live.ts",
@@ -28,7 +29,12 @@
     "./claude-usage": "./src/claude-usage.ts",
     "./cli-style": "./src/cli-style.ts",
     "./date": "./src/date.ts",
-    "./pane-join": "./src/thread/pane-join.ts"
+    "./input-drafts": "./src/thread/input-drafts.ts",
+    "./open-colors": "./src/thread/open-colors.ts",
+    "./pane-join": "./src/thread/pane-join.ts",
+    "./thread-status-file": "./src/thread/status-file.ts",
+    "./transcript-activity": "./src/thread/transcript-activity.ts",
+    "./workspace-close": "./src/thread/workspace-close.ts"
   },
   "files": [
     "src",

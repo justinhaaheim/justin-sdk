@@ -10,14 +10,20 @@
 import type {Sandbox} from './sandbox';
 
 import {afterAll, beforeAll, describe, expect, test} from 'bun:test';
-import {mkdirSync, rmSync, writeFileSync} from 'fs';
+import {mkdirSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {dirname, join} from 'path';
 
 import {brClose, brUpdate, runBr} from '../src/beads/br';
 import {PLAIN_STYLE} from '../src/cli-style';
 import {messageLogPath} from '../src/thread/archive';
 import {fileAsk} from '../src/thread/ask';
+import {
+  clearInputDraft,
+  inputDraftsDir,
+  writeInputDraft,
+} from '../src/thread/input-drafts';
 import {serializeMessageLine} from '../src/thread/message-log';
+import {appendReadMark, readMarksPath} from '../src/thread/read-marks';
 import {fileRequest} from '../src/thread/request';
 import {ensureSessionBead} from '../src/thread/session-bead';
 import {handOff} from '../src/thread/session-handoff';
@@ -260,6 +266,28 @@ beforeAll(async () => {
     log: '2029-11-01T09:00:00.000Z',
     record: '2029-11-01T09:05:00.000Z',
   });
+
+  // D-READ-STATE (home-base-yukaf.9): Justin has read every session up to its
+  // last assistant line except three. 1 he never marked; 3 he read BEFORE its
+  // newest assistant line; 5 he marked unread after reading it.
+  const readAt: Record<number, string> = {
+    2: t('08:00'),
+    3: t('10:00'),
+    4: t('07:00'),
+    5: t('09:00'),
+    6: t('06:00'),
+    7: t('05:00'),
+    8: t('04:00'),
+    9: '2029-11-01T09:00:00.000Z',
+  };
+  for (const [n, seen] of Object.entries(readAt)) {
+    const mark = {at: t('11:30'), seenAssistantAt: seen, sessionId: sid(+n)};
+    appendReadMark({...mark, mark: 'read'}, env);
+  }
+  appendReadMark(
+    {at: t('11:31'), mark: 'unread', seenAssistantAt: null, sessionId: sid(5)},
+    env,
+  );
 });
 
 afterAll(() => {
@@ -357,10 +385,11 @@ describe('thread inbox: sections (j8q3e.1 D5)', () => {
   test('by default ONE list, newest last activity first, each card naming its section; Done and Archived only with --all', async () => {
     const r = await read();
     const text = render(r);
+    // yukaf.9: ● on the three sessions with work since Justin last looked.
     expect(headings(text)).toEqual([
-      '**🏃 [BETA] Refactor the parser** (1 minute ago)',
-      '**🛑 [ALPHA] Write the export runbook** (1 hour ago)',
-      '**💬 [ALPHA] What does the importer do with blank rows?** (2 hours ago)',
+      '**● 🏃 [BETA] Refactor the parser** (1 minute ago)',
+      '**● 🛑 [ALPHA] Write the export runbook** (1 hour ago)',
+      '**● 💬 [ALPHA] What does the importer do with blank rows?** (2 hours ago)',
       '**⚠️ [ALPHA] Speed up the importer** (3 hours ago)',
       '**🤝 [BETA] Migrate the orders table** (4 hours ago)',
       // Its beads went with its checkout, so the title is unknown too.
@@ -409,8 +438,8 @@ describe('thread inbox: sections (j8q3e.1 D5)', () => {
       text.indexOf('## 📁 gone'),
     );
     expect(headings(alphaGroup)).toEqual([
-      '**🛑 [ALPHA] Write the export runbook** (1 hour ago)',
-      '**💬 [ALPHA] What does the importer do with blank rows?** (2 hours ago)',
+      '**● 🛑 [ALPHA] Write the export runbook** (1 hour ago)',
+      '**● 💬 [ALPHA] What does the importer do with blank rows?** (2 hours ago)',
       '**⚠️ [ALPHA] Speed up the importer** (3 hours ago)',
     ]);
   });
@@ -421,7 +450,7 @@ describe('thread inbox: sections (j8q3e.1 D5)', () => {
     const s5 = beads[sid(5)] ?? '';
     expect(text).toContain(
       [
-        '**🛑 [ALPHA] Write the export runbook** (1 hour ago)',
+        '**● 🛑 [ALPHA] Write the export runbook** (1 hour ago)',
         '',
         '- **Section:** 🛑 Needs you',
         '- **You asked:**',
@@ -449,6 +478,145 @@ describe('thread inbox: sections (j8q3e.1 D5)', () => {
   });
 });
 
+describe('thread inbox: unsent input-box text (home-base-yukaf.4, D-DRAFTS)', () => {
+  test('a stored, live draft puts its session first under ✍️, the card leads with the text, and --json carries inputDraft', async () => {
+    const draft = (n: number, text: string) =>
+      writeInputDraft(
+        {
+          at: t('11:30'),
+          sessionId: sid(n),
+          source: 'scan',
+          surfaceId: `SURF-${n}`,
+          text,
+          workspaceId: `WS-${n}`,
+        },
+        env,
+      );
+    try {
+      expect(draft(1, 'use the cron bucket\n  and tell me why').kind).toBe(
+        'written',
+      );
+      // Session 9 is outside the 30-day window: its draft keeps it listed.
+      expect(draft(9, 'x'.repeat(310)).kind).toBe('written');
+      // Session 5's draft was cleared: it stays where it was.
+      expect(draft(5, 'already handled').kind).toBe('written');
+      expect(clearInputDraft(sid(5), env, t('11:40')).kind).toBe('cleared');
+      // A draft for a session the inbox does not know: counted, never dropped.
+      writeInputDraft(
+        {
+          at: t('11:31'),
+          sessionId: '1b0c0000-1111-4222-8333-999999999999',
+          source: 'undo',
+          surfaceId: null,
+          text: 'orphan',
+          workspaceId: null,
+        },
+        env,
+      );
+
+      const r = await read();
+      const one = r.rows.find((row) => row.sessionId === sid(1));
+      expect(one?.section).toBe('unsentDraft');
+      expect(one?.card.sectionTitle).toBe('Unsent text in the input box');
+      expect(one?.card.facts[0]).toEqual({
+        label: 'You typed, never sent',
+        value: 'use the cron bucket\n  and tell me why',
+      });
+      // F1 (home-base-yukaf.14): the P0 stays the action; the draft is a
+      // second line, and the session still counts under 🛑.
+      expect(one?.card.action.text).toBe('Answer: Which bucket?');
+      expect(one?.card.unsent).toEqual({
+        beneath: 'needsYou',
+        command: 'cmux select-workspace --workspace WS-1',
+        text: 'You have unsent text in that pane: open it and send or clear it:',
+      });
+      const nine = r.rows.find((row) => row.sessionId === sid(9));
+      expect(nine?.section).toBe('unsentDraft');
+      expect(nine?.card.facts[0]?.value).toBe(`${'x'.repeat(300)}…`);
+      // F23 (home-base-yukaf.14): a draft equal to the newest sent message
+      // is still listed under ✍️, its text followed by a note.
+      writeInputDraft(
+        {
+          at: t('11:32'),
+          sentMatch: true,
+          sessionId: sid(2),
+          source: 'scan',
+          surfaceId: 'SURF-2',
+          text: 'continue',
+          workspaceId: 'WS-2',
+        },
+        env,
+      );
+      const again = await read();
+      const two = again.rows.find((row) => row.sessionId === sid(2));
+      expect(two?.section).toBe('unsentDraft');
+      expect(two?.card.facts[0]).toEqual({
+        label: 'You typed, never sent',
+        value: 'continue (the same as your last sent message)',
+      });
+      expect(two?.inputDraft?.sentMatch).toBe(true);
+      expect(
+        again.rows.find((row) => row.sessionId === sid(1))?.card.facts[0]
+          ?.value,
+      ).toBe('use the cron bucket\n  and tell me why');
+      expect(
+        sectionOfTitle(r, 'What does the importer do with blank rows?'),
+      ).toBe('answered');
+      expect(r.inputDrafts).toMatchObject({
+        failures: [],
+        kind: 'read',
+        unshown: [{sessionId: '1b0c0000-1111-4222-8333-999999999999'}],
+      });
+
+      const text = render(r, {order: 'status'});
+      const firstSection = text.indexOf(
+        '## ✍️ Unsent text in the input box (2)',
+      );
+      expect(firstSection).toBeGreaterThan(-1);
+      // Session 1 was the only one in Needs you: its draft moved it here.
+      expect(text).not.toContain('## 🛑 Needs you');
+      expect(firstSection).toBeLessThan(text.indexOf('## 🏃 Working'));
+      expect(text).toContain(
+        '**You typed, never sent:** use the cron bucket\n      and tell me why',
+      );
+      expect(text).toContain(
+        '1 session has unsent input-box text but no card in this view',
+      );
+      expect(text).toContain(
+        [
+          `- **You need to:** **Answer: Which bucket?** \`bun run justin-sdk thread answer ${beads[sid(1)] ?? ''}\``,
+          '  - **You have unsent text in that pane: open it and send or clear it:** `cmux select-workspace --workspace WS-1`',
+        ].join('\n'),
+      );
+      expect(text).toContain('2 (1 also waiting on you)');
+
+      const json = inboxJson(r);
+      expect(json.summary[0]).toMatchObject({
+        alsoWaiting: 1,
+        count: 2,
+        key: 'unsentDraft',
+      });
+      expect(
+        json.summary.find((entry) => entry.key === 'needsYou'),
+      ).toMatchObject({count: 1});
+      expect(
+        json.sessions.find((s) => s.sessionId === sid(1))?.inputDraft,
+      ).toEqual({
+        at: t('11:30'),
+        sentMatch: false,
+        surfaceId: 'SURF-1',
+        text: 'use the cron bucket\n  and tell me why',
+        workspaceId: 'WS-1',
+      });
+      expect(
+        json.sessions.find((s) => s.sessionId === sid(5))?.inputDraft,
+      ).toBeNull();
+    } finally {
+      rmSync(inputDraftsDir(env), {force: true, recursive: true});
+    }
+  });
+});
+
 describe('thread inbox: never drops what it cannot read', () => {
   test('the session whose checkout is gone is a ❔ card under Check by hand, rule 10, with the path', async () => {
     const r = await read();
@@ -468,6 +636,72 @@ describe('thread inbox: never drops what it cannot read', () => {
       '- **You asked:** ⚠️ unknown (<sandbox>/gone/.beads/issues.jsonl does not exist); your first message: "Clean up the cron entries"',
     );
     expect(text).toContain(`claude --resume ${sid(8)}`);
+  });
+});
+
+/**
+ * home-base-yukaf.9. NEGATIVE CONTROL (run once, 2026-10-18): with
+ * `unreadFrom` reading the OLDEST mark instead of the newest, "the four
+ * cases" failed on session 5 (false, expected true).
+ */
+describe('thread inbox: read and unread (home-base-yukaf.9, D-READ-STATE)', () => {
+  test('the four cases: never marked, read before newer assistant activity, unread after read are unread; read up to date is not', async () => {
+    const json = inboxJson(await read());
+    const of = (n: number) =>
+      json.sessions.find((entry) => entry.sessionId === sid(n));
+    expect(of(1)?.unread).toBe(true);
+    expect(of(3)?.unread).toBe(true);
+    expect(of(5)?.unread).toBe(true);
+    expect(of(2)?.unread).toBe(false);
+    expect(of(1)?.lastAssistantAt).toBe(t('10:00'));
+    expect(json.readMarks).toEqual({kind: 'read'});
+  });
+
+  test('an unreadable marks file makes every unread null, never false, and the text inbox says why', async () => {
+    const path = readMarksPath(env);
+    const saved = readFileSync(path, 'utf8');
+    try {
+      writeFileSync(path, `not a mark\n${saved}`);
+      const r = await read();
+      expect(r.rows.map((row) => row.unread)).toEqual(r.rows.map(() => null));
+      expect(inboxJson(r).readMarks).toMatchObject({kind: 'failed'});
+      const text = render(r);
+      expect(text).toContain('⚠️ Read / unread could not be checked');
+      expect(text).not.toContain('**● ');
+    } finally {
+      writeFileSync(path, saved);
+    }
+  });
+});
+
+describe('thread inbox: pinned projects (home-base-yukaf.9, D-PINS)', () => {
+  test('--by-repo lists the pinned repos first, in config order, matched ignoring case; the rest keep newest first', async () => {
+    const r = await read();
+    const groups = (pinnedProjects: string[]): string[] =>
+      renderInbox(r, {
+        all: false,
+        days: 30,
+        now: NOW,
+        order: 'repo',
+        pinnedProjects,
+        style: PLAIN_STYLE,
+        timeZone: TZ,
+      })
+        .split('\n')
+        .filter((line) => line.startsWith('## 📁'));
+    expect(groups([])).toEqual([
+      '## 📁 beta (2)',
+      '## 📁 alpha (3)',
+      '## 📁 gone (1)',
+    ]);
+    expect(groups(['gone', 'ALPHA', 'not-a-repo'])).toEqual([
+      '## 📁 gone (1)',
+      '## 📁 alpha (3)',
+      '## 📁 beta (2)',
+    ]);
+    expect(inboxJson(r, {pinnedProjects: ['gone']}).pinnedProjects).toEqual([
+      'gone',
+    ]);
   });
 });
 

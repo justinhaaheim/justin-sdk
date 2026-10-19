@@ -284,6 +284,22 @@ export function nudgeMarkPath(
 }
 
 /**
+ * The last-request warning's once-per-turn marker (home-base-yukaf.3), next
+ * to the commit nudge's and keyed the same way. Its own file, so one warning
+ * never silences the other.
+ */
+export function lastRequestMarkPath(
+  sessionId: string,
+  env: EnvLike = process.env,
+): string {
+  return join(
+    threadsStateDir(env),
+    'nudge-marks',
+    `${sessionId}.last-request.json`,
+  );
+}
+
+/**
  * Which answered questions Claude has already been shown in this session
  * (home-base-vzwbj.4.9 R1): a JSON list of question bead ids, written by the
  * prompt-time line and by `thread answers` after they print.

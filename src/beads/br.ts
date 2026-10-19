@@ -47,6 +47,14 @@ export interface BrOutcome {
 /** How many lines of a failed call's stderr are worth printing. */
 export const BR_STDERR_LINES = 5;
 
+/**
+ * A bead id as br prints it, as regex source: `<prefix>-<hash>`, then `.<n>`
+ * per child level (`home-base-abcde`, `home-base-abcde.12`). Shared by the
+ * `br create` output reader (thread/session-created.ts) and the `br close`
+ * reader of the last-request nudge (thread/nudge.ts, home-base-yukaf.3).
+ */
+export const BEAD_ID_SOURCE = String.raw`[A-Za-z0-9][A-Za-z0-9_-]*-[A-Za-z0-9]+(?:\.\d+)*`;
+
 /** Trimmed stderr, or null when there was none. Never `''`. */
 function capturedStderr(raw: string | null | undefined): string | null {
   const trimmed = (raw ?? '').trim();
@@ -1052,6 +1060,27 @@ export function brClose(
   const ahead = exportAheadOfDb(target);
   if (ahead != null) return ahead;
   const call = callBr(target, args);
+  return call.ok ? {kind: 'ok'} : call.failed;
+}
+
+/**
+ * `br reopen <id>`, ONE id per call: the bead goes back to `open` (br has no
+ * way to reopen straight into another status; `thread unmark` follows it with
+ * `brUpdate({status})` when the bead was in_progress before, home-base-yukaf.9
+ * D-GMAIL-KEYS).
+ */
+export function brReopen(target: BrTarget, id: string): BrWriteOutcome {
+  if (id.trim() === '') {
+    return {
+      command: 'br reopen',
+      detail: [],
+      kind: 'failed',
+      reason: 'brReopen was called with no id',
+    };
+  }
+  const ahead = exportAheadOfDb(target);
+  if (ahead != null) return ahead;
+  const call = callBr(target, ['reopen', id]);
   return call.ok ? {kind: 'ok'} : call.failed;
 }
 

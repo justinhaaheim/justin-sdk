@@ -34,10 +34,12 @@ import {readUsageCheckConfig, resolveUsageCheckConfig} from '../usage-check';
 import {
   THREAD_ANSWER_UIS,
   THREAD_CONFIG_KEY,
+  THREAD_DASHBOARD_UIS,
   THREAD_DEFAULT_ANSWER_UI,
   THREAD_DEFAULT_AUTO_COMMIT,
   THREAD_DEFAULT_AUTO_PUSH,
   THREAD_DEFAULT_CAPTURE,
+  THREAD_DEFAULT_DASHBOARD_UI,
   THREAD_DEFAULT_EMOJI_HEADER,
   THREAD_DEFAULT_ENABLED,
   THREAD_DEFAULT_ENFORCE,
@@ -45,12 +47,25 @@ import {
   THREAD_DEFAULT_ENFORCE_MODE,
   THREAD_DEFAULT_NAME_WORKSPACES,
   THREAD_DEFAULT_NUDGE,
+  THREAD_DEFAULT_OPEN_SINCE,
+  THREAD_DEFAULT_PINNED_PROJECTS,
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
   THREAD_ENFORCE_MODES,
   type ThreadAnswerUi,
+  type ThreadDashboardUi,
   type ThreadEnforceMode,
 } from './defaults';
+import {parseSince} from './open-filters';
+
+export function isThreadDashboardUi(
+  value: unknown,
+): value is ThreadDashboardUi {
+  return (
+    typeof value === 'string' &&
+    (THREAD_DASHBOARD_UIS as readonly string[]).includes(value)
+  );
+}
 
 function isThreadEnforceMode(value: unknown): value is ThreadEnforceMode {
   return (
@@ -95,6 +110,14 @@ export interface ResolvedThreadConfig {
   captureActive: boolean;
   /** Which layer decided `capture`. */
   captureSource: ThreadConfigSource;
+  /**
+   * Which dashboard `thread dashboard` opens without --web / --tui
+   * (home-base-yukaf.11, D-WEB). Default `tui`; a misspelled value is NAMED
+   * in `problems` and ignored.
+   */
+  dashboardUi: ThreadDashboardUi;
+  /** Which layer decided `dashboardUi`. */
+  dashboardUiSource: ThreadConfigSource;
   /** Whether the report header is emoji-prefixed values or titled fields (D19). */
   emojiHeader: boolean;
   /** Which layer decided `emojiHeader`. */
@@ -124,6 +147,22 @@ export interface ResolvedThreadConfig {
   nudge: boolean;
   /** Which layer decided `nudge`. */
   nudgeSource: ThreadConfigSource;
+  /**
+   * The window `thread open` uses when neither --since nor --days is given
+   * (home-base-yukaf.22): `24h`, `3d`, `2w`. A value parseSince refuses is
+   * NAMED in `problems` and ignored.
+   */
+  openSince: string;
+  /** Which layer decided `openSince`. */
+  openSinceSource: ThreadConfigSource;
+  /**
+   * D-PINS (home-base-yukaf.9): repo folder names listed first in every
+   * by-repo view, in order. A value that is not a list of non-empty strings
+   * is NAMED in `problems` and ignored.
+   */
+  pinnedProjects: readonly string[];
+  /** Which layer decided `pinnedProjects`. */
+  pinnedProjectsSource: ThreadConfigSource;
   /** Human-readable config read problems. Empty means both files were fine. */
   problems: string[];
   projectRoot: string;
@@ -301,6 +340,23 @@ export function resolveThreadConfig(
     answerUiSource = layer.name;
   }
 
+  // D-WEB (home-base-yukaf.11): named and ignored when misspelled, like
+  // answerUi, so a typo never silently picks the other dashboard.
+  let dashboardUi: ThreadDashboardUi = THREAD_DEFAULT_DASHBOARD_UI;
+  let dashboardUiSource: ThreadConfigSource = 'default';
+  for (const layer of layers) {
+    const value = threadSectionIn(layer.config)?.dashboardUi;
+    if (value === undefined) continue;
+    if (!isThreadDashboardUi(value)) {
+      problems.push(
+        `componentConfig.thread.dashboardUi in the ${layer.name} config is ${JSON.stringify(value)}, which is not one of ${THREAD_DASHBOARD_UIS.join(', ')} — ignoring it and using ${dashboardUi}.`,
+      );
+      continue;
+    }
+    dashboardUi = value;
+    dashboardUiSource = layer.name;
+  }
+
   // The stage ladder (home-base-vzwbj.4.3). A malformed list is NAMED and
   // ignored like answerUi: a ladder that silently fell back would refuse every
   // stage Justin configured, with nothing saying why.
@@ -326,6 +382,45 @@ export function resolveThreadConfig(
     }
     stages = value as string[];
     stagesSource = layer.name;
+  }
+
+  // D-PINS (home-base-yukaf.9): a later layer REPLACES the list (no merge),
+  // like `stages`; a malformed one is named and ignored.
+  let pinnedProjects: readonly string[] = THREAD_DEFAULT_PINNED_PROJECTS;
+  let pinnedProjectsSource: ThreadConfigSource = 'default';
+  for (const layer of layers) {
+    const value = threadSectionIn(layer.config)?.pinnedProjects;
+    if (value === undefined) continue;
+    const ok =
+      Array.isArray(value) &&
+      value.every((entry) => typeof entry === 'string' && entry.trim() !== '');
+    if (!ok) {
+      problems.push(
+        `componentConfig.thread.pinnedProjects in the ${layer.name} config is ${JSON.stringify(value)}, which is not a list of repo folder names — ignoring it and using ${JSON.stringify(pinnedProjects)}.`,
+      );
+      continue;
+    }
+    pinnedProjects = value as string[];
+    pinnedProjectsSource = layer.name;
+  }
+
+  // home-base-yukaf.22: a later layer replaces it; a value --since would
+  // refuse is named and ignored, so a typo never silently changes the window.
+  let openSince = THREAD_DEFAULT_OPEN_SINCE;
+  let openSinceSource: ThreadConfigSource = 'default';
+  for (const layer of layers) {
+    const value = threadSectionIn(layer.config)?.openSince;
+    if (value === undefined) continue;
+    const parsed =
+      typeof value === 'string' ? parseSince(value) : {kind: 'bad' as const};
+    if (parsed.kind !== 'ok') {
+      problems.push(
+        `componentConfig.thread.openSince in the ${layer.name} config is ${JSON.stringify(value)}, which is not a number and h, d or w (like 24h, 3d, 2w) — ignoring it and using ${openSince}.`,
+      );
+      continue;
+    }
+    openSince = parsed.text;
+    openSinceSource = layer.name;
   }
 
   // K12: a misspelled mode is NAMED and ignored, exactly like answerUi — a
@@ -390,6 +485,8 @@ export function resolveThreadConfig(
     capture: capture.value,
     captureActive: enabled.value && capture.value,
     captureSource: capture.source,
+    dashboardUi,
+    dashboardUiSource,
     emojiHeader,
     emojiHeaderSource,
     enabled: enabled.value,
@@ -403,6 +500,10 @@ export function resolveThreadConfig(
     nameWorkspacesSource: nameWorkspaces.source,
     nudge: nudge.value,
     nudgeSource: nudge.source,
+    openSince,
+    openSinceSource,
+    pinnedProjects,
+    pinnedProjectsSource,
     problems,
     projectRoot,
     projectTag,

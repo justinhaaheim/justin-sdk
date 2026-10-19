@@ -25,11 +25,13 @@ import {mkdirSync, mkdtempSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
+import {formatLocalDate, formatLocalTime} from '../src/date';
 import {
   buildCorpus,
   buildSnippet,
   compileQuery,
   countCorpus,
+  displayFieldName,
   incompleteLine,
   moreLine,
   noMatchesLine,
@@ -37,6 +39,8 @@ import {
   renderSearchRow,
   runThreadSearch,
   searchCorpus,
+  searchJson,
+  searchSessions,
   sessionActivityAt,
   SNIPPET_RADIUS,
   THREAD_SEARCH_FIELDS,
@@ -683,12 +687,18 @@ describe('ordering and limits', () => {
 // Rendering
 // ---------------------------------------------------------------------------
 
+/** `3d (2026-09-16 14:00)` as this machine's local clock writes it. */
+function whenText(age: string, at: Date): string {
+  return `${age} (${formatLocalDate(at)} ${formatLocalTime(at).slice(0, 5)})`;
+}
+
 describe('rendering', () => {
-  test('a row is the header, the named snippet and the resume command', () => {
+  test('D-SEARCH-STYLE: a bold title, then one labelled field per line', () => {
+    const at = new Date(NOW.getTime() - 3 * DAY);
     const corpus = buildCorpus(
       [
         thread('th-1', {
-          lastActivityAt: new Date(NOW.getTime() - 3 * DAY).toISOString(),
+          lastActivityAt: at.toISOString(),
           lastUserMessage: 'go build the format v2 dispatch',
           repo: 'home-base',
           resumeCommand:
@@ -702,35 +712,69 @@ describe('rendering', () => {
     const lines = renderSearchRow(firstRow(result), NOW, {color: false}).split(
       '\n',
     );
-    // K11 (k0b8n.10): the header at column 2, the snippet and the resume
-    // command under it at the body column.
-    expect(lines[0]).toBe('  home-base · 3d · th-1 title · sess-1');
-    expect(lines[1]).toBe(
-      '      lastUserMessage: go build the format v2 dispatch',
-    );
-    expect(lines[2]).toBe(
-      "      cd '/Users/jhaa/Dev/home-base' && claude --resume sess-1",
-    );
+    // The title alone at the header column; every field under it at the body
+    // column with its value in one shared column; the snippet on its own line
+    // in that value column, the match marked »…« because colour is off.
+    expect(lines).toEqual([
+      '  th-1 title',
+      '      Repo:     home-base',
+      `      When:     ${whenText('3d', at)}`,
+      '      Session:  sess-1',
+      '      Matched:  lastUserMessage',
+      '      Match:',
+      '                go build the »format v2« dispatch',
+      "      Resume:   cd '/Users/jhaa/Dev/home-base' && claude --resume sess-1",
+    ]);
   });
 
-  test('K11 colour: header bold, session id and field name dim, resume command cyan', () => {
+  test('the labels come in the documented order, Also in only when more matched', () => {
     const corpus = buildCorpus(
       [
         thread('th-1', {
-          lastUserMessage: 'go build the format v2 dispatch',
-          repo: 'home-base',
-          resumeCommand: 'claude --resume sess-1',
+          firstUserMessage: 'go build the format v2 dispatch',
+          lastAssistantMessage: 'the format v2 renderers are built',
           sessionId: 'sess-1',
         }),
       ],
       [],
     );
     const row = firstRow(searchCorpus(corpus, pattern('format v2')));
+    const labels = renderSearchRow(row, NOW, {color: false})
+      .split('\n')
+      .map((line) => /^ {6}([A-Z][a-z]+(?: in)?):/u.exec(line)?.[1])
+      .filter((value): value is string => value != null);
+    expect(labels).toEqual([
+      'Repo',
+      'When',
+      'Session',
+      'Matched',
+      'Also in',
+      'Match',
+      'Resume',
+    ]);
+  });
+
+  test('colour: title and labels bold, match black on yellow, resume command cyan, missing values dim', () => {
+    const corpus = buildCorpus(
+      [
+        thread('th-1', {
+          lastUserMessage: 'go build the format v2 dispatch',
+          repo: 'home-base',
+          resumeCommand: 'claude --resume sess-1',
+        }),
+      ],
+      [],
+    );
+    const row = firstRow(searchCorpus(corpus, pattern('format v2')));
     const painted = renderSearchRow(row, NOW, {color: true});
-    expect(painted).toContain('\u001b[2msess-1\u001b[0m');
-    expect(painted).toContain('\u001b[2mlastUserMessage:\u001b[0m');
+    expect(painted).toStartWith('  \u001b[1mth-1 title\u001b[0m\n');
+    expect(painted).toContain('\u001b[1mRepo:\u001b[0m');
+    expect(painted).toContain('\u001b[1mMatch:\u001b[0m');
+    expect(painted).toContain('\u001b[43;30mformat v2\u001b[0m');
     expect(painted).toContain('\u001b[36mclaude --resume sess-1\u001b[0m');
-    expect(painted).toStartWith('  \u001b[1m');
+    expect(painted).toContain('\u001b[2mno session id\u001b[0m');
+    // With colour on, the »…« marks are not added on top of the highlight.
+    expect(painted).not.toContain('»');
   });
 
   test('on a terminal the snippet hangs at the body column; the resume command never wraps', () => {
@@ -749,31 +793,147 @@ describe('rendering', () => {
     const lines = renderSearchRow(row, NOW, {color: false, width: 70}).split(
       '\n',
     );
-    // The snippet wrapped, each continuation at the body column…
-    const snippet = lines.slice(1, -1);
+    // The snippet wrapped, every line of it in the value column (16)…
+    expect(lines[5]).toBe('      Match:');
+    const snippet = lines.slice(6, -1);
     expect(snippet.length).toBeGreaterThan(1);
     for (const line of snippet) {
-      expect(line).toMatch(/^ {6}\S/u);
+      expect(line).toMatch(/^ {16}\S/u);
       expect(Bun.stringWidth(line)).toBeLessThanOrEqual(70);
     }
     // …and the command is ONE line however wide, so it still pastes.
-    expect(lines.at(-1)).toBe(`      ${resume}`);
+    expect(lines.at(-1)).toBe(`      Resume:   ${resume}`);
     // The control: piped, nothing wraps at all.
     expect(renderSearchRow(row, NOW, {color: false}).split('\n')).toHaveLength(
-      3,
+      8,
     );
   });
 
-  test('the match is bold with color on, and plain with color off', () => {
+  test('the match is highlighted black on yellow with colour on, and marked »…« with colour off', () => {
     const corpus = buildCorpus(
       [thread('th-1', {lastUserMessage: 'go build the format v2 dispatch'})],
       [],
     );
     const row = firstRow(searchCorpus(corpus, pattern('format v2')));
     expect(renderSearchRow(row, NOW, {color: true})).toContain(
-      '\u001b[1mformat v2\u001b[0m',
+      'go build the \u001b[43;30mformat v2\u001b[0m dispatch',
     );
-    expect(renderSearchRow(row, NOW, {color: false})).not.toContain('\u001b[');
+    const plain = renderSearchRow(row, NOW, {color: false});
+    expect(plain).toContain('go build the »format v2« dispatch');
+    expect(plain).not.toContain('\u001b[');
+  });
+
+  test('THE LINE COUNT: 8 to 11 lines a result, 8 for a one-line snippet', () => {
+    const lineCount = (row: SearchRow, width: number | null): number =>
+      renderSearchRow(row, NOW, {color: true, width}).split('\n').length;
+    const one = firstRow(
+      searchCorpus(
+        buildCorpus(
+          [
+            thread('th-1', {
+              lastUserMessage: 'go build the format v2 dispatch',
+            }),
+          ],
+          [],
+        ),
+        pattern('format v2'),
+      ),
+    );
+    expect(lineCount(one, null)).toBe(8);
+    expect(lineCount(one, 120)).toBe(8);
+    // The longest a row gets on a normal terminal: other fields matched (Also
+    // in) and a full ±80-character snippet, which wraps.
+    const long = `${'context words '.repeat(12)}format v2 ${'and more words '.repeat(12)}`;
+    const full = firstRow(
+      searchCorpus(
+        buildCorpus(
+          [
+            thread(
+              'th-2',
+              {firstUserMessage: long, lastUserMessage: long},
+              {notes: long},
+            ),
+          ],
+          [],
+        ),
+        pattern('format v2'),
+      ),
+    );
+    expect(lineCount(full, null)).toBe(9);
+    for (const width of [80, 100, 120]) {
+      const count = lineCount(full, width);
+      expect(count).toBeGreaterThanOrEqual(8);
+      expect(count).toBeLessThanOrEqual(11);
+    }
+  });
+
+  test('NO line joins values with " · ", colour on or off, wrapped or not', () => {
+    // The field names that carry a ` · ` in the data: a message-log line and an
+    // archived report path. `--json` keeps them; the terminal must not.
+    const corpus = buildCorpus(
+      [
+        thread('th-1', {
+          lastActivityAt: NOW.toISOString(),
+          repo: 'home-base',
+          sessionId: 's1',
+        }),
+      ],
+      [
+        {
+          document: archiveDoc('s1', '2026-09-14T01:00:00.000Z', {
+            payload: {notes: 'needle again', stopReason: 'needle'},
+          }),
+          path: '/a/1.json',
+          repo: null,
+          reportedAt: '2026-09-14T01:00:00.000Z',
+          resumeCommand: null,
+          sessionId: 's1',
+          title: null,
+        },
+      ],
+      [
+        {
+          lines: [
+            {
+              at: '2026-09-18T10:00:00.000Z',
+              cwd: null,
+              event: 'UserPromptSubmit',
+              role: 'user',
+              text: 'a needle',
+            },
+          ],
+          path: '/m/s1.jsonl',
+          sessionId: 's1',
+        },
+      ],
+    );
+    const row = firstRow(searchCorpus(corpus, pattern('needle')));
+    expect(row.hit.field).toMatch(/^you · /u);
+    expect(row.matchedFields.some((f) => f.includes(' · payload.'))).toBe(true);
+    for (const color of [false, true]) {
+      for (const width of [null, 60, 120]) {
+        for (const line of renderSearchRow(row, NOW, {color, width}).split(
+          '\n',
+        )) {
+          expect(line).not.toContain(' · ');
+        }
+      }
+    }
+    expect(renderSearchRow(row, NOW, {color: false})).toContain(
+      'Matched:  you (',
+    );
+  });
+
+  test('displayFieldName undoes the · join for display only', () => {
+    expect(displayFieldName('lastUserMessage')).toBe('lastUserMessage');
+    expect(displayFieldName('you · 2026-09-23 14:05')).toBe(
+      'you (2026-09-23 14:05)',
+    );
+    expect(
+      displayFieldName(
+        'archived report 2026-09-14T01:00:00.000Z · payload.stopReason',
+      ),
+    ).toBe('archived report 2026-09-14T01:00:00.000Z (payload.stopReason)');
   });
 
   test('THE F4 ACCEPTANCE: the snippet is the first field, and the OTHERS are named', () => {
@@ -796,9 +956,11 @@ describe('rendering', () => {
     const lines = renderSearchRow(row, NOW, {color: false}).split('\n');
     // The snippet still comes from the FIRST field in THREAD_SEARCH_FIELDS
     // order; what changes is that the row no longer hides the second one.
-    expect(lines[1]).toBe(
-      '      firstUserMessage: go build the format v2 dispatch (+1 more field: lastAssistantMessage)',
+    expect(lines[4]).toBe('      Matched:  firstUserMessage');
+    expect(lines[5]).toBe(
+      '      Also in:  +1 more field: lastAssistantMessage',
     );
+    expect(lines[7]).toBe('                go build the »format v2« dispatch');
   });
 
   test('a SINGLE-field match prints no suffix at all', () => {
@@ -861,7 +1023,7 @@ describe('rendering', () => {
     const row = firstRow(searchCorpus(corpus, pattern('needle')));
     expect(row.matchedFields).toHaveLength(6);
     expect(renderSearchRow(row, NOW, {color: false})).toContain(
-      '(+5 more fields: firstUserMessage, lastUserMessage, lastAssistantMessage, …)',
+      '      Also in:  +5 more fields: firstUserMessage, lastUserMessage, lastAssistantMessage, …',
     );
   });
 
@@ -872,9 +1034,10 @@ describe('rendering', () => {
     );
     const row = firstRow(searchCorpus(corpus, pattern('needle')));
     const rendered = renderSearchRow(row, NOW, {color: false});
-    expect(rendered).toContain('(repo unknown)');
-    expect(rendered).toContain('(no session id)');
-    expect(rendered).toContain('(no resume command recorded)');
+    expect(rendered).toContain('Repo:     no repo recorded');
+    expect(rendered).toContain('When:     no activity date recorded');
+    expect(rendered).toContain('Session:  no session id');
+    expect(rendered).toContain('Resume:   no resume command recorded');
   });
 
   test('the zero-match line names how much was searched', () => {
@@ -1005,9 +1168,10 @@ describe('runThreadSearch', () => {
       query: 'reliably capture every session',
     });
     expect(code).toBe(0);
-    expect(out.join('\n')).toContain(
-      'home-base · just now · th-1 title · sess-1',
-    );
+    const printed = out.join('\n');
+    expect(printed).toContain('  th-1 title\n      Repo:     home-base\n');
+    expect(printed).toContain(`When:     ${whenText('just now', NOW)}`);
+    expect(printed).toContain('Session:  sess-1');
     expect(out.join('\n')).toContain('claude --resume sess-1');
   });
 
@@ -1031,9 +1195,11 @@ describe('runThreadSearch', () => {
       query: 'zzz-nothing-here-zzz',
     });
     expect(code).toBe(1);
-    expect(out).toContain(
-      'no matches in 2 sessions searched (1 threads, 1 archived report across 1 session, 0 message logs)',
-    );
+    // At the header column, with a blank line before it (yukaf.5).
+    expect(out.slice(-2)).toEqual([
+      '',
+      '  no matches in 2 sessions searched (1 threads, 1 archived report across 1 session, 0 message logs)',
+    ]);
   });
 
   test('an invalid regex exits 2 before reading anything', async () => {
@@ -1195,5 +1361,54 @@ describe('runThreadSearch', () => {
     expect(doc.sessionsSearched).toBe(1);
     expect(doc.matched).toBe(1);
     expect(doc.rows[0]?.threadId).toBe('th-recent');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// searchSessions: the pipeline without the printing (home-base-yukaf.10)
+// ---------------------------------------------------------------------------
+
+describe('searchSessions', () => {
+  test('returns exactly what --json prints, and prints nothing', async () => {
+    const h = harness();
+    seedThreads(h, [
+      thread('th-1', {
+        lastActivityAt: NOW.toISOString(),
+        lastUserMessage: 'make the header darker',
+        sessionId: 'sess-1',
+      }),
+      thread('th-2', {lastUserMessage: 'the sticky header overlaps'}),
+      thread('th-3', {lastUserMessage: 'nothing to see'}),
+    ]);
+    const options = {env: h.env, limit: 0, now: NOW, query: 'header'};
+    const out = captureStdout();
+    const err = captureStderr();
+    const found = await searchSessions(options);
+    expect(out).toEqual([]);
+    expect(err).toEqual([]);
+    if (!found.ok) throw new Error(found.error);
+    expect(found.complete).toBe(true);
+    expect(found.result.rows.map((row) => row.threadId)).toEqual([
+      'th-1',
+      'th-2',
+    ]);
+
+    const code = await runThreadSearch({...options, color: false, json: true});
+    expect(code).toBe(0);
+    expect(JSON.parse(out.join('\n'))).toEqual(
+      JSON.parse(JSON.stringify(searchJson(found, options))),
+    );
+  });
+
+  test('a bad regex is ok: false with the engine message, nothing read', async () => {
+    const h = harness();
+    const found = await searchSessions({env: h.env, query: '(', regex: true});
+    expect(found).toEqual({
+      error: expect.stringContaining(
+        'thread search: invalid regex /(/',
+      ) as string,
+      ok: false,
+    });
+    expect(h.fake.read().log).toEqual([]);
   });
 });

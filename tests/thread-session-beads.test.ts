@@ -23,7 +23,14 @@ import type {SpawnOutcome} from '../src/thread/capture';
 import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, spyOn, test} from 'bun:test';
-import {existsSync, mkdirSync, readFileSync, rmSync, writeFileSync} from 'fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'fs';
 import {dirname, join} from 'path';
 
 import {
@@ -73,10 +80,16 @@ import {
   REQUEST_HINT,
   sessionContextLine,
 } from '../src/thread/session-line';
+import {closeSession} from '../src/thread/session-marks';
 import {
   loadSessionReport,
   renderThreadStatus,
 } from '../src/thread/session-report';
+import {
+  readStatusFile,
+  statusFilePath,
+  writeStatusFile,
+} from '../src/thread/status-file';
 import {createFakeBd} from './fake-bd';
 import {git, initRepo} from './git-fixtures';
 import {needBr, PINNED_BR, pinnedBrVersion} from './pinned-br';
@@ -1066,6 +1079,170 @@ describe('capture with sessionBeads ON', () => {
       kind: 'noWorkspace',
     });
     expect(existsSync(sessionIndexPath(cw.env))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The status line's file (home-base-yukaf.6, D-STATUSLINE)
+// ---------------------------------------------------------------------------
+
+describe('status line file', () => {
+  function statusRead(cw: CaptureWorld) {
+    const read = readStatusFile(cw.stateDir, SESSION);
+    if (read.kind !== 'read') {
+      throw new Error(`status file ${read.kind}: ${JSON.stringify(read)}`);
+    }
+    return read.status;
+  }
+
+  test('the capture child writes it after each prompt, with the documented shape and the request counts; no temp file remains', async () => {
+    needBr();
+    const cw = captureWorld(ON);
+    captureStdout();
+    runHook(cw, prompt(cw, 'Build the status segment'));
+    await runChild(cw);
+    expect(runRecords(cw).at(-1)?.statusFile).toMatchObject({
+      kind: 'written',
+      path: statusFilePath(cw.stateDir, SESSION),
+    });
+    const first = statusRead(cw);
+    expect(Object.keys(first).sort()).toEqual([
+      'archived',
+      'at',
+      'closedRequests',
+      'done',
+      'openP0',
+      'openRequests',
+      'section',
+      'statusWord',
+    ]);
+    expect(first).toMatchObject({
+      archived: false,
+      closedRequests: 0,
+      done: false,
+      openP0: 0,
+      openRequests: 0,
+    });
+    expect(typeof first.section).toBe('string');
+    expect(typeof first.statusWord).toBe('string');
+
+    // Two requests, one closed: the next capture counts them.
+    const one = await fileRequest(
+      requestOptions(cw, cw.repo, {title: 'Write the file'}),
+    );
+    await fileRequest(requestOptions(cw, cw.repo, {title: 'Render it'}));
+    if (one.kind !== 'filed') throw new Error(JSON.stringify(one));
+    const closed = brClose({cwd: cw.repo}, one.id, 'done', {force: true});
+    expect(closed.kind).toBe('ok');
+    runHook(cw, prompt(cw, 'and now render it'));
+    await runChild(cw);
+    expect(statusRead(cw)).toMatchObject({
+      archived: false,
+      closedRequests: 1,
+      openRequests: 1,
+    });
+    expect(readdirSync(join(cw.stateDir, 'status'))).toEqual([
+      `${SESSION}.json`,
+    ]);
+  });
+
+  test('thread archive rewrites it at once: archived, every request closed', async () => {
+    needBr();
+    const cw = captureWorld(ON);
+    captureStdout();
+    runHook(cw, prompt(cw, 'Archive me'));
+    await runChild(cw);
+    await fileRequest(requestOptions(cw, cw.repo, {title: 'Not needed'}));
+    const outcome = await closeSession('archive', {
+      cwd: cw.repo,
+      env: cw.env,
+      reason: 'not needed any more',
+      selector: null,
+      sessionId: SESSION,
+    });
+    expect(outcome).toMatchObject({
+      kind: 'closed',
+      statusFile: {kind: 'written'},
+    });
+    expect(statusRead(cw)).toMatchObject({
+      archived: true,
+      closedRequests: 1,
+      done: false,
+      openP0: 0,
+      openRequests: 0,
+      section: 'archived',
+    });
+    expect(readdirSync(join(cw.stateDir, 'status'))).toEqual([
+      `${SESSION}.json`,
+    ]);
+  });
+
+  test('thread done rewrites it as done', async () => {
+    needBr();
+    const cw = captureWorld(ON);
+    captureStdout();
+    runHook(cw, prompt(cw, 'Mark me done'));
+    await runChild(cw);
+    await closeSession('done', {
+      cwd: cw.repo,
+      env: cw.env,
+      reason: null,
+      selector: null,
+      sessionId: SESSION,
+    });
+    expect(statusRead(cw)).toMatchObject({
+      archived: false,
+      done: true,
+      section: 'done',
+    });
+  });
+
+  // home-base-yukaf.14 F13. NEGATIVE CONTROL in the bead notes: the capture
+  // passing keepNewer: false fails this test.
+  test('a capture never overwrites a status file written after it started (a mark that landed meanwhile)', async () => {
+    needBr();
+    const cw = captureWorld(ON);
+    captureStdout();
+    runHook(cw, prompt(cw, 'Archive me while the capture is slow'));
+    await runChild(cw);
+    // What thread archive writes, dated after the next capture starts.
+    const later = new Date(Date.now() + 60 * 60_000).toISOString();
+    const marked = writeStatusFile(cw.stateDir, SESSION, {
+      archived: true,
+      at: later,
+      closedRequests: 0,
+      done: false,
+      openP0: 0,
+      openRequests: 0,
+      section: 'archived',
+      statusWord: 'archived',
+    });
+    expect(marked.kind).toBe('written');
+    runHook(cw, prompt(cw, 'one more prompt'));
+    await runChild(cw);
+    expect(runRecords(cw).at(-1)?.statusFile).toMatchObject({
+      kind: 'skipped',
+    });
+    expect(statusRead(cw)).toMatchObject({archived: true, at: later});
+  });
+
+  test('a write that fails lands in the run record, and the child still exits 0', async () => {
+    needBr();
+    const cw = captureWorld(ON);
+    captureStdout();
+    mkdirSync(cw.stateDir, {recursive: true});
+    writeFileSync(join(cw.stateDir, 'status'), 'a file where the dir goes');
+    runHook(cw, prompt(cw, 'Fail to write'));
+    expect(
+      await runThreadCaptureApply({
+        autoCommit: false,
+        cwd: cw.repo,
+        env: cw.env,
+        hookElapsedMs: 1,
+        sessionId: SESSION,
+      }),
+    ).toBe(0);
+    expect(runRecords(cw).at(-1)?.statusFile).toMatchObject({kind: 'failed'});
   });
 });
 

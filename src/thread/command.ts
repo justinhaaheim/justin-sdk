@@ -41,6 +41,89 @@ SANDBOX HINT. The Claude Code sandbox blocks the cmux socket. When cmux cannot b
 
 WHY --successor-socket IS OFF. It passes that same setting to the successor with \`claude --settings\`. Justin's user settings have autoAllowBashIfSandboxed true, so with the socket allowed every sandboxed cmux command in the successor runs with no permission check at all, including \`cmux send\` into any other pane. Without the flag the successor gets no --settings.`;
 
+const SPAWN_SUMMARY =
+  'Start a new Claude Code session in a directory you name: open a new cmux workspace there running `claude`, with Remote Control when you pass --remote-control, so you can reach it from the Claude app on your phone (home-base-yukaf.7). Try --dry-run first. Exit 0 opened, or a dry run · 1 cmux did not open it · 2 refused, nothing opened.';
+
+const SPAWN_NARRATIVE = `
+WHAT IT DOES, in order.
+
+  1. Refuses (exit 2, nothing opened) when the directory does not exist or is not a directory. A leading ~ means your home directory; a relative path is read from the current directory.
+  2. Names the workspace "[TAG] new session <directory name>", or "[TAG] <name>" with --name. TAG is the projectTag in that repo's justin-sdk.config.json, else the repo folder name in capitals, the same tag the inbox shows.
+  3. Refuses (exit 2) when cmux cannot be reached, and prints the sandbox setting that allows it (see SANDBOX HINT).
+  4. Opens a new cmux workspace in the directory, without switching to it, running \`claude [--model <m>] [--remote-control '<workspace name>']\`.
+  5. Prints the workspace, its cmux id, the directory and the command. With --remote-control it also says how to open the session from your phone.
+
+REMOTE CONTROL. The session runs on this Mac; the Claude app on your phone, or claude.ai/code, is a window onto it. Open the Claude app, tap Code, and pick the session by the name this command prints. The claude process in the workspace must keep running: closing the workspace or quitting claude takes the session offline. A Mac that sleeps reconnects when it wakes.
+
+DRY RUN. --dry-run prints the same plan, the cmux socket it would use and the full cmux command, and does not touch cmux.
+
+IT WRITES NOTHING. Opening the workspace is its only effect: no file, no bead, no record.
+
+WINDOW. With CMUX_WINDOW_ID set, the workspace goes to that window (--window). Otherwise cmux picks: its default is the window of the pane the command runs in. The output's Window line says which.
+
+FOLDER TRUST. It reads (never edits) ~/.claude.json and warns when Claude Code has not recorded the trust dialog as accepted for that exact folder: the new session may then show a trust prompt that only the Mac can answer.
+
+SANDBOX HINT. The Claude Code sandbox blocks the cmux socket. When cmux cannot be reached, the refusal prints the setting that allows it, {"sandbox":{"network":{"allowUnixSockets":["<socket path>"]}}}, for your Claude Code user settings. Otherwise retry the command with the sandbox disabled.`;
+
+const STOP_OPTION_TEXT =
+  'After the mark is written and printed, stop this session’s Claude process: SIGTERM from a detached child, re-checked right before the signal. The target is a process whose command line names the session (claude --resume <id>), 3 s later; or, when the session is the one this command runs in (CLAUDE_CODE_SESSION_ID), the Claude process above this command, 15 s later, so the reply lands first. A process the cmux hook store or claude agents --json maps to another session is never signalled; when either cannot be read, nothing is stopped (exit 1). The cmux pane stays open; resume with claude --resume <id>. Needs ps and claude agents (run with the sandbox off). Logged to ~/.local/state/justin-threads/session-stops.jsonl. Unverified: whether the detached child survives the Bash tool that started it; the first real /thread-archive measures it.';
+
+const OPEN_SUMMARY =
+  'Reopen every unfinished session from the last 7 days (--since, --repo and --limit narrow it) in cmux: one new window with one workspace per session, newest at the top, each running `claude --resume` in its own checkout. Sessions that are finished, already open, or untracked are not opened. Try --dry-run first. --undo closes what the latest run opened, but keeps any workspace with unsent text, Claude working, or use since the run. It exits 0 when it opened the sessions, found nothing to open, or ran dry; 1 when a step failed; 2 when it refused and opened nothing.';
+
+const OPEN_NARRATIVE = `
+WHAT REOPENS. A session reopens when all three are true:
+
+  1. The inbox puts it in Unsent text in the input box, Needs you, To land, Stopped with work open, or Check by hand. --include answered,handedOff,doneQuestions adds those sections too.
+
+  2. It has a session bead (it is tracked) and had activity in the window: the last 7 days unless --since or componentConfig.thread.openSince says otherwise.
+
+  3. Nothing shows it running. thread open looks three ways: the claude processes and their command lines, cmux's hook store, and the session id on the status line of every live Claude pane.
+
+WHAT NEVER REOPENS.
+
+  - A session that is running now: it is listed under Already open, with the command that selects its pane.
+
+  - Working, Done and Archived sessions, and sessions with no session bead (only counted).
+
+  - A session whose checkout no longer exists, because claude --resume finds nothing from the wrong directory.
+
+FILTERS. Think of thread open as a filter over your sessions, and the new cmux window as the view it shows. The plan's header names every filter, set or not.
+
+  --since 24h|3d|2w: the window (hours, days, weeks). Default componentConfig.thread.openSince ("7d"). --days N is the same as --since Nd. Any other shape is refused (exit 2).
+
+  --repo <name>: only sessions in that repo, by its folder name or its project tag, any case. Repeat it for several. A name that matches nothing is said.
+
+  --limit N: at most N sessions, newest first (opened and moved together). The rest are listed under "Not opened: over the limit".
+
+  --include-open: a session already open in another cmux window is still never resumed a second time. Its existing workspace is MOVED into the new window instead (it keeps running), so all the matching sessions sit in one place. Without the flag those sessions are listed under "Already open elsewhere", with the command that selects each pane. The whole workspace moves, its other panes (shell splits and the like) with it, and the plan says "moved with its N other panes". A session with no cmux workspace (a background worker, a terminal cmux does not own), whose workspace holds another Claude session too, or whose workspace is the one this command runs in (CMUX_WORKSPACE_ID), is never moved and says why. A move that empties a window leaves a blank workspace there, which the plan says and --undo closes again while it holds only an idle shell.
+
+CANNOT TELL. When a live Claude pane does not show which session it holds, thread open opens nothing: that pane could be one of the sessions it would open. It lists those panes; look at them, then pass --force-unplaced to open anyway.
+
+LAYOUT. Default: one new cmux window. --per-project: one new window per project, the project with the newest session first. Inside a window the newest session is at the top. Each workspace is named "[TAG] <session title>".
+
+COLOURS. After a window is built, each workspace this run OPENED gets its project's colour the way cmux-arrange chooses it: from ~/.config/cmux-arrange/colors.json ($XDG_CONFIG_HOME/cmux-arrange/colors.json) "overrides" first, then "assigned", then cmux-arrange's built-in project colours unless the file's "exclude" lists that colour; with no file, the built-in project colours alone. thread open makes no new picks. A workspace moved in with --include-open keeps the colour it had: --undo moves it back but cannot restore a colour. An unreadable or invalid file colours nothing. Each of these, and a project with no colour, is said in one line and the run goes on; a colour that cannot be set is reported and never stops the run. --no-color skips colouring.
+
+DRY RUN. --dry-run prints the same plan ("Would open") and opens nothing, writes nothing.
+
+THE RECORD. Before it opens anything, a real run writes <threads state dir>/opens/<time>.json with the plan, and rewrites it after every cmux step with the ids of the windows and workspaces it made. If that file cannot be written, nothing is opened. --json prints the record. thread open --undo reads it.
+
+UNDO. thread open --undo closes the workspaces the latest run opened (--run <time> picks another run by its record's file name). It never closes anything that run did not open. A workspace that is already closed is listed as Already gone. Every other one is checked first, and it is kept open, with the reason printed, unless all three checks pass:
+
+  1. Nothing is typed in the input box. Unsent text keeps the workspace open, is printed in full under "✍️ Unsent text, kept open", and is saved in <threads state dir>/input-drafts/<session id>.json.
+
+  2. Claude is not working (no spinner, no "Running…" on the screen).
+
+  3. The session has not been used since the run opened it: its last message is not newer than the run.
+
+  A screen that cannot be read, or a last message that cannot be read, keeps the workspace too. So does a pane that shows a different session or no session id at all, Claude with no process that can be found, and a pane whose terminal cannot be matched to its processes (even a blank one: cmux shows a blank screen for a pane that has not drawn yet). A pane where Claude never started (an idle shell prompt or a blank screen, with only the shell running on its terminal) passes.
+
+  A workspace that passes has its Claude process stopped first (SIGTERM, up to 15 seconds to exit; the session stays resumable with claude --resume), and only then is the workspace closed. A window closes with its last workspace. The record is rewritten before the first process is stopped; if that fails, nothing is stopped or closed. --undo --dry-run runs the same checks and prints what would close and what would be kept; it closes nothing and writes nothing. It exits 1 when there is no run to undo or a step failed.
+
+RUNS AS A VIEW. A filtered thread open makes a window appear (for example thread open --repo audio-journal-1 --include-open: all of that repo's unfinished work in one new window), and thread open --undo --run <stamp> makes it disappear again: what it opened closes, what it moved goes back. thread open --list prints every recorded run with its stamp, filters, counts, whether it was undone, and the command that undoes it. --list reads the records only: no cmux, no ps.
+
+SANDBOX. The Claude Code sandbox blocks the cmux socket and ps. Run it from a terminal, or with the sandbox disabled.`;
+
 const PREPARE_NARRATIVE = `
 Run this BEFORE writing a report. It prints, in order:
 
@@ -116,6 +199,24 @@ shows it.`;
  * the board and the archive reader, and nothing heavy loads at the top of this
  * file.
  */
+const DRAFTS_NARRATIVE = `
+WHAT IS STORED: one file per session, <threads state dir>/input-drafts/<session id>.json, holding the latest unsent text seen in that session's input box, when it was seen, which pane, and what saw it (scan, thread open --undo, or cmux-arrange --older-than refusing a close). When newer, different text replaces unsent text that was still live, the earlier text is kept in the same file under "previous" (the last 20). Sent messages are never stored here.
+
+SCAN, read-only on cmux (it writes only that store):
+  1. Reads every pane's screen and keeps the Claude input boxes.
+  2. Places each one in a session by the "⌗ <session id>" your status line shows under the box, else by the claude process on the pane's tty. A pane it cannot place is listed under "Unplaced panes" with why, and nothing is stored for it.
+  3. Text in the box is stored, unless the store already holds exactly that text. An empty box clears the stored draft only in the pane the draft was seen in, or once that pane is gone. A stored draft whose pane is gone (no pane shows its session, and the pane it was seen in is no longer in cmux) is cleared by the second scan in a row that finds it so; "thread drafts dismiss <session id…>" (x in the threads dashboard) clears one at once. Cleared text stays in its file. Text equal to the newest message you sent in that session (spacing ignored) is still in the box, so it is stored too, marked sentMatch, and its card says "(the same as your last sent message)". A stored draft whose pane is gone is cleared as sent when that session's newest sent message equals it (a sentMatch draft: only a message sent after it was seen).
+  An hourly chore (thread-drafts-scan) runs it, and the threads dashboard runs it before loading.
+
+LIMITS, measured on Claude Code 2.1.302:
+  - The screen is read as plain text, without colours. An autocomplete or suggestion that Claude Code draws dimmed after your cursor cannot be told apart from text you typed, and is stored as if typed.
+  - An empty box shows no placeholder hint (1,029 input boxes in 24 cmux captures, 2026-10-17), so it reads as empty.
+  - Only the visible screen is read. A draft taller than the screen pushes the top of the box off it, so that pane is not seen as a Claude pane and its text is not stored.
+  - Text recalled into the box with the up arrow equals your last message, so it is stored as a sentMatch draft although you never typed it.
+
+Run it with the Claude Code sandbox off: the sandbox blocks the cmux socket and ps.
+`;
+
 const SEARCH_NARRATIVE = `
 SEARCHES, per session, in this order — the order decides which field the one
 snippet comes from when several match, and the snippet line says how many other
@@ -246,7 +347,27 @@ It speaks — one line of context, mirrored to you — only when ALL hold:
       <state dir>/nudge-marks/<session id>.json, keyed by that prompt's time)
 
 The line: [thread] you committed but no request is in progress for this
-session — if this is work Justin asked for, run: thread request "…"`;
+session — if this is work Justin asked for, run: thread request "…"
+
+It also warns — once per turn, its own marker in
+<state dir>/nudge-marks/<session id>.last-request.json — when the command runs
+br close <id…> (quoted text ignored) and that closes the LAST open request of
+this session (a request of another session, or a bead that is no request,
+stays silent):
+
+  [thread] you closed the last open request in this session ("<title>").
+  Before you stop: re-read Justin's first message — does everything he asked
+  for exist, or is it answered in your message? If anything is missing, even a
+  conditional or uncertain ask, file it: thread request "…"
+
+When the session's beads cannot be read it says it could not check, never
+that the request was the last one.
+
+IT IS A REMINDER, NOT A CHECK. It reads br as the command word only (not in a
+comment or an echo), and skips an id br's output says it skipped or could not
+find. It misses: a br close with no id, an id held in a shell variable, and a
+close that exits non-zero (Claude Code fires no PostToolUse hook for a failed
+call, so a partial close that also closed the last request says nothing).`;
 
 const REQUEST_NARRATIVE = `
 A REQUEST is a bead Justin asked for: label \`request\` + \`sid:<session id>\`,
@@ -776,6 +897,174 @@ export const threadCommand: CommandModule = {
         },
       )
       .command(
+        'spawn <dir>',
+        SPAWN_SUMMARY,
+        (yy) =>
+          yy
+            .usage(
+              `${helpHeader('justin-sdk', dirname(import.meta.dirname))}\n\n$0 thread spawn <dir>\n\n${SPAWN_SUMMARY}`,
+            )
+            .epilogue(SPAWN_NARRATIVE)
+            .positional('dir', {
+              describe:
+                'The directory the new session starts in (~ is allowed)',
+              type: 'string' as const,
+            })
+            .option('name', {
+              describe:
+                'The workspace title after "[TAG] " (default: "new session <directory name>")',
+              type: 'string' as const,
+            })
+            .option('remote-control', {
+              default: false,
+              describe:
+                'Start claude with Remote Control, named after the workspace, so the Claude app can open it',
+              type: 'boolean' as const,
+            })
+            .option('model', {
+              describe:
+                'The new session’s model (`claude --model`); default: claude’s own default',
+              type: 'string' as const,
+            })
+            .option('dry-run', {
+              default: false,
+              describe:
+                'Print the workspace name, directory and command; do not touch cmux',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          const {runThreadSpawn} = await import('./spawn');
+          process.exit(
+            await runThreadSpawn({
+              dir: argv.dir ?? null,
+              dryRun: argv['dry-run'] === true,
+              model: argv.model ?? null,
+              name: argv.name ?? null,
+              remoteControl: argv['remote-control'] === true,
+            }),
+          );
+        },
+      )
+      .command(
+        'open',
+        OPEN_SUMMARY,
+        (yy) =>
+          yy
+            .usage(
+              `${helpHeader('justin-sdk', dirname(import.meta.dirname))}\n\n$0 thread open\n\n${OPEN_SUMMARY}`,
+            )
+            .epilogue(OPEN_NARRATIVE)
+            .option('since', {
+              describe:
+                'Only sessions with activity in this window: a number and h, d or w (24h, 3d, 2w). Default: componentConfig.thread.openSince, else 7d',
+              type: 'string' as const,
+            })
+            .option('days', {
+              describe: 'The same as --since <N>d (kept as an alias)',
+              type: 'number' as const,
+            })
+            .option('limit', {
+              describe:
+                'Open at most N sessions, newest first; the rest are listed under "Not opened: over the limit"',
+              type: 'number' as const,
+            })
+            .option('repo', {
+              describe:
+                'Only sessions in this repo: its folder name or its project tag, any case (repeat the flag, or comma-separate, for several)',
+              string: true,
+              type: 'array' as const,
+            })
+            .option('per-project', {
+              default: false,
+              describe:
+                'One new cmux window per project instead of one window for all',
+              type: 'boolean' as const,
+            })
+            .option('include', {
+              describe:
+                'Also reopen these sections: answered, handedOff, doneQuestions (comma-separated, or repeat the flag)',
+              string: true,
+              type: 'array' as const,
+            })
+            .option('color', {
+              default: true,
+              describe:
+                'Colour each workspace this run opens with its project colour (~/.config/cmux-arrange/colors.json overrides, then assigned, then the built-in project colours); moved workspaces keep theirs; --no-color skips it',
+              type: 'boolean' as const,
+            })
+            .option('include-open', {
+              default: false,
+              describe:
+                'Also show sessions already open in another cmux window: their workspaces are MOVED into the new window (never resumed a second time); --undo moves them back',
+              type: 'boolean' as const,
+            })
+            .option('include-untracked', {
+              default: false,
+              describe:
+                'Also reopen sessions with no session bead. Not built yet: refuses.',
+              type: 'boolean' as const,
+            })
+            .option('force-unplaced', {
+              default: false,
+              describe:
+                'Open even when a live Claude pane does not show which session it holds (see CANNOT TELL)',
+              type: 'boolean' as const,
+            })
+            .option('dry-run', {
+              default: false,
+              describe: 'Print what would open; open nothing, write nothing',
+              type: 'boolean' as const,
+            })
+            .option('json', {
+              default: false,
+              describe:
+                'Print the record (the plan and what was opened) as JSON',
+              type: 'boolean' as const,
+            })
+            .option('undo', {
+              default: false,
+              describe:
+                'Close what the latest run opened, keeping any workspace with unsent text, Claude working, or use since the run (see UNDO)',
+              type: 'boolean' as const,
+            })
+            .option('list', {
+              default: false,
+              describe:
+                'List the recorded runs, newest first: when, the filters, how many opened and moved, whether undone, and the --undo --run command for each (reads the records only)',
+              type: 'boolean' as const,
+            })
+            .option('run', {
+              describe:
+                'With --undo: the run to undo, by its record file name under opens/ (e.g. 2026-10-18T12-34-56.789Z)',
+              type: 'string' as const,
+            }),
+        async (argv) => {
+          const {runThreadOpen} = await import('./open');
+          const at = process.argv.indexOf('open');
+          process.exit(
+            await runThreadOpen({
+              argv: at === -1 ? [] : process.argv.slice(at + 1),
+              color: argv.color !== false,
+              days: argv.days ?? null,
+              dryRun: argv['dry-run'] === true,
+              forceUnplaced: argv['force-unplaced'] === true,
+              include: (argv.include ?? []).map(String),
+              includeOpen: argv['include-open'] === true,
+              includeUntracked: argv['include-untracked'] === true,
+              json: argv.json === true,
+              limit: argv.limit ?? null,
+              list: argv.list === true,
+              perProject: argv['per-project'] === true,
+              // G6: absent stays absent, so a bare or blank --repo can refuse.
+              repos: argv.repo?.map(String),
+              run: argv.run ?? null,
+              since: argv.since ?? null,
+              undo: argv.undo === true,
+            }),
+          );
+        },
+      )
+      .command(
         'title <title..>',
         'Rename this session’s bead (and drop its auto-title label). Overrides the name the first request gave it. Needs componentConfig.thread.sessionBeads.',
         (yy) =>
@@ -1046,6 +1335,11 @@ export const threadCommand: CommandModule = {
               describe:
                 'Look up by this claude session id instead of the current one (default: $CLAUDE_CODE_SESSION_ID)',
               type: 'string' as const,
+            })
+            .option('stop', {
+              default: false,
+              describe: STOP_OPTION_TEXT,
+              type: 'boolean' as const,
             }),
         async (argv) => {
           const {runSessionClose} = await import('./session-marks');
@@ -1054,6 +1348,133 @@ export const threadCommand: CommandModule = {
               reason: argv.reason ?? null,
               selector: argv.sessionBead ?? null,
               sessionId: argv.session ?? null,
+              stop: argv.stop === true,
+            }),
+          );
+        },
+      )
+      .command(
+        'unmark',
+        'Undo Justin’s newest `thread done` or `thread archive` (for --session, or the newest of all; --mark <id> names exactly one): reopen every bead it closed and give each the status it had (in_progress comes back as in_progress), remove the archived label it added, and give adopted requests it released their request labels back. Read from ~/.local/state/justin-threads/marks-undo.jsonl, which done and archive write before they close anything. Exit 0 restored · 1 a br call failed (each id named; the record is kept, so running it again retries) · 2 nothing to undo.',
+        (yy) =>
+          yy
+            .option('session', {
+              describe:
+                'The session whose mark to undo: its session bead id or its claude session id (default: the newest mark of all)',
+              type: 'string' as const,
+            })
+            .option('mark', {
+              describe:
+                'The id of one mark to undo, as `thread done` / `thread archive` print it ("Undo: thread unmark --mark <id>"); that mark and no other',
+              type: 'string' as const,
+            })
+            .conflicts('mark', 'session'),
+        async (argv) => {
+          const {runThreadUnmark} = await import('./session-marks');
+          process.exit(
+            await runThreadUnmark({
+              mark: argv.mark ?? null,
+              session: argv.session ?? null,
+            }),
+          );
+        },
+      )
+      .command(
+        'read [sessionId]',
+        'Justin’s own read mark on a session, kept in ~/.local/state/justin-threads/read-marks.jsonl and separate from Claude Code’s and cmux’s. A session is unread in `thread inbox` (● before its title) when Claude has written since your newest read mark, when you never marked it, or when your newest mark is unread (`thread unread`). --all marks every unread session of the inbox (the last 30 days) read, one record each (R in the threads dashboard). Exit 0 marked · 1 not written · 2 usage.',
+        (yy) =>
+          yy
+            .positional('sessionId', {
+              describe: 'The claude session id',
+              type: 'string' as const,
+            })
+            .option('seen', {
+              describe:
+                'The last assistant activity you saw (ISO); default: the message log’s last assistant line now',
+              type: 'string' as const,
+            })
+            .option('all', {
+              default: false,
+              describe:
+                'Mark every unread session in the inbox read, as of now (home-base-yukaf.14 F7)',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          const {runReadAll, runReadMark} = await import('./read-marks');
+          if (argv.all) {
+            if (argv.sessionId != null || argv.seen != null) {
+              console.error(
+                'thread read: --all takes no session id and no --seen',
+              );
+              process.exit(2);
+            }
+            process.exit(await runReadAll({cwd: process.cwd()}));
+          }
+          process.exit(
+            runReadMark({
+              mark: 'read',
+              seen: argv.seen ?? null,
+              sessionId: argv.sessionId ?? null,
+            }),
+          );
+        },
+      )
+      .command(
+        'unread <sessionId>',
+        'Justin’s own unread mark on a session (see `thread read`): `thread inbox` shows it with ● until you mark it read again. Exit 0 marked · 1 not written · 2 usage.',
+        (yy) =>
+          yy.positional('sessionId', {
+            describe: 'The claude session id',
+            type: 'string' as const,
+          }),
+        async (argv) => {
+          const {runReadMark} = await import('./read-marks');
+          process.exit(
+            runReadMark({
+              mark: 'unread',
+              seen: null,
+              sessionId: argv.sessionId ?? null,
+            }),
+          );
+        },
+      )
+      .command(
+        'dashboard',
+        'Open the threads dashboard. --tui: the full-screen terminal dashboard (`bun run threads`; spawned when this is a home-base checkout, otherwise it prints how to run it). --web (EXPERIMENT, home-base-yukaf.11): serve the inbox as a page on 127.0.0.1 and print its URL; each card has Open in cmux, Mark read/unread, Done and Archive buttons and a See more toggle, and every button names the session by id, session bead id and card version, which the server checks against a fresh inbox read before it runs the one command the TUI key runs (a mismatch is refused, 409, with the reason on the page). Actions are logged to ~/.local/state/justin-threads/dashboard-web.jsonl. Without either flag: componentConfig.thread.dashboardUi (default tui). Exit 0 · 1 the TUI could not start · 2 the TUI is not here.',
+        (yy) =>
+          yy
+            .option('web', {
+              describe: 'Serve the web page (the experiment)',
+              type: 'boolean' as const,
+            })
+            .option('tui', {
+              describe: 'Run the terminal dashboard',
+              type: 'boolean' as const,
+            })
+            .conflicts('web', 'tui')
+            .option('days', {
+              describe:
+                'Web: sessions with activity in the last N days (default 30, like thread inbox)',
+              type: 'number' as const,
+            })
+            .option('port', {
+              describe: 'Web: listen on this port (default: any free port)',
+              type: 'number' as const,
+            })
+            .option('open', {
+              default: true,
+              describe:
+                'Web: ask the OS to open the URL in a browser (--no-open only prints it)',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          const {runThreadDashboard} = await import('./dashboard-web');
+          process.exit(
+            await runThreadDashboard({
+              days: argv.days,
+              openBrowser: argv.open,
+              port: argv.port,
+              ui: argv.web === true ? 'web' : argv.tui === true ? 'tui' : null,
             }),
           );
         },
@@ -1204,7 +1625,7 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'inbox [threadId]',
-        'With componentConfig.thread.sessionBeads ON: your dashboard — every session you started (last 30 days) as one card each, newest activity first, after a summary that counts the sessions per section (Needs you, To land, Stopped with work open, Check by hand, Working, Handed off or out of context, Answered, Done with questions for you, Not tracked; --all adds Done and Archived). Each card says what you asked for, where it stands (status and the git facts that matter), the ONE thing you need to do, any optional questions and how to resume it. Not tracked: every other Claude Code session under ~/Dev in the window (no session bead; found the way `repo-status repos` finds them), shown from facts only — a full card when something is open (a branch not merged, uncommitted files, working now, out of context, a blocking question in its old report) or could not be read, else one line saying nothing open was found. Working means its last record is under 3 minutes old, or one of its helper agents (subagents) is still in flight with a record under 15 minutes old, so a helper inside one long tool call keeps it Working; a helper that was killed keeps it Working for up to 15 minutes. --by-status groups the cards by section, --by-repo by repo. A session that cannot be read is a ❔ card, never dropped. Knob OFF (legacy): what Justin answered or skipped since the last report, each ask restated in full. Marks nothing.',
+        'With componentConfig.thread.sessionBeads ON: your dashboard — every session you started (last 30 days) as one card each, newest activity first, after a summary that counts the sessions per section (Unsent text in the input box — text typed and never sent, recorded by `thread drafts scan` —, Needs you, To land, Stopped with work open, Check by hand, Working, Handed off or out of context, Answered, Done with questions for you, Not tracked; --all adds Done and Archived). Each card says what you asked for, where it stands (status and the git facts that matter), the ONE thing you need to do, any optional questions and how to resume it. Not tracked: every other Claude Code session under ~/Dev in the window (no session bead; found the way `repo-status repos` finds them), shown from facts only — a full card when something is open (a branch not merged, uncommitted files, working now, out of context, a blocking question in its old report) or could not be read, else one line saying nothing open was found. Working means its last record is under 3 minutes old, or one of its helper agents (subagents) is still in flight with a record under 15 minutes old, so a helper inside one long tool call keeps it Working; a helper that was killed keeps it Working for up to 15 minutes. --by-status groups the cards by section, --by-repo by repo. A session that cannot be read is a ❔ card, never dropped. Knob OFF (legacy): what Justin answered or skipped since the last report, each ask restated in full. Marks nothing.',
         (yy) =>
           yy
             .positional('threadId', {
@@ -1233,7 +1654,7 @@ export const threadCommand: CommandModule = {
             // given, and `.conflicts` would then refuse every run.
             .option('by-status', {
               describe:
-                'Knob on: group the cards by section (Needs you first), newest first inside each',
+                'Knob on: group the cards by section (Unsent text in the input box first, then Needs you), newest first inside each',
               type: 'boolean' as const,
             })
             .option('by-repo', {
@@ -1369,6 +1790,52 @@ export const threadCommand: CommandModule = {
         },
       )
       .command(
+        'drafts [action] [sessionIds..]',
+        'Unsent text in Claude Code input boxes. `thread drafts` lists what is stored and still unsent; `thread drafts scan` reads every open cmux pane and updates the store; `thread drafts dismiss <session id…>` marks stored text you no longer want as cleared (the text stays in the file). Exit 0 read · 1 something failed (named) · 2 cmux unreachable or no session id given, nothing written.',
+        (yy) =>
+          yy
+            .epilogue(DRAFTS_NARRATIVE)
+            .positional('action', {
+              choices: ['scan', 'dismiss'] as const,
+              describe:
+                'scan: read every cmux pane and record the unsent text in each Claude input box. dismiss: clear the stored text of the sessions named after it. Omit to list what is stored.',
+              type: 'string' as const,
+            })
+            .positional('sessionIds', {
+              array: true,
+              describe:
+                'dismiss only: the claude session ids whose text to clear',
+              type: 'string' as const,
+            })
+            .option('json', {
+              default: false,
+              describe: 'Print the result as JSON',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          const {
+            runThreadDraftsDismiss,
+            runThreadDraftsList,
+            runThreadDraftsScan,
+          } = await import('./drafts-scan');
+          const json = argv.json === true;
+          const ids = (argv.sessionIds ?? []).map(String);
+          if (argv.action !== 'dismiss' && ids.length > 0) {
+            console.error(
+              `thread drafts: session ids are taken by dismiss only (got: ${ids.join(' ')})`,
+            );
+            process.exit(2);
+          }
+          process.exit(
+            argv.action === 'scan'
+              ? await runThreadDraftsScan({json})
+              : argv.action === 'dismiss'
+                ? runThreadDraftsDismiss({json, sessionIds: ids})
+                : await runThreadDraftsList({json}),
+          );
+        },
+      )
+      .command(
         'search <query..>',
         'Find the session in which a phrase was written. Searches every thread bead (the three verbatim messages, the title, the stored report) and every archived report JSON; prints repo · age · title · session id, the matching snippet, and the command that resumes it.',
         (yy) =>
@@ -1437,6 +1904,11 @@ export const threadCommand: CommandModule = {
             .option('session', {
               describe: 'Look up by this session id instead of the current one',
               type: 'string' as const,
+            })
+            .option('stop', {
+              default: false,
+              describe: STOP_OPTION_TEXT,
+              type: 'boolean' as const,
             }),
         async (argv) => {
           if (await sessionBeadsOn()) {
@@ -1452,8 +1924,15 @@ export const threadCommand: CommandModule = {
                 reason: argv.reason ?? null,
                 selector: argv.threadId ?? null,
                 sessionId: argv.session ?? null,
+                stop: argv.stop === true,
               }),
             );
+          }
+          if (argv.stop === true) {
+            console.error(
+              'thread done --stop: only with componentConfig.thread.sessionBeads on; nothing was marked',
+            );
+            process.exit(2);
           }
           const {runThreadDone} = await import('./done');
           process.exit(

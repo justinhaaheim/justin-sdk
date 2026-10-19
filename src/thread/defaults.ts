@@ -110,6 +110,20 @@ export const THREAD_DEFAULT_NUDGE = true;
 export const THREAD_DEFAULT_NAME_WORKSPACES = false;
 
 /**
+ * Repo folder names that `thread inbox --by-repo` and the threads TUI's "by
+ * repo" grouping list first, in this order (home-base-yukaf.9, D-PINS). Not a
+ * feature gate: it only reorders groups. Default none.
+ */
+export const THREAD_DEFAULT_PINNED_PROJECTS: readonly string[] = [];
+
+/**
+ * How far back `thread open` looks when neither --since nor --days is given
+ * (home-base-yukaf.22; D-CUTOFF's 7 days). A number and h, d or w: `24h`,
+ * `3d`, `2w`. Not a feature gate: it only sets the default window.
+ */
+export const THREAD_DEFAULT_OPEN_SINCE = '7d';
+
+/**
  * How far a request can get, in order (status report v4, epic
  * home-base-vzwbj.4 D1 "STAGES"; built by home-base-vzwbj.4.3). `thread stage
  * <request> <name>` labels the request `stage:<name>`, and Part 1 shows the
@@ -182,5 +196,22 @@ export const THREAD_DEFAULT_ANSWER_UI: ThreadAnswerUi = 'web';
 export const THREAD_ANSWER_UIS: readonly ThreadAnswerUi[] = [
   'classic',
   'ink',
+  'web',
+];
+
+/**
+ * Which dashboard `thread dashboard` opens (home-base-yukaf.11, D-WEB).
+ *
+ * `tui` is the full-screen terminal dashboard (`bun run threads` in
+ * home-base). `web` is the EXPERIMENT: a page on 127.0.0.1 whose buttons run
+ * the same commands the TUI's keys run. Default `tui` until Justin has tried
+ * the page (feature-knobs rule); `--web` / `--tui` override it per run.
+ */
+export type ThreadDashboardUi = 'tui' | 'web';
+
+export const THREAD_DEFAULT_DASHBOARD_UI: ThreadDashboardUi = 'tui';
+
+export const THREAD_DASHBOARD_UIS: readonly ThreadDashboardUi[] = [
+  'tui',
   'web',
 ];

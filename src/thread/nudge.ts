@@ -38,19 +38,52 @@
  * R9): "I could not check whether a request is in progress (<reason>)", never
  * the claim that none is.
  *
+ * THE LAST-REQUEST WARNING (home-base-yukaf.3, epic home-base-yukaf decision
+ * D-LAST-REQUEST-WARNING). The same hook, a second decision, its own marker.
+ * After a Bash call that ran `br close <ids…>` (`brCloseIds`), it says:
+ *
+ *   [thread] you closed the last open request in this session ("<title>").
+ *   Before you stop: re-read Justin's first message — … file it: thread request "…"
+ *
+ * Its table, in order:
+ *   payload unreadable, no session_id,
+ *     a subagent, not Bash              silent  (as above)
+ *   no `br close` naming a bead id      silent  (`br close` with NO id closes
+ *                                                 br's last-touched bead, which
+ *                                                 this cannot name)
+ *   the knobs off                       silent  (the same two knobs)
+ *   no session bead for the session     silent
+ *   none of the ids is a request of
+ *     this session                      silent  (a non-request bead)
+ *   a request of this session is still
+ *     open (ids just closed count as
+ *     closed: the export may lag)       silent
+ *   already warned this turn            silent  (its own marker,
+ *                                                 lastRequestMarkPath)
+ *   otherwise                           the line
+ * Rule 7: when the session's beads cannot be read (an export, the sessions
+ * index, or a corrupt index line), "that was the last request" is not a
+ * measured fact, so it speaks the VARIANT, which names the ids and the reason
+ * and asks the same question — never the claim, and never silence.
+ *
+ * Both decisions can speak on one call (`br close X && git commit`); the two
+ * lines then go out as one context block.
+ *
  * Always exits 0 and never blocks; nothing here can stop a tool call.
  */
 
 import type {EnvLike} from './paths';
+import type {SessionTree, TreeIssue} from './session-tree';
 
 import {mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {dirname} from 'path';
 
+import {BEAD_ID_SOURCE} from '../beads/br';
 import {emitHookOutput} from '../hook-output';
 import {sdkRun} from '../sdk-invocation';
-import {nudgeMarkPath} from './archive';
+import {lastRequestMarkPath, nudgeMarkPath} from './archive';
 import {readMessageLog} from './message-log';
-import {isGitCommitCommand} from './session-commits';
+import {isGitCommitCommand, stripQuotedText} from './session-commits';
 import {
   corruptSightingsNote,
   readSessionSightings,
@@ -94,8 +127,19 @@ interface Payload {
   agentId: string | null;
   command: string | null;
   cwd: string | null;
+  /** tool_response stdout and stderr joined; null when it carries neither. */
+  output: string | null;
   sessionId: string | null;
   toolName: string | null;
+}
+
+function toolOutput(response: unknown): string | null {
+  if (response == null || typeof response !== 'object') return null;
+  const record = response as Record<string, unknown>;
+  const parts = [record.stdout, record.stderr].filter(
+    (part): part is string => typeof part === 'string',
+  );
+  return parts.length === 0 ? null : parts.join('\n');
 }
 
 function text(value: unknown): string | null {
@@ -121,6 +165,7 @@ export function parseNudgePayload(raw: string): Payload | null {
         ? text((input as Record<string, unknown>).command)
         : null,
     cwd: text(record.cwd),
+    output: toolOutput(record.tool_response),
     sessionId: text(record.session_id),
     toolName: text(record.tool_name),
   };
@@ -132,6 +177,48 @@ function turnKey(sessionId: string, env: EnvLike): string | null {
   if (log.kind !== 'read') return null;
   const users = log.lines.filter((line) => line.role === 'user');
   return users.at(-1)?.at ?? null;
+}
+
+/**
+ * This session's beads, read from files only (the sessions index, then the
+ * exports it names). `unreadable`: the check cannot be made — the index
+ * failed, or it has a corrupt line for this session and no readable `created`
+ * line (R9). `tree.problems` also carries a corrupt line seen beside a
+ * readable one: the tree may then be partial.
+ */
+type SessionBeads =
+  | {kind: 'noSessionBead'}
+  | {kind: 'tree'; problems: string[]; tree: SessionTree}
+  | {kind: 'unreadable'; reason: string};
+
+function readSessionBeads(sessionId: string, env: EnvLike): SessionBeads {
+  const sightings = readSessionSightings(sessionId, env);
+  // R9: a corrupt index line that mentions this session may be the session
+  // bead's own `created` line, or a second DB's: the check is then partial.
+  const corruptNote = corruptSightingsNote(sightings);
+  if (sightings.kind === 'failed') {
+    return {
+      kind: 'unreadable',
+      reason: `the sessions index is unreadable: ${sightings.error}`,
+    };
+  }
+  const list = sightings.kind === 'read' ? sightings.sightings : [];
+  const created = sessionBeadSighting(list);
+  if (created == null) {
+    return corruptNote == null
+      ? {kind: 'noSessionBead'}
+      : {kind: 'unreadable', reason: corruptNote};
+  }
+  const tree = readSessionTree({
+    beadsDirs: [created.beadsDir, ...list.map((entry) => entry.beadsDir)],
+    sessionBeadId: created.beadId,
+    sessionId,
+  });
+  return {
+    kind: 'tree',
+    problems: [...tree.problems, ...(corruptNote != null ? [corruptNote] : [])],
+    tree,
+  };
 }
 
 function readMark(path: string): string | null {
@@ -158,6 +245,22 @@ function writeMark(path: string, turn: string, now: Date): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * Speak at most once per turn, keyed by the newest user line (see the
+ * header). No user line to key on: speak, unmarked.
+ */
+function oncePerTurn(input: {
+  env: EnvLike;
+  markPath: string;
+  now: Date;
+  sessionId: string;
+}): {kind: 'already'} | {kind: 'speak'; marked: boolean} {
+  const turn = turnKey(input.sessionId, input.env);
+  if (turn == null) return {kind: 'speak', marked: false};
+  if (readMark(input.markPath) === turn) return {kind: 'already'};
+  return {kind: 'speak', marked: writeMark(input.markPath, turn, input.now)};
 }
 
 /** The decision, and the marker write when it speaks. Prints nothing. */
@@ -191,83 +294,358 @@ export async function decideNudge(input: {
   }
 
   const sessionId = payload.sessionId;
-  const sightings = readSessionSightings(sessionId, env);
-  // R9: a corrupt index line that mentions this session may be the session
-  // bead's own `created` line, or a second DB's: the check is then partial.
-  const corruptNote = corruptSightingsNote(sightings);
+  const beads = readSessionBeads(sessionId, env);
   let beadsUnreadable: string | null = null;
-  if (sightings.kind === 'failed') {
-    beadsUnreadable = `the sessions index is unreadable: ${sightings.error}`;
+  if (beads.kind === 'noSessionBead') {
+    return {kind: 'silent', why: 'no session bead for this session'};
+  }
+  if (beads.kind === 'unreadable') {
+    beadsUnreadable = beads.reason;
   } else {
-    const list = sightings.kind === 'read' ? sightings.sightings : [];
-    const created = sessionBeadSighting(list);
-    if (created == null) {
-      if (corruptNote == null) {
-        return {kind: 'silent', why: 'no session bead for this session'};
-      }
-      beadsUnreadable = corruptNote;
-    } else {
-      const tree = readSessionTree({
-        beadsDirs: [created.beadsDir, ...list.map((entry) => entry.beadsDir)],
-        sessionBeadId: created.beadId,
-        sessionId,
-      });
-      if (tree.requests.some((node) => node.request.status === 'in_progress')) {
-        return {kind: 'silent', why: 'a request is in progress'};
-      }
-      const problems = [
-        ...tree.problems,
-        ...(corruptNote != null ? [corruptNote] : []),
-      ];
-      if (problems.length > 0) beadsUnreadable = problems.join('; ');
+    if (
+      beads.tree.requests.some((node) => node.request.status === 'in_progress')
+    ) {
+      return {kind: 'silent', why: 'a request is in progress'};
     }
+    if (beads.problems.length > 0) beadsUnreadable = beads.problems.join('; ');
   }
 
-  const turn = turnKey(sessionId, env);
   const why =
     beadsUnreadable == null
       ? 'no request in progress'
       : `the beads could not be read (${beadsUnreadable})`;
   const unchecked = beadsUnreadable;
-  if (turn == null) return {kind: 'speak', marked: false, unchecked, why};
-  const markPath = nudgeMarkPath(sessionId, env);
-  if (readMark(markPath) === turn) {
+  const once = oncePerTurn({
+    env,
+    markPath: nudgeMarkPath(sessionId, env),
+    now,
+    sessionId,
+  });
+  if (once.kind === 'already') {
     return {kind: 'silent', why: 'already nudged this turn'};
   }
+  return {kind: 'speak', marked: once.marked, unchecked, why};
+}
+
+// ---------------------------------------------------------------------------
+// The last-request warning (home-base-yukaf.3, D-LAST-REQUEST-WARNING)
+// ---------------------------------------------------------------------------
+
+const LAST_REQUEST_TAIL = `Before you stop: re-read Justin's first message — does everything he asked for exist, or is it answered in your message? If anything is missing, even a conditional or uncertain ask, file it: ${sdkRun('thread request "…"')}`;
+
+function oneLine(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+/** The line, naming the request (or requests) the command closed. */
+export function lastRequestLine(titles: readonly string[]): string {
+  const quoted = titles.map((title) => `"${oneLine(title)}"`).join(', ');
+  const what =
+    titles.length === 1 ? 'the last open request' : 'the last open requests';
+  return `[thread] you closed ${what} in this session (${quoted}). ${LAST_REQUEST_TAIL}`;
+}
+
+/**
+ * The variant for a check that could not be made (rule 7): the session's
+ * beads could not all be read, so "that was the last request" is unknown.
+ */
+export function lastRequestUncheckedLine(
+  ids: readonly string[],
+  reason: string,
+): string {
+  return `[thread] you closed ${ids.join(', ')}; I could not check whether that was the last open request in this session (${oneLine(reason)}). ${LAST_REQUEST_TAIL}`;
+}
+
+/**
+ * br options that take a value, before or after the subcommand (`br --help`
+ * and `br close --help`, br 0.x, read 2026-10-18). A value never counts as an
+ * id: `--reason not-needed` must not close a bead called `not-needed`.
+ */
+const BR_VALUE_OPTIONS = new Set([
+  '--actor',
+  '--db',
+  '--lock-timeout',
+  '--reason',
+  '--session',
+]);
+
+const BEAD_ID_TOKEN = new RegExp(String.raw`^(?:${BEAD_ID_SOURCE})$`);
+
+function takesValue(token: string): boolean {
+  if (token.includes('=')) return false;
+  if (BR_VALUE_OPTIONS.has(token)) return true;
+  // `-r <reason>`, or a short cluster ending in r (`-fr <reason>`).
+  return /^-[a-zA-Z]*r$/.test(token);
+}
+
+/**
+ * `plain` (quotes already stripped) without its shell comments: a `#` that
+ * starts a word runs to the end of its line (home-base-yukaf.14 F14).
+ */
+function stripShellComments(plain: string): string {
+  return plain
+    .split('\n')
+    .map((line) => line.replace(/(?:^|\s)#.*$/, ''))
+    .join('\n');
+}
+
+/** `FOO=bar` before a command word. */
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * The bead ids every `br close` in `command` names, in order, each once.
+ * Quoted text is ignored (stripQuotedText), so `echo "br close x-1"` and a
+ * reason that mentions an id are not closes. Shell comments are ignored, and
+ * `br` counts only as the COMMAND word of a simple command (first word, after
+ * any `VAR=value`; `/path/to/br` too), so `# br close x-1` and
+ * `echo br close x-1` close nothing (F14). Global options may come before
+ * `close` (`br --db <path> close <id>`); option values are skipped; a token
+ * counts only when it has the bead id shape (`home-base-abcde`,
+ * `home-base-abcde.12`). A `br close` asking for `--help`/`-h` closes nothing.
+ * `br close` with no id (br's last-touched bead) and an id held in a shell
+ * variable name nothing, so they give no ids. `br update <id> --status
+ * closed` is no close: br 0.5.12 refuses it (exit 4, "terminal-state
+ * transitions must go through `br close`"; measured 2026-10-18).
+ */
+export function brCloseIds(command: string): string[] {
+  const plain = stripShellComments(stripQuotedText(command));
+  const ids: string[] = [];
+  for (const segment of plain.split(/;|&&|\|\||\||&|\n|\(|\)/)) {
+    const words = segment.split(/\s+/).filter((token) => token !== '');
+    let first = 0;
+    while (first < words.length && ENV_ASSIGNMENT.test(words[first] ?? '')) {
+      first += 1;
+    }
+    const commandWord = words[first] ?? '';
+    if (commandWord !== 'br' && !commandWord.endsWith('/br')) continue;
+    const tokens = words.slice(first + 1);
+    let index = 0;
+    while (index < tokens.length && (tokens[index] ?? '').startsWith('-')) {
+      index += takesValue(tokens[index] ?? '') ? 2 : 1;
+    }
+    if (tokens[index] !== 'close') continue;
+    const found: string[] = [];
+    let help = false;
+    for (index += 1; index < tokens.length; index += 1) {
+      const token = tokens[index] ?? '';
+      if (token === '--help' || token === '-h') {
+        help = true;
+        break;
+      }
+      if (token.startsWith('-')) {
+        if (takesValue(token)) index += 1;
+        continue;
+      }
+      if (BEAD_ID_TOKEN.test(token)) found.push(token);
+    }
+    if (!help) ids.push(...found);
+  }
+  return [...new Set(ids)];
+}
+
+/**
+ * The ids br's own output says it did NOT close (F14), read from the Bash
+ * tool_response's stdout and stderr. A whole close br refuses exits non-zero
+ * (3, measured with br 0.5.12, 2026-10-18), and a failed Bash call fires
+ * PostToolUseFailure, not PostToolUse, so this hook never sees it. What does
+ * reach it is a refusal whose exit code a later step hid (`br close x; echo`,
+ * `br close x | tail`), and br prints that refusal as
+ * `Skipped <id>: <why>` or `Issue not found: <id>`.
+ */
+export function brRefusedIds(output: string): Set<string> {
+  const refused = new Set<string>();
+  const pattern = new RegExp(
+    String.raw`(?:Skipped|Issue not found:)\s+(${BEAD_ID_SOURCE})\b`,
+    'g',
+  );
+  for (const match of output.matchAll(pattern)) {
+    if (match[1] != null) refused.add(match[1]);
+  }
+  return refused;
+}
+
+/**
+ * Closed or tombstoned — session-status.ts `isOpen`, negated. Not imported:
+ * session-status pulls in session-model (git, transcripts, usage-check), and
+ * this hook runs on every commit and close.
+ */
+function isClosedStatus(status: string): boolean {
+  return status === 'closed' || status === 'tombstone';
+}
+
+export type LastRequestDecision =
+  | {
+      /** The bead ids the command closed. */
+      closedIds: string[];
+      kind: 'speak';
+      marked: boolean;
+      /** The titles of the requests among them (empty when unchecked). */
+      titles: string[];
+      /** Rule 7: why the check could not be made; null = it was made. */
+      unchecked: string | null;
+      why: string;
+    }
+  | {kind: 'silent'; why: string};
+
+/** The one line a speaking last-request decision prints. */
+export function lastRequestNudgeLine(
+  decision: Extract<LastRequestDecision, {kind: 'speak'}>,
+): string {
+  return decision.unchecked == null
+    ? lastRequestLine(decision.titles)
+    : lastRequestUncheckedLine(decision.closedIds, decision.unchecked);
+}
+
+/** The last-request decision, and its marker write when it speaks. */
+export async function decideLastRequestNudge(input: {
+  env: EnvLike;
+  now: Date;
+  raw: string;
+}): Promise<LastRequestDecision> {
+  const {env, now} = input;
+  const payload = parseNudgePayload(input.raw);
+  if (payload == null) return {kind: 'silent', why: 'payload is not JSON'};
+  if (payload.sessionId == null) {
+    return {kind: 'silent', why: 'payload has no session_id'};
+  }
+  if (payload.agentId != null) {
+    return {kind: 'silent', why: `subagent (agent_id=${payload.agentId})`};
+  }
+  if (payload.toolName !== 'Bash') {
+    return {kind: 'silent', why: `tool ${payload.toolName ?? '(none)'}`};
+  }
+  const namedIds = payload.command == null ? [] : brCloseIds(payload.command);
+  if (namedIds.length === 0) {
+    return {kind: 'silent', why: 'not a br close of a bead id'};
+  }
+  const refused = brRefusedIds(payload.output ?? '');
+  const closedIds = namedIds.filter((id) => !refused.has(id));
+  if (closedIds.length === 0) {
+    return {
+      kind: 'silent',
+      why: `br refused the close (${namedIds.join(', ')})`,
+    };
+  }
+  const {resolveThreadConfig} = await import('./config');
+  const config = resolveThreadConfig({cwd: payload.cwd ?? process.cwd(), env});
+  if (!config.sessionBeads || !config.nudge) {
+    return {
+      kind: 'silent',
+      why: `knob off (sessionBeads=${config.sessionBeads}, nudge=${config.nudge})`,
+    };
+  }
+
+  const sessionId = payload.sessionId;
+  const beads = readSessionBeads(sessionId, env);
+  if (beads.kind === 'noSessionBead') {
+    return {kind: 'silent', why: 'no session bead for this session'};
+  }
+  let unchecked: string | null = null;
+  let titles: string[] = [];
+  if (beads.kind === 'unreadable') {
+    unchecked = beads.reason;
+  } else {
+    const closed = new Set(closedIds);
+    const requests = beads.tree.requests.map((node) => node.request);
+    const byId = new Map(requests.map((request) => [request.id, request]));
+    const closedRequests = closedIds
+      .map((id) => byId.get(id))
+      .filter((request): request is TreeIssue => request != null);
+    const problems = beads.problems.join('; ');
+    if (closedRequests.length === 0) {
+      // An id may be a request held in the export that could not be read.
+      if (problems === '') {
+        return {
+          kind: 'silent',
+          why: `closed no request of this session (${closedIds.join(', ')})`,
+        };
+      }
+      unchecked = problems;
+    } else {
+      const stillOpen = requests.filter(
+        (request) => !isClosedStatus(request.status) && !closed.has(request.id),
+      );
+      if (stillOpen.length > 0) {
+        return {
+          kind: 'silent',
+          why: `${stillOpen.length} request${stillOpen.length === 1 ? '' : 's'} of this session still open (${stillOpen.map((request) => request.id).join(', ')})`,
+        };
+      }
+      // Another request may sit in the export that could not be read.
+      if (problems !== '') unchecked = problems;
+      titles = closedRequests.map((request) => request.title);
+    }
+  }
+
+  const once = oncePerTurn({
+    env,
+    markPath: lastRequestMarkPath(sessionId, env),
+    now,
+    sessionId,
+  });
+  if (once.kind === 'already') {
+    return {kind: 'silent', why: 'already warned this turn'};
+  }
   return {
+    closedIds,
     kind: 'speak',
-    marked: writeMark(markPath, turn, now),
+    marked: once.marked,
+    titles: unchecked == null ? titles : [],
     unchecked,
-    why,
+    why:
+      unchecked == null
+        ? 'closed the last open request of this session'
+        : `the beads could not be read (${unchecked})`,
   };
 }
 
-/** The hook: read stdin, decide, print at most one line. Always 0. */
+function failedDecision(error: unknown): {kind: 'silent'; why: string} {
+  return {
+    kind: 'silent',
+    why: `failed: ${error instanceof Error ? error.message : String(error)}`,
+  };
+}
+
+/**
+ * The hook: read stdin, make both decisions, print at most one hook-JSON
+ * line (the commit nudge, the last-request warning, or both). Always 0.
+ */
 export async function runThreadNudgeHook(
   args: {env?: EnvLike; explain?: boolean; now?: Date; stdin?: string} = {},
 ): Promise<number> {
   const env = args.env ?? process.env;
+  const now = args.now ?? new Date();
   let raw: string;
   try {
     raw = args.stdin ?? readFileSync(0, 'utf8');
   } catch {
     raw = '';
   }
-  let decision: NudgeDecision;
+  // Never block a tool call over the nudge's own failure.
+  let commit: NudgeDecision;
   try {
-    decision = await decideNudge({env, now: args.now ?? new Date(), raw});
+    commit = await decideNudge({env, now, raw});
   } catch (error) {
-    // Never block a tool call over the nudge's own failure.
-    decision = {
-      kind: 'silent',
-      why: `failed: ${error instanceof Error ? error.message : String(error)}`,
-    };
+    commit = failedDecision(error);
+  }
+  let lastRequest: LastRequestDecision;
+  try {
+    lastRequest = await decideLastRequestNudge({env, now, raw});
+  } catch (error) {
+    lastRequest = failedDecision(error);
   }
   if (args.explain === true) {
-    console.error(`thread nudge: ${decision.kind} — ${decision.why}`);
+    console.error(`thread nudge: ${commit.kind} — ${commit.why}`);
+    console.error(
+      `thread nudge (last request): ${lastRequest.kind} — ${lastRequest.why}`,
+    );
   }
-  if (decision.kind === 'speak') {
-    emitHookOutput({event: 'PostToolUse', forClaude: nudgeLine(decision)});
+  const lines = [
+    commit.kind === 'speak' ? nudgeLine(commit) : null,
+    lastRequest.kind === 'speak' ? lastRequestNudgeLine(lastRequest) : null,
+  ].filter((line): line is string => line != null);
+  if (lines.length > 0) {
+    emitHookOutput({event: 'PostToolUse', forClaude: lines.join('\n')});
   }
   return 0;
 }

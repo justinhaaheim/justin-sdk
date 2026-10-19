@@ -86,6 +86,10 @@ import {probeErrorMessage} from './paths';
 import {ensureSessionBead, type SessionBeadOutcome} from './session-bead';
 import {sessionContextLine} from './session-line';
 import {
+  type StatusFileOutcome,
+  writeStatusForSession,
+} from './session-status-file';
+import {
   buildResumeCommand,
   extractTranscriptTurns,
   type TranscriptTurns,
@@ -1019,6 +1023,11 @@ export type CaptureApplyOutcome =
        */
       sessionBead: SessionBeadOutcome | null;
       /**
+       * What writing the status line's file did (home-base-yukaf.6); null when
+       * componentConfig.thread.sessionBeads is off.
+       */
+      statusFile: StatusFileOutcome | null;
+      /**
        * What naming the cmux workspace did (home-base-j8q3e.5 D4 a); null
        * when no session bead was ensured or nameWorkspaces is off.
        */
@@ -1169,7 +1178,30 @@ export async function applyCapture(
       exportUnstaged: ctx.exportUnstaged,
     });
   }
-  return {commit, kind: 'ran', last, passes, seed, sessionBead, workspaceName};
+  // D-STATUSLINE (home-base-yukaf.6): the status line's file, after the
+  // session bead exists. Never throws; a failure lands in the run record,
+  // because this child's stderr is ignored.
+  const statusFile =
+    options.sessionBeads === true
+      ? await writeStatusForSession({
+          cwd: options.cwd ?? process.cwd(),
+          env,
+          // F13: never overwrite a done/archive mark written while this ran.
+          keepNewer: true,
+          now: options.now ?? new Date(),
+          sessionId,
+        })
+      : null;
+  return {
+    commit,
+    kind: 'ran',
+    last,
+    passes,
+    seed,
+    sessionBead,
+    statusFile,
+    workspaceName,
+  };
 }
 
 /** The one JSON line a child run appends to `<stateDir>/capture.jsonl`. */
@@ -1224,6 +1256,9 @@ export function captureRunRecord(
   }
   if (outcome.workspaceName != null) {
     record.workspaceName = workspaceSyncRecord(outcome.workspaceName);
+  }
+  if (outcome.statusFile != null) {
+    record.statusFile = outcome.statusFile;
   }
   if (last.kind === 'applied') {
     record.threadId = last.threadId;

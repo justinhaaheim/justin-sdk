@@ -42,7 +42,7 @@ import type {ExportRead, TreeIssue} from './session-tree';
 
 import {readFileSync} from 'fs';
 
-import {findBeadsWorkspace} from '../beads/br';
+import {BEAD_ID_SOURCE, findBeadsWorkspace} from '../beads/br';
 import {stripQuotedText, subagentTranscripts} from './session-commits';
 import {measured, unmeasured} from './session-model';
 import {parseExportLine, readBeadsExport} from './session-tree';
@@ -74,8 +74,8 @@ export interface CreatedEvidence {
   unparsedLines: number;
 }
 
-/** A bead id as br prints it: `<prefix>-<hash>`, then `.<n>` per child level. */
-const BEAD_ID = String.raw`[A-Za-z0-9][A-Za-z0-9_-]*-[A-Za-z0-9]+(?:\.\d+)*`;
+/** A bead id as br prints it (br.ts BEAD_ID_SOURCE). */
+const BEAD_ID = BEAD_ID_SOURCE;
 
 /** br's default confirmation line (the check mark is optional: `--no-color`). */
 const CREATED_LINE = new RegExp(

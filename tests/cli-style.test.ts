@@ -17,6 +17,7 @@ import {describe, expect, test} from 'bun:test';
 import {
   BODY_COLUMN,
   displayWidth,
+  highlight,
   outputStyle,
   padEndWidth,
   paint,
@@ -90,6 +91,50 @@ describe('paint, sectionHeader, spacedList', () => {
 
   test('spacedList puts exactly one blank line between blocks', () => {
     expect(spacedList(['a', '', 'b'])).toBe('a\n\nb');
+  });
+});
+
+describe('highlight — the highlighter pen (home-base-yukaf.5)', () => {
+  test('colour on: black on a yellow BACKGROUND, closed by a full reset', () => {
+    expect(highlight('needle', true)).toBe(`${ESC}43;30mneedle${ESC}0m`);
+    expect(paint('needle', ['highlight'], true)).toBe(
+      `${ESC}43;30mneedle${ESC}0m`,
+    );
+  });
+
+  test('colour off: no escape at all, and the position survives as »…«', () => {
+    expect(highlight('needle', false)).toBe('»needle«');
+    expect(highlight('needle', false)).not.toContain(ESC);
+    // paint itself still returns plain text: the marks are highlight's job.
+    expect(paint('needle', ['highlight'], false)).toBe('needle');
+  });
+
+  test('empty text stays empty, in both modes', () => {
+    expect(highlight('', true)).toBe('');
+    expect(highlight('', false)).toBe('');
+  });
+
+  test('a highlight that crosses a wrap is re-opened on the next line, never on its indent', () => {
+    const styled = `lead ${highlight(LONG, true)} tail`;
+    const lines = wrapHanging(styled, {hang: 8, indent: 6, width: 60}).split(
+      '\n',
+    );
+    expect(lines.length).toBeGreaterThan(3);
+    for (const line of lines.slice(1, -1)) {
+      // A yellow background on the indentation would draw a yellow block.
+      expect(line.startsWith(`        ${ESC}43;30m`)).toBe(true);
+      expect(line.endsWith(`${ESC}0m`)).toBe(true);
+    }
+  });
+
+  test('SGR 49 closes the background and keeps the foreground', () => {
+    const styled = `${ESC}43;30m${LONG}${ESC}49m and the tail after it`;
+    const out = wrapHanging(styled, {hang: 8, indent: 6, width: 60});
+    // The run that holds "tail" is opened with the foreground alone: the last
+    // escape before the word carries `30`, not `43;30`.
+    const upToTail = out.slice(0, out.indexOf('tail'));
+    const opener = upToTail.slice(upToTail.lastIndexOf(ESC) + ESC.length);
+    expect(opener.slice(0, opener.indexOf('m'))).toBe('30');
   });
 });
 

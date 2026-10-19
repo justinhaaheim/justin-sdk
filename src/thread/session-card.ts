@@ -21,6 +21,7 @@
  * A count that could not be taken is said as unknown, never as 0.
  */
 
+import type {InputDraft} from './input-drafts';
 import type {PaneLookup} from './pane-join';
 import type {MergeState, SessionModel} from './session-model';
 import type {SessionStatus, StatusCounts} from './session-status';
@@ -49,6 +50,7 @@ export type InboxSection =
   | 'notTracked'
   | 'stoppedOpen'
   | 'toLand'
+  | 'unsentDraft'
   | 'working';
 
 /**
@@ -65,6 +67,16 @@ export const INBOX_SECTIONS: readonly {
   onlyWithAll: boolean;
   title: string;
 }[] = [
+  // D-DRAFTS (epic home-base-yukaf, home-base-yukaf.4): text Justin typed
+  // into the input box and never sent comes before everything else. Justin,
+  // 2026-10-17: "that's like probably a session or a thread to kind of
+  // surface to like highlight right to the top".
+  {
+    emoji: '✍️',
+    key: 'unsentDraft',
+    onlyWithAll: false,
+    title: 'Unsent text in the input box',
+  },
   {emoji: '🛑', key: 'needsYou', onlyWithAll: false, title: 'Needs you'},
   {emoji: '🛬', key: 'toLand', onlyWithAll: false, title: 'To land'},
   {
@@ -515,6 +527,18 @@ export interface CardFact {
   value: string;
 }
 
+/**
+ * F1 (home-base-yukaf.14): the second "You need to" line of a session that
+ * has unsent text, kept beside the session's own action (an open P0 stays
+ * "Answer: …"), and the section it is counted in besides ✍️.
+ */
+export interface UnsentLine {
+  /** The section the session is in without its draft; it is counted there too. */
+  beneath: InboxSection;
+  command: string | null;
+  text: string;
+}
+
 export interface SessionCard {
   action: CardAction;
   /** "3 hours ago"; null when nothing dates the last activity. */
@@ -546,6 +570,8 @@ export interface SessionCard {
   /** The derived status in words ("Where it is"). */
   status: string;
   title: string;
+  /** F1: unsent text in the session's input box, or null when there is none. */
+  unsent: UnsentLine | null;
   youAsked: YouAsked;
 }
 
@@ -885,7 +911,61 @@ export function buildCard(input: CardInput): SessionCard {
     sectionTitle: info.title,
     status: where,
     title: input.title,
+    unsent: null,
     youAsked: youAskedOf(model),
+  };
+}
+
+/** The card's "You typed, never sent" fact shows this much of the text, then "…". */
+export const DRAFT_FACT_CHARS = 300;
+
+/** The card fact's label (the renderers add the colon). */
+export const DRAFT_FACT_LABEL = 'You typed, never sent';
+
+/**
+ * F23: added after the draft's text when it equals the session's newest
+ * sent message (typed again, not sent).
+ */
+export const DRAFT_SENT_MATCH_NOTE = '(the same as your last sent message)';
+
+/** The second "You need to" line of a card with unsent text (F1). */
+export const DRAFT_ACTION_TEXT =
+  'You have unsent text in that pane: open it and send or clear it:';
+
+/**
+ * D-DRAFTS (home-base-yukaf.4): a session with a live draft in the store goes
+ * in the first section, its card leads with the text, and the one thing to do
+ * is open its pane: the live one, else the one the draft was seen in.
+ */
+export function withInputDraft(
+  card: SessionCard,
+  draft: Pick<InputDraft, 'text' | 'workspaceId'> &
+    Partial<Pick<InputDraft, 'sentMatch'>>,
+): SessionCard {
+  const info = sectionInfo('unsentDraft');
+  const cut =
+    draft.text.length > DRAFT_FACT_CHARS
+      ? `${draft.text.slice(0, DRAFT_FACT_CHARS)}…`
+      : draft.text;
+  const text =
+    draft.sentMatch === true ? `${cut} ${DRAFT_SENT_MATCH_NOTE}` : cut;
+  // F1: the session's own action stays first ("Answer: <P0>" included); the
+  // draft is a second line, and the session still counts in its own section.
+  return {
+    ...card,
+    facts: [{label: DRAFT_FACT_LABEL, value: text}, ...card.facts],
+    section: 'unsentDraft',
+    sectionEmoji: info.emoji,
+    sectionTitle: info.title,
+    unsent: {
+      beneath: card.section,
+      command:
+        card.pane ??
+        (draft.workspaceId == null
+          ? null
+          : selectWorkspaceCommand(draft.workspaceId)),
+      text: DRAFT_ACTION_TEXT,
+    },
   };
 }
 
@@ -919,6 +999,7 @@ export function unreadableCard(input: {
     sectionTitle: info.title,
     status: '❔ Unknown (this session could not be loaded)',
     title: input.title,
+    unsent: null,
     youAsked: {
       firstMessage: null,
       kind: 'unknown',

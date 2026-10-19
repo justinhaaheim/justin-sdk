@@ -1,0 +1,15 @@
+────────────────────────────────────────────────────────────────────────────────────────
+❯ no new work and change no code. 1) List every separate thing Justin asked for in
+  this session, including things that were only discussed, deferred, proposed, or left
+  as an open question. For each one run: bun run justin-sdk thread request
+  "<plain-words title of what he wants>" 2) Close a request with br close <id>
+  --reason "..." only when its work is really finished. A question is finished when it
+  was answered, but if the answer proposed work that Justin has neither had built nor
+  declined, file that work as its own request and leave it open. 3) For an open
+  request that reached a stage, run bun run justin-sdk thread stage <id> <stage>. For
+  anything you need from Justin, run bun run justin-sdk thread ask. 4) Commit only
+  .beads/issues.jsonl. 5) Run bun run justin-sdk thread status and end your turn with
+  its Part 1, plus one line per open request saying what is left.
+────────────────────────────────────────────────────────────────────────────────────────
+  I  ✱ Opus 5.5 (1m) ✦ xhigh  …/ home-base  main ⇡ 
+  ◔ ███░░ 59% (595k)  5h —  7d — 

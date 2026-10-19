@@ -90,7 +90,9 @@ function row(s: UntrackedSession): InboxRow {
     card,
     display: verdict.display,
     git: null,
+    inputDraft: null,
     lastActivityAt: s.lastActivityAt.ok ? s.lastActivityAt.value : null,
+    lastAssistantAt: null,
     loaded: null,
     repeats: null,
     repo: s.repo,
@@ -100,6 +102,7 @@ function row(s: UntrackedSession): InboxRow {
     startedAt: s.firstMessageAt,
     title: card.title,
     tracked: false,
+    unread: null,
     unreadable: null,
     untracked: {session: s, verdict},
   };
@@ -110,8 +113,10 @@ function read(rows: InboxRow[]): InboxRead {
     corrupt: [],
     hiddenByAge: {},
     indexPath: '/state/sessions.jsonl',
+    inputDrafts: {failures: [], kind: 'read', unshown: []},
     missing: false,
     panes: NO_PANES,
+    readMarks: {kind: 'read'},
     ...shapeRows(rows),
     untracked: {
       devRoot: '/dev',

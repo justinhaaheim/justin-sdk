@@ -38,11 +38,13 @@ import {homedir} from 'os';
 import {join} from 'path';
 
 import {resolveThreadConfig} from './config';
+import {resolveThreadsStateDir, THREADS_STATE_DIR_ENV_VAR} from './status-file';
 
 /** Environment as this module consumes it — `process.env` is assignable. */
 export type EnvLike = Record<string, string | undefined>;
 
-export const STATE_DIR_ENV_VAR = 'JUSTIN_THREADS_STATE_DIR';
+/** Defined in the leaf status-file.ts, which the status line reads cheaply. */
+export const STATE_DIR_ENV_VAR = THREADS_STATE_DIR_ENV_VAR;
 export const REPO_DIR_ENV_VAR = 'JUSTIN_THREADS_REPO_DIR';
 
 /** Default archive/spool root. Shown verbatim in the SANDBOX DENIED line. */
@@ -56,9 +58,8 @@ export const DEFAULT_THREADS_REPO_DISPLAY = '~/Dev/threads';
 
 /** Archive + spool root for report payloads. */
 export function threadsStateDir(env: EnvLike = process.env): string {
-  const override = env[STATE_DIR_ENV_VAR];
-  if (override != null && override !== '') return override;
-  return join(homedir(), '.local', 'state', 'justin-threads');
+  // home-base-yukaf.6: one resolver, shared with the status line's reader.
+  return resolveThreadsStateDir(env);
 }
 
 /** Which layer decided where the bd workspace is. */

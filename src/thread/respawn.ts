@@ -80,8 +80,13 @@ export function socketSettingsJson(socket: string): string {
   return `${JSON.stringify(settings)}\n`;
 }
 
-/** CMUX_SOCKET_PATH, else what cmux recorded in its last-socket-path file. */
-function liveSocketPath(env: EnvLike): {path: string} | {reason: string} {
+/**
+ * CMUX_SOCKET_PATH, else what cmux recorded in its last-socket-path file.
+ * Exported for `thread open` (home-base-yukaf.1), which follows the same rule.
+ */
+export function liveSocketPath(
+  env: EnvLike,
+): {path: string} | {reason: string} {
   const fromEnv = env.CMUX_SOCKET_PATH ?? '';
   const home = env.HOME ?? homedir();
   const file = join(home, '.local/state/cmux/last-socket-path');

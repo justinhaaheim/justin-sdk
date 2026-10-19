@@ -49,7 +49,12 @@ import {
   STAGE_LABEL_PREFIX,
 } from './session-bead';
 import {unmatchedCommitEvidence} from './session-commits';
-import {lastLogLine, measured, unmeasured} from './session-model';
+import {
+  firstUserLine,
+  lastLogLine,
+  measured,
+  unmeasured,
+} from './session-model';
 
 /** Epic D2 step 2: a session whose last record is younger than this is working. */
 export const WORKING_WINDOW_MS = 3 * 60_000;
@@ -404,6 +409,18 @@ export function stageReached(
 // ---------------------------------------------------------------------------
 
 export type MarkItem =
+  /**
+   * home-base-yukaf.3 (D-LAST-REQUEST-WARNING): every request is closed (at
+   * least one, every export read). Quotes Justin's first message so the
+   * session checks it against what exists before it stops. `firstMessage`:
+   * the first user line's text; measured null = the log holds no user line;
+   * not measured = the log could not be read (rule 7: said, never dropped).
+   */
+  | {
+      closedCount: number;
+      firstMessage: Measured<string | null>;
+      kind: 'allRequestsClosed';
+    }
   | {kind: 'autoTitle'; sessionBeadId: string; title: string}
   | {
       commits: number;
@@ -552,7 +569,8 @@ function isOldShapeQuestion(node: RequestNode, question: TreeIssue): boolean {
  * tree does not hold, a `createdNotFound` for ids no export holds, and an
  * `unchecked` when the transcript could not be read. D3: when every request
  * is closed (at least one), one `undecided` per open question and per open
- * candidate (or open bead under one).
+ * candidate (or open bead under one). home-base-yukaf.3: in that same case,
+ * one `allRequestsClosed` first, quoting Justin's first message.
  */
 export function whatToMark(
   model: SessionModel,
@@ -622,6 +640,15 @@ export function whatToMark(
     beads.requests.length > 0 &&
     beads.requests.every((node) => !isOpen(node.request));
   if (allRequestsClosed) {
+    // home-base-yukaf.3: first, Justin's first message to check against.
+    const first = firstUserLine(model.log);
+    items.push({
+      closedCount: beads.requests.length,
+      firstMessage: first.ok
+        ? measured(first.value == null ? null : first.value.text)
+        : unmeasured(first.reason),
+      kind: 'allRequestsClosed',
+    });
     for (const question of openQuestions(model)) {
       items.push({bead: question, kind: 'undecided'});
     }

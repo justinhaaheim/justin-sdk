@@ -50,6 +50,7 @@
  */
 
 import type {Field, OutputStyle} from '../cli-style';
+import type {InputDraft} from './input-drafts';
 import type {PaneLookup, UnplacedKind} from './pane-join';
 import type {EnvLike} from './paths';
 import type {
@@ -79,12 +80,21 @@ import {
   stepColumn,
   wrapHanging,
 } from '../cli-style';
+import {sdkRun} from '../sdk-invocation';
 import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
-import {resolveRepoTag} from './config';
-import {readMessageLog} from './message-log';
+import {messageLogPath} from './archive';
+import {resolveRepoTag, resolveThreadConfig} from './config';
+import {listInputDrafts} from './input-drafts';
+import {
+  isSafeSessionId,
+  readLastAssistantLine,
+  readMessageLog,
+} from './message-log';
 import {lookupPanes as lookupLivePanes, realPaneSources} from './pane-join';
 import {ageWords, tildeText} from './part-one';
+import {pinnedFirst} from './pinned-projects';
+import {readReadMarks, UNREAD_MARKER, unreadFor} from './read-marks';
 import {
   buildCard,
   CARD_REQUESTS_SHOWN,
@@ -95,11 +105,13 @@ import {
   sectionFor,
   sectionInfo,
   unreadableCard,
+  withInputDraft,
 } from './session-card';
 import {readSessionIndex} from './session-index';
 import {
   createLoadCache,
   firstUserLine,
+  lastAssistantLine,
   loadSession,
   newestLogAt,
 } from './session-model';
@@ -134,8 +146,20 @@ export interface InboxRow {
   display: 'card' | 'line';
   /** The git facts the card reads; null for a session that did not load. */
   git: CardGit | null;
+  /**
+   * D-DRAFTS (home-base-yukaf.4): the live unsent text the drafts store holds
+   * for this session, or null when it holds none (or could not be read: then
+   * `InboxRead.inputDrafts` says so).
+   */
+  inputDraft: InboxInputDraft | null;
   /** The newest activity known (ISO), or null when nothing dates it. */
   lastActivityAt: string | null;
+  /**
+   * D-READ-STATE (home-base-yukaf.9): the `at` of the newest assistant line in
+   * the session's message log — Claude's last activity, which Justin's own
+   * prompts do not bump. Null when the log has none or could not be read.
+   */
+  lastAssistantAt: string | null;
   /** Present when the session loaded; null for an unreadable row. */
   loaded: {
     counts: StatusCounts;
@@ -160,11 +184,38 @@ export interface InboxRow {
   title: string;
   /** False for a session with no session bead (D6, section Not tracked). */
   tracked: boolean;
+  /**
+   * D-READ-STATE: Claude has written since Justin's newest read mark, or he
+   * never marked it, or his newest mark is unread (read-marks.ts). Null when
+   * the marks could not be read or `lastAssistantAt` is null: never false
+   * for "could not tell" (rule 7).
+   */
+  unread: boolean | null;
   /** What could not be read (a path and why), or null. */
   unreadable: string | null;
   /** D6's facts and verdict; null for a tracked session. */
   untracked: {session: UntrackedSession; verdict: UntrackedVerdict} | null;
 }
+
+/** A row's live draft, as the inbox and its JSON carry it. */
+export type InboxInputDraft = Pick<
+  InputDraft,
+  'at' | 'sentMatch' | 'surfaceId' | 'text' | 'workspaceId'
+>;
+
+/**
+ * How the drafts store was read for this inbox: the live drafts no listed
+ * session carries (another repo, outside the window, a session the inbox
+ * does not know), and the store files that could not be read; or why the
+ * store could not be read at all (critical rule 7: never "no drafts").
+ */
+export type InboxDrafts =
+  | {
+      failures: string[];
+      kind: 'read';
+      unshown: (InboxInputDraft & {sessionId: string})[];
+    }
+  | {kind: 'failed'; reason: string};
 
 function newest(...values: (string | null | undefined)[]): string | null {
   let best: string | null = null;
@@ -214,10 +265,14 @@ export interface InboxRead {
    */
   hiddenByAge: Partial<Record<SessionStatus['kind'], number>>;
   indexPath: string;
+  /** D-DRAFTS: how the drafts store was read, and the drafts no row shows. */
+  inputDrafts: InboxDrafts;
   /** No index file yet (nothing ever recorded) — a measured answer. */
   missing: boolean;
   /** j8q3e.7 D6: the run's live pane lookup, once, or why it failed. */
   panes: PaneLookup;
+  /** D-READ-STATE: how Justin's read marks were read (every `unread` is null when not). */
+  readMarks: {kind: 'failed'; reason: string} | {kind: 'read'};
   rows: InboxRow[];
   /**
    * F5 (home-base-j8q3e.1.10): sessions whose first message carries the
@@ -386,6 +441,22 @@ export async function readInbox(input: {
       }
     }
   }
+  // D-DRAFTS (home-base-yukaf.4): the live drafts, read once. A session with
+  // one is never hidden by age: the text exists nowhere else.
+  const draftList = listInputDrafts(env);
+  const liveDrafts = new Map<string, InboxInputDraft>();
+  if (draftList.kind === 'read') {
+    for (const entry of draftList.drafts) {
+      if (entry.draft.clearedAt != null) continue;
+      liveDrafts.set(entry.sessionId, {
+        at: entry.draft.at,
+        sentMatch: entry.draft.sentMatch,
+        surfaceId: entry.draft.surfaceId,
+        text: entry.draft.text,
+        workspaceId: entry.draft.workspaceId,
+      });
+    }
+  }
   const since = now.getTime() - input.days * 24 * 60 * 60_000;
   const wantRepo = input.repo?.trim().toLowerCase() ?? null;
   const rows: InboxRow[] = [];
@@ -393,6 +464,7 @@ export async function readInbox(input: {
   const candidates: {
     activity: string | null;
     indexed: (typeof index.sessions)[number];
+    lastAssistantAt: string | null;
     old: boolean;
     sighting: SessionSighting;
   }[] = [];
@@ -418,7 +490,14 @@ export async function readInbox(input: {
     // R5: the age filter runs AFTER the status is derived (below), so it can
     // spare a waiting or unknown session.
     const old = activityMs != null && activityMs < since;
-    candidates.push({activity, indexed, old, sighting});
+    const assistant = lastAssistantLine(log);
+    candidates.push({
+      activity,
+      indexed,
+      lastAssistantAt: assistant.ok ? (assistant.value?.at ?? null) : null,
+      old,
+      sighting,
+    });
   }
 
   // F7 (home-base-vzwbj.4.9): the sessions load CONCURRENTLY, `concurrency`
@@ -459,7 +538,7 @@ export async function readInbox(input: {
     pendingPanes,
   ]);
   for (const [position, candidate] of candidates.entries()) {
-    const {activity, indexed, old, sighting} = candidate;
+    const {activity, indexed, lastAssistantAt, old, sighting} = candidate;
     const loaded = loads[position];
     if (loaded == null) continue;
     if (loaded.kind !== 'loaded') {
@@ -483,7 +562,9 @@ export async function readInbox(input: {
         }),
         display: 'card',
         git: null,
+        inputDraft: null,
         lastActivityAt: activity,
+        lastAssistantAt,
         loaded: null,
         repeats: null,
         repo: sighting.repo,
@@ -493,6 +574,7 @@ export async function readInbox(input: {
         startedAt: null,
         title,
         tracked: true,
+        unread: null,
         unreadable: detail,
         untracked: null,
       });
@@ -510,7 +592,8 @@ export async function readInbox(input: {
       old &&
       (lastActivityMs == null || lastActivityMs < since) &&
       status.kind !== 'waiting' &&
-      status.kind !== 'unknown'
+      status.kind !== 'unknown' &&
+      !liveDrafts.has(model.sessionId)
     ) {
       hiddenByAge[status.kind] = (hiddenByAge[status.kind] ?? 0) + 1;
       continue;
@@ -543,7 +626,9 @@ export async function readInbox(input: {
       }),
       display: 'card',
       git: cardGit(model.git),
+      inputDraft: null,
       lastActivityAt,
+      lastAssistantAt,
       loaded: {counts, model, status},
       repeats: null,
       repo: model.repo,
@@ -553,6 +638,7 @@ export async function readInbox(input: {
       startedAt: model.startedAt.ok ? model.startedAt.value : null,
       title,
       tracked: true,
+      unread: null,
       unreadable,
       untracked: null,
     });
@@ -560,11 +646,17 @@ export async function readInbox(input: {
   for (const session of untracked.sessions) {
     const verdict = untrackedVerdict(session, now);
     const card = untrackedCard(session, verdict, now, panes);
+    // D-READ-STATE: an untracked session's log is read from its end only.
+    const assistant = isSafeSessionId(session.sessionId)
+      ? readLastAssistantLine(messageLogPath(session.sessionId, env))
+      : null;
     rows.push({
       card,
       display: verdict.display,
       git: cardGit(session.git),
+      inputDraft: null,
       lastActivityAt: untrackedActivityAt(session),
+      lastAssistantAt: assistant?.kind === 'found' ? assistant.line.at : null,
       loaded: null,
       repeats: null,
       repo: session.repo,
@@ -574,11 +666,44 @@ export async function readInbox(input: {
       startedAt: session.firstMessageAt,
       title: card.title,
       tracked: false,
+      unread: null,
       unreadable:
         verdict.unmeasured.length === 0 ? null : verdict.unmeasured.join('; '),
       untracked: {session, verdict},
     });
   }
+  // D-READ-STATE (home-base-yukaf.9): Justin's read marks, read once.
+  const marks = readReadMarks(env);
+  for (const [position, row] of rows.entries()) {
+    rows[position] = {
+      ...row,
+      unread: unreadFor(marks, row.sessionId, row.lastAssistantAt),
+    };
+  }
+  // D-DRAFTS: a row with a live draft goes first, as a full card.
+  const shownDrafts = new Set<string>();
+  for (const [position, row] of rows.entries()) {
+    const draft = liveDrafts.get(row.sessionId);
+    if (draft == null) continue;
+    shownDrafts.add(row.sessionId);
+    rows[position] = {
+      ...row,
+      card: withInputDraft(row.card, draft),
+      display: 'card',
+      inputDraft: draft,
+      section: 'unsentDraft',
+    };
+  }
+  const inputDrafts: InboxDrafts =
+    draftList.kind === 'failed'
+      ? draftList
+      : {
+          failures: draftList.failures,
+          kind: 'read',
+          unshown: [...liveDrafts.entries()]
+            .filter(([sessionId]) => !shownDrafts.has(sessionId))
+            .map(([sessionId, draft]) => ({...draft, sessionId})),
+        };
   const untrackedRead: InboxRead['untracked'] = {
     devRoot: untracked.devRoot,
     failures: untracked.failures,
@@ -597,8 +722,13 @@ export async function readInbox(input: {
       })),
       hiddenByAge,
       indexPath: index.path,
+      inputDrafts,
       missing: read.kind === 'missing',
       panes,
+      readMarks:
+        marks.kind === 'failed'
+          ? {kind: 'failed', reason: marks.reason}
+          : {kind: 'read'},
       rows: shaped.rows,
       testSessions: shaped.testSessions,
       untracked: untrackedRead,
@@ -612,6 +742,18 @@ export async function readInbox(input: {
 
 function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
+}
+
+/**
+ * The checkout a session ran in: the loaded model's, else the untracked
+ * session's; null when neither is known. `claude --resume` finds a session
+ * only from its own directory (D-LAYOUT), so every opener needs this
+ * (home-base-yukaf.14 F24): thread open, the TUI's `o`, the web page's Open.
+ */
+export function rowCheckout(row: InboxRow): string | null {
+  return (
+    row.loaded?.model.git.checkout ?? row.untracked?.session.checkout ?? null
+  );
 }
 
 /** A section shows unless it is Done or Archived and --all is off. */
@@ -628,6 +770,8 @@ export function inboxSummary(
   rows: readonly InboxRow[],
   all: boolean,
 ): {
+  /** ✍️ only (F1): how many of its sessions are also waiting on you (🛑). */
+  alsoWaiting: number;
   count: number;
   emoji: string;
   key: InboxSection;
@@ -636,11 +780,24 @@ export function inboxSummary(
 }[] {
   return INBOX_SECTIONS.filter((section) => all || !section.onlyWithAll)
     .map((section) => {
-      const mine = rows.filter((row) => row.section === section.key);
+      // F1: a session with unsent text counts under ✍️ AND under the
+      // section it is in without the draft, so a P0 never leaves the 🛑 count.
+      const mine = rows.filter(
+        (row) =>
+          row.section === section.key ||
+          (section.key !== 'unsentDraft' &&
+            row.card.unsent?.beneath === section.key),
+      );
       // Sessions, not rows: a folded line (F6) counts every session in it.
       const count = (list: readonly InboxRow[]): number =>
         list.reduce((sum, row) => sum + sessionsIn(row), 0);
       return {
+        alsoWaiting:
+          section.key === 'unsentDraft'
+            ? count(
+                mine.filter((row) => row.card.unsent?.beneath === 'needsYou'),
+              )
+            : 0,
         count: count(mine),
         emoji: section.emoji,
         key: section.key,
@@ -655,7 +812,14 @@ export function inboxSummary(
  * A summary entry's value: the count, and for Not tracked what it holds
  * (j8q3e.7 D4: a one-liner is "no request recorded", never "nothing open").
  */
-function summaryValue(entry: {count: number; lines: number}): string {
+function summaryValue(entry: {
+  alsoWaiting: number;
+  count: number;
+  lines: number;
+}): string {
+  if (entry.alsoWaiting > 0) {
+    return `${entry.count} (${entry.alsoWaiting} also waiting on you)`;
+  }
   if (entry.lines === 0) return String(entry.count);
   const cards = entry.count - entry.lines;
   return `${entry.count} (${cards} with something open or unreadable, ${entry.lines} with no request recorded)`;
@@ -816,11 +980,24 @@ function youAskedLines(asked: YouAsked): string[] {
   }
 }
 
-function headingText(card: SessionCard): string {
-  return `${card.emoji} ${tildeText(sessionDisplayName(card.repoTag, card.title))}`;
+/**
+ * D-READ-STATE (home-base-yukaf.9): an unread session's heading starts with
+ * UNREAD_MARKER. Only `unread === true` gets it; null (could not tell) does
+ * not, and the inbox says why once.
+ */
+function unreadLead(unread: boolean | null): string {
+  return unread === true ? `${UNREAD_MARKER} ` : '';
 }
 
-function markdownCard(card: SessionCard, showSection: boolean): string {
+function headingText(card: SessionCard, unread: boolean | null): string {
+  return `${unreadLead(unread)}${card.emoji} ${tildeText(sessionDisplayName(card.repoTag, card.title))}`;
+}
+
+function markdownCard(
+  card: SessionCard,
+  showSection: boolean,
+  unread: boolean | null,
+): string {
   const lines: string[] = [];
   if (showSection) {
     lines.push(`- **Section:** ${card.sectionEmoji} ${card.sectionTitle}`);
@@ -833,11 +1010,21 @@ function markdownCard(card: SessionCard, showSection: boolean): string {
   }
   lines.push(
     `- **Where it is:** ${card.status}`,
-    ...card.facts.map((fact) => `  - **${fact.label}:** ${fact.value}`),
+    // A draft's text can run to several lines: they stay inside the item.
+    ...card.facts.map(
+      (fact) =>
+        `  - **${fact.label}:** ${fact.value.replaceAll('\n', '\n    ')}`,
+    ),
   );
   lines.push(
     `- **You need to:** **${card.action.text}**${card.action.command == null ? '' : ` \`${card.action.command}\``}`,
   );
+  // F1: unsent text is a second line; the session's own action stays first.
+  if (card.unsent != null) {
+    lines.push(
+      `  - **${card.unsent.text}**${card.unsent.command == null ? '' : ` \`${card.unsent.command}\``}`,
+    );
+  }
   if (card.optional != null) {
     lines.push(
       `- **Optional:** ${card.optional.text} \`${card.optional.command}\``,
@@ -850,7 +1037,7 @@ function markdownCard(card: SessionCard, showSection: boolean): string {
     `- **Pane:** ${pane.before}${pane.command == null ? '' : `\`${pane.command}\``}${pane.after}`,
   );
   return [
-    `**${headingText(card)}**${card.age == null ? '' : ` (${card.age})`}`,
+    `**${headingText(card, unread)}**${card.age == null ? '' : ` (${card.age})`}`,
     lines.join('\n'),
   ].join('\n\n');
 }
@@ -870,6 +1057,7 @@ function ansiCard(
   card: SessionCard,
   showSection: boolean,
   style: OutputStyle,
+  unread: boolean | null,
 ): string {
   const {color, width} = style;
   const code = (text: string): string => paint(text, ['cyan'], color);
@@ -895,7 +1083,15 @@ function ansiCard(
   });
   fields.push({
     label: 'You need to',
-    value: `${paint(card.action.text, ['bold'], color)}${card.action.command == null ? '' : ` ${code(card.action.command)}`}`,
+    value: [
+      `${paint(card.action.text, ['bold'], color)}${card.action.command == null ? '' : ` ${code(card.action.command)}`}`,
+      // F1: unsent text is a second line; the session's own action stays first.
+      ...(card.unsent == null
+        ? []
+        : [
+            `${paint(card.unsent.text, ['bold'], color)}${card.unsent.command == null ? '' : ` ${code(card.unsent.command)}`}`,
+          ]),
+    ].join('\n'),
   });
   if (card.optional != null) {
     fields.push({
@@ -909,7 +1105,7 @@ function ansiCard(
     label: 'Pane',
     value: `${pane.before}${pane.command == null ? '' : code(pane.command)}${pane.after}`,
   });
-  const heading = `${paint(headingText(card), ['bold'], color)}${card.age == null ? '' : `  ${paint(`(${card.age})`, ['dim'], color)}`}`;
+  const heading = `${paint(headingText(card, unread), ['bold'], color)}${card.age == null ? '' : `  ${paint(`(${card.age})`, ['dim'], color)}`}`;
   return [
     wrapHanging(heading, {hang: BODY_COLUMN + 3, indent: BODY_COLUMN, width}),
     fieldLines(fields, {
@@ -923,12 +1119,14 @@ function ansiCard(
 
 /** D6's one-line entry, on a TTY at the cards' heading indent. */
 function lineEntry(row: InboxRow, style: OutputStyle): string {
-  const text = untrackedLine(
+  const line = untrackedLine(
     row.card,
     row.untracked?.session.firstMessage ?? null,
     sessionsIn(row),
   );
-  if (!style.color) return text;
+  const lead = unreadLead(row.unread);
+  if (!style.color) return lead === '' ? line : `**${lead.trim()}** ${line}`;
+  const text = lead === '' ? line : `${paint(lead, ['bold'], true)}${line}`;
   return wrapHanging(text, {
     hang: BODY_COLUMN + 3,
     indent: BODY_COLUMN,
@@ -944,8 +1142,8 @@ function renderRow(
 ): string {
   if (row.display === 'line') return lineEntry(row, style);
   return style.color
-    ? ansiCard(row.card, showSection, style)
-    : markdownCard(row.card, showSection);
+    ? ansiCard(row.card, showSection, style, row.unread)
+    : markdownCard(row.card, showSection, row.unread);
 }
 
 function header(
@@ -990,11 +1188,37 @@ export function hiddenByAgeLine(
   return `${plural(total, 'older session', 'older sessions')} hidden (no activity in the last ${plural(days, 'day', 'days')}; --days): ${parts}. Waiting and unknown sessions are never hidden by age.`;
 }
 
+/**
+ * D-DRAFTS (home-base-yukaf.4): the drafts no card shows, and a store that
+ * could not be read, each said once (critical rule 7: never "no drafts").
+ */
+export function inputDraftNotes(drafts: InboxDrafts): string[] {
+  if (drafts.kind === 'failed') {
+    return [
+      `⚠️ Unsent input-box text could not be checked: ${tildeText(drafts.reason)}`,
+    ];
+  }
+  const notes: string[] = [];
+  if (drafts.unshown.length > 0) {
+    notes.push(
+      `✍️ ${plural(drafts.unshown.length, 'session has', 'sessions have')} unsent input-box text but no card in this view (${drafts.unshown.map((entry) => entry.sessionId).join(', ')}); ${sdkRun('thread drafts')} shows ${drafts.unshown.length === 1 ? 'it' : 'them'}.`,
+    );
+  }
+  if (drafts.failures.length > 0) {
+    notes.push(
+      `⚠️ ${plural(drafts.failures.length, 'draft file', 'draft files')} could not be read: ${drafts.failures.map(tildeText).join('; ')}`,
+    );
+  }
+  return notes;
+}
+
 export interface RenderInboxOptions {
   all: boolean;
   days: number;
   now: Date;
   order: InboxOrder;
+  /** D-PINS: `--by-repo` lists these repos first, in this order. Default none. */
+  pinnedProjects?: readonly string[];
   style: OutputStyle;
   timeZone?: string;
 }
@@ -1065,8 +1289,13 @@ export function renderInbox(
       const key = row.repo ?? 'unknown repo';
       groups.set(key, [...(groups.get(key) ?? []), row]);
     }
-    // Map insertion order follows each group's newest session.
-    for (const [repo, rows] of groups) {
+    // Map insertion order follows each group's newest session; D-PINS moves
+    // the pinned repos to the front, in config order.
+    for (const repo of pinnedFirst(
+      [...groups.keys()],
+      options.pinnedProjects ?? [],
+    )) {
+      const rows = groups.get(repo) ?? [];
       blocks.push(header(`${repo} (${rows.length})`, '📁', 2, style));
       for (const row of rows) blocks.push(renderRow(row, true, style));
     }
@@ -1098,6 +1327,13 @@ export function renderInbox(
     );
   }
   notes.push(...untrackedNotes(read.untracked));
+  notes.push(...inputDraftNotes(read.inputDrafts));
+  // D-READ-STATE: no ● anywhere is then "could not tell", and says so once.
+  if (read.readMarks.kind === 'failed') {
+    notes.push(
+      `⚠️ Read / unread could not be checked, so no session is marked ${UNREAD_MARKER}: ${tildeText(read.readMarks.reason)}`,
+    );
+  }
   if (read.corrupt.length > 0) {
     notes.push(
       [
@@ -1146,12 +1382,17 @@ function oldReportsJson(old: InboxRead['untracked']['oldReports']): unknown {
  * home-base-j8q3e.1.10): the threads TUI checks its parser against it, so a
  * new card shape here fails that check instead of the TUI refusing to load.
  */
-export function inboxJson(read: InboxRead) {
+export function inboxJson(
+  read: InboxRead,
+  options: {pinnedProjects?: readonly string[]} = {},
+) {
   const sorted = [...read.rows].sort(byNewest);
   return {
     corrupt: read.corrupt,
     hiddenByAge: read.hiddenByAge,
     indexPath: read.indexPath,
+    // D-DRAFTS: how the drafts store was read, and the drafts no row carries.
+    inputDrafts: read.inputDrafts,
     missing: read.missing,
     // j8q3e.7 D6/D8: how the panes were looked up (the Map would print as
     // `{}`, which reads as "no panes"), and the D8 count.
@@ -1174,14 +1415,24 @@ export function inboxJson(read: InboxRead) {
           })),
         }
       : {ok: false, reason: read.panes.reason},
+    // D-PINS (home-base-yukaf.9): the repos a by-repo view lists first.
+    pinnedProjects: [...(options.pinnedProjects ?? [])],
+    // D-READ-STATE: how the read marks were read; every `unread` is null when not.
+    readMarks: read.readMarks,
     sessions: sorted.map((row) => ({
       action: row.card.action,
       card: row.card,
+      // F24: where `claude --resume` must run; null when no checkout is known.
+      checkout: rowCheckout(row),
       counts: row.loaded?.counts ?? null,
       // D6 (home-base-j8q3e.1.2): a full card or one line.
       display: row.display,
       git: row.git,
+      // D-DRAFTS: the live unsent text for this session, or null.
+      inputDraft: row.inputDraft,
       lastActivityAt: row.lastActivityAt,
+      // D-READ-STATE: Claude's last activity, what `thread read --seen` takes.
+      lastAssistantAt: row.lastAssistantAt,
       // The message log's text can run to megabytes across dozens of
       // sessions; `thread show <id>` prints it. Here: its kind and size.
       model:
@@ -1205,6 +1456,8 @@ export function inboxJson(read: InboxRead) {
       status: row.loaded?.status ?? null,
       title: row.title,
       tracked: row.tracked,
+      // D-READ-STATE: true / false, or null when it could not be told.
+      unread: row.unread,
       unreadable: row.unreadable,
       // D6: the facts an untracked session was read from, and the verdict
       // (its evidence of open work, and what could not be measured).
@@ -1281,10 +1534,20 @@ export async function runSessionInbox(
     console.error(`thread inbox: ${result.reason}`);
     return 1;
   }
+  // D-PINS: the user file, then the project file, like every thread knob.
+  const config = resolveThreadConfig({cwd, env});
+  for (const problem of config.problems) {
+    if (problem.includes('pinnedProjects')) {
+      console.error(`thread inbox: ${problem}`);
+    }
+  }
+  const pinnedProjects = config.pinnedProjects;
   if (options.json) {
     // F2 (home-base-j8q3e.1.9): wait for a pipe to take all of it before the
     // caller's process.exit.
-    await writeStdout(`${JSON.stringify(inboxJson(result.read), null, 2)}\n`);
+    await writeStdout(
+      `${JSON.stringify(inboxJson(result.read, {pinnedProjects}), null, 2)}\n`,
+    );
     return 0;
   }
   await writeStdout(
@@ -1293,6 +1556,7 @@ export async function runSessionInbox(
       days,
       now,
       order: options.order,
+      pinnedProjects,
       style: options.style ?? outputStyle(process.stdout),
       timeZone: options.timeZone,
     })}\n`,
