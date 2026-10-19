@@ -78,7 +78,9 @@ import {
 import {
   composeSessionLine,
   REQUEST_HINT,
+  RULES_CLAUSE,
   sessionContextLine,
+  YIELD_HINT,
 } from '../src/thread/session-line';
 import {closeSession} from '../src/thread/session-marks';
 import {
@@ -981,7 +983,7 @@ describe('capture with sessionBeads ON', () => {
     const second = runHook(cw, prompt(cw, 'and now the import'));
     const [bead] = sessionBeads(cw.repo);
     expect(second.contextLine).toBe(
-      `[thread] session ${bead?.id ?? '?'} "Please speed up the export" · requests: none yet · ${REQUEST_HINT}`,
+      `[thread] session ${bead?.id ?? '?'} "Please speed up the export" · requests: none yet · ${REQUEST_HINT} · ${YIELD_HINT}`,
     );
     await runChild(cw);
     expect(sessionBeads(cw.repo)).toHaveLength(1);
@@ -1292,7 +1294,7 @@ describe('context line', () => {
       sessionId: SESSION,
     });
     expect(line).toBe(
-      `[thread] session ${bead?.id ?? '?'} "Ship the parser" · requests: 1 open, 0 done · ${REQUEST_HINT}`,
+      `[thread] session ${bead?.id ?? '?'} "Ship the parser" · requests: 1 open, 0 done · ${REQUEST_HINT} · ${YIELD_HINT}`,
     );
     expect(brClose({cwd: repo}, filed.id, 'done').kind).toBe('ok');
     expect(
@@ -1323,8 +1325,83 @@ describe('context line', () => {
         titleProblem: null,
       }),
     ).toBe(
-      `[thread] session t-1 "X" · requests: 1 open, 0 done · answers: 1 new · ${REQUEST_HINT}`,
+      `[thread] session t-1 "X" · requests: 1 open, 0 done · answers: 1 new · ${REQUEST_HINT} · ${YIELD_HINT}`,
     );
+  });
+
+  // home-base-yukaf.26 D-REMINDERS: every line ends with the yield reminder,
+  // and names the rules file only where the repo has it.
+  test('every kind of line ends with the yield reminder, and the rules clause only when asked', () => {
+    const kinds = [
+      {
+        beadId: 't-1',
+        kind: 'session' as const,
+        requests: {done: 0, kind: 'counted' as const, open: 1},
+        title: 'X',
+        titleProblem: null,
+      },
+      {kind: 'notFiledYet' as const},
+      {kind: 'indexUnreadable' as const, reason: 'EACCES'},
+    ];
+    for (const parts of kinds) {
+      const plain = composeSessionLine(parts);
+      expect(plain.endsWith(` · ${REQUEST_HINT} · ${YIELD_HINT}`)).toBe(true);
+      expect(plain).not.toContain(RULES_CLAUSE);
+      const withRules = composeSessionLine(parts, {rulesInstalled: true});
+      expect(withRules.endsWith(` · ${YIELD_HINT} · ${RULES_CLAUSE}`)).toBe(
+        true,
+      );
+    }
+    expect(YIELD_HINT).toBe(
+      'before you yield: bun run justin-sdk thread status',
+    );
+    expect(RULES_CLAUSE).toBe(
+      'rules: .claude/rules/justin-sdk/status-report-format.md',
+    );
+  });
+
+  test('the line stays under 400 characters with every clause on', () => {
+    const longest = [
+      composeSessionLine(
+        {
+          answers: [{answer: 'yes', id: 't-9', question: 'Ship it?'}],
+          answersProblem: null,
+          beadId: 'home-base-abcde',
+          kind: 'session',
+          requests: {done: 12, kind: 'counted', open: 3},
+          title: 'Ship the threads and status-report rules with justin-sdk',
+          titleProblem: null,
+        },
+        {rulesInstalled: true},
+      ),
+      composeSessionLine({kind: 'notFiledYet'}, {rulesInstalled: true}),
+    ];
+    for (const line of longest) expect(line.length).toBeLessThan(400);
+  });
+
+  test('sessionContextLine adds the rules clause only in a repo with the installed file', () => {
+    needBr();
+    const w = world(ON);
+    const repo = beadsRepo(w.sb, 'rules-line');
+    expect(fileSessionBead(w, repo, 'First words').kind).toBe('created');
+    const before =
+      sessionContextLine({cwd: repo, env: w.env, sessionId: SESSION}) ?? '';
+    expect(before.endsWith(` · ${YIELD_HINT}`)).toBe(true);
+    expect(before).not.toContain(RULES_CLAUSE);
+
+    const rules = join(repo, '.claude', 'rules', 'justin-sdk');
+    mkdirSync(rules, {recursive: true});
+    writeFileSync(join(rules, 'status-report-format.md'), '# rules\n');
+    // From a subdirectory too: the checkout root is found by walking up.
+    mkdirSync(join(repo, 'src'), {recursive: true});
+    const after =
+      sessionContextLine({
+        cwd: join(repo, 'src'),
+        env: w.env,
+        sessionId: SESSION,
+      }) ?? '';
+    expect(after.endsWith(` · ${YIELD_HINT} · ${RULES_CLAUSE}`)).toBe(true);
+    expect(after.length).toBeLessThan(400);
   });
 });
 

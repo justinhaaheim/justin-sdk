@@ -329,17 +329,25 @@ void yargs(ARGV)
     'remove <components..>',
     'Remove one or more justin-sdk components from the current project. Deletes a file ONLY when its bytes are identical to what the component would write now, and an appended entry (script, ignore line, hook, config block) only on an exact match; anything else is reported and left in place.',
     (y) =>
-      y.positional('components', {
-        array: true,
-        choices: COMPONENTS as readonly string[],
-        describe:
-          'Components to remove. base-setup cannot be removed — every component applies it.',
-        type: 'string',
-      }),
+      y
+        .positional('components', {
+          array: true,
+          choices: COMPONENTS as readonly string[],
+          describe:
+            'Components to remove. base-setup cannot be removed — every component applies it.',
+          type: 'string',
+        })
+        .option('dry-run', {
+          default: false,
+          describe:
+            'Print every file, line, script, hook and config key with its verdict (would remove / left in place) and change nothing. The same code path as the real run, minus the writes.',
+          type: 'boolean',
+        }),
     async (argv) => {
       const {runRemove} = await import('./remove');
       process.exit(
         runRemove(argv.components! ?? [], {
+          dryRun: argv['dry-run'],
           projectRoot: process.cwd(),
         }),
       );

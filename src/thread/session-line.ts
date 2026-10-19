@@ -6,7 +6,10 @@
  * SYNCHRONOUS UserPromptSubmit path injects ONE line into Claude's context on
  * every prompt, so the session's bead stays in Claude's head without a form:
  *
- *   [thread] session <bead id> "<title>" · requests: <n> open, <m> done · new work → bun run justin-sdk thread request "…"
+ *   [thread] session <bead id> "<title>" · requests: <n> open, <m> done · new work → bun run justin-sdk thread request "…" · before you yield: bun run justin-sdk thread status · rules: .claude/rules/justin-sdk/status-report-format.md
+ *
+ * The last two clauses are home-base-yukaf.26's D-REMINDERS; `rules:` appears
+ * only in a repo where the thread-rules component installed that file.
  *
  * IT NEVER CALLS br. Measured 2026-10-11: one `br list` costs ~270 ms against
  * home-base's 11 MB beads DB (the binary itself, mise shim or not), against a
@@ -31,6 +34,7 @@ import {dirname, join} from 'path';
 
 import {findBeadsDb} from '../beads/br';
 import {sdkRun} from '../sdk-invocation';
+import {THREAD_RULES_POINTER_PATH} from '../thread-rules';
 import {
   answerFrom,
   isAnswered,
@@ -51,6 +55,35 @@ export const SESSION_LINE_PREFIX = '[thread]';
 
 /** What the hint tells Claude to run for new work. */
 export const REQUEST_HINT = `new work → ${sdkRun('thread request "…"')}`;
+
+/**
+ * The reminder that ends every line (home-base-yukaf.26, D-REMINDERS). A
+ * non-blocking Stop hook can speak only to Justin, never to the model, so the
+ * prompt-time line is where Claude is reminded, once per prompt.
+ */
+export const YIELD_HINT = `before you yield: ${sdkRun('thread status')}`;
+
+/**
+ * The clause naming the installed rules file, added only when the repo has it.
+ * The PATH, never the text: hook output is capped at 10,000 characters, and
+ * the file is already autoloaded.
+ */
+export const RULES_CLAUSE = `rules: ${THREAD_RULES_POINTER_PATH}`;
+
+/** What the line says after its parts, in order. */
+function lineTail(options: LineOptions): string[] {
+  return [
+    REQUEST_HINT,
+    YIELD_HINT,
+    ...(options.rulesInstalled === true ? [RULES_CLAUSE] : []),
+  ];
+}
+
+/** Facts about the repo, not the session, that change how the line ends. */
+export interface LineOptions {
+  /** `.claude/rules/justin-sdk/status-report-format.md` exists in the repo. */
+  rulesInstalled?: boolean;
+}
 
 export type RequestCounts =
   | {done: number; kind: 'counted'; open: number}
@@ -98,9 +131,16 @@ function describeCounts(counts: RequestCounts): string {
 }
 
 /** Spell the line. One line, always. */
-export function composeSessionLine(parts: SessionLineParts): string {
+export function composeSessionLine(
+  parts: SessionLineParts,
+  options: LineOptions = {},
+): string {
+  const tail = lineTail(options);
   if (parts.kind === 'indexUnreadable') {
-    return `${SESSION_LINE_PREFIX} session bead: unknown (sessions index unreadable: ${oneLine(parts.reason)}) · ${REQUEST_HINT}`;
+    return [
+      `${SESSION_LINE_PREFIX} session bead: unknown (sessions index unreadable: ${oneLine(parts.reason)})`,
+      ...tail,
+    ].join(' · ');
   }
   const extras = parts.extras ?? [];
   if (parts.kind === 'notFiledYet') {
@@ -108,7 +148,7 @@ export function composeSessionLine(parts: SessionLineParts): string {
       `${SESSION_LINE_PREFIX} session bead: not filed yet (the capture hook files it in the background after this prompt)`,
       'requests: none yet',
       ...extras,
-      REQUEST_HINT,
+      ...tail,
     ].join(' · ');
   }
   const title =
@@ -126,7 +166,7 @@ export function composeSessionLine(parts: SessionLineParts): string {
     `requests: ${describeCounts(parts.requests)}`,
     ...answerParts,
     ...extras,
-    REQUEST_HINT,
+    ...tail,
   ].join(' · ');
 }
 
@@ -136,8 +176,11 @@ export function composeSessionLine(parts: SessionLineParts): string {
  * his answer verbatim (epic D3: "any answers Justin recorded since Claude last
  * yielded (verbatim, since they are actionable)").
  */
-export function composeSessionContext(parts: SessionLineParts): string {
-  const line = composeSessionLine(parts);
+export function composeSessionContext(
+  parts: SessionLineParts,
+  options: LineOptions = {},
+): string {
+  const line = composeSessionLine(parts, options);
   const answers = parts.kind === 'session' ? (parts.answers ?? []) : [];
   if (answers.length === 0) return line;
   return [
@@ -150,6 +193,20 @@ export function composeSessionContext(parts: SessionLineParts): string {
 }
 
 /**
+ * The first directory at or above `cwd` holding `.git` (a directory, or a
+ * worktree's file), or null. FILES ONLY: no git subprocess on the hook path.
+ */
+function checkoutRootNear(cwd: string): string | null {
+  let dir = cwd;
+  for (;;) {
+    if (existsSync(join(dir, '.git'))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
  * Is there a br workspace for `cwd`'s checkout? FILES ONLY (the hook cannot
  * afford a git subprocess per prompt): walk up to the first directory holding
  * `.git` (a directory, or a worktree's file) and look for `.beads/*.db` there.
@@ -158,15 +215,20 @@ export function composeSessionContext(parts: SessionLineParts): string {
  * not-filed-yet line, never whether a bead is created.
  */
 export function beadsWorkspaceNear(cwd: string): boolean {
-  let dir = cwd;
-  for (;;) {
-    if (existsSync(join(dir, '.git'))) {
-      return findBeadsDb(join(dir, '.beads')).kind === 'found';
-    }
-    const parent = dirname(dir);
-    if (parent === dir) return false;
-    dir = parent;
-  }
+  const root = checkoutRootNear(cwd);
+  return root != null && findBeadsDb(join(root, '.beads')).kind === 'found';
+}
+
+/**
+ * Does `cwd`'s checkout carry the installed status-report rule (D-REMINDERS)?
+ * One `existsSync`, so the prompt pays nothing measurable. False when there is
+ * no checkout at all: the clause is a pointer, and a pointer to a file that is
+ * not there would send Claude looking for nothing.
+ */
+export function threadRulesInstalledNear(cwd: string | null): boolean {
+  if (cwd == null) return false;
+  const root = checkoutRootNear(cwd);
+  return root != null && existsSync(join(root, THREAD_RULES_POINTER_PATH));
 }
 
 interface ExportedIssue {
@@ -352,7 +414,9 @@ export function sessionContextLine(input: {
 }): string | null {
   const parts = sessionLineParts(input);
   if (parts == null) return null;
-  const context = composeSessionContext(parts);
+  const context = composeSessionContext(parts, {
+    rulesInstalled: threadRulesInstalledNear(input.cwd),
+  });
   // R1: the answers in this context are now delivered to Claude. A marker that
   // cannot be written only means they show again on the next prompt.
   const shown = parts.kind === 'session' ? (parts.answers ?? []) : [];

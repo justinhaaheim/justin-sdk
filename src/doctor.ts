@@ -16,7 +16,7 @@ import {resolve} from 'path';
 
 import {SDK_BIN_SHADOW_SCRIPT, shadowsSdkBin} from './base-setup';
 import {renderCheckTree, runCheckTree} from './check-runner';
-import {resolveComponents} from './component-registry';
+import {configNameFor, resolveComponents} from './component-registry';
 import {
   CRITICAL_RULES_CONFIG_KEY,
   legacyModulesWarning,
@@ -33,6 +33,7 @@ import {
   rulesDriftAdvice,
 } from './rules/rules-drift';
 import {SDK_RUN} from './sdk-invocation';
+import {threadRulesInstalledPath, threadRulesState} from './thread-rules';
 import {
   checkUserLevelSessionStart,
   USER_SETTINGS_DISPLAY,
@@ -1592,6 +1593,121 @@ function makeLegacyArtifactChecks(projectRoot: string): CheckNode[] {
 }
 
 // ---------------------------------------------------------------------------
+// Threads rules (D-RULES-DOCTOR, home-base-yukaf.26) — NOT keyed to a component
+// ---------------------------------------------------------------------------
+
+/**
+ * THREAD_RULES: are `.claude/rules/justin-sdk/status-report-format.md` and
+ * `requests.md` the SDK's bytes?
+ *
+ * It runs in every repo rather than only where `thread-rules-setup` is listed,
+ * because the case that matters most is a repo where threads are ON and the
+ * component is NOT listed (a config with an explicit `components` list written
+ * before the component existed): Claude there gets the thread hooks and no
+ * instructions for them. Checking only listed repos would never see it.
+ *
+ *   both match                     → ok
+ *   missing, threads on            → warn; advice `install` (or `add
+ *                                    thread-rules` where the config does not
+ *                                    list it)
+ *   missing, threads off           → ok: nothing is expected
+ *   present but different          → warn with the command (install
+ *                                    overwrites; a local edit is a human's
+ *                                    call)
+ *   unreadable (file or template)  → warn "could not check" — never "missing"
+ *                                    and never "ok" (critical rule 7)
+ *
+ * ADVICE ONLY: no `fixCommand` and no `fixFn`, in any state. Doctor warns and
+ * never fixes on its own, and a `fixCommand` runs in `process.cwd()`, not in
+ * the repo this check examined: the first version had one, and `doctor --fix`
+ * in tests/rules-drift.test.ts ran `add thread-rules` inside pkg/justin-sdk
+ * itself (yukaf.26, found by the full suite).
+ */
+export function makeThreadRulesChecks(
+  projectRoot: string,
+  resolvedComponents: readonly string[],
+): CheckNode[] {
+  return [
+    {
+      check: {
+        fn: async (): Promise<CheckResult> => {
+          const states = threadRulesState(projectRoot);
+          // `await import`: thread/config reaches sdk-config and zod, which
+          // must stay off cli-main's static import graph (the hooks' startup
+          // cost; tests/health-notices-cli.test.ts).
+          const {resolveThreadConfig} = await import('./thread/config');
+          const enabled = resolveThreadConfig({cwd: projectRoot}).enabled;
+          const listed = resolvedComponents.includes(
+            configNameFor('thread-rules'),
+          );
+          const command = listed
+            ? `${SDK_RUN} install`
+            : `${SDK_RUN} add thread-rules`;
+
+          const unchecked = states.flatMap((state) =>
+            state.kind === 'unreadable'
+              ? [`${threadRulesInstalledPath(state.file)} (${state.reason})`]
+              : state.kind === 'template-unreadable'
+                ? [`the SDK template for ${state.file}`]
+                : [],
+          );
+          if (unchecked.length > 0) {
+            return {
+              message: `could not check: ${unchecked.join('; ')} — NOT verified`,
+              pass: false,
+              severity: 'warn',
+            };
+          }
+
+          const drifted = states
+            .filter((state) => state.kind === 'drifted')
+            .map((state) => threadRulesInstalledPath(state.file));
+          if (drifted.length > 0) {
+            return {
+              fix: `Run: ${command} (it replaces them with the SDK's copy; look at the diff first if you edited them)`,
+              message: `${drifted.join(', ')} differ${drifted.length === 1 ? 's' : ''} from the SDK's copy`,
+              pass: false,
+              severity: 'warn',
+            };
+          }
+
+          const missing = states
+            .filter((state) => state.kind === 'missing')
+            .map((state) => threadRulesInstalledPath(state.file));
+          if (missing.length > 0 && enabled) {
+            return {
+              fix: `Run: ${command}`,
+              message: `threads are on here (componentConfig.thread.enabled) but ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing`,
+              pass: false,
+              severity: 'warn',
+            };
+          }
+          if (missing.length === states.length) {
+            return {
+              message:
+                'threads are off here, and no thread rules are installed',
+              pass: true,
+            };
+          }
+          if (missing.length > 0) {
+            return {
+              message: `threads are off here; ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing, and the rest match the SDK's copy`,
+              pass: true,
+            };
+          }
+          return {
+            message: `${states.length} rule files match the SDK's copy`,
+            pass: true,
+          };
+        },
+        label: 'THREAD_RULES',
+        severity: 'warn',
+      },
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
 // Components that APPLY here but are not installed (informational)
 // ---------------------------------------------------------------------------
 
@@ -1800,6 +1916,7 @@ function planDoctor(projectRoot: string): DoctorPlan {
   const nodes: CheckNode[] = [
     ...makeLegacyArtifactChecks(projectRoot),
     ...makeComponentAvailabilityChecks(projectRoot),
+    ...makeThreadRulesChecks(projectRoot, components),
   ];
   for (const component of components) {
     const factory = componentCheckFactories[component];

@@ -48,6 +48,8 @@ const COMPONENT_BLURBS: Record<ComponentName, string> = {
   prettier: 'Shared Prettier config + .prettierignore.',
   'thread-hooks':
     'UserPromptSubmit + Stop hooks running `thread capture`, which log every prompt and every Claude yield to ~/.local/state/justin-threads/messages/<sessionId>.jsonl, create this session’s thread bead in ~/Dev/threads on its FIRST PROMPT (so a session that never reaches a status report is still on the board, and one that is opened and never prompted leaves nothing), and keep the bead’s last messages current. INERT until componentConfig.thread.enabled is true (.capture defaults ON) — set it in the USER file; this installer writes no componentConfig block, because a project-level value would outrank it. Also a Stop hook running `thread stop-check` (armed by .enforce). Nothing runs at SessionStart: the old `thread start --hook` entry is retired, inert, and removed on re-apply when it is byte-identical to what the SDK wrote; .startOnSessionStart is deprecated and does nothing.',
+  'thread-rules':
+    'Copies the threads and status-report rules (status-report-format.md, requests.md) from the SDK into .claude/rules/justin-sdk/, beside critical-rules.md, so the instructions travel with the SDK version the repo pins. The SDK’s copy wins on every re-apply; `remove` deletes a file only when it is byte-identical to the template. Applies only where componentConfig.thread.enabled resolves true (includeIf isThreadEnabled).',
   'time-check':
     'UserPromptSubmit hook stamping the wall-clock into the transcript after a long gap or on a new working day. Config: componentConfig["time-check"].',
   tsconfig: 'Shared TypeScript config.',

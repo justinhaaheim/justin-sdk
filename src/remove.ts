@@ -466,6 +466,11 @@ export function removeComponent(
 // ---------------------------------------------------------------------------
 
 export interface RemoveOptions {
+  /**
+   * Print the plan and change nothing — the same `removeComponent` call with
+   * `dryRun: true`, so the preview is the run minus its writes (dchjw.17 F6).
+   */
+  dryRun?: boolean;
   projectRoot: string;
   quiet?: boolean;
 }
@@ -500,25 +505,31 @@ export function runRemove(
     if (!names.includes(name)) names.push(name);
   }
 
+  const dryRun = opts.dryRun ?? false;
   for (const name of names) {
-    stepHeader(`remove ${name}`);
+    stepHeader(`${dryRun ? '(dry-run) ' : ''}remove ${name}`);
     const evidence = componentInstalledEvidence(opts.projectRoot, name);
     if (!evidence.installed) {
       warn(`${name} is not installed here — nothing on disk to remove.`);
     }
-    const report = removeComponent(opts.projectRoot, name);
+    const report = removeComponent(opts.projectRoot, name, {dryRun});
     for (const outcome of report.outcomes) {
       if (outcome.kind === 'removed') {
-        success(renderOutcome(outcome));
+        success(renderOutcome(outcome, {planned: dryRun}));
       } else {
-        warn(renderOutcome(outcome));
+        warn(renderOutcome(outcome, {planned: dryRun}));
       }
     }
     if (report.deregistered) {
-      success(`justin-sdk.config.json components -= ${configNameFor(name)}`);
+      success(
+        dryRun
+          ? `would drop ${configNameFor(name)} from justin-sdk.config.json`
+          : `justin-sdk.config.json components -= ${configNameFor(name)}`,
+      );
     }
-    success(summarizeRemoval(report));
+    if (!dryRun) success(summarizeRemoval(report));
   }
+  if (dryRun) success('(dry-run) nothing was changed');
 
   return 0;
 }

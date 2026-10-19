@@ -35,6 +35,7 @@ import {basename, dirname, join, resolve} from 'path';
 
 import {emitHookOutput} from './hook-output';
 import {sdkRun} from './sdk-invocation';
+import {threadEnabledFromFiles} from './thread/enabled-knob';
 
 const DEFAULT_REPO_URL = 'https://github.com/justinhaaheim/prompts.git';
 const DEFAULT_MAX_AGE_SECONDS = 300;
@@ -122,6 +123,21 @@ export const PREDICATES: Record<string, (ctx: ProjectContext) => boolean> = {
     ctx.deps.has('expo') ||
     ctx.deps.has('react-native'),
   isReactNative: (ctx) => ctx.deps.has('expo') || ctx.deps.has('react-native'),
+  /**
+   * `componentConfig.thread.enabled` is true for this repo: the default (off),
+   * then the USER file, then the project file (home-base-yukaf.26,
+   * D-RULES-INSTALL). It gates `thread-rules`: the rules tell Claude to run
+   * `thread` commands, which is wrong in a repo where threads are off.
+   *
+   * It reads the user file, so the answer is per MACHINE, not per checkout —
+   * which is where Justin sets the knob (thread-hooks writes no project
+   * block, because a project value would outrank his).
+   *
+   * Read by `threadEnabledFromFiles`, NOT `resolveThreadConfig`: this file is
+   * in cli-main's static import graph, and the full resolver would put zod
+   * there (see thread/enabled-knob.ts, and its agreement test).
+   */
+  isThreadEnabled: (ctx) => threadEnabledFromFiles(ctx.projectRoot),
 };
 
 export function loadProjectContext(projectRoot: string): ProjectContext {

@@ -26,6 +26,7 @@ import {runGitignoreSetup} from './gitignore-setup';
 import {runHuskySetup} from './husky-setup';
 import {runPrettierSetup} from './prettier-setup';
 import {runThreadHooksSetup} from './thread-hooks-setup';
+import {runThreadRulesSetup} from './thread-rules-setup';
 import {runTimeCheckSetup} from './time-check-setup';
 import {runTsconfigSetup} from './tsconfig-setup';
 import {runUsageCheckSetup} from './usage-check-setup';
@@ -98,6 +99,7 @@ const RUNNERS: Record<
   husky: (a) => runHuskySetup(base(a)),
   prettier: (a) => runPrettierSetup(base(a)),
   'thread-hooks': (a) => runThreadHooksSetup(base(a)),
+  'thread-rules': (a) => runThreadRulesSetup(base(a)),
   'time-check': (a) => runTimeCheckSetup(base(a)),
   tsconfig: (a) => runTsconfigSetup(base(a)),
   'usage-check': (a) => runUsageCheckSetup(base(a)),

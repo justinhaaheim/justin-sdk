@@ -66,6 +66,11 @@ import {
   THREAD_STOP_HOOK_EVENT,
   THREAD_STOP_HOOK_FINGERPRINT,
 } from './thread-hooks-setup';
+import {
+  THREAD_RULES_FILES,
+  threadRulesInstalledPath,
+  threadRulesTemplateText,
+} from './thread-rules';
 import {TIME_CHECK_CONFIG_KEY, TIME_CHECK_DEFAULTS} from './time-check';
 import {
   TIME_CHECK_HOOK_COMMAND,
@@ -462,6 +467,25 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
         fingerprint: THREAD_START_HOOK_FINGERPRINT,
       },
     ],
+  },
+
+  'thread-rules': {
+    ...EMPTY,
+    // Plain copies, so the template IS the pristine content and `remove`
+    // deletes a file only when it is byte-identical (home-base-yukaf.26). The
+    // paths and bytes come from thread-rules.ts, the same source the installer
+    // writes from, so manifest and installer cannot drift apart.
+    files: THREAD_RULES_FILES.map((file) => ({
+      path: threadRulesInstalledPath(file),
+      pristine: () => threadRulesTemplateText(file),
+    })),
+    purpose:
+      'The threads and status-report rules (status-report-format.md, requests.md), copied from the SDK into .claude/rules/justin-sdk/. Applies only where componentConfig.thread.enabled is true.',
+    // Namespaced under .claude/rules/justin-sdk/, which nothing but the SDK
+    // writes — provenance enough to adopt on, like critical-rules.md.
+    sdkOwnedPaths: THREAD_RULES_FILES.map((file) =>
+      threadRulesInstalledPath(file),
+    ),
   },
 
   'time-check': {

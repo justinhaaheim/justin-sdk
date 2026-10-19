@@ -42,6 +42,7 @@ export const COMPONENT_NAMES = [
   'time-check',
   'usage-check',
   'thread-hooks',
+  'thread-rules',
   'critical-rules',
 ] as const;
 
@@ -82,6 +83,13 @@ export const COMPONENT_INCLUDE_IF: Partial<Record<ComponentName, string[]>> = {
    */
   beads: ['isBeadsRust'],
   eas: ['isExpo'],
+  /**
+   * The threads and status-report rules tell Claude to run `thread` commands,
+   * so they apply only where `componentConfig.thread.enabled` resolves true
+   * (home-base-yukaf.26, D-RULES-INSTALL). Unlike thread-hooks, which is inert
+   * when the knob is off, an installed rule file is not inert: Claude reads it.
+   */
+  'thread-rules': ['isThreadEnabled'],
 };
 
 /**

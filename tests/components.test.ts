@@ -10,7 +10,7 @@
  * must NOT run an installer.
  */
 
-import {afterAll, describe, expect, test} from 'bun:test';
+import {afterAll, beforeAll, describe, expect, test} from 'bun:test';
 import {mkdirSync, mkdtempSync, rmSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
@@ -44,7 +44,23 @@ function fixture(deps: string[]): string {
   return root;
 }
 
+/**
+ * `thread-rules` is gated on `isThreadEnabled`, which reads the USER config
+ * file (home-base-yukaf.26). Point that at an empty directory for this file, so
+ * `core` here is the same on Justin's machine (where the user file turns threads
+ * on) as anywhere else. A test that wants threads on says so in the fixture's
+ * own project config, which outranks the user file.
+ */
+const savedXdgConfigHome = process.env.XDG_CONFIG_HOME;
+const emptyXdg = mkdtempSync(join(tmpdir(), 'jsdk-components-xdg-'));
+beforeAll(() => {
+  process.env.XDG_CONFIG_HOME = emptyXdg;
+});
+
 afterAll(() => {
+  if (savedXdgConfigHome == null) delete process.env.XDG_CONFIG_HOME;
+  else process.env.XDG_CONFIG_HOME = savedXdgConfigHome;
+  rmSync(emptyXdg, {force: true, recursive: true});
   for (const root of roots) rmSync(root, {force: true, recursive: true});
 });
 
@@ -126,6 +142,23 @@ describe('component registry: core is computed, not listed', () => {
     ]) {
       expect(core).toContain(name);
     }
+  });
+
+  test('thread-rules is gated on isThreadEnabled: in core only where threads are on (yukaf.26)', () => {
+    expect(COMPONENT_INCLUDE_IF['thread-rules']).toEqual(['isThreadEnabled']);
+    const withThreads = (enabled: boolean): string => {
+      const root = fixture([]);
+      writeFileSync(
+        join(root, 'justin-sdk.config.json'),
+        JSON.stringify({componentConfig: {thread: {enabled}}}),
+      );
+      return root;
+    };
+    // The negative control for the gate: the ONLY difference is the knob.
+    expect(corePreset(withThreads(true))).toContain('thread-rules');
+    expect(corePreset(withThreads(false))).not.toContain('thread-rules');
+    // No layer says anything: the default is off.
+    expect(corePreset(fixture([]))).not.toContain('thread-rules');
   });
 
   test('eas is gated on isExpo: absent without expo, present with it', () => {
