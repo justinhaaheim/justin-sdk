@@ -9,10 +9,11 @@
  *     Claude stops: never 🏃, and Claude's yield counted as the last message)
  *   What to mark — ONLY what cannot be derived (session-status.ts
  *     `whatToMark`), or "Nothing to mark." When the yield would be ⚠️, one
- *     entry per open request with the close command, the P0 and the handoff
- *     (home-base-vzwbj.4.16 G2).
+ *     entry per open request: the close command, keep working, or the P0
+ *     (home-base-vzwbj.4.16 G2; home-base-tg45h).
  *   If you stop now the inbox will say: <status> — and for ⚠️ only, what that
- *     leads to and the way out, on a second line (G2)
+ *     leads to, how to settle each open request, and that handing off is only
+ *     for a session that cannot go on (G2; home-base-tg45h)
  * With the knob off it prints `SESSION BEADS: DISABLED` and exits 0 — the line
  * the v4 rule branches on to write the legacy report instead (D6).
  *
@@ -275,8 +276,10 @@ function plural(count: number, one: string, many: string): string {
 
 /**
  * G2: what to do with an open request when the yield would be ⚠️. Plain
- * words, one request per entry: the close command when its work is done, the
- * P0 or the handoff when it is not. `--force` appears HERE ONLY, for a request
+ * words, one request per entry: the close command when its work is done; when
+ * it is not, keep working, or file the P0 that it cannot move without
+ * (home-base-tg45h: never a handoff, which is not a way to stop and is said
+ * once, on the verdict). `--force` appears HERE ONLY, for a request
  * whose open questions are old-shape children (br refuses to close a parent
  * with open children); a request with an open real child lists the child
  * instead of a close command.
@@ -316,15 +319,32 @@ function requestOpenLines(
         : ` (${n === 1 ? 'its open question for Justin stays open' : `its ${n} open questions for Justin stay open`}; questions never keep a request open)`,
     ];
   }
+  // home-base-tg45h: there is no command that raises an ask's priority, and
+  // `br update --priority 0` would leave its P1–P3 default on a P0. So a
+  // question already filed is filed again at P0 and the old one closed; a
+  // close reason without the answer prefix never reads as Justin's answer.
+  const filed = [...item.openQuestions, ...item.oldShapeQuestions];
+  const raise: Piece[] =
+    filed.length === 0
+      ? []
+      : [
+          ` (already filed as ${filed.map((question) => question.id).join(', ')}? File it again at P0, then close the old one: `,
+          {
+            code: `br close ${filed.length === 1 && filed[0] != null ? filed[0].id : '<id>'} --reason "raised to P0 as <new id>"`,
+          },
+          ')',
+        ];
   return {
     code: null,
     sub: [
       done,
       [
-        'not done → file the P0 that blocks it: ',
+        'not done, and you can go on → keep working; act on the default of any P1–P3 question Justin has not answered',
+      ],
+      [
+        'not done, and it cannot move without Justin → file that question as a P0: ',
         {code: sdkRun(`thread ask "…" --priority 0 --to ${request.id}`)},
-        ' — or hand off: ',
-        {code: sdkRun('thread handoff')},
+        ...raise,
       ],
     ],
     text: `Request ${request.id} ("${request.title}") ${where}${allClosed} and nothing blocks it.`,
@@ -484,7 +504,32 @@ function pieces(parts: readonly Piece[], color: boolean): string {
     .join('');
 }
 
-/** The verdict: one line, and for ⚠️ a second saying what to do (G2). */
+/**
+ * home-base-tg45h decision 2: what to do with each open request before
+ * stopping on ⚠️, in this order. An unanswered P1–P3 question is not a reason
+ * to stop: its default is the plan.
+ */
+export const OPEN_WORK_SETTLE: readonly Piece[] = [
+  'Before you stop, settle each open request: close it if its work is done; keep working if you can, acting on the default of any P1–P3 question Justin has not answered; or, if it cannot move without his answer, file that question as a P0.',
+];
+
+/**
+ * home-base-tg45h decision 1: handing off is not a way to stop. It used to
+ * sit beside "close" and "file the P0" as a peer, and on 2026-10-19 a session
+ * whose only pending questions were optional handed off with its context far
+ * from full.
+ */
+export const OPEN_WORK_HANDOFF: readonly Piece[] = [
+  'Handing off is not a way to stop: run ',
+  {code: sdkRun('thread handoff')},
+  ' only when this session cannot go on (its context is nearly full, or Justin asked for a new session).',
+];
+
+/**
+ * The verdict: one line, and for ⚠️ two more saying what to do (G2;
+ * home-base-tg45h): settle each open request, and hand off only when the
+ * session cannot go on.
+ */
 export function verdictLines(
   status: SessionStatus,
   style: OutputStyle,
@@ -494,16 +539,21 @@ export function verdictLines(
     ? `${pad(2)}${paint(VERDICT_LABEL, ['bold'], true)} ${words}`
     : `${VERDICT_LABEL} ${words}`;
   if (status.kind !== 'openWork') return [head];
+  // On a TTY each paragraph wraps at the body indent and has an empty line
+  // before it (home-base CLAUDE.md, Terminal output style); piped, it is one
+  // plain line, as Claude reads it.
+  const line = (parts: readonly Piece[]): string =>
+    style.color
+      ? `\n${wrapHanging(pieces(parts, true), {
+          hang: 2,
+          indent: 2,
+          width: style.width,
+        })}`
+      : pieces(parts, false);
   return [
     `${head}${OPEN_WORK_CONSEQUENCE}`,
-    `${style.color ? pad(2) : ''}${pieces(
-      [
-        'Close what is done, file the P0 that blocks you, or run ',
-        {code: sdkRun('thread handoff')},
-        '.',
-      ],
-      style.color,
-    )}`,
+    line(OPEN_WORK_SETTLE),
+    line(OPEN_WORK_HANDOFF),
   ];
 }
 

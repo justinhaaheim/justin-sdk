@@ -33,7 +33,12 @@ import {sortAsks} from './ask-render';
 import {SHARED_PANE_REASON} from './pane-join';
 import {FIRST_MESSAGE_CUT, firstLineOf, tildeText} from './part-one';
 import {firstUserLine} from './session-model';
-import {isOpen, openQuestions, stageReached} from './session-status';
+import {
+  isOpen,
+  openQuestions,
+  stageReached,
+  statusCounts,
+} from './session-status';
 
 // ---------------------------------------------------------------------------
 // Sections (D5)
@@ -215,6 +220,22 @@ function hasHandoffNote(notes: string | null): boolean {
   return notes != null && /^- [^\n]*: handed off(?: —|$)/mu.test(notes);
 }
 
+/**
+ * Rule 5's words about questions (home-base-tg45h): rule 5 means no P0 is
+ * open, but optional questions may be. "No question for you" is said only
+ * when none is open; otherwise the count, so the line stays true. On
+ * 2026-10-19 it said "no question for you" beside 11 open questions. Counted
+ * as the card's own "Optional" line counts them (`optionalLine`: P1–P4).
+ */
+function noBlockingQuestionWords(
+  counts: Pick<StatusCounts, 'fyi' | 'optional'>,
+): string {
+  const count = counts.optional + counts.fyi;
+  return count === 0
+    ? 'no question for you'
+    : `nothing that needs your answer first (${plural(count, 'optional question', 'optional questions')})`;
+}
+
 /** Rule 5's words when no request was filed: what work Claude left. */
 function workWithoutRequest(model: SessionModel): string[] {
   const parts: string[] = [];
@@ -353,13 +374,14 @@ export function deriveAction(input: ActionInput): ActionLine {
             text: 'Resume it and ask Claude for a handoff.',
           };
     case 'openWork': {
+      const questions = noBlockingQuestionWords(statusCounts(model));
       const requests = model.beads.requests.map((node) => node.request);
       if (requests.length > 0) {
         const open = requests.filter(isOpen).length;
         return {
           command: null,
           rule: 5,
-          text: `Claude stopped with ${open} of ${plural(requests.length, 'request', 'requests')} unfinished and no question for you. Resume it and say continue.`,
+          text: `Claude stopped with ${open} of ${plural(requests.length, 'request', 'requests')} unfinished and ${questions}. Resume it and say continue.`,
         };
       }
       const work = workWithoutRequest(model);
@@ -368,8 +390,8 @@ export function deriveAction(input: ActionInput): ActionLine {
         rule: 5,
         text:
           work.length > 0
-            ? `Claude stopped with ${work.join(' and ')}, no request filed, and no question for you. Resume it and say continue.`
-            : 'Claude stopped before answering your last message, and has no question for you. Resume it and say continue.',
+            ? `Claude stopped with ${work.join(' and ')}, no request filed, and ${questions}. Resume it and say continue.`
+            : `Claude stopped before answering your last message, and has ${questions}. Resume it and say continue.`,
       };
     }
     case 'doneUnmerged':

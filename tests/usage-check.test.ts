@@ -6,7 +6,8 @@
  * production:
  *
  *  1. THE ONCE-PER-SETPOINT CONTRACT. The component's entire state lives in the
- *     `setpoint=<n>` token inside its own past output, so the round trip
+ *     `notice-at=<n>` token inside its own past output (`setpoint=<n>` in
+ *     notices written before home-base-y1hg0.22, still read), so the round trip
  *     (emit → transcript → read back → stay silent) is tested end to end
  *     against real files rather than by asserting on decide() alone. A broken
  *     round trip would re-announce on every tool batch forever.
@@ -44,8 +45,11 @@ import {
   decide,
   formatNotice,
   formatTokens,
+  type NoticeSubject,
+  NOTICE_FYI,
   readTranscriptFacts,
   readUsageCheckConfig,
+  regularLadderInterval,
   type ResolvedUsageCheckConfig,
   resolveMeasurementTarget,
   resolveUsageCheckConfig,
@@ -56,6 +60,7 @@ import {
   USAGE_CHECK_MARKER,
   type UsageCheckConfig,
   type UsageCheckRole,
+  type UsageDecision,
   WRAP_UP_DIRECTIVE,
 } from '../src/usage-check';
 import {
@@ -440,7 +445,7 @@ describe('transcript scan', () => {
   test('finds our own notice with content as an ARRAY (the delivered shape)', () => {
     const dir = tempDir();
     const path = writeTranscript(dir, [
-      noticeEntry(`${USAGE_CHECK_MARKER} ... (setpoint=200000).`),
+      noticeEntry(`${USAGE_CHECK_MARKER} ... (notice-at=200000).`),
       assistantEntry(210_000),
     ]);
     expect(
@@ -454,7 +459,7 @@ describe('transcript scan', () => {
     const path = writeTranscript(dir, [
       {
         attachment: {
-          content: `${USAGE_CHECK_MARKER} ... (setpoint=200000).`,
+          content: `${USAGE_CHECK_MARKER} ... (notice-at=200000).`,
           hookEvent: 'UserPromptSubmit',
           type: 'hook_system_message',
         },
@@ -471,8 +476,8 @@ describe('transcript scan', () => {
   test('takes the MOST RECENT notice when several are present', () => {
     const dir = tempDir();
     const path = writeTranscript(dir, [
-      noticeEntry(`${USAGE_CHECK_MARKER} a (setpoint=100000).`),
-      noticeEntry(`${USAGE_CHECK_MARKER} b (setpoint=200000).`),
+      noticeEntry(`${USAGE_CHECK_MARKER} a (notice-at=100000).`),
+      noticeEntry(`${USAGE_CHECK_MARKER} b (notice-at=200000).`),
       assistantEntry(210_000),
     ]);
     expect(
@@ -487,7 +492,7 @@ describe('transcript scan', () => {
     const dir = tempDir();
     const filler = Array.from({length: 40}, () => assistantEntry(150_000));
     const path = writeTranscript(dir, [
-      noticeEntry(`${USAGE_CHECK_MARKER} old (setpoint=100000).`),
+      noticeEntry(`${USAGE_CHECK_MARKER} old (notice-at=100000).`),
       ...filler,
     ]);
     const facts = readTranscriptFacts({
@@ -645,7 +650,7 @@ describe('formatting', () => {
       wrapUp: false,
     });
     expect(notice).toBe(
-      `${USAGE_CHECK_MARKER} This session has now used 152,431 tokens of context (setpoint=150000).`,
+      `${USAGE_CHECK_MARKER} This session has now used 152,431 tokens of context. This notice fires at preset token counts (this one at 150,000). This is just an FYI: not a limit, and not a reason to stop or hand off. (notice-at=150000)`,
     );
     expect(notice).not.toContain(WRAP_UP_DIRECTIVE);
   });
@@ -719,7 +724,7 @@ describe('runUsageCheck: end to end over real files', () => {
     expect(specific.additionalContext).toBe(payload?.systemMessage);
     // A mismatched hookEventName would make the payload inert on this event.
     expect(specific.hookEventName).toBe('PostToolBatch');
-    expect(noticeOf(payload)).toContain('setpoint=200000');
+    expect(noticeOf(payload)).toContain('notice-at=200000');
   });
 
   test('a crossing fires ONCE and stays silent on later prompts', () => {
@@ -732,7 +737,7 @@ describe('runUsageCheck: end to end over real files', () => {
 
     const first = noticeOf(runCapturing(input));
     expect(first).toContain('210,000 tokens of context');
-    expect(first).toContain('setpoint=200000');
+    expect(first).toContain('notice-at=200000');
 
     // Claude Code writes the notice into the transcript; that IS the state.
     recordNotice(transcriptPath, first!);
@@ -754,7 +759,7 @@ describe('runUsageCheck: end to end over real files', () => {
     };
 
     const at110 = noticeOf(runCapturing(input));
-    expect(at110).toContain('setpoint=100000');
+    expect(at110).toContain('notice-at=100000');
     expect(at110).not.toContain(WRAP_UP_DIRECTIVE);
     recordNotice(transcriptPath, at110!);
 
@@ -763,7 +768,7 @@ describe('runUsageCheck: end to end over real files', () => {
       `${JSON.stringify(assistantEntry(205_000))}\n`,
     );
     const at205 = noticeOf(runCapturing(input));
-    expect(at205).toContain('setpoint=200000');
+    expect(at205).toContain('notice-at=200000');
     expect(at205).not.toContain(WRAP_UP_DIRECTIVE);
     recordNotice(transcriptPath, at205!);
 
@@ -772,7 +777,7 @@ describe('runUsageCheck: end to end over real files', () => {
       `${JSON.stringify(assistantEntry(312_004))}\n`,
     );
     const at312 = noticeOf(runCapturing(input));
-    expect(at312).toContain('setpoint=300000');
+    expect(at312).toContain('notice-at=300000');
     expect(at312).toContain(WRAP_UP_DIRECTIVE);
     recordNotice(transcriptPath, at312!);
 
@@ -816,7 +821,7 @@ describe('runUsageCheck: end to end over real files', () => {
         continue;
       }
       expect(notice).not.toContain(WRAP_UP_DIRECTIVE);
-      const match = /setpoint=(\d+)/.exec(notice);
+      const match = /notice-at=(\d+)/.exec(notice);
       expect(match?.[1]).toBeDefined();
       announced.push(Number(match?.[1]));
       recordNotice(transcriptPath, notice);
@@ -843,7 +848,7 @@ describe('runUsageCheck: end to end over real files', () => {
     };
 
     const at205 = noticeOf(runCapturing(input));
-    expect(at205).toContain('setpoint=200000');
+    expect(at205).toContain('notice-at=200000');
     expect(at205).not.toContain(WRAP_UP_DIRECTIVE);
     recordNotice(transcriptPath, at205!);
 
@@ -852,7 +857,7 @@ describe('runUsageCheck: end to end over real files', () => {
       `${JSON.stringify(assistantEntry(305_000))}\n`,
     );
     const at305 = noticeOf(runCapturing(input));
-    expect(at305).toContain('setpoint=300000');
+    expect(at305).toContain('notice-at=300000');
     expect(at305).toContain(WRAP_UP_DIRECTIVE);
   });
 
@@ -865,7 +870,7 @@ describe('runUsageCheck: end to end over real files', () => {
     };
 
     const before = noticeOf(runCapturing(input));
-    expect(before).toContain('setpoint=300000');
+    expect(before).toContain('notice-at=300000');
     recordNotice(transcriptPath, before!);
 
     // Compaction: the context collapses. Below the lowest setpoint, so silent.
@@ -881,7 +886,7 @@ describe('runUsageCheck: end to end over real files', () => {
       `${JSON.stringify(assistantEntry(115_000))}\n`,
     );
     const after = noticeOf(runCapturing(input));
-    expect(after).toContain('setpoint=100000');
+    expect(after).toContain('notice-at=100000');
     expect(after).toContain('115,000 tokens of context');
   });
 });
@@ -1140,7 +1145,7 @@ describe('runUsageCheck: a player is measured on ITS OWN transcript', () => {
 
     // The player's own number, its own rung, and its own wrap-up bound.
     expect(asPlayer).toContain('360,000 tokens');
-    expect(asPlayer).toContain('setpoint=350000');
+    expect(asPlayer).toContain('notice-at=350000');
     expect(asPlayer).toContain(WRAP_UP_DIRECTIVE);
     // The notice names the PLAYER, so it cannot be read as the parent's.
     expect(asPlayer).toContain('This player subagent');
@@ -1149,7 +1154,7 @@ describe('runUsageCheck: a player is measured on ITS OWN transcript', () => {
     // Same payload, same instant, the session's own number — and NO directive,
     // because the session opted out while the player opted in.
     expect(asSession).toContain('900,000 tokens');
-    expect(asSession).toContain('setpoint=300000');
+    expect(asSession).toContain('notice-at=300000');
     expect(asSession).not.toContain(WRAP_UP_DIRECTIVE);
     expect(asSession).toContain('This session');
 
@@ -1193,7 +1198,7 @@ describe('runUsageCheck: a player is measured on ITS OWN transcript', () => {
     };
 
     const first = noticeOf(runCapturing(input));
-    expect(first).toContain('setpoint=200000');
+    expect(first).toContain('notice-at=200000');
 
     // Record it exactly as Claude Code does — into the subagent's file.
     appendFileSync(
@@ -1226,6 +1231,7 @@ describe('runUsageCheck: a player is measured on ITS OWN transcript', () => {
     // And it is emphatically NOT the parent's 900,000 relabelled as the
     // player's — the exact substitution rule 6 forbids.
     expect(stderr).not.toContain('900,000');
+    expect(stderr).not.toContain('notice-at=');
     expect(stderr).not.toContain('setpoint=');
   });
 
@@ -1261,6 +1267,271 @@ describe('runUsageCheck: a player is measured on ITS OWN transcript', () => {
     });
     expect(payload).toBeNull();
     expect(stderr).toBe('');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-y1hg0.22 — the notice reads as an FYI, and its token is renamed
+// ---------------------------------------------------------------------------
+
+/**
+ * Verbatim the notice session 994806ab received on 2026-10-19, read as "you are
+ * past your setpoint", after which it handed itself off. Live transcripts hold
+ * notices in this form, so the reader must keep understanding them.
+ */
+const LEGACY_SESSION_NOTICE = `${USAGE_CHECK_MARKER} This session has now used 201,607 tokens of context (setpoint=200000).`;
+
+/** The subagent form of the same era, verbatim from a live player. */
+const LEGACY_PLAYER_NOTICE = `${USAGE_CHECK_MARKER} This player subagent has now used 117,819 tokens of its OWN context, measured from its own transcript — this is your number, not the parent session's (setpoint=100000).`;
+
+/** Justin's player budget: a 350,000 wrap-up bound folded into the default ladder. */
+const PLAYER_BOUND_CONFIG: UsageCheckConfig = {
+  enabled: true,
+  roles: {player: {wrapUpAt: 350_000}},
+  wrapUpAt: null,
+};
+
+describe('the notice token: current and legacy names (home-base-y1hg0.22)', () => {
+  /** What the reader takes as the last announced rung of these entries. */
+  function lastAnnounced(entries: unknown[]): number | null {
+    const path = writeTranscript(tempDir(), [
+      ...entries,
+      assistantEntry(250_000),
+    ]);
+    const facts = readTranscriptFacts({
+      lowestSetpoint: 100_000,
+      transcriptPath: path,
+    });
+    // Null below must mean "no notice", not "stopped looking".
+    expect(facts.reachedStart).toBe(true);
+    return facts.lastAnnouncedSetpoint;
+  }
+
+  test('reads the current notice-at= token back from a notice formatNotice wrote', () => {
+    const notice = formatNotice(
+      {
+        contextTokens: 201_607,
+        reason: 'first',
+        setpoint: 200_000,
+        wrapUp: false,
+      },
+      {scope: 'session'},
+      USAGE_CHECK_DEFAULTS.setpoints,
+    );
+    expect(notice).toContain('(notice-at=200000)');
+    expect(lastAnnounced([noticeEntry(notice)])).toBe(200_000);
+  });
+
+  test('still reads the LEGACY setpoint= token of a session notice', () => {
+    expect(lastAnnounced([noticeEntry(LEGACY_SESSION_NOTICE)])).toBe(200_000);
+  });
+
+  test('still reads the LEGACY setpoint= token of a subagent notice', () => {
+    expect(lastAnnounced([noticeEntry(LEGACY_PLAYER_NOTICE)])).toBe(100_000);
+  });
+
+  test('across an upgrade the MOST RECENT notice wins, whichever form it has', () => {
+    expect(
+      lastAnnounced([
+        noticeEntry(`${USAGE_CHECK_MARKER} old (setpoint=100000).`),
+        noticeEntry(`${USAGE_CHECK_MARKER} new (notice-at=200000)`),
+      ]),
+    ).toBe(200_000);
+    expect(
+      lastAnnounced([
+        noticeEntry(`${USAGE_CHECK_MARKER} new (notice-at=100000)`),
+        noticeEntry(`${USAGE_CHECK_MARKER} old (setpoint=200000).`),
+      ]),
+    ).toBe(200_000);
+  });
+
+  test('NEGATIVE CONTROL: only those two names count, and only in our own notice', () => {
+    // Another name for the same number is not state.
+    expect(
+      lastAnnounced([noticeEntry(`${USAGE_CHECK_MARKER} (rung=200000)`)]),
+    ).toBeNull();
+    // Nor is a name that merely ENDS in one of ours.
+    expect(
+      lastAnnounced([noticeEntry(`${USAGE_CHECK_MARKER} (mysetpoint=200000)`)]),
+    ).toBeNull();
+    // Nor is our token outside our marker: that is somebody else's text.
+    expect(
+      lastAnnounced([noticeEntry('Another hook mentions notice-at=200000')]),
+    ).toBeNull();
+  });
+});
+
+describe('the notice reads as an FYI, not a limit (home-base-y1hg0.22)', () => {
+  const FOLDED_LADDER = resolvedFor(PLAYER_BOUND_CONFIG, 'player').setpoints;
+
+  function decision(wrapUp: boolean): UsageDecision {
+    return {contextTokens: 201_607, reason: 'first', setpoint: 200_000, wrapUp};
+  }
+
+  const SUBJECTS: NoticeSubject[] = [
+    {scope: 'session'},
+    {agentType: 'player', scope: 'subagent'},
+    {scope: 'subagent'},
+  ];
+  const LADDERS: (number[] | null)[] = [
+    null,
+    USAGE_CHECK_DEFAULTS.setpoints,
+    FOLDED_LADDER,
+    [200_000],
+  ];
+
+  /** Every notice the formatter can produce for the 200,000 rung. */
+  function everyVariant(): string[] {
+    const notices: string[] = [];
+    for (const wrapUp of [false, true]) {
+      for (const subject of SUBJECTS) {
+        for (const ladder of LADDERS) {
+          notices.push(formatNotice(decision(wrapUp), subject, ladder));
+        }
+      }
+    }
+    return notices;
+  }
+
+  test('the exact text a session sees at 200,000 on the default ladder', () => {
+    expect(
+      formatNotice(
+        decision(false),
+        {scope: 'session'},
+        USAGE_CHECK_DEFAULTS.setpoints,
+      ),
+    ).toBe(
+      `${USAGE_CHECK_MARKER} This session has now used 201,607 tokens of context. This notice fires at preset token counts, every 100,000 tokens (this one at 200,000). This is just an FYI: not a limit, and not a reason to stop or hand off. (notice-at=200000)`,
+    );
+  });
+
+  test('no variant of the notice contains the word "setpoint"', () => {
+    const notices = everyVariant();
+    expect(notices).toHaveLength(24);
+    for (const notice of notices) {
+      expect(notice.toLowerCase()).not.toContain('setpoint');
+    }
+  });
+
+  test('every variant says it fires at preset token counts and names its rung', () => {
+    for (const notice of everyVariant()) {
+      expect(notice).toContain('This notice fires at preset token counts');
+      expect(notice).toContain('(this one at 200,000)');
+      expect(notice.split('\n')[0]).toEndWith('(notice-at=200000)');
+    }
+  });
+
+  test('without the directive, it says it is an FYI and not a limit or a reason to stop', () => {
+    expect(NOTICE_FYI).toContain('FYI');
+    expect(NOTICE_FYI).toContain('not a limit');
+    expect(NOTICE_FYI).toContain('not a reason to stop or hand off');
+    for (const subject of SUBJECTS) {
+      const notice = formatNotice(decision(false), subject, null);
+      expect(notice).toContain(NOTICE_FYI);
+      expect(notice).not.toContain(WRAP_UP_DIRECTIVE);
+    }
+  });
+
+  test('with the directive, it does NOT also call itself no reason to stop', () => {
+    // The directive is a real instruction a project opted into (D8). A line
+    // saying "not a reason to stop or hand off" above it would contradict it.
+    for (const subject of SUBJECTS) {
+      const notice = formatNotice(decision(true), subject, null);
+      expect(notice.split('\n')[1]).toBe(WRAP_UP_DIRECTIVE);
+      expect(notice).not.toContain(NOTICE_FYI);
+      expect(notice).not.toContain('not a reason to stop');
+    }
+  });
+
+  test('names an interval only for an evenly spaced ladder', () => {
+    const on = (ladder: number[] | null) =>
+      formatNotice(decision(false), {scope: 'session'}, ladder);
+    expect(on(USAGE_CHECK_DEFAULTS.setpoints)).toContain(
+      'preset token counts, every 100,000 tokens (this one at 200,000)',
+    );
+    // 350,000 sits between rungs, so "every 100,000" would be false here.
+    expect(on(FOLDED_LADDER)).toContain(
+      'preset token counts (this one at 200,000)',
+    );
+    expect(on(FOLDED_LADDER)).not.toContain('every');
+    expect(on([200_000])).not.toContain('every');
+    expect(on(null)).not.toContain('every');
+  });
+});
+
+describe('regularLadderInterval', () => {
+  test('the generated default ladder is every 100,000', () => {
+    expect(regularLadderInterval(USAGE_CHECK_DEFAULTS.setpoints)).toBe(100_000);
+    expect(regularLadderInterval([100_000, 200_000, 300_000])).toBe(100_000);
+  });
+
+  test('a folded-in wrapUpAt rung breaks the spacing', () => {
+    expect(
+      regularLadderInterval(
+        resolvedFor(PLAYER_BOUND_CONFIG, 'player').setpoints,
+      ),
+    ).toBeNull();
+  });
+
+  test('one rung, no rungs, and an offset start have no interval', () => {
+    expect(regularLadderInterval([200_000])).toBeNull();
+    expect(regularLadderInterval([])).toBeNull();
+    expect(regularLadderInterval([50_000, 150_000, 250_000])).toBeNull();
+  });
+});
+
+describe('runUsageCheck: upgrading over a transcript with legacy notices', () => {
+  test('a session told about 200,000 in the OLD form is not told again', () => {
+    const dir = tempDir();
+    writeConfig(dir, {enabled: true});
+    const transcriptPath = writeTranscript(dir, [
+      assistantEntry(201_607),
+      noticeEntry(LEGACY_SESSION_NOTICE),
+      assistantEntry(240_000),
+    ]);
+    const input = {
+      cwd: dir,
+      hook_event_name: 'PostToolBatch',
+      transcript_path: transcriptPath,
+    };
+
+    // A reader blind to the old name finds no notice and re-announces 200,000.
+    expect(runCapturing(input)).toBeNull();
+
+    // The ladder carries on from the legacy rung, in the new form.
+    appendFileSync(
+      transcriptPath,
+      `${JSON.stringify(assistantEntry(305_000))}\n`,
+    );
+    const next = noticeOf(runCapturing(input));
+    expect(next).toContain('(notice-at=300000)');
+    expect(next).toContain('every 100,000 tokens (this one at 300,000)');
+    expect(next).toContain(NOTICE_FYI);
+    expect(next?.toLowerCase()).not.toContain('setpoint');
+  });
+
+  test('a player on a folded ladder is not promised an interval; its session is', () => {
+    const fx = subagentFixture({
+      agentId: 'a405a84daeae6cd2b',
+      agentTokens: 210_000,
+      sessionTokens: 210_000,
+      usageCheck: PLAYER_BOUND_CONFIG,
+    });
+    const base = {
+      cwd: fx.dir,
+      hook_event_name: 'PostToolBatch',
+      transcript_path: fx.sessionPath,
+    };
+
+    const asPlayer = noticeOf(
+      runCapturing({...base, agent_id: 'a405a84daeae6cd2b'}),
+    );
+    expect(asPlayer).toContain('preset token counts (this one at 200,000)');
+    expect(asPlayer).not.toContain('every');
+    expect(asPlayer).toContain(NOTICE_FYI);
+
+    const asSession = noticeOf(runCapturing(base));
+    expect(asSession).toContain('every 100,000 tokens (this one at 200,000)');
   });
 });
 

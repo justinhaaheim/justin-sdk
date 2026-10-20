@@ -350,6 +350,74 @@ describe('D3 rule 5: stopped with work open, no blocker', () => {
       'Claude stopped with 2 commits, no request filed, and no question for you. Resume it and say continue.',
     );
   });
+
+  test('home-base-tg45h: never "no question for you" while optional questions are open — counted as the card\'s Optional line counts them (P1–P4)', () => {
+    // 2026-10-19: rule 5 said "no question for you" beside 11 open questions.
+    const optional = [
+      question('t-5', 'Gzip the export?', 3),
+      question('t-6', 'Rename the bucket?', 1),
+      question('t-7', 'FYI: the cron moved', 4),
+    ];
+    const withRequests = action(
+      fixture({
+        questions: optional,
+        requests: [
+          closed('t-2', 'Speed up the importer'),
+          open('t-3', 'Add a progress bar'),
+        ],
+      }),
+    );
+    expect(withRequests).toEqual({
+      command: null,
+      kind: 'openWork',
+      rule: 5,
+      text: 'Claude stopped with 1 of 2 requests unfinished and nothing that needs your answer first (3 optional questions). Resume it and say continue.',
+    });
+
+    const oneQuestion = action(
+      fixture({
+        git: {
+          commits: measured({
+            count: 2,
+            shas: ['a', 'b'],
+            source: 'transcript',
+            unmatchedCalls: [],
+            unresolved: [],
+          }),
+        },
+        questions: [question('t-5', 'Gzip the export?', 2)],
+      }),
+    );
+    expect(oneQuestion.kind).toBe('openWork');
+    expect(oneQuestion.text).toBe(
+      'Claude stopped with 2 commits, no request filed, and nothing that needs your answer first (1 optional question). Resume it and say continue.',
+    );
+
+    const nothingLeft = action(
+      fixture({lastRole: 'user', questions: optional}),
+    );
+    expect(nothingLeft.kind).toBe('openWork');
+    expect(nothingLeft.text).toBe(
+      'Claude stopped before answering your last message, and has nothing that needs your answer first (3 optional questions). Resume it and say continue.',
+    );
+
+    // A closed (answered) question is not open: the line is the plain one.
+    const answered = action(
+      fixture({
+        questions: [
+          {...question('t-5', 'Gzip the export?', 3), status: 'closed'},
+        ],
+        requests: [open('t-3', 'Add a progress bar')],
+      }),
+    );
+    expect(answered.text).toBe(
+      'Claude stopped with 1 of 1 request unfinished and no question for you. Resume it and say continue.',
+    );
+
+    for (const result of [withRequests, oneQuestion, nothingLeft]) {
+      expect(result.text).not.toContain('no question for you');
+    }
+  });
 });
 
 describe('D3 rule 6: done, not merged', () => {

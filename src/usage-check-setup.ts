@@ -170,7 +170,7 @@ export function stepUsageCheckConfig(projectRoot: string): boolean {
       : `wrapUpAt: ${USAGE_CHECK_DEFAULTS.wrapUpAt}`;
   success(`Added componentConfig.${USAGE_CHECK_CONFIG_KEY} (${wrapUpSummary})`);
   success(
-    'Setpoints left unset, so this project tracks the SDK default: one ' +
+    'Notice token counts left unset, so this project tracks the SDK default: one ' +
       `notice every ${formatTokens(SETPOINT_INTERVAL_TOKENS)} tokens up to ` +
       formatTokens(SETPOINT_CEILING_TOKENS),
   );

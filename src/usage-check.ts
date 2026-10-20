@@ -49,8 +49,9 @@
  * STATE IS DERIVED FROM THE TRANSCRIPT, never from a state file — time-check's
  * rationale applies unchanged: a state file desyncs on resume, on another
  * machine, or when the state dir is cleared, and it fails silently when it
- * does. Our own notices carry a machine-readable `setpoint=<n>` token, so the
- * most recent one tells us exactly where the ladder stands.
+ * does. Our own notices carry a machine-readable `notice-at=<n>` token (older
+ * ones `setpoint=<n>`, still read — see NOTICE_TOKEN_NAME), so the most recent
+ * one tells us exactly where the ladder stands.
  *
  * THE RE-ARM RULE (context can SHRINK — auto-compaction can drop a 300k
  * session to 60k, and after that the setpoints must fire again):
@@ -87,11 +88,29 @@ import {emitHookOutput} from './hook-output';
 export const USAGE_CHECK_MARKER = '[Automated Usage Check]';
 
 /**
- * The machine-readable half of a notice. This is the component's entire
+ * The name of the machine-readable half of a notice, `notice-at=<n>`, where n
+ * is the rung the notice fired for. That token is the component's entire
  * persistence layer — reword the prose around it freely, but never emit a
  * notice without it and never change its shape without changing the parser.
+ *
+ * The name is neutral on purpose (home-base-y1hg0.22). Until 2026-10-20 the
+ * token was `setpoint=<n>`, and a session read "(setpoint=200000)" as "you are
+ * past your limit" and handed itself off with nothing wrong.
  */
-const SETPOINT_TOKEN = /setpoint=(\d+)/;
+const NOTICE_TOKEN_NAME = 'notice-at';
+
+/**
+ * The token's name before home-base-y1hg0.22. PARSED, never written: live
+ * transcripts already hold notices in this form, and a reader that forgot it
+ * would find "no notice yet" and re-announce a rung the session was already
+ * told about.
+ */
+const LEGACY_NOTICE_TOKEN_NAME = 'setpoint';
+
+/** Reads either name. Built from the two constants so writer and reader agree. */
+const SETPOINT_TOKEN = new RegExp(
+  `\\b(?:${NOTICE_TOKEN_NAME}|${LEGACY_NOTICE_TOKEN_NAME})=(\\d+)`,
+);
 
 /** The key under `componentConfig` in justin-sdk.config.json. */
 export const USAGE_CHECK_CONFIG_KEY = 'usage-check';
@@ -1008,8 +1027,53 @@ export interface NoticeSubject {
 const SESSION_SUBJECT: NoticeSubject = {scope: 'session'};
 
 /**
- * The notice. The first line carries the marker AND the machine-readable
- * `setpoint=` token that a later run reads back as state — see SETPOINT_TOKEN.
+ * What the notice IS, said in the notice (home-base-y1hg0.22). Justin,
+ * 2026-10-20: what the alert means is "this is the alert that was designed to
+ * go off at/after 200k tokens", but "what the model interprets is 'you're past
+ * your setpoint', which is wrong." A session did exactly that on 2026-10-19 and
+ * handed itself off at 201,607 tokens.
+ *
+ * Left OUT when the wrap-up directive rides along: that directive is a real
+ * instruction a project opted into (D8), and a notice saying "not a reason to
+ * stop or hand off" one line above "Wrap up your session" would contradict it.
+ */
+export const NOTICE_FYI =
+  'This is just an FYI: not a limit, and not a reason to stop or hand off.';
+
+/**
+ * The spacing of a ladder whose rungs are exactly 1x, 2x, 3x … of its first
+ * rung (the generated default: 100k, 200k, 300k, …), or null for any other
+ * shape.
+ *
+ * The notice names an interval only when this returns one, so it never says
+ * "every 100,000 tokens" of a ladder that is not: a `wrapUpAt` of 350,000 folds
+ * an extra rung in, and a project may hand-write irregular rungs. A one-rung
+ * ladder fires once, so it has no interval either.
+ */
+export function regularLadderInterval(
+  setpoints: readonly number[],
+): number | null {
+  const interval = setpoints[0];
+  if (interval == null || setpoints.length < 2) {
+    return null;
+  }
+  for (let rung = 0; rung < setpoints.length; rung += 1) {
+    if (setpoints[rung] !== interval * (rung + 1)) {
+      return null;
+    }
+  }
+  return interval;
+}
+
+/**
+ * The notice. One line carries the marker, whose number it is, when it fires,
+ * that it is only an FYI (see NOTICE_FYI), and LAST the machine-readable
+ * `notice-at=` token that a later run reads back as state — see
+ * SETPOINT_TOKEN. The wrap-up directive, when due, is a second line.
+ *
+ * The word "setpoint" appears nowhere in it (home-base-y1hg0.22): a model read
+ * it as a limit it had passed. The notice says instead that it fires at preset
+ * token counts, which is all a rung is.
  *
  * "of context" is load-bearing wording: elsewhere in this SDK "usage" means
  * subscription QUOTA (`/usage`, ralph's usage gate), and the two numbers must
@@ -1020,25 +1084,44 @@ const SESSION_SUBJECT: NoticeSubject = {scope: 'session'};
  * parent's number, so a subagent reading "this session has used 400,000" had
  * every reason to think it was its own. Saying whose number it is, in the same
  * sentence as the number, is the whole point of the feature.
+ *
+ * `setpoints` is the ladder the decision was made on. It only decides whether
+ * the notice can truthfully say "every N tokens" (see regularLadderInterval);
+ * null leaves the interval out.
  */
 export function formatNotice(
   decision: UsageDecision,
   subject: NoticeSubject = SESSION_SUBJECT,
+  setpoints: readonly number[] | null = null,
 ): string {
   const tokens = formatTokens(decision.contextTokens);
+
+  let count: string;
   if (subject.scope === 'session') {
-    const line = `${USAGE_CHECK_MARKER} This session has now used ${tokens} tokens of context (setpoint=${decision.setpoint}).`;
-    return decision.wrapUp ? `${line}\n${WRAP_UP_DIRECTIVE}` : line;
+    count = `This session has now used ${tokens} tokens of context.`;
+  } else {
+    // agent_type is what Claude Code called the subagent ("player", "Explore").
+    // Absent, "This subagent" still says the one thing that matters: not you.
+    const who =
+      subject.agentType == null || subject.agentType === ''
+        ? 'This subagent'
+        : `This ${subject.agentType} subagent`;
+    count = `${who} has now used ${tokens} tokens of its OWN context, measured from its own transcript — this is your number, not the parent session's.`;
   }
 
-  // agent_type is what Claude Code called the subagent ("player", "Explore").
-  // Absent, "This subagent" still says the one thing that matters: not you.
-  const who =
-    subject.agentType == null || subject.agentType === ''
-      ? 'This subagent'
-      : `This ${subject.agentType} subagent`;
-  const first = `${USAGE_CHECK_MARKER} ${who} has now used ${tokens} tokens of its OWN context, measured from its own transcript — this is your number, not the parent session's (setpoint=${decision.setpoint}).`;
-  return decision.wrapUp ? `${first}\n${WRAP_UP_DIRECTIVE}` : first;
+  const interval = setpoints == null ? null : regularLadderInterval(setpoints);
+  const every =
+    interval == null ? '' : `, every ${formatTokens(interval)} tokens`;
+  const cadence = `This notice fires at preset token counts${every} (this one at ${formatTokens(decision.setpoint)}).`;
+
+  const parts = [USAGE_CHECK_MARKER, count, cadence];
+  if (!decision.wrapUp) {
+    parts.push(NOTICE_FYI);
+  }
+  parts.push(`(${NOTICE_TOKEN_NAME}=${decision.setpoint})`);
+
+  const line = parts.join(' ');
+  return decision.wrapUp ? `${line}\n${WRAP_UP_DIRECTIVE}` : line;
 }
 
 // ---------------------------------------------------------------------------
@@ -1143,10 +1226,11 @@ export function runUsageCheck(args?: {stdin?: string}): number {
     return 0;
   }
 
-  const notice = formatNotice(decision, {
-    agentType: input.agent_type,
-    scope: target.kind,
-  });
+  const notice = formatNotice(
+    decision,
+    {agentType: input.agent_type, scope: target.kind},
+    config.setpoints,
+  );
 
   // Emit BOTH channels, exactly as time-check does and for the same reason:
   // `systemMessage` renders in Justin's terminal but never enters the model's

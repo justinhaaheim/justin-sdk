@@ -433,7 +433,8 @@ export type MarkItem =
   /**
    * home-base-vzwbj.4.16 G2: the yield would be ⚠️ Open work, and this open
    * request is why — nothing blocks it. Says what to do with it: close it
-   * (work done), or file the P0 that blocks it / hand off (not done).
+   * (work done); keep working, or file the P0 it cannot move without (not
+   * done; home-base-tg45h).
    */
   | {
       /** Every real child is closed (at least one): what requestChildrenClosed says. */

@@ -338,7 +338,7 @@ describe('the reading itself', () => {
     // The bug's real damage: at the phantom 341,867 this crossed wrapUpAt and
     // told a session sitting at 172k to wind down.
     expect(notice).not.toContain(WRAP_UP_DIRECTIVE);
-    expect(notice).toContain('setpoint=100000');
+    expect(notice).toContain('notice-at=100000');
   });
 
   test('thread usage-now reports the same number as the hook', () => {

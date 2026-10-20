@@ -589,15 +589,58 @@ describe('G2: thread status says what to do with each open request when the yiel
         const said = lines.join('\n').includes(OPEN_WORK_CONSEQUENCE.trim());
         expect({kind: status.kind, lines: lines.length, said}).toEqual({
           kind: status.kind,
-          lines: status.kind === 'openWork' ? 2 : 1,
+          lines: status.kind === 'openWork' ? 3 : 1,
           said: status.kind === 'openWork',
         });
       }
     }
     expect(verdictLines({kind: 'openWork'}, PLAIN_STYLE)).toEqual([
       'If you stop now the inbox will say: ⚠️ Open work, no blocker — Justin will be told to resume this session.',
-      'Close what is done, file the P0 that blocks you, or run `bun run justin-sdk thread handoff`.',
+      'Before you stop, settle each open request: close it if its work is done; keep working if you can, acting on the default of any P1–P3 question Justin has not answered; or, if it cannot move without his answer, file that question as a P0.',
+      'Handing off is not a way to stop: run `bun run justin-sdk thread handoff` only when this session cannot go on (its context is nearly full, or Justin asked for a new session).',
     ]);
+  });
+
+  test('tg45h AC1: under ⚠️, handoff is never a peer way to stop — in the verdict or in any request entry', async () => {
+    // home-base-tg45h: on 2026-10-19 a session with only optional questions
+    // pending read "Close what is done, file the P0 that blocks you, or run
+    // thread handoff" as three ways to stop, and handed off for no reason.
+    for (const style of [PLAIN_STYLE, {color: true, width: 100}]) {
+      const said = verdictLines({kind: 'openWork'}, style)
+        .join('\n')
+        .replace(/\s+/g, ' ');
+      expect(said).not.toContain('file the P0 that blocks you');
+      expect(said).not.toContain('fourth option');
+      expect(said).toContain('close it if its work is done');
+      expect(said).toContain('keep working if you can');
+      expect(said).toContain('file that question as a P0');
+      expect(said).toMatch(
+        /Handing off is not a way to stop: run \S*bun run justin-sdk thread handoff\S* only when this session cannot go on/u,
+      );
+    }
+
+    const {linked, w} = await threeRequests();
+    const load = await report(w, true);
+    expect(load.status.kind).toBe('openWork');
+    const out = renderThreadStatus(load, {
+      now: NOW,
+      style: PLAIN_STYLE,
+      timeZone: TZ,
+    });
+    const block = marksBlock(out);
+    // The handoff is said ONCE, on the verdict, with its caveat.
+    expect(block.split('thread handoff')).toHaveLength(2);
+    expect(block).not.toContain('or hand off');
+    expect(block).toContain(
+      '  - not done, and you can go on → keep working; act on the default of any P1–P3 question Justin has not answered',
+    );
+    const filed = load.model.beads.requests.find(
+      (node) => node.request.id === linked,
+    )?.questions[0];
+    expect(filed?.title).toBe('Should the export also gzip its output?');
+    expect(block).toContain(
+      `  - not done, and it cannot move without Justin → file that question as a P0: \`bun run justin-sdk thread ask "…" --priority 0 --to ${linked}\` (already filed as ${filed?.id}? File it again at P0, then close the old one: \`br close ${filed?.id} --reason "raised to P0 as <new id>"\`)`,
+    );
   });
 });
 

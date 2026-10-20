@@ -350,7 +350,7 @@ const componentConfigSchema = z
           .number()
           .optional()
           .describe(
-            'Fractional drop below the last announced setpoint that re-arms the ladder.',
+            'How far below the token count of the last notice the context must fall (as a fraction) to re-arm the ladder, e.g. after compaction.',
           ),
         roles: z
           .looseObject({
