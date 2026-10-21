@@ -130,6 +130,10 @@ const treeSchema = z.object({
           panes: z.array(
             z.object({surfaces: z.array(z.object({id: z.string()}))}),
           ),
+          // home-base-yukaf.31: `thread close workspace:N` and its Title line.
+          // Measured 2026-10-20: every workspace carries both.
+          ref: z.string().nullish(),
+          title: z.string().nullish(),
         }),
       ),
     }),
@@ -146,7 +150,14 @@ export interface CmuxTree {
   windows: {
     id: string;
     ref: string;
-    workspaces: {id: string; surfaceIds: string[]}[];
+    workspaces: {
+      id: string;
+      /** `workspace:N`; null when the tree did not carry one. */
+      ref: string | null;
+      surfaceIds: string[];
+      /** The title cmux shows for it; null when the tree did not carry one. */
+      title: string | null;
+    }[];
   }[];
 }
 
@@ -182,9 +193,11 @@ export async function readCmuxTree(run: CmuxRunner): Promise<CmuxTreeRead> {
         ref: window.ref,
         workspaces: window.workspaces.map((workspace) => ({
           id: workspace.id,
+          ref: workspace.ref ?? null,
           surfaceIds: workspace.panes.flatMap((pane) =>
             pane.surfaces.map((surface) => surface.id),
           ),
+          title: workspace.title ?? null,
         })),
       })),
     },

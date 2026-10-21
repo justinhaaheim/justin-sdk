@@ -37,6 +37,7 @@ import type {
   LiveSessions,
   UnplacedLive,
 } from './live-sessions';
+import type {RestoreDeps, RestoreRecord, RestoreTarget} from './open-restore';
 import type {EnvLike} from './paths';
 import type {InboxSection} from './session-card';
 import type {InboxRow} from './session-inbox';
@@ -89,6 +90,13 @@ import {
   repoValues,
   type SinceSource,
 } from './open-filters';
+import {
+  planRestores,
+  realRestoreDeps,
+  renderRestore,
+  restoreDrafts,
+  restoreFailed,
+} from './open-restore';
 import {ageWords, tildeText} from './part-one';
 import {threadsStateDir} from './paths';
 import {liveSocketPath, socketSettingsJson, zshWord} from './respawn';
@@ -724,6 +732,12 @@ export interface OpenRecord extends OpenPlan {
   notMoved: {name: string; reason: string; sessionId: string}[];
   /** Why the run opened nothing on purpose, or null. */
   refused: string | null;
+  /**
+   * home-base-yukaf.34: the unsent text typed back into the sessions this run
+   * opened (open-restore.ts), each entry written before its one `cmux send`.
+   * A dry run holds the plan ('wouldRestore').
+   */
+  restore: RestoreRecord;
   sections: InboxSection[];
   version: 1;
   windows: OpenWindow[];
@@ -1385,6 +1399,13 @@ export function renderOpen(
             : 'off (--include-open moves sessions already open elsewhere into the new window)',
         },
         {label: 'Layout', value: layout},
+        // yukaf.34 item 2.
+        {
+          label: 'Restore',
+          value: rec.restore.enabled
+            ? 'on: unsent text stored for a session it opens is typed into the new input box, on one line, and never sent (--no-restore skips it)'
+            : 'off (--no-restore): no stored draft is typed',
+        },
         {label: 'Reopens', value: rec.sections.map(sectionWords).join('\n')},
         {
           label: 'Live sessions',
@@ -1439,6 +1460,10 @@ export function renderOpen(
     openRecords.length === 0
       ? prose('Nothing to open.', style)
       : spacedList(openRecords),
+  );
+  // yukaf.34 item 4: ✍️ Restored drafts, and ⚠️ Draft not restored.
+  blocks.push(
+    ...renderRestore(rec.restore, rec.dryRun, openRecords.length, style),
   );
 
   // yukaf.22 --include-open: the live sessions whose workspaces move in.
@@ -1792,6 +1817,11 @@ export interface OpenOptions {
    * flag was not passed. Passed but naming no repo refuses (G6).
    */
   repos?: readonly string[];
+  /**
+   * yukaf.34: `--no-restore` makes this false: no stored draft is typed into
+   * the sessions this run opens (default true).
+   */
+  restore?: boolean;
   /** Reserved for the --undo dispatch. */
   run: string | null;
   /** `--since 24h|3d|2w`; null when not given (then --days, then config). */
@@ -1818,8 +1848,46 @@ export interface OpenDeps {
   readLive: () => Promise<LiveSessions>;
   /** yukaf.22 --include-open: the cmux tree (where each workspace is). */
   readTree: () => Promise<CmuxTreeRead>;
+  /**
+   * yukaf.34: the draft restore's store, tree reads and clock; any left out
+   * are the real ones. Its cmux calls always go through `run`.
+   */
+  restore: Partial<Omit<RestoreDeps, 'run'>>;
   run: CmuxRunner;
   writeRecord: RecordWriter;
+}
+
+/**
+ * yukaf.34: the sessions this run OPENED, each with the one workspace it
+ * made, in each window's newest-first order. A workspace moved in with
+ * --include-open is not in a window's `workspaces`, so it is never a target.
+ */
+export function openedTargets(rec: OpenRecord): RestoreTarget[] {
+  const planned = new Map(rec.planned.map((entry) => [entry.sessionId, entry]));
+  const targets: RestoreTarget[] = [];
+  for (const window of rec.windows) {
+    for (const sessionId of window.sessionIds) {
+      const session = planned.get(sessionId);
+      const made = window.workspaces.filter(
+        (entry) => entry.sessionId === sessionId,
+      );
+      const [first] = made;
+      if (session == null || first == null) continue;
+      targets.push({
+        name: session.name,
+        // F22: a failed new-workspace can record what the window gained, so
+        // one session can hold two entries; neither is guessed at.
+        problem:
+          made.length > 1
+            ? `the run recorded ${made.length} workspaces for this session (an open that failed part-way), so which one holds it cannot be told`
+            : null,
+        sessionId,
+        workspaceId: made.length === 1 ? first.workspaceId : null,
+        workspaceRef: first.workspaceRef,
+      });
+    }
+  }
+  return targets;
 }
 
 /** F21: a run lock older than this is left over from a run that died. */
@@ -2196,6 +2264,7 @@ export async function openSessions(
       notMoved: [],
       planned: groups.flatMap((group) => group.sessions),
       refused: null,
+      restore: {enabled: options.restore !== false, entries: []},
       sections,
       toMove: groups.flatMap((group) => group.moves),
       version: 1,
@@ -2224,7 +2293,27 @@ export async function openSessions(
       record: rec,
       recordPath: path,
     });
+    // yukaf.34: the restore's reads and writes; cmux only through `run`.
+    const restoreDeps: RestoreDeps = {
+      ...realRestoreDeps(run, env),
+      ...deps.restore,
+      run,
+    };
     if (options.dryRun || plan.planned.length + plan.toMove.length === 0) {
+      // yukaf.34 item 2: a dry run says which drafts a real run would type
+      // (read-only: the store and one tree read), and types nothing.
+      if (options.dryRun && rec.restore.enabled && rec.refused == null) {
+        rec.restore.entries = await planRestores(
+          rec.planned.map((session) => ({
+            name: session.name,
+            problem: null,
+            sessionId: session.sessionId,
+            workspaceId: null,
+            workspaceRef: null,
+          })),
+          restoreDeps,
+        );
+      }
       return finish(0, null);
     }
     if (rec.refused != null) return finish(2, null);
@@ -2297,9 +2386,19 @@ export async function openSessions(
       // yukaf.22 item 5: colour what this built window holds of ours.
       if (!(await colorWindow(window, rec, run, save))) break;
     }
+
+    // ---- 6. yukaf.34: type each opened session's unsent text back, unsent ----
+    // Last, so every new pane has had the whole run to start. Never when the
+    // record can no longer be rewritten (D-RECORD: no record, no write).
+    if (rec.restore.enabled && !saveFailed) {
+      await restoreDrafts(openedTargets(rec), rec.restore, restoreDeps, save);
+    }
     rec.finishedAt = new Date().toISOString();
     save();
-    return finish(rec.failures.length === 0 ? 0 : 1, path);
+    return finish(
+      rec.failures.length === 0 && !restoreFailed(rec.restore) ? 0 : 1,
+      path,
+    );
   } finally {
     if (!options.dryRun) releaseOpenLock(lockPath, pid);
   }

@@ -107,7 +107,14 @@ function liveRead(
       ...entry,
     });
   }
-  return {bySessionId, kind: 'read', unplaced};
+  // home-base-yukaf.31: every placement, as joinLiveSessions records them.
+  const workspacesBySessionId = new Map<string, string[]>();
+  for (const [id, entry] of bySessionId) {
+    if (entry.workspaceId != null) {
+      workspacesBySessionId.set(id, [entry.workspaceId.toUpperCase()]);
+    }
+  }
+  return {bySessionId, kind: 'read', unplaced, workspacesBySessionId};
 }
 
 /** The cmux commands that change something; everything else only reads. */

@@ -52,6 +52,7 @@ import {
   cutMessage,
   loadSessionReport,
   markLine,
+  relatedEpicsOf,
   renderSessionShow,
   renderThreadStatus,
   routesToLegacyThread,
@@ -1115,10 +1116,12 @@ describe('fixture 2: a work session with two requests, stages, a P0 and a P3', (
 
   test('thread show: Part 1 live, Claude’s last message with the pasted Part 1 stripped, your messages', async () => {
     const w = await workSession();
+    const load = await report(w, false);
     const out = normalize(
-      renderSessionShow(await report(w, false), {
+      renderSessionShow(load, {
         full: false,
         now: NOW,
+        related: relatedEpicsOf(load),
         style: PLAIN_STYLE,
         timeZone: TZ,
       }),
@@ -1777,6 +1780,163 @@ describe('whatToMark: beads this session created with br create', () => {
     expect(out).not.toContain(
       `adopt it: \`bun run justin-sdk thread request --bead ${older.id}\``,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// thread show: Related epics (home-base-y1hg0.7)
+// ---------------------------------------------------------------------------
+
+describe('thread show: Related epics, through a real br workspace', () => {
+  /**
+   * The aasbl shape (2026-10-20): the session filed an epic and its children
+   * with plain `br create`, and adopted one child of ANOTHER epic as a
+   * request. Both epics must be named, each with its open children.
+   */
+  async function epicsSession(): Promise<{
+    adoptedEpic: string;
+    createdEpic: string;
+    openChild: string;
+    w: World;
+  }> {
+    const w = questionOnly();
+    const adoptedEpic = brCreate(
+      {cwd: w.repo},
+      {title: 'Speed up the nightly export', type: 'epic'},
+    );
+    if (adoptedEpic.kind !== 'ok') throw new Error('epic not filed');
+    const adopted = brCreate(
+      {cwd: w.repo},
+      {parent: adoptedEpic.id, title: 'Batch the writes', type: 'task'},
+    );
+    if (adopted.kind !== 'ok') throw new Error('child not filed');
+    const filed = await fileRequest({
+      bead: adopted.id,
+      cwd: w.repo,
+      doneWhen: null,
+      env: w.env,
+      here: false,
+      now: NOW,
+      sessionId: null,
+      title: null,
+    });
+    if (filed.kind !== 'filed') throw new Error(JSON.stringify(filed));
+    const filedAt = new Date().toISOString();
+    const createdEpic = brCreate(
+      {cwd: w.repo},
+      {title: 'Threads tooling push', type: 'epic'},
+    );
+    if (createdEpic.kind !== 'ok') throw new Error('epic not filed');
+    const openChild = brCreate(
+      {cwd: w.repo},
+      {
+        parent: createdEpic.id,
+        title: 'Name the epic in thread show',
+        type: 'task',
+      },
+    );
+    const doneChild = brCreate(
+      {cwd: w.repo},
+      {parent: createdEpic.id, title: 'Already shipped', type: 'task'},
+    );
+    if (openChild.kind !== 'ok' || doneChild.kind !== 'ok') {
+      throw new Error('children not filed');
+    }
+    brClose({cwd: w.repo}, doneChild.id, 'shipped');
+    const calls = [createdEpic.id, openChild.id, doneChild.id].flatMap(
+      (id, index) =>
+        bashCallRecords({
+          at: filedAt,
+          command: `br create "bead ${index}" --silent`,
+          cwd: w.repo,
+          endAt: new Date(Date.parse(filedAt) + 1000).toISOString(),
+          id: `toolu_epic_${index}`,
+          output: `${id}\n`,
+          sessionId: SESSION,
+        }),
+    );
+    writeTranscript(w, w.repo, '09:30', 41_200, calls);
+    return {
+      adoptedEpic: adoptedEpic.id,
+      createdEpic: createdEpic.id,
+      openChild: openChild.id,
+      w,
+    };
+  }
+
+  test('both epics are named after Part 1, each with its open children', async () => {
+    const {adoptedEpic, createdEpic, openChild, w} = await epicsSession();
+    const load = await report(w, false);
+    const related = relatedEpicsOf(load);
+    expect(related.problems).toEqual([]);
+    expect(related.epics.map((entry) => entry.epic.id)).toEqual([
+      adoptedEpic,
+      createdEpic,
+    ]);
+    const out = renderSessionShow(load, {
+      full: false,
+      now: NOW,
+      related,
+      style: PLAIN_STYLE,
+      timeZone: TZ,
+    });
+    const [part1, rest = ''] = out.split(`${PART_ONE_SEPARATOR}\n`);
+    expect(part1).not.toContain('Related epics');
+    // After Part 1 and before Claude's message.
+    expect(rest.indexOf('**Related epics:**')).toBeGreaterThanOrEqual(0);
+    expect(rest.indexOf('**Related epics:**')).toBeLessThan(
+      rest.indexOf('**From Claude:**'),
+    );
+    expect(rest).toContain(
+      `1. **Speed up the nightly export** (${adoptedEpic}, open)`,
+    );
+    expect(rest).toContain('   **Reached from:** 1 request');
+    expect(rest).toContain(
+      `2. **Threads tooling push** (${createdEpic}, open)`,
+    );
+    // The epic itself, its open child and its closed child: all three were
+    // created by this session, and the closed one still leads here.
+    expect(rest).toContain('   **Reached from:** 3 beads this session created');
+    expect(rest).toContain('   **Open children:** 1\n');
+    expect(rest).toContain(
+      `   - ${openChild} Name the epic in thread show (open)`,
+    );
+    expect(rest).not.toContain('Already shipped');
+  });
+
+  test('a session with no epic above anything says none, checked', async () => {
+    const w = questionOnly();
+    const load = await report(w, false);
+    const out = renderSessionShow(load, {
+      full: false,
+      now: NOW,
+      related: relatedEpicsOf(load),
+      style: PLAIN_STYLE,
+      timeZone: TZ,
+    });
+    expect(out).toContain(
+      '**Related epics:**\n\nnone — checked 0 requests and 0 beads this session created; none of them sits under an epic.',
+    );
+  });
+
+  test('no transcript: the created beads are unknown, so the line is UNKNOWN, never none', async () => {
+    const w = questionOnly();
+    rmSync(join(w.sb.path, 'projects'), {force: true, recursive: true});
+    const load = await report(w, false);
+    const out = renderSessionShow(load, {
+      full: false,
+      now: NOW,
+      related: relatedEpicsOf(load),
+      style: PLAIN_STYLE,
+      timeZone: TZ,
+    });
+    expect(out).toContain(
+      '**Related epics:**\n\nUNKNOWN — no epic found from ',
+    );
+    expect(out).toContain(
+      '- the beads this session created could not be listed: could not look for the transcript',
+    );
+    expect(out).not.toContain('none — checked');
   });
 });
 

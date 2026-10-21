@@ -43,6 +43,7 @@ import type {Field} from '../cli-style';
 import type {BdIssue} from './bd';
 import type {MessageLine} from './message-log';
 import type {EnvLike} from './paths';
+import type {ExportRead} from './session-tree';
 
 import {readdirSync, readFileSync} from 'fs';
 import {join} from 'path';
@@ -66,6 +67,8 @@ import {bdContext, describeBdFailure, listThreads} from './bd';
 import {formatAge} from './board';
 import {readMessageLogAt} from './message-log';
 import {probeErrorMessage} from './paths';
+import {readSessionIndex, sessionBeadSighting} from './session-index';
+import {exportRecordById, readBeadsExport} from './session-tree';
 
 /** Rows printed before the `N more (--limit)` line. `0` means every row. */
 export const DEFAULT_SEARCH_LIMIT = 20;
@@ -189,12 +192,88 @@ export function buildSnippet(
   };
 }
 
-function firstMatch(pattern: RegExp, text: string): SearchSnippet | null {
+// ---------------------------------------------------------------------------
+// Sections (home-base-y1hg0.7)
+// ---------------------------------------------------------------------------
+
+/** A markdown ATX heading: `## Progress`. */
+const ATX_HEADING = /^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/u;
+
+/** A line that is only a bold label: `**What I did:**` or `**What I did**:`. */
+const BOLD_LABEL = /^[ \t]*\*\*([^*\n]+?)\*\*(:?)[ \t]*$/u;
+
+/** A code fence opening or closing: a `#` inside one is not a heading. */
+const FENCE = /^ {0,3}(?:`{3,}|~{3,})/u;
+
+/** The longest section name printed; a longer heading is cut with '…'. */
+export const SECTION_NAME_CUT = 80;
+
+/**
+ * The section a line opens, or null. Bold-only lines count only when the
+ * label ends in a colon, the shape the legacy report used for its sections
+ * (`**What I did:**`); Part 1's `**13 of 18 requests done**` is a sentence,
+ * not a section.
+ */
+function headingOf(line: string): string | null {
+  const atx = ATX_HEADING.exec(line);
+  const bold = atx == null ? BOLD_LABEL.exec(line) : null;
+  const name =
+    atx?.[1] ??
+    (bold?.[1] != null && (bold[1].endsWith(':') || bold[2] === ':')
+      ? bold[1]
+      : null);
+  if (name == null) return null;
+  const clean = name
+    .replace(/\*\*|__|`/g, '')
+    .replace(/:$/u, '')
+    .trim();
+  if (clean === '') return null;
+  return clean.length <= SECTION_NAME_CUT
+    ? clean
+    : `${clean.slice(0, SECTION_NAME_CUT - 1)}…`;
+}
+
+/**
+ * The section of `text` that the character at `index` sits in: the nearest
+ * markdown heading at or above its line (home-base-y1hg0.7, "which section
+ * matched"). A status report, a Part 1 and a dictated brief are all markdown,
+ * so the heading tells a reader whether a phrase is a request title under
+ * `Progress`, a question, or a line of `Deviations`. Null when no heading
+ * precedes the match: then the field the row names is the whole answer.
+ * Headings inside a fenced code block are not headings.
+ */
+export function sectionOf(text: string, index: number): string | null {
+  let section: string | null = null;
+  let inFence = false;
+  let start = 0;
+  while (start < text.length) {
+    const newline = text.indexOf('\n', start);
+    const end = newline === -1 ? text.length : newline;
+    const line = text.slice(start, end);
+    if (FENCE.test(line)) inFence = !inFence;
+    else if (!inFence) section = headingOf(line) ?? section;
+    if (newline === -1 || end >= index) break;
+    start = end + 1;
+  }
+  return section;
+}
+
+/** One match in one field: the snippet around it and the section it sits in. */
+interface FieldMatch {
+  /** The heading the match sits under (`sectionOf`), or null when none. */
+  section: string | null;
+  snippet: SearchSnippet;
+}
+
+function firstMatch(pattern: RegExp, text: string): FieldMatch | null {
   // `exec` on a non-global RegExp always starts at 0 and never carries
   // lastIndex between calls, so one shared pattern is safe across every field.
   const found = pattern.exec(text);
   if (found == null) return null;
-  return buildSnippet(text, found.index, found[0].length);
+  return {
+    section: sectionOf(text, found.index),
+    snippet: buildSnippet(text, found.index, found[0].length),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -593,6 +672,11 @@ export function buildCorpus(
 export interface SearchHit {
   /** Which field matched: a bead field name, or `archived report <stamp> · <json path>`. */
   field: string;
+  /**
+   * The markdown heading the match sits under inside that field (`sectionOf`,
+   * home-base-y1hg0.7), or null when no heading precedes it.
+   */
+  section: string | null;
   snippet: SearchSnippet;
 }
 
@@ -622,8 +706,14 @@ export interface SearchRow {
   matchedFields: string[];
   repo: string | null;
   resumeCommand: string | null;
+  /**
+   * The session's v4 session bead (home-base-y1hg0.7), or null when it was
+   * not looked up: `searchCorpus` never looks, `searchSessions` always does.
+   */
+  sessionBead: SessionBeadLookup | null;
   sessionId: string | null;
   threadId: string | null;
+  /** The session bead's title when it has one, else the corpus row's title. */
   title: string;
 }
 
@@ -661,33 +751,33 @@ export function matchSession(
 ): SessionMatch | null {
   let hit: SearchHit | null = null;
   const matchedFields: string[] = [];
-  const take = (field: string, snippet: SearchSnippet): void => {
+  const take = (field: string, found: FieldMatch): void => {
     matchedFields.push(field);
-    hit ??= {field, snippet};
+    hit ??= {field, section: found.section, snippet: found.snippet};
   };
 
   if (session.thread != null) {
     for (const field of THREAD_SEARCH_FIELDS) {
       const text = threadFieldText(session.thread, field);
       if (text == null) continue;
-      const snippet = firstMatch(pattern, text);
-      if (snippet != null) take(field, snippet);
+      const found = firstMatch(pattern, text);
+      if (found != null) take(field, found);
     }
   }
   // Every logged message (K10 f): after the bead's own fields, which already
   // hold the first and last of them, and before the archive.
   for (const line of session.messageLog?.lines ?? []) {
-    const snippet = firstMatch(pattern, line.text);
-    if (snippet != null) take(messageFieldName(line), snippet);
+    const found = firstMatch(pattern, line.text);
+    if (found != null) take(messageFieldName(line), found);
   }
   for (const file of session.archives) {
     const strings: {path: string; text: string}[] = [];
     collectStrings(file.document, '', strings);
     for (const entry of strings) {
-      const snippet = firstMatch(pattern, entry.text);
-      if (snippet == null) continue;
+      const found = firstMatch(pattern, entry.text);
+      if (found == null) continue;
       const stamp = file.reportedAt ?? 'undated';
-      take(`archived report ${stamp} · ${entry.path}`, snippet);
+      take(`archived report ${stamp} · ${entry.path}`, found);
     }
   }
   return hit == null ? null : {hit, matchedFields};
@@ -775,6 +865,7 @@ export function searchCorpus(
       matchedFields: match.matchedFields,
       repo: session.repo,
       resumeCommand: session.resumeCommand,
+      sessionBead: null,
       sessionId: session.sessionId,
       threadId: session.threadId,
       title: session.title,
@@ -795,6 +886,156 @@ export function searchCorpus(
     matched: hits.length,
     rows: limit > 0 ? hits.slice(0, limit) : hits,
   };
+}
+
+// ---------------------------------------------------------------------------
+// The session bead (home-base-y1hg0.7)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the sessions index and the beads exports say about one row's v4
+ * session bead. Three outcomes (critical rule 7): `found`; `none`, MEASURED
+ * (no session id, no index on this machine, the index records no session
+ * bead for it, or the bead was deleted), with why; `unknown`, when the index
+ * or the export could not be read or does not hold what the index names.
+ */
+export type SessionBeadLookup =
+  | {beadId: string; kind: 'found'; title: string}
+  | {kind: 'none'; reason: string}
+  | {kind: 'unknown'; reason: string};
+
+/**
+ * The session bead of every session id, from ONE read of the sessions index
+ * and one read of each beads export it names.
+ *
+ * WHY. The thread bead a v4 session's capture filed is titled
+ * `(untitled) <repo> session <id>` and is never renamed; the session bead in
+ * the repo's own beads carries the title `thread title` and the first prompt
+ * gave it. On 2026-10-20 a cold agent's `thread search "thread open"` found
+ * session home-base-aasbl and printed it as "(untitled)".
+ */
+export function lookUpSessionBeads(
+  sessionIds: readonly (string | null)[],
+  env: EnvLike = process.env,
+  readExport: (beadsDir: string) => ExportRead = readBeadsExport,
+): Map<string, SessionBeadLookup> {
+  const out = new Map<string, SessionBeadLookup>();
+  const wanted = [
+    ...new Set(sessionIds.filter((id): id is string => id != null)),
+  ];
+  if (wanted.length === 0) return out;
+  const index = readSessionIndex(env);
+  if (index.kind !== 'read') {
+    const lookup: SessionBeadLookup =
+      index.kind === 'missing'
+        ? {
+            kind: 'none',
+            reason: `there is no sessions index at ${index.path}, so no session bead was ever recorded on this machine`,
+          }
+        : {
+            kind: 'unknown',
+            reason: `the sessions index ${index.path} could not be read: ${index.error}`,
+          };
+    for (const id of wanted) out.set(id, lookup);
+    return out;
+  }
+  const bySession = new Map(
+    index.sessions.map((session) => [session.sessionId, session.sightings]),
+  );
+  const exports = new Map<string, ExportRead>();
+  for (const sessionId of wanted) {
+    // A corrupt line that names the session could be its `created` line.
+    const corrupt = index.corrupt.filter((line) =>
+      line.text.includes(sessionId),
+    );
+    if (corrupt.length > 0) {
+      out.set(sessionId, {
+        kind: 'unknown',
+        reason: `the sessions index ${index.path} has a corrupt line for this session (line ${corrupt.map((line) => line.lineNumber).join(', ')})`,
+      });
+      continue;
+    }
+    const created = sessionBeadSighting(bySession.get(sessionId) ?? []);
+    if (created == null) {
+      out.set(sessionId, {
+        kind: 'none',
+        reason: `the sessions index records no session bead for this session`,
+      });
+      continue;
+    }
+    let read = exports.get(created.beadsDir);
+    if (read == null) {
+      read = readExport(created.beadsDir);
+      exports.set(created.beadsDir, read);
+    }
+    if (read.kind === 'failed') {
+      out.set(sessionId, {kind: 'unknown', reason: read.reason});
+      continue;
+    }
+    const record = exportRecordById(
+      read.text,
+      created.beadId,
+      created.beadsDir,
+      read.path,
+    );
+    switch (record.kind) {
+      case 'found':
+        out.set(sessionId, {
+          beadId: record.issue.id,
+          kind: 'found',
+          title: record.issue.title,
+        });
+        break;
+      case 'deleted':
+        out.set(sessionId, {
+          kind: 'none',
+          reason: `its session bead ${created.beadId} was deleted`,
+        });
+        break;
+      case 'absent':
+        out.set(sessionId, {
+          kind: 'unknown',
+          reason: `the sessions index names ${created.beadId}, but ${read.path} does not hold it`,
+        });
+        break;
+      case 'failed':
+        out.set(sessionId, {kind: 'unknown', reason: record.reason});
+        break;
+    }
+  }
+  return out;
+}
+
+/**
+ * The rows with their session beads looked up, each titled by its session
+ * bead when that bead has a title (home-base-y1hg0.7: never "(untitled)"
+ * when the session bead has one). A row with no session id is a measured
+ * `none`.
+ */
+export function withSessionBeads(
+  rows: readonly SearchRow[],
+  env: EnvLike = process.env,
+  readExport?: (beadsDir: string) => ExportRead,
+): SearchRow[] {
+  const found = lookUpSessionBeads(
+    rows.map((row) => row.sessionId),
+    env,
+    readExport,
+  );
+  return rows.map((row) => {
+    const sessionBead: SessionBeadLookup =
+      row.sessionId == null
+        ? {kind: 'none', reason: 'this row has no session id'}
+        : (found.get(row.sessionId) ?? {
+            kind: 'unknown',
+            reason: 'the session bead was not looked up',
+          });
+    const title =
+      sessionBead.kind === 'found' && sessionBead.title.trim() !== ''
+        ? sessionBead.title
+        : row.title;
+    return {...row, sessionBead, title};
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -858,7 +1099,9 @@ const SEARCH_LABELS = [
   'Repo',
   'When',
   'Session',
+  'Bead',
   'Matched',
+  'Section',
   'Also in',
   'Match',
   'Resume',
@@ -890,18 +1133,25 @@ export function whenValue(activityAt: string | null, now: Date): string | null {
  *     ␣␣␣␣␣␣Repo:␣␣␣␣␣home-base
  *     ␣␣␣␣␣␣When:␣␣␣␣␣3d (2026-10-15 14:05)
  *     ␣␣␣␣␣␣Session:␣␣<id>
+ *     ␣␣␣␣␣␣Bead:␣␣␣␣␣<session bead id>                (only for a v4 session)
  *     ␣␣␣␣␣␣Matched:␣␣<field>
+ *     ␣␣␣␣␣␣Section:␣␣<heading above the match>      (only when there is one)
  *     ␣␣␣␣␣␣Also in:␣␣+2 more fields: a, b        (only when more matched)
  *     ␣␣␣␣␣␣Match:
  *     ␣␣␣␣␣␣␣␣␣␣␣␣␣␣␣␣…before <match> after…     (the value column, 1–3 lines)
  *     ␣␣␣␣␣␣Resume:␣␣␣<command, cyan>
  *
- * Eight lines for a one-line snippet, eleven at most with `Also in` and a
- * three-line snippet. THE SNIPPET HAS LINES OF ITS OWN under its label, in the
- * value column: it is the one long value, and starting it on the label's line
- * would leave it a narrow column beside a short stack. No line joins values
- * with `·` (the stored field names that carry one go through
- * displayFieldName). The match is black on yellow with colour on and `»…«`
+ * Eight lines for a one-line snippet, thirteen at most with `Bead`,
+ * `Section`, `Also in` and a three-line snippet (home-base-y1hg0.7 added the
+ * two). The title is the session bead's when the row has one with a title
+ * (`withSessionBeads`). `Bead` is printed for a found session bead and for one
+ * that could not be read (`UNKNOWN — <why>`, rule 7); no `Bead` line means the
+ * sessions index records none for the session, or the row was never looked
+ * up (`searchCorpus` alone). THE SNIPPET HAS LINES OF ITS OWN under its
+ * label, in the value column: it is the one long value, and starting it on
+ * the label's line would leave it a narrow column beside a short stack. No
+ * line joins values with `·` (the stored field names that carry one go
+ * through displayFieldName). The match is black on yellow with colour on and `»…«`
  * without (cli-style `highlight`). What is missing says so, dimmed. The title
  * and snippet hang-wrap on a terminal; the resume command NEVER wraps, because
  * a command broken across lines no longer pastes as one.
@@ -919,6 +1169,12 @@ export function renderSearchRow(
   const valueColumn = BODY_COLUMN + SEARCH_LABEL_WIDTH;
 
   const also = moreFieldsText(row.matchedFields);
+  const bead =
+    row.sessionBead?.kind === 'found'
+      ? row.sessionBead.beadId
+      : row.sessionBead?.kind === 'unknown'
+        ? `UNKNOWN — ${row.sessionBead.reason}`
+        : null;
   const fields: Field[] = [
     {label: 'Repo', value: row.repo ?? missing('no repo recorded')},
     {
@@ -927,7 +1183,11 @@ export function renderSearchRow(
         whenValue(row.activityAt, now) ?? missing('no activity date recorded'),
     },
     {label: 'Session', value: row.sessionId ?? missing('no session id')},
+    ...(bead == null ? [] : [{label: 'Bead', value: bead}]),
     {label: 'Matched', value: displayFieldName(row.hit.field)},
+    ...(row.hit.section == null
+      ? []
+      : [{label: 'Section', value: row.hit.section}]),
     ...(also == null ? [] : [{label: 'Also in', value: also}]),
   ];
   const {after, before, match} = row.hit.snippet;
@@ -1042,12 +1302,15 @@ export async function searchSessions(
     options.days ?? null,
     now,
   );
+  const result = searchCorpus(corpus, compiled.value, {limit: options.limit});
   return {
     complete: failures.length === 0,
     counts: countCorpus(corpus),
     failures,
     ok: true,
-    result: searchCorpus(corpus, compiled.value, {limit: options.limit}),
+    // Only the rows that are printed are looked up: one index read, one read
+    // per beads export they name (home-base-y1hg0.7).
+    result: {...result, rows: withSessionBeads(result.rows, env)},
   };
 }
 

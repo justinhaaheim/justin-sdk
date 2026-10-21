@@ -17,8 +17,17 @@ import {git, write} from './git-fixtures';
 import {type Sandbox} from './sandbox';
 
 export interface E2EOptions {
+  /**
+   * How the fake SDK's `add <name>` behaves (only with `sdkOffers`):
+   *   normal          — writes `<name>-setup` into the config and one file
+   *   no-config-write — exits 0 having written only the file
+   *   commits         — does `normal`, then makes a git commit itself
+   */
+  addBehaviour?: 'commits' | 'no-config-write' | 'normal';
   /** A dependency bun cannot resolve, so hydration really fails. */
   breakHydration?: boolean;
+  /** Extra keys merged into the committed justin-sdk.config.json. */
+  config?: Record<string, unknown>;
   /** Exit code of the read-only `doctor` baseline. */
   doctorExit?: number;
   /** Exit code of the `doctor --fix` gate. */
@@ -26,11 +35,66 @@ export interface E2EOptions {
   /** A pre-commit hook that exits non-zero (health-logger-rn's shape). */
   hostilePreCommit?: boolean;
   /**
+   * The components the fake SDK's `add` offers (home-base-yukaf.33). When set,
+   * `add --help` prints a yargs-shaped `[choices: …]` list of exactly these,
+   * `add <name>` refuses anything else the way yargs does, and `install`
+   * exits 0. Unset = the historical fake, which answers every argv alike.
+   */
+  sdkOffers?: readonly string[];
+  /**
    * always-green      — signal passes before and after (the ordinary repo)
    * always-red        — signal fails before and after (userscripts-j's shape)
    * red-when-swept    — signal fails exactly once the payload's bytes land
    */
   signal?: 'always-green' | 'always-red' | 'red-when-swept';
+}
+
+/**
+ * The fake SDK's `add` / `install` handling (home-base-yukaf.33), as lines of
+ * the fixture cli.js. The `--help` output carries the component names in the
+ * positional's DESCRIPTION too, unquoted, as the real yargs help does — so a
+ * probe that matched bare names would be fooled by it.
+ */
+function fakeAddLines(
+  offers: readonly string[],
+  behaviour: NonNullable<E2EOptions['addBehaviour']>,
+): string[] {
+  const choices = [...offers, 'core'].map((name) => JSON.stringify(name));
+  return [
+    "const fs = require('fs');",
+    `const offers = ${JSON.stringify(offers)};`,
+    "if (args[0] === 'add' && args.includes('--help')) {",
+    "  console.log('Positionals:');",
+    "  console.log('  components  In THIS repo, core = gitignore, thread-rules, eas, beads');",
+    `  console.log('   [array] [required] [choices: ${choices.join(', ')}] [default: []]');`,
+    '  process.exit(0);',
+    '}',
+    "if (args[0] === 'add') {",
+    '  const name = args[1];',
+    '  if (!offers.includes(name)) {',
+    "    console.error('Invalid values:\\n  Argument: components, Given: \"' + name + '\"');",
+    '    process.exit(1);',
+    '  }',
+    ...(behaviour === 'no-config-write'
+      ? []
+      : [
+          "  const config = JSON.parse(fs.readFileSync('justin-sdk.config.json', 'utf-8'));",
+          "  config.components = [...(config.components || []), name + '-setup'];",
+          "  fs.writeFileSync('justin-sdk.config.json', JSON.stringify(config, null, 2) + '\\n');",
+        ]),
+    "  fs.mkdirSync('.claude/rules/justin-sdk', {recursive: true});",
+    "  fs.writeFileSync('.claude/rules/justin-sdk/' + name + '.md', 'fixture ' + name + '\\n');",
+    ...(behaviour === 'commits'
+      ? [
+          "  const {execFileSync} = require('child_process');",
+          "  execFileSync('git', ['add', '-A']);",
+          "  execFileSync('git', ['commit', '--no-verify', '-qm', 'fixture add committed by itself']);",
+        ]
+      : []),
+    '  process.exit(0);',
+    '}',
+    "if (args[0] === 'install') process.exit(0);",
+  ];
 }
 
 /**
@@ -65,6 +129,9 @@ export function e2eRepo(
       '#!/usr/bin/env node',
       'const args = process.argv.slice(2);',
       "console.log('fixture justin-sdk ' + args.join(' '));",
+      ...(options.sdkOffers == null
+        ? []
+        : fakeAddLines(options.sdkOffers, options.addBehaviour ?? 'normal')),
       `process.exit(args.includes('--fix') ? ${doctorFixExit} : ${doctorExit});`,
       '',
     ].join('\n'),
@@ -128,6 +195,7 @@ export function e2eRepo(
         components: ['base-setup', 'gitignore-setup'],
         lastSynced: '2000-01-01',
         version: '0.0.1-fixture',
+        ...options.config,
       },
       null,
       2,

@@ -657,6 +657,100 @@ export function workingIndicator(lines: readonly string[]): string | null {
   return null;
 }
 
+/**
+ * j8q3e.13 F1: the vim mode the pane's input is in, read below the box, or
+ * null when no vim indicator is shown (vim mode off: typed text goes in as
+ * text). ONE IMPLEMENTATION: moved here from scripts/pane-backfill-classify.ts
+ * (home-base-yukaf.34, `thread open`'s draft restore), which imports it back.
+ * Measured on real captures:
+ * - INSERT (2026-10-17 06:55 s24, Claude Code 2.1.289): Justin's status line
+ *   starts "  I  ✱ Opus 5 …" and Claude Code's bottom line starts
+ *   "  -- INSERT -- ⏵⏵ auto mode on".
+ * - NORMAL (2026-10-01 04:29 s27, 2.1.280): the status line starts
+ *   "  N  ✱ Opus 5.5 …" and the bottom line is "  ⏵⏵ auto mode on …", with no
+ *   "-- INSERT --". No capture shows any other mode.
+ * The letter sits between powerline glyphs (U+E0B6 before it, U+E0B0 after
+ * it), not plain spaces. So: an indicator is present when "-- INSERT --", or
+ * one capital letter with nothing alphanumeric around it before "✱", is below
+ * the box, and the pane is in insert mode only when "-- INSERT --" is there.
+ * In NORMAL mode typed text would be read as vim commands.
+ */
+const INSERT_INDICATOR = '-- INSERT --';
+const STATUS_MODE_LETTER = /^[^\p{L}\p{N}]*\p{Lu}[^\p{L}\p{N}]*✱/u;
+
+export function vimMode(
+  lines: readonly string[],
+  box: InputBox,
+): 'insert' | 'normal' | null {
+  const below = lines.slice(box.bottom + 1);
+  if (below.some((line) => line.includes(INSERT_INDICATOR))) return 'insert';
+  return below.some((line) => STATUS_MODE_LETTER.test(line)) ? 'normal' : null;
+}
+
+/**
+ * Claude Code's stand-in for a chunk of input it treated as a paste. Measured
+ * 2026-10-17 in ~/.claude/history.jsonl, which records what the input box
+ * displayed for each submitted prompt: 3 of the 6 backfill sends made by
+ * `cmux send` that day displayed part of the message as "[Pasted text #1]"
+ * (e.g. "[home-base backfill, … Justin [Pasted text #1] what is left."), the
+ * other 3 the whole message. The " +N lines" form is Claude Code's for a
+ * multi-line paste.
+ */
+const PASTE_PLACEHOLDER = /\[Pasted text #\d+(?: \+\d+ lines?)?\]/u;
+
+/**
+ * The fewest characters (whitespace removed) a scrolled draft must show for
+ * its visible tail to count as the message (j8q3e.13 F1, the conductor's
+ * figure, 2026-10-17). A short tail ("saying what is left.") is too little to
+ * tell the message from other text that happens to end the same way.
+ */
+export const SCROLLED_DRAFT_MIN_CHARS = 60;
+
+/**
+ * j8q3e.13 F1: is the input line's draft the message, and nothing else?
+ * ONE IMPLEMENTATION: moved here from scripts/pane-backfill-classify.ts
+ * (home-base-yukaf.34), which re-exports it; pane-backfill checks its typed
+ * message with it, and `thread open` checks a restored draft with it.
+ * Whitespace is ignored (the box wraps the line and indents continuation
+ * lines). Three shapes count:
+ * - the whole message;
+ * - a "[Pasted text #N]" placeholder standing for any run of the message,
+ *   since Claude Code collapses part of a long `cmux send` that way: every
+ *   visible piece must then be the message's own text, in order, the first
+ *   piece its start and the last piece its end;
+ * - a SCROLLED box: the message's last SCROLLED_DRAFT_MIN_CHARS or more
+ *   characters, with no placeholder. Measured on the first live run,
+ *   2026-10-17 12:01 PDT (surface:30, session 5bd26402): the box showed 11
+ *   lines, which began mid-message at "no new work and change no code." and
+ *   ran to the message's end (the box's height limit itself is not
+ *   measured). The cursor is at the end after `cmux send`, so a visible run
+ *   that stops before the end is not this case, and refuses.
+ * Pure.
+ */
+export function draftIsMessage(draft: string, message: string): boolean {
+  const squash = (text: string): string => text.replace(/\s+/gu, '');
+  const target = squash(message);
+  const pieces = draft
+    .split(new RegExp(PASTE_PLACEHOLDER.source, 'gu'))
+    .map(squash);
+  const first = pieces[0] ?? '';
+  if (pieces.length === 1) {
+    return (
+      first === target ||
+      (first.length >= SCROLLED_DRAFT_MIN_CHARS && target.endsWith(first))
+    );
+  }
+  if (!target.startsWith(first)) return false;
+  let at = first.length;
+  for (const piece of pieces.slice(1, -1)) {
+    const found = target.indexOf(piece, at);
+    if (found < 0) return false;
+    at = found + piece.length;
+  }
+  const last = pieces.at(-1) ?? '';
+  return last.length <= target.length - at && target.endsWith(last);
+}
+
 const SHELL_NAMES: ReadonlySet<string> = new Set([
   'login',
   'zsh',

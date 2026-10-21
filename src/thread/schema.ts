@@ -71,6 +71,27 @@ export const STOP_REASON_KINDS = [
 export const ASK_KINDS = ['approve', 'pick', 'answer', 'act'] as const;
 
 /**
+ * The one near-miss spelling `thread report` accepts and quietly corrects
+ * (home-base-pp1vx.12, Justin's approval 2026-10-20).
+ *
+ * `do` is what sessions write for an ask Justin has to DO himself, because the
+ * `thread ask` flag for it is `--do`. The payload kind is `act`. Measured over
+ * every transcript on this machine: 66 asks written as `do` across 67 rejected
+ * payloads whose text could be recovered (111 rejections in all), by far the
+ * most common reason a report was refused. The meaning is not in doubt, so the
+ * alias is applied before validation and nothing is said about it.
+ *
+ * ONE entry on purpose. Every other value that has been refused (`fyi` for an
+ * ask kind, `doc` or `plan` for a work-product kind, `decided` for a prior-ask
+ * disposition, `judgment` for a deviation kind) means something ambiguous, so
+ * it stays an error and the error names it. Adding a key here is a decision
+ * for Justin, not a convenience.
+ */
+export const ASK_KIND_ALIASES: Readonly<Record<string, AskKind>> = {
+  do: 'act',
+};
+
+/**
  * What should happen next, in one word (D16). The second glance badge.
  *
  * Claude-supplied, because it is the one thing a measurement cannot know: the
@@ -421,6 +442,85 @@ function formatIssuePath(path: readonly PropertyKey[]): string {
   return path.map((segment) => String(segment)).join('.');
 }
 
+/** The value a payload holds at `path`, or `undefined` when nothing is there. */
+function valueAtPath(root: unknown, path: readonly PropertyKey[]): unknown {
+  let current: unknown = root;
+  for (const segment of path) {
+    if (current == null || typeof current !== 'object') return undefined;
+    current = (current as Record<PropertyKey, unknown>)[segment];
+  }
+  return current;
+}
+
+const GIVEN_VALUE_MAX_LENGTH = 80;
+
+/** A value as the error shows it: JSON, cut short, never a bare `undefined`. */
+function showGivenValue(value: unknown): string {
+  if (value === undefined) return 'nothing (the field is missing)';
+  const json = JSON.stringify(value);
+  return json.length > GIVEN_VALUE_MAX_LENGTH
+    ? `${json.slice(0, GIVEN_VALUE_MAX_LENGTH)}…`
+    : json;
+}
+
+/**
+ * One validation problem as a line a session can fix without re-reading the
+ * schema (home-base-pp1vx.12): the FIELD, the VALUE it was given, and — for an
+ * enum — every value that is allowed.
+ *
+ * Zod's own text for a bad enum value is `Invalid option: expected one of …`.
+ * It names the allowed values but not what was written, so a session that
+ * wrote `do` had to work out for itself which of its fifteen fields held it.
+ * Other issue kinds keep zod's message (it already says "expected string,
+ * received number" or names the unrecognized key) and gain the given value
+ * when that is a short primitive worth showing.
+ */
+function describeReportIssue(issue: z.core.$ZodIssue, root: unknown): string {
+  const path = formatIssuePath(issue.path);
+  const given = valueAtPath(root, issue.path);
+  if (issue.code === 'invalid_value') {
+    const allowed = issue.values.map((value) => JSON.stringify(value));
+    return `${path}: got ${showGivenValue(given)}, which is not allowed. Allowed values: ${allowed.join(' | ')}`;
+  }
+  const isShortPrimitive =
+    given !== undefined && given !== null && typeof given !== 'object';
+  if (issue.code === 'invalid_type' && isShortPrimitive) {
+    return `${issue.path.length === 0 ? '(root)' : path}: ${issue.message} (value given: ${showGivenValue(given)})`;
+  }
+  return `${path}: ${issue.message}`;
+}
+
+/**
+ * Rewrite the near-miss spellings `thread report` accepts (pp1vx.12), before
+ * validation. Pure; the input is not mutated, and the same object comes back
+ * when there was nothing to rewrite.
+ *
+ * Silent by design: unlike a version migration, an alias substitutes a value
+ * whose meaning is not in doubt, so there is nothing for the report to warn
+ * about. See `ASK_KIND_ALIASES` for the one entry and why there is only one.
+ */
+export function normalizeNearMisses(parsed: unknown): unknown {
+  if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return parsed;
+  }
+  const source = parsed as Record<string, unknown>;
+  if (!Array.isArray(source.asks)) return parsed;
+  let changed = false;
+  const asks = source.asks.map((ask: unknown) => {
+    if (ask == null || typeof ask !== 'object' || Array.isArray(ask)) {
+      return ask;
+    }
+    const entry = ask as Record<string, unknown>;
+    const kind = entry.kind;
+    if (typeof kind !== 'string' || !Object.hasOwn(ASK_KIND_ALIASES, kind)) {
+      return ask;
+    }
+    changed = true;
+    return {...entry, kind: ASK_KIND_ALIASES[kind]};
+  });
+  return changed ? {...source, asks} : parsed;
+}
+
 /**
  * The AUTOFILLED half of an archived report (D7), as a schema (F11).
  *
@@ -678,6 +778,11 @@ export function validateThreadReport(parsed: unknown): PayloadValidation {
     migrationNotes = v3.notes;
   }
 
+  // Near-miss spellings are corrected AFTER any version migration, so an old
+  // payload that also says `do` is handled, and BEFORE the parse, so the schema
+  // below stays exactly as strict as it was.
+  candidate = normalizeNearMisses(candidate);
+
   const result = threadReportSchema.safeParse(candidate);
   if (result.success) {
     return {
@@ -689,11 +794,56 @@ export function validateThreadReport(parsed: unknown): PayloadValidation {
     };
   }
   return {
-    issues: result.error.issues.map(
-      (issue) => `${formatIssuePath(issue.path)}: ${issue.message}`,
+    issues: result.error.issues.map((issue) =>
+      describeReportIssue(issue, candidate),
     ),
     status: 'invalid',
   };
+}
+
+/**
+ * The smallest payload `thread report` accepts, as JSON text (pp1vx.12).
+ *
+ * Printed under every validation failure so a session sees a payload that
+ * works, in the same message as the one that did not. It is deliberately small
+ * (no hints, no optional keys, one ask of the kind sessions most often get
+ * wrong); `thread prepare` prints the full skeleton with a hint on every field,
+ * and the failure message points there too. A test validates this text against
+ * the schema, so it cannot drift into a shape the tool would refuse.
+ */
+export function minimalPayloadExample(): string {
+  const example = {
+    answers: [],
+    asks: [
+      {
+        context: 'The hook back into what this is about.',
+        default: 'What I will do if he never answers.',
+        kind: 'act',
+        options: [],
+        priority: 3,
+        text: 'Install the build and open the Recordings tab',
+      },
+    ],
+    beadsTouched: [],
+    deviations: [],
+    did: ['Fixed the login redirect'],
+    discussion: [],
+    goal: 'Logins land on the page the user came from',
+    instruction: 'You told me to fix the login redirect.',
+    learned: [],
+    nextStep: 'continue',
+    progress: {percent: 50, remaining: ['Test it on a device']},
+    schemaVersion: THREAD_SCHEMA_VERSION,
+    stopReason: {detail: 'The fix is built and tested.', kind: 'completed'},
+    title: 'Login redirect fix',
+    workProduct: {
+      kind: 'code',
+      merged: 'unmerged',
+      pr: null,
+      summary: 'The redirect now keeps the original path.',
+    },
+  };
+  return JSON.stringify(example, null, 2);
 }
 
 /**

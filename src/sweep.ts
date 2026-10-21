@@ -144,6 +144,13 @@ import {sdkTagExistsOnRemote} from './sdk-latest';
 import {detectPackageManager, type PackageManager, setupEnv} from './setup-env';
 import {isQuiet, setQuiet, writeJson} from './setup-helpers';
 import {
+  addApplicabilitySkip,
+  addEnrollmentVerdict,
+  probeSdkOffers,
+  SWEEP_ADD_INSTALL_ARGS,
+  sweepAddArgs,
+} from './sweep-add';
+import {
   applyInstallPayloadConfig,
   noProvenanceLine,
   planInstallPayload,
@@ -254,7 +261,7 @@ export type RepoOutcome =
   | 'push-failed' // merged LOCALLY, push rejected/failed — the default branch holds a commit the remote lacks (S6/S7). Fails the run.
   | 'failed' // a step went red; worktree removed, evidence in the run log
   | 'blocked' // COULD NOT sweep — preflight refused (ckc4 F4). Fails the run.
-  | 'skipped'; // out of scope for this payload (not enrolled). Expected, not a failure.
+  | 'skipped'; // out of scope for this payload (not enrolled; for --add: already enrolled, pin too old, or not applicable). Expected, not a failure.
 
 /** What a repo's sweep decided, before its leftover report is attached. */
 export interface RepoVerdict {
@@ -1234,11 +1241,24 @@ function dryRunInstallNote(repo: string): string {
  *   full      — the historical payload: bump the pin, then `update` re-applies
  *               every registered component.
  * component   — ONE component, run in-process, pin left exactly as found.
+ * install     — the enrollment refresh (`--component install`, dchjw.10).
+ * add         — `--add X` (home-base-yukaf.33): in each repo whose config does
+ *               not list X, the repo's OWN SDK runs `add X` then `install`;
+ *               pin left exactly as found. See sweep-add.ts.
  */
 export type SweepPayload =
   | {mode: 'full'}
   | {component: ComponentName; mode: 'component'}
-  | {mode: 'install'};
+  | {mode: 'install'}
+  | {component: ComponentName; mode: 'add'};
+
+/**
+ * The payloads whose contract is "the SDK pin does not move": the pin fields
+ * are snapshotted around the payload and held again after the gates. Pure.
+ */
+export function isPinNeutral(payload: SweepPayload): boolean {
+  return payload.mode === 'component' || payload.mode === 'add';
+}
 
 /**
  * `--component install` is not a component — it is the ENROLLMENT REFRESH
@@ -1303,8 +1323,39 @@ export function parseSweepPayloadOption(
   return {ok: true, payload: planSweepPayload(parsed.component)};
 }
 
+/**
+ * The run's payload from BOTH payload options. `--add` and `--component` are
+ * two answers to "which payload", so giving both refuses the run rather than
+ * picking one — the same reason an unknown name refuses: a guessed payload
+ * ships to the whole fleet.
+ */
+export function resolveSweepPayload(options: {
+  add?: string;
+  component?: string;
+}): {ok: true; payload: SweepPayload} | {error: string; ok: false} {
+  if (options.add == null) return parseSweepPayloadOption(options.component);
+  if (options.component != null) {
+    return {
+      error: `--add and --component are both set ("${options.add}", "${options.component}") — one payload per run; nothing was swept`,
+      ok: false,
+    };
+  }
+  const parsed = parseComponentOption(options.add);
+  if (!parsed.ok) return {error: `--add: ${parsed.error}`, ok: false};
+  if (parsed.component == null) {
+    return {error: '--add needs a component name', ok: false};
+  }
+  return {ok: true, payload: {component: parsed.component, mode: 'add'}};
+}
+
 /** The one commit a swept repo gets. Names the component when scoped. */
 export function sweepCommitMessage(payload: SweepPayload): string {
+  if (payload.mode === 'add') {
+    return (
+      `chore(sdk): sweep --add ${payload.component} — enrol it via the repo's own SDK (add, then install; ` +
+      'no removals), SDK pin unchanged (automated, home-base-yukaf.33)'
+    );
+  }
   if (payload.mode === 'install') {
     return (
       'chore(sdk): sweep install — adopt installed components, drop dead config keys, ' +
@@ -1345,6 +1396,12 @@ export function beadsConfigGuard(
   // if that reaches `.beads/config.yaml` it is the same accident this guard was
   // written for, not an instruction.
   if (payload.mode === 'component') return {ok: true};
+  // `--add beads` is the same deliberate act as `--component beads`. Any other
+  // `--add` runs `install` afterwards, which re-applies everything listed, so
+  // reaching `.beads/config.yaml` there is the accident this guard is for.
+  if (payload.mode === 'add' && payload.component === 'beads') {
+    return {ok: true};
+  }
   const offenders = changedFiles.filter(
     (file) =>
       file === '.beads/config.yaml' || file.endsWith('/.beads/config.yaml'),
@@ -2253,17 +2310,17 @@ export function restorePinSnapshot(
  * move". (The justin-sdk.config.json half of this hazard is gone with D3: its
  * two SDK-version stamps are no longer written by anything.)
  *
- * COMPONENT MODE ONLY. In a full sweep the pin is SUPPOSED to move — that run's
- * whole purpose is the bump — so this must never restore there. Passing the
- * payload rather than a boolean keeps that decision in one place instead of at
- * the call site.
+ * PIN-NEUTRAL PAYLOADS ONLY (component, and `--add`, yukaf.33). In a full or
+ * install sweep the pin is SUPPOSED to move — that run's whole purpose is the
+ * bump — so this must never restore there. Passing the payload rather than a
+ * boolean keeps that decision in one place instead of at the call site.
  */
 export function holdPinAfterGates(
   worktree: string,
   payload: SweepPayload,
   beforeGates: PinSnapshot | null,
 ): string[] {
-  if (payload.mode !== 'component' || beforeGates == null) return [];
+  if (!isPinNeutral(payload) || beforeGates == null) return [];
   return restorePinSnapshot(worktree, beforeGates);
 }
 
@@ -2811,6 +2868,98 @@ async function applyInstallSweepPayload(
   };
 }
 
+/**
+ * The `--add <component>` payload (home-base-yukaf.33), on a hydrated worktree
+ * whose own SDK has already been asked whether it offers the component
+ * (`probeSdkOffers`, before the baseline gates):
+ *
+ *   1. `<worktree>/node_modules/.bin/justin-sdk add <component>` — the repo's
+ *      OWN SDK, by path (dchjw.15 F2), which installs the component and writes
+ *      it into justin-sdk.config.json#components.
+ *   2. `<same bin> install` — the reconciler, with no `--prune`: removals stay
+ *      disabled, as in every sweep.
+ *
+ * Pin-neutral: the pin fields are snapshotted first and put back afterwards
+ * (base-setup, chained by every installer, can write the pin). Two
+ * post-conditions are measured rather than read off the exit codes: the config
+ * lists the component now, and the payload made no commit of its own — the
+ * sweep makes the one commit, after its gates.
+ */
+function applyAddSweepPayload(
+  worktree: string,
+  component: ComponentName,
+): PayloadOutcome {
+  const sdkBin = resolveWorktreeSdkBin(worktree);
+  if (!sdkBin.ok) {
+    return {
+      detail: `cannot run \`add ${component}\`: ${sdkBin.detail} — worktree left for inspection`,
+      ok: false,
+    };
+  }
+  const before = readPinSnapshot(worktree);
+  const headBefore = git(worktree, ['rev-parse', 'HEAD']);
+
+  const added = run(
+    worktreeSdkArgv(sdkBin.path, sweepAddArgs(component)),
+    worktree,
+  );
+  if (added.exitCode !== 0 || added.error != null) {
+    restorePinSnapshot(worktree, before);
+    return {
+      detail: `the repo's own \`justin-sdk add ${component}\` failed (${added.error ?? `exit ${added.exitCode}`}) — worktree left for inspection`,
+      ok: false,
+    };
+  }
+  const installed = run(
+    worktreeSdkArgv(sdkBin.path, SWEEP_ADD_INSTALL_ARGS),
+    worktree,
+  );
+  // Restored before either verdict below, so an inspected worktree never
+  // carries a moved pin.
+  const restored = restorePinSnapshot(worktree, before);
+  if (installed.exitCode !== 0 || installed.error != null) {
+    return {
+      detail: `the repo's own \`justin-sdk install\` failed after \`add ${component}\` (${installed.error ?? `exit ${installed.exitCode}`}) — worktree left for inspection`,
+      ok: false,
+    };
+  }
+
+  const config = readJsonObject(join(worktree, 'justin-sdk.config.json'));
+  const resolved = config == null ? null : resolveComponents(config, worktree);
+  if (resolved == null || !resolved.ok) {
+    return {
+      detail: `after \`add ${component}\` justin-sdk.config.json could not be read${resolved != null && !resolved.ok ? ` (${resolved.reason})` : ''} — worktree left for inspection`,
+      ok: false,
+    };
+  }
+  if (!isEnrolledIn(resolved.components, component)) {
+    return {
+      detail: `\`add ${component}\` exited 0 but justin-sdk.config.json does not list ${configNameFor(component)} — the repo's SDK did not register it; worktree left for inspection`,
+      ok: false,
+    };
+  }
+  const headAfter = git(worktree, ['rev-parse', 'HEAD']);
+  if (headBefore == null || headAfter == null || headAfter !== headBefore) {
+    return {
+      detail:
+        headBefore == null || headAfter == null
+          ? 'could not read the worktree HEAD around the payload, so whether it committed on its own is UNKNOWN — worktree left for inspection'
+          : `the payload made a commit of its own (HEAD ${headBefore.slice(0, 12)} → ${headAfter.slice(0, 12)}); the sweep commits once, after its gates — worktree left for inspection`,
+      ok: false,
+    };
+  }
+
+  return {
+    note:
+      `added ${component} via the repo's own SDK, then installed (removals disabled)` +
+      (restored.length > 0
+        ? ` (pin held: ${restored.join(', ')})`
+        : ' (pin untouched)'),
+    ok: true,
+    summaryNote: `added ${component}`,
+  };
+}
+
 export function runSweepUpdate(worktree: string): PayloadOutcome {
   // dchjw.15 F2: the worktree's OWN binary, by path. `bun run justin-sdk` here
   // would fall through to the PATH shim on a half-failed install and re-apply
@@ -2853,6 +3002,9 @@ export async function applySweepPayload(
 ): Promise<PayloadOutcome> {
   if (payload.mode === 'install') {
     return await applyInstallSweepPayload(worktree, options);
+  }
+  if (payload.mode === 'add') {
+    return applyAddSweepPayload(worktree, payload.component);
   }
   if (payload.mode === 'component') {
     // D11: run the orchestrator's OWN component code in-process. The
@@ -3222,6 +3374,16 @@ async function sweepRepoSteps(
           : ''
       }`;
     }
+  } else if (context.payload.mode === 'add') {
+    // The mirror image (yukaf.33): `--add X` is for the repos that do NOT list
+    // X yet. Read from the same committed config, with the same rule 7 split:
+    // an unreadable config is COULD NOT SWEEP, never "already enrolled".
+    const verdict = addEnrollmentVerdict(
+      committedConfigComponents(repo, defaultBranch),
+      context.payload.component,
+    );
+    if (verdict.kind === 'blocked') return blocked(verdict.detail);
+    if (verdict.kind === 'skip') notEnrolled = verdict.detail;
   }
 
   // --- Leftovers from earlier runs (ckc4 F5; 39co9.6 S2/S3) ----------------
@@ -3289,6 +3451,39 @@ async function sweepRepoSteps(
     context.log.note(name, freshNote.trim().replace(/^\[|\]$/g, ''));
   }
 
+  if (context.dryRun && context.payload.mode === 'add') {
+    // ADVISORY, like the other dry-run notes: applicability and the SDK probe
+    // read the PRIMARY checkout (its working tree, its node_modules), while the
+    // real run re-decides both inside its worktree. `add --help` is the only
+    // thing spawned; `add` and `install` never run here.
+    const {component} = context.payload;
+    const inapplicable = addApplicabilitySkip(repo, component);
+    if (inapplicable != null) {
+      return {detail: inapplicable, outcome: 'skipped', repo: name};
+    }
+    const offer = probeSdkOffers(repo, component, (argv, cwd) =>
+      run(argv, cwd, {quiet: true}),
+    );
+    if (offer.kind === 'too-old') {
+      return {
+        detail: `skipped — ${offer.detail}`,
+        outcome: 'skipped',
+        repo: name,
+      };
+    }
+    return {
+      detail:
+        (wouldRemove ? 'would auto-remove a leftover, then ' : '') +
+        (offer.kind === 'offers'
+          ? `would add ${component} off ${defaultBranch} with the repo's own SDK ${offer.version ?? '(version unreadable)'}, then install (removals disabled; pin untouched)`
+          : `would add ${component} off ${defaultBranch} IF the repo's own SDK offers it — COULD NOT CHECK from the primary: ${offer.detail}; the real run re-checks in its worktree and stops this repo if it still cannot tell`) +
+        dryRunInstallNote(repo) +
+        freshNote,
+      outcome: 'current',
+      repo: name,
+    };
+  }
+
   if (context.dryRun) {
     return {
       detail:
@@ -3318,6 +3513,31 @@ async function sweepRepoSteps(
     `created worktree ${worktreePath} on branch ${branch} off ${defaultBranch} ${baseSha.slice(0, 12)}`,
   );
 
+  /**
+   * A repo this payload turned out not to apply to, discovered after the
+   * worktree exists (`--add` only): remove the worktree and branch, then report
+   * the skip. Expected, not a failure — but a removal that failed is named.
+   */
+  const skipAfterWorktree = (detail: string): RepoVerdict => {
+    const cleaned = cleanupWorktreeAndBranch(repo, worktreePath, branch);
+    context.log.note(name, cleaned.detail);
+    return {
+      detail: `${detail}${cleaned.ok ? '' : ` [${cleaned.detail}]`}`,
+      outcome: 'skipped',
+      repo: name,
+    };
+  };
+
+  // --add: does the component apply to this repo, as committed? Before
+  // hydration, because answering needs only the checked-out files.
+  if (context.payload.mode === 'add') {
+    const inapplicable = addApplicabilitySkip(
+      worktreePath,
+      context.payload.component,
+    );
+    if (inapplicable != null) return skipAfterWorktree(inapplicable);
+  }
+
   // --- Hydrate (retry once — home-base-dl0q) -------------------------------
   let hydrated = setupEnv({target: worktreePath});
   if (hydrated.exitCode !== 0) {
@@ -3344,6 +3564,22 @@ async function sweepRepoSteps(
   // shim — the orchestrator's SDK — the moment a hydration half-fails.
   const sdkBin = resolveWorktreeSdkBin(worktreePath);
   if (!sdkBin.ok) return fail('sdk-bin', sdkBin.detail, null);
+
+  // --add: does THIS repo's own SDK, as hydrated from the committed lockfile,
+  // offer the component? Before the baseline, so a too-old pin costs no gates.
+  // Too old is a skip (the install sweep moves pins); could-not-tell is a red
+  // step, never a skip and never an add (critical rule 7).
+  if (context.payload.mode === 'add') {
+    const offer = probeSdkOffers(
+      worktreePath,
+      context.payload.component,
+      (argv, cwd) => run(argv, cwd, {quiet: true}),
+    );
+    if (offer.kind === 'too-old') {
+      return skipAfterWorktree(`skipped — ${offer.detail}`);
+    }
+    if (offer.kind === 'unknown') return fail('sdk-probe', offer.detail, null);
+  }
 
   // --- Baseline (ckc4 F3) --------------------------------------------------
   // Measured on the HYDRATED tree, BEFORE the payload, so the gates below can
@@ -3373,8 +3609,9 @@ async function sweepRepoSteps(
   // --- Gates ---------------------------------------------------------------
   // Snapshot AFTER the payload (which already restored the pin), so the gates
   // are measured against the state the commit is supposed to have.
-  const pinBeforeGates =
-    context.payload.mode === 'component' ? readPinSnapshot(worktreePath) : null;
+  const pinBeforeGates = isPinNeutral(context.payload)
+    ? readPinSnapshot(worktreePath)
+    : null;
   const doctor = run(
     worktreeSdkArgv(sdkBin.path, ['doctor', '--fix']),
     worktreePath,
@@ -3688,6 +3925,12 @@ export function pushRecovery(input: {
 
 export interface SweepOptions {
   /**
+   * `--add <component>` (yukaf.33): enrol every repo whose committed config
+   * does not list it, via that repo's own `add` then `install`; pin untouched.
+   * Mutually exclusive with `component` — both set refuses the run.
+   */
+  add?: string;
+  /**
    * Scope the payload to ONE component (short or `-setup` name) and leave the
    * SDK pin alone. Unknown name = the whole run refuses, before any repo is
    * touched. Default (absent) = the historical pin-bump-and-re-apply-all sweep.
@@ -3735,7 +3978,10 @@ export function summaryLeftoverLines(result: RepoResult): string[] {
 }
 
 export async function runSweep(options: SweepOptions = {}): Promise<number> {
-  const parsedPayload = parseSweepPayloadOption(options.component);
+  const parsedPayload = resolveSweepPayload({
+    ...(options.add == null ? {} : {add: options.add}),
+    ...(options.component == null ? {} : {component: options.component}),
+  });
   if (!parsedPayload.ok) {
     // Refuse the ENTIRE run: falling through to the default payload on a typo
     // would ship an SDK pin bump to the whole fleet.
@@ -3753,9 +3999,11 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
   const payloadLabel =
     payload.mode === 'component'
       ? `component ${payload.component} (SDK pin NOT bumped)`
-      : payload.mode === 'install'
-        ? 'install (enrollment refresh)'
-        : 'full (pin bump + re-apply)';
+      : payload.mode === 'add'
+        ? `add ${payload.component} where unlisted (SDK pin NOT bumped)`
+        : payload.mode === 'install'
+          ? 'install (enrollment refresh)'
+          : 'full (pin bump + re-apply)';
 
   say(
     `${BOLD}justin-sdk sweep${RESET} — ${repos.length} repo(s)` +
@@ -3763,7 +4011,9 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
       `${
         payload.mode === 'component'
           ? ` ${DIM}· component: ${payload.component} (SDK pin NOT bumped)${RESET}`
-          : ''
+          : payload.mode === 'add'
+            ? ` ${DIM}· add: ${payload.component} where unlisted, via each repo's own SDK (SDK pin NOT bumped)${RESET}`
+            : ''
       }` +
       `${dryRun ? ` ${DIM}(dry-run)${RESET}` : ''}`,
   );
@@ -3773,7 +4023,13 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
   // killed mid-way can be matched to whatever it left in a repo.
   const log = createRunLog(options.logDir ?? SWEEP_LOG_DIR, now, {
     header: [
-      `payload: ${payload.mode === 'component' ? payload.component : payload.mode}`,
+      `payload: ${
+        payload.mode === 'component'
+          ? payload.component
+          : payload.mode === 'add'
+            ? `add ${payload.component}`
+            : payload.mode
+      }`,
       `branch: ${names.branch}`,
       `worktree: <repo>/${names.worktreeSegments.join('/')}`,
       `repos (${repos.length}): ${repos.join(', ')}`,
@@ -3878,8 +4134,14 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
   // out of sync and nothing said so — and it is printed LAST, where a long
   // run's tail is actually read.
   if (skipped.length > 0) {
+    // `--add` skips the OPPOSITE repos (already enrolled), plus too-old pins
+    // and repos it does not apply to, so "not enrolled" would misstate them.
+    const why =
+      payload.mode === 'add'
+        ? `skipped by --add ${payload.component} (already enrolled, pin too old, or does not apply — expected, not a failure; each reason is on its line above)`
+        : 'not enrolled in this payload (expected, not a failure)';
     say(
-      `${DIM}${skipped.length} not enrolled in this payload (expected, not a failure): ${skipped
+      `${DIM}${skipped.length} ${why}: ${skipped
         .map((result) => result.repo)
         .join(', ')}${RESET}`,
     );

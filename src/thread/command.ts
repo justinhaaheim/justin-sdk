@@ -104,6 +104,8 @@ LAYOUT. Default: one new cmux window. --per-project: one new window per project,
 
 COLOURS. After a window is built, each workspace this run OPENED gets its project's colour the way cmux-arrange chooses it: from ~/.config/cmux-arrange/colors.json ($XDG_CONFIG_HOME/cmux-arrange/colors.json) "overrides" first, then "assigned", then cmux-arrange's built-in project colours unless the file's "exclude" lists that colour; with no file, the built-in project colours alone. thread open makes no new picks. A workspace moved in with --include-open keeps the colour it had: --undo moves it back but cannot restore a colour. An unreadable or invalid file colours nothing. Each of these, and a project with no colour, is said in one line and the run goes on; a colour that cannot be set is reported and never stops the run. --no-color skips colouring.
 
+RESTORED DRAFTS. When a session it opens has unsent text stored (thread drafts lists it; <threads state dir>/input-drafts/<session id>.json), that text is typed back into the new workspace's input box, and NEVER sent: press Enter there yourself. It waits up to 30 s for Claude to show an empty input box with that session's id under it, types the text in one cmux send (no Enter), and reads the screen again to see it there. Line breaks become spaces, because a line break typed into the box would press Enter, so the text goes in on one line. It is never typed when the box already holds text, the pane shows another session, vim is in NORMAL mode, the text holds a backslash (cmux send reads \\n and \\r as Enter), a control character or a "[Pasted text #N]" stand-in, or the text's original pane is still open (then the output gives the command that selects it). Each draft not restored is printed in full under "⚠️ Draft not restored", with why: the screen could not be read, the box never appeared, the text was typed but the box does not show it, and so on. Only workspaces this run opened are typed into, never moved ones. --no-restore skips it; --dry-run says which drafts it would restore and types nothing. A restored draft keeps its text in the store, with restoredAt, restoredSurfaceId and restoredText added. It is unsent text in the box, so thread open --undo keeps that workspace open.
+
 DRY RUN. --dry-run prints the same plan ("Would open") and opens nothing, writes nothing.
 
 THE RECORD. Before it opens anything, a real run writes <threads state dir>/opens/<time>.json with the plan, and rewrites it after every cmux step with the ids of the windows and workspaces it made. If that file cannot be written, nothing is opened. --json prints the record. thread open --undo reads it.
@@ -121,6 +123,32 @@ UNDO. thread open --undo closes the workspaces the latest run opened (--run <tim
   A workspace that passes has its Claude process stopped first (SIGTERM, up to 15 seconds to exit; the session stays resumable with claude --resume), and only then is the workspace closed. A window closes with its last workspace. The record is rewritten before the first process is stopped; if that fails, nothing is stopped or closed. --undo --dry-run runs the same checks and prints what would close and what would be kept; it closes nothing and writes nothing. It exits 1 when there is no run to undo or a step failed.
 
 RUNS AS A VIEW. A filtered thread open makes a window appear (for example thread open --repo audio-journal-1 --include-open: all of that repo's unfinished work in one new window), and thread open --undo --run <stamp> makes it disappear again: what it opened closes, what it moved goes back. thread open --list prints every recorded run with its stamp, filters, counts, whether it was undone, and the command that undoes it. --list reads the records only: no cmux, no ps.
+
+SANDBOX. The Claude Code sandbox blocks the cmux socket and ps. Run it from a terminal, or with the sandbox disabled.`;
+
+const CLOSE_SUMMARY =
+  'Close the cmux workspaces you name, by uuid (from cmux tree --id-format both) or workspace:N, or by the session they hold (--session <id>). Each one is checked first and kept open, with the reason printed, unless nothing could be lost; its Claude process is stopped before the workspace closes, and a resume command for it is written down first. Try --dry-run first. It exits 0 when done (kept workspaces included), 1 when a step failed, 2 when it refused and touched nothing.';
+
+const CLOSE_NARRATIVE = `
+THE CHECKS. Every pane of the workspace is read, and the workspace is kept open unless every pane passes all of these:
+
+  1. Nothing is typed in the input box. Unsent text keeps the workspace open, is printed in full under "✍️ Unsent text, kept open", and is saved in <threads state dir>/input-drafts/<session id>.json.
+
+  2. Claude is not working (no spinner, no "Running…" on the screen).
+
+  3. The screen can be read, and the pane's terminal is known and no other pane reports it.
+
+  4. The status line under the input box shows which session the pane holds (⌗ <session id>), and the Claude process on that terminal names the same session, on its command line or in the cmux hook store.
+
+  A workspace holding more than one Claude session or more than one Claude process is kept, and so is a session whose resume command cannot be built from its transcript. A pane where Claude is not running passes only when it shows an idle shell prompt (or a blank screen) with nothing else running on its terminal. These are the checks thread open --undo uses, minus its "used since the run" check: a named close has no run to compare with.
+
+THE RECORD. Before the first Claude process is stopped, one line per workspace that passed is appended to <threads state dir>/closes.jsonl: when, the workspace and window, the session, its title, repo and checkout, its Claude pid, and its resume command (cd '<checkout>' && claude --resume <id>), with outcome "closing". If those lines cannot be written, nothing is stopped or closed. After each workspace, one more line gives its outcome: closed, kept (with why), or failed. The resume command is printed for every closed workspace too, so every close can be undone by hand.
+
+CLOSING. Right before its turn, each workspace is checked again; if anything changed, it is kept. Then its Claude process is stopped (SIGTERM, up to 15 seconds to exit, never SIGKILL; the session stays resumable), and only then is the workspace closed. A window closes with its last workspace, and the output says so.
+
+NEVER CLOSED. The workspace this command runs in (CMUX_WORKSPACE_ID): naming it refuses the whole run, and nothing is touched. A --session that no live Claude process holds, that runs outside cmux, or that shows in more than one workspace refuses the run too. A workspace that is not open is listed under "Not found"; the others still go ahead.
+
+--dry-run runs every check and prints what would close and what would be kept and why. It signals nothing, closes nothing, writes no record and stores no draft.
 
 SANDBOX. The Claude Code sandbox blocks the cmux socket and ps. Run it from a terminal, or with the sandbox disabled.`;
 
@@ -249,7 +277,16 @@ EXIT    0 something matched · 1 NOTHING matched, and the line says how many
 
 --days filters on last activity (lastActivityAt, else reportedAt, else
 startedAt). A session that dates itself NOWHERE is never filtered out — an
-unknown date is not proof that it is old.`;
+unknown date is not proof that it is old.
+
+TITLES  a v4 session is titled by its session bead (found through the
+        sessions index and that repo's .beads/issues.jsonl), and its Bead line
+        names it; \`thread show <bead>\` takes it. A Bead line reading UNKNOWN
+        says why the bead could not be read. No Bead line: the sessions index
+        records no session bead for that session.
+
+SECTION the markdown heading the match sits under in the matched field, e.g.
+        Progress in a Part 1. No Section line: no heading precedes the match.`;
 
 const ANSWER_NARRATIVE = `
 DEFAULT (--ui web): starts a server on 127.0.0.1, opens your browser, and shows
@@ -454,7 +491,11 @@ const SHOW_V4_NARRATIVE = `
 WITH componentConfig.thread.sessionBeads ON (status report v4):
   thread show [session bead | request or question id | --session <uuid>]
 prints Part 1 LIVE (the same generated block thread status prints, with 🏃
-when the session is running), then "From Claude:" — the last message Claude
+when the session is running), then "Related epics:" — the nearest epic above
+each request and each bead the session created with br create, with that
+epic's open children (at most 15, then "N more"); "none" means it checked and
+found none, "UNKNOWN" that something it needed could not be read, listed under
+it — then "From Claude:" — the last message Claude
 yielded, with any pasted Part 1 removed (it was stale the moment it was
 pasted) — then "Your messages:", every prompt, newest last, each cut at 400
 characters (--full: uncut). A request or question id is resolved to its
@@ -998,6 +1039,12 @@ export const threadCommand: CommandModule = {
                 'Also show sessions already open in another cmux window: their workspaces are MOVED into the new window (never resumed a second time); --undo moves them back',
               type: 'boolean' as const,
             })
+            .option('restore', {
+              default: true,
+              describe:
+                'Type the unsent text stored for each session it opens back into the new input box, on one line, never sent (see RESTORED DRAFTS); --no-restore skips it',
+              type: 'boolean' as const,
+            })
             .option('include-untracked', {
               default: false,
               describe:
@@ -1057,9 +1104,60 @@ export const threadCommand: CommandModule = {
               perProject: argv['per-project'] === true,
               // G6: absent stays absent, so a bare or blank --repo can refuse.
               repos: argv.repo?.map(String),
+              restore: argv.restore !== false,
               run: argv.run ?? null,
               since: argv.since ?? null,
               undo: argv.undo === true,
+            }),
+          );
+        },
+      )
+      .command(
+        'close [workspaces..]',
+        CLOSE_SUMMARY,
+        (yy) =>
+          yy
+            .usage(
+              `${helpHeader('justin-sdk', dirname(import.meta.dirname))}\n\n$0 thread close <workspace…> [--session <id>…] [--dry-run] [--json]\n\n${CLOSE_SUMMARY}`,
+            )
+            .epilogue(CLOSE_NARRATIVE)
+            .positional('workspaces', {
+              describe:
+                'Workspaces to close: uuids (cmux tree --id-format both) or workspace:N refs',
+              string: true,
+              type: 'string' as const,
+            })
+            .option('session', {
+              describe:
+                'Close the workspace that holds this Claude session (repeat for several); refused when no live process holds it or it shows in more than one workspace',
+              string: true,
+              type: 'array' as const,
+            })
+            .option('dry-run', {
+              default: false,
+              describe:
+                'Run every check and print what would close and what would be kept; signal, close and write nothing',
+              type: 'boolean' as const,
+            })
+            .option('json', {
+              default: false,
+              describe: 'Print what was found and done as JSON',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          const {runThreadClose} = await import('./close');
+          const given = argv.workspaces as string[] | string | undefined;
+          process.exit(
+            await runThreadClose({
+              dryRun: argv['dry-run'] === true,
+              json: argv.json === true,
+              sessions: (argv.session ?? []).map(String),
+              workspaces: (Array.isArray(given)
+                ? given
+                : given == null
+                  ? []
+                  : [given]
+              ).map(String),
             }),
           );
         },

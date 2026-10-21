@@ -19,8 +19,11 @@
  *
  * `thread show [session bead | request or question id | --session <uuid>]` —
  * Justin (or Claude), knob on: Part 1 LIVE (🏃 when the session is running),
- * then `From Claude:` and the last message Claude yielded with any pasted Part
- * 1 stripped (it was stale the moment it was pasted), then `Your messages:` —
+ * then `Related epics:` — the nearest epic above each request and each bead
+ * the session created, with its open children (related-epics.ts,
+ * home-base-y1hg0.7) — then `From Claude:` and the last message Claude
+ * yielded with any pasted Part 1 stripped (it was stale the moment it was
+ * pasted), then `Your messages:` —
  * every prompt, newest last, each cut at 400 characters (`--full`: uncut).
  *
  * Exit: 0 printed · 1 no session bead, or the sessions index unreadable.
@@ -30,6 +33,7 @@ import type {OutputStyle} from '../cli-style';
 import type {MessageLine} from './message-log';
 import type {Piece} from './part-one';
 import type {EnvLike} from './paths';
+import type {RelatedEpics} from './related-epics';
 import type {ActionLine, OptionalLine} from './session-card';
 import type {CreatedBeads} from './session-created';
 import type {Measured, SessionModel} from './session-model';
@@ -58,6 +62,7 @@ import {
   whenWords,
 } from './part-one';
 import {threadsBeadsDir} from './paths';
+import {findRelatedEpics, renderRelatedEpics} from './related-epics';
 import {deriveAction, optionalLine} from './session-card';
 import {loadCreatedBeads} from './session-created';
 import {readSessionIndex} from './session-index';
@@ -678,12 +683,37 @@ function messageStamp(
   return ms == null ? null : whenWords(new Date(ms), now, timeZone);
 }
 
+/**
+ * The epics this session's requests and created beads sit under
+ * (home-base-y1hg0.7), read from the same exports as its tree. Read here and
+ * not in `loadForReport`, so `thread status` and the inbox never pay for it.
+ */
+export function relatedEpicsOf(
+  load: Extract<ReportLoad, {kind: 'loaded'}>,
+): RelatedEpics {
+  return findRelatedEpics({
+    created: load.created,
+    sessionDirs: [
+      ...new Set(load.model.sightings.map((entry) => entry.beadsDir)),
+    ],
+    tree: load.model.beads,
+  });
+}
+
 export function renderSessionShow(
   load: Extract<ReportLoad, {kind: 'loaded'}>,
-  options: {full: boolean; now: Date; style: OutputStyle; timeZone?: string},
+  options: {
+    full: boolean;
+    now: Date;
+    /** The "Related epics" section's content (`relatedEpicsOf`). */
+    related: RelatedEpics;
+    style: OutputStyle;
+    timeZone?: string;
+  },
 ): string {
   const {now, style, timeZone} = options;
   const {model} = load;
+  const related = renderRelatedEpics(options.related, style);
   const partOne = renderPartOne(
     partOneView({
       action: load.action,
@@ -735,6 +765,7 @@ export function renderSessionShow(
   if (!style.color) {
     return spacedList([
       partOne,
+      ...related,
       '**From Claude:**',
       claude,
       '**Your messages:**',
@@ -756,6 +787,7 @@ export function renderSessionShow(
       .join('\n');
   return spacedList([
     partOne,
+    ...related,
     sectionHeader('From Claude', {color: true, emoji: '💬'}),
     indent(claude),
     sectionHeader('Your messages', {color: true, emoji: '🗣️'}),
@@ -788,6 +820,7 @@ export async function runSessionShow(
     renderSessionShow(load, {
       full: options.full,
       now,
+      related: relatedEpicsOf(load),
       style,
       timeZone: options.timeZone,
     }),

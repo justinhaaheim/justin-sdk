@@ -52,7 +52,13 @@
 import type {OutputStyle} from '../cli-style';
 import type {CmuxRunner, CmuxTree} from './cmux';
 import type {InputDraftWrite, WriteInputDraftInput} from './input-drafts';
-import type {LiveSurface, Proc, ProcessRunner, ScreenRead} from './pane-join';
+import type {
+  HookStore,
+  LiveSurface,
+  Proc,
+  ProcessRunner,
+  ScreenRead,
+} from './pane-join';
 import type {EnvLike} from './paths';
 import type {ActivityTimes} from './transcript-activity';
 import type {PidCommand} from './workspace-close';
@@ -174,8 +180,11 @@ export interface RecordedWorkspace {
 // ---------------------------------------------------------------------------
 
 export interface UndoDraft {
-  /** The session the text belongs to: the id its screen shows, else the run's. */
-  sessionId: string;
+  /**
+   * The session the text belongs to: the id its screen shows, else the
+   * run's. Null only in a named close (`thread close`) whose box shows no id.
+   */
+  sessionId: string | null;
   /** Why it was not stored, when a real run could not store it. */
   storeFailure: string | null;
   /** Where the store holds it; null when not stored (dry run, or failed). */
@@ -311,21 +320,55 @@ function cut(text: string, max: number): string {
 export interface PaneGate {
   /** Claude session processes on the pane's tty, to stop before closing. */
   claude: Proc[];
-  /** The input box's unsent text and the session it belongs to, or null. */
-  draft: {sessionId: string; text: string} | null;
+  /**
+   * The input box's unsent text and the session it belongs to (the id its
+   * screen shows, else the expected one), or null. The session is null only
+   * in a named close whose box shows no `⌗` id: the text cannot be filed
+   * under a session, and the pane is kept (F19).
+   */
+  draft: {sessionId: string | null; text: string} | null;
   /** Why the pane keeps its workspace open; empty = it may close. */
   reasons: string[];
+  /** The session id the input box's status line shows, lowercased; null when none. */
+  shown: string | null;
+}
+
+/**
+ * The pids the cmux hook store records for each session (lowercased id →
+ * pids). `thread close` passes it: a claude process counts as running the
+ * session its screen shows when its command line OR the hook store names it
+ * (a bare `claude`, or a /clear, leaves the command line silent or stale).
+ */
+export type HookStorePids = ReadonlyMap<string, ReadonlySet<number>>;
+
+/** The hook store's `sessions` map as {@link HookStorePids}; entries with no pid are left out. */
+export function hookStorePids(store: HookStore): Map<string, Set<number>> {
+  const out = new Map<string, Set<number>>();
+  for (const [key, entry] of Object.entries(store.sessions ?? {})) {
+    if (entry.pid == null) continue;
+    const id = (entry.sessionId ?? key).toLowerCase();
+    out.set(id, new Set([...(out.get(id) ?? []), entry.pid]));
+  }
+  return out;
 }
 
 /**
  * D-UNDO-SAFETY for one pane. `procsOnTty` is null when the pane's tty is not
  * known (then no process on it can be found, which is not the same as none).
+ *
+ * `sessionId` is the session the pane must hold: the one the run opened, for
+ * `thread open --undo`. `null` is a NAMED close (`thread close`,
+ * home-base-yukaf.31): there is no run, so the session the pane's own
+ * `⌗ <id>` line shows is the one checked, and every other gate is the same.
+ * `hookPids` (named close) lets the hook store name a process's session too;
+ * without it only the command line can (`--undo`, unchanged).
  */
 export function gatePane(input: {
+  hookPids?: HookStorePids;
   label: string;
   procsOnTty: readonly Proc[] | null;
   screen: ScreenRead;
-  sessionId: string;
+  sessionId: string | null;
   tty: string | null;
 }): PaneGate {
   const {label} = input;
@@ -336,6 +379,7 @@ export function gatePane(input: {
       reasons: [
         `the screen of ${label} could not be read: ${input.screen.reason}`,
       ],
+      shown: null,
     };
   }
   const reasons: string[] = [];
@@ -353,7 +397,11 @@ export function gatePane(input: {
       draft = {sessionId: shown ?? input.sessionId, text: box.draft};
       reasons.push(`unsent text in the input box of ${label}`);
     }
-    if (shown != null && shown !== input.sessionId.toLowerCase()) {
+    if (
+      input.sessionId != null &&
+      shown != null &&
+      shown !== input.sessionId.toLowerCase()
+    ) {
       reasons.push(
         `${label} shows session ${shown}, which is not the one this run opened`,
       );
@@ -379,23 +427,32 @@ export function gatePane(input: {
     // Only a process this run started is signalled: thread open ran
     // `claude --resume <id>`, and a /clear keeps that argv id. Anything else on
     // the tty (Claude restarted by hand, a reused tty) is not ours to stop.
-    const want = input.sessionId.toLowerCase();
-    const foreign = claude.filter(
-      (proc) => argvSessionId(proc.command) !== want,
-    );
-    const [other] = foreign;
-    if (other != null) {
-      reasons.push(
-        `the claude process on ${label} (pid ${other.pid}) does not name session ${want} on its command line, so it was not started by this run and is not stopped`,
+    // A named close (sessionId null) checks the session the screen shows,
+    // named by the command line or the hook store; with no shown id the pane
+    // is already kept above.
+    const want = input.sessionId?.toLowerCase() ?? shown;
+    if (want != null) {
+      const foreign = claude.filter(
+        (proc) =>
+          argvSessionId(proc.command) !== want &&
+          input.hookPids?.get(want)?.has(proc.pid) !== true,
       );
+      const [other] = foreign;
+      if (other != null) {
+        reasons.push(
+          input.sessionId == null
+            ? `the claude process on ${label} (pid ${other.pid}) names neither on its command line nor in the cmux hook store the session its screen shows (${want}), so which session it runs cannot be confirmed and it is not stopped`
+            : `the claude process on ${label} (pid ${other.pid}) does not name session ${want} on its command line, so it was not started by this run and is not stopped`,
+        );
+      }
     }
-    return {claude, draft, reasons};
+    return {claude, draft, reasons, shown};
   }
   if (claude.length > 0) {
     reasons.push(
       `${label} shows no Claude input box but a claude process runs on its tty: Claude is starting or showing a dialog`,
     );
-    return {claude, draft, reasons};
+    return {claude, draft, reasons, shown: null};
   }
   // F20 (home-base-yukaf.14): an unknown tty always keeps the pane, a blank
   // screen included. cmux returns an empty screen for a pane that has not
@@ -406,13 +463,13 @@ export function gatePane(input: {
     reasons.push(
       `${label} shows no Claude input box and its tty is unknown, so what runs there cannot be checked`,
     );
-    return {claude, draft, reasons};
+    return {claude, draft, reasons, shown: null};
   }
   const busy = input.procsOnTty.filter((proc) => !isShellScaffolding(proc));
   const [first] = busy;
   if (first != null) {
     reasons.push(`${label} is running ${cut(first.command, 70)}`);
-    return {claude, draft, reasons};
+    return {claude, draft, reasons, shown: null};
   }
   if (!idleShellScreen(lines)) {
     const last = lines.filter((line) => line.trim() !== '').at(-1) ?? '';
@@ -420,7 +477,7 @@ export function gatePane(input: {
       `${label} shows neither a Claude input box nor an idle shell prompt (last line: "${cut(last, 60)}")`,
     );
   }
-  return {claude, draft, reasons};
+  return {claude, draft, reasons, shown: null};
 }
 
 // ---------------------------------------------------------------------------
@@ -437,14 +494,14 @@ export type Assessment =
     }
   | {entry: RecordedWorkspace; kind: 'gone'; workspaceId: string}
   | {
-      drafts: {sessionId: string; surfaceId: string; text: string}[];
+      drafts: GateDraft[];
       entry: RecordedWorkspace;
       kind: 'kept';
       reasons: string[];
     };
 
 /** What one pass of the gates reads: the tree twice (windows; ttys), ps. */
-interface LiveView {
+export interface LiveView {
   procs: Proc[];
   surfaces: LiveSurface[];
   tree: CmuxTree;
@@ -458,24 +515,46 @@ function windowOf(tree: CmuxTree, workspaceId: string): string | null {
   return window?.id ?? null;
 }
 
+/** Unsent text a gate found, the pane it is in and its session (null: unknown). */
+export interface GateDraft {
+  sessionId: string | null;
+  surfaceId: string;
+  text: string;
+}
+
+export interface SurfacesGate {
+  /** Claude session processes on the workspace's panes, to stop first. */
+  claude: Proc[];
+  drafts: GateDraft[];
+  /** Why the workspace is kept; empty = it may close. */
+  reasons: string[];
+  /** Every distinct session id its panes' status lines show, lowercased. */
+  sessions: string[];
+}
+
 /**
  * The per-pane gates of D-UNDO-SAFETY over every surface of one workspace
- * (screen, tty, processes, input box). Shared by assessWorkspace and the
- * blank-workspace close of G3 (home-base-yukaf.25).
+ * (screen, tty, processes, input box). ONE IMPLEMENTATION, shared by
+ * assessWorkspace (`--undo`), the blank-workspace close of G3
+ * (home-base-yukaf.25) and `thread close` (close.ts, home-base-yukaf.31).
+ *
+ * `sessionId` null is a named close (see gatePane). It adds one workspace
+ * rule there: the workspace holds at most one Claude session and one Claude
+ * process, since closing it stops everything on it and there is no run to
+ * say which session was meant. `--undo` needs no such rule: every pane must
+ * show the run's own session.
  */
-async function gateSurfaces(
+export async function gateSurfaces(
   surfaceIds: readonly string[],
   view: LiveView,
   run: CmuxRunner,
-  sessionId: string,
-): Promise<{
-  claude: Proc[];
-  drafts: {sessionId: string; surfaceId: string; text: string}[];
-  reasons: string[];
-}> {
+  sessionId: string | null,
+  hookPids?: HookStorePids,
+): Promise<SurfacesGate> {
   const reasons: string[] = [];
-  const drafts: {sessionId: string; surfaceId: string; text: string}[] = [];
+  const drafts: GateDraft[] = [];
   const claude: Proc[] = [];
+  const sessions: string[] = [];
   if (surfaceIds.length === 0) {
     reasons.push('cmux lists no pane in it, so nothing on it can be checked');
   }
@@ -505,12 +584,35 @@ async function gateSurfaces(
         : view.procs.filter((proc) => normalizeTty(proc.tty) === tty);
     // F6: a draft taller than the screen is read back from the scrollback.
     const screen = await readScreenForBox(run, surface?.ref ?? surfaceId);
-    const gate = gatePane({label, procsOnTty, screen, sessionId, tty});
+    const gate = gatePane({
+      ...(hookPids == null ? {} : {hookPids}),
+      label,
+      procsOnTty,
+      screen,
+      sessionId,
+      tty,
+    });
     reasons.push(...gate.reasons);
     claude.push(...gate.claude);
     if (gate.draft != null) drafts.push({...gate.draft, surfaceId});
+    if (gate.shown != null && !sessions.includes(gate.shown)) {
+      sessions.push(gate.shown);
+    }
   }
-  return {claude, drafts, reasons};
+  if (sessionId == null) {
+    if (sessions.length > 1) {
+      reasons.push(
+        `it holds ${sessions.length} Claude sessions (${sessions.join(', ')}), and closing it would stop all of them`,
+      );
+    }
+    const pids = [...new Set(claude.map((proc) => proc.pid))];
+    if (pids.length > 1) {
+      reasons.push(
+        `${pids.length} Claude processes run in it (pid ${pids.join(', ')}), and closing it would stop all of them`,
+      );
+    }
+  }
+  return {claude, drafts, reasons, sessions};
 }
 
 async function assessWorkspace(
@@ -734,11 +836,14 @@ export function recordedWorkspaces(record: ParsedRecord): RecordedWorkspace[] {
   );
 }
 
-type ViewRead =
+export type ViewRead =
   | {kind: 'failed'; reason: string}
   | {kind: 'read'; view: LiveView};
 
-async function readView(deps: Pick<UndoDeps, 'ps' | 'run'>): Promise<ViewRead> {
+/** One gate pass's reads (shared with close.ts): any source failing fails the whole read. */
+export async function readView(
+  deps: Pick<UndoDeps, 'ps' | 'run'>,
+): Promise<ViewRead> {
   const [tree, surfaces, procs] = await Promise.all([
     readCmuxTree(deps.run),
     readLiveSurfaces(deps.run),
@@ -784,6 +889,15 @@ function storeDrafts(
   return assessment.drafts.map((found) => {
     if (dryRun) {
       return {...found, storeFailure: null, stored: null};
+    }
+    // The run's session is always known here; the type allows null for a
+    // named close (thread close), which files nothing under a guessed id.
+    if (found.sessionId == null) {
+      return {
+        ...found,
+        storeFailure: 'no session id is known for this text',
+        stored: null,
+      };
     }
     const written = deps.writeDraft({
       at: new Date(deps.nowMs()).toISOString(),

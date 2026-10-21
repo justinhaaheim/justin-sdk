@@ -152,12 +152,57 @@ export function parseExportLine(
   };
 }
 
+/** What looking one id up in one export found. */
+export type ExportRecordLookup =
+  | {issue: TreeIssue; kind: 'found'}
+  | {kind: 'absent'}
+  | {kind: 'deleted'}
+  | {kind: 'failed'; reason: string};
+
+/**
+ * The record with id `id` in one export's text, without splitting the whole
+ * file (home-base's export is ~8 MB): `"id":"<id>"` appears only on that
+ * record's own line, because dependencies name their ends `issue_id` and
+ * `depends_on_id` (the same fact session-created.ts's JSON_ID relies on). A
+ * line holding the needle that does not parse is a failure, never "absent":
+ * it could be the very record (rule 7).
+ */
+export function exportRecordById(
+  text: string,
+  id: string,
+  beadsDir: string,
+  path: string,
+): ExportRecordLookup {
+  const needle = `"id":${JSON.stringify(id)}`;
+  let from = 0;
+  for (;;) {
+    const at = text.indexOf(needle, from);
+    if (at === -1) return {kind: 'absent'};
+    const start = text.lastIndexOf('\n', at) + 1;
+    const newline = text.indexOf('\n', at);
+    const end = newline === -1 ? text.length : newline;
+    const parsed = parseExportLine(text.slice(start, end), beadsDir);
+    if (!parsed.ok) {
+      return {
+        kind: 'failed',
+        reason: `a line of ${path} naming ${id} is not a bead record (${parsed.reason})`,
+      };
+    }
+    if (parsed.issue.id === id) {
+      return parsed.issue.status === 'tombstone'
+        ? {kind: 'deleted'}
+        : {issue: parsed.issue, kind: 'found'};
+    }
+    from = end;
+  }
+}
+
 /**
  * Every record of `text` whose line contains one of `needles`, parsed. A line
  * that contains a needle but does not parse is a FAILURE, not a skip: it could
  * be the very bead being looked for.
  */
-function recordsMatching(
+export function recordsMatching(
   text: string,
   needles: readonly string[],
   beadsDir: string,

@@ -41,10 +41,13 @@ import {
   searchCorpus,
   searchJson,
   searchSessions,
+  SECTION_NAME_CUT,
+  sectionOf,
   sessionActivityAt,
   SNIPPET_RADIUS,
   THREAD_SEARCH_FIELDS,
   withinWindow,
+  withSessionBeads,
 } from '../src/thread/search';
 import {createFakeBd, type FakeBd} from './fake-bd';
 
@@ -1410,5 +1413,294 @@ describe('searchSessions', () => {
       ok: false,
     });
     expect(h.fake.read().log).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-y1hg0.7: the session bead's title, and the section that matched
+// ---------------------------------------------------------------------------
+
+describe('the section a match sits in (home-base-y1hg0.7)', () => {
+  const REPORT = [
+    '**Session:** [HOME] Reopen every unfinished session',
+    '',
+    '## Progress',
+    '',
+    '12. ✅ **Scope and filter thread open like a dataview** (home-base-aasbl.24)',
+    '',
+    '## Questions for you',
+    '',
+    '1. 🟡 P1 · Run the first real thread open',
+  ].join('\n');
+
+  test('sectionOf: the nearest heading at or above the match', () => {
+    expect(sectionOf(REPORT, REPORT.indexOf('Scope and filter'))).toBe(
+      'Progress',
+    );
+    expect(sectionOf(REPORT, REPORT.indexOf('Run the first'))).toBe(
+      'Questions for you',
+    );
+    // A match ON the heading line: that heading is its section.
+    expect(sectionOf(REPORT, REPORT.indexOf('Questions for'))).toBe(
+      'Questions for you',
+    );
+    // Above every heading: none.
+    expect(sectionOf(REPORT, REPORT.indexOf('Reopen'))).toBeNull();
+  });
+
+  test('a bold-only label ending in a colon is a section; a bold sentence and a labelled value are not', () => {
+    const legacy = [
+      '**What I did:**',
+      '- ✅ Built the renderer',
+      '**13 of 18 requests done**',
+      '- the request list',
+      '**Session:** home-base',
+      '- after a labelled value',
+      '**Deviations**:',
+      '- none',
+    ].join('\n');
+    expect(sectionOf(legacy, legacy.indexOf('Built the'))).toBe('What I did');
+    expect(sectionOf(legacy, legacy.indexOf('the request list'))).toBe(
+      'What I did',
+    );
+    expect(sectionOf(legacy, legacy.indexOf('after a labelled'))).toBe(
+      'What I did',
+    );
+    expect(sectionOf(legacy, legacy.indexOf('none'))).toBe('Deviations');
+  });
+
+  test('a # inside a code fence is not a heading; markup is stripped; a long heading is cut', () => {
+    const fenced = [
+      '## Real **section** `x`',
+      '```sh',
+      '# not a heading',
+      'echo match-here',
+      '```',
+    ].join('\n');
+    expect(sectionOf(fenced, fenced.indexOf('match-here'))).toBe(
+      'Real section x',
+    );
+    const long = `# ${'word '.repeat(40)}\nmatch`;
+    const cut = sectionOf(long, long.indexOf('match'));
+    expect(cut?.length).toBe(SECTION_NAME_CUT);
+    expect(cut?.endsWith('…')).toBe(true);
+  });
+
+  test('the row carries the section of its FIRST matching field, and prints it under Matched', () => {
+    const corpus = buildCorpus(
+      [
+        thread('th-1', {
+          lastAssistantMessage: REPORT,
+          lastUserMessage: 'please scope and filter thread open',
+          sessionId: 'sess-1',
+        }),
+      ],
+      [],
+    );
+    // The user message is tried before Claude's (THREAD_SEARCH_FIELDS) and
+    // has no heading above the match.
+    const fromUser = firstRow(searchCorpus(corpus, pattern('thread open')));
+    expect(fromUser.hit.field).toBe('lastUserMessage');
+    expect(fromUser.hit.section).toBeNull();
+    expect(renderSearchRow(fromUser, NOW, {color: false})).not.toContain(
+      'Section:',
+    );
+
+    const fromReport = firstRow(
+      searchCorpus(corpus, pattern('Scope and filter thread open like')),
+    );
+    expect(fromReport.hit).toMatchObject({
+      field: 'lastAssistantMessage',
+      section: 'Progress',
+    });
+    const lines = renderSearchRow(fromReport, NOW, {color: false}).split('\n');
+    expect(lines.slice(3, 6)).toEqual([
+      '      Session:  sess-1',
+      '      Matched:  lastAssistantMessage',
+      '      Section:  Progress',
+    ]);
+  });
+});
+
+describe('the session bead titles the row (home-base-y1hg0.7)', () => {
+  const SID = 'd87d078b-8484-4ba6-9f61-8be75ea0ecbc';
+  const UNTITLED = '(untitled) home-base session d87d078b';
+  const TITLE = 'Reopen every unfinished session in cmux with one command';
+
+  /** A sessions index line, and (unless null) the beads export it names. */
+  function seedSessionBead(
+    h: Harness,
+    options: {
+      exportLines?: string[] | null;
+      indexText?: string;
+      sessionId?: string;
+    } = {},
+  ): string {
+    const beadsDir = join(h.root, 'repo', '.beads');
+    const sighting = {
+      at: '2026-10-18T12:16:09.000Z',
+      beadId: 'home-base-aasbl',
+      beadsDir,
+      branch: 'main',
+      checkoutPath: join(h.root, 'repo'),
+      event: 'created',
+      repo: 'home-base',
+      sessionId: options.sessionId ?? SID,
+    };
+    writeFileSync(
+      join(h.root, 'state', 'sessions.jsonl'),
+      options.indexText ?? `${JSON.stringify(sighting)}\n`,
+    );
+    const lines =
+      options.exportLines === undefined
+        ? [
+            JSON.stringify({
+              id: 'home-base-aasbl',
+              issue_type: 'session',
+              labels: ['session', `sid:${SID}`],
+              status: 'in_progress',
+              title: TITLE,
+            }),
+          ]
+        : options.exportLines;
+    if (lines != null) {
+      mkdirSync(beadsDir, {recursive: true});
+      writeFileSync(join(beadsDir, 'issues.jsonl'), `${lines.join('\n')}\n`);
+    }
+    return beadsDir;
+  }
+
+  function seedUntitled(h: Harness): void {
+    seedThreads(h, [
+      thread(
+        'th-aasbl',
+        {
+          lastActivityAt: NOW.toISOString(),
+          lastAssistantMessage: '12. ✅ **Scope and filter thread open**',
+          repo: 'home-base',
+          sessionId: SID,
+        },
+        {title: UNTITLED},
+      ),
+    ]);
+  }
+
+  async function onlyRow(h: Harness): Promise<SearchRow> {
+    const found = await searchSessions({
+      env: h.env,
+      now: NOW,
+      query: 'thread open',
+    });
+    if (!found.ok) throw new Error(found.error);
+    return firstRow(found.result);
+  }
+
+  test('THE 2026-10-20 CASE: the row is titled by the session bead, never "(untitled)"', async () => {
+    const h = harness();
+    seedUntitled(h);
+    seedSessionBead(h);
+    const row = await onlyRow(h);
+    expect(row.title).toBe(TITLE);
+    expect(row.sessionBead).toEqual({
+      beadId: 'home-base-aasbl',
+      kind: 'found',
+      title: TITLE,
+    });
+    const out = captureStdout();
+    captureStderr();
+    const code = await runThreadSearch({
+      color: false,
+      env: h.env,
+      now: NOW,
+      query: 'thread open',
+    });
+    expect(code).toBe(0);
+    const printed = out.join('\n');
+    expect(printed).toContain(`  ${TITLE}\n`);
+    expect(printed).not.toContain('(untitled)');
+    expect(printed).toContain(
+      `      Session:  ${SID}\n      Bead:     home-base-aasbl\n      Matched:  lastAssistantMessage\n`,
+    );
+  });
+
+  test('no sessions index on this machine: none, measured; the corpus title stays; no Bead line', async () => {
+    const h = harness();
+    seedUntitled(h);
+    const row = await onlyRow(h);
+    expect(row.title).toBe(UNTITLED);
+    expect(row.sessionBead?.kind).toBe('none');
+    expect(renderSearchRow(row, NOW, {color: false})).not.toContain('Bead:');
+  });
+
+  test('the index records no session bead for this session: none', async () => {
+    const h = harness();
+    seedUntitled(h);
+    seedSessionBead(h, {sessionId: 'some-other-session'});
+    const row = await onlyRow(h);
+    expect(row.sessionBead).toEqual({
+      kind: 'none',
+      reason: 'the sessions index records no session bead for this session',
+    });
+    expect(row.title).toBe(UNTITLED);
+  });
+
+  test('the export the index names cannot be read: UNKNOWN on the Bead line, title unchanged', async () => {
+    const h = harness();
+    seedUntitled(h);
+    const beadsDir = seedSessionBead(h, {exportLines: null});
+    const row = await onlyRow(h);
+    const path = join(beadsDir, 'issues.jsonl');
+    expect(row.sessionBead).toEqual({
+      kind: 'unknown',
+      reason: `${path} does not exist`,
+    });
+    expect(row.title).toBe(UNTITLED);
+    expect(renderSearchRow(row, NOW, {color: false})).toContain(
+      `      Bead:     UNKNOWN — ${path} does not exist`,
+    );
+  });
+
+  test('the index names a bead the export does not hold: UNKNOWN, never none', async () => {
+    const h = harness();
+    seedUntitled(h);
+    const beadsDir = seedSessionBead(h, {
+      exportLines: [
+        JSON.stringify({
+          id: 'home-base-other',
+          issue_type: 'task',
+          status: 'open',
+          title: 'Something else',
+        }),
+      ],
+    });
+    const row = await onlyRow(h);
+    expect(row.sessionBead).toEqual({
+      kind: 'unknown',
+      reason: `the sessions index names home-base-aasbl, but ${join(beadsDir, 'issues.jsonl')} does not hold it`,
+    });
+  });
+
+  test('a corrupt index line naming the session: UNKNOWN, never none', async () => {
+    const h = harness();
+    seedUntitled(h);
+    seedSessionBead(h, {indexText: `{"sessionId":"${SID}", half-written\n`});
+    const row = await onlyRow(h);
+    expect(row.sessionBead?.kind).toBe('unknown');
+    expect(row.title).toBe(UNTITLED);
+  });
+
+  test('a row with no session id is a measured none; searchCorpus alone looks nothing up', () => {
+    const row = firstRow(
+      searchCorpus(
+        buildCorpus([thread('th-x', {lastUserMessage: 'thread open'})], []),
+        pattern('thread open'),
+      ),
+    );
+    expect(row.sessionBead).toBeNull();
+    const [looked] = withSessionBeads([row], {});
+    expect(looked?.sessionBead).toEqual({
+      kind: 'none',
+      reason: 'this row has no session id',
+    });
   });
 });

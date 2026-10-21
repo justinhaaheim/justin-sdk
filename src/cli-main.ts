@@ -1138,10 +1138,18 @@ void yargs(ARGV)
           describe:
             'Which payload to sweep. A COMPONENT NAME scopes the run to that one component and leaves the SDK pin alone: no pin bump, no `update`, no other component re-applied — so a rules/config edit does not ship an SDK upgrade to the whole fleet, and repos not enrolled in it are skipped. `install` is the ENROLLMENT REFRESH: in every enrolled repo it ADOPTS installed-but-unlisted components into justin-sdk.config.json, deletes the dead `version`/`lastSynced`/`componentConfig["critical-rules"].modules` keys, bumps the SDK pin to this release (tag verified on the remote first), and runs `install` with REMOVALS DISABLED — a sweep never removes a component; that is a per-repo decision made with `remove`. Omit the option for the historical full sweep (pin bump + `update`). Same gates for all three. Unknown name refuses the whole run.',
           type: 'string',
+        })
+        .option('add', {
+          choices: [...COMPONENT_NAMES],
+          conflicts: 'component',
+          describe:
+            'Enrol the fleet in a NEW component: in every repo whose committed justin-sdk.config.json does not list it, run that repo’s OWN SDK by path (`node_modules/.bin/justin-sdk add <component>`, then `install`, removals disabled) through the same worktree, ratchet gates, merge and push, with the SDK pin untouched; repos that already list it, track core, do not meet its includeIf, or whose pin predates the component ("pin too old: <version>; run the install sweep first") are skipped, never failed. With --dry-run it prints that plan per repo and creates nothing.',
+          type: 'string',
         }),
     async (argv) => {
       process.exit(
         await runSweep({
+          add: argv.add,
           component: argv.component,
           dryRun: argv['dry-run'],
           repos: argv.repo,

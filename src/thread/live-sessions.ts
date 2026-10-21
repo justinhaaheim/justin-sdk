@@ -111,6 +111,8 @@ export type LiveSessions =
       bySessionId: Map<string, LiveSession>;
       kind: 'read';
       unplaced: UnplacedLive[];
+      /** Every workspace uuid any source placed each session in (see the join). */
+      workspacesBySessionId: Map<string, string[]>;
     }
   | {kind: 'failed'; reason: string};
 
@@ -391,7 +393,18 @@ export function joinLiveSessions(input: {
   screens: ReadonlyMap<string, ScreenRead>;
   store: HookStore;
   surfaces: readonly LiveSurface[];
-}): {bySessionId: Map<string, LiveSession>; unplaced: UnplacedLive[]} {
+}): {
+  bySessionId: Map<string, LiveSession>;
+  unplaced: UnplacedLive[];
+  /**
+   * home-base-yukaf.31: every distinct workspace uuid (uppercase) a source
+   * placed each session in. bySessionId keeps the first placement only, so a
+   * session seen in two workspaces (resumed twice, or an argv id one pane
+   * shares with another pane's screen) is told apart here: `thread close
+   * --session` refuses it rather than pick one.
+   */
+  workspacesBySessionId: Map<string, string[]>;
+} {
   const sessionProcs = input.procs.filter((proc) => isSessionProc(proc));
   const procByPid = new Map(sessionProcs.map((proc) => [proc.pid, proc]));
   const claudeByPid = new Map(
@@ -421,9 +434,17 @@ export function joinLiveSessions(input: {
   };
 
   const bySessionId = new Map<string, LiveSession>();
+  const workspacesBySessionId = new Map<string, string[]>();
   const pidsNamed = new Set<number>();
   const add = (sessionId: string, found: LiveSession): void => {
     const key = sessionId.toLowerCase();
+    if (found.workspaceId != null) {
+      const seen = workspacesBySessionId.get(key) ?? [];
+      const workspace = found.workspaceId.toUpperCase();
+      if (!seen.includes(workspace)) {
+        workspacesBySessionId.set(key, [...seen, workspace]);
+      }
+    }
     const known = bySessionId.get(key);
     if (known == null) {
       bySessionId.set(key, found);
@@ -601,7 +622,7 @@ export function joinLiveSessions(input: {
       });
     }
   }
-  return {bySessionId, unplaced};
+  return {bySessionId, unplaced, workspacesBySessionId};
 }
 
 /** What `readLiveSessions` reads; every source is injectable for tests. */

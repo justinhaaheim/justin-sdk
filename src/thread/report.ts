@@ -83,6 +83,7 @@ import {
 import {
   AUTO_CLOSE_DISPOSITION,
   EXPIRED_DISPOSITION,
+  minimalPayloadExample,
   THREAD_SCHEMA_VERSION,
   validateThreadReport,
 } from './schema';
@@ -1011,6 +1012,15 @@ export async function runThreadReport(
       'thread report: the payload does not validate. Nothing was written.',
     );
     for (const issue of validation.issues) console.error(`  ${issue}`);
+    // A working payload goes in the SAME message as the failure (pp1vx.12), so
+    // the session does not spend a call finding out what valid looks like.
+    console.error('');
+    console.error('A minimal payload that validates:');
+    console.error(minimalPayloadExample());
+    console.error('');
+    console.error(
+      `Run ${SDK_RUN} thread prepare to print the full skeleton, with a hint for every field.`,
+    );
     return 2;
   }
   const payload: ThreadReportPayload = validation.payload;

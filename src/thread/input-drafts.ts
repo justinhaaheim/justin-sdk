@@ -84,6 +84,20 @@ export interface InputDraft {
    */
   previous: EarlierDraft[];
   /**
+   * home-base-yukaf.34: when `thread open` last typed this session's draft
+   * into the input box of a workspace it reopened (ISO), and the box was then
+   * seen to hold it. Never Enter: the text is in the box, still unsent, so the
+   * draft stays live (clearedAt unchanged). null when never restored, and in
+   * files from before yukaf.34. A later observation keeps these three fields
+   * (writeInputDraft), so the record of the restore is not lost to the next
+   * scan of that pane.
+   */
+  restoredAt: string | null;
+  /** The surface uuid it was typed into; null when never restored. */
+  restoredSurfaceId: string | null;
+  /** The text as typed: newlines collapsed to spaces; null when never restored. */
+  restoredText: string | null;
+  /**
    * F23 (home-base-yukaf.14): the text equalled the session's newest SENT
    * message when it was seen ("continue", "yes" typed again and not sent).
    * Stored and shown, with a note, rather than dropped. false in files from
@@ -114,6 +128,9 @@ const draftSchema = z.object({
       }),
     )
     .default([]),
+  restoredAt: z.string().nullable().default(null),
+  restoredSurfaceId: z.string().nullable().default(null),
+  restoredText: z.string().nullable().default(null),
   sentMatch: z.boolean().default(false),
   source: z.enum(['close', 'scan', 'undo']),
   surfaceId: z.string().nullable(),
@@ -229,6 +246,10 @@ export function writeInputDraft(
     clearedBy: null,
     missingSince: null,
     previous: previous.slice(-EARLIER_DRAFTS_KEPT),
+    // yukaf.34: a new observation keeps the record of the last restore.
+    restoredAt: prior?.restoredAt ?? null,
+    restoredSurfaceId: prior?.restoredSurfaceId ?? null,
+    restoredText: prior?.restoredText ?? null,
     sentMatch: input.sentMatch ?? false,
     source: input.source,
     surfaceId: input.surfaceId,
@@ -284,6 +305,40 @@ export function clearInputDraft(
   const failure = writeAtomically(read.path, draft);
   return failure == null
     ? {draft, kind: 'cleared', path: read.path}
+    : {
+        kind: 'failed',
+        reason: `the draft file ${read.path} could not be rewritten: ${failure}`,
+      };
+}
+
+/**
+ * home-base-yukaf.34: record that `thread open` typed this draft into a new
+ * input box and saw it there. Changes only restoredAt, restoredSurfaceId and
+ * restoredText: the text and clearedAt stay as they are, since the restored
+ * text is still unsent. An absent or unreadable file is `failed` (there is no
+ * draft to mark), never a silent success.
+ */
+export function markInputDraftRestored(
+  sessionId: string,
+  restore: {at: string; surfaceId: string; text: string},
+  env: EnvLike = process.env,
+):
+  | {draft: InputDraft; kind: 'marked'; path: string}
+  | {kind: 'failed'; reason: string} {
+  const read = readInputDraft(sessionId, env);
+  if (read.kind === 'failed') return read;
+  if (read.kind === 'absent') {
+    return {kind: 'failed', reason: `no stored draft at ${read.path}`};
+  }
+  const draft: InputDraft = {
+    ...read.draft,
+    restoredAt: restore.at,
+    restoredSurfaceId: restore.surfaceId,
+    restoredText: restore.text,
+  };
+  const failure = writeAtomically(read.path, draft);
+  return failure == null
+    ? {draft, kind: 'marked', path: read.path}
     : {
         kind: 'failed',
         reason: `the draft file ${read.path} could not be rewritten: ${failure}`,
