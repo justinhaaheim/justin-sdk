@@ -34,6 +34,7 @@ import {
 import {basename, dirname, join, resolve} from 'path';
 
 import {emitHookOutput} from './hook-output';
+import {hasMacBuildConfig} from './mac-build-config';
 import {sdkRun} from './sdk-invocation';
 import {threadEnabledFromFiles} from './thread/enabled-knob';
 
@@ -84,6 +85,14 @@ export interface ProjectContext {
 // named is/has predicate framework (t6a0.5) is still deferred — this stays a
 // small hand-written registry until that's worth building.
 export const PREDICATES: Record<string, (ctx: ProjectContext) => boolean> = {
+  /**
+   * The repo's own justin-sdk.config.json has a `componentConfig["mac-build"]`
+   * block, valid or not (home-base-0jeya.1). It gates the `mac-build`
+   * component: the block says which variant the Mac build is, so without it the
+   * scripts would have nothing to build. Project file only — never the user
+   * file — because which app goes on the Mac is a fact about the repo.
+   */
+  hasMacBuildConfig: (ctx) => hasMacBuildConfig(ctx.projectRoot),
   /**
    * True for beads_rust (`br`) projects — NOT Yegge's Dolt-backed `bd`.
    *

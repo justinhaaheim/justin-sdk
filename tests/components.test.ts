@@ -168,6 +168,28 @@ describe('component registry: core is computed, not listed', () => {
     expect(corePreset(fixture(['react', 'expo']))).toContain('eas');
   });
 
+  test('mac-build is gated on its own config block, NOT on isExpo (home-base-0jeya.1)', () => {
+    expect(COMPONENT_INCLUDE_IF['mac-build']).toEqual(['hasMacBuildConfig']);
+    // An Expo app with no Mac build configured does not get the scripts.
+    const expoOnly = fixture(['react', 'expo']);
+    expect(corePreset(expoOnly)).not.toContain('mac-build');
+    // The negative control for the gate: the ONLY difference is the block.
+    const configured = fixture(['react', 'expo']);
+    writeFileSync(
+      join(configured, 'justin-sdk.config.json'),
+      JSON.stringify({
+        componentConfig: {
+          'mac-build': {
+            bundleId: 'com.example.app.preview',
+            scheme: 'ExampleAppPreview',
+            variant: 'preview',
+          },
+        },
+      }),
+    );
+    expect(corePreset(configured)).toContain('mac-build');
+  });
+
   test('applicability names the gate that excluded a component', () => {
     const entry = componentApplicability(fixture([])).find(
       (e) => e.name === 'eas',

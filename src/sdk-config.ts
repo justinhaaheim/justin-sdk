@@ -195,6 +195,43 @@ export const healthNoticesSchema = z
  */
 const componentConfigSchema = z
   .looseObject({
+    // Read by `justin-sdk mac-build` through mac-build-config.ts, which checks
+    // the values itself (it must stay zod-free: prime.ts gates the component on
+    // it). These entries document the keys for `config schema` and give doctor's
+    // CONFIG_SCHEMA check their types. No defaults are printed: every key but
+    // `configuration` is required, and `configuration`'s default depends on the
+    // variant.
+    'mac-build': z
+      .looseObject({
+        bundleId: z
+          .string()
+          .optional()
+          .describe(
+            'REQUIRED. The variant’s bundle identifier (its ios.bundleIdentifier), e.g. "com.jhaa.naturesounds.preview". The ONLY app the install step copies into ~/Applications or replaces there; anything else at that path is refused.',
+          ),
+        configuration: z
+          .enum(['Debug', 'Release'])
+          .optional()
+          .describe(
+            'Optional. The Xcode build configuration. Absent: Debug for the "development" variant (a dev client, which loads its JS from Metro or an EAS update), Release for every other variant (embedded JS, no Metro, no dev launcher).',
+          ),
+        scheme: z
+          .string()
+          .optional()
+          .describe(
+            'REQUIRED. The workspace and scheme Expo generates for the variant (ios/<scheme>.xcworkspace after `APP_VARIANT=<variant> npx expo prebuild`), e.g. "NatureSoundsPreview". Asserted, never inferred from whatever ios/ holds, so a build of the wrong variant fails instead of launching. Also the app’s name in ~/Applications.',
+          ),
+        variant: z
+          .string()
+          .optional()
+          .describe(
+            'REQUIRED. The APP_VARIANT to prebuild and build for the Mac, e.g. "preview" or "development".',
+          ),
+      })
+      .optional()
+      .describe(
+        'mac-build: which variant `justin-sdk mac-build` builds as a Mac (Designed for iPad) app (home-base-0jeya.1). Set in the project file only. Its presence is also what makes the mac-build component apply to the repo.',
+      ),
     thread: z
       .looseObject({
         answerUi: z

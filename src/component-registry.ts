@@ -39,6 +39,7 @@ export const COMPONENT_NAMES = [
   'gh-actions',
   'beads',
   'eas',
+  'mac-build',
   'time-check',
   'usage-check',
   'thread-hooks',
@@ -83,6 +84,15 @@ export const COMPONENT_INCLUDE_IF: Partial<Record<ComponentName, string[]>> = {
    */
   beads: ['isBeadsRust'],
   eas: ['isExpo'],
+  /**
+   * NOT `isExpo` (home-base-0jeya.1): a Mac build is a choice made per app, not
+   * a property of every Expo app, and `isExpo` would put its scripts into every
+   * Expo repo that tracks `core`. The gate is the repo's own
+   * `componentConfig["mac-build"]` block — the same block the command needs to
+   * know which variant to build — so the scripts arrive only with the config
+   * that makes them work.
+   */
+  'mac-build': ['hasMacBuildConfig'],
   /**
    * The threads and status-report rules tell Claude to run `thread` commands,
    * so they apply only where `componentConfig.thread.enabled` resolves true

@@ -41,6 +41,7 @@ import {
 } from './eslint-setup';
 import {WORKFLOW_RELATIVE_PATH} from './gh-actions-setup';
 import {BASELINE_ENTRIES as GITIGNORE_BASELINE_ENTRIES} from './gitignore-setup';
+import {MAC_BUILD_SCRIPTS} from './mac-build-setup';
 import {
   DEFAULT_LINT_STAGED_CONFIG,
   POST_CHECKOUT_MARKER_BEGIN,
@@ -330,6 +331,13 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
       shared:
         script.key === 'prebuild' || script.key === 'eas-build-post-install',
     })),
+  },
+
+  'mac-build': {
+    ...EMPTY,
+    purpose:
+      'Mac (Designed for iPad) build scripts that call `justin-sdk mac-build` (applies where componentConfig["mac-build"] is set).',
+    scripts: MAC_BUILD_SCRIPTS.map((script) => ({...script})),
   },
 
   eslint: {

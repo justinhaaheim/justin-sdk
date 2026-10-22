@@ -524,6 +524,41 @@ void yargs(ARGV)
       process.exit(exitCode);
     },
   )
+  .command(
+    'mac-build',
+    'Build this Expo app for the Mac as a "Designed for iPad" app, launch it through Xcode, and copy it out of DerivedData into ~/Applications/<Scheme>.app (a previous copy of the same app goes to the Trash). The variant, scheme and bundle id come from componentConfig["mac-build"] in justin-sdk.config.json. Run in the app repo, via its build:mac / mac / build:mac:no-launch / mac:install scripts.',
+    (y) =>
+      y
+        .option('skip-prebuild', {
+          default: false,
+          describe:
+            'Incremental: skip `expo prebuild --clean` and let Xcode build alone. Only when nothing native changed (`bun run mac`).',
+          type: 'boolean',
+        })
+        .option('launch', {
+          default: true,
+          describe:
+            '--no-launch builds in the terminal only: no Xcode, no launch, no copy into ~/Applications (`bun run build:mac:no-launch`).',
+          type: 'boolean',
+        })
+        .option('install-only', {
+          default: false,
+          describe:
+            'Build nothing: copy the app Xcode last installed into ~/Applications (`bun run mac:install`).',
+          type: 'boolean',
+        }),
+    async (argv) => {
+      // Lazy: mac-install.ts uses zod, which must not be statically reachable
+      // from this file (tests/health-notices-cli.test.ts).
+      const {runMacBuild} = await import('./mac-build');
+      const exitCode = runMacBuild(process.cwd(), {
+        installOnly: argv['install-only'],
+        launch: argv.launch,
+        skipPrebuild: argv['skip-prebuild'],
+      });
+      process.exit(exitCode);
+    },
+  )
   // justin-loop (home-base-1r6d.33): a session chain whose control channel IS a
   // committed handoff bead. Running the command with no subcommand RUNS the
   // loop; `handoff` and `handoff validate` are what a session inside the loop

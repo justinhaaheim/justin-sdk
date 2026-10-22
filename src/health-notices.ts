@@ -235,6 +235,7 @@ export const ALL_COMMANDS = [
   'install',
   'justin-loop',
   'list',
+  'mac-build',
   'migrate-to-prime',
   'prime',
   'remove',

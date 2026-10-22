@@ -45,6 +45,8 @@ const COMPONENT_BLURBS: Record<ComponentName, string> = {
   'gh-actions': 'GitHub Actions workflows (signal on PR).',
   gitignore: 'The full baseline .gitignore.',
   husky: 'Git hooks (pre-commit → lint-staged).',
+  'mac-build':
+    'The build:mac / build:mac:fast / build:mac:no-launch / mac / mac:install scripts, all calling `justin-sdk mac-build`: build the app as a Mac (Designed for iPad) app, launch it through Xcode, and copy it out of DerivedData into ~/Applications/<Scheme>.app (our previous copy goes to the Trash; anything else there is refused). Applies only where componentConfig["mac-build"] names the variant, scheme and bundle id (includeIf hasMacBuildConfig).',
   prettier: 'Shared Prettier config + .prettierignore.',
   'thread-hooks':
     'UserPromptSubmit + Stop hooks running `thread capture`, which log every prompt and every Claude yield to ~/.local/state/justin-threads/messages/<sessionId>.jsonl, create this session’s thread bead in ~/Dev/threads on its FIRST PROMPT (so a session that never reaches a status report is still on the board, and one that is opened and never prompted leaves nothing), and keep the bead’s last messages current. INERT until componentConfig.thread.enabled is true (.capture defaults ON) — set it in the USER file; this installer writes no componentConfig block, because a project-level value would outrank it. Also a Stop hook running `thread stop-check` (armed by .enforce). Nothing runs at SessionStart: the old `thread start --hook` entry is retired, inert, and removed on re-apply when it is byte-identical to what the SDK wrote; .startOnSessionStart is deprecated and does nothing.',
