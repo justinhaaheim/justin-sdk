@@ -480,15 +480,17 @@ function xcodebuildTargetArgs(
 
 /**
  * The one failure every app hits the same way, so it is named after every
- * failed terminal build. Measured 2026-10-21: run from a Claude Code session,
- * xcodebuild reported "No Accounts" for both health-logger-rn and screenshot-app
- * although Xcode has an Apple ID configured, then fell back to the wildcard
- * "iOS Team Provisioning Profile: *", which lacks App Groups and push. That the
- * same command signs from Justin's own terminal is inferred (nature-sounds'
- * profile was fetched during his own build:mac on 2026-09-23), not re-measured.
+ * failed terminal build. Measured 2026-10-21: xcodebuild reported "No Accounts"
+ * for health-logger-rn and screenshot-app from a Claude Code session AND from
+ * Justin's own terminal, although Xcode lists an Apple ID, then fell back to the
+ * wildcard "iOS Team Provisioning Profile: *", which lacks App Groups and push.
+ * Apps whose cached profile already covers their capabilities kept building,
+ * which is why it looked app-specific. The newest profile Xcode had fetched was
+ * 2026-10-07; Xcode 27.1 was installed 2026-10-19 (that the update dropped the
+ * sign-in is inferred).
  */
 const SIGNING_HINT =
-  'If they say "No Accounts", or that a provisioning profile lacks a capability (App Groups, Push Notifications), xcodebuild could not use your Xcode account to fetch this app’s profile: check Xcode > Settings > Accounts, and run the command from your own terminal (a process that cannot reach your login keychain, such as an agent session, gets "No Accounts").';
+  'If they say "No Accounts", or that a provisioning profile lacks a capability (App Groups, Push Notifications), xcodebuild could not use an Xcode account to create this app’s profile. Apps whose cached profile already covers them still build, so this can hit one app and not another. Open Xcode > Settings > Accounts and sign in to your Apple ID again (or add it), then run this again. The full error list of the last build is in its Logs/Build folder under ~/Library/Developer/Xcode/DerivedData.';
 
 /**
  * Build in the terminal — the only way to see progress and read compiler errors
