@@ -123,6 +123,8 @@ It never writes inside the repo and always exits 0. Locally it shows you `doctor
 }
 ```
 
+If you have decided not to install them, put `"userLevelHooks": false` in `~/.config/justin-sdk/config.json`. `USER_LEVEL_SESSION_START` then passes with one line saying the hooks are off by your choice; delete the key to get the warning back. Absent, the check warns as above, and so does a user config that cannot be read or fails validation.
+
 The guard is in the hook string on purpose: an enrolled repo (the project hook owns it) and a machine without home-base's `justin-sdk-latest` on PATH both short-circuit before anything is spawned, so neither ever touches the network. In an unenrolled repo the UserPromptSubmit hook does run `justin-sdk-latest` on every prompt, which resolves the newest sha with `git ls-remote` each time. `--user-level` re-checks enrolment itself, because `CLAUDE_PROJECT_DIR` is not guaranteed to be set. The project root is `$CLAUDE_PROJECT_DIR`, else the git toplevel of the cwd, else the cwd — never a walk up the parent chain, so a session in `~/Downloads` or inside a subdirectory is not silenced by an unrelated ancestor.
 
 ## Chaining sessions: `justin-loop`

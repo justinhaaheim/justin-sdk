@@ -43,6 +43,7 @@ import {join} from 'path';
 
 import {hookEntriesFor} from './component-manifest';
 import {xdgStateHome} from './health-notices';
+import {hasDispatchEntry} from './hook-entries';
 import {formatRepoState, runDivergenceCheck} from './repo-status/prime-view';
 import {prettierMarkdown} from './rules/rules-file';
 import {userSettingsPath} from './user-level-hook';
@@ -107,6 +108,19 @@ export function repoStateHookPresence(
         command.includes('--user-level') === userLevel,
     );
     if (fires) return {kind: 'installed', where: file};
+    // A dispatch-mode repo (home-base-rtsx1.2) runs `repo-state --hook` from
+    // its UserPromptSubmit dispatcher entry: base-setup is in every repo's
+    // components, so that entry always runs it. Without this, session-start
+    // reads "absent", injects the repo state itself, arms nothing, and the
+    // dispatcher's copy fires on the first prompt as well: two copies. Project
+    // files only: the dispatcher is never a user-level hook.
+    if (
+      !userLevel &&
+      file !== userSettingsPath(env) &&
+      hasDispatchEntry(settings as Record<string, unknown>, 'UserPromptSubmit')
+    ) {
+      return {kind: 'installed', where: file};
+    }
   }
   if (unreadable.length > 0) {
     return {kind: 'unknown', why: `could not read ${unreadable.join(', ')}`};

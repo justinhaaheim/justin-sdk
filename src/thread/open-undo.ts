@@ -98,6 +98,7 @@ import {
   realProcessRunner,
   screenLines,
   screenSessionId,
+  SUGGESTION_EVIDENCE,
   workingIndicator,
 } from './pane-join';
 import {tildeText} from './part-one';
@@ -202,6 +203,8 @@ export interface UndoKept {
   reason: string;
   reasons: string[];
   sessionId: string;
+  /** yukaf.36 D3: panes whose box showed only Claude Code's suggestion. */
+  suggestions: GateSuggestion[];
   workspaceId: string | null;
 }
 
@@ -210,6 +213,8 @@ export interface UndoClosing {
   /** The claude pids to stop first; empty when no Claude process runs there. */
   pids: number[];
   sessionId: string;
+  /** yukaf.36 D3: panes whose box showed only Claude Code's suggestion. */
+  suggestions: GateSuggestion[];
   workspaceId: string;
 }
 
@@ -331,6 +336,25 @@ export interface PaneGate {
   reasons: string[];
   /** The session id the input box's status line shows, lowercased; null when none. */
   shown: string | null;
+  /**
+   * home-base-yukaf.36 D3: the text the input box shows when it is Claude
+   * Code's prompt suggestion (findInputBox `suggested`), else null. Such a box
+   * passes check 1 as an empty box; the output names the suggestion.
+   */
+  suggestion: string | null;
+}
+
+/** yukaf.36 D3: a pane whose box showed Claude Code's suggestion, not typing. */
+export interface GateSuggestion {
+  surfaceId: string;
+  /** The pane as cmux names it (surface:N), else its uuid. */
+  surfaceRef: string;
+  text: string;
+}
+
+/** yukaf.36 D3: one suggestion, in words, for every close output. */
+export function suggestionWords(found: GateSuggestion): string {
+  return `${found.surfaceRef} shows Claude Code's suggestion "${cut(found.text, 80)}", not unsent text, so it counts as empty: ${SUGGESTION_EVIDENCE}`;
 }
 
 /**
@@ -380,6 +404,7 @@ export function gatePane(input: {
         `the screen of ${label} could not be read: ${input.screen.reason}`,
       ],
       shown: null,
+      suggestion: null,
     };
   }
   const reasons: string[] = [];
@@ -393,7 +418,10 @@ export function gatePane(input: {
   let draft: PaneGate['draft'] = null;
   if (box != null) {
     const shown = screenSessionId(lines, box);
-    if (box.draft !== '') {
+    // yukaf.36 D3: Claude Code's suggestion is not unsent text. Only positive
+    // evidence marks it (findInputBox); anything else in the box keeps the
+    // workspace as before.
+    if (box.draft !== '' && !box.suggested) {
       draft = {sessionId: shown ?? input.sessionId, text: box.draft};
       reasons.push(`unsent text in the input box of ${label}`);
     }
@@ -446,13 +474,19 @@ export function gatePane(input: {
         );
       }
     }
-    return {claude, draft, reasons, shown};
+    return {
+      claude,
+      draft,
+      reasons,
+      shown,
+      suggestion: box.suggested ? box.draft : null,
+    };
   }
   if (claude.length > 0) {
     reasons.push(
       `${label} shows no Claude input box but a claude process runs on its tty: Claude is starting or showing a dialog`,
     );
-    return {claude, draft, reasons, shown: null};
+    return {claude, draft, reasons, shown: null, suggestion: null};
   }
   // F20 (home-base-yukaf.14): an unknown tty always keeps the pane, a blank
   // screen included. cmux returns an empty screen for a pane that has not
@@ -463,13 +497,13 @@ export function gatePane(input: {
     reasons.push(
       `${label} shows no Claude input box and its tty is unknown, so what runs there cannot be checked`,
     );
-    return {claude, draft, reasons, shown: null};
+    return {claude, draft, reasons, shown: null, suggestion: null};
   }
   const busy = input.procsOnTty.filter((proc) => !isShellScaffolding(proc));
   const [first] = busy;
   if (first != null) {
     reasons.push(`${label} is running ${cut(first.command, 70)}`);
-    return {claude, draft, reasons, shown: null};
+    return {claude, draft, reasons, shown: null, suggestion: null};
   }
   if (!idleShellScreen(lines)) {
     const last = lines.filter((line) => line.trim() !== '').at(-1) ?? '';
@@ -477,7 +511,7 @@ export function gatePane(input: {
       `${label} shows neither a Claude input box nor an idle shell prompt (last line: "${cut(last, 60)}")`,
     );
   }
-  return {claude, draft, reasons, shown: null};
+  return {claude, draft, reasons, shown: null, suggestion: null};
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +523,8 @@ export type Assessment =
       claude: Proc[];
       entry: RecordedWorkspace;
       kind: 'closable';
+      /** yukaf.36 D3: panes whose box showed only Claude Code's suggestion. */
+      suggestions: GateSuggestion[];
       windowId: string;
       workspaceId: string;
     }
@@ -498,6 +534,7 @@ export type Assessment =
       entry: RecordedWorkspace;
       kind: 'kept';
       reasons: string[];
+      suggestions: GateSuggestion[];
     };
 
 /** What one pass of the gates reads: the tree twice (windows; ttys), ps. */
@@ -530,6 +567,8 @@ export interface SurfacesGate {
   reasons: string[];
   /** Every distinct session id its panes' status lines show, lowercased. */
   sessions: string[];
+  /** yukaf.36 D3: panes whose box showed only Claude Code's suggestion. */
+  suggestions: GateSuggestion[];
 }
 
 /**
@@ -555,6 +594,7 @@ export async function gateSurfaces(
   const drafts: GateDraft[] = [];
   const claude: Proc[] = [];
   const sessions: string[] = [];
+  const suggestions: GateSuggestion[] = [];
   if (surfaceIds.length === 0) {
     reasons.push('cmux lists no pane in it, so nothing on it can be checked');
   }
@@ -595,6 +635,13 @@ export async function gateSurfaces(
     reasons.push(...gate.reasons);
     claude.push(...gate.claude);
     if (gate.draft != null) drafts.push({...gate.draft, surfaceId});
+    if (gate.suggestion != null) {
+      suggestions.push({
+        surfaceId,
+        surfaceRef: surface?.ref ?? surfaceId,
+        text: gate.suggestion,
+      });
+    }
     if (gate.shown != null && !sessions.includes(gate.shown)) {
       sessions.push(gate.shown);
     }
@@ -612,7 +659,7 @@ export async function gateSurfaces(
       );
     }
   }
-  return {claude, drafts, reasons, sessions};
+  return {claude, drafts, reasons, sessions, suggestions};
 }
 
 async function assessWorkspace(
@@ -626,6 +673,7 @@ async function assessWorkspace(
     entry,
     kind: 'kept',
     reasons,
+    suggestions: [],
   });
   if (entry.workspaceId == null) {
     return keep([
@@ -638,7 +686,7 @@ async function assessWorkspace(
   if (surfaceIds == null || windowId == null) {
     return {entry, kind: 'gone', workspaceId};
   }
-  const {claude, drafts, reasons} = await gateSurfaces(
+  const {claude, drafts, reasons, suggestions} = await gateSurfaces(
     surfaceIds,
     view,
     deps.run,
@@ -655,9 +703,16 @@ async function assessWorkspace(
     );
   }
   if (reasons.length > 0) {
-    return {drafts, entry, kind: 'kept', reasons};
+    return {drafts, entry, kind: 'kept', reasons, suggestions};
   }
-  return {claude, entry, kind: 'closable', windowId, workspaceId};
+  return {
+    claude,
+    entry,
+    kind: 'closable',
+    suggestions,
+    windowId,
+    workspaceId,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -876,6 +931,7 @@ function keptOf(
     reason: assessment.reasons.join('; '),
     reasons: assessment.reasons,
     sessionId: assessment.entry.sessionId,
+    suggestions: assessment.suggestions,
     workspaceId: assessment.entry.workspaceId,
   };
 }
@@ -1301,12 +1357,34 @@ async function verifyWindows(
 // Rendering
 // ---------------------------------------------------------------------------
 
-const LABELS = ['Session', 'Workspace', 'Claude', 'Stored', 'Why'].map(
-  (label) => ({
-    label,
-    value: '',
-  }),
-);
+const LABELS = [
+  'Session',
+  'Workspace',
+  'Claude',
+  'Input box',
+  'Stored',
+  'Why',
+].map((label) => ({
+  label,
+  value: '',
+}));
+
+/**
+ * yukaf.36 D3: the "Input box" field naming each pane whose box showed only
+ * Claude Code's suggestion; none when no pane did. Shared with close.ts.
+ */
+export function suggestionFields(
+  suggestions: readonly GateSuggestion[],
+): {label: string; value: string}[] {
+  return suggestions.length === 0
+    ? []
+    : [
+        {
+          label: 'Input box',
+          value: suggestions.map((found) => suggestionWords(found)).join('\n'),
+        },
+      ];
+}
 
 function block(
   title: string,
@@ -1377,7 +1455,7 @@ export function renderUndo(
         {
           label: 'Gates',
           value:
-            'an empty input box, Claude not working, no activity since the run (else kept)',
+            "an empty input box (one showing only Claude Code's suggestion counts as empty), Claude not working, no activity since the run (else kept)",
         },
       ],
       {color: style.color, indent: BODY_COLUMN, width: style.width},
@@ -1473,6 +1551,7 @@ export function renderUndo(
               [
                 {label: 'Session', value: entry.sessionId},
                 {label: 'Workspace', value: entry.workspaceId ?? 'unknown'},
+                ...suggestionFields(entry.suggestions),
                 ...entry.drafts.map((found) => ({
                   label: 'Stored',
                   value:
@@ -1515,6 +1594,7 @@ export function renderUndo(
                   label: 'Claude',
                   value: claudeWords(entry.pids, !state.dryRun),
                 },
+                ...suggestionFields(entry.suggestions),
               ],
               style,
             ),
@@ -1532,6 +1612,7 @@ export function renderUndo(
             [
               {label: 'Session', value: entry.sessionId},
               {label: 'Workspace', value: entry.workspaceId ?? 'unknown'},
+              ...suggestionFields(entry.suggestions),
               {label: 'Why', value: entry.reasons.join('\n')},
             ],
             style,
@@ -1727,6 +1808,7 @@ export async function undoOpen(
         name: entry.name,
         pids: assessment.claude.map((proc) => proc.pid),
         sessionId: entry.sessionId,
+        suggestions: assessment.suggestions,
         workspaceId: assessment.workspaceId,
       });
     }
@@ -1780,6 +1862,7 @@ export async function undoOpen(
         reason: 'the record could not be written first',
         reasons: ['the record could not be written first'],
         sessionId: closing.entry.sessionId,
+        suggestions: closing.suggestions,
         workspaceId: closing.workspaceId,
       });
     }
@@ -1836,6 +1919,7 @@ export async function undoOpen(
             reasons: [
               `what is open now could not be read again: ${again.reason}`,
             ],
+            suggestions: [],
           } satisfies Assessment);
     if (assessment.kind === 'gone') {
       state.gone.push({
@@ -1855,6 +1939,7 @@ export async function undoOpen(
           name: planned.entry.name,
           pids: assessment.claude.map((proc) => proc.pid),
           sessionId: planned.entry.sessionId,
+          suggestions: assessment.suggestions,
           workspaceId: assessment.workspaceId,
         });
       } else {

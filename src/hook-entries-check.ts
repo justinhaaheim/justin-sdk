@@ -1,0 +1,276 @@
+/**
+ * hook-entries-check — doctor's HOOK_ENTRIES check (home-base-rtsx1.3): do the
+ * SDK hook entries in this repo's .claude/settings.json match what `install`
+ * would write for its components and its hooks.dispatch mode?
+ *
+ * Justin, 2026-10-17: "I think it's fine to just report the discrepancy, but we
+ * also need to have tooling that fixes this in bulk via a justin-sdk sweep of
+ * some kind." So this REPORTS and never writes, and its fix names both repairs:
+ * `install` for this repo and `sweep --component install` for every enrolled
+ * repo (verified by dry run on ~/Dev/prompts, 2026-10-17: "install: would apply
+ * 12 component(s)", thread-hooks among them, which adds its missing nudge).
+ *
+ * Useful in BOTH modes, and today: two enrolled repos pinned at v0.42.0 lack
+ * the thread nudge entry and nothing said so.
+ *
+ * WHAT IT FINDS, per dispatched event:
+ *  - RUNS TWICE (error): a handler that more than one entry would run — its own
+ *    entry (exact or hand-edited) plus the dispatcher, or two of its own. This
+ *    is the one failure that does visible damage every turn.
+ *  - MISSING (warn): an entry `install` would write that is not there.
+ *  - STALE (warn): an entry from the other mode (a handler with its own entry
+ *    while dispatch is on, or run by the dispatcher while it is off), or a
+ *    dispatcher entry with the wrong matcher.
+ *  - EXTRA (warn): a dispatcher entry that runs no handler for this repo.
+ *  - DEAD (error, dispatch mode only): the dispatcher entry itself does not run.
+ *    Carried from home-base-nlho as a DRY RUN: `hook <Event> --dry-run` resolves
+ *    the config and lists handlers, spawning none, so doctor — which runs at
+ *    every session start — never records a fake message or fires a marker.
+ *
+ * UNKNOWN IS NOT CLEAN (critical rule 7): a settings.json or config that cannot
+ * be read is `cannot-check`, never "no hooks".
+ */
+
+import {spawnSync} from 'child_process';
+import {existsSync, readFileSync} from 'fs';
+import {join} from 'path';
+
+import {resolveComponents} from './component-registry';
+import {hookDispatchEnabled} from './hook-entries';
+import {
+  dispatchCommand,
+  DISPATCHED_EVENTS,
+  type DispatchedEvent,
+  dispatchMatcher,
+  HOOK_HANDLERS,
+} from './hook-registry';
+import {invokesSdk, sdkRunArgv} from './sdk-invocation';
+
+export type HookEntriesMode = 'dispatch' | 'per-handler';
+
+export type HookEntriesReport =
+  | {kind: 'cannot-check'; reason: string}
+  | {
+      dead: string[];
+      doubleRuns: string[];
+      extra: string[];
+      kind: 'checked';
+      /** How many SDK hook entries matched what install writes. */
+      matched: number;
+      missing: string[];
+      mode: HookEntriesMode;
+      stale: string[];
+    };
+
+/** What `hook <Event> --dry-run` did. Injectable so tests spawn nothing. */
+export type DryRun = (
+  event: DispatchedEvent,
+  projectRoot: string,
+) => {exitCode: number | null; stdout: string};
+
+/** The real dry run: the repo's own SDK, exactly as the hook entry invokes it. */
+const realDryRun: DryRun = (event, projectRoot) => {
+  const [bin, ...args] = sdkRunArgv(['hook', event, '--dry-run']);
+  const result = spawnSync(bin ?? 'bun', args, {
+    cwd: projectRoot,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      CLAUDE_PROJECT_DIR: projectRoot,
+      JUSTIN_SDK_HEALTH_NOTICES: 'off',
+    },
+    input: '',
+    timeout: 20_000,
+  });
+  return {exitCode: result.status, stdout: result.stdout ?? ''};
+};
+
+interface Entry {
+  commands: string[];
+  matcher: string | null;
+}
+
+function entriesFor(settings: Record<string, unknown>, event: string): Entry[] {
+  const hooks = settings.hooks as Record<string, unknown> | undefined;
+  const value = hooks?.[event];
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): Entry[] => {
+    if (entry == null || typeof entry !== 'object') return [];
+    const {hooks: inner, matcher} = entry as {
+      hooks?: unknown;
+      matcher?: unknown;
+    };
+    if (!Array.isArray(inner)) return [];
+    return [
+      {
+        commands: inner
+          .map((hook) => (hook as {command?: unknown} | null)?.command)
+          .filter((c): c is string => typeof c === 'string'),
+        matcher: typeof matcher === 'string' ? matcher : null,
+      },
+    ];
+  });
+}
+
+export function checkSdkHookEntries(
+  projectRoot: string,
+  options: {dryRun?: DryRun} = {},
+): HookEntriesReport {
+  const settingsPath = join(projectRoot, '.claude', 'settings.json');
+  let settings: Record<string, unknown> = {};
+  if (existsSync(settingsPath)) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      if (
+        parsed == null ||
+        typeof parsed !== 'object' ||
+        Array.isArray(parsed)
+      ) {
+        return {
+          kind: 'cannot-check',
+          reason: `${settingsPath} is not a JSON object`,
+        };
+      }
+      settings = parsed as Record<string, unknown>;
+    } catch (error) {
+      return {
+        kind: 'cannot-check',
+        reason: `could not read ${settingsPath} (${error instanceof Error ? error.message : String(error)})`,
+      };
+    }
+  }
+
+  const configPath = join(projectRoot, 'justin-sdk.config.json');
+  let config: unknown;
+  try {
+    config = JSON.parse(readFileSync(configPath, 'utf8'));
+  } catch (error) {
+    return {
+      kind: 'cannot-check',
+      reason: `could not read ${configPath} (${error instanceof Error ? error.message : String(error)})`,
+    };
+  }
+  const resolved = resolveComponents(config, projectRoot);
+  if (!resolved.ok) return {kind: 'cannot-check', reason: resolved.reason};
+
+  const mode: HookEntriesMode = hookDispatchEnabled(projectRoot)
+    ? 'dispatch'
+    : 'per-handler';
+  const handlers = HOOK_HANDLERS.filter((h) =>
+    resolved.components.includes(h.component),
+  );
+
+  const report = {
+    dead: [] as string[],
+    doubleRuns: [] as string[],
+    extra: [] as string[],
+    kind: 'checked' as const,
+    matched: 0,
+    missing: [] as string[],
+    mode,
+    stale: [] as string[],
+  };
+  const presentDispatchers: DispatchedEvent[] = [];
+
+  for (const event of DISPATCHED_EVENTS) {
+    const entries = entriesFor(settings, event);
+    const dispatcher = dispatchCommand(event);
+    const dispatcherEntry = entries.find((e) =>
+      e.commands.includes(dispatcher),
+    );
+    const needed = handlers.filter((h) =>
+      h.events.some((e) => e.event === event),
+    );
+
+    if (dispatcherEntry != null) {
+      presentDispatchers.push(event);
+      if (needed.length === 0) {
+        report.extra.push(
+          `${event}: \`${dispatcher}\` runs no handler for this repo's components`,
+        );
+      } else if (mode === 'dispatch') {
+        const want = dispatchMatcher(event);
+        if (dispatcherEntry.matcher !== want) {
+          report.stale.push(
+            `${event}: the dispatcher entry's matcher is ${dispatcherEntry.matcher ?? 'none'}; install writes ${want ?? 'none'}`,
+          );
+        } else {
+          report.matched += 1;
+        }
+      }
+    } else if (mode === 'dispatch' && needed.length > 0) {
+      report.missing.push(`${event}: \`${dispatcher}\``);
+    }
+
+    for (const handler of needed) {
+      const own = entries.flatMap((e) =>
+        e.commands.filter(
+          (c) =>
+            c === handler.command ||
+            (c !== dispatcher && invokesSdk(c) && c.includes(handler.id)),
+        ),
+      );
+      const runs = own.length + (dispatcherEntry == null ? 0 : 1);
+      if (runs > 1) {
+        report.doubleRuns.push(
+          `${event}: ${handler.id} runs ${runs} times (${[
+            ...own.map((c) => `\`${c}\``),
+            ...(dispatcherEntry == null ? [] : [`\`${dispatcher}\``]),
+          ].join(', ')})`,
+        );
+        continue;
+      }
+      if (runs === 0) {
+        if (mode === 'per-handler') {
+          report.missing.push(`${event}: \`${handler.command}\``);
+        }
+        continue;
+      }
+      if (mode === 'dispatch' && own.length === 1) {
+        report.stale.push(
+          `${event}: ${handler.id} has its own entry (\`${own[0]}\`); with hooks.dispatch on, \`${dispatcher}\` should run it`,
+        );
+      } else if (mode === 'per-handler' && dispatcherEntry != null) {
+        report.stale.push(
+          `${event}: ${handler.id} runs from \`${dispatcher}\` although hooks.dispatch is off`,
+        );
+      } else if (mode === 'per-handler' && own[0] === handler.command) {
+        report.matched += 1;
+      }
+      // Otherwise a hand-edited spelling in per-handler mode: it runs once, so
+      // there is nothing to repair, but it is not what install writes either,
+      // so it is not counted as matched.
+    }
+  }
+
+  // DEAD: does the dispatcher entry run at all? One dry run proves the path
+  // from settings.json through `bun run justin-sdk` to the dispatcher; the
+  // plan it prints is the same code every event uses.
+  const probe = presentDispatchers[0];
+  if (mode === 'dispatch' && probe != null) {
+    const result = (options.dryRun ?? realDryRun)(probe, projectRoot);
+    let ok = false;
+    let reason = `exit ${result.exitCode ?? 'none'}`;
+    try {
+      const body = JSON.parse(result.stdout) as {
+        ok?: unknown;
+        reason?: unknown;
+      };
+      ok = result.exitCode === 0 && body.ok === true;
+      if (typeof body.reason === 'string') reason = body.reason;
+    } catch {
+      reason = `${reason}, and its output is not JSON`;
+    }
+    if (!ok) {
+      report.dead.push(
+        `\`${dispatchCommand(probe)} --dry-run\` failed (${reason}), so no dispatched handler runs here`,
+      );
+    }
+  }
+
+  return report;
+}
+
+/** The repairs, named for this repo and for the fleet (Justin, 2026-10-17). */
+export const HOOK_ENTRIES_FIX =
+  'Run `bun run justin-sdk install` here, or `bun run justin-sdk sweep --component install` to repair every enrolled repo. A hand-edited entry that runs twice is yours to delete: install never removes what it did not write.';

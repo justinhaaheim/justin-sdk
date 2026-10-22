@@ -31,7 +31,12 @@ import {existsSync, readFileSync} from 'fs';
 import {resolve} from 'path';
 
 import {BEADS_MISE_TOOL_KEY} from './beads-setup';
-import {COMPONENT_NAMES, type ComponentName} from './component-registry';
+import {
+  COMPONENT_NAMES,
+  type ComponentName,
+  configNameFor,
+  resolveComponents,
+} from './component-registry';
 import {EAS_SCRIPTS} from './eas-setup';
 import {
   ESLINT_CONFIG_TARGET,
@@ -52,6 +57,7 @@ import {
   SIGNAL_SOURCE_PRETTIER_KEY,
   SIGNAL_SOURCE_PRETTIER_SCRIPT,
 } from './prettier-setup';
+import {eventsForComponent, hasDispatchEntry} from './hook-entries';
 import {isSdkEmittedCommand} from './sdk-invocation';
 import {
   THREAD_CAPTURE_HOOK_COMMAND,
@@ -576,6 +582,21 @@ function readJsonFile(path: string): Record<string, unknown> | null {
   }
 }
 
+/**
+ * Does this repo's config resolve to `name`? False when the config is missing
+ * or cannot be resolved: a dispatcher entry is only evidence for a component
+ * the dispatcher would actually run, and an unresolvable config runs nothing.
+ */
+function componentIsResolved(
+  projectRoot: string,
+  name: ComponentName,
+): boolean {
+  const config = readJsonFile(resolve(projectRoot, 'justin-sdk.config.json'));
+  if (config == null) return false;
+  const resolved = resolveComponents(config, projectRoot);
+  return resolved.ok && resolved.components.includes(configNameFor(name));
+}
+
 /** Every hook COMMAND string registered for one event, flattened. */
 export function hookEntriesFor(
   settings: Record<string, unknown>,
@@ -649,6 +670,22 @@ export function componentInstalledEvidence(
           installed: true,
         };
       }
+    }
+    // Dispatch mode (home-base-rtsx1.2): the component has no entry of its
+    // own; the shared dispatcher entry runs it — but only while the repo's
+    // config lists it, because the dispatcher runs listed components only. So
+    // a dispatcher entry is evidence for THIS component exactly when the
+    // config resolves to it. thread-hooks needs this most: its hook entries
+    // are its only evidence, so without it every dispatch repo would read
+    // "thread-hooks not installed" and advise an `install` that cannot help.
+    const dispatched = eventsForComponent(configNameFor(name)).find((event) =>
+      hasDispatchEntry(settings, event),
+    );
+    if (dispatched != null && componentIsResolved(projectRoot, name)) {
+      return {
+        because: `.claude/settings.json ${dispatched} (hook dispatcher)`,
+        installed: true,
+      };
     }
   }
 

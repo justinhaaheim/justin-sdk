@@ -29,6 +29,13 @@
 import {basename, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
+import {
+  applyDispatchForComponent,
+  describeClearedDispatchEntries,
+  describeDispatchOutcome,
+  hookDispatchEnabled,
+  removeDispatchEntriesForComponent,
+} from './hook-entries';
 import {sdkRun, sdkScript, upsertHookCommand} from './sdk-invocation';
 import {
   ensureDir,
@@ -101,14 +108,37 @@ export function stepUsageCheckHooks(projectRoot: string): boolean {
   ensureDir(settingsDir);
 
   const settings = readJson(settingsPath) ?? {};
+
+  // hooks.dispatch on (home-base-rtsx1.2): the UserPromptSubmit and
+  // PostToolBatch dispatcher entries run usage-check, and its own entries are
+  // taken back.
+  if (hookDispatchEnabled(projectRoot)) {
+    const outcome = applyDispatchForComponent(settings, 'usage-check-setup');
+    for (const line of describeDispatchOutcome(outcome)) {
+      console.log(`  ${line}`);
+    }
+    if (outcome.changed) writeJson(settingsPath, settings);
+    success(
+      `.claude/settings.json: usage-check runs from the ${USAGE_CHECK_HOOK_EVENTS.join(' + ')} dispatcher entries`,
+    );
+    return true;
+  }
+
   const added: string[] = [];
   for (const event of USAGE_CHECK_HOOK_EVENTS) {
     if (addUsageCheckHook(settings, event)) {
       added.push(event);
     }
   }
+  const cleared = removeDispatchEntriesForComponent(
+    settings,
+    'usage-check-setup',
+  );
+  for (const line of describeClearedDispatchEntries(cleared)) {
+    console.log(`  ${line}`);
+  }
 
-  if (added.length === 0) {
+  if (added.length === 0 && cleared.length === 0) {
     success('.claude/settings.json already has the usage-check hooks');
     return true;
   }

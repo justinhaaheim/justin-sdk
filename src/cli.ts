@@ -23,8 +23,14 @@
  *    full hook, runThreadNudgeHook, with the payload already read — stdin can
  *    be read only once.
  *
- * Every other argv — `thread nudge --help` included — goes to cli-main.ts
- * untouched, so help still prints help and does nothing else.
+ * The hook dispatcher (`hook <Event>`, optionally `--dry-run`, home-base-rtsx1.1)
+ * answers here too, for the same reason: in a dispatch-mode repo it is the
+ * entry for EVERY prompt, tool batch, Bash call and turn end, and it needs
+ * nothing from the command tree. Its handlers are children that come back
+ * through this file, so `thread nudge` keeps its own fast path.
+ *
+ * Every other argv — `thread nudge --help` and `hook --help` included — goes to
+ * cli-main.ts untouched, so help still prints help and does nothing else.
  */
 
 import {readFileSync} from 'node:fs';
@@ -56,7 +62,22 @@ function provablySilent(raw: string): boolean {
 
 const argv = process.argv.slice(2);
 const explain = argv.length === 3 && argv[2] === '--explain';
-if (
+
+/** `hook <Event>` or `hook <Event> --dry-run`, and nothing else. */
+const hookEvent =
+  argv[0] === 'hook' &&
+  argv[1] != null &&
+  !argv[1].startsWith('-') &&
+  (argv.length === 2 || (argv.length === 3 && argv[2] === '--dry-run'))
+    ? argv[1]
+    : null;
+
+if (hookEvent != null) {
+  const {runHookCommand} = await import('./hook-dispatch');
+  process.exit(
+    await runHookCommand({dryRun: argv.length === 3, event: hookEvent}),
+  );
+} else if (
   argv[0] === 'thread' &&
   argv[1] === 'nudge' &&
   (argv.length === 2 || explain)

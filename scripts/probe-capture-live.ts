@@ -31,6 +31,7 @@ import {existsSync, readdirSync, readFileSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {join, resolve} from 'node:path';
 
+import {hasDispatchEntry} from '../src/hook-entries';
 import {captureRunLogPath, messagesDir} from '../src/thread/archive';
 import {readMessageLogAt} from '../src/thread/message-log';
 import {gateSpend} from './spend-gate';
@@ -129,14 +130,23 @@ function readOrNull(path: string): string | null {
   }
 }
 
-/** Both capture hooks present in the repo's committed settings? */
+/**
+ * Both capture hooks present in the repo's committed settings? Either as their
+ * own entries or, in a dispatch-mode repo (home-base-rtsx1.2), as the event's
+ * dispatcher entry, which runs `thread capture` whenever thread-hooks is in the
+ * repo's components.
+ */
 function captureHooksInstalled(cwd: string): string | null {
   const raw = readOrNull(join(cwd, '.claude', 'settings.json'));
   if (raw == null) return `no ${cwd}/.claude/settings.json`;
-  const hooks = (JSON.parse(raw) as {hooks?: Record<string, unknown>}).hooks;
-  for (const event of ['UserPromptSubmit', 'Stop']) {
-    if (!JSON.stringify(hooks?.[event] ?? []).includes('thread capture')) {
-      return `${event} has no \`thread capture\` hook in ${cwd}/.claude/settings.json`;
+  const settings = JSON.parse(raw) as Record<string, unknown>;
+  const hooks = settings.hooks as Record<string, unknown> | undefined;
+  for (const event of ['UserPromptSubmit', 'Stop'] as const) {
+    if (
+      !JSON.stringify(hooks?.[event] ?? []).includes('thread capture') &&
+      !hasDispatchEntry(settings, event)
+    ) {
+      return `${event} has no \`thread capture\` hook (and no \`hook ${event}\` dispatcher entry) in ${cwd}/.claude/settings.json`;
     }
   }
   return null;

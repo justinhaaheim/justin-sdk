@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.49.2",
+  "version": "0.49.3",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -13,6 +13,7 @@
     "e2e:thread-answer-web": "bun scripts/e2e-thread-answer-web.ts",
     "measure:br-export-clobber": "bun scripts/measure-br-export-clobber.ts",
     "measure:br-import-only": "bun scripts/measure-br-import-only.ts",
+    "measure:hook-dispatch": "bun scripts/measure-hook-dispatch.ts",
     "measure:thread-hook": "bun scripts/measure-thread-hook.ts",
     "measure:inbox": "bun scripts/measure-inbox.ts",
     "measure:session-line": "bun scripts/measure-session-line.ts",

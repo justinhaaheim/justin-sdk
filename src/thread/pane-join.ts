@@ -533,13 +533,61 @@ export function readSessionFile(path: string): SourceRead<SessionFile> {
 export interface InputBox {
   /** Line index of the bottom rule. */
   bottom: number;
-  /** What is typed on the input line, no-break spaces stripped; '' = empty. */
+  /**
+   * The text on the input line, no-break spaces stripped; '' = empty. It is
+   * what the screen shows, which is Claude Code's suggestion when
+   * `suggested` is true.
+   */
   draft: string;
   /** Line index of the ❯ line. */
   prompt: number;
+  /**
+   * home-base-yukaf.36 D1: true when `draft` is Claude Code's prompt
+   * suggestion, drawn in an EMPTY box, not text anyone typed. True ONLY on
+   * positive evidence (see EMPTY_INPUT_FOOTER); without it the text counts
+   * as typed, exactly as before. Always false for an empty box.
+   */
+  suggested: boolean;
   /** Line index of the top rule. */
   top: number;
 }
+
+/**
+ * home-base-yukaf.36 D1: the footer hint Claude Code draws under its input
+ * box ONLY while nothing is typed: "… · ← 19 agents" ("← 1 agent", "← 99+
+ * agents"). A prompt suggestion is drawn in the box as a placeholder,
+ * byte-identical to typed text in `cmux read-screen` (no colour), so this hint
+ * is the only thing on screen that tells the two apart.
+ *
+ * Read in the minified Claude Code binaries (rg -a, 2026-10-22):
+ * - 2.1.308: the footer (TYe) renders the hint `cj({available:
+ *   Ve&&Ce&&!Bo&&!ne})` only in slots gated on `ml=Ve&&!ar&&Ce&&!Bo&&!ne`
+ *   (also its `Sr` and `Os` placements), where `Ce` is its `isInputEmpty`
+ *   prop. That prop is `!suppressHint`, the prompt input passes
+ *   `suppressHint:!xt`, and `xt=xe(draftStore, ede)` with
+ *   `ede=(h)=>h.value.length===0`: the TYPED value, not the placeholder. The
+ *   prompt-suggestion hook (Qye) gets the same `isInputEmpty:xt` and returns
+ *   no suggestion unless it is true.
+ * - 2.1.289 (most of Justin's panes): the same chain, `Oee=(h)=>h.value
+ *   .length===0` → `pwe=!yt` → `$n=!Rt` → footer dHe's `isInputEmpty:Pe` →
+ *   `oi=qe&&!Un&&Pe&&!Ro&&!he` gates the "agents" and "interrupt_agents" slots
+ *   that render the hint (Cze).
+ * - 2.1.304 to 2.1.307 call it as in 2.1.308. Its only other caller is a
+ *   full-screen history view that has no input box.
+ * Measured live the same day (marker D8D2A14B-14FC-489F-A593-153298E72110):
+ * the suffix shows with an empty box or a suggestion, and goes as soon as
+ * anything is typed, Tab-inserted suggestion text included.
+ *
+ * Absence proves nothing: with no agents, or a version without the hint,
+ * no line ends this way. It matches at the end of a line, after " · " or as
+ * the line's only content; the mode text before it varies (-- INSERT --, vim
+ * NORMAL, plan mode).
+ */
+const EMPTY_INPUT_FOOTER = /(?:^|\s·)\s*←\s+\d+\+?\s+agents?$/u;
+
+/** The evidence, in words, for every output that names a suggestion (D2, D3). */
+export const SUGGESTION_EVIDENCE =
+  'the line under the box ends with "← N agents", which Claude Code draws only while nothing is typed';
 
 /**
  * U+00A0, which Claude Code prints after ❯ on an empty input line. Built from
@@ -561,7 +609,8 @@ export function screenLines(text: string): string[] {
  * no rule above it), a dialog or menu that replaced the box, or a screen cut
  * off before the bottom rule. The top rule can carry a label (a named
  * session: "──── 2026-10-08 09:00 daily-loop-1 ─"), so only the bottom rule
- * must be pure ─.
+ * must be pure ─. `suggested` (yukaf.36 D1) is read from the lines below the
+ * bottom rule only, so a hint quoted in the conversation above never counts.
  */
 export function findInputBox(lines: readonly string[]): InputBox | null {
   for (let prompt = lines.length - 1; prompt > 0; prompt -= 1) {
@@ -574,7 +623,10 @@ export function findInputBox(lines: readonly string[]): InputBox | null {
         .join('\n')
         .replaceAll(NO_BREAK_SPACE, ' ')
         .trim();
-      return {bottom, draft: typed, prompt, top: prompt - 1};
+      const suggested =
+        typed !== '' &&
+        lines.slice(bottom + 1).some((below) => EMPTY_INPUT_FOOTER.test(below));
+      return {bottom, draft: typed, prompt, suggested, top: prompt - 1};
     }
     return null;
   }

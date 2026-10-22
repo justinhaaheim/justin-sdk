@@ -864,3 +864,87 @@ describe('failures', () => {
     expect(readLog(w.logPath).at(-1)?.outcome).toStartWith('failed: wait-exit');
   });
 });
+
+describe("Claude Code's prompt suggestion (home-base-yukaf.36 D3)", () => {
+  /**
+   * Real captures, cut to the box and the lines under it (2026-10-22):
+   * surface:13 shows Claude Code's suggestion "push main" with the footer
+   * ending "· ← 19 agents"; surface:59 holds "Q2 Fix A is the right one. Q3",
+   * typed by Justin, and its footer has no such ending.
+   */
+  const FIXTURES = join(import.meta.dir, 'fixtures', 'prompt-suggestion');
+  const real = (file: string, shownId: string, session: string): string =>
+    [
+      '⏺ Done: the tests pass.',
+      '',
+      '✻ Cooked for 3m 2s',
+      '',
+      readFileSync(join(FIXTURES, file), 'utf8')
+        .replace(shownId, session)
+        .trimEnd(),
+    ].join('\n');
+  const suggestionClaude = (session: string): string =>
+    real(
+      's13-suggestion-push-main.txt',
+      '9ba5e2fa-8bc5-4e90-b6ef-a986c897e5d1',
+      session,
+    );
+  const typedClaude = (session: string): string =>
+    real('s59-typed-q2.txt', '3b961d66-d405-4b14-be5f-356f8fe201e8', session);
+
+  test('a box showing only the suggestion passes check 1: closed, nothing stored, and its Input box line names the suggestion', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: [suggestionClaude(sid(1))]}]),
+      options: {workspaces: [wsId(1)]},
+      procs: [claudeProc(1)],
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(0);
+    expect(writes(w)).toEqual([
+      `log ${wsId(1)} closing`,
+      'kill 1001',
+      `close-workspace ${wsId(1)} --window ${winId(1)}`,
+      `log ${wsId(1)} closed`,
+    ]);
+    expect(
+      existsSync(
+        inputDraftPath(sid(1), {JUSTIN_THREADS_STATE_DIR: w.stateDir}),
+      ),
+    ).toBe(false);
+    expect(result.state?.closed[0]?.suggestions).toEqual([
+      {surfaceId: surfId(1), surfaceRef: 'surface:1', text: 'push main'},
+    ]);
+    expect(result.output).toContain('Closed (1)');
+    expect(result.output).toContain(
+      `Input box:  surface:1 shows Claude Code's suggestion "push main", not unsent text, so it counts as empty: the line under the box ends with "← N agents"`,
+    );
+  });
+
+  test('--dry-run: the suggestion pane would close, the typed one is kept with its text', async () => {
+    const w = world({
+      model: oneWindow([
+        {n: 1, screens: [suggestionClaude(sid(1))]},
+        {n: 2, screens: [typedClaude(sid(2))]},
+      ]),
+      options: {dryRun: true, workspaces: [wsId(1), wsId(2)]},
+      procs: [claudeProc(1), claudeProc(2)],
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(0);
+    expect(writes(w)).toEqual([]);
+    expect(result.state?.planned.map((entry) => entry.workspaceId)).toEqual([
+      wsId(1),
+    ]);
+    expect(result.state?.kept[0]?.reasons).toEqual([
+      'unsent text in the input box of pane surface:2',
+    ]);
+    expect(result.output).toContain('Would close (1)');
+    expect(result.output).toContain(
+      `surface:1 shows Claude Code's suggestion "push main"`,
+    );
+    expect(result.output).toContain('Q2 Fix A is the right one. Q3');
+    expect(result.output).toContain(
+      'Would close 1, kept 1 (1 with unsent text), not found 0.',
+    );
+  });
+});

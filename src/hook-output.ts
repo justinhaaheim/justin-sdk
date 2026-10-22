@@ -195,3 +195,215 @@ export function stopBlockJson(reason: string): StopBlockJson {
     systemMessage: mirrorForJustin(stripAnsi(reason)),
   };
 }
+
+// ---------------------------------------------------------------------------
+// Merging several handlers into one hook output (home-base-rtsx1.1)
+// ---------------------------------------------------------------------------
+
+/** What one handler child process did, as the dispatcher observed it. */
+export interface HandlerRunResult {
+  /** The exit code, or null when the child never exited on its own. */
+  exitCode: number | null;
+  id: string;
+  /** Why the child could not be started, or null when it started. */
+  spawnError: string | null;
+  stderr: string;
+  stdout: string;
+  /** True when the dispatcher stopped it at its time limit. */
+  timedOut: boolean;
+  timeoutMs: number;
+}
+
+/** What the dispatcher prints and exits with. */
+export interface MergedHookOutput {
+  exitCode: 0 | 2;
+  stderr: string;
+  /** One JSON object and a newline, or '' when nobody said anything. */
+  stdout: string;
+}
+
+/** The output keys a handler may print. Anything else is reported, not passed. */
+const KNOWN_OUTPUT_KEYS = new Set([
+  'continue',
+  'decision',
+  'hookSpecificOutput',
+  'reason',
+  'stopReason',
+  'suppressOutput',
+  'systemMessage',
+]);
+
+function firstLine(text: string): string | null {
+  const line = text
+    .split('\n')
+    .map((part) => part.trim())
+    .find((part) => part !== '');
+  return line ?? null;
+}
+
+function parseOneObject(stdout: string): Record<string, unknown> | null {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    return parsed != null &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Merge every handler's output into the ONE output Claude Code reads from the
+ * `hook <Event>` entry.
+ *
+ * WHAT IS PRESERVED, AND WHY EACH RULE IS SAFE:
+ *  - Each handler's `additionalContext` and `systemMessage` pass through
+ *    verbatim, joined by a blank line in handler order. Claude Code already
+ *    joins several hooks' contexts ("When several hooks return
+ *    additionalContext for the same event, Claude receives all of the values",
+ *    hooks reference, read 2026-10-17), and time-check and usage-check find
+ *    their own earlier notices in the transcript by exact text, so nothing is
+ *    reworded. Nothing is mirrored again: each handler already mirrored itself.
+ *  - A `decision: "block"` from any handler blocks; the reasons are joined.
+ *  - A handler that EXITS 2 (thread stop-check blocks that way) makes the
+ *    dispatcher exit 2 with that handler's stderr, exactly as Claude Code would
+ *    have treated the handler on its own. stdout is still printed: "Claude Code
+ *    still reads the JSON output fields, but they can't override the block".
+ *    stderr then carries ONLY the blocking handlers' text, because on exit 2 it
+ *    is what Claude is told.
+ *
+ * A FAILED HANDLER IS NAMED, NEVER SWALLOWED (critical rule 7), and never costs
+ * the others their output: one that did not start, timed out, exited with any
+ * code other than 0 or 2, or printed something that is not one JSON object gets
+ * a line in `systemMessage` with what happened, and everyone else's output is
+ * kept. Exiting non-zero for it instead would make Claude Code discard every
+ * other handler's JSON.
+ */
+export function mergeHandlerOutputs(
+  event: string,
+  runs: readonly HandlerRunResult[],
+): MergedHookOutput {
+  const messages: string[] = [];
+  const contexts: string[] = [];
+  const blockReasons: string[] = [];
+  const stopReasons: string[] = [];
+  const failures: string[] = [];
+  const blockingStderr: string[] = [];
+  const passthroughStderr: string[] = [];
+  let stopContinuing = false;
+  // Tracked apart from blockingStderr: a handler that exits 2 blocks whether
+  // or not it wrote a reason.
+  let blocking = false;
+
+  for (const run of runs) {
+    if (run.spawnError != null) {
+      failures.push(`${run.id} did not start (${run.spawnError})`);
+      continue;
+    }
+    if (run.timedOut) {
+      failures.push(
+        `${run.id} was stopped after ${run.timeoutMs / 1000} s without finishing`,
+      );
+      continue;
+    }
+
+    const stderr = run.stderr.trimEnd();
+    if (run.exitCode !== 0 && run.exitCode !== 2) {
+      const detail = firstLine(stderr);
+      failures.push(
+        `${run.id} failed (exit ${run.exitCode ?? 'unknown'})${detail == null ? '' : `: ${detail}`}`,
+      );
+      continue;
+    }
+    if (run.exitCode === 2) {
+      blocking = true;
+      if (stderr !== '') blockingStderr.push(stderr);
+    } else if (stderr !== '') {
+      passthroughStderr.push(
+        stderr
+          .split('\n')
+          .map((line) => `[${run.id}] ${line}`)
+          .join('\n'),
+      );
+    }
+
+    if (run.stdout.trim() === '') continue;
+    const json = parseOneObject(run.stdout.trim());
+    if (json == null) {
+      failures.push(`${run.id} printed output that is not one JSON object`);
+      continue;
+    }
+
+    const unknown = Object.keys(json).filter(
+      (key) => !KNOWN_OUTPUT_KEYS.has(key),
+    );
+    if (unknown.length > 0) {
+      failures.push(
+        `${run.id} printed output keys the dispatcher does not pass on: ${unknown.join(', ')}`,
+      );
+    }
+    if (typeof json.systemMessage === 'string' && json.systemMessage !== '') {
+      messages.push(json.systemMessage);
+    }
+    const specific = json.hookSpecificOutput as
+      | {additionalContext?: unknown}
+      | undefined;
+    if (
+      specific != null &&
+      typeof specific.additionalContext === 'string' &&
+      specific.additionalContext !== ''
+    ) {
+      contexts.push(specific.additionalContext);
+    }
+    if (json.decision === 'block') {
+      blockReasons.push(
+        typeof json.reason === 'string' && json.reason !== ''
+          ? json.reason
+          : `${run.id} blocked without a reason`,
+      );
+    }
+    if (json.continue === false) {
+      stopContinuing = true;
+      if (typeof json.stopReason === 'string' && json.stopReason !== '') {
+        stopReasons.push(json.stopReason);
+      }
+    }
+  }
+
+  const failureLines = failures.map(
+    (failure) => `⚠️ justin-sdk hook ${event}: ${failure}`,
+  );
+  const systemMessage = [...messages, ...failureLines].join('\n\n');
+
+  const output: Record<string, unknown> = {};
+  if (stopContinuing) {
+    output.continue = false;
+    if (stopReasons.length > 0) output.stopReason = stopReasons.join('\n\n');
+  }
+  if (blockReasons.length > 0) {
+    output.decision = 'block';
+    output.reason = blockReasons.join('\n\n');
+  }
+  if (contexts.length > 0) {
+    output.hookSpecificOutput = {
+      additionalContext: contexts.join('\n\n'),
+      hookEventName: event,
+    };
+  }
+  if (systemMessage !== '') output.systemMessage = systemMessage;
+
+  return {
+    exitCode: blocking ? 2 : 0,
+    stderr: blocking
+      ? blockingStderr.length > 0
+        ? `${blockingStderr.join('\n')}\n`
+        : ''
+      : passthroughStderr.length > 0
+        ? `${passthroughStderr.join('\n')}\n`
+        : '',
+    stdout:
+      Object.keys(output).length === 0 ? '' : `${JSON.stringify(output)}\n`,
+  };
+}

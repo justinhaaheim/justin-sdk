@@ -27,10 +27,15 @@
  *
  * WHAT A SCREEN CAN AND CANNOT SAY (measured on the fixtures in
  * scripts/__fixtures__/pane-backfill and 1,029 input boxes in the 24 cmux
- * captures of 2026-10-17, Claude Code 2.1.302): an empty box is `❯` plus
- * U+00A0 and nothing else — no placeholder hint is drawn — so findInputBox
- * reads it as ''. `read-screen` is plain text: autocomplete or suggestion text
- * drawn dim after the cursor cannot be told from typed text, and is read as
+ * captures of 2026-10-17, Claude Code 2.1.302): an empty box with nothing in
+ * it is `❯` plus U+00A0, so findInputBox reads it as ''. `read-screen` is
+ * plain text, so Claude Code's prompt suggestion (a suggested next prompt it
+ * draws dimmed in an EMPTY box after a turn, home-base-yukaf.36) reads exactly
+ * like typed text. findInputBox marks it `suggested` only when the line under
+ * the box ends with "← N agents" (pane-join.ts EMPTY_INPUT_FOOTER); such a box
+ * counts as EMPTY here (D2): nothing is stored, a stored draft is cleared as
+ * for an empty box, and the pane is listed under "Claude's suggestion, not
+ * your typing" with its text. Without that hint a suggestion is read as
  * typed. A draft taller than the screen pushes the box's top rule off it: no
  * box is found, and that pane is not a Claude pane to this scan.
  *
@@ -88,6 +93,7 @@ import {
   SCREEN_CONCURRENCY,
   screenLines,
   screenSessionId,
+  SUGGESTION_EVIDENCE,
 } from './pane-join';
 import {tildeText} from './part-one';
 import {liveSocketPath, socketSettingsJson} from './respawn';
@@ -134,6 +140,11 @@ export interface FoundDraft extends PanePlace {
 export interface ClearedDraft {
   repo: string | null;
   sessionId: string;
+  /**
+   * yukaf.36 D2: the suggestion the box showed when a draft was cleared as
+   * 'emptyBox' because the box held only Claude Code's suggestion; else null.
+   */
+  suggestion: string | null;
   /** The pane the box was seen empty in; null for a draft cleared as sent elsewhere. */
   surfaceRef: string | null;
   text: string;
@@ -143,22 +154,34 @@ export interface ClearedDraft {
 export interface UnplacedDraftPane {
   /** The text in its box, '' when empty: printed, never stored. */
   draft: string;
+  /** yukaf.36: the text is Claude Code's suggestion, not typed. */
+  suggested: boolean;
   surfaceId: string | null;
   surfaceRef: string;
   why: string;
   workspaceId: string | null;
 }
 
+/**
+ * yukaf.36 D2: a placed pane whose box shows only Claude Code's suggestion.
+ * Nothing is stored for it; it is listed so the text never vanishes silently.
+ */
+export interface SuggestionPane extends PanePlace {
+  text: string;
+}
+
 export interface ScanResult {
   /** Claude panes (an input box was found on screen). */
   claudePanes: number;
   cleared: ClearedDraft[];
-  /** Placed panes whose box was empty. */
+  /** Placed panes whose box was empty (a box showing only a suggestion is counted in `suggestions`). */
   emptyPlaced: number;
   /** Store writes, store reads, and sources that failed: each named. */
   failures: string[];
   found: FoundDraft[];
   kind: 'scanned';
+  /** yukaf.36 D2: placed panes showing Claude Code's suggestion, not typing. */
+  suggestions: SuggestionPane[];
   surfacesRead: number;
   unplaced: UnplacedDraftPane[];
   unreadable: {reason: string; surfaceRef: string}[];
@@ -273,6 +296,8 @@ function repoResolver(
 interface ClaudePane {
   draft: string;
   shownId: string | null;
+  /** yukaf.36 D1: `draft` is Claude Code's suggestion (findInputBox). */
+  suggested: boolean;
   surface: LiveSurface;
 }
 
@@ -312,6 +337,7 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
     panes.push({
       draft: box.draft,
       shownId: screenSessionId(lines, box),
+      suggested: box.suggested,
       surface,
     });
   }
@@ -359,10 +385,11 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
 
   const repoOf = repoResolver(deps.env, store.ok ? store.value : null);
   const unplaced: UnplacedDraftPane[] = [];
-  const placed: (PanePlace & {draft: string})[] = [];
+  const placed: (PanePlace & {draft: string; suggested: boolean})[] = [];
   for (const pane of panes) {
     const base = {
       draft: pane.draft,
+      suggested: pane.suggested,
       surfaceId: pane.surface.id ?? null,
       surfaceRef: pane.surface.ref,
       workspaceId: pane.surface.workspaceId ?? null,
@@ -405,11 +432,13 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
 
   const found: FoundDraft[] = [];
   const cleared: ClearedDraft[] = [];
+  const suggestions: SuggestionPane[] = [];
   const clearOne = (
     sessionId: string,
     draft: InputDraft,
     why: ClearedDraft['why'],
     surfaceRef: string | null,
+    suggestion: string | null,
   ): void => {
     const result = clearInputDraft(sessionId, deps.env, deps.nowIso(), why);
     if (result.kind === 'failed') {
@@ -419,6 +448,7 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
     cleared.push({
       repo: repoOf(sessionId),
       sessionId,
+      suggestion,
       surfaceRef,
       text: draft.text,
       why,
@@ -441,6 +471,7 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
     if ((panesPerSession.get(pane.sessionId) ?? 0) > 1) {
       unplaced.push({
         draft: pane.draft,
+        suggested: pane.suggested,
         surfaceId: pane.surfaceId,
         surfaceRef: pane.surfaceRef,
         why: `another pane shows the same session (${pane.sessionId})`,
@@ -449,16 +480,30 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
       continue;
     }
     seen.add(pane.sessionId);
+    // yukaf.36 D2: a box showing only Claude Code's suggestion is an EMPTY
+    // box for storing and clearing. Its text is listed, never stored.
+    if (pane.suggested) {
+      suggestions.push({
+        placedBy: pane.placedBy,
+        repo: pane.repo,
+        sessionId: pane.sessionId,
+        surfaceId: pane.surfaceId,
+        surfaceRef: pane.surfaceRef,
+        text: pane.draft,
+        workspaceId: pane.workspaceId,
+      });
+    }
+    const typed = pane.suggested ? '' : pane.draft;
     const stored = readInputDraft(pane.sessionId, deps.env);
     if (stored.kind === 'failed') {
       failures.push(stored.reason);
-      if (pane.draft !== '') {
+      if (typed !== '') {
         found.push({
           ...pane,
           failure: stored.reason,
           outcome: 'storeFailed',
           path: null,
-          text: pane.draft,
+          text: typed,
         });
       }
       continue;
@@ -467,15 +512,21 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
       stored.kind === 'present' && stored.draft.clearedAt == null
         ? stored.draft
         : null;
-    if (pane.draft === '') {
-      emptyPlaced += 1;
+    if (typed === '') {
+      if (!pane.suggested) emptyPlaced += 1;
       // F18 (home-base-yukaf.14): only the pane the draft was typed in
       // clears it, or this pane when that one is gone (the pane is the
       // session's only one here: two panes of a session are unplaced above).
       // A reopened session's fresh, empty box beside the old pane must not
       // erase what the old pane still holds.
       if (live != null && emptyBoxClears(live, pane.surfaceId)) {
-        clearOne(pane.sessionId, live, 'emptyBox', pane.surfaceRef);
+        clearOne(
+          pane.sessionId,
+          live,
+          'emptyBox',
+          pane.surfaceRef,
+          pane.suggested ? pane.draft : null,
+        );
       }
       continue;
     }
@@ -486,14 +537,14 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
     // still holds it has not sent it, so it is stored, marked sentMatch, and
     // shown with a note. A live draft of other text moves into `previous`.
     const sentMatch =
-      sent.kind === 'read' && sent.text === normalizedText(pane.draft);
-    if (live?.text === pane.draft && live.sentMatch === sentMatch) {
+      sent.kind === 'read' && sent.text === normalizedText(typed);
+    if (live?.text === typed && live.sentMatch === sentMatch) {
       found.push({
         ...pane,
         failure: null,
         outcome: 'unchanged',
         path: stored.kind === 'present' ? stored.path : null,
-        text: pane.draft,
+        text: typed,
       });
       continue;
     }
@@ -504,7 +555,7 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
         sessionId: pane.sessionId,
         source: 'scan',
         surfaceId: pane.surfaceId,
-        text: pane.draft,
+        text: typed,
         workspaceId: pane.workspaceId,
       },
       deps.env,
@@ -520,7 +571,7 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
             ? 'storedSentMatch'
             : 'stored',
       path: written.kind === 'written' ? written.path : null,
-      text: pane.draft,
+      text: typed,
     });
   }
 
@@ -549,7 +600,7 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
         continue;
       }
       if (draftWasSent(entry.draft, sent)) {
-        clearOne(entry.sessionId, entry.draft, 'sent', null);
+        clearOne(entry.sessionId, entry.draft, 'sent', null, null);
         continue;
       }
       // F2 (home-base-yukaf.14): no pane shows the session AND the surface
@@ -568,7 +619,7 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
       if (entry.draft.missingSince == null) {
         missingSince(entry.sessionId, deps.nowIso());
       } else {
-        clearOne(entry.sessionId, entry.draft, 'missing', null);
+        clearOne(entry.sessionId, entry.draft, 'missing', null, null);
       }
     }
   }
@@ -580,6 +631,7 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
     failures,
     found,
     kind: 'scanned',
+    suggestions,
     surfacesRead: toRead.length,
     unplaced,
     unreadable,
@@ -686,7 +738,9 @@ export function renderScan(result: ScanResult, style: OutputStyle): string {
           label: 'Why',
           value:
             entry.why === 'emptyBox'
-              ? `its input box is empty now (${entry.surfaceRef ?? 'pane unknown'})`
+              ? entry.suggestion == null
+                ? `its input box is empty now (${entry.surfaceRef ?? 'pane unknown'})`
+                : `its input box shows only Claude Code's suggestion now, "${firstLine(entry.suggestion)}", which is not your typing (${entry.surfaceRef ?? 'pane unknown'})`
               : entry.why === 'missing'
                 ? 'its pane was gone in two scans in a row (the text is kept in the file)'
                 : 'the text equals the newest message you sent in that session',
@@ -695,6 +749,29 @@ export function renderScan(result: ScanResult, style: OutputStyle): string {
       ],
       style,
     ),
+  );
+  // yukaf.36 D2: listed so a suggestion never disappears silently.
+  const suggestions = result.suggestions.map((entry) =>
+    [
+      fields(
+        [
+          {label: 'Session', value: entry.sessionId},
+          {label: 'Repo', value: entry.repo ?? 'unknown'},
+          {
+            label: 'Pane',
+            value:
+              entry.workspaceId == null
+                ? entry.surfaceRef
+                : `${code(selectWorkspaceCommand(entry.workspaceId))} (${entry.surfaceRef})`,
+          },
+          {label: 'Store', value: 'nothing stored: the box counts as empty'},
+          {label: 'Why', value: SUGGESTION_EVIDENCE},
+          {label: 'Text', value: ''},
+        ],
+        style,
+      ),
+      verbatim(entry.text),
+    ].join('\n'),
   );
   const unplaced = result.unplaced.map((entry) => {
     const head = fields(
@@ -707,7 +784,15 @@ export function renderScan(result: ScanResult, style: OutputStyle): string {
               value: code(selectWorkspaceCommand(entry.workspaceId)),
             },
         {label: 'Why', value: entry.why},
-        {label: 'Text', value: entry.draft === '' ? '(the box is empty)' : ''},
+        {
+          label: 'Text',
+          value:
+            entry.draft === ''
+              ? '(the box is empty)'
+              : entry.suggested
+                ? `Claude Code's suggestion, not your typing (${SUGGESTION_EVIDENCE}):`
+                : '',
+        },
       ],
       style,
     );
@@ -739,11 +824,12 @@ export function renderScan(result: ScanResult, style: OutputStyle): string {
   const live = result.found.length;
   const summary = [
     `Read ${plural(result.surfacesRead, 'pane', 'panes')}: ${plural(result.claudePanes, 'Claude input box', 'Claude input boxes')}, ${result.claudePanes - result.unplaced.length} placed in a session.`,
-    `${plural(live, 'draft', 'drafts')} found (${newDrafts} newly stored, ${unchanged} unchanged), ${result.emptyPlaced} empty, ${result.cleared.length} cleared, ${result.unplaced.length} unplaced, ${plural(result.unreadable.length, 'screen', 'screens')} unreadable${result.failures.length > 0 ? `, ${plural(result.failures.length, 'failure', 'failures')}` : ''}.`,
+    `${plural(live, 'draft', 'drafts')} found (${newDrafts} newly stored, ${unchanged} unchanged), ${result.emptyPlaced} empty, ${result.suggestions.length} showing Claude's suggestion, ${result.cleared.length} cleared, ${result.unplaced.length} unplaced, ${plural(result.unreadable.length, 'screen', 'screens')} unreadable${result.failures.length > 0 ? `, ${plural(result.failures.length, 'failure', 'failures')}` : ''}.`,
   ].join('\n');
   return spacedList([
     sectionHeader('thread drafts scan', {color: style.color, emoji: '✍️'}),
     block('Drafts found', '✍️', found, style),
+    block("Claude's suggestion, not your typing", '💡', suggestions, style),
     block('Cleared', '🧹', cleared, style),
     block('Unplaced panes', '🪟', unplaced, style),
     block('Screens that could not be read', '⚠️', unreadable, style),

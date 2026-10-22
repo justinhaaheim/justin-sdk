@@ -153,8 +153,10 @@ function eventCommands(settings: unknown, event: string): string[] {
  * not there" are different facts, and only one of them justifies telling Justin
  * to paste something in (rule 6).
  */
-export function checkUserLevelSessionStart(): UserLevelHookResult {
-  const path = userSettingsPath();
+export function checkUserLevelSessionStart(
+  env: Record<string, string | undefined> = process.env,
+): UserLevelHookResult {
+  const path = userSettingsPath(env);
   if (!existsSync(path)) {
     return {
       message: `${USER_SETTINGS_DISPLAY} does not exist, so the user-level session-start hook is not installed`,

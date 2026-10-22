@@ -69,6 +69,13 @@ import {basename, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
 import {
+  applyDispatchForComponent,
+  describeClearedDispatchEntries,
+  describeDispatchOutcome,
+  hookDispatchEnabled,
+  removeDispatchEntriesForComponent,
+} from './hook-entries';
+import {
   invokesSdk,
   sdkRun,
   sdkScript,
@@ -338,11 +345,41 @@ export function stepThreadHooks(projectRoot: string): boolean {
   const settings = readJson(settingsPath) ?? {};
   const retired = removeRetiredThreadStartHook(settings);
   const removedRetired = retired.some((outcome) => outcome.kind === 'removed');
+
+  // hooks.dispatch on (home-base-rtsx1.2): the UserPromptSubmit, Stop and
+  // PostToolUse [Bash] dispatcher entries run the thread handlers, and their
+  // own entries are taken back. The retired SessionStart entry is cleaned up
+  // in both modes.
+  if (hookDispatchEnabled(projectRoot)) {
+    const outcome = applyDispatchForComponent(settings, 'thread-hooks-setup');
+    if (removedRetired || outcome.changed) writeJson(settingsPath, settings);
+    for (const line of [
+      ...retired.map(describeRetiredStartHookOutcome),
+      ...describeDispatchOutcome(outcome),
+    ]) {
+      console.log(`  ${line}`);
+    }
+    success(
+      '.claude/settings.json: the thread hooks run from the dispatcher entries',
+    );
+    return true;
+  }
+
   const addedStop = addThreadStopHook(settings);
   const addedCapture = addThreadCaptureHooks(settings);
   const addedNudge = addThreadNudgeHook(settings);
+  const cleared = removeDispatchEntriesForComponent(
+    settings,
+    'thread-hooks-setup',
+  );
 
-  if (removedRetired || addedStop || addedCapture.length > 0 || addedNudge) {
+  if (
+    removedRetired ||
+    addedStop ||
+    addedCapture.length > 0 ||
+    addedNudge ||
+    cleared.length > 0
+  ) {
     writeJson(settingsPath, settings);
   }
 
@@ -352,12 +389,16 @@ export function stepThreadHooks(projectRoot: string): boolean {
   for (const outcome of retired) {
     console.log(`  ${describeRetiredStartHookOutcome(outcome)}`);
   }
+  for (const line of describeClearedDispatchEntries(cleared)) {
+    console.log(`  ${line}`);
+  }
 
   if (
     !removedRetired &&
     !addedStop &&
     addedCapture.length === 0 &&
-    !addedNudge
+    !addedNudge &&
+    cleared.length === 0
   ) {
     success('.claude/settings.json already has every thread hook');
     return true;

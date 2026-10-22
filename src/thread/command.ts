@@ -104,7 +104,7 @@ LAYOUT. Default: one new cmux window. --per-project: one new window per project,
 
 COLOURS. After a window is built, each workspace this run OPENED gets its project's colour the way cmux-arrange chooses it: from ~/.config/cmux-arrange/colors.json ($XDG_CONFIG_HOME/cmux-arrange/colors.json) "overrides" first, then "assigned", then cmux-arrange's built-in project colours unless the file's "exclude" lists that colour; with no file, the built-in project colours alone. thread open makes no new picks. A workspace moved in with --include-open keeps the colour it had: --undo moves it back but cannot restore a colour. An unreadable or invalid file colours nothing. Each of these, and a project with no colour, is said in one line and the run goes on; a colour that cannot be set is reported and never stops the run. --no-color skips colouring.
 
-RESTORED DRAFTS. When a session it opens has unsent text stored (thread drafts lists it; <threads state dir>/input-drafts/<session id>.json), that text is typed back into the new workspace's input box, and NEVER sent: press Enter there yourself. It waits up to 30 s for Claude to show an empty input box with that session's id under it, types the text in one cmux send (no Enter), and reads the screen again to see it there. Line breaks become spaces, because a line break typed into the box would press Enter, so the text goes in on one line. It is never typed when the box already holds text, the pane shows another session, vim is in NORMAL mode, the text holds a backslash (cmux send reads \\n and \\r as Enter), a control character or a "[Pasted text #N]" stand-in, or the text's original pane is still open (then the output gives the command that selects it). Each draft not restored is printed in full under "⚠️ Draft not restored", with why: the screen could not be read, the box never appeared, the text was typed but the box does not show it, and so on. Only workspaces this run opened are typed into, never moved ones. --no-restore skips it; --dry-run says which drafts it would restore and types nothing. A restored draft keeps its text in the store, with restoredAt, restoredSurfaceId and restoredText added. It is unsent text in the box, so thread open --undo keeps that workspace open.
+RESTORED DRAFTS. When a session it opens has unsent text stored (thread drafts lists it; <threads state dir>/input-drafts/<session id>.json), that text is typed back into the new workspace's input box, and NEVER sent: press Enter there yourself. It waits up to 30 s for Claude to show an empty input box with that session's id under it, types the text in one cmux send (no Enter), and reads the screen again to see it there. Line breaks become spaces, because a line break typed into the box would press Enter, so the text goes in on one line. It is never typed when the box already holds text or shows Claude Code's suggested next prompt, the pane shows another session, vim is in NORMAL mode, the text holds a backslash (cmux send reads \\n and \\r as Enter), a control character or a "[Pasted text #N]" stand-in, or the text's original pane is still open (then the output gives the command that selects it). Each draft not restored is printed in full under "⚠️ Draft not restored", with why: the screen could not be read, the box never appeared, the text was typed but the box does not show it, and so on. Only workspaces this run opened are typed into, never moved ones. --no-restore skips it; --dry-run says which drafts it would restore and types nothing. A restored draft keeps its text in the store, with restoredAt, restoredSurfaceId and restoredText added. It is unsent text in the box, so thread open --undo keeps that workspace open.
 
 DRY RUN. --dry-run prints the same plan ("Would open") and opens nothing, writes nothing.
 
@@ -112,7 +112,7 @@ THE RECORD. Before it opens anything, a real run writes <threads state dir>/open
 
 UNDO. thread open --undo closes the workspaces the latest run opened (--run <time> picks another run by its record's file name). It never closes anything that run did not open. A workspace that is already closed is listed as Already gone. Every other one is checked first, and it is kept open, with the reason printed, unless all three checks pass:
 
-  1. Nothing is typed in the input box. Unsent text keeps the workspace open, is printed in full under "✍️ Unsent text, kept open", and is saved in <threads state dir>/input-drafts/<session id>.json.
+  1. Nothing is typed in the input box. Unsent text keeps the workspace open, is printed in full under "✍️ Unsent text, kept open", and is saved in <threads state dir>/input-drafts/<session id>.json. A box showing only Claude Code's suggested next prompt passes, and its "Input box" line names the suggestion (thread close --help, LIMITS, says how it is told apart).
 
   2. Claude is not working (no spinner, no "Running…" on the screen).
 
@@ -132,7 +132,7 @@ const CLOSE_SUMMARY =
 const CLOSE_NARRATIVE = `
 THE CHECKS. Every pane of the workspace is read, and the workspace is kept open unless every pane passes all of these:
 
-  1. Nothing is typed in the input box. Unsent text keeps the workspace open, is printed in full under "✍️ Unsent text, kept open", and is saved in <threads state dir>/input-drafts/<session id>.json.
+  1. Nothing is typed in the input box. Unsent text keeps the workspace open, is printed in full under "✍️ Unsent text, kept open", and is saved in <threads state dir>/input-drafts/<session id>.json. A box showing only Claude Code's suggested next prompt passes, and its "Input box" line names the suggestion (see LIMITS).
 
   2. Claude is not working (no spinner, no "Running…" on the screen).
 
@@ -147,6 +147,10 @@ THE RECORD. Before the first Claude process is stopped, one line per workspace t
 CLOSING. Right before its turn, each workspace is checked again; if anything changed, it is kept. Then its Claude process is stopped (SIGTERM, up to 15 seconds to exit, never SIGKILL; the session stays resumable), and only then is the workspace closed. A window closes with its last workspace, and the output says so.
 
 NEVER CLOSED. The workspace this command runs in (CMUX_WORKSPACE_ID): naming it refuses the whole run, and nothing is touched. A --session that no live Claude process holds, that runs outside cmux, or that shows in more than one workspace refuses the run too. A workspace that is not open is listed under "Not found"; the others still go ahead.
+
+LIMITS (measured 2026-10-22 on Claude Code 2.1.308, and read in its code back to 2.1.289):
+  - The screen is read as plain text, without colours. Claude Code can draw a suggested next prompt, dimmed, in an EMPTY input box after a turn ("❯ push main"); pressing Enter on it sends nothing. On screen it looks exactly like typed text. Check 1 tells them apart only by the line under the box: while nothing is typed, Claude Code ends it with "← N agents", and drops it as soon as anything is typed. A box whose text has that line under it passes check 1, and nothing is stored for it.
+  - Without that "← N agents" line (no agents running, or a Claude Code version without the hint) a suggestion cannot be told from typed text: it keeps the workspace open and is stored as unsent text.
 
 --dry-run runs every check and prints what would close and what would be kept and why. It signals nothing, closes nothing, writes no record and stores no draft.
 
@@ -236,9 +240,11 @@ SCAN, read-only on cmux (it writes only that store):
   3. Text in the box is stored, unless the store already holds exactly that text. An empty box clears the stored draft only in the pane the draft was seen in, or once that pane is gone. A stored draft whose pane is gone (no pane shows its session, and the pane it was seen in is no longer in cmux) is cleared by the second scan in a row that finds it so; "thread drafts dismiss <session id…>" (x in the threads dashboard) clears one at once. Cleared text stays in its file. Text equal to the newest message you sent in that session (spacing ignored) is still in the box, so it is stored too, marked sentMatch, and its card says "(the same as your last sent message)". A stored draft whose pane is gone is cleared as sent when that session's newest sent message equals it (a sentMatch draft: only a message sent after it was seen).
   An hourly chore (thread-drafts-scan) runs it, and the threads dashboard runs it before loading.
 
-LIMITS, measured on Claude Code 2.1.302:
-  - The screen is read as plain text, without colours. An autocomplete or suggestion that Claude Code draws dimmed after your cursor cannot be told apart from text you typed, and is stored as if typed.
-  - An empty box shows no placeholder hint (1,029 input boxes in 24 cmux captures, 2026-10-17), so it reads as empty.
+CLAUDE'S SUGGESTION (measured 2026-10-22 on Claude Code 2.1.308, and read in its code back to 2.1.289): after a turn, Claude Code can draw a suggested next prompt, dimmed, in the EMPTY input box ("❯ push main"). It is not your typing: pressing Enter on it sends nothing (Tab would insert it as real text), and it stays until a prompt is sent. The scan reads the screen as plain text, without colours, so on screen it looks exactly like typed text. What tells them apart is the line under the box: while nothing is typed, Claude Code ends it with "← N agents" ("-- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← 19 agents"), and drops it as soon as anything is typed. A box whose text has that line under it counts as empty: nothing is stored, a stored draft is cleared as for an empty box (the text stays in its file), and the pane is listed under "Claude's suggestion, not your typing" with the text.
+
+LIMITS, measured on Claude Code 2.1.302 unless dated:
+  - Without that "← N agents" line (no agents running, or a Claude Code version without the hint) a suggestion cannot be told from typed text, and is stored as if typed. An autocomplete Claude Code draws after your cursor is stored as typed too.
+  - An empty box with no suggestion shows nothing after ❯ (1,029 input boxes in 24 cmux captures, 2026-10-17), so it reads as empty.
   - Only the visible screen is read. A draft taller than the screen pushes the top of the box off it, so that pane is not seen as a Claude pane and its text is not stored.
   - Text recalled into the box with the up arrow equals your last message, so it is stored as a sentMatch draft although you never typed it.
 

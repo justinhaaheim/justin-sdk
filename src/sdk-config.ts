@@ -437,6 +437,19 @@ export const projectConfigSchema = z
         'The components this repo has, by their -setup names. OPTIONAL: absent means the `core` preset — every component applicable to this repo, computed at every read, so a repo tracks core as the registry grows. An EMPTY array is a different statement and is honoured as written: no components. Only `add` and `remove` write this key.',
       ),
     healthNotices: healthNoticesSchema.optional(),
+    hooks: z
+      .looseObject({
+        dispatch: z
+          .boolean()
+          .optional()
+          .describe(
+            'HOOK DISPATCH (home-base-rtsx1, Justin 2026-10-17: "let\'s go with Q1 option A -- dispatcher in each repo"). DEFAULT FALSE. When true, `install` writes ONE .claude/settings.json entry per event — `bun run justin-sdk hook <Event>` for UserPromptSubmit, PostToolUse [Bash], PostToolBatch and Stop — and takes back the per-handler entries it replaces (exact commands only; a hand-edited one is left in place and reported, because it would run twice). At runtime that entry reads this file, resolves the components, and runs the handlers they own, so adding a handler to an event already in the block needs no settings change. SessionStart is unchanged in both modes. Run `bun run justin-sdk install` after changing it.',
+          ),
+      })
+      .optional()
+      .describe(
+        'hooks: how the SDK writes its Claude Code hooks into this repo.',
+      ),
     // home-base-bomy5.7.1: the type only. The FORMAT (1–12 of A-Z 0-9 -) is
     // checked by thread/config.ts, which names a bad value as a problem and
     // falls back to the repo name. A format rule here would make a bad tag a
@@ -460,6 +473,14 @@ export const userConfigSchema = z
     // be the same shape in both files or the two would drift into dialects.
     componentConfig: componentConfigSchema.optional(),
     healthNotices: healthNoticesSchema.optional(),
+    // User file only: the hooks it is about live in ~/.claude/settings.json,
+    // which is one file per machine, not per repo.
+    userLevelHooks: z
+      .boolean()
+      .optional()
+      .describe(
+        'Whether this machine should have the user-level hooks in ~/.claude/settings.json (`session-start --user-level` and `repo-state --hook --user-level`), which bring the repo-state block to repos NOT enrolled in justin-sdk (home-base-rtsx1.5, Justin 2026-10-22). Absent or true: yes, and doctor’s USER_LEVEL_SESSION_START check warns while they are missing. false: you chose not to install them, and that check passes with one line saying so. Delete the key to get the warning, and the JSON to paste, back.',
+      ),
   })
   .describe(
     'User-level justin-sdk config: settings that should apply to every repo on this machine.',

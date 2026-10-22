@@ -10,6 +10,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -281,6 +282,109 @@ describe('thread drafts scan', () => {
     ]);
     expect(readInputDraft(S1, env)).toMatchObject({
       draft: {clearedAt: NOW, text: 'half a thought'},
+    });
+  });
+
+  describe("Claude Code's prompt suggestion (home-base-yukaf.36 D2)", () => {
+    /**
+     * Real captures, cut to the box and the lines under it (2026-10-22):
+     * surface:13, the suggestion "push main" with the footer ending "· ← 19
+     * agents"; surface:59, "Q2 Fix A is the right one. Q3" typed by Justin,
+     * no such ending. Each is placed in a test session by its ⌗ line.
+     */
+    const FIXTURES = join(import.meta.dir, 'fixtures', 'prompt-suggestion');
+    const real = (file: string, shownId: string, id: string): string =>
+      `⏺ Done.\n\n${readFileSync(join(FIXTURES, file), 'utf8').replace(shownId, id)}`;
+    const suggestion = (id: string): string =>
+      real(
+        's13-suggestion-push-main.txt',
+        '9ba5e2fa-8bc5-4e90-b6ef-a986c897e5d1',
+        id,
+      );
+    const typedFragment = (id: string): string =>
+      real('s59-typed-q2.txt', '3b961d66-d405-4b14-be5f-356f8fe201e8', id);
+
+    test('a suggestion is listed and never stored; a typed fragment beside it is stored', async () => {
+      const result = await scan([
+        {screen: suggestion(S1), surfaceId: 'SURF-1', tty: 'ttys001'},
+        {screen: typedFragment(S2), surfaceId: 'SURF-2', tty: 'ttys002'},
+      ]);
+      expect(result.found).toMatchObject([
+        {
+          outcome: 'stored',
+          sessionId: S2,
+          text: 'Q2 Fix A is the right one. Q3',
+        },
+      ]);
+      expect(result.suggestions).toEqual([
+        {
+          placedBy: 'screen',
+          repo: null,
+          sessionId: S1,
+          surfaceId: 'SURF-1',
+          surfaceRef: 'surface:1',
+          text: 'push main',
+          workspaceId: 'WS-1',
+        },
+      ]);
+      expect(result.emptyPlaced).toBe(0);
+      expect(readInputDraft(S1, env).kind).toBe('absent');
+      const output = renderScan(result, PLAIN_STYLE);
+      expect(output).toContain("Claude's suggestion, not your typing (1)");
+      expect(output).toContain('nothing stored: the box counts as empty');
+      expect(output).toContain('    push main');
+      expect(output).toContain('1 draft found (1 newly stored, 0 unchanged)');
+      expect(output).toContain("1 showing Claude's suggestion");
+    });
+
+    test('a stored draft that was the suggestion is cleared as for an empty box; its text stays in the file', async () => {
+      // As every scan before yukaf.36 stored it.
+      writeInputDraft(
+        {
+          at: '2026-10-18T09:00:00.000Z',
+          sessionId: S1,
+          source: 'scan',
+          surfaceId: 'SURF-1',
+          text: 'push main',
+          workspaceId: 'WS-1',
+        },
+        env,
+      );
+      const result = await scan([
+        {screen: suggestion(S1), surfaceId: 'SURF-1', tty: 'ttys001'},
+      ]);
+      expect(result.found).toEqual([]);
+      expect(result.cleared).toMatchObject([
+        {
+          sessionId: S1,
+          suggestion: 'push main',
+          surfaceRef: 'surface:1',
+          text: 'push main',
+          why: 'emptyBox',
+        },
+      ]);
+      expect(readInputDraft(S1, env)).toMatchObject({
+        draft: {clearedAt: NOW, clearedBy: 'emptyBox', text: 'push main'},
+      });
+      expect(renderScan(result, PLAIN_STYLE)).toContain(
+        `its input box shows only Claude Code's suggestion now, "push main", which is not your typing (surface:1)`,
+      );
+    });
+
+    test('an unplaced pane showing a suggestion says so', async () => {
+      const result = await scan([
+        {
+          screen: suggestion(S1).replace(`⌗ ${S1}`, ''),
+          surfaceId: 'SURF-1',
+          tty: 'ttys001',
+        },
+      ]);
+      expect(result.unplaced).toMatchObject([
+        {draft: 'push main', suggested: true},
+      ]);
+      expect(renderScan(result, PLAIN_STYLE)).toContain(
+        "Claude Code's suggestion, not your typing (the line under the box ends with",
+      );
     });
   });
 

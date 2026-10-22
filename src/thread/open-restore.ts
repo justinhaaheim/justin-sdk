@@ -36,6 +36,10 @@
  * U+00A0, findInputBox) with this session's `⌗ <id>` on the status line under
  * it, Claude not working and vim not in NORMAL mode. A box that already holds
  * text, or a pane showing another session, stops at once: nothing is typed.
+ * So does a box showing Claude Code's prompt suggestion (home-base-yukaf.36
+ * D4: findInputBox `suggested`), and the CHECK below never takes a
+ * suggestion for the typed text. Neither the scan nor a close stores a
+ * suggestion, so none is typed back from the store.
  *
  * CHECK: after the send the screen is read again (RESTORE_CONFIRM_READS times,
  * RESTORE_CONFIRM_MS apart: the app may still be drawing), and the draft only
@@ -84,6 +88,7 @@ import {
   readScreenForBox,
   screenLines,
   screenSessionId,
+  SUGGESTION_EVIDENCE,
   vimMode,
   workingIndicator,
 } from './pane-join';
@@ -397,9 +402,15 @@ export async function waitForEmptyBox(
           reason: `the box never appeared: ${ref} showed no Claude input box within ${TIMEOUT_WORDS}`,
         };
       } else if (box.draft !== '') {
+        // yukaf.36 D4: a box showing Claude Code's suggestion is not typed
+        // into either. Its value is empty, but typing over a suggestion has
+        // not been measured, so this stays as cautious as before; only the
+        // reason is told apart.
         return {
           kind: 'boxHasText',
-          reason: `the input box of ${ref} already holds text ("${cut(box.draft, 80)}"), and nothing is ever typed into a box that has some`,
+          reason: box.suggested
+            ? `the input box of ${ref} shows Claude Code's suggestion ("${cut(box.draft, 80)}"; ${SUGGESTION_EVIDENCE}), and nothing is typed into a box that shows one`
+            : `the input box of ${ref} already holds text ("${cut(box.draft, 80)}"), and nothing is ever typed into a box that has some`,
         };
       } else {
         const shown = screenSessionId(lines, box);
@@ -466,7 +477,9 @@ export async function confirmRestored(
     }
     const lines = screenLines(screen.text);
     const box = findInputBox(lines);
-    if (box != null && draftIsMessage(box.draft, text))
+    // yukaf.36 D4: Claude Code's suggestion is never the restored text, even
+    // when it reads the same: it is drawn only while the box is EMPTY.
+    if (box != null && !box.suggested && draftIsMessage(box.draft, text))
       return {kind: 'restored'};
     const working = workingIndicator(lines);
     const shown =
@@ -474,7 +487,9 @@ export async function confirmRestored(
         ? 'no input box is on screen'
         : box.draft === ''
           ? 'the box is empty'
-          : `the box holds "${cut(box.draft, 80)}"`;
+          : box.suggested
+            ? `the box is empty and shows only Claude Code's suggestion "${cut(box.draft, 80)}" (${SUGGESTION_EVIDENCE})`
+            : `the box holds "${cut(box.draft, 80)}"`;
     last = {
       kind: 'mismatch',
       reason: `the text was typed into ${ref}, but the input box does not show it: ${shown}${

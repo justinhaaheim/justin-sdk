@@ -20,6 +20,13 @@
 import {basename, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
+import {
+  applyDispatchForComponent,
+  describeClearedDispatchEntries,
+  describeDispatchOutcome,
+  hookDispatchEnabled,
+  removeDispatchEntriesForComponent,
+} from './hook-entries';
 import {sdkRun, sdkScript, upsertHookCommand} from './sdk-invocation';
 import {
   ensureDir,
@@ -66,6 +73,21 @@ export function stepTimeCheckHook(projectRoot: string): boolean {
   ensureDir(settingsDir);
 
   const settings = readJson(settingsPath) ?? {};
+
+  // hooks.dispatch on (home-base-rtsx1.2): the UserPromptSubmit dispatcher
+  // entry runs time-check, and its own entry is taken back.
+  if (hookDispatchEnabled(projectRoot)) {
+    const outcome = applyDispatchForComponent(settings, 'time-check-setup');
+    for (const line of describeDispatchOutcome(outcome)) {
+      console.log(`  ${line}`);
+    }
+    if (outcome.changed) writeJson(settingsPath, settings);
+    success(
+      '.claude/settings.json: time-check runs from the UserPromptSubmit dispatcher entry',
+    );
+    return true;
+  }
+
   const hooks = (settings.hooks as Record<string, unknown> | undefined) ?? {};
   const userPromptSubmit =
     (hooks.UserPromptSubmit as unknown[] | undefined) ?? [];
@@ -76,13 +98,20 @@ export function stepTimeCheckHook(projectRoot: string): boolean {
     HOOK_COMMAND,
     () => ({hooks: [{command: HOOK_COMMAND, type: 'command'}]}),
   );
-  if (!changed) {
+  if (changed) hooks.UserPromptSubmit = entries;
+  settings.hooks = hooks;
+  const cleared = removeDispatchEntriesForComponent(
+    settings,
+    'time-check-setup',
+  );
+  for (const line of describeClearedDispatchEntries(cleared)) {
+    console.log(`  ${line}`);
+  }
+  if (!changed && cleared.length === 0) {
     success('.claude/settings.json already has the time-check hook');
     return true;
   }
 
-  hooks.UserPromptSubmit = entries;
-  settings.hooks = hooks;
   writeJson(settingsPath, settings);
   success('Updated .claude/settings.json (UserPromptSubmit → time-check)');
   return true;

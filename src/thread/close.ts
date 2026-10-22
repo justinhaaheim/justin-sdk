@@ -53,7 +53,12 @@ import type {RepoResolution} from '../repo-status/sessions';
 import type {CmuxRunner, CmuxTree} from './cmux';
 import type {InputDraftWrite, WriteInputDraftInput} from './input-drafts';
 import type {LiveSessions} from './live-sessions';
-import type {HookStorePids, LiveView, UndoDraft} from './open-undo';
+import type {
+  GateSuggestion,
+  HookStorePids,
+  LiveView,
+  UndoDraft,
+} from './open-undo';
 import type {HookStore, Proc, ProcessRunner, SourceRead} from './pane-join';
 import type {EnvLike} from './paths';
 import type {PidCommand} from './workspace-close';
@@ -87,6 +92,7 @@ import {
   gateSurfaces,
   hookStorePids,
   readView,
+  suggestionFields,
   UNDO_EXIT_TIMEOUT_MS,
   UNDO_WINDOW_GONE_TIMEOUT_MS,
 } from './open-undo';
@@ -163,6 +169,11 @@ export interface CloseEntry {
   /** Why there is no resume command, or what is unsure about it; null when nothing. */
   resumeNote: string | null;
   sessionId: string | null;
+  /**
+   * home-base-yukaf.36 D3: panes whose input box showed only Claude Code's
+   * prompt suggestion. Check 1 passed them as empty; the output names each.
+   */
+  suggestions: GateSuggestion[];
   title: string | null;
   /** Whether closing it closes its window too (it is the window's last workspace). */
   windowAlone: boolean;
@@ -435,6 +446,7 @@ async function assess(
           ? resume.warning
           : resume.reason,
     sessionId: sessionId ?? null,
+    suggestions: gate.suggestions,
     title: workspace.title,
     windowAlone: at.count === 1,
     windowId: at.windowId,
@@ -554,6 +566,7 @@ const LABELS = [
   'Window',
   'Workspace',
   'Claude',
+  'Input box',
   'Stored',
   'Why',
 ].map((label) => ({label, value: ''}));
@@ -607,7 +620,11 @@ function sessionWords(entry: CloseEntry): string {
   return entry.pid == null ? 'none' : 'cannot tell';
 }
 
-/** The fields every record carries, in order (Title, Repo, Session, Resume, Window). */
+/**
+ * The fields every record carries, in order (Title, Repo, Session, Resume,
+ * Window), then "Input box" when a pane showed Claude Code's suggestion
+ * (yukaf.36 D3).
+ */
 function baseFields(
   entry: CloseEntry,
   windowExtra: string | null,
@@ -621,6 +638,7 @@ function baseFields(
       label: 'Window',
       value: `${entry.windowRef} (${entry.windowId})${windowExtra == null ? '' : `; ${windowExtra}`}`,
     },
+    ...suggestionFields(entry.suggestions),
   ];
 }
 
@@ -654,7 +672,7 @@ export function renderClose(state: CloseState, style: OutputStyle): string {
         {
           label: 'Gates',
           value:
-            'an empty input box, Claude not working, a readable screen, a known tty, one Claude session and process that its ⌗ line names (else kept)',
+            "an empty input box (one showing only Claude Code's suggestion counts as empty), Claude not working, a readable screen, a known tty, one Claude session and process that its ⌗ line names (else kept)",
         },
         {label: 'Log', value: tildeText(state.logPath)},
       ],

@@ -1015,6 +1015,33 @@ void yargs(ARGV)
     },
   )
   .command(
+    'hook <event>',
+    "The one settings.json hook entry per event in a dispatch-mode repo (hooks.dispatch in justin-sdk.config.json): reads the hook payload on stdin, resolves the repo's components from justin-sdk.config.json, runs every handler registered for <event> whose component the repo has (repo-state --hook, time-check, usage-check, thread capture / stop-check / nudge), in parallel, and prints ONE merged hook output. A handler that fails or times out is named in the message and costs no other handler its output. Events: UserPromptSubmit, PostToolUse, PostToolBatch, Stop",
+    (y) =>
+      y
+        .positional('event', {
+          describe: 'The Claude Code hook event, e.g. UserPromptSubmit',
+          type: 'string' as const,
+        })
+        .option('dry-run', {
+          default: false,
+          describe:
+            'Print, as JSON, which handlers this event would run in this repo, and run none of them',
+          type: 'boolean' as const,
+        }),
+    async (argv) => {
+      // Normally answered by cli.ts's fast path before this tree loads; this
+      // registration is what --help and the command list see.
+      const {runHookCommand} = await import('./hook-dispatch');
+      process.exit(
+        await runHookCommand({
+          dryRun: argv['dry-run'] === true,
+          event: argv.event ?? '',
+        }),
+      );
+    },
+  )
+  .command(
     'usage-check',
     'UserPromptSubmit + PostToolBatch hook: tell the session how many tokens of its OWN CONTEXT it has used (NOT subscription quota), as an FYI at preset token counts — by default every 100k tokens. When the payload carries an agent_id the number measured is the SUBAGENT\'s own, read from its own transcript, and componentConfig["usage-check"].roles.player overrides the budget for it. The wrap-up directive is opt-in and OFF unless a wrapUpAt names a token count (reads stdin, prints nothing when not due; a subagent whose transcript cannot be found prints UNKNOWN to stderr and measures nothing)',
     (y) => y,

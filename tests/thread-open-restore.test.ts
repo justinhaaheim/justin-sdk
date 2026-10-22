@@ -77,10 +77,14 @@ function idle(session: string): string {
 }
 
 /**
- * The idle screen with `text` in the box, wrapped at 40 columns the way the
- * box wraps: continuation lines indented two spaces.
+ * The footer hint Claude Code draws only while the box is EMPTY (the
+ * fixture's last line ends with it). home-base-yukaf.36, measured 2026-10-22:
+ * it goes as soon as anything is typed.
  */
-function typed(session: string, text: string): string {
+const EMPTY_INPUT_HINT = ' · ← 19 agents';
+
+/** The idle screen with `text` in the box, `footerHint` kept or not. */
+function withBoxText(session: string, text: string, footerHint: boolean) {
   const lines: string[] = [];
   let rest = text;
   while (rest.length > 40) {
@@ -92,7 +96,25 @@ function typed(session: string, text: string): string {
     `❯ ${lines[0] ?? ''}`,
     ...lines.slice(1).map((line) => `  ${line}`),
   ];
-  return idle(session).replace(EMPTY_BOX, box.join('\n'));
+  const screen = idle(session).replace(EMPTY_BOX, box.join('\n'));
+  return footerHint ? screen : screen.replace(EMPTY_INPUT_HINT, '');
+}
+
+/**
+ * The idle screen with `text` TYPED in the box, wrapped at 40 columns the way
+ * the box wraps (continuation lines indented two spaces). Typed text drops
+ * the footer's "← 19 agents" (yukaf.36), as a real Claude Code does.
+ */
+function typed(session: string, text: string): string {
+  return withBoxText(session, text, false);
+}
+
+/**
+ * yukaf.36: Claude Code's prompt suggestion in the EMPTY box: the text on
+ * the ❯ line, the footer still ending "← 19 agents".
+ */
+function suggesting(session: string, text: string): string {
+  return withBoxText(session, text, true);
 }
 
 /** vim NORMAL mode, as measured: status letter N, no "-- INSERT --". */
@@ -600,6 +622,46 @@ describe('thread open restores a stored draft, never pressing Enter', () => {
     // The text in full, every line.
     expect(result.output).toContain('please finish the restore');
     expect(result.output).toContain('  and tell me what is left');
+    const read = readInputDraft(sid(1), s.env);
+    expect(
+      read.kind === 'present' ? read.draft.restoredAt : 'absent',
+    ).toBeNull();
+  });
+
+  test("yukaf.36 D4: a box showing Claude Code's suggestion is never typed into, and the reason names the suggestion", async () => {
+    const s = setup([cand(1)]);
+    storeDraft(s, 1, TWO_LINES);
+    s.fake.setScreen((surface) =>
+      surface.session == null ? ZSH : suggesting(surface.session, 'push main'),
+    );
+    const result = await openSessions(s.options, s.deps);
+    expect(s.fake.sends()).toEqual([]);
+    const [entry] = entries(result.record);
+    expect(entry?.kind).toBe('boxHasText');
+    expect(entry?.reason).toContain(
+      `shows Claude Code's suggestion ("push main"; the line under the box ends with "← N agents"`,
+    );
+  });
+
+  test('yukaf.36 D4: a suggestion that reads like the draft is never taken for it after the send', async () => {
+    const s = setup([cand(1)]);
+    storeDraft(s, 1, 'push main');
+    // An empty box until the send; after it, the box is empty again and
+    // shows only Claude's suggestion, word for word the draft.
+    s.fake.setScreen((surface, _read, sent) =>
+      surface.session == null
+        ? ZSH
+        : sent.length > 0
+          ? suggesting(surface.session, 'push main')
+          : idle(surface.session),
+    );
+    const result = await openSessions(s.options, s.deps);
+    expect(s.fake.sends()).toHaveLength(1);
+    const [entry] = entries(result.record);
+    expect(entry?.kind).toBe('mismatch');
+    expect(entry?.reason).toContain(
+      `the box is empty and shows only Claude Code's suggestion "push main"`,
+    );
     const read = readInputDraft(sid(1), s.env);
     expect(
       read.kind === 'present' ? read.draft.restoredAt : 'absent',

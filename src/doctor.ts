@@ -25,6 +25,11 @@ import {
   RETIRED_MODULES_KEY,
 } from './critical-rules-setup';
 import {ESLINT_CONFIG_NAMES} from './eslint-setup';
+import {
+  checkSdkHookEntries,
+  type DryRun,
+  HOOK_ENTRIES_FIX,
+} from './hook-entries-check';
 import {buildComponentListing} from './list';
 import {PINNED} from './pinned-versions';
 import {
@@ -83,6 +88,91 @@ function exec(cmd: string, cwd: string): {exitCode: number; stdout: string} {
   } catch {
     return {exitCode: 1, stdout: ''};
   }
+}
+
+/** HOOK_ENTRIES as a CheckResult. Exported for tests. */
+export function hookEntriesCheckResult(
+  projectRoot: string,
+  options: {dryRun?: DryRun} = {},
+): CheckResult {
+  const report = checkSdkHookEntries(projectRoot, options);
+  if (report.kind === 'cannot-check') {
+    return {
+      fix: 'Fix the file named above, then run doctor again',
+      message: `UNKNOWN: ${report.reason}`,
+      pass: false,
+      severity: 'warn',
+    };
+  }
+  const errors = [...report.doubleRuns, ...report.dead];
+  const warnings = [...report.missing, ...report.stale, ...report.extra];
+  if (errors.length === 0 && warnings.length === 0) {
+    return {
+      message: `${report.mode}: ${report.matched} SDK hook entr${report.matched === 1 ? 'y matches' : 'ies match'} what install writes`,
+      pass: true,
+    };
+  }
+  const section = (title: string, lines: string[]): string[] =>
+    lines.length === 0
+      ? []
+      : [`${title}:`, ...lines.map((line) => `  ${line}`)];
+  return {
+    fix: HOOK_ENTRIES_FIX,
+    message: [
+      `${report.mode} mode — the SDK hook entries in .claude/settings.json do not match what install writes`,
+      ...section('runs twice', report.doubleRuns),
+      ...section('dead', report.dead),
+      ...section('missing', report.missing),
+      ...section('stale', report.stale),
+      ...section('extra', report.extra),
+    ].join('\n'),
+    pass: false,
+    severity: errors.length > 0 ? 'error' : 'warn',
+  };
+}
+
+/**
+ * USER_LEVEL_SESSION_START as a CheckResult. Exported for tests.
+ *
+ * `userLevelHooks: false` in the USER config (home-base-rtsx1.5) turns the
+ * warning into a passing line: Justin chose not to install the hooks, so a
+ * warning in every enrolled repo tells him nothing. Only a user config that
+ * read and validated can say so. One that cannot be read, is not JSON or
+ * breaks the schema leaves the choice UNKNOWN, and the check warns as before,
+ * naming the file (critical rule 7: "could not read" is never "off").
+ *
+ * sdk-config is `await import`ed for the reason given at CONFIG_SCHEMA below.
+ */
+export async function userLevelSessionStartCheckResult(
+  env: Record<string, string | undefined> = process.env,
+): Promise<CheckResult> {
+  const result = checkUserLevelSessionStart(env);
+  if (result.status === 'installed') {
+    return {message: result.message, pass: true};
+  }
+
+  const {describeConfigOutcome, readUserConfig} = await import('./sdk-config');
+  const user = readUserConfig(env);
+  if (user.status === 'ok' && user.config.userLevelHooks === false) {
+    return {
+      message: `The user-level hooks are off by your choice ("userLevelHooks": false in ${user.path}), so UNENROLLED repos get no repo-state block. To turn them back on, delete that key: doctor then warns again and prints the JSON to paste into ${USER_SETTINGS_DISPLAY}`,
+      pass: true,
+    };
+  }
+
+  const choiceUnknown =
+    user.status === 'ok' || user.status === 'absent'
+      ? ''
+      : `. Whether you switched this warning off is UNKNOWN: ${describeConfigOutcome(user)}`;
+  return {
+    fix:
+      result.status === 'cannot-check'
+        ? `Read ${USER_SETTINGS_DISPLAY} by hand and confirm it registers \`session-start --user-level\` (SessionStart) and \`repo-state --hook --user-level\` (UserPromptSubmit)`
+        : userLevelHookAdvice(),
+    message: `${result.message}${choiceUnknown}`,
+    pass: false,
+    severity: 'warn',
+  };
 }
 
 function parseMiseToml(projectRoot: string): Record<string, string> | null {
@@ -221,21 +311,7 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
     },
     {
       check: {
-        fn: (): CheckResult => {
-          const result = checkUserLevelSessionStart();
-          if (result.status === 'installed') {
-            return {message: result.message, pass: true};
-          }
-          return {
-            fix:
-              result.status === 'cannot-check'
-                ? `Read ${USER_SETTINGS_DISPLAY} by hand and confirm it registers \`session-start --user-level\` (SessionStart) and \`repo-state --hook --user-level\` (UserPromptSubmit)`
-                : userLevelHookAdvice(),
-            message: result.message,
-            pass: false,
-            severity: 'warn',
-          };
-        },
+        fn: (): Promise<CheckResult> => userLevelSessionStartCheckResult(),
         /**
          * Is the USER-LEVEL SessionStart hook installed (epic home-base-dchjw D6)?
          *
@@ -253,9 +329,26 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
          *
          * `cannot-check` also warns, but says so in those words: an unreadable
          * settings file is not evidence the hook is missing (rule 6).
+         *
+         * `userLevelHooks: false` in the user config passes it with one line
+         * instead (home-base-rtsx1.5): see userLevelSessionStartCheckResult.
          */
         label: 'USER_LEVEL_SESSION_START',
         severity: 'warn',
+      },
+    },
+    {
+      check: {
+        fn: (): CheckResult => hookEntriesCheckResult(projectRoot),
+        /**
+         * Do the SDK hook entries in .claude/settings.json match what
+         * `install` writes for this repo's components and hooks.dispatch mode
+         * (home-base-rtsx1.3)? Reports, never writes: Justin, 2026-10-17, "fine
+         * to just report the discrepancy", with the per-repo and fleet repair
+         * named in the fix. An error only when a handler runs twice or the
+         * dispatcher entry is dead; anything else warns.
+         */
+        label: 'HOOK_ENTRIES',
       },
     },
     {

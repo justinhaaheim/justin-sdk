@@ -27,6 +27,13 @@ import {existsSync, readFileSync, rmSync} from 'fs';
 import {basename, resolve} from 'path';
 
 import {coreConfigNames} from './component-registry';
+import {
+  applyDispatchForComponent,
+  describeClearedDispatchEntries,
+  describeDispatchOutcome,
+  hookDispatchEnabled,
+  removeDispatchEntriesForComponent,
+} from './hook-entries';
 import {getSdkVersion} from './sdk-identity';
 import {
   invokesSdk,
@@ -699,15 +706,33 @@ export function stepClaudeSettings(projectRoot: string): boolean {
   }
 
   // The first-prompt half of the same feature (M5): SessionStart arms, this
-  // UserPromptSubmit hook fires.
-  const userPromptSubmit =
-    (hooks.UserPromptSubmit as unknown[] | undefined) ?? [];
-  const repoState = upsertRepoStateHook(userPromptSubmit);
-  if (repoState.changed) {
-    hooks.UserPromptSubmit = repoState.entries;
-    modified = true;
+  // UserPromptSubmit hook fires. With hooks.dispatch on (home-base-rtsx1.2) it
+  // is run by the UserPromptSubmit dispatcher entry instead of its own — and
+  // this branch matters most of the four, because EVERY installer runs
+  // base-setup first, so it is where a per-handler entry would come back.
+  const dispatchLines: string[] = [];
+  if (hookDispatchEnabled(projectRoot)) {
+    settings.hooks = hooks;
+    const outcome = applyDispatchForComponent(settings, 'base-setup');
+    if (outcome.changed) modified = true;
+    dispatchLines.push(...describeDispatchOutcome(outcome));
+  } else {
+    const userPromptSubmit =
+      (hooks.UserPromptSubmit as unknown[] | undefined) ?? [];
+    const repoState = upsertRepoStateHook(userPromptSubmit);
+    if (repoState.changed) {
+      hooks.UserPromptSubmit = repoState.entries;
+      modified = true;
+    }
+    settings.hooks = hooks;
+    const cleared = removeDispatchEntriesForComponent(settings, 'base-setup');
+    if (cleared.length > 0) modified = true;
+    dispatchLines.push(...describeClearedDispatchEntries(cleared));
   }
-  settings.hooks = hooks;
+
+  // NOT through success(): printed even in quiet mode, which is how every
+  // installer runs base-setup. An entry added or deleted must be seen.
+  for (const line of dispatchLines) console.log(`  ${line}`);
 
   if (modified) {
     writeJson(settingsPath, settings);

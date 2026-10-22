@@ -172,8 +172,9 @@ export const SELECT_COMMANDS = [
 /**
  * Commands that must NEVER carry a notice, for three different reasons:
  *
- *  - `time-check`, `usage-check`, `session-start`, `repo-state` and `prime`
- *    are HOOKS (`repo-state --hook`, home-base-39co9.4). Their
+ *  - `time-check`, `usage-check`, `session-start`, `repo-state`, `prime` and
+ *    `hook` are HOOKS (`repo-state --hook`, home-base-39co9.4; `hook <Event>`,
+ *    the dispatcher, home-base-rtsx1.1, whose stdout is one JSON object). Their
  *    output is injected into a Claude session's context, and their cost is paid
  *    on every prompt Justin types. `session-start` is the strictest of them:
  *    its entire stdout is ONE JSON envelope, so a notice printed there would
@@ -202,6 +203,7 @@ export const SELECT_COMMANDS = [
  */
 export const NEVER_COMMANDS = [
   'forensics',
+  'hook',
   'justin-loop handoff',
   'prime',
   'repo-state',
@@ -231,6 +233,7 @@ export const ALL_COMMANDS = [
   'eas-update',
   'fix',
   'forensics',
+  'hook',
   'init',
   'install',
   'justin-loop',
