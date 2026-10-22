@@ -14,6 +14,7 @@ import {join} from 'path';
 
 import {
   assertIosNotTracked,
+  assertSigningTeam,
   conflictingOptions,
   pinVariantForXcodeBuildPhases,
   runMacBuild,
@@ -162,6 +163,42 @@ describe('assertIosNotTracked', () => {
   test('refuses when it cannot check (not a git repo)', () => {
     expect(() => assertIosNotTracked(tempRoot())).toThrow(
       /Could not check whether git tracks anything under ios\/ \(`git ls-files -- ios` failed: fatal: not a git repository.*\)\. Refusing/,
+    );
+  });
+});
+
+describe('assertSigningTeam', () => {
+  function writePbxproj(root: string, body: string): void {
+    const dir = join(root, 'ios', `${SCHEME}.xcodeproj`);
+    mkdirSync(dir, {recursive: true});
+    writeFileSync(join(dir, 'project.pbxproj'), body);
+  }
+
+  test('passes when prebuild wrote a team (quoted or not)', () => {
+    const root = tempRoot();
+    writePbxproj(root, '\t\t\t\tDEVELOPMENT_TEAM = UFL7WNR5T5;\n');
+    expect(() => assertSigningTeam(root, SCHEME)).not.toThrow();
+    writePbxproj(root, '\t\t\t\tDEVELOPMENT_TEAM = "UFL7WNR5T5";\n');
+    expect(() => assertSigningTeam(root, SCHEME)).not.toThrow();
+  });
+
+  test('fails before any compiling when no team is set, naming ios.appleTeamId', () => {
+    const root = tempRoot();
+    // The shape a prebuild without ios.appleTeamId leaves: the key is absent,
+    // or present and empty.
+    writePbxproj(root, '\t\t\t\tCODE_SIGN_STYLE = Automatic;\n');
+    expect(() => assertSigningTeam(root, SCHEME)).toThrow(
+      /no DEVELOPMENT_TEAM .*Set `ios\.appleTeamId`/,
+    );
+    writePbxproj(root, '\t\t\t\tDEVELOPMENT_TEAM = "";\n');
+    expect(() => assertSigningTeam(root, SCHEME)).toThrow(
+      /no DEVELOPMENT_TEAM/,
+    );
+  });
+
+  test('an unreadable project file is a failure, not a pass', () => {
+    expect(() => assertSigningTeam(tempRoot(), SCHEME)).toThrow(
+      /Could not read .*project\.pbxproj to check its signing team/,
     );
   });
 });

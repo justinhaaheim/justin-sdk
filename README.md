@@ -201,12 +201,13 @@ Available components:
 - **base-setup** — Foundation: package.json scripts, `justin-sdk.config.json`, CLAUDE.md reference. Installed by default when you run any SDK command.
 - **beads-setup** — beads_rust issue tracker via mise, plus AGENTS.md. Add via `add beads`.
 - **critical-rules-setup** — writes the committed rules artifact `.claude/rules/justin-sdk/critical-rules.md`, assembled from the prompts repo's rules registry. Which modules a repo gets is decided by that registry plus the project-type predicates (`isReact`, `isReactNative`, `isBeadsRust`), re-evaluated every time the artifact is regenerated — there is no per-repo module list, and a config still carrying the retired `componentConfig["critical-rules"].modules` gets one warning and is otherwise ignored. In `core`; add via `add critical-rules`, regenerate with `rules-update`, propagate with `sweep --component critical-rules`.
+- **mac-build-setup** — `build:mac`, `build:mac:fast`, `build:mac:no-launch`, `mac` and `mac:install`, all calling `justin-sdk mac-build`: build an Expo app as a Mac ("Designed for iPad") app, launch it through Xcode, and copy it out of DerivedData into `~/Applications/<Scheme>.app` (our previous copy goes to the Trash; any other app there is refused). It needs a `componentConfig["mac-build"]` block naming the `variant`, `scheme` and `bundleId` (`configuration` is optional: Debug for development, Release otherwise), and it applies only where that block exists. Add via `add mac-build`; `justin-sdk config schema` describes each key.
 
 Adding a component installs it AND registers it for future doctor checks.
 
 ### The `core` preset
 
-There is exactly one preset, and it is **computed, not listed**: `core` is every component whose `includeIf` predicates pass for the repo you run it in, minus the implicit `base-setup`. `eas` carries `includeIf: [isExpo]`, so it is in `core` for an Expo app and absent everywhere else; everything else applies to every repo.
+There is exactly one preset, and it is **computed, not listed**: `core` is every component whose `includeIf` predicates pass for the repo you run it in, minus the implicit `base-setup`. `eas` carries `includeIf: [isExpo]`, so it is in `core` for an Expo app and absent everywhere else; `mac-build` carries `includeIf: [hasMacBuildConfig]`, so it is in `core` only where the repo's config has a `mac-build` block. `bun run justin-sdk list` shows every gate and whether it passes here.
 
 ```bash
 bun run justin-sdk add core            # everything that applies here

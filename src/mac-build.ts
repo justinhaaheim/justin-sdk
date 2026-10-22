@@ -246,6 +246,39 @@ function findWorkspace(
 }
 
 /**
+ * Fail fast when the generated project names no signing team.
+ *
+ * `xcodebuild` never picks a team itself (`expo run:ios` does, which is why an
+ * app can build for a device for months without one), so a project with no
+ * DEVELOPMENT_TEAM compiles for minutes and then stops on "Signing for <target>
+ * requires a development team" — measured on health-logger-rn, 2026-10-21. Expo
+ * writes the team from `ios.appleTeamId` at prebuild; checking for it here turns
+ * that into a one-line failure before anything compiles. An unreadable project
+ * file is a failure too, never a pass.
+ */
+export function assertSigningTeam(projectRoot: string, scheme: string): void {
+  const pbxprojPath = path.join(
+    projectRoot,
+    'ios',
+    `${scheme}.xcodeproj`,
+    'project.pbxproj',
+  );
+  let text: string;
+  try {
+    text = fs.readFileSync(pbxprojPath, 'utf8');
+  } catch (error) {
+    fail(
+      `Could not read ${pbxprojPath} to check its signing team: ${describeError(error)}`,
+    );
+  }
+  if (!/\bDEVELOPMENT_TEAM = "?[A-Z0-9]+"?;/.test(text)) {
+    fail(
+      `The generated project has no DEVELOPMENT_TEAM (${pbxprojPath}), so xcodebuild cannot sign it. Set \`ios.appleTeamId\` in the app config (app.config.ts or app.json) to your Apple Developer team id, then run \`bun run build:mac\` again so the prebuild writes it.`,
+    );
+  }
+}
+
+/**
  * Refuse `expo prebuild --clean` when git tracks anything under ios/.
  *
  * `--clean` deletes ios/ and regenerates it. That is only safe for a CNG project,
@@ -446,6 +479,18 @@ function xcodebuildTargetArgs(
 }
 
 /**
+ * The one failure every app hits the same way, so it is named after every
+ * failed terminal build. Measured 2026-10-21: run from a Claude Code session,
+ * xcodebuild reported "No Accounts" for both health-logger-rn and screenshot-app
+ * although Xcode has an Apple ID configured, then fell back to the wildcard
+ * "iOS Team Provisioning Profile: *", which lacks App Groups and push. That the
+ * same command signs from Justin's own terminal is inferred (nature-sounds'
+ * profile was fetched during his own build:mac on 2026-09-23), not re-measured.
+ */
+const SIGNING_HINT =
+  'If they say "No Accounts", or that a provisioning profile lacks a capability (App Groups, Push Notifications), xcodebuild could not use your Xcode account to fetch this app’s profile: check Xcode > Settings > Accounts, and run the command from your own terminal (a process that cannot reach your login keychain, such as an agent session, gets "No Accounts").';
+
+/**
  * Build in the terminal — the only way to see progress and read compiler errors
  * without opening Xcode's UI. Used for --no-launch, for the cold build right
  * after a prebuild, and to surface the errors when an Xcode-alone build fails.
@@ -458,17 +503,21 @@ function buildWithXcodebuild(
 ): void {
   // APP_VARIANT is belt and braces alongside .xcode.env.local: this one covers
   // the CLI build even if that file were ever missing.
-  runInherit(
-    projectRoot,
-    'xcodebuild',
-    [
-      ...xcodebuildTargetArgs(workspace, config, macDestId),
-      '-allowProvisioningUpdates',
-      '-allowProvisioningDeviceRegistration',
-      'build',
-    ],
-    {APP_VARIANT: config.variant},
-  );
+  try {
+    runInherit(
+      projectRoot,
+      'xcodebuild',
+      [
+        ...xcodebuildTargetArgs(workspace, config, macDestId),
+        '-allowProvisioningUpdates',
+        '-allowProvisioningDeviceRegistration',
+        'build',
+      ],
+      {APP_VARIANT: config.variant},
+    );
+  } catch {
+    fail(`xcodebuild failed; its errors are above. ${SIGNING_HINT}`);
+  }
 }
 
 /**
@@ -903,6 +952,7 @@ function macBuild(projectRoot: string, options: MacBuildOptions): void {
   // prebuild may have reset the scheme and the env file.
   setLaunchConfiguration(projectRoot, workspace.scheme, config.configuration);
   pinVariantForXcodeBuildPhases(projectRoot, config.variant);
+  assertSigningTeam(projectRoot, workspace.scheme);
 
   if (!options.launch) {
     log(
