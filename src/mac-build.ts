@@ -136,6 +136,12 @@ const APP_EXIT_WAIT_SECONDS = 20;
  * amount of waiting clears that.
  */
 const DESTINATION_WAIT_SECONDS = 600;
+/**
+ * How many unreadable build-status answers in a row (one a second) before the
+ * Xcode step stops waiting for a status and requests the launch anyway — see
+ * the status loop in buildAndLaunchWithXcode.
+ */
+const STATUS_UNREADABLE_LIMIT = 10;
 
 const COLOR = shouldStyle(process.stdout);
 const ERROR_COLOR = shouldStyle(process.stderr);
@@ -314,25 +320,48 @@ export function assertIosNotTracked(projectRoot: string): void {
 }
 
 /**
- * Make the Xcode Run action use the configuration this command builds.
+ * The Run action's settings this command needs, as `<LaunchAction>` attributes.
  *
- * Expo generates the scheme with LaunchAction buildConfiguration = "Debug", and
- * the AppleScript launch path below goes through Xcode's Run action — so without
- * this, Xcode would build and install a DEBUG app (no embedded JS, dev launcher
- * compiled in) no matter what was asked for. A no-op for a Debug build.
+ * - `buildConfiguration`: Expo generates "Debug", and the AppleScript launch path
+ *   below goes through Xcode's Run action — so without this, Xcode would build
+ *   and install a DEBUG app (no embedded JS, dev launcher compiled in) no matter
+ *   what was asked for.
+ * - No debugger ("Debug executable" unchecked in the scheme editor). Measured
+ *   2026-10-22 on Xcode 27.1 with both health-logger-rn and screenshot-app: with
+ *   LLDB attached, Xcode launched the app suspended ("the debugger is
+ *   responsible for resuming"), spent 151 s in "Configuring Debugger Actions",
+ *   and the app never ran — no window, no console output, and no process the
+ *   launch check could see. A daily-driver build has no use for the debugger,
+ *   and without it Xcode launches the app as an ordinary process. (On Xcode 27.0
+ *   the debugger-attached launch worked: nature-sounds, 2026-10-12.)
+ */
+function launchActionAttributes(configuration: string): Record<string, string> {
+  return {
+    buildConfiguration: configuration,
+    selectedDebuggerIdentifier: '',
+    selectedLauncherIdentifier: 'Xcode.IDEFoundation.Launcher.PosixSpawn',
+  };
+}
+
+/**
+ * Point the Xcode Run action at what this command needs (launchActionAttributes).
+ * Returns whether the scheme file changed, so a caller can make an open Xcode
+ * read it again.
  *
  * Patching a generated file is fine HERE specifically because this command owns
  * the generation step: it re-applies the patch on every run, and `--clean`
  * regenerates the scheme. Nothing else depends on it.
  *
  * Only the LaunchAction is touched — `buildConfiguration` also appears on
- * TestAction and AnalyzeAction, and a blanket replace would corrupt those.
+ * TestAction and AnalyzeAction, and a blanket replace would corrupt those. Each
+ * attribute must already be present: a scheme of another shape fails loudly
+ * rather than being half-patched.
  */
-export function setLaunchConfiguration(
+export function configureLaunchAction(
   projectRoot: string,
   scheme: string,
   configuration: string,
-): void {
+): boolean {
   const schemePath = path.join(
     projectRoot,
     'ios',
@@ -343,7 +372,7 @@ export function setLaunchConfiguration(
   );
 
   if (!fs.existsSync(schemePath)) {
-    fail(`Scheme not found, cannot set the Run configuration: ${schemePath}`);
+    fail(`Scheme not found, cannot set the Run action: ${schemePath}`);
   }
 
   const original = fs.readFileSync(schemePath, 'utf8');
@@ -358,24 +387,29 @@ export function setLaunchConfiguration(
   }
 
   const openingTag = original.slice(tagStart, tagEnd);
-  const patchedTag = openingTag.replace(
-    /buildConfiguration = "[^"]*"/,
-    `buildConfiguration = "${configuration}"`,
-  );
-  if (
-    patchedTag === openingTag &&
-    !openingTag.includes(`buildConfiguration = "${configuration}"`)
-  ) {
-    fail(
-      `Could not set buildConfiguration on <LaunchAction> in ${schemePath} — its attributes did not match the expected shape.`,
-    );
+  let patchedTag = openingTag;
+  for (const [name, value] of Object.entries(
+    launchActionAttributes(configuration),
+  )) {
+    const attribute = new RegExp(`\\b${name} = "[^"]*"`);
+    if (!attribute.test(patchedTag)) {
+      fail(
+        `Could not set ${name} on <LaunchAction> in ${schemePath} — the attribute is not there, so its shape is not the one Expo generates.`,
+      );
+    }
+    patchedTag = patchedTag.replace(attribute, `${name} = "${value}"`);
   }
 
+  if (patchedTag === openingTag) {
+    ok(`Xcode Run action already ${configuration}, without the debugger.`);
+    return false;
+  }
   fs.writeFileSync(
     schemePath,
     original.slice(0, tagStart) + patchedTag + original.slice(tagEnd),
   );
-  ok(`Xcode Run action set to ${configuration}.`);
+  ok(`Xcode Run action set to ${configuration}, without the debugger.`);
+  return true;
 }
 
 /**
@@ -621,8 +655,11 @@ function appProcessPattern(scheme: string): string {
  * the process list could not be read — null is "don't know", never "none
  * running", so an unreadable list can't be mistaken for a confirmed launch.
  *
- * Xcode installs the app into a system-managed container, so the running binary
- * lives at …/d/Wrapper/<Scheme>.app/<Scheme>, not in DerivedData.
+ * The running binary is always inside a wrapper's Wrapper/<Scheme>.app: Xcode
+ * 27.0 launched it from a system-managed container (…/d/Wrapper/<Scheme>.app),
+ * Xcode 27.1 from the install itself
+ * (<BUILT_PRODUCTS_DIR>/.XCInstall/<Scheme>.app, per its 2026-10-22 run logs),
+ * and a copy in ~/Applications has the same layout.
  */
 function runningAppPids(scheme: string): Set<string> | null {
   try {
@@ -683,14 +720,17 @@ function asString(value: string): string {
 }
 
 /** Run an AppleScript, throwing its stderr as the message on failure. */
-function osascript(script: string, what: string): void {
+function osascript(script: string, what: string): string {
   try {
-    execFileSync('osascript', ['-'], {
+    return execFileSync('osascript', ['-'], {
+      encoding: 'utf8',
       input: script,
       stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    }).trim();
   } catch (error) {
-    const stderr = (error as {stderr?: Buffer}).stderr?.toString().trim();
+    const stderr = (error as {stderr?: Buffer | string}).stderr
+      ?.toString()
+      .trim();
     fail(
       stderr != null && stderr !== ''
         ? `${what} — Xcode reported: ${stderr}`
@@ -850,17 +890,33 @@ tell application "Xcode"
     if foundDestination is false then error "Xcode still had no \\"My Mac\\" run destination for this scheme after ${DESTINATION_WAIT_SECONDS}s."
 
     -- Wait for a TERMINAL status: "not yet started" -> "running" -> succeeded /
-    -- failed / cancelled / error occurred.
+    -- failed / cancelled / error occurred. Xcode 27.1 can answer the status
+    -- request with a reference it cannot resolve instead of a value (-1700,
+    -- health-logger-rn 2026-10-22). After ${STATUS_UNREADABLE_LIMIT} such answers in a row the
+    -- build is left to "run", which builds again, and the launch is judged from
+    -- the process list rather than from a status nobody could read.
     set buildResult to build targetProject
     set waited to 0
+    set unreadable to 0
+    set s to "unreadable"
     repeat
-        set s to (status of buildResult as string)
-        if s is not "not yet started" and s is not "running" then exit repeat
+        try
+            set s to (status of buildResult as string)
+            set unreadable to 0
+        on error
+            set s to "unreadable"
+            set unreadable to unreadable + 1
+        end try
+        if s is "unreadable" then
+            if unreadable > ${STATUS_UNREADABLE_LIMIT} then exit repeat
+        else if s is not "not yet started" and s is not "running" then
+            exit repeat
+        end if
         if waited > ${IDE_BUILD_TIMEOUT_SECONDS} then error "Xcode build timed out"
         set waited to waited + 1
         delay 1
     end repeat
-    if (status of buildResult as string) is not "succeeded" then error "Xcode IDE build " & (status of buildResult as string)
+    if s is not "succeeded" and s is not "unreadable" then error "Xcode IDE build " & s
 
     -- End any live run session first. Xcode treats "run" as a no-op while one is
     -- already active, so without this the freshly built app never replaces the
@@ -877,11 +933,16 @@ tell application "Xcode"
     ignoring application responses
         run targetProject
     end ignoring
-    return "launched"
+    return s
 end tell
 end timeout
 `;
-  osascript(script, 'Xcode build/launch failed');
+  const buildStatus = osascript(script, 'Xcode build/launch failed');
+  if (buildStatus === 'unreadable') {
+    log(
+      `Xcode never reported the build's status (it answered ${STATUS_UNREADABLE_LIMIT + 1} times with a reference it could not resolve), so the launch was requested anyway; whether the app came up is judged from the process list.`,
+    );
+  }
 }
 
 /** What the app does for JS once it is running, for the closing message. */
@@ -952,7 +1013,11 @@ function macBuild(projectRoot: string, options: MacBuildOptions): void {
   // Both are cheap, idempotent, and must hold for the build that is about to
   // run — so they are re-applied on the incremental path too, where a previous
   // prebuild may have reset the scheme and the env file.
-  setLaunchConfiguration(projectRoot, workspace.scheme, config.configuration);
+  const schemeChanged = configureLaunchAction(
+    projectRoot,
+    workspace.scheme,
+    config.configuration,
+  );
   pinVariantForXcodeBuildPhases(projectRoot, config.variant);
   assertSigningTeam(projectRoot, workspace.scheme);
 
@@ -980,6 +1045,11 @@ function macBuild(projectRoot: string, options: MacBuildOptions): void {
     );
     buildWithXcodebuild(projectRoot, workspace, config, macDestId);
     ok(`Build succeeded in ${elapsedSince(started)}.`);
+    closeStaleWorkspace(workspace);
+  } else if (schemeChanged) {
+    // An open workspace keeps the scheme it loaded; closing it makes Xcode read
+    // the Run action just written, rather than launch with the old one.
+    log('The Run action changed, so Xcode reopens the workspace to read it.');
     closeStaleWorkspace(workspace);
   }
 
@@ -1018,9 +1088,13 @@ function macBuild(projectRoot: string, options: MacBuildOptions): void {
     log(
       `Xcode build SUCCEEDED in ${elapsedSince(started)}, but no new ${workspace.scheme} process appeared within ${LAUNCH_WAIT_SECONDS}s — the app may still be starting, or Xcode may be waiting on a prompt. Check Xcode.`,
     );
+    // The copy does not depend on the launch: it takes Xcode's install only when
+    // it matches the latest build and verifies the copy, so an unconfirmed
+    // launch is no reason to leave the app in DerivedData.
     log(
-      `${APPLICATIONS_DIR} not updated (the launch was not confirmed). Once the app is up, \`bun run mac:install\` copies it there.`,
+      'Copying it out of DerivedData anyway, if Xcode installed the latest build.',
     );
+    installIntoApplications(projectRoot, workspace, config, macDestId);
     return;
   }
   ok(
@@ -1031,7 +1105,7 @@ function macBuild(projectRoot: string, options: MacBuildOptions): void {
       `Note: ios/ is now prebuilt for ${config.variant.toUpperCase()}; a Detox or simulator build of another variant has to prebuild again.`,
     );
   }
-  // Only now: a confirmed new instance means Xcode's Run finished installing.
+  // A confirmed new instance means Xcode's Run finished installing.
   installIntoApplications(projectRoot, workspace, config, macDestId);
 }
 

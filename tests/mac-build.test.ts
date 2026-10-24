@@ -15,10 +15,10 @@ import {join} from 'path';
 import {
   assertIosNotTracked,
   assertSigningTeam,
+  configureLaunchAction,
   conflictingOptions,
   pinVariantForXcodeBuildPhases,
   runMacBuild,
-  setLaunchConfiguration,
 } from '../src/mac-build';
 
 const roots: string[] = [];
@@ -35,17 +35,25 @@ function tempRoot(): string {
 
 const SCHEME = 'ExampleAppPreview';
 
-/** The shape Expo generates: Debug on Test, Launch and Analyze; Release on Archive. */
+/**
+ * The shape Expo generates: Debug on Test, Launch and Analyze; Release on
+ * Archive. The LaunchAction attributes are copied from health-logger-rn's
+ * generated scheme (2026-10-24).
+ */
 const SCHEME_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <Scheme LastUpgradeVersion = "1130" version = "1.3">
    <TestAction
       buildConfiguration = "Debug"
-      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB">
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB">
    </TestAction>
    <LaunchAction
       buildConfiguration = "Debug"
       selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
-      launchStyle = "0">
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"
+      launchStyle = "0"
+      useCustomWorkingDirectory = "NO"
+      allowLocationSimulation = "YES">
    </LaunchAction>
    <AnalyzeAction
       buildConfiguration = "Debug">
@@ -71,38 +79,64 @@ function writeScheme(root: string): string {
   return path;
 }
 
-describe('setLaunchConfiguration', () => {
-  test('changes the LaunchAction only, leaving Test and Analyze on Debug', () => {
+/** SCHEME_XML with the LaunchAction set to `configuration` and no debugger. */
+function expectedLaunchAction(configuration: string): string {
+  return SCHEME_XML.replace(
+    `<LaunchAction
+      buildConfiguration = "Debug"
+      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"
+      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"`,
+    `<LaunchAction
+      buildConfiguration = "${configuration}"
+      selectedDebuggerIdentifier = ""
+      selectedLauncherIdentifier = "Xcode.IDEFoundation.Launcher.PosixSpawn"`,
+  );
+}
+
+describe('configureLaunchAction', () => {
+  test('sets the configuration and drops the debugger on the LaunchAction only', () => {
     const root = tempRoot();
     const path = writeScheme(root);
 
-    setLaunchConfiguration(root, SCHEME, 'Release');
+    expect(configureLaunchAction(root, SCHEME, 'Release')).toBe(true);
 
     const patched = readFileSync(path, 'utf8');
-    expect(patched).toBe(
-      SCHEME_XML.replace(
-        '<LaunchAction\n      buildConfiguration = "Debug"',
-        '<LaunchAction\n      buildConfiguration = "Release"',
-      ),
-    );
-    // Negative control: the replace above really changed something.
+    expect(patched).toBe(expectedLaunchAction('Release'));
+    // Negative control: the expected text really differs from the input, and
+    // TestAction keeps its debugger.
     expect(patched).not.toBe(SCHEME_XML);
+    expect(patched).toContain(
+      '<TestAction\n      buildConfiguration = "Debug"\n      selectedDebuggerIdentifier = "Xcode.DebuggerFoundation.Debugger.LLDB"',
+    );
   });
 
-  test('is a no-op for Debug, and idempotent', () => {
+  test('drops the debugger for a Debug build too, and reports no change the second time', () => {
     const root = tempRoot();
     const path = writeScheme(root);
-    setLaunchConfiguration(root, SCHEME, 'Debug');
-    expect(readFileSync(path, 'utf8')).toBe(SCHEME_XML);
-    setLaunchConfiguration(root, SCHEME, 'Release');
-    const once = readFileSync(path, 'utf8');
-    setLaunchConfiguration(root, SCHEME, 'Release');
-    expect(readFileSync(path, 'utf8')).toBe(once);
+    expect(configureLaunchAction(root, SCHEME, 'Debug')).toBe(true);
+    expect(readFileSync(path, 'utf8')).toBe(expectedLaunchAction('Debug'));
+    expect(configureLaunchAction(root, SCHEME, 'Debug')).toBe(false);
+    expect(readFileSync(path, 'utf8')).toBe(expectedLaunchAction('Debug'));
+  });
+
+  test('refuses a LaunchAction without the attributes Expo generates', () => {
+    const root = tempRoot();
+    const path = writeScheme(root);
+    writeFileSync(
+      path,
+      SCHEME_XML.replace(
+        '      selectedLauncherIdentifier = "Xcode.DebuggerFoundation.Launcher.LLDB"\n      launchStyle',
+        '      launchStyle',
+      ),
+    );
+    expect(() => configureLaunchAction(root, SCHEME, 'Release')).toThrow(
+      /Could not set selectedLauncherIdentifier on <LaunchAction>/,
+    );
   });
 
   test('fails, naming the path, when the scheme file is missing', () => {
-    expect(() => setLaunchConfiguration(tempRoot(), SCHEME, 'Release')).toThrow(
-      /Scheme not found, cannot set the Run configuration: .*ExampleAppPreview\.xcscheme/,
+    expect(() => configureLaunchAction(tempRoot(), SCHEME, 'Release')).toThrow(
+      /Scheme not found, cannot set the Run action: .*ExampleAppPreview\.xcscheme/,
     );
   });
 });
