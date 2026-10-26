@@ -13,6 +13,7 @@
  *   silent           prints nothing, exit 0
  *   echo-stdin       systemMessage = the exact stdin it received
  *   chatty <text>    systemMessage <text>, plus a stderr line, exit 0
+ *   cwd              systemMessage = process.cwd(), the directory it was started in
  */
 
 import {readFileSync} from 'fs';
@@ -59,6 +60,9 @@ switch (mode) {
   case 'chatty':
     print({systemMessage: text});
     console.error('a diagnostic line');
+    break;
+  case 'cwd':
+    print({systemMessage: process.cwd()});
     break;
   default:
     console.error(`fake-hook-handler: unknown mode ${String(mode)}`);

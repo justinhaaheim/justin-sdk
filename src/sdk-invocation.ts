@@ -9,7 +9,9 @@
  *     are invoked in every repo here. It resolves the repo's own pin, offline.
  *  2. `bun run justin-sdk <cmd>` — everywhere a command is EXECUTED or told to
  *     a human: hooks, advice strings, docs, fixCommands. Hooks run under `sh`,
- *     not under `bun run`, so form 1 would simply not resolve there.
+ *     not under `bun run`, so form 1 would simply not resolve there. The hook
+ *     DISPATCHER entries use form 2′, the same form with its resolution pinned
+ *     to the session's project root (`SDK_RUN_AT_PROJECT_ROOT`, below).
  *  3. `bunx github:justinhaaheim/justin-sdk <cmd>` — BOOTSTRAP only, i.e. the
  *     handful of places where no node_modules can exist yet: the remote
  *     SessionStart hook in a fresh cloud container, and the documented
@@ -41,6 +43,33 @@ export const SDK_BIN = 'justin-sdk';
 /** The executable prefix for hooks, advice and docs (form 2). */
 export const SDK_RUN = `bun run ${SDK_BIN}`;
 
+/**
+ * Form 2′: form 2 with its resolution pinned to the session's PROJECT ROOT —
+ * `bun run --cwd "${CLAUDE_PROJECT_DIR:-.}" justin-sdk`. Written into the hook
+ * dispatcher entries (home-base-rtsx1.6). Not a fourth form, in the same way
+ * form 1′ below is not: it is form 2 with the resolution nailed down.
+ *
+ * Why: Claude Code runs a hook in the session's CURRENT directory, and plain
+ * `bun run justin-sdk` resolves the SDK from there. When Claude works in an
+ * older checkout (a worktree branched before the dispatcher existed, with its
+ * own node_modules), that checkout's SDK has no `hook` command, prints its help
+ * screen, exits 1, and every handler on the event is lost. CLAUDE_PROJECT_DIR is
+ * "the project root where the session started", and Claude Code keeps it there
+ * when it enters a worktree (hooks reference, read 2026-10-24) — so it names the
+ * checkout whose settings.json the session loaded, whose SDK wrote the entry.
+ *
+ * The spelling is load-bearing, each part measured on bun 1.4.2 (2026-10-24):
+ *  - `--cwd` goes AFTER `run`. `bun --cwd <dir> run …` prints bun's usage.
+ *  - The quotes keep a project path with spaces in one word.
+ *  - `:-.` falls back to the current directory when the variable is unset,
+ *    which is exactly the unpinned behaviour, so nothing gets worse.
+ *
+ * The dispatcher's own process.cwd() is then the project root; it runs each
+ * handler child back in the payload's cwd (hook-dispatch.ts `handlerCwd`), so
+ * handlers still see the directory Claude is in.
+ */
+export const SDK_RUN_AT_PROJECT_ROOT = `bun run --cwd "\${CLAUDE_PROJECT_DIR:-.}" ${SDK_BIN}`;
+
 /** The zero-install bootstrap spec (form 3). Legitimate ONLY where no node_modules can exist. */
 export const SDK_BOOTSTRAP = 'bunx github:justinhaaheim/justin-sdk';
 
@@ -63,6 +92,11 @@ export function sdkScript(args: string): string {
 /** A command to run or to print: `bun run justin-sdk doctor`. */
 export function sdkRun(args: string): string {
   return `${SDK_RUN} ${args}`;
+}
+
+/** A hook command resolved from the project root (form 2′): the dispatcher entries. */
+export function sdkRunAtProjectRoot(args: string): string {
+  return `${SDK_RUN_AT_PROJECT_ROOT} ${args}`;
 }
 
 /** The same thing as an argv array, for `spawnSync`/`execFileSync`. */
@@ -154,7 +188,8 @@ interface HookEntry {
  *
  * This is the line between "mine to rewrite" and "somebody's deliberate
  * choice". Everything the SDK has ever emitted starts with one of the retired
- * `bunx` spellings or with the current `bun run justin-sdk`. Anything else that
+ * `bunx` spellings, with the current `bun run justin-sdk`, or with its
+ * project-root-pinned form 2′ (the dispatcher entries). Anything else that
  * still mentions the SDK — an absolute path to a checkout's bin, a wrapper
  * script — was typed by a human for a reason this code cannot see, and at least
  * one such reason is live: an UNENROLLED repo (the threads repo) has no
@@ -163,7 +198,9 @@ interface HookEntry {
  */
 export function isSdkEmittedCommand(command: string): boolean {
   return (
-    STALE_SDK_INVOCATION_RE.test(command) || command.startsWith(`${SDK_RUN} `)
+    STALE_SDK_INVOCATION_RE.test(command) ||
+    command.startsWith(`${SDK_RUN} `) ||
+    command.startsWith(`${SDK_RUN_AT_PROJECT_ROOT} `)
   );
 }
 

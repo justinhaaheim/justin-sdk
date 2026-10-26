@@ -22,6 +22,13 @@ import {join} from 'path';
 import {expandTargets, runAdd} from '../src/add';
 import {COMPONENT_MANIFESTS} from '../src/component-manifest';
 import {corePreset} from '../src/component-registry';
+import {hookEntriesCheckResult} from '../src/doctor';
+import {type DryRun} from '../src/hook-entries-check';
+import {
+  dispatchCommand,
+  DISPATCHED_EVENTS,
+  HOOK_HANDLERS,
+} from '../src/hook-registry';
 import {runInit} from '../src/init';
 import {planInstall, runInstall} from '../src/install';
 import {buildComponentListing, renderComponentListing} from '../src/list';
@@ -437,7 +444,11 @@ describe('remove: pristine artifacts go, modified ones stay (AC 2, AC 10)', () =
   });
 
   test('remove time-check takes its hook and its componentConfig block', async () => {
-    const sb = track(createProjectSandbox());
+    // Per-handler mode, so time-check has a hook of its own to take back
+    // (dispatch is the default since home-base-rtsx1.7).
+    const sb = track(
+      createProjectSandbox({justinSdkConfig: {hooks: {dispatch: false}}}),
+    );
     initGitRepo(sb.path);
     await runAdd(['time-check'], {
       commit: false,
@@ -503,7 +514,10 @@ describe('remove: pristine artifacts go, modified ones stay (AC 2, AC 10)', () =
   });
 
   test('AC F5 positive control: the EXACT command the installer writes is removed', async () => {
-    const sb = track(createProjectSandbox());
+    // Per-handler mode: dispatch is the default since home-base-rtsx1.7.
+    const sb = track(
+      createProjectSandbox({justinSdkConfig: {hooks: {dispatch: false}}}),
+    );
     initGitRepo(sb.path);
     await runAdd(['time-check'], {
       commit: false,
@@ -661,7 +675,11 @@ describe('install reconciles config → disk both ways (AC 3)', () => {
   });
 
   test('AC F6: --prune --dry-run names every file, line, script, hook and key — and changes nothing', async () => {
-    const sb = track(createProjectSandbox());
+    // Per-handler mode, so time-check's own hook is one of the things named
+    // (dispatch is the default since home-base-rtsx1.7).
+    const sb = track(
+      createProjectSandbox({justinSdkConfig: {hooks: {dispatch: false}}}),
+    );
     initGitRepo(sb.path);
     await runAdd(['gitignore', 'prettier', 'time-check'], {
       commit: false,
@@ -890,6 +908,125 @@ describe('install copes with a pre-Part-A config', () => {
         'time-check'
       ]?.gapHours,
     ).toBe(4);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-rtsx1.7 — hook dispatch is the default
+// ---------------------------------------------------------------------------
+
+describe('install with no hooks key writes the hook dispatcher (home-base-rtsx1.7)', () => {
+  // The real dispatcher dry run needs node_modules, which a fixture has not
+  // got, so doctor's HOOK_ENTRIES is handed a passing one (as in
+  // tests/hook-entries-check.test.ts).
+  const DRY_OK: DryRun = (event) => ({
+    exitCode: 0,
+    stdout: JSON.stringify({event, handlers: [], ok: true}),
+  });
+
+  function hookCommands(root: string): Record<string, string[]> {
+    const settings = JSON.parse(
+      readFileSync(join(root, '.claude', 'settings.json'), 'utf-8'),
+    ) as {hooks?: Record<string, {hooks?: {command: string}[]}[]>};
+    return Object.fromEntries(
+      Object.entries(settings.hooks ?? {}).map(([event, entries]) => [
+        event,
+        entries.flatMap((entry) => (entry.hooks ?? []).map((h) => h.command)),
+      ]),
+    );
+  }
+
+  test('a per-handler repo moves to the four dispatcher entries, and doctor expects them', async () => {
+    const components = [
+      'time-check-setup',
+      'usage-check-setup',
+      'thread-hooks-setup',
+    ];
+    const sb = track(
+      createProjectSandbox({
+        justinSdkConfig: {components, hooks: {dispatch: false}},
+      }),
+    );
+    initGitRepo(sb.path);
+    const install = () =>
+      captureOutput(() =>
+        runInstall({projectRoot: sb.path, sdkRepoUrl: sdkRemote()}),
+      );
+
+    // 1. The repo as an older SDK installed it: one entry per handler.
+    expect((await install()).value).toBe(0);
+    const perHandler = HOOK_HANDLERS.filter(
+      (h) => h.component === 'base-setup' || components.includes(h.component),
+    );
+    expect(perHandler).toHaveLength(HOOK_HANDLERS.length);
+    for (const handler of perHandler) {
+      for (const {event} of handler.events) {
+        expect(hookCommands(sb.path)[event]).toContain(handler.command);
+      }
+    }
+    expect(hookEntriesCheckResult(sb.path, {dryRun: DRY_OK})).toEqual({
+      message: 'per-handler: 8 SDK hook entries match what install writes',
+      pass: true,
+    });
+
+    // 2. The new SDK reads a config with no hooks key, as every consumer's is.
+    const configPath = join(sb.path, 'justin-sdk.config.json');
+    writeFileSync(configPath, JSON.stringify({components}, null, 2) + '\n');
+    const before = hookEntriesCheckResult(sb.path, {dryRun: DRY_OK});
+    expect(before.pass).toBe(false);
+    expect(before.message).toContain(
+      `with hooks.dispatch on, \`${dispatchCommand('Stop')}\` should run it`,
+    );
+
+    // 3. install: the four dispatcher entries, the per-handler ones taken back.
+    const {out, value} = await install();
+    expect(value).toBe(0);
+    const after = hookCommands(sb.path);
+    for (const event of DISPATCHED_EVENTS) {
+      expect(after[event]).toEqual([dispatchCommand(event)]);
+    }
+    for (const commands of Object.values(after)) {
+      for (const handler of HOOK_HANDLERS) {
+        expect(commands).not.toContain(handler.command);
+      }
+    }
+    for (const handler of perHandler) {
+      for (const {event} of handler.events) {
+        expect(out).toContain(
+          `removed: .claude/settings.json ${event} hook (${handler.command}) — the ${event} dispatcher entry runs it now`,
+        );
+      }
+    }
+    expect(hookEntriesCheckResult(sb.path, {dryRun: DRY_OK})).toEqual({
+      message: 'dispatch: 4 SDK hook entries match what install writes',
+      pass: true,
+    });
+    // install switched modes without writing the knob.
+    expect(readFileSync(configPath, 'utf-8')).not.toContain('"hooks"');
+  });
+
+  test('only the events of the components the repo has get a dispatcher entry', async () => {
+    const sb = track(
+      createProjectSandbox({
+        justinSdkConfig: {components: ['time-check-setup']},
+      }),
+    );
+    initGitRepo(sb.path);
+    const {value} = await captureOutput(() =>
+      runInstall({projectRoot: sb.path, sdkRepoUrl: sdkRemote()}),
+    );
+    expect(value).toBe(0);
+    const after = hookCommands(sb.path);
+    // base-setup's repo-state and time-check both run on UserPromptSubmit.
+    expect(after.UserPromptSubmit).toEqual([
+      dispatchCommand('UserPromptSubmit'),
+    ]);
+    for (const event of ['PostToolUse', 'PostToolBatch', 'Stop']) {
+      expect({commands: after[event] ?? [], event}).toEqual({
+        commands: [],
+        event,
+      });
+    }
   });
 });
 

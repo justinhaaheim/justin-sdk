@@ -87,7 +87,9 @@ import {sessionDisplayName} from './session-name';
 import {isOpen, openQuestions, stageReached} from './session-status';
 
 /** The legacy report's rule (render-markdown.ts RULE_STOP), kept identical. */
-export const PART_ONE_RULE = '🛑'.repeat(28);
+// Six, not 28 (Justin, 2026-10-24): a longer run fills the phone notification
+// that shows the start of the report. Detection (isRuleLine) needs three.
+export const PART_ONE_RULE = '🛑'.repeat(6);
 
 /** The end of Part 1, and what `thread show` strips through. */
 export const PART_ONE_SEPARATOR = '─'.repeat(28);

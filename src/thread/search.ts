@@ -684,6 +684,14 @@ export interface SearchHit {
 export interface SessionMatch {
   hit: SearchHit;
   /**
+   * EVERY hit, `hit` first, in the order the fields were tried: one per
+   * matching field, each with its own snippet. The row prints the first
+   * SNIPPETS_SHOWN of them and counts the rest (Justin, 2026-10-24: one
+   * snippet per session hid the other places the phrase was said;
+   * home-base-7761p.2).
+   */
+  hits: SearchHit[];
+  /**
    * EVERY field that matched, first included, in the order they were tried.
    *
    * K8 prints one snippet per session, which used to leave "the phrase is also
@@ -697,11 +705,20 @@ export interface SessionMatch {
 /** Names of the other fields, for the ' (+N more fields: …)' suffix. */
 export const MATCHED_FIELDS_NAMED = 3;
 
+/**
+ * How many snippets a row prints without --all-matches: the first hit under
+ * `Match:`, then up to two more under `Match (<field>):`, then a count of the
+ * rest. Three keeps a row readable; the count says what it left out.
+ */
+export const SNIPPETS_SHOWN = 3;
+
 export interface SearchRow {
   activityAt: string | null;
   /** How many archived report files this session has. 0 is a measured zero. */
   archivedReports: number;
   hit: SearchHit;
+  /** Every hit of this session, the one in `hit` first, each with its snippet. */
+  hits: SearchHit[];
   /** Every field of this session that matched, the one in `hit` first (F4). */
   matchedFields: string[];
   repo: string | null;
@@ -749,11 +766,21 @@ export function matchSession(
   session: CorpusSession,
   pattern: RegExp,
 ): SessionMatch | null {
-  let hit: SearchHit | null = null;
+  const hits: SearchHit[] = [];
   const matchedFields: string[] = [];
   const take = (field: string, found: FieldMatch): void => {
     matchedFields.push(field);
-    hit ??= {field, section: found.section, snippet: found.snippet};
+    // The message log repeats the bead's first and last messages, so the same
+    // utterance would print twice: a snippet identical to one already taken
+    // still counts as a matched field, but is not a second snippet.
+    const seen = hits.some(
+      (hit) =>
+        hit.snippet.before === found.snippet.before &&
+        hit.snippet.match === found.snippet.match &&
+        hit.snippet.after === found.snippet.after,
+    );
+    if (!seen)
+      hits.push({field, section: found.section, snippet: found.snippet});
   };
 
   if (session.thread != null) {
@@ -780,7 +807,8 @@ export function matchSession(
       take(`archived report ${stamp} · ${entry.path}`, found);
     }
   }
-  return hit == null ? null : {hit, matchedFields};
+  const [hit] = hits;
+  return hit == null ? null : {hit, hits, matchedFields};
 }
 
 export interface SearchCounts {
@@ -862,6 +890,7 @@ export function searchCorpus(
       activityAt: session.activityAt,
       archivedReports: session.archives.length,
       hit: match.hit,
+      hits: match.hits,
       matchedFields: match.matchedFields,
       repo: session.repo,
       resumeCommand: session.resumeCommand,
@@ -1159,10 +1188,11 @@ export function whenValue(activityAt: string | null, now: Date): string | null {
 export function renderSearchRow(
   row: SearchRow,
   now: Date,
-  options: {color?: boolean; width?: number | null} = {},
+  options: {allMatches?: boolean; color?: boolean; width?: number | null} = {},
 ): string {
   const color = options.color === true;
   const width = options.width ?? null;
+  const allMatches = options.allMatches === true;
   const missing = (text: string): string => paint(text, ['dim'], color);
   const label = (name: (typeof SEARCH_LABELS)[number]): string =>
     `${paint(`${name}:`, ['bold'], color)}${pad(SEARCH_LABEL_WIDTH - displayWidth(`${name}:`))}`;
@@ -1190,7 +1220,31 @@ export function renderSearchRow(
       : [{label: 'Section', value: row.hit.section}]),
     ...(also == null ? [] : [{label: 'Also in', value: also}]),
   ];
-  const {after, before, match} = row.hit.snippet;
+  const snippetLines = (hit: SearchHit): string => {
+    const {after, before, match} = hit.snippet;
+    return wrapHanging(`${before}${highlight(match, color)}${after}`, {
+      hang: valueColumn,
+      indent: valueColumn,
+      width,
+    });
+  };
+  // The first hit prints under `Match:` as it always has. The next ones print
+  // under `Match (<field>):`, up to SNIPPETS_SHOWN in all unless --all-matches,
+  // and a dimmed line counts what was left out (home-base-7761p.2).
+  const shown = allMatches ? row.hits : row.hits.slice(0, SNIPPETS_SHOWN);
+  const left = row.hits.length - shown.length;
+  const moreMatches = shown
+    .slice(1)
+    .flatMap((hit) => [
+      `${pad(BODY_COLUMN)}${paint(`Match (${displayFieldName(hit.field)}):`, ['bold'], color)}`,
+      snippetLines(hit),
+    ]);
+  const leftLine =
+    left > 0
+      ? [
+          `${pad(BODY_COLUMN)}${paint(`and ${left} more match${left === 1 ? '' : 'es'} (--all-matches prints every one)`, ['dim'], color)}`,
+        ]
+      : [];
   const resume =
     row.resumeCommand == null
       ? missing('no resume command recorded')
@@ -1208,11 +1262,9 @@ export function renderSearchRow(
       width,
     }),
     `${pad(BODY_COLUMN)}${paint('Match:', ['bold'], color)}`,
-    wrapHanging(`${before}${highlight(match, color)}${after}`, {
-      hang: valueColumn,
-      indent: valueColumn,
-      width,
-    }),
+    snippetLines(row.hit),
+    ...moreMatches,
+    ...leftLine,
     `${pad(BODY_COLUMN)}${label('Resume')}${resume}`,
   ].join('\n');
 }
@@ -1237,6 +1289,8 @@ export interface SearchSessionsOptions {
 }
 
 export interface SearchOptions extends SearchSessionsOptions {
+  /** Print every hit's snippet, not the first SNIPPETS_SHOWN plus a count. */
+  allMatches?: boolean;
   color?: boolean;
   json?: boolean;
   /** Wrap width; `terminalWidth()` when absent, null never wraps. */
@@ -1382,9 +1436,10 @@ export async function runThreadSearch(options: SearchOptions): Promise<number> {
       : options.color === undefined
         ? terminalWidth()
         : null;
+  const allMatches = options.allMatches === true;
   for (const row of result.rows) {
     console.log('');
-    console.log(renderSearchRow(row, now, {color, width}));
+    console.log(renderSearchRow(row, now, {allMatches, color, width}));
   }
   const more = moreLine(result);
   if (more != null) {

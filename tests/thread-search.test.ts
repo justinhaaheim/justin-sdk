@@ -1030,6 +1030,50 @@ describe('rendering', () => {
     );
   });
 
+  test('a row prints a snippet for the first three hits and counts the rest; --all-matches prints every one (home-base-7761p.2)', () => {
+    const corpus = buildCorpus(
+      [
+        thread(
+          'th-1',
+          {
+            firstUserMessage: 'first needle here',
+            lastAssistantMessage: 'claude needle here',
+            lastUserMessage: 'last needle here',
+          },
+          {description: 'desc needle', notes: 'notes needle', title: 'needle'},
+        ),
+      ],
+      [],
+    );
+    const row = firstRow(searchCorpus(corpus, pattern('needle')));
+    expect(row.hits).toHaveLength(6);
+    expect(row.hits[0]).toEqual(row.hit);
+    const plain = renderSearchRow(row, NOW, {color: false});
+    expect(plain).toContain('      Match:');
+    expect(plain).toContain('      Match (firstUserMessage):');
+    expect(plain).toContain('first »needle« here');
+    expect(plain).toContain('      Match (lastUserMessage):');
+    expect(plain).not.toContain('Match (lastAssistantMessage):');
+    expect(plain).toContain(
+      '      and 3 more matches (--all-matches prints every one)',
+    );
+    const all = renderSearchRow(row, NOW, {allMatches: true, color: false});
+    expect(all).toContain('Match (lastAssistantMessage):');
+    expect(all).toContain('Match (notes):');
+    expect(all).toContain('Match (description):');
+    expect(all).not.toContain('more match');
+    // One hit: no extra blocks and no count, so the eight-line shape holds.
+    const one = firstRow(
+      searchCorpus(
+        buildCorpus([thread('th-2', {lastUserMessage: 'needle'})], []),
+        pattern('needle'),
+      ),
+    );
+    expect(renderSearchRow(one, NOW, {color: false})).not.toContain(
+      'more match',
+    );
+  });
+
   test('what is missing SAYS it is missing rather than printing blank', () => {
     const corpus = buildCorpus(
       [thread('th-1', {lastUserMessage: 'needle'})],

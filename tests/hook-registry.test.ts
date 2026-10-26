@@ -14,10 +14,12 @@ import {
   DISPATCHED_EVENTS,
   dispatchMatcher,
   HOOK_HANDLERS,
+  isDispatchCommand,
   matcherAccepts,
+  retiredDispatchCommand,
   selectHandlers,
 } from '../src/hook-registry';
-import {invokesSdk} from '../src/sdk-invocation';
+import {invokesSdk, isSdkEmittedCommand} from '../src/sdk-invocation';
 import {
   THREAD_CAPTURE_HOOK_COMMAND,
   THREAD_CAPTURE_HOOK_EVENTS,
@@ -92,14 +94,45 @@ describe('dispatcher entries', () => {
     'session-start',
   ];
 
-  test('no dispatcher command contains a handler subcommand', () => {
+  test('no dispatcher command contains a handler subcommand, in either spelling', () => {
     for (const event of DISPATCHED_EVENTS) {
-      const command = dispatchCommand(event);
-      expect(invokesSdk(command)).toBe(true);
-      for (const subcommand of HANDLER_SUBCOMMANDS) {
-        expect(command.includes(subcommand)).toBe(false);
+      for (const command of [
+        dispatchCommand(event),
+        retiredDispatchCommand(event),
+      ]) {
+        expect(invokesSdk(command)).toBe(true);
+        for (const subcommand of HANDLER_SUBCOMMANDS) {
+          expect(command.includes(subcommand)).toBe(false);
+        }
       }
     }
+  });
+
+  /**
+   * home-base-rtsx1.6: the entry resolves the SDK from the session's project
+   * root, so a session working in a checkout whose SDK predates `hook` still
+   * runs this one. The exact string is the entry's identity everywhere.
+   */
+  test('the dispatcher entry is pinned to the project root, and SDK-emitted', () => {
+    for (const event of DISPATCHED_EVENTS) {
+      expect(dispatchCommand(event)).toBe(
+        `bun run --cwd "\${CLAUDE_PROJECT_DIR:-.}" justin-sdk hook ${event}`,
+      );
+      expect(isSdkEmittedCommand(dispatchCommand(event))).toBe(true);
+      expect(retiredDispatchCommand(event)).toBe(
+        `bun run justin-sdk hook ${event}`,
+      );
+      expect(isDispatchCommand(event, dispatchCommand(event))).toBe(true);
+      expect(isDispatchCommand(event, retiredDispatchCommand(event))).toBe(
+        true,
+      );
+      expect(
+        isDispatchCommand(event, `${dispatchCommand(event)} && echo mine`),
+      ).toBe(false);
+    }
+    expect(isDispatchCommand('Stop', dispatchCommand('UserPromptSubmit'))).toBe(
+      false,
+    );
   });
 
   test('matchers: Bash on PostToolUse, none elsewhere', () => {

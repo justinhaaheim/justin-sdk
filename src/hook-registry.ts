@@ -5,8 +5,8 @@
  * Two modes read it. In per-handler mode (today's default) `install` writes one
  * `.claude/settings.json` entry per handler. In dispatch mode (`hooks.dispatch`
  * in justin-sdk.config.json, home-base-rtsx1) it writes one entry per EVENT,
- * `bun run justin-sdk hook <Event>`, and `hook-dispatch.ts` reads this table at
- * runtime to decide which handlers that entry runs.
+ * `dispatchCommand(event)`, and `hook-dispatch.ts` reads this table at runtime
+ * to decide which handlers that entry runs.
  *
  * A LEAF on purpose: it imports nothing but `sdk-invocation.ts`. The dispatcher
  * runs on every prompt, every tool batch and every turn end, and the installers
@@ -18,7 +18,7 @@
  * the CLAUDE_CODE_REMOTE cloud branch) is written by base-setup in both modes.
  */
 
-import {sdkRun} from './sdk-invocation';
+import {sdkRun, sdkRunAtProjectRoot} from './sdk-invocation';
 
 /** The events a dispatch-mode repo carries a `hook <Event>` entry for. */
 export const DISPATCHED_EVENTS = [
@@ -111,9 +111,44 @@ export function isDispatchedEvent(event: string): event is DispatchedEvent {
   return (DISPATCHED_EVENTS as readonly string[]).includes(event);
 }
 
-/** The settings.json command a dispatch-mode repo runs for one event. */
+/**
+ * The settings.json command a dispatch-mode repo runs for one event:
+ * `bun run --cwd "${CLAUDE_PROJECT_DIR:-.}" justin-sdk hook <Event>`. It resolves
+ * the SDK from the session's project root, not from whatever checkout the
+ * session is working in (home-base-rtsx1.6; why in sdk-invocation.ts).
+ *
+ * This exact string is the entry's IDENTITY: install writes it, remove and
+ * doctor find it by exact match.
+ */
 export function dispatchCommand(event: DispatchedEvent): string {
+  return sdkRunAtProjectRoot(`hook ${event}`);
+}
+
+/**
+ * The RETIRED dispatcher spelling, `bun run justin-sdk hook <Event>`
+ * (home-base-rtsx1.6). It resolved the SDK from the session's current
+ * directory, so in a checkout whose SDK predates `hook` every handler on the
+ * event was lost.
+ *
+ * Still recognised everywhere the current spelling is: install rewrites it in
+ * place, the installers' dispatch-off path takes it back, hasDispatchEntry
+ * accepts it, and doctor names it stale. It contains no handler id, so nothing
+ * else flags it — without this, install would append the new entry beside it
+ * and every handler would run twice, silently.
+ */
+export function retiredDispatchCommand(event: DispatchedEvent): string {
   return sdkRun(`hook ${event}`);
+}
+
+/** Is `command` this event's dispatcher entry, in either spelling? */
+export function isDispatchCommand(
+  event: DispatchedEvent,
+  command: string,
+): boolean {
+  return (
+    command === dispatchCommand(event) ||
+    command === retiredDispatchCommand(event)
+  );
 }
 
 /**

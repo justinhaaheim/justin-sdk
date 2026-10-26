@@ -74,10 +74,15 @@ function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'usage-check-'));
 }
 
-function writeConfig(dir: string, usageCheck: UsageCheckConfig | null): void {
+function writeConfig(
+  dir: string,
+  usageCheck: UsageCheckConfig | null,
+  extra: Record<string, unknown> = {},
+): void {
   const config: Record<string, unknown> = {
     components: ['base-setup'],
     version: '0.18.3',
+    ...extra,
   };
   if (usageCheck != null) {
     config.componentConfig = {[USAGE_CHECK_CONFIG_KEY]: usageCheck};
@@ -1577,7 +1582,8 @@ describe('installer: settings and config wiring', () => {
   test('writes both hooks and the config block into a real project', () => {
     setQuiet(true);
     const dir = tempDir();
-    writeConfig(dir, null);
+    // Per-handler mode: dispatch is the default since home-base-rtsx1.7.
+    writeConfig(dir, null, {hooks: {dispatch: false}});
 
     expect(stepUsageCheckHooks(dir)).toBe(true);
     expect(stepUsageCheckConfig(dir)).toBe(true);

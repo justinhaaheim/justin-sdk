@@ -31,7 +31,15 @@
  *
  * WHY THE SAME cli.ts. It is resolved next to THIS module, not from
  * process.argv, so a child always runs the SDK version the dispatcher belongs
- * to — the repo's pinned one under `bun run justin-sdk`.
+ * to — the project root's pinned one under the entry's `bun run --cwd
+ * "${CLAUDE_PROJECT_DIR:-.}" justin-sdk` (home-base-rtsx1.6).
+ *
+ * WHERE A HANDLER RUNS. That `--cwd` moves THIS process to the project root,
+ * while Claude Code runs a hook in the session's current directory, and some
+ * handlers read process.cwd(). So each child is started in the payload's cwd
+ * (where Claude is) when that directory exists, else in this process's cwd —
+ * Claude Code's own fallback when the current directory is gone. The handlers
+ * therefore see the same directory a per-handler entry gave them.
  *
  * TIME LIMITS. Claude Code discards ALL of a hook's output when the hook hits
  * its timeout ("Claude Code cancels a command [...] hook that reaches its
@@ -46,7 +54,7 @@
  */
 
 import {spawn} from 'child_process';
-import {existsSync, readFileSync} from 'fs';
+import {existsSync, readFileSync, statSync} from 'fs';
 import {join} from 'path';
 import {fileURLToPath} from 'url';
 
@@ -111,6 +119,23 @@ function payloadFields(stdin: string): {
   } catch {
     return {cwd: null, toolName: null};
   }
+}
+
+/**
+ * The directory each handler child runs in (home-base-rtsx1.6): the payload's
+ * cwd when it names an existing directory, else this process's cwd. See WHERE
+ * A HANDLER RUNS above.
+ */
+export function handlerCwd(stdin: string): string {
+  const {cwd} = payloadFields(stdin);
+  if (cwd != null) {
+    try {
+      if (statSync(cwd).isDirectory()) return cwd;
+    } catch {
+      // Gone or unreadable: fall through to Claude Code's own fallback.
+    }
+  }
+  return process.cwd();
 }
 
 export type DispatchPlan =
@@ -183,6 +208,8 @@ export function planDispatch(args: {
 /** Run one handler child to completion, or until its time limit. Never throws. */
 function runHandler(args: {
   command: readonly string[];
+  /** The child's working directory: `handlerCwd(stdin)`. */
+  cwd: string;
   env: Env;
   handler: HookHandler;
   stdin: string;
@@ -217,6 +244,7 @@ function runHandler(args: {
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(bin, [...prefix, ...handler.args], {
+        cwd: args.cwd,
         env: silencedChildEnv(args.env),
         stdio: ['pipe', 'pipe', 'pipe'],
       });
@@ -302,9 +330,10 @@ export async function runHookDispatch(args: {
     handlerTimeoutMs(
       args.event as DispatchedEvent /* checked by planDispatch */,
     );
+  const cwd = handlerCwd(args.stdin);
   const runs = await Promise.all(
     plan.handlers.map((handler) =>
-      runHandler({command, env, handler, stdin: args.stdin, timeoutMs}),
+      runHandler({command, cwd, env, handler, stdin: args.stdin, timeoutMs}),
     ),
   );
   return mergeHandlerOutputs(args.event, runs);

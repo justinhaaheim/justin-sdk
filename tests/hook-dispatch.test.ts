@@ -10,11 +10,12 @@
 
 import {afterEach, describe, expect, test} from 'bun:test';
 import {spawnSync} from 'child_process';
-import {mkdtempSync, rmSync, writeFileSync} from 'fs';
+import {mkdtempSync, realpathSync, rmSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
 import {
+  handlerCwd,
   planDispatch,
   renderDispatchPlan,
   runHookDispatch,
@@ -148,6 +149,51 @@ describe('merging', () => {
     });
     expect(out.exitCode).toBe(0);
     expect(out.stderr).toBe('[chatty hi] a diagnostic line\n');
+  });
+});
+
+/**
+ * home-base-rtsx1.6: the entry's `bun run --cwd "${CLAUDE_PROJECT_DIR:-.}"`
+ * moves the dispatcher to the project root, but Claude Code runs a hook in the
+ * session's current directory and some handlers read process.cwd(). So each
+ * child starts in the payload's cwd, or in the dispatcher's own cwd when that
+ * directory is gone.
+ */
+describe('where each handler runs', () => {
+  test("in the payload's cwd when that directory exists", async () => {
+    const root = repo(LISTED);
+    const elsewhere = mkdtempSync(join(tmpdir(), 'hook-dispatch-cwd-'));
+    dirs.push(elsewhere);
+    // The dispatcher's own cwd is neither directory, so only the spawn's
+    // `cwd` option can put the child in `elsewhere`.
+    expect(realpathSync(process.cwd())).not.toBe(realpathSync(elsewhere));
+    const out = await dispatch({
+      handlers: [fake(['cwd']), fake(['cwd'])],
+      root,
+      stdin: JSON.stringify({cwd: elsewhere}),
+    });
+    const real = realpathSync(elsewhere);
+    expect(parse(out.stdout).systemMessage).toBe(`${real}\n\n${real}`);
+  });
+
+  test("in the dispatcher's own cwd when the payload's cwd is gone", async () => {
+    const root = repo(LISTED);
+    const gone = join(root, 'no-such-directory');
+    const out = await dispatch({
+      handlers: [fake(['cwd'])],
+      root,
+      stdin: JSON.stringify({cwd: gone}),
+    });
+    expect(parse(out.stdout).systemMessage).toBe(realpathSync(process.cwd()));
+  });
+
+  test('handlerCwd: a file is not a directory, and no cwd at all falls back too', () => {
+    const root = repo(LISTED);
+    const file = join(root, 'justin-sdk.config.json');
+    expect(handlerCwd(JSON.stringify({cwd: file}))).toBe(process.cwd());
+    expect(handlerCwd('{}')).toBe(process.cwd());
+    expect(handlerCwd('not json')).toBe(process.cwd());
+    expect(handlerCwd(JSON.stringify({cwd: root}))).toBe(root);
   });
 });
 

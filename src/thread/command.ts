@@ -18,6 +18,7 @@
 
 import type {Argv, CommandModule} from 'yargs';
 
+import {readFileSync} from 'node:fs';
 import {dirname} from 'node:path';
 
 import {helpHeader} from '../sdk-identity';
@@ -50,7 +51,7 @@ WHAT IT DOES, in order.
   1. Refuses (exit 2, nothing opened) when the directory does not exist or is not a directory. A leading ~ means your home directory; a relative path is read from the current directory.
   2. Names the workspace "[TAG] new session <directory name>", or "[TAG] <name>" with --name. TAG is the projectTag in that repo's justin-sdk.config.json, else the repo folder name in capitals, the same tag the inbox shows.
   3. Refuses (exit 2) when cmux cannot be reached, and prints the sandbox setting that allows it (see SANDBOX HINT).
-  4. Opens a new cmux workspace in the directory, without switching to it, running \`claude [--model <m>] [--remote-control '<workspace name>']\`.
+  4. Opens a new cmux workspace in the directory, without switching to it, running \`claude [--model <m>] [--remote-control '<workspace name>'] ['<kickoff>']\`. With --kickoff or --kickoff-file the session starts on that prompt with no keystroke; without them it opens on an empty prompt.
   5. Prints the workspace, its cmux id, the directory and the command. With --remote-control it also says how to open the session from your phone.
 
 REMOTE CONTROL. The session runs on this Mac; the Claude app on your phone, or claude.ai/code, is a window onto it. Open the Claude app, tap Code, and pick the session by the name this command prints. The claude process in the workspace must keep running: closing the workspace or quitting claude takes the session offline. A Mac that sleeps reconnects when it wakes.
@@ -252,9 +253,10 @@ Run it with the Claude Code sandbox off: the sandbox blocks the cmux socket and 
 `;
 
 const SEARCH_NARRATIVE = `
-SEARCHES, per session, in this order — the order decides which field the one
-snippet comes from when several match, and the snippet line says how many other
-fields matched and names them:
+SEARCHES, per session, in this order — the order decides which hit prints first
+under \`Match:\`. The next two hits print under \`Match (<field>):\`, a dimmed
+line counts the rest, and --all-matches prints every one (home-base-7761p.2);
+the \`Also in\` line still names the other fields that matched:
 
   title · firstUserMessage · lastUserMessage · lastAssistantMessage
   notes (the stored report) · description
@@ -973,6 +975,17 @@ export const threadCommand: CommandModule = {
                 'The new session’s model (`claude --model`); default: claude’s own default',
               type: 'string' as const,
             })
+            .option('kickoff', {
+              describe:
+                'The first prompt, typed for you: the new session starts on it with no keystroke. Mutually exclusive with --kickoff-file.',
+              type: 'string' as const,
+            })
+            .option('kickoff-file', {
+              describe:
+                'Read the first prompt from this file (for a long or multi-line kickoff). Mutually exclusive with --kickoff.',
+              type: 'string' as const,
+            })
+            .conflicts('kickoff', 'kickoff-file')
             .option('dry-run', {
               default: false,
               describe:
@@ -981,10 +994,23 @@ export const threadCommand: CommandModule = {
             }),
         async (argv) => {
           const {runThreadSpawn} = await import('./spawn');
+          let kickoff: string | null = argv.kickoff ?? null;
+          const kickoffFile = argv['kickoff-file'] ?? null;
+          if (kickoffFile != null) {
+            try {
+              kickoff = readFileSync(kickoffFile, 'utf8');
+            } catch (error) {
+              console.error(
+                `thread spawn: refused: --kickoff-file ${kickoffFile} cannot be read: ${String(error)}`,
+              );
+              process.exit(2);
+            }
+          }
           process.exit(
             await runThreadSpawn({
               dir: argv.dir ?? null,
               dryRun: argv['dry-run'] === true,
+              kickoff,
               model: argv.model ?? null,
               name: argv.name ?? null,
               remoteControl: argv['remote-control'] === true,
@@ -1971,12 +1997,19 @@ export const threadCommand: CommandModule = {
               describe:
                 'Treat the query as a JS regular expression instead of a literal phrase',
               type: 'boolean' as const,
+            })
+            .option('all-matches', {
+              default: false,
+              describe:
+                'Print a snippet for every place the phrase matched in a session, instead of the first three plus a count',
+              type: 'boolean' as const,
             }),
         async (argv) => {
           const {runThreadSearch} = await import('./search');
           const words = (argv.query as string[] | string | undefined) ?? [];
           process.exit(
             await runThreadSearch({
+              allMatches: argv['all-matches'] === true,
               days: argv.days ?? null,
               json: argv.json === true,
               limit: argv.limit,

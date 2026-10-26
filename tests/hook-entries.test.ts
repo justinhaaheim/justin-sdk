@@ -15,12 +15,19 @@ import {join} from 'path';
 import {stepClaudeSettings} from '../src/base-setup';
 import {componentInstalledEvidence} from '../src/component-manifest';
 import {repoStateHookPresence} from '../src/first-prompt';
-import {applyDispatchForComponent} from '../src/hook-entries';
+import {
+  applyDispatchForComponent,
+  describeDispatchOutcome,
+  hookDispatchEnabled,
+  removeDispatchEntriesForComponent,
+} from '../src/hook-entries';
 import {
   dispatchCommand,
   DISPATCHED_EVENTS,
   HOOK_HANDLERS,
+  retiredDispatchCommand,
 } from '../src/hook-registry';
+import {removeComponent} from '../src/remove';
 import {setQuiet} from '../src/setup-helpers';
 import {stepThreadHooks} from '../src/thread-hooks-setup';
 import {stepTimeCheckHook} from '../src/time-check-setup';
@@ -97,6 +104,107 @@ function installHooks(root: string): string[] {
 
 const PER_HANDLER_COMMANDS = HOOK_HANDLERS.map((h) => h.command);
 
+/**
+ * home-base-rtsx1.7: dispatch is the DEFAULT. An absent knob is on; only an
+ * explicit `false`, or a config that cannot be read, is off, because
+ * per-handler entries work with every SDK version.
+ */
+describe('the knob: absent means on (rtsx1.7)', () => {
+  /** A scratch project whose config file holds exactly `text`, or no file. */
+  function rawProject(text: string | null): string {
+    const sandbox = createSandbox();
+    sandboxes.push(sandbox);
+    if (text != null) sandbox.writeFile('justin-sdk.config.json', text);
+    return sandbox.path;
+  }
+
+  test('absent is on: no hooks key, or a hooks block with no dispatch key', () => {
+    for (const config of [
+      {},
+      {components: ['time-check-setup']},
+      {hooks: {}},
+      {hooks: {dispatch: true}},
+    ]) {
+      const text = JSON.stringify(config);
+      expect({on: hookDispatchEnabled(rawProject(text)), text}).toEqual({
+        on: true,
+        text,
+      });
+    }
+  });
+
+  test('an explicit false is off', () => {
+    expect(
+      hookDispatchEnabled(
+        rawProject(JSON.stringify({hooks: {dispatch: false}})),
+      ),
+    ).toBe(false);
+  });
+
+  test('a missing or unreadable config is off', () => {
+    for (const text of [
+      null, // no config file at all
+      '',
+      '{not json',
+      'null',
+      '[]',
+      '"on"',
+      '{"hooks": null}',
+      '{"hooks": "on"}',
+      '{"hooks": []}',
+      '{"hooks": {"dispatch": "true"}}',
+      '{"hooks": {"dispatch": null}}',
+      '{"hooks": {"dispatch": 1}}',
+    ]) {
+      expect({on: hookDispatchEnabled(rawProject(text)), text}).toEqual({
+        on: false,
+        text,
+      });
+    }
+    const directory = rawProject(null);
+    mkdirSync(join(directory, 'justin-sdk.config.json'));
+    expect(hookDispatchEnabled(directory)).toBe(false);
+  });
+
+  test('a per-handler repo whose config has no hooks key moves to the dispatcher entries on install', () => {
+    const root = project({hooks: {dispatch: false}});
+    installHooks(root);
+    expect(commands(root, 'UserPromptSubmit')).toHaveLength(4);
+
+    // Every consumer config: the key was never written.
+    writeFileSync(join(root, 'justin-sdk.config.json'), '{}');
+    const lines = installHooks(root);
+
+    for (const event of DISPATCHED_EVENTS) {
+      expect(commands(root, event)).toEqual([dispatchCommand(event)]);
+    }
+    for (const event of Object.keys(hooksOf(root))) {
+      for (const command of commands(root, event)) {
+        expect(PER_HANDLER_COMMANDS).not.toContain(command);
+      }
+    }
+    for (const handler of HOOK_HANDLERS) {
+      for (const {event} of handler.events) {
+        expect(lines).toContain(
+          `  removed: .claude/settings.json ${event} hook (${handler.command}) — the ${event} dispatcher entry runs it now`,
+        );
+      }
+    }
+  });
+
+  test('…and a missing config writes per-handler entries, as every SDK version can run', () => {
+    const sandbox = createSandbox();
+    sandboxes.push(sandbox);
+    installHooks(sandbox.path);
+    expect(commands(sandbox.path, 'UserPromptSubmit')).toHaveLength(4);
+    for (const event of DISPATCHED_EVENTS) {
+      expect(commands(sandbox.path, event)).not.toContain(
+        dispatchCommand(event),
+      );
+    }
+  });
+});
+
 describe('dispatch on', () => {
   test('one dispatcher entry per event, no per-handler entry, SessionStart untouched', () => {
     const root = project({hooks: {dispatch: true}});
@@ -124,7 +232,7 @@ describe('dispatch on', () => {
   });
 
   test('switching on takes back each per-handler entry by identity and says so', () => {
-    const root = project({});
+    const root = project({hooks: {dispatch: false}});
     installHooks(root);
     expect(commands(root, 'UserPromptSubmit')).toHaveLength(4);
 
@@ -143,7 +251,7 @@ describe('dispatch on', () => {
   });
 
   test('a hand-edited per-handler entry is kept, and reported as running twice', () => {
-    const root = project({});
+    const root = project({hooks: {dispatch: false}});
     installHooks(root);
     const settings = readSettings(root);
     const hooks = settings.hooks as Record<string, unknown[]>;
@@ -209,7 +317,7 @@ describe('dispatch on', () => {
 
 describe('dispatch off again', () => {
   test('restores exactly the per-handler entries a never-dispatched repo has', () => {
-    const plain = project({});
+    const plain = project({hooks: {dispatch: false}});
     installHooks(plain);
     const expected = hooksOf(plain);
 
@@ -264,6 +372,246 @@ describe('the readers see a dispatched handler as registered', () => {
     expect(componentInstalledEvidence(root, 'thread-hooks').installed).toBe(
       false,
     );
+  });
+});
+
+/**
+ * Rewrite every current dispatcher command in the settings file to the retired
+ * spelling: the shape home-base main carried before home-base-rtsx1.6, written
+ * by the real installers and then aged by hand.
+ */
+function retire(root: string): void {
+  const settings = readSettings(root);
+  const hooks = settings.hooks as Record<
+    string,
+    {hooks: {command: string}[]; matcher?: string}[]
+  >;
+  for (const event of DISPATCHED_EVENTS) {
+    for (const entry of hooks[event] ?? []) {
+      for (const hook of entry.hooks) {
+        if (hook.command === dispatchCommand(event)) {
+          hook.command = retiredDispatchCommand(event);
+        }
+      }
+    }
+  }
+  writeFileSync(settingsPath(root), JSON.stringify(settings));
+}
+
+/**
+ * home-base-rtsx1.6, the double-run trap: the retired spelling carries no
+ * handler id, so nothing else flags it. If install only learned the new
+ * spelling it would append the new entry beside the old one and every handler
+ * would run twice, silently.
+ */
+describe('a retired-spelling dispatcher entry (rtsx1.6)', () => {
+  test('install rewrites it in place: exactly one dispatcher entry per event, reported', () => {
+    const root = project({hooks: {dispatch: true}});
+    installHooks(root);
+    retire(root);
+    for (const event of DISPATCHED_EVENTS) {
+      expect(commands(root, event)).toEqual([retiredDispatchCommand(event)]);
+    }
+
+    const lines = installHooks(root);
+    for (const event of DISPATCHED_EVENTS) {
+      expect(commands(root, event)).toEqual([dispatchCommand(event)]);
+      expect(lines).toContain(
+        `  rewritten: .claude/settings.json ${event} hook (${retiredDispatchCommand(event)} → ${dispatchCommand(event)}) — the old spelling ran the SDK of whatever checkout the session was in, and lost every hook in one older than the dispatcher`,
+      );
+    }
+    const postToolUse = hooksOf(root).PostToolUse as {matcher?: string}[];
+    expect(postToolUse[0]?.matcher).toBe('Bash');
+    for (const event of ['UserPromptSubmit', 'PostToolBatch', 'Stop']) {
+      const entries = hooksOf(root)[event] as {matcher?: string}[];
+      expect(entries[0]?.matcher).toBeUndefined();
+    }
+
+    // …and the result is exactly what a repo that never had the retired
+    // spelling holds, so a further install is a no-op.
+    const fresh = project({hooks: {dispatch: true}});
+    installHooks(fresh);
+    expect(hooksOf(root)).toEqual(hooksOf(fresh));
+    const settled = readFileSync(settingsPath(root), 'utf8');
+    installHooks(root);
+    expect(readFileSync(settingsPath(root), 'utf8')).toBe(settled);
+  });
+
+  test('applyDispatchForComponent: in place, keeping position and foreign hooks; matcher corrected', () => {
+    const retired = retiredDispatchCommand('PostToolUse');
+    const settings: Record<string, unknown> = {
+      hooks: {
+        PostToolUse: [
+          {
+            hooks: [{command: 'bun run prettier --write', type: 'command'}],
+            matcher: 'Edit|Write',
+          },
+          // The retired entry, without its matcher, sharing its entry with a
+          // foreign hook.
+          {
+            hooks: [
+              {command: retired, timeout: 30, type: 'command'},
+              {command: 'echo foreign', type: 'command'},
+            ],
+          },
+        ],
+      },
+    };
+    const outcome = applyDispatchForComponent(settings, 'thread-hooks-setup');
+    expect(outcome.rewritten).toEqual(['PostToolUse']);
+    // UserPromptSubmit and Stop are added (thread-hooks runs on them too and
+    // they had no entry); PostToolUse is reported once, as the rewrite.
+    expect(outcome.added).toEqual(['UserPromptSubmit', 'Stop']);
+    expect(outcome.changed).toBe(true);
+    expect((settings.hooks as Record<string, unknown>).PostToolUse).toEqual([
+      {
+        hooks: [{command: 'bun run prettier --write', type: 'command'}],
+        matcher: 'Edit|Write',
+      },
+      {
+        hooks: [
+          {
+            command: dispatchCommand('PostToolUse'),
+            timeout: 30,
+            type: 'command',
+          },
+          {command: 'echo foreign', type: 'command'},
+        ],
+        matcher: 'Bash',
+      },
+    ]);
+  });
+
+  test('applyDispatchForComponent: a retired entry BESIDE the current one is taken back', () => {
+    const settings: Record<string, unknown> = {
+      hooks: {
+        Stop: [
+          {hooks: [{command: dispatchCommand('Stop'), type: 'command'}]},
+          {hooks: [{command: retiredDispatchCommand('Stop'), type: 'command'}]},
+        ],
+      },
+    };
+    const outcome = applyDispatchForComponent(settings, 'thread-hooks-setup');
+    expect(outcome.rewritten).toEqual([]);
+    expect(outcome.removed).toContainEqual({
+      command: retiredDispatchCommand('Stop'),
+      event: 'Stop',
+    });
+    expect((settings.hooks as Record<string, unknown>).Stop).toEqual([
+      {hooks: [{command: dispatchCommand('Stop'), type: 'command'}]},
+    ]);
+    expect(describeDispatchOutcome(outcome)).toContain(
+      `removed: .claude/settings.json Stop hook (${retiredDispatchCommand('Stop')}) — a retired spelling of the dispatcher entry, beside the current one: every handler on it ran twice`,
+    );
+  });
+
+  test('a second copy of the retired command in one entry does not become a second current one', () => {
+    const retired = retiredDispatchCommand('Stop');
+    const settings: Record<string, unknown> = {
+      hooks: {
+        Stop: [
+          {
+            hooks: [
+              {command: retired, type: 'command'},
+              {command: retired, type: 'command'},
+            ],
+          },
+        ],
+      },
+    };
+    applyDispatchForComponent(settings, 'thread-hooks-setup');
+    expect((settings.hooks as Record<string, unknown>).Stop).toEqual([
+      {hooks: [{command: dispatchCommand('Stop'), type: 'command'}]},
+    ]);
+  });
+
+  test('dispatch off: removeDispatchEntriesForComponent takes back both spellings by exact match, and nothing else', () => {
+    const edited = `${retiredDispatchCommand('Stop')} && echo mine`;
+    const settings: Record<string, unknown> = {
+      hooks: {
+        Stop: [
+          {hooks: [{command: dispatchCommand('Stop'), type: 'command'}]},
+          {hooks: [{command: retiredDispatchCommand('Stop'), type: 'command'}]},
+          {hooks: [{command: edited, type: 'command'}]},
+          {hooks: [{command: 'echo foreign', type: 'command'}]},
+          {
+            hooks: [
+              {command: dispatchCommand('UserPromptSubmit'), type: 'command'},
+            ],
+          },
+        ],
+      },
+    };
+    const cleared = removeDispatchEntriesForComponent(
+      settings,
+      'thread-hooks-setup',
+    );
+    expect(cleared).toEqual([
+      {command: dispatchCommand('Stop'), event: 'Stop'},
+      {command: retiredDispatchCommand('Stop'), event: 'Stop'},
+    ]);
+    expect((settings.hooks as Record<string, unknown>).Stop).toEqual([
+      {hooks: [{command: edited, type: 'command'}]},
+      {hooks: [{command: 'echo foreign', type: 'command'}]},
+      {
+        hooks: [
+          {command: dispatchCommand('UserPromptSubmit'), type: 'command'},
+        ],
+      },
+    ]);
+  });
+
+  test('dispatch off through install: the retired entries go, named as they were spelled', () => {
+    const plain = project({hooks: {dispatch: false}});
+    installHooks(plain);
+
+    const root = project({hooks: {dispatch: true}});
+    installHooks(root);
+    retire(root);
+    setDispatch(root, false);
+    const lines = installHooks(root);
+
+    expect(hooksOf(root)).toEqual(hooksOf(plain));
+    for (const event of DISPATCHED_EVENTS) {
+      expect(lines).toContain(
+        `  removed: .claude/settings.json ${event} hook (${retiredDispatchCommand(event)}) — hooks.dispatch is off, so each handler gets its own entry again`,
+      );
+    }
+  });
+
+  test('remove / install --prune leave a shared dispatcher entry alone, in either spelling (rtsx1.2 finding 5)', () => {
+    // A dispatcher entry runs every listed component's handlers, so removing
+    // ONE component must not take it: `remove` drops the component from the
+    // config, which is what stops the dispatcher running it. remove.ts's
+    // manifest hooks are per-handler commands only, matched exactly, so
+    // neither spelling is ever theirs to delete.
+    for (const age of ['current', 'retired'] as const) {
+      const root = project({hooks: {dispatch: true}});
+      installHooks(root);
+      if (age === 'retired') retire(root);
+      const before = hooksOf(root);
+      const plan = removeComponent(root, 'thread-hooks', {dryRun: true});
+      for (const outcome of plan.outcomes) {
+        expect(outcome.what).not.toContain('justin-sdk hook');
+      }
+      removeComponent(root, 'thread-hooks');
+      expect(hooksOf(root)).toEqual(before);
+    }
+  });
+
+  test('the readers count it: session-start arms, and component evidence holds', () => {
+    const root = project({hooks: {dispatch: true}});
+    installHooks(root);
+    retire(root);
+    const home = project({});
+    expect(repoStateHookPresence(root, false, {HOME: home})).toEqual({
+      kind: 'installed',
+      where: settingsPath(root),
+    });
+    expect(componentInstalledEvidence(root, 'thread-hooks')).toEqual({
+      because: '.claude/settings.json UserPromptSubmit (hook dispatcher)',
+      installed: true,
+    });
   });
 });
 

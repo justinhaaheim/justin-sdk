@@ -19,8 +19,10 @@
  *    is the one failure that does visible damage every turn.
  *  - MISSING (warn): an entry `install` would write that is not there.
  *  - STALE (warn): an entry from the other mode (a handler with its own entry
- *    while dispatch is on, or run by the dispatcher while it is off), or a
- *    dispatcher entry with the wrong matcher.
+ *    while dispatch is on, or run by the dispatcher while it is off), a
+ *    dispatcher entry with the wrong matcher, or a dispatcher entry in the
+ *    RETIRED spelling (home-base-rtsx1.6): it still runs the handlers, so alone
+ *    it is a warning; beside the current entry it is a RUNS TWICE error.
  *  - EXTRA (warn): a dispatcher entry that runs no handler for this repo.
  *  - DEAD (error, dispatch mode only): the dispatcher entry itself does not run.
  *    Carried from home-base-nlho as a DRY RUN: `hook <Event> --dry-run` resolves
@@ -43,8 +45,10 @@ import {
   type DispatchedEvent,
   dispatchMatcher,
   HOOK_HANDLERS,
+  isDispatchCommand,
+  retiredDispatchCommand,
 } from './hook-registry';
-import {invokesSdk, sdkRunArgv} from './sdk-invocation';
+import {invokesSdk, sdkRun, sdkRunArgv} from './sdk-invocation';
 
 export type HookEntriesMode = 'dispatch' | 'per-handler';
 
@@ -68,7 +72,12 @@ export type DryRun = (
   projectRoot: string,
 ) => {exitCode: number | null; stdout: string};
 
-/** The real dry run: the repo's own SDK, exactly as the hook entry invokes it. */
+/**
+ * The real dry run: the repo's own SDK, resolved as the hook entry resolves it.
+ * The entry runs `bun run --cwd "${CLAUDE_PROJECT_DIR:-.}" justin-sdk`; with cwd
+ * and CLAUDE_PROJECT_DIR both the project root, plain `bun run justin-sdk` here
+ * resolves from the same directory (home-base-rtsx1.6).
+ */
 const realDryRun: DryRun = (event, projectRoot) => {
   const [bin, ...args] = sdkRunArgv(['hook', event, '--dry-run']);
   const result = spawnSync(bin ?? 'bun', args, {
@@ -175,20 +184,32 @@ export function checkSdkHookEntries(
   for (const event of DISPATCHED_EVENTS) {
     const entries = entriesFor(settings, event);
     const dispatcher = dispatchCommand(event);
+    const retired = retiredDispatchCommand(event);
     const dispatcherEntry = entries.find((e) =>
       e.commands.includes(dispatcher),
+    );
+    // Every dispatcher command under this event, in either spelling, once per
+    // occurrence: each one runs every dispatched handler (home-base-rtsx1.6).
+    const dispatcherRuns = entries.flatMap((e) =>
+      e.commands.filter((c) => isDispatchCommand(event, c)),
     );
     const needed = handlers.filter((h) =>
       h.events.some((e) => e.event === event),
     );
 
-    if (dispatcherEntry != null) {
-      presentDispatchers.push(event);
-      if (needed.length === 0) {
-        report.extra.push(
-          `${event}: \`${dispatcher}\` runs no handler for this repo's components`,
-        );
-      } else if (mode === 'dispatch') {
+    if (dispatcherRuns.includes(retired)) {
+      report.stale.push(
+        `${event}: stale dispatcher entry \`${retired}\` (runs the SDK of whatever checkout the session is in, and loses every hook in an older one): run \`${sdkRun('install')}\``,
+      );
+    }
+
+    if (dispatcherRuns.length > 0) presentDispatchers.push(event);
+    if (dispatcherRuns.length > 0 && needed.length === 0) {
+      report.extra.push(
+        `${event}: \`${dispatcherRuns[0] ?? dispatcher}\` runs no handler for this repo's components`,
+      );
+    } else if (dispatcherEntry != null) {
+      if (mode === 'dispatch') {
         const want = dispatchMatcher(event);
         if (dispatcherEntry.matcher !== want) {
           report.stale.push(
@@ -198,7 +219,12 @@ export function checkSdkHookEntries(
           report.matched += 1;
         }
       }
-    } else if (mode === 'dispatch' && needed.length > 0) {
+    } else if (
+      mode === 'dispatch' &&
+      needed.length > 0 &&
+      // A retired-spelling entry is not missing: it is reported stale above.
+      dispatcherRuns.length === 0
+    ) {
       report.missing.push(`${event}: \`${dispatcher}\``);
     }
 
@@ -207,16 +233,20 @@ export function checkSdkHookEntries(
         e.commands.filter(
           (c) =>
             c === handler.command ||
-            (c !== dispatcher && invokesSdk(c) && c.includes(handler.id)),
+            (!isDispatchCommand(event, c) &&
+              invokesSdk(c) &&
+              c.includes(handler.id)),
         ),
       );
-      const runs = own.length + (dispatcherEntry == null ? 0 : 1);
+      const runs = own.length + dispatcherRuns.length;
       if (runs > 1) {
         report.doubleRuns.push(
           `${event}: ${handler.id} runs ${runs} times (${[
-            ...own.map((c) => `\`${c}\``),
-            ...(dispatcherEntry == null ? [] : [`\`${dispatcher}\``]),
-          ].join(', ')})`,
+            ...own,
+            ...dispatcherRuns,
+          ]
+            .map((c) => `\`${c}\``)
+            .join(', ')})`,
         );
         continue;
       }
@@ -230,9 +260,9 @@ export function checkSdkHookEntries(
         report.stale.push(
           `${event}: ${handler.id} has its own entry (\`${own[0]}\`); with hooks.dispatch on, \`${dispatcher}\` should run it`,
         );
-      } else if (mode === 'per-handler' && dispatcherEntry != null) {
+      } else if (mode === 'per-handler' && dispatcherRuns.length > 0) {
         report.stale.push(
-          `${event}: ${handler.id} runs from \`${dispatcher}\` although hooks.dispatch is off`,
+          `${event}: ${handler.id} runs from \`${dispatcherRuns[0] ?? dispatcher}\` although hooks.dispatch is off`,
         );
       } else if (mode === 'per-handler' && own[0] === handler.command) {
         report.matched += 1;

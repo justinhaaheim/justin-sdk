@@ -4,7 +4,7 @@
  * so the check is measured against exactly what `install` produces.
  *
  * The dispatcher dry run is injected: a scratch repo has no node_modules, so
- * the real `bun run justin-sdk hook … --dry-run` could only fail there.
+ * the real `justin-sdk hook … --dry-run` could only fail there.
  */
 
 import {afterEach, describe, expect, spyOn, test} from 'bun:test';
@@ -13,8 +13,12 @@ import {join} from 'path';
 
 import {stepClaudeSettings} from '../src/base-setup';
 import {hookEntriesCheckResult} from '../src/doctor';
-import {type DryRun} from '../src/hook-entries-check';
-import {dispatchCommand} from '../src/hook-registry';
+import {type DryRun, HOOK_ENTRIES_FIX} from '../src/hook-entries-check';
+import {
+  dispatchCommand,
+  DISPATCHED_EVENTS,
+  retiredDispatchCommand,
+} from '../src/hook-registry';
 import {setQuiet} from '../src/setup-helpers';
 import {stepThreadHooks} from '../src/thread-hooks-setup';
 import {stepTimeCheckHook} from '../src/time-check-setup';
@@ -71,7 +75,7 @@ function check(root: string, dryRun: DryRun = DRY_OK) {
 
 describe('a repo exactly as install wrote it passes', () => {
   test('per-handler mode', () => {
-    const root = project({});
+    const root = project({hooks: {dispatch: false}});
     installHooks(root);
     expect(check(root)).toEqual({
       message: 'per-handler: 8 SDK hook entries match what install writes',
@@ -89,9 +93,102 @@ describe('a repo exactly as install wrote it passes', () => {
   });
 });
 
+/**
+ * home-base-rtsx1.7: dispatch is the default, so a config with no `hooks` key
+ * (every consumer's) is checked against dispatch mode.
+ */
+describe('with no hooks key the check expects dispatch mode', () => {
+  test('per-handler entries are stale, each naming the dispatcher that should run it', () => {
+    const root = project({hooks: {dispatch: false}});
+    installHooks(root);
+    writeFileSync(join(root, 'justin-sdk.config.json'), '{}');
+    const result = check(root);
+    expect(result.pass).toBe(false);
+    expect(result.fix).toBe(HOOK_ENTRIES_FIX);
+    expect(result.message).toContain(
+      `Stop: thread stop-check has its own entry (\`bun run justin-sdk thread stop-check\`); with hooks.dispatch on, \`${dispatchCommand('Stop')}\` should run it`,
+    );
+  });
+
+  test('the dispatcher entries install writes pass', () => {
+    const root = project({});
+    installHooks(root);
+    expect(check(root)).toEqual({
+      message: 'dispatch: 4 SDK hook entries match what install writes',
+      pass: true,
+    });
+  });
+});
+
+/** Age every current dispatcher command to the retired spelling (pre-rtsx1.6). */
+function retire(settings: Settings): void {
+  for (const event of DISPATCHED_EVENTS) {
+    for (const entry of settings.hooks[event] ?? []) {
+      for (const hook of entry.hooks) {
+        if (hook.command === dispatchCommand(event)) {
+          hook.command = retiredDispatchCommand(event);
+        }
+      }
+    }
+  }
+}
+
+describe('a retired-spelling dispatcher entry (home-base-rtsx1.6)', () => {
+  test('is a stale WARNING naming the install fix — not missing, not a double run', () => {
+    const root = project({hooks: {dispatch: true}});
+    installHooks(root);
+    edit(root, retire);
+    const result = check(root);
+    expect(result.pass).toBe(false);
+    expect(result.severity).toBe('warn');
+    expect(result.fix).toBe(HOOK_ENTRIES_FIX);
+    expect(result.fix).toContain('bun run justin-sdk install');
+    expect(result.message).toContain('stale:\n');
+    for (const event of DISPATCHED_EVENTS) {
+      expect(result.message).toContain(
+        `  ${event}: stale dispatcher entry \`${retiredDispatchCommand(event)}\` (runs the SDK of whatever checkout the session is in, and loses every hook in an older one): run \`bun run justin-sdk install\``,
+      );
+    }
+    expect(result.message).not.toContain('missing:');
+    expect(result.message).not.toContain('runs twice:');
+  });
+
+  test('beside the current entry, every handler on it runs twice: an error', () => {
+    const root = project({hooks: {dispatch: true}});
+    installHooks(root);
+    edit(root, (s) => {
+      s.hooks.PostToolBatch?.push({
+        hooks: [{command: retiredDispatchCommand('PostToolBatch')}],
+      });
+    });
+    const result = check(root);
+    expect(result.severity).toBe('error');
+    expect(result.message).toContain(
+      `runs twice:\n  PostToolBatch: usage-check runs 2 times (\`${dispatchCommand('PostToolBatch')}\`, \`${retiredDispatchCommand('PostToolBatch')}\`)`,
+    );
+  });
+
+  test('install repairs it, and the new spelling passes', () => {
+    const root = project({hooks: {dispatch: true}});
+    installHooks(root);
+    edit(root, retire);
+    installHooks(root);
+    const settings = JSON.parse(
+      readFileSync(join(root, '.claude', 'settings.json'), 'utf8'),
+    ) as Settings;
+    expect(settings.hooks.Stop?.[0]?.hooks[0]?.command).toBe(
+      'bun run --cwd "${CLAUDE_PROJECT_DIR:-.}" justin-sdk hook Stop',
+    );
+    expect(check(root)).toEqual({
+      message: 'dispatch: 4 SDK hook entries match what install writes',
+      pass: true,
+    });
+  });
+});
+
 describe('what it reports', () => {
   test('a missing entry warns, and the fix names install and the sweep', () => {
-    const root = project({});
+    const root = project({hooks: {dispatch: false}});
     installHooks(root);
     edit(root, (s) => {
       delete s.hooks.PostToolUse;
@@ -119,7 +216,7 @@ describe('what it reports', () => {
     const result = check(root);
     expect(result.severity).toBe('error');
     expect(result.message).toContain(
-      'runs twice:\n  Stop: thread stop-check runs 2 times (`bun run justin-sdk thread stop-check`, `bun run justin-sdk hook Stop`)',
+      `runs twice:\n  Stop: thread stop-check runs 2 times (\`bun run justin-sdk thread stop-check\`, \`${dispatchCommand('Stop')}\`)`,
     );
   });
 
@@ -137,7 +234,7 @@ describe('what it reports', () => {
   });
 
   test('dispatch off with a dispatcher entry left over: every handler on it runs twice', () => {
-    const root = project({});
+    const root = project({hooks: {dispatch: false}});
     installHooks(root);
     edit(root, (s) => {
       s.hooks.PostToolBatch?.push({
@@ -158,7 +255,7 @@ describe('what it reports', () => {
     }));
     expect(result.severity).toBe('error');
     expect(result.message).toContain(
-      'dead:\n  `bun run justin-sdk hook UserPromptSubmit --dry-run` failed (no justin-sdk.config.json)',
+      `dead:\n  \`${dispatchCommand('UserPromptSubmit')} --dry-run\` failed (no justin-sdk.config.json)`,
     );
   });
 
@@ -179,7 +276,7 @@ describe('what it reports', () => {
     // installHooks runs every step, as `install` would not for unlisted
     // components, so Stop and PostToolUse are extra here too.
     expect(result.message).toContain(
-      "  PostToolBatch: `bun run justin-sdk hook PostToolBatch` runs no handler for this repo's components",
+      `  PostToolBatch: \`${dispatchCommand('PostToolBatch')}\` runs no handler for this repo's components`,
     );
   });
 

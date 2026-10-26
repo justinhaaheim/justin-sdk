@@ -52,6 +52,12 @@ export interface SpawnOptions {
   dir: string | null;
   dryRun: boolean;
   env?: EnvLike;
+  /**
+   * The first prompt, handed to `claude` as its positional argument so the
+   * session starts working with no keystroke (the respawn.ts pattern); null:
+   * the session opens on an empty prompt.
+   */
+  kickoff: string | null;
   /** `claude --model`; null: claude's own default. */
   model: string | null;
   /** The title after "[TAG] "; null: "new session <dir basename>". */
@@ -207,6 +213,7 @@ export function spawnWorkspaceName(
 
 /** The text `new-workspace --command` types into the new pane's zsh. */
 export function spawnCommand(input: {
+  kickoff: string | null;
   model: string | null;
   name: string;
   remoteControl: boolean;
@@ -214,6 +221,9 @@ export function spawnCommand(input: {
   const words = ['claude'];
   if (input.model != null) words.push('--model', input.model);
   if (input.remoteControl) words.push('--remote-control', input.name);
+  // The prompt is claude's positional argument (`claude [options] [prompt]`),
+  // so it goes last, after every flag.
+  if (input.kickoff != null) words.push(input.kickoff);
   return words.map(zshWord).join(' ');
 }
 
@@ -247,6 +257,8 @@ export async function spawnSession(
   if (name === '') return stop(2, '--name needs at least one word');
   const model = options.model == null ? null : options.model.trim();
   if (model === '') return stop(2, '--model needs a model name');
+  const kickoff = options.kickoff == null ? null : options.kickoff.trim();
+  if (kickoff === '') return stop(2, '--kickoff needs the text of a prompt');
   const dir = resolveSpawnDir(typed, cwd, env);
   const checked = checkDir(dir);
   if (checked.kind === 'missing') return stop(2, `${dir} does not exist`);
@@ -260,7 +272,12 @@ export async function spawnSession(
   // ---- the plan: every argument, before cmux is touched ----
   const workspaceName = spawnWorkspaceName(dir, name, env);
   const {remoteControl} = options;
-  const command = spawnCommand({model, name: workspaceName, remoteControl});
+  const command = spawnCommand({
+    kickoff,
+    model,
+    name: workspaceName,
+    remoteControl,
+  });
   const window = spawnWindow(env);
   const spawnArgs = ['new-workspace', '--name', workspaceName];
   spawnArgs.push('--cwd', dir, '--command', command, '--focus', 'false');
@@ -271,6 +288,7 @@ export async function spawnSession(
     {label: 'Command', value: command},
     {label: 'Window', value: window.text},
   ];
+  if (kickoff != null) fields.push({label: 'Kickoff', value: kickoff});
   const warning = trustWarning(checkFolderTrust(dir, env));
   const style = outputStyle();
   const indent = stepColumn(0);

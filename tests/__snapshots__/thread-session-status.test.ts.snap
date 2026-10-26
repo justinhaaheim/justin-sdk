@@ -1,7 +1,7 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
 exports[`fixture 1: a question-only session Part 1 snapshot, markdown and ANSI 1`] = `
-"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+"🛑🛑🛑🛑🛑🛑
 
 **Session:** [QUESTION-REPO] What does the nightly export do with deleted rows?
 
@@ -40,7 +40,7 @@ exports[`fixture 1: a question-only session Part 1 snapshot, markdown and ANSI 1
 `;
 
 exports[`fixture 1: a question-only session Part 1 snapshot, markdown and ANSI 2`] = `
-"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+"🛑🛑🛑🛑🛑🛑
 
       \x1B[1mSession:\x1B[0m               [QUESTION-REPO] What does the nightly export do with deleted rows?
 
@@ -80,7 +80,7 @@ exports[`fixture 1: a question-only session Part 1 snapshot, markdown and ANSI 2
 `;
 
 exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part 1 snapshot, markdown and ANSI 1`] = `
-"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+"🛑🛑🛑🛑🛑🛑
 
 **Session:** [WORK-REPO] Make the nightly export twice as fast
 
@@ -161,7 +161,7 @@ exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part
 `;
 
 exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part 1 snapshot, markdown and ANSI 2`] = `
-"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+"🛑🛑🛑🛑🛑🛑
 
       \x1B[1mSession:\x1B[0m               [WORK-REPO] Make the nightly export twice as fast
 
@@ -239,7 +239,7 @@ exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part
 `;
 
 exports[`fixture 3: a session whose checkout is gone Part 1 snapshot, markdown and ANSI 1`] = `
-"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+"🛑🛑🛑🛑🛑🛑
 
 **Session:** [GONE-REPO] ⚠️ title unknown (its beads could not be read; see Progress)
 
@@ -282,7 +282,7 @@ exports[`fixture 3: a session whose checkout is gone Part 1 snapshot, markdown a
 `;
 
 exports[`fixture 3: a session whose checkout is gone Part 1 snapshot, markdown and ANSI 2`] = `
-"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+"🛑🛑🛑🛑🛑🛑
 
       \x1B[1mSession:\x1B[0m               [GONE-REPO] ⚠️ title unknown (its beads could not be read; see Progress)
 
@@ -324,7 +324,7 @@ exports[`fixture 3: a session whose checkout is gone Part 1 snapshot, markdown a
 `;
 
 exports[`fixture 4: 14 commit commands that matched nothing here (F14) Part 1 snapshot, markdown and ANSI 1`] = `
-"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+"🛑🛑🛑🛑🛑🛑
 
 **Session:** [COMMITS-REPO] Tidy the release scripts in the other checkout.
 
@@ -368,7 +368,7 @@ exports[`fixture 4: 14 commit commands that matched nothing here (F14) Part 1 sn
 `;
 
 exports[`fixture 4: 14 commit commands that matched nothing here (F14) Part 1 snapshot, markdown and ANSI 2`] = `
-"🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑🛑
+"🛑🛑🛑🛑🛑🛑
 
       \x1B[1mSession:\x1B[0m               [COMMITS-REPO] Tidy the release scripts in the other checkout.
 

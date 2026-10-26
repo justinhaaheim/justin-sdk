@@ -31,6 +31,8 @@ import {
   PROJECT_CONFIG_FILENAME,
   xdgConfigHome,
 } from './health-notices';
+import {HOOK_DISPATCH_DEFAULT} from './hook-entries';
+import {sdkRunAtProjectRoot} from './sdk-invocation';
 import {
   THREAD_DEFAULT_ANSWER_UI,
   THREAD_DEFAULT_AUTO_COMMIT,
@@ -443,7 +445,7 @@ export const projectConfigSchema = z
           .boolean()
           .optional()
           .describe(
-            'HOOK DISPATCH (home-base-rtsx1, Justin 2026-10-17: "let\'s go with Q1 option A -- dispatcher in each repo"). DEFAULT FALSE. When true, `install` writes ONE .claude/settings.json entry per event — `bun run justin-sdk hook <Event>` for UserPromptSubmit, PostToolUse [Bash], PostToolBatch and Stop — and takes back the per-handler entries it replaces (exact commands only; a hand-edited one is left in place and reported, because it would run twice). At runtime that entry reads this file, resolves the components, and runs the handlers they own, so adding a handler to an event already in the block needs no settings change. SessionStart is unchanged in both modes. Run `bun run justin-sdk install` after changing it.',
+            `HOOK DISPATCH (home-base-rtsx1, Justin 2026-10-17: "let's go with Q1 option A -- dispatcher in each repo"). DEFAULT TRUE since home-base-rtsx1.7 (Justin 2026-10-24): absent means on, \`false\` turns it off, and a config file that is missing or cannot be read means off, because per-handler entries work with every SDK version. When on, \`install\` writes ONE .claude/settings.json entry per event — \`${sdkRunAtProjectRoot('hook <Event>')}\`, run at the session's project root so a session working in an older checkout still runs this SDK, for UserPromptSubmit, PostToolUse [Bash], PostToolBatch and Stop — and takes back the per-handler entries it replaces (exact commands only; a hand-edited one is left in place and reported, because it would run twice). At runtime that entry reads this file, resolves the components, and runs the handlers they own, so adding a handler to an event already in the block needs no settings change. SessionStart is unchanged in both modes. Run \`bun run justin-sdk install\` after changing it.`,
           ),
       })
       .optional()
@@ -936,6 +938,7 @@ function renderSection(
     defaults: {
       componentConfig: DEFAULT_COMPONENT_CONFIG,
       healthNotices: DEFAULT_HEALTH_NOTICES,
+      hooks: {dispatch: HOOK_DISPATCH_DEFAULT},
     },
   });
   const width = keys.reduce((max, line) => Math.max(max, line.key.length), 0);

@@ -79,6 +79,7 @@ function options(w: World, more: Partial<SpawnOptions>): SpawnOptions {
     dir: w.tagged,
     dryRun: false,
     env: w.env,
+    kickoff: null,
     model: null,
     name: null,
     remoteControl: false,
@@ -326,6 +327,36 @@ describe('thread spawn --dry-run', () => {
       `claude --remote-control '[SPWN] new session tagged-repo'`,
     );
     expect(text).toContain(SOCK);
+  });
+
+  test('a --kickoff becomes claude’s positional prompt, after every flag, and is shown', async () => {
+    const w = world();
+    const cmux = fakeCmux();
+    const kickoff = `/conductor Work on x-1: it's "quoted". Run br show x-1 first.`;
+    const opts = options(w, {kickoff, remoteControl: true});
+    const result = await spawnSession(opts, cmux);
+    expect(result.exitCode).toBe(0);
+    const text = result.lines.join('\n');
+    expect(text).toContain('Kickoff');
+    expect(text).toContain(kickoff);
+    const command = argAfter(cmux.calls[1], '--command') ?? '';
+    expect(zshWords(command)).toEqual([
+      '--remote-control',
+      '[SPWN] new session tagged-repo',
+      kickoff,
+    ]);
+  });
+
+  test('refuses an empty --kickoff', async () => {
+    const w = world();
+    const cmux = fakeCmux();
+    const result = await spawnSession(
+      options(w, {dryRun: true, kickoff: '   '}),
+      cmux,
+    );
+    expect(result.exitCode).toBe(2);
+    expect(result.lines.join('\n')).toContain('--kickoff');
+    expect(cmux.calls).toEqual([]);
   });
 
   test('still refuses a missing directory', async () => {
