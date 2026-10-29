@@ -2,9 +2,9 @@
  * thread-rules-setup — copy the threads and status-report rules into a repo
  * (home-base-yukaf.26, D-RULES-INSTALL).
  *
- * Writes `.claude/rules/justin-sdk/status-report-format.md` and `requests.md`
- * from the SDK's `templates/rules/`, beside the committed critical-rules.md.
- * Claude Code autoloads both from there at CLAUDE.md priority, and because the
+ * Writes `.claude/rules/justin-sdk/status-report-format.md`, `requests.md` and
+ * `handoff.md` (THREAD_RULES_FILES) from the SDK's `templates/rules/`, beside
+ * the committed critical-rules.md. Claude Code autoloads them from there at CLAUDE.md priority, and because the
  * files are committed they reach web sessions, CI and fresh clones too.
  *
  * THE SDK'S COPY WINS. A re-run (`install`, `update`, a sweep) rewrites a file
@@ -53,7 +53,7 @@ function writeAtomically(path: string, content: string): void {
 }
 
 /**
- * Bring both files to the template's bytes. Returns false when a file could not
+ * Bring every file to the template's bytes. Returns false when a file could not
  * be checked or written — never reports "in sync" for a file it did not read.
  */
 export function writeThreadRules(projectRoot: string): boolean {
@@ -131,7 +131,7 @@ export async function runThreadRulesSetup(
 
   if (!quiet) {
     console.log(
-      `\n\x1b[32m\x1b[1mthread-rules-setup ready\x1b[0m in ${basename(projectRoot)}. Commit the two files; the next pin bump plus \`install\` updates them.\n`,
+      `\n\x1b[32m\x1b[1mthread-rules-setup ready\x1b[0m in ${basename(projectRoot)}. Commit the ${THREAD_RULES_FILES.length} files; the next pin bump plus \`install\` updates them.\n`,
     );
   }
   return 0;

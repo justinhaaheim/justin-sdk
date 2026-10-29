@@ -116,6 +116,50 @@ describe('`do` is accepted as `act`', () => {
   });
 });
 
+describe('`doc` is accepted as `docs` and `judgment` as `judgmentCall` (pp1vx.16 item 5)', () => {
+  test('workProduct.kind "doc" validates and is stored as "docs"', () => {
+    const payload = basePayload();
+    payload.workProduct.kind = 'doc';
+    const result = validateThreadReport(payload);
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('unreachable');
+    expect(result.payload.workProduct.kind).toBe('docs');
+    expect(result.migrationNotes).toEqual([]);
+  });
+
+  test('every deviation of kind "judgment" becomes "judgmentCall", the others are left alone', () => {
+    const payload = basePayload();
+    payload.deviations = [
+      {kind: 'judgment', text: 'I chose X'},
+      {kind: 'fyi', text: 'tabs'},
+      {kind: 'judgment', text: 'I chose Y'},
+    ];
+    const result = validateThreadReport(payload);
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') throw new Error('unreachable');
+    expect(result.payload.deviations.map((d) => d.kind)).toEqual([
+      'judgmentCall',
+      'fyi',
+      'judgmentCall',
+    ]);
+  });
+
+  test('the input payload is not mutated', () => {
+    const payload = basePayload();
+    payload.workProduct.kind = 'doc';
+    const deviations = [{kind: 'judgment', text: 'I chose X'}];
+    payload.deviations = deviations;
+    normalizeNearMisses(payload);
+    expect(payload.workProduct.kind).toBe('doc');
+    expect(deviations[0]?.kind).toBe('judgment');
+  });
+
+  test('a payload with nothing to correct comes back as the same object', () => {
+    const payload = basePayload();
+    expect(normalizeNearMisses(payload)).toBe(payload);
+  });
+});
+
 describe('nothing else is loosened', () => {
   // Each of these is a value sessions really wrote (counted over every
   // transcript on this machine, 2026-10-20) and each is ambiguous, so each
@@ -142,13 +186,13 @@ describe('nothing else is loosened', () => {
     }
   });
 
-  test('workProduct.kind "doc", deviations kind "judgment" and priorAsks "decided" are still refused', () => {
-    const doc = basePayload();
-    doc.workProduct.kind = 'doc';
-    expect(issuesOf(doc)).toContain('workProduct.kind');
+  test('workProduct.kind "plan", deviations kind "Judgment" and priorAsks "decided" are still refused', () => {
+    const plan = basePayload();
+    plan.workProduct.kind = 'plan';
+    expect(issuesOf(plan)).toContain('workProduct.kind');
 
     const judgment = basePayload();
-    judgment.deviations = [{kind: 'judgment', text: 'I chose X'}];
+    judgment.deviations = [{kind: 'Judgment', text: 'I chose X'}];
     expect(issuesOf(judgment)).toContain('deviations.0.kind');
 
     const decided = basePayload();
@@ -179,9 +223,9 @@ describe('a refusal names the field, the value given and the allowed values', ()
 
   test('a bad work-product kind shows what was written and what is allowed', () => {
     const payload = basePayload();
-    payload.workProduct.kind = 'doc';
+    payload.workProduct.kind = 'plan';
     const text = issuesOf(payload);
-    expect(text).toContain('workProduct.kind: got "doc"');
+    expect(text).toContain('workProduct.kind: got "plan"');
     expect(text).toContain('"docs"');
   });
 

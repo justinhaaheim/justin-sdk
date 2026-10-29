@@ -1,0 +1,33 @@
+
+ ▐▛███▛█   Claude Code v2.1.312
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /…/scratchpad/m1-cwd · /rc connecting…
+
+
+❯ [TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] This is a measurement of  
+  how a new Claude Code session starts. Reply with the single word ready. Run no tools. 
+  ⎿  UserPromptSubmit says:  2026-10-29 5:04:57am
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+✻ Whatchamacalliting… 
+                                                                    ◐ medium · /effort
+────────── [TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] mbnjv.2 M1 runB ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────
+  I  ✱ Haiku 5.5 ✦ medium  …/62dd8629-da82-4ee7-9cef-283bbd6d9600/scratchpad/m1-cw…
+  ◔ —  T-1.6h █░░░░ 24% (—)  T-2d ███░░ 62% (—) 
+  ⧉ —   —   — 
+  ◈ v2.1.312   ⌗ 8ec3b90b-771c-4cff-849c-a7e533997ac1
+  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← 19 agents

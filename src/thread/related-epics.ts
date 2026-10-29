@@ -20,8 +20,10 @@
  * WHERE IT READS. The `.beads/issues.jsonl` export of every beads DB the
  * session names (its sightings) plus the DB each start bead was found in, the
  * same files session-tree.ts reads and for the same reason (one file read per
- * DB, no `br` run). A record found in two exports (a worktree and its main
- * checkout share ids) is the one with the newer `updated_at`.
+ * DB, no `br` run), located the same way (`readBeadsExport`: the export br
+ * writes for that DB, home-base-dj5m9.1.2). A record found in two exports (a
+ * worktree and its main checkout share ids) is the one with the newer
+ * `updated_at`.
  *
  * CRITICAL RULE 7. "No epic" and "could not tell" are different results.
  * `problems` names everything that could not be read or followed: an export

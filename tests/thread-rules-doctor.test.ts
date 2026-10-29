@@ -75,12 +75,12 @@ describe('THREAD_RULES doctor check (AC 4)', () => {
     }
   }
 
-  test('ok when both files match', async () => {
+  test('ok when every file matches', async () => {
     const root = threadsRepo(true);
     writeRules(root);
     const line = await doctorLine(root);
     expect(line).toContain('✓ THREAD_RULES');
-    expect(line).toContain("2 rule files match the SDK's copy");
+    expect(line).toContain("3 rule files match the SDK's copy");
   });
 
   test('warns when missing while threads are on, with the command', async () => {

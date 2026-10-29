@@ -24,8 +24,8 @@ import {
   brShow,
   brUpdate,
   describeBrFailed,
-  findBeadsDb,
   findBeadsWorkspace,
+  resolveRecordedBeadsDb,
 } from '../beads/br';
 import {sdkRun} from '../sdk-invocation';
 import {REQUEST_LABEL, STAGE_LABEL_PREFIX} from './session-bead';
@@ -81,7 +81,7 @@ function placesToLook(
       );
     } else if (read.kind === 'read') {
       for (const sighting of read.sightings) {
-        const db = findBeadsDb(sighting.beadsDir);
+        const db = resolveRecordedBeadsDb(sighting.beadsDir);
         if (db.kind === 'found') places.push(db.db);
         else problems.push(`could not use ${sighting.beadsDir}: ${db.reason}`);
       }

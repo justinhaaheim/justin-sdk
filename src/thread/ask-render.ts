@@ -124,6 +124,21 @@ interface Block {
  */
 export type ItemGap = 1 | 2;
 
+/**
+ * A context line that starts with a list marker (`1.`, `1)`, `-`, `*`, `+`)
+ * would become a list NESTED under its own bullet in markdown: on 2026-10-20 a
+ * `--context "1. … 2. … 3. …"` drew as "- i." with steps 2 and 3 run inline
+ * (home-base-pp1vx.14.1). The marker is backslash-escaped, which Claude Code
+ * draws as the plain character (docs/reference/claude-code-markdown-rendering.md,
+ * case 23). Only the markdown rendering needs it; a terminal print has no
+ * markdown to misread.
+ */
+export function escapeLeadingListMarker(line: string): string {
+  return line
+    .replace(/^(\s*)(\d+)([.)])(?=\s|$)/u, '$1$2\\$3')
+    .replace(/^(\s*)([-*+])(?=\s|$)/u, '$1\\$2');
+}
+
 function markdownItem(
   question: AskBeadView,
   number: number,
@@ -151,7 +166,9 @@ function markdownItem(
     }
   } else {
     const {ask} = parsed;
-    const context = ask.context.map((line) => `- ${line}`);
+    const context = ask.context.map(
+      (line) => `- ${escapeLeadingListMarker(line)}`,
+    );
     const options = ask.options.map((option, index) => {
       const mark = index === ask.recommended ? '(Recommended) ' : '';
       const why = option.why == null ? '' : ` — ${option.why}`;

@@ -30,8 +30,13 @@ import type {TreeIssue} from './session-tree';
 import {sdkRun} from '../sdk-invocation';
 import {ARCHIVED_PREFIX, oneLine, parseAsk} from './ask-format';
 import {sortAsks} from './ask-render';
+import {continuedByOf, continuesOf, handoffRefusalOf} from './handoff-view';
 import {SHARED_PANE_REASON} from './pane-join';
 import {FIRST_MESSAGE_CUT, firstLineOf, tildeText} from './part-one';
+import {
+  CONTINUED_BY_LABEL_PREFIX,
+  CONTINUES_LABEL_PREFIX,
+} from './session-bead';
 import {firstUserLine} from './session-model';
 import {
   isOpen,
@@ -892,11 +897,105 @@ export function paneLineParts(fact: PaneFact): {
   }
 }
 
+/** A session bead the card can name as a predecessor or successor. */
+export interface CardNeighbor {
+  labels: readonly string[];
+  title: string;
+}
+
+/** The card fact labels of the handoff chain (home-base-mbnjv.3, D9). */
+export const CONTINUES_FACT_LABEL = 'Continues';
+export const CONTINUED_BY_FACT_LABEL = 'Continued by';
+
+/** How long the card's "handoff refused:" text may run before "…". */
+export const CARD_REFUSAL_CHARS = 200;
+
+/**
+ * home-base-mbnjv.3 (D9): one neighbour in words. Its title and the state of
+ * the link when its bead is known here; a link whose other half is missing is
+ * said to be half-written, and one whose other bead was not read says so.
+ */
+export function neighborWords(input: {
+  direction: 'continuedBy' | 'continues';
+  neighborId: string;
+  neighbors: ReadonlyMap<string, CardNeighbor> | null;
+  selfId: string;
+}): string {
+  const {direction, neighborId, selfId} = input;
+  const known = input.neighbors?.get(neighborId) ?? null;
+  if (known == null) {
+    return `${neighborId} (its session bead was not read here, so whether the link is complete is not checked)`;
+  }
+  const answer =
+    direction === 'continues'
+      ? `${CONTINUED_BY_LABEL_PREFIX}${selfId}`
+      : `${CONTINUES_LABEL_PREFIX}${selfId}`;
+  const titled = `"${tildeText(known.title)}" (${neighborId})`;
+  return known.labels.includes(answer)
+    ? titled
+    : `${titled} ⚠️ half-written link: ${neighborId} has no ${answer}`;
+}
+
+/** The card's Continues / Continued by facts, from the session bead's labels. */
+export function chainFacts(
+  model: SessionModel,
+  neighbors: ReadonlyMap<string, CardNeighbor> | null,
+): CardFact[] {
+  const session = model.beads.session;
+  if (session == null) return [];
+  const selfId = session.id;
+  return [
+    ...continuesOf(session.labels).map((neighborId) => ({
+      label: CONTINUES_FACT_LABEL,
+      value: neighborWords({
+        direction: 'continues',
+        neighborId,
+        neighbors,
+        selfId,
+      }),
+    })),
+    ...continuedByOf(session.labels).map((neighborId) => ({
+      label: CONTINUED_BY_FACT_LABEL,
+      value: neighborWords({
+        direction: 'continuedBy',
+        neighborId,
+        neighbors,
+        selfId,
+      }),
+    })),
+  ];
+}
+
+/**
+ * home-base-mbnjv.3 (D2): "Where it is" with the newest "handoff refused:"
+ * line after it, while the session has no successor. Once a successor is
+ * linked the refusal is history, and `thread show` still prints it.
+ */
+export function statusWithRefusal(where: string, model: SessionModel): string {
+  const session = model.beads.session;
+  if (session == null || continuedByOf(session.labels).length > 0) {
+    return where;
+  }
+  const refusal = handoffRefusalOf(session.labels, session.notes);
+  if (refusal == null) return where;
+  const flat = tildeText(refusal.replace(/\s+/g, ' '));
+  const cut =
+    flat.length > CARD_REFUSAL_CHARS
+      ? `${flat.slice(0, CARD_REFUSAL_CHARS).trimEnd()}…`
+      : flat;
+  return `${where}; ${cut}`;
+}
+
 export interface CardInput {
   action: ActionLine;
   age: string | null;
   counts: StatusCounts;
   model: SessionModel;
+  /**
+   * Session beads by id, for naming this session's predecessor and successor
+   * (the inbox passes every session it loaded); null or absent = none read.
+   */
+  neighbors?: ReadonlyMap<string, CardNeighbor> | null;
   /** The run's live pane lookup (j8q3e.7 D6). */
   panes: PaneLookup;
   section: InboxSection;
@@ -911,7 +1010,10 @@ export function buildCard(input: CardInput): SessionCard {
   const {action, counts, model, section, status} = input;
   const paneFact = paneFactOf(input.panes, model.sessionId, model.cmux);
   const where = whereWords(status);
-  const facts = gitFacts(model.git);
+  const facts = [
+    ...chainFacts(model, input.neighbors ?? null),
+    ...gitFacts(model.git),
+  ];
   // Rule 10 already says what could not be read; any other line would hide it.
   if (input.unreadable != null && action.rule !== 10) {
     facts.push({label: 'Could not read', value: tildeText(input.unreadable)});
@@ -931,7 +1033,7 @@ export function buildCard(input: CardInput): SessionCard {
     section,
     sectionEmoji: info.emoji,
     sectionTitle: info.title,
-    status: where,
+    status: statusWithRefusal(where, model),
     title: input.title,
     unsent: null,
     youAsked: youAskedOf(model),

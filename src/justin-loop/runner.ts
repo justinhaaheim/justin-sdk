@@ -368,7 +368,11 @@ THE HANDOFF BEAD IS THE ONLY CHANNEL, and it is the control signal: it decides
 whether a successor is spawned at all and what that successor is told. Write it
 with the helper — never by hand — doing these, in this order, LAST:
   1. Commit your code.
-  2. Flush and commit \`.beads/\`, so the bead travels with the branch.
+  2. Flush the beads (\`br sync --flush-only\`) and commit the
+     \`.beads/issues.jsonl\` that br wrote, by explicit path. \`br where\` names
+     its directory: this checkout's own \`.beads/\` while br keeps one database
+     per worktree (br before 0.4.1), the main checkout's once br shares one
+     database across worktrees.
   3. Create the handoff bead:
 
      ${handoffExample(opts.label)}
@@ -2901,7 +2905,7 @@ export function handoffDemand(opts: {
   }
 
   lines.push(
-    'THEN commit your code and your `.beads/` changes, and run this ONCE:',
+    'THEN commit your code and the `.beads/issues.jsonl` br wrote (`br where` names its directory), and run this ONCE:',
     '',
     // F2: DERIVED from the contract's example rather than written a second time.
     // The two had drifted — different placeholders, and a second copy that any

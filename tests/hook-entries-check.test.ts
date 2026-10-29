@@ -13,12 +13,9 @@ import {join} from 'path';
 
 import {stepClaudeSettings} from '../src/base-setup';
 import {hookEntriesCheckResult} from '../src/doctor';
+import {UNGATED_EVENTS} from '../src/hook-entries';
 import {type DryRun, HOOK_ENTRIES_FIX} from '../src/hook-entries-check';
-import {
-  dispatchCommand,
-  DISPATCHED_EVENTS,
-  retiredDispatchCommand,
-} from '../src/hook-registry';
+import {dispatchCommand, retiredDispatchCommand} from '../src/hook-registry';
 import {setQuiet} from '../src/setup-helpers';
 import {stepThreadHooks} from '../src/thread-hooks-setup';
 import {stepTimeCheckHook} from '../src/time-check-setup';
@@ -122,7 +119,7 @@ describe('with no hooks key the check expects dispatch mode', () => {
 
 /** Age every current dispatcher command to the retired spelling (pre-rtsx1.6). */
 function retire(settings: Settings): void {
-  for (const event of DISPATCHED_EVENTS) {
+  for (const event of UNGATED_EVENTS) {
     for (const entry of settings.hooks[event] ?? []) {
       for (const hook of entry.hooks) {
         if (hook.command === dispatchCommand(event)) {
@@ -144,7 +141,7 @@ describe('a retired-spelling dispatcher entry (home-base-rtsx1.6)', () => {
     expect(result.fix).toBe(HOOK_ENTRIES_FIX);
     expect(result.fix).toContain('bun run justin-sdk install');
     expect(result.message).toContain('stale:\n');
-    for (const event of DISPATCHED_EVENTS) {
+    for (const event of UNGATED_EVENTS) {
       expect(result.message).toContain(
         `  ${event}: stale dispatcher entry \`${retiredDispatchCommand(event)}\` (runs the SDK of whatever checkout the session is in, and loses every hook in an older one): run \`bun run justin-sdk install\``,
       );

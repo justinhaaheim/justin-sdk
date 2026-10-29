@@ -7,7 +7,12 @@
 
 import type {CmuxRunner} from './cmux';
 import type {EnvLike} from './paths';
-import type {WorkspaceSession, WorkspaceSyncOutcome} from './workspace-name';
+import type {TabTitleOutcome} from './tab-title';
+import type {
+  OwnerLabelsRead,
+  WorkspaceSession,
+  WorkspaceSyncOutcome,
+} from './workspace-name';
 import type {PreviewSession} from './workspace-name-preview';
 
 import {execFileSync} from 'node:child_process';
@@ -17,6 +22,7 @@ import {brShow, describeBrFailed, findBeadsWorkspace} from '../beads/br';
 import {outputStyle} from '../cli-style';
 import {realCmuxRunner} from './cmux';
 import {resolveRepoTag} from './config';
+import {realChainViewReaders} from './handoff-view';
 import {
   labelValue,
   resolveSession,
@@ -24,6 +30,7 @@ import {
   SID_LABEL_PREFIX,
 } from './session-bead';
 import {readSessionSightings} from './session-index';
+import {describeTabTitle, syncTabTitle} from './tab-title';
 import {
   describeWorkspaceSync,
   restoreWorkspaceNames,
@@ -58,6 +65,58 @@ function repoOfCheckout(root: string): string | null {
 }
 
 /**
+ * The repo name of a session, as workspace naming has always taken it: the
+ * newest sighting from its own beads dir that names one, else the checkout's
+ * git common dir. Shared with thread handoff's successor name
+ * (home-base-mbnjv.3 item 6), so both resolve the same repo tag.
+ */
+export function sessionRepoOf(input: {
+  beadsDir: string;
+  checkoutPath: string;
+  sightings: readonly {beadsDir: string; repo: string | null}[];
+}): string | null {
+  return (
+    [...input.sightings]
+      .reverse()
+      .find((entry) => entry.beadsDir === input.beadsDir && entry.repo != null)
+      ?.repo ?? repoOfCheckout(input.checkoutPath)
+  );
+}
+
+/**
+ * home-base-mbnjv.3 (C7): a sticky owner's labels, for the name transfer.
+ * The sessions index first, then the cwd's beads DB.
+ */
+export function realOwnerLabels(input: {
+  cwd: string;
+  env: EnvLike;
+}): (beadId: string) => OwnerLabelsRead {
+  const readers = realChainViewReaders(input);
+  return (beadId) => {
+    const read = readers.showBead(beadId);
+    return read.kind === 'found'
+      ? {kind: 'found', labels: read.bead.labels}
+      : {kind: 'failed', reason: read.reason};
+  };
+}
+
+/**
+ * home-base-mbnjv.3 item 5: tab titles need nameWorkspaces AND
+ * handoff.successor on in the session's checkout (tab-title.ts header).
+ */
+async function namingKnobs(
+  cwd: string,
+  env: EnvLike,
+): Promise<{nameWorkspaces: boolean; tabTitles: boolean}> {
+  const {resolveThreadConfig} = await import('./config');
+  const config = resolveThreadConfig({cwd, env});
+  return {
+    nameWorkspaces: config.nameWorkspaces,
+    tabTitles: config.nameWorkspaces && config.handoff.successor,
+  };
+}
+
+/**
  * A session by its session id (through the sessions index), or by its session
  * bead's id (looked up in the cwd's beads DB).
  */
@@ -80,15 +139,11 @@ export function lookupWorkspaceSession(input: {
       };
     }
     const sightings = readSessionSightings(wanted, env);
-    const repo =
-      sightings.kind === 'read'
-        ? ([...sightings.sightings]
-            .reverse()
-            .find(
-              (entry) =>
-                entry.beadsDir === resolution.beadsDir && entry.repo != null,
-            )?.repo ?? repoOfCheckout(resolution.checkoutPath))
-        : repoOfCheckout(resolution.checkoutPath);
+    const repo = sessionRepoOf({
+      beadsDir: resolution.beadsDir,
+      checkoutPath: resolution.checkoutPath,
+      sightings: sightings.kind === 'read' ? sightings.sightings : [],
+    });
     return {
       kind: 'found',
       session: {
@@ -159,7 +214,8 @@ export async function workspaceNameFollowUp(input: {
   sessionId: string;
 }): Promise<string | null> {
   try {
-    if (!(await nameWorkspacesKnob(input.cwd, input.env))) return null;
+    const knobs = await namingKnobs(input.cwd, input.env);
+    if (!knobs.nameWorkspaces) return null;
     const lookup = lookupWorkspaceSession({
       cwd: input.cwd,
       env: input.env,
@@ -168,49 +224,102 @@ export async function workspaceNameFollowUp(input: {
     if (lookup.kind === 'failed') {
       return `workspace name not set: ${lookup.reason}; the next prompt will set it`;
     }
+    const run = input.run ?? realCmuxRunner();
     const outcome = await syncWorkspaceName({
       enabled: true,
       env: input.env,
-      run: input.run ?? realCmuxRunner(),
+      readLabels: realOwnerLabels({cwd: input.cwd, env: input.env}),
+      run,
       session: lookup.session,
     });
+    let line: string | null;
     switch (outcome.kind) {
       case 'off':
       case 'outsideCmux':
       case 'unchanged':
-        return null;
+        line = null;
+        break;
       case 'failed':
       case 'notReady':
-        return `${describeWorkspaceSync(outcome)}; the next prompt will set it`;
+        line = `${describeWorkspaceSync(outcome)}; the next prompt will set it`;
+        break;
       default:
-        return describeWorkspaceSync(outcome);
+        line = describeWorkspaceSync(outcome);
     }
+    const tab = await syncTabTitle({
+      enabled: knobs.tabTitles,
+      env: input.env,
+      run,
+      session: lookup.session,
+    });
+    const tabLine =
+      tab.kind === 'renamed'
+        ? describeTabTitle(tab)
+        : tab.kind === 'failed'
+          ? `${describeTabTitle(tab)}; the next prompt will set it`
+          : null;
+    const lines = [line, tabLine].filter(
+      (entry): entry is string => entry != null,
+    );
+    return lines.length === 0 ? null : lines.join('\n');
   } catch (error) {
     return `workspace name not set: ${String(error)}; the next prompt will set it`;
   }
 }
 
+/** The signature of lookupWorkspaceSession, so a test can count the calls. */
+export type SessionLookupFn = (input: {
+  cwd: string;
+  env: EnvLike;
+  session: string;
+}) => SessionLookup;
+
 /**
  * The capture child's call (D4 a), after the session bead is ensured. The
  * outcome goes into capture.jsonl; nothing is printed (stdio is ignored).
+ * `lookup` is the capture run's ONE lookupWorkspaceSession result, shared
+ * with syncTabForCapture (home-base-mbnjv.8 F3).
  */
 export async function syncWorkspaceForCapture(input: {
   cwd: string;
   enabled: boolean;
   env: EnvLike;
+  lookup: SessionLookup;
   run?: CmuxRunner;
-  sessionId: string;
 }): Promise<WorkspaceSyncOutcome> {
   if (!input.enabled) return {kind: 'off'};
-  const lookup = lookupWorkspaceSession({
-    cwd: input.cwd,
-    env: input.env,
-    session: input.sessionId,
-  });
+  const {lookup} = input;
   if (lookup.kind === 'failed') {
     return {kind: 'failed', reason: lookup.reason, workspaceId: null};
   }
   return await syncWorkspaceName({
+    enabled: true,
+    env: input.env,
+    readLabels: realOwnerLabels({cwd: input.cwd, env: input.env}),
+    run: input.run ?? realCmuxRunner(),
+    session: lookup.session,
+  });
+}
+
+/**
+ * The capture child's tab-title call (home-base-mbnjv.3 item 5), after the
+ * workspace sync; its outcome goes into capture.jsonl as `tabTitle`.
+ * home-base-mbnjv.8 F3: it takes the workspace sync's lookup instead of
+ * repeating it (a br read and a git rev-parse on every prompt). The sync
+ * writes only the workspace-names record and cmux, never the session bead,
+ * so the labels and title it read are still the bead's.
+ */
+export async function syncTabForCapture(input: {
+  cwd: string;
+  env: EnvLike;
+  lookup: SessionLookup;
+  run?: CmuxRunner;
+}): Promise<TabTitleOutcome> {
+  const knobs = await namingKnobs(input.cwd, input.env);
+  if (!knobs.tabTitles) return {kind: 'off'};
+  const {lookup} = input;
+  if (lookup.kind === 'failed') return {kind: 'failed', reason: lookup.reason};
+  return await syncTabTitle({
     enabled: true,
     env: input.env,
     run: input.run ?? realCmuxRunner(),
@@ -408,6 +517,7 @@ export async function runThreadWorkspaceName(
     dryRun: options.dryRun,
     enabled: true,
     env,
+    readLabels: realOwnerLabels({cwd, env}),
     run,
     session: lookup.session,
     workspaceId: options.workspace,

@@ -20,9 +20,14 @@
 
 import {sdkRun, sdkRunAtProjectRoot} from './sdk-invocation';
 
-/** The events a dispatch-mode repo carries a `hook <Event>` entry for. */
+/**
+ * The events a dispatch-mode repo can carry a `hook <Event>` entry for.
+ * PreToolUse joined for the session guard (home-base-mbnjv.5); its entry is
+ * written only where the guard's knob is on (`knob` below).
+ */
 export const DISPATCHED_EVENTS = [
   'UserPromptSubmit',
+  'PreToolUse',
   'PostToolUse',
   'PostToolBatch',
   'Stop',
@@ -50,15 +55,29 @@ export interface HookHandler {
   events: readonly HookHandlerEvent[];
   /** The name used in messages: the args joined, e.g. `thread capture`. */
   id: string;
+  /**
+   * A config switch that must be on in the repo before install writes this
+   * handler's entry, or null when the component alone decides. Read by
+   * `hook-knobs.ts`, never here: this file stays a leaf.
+   */
+  knob: HookHandlerKnob | null;
 }
+
+/**
+ * The switches a handler can wait on. `thread.handoff.successor` is
+ * componentConfig.thread.handoff.successor (epic home-base-mbnjv D10): the
+ * session guard is written only where sessions may start successors.
+ */
+export type HookHandlerKnob = 'thread.handoff.successor';
 
 function handler(
   component: string,
   args: readonly string[],
   events: readonly HookHandlerEvent[],
+  knob: HookHandlerKnob | null = null,
 ): HookHandler {
   const id = args.join(' ');
-  return {args, command: sdkRun(id), component, events, id};
+  return {args, command: sdkRun(id), component, events, id, knob};
 }
 
 const NO_MATCHER = null;
@@ -104,6 +123,14 @@ export const HOOK_HANDLERS: readonly HookHandler[] = [
     'thread-hooks-setup',
     ['thread', 'nudge'],
     [{event: 'PostToolUse', matcher: 'Bash'}],
+  ),
+  // The session guard (home-base-mbnjv.5, epic C8): refuses raw cmux / claude
+  // calls and a subagent's thread handoff. Only where successor is on.
+  handler(
+    'thread-hooks-setup',
+    ['thread', 'guard'],
+    [{event: 'PreToolUse', matcher: 'Bash'}],
+    'thread.handoff.successor',
   ),
 ];
 

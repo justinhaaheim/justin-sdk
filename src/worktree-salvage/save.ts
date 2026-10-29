@@ -284,7 +284,8 @@ function holdsGitDir(abs: string): boolean {
   return existsSync(join(abs, '.git'));
 }
 
-interface IgnoredWalk {
+/** Exported for worktree-retire (home-base-rub4v.1.1), which classifies the same walk. */
+export interface IgnoredWalk {
   /** Relative paths of every file a `--ignored` save copies. */
   files: string[];
   nested: ManifestNestedCheckout[];
@@ -306,7 +307,10 @@ function lastSegment(relPath: string): string {
  * separately); a directory holding its own `.git` is a nested checkout and is
  * not entered. A walk that fails gives that path an UNKNOWN size, never 0.
  */
-function walkIgnored(root: string, ignored: readonly string[]): IgnoredWalk {
+export function walkIgnored(
+  root: string,
+  ignored: readonly string[],
+): IgnoredWalk {
   const files: string[] = [];
   const nested: ManifestNestedCheckout[] = [];
   const paths: IgnoredPath[] = [];

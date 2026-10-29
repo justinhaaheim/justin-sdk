@@ -34,7 +34,7 @@ No JSON, no form, no progress percent. Do not repeat what Part 1 already shows: 
 
 4. **Before you yield on a work turn.** Run `bun run justin-sdk thread status` and act on what it prints:
    - **What to mark** lists only what the tool cannot work out itself, each with the command that fixes it. Run that command, or skip an item that does not apply.
-   - **If you stop now the inbox will say:** is the status Justin will see. "Open work, no blocker" tells him to resume this session and say continue. Before you stop on it, settle each open request: close it if its work is done; keep working if you can, acting on the default of any P1 to P3 question he has not answered; or, if it cannot move without his answer, file that question as a P0. A turn where he asked you a question is no exception: put the answer in your final message and keep working on the default until something blocks. In his words (2026-10-24): "You shouldn't yield back to me if there are not blockers." `thread handoff` is not a way to stop: use it only when this session cannot go on (its context is nearly full, or he asked for a new session).
+   - **If you stop now the inbox will say:** is the status Justin will see. "Open work, no blocker" tells him to resume this session and say continue. Before you stop on it, settle each open request: close it if its work is done; keep working if you can, acting on the default of any P1 to P3 question he has not answered; or, if it cannot move without his answer, file that question as a P0. A turn where he asked you a question is no exception: put the answer in your final message and keep working on the default until something blocks. In his words (2026-10-24): "You shouldn't yield back to me if there are not blockers." `thread handoff` is not a way to stop: handoff.md says when and how to hand off.
 5. **He says his answers are in**, or the `[thread]` line in your context counts new answers. Run `bun run justin-sdk thread answers` at the start of the turn and continue from them. If he answers a question in chat instead, record it: `bun run justin-sdk thread answer --ask <question id> "<his answer, verbatim>"`.
 
 `thread done`, `thread archive` and `thread note` are Justin's marks. Do not run them unless he asks. `/thread-done` and `/thread-archive` are him asking.
@@ -51,6 +51,7 @@ bun run justin-sdk thread ask "<one-line question>" --priority <0-4> [--header "
 - `--approve` makes it a yes/no. `--do` marks something he has to do himself, such as testing on a device.
 - A P0 takes no `--default`. P1–P3 require one. A P4 needs none.
 - An incomplete ask is refused with exit 2 and a one-line reason. Fix it and run it again.
+- Put every command, path and flag in backticks. Give each step its own `--context`, starting `Step N:`, never `N.`: several numbered steps in one context run together when he reads them.
 
 ## Ask priority — P0 to P4
 

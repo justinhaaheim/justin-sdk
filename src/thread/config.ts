@@ -23,6 +23,7 @@ import type {EnvLike} from './paths';
 import {existsSync, readFileSync, statSync} from 'fs';
 import {basename, dirname, join, resolve} from 'path';
 
+import {primaryOfClaudeWorktreePath} from '../claude-worktree-path';
 import {findProjectRoot} from '../health-notices';
 import {
   describeConfigOutcome,
@@ -56,6 +57,7 @@ import {
   type ThreadDashboardUi,
   type ThreadEnforceMode,
 } from './defaults';
+import {type ResolvedHandoffConfig, resolveHandoffConfig} from './handoff-knob';
 import {parseSince} from './open-filters';
 
 export function isThreadDashboardUi(
@@ -133,6 +135,12 @@ export interface ResolvedThreadConfig {
   enforceModeSource: ThreadConfigSource;
   /** Which layer decided `enforce`. */
   enforceSource: ThreadConfigSource;
+  /**
+   * `componentConfig.thread.handoff` (epic home-base-mbnjv C1): whether
+   * `thread handoff` starts a successor, and the limits its gate enforces.
+   * Each field is resolved per layer on its own; see handoff-knob.ts.
+   */
+  handoff: ResolvedHandoffConfig;
   /**
    * Whether a session names its cmux workspace after its title
    * (home-base-j8q3e.5 D6). Off by default.
@@ -459,6 +467,16 @@ export function resolveThreadConfig(
     }
   }
 
+  // epic home-base-mbnjv C1: the handoff block, field by field, with its own
+  // problems (a bad value is named and ignored, like enforceMode above).
+  const handoff = resolveHandoffConfig(
+    layers.map((layer) => ({
+      name: layer.name,
+      section: threadSectionIn(layer.config)?.handoff,
+    })),
+    problems,
+  );
+
   // home-base-bomy5.7.1: the project file only — a user-level tag would put
   // one tag on every repo. A bad value is NAMED and ignored, like `stages`.
   let projectTag: string | null = null;
@@ -496,6 +514,7 @@ export function resolveThreadConfig(
     enforceMode,
     enforceModeSource,
     enforceSource: enforce.source,
+    handoff,
     nameWorkspaces: nameWorkspaces.value,
     nameWorkspacesSource: nameWorkspaces.source,
     nudge: nudge.value,
@@ -517,14 +536,12 @@ export function resolveThreadConfig(
   };
 }
 
-/** Where Claude Code puts a repo's worktrees: `<primary>/.claude/worktrees/<name>`. */
-const CLAUDE_WORKTREES_SEGMENT = '/.claude/worktrees/';
-
 /**
  * The repo's PRIMARY checkout for a session checkout (home-base-bomy5.7.2),
  * found without spawning git:
  *   1. a path containing "/.claude/worktrees/" → the prefix before it (a pure
- *      string rule, so it also works for a worktree that is gone);
+ *      string rule, so it also works for a worktree that is gone; shared with
+ *      the beads DB resolver in src/claude-worktree-path.ts);
  *   2. a checkout whose `.git` is a FILE reading
  *      `gitdir: <primary>/.git/worktrees/<name>` → `<primary>`;
  *   3. otherwise the checkout itself.
@@ -536,8 +553,8 @@ const CLAUDE_WORKTREES_SEGMENT = '/.claude/worktrees/';
  * from it.
  */
 export function primaryCheckoutOf(checkout: string): string {
-  const at = checkout.indexOf(CLAUDE_WORKTREES_SEGMENT);
-  if (at > 0) return checkout.slice(0, at);
+  const fromPath = primaryOfClaudeWorktreePath(checkout);
+  if (fromPath != null) return fromPath;
   const dotGit = join(checkout, '.git');
   let text: string;
   try {

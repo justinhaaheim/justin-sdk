@@ -1,0 +1,5 @@
+claude --permission-mode auto --remote-control '[TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] mbnjv.2 M1 runB' --name '[TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] mbnjv.2 M1 runB' --model haiku '[TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] This is a measurement of how a new Claude Code session starts. Reply with the single word ready. Run no tools.'
+Last login: Thu Oct 29 05:02:48 on ttys010
+
+󰀵 jhaa  …/62dd8629-da82-4ee7-9cef-283bbd6d9600/scratchpad/m1-cwd   05:04  
+❯ claude --permission-mode auto --remote-control '[TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] mbnjv.2 M1 runB' --name '[TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] mbnjv.2 M1 runB' --model haiku '[TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] This is a measurement of how a new Claude Code session starts. Reply with the single word ready. Run no tools.'

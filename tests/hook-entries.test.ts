@@ -20,10 +20,11 @@ import {
   describeDispatchOutcome,
   hookDispatchEnabled,
   removeDispatchEntriesForComponent,
+  UNGATED_EVENTS,
+  UNGATED_HANDLERS,
 } from '../src/hook-entries';
 import {
   dispatchCommand,
-  DISPATCHED_EVENTS,
   HOOK_HANDLERS,
   retiredDispatchCommand,
 } from '../src/hook-registry';
@@ -175,7 +176,7 @@ describe('the knob: absent means on (rtsx1.7)', () => {
     writeFileSync(join(root, 'justin-sdk.config.json'), '{}');
     const lines = installHooks(root);
 
-    for (const event of DISPATCHED_EVENTS) {
+    for (const event of UNGATED_EVENTS) {
       expect(commands(root, event)).toEqual([dispatchCommand(event)]);
     }
     for (const event of Object.keys(hooksOf(root))) {
@@ -183,7 +184,7 @@ describe('the knob: absent means on (rtsx1.7)', () => {
         expect(PER_HANDLER_COMMANDS).not.toContain(command);
       }
     }
-    for (const handler of HOOK_HANDLERS) {
+    for (const handler of UNGATED_HANDLERS) {
       for (const {event} of handler.events) {
         expect(lines).toContain(
           `  removed: .claude/settings.json ${event} hook (${handler.command}) — the ${event} dispatcher entry runs it now`,
@@ -197,7 +198,7 @@ describe('the knob: absent means on (rtsx1.7)', () => {
     sandboxes.push(sandbox);
     installHooks(sandbox.path);
     expect(commands(sandbox.path, 'UserPromptSubmit')).toHaveLength(4);
-    for (const event of DISPATCHED_EVENTS) {
+    for (const event of UNGATED_EVENTS) {
       expect(commands(sandbox.path, event)).not.toContain(
         dispatchCommand(event),
       );
@@ -210,7 +211,7 @@ describe('dispatch on', () => {
     const root = project({hooks: {dispatch: true}});
     installHooks(root);
 
-    for (const event of DISPATCHED_EVENTS) {
+    for (const event of UNGATED_EVENTS) {
       expect(commands(root, event)).toEqual([dispatchCommand(event)]);
     }
     const postToolUse = hooksOf(root).PostToolUse as {matcher?: string}[];
@@ -238,10 +239,10 @@ describe('dispatch on', () => {
 
     setDispatch(root, true);
     const lines = installHooks(root);
-    for (const event of DISPATCHED_EVENTS) {
+    for (const event of UNGATED_EVENTS) {
       expect(commands(root, event)).toEqual([dispatchCommand(event)]);
     }
-    for (const handler of HOOK_HANDLERS) {
+    for (const handler of UNGATED_HANDLERS) {
       for (const {event} of handler.events) {
         expect(lines).toContain(
           `  removed: .claude/settings.json ${event} hook (${handler.command}) — the ${event} dispatcher entry runs it now`,
@@ -327,7 +328,7 @@ describe('dispatch off again', () => {
     const lines = installHooks(root);
 
     expect(hooksOf(root)).toEqual(expected);
-    for (const event of DISPATCHED_EVENTS) {
+    for (const event of UNGATED_EVENTS) {
       expect(
         lines.some((line) =>
           line.includes(
@@ -386,7 +387,7 @@ function retire(root: string): void {
     string,
     {hooks: {command: string}[]; matcher?: string}[]
   >;
-  for (const event of DISPATCHED_EVENTS) {
+  for (const event of UNGATED_EVENTS) {
     for (const entry of hooks[event] ?? []) {
       for (const hook of entry.hooks) {
         if (hook.command === dispatchCommand(event)) {
@@ -409,12 +410,12 @@ describe('a retired-spelling dispatcher entry (rtsx1.6)', () => {
     const root = project({hooks: {dispatch: true}});
     installHooks(root);
     retire(root);
-    for (const event of DISPATCHED_EVENTS) {
+    for (const event of UNGATED_EVENTS) {
       expect(commands(root, event)).toEqual([retiredDispatchCommand(event)]);
     }
 
     const lines = installHooks(root);
-    for (const event of DISPATCHED_EVENTS) {
+    for (const event of UNGATED_EVENTS) {
       expect(commands(root, event)).toEqual([dispatchCommand(event)]);
       expect(lines).toContain(
         `  rewritten: .claude/settings.json ${event} hook (${retiredDispatchCommand(event)} → ${dispatchCommand(event)}) — the old spelling ran the SDK of whatever checkout the session was in, and lost every hook in one older than the dispatcher`,
@@ -572,7 +573,7 @@ describe('a retired-spelling dispatcher entry (rtsx1.6)', () => {
     const lines = installHooks(root);
 
     expect(hooksOf(root)).toEqual(hooksOf(plain));
-    for (const event of DISPATCHED_EVENTS) {
+    for (const event of UNGATED_EVENTS) {
       expect(lines).toContain(
         `  removed: .claude/settings.json ${event} hook (${retiredDispatchCommand(event)}) — hooks.dispatch is off, so each handler gets its own entry again`,
       );

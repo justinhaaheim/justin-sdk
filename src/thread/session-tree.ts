@@ -2,7 +2,10 @@
  * A session's beads, as one tree (status report v4, epic home-base-vzwbj.4 D1;
  * built by home-base-vzwbj.4.3): the session bead, its requests, each
  * request's children, and every question — read from the `.beads/issues.jsonl`
- * EXPORT of every beads DB the sessions index names for the session.
+ * EXPORT of every beads DB the sessions index names for the session: the
+ * export br writes for that DB, located by `readBeadsExport` (which, for an
+ * old worktree entry under a br that shares the primary's DB, is the
+ * primary's file; home-base-dj5m9.1.2).
  *
  * WHY THE EXPORT AND NOT `br` (decided by home-base-vzwbj.4.3, measured on
  * home-base's real DB — the numbers are in that bead's notes). `br list --json`
@@ -44,6 +47,7 @@ import {readFileSync} from 'fs';
 import {join} from 'path';
 
 import {parseBrIssues} from '../beads/br';
+import {BEADS_JSONL, recordedBeadsJsonl} from '../beads/jsonl';
 import {parseInstant} from './answer-store';
 import {ASK_LABEL} from './ask-format';
 import {probeErrorMessage} from './paths';
@@ -88,9 +92,24 @@ export type ExportRead =
   | {kind: 'failed'; path: string; reason: string}
   | {kind: 'read'; path: string; text: string};
 
-/** One export file, whole. */
+/**
+ * The export br writes for the beads of `beadsDir`, whole. The file is the one
+ * beside the DB br uses (`recordedBeadsJsonl`, home-base-dj5m9.1.2): for a
+ * linked worktree whose br shares its primary checkout's DB (br 0.4.1 on),
+ * the PRIMARY's export, not the worktree's own copy, which stays at the
+ * branch's last commit. Under br before 0.4.1 it is `beadsDir`'s own, as
+ * before. Not knowing which file it is is a failed read, never a guess.
+ */
 export function readBeadsExport(beadsDir: string): ExportRead {
-  const path = join(beadsDir, 'issues.jsonl');
+  const located = recordedBeadsJsonl(beadsDir);
+  if (located.kind === 'failed') {
+    return {
+      kind: 'failed',
+      path: join(beadsDir, BEADS_JSONL),
+      reason: located.reason,
+    };
+  }
+  const {path} = located;
   try {
     return {kind: 'read', path, text: readFileSync(path, 'utf8')};
   } catch (error) {

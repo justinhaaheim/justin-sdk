@@ -4,6 +4,7 @@
  * missing.
  */
 
+import type {CmuxCall} from '../src/thread/cmux';
 import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, test} from 'bun:test';
@@ -14,11 +15,20 @@ import {brShow, runBr} from '../src/beads/br';
 import {messageLogPath} from '../src/thread/archive';
 import {fileAsk} from '../src/thread/ask';
 import {serializeMessageLine} from '../src/thread/message-log';
-import {fileRequest} from '../src/thread/request';
+import {
+  describeRequestOutcome,
+  fileRequest,
+  renameSession,
+} from '../src/thread/request';
 import {ensureSessionBead} from '../src/thread/session-bead';
 import {describeHandoffOutcome, handOff} from '../src/thread/session-handoff';
 import {loadSessionReport} from '../src/thread/session-report';
 import {markStage} from '../src/thread/session-stage';
+import {readWorkspaceNames} from '../src/thread/workspace-name';
+import {
+  lookupWorkspaceSession,
+  syncWorkspaceForCapture,
+} from '../src/thread/workspace-name-session';
 import {initRepo} from './git-fixtures';
 import {siblingPairs} from './markdown-siblings';
 import {needBr} from './pinned-br';
@@ -39,7 +49,15 @@ interface World {
   repo: string;
 }
 
-function world(sessions: readonly string[] = [OLD]): World {
+function world(
+  sessions: readonly string[] = [OLD],
+  options: {
+    nameWorkspaces?: boolean;
+    /** Each session's cmux surface (its bead's cmux-surface: label). */
+    surfaces?: Record<string, string>;
+    workspace?: string;
+  } = {},
+): World {
   needBr();
   const sb = createSandbox();
   sandboxes.push(sb);
@@ -48,7 +66,13 @@ function world(sessions: readonly string[] = [OLD]): World {
   writeFileSync(
     join(xdg, 'justin-sdk', 'config.json'),
     JSON.stringify({
-      componentConfig: {thread: {enabled: true, sessionBeads: true}},
+      componentConfig: {
+        thread: {
+          enabled: true,
+          nameWorkspaces: options.nameWorkspaces === true,
+          sessionBeads: true,
+        },
+      },
     }),
   );
   const env: Record<string, string | undefined> = {
@@ -65,7 +89,12 @@ function world(sessions: readonly string[] = [OLD]): World {
   for (const session of sessions) {
     const filed = ensureSessionBead({
       cwd: repo,
-      env: {...env, CLAUDE_CODE_SESSION_ID: session},
+      env: {
+        ...env,
+        CLAUDE_CODE_SESSION_ID: session,
+        CMUX_SURFACE_ID: options.surfaces?.[session],
+        CMUX_WORKSPACE_ID: options.workspace,
+      },
       firstPrompt: {at: '2030-01-01T09:00:00.000Z', text: 'migrate the db'},
       now: new Date('2030-01-01T09:00:00.000Z'),
       sessionId: session,
@@ -163,7 +192,9 @@ describe('thread handoff', () => {
     const {exitCode, lines} = describeHandoffOutcome(outcome);
     expect(exitCode).toBe(0);
     const block = lines.join('\n');
-    expect(block).toContain('🤝 **HANDOFF** — paste this into the new session');
+    expect(block).toContain(
+      '🤝 **HANDOFF** — paste this into the new session as a message, not as a `!` command',
+    );
     expect(block).toContain(
       `- **Session:** [HANDOFF-REPO] Migrate the orders table (${old})`,
     );
@@ -174,7 +205,7 @@ describe('thread handoff', () => {
     expect(block).toContain('**Stage:** code-done — next: tested');
     expect(block).toContain('**Drop the unused columns?**');
     expect(block).toContain(
-      `- First, in the new session: \`bun run justin-sdk thread request --continues ${old}\``,
+      `- Run \`bun run justin-sdk thread request --continues ${old}\` to receive the handoff from a previous session.`,
     );
     expect(block).toContain(`\`claude --resume ${OLD}\``);
 
@@ -300,11 +331,15 @@ describe('thread request --continues', () => {
       sessionId: NEW,
       title: null,
     });
+    // The old session is still auto-titled, so the new one keeps its own.
     expect(linked).toEqual({
       kind: 'linked',
       newBeadId: w.beads[NEW] ?? '',
       oldBeadId: w.beads[OLD] ?? '',
       oldTitle: 'migrate the db',
+      renameFailure: null,
+      renamedSession: null,
+      workspaceNote: null,
     });
     expect(labelsOf(w, w.beads[NEW] ?? '')).toContain(
       `continues:${w.beads[OLD]}`,
@@ -366,5 +401,215 @@ describe('thread request --continues', () => {
         label.startsWith('continues:'),
       ),
     ).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-mbnjv.12: the workspace name moves to the successor on its link
+// ---------------------------------------------------------------------------
+
+const WS = 'AAAA0000-1111-4222-8333-0000000000b2';
+const S_OLD = 'CCCC0000-1111-4222-8333-0000000000a1';
+const S_NEW = 'CCCC0000-1111-4222-8333-0000000000b1';
+
+/** A fake cmux holding workspace WS with the given surfaces and name. */
+function fakeCmux(input: {name: string | null; surfaces: string[]}) {
+  const calls: string[][] = [];
+  let name = input.name;
+  const tree = {
+    windows: [
+      {
+        id: 'W1',
+        ref: 'window:1',
+        workspaces: [
+          {
+            id: WS,
+            panes: [{surfaces: input.surfaces.map((id) => ({id}))}],
+            ref: 'workspace:7',
+            title: name ?? 'x',
+          },
+        ],
+      },
+    ],
+  };
+  const run = (args: readonly string[]): Promise<CmuxCall> => {
+    calls.push([...args]);
+    if (args.includes('tree')) {
+      return Promise.resolve({kind: 'ok', stdout: JSON.stringify(tree)});
+    }
+    if (args.includes('workspace') && args.includes('list')) {
+      return Promise.resolve({
+        kind: 'ok',
+        stdout: JSON.stringify({workspaces: [{custom_title: name, id: WS}]}),
+      });
+    }
+    if (args[0] === 'rename-workspace') {
+      name = args.at(-1) ?? null;
+      return Promise.resolve({kind: 'ok', stdout: 'OK\n'});
+    }
+    if (args[0] === 'rename-tab') {
+      return Promise.resolve({kind: 'ok', stdout: 'OK\n'});
+    }
+    return Promise.resolve({
+      kind: 'failed',
+      reason: `the fake cmux does not know ${args.join(' ')}`,
+    });
+  };
+  return {calls, run};
+}
+
+describe('home-base-mbnjv.12: thread request --continues moves the workspace name', () => {
+  /**
+   * The live S1 shape: the old session titled itself with its first request
+   * and named the workspace Justin had called "his name"; the new session
+   * (auto-titled with its kickoff) runs only `thread request --continues`.
+   */
+  async function handedOffWorld() {
+    const w = world([OLD, NEW], {
+      nameWorkspaces: true,
+      surfaces: {[NEW]: S_NEW, [OLD]: S_OLD},
+      workspace: WS,
+    });
+    const cmux = fakeCmux({name: 'his name', surfaces: [S_OLD, S_NEW]});
+    const first = await fileRequest({
+      bead: null,
+      cmux: cmux.run,
+      cwd: w.repo,
+      doneWhen: null,
+      env: w.env,
+      here: false,
+      now: NOW,
+      sessionId: OLD,
+      title: 'Migrate the orders table',
+    });
+    if (first.kind !== 'filed') throw new Error(JSON.stringify(first));
+    return {cmux, w};
+  }
+
+  function names(w: World) {
+    const read = readWorkspaceNames(w.env);
+    if (read.kind !== 'read') throw new Error(JSON.stringify(read));
+    return read.records;
+  }
+
+  test('a link-only first turn titles the successor after its predecessor and records the name as its own', async () => {
+    const {cmux, w} = await handedOffWorld();
+    const oldBead = w.beads[OLD] ?? '';
+    const newBead = w.beads[NEW] ?? '';
+    const before = names(w);
+    expect(before.map((record) => record.beadId)).toEqual([oldBead]);
+    const shownName = before[0]?.nameSet ?? '';
+    expect(shownName).toMatch(/Migrate the orders table \(his name\)$/u);
+    const renamesBefore = cmux.calls.filter(
+      (call) => call[0] === 'rename-workspace',
+    ).length;
+
+    const linked = await fileRequest({
+      bead: null,
+      cmux: cmux.run,
+      continues: oldBead,
+      cwd: w.repo,
+      doneWhen: null,
+      env: w.env,
+      here: false,
+      now: NOW,
+      sessionId: NEW,
+      title: null,
+    });
+    expect(linked).toMatchObject({
+      kind: 'linked',
+      renameFailure: null,
+      renamedSession: {beadId: newBead, title: 'Migrate the orders table'},
+    });
+    expect(labelsOf(w, newBead)).not.toContain('auto-title');
+    expect(linked.kind === 'linked' && linked.workspaceNote).toContain(
+      `taken over from ${oldBead}`,
+    );
+
+    const after = names(w);
+    expect(after).toHaveLength(2);
+    // The successor's own line: the same name, its surface as the sticky
+    // claim, and Justin's name carried so --restore still puts it back.
+    expect(after[1]).toMatchObject({
+      beadId: newBead,
+      hisName: 'his name',
+      nameSet: shownName,
+      surfaceId: S_NEW,
+      workspaceId: WS,
+    });
+    // The name was already right: no rename was sent for it.
+    expect(
+      cmux.calls.filter((call) => call[0] === 'rename-workspace'),
+    ).toHaveLength(renamesBefore);
+    const lines = describeRequestOutcome(linked).lines.join('\n');
+    expect(lines).toContain(
+      `session ${newBead} titled after it: "Migrate the orders table"`,
+    );
+  });
+
+  test('after the takeover the old session no longer owns it: its next sync is sticky to the successor', async () => {
+    const {cmux, w} = await handedOffWorld();
+    await fileRequest({
+      bead: null,
+      cmux: cmux.run,
+      continues: w.beads[OLD] ?? '',
+      cwd: w.repo,
+      doneWhen: null,
+      env: w.env,
+      here: false,
+      now: NOW,
+      sessionId: NEW,
+      title: null,
+    });
+    // The old session retitles itself (Justin typed into a kept tab). Without
+    // the successor's own line, this sync would rename the workspace back.
+    const retitled = await renameSession({
+      cmux: cmux.run,
+      cwd: w.repo,
+      env: w.env,
+      sessionId: OLD,
+      title: 'Something else entirely',
+    });
+    expect(retitled.kind).toBe('renamed');
+    const outcome = await syncWorkspaceForCapture({
+      cwd: w.repo,
+      enabled: true,
+      env: w.env,
+      lookup: lookupWorkspaceSession({cwd: w.repo, env: w.env, session: OLD}),
+      run: cmux.run,
+    });
+    expect(outcome).toMatchObject({
+      kind: 'unchanged',
+      ownerBeadId: w.beads[NEW] ?? '',
+      rule: 'sticky',
+    });
+  });
+
+  test('an auto-titled predecessor passes on no title: the successor stays auto-titled and names nothing', async () => {
+    const w = world([OLD, NEW], {
+      nameWorkspaces: true,
+      surfaces: {[NEW]: S_NEW, [OLD]: S_OLD},
+      workspace: WS,
+    });
+    const cmux = fakeCmux({name: 'his name', surfaces: [S_OLD, S_NEW]});
+    const linked = await fileRequest({
+      bead: null,
+      cmux: cmux.run,
+      continues: w.beads[OLD] ?? '',
+      cwd: w.repo,
+      doneWhen: null,
+      env: w.env,
+      here: false,
+      now: NOW,
+      sessionId: NEW,
+      title: null,
+    });
+    expect(linked).toMatchObject({
+      kind: 'linked',
+      renamedSession: null,
+      workspaceNote: null,
+    });
+    expect(labelsOf(w, w.beads[NEW] ?? '')).toContain('auto-title');
+    expect(cmux.calls).toEqual([]);
   });
 });

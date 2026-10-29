@@ -1,9 +1,12 @@
 /**
  * thread-hooks-setup — installs the thread hooks in a consuming project.
  *
- * Scaffolds exactly FOUR entries in `.claude/settings.json` (the fourth, the
+ * Scaffolds FOUR entries in `.claude/settings.json` (the fourth, the
  * PostToolUse [Bash] `thread nudge` commit nudge, added by home-base-vzwbj.4.4
- * and inert until componentConfig.thread.sessionBeads is on):
+ * and inert until componentConfig.thread.sessionBeads is on), plus a FIFTH,
+ * the PreToolUse [Bash] session guard `thread guard`, only where
+ * componentConfig.thread.handoff.successor is on (home-base-mbnjv.5; see
+ * THREAD_GUARD_HOOK_COMMAND):
  *
  *  - `UserPromptSubmit` and `Stop` (no matcher) → `thread capture`, which logs
  *    every prompt and every Claude yield and keeps the thread bead's last
@@ -69,11 +72,15 @@ import {basename, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
 import {
+  allKnobsOff,
   applyDispatchForComponent,
   describeClearedDispatchEntries,
   describeDispatchOutcome,
+  describeKnobOffRemovals,
+  type HandlersByKnob,
   hookDispatchEnabled,
   removeDispatchEntriesForComponent,
+  removeKnobOffEntries,
 } from './hook-entries';
 import {
   invokesSdk,
@@ -169,6 +176,25 @@ export const THREAD_NUDGE_HOOK_EVENT = 'PostToolUse';
 export const THREAD_NUDGE_HOOK_MATCHER = 'Bash';
 
 /**
+ * The session guard (home-base-mbnjv.5, epic home-base-mbnjv C8): `thread
+ * guard` on PreToolUse, matcher Bash. It refuses raw cmux / claude calls that
+ * start or drive other sessions, and a subagent's thread handoff. Written ONLY
+ * where componentConfig.thread.handoff.successor is on (hook-knobs.ts); with
+ * it off, install takes back the exact entry it wrote.
+ */
+const THREAD_GUARD_SUBCOMMAND = 'thread guard';
+
+/** The command the PreToolUse hook runs. */
+export const THREAD_GUARD_HOOK_COMMAND = sdkRun(THREAD_GUARD_SUBCOMMAND);
+
+/** The CURRENT spelling, for the component manifest's installed-evidence check. */
+export const THREAD_GUARD_HOOK_FINGERPRINT = sdkScript(THREAD_GUARD_SUBCOMMAND);
+
+export const THREAD_GUARD_HOOK_EVENT = 'PreToolUse';
+
+export const THREAD_GUARD_HOOK_MATCHER = 'Bash';
+
+/**
  * Register one hook command under one event in a settings object.
  *
  * Hooks are ADDITIVE in Claude Code — several may be registered for one event
@@ -227,6 +253,16 @@ export function addThreadNudgeHook(settings: Record<string, unknown>): boolean {
     event: THREAD_NUDGE_HOOK_EVENT,
     matcher: THREAD_NUDGE_HOOK_MATCHER,
     subcommand: THREAD_NUDGE_SUBCOMMAND,
+  });
+}
+
+/** Register `thread guard` on PreToolUse with matcher Bash (home-base-mbnjv.5). */
+export function addThreadGuardHook(settings: Record<string, unknown>): boolean {
+  return addHook(settings, {
+    command: THREAD_GUARD_HOOK_COMMAND,
+    event: THREAD_GUARD_HOOK_EVENT,
+    matcher: THREAD_GUARD_HOOK_MATCHER,
+    subcommand: THREAD_GUARD_SUBCOMMAND,
   });
 }
 
@@ -337,7 +373,15 @@ export function describeRetiredStartHookOutcome(
     : `left in place (modified): ${what} — not the exact command the SDK wrote, so it is yours to delete; \`thread start --hook\` is inert either way`;
 }
 
-export function stepThreadHooks(projectRoot: string): boolean {
+export function stepThreadHooks(
+  projectRoot: string,
+  /**
+   * Which knobs are on here (hook-knobs.ts handlersByKnob; runThreadHooksSetup
+   * loads it with `await import`, because it reaches zod). Absent: every knob
+   * off, so the guard entry is neither written nor kept.
+   */
+  byKnob: HandlersByKnob = allKnobsOff(),
+): boolean {
   const settingsDir = resolve(projectRoot, '.claude');
   const settingsPath = resolve(settingsDir, 'settings.json');
   ensureDir(settingsDir);
@@ -345,17 +389,35 @@ export function stepThreadHooks(projectRoot: string): boolean {
   const settings = readJson(settingsPath) ?? {};
   const retired = removeRetiredThreadStartHook(settings);
   const removedRetired = retired.some((outcome) => outcome.kind === 'removed');
+  // The session guard waits on componentConfig.thread.handoff.successor
+  // (home-base-mbnjv.5): off here, it gets no entry, and the exact entry
+  // install wrote earlier is taken back, in either mode.
+  const guardOn = byKnob.enabled.some(
+    (h) => h.command === THREAD_GUARD_HOOK_COMMAND,
+  );
 
   // hooks.dispatch on (home-base-rtsx1.2): the UserPromptSubmit, Stop and
   // PostToolUse [Bash] dispatcher entries run the thread handlers, and their
   // own entries are taken back. The retired SessionStart entry is cleaned up
   // in both modes.
   if (hookDispatchEnabled(projectRoot)) {
-    const outcome = applyDispatchForComponent(settings, 'thread-hooks-setup');
-    if (removedRetired || outcome.changed) writeJson(settingsPath, settings);
+    const outcome = applyDispatchForComponent(
+      settings,
+      'thread-hooks-setup',
+      byKnob.enabled,
+    );
+    const knobOff = removeKnobOffEntries(
+      settings,
+      'thread-hooks-setup',
+      byKnob,
+    );
+    if (removedRetired || outcome.changed || knobOff.length > 0) {
+      writeJson(settingsPath, settings);
+    }
     for (const line of [
       ...retired.map(describeRetiredStartHookOutcome),
       ...describeDispatchOutcome(outcome),
+      ...describeKnobOffRemovals(knobOff),
     ]) {
       console.log(`  ${line}`);
     }
@@ -368,6 +430,8 @@ export function stepThreadHooks(projectRoot: string): boolean {
   const addedStop = addThreadStopHook(settings);
   const addedCapture = addThreadCaptureHooks(settings);
   const addedNudge = addThreadNudgeHook(settings);
+  const addedGuard = guardOn && addThreadGuardHook(settings);
+  const knobOff = removeKnobOffEntries(settings, 'thread-hooks-setup', byKnob);
   const cleared = removeDispatchEntriesForComponent(
     settings,
     'thread-hooks-setup',
@@ -378,6 +442,8 @@ export function stepThreadHooks(projectRoot: string): boolean {
     addedStop ||
     addedCapture.length > 0 ||
     addedNudge ||
+    addedGuard ||
+    knobOff.length > 0 ||
     cleared.length > 0
   ) {
     writeJson(settingsPath, settings);
@@ -389,7 +455,10 @@ export function stepThreadHooks(projectRoot: string): boolean {
   for (const outcome of retired) {
     console.log(`  ${describeRetiredStartHookOutcome(outcome)}`);
   }
-  for (const line of describeClearedDispatchEntries(cleared)) {
+  for (const line of [
+    ...describeClearedDispatchEntries(cleared),
+    ...describeKnobOffRemovals(knobOff),
+  ]) {
     console.log(`  ${line}`);
   }
 
@@ -398,10 +467,17 @@ export function stepThreadHooks(projectRoot: string): boolean {
     !addedStop &&
     addedCapture.length === 0 &&
     !addedNudge &&
+    !addedGuard &&
+    knobOff.length === 0 &&
     cleared.length === 0
   ) {
     success('.claude/settings.json already has every thread hook');
     return true;
+  }
+  if (addedGuard) {
+    success(
+      `Updated .claude/settings.json (${THREAD_GUARD_HOOK_EVENT} [${THREAD_GUARD_HOOK_MATCHER}] → thread guard; componentConfig.thread.handoff.successor is on)`,
+    );
   }
   if (addedNudge) {
     success(
@@ -452,7 +528,9 @@ export async function runThreadHooksSetup(args: {
   stepHeader(
     `1. .claude/settings.json (${THREAD_CAPTURE_HOOK_EVENTS.join(', ')} capture, ${THREAD_STOP_HOOK_EVENT} stop-check, ${THREAD_NUDGE_HOOK_EVENT} [${THREAD_NUDGE_HOOK_MATCHER}] nudge; retired ${THREAD_START_HOOK_EVENT} entry)`,
   );
-  if (!stepThreadHooks(projectRoot)) return 1;
+  // hook-knobs reaches zod: loaded here, never statically (home-base-mbnjv.5).
+  const {handlersByKnob} = await import('./hook-knobs');
+  if (!stepThreadHooks(projectRoot, handlersByKnob(projectRoot))) return 1;
 
   if (!isQuiet()) {
     console.log(

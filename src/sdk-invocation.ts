@@ -17,6 +17,11 @@
  *     SessionStart hook in a fresh cloud container, and the documented
  *     "enrol a repo that has never heard of the SDK" sentence.
  *
+ * One call is spelled differently: a session runs `thread handoff` as
+ * `./node_modules/.bin/justin-sdk thread handoff` (form 1″, SDK_HANDOFF_CALL,
+ * below), because Claude Code never excludes a `bun …` command from its
+ * sandbox (epic home-base-mbnjv C12).
+ *
  * What is GONE, and why each one is a bug rather than a style:
  *  - `bunx @justinhaaheim/justin-sdk …` — the scope is not demonstrably
  *    Justin's on registry.npmjs.org and the name 404s there, so whenever local
@@ -69,6 +74,34 @@ export const SDK_RUN = `bun run ${SDK_BIN}`;
  * handlers still see the directory Claude is in.
  */
 export const SDK_RUN_AT_PROJECT_ROOT = `bun run --cwd "\${CLAUDE_PROJECT_DIR:-.}" ${SDK_BIN}`;
+
+/**
+ * Form 1″: the repo's own SDK bin by RELATIVE path, for the ONE call a
+ * session must run outside the Claude Code sandbox: `thread handoff` (epic
+ * home-base-mbnjv C12). Not a fourth form either: form 1 with the resolution
+ * written into the command.
+ *
+ * Why not form 2: MEASURED on Claude Code 2.1.312 with throwaway sessions
+ * (home-base-mbnjv.9, runs 20261029T155802Z, 20261029T160238Z and
+ * 20261029T160417Z), a command whose first word is `bun` is never excluded
+ * from the sandbox, neither by the entry "bun run justin-sdk thread handoff *"
+ * nor by "bun *"; `./node_modules/.bin/justin-sdk thread handoff --dry-run`
+ * with the entry "./node_modules/.bin/justin-sdk thread handoff *" is. Inside
+ * the sandbox the call cannot reach the cmux socket, so it can never open the
+ * successor.
+ *
+ * The `./` path resolves from the current directory, so a session runs the
+ * call from the repository root, where node_modules is (the rule, handoff.md,
+ * says so). Every other command keeps form 2: they need no exclusion.
+ */
+export const SDK_BIN_BY_PATH = `./node_modules/.bin/${SDK_BIN}`;
+
+/**
+ * The handoff call as a session runs it, bare, from the repository root. The
+ * rule, the help, the guard, doctor's sandbox entries and every message that
+ * tells a session how to hand off are built from this one string.
+ */
+export const SDK_HANDOFF_CALL = `${SDK_BIN_BY_PATH} thread handoff`;
 
 /** The zero-install bootstrap spec (form 3). Legitimate ONLY where no node_modules can exist. */
 export const SDK_BOOTSTRAP = 'bunx github:justinhaaheim/justin-sdk';

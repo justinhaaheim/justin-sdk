@@ -1,0 +1,33 @@
+
+ ▐▛███▛█   Claude Code v2.1.312
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /…/62dd8629-da82-4ee7-9cef-283bbd6d9600/scratchpad/m1-cwd · /rc
+
+
+❯ [TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] This is a measurement of
+  how a Claude Code session ends. Reply with the single word ready. Run no tools.
+  ⎿  UserPromptSubmit says:  2026-10-29 6:07:51am
+
+⏺ ready
+  ⎿  Stop says:  2026-10-29 6:07:53am (tokens unknown: usage-now could not measure them)
+
+✻ Brewed for 2s · done 6:07 AM
+
+
+
+
+
+
+
+
+
+
+                                                                    ◐ medium · /effort
+──────── [TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] mbnjv.4 A respawn ─
+❯
+────────────────────────────────────────────────────────────────────────────────────────
+  I  ✱ Haiku 5.5 ✦ medium  …/62dd8629-da82-4ee7-9cef-283bbd6d9600/scratchpad/m1-cw…
+  ◔ ░░░░░ 6% (63k)  T-32m █░░░░ 29% (29%)  T-2d ███░░ 63% (63%)
+  ⧉ 0%   0m 02s   0m 00s
+  ◈ v2.1.312   ⌗ aa693548-b000-4b39-8cf4-90a380854827
+  -- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← 19 agents

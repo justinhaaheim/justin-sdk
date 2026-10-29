@@ -215,3 +215,52 @@ export const THREAD_DASHBOARD_UIS: readonly ThreadDashboardUi[] = [
   'tui',
   'web',
 ];
+
+// ---------------------------------------------------------------------------
+// componentConfig.thread.handoff (epic home-base-mbnjv C1)
+// ---------------------------------------------------------------------------
+
+/**
+ * What happens to the handed-off session's tab once its successor has linked
+ * (epic home-base-mbnjv D6): `keep` leaves it running, `exit` ends Claude Code
+ * there and leaves a tombstone, `close` closes the tab.
+ */
+export const HANDOFF_PREDECESSOR_MODES = ['keep', 'exit', 'close'] as const;
+
+export type HandoffPredecessorMode = (typeof HANDOFF_PREDECESSOR_MODES)[number];
+
+/**
+ * The `--permission-mode` choices of the installed claude (2.1.312, measured
+ * 2026-10-29 by the epic's conductor). The successor gets one explicitly (D7).
+ */
+export const HANDOFF_PERMISSION_MODES = [
+  'acceptEdits',
+  'auto',
+  'bypassPermissions',
+  'manual',
+  'dontAsk',
+  'plan',
+] as const;
+
+export type HandoffPermissionMode = (typeof HANDOFF_PERMISSION_MODES)[number];
+
+/**
+ * The handoff knob's defaults (C1). `successor: false` is the feature knob
+ * (D10): off, `thread handoff` behaves exactly as it did before the epic.
+ *
+ * `maxLiveSessions` was set from a measurement on Justin's machine
+ * (home-base-mbnjv.1 notes, 2026-10-29): the number and the reasoning live
+ * there, not here, because they go stale.
+ */
+export const HANDOFF_DEFAULTS = {
+  maxLiveSessions: 25,
+  maxUnattendedHandoffs: 3,
+  permissionMode: 'auto' as HandoffPermissionMode,
+  predecessor: 'keep' as HandoffPredecessorMode,
+  successor: false,
+  usage: {
+    maxSampleAgeMinutes: 150,
+    maxSessionPercent: 85,
+    maxWeekPercent: 90,
+  },
+} as const;

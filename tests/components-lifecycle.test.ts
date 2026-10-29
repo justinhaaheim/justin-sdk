@@ -24,11 +24,8 @@ import {COMPONENT_MANIFESTS} from '../src/component-manifest';
 import {corePreset} from '../src/component-registry';
 import {hookEntriesCheckResult} from '../src/doctor';
 import {type DryRun} from '../src/hook-entries-check';
-import {
-  dispatchCommand,
-  DISPATCHED_EVENTS,
-  HOOK_HANDLERS,
-} from '../src/hook-registry';
+import {dispatchCommand, HOOK_HANDLERS} from '../src/hook-registry';
+import {UNGATED_EVENTS, UNGATED_HANDLERS} from '../src/hook-entries';
 import {runInit} from '../src/init';
 import {planInstall, runInstall} from '../src/install';
 import {buildComponentListing, renderComponentListing} from '../src/list';
@@ -955,10 +952,10 @@ describe('install with no hooks key writes the hook dispatcher (home-base-rtsx1.
 
     // 1. The repo as an older SDK installed it: one entry per handler.
     expect((await install()).value).toBe(0);
-    const perHandler = HOOK_HANDLERS.filter(
+    const perHandler = UNGATED_HANDLERS.filter(
       (h) => h.component === 'base-setup' || components.includes(h.component),
     );
-    expect(perHandler).toHaveLength(HOOK_HANDLERS.length);
+    expect(perHandler).toHaveLength(UNGATED_HANDLERS.length);
     for (const handler of perHandler) {
       for (const {event} of handler.events) {
         expect(hookCommands(sb.path)[event]).toContain(handler.command);
@@ -982,7 +979,7 @@ describe('install with no hooks key writes the hook dispatcher (home-base-rtsx1.
     const {out, value} = await install();
     expect(value).toBe(0);
     const after = hookCommands(sb.path);
-    for (const event of DISPATCHED_EVENTS) {
+    for (const event of UNGATED_EVENTS) {
       expect(after[event]).toEqual([dispatchCommand(event)]);
     }
     for (const commands of Object.values(after)) {

@@ -93,6 +93,79 @@ function resolvePinnedBr(): PinnedBr {
 
 export const PINNED_BR: PinnedBr = resolvePinnedBr();
 
+/** The mise tool id home-base's mise.toml pins br under. */
+const BR_MISE_TOOL = 'github:Dicklesworthstone/beads_rust';
+
+export type InstalledBr =
+  | {dir: string; kind: 'installed'; path: string; version: string}
+  | {kind: 'unresolved'; reason: string};
+
+/**
+ * A br of one exact version, installed by mise, for the tests that must run
+ * THAT version whatever home-base pins (home-base-dj5m9.1.1: br 0.7.6 shares
+ * one DB across a repo's worktrees, 0.1.37 does not; home-base-dj5m9.1.4: the
+ * suite passes with either pinned, so a test about 0.1.37 asks for 0.1.37
+ * rather than assuming the pin is it). The pin itself stays the suite's
+ * default; a test puts this directory first on PATH for its own run
+ * (`underInstalledBr`).
+ *
+ * Asked with MISE_OFFLINE, so a version that is not installed is a measured
+ * "unresolved", never a download. The binary must report the version asked
+ * for, or it is unresolved too.
+ */
+export function installedBr(version: string): InstalledBr {
+  const where = spawnSync('mise', ['where', `${BR_MISE_TOOL}@${version}`], {
+    cwd: REPO_ROOT,
+    encoding: 'utf-8',
+    env: brSpawnEnv({MISE_OFFLINE: '1'}),
+  });
+  if (where.error != null) {
+    return {
+      kind: 'unresolved',
+      reason: `mise could not run: ${where.error.message}`,
+    };
+  }
+  const dir = (where.stdout ?? '').trim();
+  if (where.status !== 0 || dir === '') {
+    return {
+      kind: 'unresolved',
+      reason: `mise where ${BR_MISE_TOOL}@${version} exited ${where.status ?? 'unknown'}: ${(where.stderr ?? '').trim().split('\n')[0] ?? ''}`,
+    };
+  }
+  const path = join(dir, 'br');
+  const probe = spawnSync(path, ['--version'], {encoding: 'utf-8'});
+  const said = (probe.stdout ?? '').trim();
+  if (said !== `br ${version}`) {
+    return {
+      kind: 'unresolved',
+      reason: `${path} reports ${JSON.stringify(said)}, not br ${version}`,
+    };
+  }
+  return {dir, kind: 'installed', path, version};
+}
+
+/**
+ * Run `fn` with `br`'s directory first on PATH, then put PATH back, also when
+ * `fn` is async (home-base-dj5m9.1.4). The br adapter spawns with the live
+ * `process.env` (`brSpawnEnv`), so every br the code under test runs is this
+ * one. Throws when `br` is not installed: the caller skips the test then
+ * (`test.skipIf`), and says so.
+ */
+export async function underInstalledBr<T>(
+  br: InstalledBr,
+  fn: () => Promise<T> | T,
+): Promise<T> {
+  if (br.kind !== 'installed') throw new Error(br.reason);
+  const saved = process.env.PATH;
+  process.env.PATH = `${br.dir}${delimiter}${saved ?? ''}`;
+  try {
+    return await fn();
+  } finally {
+    if (saved === undefined) delete process.env.PATH;
+    else process.env.PATH = saved;
+  }
+}
+
 if (PINNED_BR.kind === 'pinned') {
   const current = process.env.PATH ?? '';
   if (current.split(delimiter)[0] !== PINNED_BR.dir) {

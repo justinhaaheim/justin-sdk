@@ -432,6 +432,37 @@ describe('the ask renderer', () => {
     ...overrides,
   });
 
+  test('markdown: a context line starting with a list marker stays one plain bullet (pp1vx.14.1)', () => {
+    const steps = question({
+      description: renderAskDescription({
+        context: [
+          '1. Run `cd ~/Dev/x`.',
+          '2) then this',
+          '- a dash line',
+          '* a star line',
+          '1.5 GB is not a marker',
+          'Step 1: already safe',
+        ],
+        default: {kind: 'text', text: 'I wait.'},
+        form: 'answer',
+        header: null,
+        options: [],
+        recommended: null,
+      }),
+    });
+    const text = renderAsks([steps], {style: PLAIN_STYLE});
+    expect(text).toContain('- 1\\. Run `cd ~/Dev/x`.');
+    expect(text).toContain('- 2\\) then this');
+    expect(text).toContain('- \\- a dash line');
+    expect(text).toContain('- \\* a star line');
+    expect(text).toContain('- 1.5 GB is not a marker');
+    expect(text).toContain('- Step 1: already safe');
+    // The terminal (ANSI) rendering has no markdown to misread: unchanged.
+    const ansi = renderAsk(steps, 1, {color: true, width: null});
+    expect(ansi).toContain('1. Run `cd ~/Dev/x`.');
+    expect(ansi).not.toContain('1\\.');
+  });
+
   test('markdown: numbered, badge, bold question, context, options, italic default, a blank line after every item and between options', () => {
     const p0 = question({
       description: renderAskDescription({

@@ -23,6 +23,9 @@ import {invokesSdk, isSdkEmittedCommand} from '../src/sdk-invocation';
 import {
   THREAD_CAPTURE_HOOK_COMMAND,
   THREAD_CAPTURE_HOOK_EVENTS,
+  THREAD_GUARD_HOOK_COMMAND,
+  THREAD_GUARD_HOOK_EVENT,
+  THREAD_GUARD_HOOK_MATCHER,
   THREAD_NUDGE_HOOK_COMMAND,
   THREAD_NUDGE_HOOK_EVENT,
   THREAD_NUDGE_HOOK_MATCHER,
@@ -53,6 +56,7 @@ describe('the registry says what the installers write', () => {
     expect(byId('thread capture').command).toBe(THREAD_CAPTURE_HOOK_COMMAND);
     expect(byId('thread stop-check').command).toBe(THREAD_STOP_HOOK_COMMAND);
     expect(byId('thread nudge').command).toBe(THREAD_NUDGE_HOOK_COMMAND);
+    expect(byId('thread guard').command).toBe(THREAD_GUARD_HOOK_COMMAND);
   });
 
   test('events and matchers', () => {
@@ -64,6 +68,14 @@ describe('the registry says what the installers write', () => {
     expect(byId('thread nudge').events).toEqual([
       {event: THREAD_NUDGE_HOOK_EVENT, matcher: THREAD_NUDGE_HOOK_MATCHER},
     ]);
+    // The session guard (home-base-mbnjv.5): PreToolUse [Bash], knob-gated.
+    expect(byId('thread guard').events).toEqual([
+      {event: THREAD_GUARD_HOOK_EVENT, matcher: THREAD_GUARD_HOOK_MATCHER},
+    ]);
+    expect(byId('thread guard').knob).toBe('thread.handoff.successor');
+    expect(
+      HOOK_HANDLERS.filter((h) => h.knob != null).map((h) => h.id),
+    ).toEqual(['thread guard']);
   });
 
   test('every handler is on a dispatched event', () => {

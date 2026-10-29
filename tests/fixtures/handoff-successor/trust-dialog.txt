@@ -1,0 +1,24 @@
+claude --permission-mode auto --remote-control '[TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] mbnjv.2 M1 runA' --name '[TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] mbnjv.2 M1 runA' --model haiku '[TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] This is a measurement of how a new Claude Code session starts. Reply with the single word ready. Run no tools.'
+Last login: Thu Oct 29 04:01:28 on ttys011
+
+󰀵 jhaa  …/62dd8629-da82-4ee7-9cef-283bbd6d9600/scratchpad/m1-cwd   05:02  
+❯ claude --permission-mode auto --remote-control '[TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] mbnjv.2 M1 runA' --name '[TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] mbnjv.2 M1 runA' --model haiku '[TEST_DATA_DELETABLE 1ba5ab8f-e95c-4f6d-9de0-d6f62af895ea ] This is a measurement of how a new Claude Code session starts. Reply with the single word ready. Run no tools.'
+
+────────────────────────────────────────────────────────────────────────────────────────
+ Accessing workspace:
+
+ /private/tmp/claude-501/-Users-jhaa-Dev-home-base/62dd8629-da82-4ee7-9cef-283bbd6d9600
+ /scratchpad/m1-cwd
+
+ Quick safety check: Is this a project you created or one you trust? (Like your own
+ code, a well-known open source project, or work from your team). If not, take a moment
+ to review what's in this folder first.
+
+ Claude Code'll be able to read, edit, and execute files here.
+
+ Security guide
+
+ ❯ No, exit
+   Yes, I trust this folder
+
+ Enter to confirm · Esc to cancel

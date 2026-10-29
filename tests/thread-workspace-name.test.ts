@@ -941,8 +941,12 @@ describe('D6 the knob', () => {
 
 const SESSION = '5e551011-aaaa-4bbb-8ccc-0123456789ab';
 
-/** A real beads repo holding one session bead, with the knob as given. */
-function world(nameWorkspaces = true) {
+/**
+ * A real beads repo holding one session bead, with the knob as given.
+ * `successor` also turns on handoff.successor, which with nameWorkspaces turns
+ * on tab titles (home-base-mbnjv.3 item 5).
+ */
+function world(nameWorkspaces = true, successor = false) {
   const sb = sandbox();
   const xdg = join(sb.path, 'xdg');
   mkdirSync(join(xdg, 'justin-sdk'), {recursive: true});
@@ -950,7 +954,12 @@ function world(nameWorkspaces = true) {
     join(xdg, 'justin-sdk', 'config.json'),
     JSON.stringify({
       componentConfig: {
-        thread: {enabled: true, nameWorkspaces, sessionBeads: true},
+        thread: {
+          enabled: true,
+          nameWorkspaces,
+          sessionBeads: true,
+          ...(successor ? {handoff: {successor: true}} : {}),
+        },
       },
     }),
   );
@@ -1111,8 +1120,8 @@ describe('j8q3e.5.3 F3: the capture child names the workspace', () => {
    * A titled session bead in a real beads repo, one prompt in its message log,
    * and the ~/Dev/threads side routed to a fake bd.
    */
-  async function captureWorld() {
-    const w = world(true);
+  async function captureWorld(successor = false) {
+    const w = world(true, successor);
     const fake = createFakeBd();
     const env = {...fake.env, ...w.env, JUSTIN_THREADS_REPO_DIR: fake.dir};
     await renameSession({
@@ -1177,6 +1186,37 @@ describe('j8q3e.5.3 F3: the capture child names the workspace', () => {
     expect(
       captureRunRecord(SESSION, outcome, 5, new Date()),
     ).not.toHaveProperty('workspaceName');
+  });
+
+  test('home-base-mbnjv.8 F3: tab titles on too, one session lookup per capture run', async () => {
+    needBr();
+    const w = await captureWorld(true);
+    const cmux = fakeCmux([{id: WS_A, surfaces: [SURFACE], title: null}]);
+    const looked: string[] = [];
+    const outcome = await applyCapture({
+      autoCommit: false,
+      cmux: cmux.run,
+      cwd: w.repo,
+      env: w.env,
+      lookupSession: (input) => {
+        looked.push(input.session);
+        return lookupWorkspaceSession(input);
+      },
+      nameWorkspaces: true,
+      sessionBeads: true,
+      sessionId: SESSION,
+    });
+    // Both syncs ran on the one lookup: the workspace was named, and the tab
+    // sync got past its knob and read the bead's labels (not a successor).
+    expect(outcome).toMatchObject({
+      kind: 'ran',
+      tabTitle: {
+        kind: 'skipped',
+        reason: 'not a successor (no continues: label)',
+      },
+      workspaceName: {kind: 'renamed', to: '[NAMED] A real title'},
+    });
+    expect(looked).toEqual([SESSION]);
   });
 
   test('a throwing sync is recorded as failed and the capture still applies', async () => {

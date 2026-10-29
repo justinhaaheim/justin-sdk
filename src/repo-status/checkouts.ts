@@ -25,8 +25,10 @@
  */
 
 import {execFileSync} from 'child_process';
-import {existsSync} from 'fs';
+import {existsSync, readFileSync} from 'fs';
 
+import {findBeadsWorkspace} from '../beads/br';
+import {workspaceBeadsJsonl} from '../beads/jsonl';
 import {readWorktreeState, type WorktreeState} from './worktree-state';
 
 export type GitRead = {error: string; ok: false} | {ok: true; value: string};
@@ -205,12 +207,18 @@ export interface BeadRef {
  * all. `baselineJsonl: null` means the baseline has no beads file, so every
  * open bead on the branch is branch-only. Malformed lines are counted in
  * `malformed`, never silently dropped.
+ *
+ * `sharedDbIds`: the ids the database this checkout's br uses already holds,
+ * when that is the primary checkout's shared DB (see `sharedDbBeadIds`). A
+ * bead there is not only on this branch, whatever the baseline's committed
+ * file says.
  */
 export function branchOnlyOpenBeads(
   branchJsonl: string,
   baselineJsonl: string | null,
+  sharedDbIds: ReadonlySet<string> = new Set(),
 ): {beads: BeadRef[]; malformed: number} {
-  const baselineIds = new Set<string>();
+  const baselineIds = new Set<string>(sharedDbIds);
   let malformed = 0;
   for (const line of (baselineJsonl ?? '').split('\n')) {
     if (line.trim() === '') continue;
@@ -250,6 +258,87 @@ export function branchOnlyOpenBeads(
 }
 
 const BEADS_PATH = '.beads/issues.jsonl';
+
+/** One shared export's ids, read once per report (see `sharedDbBeadIds`). */
+type SharedExportRead =
+  | {ids: ReadonlySet<string>; kind: 'read'; malformed: number}
+  | {kind: 'failed'; reason: string};
+
+export type SharedExportCache = Map<string, SharedExportRead>;
+
+function readExportIds(path: string): SharedExportRead {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf-8');
+  } catch (error) {
+    return {
+      kind: 'failed',
+      reason: `the shared database's export ${path} could not be read: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  const ids = new Set<string>();
+  let malformed = 0;
+  for (const line of text.split('\n')) {
+    if (line.trim() === '') continue;
+    try {
+      const record = JSON.parse(line) as {id?: unknown};
+      if (typeof record.id === 'string') ids.add(record.id);
+    } catch {
+      malformed += 1;
+    }
+  }
+  return {ids, kind: 'read', malformed};
+}
+
+/**
+ * The bead ids the database a checkout's br uses already holds, when that is
+ * NOT the checkout's own (home-base-dj5m9.1.5, item 3).
+ *
+ * From br 0.4.1 on, a linked worktree with no DB of its own uses the primary
+ * checkout's, and every write from it lands there; the branch's committed
+ * `.beads/issues.jsonl` stays where the branch last committed it. A bead that
+ * branch once committed (from the per-worktree DB it had under br 0.1.37) may
+ * be in the shared DB now and not yet in the baseline's committed file, and
+ * the branch-only list would call it "only on this branch". So for such a
+ * checkout the shared DB's export (the file br rewrites beside it, located by
+ * the same discovery as the DB) is read too, and its ids count as known.
+ *
+ *   - `own`: the checkout has its own DB, has none at all, or its br keeps
+ *     one DB per worktree: nothing is added, exactly as before.
+ *   - `shared`: the shared DB's export, read.
+ *   - `failed`: which DB could not be told, or its export could not be read.
+ *     The caller then compares with the baseline only and says so: listing a
+ *     bead the shared DB holds is the cautious error, hiding one is not.
+ */
+export type SharedDbIds =
+  | {ids: ReadonlySet<string>; kind: 'shared'; malformed: number; path: string}
+  | {kind: 'failed'; reason: string}
+  | {kind: 'own'};
+
+export function sharedDbBeadIds(
+  checkout: string,
+  cache: SharedExportCache = new Map(),
+): SharedDbIds {
+  const workspace = findBeadsWorkspace(checkout);
+  if (workspace.kind === 'failed') {
+    return {
+      kind: 'failed',
+      reason: `which beads database ${checkout} uses could not be told: ${workspace.reason}`,
+    };
+  }
+  if (workspace.kind === 'none' || workspace.via === 'checkout') {
+    return {kind: 'own'};
+  }
+  const path = workspaceBeadsJsonl(workspace);
+  let read = cache.get(path);
+  if (read == null) {
+    read = readExportIds(path);
+    cache.set(path, read);
+  }
+  return read.kind === 'failed'
+    ? read
+    : {ids: read.ids, kind: 'shared', malformed: read.malformed, path};
+}
 
 /** A path missing at a commit, as opposed to a read that failed. */
 function isMissingPath(error: string): boolean {
@@ -299,6 +388,7 @@ export function readCheckoutFacts(
   baselineName: string,
   baselineBeads: string | null | undefined,
   knownStates: ReadonlyMap<string, WorktreeState>,
+  sharedExports: SharedExportCache = new Map(),
 ): CheckoutFacts {
   const failures: string[] = [];
   const facts: CheckoutFacts = {
@@ -356,7 +446,27 @@ export function readCheckoutFacts(
   } else {
     const branchBeads = gitRead(repo, ['show', `${head}:${BEADS_PATH}`]);
     if (branchBeads.ok) {
-      const diff = branchOnlyOpenBeads(branchBeads.value, baselineBeads);
+      let sharedIds: ReadonlySet<string> = new Set();
+      if (facts.exists) {
+        const shared = sharedDbBeadIds(entry.path, sharedExports);
+        if (shared.kind === 'failed') {
+          failures.push(
+            `branch-only beads: ${shared.reason}; compared with the baseline's committed beads only, so a bead the shared database already holds may be listed`,
+          );
+        } else if (shared.kind === 'shared') {
+          sharedIds = shared.ids;
+          if (shared.malformed > 0) {
+            failures.push(
+              `branch-only beads: ${shared.malformed} malformed line(s) in ${shared.path} were skipped`,
+            );
+          }
+        }
+      }
+      const diff = branchOnlyOpenBeads(
+        branchBeads.value,
+        baselineBeads,
+        sharedIds,
+      );
       facts.branchOnlyBeads = {beads: diff.beads, kind: 'measured'};
       if (diff.malformed > 0) {
         failures.push(
@@ -471,6 +581,8 @@ export function readCheckouts(
   const entries = parseWorktreePorcelain(list.value).filter(
     (entry) => !entry.bare,
   );
+  // One read of the shared DB's export for every worktree that uses it.
+  const sharedExports: SharedExportCache = new Map();
   return {
     checkouts: entries.map((entry, index) =>
       readCheckoutFacts(
@@ -480,6 +592,7 @@ export function readCheckouts(
         baseline.name,
         baselineBeads,
         knownStates,
+        sharedExports,
       ),
     ),
     failures,

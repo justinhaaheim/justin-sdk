@@ -5,7 +5,10 @@
  * unchanged, dry run by default.
  *
  * Runs the PINNED br (tests/pinned-br.ts) in throwaway workspaces under
- * $TMPDIR, with made-up session ids. Never against a real database.
+ * $TMPDIR, with made-up session ids. Never against a real database. The
+ * --apply test runs once per br version (mise's installed 0.1.37 and 0.7.6,
+ * whatever home-base pins, home-base-dj5m9.1.4): what a plain close of the
+ * request does afterwards differs between them.
  * NEGATIVE CONTROL: recorded in home-base-vzwbj.4.16's notes.
  */
 
@@ -32,10 +35,22 @@ import {
 } from '../src/thread/session-bead';
 import {readSessionTree} from '../src/thread/session-tree';
 import {initRepo} from './git-fixtures';
-import {needBr} from './pinned-br';
+import {installedBr, needBr, underInstalledBr} from './pinned-br';
 import {createSandbox} from './sandbox';
 
 const SESSION = '9e5711c5-0a19-4c00-8000-000000000001';
+
+const BRS = [
+  {br: installedBr('0.1.37'), version: '0.1.37'},
+  {br: installedBr('0.7.6'), version: '0.7.6'},
+] as const;
+for (const {br} of BRS) {
+  if (br.kind !== 'installed') {
+    console.warn(
+      `SKIPPED: a per-version --apply test in thread-migrate-ask-parents.test.ts cannot run (${br.reason})`,
+    );
+  }
+}
 
 const sandboxes: Sandbox[] = [];
 const spies: {mockRestore: () => void}[] = [];
@@ -234,7 +249,7 @@ describe('migrate-ask-parents', () => {
     );
   });
 
-  test('--apply moves each old-shape question under the session bead with to:<request>, ids and statuses unchanged; the request then closes with plain br close', async () => {
+  async function applyAndClose(version: '0.1.37' | '0.7.6'): Promise<void> {
     const w = await world();
     const plan = planMigration({cwd: w.repo, env: w.env});
     expect(plan.kind).toBe('planned');
@@ -292,17 +307,38 @@ describe('migrate-ask-parents', () => {
       tree.requests[0]?.questions.map((question) => question.id).sort(),
     ).toEqual([w.closedQuestion, w.newShape, w.openQuestion].sort());
 
-    // The point of it all: the plain close now works.
+    // The point of it all: the plain close. It works on br 0.1.37. From
+    // 0.2.22 on (0.7.6 here; measured 2026-10-26 by
+    // scripts/measure-br-contract.ts) br also counts the OPEN moved question as
+    // a child by its dot-notation id, and says so; the answered one does not.
     const close = runBr(w.repo, ['close', w.request, '--reason=found it']);
-    expect({ok: close.ok, reason: close.reason}).toEqual({
-      ok: true,
-      reason: null,
-    });
+    if (version === '0.1.37') {
+      expect({ok: close.ok, reason: close.reason}).toEqual({
+        ok: true,
+        reason: null,
+      });
+    } else {
+      expect(close.ok).toBe(false);
+      expect(close.stderr ?? '').toContain(
+        `parent issue has 1 open dot-notation child issue(s): ${w.openQuestion}`,
+      );
+    }
 
     // Run again: nothing left to move.
     const again = planMigration({cwd: w.repo, env: w.env});
     expect(again.kind === 'planned' && again.moves).toEqual([]);
-  });
+  }
+
+  for (const {br, version} of BRS) {
+    test.skipIf(br.kind !== 'installed')(
+      `br ${version}: --apply moves each old-shape question under the session bead with to:<request>, ids and statuses unchanged; ${version === '0.1.37' ? 'the request then closes with plain br close' : 'the open one, a dot-notation child by id, still blocks a plain close'}`,
+      async () => {
+        await underInstalledBr(br, async () => {
+          await applyAndClose(version);
+        });
+      },
+    );
+  }
 
   test('a question whose session bead is not in the DB is refused by name (exit 1) and left where it is', async () => {
     const w = await world();

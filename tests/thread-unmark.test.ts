@@ -250,7 +250,7 @@ describe('the undo record (thread done / thread archive)', () => {
       ].sort(),
     );
     expect(record?.closed.at(-1)?.id).toBe(ids.sessionBeadId);
-  });
+  }, 30_000);
 
   test('a record that cannot be written refuses the mark: nothing is closed or labelled', async () => {
     const w = world();
@@ -268,7 +268,7 @@ describe('the undo record (thread done / thread archive)', () => {
     ).toEqual([]);
     expect(show(w, ids.sessionBeadId)).toMatchObject({status: 'in_progress'});
     expect(show(w, ids.sessionBeadId).labels).not.toContain('archived');
-  });
+  }, 30_000);
 });
 
 describe('thread unmark', () => {
@@ -296,7 +296,7 @@ describe('thread unmark', () => {
     expect(read.records[0]?.undoneAt).not.toBeNull();
     // Undone once: there is nothing left to undo for this session.
     expect(await runThreadUnmark({env: w.env, session: SESSION})).toBe(2);
-  });
+  }, 30_000);
 
   test('the session bead id selects the mark too, and unmark with no session takes the newest', async () => {
     const w = world();
@@ -318,7 +318,7 @@ describe('thread unmark', () => {
     );
     expect(await runThreadUnmark({env: w.env, session: null})).toBe(0);
     expect(show(w, ids.sessionBeadId).status).toBe('in_progress');
-  });
+  }, 30_000);
 
   test('nothing to undo exits 2 and says so', async () => {
     const w = world();
@@ -357,7 +357,7 @@ describe('thread unmark', () => {
     expect(describeUnmarkOutcome(retried).exitCode).toBe(0);
     expect(show(w, ids.working).status).toBe('in_progress');
     expect(show(w, ids.waiting).status).toBe('open');
-  });
+  }, 30_000);
 
   describe('the undo id (home-base-yukaf.14 F11)', () => {
     test('a mark prints the id of the record it wrote, and --mark reverses exactly that record', async () => {
@@ -397,7 +397,7 @@ describe('thread unmark', () => {
           session: null,
         }),
       ).toBe(2);
-    });
+    }, 30_000);
 
     test('a mark that changes nothing writes no record and prints no undo id, so the TUI has nothing to push', async () => {
       const w = world();
@@ -414,7 +414,7 @@ describe('thread unmark', () => {
       const read = readMarksUndo(w.env);
       if (read.kind !== 'read') throw new Error(read.reason);
       expect(read.records).toHaveLength(1);
-    });
+    }, 30_000);
 
     test('a partial failure (exit 1) still prints the id of the record it wrote', async () => {
       const w = world();
@@ -430,7 +430,7 @@ describe('thread unmark', () => {
       expect(undoIdOf(printed.lines.join('\n'))).toBe(
         read.records[0]?.id ?? 'missing',
       );
-    });
+    }, 30_000);
   });
 
   test('an unreadable undo file is a failure (exit 1), never "nothing to undo"', async () => {

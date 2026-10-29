@@ -51,7 +51,7 @@ import {
   readEnrollment,
   refreshCriticalRulesArtifact,
   refreshSucceeded,
-  runCriticalRulesSetup,
+  runCriticalRulesSetup as runCriticalRulesSetupReal,
   userLevelRulesExclude,
 } from '../src/critical-rules-setup';
 import {checkRulesDrift} from '../src/rules/rules-drift';
@@ -66,8 +66,23 @@ import {
 } from '../src/rules/rules-file';
 import {rulesDiff} from '../src/rules-diff';
 import {readJson, setQuiet, writeJson} from '../src/setup-helpers';
-import {git} from './git-fixtures';
+import {git, sdkRemoteWithOwnTag} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
+
+/**
+ * home-base-nyh2k: every run verifies the SDK pin against a LOCAL bare remote
+ * holding this SDK's tag (sdkRemoteWithOwnTag), never github. With the default
+ * remote each test made a real `git ls-remote` to github, killed at 5 s, the
+ * same as bun's default test timeout, so a slow network failed the suite.
+ */
+function runCriticalRulesSetup(
+  args: Parameters<typeof runCriticalRulesSetupReal>[0],
+): Promise<number> {
+  return runCriticalRulesSetupReal({
+    sdkRepoUrl: sdkRemoteWithOwnTag(track),
+    ...args,
+  });
+}
 
 const sandboxes: Sandbox[] = [];
 function track(sb: Sandbox): Sandbox {

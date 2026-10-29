@@ -597,7 +597,7 @@ describe('G2: thread status says what to do with each open request when the yiel
     expect(verdictLines({kind: 'openWork'}, PLAIN_STYLE)).toEqual([
       'If you stop now the inbox will say: ⚠️ Open work, no blocker — Justin will be told to resume this session.',
       'Before you stop, settle each open request: close it if its work is done; keep working if you can, acting on the default of any P1–P3 question Justin has not answered; or, if it cannot move without his answer, file that question as a P0.',
-      'Handing off is not a way to stop: run `bun run justin-sdk thread handoff` only when this session cannot go on (its context is nearly full, or Justin asked for a new session).',
+      'Handing off is not a way to stop: run `./node_modules/.bin/justin-sdk thread handoff` only when this session cannot go on (its context is nearly full, or Justin asked for a new session).',
     ]);
   });
 
@@ -615,7 +615,7 @@ describe('G2: thread status says what to do with each open request when the yiel
       expect(said).toContain('keep working if you can');
       expect(said).toContain('file that question as a P0');
       expect(said).toMatch(
-        /Handing off is not a way to stop: run \S*bun run justin-sdk thread handoff\S* only when this session cannot go on/u,
+        /Handing off is not a way to stop: run \S*\.\/node_modules\/\.bin\/justin-sdk thread handoff\S* only when this session cannot go on/u,
       );
     }
 

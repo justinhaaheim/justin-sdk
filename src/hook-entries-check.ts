@@ -38,13 +38,17 @@ import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
 import {resolveComponents} from './component-registry';
-import {hookDispatchEnabled} from './hook-entries';
+import {
+  allKnobsOff,
+  describeHookKnob,
+  type HandlersByKnob,
+  hookDispatchEnabled,
+} from './hook-entries';
 import {
   dispatchCommand,
   DISPATCHED_EVENTS,
   type DispatchedEvent,
   dispatchMatcher,
-  HOOK_HANDLERS,
   isDispatchCommand,
   retiredDispatchCommand,
 } from './hook-registry';
@@ -123,7 +127,14 @@ function entriesFor(settings: Record<string, unknown>, event: string): Entry[] {
 
 export function checkSdkHookEntries(
   projectRoot: string,
-  options: {dryRun?: DryRun} = {},
+  options: {
+    /**
+     * Which knobs are on here: hook-knobs.ts handlersByKnob, which the caller
+     * loads with `await import` (it reaches zod). Absent: every knob off.
+     */
+    byKnob?: HandlersByKnob;
+    dryRun?: DryRun;
+  } = {},
 ): HookEntriesReport {
   const settingsPath = join(projectRoot, '.claude', 'settings.json');
   let settings: Record<string, unknown> = {};
@@ -165,7 +176,13 @@ export function checkSdkHookEntries(
   const mode: HookEntriesMode = hookDispatchEnabled(projectRoot)
     ? 'dispatch'
     : 'per-handler';
-  const handlers = HOOK_HANDLERS.filter((h) =>
+  // A handler whose knob is off here (hook-knobs.ts, home-base-mbnjv.5) is
+  // expected NOWHERE: install writes no entry for it and takes back its own.
+  const byKnob = options.byKnob ?? allKnobsOff();
+  const handlers = byKnob.enabled.filter((h) =>
+    resolved.components.includes(h.component),
+  );
+  const knobOff = byKnob.disabled.filter((h) =>
     resolved.components.includes(h.component),
   );
 
@@ -204,9 +221,23 @@ export function checkSdkHookEntries(
     }
 
     if (dispatcherRuns.length > 0) presentDispatchers.push(event);
+    const offHere = knobOff.filter((h) =>
+      h.events.some((e) => e.event === event),
+    );
+    for (const handler of offHere) {
+      for (const own of entries.flatMap((e) =>
+        e.commands.filter((c) => c === handler.command),
+      )) {
+        report.extra.push(
+          `${event}: \`${own}\` is installed, but ${describeHookKnob(handler.knob)} is off here`,
+        );
+      }
+    }
     if (dispatcherRuns.length > 0 && needed.length === 0) {
       report.extra.push(
-        `${event}: \`${dispatcherRuns[0] ?? dispatcher}\` runs no handler for this repo's components`,
+        offHere.length > 0
+          ? `${event}: \`${dispatcherRuns[0] ?? dispatcher}\` runs only ${offHere.map((h) => h.id).join(', ')}, and ${offHere.map((h) => describeHookKnob(h.knob)).join(', ')} is off here`
+          : `${event}: \`${dispatcherRuns[0] ?? dispatcher}\` runs no handler for this repo's components`,
       );
     } else if (dispatcherEntry != null) {
       if (mode === 'dispatch') {

@@ -596,7 +596,15 @@ export const SUGGESTION_EVIDENCE =
  */
 export const NO_BREAK_SPACE = String.fromCharCode(0x00a0);
 
-const TOP_RULE = /^─{10,}/u;
+/**
+ * The box's top rule: ten or more ─, or a rule carrying a session's name
+ * ("──────── [TAG] long session name ─"). Claude Code right-aligns the name
+ * in a rule as wide as the terminal, so a long name leaves FEWER than ten
+ * leading ─: measured 2026-10-29 (home-base-mbnjv.4) on an 88-column tab,
+ * an 82-character name left 8. The labelled form needs ─, a space, the
+ * name, a space and a closing ─, so a line of prose does not pass for it.
+ */
+const TOP_RULE = /^─{10,}|^─+\s.*\S\s─+$/u;
 const BOTTOM_RULE = /^─{10,}$/u;
 
 export function screenLines(text: string): string[] {
@@ -705,6 +713,51 @@ export function workingIndicator(lines: readonly string[]): string | null {
   }
   for (const line of lines.slice(start)) {
     if (ESC_TO_INTERRUPT.test(line)) return line.trim();
+  }
+  return null;
+}
+
+/**
+ * What a Claude Code dialog or menu shows. ONE IMPLEMENTATION: moved here
+ * from scripts/pane-backfill-classify.ts (home-base-mbnjv.2, so `thread
+ * handoff` can report a successor tab waiting on a trust or permission
+ * dialog), which imports dialogOnScreen back.
+ */
+const DIALOG_MARKERS: readonly {label: string; pattern: RegExp}[] = [
+  {label: 'the folder-trust dialog', pattern: /Quick safety check/u},
+  {label: 'the folder-trust dialog', pattern: /Yes, I trust this folder/u},
+  {label: 'a dialog offering "No, exit"', pattern: /No, exit/u},
+  {
+    label: 'a permission prompt ("Do you want to …")',
+    pattern: /Do you want to\b/u,
+  },
+  {
+    label: 'a permission prompt ("Yes, and don’t ask again")',
+    pattern: /Yes, and don.t ask again/u,
+  },
+  {
+    label: 'a highlighted numbered option (❯ 1.)',
+    pattern: /^\s*❯\s*\d+\.\s/u,
+  },
+  {
+    label: 'a dialog hint ("Enter to …")',
+    pattern: /Enter to (?:confirm|continue|select|submit)/iu,
+  },
+  {label: 'a dialog hint ("Esc to …")', pattern: /Esc to (?:cancel|exit)/iu},
+];
+
+/**
+ * A dialog or menu on screen, named, or null. Searched from the last ⏺ to the
+ * bottom: a dialog replaces the input box, so it is drawn below Claude's
+ * latest message. An Enter into a dialog picks its highlighted option.
+ */
+export function dialogOnScreen(lines: readonly string[]): string | null {
+  const box = findInputBox(lines);
+  const start = liveRegionStart(lines, box?.top ?? lines.length);
+  for (const line of lines.slice(start)) {
+    for (const marker of DIALOG_MARKERS) {
+      if (marker.pattern.test(line)) return marker.label;
+    }
   }
   return null;
 }

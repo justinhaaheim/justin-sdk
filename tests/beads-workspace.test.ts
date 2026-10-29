@@ -26,11 +26,16 @@ import {
   detectBeadsWorkspace,
   mainCheckoutRoot,
   mergeBeadsSyncConfig,
-  runBeadsSetup,
+  runBeadsSetup as runBeadsSetupReal,
 } from '../src/beads-setup';
 import {kebabCase} from '../src/setup-helpers';
 import {beadsConfigGuard} from '../src/sweep';
-import {addLinkedWorktree, git, initRepo} from './git-fixtures';
+import {
+  addLinkedWorktree,
+  git,
+  initRepo,
+  sdkRemoteWithOwnTag,
+} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
 
 /**
@@ -52,6 +57,21 @@ const sandboxes: Sandbox[] = [];
 function track(sandbox: Sandbox): Sandbox {
   sandboxes.push(sandbox);
   return sandbox;
+}
+
+/**
+ * home-base-nyh2k: every run verifies the SDK pin against a LOCAL bare remote
+ * holding this SDK's tag (sdkRemoteWithOwnTag), never github. With the default
+ * remote each test made a real `git ls-remote` to github, killed at 5 s, the
+ * same as bun's default test timeout, so a slow network failed the suite.
+ */
+function runBeadsSetup(
+  options: Parameters<typeof runBeadsSetupReal>[0] = {},
+): Promise<number> {
+  return runBeadsSetupReal({
+    sdkRepoUrl: sdkRemoteWithOwnTag(track),
+    ...options,
+  });
 }
 
 afterEach(() => {

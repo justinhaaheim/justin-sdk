@@ -89,13 +89,20 @@ import {
   type StatusFileOutcome,
   writeStatusForSession,
 } from './session-status-file';
+import {describeTabTitle, type TabTitleOutcome} from './tab-title';
 import {
   buildResumeCommand,
   extractTranscriptTurns,
   type TranscriptTurns,
 } from './transcript-messages';
 import {type WorkspaceSyncOutcome, workspaceSyncRecord} from './workspace-name';
-import {syncWorkspaceForCapture} from './workspace-name-session';
+import {
+  lookupWorkspaceSession,
+  type SessionLookup,
+  type SessionLookupFn,
+  syncTabForCapture,
+  syncWorkspaceForCapture,
+} from './workspace-name-session';
 
 /** The entrypoint a `claude -p` session runs under (measured, see below). */
 export const NON_INTERACTIVE_ENTRYPOINT = 'sdk-cli';
@@ -458,7 +465,10 @@ export function runThreadCaptureHook(
     }
 
     // Before the spawn, so `hookElapsedMs` includes its cost (the ~60 ms
-    // budget is measured on that field). Reads files only; never calls br.
+    // budget is measured on that field). Reads files only and never asks br
+    // for beads; in a linked worktree it may run `br --version` (~15-20 ms)
+    // to tell which DB, and so which export, br uses there (session-line.ts,
+    // home-base-dj5m9.1.2).
     if (decision.event === 'UserPromptSubmit' && config.sessionBeads) {
       const lineStarted = performance.now();
       contextLine = computeContextLine(decision, env);
@@ -815,6 +825,12 @@ export interface ApplyOptions {
   /** The spawning hook's synchronous ms (`--hook-ms`), recorded as-is. */
   hookElapsedMs?: number | null;
   /**
+   * The session lookup for workspace naming and tab titles (default
+   * lookupWorkspaceSession); tests inject a counting one (home-base-mbnjv.8
+   * F3: one lookup per capture run).
+   */
+  lookupSession?: SessionLookupFn;
+  /**
    * Whether to name the session's cmux workspace after the bead is ensured
    * (home-base-j8q3e.5 D4 a). `runThreadCaptureApply` resolves it from
    * componentConfig.thread.nameWorkspaces when absent; absent here means off.
@@ -1028,6 +1044,11 @@ export type CaptureApplyOutcome =
        */
       statusFile: StatusFileOutcome | null;
       /**
+       * What titling the session's own tab did (home-base-mbnjv.3 item 5);
+       * absent or null when the workspace sync did not run.
+       */
+      tabTitle?: TabTitleOutcome | null;
+      /**
        * What naming the cmux workspace did (home-base-j8q3e.5 D4 a); null
        * when no session bead was ensured or nameWorkspaces is off.
        */
@@ -1097,6 +1118,7 @@ export async function applyCapture(
   let seed: SeedOutcome = {kind: 'alreadySeeded'};
   let sessionBead: SessionBeadOutcome | null = null;
   let workspaceName: WorkspaceSyncOutcome | null = null;
+  let tabTitle: TabTitleOutcome | null = null;
   try {
     // Under the lock, before the first pass: the pass then applies the seeded
     // log's tail. A thrown seed is a failed one, never a lost capture.
@@ -1118,19 +1140,50 @@ export async function applyCapture(
         options.nameWorkspaces === true &&
         (sessionBead.kind === 'created' || sessionBead.kind === 'exists')
       ) {
+        const cwd = options.cwd ?? process.cwd();
+        // home-base-mbnjv.8 F3: ONE session lookup (a br read and a git
+        // rev-parse) for both syncs below; the tab sync used to repeat it.
+        let lookup: SessionLookup;
+        try {
+          lookup = (options.lookupSession ?? lookupWorkspaceSession)({
+            cwd,
+            env,
+            session: options.sessionId,
+          });
+        } catch (error) {
+          lookup = {
+            kind: 'failed',
+            reason: `the session lookup threw: ${probeErrorMessage(error)}`,
+          };
+        }
         try {
           workspaceName = await syncWorkspaceForCapture({
-            cwd: options.cwd ?? process.cwd(),
+            cwd,
             enabled: true,
             env,
+            lookup,
             run: options.cmux,
-            sessionId: options.sessionId,
           });
         } catch (error) {
           workspaceName = {
             kind: 'failed',
             reason: `threw: ${probeErrorMessage(error)}`,
             workspaceId: null,
+          };
+        }
+        // home-base-mbnjv.3 item 5: after the workspace, so a successor that
+        // just took the workspace name also titles its tab.
+        try {
+          tabTitle = await syncTabForCapture({
+            cwd,
+            env,
+            lookup,
+            run: options.cmux,
+          });
+        } catch (error) {
+          tabTitle = {
+            kind: 'failed',
+            reason: `threw: ${probeErrorMessage(error)}`,
           };
         }
       }
@@ -1200,6 +1253,7 @@ export async function applyCapture(
     seed,
     sessionBead,
     statusFile,
+    tabTitle,
     workspaceName,
   };
 }
@@ -1256,6 +1310,12 @@ export function captureRunRecord(
   }
   if (outcome.workspaceName != null) {
     record.workspaceName = workspaceSyncRecord(outcome.workspaceName);
+  }
+  if (outcome.tabTitle != null) {
+    record.tabTitle = {
+      detail: describeTabTitle(outcome.tabTitle),
+      kind: outcome.tabTitle.kind,
+    };
   }
   if (outcome.statusFile != null) {
     record.statusFile = outcome.statusFile;

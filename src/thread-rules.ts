@@ -2,7 +2,7 @@
  * thread-rules.ts — the threads and status-report rules that ship WITH the SDK
  * (home-base-yukaf.26).
  *
- * D-RULES-SOURCE: the SDK is the single source of truth for these two rule
+ * D-RULES-SOURCE: the SDK is the single source of truth for these rule
  * files. They used to live in the prompts repo and reach sessions through
  * `~/.claude/rules/` symlinks, which meant a repo could get new instructions
  * before the code they describe, or the reverse. Justin, 2026-10-19: "it might
@@ -29,10 +29,18 @@ import {join, resolve} from 'path';
 /** Where the installed copies live, repo-relative — beside critical-rules.md. */
 export const THREAD_RULES_DIR = '.claude/rules/justin-sdk';
 
-/** The rule files, in the order the installer writes them. */
+/**
+ * The rule files, in the order the installer writes them. A fixed list, not
+ * every file in templates/rules/: the manifest's identity removal and doctor's
+ * THREAD_RULES check both read it. handoff.md (home-base-mbnjv.6, D3a) teaches
+ * `thread handoff`; it ships wherever threads are on, whatever
+ * componentConfig.thread.handoff.successor says, because status-report-format.md
+ * points at it and its text is true with the knob off too.
+ */
 export const THREAD_RULES_FILES = [
   'status-report-format.md',
   'requests.md',
+  'handoff.md',
 ] as const;
 
 export type ThreadRulesFile = (typeof THREAD_RULES_FILES)[number];

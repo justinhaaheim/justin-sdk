@@ -866,7 +866,7 @@ describe('sessionContract — the handoff protocol', () => {
     // Order is load-bearing: a handoff written before the commit points at a
     // branch that does not have the work on it.
     const commit = contract.indexOf('Commit your code');
-    const flush = contract.indexOf('Flush and commit `.beads/`');
+    const flush = contract.indexOf('Flush the beads (`br sync --flush-only`)');
     const handoff = contract.indexOf('justin-sdk justin-loop handoff');
     const end = contract.indexOf('End your turn');
     expect(commit).toBeGreaterThan(-1);

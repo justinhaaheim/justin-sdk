@@ -55,6 +55,7 @@ import type {PaneLookup, UnplacedKind} from './pane-join';
 import type {EnvLike} from './paths';
 import type {
   CardGit,
+  CardNeighbor,
   InboxSection,
   SessionCard,
   YouAsked,
@@ -537,6 +538,15 @@ export async function readInbox(input: {
     pendingUntracked,
     pendingPanes,
   ]);
+  // home-base-mbnjv.3 (D9): every session bead loaded in this run, so a card
+  // names its predecessor and successor by title and sees a half-written link.
+  const neighbors = new Map<string, CardNeighbor>();
+  for (const loaded of loads) {
+    const bead = loaded?.kind === 'loaded' ? loaded.model.beads.session : null;
+    if (bead != null) {
+      neighbors.set(bead.id, {labels: bead.labels, title: bead.title});
+    }
+  }
   for (const [position, candidate] of candidates.entries()) {
     const {activity, indexed, lastAssistantAt, old, sighting} = candidate;
     const loaded = loads[position];
@@ -618,6 +628,7 @@ export async function readInbox(input: {
         age: ageOf(lastActivityAt, now),
         counts,
         model,
+        neighbors,
         panes,
         section,
         status,

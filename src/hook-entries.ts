@@ -42,6 +42,7 @@ import {
   dispatchMatcher,
   HOOK_HANDLERS,
   type HookHandler,
+  type HookHandlerKnob,
   isDispatchCommand,
   isDispatchedEvent,
   retiredDispatchCommand,
@@ -147,10 +148,53 @@ export function hasDispatchEntry(
   );
 }
 
+/**
+ * The registry minus every handler that waits on a knob (home-base-mbnjv.5).
+ * The DEFAULT for the helpers below, so a caller that does not read knobs
+ * never writes a knob-gated entry (the cautious direction: off). Installers
+ * that do read them (thread-hooks-setup) pass handlersByKnob(...).enabled.
+ */
+export const UNGATED_HANDLERS: readonly HookHandler[] = HOOK_HANDLERS.filter(
+  (h) => h.knob == null,
+);
+
+/** The events at least one ungated handler runs on: every event a repo with all knobs off carries. */
+export const UNGATED_EVENTS: readonly DispatchedEvent[] =
+  DISPATCHED_EVENTS.filter((event) =>
+    UNGATED_HANDLERS.some((h) => h.events.some((e) => e.event === event)),
+  );
+
+/** The registry split by whether each handler's knob is on in one repo. */
+export interface HandlersByKnob {
+  /** Knob off: install writes no entry for these, and takes back its own. */
+  disabled: HookHandler[];
+  /** No knob, or its knob is on. */
+  enabled: HookHandler[];
+}
+
+/**
+ * Every knob off: the default where nobody read the knobs (the cautious
+ * direction). The real split is hook-knobs.ts handlersByKnob, loaded with
+ * `await import` because it reaches zod.
+ */
+export function allKnobsOff(
+  handlers: readonly HookHandler[] = HOOK_HANDLERS,
+): HandlersByKnob {
+  return {
+    disabled: handlers.filter((h) => h.knob != null),
+    enabled: handlers.filter((h) => h.knob == null),
+  };
+}
+
+/** The words a message uses for a knob: its full config path. */
+export function describeHookKnob(knob: HookHandlerKnob | null): string {
+  return knob == null ? 'its switch' : `componentConfig.${knob}`;
+}
+
 /** The events a component's handlers run on, in DISPATCHED_EVENTS order. */
 export function eventsForComponent(
   component: string,
-  handlers: readonly HookHandler[] = HOOK_HANDLERS,
+  handlers: readonly HookHandler[] = UNGATED_HANDLERS,
 ): DispatchedEvent[] {
   const events = new Set<DispatchedEvent>();
   for (const handler of handlers) {
@@ -271,7 +315,7 @@ function rewriteRetiredDispatchEntry(
 export function applyDispatchForComponent(
   settings: Record<string, unknown>,
   component: string,
-  handlers: readonly HookHandler[] = HOOK_HANDLERS,
+  handlers: readonly HookHandler[] = UNGATED_HANDLERS,
 ): DispatchApplyOutcome {
   const outcome: DispatchApplyOutcome = {
     added: [],
@@ -378,6 +422,61 @@ export function removeDispatchEntriesForComponent(
     }
   }
   return cleared;
+}
+
+/** One entry taken back because its handler's knob is off (home-base-mbnjv.5). */
+export interface KnobOffRemoval {
+  command: string;
+  event: string;
+  /** The handler whose knob is off, e.g. `thread guard`. */
+  handlerId: string;
+  knob: string;
+}
+
+/**
+ * A knob is off (hook-knobs.ts): take back, by exact command, what install
+ * wrote for this component's handlers that wait on it, in either mode. That
+ * is the handler's own per-handler entry and, when no ENABLED handler (of any
+ * component) still uses the event, the event's dispatcher entry in either
+ * spelling. Anything hand-edited stays. Edits `settings` in place.
+ *
+ * Install takes these back for the same reason the dispatch-off path takes
+ * back dispatcher entries: the SDK wrote them, it can prove it, and leaving
+ * one would make doctor name an entry that install could not repair.
+ */
+export function removeKnobOffEntries(
+  settings: Record<string, unknown>,
+  component: string,
+  byKnob: {disabled: readonly HookHandler[]; enabled: readonly HookHandler[]},
+): KnobOffRemoval[] {
+  const removed: KnobOffRemoval[] = [];
+  for (const handler of byKnob.disabled) {
+    if (handler.component !== component || handler.knob == null) continue;
+    const knob = handler.knob;
+    for (const {event} of handler.events) {
+      const stillUsed = byKnob.enabled.some((h) =>
+        h.events.some((e) => e.event === event),
+      );
+      for (const command of removeCommands(
+        settings,
+        event,
+        (c) =>
+          c === handler.command || (!stillUsed && isDispatchCommand(event, c)),
+      )) {
+        removed.push({command, event, handlerId: handler.id, knob});
+      }
+    }
+  }
+  return removed;
+}
+
+export function describeKnobOffRemovals(
+  removals: readonly KnobOffRemoval[],
+): string[] {
+  return removals.map(
+    ({command, event, handlerId, knob}) =>
+      `removed: .claude/settings.json ${event} hook (${command}) — componentConfig.${knob} is off here, so ${handlerId} has nothing to do`,
+  );
 }
 
 /**

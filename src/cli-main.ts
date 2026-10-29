@@ -43,6 +43,9 @@ import {
   runJustinLoop,
 } from './justin-loop/runner';
 import {runMigrateToPrime} from './migrate-to-prime';
+// By reference, like worktree-retire: command.ts loads its handler on demand
+// (home-base-pp1vx.1.2).
+import {preCommitTsCheckCommand} from './pre-commit-ts-check/command';
 import {runPrime} from './prime';
 import {repoStatusCommand} from './repo-status/repo-status';
 import {runRulesDiff} from './rules-diff';
@@ -69,6 +72,7 @@ import {runUsageCheck} from './usage-check';
 import {worktreeNew} from './worktree-new';
 // By reference, like thread: command.ts imports only yargs TYPES and loads each
 // handler on demand (home-base-us739 D1).
+import {worktreeRetireCommand} from './worktree-retire/command';
 import {worktreeSalvageCommand} from './worktree-salvage/command';
 
 // Handled before yargs: `--skill` is a bare flag, and `demandCommand(1)` would
@@ -1016,7 +1020,7 @@ void yargs(ARGV)
   )
   .command(
     'hook <event>',
-    "The one settings.json hook entry per event in a dispatch-mode repo (hooks.dispatch in justin-sdk.config.json): reads the hook payload on stdin, resolves the repo's components from justin-sdk.config.json, runs every handler registered for <event> whose component the repo has (repo-state --hook, time-check, usage-check, thread capture / stop-check / nudge), in parallel, and prints ONE merged hook output. A handler that fails or times out is named in the message and costs no other handler its output. Events: UserPromptSubmit, PostToolUse, PostToolBatch, Stop",
+    "The one settings.json hook entry per event in a dispatch-mode repo (hooks.dispatch in justin-sdk.config.json): reads the hook payload on stdin, resolves the repo's components from justin-sdk.config.json, runs every handler registered for <event> whose component the repo has (repo-state --hook, time-check, usage-check, thread capture / stop-check / nudge / guard), in parallel, and prints ONE merged hook output. A handler that fails or times out is named in the message and costs no other handler its output. A handler that exits 2 blocks, with its stderr. Events: UserPromptSubmit, PreToolUse, PostToolUse, PostToolBatch, Stop",
     (y) =>
       y
         .positional('event', {
@@ -1249,6 +1253,8 @@ void yargs(ARGV)
   .command(threadCommand)
   .command(usageNowCommand)
   .command(worktreeSalvageCommand)
+  .command(worktreeRetireCommand)
+  .command(preCommitTsCheckCommand)
   .demandCommand(1, 'Please specify a command')
   .strict()
   // The CLI reports its OWN failures (uxwc.5 F1). Without this, yargs' default

@@ -63,6 +63,9 @@ import {
   THREAD_CAPTURE_HOOK_COMMAND,
   THREAD_CAPTURE_HOOK_EVENTS,
   THREAD_CAPTURE_HOOK_FINGERPRINT,
+  THREAD_GUARD_HOOK_COMMAND,
+  THREAD_GUARD_HOOK_EVENT,
+  THREAD_GUARD_HOOK_FINGERPRINT,
   THREAD_START_HOOK_COMMAND,
   THREAD_START_HOOK_EVENT,
   THREAD_START_HOOK_FINGERPRINT,
@@ -469,6 +472,13 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
         event: THREAD_NUDGE_HOOK_EVENT,
         fingerprint: THREAD_NUDGE_HOOK_FINGERPRINT,
       },
+      // The session guard (home-base-mbnjv.5): PreToolUse, matcher Bash, only
+      // where componentConfig.thread.handoff.successor is on.
+      {
+        command: THREAD_GUARD_HOOK_COMMAND,
+        event: THREAD_GUARD_HOOK_EVENT,
+        fingerprint: THREAD_GUARD_HOOK_FINGERPRINT,
+      },
     ],
     purpose:
       'UserPromptSubmit/Stop hooks that capture every prompt and yield (creating the thread bead on the first prompt) and refuse to end a session without a report.',
@@ -494,7 +504,7 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
       pristine: () => threadRulesTemplateText(file),
     })),
     purpose:
-      'The threads and status-report rules (status-report-format.md, requests.md), copied from the SDK into .claude/rules/justin-sdk/. Applies only where componentConfig.thread.enabled is true.',
+      'The threads, status-report and handoff rules (status-report-format.md, requests.md, handoff.md), copied from the SDK into .claude/rules/justin-sdk/. Applies only where componentConfig.thread.enabled is true.',
     // Namespaced under .claude/rules/justin-sdk/, which nothing but the SDK
     // writes — provenance enough to adopt on, like critical-rules.md.
     sdkOwnedPaths: THREAD_RULES_FILES.map((file) =>

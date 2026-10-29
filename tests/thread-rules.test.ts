@@ -5,7 +5,7 @@
  * The rules move from the prompts repo into the SDK and are COPIED into each
  * repo by `install`. Two things are guarded here:
  *
- *   1. install writes both files byte-identical to the SDK templates, a second
+ *   1. install writes every file byte-identical to the SDK templates, a second
  *      install changes nothing, and a drifted file is replaced (the SDK's copy
  *      wins, D-RULES-INSTALL).
  *   2. remove deletes by IDENTITY: a pristine file goes, a modified one is
@@ -143,21 +143,23 @@ async function addThreadRules(root: string): Promise<void> {
 }
 
 describe('the templates', () => {
-  test('both ship with the SDK and are not empty', () => {
+  test('all three ship with the SDK and are not empty', () => {
     for (const file of THREAD_RULES_FILES) {
       expect(template(file).length).toBeGreaterThan(1000);
     }
     expect(THREAD_RULES_FILES).toEqual([
       'status-report-format.md',
       'requests.md',
+      'handoff.md',
     ]);
   });
 
-  test('the manifest owns both files, with the template as pristine content', () => {
+  test('the manifest owns all three files, with the template as pristine content', () => {
     const files = COMPONENT_MANIFESTS['thread-rules'].files;
     expect(files.map((f) => f.path)).toEqual([
       '.claude/rules/justin-sdk/status-report-format.md',
       '.claude/rules/justin-sdk/requests.md',
+      '.claude/rules/justin-sdk/handoff.md',
     ]);
     for (const [index, file] of THREAD_RULES_FILES.entries()) {
       expect(files[index]?.pristine()).toBe(template(file));
@@ -166,9 +168,13 @@ describe('the templates', () => {
 });
 
 describe('install (AC 1)', () => {
-  test('add writes both files byte-identical; a second install changes nothing', async () => {
+  test('add writes every file byte-identical; a second install changes nothing', async () => {
     const root = threadsRepo(true);
     await addThreadRules(root);
+    // home-base-mbnjv.6 AC1: the handoff rule is among them.
+    expect(readFileSync(installed(root, 'handoff.md'), 'utf-8')).toBe(
+      template('handoff.md'),
+    );
     for (const file of THREAD_RULES_FILES) {
       expect(readFileSync(installed(root, file), 'utf-8')).toBe(template(file));
     }
@@ -234,7 +240,7 @@ describe('install (AC 1)', () => {
 });
 
 describe('remove deletes by identity (AC 1)', () => {
-  test('--dry-run names both files and writes nothing', async () => {
+  test('--dry-run names every file and writes nothing', async () => {
     const root = threadsRepo(true);
     await addThreadRules(root);
     const {out, value} = await captureOutput(() =>
@@ -245,6 +251,7 @@ describe('remove deletes by identity (AC 1)', () => {
       'would remove: .claude/rules/justin-sdk/status-report-format.md',
     );
     expect(out).toContain('would remove: .claude/rules/justin-sdk/requests.md');
+    expect(out).toContain('would remove: .claude/rules/justin-sdk/handoff.md');
     expect(out).toContain('would drop thread-rules-setup');
     expect(out).toContain('(dry-run) nothing was changed');
     for (const file of THREAD_RULES_FILES) {
@@ -266,6 +273,7 @@ describe('remove deletes by identity (AC 1)', () => {
         what: '.claude/rules/justin-sdk/status-report-format.md',
       },
       {kind: 'removed', what: '.claude/rules/justin-sdk/requests.md'},
+      {kind: 'removed', what: '.claude/rules/justin-sdk/handoff.md'},
     ]);
     for (const file of THREAD_RULES_FILES) {
       expect(existsSync(installed(root, file))).toBe(false);

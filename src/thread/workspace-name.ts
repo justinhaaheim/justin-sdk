@@ -38,6 +38,8 @@ import {
   AUTO_TITLE_LABEL,
   CMUX_SURFACE_LABEL_PREFIX,
   CMUX_WORKSPACE_LABEL_PREFIX,
+  CONTINUED_BY_LABEL_PREFIX,
+  CONTINUES_LABEL_PREFIX,
   labelValue,
 } from './session-bead';
 import {sessionDisplayName} from './session-name';
@@ -173,6 +175,7 @@ export function newestRecordNamed(
 export type WorkspaceNameRule =
   | 'empty'
   | 'generated'
+  | 'handedOff'
   | 'his'
   | 'matchesToolPart'
   | 'sticky'
@@ -180,6 +183,21 @@ export type WorkspaceNameRule =
 
 export type WorkspaceNameDecision =
   | {kind: 'record'; name: string; rule: 'matchesToolPart'}
+  /**
+   * home-base-mbnjv.12 (D8): the name is already right, but the session that
+   * set it handed off to this one, so this one records it as its own (its
+   * surface becomes the sticky claim). hisName and replacedName are carried
+   * from the predecessor's line: `--restore` and every later rename read them
+   * from the newest line, so dropping them would lose Justin's own name.
+   */
+  | {
+      fromBeadId: string;
+      hisName: string | null;
+      kind: 'record';
+      name: string;
+      replacedName: string | null;
+      rule: 'handedOff';
+    }
   | {
       hisName: string | null;
       kind: 'rename';
@@ -199,6 +217,8 @@ export const RULE_WORDS: Record<WorkspaceNameRule, string> = {
   empty: 'the workspace has no name (rule 1)',
   generated:
     'the name starts with ✳, so a tool generated it, not Justin (rule 3)',
+  handedOff:
+    'the session that set the name handed off to this one, which now owns it (D8)',
   his: 'the name is not one the tool set, so it is Justin’s and is kept in parentheses (rule 4)',
   matchesToolPart: 'the name already equals the tool’s name (rule 0)',
   sticky:
@@ -228,6 +248,14 @@ export function unchangedWords(
  */
 export interface StickyContext {
   beadId: string;
+  /**
+   * home-base-mbnjv.3 (D8, C7): the session that handed off to this one, when
+   * BOTH halves of the link are confirmed (this bead has `continues:<it>`, its
+   * bead has `continued-by:<this>`). Its sticky claim yields to this session,
+   * so the workspace name follows the live end of the chain. Absent or null:
+   * no transfer.
+   */
+  handedOffFrom?: string | null;
   surfaceIdsHere: readonly string[];
 }
 
@@ -258,7 +286,52 @@ export function stickyOwner(
   self: StickyContext,
 ): string | null {
   const owner = liveNamer(matched, self.surfaceIdsHere);
-  return owner != null && owner !== self.beadId ? owner : null;
+  if (owner == null || owner === self.beadId) return null;
+  // home-base-mbnjv.3 (C7): the owner yields the name to its own successor.
+  if (self.handedOffFrom != null && owner === self.handedOffFrom) return null;
+  return owner;
+}
+
+/** What syncWorkspaceName reads to confirm a handoff: one bead's labels. */
+export type OwnerLabelsRead =
+  | {kind: 'failed'; reason: string}
+  | {kind: 'found'; labels: readonly string[]};
+
+/** What confirmedPredecessor found out about one possible handoff. */
+export type PredecessorCheck =
+  /** Both halves of the link are there: the owner handed off to self. */
+  | {beadId: string; kind: 'confirmed'}
+  /** Self does not continue the owner, or the owner lacks continued-by:self. */
+  | {kind: 'notLinked'}
+  /**
+   * home-base-mbnjv.8 F4 (critical rule 7): self continues the owner, but the
+   * owner's labels could not be read, so the link is neither confirmed nor
+   * ruled out. Never folded into notLinked.
+   */
+  | {kind: 'ownerUnread'; reason: string};
+
+/**
+ * home-base-mbnjv.3 (C7): `ownerBeadId` handed off to `self` when self's
+ * labels carry `continues:<owner>` AND the owner's carry
+ * `continued-by:<self>`. A half-written link never moves a name; an owner
+ * bead that cannot be read does not either (the name stays where it is), and
+ * says so (ownerUnread).
+ */
+export function confirmedPredecessor(input: {
+  ownerBeadId: string;
+  ownerLabels: (beadId: string) => OwnerLabelsRead;
+  selfBeadId: string;
+  selfLabels: readonly string[];
+}): PredecessorCheck {
+  const {ownerBeadId, selfBeadId} = input;
+  if (!input.selfLabels.includes(`${CONTINUES_LABEL_PREFIX}${ownerBeadId}`)) {
+    return {kind: 'notLinked'};
+  }
+  const read = input.ownerLabels(ownerBeadId);
+  if (read.kind !== 'found') return {kind: 'ownerUnread', reason: read.reason};
+  return read.labels.includes(`${CONTINUED_BY_LABEL_PREFIX}${selfBeadId}`)
+    ? {beadId: ownerBeadId, kind: 'confirmed'}
+    : {kind: 'notLinked'};
 }
 
 /** cmux trims trailing whitespace, so what is sent must already be trimmed. */
@@ -282,14 +355,37 @@ export function decideWorkspaceName(input: {
 }): WorkspaceNameDecision {
   const {current, records} = input;
   const toolPart = stored(input.toolPart);
+  const latest = newestRecordNamed(records, current);
+  // home-base-mbnjv.12 (D8): the confirmed predecessor set the name now
+  // shown, so a name that is already right is still taken over by a record
+  // line of this session's own. Without it the predecessor's line stays the
+  // claim: its later rename would take the workspace back from the live end
+  // of the chain, and a successor whose title equals its predecessor's (the
+  // usual case: it is titled after it on --continues) would never own it.
+  const takeOver = (): WorkspaceNameDecision | null =>
+    latest != null &&
+    current != null &&
+    input.self?.handedOffFrom != null &&
+    latest.beadId === input.self.handedOffFrom
+      ? {
+          fromBeadId: latest.beadId,
+          hisName: latest.hisName,
+          kind: 'record',
+          name: current,
+          replacedName: latest.replacedName,
+          rule: 'handedOff',
+        }
+      : null;
   // Rule 0 (F2): C equal to T is always the tool's, whatever else the record
   // holds; otherwise rule 4 would read it as his and nest it, "T (T)".
   if (current === toolPart) {
-    return newestRecordNamed(records, toolPart) == null
-      ? {kind: 'record', name: current, rule: 'matchesToolPart'}
-      : {kind: 'unchanged', name: current, rule: 'matchesToolPart'};
+    if (latest == null) {
+      return {kind: 'record', name: current, rule: 'matchesToolPart'};
+    }
+    return (
+      takeOver() ?? {kind: 'unchanged', name: current, rule: 'matchesToolPart'}
+    );
   }
-  const latest = newestRecordNamed(records, current);
   // Sticky (home-base-bomy5.4.1): another session still open here named it,
   // so this one writes nothing. Its pane leaving releases it to rule 2.
   const owner = input.self != null ? stickyOwner(latest, input.self) : null;
@@ -338,7 +434,7 @@ export function decideWorkspaceName(input: {
   }
   const target = stored(decided.target);
   if (current === target) {
-    return {kind: 'unchanged', name: current, rule: decided.rule};
+    return takeOver() ?? {kind: 'unchanged', name: current, rule: decided.rule};
   }
   return {...decided, target};
 }
@@ -380,7 +476,13 @@ export type WorkspaceSyncOutcome =
       rule: 'sticky';
       workspaceId: string;
     }
-  | {kind: 'recorded'; name: string; workspaceId: string}
+  | {
+      /** home-base-mbnjv.12: the predecessor the name was taken over from. */
+      fromBeadId: string | null;
+      kind: 'recorded';
+      name: string;
+      workspaceId: string;
+    }
   | {
       from: string | null;
       kind: 'wouldRename';
@@ -406,6 +508,11 @@ export interface WorkspaceSyncInput {
   enabled: boolean;
   env: EnvLike;
   now?: Date;
+  /**
+   * home-base-mbnjv.3 (C7): reads a sticky owner's labels to confirm it
+   * handed off to this session. Absent: the name never transfers.
+   */
+  readLabels?: (beadId: string) => OwnerLabelsRead;
   run: CmuxRunner;
   session: WorkspaceSession;
   /** `--workspace <uuid>`: skip resolution. Never defaults to the caller. */
@@ -500,13 +607,55 @@ export async function syncWorkspaceName(
     };
   }
   const toolPart = stored(sessionDisplayName(session.repoTag, session.title));
-  const decision = decideWorkspaceName({
+  const records =
+    names.kind === 'read' ? recordsFor(names.records, workspaceId) : [];
+  let decision = decideWorkspaceName({
     current: title.customTitle,
-    records:
-      names.kind === 'read' ? recordsFor(names.records, workspaceId) : [],
+    records,
     self: {beadId: session.beadId, surfaceIdsHere},
     toolPart,
   });
+  // home-base-mbnjv.3 (D8, C7): a sticky owner that handed off to this
+  // session yields the name to it. home-base-mbnjv.12: also when the name is
+  // already right (unchanged by any rule) but another session's line set it,
+  // e.g. a closed predecessor's, so this session records it as its own.
+  // confirmedPredecessor reads nothing unless this bead has continues:<it>.
+  const namedBy = newestRecordNamed(records, title.customTitle)?.beadId ?? null;
+  if (
+    decision.kind === 'unchanged' &&
+    namedBy != null &&
+    namedBy !== session.beadId &&
+    input.readLabels != null
+  ) {
+    const check = confirmedPredecessor({
+      ownerBeadId: namedBy,
+      ownerLabels: input.readLabels,
+      selfBeadId: session.beadId,
+      selfLabels: session.labels,
+    });
+    if (check.kind === 'ownerUnread') {
+      // home-base-mbnjv.8 F4 (critical rule 7): the name stays where it is,
+      // the cautious side, but the outcome says the handoff could not be
+      // checked instead of reading as a plain sticky or unchanged.
+      return {
+        kind: 'failed',
+        reason: `the name was left alone: this session continues ${namedBy}, which set it, but ${namedBy}'s labels could not be read (${check.reason}), so the handoff could not be confirmed`,
+        workspaceId,
+      };
+    }
+    if (check.kind === 'confirmed') {
+      decision = decideWorkspaceName({
+        current: title.customTitle,
+        records,
+        self: {
+          beadId: session.beadId,
+          handedOffFrom: check.beadId,
+          surfaceIdsHere,
+        },
+        toolPart,
+      });
+    }
+  }
   if (decision.kind === 'unchanged') return {...decision, workspaceId};
   const base = {
     at: (input.now ?? new Date()).toISOString(),
@@ -527,8 +676,14 @@ export async function syncWorkspaceName(
         workspaceId,
       };
     }
+    const handedOff = decision.rule === 'handedOff' ? decision : null;
     const appended = appendWorkspaceName(
-      {...base, hisName: null, nameSet: decision.name, replacedName: null},
+      {
+        ...base,
+        hisName: handedOff?.hisName ?? null,
+        nameSet: decision.name,
+        replacedName: handedOff?.replacedName ?? null,
+      },
       env,
     );
     if (appended.kind === 'failed') {
@@ -538,7 +693,12 @@ export async function syncWorkspaceName(
         workspaceId,
       };
     }
-    return {kind: 'recorded', name: decision.name, workspaceId};
+    return {
+      fromBeadId: handedOff?.fromBeadId ?? null,
+      kind: 'recorded',
+      name: decision.name,
+      workspaceId,
+    };
   }
   if (input.dryRun === true) {
     return {
@@ -617,7 +777,9 @@ export function describeWorkspaceSync(outcome: WorkspaceSyncOutcome): string {
         ? `workspace name "${outcome.name}" left alone: ${stickyWords(outcome.ownerBeadId)}`
         : `workspace name already "${outcome.name}" (${RULE_WORDS[outcome.rule]})`;
     case 'recorded':
-      return `workspace name "${outcome.name}" recorded as the tool's (${RULE_WORDS.matchesToolPart})`;
+      return outcome.fromBeadId != null
+        ? `workspace name "${outcome.name}" taken over from ${outcome.fromBeadId} (${RULE_WORDS.handedOff})`
+        : `workspace name "${outcome.name}" recorded as the tool's (${RULE_WORDS.matchesToolPart})`;
     case 'wouldRename':
       return `would rename workspace ${outcome.workspaceId}: "${outcome.from ?? '(no name)'}" -> "${outcome.to}" (${RULE_WORDS[outcome.rule]})`;
     case 'renamed': {

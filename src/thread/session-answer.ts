@@ -34,8 +34,8 @@ import {
   brClose,
   brShow,
   describeBrFailed,
-  findBeadsDb,
   findBeadsWorkspace,
+  resolveRecordedBeadsDb,
 } from '../beads/br';
 import {outputStyle} from '../cli-style';
 import {
@@ -141,11 +141,32 @@ type Located =
   | {kind: 'notFound'; searched: string[]};
 
 /**
- * Find one bead by id: in the DBs of a session the index names it under (its
- * id starts with a recorded bead's id plus "."), then in the cwd's DB.
+ * `failed` for a bead that no searched DB holds while some DB could not be
+ * resolved (home-base-dj5m9.1.6 F3). Shared with session-handoff.
  */
-function locateBead(id: string, cwd: string, env: EnvLike): Located {
+export function notFoundButUnresolved(
+  id: string,
+  searched: readonly string[],
+  unresolved: readonly string[],
+): {kind: 'failed'; reason: string} {
+  const unique = [...new Set(unresolved)];
+  return {
+    kind: 'failed',
+    reason: `${id} is not in ${searched.length === 0 ? 'any database that could be searched' : searched.join(', ')}, but ${unique.length === 1 ? 'one database' : `${unique.length} databases`} could not be resolved, so it may be there: ${unique.join('; ')}`,
+  };
+}
+
+/**
+ * Find one bead by id: in the DBs of a session the index names it under (its
+ * id starts with a recorded bead's id plus "."), then in the cwd's DB. Exported for
+ * tests.
+ */
+export function locateBead(id: string, cwd: string, env: EnvLike): Located {
   const dbs: string[] = [];
+  // DBs that could not be resolved (home-base-dj5m9.1.6 F3): when the bead is
+  // not in any DB that was searched, it may be in one of these, so the answer
+  // is `failed`, never "not found".
+  const unresolved: string[] = [];
   const index = readSessionIndex(env);
   if (index.kind === 'failed') {
     return {
@@ -159,13 +180,17 @@ function locateBead(id: string, cwd: string, env: EnvLike): Located {
         if (id !== sighting.beadId && !id.startsWith(`${sighting.beadId}.`)) {
           continue;
         }
-        const db = findBeadsDb(sighting.beadsDir);
+        const db = resolveRecordedBeadsDb(sighting.beadsDir);
         if (db.kind === 'found' && !dbs.includes(db.db)) dbs.push(db.db);
+        if (db.kind === 'failed') {
+          unresolved.push(`${sighting.beadsDir}: ${db.reason}`);
+        }
       }
     }
   }
   const here = findBeadsWorkspace(cwd);
   if (here.kind === 'found' && !dbs.includes(here.db)) dbs.push(here.db);
+  if (here.kind === 'failed') unresolved.push(`${cwd}: ${here.reason}`);
   for (const db of dbs) {
     const shown = brShow({db, env}, id);
     if (shown.kind === 'failed') {
@@ -176,6 +201,7 @@ function locateBead(id: string, cwd: string, env: EnvLike): Located {
     }
     if (shown.kind === 'ok') return {db, issue: shown.issue, kind: 'found'};
   }
+  if (unresolved.length > 0) return notFoundButUnresolved(id, dbs, unresolved);
   return {kind: 'notFound', searched: dbs};
 }
 

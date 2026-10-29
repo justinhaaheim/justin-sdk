@@ -11,12 +11,20 @@
  * The last two clauses are home-base-yukaf.26's D-REMINDERS; `rules:` appears
  * only in a repo where the thread-rules component installed that file.
  *
- * IT NEVER CALLS br. Measured 2026-10-11: one `br list` costs ~270 ms against
- * home-base's 11 MB beads DB (the binary itself, mise shim or not), against a
- * hook budget of ~60 ms. So the line is read from files: the sessions index
+ * IT NEVER ASKS br FOR BEADS. Measured 2026-10-11: one `br list` costs ~270 ms
+ * against home-base's 11 MB beads DB (the binary itself, mise shim or not),
+ * against a hook budget of ~60 ms. (The one br it may run is `br --version`,
+ * ~15-20 ms, and only where the br version decides which DB a worktree uses:
+ * see `beadsWorkspaceNear` and `recordedBeadsJsonl`, home-base-dj5m9.1.2.)
+ * So the line is read from files: the sessions index
  * (which DB holds this session) and that DB's own `issues.jsonl` export, which
  * br rewrites after every write (verified for `--db` writes too). Scanning
- * home-base's 6.7 MB export for one label costs ~4 ms.
+ * home-base's 6.7 MB export for one label costs ~4 ms. "That DB" is the one br
+ * uses for the recorded directory (`recordedBeadsJsonl`, home-base-dj5m9.1.2):
+ * an old worktree entry whose DB is gone, under a br that shares the primary
+ * checkout's DB, reads the primary's export. A recorded directory that still
+ * holds its DB, which is every entry a current session writes, costs one
+ * directory listing more and no process.
  *
  * The export can lag the DB when a writer passed `--no-auto-flush`; the line is
  * a reminder for Claude, never a decision input, so a stale count is a smaller
@@ -32,7 +40,8 @@ import type {EnvLike} from './paths';
 import {existsSync, readFileSync} from 'fs';
 import {dirname, join} from 'path';
 
-import {findBeadsDb} from '../beads/br';
+import {brSharesWorktreeDb, brVersionIn, findBeadsDb} from '../beads/br';
+import {recordedBeadsJsonl} from '../beads/jsonl';
 import {sdkRun} from '../sdk-invocation';
 import {THREAD_RULES_POINTER_PATH} from '../thread-rules';
 import {
@@ -42,6 +51,8 @@ import {
   markAnswersDelivered,
   readDeliveredAnswers,
 } from './answer-store';
+// Already in the hook's import graph: capture.ts imports config.ts itself.
+import {primaryCheckoutOf} from './config';
 import {probeErrorMessage} from './paths';
 // Already in the hook's import graph: capture.ts imports session-bead itself.
 import {REQUEST_LABEL, sidLabel} from './session-bead';
@@ -118,7 +129,13 @@ export type SessionLineParts =
       titleProblem: string | null;
     }
   | {extras?: string[]; kind: 'notFiledYet'}
-  | {kind: 'indexUnreadable'; reason: string};
+  | {kind: 'indexUnreadable'; reason: string}
+  /**
+   * No session bead yet, and whether this checkout has a beads workspace
+   * could not be told (`beadsWorkspaceNear` failed): said, never read as
+   * "no workspace" (home-base-dj5m9.1.2).
+   */
+  | {kind: 'workspaceUnknown'; reason: string};
 
 function oneLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
@@ -139,6 +156,12 @@ export function composeSessionLine(
   if (parts.kind === 'indexUnreadable') {
     return [
       `${SESSION_LINE_PREFIX} session bead: unknown (sessions index unreadable: ${oneLine(parts.reason)})`,
+      ...tail,
+    ].join(' · ');
+  }
+  if (parts.kind === 'workspaceUnknown') {
+    return [
+      `${SESSION_LINE_PREFIX} session bead: not filed, and whether this checkout has a beads workspace is unknown (${oneLine(parts.reason)})`,
       ...tail,
     ].join(' · ');
   }
@@ -207,16 +230,53 @@ function checkoutRootNear(cwd: string): string | null {
 }
 
 /**
- * Is there a br workspace for `cwd`'s checkout? FILES ONLY (the hook cannot
- * afford a git subprocess per prompt): walk up to the first directory holding
- * `.git` (a directory, or a worktree's file) and look for `.beads/*.db` there.
- * The capture child uses `git rev-parse --show-toplevel`; in an ordinary
- * checkout or worktree the two agree. This only picks the wording of the
- * not-filed-yet line, never whether a bead is created.
+ * Whether `cwd`'s checkout has a br workspace: `failed` when that could not be
+ * told, which is never read as `none` (critical rule 7).
  */
-export function beadsWorkspaceNear(cwd: string): boolean {
+export type WorkspaceNear =
+  | {kind: 'failed'; reason: string}
+  | {kind: 'found'}
+  | {kind: 'none'};
+
+/**
+ * Is there a br workspace for `cwd`'s checkout? It decides only whether the
+ * line says "not filed yet" before the session's bead exists, never whether a
+ * bead is created; the capture child decides that with `findBeadsWorkspace`.
+ *
+ * FILES FIRST (the hook's synchronous budget is ~50 ms): walk up to the first
+ * directory holding `.git` (a directory, or a worktree's file) and look for
+ * `.beads/*.db` there, as the capture child's `git rev-parse --show-toplevel`
+ * would; in an ordinary checkout or worktree the two agree.
+ *
+ * A linked worktree with no DB of its own uses its PRIMARY checkout's from br
+ * 0.4.1 on (home-base-dj5m9.1.1), and the capture child files the bead there.
+ * The primary is found from files too (`primaryCheckoutOf`: the
+ * `.claude/worktrees/` path, else the worktree's `.git` file). Only when it
+ * has a DB does the answer depend on the br version, and only then is a
+ * process spawned: `br --version` in the worktree (`brVersionIn`, ~15-20 ms),
+ * so a repo on br before 0.4.1 still gets `none` there, as before
+ * (home-base-dj5m9.1.2). Once the session's bead is filed this is never asked
+ * again for that session.
+ */
+export function beadsWorkspaceNear(cwd: string): WorkspaceNear {
   const root = checkoutRootNear(cwd);
-  return root != null && findBeadsDb(join(root, '.beads')).kind === 'found';
+  if (root == null) return {kind: 'none'};
+  const own = findBeadsDb(join(root, '.beads'));
+  if (own.kind === 'found') return {kind: 'found'};
+  if (own.kind === 'failed') return own;
+  const primary = primaryCheckoutOf(root);
+  if (primary === root) return {kind: 'none'};
+  const shared = findBeadsDb(join(primary, '.beads'));
+  if (shared.kind === 'none') return {kind: 'none'};
+  if (shared.kind === 'failed') return shared;
+  const version = brVersionIn(root);
+  if (version.kind === 'failed') {
+    return {
+      kind: 'failed',
+      reason: `${root} has no beads DB of its own, and whether br uses its primary checkout's instead depends on the br version, which could not be read: ${version.reason}`,
+    };
+  }
+  return brSharesWorktreeDb(version) ? {kind: 'found'} : {kind: 'none'};
 }
 
 /**
@@ -251,8 +311,14 @@ interface ExportedIssue {
 export function readExportedSessionIssues(
   beadsDir: string,
   sessionId: string,
-): {issues: ExportedIssue[]; ok: true} | {ok: false; reason: string} {
-  const path = join(beadsDir, 'issues.jsonl');
+):
+  | {issues: ExportedIssue[]; ok: true; path: string}
+  | {ok: false; reason: string} {
+  // The export br writes for this DB (home-base-dj5m9.1.2): for an old
+  // worktree entry under a br that shares the primary's DB, the primary's.
+  const located = recordedBeadsJsonl(beadsDir);
+  if (located.kind === 'failed') return {ok: false, reason: located.reason};
+  const {path} = located;
   let text: string;
   try {
     text = readFileSync(path, 'utf8');
@@ -265,7 +331,7 @@ export function readExportedSessionIssues(
   const label = sidLabel(sessionId);
   const needle = JSON.stringify(label);
   const issues: ExportedIssue[] = [];
-  if (!text.includes(needle)) return {issues, ok: true};
+  if (!text.includes(needle)) return {issues, ok: true, path};
   for (const raw of text.split('\n')) {
     if (!raw.includes(needle)) continue;
     let record: unknown;
@@ -309,7 +375,7 @@ export function readExportedSessionIssues(
       title: typeof value.title === 'string' ? value.title : null,
     });
   }
-  return {issues, ok: true};
+  return {issues, ok: true, path};
 }
 
 /**
@@ -333,11 +399,13 @@ export function sessionLineParts(input: {
   const corruptNote = corruptSightingsNote(read);
   const corruptParts = corruptNote != null ? [`⚠️ ${corruptNote}`] : [];
   if (sessionSighting == null) {
-    if (
-      corruptNote == null &&
-      (input.cwd == null || !beadsWorkspaceNear(input.cwd))
-    ) {
-      return null;
+    if (corruptNote == null) {
+      const near: WorkspaceNear =
+        input.cwd == null ? {kind: 'none'} : beadsWorkspaceNear(input.cwd);
+      if (near.kind === 'none') return null;
+      if (near.kind === 'failed') {
+        return {kind: 'workspaceUnknown', reason: near.reason};
+      }
     }
     return {extras: corruptParts, kind: 'notFiledYet'};
   }
@@ -346,6 +414,8 @@ export function sessionLineParts(input: {
   // `thread request --bead` can live in a second checkout's DB).
   const byId = new Map<string, ExportedIssue>();
   const problems: string[] = [];
+  /** Which export each directory's beads were read from. */
+  const readFrom = new Map<string, string>();
   const dirs = [...new Set(sightings.map((entry) => entry.beadsDir))];
   for (const dir of dirs) {
     const exported = readExportedSessionIssues(dir, input.sessionId);
@@ -353,6 +423,7 @@ export function sessionLineParts(input: {
       problems.push(exported.reason);
       continue;
     }
+    readFrom.set(dir, exported.path);
     for (const issue of exported.issues) byId.set(issue.id, issue);
   }
 
@@ -401,7 +472,7 @@ export function sessionLineParts(input: {
       bead == null
         ? problems.length > 0
           ? 'beads export unreadable'
-          : `${sessionSighting.beadId} is not in ${join(sessionSighting.beadsDir, 'issues.jsonl')} yet`
+          : `${sessionSighting.beadId} is not in ${readFrom.get(sessionSighting.beadsDir) ?? sessionSighting.beadsDir} yet`
         : null,
   };
 }

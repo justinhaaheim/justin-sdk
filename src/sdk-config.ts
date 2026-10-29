@@ -32,8 +32,15 @@ import {
   xdgConfigHome,
 } from './health-notices';
 import {HOOK_DISPATCH_DEFAULT} from './hook-entries';
+import {
+  FULL_TS_CHECK_EVERY_HOURS_DEFAULT,
+  TS_CHECK_ON_COMMIT_DEFAULT,
+} from './pre-commit-ts-check/defaults';
 import {sdkRunAtProjectRoot} from './sdk-invocation';
 import {
+  HANDOFF_DEFAULTS,
+  HANDOFF_PERMISSION_MODES,
+  HANDOFF_PREDECESSOR_MODES,
   THREAD_DEFAULT_ANSWER_UI,
   THREAD_DEFAULT_AUTO_COMMIT,
   THREAD_DEFAULT_AUTO_PUSH,
@@ -203,6 +210,26 @@ const componentConfigSchema = z
     // CONFIG_SCHEMA check their types. No defaults are printed: every key but
     // `configuration` is required, and `configuration`'s default depends on the
     // variant.
+    // home-base-pp1vx.1.2. Plain string/number, not an enum: gate.ts checks the
+    // values and falls back to type-checking every commit, because a schema
+    // violation here would drop the whole file, thread knobs included.
+    husky: z
+      .looseObject({
+        fullTsCheckEveryHours: z
+          .number()
+          .optional()
+          .describe(
+            'With tsCheckOnCommit "onlyWhenTsStaged": a commit that would skip the type-check runs it anyway when this checkout has no green type-check recorded within this many hours, so every repo still gets a regular full check (Justin 2026-10-26: catch a TS version difference or a missed earlier change). The record is per checkout, in its git dir. 0 or less type-checks every commit.',
+          ),
+        tsCheckOnCommit: z
+          .string()
+          .optional()
+          .describe(
+            'Whether the .husky/pre-commit type-check runs on every commit (home-base-pp1vx.1.2). Read by `justin-sdk pre-commit-ts-check`, which the hook must call (`bun run justin-sdk pre-commit-ts-check -- npm run ts-check`); a hook that calls the type-check directly ignores it. "always" (DEFAULT): every commit, exactly as before. "onlyWhenTsStaged": skipped, in one printed line, when no staged path can affect type-checking (only .md, .jsonl, .txt, images, .pdf, .gitignore, .prettierignore or .beads/ paths staged); see `justin-sdk pre-commit-ts-check --help`. Any other value type-checks every commit and says so. Project file only.',
+          ),
+      })
+      .optional()
+      .describe('husky: the git pre-commit hook.'),
     'mac-build': z
       .looseObject({
         bundleId: z
@@ -290,6 +317,77 @@ const componentConfigSchema = z
           .optional()
           .describe(
             'WHAT an armed `thread stop-check` refuses (home-base-k0b8n.11, K12 — the refusal experiment). DEFAULT "reportShaped": only a final message shaped like a status report that was not recorded, which has never fired in practice. "workTurns" ALSO refuses, once per turn, a turn that ran a `git commit` or lasted at least enforceMinTurnMinutes and yields with no report archived since Justin’s last message. Needs `enforce: true`. Every decision, pass or block, is logged to ~/.local/state/justin-threads/stop-check.jsonl; `thread stop-check --stats` summarises it.',
+          ),
+        handoff: z
+          .looseObject({
+            maxLiveSessions: z
+              .number()
+              .int()
+              .positive()
+              .optional()
+              .describe(
+                'The handoff gate refuses while more Claude Code sessions than this are live on this machine (D2). Counted from ps, the cmux hook store, each pane’s status-line session id and `claude agents --json`; a count that cannot be read refuses too. The default comes from a count on Justin’s machine (home-base-mbnjv.1 notes).',
+              ),
+            maxUnattendedHandoffs: z
+              .number()
+              .int()
+              .nonnegative()
+              .optional()
+              .describe(
+                'The handoff gate refuses once this many handoffs have happened in a row since Justin last typed in the chain (D2). Counted by walking the session beads’ `continues:` labels back; a session counts as attended when its message log holds a prompt after its first one (the first is a successor’s kickoff), and the first session of a chain counts as attended. A chain that cannot be read refuses.',
+              ),
+            permissionMode: z
+              .enum(HANDOFF_PERMISSION_MODES)
+              .optional()
+              .describe(
+                'The `claude --permission-mode` the successor session starts in (D7).',
+              ),
+            predecessor: z
+              .enum(HANDOFF_PREDECESSOR_MODES)
+              .optional()
+              .describe(
+                'What becomes of the handed-off session’s tab once its successor has linked itself (D6): "keep" leaves it running, "exit" ends Claude Code there and leaves a tombstone naming the successor, "close" closes the tab. exit and close act only after the handshake, which reads the tab’s screen and needs the status line to show the session id as "⌗ <session id>": without it they never act, and the tab is kept after 20 minutes ("handshake failed: screen"). They also end any subagent or background shell still running in that tab.',
+              ),
+            successor: z
+              .boolean()
+              .optional()
+              .describe(
+                'THE FEATURE KNOB (epic home-base-mbnjv D10). DEFAULT FALSE: `thread handoff` labels the session, writes its note and prints the handoff block, exactly as before the epic, and starts nothing. True: it also passes the handoff gate and starts the successor in a new tab of the same cmux workspace. A file `<threads state dir>/handoff-off` (default ~/.local/state/justin-threads/handoff-off) refuses every handoff on the machine whatever this says; its text is shown as the reason.',
+              ),
+            usage: z
+              .looseObject({
+                maxSampleAgeMinutes: z
+                  .number()
+                  .positive()
+                  .optional()
+                  .describe(
+                    'The newest /usage sample (the hourly claude-usage history) must be at most this many minutes old; an older one, a missing history or a failed newest sample refuses the handoff.',
+                  ),
+                maxSessionPercent: z
+                  .number()
+                  .min(0)
+                  .max(100)
+                  .optional()
+                  .describe(
+                    'The handoff gate refuses when the newest sample’s 5-hour session window is above this percentage.',
+                  ),
+                maxWeekPercent: z
+                  .number()
+                  .min(0)
+                  .max(100)
+                  .optional()
+                  .describe(
+                    'The handoff gate refuses when the newest sample’s all-models week window is above this percentage.',
+                  ),
+              })
+              .optional()
+              .describe(
+                'thread.handoff: the usage ceilings, read from the hourly claude-usage samples, never a live /usage read.',
+              ),
+          })
+          .optional()
+          .describe(
+            'thread.handoff: whether `thread handoff` starts a successor session, and the limits its gate enforces (epic home-base-mbnjv C1). Each field resolves on its own, default ← user file ← project file.',
           ),
         nameWorkspaces: z
           .boolean()
@@ -657,6 +755,10 @@ export interface ResolvedHealthNoticesConfig {
  * imported rather than restated.
  */
 export const DEFAULT_COMPONENT_CONFIG = {
+  husky: {
+    fullTsCheckEveryHours: FULL_TS_CHECK_EVERY_HOURS_DEFAULT,
+    tsCheckOnCommit: TS_CHECK_ON_COMMIT_DEFAULT,
+  },
   thread: {
     answerUi: THREAD_DEFAULT_ANSWER_UI,
     autoCommit: THREAD_DEFAULT_AUTO_COMMIT,
@@ -667,6 +769,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     enforce: THREAD_DEFAULT_ENFORCE,
     enforceMinTurnMinutes: THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
     enforceMode: THREAD_DEFAULT_ENFORCE_MODE,
+    handoff: HANDOFF_DEFAULTS,
     nameWorkspaces: THREAD_DEFAULT_NAME_WORKSPACES,
     nudge: THREAD_DEFAULT_NUDGE,
     openSince: THREAD_DEFAULT_OPEN_SINCE,

@@ -9,12 +9,29 @@
  */
 
 import type {CheckNode, CheckResult} from './check-runner';
+import type {HandlersByKnob} from './hook-entries';
 
 import {execSync} from 'child_process';
 import {existsSync, readFileSync, statSync} from 'fs';
-import {resolve} from 'path';
+import {join, resolve} from 'path';
 
 import {SDK_BIN_SHADOW_SCRIPT, shadowsSdkBin} from './base-setup';
+import {
+  BR_EXIT_SYNC_CONFLICT,
+  type BrListProbe,
+  compareBrPin,
+  mainCheckoutRoot,
+  probeBrList,
+} from './beads-setup';
+import type {BrSemver} from './beads/br';
+
+import {
+  brSharesWorktreeDb,
+  brVersionIn,
+  compareSemver,
+  findBeadsWorkspace,
+  parseBrVersion,
+} from './beads/br';
 import {renderCheckTree, runCheckTree} from './check-runner';
 import {configNameFor, resolveComponents} from './component-registry';
 import {
@@ -38,6 +55,12 @@ import {
   rulesDriftAdvice,
 } from './rules/rules-drift';
 import {SDK_RUN} from './sdk-invocation';
+import {
+  checkHandoffSandbox,
+  HANDOFF_COMMAND_DISPLAY,
+  handoffSandboxAdvice,
+  handoffSandboxCannotCheckAdvice,
+} from './thread/handoff-sandbox';
 import {threadRulesInstalledPath, threadRulesState} from './thread-rules';
 import {
   checkUserLevelSessionStart,
@@ -93,7 +116,7 @@ function exec(cmd: string, cwd: string): {exitCode: number; stdout: string} {
 /** HOOK_ENTRIES as a CheckResult. Exported for tests. */
 export function hookEntriesCheckResult(
   projectRoot: string,
-  options: {dryRun?: DryRun} = {},
+  options: {byKnob?: HandlersByKnob; dryRun?: DryRun} = {},
 ): CheckResult {
   const report = checkSdkHookEntries(projectRoot, options);
   if (report.kind === 'cannot-check') {
@@ -194,6 +217,400 @@ function parseMiseToml(projectRoot: string): Record<string, string> | null {
   }
 
   return versions;
+}
+
+// ---------------------------------------------------------------------------
+// BR and BR_DB (beads-setup component; home-base-dj5m9.1.3)
+// ---------------------------------------------------------------------------
+
+/** The br version this repo's mise.toml pins, or null when it pins none. */
+function repoBeadsPin(projectRoot: string): string | null {
+  const miseVersions = parseMiseToml(projectRoot);
+  if (miseVersions == null) return null;
+  const key = Object.keys(miseVersions).find((k) => k.includes('beads_rust'));
+  return key == null ? null : (miseVersions[key] ?? null);
+}
+
+/** The br this repo should run, and where that expectation comes from. */
+interface BrExpectation {
+  /** null when neither versions.json nor mise.toml names a version. */
+  expected: string | null;
+  /** Set when the repo pins a br NEWER than the SDK's: its pin is expected. */
+  repoAbove: {repoPin: string; sdkPin: string} | null;
+  source: 'mise.toml' | 'versions.json';
+  /** The repo's pin cannot be ordered against the SDK's (`latest`, `0.7`). */
+  unordered: boolean;
+}
+
+/**
+ * The SDK's pin (versions.json), as before, unless this repo's mise.toml pins
+ * a NEWER br: then the repo's own. During the br upgrade the SDK pin trails the
+ * repos that have moved, and expecting the SDK's would advise running an older
+ * br on a database a newer one wrote. A repo pinned at or below the SDK, or
+ * not at all, gets exactly the old expectation.
+ */
+function brExpectation(projectRoot: string): BrExpectation {
+  const sdkPin = getCentralBeadsVersion();
+  const repoPin = repoBeadsPin(projectRoot);
+  const order =
+    sdkPin != null && repoPin != null ? compareBrPin(repoPin, sdkPin) : null;
+  if (order?.kind === 'above' && repoPin != null && sdkPin != null) {
+    return {
+      expected: repoPin,
+      repoAbove: {repoPin, sdkPin},
+      source: 'mise.toml',
+      unordered: false,
+    };
+  }
+  return {
+    expected: sdkPin ?? repoPin,
+    repoAbove: null,
+    source: sdkPin != null ? 'versions.json' : 'mise.toml',
+    unordered: order?.kind === 'unordered',
+  };
+}
+
+/**
+ * The BR check as a CheckResult. Exported for tests.
+ *
+ * A repo pinned above versions.json is never pulled down (home-base-dj5m9.1.3):
+ * its own pin is the expectation, a match passes with an info line, and the
+ * install advice downloads that version, not the SDK's. A repo whose pin
+ * cannot be ordered gets no direct-download advice, since any version named
+ * could be older than the one it runs.
+ *
+ * The version comes from `brVersionIn`, the same cached reading BR_DB's
+ * workspace discovery uses, so the two checks never see two different brs.
+ */
+export function brVersionCheckResult(projectRoot: string): CheckResult {
+  const want = brExpectation(projectRoot);
+  const installed = brVersionIn(projectRoot);
+  if (installed.kind === 'failed') {
+    // Try mise first, then the official install script for the expected
+    // version, when there is one that names a single release.
+    const download =
+      want.expected == null || want.unordered ? null : want.expected;
+    const versionTag =
+      download == null || download.startsWith('v') ? download : `v${download}`;
+    const fixCommand =
+      versionTag == null
+        ? 'mise install'
+        : `mise install || curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh" | bash -s -- --version ${versionTag} --quiet --skip-skills`;
+    return {
+      fix:
+        versionTag == null
+          ? 'Run: mise install'
+          : 'Run: mise install (falls back to direct GitHub download if mise is unavailable or rate-limited)',
+      fixCommand,
+      message: `br (beads_rust) is not installed or not on PATH (${installed.reason})`,
+      pass: false,
+      requiresApproval: true,
+    };
+  }
+
+  const actual = installed.text;
+  if (want.unordered) {
+    // home-base-dj5m9.1.6 F7: a pin like `latest` or `0.7` cannot be ordered
+    // against the SDK's, so "expected <SDK pin>" would read as advice to
+    // downgrade. Report what runs, compare nothing.
+    return {
+      message: `br ${actual}: this repo's br pin (${repoBeadsPin(projectRoot) ?? 'none'}) is not a single X.Y.Z version, so it is not compared with the SDK's (${getCentralBeadsVersion() ?? 'none'}, versions.json)`,
+      pass: true,
+    };
+  }
+  const expected = want.expected?.replace(/^v/, '') ?? null;
+  if (expected != null && actual !== expected) {
+    return {
+      fix: 'Run: mise install',
+      fixCommand: 'mise install',
+      message: `Version mismatch: expected ${want.expected} (from ${want.source}), got ${actual}`,
+      pass: false,
+      severity: 'warn',
+    };
+  }
+  if (want.repoAbove != null) {
+    return {
+      message: `br ${actual}: this repo pins ${want.repoAbove.repoPin}, newer than the SDK's ${want.repoAbove.sdkPin} (versions.json). Fine: doctor never pulls a pin down.`,
+      pass: true,
+    };
+  }
+  return {message: `br ${actual}`, pass: true};
+}
+
+/**
+ * Advice for a database `br list` failed on. Text only, never a fixCommand, so
+ * `doctor --fix` (which remote sessions run through setup-env) cannot run it.
+ *
+ * It replaced `br doctor --fix`, which was wrong on both brs (measured
+ * 2026-10-26 in temp repos): br 0.1.37 has no `--fix` (exit 2, "unexpected
+ * argument"); on br 0.7.6 `--fix` is an alias of `--repair`, which rebuilds
+ * the database from JSONL, writes .beads/, .doctor/ and the repo's .gitignore,
+ * and, run from a linked worktree, does all of that in the PRIMARY checkout.
+ */
+const BR_DB_REPAIR_ADVICE =
+  "Diagnose with `br doctor` before repairing anything, and back the database up first. A repair rebuilds the database from issues.jsonl and differs by br version: br 0.1.37 spells it `--repair` and has no `--fix`; on br 0.7.6 `--fix` is an alias of `--repair`, writes .beads/, .doctor/ and the repo .gitignore, and run from a linked worktree it repairs the PRIMARY checkout's database. Run any repair from the checkout that owns the database. doctor --fix does not run it for you.";
+
+/** For br exit 6, br's own instruction is the advice: no rebuild at all. */
+const BR_DB_SYNC_CONFLICT_ADVICE =
+  "Do not repair, rebuild or move this database. br's own instruction for this error: close other database readers/writers and have the owning SQLite engine complete a truncating checkpoint before retrying; do not delete or replace the WAL or rebuild this database from JSONL. doctor --fix does not run anything for this.";
+
+function brListFailedResult(
+  db: string,
+  probe: Extract<BrListProbe, {ok: false}>,
+): CheckResult {
+  const syncConflict = probe.exitCode === BR_EXIT_SYNC_CONFLICT;
+  const lines = [
+    `br list failed on ${db}: ${probe.detail}`,
+    ...(syncConflict
+      ? [
+          'Exit 6 is SYNC_CONFLICT: br will not open this database as it stands. One measured cause: a database last written by br 0.1.37 that still holds WAL frames, opened by br 0.7.6.',
+        ]
+      : []),
+  ];
+  return {
+    fix: syncConflict ? BR_DB_SYNC_CONFLICT_ADVICE : BR_DB_REPAIR_ADVICE,
+    message: lines.join('\n'),
+    pass: false,
+  };
+}
+
+/**
+ * A linked worktree with a beads database of its own, while its br shares the
+ * primary checkout's: br 0.7.6 then uses the worktree's (measured 2026-10-26,
+ * scripts/probe-br-worktree-db.ts), so it shadows the shared one. A WARN, null
+ * when this is not that case. An unreadable br version is an UNKNOWN warn,
+ * never "not shared" (critical rules §7).
+ */
+function worktreeDbShadowResult(
+  projectRoot: string,
+  db: string,
+): CheckResult | null {
+  if (!isLinkedWorktree(projectRoot)) return null;
+  const version = brVersionIn(projectRoot);
+  if (version.kind === 'failed') {
+    return {
+      fix: 'Fix what the message names, then run doctor again',
+      message: `UNKNOWN: this worktree has a beads database of its own (${db}); whether it shadows the primary checkout's depends on the br version, which could not be read: ${version.reason}`,
+      pass: false,
+      severity: 'warn',
+    };
+  }
+  if (!brSharesWorktreeDb(version)) return null;
+  const primary = mainCheckoutRoot(projectRoot);
+  const primaryDb = primary == null ? null : findBeadsWorkspace(primary);
+  const consequence =
+    primaryDb?.kind === 'found'
+      ? `It shadows the primary checkout's ${primaryDb.db}: beads filed here never reach it.`
+      : 'The primary checkout has no database br can use, so beads filed here exist in this worktree only.';
+  return {
+    fix: `Check what ${db} holds that the primary checkout's database lacks, then move this worktree's .beads/beads.db* aside by hand (never delete them), and br uses the primary's. doctor does not do this for you.`,
+    message: `this linked worktree has its own beads database (${db}), and br ${version.text} shares one database across worktrees but uses a worktree's own when it exists. ${consequence}`,
+    pass: false,
+    severity: 'warn',
+  };
+}
+
+/**
+ * No database found for this checkout. The primary checkout gets the old
+ * result, `br init` included. A linked worktree NEVER gets `br init`: under a
+ * br that shares the primary's database that would create a database of the
+ * worktree's own, which br 0.7.6 then prefers over the primary's.
+ */
+function missingBeadsDbResult(
+  projectRoot: string,
+  reason: string,
+): CheckResult {
+  if (!isLinkedWorktree(projectRoot)) {
+    return {
+      fix: 'Run: br init',
+      fixCommand: 'br init',
+      message: '.beads/beads.db not found — beads not initialized',
+      pass: false,
+    };
+  }
+  const version = brVersionIn(projectRoot);
+  if (
+    version.kind === 'read' &&
+    !brSharesWorktreeDb(version) &&
+    existsSync(join(projectRoot, '.beads'))
+  ) {
+    // Measured on br 0.1.37 (2026-10-26): any br command here, even
+    // `br list --no-auto-import`, creates this worktree's database.
+    return {
+      message: `no beads database in this worktree yet: br ${version.text} keeps one per worktree and creates it from the committed .beads/ on first use`,
+      pass: true,
+    };
+  }
+  const primary = mainCheckoutRoot(projectRoot);
+  const where =
+    primary == null
+      ? 'the primary checkout'
+      : `the primary checkout (${primary})`;
+  const why =
+    version.kind === 'read' && brSharesWorktreeDb(version)
+      ? ` A database made here would be this worktree's own, and br ${version.text} would use it instead of the primary's.`
+      : '';
+  return {
+    fix: `Set up beads in ${where}, not in this worktree: do not run \`br init\` here.${why}`,
+    message: `no beads database for this worktree: ${reason}`,
+    pass: false,
+  };
+}
+
+/**
+ * The BR_DB check as a CheckResult. Exported for tests.
+ *
+ * The database is found the way br finds it (`findBeadsWorkspace`,
+ * home-base-dj5m9.1.1): a linked worktree whose br shares the primary
+ * checkout's database (br 0.4.1 and later) passes on the primary's, rather
+ * than failing on a `.beads/beads.db` it was never meant to have. The `br list`
+ * probe carries `--no-auto-import`, so a heartbeat run never imports into a
+ * database, the primary's included.
+ */
+export function brDbCheckResult(projectRoot: string): CheckResult {
+  const workspace = findBeadsWorkspace(projectRoot);
+  if (workspace.kind === 'failed' && workspace.brSplit != null) {
+    // home-base-dj5m9.1.6 F1: the br a bare `br` runs here and the br that
+    // runs on the primary's database disagree. No br is probed: a probe from
+    // here would run this worktree's br against a database it disagrees on.
+    const {primary, worktree} = workspace.brSplit;
+    return {
+      fix: `Pin the same br in this worktree as in the main checkout (merge main into this worktree, then run \`mise install\`). This worktree runs br ${worktree.version}; the main checkout (${primary.checkout}) runs br ${primary.version}. doctor does not do this for you.`,
+      message: `this worktree and its main checkout run brs that disagree on which beads database a worktree uses: ${workspace.reason}`,
+      pass: false,
+    };
+  }
+  if (workspace.kind === 'failed') {
+    return {
+      fix: 'Fix what the message names, then run doctor again',
+      message: `UNKNOWN: could not tell which beads database this checkout uses: ${workspace.reason}`,
+      pass: false,
+      severity: 'warn',
+    };
+  }
+  if (workspace.kind === 'none') {
+    return missingBeadsDbResult(projectRoot, workspace.reason);
+  }
+
+  const shadow =
+    workspace.via === 'checkout'
+      ? worktreeDbShadowResult(projectRoot, workspace.db)
+      : null;
+  // home-base-dj5m9.1.6 F6: a shadow DB is never probed. The br that would
+  // probe it shares the primary's database (or its version is unknown), and
+  // br 0.7.6 opening a DB an older br made upgrades its schema, at session
+  // start, in a database the warning says to move aside.
+  if (shadow != null) return shadow;
+  const probe = probeBrList(projectRoot, {autoImport: false});
+  if (!probe.ok) return brListFailedResult(workspace.db, probe);
+  if (workspace.via === 'primary') {
+    return {
+      message: `uses the primary checkout's database, ${workspace.db}: br ${workspace.brVersion} shares one database across a repo's worktrees`,
+      pass: true,
+    };
+  }
+  return {pass: true};
+}
+
+/**
+ * The br a checkout pins: its mise.toml pin when that is a plain X.Y.Z (a
+ * file read, no process), else the br that runs there (`br --version`,
+ * offline). `failed` when neither can be read.
+ */
+function pinnedBrOf(
+  checkout: string,
+):
+  | {kind: 'failed'; reason: string}
+  | (BrSemver & {kind: 'read'; text: string}) {
+  let pin: string | null;
+  try {
+    pin = repoBeadsPin(checkout);
+  } catch (error) {
+    return {
+      kind: 'failed',
+      reason: `its mise.toml could not be read: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  const plain =
+    pin == null ? null : parseBrVersion(`br ${pin.replace(/^v/, '')}`);
+  if (plain != null && /^v?\d+\.\d+\.\d+$/.test(pin ?? '')) {
+    return {...plain, kind: 'read'};
+  }
+  return brVersionIn(checkout);
+}
+
+/**
+ * The repo's linked worktrees whose pinned br is OLDER than the main
+ * checkout's (home-base-dj5m9.1.6 F10; layer 3 of the decision in
+ * home-base-dj5m9.1.7). An old worktree's SDK passes `--db <main's DB>` to its
+ * own old br, and br 0.1.37 writes a 0.7.6 database without refusing; the
+ * fix is merging main into that worktree. A worktree whose br cannot be read
+ * is listed as unknown, never left out. Exported for tests.
+ */
+export function brWorktreesCheckResult(projectRoot: string): CheckResult {
+  const primary = mainCheckoutRoot(projectRoot);
+  if (primary == null) {
+    return {
+      fix: 'Fix what the message names, then run doctor again',
+      message:
+        "UNKNOWN: the main checkout could not be found, so the worktrees' br pins were not compared with it",
+      pass: false,
+      severity: 'warn',
+    };
+  }
+  const main = pinnedBrOf(primary);
+  if (main.kind === 'failed') {
+    return {
+      fix: 'Fix what the message names, then run doctor again',
+      message: `UNKNOWN: the main checkout's br (${primary}) could not be read, so no worktree was compared with it: ${main.reason}`,
+      pass: false,
+      severity: 'warn',
+    };
+  }
+  const listed = exec('git worktree list --porcelain', primary);
+  if (listed.exitCode !== 0) {
+    return {
+      fix: 'Fix what the message names, then run doctor again',
+      message: `UNKNOWN: \`git worktree list --porcelain\` failed in ${primary}, so no worktree's br was checked`,
+      pass: false,
+      severity: 'warn',
+    };
+  }
+  const worktrees = listed.stdout
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => line.slice('worktree '.length))
+    .filter((path) => path !== primary);
+  const older: string[] = [];
+  const unknown: string[] = [];
+  for (const worktree of worktrees) {
+    if (!existsSync(worktree)) {
+      unknown.push(`${worktree}: br unknown (the directory is missing)`);
+      continue;
+    }
+    const version = pinnedBrOf(worktree);
+    if (version.kind === 'failed') {
+      unknown.push(`${worktree}: br unknown (${version.reason})`);
+    } else if (compareSemver(version, main) < 0) {
+      older.push(`${worktree}: br ${version.text}`);
+    }
+  }
+  if (older.length === 0 && unknown.length === 0) {
+    return {
+      message: `${worktrees.length} linked worktree${worktrees.length === 1 ? '' : 's'}, none pinned to a br older than the main checkout's ${main.text}`,
+      pass: true,
+    };
+  }
+  return {
+    fix: 'Merge main into each worktree listed, then run `mise install` there. doctor does not do this for you.',
+    message: [
+      `${older.length} linked worktree${older.length === 1 ? '' : 's'} pinned to a br older than the main checkout's ${main.text}, and ${unknown.length} whose br could not be read. An older br writes the main checkout's newer database without refusing:`,
+      ...older.map((line) => `  ${line}`),
+      ...unknown.map((line) => `  ${line}`),
+    ].join('\n'),
+    pass: false,
+    severity: 'warn',
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -339,7 +756,13 @@ function makeBaseChecks(projectRoot: string): CheckNode[] {
     },
     {
       check: {
-        fn: (): CheckResult => hookEntriesCheckResult(projectRoot),
+        // hook-knobs reaches zod: loaded here, never statically (home-base-mbnjv.5).
+        fn: async (): Promise<CheckResult> => {
+          const {handlersByKnob} = await import('./hook-knobs');
+          return hookEntriesCheckResult(projectRoot, {
+            byKnob: handlersByKnob(projectRoot),
+          });
+        },
         /**
          * Do the SDK hook entries in .claude/settings.json match what
          * `install` writes for this repo's components and hooks.dispatch mode
@@ -666,104 +1089,13 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
     },
     {
       check: {
-        fn: (): CheckResult => {
-          const {stdout, exitCode} = exec('br --version', projectRoot);
-          if (exitCode !== 0) {
-            // Build a fixCommand that tries mise first, then falls
-            // back to the official install script. The version comes
-            // from versions.json (central pin), with mise.toml as
-            // backup. Always include the curl fallback when we know
-            // the version.
-            const centralVersion = getCentralBeadsVersion();
-            const miseVersions = parseMiseToml(projectRoot);
-            const beadsKey =
-              miseVersions != null
-                ? Object.keys(miseVersions).find((k) =>
-                    k.includes('beads_rust'),
-                  )
-                : null;
-            const version =
-              centralVersion ??
-              (beadsKey != null && beadsKey !== ''
-                ? miseVersions![beadsKey]
-                : null);
-            const versionTag =
-              version != null && !version.startsWith('v')
-                ? `v${version}`
-                : version;
-
-            let fixCommand = 'mise install';
-            if (versionTag != null) {
-              fixCommand = `mise install || curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/beads_rust/main/install.sh" | bash -s -- --version ${versionTag} --quiet --skip-skills`;
-            }
-
-            return {
-              fix: 'Run: mise install (falls back to direct GitHub download if mise is unavailable or rate-limited)',
-              fixCommand,
-              message: 'br (beads_rust) is not installed or not on PATH',
-              pass: false,
-              requiresApproval: true,
-            };
-          }
-
-          // Check version against central pin (preferred) or mise.toml
-          const actual = stdout.replace(/^br\s*/, '').trim();
-          const centralVersion = getCentralBeadsVersion();
-          const miseVersions = parseMiseToml(projectRoot);
-          const beadsKey =
-            miseVersions != null
-              ? Object.keys(miseVersions).find((k) => k.includes('beads_rust'))
-              : null;
-          const expected =
-            centralVersion ??
-            (beadsKey != null && beadsKey !== ''
-              ? miseVersions![beadsKey]
-              : null);
-
-          if (expected != null && actual !== expected) {
-            const source =
-              centralVersion != null ? 'versions.json' : 'mise.toml';
-            return {
-              fix: 'Run: mise install',
-              fixCommand: 'mise install',
-              message: `Version mismatch: expected ${expected} (from ${source}), got ${actual}`,
-              pass: false,
-              severity: 'warn',
-            };
-          }
-
-          return {
-            message: `br ${actual}`,
-            pass: true,
-          };
-        },
+        fn: (): CheckResult => brVersionCheckResult(projectRoot),
         label: 'BR',
       },
       children: [
         {
           check: {
-            fn: (): CheckResult => {
-              if (!existsSync(resolve(projectRoot, '.beads/beads.db'))) {
-                return {
-                  fix: 'Run: br init',
-                  fixCommand: 'br init',
-                  message: '.beads/beads.db not found — beads not initialized',
-                  pass: false,
-                };
-              }
-
-              const {exitCode} = exec('br list --json', projectRoot);
-              if (exitCode !== 0) {
-                return {
-                  fix: 'Run: br doctor --fix',
-                  fixCommand: 'br doctor --fix',
-                  message: 'br list failed — database may be corrupt',
-                  pass: false,
-                };
-              }
-
-              return {pass: true};
-            },
+            fn: (): CheckResult => brDbCheckResult(projectRoot),
             label: 'BR_DB',
           },
           // AGENTS.md is no longer generated or required: cross-project guidance
@@ -772,6 +1104,13 @@ function makeBeadsChecks(projectRoot: string): CheckNode[] {
           // (+ `br --help`). The old AGENTS_MD / CLAUDE_MD_AGENTS_REF checks were
           // removed here so they stop re-generating AGENTS.md at session start.
           // See home-base-t6a0.12 (migrate-to-prime).
+        },
+        {
+          check: {
+            fn: (): CheckResult => brWorktreesCheckResult(projectRoot),
+            label: 'BR_WORKTREES',
+            severity: 'warn',
+          },
         },
       ],
     },
@@ -1690,8 +2029,9 @@ function makeLegacyArtifactChecks(projectRoot: string): CheckNode[] {
 // ---------------------------------------------------------------------------
 
 /**
- * THREAD_RULES: are `.claude/rules/justin-sdk/status-report-format.md` and
- * `requests.md` the SDK's bytes?
+ * THREAD_RULES: are the files in `.claude/rules/justin-sdk/` that
+ * THREAD_RULES_FILES names (status-report-format.md, requests.md, handoff.md)
+ * the SDK's bytes?
  *
  * It runs in every repo rather than only where `thread-rules-setup` is listed,
  * because the case that matters most is a repo where threads are ON and the
@@ -1798,6 +2138,116 @@ export function makeThreadRulesChecks(
       },
     },
   ];
+}
+
+// ---------------------------------------------------------------------------
+// The thread handoff sandbox exclusion (home-base-mbnjv.6, D4) — only where
+// componentConfig.thread.handoff.successor is on
+// ---------------------------------------------------------------------------
+
+/**
+ * HANDOFF_SANDBOX as a CheckResult. Exported for tests.
+ *
+ * Does `~/.claude/settings.json` let `thread handoff` run outside the sandbox
+ * (a `sandbox.excludedCommands` entry) without a classifier review (a
+ * `permissions.allow` rule)? See thread/handoff-sandbox.ts.
+ *
+ * WARN, READ-ONLY, ADVICE ONLY, as USER_LEVEL_SESSION_START: the SDK never
+ * writes user settings, so there is no fixCommand and no fixFn. A file that
+ * cannot be read or parsed is UNKNOWN, never "missing" (critical rule 7).
+ */
+export function handoffSandboxCheckResult(
+  env: Record<string, string | undefined> = process.env,
+): CheckResult {
+  const status = checkHandoffSandbox(env);
+  if (status.kind === 'cannot-check') {
+    return {
+      fix: handoffSandboxCannotCheckAdvice(),
+      message: `${USER_SETTINGS_DISPLAY} could not be read or parsed (${status.reason}) — whether it lets \`${HANDOFF_COMMAND_DISPLAY}\` run outside the sandbox is UNKNOWN, not "missing"`,
+      pass: false,
+      severity: 'warn',
+    };
+  }
+
+  const exclusionBy = status.exclusions.map((item) => item.by);
+  const allowBy = status.allowRules.map((item) => item.by);
+  if (
+    exclusionBy.every((by) => by != null) &&
+    allowBy.every((by) => by != null)
+  ) {
+    return {
+      message: `${USER_SETTINGS_DISPLAY} covers \`${HANDOFF_COMMAND_DISPLAY}\`: sandbox.excludedCommands ${exclusionBy.map((by) => `\`${by}\``).join(', ')}; permissions.allow ${allowBy.map((by) => `\`${by}\``).join(', ')}`,
+      pass: true,
+    };
+  }
+
+  const missing = [
+    ...(exclusionBy.every((by) => by != null)
+      ? []
+      : [
+          'no sandbox.excludedCommands entry covers it, so a handoff runs inside the sandbox, cannot reach cmux, and is refused',
+        ]),
+    ...(allowBy.every((by) => by != null)
+      ? []
+      : [
+          'no permissions.allow rule covers it, so in auto mode every handoff waits for the auto-mode classifier',
+        ]),
+  ];
+  return {
+    fix: handoffSandboxAdvice(status),
+    message: `componentConfig.thread.handoff.successor is on here, and ${status.fileExists ? USER_SETTINGS_DISPLAY : `${USER_SETTINGS_DISPLAY}, which does not exist,`} does not cover \`${HANDOFF_COMMAND_DISPLAY}\`: ${missing.join('; ')}`,
+    pass: false,
+    severity: 'warn',
+  };
+}
+
+/**
+ * The HANDOFF_SANDBOX node. planDoctor adds it ONLY where the knob is on (the
+ * check does not run, and prints nothing, where it is off: nothing then needs
+ * the exclusion), and adds it AFTER withRunnableFixes: its advice is JSON to
+ * paste, and a `bun install && ` prefix would make that JSON wrong. (Its
+ * entries name `./node_modules/.bin/justin-sdk` since home-base-mbnjv.10, which
+ * withRunnableFixes does not rewrite, but the JSON must stay out of its reach
+ * whatever it names.)
+ */
+export function makeHandoffSandboxChecks(
+  env: Record<string, string | undefined> = process.env,
+): CheckNode[] {
+  return [
+    {
+      check: {
+        fn: (): CheckResult => handoffSandboxCheckResult(env),
+        label: 'HANDOFF_SANDBOX',
+        severity: 'warn',
+      },
+    },
+  ];
+}
+
+/**
+ * Is componentConfig.thread.handoff.successor on at `projectRoot`? Resolved as
+ * `thread handoff` and the session guard resolve it (hook-knobs.ts), so doctor
+ * checks the exclusion exactly where the command would start a successor.
+ * `await import`: hook-knobs reaches zod (see the THREAD_RULES check). A read
+ * that throws is UNKNOWN: doctor then warns that it could not tell, never
+ * treats it as off (critical rule 7). A config that reads but is invalid
+ * resolves to the defaults (off) in resolveThreadConfig, for doctor and for
+ * `thread handoff` alike, and CONFIG_SCHEMA names it.
+ */
+async function handoffSuccessorKnob(
+  projectRoot: string,
+): Promise<{kind: 'off' | 'on'} | {kind: 'unknown'; reason: string}> {
+  try {
+    const {hookKnobOn} = await import('./hook-knobs');
+    return {
+      kind: hookKnobOn('thread.handoff.successor', projectRoot) ? 'on' : 'off',
+    };
+  } catch (error) {
+    return {
+      kind: 'unknown',
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1970,13 +2420,38 @@ type DoctorPlan =
   | {componentCount: number; nodes: CheckNode[]; ok: true}
   | {error: string; ok: false};
 
+/** The HANDOFF_SANDBOX nodes for this repo: none where the knob is off. */
+async function handoffSandboxNodes(projectRoot: string): Promise<CheckNode[]> {
+  const knob = await handoffSuccessorKnob(projectRoot);
+  switch (knob.kind) {
+    case 'off':
+      return [];
+    case 'on':
+      return makeHandoffSandboxChecks();
+    case 'unknown':
+      return [
+        {
+          check: {
+            fn: (): CheckResult => ({
+              message: `could not read componentConfig.thread.handoff.successor (${knob.reason}) — whether this repo needs the thread handoff sandbox exclusion is UNKNOWN, so it was NOT checked`,
+              pass: false,
+              severity: 'warn',
+            }),
+            label: 'HANDOFF_SANDBOX',
+            severity: 'warn',
+          },
+        },
+      ];
+  }
+}
+
 /**
  * Resolve the config and assemble the check tree.
  *
  * Separated from running it so `runDoctor` and `renderDoctor` cannot drift:
  * both take their checks, and their refusals, from here.
  */
-function planDoctor(projectRoot: string): DoctorPlan {
+async function planDoctor(projectRoot: string): Promise<DoctorPlan> {
   const configPath = resolve(projectRoot, 'justin-sdk.config.json');
 
   if (!existsSync(configPath)) {
@@ -2020,7 +2495,11 @@ function planDoctor(projectRoot: string): DoctorPlan {
 
   return {
     componentCount: components.length,
-    nodes: withRunnableFixes(nodes, projectRoot),
+    nodes: [
+      ...withRunnableFixes(nodes, projectRoot),
+      // After withRunnableFixes on purpose: see makeHandoffSandboxChecks.
+      ...(await handoffSandboxNodes(projectRoot)),
+    ],
     ok: true,
   };
 }
@@ -2063,7 +2542,7 @@ export async function runDoctor(
   projectRoot: string = process.cwd(),
   options: DoctorOptions = {},
 ): Promise<number> {
-  const plan = planDoctor(projectRoot);
+  const plan = await planDoctor(projectRoot);
   if (!plan.ok) {
     console.error(plan.error);
     return 1;
@@ -2093,7 +2572,7 @@ export async function renderDoctor(
   projectRoot: string = process.cwd(),
   options: DoctorOptions = {},
 ): Promise<DoctorReport> {
-  const plan = planDoctor(projectRoot);
+  const plan = await planDoctor(projectRoot);
   if (!plan.ok) {
     return {exitCode: 1, report: plan.error};
   }

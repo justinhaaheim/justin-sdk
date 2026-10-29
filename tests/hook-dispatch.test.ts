@@ -66,6 +66,7 @@ function fake(
       },
     ],
     id: args.join(' '),
+    knob: null,
   };
 }
 

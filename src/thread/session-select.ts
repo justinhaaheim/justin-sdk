@@ -16,7 +16,7 @@ import type {BrIssue} from '../beads/br';
 import type {EnvLike} from './paths';
 import type {SessionResolution} from './session-bead';
 
-import {brList, describeBrFailed, findBeadsDb} from '../beads/br';
+import {brList, describeBrFailed, resolveRecordedBeadsDb} from '../beads/br';
 import {isSafeSessionId} from './message-log';
 import {resolveSession, sidLabel} from './session-bead';
 import {readSessionIndex} from './session-index';
@@ -163,7 +163,7 @@ export function sessionBeadsLabelled(
   const dbs: string[] = [session.db];
   const problems: string[] = [];
   for (const sighting of session.sightings) {
-    const found = findBeadsDb(sighting.beadsDir);
+    const found = resolveRecordedBeadsDb(sighting.beadsDir);
     if (found.kind !== 'found') {
       problems.push(`could not read ${sighting.beadsDir}: ${found.reason}`);
       continue;

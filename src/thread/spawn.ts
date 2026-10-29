@@ -44,6 +44,7 @@ import {cmuxArgv, realCmuxRunner, resolveCmuxBinary} from './cmux';
 import {primaryCheckoutOf, resolveRepoTag} from './config';
 import {liveSocketPath, socketSettingsJson, zshWord} from './respawn';
 import {sessionDisplayName} from './session-name';
+import {spawnGate} from './spawn-gate';
 
 export interface SpawnOptions {
   /** Where a relative <dir> is resolved from (default: process.cwd()). */
@@ -67,12 +68,14 @@ export interface SpawnOptions {
 }
 
 export interface SpawnDeps {
+  /** The handoff gate (home-base-mbnjv.2, C4): null = go on. */
+  gate: typeof spawnGate;
   run: CmuxRunner;
 }
 
-/** Exit 0 opened (or a dry run) · 1 cmux did not open it · 2 refused. */
+/** Exit 0 opened (or a dry run) · 1 cmux did not open it · 2 refused · 3 refused by the handoff gate. */
 export interface SpawnResult {
-  exitCode: 0 | 1 | 2;
+  exitCode: 0 | 1 | 2 | 3;
   lines: string[];
 }
 
@@ -330,6 +333,10 @@ export async function spawnSession(
     fields.push({label: 'cmux argv', value: JSON.stringify(argv)});
     return {exitCode: 0, lines: render('Dry run: nothing opened', '🔎')};
   }
+
+  // ---- 1b. the handoff gate, knob on only (home-base-mbnjv.2, C4) ----
+  const refused = await (deps.gate ?? spawnGate)({cwd, env});
+  if (refused != null) return refused;
 
   // ---- 2. cmux: the socket, then a ping (respawn.ts rules) ----
   if ('reason' in socket) {

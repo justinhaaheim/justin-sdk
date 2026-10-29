@@ -22,28 +22,47 @@ import {readFileSync} from 'node:fs';
 import {dirname} from 'node:path';
 
 import {helpHeader} from '../sdk-identity';
+import {SDK_BIN_BY_PATH, SDK_HANDOFF_CALL} from '../sdk-invocation';
 
-const RESPAWN_SUMMARY =
-  'Continue this session in a fresh one with no keystroke: run `thread handoff`, write the block to a file, and start the successor in a new cmux workspace (home-base-1r6d.34.5). Run it from inside a cmux pane. Exit 0 successor started · 1 a step failed · 2 refused, nothing written.';
+const HANDOFF_SUMMARY =
+  'Hand this session on: label its bead handed-off (the inbox then says 🤝), append a dated "handed off — <note>" to its notes, and print a block for the next session (title, requests with status and stage, open questions, how to resume, and the `thread request --continues` the new session runs first). With componentConfig.thread.handoff.successor on, it also starts that next session in a new tab of this cmux workspace, or refuses and says why. Needs componentConfig.thread.sessionBeads. Exit 0 handed off (and the successor started) · 1 a step failed · 2 nothing written · 3 refused by the handoff gate.';
 
-const RESPAWN_NARRATIVE = `
-WHAT IT DOES, in order. Each failure exits non-zero and names the step.
+const HANDOFF_NARRATIVE = `
+THE KNOB. componentConfig.thread.handoff.successor, default false (epic home-base-mbnjv D10). OFF: thread handoff labels, notes and prints the block, exactly as before, and starts nothing; --dry-run and --model are refused (exit 2). ON, it also starts the successor, in this order:
 
-  1. Refuses (exit 2, nothing written) outside a cmux pane, without a session bead (as \`thread handoff\` does), or when cmux cannot be reached.
-  2. Runs \`thread handoff\`: labels the session bead handed-off, appends the note, builds the block.
-  3. Writes the block to <threads state dir>/handoffs/<session id>.md.
-  4. Opens a new cmux workspace in this session's checkout, running \`claude [--model <m>] [--settings <file>] '<kickoff>'\`. The kickoff tells the successor to read the block file and to run \`thread request --continues <this session's bead>\` first, which links the two sessions.
-  5. With --close-after N, closes THIS workspace N seconds later from a detached child, so the Bash call returns at once and the last message and Stop hook run first.
-  6. Prints what it did, ending with what you do next: write your last message and end the turn.
+  1. Refuses (exit 2, nothing written) without a session bead, when this session's checkout is gone, or when --session names a session other than the one it runs in.
 
-KNOBS. --close-after defaults to 0 (off: the old pane stays open, idle). --successor-socket defaults to off.
+  2. The handoff gate: the kill switch, a cmux pane, cmux reachable, usage from the hourly samples, handoffs in a row since Justin last typed, live Claude sessions on this Mac. A refusal still hands the session off (label, note, block printed), records "handoff refused: <reason>" on the session bead, opens nothing, and exits 3.
 
-SANDBOX HINT. The Claude Code sandbox blocks the cmux socket. When cmux cannot be reached, the refusal prints the setting that allows it, {"sandbox":{"network":{"allowUnixSockets":["<socket path>"]}}}, for your Claude Code user settings. Otherwise retry the command with the sandbox disabled.
+  3. Finds this tab's pane (cmux tree, read only), hands off, and writes the block to <threads state dir>/handoffs/<session id>.md.
 
-WHY --successor-socket IS OFF. It passes that same setting to the successor with \`claude --settings\`. Justin's user settings have autoAllowBashIfSandboxed true, so with the socket allowed every sandboxed cmux command in the successor runs with no permission check at all, including \`cmux send\` into any other pane. Without the flag the successor gets no --settings.`;
+  4. Opens a new tab beside this one, in this workspace and this session's checkout, running claude --permission-mode <componentConfig.thread.handoff.permissionMode> --remote-control <name> --name <name> [--model <m>] '<kickoff>'. The kickoff tells the successor to read the block file and to run \`thread request --continues <this session's bead>\` first, which links the two sessions. This tab stays open.
+
+  5. Reads the new tab's screen for up to 20 s. Claude Code's input box with no dialog means it started. A trust or permission dialog is reported with the screen, never answered.
+
+  6. THE OLD TAB (componentConfig.thread.handoff.predecessor, default keep). keep leaves this tab running. exit (Claude Code here ends and the tab shows a tombstone) and close (the tab closes) are done later by a detached watcher, only after every check holds twice: the successor's bead links back to this one from the new tab (continues: and that tab's cmux-surface:), this session's turn has ended with nothing typed or run in it since, the tab still exists, and its screen shows Claude Code idle at an empty input box with THIS session's id in the status line as "⌗ <session id>". A status line that does not show "⌗ <session id>" means exit and close never act: after 20 minutes the tab is kept and its bead says "predecessor kept: handshake failed: screen". exit and close end everything still running in the tab, so hand off only with no background work running (no subagent, no background shell).
+
+EXIT CODES, and what you do after each.
+
+  0  Handed off, and the successor started. Write your final report now and end your turn. Do not keep working: the successor works in the same checkout.
+
+  1  A step failed. The output says what WAS done: whether the session was handed off, where the block is, whether a tab opened. Finish your report, quote that output for Justin, and stop. Do not run thread handoff again.
+
+  2  Nothing was written: the message says why. Fix the call if a flag was wrong, or if it says the call ran inside the Claude Code sandbox (cmux answered Operation not permitted), and run it once more; if exit 2 comes back again, put the output in your final report and stop. Never set dangerouslyDisableSandbox for it.
+
+  3  The gate refused. The session WAS handed off and the refusal is recorded; nothing was opened. This is final: finish your report, include the printed handoff block for Justin, and stop. Never start a session another way: no cmux command, no claude command.
+
+RUN IT BARE, from the repository root, where node_modules is: ${SDK_HANDOFF_CALL} --note "<what the successor must know>". The sandbox blocks the cmux socket, so the call must run outside it, through Justin's global sandbox exclusion (doctor's HANDOFF_SANDBOX). Three things keep the whole call inside the sandbox even where that exclusion exists: starting it with bun (Claude Code never excludes a \`bun run justin-sdk …\` call, home-base-mbnjv.9), a \`cd X && …\` prefix, and a redirect or a $(…) (home-base-pp1vx.5). A backtick in the note does the same, even inside single quotes (measured, home-base-mbnjv.10); every other character tested is fine. If ${SDK_BIN_BY_PATH} is not in the current directory, run \`cd <repository root>\` as its own Bash call first. If it is missing at the root too (no bun install yet), say so in your final report and stop.
+
+--to <session id> means the successor already exists: the two sessions are linked, as before, with no gate and no new tab, whatever the knob says.
+
+--dry-run (knob on) runs the gate and the pane lookup, both read only, and prints the gate's answer, the block path, the full cmux argument array and the kickoff. It writes nothing and opens nothing.`;
+
+const RESPAWN_RETIRED_SUMMARY =
+  'RETIRED (epic home-base-mbnjv C3): starting a successor is now `thread handoff` with componentConfig.thread.handoff.successor on. This command prints that and exits 2, doing nothing.';
 
 const SPAWN_SUMMARY =
-  'Start a new Claude Code session in a directory you name: open a new cmux workspace there running `claude`, with Remote Control when you pass --remote-control, so you can reach it from the Claude app on your phone (home-base-yukaf.7). Try --dry-run first. Exit 0 opened, or a dry run · 1 cmux did not open it · 2 refused, nothing opened.';
+  'Start a new Claude Code session in a directory you name: open a new cmux workspace there running `claude`, with Remote Control when you pass --remote-control, so you can reach it from the Claude app on your phone (home-base-yukaf.7). Try --dry-run first. With componentConfig.thread.handoff.successor on in the repo it runs in, the handoff gate runs first (kill switch, cmux, usage, live sessions). Exit 0 opened, or a dry run · 1 cmux did not open it · 2 refused, nothing opened · 3 refused by the handoff gate, nothing opened.';
 
 const SPAWN_NARRATIVE = `
 WHAT IT DOES, in order.
@@ -798,6 +817,22 @@ export const threadCommand: CommandModule = {
         },
       )
       .command(
+        'guard',
+        'Hook (PreToolUse, matcher Bash): the session guard (home-base-mbnjv.5). Refuses, with exit 2 and the reason on stderr, a raw cmux call that is not read-only, a claude call that is not read-only, and thread handoff / spawn / respawn from a subagent (recorded on the parent’s session bead). Points at thread handoff and thread spawn. Reads the payload on stdin. Inert unless componentConfig.thread.handoff.successor is on; install writes its entry only there.',
+        (yy) =>
+          yy.option('explain', {
+            default: false,
+            describe: 'Also say "allowed" on stderr when the call is allowed',
+            type: 'boolean' as const,
+          }),
+        async (argv) => {
+          const {runThreadGuardHook} = await import('./session-guard');
+          process.exit(
+            await runThreadGuardHook({explain: argv.explain === true}),
+          );
+        },
+      )
+      .command(
         'request [title..]',
         'File what Justin asked for as a REQUEST bead under this session’s bead, in the session’s own beads DB (or adopt an existing bead with --bead). The first request also names the session. Needs componentConfig.thread.sessionBeads. Exit 0 filed · 1 refused or failed · 2 usage.',
         (yy) =>
@@ -852,9 +887,15 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'handoff',
-        'Hand this session on: label its bead handed-off (the inbox then says 🤝), append a dated "handed off — <note>" to its notes, and print a block to paste into the new session (title, requests with status and stage, open questions, how to resume, and the `thread request --continues` the new session runs first). Needs componentConfig.thread.sessionBeads. Exit 0 handed off · 1 failed (or handed off with a follow-up problem).',
+        HANDOFF_SUMMARY,
         (yy) =>
           yy
+            // The same first line as `justin-sdk --help` (D4), built only
+            // when this command is chosen: sdk-identity reads package.json.
+            .usage(
+              `${helpHeader('justin-sdk', dirname(import.meta.dirname))}\n\n$0 thread handoff\n\n${HANDOFF_SUMMARY}`,
+            )
+            .epilogue(HANDOFF_NARRATIVE)
             .option('note', {
               describe:
                 'What the next session must know, one line (appended to the session bead’s notes with a timestamp, and printed in the block)',
@@ -867,13 +908,26 @@ export const threadCommand: CommandModule = {
             })
             .option('session', {
               describe:
-                'Session id to hand off (default: $CLAUDE_CODE_SESSION_ID)',
+                'Session id to hand off (default: $CLAUDE_CODE_SESSION_ID). With the successor knob on, only the session this runs in: another id is refused (exit 2).',
               type: 'string' as const,
+            })
+            .option('model', {
+              describe:
+                'Knob on only: the successor’s model (`claude --model`); default: claude’s own default',
+              type: 'string' as const,
+            })
+            .option('dry-run', {
+              default: false,
+              describe:
+                'Knob on only: print the gate’s answer, the block path, the cmux argument array and the kickoff; write nothing, open nothing',
+              type: 'boolean' as const,
             }),
         async (argv) => {
-          const {runThreadHandoff} = await import('./session-handoff');
+          const {runThreadHandoffCommand} = await import('./handoff-successor');
           process.exit(
-            await runThreadHandoff({
+            await runThreadHandoffCommand({
+              dryRun: argv['dry-run'] === true,
+              model: argv.model ?? null,
               note: argv.note ?? null,
               sessionId: argv.session ?? null,
               to: argv.to ?? null,
@@ -883,66 +937,19 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'respawn',
-        RESPAWN_SUMMARY,
+        RESPAWN_RETIRED_SUMMARY,
         (yy) =>
           yy
-            // The same first line as `justin-sdk --help` (D4), built only
-            // when this command is chosen: sdk-identity reads package.json.
+            // Its old flags (--note, --close-after, …) must reach the
+            // handler, which refuses with exit 2, not fail as unknown (1).
+            .strict(false)
             .usage(
-              `${helpHeader('justin-sdk', dirname(import.meta.dirname))}\n\n$0 thread respawn\n\n${RESPAWN_SUMMARY}`,
-            )
-            .epilogue(RESPAWN_NARRATIVE)
-            .option('note', {
-              describe:
-                'What the successor must know, one line (goes in the block and the session bead’s notes)',
-              type: 'string' as const,
-            })
-            .option('model', {
-              describe:
-                'The successor’s model (`claude --model`); default: claude’s own default',
-              type: 'string' as const,
-            })
-            .option('close-after', {
-              default: 0,
-              describe:
-                'Close THIS workspace N seconds after the successor starts, from a detached child, so the last message and Stop hook run first. 0 = off (the default): the old pane stays open.',
-              type: 'number' as const,
-            })
-            .option('kickoff', {
-              describe:
-                'An extra one-line instruction appended to the successor’s first message',
-              type: 'string' as const,
-            })
-            .option('successor-socket', {
-              default: false,
-              describe:
-                'Give the successor `claude --settings` allowing the cmux socket in its sandbox, so it can respawn sandboxed too. OFF by default: see below.',
-              type: 'boolean' as const,
-            })
-            .option('dry-run', {
-              default: false,
-              describe:
-                'Print every path, the cmux argument array and the kickoff; write nothing, spawn nothing',
-              type: 'boolean' as const,
-            })
-            .option('session', {
-              describe:
-                'Session id to hand off (default: $CLAUDE_CODE_SESSION_ID)',
-              type: 'string' as const,
-            }),
-        async (argv) => {
-          const {runThreadRespawn} = await import('./respawn');
-          process.exit(
-            await runThreadRespawn({
-              closeAfter: argv['close-after'],
-              dryRun: argv['dry-run'] === true,
-              kickoff: argv.kickoff ?? null,
-              model: argv.model ?? null,
-              note: argv.note ?? null,
-              sessionId: argv.session ?? null,
-              successorSocket: argv['successor-socket'] === true,
-            }),
-          );
+              `${helpHeader('justin-sdk', dirname(import.meta.dirname))}\n\n$0 thread respawn\n\n${RESPAWN_RETIRED_SUMMARY}`,
+            ),
+        async () => {
+          const {RESPAWN_RETIRED_LINES} = await import('./respawn');
+          for (const line of RESPAWN_RETIRED_LINES) console.error(line);
+          process.exit(2);
         },
       )
       .command(

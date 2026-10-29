@@ -9,7 +9,8 @@ import {afterEach, describe, expect, test} from 'bun:test';
 import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
-import {runGitignoreSetup} from '../src/gitignore-setup';
+import {runGitignoreSetup as runGitignoreSetupReal} from '../src/gitignore-setup';
+import {sdkRemoteWithOwnTag} from './git-fixtures';
 import {createProjectSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -17,6 +18,21 @@ const sandboxes: Sandbox[] = [];
 function track(sandbox: Sandbox): Sandbox {
   sandboxes.push(sandbox);
   return sandbox;
+}
+
+/**
+ * home-base-nyh2k: every run verifies the SDK pin against a LOCAL bare remote
+ * holding this SDK's tag (sdkRemoteWithOwnTag), never github. With the default
+ * remote each test made a real `git ls-remote` to github, killed at 5 s, the
+ * same as bun's default test timeout, so a slow network failed the suite.
+ */
+function runGitignoreSetup(
+  options: Parameters<typeof runGitignoreSetupReal>[0] = {},
+): Promise<number> {
+  return runGitignoreSetupReal({
+    sdkRepoUrl: sdkRemoteWithOwnTag(track),
+    ...options,
+  });
 }
 
 afterEach(() => {

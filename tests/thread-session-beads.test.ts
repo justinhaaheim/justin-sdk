@@ -94,8 +94,24 @@ import {
 } from '../src/thread/status-file';
 import {createFakeBd} from './fake-bd';
 import {git, initRepo} from './git-fixtures';
-import {needBr, PINNED_BR, pinnedBrVersion} from './pinned-br';
+import {
+  installedBr,
+  needBr,
+  PINNED_BR,
+  pinnedBrVersion,
+  underInstalledBr,
+} from './pinned-br';
 import {createSandbox} from './sandbox';
+
+const BR_0137 = installedBr('0.1.37');
+const BR_076 = installedBr('0.7.6');
+for (const br of [BR_0137, BR_076]) {
+  if (br.kind !== 'installed') {
+    console.warn(
+      `SKIPPED: a per-version F1 test in thread-session-beads.test.ts cannot run (${br.reason})`,
+    );
+  }
+}
 
 const SESSION = '5e551011-aaaa-4bbb-8ccc-0123456789ab';
 const OTHER_SESSION = '0babe000-1111-4222-8333-444455556666';
@@ -632,6 +648,89 @@ describe('P1 + F3: a br write after a pull imports the export first, and never c
     }
     expect(readFileSync(path, 'utf8')).toBe(conflicted);
   });
+
+  /**
+   * The export holds a DIFFERENT issue under an id the DB already has (its own
+   * `created_at`): what two checkouts that each kept a DB under br 0.1.37
+   * leave when both minted the same next id and one merges the other's
+   * export. br 0.7.0 made the import refuse it (exit 6, SYNC_CONFLICT); 0.1.37
+   * imports it over the local issue. Measured 2026-10-26 by
+   * scripts/measure-br-contract.ts (home-base-dj5m9.1.4). Returns the export.
+   */
+  function collideExport(root: string, id: string): string {
+    const path = join(root, '.beads', 'issues.jsonl');
+    const later = new Date(Date.now() + 1000).toISOString();
+    const lines = readFileSync(path, 'utf8')
+      .split('\n')
+      .filter((line) => line.trim() !== '')
+      .map((line) => {
+        const record = JSON.parse(line) as Record<string, unknown>;
+        return record.id === id
+          ? JSON.stringify({
+              ...record,
+              created_at: later,
+              title: 'MADE ELSEWHERE',
+              updated_at: later,
+            })
+          : line;
+      });
+    writeFileSync(path, `${lines.join('\n')}\n`);
+    return readFileSync(path, 'utf8');
+  }
+
+  test.skipIf(BR_076.kind !== 'installed')(
+    'br 0.7.6: an export holding another issue under a local id is an import br refuses (exit 6); nothing is written, and the words name br sync --merge',
+    async () => {
+      await underInstalledBr(BR_076, () => {
+        const root = beadsRepo(sandbox(), 'collision-076');
+        const filed = brCreate({cwd: root}, {title: 'Made here', type: 'task'});
+        if (filed.kind !== 'ok') throw new Error(filed.reason);
+        const exported = collideExport(root, filed.id);
+        expect(syncStatus(root)).toMatchObject({
+          db_newer: false,
+          jsonl_newer: true,
+        });
+
+        const created = brCreate({cwd: root}, {title: 'New', type: 'task'});
+        expect(created.kind).toBe('failed');
+        if (created.kind === 'failed') {
+          const said = [created.reason, ...created.detail].join('\n');
+          expect(said).toContain(
+            'issues.jsonl is newer than the beads DB and importing it failed, so nothing was written: br exited 6',
+          );
+          expect(said).toContain('ID collision');
+          expect(said).toContain('br sync --merge');
+        }
+        expect(readFileSync(join(root, '.beads', 'issues.jsonl'), 'utf8')).toBe(
+          exported,
+        );
+        const listed = brList({cwd: root}, {all: true});
+        expect(
+          listed.kind === 'ok' && listed.issues.map((issue) => issue.title),
+        ).toEqual(['Made here']);
+      });
+    },
+  );
+
+  test.skipIf(BR_0137.kind !== 'installed')(
+    'br 0.1.37: the same export is imported over the local issue (exit 0), so the write goes through and the local copy is gone',
+    async () => {
+      await underInstalledBr(BR_0137, () => {
+        const root = beadsRepo(sandbox(), 'collision-0137');
+        const filed = brCreate({cwd: root}, {title: 'Made here', type: 'task'});
+        if (filed.kind !== 'ok') throw new Error(filed.reason);
+        collideExport(root, filed.id);
+
+        expect(brCreate({cwd: root}, {title: 'New', type: 'task'}).kind).toBe(
+          'ok',
+        );
+        expect(brShow({cwd: root}, filed.id)).toMatchObject({
+          issue: {title: 'MADE ELSEWHERE'},
+          kind: 'ok',
+        });
+      });
+    },
+  );
 
   test('a freshly initialised workspace (br says jsonl_newer, the export is empty) is writable', () => {
     needBr();
@@ -1660,10 +1759,8 @@ describe('thread request', () => {
     ]);
   });
 
-  // F11 collapsed this to one half: the whole suite runs the pinned br
-  // (tests/pinned-br.ts), the version of the live repro.
-  test('F1: --bead on an open task with an open child — br 0.1.37 (home-base’s pin) refuses the claim and the labels still land', async () => {
-    needBr();
+  /** `--bead` on an open task with an open child, under the br on PATH. */
+  async function adoptParentTask() {
     const w = world(ON);
     const repo = beadsRepo(w.sb, 'adopt-parent');
     expect(fileSessionBead(w, repo).kind).toBe('created');
@@ -1681,11 +1778,38 @@ describe('thread request', () => {
       'request',
       `sid:${SESSION}`,
     ]);
-    expect(shown.status).toBe('open');
-    expect(outcome).toMatchObject({
-      adoptedStatus: {kind: 'left', status: 'open'},
-    });
-  });
+    return {outcome, shown};
+  }
+
+  // One test per br version (home-base-dj5m9.1.4): whether br claims a task
+  // with an open child changed between 0.1.37 and 0.7.6 (measured
+  // 2026-10-26), so each runs mise's installed br of its version, whatever
+  // home-base pins. (F11 had collapsed this to the pinned half.)
+  test.skipIf(BR_0137.kind !== 'installed')(
+    'F1: --bead on an open task with an open child — br 0.1.37 refuses the claim and the labels still land',
+    async () => {
+      await underInstalledBr(BR_0137, async () => {
+        const {outcome, shown} = await adoptParentTask();
+        expect(shown.status).toBe('open');
+        expect(outcome).toMatchObject({
+          adoptedStatus: {kind: 'left', status: 'open'},
+        });
+      });
+    },
+  );
+
+  test.skipIf(BR_076.kind !== 'installed')(
+    'F1: --bead on an open task with an open child — br 0.7.6 claims it (in_progress) and the labels land',
+    async () => {
+      await underInstalledBr(BR_076, async () => {
+        const {outcome, shown} = await adoptParentTask();
+        expect(shown.status).toBe('in_progress');
+        expect(outcome).toMatchObject({
+          adoptedStatus: {from: 'open', kind: 'set'},
+        });
+      });
+    },
+  );
 
   /** The session's first prompt in its message log, logged `ageMs` ago. */
   function logFirstPrompt(w: World, ageMs: number): void {
@@ -1777,6 +1901,11 @@ describe('thread request', () => {
     expect(JSON.stringify(refused)).toContain(
       'not waited for: this session has no message log',
     );
+    // Retrying cannot help here: only a message runs the capture hook.
+    expect(JSON.stringify(refused)).toContain(
+      'send this session a message first (a `!` command is not one), then run this again',
+    );
+    expect(JSON.stringify(refused)).not.toContain('retry');
   });
 
   // R9 (home-base-vzwbj.4.9): a half-written index line for this session.

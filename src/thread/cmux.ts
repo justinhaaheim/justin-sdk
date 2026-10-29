@@ -324,6 +324,128 @@ export async function readWindowWorkspaces(
   };
 }
 
+const workspacePanesSchema = z.object({
+  windows: z.array(
+    z.object({
+      workspaces: z.array(
+        z.object({
+          id: z.string(),
+          panes: z.array(
+            z.object({
+              id: z.string(),
+              ref: z.string().nullish(),
+              surfaces: z.array(
+                z.object({id: z.string(), ref: z.string().nullish()}),
+              ),
+            }),
+          ),
+        }),
+      ),
+    }),
+  ),
+});
+
+/** The pane that holds a surface: found, absent, or not readable (rule 7). */
+export type PaneOfSurfaceRead =
+  | {kind: 'found'; paneId: string; paneRef: string | null}
+  | {kind: 'notFound'; reason: string}
+  | {kind: 'unreadable'; reason: string};
+
+/**
+ * home-base-mbnjv.2: the pane that holds `surfaceId` inside `workspaceId`,
+ * read-only, so a successor tab opens beside its caller (epic C5).
+ *
+ * Measured 2026-10-29 on cmux 0.64.24, in a throwaway workspace: `cmux --json
+ * --id-format both tree --workspace <id>` lists that workspace's panes, each
+ * with its uuid and its surfaces' uuids. `cmux identify --surface <id>` names
+ * the pane too, but for a surface that does not exist it exits 0 with
+ * `caller: null` beside a `focused` block naming ANOTHER pane: a reader that
+ * fell back to `focused` would open the successor beside the wrong tab. The
+ * tree also proves the surface is in the caller's workspace.
+ */
+export async function readPaneOfSurface(
+  run: CmuxRunner,
+  workspaceId: string,
+  surfaceId: string,
+): Promise<PaneOfSurfaceRead> {
+  const args = ['--json', '--id-format', 'both', 'tree'];
+  args.push('--workspace', workspaceId);
+  const call = await run(args);
+  if (call.kind === 'failed') return {kind: 'unreadable', reason: call.reason};
+  const parsed = workspacePanesSchema.safeParse(parseJson(call.stdout));
+  if (!parsed.success) {
+    return {
+      kind: 'unreadable',
+      reason: `cmux ${args.join(' ')} printed JSON this code cannot read: ${parsed.error.issues[0]?.message ?? 'not JSON'}`,
+    };
+  }
+  const wantWorkspace = workspaceId.toUpperCase();
+  const wantSurface = surfaceId.toUpperCase();
+  const workspace = parsed.data.windows
+    .flatMap((window) => window.workspaces)
+    .find((entry) => entry.id.toUpperCase() === wantWorkspace);
+  if (workspace == null) {
+    return {
+      kind: 'notFound',
+      reason: `no open cmux workspace has id ${workspaceId}`,
+    };
+  }
+  const pane = workspace.panes.find((entry) =>
+    entry.surfaces.some((surface) => surface.id.toUpperCase() === wantSurface),
+  );
+  if (pane == null) {
+    return {
+      kind: 'notFound',
+      reason: `surface ${surfaceId} is not in workspace ${workspaceId}`,
+    };
+  }
+  return {kind: 'found', paneId: pane.id, paneRef: pane.ref ?? null};
+}
+
+/** A surface's uuid, read from its short ref: found, absent, or not readable. */
+export type SurfaceIdRead =
+  | {kind: 'found'; surfaceId: string}
+  | {kind: 'notFound'; reason: string}
+  | {kind: 'unreadable'; reason: string};
+
+/**
+ * home-base-mbnjv.4: the uuid of the tab `new-surface` named by its ref
+ * ("surface:306"), inside `workspaceId`, read-only, so the tombstone's focus
+ * command names the successor's tab by uuid (refs resolve in a window
+ * context; uuids do not need one). Same tree read as readPaneOfSurface.
+ */
+export async function readSurfaceIdOfRef(
+  run: CmuxRunner,
+  workspaceId: string,
+  surfaceRef: string,
+): Promise<SurfaceIdRead> {
+  const args = ['--json', '--id-format', 'both', 'tree'];
+  args.push('--workspace', workspaceId);
+  const call = await run(args);
+  if (call.kind === 'failed') return {kind: 'unreadable', reason: call.reason};
+  const parsed = workspacePanesSchema.safeParse(parseJson(call.stdout));
+  if (!parsed.success) {
+    return {
+      kind: 'unreadable',
+      reason: `cmux ${args.join(' ')} printed JSON this code cannot read: ${parsed.error.issues[0]?.message ?? 'not JSON'}`,
+    };
+  }
+  const want = workspaceId.toUpperCase();
+  const surface = parsed.data.windows
+    .flatMap((window) => window.workspaces)
+    .filter((entry) => entry.id.toUpperCase() === want)
+    .flatMap((entry) => entry.panes)
+    .flatMap((pane) => pane.surfaces)
+    .find((entry) => entry.ref === surfaceRef);
+  if (surface == null) {
+    return {
+      kind: 'notFound',
+      reason: `no tab ${surfaceRef} in workspace ${workspaceId}`,
+    };
+  }
+  return {kind: 'found', surfaceId: surface.id};
+}
+
 /** Set a workspace's name, by uuid; `--` because a name may start with "-". */
 export function renameWorkspace(
   run: CmuxRunner,
@@ -331,6 +453,29 @@ export function renameWorkspace(
   name: string,
 ): Promise<CmuxCall> {
   return run(['rename-workspace', '--workspace', workspaceId, '--', name]);
+}
+
+/**
+ * Set one tab's title (home-base-mbnjv.3, D8): `cmux rename-tab --workspace
+ * <id> --surface <id> -- <title>`. Both ids are always passed: without
+ * --surface cmux renames $CMUX_SURFACE_ID or the focused tab, and without
+ * --workspace it resolves in the caller's workspace.
+ */
+export function renameTab(
+  run: CmuxRunner,
+  workspaceId: string,
+  surfaceId: string,
+  title: string,
+): Promise<CmuxCall> {
+  return run([
+    'rename-tab',
+    '--workspace',
+    workspaceId,
+    '--surface',
+    surfaceId,
+    '--',
+    title,
+  ]);
 }
 
 /** Reset a workspace's name to none (custom_title null), by uuid. */

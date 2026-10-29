@@ -30,6 +30,7 @@
  */
 
 import type {OutputStyle} from '../cli-style';
+import type {ChainReaders} from './handoff-chain';
 import type {MessageLine} from './message-log';
 import type {Piece} from './part-one';
 import type {EnvLike} from './paths';
@@ -51,8 +52,17 @@ import {
   spacedList,
   wrapHanging,
 } from '../cli-style';
-import {sdkRun} from '../sdk-invocation';
+import {SDK_HANDOFF_CALL, sdkRun} from '../sdk-invocation';
 import {parseInstant} from './answer-store';
+import {realChainReaders, walkUnattendedChain} from './handoff-chain';
+import {
+  chainLines,
+  type ChainViewReaders,
+  hasHandoffRecord,
+  readHandoffChain,
+  realChainViewReaders,
+  type UnattendedCountView,
+} from './handoff-view';
 import {
   partOneView,
   renderPartOne,
@@ -526,7 +536,7 @@ export const OPEN_WORK_SETTLE: readonly Piece[] = [
  */
 export const OPEN_WORK_HANDOFF: readonly Piece[] = [
   'Handing off is not a way to stop: run ',
-  {code: sdkRun('thread handoff')},
+  {code: SDK_HANDOFF_CALL},
   ' only when this session cannot go on (its context is nearly full, or Justin asked for a new session).',
 ];
 
@@ -700,10 +710,63 @@ export function relatedEpicsOf(
   });
 }
 
+/**
+ * home-base-mbnjv.3 (D9, C9): the "Handoff chain" section's lines, or null
+ * when the session bead carries no handoff label (no section is printed, so a
+ * session that never handed off prints exactly what it did before). The
+ * chain runs both ways from this session; the unattended count is the chain
+ * walk's (walkUnattendedChain) from the newest session, the one the gate
+ * would count from on the next handoff.
+ */
+export function handoffSectionLines(
+  load: Extract<ReportLoad, {kind: 'loaded'}>,
+  readers: {chain: ChainReaders; view: ChainViewReaders},
+): string[] | null {
+  const session = load.model.beads.session;
+  if (session == null) return null;
+  if (!hasHandoffRecord(session.labels)) return null;
+  const chain = readHandoffChain(load.model.sessionBeadId, readers.view);
+  if ('kind' in chain) {
+    return [`⚠️ The handoff chain could not be read: ${chain.reason}`];
+  }
+  const newest = chain.nodes.at(-1)?.beadId ?? null;
+  // A walk that stopped before the newest end does not know the newest
+  // session, so it does not claim a count for it (rule 7).
+  const forwardStopped = chain.problems.length > 0;
+  let unattended: UnattendedCountView;
+  if (newest == null || forwardStopped) {
+    unattended = {
+      kind: 'unknown',
+      newest: null,
+      reason: 'the chain could not be read to its end (below)',
+    };
+  } else {
+    const walked = walkUnattendedChain(newest, readers.chain);
+    unattended =
+      walked.kind === 'counted'
+        ? {count: walked.unattendedHandoffs, kind: 'counted', newest}
+        : {kind: 'unknown', newest, reason: walked.reason};
+  }
+  return chainLines(chain, unattended);
+}
+
+/** The real readers of the "Handoff chain" section. */
+export function realHandoffSectionReaders(input: {cwd: string; env: EnvLike}): {
+  chain: ChainReaders;
+  view: ChainViewReaders;
+} {
+  return {
+    chain: realChainReaders(input),
+    view: realChainViewReaders(input),
+  };
+}
+
 export function renderSessionShow(
   load: Extract<ReportLoad, {kind: 'loaded'}>,
   options: {
     full: boolean;
+    /** The "Handoff chain" section (`handoffSectionLines`); null = none. */
+    handoff?: string[] | null;
     now: Date;
     /** The "Related epics" section's content (`relatedEpicsOf`). */
     related: RelatedEpics;
@@ -714,6 +777,7 @@ export function renderSessionShow(
   const {now, style, timeZone} = options;
   const {model} = load;
   const related = renderRelatedEpics(options.related, style);
+  const handoff = options.handoff ?? null;
   const partOne = renderPartOne(
     partOneView({
       action: load.action,
@@ -766,6 +830,7 @@ export function renderSessionShow(
     return spacedList([
       partOne,
       ...related,
+      ...(handoff == null ? [] : ['**Handoff chain:**', ...handoff]),
       '**From Claude:**',
       claude,
       '**Your messages:**',
@@ -788,6 +853,12 @@ export function renderSessionShow(
   return spacedList([
     partOne,
     ...related,
+    ...(handoff == null
+      ? []
+      : [
+          sectionHeader('Handoff chain', {color: true, emoji: '🔗'}),
+          ...handoff.map(indent),
+        ]),
     sectionHeader('From Claude', {color: true, emoji: '💬'}),
     indent(claude),
     sectionHeader('Your messages', {color: true, emoji: '🗣️'}),
@@ -819,6 +890,7 @@ export async function runSessionShow(
   console.log(
     renderSessionShow(load, {
       full: options.full,
+      handoff: handoffSectionLines(load, realHandoffSectionReaders({cwd, env})),
       now,
       related: relatedEpicsOf(load),
       style,

@@ -13,6 +13,7 @@
  * Bails with a clear error on unexpected state rather than guessing.
  */
 
+import {spawnSync} from 'child_process';
 import {
   cpSync,
   existsSync,
@@ -26,6 +27,7 @@ import {
 import {basename, dirname, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
+import {type BrSemver, brSpawnEnv} from './beads/br';
 import {
   ensureDir,
   ensureIgnoreEntries,
@@ -54,6 +56,53 @@ function getPinnedVersion(): string {
     );
   }
   return version;
+}
+
+// ---------------------------------------------------------------------------
+// Never pull a repo's br DOWN (home-base-dj5m9.1.3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where a repo's own br pin stands against the SDK's (versions.json).
+ *
+ * The SDK pin moves repo by repo during an upgrade sweep, so a repo may pin a
+ * br NEWER than the SDK it runs. Rewriting that pin to the SDK's would run an
+ * older br on a database a newer one wrote, so neither doctor nor beads-setup
+ * ever does it. `unordered` is a pin that is not a plain `X.Y.Z` (a mise
+ * `latest`, a prefix like `0.7`): its place cannot be told, so it is never
+ * read as "below" (critical rules §7).
+ */
+export type BrPinOrder =
+  | {kind: 'above'}
+  | {kind: 'below'}
+  | {kind: 'same'}
+  | {kind: 'unordered'; reason: string};
+
+/** `0.7.6` or `v0.7.6` → its numbers; null for anything else. */
+function parsePinVersion(text: string): BrSemver | null {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(text.trim());
+  const [, major, minor, patch] = match ?? [];
+  if (major == null || minor == null || patch == null) return null;
+  return {major: Number(major), minor: Number(minor), patch: Number(patch)};
+}
+
+/** Order `repoPin` against `sdkPin`. Pure, shared by beads-setup and doctor. */
+export function compareBrPin(repoPin: string, sdkPin: string): BrPinOrder {
+  const repo = parsePinVersion(repoPin);
+  const sdk = parsePinVersion(sdkPin);
+  if (repo == null || sdk == null) {
+    const which =
+      repo == null ? `this repo's "${repoPin}"` : `the SDK's "${sdkPin}"`;
+    return {
+      kind: 'unordered',
+      reason: `${which} is not a plain X.Y.Z version, so it cannot be ordered against the other`,
+    };
+  }
+  for (const part of ['major', 'minor', 'patch'] as const) {
+    if (repo[part] > sdk[part]) return {kind: 'above'};
+    if (repo[part] < sdk[part]) return {kind: 'below'};
+  }
+  return {kind: 'same'};
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +157,16 @@ export type MiseTomlPinOutcome =
   | {content: string; kind: 'added'}
   | {content: string; from: string; kind: 'updated'}
   | {kind: 'already-pinned'}
+  /**
+   * The repo pins a br NEWER than the SDK's: kept as it is, never pulled down
+   * (home-base-dj5m9.1.3). `pinned` is the version the repo keeps running.
+   */
+  | {kind: 'kept-higher'; pinned: string}
+  /**
+   * The repo's pin cannot be ordered against the SDK's (`latest`, `0.7`): kept,
+   * because it may be the newer one, and rewriting it could pull it down.
+   */
+  | {kind: 'kept-unordered'; pinned: string; reason: string}
   | {kind: 'unrewritable'; reason: string};
 
 /**
@@ -131,6 +190,13 @@ export function applyBeadsMiseToolPin(
     }
     const from = match[2] ?? '';
     if (from === version) return {kind: 'already-pinned'};
+    // Only a pin BELOW the SDK's is rewritten (home-base-dj5m9.1.3).
+    const order = compareBrPin(from, version);
+    if (order.kind === 'above') return {kind: 'kept-higher', pinned: from};
+    if (order.kind === 'same') return {kind: 'already-pinned'};
+    if (order.kind === 'unordered') {
+      return {kind: 'kept-unordered', pinned: from, reason: order.reason};
+    }
 
     const updated = content.replace(BEADS_MISE_ENTRY_VERSION, `$1${version}$3`);
     if (updated === content) {
@@ -158,14 +224,19 @@ export function applyBeadsMiseToolPin(
   };
 }
 
-function stepMiseToml(projectRoot: string, version: string): boolean {
+/**
+ * Pin beads_rust in mise.toml. Returns the br version this repo will run — the
+ * SDK's, or the repo's own when that is newer or cannot be ordered
+ * (home-base-dj5m9.1.3) — or null when the step failed.
+ */
+function stepMiseToml(projectRoot: string, version: string): string | null {
   const miseToml = resolve(projectRoot, 'mise.toml');
 
   if (!existsSync(miseToml)) {
     const entry = `${BEADS_MISE_TOOL_KEY} = { version = "${version}", exe = "br" }`;
     writeFileSync(miseToml, `[tools]\n${entry}\n`);
     success(`Created mise.toml with beads_rust ${version}`);
-    return true;
+    return version;
   }
 
   const content = readFileSync(miseToml, 'utf-8');
@@ -174,22 +245,32 @@ function stepMiseToml(projectRoot: string, version: string): boolean {
   switch (outcome.kind) {
     case 'already-pinned':
       success(`mise.toml already pins beads_rust ${version}`);
-      return true;
+      return version;
     case 'updated':
       writeFileSync(miseToml, outcome.content);
       success(
         `Updated mise.toml beads_rust version ${outcome.from} → ${version}`,
       );
-      return true;
+      return version;
     case 'added':
       writeFileSync(miseToml, outcome.content);
       success(
         `Added beads_rust ${version} to mise.toml (it had no ${BEADS_MISE_TOOL_KEY} entry)`,
       );
-      return true;
+      return version;
+    case 'kept-higher':
+      success(
+        `mise.toml pins beads_rust ${outcome.pinned}, newer than the SDK's ${version}: kept. beads-setup never pulls a pin down.`,
+      );
+      return outcome.pinned;
+    case 'kept-unordered':
+      warn(
+        `mise.toml pins beads_rust "${outcome.pinned}": kept, because ${outcome.reason}, and it may be newer than the SDK's ${version}. beads-setup never pulls a pin down.`,
+      );
+      return outcome.pinned;
     case 'unrewritable':
       fail(outcome.reason);
-      return false;
+      return null;
   }
 }
 
@@ -215,7 +296,15 @@ function stepInstallBr(projectRoot: string, version: string): boolean {
     }
   }
 
-  // Fallback to direct install
+  // Fallback to direct install — only of a version that names one release. A
+  // kept `latest` or `0.7` cannot be downloaded as asked, and guessing one could
+  // install a br older than the repo runs (home-base-dj5m9.1.3).
+  if (parsePinVersion(version) == null) {
+    fail(
+      `mise install failed or br is not on PATH, and mise.toml pins beads_rust "${version}", which names no single release to download. Install it with mise by hand.`,
+    );
+    return false;
+  }
   log('mise install failed or br not on PATH — trying direct install...');
   const versionTag = version.startsWith('v') ? version : `v${version}`;
   const curlResult = exec(
@@ -273,8 +362,103 @@ export type BeadsWorkspaceState =
    * concern, never an init concern — the configuration must not be touched.
    */
   | {artifact: string; kind: 'tracked-not-hydrated'}
+  /**
+   * `.beads/beads.db` exists and `br list` FAILED on it (home-base-dj5m9.1.3).
+   *
+   * NOT `legacy`, and never migrated: a failure does not say what the database
+   * is. br 0.7.6 exits 6 (SYNC_CONFLICT) on a live 0.1.37 database that still
+   * holds WAL frames, and says "do not delete or replace the WAL or rebuild this
+   * database from JSONL" (measured 2026-10-26) — which is what moving `.beads/`
+   * aside, `br init` and the JSONL import would have done. No `br list` failure
+   * is positively known to mean "legacy", so every one stops the run.
+   * `exitCode` is null when br did not exit on its own (not found, killed).
+   */
+  | {detail: string; exitCode: number | null; kind: 'unreadable'}
   /** `.beads/` exists but is not a usable beads_rust workspace. */
   | {kind: 'legacy'; reason: string};
+
+/** br's exit code for SYNC_CONFLICT (br 0.7.6: the DB would not be opened). */
+export const BR_EXIT_SYNC_CONFLICT = 6;
+
+/** What `br list` said in a checkout: ok, or how it failed. */
+export type BrListProbe =
+  | {detail: string; exitCode: number | null; ok: false}
+  | {ok: true};
+
+/**
+ * `br list --json` in `cwd`, keeping what a failure said. br writes a `--json`
+ * call's error body to STDOUT (measured on 0.1.37 and 0.7.6), so the error code
+ * is read from there first, then stderr's first line. Shared by beads-setup's
+ * workspace probe and doctor's BR_DB.
+ *
+ * `autoImport: false` adds `--no-auto-import`, so the probe cannot import a
+ * JSONL into the database it is only meant to read. beads-setup keeps br's
+ * default, as it always ran.
+ *
+ * Spawned with the live environment (`brSpawnEnv`): Bun's spawnSync without
+ * `env` uses a snapshot taken at startup.
+ */
+export function probeBrList(
+  cwd: string,
+  options: {autoImport: boolean},
+): BrListProbe {
+  const args = options.autoImport
+    ? ['list', '--json']
+    : ['list', '--json', '--no-auto-import'];
+  const proc = spawnSync('br', args, {
+    cwd,
+    encoding: 'utf-8',
+    env: brSpawnEnv(undefined),
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: 60_000,
+  });
+  if (proc.error == null && proc.status === 0) return {ok: true};
+  const how =
+    proc.error != null
+      ? `br could not run (${proc.error.message})`
+      : proc.status != null
+        ? `br list exited ${proc.status}`
+        : `br list was killed (${proc.signal ?? 'unknown signal'})`;
+  let code: string | null = null;
+  try {
+    const body = JSON.parse(proc.stdout ?? '') as {
+      error?: {code?: unknown; message?: unknown};
+    };
+    const said = [body.error?.code, body.error?.message]
+      .filter((part): part is string => typeof part === 'string')
+      .join(': ');
+    code = said === '' ? null : said;
+  } catch {
+    code = null;
+  }
+  const stderrLine = (proc.stderr ?? '').trim().split('\n')[0] ?? '';
+  const said = code ?? (stderrLine === '' ? null : stderrLine);
+  return {
+    detail: said == null ? how : `${how}: ${said}`,
+    exitCode: proc.error != null ? null : proc.status,
+    ok: false,
+  };
+}
+
+/**
+ * Why beads-setup stops on an `unreadable` workspace, naming what br said.
+ * Exported so the message is assertable without running the installer.
+ */
+export function unreadableBeadsDbReason(
+  projectRoot: string,
+  state: {detail: string; exitCode: number | null},
+): string {
+  const db = resolve(projectRoot, '.beads', 'beads.db');
+  const syncConflict =
+    state.exitCode === BR_EXIT_SYNC_CONFLICT
+      ? " Exit 6 is SYNC_CONFLICT: this br will not open the database as it stands. One measured cause is a database last written by br 0.1.37 that still holds WAL frames, opened by br 0.7.6. br's own instruction for it: have the owning SQLite engine complete a truncating checkpoint, and do not delete or replace the WAL or rebuild the database from JSONL."
+      : '';
+  return (
+    `${db} is present, but ${state.detail}.${syncConflict} ` +
+    'beads-setup cannot tell a legacy workspace from a live one this br failed to open, so it refuses: ' +
+    'nothing in .beads/ was moved, deleted or re-initialised. Find out why br fails (`br doctor`) before re-running.'
+  );
+}
 
 /**
  * The `legacy` reason that means "this is a DELIBERATE Dolt (`bd`) workspace",
@@ -307,11 +491,12 @@ export function detectBeadsWorkspace(projectRoot: string): BeadsWorkspaceState {
   }
 
   if (existsSync(resolve(beadsDir, 'beads.db'))) {
-    const check = exec('br list --json', projectRoot);
-    if (check.exitCode === 0) return {kind: 'initialized'};
+    const check = probeBrList(projectRoot, {autoImport: true});
+    if (check.ok) return {kind: 'initialized'};
     return {
-      kind: 'legacy',
-      reason: 'beads.db present but `br list` failed',
+      detail: check.detail,
+      exitCode: check.exitCode,
+      kind: 'unreadable',
     };
   }
 
@@ -336,6 +521,19 @@ export function detectBeadsWorkspace(projectRoot: string): BeadsWorkspaceState {
  */
 export function beadsSetupRefusal(projectRoot: string): string | null {
   const workspace = detectBeadsWorkspace(projectRoot);
+  // br itself refusing the database (exit 6, SYNC_CONFLICT) stops the run here,
+  // before base-setup or the mise pin write anything (home-base-dj5m9.1.3).
+  // Every other `br list` failure is left to step 3, which checks again after
+  // step 2 has installed the pinned br: before that, "br could not run" is the
+  // normal state of a machine that has not installed the pin yet (mise's shim
+  // fails until `mise install`), and refusing here would stop the run that
+  // installs it.
+  if (
+    workspace.kind === 'unreadable' &&
+    workspace.exitCode === BR_EXIT_SYNC_CONFLICT
+  ) {
+    return unreadableBeadsDbReason(projectRoot, workspace);
+  }
   if (workspace.kind !== 'legacy' || workspace.reason !== DOLT_BACKEND_REASON) {
     return null;
   }
@@ -458,6 +656,35 @@ export function mergeBeadsSyncConfig(original: string): string {
   );
 }
 
+/**
+ * The `.beads/.gitignore` lines br 0.7.6 needs that a workspace an older br
+ * made does not have (home-base-dj5m9.1.5, item 5).
+ *
+ * `.beads/.gitignore` is written once, by the `br init` that made the
+ * workspace, and every enrolled repo was made by br 0.1.37 or older. MEASURED
+ * 2026-10-29 (`bun run measure:br-local-files`, br 0.1.37 → 0.7.6, with
+ * home-base's own ignore files): br 0.7.6's ordinary commands leave five
+ * sidecars beside the DB that the old file does not ignore —
+ * `beads.db-fsqlite-ns-gate`, `beads.db-fsqlite-ns-use`, `beads.db-wal-cert`,
+ * `beads.db-wal-cert-head`, `beads.db.fsqlite-migration-state` — so
+ * `git add -A`, or step 9's `git add .beads/`, would commit them. And its
+ * first open of a 0.1.37 DB rebuilds it from the JSONL and keeps the old DB in
+ * `.br_recovery/`, which 0.1.37's `br init` never listed (home-base added it
+ * by hand). br 0.7.6 does not add these lines itself until a
+ * `br doctor --repair`, which appends exactly the ones missing (and leaves
+ * the file modified). Its own `br init` writes all of them. With them
+ * present, `doctor --repair` leaves the file alone.
+ */
+export const BR076_BEADS_IGNORE_ENTRIES: readonly string[] = [
+  '*.db-wal*',
+  '*-fsqlite-ns-gate',
+  '*-fsqlite-ns-use',
+  '*.vacuum-wal-cert*',
+  '*.fsqlite-migration-state',
+  '.br-wal-index-*/',
+  '.br_recovery/',
+];
+
 // ---------------------------------------------------------------------------
 // Legacy `.beads/` migration — MOVE, never delete (home-base-dchjw.20)
 // ---------------------------------------------------------------------------
@@ -478,6 +705,7 @@ const KNOWN_BEADS_ENTRIES: ReadonlySet<string> = new Set([
   '.local_version',
   '.sync.lock',
   '.write.lock',
+  'beads.base.jsonl',
   'beads.db',
   'beads.db-shm',
   'beads.db-wal',
@@ -488,10 +716,37 @@ const KNOWN_BEADS_ENTRIES: ReadonlySet<string> = new Set([
   'metadata.json',
 ]);
 
-/** Per-process lock files: `.br-db-openers-<hex>.lock`, `.br-db-write-<hex>.lock`. */
+/**
+ * Per-process lock files: `.br-db-openers-<hex>.lock`, `.br-db-write-<hex>.lock`,
+ * and from br 0.7.6 `.br-db-openers-<hex>.transition.lock` and
+ * `.br-jsonl-write-<hex>.lock` (seen in a 0.7.6 `.beads/` on 2026-10-29, with
+ * `beads.base.jsonl` above; 0.1.37's own `.beads/.gitignore` already ignores
+ * all of them, so they are not in `BR076_BEADS_IGNORE_ENTRIES`).
+ */
 const KNOWN_BEADS_ENTRY_PATTERNS: readonly RegExp[] = [
-  /^\.br-db-[a-z]+-[0-9a-f]+\.lock$/,
+  /^\.br-(?:db|jsonl)-[a-z]+-[0-9a-f]+(?:\.transition)?\.lock$/,
 ];
+
+/**
+ * A `.gitignore` glob from `BR076_BEADS_IGNORE_ENTRIES` as a whole-name
+ * pattern: `*` is any run of characters, and a trailing `/` (a directory) is
+ * dropped, since a directory listing names it without one.
+ */
+function ignoreGlobPattern(glob: string): RegExp {
+  const body = glob
+    .replace(/\/$/, '')
+    .split('*')
+    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))
+    .join('.*');
+  return new RegExp(`^${body}$`);
+}
+
+/**
+ * br 0.7.6's local files, recognised from the SAME list the `.gitignore`
+ * step writes (home-base-dj5m9.1.6 F8), so the two cannot drift.
+ */
+const BR076_ENTRY_PATTERNS: readonly RegExp[] =
+  BR076_BEADS_IGNORE_ENTRIES.map(ignoreGlobPattern);
 
 /**
  * Entries that only a Dolt (`bd`) workspace has. Checked IN ADDITION to
@@ -502,7 +757,9 @@ const DOLT_LAYOUT_ENTRIES: ReadonlySet<string> = new Set(['embeddeddolt']);
 
 function isKnownBeadsEntry(name: string): boolean {
   if (KNOWN_BEADS_ENTRIES.has(name)) return true;
-  return KNOWN_BEADS_ENTRY_PATTERNS.some((pattern) => pattern.test(name));
+  return [...KNOWN_BEADS_ENTRY_PATTERNS, ...BR076_ENTRY_PATTERNS].some(
+    (pattern) => pattern.test(name),
+  );
 }
 
 export type LegacyBeadsInspection =
@@ -695,6 +952,11 @@ function stepMigrateOldBeads(
     );
     return untouched;
   }
+  if (state.kind === 'unreadable') {
+    // home-base-dj5m9.1.3: a failing `br list` never licenses a move aside.
+    fail(unreadableBeadsDbReason(projectRoot, state));
+    return {hadOldData: false, jsonlPath: null, movedTo: null, ok: false};
+  }
 
   log(`Migrating legacy .beads/ (${state.reason})`);
 
@@ -745,6 +1007,12 @@ function stepInitBeads(
       `beads_rust workspace already committed (.beads/${state.artifact}) — not re-initializing`,
     );
     return true;
+  }
+  if (state.kind === 'unreadable') {
+    // Unreachable through runBeadsSetup (step 3 stops first); kept so no path
+    // ever runs `br init` over a database br failed to open.
+    fail(unreadableBeadsDbReason(projectRoot, state));
+    return false;
   }
 
   const derived = deriveBeadsPrefix(projectRoot);
@@ -882,6 +1150,60 @@ function stepImportIssues(
 // project auto-flushes. Installing a second, staler copy per-project was worse
 // than having none. See home-base-t6a0.14.
 
+/**
+ * The root `.gitignore` line for `br doctor --repair`'s per-run directory: br
+ * 0.7.6 writes `.doctor/` at the REPO ROOT (from a linked worktree too, into
+ * the primary checkout it acts on) and appends this line to the root
+ * `.gitignore`, creating the file when there is none. Present beforehand, br
+ * leaves the file alone (measured with measure-br-local-files, 2026-10-29).
+ */
+export const BR_DOCTOR_ROOT_IGNORE_ENTRY = '.doctor/';
+
+/**
+ * The ROOT `.gitignore` lines this step ensures: each `.beads/.gitignore`
+ * pattern anchored under `.beads/`, then `.doctor/`.
+ *
+ * In the ROOT file, not `.beads/.gitignore`, on purpose: beads-setup never
+ * changes a committed `.beads/` (home-base-o33r AC2b: a sweep leaves `.beads`
+ * with no git-visible change; dj5m9.1.3: a run whose br cannot open the DB
+ * leaves `.beads/` byte for byte). A pattern with a slash in it is anchored
+ * to the ignore file's directory, so `.beads/*.db-wal*` ignores exactly what
+ * `*.db-wal*` does inside `.beads/` (`*` never crosses a `/`). The one
+ * difference: `br doctor --repair` still appends its lines to
+ * `.beads/.gitignore`, since it reads only that file. home-base's own
+ * `.beads/.gitignore` carries them by hand for that reason.
+ */
+export const BR076_ROOT_IGNORE_ENTRIES: readonly string[] = [
+  ...BR076_BEADS_IGNORE_ENTRIES.map((pattern) => `.beads/${pattern}`),
+  BR_DOCTOR_ROOT_IGNORE_ENTRY,
+];
+
+/**
+ * Make the root `.gitignore` cover br 0.7.6's local files
+ * (`BR076_ROOT_IGNORE_ENTRIES`). Returns the entries it appended.
+ * Idempotent: a second run changes nothing.
+ */
+export function ensureBeadsGitignores(projectRoot: string): readonly string[] {
+  return ensureIgnoreEntries(
+    resolve(projectRoot, '.gitignore'),
+    BR076_ROOT_IGNORE_ENTRIES,
+    {
+      sectionHeader:
+        'br 0.7.6 local files: DB sidecars, recovery copies, br doctor runs',
+    },
+  ).added;
+}
+
+function stepBeadsGitignores(projectRoot: string): boolean {
+  const added = ensureBeadsGitignores(projectRoot);
+  success(
+    added.length > 0
+      ? `Added ${added.length} br 0.7.6 local-file pattern(s) to .gitignore`
+      : '.gitignore already covers br 0.7.6 local files',
+  );
+  return true;
+}
+
 function stepPrettierIgnore(projectRoot: string): boolean {
   const prettierIgnore = resolve(projectRoot, '.prettierignore');
   // Normalized-line matching, so an existing `.beads/` is recognised rather
@@ -1016,13 +1338,15 @@ export async function runBeadsSetup(
   setQuiet(quiet);
   success('base-setup ready');
 
-  // Step 1: mise.toml
+  // Step 1: mise.toml. It returns the br this repo runs: the SDK's pin, or the
+  // repo's own when that is newer (home-base-dj5m9.1.3: never pulled down).
   stepHeader('1. mise.toml');
-  if (!stepMiseToml(projectRoot, version)) return 1;
+  const brVersion = stepMiseToml(projectRoot, version);
+  if (brVersion == null) return 1;
 
   // Step 2: Install br
   stepHeader('2. Install br');
-  if (!stepInstallBr(projectRoot, version)) return 1;
+  if (!stepInstallBr(projectRoot, brVersion)) return 1;
 
   // Step 3: Handle existing .beads/ data
   stepHeader('3. Migration check');
@@ -1031,7 +1355,16 @@ export async function runBeadsSetup(
   // migration step and the init step (home-base-o33r).
   const state = detectBeadsWorkspace(projectRoot);
   const migration = stepMigrateOldBeads(projectRoot, state);
-  if (!migration.ok) return 1;
+  if (!migration.ok) {
+    if (state.kind === 'unreadable') {
+      // Steps 0–2 have run by now; say so, since a changed pin changes which br
+      // opens this database (home-base-dj5m9.1.3).
+      warn(
+        'Steps 0–2 already ran, and anything they changed (mise.toml among them) is in the working tree, uncommitted. Check `git status` before re-running.',
+      );
+    }
+    return 1;
+  }
 
   // Step 4: Initialize beads_rust
   stepHeader('4. Initialize beads_rust');
@@ -1083,6 +1416,11 @@ export async function runBeadsSetup(
   stepHeader('7. .claude/settings.json');
   if (!stepClaudeSettings(projectRoot)) return 1;
 
+  // Step 8: ignore files for br 0.7.6's local files (home-base-dj5m9.1.5).
+  // Before step 9, which stages `.beads/` and `.gitignore`.
+  stepHeader('8. Ignore files for br 0.7.6');
+  if (!stepBeadsGitignores(projectRoot)) return 1;
+
   // Step 9: Git commit
   if (options.noCommit !== true) {
     stepHeader('9. Git commit');
@@ -1123,7 +1461,7 @@ export async function runBeadsSetup(
 
   if (!quiet) {
     console.log(
-      `\n\x1b[32m\x1b[1mDone!\x1b[0m beads_rust ${version} is ready in ${basename(projectRoot)}.\n`,
+      `\n\x1b[32m\x1b[1mDone!\x1b[0m beads_rust ${brVersion} is ready in ${basename(projectRoot)}.\n`,
     );
 
     // Remind about agent-only tasks

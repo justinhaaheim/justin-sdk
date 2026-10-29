@@ -81,11 +81,10 @@ export const ASK_KINDS = ['approve', 'pick', 'answer', 'act'] as const;
  * most common reason a report was refused. The meaning is not in doubt, so the
  * alias is applied before validation and nothing is said about it.
  *
- * ONE entry on purpose. Every other value that has been refused (`fyi` for an
- * ask kind, `doc` or `plan` for a work-product kind, `decided` for a prior-ask
- * disposition, `judgment` for a deviation kind) means something ambiguous, so
- * it stays an error and the error names it. Adding a key here is a decision
- * for Justin, not a convenience.
+ * Every other value that has been refused (`fyi` for an ask kind, `plan` for a
+ * work-product kind, `decided` for a prior-ask disposition) means something
+ * ambiguous, so it stays an error and the error names it. Adding a key here, or
+ * to the two tables below, is a decision for Justin, not a convenience.
  */
 export const ASK_KIND_ALIASES: Readonly<Record<string, AskKind>> = {
   do: 'act',
@@ -184,6 +183,24 @@ export const WORK_PRODUCT_KINDS = [
   'research',
   'none',
 ] as const;
+
+/**
+ * `doc` for the `docs` work-product kind and `judgment` for the `judgmentCall`
+ * deviation kind: 9 of the 111 refused payloads measured on 2026-10-20. Justin
+ * approved both by default on 2026-10-26 (home-base-pp1vx.16, item 5), so
+ * `normalizeNearMisses` corrects them silently, like `do` (ASK_KIND_ALIASES).
+ */
+export const WORK_PRODUCT_KIND_ALIASES: Readonly<
+  Record<string, (typeof WORK_PRODUCT_KINDS)[number]>
+> = {
+  doc: 'docs',
+};
+
+export const DEVIATION_KIND_ALIASES: Readonly<
+  Record<string, (typeof DEVIATION_KINDS)[number]>
+> = {
+  judgment: 'judgmentCall',
+};
 
 export const MERGE_STATES = [
   'merged',
@@ -497,28 +514,46 @@ function describeReportIssue(issue: z.core.$ZodIssue, root: unknown): string {
  *
  * Silent by design: unlike a version migration, an alias substitutes a value
  * whose meaning is not in doubt, so there is nothing for the report to warn
- * about. See `ASK_KIND_ALIASES` for the one entry and why there is only one.
+ * about. The aliases are `ASK_KIND_ALIASES` (asks[].kind),
+ * `WORK_PRODUCT_KIND_ALIASES` (workProduct.kind) and `DEVIATION_KIND_ALIASES`
+ * (deviations[].kind); each entry is Justin's decision.
  */
 export function normalizeNearMisses(parsed: unknown): unknown {
   if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return parsed;
   }
   const source = parsed as Record<string, unknown>;
-  if (!Array.isArray(source.asks)) return parsed;
   let changed = false;
-  const asks = source.asks.map((ask: unknown) => {
-    if (ask == null || typeof ask !== 'object' || Array.isArray(ask)) {
-      return ask;
+  const withAlias = (
+    value: unknown,
+    aliases: Readonly<Record<string, string>>,
+  ): unknown => {
+    if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+      return value;
     }
-    const entry = ask as Record<string, unknown>;
+    const entry = value as Record<string, unknown>;
     const kind = entry.kind;
-    if (typeof kind !== 'string' || !Object.hasOwn(ASK_KIND_ALIASES, kind)) {
-      return ask;
+    if (typeof kind !== 'string' || !Object.hasOwn(aliases, kind)) {
+      return value;
     }
     changed = true;
-    return {...entry, kind: ASK_KIND_ALIASES[kind]};
-  });
-  return changed ? {...source, asks} : parsed;
+    return {...entry, kind: aliases[kind]};
+  };
+  const next: Record<string, unknown> = {...source};
+  if (Array.isArray(source.asks)) {
+    next.asks = source.asks.map((ask: unknown) =>
+      withAlias(ask, ASK_KIND_ALIASES),
+    );
+  }
+  if (Array.isArray(source.deviations)) {
+    next.deviations = source.deviations.map((deviation: unknown) =>
+      withAlias(deviation, DEVIATION_KIND_ALIASES),
+    );
+  }
+  if (Object.hasOwn(source, 'workProduct')) {
+    next.workProduct = withAlias(source.workProduct, WORK_PRODUCT_KIND_ALIASES);
+  }
+  return changed ? next : parsed;
 }
 
 /**

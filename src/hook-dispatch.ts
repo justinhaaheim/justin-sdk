@@ -84,9 +84,16 @@ type Env = Record<string, string | undefined>;
  * The 120 s elsewhere is deliberately far under 600 s: no handler here
  * legitimately runs for minutes, and a turn end held for ten minutes by one
  * hung child is worse than a named failure.
+ *
+ * PreToolUse gets the short limit too (home-base-mbnjv.5): it holds every
+ * Bash call until it answers. A guard stopped at the limit is named in the
+ * message and the call goes ahead (mergeHandlerOutputs), so a hung guard
+ * costs 25 s per call, never a stuck session.
  */
 export function handlerTimeoutMs(event: DispatchedEvent): number {
-  return event === 'UserPromptSubmit' ? 25_000 : 120_000;
+  return event === 'UserPromptSubmit' || event === 'PreToolUse'
+    ? 25_000
+    : 120_000;
 }
 
 /** The argv that runs one SDK command in a child: this bun, this SDK's cli.ts. */

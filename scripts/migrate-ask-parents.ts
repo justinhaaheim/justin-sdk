@@ -11,6 +11,14 @@
  * names the request with a `to:` label (`toLabel`). This script moves the
  * questions already filed the old way into that shape.
  *
+ * ON br 0.2.22 AND LATER the move does not free the request (measured
+ * 2026-10-26 on 0.2.22, 0.3.2, 0.4.1, 0.5.10 and 0.7.6 by
+ * scripts/measure-br-contract.ts, home-base-dj5m9.1.4): br also counts a
+ * bead's DOT-NOTATION children by id, so a moved question that is still OPEN
+ * (`<request>.N`) keeps blocking a plain close of the request, and br names it
+ * ("parent issue has 1 open dot-notation child issue(s)"). An answered
+ * (closed) one does not. br 0.1.37 closes the request after the move.
+ *
  * WHAT IT DOES, in the beads workspace of `--cwd`:
  *
  *   1. Reads the workspace's `.beads/issues.jsonl` export once and finds every
@@ -23,7 +31,8 @@
  *      the question is still the request's child — the export can lag.
  *   4. With --apply, for each question (MEASURED 2026-10-12 on the pinned br
  *      0.1.37: moving a bead straight to one of its own ancestors is refused
- *      as a cycle, so the parent is removed first):
+ *      as a cycle, so the parent is removed first; br 0.7.6 accepts the
+ *      direct move, measured 2026-10-26, and the two steps work there too):
  *        br update <q> --add-label=<to label> --parent=
  *        br update <q> --parent=<session bead>
  *      then reads it back: the session bead lists it as a child, the request

@@ -197,6 +197,11 @@ export const SELECT_COMMANDS = [
  *    `hook` mode (home-base-us739 D9) is a PreToolUse hook on ExitWorktree, so
  *    it is in the hooks' class: an upgrade notice there is noise at the moment
  *    a removal decision is being made.
+ *  - `pre-commit-ts-check` is a GIT hook step (home-base-pp1vx.1.2): it runs
+ *    on every commit, and an upgrade notice in commit output is noise.
+ *  - `worktree-retire` is the same moment (home-base-rub4v.1.1): `run` asks
+ *    Justin to type a count before it removes worktrees, and `plan` is read as
+ *    evidence by the session that proposes the list.
  *
  * `--help` needs no entry: yargs resolves help BEFORE middleware runs
  * (measured 2026-09-10), so a notice can never reach it.
@@ -205,6 +210,7 @@ export const NEVER_COMMANDS = [
   'forensics',
   'hook',
   'justin-loop handoff',
+  'pre-commit-ts-check',
   'prime',
   'repo-state',
   'session-start',
@@ -215,6 +221,7 @@ export const NEVER_COMMANDS = [
   'update',
   'usage-check',
   'usage-now',
+  'worktree-retire',
   'worktree-salvage',
 ] as const;
 
@@ -240,6 +247,7 @@ export const ALL_COMMANDS = [
   'list',
   'mac-build',
   'migrate-to-prime',
+  'pre-commit-ts-check',
   'prime',
   'remove',
   'repo-state',
@@ -258,6 +266,7 @@ export const ALL_COMMANDS = [
   'usage-check',
   'usage-now',
   'worktree-new',
+  'worktree-retire',
   'worktree-salvage',
 ] as const;
 

@@ -18,15 +18,13 @@ import type {BrIssue, BrTarget} from '../beads/br';
 import type {EnvLike} from './paths';
 import type {SessionSighting} from './session-index';
 
-import {existsSync} from 'fs';
-
 import {
   brCreate,
   brList,
   brShow,
   describeBrFailed,
-  findBeadsDb,
   findBeadsWorkspace,
+  resolveRecordedBeadsDb,
 } from '../beads/br';
 import {readGitFacts} from './facts';
 import {
@@ -78,6 +76,19 @@ export const HANDED_OFF_LABEL = 'handed-off';
  */
 export const CONTINUES_LABEL_PREFIX = 'continues:';
 export const CONTINUED_BY_LABEL_PREFIX = 'continued-by:';
+/**
+ * The session bead's label once the handoff gate has refused it (epic
+ * home-base-mbnjv D2), beside a note line "handoff refused: <reason> — …".
+ * Written by handoff-gate.ts `recordRefusal`.
+ */
+export const HANDOFF_REFUSED_LABEL = 'handoff-refused';
+
+/**
+ * Written by `thread handoff` before it opens the successor's tab
+ * (home-base-mbnjv.8 F11); the gate refuses a second handoff while present
+ * (alreadyHandedOff).
+ */
+export const SUCCESSOR_STARTED_LABEL = 'successor-started';
 
 /** br's label length limit (measured 2026-10-11, br 0.1.37). */
 export const BR_LABEL_MAX = 50;
@@ -491,11 +502,18 @@ export function resolveSession(input: {
       corruptNote,
       indexPath: read.path,
       kind: 'none',
-      reason: `${corruptNote != null ? `${corruptNote}. ` : ''}no session bead is recorded for session ${sessionId} in ${read.path}. Either componentConfig.thread.sessionBeads was off when this session's prompts were captured, the thread capture hook is not installed here, the repo has no beads workspace, or the capture child failed (its outcome is in capture.jsonl beside the index).`,
+      reason: `${corruptNote != null ? `${corruptNote}. ` : ''}no session bead is recorded for session ${sessionId} in ${read.path}. Either componentConfig.thread.sessionBeads was off when this session's prompts were captured, the thread capture hook is not installed here, the repo has no beads workspace, or the capture child failed (its outcome is in capture.jsonl beside the index). Or the bead is not filed YET: a session's bead is filed in the background after its first prompt (15.7 s measured), and /clear starts a new session id that needs a bead of its own (home-base-mbnjv.8 F22, live run 20261029T184011Z). If this session started or was cleared moments ago, end this turn and run the command again in the next one.`,
     };
   }
-  const db = findBeadsDb(known.beadsDir);
-  if (!existsSync(known.checkoutPath) || db.kind === 'none') {
+  // The recorded dir is resolved at read time (home-base-dj5m9.1.1): an old
+  // entry naming a worktree whose DB was moved aside, or whose directory is
+  // gone, reaches the primary checkout's DB when the repo's br shares it.
+  // Only an unresolvable DB is checkoutMissing. That is all the old
+  // `existsSync(checkoutPath)` check added: every entry a br before 0.4.1
+  // wrote has beadsDir === <checkoutPath>/.beads, so a DB found there proves
+  // the checkout exists, and a DB in the primary outlives its worktree.
+  const db = resolveRecordedBeadsDb(known.beadsDir);
+  if (db.kind === 'none') {
     return {
       beadId: known.beadId,
       beadsDir: known.beadsDir,

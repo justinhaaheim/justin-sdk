@@ -32,6 +32,16 @@ import {createSandbox} from './sandbox';
 const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
 const ESC = String.fromCharCode(27);
 
+/**
+ * home-base-nyh2k: each test starts a real CLI process whose fresh
+ * XDG_CONFIG_HOME has no prompts clone, so session-start runs a real
+ * `git clone` of github.com/justinhaaheim/prompts (measured with GIT_TRACE,
+ * 2026-10-29) plus a full doctor. Alone that is under 1 s; on a slow network
+ * the clone alone passed bun's 5 s default. The test is about the envelope,
+ * not the network, so it gets room for a slow clone.
+ */
+const ENVELOPE_TIMEOUT_MS = 30_000;
+
 function initRepoAt(root: string): void {
   git(root, ['init', '-q', '-b', 'main']);
   git(root, ['config', 'user.email', 'test@example.com']);
@@ -86,36 +96,44 @@ function runSessionStart(projectRoot: string): {
 }
 
 describe('session-start emits one clean envelope', () => {
-  test('stdout is exactly one JSON object, and doctor is in Justin’s half', () => {
-    const root = enrolledRepo();
-    const run = runSessionStart(root);
-    expect(run.status).toBe(0);
-    // JSON.parse IS the assertion: anything doctor leaked onto stdout would
-    // make this throw, which is precisely the failure the capture prevented
-    // and `renderDoctor` now prevents structurally.
-    const parsed = JSON.parse(run.stdout) as {
-      hookSpecificOutput?: {additionalContext?: string};
-      systemMessage?: string;
-    };
-    const message = parsed.systemMessage ?? '';
-    // Doctor's report really is in there — a check label only doctor emits.
-    expect(message).toContain('CLAUDE_MD');
-    expect(message).toContain('Ran ');
-    // …and not in Claude's context (M2).
-    expect(parsed.hookSpecificOutput?.additionalContext ?? '').not.toContain(
-      'CLAUDE_MD',
-    );
-  });
+  test(
+    'stdout is exactly one JSON object, and doctor is in Justin’s half',
+    () => {
+      const root = enrolledRepo();
+      const run = runSessionStart(root);
+      expect(run.status).toBe(0);
+      // JSON.parse IS the assertion: anything doctor leaked onto stdout would
+      // make this throw, which is precisely the failure the capture prevented
+      // and `renderDoctor` now prevents structurally.
+      const parsed = JSON.parse(run.stdout) as {
+        hookSpecificOutput?: {additionalContext?: string};
+        systemMessage?: string;
+      };
+      const message = parsed.systemMessage ?? '';
+      // Doctor's report really is in there — a check label only doctor emits.
+      expect(message).toContain('CLAUDE_MD');
+      expect(message).toContain('Ran ');
+      // …and not in Claude's context (M2).
+      expect(parsed.hookSpecificOutput?.additionalContext ?? '').not.toContain(
+        'CLAUDE_MD',
+      );
+    },
+    ENVELOPE_TIMEOUT_MS,
+  );
 
-  test('the envelope carries NO ANSI escape, in either half', () => {
-    const root = enrolledRepo();
-    const out = runSessionStart(root).stdout;
-    expect(out).not.toContain(ESC);
-    // NEGATIVE CONTROL for the assertion itself: the text it is asserting over
-    // is the text that WOULD have carried the escapes. A doctor report renders
-    // its verdict markers in colour, so their presence proves this is the real
-    // coloured report with the codes removed, not an empty string.
-    const parsed = JSON.parse(out) as {systemMessage?: string};
-    expect(parsed.systemMessage ?? '').toMatch(/[✓✗⚠]/);
-  });
+  test(
+    'the envelope carries NO ANSI escape, in either half',
+    () => {
+      const root = enrolledRepo();
+      const out = runSessionStart(root).stdout;
+      expect(out).not.toContain(ESC);
+      // NEGATIVE CONTROL for the assertion itself: the text it is asserting over
+      // is the text that WOULD have carried the escapes. A doctor report renders
+      // its verdict markers in colour, so their presence proves this is the real
+      // coloured report with the codes removed, not an empty string.
+      const parsed = JSON.parse(out) as {systemMessage?: string};
+      expect(parsed.systemMessage ?? '').toMatch(/[✓✗⚠]/);
+    },
+    ENVELOPE_TIMEOUT_MS,
+  );
 });

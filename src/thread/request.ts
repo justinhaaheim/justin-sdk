@@ -133,7 +133,22 @@ export type ThreadRequestOutcome =
     }
   | {agentId: string; kind: 'subagent'}
   | {id: string; kind: 'notFound'; searched: string[]}
-  | {kind: 'linked'; newBeadId: string; oldBeadId: string; oldTitle: string}
+  | {
+      kind: 'linked';
+      newBeadId: string;
+      oldBeadId: string;
+      oldTitle: string;
+      /** That rename failed: the link stands, exit 1, the retry is named. */
+      renameFailure: string | null;
+      /**
+       * home-base-mbnjv.12: a successor still carrying `auto-title` is titled
+       * after its titled predecessor; null when it was not (already titled,
+       * or the predecessor is auto-titled too).
+       */
+      renamedSession: {beadId: string; title: string} | null;
+      /** The workspace-name follow-up, as for a filed request. */
+      workspaceNote: string | null;
+    }
   | {kind: 'disabled'; reason: string}
   | {kind: 'failed'; reason: string}
   | {kind: 'noSession'; reason: string}
@@ -177,21 +192,26 @@ export const SESSION_BEAD_RACE_WINDOW_MS = 30_000;
  * user line in the message log is younger than SESSION_BEAD_RACE_WINDOW_MS.
  * Anything else — no log (capture never ran: the knob was off, say), an
  * unreadable log, an old first prompt — refuses at once, and says why.
+ * `noLog` marks the case where no prompt was ever captured, which is also
+ * what a session sees when it has only been sent `!` commands (they do not
+ * run the capture hook; measured 2026-10-26, home-base-nro7d.1).
  */
 function raceStillOpen(
   sessionId: string,
   env: EnvLike,
   now: Date,
-): {open: false; why: string} | {open: true} {
+): {noLog: boolean; open: false; why: string} | {open: true} {
   const log = readMessageLog(sessionId, env);
   if (log.kind === 'missing') {
     return {
+      noLog: true,
       open: false,
       why: 'this session has no message log, so the capture hook has not run for it',
     };
   }
   if (log.kind === 'failed') {
     return {
+      noLog: false,
       open: false,
       why: `its message log could not be read (${log.error})`,
     };
@@ -199,11 +219,16 @@ function raceStillOpen(
   const first = log.lines.find((line) => line.role === 'user');
   const at = first?.at == null ? Number.NaN : Date.parse(first.at);
   if (Number.isNaN(at)) {
-    return {open: false, why: 'its message log has no dated first prompt'};
+    return {
+      noLog: false,
+      open: false,
+      why: 'its message log has no dated first prompt',
+    };
   }
   const age = now.getTime() - at;
   if (age >= 0 && age < SESSION_BEAD_RACE_WINDOW_MS) return {open: true};
   return {
+    noLog: false,
     open: false,
     why: `the first prompt was logged ${Math.round(age / 1000)} s ago, so the capture hook has had its chance`,
   };
@@ -318,10 +343,15 @@ export async function fileRequest(
     const waited = race.open
       ? `waited ${(waitMs / 1000).toFixed(1)} s`
       : `not waited for: ${race.why}`;
+    // Retrying never helps a session that has only been sent `!` commands.
+    const next =
+      !race.open && race.noLog
+        ? 'send this session a message first (a `!` command is not one), then run this again; if it has had one, check componentConfig.thread.sessionBeads.'
+        : 'retry, or check componentConfig.thread.sessionBeads.';
     return {
       kind: 'noSession',
       reason: [
-        `no session bead yet — the capture hook files it a moment after the first prompt (${waited}); retry, or check componentConfig.thread.sessionBeads.`,
+        `no session bead yet — the capture hook files it a moment after the first prompt (${waited}); ${next}`,
         ...(resolution.corruptNote != null ? [resolution.corruptNote] : []),
         `(sessions index: ${resolution.indexPath}; the capture outcome is in capture.jsonl beside it)`,
       ].join(' '),
@@ -343,7 +373,42 @@ export async function fileRequest(
       newSession: {beadId: usable.bead.id, db: usable.db},
       oldBeadId: continues,
     });
-    return linked;
+    if (linked.kind === 'failed') return linked;
+    // home-base-mbnjv.12 (D8): a successor's bead is titled with its kickoff
+    // ("You are the successor of a handed-off…") and carries auto-title, so it
+    // could name nothing (workspace-name.ts D3) until its first request, and
+    // a link-only first turn never files one. It continues its predecessor's
+    // work, and `thread handoff` already started it with --name =
+    // sessionName(tag, predecessor title), so it takes that title here. A
+    // predecessor still on auto-title passes on nothing (its title is its
+    // first message); `thread title` overrides either way.
+    let renamedSession: {beadId: string; title: string} | null = null;
+    let renameFailure: string | null = null;
+    const autoTitled = usable.bead.labels.includes(AUTO_TITLE_LABEL);
+    if (autoTitled && !linked.oldTitleIsAuto) {
+      const renamed = brUpdate({db: usable.db, env}, usable.bead.id, {
+        removeLabels: [AUTO_TITLE_LABEL],
+        title: linked.oldTitle,
+      });
+      if (renamed.kind === 'failed') {
+        renameFailure = `the session bead ${usable.bead.id} was NOT titled after ${linked.oldBeadId}: ${describeBrFailed(renamed)}. Retry with ${sdkRun(`thread title "${linked.oldTitle}"`)}`;
+      } else {
+        renamedSession = {beadId: usable.bead.id, title: linked.oldTitle};
+      }
+    }
+    const titled = !autoTitled || renamedSession != null;
+    const workspaceNote = titled
+      ? await workspaceNameFollowUp({cwd, env, run: options.cmux, sessionId})
+      : null;
+    return {
+      kind: 'linked',
+      newBeadId: linked.newBeadId,
+      oldBeadId: linked.oldBeadId,
+      oldTitle: linked.oldTitle,
+      renameFailure,
+      renamedSession,
+      workspaceNote,
+    };
   }
 
   // The cwd's workspace, needed for --here and as the second place --bead
@@ -471,7 +536,8 @@ export async function fileRequest(
     }
     // F1 (home-base-vzwbj.4.9): the status change is sent only when the bead
     // is not already in_progress, and a claim br refuses (a bead it counts as
-    // blocked: br 0.1.37 counts open children) still adopts — labels only.
+    // blocked: br 0.1.37 counts open children; br 0.7.6 does not and claims
+    // it, measured 2026-10-26) still adopts — labels only.
     const labels = [REQUEST_LABEL, sidLabel(sessionId)];
     const foundDb = found.place.db;
     const labelOnly = (): ReturnType<typeof brUpdate> =>
@@ -538,11 +604,6 @@ export async function fileRequest(
       renamedSession = {beadId: usable.bead.id, title: filedTitle};
     }
   }
-  const workspaceNote =
-    renamedSession != null
-      ? await workspaceNameFollowUp({cwd, env, run: options.cmux, sessionId})
-      : null;
-
   // ---- --continues with a request: link after filing ----
   let continued: {oldBeadId: string; oldTitle: string} | null = null;
   if (continues != null) {
@@ -566,6 +627,16 @@ export async function fileRequest(
       }
     }
   }
+
+  // After the --continues link (home-base-mbnjv.3, C7): a successor's first
+  // naming sync then sees both halves of the link and takes the workspace
+  // name from its predecessor at once, instead of on its next prompt.
+  // home-base-mbnjv.12: a session that was already titled and just linked
+  // runs it too, so it takes its predecessor's workspace name now.
+  const workspaceNote =
+    renamedSession != null || continued != null
+      ? await workspaceNameFollowUp({cwd, env, run: options.cmux, sessionId})
+      : null;
 
   return {
     adoptedStatus,
@@ -636,14 +707,28 @@ export function describeRequestOutcome(outcome: ThreadRequestOutcome): {
           `thread request: ${outcome.id} was not found in ${outcome.searched.join(' or ')}.`,
         ],
       };
-    case 'linked':
-      return {
-        exitCode: 0,
-        lines: [
-          `session ${outcome.newBeadId} continues ${outcome.oldBeadId} ("${outcome.oldTitle}")`,
-          `  labels: continues:${outcome.oldBeadId} here, continued-by:${outcome.newBeadId} there`,
-        ],
-      };
+    case 'linked': {
+      const lines = [
+        `session ${outcome.newBeadId} continues ${outcome.oldBeadId} ("${outcome.oldTitle}")`,
+        `  labels: continues:${outcome.oldBeadId} here, continued-by:${outcome.newBeadId} there`,
+      ];
+      if (outcome.renamedSession != null) {
+        lines.push(
+          `session ${outcome.renamedSession.beadId} titled after it: "${outcome.renamedSession.title}"`,
+        );
+      }
+      if (outcome.workspaceNote != null) {
+        lines.push(`  ${outcome.workspaceNote}`);
+      }
+      if (outcome.renameFailure != null) {
+        lines.push(
+          `⚠️ the link above WAS made — do not run --continues again. But:`,
+          `  - ${outcome.renameFailure}`,
+        );
+        return {exitCode: 1, lines};
+      }
+      return {exitCode: 0, lines};
+    }
     case 'subagent':
       return {
         exitCode: 1,

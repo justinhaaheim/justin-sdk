@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.50.0",
+  "version": "0.51.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -11,11 +11,16 @@
     "test:watch": "bun test --watch",
     "e2e:justin-loop": "bun scripts/e2e-justin-loop.ts",
     "e2e:thread-answer-web": "bun scripts/e2e-thread-answer-web.ts",
+    "live:handoff": "bun scripts/live-handoff.ts",
+    "measure:br-contract": "bun scripts/measure-br-contract.ts",
+    "measure:br-downgrade": "bun scripts/measure-br-downgrade.ts",
     "measure:br-export-clobber": "bun scripts/measure-br-export-clobber.ts",
     "measure:br-import-only": "bun scripts/measure-br-import-only.ts",
+    "measure:br-local-files": "bun scripts/measure-br-local-files.ts",
     "measure:hook-dispatch": "bun scripts/measure-hook-dispatch.ts",
     "measure:thread-hook": "bun scripts/measure-thread-hook.ts",
     "measure:inbox": "bun scripts/measure-inbox.ts",
+    "measure:live-sessions": "bun scripts/measure-live-sessions.ts",
     "measure:session-line": "bun scripts/measure-session-line.ts",
     "measure:session-tree": "bun scripts/measure-session-tree.ts",
     "measure:status-write": "bun scripts/measure-status-write.ts",
@@ -28,6 +33,7 @@
   "exports": {
     "./check-runner": "./src/check-runner.ts",
     "./claude-usage": "./src/claude-usage.ts",
+    "./claude-usage-samples": "./src/claude-usage-samples.ts",
     "./cli-style": "./src/cli-style.ts",
     "./date": "./src/date.ts",
     "./input-drafts": "./src/thread/input-drafts.ts",
@@ -46,6 +52,7 @@
   "dependencies": {
     "ignore": "^7.0.6",
     "semver": "^7.8.5",
+    "shell-quote": "^1.12.0",
     "yargs": "^18.0.0",
     "zod": "^4.6.1"
   },

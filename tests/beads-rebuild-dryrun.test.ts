@@ -124,7 +124,7 @@ if (!hasBr) {
   );
 } else if (!hasCrossVersionBr) {
   console.warn(
-    `[beads-rebuild-dryrun] SKIPPING the cross-version test: no installed br is newer than the pinned ${brVersion(requireBr()) ?? '?'}. A rebuild by an OLDER br is a downgrade, not the migration, and would fail for a real reason.`,
+    `[beads-rebuild-dryrun] SKIPPING the cross-version test: no installed br is newer than the pinned ${brVersion(requireBr()) ?? '?'}. A rebuild by an OLDER br is a downgrade, not the migration, and would fail for a real reason. It did NOT run: this run proves nothing about rebuilding an older br's workspace with a newer br.`,
   );
 }
 

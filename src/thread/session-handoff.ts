@@ -29,15 +29,17 @@ import {
   brShow,
   brUpdate,
   describeBrFailed,
-  findBeadsDb,
   findBeadsWorkspace,
+  resolveRecordedBeadsDb,
 } from '../beads/br';
 import {markdownItems} from '../cli-style';
 import {sdkRun} from '../sdk-invocation';
 import {oneLine} from './ask-format';
 import {renderAsks} from './ask-render';
 import {absoluteWhen, statusWords, tildeText} from './part-one';
+import {notFoundButUnresolved} from './session-answer';
 import {
+  AUTO_TITLE_LABEL,
   CONTINUED_BY_LABEL_PREFIX,
   CONTINUES_LABEL_PREFIX,
   HANDED_OFF_LABEL,
@@ -60,7 +62,7 @@ import {
 // ---------------------------------------------------------------------------
 
 type BeadLocation =
-  | {db: string; kind: 'found'; title: string}
+  | {db: string; kind: 'found'; labels: readonly string[]; title: string}
   | {kind: 'failed'; reason: string}
   | {kind: 'notFound'; searched: string[]};
 
@@ -69,6 +71,8 @@ export function locateSessionBead(
   beadId: string,
   env: EnvLike,
   fallbackDbs: readonly string[],
+  /** Fallback DBs that could not be resolved, each with why (F3). */
+  unresolvedFallbacks: readonly string[] = [],
 ): BeadLocation {
   const index = readSessionIndex(env);
   if (index.kind === 'failed') {
@@ -78,13 +82,19 @@ export function locateSessionBead(
     };
   }
   const dbs: string[] = [];
+  // home-base-dj5m9.1.6 F3: a DB that could not be resolved may hold the bead,
+  // so "not found" is said only when every DB was searched.
+  const unresolved: string[] = [...unresolvedFallbacks];
   if (index.kind === 'read') {
     for (const session of index.sessions) {
       for (const sighting of session.sightings) {
         if (sighting.event !== 'created' || sighting.beadId !== beadId)
           continue;
-        const found = findBeadsDb(sighting.beadsDir);
+        const found = resolveRecordedBeadsDb(sighting.beadsDir);
         if (found.kind === 'found') dbs.push(found.db);
+        if (found.kind === 'failed') {
+          unresolved.push(`${sighting.beadsDir}: ${found.reason}`);
+        }
       }
     }
   }
@@ -98,8 +108,16 @@ export function locateSessionBead(
       };
     }
     if (shown.kind === 'ok') {
-      return {db, kind: 'found', title: shown.issue.title};
+      return {
+        db,
+        kind: 'found',
+        labels: shown.issue.labels,
+        title: shown.issue.title,
+      };
     }
+  }
+  if (unresolved.length > 0) {
+    return notFoundButUnresolved(beadId, dbs, unresolved);
   }
   return {kind: 'notFound', searched: dbs};
 }
@@ -114,6 +132,11 @@ export type LinkOutcome =
       newBeadId: string;
       oldBeadId: string;
       oldTitle: string;
+      /**
+       * home-base-mbnjv.12: the old bead still carries `auto-title` (its
+       * title is its first message), so a successor is not titled after it.
+       */
+      oldTitleIsAuto: boolean;
     }
   | {kind: 'failed'; reason: string};
 
@@ -135,7 +158,12 @@ export function linkContinuation(input: {
   const fallbacks = [newSession.db];
   const space = findBeadsWorkspace(cwd);
   if (space.kind === 'found') fallbacks.push(space.db);
-  const old = locateSessionBead(oldBeadId, env, fallbacks);
+  const old = locateSessionBead(
+    oldBeadId,
+    env,
+    fallbacks,
+    space.kind === 'failed' ? [`${cwd}: ${space.reason}`] : [],
+  );
   if (old.kind === 'failed') return old;
   if (old.kind === 'notFound') {
     return {
@@ -166,6 +194,7 @@ export function linkContinuation(input: {
     newBeadId: newSession.beadId,
     oldBeadId,
     oldTitle: old.title,
+    oldTitleIsAuto: old.labels.includes(AUTO_TITLE_LABEL),
   };
 }
 
@@ -219,7 +248,7 @@ function successorBead(
       ? read.sightings.find((sighting) => sighting.event === 'created')
       : undefined;
   if (created == null) return {kind: 'none'};
-  const found = findBeadsDb(created.beadsDir);
+  const found = resolveRecordedBeadsDb(created.beadsDir);
   if (found.kind !== 'found') {
     return {
       kind: 'failed',
@@ -286,7 +315,9 @@ export async function handoffBlock(input: {
   );
   const questions = openQuestions(model);
   const blocks = [
-    '🤝 **HANDOFF** — paste this into the new session',
+    // As a message: a `!` command does not run the capture hook, so the new
+    // session would have no bead to link (home-base-nro7d.1).
+    '🤝 **HANDOFF** — paste this into the new session as a message, not as a `!` command',
     fields,
     ...problems,
     // Two empty lines between sibling requests and questions: Claude pastes
@@ -305,7 +336,8 @@ export async function handoffBlock(input: {
         ].join('\n\n'),
     [
       '**To pick it up:**',
-      `- First, in the new session: \`${sdkRun(`thread request --continues ${input.sessionBeadId}`)}\``,
+      // Justin's wording (2026-10-26): addressed to the Claude reading it.
+      `- Run \`${sdkRun(`thread request --continues ${input.sessionBeadId}`)}\` to receive the handoff from a previous session.`,
       `- To read the old session: \`claude --resume ${input.sessionId}\` or \`${sdkRun(`thread show ${input.sessionBeadId}`)}\``,
     ].join('\n'),
   ];
@@ -431,11 +463,8 @@ export function describeHandoffOutcome(outcome: HandoffOutcome): {
   return {exitCode: 0, lines};
 }
 
-export async function runThreadHandoff(
-  options: ThreadHandoffOptions,
-): Promise<number> {
-  const {exitCode, lines} = describeHandoffOutcome(await handOff(options));
-  const write = exitCode === 0 ? console.log : console.error;
-  for (const line of lines) write(line);
-  return exitCode;
-}
+// The CLI reaches handOff() through handoff-successor.ts's
+// runThreadHandoffCommand (home-base-mbnjv.2), which, with
+// componentConfig.thread.handoff.successor off, prints
+// describeHandoffOutcome(await handOff(options)) exactly as this file's
+// runThreadHandoff did.

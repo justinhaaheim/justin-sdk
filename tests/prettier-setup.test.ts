@@ -11,7 +11,8 @@ import {existsSync, readFileSync} from 'fs';
 import {join} from 'path';
 
 import {PINNED} from '../src/pinned-versions';
-import {runPrettierSetup} from '../src/prettier-setup';
+import {runPrettierSetup as runPrettierSetupReal} from '../src/prettier-setup';
+import {sdkRemoteWithOwnTag} from './git-fixtures';
 import {createProjectSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -19,6 +20,21 @@ const sandboxes: Sandbox[] = [];
 function track(sandbox: Sandbox): Sandbox {
   sandboxes.push(sandbox);
   return sandbox;
+}
+
+/**
+ * home-base-nyh2k: every run verifies the SDK pin against a LOCAL bare remote
+ * holding this SDK's tag (sdkRemoteWithOwnTag), never github. With the default
+ * remote each test made a real `git ls-remote` to github, killed at 5 s, the
+ * same as bun's default test timeout, so a slow network failed the suite.
+ */
+function runPrettierSetup(
+  options: Parameters<typeof runPrettierSetupReal>[0] = {},
+): Promise<number> {
+  return runPrettierSetupReal({
+    sdkRepoUrl: sdkRemoteWithOwnTag(track),
+    ...options,
+  });
 }
 
 afterEach(() => {

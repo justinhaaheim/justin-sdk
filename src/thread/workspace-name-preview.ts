@@ -32,6 +32,7 @@ import {readCmuxTree, readWindowWorkspaces} from './cmux';
 import {AUTO_TITLE_LABEL} from './session-bead';
 import {sessionDisplayName} from './session-name';
 import {
+  confirmedPredecessor,
   decideWorkspaceName,
   liveNamer,
   newestRecordNamed,
@@ -115,6 +116,7 @@ function verdictFor(
   namer: PreviewSession,
   records: Parameters<typeof decideWorkspaceName>[0]['records'],
   surfaceIdsHere: readonly string[],
+  handedOffFrom: string | null = null,
 ): PreviewVerdict {
   if (namer.repo == null) {
     return {
@@ -125,7 +127,7 @@ function verdictFor(
   const decision = decideWorkspaceName({
     current,
     records,
-    self: {beadId: namer.beadId, surfaceIdsHere},
+    self: {beadId: namer.beadId, handedOffFrom, surfaceIdsHere},
     toolPart: sessionDisplayName(namer.repoTag, namer.title),
   });
   if (decision.kind === 'rename') {
@@ -139,7 +141,10 @@ function verdictFor(
   if (decision.kind === 'record') {
     return {
       kind: 'unchanged',
-      why: `${RULE_WORDS.matchesToolPart}; a sync records it as the tool’s`,
+      why:
+        decision.rule === 'handedOff'
+          ? `${RULE_WORDS.handedOff}; a sync records it as ${namer.beadId}’s`
+          : `${RULE_WORDS.matchesToolPart}; a sync records it as the tool’s`,
     };
   }
   return {kind: 'unchanged', why: unchangedWords(decision)};
@@ -220,8 +225,23 @@ export async function previewWorkspaceNames(input: {
         ownerId == null
           ? null
           : (eligible.find((session) => session.beadId === ownerId) ?? null);
-      const namer = owner ?? newest;
-      const keptBy = owner != null && owner !== newest ? owner.beadId : null;
+      // home-base-mbnjv.3 (D8, C7): an owner that handed off to a session
+      // here (both halves of the link) yields the name to it, as the sync does.
+      const heir =
+        owner == null
+          ? null
+          : (eligible.find(
+              (session) =>
+                confirmedPredecessor({
+                  ownerBeadId: owner.beadId,
+                  ownerLabels: () => ({kind: 'found', labels: owner.labels}),
+                  selfBeadId: session.beadId,
+                  selfLabels: session.labels,
+                }).kind === 'confirmed',
+            ) ?? null);
+      const namer = heir ?? owner ?? newest;
+      const keptBy =
+        heir == null && owner != null && owner !== newest ? owner.beadId : null;
       let verdict: PreviewVerdict =
         namer == null
           ? {
@@ -231,7 +251,13 @@ export async function previewWorkspaceNames(input: {
                   ? 'no session here has a real title yet'
                   : 'no session bead’s surface is in this workspace',
             }
-          : verdictFor(current, namer, spaceRecords, workspace.surfaceIds);
+          : verdictFor(
+              current,
+              namer,
+              spaceRecords,
+              workspace.surfaceIds,
+              heir == null ? null : (owner?.beadId ?? null),
+            );
       if (keptBy != null && verdict.kind === 'unchanged') {
         verdict = {
           kind: 'unchanged',
