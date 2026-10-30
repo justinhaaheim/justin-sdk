@@ -493,6 +493,9 @@ export function scanShell(raw: string): ShellScan {
 // Simple commands
 // ---------------------------------------------------------------------------
 
+/** The type of one shell-quote token, for callers of simpleCommands. */
+export type ShellToken = parse.ParseEntry;
+
 /** Operators that redirect: the word after one is a file, not an argument. */
 const REDIRECT_OPS = new Set([
   '<<<',
@@ -869,10 +872,17 @@ export function claudeVerdict(words: readonly string[]): GuardVerdict {
  * path `./node_modules/.bin/justin-sdk` that SDK_HANDOFF_CALL spells, a bunx
  * spec) or is a cli.ts / cli-main.ts path.
  */
-export function threadCommandIn(words: readonly string[]): string | null {
+export function threadCommandIn(
+  words: readonly string[],
+  /**
+   * The subcommands to look for. Default: the ones a subagent may not run.
+   * The quota brake passes its allow-list (quota-brake.ts).
+   */
+  subcommands: ReadonlySet<string> = SUBAGENT_DENIED_THREAD_COMMANDS,
+): string | null {
   for (let i = 0; i + 1 < words.length; i++) {
     const sub = words[i + 1] ?? '';
-    if (words[i] !== 'thread' || !SUBAGENT_DENIED_THREAD_COMMANDS.has(sub)) {
+    if (words[i] !== 'thread' || !subcommands.has(sub)) {
       continue;
     }
     const sdk = words

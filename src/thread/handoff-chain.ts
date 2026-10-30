@@ -42,7 +42,12 @@ import {locateSessionBead} from './session-handoff';
 /** One session bead as the walk needs it. */
 export type ChainBeadRead =
   | {kind: 'failed'; reason: string}
-  | {kind: 'found'; labels: readonly string[]}
+  | {
+      kind: 'found';
+      labels: readonly string[];
+      /** The bead's title, when the reader has it (`thread quota` shows it). */
+      title?: string;
+    }
   | {kind: 'notFound'; reason: string};
 
 /** The two readers the walk uses; injected so tests need no real state. */
@@ -269,7 +274,11 @@ export function realChainReaders(input: {
       if (shown.kind === 'notFound') {
         return {kind: 'notFound', reason: `not found in ${located.db}`};
       }
-      return {kind: 'found', labels: shown.issue.labels};
+      return {
+        kind: 'found',
+        labels: shown.issue.labels,
+        title: shown.issue.title,
+      };
     },
   };
 }

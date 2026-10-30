@@ -44,9 +44,12 @@ import {ARCHIVED_PREFIX, ASK_LABEL, DONE_PREFIX} from './ask-format';
 import {
   AUTO_TITLE_LABEL,
   CONTINUED_BY_LABEL_PREFIX,
+  CONTINUES_LABEL_PREFIX,
   HANDED_OFF_LABEL,
+  labelValue,
   REQUEST_LABEL,
   STAGE_LABEL_PREFIX,
+  titleSetAt,
 } from './session-bead';
 import {unmatchedCommitEvidence} from './session-commits';
 import {
@@ -422,6 +425,24 @@ export type MarkItem =
       kind: 'allRequestsClosed';
     }
   | {kind: 'autoTitle'; sessionBeadId: string; title: string}
+  /**
+   * home-base-ys9t7.9.1 (componentConfig.thread.titleSummary on; it replaces
+   * autoTitle then): the session title no longer covers the conversation.
+   * `why`: still the first prompt's line (`autoTitle`); requests filed after
+   * the title was last set (`filedSince`, listed in `since`); or two or more
+   * requests and no record of when the title was set (`unrecorded`).
+   * `continues`: the predecessor this session continues (its `continues:`
+   * label), whose summary it extends rather than replaces.
+   */
+  | {
+      continues: string | null;
+      kind: 'titleSummary';
+      requestCount: number;
+      sessionBeadId: string;
+      since: TreeIssue[];
+      title: string;
+      why: 'autoTitle' | 'filedSince' | 'unrecorded';
+    }
   | {
       commits: number;
       kind: 'noRequest';
@@ -546,6 +567,56 @@ function isOldShapeQuestion(node: RequestNode, question: TreeIssue): boolean {
 }
 
 /**
+ * home-base-ys9t7.9.1: whether the session title still covers everything this
+ * session asked for. Exact when the bead carries `title-set:` (every request
+ * filed after it is listed); without one, two or more requests cannot be
+ * shown to be covered, so it asks (the cautious side, critical rule 7, and one
+ * `thread title` records the time and settles it). A request whose created_at
+ * cannot be read is said as unchecked, never counted as covered.
+ */
+function titleSummaryItems(
+  session: TreeIssue,
+  beads: SessionModel['beads'],
+  hasWork: boolean | null,
+): MarkItem[] {
+  const base = {
+    continues: labelValue(session.labels, CONTINUES_LABEL_PREFIX),
+    kind: 'titleSummary' as const,
+    requestCount: beads.requests.length,
+    sessionBeadId: session.id,
+    title: session.title,
+  };
+  if (session.labels.includes(AUTO_TITLE_LABEL)) {
+    return hasWork === false ? [] : [{...base, since: [], why: 'autoTitle'}];
+  }
+  const requests = beads.requests.map((node) => node.request);
+  const set = titleSetAt(session.labels);
+  if (set.kind !== 'set') {
+    if (requests.length < 2) return [];
+    return [{...base, since: [], why: 'unrecorded'}];
+  }
+  const since: TreeIssue[] = [];
+  const unreadable: TreeIssue[] = [];
+  for (const request of requests) {
+    const at = parseInstant(request.createdAt);
+    if (at == null) unreadable.push(request);
+    else if (at > set.at) since.push(request);
+  }
+  const items: MarkItem[] = [];
+  if (since.length > 0) {
+    items.push({...base, since: since.sort(byCreatedAt), why: 'filedSince'});
+  }
+  if (unreadable.length > 0) {
+    items.push({
+      kind: 'unchecked',
+      reason: `the created_at of ${unreadable.map((request) => request.id).join(', ')} cannot be read`,
+      what: 'whether the session title covers every request',
+    });
+  }
+  return items;
+}
+
+/**
  * The conditions `thread status` cannot derive (design item 4): a request
  * whose children are all closed while it is open; commits or uncommitted edits
  * with no request filed; a title still carrying `auto-title`. Plus, under rule
@@ -577,6 +648,7 @@ export function whatToMark(
   model: SessionModel,
   status: SessionStatus,
   created: Measured<CreatedBeads>,
+  options: {titleSummary?: boolean} = {},
 ): MarkItem[] {
   const items: MarkItem[] = [];
   const {beads, git} = model;
@@ -709,6 +781,8 @@ export function whatToMark(
         'the session bead was not found',
       what: "the session's title",
     });
+  } else if (options.titleSummary === true) {
+    items.push(...titleSummaryItems(session, beads, hasWork));
   } else if (session.labels.includes(AUTO_TITLE_LABEL) && hasWork !== false) {
     items.push({
       kind: 'autoTitle',

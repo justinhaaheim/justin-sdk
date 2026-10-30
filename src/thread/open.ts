@@ -103,6 +103,7 @@ import {liveSocketPath, socketSettingsJson, zshWord} from './respawn';
 import {sectionInfo, selectWorkspaceCommand} from './session-card';
 import {readInbox, rowCheckout} from './session-inbox';
 import {sessionDisplayName} from './session-name';
+import {recordSdkWorkspaceName} from './workspace-name';
 
 /** D-CUTOFF. */
 export const OPEN_DEFAULT_DAYS = 7;
@@ -1086,6 +1087,7 @@ async function applyWindow(
   save: () => boolean,
   beforeOpen: (session: PlannedSession) => Promise<'open' | 'skip' | 'stop'>,
   moveStep: MoveStep,
+  nameRecordEnv: EnvLike,
 ): Promise<boolean> {
   const opened = await run(['new-window']);
   const windowId = opened.kind === 'ok' ? parseOk(opened.stdout) : null;
@@ -1180,6 +1182,22 @@ async function applyWindow(
       );
     } else {
       known.add(workspaceId.toUpperCase());
+      // home-base-ys9t7.9.1 B3: the name is the tool's. A record that cannot
+      // be written is said; the workspace stays open.
+      const recorded = recordSdkWorkspaceName({
+        beadId: session.sessionBeadId,
+        env: nameRecordEnv,
+        name: session.name,
+        repo: session.repo,
+        sessionId: session.sessionId,
+        setBy: 'open',
+        workspaceId,
+      });
+      if (recorded.kind === 'failed') {
+        failures.push(
+          `"${session.name}" opened, but its name was NOT recorded as the tool's, so a later sync may keep it as if Justin had typed it: ${recorded.error}`,
+        );
+      }
     }
     window.workspaces.push({
       sessionId: session.sessionId,
@@ -2381,6 +2399,7 @@ export async function openSessions(
           nowIso: () => new Date().toISOString(),
           readTree,
         },
+        env,
       );
       if (!ok) break;
       // yukaf.22 item 5: colour what this built window holds of ours.

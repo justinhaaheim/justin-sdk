@@ -53,6 +53,7 @@ import {
 } from 'fs';
 import {fileURLToPath} from 'url';
 
+import {brUpdate, describeBrFailed} from '../beads/br';
 import {silencedChildEnv} from '../health-notices';
 import {emitHookOutput} from '../hook-output';
 import {
@@ -83,7 +84,11 @@ import {
   syncMessageLogFromTurns,
 } from './message-log';
 import {probeErrorMessage} from './paths';
-import {ensureSessionBead, type SessionBeadOutcome} from './session-bead';
+import {
+  cmuxLabelRefresh,
+  ensureSessionBead,
+  type SessionBeadOutcome,
+} from './session-bead';
 import {sessionContextLine} from './session-line';
 import {
   type StatusFileOutcome,
@@ -1026,6 +1031,11 @@ function markDirty(sessionId: string, env: EnvLike): void {
 export type CaptureApplyOutcome =
   | {kind: 'deferred'}
   | {
+      /**
+       * What refreshing the bead's cmux labels did (home-base-ys9t7.9.1 B4);
+       * absent or null when the workspace sync did not run.
+       */
+      cmuxLabels?: CmuxLabelsOutcome | null;
       commit: CommitOutcome | null;
       kind: 'ran';
       last: ApplyPassOutcome;
@@ -1054,6 +1064,55 @@ export type CaptureApplyOutcome =
        */
       workspaceName: WorkspaceSyncOutcome | null;
     };
+
+/**
+ * home-base-ys9t7.9.1 B4: what refreshing the session bead's cmux labels did.
+ * `updated` carries the labels as they are now.
+ */
+export type CmuxLabelsOutcome =
+  | {detail: string; kind: 'failed'}
+  | {kind: 'current'}
+  | {detail: string; kind: 'updated'; labels: string[]};
+
+/** The B4 refresh, from the capture run's one session lookup. Never throws. */
+export function refreshCmuxLabels(
+  lookup: SessionLookup,
+  env: EnvLike,
+): CmuxLabelsOutcome {
+  if (lookup.kind === 'failed') {
+    return {detail: `no session bead read: ${lookup.reason}`, kind: 'failed'};
+  }
+  const edit = cmuxLabelRefresh(lookup.session.labels, env);
+  if (edit == null) return {kind: 'current'};
+  if (lookup.db == null) {
+    return {
+      detail: 'the beads DB of the session bead is not known',
+      kind: 'failed',
+    };
+  }
+  try {
+    const written = brUpdate({db: lookup.db, env}, lookup.session.beadId, edit);
+    if (written.kind === 'failed') {
+      return {
+        detail: `br update failed: ${describeBrFailed(written)}`,
+        kind: 'failed',
+      };
+    }
+  } catch (error) {
+    return {detail: `threw: ${probeErrorMessage(error)}`, kind: 'failed'};
+  }
+  const labels = [
+    ...lookup.session.labels.filter(
+      (label) => !edit.removeLabels.includes(label),
+    ),
+    ...edit.addLabels,
+  ];
+  return {
+    detail: `cmux labels now ${edit.addLabels.join(', ')} (were ${edit.removeLabels.length > 0 ? edit.removeLabels.join(', ') : 'none'})`,
+    kind: 'updated',
+    labels,
+  };
+}
 
 /**
  * File the session bead from the log's first user line. A thrown ensure is a
@@ -1119,6 +1178,7 @@ export async function applyCapture(
   let sessionBead: SessionBeadOutcome | null = null;
   let workspaceName: WorkspaceSyncOutcome | null = null;
   let tabTitle: TabTitleOutcome | null = null;
+  let cmuxLabels: CmuxLabelsOutcome | null = null;
   try {
     // Under the lock, before the first pass: the pass then applies the seeded
     // log's tail. A thrown seed is a failed one, never a lost capture.
@@ -1154,6 +1214,15 @@ export async function applyCapture(
           lookup = {
             kind: 'failed',
             reason: `the session lookup threw: ${probeErrorMessage(error)}`,
+          };
+        }
+        // home-base-ys9t7.9.1 B4: point the bead's cmux labels at the pane
+        // this prompt came from, before the syncs read them.
+        cmuxLabels = refreshCmuxLabels(lookup, env);
+        if (cmuxLabels.kind === 'updated' && lookup.kind === 'found') {
+          lookup = {
+            ...lookup,
+            session: {...lookup.session, labels: cmuxLabels.labels},
           };
         }
         try {
@@ -1255,6 +1324,7 @@ export async function applyCapture(
     statusFile,
     tabTitle,
     workspaceName,
+    ...(cmuxLabels == null ? {} : {cmuxLabels}),
   };
 }
 
@@ -1319,6 +1389,13 @@ export function captureRunRecord(
   }
   if (outcome.statusFile != null) {
     record.statusFile = outcome.statusFile;
+  }
+  // home-base-ys9t7.9.1 B4: only a change or a failure is worth a field.
+  if (outcome.cmuxLabels != null && outcome.cmuxLabels.kind !== 'current') {
+    record.cmuxLabels = {
+      detail: outcome.cmuxLabels.detail,
+      kind: outcome.cmuxLabels.kind,
+    };
   }
   if (last.kind === 'applied') {
     record.threadId = last.threadId;

@@ -195,6 +195,20 @@ export const THREAD_GUARD_HOOK_EVENT = 'PreToolUse';
 export const THREAD_GUARD_HOOK_MATCHER = 'Bash';
 
 /**
+ * The spend quota's brake (home-base-ys9t7.5 D6): `thread brake` on
+ * PreToolUse, NO matcher (every tool). Written ONLY where
+ * componentConfig.thread.quota.mode is not off (hook-knobs.ts); with it off,
+ * install takes back the exact entry it wrote.
+ */
+const THREAD_BRAKE_SUBCOMMAND = 'thread brake';
+
+export const THREAD_BRAKE_HOOK_COMMAND = sdkRun(THREAD_BRAKE_SUBCOMMAND);
+
+export const THREAD_BRAKE_HOOK_FINGERPRINT = sdkScript(THREAD_BRAKE_SUBCOMMAND);
+
+export const THREAD_BRAKE_HOOK_EVENT = 'PreToolUse';
+
+/**
  * Register one hook command under one event in a settings object.
  *
  * Hooks are ADDITIVE in Claude Code — several may be registered for one event
@@ -263,6 +277,16 @@ export function addThreadGuardHook(settings: Record<string, unknown>): boolean {
     event: THREAD_GUARD_HOOK_EVENT,
     matcher: THREAD_GUARD_HOOK_MATCHER,
     subcommand: THREAD_GUARD_SUBCOMMAND,
+  });
+}
+
+/** Register `thread brake` on PreToolUse, every tool (home-base-ys9t7.5 D6). */
+export function addThreadBrakeHook(settings: Record<string, unknown>): boolean {
+  return addHook(settings, {
+    command: THREAD_BRAKE_HOOK_COMMAND,
+    event: THREAD_BRAKE_HOOK_EVENT,
+    matcher: null,
+    subcommand: THREAD_BRAKE_SUBCOMMAND,
   });
 }
 
@@ -395,6 +419,10 @@ export function stepThreadHooks(
   const guardOn = byKnob.enabled.some(
     (h) => h.command === THREAD_GUARD_HOOK_COMMAND,
   );
+  // The quota brake waits on componentConfig.thread.quota.mode (not off).
+  const brakeOn = byKnob.enabled.some(
+    (h) => h.command === THREAD_BRAKE_HOOK_COMMAND,
+  );
 
   // hooks.dispatch on (home-base-rtsx1.2): the UserPromptSubmit, Stop and
   // PostToolUse [Bash] dispatcher entries run the thread handlers, and their
@@ -431,6 +459,7 @@ export function stepThreadHooks(
   const addedCapture = addThreadCaptureHooks(settings);
   const addedNudge = addThreadNudgeHook(settings);
   const addedGuard = guardOn && addThreadGuardHook(settings);
+  const addedBrake = brakeOn && addThreadBrakeHook(settings);
   const knobOff = removeKnobOffEntries(settings, 'thread-hooks-setup', byKnob);
   const cleared = removeDispatchEntriesForComponent(
     settings,
@@ -443,6 +472,7 @@ export function stepThreadHooks(
     addedCapture.length > 0 ||
     addedNudge ||
     addedGuard ||
+    addedBrake ||
     knobOff.length > 0 ||
     cleared.length > 0
   ) {
@@ -468,11 +498,17 @@ export function stepThreadHooks(
     addedCapture.length === 0 &&
     !addedNudge &&
     !addedGuard &&
+    !addedBrake &&
     knobOff.length === 0 &&
     cleared.length === 0
   ) {
     success('.claude/settings.json already has every thread hook');
     return true;
+  }
+  if (addedBrake) {
+    success(
+      `Updated .claude/settings.json (${THREAD_BRAKE_HOOK_EVENT} [every tool] → thread brake; componentConfig.thread.quota.mode is not off)`,
+    );
   }
   if (addedGuard) {
     success(

@@ -189,7 +189,10 @@ export const SELECT_COMMANDS = [
  *    (`THREADS: ENABLED|DISABLED|SANDBOX DENIED`), `thread report` prints a
  *    document Claude pastes verbatim into its final message, and `usage-now`
  *    prints one number. All three run at a session's wrap-up, which is the
- *    worst possible moment to spend attention on an upgrade notice.
+ *    worst possible moment to spend attention on an upgrade notice. Every
+ *    `thread` subcommand is classified by that one word: `thread quota`
+ *    (home-base-ys9t7.5.3) is read-only, prints evidence a session reads
+ *    (and `--json` for scripts), and gets no notice either.
  *  - `forensics` is read by AGENTS, not by a person (home-base-wxa4c D-W2):
  *    conductor and investigator sessions consume its output as evidence (one
  *    `forensics repo` run is ~500 KB of it), the same class as `thread`.

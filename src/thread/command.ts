@@ -58,6 +58,26 @@ RUN IT BARE, from the repository root, where node_modules is: ${SDK_HANDOFF_CALL
 
 --dry-run (knob on) runs the gate and the pane lookup, both read only, and prints the gate's answer, the block path, the full cmux argument array and the kickoff. It writes nothing and opens nothing.`;
 
+const QUOTA_SUMMARY =
+  'Show the spend quota’s numbers for one session, read-only (request home-base-ys9t7.5, D9): the mode and each limit with the config layer that set it, the session’s group (its handoff and spawn chain) with each member’s bead, title and session, the group’s latest typed line, its unattended spend per model family in $ and percent of the week, the project’s last-24-hours spend, the week percent with its source and age, the verdict for a running session and for a handoff, and the time to each spend limit at the group’s average rate. Writes nothing, enforces nothing. Exit 0 printed (an unmeasurable piece is shown as UNKNOWN with why) · 2 no usable session id.';
+
+const QUOTA_NARRATIVE = `
+WHAT EACH PART MEANS.
+
+  Group: the sessions linked to this one by handoff labels (continues:, continued-by:) and spawn labels (spawned-by:, spawned:). Its unattended spend is every request of every member, subagents included, dated after the latest line Justin typed in any member. With no typed line, every request counts.
+
+  Project, last 24 hours: every transcript of this repo and its worktrees, requests in the last 24 hours and after Justin's latest typed line anywhere in the project.
+
+  Week percent: the all-models week from the newer of the statusline store's live.json (~/.local/state/claude-usage/live.json) and the hourly /usage samples (~/.local/share/claude-usage/samples.jsonl); each per-model week from the samples only. Older than componentConfig.thread.handoff.usage.maxSampleAgeMinutes is unknown.
+
+  Verdict: fine, OVER (with each limit crossed) or UNKNOWN (with why). The week floor applies to a handoff always, and to a running session only when Justin last typed in the group more than attendedGraceMinutes ago. The mode decides what a verdict does; this command only shows it.
+
+  Time to each spend limit: how long the group has been unattended (since its latest typed line) and when it would reach the chain limit and the project limit at its average rate since then. None when nothing was spent or the limit is already reached. The project projection ignores spend leaving the rolling 24 hours, so it is the early side.
+
+OUTPUT. A terminal gets colour and wrapping; a pipe gets neither, and NO_COLOR turns colour off. --json prints the same report as one object.
+
+COST. It runs br show once per group member and reads every member's transcripts and the project's transcripts from the last 24 hours: about a second or two.`;
+
 const RESPAWN_RETIRED_SUMMARY =
   'RETIRED (epic home-base-mbnjv C3): starting a successor is now `thread handoff` with componentConfig.thread.handoff.successor on. This command prints that and exits 2, doing nothing.';
 
@@ -833,6 +853,15 @@ export const threadCommand: CommandModule = {
         },
       )
       .command(
+        'brake',
+        'Hook (PreToolUse, every tool): the spend quota brake on a running session (home-base-ys9t7.5 D6). Reads the payload on stdin and the session’s cached quota decision (recomputed every componentConfig.thread.quota.recheckSeconds). Mode observe logs what it would deny to the quota log and allows; mode enforce denies, with exit 2 and the reason on stderr, every call but a short allow-list once the session’s group is over a limit while Justin is away. Inert where componentConfig.thread.quota.mode is off; install writes its entry only where it is not.',
+        (yy) => yy,
+        async () => {
+          const {runThreadBrakeHook} = await import('./quota-brake');
+          process.exit(await runThreadBrakeHook());
+        },
+      )
+      .command(
         'request [title..]',
         'File what Justin asked for as a REQUEST bead under this session’s bead, in the session’s own beads DB (or adopt an existing bead with --bead). The first request also names the session. Needs componentConfig.thread.sessionBeads. Exit 0 filed · 1 refused or failed · 2 usage.',
         (yy) =>
@@ -1374,6 +1403,32 @@ export const threadCommand: CommandModule = {
           process.exit(
             await runThreadAnswers({
               all: argv.all === true,
+              sessionId: argv.session ?? null,
+            }),
+          );
+        },
+      )
+      .command(
+        'quota',
+        QUOTA_SUMMARY,
+        (yy) =>
+          yy
+            .epilogue(QUOTA_NARRATIVE)
+            .option('json', {
+              default: false,
+              describe:
+                'Print the report as one JSON object (epoch ms and ISO times), for scripts',
+              type: 'boolean' as const,
+            })
+            .option('session', {
+              describe: 'Session id (default: $CLAUDE_CODE_SESSION_ID)',
+              type: 'string' as const,
+            }),
+        async (argv) => {
+          const {runThreadQuota} = await import('./quota-command');
+          process.exit(
+            await runThreadQuota({
+              json: argv.json === true,
               sessionId: argv.session ?? null,
             }),
           );

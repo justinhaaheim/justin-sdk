@@ -483,6 +483,38 @@ describe('runThreadStopCheck', () => {
     expect(run.captured.err).toBe('');
   });
 
+  test('a session the spend quota has braked is let stop (ys9t7.5.4 item 5)', () => {
+    const fixture = armedSandbox(true);
+    const state = (kind: 'braked' | 'clear'): void => {
+      const dir = join(fixture.state.path, 'quota-brake');
+      mkdirSync(dir, {recursive: true});
+      writeFileSync(
+        join(dir, `${SESSION_ID}.json`),
+        JSON.stringify({
+          computedAtMs: 0,
+          mode: 'enforce',
+          sessionId: SESSION_ID,
+          state: kind,
+          version: 1,
+        }),
+      );
+    };
+    state('braked');
+    const braked = capture(() =>
+      runThreadStopCheck({env: fixture.env, stdin: payload(fixture)}),
+    );
+    expect(braked.value.exitCode).toBe(0);
+    expect(braked.value.decision.why).toBe('quotaBraked');
+    expect(braked.captured.out).toBe('');
+    // Control: the same session, not braked, is blocked as before.
+    state('clear');
+    const clear = capture(() =>
+      runThreadStopCheck({env: fixture.env, stdin: payload(fixture)}),
+    );
+    expect(clear.value.exitCode).toBe(2);
+    expect(clear.value.decision.why).toBe('notRecorded');
+  });
+
   test('a subagent Stop is never blocked', () => {
     const fixture = armedSandbox(true);
     const run = capture(() =>

@@ -6,6 +6,9 @@
 
 import type {SpawnOutcome} from '../src/thread/capture';
 import type {CmuxCall, CmuxRunner} from '../src/thread/cmux';
+import type {SessionModel} from '../src/thread/session-model';
+import type {MarkItem, SessionStatus} from '../src/thread/session-status';
+import type {TreeIssue} from '../src/thread/session-tree';
 import type {
   WorkspaceNameRecord,
   WorkspaceSession,
@@ -22,7 +25,7 @@ import {
 } from 'fs';
 import {join} from 'path';
 
-import {runBr} from '../src/beads/br';
+import {brList, runBr} from '../src/beads/br';
 import {workspaceNamesPath} from '../src/thread/archive';
 import {
   applyCapture,
@@ -37,13 +40,18 @@ import {
   fileRequest,
   renameSession,
 } from '../src/thread/request';
-import {ensureSessionBead} from '../src/thread/session-bead';
+import {cmuxLabelRefresh, ensureSessionBead} from '../src/thread/session-bead';
 import {sessionDisplayName} from '../src/thread/session-name';
+import {markLine, TITLE_SUMMARY_EXAMPLE} from '../src/thread/session-report';
+import {whatToMark} from '../src/thread/session-status';
 import {
   appendWorkspaceName,
+  CLAUDE_PANE_GLYPHS,
   decideWorkspaceName,
   describeWorkspaceSync,
   readWorkspaceNames,
+  recordNewWorkspace,
+  respawnedNameLine,
   restoreWorkspaceNames,
   syncWorkspaceName,
 } from '../src/thread/workspace-name';
@@ -946,7 +954,7 @@ const SESSION = '5e551011-aaaa-4bbb-8ccc-0123456789ab';
  * `successor` also turns on handoff.successor, which with nameWorkspaces turns
  * on tab titles (home-base-mbnjv.3 item 5).
  */
-function world(nameWorkspaces = true, successor = false) {
+function world(nameWorkspaces = true, successor = false, titleSummary = false) {
   const sb = sandbox();
   const xdg = join(sb.path, 'xdg');
   mkdirSync(join(xdg, 'justin-sdk'), {recursive: true});
@@ -959,6 +967,7 @@ function world(nameWorkspaces = true, successor = false) {
           nameWorkspaces,
           sessionBeads: true,
           ...(successor ? {handoff: {successor: true}} : {}),
+          ...(titleSummary ? {titleSummary: true} : {}),
         },
       },
     }),
@@ -1372,5 +1381,497 @@ describe('home-base-bomy5.7.1: the short project tag', () => {
       });
       expect(lookup.session.repo).toBe('named');
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-ys9t7.9.1: the title as a summary, and naming bugs B1-B4
+// ---------------------------------------------------------------------------
+
+const OLD_PANE = '◐ Shortcuts helper app survey';
+
+/** The session bead, its requests, and a minimal model for whatToMark. */
+function titleModel(repo: string): {
+  model: SessionModel;
+  sessionBead: TreeIssue;
+} {
+  const target = {db: join(repo, '.beads', 'beads.db'), env: {}};
+  const all = brList(target, {all: true, labels: [`sid:${SESSION}`]});
+  if (all.kind !== 'ok') throw new Error('br list failed');
+  const tree = (issue: (typeof all.issues)[number]): TreeIssue => ({
+    ...issue,
+    beadsDir: join(repo, '.beads'),
+    parentIds: [],
+  });
+  const sessionIssue = all.issues.find((issue) =>
+    issue.labels.includes('session'),
+  );
+  if (sessionIssue == null) throw new Error('no session bead');
+  const sessionBead = tree(sessionIssue);
+  const requests = all.issues
+    .filter((issue) => issue.labels.includes('request'))
+    .map((issue) => ({children: [], questions: [], request: tree(issue)}));
+  const model = {
+    beads: {problems: [], questions: [], requests, session: sessionBead},
+    git: {
+      commits: {ok: false, reason: 'not read here'},
+      uncommitted: {ok: false, reason: 'not read here'},
+    },
+    log: {kind: 'missing'},
+  } as unknown as SessionModel;
+  return {model, sessionBead};
+}
+
+const WORKING: SessionStatus = {
+  helpers: 0,
+  kind: 'working',
+  lastRecordAt: '2026-10-30T00:00:00.000Z',
+};
+const NO_CREATED = {
+  ok: true as const,
+  value: {found: [], missing: [], notCreatedThen: []},
+};
+
+/** What to mark, without the git items this minimal model cannot feed. */
+function titleMarks(repo: string, titleSummary: boolean): MarkItem[] {
+  const {model} = titleModel(repo);
+  return whatToMark(model, WORKING, NO_CREATED, {titleSummary}).filter(
+    (mark) => !(mark.kind === 'unchecked' && mark.what.includes('commits')),
+  );
+}
+
+/** Wait until the clock is past the session's title-set time (whole seconds). */
+async function pastTitleSet(repo: string): Promise<void> {
+  const label = titleModel(repo).sessionBead.labels.find((entry) =>
+    entry.startsWith('title-set:'),
+  );
+  if (label == null) throw new Error('no title-set label');
+  const at = Date.parse(label.slice('title-set:'.length));
+  while (Date.now() <= at + 20) await Bun.sleep(50);
+}
+
+async function file(
+  w: {env: Record<string, string | undefined>; repo: string},
+  title: string,
+  extra: {continues?: string} = {},
+) {
+  const outcome = await fileRequest({
+    bead: null,
+    cmux: fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'})).run,
+    continues: extra.continues ?? null,
+    cwd: w.repo,
+    doneWhen: null,
+    env: w.env,
+    here: false,
+    sessionId: null,
+    title,
+  });
+  expect(outcome).toMatchObject({kind: 'filed'});
+}
+
+describe('home-base-ys9t7.9.1 item 1: the refresh prompt', () => {
+  test('(a) a request filed after the title was last set: shown, listing it', async () => {
+    needBr();
+    const w = world(true, false, true);
+    await file(w, 'Build the shortcut helper app');
+    await renameSession({
+      cmux: fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'})).run,
+      cwd: w.repo,
+      env: w.env,
+      sessionId: null,
+      title: 'Build shortcut helper app',
+    });
+    // The time is kept to the second, rounded up: the next request is filed
+    // once the clock is past it.
+    await pastTitleSet(w.repo);
+    await file(w, 'Make it installable via a link');
+    const marks = titleMarks(w.repo, true);
+    expect(marks).toHaveLength(1);
+    expect(marks[0]).toMatchObject({
+      continues: null,
+      kind: 'titleSummary',
+      title: 'Build shortcut helper app',
+      why: 'filedSince',
+    });
+    const item = marks[0] as Extract<MarkItem, {kind: 'titleSummary'}>;
+    expect(item.since.map((request) => request.title)).toEqual([
+      'Make it installable via a link',
+    ]);
+    const view = markLine(item);
+    expect(view.code).toContain('thread title');
+    expect(view.text).toContain('"Make it installable via a link"');
+    expect(view.text).toContain(TITLE_SUMMARY_EXAMPLE);
+    expect(view.text).not.toContain('extend');
+  });
+
+  test('(b) right after thread title: not shown', async () => {
+    needBr();
+    const w = world(true, false, true);
+    await file(w, 'Build the shortcut helper app');
+    await file(w, 'Make it installable via a link');
+    await renameSession({
+      cmux: fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'})).run,
+      cwd: w.repo,
+      env: w.env,
+      sessionId: null,
+      title: 'Build shortcut helper app; make installable via link',
+    });
+    const {sessionBead} = titleModel(w.repo);
+    expect(
+      sessionBead.labels.filter((label) => label.startsWith('title-set:')),
+    ).toHaveLength(1);
+    expect(titleMarks(w.repo, true)).toEqual([]);
+  });
+
+  test('(c) a single request’s auto-title with two requests and no title-set record: shown', async () => {
+    needBr();
+    // Knob off while filing: the titles are set the old way, unrecorded.
+    const w = world(true, false, false);
+    await file(w, 'Build the shortcut helper app');
+    await file(w, 'Make it installable via a link');
+    const {sessionBead} = titleModel(w.repo);
+    expect(sessionBead.title).toBe('Build the shortcut helper app');
+    expect(
+      sessionBead.labels.some((label) => label.startsWith('title-set:')),
+    ).toBe(false);
+    const marks = titleMarks(w.repo, true);
+    expect(marks).toMatchObject([
+      {kind: 'titleSummary', requestCount: 2, why: 'unrecorded'},
+    ]);
+  });
+
+  test('(d) knob off: the old autoTitle item exactly, and no title-set label', async () => {
+    needBr();
+    const w = world(true, false, false);
+    const {sessionBead: before} = titleModel(w.repo);
+    expect(titleMarks(w.repo, false)).toEqual([
+      {
+        kind: 'autoTitle',
+        sessionBeadId: before.id,
+        title: 'Build the thing',
+      },
+    ]);
+    await file(w, 'Build the shortcut helper app');
+    await file(w, 'Make it installable via a link');
+    const {sessionBead} = titleModel(w.repo);
+    expect(
+      sessionBead.labels.some((label) => label.startsWith('title-set:')),
+    ).toBe(false);
+    expect(titleMarks(w.repo, false)).toEqual([]);
+  });
+
+  test('knob on, still auto-titled: the summary item replaces autoTitle', () => {
+    needBr();
+    const w = world(true, false, true);
+    expect(titleMarks(w.repo, true)).toMatchObject([
+      {kind: 'titleSummary', why: 'autoTitle'},
+    ]);
+  });
+});
+
+describe('home-base-ys9t7.9.1 item 2: a successor extends the chain’s summary', () => {
+  test('the inherited title is recorded, the prompt says extend, and the workspace follows the refresh', async () => {
+    needBr();
+    const w = world(true, false, true);
+    // The predecessor: another session bead in the same DB, already titled.
+    const OLD_SESSION = '0ld5e551-aaaa-4bbb-8ccc-0123456789ab';
+    const old = ensureSessionBead({
+      cwd: w.repo,
+      env: {...w.env, CLAUDE_CODE_SESSION_ID: OLD_SESSION},
+      firstPrompt: {at: '2026-10-16T08:00:00.000Z', text: 'old first line'},
+      now: new Date('2026-10-16T08:00:01.000Z'),
+      sessionId: OLD_SESSION,
+    });
+    if (old.kind !== 'created') throw new Error(old.kind);
+    const titled = runBr(w.repo, [
+      'update',
+      old.beadId,
+      '--title=Build shortcut helper app',
+      '--remove-label=auto-title',
+    ]);
+    expect(titled.ok).toBe(true);
+    // The successor links (link only), inheriting the title.
+    const linked = await fileRequest({
+      bead: null,
+      cmux: fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'})).run,
+      continues: old.beadId,
+      cwd: w.repo,
+      doneWhen: null,
+      env: w.env,
+      here: false,
+      sessionId: null,
+      title: null,
+    });
+    expect(linked).toMatchObject({kind: 'linked'});
+    const inherited = titleModel(w.repo).sessionBead;
+    expect(inherited.title).toBe('Build shortcut helper app');
+    expect(
+      inherited.labels.some((label) => label.startsWith('title-set:')),
+    ).toBe(true);
+    await pastTitleSet(w.repo);
+    await file(w, 'Iterate on the inspect utility');
+    const marks = titleMarks(w.repo, true);
+    expect(marks).toMatchObject([
+      {continues: old.beadId, kind: 'titleSummary', why: 'filedSince'},
+    ]);
+    const [first] = marks;
+    if (first == null) throw new Error('no mark');
+    const text = markLine(first).text;
+    expect(text).toContain(
+      `This session continues ${old.beadId}: extend the summary it inherited rather than replace it.`,
+    );
+    expect(text).toContain('and the sessions it continues');
+
+    // The refresh, then the dry-run naming: the workspace the predecessor
+    // named (its pane gone) follows the successor's new title.
+    await renameSession({
+      cmux: fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'})).run,
+      cwd: w.repo,
+      env: w.env,
+      sessionId: null,
+      title: 'Build shortcut helper app; iterate on inspect utility',
+    });
+    expect(titleMarks(w.repo, true)).toEqual([]);
+    const state = stateEnv();
+    appendWorkspaceName(
+      record({
+        beadId: old.beadId,
+        nameSet: '[NAMED] Build shortcut helper app',
+        surfaceId: 'GONE-SURFACE',
+        toolPart: '[NAMED] Build shortcut helper app',
+      }),
+      state,
+    );
+    const lookup = lookupWorkspaceSession({
+      cwd: w.repo,
+      env: w.env,
+      session: SESSION,
+    });
+    if (lookup.kind !== 'found') throw new Error(lookup.reason);
+    const cmux = fakeCmux([
+      {
+        id: WS_A,
+        surfaces: [SURFACE],
+        title: '[NAMED] Build shortcut helper app',
+      },
+    ]);
+    const outcome = await syncWorkspaceName({
+      dryRun: true,
+      enabled: true,
+      env: state,
+      run: cmux.run,
+      session: lookup.session,
+    });
+    expect(outcome).toMatchObject({
+      kind: 'wouldRename',
+      to: '[NAMED] Build shortcut helper app; iterate on inspect utility',
+    });
+    expect(renames(cmux.calls)).toEqual([]);
+  });
+});
+
+describe('home-base-ys9t7.9.1 B1: every Claude Code pane glyph is a generated name', () => {
+  for (const glyph of CLAUDE_PANE_GLYPHS) {
+    test(`a name starting with ${glyph} lands in replacedName (rule 3)`, () => {
+      const current = `${glyph} Shortcuts helper app survey`;
+      expect(decideWorkspaceName({current, records: [], toolPart: T})).toEqual({
+        hisName: null,
+        kind: 'rename',
+        replacedName: current,
+        rule: 'generated',
+        target: T,
+      });
+    });
+  }
+
+  test('a name he typed is still his (rule 4)', () => {
+    expect(
+      decideWorkspaceName({current: 'Shortcuts', records: [], toolPart: T}),
+    ).toMatchObject({hisName: 'Shortcuts', rule: 'his'});
+  });
+});
+
+describe('home-base-ys9t7.9.1 B2: a misread "his" name is demoted', () => {
+  test('a recorded hisName starting with a glyph moves to replacedName on the next rename', () => {
+    const misread = record({
+      beadId: 'home-base-nro7d',
+      hisName: OLD_PANE,
+      nameSet: `[HOME] Picking up a handed-off session (${OLD_PANE})`,
+      toolPart: '[HOME] Picking up a handed-off session',
+    });
+    expect(
+      decideWorkspaceName({
+        current: misread.nameSet,
+        records: [misread],
+        toolPart: T,
+      }),
+    ).toEqual({
+      hisName: null,
+      kind: 'rename',
+      replacedName: OLD_PANE,
+      rule: 'tools',
+      target: T,
+    });
+  });
+
+  test('a real hisName is still kept in parentheses', () => {
+    const his = record({hisName: 'Shortcuts', nameSet: '[X] y (Shortcuts)'});
+    expect(
+      decideWorkspaceName({current: his.nameSet, records: [his], toolPart: T}),
+    ).toMatchObject({hisName: 'Shortcuts', target: `${T} (Shortcuts)`});
+  });
+});
+
+describe('home-base-ys9t7.9.1 B3: names the SDK sets are recorded as the tool’s', () => {
+  const NEW_WS = 'CCCCCCCC-0000-4000-8000-00000000000C';
+
+  test('the shared helper: a ref resolved through the tree, an empty bead id on disk, no sticky claim', async () => {
+    const env = stateEnv();
+    const run: CmuxRunner = () =>
+      Promise.resolve(
+        ok(
+          JSON.stringify({
+            windows: [
+              {
+                id: 'W-1',
+                ref: 'window:1',
+                workspaces: [
+                  {id: NEW_WS, panes: [], ref: 'workspace:9', title: null},
+                ],
+              },
+            ],
+          }),
+        ),
+      );
+    const outcome = await recordNewWorkspace({
+      beadId: null,
+      env,
+      name: '[SPWN] new session x ',
+      payload: 'workspace:9',
+      repo: 'spwn',
+      run,
+      sessionId: null,
+      setBy: 'spawn',
+    });
+    expect(outcome).toEqual({kind: 'recorded', workspaceId: NEW_WS});
+    const [line] = recordLines(env);
+    expect(JSON.parse(line ?? '{}')).toMatchObject({
+      beadId: '',
+      hisName: null,
+      nameSet: '[SPWN] new session x',
+      setBy: 'spawn',
+      surfaceId: null,
+      workspaceId: NEW_WS,
+    });
+    const read = readWorkspaceNames(env);
+    expect(read).toMatchObject({kind: 'read', records: [{beadId: null}]});
+  });
+
+  test('the new session renames a spawn name instead of keeping it as his (rule 2, not rule 4)', () => {
+    const spawned = record({
+      beadId: null,
+      nameSet: '[SPWN] new session x',
+      setBy: 'spawn',
+      surfaceId: null,
+      toolPart: '[SPWN] new session x',
+    });
+    expect(
+      decideWorkspaceName({
+        current: spawned.nameSet,
+        records: [spawned],
+        self: {beadId: 't-1', surfaceId: SURFACE, surfaceIdsHere: [SURFACE]},
+        toolPart: T,
+      }),
+    ).toMatchObject({hisName: null, rule: 'tools', target: T});
+  });
+
+  test('thread open’s line: the session with a pane claims it (rule 0 records), one without does not', () => {
+    const opened = record({setBy: 'open', surfaceId: null});
+    expect(
+      decideWorkspaceName({
+        current: T,
+        records: [opened],
+        self: {beadId: 't-1', surfaceId: SURFACE, surfaceIdsHere: [SURFACE]},
+        toolPart: T,
+      }),
+    ).toEqual({
+      hisName: null,
+      kind: 'record',
+      name: T,
+      replacedName: null,
+      rule: 'matchesToolPart',
+    });
+    expect(
+      decideWorkspaceName({
+        current: T,
+        records: [opened],
+        self: {beadId: 't-1', surfaceId: null, surfaceIdsHere: []},
+        toolPart: T,
+      }),
+    ).toEqual({kind: 'unchanged', name: T, rule: 'matchesToolPart'});
+  });
+
+  test('respawn carries the old workspace’s line only when it set exactly that name', () => {
+    const OLD_WS = WS_B;
+    const lines = [
+      record({hisName: 'his', nameSet: `${T} (his)`, workspaceId: OLD_WS}),
+    ];
+    expect(respawnedNameLine(lines, OLD_WS, `${T} (his)`)).toMatchObject({
+      hisName: 'his',
+    });
+    expect(respawnedNameLine(lines, OLD_WS, 'Something he typed')).toBeNull();
+    expect(respawnedNameLine(lines, WS_A, `${T} (his)`)).toBeNull();
+  });
+});
+
+describe('home-base-ys9t7.9.1 B4: the capture refreshes the bead’s cmux labels', () => {
+  test('a session resumed in another tab: labels follow the env, and the sync names the new workspace', async () => {
+    needBr();
+    const w = world(true);
+    const fake = createFakeBd();
+    const NEW_SURFACE = '6E6E6E6E-0000-4000-8000-000000000002';
+    const env = {
+      ...fake.env,
+      ...w.env,
+      CMUX_SURFACE_ID: NEW_SURFACE,
+      CMUX_WORKSPACE_ID: WS_B,
+      JUSTIN_THREADS_REPO_DIR: fake.dir,
+    };
+    await renameSession({
+      cmux: fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'})).run,
+      cwd: w.repo,
+      env,
+      sessionId: null,
+      title: 'A real title',
+    });
+    const cmux = fakeCmux([
+      {id: WS_A, surfaces: [SURFACE], title: null},
+      {id: WS_B, surfaces: [NEW_SURFACE], title: null},
+    ]);
+    const outcome = await applyCapture({
+      autoCommit: false,
+      cmux: cmux.run,
+      cwd: w.repo,
+      env,
+      nameWorkspaces: true,
+      sessionBeads: true,
+      sessionId: SESSION,
+    });
+    expect(outcome).toMatchObject({
+      cmuxLabels: {kind: 'updated'},
+      kind: 'ran',
+      workspaceName: {kind: 'renamed', workspaceId: WS_B},
+    });
+    const labels = titleModel(w.repo).sessionBead.labels;
+    expect(labels).toContain(`cmux-surface:${NEW_SURFACE}`);
+    expect(labels).toContain(`cmux-ws:${WS_B}`);
+    expect(labels).not.toContain(`cmux-surface:${SURFACE}`);
+    expect(labels).not.toContain(`cmux-ws:${WS_A}`);
+  });
+
+  test('an env without cmux ids leaves the labels alone', () => {
+    expect(
+      cmuxLabelRefresh([`cmux-surface:${SURFACE}`, `cmux-ws:${WS_A}`], {}),
+    ).toBeNull();
   });
 });

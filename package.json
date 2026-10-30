@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.51.0",
+  "version": "0.52.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -17,10 +17,12 @@
     "measure:br-export-clobber": "bun scripts/measure-br-export-clobber.ts",
     "measure:br-import-only": "bun scripts/measure-br-import-only.ts",
     "measure:br-local-files": "bun scripts/measure-br-local-files.ts",
+    "measure:brake-latency": "bun scripts/measure-brake-latency.ts",
     "measure:hook-dispatch": "bun scripts/measure-hook-dispatch.ts",
     "measure:thread-hook": "bun scripts/measure-thread-hook.ts",
     "measure:inbox": "bun scripts/measure-inbox.ts",
     "measure:live-sessions": "bun scripts/measure-live-sessions.ts",
+    "measure:quota": "bun scripts/measure-quota.ts",
     "measure:session-line": "bun scripts/measure-session-line.ts",
     "measure:session-tree": "bun scripts/measure-session-tree.ts",
     "measure:status-write": "bun scripts/measure-status-write.ts",
@@ -33,15 +35,24 @@
   "exports": {
     "./check-runner": "./src/check-runner.ts",
     "./claude-usage": "./src/claude-usage.ts",
+    "./claude-usage-cost": "./src/claude-usage-cost.ts",
+    "./claude-usage-live": "./src/claude-usage-live.ts",
     "./claude-usage-samples": "./src/claude-usage-samples.ts",
     "./cli-style": "./src/cli-style.ts",
+    "./cmux": "./src/thread/cmux.ts",
     "./date": "./src/date.ts",
     "./input-drafts": "./src/thread/input-drafts.ts",
     "./open-colors": "./src/thread/open-colors.ts",
     "./pane-join": "./src/thread/pane-join.ts",
+    "./session-cost": "./src/session-cost.ts",
+    "./thread-config": "./src/thread/config.ts",
+    "./thread-quota-spend": "./src/thread/quota-spend.ts",
     "./thread-status-file": "./src/thread/status-file.ts",
     "./transcript-activity": "./src/thread/transcript-activity.ts",
-    "./workspace-close": "./src/thread/workspace-close.ts"
+    "./usage-attribution": "./src/usage-attribution.ts",
+    "./usage-check": "./src/usage-check.ts",
+    "./workspace-close": "./src/thread/workspace-close.ts",
+    "./workspace-name": "./src/thread/workspace-name.ts"
   },
   "files": [
     "src",

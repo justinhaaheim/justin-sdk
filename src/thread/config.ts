@@ -52,6 +52,7 @@ import {
   THREAD_DEFAULT_PINNED_PROJECTS,
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
+  THREAD_DEFAULT_TITLE_SUMMARY,
   THREAD_ENFORCE_MODES,
   type ThreadAnswerUi,
   type ThreadDashboardUi,
@@ -59,6 +60,7 @@ import {
 } from './defaults';
 import {type ResolvedHandoffConfig, resolveHandoffConfig} from './handoff-knob';
 import {parseSince} from './open-filters';
+import {type ResolvedQuotaConfig, resolveQuotaConfig} from './quota-knob';
 
 export function isThreadDashboardUi(
   value: unknown,
@@ -183,6 +185,12 @@ export interface ResolvedThreadConfig {
    */
   projectTag: string | null;
   /**
+   * `componentConfig.thread.quota` (request home-base-ys9t7.5, D5): the
+   * spend quota's mode and limits, each field resolved per layer on its own;
+   * see quota-knob.ts.
+   */
+  quota: ResolvedQuotaConfig;
+  /**
    * The configured threads repo, or null for "no layer said" — which is a
    * DISTINCT answer from a path, and is what lets `paths.ts` fall through to
    * its own default instead of treating a missing key as an empty directory.
@@ -209,6 +217,14 @@ export interface ResolvedThreadConfig {
   stages: readonly string[];
   /** Which layer decided `stages`. */
   stagesSource: ThreadConfigSource;
+  /**
+   * Whether `thread status` asks the session to keep its title a summary of
+   * the whole conversation, and the title-set time is recorded
+   * (home-base-ys9t7.9.1). Off by default.
+   */
+  titleSummary: boolean;
+  /** Which layer decided `titleSummary`. */
+  titleSummarySource: ThreadConfigSource;
   // NO `startOnSessionStart`. It is DEPRECATED (home-base-39co9 D2) and gates
   // nothing, so it is not resolved at all: a resolved field nobody reads would
   // look like a live switch. Configs carrying it still parse — sdk-config.ts
@@ -300,6 +316,10 @@ export function resolveThreadConfig(
   const nameWorkspaces = resolveFlag(
     'nameWorkspaces',
     THREAD_DEFAULT_NAME_WORKSPACES,
+  );
+  const titleSummary = resolveFlag(
+    'titleSummary',
+    THREAD_DEFAULT_TITLE_SUMMARY,
   );
 
   // `render` is the one NESTED block in the thread section, so it needs its own
@@ -477,6 +497,15 @@ export function resolveThreadConfig(
     problems,
   );
 
+  // home-base-ys9t7.5 D5: the quota block, field by field, the same way.
+  const quota = resolveQuotaConfig(
+    layers.map((layer) => ({
+      name: layer.name,
+      section: threadSectionIn(layer.config)?.quota,
+    })),
+    problems,
+  );
+
   // home-base-bomy5.7.1: the project file only — a user-level tag would put
   // one tag on every repo. A bad value is NAMED and ignored, like `stages`.
   let projectTag: string | null = null;
@@ -526,6 +555,7 @@ export function resolveThreadConfig(
     problems,
     projectRoot,
     projectTag,
+    quota,
     repoDir,
     repoDirSource,
     sessionBeads: sessionBeads.value,
@@ -533,6 +563,8 @@ export function resolveThreadConfig(
     source: enabled.source,
     stages,
     stagesSource,
+    titleSummary: titleSummary.value,
+    titleSummarySource: titleSummary.source,
   };
 }
 

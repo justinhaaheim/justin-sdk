@@ -448,7 +448,7 @@ describe('a valid action runs exactly one command, with the right ids, and is lo
       line: 'cmux select-workspace --workspace W-B',
     });
     expect((await t.act(bodyFor(a, t.server.token, 'open'))).status).toBe(200);
-    expect(t.runner.calls[5]).toEqual({
+    expect(t.runner.calls[5]).toMatchObject({
       argv: [
         'cmux',
         'new-workspace',
@@ -461,6 +461,12 @@ describe('a valid action runs exactly one command, with the right ids, and is lo
         `claude --resume ${SID_A}`,
       ],
       kind: 'argv',
+      // home-base-ys9t7.9.1 B3: what the name record says once it ran.
+      nameRecord: {
+        name: '[DEMO] Title of aaaa',
+        sessionId: SID_A,
+        setBy: 'dashboard',
+      },
     });
 
     // resumeCommand answers with the line and runs nothing.

@@ -10,6 +10,8 @@ import type {OkSample, Sample, SamplesRead} from '../src/claude-usage-samples';
 import type {UnattendedChain} from '../src/thread/handoff-chain';
 import type {LiveSessionCountRead} from '../src/thread/live-count';
 import type {LiveSessions} from '../src/thread/live-sessions';
+import type {QuotaGateRead} from '../src/thread/quota-gate';
+import type {QuotaVerdict} from '../src/thread/quota-verdict';
 import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, test} from 'bun:test';
@@ -33,9 +35,11 @@ import {
   readKillSwitch,
   recordRefusal,
   runHandoffGate,
+  runQuotaCheck,
 } from '../src/thread/handoff-gate';
 import {countLiveSessions} from '../src/thread/live-count';
 import {ensureSessionBead} from '../src/thread/session-bead';
+import {spawnGate} from '../src/thread/spawn-gate';
 import {initRepo} from './git-fixtures';
 import {needBr} from './pinned-br';
 import {createSandbox} from './sandbox';
@@ -791,5 +795,196 @@ describe('recordRefusal (real br)', () => {
       reason: 'killSwitch',
     });
     expect(outcome.kind).toBe('failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The spend quota at the gates (home-base-ys9t7.5 D7, dispatch 2 item 2)
+// ---------------------------------------------------------------------------
+
+describe('the spend quota at the handoff and spawn gates', () => {
+  const OVER: Record<
+    'quotaChainSpent' | 'quotaProjectSpent' | 'quotaUnknown' | 'quotaWeekFloor',
+    {detail: string; verdict: QuotaVerdict}
+  > = {
+    quotaChainSpent: {
+      detail:
+        'this chain has spent 5.4 % of your week since you last typed, limit 5 %',
+      verdict: {
+        attended: false,
+        kind: 'over',
+        over: [
+          {atLeast: false, limit: 'chain', limitPercent: 5, spentPercent: 5.4},
+        ],
+        unknown: [],
+      },
+    },
+    quotaProjectSpent: {
+      detail:
+        'this project has spent 11 % of your week in the last 24 hours since you last typed, limit 10 %',
+      verdict: {
+        attended: false,
+        kind: 'over',
+        over: [
+          {
+            atLeast: false,
+            limit: 'project',
+            limitPercent: 10,
+            spentPercent: 11,
+          },
+        ],
+        unknown: [],
+      },
+    },
+    quotaUnknown: {
+      detail:
+        'the spend quota could not be measured: week: no fresh usage sample',
+      verdict: {
+        attendance: {kind: 'unattended', latestTypedAtMs: null},
+        kind: 'unknown',
+        reasons: ['week: no fresh usage sample'],
+      },
+    },
+    quotaWeekFloor: {
+      detail:
+        'your week is at 83 %, and no unattended work runs at or past 75 %',
+      verdict: {
+        attended: false,
+        kind: 'over',
+        over: [
+          {limit: 'floor', limitPercent: 75, weekPercent: 83, window: 'week'},
+        ],
+        unknown: [],
+      },
+    },
+  };
+
+  function quotaReaders(
+    read: QuotaGateRead,
+    logged: Record<string, unknown>[],
+  ): Partial<HandoffGateReaders> {
+    return {
+      quota: () => read,
+      quotaLog: (line) => {
+        logged.push(line);
+        return null;
+      },
+    };
+  }
+
+  /** The handoff gate, or the spawn gate's shape of it (no chain, no pane). */
+  async function gateFor(
+    purpose: 'handoff' | 'spawn',
+    overrides: Partial<HandoffGateReaders>,
+  ): Promise<HandoffGateResult> {
+    if (purpose === 'handoff') return await gate(overrides);
+    return await runHandoffGate({
+      env: {},
+      limits: LIMITS,
+      now: NOW,
+      readers: passingReaders({chain: null, launchRecord: null, ...overrides}),
+      requireCmuxPane: false,
+    });
+  }
+
+  for (const purpose of ['handoff', 'spawn'] as const) {
+    for (const [reason, {detail, verdict}] of Object.entries(OVER)) {
+      const measured = (mode: 'enforce' | 'observe'): QuotaGateRead => ({
+        facts: null,
+        kind: 'measured',
+        mode,
+        purpose,
+        sessionId: 's-1',
+        verdict,
+      });
+
+      test(`${purpose}, ${reason}: enforce refuses, with the numbers and the limit`, async () => {
+        const logged: Record<string, unknown>[] = [];
+        const result = await gateFor(
+          purpose,
+          quotaReaders(measured('enforce'), logged),
+        );
+        expectRefused(result, reason as HandoffRefusalReason, detail);
+        expect(logged).toMatchObject([
+          {action: 'refused', kind: 'gate', mode: 'enforce', purpose, reason},
+        ]);
+      });
+
+      test(`${purpose}, ${reason}: observe logs the would-be refusal and passes`, async () => {
+        const logged: Record<string, unknown>[] = [];
+        const result = await gateFor(
+          purpose,
+          quotaReaders(measured('observe'), logged),
+        );
+        expect(result.kind).toBe('pass');
+        expect(logged).toMatchObject([
+          {action: 'wouldRefuse', detail, mode: 'observe', purpose, reason},
+        ]);
+      });
+    }
+
+    test(`${purpose}: mode off skips, logging nothing`, async () => {
+      const logged: Record<string, unknown>[] = [];
+      const result = await gateFor(
+        purpose,
+        quotaReaders({kind: 'off'}, logged),
+      );
+      expect(result.kind).toBe('pass');
+      expect(logged).toEqual([]);
+    });
+  }
+
+  test('a quota reader that throws refuses with quotaUnknown', async () => {
+    const result = await gate({
+      quota: () => {
+        throw new Error('br exploded');
+      },
+    });
+    expectRefused(result, 'quotaUnknown', 'br exploded');
+  });
+
+  test('thread spawn with successor off still runs the quota alone', async () => {
+    const box = createSandbox();
+    sandboxes.push(box);
+    box.writeFile(
+      'justin-sdk.config.json',
+      JSON.stringify({
+        componentConfig: {thread: {handoff: {successor: false}}},
+      }),
+    );
+    const env = {
+      HOME: join(box.path, 'home'),
+      XDG_CONFIG_HOME: join(box.path, 'x'),
+    };
+    const refusedRun = await spawnGate(
+      {cwd: box.path, env, now: NOW},
+      {
+        quotaCheck: ({now}) =>
+          runQuotaCheck(
+            quotaReaders(
+              {
+                facts: null,
+                kind: 'measured',
+                mode: 'enforce',
+                purpose: 'spawn',
+                sessionId: null,
+                verdict: OVER.quotaWeekFloor.verdict,
+              },
+              [],
+            ),
+            now,
+          ),
+      },
+    );
+    expect(refusedRun?.exitCode).toBe(3);
+    expect(refusedRun?.lines[0]).toContain('quotaWeekFloor');
+    const offRun = await spawnGate(
+      {cwd: box.path, env, now: NOW},
+      {
+        quotaCheck: ({now}) =>
+          runQuotaCheck(quotaReaders({kind: 'off'}, []), now),
+      },
+    );
+    expect(offRun).toBeNull();
   });
 });

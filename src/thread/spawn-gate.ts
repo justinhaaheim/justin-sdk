@@ -6,6 +6,9 @@
  * cwd). It skips the chain count (a spawn starts no chain) and the cmux-pane
  * check (it opens a workspace of its own, D5).
  *
+ * The spend quota (home-base-ys9t7.5 D7) runs inside the handoff gate, and
+ * ON ITS OWN where successor is off: a spawn starts a session that spends.
+ *
  * A refusal exits 3, opens nothing, and is recorded on the caller's session
  * bead when the caller has one. The gate's own `message` is worded for
  * `thread handoff` ("include the handoff block printed above"), so the text
@@ -23,7 +26,10 @@ import {
   realHandoffGateReaders,
   recordRefusal,
   runHandoffGate,
+  runQuotaCheck,
 } from './handoff-gate';
+import {readQuotaForGate} from './quota-gate';
+import {appendQuotaLog} from './quota-log';
 import {selectSession} from './session-select';
 
 /** What a refused spawn tells the calling Claude, after its reason. */
@@ -42,8 +48,30 @@ export interface SpawnGateDeps {
     limits: ResolvedHandoffConfig;
     now: Date;
   }) => Promise<HandoffGateResult>;
+  /**
+   * The spend quota alone (handoff-gate.ts runQuotaCheck), for a repo whose
+   * successor knob is off: the quota still gates a spawn there (D7).
+   */
+  quotaCheck: (input: {
+    cwd: string;
+    env: EnvLike;
+    now: Date;
+  }) => ReturnType<typeof runQuotaCheck>;
   recordRefusal: typeof recordRefusal;
 }
+
+const realQuotaCheck: SpawnGateDeps['quotaCheck'] = ({cwd, env, now}) =>
+  runQuotaCheck(
+    {
+      quota: () =>
+        readQuotaForGate({cwd, env, nowMs: now.getTime(), purpose: 'spawn'}),
+      quotaLog: (line) => {
+        const written = appendQuotaLog(line, env);
+        return written.kind === 'failed' ? written.reason : null;
+      },
+    },
+    now,
+  );
 
 const realSpawnGate: SpawnGateDeps['gate'] = (input) =>
   runHandoffGate({
@@ -93,15 +121,23 @@ export async function spawnGate(
   // Behind an await import: config pulls in zod (command.ts's header).
   const {resolveThreadConfig} = await import('./config');
   const limits = resolveThreadConfig({cwd, env}).handoff;
-  if (!limits.successor) return null;
   const now = input.now ?? new Date();
-  const result = await (deps.gate ?? realSpawnGate)({
-    ...(input.commandWords == null ? {} : {commandWords: input.commandWords}),
-    cwd,
-    env,
-    limits,
-    now,
-  });
+  let result: HandoffGateResult;
+  if (!limits.successor) {
+    // Successor off: no handoff gate, but the spend quota still gates a
+    // spawn wherever its mode is not off (home-base-ys9t7.5 D7).
+    const quota = await (deps.quotaCheck ?? realQuotaCheck)({cwd, env, now});
+    if (quota == null) return null;
+    result = quota;
+  } else {
+    result = await (deps.gate ?? realSpawnGate)({
+      ...(input.commandWords == null ? {} : {commandWords: input.commandWords}),
+      cwd,
+      env,
+      limits,
+      now,
+    });
+  }
   if (result.kind === 'pass') return null;
 
   // The caller's session bead, when it has one: CLAUDE_CODE_SESSION_ID.

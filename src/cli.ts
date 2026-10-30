@@ -29,6 +29,9 @@
  * nothing from the command tree. Its handlers are children that come back
  * through this file, so `thread nudge` keeps its own fast path.
  *
+ * `thread brake` (the spend quota's PreToolUse brake, every tool) answers here
+ * too: exactly `thread brake`, nothing after it.
+ *
  * Every other argv — `thread nudge --help` and `hook --help` included — goes to
  * cli-main.ts untouched, so help still prints help and does nothing else.
  */
@@ -77,6 +80,11 @@ if (hookEvent != null) {
   process.exit(
     await runHookCommand({dryRun: argv.length === 3, event: hookEvent}),
   );
+} else if (argv[0] === 'thread' && argv[1] === 'brake' && argv.length === 2) {
+  // The quota brake runs on EVERY tool call where the quota is on (home-base-
+  // ys9t7.5 D6): its cached path must not load the command tree.
+  const {runThreadBrakeHook} = await import('./thread/quota-brake');
+  process.exit(await runThreadBrakeHook());
 } else if (
   argv[0] === 'thread' &&
   argv[1] === 'nudge' &&

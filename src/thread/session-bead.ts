@@ -22,6 +22,7 @@ import {
   brCreate,
   brList,
   brShow,
+  brUpdate,
   describeBrFailed,
   findBeadsWorkspace,
   resolveRecordedBeadsDb,
@@ -77,6 +78,31 @@ export const HANDED_OFF_LABEL = 'handed-off';
 export const CONTINUES_LABEL_PREFIX = 'continues:';
 export const CONTINUED_BY_LABEL_PREFIX = 'continued-by:';
 /**
+ * The spawn links (request home-base-ys9t7.5, D8): a session started by
+ * `thread spawn` carries `spawned-by:<parent session bead id>`, the parent
+ * `spawned:<child id>`, so the child's spend counts against the parent's
+ * quota group. Read by thread/quota-group.ts; written by dispatch 2.
+ */
+export const SPAWNED_BY_LABEL_PREFIX = 'spawned-by:';
+export const SPAWNED_LABEL_PREFIX = 'spawned:';
+/**
+ * How the child learns its parent (home-base-ys9t7.5.4 item 3). `thread
+ * spawn` types `JUSTIN_SDK_SPAWNED_BY_SESSION=<parent session id>
+ * JUSTIN_SDK_SPAWN_KICKOFF=1 claude …` into the new pane, so claude and every
+ * hook it runs (the capture child among them) carry both. The kickoff text
+ * cannot carry a marker: a `/conductor …` kickoff must start with `/` to run
+ * as a slash command. The parent is named by SESSION id, not bead id: the
+ * capture child resolves it to the parent's bead and DB through the sessions
+ * index when it files the child's bead, so spawn itself reads no bead.
+ */
+export const SPAWNED_BY_SESSION_ENV = 'JUSTIN_SDK_SPAWNED_BY_SESSION';
+export const SPAWN_KICKOFF_ENV = 'JUSTIN_SDK_SPAWN_KICKOFF';
+/**
+ * On a session whose first prompt `thread spawn` typed (the kickoff), so the
+ * quota does not read it as Justin typing (quota-group.ts drops it).
+ */
+export const SPAWN_KICKOFF_LABEL = 'spawn-kickoff';
+/**
  * The session bead's label once the handoff gate has refused it (epic
  * home-base-mbnjv D2), beside a note line "handoff refused: <reason> — …".
  * Written by handoff-gate.ts `recordRefusal`.
@@ -89,6 +115,69 @@ export const HANDOFF_REFUSED_LABEL = 'handoff-refused';
  * (alreadyHandedOff).
  */
 export const SUCCESSOR_STARTED_LABEL = 'successor-started';
+
+/**
+ * home-base-ys9t7.9.1: when the session's title was last set, as
+ * `title-set:<ISO time to the second>Z`, written in the same `br update` as
+ * the title by `thread title`, the first request's auto-title and a
+ * successor's inherited title, only with componentConfig.thread.titleSummary
+ * on. br allows letters, digits, `-`, `_` and `:` in a label, so the time
+ * carries no milliseconds; it is rounded UP to the next whole second, so a
+ * request filed in the same second just before the title was set never reads
+ * as filed after it. `thread status` compares each request's created_at with
+ * it.
+ */
+export const TITLE_SET_LABEL_PREFIX = 'title-set:';
+
+/** The `title-set:` label for a title set at `now` (rounded up to the second). */
+export function titleSetLabel(now: Date): string {
+  const ceiled = new Date(Math.ceil(now.getTime() / 1000) * 1000);
+  return `${TITLE_SET_LABEL_PREFIX}${ceiled.toISOString().replace(/\.\d{3}Z$/, 'Z')}`;
+}
+
+/**
+ * The label edit that records a title set at `now`: the new `title-set:`
+ * label, and every older one removed (one per bead, so the newest is the only
+ * one). A label equal to the new one is never in both lists, so the order in
+ * which br applies them cannot drop it.
+ */
+export function titleSetLabelEdit(
+  labels: readonly string[],
+  now: Date,
+): {addLabels: string[]; removeLabels: string[]} {
+  const label = titleSetLabel(now);
+  return {
+    addLabels: [label],
+    removeLabels: labels.filter(
+      (entry) => entry.startsWith(TITLE_SET_LABEL_PREFIX) && entry !== label,
+    ),
+  };
+}
+
+/**
+ * When the title was last set, from the `title-set:` label: epoch ms, or
+ * `none` (no label: the title was set before titleSummary was on, or never
+ * by a recorded path), or `unreadable` (a label whose time does not parse).
+ * The newest wins when a failed edit left more than one.
+ */
+export function titleSetAt(
+  labels: readonly string[],
+):
+  | {at: number; kind: 'set'}
+  | {kind: 'none'}
+  | {kind: 'unreadable'; label: string} {
+  const stamps = labels.filter((entry) =>
+    entry.startsWith(TITLE_SET_LABEL_PREFIX),
+  );
+  if (stamps.length === 0) return {kind: 'none'};
+  let newest: number | null = null;
+  for (const label of stamps) {
+    const at = Date.parse(label.slice(TITLE_SET_LABEL_PREFIX.length));
+    if (Number.isNaN(at)) return {kind: 'unreadable', label};
+    if (newest == null || at > newest) newest = at;
+  }
+  return newest == null ? {kind: 'none'} : {at: newest, kind: 'set'};
+}
 
 /** br's label length limit (measured 2026-10-11, br 0.1.37). */
 export const BR_LABEL_MAX = 50;
@@ -174,6 +263,8 @@ const CMUX_ID_SHAPE = /^[A-Za-z0-9._-]+$/;
 export function sessionBeadLabels(
   sessionId: string,
   env: EnvLike,
+  /** The parent's session bead id, when `thread spawn` started this one. */
+  links: {spawnedBy?: string | null} = {},
 ): {dropped: string[]; labels: string[]} {
   const labels = [SESSION_LABEL, sidLabel(sessionId)];
   const dropped: string[] = [];
@@ -194,8 +285,57 @@ export function sessionBeadLabels(
       labels.push(label);
     }
   }
+  if (links.spawnedBy != null) {
+    const label = `${SPAWNED_BY_LABEL_PREFIX}${links.spawnedBy}`;
+    if (!BR_LABEL_SHAPE.test(label)) {
+      dropped.push(
+        `${label} holds a character br refuses in a label, so this session counts as its own quota group`,
+      );
+    } else if (label.length > BR_LABEL_MAX) {
+      dropped.push(
+        `${label} is ${label.length} characters; br allows ${BR_LABEL_MAX}, so this session counts as its own quota group`,
+      );
+    } else {
+      labels.push(label);
+    }
+  }
+  if (env[SPAWN_KICKOFF_ENV] === '1') labels.push(SPAWN_KICKOFF_LABEL);
   labels.push(AUTO_TITLE_LABEL);
   return {dropped, labels};
+}
+
+/**
+ * home-base-ys9t7.9.1 B4: the label edit that points a session bead's
+ * `cmux-surface:` / `cmux-ws:` labels at the pane the session runs in NOW.
+ * They were read from the environment once, when the bead was filed, so a
+ * session resumed in another tab kept pointing at the old one and every
+ * naming sync failed. Only a usable id in `env` replaces a label: a missing
+ * or unusable one leaves the old label (a hook run without the cmux
+ * variables is not evidence the session left cmux). null: nothing to change.
+ */
+export function cmuxLabelRefresh(
+  labels: readonly string[],
+  env: EnvLike,
+): {addLabels: string[]; removeLabels: string[]} | null {
+  const addLabels: string[] = [];
+  const removeLabels: string[] = [];
+  const wanted = sessionBeadLabels('', env).labels.filter(
+    (label) =>
+      label.startsWith(CMUX_SURFACE_LABEL_PREFIX) ||
+      label.startsWith(CMUX_WORKSPACE_LABEL_PREFIX),
+  );
+  for (const label of wanted) {
+    const prefix = label.startsWith(CMUX_SURFACE_LABEL_PREFIX)
+      ? CMUX_SURFACE_LABEL_PREFIX
+      : CMUX_WORKSPACE_LABEL_PREFIX;
+    const current = labels.filter((entry) => entry.startsWith(prefix));
+    if (current.length === 1 && current[0] === label) continue;
+    if (!current.includes(label)) addLabels.push(label);
+    removeLabels.push(...current.filter((entry) => entry !== label));
+  }
+  return addLabels.length === 0 && removeLabels.length === 0
+    ? null
+    : {addLabels, removeLabels};
 }
 
 /**
@@ -257,6 +397,141 @@ export function sessionBeadDescription(facts: SessionBeadFacts): string {
     `Checkout: ${facts.checkoutPath}`,
     `Started: ${facts.startedAt}`,
   ].join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Resolution (thread request, thread title, and later dispatches)
+// ---------------------------------------------------------------------------
+
+export type SessionResolution =
+  | {
+      /** The session bead's checkout, when the index named it, is gone. */
+      beadId: string;
+      beadsDir: string;
+      checkoutPath: string;
+      kind: 'checkoutMissing';
+      sessionId: string;
+    }
+  | {
+      bead: BrIssue;
+      beadsDir: string;
+      checkoutPath: string;
+      db: string;
+      kind: 'found';
+      sessionId: string;
+      /** Every sighting of this session, newest first. */
+      sightings: SessionSighting[];
+    }
+  | {kind: 'failed'; reason: string}
+  | {
+      /** R9: the corrupt index lines that mention this session, or null. */
+      corruptNote: string | null;
+      indexPath: string;
+      kind: 'none';
+      reason: string;
+    };
+
+/**
+ * The session bead for `sessionId`, through the index (D1 "which DB a write
+ * goes to"): the DB that holds the session bead, regardless of cwd.
+ */
+export function resolveSession(input: {
+  env: EnvLike;
+  sessionId: string;
+}): SessionResolution {
+  const {env, sessionId} = input;
+  const read = readSessionSightings(sessionId, env);
+  if (read.kind === 'failed') {
+    return {
+      kind: 'failed',
+      reason: `the sessions index is unreadable: ${read.path}: ${read.error}`,
+    };
+  }
+  const known =
+    read.kind === 'read' ? sessionBeadSighting(read.sightings) : null;
+  if (known == null) {
+    const corruptNote = corruptSightingsNote(read);
+    return {
+      corruptNote,
+      indexPath: read.path,
+      kind: 'none',
+      reason: `${corruptNote != null ? `${corruptNote}. ` : ''}no session bead is recorded for session ${sessionId} in ${read.path}. Either componentConfig.thread.sessionBeads was off when this session's prompts were captured, the thread capture hook is not installed here, the repo has no beads workspace, or the capture child failed (its outcome is in capture.jsonl beside the index). Or the bead is not filed YET: a session's bead is filed in the background after its first prompt (15.7 s measured), and /clear starts a new session id that needs a bead of its own (home-base-mbnjv.8 F22, live run 20261029T184011Z). If this session started or was cleared moments ago, end this turn and run the command again in the next one.`,
+    };
+  }
+  // The recorded dir is resolved at read time (home-base-dj5m9.1.1): an old
+  // entry naming a worktree whose DB was moved aside, or whose directory is
+  // gone, reaches the primary checkout's DB when the repo's br shares it.
+  // Only an unresolvable DB is checkoutMissing. That is all the old
+  // `existsSync(checkoutPath)` check added: every entry a br before 0.4.1
+  // wrote has beadsDir === <checkoutPath>/.beads, so a DB found there proves
+  // the checkout exists, and a DB in the primary outlives its worktree.
+  const db = resolveRecordedBeadsDb(known.beadsDir);
+  if (db.kind === 'none') {
+    return {
+      beadId: known.beadId,
+      beadsDir: known.beadsDir,
+      checkoutPath: known.checkoutPath,
+      kind: 'checkoutMissing',
+      sessionId,
+    };
+  }
+  if (db.kind === 'failed') return {kind: 'failed', reason: db.reason};
+  const shown = brShow({db: db.db, env}, known.beadId);
+  if (shown.kind === 'failed') {
+    return {
+      kind: 'failed',
+      reason: `could not read session bead ${known.beadId}: ${describeBrFailed(shown)}`,
+    };
+  }
+  if (shown.kind === 'notFound') {
+    return {
+      kind: 'failed',
+      reason: `the sessions index names ${known.beadId} in ${db.db}, but br cannot find it there (deleted, or the index is wrong)`,
+    };
+  }
+  return {
+    bead: shown.issue,
+    beadsDir: known.beadsDir,
+    checkoutPath: known.checkoutPath,
+    db: db.db,
+    kind: 'found',
+    sessionId,
+    sightings: read.kind === 'read' ? read.sightings : [],
+  };
+}
+
+/** Where the parent of a spawned session is, or why it is not linked. */
+export type SpawnParent =
+  | {beadId: string; db: string; kind: 'found'; sessionId: string}
+  | {kind: 'failed'; reason: string}
+  | {kind: 'none'};
+
+/**
+ * The parent `thread spawn` named in SPAWNED_BY_SESSION_ENV, resolved to its
+ * session bead and DB. `none`: this session was not spawned (or names
+ * itself). `failed`: the link is left off and the reason recorded; the session
+ * then counts as its own quota group, all of it unattended (D8).
+ */
+export function spawnParentOf(sessionId: string, env: EnvLike): SpawnParent {
+  const parent = env[SPAWNED_BY_SESSION_ENV]?.trim() ?? '';
+  if (parent === '' || parent === sessionId) return {kind: 'none'};
+  const resolved = resolveSession({env, sessionId: parent});
+  if (resolved.kind === 'found') {
+    return {
+      beadId: resolved.bead.id,
+      db: resolved.db,
+      kind: 'found',
+      sessionId: parent,
+    };
+  }
+  const why =
+    resolved.kind === 'checkoutMissing'
+      ? `its session bead ${resolved.beadId}'s checkout is gone`
+      : resolved.reason;
+  return {
+    kind: 'failed',
+    reason: `the parent session ${parent} (${SPAWNED_BY_SESSION_ENV}) has no session bead to link to: ${why}`,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -390,7 +665,11 @@ export function ensureSessionBead(
     (input.firstPrompt != null
       ? sessionTitleFrom(input.firstPrompt.text)
       : null) ?? untitledSessionTitle(sessionId);
-  const labels = sessionBeadLabels(sessionId, env);
+  // D8: a session `thread spawn` started links to its parent's bead.
+  const parent = spawnParentOf(sessionId, env);
+  const labels = sessionBeadLabels(sessionId, env, {
+    spawnedBy: parent.kind === 'found' ? parent.beadId : null,
+  });
   const created = brCreate(target, {
     description: sessionBeadDescription({
       branch: git.branch,
@@ -421,6 +700,24 @@ export function ensureSessionBead(
       : `filed in ${workspace.db}, but the index line was NOT written (${indexed.error}); the next capture repairs it`,
     ...labels.dropped.map((reason) => `label left off: ${reason}`),
   ];
+  if (parent.kind === 'failed') notes.push(`not linked: ${parent.reason}`);
+  if (
+    parent.kind === 'found' &&
+    labels.labels.includes(`${SPAWNED_BY_LABEL_PREFIX}${parent.beadId}`)
+  ) {
+    // The parent's half of the link, so its group walk finds this child too.
+    // A failure leaves the child's spawned-by: label, which the walk from the
+    // child still follows; it is named here, in capture.jsonl.
+    const childLabel = `${SPAWNED_LABEL_PREFIX}${created.id}`;
+    const linked = brUpdate({db: parent.db, env}, parent.beadId, {
+      addLabels: [childLabel],
+    });
+    notes.push(
+      linked.kind === 'ok'
+        ? `spawned by ${parent.beadId} (${childLabel} written there)`
+        : `spawned by ${parent.beadId}, but ${childLabel} was NOT written there: ${describeBrFailed(linked)}`,
+    );
+  }
   return {
     beadId: created.id,
     detail: notes.join('; ') + corruptSuffix,
@@ -444,105 +741,4 @@ export function sightingIn(
     sessionId,
     now,
   );
-}
-
-// ---------------------------------------------------------------------------
-// Resolution (thread request, thread title, and later dispatches)
-// ---------------------------------------------------------------------------
-
-export type SessionResolution =
-  | {
-      /** The session bead's checkout, when the index named it, is gone. */
-      beadId: string;
-      beadsDir: string;
-      checkoutPath: string;
-      kind: 'checkoutMissing';
-      sessionId: string;
-    }
-  | {
-      bead: BrIssue;
-      beadsDir: string;
-      checkoutPath: string;
-      db: string;
-      kind: 'found';
-      sessionId: string;
-      /** Every sighting of this session, newest first. */
-      sightings: SessionSighting[];
-    }
-  | {kind: 'failed'; reason: string}
-  | {
-      /** R9: the corrupt index lines that mention this session, or null. */
-      corruptNote: string | null;
-      indexPath: string;
-      kind: 'none';
-      reason: string;
-    };
-
-/**
- * The session bead for `sessionId`, through the index (D1 "which DB a write
- * goes to"): the DB that holds the session bead, regardless of cwd.
- */
-export function resolveSession(input: {
-  env: EnvLike;
-  sessionId: string;
-}): SessionResolution {
-  const {env, sessionId} = input;
-  const read = readSessionSightings(sessionId, env);
-  if (read.kind === 'failed') {
-    return {
-      kind: 'failed',
-      reason: `the sessions index is unreadable: ${read.path}: ${read.error}`,
-    };
-  }
-  const known =
-    read.kind === 'read' ? sessionBeadSighting(read.sightings) : null;
-  if (known == null) {
-    const corruptNote = corruptSightingsNote(read);
-    return {
-      corruptNote,
-      indexPath: read.path,
-      kind: 'none',
-      reason: `${corruptNote != null ? `${corruptNote}. ` : ''}no session bead is recorded for session ${sessionId} in ${read.path}. Either componentConfig.thread.sessionBeads was off when this session's prompts were captured, the thread capture hook is not installed here, the repo has no beads workspace, or the capture child failed (its outcome is in capture.jsonl beside the index). Or the bead is not filed YET: a session's bead is filed in the background after its first prompt (15.7 s measured), and /clear starts a new session id that needs a bead of its own (home-base-mbnjv.8 F22, live run 20261029T184011Z). If this session started or was cleared moments ago, end this turn and run the command again in the next one.`,
-    };
-  }
-  // The recorded dir is resolved at read time (home-base-dj5m9.1.1): an old
-  // entry naming a worktree whose DB was moved aside, or whose directory is
-  // gone, reaches the primary checkout's DB when the repo's br shares it.
-  // Only an unresolvable DB is checkoutMissing. That is all the old
-  // `existsSync(checkoutPath)` check added: every entry a br before 0.4.1
-  // wrote has beadsDir === <checkoutPath>/.beads, so a DB found there proves
-  // the checkout exists, and a DB in the primary outlives its worktree.
-  const db = resolveRecordedBeadsDb(known.beadsDir);
-  if (db.kind === 'none') {
-    return {
-      beadId: known.beadId,
-      beadsDir: known.beadsDir,
-      checkoutPath: known.checkoutPath,
-      kind: 'checkoutMissing',
-      sessionId,
-    };
-  }
-  if (db.kind === 'failed') return {kind: 'failed', reason: db.reason};
-  const shown = brShow({db: db.db, env}, known.beadId);
-  if (shown.kind === 'failed') {
-    return {
-      kind: 'failed',
-      reason: `could not read session bead ${known.beadId}: ${describeBrFailed(shown)}`,
-    };
-  }
-  if (shown.kind === 'notFound') {
-    return {
-      kind: 'failed',
-      reason: `the sessions index names ${known.beadId} in ${db.db}, but br cannot find it there (deleted, or the index is wrong)`,
-    };
-  }
-  return {
-    bead: shown.issue,
-    beadsDir: known.beadsDir,
-    checkoutPath: known.checkoutPath,
-    db: db.db,
-    kind: 'found',
-    sessionId,
-    sightings: read.kind === 'read' ? read.sightings : [],
-  };
 }

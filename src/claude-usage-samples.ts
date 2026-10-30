@@ -57,6 +57,26 @@ export function dataDir(env: UsageEnv = process.env): string {
   );
 }
 
+/** Replaces the whole state directory, so tests never touch the real one. */
+export const STATE_DIR_ENV = 'CLAUDE_USAGE_STATE_DIR';
+
+/**
+ * `~/.local/state/claude-usage`, or its XDG / env override:
+ * $CLAUDE_USAGE_STATE_DIR, else $XDG_STATE_HOME/claude-usage. Moved here from
+ * home-base's src/claude-usage/paths.ts (home-base-ys9t7.5.2); the
+ * statusline store's live.json lives here (claude-usage-live.ts). The rule is
+ * unchanged.
+ */
+export function stateDir(env: UsageEnv = process.env): string {
+  return (
+    fromEnv(env, STATE_DIR_ENV) ??
+    join(
+      fromEnv(env, 'XDG_STATE_HOME') ?? join(homedir(), '.local', 'state'),
+      'claude-usage',
+    )
+  );
+}
+
 /** The append-only history: one JSON record per sample. */
 export function samplesPath(env: UsageEnv = process.env): string {
   return join(dataDir(env), 'samples.jsonl');

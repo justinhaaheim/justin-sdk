@@ -17,7 +17,7 @@
  *   record read.
  */
 
-import type {CmuxRunner, CmuxTree} from './cmux';
+import type {CmuxRunner, CmuxTree, CmuxTreeRead} from './cmux';
 import type {EnvLike} from './paths';
 
 import {appendFileSync, mkdirSync, readFileSync} from 'node:fs';
@@ -29,6 +29,7 @@ import {
   clearWorkspaceName,
   readCmuxTree,
   readWorkspaceTitle,
+  realCmuxRunner,
   renameWorkspace,
   surfacesOfWorkspace,
   workspaceExists,
@@ -44,8 +45,51 @@ import {
 } from './session-bead';
 import {sessionDisplayName} from './session-name';
 
-/** U+2733, Claude Code's idle-title glyph: a name no human typed (D2 rule 3). */
-export const GENERATED_NAME_PREFIX = '✳';
+/**
+ * The leading glyphs cmux shows on a pane title while Claude Code owns the
+ * terminal: ✳ when idle, the others are its spinner frames. A workspace
+ * title that starts with one was copied from a pane, so no human typed it (D2
+ * rule 3). home-base-ys9t7.9.1 B1: rule 3 knew only ✳, so a workspace caught
+ * mid-spin ("◐ Shortcuts helper app survey") was read as Justin's name. The
+ * set is the one home-base's scripts/cmux-restart.ts used to keep for itself.
+ */
+export const CLAUDE_PANE_GLYPHS = [
+  '✳',
+  '✻',
+  '✽',
+  '✶',
+  '◐',
+  '◑',
+  '◒',
+  '◓',
+  '●',
+  '○',
+  '◔',
+  '◕',
+] as const;
+
+const CLAUDE_PANE_TITLE = new RegExp(`^[${CLAUDE_PANE_GLYPHS.join('')}]`, 'u');
+
+/** Whether a name starts with a Claude Code pane glyph (D2 rule 3). */
+export function isGeneratedName(name: string): boolean {
+  return CLAUDE_PANE_TITLE.test(name);
+}
+
+/**
+ * home-base-ys9t7.9.1 B2: a recorded hisName that starts with a pane glyph was
+ * misread as Justin's by the old rule 3 (B1). It is demoted to replacedName,
+ * so it stops riding along in parentheses and `--restore` still puts it back
+ * when nothing better was recorded.
+ */
+function demoteGenerated(record: {
+  hisName: string | null;
+  replacedName: string | null;
+}): {hisName: string | null; replacedName: string | null} {
+  if (record.hisName == null || !isGeneratedName(record.hisName)) {
+    return {hisName: record.hisName, replacedName: record.replacedName};
+  }
+  return {hisName: null, replacedName: record.replacedName ?? record.hisName};
+}
 
 const READBACK_RETRIES = 10;
 const READBACK_DELAY_MS = 100;
@@ -56,12 +100,25 @@ const READBACK_DELAY_MS = 100;
 
 const recordSchema = z.object({
   at: z.string(),
-  beadId: z.string(),
+  /**
+   * The session bead that set the name. null (written as "" so an older SDK
+   * still parses the line) when the SDK named a workspace before any session
+   * bead existed: `thread spawn`, or an untracked session (B3).
+   */
+  beadId: z.string().transform((id) => (id === '' ? null : id)),
   hisName: z.string().nullable(),
   nameSet: z.string(),
   replacedName: z.string().nullable(),
   repo: z.string().nullable(),
   sessionId: z.string().nullable(),
+  /**
+   * home-base-ys9t7.9.1 B3: what set the name when it was not this sync:
+   * `new-workspace --name` in thread spawn / thread open / the dashboard / the
+   * threads TUI, or cmux-restart's respawn. null on a sync's own line and on
+   * every line written before (absent: undefined). A plain string, not an
+   * enum, so a later value never makes an older SDK reject the whole file.
+   */
+  setBy: z.string().nullish(),
   /**
    * The surface of the session that wrote the line, at sync time; null when
    * it had no cmux-surface label. Lines written before home-base-bomy5.4.1
@@ -125,9 +182,11 @@ export function appendWorkspaceName(
   env: EnvLike,
 ): {error: string; kind: 'failed'} | {kind: 'ok'} {
   const path = workspaceNamesPath(env);
+  // B3: a null beadId goes to disk as "", which every SDK version parses.
+  const line = {...record, beadId: record.beadId ?? ''};
   try {
     mkdirSync(dirname(path), {recursive: true});
-    appendFileSync(path, `${JSON.stringify(record)}\n`);
+    appendFileSync(path, `${JSON.stringify(line)}\n`);
     return {kind: 'ok'};
   } catch (error) {
     return {error: `${path}: ${String(error)}`, kind: 'failed'};
@@ -182,7 +241,19 @@ export type WorkspaceNameRule =
   | 'tools';
 
 export type WorkspaceNameDecision =
-  | {kind: 'record'; name: string; rule: 'matchesToolPart'}
+  /**
+   * The name equals this session's tool part and no line of its own claims
+   * it: none at all, or (B3) only a line the SDK wrote when it opened the
+   * workspace, which makes no sticky claim. hisName and replacedName are
+   * carried from that line so `--restore` keeps working.
+   */
+  | {
+      hisName?: string | null;
+      kind: 'record';
+      name: string;
+      replacedName?: string | null;
+      rule: 'matchesToolPart';
+    }
   /**
    * home-base-mbnjv.12 (D8): the name is already right, but the session that
    * set it handed off to this one, so this one records it as its own (its
@@ -216,7 +287,7 @@ export type WorkspaceNameDecision =
 export const RULE_WORDS: Record<WorkspaceNameRule, string> = {
   empty: 'the workspace has no name (rule 1)',
   generated:
-    'the name starts with ✳, so a tool generated it, not Justin (rule 3)',
+    'the name starts with a Claude Code pane glyph (✳, ◐ and the like), so a tool generated it, not Justin (rule 3)',
   handedOff:
     'the session that set the name handed off to this one, which now owns it (D8)',
   his: 'the name is not one the tool set, so it is Justin’s and is kept in parentheses (rule 4)',
@@ -256,6 +327,12 @@ export interface StickyContext {
    * no transfer.
    */
   handedOffFrom?: string | null;
+  /**
+   * This session's own surface (its cmux-surface label), null outside cmux.
+   * B3: only a session with a surface claims a name the SDK set at open time,
+   * so a session with none never appends a line on every sync.
+   */
+  surfaceId?: string | null;
   surfaceIdsHere: readonly string[];
 }
 
@@ -368,11 +445,10 @@ export function decideWorkspaceName(input: {
     input.self?.handedOffFrom != null &&
     latest.beadId === input.self.handedOffFrom
       ? {
-          fromBeadId: latest.beadId,
-          hisName: latest.hisName,
+          fromBeadId: input.self.handedOffFrom,
+          ...demoteGenerated(latest),
           kind: 'record',
           name: current,
-          replacedName: latest.replacedName,
           rule: 'handedOff',
         }
       : null;
@@ -382,9 +458,25 @@ export function decideWorkspaceName(input: {
     if (latest == null) {
       return {kind: 'record', name: current, rule: 'matchesToolPart'};
     }
-    return (
-      takeOver() ?? {kind: 'unchanged', name: current, rule: 'matchesToolPart'}
-    );
+    const handedOff = takeOver();
+    if (handedOff != null) return handedOff;
+    // B3 (home-base-ys9t7.9.1): the SDK named the workspace this session's
+    // name when it opened it (thread open, the dashboard), on a line with no
+    // surface. That line makes no sticky claim, so this session records its
+    // own; otherwise a second session in the workspace could take the name.
+    if (
+      latest.setBy != null &&
+      latest.surfaceId == null &&
+      input.self?.surfaceId != null
+    ) {
+      return {
+        ...demoteGenerated(latest),
+        kind: 'record',
+        name: current,
+        rule: 'matchesToolPart',
+      };
+    }
+    return {kind: 'unchanged', name: current, rule: 'matchesToolPart'};
   }
   // Sticky (home-base-bomy5.4.1): another session still open here named it,
   // so this one writes nothing. Its pane leaving releases it to rule 2.
@@ -407,15 +499,14 @@ export function decideWorkspaceName(input: {
       target: toolPart,
     };
   } else if (latest != null) {
+    const kept = demoteGenerated(latest);
     decided = {
-      hisName: latest.hisName,
+      ...kept,
       kind: 'rename',
-      replacedName: latest.replacedName,
       rule: 'tools',
-      target:
-        latest.hisName != null ? `${toolPart} (${latest.hisName})` : toolPart,
+      target: kept.hisName != null ? `${toolPart} (${kept.hisName})` : toolPart,
     };
-  } else if (current.startsWith(GENERATED_NAME_PREFIX)) {
+  } else if (isGeneratedName(current)) {
     decided = {
       hisName: null,
       kind: 'rename',
@@ -609,10 +700,11 @@ export async function syncWorkspaceName(
   const toolPart = stored(sessionDisplayName(session.repoTag, session.title));
   const records =
     names.kind === 'read' ? recordsFor(names.records, workspaceId) : [];
+  const ownSurface = labelValue(session.labels, CMUX_SURFACE_LABEL_PREFIX);
   let decision = decideWorkspaceName({
     current: title.customTitle,
     records,
-    self: {beadId: session.beadId, surfaceIdsHere},
+    self: {beadId: session.beadId, surfaceId: ownSurface, surfaceIdsHere},
     toolPart,
   });
   // home-base-mbnjv.3 (D8, C7): a sticky owner that handed off to this
@@ -650,6 +742,7 @@ export async function syncWorkspaceName(
         self: {
           beadId: session.beadId,
           handedOffFrom: check.beadId,
+          surfaceId: ownSurface,
           surfaceIdsHere,
         },
         toolPart,
@@ -662,6 +755,7 @@ export async function syncWorkspaceName(
     beadId: session.beadId,
     repo: session.repo,
     sessionId: session.sessionId,
+    setBy: null,
     // home-base-bomy5.4.1: the line's sticky claim is this surface.
     surfaceId: labelValue(session.labels, CMUX_SURFACE_LABEL_PREFIX),
     toolPart,
@@ -680,9 +774,9 @@ export async function syncWorkspaceName(
     const appended = appendWorkspaceName(
       {
         ...base,
-        hisName: handedOff?.hisName ?? null,
+        hisName: decision.hisName ?? null,
         nameSet: decision.name,
-        replacedName: handedOff?.replacedName ?? null,
+        replacedName: decision.replacedName ?? null,
       },
       env,
     );
@@ -801,6 +895,209 @@ export function workspaceSyncRecord(outcome: WorkspaceSyncOutcome): {
   kind: string;
 } {
   return {detail: describeWorkspaceSync(outcome), kind: outcome.kind};
+}
+
+// ---------------------------------------------------------------------------
+// Names the SDK sets outside the sync (home-base-ys9t7.9.1 B3)
+// ---------------------------------------------------------------------------
+
+/**
+ * B3: every `new-workspace --name` the SDK and home-base run goes through
+ * recordSdkWorkspaceName (or recordNewWorkspace), so the name is on record as
+ * the tool's. Before, only the sync wrote a line, and a later sync read the
+ * name thread spawn or thread open had set as one Justin typed (rule 4) and
+ * kept it in parentheses for good.
+ */
+export type SdkNameSetter = 'dashboard' | 'open' | 'respawn' | 'spawn' | 'tui';
+
+export interface SdkNamedWorkspace {
+  /** The session bead it was opened for; null when none exists (spawn, untracked). */
+  beadId: string | null;
+  /** What `--name` set, before cmux trims it. */
+  name: string;
+  repo: string | null;
+  sessionId: string | null;
+  setBy: SdkNameSetter;
+}
+
+const UUID_SHAPE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/**
+ * The uuid of the workspace `new-workspace` reported: the payload of its `OK
+ * <payload>` line when that is a uuid, else the tree's workspace whose ref
+ * (`workspace:N`) it is. null when neither identifies one.
+ */
+export function newWorkspaceUuid(
+  payload: string,
+  tree: CmuxTree | null,
+): string | null {
+  if (UUID_SHAPE.test(payload)) return payload;
+  if (tree == null) return null;
+  for (const window of tree.windows) {
+    const found = window.workspaces.find(
+      (workspace) => workspace.ref === payload,
+    );
+    if (found != null) return found.id;
+  }
+  return null;
+}
+
+/** The payload of cmux's `OK <payload>` line, or null. */
+export function okPayload(stdout: string): string | null {
+  return /^OK\s+(\S+)/u.exec(stdout.trim())?.[1] ?? null;
+}
+
+/**
+ * Append the line for a name the SDK set itself. It makes no sticky claim
+ * (no surfaceId): the session it was opened for claims it on its first sync
+ * (rule 0), or renames it after its own title (rule 2).
+ */
+export function recordSdkWorkspaceName(
+  input: SdkNamedWorkspace & {
+    env: EnvLike;
+    /** Carried by respawn from the line it restores; null otherwise. */
+    hisName?: string | null;
+    now?: Date;
+    replacedName?: string | null;
+    workspaceId: string;
+  },
+): {error: string; kind: 'failed'} | {kind: 'ok'} {
+  const name = stored(input.name);
+  return appendWorkspaceName(
+    {
+      at: (input.now ?? new Date()).toISOString(),
+      beadId: input.beadId,
+      hisName: input.hisName ?? null,
+      nameSet: name,
+      replacedName: input.replacedName ?? null,
+      repo: input.repo,
+      sessionId: input.sessionId,
+      setBy: input.setBy,
+      surfaceId: null,
+      toolPart: name,
+      workspaceId: input.workspaceId,
+    },
+    input.env,
+  );
+}
+
+export type NewWorkspaceRecordOutcome =
+  | {kind: 'failed'; reason: string}
+  | {kind: 'recorded'; workspaceId: string};
+
+/**
+ * After a successful `new-workspace --name`: the new workspace's uuid (from
+ * the payload, else from `tree`, the tree read after it, which the caller
+ * reads only when the payload is not a uuid) and the record line. A failure
+ * is returned to be said, never thrown: the workspace exists either way.
+ */
+export function recordNewWorkspaceFrom(
+  input: SdkNamedWorkspace & {
+    env: EnvLike;
+    hisName?: string | null;
+    now?: Date;
+    payload: string;
+    replacedName?: string | null;
+    tree: CmuxTreeRead | null;
+  },
+): NewWorkspaceRecordOutcome {
+  if (input.tree?.kind === 'unreadable') {
+    return {
+      kind: 'failed',
+      reason: `the new workspace ${input.payload} could not be found: ${input.tree.reason}`,
+    };
+  }
+  const workspaceId = newWorkspaceUuid(
+    input.payload,
+    input.tree?.kind === 'read' ? input.tree.tree : null,
+  );
+  if (workspaceId == null) {
+    return {
+      kind: 'failed',
+      reason: `cmux reported the new workspace as ${input.payload}, which no open workspace has as its ref`,
+    };
+  }
+  const appended = recordSdkWorkspaceName({...input, workspaceId});
+  return appended.kind === 'ok'
+    ? {kind: 'recorded', workspaceId}
+    : {kind: 'failed', reason: appended.error};
+}
+
+/** Whether the payload alone names the workspace (no tree read needed). */
+export function payloadIsUuid(payload: string): boolean {
+  return UUID_SHAPE.test(payload);
+}
+
+/** recordNewWorkspaceFrom, reading the tree through `run` when needed. */
+export async function recordNewWorkspace(
+  input: SdkNamedWorkspace & {
+    env: EnvLike;
+    hisName?: string | null;
+    now?: Date;
+    payload: string;
+    replacedName?: string | null;
+    run: CmuxRunner;
+  },
+): Promise<NewWorkspaceRecordOutcome> {
+  const tree = payloadIsUuid(input.payload)
+    ? null
+    : await readCmuxTree(input.run);
+  return recordNewWorkspaceFrom({...input, tree});
+}
+
+/**
+ * Records the name a `new-workspace --name` command set, from that command's
+ * stdout. Built where a command is run for real (the dashboard); a caller
+ * without one records nothing, so a test with a fake runner never writes the
+ * real file.
+ */
+export type NameRecorder = (
+  intent: SdkNamedWorkspace,
+  stdout: string,
+) => Promise<NewWorkspaceRecordOutcome>;
+
+export function realNameRecorder(env: EnvLike): NameRecorder {
+  return async (intent, stdout) => {
+    const payload = okPayload(stdout);
+    if (payload == null) {
+      return {
+        kind: 'failed',
+        reason: `cmux printed no "OK <workspace>" line: ${JSON.stringify(stdout.trim().slice(0, 200))}`,
+      };
+    }
+    return await recordNewWorkspace({
+      ...intent,
+      env,
+      payload,
+      run: realCmuxRunner(undefined, env),
+    });
+  };
+}
+
+/**
+ * B3 for cmux-restart's respawn: a session put back in a NEW workspace after
+ * a cmux restart gets the name its old workspace had. That name is the tool's
+ * only when a line for the OLD workspace set exactly it, and then the new
+ * workspace inherits that line's bead and hisName / replacedName. Otherwise
+ * the name may be one Justin typed, so null: nothing is recorded, and the
+ * next sync keeps it as his (rule 4), the cautious side.
+ */
+export function respawnedNameLine(
+  records: readonly WorkspaceNameRecord[],
+  fromWorkspaceId: string,
+  name: string,
+): WorkspaceNameRecord | null {
+  return newestRecordNamed(recordsFor(records, fromWorkspaceId), stored(name));
+}
+
+/** One line for the output of the command that opened the workspace. */
+export function describeNewWorkspaceRecord(
+  outcome: NewWorkspaceRecordOutcome,
+): string {
+  return outcome.kind === 'recorded'
+    ? `its name is recorded as the tool's in workspace-names.jsonl (${outcome.workspaceId})`
+    : `⚠️ its name was NOT recorded as the tool's, so a later sync may keep it as if Justin had typed it: ${outcome.reason}`;
 }
 
 // ---------------------------------------------------------------------------

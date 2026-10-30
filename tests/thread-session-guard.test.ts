@@ -848,7 +848,9 @@ describe('install and doctor follow the knob (AC4)', () => {
         : THREAD_GUARD_HOOK_COMMAND;
       expect(doctor(root, env).extra).toEqual([
         dispatch
-          ? `PreToolUse: \`${written}\` runs only thread guard, and componentConfig.thread.handoff.successor is off here`
+          ? // The quota brake (ys9t7.5.4) is the other PreToolUse handler; its
+            // knob, componentConfig.thread.quota.mode, is off here too.
+            `PreToolUse: \`${written}\` runs only thread guard, thread brake, and componentConfig.thread.handoff.successor, componentConfig.thread.quota.mode is off here`
           : `PreToolUse: \`${written}\` is installed, but componentConfig.thread.handoff.successor is off here`,
       ]);
       const lines = install(root, env);

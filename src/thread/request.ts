@@ -47,11 +47,32 @@ import {
   SESSION_BEAD_PRIORITY,
   sidLabel,
   sightingIn,
+  titleSetLabelEdit,
 } from './session-bead';
 import {linkContinuation} from './session-handoff';
 import {appendSessionSighting, readSessionSightings} from './session-index';
 import {sessionBeadsKnob, sessionIdFrom} from './session-select';
 import {workspaceNameFollowUp} from './workspace-name-session';
+
+/**
+ * home-base-ys9t7.9.1: the `title-set:` label edit that goes into the SAME
+ * `br update` as a new session title, so `thread status` knows exactly which
+ * requests were filed after it. Nothing when componentConfig.thread.
+ * titleSummary is off (the old behaviour, exactly). `now` is read at the
+ * rename, after any request was filed, unless a test injects one.
+ */
+async function titleSetEdit(input: {
+  cwd: string;
+  env: EnvLike;
+  labels: readonly string[];
+  now: Date | undefined;
+}): Promise<{addLabels: string[]; removeLabels: string[]}> {
+  const {resolveThreadConfig} = await import('./config');
+  if (!resolveThreadConfig({cwd: input.cwd, env: input.env}).titleSummary) {
+    return {addLabels: [], removeLabels: []};
+  }
+  return titleSetLabelEdit(input.labels, input.now ?? new Date());
+}
 
 export interface ThreadRequestOptions {
   /**
@@ -386,8 +407,15 @@ export async function fileRequest(
     let renameFailure: string | null = null;
     const autoTitled = usable.bead.labels.includes(AUTO_TITLE_LABEL);
     if (autoTitled && !linked.oldTitleIsAuto) {
+      const stamp = await titleSetEdit({
+        cwd,
+        env,
+        labels: usable.bead.labels,
+        now: options.now,
+      });
       const renamed = brUpdate({db: usable.db, env}, usable.bead.id, {
-        removeLabels: [AUTO_TITLE_LABEL],
+        addLabels: stamp.addLabels,
+        removeLabels: [AUTO_TITLE_LABEL, ...stamp.removeLabels],
         title: linked.oldTitle,
       });
       if (renamed.kind === 'failed') {
@@ -592,8 +620,15 @@ export async function fileRequest(
     usable.kind === 'found' &&
     usable.bead.labels.includes(AUTO_TITLE_LABEL)
   ) {
+    const stamp = await titleSetEdit({
+      cwd,
+      env,
+      labels: usable.bead.labels,
+      now: options.now,
+    });
     const renamed = brUpdate({db: usable.db, env}, usable.bead.id, {
-      removeLabels: [AUTO_TITLE_LABEL],
+      addLabels: stamp.addLabels,
+      removeLabels: [AUTO_TITLE_LABEL, ...stamp.removeLabels],
       title: filedTitle,
     });
     if (renamed.kind === 'failed') {
@@ -765,6 +800,8 @@ export interface ThreadTitleOptions {
   cmux?: CmuxRunner;
   cwd?: string;
   env?: EnvLike;
+  /** The title-set time (home-base-ys9t7.9.1); tests inject it. */
+  now?: Date;
   sessionId: string | null;
   title: string | null;
 }
@@ -806,8 +843,15 @@ export async function renameSession(
   if (refusal != null) return refusal;
   const found = resolution as Extract<SessionResolution, {kind: 'found'}>;
   const target: BrTarget = {db: found.db, env};
+  const stamp = await titleSetEdit({
+    cwd,
+    env,
+    labels: found.bead.labels,
+    now: options.now,
+  });
   const renamed = brUpdate(target, found.bead.id, {
-    removeLabels: [AUTO_TITLE_LABEL],
+    addLabels: stamp.addLabels,
+    removeLabels: [AUTO_TITLE_LABEL, ...stamp.removeLabels],
     title,
   });
   if (renamed.kind === 'failed') {

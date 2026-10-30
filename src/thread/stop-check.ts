@@ -93,6 +93,7 @@ import {
 import {resolveThreadConfig} from './config';
 import {THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES} from './defaults';
 import {findTranscript} from './facts';
+import {sessionBraked} from './quota-brake-state';
 import {
   forEachTranscriptLine,
   substantiveUserText,
@@ -142,6 +143,7 @@ export function looksLikeStatusReport(text: string | null): boolean {
  */
 export type StopCheckWhy =
   | 'knobOff'
+  | 'quotaBraked'
   | 'subagent'
   | 'stopHookActive'
   | 'markerPresent'
@@ -173,6 +175,13 @@ export interface TurnMeasure {
 export interface StopCheckInputs {
   /** Present only for a subagent's Stop. Its presence is the role discriminant. */
   agentId: string | null;
+  /**
+   * The spend quota's brake has this session braked in enforce mode
+   * (quota-brake-state.ts sessionBraked; home-base-ys9t7.5.4 item 5). Absent
+   * means not braked. A braked session must be let stop: its tool calls are
+   * denied, so a block here would loop it on denials.
+   */
+  braked?: boolean;
   /**
    * When this session last archived a report. Three states on purpose — see
    * `ArchiveProbe`.
@@ -251,6 +260,7 @@ export function decideStopCheck(inputs: StopCheckInputs): StopCheckDecision {
 
   if (!inputs.enforce) return pass('knobOff');
   if (inputs.agentId != null && inputs.agentId !== '') return pass('subagent');
+  if (inputs.braked === true) return pass('quotaBraked');
   if (inputs.stopHookActive) return pass('stopHookActive');
   if (inputs.markerExists) return pass('markerPresent');
   // K12: in `reportShaped` (the default, and an absent mode) a non-report
@@ -308,6 +318,8 @@ export function describeStopCheck(decision: StopCheckDecision): string {
   switch (decision.why) {
     case 'knobOff':
       return 'pass: componentConfig.thread.enforce is off';
+    case 'quotaBraked':
+      return 'pass: the spend quota has this session braked (enforce); a block would loop it on denials';
     case 'subagent':
       return 'pass: subagent Stop (agent_id present)';
     case 'stopHookActive':
@@ -704,9 +716,16 @@ export function runThreadStopCheck(args?: {
     const mode = config.enforceMode;
     const minTurnMinutes = config.enforceMinTurnMinutes;
     logged.mode = mode;
+    // The quota brake's cached decision: one small file read, and only where
+    // the thread knob is on (decideStopCheck tests enforce first anyway).
+    const braked =
+      enforce && sessionId != null && sessionId !== ''
+        ? sessionBraked(sessionId, env)
+        : false;
     const cheap = decideStopCheck({
       agentId,
       archive: {error: 'not measured yet', kind: 'unknown'},
+      braked,
       enforce,
       lastAssistantMessage,
       lastUserMessageAt: null,
@@ -757,6 +776,7 @@ export function runThreadStopCheck(args?: {
     const decision = decideStopCheck({
       agentId,
       archive,
+      braked,
       enforce,
       lastAssistantMessage,
       lastUserMessageAt: measured.at,

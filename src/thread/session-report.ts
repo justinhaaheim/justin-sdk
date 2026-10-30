@@ -82,6 +82,7 @@ import {
   resolveSessionId,
   userLines,
 } from './session-model';
+import {SESSION_NAME_LIMIT} from './session-name';
 import {
   deriveStatus,
   statusCounts,
@@ -161,6 +162,8 @@ export type ReportLoad =
       /** The dashboard's "Optional" line, null when no P1–P4 is open. */
       optional: OptionalLine | null;
       status: SessionStatus;
+      /** componentConfig.thread.titleSummary (home-base-ys9t7.9.1). */
+      titleSummary: boolean;
     }
   | {detail: string; kind: 'unreadable'}
   | {kind: 'disabled'; reason: string}
@@ -169,11 +172,11 @@ export type ReportLoad =
 async function knobOn(
   cwd: string,
   env: EnvLike,
-): Promise<{ok: false; reason: string} | {ok: true}> {
+): Promise<{ok: false; reason: string} | {ok: true; titleSummary: boolean}> {
   const {resolveThreadConfig} = await import('./config');
   const config = resolveThreadConfig({cwd, env});
   return config.sessionBeads
-    ? {ok: true}
+    ? {ok: true, titleSummary: config.titleSummary}
     : {
         ok: false,
         reason: `componentConfig.thread.sessionBeads is not true (resolved from: ${config.sessionBeadsSource})`,
@@ -249,6 +252,7 @@ async function loadForReport(input: {
     model,
     optional: optionalLine(counts, model.sessionBeadId),
     status,
+    titleSummary: knob.titleSummary,
   };
 }
 
@@ -410,6 +414,40 @@ function allRequestsClosedLine(
   };
 }
 
+/**
+ * home-base-ys9t7.9.1: Justin's own example of a good summary (home-base-
+ * ys9t7.9, 2026-10-30), quoted in the item so the session sees the shape.
+ */
+export const TITLE_SUMMARY_EXAMPLE =
+  'Build shortcut helper app; make installable via link; iterate on inspect utility';
+
+function titleSummaryLine(
+  item: Extract<MarkItem, {kind: 'titleSummary'}>,
+): MarkView {
+  const n = item.since.length;
+  let why: string;
+  switch (item.why) {
+    case 'autoTitle':
+      why = `The session is still titled with the first line of Justin's first prompt ("${item.title}").`;
+      break;
+    case 'filedSince':
+      why = `The session title ("${item.title}") was set before ${n === 1 ? 'this request was' : `these ${n} requests were`} filed: ${item.since.map((request) => `"${request.title}"`).join('; ')}.`;
+      break;
+    case 'unrecorded':
+      why = `The session title ("${item.title}") may not cover all ${item.requestCount} of this session's requests: when it was set is not recorded.`;
+      break;
+  }
+  const chain = item.continues != null;
+  const extend = chain
+    ? ` This session continues ${item.continues}: extend the summary it inherited rather than replace it.`
+    : '';
+  return {
+    code: sdkRun('thread title "…"'),
+    sub: [],
+    text: `${why} Rewrite it as a short summary, under ${SESSION_NAME_LIMIT} characters, of everything this session${chain ? ' and the sessions it continues' : ''} asked for and talked about, done or open, like "${TITLE_SUMMARY_EXAMPLE}".${extend} It names the inbox entry and the cmux workspace.`,
+  };
+}
+
 /** One "What to mark" entry, in plain words, with the command that fixes it. */
 export function markLine(item: MarkItem): MarkView {
   switch (item.kind) {
@@ -482,6 +520,8 @@ export function markLine(item: MarkItem): MarkView {
         sub: [],
         text: `Every request is closed, but "${item.bead.title}" (${item.bead.id}) is still undecided. If it decides work Justin wants, that work is an open request:`,
       };
+    case 'titleSummary':
+      return titleSummaryLine(item);
     case 'autoTitle':
       return {
         code: sdkRun('thread title "…"'),
@@ -589,7 +629,9 @@ export function renderThreadStatus(
     }),
     style,
   );
-  const marks = whatToMark(load.model, load.status, load.created)
+  const marks = whatToMark(load.model, load.status, load.created, {
+    titleSummary: load.titleSummary,
+  })
     .map(markLine)
     .map((mark) => ({...mark, text: tildeText(mark.text)}));
   let markBlock: string;

@@ -26,6 +26,7 @@
  */
 
 import type {EnvLike} from './paths';
+import type {NameRecorder} from './workspace-name';
 
 import {spawn} from 'node:child_process';
 import {appendFileSync, existsSync, mkdirSync} from 'node:fs';
@@ -48,6 +49,7 @@ import {lookupPanes, realPaneSources} from './pane-join';
 import {threadsStateDir} from './paths';
 import {INBOX_DEFAULT_DAYS, inboxJson, readInbox} from './session-inbox';
 import {sessionDisplayName} from './session-name';
+import {describeNewWorkspaceRecord, realNameRecorder} from './workspace-name';
 
 export type InboxLoad =
   | {inbox: DashboardInbox; kind: 'read'}
@@ -208,6 +210,11 @@ export interface DashboardServer {
 export interface DashboardServerOptions {
   /** Read fresh on every page load, every /api/state and every action. */
   loadInbox: () => Promise<InboxLoad>;
+  /**
+   * home-base-ys9t7.9.1 B3: records the name an `o` (new-workspace) action
+   * set. Absent: nothing is recorded (tests with a fake runner).
+   */
+  nameRecorder?: NameRecorder;
   /** 0 (the default) asks for an ephemeral port. */
   port?: number;
   runner: DashboardRunner;
@@ -449,11 +456,22 @@ export function createDashboardServer(
         {error: `${name}: ran ${commandText} and it failed (${why}).`},
       );
     }
+    // home-base-ys9t7.9.1 B3: an `o` that opened a workspace records its
+    // name as the tool's; a failure is said in the message, never a failed
+    // action (the workspace is open).
+    const named =
+      plan.command.kind === 'argv' &&
+      plan.command.nameRecord != null &&
+      options.nameRecorder != null
+        ? describeNewWorkspaceRecord(
+            await options.nameRecorder(plan.command.nameRecord, run.stdout),
+          )
+        : null;
     return finish(
       200,
       {command: commandText, exit: 0, outcome: 'ran', output, reason: null},
       {
-        message: `${name}: ran ${commandText} (exit 0)${output === '' ? '' : `: ${output.split('\n')[0] ?? ''}`}`,
+        message: `${name}: ran ${commandText} (exit 0)${output === '' ? '' : `: ${output.split('\n')[0] ?? ''}`}${named == null ? '' : `; ${named}`}`,
         ok: true,
       },
     );
@@ -588,6 +606,8 @@ export interface DashboardWebOptions {
   env?: EnvLike;
   /** Tests replace the live inbox read. */
   loadInbox?: () => Promise<InboxLoad>;
+  /** Used only with `runner`: the real runner records with the real one. */
+  nameRecorder?: NameRecorder;
   /** Called once the server is listening (tests drive it from here). */
   onReady?: (server: DashboardServer) => void;
   /** False: only print the URL. */
@@ -610,6 +630,8 @@ export async function runThreadDashboardWeb(
   const stateDir = threadsStateDir(env);
   const server = createDashboardServer({
     loadInbox: options.loadInbox ?? liveInboxLoader({cwd, days, env}),
+    nameRecorder:
+      options.runner == null ? realNameRecorder(env) : options.nameRecorder,
     port: options.port,
     runner: options.runner ?? realDashboardRunner({cwd, env}),
     stateDir,

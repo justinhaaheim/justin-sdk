@@ -41,6 +41,8 @@ import {
   HANDOFF_DEFAULTS,
   HANDOFF_PERMISSION_MODES,
   HANDOFF_PREDECESSOR_MODES,
+  QUOTA_DEFAULTS,
+  QUOTA_MODES,
   THREAD_DEFAULT_ANSWER_UI,
   THREAD_DEFAULT_AUTO_COMMIT,
   THREAD_DEFAULT_AUTO_PUSH,
@@ -57,6 +59,7 @@ import {
   THREAD_DEFAULT_PINNED_PROJECTS,
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
+  THREAD_DEFAULT_TITLE_SUMMARY,
 } from './thread/defaults';
 import {TIME_CHECK_DEFAULTS} from './time-check';
 import {USAGE_CHECK_DEFAULTS} from './usage-check';
@@ -413,6 +416,86 @@ const componentConfigSchema = z
           .describe(
             'PINNED PROJECTS (home-base-yukaf.9 D-PINS, built 2026-10-18). DEFAULT []. Repo folder names (as `thread inbox` shows them, e.g. "home-base") that `thread inbox --by-repo` and the threads TUI’s "by repo" grouping (g) list first, in this order; the other repos follow, newest session first. Matched ignoring case; a pinned repo with no session in view adds nothing. A later config layer replaces the list. Only reorders: nothing is hidden or added.',
           ),
+        quota: z
+          .looseObject({
+            attendedGraceMinutes: z
+              .number()
+              .nonnegative()
+              .optional()
+              .describe(
+                'A group whose latest line Justin typed is younger than this many minutes is attended: the week floor does not brake its running sessions, because his own prompt just started the work (D4). Handoff and spawn ignore it: the floor applies to them always.',
+              ),
+            chainWeekPercent: z
+              .number()
+              .min(0)
+              .max(100)
+              .optional()
+              .describe(
+                'A group (sessions linked by handoff and spawn labels) may spend at most this percent of the week since the latest line Justin typed in any of its sessions (D2).',
+              ),
+            dollarsPerWeekPercent: z
+              .looseObject({
+                fable: z
+                  .number()
+                  .positive()
+                  .optional()
+                  .describe('Fable (and Mythos) dollars per 1 % of the week.'),
+                opus: z
+                  .number()
+                  .positive()
+                  .optional()
+                  .describe('Opus dollars per 1 % of the week.'),
+                other: z
+                  .number()
+                  .positive()
+                  .optional()
+                  .describe(
+                    'Dollars per 1 % of the week for haiku and every other priced family.',
+                  ),
+                sonnet: z
+                  .number()
+                  .positive()
+                  .optional()
+                  .describe('Sonnet dollars per 1 % of the week.'),
+              })
+              .optional()
+              .describe(
+                'List-price dollars (the session-cost estimate) per 1 % of the week, per model family (D1). Fitted by `claude-usage calibrate` on 2026-10-30 (home-base-ys9t7.5.1). `other` covers haiku and any other priced family; its default is the most expensive per percent, so an unfitted family is never undercounted.',
+              ),
+            floorWeekPercent: z
+              .number()
+              .min(0)
+              .max(100)
+              .optional()
+              .describe(
+                'At or above this percent of the week (the newer of the statusline store live.json and the hourly samples, all-models or any per-model week), unattended work is over (D4).',
+              ),
+            mode: z
+              .enum(QUOTA_MODES)
+              .optional()
+              .describe(
+                'THE FEATURE KNOB (request home-base-ys9t7.5, D5). DEFAULT "off": nothing is computed or enforced. "observe": every verdict is computed and what it would have refused is logged, and everything is allowed. "enforce": the handoff and spawn gates refuse and the brake denies.',
+              ),
+            projectDayWeekPercent: z
+              .number()
+              .min(0)
+              .max(100)
+              .optional()
+              .describe(
+                'A project (a repo and its worktrees) may spend at most this percent of the week in a rolling 24 hours, counting only requests after the latest line Justin typed in any of its sessions (D3).',
+              ),
+            recheckSeconds: z
+              .number()
+              .positive()
+              .optional()
+              .describe(
+                'A running session recomputes its cached quota verdict at most this often (D6).',
+              ),
+          })
+          .optional()
+          .describe(
+            'thread.quota: the spend quota that stops a handoff chain or a project from using up the week while Justin is away (request home-base-ys9t7.5). Every limit is in percent of the week. Each field resolves on its own, default ← user file ← project file.',
+          ),
         render: z
           .looseObject({
             emojiHeader: z
@@ -447,6 +530,12 @@ const componentConfigSchema = z
           .optional()
           .describe(
             'DEPRECATED (2026-10-05, home-base-39co9 D2): it has NO EFFECT. It used to let a SessionStart hook create the session’s thread bead before anything happened in it; the bead is now created by `thread capture` on the session’s first prompt, and `thread start --hook` does nothing. Still accepted so configs that carry it keep parsing; delete it from your config when convenient.',
+          ),
+        titleSummary: z
+          .boolean()
+          .optional()
+          .describe(
+            'SESSION TITLE AS A SUMMARY (home-base-ys9t7.9.1, built 2026-10-30). DEFAULT FALSE. When true, every time a session’s title is set (`thread title`, the first request’s auto-title, or a successor inheriting its predecessor’s title) the session bead gets a `title-set:<time>` label, and `thread status` lists a "What to mark" item asking for a short summary of everything the session, and the sessions it continues, asked for and talked about, whenever requests were filed after the title was last set. The title is what the inbox shows and what `nameWorkspaces` names the cmux workspace after. Off: the old auto-title item only, and no label.',
           ),
       })
       .optional()
@@ -774,10 +863,12 @@ export const DEFAULT_COMPONENT_CONFIG = {
     nudge: THREAD_DEFAULT_NUDGE,
     openSince: THREAD_DEFAULT_OPEN_SINCE,
     pinnedProjects: THREAD_DEFAULT_PINNED_PROJECTS,
+    quota: QUOTA_DEFAULTS,
     render: {emojiHeader: THREAD_DEFAULT_EMOJI_HEADER},
     repoDir: '~/Dev/threads',
     sessionBeads: THREAD_DEFAULT_SESSION_BEADS,
     stages: THREAD_DEFAULT_STAGES,
+    titleSummary: THREAD_DEFAULT_TITLE_SUMMARY,
     // No `startOnSessionStart`: deprecated, no effect, so no default to print
     // (home-base-39co9 D2).
   },

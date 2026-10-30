@@ -43,8 +43,11 @@ import {oneLine} from './ask-format';
 import {cmuxArgv, realCmuxRunner, resolveCmuxBinary} from './cmux';
 import {primaryCheckoutOf, resolveRepoTag} from './config';
 import {liveSocketPath, socketSettingsJson, zshWord} from './respawn';
+import {SPAWN_KICKOFF_ENV, SPAWNED_BY_SESSION_ENV} from './session-bead';
 import {sessionDisplayName} from './session-name';
+import {sessionIdFrom} from './session-select';
 import {spawnGate} from './spawn-gate';
+import {describeNewWorkspaceRecord, recordNewWorkspace} from './workspace-name';
 
 export interface SpawnOptions {
   /** Where a relative <dir> is resolved from (default: process.cwd()). */
@@ -214,20 +217,38 @@ export function spawnWorkspaceName(
   return full.length > NAME_LIMIT ? `${full.slice(0, NAME_LIMIT - 1)}…` : full;
 }
 
-/** The text `new-workspace --command` types into the new pane's zsh. */
+/**
+ * The text `new-workspace --command` types into the new pane's zsh.
+ *
+ * D8 (home-base-ys9t7.5.4 item 3): environment assignments come first, so
+ * claude and its hooks carry them. SPAWNED_BY_SESSION_ENV names the session
+ * that ran `thread spawn` (the child's capture links the two beads);
+ * SPAWN_KICKOFF_ENV says the first prompt is the kickoff, typed by spawn and
+ * not by Justin (the quota drops it). Neither is written when it does not
+ * apply.
+ */
 export function spawnCommand(input: {
   kickoff: string | null;
   model: string | null;
   name: string;
   remoteControl: boolean;
+  /** The session running `thread spawn`, or null outside one. */
+  spawnedBySession?: string | null;
 }): string {
+  const assignments: string[] = [];
+  if (input.spawnedBySession != null) {
+    assignments.push(
+      `${SPAWNED_BY_SESSION_ENV}=${zshWord(input.spawnedBySession)}`,
+    );
+  }
+  if (input.kickoff != null) assignments.push(`${SPAWN_KICKOFF_ENV}=1`);
   const words = ['claude'];
   if (input.model != null) words.push('--model', input.model);
   if (input.remoteControl) words.push('--remote-control', input.name);
   // The prompt is claude's positional argument (`claude [options] [prompt]`),
   // so it goes last, after every flag.
   if (input.kickoff != null) words.push(input.kickoff);
-  return words.map(zshWord).join(' ');
+  return [...assignments, ...words.map(zshWord)].join(' ');
 }
 
 /**
@@ -275,11 +296,15 @@ export async function spawnSession(
   // ---- the plan: every argument, before cmux is touched ----
   const workspaceName = spawnWorkspaceName(dir, name, env);
   const {remoteControl} = options;
+  // D8: the session running this, so the child links to it (item 3).
+  const parent = sessionIdFrom(null, env);
+  const spawnedBySession = parent.ok ? parent.id : null;
   const command = spawnCommand({
     kickoff,
     model,
     name: workspaceName,
     remoteControl,
+    spawnedBySession,
   });
   const window = spawnWindow(env);
   const spawnArgs = ['new-workspace', '--name', workspaceName];
@@ -366,6 +391,22 @@ export async function spawnSession(
     return stop(1, `cmux did not confirm a new workspace: ${cmux}`);
   }
   fields.splice(1, 0, {label: 'Workspace id', value: ref});
+  // home-base-ys9t7.9.1 B3: the name is the tool's, so the new session's
+  // first naming sync replaces it instead of keeping it as Justin's.
+  const recorded = await recordNewWorkspace({
+    beadId: null,
+    env,
+    name: workspaceName,
+    payload: ref,
+    repo: basename(primaryCheckoutOf(dir)),
+    run,
+    sessionId: null,
+    setBy: 'spawn',
+  });
+  fields.push({
+    label: 'Name record',
+    value: describeNewWorkspaceRecord(recorded),
+  });
   return {exitCode: 0, lines: render('Opened a new session', '🌱')};
 }
 

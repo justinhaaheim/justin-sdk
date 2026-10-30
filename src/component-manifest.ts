@@ -63,6 +63,9 @@ import {
   THREAD_CAPTURE_HOOK_COMMAND,
   THREAD_CAPTURE_HOOK_EVENTS,
   THREAD_CAPTURE_HOOK_FINGERPRINT,
+  THREAD_BRAKE_HOOK_COMMAND,
+  THREAD_BRAKE_HOOK_EVENT,
+  THREAD_BRAKE_HOOK_FINGERPRINT,
   THREAD_GUARD_HOOK_COMMAND,
   THREAD_GUARD_HOOK_EVENT,
   THREAD_GUARD_HOOK_FINGERPRINT,
@@ -478,6 +481,13 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
         command: THREAD_GUARD_HOOK_COMMAND,
         event: THREAD_GUARD_HOOK_EVENT,
         fingerprint: THREAD_GUARD_HOOK_FINGERPRINT,
+      },
+      // The spend quota's brake (home-base-ys9t7.5 D6): PreToolUse, every
+      // tool, only where componentConfig.thread.quota.mode is not off.
+      {
+        command: THREAD_BRAKE_HOOK_COMMAND,
+        event: THREAD_BRAKE_HOOK_EVENT,
+        fingerprint: THREAD_BRAKE_HOOK_FINGERPRINT,
       },
     ],
     purpose:

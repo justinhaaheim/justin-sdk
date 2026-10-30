@@ -110,6 +110,15 @@ export const THREAD_DEFAULT_NUDGE = true;
 export const THREAD_DEFAULT_NAME_WORKSPACES = false;
 
 /**
+ * Whether a session keeps its title a short summary of the whole conversation
+ * (home-base-ys9t7.9.1): `thread status` asks for a refresh when requests were
+ * filed after the title was last set, the title-set time is recorded on the
+ * session bead, and a successor is asked to extend its predecessor's summary.
+ * Off until Justin turns it on (feature-knobs rule).
+ */
+export const THREAD_DEFAULT_TITLE_SUMMARY = false;
+
+/**
  * Repo folder names that `thread inbox --by-repo` and the threads TUI's "by
  * repo" grouping list first, in this order (home-base-yukaf.9, D-PINS). Not a
  * feature gate: it only reorders groups. Default none.
@@ -263,4 +272,50 @@ export const HANDOFF_DEFAULTS = {
     maxSessionPercent: 85,
     maxWeekPercent: 90,
   },
+} as const;
+
+// ---------------------------------------------------------------------------
+// componentConfig.thread.quota (request home-base-ys9t7.5, D5)
+// ---------------------------------------------------------------------------
+
+/**
+ * What the spend quota does (D5): `off` computes nothing, `observe` computes
+ * every verdict and logs what it would have refused, `enforce` refuses and
+ * denies. The verdict itself never reads the mode; its callers do.
+ */
+export const QUOTA_MODES = ['off', 'observe', 'enforce'] as const;
+
+export type QuotaMode = (typeof QUOTA_MODES)[number];
+
+/** The model families a quota rate is set for (D1). */
+export const QUOTA_RATE_FAMILIES = [
+  'fable',
+  'opus',
+  'sonnet',
+  'other',
+] as const;
+
+export type QuotaRateFamily = (typeof QUOTA_RATE_FAMILIES)[number];
+
+/**
+ * The quota's defaults (D5). `mode: 'off'` is the feature knob
+ * (feature-knobs rule). The dollar rates were fitted against the session-cost
+ * estimator by `claude-usage calibrate` on 2026-10-30 (home-base-ys9t7.5.1):
+ * list-price dollars per 1 % of Justin's week, per model family. `other`
+ * (haiku and any other priced family) takes the most expensive per percent,
+ * fable's, so an unfitted family is never undercounted.
+ */
+export const QUOTA_DEFAULTS = {
+  attendedGraceMinutes: 30,
+  chainWeekPercent: 5,
+  dollarsPerWeekPercent: {
+    fable: 12.9,
+    opus: 32.3,
+    other: 12.9,
+    sonnet: 16.8,
+  },
+  floorWeekPercent: 75,
+  mode: 'off' as QuotaMode,
+  projectDayWeekPercent: 10,
+  recheckSeconds: 60,
 } as const;

@@ -173,12 +173,22 @@ function parseJson(text: string): unknown {
   }
 }
 
-/** Every window, workspace and surface, by uuid. */
-export async function readCmuxTree(run: CmuxRunner): Promise<CmuxTreeRead> {
-  const args = ['--json', '--id-format', 'both', 'tree', '--all'];
-  const call = await run(args);
-  if (call.kind === 'failed') return {kind: 'unreadable', reason: call.reason};
-  const parsed = treeSchema.safeParse(parseJson(call.stdout));
+/** The argv after `cmux` that readCmuxTree runs. */
+export const CMUX_TREE_ARGS = [
+  '--json',
+  '--id-format',
+  'both',
+  'tree',
+  '--all',
+] as const;
+
+/**
+ * The output of `cmux <CMUX_TREE_ARGS>` parsed; for a caller that runs it
+ * itself (the threads TUI runs commands synchronously, home-base-ys9t7.9.1).
+ */
+export function parseCmuxTree(stdout: string): CmuxTreeRead {
+  const args = CMUX_TREE_ARGS;
+  const parsed = treeSchema.safeParse(parseJson(stdout));
   if (!parsed.success) {
     return {
       kind: 'unreadable',
@@ -202,6 +212,13 @@ export async function readCmuxTree(run: CmuxRunner): Promise<CmuxTreeRead> {
       })),
     },
   };
+}
+
+/** Every window, workspace and surface, by uuid. */
+export async function readCmuxTree(run: CmuxRunner): Promise<CmuxTreeRead> {
+  const call = await run(CMUX_TREE_ARGS);
+  if (call.kind === 'failed') return {kind: 'unreadable', reason: call.reason};
+  return parseCmuxTree(call.stdout);
 }
 
 /** The workspace that holds a surface now, or null when no workspace does. */

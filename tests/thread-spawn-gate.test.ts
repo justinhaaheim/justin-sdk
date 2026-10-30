@@ -125,6 +125,8 @@ describe('thread spawn and the handoff gate', () => {
     expect(cmux.calls.map((args) => args[0])).toEqual([
       'ping',
       'new-workspace',
+      // home-base-ys9t7.9.1 B3: the tree read that finds workspace:9's uuid.
+      '--json',
     ]);
   });
 

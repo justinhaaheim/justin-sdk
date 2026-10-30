@@ -55,10 +55,15 @@ function world(): World {
     CMUX_SOCKET_PATH: SOCK,
     HOME: home,
     JUSTIN_SDK_HEALTH_NOTICES: 'off',
+    // home-base-ys9t7.9.1 B3: spawn records the name it set; never in the
+    // real ~/.local/state/justin-threads.
+    JUSTIN_THREADS_STATE_DIR: join(root, 'state'),
     XDG_CONFIG_HOME: join(root, 'xdg'),
   };
   return {env, file, home, plain, root, tagged, worktree};
 }
+
+const NEW_WS = 'DDDDDDDD-0000-4000-8000-00000000000D';
 
 /** A fake cmux: records every call; ping and new-workspace answer as cmux does. */
 function fakeCmux(answers: Partial<Record<string, CmuxCall>> = {}) {
@@ -67,6 +72,19 @@ function fakeCmux(answers: Partial<Record<string, CmuxCall>> = {}) {
     calls.push([...args]);
     const preset = answers[args[0] ?? ''];
     if (preset != null) return Promise.resolve(preset);
+    if (args.includes('tree')) {
+      // The tree read after new-workspace, to find workspace:9's uuid (B3).
+      const tree = {
+        windows: [
+          {
+            id: 'W-1',
+            ref: 'window:1',
+            workspaces: [{id: NEW_WS, panes: [], ref: 'workspace:9'}],
+          },
+        ],
+      };
+      return Promise.resolve({kind: 'ok', stdout: JSON.stringify(tree)});
+    }
     const stdout = args[0] === 'ping' ? 'PONG\n' : 'OK workspace:9\n';
     return Promise.resolve({kind: 'ok', stdout});
   };
@@ -94,9 +112,17 @@ function argAfter(call: string[] | undefined, flag: string): string | null {
   return at === -1 ? null : (call[at + 1] ?? null);
 }
 
-/** Every word zsh parses from `command`, with claude swapped for printf. */
+/**
+ * Every word zsh parses from `command`, with claude swapped for printf. The
+ * leading NAME=value assignments (D8) stay; a command with no claude where
+ * expected throws rather than run, so no test ever starts a real claude.
+ */
 function zshWords(command: string): string[] {
-  const probe = command.replace(/^claude/u, `printf '%s\\n'`);
+  const leading = /^((?:[A-Z_]+=\S+ )*)claude /u;
+  if (!leading.test(command)) {
+    throw new Error(`no claude after the assignments in: ${command}`);
+  }
+  const probe = command.replace(leading, `$1printf '%s\\n' `);
   const printed = execFileSync('zsh', ['-f', '-c', probe], {encoding: 'utf8'});
   return printed.split('\n').slice(0, -1);
 }
@@ -176,7 +202,34 @@ describe('thread spawn: the directory', () => {
         '--focus',
         'false',
       ],
+      ['--json', '--id-format', 'both', 'tree', '--all'],
     ]);
+  });
+
+  test('home-base-ys9t7.9.1 B3: the name it set is recorded as the tool’s', async () => {
+    const w = world();
+    const cmux = fakeCmux();
+    const result = await spawnSession(options(w, {}), cmux);
+    expect(result.exitCode).toBe(0);
+    const lines = readFileSync(
+      join(w.root, 'state', 'workspace-names.jsonl'),
+      'utf8',
+    )
+      .split('\n')
+      .filter((line) => line !== '');
+    expect(lines.map((line) => JSON.parse(line) as unknown)).toEqual([
+      expect.objectContaining({
+        beadId: '',
+        hisName: null,
+        nameSet: '[SPWN] new session tagged-repo',
+        setBy: 'spawn',
+        surfaceId: null,
+        workspaceId: NEW_WS,
+      }),
+    ]);
+    expect(result.lines.join('\n')).toContain(
+      'its name is recorded as the tool',
+    );
   });
 });
 
@@ -308,6 +361,66 @@ describe('thread spawn: the command and --remote-control', () => {
       '--remote-control',
       `[SPWN] ${TRICKY}`,
     ]);
+  });
+});
+
+describe('thread spawn: the parent link in the environment (home-base-ys9t7.5.4 item 3, D8)', () => {
+  const PARENT = '3dbc86df-1bf7-4c21-b99f-cef99208bdbd';
+
+  /** The JUSTIN_SDK_ variables the program zsh starts sees, NAME=value. */
+  function envSeen(command: string): string[] {
+    const leading = /^((?:[A-Z_]+=\S+ )*)claude( |$)/u;
+    if (!leading.test(command)) throw new Error(`no claude in: ${command}`);
+    const probe = command.replace(/^((?:[A-Z_]+=\S+ )*)claude.*$/su, `$1env`);
+    const printed = execFileSync('zsh', ['-f', '-c', probe], {
+      encoding: 'utf8',
+      env: {PATH: process.env.PATH},
+    });
+    return printed
+      .split('\n')
+      .filter((line) => line.startsWith('JUSTIN_SDK_'))
+      .sort();
+  }
+
+  test('inside a session with a kickoff: claude starts with the parent session and the kickoff marker', async () => {
+    const w = world();
+    const cmux = fakeCmux();
+    const kickoff = '/conductor Work on x-1';
+    const env = {...w.env, CLAUDE_CODE_SESSION_ID: PARENT};
+    const result = await spawnSession(options(w, {env, kickoff}), cmux);
+    expect(result.exitCode).toBe(0);
+    const command = argAfter(cmux.calls[1], '--command') ?? '';
+    expect(command).toBe(
+      `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT} JUSTIN_SDK_SPAWN_KICKOFF=1 claude '${kickoff}'`,
+    );
+    // The kickoff stays claude's prompt, untouched: a slash command still
+    // starts with "/".
+    expect(zshWords(command)).toEqual([kickoff]);
+    expect(envSeen(command)).toEqual([
+      `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT}`,
+      'JUSTIN_SDK_SPAWN_KICKOFF=1',
+    ]);
+  });
+
+  test('inside a session, no kickoff: the parent only (Justin types the first prompt)', async () => {
+    const w = world();
+    const cmux = fakeCmux();
+    const env = {...w.env, CLAUDE_CODE_SESSION_ID: PARENT};
+    await spawnSession(options(w, {env}), cmux);
+    const command = argAfter(cmux.calls[1], '--command') ?? '';
+    expect(command).toBe(`JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT} claude`);
+    expect(envSeen(command)).toEqual([
+      `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT}`,
+    ]);
+  });
+
+  test('outside a session, with a kickoff: the kickoff marker only, so the child is its own unattended group', async () => {
+    const w = world();
+    const cmux = fakeCmux();
+    await spawnSession(options(w, {kickoff: 'go'}), cmux);
+    const command = argAfter(cmux.calls[1], '--command') ?? '';
+    expect(command).toBe('JUSTIN_SDK_SPAWN_KICKOFF=1 claude go');
+    expect(envSeen(command)).toEqual(['JUSTIN_SDK_SPAWN_KICKOFF=1']);
   });
 });
 

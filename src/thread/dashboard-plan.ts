@@ -13,6 +13,7 @@
  */
 
 import type {InboxJson} from './session-inbox';
+import type {SdkNamedWorkspace} from './workspace-name';
 
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
@@ -207,7 +208,15 @@ export function dashboardInboxOf(json: InboxJson): DashboardInbox {
 
 /** argv for a mark, or one shell line copied from the inbox JSON (the pane line). */
 export type DashboardCommand =
-  | {argv: string[]; kind: 'argv'}
+  | {
+      argv: string[];
+      kind: 'argv';
+      /**
+       * home-base-ys9t7.9.1 B3: the argv is a `new-workspace --name`, and
+       * the name it sets is recorded as the tool's once it ran.
+       */
+      nameRecord?: SdkNamedWorkspace;
+    }
   | {kind: 'shell'; line: string};
 
 /** How the log and the page print a command. */
@@ -315,7 +324,7 @@ export function planAction(
         command: {argv: sdkThreadArgv(['unread', s.sessionId]), kind: 'argv'},
         kind: 'run',
       };
-    case 'open':
+    case 'open': {
       // The TUI's `o`: the session's cmux pane when the inbox knows it,
       // otherwise a new workspace running the resume command, named the way
       // the workspace-naming hook would name it (home-base-j8q3e.5 D8).
@@ -330,21 +339,30 @@ export function planAction(
       if (s.checkout == null && !/^cd\s/u.test(s.card.resume)) {
         return {kind: 'refused', reason: NO_CHECKOUT};
       }
+      const name = sessionDisplayName(s.card.repoTag, s.card.title);
       return {
         command: {
           argv: [
             'cmux',
             'new-workspace',
             '--name',
-            sessionDisplayName(s.card.repoTag, s.card.title),
+            name,
             ...(s.checkout == null ? [] : ['--cwd', s.checkout]),
             '--command',
             s.card.resume,
           ],
           kind: 'argv',
+          nameRecord: {
+            beadId: s.sessionBeadId,
+            name,
+            repo: s.repo,
+            sessionId: s.sessionId,
+            setBy: 'dashboard',
+          },
         },
         kind: 'run',
       };
+    }
     case 'resumeCommand':
       return {kind: 'show', text: s.card.resume};
   }

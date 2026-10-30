@@ -321,7 +321,7 @@ export function queuedPromptText(record: TranscriptRecord): string | null {
  * the record's timestamp is the only one there is. Where both exist they were
  * equal in every case measured.
  */
-function queuedPromptTimestamp(record: TranscriptRecord): string | null {
+export function queuedPromptTimestamp(record: TranscriptRecord): string | null {
   return asString(record.attachment?.timestamp) ?? asString(record.timestamp);
 }
 

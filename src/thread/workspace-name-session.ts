@@ -45,7 +45,16 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export type SessionLookup =
   | {kind: 'failed'; reason: string}
-  | {kind: 'found'; session: WorkspaceSession};
+  | {
+      /**
+       * The beads DB holding the session bead (home-base-ys9t7.9.1 B4: the
+       * capture child refreshes its cmux labels there). Absent from a lookup
+       * a test builds by hand.
+       */
+      db?: string;
+      kind: 'found';
+      session: WorkspaceSession;
+    };
 
 /** The repo name the session model uses: the git common dir's checkout. */
 function repoOfCheckout(root: string): string | null {
@@ -145,6 +154,7 @@ export function lookupWorkspaceSession(input: {
       sightings: sightings.kind === 'read' ? sightings.sightings : [],
     });
     return {
+      db: resolution.db,
       kind: 'found',
       session: {
         beadId: resolution.bead.id,
@@ -185,6 +195,7 @@ export function lookupWorkspaceSession(input: {
   }
   const repo = repoOfCheckout(space.root);
   return {
+    db: space.db,
     kind: 'found',
     session: {
       beadId: shown.issue.id,

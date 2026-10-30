@@ -21,6 +21,8 @@ import {
 } from '../src/hook-registry';
 import {invokesSdk, isSdkEmittedCommand} from '../src/sdk-invocation';
 import {
+  THREAD_BRAKE_HOOK_COMMAND,
+  THREAD_BRAKE_HOOK_EVENT,
   THREAD_CAPTURE_HOOK_COMMAND,
   THREAD_CAPTURE_HOOK_EVENTS,
   THREAD_GUARD_HOOK_COMMAND,
@@ -57,6 +59,7 @@ describe('the registry says what the installers write', () => {
     expect(byId('thread stop-check').command).toBe(THREAD_STOP_HOOK_COMMAND);
     expect(byId('thread nudge').command).toBe(THREAD_NUDGE_HOOK_COMMAND);
     expect(byId('thread guard').command).toBe(THREAD_GUARD_HOOK_COMMAND);
+    expect(byId('thread brake').command).toBe(THREAD_BRAKE_HOOK_COMMAND);
   });
 
   test('events and matchers', () => {
@@ -73,9 +76,15 @@ describe('the registry says what the installers write', () => {
       {event: THREAD_GUARD_HOOK_EVENT, matcher: THREAD_GUARD_HOOK_MATCHER},
     ]);
     expect(byId('thread guard').knob).toBe('thread.handoff.successor');
+    // The quota brake (home-base-ys9t7.5 D6): PreToolUse, EVERY tool, gated
+    // on componentConfig.thread.quota.mode.
+    expect(byId('thread brake').events).toEqual([
+      {event: THREAD_BRAKE_HOOK_EVENT, matcher: null},
+    ]);
+    expect(byId('thread brake').knob).toBe('thread.quota.mode');
     expect(
       HOOK_HANDLERS.filter((h) => h.knob != null).map((h) => h.id),
-    ).toEqual(['thread guard']);
+    ).toEqual(['thread guard', 'thread brake']);
   });
 
   test('every handler is on a dispatched event', () => {

@@ -67,8 +67,11 @@ export interface HookHandler {
  * The switches a handler can wait on. `thread.handoff.successor` is
  * componentConfig.thread.handoff.successor (epic home-base-mbnjv D10): the
  * session guard is written only where sessions may start successors.
+ * `thread.quota.mode` is componentConfig.thread.quota.mode (request
+ * home-base-ys9t7.5 D5): ON means any mode but `off`, so the brake is written
+ * wherever it observes or enforces.
  */
-export type HookHandlerKnob = 'thread.handoff.successor';
+export type HookHandlerKnob = 'thread.handoff.successor' | 'thread.quota.mode';
 
 function handler(
   component: string,
@@ -131,6 +134,16 @@ export const HOOK_HANDLERS: readonly HookHandler[] = [
     ['thread', 'guard'],
     [{event: 'PreToolUse', matcher: 'Bash'}],
     'thread.handoff.successor',
+  ),
+  // The spend quota's brake (home-base-ys9t7.5 D6): EVERY tool, so its null
+  // matcher widens the PreToolUse dispatcher entry from Bash to every tool
+  // (dispatchMatcher; install rewrites the entry in place). Only where
+  // componentConfig.thread.quota.mode is not off.
+  handler(
+    'thread-hooks-setup',
+    ['thread', 'brake'],
+    [{event: 'PreToolUse', matcher: NO_MATCHER}],
+    'thread.quota.mode',
   ),
 ];
 

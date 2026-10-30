@@ -28,6 +28,7 @@ import type {ResolvedHandoffConfig} from './handoff-knob';
 import type {LiveSessionCount, LiveSessionCountRead} from './live-count';
 import type {ScreenRead} from './pane-join';
 import type {EnvLike} from './paths';
+import type {QuotaGateDecision, QuotaGateRead} from './quota-gate';
 
 import {lstatSync, readFileSync} from 'node:fs';
 import {join} from 'node:path';
@@ -47,6 +48,8 @@ import {countLiveSessions, describeLiveSessionCount} from './live-count';
 import {readLiveSessions, realLiveSessionDeps} from './live-sessions';
 import {statusLineIdOf} from './pane-join';
 import {threadsStateDir} from './paths';
+import {gateLine, quotaGateDecision, readQuotaForGate} from './quota-gate';
+import {appendQuotaLog} from './quota-log';
 import {liveSocketPath} from './respawn';
 import {HANDOFF_REFUSED_LABEL, SUCCESSOR_STARTED_LABEL} from './session-bead';
 import {appendNote} from './session-marks';
@@ -73,6 +76,11 @@ export const HANDOFF_REFUSAL_REASONS = [
   'usageHigh',
   'chainUnknown',
   'tooManyUnattendedHandoffs',
+  // The spend quota (home-base-ys9t7.5 D7, quota-gate.ts): enforce mode only.
+  'quotaUnknown',
+  'quotaChainSpent',
+  'quotaProjectSpent',
+  'quotaWeekFloor',
   'liveSessionsUnknown',
   'tooManyLiveSessions',
 ] as const;
@@ -322,6 +330,14 @@ export interface HandoffGateReaders {
   launchRecord: (() => LaunchRecordRead | Promise<LaunchRecordRead>) | null;
   liveSessions: () => LiveSessionCountRead | Promise<LiveSessionCountRead>;
   pingCmux: () => CmuxPing | Promise<CmuxPing>;
+  /**
+   * The spend quota's verdict for this handoff or spawn (quota-gate.ts,
+   * home-base-ys9t7.5 D7). Absent or null skips the check. A throw refuses
+   * with quotaUnknown.
+   */
+  quota?: (() => Promise<QuotaGateRead> | QuotaGateRead) | null;
+  /** Append a quota-log line; returns why it failed, or null. */
+  quotaLog?: (line: Record<string, unknown>) => string | null;
   usage: () => Promise<SamplesRead> | SamplesRead;
 }
 
@@ -420,6 +436,40 @@ async function attempt<T>(
   } catch (error) {
     return {threw: errorText(error)};
   }
+}
+
+/**
+ * Step 5b on its own, so `thread spawn` can run it where the successor knob
+ * is off (spawn-gate.ts): null passes, otherwise the refusal.
+ */
+export async function runQuotaCheck(
+  readers: Pick<HandoffGateReaders, 'quota' | 'quotaLog'>,
+  now: Date,
+): Promise<Extract<HandoffGateResult, {kind: 'refused'}> | null> {
+  if (readers.quota == null) return null;
+  const read = await attempt(readers.quota);
+  const measured =
+    'value' in read && read.value.kind === 'measured' ? read.value : null;
+  const decision: QuotaGateDecision =
+    'threw' in read
+      ? {
+          detail: `the spend quota could not be measured: ${read.threw}`,
+          kind: 'refuse',
+          reason: 'quotaUnknown',
+        }
+      : quotaGateDecision(read.value);
+  if (decision.kind === 'pass') return null;
+  readers.quotaLog?.(
+    gateLine({
+      decision,
+      nowMs: now.getTime(),
+      purpose: measured?.purpose ?? 'handoff',
+      read: measured,
+    }),
+  );
+  return decision.kind === 'refuse'
+    ? refused(decision.reason, decision.detail)
+    : null;
 }
 
 /**
@@ -594,6 +644,13 @@ export async function runHandoffGate(
       );
     }
     chain = walked.value;
+  }
+
+  // 5b. The spend quota (home-base-ys9t7.5 D7). Off: skipped inside the
+  // reader. Observe: logged, then on. Enforce: refused.
+  if (readers.quota != null) {
+    const quota = await runQuotaCheck(readers, now);
+    if (quota != null) return quota;
   }
 
   // 6. Live sessions on this machine.
@@ -797,6 +854,17 @@ export function realHandoffGateReaders(input: {
       }
       const ping = await runner(['ping']);
       return ping.kind === 'ok' ? {kind: 'ok'} : ping;
+    },
+    quota: () =>
+      readQuotaForGate({
+        cwd,
+        env,
+        nowMs: Date.now(),
+        purpose: sessionBeadId == null ? 'spawn' : 'handoff',
+      }),
+    quotaLog: (line) => {
+      const written = appendQuotaLog(line, env);
+      return written.kind === 'failed' ? written.reason : null;
     },
     usage: () => readSamples(samplesPath(env)),
   };

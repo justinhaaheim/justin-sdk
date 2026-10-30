@@ -241,7 +241,9 @@ export function checkSdkHookEntries(
       );
     } else if (dispatcherEntry != null) {
       if (mode === 'dispatch') {
-        const want = dispatchMatcher(event);
+        // The matcher install writes: over the handlers whose knob is on, as
+        // stepThreadHooks passes them (a knob-off brake must not widen it).
+        const want = dispatchMatcher(event, byKnob.enabled);
         if (dispatcherEntry.matcher !== want) {
           report.stale.push(
             `${event}: the dispatcher entry's matcher is ${dispatcherEntry.matcher ?? 'none'}; install writes ${want ?? 'none'}`,

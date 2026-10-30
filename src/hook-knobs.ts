@@ -41,6 +41,10 @@ export function hookKnobOn(
   switch (knob) {
     case 'thread.handoff.successor':
       return resolveThreadConfig({cwd: projectRoot, env}).handoff.successor;
+    case 'thread.quota.mode':
+      return (
+        resolveThreadConfig({cwd: projectRoot, env}).quota.mode.value !== 'off'
+      );
   }
 }
 
