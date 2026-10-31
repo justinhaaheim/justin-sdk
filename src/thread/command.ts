@@ -467,6 +467,24 @@ status in_progress. Run it as soon as he asks for work — one command, no form.
 The FIRST request also renames the session to the request's title (unless
 \`thread title\` already named it). Later requests never rename.
 
+THE OVERARCHING REQUEST (home-base-jm5kg.5) is the one request whose title
+describes the whole of the work, done and open, in this session and the
+sessions it continues. Its title IS the session title, so it names the inbox
+entry and the cmux workspace. There is at most one per handoff chain; a
+successor shares its predecessor's.
+
+  thread request --overarching "make the handoff command trustworthy"
+      files a new request and marks it overarching (the work changed
+      direction: the old overarching request stays a request).
+  thread request --overarching --bead <request id>
+      marks an existing request, or confirms the current one still fits.
+  thread title "…"
+      retitles the overarching request and the session together.
+
+Marking one unmarks every other request of the chain, and titles the session.
+Requests are not nested: a bead filed with \`br create --parent <request id>\`
+shows as a sub-item of that request.
+
 REFUSES (exit 1) when the session's checkout is gone — it names the path — and
 when this session has no session bead (the knob was off when it started, the
 capture hook is not installed, or the repo has no beads workspace). --here files
@@ -893,6 +911,12 @@ export const threadCommand: CommandModule = {
                 'File in the CURRENT directory’s beads instead of the session’s (needed when the session’s checkout is gone); that DB is recorded for the session',
               type: 'boolean' as const,
             })
+            .option('overarching', {
+              default: false,
+              describe:
+                'Mark this request as the OVERARCHING one: the request whose title describes the whole of the work in this session and the sessions it continues. The session title becomes its title, and every other request of the chain is unmarked. With --bead, marks an existing request (or confirms the current one).',
+              type: 'boolean' as const,
+            })
             .option('session', {
               describe:
                 'Session id to file under (default: $CLAUDE_CODE_SESSION_ID)',
@@ -908,6 +932,7 @@ export const threadCommand: CommandModule = {
               continues: argv.continues ?? null,
               doneWhen: argv['done-when'] ?? null,
               here: argv.here === true,
+              overarching: argv.overarching === true,
               sessionId: argv.session ?? null,
               title: title === '' ? null : title,
             }),

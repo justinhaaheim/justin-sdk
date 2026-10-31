@@ -34,3 +34,49 @@ export function sessionName(repoTag: string | null, text: string): string {
     ? `${full.slice(0, SESSION_NAME_LIMIT - 1)}…`
     : full;
 }
+
+// ---------------------------------------------------------------------------
+// TRIAL (home-base-jm5kg.6 D5): the workspace name with its items
+// ---------------------------------------------------------------------------
+
+export const DONE_ITEM_MARK = '✅';
+export const OPEN_ITEM_MARK = '🔳';
+
+/**
+ * The longest workspace name the trial writes, in characters (code points).
+ * NOT MEASURED against what the cmux sidebar shows (home-base-jm5kg.6 notes):
+ * the sidebar cuts by pixel width, which a session cannot see. Justin's own
+ * example name is 125 code points, so 160 keeps it whole with room for about
+ * one more request.
+ */
+export const WORKSPACE_ITEMS_NAME_LIMIT = 160;
+
+export interface NameItem {
+  done: boolean;
+  title: string;
+}
+
+/**
+ * "[TAG] <title> ✅ <done> 🔳 <open> …", cut to WORKSPACE_ITEMS_NAME_LIMIT
+ * code points with "…" (never inside a surrogate pair).
+ */
+export function itemsDisplayName(
+  repoTag: string | null,
+  title: string,
+  items: readonly NameItem[],
+): string {
+  const text = [
+    title.trim(),
+    ...items.map(
+      (item) =>
+        `${item.done ? DONE_ITEM_MARK : OPEN_ITEM_MARK} ${item.title.trim()}`,
+    ),
+  ].join(' ');
+  const full = sessionDisplayName(repoTag, text).trimEnd();
+  const points = Array.from(full);
+  if (points.length <= WORKSPACE_ITEMS_NAME_LIMIT) return full;
+  return `${points
+    .slice(0, WORKSPACE_ITEMS_NAME_LIMIT - 1)
+    .join('')
+    .trimEnd()}…`;
+}

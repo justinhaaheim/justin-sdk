@@ -119,6 +119,14 @@ export const THREAD_DEFAULT_NAME_WORKSPACES = false;
 export const THREAD_DEFAULT_TITLE_SUMMARY = false;
 
 /**
+ * TRIAL (home-base-jm5kg.6 D5, 2026-10-30): the cmux workspace name lists the
+ * session chain's other requests after its title, ✅ done then 🔳 open. Justin:
+ * "Let's consider this a *trial*, and put it behind a knob. I'm not sure this
+ * is what I will want." Off by default (feature-knobs rule).
+ */
+export const THREAD_DEFAULT_WORKSPACE_NAME_ITEMS = false;
+
+/**
  * Repo folder names that `thread inbox --by-repo` and the threads TUI's "by
  * repo" grouping list first, in this order (home-base-yukaf.9, D-PINS). Not a
  * feature gate: it only reorders groups. Default none.

@@ -41,6 +41,7 @@ import type {RequestNode, SessionTree, TreeIssue} from './session-tree';
 
 import {parseInstant} from './answer-store';
 import {ARCHIVED_PREFIX, ASK_LABEL, DONE_PREFIX} from './ask-format';
+import {isOverarching, overarchingSetAt, pickOverarching} from './overarching';
 import {
   AUTO_TITLE_LABEL,
   CONTINUED_BY_LABEL_PREFIX,
@@ -443,6 +444,26 @@ export type MarkItem =
       title: string;
       why: 'autoTitle' | 'filedSince' | 'unrecorded';
     }
+  /**
+   * home-base-jm5kg.5 D3 (with titleSummary on; it supersedes titleSummary
+   * wherever the chain has an overarching request, or two or more requests):
+   * whether the overarching request still describes the whole of the work.
+   * `none`: two or more requests and none marked. `filedSince`: requests
+   * filed after it was last set or retitled (`since`). `unrecorded`: no set
+   * time on it, and other requests exist. `titleDiffers`: the session title
+   * is not its title (D2). `duplicate`: other requests are still marked too.
+   * `chained`: the session continues another, so "the work" spans the chain.
+   */
+  | {
+      chained: boolean;
+      duplicates: TreeIssue[];
+      kind: 'overarching';
+      overarching: TreeIssue | null;
+      requests: TreeIssue[];
+      sessionTitle: string;
+      since: TreeIssue[];
+      why: 'duplicate' | 'filedSince' | 'none' | 'titleDiffers' | 'unrecorded';
+    }
   | {
       commits: number;
       kind: 'noRequest';
@@ -617,6 +638,77 @@ function titleSummaryItems(
 }
 
 /**
+ * home-base-jm5kg.5 D3: what thread status knows about the chain's requests.
+ * `requests`: every request of this session and the sessions it continues,
+ * oldest first; `chained`: there is more than this session.
+ */
+export interface OverarchingFacts {
+  chained: boolean;
+  requests: TreeIssue[];
+}
+
+/**
+ * D3. Null hands over to titleSummaryItems: no overarching request and fewer
+ * than two requests in the chain (the title the first request gave the
+ * session still covers it). Otherwise the overarching items, possibly none:
+ * they supersede the summary prompt. An unreadable chain is said, and the
+ * summary prompt still runs (rule 7: neither "covered" nor "none").
+ */
+function overarchingItems(
+  session: TreeIssue,
+  facts: Measured<OverarchingFacts>,
+): MarkItem[] | null {
+  if (!facts.ok) {
+    return null;
+  }
+  const {chained, requests} = facts.value;
+  const {duplicates, overarching} = pickOverarching(requests);
+  const base = {
+    chained,
+    duplicates,
+    kind: 'overarching' as const,
+    overarching,
+    requests,
+    sessionTitle: session.title,
+    since: [] as TreeIssue[],
+  };
+  if (overarching == null) {
+    return requests.length >= 2 ? [{...base, why: 'none'}] : null;
+  }
+  const items: MarkItem[] = [];
+  if (duplicates.length > 0) items.push({...base, why: 'duplicate'});
+  if (session.title.trim() !== overarching.title.trim()) {
+    items.push({...base, why: 'titleDiffers'});
+  }
+  const others = requests.filter(
+    (request) => request.id !== overarching.id && !isOverarching(request),
+  );
+  const set = overarchingSetAt(overarching.labels);
+  if (set.kind !== 'set') {
+    if (others.length > 0) items.push({...base, why: 'unrecorded'});
+    return items;
+  }
+  const since: TreeIssue[] = [];
+  const unreadable: TreeIssue[] = [];
+  for (const request of others) {
+    const at = parseInstant(request.createdAt);
+    if (at == null) unreadable.push(request);
+    else if (at > set.at) since.push(request);
+  }
+  if (since.length > 0) {
+    items.push({...base, since: since.sort(byCreatedAt), why: 'filedSince'});
+  }
+  if (unreadable.length > 0) {
+    items.push({
+      kind: 'unchecked',
+      reason: `the created_at of ${unreadable.map((request) => request.id).join(', ')} cannot be read`,
+      what: 'whether the overarching request was set after every request',
+    });
+  }
+  return items;
+}
+
+/**
  * The conditions `thread status` cannot derive (design item 4): a request
  * whose children are all closed while it is open; commits or uncommitted edits
  * with no request filed; a title still carrying `auto-title`. Plus, under rule
@@ -648,7 +740,14 @@ export function whatToMark(
   model: SessionModel,
   status: SessionStatus,
   created: Measured<CreatedBeads>,
-  options: {titleSummary?: boolean} = {},
+  options: {
+    /**
+     * home-base-jm5kg.5 D3: the chain's requests, read only with titleSummary
+     * on; absent = not read (the summary prompt alone, as before).
+     */
+    overarching?: Measured<OverarchingFacts>;
+    titleSummary?: boolean;
+  } = {},
 ): MarkItem[] {
   const items: MarkItem[] = [];
   const {beads, git} = model;
@@ -782,7 +881,18 @@ export function whatToMark(
       what: "the session's title",
     });
   } else if (options.titleSummary === true) {
-    items.push(...titleSummaryItems(session, beads, hasWork));
+    const over =
+      options.overarching != null
+        ? overarchingItems(session, options.overarching)
+        : null;
+    if (options.overarching != null && !options.overarching.ok) {
+      items.push({
+        kind: 'unchecked',
+        reason: options.overarching.reason,
+        what: 'the overarching request of this session and the sessions it continues',
+      });
+    }
+    items.push(...(over ?? titleSummaryItems(session, beads, hasWork)));
   } else if (session.labels.includes(AUTO_TITLE_LABEL) && hasWork !== false) {
     items.push({
       kind: 'autoTitle',

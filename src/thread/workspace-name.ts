@@ -19,6 +19,8 @@
 
 import type {CmuxRunner, CmuxTree, CmuxTreeRead} from './cmux';
 import type {EnvLike} from './paths';
+import type {Measured} from './session-model';
+import type {NameItem} from './session-name';
 
 import {appendFileSync, mkdirSync, readFileSync} from 'node:fs';
 import {dirname} from 'node:path';
@@ -43,7 +45,7 @@ import {
   CONTINUES_LABEL_PREFIX,
   labelValue,
 } from './session-bead';
-import {sessionDisplayName} from './session-name';
+import {itemsDisplayName, sessionDisplayName} from './session-name';
 
 /**
  * The leading glyphs cmux shows on a pane title while Claude Code owns the
@@ -537,6 +539,13 @@ export function decideWorkspaceName(input: {
 export interface WorkspaceSession {
   beadId: string;
   labels: readonly string[];
+  /**
+   * TRIAL (home-base-jm5kg.6 D5, componentConfig.thread.workspaceNameItems):
+   * the chain's other requests, listed after the title. Absent or null: the
+   * knob is off, and the name is "[TAG] <title>" as before. Not measured: the
+   * requests could not be read, so nothing is named (D5 of this module).
+   */
+  nameItems?: Measured<NameItem[]> | null;
   repo: string | null;
   /** Resolved from the session's own checkout (home-base-bomy5.7.1). */
   repoTag: string | null;
@@ -638,6 +647,17 @@ export function resolveWorkspace(
   };
 }
 
+/**
+ * The tool's part of the name: "[TAG] <title>", or with the trial knob on
+ * (home-base-jm5kg.6 D5) "[TAG] <title> ✅ <done> 🔳 <open> …".
+ */
+export function workspaceToolPart(session: WorkspaceSession): string {
+  const items = session.nameItems;
+  return items?.ok === true
+    ? itemsDisplayName(session.repoTag, session.title, items.value)
+    : sessionDisplayName(session.repoTag, session.title);
+}
+
 export async function syncWorkspaceName(
   input: WorkspaceSyncInput,
 ): Promise<WorkspaceSyncOutcome> {
@@ -661,6 +681,15 @@ export async function syncWorkspaceName(
     return {
       kind: 'failed',
       reason: `the repo of session ${session.beadId} is unknown`,
+      workspaceId: override,
+    };
+  }
+  // home-base-jm5kg.6 (D5 here, rule 7): a name without items would claim the
+  // chain has no other requests, so an unreadable chain names nothing.
+  if (session.nameItems != null && !session.nameItems.ok) {
+    return {
+      kind: 'failed',
+      reason: `the session's requests could not be read for the workspace name (componentConfig.thread.workspaceNameItems is on): ${session.nameItems.reason}`,
       workspaceId: override,
     };
   }
@@ -697,7 +726,7 @@ export async function syncWorkspaceName(
       workspaceId,
     };
   }
-  const toolPart = stored(sessionDisplayName(session.repoTag, session.title));
+  const toolPart = stored(workspaceToolPart(session));
   const records =
     names.kind === 'read' ? recordsFor(names.records, workspaceId) : [];
   const ownSurface = labelValue(session.labels, CMUX_SURFACE_LABEL_PREFIX);

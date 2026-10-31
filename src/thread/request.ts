@@ -28,6 +28,7 @@
 
 import type {BeadsWorkspace, BrTarget} from '../beads/br';
 import type {CmuxRunner} from './cmux';
+import type {ChainRequestReaders} from './overarching';
 import type {EnvLike} from './paths';
 import type {SessionResolution} from './session-bead';
 
@@ -37,11 +38,22 @@ import {
   brUpdate,
   describeBrFailed,
   findBeadsWorkspace,
+  resolveRecordedBeadsDb,
 } from '../beads/br';
 import {sdkRun} from '../sdk-invocation';
 import {readMessageLog} from './message-log';
 import {
+  chainRequestList,
+  isOverarching,
+  overarchingMarkEdit,
+  overarchingUnmarkEdit,
+  pickOverarching,
+  readChainRequests,
+  realChainRequestReaders,
+} from './overarching';
+import {
   AUTO_TITLE_LABEL,
+  CONTINUES_LABEL_PREFIX,
   REQUEST_LABEL,
   resolveSession,
   SESSION_BEAD_PRIORITY,
@@ -85,6 +97,11 @@ export interface ThreadRequestOptions {
   agentId?: string | null;
   /** `--bead <id>`: adopt this bead instead of creating one. */
   bead: string | null;
+  /**
+   * How the chain's requests are read for `--overarching` (home-base-jm5kg.5
+   * D1); tests inject fixtures. Default: the sessions index, br and exports.
+   */
+  chainReaders?: ChainRequestReaders;
   /** The cmux runner for the workspace-name follow-up; tests inject a fake. */
   cmux?: CmuxRunner;
   /**
@@ -101,6 +118,13 @@ export interface ThreadRequestOptions {
   /** `--here`: file in the cwd's beads DB instead of the session's. */
   here: boolean;
   now?: Date;
+  /**
+   * `--overarching` (home-base-jm5kg.5 D1): mark the filed or adopted request
+   * as the overarching request of this session and the sessions it
+   * continues, unmark every other one there, and give the session its title
+   * (D2).
+   */
+  overarching?: boolean;
   /** `--session`, else CLAUDE_CODE_SESSION_ID. */
   sessionId: string | null;
   /**
@@ -125,6 +149,14 @@ export type AdoptedStatus =
   | {kind: 'already'}
   | {blockers: string; kind: 'left'; status: string};
 
+/** What `--overarching` did (home-base-jm5kg.5 D1). */
+export interface OverarchingMarked {
+  /** The request now marked overarching. */
+  id: string;
+  /** Requests of the chain that were marked before, and are not now. */
+  unmarked: string[];
+}
+
 export type ThreadRequestOutcome =
   | {
       /** The session's checkout is gone and `--here` was not passed. */
@@ -143,6 +175,8 @@ export type ThreadRequestOutcome =
       inCheckout: string;
       kind: 'filed';
       mode: 'adopted' | 'created';
+      /** `--overarching`: what was marked and unmarked; null = not asked. */
+      overarching: OverarchingMarked | null;
       /** Set when the title rule renamed the session bead. */
       renamedSession: {beadId: string; title: string} | null;
       title: string;
@@ -300,6 +334,126 @@ function refuseResolution(
   return null;
 }
 
+async function workspaceItemsOn(cwd: string, env: EnvLike): Promise<boolean> {
+  const {resolveThreadConfig} = await import('./config');
+  const config = resolveThreadConfig({cwd, env});
+  return config.nameWorkspaces && config.workspaceNameItems;
+}
+
+/**
+ * home-base-jm5kg.5 D1/D2: mark `filed` overarching, give the session its
+ * title, and unmark every other request of the chain. Marked FIRST, so a
+ * failure later leaves two marks (the newest wins, and thread status names
+ * the other) rather than none. Every failure is said, with its retry.
+ */
+async function markOverarching(input: {
+  chainReaders: ChainRequestReaders | undefined;
+  continued: {oldBeadId: string; oldTitle: string} | null;
+  cwd: string;
+  env: EnvLike;
+  filed: {db: string; id: string; labels: readonly string[]; title: string};
+  now: Date | undefined;
+  renamedSession: {beadId: string; title: string} | null;
+  session: Usable;
+}): Promise<{
+  failures: string[];
+  overarching: OverarchingMarked | null;
+  renamedSession: {beadId: string; title: string} | null;
+}> {
+  const {env, filed} = input;
+  const failures: string[] = [];
+  const retry = sdkRun(`thread request --overarching --bead ${filed.id}`);
+  const mark = brUpdate(
+    {db: filed.db, env},
+    filed.id,
+    overarchingMarkEdit(filed.labels, input.now ?? new Date()),
+  );
+  if (mark.kind === 'failed') {
+    failures.push(
+      `${filed.id} was NOT marked overarching: ${describeBrFailed(mark)}. Retry with ${retry}`,
+    );
+    return {failures, overarching: null, renamedSession: input.renamedSession};
+  }
+  let renamedSession = input.renamedSession;
+  const {session} = input;
+  if (session.kind !== 'found') {
+    failures.push(
+      `the session title was NOT set to "${filed.title}": the session bead's checkout is gone`,
+    );
+    return {
+      failures,
+      overarching: {id: filed.id, unmarked: []},
+      renamedSession,
+    };
+  }
+  // D2: the session title IS the overarching request's title.
+  const currentTitle = renamedSession?.title ?? session.bead.title;
+  const autoTitled =
+    renamedSession == null && session.bead.labels.includes(AUTO_TITLE_LABEL);
+  if (currentTitle !== filed.title || autoTitled) {
+    const stamp = await titleSetEdit({
+      cwd: input.cwd,
+      env,
+      labels: session.bead.labels,
+      now: input.now,
+    });
+    const renamed = brUpdate({db: session.db, env}, session.bead.id, {
+      addLabels: stamp.addLabels,
+      removeLabels: [AUTO_TITLE_LABEL, ...stamp.removeLabels],
+      title: filed.title,
+    });
+    if (renamed.kind === 'failed') {
+      failures.push(
+        `the session bead ${session.bead.id} was NOT titled "${filed.title}": ${describeBrFailed(renamed)}. Retry with ${retry}`,
+      );
+    } else {
+      renamedSession = {beadId: session.bead.id, title: filed.title};
+    }
+  }
+  // D1: at most one per chain. The chain is read from the session bead's
+  // labels as they are now (a link made just above is not in `bead` yet).
+  const labels = [
+    ...session.bead.labels,
+    ...(input.continued != null
+      ? [`${CONTINUES_LABEL_PREFIX}${input.continued.oldBeadId}`]
+      : []),
+  ];
+  const chain = readChainRequests(
+    {id: session.bead.id, labels, title: currentTitle},
+    input.chainReaders ?? realChainRequestReaders({cwd: input.cwd, env}),
+  );
+  const unmarked: string[] = [];
+  if (chain.kind === 'failed') {
+    failures.push(
+      `no earlier overarching request was unmarked, because the requests of this session and the sessions it continues could not be read (${chain.reason}). Run ${retry} again once they can be`,
+    );
+    return {failures, overarching: {id: filed.id, unmarked}, renamedSession};
+  }
+  for (const request of chainRequestList(chain)) {
+    if (request.id === filed.id || !isOverarching(request)) continue;
+    const db = resolveRecordedBeadsDb(request.beadsDir);
+    if (db.kind !== 'found') {
+      failures.push(
+        `${request.id} is still marked overarching: its beads DB (${request.beadsDir}) could not be found${db.kind === 'failed' ? ` (${db.reason})` : ''}`,
+      );
+      continue;
+    }
+    const cleared = brUpdate(
+      {db: db.db, env},
+      request.id,
+      overarchingUnmarkEdit(request.labels),
+    );
+    if (cleared.kind === 'failed') {
+      failures.push(
+        `${request.id} is still marked overarching: ${describeBrFailed(cleared)}. Retry with ${retry}`,
+      );
+    } else {
+      unmarked.push(request.id);
+    }
+  }
+  return {failures, overarching: {id: filed.id, unmarked}, renamedSession};
+}
+
 /** The decision half of `thread request`: writes beads, prints nothing. */
 export async function fileRequest(
   options: ThreadRequestOptions,
@@ -325,6 +479,13 @@ export async function fileRequest(
       kind: 'usage',
       message:
         'give exactly one of: a request title (thread request "fix the login bug") or --bead <id> (or only --continues <old session bead id> to link this session to the one it picks up from)',
+    };
+  }
+  if (linkOnly && options.overarching === true) {
+    return {
+      kind: 'usage',
+      message:
+        '--overarching marks a request: give its title (thread request --overarching "…") or --bead <request id>',
     };
   }
   if (linkOnly && options.doneWhen != null) {
@@ -457,6 +618,7 @@ export async function fileRequest(
   let mode: 'adopted' | 'created';
   let filedId: string;
   let filedTitle: string;
+  let filedLabels: string[];
   let adoptedStatus: AdoptedStatus | null = null;
   const followUpFailures: string[] = [];
 
@@ -504,6 +666,7 @@ export async function fileRequest(
     }
     filedId = created.id;
     filedTitle = title;
+    filedLabels = [REQUEST_LABEL, sidLabel(sessionId)];
     mode = 'created';
     if (options.doneWhen != null && options.doneWhen.trim() !== '') {
       const criteria = brUpdate({db: target.db, env}, filedId, {
@@ -540,6 +703,7 @@ export async function fileRequest(
       };
     }
     let found: {
+      labels: readonly string[];
       place: {beadsDir: string; db: string; root: string};
       status: string;
       title: string;
@@ -555,7 +719,12 @@ export async function fileRequest(
         };
       }
       if (shown.kind === 'ok') {
-        found = {place, status: shown.issue.status, title: shown.issue.title};
+        found = {
+          labels: shown.issue.labels,
+          place,
+          status: shown.issue.status,
+          title: shown.issue.title,
+        };
         break;
       }
     }
@@ -598,6 +767,7 @@ export async function fileRequest(
     target = found.place;
     filedId = id;
     filedTitle = found.title;
+    filedLabels = [...new Set([...found.labels, ...labels])];
     mode = 'adopted';
   }
 
@@ -663,13 +833,42 @@ export async function fileRequest(
     }
   }
 
+  // ---- --overarching (home-base-jm5kg.5 D1, D2): after the link, so the
+  // chain it reads already holds the predecessor ----
+  let overarching: OverarchingMarked | null = null;
+  if (options.overarching === true) {
+    const marked = await markOverarching({
+      chainReaders: options.chainReaders,
+      continued,
+      cwd,
+      env,
+      filed: {
+        db: target.db,
+        id: filedId,
+        labels: filedLabels,
+        title: filedTitle,
+      },
+      now: options.now,
+      renamedSession,
+      session: usable,
+    });
+    followUpFailures.push(...marked.failures);
+    overarching = marked.overarching;
+    renamedSession = marked.renamedSession;
+  }
+
   // After the --continues link (home-base-mbnjv.3, C7): a successor's first
   // naming sync then sees both halves of the link and takes the workspace
   // name from its predecessor at once, instead of on its next prompt.
   // home-base-mbnjv.12: a session that was already titled and just linked
   // runs it too, so it takes its predecessor's workspace name now.
+  // home-base-jm5kg.6: with the items trial on, every new request changes
+  // the name (one more 🔳), so it runs for every request.
   const workspaceNote =
-    renamedSession != null || continued != null
+    renamedSession != null ||
+    continued != null ||
+    overarching != null ||
+    (await workspaceItemsOn(cwd, env))
       ? await workspaceNameFollowUp({cwd, env, run: options.cmux, sessionId})
       : null;
 
@@ -681,6 +880,7 @@ export async function fileRequest(
     inCheckout: target.root,
     kind: 'filed',
     mode,
+    overarching,
     renamedSession,
     title: filedTitle,
     workspaceNote,
@@ -704,6 +904,16 @@ export function describeRequestOutcome(outcome: ThreadRequestOutcome): {
         lines.push(
           `  adopted; status left ${outcome.adoptedStatus.status}: br refuses to claim a blocked issue (blocked by: ${outcome.adoptedStatus.blockers}; br 0.1.37 counts open children as blockers). The request and sid labels are on it.`,
         );
+      }
+      if (outcome.overarching != null) {
+        lines.push(
+          `  marked overarching: it describes the whole of this session's work (and of the sessions it continues), and the session title follows it`,
+        );
+        if (outcome.overarching.unmarked.length > 0) {
+          lines.push(
+            `  no longer overarching: ${outcome.overarching.unmarked.join(', ')}`,
+          );
+        }
       }
       if (outcome.renamedSession != null) {
         lines.push(
@@ -796,6 +1006,8 @@ export async function runThreadRequest(
 
 export interface ThreadTitleOptions {
   agentId?: string | null;
+  /** How the chain's requests are read (home-base-jm5kg.5 D2); tests inject. */
+  chainReaders?: ChainRequestReaders;
   /** The cmux runner for the workspace-name follow-up; tests inject a fake. */
   cmux?: CmuxRunner;
   cwd?: string;
@@ -811,6 +1023,15 @@ export type ThreadTitleOutcome =
   | {
       beadId: string;
       kind: 'renamed';
+      /**
+       * home-base-jm5kg.5 D2: the overarching request retitled with the
+       * session (`retitled`), none in the chain (`none`), or the chain could
+       * not be read, so one may exist with its old title (`unchecked`, exit 1).
+       */
+      overarching:
+        | {id: string; kind: 'retitled'}
+        | {kind: 'none'}
+        | {kind: 'unchecked'; reason: string};
       title: string;
       /** The workspace-name follow-up (D4 b); never changes the exit code. */
       workspaceNote: string | null;
@@ -843,6 +1064,42 @@ export async function renameSession(
   if (refusal != null) return refusal;
   const found = resolution as Extract<SessionResolution, {kind: 'found'}>;
   const target: BrTarget = {db: found.db, env};
+  // home-base-jm5kg.5 D2: the session title IS the overarching request's
+  // title, so with one in the chain it is retitled first (and its set time
+  // refreshed: retitling it is checking it). A failure there changes nothing.
+  const chain = readChainRequests(
+    {id: found.bead.id, labels: found.bead.labels, title: found.bead.title},
+    options.chainReaders ?? realChainRequestReaders({cwd, env}),
+  );
+  let overarching: Extract<
+    ThreadTitleOutcome,
+    {kind: 'renamed'}
+  >['overarching'] = {kind: 'none'};
+  if (chain.kind === 'failed') {
+    overarching = {kind: 'unchecked', reason: chain.reason};
+  } else {
+    const picked = pickOverarching(chainRequestList(chain)).overarching;
+    if (picked != null) {
+      const db = resolveRecordedBeadsDb(picked.beadsDir);
+      if (db.kind !== 'found') {
+        return {
+          kind: 'failed',
+          reason: `the title is unchanged: the beads DB of the overarching request ${picked.id} (${picked.beadsDir}) could not be found${db.kind === 'failed' ? ` (${db.reason})` : ''}`,
+        };
+      }
+      const retitled = brUpdate({db: db.db, env}, picked.id, {
+        ...overarchingMarkEdit(picked.labels, options.now ?? new Date()),
+        title,
+      });
+      if (retitled.kind === 'failed') {
+        return {
+          kind: 'failed',
+          reason: `br update failed on the overarching request ${picked.id}, so neither it nor the session was retitled: ${describeBrFailed(retitled)}`,
+        };
+      }
+      overarching = {id: picked.id, kind: 'retitled'};
+    }
+  }
   const stamp = await titleSetEdit({
     cwd,
     env,
@@ -866,7 +1123,13 @@ export async function renameSession(
     run: options.cmux,
     sessionId: session.id,
   });
-  return {beadId: found.bead.id, kind: 'renamed', title, workspaceNote};
+  return {
+    beadId: found.bead.id,
+    kind: 'renamed',
+    overarching,
+    title,
+    workspaceNote,
+  };
 }
 
 export function describeTitleOutcome(outcome: ThreadTitleOutcome): {
@@ -874,16 +1137,27 @@ export function describeTitleOutcome(outcome: ThreadTitleOutcome): {
   lines: string[];
 } {
   switch (outcome.kind) {
-    case 'renamed':
-      return {
-        exitCode: 0,
-        lines: [
-          `session ${outcome.beadId} · ${outcome.title}`,
-          ...(outcome.workspaceNote != null
-            ? [`  ${outcome.workspaceNote}`]
-            : []),
-        ],
-      };
+    case 'renamed': {
+      const over = outcome.overarching;
+      const lines = [
+        `session ${outcome.beadId} · ${outcome.title}`,
+        ...(over.kind === 'retitled'
+          ? [
+              `  the overarching request ${over.id} is retitled with it (the session title is its title)`,
+            ]
+          : []),
+        ...(outcome.workspaceNote != null
+          ? [`  ${outcome.workspaceNote}`]
+          : []),
+      ];
+      if (over.kind === 'unchecked') {
+        lines.push(
+          `⚠️ the session WAS renamed, but its overarching request, if it has one, was NOT: the requests of this session and the sessions it continues could not be read (${over.reason}).`,
+        );
+        return {exitCode: 1, lines};
+      }
+      return {exitCode: 0, lines};
+    }
     case 'checkoutMissing':
       return {
         exitCode: 1,

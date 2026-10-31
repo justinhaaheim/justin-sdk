@@ -12,10 +12,12 @@
  * `thread-rules` component copies them into each repo at the SDK version the
  * repo pins.
  *
- * A LEAF on purpose: node builtins only. The capture hook's prompt-time
- * `[thread]` line imports `THREAD_RULES_POINTER_PATH` from here, and that path
- * has a ~60 ms budget, so it must not pull in the installer (which chains
- * base-setup) or anything else heavy.
+ * A LEAF on purpose: node builtins only at module load. The capture hook's
+ * prompt-time `[thread]` line imports `THREAD_RULES_POINTER_PATH` from here,
+ * and that path has a ~60 ms budget, so it must not pull in the installer
+ * (which chains base-setup) or anything else heavy. `handoffSuccessorKnob` is
+ * the one function that reaches further, through an `await import` that runs
+ * only when it is called.
  *
  * The files are plain copies, so their pristine content IS the template: that is
  * what lets `remove` delete one only when it is byte-identical (the identity
@@ -30,12 +32,10 @@ import {join, resolve} from 'path';
 export const THREAD_RULES_DIR = '.claude/rules/justin-sdk';
 
 /**
- * The rule files, in the order the installer writes them. A fixed list, not
- * every file in templates/rules/: the manifest's identity removal and doctor's
- * THREAD_RULES check both read it. handoff.md (home-base-mbnjv.6, D3a) teaches
- * `thread handoff`; it ships wherever threads are on, whatever
- * componentConfig.thread.handoff.successor says, because status-report-format.md
- * points at it and its text is true with the knob off too.
+ * Every rule file the component may own, in the order the installer writes
+ * them. A fixed list, not every file in templates/rules/: the manifest's
+ * identity removal and doctor's THREAD_RULES check both read it. Which of them
+ * a repo SHOULD carry is `threadRulesFilesFor` below: handoff.md is gated.
  */
 export const THREAD_RULES_FILES = [
   'status-report-format.md',
@@ -44,6 +44,65 @@ export const THREAD_RULES_FILES = [
 ] as const;
 
 export type ThreadRulesFile = (typeof THREAD_RULES_FILES)[number];
+
+/**
+ * The handoff rule (home-base-mbnjv.6, D3a). It is the ONLY installed text that
+ * teaches `thread handoff` and `thread spawn`, and it is installed only where
+ * componentConfig.thread.handoff.successor is on (home-base-jm5kg.8). Justin,
+ * 2026-10-30: "it's probably better to not put information about this in
+ * critical-rules until i'm ready for all projects to adopt it." So the shared
+ * status-report-format.md names no handoff command, and a repo with the knob
+ * off is told nothing about either.
+ */
+export const HANDOFF_RULE_FILE = 'handoff.md' satisfies ThreadRulesFile;
+
+/** The files a repo should carry, given its successor knob. */
+export function threadRulesFilesFor(
+  successor: boolean,
+): readonly ThreadRulesFile[] {
+  return successor
+    ? THREAD_RULES_FILES
+    : THREAD_RULES_FILES.filter((file) => file !== HANDOFF_RULE_FILE);
+}
+
+/**
+ * componentConfig.thread.handoff.successor at one repo, or why it could not be
+ * read. A read that throws is UNKNOWN, never "off" (critical rule 7): the
+ * installer then writes no handoff rule and says so, and doctor says it could
+ * not check.
+ */
+export type HandoffSuccessorKnob =
+  | {kind: 'off' | 'on'}
+  | {kind: 'unknown'; reason: string};
+
+/**
+ * Resolve the knob as `thread handoff`, the session guard and the hooks
+ * installer resolve it (hook-knobs.ts): resolveThreadConfig at the project
+ * root, DEFAULT <- user file <- project file. A config that reads but is
+ * invalid resolves to the defaults (off) there, for every caller alike.
+ *
+ * `await import`, inside the function: hook-knobs reaches zod, and this file is
+ * a leaf the capture hook imports at prompt time. The import runs only when an
+ * installer or doctor calls this, never when the module loads.
+ */
+export async function handoffSuccessorKnob(
+  projectRoot: string,
+  env: Record<string, string | undefined> = process.env,
+): Promise<HandoffSuccessorKnob> {
+  try {
+    const {hookKnobOn} = await import('./hook-knobs');
+    return {
+      kind: hookKnobOn('thread.handoff.successor', projectRoot, env)
+        ? 'on'
+        : 'off',
+    };
+  } catch (error) {
+    return {
+      kind: 'unknown',
+      reason: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
 
 /**
  * The path the `[thread]` line names (D-REMINDERS): the status-report rule,

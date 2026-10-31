@@ -514,7 +514,7 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
       pristine: () => threadRulesTemplateText(file),
     })),
     purpose:
-      'The threads, status-report and handoff rules (status-report-format.md, requests.md, handoff.md), copied from the SDK into .claude/rules/justin-sdk/. Applies only where componentConfig.thread.enabled is true.',
+      'The threads and status-report rules (status-report-format.md, requests.md), plus the handoff rule (handoff.md) only where componentConfig.thread.handoff.successor is on, copied from the SDK into .claude/rules/justin-sdk/. Applies only where componentConfig.thread.enabled is true.',
     // Namespaced under .claude/rules/justin-sdk/, which nothing but the SDK
     // writes — provenance enough to adopt on, like critical-rules.md.
     sdkOwnedPaths: THREAD_RULES_FILES.map((file) =>

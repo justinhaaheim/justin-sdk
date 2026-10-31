@@ -61,7 +61,14 @@ import {
   handoffSandboxAdvice,
   handoffSandboxCannotCheckAdvice,
 } from './thread/handoff-sandbox';
-import {threadRulesInstalledPath, threadRulesState} from './thread-rules';
+import {
+  HANDOFF_RULE_FILE,
+  type HandoffSuccessorKnob,
+  handoffSuccessorKnob,
+  threadRulesFilesFor,
+  threadRulesInstalledPath,
+  threadRulesState,
+} from './thread-rules';
 import {
   checkUserLevelSessionStart,
   USER_SETTINGS_DISPLAY,
@@ -2029,9 +2036,10 @@ function makeLegacyArtifactChecks(projectRoot: string): CheckNode[] {
 // ---------------------------------------------------------------------------
 
 /**
- * THREAD_RULES: are the files in `.claude/rules/justin-sdk/` that
- * THREAD_RULES_FILES names (status-report-format.md, requests.md, handoff.md)
- * the SDK's bytes?
+ * THREAD_RULES: are the files in `.claude/rules/justin-sdk/` that this repo
+ * should carry (threadRulesFilesFor: status-report-format.md and requests.md,
+ * plus handoff.md where componentConfig.thread.handoff.successor is on) the
+ * SDK's bytes, and is there a handoff.md where the knob is off?
  *
  * It runs in every repo rather than only where `thread-rules-setup` is listed,
  * because the case that matters most is a repo where threads are ON and the
@@ -2049,6 +2057,10 @@ function makeLegacyArtifactChecks(projectRoot: string): CheckNode[] {
  *                                    call)
  *   unreadable (file or template)  → warn "could not check" — never "missing"
  *                                    and never "ok" (critical rule 7)
+ *   handoff.md present, successor  → warn, naming whether it is the SDK's
+ *   off (home-base-jm5kg.8)          copy; install never removes it, so this
+ *                                    is where it is seen
+ *   successor knob unreadable      → warn "could not check" for handoff.md
  *
  * ADVICE ONLY: no `fixCommand` and no `fixFn`, in any state. Doctor warns and
  * never fixes on its own, and a `fixCommand` runs in `process.cwd()`, not in
@@ -2059,12 +2071,17 @@ function makeLegacyArtifactChecks(projectRoot: string): CheckNode[] {
 export function makeThreadRulesChecks(
   projectRoot: string,
   resolvedComponents: readonly string[],
+  // Injectable so a test can reach the unknown branch: a real config that
+  // reads but is invalid resolves to off, so nothing on disk makes it throw.
+  readHandoffKnob: (
+    root: string,
+  ) => Promise<HandoffSuccessorKnob> = handoffSuccessorKnob,
 ): CheckNode[] {
   return [
     {
       check: {
         fn: async (): Promise<CheckResult> => {
-          const states = threadRulesState(projectRoot);
+          const all = threadRulesState(projectRoot);
           // `await import`: thread/config reaches sdk-config and zod, which
           // must stay off cli-main's static import graph (the hooks' startup
           // cost; tests/health-notices-cli.test.ts).
@@ -2077,13 +2094,36 @@ export function makeThreadRulesChecks(
             ? `${SDK_RUN} install`
             : `${SDK_RUN} add thread-rules`;
 
-          const unchecked = states.flatMap((state) =>
-            state.kind === 'unreadable'
-              ? [`${threadRulesInstalledPath(state.file)} (${state.reason})`]
-              : state.kind === 'template-unreadable'
-                ? [`the SDK template for ${state.file}`]
-                : [],
-          );
+          // home-base-jm5kg.8: handoff.md belongs only where the successor
+          // knob is on. Unknown knob: the file is judged neither expected nor
+          // stray, and the check says it could not tell (critical rule 7).
+          const knob = await readHandoffKnob(projectRoot);
+          const handoffRel = threadRulesInstalledPath(HANDOFF_RULE_FILE);
+          const wanted = threadRulesFilesFor(knob.kind === 'on');
+          const states = all.filter((state) => wanted.includes(state.file));
+          const stray =
+            knob.kind === 'off'
+              ? (all.find(
+                  (state) =>
+                    state.file === HANDOFF_RULE_FILE &&
+                    state.kind !== 'missing',
+                ) ?? null)
+              : null;
+
+          const unchecked = [
+            ...(knob.kind === 'unknown'
+              ? [
+                  `whether ${handoffRel} belongs here (componentConfig.thread.handoff.successor could not be read: ${knob.reason})`,
+                ]
+              : []),
+            ...states.flatMap((state) =>
+              state.kind === 'unreadable'
+                ? [`${threadRulesInstalledPath(state.file)} (${state.reason})`]
+                : state.kind === 'template-unreadable'
+                  ? [`the SDK template for ${state.file}`]
+                  : [],
+            ),
+          ];
           if (unchecked.length > 0) {
             return {
               message: `could not check: ${unchecked.join('; ')} — NOT verified`,
@@ -2095,10 +2135,34 @@ export function makeThreadRulesChecks(
           const drifted = states
             .filter((state) => state.kind === 'drifted')
             .map((state) => threadRulesInstalledPath(state.file));
+          const problems: string[] = [];
+          const fixes: string[] = [];
           if (drifted.length > 0) {
+            problems.push(
+              `${drifted.join(', ')} differ${drifted.length === 1 ? 's' : ''} from the SDK's copy`,
+            );
+            fixes.push(
+              `Run: ${command} (it replaces them with the SDK's copy; look at the diff first if you edited them)`,
+            );
+          }
+          if (stray != null) {
+            // Install never removes, so this is the only place a stray
+            // handoff rule is named after the run that left it.
+            problems.push(
+              `${handoffRel} is here, but componentConfig.thread.handoff.successor is off: it teaches thread handoff and spawn to sessions in a repo where they are not on, and install never removes it`,
+            );
+            fixes.push(
+              stray.kind === 'matches'
+                ? `It is byte-identical to the SDK's copy, so deleting it loses nothing: git rm ${handoffRel}`
+                : stray.kind === 'drifted'
+                  ? `It differs from the SDK's copy: read it before you delete it with git rm ${handoffRel}`
+                  : `It could not be compared with the SDK's copy: read it before you delete it with git rm ${handoffRel}`,
+            );
+          }
+          if (problems.length > 0) {
             return {
-              fix: `Run: ${command} (it replaces them with the SDK's copy; look at the diff first if you edited them)`,
-              message: `${drifted.join(', ')} differ${drifted.length === 1 ? 's' : ''} from the SDK's copy`,
+              fix: fixes.join(' '),
+              message: problems.join('; '),
               pass: false,
               severity: 'warn',
             };
@@ -2129,7 +2193,7 @@ export function makeThreadRulesChecks(
             };
           }
           return {
-            message: `${states.length} rule files match the SDK's copy`,
+            message: `${states.length} rule files match the SDK's copy${knob.kind === 'off' ? ` (${HANDOFF_RULE_FILE} is not expected here: componentConfig.thread.handoff.successor is off)` : ''}`,
             pass: true,
           };
         },
@@ -2222,32 +2286,6 @@ export function makeHandoffSandboxChecks(
       },
     },
   ];
-}
-
-/**
- * Is componentConfig.thread.handoff.successor on at `projectRoot`? Resolved as
- * `thread handoff` and the session guard resolve it (hook-knobs.ts), so doctor
- * checks the exclusion exactly where the command would start a successor.
- * `await import`: hook-knobs reaches zod (see the THREAD_RULES check). A read
- * that throws is UNKNOWN: doctor then warns that it could not tell, never
- * treats it as off (critical rule 7). A config that reads but is invalid
- * resolves to the defaults (off) in resolveThreadConfig, for doctor and for
- * `thread handoff` alike, and CONFIG_SCHEMA names it.
- */
-async function handoffSuccessorKnob(
-  projectRoot: string,
-): Promise<{kind: 'off' | 'on'} | {kind: 'unknown'; reason: string}> {
-  try {
-    const {hookKnobOn} = await import('./hook-knobs');
-    return {
-      kind: hookKnobOn('thread.handoff.successor', projectRoot) ? 'on' : 'off',
-    };
-  } catch (error) {
-    return {
-      kind: 'unknown',
-      reason: error instanceof Error ? error.message : String(error),
-    };
-  }
 }
 
 // ---------------------------------------------------------------------------

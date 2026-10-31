@@ -6,6 +6,7 @@
  */
 
 import type {CmuxRunner} from './cmux';
+import type {ChainRequestReaders} from './overarching';
 import type {EnvLike} from './paths';
 import type {TabTitleOutcome} from './tab-title';
 import type {
@@ -23,6 +24,12 @@ import {outputStyle} from '../cli-style';
 import {realCmuxRunner} from './cmux';
 import {resolveRepoTag} from './config';
 import {realChainViewReaders} from './handoff-view';
+import {
+  chainRequestList,
+  nameItemsOf,
+  readChainRequests,
+  realChainRequestReaders,
+} from './overarching';
 import {
   labelValue,
   resolveSession,
@@ -208,6 +215,55 @@ export function lookupWorkspaceSession(input: {
   };
 }
 
+/**
+ * TRIAL (home-base-jm5kg.6 D5): with componentConfig.thread.workspaceNameItems
+ * on in `cwd`, the lookup's session gets the chain's other requests as
+ * `nameItems` (measured, or the reason they could not be read, which then
+ * names nothing). Off, or a failed lookup: returned as it was. `readers` is
+ * for tests; `itemsOn` overrides the knob (tests, the dry run).
+ */
+export async function withNameItems(
+  lookup: SessionLookup,
+  input: {
+    cwd: string;
+    env: EnvLike;
+    itemsOn?: boolean;
+    readers?: ChainRequestReaders;
+  },
+): Promise<SessionLookup> {
+  if (lookup.kind !== 'found') return lookup;
+  let on = input.itemsOn;
+  if (on == null) {
+    const {resolveThreadConfig} = await import('./config');
+    on = resolveThreadConfig({
+      cwd: input.cwd,
+      env: input.env,
+    }).workspaceNameItems;
+  }
+  if (!on) return lookup;
+  const {session} = lookup;
+  const read = readChainRequests(
+    {id: session.beadId, labels: session.labels, title: session.title},
+    input.readers ?? realChainRequestReaders({cwd: input.cwd, env: input.env}),
+  );
+  return {
+    ...lookup,
+    session: {
+      ...session,
+      nameItems:
+        read.kind === 'read'
+          ? {
+              ok: true,
+              value: nameItemsOf({
+                headTitle: session.title,
+                requests: chainRequestList(read),
+              }),
+            }
+          : {ok: false, reason: read.reason},
+    },
+  };
+}
+
 async function nameWorkspacesKnob(cwd: string, env: EnvLike): Promise<boolean> {
   const {resolveThreadConfig} = await import('./config');
   return resolveThreadConfig({cwd, env}).nameWorkspaces;
@@ -235,13 +291,14 @@ export async function workspaceNameFollowUp(input: {
     if (lookup.kind === 'failed') {
       return `workspace name not set: ${lookup.reason}; the next prompt will set it`;
     }
+    const named = await withNameItems(lookup, input);
     const run = input.run ?? realCmuxRunner();
     const outcome = await syncWorkspaceName({
       enabled: true,
       env: input.env,
       readLabels: realOwnerLabels({cwd: input.cwd, env: input.env}),
       run,
-      session: lookup.session,
+      session: named.kind === 'found' ? named.session : lookup.session,
     });
     let line: string | null;
     switch (outcome.kind) {
@@ -299,7 +356,12 @@ export async function syncWorkspaceForCapture(input: {
   run?: CmuxRunner;
 }): Promise<WorkspaceSyncOutcome> {
   if (!input.enabled) return {kind: 'off'};
-  const {lookup} = input;
+  if (input.lookup.kind === 'failed') {
+    return {kind: 'failed', reason: input.lookup.reason, workspaceId: null};
+  }
+  // home-base-jm5kg.6: the items are the workspace sync's alone; the tab
+  // title (syncTabForCapture) keeps the plain session name.
+  const lookup = await withNameItems(input.lookup, input);
   if (lookup.kind === 'failed') {
     return {kind: 'failed', reason: lookup.reason, workspaceId: null};
   }
@@ -519,7 +581,8 @@ export async function runThreadWorkspaceName(
     );
     return 1;
   }
-  const lookup = lookupWorkspaceSession({cwd, env, session: sessionRef});
+  const found = lookupWorkspaceSession({cwd, env, session: sessionRef});
+  const lookup = await withNameItems(found, {cwd, env});
   if (lookup.kind === 'failed') {
     console.error(`thread workspace-name: ${lookup.reason}`);
     return 1;

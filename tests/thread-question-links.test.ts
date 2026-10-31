@@ -584,20 +584,29 @@ describe('G2: thread status says what to do with each open request when the yiel
       {kind: 'openWork'},
     ];
     for (const style of [PLAIN_STYLE, {color: true, width: 100}]) {
-      for (const status of statuses) {
-        const lines = verdictLines(status, style);
-        const said = lines.join('\n').includes(OPEN_WORK_CONSEQUENCE.trim());
-        expect({kind: status.kind, lines: lines.length, said}).toEqual({
-          kind: status.kind,
-          lines: status.kind === 'openWork' ? 3 : 1,
-          said: status.kind === 'openWork',
-        });
+      for (const successor of [false, true]) {
+        for (const status of statuses) {
+          const lines = verdictLines(status, style, successor);
+          const said = lines.join('\n').includes(OPEN_WORK_CONSEQUENCE.trim());
+          expect({kind: status.kind, lines: lines.length, said}).toEqual({
+            kind: status.kind,
+            lines: status.kind === 'openWork' ? 3 : 1,
+            said: status.kind === 'openWork',
+          });
+        }
       }
     }
-    expect(verdictLines({kind: 'openWork'}, PLAIN_STYLE)).toEqual([
+    expect(verdictLines({kind: 'openWork'}, PLAIN_STYLE, true)).toEqual([
       'If you stop now the inbox will say: ⚠️ Open work, no blocker — Justin will be told to resume this session.',
       'Before you stop, settle each open request: close it if its work is done; keep working if you can, acting on the default of any P1–P3 question Justin has not answered; or, if it cannot move without his answer, file that question as a P0.',
       'Handing off is not a way to stop: run `./node_modules/.bin/justin-sdk thread handoff` only when this session cannot go on (its context is nearly full, or Justin asked for a new session).',
+    ]);
+    // home-base-jm5kg.8: with componentConfig.thread.handoff.successor off,
+    // the same rule, and no handoff command named.
+    expect(verdictLines({kind: 'openWork'}, PLAIN_STYLE, false)).toEqual([
+      'If you stop now the inbox will say: ⚠️ Open work, no blocker — Justin will be told to resume this session.',
+      'Before you stop, settle each open request: close it if its work is done; keep working if you can, acting on the default of any P1–P3 question Justin has not answered; or, if it cannot move without his answer, file that question as a P0.',
+      'Handing off is not a way to stop: hand off only when this session cannot go on (its context is nearly full, or Justin asked for a new session).',
     ]);
   });
 
@@ -606,17 +615,21 @@ describe('G2: thread status says what to do with each open request when the yiel
     // pending read "Close what is done, file the P0 that blocks you, or run
     // thread handoff" as three ways to stop, and handed off for no reason.
     for (const style of [PLAIN_STYLE, {color: true, width: 100}]) {
-      const said = verdictLines({kind: 'openWork'}, style)
-        .join('\n')
-        .replace(/\s+/g, ' ');
-      expect(said).not.toContain('file the P0 that blocks you');
-      expect(said).not.toContain('fourth option');
-      expect(said).toContain('close it if its work is done');
-      expect(said).toContain('keep working if you can');
-      expect(said).toContain('file that question as a P0');
-      expect(said).toMatch(
-        /Handing off is not a way to stop: run \S*\.\/node_modules\/\.bin\/justin-sdk thread handoff\S* only when this session cannot go on/u,
-      );
+      for (const successor of [false, true]) {
+        const said = verdictLines({kind: 'openWork'}, style, successor)
+          .join('\n')
+          .replace(/\s+/g, ' ');
+        expect(said).not.toContain('file the P0 that blocks you');
+        expect(said).not.toContain('fourth option');
+        expect(said).toContain('close it if its work is done');
+        expect(said).toContain('keep working if you can');
+        expect(said).toContain('file that question as a P0');
+        expect(said).toMatch(
+          successor
+            ? /Handing off is not a way to stop: run \S*\.\/node_modules\/\.bin\/justin-sdk thread handoff\S* only when this session cannot go on/u
+            : /Handing off is not a way to stop: hand off only when this session cannot go on/u,
+        );
+      }
     }
 
     const {linked, w} = await threeRequests();
@@ -628,8 +641,11 @@ describe('G2: thread status says what to do with each open request when the yiel
       timeZone: TZ,
     });
     const block = marksBlock(out);
-    // The handoff is said ONCE, on the verdict, with its caveat.
-    expect(block.split('thread handoff')).toHaveLength(2);
+    // The handoff is said ONCE, on the verdict, with its caveat. This world's
+    // successor knob is off (the default), so no command is named
+    // (home-base-jm5kg.8).
+    expect(block.split('Handing off')).toHaveLength(2);
+    expect(block).not.toContain('thread handoff');
     expect(block).not.toContain('or hand off');
     expect(block).toContain(
       '  - not done, and you can go on → keep working; act on the default of any P1–P3 question Justin has not answered',
@@ -640,6 +656,39 @@ describe('G2: thread status says what to do with each open request when the yiel
     expect(filed?.title).toBe('Should the export also gzip its output?');
     expect(block).toContain(
       `  - not done, and it cannot move without Justin → file that question as a P0: \`bun run justin-sdk thread ask "…" --priority 0 --to ${linked}\` (already filed as ${filed?.id}? File it again at P0, then close the old one: \`br close ${filed?.id} --reason "raised to P0 as <new id>"\`)`,
+    );
+  });
+
+  test('jm5kg.8: thread status names the handoff call only where componentConfig.thread.handoff.successor is on', async () => {
+    // Through the real loader, so the knob is read from config the way
+    // `thread status` reads it, not passed in by the test.
+    const {w} = await threeRequests();
+    const render = async (): Promise<string> =>
+      renderThreadStatus(await report(w, true), {
+        now: NOW,
+        style: PLAIN_STYLE,
+        timeZone: TZ,
+      });
+    const xdg = w.env.XDG_CONFIG_HOME;
+    if (xdg == null) throw new Error('the world has no XDG_CONFIG_HOME');
+    const userConfig = join(xdg, 'justin-sdk', 'config.json');
+
+    const off = await render();
+    expect(off).toContain(
+      'Handing off is not a way to stop: hand off only when this session cannot go on',
+    );
+    expect(off).not.toContain('thread handoff');
+    expect(off).not.toContain('thread spawn');
+
+    writeFileSync(
+      userConfig,
+      JSON.stringify({
+        componentConfig: {thread: {...ON, handoff: {successor: true}}},
+      }),
+    );
+    const on = await render();
+    expect(on).toContain(
+      'Handing off is not a way to stop: run `./node_modules/.bin/justin-sdk thread handoff` only when this session cannot go on',
     );
   });
 });

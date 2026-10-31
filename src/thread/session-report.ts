@@ -38,7 +38,12 @@ import type {RelatedEpics} from './related-epics';
 import type {ActionLine, OptionalLine} from './session-card';
 import type {CreatedBeads} from './session-created';
 import type {Measured, SessionModel} from './session-model';
-import type {MarkItem, SessionStatus, StatusCounts} from './session-status';
+import type {
+  MarkItem,
+  OverarchingFacts,
+  SessionStatus,
+  StatusCounts,
+} from './session-status';
 
 import {readFileSync} from 'fs';
 import {join} from 'path';
@@ -63,6 +68,11 @@ import {
   realChainViewReaders,
   type UnattendedCountView,
 } from './handoff-view';
+import {
+  chainRequestList,
+  readChainRequests,
+  realChainRequestReaders,
+} from './overarching';
 import {
   partOneView,
   renderPartOne,
@@ -157,10 +167,20 @@ export type ReportLoad =
        * pass over every transcript.
        */
       created: Measured<CreatedBeads>;
+      /**
+       * componentConfig.thread.handoff.successor: only where it is on does the
+       * verdict name the handoff call (home-base-jm5kg.8).
+       */
+      handoffSuccessor: boolean;
       kind: 'loaded';
       model: SessionModel;
       /** The dashboard's "Optional" line, null when no P1–P4 is open. */
       optional: OptionalLine | null;
+      /**
+       * home-base-jm5kg.5 D3: the chain's requests for What to mark, read only
+       * with titleSummary on (null otherwise).
+       */
+      overarching: Measured<OverarchingFacts> | null;
       status: SessionStatus;
       /** componentConfig.thread.titleSummary (home-base-ys9t7.9.1). */
       titleSummary: boolean;
@@ -172,11 +192,18 @@ export type ReportLoad =
 async function knobOn(
   cwd: string,
   env: EnvLike,
-): Promise<{ok: false; reason: string} | {ok: true; titleSummary: boolean}> {
+): Promise<
+  | {ok: false; reason: string}
+  | {handoffSuccessor: boolean; ok: true; titleSummary: boolean}
+> {
   const {resolveThreadConfig} = await import('./config');
   const config = resolveThreadConfig({cwd, env});
   return config.sessionBeads
-    ? {ok: true, titleSummary: config.titleSummary}
+    ? {
+        handoffSuccessor: config.handoff.successor,
+        ok: true,
+        titleSummary: config.titleSummary,
+      }
     : {
         ok: false,
         reason: `componentConfig.thread.sessionBeads is not true (resolved from: ${config.sessionBeadsSource})`,
@@ -205,6 +232,42 @@ function successorSessionIdOf(
     }
   }
   return null;
+}
+
+/**
+ * home-base-jm5kg.5 D3: every request of this session and the sessions it
+ * continues. This session's own requests come from the model already loaded,
+ * so a session with no handoff link reads nothing more.
+ */
+function overarchingFactsOf(
+  model: SessionModel,
+  input: {cwd: string; env: EnvLike},
+): Measured<OverarchingFacts> {
+  const session = model.beads.session;
+  if (session == null) {
+    return {ok: false, reason: 'the session bead was not found'};
+  }
+  if (model.beads.problems.length > 0) {
+    return {ok: false, reason: model.beads.problems.join('; ')};
+  }
+  const read = readChainRequests(
+    {id: session.id, labels: session.labels, title: session.title},
+    realChainRequestReaders({
+      cwd: input.cwd,
+      env: input.env,
+      known: new Map([
+        [session.id, model.beads.requests.map((node) => node.request)],
+      ]),
+    }),
+  );
+  if (read.kind === 'failed') return {ok: false, reason: read.reason};
+  return {
+    ok: true,
+    value: {
+      chained: read.sessions.length > 1,
+      requests: chainRequestList(read),
+    },
+  };
 }
 
 async function loadForReport(input: {
@@ -248,9 +311,11 @@ async function loadForReport(input: {
     }),
     counts,
     created,
+    handoffSuccessor: knob.handoffSuccessor,
     kind: 'loaded',
     model,
     optional: optionalLine(counts, model.sessionBeadId),
+    overarching: knob.titleSummary ? overarchingFactsOf(model, input) : null,
     status,
     titleSummary: knob.titleSummary,
   };
@@ -448,9 +513,93 @@ function titleSummaryLine(
   };
 }
 
+function quoted(requests: readonly {id: string; title: string}[]): string {
+  return requests
+    .map((request) => `"${request.title}" (${request.id})`)
+    .join('; ');
+}
+
+/**
+ * home-base-jm5kg.5 D3: is the overarching request still the whole of the
+ * work? Each way out is its own line, with its command (as requestOpenLines).
+ */
+export function overarchingLines(
+  item: Extract<MarkItem, {kind: 'overarching'}>,
+): MarkView {
+  const scope = item.chained
+    ? 'this session and the sessions it continues'
+    : 'this session';
+  const fileNew = sdkRun('thread request --overarching "…"');
+  const retitle = sdkRun('thread title "…"');
+  const over = item.overarching;
+  if (item.why === 'none' || over == null) {
+    return {
+      code: null,
+      sub: [
+        [
+          'one of them describes all of it → ',
+          {code: sdkRun('thread request --overarching --bead <request id>')},
+        ],
+        ['none of them does → file the one that does: ', {code: fileNew}],
+      ],
+      text: `${scope === 'this session' ? 'This session has' : 'This session and the sessions it continues have'} ${item.requests.length} requests, and none is marked as the overarching request: the one whose title describes the whole of the work, done and open. Its title becomes the session title, which names the inbox entry and the cmux workspace. The requests: ${quoted(item.requests)}.`,
+    };
+  }
+  const confirm = sdkRun(`thread request --overarching --bead ${over.id}`);
+  const name = `The overarching request ${over.id} ("${over.title}")`;
+  switch (item.why) {
+    case 'duplicate':
+      return {
+        code: confirm,
+        sub: [],
+        text: `${item.duplicates.length + 1} requests are marked overarching: ${over.id} (marked last, so it is the one used) and ${item.duplicates.map((issue) => issue.id).join(', ')}. Mark it again to unmark the others:`,
+      };
+    case 'titleDiffers':
+      return {
+        code: null,
+        sub: [
+          [
+            'it still fits → set the session title from it again: ',
+            {code: confirm},
+          ],
+          [
+            'the work has grown → retitle the request and the session together: ',
+            {code: retitle},
+          ],
+        ],
+        text: `The session title ("${item.sessionTitle}") is not the title of its overarching request ${over.id} ("${over.title}"); the session title is meant to be that title.`,
+      };
+    case 'filedSince':
+    case 'unrecorded': {
+      const n = item.since.length;
+      const why =
+        item.why === 'filedSince'
+          ? `${name} was set before ${n === 1 ? 'this request was' : `these ${n} requests were`} filed: ${quoted(item.since)}.`
+          : `${name} carries no record of when it was set, so it may predate the other requests.`;
+      return {
+        code: null,
+        sub: [
+          ['it does → record that you checked: ', {code: confirm}],
+          [
+            'the work has grown → retitle it (the session follows): ',
+            {code: retitle},
+          ],
+          [
+            `the work has changed direction → file the new one (${over.id} stays a request): `,
+            {code: fileNew},
+          ],
+        ],
+        text: `${why} Does it still describe the whole of the work in ${scope}, done and open? A new request can reframe the work: a session that began with a question may now be a refactor.`,
+      };
+    }
+  }
+}
+
 /** One "What to mark" entry, in plain words, with the command that fixes it. */
 export function markLine(item: MarkItem): MarkView {
   switch (item.kind) {
+    case 'overarching':
+      return overarchingLines(item);
     case 'allRequestsClosed':
       return allRequestsClosedLine(item);
     case 'requestChildrenClosed':
@@ -581,13 +730,24 @@ export const OPEN_WORK_HANDOFF: readonly Piece[] = [
 ];
 
 /**
+ * The same rule where componentConfig.thread.handoff.successor is off
+ * (home-base-jm5kg.8): tg45h's guidance stays, and no handoff command is named,
+ * because Justin is not ready for repos without the knob to learn it.
+ */
+export const OPEN_WORK_HANDOFF_UNNAMED: readonly Piece[] = [
+  'Handing off is not a way to stop: hand off only when this session cannot go on (its context is nearly full, or Justin asked for a new session).',
+];
+
+/**
  * The verdict: one line, and for ⚠️ two more saying what to do (G2;
  * home-base-tg45h): settle each open request, and hand off only when the
- * session cannot go on.
+ * session cannot go on. `handoffSuccessor` is the repo's successor knob: only
+ * where it is on does the last line name the handoff call.
  */
 export function verdictLines(
   status: SessionStatus,
   style: OutputStyle,
+  handoffSuccessor: boolean,
 ): string[] {
   const words = tildeText(statusWords(status));
   const head = style.color
@@ -608,7 +768,7 @@ export function verdictLines(
   return [
     `${head}${OPEN_WORK_CONSEQUENCE}`,
     line(OPEN_WORK_SETTLE),
-    line(OPEN_WORK_HANDOFF),
+    line(handoffSuccessor ? OPEN_WORK_HANDOFF : OPEN_WORK_HANDOFF_UNNAMED),
   ];
 }
 
@@ -630,6 +790,7 @@ export function renderThreadStatus(
     style,
   );
   const marks = whatToMark(load.model, load.status, load.created, {
+    ...(load.overarching != null ? {overarching: load.overarching} : {}),
     titleSummary: load.titleSummary,
   })
     .map(markLine)
@@ -671,7 +832,7 @@ export function renderThreadStatus(
     SESSION_BEADS_ENABLED_LINE,
     partOne,
     markBlock,
-    verdictLines(load.status, style).join('\n'),
+    verdictLines(load.status, style, load.handoffSuccessor).join('\n'),
   ]);
 }
 

@@ -60,6 +60,7 @@ import {
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
   THREAD_DEFAULT_TITLE_SUMMARY,
+  THREAD_DEFAULT_WORKSPACE_NAME_ITEMS,
 } from './thread/defaults';
 import {TIME_CHECK_DEFAULTS} from './time-check';
 import {USAGE_CHECK_DEFAULTS} from './usage-check';
@@ -537,6 +538,12 @@ const componentConfigSchema = z
           .describe(
             'SESSION TITLE AS A SUMMARY (home-base-ys9t7.9.1, built 2026-10-30). DEFAULT FALSE. When true, every time a session’s title is set (`thread title`, the first request’s auto-title, or a successor inheriting its predecessor’s title) the session bead gets a `title-set:<time>` label, and `thread status` lists a "What to mark" item asking for a short summary of everything the session, and the sessions it continues, asked for and talked about, whenever requests were filed after the title was last set. The title is what the inbox shows and what `nameWorkspaces` names the cmux workspace after. Off: the old auto-title item only, and no label.',
           ),
+        workspaceNameItems: z
+          .boolean()
+          .optional()
+          .describe(
+            'TRIAL: WORKSPACE NAME LISTS THE REQUESTS (home-base-jm5kg.6 D5, built 2026-10-30). DEFAULT FALSE. With `nameWorkspaces` on, the cmux workspace name becomes "[TAG] <session title> ✅ <done request> 🔳 <open request> …": every request of the session and the sessions it continues, other than its overarching request (`thread request --overarching`) and any whose title is the session title, done before open and oldest first within each; requests closed "not needed" are left out. Cut at 160 characters with "…". A chain whose requests cannot be read names nothing that time, and says why. Off: "[TAG] <session title>", as before.',
+          ),
       })
       .optional()
       .describe(
@@ -869,6 +876,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     sessionBeads: THREAD_DEFAULT_SESSION_BEADS,
     stages: THREAD_DEFAULT_STAGES,
     titleSummary: THREAD_DEFAULT_TITLE_SUMMARY,
+    workspaceNameItems: THREAD_DEFAULT_WORKSPACE_NAME_ITEMS,
     // No `startOnSessionStart`: deprecated, no effect, so no default to print
     // (home-base-39co9 D2).
   },
