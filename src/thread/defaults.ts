@@ -283,6 +283,20 @@ export const HANDOFF_DEFAULTS = {
 } as const;
 
 // ---------------------------------------------------------------------------
+// componentConfig.thread.spawn (home-base-11ya7.9)
+// ---------------------------------------------------------------------------
+
+/**
+ * Who may run `thread spawn`. `allowed: false` is the default: the command
+ * refuses, dry run included, in every repo that does not turn it on. Justin
+ * (2026-11-03): "in general I don't want cc sessions spawning their own new
+ * sessions … this is a command that I expect only home-base will be running."
+ */
+export const SPAWN_DEFAULTS = {
+  allowed: false,
+} as const;
+
+// ---------------------------------------------------------------------------
 // componentConfig.thread.quota (request home-base-ys9t7.5, D5)
 // ---------------------------------------------------------------------------
 

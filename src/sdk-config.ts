@@ -43,6 +43,7 @@ import {
   HANDOFF_PREDECESSOR_MODES,
   QUOTA_DEFAULTS,
   QUOTA_MODES,
+  SPAWN_DEFAULTS,
   THREAD_DEFAULT_ANSWER_UI,
   THREAD_DEFAULT_AUTO_COMMIT,
   THREAD_DEFAULT_AUTO_PUSH,
@@ -360,6 +361,12 @@ const componentConfigSchema = z
               ),
             usage: z
               .looseObject({
+                check: z
+                  .boolean()
+                  .optional()
+                  .describe(
+                    'False skips the handoff gate’s usage check entirely: no sample is read and no usage ceiling applies. An off switch for when the hourly /usage sampler cannot read the panel, so that every handoff would otherwise refuse with usageUnknown; delete it once the sampler records an ok sample again. Default true.',
+                  ),
                 maxSampleAgeMinutes: z
                   .number()
                   .positive()
@@ -373,7 +380,7 @@ const componentConfigSchema = z
                   .max(100)
                   .optional()
                   .describe(
-                    'The handoff gate refuses when the newest sample’s 5-hour session window is above this percentage.',
+                    'The handoff gate refuses when the newest sample’s 5-hour session window is above this percentage. It applies only when that sample shows a 5-hour window; a sample whose panel printed no `Current session` line is judged on its week windows alone.',
                   ),
                 maxWeekPercent: z
                   .number()
@@ -519,6 +526,19 @@ const componentConfigSchema = z
           .optional()
           .describe(
             'STATUS REPORT V4 (home-base-vzwbj.4 D6, built 2026-10-11 by home-base-vzwbj.4.1). DEFAULT FALSE. With it on, the `thread capture` hook ALSO files a `session` bead (in_progress, labels session / sid:<id> / auto-title, plus cmux-surface: / cmux-workspace: when known) in the repo’s OWN beads workspace on a session’s first captured prompt, records which DB holds it in ~/.local/state/justin-threads/sessions.jsonl, and injects one `[thread] session …` line into Claude’s context on every prompt (mirrored to you). `thread request` and `thread title` need it. A repo with no br workspace gets no bead and no line. Off: none of that happens anywhere, and the ~/Dev/threads thread bead is written exactly as before either way. Rides on capture, so `enabled` and `capture` must be on too.',
+          ),
+        spawn: z
+          .looseObject({
+            allowed: z
+              .boolean()
+              .optional()
+              .describe(
+                'WHO MAY START SESSIONS (home-base-11ya7.9, 2026-11-03). DEFAULT FALSE: `thread spawn` refuses with exit 2 and opens nothing, `--dry-run` included, and tells the caller to file the work as a bead and tell Justin. True: `thread spawn` runs as before (the handoff gate and the spend quota still apply). Read from the repo the command runs in (its cwd). Justin wants only the home-base mayor to start sessions in other projects, so only home-base’s project file turns it on.',
+              ),
+          })
+          .optional()
+          .describe(
+            'thread.spawn: whether `thread spawn` may run in this repo at all (home-base-11ya7.9). Each field resolves on its own, default ← user file ← project file.',
           ),
         stages: z
           .array(z.string())
@@ -874,6 +894,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     render: {emojiHeader: THREAD_DEFAULT_EMOJI_HEADER},
     repoDir: '~/Dev/threads',
     sessionBeads: THREAD_DEFAULT_SESSION_BEADS,
+    spawn: SPAWN_DEFAULTS,
     stages: THREAD_DEFAULT_STAGES,
     titleSummary: THREAD_DEFAULT_TITLE_SUMMARY,
     workspaceNameItems: THREAD_DEFAULT_WORKSPACE_NAME_ITEMS,

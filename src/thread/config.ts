@@ -62,6 +62,7 @@ import {
 import {type ResolvedHandoffConfig, resolveHandoffConfig} from './handoff-knob';
 import {parseSince} from './open-filters';
 import {type ResolvedQuotaConfig, resolveQuotaConfig} from './quota-knob';
+import {type ResolvedSpawnConfig, resolveSpawnConfig} from './spawn-knob';
 
 export function isThreadDashboardUi(
   value: unknown,
@@ -210,6 +211,11 @@ export interface ResolvedThreadConfig {
   sessionBeadsSource: ThreadConfigSource;
   /** Which layer decided `enabled`. */
   source: ThreadConfigSource;
+  /**
+   * `componentConfig.thread.spawn` (home-base-11ya7.9): whether `thread
+   * spawn` may run in this repo at all. Default off; see spawn-knob.ts.
+   */
+  spawn: ResolvedSpawnConfig;
   /**
    * The request stage ladder, in order (home-base-vzwbj.4.3): what `thread
    * stage` accepts and Part 1 ranks. A layer whose value is not a non-empty
@@ -518,6 +524,15 @@ export function resolveThreadConfig(
     problems,
   );
 
+  // home-base-11ya7.9: who may run `thread spawn`, the same way.
+  const spawn = resolveSpawnConfig(
+    layers.map((layer) => ({
+      name: layer.name,
+      section: threadSectionIn(layer.config)?.spawn,
+    })),
+    problems,
+  );
+
   // home-base-bomy5.7.1: the project file only — a user-level tag would put
   // one tag on every repo. A bad value is NAMED and ignored, like `stages`.
   let projectTag: string | null = null;
@@ -573,6 +588,7 @@ export function resolveThreadConfig(
     sessionBeads: sessionBeads.value,
     sessionBeadsSource: sessionBeads.source,
     source: enabled.source,
+    spawn,
     stages,
     stagesSource,
     titleSummary: titleSummary.value,

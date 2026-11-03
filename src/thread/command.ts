@@ -82,11 +82,12 @@ const RESPAWN_RETIRED_SUMMARY =
   'RETIRED (epic home-base-mbnjv C3): starting a successor is now `thread handoff` with componentConfig.thread.handoff.successor on. This command prints that and exits 2, doing nothing.';
 
 const SPAWN_SUMMARY =
-  'Start a new Claude Code session in a directory you name: open a new cmux workspace there running `claude`, with Remote Control when you pass --remote-control, so you can reach it from the Claude app on your phone (home-base-yukaf.7). Try --dry-run first. With componentConfig.thread.handoff.successor on in the repo it runs in, the handoff gate runs first (kill switch, cmux, usage, live sessions). Exit 0 opened, or a dry run · 1 cmux did not open it · 2 refused, nothing opened · 3 refused by the handoff gate, nothing opened.';
+  'Start a new Claude Code session in a directory you name: open a new cmux workspace there running `claude`, with Remote Control when you pass --remote-control, so you can reach it from the Claude app on your phone (home-base-yukaf.7). ONLY THE HOME-BASE MAYOR STARTS SESSIONS IN OTHER PROJECTS: it refuses (exit 2, nothing opened, --dry-run included) unless componentConfig.thread.spawn.allowed is true in the repo it runs in, which only home-base turns on; anywhere else, file the work as a bead and tell Justin (home-base-11ya7.9). Try --dry-run first. With componentConfig.thread.handoff.successor on in the repo it runs in, the handoff gate runs first (kill switch, cmux, usage, live sessions). Exit 0 opened, or a dry run · 1 cmux did not open it · 2 refused, nothing opened · 3 refused by the handoff gate, nothing opened.';
 
 const SPAWN_NARRATIVE = `
 WHAT IT DOES, in order.
 
+  0. Refuses (exit 2, nothing opened, --dry-run included) unless componentConfig.thread.spawn.allowed is true in the repo it runs in (default false; only home-base turns it on).
   1. Refuses (exit 2, nothing opened) when the directory does not exist or is not a directory. A leading ~ means your home directory; a relative path is read from the current directory.
   2. Names the workspace "[TAG] new session <directory name>", or "[TAG] <name>" with --name. TAG is the projectTag in that repo's justin-sdk.config.json, else the repo folder name in capitals, the same tag the inbox shows.
   3. Refuses (exit 2) when cmux cannot be reached, and prints the sandbox setting that allows it (see SANDBOX HINT).

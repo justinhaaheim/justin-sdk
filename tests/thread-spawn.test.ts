@@ -13,7 +13,11 @@ import {execFileSync} from 'child_process';
 import {mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
+import {DEFAULT_COMPONENT_CONFIG, renderConfigSchema} from '../src/sdk-config';
+import {resolveThreadConfig} from '../src/thread/config';
+import {SPAWN_DEFAULTS} from '../src/thread/defaults';
 import {spawnSession} from '../src/thread/spawn';
+import {resolveSpawnConfig} from '../src/thread/spawn-knob';
 import {createSandbox} from './sandbox';
 
 const SOCK = '/tmp/spawn-test/cmux.sock';
@@ -23,6 +27,11 @@ const sandboxes: Sandbox[] = [];
 afterEach(() => {
   for (const sb of sandboxes.splice(0)) sb.cleanup();
 });
+
+/** A config file body that sets componentConfig.thread.spawn.allowed. */
+function spawnConfig(allowed: unknown): Record<string, unknown> {
+  return {componentConfig: {thread: {spawn: {allowed}}}};
+}
 
 interface World {
   env: Record<string, string | undefined>;
@@ -34,10 +43,24 @@ interface World {
   worktree: string;
 }
 
-function world(): World {
+/**
+ * home-base-11ya7.9: `spawnAllowed` writes componentConfig.thread.spawn.allowed
+ * into the USER file (default true, so every test outside the access block
+ * runs where spawning is allowed); null writes no user file at all.
+ */
+function world(setup: {spawnAllowed?: boolean | null} = {}): World {
   const sb = createSandbox();
   sandboxes.push(sb);
   const root = sb.path;
+  const spawnAllowed =
+    setup.spawnAllowed === undefined ? true : setup.spawnAllowed;
+  if (spawnAllowed != null) {
+    mkdirSync(join(root, 'xdg', 'justin-sdk'), {recursive: true});
+    writeFileSync(
+      join(root, 'xdg', 'justin-sdk', 'config.json'),
+      JSON.stringify(spawnConfig(spawnAllowed)),
+    );
+  }
   const home = join(root, 'home');
   mkdirSync(join(home, 'Dev', 'notes'), {recursive: true});
   const tagged = join(root, 'tagged-repo');
@@ -126,6 +149,162 @@ function zshWords(command: string): string[] {
   const printed = execFileSync('zsh', ['-f', '-c', probe], {encoding: 'utf8'});
   return printed.split('\n').slice(0, -1);
 }
+
+describe('thread spawn: who may run it (home-base-11ya7.9)', () => {
+  const KNOB = 'componentConfig.thread.spawn.allowed';
+
+  /** Write the project file at the directory spawn runs from (w.root). */
+  function projectFile(w: World, body: Record<string, unknown>): void {
+    writeFileSync(join(w.root, 'justin-sdk.config.json'), JSON.stringify(body));
+  }
+
+  test('the default is false: no config anywhere resolves to off, from the default', () => {
+    const w = world({spawnAllowed: null});
+    const config = resolveThreadConfig({cwd: w.root, env: w.env});
+    expect(config.problems).toEqual([]);
+    expect(config.spawn).toEqual({allowed: false, allowedSource: 'default'});
+    expect(SPAWN_DEFAULTS.allowed).toBe(false);
+    expect(DEFAULT_COMPONENT_CONFIG.thread.spawn).toBe(SPAWN_DEFAULTS);
+  });
+
+  test('knob off: a real run refuses with exit 2, never reaches cmux, and says what to do instead', async () => {
+    const w = world({spawnAllowed: null});
+    const cmux = fakeCmux();
+    const result = await spawnSession(options(w, {kickoff: 'go'}), cmux);
+    expect(result.exitCode).toBe(2);
+    expect(cmux.calls).toEqual([]);
+    const text = result.lines.join('\n');
+    expect(text).toContain(
+      `thread spawn: refused: ${KNOB} is not set (default false) for ${w.root}. Nothing was opened.`,
+    );
+    expect(text).toContain(
+      'Only the home-base mayor starts sessions in other projects. Here, file the work as a bead and tell Justin in your report.',
+    );
+    expect(text).toContain('do not retry from another directory');
+    expect(text).not.toContain('Config problems');
+  });
+
+  test('knob off: --dry-run refuses the same way and prints no plan', async () => {
+    const w = world({spawnAllowed: null});
+    const cmux = fakeCmux();
+    const result = await spawnSession(options(w, {dryRun: true}), cmux);
+    expect(result.exitCode).toBe(2);
+    expect(cmux.calls).toEqual([]);
+    const text = result.lines.join('\n');
+    expect(text).toContain(`thread spawn: refused: ${KNOB}`);
+    expect(text).not.toContain('Dry run');
+    expect(text).not.toContain('cmux argv');
+  });
+
+  test('knob off: it refuses before any other check, so a missing directory gets the knob refusal', async () => {
+    const w = world({spawnAllowed: null});
+    const missing = join(w.root, 'no-such-dir');
+    const result = await spawnSession(
+      options(w, {dir: missing, dryRun: true}),
+      fakeCmux(),
+    );
+    expect(result.exitCode).toBe(2);
+    expect(result.lines.join('\n')).toContain(KNOB);
+    expect(result.lines.join('\n')).not.toContain('does not exist');
+  });
+
+  test('knob on in the project file: a dry run and a real run both go ahead', async () => {
+    const w = world({spawnAllowed: null});
+    projectFile(w, spawnConfig(true));
+    expect(resolveThreadConfig({cwd: w.root, env: w.env}).spawn).toEqual({
+      allowed: true,
+      allowedSource: 'project',
+    });
+    const dry = await spawnSession(options(w, {dryRun: true}), fakeCmux());
+    expect(dry.exitCode).toBe(0);
+    expect(dry.lines.join('\n')).toContain('Dry run: nothing opened');
+    const cmux = fakeCmux();
+    const real = await spawnSession(options(w, {}), cmux);
+    expect(real.exitCode).toBe(0);
+    expect(cmux.calls.map((args) => args[0])).toEqual([
+      'ping',
+      'new-workspace',
+      '--json',
+    ]);
+  });
+
+  test('the project file overrides the user file, both ways', async () => {
+    // The user file alone decides when the project file says nothing.
+    const userOnly = world({spawnAllowed: true});
+    expect(
+      resolveThreadConfig({cwd: userOnly.root, env: userOnly.env}).spawn,
+    ).toEqual({allowed: true, allowedSource: 'user'});
+
+    // User true, project false: refused, and the refusal names the project.
+    const off = world({spawnAllowed: true});
+    projectFile(off, spawnConfig(false));
+    expect(resolveThreadConfig({cwd: off.root, env: off.env}).spawn).toEqual({
+      allowed: false,
+      allowedSource: 'project',
+    });
+    const cmux = fakeCmux();
+    const refused = await spawnSession(options(off, {}), cmux);
+    expect(refused.exitCode).toBe(2);
+    expect(refused.lines.join('\n')).toContain(
+      `${KNOB} is false in the project config for ${off.root}`,
+    );
+    expect(cmux.calls).toEqual([]);
+
+    // User false, project true: allowed.
+    const on = world({spawnAllowed: false});
+    projectFile(on, spawnConfig(true));
+    expect(resolveThreadConfig({cwd: on.root, env: on.env}).spawn).toEqual({
+      allowed: true,
+      allowedSource: 'project',
+    });
+    const allowed = await spawnSession(options(on, {dryRun: true}), fakeCmux());
+    expect(allowed.exitCode).toBe(0);
+  });
+
+  test('a value that is not true or false is named in the refusal, and the knob stays off', async () => {
+    const w = world({spawnAllowed: null});
+    projectFile(w, spawnConfig('yes'));
+    const result = await spawnSession(options(w, {dryRun: true}), fakeCmux());
+    expect(result.exitCode).toBe(2);
+    const text = result.lines.join('\n');
+    expect(text).toContain('Config problems:');
+    expect(text).toContain(`- ${w.root}`);
+    expect(text).toContain('componentConfig.thread.spawn.allowed');
+  });
+
+  test('the field walk names and skips a value zod never saw (second line)', () => {
+    const problems: string[] = [];
+    const spawn = resolveSpawnConfig(
+      [
+        {name: 'user', section: {allowed: true}},
+        {name: 'project', section: {allowed: 'yes'}},
+      ],
+      problems,
+    );
+    expect(spawn).toEqual({allowed: true, allowedSource: 'user'});
+    expect(problems).toEqual([
+      'componentConfig.thread.spawn.allowed in the project config is "yes", which is not true or false — ignoring it and using true.',
+    ]);
+    const notObject: string[] = [];
+    expect(
+      resolveSpawnConfig([{name: 'project', section: true}], notObject),
+    ).toEqual({allowed: false, allowedSource: 'default'});
+    expect(notObject).toEqual([
+      'componentConfig.thread.spawn in the project config is true, which is not an object — ignoring it.',
+    ]);
+  });
+
+  test('`config schema` prints the knob with its default and a description', () => {
+    const w = world({spawnAllowed: null});
+    const line = renderConfigSchema({env: w.env, projectRoot: w.root})
+      .split('\n')
+      .find((entry) => entry.trimStart().startsWith(`${KNOB} `));
+    expect(line).toBeDefined();
+    expect(line).toContain('default false');
+    // A description follows the last ` · `.
+    expect((line ?? '').split('  ·  ').length).toBeGreaterThan(1);
+  });
+});
 
 describe('thread spawn: the workspace name', () => {
   test('defaults to "[TAG] new session <dir name>", the tag from the repo config', async () => {

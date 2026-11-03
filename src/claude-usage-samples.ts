@@ -4,6 +4,8 @@
  *
  * A successful sample:
  *   {schema: 1, sampledAt, ok: true, session, week, weekByModel, raw}
+ * where `session` is null when the panel showed no 5-hour window
+ * (home-base-jm5kg.19, from 2026-10-30).
  * A failed one:
  *   {schema: 1, sampledAt, ok: false, reason}
  * Either may also carry `trigger` and `failedAttempts` (home-base-neapv.5);
@@ -118,7 +120,14 @@ export interface OkSample extends SampleExtras {
   raw: string;
   sampledAt: string;
   schema: typeof SCHEMA;
-  session: UsageWindow;
+  /**
+   * The 5-hour window, or null when the panel printed no `Current session`
+   * line ("no 5-hour window shown", never 0%; home-base-jm5kg.19 D3). Records
+   * from before 2026-10-30 always carry one. Still schema 1: an SDK older than
+   * this change rejects a null-session line as unreadable, which is the
+   * cautious direction (its handoff gate then says usageUnknown).
+   */
+  session: UsageWindow | null;
   week: UsageWindow;
   weekByModel: Record<string, UsageWindow>;
 }
@@ -243,7 +252,11 @@ function sampleProblem(value: unknown): string | null {
       : 'a failed sample with no reason';
   }
   if (value.ok !== true) return '`ok` is neither true nor false';
-  if (!isWindow(value.session)) return 'no valid session window';
+  // null is "the panel showed no 5-hour window" (jm5kg.19 D3); an absent key
+  // or a malformed window is still not a sample.
+  if (value.session !== null && !isWindow(value.session)) {
+    return 'no valid session window (a window, or null for none shown)';
+  }
   if (!isWindow(value.week)) return 'no valid week window';
   if (
     !isObject(value.weekByModel) ||

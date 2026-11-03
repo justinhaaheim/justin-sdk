@@ -73,7 +73,8 @@ function window(pct: number) {
 
 function okSample(input: {
   minutesAgo: number;
-  session?: number;
+  /** null: the panel showed no 5-hour window (home-base-jm5kg.19). */
+  session?: number | null;
   week?: number;
 }): OkSample {
   return {
@@ -83,7 +84,7 @@ function okSample(input: {
       NOW.getTime() - input.minutesAgo * 60_000,
     ).toISOString(),
     schema: 1,
-    session: window(input.session ?? 16),
+    session: input.session === null ? null : window(input.session ?? 16),
     week: window(input.week ?? 60),
     weekByModel: {},
   };
@@ -177,8 +178,10 @@ describe('runHandoffGate', () => {
     const result = await gate();
     expect(result.kind).toBe('pass');
     if (result.kind !== 'pass') return;
-    expect(result.facts.usage.sessionPercent).toBe(16);
-    expect(result.facts.usage.ageMinutes).toBe(30);
+    expect(result.facts.usage).toMatchObject({
+      ageMinutes: 30,
+      sessionPercent: 16,
+    });
     expect(result.facts.liveSessions.total).toBe(17);
     expect(result.facts.chain).toEqual(chainOf(1));
     expect(result.facts.surfaceId).toBe(PANE_ENV.CMUX_SURFACE_ID);
@@ -287,6 +290,37 @@ describe('runHandoffGate', () => {
     expectRefused(result, 'usageUnknown', 'is a failed read');
   });
 
+  test('usage.check false skips the usage check: a failed newest sample no longer refuses (home-base-jm5kg.19)', async () => {
+    const failed: Sample = {
+      ok: false,
+      reason: 'claude -p /usage printed no recognisable quota lines',
+      sampledAt: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
+      schema: 1,
+    };
+    let read = false;
+    const run = (check: boolean | undefined) =>
+      runHandoffGate({
+        env: PANE_ENV,
+        limits: {...LIMITS, usage: {...LIMITS.usage, check}},
+        now: NOW,
+        readers: passingReaders({
+          usage: () => {
+            read = true;
+            return history(okSample({minutesAgo: 70}), failed);
+          },
+        }),
+      });
+    const skipped = await run(false);
+    expect(skipped.kind).toBe('pass');
+    expect(read).toBe(false);
+    expect(skipped.kind === 'pass' ? skipped.facts.usage : null).toEqual({
+      skipped:
+        'componentConfig.thread.handoff.usage.check is false: the usage check was not run',
+    });
+    // Absent, the check runs exactly as before.
+    expectRefused(await run(undefined), 'usageUnknown', 'is a failed read');
+  });
+
   test('usageUnknown: the newest sample is older than maxSampleAgeMinutes', async () => {
     const result = await gate({
       usage: () => history(okSample({minutesAgo: 151})),
@@ -325,6 +359,39 @@ describe('runHandoffGate', () => {
       result,
       'usageHigh',
       'the 5-hour session window is at 86 % (ceiling 85 %)',
+    );
+  });
+
+  test('a fresh sample with NO 5-hour window passes on its week figure alone, and says null, not 0 (jm5kg.19 D4)', async () => {
+    // The gate refuses ABOVE the ceiling, so a ceiling of -1 refuses every
+    // 5-hour figure, 0 % included: a pass here proves null was never compared
+    // as a number. (The config schema allows 0 to 100; the gate takes any.)
+    const result = await runHandoffGate({
+      env: PANE_ENV,
+      limits: {...LIMITS, usage: {...LIMITS.usage, maxSessionPercent: -1}},
+      now: NOW,
+      readers: passingReaders({
+        usage: () => history(okSample({minutesAgo: 5, session: null})),
+      }),
+    });
+    expect(result.kind).toBe('pass');
+    if (result.kind !== 'pass') return;
+    expect(result.facts.usage).toEqual({
+      ageMinutes: 5,
+      sampledAt: new Date(NOW.getTime() - 5 * 60_000).toISOString(),
+      sessionPercent: null,
+      weekPercent: 60,
+    });
+  });
+
+  test('a sample with NO 5-hour window still refuses on its week figure (jm5kg.19 D4)', async () => {
+    expectRefused(
+      await gate({
+        usage: () =>
+          history(okSample({minutesAgo: 5, session: null, week: 91})),
+      }),
+      'usageHigh',
+      'the week window is at 91 % (ceiling 90 %)',
     );
   });
 

@@ -22,6 +22,9 @@
  *   and neither does a real run: cmux is its only side effect.
  * - The route b alternative, a persistent `claude remote-control` server, is
  *   home-base-pa2s and is not built here.
+ * - Access (home-base-11ya7.9): it refuses with exit 2, before anything else
+ *   and with --dry-run too, unless componentConfig.thread.spawn.allowed is on
+ *   in the repo it runs in. Only home-base turns it on, for the mayor.
  */
 
 import type {Field} from '../cli-style';
@@ -41,7 +44,7 @@ import {
 } from '../cli-style';
 import {oneLine} from './ask-format';
 import {cmuxArgv, realCmuxRunner, resolveCmuxBinary} from './cmux';
-import {primaryCheckoutOf, resolveRepoTag} from './config';
+import {primaryCheckoutOf, resolveRepoTag, resolveThreadConfig} from './config';
 import {liveSocketPath, socketSettingsJson, zshWord} from './respawn';
 import {SPAWN_KICKOFF_ENV, SPAWNED_BY_SESSION_ENV} from './session-bead';
 import {sessionDisplayName} from './session-name';
@@ -88,6 +91,40 @@ const NAME_LIMIT = 80;
 function stop(exitCode: 1 | 2, text: string): SpawnResult {
   const verb = exitCode === 2 ? 'refused' : 'failed';
   return {exitCode, lines: [`thread spawn: ${verb}: ${text}`]};
+}
+
+/** What a spawn refused for want of the knob tells the calling Claude. */
+export const SPAWN_NOT_ALLOWED_INSTRUCTIONS = [
+  'Only the home-base mayor starts sessions in other projects. Here, file the work as a bead and tell Justin in your report.',
+  'This refusal is final: do not retry from another directory, and do not start a session another way.',
+] as const;
+
+/**
+ * home-base-11ya7.9: null when componentConfig.thread.spawn.allowed is on in
+ * the repo `cwd` is in; otherwise the exit-2 refusal. It is read the way the
+ * spawn gate reads its knob (resolveThreadConfig, so the nearest
+ * justin-sdk.config.json above cwd), so one repo's config decides both. Any
+ * config problem is printed with it: a file that fails validation contributes
+ * nothing, and the knob must not read as off with nothing saying why.
+ */
+export function spawnNotAllowed(cwd: string, env: EnvLike): SpawnResult | null {
+  const config = resolveThreadConfig({cwd, env});
+  if (config.spawn.allowed) return null;
+  const source = config.spawn.allowedSource;
+  const state =
+    source === 'default'
+      ? 'is not set (default false)'
+      : `is false in the ${source} config`;
+  const lines = [
+    `thread spawn: refused: componentConfig.thread.spawn.allowed ${state} for ${config.projectRoot}. Nothing was opened.`,
+    '',
+    ...SPAWN_NOT_ALLOWED_INSTRUCTIONS,
+  ];
+  if (config.problems.length > 0) {
+    lines.push('', 'Config problems:');
+    for (const problem of config.problems) lines.push(`- ${problem}`);
+  }
+  return {exitCode: 2, lines};
 }
 
 /** `~` and `~/…` become the home directory; anything else is resolved from cwd. */
@@ -273,6 +310,10 @@ export async function spawnSession(
 ): Promise<SpawnResult> {
   const env = options.env ?? process.env;
   const cwd = options.cwd ?? process.cwd();
+
+  // ---- 0. access (home-base-11ya7.9): first, so a dry run refuses too ----
+  const notAllowed = spawnNotAllowed(cwd, env);
+  if (notAllowed != null) return notAllowed;
 
   // ---- 1. refusals: nothing reaches cmux before these pass ----
   const typed = options.dir == null ? '' : options.dir.trim();

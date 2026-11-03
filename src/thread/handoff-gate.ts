@@ -181,7 +181,12 @@ export type HandoffUsageLimits = Pick<
 export interface HandoffUsageFacts {
   ageMinutes: number;
   sampledAt: string;
-  sessionPercent: number;
+  /**
+   * The 5-hour window, or null when the newest sample shows none (the panel
+   * printed no `Current session` line; home-base-jm5kg.19 D4). Read null as
+   * "no 5-hour window shown", never as 0 %.
+   */
+  sessionPercent: number | null;
   weekPercent: number;
 }
 
@@ -246,7 +251,9 @@ export function checkUsage(
     );
   }
   const over: string[] = [];
-  if (newest.session.pct > limits.maxSessionPercent) {
+  // jm5kg.19 D4: the 5-hour ceiling applies only when the sample has a 5-hour
+  // window. null is "the panel showed none", so there is nothing to compare.
+  if (newest.session != null && newest.session.pct > limits.maxSessionPercent) {
     over.push(
       `the 5-hour session window is at ${newest.session.pct} % (ceiling ${limits.maxSessionPercent} %)`,
     );
@@ -275,7 +282,7 @@ export function checkUsage(
     facts: {
       ageMinutes,
       sampledAt: newest.sampledAt,
-      sessionPercent: newest.session.pct,
+      sessionPercent: newest.session?.pct ?? null,
       weekPercent: newest.week.pct,
     },
     ok: true,
@@ -345,7 +352,8 @@ export interface HandoffGateReaders {
 export interface HandoffGateLimits {
   maxLiveSessions: number;
   maxUnattendedHandoffs: number;
-  usage: HandoffUsageLimits;
+  /** `check: false` skips the usage check; absent checks. */
+  usage: HandoffUsageLimits & {check?: boolean};
 }
 
 export interface HandoffGateInput {
@@ -367,7 +375,8 @@ export interface HandoffGateFacts {
   liveSessions: LiveSessionCount;
   /** CMUX_SURFACE_ID; null only when requireCmuxPane was false and it is unset. */
   surfaceId: string | null;
-  usage: HandoffUsageFacts;
+  /** What the newest sample said, or why the usage check was skipped. */
+  usage: HandoffUsageFacts | {skipped: string};
   /** CMUX_WORKSPACE_ID; null only when requireCmuxPane was false and it is unset. */
   workspaceId: string | null;
 }
@@ -609,16 +618,28 @@ export async function runHandoffGate(
     }
   }
 
-  // 4. Usage, from the hourly samples.
-  const usageRead = await attempt(readers.usage);
-  if ('threw' in usageRead) {
-    return refused(
-      'usageUnknown',
-      `the usage history could not be read: ${usageRead.threw}`,
-    );
+  // 4. Usage, from the hourly samples. componentConfig.thread.handoff.usage
+  // .check false skips it (Justin, 2026-11-02: a temporary switch while the
+  // /usage sampler cannot parse the panel, home-base-jm5kg.19). Absent means
+  // check: only an explicit false skips.
+  let usageFacts: HandoffGateFacts['usage'];
+  if (limits.usage.check === false) {
+    usageFacts = {
+      skipped:
+        'componentConfig.thread.handoff.usage.check is false: the usage check was not run',
+    };
+  } else {
+    const usageRead = await attempt(readers.usage);
+    if ('threw' in usageRead) {
+      return refused(
+        'usageUnknown',
+        `the usage history could not be read: ${usageRead.threw}`,
+      );
+    }
+    const usage = checkUsage(usageRead.value, limits.usage, now);
+    if (!usage.ok) return refused(usage.reason, usage.detail);
+    usageFacts = usage.facts;
   }
-  const usage = checkUsage(usageRead.value, limits.usage, now);
-  if (!usage.ok) return refused(usage.reason, usage.detail);
 
   // 5. Handoffs in a row since Justin last typed in the chain.
   let chain: HandoffGateFacts['chain'] = {kind: 'skipped'};
@@ -679,7 +700,7 @@ export async function runHandoffGate(
       chain,
       liveSessions: live.value,
       surfaceId: surfaceId === '' ? null : surfaceId,
-      usage: usage.facts,
+      usage: usageFacts,
       workspaceId: workspaceId === '' ? null : workspaceId,
     },
     kind: 'pass',

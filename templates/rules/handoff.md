@@ -44,7 +44,8 @@ Where the old tab is set to exit or close after a handoff, it waits until the ne
 ## Never start a session another way
 
 - `thread handoff` is the only way to start the session that continues this one.
-- To start a session for unrelated work or in another project, use `bun run justin-sdk thread spawn` (see its `--help`). It passes the same gate, and its exit 3 is final too.
+- Never start a session for unrelated work or in another project. File the work as a bead and tell Justin in your report.
+- The one exception is a repository with `componentConfig.thread.spawn.allowed` on, which is home-base, where the mayor runs. Only there does `bun run justin-sdk thread spawn` run (see its `--help`). It passes the same gate, and its exit 3 is final too. Everywhere else it refuses: do not retry it from another directory.
 - Never open, type into or close a tab, pane or workspace with `cmux`: no `new-workspace`, `new-surface`, `new-split`, `new-pane`, `send` or `close-…`. Reading with `cmux identify`, `cmux tree` or `cmux read-screen` is fine.
 - Never start Claude Code yourself: no `claude` with or without a prompt, no `--bg`, `-p`, `--resume` or `attach`.
 - Where `componentConfig.thread.handoff.successor` is on, a guard refuses these commands. It does not catch every spelling: a command it lets through is still forbidden. When it refuses one, do not rewrite the command to get past it.

@@ -33,6 +33,7 @@ import {
 import {tmpdir} from 'os';
 import {join, resolve} from 'path';
 
+import {stripAnsi} from '../src/check-runner';
 import {
   blockedWaitDescription,
   type BootContext,
@@ -52,6 +53,7 @@ import {
   type UsageSnapshot,
 } from '../src/justin-loop/runner';
 import {initRepo} from './git-fixtures';
+import {runLoop} from './justin-loop-world';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const REAL_USAGE_OUTPUT = `You are currently using your subscription to power your Claude Code usage
@@ -314,6 +316,103 @@ describe('checkGate', () => {
 });
 
 /**
+ * A /usage panel with no `Current session` line (home-base-jm5kg.19 D5): the
+ * panel has printed none since 2026-10-30. null skips every session-window
+ * condition, prints as "no 5-hour window", and is never 0 or a pause.
+ */
+describe('no 5-hour window (jm5kg.19 D5)', () => {
+  const NO_SESSION_PANEL = `You are currently using your subscription to power your Claude Code usage
+
+Current week (all models): 3% used · resets Nov 7 at 3pm (America/Los_Angeles)
+Current week (Fable): 1% used · resets Nov 7 at 3pm (America/Los_Angeles)
+
+What's contributing to your usage?
+Approximate · sessions on this machine only · shares overlap
+
+Last 24h · 348 requests · 5 sessions
+  77%  Start fresh when you switch tasks · run /clear
+  Top skills: /computer-use 7%, /research 4%, /mayor 3%`;
+
+  function noSession(weekPct: number): UsageRead {
+    return {
+      kind: 'ok',
+      usage: {
+        isSubscription: true,
+        raw: 'fixture',
+        sessionPct: null,
+        sessionResetsAt: null,
+        weekPct,
+        weekResetsAt: 'Nov 7 at 3pm',
+      },
+    };
+  }
+
+  const plain = stripAnsi;
+
+  test('parseUsage reads the panel with sessionPct null, not 0', () => {
+    const usage = parseUsage(NO_SESSION_PANEL);
+    expect(usage).not.toBeNull();
+    expect(usage?.sessionPct).toBeNull();
+    expect(usage?.sessionResetsAt).toBeNull();
+    expect(usage?.weekPct).toBe(3);
+    expect(usage?.weekResetsAt).toBe('Nov 7 at 3pm');
+  });
+
+  test('checkGate: no 5-hour window never trips the session stop, even at 0%', async () => {
+    // A session stop of 0 trips on any figure, 0% included (the stop is
+    // inclusive), so an ok here proves null was never read as a number.
+    const decision = await checkGate(
+      {sessionStopPct: 0, usageGate: true, weeklyStopPct: 80},
+      () => Promise.resolve(noSession(10)),
+    );
+    expect(decision.kind).toBe('ok');
+  });
+
+  test('checkGate: the weekly stop still trips with no 5-hour window', async () => {
+    const decision = await checkGate(
+      {sessionStopPct: 50, usageGate: true, weeklyStopPct: 80},
+      () => Promise.resolve(noSession(80)),
+    );
+    expect(decision.kind).toBe('tripped');
+  });
+
+  test('the dry run prints "no 5-hour window" for the session row, not a 0% bar', async () => {
+    const res = await runLoop({
+      opts: {dryRun: true, usageGate: true},
+      usage: [noSession(10)],
+    });
+    expect(res.exitCode).toBe(0);
+    const out = plain(res.stdout);
+    expect(out).toContain('session       no 5-hour window');
+    expect(out).not.toMatch(/session\s+\[[-=|]+\] 0%/);
+    expect(out).toMatch(/week\s+\[[-=|]+\] 10%/);
+  });
+
+  test('a weekly stop with no 5-hour window says so in the stop reason and the pause banner', async () => {
+    const exited = await runLoop({
+      opts: {onGateHit: 'exit', usageGate: true, weeklyStopPct: 80},
+      usage: [noSession(90)],
+    });
+    expect(plain(exited.stdout)).toContain(
+      'quota gate (session no 5-hour window / week 90%)',
+    );
+
+    // Paused, then back under: the banner names the weekly gate and the week's
+    // reset, then the loop runs.
+    const paused = await runLoop({
+      opts: {maxSessions: 1, usageGate: true, weeklyStopPct: 80},
+      sessions: [{}],
+      usage: [noSession(90), noSession(10)],
+    });
+    const out = plain(paused.stdout);
+    expect(out).toContain(
+      'weekly quota gate: session no 5-hour window / week 90%. resets Nov 7 at 3pm',
+    );
+    expect(out).toContain('session no 5-hour window');
+  });
+});
+
+/**
  * `readUsage` names WHICH failure happened (home-base-685h F1).
  *
  * Every one of these used to be the same `null`. They are driven through a
@@ -372,7 +471,7 @@ describe('readUsage names the failure (F1)', () => {
   test('quota TEXT that does not match is named separately from bad JSON', async () => {
     const outcome = await read('{"result":"Credit balance: $12.00"}');
     const reason = outcome.kind === 'failed' ? outcome.reason : '';
-    expect(reason).toContain('no recognisable quota lines');
+    expect(reason).toContain('a panel this parser cannot read');
     expect(reason).not.toContain('unparseable JSON');
   });
 

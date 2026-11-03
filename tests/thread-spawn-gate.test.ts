@@ -46,7 +46,13 @@ function world(input: {bead: boolean; successor: boolean | null}): World {
   sandboxes.push(sb);
   const xdg = join(sb.path, 'xdg');
   mkdirSync(join(xdg, 'justin-sdk'), {recursive: true});
-  const thread: Record<string, unknown> = {enabled: true, sessionBeads: true};
+  // home-base-11ya7.9: spawning must be allowed here, or spawnSession refuses
+  // before the gate these tests are about.
+  const thread: Record<string, unknown> = {
+    enabled: true,
+    sessionBeads: true,
+    spawn: {allowed: true},
+  };
   if (input.successor != null) {
     thread.handoff = {successor: input.successor};
   }

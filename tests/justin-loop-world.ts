@@ -30,6 +30,7 @@ import {
   type RunnerDeps,
   runSession,
   type SessionRun,
+  type UsageRead,
 } from '../src/justin-loop/runner';
 
 /**
@@ -222,6 +223,12 @@ export async function runLoop(spec: {
   opts?: Partial<JustinLoopOptions>;
   scans?: (BeadSpec[] | 'unavailable')[];
   sessions?: SessionScript[];
+  /**
+   * The `/usage` reads, in call order; the last one repeats. Absent: every
+   * read fails ("no /usage in this fixture"), which only matters with
+   * `usageGate: true`.
+   */
+  usage?: UsageRead[];
 }): Promise<LoopResult> {
   const rows = new Map<string, AgentRow>();
   const scriptOf = new Map<string, SessionScript>();
@@ -450,8 +457,14 @@ export async function runLoop(spec: {
           }
         : {kind: 'found', sessionId: row.fullSessionId};
     },
-    readUsage: () =>
-      Promise.resolve({kind: 'failed', reason: 'no /usage in this fixture'}),
+    readUsage: () => {
+      const reads = spec.usage ?? [];
+      const read: UsageRead = (reads.length > 1 ? reads.shift() : reads[0]) ?? {
+        kind: 'failed',
+        reason: 'no /usage in this fixture',
+      };
+      return Promise.resolve(read);
+    },
     signalPid: (pid, sig) => {
       signals.push({pid, sig: String(sig)});
       for (const [id, row] of rows) {

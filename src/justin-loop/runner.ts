@@ -83,8 +83,14 @@ export interface UsageSnapshot {
   /** True when the account is on a subscription rather than API billing. */
   isSubscription: boolean;
   raw: string;
-  /** Percent of the 5-hour session window consumed (0-100). */
-  sessionPct: number;
+  /**
+   * Percent of the 5-hour session window consumed (0-100), or null when the
+   * panel showed no 5-hour window (no `Current session` line; home-base-jm5kg.19
+   * D5). null skips every session-window condition and prints as "no 5-hour
+   * window": it is never 0 and never a pause.
+   */
+  sessionPct: number | null;
+  /** null when the line had no reset clause, or there is no session window. */
   sessionResetsAt: string | null;
   /** Percent of the weekly all-models window consumed (0-100). */
   weekPct: number;
@@ -1677,9 +1683,9 @@ function snapshotFromPanel(panel: UsagePanel, raw: string): UsageSnapshot {
   return {
     isSubscription: panel.isSubscription,
     raw,
-    sessionPct: panel.session.pct,
+    sessionPct: panel.session?.pct ?? null,
     sessionResetsAt:
-      panel.session.resetsText == null
+      panel.session?.resetsText == null
         ? null
         : resetsTextWithoutZone(panel.session.resetsText),
     weekPct: panel.week.pct,
@@ -1801,13 +1807,40 @@ export async function checkGate(
     };
   }
   const usage = read.usage;
-  if (
-    usage.sessionPct >= opts.sessionStopPct ||
-    usage.weekPct >= opts.weeklyStopPct
-  ) {
+  if (gateTripped(usage, opts)) {
     return {kind: 'tripped', usage};
   }
   return {kind: 'ok', usage};
+}
+
+/**
+ * Is the 5-hour window at or past its stop? false when the panel showed no
+ * 5-hour window (jm5kg.19 D5): there is nothing to trip on, and null is never
+ * read as 0 or as a pause.
+ */
+function sessionTripped(
+  usage: Pick<UsageSnapshot, 'sessionPct'>,
+  sessionStopPct: number,
+): boolean {
+  return usage.sessionPct != null && usage.sessionPct >= sessionStopPct;
+}
+
+/** Either window at or past its stop: the one rule `checkGate` and `waitForGate` share. */
+function gateTripped(
+  usage: Pick<UsageSnapshot, 'sessionPct' | 'weekPct'>,
+  opts: Pick<JustinLoopOptions, 'sessionStopPct' | 'weeklyStopPct'>,
+): boolean {
+  return (
+    sessionTripped(usage, opts.sessionStopPct) ||
+    usage.weekPct >= opts.weeklyStopPct
+  );
+}
+
+/** The session figure in a sentence: `42%`, or `no 5-hour window` (D5). */
+function sessionPctText(usage: Pick<UsageSnapshot, 'sessionPct'>): string {
+  return usage.sessionPct == null
+    ? NO_FIVE_HOUR_WINDOW
+    : `${usage.sessionPct}%`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2196,6 +2229,19 @@ function quotaBar(pct: number, limit: number): string {
   }
   const color = pct >= limit ? RED : pct >= limit * 0.8 ? YELLOW : GREEN;
   return `${color}[${bar}]${RESET} ${pct}%${DIM} (stop at ${limit}%)${RESET}`;
+}
+
+/** What the loop prints where a 5-hour figure would go when the panel shows none. */
+const NO_FIVE_HOUR_WINDOW = 'no 5-hour window';
+
+/** The session row's bar, or a plain "no 5-hour window" (jm5kg.19 D5): never an empty 0% bar. */
+function sessionBar(
+  usage: Pick<UsageSnapshot, 'sessionPct'>,
+  limit: number,
+): string {
+  return usage.sessionPct == null
+    ? `${DIM}${NO_FIVE_HOUR_WINDOW} (the /usage panel shows none)${RESET}`
+    : quotaBar(usage.sessionPct, limit);
 }
 
 /**
@@ -3233,15 +3279,15 @@ async function waitForGate(
   deps: RunnerDeps,
 ): Promise<UsageRead> {
   let current: UsageSnapshot = usage;
-  while (
-    current.sessionPct >= opts.sessionStopPct ||
-    current.weekPct >= opts.weeklyStopPct
-  ) {
-    const which =
-      current.sessionPct >= opts.sessionStopPct ? 'session' : 'weekly';
+  while (gateTripped(current, opts)) {
+    const session = sessionTripped(current, opts.sessionStopPct);
+    const which = session ? 'session' : 'weekly';
+    // The reset of the window that tripped: with no 5-hour window (jm5kg.19
+    // D5) only the weekly one can, and its reset is the one that matters.
+    const resetsAt = session ? current.sessionResetsAt : current.weekResetsAt;
     deps.write(
-      `${YELLOW}⏸${RESET}  ${which} quota gate: session ${current.sessionPct}% / week ${current.weekPct}%. ` +
-        `${DIM}resets ${current.sessionResetsAt ?? 'unknown'} · re-checking in ${opts.gatePollMin}m${RESET}\n`,
+      `${YELLOW}⏸${RESET}  ${which} quota gate: session ${sessionPctText(current)} / week ${current.weekPct}%. ` +
+        `${DIM}resets ${resetsAt ?? 'unknown'} · re-checking in ${opts.gatePollMin}m${RESET}\n`,
     );
     await deps.sleep(opts.gatePollMin * 60_000);
     // A re-read that FAILS ends the wait with its reason, rather than being
@@ -3342,7 +3388,7 @@ export async function runJustinLoop(
     deps.write(
       `${DIM}dry run — no sessions spawned${RESET}\n` +
         `  subscription  ${usage.isSubscription ? 'yes' : `${YELLOW}NO — check billing${RESET}`}\n` +
-        `  session       ${quotaBar(usage.sessionPct, opts.sessionStopPct)}\n` +
+        `  session       ${sessionBar(usage, opts.sessionStopPct)}\n` +
         `  week          ${quotaBar(usage.weekPct, opts.weeklyStopPct)}\n\n`,
     );
     return 0;
@@ -3432,7 +3478,7 @@ export async function runJustinLoop(
       if (opts.onGateHit === 'exit') {
         end = {
           exitCode: 0,
-          reason: `quota gate (session ${decision.usage.sessionPct}% / week ${decision.usage.weekPct}%)`,
+          reason: `quota gate (session ${sessionPctText(decision.usage)} / week ${decision.usage.weekPct}%)`,
         };
         break;
       }
@@ -3515,7 +3561,7 @@ export async function runJustinLoop(
       deps.write(
         usage == null
           ? `   ${DIM}quota${RESET} ${quotaGateDisabled()}\n`
-          : `   ${DIM}session${RESET} ${quotaBar(usage.sessionPct, opts.sessionStopPct)}` +
+          : `   ${DIM}session${RESET} ${sessionBar(usage, opts.sessionStopPct)}` +
               `   ${DIM}week${RESET} ${quotaBar(usage.weekPct, opts.weeklyStopPct)}\n`,
       );
     };

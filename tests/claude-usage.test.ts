@@ -45,11 +45,58 @@ const SESSION_LINE =
 const WEEK_LINE =
   'Current week (all models): 1% used · resets Oct 3 at 3:59pm (America/Los_Angeles)';
 
+/**
+ * The real panel of the 2026-11-03T06:57Z hourly read, verbatim from
+ * ~/.local/state/chores/logs/claude-usage-sample.log (home-base-jm5kg.19). From
+ * 2026-10-30T20:57Z on, the panel prints no `Current session` line.
+ */
+const REAL_PANEL_2026_11_03 = `You are currently using your subscription to power your Claude Code usage
+
+Current week (all models): 3% used · resets Nov 7 at 3pm (America/Los_Angeles)
+Current week (Fable): 1% used · resets Nov 7 at 3pm (America/Los_Angeles)
+
+What's contributing to your usage?
+Approximate · sessions on this machine only · shares overlap
+
+Last 24h · 348 requests · 5 sessions
+  77%  Start fresh when you switch tasks · run /clear
+  58%  Give "general-purpose" subagents a cheaper model
+  18%  Trim ~/Dev/home-base/.claude/rules/justin-sdk/critical-rules.md · 9k tokens per request
+  Top skills: /computer-use 7%, /research 4%, /mayor 3%
+  Top subagents: general-purpose 28%
+  Top MCP servers: claude.ai Gmail 2%
+
+Last 7d · 12515 requests · 85 sessions
+  89%  Give "player" subagents a cheaper model
+  86%  Start fresh when you switch tasks · run /clear
+  33%  Stop sessions you no longer need · some ran 8 hours or more
+  Top skills: /daily-loop 4%, /conductor 1%, /research 1%
+  Top subagents: player 53%, conductor 6%, general-purpose 3%, signal-not-noise 2%, beginners-mind 1%
+  Top MCP servers: claude.ai Gmail 1%`;
+
+/** When that read finished. */
+const SAMPLED_AT_2026_11_03 = new Date('2026-11-03T06:57:59.797Z');
+
 function okPanel(parsed: UsagePanelParse): UsagePanel {
   if (parsed.kind !== 'ok') {
     throw new Error(`expected an ok parse, got: ${parsed.reason}`);
   }
   return parsed.panel;
+}
+
+function failedReason(parsed: UsagePanelParse): string {
+  if (parsed.kind !== 'failed') {
+    throw new Error('expected a failed parse, got an ok one');
+  }
+  return parsed.reason;
+}
+
+/** The panel's session window, which these fixtures all carry. */
+function sessionOf(panel: UsagePanel): NonNullable<UsagePanel['session']> {
+  if (panel.session == null) {
+    throw new Error('expected a session window, got null');
+  }
+  return panel.session;
 }
 
 function instant(resetsText: string, sampledAt: Date): string | null {
@@ -92,7 +139,7 @@ describe('parseUsagePanel — the real 2026-09-26 panel', () => {
   test('the "What\'s contributing" percentages are not quota lines', () => {
     // "98% of your usage came from…" must never be read as a window.
     const panel = okPanel(parseUsagePanel(REAL_PANEL_2026_09_26, SAMPLED_AT));
-    expect(panel.session.pct).not.toBe(98);
+    expect(sessionOf(panel).pct).not.toBe(98);
     expect(panel.week.pct).not.toBe(98);
   });
 });
@@ -133,21 +180,97 @@ describe('parseUsagePanel — per-model lines are read generically', () => {
         SAMPLED_AT,
       ),
     );
-    expect(panel.session.pct).toBe(12.5);
+    expect(sessionOf(panel).pct).toBe(12.5);
+  });
+});
+
+describe('parseUsagePanel — the real 2026-11-03 panel, with no session line (jm5kg.19)', () => {
+  test('parses ok with session NULL, week 3 and Fable 1', () => {
+    const panel = okPanel(
+      parseUsagePanel(REAL_PANEL_2026_11_03, SAMPLED_AT_2026_11_03),
+    );
+    // null, "the panel shows no 5-hour window": not a 0% window (D1).
+    expect(panel.session).toBeNull();
+    expect(panel.week).toEqual({
+      pct: 3,
+      resetsAt: '2026-11-07T23:00:00Z',
+      resetsAtError: null,
+      resetsText: 'Nov 7 at 3pm (America/Los_Angeles)',
+    });
+    expect(panel.weekByModel).toEqual({
+      Fable: {
+        pct: 1,
+        resetsAt: '2026-11-07T23:00:00Z',
+        resetsAtError: null,
+        resetsText: 'Nov 7 at 3pm (America/Los_Angeles)',
+      },
+    });
+    expect(panel.isSubscription).toBe(true);
+  });
+
+  test('the "What\'s contributing" lines (77%  Start fresh…, Top skills: … 7%) are not quota lines', () => {
+    // D2's unknown-line guard must not trip on them: the panel parses, and no
+    // contributing percentage lands in a window.
+    const panel = okPanel(
+      parseUsagePanel(REAL_PANEL_2026_11_03, SAMPLED_AT_2026_11_03),
+    );
+    expect(Object.keys(panel.weekByModel)).toEqual(['Fable']);
+    expect(panel.week.pct).toBe(3);
   });
 });
 
 describe('parseUsagePanel — fails closed, never 0%', () => {
-  test('a panel missing the session line is a FAILED parse naming the line', () => {
-    const parsed = parseUsagePanel(
-      REAL_PANEL_2026_09_26.replace(`${SESSION_LINE}\n`, ''),
-      SAMPLED_AT,
+  test('a panel missing the session line parses with session null, never a 0% window', () => {
+    const panel = okPanel(
+      parseUsagePanel(
+        REAL_PANEL_2026_09_26.replace(`${SESSION_LINE}\n`, ''),
+        SAMPLED_AT,
+      ),
     );
-    expect(parsed.kind).toBe('failed');
-    expect(parsed).not.toHaveProperty('panel');
-    expect(parsed.kind === 'failed' ? parsed.reason : '').toContain(
-      '`Current session: N% used`',
+    expect(panel.session).toBeNull();
+    expect(panel.week.pct).toBe(1);
+  });
+
+  test('a line naming `Current session` that does not parse is a FAILED parse quoting the line (D2)', () => {
+    const garbled =
+      'Current session: unavailable · resets Sep 26 at 7:29pm (America/Los_Angeles)';
+    const reason = failedReason(
+      parseUsagePanel(
+        REAL_PANEL_2026_09_26.replace(SESSION_LINE, garbled),
+        SAMPLED_AT,
+      ),
     );
+    expect(reason).toContain('`Current session`');
+    expect(reason).toContain(JSON.stringify(garbled));
+  });
+
+  test('a reworded session line ("Current session (5h): N% used") is a FAILED parse too', () => {
+    const reworded =
+      'Current session (5h): 9% used · resets Sep 26 at 7:29pm (America/Los_Angeles)';
+    const reason = failedReason(
+      parseUsagePanel(
+        REAL_PANEL_2026_09_26.replace(SESSION_LINE, reworded),
+        SAMPLED_AT,
+      ),
+    );
+    expect(reason).toContain(JSON.stringify(reworded));
+  });
+
+  test('an unrecognised `Current <label>: N% used` line is a FAILED parse quoting the line (D2)', () => {
+    // A renamed or new limit must refuse, not pass unchecked.
+    const unknown =
+      'Current 5-hour window: 12% used · resets Nov 3 at 2am (America/Los_Angeles)';
+    const reason = failedReason(
+      parseUsagePanel(
+        REAL_PANEL_2026_11_03.replace(
+          'Current week (Fable)',
+          `${unknown}\nCurrent week (Fable)`,
+        ),
+        SAMPLED_AT_2026_11_03,
+      ),
+    );
+    expect(reason).toContain('does not know');
+    expect(reason).toContain(JSON.stringify(unknown));
   });
 
   test('a panel missing the all-models week line is a FAILED parse, even with a per-model line', () => {
@@ -160,6 +283,19 @@ describe('parseUsagePanel — fails closed, never 0%', () => {
     expect(parsed.kind === 'failed' ? parsed.reason : '').toContain(
       '`Current week (all models): N% used`',
     );
+  });
+
+  test('the 2026-11-03 panel without its all-models line FAILS: only Fable is left, and there is no session line', () => {
+    const reason = failedReason(
+      parseUsagePanel(
+        REAL_PANEL_2026_11_03.replace(
+          'Current week (all models): 3% used · resets Nov 7 at 3pm (America/Los_Angeles)\n',
+          '',
+        ),
+        SAMPLED_AT_2026_11_03,
+      ),
+    );
+    expect(reason).toContain('`Current week (all models): N% used`');
   });
 
   test('empty and unrelated text fail', () => {
@@ -206,7 +342,7 @@ describe('reset instants', () => {
         dec30,
       ),
     );
-    expect(panel.session.resetsAt).toBe('2026-12-31T01:00:00Z');
+    expect(sessionOf(panel).resetsAt).toBe('2026-12-31T01:00:00Z');
     expect(panel.week.resetsAt).toBe('2027-01-03T00:00:00Z');
   });
 
@@ -254,10 +390,10 @@ describe('reset instants', () => {
         SAMPLED_AT,
       ),
     );
-    expect(panel.session.pct).toBe(14);
-    expect(panel.session.resetsText).toBe('sometime soon, probably');
-    expect(panel.session.resetsAt).toBeNull();
-    expect(panel.session.resetsAtError).toContain('unrecognised reset text');
+    expect(sessionOf(panel).pct).toBe(14);
+    expect(sessionOf(panel).resetsText).toBe('sometime soon, probably');
+    expect(sessionOf(panel).resetsAt).toBeNull();
+    expect(sessionOf(panel).resetsAtError).toContain('unrecognised reset text');
     // The other window is unaffected.
     expect(panel.week.resetsAt).toBe('2026-10-03T22:59:00Z');
   });
@@ -293,9 +429,9 @@ describe('reset instants', () => {
         SAMPLED_AT,
       ),
     );
-    expect(panel.session.resetsText).toBeNull();
-    expect(panel.session.resetsAt).toBeNull();
-    expect(panel.session.resetsAtError).toContain('no "· resets …" clause');
+    expect(sessionOf(panel).resetsText).toBeNull();
+    expect(sessionOf(panel).resetsAt).toBeNull();
+    expect(sessionOf(panel).resetsAtError).toContain('no "· resets …" clause');
   });
 
   test('an invalid sample time fails the instant rather than inventing a year', () => {
@@ -370,7 +506,7 @@ describe('readUsagePanel — an injected runner for each outcome', () => {
     if (read.kind !== 'ok') return;
     expect(read.sampledAt).toBe('2026-09-26T23:10:00.000Z');
     expect(read.raw).toBe(REAL_PANEL_2026_09_26);
-    expect(read.panel.session.resetsAt).toBe('2026-09-27T02:29:00Z');
+    expect(sessionOf(read.panel).resetsAt).toBe('2026-09-27T02:29:00Z');
     expect(read.panel.weekByModel.Fable?.pct).toBe(0);
   });
 
@@ -475,8 +611,21 @@ describe('readUsagePanel — an injected runner for each outcome', () => {
     });
     expect(read.kind).toBe('failed');
     if (read.kind !== 'failed') return;
-    expect(read.reason).toContain('no recognisable quota lines');
+    expect(read.reason).toContain('a panel this parser cannot read');
     expect(read.reason).not.toContain('unparseable JSON');
     expect(read.raw).toBe('Credit balance: $12.00');
+  });
+
+  test('the real 2026-11-03 panel (no session line) comes back ok with session null', async () => {
+    const read = await readUsagePanel({
+      now: () => SAMPLED_AT_2026_11_03,
+      run: runner(
+        outcome({stdout: JSON.stringify({result: REAL_PANEL_2026_11_03})}),
+      ).run,
+    });
+    expect(read.kind).toBe('ok');
+    if (read.kind !== 'ok') return;
+    expect(read.panel.session).toBeNull();
+    expect(read.panel.week.pct).toBe(3);
   });
 });

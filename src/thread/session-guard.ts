@@ -4,8 +4,10 @@
  *
  * Justin, 2026-10-29: "claude doesn't try to hack around it (i don't want
  * claude 'going rogue' like that opening new cc sessions)". `thread handoff`
- * (a successor) and `thread spawn` (unrelated work) are the only doors; this
- * hook refuses the raw commands that would go around them:
+ * (a successor) and `thread spawn` (a new session in another project, and
+ * only where componentConfig.thread.spawn.allowed is on: home-base-11ya7.9)
+ * are the only doors; this hook refuses the raw commands that would go
+ * around them:
  *
  *   1. any `cmux` subcommand that is not on the allowlist below;
  *   2. any `claude` invocation that is not one of the read-only forms below;
@@ -1073,7 +1075,7 @@ export function classifyCommand(
 export const GUARD_DOORS = [
   'Sessions never start or drive other sessions with raw cmux or claude commands.',
   `- To hand this session off to a fresh one: run \`${SDK_HANDOFF_CALL} --note "<what the successor needs>"\`, bare, from the repository root.`,
-  '- To start unrelated work in a new workspace: run `bun run justin-sdk thread spawn`.',
+  '- For unrelated work or work in another project: file it as a bead and tell Justin. `bun run justin-sdk thread spawn` runs only in a repo with `componentConfig.thread.spawn.allowed` on (home-base, for the mayor).',
   'Either command may refuse. A refusal is final: finish your report and stop. Do not look for another way.',
 ] as const;
 

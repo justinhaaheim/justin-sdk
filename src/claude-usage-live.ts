@@ -1034,12 +1034,21 @@ export function feedLiveFromSample(
   const next: LiveState =
     current.kind === 'ok' ? {...current.state} : emptyLive();
   const sampledMs = Date.parse(sample.sampledAt);
-  const pairs: [WindowName, OkSample['week']][] = [
+  const pairs: [WindowName, OkSample['session']][] = [
     ['five_hour', sample.session],
     ['seven_day', sample.week],
   ];
   const windows: WindowName[] = [];
   for (const [window, usage] of pairs) {
+    // home-base-jm5kg.19 D6: a panel with no 5-hour window says nothing about
+    // live's five_hour, so it is left exactly as it is (an expired one is
+    // already shown as no reading by chooseDisplay).
+    if (usage == null) {
+      reasons.push(
+        `${window}: the sample shows no 5-hour window, so live's ${window} was left as it is`,
+      );
+      continue;
+    }
     const resetMs = usage.resetsAt == null ? NaN : Date.parse(usage.resetsAt);
     if (Number.isNaN(resetMs)) {
       reasons.push(

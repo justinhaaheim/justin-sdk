@@ -58,6 +58,8 @@ describe('componentConfig.thread.handoff', () => {
       successor: false,
       successorSource: 'default',
       usage: {
+        check: true,
+        checkSource: 'default',
         maxSampleAgeMinutes: 150,
         maxSampleAgeMinutesSource: 'default',
         maxSessionPercent: 85,

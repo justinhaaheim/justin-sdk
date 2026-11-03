@@ -11,17 +11,35 @@
  *   Current week (all models): 1% used · resets Oct 3 at 3:59pm (America/Los_Angeles)
  *   Current week (Fable): 0% used · resets Oct 3 at 4pm (America/Los_Angeles)
  *
- * Every "Current …: N% used" line is read GENERICALLY. `Current session` is the
- * 5-hour window, `Current week (all models)` is the weekly window, and every
- * other `Current week (<Model>)` line lands in `weekByModel` under its model
- * name — whatever models the plan lists, not a hardcoded Fable
- * (home-base-1r6d.12: the model label tracks the plan's per-model limits).
+ * Since 2026-10-30T20:57Z the panel prints no `Current session` line at all,
+ * only the two week lines (home-base-jm5kg.19; the statusline payload lost its
+ * `five_hour` window the same day). Whether it comes back is unknown, so both
+ * shapes parse.
  *
- * FAILURE IS NEVER A NUMBER (critical rule 7). The session and all-models week
- * lines are REQUIRED: a panel missing either is a failed parse with a reason,
- * never a window at 0%. A reset time that cannot be turned into an instant
- * leaves `resetsAt` null WITH a reason, and the window's percentage still
- * stands — the two facts come from different parts of the line.
+ * `Current session` is the 5-hour window, `Current week (all models)` is the
+ * weekly window, and every other `Current week (<Model>)` line lands in
+ * `weekByModel` under its model name — whatever models the plan lists, not a
+ * hardcoded Fable (home-base-1r6d.12: the model label tracks the plan's
+ * per-model limits).
+ *
+ * FAILURE IS NEVER A NUMBER (critical rule 7).
+ *   - The all-models week line is REQUIRED: a panel without it is a failed
+ *     parse with a reason, never a window at 0%.
+ *   - The session line is OPTIONAL. A panel that prints none has `session`
+ *     null, which means "the panel shows no 5-hour window", the same kind of
+ *     fact as an empty `weekByModel`, and never 0% (jm5kg.19 D1).
+ *   - So that "no session line" can be trusted to mean exactly that, and not
+ *     "the line was reworded", two kinds of line are failed parses whose reason
+ *     quotes the line (D2): a line that mentions `Current session` but does not
+ *     read as `Current session: N% used`, and any `Current <label>: N% used`
+ *     line that is neither the session line nor a `Current week (<label>)`
+ *     line. A new or renamed limit therefore refuses instead of passing
+ *     unchecked. The cost is accepted on purpose: the next limit line the panel
+ *     adds breaks the sampler again, with that line quoted in the reason. Do not
+ *     answer such a failure by ignoring unknown lines.
+ *   - A reset time that cannot be turned into an instant leaves `resetsAt` null
+ *     WITH a reason, and the window's percentage still stands: the two facts
+ *     come from different parts of the line.
  *
  * justin-loop's usage gate (justin-loop/runner.ts `parseUsage`/`readUsage`) is
  * built on this module, so there is exactly one reading of the panel.
@@ -63,8 +81,13 @@ export interface UsageWindow {
 export interface UsagePanel {
   /** True when the account is on a subscription rather than API billing. */
   isSubscription: boolean;
-  /** `Current session` — the 5-hour window. */
-  session: UsageWindow;
+  /**
+   * `Current session` — the 5-hour window. null means one thing only: the
+   * panel printed no `Current session` line at all ("the panel shows no 5-hour
+   * window", never 0%; home-base-jm5kg.19 D1). A session line that does not
+   * parse is a failed parse, not null.
+   */
+  session: UsageWindow | null;
   /** `Current week (all models)` — the weekly window. */
   week: UsageWindow;
   /**
@@ -179,6 +202,16 @@ const MONTHS = [
  */
 const QUOTA_LINE =
   /Current (session|week \(([^)\n]+)\)):\s*(\d+(?:\.\d+)?)%\s*used(.*)$/;
+
+/**
+ * Anything shaped like a quota line, whatever its label (home-base-jm5kg.19
+ * D2). A line that matches this and not `QUOTA_LINE` is a limit this parser
+ * does not know, and fails the parse.
+ */
+const ANY_QUOTA_LINE = /Current [^:\n]+:\s*\d+(?:\.\d+)?%\s*used/;
+
+/** The session line's label. A line naming it that is not `QUOTA_LINE` fails (D2). */
+const SESSION_LABEL = 'Current session';
 
 /** The reset clause at the end of a quota line. */
 const RESETS_CLAUSE = /·\s*resets\s+(.+?)\s*$/i;
@@ -478,6 +511,11 @@ function windowFrom(pct: number, tail: string, sampledAt: Date): UsageWindow {
  * `sampledAt` is when the panel was read; it is what the year of each reset is
  * inferred from (the panel prints none). When a quota line appears twice the
  * first one wins, as it always has.
+ *
+ * `session` is null when the panel prints no `Current session` line. A line
+ * that mentions `Current session` without parsing, and a `Current <label>: N%
+ * used` line of any other label, fail the parse with the line quoted
+ * (home-base-jm5kg.19 D2; the module comment says why).
  */
 export function parseUsagePanel(raw: string, sampledAt: Date): UsagePanelParse {
   let session: UsageWindow | null = null;
@@ -486,7 +524,21 @@ export function parseUsagePanel(raw: string, sampledAt: Date): UsagePanelParse {
 
   for (const line of raw.split(/\r?\n/)) {
     const match = QUOTA_LINE.exec(line);
-    if (match == null) continue;
+    if (match == null) {
+      if (line.includes(SESSION_LABEL)) {
+        return {
+          kind: 'failed',
+          reason: `a line names \`${SESSION_LABEL}\` but does not read as \`${SESSION_LABEL}: N% used\`, so whether the panel shows a 5-hour window is unknown: ${JSON.stringify(line)}`,
+        };
+      }
+      if (ANY_QUOTA_LINE.test(line)) {
+        return {
+          kind: 'failed',
+          reason: `a quota line of a kind this parser does not know (only \`${SESSION_LABEL}\` and \`Current week (<label>)\` are read), so a limit would go unchecked: ${JSON.stringify(line)}`,
+        };
+      }
+      continue;
+    }
     const [, which, label, pctText, tail] = match;
     const pct = Number(pctText);
     if (!Number.isFinite(pct)) continue;
@@ -502,13 +554,10 @@ export function parseUsagePanel(raw: string, sampledAt: Date): UsagePanelParse {
     }
   }
 
-  const missing: string[] = [];
-  if (session == null) missing.push('`Current session: N% used`');
-  if (week == null) missing.push('`Current week (all models): N% used`');
-  if (session == null || week == null) {
+  if (week == null) {
     return {
       kind: 'failed',
-      reason: `the panel has no ${missing.join(' and no ')} line`,
+      reason: 'the panel has no `Current week (all models): N% used` line',
     };
   }
   return {
@@ -604,7 +653,7 @@ export async function readUsagePanel(
     return {
       kind: 'failed',
       raw: result,
-      reason: `${USAGE_COMMAND_LABEL} printed no recognisable quota lines (expected \`Current session: N% used\` and \`Current week (all models): N% used\`): ${panel.reason}`,
+      reason: `${USAGE_COMMAND_LABEL} printed a panel this parser cannot read (it needs a \`Current week (all models): N% used\` line, reads \`Current session: N% used\` when there is one, and refuses any other \`Current <label>: N% used\` line): ${panel.reason}`,
       sampledAt,
     };
   }

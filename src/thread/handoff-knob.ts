@@ -28,6 +28,12 @@ import {
 
 /** The handoff gate's usage ceilings (C1), each with the layer that set it. */
 export interface ResolvedHandoffUsage {
+  /**
+   * False skips the gate's usage check entirely (a temporary switch, Justin
+   * 2026-11-02, home-base-jm5kg.19). Default true.
+   */
+  check: boolean;
+  checkSource: ThreadConfigSource;
   /** A sample older than this many minutes is unknown, never "fine". */
   maxSampleAgeMinutes: number;
   maxSampleAgeMinutesSource: ThreadConfigSource;
@@ -227,6 +233,15 @@ export function resolveHandoffConfig(
   const maxSessionPercent = usageField('maxSessionPercent');
   const maxWeekPercent = usageField('maxWeekPercent');
   const maxSampleAgeMinutes = usageField('maxSampleAgeMinutes');
+  const usageCheck = resolveField({
+    accept: (value): value is boolean => typeof value === 'boolean',
+    dotted: 'handoff.usage.check',
+    expected: 'true or false',
+    fallback: true as boolean,
+    problems,
+    read: (section) => section.check,
+    sections: usageLayers,
+  });
 
   return {
     maxLiveSessions: maxLiveSessions.value,
@@ -240,6 +255,8 @@ export function resolveHandoffConfig(
     successor: successor.value,
     successorSource: successor.source,
     usage: {
+      check: usageCheck.value,
+      checkSource: usageCheck.source,
       maxSampleAgeMinutes: maxSampleAgeMinutes.value,
       maxSampleAgeMinutesSource: maxSampleAgeMinutes.source,
       maxSessionPercent: maxSessionPercent.value,
