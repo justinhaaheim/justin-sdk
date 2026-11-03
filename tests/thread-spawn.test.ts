@@ -10,13 +10,28 @@ import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, test} from 'bun:test';
 import {execFileSync} from 'child_process';
-import {mkdirSync, readFileSync, writeFileSync} from 'fs';
-import {join} from 'path';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'fs';
+import {basename, dirname, join} from 'path';
 
 import {DEFAULT_COMPONENT_CONFIG, renderConfigSchema} from '../src/sdk-config';
 import {resolveThreadConfig} from '../src/thread/config';
 import {SPAWN_DEFAULTS} from '../src/thread/defaults';
-import {spawnSession} from '../src/thread/spawn';
+import {
+  TYPED_COMMAND_BYTE_LIMIT,
+  typedCommandBytes,
+  typedCommandTooLong,
+} from '../src/thread/respawn';
+import {
+  spawnKickoffPath,
+  spawnSession,
+  writeKickoffFile,
+} from '../src/thread/spawn';
 import {resolveSpawnConfig} from '../src/thread/spawn-knob';
 import {createSandbox} from './sandbox';
 
@@ -133,6 +148,14 @@ function argAfter(call: string[] | undefined, flag: string): string | null {
   if (call == null) return null;
   const at = call.indexOf(flag);
   return at === -1 ? null : (call[at + 1] ?? null);
+}
+
+/**
+ * The kickoff file a typed command reads back as claude's prompt
+ * (home-base-8vywn), or null when it reads none. Test paths need no quoting.
+ */
+function kickoffFileOf(command: string): string | null {
+  return /"\$\(command cat -- (\S+)\)"$/u.exec(command)?.[1] ?? null;
 }
 
 /**
@@ -569,8 +592,14 @@ describe('thread spawn: the parent link in the environment (home-base-ys9t7.5.4 
     const result = await spawnSession(options(w, {env, kickoff}), cmux);
     expect(result.exitCode).toBe(0);
     const command = argAfter(cmux.calls[1], '--command') ?? '';
+    // home-base-8vywn: the kickoff is read from its file, never typed; with
+    // no XDG_STATE_HOME the file is under HOME's .local/state.
+    const file = kickoffFileOf(command) ?? '';
+    expect(file.startsWith(join(w.home, '.local', 'state', 'justin-sdk'))).toBe(
+      true,
+    );
     expect(command).toBe(
-      `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT} JUSTIN_SDK_SPAWN_KICKOFF=1 claude '${kickoff}'`,
+      `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT} JUSTIN_SDK_SPAWN_KICKOFF=1 claude "$(command cat -- ${file})"`,
     );
     // The kickoff stays claude's prompt, untouched: a slash command still
     // starts with "/".
@@ -598,7 +627,11 @@ describe('thread spawn: the parent link in the environment (home-base-ys9t7.5.4 
     const cmux = fakeCmux();
     await spawnSession(options(w, {kickoff: 'go'}), cmux);
     const command = argAfter(cmux.calls[1], '--command') ?? '';
-    expect(command).toBe('JUSTIN_SDK_SPAWN_KICKOFF=1 claude go');
+    const file = kickoffFileOf(command) ?? '';
+    expect(command).toBe(
+      `JUSTIN_SDK_SPAWN_KICKOFF=1 claude "$(command cat -- ${file})"`,
+    );
+    expect(zshWords(command)).toEqual(['go']);
     expect(envSeen(command)).toEqual(['JUSTIN_SDK_SPAWN_KICKOFF=1']);
   });
 });
@@ -758,5 +791,221 @@ describe('thread spawn: a folder Claude Code has not trusted (home-base-yukaf.14
     const env = {...moved.env, CLAUDE_CONFIG_DIR: join(moved.root, 'cfg')};
     const trusted = await spawnSession(options(moved, {env}), fakeCmux());
     expect(trusted.lines.join('\n')).not.toContain(WARNING);
+  });
+});
+
+describe('thread spawn: the kickoff goes through a file, never the typed line (home-base-8vywn)', () => {
+  const PARENT = '3dbc86df-1bf7-4c21-b99f-cef99208bdbd';
+  const NOW = new Date('2026-11-03T21:04:05.678Z');
+
+  /**
+   * At least 3,000 bytes holding everything a shell or a typed line could
+   * mangle: newlines (one blank line, one CRLF), double quotes, apostrophes,
+   * backticks, $ and $( ), history !, backslashes, %, a tab, and multibyte
+   * characters. It starts and ends with a word, as a trimmed kickoff does.
+   */
+  function longKickoff(): string {
+    const line = `it's "quoted", \`date\`, $HOME, $(whoami), !!, a \\n backslash, 'single', 100%s, é, 🎵 and a tab\there.`;
+    const lines = ['/conductor Work on x-1.', '', 'Line one.\r'];
+    for (let i = 0; Buffer.byteLength(lines.join('\n')) < 3000; i += 1) {
+      lines.push(`${i}: ${line}`);
+    }
+    lines.push('End.');
+    return lines.join('\n');
+  }
+
+  /** The value printed after "<label>:" (fields are padded to align). */
+  function fieldValue(lines: readonly string[], label: string): string | null {
+    const prefix = `${label}:`;
+    for (const block of lines) {
+      for (const raw of block.split('\n')) {
+        const line = raw.trim();
+        if (line.startsWith(prefix)) return line.slice(prefix.length).trim();
+      }
+    }
+    return null;
+  }
+
+  function stateWorld() {
+    const w = world();
+    const xdgState = join(w.root, 'xdg-state');
+    const env = {...w.env, CLAUDE_CODE_SESSION_ID: PARENT};
+    return {env: {...env, XDG_STATE_HOME: xdgState}, w, xdgState};
+  }
+
+  test('a 3,000-byte kickoff: the typed command stays under the limit, and the file under XDG_STATE_HOME holds the kickoff byte for byte', async () => {
+    const kickoff = longKickoff();
+    expect(Buffer.byteLength(kickoff)).toBeGreaterThanOrEqual(3000);
+    const {env, w, xdgState} = stateWorld();
+    const cmux = fakeCmux();
+    const opts = options(w, {
+      env,
+      kickoff,
+      model: 'claude-opus-5-5',
+      now: NOW,
+      remoteControl: true,
+    });
+    const result = await spawnSession(opts, cmux);
+    expect(result.exitCode).toBe(0);
+    const command = argAfter(cmux.calls[1], '--command') ?? '';
+    expect(typedCommandBytes(command)).toBeLessThan(TYPED_COMMAND_BYTE_LIMIT);
+    expect(command).not.toContain('Work on x-1');
+    const file = kickoffFileOf(command) ?? '';
+    const dir = join(xdgState, 'justin-sdk', 'spawn-kickoffs');
+    expect(dirname(file)).toBe(dir);
+    expect(basename(file)).toMatch(/^20261103T210405Z-[0-9a-f]{8}\.md$/u);
+    expect(readFileSync(file)).toEqual(Buffer.from(kickoff, 'utf8'));
+    expect(fieldValue(result.lines, 'Kickoff file')).toBe(file);
+    expect(fieldValue(result.lines, 'Command size')).toBe(
+      `${typedCommandBytes(command)} bytes typed (1000 or more is refused)`,
+    );
+  });
+
+  test('zsh runs the exact typed command, and claude receives the kickoff byte for byte', async () => {
+    const kickoff = longKickoff();
+    const {env, w} = stateWorld();
+    const cmux = fakeCmux();
+    const opts = options(w, {
+      env,
+      kickoff,
+      model: 'haiku',
+      remoteControl: true,
+    });
+    expect((await spawnSession(opts, cmux)).exitCode).toBe(0);
+    const command = argAfter(cmux.calls[1], '--command') ?? '';
+    // Only the stub can run: claude is the first word after the assignments,
+    // and PATH holds the stub's directory and the system's, nothing else.
+    expect(command).toMatch(/^(?:[A-Z_]+=\S+ )*claude /u);
+    const bin = join(w.root, 'stub-bin');
+    mkdirSync(bin);
+    const out = join(w.root, 'stub-out');
+    const stub = join(bin, 'claude');
+    writeFileSync(
+      stub,
+      [
+        '#!/bin/sh',
+        '# Stands in for claude: records argc, the last argument, and the JUSTIN_SDK_ variables.',
+        'printf "%s" "$#" > "$STUB_OUT.argc"',
+        'for last in "$@"; do :; done',
+        'printf "%s" "$last" > "$STUB_OUT.prompt"',
+        'env | grep "^JUSTIN_SDK_" | sort > "$STUB_OUT.env"',
+        '',
+      ].join('\n'),
+    );
+    chmodSync(stub, 0o755);
+    execFileSync('zsh', ['-f', '-c', command], {
+      cwd: w.root,
+      env: {HOME: w.home, PATH: `${bin}:/usr/bin:/bin`, STUB_OUT: out},
+    });
+    expect(readFileSync(`${out}.prompt`)).toEqual(Buffer.from(kickoff, 'utf8'));
+    // --model haiku --remote-control <name> <prompt>
+    expect(readFileSync(`${out}.argc`, 'utf8')).toBe('5');
+    expect(readFileSync(`${out}.env`, 'utf8')).toBe(
+      `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT}\nJUSTIN_SDK_SPAWN_KICKOFF=1\n`,
+    );
+  });
+
+  test('a command that would still reach the limit is refused with exit 2: no cmux call, no file, dry run too', async () => {
+    for (const dryRun of [false, true]) {
+      const {env, w, xdgState} = stateWorld();
+      const cmux = fakeCmux();
+      const model = 'm'.repeat(TYPED_COMMAND_BYTE_LIMIT);
+      const opts = options(w, {dryRun, env, kickoff: 'go', model});
+      const result = await spawnSession(opts, cmux);
+      expect(result.exitCode).toBe(2);
+      const text = result.lines.join('\n');
+      expect(text).toContain('thread spawn: refused:');
+      expect(text).toContain('Nothing was written or opened');
+      expect(cmux.calls).toEqual([]);
+      expect(existsSync(join(xdgState, 'justin-sdk'))).toBe(false);
+    }
+  });
+
+  test('the limit is exact: 999 typed bytes open, 1,000 are refused', async () => {
+    // No kickoff and no parent session: the command is `claude --model <m>`,
+    // 15 bytes plus the model.
+    const at = async (bytes: number) => {
+      const w = world();
+      const cmux = fakeCmux();
+      const model = 'm'.repeat(bytes - 'claude --model '.length);
+      const result = await spawnSession(options(w, {model}), cmux);
+      const command = argAfter(cmux.calls[1], '--command');
+      return {command, exitCode: result.exitCode};
+    };
+    const under = await at(TYPED_COMMAND_BYTE_LIMIT - 1);
+    expect(under.exitCode).toBe(0);
+    expect(typedCommandBytes(under.command ?? '')).toBe(999);
+    const over = await at(TYPED_COMMAND_BYTE_LIMIT);
+    expect(over.exitCode).toBe(2);
+    expect(over.command).toBeNull();
+    // Bytes, not characters: 500 two-byte characters are 1,000 bytes.
+    expect(typedCommandTooLong('é'.repeat(500))).toContain('1000 bytes');
+    expect(typedCommandTooLong(`${'é'.repeat(499)}a`)).toBeNull();
+  });
+
+  test('--dry-run prints the kickoff file and the typed size, and writes nothing', async () => {
+    const {env, w, xdgState} = stateWorld();
+    const cmux = fakeCmux();
+    const opts = options(w, {dryRun: true, env, kickoff: longKickoff()});
+    const result = await spawnSession(opts, cmux);
+    expect(result.exitCode).toBe(0);
+    expect(cmux.calls).toEqual([]);
+    const command = fieldValue(result.lines, 'Command') ?? '';
+    const file = kickoffFileOf(command) ?? '';
+    expect(dirname(file)).toBe(join(xdgState, 'justin-sdk', 'spawn-kickoffs'));
+    expect(fieldValue(result.lines, 'Kickoff file')).toBe(
+      `${file} (not written: dry run)`,
+    );
+    expect(fieldValue(result.lines, 'Command size')).toBe(
+      `${typedCommandBytes(command)} bytes typed (1000 or more is refused)`,
+    );
+    expect(existsSync(join(xdgState, 'justin-sdk'))).toBe(false);
+  });
+
+  test('cmux unreachable: the kickoff file is not written (the sandboxed first try leaves no file)', async () => {
+    const {env, w, xdgState} = stateWorld();
+    const cmux = fakeCmux({ping: {kind: 'failed', reason: 'EPERM'}});
+    const result = await spawnSession(options(w, {env, kickoff: 'go'}), cmux);
+    expect(result.exitCode).toBe(2);
+    expect(result.lines.join('\n')).toContain('cmux cannot be reached');
+    expect(existsSync(join(xdgState, 'justin-sdk'))).toBe(false);
+  });
+
+  test('a kickoff file that cannot be written: exit 2, and no workspace is opened', async () => {
+    const {env, w, xdgState} = stateWorld();
+    // A FILE where the state directory should be: mkdir under it fails.
+    writeFileSync(xdgState, 'not a directory\n');
+    const cmux = fakeCmux();
+    const result = await spawnSession(options(w, {env, kickoff: 'go'}), cmux);
+    expect(result.exitCode).toBe(2);
+    expect(result.lines.join('\n')).toContain('could not be written');
+    expect(cmux.calls).toEqual([['ping']]);
+  });
+
+  test('a kickoff holding a NUL byte is refused: no program argument can carry it', async () => {
+    const {env, w, xdgState} = stateWorld();
+    const cmux = fakeCmux();
+    const opts = options(w, {env, kickoff: 'before\0after'});
+    const result = await spawnSession(opts, cmux);
+    expect(result.exitCode).toBe(2);
+    expect(result.lines.join('\n')).toContain('NUL byte');
+    expect(cmux.calls).toEqual([]);
+    expect(existsSync(join(xdgState, 'justin-sdk'))).toBe(false);
+  });
+
+  test('a kickoff file is never overwritten: each one is a record', () => {
+    const w = world();
+    const path = spawnKickoffPath({XDG_STATE_HOME: w.root}, NOW, 'abcd1234');
+    expect(path).toBe(
+      join(
+        w.root,
+        'justin-sdk',
+        'spawn-kickoffs',
+        '20261103T210405Z-abcd1234.md',
+      ),
+    );
+    expect(writeKickoffFile(path, 'first')).toBeNull();
+    expect(writeKickoffFile(path, 'second')).toContain('EEXIST');
+    expect(readFileSync(path, 'utf8')).toBe('first');
   });
 });

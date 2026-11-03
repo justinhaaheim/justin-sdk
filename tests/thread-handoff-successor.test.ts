@@ -36,7 +36,7 @@ import {
 } from '../src/thread/handoff-successor';
 import {NO_BREAK_SPACE} from '../src/thread/pane-join';
 import {predecessorWatchSchema} from '../src/thread/predecessor-watch';
-import {kickoffText} from '../src/thread/respawn';
+import {kickoffText, TYPED_COMMAND_BYTE_LIMIT} from '../src/thread/respawn';
 import {ensureSessionBead} from '../src/thread/session-bead';
 import {describeHandoffOutcome, handOff} from '../src/thread/session-handoff';
 import {selectSession} from '../src/thread/session-select';
@@ -407,6 +407,28 @@ describe('knob on: refusals before anything is written (exit 2)', () => {
     expect(writeCalls(cmux.calls)).toEqual([]);
     expect(bead(w).labels).not.toContain('handed-off');
     expect(existsSync(handoffsDir(w))).toBe(false);
+  });
+
+  test('home-base-8vywn: a claude line of 1,000 bytes or more is refused; nothing written, no gate, no cmux, dry run too', async () => {
+    for (const dryRun of [false, true]) {
+      const w = world(ON);
+      const cmux = fakeCmux();
+      const gate = gateOf(PASS);
+      const model = 'm'.repeat(TYPED_COMMAND_BYTE_LIMIT);
+      const result = await threadHandoffCommand(
+        opts(w, {dryRun, model}),
+        deps(cmux, gate),
+      );
+      expect(result.exitCode).toBe(2);
+      const text = result.lines.join('\n');
+      expect(text).toContain('thread handoff: refused:');
+      expect(text).toContain('bytes');
+      expect(text).toContain('Nothing was written.');
+      expect(gate.seen).toEqual([]);
+      expect(cmux.calls).toEqual([]);
+      expect(bead(w).labels).not.toContain('handed-off');
+      expect(existsSync(handoffsDir(w))).toBe(false);
+    }
   });
 
   test('--to links only, as before: no gate, no cmux', async () => {

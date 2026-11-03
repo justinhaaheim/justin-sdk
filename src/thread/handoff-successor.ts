@@ -12,7 +12,8 @@
  * ORDER with the knob on. Nothing is written before step 3.
  *   1. Refusals, exit 2: --session naming another session (the tab and the
  *      environment belong to the caller), no session bead, a checkout that is
- *      gone, an empty --model.
+ *      gone, an empty --model, a claude line of TYPED_COMMAND_BYTE_LIMIT
+ *      bytes or more (home-base-8vywn: a typed line is cut at 1,024 bytes).
  *   2. The gate (handoff-gate.ts). Refused: handOff() as today, the refusal
  *      recorded on the session bead, the block and the final-refusal message
  *      printed, exit 3, nothing opened (C2).
@@ -81,7 +82,12 @@ import {
 } from './handoff-predecessor';
 import {dialogOnScreen, findInputBox, screenLines} from './pane-join';
 import {threadsStateDir} from './paths';
-import {kickoffText, liveSocketPath, zshWord} from './respawn';
+import {
+  kickoffText,
+  liveSocketPath,
+  typedCommandTooLong,
+  zshWord,
+} from './respawn';
 import {describeHandoffOutcome, handOff} from './session-handoff';
 import {SESSION_NAME_LIMIT, sessionName} from './session-name';
 import {selectSession, sessionBeadsKnob} from './session-select';
@@ -484,6 +490,18 @@ export async function handoffWithSuccessor(
     permissionMode: options.limits.permissionMode,
   });
   const command = successorCommand(words);
+  // home-base-8vywn: a typed line is cut at 1,024 bytes and a cut command
+  // never runs. The kickoff here is a short, fixed pointer to the block file,
+  // but the name (typed twice) and --model are not bounded in bytes: measured
+  // with these functions on 2026-11-03, 498 bytes for a typical title, 590 for
+  // an 80-character one, 998 for 80 apostrophes, and no bound with --model.
+  // Refused before the gate, so nothing is written, dry run included.
+  const tooLong = typedCommandTooLong(command);
+  if (tooLong != null) {
+    return refuse(
+      `${tooLong}. Use a shorter --model or session title. Nothing was written.`,
+    );
+  }
 
   // ---- 2. the gate ----
   const gate = await d.gate({

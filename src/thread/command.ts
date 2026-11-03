@@ -90,15 +90,17 @@ WHAT IT DOES, in order.
   0. Refuses (exit 2, nothing opened, --dry-run included) unless componentConfig.thread.spawn.allowed is true in the repo it runs in (default false; only home-base turns it on).
   1. Refuses (exit 2, nothing opened) when the directory does not exist or is not a directory. A leading ~ means your home directory; a relative path is read from the current directory.
   2. Names the workspace "[TAG] new session <directory name>", or "[TAG] <name>" with --name. TAG is the projectTag in that repo's justin-sdk.config.json, else the repo folder name in capitals, the same tag the inbox shows.
-  3. Refuses (exit 2) when cmux cannot be reached, and prints the sandbox setting that allows it (see SANDBOX HINT).
-  4. Opens a new cmux workspace in the directory, without switching to it, running \`claude [--model <m>] [--remote-control '<workspace name>'] ['<kickoff>']\`. With --kickoff or --kickoff-file the session starts on that prompt with no keystroke; without them it opens on an empty prompt.
-  5. Prints the workspace, its cmux id, the directory and the command. With --remote-control it also says how to open the session from your phone.
+  3. Refuses (exit 2, nothing written or opened, --dry-run included) when the command it would type is 1,000 bytes or more: a typed line is cut at 1,024 bytes (measured 2026-11-03), and a cut command never runs. The kickoff does not count toward that, because it is never typed.
+  4. Refuses (exit 2) when cmux cannot be reached, and prints the sandbox setting that allows it (see SANDBOX HINT).
+  5. With --kickoff or --kickoff-file, writes the kickoff to a file, $XDG_STATE_HOME/justin-sdk/spawn-kickoffs/<stamp>-<random>.md (default ~/.local/state/…), after cmux answered. The file is kept as the record of what the session was asked.
+  6. Opens a new cmux workspace in the directory, without switching to it, running \`claude [--model <m>] [--remote-control '<workspace name>'] ["$(command cat -- <kickoff file>)"]\`. With a kickoff the session starts on it, byte for byte, with no keystroke; without one it opens on an empty prompt.
+  7. Prints the workspace, its cmux id, the directory, the command and its size, and the kickoff file. With --remote-control it also says how to open the session from your phone.
 
 REMOTE CONTROL. The session runs on this Mac; the Claude app on your phone, or claude.ai/code, is a window onto it. Open the Claude app, tap Code, and pick the session by the name this command prints. The claude process in the workspace must keep running: closing the workspace or quitting claude takes the session offline. A Mac that sleeps reconnects when it wakes.
 
-DRY RUN. --dry-run prints the same plan, the cmux socket it would use and the full cmux command, and does not touch cmux.
+DRY RUN. --dry-run prints the same plan, the kickoff file it would write, the typed command's size, the cmux socket it would use and the full cmux command. It writes nothing and does not touch cmux.
 
-IT WRITES NOTHING. Opening the workspace is its only effect: no file, no bead, no record.
+WHAT IT WRITES. The kickoff file (nothing deletes it) and the record of the workspace name it set. No bead.
 
 WINDOW. With CMUX_WINDOW_ID set, the workspace goes to that window (--window). Otherwise cmux picks: its default is the window of the pane the command runs in. The output's Window line says which.
 
@@ -1039,7 +1041,7 @@ export const threadCommand: CommandModule = {
             })
             .option('kickoff', {
               describe:
-                'The first prompt, typed for you: the new session starts on it with no keystroke. Mutually exclusive with --kickoff-file.',
+                'The first prompt: written to a kickoff file and handed to claude, so the new session starts on it with no keystroke. Mutually exclusive with --kickoff-file.',
               type: 'string' as const,
             })
             .option('kickoff-file', {

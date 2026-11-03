@@ -42,6 +42,40 @@ export function zshWord(word: string): string {
   return `'${word.replaceAll("'", `'\\''`)}'`;
 }
 
+/**
+ * home-base-8vywn: the most bytes a command TYPED into a new pane may hold.
+ *
+ * Measured 2026-11-03 by the mayor: a 1,088-byte `thread spawn` command
+ * arrived in the new pane as exactly its first 1,024 bytes, quote unclosed,
+ * so zsh never ran it and claude never started; a 517-byte one worked. 1,024
+ * is macOS's terminal canonical-mode line limit (MAX_CANON), so the cut is
+ * most likely the pty's line buffer while zsh is still starting up (inferred
+ * from the exact match, not verified against cmux's source).
+ *
+ * 1,000, not 1,024: the longest command allowed is 999 bytes, 1,000 with the
+ * Enter that ends the line, which leaves 24 bytes for anything cmux adds that
+ * has not been measured. A command of 1,000 bytes or more is refused before
+ * cmux is touched (typedCommandTooLong). Bytes, never characters: "é" is 2
+ * bytes, "🎵" is 4, and an apostrophe costs 4 once zshWord quotes it.
+ */
+export const TYPED_COMMAND_BYTE_LIMIT = 1000;
+
+/** The UTF-8 length of a command typed into a pane. */
+export function typedCommandBytes(command: string): number {
+  return Buffer.byteLength(command, 'utf8');
+}
+
+/**
+ * null when `command` is short enough to type into a pane whole; otherwise
+ * why it would be cut (home-base-8vywn). A cut command never runs, and a
+ * caller that only checks cmux's answer would report it as opened.
+ */
+export function typedCommandTooLong(command: string): string | null {
+  const bytes = typedCommandBytes(command);
+  if (bytes < TYPED_COMMAND_BYTE_LIMIT) return null;
+  return `the command typed into the new pane would be ${bytes} bytes, and a typed line must stay under ${TYPED_COMMAND_BYTE_LIMIT} bytes: macOS cuts it at 1,024, so the shell would never run it`;
+}
+
 /** The successor's first message: an instruction, never the raw block. */
 /**
  * The kickoff's fixed opening: every successor's first user line starts with

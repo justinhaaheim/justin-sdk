@@ -18,8 +18,21 @@
  *   prints. Measured 2026-10-18 against code.claude.com/docs/en/remote-control:
  *   a name passed to --remote-control is the first source of the session's
  *   title, and without one Claude Code makes one up from the hostname.
- * - --dry-run prints the plan and touches no cmux. It writes nothing anywhere,
- *   and neither does a real run: cmux is its only side effect.
+ * - The kickoff is never typed (home-base-8vywn). A typed line is cut at
+ *   1,024 bytes, and a 1,088-byte spawn command arrived cut, never ran, and
+ *   was still reported as opened. The kickoff goes to a file under XDG state,
+ *   <XDG_STATE_HOME>/justin-sdk/spawn-kickoffs/<stamp>-<random>.md, which is
+ *   kept as the record of what the session was asked; the typed command reads
+ *   it back as claude's prompt with `"$(command cat -- <path>)"`. A command
+ *   that would still reach TYPED_COMMAND_BYTE_LIMIT (a long --model, say) is
+ *   refused with exit 2 before cmux is touched, --dry-run included.
+ * - --dry-run prints the plan, the kickoff file's path and the typed command's
+ *   length, writes nothing and touches no cmux. A real run writes the kickoff
+ *   file only after cmux answered its ping. A sandboxed first try fails on the
+ *   ping and is retried with the sandbox off (the mayor's routine); written
+ *   earlier, the file would fail first, because Justin's sandbox settings
+ *   (2026-11-03) allow no writes to ~/.local/state/justin-sdk, and that
+ *   refusal is not one the mayor retries.
  * - The route b alternative, a persistent `claude remote-control` server, is
  *   home-base-pa2s and is not built here.
  * - Access (home-base-11ya7.9): it refuses with exit 2, before anything else
@@ -31,9 +44,10 @@ import type {Field} from '../cli-style';
 import type {CmuxRunner} from './cmux';
 import type {EnvLike} from './paths';
 
-import {readFileSync, statSync} from 'node:fs';
+import {randomBytes} from 'node:crypto';
+import {mkdirSync, readFileSync, statSync, writeFileSync} from 'node:fs';
 import {homedir} from 'node:os';
-import {basename, join, resolve} from 'node:path';
+import {basename, dirname, join, resolve} from 'node:path';
 
 import {
   fieldLines,
@@ -42,10 +56,18 @@ import {
   stepColumn,
   wrapHanging,
 } from '../cli-style';
+import {xdgStateHome} from '../health-notices';
 import {oneLine} from './ask-format';
 import {cmuxArgv, realCmuxRunner, resolveCmuxBinary} from './cmux';
 import {primaryCheckoutOf, resolveRepoTag, resolveThreadConfig} from './config';
-import {liveSocketPath, socketSettingsJson, zshWord} from './respawn';
+import {
+  liveSocketPath,
+  socketSettingsJson,
+  TYPED_COMMAND_BYTE_LIMIT,
+  typedCommandBytes,
+  typedCommandTooLong,
+  zshWord,
+} from './respawn';
 import {SPAWN_KICKOFF_ENV, SPAWNED_BY_SESSION_ENV} from './session-bead';
 import {sessionDisplayName} from './session-name';
 import {sessionIdFrom} from './session-select';
@@ -61,14 +83,18 @@ export interface SpawnOptions {
   env?: EnvLike;
   /**
    * The first prompt, handed to `claude` as its positional argument so the
-   * session starts working with no keystroke (the respawn.ts pattern); null:
-   * the session opens on an empty prompt.
+   * session starts working with no keystroke (the respawn.ts pattern). It is
+   * written to the kickoff file and read back by the typed command, never
+   * typed itself (home-base-8vywn). null: the session opens on an empty
+   * prompt.
    */
   kickoff: string | null;
   /** `claude --model`; null: claude's own default. */
   model: string | null;
   /** The title after "[TAG] "; null: "new session <dir basename>". */
   name: string | null;
+  /** The kickoff file's timestamp (default: now). */
+  now?: Date;
   /** Start claude with --remote-control <workspace name>. */
   remoteControl: boolean;
 }
@@ -255,6 +281,51 @@ export function spawnWorkspaceName(
 }
 
 /**
+ * home-base-8vywn: where a spawn's kickoff is written,
+ * <XDG_STATE_HOME or ~/.local/state>/justin-sdk/spawn-kickoffs/<stamp>-<suffix>.md,
+ * the stamp in UTC (20261103T210405Z). The file is kept: it records what the
+ * new session was asked, and nothing deletes it.
+ */
+export function spawnKickoffPath(
+  env: EnvLike,
+  now: Date,
+  suffix: string,
+): string {
+  const stamp = now
+    .toISOString()
+    .replace(/\.\d+Z$/u, 'Z')
+    .replaceAll(/[-:]/gu, '');
+  const name = `${stamp}-${suffix}.md`;
+  return join(xdgStateHome(env), 'justin-sdk', 'spawn-kickoffs', name);
+}
+
+/**
+ * The typed word that becomes claude's prompt: the kickoff file's bytes, read
+ * by the new pane's shell (home-base-8vywn). Inside double quotes the result
+ * is one word, with no splitting, globbing or further expansion. `command`
+ * skips any alias or function named cat (a cat aliased to bat would be read
+ * instead). Command substitution drops trailing newlines; the kickoff is
+ * trimmed before it is written, so it has none to lose.
+ */
+export function kickoffFileWord(path: string): string {
+  return `"$(command cat -- ${zshWord(path)})"`;
+}
+
+/**
+ * Write the kickoff file: null when written, else why not. `wx`: an existing
+ * file is never overwritten, since each one is a record.
+ */
+export function writeKickoffFile(path: string, kickoff: string): string | null {
+  try {
+    mkdirSync(dirname(path), {recursive: true});
+    writeFileSync(path, kickoff, {encoding: 'utf8', flag: 'wx'});
+    return null;
+  } catch (error) {
+    return String(error);
+  }
+}
+
+/**
  * The text `new-workspace --command` types into the new pane's zsh.
  *
  * D8 (home-base-ys9t7.5.4 item 3): environment assignments come first, so
@@ -263,9 +334,14 @@ export function spawnWorkspaceName(
  * SPAWN_KICKOFF_ENV says the first prompt is the kickoff, typed by spawn and
  * not by Justin (the quota drops it). Neither is written when it does not
  * apply.
+ *
+ * home-base-8vywn: the kickoff itself is never typed. With `kickoffFile` set,
+ * claude's prompt is that file's text, read back by kickoffFileWord, so the
+ * typed line stays short however long the kickoff is.
  */
 export function spawnCommand(input: {
-  kickoff: string | null;
+  /** The file holding the first prompt; null: no kickoff. */
+  kickoffFile: string | null;
   model: string | null;
   name: string;
   remoteControl: boolean;
@@ -278,14 +354,15 @@ export function spawnCommand(input: {
       `${SPAWNED_BY_SESSION_ENV}=${zshWord(input.spawnedBySession)}`,
     );
   }
-  if (input.kickoff != null) assignments.push(`${SPAWN_KICKOFF_ENV}=1`);
+  if (input.kickoffFile != null) assignments.push(`${SPAWN_KICKOFF_ENV}=1`);
   const words = ['claude'];
   if (input.model != null) words.push('--model', input.model);
   if (input.remoteControl) words.push('--remote-control', input.name);
+  const typed = [...assignments, ...words.map(zshWord)];
   // The prompt is claude's positional argument (`claude [options] [prompt]`),
   // so it goes last, after every flag.
-  if (input.kickoff != null) words.push(input.kickoff);
-  return [...assignments, ...words.map(zshWord)].join(' ');
+  if (input.kickoffFile != null) typed.push(kickoffFileWord(input.kickoffFile));
+  return typed.join(' ');
 }
 
 /**
@@ -324,6 +401,11 @@ export async function spawnSession(
   if (model === '') return stop(2, '--model needs a model name');
   const kickoff = options.kickoff == null ? null : options.kickoff.trim();
   if (kickoff === '') return stop(2, '--kickoff needs the text of a prompt');
+  // home-base-8vywn: no program argument can carry a NUL byte, so claude
+  // would receive the kickoff cut short at the first one.
+  if (kickoff?.includes('\0') === true) {
+    return stop(2, '--kickoff holds a NUL byte, which claude cannot receive');
+  }
   const dir = resolveSpawnDir(typed, cwd, env);
   const checked = checkDir(dir);
   if (checked.kind === 'missing') return stop(2, `${dir} does not exist`);
@@ -340,13 +422,34 @@ export async function spawnSession(
   // D8: the session running this, so the child links to it (item 3).
   const parent = sessionIdFrom(null, env);
   const spawnedBySession = parent.ok ? parent.id : null;
+  // home-base-8vywn: the kickoff goes to a file, never into the typed line.
+  const kickoffPlan =
+    kickoff == null
+      ? null
+      : {
+          path: spawnKickoffPath(
+            env,
+            options.now ?? new Date(),
+            randomBytes(4).toString('hex'),
+          ),
+          text: kickoff,
+        };
   const command = spawnCommand({
-    kickoff,
+    kickoffFile: kickoffPlan?.path ?? null,
     model,
     name: workspaceName,
     remoteControl,
     spawnedBySession,
   });
+  // A command this long would arrive cut and never run, while cmux still
+  // answers OK: refused here, before cmux and before any write, dry run too.
+  const tooLong = typedCommandTooLong(command);
+  if (tooLong != null) {
+    return stop(
+      2,
+      `${tooLong}. Shorten --model or --name, or XDG_STATE_HOME (the kickoff file's directory); the kickoff's own length does not count, because it is not typed. Nothing was written or opened.`,
+    );
+  }
   const window = spawnWindow(env);
   const spawnArgs = ['new-workspace', '--name', workspaceName];
   spawnArgs.push('--cwd', dir, '--command', command, '--focus', 'false');
@@ -355,9 +458,21 @@ export async function spawnSession(
     {label: 'Workspace', value: workspaceName},
     {label: 'Directory', value: dir},
     {label: 'Command', value: command},
+    {
+      label: 'Command size',
+      value: `${typedCommandBytes(command)} bytes typed (${TYPED_COMMAND_BYTE_LIMIT} or more is refused)`,
+    },
     {label: 'Window', value: window.text},
   ];
-  if (kickoff != null) fields.push({label: 'Kickoff', value: kickoff});
+  if (kickoffPlan != null) {
+    fields.push({
+      label: 'Kickoff file',
+      value: options.dryRun
+        ? `${kickoffPlan.path} (not written: dry run)`
+        : kickoffPlan.path,
+    });
+    fields.push({label: 'Kickoff', value: kickoffPlan.text});
+  }
   const warning = trustWarning(checkFolderTrust(dir, env));
   const style = outputStyle();
   const indent = stepColumn(0);
@@ -418,6 +533,18 @@ export async function spawnSession(
     const allow = socketSettingsJson(socket.path).trim();
     const hint = `If this session is sandboxed, the sandbox blocks the cmux socket: add ${allow} to your Claude Code user settings, or retry with the sandbox disabled.`;
     return stop(2, `cmux cannot be reached: ${ping.reason}\n${hint}`);
+  }
+
+  // ---- 2b. the kickoff file (home-base-8vywn): only now, after the ping,
+  // so a sandboxed first try still fails on the ping (see the header) ----
+  if (kickoffPlan != null) {
+    const failed = writeKickoffFile(kickoffPlan.path, kickoffPlan.text);
+    if (failed != null) {
+      return stop(
+        2,
+        `the kickoff file ${kickoffPlan.path} could not be written, so the session would start without its kickoff: ${failed}. Nothing was opened.`,
+      );
+    }
   }
 
   // ---- 3. the workspace ----
