@@ -288,7 +288,9 @@ beforeAll(async () => {
     {at: t('11:31'), mark: 'unread', seenAssistantAt: null, sessionId: sid(5)},
     env,
   );
-});
+  // Nine real `br` session beads: 14 s measured at load 14 on 2026-11-06. Bun's
+  // 5 s hook default failed this file, which refused a publish.
+}, 120_000);
 
 afterAll(() => {
   sb.cleanup();

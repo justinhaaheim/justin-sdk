@@ -19,7 +19,7 @@
  * builds the wrong app. So this regenerates the native project for the
  * configured variant first, then builds, then launches, then installs.
  *
- * SIDE EFFECT: this leaves ios/ prebuilt for the configured variant (and the
+ * SIDE EFFECT: this leaves ios/ prebuilt for the selected variant (and the
  * clean prebuild wipes ios/build). A repo's Detox build has to prebuild its own
  * variant again before it builds.
  *
@@ -65,6 +65,9 @@
  *   bun run mac                  fast incremental: build -> launch -> install
  *   bun run build:mac:no-launch  build only, in the terminal (no Xcode, no install)
  *   bun run mac:install          install the last Xcode-installed build
+ * Each takes `-- --variant <name>` to build a variant named under "variants" in
+ * the config instead of the default (home-base-0jeya.9). Its scheme is different,
+ * so it installs as a different app and the two sit side by side in ~/Applications.
  *
  * JS-only changes do not need this: ship them with EAS Update. Run it when
  * native code or dependencies changed.
@@ -79,8 +82,10 @@ import {paint, shouldStyle} from './cli-style';
 import {
   MAC_BUILD_CONFIG_EXAMPLE,
   MAC_BUILD_CONFIG_KEY,
+  MAC_BUILD_VARIANTS_EXAMPLE,
   type MacBuildConfig,
   readMacBuildConfig,
+  selectMacBuildVariant,
 } from './mac-build-config';
 import {installToApplications, parseBuiltProductsDir} from './mac-install';
 
@@ -173,14 +178,27 @@ export interface MacBuildOptions {
   installOnly: boolean;
   launch: boolean;
   skipPrebuild: boolean;
+  /** What `--variant` asked for; null builds the configured default. */
+  variant: string | null;
 }
 
 /** A combination of flags that cannot mean anything, or null when they are fine. */
 export function conflictingOptions(options: MacBuildOptions): string | null {
   if (options.installOnly && (options.skipPrebuild || !options.launch)) {
-    return '--install-only builds nothing, so it takes no other options.';
+    return '--install-only builds nothing, so --skip-prebuild and --no-launch mean nothing with it.';
   }
   return null;
+}
+
+/**
+ * The full build a message tells someone to run. It keeps the variant that was
+ * asked for: the bare command would build the default, and the same failure would
+ * come straight back.
+ */
+function fullBuildCommand(variant: string | null): string {
+  return variant == null
+    ? 'bun run build:mac'
+    : `bun run build:mac -- --variant ${variant}`;
 }
 
 /**
@@ -217,18 +235,20 @@ interface Workspace {
 }
 
 /**
- * Locate the CONFIGURED variant's workspace specifically.
+ * Locate the SELECTED variant's workspace specifically.
  *
  * Deliberately not "whichever single workspace is in ios/": the simulator loop
  * keeps ios/ prebuilt for development in most repos, so a different workspace is
  * routinely sitting there, and a --skip-prebuild run would otherwise build and
  * launch the wrong variant without saying anything.
  *
- * `remedy` is the advice when it is missing, which depends on the caller.
+ * `configKey` is where the scheme is written (mac-build-config.ts). `remedy` is
+ * the advice when it is missing, which depends on the caller.
  */
 function findWorkspace(
   projectRoot: string,
   config: MacBuildConfig,
+  configKey: string,
   remedy: string,
 ): Workspace {
   const relativePath = path.join('ios', `${config.scheme}.xcworkspace`);
@@ -244,7 +264,7 @@ function findWorkspace(
         present.length > 0
           ? ` (ios/ currently holds: ${present.join(', ')})`
           : ''
-      }. Either ios/ is prebuilt for a different variant, or "scheme" in componentConfig.${MAC_BUILD_CONFIG_KEY} does not match the workspace Expo generates for "${config.variant}" — ${remedy}`,
+      }. Either ios/ is prebuilt for a different variant, or "scheme" in ${configKey} does not match the workspace Expo generates for "${config.variant}" — ${remedy}`,
     );
   }
 
@@ -262,7 +282,11 @@ function findWorkspace(
  * that into a one-line failure before anything compiles. An unreadable project
  * file is a failure too, never a pass.
  */
-export function assertSigningTeam(projectRoot: string, scheme: string): void {
+export function assertSigningTeam(
+  projectRoot: string,
+  scheme: string,
+  buildCommand: string = fullBuildCommand(null),
+): void {
   const pbxprojPath = path.join(
     projectRoot,
     'ios',
@@ -279,7 +303,7 @@ export function assertSigningTeam(projectRoot: string, scheme: string): void {
   }
   if (!/\bDEVELOPMENT_TEAM = "?[A-Z0-9]+"?;/.test(text)) {
     fail(
-      `The generated project has no DEVELOPMENT_TEAM (${pbxprojPath}), so xcodebuild cannot sign it. Set \`ios.appleTeamId\` in the app config (app.config.ts or app.json) to your Apple Developer team id, then run \`bun run build:mac\` again so the prebuild writes it.`,
+      `The generated project has no DEVELOPMENT_TEAM (${pbxprojPath}), so xcodebuild cannot sign it. Set \`ios.appleTeamId\` in the app config (app.config.ts or app.json) to your Apple Developer team id, then run \`${buildCommand}\` again so the prebuild writes it.`,
     );
   }
 }
@@ -952,14 +976,22 @@ function jsNote(config: MacBuildConfig): string {
     : 'It is a Debug build: it loads its JS from Metro or, through the dev launcher, from an EAS update.';
 }
 
-function loadConfig(projectRoot: string): MacBuildConfig {
+/** The values this run builds, and where they are written, or a named failure. */
+function loadConfig(
+  projectRoot: string,
+  requestedVariant: string | null,
+): {config: MacBuildConfig; configKey: string} {
   const read = readMacBuildConfig(projectRoot);
   switch (read.status) {
-    case 'ok':
-      return read.config;
+    case 'ok': {
+      const selection = selectMacBuildVariant(read, requestedVariant);
+      return selection.status === 'selected'
+        ? selection
+        : fail(selection.message);
+    }
     case 'absent':
       return fail(
-        `${read.path} has no componentConfig.${MAC_BUILD_CONFIG_KEY} block, so there is no variant to build. Add one, for example:\n${MAC_BUILD_CONFIG_EXAMPLE}\n"scheme" is the ios/*.xcworkspace name \`APP_VARIANT=<variant> npx expo prebuild\` generates; "bundleId" is that variant's ios.bundleIdentifier. "configuration" is optional (Debug for development, Release otherwise).`,
+        `${read.path} has no componentConfig.${MAC_BUILD_CONFIG_KEY} block, so there is no variant to build. Add one, for example:\n${MAC_BUILD_CONFIG_EXAMPLE}\n"scheme" is the ios/*.xcworkspace name \`APP_VARIANT=<variant> npx expo prebuild\` generates; "bundleId" is that variant's ios.bundleIdentifier. "configuration" is optional (Debug for development, Release otherwise).\n\nTo build another variant with --variant <name> as well, add a "variants" map beside those keys, for example:\n${MAC_BUILD_VARIANTS_EXAMPLE}`,
       );
     case 'invalid':
       return fail(
@@ -971,7 +1003,8 @@ function loadConfig(projectRoot: string): MacBuildConfig {
 }
 
 function macBuild(projectRoot: string, options: MacBuildOptions): void {
-  const config = loadConfig(projectRoot);
+  const {config, configKey} = loadConfig(projectRoot, options.variant);
+  const buildCommand = fullBuildCommand(options.variant);
   log(
     `${config.variant} variant, scheme ${config.scheme}, ${config.configuration}${
       config.configurationSource === 'default'
@@ -991,7 +1024,8 @@ function macBuild(projectRoot: string, options: MacBuildOptions): void {
     const workspace = findWorkspace(
       projectRoot,
       config,
-      'the build settings that locate the last Xcode install cannot be read. Run `bun run build:mac` (it installs as it goes).',
+      configKey,
+      `the build settings that locate the last Xcode install cannot be read. Run \`${buildCommand}\` (it installs as it goes).`,
     );
     installIntoApplications(projectRoot, workspace, config, macDestId);
     return;
@@ -1007,7 +1041,8 @@ function macBuild(projectRoot: string, options: MacBuildOptions): void {
   const workspace = findWorkspace(
     projectRoot,
     config,
-    'run `bun run build:mac` (without --skip-prebuild) to regenerate it.',
+    configKey,
+    `run \`${buildCommand}\` (without --skip-prebuild) to regenerate it.`,
   );
 
   // Both are cheap, idempotent, and must hold for the build that is about to
@@ -1019,7 +1054,7 @@ function macBuild(projectRoot: string, options: MacBuildOptions): void {
     config.configuration,
   );
   pinVariantForXcodeBuildPhases(projectRoot, config.variant);
-  assertSigningTeam(projectRoot, workspace.scheme);
+  assertSigningTeam(projectRoot, workspace.scheme, buildCommand);
 
   if (!options.launch) {
     log(

@@ -530,7 +530,7 @@ void yargs(ARGV)
   )
   .command(
     'mac-build',
-    'Build this Expo app for the Mac as a "Designed for iPad" app, launch it through Xcode, and copy it out of DerivedData into ~/Applications/<Scheme>.app (a previous copy of the same app goes to the Trash). The variant, scheme and bundle id come from componentConfig["mac-build"] in justin-sdk.config.json. Run in the app repo, via its build:mac / mac / build:mac:no-launch / mac:install scripts.',
+    'Build this Expo app for the Mac as a "Designed for iPad" app, launch it through Xcode, and copy it out of DerivedData into ~/Applications/<Scheme>.app (a previous copy of the same app goes to the Trash). The variant, scheme and bundle id come from componentConfig["mac-build"] in justin-sdk.config.json; --variant <name> builds another variant named under its "variants" map. Run in the app repo, via its build:mac / mac / build:mac:no-launch / mac:install scripts, e.g. `bun run build:mac -- --variant development`.',
     (y) =>
       y
         .option('skip-prebuild', {
@@ -550,6 +550,20 @@ void yargs(ARGV)
           describe:
             'Build nothing: copy the app Xcode last installed into ~/Applications (`bun run mac:install`).',
           type: 'boolean',
+        })
+        .option('variant', {
+          describe:
+            'Use this variant instead of the default: the top-level "variant" or a key of "variants" in componentConfig["mac-build"]. A name the config does not know is an error that shows the JSON to add, never a build of the default.',
+          requiresArg: true,
+          type: 'string',
+        })
+        .check((argv) => {
+          // yargs turns `--variant a --variant b` into an array and `--no-variant`
+          // into false, whatever the declared type says.
+          const variant: unknown = argv.variant;
+          return variant === undefined || typeof variant === 'string'
+            ? true
+            : '--variant takes one variant name.';
         }),
     async (argv) => {
       // Lazy: mac-install.ts uses zod, which must not be statically reachable
@@ -559,6 +573,7 @@ void yargs(ARGV)
         installOnly: argv['install-only'],
         launch: argv.launch,
         skipPrebuild: argv['skip-prebuild'],
+        variant: argv.variant ?? null,
       });
       process.exit(exitCode);
     },

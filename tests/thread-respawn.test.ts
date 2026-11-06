@@ -106,7 +106,7 @@ describe('the helpers respawn.ts keeps', () => {
     );
     expect(kickoff.endsWith(TRICKY)).toBe(true);
     expect(kickoffText('/tmp/h/abc.md', 't-abc', null)).toBe(
-      'You are the successor of a handed-off Claude Code session. Read /tmp/h/abc.md. First run the command under its pick-up section: bun run justin-sdk thread request --continues t-abc. Then continue the work the block describes, starting from its note.',
+      'You are the successor of a handed-off Claude Code session. Read /tmp/h/abc.md. First run the command under its pick-up section: bun run justin-sdk thread request --continues t-abc. Every open request and question carries over to this session; the note is the order to take them in, not the whole scope. Then continue the work the block describes, starting from its note.',
     );
   });
 

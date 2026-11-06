@@ -1,16 +1,17 @@
 /**
  * Tests for the parts of mac-build.ts that run without Xcode
  * (home-base-0jeya.1): the scheme patch, the APP_VARIANT pin, the guard against
- * `expo prebuild --clean` in a repo that commits ios/, the flag check, and the
- * config failure path. The Xcode-driving half is exercised only by a real
- * `bun run build:mac` in an app repo.
+ * `expo prebuild --clean` in a repo that commits ios/, the flag check, the
+ * config failure path, and `--variant` (home-base-0jeya.9) through the real CLI
+ * as far as each path goes before it would need Xcode. The Xcode-driving half is
+ * exercised only by a real `bun run build:mac` in an app repo.
  */
 
 import {afterAll, describe, expect, test} from 'bun:test';
-import {execFileSync} from 'child_process';
+import {execFileSync, spawnSync} from 'child_process';
 import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
-import {join} from 'path';
+import {join, resolve} from 'path';
 
 import {
   assertIosNotTracked,
@@ -238,15 +239,21 @@ describe('assertSigningTeam', () => {
 });
 
 describe('conflictingOptions', () => {
-  test('--install-only takes no other options', () => {
+  test('--install-only takes no other build options', () => {
     expect(
-      conflictingOptions({installOnly: true, launch: true, skipPrebuild: true}),
+      conflictingOptions({
+        installOnly: true,
+        launch: true,
+        skipPrebuild: true,
+        variant: null,
+      }),
     ).toContain('--install-only');
     expect(
       conflictingOptions({
         installOnly: true,
         launch: false,
         skipPrebuild: false,
+        variant: null,
       }),
     ).toContain('--install-only');
     expect(
@@ -254,6 +261,7 @@ describe('conflictingOptions', () => {
         installOnly: true,
         launch: true,
         skipPrebuild: false,
+        variant: null,
       }),
     ).toBeNull();
     expect(
@@ -261,6 +269,18 @@ describe('conflictingOptions', () => {
         installOnly: false,
         launch: false,
         skipPrebuild: true,
+        variant: null,
+      }),
+    ).toBeNull();
+  });
+
+  test('--variant goes with --install-only, which installs that variant', () => {
+    expect(
+      conflictingOptions({
+        installOnly: true,
+        launch: true,
+        skipPrebuild: false,
+        variant: 'development',
       }),
     ).toBeNull();
   });
@@ -282,6 +302,7 @@ describe('runMacBuild without a config block', () => {
         installOnly: false,
         launch: false,
         skipPrebuild: true,
+        variant: null,
       });
     } finally {
       process.stderr.write = original;
@@ -290,5 +311,253 @@ describe('runMacBuild without a config block', () => {
     const message = writes.join('');
     expect(message).toContain('has no componentConfig.mac-build block');
     expect(message).toContain('"variant": "preview"');
+    // The same message teaches the optional map and the flag that reads it.
+    expect(message).toContain('--variant <name>');
+    expect(message).toContain('"variants": {');
+  });
+});
+
+describe('--variant through the real CLI', () => {
+  const CLI = resolve(import.meta.dir, '..', 'src', 'cli.ts');
+  const PREVIEW_SCHEME = 'ScreenshotAppPreview';
+  const DEV_SCHEME = 'ScreenshotAppDev';
+
+  /** A repo with a Preview default and a Dev entry, and no ios/ yet. */
+  function appRepo(): string {
+    const root = tempRoot();
+    writeFileSync(
+      join(root, 'justin-sdk.config.json'),
+      JSON.stringify({
+        componentConfig: {
+          'mac-build': {
+            bundleId: 'com.jhaa.screenshotapp.preview',
+            scheme: PREVIEW_SCHEME,
+            variant: 'preview',
+            variants: {
+              development: {
+                bundleId: 'com.jhaa.screenshotapp.dev',
+                scheme: DEV_SCHEME,
+              },
+            },
+          },
+        },
+      }),
+    );
+    return root;
+  }
+
+  function macBuildCli(
+    root: string,
+    args: string[],
+  ): {status: number | null; stderr: string; stdout: string} {
+    const run = spawnSync(process.execPath, [CLI, 'mac-build', ...args], {
+      cwd: root,
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        // git must not find a repo above the temp root: the prebuild path relies
+        // on "not a git repository" to stop before it would run `expo prebuild`.
+        GIT_CEILING_DIRECTORIES: tmpdir(),
+        JUSTIN_SDK_HEALTH_NOTICES: 'off',
+        // Skips system_profiler, which has nothing to do with these checks.
+        MAC_DEST_ID: 'TEST-MAC-DESTINATION',
+      },
+    });
+    return {status: run.status, stderr: run.stderr, stdout: run.stdout};
+  }
+
+  const DEV_LINE =
+    'development variant, scheme ScreenshotAppDev, Debug (the default for this variant), bundle id com.jhaa.screenshotapp.dev.';
+  const PREVIEW_LINE =
+    'preview variant, scheme ScreenshotAppPreview, Release (the default for this variant), bundle id com.jhaa.screenshotapp.preview.';
+
+  test('with no flag it uses the default, and the messages name no flag', () => {
+    const run = macBuildCli(appRepo(), ['--skip-prebuild', '--no-launch']);
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain(PREVIEW_LINE);
+    expect(run.stderr).toContain(`ios/${PREVIEW_SCHEME}.xcworkspace not found`);
+    expect(run.stderr).toContain(
+      '"scheme" in componentConfig.mac-build does not match the workspace Expo generates for "preview"',
+    );
+    expect(run.stderr).toContain(
+      'run `bun run build:mac` (without --skip-prebuild) to regenerate it.',
+    );
+    expect(run.stderr).not.toContain('--variant');
+  });
+
+  test('--variant with the default name uses the same top-level values', () => {
+    const run = macBuildCli(appRepo(), [
+      '--variant',
+      'preview',
+      '--skip-prebuild',
+      '--no-launch',
+    ]);
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain(PREVIEW_LINE);
+    expect(run.stderr).toContain(`ios/${PREVIEW_SCHEME}.xcworkspace not found`);
+  });
+
+  test('--skip-prebuild honours the variant, and the message stays accurate', () => {
+    const root = appRepo();
+    // The routine state: ios/ holds the OTHER variant's workspace.
+    mkdirSync(join(root, 'ios', `${PREVIEW_SCHEME}.xcworkspace`), {
+      recursive: true,
+    });
+    const run = macBuildCli(root, [
+      '--variant',
+      'development',
+      '--skip-prebuild',
+    ]);
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain(DEV_LINE);
+    expect(run.stderr).toContain(`ios/${DEV_SCHEME}.xcworkspace not found`);
+    expect(run.stderr).toContain(
+      `ios/ currently holds: ${PREVIEW_SCHEME}.xcworkspace`,
+    );
+    expect(run.stderr).toContain(
+      '"scheme" in componentConfig.mac-build.variants.development does not match the workspace Expo generates for "development"',
+    );
+    // The bare command would rebuild the default and fail the same way again.
+    expect(run.stderr).toContain(
+      'run `bun run build:mac -- --variant development` (without --skip-prebuild) to regenerate it.',
+    );
+  });
+
+  test('--install-only honours the variant, and so does its remedy', () => {
+    const run = macBuildCli(appRepo(), [
+      '--variant',
+      'development',
+      '--install-only',
+    ]);
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain(DEV_LINE);
+    expect(run.stderr).toContain(`ios/${DEV_SCHEME}.xcworkspace not found`);
+    expect(run.stderr).toContain(
+      'Run `bun run build:mac -- --variant development` (it installs as it goes).',
+    );
+  });
+
+  test('--no-launch reaches the prebuild path with the variant selected', () => {
+    // The temp root is not a git repo, so the guard in prebuild() refuses before
+    // anything runs. Nothing here can reach `expo prebuild`.
+    const run = macBuildCli(appRepo(), [
+      '--variant',
+      'development',
+      '--no-launch',
+    ]);
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain(DEV_LINE);
+    expect(run.stdout).not.toContain('Regenerating');
+    expect(run.stderr).toContain('Could not check whether git tracks anything');
+  });
+
+  test('the variant reaches the Run action, the APP_VARIANT pin and the signing remedy', () => {
+    const root = appRepo();
+    mkdirSync(join(root, 'ios', `${DEV_SCHEME}.xcworkspace`), {
+      recursive: true,
+    });
+    const schemeDir = join(
+      root,
+      'ios',
+      `${DEV_SCHEME}.xcodeproj`,
+      'xcshareddata',
+      'xcschemes',
+    );
+    mkdirSync(schemeDir, {recursive: true});
+    const schemePath = join(schemeDir, `${DEV_SCHEME}.xcscheme`);
+    writeFileSync(schemePath, SCHEME_XML);
+    // No DEVELOPMENT_TEAM: assertSigningTeam stops the run before xcodebuild.
+    writeFileSync(
+      join(root, 'ios', `${DEV_SCHEME}.xcodeproj`, 'project.pbxproj'),
+      '\t\t\t\tCODE_SIGN_STYLE = Automatic;\n',
+    );
+
+    const run = macBuildCli(root, [
+      '--variant',
+      'development',
+      '--skip-prebuild',
+      '--no-launch',
+    ]);
+
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain(DEV_LINE);
+    expect(run.stdout).not.toContain('Building ');
+    expect(readFileSync(schemePath, 'utf8')).toBe(
+      expectedLaunchAction('Debug'),
+    );
+    expect(
+      readFileSync(join(root, 'ios', '.xcode.env.local'), 'utf8'),
+    ).toContain('export APP_VARIANT=development\n');
+    expect(run.stderr).toContain(
+      'then run `bun run build:mac -- --variant development` again so the prebuild writes it.',
+    );
+  });
+
+  test('an unknown variant exits non-zero before doing anything, and never builds the default', () => {
+    const run = macBuildCli(appRepo(), [
+      '--variant',
+      'staging',
+      '--skip-prebuild',
+      '--no-launch',
+    ]);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain(
+      '"staging" is not a variant this repo\'s Mac build knows, so nothing was built. It knows: preview (the default), development.',
+    );
+    expect(run.stderr).toContain('"variants": {');
+    expect(run.stderr).toContain('"staging": {');
+    // Not one line of a build started, of either variant.
+    expect(run.stdout).toBe('');
+  });
+
+  test('a broken entry stops a build of the default, not just of that entry', () => {
+    const root = tempRoot();
+    writeFileSync(
+      join(root, 'justin-sdk.config.json'),
+      JSON.stringify({
+        componentConfig: {
+          'mac-build': {
+            bundleId: 'com.jhaa.screenshotapp.preview',
+            scheme: PREVIEW_SCHEME,
+            variant: 'preview',
+            variants: {development: {scheme: DEV_SCHEME}},
+          },
+        },
+      }),
+    );
+    const run = macBuildCli(root, ['--skip-prebuild', '--no-launch']);
+    expect(run.status).toBe(1);
+    expect(run.stderr).toContain('cannot be used');
+    expect(run.stderr).toContain('"variants.development.bundleId" is missing');
+    expect(run.stdout).toBe('');
+  });
+
+  test('the odd spellings of the flag all refuse, and none builds the default', () => {
+    const spellings: [string[], string][] = [
+      [['--variant'], 'Not enough arguments following: variant'],
+      [
+        ['--variant', '--skip-prebuild'],
+        'Not enough arguments following: variant',
+      ],
+      [['--variant='], '"" is not a variant name'],
+      [
+        ['--variant', 'a', '--variant', 'b'],
+        '--variant takes one variant name.',
+      ],
+      [['--no-variant'], '--variant takes one variant name.'],
+    ];
+    for (const [args, expected] of spellings) {
+      const run = macBuildCli(appRepo(), [...args, '--no-launch']);
+      expect([args, run.status]).toEqual([args, 1]);
+      expect(run.stderr).toContain(expected);
+      expect(run.stdout).not.toContain(PREVIEW_LINE);
+    }
+  });
+
+  test('--help documents the flag and does nothing else', () => {
+    const run = macBuildCli(appRepo(), ['--help']);
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain('--variant');
+    expect(run.stdout).not.toContain(PREVIEW_LINE);
   });
 });

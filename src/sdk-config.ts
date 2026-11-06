@@ -209,12 +209,6 @@ export const healthNoticesSchema = z
  */
 const componentConfigSchema = z
   .looseObject({
-    // Read by `justin-sdk mac-build` through mac-build-config.ts, which checks
-    // the values itself (it must stay zod-free: prime.ts gates the component on
-    // it). These entries document the keys for `config schema` and give doctor's
-    // CONFIG_SCHEMA check their types. No defaults are printed: every key but
-    // `configuration` is required, and `configuration`'s default depends on the
-    // variant.
     // home-base-pp1vx.1.2. Plain string/number, not an enum: gate.ts checks the
     // values and falls back to type-checking every commit, because a schema
     // violation here would drop the whole file, thread knobs included.
@@ -235,6 +229,13 @@ const componentConfigSchema = z
       })
       .optional()
       .describe('husky: the git pre-commit hook.'),
+    // Read by `justin-sdk mac-build` through mac-build-config.ts, which checks
+    // the values itself (it must stay zod-free: prime.ts gates the component on
+    // it). These entries document the keys for `config schema` and give doctor's
+    // CONFIG_SCHEMA check their types. No defaults are printed: every key but
+    // `configuration` and `variants` is required, and `configuration`'s default
+    // depends on the variant. `variants` is a record, which `config schema` prints
+    // as one line, so its description has to carry the shape of an entry.
     'mac-build': z
       .looseObject({
         bundleId: z
@@ -259,12 +260,25 @@ const componentConfigSchema = z
           .string()
           .optional()
           .describe(
-            'REQUIRED. The APP_VARIANT to prebuild and build for the Mac, e.g. "preview" or "development".',
+            'REQUIRED. The APP_VARIANT to prebuild and build for the Mac when `--variant` is not given, e.g. "preview" or "development".',
+          ),
+        variants: z
+          .record(
+            z.string(),
+            z.looseObject({
+              bundleId: z.string().optional(),
+              configuration: z.enum(['Debug', 'Release']).optional(),
+              scheme: z.string().optional(),
+            }),
+          )
+          .optional()
+          .describe(
+            'Optional. The other variants `justin-sdk mac-build --variant <name>` can build, by APP_VARIANT name, e.g. {"development": {"scheme": "NatureSoundsDev", "bundleId": "com.jhaa.naturesounds.dev"}}. Each entry REQUIRES "scheme" and "bundleId", which mean what they mean at the top level. Its optional "configuration" follows that entry’s variant when absent, never the top-level value. A broken entry stops every build, even of another variant; a key equal to the top-level "variant" is refused (two sources for one variant); and a name in neither place is an error that shows the JSON to add, never a build of the default.',
           ),
       })
       .optional()
       .describe(
-        'mac-build: which variant `justin-sdk mac-build` builds as a Mac (Designed for iPad) app (home-base-0jeya.1). Set in the project file only. Its presence is also what makes the mac-build component apply to the repo.',
+        'mac-build: which variants `justin-sdk mac-build` builds as a Mac (Designed for iPad) app (home-base-0jeya.1). Set in the project file only. Its presence is also what makes the mac-build component apply to the repo.',
       ),
     thread: z
       .looseObject({

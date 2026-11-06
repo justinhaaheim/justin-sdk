@@ -333,13 +333,19 @@ describe('thread request --continues', () => {
     });
     // The old session is still auto-titled, so the new one keeps its own.
     expect(linked).toEqual({
-      kind: 'linked',
-      newBeadId: w.beads[NEW] ?? '',
-      oldBeadId: w.beads[OLD] ?? '',
-      oldTitle: 'migrate the db',
-      renameFailure: null,
-      renamedSession: null,
-      workspaceNote: null,
+      kind: 'handoffPickup',
+      pickup: {
+        alreadyHeld: {questions: [], requests: []},
+        carried: {questions: [], requests: []},
+        kind: 'picked-up',
+        newBeadId: w.beads[NEW] ?? '',
+        oldBeadId: w.beads[OLD] ?? '',
+        oldTitle: 'migrate the db',
+        renamedSession: null,
+        workspaceNote: null,
+        wrote: true,
+      },
+      retryCommand: `bun run justin-sdk thread request --continues ${w.beads[OLD]}`,
     });
     expect(labelsOf(w, w.beads[NEW] ?? '')).toContain(
       `continues:${w.beads[OLD]}`,
@@ -395,7 +401,9 @@ describe('thread request --continues', () => {
       sessionId: NEW,
       title: null,
     });
-    expect(linked.kind).toBe('failed');
+    expect(linked).toMatchObject({
+      pickup: {kind: 'failed', step: 'find-predecessor'},
+    });
     expect(
       labelsOf(w, w.beads[NEW] ?? '').some((label) =>
         label.startsWith('continues:'),
@@ -517,14 +525,18 @@ describe('home-base-mbnjv.12: thread request --continues moves the workspace nam
       title: null,
     });
     expect(linked).toMatchObject({
-      kind: 'linked',
-      renameFailure: null,
-      renamedSession: {beadId: newBead, title: 'Migrate the orders table'},
+      kind: 'handoffPickup',
+      pickup: {
+        kind: 'picked-up',
+        renamedSession: {beadId: newBead, title: 'Migrate the orders table'},
+      },
     });
     expect(labelsOf(w, newBead)).not.toContain('auto-title');
-    expect(linked.kind === 'linked' && linked.workspaceNote).toContain(
-      `taken over from ${oldBead}`,
-    );
+    expect(
+      linked.kind === 'handoffPickup' &&
+        linked.pickup.kind === 'picked-up' &&
+        linked.pickup.workspaceNote,
+    ).toContain(`taken over from ${oldBead}`);
 
     const after = names(w);
     expect(after).toHaveLength(2);
@@ -605,9 +617,8 @@ describe('home-base-mbnjv.12: thread request --continues moves the workspace nam
       title: null,
     });
     expect(linked).toMatchObject({
-      kind: 'linked',
-      renamedSession: null,
-      workspaceNote: null,
+      kind: 'handoffPickup',
+      pickup: {kind: 'picked-up', renamedSession: null, workspaceNote: null},
     });
     expect(labelsOf(w, w.beads[NEW] ?? '')).toContain('auto-title');
     expect(cmux.calls).toEqual([]);

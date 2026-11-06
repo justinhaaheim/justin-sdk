@@ -78,6 +78,15 @@ export const HANDED_OFF_LABEL = 'handed-off';
 export const CONTINUES_LABEL_PREFIX = 'continues:';
 export const CONTINUED_BY_LABEL_PREFIX = 'continued-by:';
 /**
+ * The handoff pickup's two end states on a successor's session bead
+ * (home-base-npbse.1.1, handoff-pickup.ts). `picked-up`: linked, every open
+ * request and question carried over, and the record written on both beads.
+ * `not-a-successor`: the predecessor already had another successor, so this
+ * session stays unlinked. That label is terminal.
+ */
+export const PICKED_UP_LABEL = 'picked-up';
+export const NOT_A_SUCCESSOR_LABEL = 'not-a-successor';
+/**
  * The spawn links (request home-base-ys9t7.5, D8): a session started by
  * `thread spawn` carries `spawned-by:<parent session bead id>`, the parent
  * `spawned:<child id>`, so the child's spend counts against the parent's

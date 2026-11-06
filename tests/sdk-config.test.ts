@@ -26,6 +26,7 @@ import {z} from 'zod';
 
 import {coreConfigNames} from '../src/component-registry';
 import {xdgStateHome} from '../src/health-notices';
+import {readMacBuildConfig} from '../src/mac-build-config';
 import {
   configSchemaJson,
   DEFAULT_HEALTH_NOTICES,
@@ -177,6 +178,83 @@ describe('readProjectConfig outcomes', () => {
     expect(describeConfigOutcome(outcome)).toContain(
       'healthNotices.sdkVersion.minor.promptTier',
     );
+  });
+
+  test('mac-build "variants": both readers accept the same valid map (home-base-0jeya.9)', () => {
+    const variants = {
+      development: {
+        bundleId: 'com.jhaa.screenshotapp.dev',
+        configuration: 'Debug' as const,
+        scheme: 'ScreenshotAppDev',
+      },
+      staging: {
+        bundleId: 'com.jhaa.screenshotapp.staging',
+        scheme: 'ScreenshotAppStaging',
+      },
+    };
+    const root = projectWith(
+      projectJson({
+        componentConfig: {
+          'mac-build': {
+            bundleId: 'com.jhaa.screenshotapp.preview',
+            scheme: 'ScreenshotAppPreview',
+            variant: 'preview',
+            variants,
+          },
+        },
+      }),
+    );
+
+    const outcome = readProjectConfig(root);
+    expect(outcome.status).toBe('ok');
+    if (outcome.status !== 'ok') throw new Error('unreachable');
+    expect(outcome.config.componentConfig?.['mac-build']?.variants).toEqual(
+      variants,
+    );
+
+    const read = readMacBuildConfig(root);
+    expect(read.status).toBe('ok');
+    if (read.status !== 'ok') throw new Error('unreachable');
+    expect([...read.variants.keys()]).toEqual(['development', 'staging']);
+  });
+
+  test('mac-build "variants": a wrong type is a violation naming the key path', () => {
+    // A loose block would accept this if the schema did not declare "variants",
+    // so this is what proves the key is declared, not merely tolerated.
+    const cases: [unknown, string][] = [
+      [
+        {development: {bundleId: 'com.example.dev', scheme: 7}},
+        'componentConfig.mac-build.variants.development.scheme:',
+      ],
+      [
+        {development: {bundleId: 'com.example.dev', configuration: 'Profile'}},
+        'componentConfig.mac-build.variants.development.configuration:',
+      ],
+      [
+        {development: 'ScreenshotAppDev'},
+        'componentConfig.mac-build.variants.development:',
+      ],
+      [['development'], 'componentConfig.mac-build.variants:'],
+    ];
+    for (const [variants, expected] of cases) {
+      const outcome = readProjectConfig(
+        projectWith(
+          projectJson({
+            componentConfig: {
+              'mac-build': {
+                bundleId: 'com.jhaa.screenshotapp.preview',
+                scheme: 'ScreenshotAppPreview',
+                variant: 'preview',
+                variants,
+              },
+            },
+          }),
+        ),
+      );
+      expect(outcome.status).toBe('schema-violation');
+      if (outcome.status !== 'schema-violation') throw new Error('unreachable');
+      expect(outcome.issues[0]).toStartWith(expected);
+    }
   });
 
   test('schema-violation: an out-of-range tier is a violation too', () => {
@@ -447,6 +525,23 @@ function topLevelKeys(schema: z.ZodType): string[] {
 }
 
 describe('config schema', () => {
+  test('mac-build "variants" is documented, including the shape of an entry', () => {
+    const rendered = renderConfigSchema({
+      env: {XDG_CONFIG_HOME: '/xdg'},
+      projectRoot: '/repo',
+    });
+    // A record prints as one line, so the description has to carry the entry.
+    const line = rendered
+      .split('\n')
+      .find((text) => text.includes('componentConfig.mac-build.variants '));
+    expect(line).toBeDefined();
+    expect(line).toContain('object');
+    expect(line).toContain('--variant <name>');
+    expect(line).toContain('"scheme"');
+    expect(line).toContain('"bundleId"');
+    expect(line).toContain('"configuration"');
+  });
+
   test('the human tree names both files and EVERY top-level key of each', () => {
     const rendered = renderConfigSchema({
       env: {XDG_CONFIG_HOME: '/xdg'},

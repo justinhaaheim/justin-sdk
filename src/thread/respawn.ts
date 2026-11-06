@@ -85,7 +85,9 @@ export const KICKOFF_OPENING =
   'You are the successor of a handed-off Claude Code session.';
 
 export function kickoffText(block: string, bead: string, extra: string | null) {
-  const base = `${KICKOFF_OPENING} Read ${block}. First run the command under its pick-up section: ${sdkRun(`thread request --continues ${bead}`)}. Then continue the work the block describes, starting from its note.`;
+  // P6 (home-base-npbse.1.1): the scope sentence is here as well as in the
+  // block, because a session once read the note as the whole scope.
+  const base = `${KICKOFF_OPENING} Read ${block}. First run the command under its pick-up section: ${sdkRun(`thread request --continues ${bead}`)}. Every open request and question carries over to this session; the note is the order to take them in, not the whole scope. Then continue the work the block describes, starting from its note.`;
   const more = oneLine(extra ?? '');
   return more === '' ? base : `${base} ${more}`;
 }

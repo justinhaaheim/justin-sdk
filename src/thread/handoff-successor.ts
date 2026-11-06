@@ -495,6 +495,8 @@ export async function handoffWithSuccessor(
   // but the name (typed twice) and --model are not bounded in bytes: measured
   // with these functions on 2026-11-03, 498 bytes for a typical title, 590 for
   // an 80-character one, 998 for 80 apostrophes, and no bound with --model.
+  // The scope sentence (home-base-npbse.1.1, 2026-11-06) adds 122 bytes to each,
+  // so the 80-apostrophe title is now refused.
   // Refused before the gate, so nothing is written, dry run included.
   const tooLong = typedCommandTooLong(command);
   if (tooLong != null) {

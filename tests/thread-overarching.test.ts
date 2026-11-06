@@ -343,7 +343,10 @@ describe('D1: --overarching marks one request per chain', () => {
     );
     // The successor links (link only): it inherits the title, copies nothing.
     const linked = await request(w, null, {continues: oldBead});
-    expect(linked.kind).toBe('linked');
+    expect(linked).toMatchObject({
+      kind: 'handoffPickup',
+      pickup: {kind: 'picked-up'},
+    });
     expect(bead(w, w.sessionBeadId).title).toBe('Handoff command refinements');
 
     const session = bead(w, w.sessionBeadId);

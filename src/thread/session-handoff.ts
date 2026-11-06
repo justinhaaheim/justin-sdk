@@ -12,8 +12,9 @@
  *       linked at once (`continued-by:` here, `continues:` there).
  *
  *   thread request --continues <old session bead id>   (request.ts)
- *       run IN the new session: labels its session bead `continues:<old>` and
- *       the old one `continued-by:<new>` — `linkContinuation` below.
+ *       run IN the new session: the whole pickup (handoff-pickup.ts). Its link
+ *       labels its session bead `continues:<old>` and the old one
+ *       `continued-by:<new>` — `linkContinuation` below.
  *
  * WHERE THE OLD BEAD IS: the sessions index names the DB that holds every
  * session bead (`created` sightings), so a predecessor in another checkout is
@@ -61,7 +62,7 @@ import {
 // Finding a session bead's DB
 // ---------------------------------------------------------------------------
 
-type BeadLocation =
+export type BeadLocation =
   | {db: string; kind: 'found'; labels: readonly string[]; title: string}
   | {kind: 'failed'; reason: string}
   | {kind: 'notFound'; searched: string[]};
@@ -338,6 +339,9 @@ export async function handoffBlock(input: {
       '**To pick it up:**',
       // Justin's wording (2026-10-26): addressed to the Claude reading it.
       `- Run \`${sdkRun(`thread request --continues ${input.sessionBeadId}`)}\` to receive the handoff from a previous session.`,
+      // P6 (home-base-npbse.1.1): a session once took the note as the whole
+      // scope and adopted 2 of its 10 open requests.
+      '- Every open request and question above carries over to the new session. The note is the order to take them in, not the whole scope.',
       `- To read the old session: \`claude --resume ${input.sessionId}\` or \`${sdkRun(`thread show ${input.sessionBeadId}`)}\``,
     ].join('\n'),
   ];

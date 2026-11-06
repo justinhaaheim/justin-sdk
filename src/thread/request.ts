@@ -12,6 +12,10 @@
  *       adopts an existing bead: looked up in the session's DB, then in the
  *       cwd's; set in_progress and labelled where it is found. Never moved and
  *       never re-parented.
+ *   thread request --continues <old session bead id>
+ *       picks up a handoff (handoff-pickup.ts, home-base-npbse.1.1) under the
+ *       per-session lock the capture child uses. With a title or --bead it
+ *       files that request first.
  *
  * TITLE RULE: while the session bead still carries `auto-title`, the FIRST
  * request renames the session to the request's title and drops the label.
@@ -22,14 +26,19 @@
  * files in the cwd's DB instead and records that DB in the index. It never
  * silently falls back.
  *
- * Exit: 0 filed · 1 refused or failed (a request that WAS filed but whose
- * follow-up write failed says so, by id) · 2 usage.
+ * Exit: 0 filed, or the pickup is done or had nothing to do · 1 refused or
+ * failed (a request that WAS filed but whose follow-up write failed says so, by
+ * id; a pickup step that failed is named, and running the same command again
+ * finishes it) · 2 usage, or the pickup found that another session already
+ * continues that one (not-a-successor).
  */
 
 import type {BeadsWorkspace, BrTarget} from '../beads/br';
 import type {CmuxRunner} from './cmux';
+import type {PickUpDeps, PickUpOutcome} from './handoff-pickup';
 import type {ChainRequestReaders} from './overarching';
 import type {EnvLike} from './paths';
+import type {AdoptedStatus} from './request-writes';
 import type {SessionResolution} from './session-bead';
 
 import {
@@ -41,6 +50,7 @@ import {
   resolveRecordedBeadsDb,
 } from '../beads/br';
 import {sdkRun} from '../sdk-invocation';
+import {carriedLines, describePickUp, pickUpHandoff} from './handoff-pickup';
 import {readMessageLog} from './message-log';
 import {
   chainRequestList,
@@ -51,6 +61,7 @@ import {
   readChainRequests,
   realChainRequestReaders,
 } from './overarching';
+import {adoptBead, titleSetEdit} from './request-writes';
 import {
   AUTO_TITLE_LABEL,
   CONTINUES_LABEL_PREFIX,
@@ -59,32 +70,10 @@ import {
   SESSION_BEAD_PRIORITY,
   sidLabel,
   sightingIn,
-  titleSetLabelEdit,
 } from './session-bead';
-import {linkContinuation} from './session-handoff';
 import {appendSessionSighting, readSessionSightings} from './session-index';
 import {sessionBeadsKnob, sessionIdFrom} from './session-select';
 import {workspaceNameFollowUp} from './workspace-name-session';
-
-/**
- * home-base-ys9t7.9.1: the `title-set:` label edit that goes into the SAME
- * `br update` as a new session title, so `thread status` knows exactly which
- * requests were filed after it. Nothing when componentConfig.thread.
- * titleSummary is off (the old behaviour, exactly). `now` is read at the
- * rename, after any request was filed, unless a test injects one.
- */
-async function titleSetEdit(input: {
-  cwd: string;
-  env: EnvLike;
-  labels: readonly string[];
-  now: Date | undefined;
-}): Promise<{addLabels: string[]; removeLabels: string[]}> {
-  const {resolveThreadConfig} = await import('./config');
-  if (!resolveThreadConfig({cwd: input.cwd, env: input.env}).titleSummary) {
-    return {addLabels: [], removeLabels: []};
-  }
-  return titleSetLabelEdit(input.labels, input.now ?? new Date());
-}
 
 export interface ThreadRequestOptions {
   /**
@@ -105,10 +94,9 @@ export interface ThreadRequestOptions {
   /** The cmux runner for the workspace-name follow-up; tests inject a fake. */
   cmux?: CmuxRunner;
   /**
-   * `--continues <old session bead id>` (home-base-vzwbj.4.4): link this
-   * session to the one it picks up from — `continues:<old>` on this session's
-   * bead, `continued-by:<this>` on the old one. Alone (no title, no --bead) it
-   * only links.
+   * `--continues <old session bead id>`: pick up the handoff from that session
+   * (handoff-pickup.ts, home-base-npbse.1.1). Alone (no title, no --bead) it
+   * files nothing of its own.
    */
   continues?: string | null;
   cwd?: string;
@@ -125,6 +113,16 @@ export interface ThreadRequestOptions {
    * (D2).
    */
   overarching?: boolean;
+  /** What the pickup calls outside itself; tests inject failures. */
+  pickupDeps?: Partial<PickUpDeps>;
+  /**
+   * How long `--continues` waits for the per-session lock before it fails,
+   * naming the step. Default 30000 ms, polled every `pickupLockPollMs` (default
+   * 250). A capture child holds the lock for seconds, and the capture lock
+   * itself never waits (capture.ts).
+   */
+  pickupLockPollMs?: number;
+  pickupLockWaitMs?: number;
   /** `--session`, else CLAUDE_CODE_SESSION_ID. */
   sessionId: string | null;
   /**
@@ -138,16 +136,6 @@ export interface ThreadRequestOptions {
   /** The plain-words title of a new request. */
   title: string | null;
 }
-
-/**
- * What adopting did to the bead's status (home-base-vzwbj.4.9 F1). `already`:
- * it was in_progress, so no status change was sent. `left`: br refused the
- * claim (`cannot claim blocked issue`), so only the labels were added.
- */
-export type AdoptedStatus =
-  | {from: string; kind: 'set'}
-  | {kind: 'already'}
-  | {blockers: string; kind: 'left'; status: string};
 
 /** What `--overarching` did (home-base-jm5kg.5 D1). */
 export interface OverarchingMarked {
@@ -177,6 +165,8 @@ export type ThreadRequestOutcome =
       mode: 'adopted' | 'created';
       /** `--overarching`: what was marked and unmarked; null = not asked. */
       overarching: OverarchingMarked | null;
+      /** What `--continues` did; null = not asked. */
+      pickup: PickUpOutcome | null;
       /** Set when the title rule renamed the session bead. */
       renamedSession: {beadId: string; title: string} | null;
       title: string;
@@ -188,22 +178,8 @@ export type ThreadRequestOutcome =
     }
   | {agentId: string; kind: 'subagent'}
   | {id: string; kind: 'notFound'; searched: string[]}
-  | {
-      kind: 'linked';
-      newBeadId: string;
-      oldBeadId: string;
-      oldTitle: string;
-      /** That rename failed: the link stands, exit 1, the retry is named. */
-      renameFailure: string | null;
-      /**
-       * home-base-mbnjv.12: a successor still carrying `auto-title` is titled
-       * after its titled predecessor; null when it was not (already titled,
-       * or the predecessor is auto-titled too).
-       */
-      renamedSession: {beadId: string; title: string} | null;
-      /** The workspace-name follow-up, as for a filed request. */
-      workspaceNote: string | null;
-    }
+  /** `--continues` alone: the pickup's outcome, and the command that re-runs it. */
+  | {kind: 'handoffPickup'; pickup: PickUpOutcome; retryCommand: string}
   | {kind: 'disabled'; reason: string}
   | {kind: 'failed'; reason: string}
   | {kind: 'noSession'; reason: string}
@@ -212,23 +188,6 @@ export type ThreadRequestOutcome =
 /** Collapse whitespace: a bead title is one line. */
 export function oneLineTitle(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
-}
-
-const CLAIM_REFUSAL = /cannot claim blocked issue:?\s*([^\n]*)/;
-
-/**
- * The blockers br names when it refuses `--status=in_progress`, or null when
- * the failure is something else. Measured 2026-10-11: br 0.1.37 refuses a bead
- * with OPEN CHILDREN ("Validation failed: claim: cannot claim blocked issue:
- * u-86g.1", exit 4) and br 0.5.12 one with an open `blocks` dependency, with
- * the same words; both refusals are atomic (the labels in the same call are
- * not written either).
- */
-export function claimRefusalBlockers(failureText: string): string | null {
-  const match = CLAIM_REFUSAL.exec(failureText);
-  if (match == null) return null;
-  const blockers = (match[1] ?? '').trim();
-  return blockers === '' ? 'unnamed' : blockers;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -312,6 +271,70 @@ async function resolveSessionWaiting(input: {
 type Usable =
   | Extract<SessionResolution, {kind: 'checkoutMissing'}>
   | Extract<SessionResolution, {kind: 'found'}>;
+
+/**
+ * pickUpHandoff under the capture child's per-session lock, so the two callers
+ * serialize rather than interleave: linkContinuation alone is two separate br
+ * writes, and repeatability does not cover two writers between them. The lock
+ * itself never waits, so this polls it, and a lock it cannot get is a failed
+ * step that wrote nothing. A capture child that finds the lock held here defers
+ * to the next one, whose pass applies the log's tail (capture.ts's convergence
+ * argument).
+ *
+ * capture.ts is imported here, not at the top: home-base-npbse.1.2 has it import
+ * handoff-pickup.ts, and a `thread request` that only files needs none of it.
+ */
+async function pickUpUnderLock(input: {
+  continues: string;
+  cwd: string;
+  deps: Partial<PickUpDeps>;
+  env: EnvLike;
+  now: Date | undefined;
+  pollMs: number;
+  session: Extract<SessionResolution, {kind: 'found'}>;
+  sessionId: string;
+  waitMs: number;
+}): Promise<PickUpOutcome> {
+  const {env, sessionId} = input;
+  const {releaseCaptureLock, tryCaptureLock} = await import('./capture');
+  const deadline = Date.now() + input.waitMs;
+  while (!tryCaptureLock(sessionId, env)) {
+    if (Date.now() >= deadline) {
+      return {
+        done: {
+          alreadyHeld: {questions: [], requests: []},
+          carried: {questions: [], requests: []},
+          link: null,
+          pickedUpLabelled: false,
+          renamedSession: null,
+          workspaceNote: null,
+        },
+        kind: 'failed',
+        reason: `another process held this session's lock for ${Math.round(input.waitMs / 1000)} s, or the lock could not be taken, so nothing was written`,
+        step: 'lock',
+      };
+    }
+    await sleep(Math.max(1, Math.min(input.pollMs, deadline - Date.now())));
+  }
+  try {
+    return await pickUpHandoff(
+      {
+        cwd: input.cwd,
+        env,
+        ...(input.now != null ? {now: input.now} : {}),
+        predecessorBeadId: input.continues,
+        successor: {
+          beadId: input.session.bead.id,
+          db: input.session.db,
+          sessionId,
+        },
+      },
+      input.deps,
+    );
+  } finally {
+    releaseCaptureLock(sessionId, env);
+  }
+}
 
 /** Refusals shared by `thread request` and `thread title`. */
 function refuseResolution(
@@ -478,7 +501,7 @@ export async function fileRequest(
     return {
       kind: 'usage',
       message:
-        'give exactly one of: a request title (thread request "fix the login bug") or --bead <id> (or only --continues <old session bead id> to link this session to the one it picks up from)',
+        'give exactly one of: a request title (thread request "fix the login bug") or --bead <id> (or only --continues <old session bead id> to pick up the handoff from that session)',
     };
   }
   if (linkOnly && options.overarching === true) {
@@ -544,59 +567,35 @@ export async function fileRequest(
   const usable = resolution as Usable;
   const sessionDb = usable.kind === 'found' ? usable.db : null;
 
-  // ---- --continues alone: link, file nothing ----
+  // ---- the pickup: `--continues` alone runs only this; with a title or --bead
+  // it runs after the request is filed ----
+  const pickUp = async (
+    found: Extract<SessionResolution, {kind: 'found'}>,
+    syncNames: PickUpDeps['syncNames'],
+  ): Promise<PickUpOutcome> =>
+    await pickUpUnderLock({
+      continues: continues ?? '',
+      cwd,
+      deps: {syncNames, ...options.pickupDeps},
+      env,
+      now: options.now,
+      pollMs: options.pickupLockPollMs ?? 250,
+      session: found,
+      sessionId,
+      waitMs: options.pickupLockWaitMs ?? 30_000,
+    });
+  const retryCommand = sdkRun(`thread request --continues ${continues ?? ''}`);
+
   if (linkOnly) {
     if (usable.kind !== 'found') {
       return {checkoutPath: usable.checkoutPath, kind: 'checkoutMissing'};
     }
-    const linked = linkContinuation({
-      cwd,
-      env,
-      newSession: {beadId: usable.bead.id, db: usable.db},
-      oldBeadId: continues,
-    });
-    if (linked.kind === 'failed') return linked;
-    // home-base-mbnjv.12 (D8): a successor's bead is titled with its kickoff
-    // ("You are the successor of a handed-off…") and carries auto-title, so it
-    // could name nothing (workspace-name.ts D3) until its first request, and
-    // a link-only first turn never files one. It continues its predecessor's
-    // work, and `thread handoff` already started it with --name =
-    // sessionName(tag, predecessor title), so it takes that title here. A
-    // predecessor still on auto-title passes on nothing (its title is its
-    // first message); `thread title` overrides either way.
-    let renamedSession: {beadId: string; title: string} | null = null;
-    let renameFailure: string | null = null;
-    const autoTitled = usable.bead.labels.includes(AUTO_TITLE_LABEL);
-    if (autoTitled && !linked.oldTitleIsAuto) {
-      const stamp = await titleSetEdit({
-        cwd,
-        env,
-        labels: usable.bead.labels,
-        now: options.now,
-      });
-      const renamed = brUpdate({db: usable.db, env}, usable.bead.id, {
-        addLabels: stamp.addLabels,
-        removeLabels: [AUTO_TITLE_LABEL, ...stamp.removeLabels],
-        title: linked.oldTitle,
-      });
-      if (renamed.kind === 'failed') {
-        renameFailure = `the session bead ${usable.bead.id} was NOT titled after ${linked.oldBeadId}: ${describeBrFailed(renamed)}. Retry with ${sdkRun(`thread title "${linked.oldTitle}"`)}`;
-      } else {
-        renamedSession = {beadId: usable.bead.id, title: linked.oldTitle};
-      }
-    }
-    const titled = !autoTitled || renamedSession != null;
-    const workspaceNote = titled
-      ? await workspaceNameFollowUp({cwd, env, run: options.cmux, sessionId})
-      : null;
     return {
-      kind: 'linked',
-      newBeadId: linked.newBeadId,
-      oldBeadId: linked.oldBeadId,
-      oldTitle: linked.oldTitle,
-      renameFailure,
-      renamedSession,
-      workspaceNote,
+      kind: 'handoffPickup',
+      pickup: await pickUp(usable, (names) =>
+        workspaceNameFollowUp({...names, run: options.cmux}),
+      ),
+      retryCommand,
     };
   }
 
@@ -731,43 +730,23 @@ export async function fileRequest(
     if (found == null) {
       return {id, kind: 'notFound', searched: places.map((p) => p.db)};
     }
-    // F1 (home-base-vzwbj.4.9): the status change is sent only when the bead
-    // is not already in_progress, and a claim br refuses (a bead it counts as
-    // blocked: br 0.1.37 counts open children; br 0.7.6 does not and claims
-    // it, measured 2026-10-26) still adopts — labels only.
-    const labels = [REQUEST_LABEL, sidLabel(sessionId)];
-    const foundDb = found.place.db;
-    const labelOnly = (): ReturnType<typeof brUpdate> =>
-      brUpdate({db: foundDb, env}, id, {addLabels: labels});
-    let adopted: ReturnType<typeof brUpdate>;
-    if (found.status === 'in_progress') {
-      adopted = labelOnly();
-      adoptedStatus = {kind: 'already'};
-    } else {
-      adopted = brUpdate({db: foundDb, env}, id, {
-        addLabels: labels,
-        status: 'in_progress',
-      });
-      adoptedStatus = {from: found.status, kind: 'set'};
-      const blockers =
-        adopted.kind === 'failed'
-          ? claimRefusalBlockers(describeBrFailed(adopted))
-          : null;
-      if (blockers != null) {
-        adopted = labelOnly();
-        adoptedStatus = {blockers, kind: 'left', status: found.status};
-      }
-    }
+    const adopted = adoptBead({
+      db: found.place.db,
+      env,
+      id,
+      sessionId,
+      status: found.status,
+    });
     if (adopted.kind === 'failed') {
-      return {
-        kind: 'failed',
-        reason: `br update failed, ${id} was NOT adopted: ${describeBrFailed(adopted)}`,
-      };
+      return {kind: 'failed', reason: adopted.reason};
     }
+    adoptedStatus = adopted.adoptedStatus;
     target = found.place;
     filedId = id;
     filedTitle = found.title;
-    filedLabels = [...new Set([...found.labels, ...labels])];
+    filedLabels = [
+      ...new Set([...found.labels, REQUEST_LABEL, sidLabel(sessionId)]),
+    ];
     mode = 'adopted';
   }
 
@@ -809,26 +788,28 @@ export async function fileRequest(
       renamedSession = {beadId: usable.bead.id, title: filedTitle};
     }
   }
-  // ---- --continues with a request: link after filing ----
+  // ---- --continues with a request: the pickup, after filing. The names are
+  // synced once below, after --overarching has settled the title. ----
   let continued: {oldBeadId: string; oldTitle: string} | null = null;
+  let pickup: PickUpOutcome | null = null;
   if (continues != null) {
     if (usable.kind !== 'found') {
       followUpFailures.push(
         `this session was NOT linked to ${continues}: its session bead's checkout is gone`,
       );
     } else {
-      const linked = linkContinuation({
-        cwd,
-        env,
-        newSession: {beadId: usable.bead.id, db: usable.db},
-        oldBeadId: continues,
-      });
-      if (linked.kind === 'failed') {
+      pickup = await pickUp(usable, () => Promise.resolve(null));
+      if (pickup.kind === 'picked-up') {
+        continued = {oldBeadId: pickup.oldBeadId, oldTitle: pickup.oldTitle};
+      } else if (pickup.kind === 'failed') {
+        continued = pickup.done.link;
         followUpFailures.push(
-          `this session was NOT linked to ${continues}: ${linked.reason}`,
+          `the handoff pickup of ${continues} stopped at step "${pickup.step}": ${pickup.reason}. Running ${retryCommand} again finishes it`,
         );
       } else {
-        continued = {oldBeadId: linked.oldBeadId, oldTitle: linked.oldTitle};
+        followUpFailures.push(
+          `this session is not the successor of ${continues}: ${pickup.reason}. No link was made and nothing was carried over`,
+        );
       }
     }
   }
@@ -881,6 +862,7 @@ export async function fileRequest(
     kind: 'filed',
     mode,
     overarching,
+    pickup,
     renamedSession,
     title: filedTitle,
     workspaceNote,
@@ -928,12 +910,18 @@ export function describeRequestOutcome(outcome: ThreadRequestOutcome): {
           `this session continues ${outcome.continued.oldBeadId} ("${outcome.continued.oldTitle}")`,
         );
       }
+      if (outcome.pickup != null) {
+        lines.push(...carriedLines(outcome.pickup));
+      }
       if (outcome.followUpFailures.length > 0) {
         lines.push(
           `⚠️ ${outcome.id} WAS filed — do not file it again. But:`,
           ...outcome.followUpFailures.map((failure) => `  - ${failure}`),
         );
-        return {exitCode: 1, lines};
+        return {
+          exitCode: outcome.pickup?.kind === 'not-a-successor' ? 2 : 1,
+          lines,
+        };
       }
       return {exitCode: 0, lines};
     }
@@ -952,28 +940,8 @@ export function describeRequestOutcome(outcome: ThreadRequestOutcome): {
           `thread request: ${outcome.id} was not found in ${outcome.searched.join(' or ')}.`,
         ],
       };
-    case 'linked': {
-      const lines = [
-        `session ${outcome.newBeadId} continues ${outcome.oldBeadId} ("${outcome.oldTitle}")`,
-        `  labels: continues:${outcome.oldBeadId} here, continued-by:${outcome.newBeadId} there`,
-      ];
-      if (outcome.renamedSession != null) {
-        lines.push(
-          `session ${outcome.renamedSession.beadId} titled after it: "${outcome.renamedSession.title}"`,
-        );
-      }
-      if (outcome.workspaceNote != null) {
-        lines.push(`  ${outcome.workspaceNote}`);
-      }
-      if (outcome.renameFailure != null) {
-        lines.push(
-          `⚠️ the link above WAS made — do not run --continues again. But:`,
-          `  - ${outcome.renameFailure}`,
-        );
-        return {exitCode: 1, lines};
-      }
-      return {exitCode: 0, lines};
-    }
+    case 'handoffPickup':
+      return describePickUp(outcome.pickup, outcome.retryCommand);
     case 'subagent':
       return {
         exitCode: 1,

@@ -28,7 +28,13 @@ export type CmuxCall =
 /** Runs `cmux <args>`. Injected so tests never reach the real cmux. */
 export type CmuxRunner = (args: readonly string[]) => Promise<CmuxCall>;
 
-export const CMUX_TIMEOUT_MS = 4000;
+/**
+ * Measured 2026-11-06 with the Mac at load average 68: `cmux tree --all` took
+ * 15 s, and a 4 s limit made the handoff gate refuse a healthy session with
+ * liveSessionsUnknown. A refused handoff is final, so a slow cmux must not read
+ * as a failed one.
+ */
+export const CMUX_TIMEOUT_MS = 30_000;
 
 /** Where the binary came from: which env variable, or a PATH lookup. */
 export type CmuxBinarySource =

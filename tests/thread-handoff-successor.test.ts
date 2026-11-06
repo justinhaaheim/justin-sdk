@@ -564,7 +564,7 @@ describe('knob on: the gate passes', () => {
       '--working-directory',
       session.checkoutPath,
       '--command',
-      `claude --permission-mode auto --remote-control '[HANDOFF-REPO] migrate the db' --name '[HANDOFF-REPO] migrate the db' --model haiku 'You are the successor of a handed-off Claude Code session. Read ${blockPath}. First run the command under its pick-up section: bun run justin-sdk thread request --continues ${w.beadId}. Then continue the work the block describes, starting from its note.'`,
+      `claude --permission-mode auto --remote-control '[HANDOFF-REPO] migrate the db' --name '[HANDOFF-REPO] migrate the db' --model haiku 'You are the successor of a handed-off Claude Code session. Read ${blockPath}. First run the command under its pick-up section: bun run justin-sdk thread request --continues ${w.beadId}. Every open request and question carries over to this session; the note is the order to take them in, not the whole scope. Then continue the work the block describes, starting from its note.'`,
       '--focus',
       'false',
     ]);

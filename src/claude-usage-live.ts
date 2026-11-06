@@ -34,19 +34,24 @@
  *      refused (usage within a window does not go down, so a lower number is
  *      old). An older window is refused. A newer window, or no current live
  *      reading, is accepted.
- * An accepted reading is appended to statusline.jsonl and written to live.json
- * (tmp + rename). A refused one is appended to the rejections log with the rule
- * that refused it. A live.json that cannot be parsed refuses every candidate
- * (`live-unreadable`): with no baseline nothing can be validated, and the next
- * /usage sample rewrites the file whole.
+ * An accepted reading is written to live.json (tmp + rename). It is also
+ * appended to statusline.jsonl when `shouldRecordReading` says so (neapv.10 D1):
+ * accepting a reading and recording it are separate decisions, because several
+ * sessions each see the same transition and 63% of the history's lines repeated
+ * the value before them (measured 2026-11-06). A refused reading is appended to
+ * the rejections log with the rule that refused it. A live.json that cannot be
+ * parsed refuses every candidate (`live-unreadable`): with no baseline nothing
+ * can be validated, and the next /usage sample rewrites the file whole.
  *
  * CONCURRENCY: dozens of windows render every 30 s. The history append is one
  * O_APPEND write. live.json is last-rename-wins; a lost update heals on the next
- * change, and the history keeps both lines.
+ * change. Two sessions that accept the same reading in the same instant can both
+ * record it: each read the history's tail before the other appended.
  *
  * COST: this runs inside the renderer process the statusline already spawns, so
  * it adds no process. An idle render reads two small files and, at most once a
- * minute, rewrites its own last-seen file. Nothing here reads the history.
+ * minute, rewrites its own last-seen file. Only a render that accepted a reading
+ * reads the history, and then only its last HISTORY_TAIL_BYTES.
  *
  * ONE OWNER (request home-base-ys9t7.5, D11; moved 2026-10-30 by
  * home-base-ys9t7.5.3). This module was home-base's src/claude-usage/live.ts,
@@ -71,9 +76,13 @@ import type {OkSample, UnreadableLine, UsageEnv} from './claude-usage-samples';
 
 import {
   appendFileSync,
+  closeSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   statSync,
@@ -122,7 +131,7 @@ export interface StorePaths {
   costHistory: string;
   /** One file per session: the cost figure its last line recorded. */
   costSessions: string;
-  /** Append-only: one line per accepted statusline window reading. */
+  /** One line per accepted reading that `shouldRecordReading` kept. */
   history: string;
   /** The newest validated reading per window; every statusline reads it. */
   live: string;
@@ -192,6 +201,18 @@ export const MAX_PCT = 101;
 
 /** The debug logs (rejections, near-reset output) are truncated past this. */
 export const LOG_CAP_BYTES = 256 * 1024;
+
+/**
+ * How close the weekly reset must be for a near-reset read to start, and how
+ * close any window's reset must be for every accepted reading to be recorded.
+ */
+export const NEAR_RESET_WINDOW_MS = HOUR_MS;
+
+/** An unchanged reading is still recorded once this long has passed (neapv.10 D1). */
+export const RECORD_HEARTBEAT_MS = 15 * 60 * 1000;
+
+/** How much of the end of statusline.jsonl is read to find the last recorded readings. */
+export const HISTORY_TAIL_BYTES = 8 * 1024;
 
 // ─── payload ─────────────────────────────────────────────────────────────────
 
@@ -738,10 +759,146 @@ export interface StatuslineReading {
   window: WindowName;
 }
 
+function readingProblem(value: unknown): string | null {
+  if (!isObject(value)) return 'not a JSON object';
+  if (value.schema !== SCHEMA) return `schema ${JSON.stringify(value.schema)}`;
+  if (typeof value.at !== 'string' || Number.isNaN(Date.parse(value.at))) {
+    return 'no valid at';
+  }
+  if (value.window !== 'five_hour' && value.window !== 'seven_day') {
+    return `unknown window ${JSON.stringify(value.window)}`;
+  }
+  if (typeof value.pct !== 'number' || !Number.isFinite(value.pct)) {
+    return 'no finite pct';
+  }
+  if (typeof value.resetsAt !== 'number' || !Number.isFinite(value.resetsAt)) {
+    return 'no finite resetsAt';
+  }
+  if (typeof value.sessionId !== 'string') return 'no sessionId';
+  return null;
+}
+
+/** One line of statusline.jsonl, or why it is not a reading. */
+export function parseHistoryLine(
+  line: string,
+):
+  | {kind: 'ok'; reading: StatuslineReading}
+  | {kind: 'unreadable'; reason: string} {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch (err) {
+    return {kind: 'unreadable', reason: `not JSON: ${message(err)}`};
+  }
+  const problem = readingProblem(parsed);
+  return problem == null
+    ? {kind: 'ok', reading: parsed as StatuslineReading}
+    : {kind: 'unreadable', reason: problem};
+}
+
+/**
+ * Whether an ACCEPTED reading goes into statusline.jsonl (neapv.10 D1).
+ * judgeCandidate decides whether a reading is believable; this decides whether
+ * the history needs it. `compact` walks the existing file with this same rule.
+ *
+ * `last` is the last reading recorded for this window, null when there is none.
+ * Any doubt records: a reading kept needlessly costs one line, and a reading
+ * dropped needlessly is gone.
+ */
+export function shouldRecordReading(
+  reading: Pick<StatuslineReading, 'pct' | 'resetsAt'>,
+  last: Pick<StatuslineReading, 'at' | 'pct' | 'resetsAt'> | null,
+  nowMs: number,
+): boolean {
+  // a. Nothing is recorded for this window yet.
+  if (last == null) return true;
+  // b. A different week or window.
+  const resetGapMs = Math.abs(reading.resetsAt - last.resetsAt) * 1000;
+  if (resetGapMs > SAME_WINDOW_TOLERANCE_MS) return true;
+  // c. A different value, in either direction: a lower accepted reading is a
+  // real correction after a /usage re-baseline.
+  if (reading.pct !== last.pct) return true;
+  // d. The final hour before a reset is what this file exists to cover.
+  if (reading.resetsAt * 1000 - nowMs <= NEAR_RESET_WINDOW_MS) return true;
+  // e. A heartbeat. A `last` from the future, or one with no usable time, cannot
+  // be measured against, so it records too.
+  const sinceLastMs = nowMs - Date.parse(last.at);
+  if (Number.isNaN(sinceLastMs) || sinceLastMs < 0) return true;
+  return sinceLastMs >= RECORD_HEARTBEAT_MS;
+}
+
+export type LastRecordedRead =
+  | {kind: 'failed'; reason: string}
+  | {kind: 'ok'; last: Record<WindowName, StatuslineReading | null>};
+
+/**
+ * The last recorded reading of each window, from the last HISTORY_TAIL_BYTES of
+ * statusline.jsonl (neapv.10 D1). The file itself is the truth, so nothing is
+ * added to live.json, whose format an older pinned SDK also reads.
+ *
+ * A window not in the tail is null, the same as never recorded, and so is every
+ * window when the file does not exist. A file that cannot be read is `failed`,
+ * and the caller records. Never throws.
+ */
+export function readLastRecorded(path: string): LastRecordedRead {
+  const last: Record<WindowName, StatuslineReading | null> = {
+    five_hour: null,
+    seven_day: null,
+  };
+  let fd: number;
+  try {
+    fd = openSync(path, 'r');
+  } catch (err) {
+    if ((err as {code?: string}).code === 'ENOENT') return {kind: 'ok', last};
+    return {kind: 'failed', reason: `could not read ${path}: ${message(err)}`};
+  }
+  try {
+    const {size} = fstatSync(fd);
+    const length = Math.min(size, HISTORY_TAIL_BYTES);
+    const start = size - length;
+    const buffer = Buffer.alloc(length);
+    const got = readSync(fd, buffer, 0, length, start);
+    const text = buffer.subarray(0, got).toString('utf-8');
+    // A read that starts mid-file starts mid-line: drop up to the first newline.
+    const whole = start > 0 ? text.slice(text.indexOf('\n') + 1) : text;
+    for (const line of whole.split('\n')) {
+      const parsed = parseHistoryLine(line);
+      if (parsed.kind === 'ok') last[parsed.reading.window] = parsed.reading;
+    }
+    return {kind: 'ok', last};
+  } catch (err) {
+    return {kind: 'failed', reason: `could not read ${path}: ${message(err)}`};
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+      // The read's outcome is already decided; a failed close changes nothing.
+    }
+  }
+}
+
+/** The accepted readings the history needs; a failed tail read records them all. */
+function readingsToRecord(
+  accepted: readonly StatuslineReading[],
+  historyPath: string,
+  nowMs: number,
+  errors: string[],
+): readonly StatuslineReading[] {
+  const tail = readLastRecorded(historyPath);
+  if (tail.kind === 'failed') {
+    errors.push(tail.reason);
+    return accepted;
+  }
+  return accepted.filter((reading) =>
+    shouldRecordReading(reading, tail.last[reading.window], nowMs),
+  );
+}
+
 /**
  * Everything one statusline render does to the store (D3): parse its windows,
  * find candidates by comparing with this session's last-seen, judge each, and
- * write the accepted ones (history + live) and the refused ones (rejections).
+ * write the accepted ones (live, and history when it needs them) and the refused
+ * ones (rejections).
  *
  * Never throws for an I/O failure — each is named in `errors` and the render
  * carries on with what it has. A bug elsewhere could still throw; the caller
@@ -898,15 +1055,20 @@ export function observeRender(input: ObserveInput): ObserveResult {
   }
 
   // 3. Write what was decided. History first: it is the data Justin would miss.
+  // live.json is written for every accepted reading, recorded or not, so its
+  // `at` moves and the bar's age suffix stays right (neapv.10 D1).
   if (history.length > 0) {
-    try {
-      mkdirSync(dirname(paths.history), {recursive: true});
-      appendFileSync(
-        paths.history,
-        history.map((h) => `${JSON.stringify(h)}\n`).join(''),
-      );
-    } catch (err) {
-      errors.push(`could not append to ${paths.history}: ${message(err)}`);
+    const toRecord = readingsToRecord(history, paths.history, nowMs, errors);
+    if (toRecord.length > 0) {
+      try {
+        mkdirSync(dirname(paths.history), {recursive: true});
+        appendFileSync(
+          paths.history,
+          toRecord.map((h) => `${JSON.stringify(h)}\n`).join(''),
+        );
+      } catch (err) {
+        errors.push(`could not append to ${paths.history}: ${message(err)}`);
+      }
     }
     try {
       writeLive(paths.live, next);
@@ -1128,25 +1290,6 @@ export type StatuslineHistoryRead =
       unreadable: UnreadableLine[];
     };
 
-function readingProblem(value: unknown): string | null {
-  if (!isObject(value)) return 'not a JSON object';
-  if (value.schema !== SCHEMA) return `schema ${JSON.stringify(value.schema)}`;
-  if (typeof value.at !== 'string' || Number.isNaN(Date.parse(value.at))) {
-    return 'no valid at';
-  }
-  if (value.window !== 'five_hour' && value.window !== 'seven_day') {
-    return `unknown window ${JSON.stringify(value.window)}`;
-  }
-  if (typeof value.pct !== 'number' || !Number.isFinite(value.pct)) {
-    return 'no finite pct';
-  }
-  if (typeof value.resetsAt !== 'number' || !Number.isFinite(value.resetsAt)) {
-    return 'no finite resetsAt';
-  }
-  if (typeof value.sessionId !== 'string') return 'no sessionId';
-  return null;
-}
-
 /** Read statusline.jsonl; a malformed line is skipped AND reported, as readSamples does. */
 export function readStatuslineHistory(path: string): StatuslineHistoryRead {
   let text: string;
@@ -1165,16 +1308,9 @@ export function readStatuslineHistory(path: string): StatuslineHistoryRead {
   const unreadable: UnreadableLine[] = [];
   text.split('\n').forEach((line, index) => {
     if (line.trim() === '') return;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch (err) {
-      unreadable.push({line: index + 1, reason: `not JSON: ${message(err)}`});
-      return;
-    }
-    const problem = readingProblem(parsed);
-    if (problem == null) readings.push(parsed as StatuslineReading);
-    else unreadable.push({line: index + 1, reason: problem});
+    const parsed = parseHistoryLine(line);
+    if (parsed.kind === 'ok') readings.push(parsed.reading);
+    else unreadable.push({line: index + 1, reason: parsed.reason});
   });
   return {kind: 'ok', path, readings, unreadable};
 }

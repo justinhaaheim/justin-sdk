@@ -36,7 +36,7 @@ THE KNOB. componentConfig.thread.handoff.successor, default false (epic home-bas
 
   3. Finds this tab's pane (cmux tree, read only), hands off, and writes the block to <threads state dir>/handoffs/<session id>.md.
 
-  4. Opens a new tab beside this one, in this workspace and this session's checkout, running claude --permission-mode <componentConfig.thread.handoff.permissionMode> --remote-control <name> --name <name> [--model <m>] '<kickoff>'. The kickoff tells the successor to read the block file and to run \`thread request --continues <this session's bead>\` first, which links the two sessions. This tab stays open.
+  4. Opens a new tab beside this one, in this workspace and this session's checkout, running claude --permission-mode <componentConfig.thread.handoff.permissionMode> --remote-control <name> --name <name> [--model <m>] '<kickoff>'. The kickoff tells the successor to read the block file and to run \`thread request --continues <this session's bead>\` first, which links the two sessions and carries every open request and question over to the new one. This tab stays open.
 
   5. Reads the new tab's screen for up to 20 s. Claude Code's input box with no dialog means it started. A trust or permission dialog is reported with the screen, never answered.
 
@@ -466,6 +466,14 @@ status in_progress. Run it as soon as he asks for work — one command, no form.
   thread request --bead cq8f
       adopts an existing bead ("fix cq8f"): sets it in_progress and labels it.
       Never moves or re-parents it. Looked up in the session's DB, then here.
+  thread request --continues <old session bead id>
+      picks up a handoff: links the two sessions, adopts every open request of
+      the old session, carries over its unanswered questions, takes its title
+      if this session has none yet, and sets the workspace name. Run it again
+      at any time: a run after a failure finishes the rest, and a run that
+      finds it all done writes nothing. Each session has one successor: when
+      another session already continues the old one, nothing is linked or
+      carried, this session is labelled not-a-successor, and the exit code is 2.
 
 The FIRST request also renames the session to the request's title (unless
 \`thread title\` already named it). Later requests never rename.
@@ -884,7 +892,7 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'request [title..]',
-        'File what Justin asked for as a REQUEST bead under this session’s bead, in the session’s own beads DB (or adopt an existing bead with --bead). The first request also names the session. Needs componentConfig.thread.sessionBeads. Exit 0 filed · 1 refused or failed · 2 usage.',
+        'File what Justin asked for as a REQUEST bead under this session’s bead, in the session’s own beads DB (or adopt an existing bead with --bead). The first request also names the session. Needs componentConfig.thread.sessionBeads. Exit 0 filed, or with --continues done or nothing to do · 1 refused or failed (with --continues, a step failed, and running it again finishes it) · 2 usage, or with --continues another session already continues that one.',
         (yy) =>
           yy
             .epilogue(REQUEST_NARRATIVE)
@@ -900,7 +908,7 @@ export const threadCommand: CommandModule = {
             })
             .option('continues', {
               describe:
-                'This session picks up from that SESSION bead (the handoff block names it): labels this session’s bead continues:<id> and that one continued-by:<this>. Alone, it only links; with a title or --bead it also files the request.',
+                'Pick up the handoff from that SESSION bead (the handoff block names it): label this session’s bead continues:<id> and that one continued-by:<this>, adopt every open request of that session, carry over its unanswered questions, take its title if this session has none yet, and set the workspace name. Safe to run again. With a title or --bead it also files that request.',
               type: 'string' as const,
             })
             .option('done-when', {

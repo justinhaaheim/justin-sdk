@@ -1602,7 +1602,10 @@ describe('home-base-ys9t7.9.1 item 2: a successor extends the chain’s summary'
       sessionId: null,
       title: null,
     });
-    expect(linked).toMatchObject({kind: 'linked'});
+    expect(linked).toMatchObject({
+      kind: 'handoffPickup',
+      pickup: {kind: 'picked-up'},
+    });
     const inherited = titleModel(w.repo).sessionBead;
     expect(inherited.title).toBe('Build shortcut helper app');
     expect(
