@@ -486,7 +486,11 @@ describe('thread spawn: cmux failures', () => {
   test('cmux unreachable: exit 2 with the sandbox hint, and nothing after the ping', async () => {
     const w = world();
     const cmux = fakeCmux({
-      ping: {kind: 'failed', reason: 'connect ENOENT /tmp/spawn-test'},
+      ping: {
+        kind: 'failed',
+        reason: 'connect ENOENT /tmp/spawn-test',
+        timedOut: false,
+      },
     });
     const result = await spawnSession(options(w, {}), cmux);
     expect(result.exitCode).toBe(2);
@@ -500,7 +504,11 @@ describe('thread spawn: cmux failures', () => {
   test('new-workspace fails: exit 1, with what cmux said', async () => {
     const w = world();
     const cmux = fakeCmux({
-      'new-workspace': {kind: 'failed', reason: 'cmux new-workspace failed: x'},
+      'new-workspace': {
+        kind: 'failed',
+        reason: 'cmux new-workspace failed: x',
+        timedOut: false,
+      },
     });
     const result = await spawnSession(options(w, {}), cmux);
     expect(result.exitCode).toBe(1);
@@ -964,7 +972,9 @@ describe('thread spawn: the kickoff goes through a file, never the typed line (h
 
   test('cmux unreachable: the kickoff file is not written (the sandboxed first try leaves no file)', async () => {
     const {env, w, xdgState} = stateWorld();
-    const cmux = fakeCmux({ping: {kind: 'failed', reason: 'EPERM'}});
+    const cmux = fakeCmux({
+      ping: {kind: 'failed', reason: 'EPERM', timedOut: false},
+    });
     const result = await spawnSession(options(w, {env, kickoff: 'go'}), cmux);
     expect(result.exitCode).toBe(2);
     expect(result.lines.join('\n')).toContain('cmux cannot be reached');

@@ -30,7 +30,13 @@ import type {TreeIssue} from './session-tree';
 import {sdkRun} from '../sdk-invocation';
 import {ARCHIVED_PREFIX, oneLine, parseAsk} from './ask-format';
 import {sortAsks} from './ask-render';
-import {continuedByOf, continuesOf, handoffRefusalOf} from './handoff-view';
+import {
+  continuedByOf,
+  continuesOf,
+  HANDOFF_DEFERRED_WORDS,
+  handoffRefusalOf,
+  handoffStopOf,
+} from './handoff-view';
 import {SHARED_PANE_REASON} from './pane-join';
 import {FIRST_MESSAGE_CUT, firstLineOf, tildeText} from './part-one';
 import {
@@ -633,7 +639,9 @@ export function whereWords(status: SessionStatus): string {
     case 'working':
       return '🏃 Working';
     case 'handedOff':
-      return '🤝 Handed off';
+      return status.notPickedUp === true
+        ? '🤝 Handed off, not picked up'
+        : '🤝 Handed off';
     case 'outOfContext':
       return '🧯 Out of context';
     case 'done':
@@ -967,18 +975,25 @@ export function chainFacts(
 }
 
 /**
- * home-base-mbnjv.3 (D2): "Where it is" with the newest "handoff refused:"
- * line after it, while the session has no successor. Once a successor is
- * linked the refusal is history, and `thread show` still prints it.
+ * home-base-mbnjv.3 (D2): "Where it is" with the newest "handoff refused:" or
+ * "handoff deferred:" line after it, while the session has no successor, so a
+ * session waiting to run its handoff again does not read as a plain Handed off
+ * (home-base-89c8h.3). Once a successor is linked it is history, and `thread
+ * show` still prints a refusal.
  */
 export function statusWithRefusal(where: string, model: SessionModel): string {
   const session = model.beads.session;
-  if (session == null || continuedByOf(session.labels).length > 0) {
-    return where;
-  }
-  const refusal = handoffRefusalOf(session.labels, session.notes);
-  if (refusal == null) return where;
-  const flat = tildeText(refusal.replace(/\s+/g, ' '));
+  if (session == null) return where;
+  const stop = handoffStopOf(session.labels, session.notes);
+  if (stop == null) return where;
+  const text =
+    stop.state === 'refused'
+      ? handoffRefusalOf(session.labels, session.notes)
+      : stop.reason == null
+        ? `${HANDOFF_DEFERRED_WORDS} ${stop.detail}`
+        : `${HANDOFF_DEFERRED_WORDS} ${stop.reason} — ${stop.detail}`;
+  if (text == null) return where;
+  const flat = tildeText(text.replace(/\s+/g, ' '));
   const cut =
     flat.length > CARD_REFUSAL_CHARS
       ? `${flat.slice(0, CARD_REFUSAL_CHARS).trimEnd()}…`

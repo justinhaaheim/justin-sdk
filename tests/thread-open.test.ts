@@ -190,7 +190,8 @@ function fakeCmux(
       );
     }
     const failure = fail[command];
-    if (failure != null) return {kind: 'failed', reason: failure};
+    if (failure != null)
+      return {kind: 'failed', reason: failure, timedOut: false};
     switch (command) {
       case 'ping':
         return {kind: 'ok', stdout: 'PONG\n'};
@@ -205,7 +206,8 @@ function fakeCmux(
       }
       case 'new-workspace': {
         const list = windows.get(value(args, '--window'));
-        if (list == null) return {kind: 'failed', reason: 'no such window'};
+        if (list == null)
+          return {kind: 'failed', reason: 'no such window', timedOut: false};
         const id = uuid('C');
         const ref = `workspace:${200 + next}`;
         list.push({id, ref});
@@ -242,7 +244,11 @@ function fakeCmux(
         );
         const entry = from?.find((item) => item.id === id);
         if (target == null || from == null || entry == null) {
-          return {kind: 'failed', reason: 'no such workspace or window'};
+          return {
+            kind: 'failed',
+            reason: 'no such workspace or window',
+            timedOut: false,
+          };
         }
         from.splice(from.indexOf(entry), 1);
         target.push(entry);
@@ -263,7 +269,11 @@ function fakeCmux(
         return {kind: 'ok', stdout: 'OK\n'};
       }
       default:
-        return {kind: 'failed', reason: `the fake does not know ${command}`};
+        return {
+          kind: 'failed',
+          reason: `the fake does not know ${command}`,
+          timedOut: false,
+        };
     }
   };
   const run = (args: readonly string[]): Promise<CmuxCall> =>
@@ -470,7 +480,11 @@ describe('liveness', () => {
   });
 
   test('a failed liveness read exits 2 and makes zero cmux writes and no record', async () => {
-    const s = setup([cand(1)], {}, {kind: 'failed', reason: 'ps refused'});
+    const s = setup(
+      [cand(1)],
+      {},
+      {kind: 'failed', reason: 'ps refused', timedOut: false},
+    );
     const result = await openSessions(s.options, s.deps);
     expect(result.exitCode).toBe(2);
     expect(result.output).toContain('ps refused');
@@ -968,7 +982,8 @@ describe('live-sessions.ts', () => {
     expect(noPs.kind).toBe('failed');
     const noTree = await readLiveSessions({
       agents,
-      cmux: () => Promise.resolve({kind: 'failed', reason: 'no socket'}),
+      cmux: () =>
+        Promise.resolve({kind: 'failed', reason: 'no socket', timedOut: false}),
       hookStorePath: store,
       ps,
     });
@@ -1495,7 +1510,7 @@ describe('--include-open (home-base-yukaf.22 item 4)', () => {
     s.deps.run = async (args) => {
       const call = await s.cmux.run(args);
       return commandOf(args) === 'move-workspace-to-window'
-        ? {kind: 'failed', reason: 'timed out after 4000 ms'}
+        ? {kind: 'failed', reason: 'timed out after 4000 ms', timedOut: false}
         : call;
     };
     const result = await openSessions(s.options, s.deps);

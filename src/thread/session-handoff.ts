@@ -44,6 +44,7 @@ import {
   CONTINUED_BY_LABEL_PREFIX,
   CONTINUES_LABEL_PREFIX,
   HANDED_OFF_LABEL,
+  PICKUP_EXPECTED_LABEL,
 } from './session-bead';
 import {readSessionIndex, readSessionSightings} from './session-index';
 import {appendNote} from './session-marks';
@@ -377,8 +378,17 @@ export async function handOff(
       : oneLine(options.note);
 
   // ---- the label and the note: one write ----
+  // home-base-npbse.1.2 item 5: what the inbox's "not picked up" waits on.
+  const {resolveThreadConfig} = await import('./config');
+  const {autoPickup} = resolveThreadConfig({
+    cwd: session.checkoutPath ?? undefined,
+    env,
+  }).handoff;
   const written = brUpdate({db: session.db, env}, session.bead.id, {
-    addLabels: [HANDED_OFF_LABEL],
+    addLabels: [
+      HANDED_OFF_LABEL,
+      ...(autoPickup ? [PICKUP_EXPECTED_LABEL] : []),
+    ],
     notes: appendNote(
       session.bead.notes,
       note == null ? 'handed off' : `handed off — ${note}`,

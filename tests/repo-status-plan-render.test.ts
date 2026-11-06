@@ -35,6 +35,7 @@ import {
 } from '../src/repo-status/plan';
 import {runCli} from '../src/repo-status/repo-status';
 import {buildReport} from '../src/repo-status/report';
+import {captureWriteStdout} from './capture-stdout';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const CLI = join(import.meta.dir, '../src/repo-status/repo-status.ts');
@@ -132,9 +133,10 @@ interface CliRun {
 async function runPlan(repo: string, extra: string[]): Promise<CliRun> {
   const out: string[] = [];
   const err: string[] = [];
-  const log = console.log;
+  const stdout = captureWriteStdout((text) => {
+    out.push(text);
+  });
   const error = console.error;
-  console.log = (...a: unknown[]) => void out.push(a.join(' '));
   console.error = (...a: unknown[]) => void err.push(a.join(' '));
   const previousExitCode = process.exitCode;
   let code = 0;
@@ -148,7 +150,7 @@ async function runPlan(repo: string, extra: string[]): Promise<CliRun> {
       ...extra,
     ]);
   } finally {
-    console.log = log;
+    stdout.mockRestore();
     console.error = error;
     // Handlers set process.exitCode; left set it would fail the whole run.
     // `?? 0` is load-bearing (home-base-uarq): under bun 1.4.0 assigning

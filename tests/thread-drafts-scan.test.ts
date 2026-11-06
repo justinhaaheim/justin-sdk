@@ -75,6 +75,7 @@ function fakeCmux(panes: readonly FakePane[], treeFails = false) {
         return Promise.resolve({
           kind: 'failed',
           reason: 'cmux: Failed to connect to socket',
+          timedOut: false,
         });
       }
       return Promise.resolve({
@@ -113,11 +114,19 @@ function fakeCmux(panes: readonly FakePane[], treeFails = false) {
       const pane = panes[Number(ref.replace('surface:', '')) - 1];
       return Promise.resolve(
         pane?.screen == null
-          ? {kind: 'failed', reason: 'read-screen failed: surface not ready'}
+          ? {
+              kind: 'failed',
+              reason: 'read-screen failed: surface not ready',
+              timedOut: false,
+            }
           : {kind: 'ok', stdout: pane.screen},
       );
     }
-    return Promise.resolve({kind: 'failed', reason: `unexpected ${args[0]}`});
+    return Promise.resolve({
+      kind: 'failed',
+      reason: `unexpected ${args[0]}`,
+      timedOut: false,
+    });
   };
   return {calls, run};
 }
@@ -737,6 +746,7 @@ describe('thread drafts scan', () => {
       Promise.resolve({
         kind: 'failed',
         reason: 'cmux: Failed to connect to socket',
+        timedOut: false,
       });
     const reasonOf = async (
       over: Record<string, string>,

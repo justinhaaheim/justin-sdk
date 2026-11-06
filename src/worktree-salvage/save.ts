@@ -78,6 +78,7 @@ import {
 } from '../cli-style';
 import {formatLocalTimestamp} from '../date';
 import {getSdkVersion} from '../sdk-identity';
+import {writeStdout} from '../write-stdout';
 import {describeDestinationSource, resolveDestination} from './config';
 import {
   FAILED_SUFFIX,
@@ -1143,7 +1144,7 @@ export interface CommandIo {
   stdoutStyle: OutputStyle;
 }
 
-/** The real process: Bun.write waits for a pipe to drain before `process.exit` (see write-stdout.ts). */
+/** The real process: stdout through writeStdout, so a pipe gets it whole and once (see write-stdout.ts). */
 export function processIo(): CommandIo {
   return {
     cwd: process.cwd(),
@@ -1153,7 +1154,7 @@ export function processIo(): CommandIo {
     },
     stderrStyle: outputStyle(process.stderr),
     stdout: async (text) => {
-      await Bun.write(Bun.stdout, text);
+      await writeStdout(text);
     },
     stdoutStyle: outputStyle(process.stdout),
   };

@@ -46,6 +46,7 @@
  */
 
 import {stripAnsi} from './check-runner';
+import {writeStdoutSync} from './write-stdout';
 
 /** Mirror at most this many lines of a Claude-bound payload (M3: "about 40"). */
 export const MIRROR_MAX_LINES = 40;
@@ -174,13 +175,13 @@ export function renderHookOutput(message: HookMessage): string {
 /**
  * Print the hook's output to stdout. Prints nothing when there is nothing.
  *
- * Through `console.log`, which is what time-check and usage-check always used
- * and what their tests capture; in Bun it and `process.stdout.write` are
- * separate channels, so switching would silently blind those tests.
+ * Through the helper because injected rule text can pass a pipe's 64 KiB, and a
+ * `console.log` that gets cut there is invalid JSON (see write-stdout.ts).
+ * Tests read this with tests/capture-stdout.ts.
  */
 export function emitHookOutput(message: HookMessage): void {
   const json = hookOutputJson(message);
-  if (json != null) console.log(JSON.stringify(json));
+  if (json != null) writeStdoutSync(`${JSON.stringify(json)}\n`);
 }
 
 /**

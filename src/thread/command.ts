@@ -25,14 +25,14 @@ import {helpHeader} from '../sdk-identity';
 import {SDK_BIN_BY_PATH, SDK_HANDOFF_CALL} from '../sdk-invocation';
 
 const HANDOFF_SUMMARY =
-  'Hand this session on: label its bead handed-off (the inbox then says 🤝), append a dated "handed off — <note>" to its notes, and print a block for the next session (title, requests with status and stage, open questions, how to resume, and the `thread request --continues` the new session runs first). With componentConfig.thread.handoff.successor on, it also starts that next session in a new tab of this cmux workspace, or refuses and says why. Needs componentConfig.thread.sessionBeads. Exit 0 handed off (and the successor started) · 1 a step failed · 2 nothing written · 3 refused by the handoff gate.';
+  'Hand this session on: label its bead handed-off (the inbox then says 🤝), append a dated "handed off — <note>" to its notes, and print a block for the next session (title, requests with status and stage, open questions, how to resume, and the `thread request --continues` the new session runs first). With componentConfig.thread.handoff.successor on, it also starts that next session in a new tab of this cmux workspace, or refuses and says why. Needs componentConfig.thread.sessionBeads. Exit 0 handed off (and the successor started) · 1 a step failed · 2 nothing written · 3 refused by the handoff gate · 4 deferred: cmux was too slow to decide, so run the same command again.';
 
 const HANDOFF_NARRATIVE = `
 THE KNOB. componentConfig.thread.handoff.successor, default false (epic home-base-mbnjv D10). OFF: thread handoff labels, notes and prints the block, exactly as before, and starts nothing; --dry-run and --model are refused (exit 2). ON, it also starts the successor, in this order:
 
   1. Refuses (exit 2, nothing written) without a session bead, when this session's checkout is gone, or when --session names a session other than the one it runs in.
 
-  2. The handoff gate: the kill switch, a cmux pane, cmux reachable, usage from the hourly samples, handoffs in a row since Justin last typed, live Claude sessions on this Mac. A refusal still hands the session off (label, note, block printed), records "handoff refused: <reason>" on the session bead, opens nothing, and exits 3.
+  2. The handoff gate: the kill switch, a cmux pane, cmux reachable, usage from the hourly samples, handoffs in a row since Justin last typed, live Claude sessions on this Mac. A refusal still hands the session off (label, note, block printed), records "handoff refused: <reason>" on the session bead, opens nothing, and exits 3. A cmux read that times out is retried, for at most 60 s across the gate and step 3. If cmux still has not answered, nothing is decided: the same writes under the handoff-deferred label, "handoff deferred: cmuxSlow" on the session bead, exit 4. Run the same command again at once, up to 3 more times.
 
   3. Finds this tab's pane (cmux tree, read only), hands off, and writes the block to <threads state dir>/handoffs/<session id>.md.
 
@@ -82,7 +82,7 @@ const RESPAWN_RETIRED_SUMMARY =
   'RETIRED (epic home-base-mbnjv C3): starting a successor is now `thread handoff` with componentConfig.thread.handoff.successor on. This command prints that and exits 2, doing nothing.';
 
 const SPAWN_SUMMARY =
-  'Start a new Claude Code session in a directory you name: open a new cmux workspace there running `claude`, with Remote Control when you pass --remote-control, so you can reach it from the Claude app on your phone (home-base-yukaf.7). ONLY THE HOME-BASE MAYOR STARTS SESSIONS IN OTHER PROJECTS: it refuses (exit 2, nothing opened, --dry-run included) unless componentConfig.thread.spawn.allowed is true in the repo it runs in, which only home-base turns on; anywhere else, file the work as a bead and tell Justin (home-base-11ya7.9). Try --dry-run first. With componentConfig.thread.handoff.successor on in the repo it runs in, the handoff gate runs first (kill switch, cmux, usage, live sessions). Exit 0 opened, or a dry run · 1 cmux did not open it · 2 refused, nothing opened · 3 refused by the handoff gate, nothing opened.';
+  'Start a new Claude Code session in a directory you name: open a new cmux workspace there running `claude`, with Remote Control when you pass --remote-control, so you can reach it from the Claude app on your phone (home-base-yukaf.7). ONLY THE HOME-BASE MAYOR STARTS SESSIONS IN OTHER PROJECTS: it refuses (exit 2, nothing opened, --dry-run included) unless componentConfig.thread.spawn.allowed is true in the repo it runs in, which only home-base turns on; anywhere else, file the work as a bead and tell Justin (home-base-11ya7.9). Try --dry-run first. With componentConfig.thread.handoff.successor on in the repo it runs in, the handoff gate runs first (kill switch, cmux, usage, live sessions). Exit 0 opened, or a dry run · 1 cmux did not open it · 2 refused, nothing opened · 3 refused by the handoff gate, nothing opened · 4 deferred: cmux was too slow to decide, nothing opened, so run the same command again.';
 
 const SPAWN_NARRATIVE = `
 WHAT IT DOES, in order.
@@ -1042,6 +1042,11 @@ export const threadCommand: CommandModule = {
                 'Start claude with Remote Control, named after the workspace, so the Claude app can open it',
               type: 'boolean' as const,
             })
+            .option('continues', {
+              describe:
+                'The session bead this new session continues. Typed as JUSTIN_SDK_CONTINUES before claude, so where componentConfig.thread.handoff.autoPickup is on the new session picks up that session’s open requests and questions by itself',
+              type: 'string' as const,
+            })
             .option('model', {
               describe:
                 'The new session’s model (`claude --model`); default: claude’s own default',
@@ -1086,6 +1091,7 @@ export const threadCommand: CommandModule = {
               model: argv.model ?? null,
               name: argv.name ?? null,
               remoteControl: argv['remote-control'] === true,
+              ...(argv.continues != null ? {continues: argv.continues} : {}),
             }),
           );
         },
@@ -1583,7 +1589,7 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'unmark',
-        'Undo Justin’s newest `thread done` or `thread archive` (for --session, or the newest of all; --mark <id> names exactly one): reopen every bead it closed and give each the status it had (in_progress comes back as in_progress), remove the archived label it added, and give adopted requests it released their request labels back. Read from ~/.local/state/justin-threads/marks-undo.jsonl, which done and archive write before they close anything. Exit 0 restored · 1 a br call failed (each id named; the record is kept, so running it again retries) · 2 nothing to undo.',
+        'Undo Justin’s newest `thread done` or `thread archive` (for --session, or the newest of all; --mark <id> names exactly one): reopen every bead it closed and give each the status it had (in_progress comes back as in_progress), remove the archived label it added, give adopted requests it released their request labels back, and give beads it left with another session this session’s label back. Read from ~/.local/state/justin-threads/marks-undo.jsonl, which done and archive write before they close anything. Exit 0 restored · 1 a br call failed (each id named; the record is kept, so running it again retries) · 2 nothing to undo.',
         (yy) =>
           yy
             .option('session', {

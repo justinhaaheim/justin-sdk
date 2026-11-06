@@ -105,6 +105,18 @@ export const SPAWNED_LABEL_PREFIX = 'spawned:';
  * index when it files the child's bead, so spawn itself reads no bead.
  */
 export const SPAWNED_BY_SESSION_ENV = 'JUSTIN_SDK_SPAWNED_BY_SESSION';
+/**
+ * home-base-npbse.1.2: `thread handoff` and `thread spawn --continues` type
+ * JUSTIN_SDK_CONTINUES=<predecessor bead> before `claude`, which marks the new
+ * session as a successor (handoff-auto-pickup.ts).
+ */
+export const CONTINUES_ENV = 'JUSTIN_SDK_CONTINUES';
+/**
+ * Put on a session that handed off with componentConfig.thread.handoff.autoPickup
+ * on. The inbox names a missing pickup only on these, so a session that handed
+ * off before the knob existed is not reported as not picked up.
+ */
+export const PICKUP_EXPECTED_LABEL = 'pickup-expected';
 export const SPAWN_KICKOFF_ENV = 'JUSTIN_SDK_SPAWN_KICKOFF';
 /**
  * On a session whose first prompt `thread spawn` typed (the kickoff), so the
@@ -117,6 +129,14 @@ export const SPAWN_KICKOFF_LABEL = 'spawn-kickoff';
  * Written by handoff-gate.ts `recordRefusal`.
  */
 export const HANDOFF_REFUSED_LABEL = 'handoff-refused';
+
+/**
+ * The gate could not get an answer from cmux in time, so nothing was decided
+ * and the session may run the handoff again (home-base-89c8h.1 D6). Written by
+ * handoff-gate.ts `recordDeferral`; the launch record of a later run that
+ * passes removes it. handoff-view.ts `handoffStopOf` reads it back.
+ */
+export const HANDOFF_DEFERRED_LABEL = 'handoff-deferred';
 
 /**
  * Written by `thread handoff` before it opens the successor's tab

@@ -209,7 +209,11 @@ describe('runHandoffGate', () => {
       now: NOW,
       readers: passingReaders({
         chain: null,
-        pingCmux: () => ({kind: 'failed', reason: 'socket refused'}),
+        pingCmux: () => ({
+          kind: 'failed',
+          reason: 'socket refused',
+          timedOut: false,
+        }),
       }),
       requireCmuxPane: false,
     });
@@ -246,7 +250,11 @@ describe('runHandoffGate', () => {
 
   test('cmuxUnreachable: the ping fails', async () => {
     const result = await gate({
-      pingCmux: () => ({kind: 'failed', reason: 'connect ENOENT /x.sock'}),
+      pingCmux: () => ({
+        kind: 'failed',
+        reason: 'connect ENOENT /x.sock',
+        timedOut: false,
+      }),
     });
     expectRefused(result, 'cmuxUnreachable', 'connect ENOENT /x.sock');
     // Not the sandbox: the gate's own refusal, exit 3 in thread handoff.
@@ -258,7 +266,7 @@ describe('runHandoffGate', () => {
     const eperm =
       'cmux ping failed: Error: Failed to connect to socket at /Users/x/.local/state/cmux/cmux.sock (Operation not permitted, errno 1)';
     const result = await gate({
-      pingCmux: () => ({kind: 'failed', reason: eperm}),
+      pingCmux: () => ({kind: 'failed', reason: eperm, timedOut: false}),
     });
     expectRefused(result, 'cmuxUnreachable', eperm);
     expect(result.kind === 'refused' && result.ranInSandbox).toBe(true);
@@ -437,7 +445,11 @@ describe('runHandoffGate', () => {
 
   test('liveSessionsUnknown: the count failed', async () => {
     const result = await gate({
-      liveSessions: () => ({kind: 'failed', reason: 'ps failed: EPERM'}),
+      liveSessions: () => ({
+        kind: 'failed',
+        reason: 'ps failed: EPERM',
+        timedOut: false,
+      }),
     });
     expectRefused(result, 'liveSessionsUnknown', 'ps failed: EPERM');
   });
@@ -477,8 +489,8 @@ describe('runHandoffGate', () => {
       {
         chain: () => ({kind: 'unknown', links: [], reason: 'x'}),
         killSwitch: () => ({kind: 'on', path: '/x', reason: 'off for now'}),
-        liveSessions: () => ({kind: 'failed', reason: 'x'}),
-        pingCmux: () => ({kind: 'failed', reason: 'x'}),
+        liveSessions: () => ({kind: 'failed', reason: 'x', timedOut: false}),
+        pingCmux: () => ({kind: 'failed', reason: 'x', timedOut: false}),
         usage: () => ({kind: 'missing', path: '/x'}),
       },
       {},
@@ -568,7 +580,11 @@ describe('fix round 2 (home-base-mbnjv.8): F2, F20, F11, F14, F16', () => {
   test('F16: an unreadable screen, or one with no status-line id, refuses', async () => {
     expectRefused(
       await gate({
-        callerScreen: () => ({kind: 'unreadable', reason: 'no such surface'}),
+        callerScreen: () => ({
+          kind: 'unreadable',
+          reason: 'no such surface',
+          timedOut: false,
+        }),
       }),
       'notInCmuxPane',
       'screen could not be read (no such surface), so it is not proven to show this session',
@@ -594,7 +610,7 @@ describe('fix round 2 (home-base-mbnjv.8): F2, F20, F11, F14, F16', () => {
       readers: passingReaders({
         callerScreen: () => {
           read += 1;
-          return {kind: 'unreadable', reason: 'x'};
+          return {kind: 'unreadable', reason: 'x', timedOut: false};
         },
       }),
       requireCmuxPane: false,
@@ -616,7 +632,11 @@ describe('fix round 2 (home-base-mbnjv.8): F2, F20, F11, F14, F16', () => {
     );
     expectRefused(
       await gate({
-        launchRecord: () => ({kind: 'failed', reason: 'br is down'}),
+        launchRecord: () => ({
+          kind: 'failed',
+          reason: 'br is down',
+          timedOut: false,
+        }),
       }),
       'alreadyHandedOff',
       'could not be checked: br is down',
@@ -796,8 +816,16 @@ describe('countLiveSessions', () => {
 
   test('a failed read is failed, never 0 (rule 7)', () => {
     expect(
-      countLiveSessions({kind: 'failed', reason: 'cmux tree: timed out'}),
-    ).toEqual({kind: 'failed', reason: 'cmux tree: timed out'});
+      countLiveSessions({
+        kind: 'failed',
+        reason: 'cmux tree: timed out',
+        timedOut: false,
+      }),
+    ).toEqual({
+      kind: 'failed',
+      reason: 'cmux tree: timed out',
+      timedOut: false,
+    });
   });
 });
 

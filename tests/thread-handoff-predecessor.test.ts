@@ -243,6 +243,7 @@ function fakeCmux(
     return Promise.resolve({
       kind: 'failed',
       reason: `the fake cmux does not know ${args.join(' ')}`,
+      timedOut: false,
     });
   };
   return {calls, run};
@@ -452,6 +453,7 @@ describe('exit and close act only when (a) and (b) both hold (AC1)', () => {
         kind: 'failed',
         reason:
           'cmux --json --id-format both failed: Error: not_found: Workspace not found',
+        timedOut: false,
       },
     });
     const {deps, notes} = depsOf({cmux, labels: LINKED, log: logOf(STOPPED)});
@@ -545,8 +547,10 @@ describe("the caller's own screen must show this session, idle", () => {
       'the tab shows no Claude Code input box',
     );
     expect(
-      checkScreen({kind: 'failed', reason: 'cmux read-screen failed: x'}, OLD)
-        .ok,
+      checkScreen(
+        {kind: 'failed', reason: 'cmux read-screen failed: x', timedOut: false},
+        OLD,
+      ).ok,
     ).toBe(false);
   });
 
@@ -561,7 +565,11 @@ describe("the caller's own screen must show this session, idle", () => {
 describe('an act that fails or cannot be verified keeps the record honest', () => {
   test('respawn-pane failing: noted as kept, with the reason', async () => {
     const cmux = fakeCmux({
-      act: {kind: 'failed', reason: 'cmux respawn-pane failed: boom'},
+      act: {
+        kind: 'failed',
+        reason: 'cmux respawn-pane failed: boom',
+        timedOut: false,
+      },
     });
     const {deps, notes} = depsOf({cmux, labels: LINKED, log: logOf(STOPPED)});
     expect((await runPredecessorWatch(watchOf('exit'), deps)).kind).toBe(

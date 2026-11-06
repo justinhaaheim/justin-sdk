@@ -9,7 +9,7 @@
 
 import type {Sandbox} from './sandbox';
 
-import {afterEach, describe, expect, test} from 'bun:test';
+import {afterEach, describe, expect, setDefaultTimeout, test} from 'bun:test';
 import {mkdirSync, writeFileSync} from 'fs';
 import {dirname, join} from 'path';
 
@@ -31,6 +31,10 @@ import {
 import {initRepo} from './git-fixtures';
 import {needBr} from './pinned-br';
 import {createSandbox} from './sandbox';
+
+// These tests chain real `br` session beads. Bun's 5 s default failed this file
+// at load 13 on 2026-11-06, and any failing test refuses sdk:publish.
+setDefaultTimeout(120_000);
 
 const A = '0a000000-1111-4222-8333-0000000000a1';
 const B = '0b000000-1111-4222-8333-0000000000b1';

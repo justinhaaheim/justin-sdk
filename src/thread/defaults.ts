@@ -270,6 +270,7 @@ export type HandoffPermissionMode = (typeof HANDOFF_PERMISSION_MODES)[number];
  * there, not here, because they go stale.
  */
 export const HANDOFF_DEFAULTS = {
+  autoPickup: false,
   maxLiveSessions: 25,
   maxUnattendedHandoffs: 3,
   permissionMode: 'auto' as HandoffPermissionMode,

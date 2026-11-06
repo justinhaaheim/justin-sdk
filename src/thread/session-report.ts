@@ -30,6 +30,7 @@
  */
 
 import type {OutputStyle} from '../cli-style';
+import type {PickupNotDone} from './handoff-auto-pickup';
 import type {ChainReaders} from './handoff-chain';
 import type {MessageLine} from './message-log';
 import type {Piece} from './part-one';
@@ -58,7 +59,9 @@ import {
   wrapHanging,
 } from '../cli-style';
 import {SDK_HANDOFF_CALL, sdkRun} from '../sdk-invocation';
+import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
+import {pickupNotDone, pickupNotDoneWords} from './handoff-auto-pickup';
 import {realChainReaders, walkUnattendedChain} from './handoff-chain';
 import {
   chainLines,
@@ -181,6 +184,8 @@ export type ReportLoad =
        * with titleSummary on (null otherwise).
        */
       overarching: Measured<OverarchingFacts> | null;
+      /** home-base-npbse.1.2 item 5: null with nothing to say. */
+      pickupNotDone: null | PickupNotDone;
       status: SessionStatus;
       /** componentConfig.thread.titleSummary (home-base-ys9t7.9.1). */
       titleSummary: boolean;
@@ -194,12 +199,18 @@ async function knobOn(
   env: EnvLike,
 ): Promise<
   | {ok: false; reason: string}
-  | {handoffSuccessor: boolean; ok: true; titleSummary: boolean}
+  | {
+      autoPickup: boolean;
+      handoffSuccessor: boolean;
+      ok: true;
+      titleSummary: boolean;
+    }
 > {
   const {resolveThreadConfig} = await import('./config');
   const config = resolveThreadConfig({cwd, env});
   return config.sessionBeads
     ? {
+        autoPickup: config.handoff.autoPickup,
         handoffSuccessor: config.handoff.successor,
         ok: true,
         titleSummary: config.titleSummary,
@@ -316,6 +327,13 @@ async function loadForReport(input: {
     model,
     optional: optionalLine(counts, model.sessionBeadId),
     overarching: knob.titleSummary ? overarchingFactsOf(model, input) : null,
+    pickupNotDone: pickupNotDone({
+      autoPickup: knob.autoPickup,
+      env: input.env,
+      labels: model.beads.session?.labels ?? [],
+      ownSession: input.env.CLAUDE_CODE_SESSION_ID === model.sessionId,
+      sessionId: model.sessionId,
+    }),
     status,
     titleSummary: knob.titleSummary,
   };
@@ -669,6 +687,12 @@ export function markLine(item: MarkItem): MarkView {
         sub: [],
         text: `Every request is closed, but "${item.bead.title}" (${item.bead.id}) is still undecided. If it decides work Justin wants, that work is an open request:`,
       };
+    case 'pickupNotDone':
+      return {
+        code: item.command,
+        sub: [],
+        text: pickupNotDoneWords(item.reason),
+      };
     case 'titleSummary':
       return titleSummaryLine(item);
     case 'autoTitle':
@@ -791,6 +815,7 @@ export function renderThreadStatus(
   );
   const marks = whatToMark(load.model, load.status, load.created, {
     ...(load.overarching != null ? {overarching: load.overarching} : {}),
+    pickupNotDone: load.pickupNotDone,
     titleSummary: load.titleSummary,
   })
     .map(markLine)
@@ -861,8 +886,8 @@ export async function runThreadStatus(
     console.error(refusalLines('thread status', load).join('\n'));
     return 1;
   }
-  console.log(
-    renderThreadStatus(load, {now, style, timeZone: options.timeZone}),
+  await writeStdout(
+    `${renderThreadStatus(load, {now, style, timeZone: options.timeZone})}\n`,
   );
   return 0;
 }
@@ -1090,15 +1115,15 @@ export async function runSessionShow(
     console.error(lines.join('\n'));
     return 1;
   }
-  console.log(
-    renderSessionShow(load, {
+  await writeStdout(
+    `${renderSessionShow(load, {
       full: options.full,
       handoff: handoffSectionLines(load, realHandoffSectionReaders({cwd, env})),
       now,
       related: relatedEpicsOf(load),
       style,
       timeZone: options.timeZone,
-    }),
+    })}\n`,
   );
   return 0;
 }

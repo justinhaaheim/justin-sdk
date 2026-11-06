@@ -269,6 +269,19 @@ async function nameWorkspacesKnob(cwd: string, env: EnvLike): Promise<boolean> {
   return resolveThreadConfig({cwd, env}).nameWorkspaces;
 }
 
+const SANDBOX_REFUSAL = /Operation not permitted|\bEPERM\b|\berrno 1\b/u;
+
+/**
+ * home-base-jm5kg.20: what follows a name that was not set. On 2026-11-03 a
+ * session read a bare "the next prompt will set it" as self-healing and did not
+ * re-run a command the sandbox had refused, so a refused socket says so first.
+ */
+export function withRetryAdvice(line: string): string {
+  return SANDBOX_REFUSAL.test(line)
+    ? `${line}; the Claude Code sandbox is the likely cause: re-run this same command with the sandbox off. Otherwise the next prompt will set it`
+    : `${line}; the next prompt will set it`;
+}
+
 /**
  * The soft follow-up of `thread request` and `thread title` (D4 b): one line
  * for a person when something was done or could not be, or null when there is
@@ -289,7 +302,7 @@ export async function workspaceNameFollowUp(input: {
       session: input.sessionId,
     });
     if (lookup.kind === 'failed') {
-      return `workspace name not set: ${lookup.reason}; the next prompt will set it`;
+      return withRetryAdvice(`workspace name not set: ${lookup.reason}`);
     }
     const named = await withNameItems(lookup, input);
     const run = input.run ?? realCmuxRunner();
@@ -309,7 +322,7 @@ export async function workspaceNameFollowUp(input: {
         break;
       case 'failed':
       case 'notReady':
-        line = `${describeWorkspaceSync(outcome)}; the next prompt will set it`;
+        line = withRetryAdvice(describeWorkspaceSync(outcome));
         break;
       default:
         line = describeWorkspaceSync(outcome);
@@ -324,14 +337,14 @@ export async function workspaceNameFollowUp(input: {
       tab.kind === 'renamed'
         ? describeTabTitle(tab)
         : tab.kind === 'failed'
-          ? `${describeTabTitle(tab)}; the next prompt will set it`
+          ? withRetryAdvice(describeTabTitle(tab))
           : null;
     const lines = [line, tabLine].filter(
       (entry): entry is string => entry != null,
     );
     return lines.length === 0 ? null : lines.join('\n');
   } catch (error) {
-    return `workspace name not set: ${String(error)}; the next prompt will set it`;
+    return withRetryAdvice(`workspace name not set: ${String(error)}`);
   }
 }
 

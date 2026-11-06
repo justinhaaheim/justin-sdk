@@ -39,6 +39,14 @@ export const SPAWN_REFUSAL_INSTRUCTIONS = [
   'Never start a session another way: no cmux command, no claude command.',
 ] as const;
 
+/** What a deferred spawn tells the calling Claude (home-base-89c8h.1 D6). */
+export const SPAWN_DEFERRAL_INSTRUCTIONS = [
+  'Nothing was refused, and no session was opened.',
+  'This command already waited for cmux. Run the same command again at once, up to 3 more times.',
+  'If it still exits 4, say so in your final report and stop.',
+  'Never start a session another way: no cmux command, no claude command.',
+] as const;
+
 export interface SpawnGateDeps {
   gate: (input: {
     /** F14: the words the guard pass must match; default process.argv.slice(2). */
@@ -105,7 +113,11 @@ export function spawnRefusalLines(
 
 /**
  * null: the knob is off, or the gate passed, and the spawn goes on. Otherwise
- * the exit-3 result `thread spawn` returns as it is.
+ * the exit-3 or exit-4 result `thread spawn` returns as it is.
+ *
+ * A deferral writes nothing on the caller's bead: the handoff-deferred label
+ * is about the caller's own handoff, and a spawn that later passes would not
+ * remove it.
  */
 export async function spawnGate(
   input: {
@@ -116,7 +128,7 @@ export async function spawnGate(
     now?: Date;
   },
   deps: Partial<SpawnGateDeps> = {},
-): Promise<{exitCode: 3; lines: string[]} | null> {
+): Promise<{exitCode: 3 | 4; lines: string[]} | null> {
   const {cwd, env} = input;
   // Behind an await import: config pulls in zod (command.ts's header).
   const {resolveThreadConfig} = await import('./config');
@@ -139,6 +151,16 @@ export async function spawnGate(
     });
   }
   if (result.kind === 'pass') return null;
+  if (result.kind === 'deferred') {
+    return {
+      exitCode: 4,
+      lines: [
+        `thread spawn: deferred by the handoff gate: ${result.reason}: ${result.detail}`,
+        '',
+        ...SPAWN_DEFERRAL_INSTRUCTIONS,
+      ],
+    };
+  }
 
   // The caller's session bead, when it has one: CLAUDE_CODE_SESSION_ID.
   const selected = selectSession({env, selector: null, sessionIdOption: null});

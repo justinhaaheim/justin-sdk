@@ -58,6 +58,7 @@ import {
 import {
   lookupWorkspaceSession,
   runThreadWorkspaceName,
+  withRetryAdvice,
 } from '../src/thread/workspace-name-session';
 import {createFakeBd} from './fake-bd';
 import {initRepo} from './git-fixtures';
@@ -169,6 +170,7 @@ function fakeCmux(
     return Promise.resolve({
       kind: 'failed',
       reason: `unexpected: ${args.join(' ')}`,
+      timedOut: false,
     });
   };
   return {calls, run, spaces};
@@ -354,11 +356,19 @@ describe('D4/D5 the sync, against a fake cmux', () => {
   test.each([
     [
       'spawn error',
-      (): CmuxCall => ({kind: 'failed', reason: 'spawn cmux ENOENT'}),
+      (): CmuxCall => ({
+        kind: 'failed',
+        reason: 'spawn cmux ENOENT',
+        timedOut: false,
+      }),
     ],
     [
       'non-zero exit',
-      (): CmuxCall => ({kind: 'failed', reason: 'cmux failed: socket refused'}),
+      (): CmuxCall => ({
+        kind: 'failed',
+        reason: 'cmux failed: socket refused',
+        timedOut: false,
+      }),
     ],
     ['bad JSON', (): CmuxCall => ok('{not json')],
     [
@@ -366,6 +376,7 @@ describe('D4/D5 the sync, against a fake cmux', () => {
       (): CmuxCall => ({
         kind: 'failed',
         reason: 'cmux timed out after 4000 ms',
+        timedOut: false,
       }),
     ],
   ])('unreadable cmux (%s) renames nothing', async (_name, reply) => {
@@ -1000,6 +1011,7 @@ describe('D4 b: thread request / thread title with cmux unreadable', () => {
   const unreadable = fakeCmux([], () => ({
     kind: 'failed',
     reason: 'cmux failed: Operation not permitted',
+    timedOut: false,
   }));
 
   test('thread request: one soft line, exit code unchanged', async () => {
@@ -1020,8 +1032,27 @@ describe('D4 b: thread request / thread title with cmux unreadable', () => {
     expect(exitCode).toBe(0);
     const soft = lines.filter((line) => line.includes('workspace name'));
     expect(soft).toEqual([
-      '  workspace name not set: cmux failed: Operation not permitted; the next prompt will set it',
+      '  workspace name not set: cmux failed: Operation not permitted; the Claude Code sandbox is the likely cause: re-run this same command with the sandbox off. Otherwise the next prompt will set it',
     ]);
+  });
+
+  test('home-base-jm5kg.20: EPERM names the sandbox, and any other failure does not', () => {
+    for (const reason of [
+      'cmux failed: Operation not permitted',
+      'connect EPERM /tmp/cmux.sock',
+      'socket refused (errno 1)',
+    ]) {
+      const line = withRetryAdvice(`workspace name not set: ${reason}`);
+      expect(line).toContain('sandbox');
+      expect(line).toContain('re-run this same command with the sandbox off');
+    }
+    const other = withRetryAdvice(
+      'workspace name not set: cmux is not running',
+    );
+    expect(other).toBe(
+      'workspace name not set: cmux is not running; the next prompt will set it',
+    );
+    expect(withRetryAdvice('x (errno 13)')).not.toContain('sandbox');
   });
 
   test('thread title: one soft line, exit code unchanged', async () => {
@@ -1123,7 +1154,11 @@ describe('j8q3e.5.3 F2: C equal to T is always the tool’s (rule 0)', () => {
 });
 
 describe('j8q3e.5.3 F3: the capture child names the workspace', () => {
-  const unreadable = fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'}));
+  const unreadable = fakeCmux([], () => ({
+    kind: 'failed',
+    reason: 'no cmux',
+    timedOut: false,
+  }));
 
   /**
    * A titled session bead in a real beads repo, one prompt in its message log,
@@ -1247,7 +1282,11 @@ describe('j8q3e.5.3 F3: the capture child names the workspace', () => {
 });
 
 describe('j8q3e.5.3 F4: thread workspace-name against a fake cmux', () => {
-  const unreadable = fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'}));
+  const unreadable = fakeCmux([], () => ({
+    kind: 'failed',
+    reason: 'no cmux',
+    timedOut: false,
+  }));
 
   /** A titled session (no auto-title) whose surface is in WS_A. */
   async function titled(nameWorkspaces: boolean) {
@@ -1457,7 +1496,11 @@ async function file(
 ) {
   const outcome = await fileRequest({
     bead: null,
-    cmux: fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'})).run,
+    cmux: fakeCmux([], () => ({
+      kind: 'failed',
+      reason: 'no cmux',
+      timedOut: false,
+    })).run,
     continues: extra.continues ?? null,
     cwd: w.repo,
     doneWhen: null,
@@ -1475,7 +1518,11 @@ describe('home-base-ys9t7.9.1 item 1: the refresh prompt', () => {
     const w = world(true, false, true);
     await file(w, 'Build the shortcut helper app');
     await renameSession({
-      cmux: fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'})).run,
+      cmux: fakeCmux([], () => ({
+        kind: 'failed',
+        reason: 'no cmux',
+        timedOut: false,
+      })).run,
       cwd: w.repo,
       env: w.env,
       sessionId: null,
@@ -1510,7 +1557,11 @@ describe('home-base-ys9t7.9.1 item 1: the refresh prompt', () => {
     await file(w, 'Build the shortcut helper app');
     await file(w, 'Make it installable via a link');
     await renameSession({
-      cmux: fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'})).run,
+      cmux: fakeCmux([], () => ({
+        kind: 'failed',
+        reason: 'no cmux',
+        timedOut: false,
+      })).run,
       cwd: w.repo,
       env: w.env,
       sessionId: null,
@@ -1593,7 +1644,11 @@ describe('home-base-ys9t7.9.1 item 2: a successor extends the chain’s summary'
     // The successor links (link only), inheriting the title.
     const linked = await fileRequest({
       bead: null,
-      cmux: fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'})).run,
+      cmux: fakeCmux([], () => ({
+        kind: 'failed',
+        reason: 'no cmux',
+        timedOut: false,
+      })).run,
       continues: old.beadId,
       cwd: w.repo,
       doneWhen: null,
@@ -1628,7 +1683,11 @@ describe('home-base-ys9t7.9.1 item 2: a successor extends the chain’s summary'
     // The refresh, then the dry-run naming: the workspace the predecessor
     // named (its pane gone) follows the successor's new title.
     await renameSession({
-      cmux: fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'})).run,
+      cmux: fakeCmux([], () => ({
+        kind: 'failed',
+        reason: 'no cmux',
+        timedOut: false,
+      })).run,
       cwd: w.repo,
       env: w.env,
       sessionId: null,
@@ -1841,7 +1900,11 @@ describe('home-base-ys9t7.9.1 B4: the capture refreshes the bead’s cmux labels
       JUSTIN_THREADS_REPO_DIR: fake.dir,
     };
     await renameSession({
-      cmux: fakeCmux([], () => ({kind: 'failed', reason: 'no cmux'})).run,
+      cmux: fakeCmux([], () => ({
+        kind: 'failed',
+        reason: 'no cmux',
+        timedOut: false,
+      })).run,
       cwd: w.repo,
       env,
       sessionId: null,

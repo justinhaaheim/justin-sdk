@@ -1061,8 +1061,10 @@ export function readDbSchema(
 ): {kind: 'failed'; reason: string} | {kind: 'read'; schema: number} {
   const proc = spawnSync(
     'sqlite3',
-    ['-readonly', '-cmd', '.timeout 2000', db, 'PRAGMA user_version'],
-    {encoding: 'utf-8', env: brSpawnEnv(undefined), timeout: 10_000},
+    // 2026-11-06: 2 s was too short with many sessions writing. `thread
+    // handoff` failed twice in a row on `database is locked` (home-base-89c8h).
+    ['-readonly', '-cmd', '.timeout 20000', db, 'PRAGMA user_version'],
+    {encoding: 'utf-8', env: brSpawnEnv(undefined), timeout: 30_000},
   );
   if (proc.error != null) {
     return {
@@ -1705,6 +1707,13 @@ export interface BrUpdateInput {
   acceptanceCriteria?: string | null;
   addLabels?: string[];
   /**
+   * `br update --force`: br otherwise refuses `--status=in_progress` on a bead
+   * with open children ("cannot claim blocked issue", exit 4, measured
+   * 2026-11-06, home-base-npbse.1.3). Only `thread unmark` passes it, to put back
+   * a status the bead had before.
+   */
+  force?: boolean;
+  /**
    * REPLACES the notes field (`br update --notes` is not an append). To append,
    * read the bead first and write the whole text back — `thread note` does.
    */
@@ -1762,6 +1771,7 @@ export function brUpdate(
       reason: 'brUpdate was called with nothing to change',
     };
   }
+  if (input.force === true) args.push('--force');
   const ahead = exportAheadOfDb(target);
   if (ahead != null) return ahead;
   const call = callBr(target, args);

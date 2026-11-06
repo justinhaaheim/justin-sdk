@@ -50,6 +50,7 @@
  */
 
 import type {Field, OutputStyle} from '../cli-style';
+import type {HandoffStop} from './handoff-view';
 import type {InputDraft} from './input-drafts';
 import type {PaneLookup, UnplacedKind} from './pane-join';
 import type {EnvLike} from './paths';
@@ -86,6 +87,7 @@ import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
 import {messageLogPath} from './archive';
 import {resolveRepoTag, resolveThreadConfig} from './config';
+import {handoffStopOf} from './handoff-view';
 import {listInputDrafts} from './input-drafts';
 import {
   isSafeSessionId,
@@ -147,6 +149,12 @@ export interface InboxRow {
   display: 'card' | 'line';
   /** The git facts the card reads; null for a session that did not load. */
   git: CardGit | null;
+  /**
+   * home-base-89c8h.3: why its handoff stopped short, or null. Null on a row
+   * with no session bead to read too: `unreadable` says which of those it is,
+   * and an untracked session has no handoff records.
+   */
+  handoff: HandoffStop | null;
   /**
    * D-DRAFTS (home-base-yukaf.4): the live unsent text the drafts store holds
    * for this session, or null when it holds none (or could not be read: then
@@ -572,6 +580,7 @@ export async function readInbox(input: {
         }),
         display: 'card',
         git: null,
+        handoff: null,
         inputDraft: null,
         lastActivityAt: activity,
         lastAssistantAt,
@@ -637,6 +646,13 @@ export async function readInbox(input: {
       }),
       display: 'card',
       git: cardGit(model.git),
+      handoff:
+        model.beads.session == null
+          ? null
+          : handoffStopOf(
+              model.beads.session.labels,
+              model.beads.session.notes,
+            ),
       inputDraft: null,
       lastActivityAt,
       lastAssistantAt,
@@ -665,6 +681,7 @@ export async function readInbox(input: {
       card,
       display: verdict.display,
       git: cardGit(session.git),
+      handoff: null,
       inputDraft: null,
       lastActivityAt: untrackedActivityAt(session),
       lastAssistantAt: assistant?.kind === 'found' ? assistant.line.at : null,
@@ -1439,6 +1456,8 @@ export function inboxJson(
       // D6 (home-base-j8q3e.1.2): a full card or one line.
       display: row.display,
       git: row.git,
+      // home-base-89c8h.3: a refused or deferred handoff with no successor yet.
+      handoff: row.handoff,
       // D-DRAFTS: the live unsent text for this session, or null.
       inputDraft: row.inputDraft,
       lastActivityAt: row.lastActivityAt,

@@ -253,7 +253,11 @@ function world(input: {
           (entry) => entry.ref === target || entry.id === target,
         );
         if (pane == null)
-          return {kind: 'failed', reason: `no surface ${target}`};
+          return {
+            kind: 'failed',
+            reason: `no surface ${target}`,
+            timedOut: false,
+          };
         const index = reads.get(pane.id) ?? 0;
         reads.set(pane.id, index + 1);
         if (args.includes('--scrollback')) {
@@ -262,7 +266,11 @@ function world(input: {
         const screen =
           pane.screens[Math.min(index, pane.screens.length - 1)] ?? null;
         return screen == null
-          ? {kind: 'failed', reason: 'read-screen failed: surface not ready'}
+          ? {
+              kind: 'failed',
+              reason: 'read-screen failed: surface not ready',
+              timedOut: false,
+            }
           : {kind: 'ok', stdout: screen};
       }
       if (args[0] === 'move-workspace-to-window') {
@@ -277,7 +285,11 @@ function world(input: {
           (workspace) => workspace.id === target,
         );
         if (into == null || from == null || moving == null) {
-          return {kind: 'failed', reason: 'no such workspace or window'};
+          return {
+            kind: 'failed',
+            reason: 'no such workspace or window',
+            timedOut: false,
+          };
         }
         from.workspaces = from.workspaces.filter((entry) => entry !== moving);
         // cmux puts a moved workspace where it likes: here, at the end.
@@ -289,7 +301,8 @@ function world(input: {
         const to = value(args, '--window');
         events.push(`reorder ${order.join(',')} --window ${to}`);
         const window = input.model.windows.find((entry) => entry.id === to);
-        if (window == null) return {kind: 'failed', reason: 'no such window'};
+        if (window == null)
+          return {kind: 'failed', reason: 'no such window', timedOut: false};
         const listed = order
           .map((id) => window.workspaces.find((entry) => entry.id === id))
           .filter((entry) => entry != null);
@@ -318,6 +331,7 @@ function world(input: {
       return {
         kind: 'failed',
         reason: `the fake does not know ${args.join(' ')}`,
+        timedOut: false,
       };
     };
     return Promise.resolve(respond());

@@ -37,6 +37,7 @@ import {
   renderBoardPointer,
   runThreadBoard,
 } from '../src/thread/board';
+import {captureWriteStdout} from './capture-stdout';
 
 const PLAIN = {color: false, width: null};
 
@@ -129,8 +130,8 @@ describe('bare runThreadBoard', () => {
 
     const out: string[] = [];
     const err: string[] = [];
-    const logSpy = spyOn(console, 'log').mockImplementation((...args) => {
-      out.push(args.map(String).join(' '));
+    const logSpy = captureWriteStdout((text) => {
+      out.push(text);
     });
     const errorSpy = spyOn(console, 'error').mockImplementation((...args) => {
       err.push(args.map(String).join(' '));

@@ -44,11 +44,18 @@ export interface LiveSessionCount {
 
 export type LiveSessionCountRead =
   | LiveSessionCount
-  | {kind: 'failed'; reason: string};
+  | {
+      kind: 'failed';
+      reason: string;
+      /** True only when a slow cmux tree is the whole failure (home-base-89c8h.1). */
+      timedOut: boolean;
+    };
 
 /** The count from one readLiveSessions() answer. Pure. */
 export function countLiveSessions(live: LiveSessions): LiveSessionCountRead {
-  if (live.kind === 'failed') return {kind: 'failed', reason: live.reason};
+  if (live.kind === 'failed') {
+    return {kind: 'failed', reason: live.reason, timedOut: live.timedOut};
+  }
   const bySource: Record<LiveSource, number> = {
     agents: 0,
     hookStore: 0,

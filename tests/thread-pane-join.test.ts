@@ -178,6 +178,7 @@ describe('lookupPanes (D6): one map of live panes, or why there is none', () => 
         kind: 'failed',
         reason:
           'cmux --json --id-format failed: Error: Failed to connect to socket at /x/cmux.sock (Operation not permitted, errno 1)',
+        timedOut: false,
       });
     const lookup = await lookupPanes({
       cmux: failing,
@@ -392,6 +393,7 @@ function fakeCmux2(
               kind: 'failed' as const,
               reason:
                 'cmux read-screen --surface failed: internal_error: Failed to read terminal text',
+              timedOut: false,
             }
           : {kind: 'ok' as const, stdout: text},
       );

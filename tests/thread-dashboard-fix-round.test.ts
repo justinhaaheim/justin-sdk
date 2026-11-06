@@ -90,6 +90,7 @@ function row(s: UntrackedSession): InboxRow {
     card,
     display: verdict.display,
     git: null,
+    handoff: null,
     inputDraft: null,
     lastActivityAt: s.lastActivityAt.ok ? s.lastActivityAt.value : null,
     lastAssistantAt: null,

@@ -461,6 +461,7 @@ function fakeCmux(input: {name: string | null; surfaces: string[]}) {
     return Promise.resolve({
       kind: 'failed',
       reason: `the fake cmux does not know ${args.join(' ')}`,
+      timedOut: false,
     });
   };
   return {calls, run};

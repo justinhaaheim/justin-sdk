@@ -1119,7 +1119,11 @@ describe('j8q3e.13 F8: two stored sessions on one pid count one pane at most (en
             args[0] !== 'read-screen'
               ? {kind: 'ok', stdout: JSON.stringify(tree)}
               : screen == null
-                ? {kind: 'failed', reason: 'Failed to read terminal text'}
+                ? {
+                    kind: 'failed',
+                    reason: 'Failed to read terminal text',
+                    timedOut: false,
+                  }
                 : {kind: 'ok', stdout: screen},
           ),
         hookStorePath: join(sb.path, 'f8-store.json'),

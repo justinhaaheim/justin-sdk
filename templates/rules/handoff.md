@@ -38,6 +38,7 @@ The command may refuse: too many sessions running, usage too high, or another re
 - **Exit 1: a step failed after the handoff was recorded.** The output says what was done. Quote it in your final report and stop. Do not run `thread handoff` again.
 - **Exit 2: nothing was written.** The output says why. If your call was wrong, fix it and run it again. Otherwise report the message and stop.
 - **Exit 3: the gate refused.** The handoff and the refusal are recorded, and nothing was opened. The refusal is final. Put the printed handoff block in your final report and stop. Do not run `thread handoff` again.
+- **Exit 4: deferred, cmux was too slow to decide.** Nothing was refused and nothing was opened. The command already waited, so run the same command again at once, up to 3 more times. If it still exits 4, put the printed handoff block in your final report and stop.
 
 Where the old tab is set to exit or close after a handoff, it waits until the next session has linked and your last message is recorded. Do nothing to help it: finish your report and stop.
 
@@ -45,7 +46,7 @@ Where the old tab is set to exit or close after a handoff, it waits until the ne
 
 - `thread handoff` is the only way to start the session that continues this one.
 - Never start a session for unrelated work or in another project. File the work as a bead and tell Justin in your report.
-- The one exception is a repository with `componentConfig.thread.spawn.allowed` on, which is home-base, where the mayor runs. Only there does `bun run justin-sdk thread spawn` run (see its `--help`). It passes the same gate, and its exit 3 is final too. Everywhere else it refuses: do not retry it from another directory.
+- The one exception is a repository with `componentConfig.thread.spawn.allowed` on, which is home-base, where the mayor runs. Only there does `bun run justin-sdk thread spawn` run (see its `--help`). It passes the same gate: its exit 3 is final too, and its exit 4 means the same as above. Everywhere else it refuses: do not retry it from another directory.
 - Never open, type into or close a tab, pane or workspace with `cmux`: no `new-workspace`, `new-surface`, `new-split`, `new-pane`, `send` or `close-…`. Reading with `cmux identify`, `cmux tree` or `cmux read-screen` is fine.
 - Never start Claude Code yourself: no `claude` with or without a prompt, no `--bg`, `-p`, `--resume` or `attach`.
 - Where `componentConfig.thread.handoff.successor` is on, a guard refuses these commands. It does not catch every spelling: a command it lets through is still forbidden. When it refuses one, do not rewrite the command to get past it.

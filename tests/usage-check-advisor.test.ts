@@ -36,6 +36,7 @@ import {
   USAGE_CHECK_CONFIG_KEY,
   WRAP_UP_DIRECTIVE,
 } from '../src/usage-check';
+import {captureWriteStdout} from './capture-stdout';
 
 /**
  * The session's real context as the advisor record ended, read from that
@@ -204,15 +205,14 @@ function writeConfig(dir: string): void {
 
 function runCapturing(input: unknown): Record<string, unknown> | null {
   const lines: string[] = [];
-  const original = console.log;
-  console.log = (...args: unknown[]) => {
-    lines.push(args.map(String).join(' '));
-  };
+  const capture = captureWriteStdout((text) => {
+    lines.push(text);
+  });
   let exit: number;
   try {
     exit = runUsageCheck({stdin: JSON.stringify(input)});
   } finally {
-    console.log = original;
+    capture.mockRestore();
   }
   expect(exit).toBe(0);
   return lines.length === 0

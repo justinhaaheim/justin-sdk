@@ -4,8 +4,10 @@
  * as ONE function over injected readers, so each refusal reason is a unit
  * test with no cmux, no claude and no real state dir.
  *
- * It answers `pass` or `refused` with a reason, a detail and the message the
- * caller prints. Calling it from `thread handoff` / `thread spawn`, exit code
+ * It answers `pass`, `refused` with a reason, a detail and the message the
+ * caller prints, or `deferred` when cmux still had not answered at the
+ * deadline (home-base-89c8h.1: a slow cmux decides nothing, so it is never a
+ * final refusal). Calling it from `thread handoff` / `thread spawn`, exit code
  * 3 and the cmux launch are home-base-mbnjv.2.
  *
  * ORDER: fixed, first refusal wins, cheapest first. The kill switch (one
@@ -21,12 +23,13 @@
  */
 
 import type {SamplesRead} from '../claude-usage-samples';
+import type {CmuxRunner} from './cmux';
 import type {GuardPassRead} from './guard-pass';
 import type {GuardRegistration} from './guard-registration';
 import type {UnattendedChain} from './handoff-chain';
 import type {ResolvedHandoffConfig} from './handoff-knob';
 import type {LiveSessionCount, LiveSessionCountRead} from './live-count';
-import type {ScreenRead} from './pane-join';
+import type {LiveSessionDeps} from './live-sessions';
 import type {EnvLike} from './paths';
 import type {QuotaGateDecision, QuotaGateRead} from './quota-gate';
 
@@ -37,7 +40,7 @@ import {brShow, brUpdate, describeBrFailed} from '../beads/br';
 import {readSamples, samplesPath} from '../claude-usage-samples';
 import {SDK_BIN_BY_PATH} from '../sdk-invocation';
 import {oneLine} from './ask-format';
-import {realCmuxRunner} from './cmux';
+import {gateCmuxRunner, realCmuxRunner} from './cmux';
 import {consumeGuardPass, describeGuardPass} from './guard-pass';
 import {
   describeGuardNotRegistered,
@@ -51,7 +54,11 @@ import {threadsStateDir} from './paths';
 import {gateLine, quotaGateDecision, readQuotaForGate} from './quota-gate';
 import {appendQuotaLog} from './quota-log';
 import {liveSocketPath} from './respawn';
-import {HANDOFF_REFUSED_LABEL, SUCCESSOR_STARTED_LABEL} from './session-bead';
+import {
+  HANDOFF_DEFERRED_LABEL,
+  HANDOFF_REFUSED_LABEL,
+  SUCCESSOR_STARTED_LABEL,
+} from './session-bead';
 import {appendNote} from './session-marks';
 
 // ---------------------------------------------------------------------------
@@ -110,6 +117,39 @@ export function handoffRefusalMessage(
     ...HANDOFF_REFUSAL_INSTRUCTIONS,
   ].join('\n');
 }
+
+/**
+ * home-base-89c8h.1 D5: why the gate decided nothing. The only reason so far:
+ * cmux still had not answered at the deadline.
+ */
+export type HandoffDeferralReason = 'cmuxSlow';
+
+/** What a deferred handoff tells the calling Claude, after its reason (D6). */
+export const HANDOFF_DEFERRAL_INSTRUCTIONS = [
+  'Nothing was refused, and no successor was started.',
+  'This command already waited for cmux. Run the same command again at once, up to 3 more times.',
+  'If it still exits 4, include the handoff block printed above in your final report for Justin, and stop.',
+  'Never start a session another way: no cmux command, no claude command.',
+] as const;
+
+/** The full message one deferral prints: its reason line, then the instructions. */
+export function handoffDeferralMessage(
+  reason: HandoffDeferralReason,
+  detail: string,
+): string {
+  return [
+    `handoff deferred: ${reason}: ${detail}`,
+    '',
+    ...HANDOFF_DEFERRAL_INSTRUCTIONS,
+  ].join('\n');
+}
+
+/**
+ * D4: the most time the gate and the pane lookup spend waiting on cmux. The
+ * Bash tool kills a call at 120 s by default, and handoff.md runs the command
+ * with no timeout override.
+ */
+export const HANDOFF_GATE_DEADLINE_MS = 60_000;
 
 // ---------------------------------------------------------------------------
 // The kill switch
@@ -293,7 +333,14 @@ export function checkUsage(
 // The gate
 // ---------------------------------------------------------------------------
 
-export type CmuxPing = {kind: 'failed'; reason: string} | {kind: 'ok'};
+export type CmuxPing =
+  | {kind: 'failed'; reason: string; timedOut: boolean}
+  | {kind: 'ok'};
+
+/** The caller's own screen: ScreenRead, plus whether a failed read timed out. */
+export type CallerScreenRead =
+  | {kind: 'read'; text: string}
+  | {kind: 'unreadable'; reason: string; timedOut: boolean};
 
 /**
  * F11: has this session already started a successor? `started` carries what
@@ -311,7 +358,7 @@ export interface HandoffGateReaders {
    * CMUX_SURFACE_ID), whose status line must show CLAUDE_CODE_SESSION_ID.
    * Read only when requireCmuxPane is not false.
    */
-  callerScreen: () => Promise<ScreenRead> | ScreenRead;
+  callerScreen: () => CallerScreenRead | Promise<CallerScreenRead>;
   /**
    * The chain walk, or null to skip the unattended-handoff count: `thread
    * spawn` runs the gate without it (epic C4), because a spawn starts no
@@ -382,6 +429,17 @@ export interface HandoffGateFacts {
 }
 
 export type HandoffGateResult =
+  | {
+      /**
+       * home-base-89c8h.1 D5: cmux still had not answered at the deadline, so
+       * nothing was decided. A kind of its own, so every caller must handle it.
+       */
+      detail: string;
+      kind: 'deferred';
+      /** The reason line, then the instructions: print it as it is. */
+      message: string;
+      reason: HandoffDeferralReason;
+    }
   | {facts: HandoffGateFacts; kind: 'pass'}
   | {
       detail: string;
@@ -409,6 +467,18 @@ function refused(
     message: handoffRefusalMessage(reason, detail),
     ranInSandbox,
     reason,
+  };
+}
+
+/** D5: the gate's answer when cmux is too slow to give a real one. */
+function deferredCmuxSlow(
+  detail: string,
+): Extract<HandoffGateResult, {kind: 'deferred'}> {
+  return {
+    detail,
+    kind: 'deferred',
+    message: handoffDeferralMessage('cmuxSlow', detail),
+    reason: 'cmuxSlow',
   };
 }
 
@@ -574,7 +644,11 @@ export async function runHandoffGate(
   // 3. cmux answers.
   const ping = await attempt(readers.pingCmux);
   if ('threw' in ping) return cmuxUnreachable(ping.threw);
-  if (ping.value.kind === 'failed') return cmuxUnreachable(ping.value.reason);
+  if (ping.value.kind === 'failed') {
+    return ping.value.timedOut
+      ? deferredCmuxSlow(`cmux did not answer a ping: ${ping.value.reason}`)
+      : cmuxUnreachable(ping.value.reason);
+  }
 
   // 3b. F16: the tab CMUX_SURFACE_ID names shows THIS session. The CMUX_*
   // ids are inherited: a session started by `claude --bg`, or reattached in
@@ -589,6 +663,15 @@ export async function runHandoffGate(
       );
     }
     const screen = await attempt(readers.callerScreen);
+    if (
+      'value' in screen &&
+      screen.value.kind === 'unreadable' &&
+      screen.value.timedOut
+    ) {
+      return deferredCmuxSlow(
+        `cmux did not return tab ${surfaceId}'s screen: ${screen.value.reason}`,
+      );
+    }
     const text =
       'threw' in screen
         ? null
@@ -619,9 +702,9 @@ export async function runHandoffGate(
   }
 
   // 4. Usage, from the hourly samples. componentConfig.thread.handoff.usage
-  // .check false skips it (Justin, 2026-11-02: a temporary switch while the
-  // /usage sampler cannot parse the panel, home-base-jm5kg.19). Absent means
-  // check: only an explicit false skips.
+  // .check false skips it: an off switch for when the hourly /usage sampler
+  // cannot read the panel, so that every handoff would otherwise refuse with
+  // usageUnknown. Absent means check: only an explicit false skips.
   let usageFacts: HandoffGateFacts['usage'];
   if (limits.usage.check === false) {
     usageFacts = {
@@ -683,6 +766,11 @@ export async function runHandoffGate(
     );
   }
   if (live.value.kind === 'failed') {
+    if (live.value.timedOut) {
+      return deferredCmuxSlow(
+        `cmux did not return its tree, so the live Claude sessions could not be counted: ${live.value.reason}`,
+      );
+    }
     return refused(
       'liveSessionsUnknown',
       `the live Claude sessions could not be counted: ${live.value.reason}`,
@@ -769,6 +857,10 @@ export function recordLaunch(input: {
   const written = brUpdate({db: input.db, env: input.env}, input.beadId, {
     addLabels: [SUCCESSOR_STARTED_LABEL],
     notes: appendNote(shown.issue.notes, line, input.now),
+    // home-base-89c8h.1 D6: this run passed, so an earlier deferral is over.
+    ...(shown.issue.labels.includes(HANDOFF_DEFERRED_LABEL)
+      ? {removeLabels: [HANDOFF_DEFERRED_LABEL]}
+      : {}),
   });
   if (written.kind === 'failed') {
     return {
@@ -784,10 +876,74 @@ export function recordLaunch(input: {
 // ---------------------------------------------------------------------------
 
 /**
+ * home-base-89c8h.1 D4: the gate's three cmux readers over one deadline. The
+ * ping and the caller's screen retry a timeout. The live-session count does
+ * not, because it reads about 65 panes: it only stops at the deadline, and
+ * `liveSources` builds its other sources around that runner. `run` as a string
+ * is why there is no runner (no cmux socket).
+ */
+export function gateCmuxReaders(input: {
+  backoffMs?: readonly number[];
+  deadlineAtMs: number;
+  env: EnvLike;
+  liveSources: (cmux: CmuxRunner) => LiveSessionDeps;
+  now: () => number;
+  run: CmuxRunner | string;
+  sleep: (ms: number) => Promise<void>;
+}): Pick<HandoffGateReaders, 'callerScreen' | 'liveSessions' | 'pingCmux'> {
+  const {env, run} = input;
+  if (typeof run === 'string') {
+    const reason = `no cmux socket: ${run}`;
+    return {
+      callerScreen: () => ({kind: 'unreadable', reason, timedOut: false}),
+      liveSessions: () => ({kind: 'failed', reason, timedOut: false}),
+      pingCmux: () => ({kind: 'failed', reason, timedOut: false}),
+    };
+  }
+  const options = {
+    ...(input.backoffMs == null ? {} : {backoffMs: input.backoffMs}),
+    deadlineAtMs: input.deadlineAtMs,
+    now: input.now,
+    sleep: input.sleep,
+  };
+  const retrying = gateCmuxRunner(run, {...options, retry: true});
+  const bounded = gateCmuxRunner(run, {...options, retry: false});
+  return {
+    callerScreen: async () => {
+      const call = await retrying([
+        'read-screen',
+        '--workspace',
+        env.CMUX_WORKSPACE_ID ?? '',
+        '--surface',
+        env.CMUX_SURFACE_ID ?? '',
+      ]);
+      return call.kind === 'ok'
+        ? {kind: 'read', text: call.stdout}
+        : {
+            kind: 'unreadable',
+            reason: call.reason,
+            timedOut: call.timedOut,
+          };
+    },
+    liveSessions: async () =>
+      countLiveSessions(await readLiveSessions(input.liveSources(bounded))),
+    pingCmux: async () => {
+      const ping = await retrying(['ping']);
+      return ping.kind === 'ok' ? {kind: 'ok'} : ping;
+    },
+  };
+}
+
+/**
  * The readers `thread handoff` runs the gate with (home-base-mbnjv.2 wires
  * them). `sessionBeadId` null builds the spawn gate's set, with no chain.
  */
 export function realHandoffGateReaders(input: {
+  /**
+   * D4: when the gate's cmux calls must stop; `thread handoff` passes its own
+   * so the pane lookup after the gate shares it. Default: 60 s from now.
+   */
+  cmuxDeadlineAtMs?: number;
   /** The command's own words after the program (process.argv.slice(2)): F14. */
   commandWords: readonly string[];
   cwd: string;
@@ -813,27 +969,25 @@ export function realHandoffGateReaders(input: {
     'path' in socket
       ? {...env, CMUX_QUIET: '1', CMUX_SOCKET_PATH: socket.path}
       : null;
-  const runner = cmuxEnv == null ? null : realCmuxRunner(undefined, cmuxEnv);
   const sessionDb = input.sessionDb ?? null;
   return {
-    callerScreen: async () => {
-      if (runner == null) {
-        return {
-          kind: 'unreadable',
-          reason: `no cmux socket: ${'reason' in socket ? socket.reason : '?'}`,
-        };
-      }
-      const call = await runner([
-        'read-screen',
-        '--workspace',
-        env.CMUX_WORKSPACE_ID ?? '',
-        '--surface',
-        env.CMUX_SURFACE_ID ?? '',
-      ]);
-      return call.kind === 'ok'
-        ? {kind: 'read', text: call.stdout}
-        : {kind: 'unreadable', reason: call.reason};
-    },
+    ...gateCmuxReaders({
+      deadlineAtMs:
+        input.cmuxDeadlineAtMs ?? Date.now() + HANDOFF_GATE_DEADLINE_MS,
+      env,
+      liveSources: (cmux) => ({...realLiveSessionDeps(cmuxEnv ?? env), cmux}),
+      now: () => Date.now(),
+      run:
+        cmuxEnv == null
+          ? 'reason' in socket
+            ? socket.reason
+            : '?'
+          : realCmuxRunner(undefined, cmuxEnv),
+      sleep: (ms) =>
+        new Promise((resolve) => {
+          setTimeout(resolve, ms);
+        }),
+    }),
     chain:
       sessionBeadId == null
         ? null
@@ -855,27 +1009,6 @@ export function realHandoffGateReaders(input: {
       sessionBeadId == null || sessionDb == null
         ? null
         : () => readLaunchRecord({beadId: sessionBeadId, db: sessionDb, env}),
-    liveSessions: async () => {
-      if (cmuxEnv == null) {
-        return {
-          kind: 'failed',
-          reason: `no cmux socket: ${'reason' in socket ? socket.reason : '?'}`,
-        };
-      }
-      return countLiveSessions(
-        await readLiveSessions(realLiveSessionDeps(cmuxEnv)),
-      );
-    },
-    pingCmux: async () => {
-      if (runner == null) {
-        return {
-          kind: 'failed',
-          reason: `no cmux socket: ${'reason' in socket ? socket.reason : '?'}`,
-        };
-      }
-      const ping = await runner(['ping']);
-      return ping.kind === 'ok' ? {kind: 'ok'} : ping;
-    },
     quota: () =>
       readQuotaForGate({
         cwd,
@@ -898,6 +1031,47 @@ export function realHandoffGateReaders(input: {
 export type RecordRefusalOutcome =
   | {kind: 'failed'; reason: string}
   | {kind: 'recorded'; line: string};
+
+/**
+ * home-base-89c8h.1 D6: label the session bead `handoff-deferred` and append
+ * "handoff deferred: <reason> — <detail>", as recordRefusal does for a refusal.
+ * One br write; a failure says nothing was recorded.
+ */
+export function recordDeferral(input: {
+  beadId: string;
+  db: string;
+  detail: string;
+  env: EnvLike;
+  now: Date;
+  reason: HandoffDeferralReason;
+}): RecordRefusalOutcome {
+  const {env, now} = input;
+  const shown = brShow({db: input.db, env}, input.beadId);
+  if (shown.kind === 'failed') {
+    return {
+      kind: 'failed',
+      reason: `the deferral was NOT recorded: ${input.beadId} could not be read: ${describeBrFailed(shown)}`,
+    };
+  }
+  if (shown.kind === 'notFound') {
+    return {
+      kind: 'failed',
+      reason: `the deferral was NOT recorded: ${input.beadId} is not in ${input.db}`,
+    };
+  }
+  const text = `handoff deferred: ${input.reason} — ${oneLine(input.detail)}`;
+  const written = brUpdate({db: input.db, env}, input.beadId, {
+    addLabels: [HANDOFF_DEFERRED_LABEL],
+    notes: appendNote(shown.issue.notes, text, now),
+  });
+  if (written.kind === 'failed') {
+    return {
+      kind: 'failed',
+      reason: `the deferral was NOT recorded on ${input.beadId}: ${describeBrFailed(written)}`,
+    };
+  }
+  return {kind: 'recorded', line: text};
+}
 
 /**
  * Label the session bead `handoff-refused` and append "handoff refused:

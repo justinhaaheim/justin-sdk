@@ -35,6 +35,7 @@ import {PREDECESSOR_SESSION_ENV} from '../src/thread/predecessor';
 import {runThreadPrepare} from '../src/thread/prepare';
 import {restateAsk} from '../src/thread/render';
 import {OPEN_ASKS_GUIDANCE} from '../src/thread/schema';
+import {captureWriteStdout} from './capture-stdout';
 import {createFakeBd, type FakeState} from './fake-bd';
 
 function comment(text: string): BdComment {
@@ -383,14 +384,21 @@ async function captureLog(
   fn: () => Promise<number>,
 ): Promise<{exitCode: number; stdout: string}> {
   let stdout = '';
+  // Both: `thread inbox` prints through writeStdout, `thread prepare` through
+  // console.log, and the end-to-end test compares the two.
+  const capture = captureWriteStdout((text) => {
+    stdout += `${text}\n`;
+  });
   const realLog = console.log;
   console.log = (...parts: unknown[]) => {
     stdout += `${parts.map(String).join(' ')}\n`;
   };
   try {
-    return {exitCode: await fn(), stdout};
+    const exitCode = await fn();
+    return {exitCode, stdout};
   } finally {
     console.log = realLog;
+    capture.mockRestore();
   }
 }
 

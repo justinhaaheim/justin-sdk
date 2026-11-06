@@ -37,6 +37,10 @@
 import type {BdContext, BdFailure, BdIssue} from './bd';
 import type {CmuxRunner} from './cmux';
 import type {CommitOutcome} from './commit';
+import type {
+  AutoPickupInput,
+  CapturePickupOutcome,
+} from './handoff-auto-pickup';
 import type {AppendOutcome, MessageLine} from './message-log';
 import type {EnvLike} from './paths';
 
@@ -816,6 +820,11 @@ export type ApplyPassOutcome =
 export interface ApplyOptions {
   /** Overrides componentConfig.thread.autoCommit. Tests pin it. */
   autoCommit?: boolean;
+  /**
+   * componentConfig.thread.handoff.autoPickup (home-base-npbse.1.2).
+   * `runThreadCaptureApply` resolves it when absent; absent here means off.
+   */
+  autoPickup?: boolean;
   /** The cmux runner for workspace naming; tests inject a fake. */
   cmux?: CmuxRunner;
   /** The spawning hook's context-line ms (`--line-ms`), recorded as-is. */
@@ -842,6 +851,8 @@ export interface ApplyOptions {
    */
   nameWorkspaces?: boolean;
   now?: Date;
+  /** The pickup attempt; tests inject a throwing one. */
+  runPickup?: (input: AutoPickupInput) => Promise<CapturePickupOutcome | null>;
   /**
    * Whether to file the session bead in the repo (status report v4,
    * home-base-vzwbj.4.1). `runThreadCaptureApply` resolves it from
@@ -1040,13 +1051,15 @@ export type CaptureApplyOutcome =
       kind: 'ran';
       last: ApplyPassOutcome;
       passes: number;
-      /** What the one-time seed did before the first pass (k0b8n.16). */
-      seed: SeedOutcome;
       /**
        * What filing the repo's session bead did (status report v4,
        * home-base-vzwbj.4.1); null when componentConfig.thread.sessionBeads
        * is off, so a knob-off run records nothing new.
        */
+      /** home-base-npbse.1.2: absent on a session that carries no successor mark. */
+      pickup?: CapturePickupOutcome;
+      /** What the one-time seed did before the first pass (k0b8n.16). */
+      seed: SeedOutcome;
       sessionBead: SessionBeadOutcome | null;
       /**
        * What writing the status line's file did (home-base-yukaf.6); null when
@@ -1143,6 +1156,34 @@ function ensureSessionBeadFromLog(
 }
 
 /**
+ * home-base-npbse.1.2: one pickup attempt for a marked session. A throw is a
+ * failed attempt in the run record, never a lost capture. Even the failure's own
+ * record is guarded, because a full disk must not stop the capture either.
+ */
+async function pickupForCapture(
+  options: ApplyOptions,
+  env: EnvLike,
+): Promise<CapturePickupOutcome | null> {
+  try {
+    const run =
+      options.runPickup ??
+      (await import('./handoff-auto-pickup-run')).runAutoPickup;
+    return await run({
+      cwd: options.cwd ?? process.cwd(),
+      env,
+      now: options.now ?? new Date(),
+      sessionId: options.sessionId,
+    });
+  } catch (error) {
+    return {
+      kind: 'failed',
+      reason: `threw: ${probeErrorMessage(error)}`,
+      step: 'threw',
+    };
+  }
+}
+
+/**
  * The child's whole job: take the lock, apply until no newer message is
  * waiting, release, commit once (K10 c, d).
  *
@@ -1176,6 +1217,7 @@ export async function applyCapture(
   let threadId: string | null = null;
   let seed: SeedOutcome = {kind: 'alreadySeeded'};
   let sessionBead: SessionBeadOutcome | null = null;
+  let pickup: CapturePickupOutcome | null = null;
   let workspaceName: WorkspaceSyncOutcome | null = null;
   let tabTitle: TabTitleOutcome | null = null;
   let cmuxLabels: CmuxLabelsOutcome | null = null;
@@ -1194,6 +1236,15 @@ export async function applyCapture(
     // prompt even when capture started mid-session.
     if (options.sessionBeads === true) {
       sessionBead = ensureSessionBeadFromLog(options, env);
+      // home-base-npbse.1.2: before the names sync, so a successor that just
+      // took its predecessor's title names its workspace after it. The wrapper
+      // never throws: this code reaches every open session on its next prompt.
+      if (
+        options.autoPickup === true &&
+        (sessionBead.kind === 'created' || sessionBead.kind === 'exists')
+      ) {
+        pickup = await pickupForCapture(options, env);
+      }
       // D4 a: under the per-session lock, so two children of one session
       // never race on the record. Every cmux call has a timeout.
       if (
@@ -1325,6 +1376,7 @@ export async function applyCapture(
     tabTitle,
     workspaceName,
     ...(cmuxLabels == null ? {} : {cmuxLabels}),
+    ...(pickup == null ? {} : {pickup}),
   };
 }
 
@@ -1378,6 +1430,7 @@ export function captureRunRecord(
           }
         : outcome.sessionBead;
   }
+  if (outcome.pickup != null) record.pickup = outcome.pickup;
   if (outcome.workspaceName != null) {
     record.workspaceName = workspaceSyncRecord(outcome.workspaceName);
   }
@@ -1450,8 +1503,13 @@ export async function runThreadCaptureApply(
       options.nameWorkspaces ??
       (sessionBeads &&
         resolveThreadConfig({cwd: cwd ?? undefined, env}).nameWorkspaces);
+    const autoPickup =
+      options.autoPickup ??
+      (sessionBeads &&
+        resolveThreadConfig({cwd: cwd ?? undefined, env}).handoff.autoPickup);
     outcome = await applyCapture({
       ...options,
+      autoPickup,
       cwd,
       nameWorkspaces,
       sessionBeads,

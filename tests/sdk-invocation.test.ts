@@ -39,6 +39,7 @@ import {
 } from '../src/sdk-invocation';
 import {sdkTagExistsOnRemote} from '../src/sdk-latest';
 import {addUsageCheckHook} from '../src/usage-check-setup';
+import {captureWriteStdout} from './capture-stdout';
 import {createProjectSandbox, createSandbox, type Sandbox} from './sandbox';
 
 const sandboxes: Sandbox[] = [];
@@ -494,11 +495,10 @@ describe('a script named justin-sdk shadows the bin (dchjw.4 AC6 / F8)', () => {
     );
 
     const lines: string[] = [];
-    const originalLog = console.log;
+    const stdout = captureWriteStdout((text) => {
+      lines.push(text);
+    });
     const originalError = console.error;
-    console.log = (...args: unknown[]): void => {
-      lines.push(args.map(String).join(' '));
-    };
     console.error = (...args: unknown[]): void => {
       lines.push(args.map(String).join(' '));
     };
@@ -506,7 +506,7 @@ describe('a script named justin-sdk shadows the bin (dchjw.4 AC6 / F8)', () => {
     try {
       exitCode = await runDoctor(sb.path);
     } finally {
-      console.log = originalLog;
+      stdout.mockRestore();
       console.error = originalError;
     }
 
@@ -537,18 +537,17 @@ describe('a script named justin-sdk shadows the bin (dchjw.4 AC6 / F8)', () => {
     );
 
     const lines: string[] = [];
-    const originalLog = console.log;
+    const stdout = captureWriteStdout((text) => {
+      lines.push(text);
+    });
     const originalError = console.error;
-    console.log = (...args: unknown[]): void => {
-      lines.push(args.map(String).join(' '));
-    };
     console.error = (...args: unknown[]): void => {
       lines.push(args.map(String).join(' '));
     };
     try {
       await runDoctor(sb.path);
     } finally {
-      console.log = originalLog;
+      stdout.mockRestore();
       console.error = originalError;
     }
 

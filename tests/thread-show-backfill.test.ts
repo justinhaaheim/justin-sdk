@@ -17,7 +17,7 @@
 
 import type {BackfillSession} from '../src/thread/backfill';
 
-import {describe, expect, spyOn, test} from 'bun:test';
+import {describe, expect, test} from 'bun:test';
 import {mkdtempSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
@@ -35,6 +35,7 @@ import {
   runThreadShow,
   showsNotesAsReport,
 } from '../src/thread/show';
+import {captureWriteStdout} from './capture-stdout';
 import {createFakeBd, type FakeIssue} from './fake-bd';
 
 /**
@@ -124,11 +125,9 @@ async function show(issue: FakeIssue, full: boolean): Promise<string> {
   state.issues = [issue];
   fake.write(state);
   const printed: string[] = [];
-  const spy = spyOn(console, 'log').mockImplementation(
-    (...parts: unknown[]) => {
-      printed.push(parts.map(String).join(' '));
-    },
-  );
+  const spy = captureWriteStdout((text) => {
+    printed.push(text);
+  });
   try {
     await runThreadShow({
       env: {

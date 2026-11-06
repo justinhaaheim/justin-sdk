@@ -245,7 +245,8 @@ function fakeCmux(stateDir: string, failSend: string | null = null): Fake {
       }
       case 'new-workspace': {
         const window = windows.get(value(args, '--window'));
-        if (window == null) return {kind: 'failed', reason: 'no such window'};
+        if (window == null)
+          return {kind: 'failed', reason: 'no such window', timedOut: false};
         const session = SESSION_IN.exec(value(args, '--command'))?.[0] ?? null;
         const id = uuid('C');
         const ref = `workspace:${next}`;
@@ -292,7 +293,8 @@ function fakeCmux(stateDir: string, failSend: string | null = null): Fake {
       case 'read-screen': {
         const ref = value(args, '--surface');
         const found = allSurfaces().find((entry) => entry.ref === ref);
-        if (found == null) return {kind: 'failed', reason: `no surface ${ref}`};
+        if (found == null)
+          return {kind: 'failed', reason: `no surface ${ref}`, timedOut: false};
         const read = reads.get(ref) ?? 0;
         reads.set(ref, read + 1);
         const text = screen(found, read, sent.get(ref) ?? []);
@@ -300,6 +302,7 @@ function fakeCmux(stateDir: string, failSend: string | null = null): Fake {
           ? {
               kind: 'failed',
               reason: 'internal_error: Failed to read terminal text',
+              timedOut: false,
             }
           : {kind: 'ok', stdout: text};
       }
@@ -308,7 +311,8 @@ function fakeCmux(stateDir: string, failSend: string | null = null): Fake {
           (newestRecord()?.restore as {entries?: unknown} | undefined)
             ?.entries ?? null,
         );
-        if (failSend != null) return {kind: 'failed', reason: failSend};
+        if (failSend != null)
+          return {kind: 'failed', reason: failSend, timedOut: false};
         const ref = value(args, '--surface');
         // The text is the argument after `--`.
         const text = args[args.indexOf('--') + 1] ?? '';
@@ -319,6 +323,7 @@ function fakeCmux(stateDir: string, failSend: string | null = null): Fake {
         return {
           kind: 'failed',
           reason: `the fake does not know ${commandOf(args)}`,
+          timedOut: false,
         };
     }
   };

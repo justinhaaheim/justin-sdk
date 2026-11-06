@@ -23,6 +23,8 @@
  *   ]);
  */
 
+import {writeStdoutSync} from './write-stdout';
+
 // ---------------------------------------------------------------------------
 // ANSI helpers
 // ---------------------------------------------------------------------------
@@ -68,7 +70,7 @@ export function stripAnsi(text: string): string {
  * hand the report back as a string instead (home-base-dchjw.9).
  *
  * Two methods, because the two kinds of output are not interchangeable: `line`
- * is a summary/progress line and supplies its own newline (it is `console.log`);
+ * is a summary/progress line and supplies its own newline;
  * `raw` is a child process's own bytes, already carrying whatever newlines it
  * had. Collapsing them would insert newlines into streamed command output.
  */
@@ -77,12 +79,15 @@ export interface OutputSink {
   raw: (text: string) => void;
 }
 
+// Through the helper because a tree run can print any amount (a child's lint
+// output), and both `console.log` and `process.stdout.write` lose text when a
+// pipe is full (see write-stdout.ts).
 const CONSOLE_SINK: OutputSink = {
   line: (text) => {
-    console.log(text);
+    writeStdoutSync(`${text}\n`);
   },
   raw: (text) => {
-    process.stdout.write(text);
+    writeStdoutSync(text);
   },
 };
 
@@ -591,18 +596,20 @@ async function attemptFixes(
 
   if (fixable.length === 0) return results;
 
-  console.log(
+  CONSOLE_SINK.line(
     `\n${YELLOW}Attempting fixes for ${fixable.length} check(s)...${RESET}\n`,
   );
 
   for (const r of fixable) {
     const fixCmd = fixDescription(r.checkResult);
-    console.log(`  ${YELLOW}→${RESET} ${r.label}: ${DIM}${fixCmd}${RESET}`);
+    CONSOLE_SINK.line(
+      `  ${YELLOW}→${RESET} ${r.label}: ${DIM}${fixCmd}${RESET}`,
+    );
     await runFix(r.checkResult, r.label);
   }
 
   // Re-run only the checks that had fixes
-  console.log(`\n${YELLOW}Re-running fixed checks...${RESET}\n`);
+  CONSOLE_SINK.line(`\n${YELLOW}Re-running fixed checks...${RESET}\n`);
   const fixedLabels = new Set(fixable.map((r) => r.label));
   const updatedResults = [...results];
 
@@ -649,7 +656,7 @@ export async function runChecks(
   };
 
   if (!quiet) {
-    console.log(
+    CONSOLE_SINK.line(
       `Running ${entries.length} checks ${serial ? 'serially' : 'in parallel'}...\n`,
     );
   }

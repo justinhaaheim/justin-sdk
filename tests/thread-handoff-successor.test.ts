@@ -173,6 +173,7 @@ function fakeCmux(
     return Promise.resolve({
       kind: 'failed',
       reason: `the fake cmux does not know ${args.join(' ')}`,
+      timedOut: false,
     });
   };
   return {calls, run};
@@ -509,7 +510,11 @@ describe('knob on: the gate passes', () => {
   test('a tab mark that fails is reported and the exit stays 0 (mbnjv.3)', async () => {
     const w = world(ON);
     const cmux = fakeCmux({
-      renameTab: {kind: 'failed', reason: 'cmux rename-tab failed: boom'},
+      renameTab: {
+        kind: 'failed',
+        reason: 'cmux rename-tab failed: boom',
+        timedOut: false,
+      },
       screens: [CLAUDE_UP],
     });
     const result = await threadHandoffCommand(
@@ -699,6 +704,7 @@ describe('knob on: the gate passes', () => {
       newSurface: {
         kind: 'failed',
         reason: 'cmux new-surface --workspace x failed: Error: pane not found',
+        timedOut: false,
       },
     });
     const result = await threadHandoffCommand(
@@ -747,6 +753,25 @@ describe('knob on: --dry-run', () => {
     expect(writeCalls(cmux.calls)).toEqual([]);
     expect(existsSync(handoffsDir(w))).toBe(false);
     expect(bead(w).labels).not.toContain('handed-off');
+  });
+
+  test('home-base-npbse.1.2: the variable and the check-only kickoff come with autoPickup on, and neither without it', async () => {
+    const dryText = async (handoff: Record<string, unknown>) => {
+      const w = world(handoff);
+      const result = await threadHandoffCommand(
+        opts(w, {dryRun: true}),
+        deps(fakeCmux(), gateOf(PASS)),
+      );
+      return {beadId: w.beadId, text: result.lines.join('\n')};
+    };
+    const on = await dryText({...ON, autoPickup: true});
+    expect(on.text).toContain(`JUSTIN_SDK_CONTINUES=${on.beadId}`);
+    expect(on.text).toContain('if it says the pickup is not done');
+    expect(on.text).not.toContain('First run the command');
+    const off = await dryText(ON);
+    expect(off.text).not.toContain('JUSTIN_SDK_CONTINUES');
+    expect(off.text).not.toContain('if it says the pickup is not done');
+    expect(off.text).toContain('First run the command');
   });
 
   test('a refusing gate is printed, and still nothing is written', async () => {
@@ -1087,7 +1112,11 @@ describe('F11 (home-base-mbnjv.8): one successor per session', () => {
       },
       now: NOW,
       readers: {
-        callerScreen: () => ({kind: 'unreadable', reason: 'not reached'}),
+        callerScreen: () => ({
+          kind: 'unreadable',
+          reason: 'not reached',
+          timedOut: false,
+        }),
         chain: null,
         guard: () => ({kind: 'registered', where: []}),
         guardPass: () => ({kind: 'valid', path: '/p'}),
@@ -1098,8 +1127,16 @@ describe('F11 (home-base-mbnjv.8): one successor per session', () => {
             db: session.db,
             env: w.env,
           }),
-        liveSessions: () => ({kind: 'failed', reason: 'not reached'}),
-        pingCmux: () => ({kind: 'failed', reason: 'not reached'}),
+        liveSessions: () => ({
+          kind: 'failed',
+          reason: 'not reached',
+          timedOut: false,
+        }),
+        pingCmux: () => ({
+          kind: 'failed',
+          reason: 'not reached',
+          timedOut: false,
+        }),
         usage: () => ({kind: 'missing', path: '/u'}),
       },
     });
@@ -1137,7 +1174,11 @@ describe('F11 (home-base-mbnjv.8): one successor per session', () => {
     const cmux = fakeCmux({screens: [CLAUDE_UP]});
     const result = await threadHandoffCommand(opts(w), {
       ...deps(cmux, gateOf(PASS)),
-      recordLaunch: () => ({kind: 'failed', reason: 'br is locked'}),
+      recordLaunch: () => ({
+        kind: 'failed',
+        reason: 'br is locked',
+        timedOut: false,
+      }),
     });
     expect(result.exitCode).toBe(1);
     expect(result.lines.join('\n')).toContain(

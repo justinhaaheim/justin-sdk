@@ -69,6 +69,7 @@ import {
   stepUsageCheckHooks,
   USAGE_CHECK_HOOK_EVENTS,
 } from '../src/usage-check-setup';
+import {captureWriteStdout} from './capture-stdout';
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'usage-check-'));
@@ -140,15 +141,14 @@ function writeTranscript(dir: string, entries: unknown[]): string {
 /** Run the hook, capturing whatever it prints. Returns null when silent. */
 function runCapturing(input: unknown): Record<string, unknown> | null {
   const lines: string[] = [];
-  const original = console.log;
-  console.log = (...args: unknown[]) => {
-    lines.push(args.map(String).join(' '));
-  };
+  const capture = captureWriteStdout((text) => {
+    lines.push(text);
+  });
   let exit: number;
   try {
     exit = runUsageCheck({stdin: JSON.stringify(input)});
   } finally {
-    console.log = original;
+    capture.mockRestore();
   }
   // A hook that can block the user's prompt must never exit non-zero.
   expect(exit).toBe(0);

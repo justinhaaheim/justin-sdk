@@ -4,8 +4,8 @@
  *
  * `thread done` / `thread archive` (closeSession) append ONE `mark` line BEFORE
  * they change anything: every bead they are about to close with the status it
- * had, every adopted request they are about to release, and every label they
- * are about to add. A mark whose line cannot be written is refused, so nothing
+ * had, every adopted request they are about to release, every bead they are
+ * about to leave with another session, and every label they are about to add. A mark whose line cannot be written is refused, so nothing
  * is ever closed that `thread unmark` could not put back.
  *
  * `thread unmark` reverses the newest mark line not yet undone and then
@@ -40,6 +40,11 @@ const markLine = z.object({
   kind: z.literal('mark'),
   /** Labels the mark adds to the session bead (`archived`, when it lacked it). */
   labelsAdded: z.array(z.string()),
+  /**
+   * Beads another session also holds: the mark removes only this session's
+   * `sid:` (home-base-npbse.1.3). A line written before that has no such beads.
+   */
+  leftWithOthers: z.array(located).default([]),
   mode: z.enum(['archive', 'done']),
   /** Adopted requests the mark releases (their request and sid labels removed). */
   released: z.array(located),

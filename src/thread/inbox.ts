@@ -34,6 +34,7 @@ import {
   spacedList,
   wrapHanging,
 } from '../cli-style';
+import {writeStdout} from '../write-stdout';
 import {SKIP_COMMENT} from './answer';
 import {
   type BdComment,
@@ -396,10 +397,12 @@ export async function runThreadInbox(
     threadTitle: thread.title ?? '(no title)',
   };
 
-  console.log(
-    options.json === true
-      ? JSON.stringify(view, null, 2)
-      : renderInbox(view, outputStyle()),
+  await writeStdout(
+    `${
+      options.json === true
+        ? JSON.stringify(view, null, 2)
+        : renderInbox(view, outputStyle())
+    }\n`,
   );
   return readFailed ? 1 : 0;
 }

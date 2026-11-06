@@ -387,10 +387,15 @@ export const LIVE_TREE_ARGS = [
   '--all',
 ] as const;
 
+/** The live surfaces, or why not; timedOut carries CmuxCall's (home-base-89c8h.1). */
+export type LiveSurfacesRead =
+  | {ok: false; reason: string; timedOut: boolean}
+  | {ok: true; value: LiveSurface[]};
+
 /** Every live surface with its tty, through the injectable cmux runner. */
 export async function readLiveSurfaces(
   run: CmuxRunner,
-): Promise<SourceRead<LiveSurface[]>> {
+): Promise<LiveSurfacesRead> {
   let call: Awaited<ReturnType<CmuxRunner>>;
   try {
     call = await run(LIVE_TREE_ARGS);
@@ -398,9 +403,12 @@ export async function readLiveSurfaces(
     return {
       ok: false,
       reason: `cmux ${LIVE_TREE_ARGS.join(' ')} could not run: ${errorText(error)}`,
+      timedOut: false,
     };
   }
-  if (call.kind === 'failed') return {ok: false, reason: call.reason};
+  if (call.kind === 'failed') {
+    return {ok: false, reason: call.reason, timedOut: call.timedOut};
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(call.stdout) as unknown;
@@ -408,6 +416,7 @@ export async function readLiveSurfaces(
     return {
       ok: false,
       reason: `cmux ${LIVE_TREE_ARGS.join(' ')} printed text that is not JSON: ${firstLine(error)}`,
+      timedOut: false,
     };
   }
   if (
@@ -418,6 +427,7 @@ export async function readLiveSurfaces(
     return {
       ok: false,
       reason: `cmux ${LIVE_TREE_ARGS.join(' ')} printed JSON with no windows list`,
+      timedOut: false,
     };
   }
   return {ok: true, value: flattenTree(parsed as RawTree)};

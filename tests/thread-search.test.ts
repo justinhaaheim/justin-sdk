@@ -49,6 +49,7 @@ import {
   withinWindow,
   withSessionBeads,
 } from '../src/thread/search';
+import {captureWriteStdout} from './capture-stdout';
 import {createFakeBd, type FakeBd} from './fake-bd';
 
 const NOW = new Date('2026-09-19T12:00:00.000Z');
@@ -62,8 +63,8 @@ afterEach(() => {
 function captureStdout(): string[] {
   const lines: string[] = [];
   spies.push(
-    spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-      lines.push(args.join(' '));
+    captureWriteStdout((text) => {
+      lines.push(text);
     }),
   );
   return lines;
@@ -1243,7 +1244,7 @@ describe('runThreadSearch', () => {
     });
     expect(code).toBe(1);
     // At the header column, with a blank line before it (yukaf.5).
-    expect(out.slice(-2)).toEqual([
+    expect(out.join('\n').split('\n').slice(-2)).toEqual([
       '',
       '  no matches in 2 sessions searched (1 threads, 1 archived report across 1 session, 0 message logs)',
     ]);

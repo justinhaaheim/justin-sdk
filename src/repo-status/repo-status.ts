@@ -39,6 +39,7 @@ import {
   helpWrapWidth,
   UNKNOWN_VERSION,
 } from '../sdk-identity';
+import {writeStdoutSync} from '../write-stdout';
 import {DEFAULT_PAIR_CAP} from './overlap';
 import {buildPlan, executePlan, executeRemotePlan, renderPlan} from './plan';
 import {renderReportPretty} from './pretty';
@@ -554,13 +555,15 @@ function emit(
     return 1;
   }
   const ledger = format === 'ledger';
-  console.log(
-    ledger
-      ? renderLedger(report, sessions)
-      : render(
-          sessions == null ? report : {...report, sessions: sessions.json},
-          format === 'json',
-        ),
+  writeStdoutSync(
+    `${
+      ledger
+        ? renderLedger(report, sessions)
+        : render(
+            sessions == null ? report : {...report, sessions: sessions.json},
+            format === 'json',
+          )
+    }\n`,
   );
   if (
     !report.enrichments.prs &&
@@ -1001,7 +1004,9 @@ const planCommand = {
     }
     // YAML by default, through the SAME render() as status and apply: one typed
     // object, one schema, whatever the format (home-base-qyu1.16).
-    console.log(args.markdown ? renderPlan(plan) : render(plan, args.json));
+    writeStdoutSync(
+      `${args.markdown ? renderPlan(plan) : render(plan, args.json)}\n`,
+    );
   },
 };
 
@@ -1122,7 +1127,7 @@ const applyCommand = {
       );
       results.push(...executeRemotePlan(plan, args.repo));
     }
-    console.log(render(results, args.json));
+    writeStdoutSync(`${render(results, args.json)}\n`);
   },
 };
 

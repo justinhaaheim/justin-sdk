@@ -586,6 +586,7 @@ describe('after the mark (stopAfterMark, runSessionClose)', () => {
     kind: 'closed',
     leftOpen: [],
     leftOpenProblems: [],
+    leftWithOthers: [],
     mode: 'archive',
     reason: 'archived: x',
     released: [],

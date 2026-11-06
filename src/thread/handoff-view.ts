@@ -33,6 +33,7 @@ import {
   CONTINUED_BY_LABEL_PREFIX,
   CONTINUES_LABEL_PREFIX,
   HANDED_OFF_LABEL,
+  HANDOFF_DEFERRED_LABEL,
   HANDOFF_REFUSED_LABEL,
 } from './session-bead';
 import {locateSessionBead} from './session-handoff';
@@ -88,6 +89,65 @@ export function handoffRefusalOf(
     if (at >= 0) return line.slice(at).trim();
   }
   return `${HANDOFF_REFUSED_WORDS} reason not recorded (the session bead is labelled ${HANDOFF_REFUSED_LABEL}, but its notes hold no "${HANDOFF_REFUSED_WORDS}" line)`;
+}
+
+/** The words every deferral line starts with (recordDeferral writes them). */
+export const HANDOFF_DEFERRED_WORDS = 'handoff deferred:';
+
+/**
+ * A handoff that did not start a successor and has not been followed by one:
+ * what `thread inbox --json` gives each session (home-base-89c8h.3).
+ */
+export interface HandoffStop {
+  /** The note line's stamp, as written; null when no line was readable. */
+  at: string | null;
+  /** The line's detail, or what the bead says when no line was readable. */
+  detail: string;
+  /** The reason the line names; null when no line was readable. */
+  reason: string | null;
+  state: 'deferred' | 'refused';
+}
+
+/** recordRefusal's and recordDeferral's line: "- <stamp>: <words> <reason> — <detail>". */
+const HANDOFF_STOP_LINE =
+  /^- (.+?): handoff (refused|deferred): (\S+) — (.*)$/u;
+
+/**
+ * Why a handoff stopped short, from the bead's labels and its newest note line
+ * for a label it carries. Null when it carries neither label, or when a
+ * successor is linked: then the stop is history, the rule statusWithRefusal
+ * uses. A pass removes handoff-deferred, so an old deferred line alone is
+ * nothing. A label with no readable line says so, and is never null (rule 7).
+ */
+export function handoffStopOf(
+  labels: readonly string[],
+  notes: string | null,
+): HandoffStop | null {
+  if (continuedByOf(labels).length > 0) return null;
+  const refused = labels.includes(HANDOFF_REFUSED_LABEL);
+  const deferred = labels.includes(HANDOFF_DEFERRED_LABEL);
+  if (!refused && !deferred) return null;
+  const lines = (notes ?? '').split('\n');
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const match = HANDOFF_STOP_LINE.exec(lines[index] ?? '');
+    const state = match?.[2];
+    if (state === 'refused' ? refused : state === 'deferred' && deferred) {
+      return {
+        at: match?.[1] ?? null,
+        detail: match?.[4] ?? '',
+        reason: match?.[3] ?? null,
+        state: state === 'refused' ? 'refused' : 'deferred',
+      };
+    }
+  }
+  const label = refused ? HANDOFF_REFUSED_LABEL : HANDOFF_DEFERRED_LABEL;
+  const words = refused ? HANDOFF_REFUSED_WORDS : HANDOFF_DEFERRED_WORDS;
+  return {
+    at: null,
+    detail: `the session bead is labelled ${label}, but its notes hold no readable "${words}" line`,
+    reason: null,
+    state: refused ? 'refused' : 'deferred',
+  };
 }
 
 /**

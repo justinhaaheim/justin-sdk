@@ -68,13 +68,23 @@ import {
   typedCommandTooLong,
   zshWord,
 } from './respawn';
-import {SPAWN_KICKOFF_ENV, SPAWNED_BY_SESSION_ENV} from './session-bead';
+import {
+  CONTINUES_ENV,
+  SPAWN_KICKOFF_ENV,
+  SPAWNED_BY_SESSION_ENV,
+} from './session-bead';
 import {sessionDisplayName} from './session-name';
 import {sessionIdFrom} from './session-select';
 import {spawnGate} from './spawn-gate';
 import {describeNewWorkspaceRecord, recordNewWorkspace} from './workspace-name';
 
 export interface SpawnOptions {
+  /**
+   * `--continues <bead>` (home-base-npbse.1.2): the session this one continues,
+   * typed as JUSTIN_SDK_CONTINUES. The new session's own repo decides, through
+   * its autoPickup knob, whether anything reads it.
+   */
+  continues?: string | null;
   /** Where a relative <dir> is resolved from (default: process.cwd()). */
   cwd?: string;
   /** The directory the new session starts in, as typed (`~` allowed). */
@@ -105,9 +115,9 @@ export interface SpawnDeps {
   run: CmuxRunner;
 }
 
-/** Exit 0 opened (or a dry run) · 1 cmux did not open it · 2 refused · 3 refused by the handoff gate. */
+/** Exit 0 opened (or a dry run) · 1 cmux did not open it · 2 refused · 3 refused by the handoff gate · 4 deferred: cmux too slow to decide. */
 export interface SpawnResult {
-  exitCode: 0 | 1 | 2 | 3;
+  exitCode: 0 | 1 | 2 | 3 | 4;
   lines: string[];
 }
 
@@ -340,6 +350,8 @@ export function writeKickoffFile(path: string, kickoff: string): string | null {
  * typed line stays short however long the kickoff is.
  */
 export function spawnCommand(input: {
+  /** `--continues <bead>`: typed as JUSTIN_SDK_CONTINUES (home-base-npbse.1.2). */
+  continues?: string | null;
   /** The file holding the first prompt; null: no kickoff. */
   kickoffFile: string | null;
   model: string | null;
@@ -349,6 +361,9 @@ export function spawnCommand(input: {
   spawnedBySession?: string | null;
 }): string {
   const assignments: string[] = [];
+  if (input.continues != null) {
+    assignments.push(`${CONTINUES_ENV}=${zshWord(input.continues)}`);
+  }
   if (input.spawnedBySession != null) {
     assignments.push(
       `${SPAWNED_BY_SESSION_ENV}=${zshWord(input.spawnedBySession)}`,
@@ -435,6 +450,7 @@ export async function spawnSession(
           text: kickoff,
         };
   const command = spawnCommand({
+    continues: options.continues ?? null,
     kickoffFile: kickoffPlan?.path ?? null,
     model,
     name: workspaceName,

@@ -174,6 +174,7 @@ export function statusAfterClose(input: {
     openP0: input.questions.filter(
       (entry) =>
         entry.issue.id !== input.sessionBeadId &&
+        !input.releasedIds.has(entry.issue.id) &&
         !closedNow(entry) &&
         entry.issue.priority === 0,
     ).length,

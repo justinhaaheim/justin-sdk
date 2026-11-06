@@ -17,6 +17,7 @@ import {homedir} from 'os';
 import {join, resolve} from 'path';
 
 import {outputStyle} from '../cli-style';
+import {writeStdout} from '../write-stdout';
 import {readRepoGlance, type RepoGlance} from './checkouts';
 import {scanRepoSessions, summarizeRepos} from './sessions';
 import {renderRepos} from './views';
@@ -103,7 +104,7 @@ export async function runRepos(args: ReposArgs): Promise<number> {
     }
   }
   if (args.json) {
-    process.stdout.write(
+    await writeStdout(
       `${JSON.stringify(
         {
           days,
@@ -126,7 +127,7 @@ export async function runRepos(args: ReposArgs): Promise<number> {
     );
     return 0;
   }
-  process.stdout.write(
+  await writeStdout(
     renderRepos(
       {
         days,

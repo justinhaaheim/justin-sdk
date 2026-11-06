@@ -339,6 +339,12 @@ const componentConfigSchema = z
           ),
         handoff: z
           .looseObject({
+            autoPickup: z
+              .boolean()
+              .optional()
+              .describe(
+                'home-base-npbse.1.2. DEFAULT FALSE: a successor picks up its handoff only when its model runs `thread request --continues`. True: `thread handoff` types JUSTIN_SDK_CONTINUES=<predecessor bead> before `claude`, the capture hook links the session and carries every open request and question over at every prompt and turn end until that holds, the kickoff tells the successor to check rather than run the command, the [thread] line and `thread status` say "handoff pickup not done" until it holds, and the inbox says "handed off, not picked up" 10 minutes after a handoff that nobody picked up.',
+              ),
             maxLiveSessions: z
               .number()
               .int()

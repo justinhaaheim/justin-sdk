@@ -37,6 +37,7 @@ import {emitHookOutput} from './hook-output';
 import {hasMacBuildConfig} from './mac-build-config';
 import {sdkRun} from './sdk-invocation';
 import {threadEnabledFromFiles} from './thread/enabled-knob';
+import {writeStdoutSync} from './write-stdout';
 
 const DEFAULT_REPO_URL = 'https://github.com/justinhaaheim/prompts.git';
 const DEFAULT_MAX_AGE_SECONDS = 300;
@@ -710,7 +711,7 @@ export function runPrime(projectRoot: string, opts: PrimeOptions): number {
       fullTextCommand: sdkRun(`prime --partition ${opts.partition ?? 'full'}`),
     });
   } else {
-    process.stdout.write(`${markdown}\n`);
+    writeStdoutSync(`${markdown}\n`);
     process.stderr.write(`\n${status}\n`);
     for (const warning of warnings) process.stderr.write(`  ⚠ ${warning}\n`);
   }

@@ -38,16 +38,26 @@
  * untouched — and printed under "Released back to the backlog:". Archiving a
  * session that worked on an epic must not close the epic.
  *
+ * WHAT ANOTHER SESSION ALSO HOLDS IS NOT THIS SESSION'S TO CLOSE (home-base-
+ * npbse.1.3): since home-base-npbse.1.1 every handoff puts the successor's
+ * `sid:` on the predecessor's open requests and questions, so marking the old
+ * tab finished used to close or release the successor's work. A bead that
+ * carries any other session's `sid:` loses only this session's `sid:`; its
+ * `request` label, its status and its other labels stay. It is printed under
+ * "Left with another session" with the session that holds it. The last session
+ * to hold a bead closes or releases it as above.
+ *
  *   thread unmark [--session <bead|sid>]
  *                                   reverses the newest done/archive not yet
  *                                   undone (for that session, or of all):
  *                                   reopens each bead it closed and puts back
  *                                   the status it had, removes the label it
  *                                   added, gives released requests their
- *                                   request and sid labels back (home-base-
- *                                   yukaf.9, D-GMAIL-KEYS; the record is the
- *                                   one closeSession writes BEFORE it closes,
- *                                   marks-undo.ts).
+ *                                   request and sid labels back, gives a bead
+ *                                   left with another session its sid label
+ *                                   back (home-base-yukaf.9, D-GMAIL-KEYS; the
+ *                                   record is the one closeSession writes
+ *                                   BEFORE it closes, marks-undo.ts).
  *
  * Exit: 0 written · 1 a read or write failed, or no session · 2 usage.
  * `thread unmark`: 0 restored · 1 a br call failed (named) · 2 nothing to undo.
@@ -84,7 +94,8 @@ import {
   undoableById,
   undoLine,
 } from './marks-undo';
-import {REQUEST_LABEL, sidLabel} from './session-bead';
+import {REQUEST_LABEL, SID_LABEL_PREFIX, sidLabel} from './session-bead';
+import {readSessionSightings, sessionBeadSighting} from './session-index';
 import {
   selectSession,
   sessionBeadsKnob,
@@ -264,6 +275,12 @@ interface ClosedBead {
   title: string;
 }
 
+/** A bead left open because another session holds it too. */
+export interface LeftWithOthers extends ClosedBead {
+  /** How to name each session that holds it: `<session bead> (<id>)`, or the id. */
+  heldBy: string[];
+}
+
 export type CloseSessionOutcome =
   | {
       alreadyClosed: boolean;
@@ -274,6 +291,11 @@ export type CloseSessionOutcome =
       leftOpen: ClosedBead[];
       /** Why some children could not be read back; non-empty means exit 1. */
       leftOpenProblems: string[];
+      /**
+       * Beads another session also holds (home-base-npbse.1.3): only this
+       * session's `sid:` was removed, and they stay open with that session.
+       */
+      leftWithOthers: LeftWithOthers[];
       mode: CloseMode;
       reason: string;
       /**
@@ -311,6 +333,26 @@ export function closeReasonFor(mode: CloseMode, text: string | null): string {
 function deepestFirst(entries: readonly LocatedIssue[]): LocatedIssue[] {
   const depth = (issue: BrIssue): number => issue.id.split('.').length;
   return [...entries].sort((a, b) => depth(b.issue) - depth(a.issue));
+}
+
+/** Every session id in a bead's `sid:` labels except this one. */
+function otherHolders(issue: BrIssue, sessionId: string): string[] {
+  const mine = sidLabel(sessionId);
+  return issue.labels
+    .filter((label) => label.startsWith(SID_LABEL_PREFIX) && label !== mine)
+    .map((label) => label.slice(SID_LABEL_PREFIX.length));
+}
+
+/**
+ * The session bead's id with the session id, for a person. The id alone names
+ * the session when the index cannot say more, so a failed read changes only the
+ * wording and never what is decided.
+ */
+function nameHolder(sessionId: string, env: EnvLike): string {
+  const read = readSessionSightings(sessionId, env);
+  const created =
+    read.kind === 'read' ? sessionBeadSighting(read.sightings) : null;
+  return created == null ? sessionId : `${created.beadId} (${sessionId})`;
 }
 
 export async function closeSession(
@@ -391,11 +433,25 @@ export async function closeSession(
     entry.issue.status !== 'closed' &&
     entry.issue.status !== 'tombstone' &&
     entry.issue.id !== session.bead.id;
+  const openQuestions = questions.issues.filter(open);
   const openRequests = requests.issues.filter(open);
-  const toRelease = openRequests.filter((item) => !isCreated(item));
+  // home-base-npbse.1.3: what another session also holds is that session's.
+  const heldElsewhere = (entry: LocatedIssue): boolean =>
+    otherHolders(entry.issue, session.sessionId).length > 0;
+  const onlyMine = (entry: LocatedIssue): boolean => !heldElsewhere(entry);
+  const toLeave = [
+    ...new Map(
+      [...openQuestions, ...openRequests]
+        .filter(heldElsewhere)
+        .map((entry) => [`${entry.db}\u0000${entry.issue.id}`, entry]),
+    ).values(),
+  ];
+  const toRelease = openRequests
+    .filter(onlyMine)
+    .filter((item) => !isCreated(item));
   const order = [
-    ...deepestFirst(questions.issues.filter(open)),
-    ...deepestFirst(openRequests.filter(isCreated)),
+    ...deepestFirst(openQuestions.filter(onlyMine)),
+    ...deepestFirst(openRequests.filter(onlyMine).filter(isCreated)),
   ];
   const alreadyClosed = session.bead.status === 'closed';
   const addArchivedLabel =
@@ -423,6 +479,10 @@ export async function closeSession(
           ]),
     ],
     labelsAdded: addArchivedLabel ? [ARCHIVED_LABEL] : [],
+    leftWithOthers: toLeave.map((entry) => ({
+      db: entry.db,
+      id: entry.issue.id,
+    })),
     mode,
     released: toRelease.map((entry) => ({db: entry.db, id: entry.issue.id})),
     sessionBeadId: session.bead.id,
@@ -436,6 +496,7 @@ export async function closeSession(
   if (
     undo.closed.length > 0 ||
     undo.released.length > 0 ||
+    undo.leftWithOthers.length > 0 ||
     undo.labelsAdded.length > 0
   ) {
     const recorded = appendMarkUndo(undo, env);
@@ -472,6 +533,25 @@ export async function closeSession(
       released.push({id: entry.issue.id, title: entry.issue.title});
     }
   }
+  const leftWithOthers: LeftWithOthers[] = [];
+  for (const entry of toLeave) {
+    const result = brUpdate({db: entry.db, env}, entry.issue.id, {
+      removeLabels: [sidLabel(session.sessionId)],
+    });
+    if (result.kind === 'failed') {
+      failures.push(
+        `${entry.issue.id} (${entry.issue.title}) still carries this session's label, though another session holds it: ${describeBrFailed(result)}`,
+      );
+    } else {
+      leftWithOthers.push({
+        heldBy: otherHolders(entry.issue, session.sessionId).map((holder) =>
+          nameHolder(holder, env),
+        ),
+        id: entry.issue.id,
+        title: entry.issue.title,
+      });
+    }
+  }
   for (const entry of order) {
     const result = brClose({db: entry.db, env}, entry.issue.id, reason, {
       force: true,
@@ -502,10 +582,13 @@ export async function closeSession(
   // What --force left open: the open children of the session bead and of every
   // request, read back AFTER the closes so the states are current.
   // Released requests are not closed, so their children are not listed here.
+  // Nor are the beads left with another session: they have their own heading.
+  const leftIds = new Set(toLeave.map((entry) => entry.issue.id));
   const parents = [
     {db: session.db, id: session.bead.id},
     ...requests.issues
       .filter((entry) => entry.issue.id !== session.bead.id)
+      .filter((entry) => !leftIds.has(entry.issue.id))
       .filter(
         (entry) =>
           isCreated(entry) ||
@@ -516,7 +599,7 @@ export async function closeSession(
   ];
   const leftOpen: ClosedBead[] = [];
   const leftOpenProblems: string[] = [];
-  const seen = new Set<string>();
+  const seen = new Set<string>(leftIds);
   for (const parent of parents) {
     const children = brChildren({db: parent.db, env}, parent.id);
     if (children.kind !== 'ok') {
@@ -544,7 +627,9 @@ export async function closeSession(
           mode,
           now: new Date(),
           questions: questions.issues,
-          releasedIds: new Set(released.map((bead) => bead.id)),
+          releasedIds: new Set(
+            [...released, ...leftWithOthers].map((bead) => bead.id),
+          ),
           requests: requests.issues,
           sessionBeadId: session.bead.id,
         }),
@@ -557,6 +642,7 @@ export async function closeSession(
     kind: 'closed',
     leftOpen,
     leftOpenProblems,
+    leftWithOthers,
     mode,
     reason,
     released,
@@ -594,6 +680,19 @@ export function describeCloseOutcome(
         );
         for (const bead of outcome.released)
           lines.push(`  - ${bead.id} · ${bead.title}`, '');
+      }
+      if (outcome.leftWithOthers.length > 0) {
+        lines.push(
+          '',
+          `Left with another session (it still holds them, so they stay open and only this session's label was removed): ${outcome.leftWithOthers.length}`,
+          '',
+        );
+        for (const bead of outcome.leftWithOthers) {
+          lines.push(
+            `  - ${bead.id} · ${bead.title} · held by ${bead.heldBy.join(', ')}`,
+            '',
+          );
+        }
       }
       if (outcome.leftOpen.length > 0) {
         lines.push(
@@ -725,6 +824,8 @@ export interface UnmarkOptions {
 export type UnmarkOutcome =
   | {
       failures: string[];
+      /** Beads left with another session that got this session's label back. */
+      heldAgain: string[];
       kind: 'unmarked';
       labelsRemoved: string[];
       mode: CloseMode;
@@ -811,7 +912,12 @@ export async function unmarkSession(
       status = 'open';
     }
     if (status !== bead.priorStatus) {
-      const result = brUpdate(target, bead.id, {status: bead.priorStatus});
+      // force: a bead left with another session stays open under the session
+      // bead, and br refuses in_progress on a bead with open children.
+      const result = brUpdate(target, bead.id, {
+        force: true,
+        status: bead.priorStatus,
+      });
       if (result.kind === 'failed') {
         failures.push(
           `${bead.id} was reopened but its status is NOT back to ${bead.priorStatus}: ${describeBrFailed(result)}`,
@@ -850,6 +956,21 @@ export async function unmarkSession(
     }
   }
 
+  // home-base-npbse.1.3: the mark removed only this session's `sid:` from these.
+  const heldAgain: string[] = [];
+  for (const bead of record.leftWithOthers) {
+    const result = brUpdate({db: bead.db, env}, bead.id, {
+      addLabels: [sidLabel(record.sessionId)],
+    });
+    if (result.kind === 'failed') {
+      failures.push(
+        `${bead.id} did NOT get this session's label back: ${describeBrFailed(result)}`,
+      );
+    } else {
+      heldAgain.push(bead.id);
+    }
+  }
+
   let statusFile: string | null = null;
   if (failures.length === 0) {
     const done = appendUndone(record.id, now.toISOString(), env);
@@ -876,6 +997,7 @@ export async function unmarkSession(
   }
   return {
     failures,
+    heldAgain,
     kind: 'unmarked',
     labelsRemoved,
     mode: record.mode,
@@ -913,6 +1035,12 @@ export function describeUnmarkOutcome(outcome: UnmarkOutcome): {
         lines.push(
           '',
           `Request labels given back: ${outcome.relabelled.join(', ')}`,
+        );
+      }
+      if (outcome.heldAgain.length > 0) {
+        lines.push(
+          '',
+          `Held by this session again: ${outcome.heldAgain.join(', ')}`,
         );
       }
       if (outcome.failures.length > 0) {

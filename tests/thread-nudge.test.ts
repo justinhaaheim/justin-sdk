@@ -9,7 +9,7 @@
 
 import type {Sandbox} from './sandbox';
 
-import {afterEach, describe, expect, spyOn, test} from 'bun:test';
+import {afterEach, describe, expect, test} from 'bun:test';
 import {appendFileSync, existsSync, mkdirSync, rmSync, writeFileSync} from 'fs';
 import {dirname, join} from 'path';
 
@@ -37,6 +37,7 @@ import {
 } from '../src/thread/nudge';
 import {fileRequest} from '../src/thread/request';
 import {ensureSessionBead} from '../src/thread/session-bead';
+import {captureWriteStdout} from './capture-stdout';
 import {initRepo} from './git-fixtures';
 import {needBr} from './pinned-br';
 import {createSandbox} from './sandbox';
@@ -219,8 +220,8 @@ describe('thread nudge: the decision table', () => {
     mkdirSync(exportPath); // a directory: EISDIR on read
     const out: string[] = [];
     spies.push(
-      spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-        out.push(args.join(' '));
+      captureWriteStdout((text) => {
+        out.push(text);
       }),
     );
     expect(
@@ -279,11 +280,9 @@ describe('thread nudge: once per turn', () => {
   test('the hook prints ONE hook-JSON line whose context is the nudge, mirrored to Justin; silent prints nothing', async () => {
     const w = world();
     const out: string[] = [];
-    const spy = spyOn(console, 'log').mockImplementation(
-      (...args: unknown[]) => {
-        out.push(args.join(' '));
-      },
-    );
+    const spy = captureWriteStdout((text) => {
+      out.push(text);
+    });
     spies.push(spy);
     expect(
       await runThreadNudgeHook({env: w.env, now: NOW, stdin: payload(w)}),
@@ -557,8 +556,8 @@ describe('thread nudge: the last-request warning', () => {
     close(w, id);
     const out: string[] = [];
     spies.push(
-      spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
-        out.push(args.join(' '));
+      captureWriteStdout((text) => {
+        out.push(text);
       }),
     );
     const command = `${closeCommand(id)} && git commit -qm 'docs: tidy'`;

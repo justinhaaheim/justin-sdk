@@ -50,44 +50,16 @@ import {basename} from 'node:path';
 import parse from 'shell-quote/parse';
 
 import {SDK_HANDOFF_CALL} from '../sdk-invocation';
+import {
+  CMUX_GLOBAL_OPTIONS,
+  CMUX_READ_ONLY_PREFIX,
+  CMUX_READ_ONLY_SUBCOMMANDS,
+} from './cmux-read-only';
 import {writeGuardPass} from './guard-pass';
 
 // ---------------------------------------------------------------------------
 // The lists (home-base-mbnjv.5 design field carries the same lists and why)
 // ---------------------------------------------------------------------------
-
-/**
- * cmux subcommands that only READ: they print state and change nothing. The
- * test each one passes: it cannot start a process in, type into, move, close
- * or open any pane, tab, workspace or window.
- */
-export const CMUX_READ_ONLY_SUBCOMMANDS = [
-  'identify',
-  'tree',
-  'read-screen',
-  'read-selection',
-  'capture-pane',
-  'current-window',
-  'current-workspace',
-  'ping',
-  'version',
-  'capabilities',
-  'top',
-  'memory',
-  'surface-health',
-  'sidebar-state',
-  'browser-status',
-  'help',
-  'guide',
-  'docs',
-] as const;
-
-/**
- * Every `list-*` subcommand is read-only too: list-windows, list-workspaces,
- * list-panes, list-pane-surfaces, list-panels, list-notifications,
- * list-status, list-log, list-buffers.
- */
-export const CMUX_READ_ONLY_PREFIX = 'list-';
 
 /**
  * Allowed although not read-only, each decided explicitly:
@@ -107,14 +79,6 @@ export const CMUX_ALLOWED_ACTIONS = [
   'markdown',
   'diff',
 ] as const;
-
-/** Options cmux accepts before the subcommand, each with whether it takes a value. */
-const CMUX_GLOBAL_OPTIONS: ReadonlyMap<string, boolean> = new Map([
-  ['--id-format', true],
-  ['--json', false],
-  ['--password', true],
-  ['--socket', true],
-]);
 
 /** Words that print help or the version wherever they stand first. */
 const HELP_WORDS = new Set(['--help', '-h']);

@@ -57,6 +57,7 @@ function fakeCmux(
         return Promise.resolve({
           kind: 'failed',
           reason: 'cmux tree failed: connect: Operation not permitted',
+          timedOut: false,
         });
       }
       return Promise.resolve(
@@ -91,6 +92,7 @@ function fakeCmux(
     return Promise.resolve({
       kind: 'failed',
       reason: `refused by the fake: ${args.join(' ')}`,
+      timedOut: false,
     });
   };
   return {calls, run};

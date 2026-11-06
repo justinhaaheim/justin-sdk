@@ -47,6 +47,8 @@ describe('componentConfig.thread.handoff', () => {
     const {handoff, problems} = resolveThreadConfig({cwd, env});
     expect(problems).toEqual([]);
     expect(handoff).toEqual({
+      autoPickup: false,
+      autoPickupSource: 'default',
       maxLiveSessions: HANDOFF_DEFAULTS.maxLiveSessions,
       maxLiveSessionsSource: 'default',
       maxUnattendedHandoffs: 3,

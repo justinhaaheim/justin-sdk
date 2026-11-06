@@ -114,7 +114,12 @@ export type LiveSessions =
       /** Every workspace uuid any source placed each session in (see the join). */
       workspacesBySessionId: Map<string, string[]>;
     }
-  | {kind: 'failed'; reason: string};
+  | {
+      kind: 'failed';
+      reason: string;
+      /** True only when a slow cmux tree is the whole failure (home-base-89c8h.1). */
+      timedOut: boolean;
+    };
 
 /**
  * `claude <subcommand>` processes that are not an interactive session
@@ -691,7 +696,14 @@ export async function readLiveSessions(
     failures.push(paneFailureReason('claude agents --json', agents.reason));
   }
   if (!store.ok || !procs.ok || !surfaces.ok || !agents.ok) {
-    return {kind: 'failed', reason: failures.join('; ')};
+    return {
+      kind: 'failed',
+      reason: failures.join('; '),
+      // home-base-89c8h.1 D5: true only when the slow cmux tree is the whole
+      // failure. Any other source that failed is a real failure.
+      timedOut:
+        store.ok && procs.ok && agents.ok && !surfaces.ok && surfaces.timedOut,
+    };
   }
   const sessionTtys = new Set(
     procs.value

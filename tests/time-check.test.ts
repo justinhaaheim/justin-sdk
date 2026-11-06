@@ -33,6 +33,7 @@ import {
   TIME_CHECK_MARKER,
   workingDayKey,
 } from '../src/time-check';
+import {captureWriteStdout} from './capture-stdout';
 
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'time-check-'));
@@ -270,16 +271,15 @@ describe('emit: both channels', () => {
    */
   function captureRun(dir: string, transcript: string): string {
     const lines: string[] = [];
-    const original = console.log;
-    console.log = (...args: unknown[]) => {
-      lines.push(args.join(' '));
-    };
+    const capture = captureWriteStdout((text) => {
+      lines.push(text);
+    });
     try {
       runTimeCheck({
         stdin: JSON.stringify({cwd: dir, transcript_path: transcript}),
       });
     } finally {
-      console.log = original;
+      capture.mockRestore();
     }
     return lines.join('\n');
   }

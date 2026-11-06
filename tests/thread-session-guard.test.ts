@@ -492,7 +492,11 @@ describe('fail closed: thread handoff and thread spawn need the guard registered
       {
         run: (args) => {
           calls.push([...args]);
-          return Promise.resolve({kind: 'failed', reason: 'no cmux in tests'});
+          return Promise.resolve({
+            kind: 'failed',
+            reason: 'no cmux in tests',
+            timedOut: false,
+          });
         },
       },
     );

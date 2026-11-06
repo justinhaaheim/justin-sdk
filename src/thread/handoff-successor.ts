@@ -17,7 +17,10 @@
  *   2. The gate (handoff-gate.ts). Refused: handOff() as today, the refusal
  *      recorded on the session bead, the block and the final-refusal message
  *      printed, exit 3, nothing opened (C2).
- *   3. The caller's pane, read-only (readPaneOfSurface): not found is exit 2.
+ *      Deferred (cmux still silent at the deadline, home-base-89c8h.1): the
+ *      same writes under the handoff-deferred label, exit 4, run it again.
+ *   3. The caller's pane, read-only (readPaneOfSurface): not found is exit 2,
+ *      a timeout at the deadline defers.
  *   4. handOff(), then the block file <threads state dir>/handoffs/<sid>.md.
  *   5. `cmux new-surface --workspace <caller's> --pane <caller's> ...
  *      --command <zsh-quoted claude line> --focus false` (C5). The command is
@@ -41,7 +44,7 @@
 
 import type {Field, OutputStyle} from '../cli-style';
 import type {CmuxRunner} from './cmux';
-import type {HandoffGateResult} from './handoff-gate';
+import type {HandoffGateResult, RecordRefusalOutcome} from './handoff-gate';
 import type {ResolvedHandoffConfig} from './handoff-knob';
 import type {EnvLike} from './paths';
 import type {FoundSession} from './session-select';
@@ -53,6 +56,7 @@ import {fieldLines, outputStyle, sectionHeader, stepColumn} from '../cli-style';
 import {SDK_BIN_BY_PATH, SDK_HANDOFF_CALL} from '../sdk-invocation';
 import {
   cmuxArgv,
+  gateCmuxRunner,
   readPaneOfSurface,
   readSurfaceIdOfRef,
   renameTab,
@@ -60,7 +64,10 @@ import {
 } from './cmux';
 import {resolveRepoTag} from './config';
 import {
+  HANDOFF_GATE_DEADLINE_MS,
+  handoffDeferralMessage,
   realHandoffGateReaders,
+  recordDeferral,
   recordLaunch,
   recordRefusal,
   runHandoffGate,
@@ -88,6 +95,7 @@ import {
   typedCommandTooLong,
   zshWord,
 } from './respawn';
+import {CONTINUES_ENV} from './session-bead';
 import {describeHandoffOutcome, handOff} from './session-handoff';
 import {SESSION_NAME_LIMIT, sessionName} from './session-name';
 import {selectSession, sessionBeadsKnob} from './session-select';
@@ -161,12 +169,22 @@ export function successorName(session: FoundSession, env: EnvLike): string {
  * goes last; it is prose and never starts with "/" (kickoffText).
  */
 export function successorClaudeWords(input: {
+  /**
+   * home-base-npbse.1.2: the predecessor's bead, typed as JUSTIN_SDK_CONTINUES
+   * before `claude`; null with componentConfig.thread.handoff.autoPickup off.
+   */
+  continues?: string | null;
   kickoff: string;
   model: string | null;
   name: string;
   permissionMode: string;
 }): string[] {
-  const words = ['claude', '--permission-mode', input.permissionMode];
+  const words = [
+    ...(input.continues != null ? [`${CONTINUES_ENV}=${input.continues}`] : []),
+    'claude',
+    '--permission-mode',
+    input.permissionMode,
+  ];
   words.push('--remote-control', input.name, '--name', input.name);
   if (input.model != null) words.push('--model', input.model);
   words.push(input.kickoff);
@@ -335,6 +353,8 @@ export interface ThreadHandoffCommandOptions {
 
 /** The gate as handoffWithSuccessor calls it; injected in tests. */
 export type HandoffGateRunner = (input: {
+  /** D4: when the gate's cmux calls must stop, shared with the pane lookup. */
+  cmuxDeadlineAtMs: number;
   cwd: string;
   env: EnvLike;
   limits: ResolvedHandoffConfig;
@@ -347,6 +367,8 @@ export interface HandoffSuccessorDeps {
   clock: () => number;
   gate: HandoffGateRunner;
   handOff: typeof handOff;
+  /** home-base-89c8h.1 D6: the handoff-deferred label and note. */
+  recordDeferral: typeof recordDeferral;
   /** F11: the launch record on the caller's bead, before new-surface. */
   recordLaunch: typeof recordLaunch;
   recordRefusal: typeof recordRefusal;
@@ -373,9 +395,9 @@ export interface SuccessorLaunch {
   successor: NewSurfaceRefs;
 }
 
-/** 0 started · 1 a step failed after the handoff · 2 nothing written · 3 refused by the gate. */
+/** 0 started · 1 a step failed after the handoff · 2 nothing written · 3 refused by the gate · 4 deferred: cmux too slow to decide, run it again. */
 export interface ThreadHandoffResult {
-  exitCode: 0 | 1 | 2 | 3;
+  exitCode: 0 | 1 | 2 | 3 | 4;
   /** Set when a successor tab was opened (exit 0, or exit 1 after the screen check). */
   launch: SuccessorLaunch | null;
   lines: string[];
@@ -396,6 +418,7 @@ export const realHandoffGate: HandoffGateRunner = (input) =>
     limits: input.limits,
     now: input.now,
     readers: realHandoffGateReaders({
+      cmuxDeadlineAtMs: input.cmuxDeadlineAtMs,
       // F14: the CLI's own words, the half of the guard pass it must match.
       commandWords: process.argv.slice(2),
       cwd: input.cwd,
@@ -412,6 +435,7 @@ function realDeps(env: EnvLike): HandoffSuccessorDeps {
     clock: () => Date.now(),
     gate: realHandoffGate,
     handOff,
+    recordDeferral,
     recordLaunch,
     recordRefusal,
     run: liveCmuxRunner(env),
@@ -482,8 +506,10 @@ export async function handoffWithSuccessor(
     `${session.sessionId}.md`,
   );
   const name = successorName(session, env);
-  const kickoff = kickoffText(blockPath, session.bead.id, null);
+  const {autoPickup} = options.limits;
+  const kickoff = kickoffText(blockPath, session.bead.id, null, {autoPickup});
   const words = successorClaudeWords({
+    continues: autoPickup ? session.bead.id : null,
     kickoff,
     model,
     name,
@@ -506,12 +532,23 @@ export async function handoffWithSuccessor(
   }
 
   // ---- 2. the gate ----
+  // D4: one deadline for the gate and the pane lookup in step 3.
+  const cmuxDeadlineAtMs = d.clock() + HANDOFF_GATE_DEADLINE_MS;
   const gate = await d.gate({
+    cmuxDeadlineAtMs,
     cwd,
     env,
     limits: options.limits,
     now,
     session,
+  });
+  // D7: the pane lookup retries a timeout too. It shares d.run with
+  // new-surface, which step 5 calls directly and never through this runner.
+  const paneRunner = gateCmuxRunner(d.run, {
+    deadlineAtMs: cmuxDeadlineAtMs,
+    now: d.clock,
+    retry: true,
+    sleep: d.sleep,
   });
 
   if (options.dryRun) {
@@ -521,7 +558,7 @@ export async function handoffWithSuccessor(
         value:
           gate.kind === 'pass'
             ? 'passed'
-            : `would refuse: ${gate.reason}: ${gate.detail}`,
+            : `would ${gate.kind === 'deferred' ? 'defer' : 'refuse'}: ${gate.reason}: ${gate.detail}`,
       },
       {label: 'Session bead', value: session.bead.id},
       {label: 'Block file', value: blockPath},
@@ -532,24 +569,29 @@ export async function handoffWithSuccessor(
     let argvText: string;
     if (gate.kind === 'refused') {
       argvText = 'none: the gate refuses, so nothing would open';
+    } else if (gate.kind === 'deferred') {
+      argvText = 'none: the gate defers, so nothing would open';
     } else if (workspaceId === '' || surfaceId === '') {
       argvText = 'none: not in a cmux pane';
     } else {
-      const pane = await readPaneOfSurface(d.run, workspaceId, surfaceId);
-      argvText =
-        pane.kind === 'found'
-          ? JSON.stringify(
-              fullCmuxArgv(
-                env,
-                newSurfaceArgs({
-                  checkoutPath: session.checkoutPath,
-                  command,
-                  paneId: pane.paneId,
-                  workspaceId,
-                }),
-              ),
-            )
-          : `none: this tab's pane was not found, so a real run would stop (${pane.reason})`;
+      const pane = await readPaneOfSurface(paneRunner, workspaceId, surfaceId);
+      if (pane.kind === 'found') {
+        argvText = JSON.stringify(
+          fullCmuxArgv(
+            env,
+            newSurfaceArgs({
+              checkoutPath: session.checkoutPath,
+              command,
+              paneId: pane.paneId,
+              workspaceId,
+            }),
+          ),
+        );
+      } else if (pane.kind === 'unreadable' && pane.timedOut) {
+        argvText = `none: cmux did not return this tab's pane in time, so a real run would defer (${pane.reason})`;
+      } else {
+        argvText = `none: this tab's pane was not found, so a real run would stop (${pane.reason})`;
+      }
     }
     fields.push({label: 'cmux argv', value: argvText});
     if (options.limits.predecessor !== 'keep') {
@@ -588,8 +630,13 @@ export async function handoffWithSuccessor(
     };
   }
 
-  // ---- 2b. refused: the handoff is still recorded, nothing opens (C2) ----
-  if (gate.kind === 'refused') {
+  // The handoff is still recorded when nothing opens (C2): the session may
+  // have to stop, and then it needs its block.
+  const handOffAndRecord = async (input: {
+    exitCode: 3 | 4;
+    message: string;
+    record: () => RecordRefusalOutcome;
+  }): Promise<ThreadHandoffResult> => {
     const lines: string[] = [];
     const handed = await d.handOff({
       cwd,
@@ -611,23 +658,50 @@ export async function handoffWithSuccessor(
       }
       if (handed.followUpFailures.length > 0) lines.push('');
     }
-    const recorded = d.recordRefusal({
-      beadId: session.bead.id,
-      db: session.db,
-      detail: gate.detail,
-      env,
-      now,
-      reason: gate.reason,
-    });
+    const recorded = input.record();
     lines.push(
       recorded.kind === 'recorded'
         ? `Recorded on ${session.bead.id}: ${recorded.line}`
         : `⚠️ ${recorded.reason}`,
       '',
-      gate.message,
+      input.message,
     );
-    return {exitCode: 3, launch: null, lines};
+    return {exitCode: input.exitCode, launch: null, lines};
+  };
+  const defer = (detail: string, message: string) =>
+    handOffAndRecord({
+      exitCode: 4,
+      message,
+      record: () =>
+        d.recordDeferral({
+          beadId: session.bead.id,
+          db: session.db,
+          detail,
+          env,
+          now,
+          reason: 'cmuxSlow',
+        }),
+    });
+
+  // ---- 2b. refused: exit 3, and the refusal is final ----
+  if (gate.kind === 'refused') {
+    return await handOffAndRecord({
+      exitCode: 3,
+      message: gate.message,
+      record: () =>
+        d.recordRefusal({
+          beadId: session.bead.id,
+          db: session.db,
+          detail: gate.detail,
+          env,
+          now,
+          reason: gate.reason,
+        }),
+    });
   }
+
+  // ---- 2c. deferred: exit 4, nothing was decided (home-base-89c8h.1 D6) ----
+  if (gate.kind === 'deferred') return await defer(gate.detail, gate.message);
 
   // ---- 3. the caller's pane, read-only ----
   const workspaceId = gate.facts.workspaceId;
@@ -637,7 +711,11 @@ export async function handoffWithSuccessor(
       'the gate passed without a cmux pane (CMUX_WORKSPACE_ID or CMUX_SURFACE_ID is not set); nothing was written',
     );
   }
-  const pane = await readPaneOfSurface(d.run, workspaceId, surfaceId);
+  const pane = await readPaneOfSurface(paneRunner, workspaceId, surfaceId);
+  if (pane.kind === 'unreadable' && pane.timedOut) {
+    const detail = `cmux did not return this tab's pane: ${pane.reason}`;
+    return await defer(detail, handoffDeferralMessage('cmuxSlow', detail));
+  }
   if (pane.kind !== 'found') {
     return refuse(
       `this tab's pane could not be found, so there is nowhere to open the successor: ${pane.reason}. Nothing was written.`,

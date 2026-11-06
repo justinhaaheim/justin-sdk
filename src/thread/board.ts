@@ -48,6 +48,7 @@ import {
   wrapHanging,
 } from '../cli-style';
 import {sdkRun} from '../sdk-invocation';
+import {writeStdout, writeStdoutSync} from '../write-stdout';
 import {
   type BdContext,
   type BdIssue,
@@ -672,15 +673,15 @@ export async function runThreadBoard(
   const style = options.style ?? outputStyle();
   // Everything after the rows is a footnote: at the header column, a blank
   // line before each, wrapped with a hang so a long command stays readable.
+  // Through the helper like the listing above them: a console.log straight after
+  // a large document finds the pipe full and is dropped (see write-stdout.ts).
   const footnote = (line: string, styles: StyleName[]): void => {
-    console.log('');
-    console.log(
-      wrapHanging(paint(line, styles, style.color), {
-        hang: BODY_COLUMN,
-        indent: HEADER_COLUMN,
-        width: style.width,
-      }),
-    );
+    const wrapped = wrapHanging(paint(line, styles, style.color), {
+      hang: BODY_COLUMN,
+      indent: HEADER_COLUMN,
+      width: style.width,
+    });
+    writeStdoutSync(`\n${wrapped}\n`);
   };
   // Yellow: each of these means a write this tool should have made did not
   // happen, and each carries the command that fixes it. Both lines, not one or
@@ -704,7 +705,7 @@ export async function runThreadBoard(
   // reached the screen. JSON mode is the exception, where the same facts go out
   // as the `drain` key and a loose line would corrupt the document.
   if (options.json !== true) {
-    for (const line of drainLines) console.log(line);
+    for (const line of drainLines) await writeStdout(`${line}\n`);
   }
   // A drained report is a write like any other, so it gets the same commit
   // (p1uj.11). One commit for the whole drain, not one per file: they land in
@@ -730,7 +731,7 @@ export async function runThreadBoard(
   // No bd listing, so nothing below can fail it — the drain above is already
   // printed, and a bd that cannot be read is not this command's news any more.
   if (isPointerView(options)) {
-    console.log(renderBoardPointer(style));
+    await writeStdout(`${renderBoardPointer(style)}\n`);
     printBacklog();
     return 0;
   }
@@ -757,8 +758,8 @@ export async function runThreadBoard(
   });
 
   if (options.json === true) {
-    console.log(
-      JSON.stringify(
+    await writeStdout(
+      `${JSON.stringify(
         {
           asks: collectOpenAsks(threads.value, asks.value),
           drain: drained,
@@ -771,19 +772,19 @@ export async function runThreadBoard(
         },
         null,
         2,
-      ),
+      )}\n`,
     );
     return 0;
   }
 
   if (view === 'openAsks') {
-    console.log(
-      renderOpenAsks(collectOpenAsks(threads.value, asks.value), style),
+    await writeStdout(
+      `${renderOpenAsks(collectOpenAsks(threads.value, asks.value), style)}\n`,
     );
   } else if (view === 'recent') {
-    console.log(renderRecent(data, style));
+    await writeStdout(`${renderRecent(data, style)}\n`);
   } else {
-    console.log(renderByRepo(data, 'thread', style));
+    await writeStdout(`${renderByRepo(data, 'thread', style)}\n`);
   }
   if (view === 'repo' && data.orphanAsks.length > 0) {
     footnote(

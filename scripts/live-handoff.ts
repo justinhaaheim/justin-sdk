@@ -80,6 +80,7 @@ import {
 import {zshWord} from '../src/thread/respawn';
 import {
   CONTINUED_BY_LABEL_PREFIX,
+  CONTINUES_ENV,
   CONTINUES_LABEL_PREFIX,
   HANDOFF_REFUSED_LABEL,
   resolveSession,
@@ -95,7 +96,7 @@ import {gateSpend} from './spend-gate';
 /** The scenarios a run without --scenario runs, in order. */
 const SCENARIOS = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const;
 /** Scenarios run only when named: M, the note-character measurement (home-base-mbnjv.9). */
-const NAMED_ONLY = ['M', 'B', 'C'] as const;
+const NAMED_ONLY = ['M', 'B', 'C', 'P'] as const;
 type ScenarioId = (typeof NAMED_ONLY)[number] | (typeof SCENARIOS)[number];
 
 const HELP = `live-handoff: drive throwaway Claude Code sessions through real thread handoffs
@@ -131,7 +132,12 @@ Scenarios (each in its own throwaway cmux workspace, cwd = this checkout):
               \`cmux identify\`; the guard denies the first two naming thread
               handoff and lets the third through.
 
-Run only when named (--scenario B, C or M):
+Run only when named (--scenario B, C, M or P):
+  P   pickup  home-base-npbse.1.2, needs componentConfig.thread.handoff.autoPickup
+              on. A session files one request. A second session starts with
+              JUSTIN_SDK_CONTINUES naming it and a prompt that never names the
+              pickup command. It must end up linked, with the request carried
+              over, and its transcript must show no thread request --continues.
   B   wait    exit mode; the session starts a background shell (sleep 100)
               and a background subagent (sleep 60), then hands off while
               both run. The watcher must not act until both have finished
@@ -2264,6 +2270,97 @@ async function scenarioS5(ctx: Ctx): Promise<void> {
   }
 }
 
+/**
+ * P (home-base-npbse.1.2 item 7): a real successor whose first message omits the
+ * pickup command still ends up linked, with every request carried over. Only the
+ * capture hook can have done it, and the transcript is checked to prove that.
+ */
+async function scenarioP(ctx: Ctx): Promise<void> {
+  const old = await startThrowaway(ctx, 'P', 'measure');
+  if (old == null) return;
+  const since = new Date().toISOString();
+  const marker = '[TEST_DATA_DELETABLE 7d3c4d0a-ec46-4184-8df0-7f47b68291cb ]';
+  const typed = await typeLine(
+    ctx,
+    old,
+    `${ctx.markerTag} Live test P. Run this Bash command exactly as written, as its own call: bun run justin-sdk thread request "${marker} live pickup request" --done-when "${marker} the live test checks it". Then reply with the word DONE and run nothing else.`,
+  );
+  if (
+    !check('P', 'the first session gets its prompt', typed == null, typed ?? '')
+  )
+    return;
+  const stopped = await waitFor(300_000, 1000, () =>
+    stopAtOrAfter(old.sessionId, since),
+  );
+  if (!check('P', 'the first session finishes', stopped.kind === 'ok', ''))
+    return;
+  const predecessor = sessionBead(old.sessionId);
+  if (
+    predecessor == null ||
+    !check('P', 'the first session has a session bead', true, predecessor.id)
+  ) {
+    check('P', 'the first session has a session bead', false, 'none found');
+    return;
+  }
+
+  const sessionId = randomUUID();
+  const name = sessionTitle(ctx, 'P', 'measure');
+  const line = `${CONTINUES_ENV}=${zshWord(predecessor.id)} ${claudeLine({
+    model: ctx.model,
+    name: `${name} successor`,
+    prompt: `${ctx.markerTag} Live test P. Reply with the word DONE and run no commands.`,
+    sessionId,
+    settingsPath: ctx.settingsPath,
+    xdg: null,
+  })}`;
+  const created = await createWorkspace(
+    `${ctx.markerTag} live-handoff ${ctx.stamp} P successor`,
+    line,
+    ctx.marker,
+    'P',
+  );
+  if ('reason' in created) {
+    check('P', 'the successor workspace opens', false, created.reason);
+    return;
+  }
+  const held = await waitFor(300_000, 2000, () => {
+    const bead = sessionBead(sessionId);
+    return bead?.labels.includes('picked-up') === true ? bead : null;
+  });
+  if (held.kind !== 'ok') {
+    check('P', 'the successor gets picked-up by itself', false, 'not in 300 s');
+    return;
+  }
+  check('P', 'the successor gets picked-up by itself', true, held.value.id);
+  check(
+    'P',
+    'the successor is linked to the first session',
+    held.value.labels.includes(`continues:${predecessor.id}`),
+    held.value.labels.join(', '),
+  );
+  const after = beadById(predecessor.db, predecessor.id);
+  const record = `picked up by ${held.value.id}: 1 request`;
+  check(
+    'P',
+    'the first session records one request carried over',
+    after?.notes?.includes(record) === true,
+    after?.notes ?? '(no bead)',
+  );
+  const called = toolCalls(
+    readTranscript(transcriptPath(sessionId)) ?? [],
+  ).some(
+    (entry) =>
+      entry.name === 'Bash' &&
+      entry.command.includes('thread request --continues'),
+  );
+  check(
+    'P',
+    'the successor never ran thread request --continues',
+    !called,
+    called ? 'it ran it' : 'no such call',
+  );
+}
+
 async function scenarioS6(ctx: Ctx): Promise<void> {
   const t = await startThrowaway(ctx, 'S6', 'guard');
   if (t == null) return;
@@ -3222,6 +3319,11 @@ function printPlan(ctx: Ctx, scenarios: readonly ScenarioId[]): void {
         .join('\n')}`,
       xdg: false,
     },
+    P: {
+      mode: 'measure',
+      prompt: `${ctx.markerTag} Live test P. Files one request, then starts a successor with JUSTIN_SDK_CONTINUES and a prompt that never names the pickup command.`,
+      xdg: false,
+    },
     S1: {
       mode: 'keep',
       prompt: explicitHandoffPrompt(ctx, 'S1', sessionTitle(ctx, 'S1', 'keep')),
@@ -3391,6 +3493,7 @@ async function main(): Promise<number> {
     B: () => scenarioB(ctx),
     C: () => scenarioC(ctx),
     M: () => scenarioM(ctx),
+    P: () => scenarioP(ctx),
     S1: () => scenarioS1(ctx),
     S2: () => scenarioAct(ctx, 'S2', 'exit'),
     S3: () => scenarioAct(ctx, 'S3', 'close'),

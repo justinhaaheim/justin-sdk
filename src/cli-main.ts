@@ -22,6 +22,7 @@ import {runBeadsRebuildDryRun} from './beads-rebuild-dryrun';
 import {reportCliFailure} from './cli-failure';
 import {COMPONENT_NAMES} from './component-registry';
 import {runDoctor} from './doctor';
+import {writeStdout} from './write-stdout';
 import {runEasUpdate} from './eas-update';
 import {runFix} from './fix';
 import {forensicsCommand} from './forensics/command';
@@ -235,11 +236,13 @@ void yargs(ARGV)
             const {configSchemaJson, renderConfigSchema} = await import(
               './sdk-config'
             );
-            if (argv.json) {
-              console.log(JSON.stringify(configSchemaJson(), null, 2));
-            } else {
-              console.log(renderConfigSchema({projectRoot: process.cwd()}));
-            }
+            await writeStdout(
+              `${
+                argv.json
+                  ? JSON.stringify(configSchemaJson(), null, 2)
+                  : renderConfigSchema({projectRoot: process.cwd()})
+              }\n`,
+            );
             process.exit(0);
           },
         )

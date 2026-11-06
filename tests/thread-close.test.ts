@@ -266,11 +266,19 @@ function world(input: {
           (entry) => entry.ref === target || entry.id === target,
         );
         if (pane == null) {
-          return {kind: 'failed', reason: `no surface ${target}`};
+          return {
+            kind: 'failed',
+            reason: `no surface ${target}`,
+            timedOut: false,
+          };
         }
         const screen = screenOf(pane, false);
         return screen == null
-          ? {kind: 'failed', reason: 'read-screen failed: surface not ready'}
+          ? {
+              kind: 'failed',
+              reason: 'read-screen failed: surface not ready',
+              timedOut: false,
+            }
           : {kind: 'ok', stdout: screen};
       }
       if (args[0] === 'close-workspace') {
@@ -293,6 +301,7 @@ function world(input: {
       return {
         kind: 'failed',
         reason: `the fake does not know ${args.join(' ')}`,
+        timedOut: false,
       };
     };
     return Promise.resolve(respond());
@@ -726,7 +735,8 @@ describe('refusals and targets', () => {
     });
     const down = await closeWorkspaces(w.options, {
       ...w.deps,
-      run: () => Promise.resolve({kind: 'failed', reason: 'no socket'}),
+      run: () =>
+        Promise.resolve({kind: 'failed', reason: 'no socket', timedOut: false}),
     });
     expect(down.exitCode).toBe(2);
     expect(down.output).toContain('cmux cannot be reached');

@@ -30,6 +30,7 @@ import type {Check, CheckNode} from '../src/check-runner';
 import {describe, expect, spyOn, test} from 'bun:test';
 
 import {runChecks, runCheckTree} from '../src/check-runner';
+import {captureWriteStdout} from './capture-stdout';
 
 const DIM = '\x1b[2m';
 const RESET = '\x1b[0m';
@@ -39,22 +40,19 @@ function continuationLine(message: string): string {
   return `\n     ${DIM}${message}${RESET}`;
 }
 
-/**
- * Run something while console.log is captured, and return everything it said.
- * The recorded calls must be read BEFORE mockRestore(), which drops them.
- */
+/** Run something while stdout is captured, and return everything it said. */
 async function captureLog(
   run: () => Promise<number>,
 ): Promise<{exitCode: number; said: string}> {
-  const logs = spyOn(console, 'log').mockImplementation(() => {
-    /* swallowed: the call is asserted, not its output */
+  const said: string[] = [];
+  const capture = captureWriteStdout((text) => {
+    said.push(text);
   });
   try {
     const exitCode = await run();
-    const said = logs.mock.calls.map((call) => String(call[0])).join('\n');
-    return {exitCode, said};
+    return {exitCode, said: said.join('\n')};
   } finally {
-    logs.mockRestore();
+    capture.mockRestore();
   }
 }
 

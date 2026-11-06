@@ -62,6 +62,7 @@ import {
   wrapHanging,
 } from '../cli-style';
 import {formatLocalDate, formatLocalTime} from '../date';
+import {writeStdout} from '../write-stdout';
 import {messagesDir, reportsRootDir} from './archive';
 import {bdContext, describeBdFailure, listThreads} from './bd';
 import {formatAge} from './board';
@@ -1412,7 +1413,9 @@ export async function runThreadSearch(options: SearchOptions): Promise<number> {
   const found = await searchSessions({...options, now});
   if (!found.ok) {
     if (json) {
-      console.log(JSON.stringify({error: found.error, ok: false}, null, 2));
+      await writeStdout(
+        `${JSON.stringify({error: found.error, ok: false}, null, 2)}\n`,
+      );
     } else console.error(found.error);
     return 2;
   }
@@ -1420,7 +1423,9 @@ export async function runThreadSearch(options: SearchOptions): Promise<number> {
   const corpusFailures = found.failures;
 
   if (json) {
-    console.log(JSON.stringify(searchJson(found, options), null, 2));
+    await writeStdout(
+      `${JSON.stringify(searchJson(found, options), null, 2)}\n`,
+    );
     for (const failure of corpusFailures) console.error(`  ⚠️ ${failure}`);
     if (!complete) return 2;
     return result.rows.length > 0 ? 0 : 1;
@@ -1437,15 +1442,17 @@ export async function runThreadSearch(options: SearchOptions): Promise<number> {
         ? terminalWidth()
         : null;
   const allMatches = options.allMatches === true;
+  // One print for all the rows: enough small console.log calls lose lines once
+  // the pipe is full (see write-stdout.ts).
+  const printed: string[] = [];
   for (const row of result.rows) {
-    console.log('');
-    console.log(renderSearchRow(row, now, {allMatches, color, width}));
+    printed.push('', renderSearchRow(row, now, {allMatches, color, width}));
   }
   const more = moreLine(result);
   if (more != null) {
-    console.log('');
-    console.log(`${pad(HEADER_COLUMN)}${paint(more, ['dim'], color)}`);
+    printed.push('', `${pad(HEADER_COLUMN)}${paint(more, ['dim'], color)}`);
   }
+  if (printed.length > 0) await writeStdout(`${printed.join('\n')}\n`);
 
   if (!complete) {
     // NOT the no-matches line, whatever `matched` says: that line CLAIMS the
@@ -1457,14 +1464,12 @@ export async function runThreadSearch(options: SearchOptions): Promise<number> {
   if (result.matched === 0) {
     // At the header column with a blank line before it, like the more line
     // (home-base-yukaf.5).
-    console.log('');
-    console.log(
-      wrapHanging(noMatchesLine(counts), {
-        hang: BODY_COLUMN,
-        indent: HEADER_COLUMN,
-        width,
-      }),
-    );
+    const wrapped = wrapHanging(noMatchesLine(counts), {
+      hang: BODY_COLUMN,
+      indent: HEADER_COLUMN,
+      width,
+    });
+    await writeStdout(`\n${wrapped}\n`);
     return 1;
   }
   return 0;

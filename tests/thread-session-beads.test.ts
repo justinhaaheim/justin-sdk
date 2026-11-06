@@ -92,6 +92,7 @@ import {
   statusFilePath,
   writeStatusFile,
 } from '../src/thread/status-file';
+import {captureWriteStdout} from './capture-stdout';
 import {createFakeBd} from './fake-bd';
 import {git, initRepo} from './git-fixtures';
 import {
@@ -219,6 +220,11 @@ function captureStdout(): string[] {
     lines.push(args.join(' '));
   });
   spies.push(spy);
+  spies.push(
+    captureWriteStdout((text) => {
+      lines.push(text);
+    }),
+  );
   return lines;
 }
 

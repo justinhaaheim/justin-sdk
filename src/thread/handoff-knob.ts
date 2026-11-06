@@ -46,6 +46,9 @@ export interface ResolvedHandoffUsage {
 }
 
 export interface ResolvedHandoffConfig {
+  /** home-base-npbse.1.2: the system does the handoff pickup by itself. */
+  autoPickup: boolean;
+  autoPickupSource: ThreadConfigSource;
   /** More live Claude sessions than this on the machine: refused (D2). */
   maxLiveSessions: number;
   maxLiveSessionsSource: ThreadConfigSource;
@@ -206,6 +209,12 @@ export function resolveHandoffConfig(
     'true or false',
     HANDOFF_DEFAULTS.successor as boolean,
   );
+  const autoPickup = field(
+    'autoPickup',
+    (value): value is boolean => typeof value === 'boolean',
+    'true or false',
+    HANDOFF_DEFAULTS.autoPickup as boolean,
+  );
   const predecessor = field(
     'predecessor',
     isPredecessorMode,
@@ -244,6 +253,8 @@ export function resolveHandoffConfig(
   });
 
   return {
+    autoPickup: autoPickup.value,
+    autoPickupSource: autoPickup.source,
     maxLiveSessions: maxLiveSessions.value,
     maxLiveSessionsSource: maxLiveSessions.source,
     maxUnattendedHandoffs: maxUnattendedHandoffs.value,

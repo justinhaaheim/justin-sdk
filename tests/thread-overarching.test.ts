@@ -134,7 +134,8 @@ function otherSession(
 }
 
 function noCmux(): CmuxRunner {
-  return () => Promise.resolve({kind: 'failed', reason: 'no cmux'});
+  return () =>
+    Promise.resolve({kind: 'failed', reason: 'no cmux', timedOut: false});
 }
 
 async function request(
@@ -251,6 +252,7 @@ function fakeCmux(spaces: FakeSpace[]): {
     return Promise.resolve({
       kind: 'failed',
       reason: `unexpected: ${args.join(' ')}`,
+      timedOut: false,
     });
   };
   return {calls, run, spaces};

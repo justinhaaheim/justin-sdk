@@ -11,7 +11,7 @@
  * assertion of every write test is that the fixture is what it resolved.
  */
 
-import {describe, expect, spyOn, test} from 'bun:test';
+import {describe, expect, test} from 'bun:test';
 import {execFileSync, spawnSync} from 'child_process';
 import {mkdirSync, mkdtempSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
@@ -25,6 +25,7 @@ import {
 import {PLAIN_STYLE} from '../src/cli-style';
 import {BACKFILL_DESCRIPTION_MARKER} from '../src/thread/backfill-ownership';
 import {NO_REPORT_GLANCE, runThreadShow} from '../src/thread/show';
+import {captureWriteStdout} from './capture-stdout';
 import {createFakeBd, type FakeBd, type FakeIssue} from './fake-bd';
 
 const SCRIPT = join(
@@ -269,11 +270,9 @@ function jsonlDirty(f: Fixture): string {
 /** What `thread show <id> --full` prints, without colour. */
 async function show(f: Fixture, id: string): Promise<string> {
   const printed: string[] = [];
-  const spy = spyOn(console, 'log').mockImplementation(
-    (...parts: unknown[]) => {
-      printed.push(parts.map(String).join(' '));
-    },
-  );
+  const spy = captureWriteStdout((text) => {
+    printed.push(text);
+  });
   try {
     await runThreadShow({env: f.env, full: true, threadId: id});
   } finally {

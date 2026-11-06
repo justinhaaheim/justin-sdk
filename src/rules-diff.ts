@@ -58,6 +58,7 @@ import {
   RULES_UPDATE_CMD,
 } from './rules/rules-file';
 import {fail, findLocalPrettier} from './setup-helpers';
+import {writeStdoutSync} from './write-stdout';
 
 export const RULES_DIFF_EXIT = {
   cannotCheck: 2,
@@ -263,6 +264,6 @@ export function runRulesDiff(options: RulesDiffOptions = {}): number {
   // Deliberately NOT routed through the quiet-gated helpers: the report IS the
   // product of this command, and a quiet flag left set by another in-process
   // caller must never be able to swallow the answer.
-  process.stdout.write(`${result.report}\n`);
+  writeStdoutSync(`${result.report}\n`);
   return result.exitCode;
 }

@@ -35,6 +35,8 @@
 import type {MessageLogRead} from './message-log';
 import type {EnvLike} from './paths';
 
+import {writeStdout} from '../write-stdout';
+
 import {
   BODY_COLUMN,
   DETAIL_COLUMN,
@@ -471,7 +473,7 @@ export async function runThreadShow(
     out.push(sectionHeader('MESSAGE LOG', {color: style.color, emoji: '📜'}));
     out.push('');
     out.push(...renderMessageLog(log, style.color, style.width));
-    console.log(out.join('\n'));
+    await writeStdout(`${out.join('\n')}\n`);
     // A missing log is a measured answer; one we could not read is not.
     return log.kind === 'failed' || log.kind === 'noSession' ? 1 : 0;
   }
@@ -487,7 +489,7 @@ export async function runThreadShow(
       style.width,
     ),
   );
-  console.log(out.join('\n'));
+  await writeStdout(`${out.join('\n')}\n`);
 
   const asks = await listOpenAsks(ctx, thread.id);
   const at = ' '.repeat(BODY_COLUMN);
@@ -498,7 +500,7 @@ export async function runThreadShow(
   ];
   if (!asks.ok) {
     tail.push('', `${at}UNKNOWN — ${describeBdFailure(asks.failure)}`);
-    console.log(tail.join('\n'));
+    await writeStdout(`${tail.join('\n')}\n`);
     return 1;
   }
   if (asks.value.length === 0) {
@@ -540,6 +542,6 @@ export async function runThreadShow(
       );
     }
   }
-  console.log(tail.join('\n'));
+  await writeStdout(`${tail.join('\n')}\n`);
   return readFailed ? 1 : 0;
 }

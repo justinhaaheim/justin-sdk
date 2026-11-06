@@ -84,10 +84,22 @@ export function typedCommandTooLong(command: string): string | null {
 export const KICKOFF_OPENING =
   'You are the successor of a handed-off Claude Code session.';
 
-export function kickoffText(block: string, bead: string, extra: string | null) {
+export function kickoffText(
+  block: string,
+  bead: string,
+  extra: string | null,
+  options: {autoPickup?: boolean} = {},
+) {
+  const command = sdkRun(`thread request --continues ${bead}`);
+  // home-base-npbse.1.2 item 6: with the knob on the system runs the pickup, so
+  // the successor only checks. Knob off: the words stay exactly as they were.
+  const pickup =
+    options.autoPickup === true
+      ? `Check that ${sdkRun('thread status')} shows the requests carried over; if it says the pickup is not done, run: ${command}.`
+      : `First run the command under its pick-up section: ${command}.`;
   // P6 (home-base-npbse.1.1): the scope sentence is here as well as in the
   // block, because a session once read the note as the whole scope.
-  const base = `${KICKOFF_OPENING} Read ${block}. First run the command under its pick-up section: ${sdkRun(`thread request --continues ${bead}`)}. Every open request and question carries over to this session; the note is the order to take them in, not the whole scope. Then continue the work the block describes, starting from its note.`;
+  const base = `${KICKOFF_OPENING} Read ${block}. ${pickup} Every open request and question carries over to this session; the note is the order to take them in, not the whole scope. Then continue the work the block describes, starting from its note.`;
   const more = oneLine(extra ?? '');
   return more === '' ? base : `${base} ${more}`;
 }

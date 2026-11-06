@@ -34,6 +34,7 @@
  * the message Claude is about to yield as the last one.
  */
 
+import type {PickupNotDone} from './handoff-auto-pickup';
 import type {SessionCommits} from './session-commits';
 import type {CreatedBeads} from './session-created';
 import type {Measured, MergeState, SessionModel} from './session-model';
@@ -41,6 +42,7 @@ import type {RequestNode, SessionTree, TreeIssue} from './session-tree';
 
 import {parseInstant} from './answer-store';
 import {ARCHIVED_PREFIX, ASK_LABEL, DONE_PREFIX} from './ask-format';
+import {handedOffAtOf} from './handoff-view';
 import {isOverarching, overarchingSetAt, pickOverarching} from './overarching';
 import {
   AUTO_TITLE_LABEL,
@@ -48,6 +50,7 @@ import {
   CONTINUES_LABEL_PREFIX,
   HANDED_OFF_LABEL,
   labelValue,
+  PICKUP_EXPECTED_LABEL,
   REQUEST_LABEL,
   STAGE_LABEL_PREFIX,
   titleSetAt,
@@ -120,6 +123,11 @@ export interface StatusFacts {
    */
   merged: Measured<MergeState>;
   openP0: number;
+  /**
+   * home-base-npbse.1.2 item 5: when a handoff that expects an automatic pickup
+   * happened, and no successor has recorded one yet; absent otherwise.
+   */
+  pickupAwaitedSince?: string;
   requests: {closed: number; total: number};
   /** The session bead's close reason when it is closed, else null. */
   sessionCloseReason: string | null;
@@ -143,7 +151,12 @@ export type SessionStatus =
    * has uncommitted paths (`.beads/` ignored), or both.
    */
   | {kind: 'doneUnmerged'; notMerged: boolean; uncommitted: number}
-  | {kind: 'handedOff'; successor: string | null}
+  | {
+      kind: 'handedOff';
+      /** home-base-npbse.1.2: 10 minutes on, and no successor has picked up. */
+      notPickedUp?: true;
+      successor: string | null;
+    }
   | {kind: 'openWork'}
   | {kind: 'unknown'; reasons: string[]}
   | {kind: 'waiting'; openP0: number}
@@ -161,6 +174,20 @@ function closedByJustin(reason: string | null): boolean {
     reason != null &&
     (reason.startsWith(DONE_PREFIX) || reason.startsWith(ARCHIVED_PREFIX))
   );
+}
+
+/** How long a handoff may wait before the inbox says nobody picked it up. */
+export const PICKUP_OVERDUE_MS = 10 * 60_000;
+
+/**
+ * True 10 minutes after the handoff. The stamp is the note's local
+ * `YYYY-MM-DD HH:mm`. One that cannot be read counts as overdue: the cautious
+ * verdict, since it only makes the inbox say so (rule 7).
+ */
+function pickupOverdue(since: string | undefined, now: Date): boolean {
+  if (since == null) return false;
+  const at = new Date(since.replace(' ', 'T')).getTime();
+  return Number.isNaN(at) || now.getTime() - at >= PICKUP_OVERDUE_MS;
 }
 
 /** Epic D2's precedence, exactly. Pure: same facts and clock, same answer. */
@@ -193,7 +220,11 @@ export function deriveStatus(
     }
   }
 
-  if (facts.handedOff) return {kind: 'handedOff', successor: facts.successor};
+  if (facts.handedOff) {
+    return pickupOverdue(facts.pickupAwaitedSince, options.now)
+      ? {kind: 'handedOff', notPickedUp: true, successor: facts.successor}
+      : {kind: 'handedOff', successor: facts.successor};
+  }
 
   if (
     facts.contextTokens != null &&
@@ -267,6 +298,18 @@ export function deriveStatus(
 // From the model
 // ---------------------------------------------------------------------------
 
+/** Null unless this handed-off session expects a pickup nobody has recorded. */
+function pickupAwaitedSinceOf(
+  session: {labels: string[]; notes?: null | string} | null,
+): string | null {
+  if (session == null) return null;
+  if (!session.labels.includes(PICKUP_EXPECTED_LABEL)) return null;
+  const notes = session.notes ?? null;
+  // pickUpHandoff writes "picked up by <successor>: …" on the predecessor.
+  if ((notes ?? '').includes(': picked up by ')) return null;
+  return handedOffAtOf(session.labels, notes);
+}
+
 export function isOpen(issue: {status: string}): boolean {
   return issue.status !== 'closed' && issue.status !== 'tombstone';
 }
@@ -290,6 +333,7 @@ export function statusFactsOf(model: SessionModel): StatusFacts {
   const requests = beads.requests.map((node) => node.request);
   const last = lastLogLine(model.log);
   const session = beads.session;
+  const awaited = pickupAwaitedSinceOf(session);
   const problems = [...beads.problems];
   if (session == null && beads.sessionMissing != null) {
     problems.push(beads.sessionMissing);
@@ -301,6 +345,7 @@ export function statusFactsOf(model: SessionModel): StatusFacts {
       ? transcript.contextTokens.value
       : null,
     handedOff: session?.labels.includes(HANDED_OFF_LABEL) === true,
+    ...(awaited == null ? {} : {pickupAwaitedSince: awaited}),
     helpersInFlight: transcript.helpers.ok
       ? transcript.helpers.value.map((helper) => helper.lastRecordAt)
       : null,
@@ -426,6 +471,7 @@ export type MarkItem =
       kind: 'allRequestsClosed';
     }
   | {kind: 'autoTitle'; sessionBeadId: string; title: string}
+  | {command: string; kind: 'pickupNotDone'; reason: string}
   /**
    * home-base-ys9t7.9.1 (componentConfig.thread.titleSummary on; it replaces
    * autoTitle then): the session title no longer covers the conversation.
@@ -746,11 +792,17 @@ export function whatToMark(
      * on; absent = not read (the summary prompt alone, as before).
      */
     overarching?: Measured<OverarchingFacts>;
+    /** home-base-npbse.1.2 item 5: the handoff pickup has not held yet. */
+    pickupNotDone?: null | PickupNotDone;
     titleSummary?: boolean;
   } = {},
 ): MarkItem[] {
   const items: MarkItem[] = [];
   const {beads, git} = model;
+
+  if (options.pickupNotDone != null) {
+    items.push({kind: 'pickupNotDone', ...options.pickupNotDone});
+  }
 
   for (const problem of beads.problems) {
     items.push({

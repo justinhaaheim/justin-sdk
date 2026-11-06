@@ -21,12 +21,29 @@ import {execFile} from 'node:child_process';
 import {accessSync, constants, statSync} from 'node:fs';
 import {z} from 'zod';
 
+import {cmuxCallIsReadOnly} from './cmux-read-only';
+
 export type CmuxCall =
-  | {kind: 'failed'; reason: string}
+  | {
+      kind: 'failed';
+      reason: string;
+      /**
+       * home-base-89c8h.1 D1: the call ran out of time, so nothing is known
+       * about whether cmux acted on it. Callers read this field and never
+       * match the reason's text (rule 7).
+       */
+      timedOut: boolean;
+    }
   | {kind: 'ok'; stdout: string};
 
-/** Runs `cmux <args>`. Injected so tests never reach the real cmux. */
-export type CmuxRunner = (args: readonly string[]) => Promise<CmuxCall>;
+/**
+ * Runs `cmux <args>`. Injected so tests never reach the real cmux. `limit`
+ * replaces the runner's own time limit for this one call.
+ */
+export type CmuxRunner = (
+  args: readonly string[],
+  limit?: {timeoutMs: number},
+) => Promise<CmuxCall>;
 
 /**
  * Measured 2026-11-06 with the Mac at load average 68: `cmux tree --all` took
@@ -35,6 +52,17 @@ export type CmuxRunner = (args: readonly string[]) => Promise<CmuxCall>;
  * as a failed one.
  */
 export const CMUX_TIMEOUT_MS = 30_000;
+
+/**
+ * The cmux CLI's own response limit, in seconds. Measured 2026-11-06 (cmux
+ * 0.64.24): against a socket that accepts and never answers, `cmux ping` exits
+ * 1 at 15.04 s with CMUX_CLI_TIMEOUT_TEXT on stderr, and with this set to 2 at
+ * 2.05 s.
+ */
+export const CMUX_CLI_TIMEOUT_ENV = 'CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC';
+
+/** What the cmux CLI prints, alone on its line, when its own limit fires. */
+export const CMUX_CLI_TIMEOUT_TEXT = 'Error: Command timed out';
 
 /** Where the binary came from: which env variable, or a PATH lookup. */
 export type CmuxBinarySource =
@@ -94,28 +122,46 @@ export function cmuxArgv(env: EnvLike, args: readonly string[]): string[] {
  * cmuxArgv, CMUX_QUIET=1, a timeout, a 16 MB buffer. `env` is both what the
  * binary and socket are read from and the child's environment; tests pass a
  * fake one so they can never reach the real cmux.
+ *
+ * D2, one timer: the CLI's own limit is set 5 s past the kill, so the kill
+ * fires first. An env that already names CMUX_CLI_TIMEOUT_ENV keeps its value,
+ * so the CLI can give up first, and its stderr counts as timed out too.
  */
 export function realCmuxRunner(
   timeoutMs: number = CMUX_TIMEOUT_MS,
   env: EnvLike = process.env,
 ): CmuxRunner {
-  return (args) =>
+  return (args, limit) =>
     new Promise((resolve) => {
+      const callMs = limit?.timeoutMs ?? timeoutMs;
       execFile(
         resolveCmuxBinary(env).path,
         cmuxArgv(env, args),
         {
-          env: {...env, CMUX_QUIET: '1'},
+          env: {
+            [CMUX_CLI_TIMEOUT_ENV]: String(Math.ceil(callMs / 1000) + 5),
+            ...env,
+            CMUX_QUIET: '1',
+          },
           maxBuffer: 16 * 1024 * 1024,
-          timeout: timeoutMs,
+          timeout: callMs,
         },
         (error, stdout, stderr) => {
           if (error != null) {
             const detail = String(stderr).trim();
-            const timedOut = error.killed === true;
+            const killed = error.killed === true;
+            const cliGaveUp = detail
+              .split('\n')
+              .some((line) => line.trim() === CMUX_CLI_TIMEOUT_TEXT);
+            const how = killed
+              ? `timed out after ${callMs} ms`
+              : cliGaveUp
+                ? "timed out at the cmux CLI's own limit"
+                : 'failed';
             resolve({
               kind: 'failed',
-              reason: `cmux ${args.slice(0, 3).join(' ')} ${timedOut ? `timed out after ${timeoutMs} ms` : 'failed'}: ${detail !== '' ? detail : error.message}`,
+              reason: `cmux ${args.slice(0, 3).join(' ')} ${how}: ${detail !== '' ? detail : error.message}`,
+              timedOut: killed || cliGaveUp,
             });
             return;
           }
@@ -123,6 +169,57 @@ export function realCmuxRunner(
         },
       );
     });
+}
+
+/** D3: the wait before each retry of a timed-out read. */
+export const GATE_CMUX_BACKOFF_MS = [5_000, 10_000, 20_000] as const;
+
+export interface GateCmuxOptions {
+  /** Waits before each retry; default GATE_CMUX_BACKOFF_MS. */
+  backoffMs?: readonly number[];
+  /** No call starts at or after this time, and none runs past it. */
+  deadlineAtMs: number;
+  now: () => number;
+  /** Retry a timed-out read? False: the deadline bounds the calls, no more. */
+  retry: boolean;
+  sleep: (ms: number) => Promise<void>;
+}
+
+/**
+ * home-base-89c8h.1 D3: a runner for the handoff gate. Each attempt's limit is
+ * the smaller of CMUX_TIMEOUT_MS and the time left. Past the deadline it runs
+ * nothing and answers failed, timed out. With `retry` it retries a call only
+ * when the call timed out AND cmuxCallIsReadOnly says it reads. Any other
+ * failure returns at once. A write is never retried: a timed-out write may
+ * have happened, and a retry could open a second tab.
+ */
+export function gateCmuxRunner(
+  run: CmuxRunner,
+  options: GateCmuxOptions,
+): CmuxRunner {
+  const {deadlineAtMs, now, retry, sleep} = options;
+  const backoffMs = options.backoffMs ?? GATE_CMUX_BACKOFF_MS;
+  return async (args) => {
+    for (let attempt = 0; ; attempt += 1) {
+      const left = deadlineAtMs - now();
+      if (left <= 0) {
+        return {
+          kind: 'failed',
+          reason: `cmux ${args.slice(0, 3).join(' ')} did not run: the handoff gate's time for cmux is used up`,
+          timedOut: true,
+        };
+      }
+      const call = await run(args, {
+        timeoutMs: Math.min(CMUX_TIMEOUT_MS, left),
+      });
+      if (call.kind === 'ok' || !call.timedOut) return call;
+      if (!retry || !cmuxCallIsReadOnly(args)) return call;
+      const wait = backoffMs[attempt];
+      // A wait that ends at or past the deadline could run nothing after it.
+      if (wait == null || deadlineAtMs - now() <= wait) return call;
+      await sleep(wait);
+    }
+  };
 }
 
 const treeSchema = z.object({
@@ -372,7 +469,7 @@ const workspacePanesSchema = z.object({
 export type PaneOfSurfaceRead =
   | {kind: 'found'; paneId: string; paneRef: string | null}
   | {kind: 'notFound'; reason: string}
-  | {kind: 'unreadable'; reason: string};
+  | {kind: 'unreadable'; reason: string; timedOut: boolean};
 
 /**
  * home-base-mbnjv.2: the pane that holds `surfaceId` inside `workspaceId`,
@@ -394,12 +491,15 @@ export async function readPaneOfSurface(
   const args = ['--json', '--id-format', 'both', 'tree'];
   args.push('--workspace', workspaceId);
   const call = await run(args);
-  if (call.kind === 'failed') return {kind: 'unreadable', reason: call.reason};
+  if (call.kind === 'failed') {
+    return {kind: 'unreadable', reason: call.reason, timedOut: call.timedOut};
+  }
   const parsed = workspacePanesSchema.safeParse(parseJson(call.stdout));
   if (!parsed.success) {
     return {
       kind: 'unreadable',
       reason: `cmux ${args.join(' ')} printed JSON this code cannot read: ${parsed.error.issues[0]?.message ?? 'not JSON'}`,
+      timedOut: false,
     };
   }
   const wantWorkspace = workspaceId.toUpperCase();

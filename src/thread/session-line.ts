@@ -52,7 +52,8 @@ import {
   readDeliveredAnswers,
 } from './answer-store';
 // Already in the hook's import graph: capture.ts imports config.ts itself.
-import {primaryCheckoutOf} from './config';
+import {primaryCheckoutOf, resolveThreadConfig} from './config';
+import {pickupNotDone, pickupNotDoneText} from './handoff-auto-pickup';
 import {probeErrorMessage} from './paths';
 // Already in the hook's import graph: capture.ts imports session-bead itself.
 import {REQUEST_LABEL, sidLabel} from './session-bead';
@@ -428,6 +429,18 @@ export function sessionLineParts(input: {
   }
 
   const bead = byId.get(sessionSighting.beadId) ?? null;
+  // home-base-npbse.1.2 item 5. Read from the export and two small files: no br.
+  const pickup = pickupNotDone({
+    autoPickup: resolveThreadConfig({
+      cwd: input.cwd ?? undefined,
+      env: input.env,
+    }).handoff.autoPickup,
+    env: input.env,
+    labels: bead?.labels ?? [],
+    ownSession: true,
+    sessionId: input.sessionId,
+  });
+  const pickupParts = pickup == null ? [] : [`⚠️ ${pickupNotDoneText(pickup)}`];
   const requests = [...byId.values()].filter(
     (issue) =>
       issue.labels.includes(REQUEST_LABEL) && issue.status !== 'tombstone',
@@ -461,7 +474,7 @@ export function sessionLineParts(input: {
     answers,
     answersProblem,
     beadId: sessionSighting.beadId,
-    extras: corruptParts,
+    extras: [...corruptParts, ...pickupParts],
     kind: 'session',
     requests:
       problems.length > 0
