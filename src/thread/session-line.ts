@@ -56,6 +56,7 @@ import {primaryCheckoutOf, resolveThreadConfig} from './config';
 import {readBeadFromDb} from './export-behind';
 import {
   pickupNotDoneText,
+  pickupRefusedText,
   pickupState,
   pickupUncheckedText,
 } from './handoff-auto-pickup';
@@ -456,9 +457,11 @@ export function sessionLineParts(input: {
   const pickupParts =
     pickup.kind === 'notDone'
       ? [`⚠️ ${pickupNotDoneText(pickup)}`]
-      : pickup.kind === 'couldNotCheck'
-        ? [`⚠️ ${pickupUncheckedText(oneLine(pickup.reason))}`]
-        : [];
+      : pickup.kind === 'refused'
+        ? [`⚠️ ${pickupRefusedText(oneLine(pickup.reason))}`]
+        : pickup.kind === 'couldNotCheck'
+          ? [`⚠️ ${pickupUncheckedText(oneLine(pickup.reason))}`]
+          : [];
   const requests = [...byId.values()].filter(
     (issue) =>
       issue.labels.includes(REQUEST_LABEL) && issue.status !== 'tombstone',

@@ -5,7 +5,8 @@
  * The child runs this under the per-session lock at every prompt and turn end
  * until the pickup holds. An unmarked session returns null here having read only
  * its own message log, so it does no br read. A session whose pickup holds does
- * one read of its own labels and no write.
+ * one read of its own labels and no write. So does a session the pickup refuses
+ * because it already continues another one (home-base-npbse.1.4).
  *
  * capture.ts imports this file only with the knob on, because merging this reaches
  * every open session's capture code on its next prompt (pkg/justin-sdk/CLAUDE.md).
@@ -20,10 +21,16 @@ import type {PickUpOutcome, PickUpStep} from './handoff-pickup';
 import {
   clearPickupFailure,
   firstUserTextOf,
+  PICKUP_REFUSED_STEP,
+  readPickupFailure,
   successorMark,
   writePickupFailure,
 } from './handoff-auto-pickup';
-import {pickUpHandoff} from './handoff-pickup';
+import {
+  alreadyContinuesReason,
+  pickUpHandoff,
+  predecessorsInTheWay,
+} from './handoff-pickup';
 import {
   AUTO_TITLE_LABEL,
   NOT_A_SUCCESSOR_LABEL,
@@ -60,6 +67,30 @@ export async function runAutoPickup(
     return {kind: 'failed', reason, step};
   };
 
+  // Written once: `at` stays the first refusal, and a later pass writes nothing.
+  const refusedWith = (reason: string): CapturePickupOutcome => {
+    const recorded = readPickupFailure(sessionId, env);
+    const same =
+      recorded != null &&
+      !('unreadable' in recorded) &&
+      recorded.step === PICKUP_REFUSED_STEP &&
+      recorded.predecessorBeadId === predecessorBeadId &&
+      recorded.reason === reason;
+    if (!same) {
+      writePickupFailure(
+        sessionId,
+        {
+          at: now.toISOString(),
+          predecessorBeadId,
+          reason,
+          step: PICKUP_REFUSED_STEP,
+        },
+        env,
+      );
+    }
+    return {kind: 'refused', predecessorBeadId, reason};
+  };
+
   try {
     const selection = selectSession({
       env,
@@ -79,6 +110,12 @@ export async function runAutoPickup(
     if (labels.includes(NOT_A_SUCCESSOR_LABEL)) {
       clearPickupFailure(sessionId, env);
       return {kind: 'held', label: NOT_A_SUCCESSOR_LABEL};
+    }
+    // home-base-npbse.1.4: ahead of `picked-up`, which may be the pickup of the
+    // predecessor it already continues rather than the one it was marked for.
+    const inTheWay = predecessorsInTheWay(labels, predecessorBeadId);
+    if (inTheWay.length > 0) {
+      return refusedWith(alreadyContinuesReason(inTheWay, predecessorBeadId));
     }
     // A failed title sets `picked-up` and returns failed at step `title`, so the
     // title is retried until `auto-title` is gone (review of npbse.1.1).
@@ -121,6 +158,9 @@ export async function runAutoPickup(
           predecessorBeadId,
           reason: outcome.reason,
         };
+      // The pickup reads the labels again, so it can see what the read above did not.
+      case 'already-continues':
+        return refusedWith(outcome.reason);
       case 'failed':
         // `picked-up` holds and only the title failed: nothing to nag about, and
         // the next pass retries the title. capture.jsonl still records it.

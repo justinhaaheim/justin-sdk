@@ -11,13 +11,15 @@ import {afterEach, describe, expect, setDefaultTimeout, test} from 'bun:test';
 import {mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {dirname, join} from 'path';
 
-import {brShow, type brUpdate, runBr} from '../src/beads/br';
+import {brShow, brUpdate, runBr} from '../src/beads/br';
 import {captureRunLogPath, messageLogPath} from '../src/thread/archive';
 import {fileAsk} from '../src/thread/ask';
 import {applyCapture, runThreadCaptureApply} from '../src/thread/capture';
 import {
+  PICKUP_REFUSED_STEP,
   pickupState,
   predecessorInFirstLine,
+  readPickupFailure,
   successorMark,
 } from '../src/thread/handoff-auto-pickup';
 import {runAutoPickup} from '../src/thread/handoff-auto-pickup-run';
@@ -44,6 +46,7 @@ const NEW = '0e400000-1111-4222-8333-000000000003';
 const OTHER = '07400000-1111-4222-8333-000000000004';
 const NOW = new Date('2030-01-01T12:00:00.000Z');
 const NOT_DONE = 'handoff pickup not done:';
+const REFUSED = 'handoff pickup refused, and it does not retry:';
 const RETRY_TAIL = 'it retries at the next prompt or turn end; to retry now:';
 
 setDefaultTimeout(90_000);
@@ -391,6 +394,186 @@ describe('one capture pass picks up a marked successor (home-base-npbse.1.2)', (
     });
     expect(line).not.toContain(NOT_DONE);
     expect(await partOne(w, OTHER)).not.toContain(NOT_DONE);
+  });
+});
+
+describe('a marked session that already continues another one (home-base-npbse.1.4)', () => {
+  /** A real attempt that also says each time the pickup itself was called. */
+  function countedAttempts() {
+    const calls: string[] = [];
+    const runPickup = (input: Parameters<typeof runAutoPickup>[0]) =>
+      runAutoPickup(input, {
+        pickUp: (pickInput, pickDeps) => {
+          calls.push(pickInput.predecessorBeadId);
+          return pickUpHandoff(pickInput, pickDeps);
+        },
+      });
+    return {calls, runPickup};
+  }
+
+  function addLabels(w: World, session: string, labels: string[]): void {
+    const added = brUpdate({cwd: w.repo}, beadOf(w, session), {
+      addLabels: labels,
+    });
+    if (added.kind === 'failed') throw new Error('the labels were not added');
+  }
+
+  test('it is refused, the reason is recorded once, it is not retried, and nothing is written', async () => {
+    const w = world({}, [OLD, NEW, OTHER]);
+    await work(w);
+    const continues = beadOf(w, OLD);
+    const other = beadOf(w, OTHER);
+    const byHand = await fileRequest({
+      bead: null,
+      continues: other,
+      cwd: w.repo,
+      doneWhen: null,
+      env: w.env,
+      here: false,
+      now: NOW,
+      sessionId: NEW,
+      title: null,
+    });
+    expect(byHand).toMatchObject({pickup: {kind: 'picked-up'}});
+    const before = exported(w);
+    const oldLabels = shown(w, continues).labels;
+    const attempts = countedAttempts();
+    const reason = `this session already continues ${other}, and a session continues only one predecessor, so it cannot also continue ${continues}`;
+
+    const first = await pass(w, NEW, {
+      continues,
+      runPickup: attempts.runPickup,
+    });
+    expect(first.pickup).toEqual({
+      kind: 'refused',
+      predecessorBeadId: continues,
+      reason,
+    });
+    const recorded = {
+      at: NOW.toISOString(),
+      predecessorBeadId: continues,
+      reason,
+      step: PICKUP_REFUSED_STEP,
+    };
+    expect(readPickupFailure(NEW, w.env)).toEqual(recorded);
+
+    // A later pass: no attempt, and the record keeps its first time.
+    const second = await pass(w, NEW, {
+      continues,
+      now: new Date('2030-01-01T13:00:00.000Z'),
+      runPickup: attempts.runPickup,
+    });
+    expect(second.pickup).toEqual(first.pickup);
+    expect(attempts.calls).toEqual([]);
+    expect(readPickupFailure(NEW, w.env)).toEqual(recorded);
+    expect(exported(w)).toBe(before);
+    expect(shown(w, continues).labels).toEqual(oldLabels);
+    expect(shown(w, beadOf(w, NEW)).labels).not.toContain('not-a-successor');
+
+    const env = {...w.env, JUSTIN_SDK_CONTINUES: continues};
+    await runThreadCaptureApply({
+      autoCommit: false,
+      cwd: w.repo,
+      env,
+      now: NOW,
+      sessionId: NEW,
+    });
+    const line =
+      readFileSync(captureRunLogPath(w.env), 'utf8')
+        .trim()
+        .split('\n')
+        .at(-1) ?? '{}';
+    expect(JSON.parse(line)).toMatchObject({pickup: {kind: 'refused', reason}});
+
+    // Said where a failure is said, and not as something that retries.
+    const context =
+      sessionContextLine({cwd: w.repo, env, sessionId: NEW}) ?? '';
+    expect(context).toContain(`${REFUSED} ${reason}`);
+    expect(context).not.toContain(NOT_DONE);
+    expect(context).not.toContain(RETRY_TAIL);
+    const status = await partOne(w, NEW);
+    expect(status).toContain(`${REFUSED} ${reason}`);
+    expect(status).not.toContain(NOT_DONE);
+    expect(status).not.toContain(RETRY_TAIL);
+  });
+
+  test('removing the label ends the refusal: the next pass picks up and the record is gone', async () => {
+    const w = world({}, [OLD, NEW, OTHER]);
+    const {request: filed} = await work(w);
+    const continues = beadOf(w, OLD);
+    const label = `continues:${beadOf(w, OTHER)}`;
+    addLabels(w, NEW, [label]);
+
+    const refused = await pass(w, NEW, {continues});
+    expect(refused.pickup).toMatchObject({kind: 'refused'});
+    expect(shown(w, filed).labels).not.toContain(sidLabel(NEW));
+
+    const removed = brUpdate({cwd: w.repo}, beadOf(w, NEW), {
+      removeLabels: [label],
+    });
+    if (removed.kind === 'failed') throw new Error('the label stayed');
+
+    const held = await pass(w, NEW, {continues});
+    expect(held.pickup).toMatchObject({kind: 'picked-up', wrote: true});
+    expect(shown(w, filed).labels).toContain(sidLabel(NEW));
+    expect(readPickupFailure(NEW, w.env)).toBeNull();
+    const env = {...w.env, JUSTIN_SDK_CONTINUES: continues};
+    expect(
+      sessionContextLine({cwd: w.repo, env, sessionId: NEW}),
+    ).not.toContain(REFUSED);
+    expect(await partOne(w, NEW)).not.toContain(REFUSED);
+  });
+
+  test('a refusal only the pickup itself saw is recorded the same way', async () => {
+    const w = world();
+    const continues = beadOf(w, OLD);
+    const reason = 'this session already continues t-seen-late';
+    const outcome = await pass(w, NEW, {
+      continues,
+      runPickup: (input) =>
+        runAutoPickup(input, {
+          pickUp: () =>
+            Promise.resolve({
+              alreadyContinues: ['t-seen-late'],
+              kind: 'already-continues',
+              newBeadId: beadOf(w, NEW),
+              oldBeadId: continues,
+              reason,
+            }),
+        }),
+    });
+    expect(outcome.pickup).toEqual({
+      kind: 'refused',
+      predecessorBeadId: continues,
+      reason,
+    });
+    expect(readPickupFailure(NEW, w.env)).toMatchObject({
+      reason,
+      step: 'already-continues',
+    });
+  });
+
+  test('thread spawn --continues: spawned-by and one continues label for the marked session is not refused', async () => {
+    const w = world();
+    const {request: filed} = await work(w);
+    const continues = beadOf(w, OLD);
+    addLabels(w, NEW, ['spawned-by:t-parent', `continues:${continues}`]);
+
+    const first = await pass(w, NEW, {continues});
+    expect(first.pickup).toMatchObject({kind: 'picked-up'});
+    expect(shown(w, filed).labels).toContain(sidLabel(NEW));
+    expect(readPickupFailure(NEW, w.env)).toBeNull();
+
+    const second = await pass(w, NEW, {continues});
+    expect(second.pickup).toEqual({kind: 'held', label: 'picked-up'});
+  });
+
+  test('thread spawn --continues: spawned-by with no continues label yet is not refused', async () => {
+    const w = world();
+    await work(w);
+    addLabels(w, NEW, ['spawned-by:t-parent']);
+    const first = await pass(w, NEW, {continues: beadOf(w, OLD)});
+    expect(first.pickup).toMatchObject({kind: 'picked-up', wrote: true});
   });
 });
 

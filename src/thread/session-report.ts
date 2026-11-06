@@ -65,6 +65,7 @@ import {readBeadFromDb} from './export-behind';
 import {
   PICKUP_DONE_LINE,
   pickupNotDoneWords,
+  pickupRefusedText,
   pickupState,
 } from './handoff-auto-pickup';
 import {realChainReaders, walkUnattendedChain} from './handoff-chain';
@@ -894,15 +895,23 @@ export function renderThreadStatus(
   }
   // home-base-jm5kg.11.2: said only when the export does not show it, because
   // that is the one case where the rest of this output cannot.
-  const pickupDone =
+  // home-base-npbse.1.4: a refusal is not retried and no command fixes it, so it
+  // is said here and is not an item in What to mark.
+  const pickupLine =
     load.pickup.kind === 'done' && load.pickup.via === 'database'
-      ? [style.color ? `${pad(2)}${PICKUP_DONE_LINE}` : PICKUP_DONE_LINE]
-      : [];
+      ? PICKUP_DONE_LINE
+      : load.pickup.kind === 'refused'
+        ? `⚠️ ${pickupRefusedText(load.pickup.reason)}`
+        : null;
+  const pickupLines =
+    pickupLine == null
+      ? []
+      : [style.color ? `${pad(2)}${pickupLine}` : pickupLine];
   return spacedList([
     SESSION_BEADS_ENABLED_LINE,
     partOne,
     markBlock,
-    ...pickupDone,
+    ...pickupLines,
     verdictLines(load.status, style, load.handoffSuccessor).join('\n'),
   ]);
 }

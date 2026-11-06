@@ -474,6 +474,9 @@ status in_progress. Run it as soon as he asks for work — one command, no form.
       finds it all done writes nothing. Each session has one successor: when
       another session already continues the old one, nothing is linked or
       carried, this session is labelled not-a-successor, and the exit code is 2.
+      Each session has one predecessor: when this session already continues
+      another one, it is refused, naming that one, nothing is written, and the
+      exit code is 2. Running it for the one it already continues stays safe.
 
 The FIRST request also renames the session to the request's title (unless
 \`thread title\` already named it). Later requests never rename.

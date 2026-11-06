@@ -30,7 +30,8 @@
  * failed (a request that WAS filed but whose follow-up write failed says so, by
  * id; a pickup step that failed is named, and running the same command again
  * finishes it) · 2 usage, or the pickup found that another session already
- * continues that one (not-a-successor).
+ * continues that one (not-a-successor), or that this session already continues
+ * another one (already-continues).
  */
 
 import type {BeadsWorkspace, BrTarget} from '../beads/br';
@@ -847,6 +848,10 @@ export async function fileRequest(
         followUpFailures.push(
           `the handoff pickup of ${continues} stopped at step "${pickup.step}": ${pickup.reason}. Running ${retryCommand} again finishes it`,
         );
+      } else if (pickup.kind === 'already-continues') {
+        followUpFailures.push(
+          `this session was NOT linked to ${continues}: ${pickup.reason}. Nothing was carried over, and the pickup wrote nothing`,
+        );
       } else {
         followUpFailures.push(
           `this session is not the successor of ${continues}: ${pickup.reason}. No link was made and nothing was carried over`,
@@ -964,7 +969,11 @@ export function describeRequestOutcome(outcome: ThreadRequestOutcome): {
           ...outcome.followUpFailures.map((failure) => `  - ${failure}`),
         );
         return {
-          exitCode: outcome.pickup?.kind === 'not-a-successor' ? 2 : 1,
+          exitCode:
+            outcome.pickup?.kind === 'not-a-successor' ||
+            outcome.pickup?.kind === 'already-continues'
+              ? 2
+              : 1,
           lines,
         };
       }

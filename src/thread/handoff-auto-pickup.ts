@@ -19,6 +19,12 @@
  * [thread] line and `thread status` can say so without a br read. A retry writes
  * that file again and nothing else: the bead's notes do not grow.
  *
+ * A REFUSAL IS NOT RETRIED (home-base-npbse.1.4). A marked session that already
+ * continues another session is refused at every attempt, so the child stops
+ * attempting. It records why once, in the same file with step
+ * `already-continues`, and each later pass does one read of its own labels. Its
+ * labels are what is checked, so removing the label ends the refusal.
+ *
  * This file holds what the prompt-time line needs, and stays light on purpose:
  * the attempt itself lives in handoff-auto-pickup-run.ts, which the capture child
  * imports only with the knob on.
@@ -86,11 +92,14 @@ export function firstUserTextOf(
 // Why the last attempt failed
 // ---------------------------------------------------------------------------
 
+/** The recorded step of a refusal, which nothing retries. */
+export const PICKUP_REFUSED_STEP = 'already-continues' as const;
+
 export interface PickupFailure {
   at: string;
   predecessorBeadId: string;
   reason: string;
-  step: PickUpStep | 'threw';
+  step: PickUpStep | typeof PICKUP_REFUSED_STEP | 'threw';
 }
 
 function failurePath(sessionId: string, env: EnvLike): string {
@@ -159,7 +168,9 @@ export type CapturePickupOutcome =
       wrote: boolean;
     }
   | {kind: 'failed'; reason: string; step: PickUpStep | 'threw'}
-  | {kind: 'not-a-successor'; predecessorBeadId: string; reason: string};
+  | {kind: 'not-a-successor'; predecessorBeadId: string; reason: string}
+  /** This session already continues another one: not attempted, not retried. */
+  | {kind: 'refused'; predecessorBeadId: string; reason: string};
 
 export interface AutoPickupInput {
   cwd: string;
@@ -193,6 +204,11 @@ export function pickupUncheckedText(reason: string): string {
   return `handoff pickup: could not check: ${reason}`;
 }
 
+/** The [thread] line and `thread status` say this for a recorded refusal. */
+export function pickupRefusedText(reason: string): string {
+  return `handoff pickup refused, and it does not retry: ${reason}`;
+}
+
 /** The line `thread status` prints when only the database shows the pickup. */
 export const PICKUP_DONE_LINE =
   'Handoff pickup: done. The database has it; the bead export has not caught up.';
@@ -204,7 +220,7 @@ export type PickupLabelsRead =
   | {kind: 'read'; labels: readonly string[]};
 
 /**
- * home-base-jm5kg.11.2. Three answers and "nothing owed", never a guess:
+ * home-base-jm5kg.11.2. Four answers and "nothing owed", never a guess:
  * a read that failed is `couldNotCheck`, not `notDone` and not `done` (rule 7).
  */
 export type PickupState =
@@ -213,6 +229,8 @@ export type PickupState =
   /** `picked-up` holds. `via`: which source showed it. */
   | {kind: 'done'; via: 'database' | 'export'}
   | ({kind: 'notDone'} & PickupNotDone)
+  /** home-base-npbse.1.4: it already continues another session; no retry. */
+  | {kind: 'refused'; reason: string}
   | {kind: 'couldNotCheck'; reason: string};
 
 /**
@@ -238,17 +256,23 @@ export function pickupState(input: {
 }): PickupState {
   const {autoPickup, env, exportLabels, ownSession, sessionId} = input;
   if (!autoPickup) return {kind: 'notOwed'};
+  const failure = readPickupFailure(sessionId, env);
+  const unreadable =
+    failure != null && 'unreadable' in failure ? failure.reason : null;
+  const recorded =
+    failure != null && !('unreadable' in failure) ? failure : null;
+  // Ahead of `picked-up`: that label may be the pickup of the predecessor this
+  // session already continues, which says nothing about the one it was marked
+  // for. The capture pass removes this record once the labels no longer refuse.
+  if (recorded?.step === PICKUP_REFUSED_STEP) {
+    return {kind: 'refused', reason: recorded.reason};
+  }
   if (exportLabels?.includes(PICKED_UP_LABEL) === true) {
     return {kind: 'done', via: 'export'};
   }
   if (exportLabels?.includes(NOT_A_SUCCESSOR_LABEL) === true) {
     return {kind: 'notOwed'};
   }
-  const failure = readPickupFailure(sessionId, env);
-  const unreadable =
-    failure != null && 'unreadable' in failure ? failure.reason : null;
-  const recorded =
-    failure != null && !('unreadable' in failure) ? failure : null;
   const log = readMessageLog(sessionId, env);
   const mark = successorMark({
     env: ownSession ? env : {},

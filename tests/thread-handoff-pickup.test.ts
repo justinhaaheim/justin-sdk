@@ -19,6 +19,11 @@ import {
   sessionIndexPath,
 } from '../src/thread/archive';
 import {fileAsk} from '../src/thread/ask';
+import {
+  realChainReaders,
+  walkUnattendedChain,
+} from '../src/thread/handoff-chain';
+import {runHandoffGate} from '../src/thread/handoff-gate';
 import {serializeMessageLine} from '../src/thread/message-log';
 import {describeRequestOutcome, fileRequest} from '../src/thread/request';
 import {kickoffText} from '../src/thread/respawn';
@@ -639,6 +644,230 @@ describe('thread request --continues carries the work over', () => {
     expect(help).toContain('carry over its unanswered questions');
     expect(help).toContain('Run it again at any time');
     expect(help).toContain('not-a-successor');
+    expect(help).toContain('Each session has one predecessor');
+  });
+});
+
+/** The labels of a bead that start with `continues:`, sorted. */
+function continuesLabels(w: World, id: string): string[] {
+  return shown(w, id)
+    .labels.filter((label) => label.startsWith('continues:'))
+    .sort();
+}
+
+/**
+ * The real gate over the real chain walk against the scratch DB. Every other
+ * reader passes, and none of them reads real state.
+ */
+function nextHandoffGate(w: World, session: string) {
+  return runHandoffGate({
+    env: {...w.env, CLAUDE_CODE_SESSION_ID: session},
+    limits: {
+      maxLiveSessions: 20,
+      maxUnattendedHandoffs: 3,
+      usage: {
+        check: false,
+        maxSampleAgeMinutes: 150,
+        maxSessionPercent: 85,
+        maxWeekPercent: 90,
+      },
+    },
+    now: NOW,
+    readers: {
+      callerScreen: () => {
+        throw new Error('requireCmuxPane is false: the screen is not read');
+      },
+      chain: () =>
+        walkUnattendedChain(
+          beadOf(w, session),
+          realChainReaders({cwd: w.repo, env: w.env}),
+        ),
+      guard: () => ({kind: 'registered', where: ['/fake/settings.json']}),
+      guardPass: () => ({kind: 'valid', path: '/fake/guard-pass.json'}),
+      killSwitch: () => ({kind: 'off', path: '/fake/handoff-off'}),
+      launchRecord: null,
+      liveSessions: () => ({
+        bySource: {agents: 0, hookStore: 0, ps: 1, screen: 0},
+        kind: 'counted',
+        sessionIds: 1,
+        total: 1,
+        unplaced: {background: 0, pane: 0, process: 0},
+      }),
+      pingCmux: () => ({kind: 'ok'}),
+      usage: () => {
+        throw new Error('usage.check is false: the usage is not read');
+      },
+    },
+    requireCmuxPane: false,
+  });
+}
+
+describe('one predecessor per successor (home-base-npbse.1.4)', () => {
+  test('AC2: --continues A then --continues B is refused naming A, no byte moves, and A again writes nothing', async () => {
+    const w = world();
+    const {own} = await chain(w);
+    const stillThere = await request(w, GRAND, 'Still with the session before');
+    const oldBead = beadOf(w, OLD);
+    const grandBead = beadOf(w, GRAND);
+    const newBead = beadOf(w, NEW);
+
+    expect(await pickUp(w)).toMatchObject({pickup: {kind: 'picked-up'}});
+    expect(shown(w, own).labels).toContain(`sid:${NEW}`);
+    const before = writesSnapshot(w);
+
+    const refused = await pickUp(w, {predecessor: grandBead});
+    expect(refused).toMatchObject({
+      kind: 'handoffPickup',
+      pickup: {
+        alreadyContinues: [oldBead],
+        kind: 'already-continues',
+        newBeadId: newBead,
+        oldBeadId: grandBead,
+      },
+    });
+    const {exitCode, lines} = describeRequestOutcome(refused);
+    const text = lines.join('\n');
+    console.log(`the refusal, exit ${exitCode}:\n${text}`);
+    expect(exitCode).toBe(2);
+    expect(text).toContain(
+      `refused: this session already continues ${oldBead}, and a session continues only one predecessor, so it cannot also continue ${grandBead}.`,
+    );
+    expect(text).toContain('nothing was written');
+    expect(text).toContain(`thread request --continues ${oldBead}`);
+    // The predecessor's side has its own words: this is not that refusal.
+    expect(text).not.toContain('not-a-successor');
+    expect(text).not.toContain('is not the successor of');
+
+    expect(writesSnapshot(w)).toEqual(before);
+    expect(continuesLabels(w, newBead)).toEqual([`continues:${oldBead}`]);
+    expect(shown(w, newBead).labels).not.toContain('not-a-successor');
+    expect(
+      shown(w, grandBead).labels.filter((label) =>
+        label.startsWith('continued-by:'),
+      ),
+    ).toEqual([]);
+    expect(shown(w, stillThere).labels).not.toContain(`sid:${NEW}`);
+
+    const again = await pickUp(w);
+    expect(again).toMatchObject({pickup: {kind: 'picked-up', wrote: false}});
+    expect(describeRequestOutcome(again).exitCode).toBe(0);
+    expect(writesSnapshot(w)).toEqual(before);
+  });
+
+  test('AC3: after that sequence the next handoff passes the gate; with two labels it is refused naming both', async () => {
+    const w = world();
+    await chain(w);
+    const oldBead = beadOf(w, OLD);
+    const grandBead = beadOf(w, GRAND);
+    const newBead = beadOf(w, NEW);
+    await pickUp(w);
+    await pickUp(w, {predecessor: grandBead});
+
+    const next = await nextHandoffGate(w, NEW);
+    if (next.kind !== 'pass') throw new Error(JSON.stringify(next));
+    expect(next.facts.chain).toMatchObject({
+      kind: 'counted',
+      links: [{beadId: newBead, continues: oldBead}],
+    });
+
+    // A bead damaged before this rule existed keeps the gate's own refusal.
+    const damaged = brUpdate({cwd: w.repo}, newBead, {
+      addLabels: [`continues:${grandBead}`],
+    });
+    if (damaged.kind === 'failed') throw new Error('the label was not added');
+    const refused = await nextHandoffGate(w, NEW);
+    if (refused.kind !== 'refused') throw new Error(JSON.stringify(refused));
+    expect(refused.reason).toBe('chainUnknown');
+    expect(refused.detail).toContain(`continues:${oldBead}`);
+    expect(refused.detail).toContain(`continues:${grandBead}`);
+  });
+
+  test('this side is checked first: a predecessor another session continues does not label this one not-a-successor', async () => {
+    const w = world([GRAND, OLD, NEW, OTHER]);
+    await chain(w);
+    const oldBead = beadOf(w, OLD);
+    const grandBead = beadOf(w, GRAND);
+    const newBead = beadOf(w, NEW);
+    await pickUp(w);
+    expect(
+      await pickUp(w, {predecessor: grandBead, session: OTHER}),
+    ).toMatchObject({pickup: {kind: 'picked-up'}});
+
+    const refused = await pickUp(w, {predecessor: grandBead});
+    expect(refused).toMatchObject({
+      pickup: {alreadyContinues: [oldBead], kind: 'already-continues'},
+    });
+    expect(shown(w, newBead).labels).not.toContain('not-a-successor');
+    expect(shown(w, newBead).notes ?? '').not.toContain('not linked:');
+  });
+
+  test('a predecessor that does not exist gets the same refusal, before anything looks for it', async () => {
+    const w = world();
+    await chain(w);
+    await pickUp(w);
+    const refused = await pickUp(w, {predecessor: 't-no-such-bead'});
+    expect(refused).toMatchObject({
+      pickup: {alreadyContinues: [beadOf(w, OLD)], kind: 'already-continues'},
+    });
+  });
+
+  test('with a title it still files the request, says why nothing linked, and exits 2', async () => {
+    const w = world();
+    await chain(w);
+    const oldBead = beadOf(w, OLD);
+    const grandBead = beadOf(w, GRAND);
+    await pickUp(w);
+    const filed = await pickUp(w, {
+      predecessor: grandBead,
+      title: 'Something new',
+    });
+    if (filed.kind !== 'filed') throw new Error(JSON.stringify(filed));
+    const {exitCode, lines} = describeRequestOutcome(filed);
+    const text = lines.join('\n');
+    expect(exitCode).toBe(2);
+    expect(text).toContain(`${filed.id} WAS filed`);
+    expect(text).toContain(
+      `this session was NOT linked to ${grandBead}: this session already continues ${oldBead}`,
+    );
+    expect(text).not.toContain('is not the successor of');
+    expect(filed.continued).toBeNull();
+    expect(continuesLabels(w, beadOf(w, NEW))).toEqual([
+      `continues:${oldBead}`,
+    ]);
+  });
+
+  test('a session already holding two labels can finish either one, and a third is refused naming both', async () => {
+    const w = world([GRAND, OLD, NEW, OTHER]);
+    await chain(w);
+    const oldBead = beadOf(w, OLD);
+    const grandBead = beadOf(w, GRAND);
+    const newBead = beadOf(w, NEW);
+    const damaged = brUpdate({cwd: w.repo}, newBead, {
+      addLabels: [`continues:${oldBead}`, `continues:${grandBead}`],
+    });
+    if (damaged.kind === 'failed') throw new Error('the labels were not added');
+    const both = [`continues:${grandBead}`, `continues:${oldBead}`].sort();
+
+    expect(await pickUp(w)).toMatchObject({pickup: {kind: 'picked-up'}});
+    expect(continuesLabels(w, newBead)).toEqual(both);
+
+    const refused = await pickUp(w, {predecessor: beadOf(w, OTHER)});
+    if (refused.kind !== 'handoffPickup') {
+      throw new Error(JSON.stringify(refused));
+    }
+    const {pickup} = refused;
+    if (pickup.kind !== 'already-continues') {
+      throw new Error(JSON.stringify(pickup));
+    }
+    expect([...pickup.alreadyContinues].sort()).toEqual(
+      [grandBead, oldBead].sort(),
+    );
+    const {exitCode, lines} = describeRequestOutcome(refused);
+    const text = lines.join('\n');
+    expect(exitCode).toBe(2);
+    expect(text).toContain('already has 2 continues: labels');
+    expect(text).not.toContain('To finish or check');
+    expect(continuesLabels(w, newBead)).toEqual(both);
   });
 });
 

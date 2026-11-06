@@ -12,6 +12,13 @@
  * (request.ts), and the capture child (home-base-npbse.1.2) already holds it.
  * It runs, in order:
  *
+ *   0. One predecessor per successor (home-base-npbse.1.4): a session that
+ *      already continues another session is refused, naming it, and nothing is
+ *      written. This is the successor's side of the rule in step a, and it comes
+ *      first so that a refused session is never labelled `not-a-successor`, which
+ *      is final. Justin's question on this is open; refusing is its stated
+ *      default. Two `continues:` labels make the handoff gate refuse this
+ *      session's next handoff (chainUnknown, handoff-chain.ts).
  *   a. One successor per predecessor (P4): the link is made only when the
  *      predecessor has no `continued-by:` yet or already names this session.
  *      Otherwise it writes nothing except, once, `not-a-successor` and one note
@@ -56,7 +63,8 @@ import {
   findBeadsWorkspace,
   resolveRecordedBeadsDb,
 } from '../beads/br';
-import {continuedByOf} from './handoff-view';
+import {sdkRun} from '../sdk-invocation';
+import {continuedByOf, continuesOf} from './handoff-view';
 import {adoptBead, titleSetEdit} from './request-writes';
 import {
   AUTO_TITLE_LABEL,
@@ -134,6 +142,14 @@ export type PickUpOutcome =
       wrote: boolean;
     }
   | {
+      /** Every predecessor this session already continues, from its labels. */
+      alreadyContinues: string[];
+      kind: 'already-continues';
+      newBeadId: string;
+      oldBeadId: string;
+      reason: string;
+    }
+  | {
       /** The other session, from the label; null when no record names it. */
       continuedBy: string | null;
       kind: 'not-a-successor';
@@ -173,6 +189,28 @@ export interface PickUpDeps {
     sessionId: string;
   }) => Promise<string | null>;
   update: typeof brUpdate;
+}
+
+/**
+ * What stops a session with these labels from continuing `oldBeadId`: the
+ * predecessors it already continues, or nothing when it continues no session or
+ * already continues `oldBeadId` itself. A session already holding two labels
+ * can still finish the pickup of either one, because that adds no label.
+ */
+export function predecessorsInTheWay(
+  labels: readonly string[],
+  oldBeadId: string,
+): string[] {
+  const continuing = continuesOf(labels);
+  return continuing.includes(oldBeadId) ? [] : continuing;
+}
+
+/** Why step 0 refused: the wording both callers record and print. */
+export function alreadyContinuesReason(
+  continuing: readonly string[],
+  oldBeadId: string,
+): string {
+  return `this session already continues ${continuing.join(' and ')}, and a session continues only one predecessor, so it cannot also continue ${oldBeadId}`;
 }
 
 /** The note line that records a refusal; `continuedByInRecord` reads it back. */
@@ -457,6 +495,19 @@ export async function pickUpHandoff(
       recordedNow: false,
     };
   }
+
+  // ---- 0. one predecessor per successor (home-base-npbse.1.4) ----
+  const inTheWay = predecessorsInTheWay(myLabels, oldBeadId);
+  if (inTheWay.length > 0) {
+    return {
+      alreadyContinues: inTheWay,
+      kind: 'already-continues',
+      newBeadId,
+      oldBeadId,
+      reason: alreadyContinuesReason(inTheWay, oldBeadId),
+    };
+  }
+
   const fallbacks = [newDb];
   const space = findBeadsWorkspace(cwd);
   if (space.kind === 'found') fallbacks.push(space.db);
@@ -684,9 +735,19 @@ function hasItems(items: PickedItems): boolean {
 export function carriedLines(
   outcome:
     | {alreadyHeld: PickedItems; carried: PickedItems}
-    | Extract<PickUpOutcome, {kind: 'failed'} | {kind: 'not-a-successor'}>,
+    | Extract<
+        PickUpOutcome,
+        | {kind: 'already-continues'}
+        | {kind: 'failed'}
+        | {kind: 'not-a-successor'}
+      >,
 ): string[] {
-  if ('kind' in outcome && outcome.kind === 'not-a-successor') return [];
+  if (
+    'kind' in outcome &&
+    (outcome.kind === 'not-a-successor' || outcome.kind === 'already-continues')
+  ) {
+    return [];
+  }
   const done = 'done' in outcome ? outcome.done : outcome;
   const lines: string[] = [];
   if (hasItems(done.carried)) {
@@ -708,7 +769,7 @@ export function carriedLines(
 
 /**
  * The lines `--continues` prints. Exit 0 done or nothing to do, 1 a step failed,
- * 2 not-a-successor.
+ * 2 not-a-successor or already-continues.
  */
 export function describePickUp(
   outcome: PickUpOutcome,
@@ -743,6 +804,19 @@ export function describePickUp(
         lines.push(`  ${outcome.workspaceNote}`);
       }
       return {exitCode: 0, lines};
+    }
+    case 'already-continues': {
+      const [only, ...more] = outcome.alreadyContinues;
+      return {
+        exitCode: 2,
+        lines: [
+          `thread request: refused: ${outcome.reason}.`,
+          `  No link was made, nothing was carried over, and nothing was written.`,
+          only != null && more.length === 0
+            ? `  To finish or check the pickup this session already has, run: ${sdkRun(`thread request --continues ${only}`)}`
+            : `  This session already has ${outcome.alreadyContinues.length} ${CONTINUES_LABEL_PREFIX} labels, so the handoff gate refuses its next handoff until only one is left.`,
+        ],
+      };
     }
     case 'not-a-successor':
       return {
