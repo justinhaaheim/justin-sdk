@@ -202,6 +202,7 @@ export const SELECT_COMMANDS = [
  *    a removal decision is being made.
  *  - `pre-commit-ts-check` is a GIT hook step (home-base-pp1vx.1.2): it runs
  *    on every commit, and an upgrade notice in commit output is noise.
+ *    `pre-commit-beads-export` is the same (home-base-jm5kg.11.3).
  *  - `worktree-retire` is the same moment (home-base-rub4v.1.1): `run` asks
  *    Justin to type a count before it removes worktrees, and `plan` is read as
  *    evidence by the session that proposes the list.
@@ -213,6 +214,7 @@ export const NEVER_COMMANDS = [
   'forensics',
   'hook',
   'justin-loop handoff',
+  'pre-commit-beads-export',
   'pre-commit-ts-check',
   'prime',
   'repo-state',
@@ -250,6 +252,7 @@ export const ALL_COMMANDS = [
   'list',
   'mac-build',
   'migrate-to-prime',
+  'pre-commit-beads-export',
   'pre-commit-ts-check',
   'prime',
   'remove',

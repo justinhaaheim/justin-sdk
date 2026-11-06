@@ -126,7 +126,12 @@ export type ChainBeadsRead =
   | {kind: 'failed'; reason: string};
 
 export type SessionRequestsRead =
-  | {kind: 'failed'; reason: string}
+  /**
+   * `missingFromExport`: every export was read and none holds the session bead,
+   * which the chain walk just read from the database. So the export is behind,
+   * and the next capture can read it (home-base-jm5kg.11.2).
+   */
+  | {kind: 'failed'; missingFromExport?: true; reason: string}
   | {kind: 'read'; requests: TreeIssue[]};
 
 export interface ChainRequestReaders {
@@ -144,7 +149,7 @@ export interface ChainRequests {
 }
 
 export type ChainRequestsRead =
-  | {kind: 'failed'; reason: string}
+  | {kind: 'failed'; missingFromExport?: true; reason: string}
   | ({kind: 'read'} & ChainRequests);
 
 /** True when a session bead carries either half of a handoff link. */
@@ -173,6 +178,7 @@ export function readChainRequests(
     if (read.kind === 'failed') {
       return {
         kind: 'failed',
+        ...(read.missingFromExport === true ? {missingFromExport: true} : {}),
         reason: `the requests of session ${bead.id} could not be read: ${read.reason}`,
       };
     }
@@ -189,6 +195,7 @@ export function requestsOfTree(tree: SessionTree): SessionRequestsRead {
   if (tree.session == null) {
     return {
       kind: 'failed',
+      ...(tree.sessionMissing != null ? {missingFromExport: true} : {}),
       reason: tree.sessionMissing ?? 'the session bead was not found',
     };
   }

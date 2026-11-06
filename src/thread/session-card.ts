@@ -30,6 +30,7 @@ import type {TreeIssue} from './session-tree';
 import {sdkRun} from '../sdk-invocation';
 import {ARCHIVED_PREFIX, oneLine, parseAsk} from './ask-format';
 import {sortAsks} from './ask-render';
+import {exportBehindWords} from './export-behind';
 import {
   continuedByOf,
   continuesOf,
@@ -446,6 +447,12 @@ export function deriveAction(input: ActionInput): ActionLine {
         rule: 10,
         text: `Check it by hand: ${tildeText(status.reasons.join('; '))}`,
       };
+    case 'exportBehind':
+      return {
+        command: null,
+        rule: 10,
+        text: `Nothing yet: ${tildeText(exportBehindWords(status.behind))}.`,
+      };
   }
 }
 
@@ -657,6 +664,8 @@ export function whereWords(status: SessionStatus): string {
       return '🔀 Done, not merged: every request is closed, but the work is not landed';
     case 'answered':
       return '💬 Answered';
+    case 'exportBehind':
+      return `⏳ Export behind: ${tildeText(exportBehindWords(status.behind))}`;
     case 'unknown':
       return '❔ Unknown';
     case 'openWork':
@@ -775,6 +784,14 @@ function youAskedOf(model: SessionModel): YouAsked {
       first.ok && first.value != null
         ? firstLineOf(first.value.text, FIRST_MESSAGE_CUT)
         : null;
+    // home-base-jm5kg.11.2: the export's silence is not "no request filed".
+    if (model.exportBehind != null) {
+      return {
+        firstMessage,
+        kind: 'unknown',
+        reason: tildeText(exportBehindWords(model.exportBehind)),
+      };
+    }
     if (beads.problems.length > 0) {
       return {
         firstMessage,

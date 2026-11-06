@@ -30,7 +30,7 @@
  */
 
 import type {OutputStyle} from '../cli-style';
-import type {PickupNotDone} from './handoff-auto-pickup';
+import type {PickupLabelsRead, PickupState} from './handoff-auto-pickup';
 import type {ChainReaders} from './handoff-chain';
 import type {MessageLine} from './message-log';
 import type {Piece} from './part-one';
@@ -61,7 +61,12 @@ import {
 import {SDK_HANDOFF_CALL, sdkRun} from '../sdk-invocation';
 import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
-import {pickupNotDone, pickupNotDoneWords} from './handoff-auto-pickup';
+import {readBeadFromDb} from './export-behind';
+import {
+  PICKUP_DONE_LINE,
+  pickupNotDoneWords,
+  pickupState,
+} from './handoff-auto-pickup';
 import {realChainReaders, walkUnattendedChain} from './handoff-chain';
 import {
   chainLines,
@@ -88,7 +93,7 @@ import {threadsBeadsDir} from './paths';
 import {findRelatedEpics, renderRelatedEpics} from './related-epics';
 import {deriveAction, optionalLine} from './session-card';
 import {loadCreatedBeads} from './session-created';
-import {readSessionIndex} from './session-index';
+import {readSessionIndex, sessionBeadSighting} from './session-index';
 import {
   lastAssistantLine,
   loadSession,
@@ -184,8 +189,8 @@ export type ReportLoad =
        * with titleSummary on (null otherwise).
        */
       overarching: Measured<OverarchingFacts> | null;
-      /** home-base-npbse.1.2 item 5: null with nothing to say. */
-      pickupNotDone: null | PickupNotDone;
+      /** home-base-npbse.1.2 item 5, home-base-jm5kg.11.2. */
+      pickup: PickupState;
       /** componentConfig.thread.workspaceDescription (home-base-jm5kg.18). */
       shortLabels: boolean;
       status: SessionStatus;
@@ -285,6 +290,25 @@ function overarchingFactsOf(
   };
 }
 
+/** The session bead's labels in the database, read once if the model has them. */
+function readModelBeadFromDb(
+  model: SessionModel,
+  env: EnvLike,
+): PickupLabelsRead {
+  if (model.exportBehind != null) {
+    return {kind: 'read', labels: model.exportBehind.labels};
+  }
+  const sighting = sessionBeadSighting(model.sightings);
+  if (sighting == null) {
+    return {kind: 'failed', reason: 'the sessions index names no session bead'};
+  }
+  return readBeadFromDb({
+    beadId: sighting.beadId,
+    beadsDir: sighting.beadsDir,
+    env,
+  });
+}
+
 async function loadForReport(input: {
   asIfYielded: boolean;
   cwd: string;
@@ -331,11 +355,12 @@ async function loadForReport(input: {
     model,
     optional: optionalLine(counts, model.sessionBeadId),
     overarching: knob.titleSummary ? overarchingFactsOf(model, input) : null,
-    pickupNotDone: pickupNotDone({
+    pickup: pickupState({
       autoPickup: knob.autoPickup,
       env: input.env,
-      labels: model.beads.session?.labels ?? [],
+      exportLabels: model.beads.session?.labels ?? null,
       ownSession: input.env.CLAUDE_CODE_SESSION_ID === model.sessionId,
+      readLabels: () => readModelBeadFromDb(model, input.env),
       sessionId: model.sessionId,
     }),
     shortLabels: knob.shortLabels,
@@ -828,7 +853,7 @@ export function renderThreadStatus(
   );
   const marks = whatToMark(load.model, load.status, load.created, {
     ...(load.overarching != null ? {overarching: load.overarching} : {}),
-    pickupNotDone: load.pickupNotDone,
+    pickup: load.pickup,
     shortLabels: load.shortLabels,
     titleSummary: load.titleSummary,
   })
@@ -867,10 +892,17 @@ export function renderThreadStatus(
       ),
     ].join('\n\n');
   }
+  // home-base-jm5kg.11.2: said only when the export does not show it, because
+  // that is the one case where the rest of this output cannot.
+  const pickupDone =
+    load.pickup.kind === 'done' && load.pickup.via === 'database'
+      ? [style.color ? `${pad(2)}${PICKUP_DONE_LINE}` : PICKUP_DONE_LINE]
+      : [];
   return spacedList([
     SESSION_BEADS_ENABLED_LINE,
     partOne,
     markBlock,
+    ...pickupDone,
     verdictLines(load.status, style, load.handoffSuccessor).join('\n'),
   ]);
 }

@@ -32,6 +32,7 @@
  * exists is measured as unreadable — never silently swapped for another.
  */
 
+import type {ExportBehind} from './export-behind';
 import type {MessageLine, MessageLogRead} from './message-log';
 import type {EnvLike} from './paths';
 import type {GitRun, SessionCommits} from './session-commits';
@@ -45,6 +46,7 @@ import {basename, dirname, isAbsolute, relative, resolve} from 'path';
 import {findBeadsWorkspace} from '../beads/br';
 import {findProjectRoot} from '../health-notices';
 import {readTranscriptFacts} from '../usage-check';
+import {checkExportBehind} from './export-behind';
 import {findTranscript} from './facts';
 import {readMessageLog} from './message-log';
 import {
@@ -186,6 +188,11 @@ export interface SessionModel {
   beads: SessionTree;
   /** From the session bead's labels; null = not recorded (not a failure). */
   cmux: {surface: string | null; workspace: string | null};
+  /**
+   * home-base-jm5kg.11.2: the session bead is in the database and not in the
+   * export. `beads` then holds nothing reliable about this session's requests.
+   */
+  exportBehind?: ExportBehind | null;
   git: GitMeasurements;
   log: MessageLogRead;
   /** The repo's name, from the index (else git); null when neither knows. */
@@ -1254,10 +1261,29 @@ export async function loadSession(input: {
     sessionBeadId: created.beadId,
     sessionId,
   });
-  const beads =
-    corruptNote == null
-      ? tree
-      : {...tree, problems: [...tree.problems, corruptNote]};
+  // home-base-jm5kg.11.2: every export was read and none holds the session
+  // bead. Only the database can say whether it is gone or the export is behind.
+  let exportBehind: ExportBehind | null = null;
+  let sessionMissing = tree.sessionMissing;
+  if (tree.session == null && tree.sessionMissing != null) {
+    const check = checkExportBehind({
+      beadId: created.beadId,
+      beadsDir: created.beadsDir,
+      env,
+    });
+    if (check.kind === 'behind') {
+      exportBehind = check.behind;
+      sessionMissing = null;
+    } else if (check.kind === 'failed') {
+      sessionMissing = `${tree.sessionMissing}; whether the export is only behind the database could not be checked: ${check.reason}`;
+    }
+  }
+  const beads = {
+    ...tree,
+    problems:
+      corruptNote == null ? tree.problems : [...tree.problems, corruptNote],
+    sessionMissing,
+  };
 
   const log = readMessageLog(sessionId, env);
   const first = firstUserLine(log);
@@ -1335,6 +1361,7 @@ export async function loadSession(input: {
             ? null
             : labelValue(session.labels, CMUX_WORKSPACE_LABEL_PREFIX),
       },
+      exportBehind,
       git,
       log,
       repo,

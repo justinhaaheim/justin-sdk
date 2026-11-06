@@ -53,7 +53,12 @@ import {
 } from './answer-store';
 // Already in the hook's import graph: capture.ts imports config.ts itself.
 import {primaryCheckoutOf, resolveThreadConfig} from './config';
-import {pickupNotDone, pickupNotDoneText} from './handoff-auto-pickup';
+import {readBeadFromDb} from './export-behind';
+import {
+  pickupNotDoneText,
+  pickupState,
+  pickupUncheckedText,
+} from './handoff-auto-pickup';
 import {probeErrorMessage} from './paths';
 // Already in the hook's import graph: capture.ts imports session-bead itself.
 import {REQUEST_LABEL, sidLabel} from './session-bead';
@@ -429,18 +434,31 @@ export function sessionLineParts(input: {
   }
 
   const bead = byId.get(sessionSighting.beadId) ?? null;
-  // home-base-npbse.1.2 item 5. Read from the export and two small files: no br.
-  const pickup = pickupNotDone({
+  // home-base-npbse.1.2 item 5, home-base-jm5kg.11.2. From the export and two
+  // small files; one br read only for a marked session whose export does not
+  // show the label yet.
+  const pickup = pickupState({
     autoPickup: resolveThreadConfig({
       cwd: input.cwd ?? undefined,
       env: input.env,
     }).handoff.autoPickup,
     env: input.env,
-    labels: bead?.labels ?? [],
+    exportLabels: bead?.labels ?? null,
     ownSession: true,
+    readLabels: () =>
+      readBeadFromDb({
+        beadId: sessionSighting.beadId,
+        beadsDir: sessionSighting.beadsDir,
+        env: input.env,
+      }),
     sessionId: input.sessionId,
   });
-  const pickupParts = pickup == null ? [] : [`⚠️ ${pickupNotDoneText(pickup)}`];
+  const pickupParts =
+    pickup.kind === 'notDone'
+      ? [`⚠️ ${pickupNotDoneText(pickup)}`]
+      : pickup.kind === 'couldNotCheck'
+        ? [`⚠️ ${pickupUncheckedText(oneLine(pickup.reason))}`]
+        : [];
   const requests = [...byId.values()].filter(
     (issue) =>
       issue.labels.includes(REQUEST_LABEL) && issue.status !== 'tombstone',

@@ -17,9 +17,12 @@
  * the whole tree, which is also what the inbox (dispatch 4) needs for dozens of
  * sessions at once. br rewrites the export after every write (`sync.auto_flush:
  * true`, verified for `--db` writes by dispatch 1), so the export lags the DB
- * only behind a writer that passed `--no-auto-flush`, or a bead created
- * `--ephemeral` (never exported). That staleness is the accepted price; an
- * export that cannot be READ is a named problem, never an empty tree (rule 7).
+ * behind a writer that passed `--no-auto-flush`, a bead created `--ephemeral`
+ * (never exported), and any write while the export holds conflict markers, which
+ * br will not rewrite (measured 2026-11-06, home-base-jm5kg.11.2). That staleness
+ * is the accepted price, and a session bead missing from the export is checked
+ * against the database by loadSession; an export that cannot be READ is a named
+ * problem, never an empty tree (rule 7).
  *
  * WHAT COUNTS AS WHAT
  *  - session bead: the record with the id the index names.

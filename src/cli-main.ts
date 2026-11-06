@@ -46,6 +46,7 @@ import {
 import {runMigrateToPrime} from './migrate-to-prime';
 // By reference, like worktree-retire: command.ts loads its handler on demand
 // (home-base-pp1vx.1.2).
+import {preCommitBeadsExportCommand} from './pre-commit-beads-export/command';
 import {preCommitTsCheckCommand} from './pre-commit-ts-check/command';
 import {runPrime} from './prime';
 import {repoStatusCommand} from './repo-status/repo-status';
@@ -1272,6 +1273,7 @@ void yargs(ARGV)
   .command(usageNowCommand)
   .command(worktreeSalvageCommand)
   .command(worktreeRetireCommand)
+  .command(preCommitBeadsExportCommand)
   .command(preCommitTsCheckCommand)
   .demandCommand(1, 'Please specify a command')
   .strict()

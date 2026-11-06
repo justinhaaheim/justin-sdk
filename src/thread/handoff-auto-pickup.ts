@@ -127,11 +127,20 @@ export function readPickupFailure(
       unreadable: true,
     };
   }
+  let parsed: unknown;
   try {
-    return JSON.parse(text) as PickupFailure;
+    parsed = JSON.parse(text);
   } catch (error) {
     return {reason: `${path} is not JSON: ${String(error)}`, unreadable: true};
   }
+  const record = (parsed ?? {}) as Partial<PickupFailure>;
+  if (
+    typeof record.reason !== 'string' ||
+    typeof record.predecessorBeadId !== 'string'
+  ) {
+    return {reason: `${path} is not a failure record`, unreadable: true};
+  }
+  return record as PickupFailure;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,36 +188,100 @@ export function pickupNotDoneText(notice: PickupNotDone): string {
   return `${pickupNotDoneWords(notice.reason)} ${notice.command}`;
 }
 
+/** The one line that says the pickup could not be checked. */
+export function pickupUncheckedText(reason: string): string {
+  return `handoff pickup: could not check: ${reason}`;
+}
+
+/** The line `thread status` prints when only the database shows the pickup. */
+export const PICKUP_DONE_LINE =
+  'Handoff pickup: done. The database has it; the bead export has not caught up.';
+
+/** The session bead's labels in the database, as `pickupState` needs them. */
+export type PickupLabelsRead =
+  | {kind: 'absent'; reason: string}
+  | {kind: 'failed'; reason: string}
+  | {kind: 'read'; labels: readonly string[]};
+
 /**
- * What to say until `picked-up` holds; null when nothing is owed: knob off, not
- * marked, already picked up, or `not-a-successor`, which gets no nagging.
+ * home-base-jm5kg.11.2. Three answers and "nothing owed", never a guess:
+ * a read that failed is `couldNotCheck`, not `notDone` and not `done` (rule 7).
+ */
+export type PickupState =
+  /** Knob off, not marked, or `not-a-successor`, which gets no nagging. */
+  | {kind: 'notOwed'}
+  /** `picked-up` holds. `via`: which source showed it. */
+  | {kind: 'done'; via: 'database' | 'export'}
+  | ({kind: 'notDone'} & PickupNotDone)
+  | {kind: 'couldNotCheck'; reason: string};
+
+/**
+ * Where the handoff pickup stands.
+ *
+ * `exportLabels`: the bead's labels in the export, null when the export does not
+ * hold it. The export can lag the database, so its silence settles nothing: a
+ * marked session asks the database through `readLabels`. An unmarked session, or
+ * one whose export already shows the label, makes no br call, which keeps this
+ * cheap enough for the prompt-time [thread] line.
  *
  * `ownSession`: whether `env` is this session's own. It decides whether the
  * launch variable counts, because `thread status --session <other>` runs in the
  * caller's environment.
  */
-export function pickupNotDone(input: {
+export function pickupState(input: {
   autoPickup: boolean;
   env: EnvLike;
-  labels: readonly string[];
+  exportLabels: readonly string[] | null;
   ownSession: boolean;
+  readLabels: () => PickupLabelsRead;
   sessionId: string;
-}): null | PickupNotDone {
-  const {autoPickup, env, labels, ownSession, sessionId} = input;
-  if (!autoPickup) return null;
-  if (labels.includes(PICKED_UP_LABEL)) return null;
-  if (labels.includes(NOT_A_SUCCESSOR_LABEL)) return null;
+}): PickupState {
+  const {autoPickup, env, exportLabels, ownSession, sessionId} = input;
+  if (!autoPickup) return {kind: 'notOwed'};
+  if (exportLabels?.includes(PICKED_UP_LABEL) === true) {
+    return {kind: 'done', via: 'export'};
+  }
+  if (exportLabels?.includes(NOT_A_SUCCESSOR_LABEL) === true) {
+    return {kind: 'notOwed'};
+  }
   const failure = readPickupFailure(sessionId, env);
-  const mark = successorMark({
-    env: ownSession ? env : {},
-    firstUserText: firstUserTextOf(sessionId, env),
-  });
+  const unreadable =
+    failure != null && 'unreadable' in failure ? failure.reason : null;
   const recorded =
     failure != null && !('unreadable' in failure) ? failure : null;
+  const log = readMessageLog(sessionId, env);
+  const mark = successorMark({
+    env: ownSession ? env : {},
+    firstUserText:
+      log.kind === 'read'
+        ? (log.lines.find((line) => line.role === 'user')?.text ?? null)
+        : null,
+  });
   const predecessor = recorded?.predecessorBeadId ?? mark?.predecessorBeadId;
-  if (predecessor == null) return null;
+  const logProblem =
+    log.kind === 'failed'
+      ? `the message log could not be read: ${log.path}: ${log.error}`
+      : null;
+  if (predecessor == null && unreadable == null && logProblem == null) {
+    return {kind: 'notOwed'};
+  }
+
+  const db = input.readLabels();
+  if (db.kind !== 'read') return {kind: 'couldNotCheck', reason: db.reason};
+  if (db.labels.includes(PICKED_UP_LABEL)) {
+    return {kind: 'done', via: 'database'};
+  }
+  if (db.labels.includes(NOT_A_SUCCESSOR_LABEL)) return {kind: 'notOwed'};
+  if (unreadable != null) return {kind: 'couldNotCheck', reason: unreadable};
+  if (predecessor == null) {
+    return {
+      kind: 'couldNotCheck',
+      reason: logProblem ?? 'whether this session is a successor is not known',
+    };
+  }
   return {
     command: sdkRun(`thread request --continues ${predecessor}`),
-    reason: failure?.reason ?? 'the first attempt has not finished',
+    kind: 'notDone',
+    reason: recorded?.reason ?? 'the first attempt has not finished',
   };
 }

@@ -1124,7 +1124,10 @@ export function readDbSchema(
   db: string,
   options: {budgetMs?: number; pauseMs?: number; waitMs?: number} = {},
 ): DbSchemaRead {
-  const budgetMs = options.budgetMs ?? 30_000;
+  // Short on purpose: every br call on a database runs this, hooks included. A
+  // read that waited the whole 20 s stops there, so a lock costs one call about
+  // 20 s, not twice that; only a busy answer that came back fast is tried again.
+  const budgetMs = options.budgetMs ?? 5000;
   const pauseMs = options.pauseMs ?? 1000;
   // 2026-11-06: 2 s was too short with many sessions writing. `thread
   // handoff` failed twice in a row on `database is locked` (home-base-89c8h).
@@ -1603,6 +1606,46 @@ function readSyncFreshness(
     };
   }
   return {freshness: {dbNewer, jsonlNewer}, ok: true};
+}
+
+/** How far the export is behind the database (home-base-jm5kg.11.2). */
+export interface BrExportLag {
+  /** Changes in the database that the export does not hold. */
+  dirtyCount: number;
+}
+
+/** `br sync --status --json`'s `dirty_count`. A failed read is never zero. */
+export function brExportLag(
+  target: BrTarget,
+): {failed: BrFailed; ok: false} | {lag: BrExportLag; ok: true} {
+  const args = ['sync', '--status', '--json'];
+  const call = callBr(target, args);
+  if (!call.ok) return {failed: call.failed, ok: false};
+  const refused = (reason: string): {failed: BrFailed; ok: false} => ({
+    failed: {
+      command: `br ${args.join(' ')} ${describeTarget(target)}`,
+      detail: [],
+      kind: 'failed',
+      reason,
+    },
+    ok: false,
+  });
+  const text = call.out.stdout;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.slice(Math.max(0, text.indexOf('{'))));
+  } catch {
+    return refused(
+      `br sync --status --json printed no JSON (stdout: ${JSON.stringify(text.slice(0, 200))})`,
+    );
+  }
+  const status = (parsed ?? {}) as {dirty_count?: unknown};
+  if (typeof status.dirty_count !== 'number') {
+    return refused(
+      `br sync --status --json printed no number dirty_count (stdout: ${JSON.stringify(text.slice(0, 200))})`,
+    );
+  }
+  return {lag: {dirtyCount: status.dirty_count}, ok: true};
 }
 
 /**

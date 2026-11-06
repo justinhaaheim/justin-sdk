@@ -16,7 +16,7 @@ import {captureRunLogPath, messageLogPath} from '../src/thread/archive';
 import {fileAsk} from '../src/thread/ask';
 import {applyCapture, runThreadCaptureApply} from '../src/thread/capture';
 import {
-  pickupNotDone,
+  pickupState,
   predecessorInFirstLine,
   successorMark,
 } from '../src/thread/handoff-auto-pickup';
@@ -579,24 +579,29 @@ describe('a failure is named (home-base-npbse.1.2)', () => {
 
   test('AC 8: an unmarked session and another session’s environment get no wording', () => {
     const w = world();
+    const noBrRead = () => {
+      throw new Error('an unmarked session must make no br read');
+    };
     expect(
-      pickupNotDone({
+      pickupState({
         autoPickup: true,
         env: w.env,
-        labels: [],
+        exportLabels: [],
         ownSession: true,
+        readLabels: noBrRead,
         sessionId: NEW,
       }),
-    ).toBeNull();
+    ).toEqual({kind: 'notOwed'});
     expect(
-      pickupNotDone({
+      pickupState({
         autoPickup: true,
         env: {...w.env, JUSTIN_SDK_CONTINUES: 't-x'},
-        labels: [],
+        exportLabels: [],
         ownSession: false,
+        readLabels: noBrRead,
         sessionId: NEW,
       }),
-    ).toBeNull();
+    ).toEqual({kind: 'notOwed'});
   });
 
   async function inboxCard(w: World, session: string, now: Date) {

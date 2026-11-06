@@ -28,13 +28,17 @@
  *                          beads export could not be read): named, never 6
  *   8. ⚠️ Open work, no blocker — otherwise
  *
+ * ⏳ Export behind (home-base-jm5kg.11.2) comes before 5: the session bead is in
+ * the database and not in the export, so nothing from 5 on can be claimed.
+ *
  * Optional questions (P1–P3) and FYIs (P4) never change the status; they are
  * counted beside it. `asIfYielded` is the "if you stop now" verdict `thread
  * status` prints while the session is plainly running: it skips 🏃 and treats
  * the message Claude is about to yield as the last one.
  */
 
-import type {PickupNotDone} from './handoff-auto-pickup';
+import type {ExportBehind} from './export-behind';
+import type {PickupState} from './handoff-auto-pickup';
 import type {SessionCommits} from './session-commits';
 import type {CreatedBeads} from './session-created';
 import type {Measured, MergeState, SessionModel} from './session-model';
@@ -107,6 +111,8 @@ export interface StatusFacts {
   commits: CommitsFact;
   /** Context tokens at the last record; null when not measured. */
   contextTokens: number | null;
+  /** home-base-jm5kg.11.2: the export does not hold the session bead yet. */
+  exportBehind?: ExportBehind;
   handedOff: boolean;
   /**
    * F10 (home-base-j8q3e.1.10): the newest record of each helper agent still
@@ -152,6 +158,8 @@ export type SessionStatus =
    * has uncommitted paths (`.beads/` ignored), or both.
    */
   | {kind: 'doneUnmerged'; notMerged: boolean; uncommitted: number}
+  /** home-base-jm5kg.11.2: not Unknown, because it says what is wrong. */
+  | {behind: ExportBehind; kind: 'exportBehind'}
   | {
       kind: 'handedOff';
       /** home-base-npbse.1.2: 10 minutes on, and no successor has picked up. */
@@ -242,6 +250,12 @@ export function deriveStatus(
   // Justin's mark is final whatever else could be read.
   if (closedByJustin(facts.sessionCloseReason)) {
     return {by: 'justin', kind: 'done', reason: facts.sessionCloseReason};
+  }
+
+  // home-base-jm5kg.11.2: nothing below can be claimed from an export that does
+  // not hold the session bead.
+  if (facts.exportBehind != null) {
+    return {behind: facts.exportBehind, kind: 'exportBehind'};
   }
 
   // Requests from an export that could not be read are unknown, so neither
@@ -347,6 +361,7 @@ export function statusFactsOf(model: SessionModel): StatusFacts {
       : null,
     handedOff: session?.labels.includes(HANDED_OFF_LABEL) === true,
     ...(awaited == null ? {} : {pickupAwaitedSince: awaited}),
+    ...(model.exportBehind == null ? {} : {exportBehind: model.exportBehind}),
     helpersInFlight: transcript.helpers.ok
       ? transcript.helpers.value.map((helper) => helper.lastRecordAt)
       : null,
@@ -798,8 +813,8 @@ export function whatToMark(
      * on; absent = not read (the summary prompt alone, as before).
      */
     overarching?: Measured<OverarchingFacts>;
-    /** home-base-npbse.1.2 item 5: the handoff pickup has not held yet. */
-    pickupNotDone?: null | PickupNotDone;
+    /** home-base-npbse.1.2 item 5, home-base-jm5kg.11.2. */
+    pickup?: PickupState;
     /** home-base-jm5kg.18: ask for a short label on each open request with none. */
     shortLabels?: boolean;
     titleSummary?: boolean;
@@ -808,8 +823,18 @@ export function whatToMark(
   const items: MarkItem[] = [];
   const {beads, git} = model;
 
-  if (options.pickupNotDone != null) {
-    items.push({kind: 'pickupNotDone', ...options.pickupNotDone});
+  if (options.pickup?.kind === 'notDone') {
+    items.push({
+      command: options.pickup.command,
+      kind: 'pickupNotDone',
+      reason: options.pickup.reason,
+    });
+  } else if (options.pickup?.kind === 'couldNotCheck') {
+    items.push({
+      kind: 'unchecked',
+      reason: options.pickup.reason,
+      what: 'the handoff pickup',
+    });
   }
 
   for (const problem of beads.problems) {
@@ -819,6 +844,10 @@ export function whatToMark(
       what: 'the requests and questions in that beads DB',
     });
   }
+
+  // home-base-jm5kg.11.2: the export does not hold this session's bead, so what
+  // follows would read its silence as "no request filed" and name commands.
+  if (model.exportBehind != null) return items;
 
   const openWork = status.kind === 'openWork';
   for (const node of beads.requests) {

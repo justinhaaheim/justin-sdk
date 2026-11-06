@@ -81,6 +81,7 @@ import {
 import {parseInstant} from './answer-store';
 import {ARCHIVED_PREFIX, DONE_PREFIX} from './ask-format';
 import {renderAsks, sortAsks} from './ask-render';
+import {exportBehindWords} from './export-behind';
 import {cutOnWord} from './session-bead';
 import {firstUserLine, newestLogAt, userLines} from './session-model';
 import {sessionDisplayName} from './session-name';
@@ -232,6 +233,8 @@ export function statusWords(status: SessionStatus): string {
       return `🔀 Done, not merged — every request is closed, but ${doneUnmergedMissing(status)}`;
     case 'answered':
       return '💬 Answered';
+    case 'exportBehind':
+      return `⏳ Export behind — ${exportBehindWords(status.behind)}`;
     case 'unknown':
       return `❔ Unknown — ${status.reasons.join('; ')}`;
     case 'openWork':
@@ -507,8 +510,8 @@ export function partOneView(input: PartOneInput): PartOneView {
   // ---- Session / Your first message / Started / Last activity ----
   // An unreadable export is named once, under Requests; here it is pointed at.
   const title =
-    beads.session != null
-      ? beads.session.title
+    (beads.session ?? model.exportBehind) != null
+      ? (beads.session?.title ?? model.exportBehind?.title ?? '')
       : beads.problems.length > 0
         ? '⚠️ title unknown (its beads could not be read; see Progress)'
         : `⚠️ title unknown (${beads.sessionMissing ?? 'the session bead was not found'})`;
@@ -596,13 +599,15 @@ export function partOneView(input: PartOneInput): PartOneView {
   // With an export unread, "no requests filed" would be a claim nobody
   // checked (rule 7): the count is unknown, not zero.
   const progress =
-    beads.problems.length > 0
-      ? counts.requestsTotal === 0
-        ? 'Requests: unknown (the beads could not be read)'
-        : `${done} (⚠️ some beads could not be read)`
-      : counts.requestsTotal === 0
-        ? 'No requests filed.'
-        : done;
+    model.exportBehind != null
+      ? 'Requests: not shown yet (the bead export is behind)'
+      : beads.problems.length > 0
+        ? counts.requestsTotal === 0
+          ? 'Requests: unknown (the beads could not be read)'
+          : `${done} (⚠️ some beads could not be read)`
+        : counts.requestsTotal === 0
+          ? 'No requests filed.'
+          : done;
 
   // ---- Requests ----
   const ordered = sortAsks(openQuestions(model));

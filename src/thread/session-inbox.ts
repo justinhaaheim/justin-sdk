@@ -658,6 +658,7 @@ export async function readInbox(input: {
       (lastActivityMs == null || lastActivityMs < since) &&
       status.kind !== 'waiting' &&
       status.kind !== 'unknown' &&
+      status.kind !== 'exportBehind' &&
       !liveDrafts.has(model.sessionId)
     ) {
       hiddenByAge[status.kind] = (hiddenByAge[status.kind] ?? 0) + 1;
@@ -675,6 +676,7 @@ export async function readInbox(input: {
     const section = sectionFor(action.rule, status, counts);
     const title =
       model.beads.session?.title ??
+      model.exportBehind?.title ??
       '⚠️ title unknown (the session bead could not be read)';
     const unreadable = unreadableOf(model);
     rows.push({
@@ -1245,6 +1247,7 @@ const HIDDEN_STATUS_WORDS: Record<SessionStatus['kind'], string> = {
   answered: '💬 answered',
   done: '✅ done or archived',
   doneUnmerged: '🔀 done, not merged',
+  exportBehind: '⏳ export behind',
   handedOff: '🤝 handed off',
   openWork: '⚠️ open work',
   outOfContext: '🧯 out of context',

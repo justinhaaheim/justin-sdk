@@ -257,6 +257,10 @@ export async function withOverarchingShort(
       ...lookup,
       session: {
         ...session,
+        // home-base-jm5kg.11.2: a lagging export is a retry, not a failure.
+        ...(read.missingFromExport === true
+          ? {overarchingBehind: read.reason}
+          : {}),
         overarchingShort: {ok: false, reason: read.reason},
       },
     };

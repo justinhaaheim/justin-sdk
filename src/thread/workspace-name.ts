@@ -549,6 +549,11 @@ export interface WorkspaceSession {
   beadId: string;
   labels: readonly string[];
   /**
+   * home-base-jm5kg.11.2: why overarchingShort is unread, when the reason is that
+   * the export has not caught up with the database. The next capture retries.
+   */
+  overarchingBehind?: string;
+  /**
    * home-base-jm5kg.18 (componentConfig.thread.workspaceDescription): the
    * overarching request's short label, which the name then shows instead of
    * the title. Measured null: it has none. Absent or null: the knob is off, and
@@ -696,6 +701,14 @@ export async function syncWorkspaceName(
       kind: 'failed',
       reason: `the repo of session ${session.beadId} is unknown`,
       workspaceId: override,
+    };
+  }
+  // home-base-jm5kg.11.2: nothing failed, and the next capture retries. Rule 7
+  // still holds: the name is left alone, as in the failed branch below.
+  if (session.overarchingBehind != null) {
+    return {
+      kind: 'notReady',
+      reason: `the bead export is behind the database, so the next capture retries: ${session.overarchingBehind}`,
     };
   }
   // home-base-jm5kg.18 (D5 here, rule 7): an unreadable chain names nothing, so
