@@ -1150,12 +1150,12 @@ export function renderPartOne(view: PartOneView, style: OutputStyle): string {
 // ---------------------------------------------------------------------------
 
 /** A line that is only 🛑 — three or more — is the rule. */
-function isRuleLine(line: string): boolean {
+export function isRuleLine(line: string): boolean {
   return /^(?:🛑){3,}$/u.test(line.trim());
 }
 
 /** A line that is only box-drawing dashes — three or more — is the separator. */
-function isSeparatorLine(line: string): boolean {
+export function isSeparatorLine(line: string): boolean {
   return /^─{3,}$/u.test(line.trim());
 }
 
@@ -1163,7 +1163,7 @@ function isSeparatorLine(line: string): boolean {
  * Part 1's first field: `- **Session:**` (or `* **Session:**`, the marker
  * home-base-vzwbj.4.9 F4 may alternate to) or a bare `**Session:**`.
  */
-function isSessionFieldLine(line: string): boolean {
+export function isSessionFieldLine(line: string): boolean {
   return /^(?:[-*] )?\*\*Session:\*\*/u.test(line.trim());
 }
 

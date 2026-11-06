@@ -119,6 +119,13 @@ export const THREAD_DEFAULT_NAME_WORKSPACES = false;
 export const THREAD_DEFAULT_TITLE_SUMMARY = false;
 
 /**
+ * home-base-7761p.23 (2026-11-06): `thread status` saves the block it printed,
+ * and the Stop hook sends a session back once when its reply's block differs.
+ * Independent of `enforce`. Off by default (feature-knobs rule); on in home-base.
+ */
+export const THREAD_DEFAULT_TRIM_GUARD = false;
+
+/**
  * home-base-jm5kg.18 (2026-11-06): the cmux workspace description lists the
  * session chain's requests, and the workspace name is the overarching request's
  * short label. Off by default (feature-knobs rule); on in home-base.

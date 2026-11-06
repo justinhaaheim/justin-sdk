@@ -62,6 +62,7 @@ import {
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
   THREAD_DEFAULT_TITLE_SUMMARY,
+  THREAD_DEFAULT_TRIM_GUARD,
   THREAD_DEFAULT_WORKSPACE_DESCRIPTION,
 } from './thread/defaults';
 import {TIME_CHECK_DEFAULTS} from './time-check';
@@ -591,6 +592,12 @@ const componentConfigSchema = z
           .describe(
             'SESSION TITLE AS A SUMMARY (home-base-ys9t7.9.1, built 2026-10-30). DEFAULT FALSE. When true, every time a session’s title is set (`thread title`, the first request’s auto-title, or a successor inheriting its predecessor’s title) the session bead gets a `title-set:<time>` label, and `thread status` lists a "What to mark" item asking for a short summary of everything the session, and the sessions it continues, asked for and talked about, whenever requests were filed after the title was last set. The title is what the inbox shows and what `nameWorkspaces` names the cmux workspace after. Off: the old auto-title item only, and no label.',
           ),
+        trimGuard: z
+          .boolean()
+          .optional()
+          .describe(
+            'TRIM GUARD (home-base-7761p.23, built 2026-11-06). DEFAULT FALSE. Independent of `enforce`. On: `thread status` saves the block it printed, whatever pipe it runs through, to <threads state dir>/status-blocks/<session id>.jsonl (newest 20), and the Stop hook (`thread stop-check`) compares the block in the final reply with the saved ones. A block that matches none of them sends the session back once, with what differs. A reply with no block passes, a whole earlier block passes, and anything it cannot read passes. `thread stop-check --stats` counts what it caught. Off: nothing is saved and nothing new is read at Stop.',
+          ),
         workspaceDescription: z
           .boolean()
           .optional()
@@ -931,6 +938,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     spawn: SPAWN_DEFAULTS,
     stages: THREAD_DEFAULT_STAGES,
     titleSummary: THREAD_DEFAULT_TITLE_SUMMARY,
+    trimGuard: THREAD_DEFAULT_TRIM_GUARD,
     workspaceDescription: THREAD_DEFAULT_WORKSPACE_DESCRIPTION,
     // No `startOnSessionStart`: deprecated, no effect, so no default to print
     // (home-base-39co9 D2).

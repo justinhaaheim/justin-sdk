@@ -53,6 +53,7 @@ import {
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
   THREAD_DEFAULT_TITLE_SUMMARY,
+  THREAD_DEFAULT_TRIM_GUARD,
   THREAD_DEFAULT_WORKSPACE_DESCRIPTION,
   THREAD_ENFORCE_MODES,
   type ThreadAnswerUi,
@@ -233,6 +234,14 @@ export interface ResolvedThreadConfig {
   /** Which layer decided `titleSummary`. */
   titleSummarySource: ThreadConfigSource;
   /**
+   * home-base-7761p.23: `thread status` saves its block and the Stop hook sends
+   * a session back once when its reply's block differs. Independent of
+   * `enforce`. Off by default.
+   */
+  trimGuard: boolean;
+  /** Which layer decided `trimGuard`. */
+  trimGuardSource: ThreadConfigSource;
+  /**
    * home-base-jm5kg.18: the workspace description lists the chain's requests
    * and the workspace name is the overarching request's short label. Off by
    * default.
@@ -336,6 +345,7 @@ export function resolveThreadConfig(
     'titleSummary',
     THREAD_DEFAULT_TITLE_SUMMARY,
   );
+  const trimGuard = resolveFlag('trimGuard', THREAD_DEFAULT_TRIM_GUARD);
   const workspaceDescription = resolveFlag(
     'workspaceDescription',
     THREAD_DEFAULT_WORKSPACE_DESCRIPTION,
@@ -594,6 +604,8 @@ export function resolveThreadConfig(
     stagesSource,
     titleSummary: titleSummary.value,
     titleSummarySource: titleSummary.source,
+    trimGuard: trimGuard.value,
+    trimGuardSource: trimGuard.source,
     workspaceDescription: workspaceDescription.value,
     workspaceDescriptionSource: workspaceDescription.source,
   };

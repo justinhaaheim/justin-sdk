@@ -33,7 +33,7 @@ import type {OutputStyle} from '../cli-style';
 import type {PickupLabelsRead, PickupState} from './handoff-auto-pickup';
 import type {ChainReaders} from './handoff-chain';
 import type {MessageLine} from './message-log';
-import type {Piece} from './part-one';
+import type {PartOneView, Piece} from './part-one';
 import type {EnvLike} from './paths';
 import type {RelatedEpics} from './related-epics';
 import type {ActionLine, OptionalLine} from './session-card';
@@ -54,6 +54,7 @@ import {
   outputStyle,
   pad,
   paint,
+  PLAIN_STYLE,
   sectionHeader,
   spacedList,
   wrapHanging,
@@ -108,6 +109,7 @@ import {
   statusFactsOf,
   whatToMark,
 } from './session-status';
+import {saveStatusBlock} from './trim-guard';
 
 /** `thread show` cuts each of Justin's messages here unless `--full`. */
 export const USER_MESSAGE_CUT = 400;
@@ -197,6 +199,8 @@ export type ReportLoad =
       status: SessionStatus;
       /** componentConfig.thread.titleSummary (home-base-ys9t7.9.1). */
       titleSummary: boolean;
+      /** componentConfig.thread.trimGuard (home-base-7761p.23). */
+      trimGuard: boolean;
     }
   | {detail: string; kind: 'unreadable'}
   | {kind: 'disabled'; reason: string}
@@ -213,6 +217,7 @@ async function knobOn(
       ok: true;
       shortLabels: boolean;
       titleSummary: boolean;
+      trimGuard: boolean;
     }
 > {
   const {resolveThreadConfig} = await import('./config');
@@ -224,6 +229,7 @@ async function knobOn(
         ok: true,
         shortLabels: config.nameWorkspaces && config.workspaceDescription,
         titleSummary: config.titleSummary,
+        trimGuard: config.trimGuard,
       }
     : {
         ok: false,
@@ -367,6 +373,7 @@ async function loadForReport(input: {
     shortLabels: knob.shortLabels,
     status,
     titleSummary: knob.titleSummary,
+    trimGuard: knob.trimGuard,
   };
 }
 
@@ -835,23 +842,28 @@ export function verdictLines(
   ];
 }
 
+/** The view Part 1 renders from, whichever form it is rendered in. */
+function statusPartOneView(
+  load: Extract<ReportLoad, {kind: 'loaded'}>,
+  options: {now: Date; timeZone?: string},
+): PartOneView {
+  return partOneView({
+    action: load.action,
+    counts: load.counts,
+    model: load.model,
+    now: options.now,
+    optional: load.optional,
+    status: load.status,
+    timeZone: options.timeZone,
+  });
+}
+
 export function renderThreadStatus(
   load: Extract<ReportLoad, {kind: 'loaded'}>,
   options: {now: Date; style: OutputStyle; timeZone?: string},
 ): string {
   const {style} = options;
-  const partOne = renderPartOne(
-    partOneView({
-      action: load.action,
-      counts: load.counts,
-      model: load.model,
-      now: options.now,
-      optional: load.optional,
-      status: load.status,
-      timeZone: options.timeZone,
-    }),
-    style,
-  );
+  const partOne = renderPartOne(statusPartOneView(load, options), style);
   const marks = whatToMark(load.model, load.status, load.created, {
     ...(load.overarching != null ? {overarching: load.overarching} : {}),
     pickup: load.pickup,
@@ -940,6 +952,28 @@ export async function runThreadStatus(
   if (load.kind !== 'loaded') {
     console.error(refusalLines('thread status', load).join('\n'));
     return 1;
+  }
+  // home-base-7761p.23 D2: BEFORE anything is printed, because sessions pipe
+  // this through `| head` and a closed pipe must not lose the save. Always the
+  // markdown form, which is what a session sees and pastes, even when this run
+  // prints ANSI. Only the session running the command: a run of `--session
+  // <other>` saves nothing, because a session on an old SDK saves nothing itself
+  // and would be held to a block its own paste can never match.
+  if (load.trimGuard && env.CLAUDE_CODE_SESSION_ID === load.model.sessionId) {
+    const saved = saveStatusBlock({
+      at: now,
+      env,
+      sessionId: load.model.sessionId,
+      text: renderPartOne(
+        statusPartOneView(load, {now, timeZone: options.timeZone}),
+        PLAIN_STYLE,
+      ),
+    });
+    if (saved.kind === 'failed') {
+      console.error(
+        `thread status: could not save this block for the Stop hook's trim guard at ${saved.path}: ${saved.error}`,
+      );
+    }
   }
   await writeStdout(
     `${renderThreadStatus(load, {now, style, timeZone: options.timeZone})}\n`,

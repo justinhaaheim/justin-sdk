@@ -98,6 +98,11 @@ import {
   forEachTranscriptLine,
   substantiveUserText,
 } from './transcript-messages';
+import {
+  decideTrimGuard,
+  readStatusBlocks,
+  trimGuardEarlyPass,
+} from './trim-guard';
 
 /**
  * How many delimiter glyphs in a row count as a report rule line.
@@ -160,7 +165,16 @@ export type StopCheckWhy =
   | 'workTurnLong'
   | 'unreadablePayload'
   | 'markerWriteFailed'
-  | 'internalFailure';
+  | 'internalFailure'
+  // The trim guard (home-base-7761p.23 D9), with `trimGuard` on. It also reuses
+  // subagent, quotaBraked, stopHookActive, markerPresent, noSessionId,
+  // lastUserMessageUnknown and markerWriteFailed, which mean the same there.
+  | 'trimGuardNoBlock'
+  | 'trimGuardMatchLatest'
+  | 'trimGuardMatchEarlier'
+  | 'trimGuardNoSaved'
+  | 'trimGuardUnknown'
+  | 'trimGuardDiffers';
 
 /**
  * What the turn since Justin's last message did (K12), measured by the IO
@@ -352,6 +366,18 @@ export function describeStopCheck(decision: StopCheckDecision): string {
       return 'pass: the loop guard could not be written, so a block was withheld';
     case 'internalFailure':
       return 'pass: the check threw';
+    case 'trimGuardNoBlock':
+      return 'pass: the final message has no status block (trimGuard)';
+    case 'trimGuardMatchLatest':
+      return 'pass: the block matches the newest one thread status printed (trimGuard)';
+    case 'trimGuardMatchEarlier':
+      return 'pass: the block matches an earlier one thread status printed (trimGuard)';
+    case 'trimGuardNoSaved':
+      return 'pass: this session has no saved block to compare with (trimGuard)';
+    case 'trimGuardUnknown':
+      return 'pass: UNKNOWN — could not read this session’s saved blocks (trimGuard)';
+    case 'trimGuardDiffers':
+      return 'BLOCK: the block differs from what thread status printed (trimGuard)';
   }
 }
 
@@ -530,6 +556,11 @@ interface DecisionLogContext {
   cwd: string | null;
   mode: ThreadEnforceMode | null;
   sessionId: string | null;
+  /**
+   * Only a trim guard run adds keys (home-base-7761p.23 D9), so with the knob off
+   * the log line is what it always was. Null: nothing to add.
+   */
+  trimGuard: Record<string, number> | null;
   turnCommits: number | null;
   turnMinutes: number | null;
 }
@@ -660,6 +691,7 @@ export function runThreadStopCheck(args?: {
     cwd: null,
     mode: null,
     sessionId: null,
+    trimGuard: null,
     turnCommits: null,
     turnMinutes: null,
   };
@@ -680,6 +712,7 @@ export function runThreadStopCheck(args?: {
       turnCommits: logged.turnCommits,
       turnMinutes: logged.turnMinutes,
       why: decision.why,
+      ...logged.trimGuard,
     });
     if (explain && logError != null) {
       console.error(`[thread stop-check] decision NOT logged: ${logError}`);
@@ -715,13 +748,93 @@ export function runThreadStopCheck(args?: {
     const enforce = config.enforce;
     const mode = config.enforceMode;
     const minTurnMinutes = config.enforceMinTurnMinutes;
+    const trimGuard = config.trimGuard;
     logged.mode = mode;
     // The quota brake's cached decision: one small file read, and only where
-    // the thread knob is on (decideStopCheck tests enforce first anyway).
+    // a knob that can block is on (decideStopCheck tests enforce first anyway;
+    // the trim guard reads it for itself, home-base-7761p.23 D7).
     const braked =
-      enforce && sessionId != null && sessionId !== ''
+      (enforce || trimGuard) && sessionId != null && sessionId !== ''
         ? sessionBraked(sessionId, env)
         : false;
+
+    /**
+     * The old check decided and did not block (home-base-7761p.23 D7). With the
+     * knob off this is `finish(old, 0)`, the same line it always was. With it on
+     * the guard decides, and its result is the logged `why` (D9).
+     */
+    const afterOldCheck = (old: StopCheckDecision): StopCheckRunResult => {
+      if (!trimGuard) return finish(old, 0);
+      const gate = {
+        agentId,
+        braked,
+        lastAssistantMessage,
+        sessionId,
+        stopHookActive,
+      };
+      // D7: the guard's own passes come before any reading.
+      const early = trimGuardEarlyPass(gate);
+      if (early != null) return finish(early, 0);
+      // `trimGuardEarlyPass` returned null, so the session id is there.
+      const id = sessionId!;
+      const saved = readStatusBlocks(id, env);
+      if (explain) {
+        if (saved.kind === 'unknown') {
+          console.error(`[thread stop-check] saved blocks: ${saved.error}`);
+        } else if (saved.kind === 'found' && saved.malformed > 0) {
+          console.error(
+            `[thread stop-check] saved blocks: skipped ${saved.malformed} malformed line(s)`,
+          );
+        }
+      }
+      if (saved.kind === 'found' && saved.malformed > 0) {
+        logged.trimGuard = {malformed: saved.malformed};
+      }
+      const decision = decideTrimGuard({...gate, saved});
+      if (decision.action === 'pass') return finish(decision, 0);
+
+      // A difference was found. Only now is the transcript worth reading, and
+      // only without a `prompt_id`. The same key as the old check, so one turn
+      // gets at most one block from both (D7). No key means nothing could stop a
+      // repeat, so it passes rather than blocks.
+      const promptId = input.prompt_id ?? null;
+      const key =
+        promptId != null && promptId !== ''
+          ? promptId
+          : String(
+              measureTurn(id, input.transcript_path ?? null, env, nowMs).at ??
+                '',
+            );
+      if (key === '') {
+        return finish(
+          {action: 'pass', reason: null, why: 'lastUserMessageUnknown'},
+          0,
+        );
+      }
+      if (stopMarkExists(id, key, env)) {
+        return finish({action: 'pass', reason: null, why: 'markerPresent'}, 0);
+      }
+      const mark = writeStopMark(id, key, env);
+      if (!mark.ok) {
+        console.error(
+          `[thread stop-check] not blocking: could not write the loop guard at ${mark.path} (${mark.error})`,
+        );
+        return finish(
+          {action: 'pass', reason: null, why: 'markerWriteFailed'},
+          0,
+        );
+      }
+      logged.trimGuard = {
+        ...logged.trimGuard,
+        added: decision.added ?? 0,
+        missing: decision.missing ?? 0,
+      };
+      const reason = decision.reason ?? '';
+      console.log(JSON.stringify(stopBlockJson(reason)));
+      console.error(reason);
+      return finish(decision, 2);
+    };
+
     const cheap = decideStopCheck({
       agentId,
       archive: {error: 'not measured yet', kind: 'unknown'},
@@ -741,7 +854,7 @@ export function runThreadStopCheck(args?: {
     // marker and archive branches sit behind it. So the sentinel is the ONLY
     // thing that falls through, and any branch added ahead of it later
     // short-circuits here automatically instead of being forgotten.
-    if (cheap.why !== 'lastUserMessageUnknown') return finish(cheap, 0);
+    if (cheap.why !== 'lastUserMessageUnknown') return afterOldCheck(cheap);
 
     // Past here the text IS a report, the knob is on, and we have a session id.
     const id = sessionId!;
@@ -797,7 +910,7 @@ export function runThreadStopCheck(args?: {
       }
     }
 
-    if (decision.action === 'pass') return finish(decision, 0);
+    if (decision.action === 'pass') return afterOldCheck(decision);
 
     // A block is only allowed once we can PROVE we will not repeat it. The
     // marker is written first; if it cannot be written we pass instead, because

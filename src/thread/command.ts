@@ -373,7 +373,13 @@ transcript, no session id, an unreadable archive, a payload that is not JSON.
 Every run appends one line to ~/.local/state/justin-threads/stop-check.jsonl,
 passes included; --stats counts them by action and why.
 
-Needs componentConfig.thread.enforce, which defaults FALSE.`;
+Needs componentConfig.thread.enforce, which defaults FALSE.
+
+With componentConfig.thread.trimGuard on (default FALSE, independent of enforce),
+it ALSO sends a session back once when the status block in its final message
+differs from every block \`thread status\` saved for it, naming what differs. Its
+results appear in --stats as trimGuardNoBlock, trimGuardMatchLatest,
+trimGuardMatchEarlier, trimGuardNoSaved, trimGuardUnknown and trimGuardDiffers.`;
 
 const CAPTURE_NARRATIVE = `
 Installed by \`justin-sdk add thread-hooks\` on TWO events. It reads the hook

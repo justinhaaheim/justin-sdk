@@ -21,6 +21,8 @@ Validation bar here is home-base's own `bun run signal` — `tsc --noEmit`, esli
 
 - **The capture hook writes the cmux workspace description, behind `componentConfig.thread.workspaceDescription`, default false** (`home-base-jm5kg.18`, 2026-11-06; `src/thread/workspace-description.ts`). Anything unreadable leaves the text, and a description holding a line the tool does not write is left alone; `thread workspace-name --description --dry-run` shows what it would write.
 
+- **The Stop hook sends a session back once when its pasted status block differs from what `thread status` printed, behind `componentConfig.thread.trimGuard`, default false and independent of `enforce`** (`home-base-7761p.23`, 2026-11-06; `src/thread/trim-guard.ts`). `thread status` saves the block to `<threads state dir>/status-blocks/<session id>.jsonl` before printing, and anything the guard cannot read passes. `thread stop-check --stats` counts what it caught, and `bun run replay:trim-guard` replays history. Off switch: set the knob to false in that repo's `justin-sdk.config.json`.
+
 - **The spend quota's brake (`thread brake`, src/thread/quota-brake.ts) runs on EVERY tool call wherever `componentConfig.thread.quota.mode` is not off** (request `home-base-ys9t7.5`, 2026-10-30; its design field holds D1–D11). In `enforce` it denies tool calls, so a bug there can stop every session in a repo: keep its decision table's tests green, give every behaviour change a negative control, and read `thread quota --help` and `justin-sdk config schema` for the knobs. Off switch: set the mode to `off` in that repo's `justin-sdk.config.json`.
 
 ## Design principles

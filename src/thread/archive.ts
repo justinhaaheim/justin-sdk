@@ -246,6 +246,18 @@ export function stopCheckLogPath(env: EnvLike = process.env): string {
 }
 
 /**
+ * The blocks `thread status` printed for one session, newest last, one
+ * `{at, text}` per line (home-base-7761p.23 D2). Written only with
+ * `componentConfig.thread.trimGuard` on; read by the Stop hook's trim guard.
+ */
+export function statusBlocksPath(
+  sessionId: string,
+  env: EnvLike = process.env,
+): string {
+  return join(threadsStateDir(env), 'status-blocks', `${sessionId}.jsonl`);
+}
+
+/**
  * One JSON line per capture-child run: what it did to which bead, or why it
  * could not (K10 c). The child runs detached with its stdio ignored, so this
  * file is the ONLY place a bd failure can be loud.
