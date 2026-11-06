@@ -8,8 +8,9 @@
  *    question, from the export of every beads DB the sessions index names for
  *    the session (session-tree.ts says why the export, not br);
  *  - git, in the session's checkout: branch, merged into the default branch or
- *    not, worktree, uncommitted paths (ignoring `.beads/`, which the session
- *    bead itself dirties), unpushed commits, and the commits THIS session made
+ *    not, worktree, the checkout's dirty paths (ignoring `.beads/`, which the
+ *    session bead itself dirties) and the ones THIS session wrote
+ *    (home-base-j8q3e.16), unpushed commits, and the commits THIS session made
  *    (attributed from its transcript, session-commits.ts — home-base-vzwbj.4.4);
  *  - the message log: first user message, last line, every user message;
  *  - the transcript: the last record's time (never the file mtime) and the
@@ -69,7 +70,13 @@ import {
   readBeadsExport,
   readSessionTree,
 } from './session-tree';
-import {porcelainSides} from './session-writes';
+import {
+  ownDirtyPaths,
+  porcelainSides,
+  readWrittenPaths,
+  type WriteEvidence,
+  writtenDirtyPaths,
+} from './session-writes';
 import {readHelperTail, readLastRecordTimestamp} from './transcript-messages';
 
 /** A measurement: its value, or why it could not be taken. Never a stand-in. */
@@ -83,7 +90,24 @@ export function unmeasured<T>(reason: string): Measured<T> {
   return {ok: false, reason};
 }
 
-export type MergeState = 'isDefault' | 'merged' | 'notMerged';
+/**
+ * `onRemoteDefault` (home-base-p05kz.3 item 3): not on the LOCAL default branch,
+ * but every commit is on origin's. That work is landed; the local default is
+ * only behind. Read from the local remote-tracking ref, with no fetch, so a stale
+ * ref can only under-report it.
+ */
+export type MergeState =
+  | 'isDefault'
+  | 'merged'
+  | 'notMerged'
+  | 'onRemoteDefault';
+
+/** How far the local default branch lags origin's, and the ref compared. */
+export interface DefaultBehind {
+  count: number;
+  /** As a person says it: `origin/main`. */
+  remote: string;
+}
 
 export type Unpushed =
   | {count: number; kind: 'counted'; upstream: string}
@@ -93,16 +117,24 @@ export type WorktreeKind = {kind: 'linked'; path: string} | {kind: 'primary'};
 
 export interface GitMeasurements {
   /**
-   * Commits on the branch that the default branch lacks (`git rev-list
-   * --count <default>..<branch>`): the "N commits" of the dashboard's "merge
-   * <branch> into main (N commits)" (home-base-j8q3e.1 D2, D3 rule 6). 0 on
-   * the default branch itself.
+   * Commits on the branch that neither the local default branch nor origin's
+   * has (`git rev-list --count <branch> ^<default> ^origin/<default>`; without
+   * that ref, `<default>..<branch>`): the "N commits" of the dashboard's "merge
+   * <branch> into main (N commits)" (home-base-j8q3e.1 D2, D3 rule 6;
+   * home-base-p05kz.3 item 3). 0 on the default branch itself.
    */
   aheadOfDefault: Measured<number>;
   /** `HEAD` when detached. */
   branch: Measured<string>;
   /** The checkout measured (absolute), and why that one. */
   checkout: string;
+  /**
+   * Every dirty `git status --porcelain` entry of the checkout, whoever wrote
+   * it, `.beads/` excluded (home-base-j8q3e.16). The inbox's per-checkout note
+   * reads this; nothing on a card does, because these are not all this
+   * session's files.
+   */
+  checkoutDirty: Measured<string[]>;
   checkoutSource: 'logCwd' | 'sessionBead';
   /**
    * The commits THIS session made: from its transcript (session-commits.ts),
@@ -112,10 +144,22 @@ export interface GitMeasurements {
   commits: Measured<SessionCommits>;
   /** The default branch "merged" is measured against, e.g. `main`. */
   defaultBranch: Measured<string>;
+  /**
+   * home-base-p05kz.3 item 3: how far the local default branch is behind
+   * origin's. Null is a measured "nothing to say": this is the default branch
+   * itself, or origin has no such branch here.
+   */
+  localDefaultBehind: Measured<DefaultBehind | null>;
   merged: Measured<MergeState>;
   /** The repo's name from git's common dir; null when git could not say. */
   repo: string | null;
-  /** `git status --porcelain` entries, `.beads/` excluded. */
+  /**
+   * The dirty paths THIS session wrote after their last commit
+   * (home-base-j8q3e.16, the rules of session-writes.ts). Every word a card, the
+   * status and Part 1 say about uncommitted files reads this, so none of them
+   * names another session's. Unmeasured when the checkout is dirty and the
+   * transcript cannot be read: never [] for that (critical rule 7).
+   */
   uncommitted: Measured<string[]>;
   unpushed: Measured<Unpushed>;
   worktree: Measured<WorktreeKind>;
@@ -320,9 +364,11 @@ function allFailed(
     aheadOfDefault: unmeasured(reason),
     branch: unmeasured(reason),
     checkout,
+    checkoutDirty: unmeasured(reason),
     checkoutSource,
     commits: unmeasured(reason),
     defaultBranch: unmeasured(reason),
+    localDefaultBehind: unmeasured(reason),
     merged: unmeasured(reason),
     repo: null,
     uncommitted: unmeasured(reason),
@@ -352,10 +398,35 @@ async function defaultBranchOf(top: string): Promise<Measured<string>> {
   );
 }
 
+/**
+ * origin's copy of the default branch (home-base-p05kz.3 item 3): the
+ * remote-tracking ref, read locally with no fetch. Null: no such ref here. A
+ * read that failed is unmeasured, never "no such ref" (rule 7).
+ */
+async function remoteDefaultRefOf(
+  top: string,
+  defaultBranch: Measured<string>,
+): Promise<Measured<null | string>> {
+  if (!defaultBranch.ok) return unmeasured(defaultBranch.reason);
+  const ref = `refs/remotes/origin/${defaultBranch.value}`;
+  const args = ['rev-parse', '--verify', '--quiet', ref];
+  const run = await runGit(top, args);
+  if (run.kind === 'ok') return measured(ref);
+  // --verify --quiet exits 1, printing nothing, for a ref that does not exist.
+  if (run.kind === 'exit' && run.status === 1) return measured(null);
+  return unmeasured(gitFailure(args, run));
+}
+
+/**
+ * home-base-p05kz.3 item 3, critical rule 7: `onRemoteDefault` needs git to say
+ * yes about a ref it could read. No such ref is `notMerged`, and any failure on
+ * the way is unmeasured, so missing evidence never reads as landed.
+ */
 async function mergeStateOf(
   top: string,
   branch: Measured<string>,
   defaultBranch: Measured<string>,
+  remoteRef: Measured<null | string>,
 ): Promise<Measured<MergeState>> {
   if (!branch.ok) return unmeasured(branch.reason);
   if (!defaultBranch.ok) return unmeasured(defaultBranch.reason);
@@ -368,24 +439,27 @@ async function mergeStateOf(
   ];
   const run = await runGit(top, args);
   if (run.kind === 'ok') return measured('merged');
-  if (run.kind === 'exit' && run.status === 1) return measured('notMerged');
-  return unmeasured(gitFailure(args, run));
+  if (run.kind !== 'exit' || run.status !== 1) {
+    return unmeasured(gitFailure(args, run));
+  }
+  if (!remoteRef.ok) return unmeasured(remoteRef.reason);
+  if (remoteRef.value == null) return measured('notMerged');
+  const remoteArgs = [
+    'merge-base',
+    '--is-ancestor',
+    branch.value,
+    remoteRef.value,
+  ];
+  const remote = await runGit(top, remoteArgs);
+  if (remote.kind === 'ok') return measured('onRemoteDefault');
+  if (remote.kind === 'exit' && remote.status === 1) {
+    return measured('notMerged');
+  }
+  return unmeasured(gitFailure(remoteArgs, remote));
 }
 
-/** home-base-j8q3e.1 D3 rule 6: how many commits the branch has that main lacks. */
-async function aheadOfDefaultOf(
-  top: string,
-  branch: Measured<string>,
-  defaultBranch: Measured<string>,
-): Promise<Measured<number>> {
-  if (!branch.ok) return unmeasured(branch.reason);
-  if (!defaultBranch.ok) return unmeasured(defaultBranch.reason);
-  if (branch.value === defaultBranch.value) return measured(0);
-  const args = [
-    'rev-list',
-    '--count',
-    `${defaultBranch.value}..${branch.value}`,
-  ];
+/** `git rev-list --count`, strictly: an empty answer is not "none" (rule 7). */
+async function countOf(top: string, args: string[]): Promise<Measured<number>> {
   const run = await runGit(top, args);
   if (run.kind !== 'ok') return unmeasured(gitFailure(args, run));
   const text = run.stdout.trim();
@@ -396,6 +470,57 @@ async function aheadOfDefaultOf(
     );
   }
   return measured(Number(text));
+}
+
+/**
+ * home-base-j8q3e.1 D3 rule 6: how many commits the branch has that main lacks.
+ * home-base-p05kz.3 item 3: origin's copy counts as main, so a stale local main
+ * does not inflate the count ("64 commits" for a branch 0 ahead of origin/main).
+ */
+async function aheadOfDefaultOf(
+  top: string,
+  branch: Measured<string>,
+  defaultBranch: Measured<string>,
+  remoteRef: Measured<null | string>,
+): Promise<Measured<number>> {
+  if (!branch.ok) return unmeasured(branch.reason);
+  if (!defaultBranch.ok) return unmeasured(defaultBranch.reason);
+  if (branch.value === defaultBranch.value) return measured(0);
+  return await countOf(
+    top,
+    remoteRef.ok && remoteRef.value != null
+      ? [
+          'rev-list',
+          '--count',
+          branch.value,
+          `^${defaultBranch.value}`,
+          `^${remoteRef.value}`,
+        ]
+      : ['rev-list', '--count', `${defaultBranch.value}..${branch.value}`],
+  );
+}
+
+/** home-base-p05kz.3 item 3: the separate, smaller fact that local main is behind. */
+async function localDefaultBehindOf(
+  top: string,
+  branch: Measured<string>,
+  defaultBranch: Measured<string>,
+  remoteRef: Measured<null | string>,
+): Promise<Measured<DefaultBehind | null>> {
+  if (!branch.ok) return unmeasured(branch.reason);
+  if (!defaultBranch.ok) return unmeasured(defaultBranch.reason);
+  if (!remoteRef.ok) return unmeasured(remoteRef.reason);
+  if (branch.value === defaultBranch.value || remoteRef.value == null) {
+    return measured(null);
+  }
+  const count = await countOf(top, [
+    'rev-list',
+    '--count',
+    `${defaultBranch.value}..${remoteRef.value}`,
+  ]);
+  return count.ok
+    ? measured({count: count.value, remote: `origin/${defaultBranch.value}`})
+    : count;
 }
 
 /**
@@ -527,6 +652,7 @@ export type CheckoutGit =
       commonDir: string | null;
       defaultBranch: Measured<string>;
       kind: 'measured';
+      localDefaultBehind: Measured<DefaultBehind | null>;
       merged: Measured<MergeState>;
       repo: string | null;
       top: string;
@@ -678,9 +804,11 @@ async function measureCheckout(checkout: string): Promise<CheckoutGit> {
           basename(commonDir) === '.git' ? dirname(commonDir) : commonDir,
         )
       : basename(top);
-  const [aheadOfDefault, merged] = await Promise.all([
-    aheadOfDefaultOf(top, branch, defaultBranch),
-    mergeStateOf(top, branch, defaultBranch),
+  const remoteRef = await remoteDefaultRefOf(top, defaultBranch);
+  const [aheadOfDefault, merged, localDefaultBehind] = await Promise.all([
+    aheadOfDefaultOf(top, branch, defaultBranch, remoteRef),
+    mergeStateOf(top, branch, defaultBranch, remoteRef),
+    localDefaultBehindOf(top, branch, defaultBranch, remoteRef),
   ]);
   return {
     aheadOfDefault,
@@ -688,6 +816,7 @@ async function measureCheckout(checkout: string): Promise<CheckoutGit> {
     commonDir,
     defaultBranch,
     kind: 'measured',
+    localDefaultBehind,
     merged,
     repo,
     top,
@@ -717,11 +846,94 @@ export async function measureCheckoutCached(
   return await pending;
 }
 
+/** j8q3e.6 D3: a checkout's dirty paths, and the ones one session wrote. */
+export interface UncommittedDirt {
+  /** Every dirty `git status --porcelain` entry of the checkout, `.beads/` excluded. */
+  checkout: string[];
+  /** Of `checkout`, the ones this session wrote after their last commit; unmeasured = could not be attributed. */
+  own: Measured<string[]>;
+  /** The checkout's top (git's), which the per-checkout note groups by. */
+  top: string;
+}
+
+/**
+ * j8q3e.6 D1-D3: which of the checkout's dirty paths this session wrote after
+ * their last commit. Its transcript is read only when the checkout is dirty,
+ * and `git log` runs only for the dirty paths it wrote. A transcript, or a
+ * `git log`, that cannot be read makes `own` unmeasured (D2, rule 7), never [].
+ * `readWrites` is injected by the tests.
+ */
+export async function attributeUncommitted(input: {
+  cache: LoadCache | null;
+  readWrites?: (
+    transcriptPath: string,
+  ) => {evidence: WriteEvidence; ok: true} | {ok: false; reason: string};
+  shared: CheckoutGit;
+  transcript: TranscriptLocation;
+}): Promise<UncommittedDirt | null> {
+  const {cache, shared, transcript} = input;
+  if (shared.kind === 'failed' || !shared.uncommitted.ok) return null;
+  const {top} = shared;
+  const dirty = shared.uncommitted.value;
+  if (dirty.length === 0) return {checkout: [], own: measured([]), top};
+  // No count in the words: the checkout's count moves whenever another
+  // session edits there, and this card must not (j8q3e.6 AC 4).
+  const cannot = (why: string): UncommittedDirt => ({
+    checkout: dirty,
+    own: unmeasured(
+      `the uncommitted files in ${top} could not be attributed to this session: ${why}`,
+    ),
+    top,
+  });
+  if (!transcript.ok) return cannot(transcript.reason);
+  const writes = (input.readWrites ?? readWrittenPaths)(transcript.path);
+  if (!writes.ok) return cannot(writes.reason);
+  const written = writtenDirtyPaths(dirty, top, writes.evidence);
+  const commits = await Promise.all(
+    written.map(
+      async (path) => [path, await lastCommitCached(top, path, cache)] as const,
+    ),
+  );
+  const lastCommitMs = new Map<string, number | null>();
+  for (const [path, commit] of commits) {
+    if (!commit.ok) return cannot(commit.reason);
+    lastCommitMs.set(path, commit.value);
+  }
+  return {
+    checkout: dirty,
+    own: measured(
+      ownDirtyPaths({
+        dirty: written,
+        evidence: writes.evidence,
+        lastCommitMs,
+        top,
+      }),
+    ),
+    top,
+  };
+}
+
+/**
+ * A tracked session's dirt, in the shape the per-checkout note reads; null when
+ * the checkout's dirty paths are themselves unknown (the card says why).
+ */
+export function dirtOfGit(
+  git: Pick<GitMeasurements, 'checkout' | 'checkoutDirty' | 'uncommitted'>,
+): UncommittedDirt | null {
+  if (!git.checkoutDirty.ok) return null;
+  return {
+    checkout: git.checkoutDirty.value,
+    own: git.uncommitted,
+    top: git.checkout,
+  };
+}
+
 /**
  * Every git measurement for `checkout`. A checkout that is gone, or is not a
  * git checkout, fails EVERY measurement with the path named (rule 7). With a
  * `cache`, the checkout's half is measured once per run and shared; the
- * session's commits are always its own.
+ * session's commits and its own uncommitted files (home-base-j8q3e.16) are
+ * always its own.
  */
 export async function measureGit(input: {
   cache?: LoadCache;
@@ -735,10 +947,16 @@ export async function measureGit(input: {
   if (shared.kind === 'failed') {
     return allFailed(checkout, checkoutSource, shared.reason);
   }
+  const dirt = await attributeUncommitted({
+    cache: input.cache ?? null,
+    shared,
+    transcript: input.transcript,
+  });
   return {
     aheadOfDefault: shared.aheadOfDefault,
     branch: shared.branch,
     checkout: shared.top,
+    checkoutDirty: shared.uncommitted,
     checkoutSource,
     commits: await sessionCommits(
       shared.top,
@@ -746,9 +964,10 @@ export async function measureGit(input: {
       input.firstPromptAt,
     ),
     defaultBranch: shared.defaultBranch,
+    localDefaultBehind: shared.localDefaultBehind,
     merged: shared.merged,
     repo: shared.repo,
-    uncommitted: shared.uncommitted,
+    uncommitted: dirt == null ? shared.uncommitted : dirt.own,
     unpushed: shared.unpushed,
     worktree: shared.worktree,
   };

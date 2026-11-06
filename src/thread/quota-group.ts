@@ -247,6 +247,8 @@ export type GroupSpend =
       /** Epoch ms of the earliest request counted, or null when none was. */
       firstUnattendedAtMs: number | null;
       kind: 'known';
+      /** Epoch ms of the latest request counted, or null when none was. */
+      lastUnattendedAtMs: number | null;
       /** Epoch ms of the group's latest typed line, or null when it has none. */
       latestTypedAtMs: number | null;
       members: MemberSpendRead[];
@@ -295,6 +297,16 @@ export function earliestOf(requests: readonly CostRequest[]): number | null {
     if (earliest == null || request.atMs < earliest) earliest = request.atMs;
   }
   return earliest;
+}
+
+/** The latest request time, or null for none (no spread: lists are long). */
+export function latestOf(requests: readonly CostRequest[]): number | null {
+  let latest: number | null = null;
+  for (const request of requests) {
+    if (request.atMs == null) continue;
+    if (latest == null || request.atMs > latest) latest = request.atMs;
+  }
+  return latest;
 }
 
 /** Resolve `startBeadId`'s group and measure what it spent unattended. */
@@ -408,6 +420,7 @@ export async function measureGroupSpend(
   return {
     firstUnattendedAtMs: earliestOf(counted.requests),
     kind: 'known',
+    lastUnattendedAtMs: latestOf(counted.requests),
     latestTypedAtMs,
     members: reads,
     requests: counted.requests.length,

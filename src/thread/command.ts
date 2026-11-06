@@ -25,14 +25,14 @@ import {helpHeader} from '../sdk-identity';
 import {SDK_BIN_BY_PATH, SDK_HANDOFF_CALL} from '../sdk-invocation';
 
 const HANDOFF_SUMMARY =
-  'Hand this session on: label its bead handed-off (the inbox then says 🤝), append a dated "handed off — <note>" to its notes, and print a block for the next session (title, requests with status and stage, open questions, how to resume, and the `thread request --continues` the new session runs first). With componentConfig.thread.handoff.successor on, it also starts that next session in a new tab of this cmux workspace, or refuses and says why. Needs componentConfig.thread.sessionBeads. Exit 0 handed off (and the successor started) · 1 a step failed · 2 nothing written · 3 refused by the handoff gate · 4 deferred: cmux was too slow to decide, so run the same command again.';
+  'Hand this session on: label its bead handed-off (the inbox then says 🤝), append a dated "handed off — <note>" to its notes, and print a block for the next session (title, requests with status and stage, open questions, how to resume, and the `thread request --continues` the new session runs first). With componentConfig.thread.handoff.successor on, it also starts that next session in a new tab of this cmux workspace, or refuses and says why. Needs componentConfig.thread.sessionBeads. Exit 0 handed off (and the successor started) · 1 a step failed · 2 nothing written · 3 refused by the handoff gate · 4 deferred: cmux was too slow to decide, or the beads database stayed locked, so run the same command again.';
 
 const HANDOFF_NARRATIVE = `
 THE KNOB. componentConfig.thread.handoff.successor, default false (epic home-base-mbnjv D10). OFF: thread handoff labels, notes and prints the block, exactly as before, and starts nothing; --dry-run and --model are refused (exit 2). ON, it also starts the successor, in this order:
 
   1. Refuses (exit 2, nothing written) without a session bead, when this session's checkout is gone, or when --session names a session other than the one it runs in.
 
-  2. The handoff gate: the kill switch, a cmux pane, cmux reachable, usage from the hourly samples, handoffs in a row since Justin last typed, live Claude sessions on this Mac. A refusal still hands the session off (label, note, block printed), records "handoff refused: <reason>" on the session bead, opens nothing, and exits 3. A cmux read that times out is retried, for at most 60 s across the gate and step 3. If cmux still has not answered, nothing is decided: the same writes under the handoff-deferred label, "handoff deferred: cmuxSlow" on the session bead, exit 4. Run the same command again at once, up to 3 more times.
+  2. The handoff gate: the kill switch, a cmux pane, cmux reachable, usage from the hourly samples, handoffs in a row since Justin last typed, live Claude sessions on this Mac. A refusal still hands the session off (label, note, block printed), records "handoff refused: <reason>" on the session bead, opens nothing, and exits 3. A cmux read that times out is retried, for at most 60 s across the gate and step 3. If cmux still has not answered, nothing is decided: the same writes under the handoff-deferred label, "handoff deferred: cmuxSlow" on the session bead, exit 4. A beads database that another process holds past br's wait also exits 4, as "handoff deferred: beadsLocked", with the knob on or off; a write that met the lock did not happen. Run the same command again at once, up to 3 more times.
 
   3. Finds this tab's pane (cmux tree, read only), hands off, and writes the block to <threads state dir>/handoffs/<session id>.md.
 
@@ -493,6 +493,14 @@ successor shares its predecessor's.
       retitles the overarching request and the session together.
 
 Marking one unmarks every other request of the chain, and titles the session.
+
+SHORT LABELS (home-base-jm5kg.18): --short "<2 to 5 words>" gives a request the
+label the cmux workspace description and name show, like a compact commit
+message: on a new request, or with --bead on an existing one, with or without
+--overarching. A request with none shows its title cut with "…".
+\`thread title\` drops the overarching request's label, which described the old
+title.
+
 Requests are not nested: a bead filed with \`br create --parent <request id>\`
 shows as a sub-item of that request.
 
@@ -932,6 +940,11 @@ export const threadCommand: CommandModule = {
               describe:
                 'Session id to file under (default: $CLAUDE_CODE_SESSION_ID)',
               type: 'string' as const,
+            })
+            .option('short', {
+              describe:
+                'The request’s short label, 2 to 5 words like a compact commit message, for the cmux workspace description and name: letters, digits, spaces, hyphens and colons. On a new request, or with --bead on an existing one.',
+              type: 'string' as const,
             }),
         async (argv) => {
           const {runThreadRequest} = await import('./request');
@@ -945,6 +958,7 @@ export const threadCommand: CommandModule = {
               here: argv.here === true,
               overarching: argv.overarching === true,
               sessionId: argv.session ?? null,
+              short: argv.short ?? null,
               title: title === '' ? null : title,
             }),
           );
@@ -1308,6 +1322,12 @@ export const threadCommand: CommandModule = {
                 'With --dry-run: the preview over EVERY open cmux workspace (its name now, what it would become, the rule, the session that would name it). Read-only. Refused without --dry-run.',
               type: 'boolean' as const,
             })
+            .option('description', {
+              default: false,
+              describe:
+                'Only the workspace DESCRIPTION, the name left as it is (home-base-jm5kg.18): write what the capture hook writes, read it back and print it. Needs componentConfig.thread.workspaceDescription, except with --dry-run.',
+              type: 'boolean' as const,
+            })
             .option('dry-run', {
               default: false,
               describe:
@@ -1337,6 +1357,7 @@ export const threadCommand: CommandModule = {
           process.exit(
             await runThreadWorkspaceName({
               all: argv.all,
+              description: argv.description,
               dryRun: argv['dry-run'],
               restore: argv.restore,
               session: argv.session ?? null,

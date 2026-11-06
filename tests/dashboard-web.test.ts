@@ -803,7 +803,7 @@ describe('dashboardInboxOf', () => {
     const json = {
       corrupt: [],
       indexPath: '/state/sessions.jsonl',
-      inputDrafts: {failures: [], kind: 'read', unshown: []},
+      inputDrafts: {failures: [], kind: 'read', unchecked: [], unshown: []},
       panes: {ok: false, reason: 'cmux is not running'},
       readMarks: {kind: 'failed', reason: 'read-marks.jsonl: EACCES'},
       sessions: [row],

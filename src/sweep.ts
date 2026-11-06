@@ -36,8 +36,9 @@
  * red step, an INTERRUPTED run still stranded the fixed-name worktree, and its
  * commit then made the repo "COULD NOT SWEEP" until someone cleared it by hand
  * (three repos, 2026-10-05). So each run stamps its branch and worktree with
- * the run-log stamp, earlier leftovers are listed rather than blocking (still
- * removed when provably empty, never when they hold a commit), and the log is
+ * the run-log stamp, earlier leftovers no longer block (still removed when
+ * provably empty, never when they hold a commit; each kept one is listed in the
+ * run log, and the screen gets one line per repo — p05kz.6), and the log is
  * written from the start so a killed run says how far it got. A push that fails
  * after the local merge is its own red outcome, and it and merge-pending both
  * fail the run (S7) — "0 failed" over four unpushed repos was the report that
@@ -157,6 +158,13 @@ import {
   renderInstallPayloadPlan,
 } from './sweep-install';
 import {runSyncRules} from './sync-rules';
+import {BEADS_JSONL as BEADS_JSONL_NAME} from './beads/jsonl';
+
+/**
+ * Tracked path of the beads export. Not imported from thread/commit.ts, which
+ * reaches zod: cli-main.ts loads this file, and hooks start it on every prompt.
+ */
+const BEADS_JSONL = `.beads/${BEADS_JSONL_NAME}`;
 
 // ---------------------------------------------------------------------------
 // Run identity — one timestamped branch + worktree per run (home-base-39co9.6 S1)
@@ -803,8 +811,52 @@ export type UpstreamComparison =
 
 export type FreshBasePlan =
   | {kind: 'block'; reason: string}
-  | {kind: 'fast-forward'; note: string; upstreamSha: string}
+  | {
+      /** `main is 3 commit(s) behind origin/main`, for a refusal's first clause. */
+      behind: string;
+      kind: 'fast-forward';
+      /** The fast-forward runs over local edits to the beads file (p05kz.6). */
+      localBeadsEdits: boolean;
+      note: string;
+      upstream: string;
+      /** `git log --oneline` of what only the upstream has. */
+      upstreamCommits: string[];
+      upstreamSha: string;
+    }
   | {kind: 'proceed'; note: string | null};
+
+/**
+ * The primary's tracked files, as the fast-forward decision needs them
+ * (home-base-p05kz.6). `beads-only` = every tracked change is an ordinary edit
+ * of `.beads/issues.jsonl`, staged, unstaged or both.
+ */
+export type PrimaryTrackedState =
+  | 'beads-only'
+  | 'clean'
+  | 'dirty'
+  | 'unreadable';
+
+/**
+ * Classify `git status --porcelain --untracked-files=no`; null = it could not be
+ * read, which is not clean (rule 7). Pure.
+ *
+ * Only an `M` in either status column counts as an edit git protects. A deleted,
+ * renamed, type-changed or conflicted beads file is `dirty`. MEASURED 2026-11-06:
+ * an unstaged deletion does not stop `merge --ff-only`, even when the upstream
+ * changed the file, and git then writes the upstream's copy back.
+ */
+export function classifyPrimaryTracked(
+  porcelain: string | null,
+): PrimaryTrackedState {
+  if (porcelain == null) return 'unreadable';
+  const lines = porcelain.split('\n').filter((line) => line !== '');
+  if (lines.length === 0) return 'clean';
+  return lines.every(
+    (line) => /^[ M][ M] /.test(line) && line.slice(3) === BEADS_JSONL,
+  )
+    ? 'beads-only'
+    : 'dirty';
+}
 
 /** How many commits of each side a COULD NOT SWEEP line prints. */
 export const COMMIT_LIST_LIMIT = 25;
@@ -830,16 +882,23 @@ export function formatCommitList(
  *                           local commits too (the sweep's long-standing shape,
  *                           now said out loud).
  *   strictly behind       → fast-forward, but ONLY when the primary is on the
- *                           default branch and has no tracked changes; otherwise
- *                           COULD NOT SWEEP — building on the stale base is the
- *                           2026-10-05 failure, and moving someone's checkout
- *                           out from under them is not the sweep's call.
+ *                           default branch with no tracked changes, or only
+ *                           edits to the beads file; otherwise COULD NOT SWEEP —
+ *                           building on the stale base is the 2026-10-05
+ *                           failure, and moving someone's checkout out from
+ *                           under them is not the sweep's call.
  *   diverged              → COULD NOT SWEEP, both commit lists, no work done.
  *   no upstream           → proceed (nothing to fetch, nothing to fall behind).
  *   unknown               → COULD NOT SWEEP: a base that cannot be shown fresh
  *                           is not assumed fresh (rule 7's cautious verdict).
  *
- * `primaryTrackedClean` null = the status could not be read, which is not clean.
+ * THE BEADS FILE (home-base-p05kz.6): session-bead edits leave
+ * `.beads/issues.jsonl` modified in most primaries, and that alone used to refuse
+ * every repo that was behind. Git decides instead: `merge --ff-only` keeps an
+ * edit to a file the upstream did not change, and refuses, leaving the tree as it
+ * was, when the upstream changed it too. The sweep never discards, resets, stashes
+ * or commits that file. Any OTHER tracked change refuses here, as it always did.
+ *
  * Untracked files do not count as dirty: `git merge --ff-only` refuses rather
  * than overwrite one, and that refusal is caught as COULD NOT SWEEP below.
  */
@@ -847,10 +906,10 @@ export function planFreshBase(input: {
   comparison: UpstreamComparison;
   defaultBranch: string;
   primaryBranch: string | null;
-  primaryTrackedClean: boolean | null;
+  primaryTracked: PrimaryTrackedState;
   repo: string;
 }): FreshBasePlan {
-  const {comparison, defaultBranch, primaryBranch, primaryTrackedClean, repo} =
+  const {comparison, defaultBranch, primaryBranch, primaryTracked, repo} =
     input;
   if (comparison.kind === 'no-upstream') {
     return {kind: 'proceed', note: comparison.detail};
@@ -876,11 +935,11 @@ export function planFreshBase(input: {
     const where =
       primaryBranch !== defaultBranch
         ? `the primary checkout is on ${primaryBranch ?? 'a detached HEAD'}, not ${defaultBranch}`
-        : primaryTrackedClean == null
+        : primaryTracked === 'unreadable'
           ? 'the primary checkout’s status could not be read'
-          : primaryTrackedClean
-            ? null
-            : 'the primary checkout has uncommitted changes to tracked files';
+          : primaryTracked === 'dirty'
+            ? 'the primary checkout has uncommitted changes to tracked files'
+            : null;
     if (where != null) {
       return {
         kind: 'block',
@@ -891,9 +950,18 @@ export function planFreshBase(input: {
           `      only on ${upstream} (${remoteOnly.length}):\n${formatCommitList(remoteOnly)}`,
       };
     }
+    const localBeadsEdits = primaryTracked === 'beads-only';
     return {
+      behind: `${defaultBranch} is ${remoteOnly.length} commit(s) behind ${upstream}`,
       kind: 'fast-forward',
-      note: `${defaultBranch} was ${remoteOnly.length} commit(s) behind ${upstream} — fast-forwarded before branching`,
+      localBeadsEdits,
+      note:
+        `${defaultBranch} was ${remoteOnly.length} commit(s) behind ${upstream} — fast-forwarded before branching` +
+        (localBeadsEdits
+          ? `, leaving the local edits to ${BEADS_JSONL} as they are`
+          : ''),
+      upstream,
+      upstreamCommits: remoteOnly,
       upstreamSha: comparison.upstreamSha,
     };
   }
@@ -1010,19 +1078,63 @@ export function compareWithUpstream(
 
 /**
  * Tracked changes in the primary (`--untracked-files=no`), or null when the
- * status could not be read — never `[]` for "could not look".
+ * status could not be read — never `''` for "could not look". Untrimmed, because
+ * the two status columns are what `classifyPrimaryTracked` reads.
  */
-function trackedChanges(repo: string): string[] | null {
+function trackedChanges(repo: string): string | null {
   try {
-    const out = execFileSync(
+    return execFileSync(
       'git',
       ['-C', repo, 'status', '--porcelain', '--untracked-files=no'],
       {encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe']},
     );
-    return parsePorcelainPaths(out);
   } catch {
     return null;
   }
+}
+
+/**
+ * Does the fast-forward's range change the beads file? null = git could not say,
+ * which is not "no". A two-tree diff, the comparison a fast-forward itself makes,
+ * so a change the upstream later undid does not count. Reads only.
+ */
+export function upstreamChangesBeadsFile(
+  repo: string,
+  defaultBranch: string,
+  upstreamSha: string,
+): boolean | null {
+  const out = git(repo, [
+    'diff',
+    '--name-only',
+    '--no-renames',
+    `refs/heads/${defaultBranch}`,
+    upstreamSha,
+    '--',
+    BEADS_JSONL,
+  ]);
+  return out == null ? null : out !== '';
+}
+
+/**
+ * Why a repo with local beads edits was not fast-forwarded: the upstream changed
+ * that file too (home-base-p05kz.6). Measured 2026-11-06: 36 of the 64 commits
+ * audio-journal-1 was behind touched it, so this is the COMMON outcome for a repo
+ * far behind, and the line has to say what to do. Pure.
+ */
+export function beadsOverlapRefusal(input: {
+  behind: string;
+  defaultBranch: string;
+  /** e.g. `git would refuse the fast-forward`. */
+  refusal: string;
+  upstream: string;
+  upstreamCommits: readonly string[];
+}): string {
+  const {behind, defaultBranch, refusal, upstream, upstreamCommits} = input;
+  return (
+    `${behind}, and those commits also change ${BEADS_JSONL}, which has local edits here, so ${refusal}. ` +
+    `Those edits are untouched and nothing was done here. Commit them on ${defaultBranch}, bring ${defaultBranch} up to date by hand, then re-sweep.\n` +
+    `      only on ${upstream} (${upstreamCommits.length}):\n${formatCommitList(upstreamCommits)}`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -1739,7 +1851,13 @@ export interface LeftoverReport {
 
 /** What one repo's leftover scan found, or why it could not look. */
 export type LeftoverScanReport =
-  | {items: LeftoverReport[]; kind: 'scanned'}
+  | {
+      defaultBranch: string;
+      /** The one command that shows what the kept ones hold (p05kz.6). */
+      inspectAll: string;
+      items: LeftoverReport[];
+      kind: 'scanned';
+    }
   | {kind: 'failed'; reason: string}
   /** The repo was refused before the scan (not a repo, no default branch). */
   | {kind: 'not-scanned'};
@@ -1833,7 +1951,14 @@ export function handleSweepLeftovers(
       reason: assessment.reason,
     });
   }
-  return {items, kind: 'scanned'};
+  return {
+    defaultBranch,
+    // The glob has a leading `*` because a kept branch may have been renamed:
+    // ynab-mcp-deluxe's five are `archive/worktree-sdk-sweep*` (2026-11-06).
+    inspectAll: `git -C ${repo} log --stat --branches='*worktree-sdk-sweep*' --not ${defaultBranch}`,
+    items,
+    kind: 'scanned',
+  };
 }
 
 /** The commits a kept leftover holds beyond the default branch, deduplicated. */
@@ -3243,7 +3368,12 @@ async function sweepOneRepo(
   return {...verdict, leftovers: scan.report};
 }
 
-/** Print (and log) what the leftover scan did, one leftover at a time. */
+/**
+ * Print (and log) what the leftover scan did, one leftover at a time. A KEPT one
+ * goes to the log only (home-base-p05kz.6): it is the same news on every run, so
+ * the screen gets one line per repo in the summary (`keptLeftoverSummary`). A
+ * removal is printed, because it happened in this run.
+ */
 function reportLeftovers(
   name: string,
   report: LeftoverScanReport,
@@ -3264,10 +3394,11 @@ function reportLeftovers(
         : item.action === 'would-remove'
           ? 'would auto-remove a leftover'
           : 'a leftover from an earlier run was left alone';
-    say(`  ${YELLOW}⚠${RESET} ${label} (${item.name}) — ${item.reason}`);
+    if (item.action !== 'kept') {
+      say(`  ${YELLOW}⚠${RESET} ${label} (${item.name}) — ${item.reason}`);
+    }
     log.note(name, `${label} (${item.name}) — ${item.reason}`);
     for (const line of leftoverDetailLines(item)) {
-      say(`    ${line}`);
       log.note(name, `  ${line}`);
     }
   }
@@ -3413,12 +3544,11 @@ async function sweepRepoSteps(
   const comparison = compareWithUpstream(repo, defaultBranch, {
     fetch: !context.dryRun,
   });
-  const changes = trackedChanges(repo);
   const fresh = planFreshBase({
     comparison,
     defaultBranch,
     primaryBranch: git(repo, ['symbolic-ref', '--quiet', '--short', 'HEAD']),
-    primaryTrackedClean: changes == null ? null : changes.length === 0,
+    primaryTracked: classifyPrimaryTracked(trackedChanges(repo)),
     repo,
   });
   if (fresh.kind === 'block') {
@@ -3430,8 +3560,32 @@ async function sweepRepoSteps(
   }
   let freshNote = fresh.note == null ? '' : ` [${fresh.note}]`;
   if (fresh.kind === 'fast-forward') {
+    // p05kz.6: the real run still asks git, whatever this says. It is measured
+    // to NAME the reason when git refuses, and so a dry run can predict the
+    // refusal instead of promising a fast-forward the real run would not get.
+    const beadsOverlap = fresh.localBeadsEdits
+      ? upstreamChangesBeadsFile(repo, defaultBranch, fresh.upstreamSha)
+      : false;
+    const beadsRefusal = (refusal: string): string =>
+      beadsOverlapRefusal({
+        behind: fresh.behind,
+        defaultBranch,
+        refusal,
+        upstream: fresh.upstream,
+        upstreamCommits: fresh.upstreamCommits,
+      });
     if (context.dryRun) {
-      freshNote = ` [would fast-forward first: ${fresh.note}]`;
+      if (beadsOverlap === true) {
+        const reason = beadsRefusal('git would refuse the fast-forward');
+        context.log.note(name, `COULD NOT SWEEP (fetch first) — ${reason}`);
+        return blocked(reason);
+      }
+      freshNote =
+        ` [would fast-forward first: ${fresh.note}` +
+        (beadsOverlap == null
+          ? `; could not tell whether ${fresh.upstream} changed ${BEADS_JSONL}, so git may refuse`
+          : '') +
+        ']';
     } else {
       const forwarded = run(
         ['git', '-C', repo, 'merge', '--ff-only', '--quiet', fresh.upstreamSha],
@@ -3440,8 +3594,11 @@ async function sweepRepoSteps(
       const nowAt = git(repo, ['rev-parse', `refs/heads/${defaultBranch}`]);
       if (forwarded.exitCode !== 0 || nowAt !== fresh.upstreamSha) {
         context.log.note(name, 'fast-forward to the upstream FAILED');
+        const gitSaid = `(exit ${forwarded.exitCode}): ${tailLines(forwarded.output, 5)}`;
         return blocked(
-          `${fresh.note.replace(/ — fast-forwarded before branching$/, '')}, and the fast-forward FAILED (exit ${forwarded.exitCode}): ${tailLines(forwarded.output, 5)} — nothing was done here`,
+          beadsOverlap === true
+            ? beadsRefusal(`git refused the fast-forward ${gitSaid}`)
+            : `${fresh.behind}, and the fast-forward FAILED ${gitSaid} — nothing was done here`,
         );
       }
     }
@@ -3961,7 +4118,66 @@ function keptLeftovers(results: readonly RepoResult[]): string[] {
   );
 }
 
-/** The lines printed under a repo's summary line: its kept leftovers. Pure. */
+/**
+ * A repo's kept leftovers as the screen shows them: one line, then one inspect
+ * command (home-base-p05kz.6). Empty when none were kept. Pure.
+ *
+ * "Each holding commits" is printed only when it is true of every one: a leftover
+ * can also be kept for uncommitted changes, for a directory git does not know, or
+ * because its commits could not be listed, which is not the same as none (rule 7).
+ */
+export function keptLeftoverSummary(
+  repoName: string,
+  defaultBranch: string,
+  inspectAll: string,
+  items: readonly LeftoverReport[],
+): string[] {
+  const kept = items.filter((item) => item.action === 'kept');
+  if (kept.length === 0) return [];
+  const holding = kept.filter(
+    (item) => item.commits != null && item.commits.length > 0,
+  ).length;
+  const unlisted = kept.filter((item) => item.commits == null).length;
+  const other = kept.length - holding - unlisted;
+  const count =
+    kept.length === 1
+      ? '1 earlier sweep worktree kept'
+      : `${kept.length} earlier sweep worktrees kept`;
+  const what =
+    holding === kept.length
+      ? `${kept.length === 1 ? 'holding' : 'each holding'} commits not on ${defaultBranch}`
+      : [
+          holding > 0
+            ? `${holding} holding commits not on ${defaultBranch}`
+            : null,
+          unlisted > 0 ? `${unlisted} whose commits could not be listed` : null,
+          other > 0 ? `${other} kept for another reason` : null,
+        ]
+          .filter((part): part is string => part != null)
+          .join(', ');
+  return [
+    `${repoName}: ${count}${holding === kept.length ? ', ' : ': '}${what}`,
+    `inspect: ${inspectAll}`,
+  ];
+}
+
+/** What the screen shows under a repo's summary line about its leftovers. Pure. */
+export function summaryLeftoverScreenLines(result: RepoResult): string[] {
+  if (result.leftovers.kind === 'failed') {
+    return [
+      `could not list earlier sweeps' leftovers — ${result.leftovers.reason}`,
+    ];
+  }
+  if (result.leftovers.kind !== 'scanned') return [];
+  return keptLeftoverSummary(
+    result.repo,
+    result.leftovers.defaultBranch,
+    result.leftovers.inspectAll,
+    result.leftovers.items,
+  );
+}
+
+/** The run log's full account of a repo's kept leftovers, one by one. Pure. */
 export function summaryLeftoverLines(result: RepoResult): string[] {
   if (result.leftovers.kind === 'failed') {
     return [
@@ -4073,8 +4289,10 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
       `  ${ICON[result.outcome]} ${result.repo} ${DIM}${result.detail}${RESET}`,
     );
     log.note(null, `  ${result.outcome} ${result.repo} ${result.detail}`);
-    for (const line of summaryLeftoverLines(result)) {
+    for (const line of summaryLeftoverScreenLines(result)) {
       say(`      ${YELLOW}${line}${RESET}`);
+    }
+    for (const line of summaryLeftoverLines(result)) {
       log.note(null, `      ${line}`);
     }
   }
@@ -4120,12 +4338,14 @@ export async function runSweep(options: SweepOptions = {}): Promise<number> {
   } else if (log.persisted) {
     say(`${DIM}run log: ${log.path}${RESET}`);
   }
-  // S2: listed, never blocking, never failing the run on their own — but
-  // printed at the tail, because a kept leftover is a commit nobody merged.
+  // S2: listed, never blocking, never failing the run on their own. The log only
+  // (p05kz.6): the screen already has one line per repo in the summary above, and
+  // a list of every name on every run was the repeated warning nobody could act on.
   if (kept.length > 0) {
-    const line = `${kept.length} leftover(s) from earlier runs KEPT (they hold work the default branch lacks; inspect commands under each repo above): ${kept.join(', ')}`;
-    say(`${YELLOW}${line}${RESET}`);
-    log.note(null, line);
+    log.note(
+      null,
+      `${kept.length} leftover(s) from earlier runs KEPT: ${kept.join(', ')}`,
+    );
   }
   // ckc4 F4. Two things that both used to be "skipped" and both used to exit 0:
   // a repo this payload does not apply to (expected), and a repo this run COULD

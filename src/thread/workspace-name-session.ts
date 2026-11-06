@@ -10,6 +10,10 @@ import type {ChainRequestReaders} from './overarching';
 import type {EnvLike} from './paths';
 import type {TabTitleOutcome} from './tab-title';
 import type {
+  DescriptionReaders,
+  WorkspaceDescriptionOutcome,
+} from './workspace-description';
+import type {
   OwnerLabelsRead,
   WorkspaceSession,
   WorkspaceSyncOutcome,
@@ -21,12 +25,12 @@ import {basename, dirname} from 'node:path';
 
 import {brShow, describeBrFailed, findBeadsWorkspace} from '../beads/br';
 import {outputStyle} from '../cli-style';
-import {realCmuxRunner} from './cmux';
+import {readCmuxTree, realCmuxRunner} from './cmux';
 import {resolveRepoTag} from './config';
 import {realChainViewReaders} from './handoff-view';
 import {
   chainRequestList,
-  nameItemsOf,
+  pickOverarching,
   readChainRequests,
   realChainRequestReaders,
 } from './overarching';
@@ -37,9 +41,16 @@ import {
   SID_LABEL_PREFIX,
 } from './session-bead';
 import {readSessionSightings} from './session-index';
+import {readShortLabel} from './short-label';
 import {describeTabTitle, syncTabTitle} from './tab-title';
 import {
+  describeWorkspaceDescription,
+  realDescriptionReaders,
+  syncWorkspaceDescription,
+} from './workspace-description';
+import {
   describeWorkspaceSync,
+  resolveWorkspace,
   restoreWorkspaceNames,
   syncWorkspaceName,
 } from './workspace-name';
@@ -216,50 +227,49 @@ export function lookupWorkspaceSession(input: {
 }
 
 /**
- * TRIAL (home-base-jm5kg.6 D5): with componentConfig.thread.workspaceNameItems
- * on in `cwd`, the lookup's session gets the chain's other requests as
- * `nameItems` (measured, or the reason they could not be read, which then
- * names nothing). Off, or a failed lookup: returned as it was. `readers` is
- * for tests; `itemsOn` overrides the knob (tests, the dry run).
+ * home-base-jm5kg.18: with componentConfig.thread.workspaceDescription on in
+ * `cwd`, the lookup's session gets its overarching request's short label for
+ * the name (measured, or the reason it could not be read, which then names
+ * nothing). Off, or a failed lookup: returned as it was. `readers` is for tests.
  */
-export async function withNameItems(
+export async function withOverarchingShort(
   lookup: SessionLookup,
   input: {
     cwd: string;
     env: EnvLike;
-    itemsOn?: boolean;
     readers?: ChainRequestReaders;
   },
 ): Promise<SessionLookup> {
   if (lookup.kind !== 'found') return lookup;
-  let on = input.itemsOn;
-  if (on == null) {
-    const {resolveThreadConfig} = await import('./config');
-    on = resolveThreadConfig({
-      cwd: input.cwd,
-      env: input.env,
-    }).workspaceNameItems;
-  }
-  if (!on) return lookup;
+  const {resolveThreadConfig} = await import('./config');
+  const {workspaceDescription} = resolveThreadConfig({
+    cwd: input.cwd,
+    env: input.env,
+  });
+  if (!workspaceDescription) return lookup;
   const {session} = lookup;
   const read = readChainRequests(
     {id: session.beadId, labels: session.labels, title: session.title},
     input.readers ?? realChainRequestReaders({cwd: input.cwd, env: input.env}),
   );
+  if (read.kind === 'failed') {
+    return {
+      ...lookup,
+      session: {
+        ...session,
+        overarchingShort: {ok: false, reason: read.reason},
+      },
+    };
+  }
+  const {overarching} = pickOverarching(chainRequestList(read));
   return {
     ...lookup,
     session: {
       ...session,
-      nameItems:
-        read.kind === 'read'
-          ? {
-              ok: true,
-              value: nameItemsOf({
-                headTitle: session.title,
-                requests: chainRequestList(read),
-              }),
-            }
-          : {ok: false, reason: read.reason},
+      overarchingShort: {
+        ok: true,
+        value: overarching == null ? null : readShortLabel(overarching.labels),
+      },
     },
   };
 }
@@ -280,6 +290,23 @@ export function withRetryAdvice(line: string): string {
   return SANDBOX_REFUSAL.test(line)
     ? `${line}; the Claude Code sandbox is the likely cause: re-run this same command with the sandbox off. Otherwise the next prompt will set it`
     : `${line}; the next prompt will set it`;
+}
+
+/**
+ * home-base-p05kz.3 item 6: the one failure that prints nothing. cmux's own
+ * text when the Claude Code sandbox refuses its socket, on the first cmux call
+ * of a sync, before any record is written. The capture hook runs outside the
+ * sandbox and repeats both syncs on every prompt and every Stop, so the name
+ * is set then; capture.jsonl held no such failure in 1,079 sync records
+ * (2026-11-06). This overrides the retry advice of home-base-jm5kg.20 for this
+ * exact text only. A rename that failed is never this case: its record is
+ * already written, so a later sync does not simply start again.
+ */
+const REFUSED_SOCKET =
+  /Failed to connect to socket at .+ \(Operation not permitted, errno 1\)/u;
+
+export function isRefusedSocket(reason: string): boolean {
+  return !reason.startsWith('the rename failed') && REFUSED_SOCKET.test(reason);
 }
 
 /**
@@ -304,7 +331,7 @@ export async function workspaceNameFollowUp(input: {
     if (lookup.kind === 'failed') {
       return withRetryAdvice(`workspace name not set: ${lookup.reason}`);
     }
-    const named = await withNameItems(lookup, input);
+    const named = await withOverarchingShort(lookup, input);
     const run = input.run ?? realCmuxRunner();
     const outcome = await syncWorkspaceName({
       enabled: true,
@@ -321,6 +348,10 @@ export async function workspaceNameFollowUp(input: {
         line = null;
         break;
       case 'failed':
+        line = isRefusedSocket(outcome.reason)
+          ? null
+          : withRetryAdvice(describeWorkspaceSync(outcome));
+        break;
       case 'notReady':
         line = withRetryAdvice(describeWorkspaceSync(outcome));
         break;
@@ -336,7 +367,7 @@ export async function workspaceNameFollowUp(input: {
     const tabLine =
       tab.kind === 'renamed'
         ? describeTabTitle(tab)
-        : tab.kind === 'failed'
+        : tab.kind === 'failed' && !isRefusedSocket(tab.reason)
           ? withRetryAdvice(describeTabTitle(tab))
           : null;
     const lines = [line, tabLine].filter(
@@ -372,9 +403,9 @@ export async function syncWorkspaceForCapture(input: {
   if (input.lookup.kind === 'failed') {
     return {kind: 'failed', reason: input.lookup.reason, workspaceId: null};
   }
-  // home-base-jm5kg.6: the items are the workspace sync's alone; the tab
+  // home-base-jm5kg.18: the short label is the workspace sync's alone; the tab
   // title (syncTabForCapture) keeps the plain session name.
-  const lookup = await withNameItems(input.lookup, input);
+  const lookup = await withOverarchingShort(input.lookup, input);
   if (lookup.kind === 'failed') {
     return {kind: 'failed', reason: lookup.reason, workspaceId: null};
   }
@@ -385,6 +416,133 @@ export async function syncWorkspaceForCapture(input: {
     run: input.run ?? realCmuxRunner(),
     session: lookup.session,
   });
+}
+
+/**
+ * The capture child's description call (home-base-jm5kg.18), after the name
+ * sync, which already resolved the workspace. Null with the knob off, so a
+ * knob-off run records nothing new and makes no call. Its outcome goes into
+ * capture.jsonl as `workspaceDescription`.
+ */
+export async function syncDescriptionForCapture(input: {
+  cwd: string;
+  env: EnvLike;
+  lookup: SessionLookup;
+  nameOutcome: WorkspaceSyncOutcome | null;
+  readers?: DescriptionReaders;
+  run?: CmuxRunner;
+}): Promise<null | WorkspaceDescriptionOutcome> {
+  const {cwd, env, lookup, nameOutcome} = input;
+  const {resolveThreadConfig} = await import('./config');
+  const config = resolveThreadConfig({cwd, env});
+  if (!config.nameWorkspaces || !config.workspaceDescription) return null;
+  if (lookup.kind === 'failed') {
+    return {kind: 'failed', reason: lookup.reason, workspaceId: null};
+  }
+  if (nameOutcome == null) {
+    return {
+      kind: 'failed',
+      reason: 'the workspace name sync did not run',
+      workspaceId: null,
+    };
+  }
+  if (nameOutcome.kind === 'outsideCmux') return {kind: 'outsideCmux'};
+  if (nameOutcome.kind === 'notReady') {
+    return {kind: 'notReady', reason: nameOutcome.reason};
+  }
+  if (nameOutcome.kind === 'off') {
+    return {
+      kind: 'failed',
+      reason: 'the workspace name sync was off, so the workspace is not known',
+      workspaceId: null,
+    };
+  }
+  if (nameOutcome.workspaceId == null) {
+    return {
+      kind: 'failed',
+      reason: `the workspace is not known: ${describeWorkspaceSync(nameOutcome)}`,
+      workspaceId: null,
+    };
+  }
+  return await syncWorkspaceDescription({
+    enabled: true,
+    env,
+    readers: input.readers ?? realDescriptionReaders({cwd, env}),
+    run: input.run ?? realCmuxRunner(),
+    session: lookup.session,
+    workspaceId: nameOutcome.workspaceId,
+  });
+}
+
+/**
+ * `thread workspace-name --description`: the description alone, the name left
+ * as it is. A dry run prints the text it would write and works with the knob
+ * off.
+ */
+async function runWorkspaceDescription(input: {
+  cwd: string;
+  dryRun: boolean;
+  env: EnvLike;
+  run: CmuxRunner;
+  sessionRef: string;
+  workspace: string | null;
+}): Promise<number> {
+  const {cwd, dryRun, env, run} = input;
+  const {resolveThreadConfig} = await import('./config');
+  const config = resolveThreadConfig({cwd, env});
+  if (!dryRun && (!config.nameWorkspaces || !config.workspaceDescription)) {
+    console.error(
+      'thread workspace-name --description: componentConfig.thread.nameWorkspaces and workspaceDescription are not both true here, so nothing is written. --dry-run shows what it would do.',
+    );
+    return 1;
+  }
+  const lookup = lookupWorkspaceSession({cwd, env, session: input.sessionRef});
+  if (lookup.kind === 'failed') {
+    console.error(`thread workspace-name --description: ${lookup.reason}`);
+    return 1;
+  }
+  let workspaceId = input.workspace;
+  if (workspaceId == null) {
+    const tree = await readCmuxTree(run);
+    if (tree.kind === 'unreadable') {
+      console.error(`thread workspace-name --description: ${tree.reason}`);
+      return 1;
+    }
+    const resolved = resolveWorkspace(tree.tree, lookup.session.labels);
+    if (resolved.kind !== 'workspace') {
+      console.error(
+        `thread workspace-name --description: ${resolved.kind === 'none' ? 'this session is not in cmux' : resolved.reason}`,
+      );
+      return 1;
+    }
+    workspaceId = resolved.workspaceId;
+  }
+  const outcome = await syncWorkspaceDescription({
+    dryRun,
+    enabled: true,
+    env,
+    readers: realDescriptionReaders({cwd, env}),
+    run,
+    session: lookup.session,
+    workspaceId,
+  });
+  const line = describeWorkspaceDescription(outcome);
+  if (outcome.kind === 'failed') {
+    console.error(line);
+    return 1;
+  }
+  console.log(line);
+  if (outcome.kind === 'wouldWrite' || outcome.kind === 'written') {
+    console.log(outcome.to);
+  }
+  if (
+    outcome.kind === 'written' &&
+    (outcome.readback.kind === 'failed' ||
+      (outcome.readback.description ?? '') !== outcome.to)
+  ) {
+    return 1;
+  }
+  return 0;
 }
 
 /**
@@ -518,12 +676,16 @@ export interface ThreadWorkspaceNameOptions {
   /** `--all`: the preview over every open workspace; only with --dry-run. */
   all?: boolean;
   cwd?: string;
+  /** `--description`: the description alone (home-base-jm5kg.18). */
+  description?: boolean;
   dryRun: boolean;
   env?: EnvLike;
   restore: boolean;
   run?: CmuxRunner;
   /** `--session`: a session id or a session bead id; else $CLAUDE_CODE_SESSION_ID. */
   session: string | null;
+  /** The wait between readbacks; a test passes one that returns at once. */
+  sleep?: (ms: number) => Promise<void>;
   workspace: string | null;
 }
 
@@ -534,6 +696,15 @@ export async function runThreadWorkspaceName(
   const env = options.env ?? process.env;
   const cwd = options.cwd ?? process.cwd();
   const run = options.run ?? realCmuxRunner();
+  if (
+    options.description === true &&
+    (options.all === true || options.restore)
+  ) {
+    console.error(
+      'thread workspace-name --description: refused with --all or --restore; it writes one workspace',
+    );
+    return 2;
+  }
   if (options.all === true) {
     if (!options.dryRun) {
       console.error(
@@ -587,6 +758,16 @@ export async function runThreadWorkspaceName(
     );
     return 2;
   }
+  if (options.description === true) {
+    return await runWorkspaceDescription({
+      cwd,
+      dryRun: options.dryRun,
+      env,
+      run,
+      sessionRef,
+      workspace: options.workspace,
+    });
+  }
   const enabled = options.dryRun || (await nameWorkspacesKnob(cwd, env));
   if (!enabled) {
     console.error(
@@ -595,7 +776,7 @@ export async function runThreadWorkspaceName(
     return 1;
   }
   const found = lookupWorkspaceSession({cwd, env, session: sessionRef});
-  const lookup = await withNameItems(found, {cwd, env});
+  const lookup = await withOverarchingShort(found, {cwd, env});
   if (lookup.kind === 'failed') {
     console.error(`thread workspace-name: ${lookup.reason}`);
     return 1;
@@ -607,6 +788,7 @@ export async function runThreadWorkspaceName(
     readLabels: realOwnerLabels({cwd, env}),
     run,
     session: lookup.session,
+    sleep: options.sleep,
     workspaceId: options.workspace,
   });
   const line = describeWorkspaceSync(outcome);

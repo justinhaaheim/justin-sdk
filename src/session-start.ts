@@ -453,7 +453,13 @@ export async function runSessionStart(
     // stays the envelope's alone. `exitCode` is deliberately unused — this hook
     // always exits 0, and the verdict is in the report it just produced. It is
     // Justin's to act on (M2), so it goes to him and not into Claude's context.
-    const doctor = await renderDoctor(projectRoot, {quiet: true});
+    // Imported here: it reaches health-notices, which must stay off the path
+    // cli-main.ts loads statically (tests/health-notices-cli.test.ts).
+    const {sessionStartWarningFilter} = await import('./doctor-warn-once');
+    const doctor = await renderDoctor(projectRoot, {
+      quiet: true,
+      warningFilter: await sessionStartWarningFilter(projectRoot),
+    });
     forJustin = [forJustin, doctor.report.trim()]
       .filter((block) => block.length > 0)
       .join('\n\n');

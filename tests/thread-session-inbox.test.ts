@@ -762,6 +762,7 @@ describe('thread inbox: --repo and --json', () => {
       aheadOfDefault: {ok: true, value: 0},
       branch: {ok: true, value: 'main'},
       defaultBranch: {ok: true, value: 'main'},
+      localDefaultBehind: {ok: true, value: null},
       merged: {ok: true, value: 'isDefault'},
       uncommitted: {ok: true, value: 0},
       unpushed: {ok: true, value: {kind: 'noUpstream'}},

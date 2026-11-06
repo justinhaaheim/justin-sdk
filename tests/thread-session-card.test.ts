@@ -121,6 +121,7 @@ function fixture(over: {
       aheadOfDefault: measured(0),
       branch: measured('main'),
       checkout: '/repo',
+      checkoutDirty: measured([]),
       checkoutSource: 'logCwd',
       commits: measured({
         count: 0,
@@ -130,6 +131,7 @@ function fixture(over: {
         unresolved: [],
       }),
       defaultBranch: measured('main'),
+      localDefaultBehind: measured(null),
       merged: measured<MergeState>('isDefault'),
       repo: 'app',
       uncommitted: measured([]),
@@ -446,6 +448,31 @@ describe('D3 rule 6: done, not merged', () => {
     );
     expect(dirty.rule).toBe(6);
     expect(dirty.text).toBe('Land it: commit the 2 uncommitted files on main');
+  });
+
+  test("j8q3e.16 AC4: another session's dirty file never makes a finished session rule 6; an unattributable one is rule 10", () => {
+    const others = action(
+      fixture({
+        git: {
+          checkoutDirty: measured(['other-session.ts']),
+          uncommitted: measured([]),
+        },
+        requests: [closed('t-2', 'Fix the date parser')],
+      }),
+    );
+    expect(others.rule).not.toBe(6);
+    expect(others.text).not.toContain('uncommitted');
+    const unread = action(
+      fixture({
+        git: {
+          checkoutDirty: measured(['other-session.ts']),
+          uncommitted: unmeasured('could not be attributed to this session'),
+        },
+        requests: [closed('t-2', 'Fix the date parser')],
+      }),
+    );
+    expect(unread.rule).toBe(10);
+    expect(unread.text).toContain('could not be attributed');
   });
 });
 

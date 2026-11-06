@@ -285,6 +285,7 @@ describe('measureGroupSpend', () => {
     expect(spend.latestTypedAtMs).toBe(at(15));
     expect(spend.spend.weekPercent).toBe(3);
     expect(spend.firstUnattendedAtMs).toBe(at(16));
+    expect(spend.lastUnattendedAtMs).not.toBeNull();
   });
 
   test('subagent requests are included, and a request in two files counts once', async () => {

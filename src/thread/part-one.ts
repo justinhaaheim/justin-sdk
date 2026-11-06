@@ -671,6 +671,13 @@ export function partOneView(input: PartOneInput): PartOneView {
       branch = `${name} (this is ${target})`;
     } else if (git.merged.value === 'merged') {
       branch = `${name} (merged into ${target})`;
+    } else if (git.merged.value === 'onRemoteDefault') {
+      // home-base-p05kz.3 item 3: landed, and local main is only behind.
+      const behind =
+        git.localDefaultBehind.ok && git.localDefaultBehind.value != null
+          ? `; local ${target} is ${plural(git.localDefaultBehind.value.count, 'commit', 'commits')} behind`
+          : '';
+      branch = `${name} (landed: all its commits are on origin/${target}${behind})`;
     } else {
       branch = `${name} (not merged into ${target})`;
     }
@@ -711,6 +718,21 @@ export function partOneView(input: PartOneInput): PartOneView {
           : plural(paths.length, 'path', 'paths'),
       ),
     );
+  }
+  // home-base-p05kz.3 item 4: `Uncommitted` is what this session's transcript
+  // names. A file it does not name may still be its own (`bun add`, a formatter,
+  // a generator), so it is said here without being claimed, never left out.
+  if (git.checkoutDirty.ok && git.uncommitted.ok) {
+    const own = new Set(git.uncommitted.value);
+    const others = git.checkoutDirty.value.filter((path) => !own.has(path));
+    if (others.length > 0) {
+      gitFields.push(
+        field(
+          'Also uncommitted in this checkout',
+          `${others.length <= 3 ? others.join(', ') : plural(others.length, 'path', 'paths')}, not tied to this session`,
+        ),
+      );
+    }
   }
 
   if (!git.unpushed.ok) {

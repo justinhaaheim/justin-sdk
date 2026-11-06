@@ -16,10 +16,18 @@ import type {
 } from '../src/thread/handoff-gate';
 import type {HandoffGateRunner} from '../src/thread/handoff-successor';
 import type {LiveSessionDeps} from '../src/thread/live-sessions';
+import type {HandoffOutcome} from '../src/thread/session-handoff';
 import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'fs';
 import {createServer, type Server, type Socket} from 'net';
 import {tmpdir} from 'os';
 import {join} from 'path';
@@ -39,6 +47,7 @@ import {
 } from '../src/thread/handoff-chain';
 import {
   gateCmuxReaders,
+  HANDOFF_BEADS_LOCKED_INSTRUCTIONS,
   HANDOFF_DEFERRAL_INSTRUCTIONS,
   HANDOFF_GATE_DEADLINE_MS,
   readLaunchRecord,
@@ -46,6 +55,7 @@ import {
 } from '../src/thread/handoff-gate';
 import {threadHandoffCommand} from '../src/thread/handoff-successor';
 import {ensureSessionBead} from '../src/thread/session-bead';
+import {describeHandoffOutcome} from '../src/thread/session-handoff';
 import {selectSession} from '../src/thread/session-select';
 import {spawnGate} from '../src/thread/spawn-gate';
 import {initRepo} from './git-fixtures';
@@ -672,6 +682,225 @@ describe('thread handoff when cmux is slow', () => {
   });
 });
 
+describe('thread handoff when the beads database is locked (home-base-p05kz.5.1)', () => {
+  const LOCKED = 'br exited 1: Error: Database error: database is busy';
+
+  /** A br that answers `show` with `text`, and runs the real br otherwise. */
+  function brThatFailsShow(w: World, text: string): void {
+    const dir = join(w.sandboxPath, 'br-shim');
+    mkdirSync(dir, {recursive: true});
+    const shim = join(dir, 'br');
+    writeFileSync(
+      shim,
+      `#!/bin/sh\ncase " $* " in *" show "*) echo '${text}' >&2; exit 1;; esac\nexec '${Bun.which('br') ?? 'br'}' "$@"\n`,
+    );
+    chmodSync(shim, 0o755);
+    w.env.PATH = `${dir}:${process.env.PATH ?? ''}`;
+  }
+
+  async function withHandOff(w: World, outcome: HandoffOutcome) {
+    const clock = fakeClock();
+    const cmux = fakeCmux(clock);
+    const handed: HandoffOutcome = outcome;
+    return {
+      cmux,
+      result: await threadHandoffCommand(
+        {
+          cwd: w.repo,
+          dryRun: false,
+          env: w.env,
+          model: null,
+          note: 'pick up at step 3',
+          now: NOW,
+          sessionId: null,
+          to: null,
+        },
+        {
+          clock: clock.now,
+          gate: gateOver(w, clock, cmux),
+          handOff: () => Promise.resolve(handed),
+          run: cmux.run,
+          sleep: clock.sleep,
+          successorPollMs: 500,
+          successorTimeoutMs: 2000,
+        },
+      ),
+    };
+  }
+
+  test('the session bead cannot be read: exit 4, and nothing is written', async () => {
+    const w = world();
+    const clock = fakeClock();
+    const cmux = fakeCmux(clock);
+    brThatFailsShow(w, 'Error: Database error: database is busy');
+    const result = await handoff(w, clock, cmux, gateOver(w, clock, cmux));
+    expect(result.exitCode).toBe(4);
+    const text = textOf(result);
+    expect(text).toContain('handoff deferred: beadsLocked');
+    for (const line of HANDOFF_BEADS_LOCKED_INSTRUCTIONS) {
+      expect(text).toContain(line);
+    }
+    const bead = beadOf(w);
+    expect(bead.labels).not.toContain('handed-off');
+    expect(bead.labels).not.toContain('handoff-refused');
+    expect(cmux.calls).toEqual([]);
+  });
+
+  test('negative control: another read failure is still exit 2', async () => {
+    const w = world();
+    const clock = fakeClock();
+    const cmux = fakeCmux(clock);
+    brThatFailsShow(w, 'Error: database disk image is malformed');
+    const result = await handoff(w, clock, cmux, gateOver(w, clock, cmux));
+    expect(result.exitCode).toBe(2);
+    expect(textOf(result)).not.toContain('beadsLocked');
+  });
+
+  test('the handoff write meets the lock: exit 4, not exit 1', async () => {
+    const w = world();
+    const {cmux, result} = await withHandOff(w, {
+      kind: 'failed',
+      reason: `the session was NOT marked handed off: ${LOCKED}`,
+    });
+    expect(result.exitCode).toBe(4);
+    expect(textOf(result)).toContain('handoff deferred: beadsLocked');
+    expect(cmux.calls).not.toContain('newSurface');
+  });
+
+  test('negative control: another failed write is still exit 1', async () => {
+    const w = world();
+    const {cmux, result} = await withHandOff(w, {
+      kind: 'failed',
+      reason: 'the session was NOT marked handed off: br exited 2: bad flag',
+    });
+    expect(result.exitCode).toBe(1);
+    expect(textOf(result)).not.toContain('beadsLocked');
+    expect(cmux.calls).not.toContain('newSurface');
+  });
+
+  test('the block cannot be built on a lock: exit 4, and it says the session was marked', async () => {
+    const w = world();
+    const {cmux, result} = await withHandOff(w, {
+      block: '',
+      followUpFailures: [`the handoff block could not be built: ${LOCKED}`],
+      kind: 'handedOff',
+      successor: {kind: 'none'},
+    });
+    expect(result.exitCode).toBe(4);
+    expect(textOf(result)).toContain('the session WAS marked handed off');
+    expect(cmux.calls).not.toContain('newSurface');
+  });
+
+  test('the launch record meets the lock: exit 4, the block is printed, no tab opens', async () => {
+    const w = world();
+    const clock = fakeClock();
+    const cmux = fakeCmux(clock);
+    const result = await threadHandoffCommand(
+      {
+        cwd: w.repo,
+        dryRun: false,
+        env: w.env,
+        model: null,
+        note: null,
+        now: NOW,
+        sessionId: null,
+        to: null,
+      },
+      {
+        clock: clock.now,
+        gate: gateOver(w, clock, cmux),
+        recordLaunch: () => ({
+          kind: 'failed',
+          reason: `${w.beadId} could not be written: ${LOCKED}`,
+        }),
+        run: cmux.run,
+        sleep: clock.sleep,
+        successorPollMs: 500,
+        successorTimeoutMs: 2000,
+      },
+    );
+    expect(result.exitCode).toBe(4);
+    const text = textOf(result);
+    expect(text).toContain('🤝 **HANDOFF**');
+    expect(text).toContain('handoff deferred: beadsLocked');
+    expect(cmux.calls).not.toContain('newSurface');
+  });
+
+  test('the gate reading the launch record on a lock defers; another failure refuses', async () => {
+    const w = world();
+    const over = async (reason: string) => {
+      const clock = fakeClock();
+      const cmux = fakeCmux(clock);
+      return await handoff(
+        w,
+        clock,
+        cmux,
+        gateOver(w, clock, cmux, {
+          readers: {launchRecord: () => ({kind: 'failed', reason})},
+        }),
+      );
+    };
+    const failedOther = await over('t-1 could not be read: br exited 2');
+    expect(failedOther.exitCode).toBe(3);
+    expect(textOf(failedOther)).toContain('alreadyHandedOff');
+    const locked = await over(`t-1 could not be read: ${LOCKED}`);
+    expect(locked.exitCode).toBe(4);
+    expect(textOf(locked)).toContain('handoff deferred: beadsLocked');
+    expect(beadOf(w).notes ?? '').toContain('handoff deferred: beadsLocked — ');
+  });
+
+  test('the gate reading the chain on a lock defers; another failure refuses', async () => {
+    const w = world();
+    const over = async (reason: string) => {
+      const clock = fakeClock();
+      const cmux = fakeCmux(clock);
+      return await handoff(
+        w,
+        clock,
+        cmux,
+        gateOver(w, clock, cmux, {
+          readers: {chain: () => ({kind: 'unknown', links: [], reason})},
+        }),
+      );
+    };
+    const failedOther = await over('t-1: not found');
+    expect(failedOther.exitCode).toBe(3);
+    expect(textOf(failedOther)).toContain('chainUnknown');
+    const locked = await over(LOCKED);
+    expect(locked.exitCode).toBe(4);
+    expect(textOf(locked)).toContain('handoff deferred: beadsLocked');
+  });
+
+  test('with the successor knob off, a lock is exit 4 and another failure is exit 1', () => {
+    const locked = describeHandoffOutcome({
+      kind: 'failed',
+      reason: `the session was NOT marked handed off: ${LOCKED}`,
+    });
+    expect(locked.exitCode).toBe(4);
+    expect(locked.lines.join('\n')).toContain('handoff deferred: beadsLocked');
+    expect(
+      describeHandoffOutcome({kind: 'failed', reason: 'br exited 2: bad flag'})
+        .exitCode,
+    ).toBe(1);
+    expect(
+      describeHandoffOutcome({
+        block: 'the block',
+        followUpFailures: [LOCKED],
+        kind: 'handedOff',
+        successor: {kind: 'none'},
+      }).exitCode,
+    ).toBe(4);
+    expect(
+      describeHandoffOutcome({
+        block: 'the block',
+        followUpFailures: ['the index is unreadable'],
+        kind: 'handedOff',
+        successor: {kind: 'none'},
+      }).exitCode,
+    ).toBe(1);
+  });
+});
+
 describe('the whole gate stops at the 60 s deadline (AC 9, fake clock)', () => {
   async function run(
     w: World,
@@ -686,6 +915,7 @@ describe('the whole gate stops at the 60 s deadline (AC 9, fake clock)', () => {
     )({
       cmuxDeadlineAtMs: clock.now() + HANDOFF_GATE_DEADLINE_MS,
       cwd: w.repo,
+      dryRun: false,
       env: w.env,
       limits: {
         maxLiveSessions: 20,
@@ -741,6 +971,7 @@ describe('the whole gate stops at the 60 s deadline (AC 9, fake clock)', () => {
     })({
       cmuxDeadlineAtMs: clock.now() + HANDOFF_GATE_DEADLINE_MS,
       cwd: w.repo,
+      dryRun: false,
       env: w.env,
       limits: {
         maxLiveSessions: 20,

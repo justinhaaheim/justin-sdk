@@ -62,9 +62,10 @@ import type {
   YouAsked,
 } from './session-card';
 import type {SessionSighting} from './session-index';
-import type {SessionModel} from './session-model';
+import type {SessionModel, UncommittedDirt} from './session-model';
 import type {SessionStatus, StatusCounts} from './session-status';
 import type {
+  UnattributedDirt,
   UntrackedRead,
   UntrackedSession,
   UntrackedVerdict,
@@ -88,7 +89,7 @@ import {parseInstant} from './answer-store';
 import {messageLogPath} from './archive';
 import {resolveRepoTag, resolveThreadConfig} from './config';
 import {handoffStopOf} from './handoff-view';
-import {listInputDrafts} from './input-drafts';
+import {listUnsentInputDrafts} from './input-drafts';
 import {
   isSafeSessionId,
   readLastAssistantLine,
@@ -113,9 +114,11 @@ import {
 import {readSessionIndex} from './session-index';
 import {
   createLoadCache,
+  dirtOfGit,
   firstUserLine,
   lastAssistantLine,
   loadSession,
+  measured,
   newestLogAt,
 } from './session-model';
 import {sessionDisplayName} from './session-name';
@@ -125,6 +128,7 @@ import {
   defaultDevRoot,
   readUntracked,
   repeatKey,
+  unattributedDirt,
   untrackedActivityAt,
   untrackedCard,
   untrackedLine,
@@ -222,6 +226,8 @@ export type InboxDrafts =
   | {
       failures: string[];
       kind: 'read';
+      /** Why a draft could not be checked against what was sent; it stays shown. */
+      unchecked: string[];
       unshown: (InboxInputDraft & {sessionId: string})[];
     }
   | {kind: 'failed'; reason: string};
@@ -284,6 +290,11 @@ export interface InboxRead {
   readMarks: {kind: 'failed'; reason: string} | {kind: 'read'};
   rows: InboxRow[];
   /**
+   * home-base-j8q3e.16: every loaded session's dirt, test sessions included,
+   * which the per-checkout note is built from (`unattributedOfListed`).
+   */
+  sessionDirt: SessionDirt[];
+  /**
    * F5 (home-base-j8q3e.1.10): sessions whose first message carries the
    * test-data marker. Never a card or a line: counted in one note, and listed
    * here (and in the JSON) so none is dropped silently.
@@ -295,6 +306,41 @@ export interface InboxRead {
   }[];
   /** D6: how the sessions with no session bead were found, and what was not. */
   untracked: Omit<UntrackedRead, 'sessions'>;
+}
+
+/** One session's part in the per-checkout note (home-base-j8q3e.16). */
+export interface SessionDirt {
+  dirt: UncommittedDirt;
+  sessionId: string;
+}
+
+/** The session's dirt, tracked or not; null when its checkout's is unknown. */
+export function sessionDirtOfRow(row: InboxRow): SessionDirt | null {
+  const dirt =
+    row.untracked != null
+      ? row.untracked.session.dirt
+      : row.loaded != null
+        ? dirtOfGit(row.loaded.model.git)
+        : null;
+  return dirt == null ? null : {dirt, sessionId: row.sessionId};
+}
+
+/**
+ * home-base-j8q3e.16: the per-checkout note, over tracked and untracked
+ * sessions alike. Only a session in `listed` can claim a file, because only its
+ * card can show that file. A file claimed only by a session this run hides
+ * (done, archived, or a test session) stays in the note: real uncommitted work
+ * must never vanish with a hidden card.
+ */
+export function unattributedOfListed(
+  sources: readonly SessionDirt[],
+  listed: ReadonlySet<string>,
+): UnattributedDirt[] {
+  return unattributedDirt(
+    sources.map(({dirt, sessionId}) => ({
+      dirt: listed.has(sessionId) ? dirt : {...dirt, own: measured([])},
+    })),
+  );
 }
 
 function byNewest(a: InboxRow, b: InboxRow): number {
@@ -452,11 +498,11 @@ export async function readInbox(input: {
   }
   // D-DRAFTS (home-base-yukaf.4): the live drafts, read once. A session with
   // one is never hidden by age: the text exists nowhere else.
-  const draftList = listInputDrafts(env);
+  // home-base-p05kz.3 item 7: a draft all of whose text went out is not shown.
+  const draftList = listUnsentInputDrafts(env);
   const liveDrafts = new Map<string, InboxInputDraft>();
   if (draftList.kind === 'read') {
     for (const entry of draftList.drafts) {
-      if (entry.draft.clearedAt != null) continue;
       liveDrafts.set(entry.sessionId, {
         at: entry.draft.at,
         sentMatch: entry.draft.sentMatch,
@@ -728,19 +774,25 @@ export async function readInbox(input: {
       : {
           failures: draftList.failures,
           kind: 'read',
+          unchecked: draftList.unchecked,
           unshown: [...liveDrafts.entries()]
             .filter(([sessionId]) => !shownDrafts.has(sessionId))
             .map(([sessionId, draft]) => ({...draft, sessionId})),
         };
+  const sessionDirt = rows.flatMap((row) => sessionDirtOfRow(row) ?? []);
+  const shaped = shapeRows(rows);
   const untrackedRead: InboxRead['untracked'] = {
     devRoot: untracked.devRoot,
     failures: untracked.failures,
     oldReports: untracked.oldReports,
     outsideRoot: untracked.outsideRoot,
-    unattributed: untracked.unattributed,
+    // The JSON lists every row, done and archived too, so all of them claim.
+    unattributed: unattributedOfListed(
+      sessionDirt,
+      new Set(shaped.rows.map((row) => row.sessionId)),
+    ),
     unplaced: untracked.unplaced,
   };
-  const shaped = shapeRows(rows);
   return {
     kind: 'read',
     read: {
@@ -758,6 +810,7 @@ export async function readInbox(input: {
           ? {kind: 'failed', reason: marks.reason}
           : {kind: 'read'},
       rows: shaped.rows,
+      sessionDirt,
       testSessions: shaped.testSessions,
       untracked: untrackedRead,
     },
@@ -911,10 +964,10 @@ export function unplacedPanesValue(panes: PaneLookup): string | null {
  */
 export function untrackedNotes(notes: InboxRead['untracked']): string[] {
   const lines: string[] = [];
-  // j8q3e.6 D3: a checkout's dirt that no untracked session's transcript
-  // names, once. j8q3e.13 F4: the words claim only what was checked. A
-  // session that ran `bun add`, `prettier --write .` or a code generator
-  // dirtied files without naming them, so "no session wrote" could be false.
+  // j8q3e.6 D3: a checkout's dirt that no listed session's transcript names,
+  // once. j8q3e.13 F4: the words claim only what was checked. A session that
+  // ran `bun add`, `prettier --write .` or a code generator dirtied files
+  // without naming them, so "no session wrote" could be false.
   for (const dirt of notes.unattributed) {
     const files = plural(
       dirt.paths.length,
@@ -930,7 +983,7 @@ export function untrackedNotes(notes: InboxRead['untracked']): string[] {
         ? `; ${plural(dirt.unchecked, 'session', 'sessions')} there could not be checked`
         : '';
     lines.push(
-      `${tildeText(dirt.checkout)}: ${files} that no Not-tracked session's transcript names${named}${unchecked}.`,
+      `${tildeText(dirt.checkout)}: ${files} that no listed session's transcript names${named}${unchecked}.`,
     );
   }
   const {outsideRoot} = notes;
@@ -1025,6 +1078,7 @@ function markdownCard(
   card: SessionCard,
   showSection: boolean,
   unread: boolean | null,
+  paneSummaryReason: string | null,
 ): string {
   const lines: string[] = [];
   if (showSection) {
@@ -1060,7 +1114,7 @@ function markdownCard(
   }
   lines.push(`- **Resume:** \`${card.resume}\``);
   // j8q3e.7 D7: every card says where its pane is, or why that is unknown.
-  const pane = paneLineParts(card.paneFact);
+  const pane = paneLineParts(card.paneFact, paneSummaryReason);
   lines.push(
     `- **Pane:** ${pane.before}${pane.command == null ? '' : `\`${pane.command}\``}${pane.after}`,
   );
@@ -1086,6 +1140,7 @@ function ansiCard(
   showSection: boolean,
   style: OutputStyle,
   unread: boolean | null,
+  paneSummaryReason: string | null,
 ): string {
   const {color, width} = style;
   const code = (text: string): string => paint(text, ['cyan'], color);
@@ -1128,7 +1183,7 @@ function ansiCard(
     });
   }
   fields.push({label: 'Resume', value: code(card.resume)});
-  const pane = paneLineParts(card.paneFact);
+  const pane = paneLineParts(card.paneFact, paneSummaryReason);
   fields.push({
     label: 'Pane',
     value: `${pane.before}${pane.command == null ? '' : code(pane.command)}${pane.after}`,
@@ -1167,11 +1222,12 @@ function renderRow(
   row: InboxRow,
   showSection: boolean,
   style: OutputStyle,
+  paneSummaryReason: string | null,
 ): string {
   if (row.display === 'line') return lineEntry(row, style);
   return style.color
-    ? ansiCard(row.card, showSection, style, row.unread)
-    : markdownCard(row.card, showSection, row.unread);
+    ? ansiCard(row.card, showSection, style, row.unread, paneSummaryReason)
+    : markdownCard(row.card, showSection, row.unread, paneSummaryReason);
 }
 
 function header(
@@ -1237,6 +1293,11 @@ export function inputDraftNotes(drafts: InboxDrafts): string[] {
       `⚠️ ${plural(drafts.failures.length, 'draft file', 'draft files')} could not be read: ${drafts.failures.map(tildeText).join('; ')}`,
     );
   }
+  if (drafts.unchecked.length > 0) {
+    notes.push(
+      `⚠️ ${plural(drafts.unchecked.length, 'draft', 'drafts')} could not be checked against what was sent, so ${drafts.unchecked.length === 1 ? 'it stays' : 'they stay'} listed as unsent: ${drafts.unchecked.map(tildeText).join('; ')}`,
+    );
+  }
   return notes;
 }
 
@@ -1270,6 +1331,11 @@ export function renderInbox(
 
   // j8q3e.1 D5: the summary first, one line per non-empty section.
   const summary = inboxSummary(visible, all);
+  // p05kz.3 item 5: a failed lookup is said once, in the summary's open-panes
+  // line, and each card points there. Null when the summary prints no such
+  // line, so "see the summary" is never a dangling pointer.
+  const paneSummaryReason =
+    summary.length > 0 && !read.panes.ok ? read.panes.reason : null;
   if (summary.length > 0) {
     blocks.push(header('Summary', '📊', 2, style));
     const fields = summary.map((entry) => ({
@@ -1309,7 +1375,9 @@ export function renderInbox(
       blocks.push(
         header(`${section.title} (${rows.length})`, section.emoji, 2, style),
       );
-      for (const row of rows) blocks.push(renderRow(row, false, style));
+      for (const row of rows) {
+        blocks.push(renderRow(row, false, style, paneSummaryReason));
+      }
     }
   } else if (order === 'repo') {
     const groups = new Map<string, InboxRow[]>();
@@ -1325,11 +1393,15 @@ export function renderInbox(
     )) {
       const rows = groups.get(repo) ?? [];
       blocks.push(header(`${repo} (${rows.length})`, '📁', 2, style));
-      for (const row of rows) blocks.push(renderRow(row, true, style));
+      for (const row of rows) {
+        blocks.push(renderRow(row, true, style, paneSummaryReason));
+      }
     }
   } else if (visible.length > 0) {
     blocks.push(header('Sessions, newest first', '🕒', 2, style));
-    for (const row of visible) blocks.push(renderRow(row, true, style));
+    for (const row of visible) {
+      blocks.push(renderRow(row, true, style, paneSummaryReason));
+    }
   }
 
   const hidden = read.rows.length - visible.length;
@@ -1354,7 +1426,15 @@ export function renderInbox(
       `${plural(tests, 'test session', 'test sessions')} hidden: ${tests === 1 ? 'its' : 'their'} first message carries the [TEST_DATA_DELETABLE …] marker. --json lists ${tests === 1 ? 'it' : 'them'} under testSessions.`,
     );
   }
-  notes.push(...untrackedNotes(read.untracked));
+  notes.push(
+    ...untrackedNotes({
+      ...read.untracked,
+      unattributed: unattributedOfListed(
+        read.sessionDirt,
+        new Set(visible.map((row) => row.sessionId)),
+      ),
+    }),
+  );
   notes.push(...inputDraftNotes(read.inputDrafts));
   // D-READ-STATE: no ● anywhere is then "could not tell", and says so once.
   if (read.readMarks.kind === 'failed') {

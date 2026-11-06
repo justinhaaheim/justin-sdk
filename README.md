@@ -295,12 +295,19 @@ Any error-severity failure is always printed, whatever `showOnPass` says — the
 ```json
 {
   "healthNotices": {
-    "doctor": {"intervalMinutes": 60, "promptTier": 3, "showOnPass": false}
+    "doctor": {
+      "intervalMinutes": 60,
+      "promptTier": 3,
+      "showOnPass": false,
+      "warnOncePerChange": true
+    }
   }
 }
 ```
 
 `promptTier` works exactly as it does above. `intervalMinutes` is measured from the last run **in that repo**, and a run that could not be made — the child failed to spawn, or hit its 60-second timeout — is recorded as a failure with its reason, so it is not retried on the next command.
+
+`warnOncePerChange` applies to the doctor report at session start, not to this heartbeat. A warning prints once per repo, and again when its text changes or when it resolves and comes back. In between, one line names it. Errors always print, `doctor` run by hand always prints everything, and a state file that cannot be read or written shows everything and says so.
 
 ### Configuring both
 

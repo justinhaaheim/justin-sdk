@@ -50,6 +50,7 @@ function group(
   return {
     firstUnattendedAtMs: null,
     kind: 'known',
+    lastUnattendedAtMs: null,
     latestTypedAtMs:
       typedMinutesAgo == null ? null : NOW - typedMinutesAgo * MINUTE,
     members: [],

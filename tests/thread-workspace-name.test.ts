@@ -56,6 +56,7 @@ import {
   syncWorkspaceName,
 } from '../src/thread/workspace-name';
 import {
+  isRefusedSocket,
   lookupWorkspaceSession,
   runThreadWorkspaceName,
   withRetryAdvice,
@@ -550,6 +551,70 @@ describe('D4/D5 the sync, against a fake cmux', () => {
     expect(outcome).toMatchObject({
       kind: 'renamed',
       readback: {kind: 'read', name: T},
+    });
+  });
+
+  describe('home-base-j8q3e.9: a slow cmux', () => {
+    /** cmux applies the rename once the fake clock passes `appliesAtMs`. */
+    function slowCmux(appliesAtMs: number) {
+      let nowMs = 0;
+      const slept: number[] = [];
+      const cmux = fakeCmux(
+        [{id: WS_A, surfaces: [SURFACE], title: null}],
+        (args) => {
+          if (args[2] === 'list' && nowMs < appliesAtMs) {
+            return ok(
+              JSON.stringify({workspaces: [{custom_title: null, id: WS_A}]}),
+            );
+          }
+          return null;
+        },
+      );
+      const sleep = (ms: number): Promise<void> => {
+        slept.push(ms);
+        nowMs += ms;
+        return Promise.resolve();
+      };
+      return {cmux, sleep, slept};
+    }
+
+    test('a rename cmux applies after 3 s is not a mismatch', async () => {
+      const {cmux, sleep} = slowCmux(3000);
+      const outcome = await syncWorkspaceName({
+        enabled: true,
+        env: stateEnv(),
+        run: cmux.run,
+        session: session(),
+        sleep,
+      });
+      expect(outcome).toMatchObject({
+        kind: 'renamed',
+        readback: {kind: 'read', name: T},
+      });
+    });
+
+    test('a rename it never applies waits 5 s, backing off, and says what is true', async () => {
+      const {cmux, sleep, slept} = slowCmux(Number.POSITIVE_INFINITY);
+      const env = stateEnv();
+      const outcome = await syncWorkspaceName({
+        enabled: true,
+        env,
+        run: cmux.run,
+        session: session(),
+        sleep,
+      });
+      expect(slept.reduce((sum, ms) => sum + ms, 0)).toBe(5000);
+      expect(slept.at(-1)).toBeGreaterThan(slept[0] ?? 0);
+      const text = describeWorkspaceSync(outcome);
+      expect(text).toContain(
+        'cmux still showed "(no name)" after 5 s; the record already holds the new name, and the next sync checks again',
+      );
+      expect(text).not.toContain('keeps the old name');
+      // The sentence is checked against the record itself.
+      const read = readWorkspaceNames(env);
+      expect(read.kind === 'read' ? read.records.at(-1)?.nameSet : null).toBe(
+        T,
+      );
     });
   });
 
@@ -1055,6 +1120,63 @@ describe('D4 b: thread request / thread title with cmux unreadable', () => {
     expect(withRetryAdvice('x (errno 13)')).not.toContain('sandbox');
   });
 
+  describe('home-base-p05kz.3 item 6: the socket the sandbox refused', () => {
+    const REFUSED =
+      'cmux --json --id-format both failed: Error: Failed to connect to socket at /Users/x/.local/state/cmux/cmux.sock (Operation not permitted, errno 1)';
+
+    async function linesWith(reason: string): Promise<string[]> {
+      const {env, repo} = world();
+      const outcome = await fileRequest({
+        bead: null,
+        cmux: fakeCmux([], () => ({
+          kind: 'failed',
+          reason,
+          timedOut: false,
+        })).run,
+        cwd: repo,
+        doneWhen: null,
+        env,
+        here: false,
+        sessionId: null,
+        title: 'The actual work',
+      });
+      const {exitCode, lines} = describeRequestOutcome(outcome);
+      expect(exitCode).toBe(0);
+      return lines.filter((line) =>
+        /workspace name|tab title|socket/u.test(line),
+      );
+    }
+
+    test('a sandboxed thread request prints no cmux line', async () => {
+      needBr();
+      expect(await linesWith(REFUSED)).toEqual([]);
+    });
+
+    test('another cmux failure still prints', async () => {
+      needBr();
+      const lines = await linesWith(
+        'cmux --json --id-format both failed: Error: Access denied - only processes started inside cmux can connect',
+      );
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('Access denied');
+      expect(lines[0]).toContain('the next prompt will set it');
+    });
+
+    test('only the exact text is silent', () => {
+      expect(isRefusedSocket(REFUSED)).toBe(true);
+      for (const reason of [
+        'cmux failed: Operation not permitted',
+        'connect EPERM /tmp/cmux.sock',
+        'Error: Failed to connect to socket at /x.sock (Connection refused, errno 61)',
+        'Error: Socket closed before reply',
+        'Error: Command timed out',
+        `the rename failed: ${REFUSED}`,
+      ]) {
+        expect(isRefusedSocket(reason)).toBe(false);
+      }
+    });
+  });
+
   test('thread title: one soft line, exit code unchanged', async () => {
     needBr();
     const {env, repo} = world();
@@ -1313,6 +1435,7 @@ describe('j8q3e.5.3 F4: thread workspace-name against a fake cmux', () => {
       restore: flags.restore ?? false,
       run,
       session: null,
+      sleep: () => Promise.resolve(),
       workspace: null,
     });
   }

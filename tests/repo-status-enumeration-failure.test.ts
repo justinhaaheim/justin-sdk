@@ -345,7 +345,7 @@ describe('the session-start view never calls an unreadable repo clean', () => {
     // would pass just as well against a formatter that never printed it.
     const diverged = runDivergenceCheck({cwd: repo});
     expect(diverged?.enumerationFailures).toEqual([]);
-    expect(formatRepoState(diverged)).toContain('1 commit ahead');
+    expect(formatRepoState(diverged)).toContain('1 commit not on main');
 
     git(repo, ['checkout', '-q', 'ahead']);
     const clean = runDivergenceCheck({cwd: repo});

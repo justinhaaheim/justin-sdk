@@ -43,6 +43,13 @@ export interface ResolvedHandoffUsage {
   /** The all-models week window's ceiling, in percent. Above it: refused. */
   maxWeekPercent: number;
   maxWeekPercentSource: ThreadConfigSource;
+  /**
+   * The pacing hold (home-base-jm5kg.17, feature knob, default false). True: at
+   * hold level, or with the pace unknown, the gate refuses. It adds a refusal
+   * and takes nothing away: the ceilings above apply either way.
+   */
+  paceHold: boolean;
+  paceHoldSource: ThreadConfigSource;
 }
 
 export interface ResolvedHandoffConfig {
@@ -189,7 +196,9 @@ export function resolveHandoffConfig(
       read: (section) => section[key],
       sections: layers,
     });
-  const usageField = (key: keyof typeof HANDOFF_DEFAULTS.usage) =>
+  const usageField = (
+    key: 'maxSampleAgeMinutes' | 'maxSessionPercent' | 'maxWeekPercent',
+  ) =>
     resolveField({
       accept: key === 'maxSampleAgeMinutes' ? isPositiveNumber : isPercent,
       dotted: `handoff.usage.${key}`,
@@ -251,6 +260,15 @@ export function resolveHandoffConfig(
     read: (section) => section.check,
     sections: usageLayers,
   });
+  const paceHold = resolveField({
+    accept: (value): value is boolean => typeof value === 'boolean',
+    dotted: 'handoff.usage.paceHold',
+    expected: 'true or false',
+    fallback: HANDOFF_DEFAULTS.usage.paceHold as boolean,
+    problems,
+    read: (section) => section.paceHold,
+    sections: usageLayers,
+  });
 
   return {
     autoPickup: autoPickup.value,
@@ -274,6 +292,8 @@ export function resolveHandoffConfig(
       maxSessionPercentSource: maxSessionPercent.source,
       maxWeekPercent: maxWeekPercent.value,
       maxWeekPercentSource: maxWeekPercent.source,
+      paceHold: paceHold.value,
+      paceHoldSource: paceHold.source,
     },
   };
 }

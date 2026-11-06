@@ -158,6 +158,34 @@ export function brSpawnEnv(env: BrEnv | undefined): Record<string, string> {
 }
 
 /**
+ * How long br waits for another process to release the database. Measured
+ * 2026-11-06 in scratch repos with 12 `br update` calls at once, 5 rounds: on br
+ * 0.1.37, 57 of 60 failed without this flag (median 70 s, most killed with no
+ * message) and 51 of 60 with it (median 40 s, most saying `database is busy`).
+ * It helps little there, but a failure names its cause. On br 0.7.6, 0 of 60
+ * failed either way (slowest 1.4 s). Earlier: home-base-j8q3e.10.
+ */
+export const BR_LOCK_TIMEOUT_MS = 20_000;
+
+/** Past this, br is killed. A br waiting on a held lock can get this far. */
+const BR_SPAWN_TIMEOUT_MS = 60_000;
+
+const BEADS_LOCKED_TEXT =
+  /database is (?:locked|busy)|SQLITE_(?:BUSY|LOCKED)|br timed out/i;
+
+/**
+ * Does a failure's text say another process holds the beads database? That is
+ * a passing state, unlike every other br failure, so `thread handoff` defers
+ * on it (home-base-p05kz.5.1). The text is the only signal: br and sqlite3 both
+ * exit non-zero with this wording and no distinct code. A br killed at our time
+ * limit counts too: with a write lock held, br 0.1.37 and 0.7.6 were both still
+ * waiting at 50 s (measured 2026-11-06), and that is how a long lock shows up.
+ */
+export function saysBeadsLocked(text: string): boolean {
+  return BEADS_LOCKED_TEXT.test(text);
+}
+
+/**
  * `runBr`, plus the raw stdout of a FAILED call. `runBr` blanks stdout on
  * failure (its callers read stdout only on success), but br can write a
  * `--json` call's error body to STDOUT: `br show <missing> --json` exits 3
@@ -171,20 +199,27 @@ function spawnBr(
   args: string[],
   env?: BrEnv,
 ): {outcome: BrOutcome; rawStdout: string} {
-  const proc = spawnSync('br', [...args, '--no-auto-import'], {
-    cwd,
-    encoding: 'utf-8',
-    env: brSpawnEnv(env),
-    maxBuffer: 16 * 1024 * 1024,
-    timeout: 60_000,
-  });
+  const proc = spawnSync(
+    'br',
+    [...args, '--no-auto-import', '--lock-timeout', String(BR_LOCK_TIMEOUT_MS)],
+    {
+      cwd,
+      encoding: 'utf-8',
+      env: brSpawnEnv(env),
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: BR_SPAWN_TIMEOUT_MS,
+    },
+  );
   const stderr = capturedStderr(proc.stderr);
   const rawStdout = proc.stdout ?? '';
   if (proc.error != null) {
+    const timedOut = (proc.error as {code?: string}).code === 'ETIMEDOUT';
     return {
       outcome: {
         ok: false,
-        reason: `br could not run: ${proc.error.message}`,
+        reason: timedOut
+          ? `br timed out after ${BR_SPAWN_TIMEOUT_MS / 1000} s`
+          : `br could not run: ${proc.error.message}`,
         stderr,
         stdout: '',
       },
@@ -1048,23 +1083,17 @@ export function brSchemaWritten(version: BrSemver): number | null {
   return schema;
 }
 
-/**
- * A database's schema (`PRAGMA user_version`), read by `sqlite3 -readonly`
- * with a bounded wait, so no br opens the file to answer it. Measured
- * 2026-10-29 on 0.1.37 and 0.7.6 DBs with WAL frames: the read leaves the DB
- * and WAL bytes unchanged and both brs work on afterwards; when the `-shm` is
- * missing, SQLite creates it, as any br open does. A failed read is `failed`,
- * never a schema.
- */
-export function readDbSchema(
-  db: string,
-): {kind: 'failed'; reason: string} | {kind: 'read'; schema: number} {
+/** `locked`: another process held the database for the whole wait. Never a schema. */
+export type DbSchemaRead =
+  | {kind: 'failed'; reason: string}
+  | {kind: 'locked'; reason: string}
+  | {kind: 'read'; schema: number};
+
+function readDbSchemaOnce(db: string, waitMs: number): DbSchemaRead {
   const proc = spawnSync(
     'sqlite3',
-    // 2026-11-06: 2 s was too short with many sessions writing. `thread
-    // handoff` failed twice in a row on `database is locked` (home-base-89c8h).
-    ['-readonly', '-cmd', '.timeout 20000', db, 'PRAGMA user_version'],
-    {encoding: 'utf-8', env: brSpawnEnv(undefined), timeout: 30_000},
+    ['-readonly', '-cmd', `.timeout ${waitMs}`, db, 'PRAGMA user_version'],
+    {encoding: 'utf-8', env: brSpawnEnv(undefined), timeout: waitMs + 10_000},
   );
   if (proc.error != null) {
     return {
@@ -1076,11 +1105,39 @@ export function readDbSchema(
   if (proc.status !== 0 || !/^\d+$/.test(out)) {
     const said = capturedStderr(proc.stderr)?.split('\n')[0] ?? out;
     return {
-      kind: 'failed',
+      kind: saysBeadsLocked(said) ? 'locked' : 'failed',
       reason: `sqlite3 could not read the schema of ${db} (${proc.status != null ? `exit ${proc.status}` : `killed: ${proc.signal ?? 'unknown signal'}`}): ${said === '' ? 'it printed nothing' : said}`,
     };
   }
   return {kind: 'read', schema: Number(out)};
+}
+
+/**
+ * A database's schema (`PRAGMA user_version`), read by `sqlite3 -readonly`
+ * with a bounded wait, so no br opens the file to answer it. Measured
+ * 2026-10-29 on 0.1.37 and 0.7.6 DBs with WAL frames: the read leaves the DB
+ * and WAL bytes unchanged and both brs work on afterwards; when the `-shm` is
+ * missing, SQLite creates it, as any br open does. A failed read is `failed`,
+ * never a schema.
+ */
+export function readDbSchema(
+  db: string,
+  options: {budgetMs?: number; pauseMs?: number; waitMs?: number} = {},
+): DbSchemaRead {
+  const budgetMs = options.budgetMs ?? 30_000;
+  const pauseMs = options.pauseMs ?? 1000;
+  // 2026-11-06: 2 s was too short with many sessions writing. `thread
+  // handoff` failed twice in a row on `database is locked` (home-base-89c8h).
+  const waitMs = options.waitMs ?? BR_LOCK_TIMEOUT_MS;
+  const startedAt = Date.now();
+  let read = readDbSchemaOnce(db, waitMs);
+  // SQLite can answer busy without waiting (WAL recovery), so a lock is tried
+  // again until the budget is gone. Only a lock: nothing else passes by itself.
+  while (read.kind === 'locked' && Date.now() - startedAt < budgetMs) {
+    Bun.sleepSync(pauseMs);
+    read = readDbSchemaOnce(db, waitMs);
+  }
+  return read;
 }
 
 /**
@@ -1094,7 +1151,7 @@ export function readDbSchema(
  */
 function oldBrOnNewDbRefusal(db: string): string | null {
   const schema = readDbSchema(db);
-  if (schema.kind === 'failed') {
+  if (schema.kind !== 'read') {
     return `refused: the schema of the beads database could not be read, so whether this br is too old for it is unknown: ${schema.reason}`;
   }
   const checkout = cwdForDb(db);

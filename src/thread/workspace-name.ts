@@ -20,7 +20,6 @@
 import type {CmuxRunner, CmuxTree, CmuxTreeRead} from './cmux';
 import type {EnvLike} from './paths';
 import type {Measured} from './session-model';
-import type {NameItem} from './session-name';
 
 import {appendFileSync, mkdirSync, readFileSync} from 'node:fs';
 import {dirname} from 'node:path';
@@ -45,7 +44,7 @@ import {
   CONTINUES_LABEL_PREFIX,
   labelValue,
 } from './session-bead';
-import {itemsDisplayName, sessionDisplayName} from './session-name';
+import {sessionDisplayName} from './session-name';
 
 /**
  * The leading glyphs cmux shows on a pane title while Claude Code owns the
@@ -93,8 +92,18 @@ function demoteGenerated(record: {
   return {hisName: null, replacedName: record.replacedName ?? record.hisName};
 }
 
-const READBACK_RETRIES = 10;
-const READBACK_DELAY_MS = 100;
+/**
+ * home-base-j8q3e.9: the waits between readbacks, 5 s in all. On 2026-10-17 a
+ * busy cmux took longer than the old 1 s (10 tries, 100 ms apart) to apply a
+ * rename, which was then reported as a mismatch.
+ */
+const READBACK_DELAYS_MS = [100, 200, 400, 800, 1000, 1000, 1500] as const;
+
+function realSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // The record (D2)
@@ -540,12 +549,13 @@ export interface WorkspaceSession {
   beadId: string;
   labels: readonly string[];
   /**
-   * TRIAL (home-base-jm5kg.6 D5, componentConfig.thread.workspaceNameItems):
-   * the chain's other requests, listed after the title. Absent or null: the
-   * knob is off, and the name is "[TAG] <title>" as before. Not measured: the
-   * requests could not be read, so nothing is named (D5 of this module).
+   * home-base-jm5kg.18 (componentConfig.thread.workspaceDescription): the
+   * overarching request's short label, which the name then shows instead of
+   * the title. Measured null: it has none. Absent or null: the knob is off, and
+   * the name is "[TAG] <title>". Not measured: the requests could not be read,
+   * so nothing is named (D5 of this module).
    */
-  nameItems?: Measured<NameItem[]> | null;
+  overarchingShort?: Measured<string | null> | null;
   repo: string | null;
   /** Resolved from the session's own checkout (home-base-bomy5.7.1). */
   repoTag: string | null;
@@ -596,7 +606,8 @@ export type WorkspaceSyncOutcome =
       /** What cmux reports after the rename; a mismatch is loud, not undone. */
       readback:
         | {kind: 'failed'; reason: string}
-        | {kind: 'read'; name: string | null};
+        /** waitedMs: how long the polling slept before this last read. */
+        | {kind: 'read'; name: string | null; waitedMs: number};
       rule: WorkspaceNameRule;
       to: string;
       workspaceId: string;
@@ -615,6 +626,8 @@ export interface WorkspaceSyncInput {
   readLabels?: (beadId: string) => OwnerLabelsRead;
   run: CmuxRunner;
   session: WorkspaceSession;
+  /** The wait between readbacks; a test passes one that returns at once. */
+  sleep?: (ms: number) => Promise<void>;
   /** `--workspace <uuid>`: skip resolution. Never defaults to the caller. */
   workspaceId?: string | null;
 }
@@ -648,14 +661,15 @@ export function resolveWorkspace(
 }
 
 /**
- * The tool's part of the name: "[TAG] <title>", or with the trial knob on
- * (home-base-jm5kg.6 D5) "[TAG] <title> ✅ <done> 🔳 <open> …".
+ * The tool's part of the name: "[TAG] <title>", or with the description knob on
+ * (home-base-jm5kg.18) "[TAG] <overarching short label, else the title>".
  */
 export function workspaceToolPart(session: WorkspaceSession): string {
-  const items = session.nameItems;
-  return items?.ok === true
-    ? itemsDisplayName(session.repoTag, session.title, items.value)
-    : sessionDisplayName(session.repoTag, session.title);
+  const short = session.overarchingShort;
+  return sessionDisplayName(
+    session.repoTag,
+    short?.ok === true && short.value != null ? short.value : session.title,
+  );
 }
 
 export async function syncWorkspaceName(
@@ -684,12 +698,12 @@ export async function syncWorkspaceName(
       workspaceId: override,
     };
   }
-  // home-base-jm5kg.6 (D5 here, rule 7): a name without items would claim the
-  // chain has no other requests, so an unreadable chain names nothing.
-  if (session.nameItems != null && !session.nameItems.ok) {
+  // home-base-jm5kg.18 (D5 here, rule 7): an unreadable chain names nothing, so
+  // a passing failure cannot flip the name from the short label to the title.
+  if (session.overarchingShort != null && !session.overarchingShort.ok) {
     return {
       kind: 'failed',
-      reason: `the session's requests could not be read for the workspace name (componentConfig.thread.workspaceNameItems is on): ${session.nameItems.reason}`,
+      reason: `the session's requests could not be read for the workspace name (componentConfig.thread.workspaceDescription is on): ${session.overarchingShort.reason}`,
       workspaceId: override,
     };
   }
@@ -859,16 +873,14 @@ export async function syncWorkspaceName(
   }
   // cmux applies a rename asynchronously: measured 2026-10-16, a list read
   // straight after `rename-workspace` still showed the old name. So the
-  // readback polls briefly before it calls a mismatch.
+  // readback polls before it calls a mismatch.
+  const sleep = input.sleep ?? realSleep;
   let after = await readWorkspaceTitle(run, treeRead.tree, workspaceId);
-  for (
-    let attempt = 0;
-    attempt < READBACK_RETRIES &&
-    after.kind === 'read' &&
-    after.customTitle !== decision.target;
-    attempt += 1
-  ) {
-    await new Promise((resolve) => setTimeout(resolve, READBACK_DELAY_MS));
+  let waitedMs = 0;
+  for (const delayMs of READBACK_DELAYS_MS) {
+    if (after.kind !== 'read' || after.customTitle === decision.target) break;
+    await sleep(delayMs);
+    waitedMs += delayMs;
     after = await readWorkspaceTitle(run, treeRead.tree, workspaceId);
   }
   return {
@@ -876,7 +888,7 @@ export async function syncWorkspaceName(
     kind: 'renamed',
     readback:
       after.kind === 'read'
-        ? {kind: 'read', name: after.customTitle}
+        ? {kind: 'read', name: after.customTitle, waitedMs}
         : {kind: 'failed', reason: after.reason},
     rule: decision.rule,
     to: decision.target,
@@ -911,7 +923,7 @@ export function describeWorkspaceSync(outcome: WorkspaceSyncOutcome): string {
         return `${line}\n⚠️ could not read the name back: ${outcome.readback.reason}`;
       }
       if (outcome.readback.name !== outcome.to) {
-        return `${line}\n⚠️ cmux reports "${outcome.readback.name ?? '(no name)'}", not the name sent; the record keeps the old name`;
+        return `${line}\n⚠️ cmux still showed "${outcome.readback.name ?? '(no name)'}" after ${outcome.readback.waitedMs / 1000} s; the record already holds the new name, and the next sync checks again`;
       }
       return line;
     }

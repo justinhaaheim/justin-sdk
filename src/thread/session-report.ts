@@ -186,6 +186,8 @@ export type ReportLoad =
       overarching: Measured<OverarchingFacts> | null;
       /** home-base-npbse.1.2 item 5: null with nothing to say. */
       pickupNotDone: null | PickupNotDone;
+      /** componentConfig.thread.workspaceDescription (home-base-jm5kg.18). */
+      shortLabels: boolean;
       status: SessionStatus;
       /** componentConfig.thread.titleSummary (home-base-ys9t7.9.1). */
       titleSummary: boolean;
@@ -203,6 +205,7 @@ async function knobOn(
       autoPickup: boolean;
       handoffSuccessor: boolean;
       ok: true;
+      shortLabels: boolean;
       titleSummary: boolean;
     }
 > {
@@ -213,6 +216,7 @@ async function knobOn(
         autoPickup: config.handoff.autoPickup,
         handoffSuccessor: config.handoff.successor,
         ok: true,
+        shortLabels: config.nameWorkspaces && config.workspaceDescription,
         titleSummary: config.titleSummary,
       }
     : {
@@ -334,6 +338,7 @@ async function loadForReport(input: {
       ownSession: input.env.CLAUDE_CODE_SESSION_ID === model.sessionId,
       sessionId: model.sessionId,
     }),
+    shortLabels: knob.shortLabels,
     status,
     titleSummary: knob.titleSummary,
   };
@@ -628,6 +633,14 @@ export function markLine(item: MarkItem): MarkView {
       };
     case 'requestOpenNoBlocker':
       return requestOpenLines(item);
+    case 'shortLabel':
+      return {
+        code: sdkRun(
+          `thread request --bead ${item.request.id} --short "<2 to 5 words>"`,
+        ),
+        sub: [],
+        text: `Request ${item.request.id} ("${item.request.title}") has no short label, so the cmux workspace description shows its title cut. Give it one, like a compact commit message:`,
+      };
     case 'noRequest': {
       const what = [
         item.commits > 0
@@ -816,6 +829,7 @@ export function renderThreadStatus(
   const marks = whatToMark(load.model, load.status, load.created, {
     ...(load.overarching != null ? {overarching: load.overarching} : {}),
     pickupNotDone: load.pickupNotDone,
+    shortLabels: load.shortLabels,
     titleSummary: load.titleSummary,
   })
     .map(markLine)

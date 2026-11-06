@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.54.1",
+  "version": "0.54.2",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -46,7 +46,12 @@
     "./pane-join": "./src/thread/pane-join.ts",
     "./session-cost": "./src/session-cost.ts",
     "./thread-config": "./src/thread/config.ts",
+    "./thread-pacing": "./src/thread/pacing.ts",
+    "./thread-quota-group": "./src/thread/quota-group.ts",
     "./thread-quota-spend": "./src/thread/quota-spend.ts",
+    "./thread-session-bead": "./src/thread/session-bead.ts",
+    "./thread-session-index": "./src/thread/session-index.ts",
+    "./thread-session-tree": "./src/thread/session-tree.ts",
     "./thread-status-file": "./src/thread/status-file.ts",
     "./transcript-activity": "./src/thread/transcript-activity.ts",
     "./usage-attribution": "./src/usage-attribution.ts",

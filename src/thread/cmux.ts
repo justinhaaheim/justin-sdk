@@ -601,6 +601,116 @@ export function renameTab(
   ]);
 }
 
+const workspaceStateSchema = z.object({
+  windows: z.array(
+    z.object({
+      workspaces: z.array(
+        z.object({
+          // Absent is not null: an absent key is a cmux that cannot say.
+          description: z.string().nullable().optional(),
+          id: z.string(),
+          panes: z.array(
+            z.object({surfaces: z.array(z.object({id: z.string()}))}),
+          ),
+          title: z.string().nullish(),
+        }),
+      ),
+    }),
+  ),
+});
+
+/**
+ * One workspace as the description sync needs it. `null` is a measured "no
+ * description"; `notFound` and `unreadable` are different facts and must never
+ * read as null (home-base-jm5kg.18: a failed read never blanks a description).
+ */
+export type WorkspaceStateRead =
+  | {
+      description: string | null;
+      kind: 'read';
+      surfaceIds: string[];
+      title: string | null;
+    }
+  | {kind: 'notFound'; reason: string}
+  | {kind: 'unreadable'; reason: string};
+
+/**
+ * Measured 2026-11-06 on cmux 0.64.24: `cmux --json --id-format both tree
+ * --workspace <id>` gives the workspace its `description` (string or null),
+ * its title and its surfaces, in one call.
+ */
+export async function readWorkspaceState(
+  run: CmuxRunner,
+  workspaceId: string,
+): Promise<WorkspaceStateRead> {
+  const args = ['--json', '--id-format', 'both', 'tree'];
+  args.push('--workspace', workspaceId);
+  const call = await run(args);
+  if (call.kind === 'failed') return {kind: 'unreadable', reason: call.reason};
+  const parsed = workspaceStateSchema.safeParse(parseJson(call.stdout));
+  if (!parsed.success) {
+    return {
+      kind: 'unreadable',
+      reason: `cmux ${args.join(' ')} printed JSON this code cannot read: ${parsed.error.issues[0]?.message ?? 'not JSON'}`,
+    };
+  }
+  const want = workspaceId.toUpperCase();
+  const found = parsed.data.windows
+    .flatMap((window) => window.workspaces)
+    .find((entry) => entry.id.toUpperCase() === want);
+  if (found == null) {
+    return {
+      kind: 'notFound',
+      reason: `no open cmux workspace has id ${workspaceId}`,
+    };
+  }
+  if (found.description === undefined) {
+    return {
+      kind: 'unreadable',
+      reason: `cmux ${args.join(' ')} did not report a description for ${workspaceId}, so what it holds is not known`,
+    };
+  }
+  return {
+    description: found.description,
+    kind: 'read',
+    surfaceIds: found.panes.flatMap((pane) =>
+      pane.surfaces.map((surface) => surface.id),
+    ),
+    title: found.title ?? null,
+  };
+}
+
+/** Set a workspace's description, by uuid (without --workspace: the caller's). */
+export function setWorkspaceDescription(
+  run: CmuxRunner,
+  workspaceId: string,
+  description: string,
+): Promise<CmuxCall> {
+  return run([
+    'workspace-action',
+    '--action',
+    'set-description',
+    '--workspace',
+    workspaceId,
+    '--description',
+    description,
+  ]);
+}
+
+/** Reset a workspace's description to none, by uuid. */
+export function clearWorkspaceDescription(
+  run: CmuxRunner,
+  workspaceId: string,
+): Promise<CmuxCall> {
+  return run([
+    'workspace-action',
+    '--action',
+    'clear-description',
+    '--workspace',
+    workspaceId,
+  ]);
+}
+
 /** Reset a workspace's name to none (custom_title null), by uuid. */
 export function clearWorkspaceName(
   run: CmuxRunner,

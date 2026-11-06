@@ -41,6 +41,7 @@ import {
   HANDOFF_DEFAULTS,
   HANDOFF_PERMISSION_MODES,
   HANDOFF_PREDECESSOR_MODES,
+  PACING_DEFAULTS,
   QUOTA_DEFAULTS,
   QUOTA_MODES,
   SPAWN_DEFAULTS,
@@ -61,7 +62,7 @@ import {
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
   THREAD_DEFAULT_TITLE_SUMMARY,
-  THREAD_DEFAULT_WORKSPACE_NAME_ITEMS,
+  THREAD_DEFAULT_WORKSPACE_DESCRIPTION,
 } from './thread/defaults';
 import {TIME_CHECK_DEFAULTS} from './time-check';
 import {USAGE_CHECK_DEFAULTS} from './usage-check';
@@ -156,6 +157,12 @@ export const healthNoticesSchema = z
           .optional()
           .describe(
             'Print a one-line summary when the heartbeat run is all-green. Failures are always printed.',
+          ),
+        warnOncePerChange: z
+          .boolean()
+          .optional()
+          .describe(
+            'At session start, print a doctor warning once per repo until its text changes or it resolves, then one line naming it. Errors always print, and `doctor` run by hand always prints everything.',
           ),
       })
       .optional()
@@ -410,6 +417,12 @@ const componentConfigSchema = z
                   .describe(
                     'The handoff gate refuses when the newest sample’s all-models week window is above this percentage.',
                   ),
+                paceHold: z
+                  .boolean()
+                  .optional()
+                  .describe(
+                    `THE PACING HOLD (home-base-jm5kg.17). DEFAULT FALSE: \`claude-usage pace\` and the warnings report the pace, and the gate ignores it. True: wherever the handoff gate runs (so \`thread handoff\`, and \`thread spawn\` where \`successor\` is on), the gate also refuses when the week is more than ${PACING_DEFAULTS.holdPointsAhead} points ahead of an even pace, or when the pace cannot be worked out. Even pace is the share of the week elapsed since the reset. It adds a refusal and replaces nothing: \`maxWeekPercent\` applies either way. It refuses only new unattended work, never a running session. \`check: false\` skips it too, because no sample is read.`,
+                  ),
               })
               .optional()
               .describe(
@@ -578,11 +591,11 @@ const componentConfigSchema = z
           .describe(
             'SESSION TITLE AS A SUMMARY (home-base-ys9t7.9.1, built 2026-10-30). DEFAULT FALSE. When true, every time a session’s title is set (`thread title`, the first request’s auto-title, or a successor inheriting its predecessor’s title) the session bead gets a `title-set:<time>` label, and `thread status` lists a "What to mark" item asking for a short summary of everything the session, and the sessions it continues, asked for and talked about, whenever requests were filed after the title was last set. The title is what the inbox shows and what `nameWorkspaces` names the cmux workspace after. Off: the old auto-title item only, and no label.',
           ),
-        workspaceNameItems: z
+        workspaceDescription: z
           .boolean()
           .optional()
           .describe(
-            'TRIAL: WORKSPACE NAME LISTS THE REQUESTS (home-base-jm5kg.6 D5, built 2026-10-30). DEFAULT FALSE. With `nameWorkspaces` on, the cmux workspace name becomes "[TAG] <session title> ✅ <done request> 🔳 <open request> …": every request of the session and the sessions it continues, other than its overarching request (`thread request --overarching`) and any whose title is the session title, done before open and oldest first within each; requests closed "not needed" are left out. Cut at 160 characters with "…". A chain whose requests cannot be read names nothing that time, and says why. Off: "[TAG] <session title>", as before.',
+            'WORKSPACE DESCRIPTION LISTS THE REQUESTS (home-base-jm5kg.18, built 2026-11-06). DEFAULT FALSE. With `nameWorkspaces` on, the capture hook writes the cmux workspace description: one line per request of the chain that names the workspace, other than its overarching request, done before open and oldest first within each, "✅" or "🔳" and the request’s short label (`thread request --short`), else its title cut with "…". Then, for each other Claude session in the workspace outside that chain, a line "💬💬💬 [Session] <its short title>" and its own items. Written only when the text changed. A failed read or write is recorded in capture.jsonl as `workspaceDescription` and leaves the description as it was; a description the tool did not write is left alone. The workspace name becomes "[TAG] <overarching request’s short label, else the session title>", and `thread status` asks for a short label on any open request with none. Off: no description is written, and the name is "[TAG] <session title>".',
           ),
       })
       .optional()
@@ -865,6 +878,7 @@ export interface ResolvedHealthNoticesConfig {
     intervalMinutes: number;
     promptTier: PromptTier;
     showOnPass: boolean;
+    warnOncePerChange: boolean;
   };
   /**
    * Master switch. Settable in either file and forced to false by the env kill
@@ -917,7 +931,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     spawn: SPAWN_DEFAULTS,
     stages: THREAD_DEFAULT_STAGES,
     titleSummary: THREAD_DEFAULT_TITLE_SUMMARY,
-    workspaceNameItems: THREAD_DEFAULT_WORKSPACE_NAME_ITEMS,
+    workspaceDescription: THREAD_DEFAULT_WORKSPACE_DESCRIPTION,
     // No `startOnSessionStart`: deprecated, no effect, so no default to print
     // (home-base-39co9 D2).
   },
@@ -939,7 +953,12 @@ export const DEFAULT_COMPONENT_CONFIG = {
 
 /** Justin's numbers, in MINUTES (home-base-uxwc D2). */
 export const DEFAULT_HEALTH_NOTICES: ResolvedHealthNoticesConfig = {
-  doctor: {intervalMinutes: 60, promptTier: 3, showOnPass: false},
+  doctor: {
+    intervalMinutes: 60,
+    promptTier: 3,
+    showOnPass: false,
+    warnOncePerChange: true,
+  },
   enabled: true,
   sdkVersion: {
     checkIntervalMinutes: 60,
@@ -978,6 +997,8 @@ function mergeHealthNotices(
       intervalMinutes: doctor?.intervalMinutes ?? base.doctor.intervalMinutes,
       promptTier: doctor?.promptTier ?? base.doctor.promptTier,
       showOnPass: doctor?.showOnPass ?? base.doctor.showOnPass,
+      warnOncePerChange:
+        doctor?.warnOncePerChange ?? base.doctor.warnOncePerChange,
     },
     enabled: layer.enabled ?? base.enabled,
     sdkVersion: {

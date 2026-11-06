@@ -9,28 +9,35 @@
  */
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {spawn} from 'child_process';
+import {spawn, spawnSync} from 'child_process';
 import {
   chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from 'fs';
 import {join} from 'path';
+import {stripVTControlCharacters} from 'util';
 
 import {deriveBeadsPrefix} from '../src/beads-setup';
 import {
   addSweepWorktree,
+  classifyPrimaryTracked,
   isSweepWorktreeName,
+  keptLeftoverSummary,
+  type LeftoverReport,
   LEGACY_SWEEP_NAME,
   planFreshBase,
+  type PrimaryTrackedState,
   runSweep,
   SWEEP_WORKTREES_DIR,
   sweepBranchFor,
   sweepRunNames,
   sweepRunStamp,
+  upstreamChangesBeadsFile,
   type UpstreamComparison,
 } from '../src/sweep';
 import {git} from './git-fixtures';
@@ -209,13 +216,13 @@ describe('planFreshBase (S5)', () => {
   const plan = (
     comparison: UpstreamComparison,
     primaryBranch: string | null = 'main',
-    primaryTrackedClean: boolean | null = true,
+    primaryTracked: PrimaryTrackedState = 'clean',
   ) =>
     planFreshBase({
       comparison,
       defaultBranch: 'main',
       primaryBranch,
-      primaryTrackedClean,
+      primaryTracked,
       repo: '/r',
     });
 
@@ -231,19 +238,43 @@ describe('planFreshBase (S5)', () => {
   });
 
   test('strictly behind but on another branch, dirty, or unreadable → COULD NOT SWEEP', () => {
-    for (const [branch, clean, words] of [
-      ['feature', true, 'is on feature'],
-      [null, true, 'detached HEAD'],
-      ['main', false, 'uncommitted changes to tracked files'],
-      ['main', null, 'could not be read'],
+    for (const [branch, tracked, words] of [
+      ['feature', 'clean', 'is on feature'],
+      [null, 'clean', 'detached HEAD'],
+      ['main', 'dirty', 'uncommitted changes to tracked files'],
+      ['main', 'unreadable', 'could not be read'],
+      // Beads edits buy nothing off the default branch: nothing to fast-forward.
+      ['feature', 'beads-only', 'is on feature'],
     ] as const) {
-      const verdict = plan(compared([], ['b1 one']), branch, clean);
+      const verdict = plan(compared([], ['b1 one']), branch, tracked);
       expect(verdict.kind).toBe('block');
       if (verdict.kind === 'block') {
         expect(verdict.reason).toContain(words);
         expect(verdict.reason).toContain('b1 one');
       }
     }
+  });
+
+  test('strictly behind with ONLY beads edits → fast-forward, marked as such (p05kz.6)', () => {
+    expect(
+      plan(compared([], ['b1 one', 'b2 two']), 'main', 'beads-only'),
+    ).toMatchObject({
+      behind: 'main is 2 commit(s) behind origin/main',
+      kind: 'fast-forward',
+      localBeadsEdits: true,
+      upstreamCommits: ['b1 one', 'b2 two'],
+    });
+    expect(plan(compared([], ['b1 one']))).toMatchObject({
+      kind: 'fast-forward',
+      localBeadsEdits: false,
+    });
+  });
+
+  test('up to date with beads edits proceeds as it always did', () => {
+    expect(plan(compared([], []), 'main', 'beads-only')).toEqual({
+      kind: 'proceed',
+      note: null,
+    });
   });
 
   test('diverged → COULD NOT SWEEP with BOTH commit lists', () => {
@@ -284,6 +315,40 @@ describe('planFreshBase (S5)', () => {
     expect(verdict.kind === 'proceed' ? verdict.note : null).toContain(
       'no upstream',
     );
+  });
+});
+
+describe('classifyPrimaryTracked (p05kz.6)', () => {
+  test('no status is unreadable, empty status is clean', () => {
+    expect(classifyPrimaryTracked(null)).toBe('unreadable');
+    expect(classifyPrimaryTracked('')).toBe('clean');
+  });
+
+  test.each([' M', 'M ', 'MM'])(
+    'an ordinary edit of the beads file (%j) is beads-only',
+    (columns) => {
+      expect(classifyPrimaryTracked(`${columns} .beads/issues.jsonl\n`)).toBe(
+        'beads-only',
+      );
+    },
+  );
+
+  test.each([
+    ['another tracked file', ' M package.json\n'],
+    ['the beads file AND another', ' M .beads/issues.jsonl\n M package.json\n'],
+    ['another file first', ' M package.json\n M .beads/issues.jsonl\n'],
+    ['a deleted beads file', ' D .beads/issues.jsonl\n'],
+    ['a staged deletion', 'D  .beads/issues.jsonl\n'],
+    ['a staged addition', 'A  .beads/issues.jsonl\n'],
+    ['a type change', ' T .beads/issues.jsonl\n'],
+    ['a conflict', 'UU .beads/issues.jsonl\n'],
+    ['a rename onto it', 'R  old.jsonl -> .beads/issues.jsonl\n'],
+    ['a rename away', 'R  .beads/issues.jsonl -> old.jsonl\n'],
+    ['a nested lookalike', ' M pkg/.beads/issues.jsonl\n'],
+    ['a suffixed lookalike', ' M .beads/issues.jsonl.bak\n'],
+    ['the beads config', ' M .beads/config.yaml\n'],
+  ])('%s is dirty, never beads-only', (_what, porcelain) => {
+    expect(classifyPrimaryTracked(porcelain)).toBe('dirty');
   });
 });
 
@@ -396,6 +461,303 @@ describe('fetch first, end to end (S5, AC3)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// p05kz.6 — a primary whose only local change is the beads file
+// ---------------------------------------------------------------------------
+
+const BEADS_FILE = '.beads/issues.jsonl';
+
+/**
+ * Local edits that would not survive any text round trip: non-UTF-8 bytes, a
+ * CRLF, a NUL, and no trailing newline. "Byte for byte" has to mean it.
+ */
+const LOCAL_BEADS_EDITS = Buffer.concat([
+  Buffer.from('{"id":"committed"}\n{"id":"local-session-edit"}\r\n'),
+  Buffer.from([0xff, 0xfe, 0x00, 0x80]),
+  Buffer.from('no trailing newline'),
+]);
+
+/** A repo with a committed beads file, on an origin, with "another machine". */
+function beadsRepo(
+  sb: Sandbox,
+  name: string,
+): {bare: string; other: string; repo: string} {
+  const repo = e2eRepo(sb, name);
+  mkdirSync(join(repo, '.beads'), {recursive: true});
+  writeFileSync(join(repo, BEADS_FILE), '{"id":"committed"}\n');
+  git(repo, ['add', '-A']);
+  git(repo, ['commit', '-qm', 'beads']);
+  const bare = withOrigin(sb, repo, name);
+  return {bare, other: elsewhere(sb, bare, name), repo};
+}
+
+function beadsBytes(repo: string): Buffer {
+  return readFileSync(join(repo, BEADS_FILE));
+}
+
+describe('only the beads file is dirty, main behind (p05kz.6)', () => {
+  test(
+    'no overlap upstream: fast-forwards, sweeps, pushes, and the edits survive byte for byte',
+    async () => {
+      const sb = track(createSandbox());
+      const {bare, other, repo} = beadsRepo(sb, 'beads-behind');
+      commitAndPush(other, 'remote-1.txt', 'pushed from elsewhere');
+      writeFileSync(join(repo, BEADS_FILE), LOCAL_BEADS_EDITS);
+
+      const {out, value} = await captureLog(() =>
+        runSweep({
+          component: 'gitignore',
+          logDir: join(sb.path, 'logs'),
+          repos: [repo],
+        }),
+      );
+
+      expect(value).toBe(0);
+      expect(out).not.toContain('COULD NOT SWEEP');
+      expect(out).toContain(
+        'main was 1 commit(s) behind origin/main — fast-forwarded before branching, leaving the local edits to .beads/issues.jsonl as they are',
+      );
+      expect(out).toContain('merged into main, pushed');
+      // The whole run is over, final merge and push included: the edits are
+      // still there, still only in the working tree.
+      expect(beadsBytes(repo).equals(LOCAL_BEADS_EDITS)).toBe(true);
+      expect(git(repo, ['status', '--porcelain', '--untracked-files=no'])).toBe(
+        ` M ${BEADS_FILE}\n`,
+      );
+      // Never committed, never pushed: both sides still hold the committed file.
+      for (const [where, ref] of [
+        [repo, 'HEAD'],
+        [bare, 'main'],
+      ] as const) {
+        expect(git(where, ['show', `${ref}:${BEADS_FILE}`])).toBe(
+          '{"id":"committed"}\n',
+        );
+      }
+      expect(sha(repo, 'main')).toBe(sha(bare, 'main'));
+      expect(git(bare, ['log', '--format=%s', 'main'])).toContain(
+        'pushed from elsewhere',
+      );
+      expectNoSweepRemains(repo);
+      // Nothing was set aside on the way through.
+      expect(git(repo, ['stash', 'list'])).toBe('');
+    },
+    E2E_TIMEOUT,
+  );
+
+  test(
+    'a staged edit AND a different unstaged edit both survive byte for byte',
+    async () => {
+      const sb = track(createSandbox());
+      const {other, repo} = beadsRepo(sb, 'beads-staged');
+      commitAndPush(other, 'remote-1.txt', 'pushed from elsewhere');
+      const staged = '{"id":"committed"}\n{"id":"staged"}\n';
+      writeFileSync(join(repo, BEADS_FILE), staged);
+      git(repo, ['add', BEADS_FILE]);
+      writeFileSync(join(repo, BEADS_FILE), LOCAL_BEADS_EDITS);
+
+      const {out, value} = await captureLog(() =>
+        runSweep({
+          component: 'gitignore',
+          logDir: join(sb.path, 'logs'),
+          repos: [repo],
+        }),
+      );
+
+      expect(value).toBe(0);
+      expect(out).toContain('merged into main, pushed');
+      expect(beadsBytes(repo).equals(LOCAL_BEADS_EDITS)).toBe(true);
+      expect(git(repo, ['show', `:${BEADS_FILE}`])).toBe(staged);
+      expect(git(repo, ['status', '--porcelain', '--untracked-files=no'])).toBe(
+        `MM ${BEADS_FILE}\n`,
+      );
+    },
+    E2E_TIMEOUT,
+  );
+
+  test(
+    'upstream ALSO changed the beads file: git refuses, COULD NOT SWEEP names why, edits intact, main not moved',
+    async () => {
+      const sb = track(createSandbox());
+      const {other, repo} = beadsRepo(sb, 'beads-overlap');
+      commitAndPush(other, BEADS_FILE, 'upstream beads edit');
+      writeFileSync(join(repo, BEADS_FILE), LOCAL_BEADS_EDITS);
+      const before = sha(repo, 'main');
+
+      const {out, value} = await captureLog(() =>
+        runSweep({
+          component: 'gitignore',
+          logDir: join(sb.path, 'logs'),
+          repos: [repo],
+        }),
+      );
+
+      expect(value).toBe(1);
+      expect(out).toContain('COULD NOT SWEEP: beads-overlap');
+      expect(out).toContain(
+        'main is 1 commit(s) behind origin/main, and those commits also change .beads/issues.jsonl, which has local edits here, so git refused the fast-forward',
+      );
+      // git's own words: it really was asked, and it really said no.
+      expect(out).toContain('would be overwritten by merge');
+      expect(out).toContain('Those edits are untouched');
+      expect(out).toContain('upstream beads edit');
+      expect(beadsBytes(repo).equals(LOCAL_BEADS_EDITS)).toBe(true);
+      expect(sha(repo, 'main')).toBe(before);
+      expect(git(repo, ['stash', 'list'])).toBe('');
+      expectNoSweepRemains(repo);
+      expect(out).not.toContain('baseline:');
+    },
+    E2E_TIMEOUT,
+  );
+
+  test(
+    'another tracked file dirty too: behaves as before, nothing moved, both edits intact',
+    async () => {
+      const sb = track(createSandbox());
+      const {other, repo} = beadsRepo(sb, 'beads-and-other');
+      commitAndPush(other, 'remote-1.txt', 'pushed from elsewhere');
+      writeFileSync(join(repo, BEADS_FILE), LOCAL_BEADS_EDITS);
+      const otherEdit = '{"name":"edited"}\n';
+      writeFileSync(join(repo, 'package.json'), otherEdit);
+      const before = sha(repo, 'main');
+
+      const {out, value} = await captureLog(() =>
+        runSweep({
+          component: 'gitignore',
+          logDir: join(sb.path, 'logs'),
+          repos: [repo],
+        }),
+      );
+
+      expect(value).toBe(1);
+      expect(out).toContain('COULD NOT SWEEP: beads-and-other');
+      expect(out).toContain('uncommitted changes to tracked files');
+      expect(sha(repo, 'main')).toBe(before);
+      expect(beadsBytes(repo).equals(LOCAL_BEADS_EDITS)).toBe(true);
+      expect(readFileSync(join(repo, 'package.json'), 'utf-8')).toBe(otherEdit);
+      expectNoSweepRemains(repo);
+    },
+    E2E_TIMEOUT,
+  );
+
+  test(
+    'a DELETED beads file refuses up front: git would not protect it, and writes upstream’s copy back',
+    async () => {
+      // Measured 2026-11-06 on real git: an unstaged deletion does not stop
+      // `merge --ff-only`, even when the upstream changed the file. So this is
+      // the one local change to that file git does not guard, and it stays dirty.
+      const sb = track(createSandbox());
+      const {other, repo} = beadsRepo(sb, 'beads-deleted');
+      commitAndPush(other, BEADS_FILE, 'upstream beads edit');
+      rmSync(join(repo, BEADS_FILE));
+      const before = sha(repo, 'main');
+
+      const {out, value} = await captureLog(() =>
+        runSweep({
+          component: 'gitignore',
+          logDir: join(sb.path, 'logs'),
+          repos: [repo],
+        }),
+      );
+
+      expect(value).toBe(1);
+      expect(out).toContain('uncommitted changes to tracked files');
+      expect(sha(repo, 'main')).toBe(before);
+      expect(existsSync(join(repo, BEADS_FILE))).toBe(false);
+      expectNoSweepRemains(repo);
+    },
+    E2E_TIMEOUT,
+  );
+
+  test(
+    '--dry-run with no overlap says it would fast-forward, and moves nothing',
+    async () => {
+      const sb = track(createSandbox());
+      const {other, repo} = beadsRepo(sb, 'beads-dry');
+      commitAndPush(other, 'remote-1.txt', 'pushed from elsewhere');
+      writeFileSync(join(repo, BEADS_FILE), LOCAL_BEADS_EDITS);
+      git(repo, ['fetch', '-q', 'origin']); // A dry run compares with the last fetch.
+      const before = sha(repo, 'main');
+
+      const {out, value} = await captureLog(() =>
+        runSweep({
+          component: 'gitignore',
+          dryRun: true,
+          logDir: join(sb.path, 'logs'),
+          repos: [repo],
+        }),
+      );
+
+      expect(value).toBe(0);
+      expect(out).toContain('would fast-forward first');
+      expect(out).toContain(
+        'leaving the local edits to .beads/issues.jsonl as they are',
+      );
+      expect(out).toContain('would apply gitignore off main');
+      expect(sha(repo, 'main')).toBe(before);
+      expect(beadsBytes(repo).equals(LOCAL_BEADS_EDITS)).toBe(true);
+      expectNoSweepRemains(repo);
+    },
+    E2E_TIMEOUT,
+  );
+
+  test(
+    '--dry-run with an overlap predicts the refusal rather than promising a fast-forward',
+    async () => {
+      const sb = track(createSandbox());
+      const {other, repo} = beadsRepo(sb, 'beads-dry-overlap');
+      commitAndPush(other, BEADS_FILE, 'upstream beads edit');
+      writeFileSync(join(repo, BEADS_FILE), LOCAL_BEADS_EDITS);
+      git(repo, ['fetch', '-q', 'origin']);
+      const before = sha(repo, 'main');
+
+      const {out, value} = await captureLog(() =>
+        runSweep({
+          component: 'gitignore',
+          dryRun: true,
+          logDir: join(sb.path, 'logs'),
+          repos: [repo],
+        }),
+      );
+
+      expect(value).toBe(1);
+      expect(out).toContain('COULD NOT SWEEP: beads-dry-overlap');
+      expect(out).toContain('git would refuse the fast-forward');
+      expect(out).not.toContain('would fast-forward first');
+      expect(sha(repo, 'main')).toBe(before);
+      expect(beadsBytes(repo).equals(LOCAL_BEADS_EDITS)).toBe(true);
+    },
+    E2E_TIMEOUT,
+  );
+
+  test('upstreamChangesBeadsFile measures the net change, and says when it cannot', () => {
+    const sb = track(createSandbox());
+    const {other, repo} = beadsRepo(sb, 'beads-measure');
+    const original = '{"id":"committed"}\n';
+
+    commitAndPush(other, 'remote-1.txt', 'unrelated');
+    git(repo, ['fetch', '-q', 'origin']);
+    const unrelated = sha(repo, 'origin/main');
+    expect(upstreamChangesBeadsFile(repo, 'main', unrelated)).toBe(false);
+
+    commitAndPush(other, BEADS_FILE, 'changed');
+    git(repo, ['fetch', '-q', 'origin']);
+    const changed = sha(repo, 'origin/main');
+    expect(upstreamChangesBeadsFile(repo, 'main', changed)).toBe(true);
+
+    // Changed and then changed back is no change to the file: git would keep
+    // local edits across that range, so the measurement must agree with git.
+    writeFileSync(join(other, BEADS_FILE), original);
+    git(other, ['add', '-A']);
+    git(other, ['commit', '-qm', 'changed back']);
+    git(other, ['push', '-q', 'origin', 'HEAD:main']);
+    git(repo, ['fetch', '-q', 'origin']);
+    const back = sha(repo, 'origin/main');
+    expect(upstreamChangesBeadsFile(repo, 'main', back)).toBe(false);
+
+    expect(upstreamChangesBeadsFile(repo, 'main', 'f'.repeat(40))).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // AC4 / S6 / S7 — a push rejected after the local merge
 // ---------------------------------------------------------------------------
 
@@ -488,6 +850,68 @@ describe('a push rejected after the local merge is a red step (S6, S7, AC4)', ()
 });
 
 // ---------------------------------------------------------------------------
+// p05kz.6 — the one line a repo's kept leftovers get on screen
+// ---------------------------------------------------------------------------
+
+describe('keptLeftoverSummary (p05kz.6)', () => {
+  const item = (
+    action: LeftoverReport['action'],
+    commits: string[] | null,
+  ): LeftoverReport => ({
+    action,
+    branch: 'b',
+    commits,
+    inspect: ['per-item command'],
+    name: 'n',
+    reason: 'r',
+    worktreePath: '/w',
+  });
+  const summary = (items: LeftoverReport[]) =>
+    keptLeftoverSummary('r', 'main', 'THE COMMAND', items);
+
+  test('nothing kept prints nothing, whatever else the scan did', () => {
+    expect(summary([])).toEqual([]);
+    expect(summary([item('removed', []), item('would-remove', [])])).toEqual(
+      [],
+    );
+  });
+
+  test('all holding commits: the one line, then the one command', () => {
+    expect(summary([item('kept', ['a c1']), item('kept', ['b c2'])])).toEqual([
+      'r: 2 earlier sweep worktrees kept, each holding commits not on main',
+      'inspect: THE COMMAND',
+    ]);
+    expect(summary([item('kept', ['a c1'])])).toEqual([
+      'r: 1 earlier sweep worktree kept, holding commits not on main',
+      'inspect: THE COMMAND',
+    ]);
+  });
+
+  test('"each holding commits" is never claimed when it is not true of each', () => {
+    const [mixed] = summary([
+      item('kept', ['a c1']),
+      item('kept', []),
+      item('kept', null),
+    ]);
+    expect(mixed).toBe(
+      'r: 3 earlier sweep worktrees kept: 1 holding commits not on main, 1 whose commits could not be listed, 1 kept for another reason',
+    );
+    expect(summary([item('kept', null)])[0]).toBe(
+      'r: 1 earlier sweep worktree kept: 1 whose commits could not be listed',
+    );
+    expect(summary([item('kept', [])])[0]).toBe(
+      'r: 1 earlier sweep worktree kept: 1 kept for another reason',
+    );
+  });
+
+  test('a removed leftover does not count toward what was kept', () => {
+    expect(summary([item('kept', ['a c1']), item('removed', [])])[0]).toBe(
+      'r: 1 earlier sweep worktree kept, holding commits not on main',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // AC1 / AC2 / S2 / S3 — leftovers are listed, never blocking, never deleted with work
 // ---------------------------------------------------------------------------
 
@@ -532,15 +956,11 @@ describe('leftovers are reported, not blocking (S2, S3, AC1, AC2)', () => {
 
       expect(value).toBe(0);
       expect(out).not.toContain('COULD NOT SWEEP');
-      const summary = summaryOf(out);
-      expect(summary).toContain(
-        'leftover from an earlier run, KEPT: sdk-sweep (branch worktree-sdk-sweep)',
+      // p05kz.6: one line and one command on screen, the detail in the log.
+      expect(summaryOf(out)).toContain(
+        'legacy-held: 1 earlier sweep worktree kept, holding commits not on main',
       );
-      expect(summary).toContain('chore: an old sweep commit nobody merged');
-      expect(summary).toContain(
-        `inspect: git -C ${repo} log --stat main..worktree-sdk-sweep`,
-      );
-      expect(summary).toContain('1 leftover(s) from earlier runs KEPT');
+      expect(out).not.toContain('chore: an old sweep commit nobody merged');
       // S3: it survives, untouched — and this run's own work still landed.
       expect(sha(repo, sweepBranchFor(LEGACY_SWEEP_NAME))).toBe(held);
       expect(
@@ -550,11 +970,109 @@ describe('leftovers are reported, not blocking (S2, S3, AC1, AC2)', () => {
         'justin-sdk baseline',
       );
       expect(sweepRemains(repo)).toEqual([LEGACY_SWEEP_NAME]);
-      // …and it is in the run log too.
+      // …and every detail is in the run log.
       const logPath = /run log: (\S+\.log)/.exec(out)?.[1];
+      const log = readFileSync(
+        must(logPath, 'log path in the output'),
+        'utf-8',
+      );
+      expect(log).toContain(
+        'leftover from an earlier run, KEPT: sdk-sweep (branch worktree-sdk-sweep)',
+      );
+      expect(log).toContain('chore: an old sweep commit nobody merged');
+      expect(log).toContain(
+        `inspect: git -C ${repo} log --stat main..worktree-sdk-sweep`,
+      );
+      expect(log).toContain('1 leftover(s) from earlier runs KEPT');
+    },
+    E2E_TIMEOUT,
+  );
+
+  test(
+    "several kept leftovers (ynab's shape, one renamed to archive/): ONE line and ONE inspect command, the rest in the log (p05kz.6)",
+    async () => {
+      const sb = track(createSandbox());
+      const repo = e2eRepo(sb, 'many-kept');
+      const stamps = [
+        'sdk-sweep-2026-10-06T07-24-07.895Z',
+        'sdk-sweep-2026-10-17T23-33-40.552Z',
+        'sdk-sweep-2026-10-20T09-37-46.186Z',
+      ];
+      for (const [index, name] of stamps.entries()) {
+        leftoverWithCommit(repo, name, `old sweep commit ${index}`);
+      }
+      // The archive/ rename ynab-mcp-deluxe's five carry: the worktree stays,
+      // and the branch no longer has the name the sweep gave it.
+      const firstName = must(stamps[0], 'a stamp');
+      git(repo, [
+        'branch',
+        '-m',
+        sweepBranchFor(firstName),
+        `archive/${sweepBranchFor(firstName)}`,
+      ]);
+      const heads = stamps.map((name) =>
+        sha(join(repo, ...SWEEP_WORKTREES_DIR, name), 'HEAD'),
+      );
+
+      const {out, value} = await captureLog(() =>
+        runSweep({
+          component: 'gitignore',
+          logDir: join(sb.path, 'logs'),
+          repos: [repo],
+        }),
+      );
+
+      expect(value).toBe(0);
+      const headline =
+        'many-kept: 3 earlier sweep worktrees kept, each holding commits not on main';
+      expect(out.split(headline)).toHaveLength(2);
+      const inspects = out
+        .split('\n')
+        .filter((line) => line.includes('inspect:'));
+      expect(inspects).toHaveLength(1);
+      // No leftover is named or described anywhere on screen.
+      for (const name of stamps) expect(out).not.toContain(name);
+      expect(out).not.toContain('old sweep commit');
+      expect(out).not.toContain('left alone');
+      expect(out).not.toContain('KEPT');
+
+      // The one command really shows all of them, the renamed one included.
+      const command = must(
+        /inspect: (git .*)$/.exec(
+          stripVTControlCharacters(must(inspects[0], 'inspect line')),
+        )?.[1],
+        'the inspect command',
+      );
+      const shown = spawnSync('sh', ['-c', command], {encoding: 'utf-8'});
+      expect(shown.status).toBe(0);
+      for (const index of [0, 1, 2]) {
+        expect(shown.stdout).toContain(`old sweep commit ${index}`);
+      }
+
+      // The full list stays in the run log.
+      const logPath = /run log: (\S+\.log)/.exec(out)?.[1];
+      const log = readFileSync(
+        must(logPath, 'log path in the output'),
+        'utf-8',
+      );
+      for (const name of stamps) {
+        expect(log).toContain(`leftover from an earlier run, KEPT: ${name}`);
+      }
+      for (const index of [0, 1, 2]) {
+        expect(log).toContain(`old sweep commit ${index}`);
+      }
+      expect(log).toContain('3 leftover(s) from earlier runs KEPT');
+
+      // Nothing was touched, and this run's own work still landed.
       expect(
-        readFileSync(must(logPath, 'log path in the output'), 'utf-8'),
-      ).toContain('leftover from an earlier run, KEPT: sdk-sweep');
+        stamps.map((name) =>
+          sha(join(repo, ...SWEEP_WORKTREES_DIR, name), 'HEAD'),
+        ),
+      ).toEqual(heads);
+      expect(sweepRemains(repo)).toEqual(stamps);
+      expect(git(repo, ['show', 'main:.gitignore'])).toContain(
+        'justin-sdk baseline',
+      );
     },
     E2E_TIMEOUT,
   );
@@ -681,13 +1199,23 @@ describe('leftovers are reported, not blocking (S2, S3, AC1, AC2)', () => {
 
       expect(value).toBe(0);
       expect(out).not.toContain('COULD NOT SWEEP');
-      const summary = summaryOf(out);
-      expect(summary).toContain(
+      expect(summaryOf(out)).toContain(
+        'interrupted: 1 earlier sweep worktree kept, holding commits not on main',
+      );
+      // p05kz.6: the second run's log carries the detail; the screen does not.
+      const secondLog = readFileSync(
+        must(
+          /run log: (\S+\.log)/.exec(out)?.[1],
+          'the second run log path in the output',
+        ),
+        'utf-8',
+      );
+      expect(secondLog).toContain(
         `leftover from an earlier run, KEPT: ${firstRun}`,
       );
-      expect(summary).toContain('1 commit(s) beyond the default branch:');
-      expect(summary).toContain(firstCommit.slice(0, 7));
-      expect(summary).toContain(
+      expect(secondLog).toContain('1 commit(s) beyond the default branch:');
+      expect(secondLog).toContain(firstCommit.slice(0, 7));
+      expect(secondLog).toContain(
         `inspect: git -C ${repo} log --stat main..${sweepBranchFor(firstRun)}`,
       );
       // S3: the first run's commit is still there; the second run's landed.

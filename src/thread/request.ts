@@ -73,6 +73,12 @@ import {
 } from './session-bead';
 import {appendSessionSighting, readSessionSightings} from './session-index';
 import {sessionBeadsKnob, sessionIdFrom} from './session-select';
+import {
+  checkShortText,
+  shortLabelEdit,
+  shortLabelOf,
+  staleShortLabels,
+} from './short-label';
 import {workspaceNameFollowUp} from './workspace-name-session';
 
 export interface ThreadRequestOptions {
@@ -133,6 +139,12 @@ export interface ThreadRequestOptions {
    */
   sessionPollMs?: number;
   sessionWaitMs?: number;
+  /**
+   * `--short` (home-base-jm5kg.18): the request's short label, 2 to 5 words,
+   * like a compact commit message. On a new request or with --bead, with or
+   * without --overarching.
+   */
+  short?: string | null;
   /** The plain-words title of a new request. */
   title: string | null;
 }
@@ -169,6 +181,8 @@ export type ThreadRequestOutcome =
       pickup: PickUpOutcome | null;
       /** Set when the title rule renamed the session bead. */
       renamedSession: {beadId: string; title: string} | null;
+      /** `--short`: the short label it now carries; null = not asked or failed. */
+      short: string | null;
       title: string;
       /**
        * The workspace-name follow-up (home-base-j8q3e.5 D4 b): one soft line,
@@ -357,12 +371,6 @@ function refuseResolution(
   return null;
 }
 
-async function workspaceItemsOn(cwd: string, env: EnvLike): Promise<boolean> {
-  const {resolveThreadConfig} = await import('./config');
-  const config = resolveThreadConfig({cwd, env});
-  return config.nameWorkspaces && config.workspaceNameItems;
-}
-
 /**
  * home-base-jm5kg.5 D1/D2: mark `filed` overarching, give the session its
  * title, and unmark every other request of the chain. Marked FIRST, so a
@@ -517,6 +525,19 @@ export async function fileRequest(
       message: '--done-when applies only when creating a request',
     };
   }
+  if (linkOnly && options.short != null) {
+    return {
+      kind: 'usage',
+      message:
+        '--short labels a request: give its title (thread request --short "…" "…") or --bead <request id>',
+    };
+  }
+  let short: string | null = null;
+  if (options.short != null) {
+    const checked = checkShortText(options.short);
+    if (!checked.ok) return {kind: 'usage', message: checked.reason};
+    short = checked.text;
+  }
   if (beadId != null && options.doneWhen != null) {
     return {
       kind: 'usage',
@@ -646,10 +667,15 @@ export async function fileRequest(
       usable.kind === 'found' && target.db === sessionDb
         ? usable.bead.id
         : null;
+    const newLabels = [
+      REQUEST_LABEL,
+      sidLabel(sessionId),
+      ...(short == null ? [] : [shortLabelOf(short)]),
+    ];
     const created = brCreate(
       {db: target.db, env},
       {
-        labels: [REQUEST_LABEL, sidLabel(sessionId)],
+        labels: newLabels,
         parent,
         priority: SESSION_BEAD_PRIORITY,
         status: 'in_progress',
@@ -665,7 +691,7 @@ export async function fileRequest(
     }
     filedId = created.id;
     filedTitle = title;
-    filedLabels = [REQUEST_LABEL, sidLabel(sessionId)];
+    filedLabels = newLabels;
     mode = 'created';
     if (options.doneWhen != null && options.doneWhen.trim() !== '') {
       const criteria = brUpdate({db: target.db, env}, filedId, {
@@ -748,6 +774,21 @@ export async function fileRequest(
       ...new Set([...found.labels, REQUEST_LABEL, sidLabel(sessionId)]),
     ];
     mode = 'adopted';
+    if (short != null) {
+      const edit = shortLabelEdit(filedLabels, short);
+      const labelled = brUpdate({db: target.db, env}, id, edit);
+      if (labelled.kind === 'failed') {
+        short = null;
+        followUpFailures.push(
+          `the short label was NOT set: ${describeBrFailed(labelled)}. Retry with ${sdkRun(`thread request --bead ${id} --short "…"`)}`,
+        );
+      } else {
+        filedLabels = [
+          ...filedLabels.filter((label) => !edit.removeLabels.includes(label)),
+          ...edit.addLabels,
+        ];
+      }
+    }
   }
 
   // ---- the index: a DB new to this session gets one sighting ----
@@ -843,13 +884,13 @@ export async function fileRequest(
   // name from its predecessor at once, instead of on its next prompt.
   // home-base-mbnjv.12: a session that was already titled and just linked
   // runs it too, so it takes its predecessor's workspace name now.
-  // home-base-jm5kg.6: with the items trial on, every new request changes
-  // the name (one more 🔳), so it runs for every request.
+  // home-base-jm5kg.18: a short label can change the name, when it is on the
+  // overarching request.
   const workspaceNote =
     renamedSession != null ||
     continued != null ||
     overarching != null ||
-    (await workspaceItemsOn(cwd, env))
+    short != null
       ? await workspaceNameFollowUp({cwd, env, run: options.cmux, sessionId})
       : null;
 
@@ -864,6 +905,7 @@ export async function fileRequest(
     overarching,
     pickup,
     renamedSession,
+    short,
     title: filedTitle,
     workspaceNote,
   };
@@ -886,6 +928,9 @@ export function describeRequestOutcome(outcome: ThreadRequestOutcome): {
         lines.push(
           `  adopted; status left ${outcome.adoptedStatus.status}: br refuses to claim a blocked issue (blocked by: ${outcome.adoptedStatus.blockers}; br 0.1.37 counts open children as blockers). The request and sid labels are on it.`,
         );
+      }
+      if (outcome.short != null) {
+        lines.push(`  short label: ${outcome.short}`);
       }
       if (outcome.overarching != null) {
         lines.push(
@@ -1055,8 +1100,18 @@ export async function renameSession(
           reason: `the title is unchanged: the beads DB of the overarching request ${picked.id} (${picked.beadsDir}) could not be found${db.kind === 'failed' ? ` (${db.reason})` : ''}`,
         };
       }
+      // home-base-jm5kg.18: the short label described the old title, and the
+      // workspace name shows it, so it goes; What to mark asks for a new one.
+      const mark = overarchingMarkEdit(
+        picked.labels,
+        options.now ?? new Date(),
+      );
       const retitled = brUpdate({db: db.db, env}, picked.id, {
-        ...overarchingMarkEdit(picked.labels, options.now ?? new Date()),
+        ...mark,
+        removeLabels: [
+          ...mark.removeLabels,
+          ...staleShortLabels(picked.labels),
+        ],
         title,
       });
       if (retitled.kind === 'failed') {

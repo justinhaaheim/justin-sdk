@@ -21,7 +21,6 @@ import {PLAIN_STYLE} from '../src/cli-style';
 import {messageLogPath} from '../src/thread/archive';
 import {
   dismissDrafts,
-  normalizedText,
   renderScan,
   runThreadDraftsList,
   runThreadDraftsScan,
@@ -29,7 +28,10 @@ import {
   type ScanResult,
 } from '../src/thread/drafts-scan';
 import {
+  draftWasSent,
   inputDraftsDir,
+  listUnsentInputDrafts,
+  normalizedText,
   readInputDraft,
   writeInputDraft,
 } from '../src/thread/input-drafts';
@@ -630,6 +632,161 @@ describe('thread drafts scan', () => {
       expect((await scan([])).cleared).toMatchObject([
         {sessionId: S1, why: 'sent'},
       ]);
+    });
+  });
+
+  describe('a capture cut off mid-typing (home-base-p05kz.3 item 7)', () => {
+    // The shape of the real case: session 58023c65, 2026-11-06. The draft was
+    // seen at 13:32:26Z, cut off, wrapped and indented by the screen. The whole
+    // message went at 13:49:22Z and several more followed.
+    const DRAFT =
+      "You are the /mayor. I'd like your help to manage some coding sessions.\n\n  As is often the case, one of the issues that makes it hard for me to manage all of these\n  sessions is it's hard\n\n  In general I think the threads tooling is going to be";
+    const MESSAGE =
+      "You are the /mayor. I'd like your help to manage some coding sessions.\n\nAs is often the case, one of the issues that makes it hard for me to manage all of these sessions is it's hard\n\nIn general I think the threads tooling is going to be a big help here, and the rest of the message follows.";
+    const line = (at: string, text: string) => ({at, text});
+    const CUT = {
+      at: '2026-11-06T13:32:26.626Z',
+      previous: [],
+      sentMatch: false,
+      text: DRAFT,
+    };
+    const REAL_LINES = [
+      line('2026-11-06T13:49:22.909Z', MESSAGE),
+      line('2026-11-06T14:04:28.461Z', 'a later message about something else'),
+    ];
+
+    function store(text: string, at = CUT.at): void {
+      writeInputDraft(
+        {
+          at,
+          sessionId: S1,
+          source: 'scan',
+          surfaceId: 'SURF-GONE',
+          text,
+          workspaceId: 'WS-1',
+        },
+        env,
+      );
+    }
+
+    function sendLine(at: string, text: string): void {
+      appendMessageLine(messageLogPath(S1, env), {
+        at,
+        cwd: '/Users/j/Dev/a',
+        event: 'UserPromptSubmit',
+        role: 'user',
+        text,
+      });
+    }
+
+    test('the real case counts as sent, though later lines followed it', () => {
+      expect(draftWasSent(CUT, REAL_LINES)).toBe(true);
+    });
+
+    test('text that did not all go out stays unsent', () => {
+      expect(
+        draftWasSent(CUT, [
+          line(
+            '2026-11-06T13:49:22.909Z',
+            "You are the /mayor. I'd like your help",
+          ),
+        ]),
+      ).toBe(false);
+      expect(
+        draftWasSent(CUT, [
+          line('2026-11-06T13:49:22.909Z', `Before that: ${MESSAGE}`),
+        ]),
+      ).toBe(false);
+    });
+
+    test('a message sent before the draft was seen proves nothing', () => {
+      expect(
+        draftWasSent(CUT, [line('2026-11-06T13:00:00.000Z', MESSAGE)]),
+      ).toBe(false);
+      expect(draftWasSent(CUT, [line('not a time', MESSAGE)])).toBe(false);
+      expect(draftWasSent({...CUT, at: 'not a time'}, REAL_LINES)).toBe(false);
+    });
+
+    test('an earlier text this draft replaced must have gone out too', () => {
+      const previous = [
+        {at: CUT.at, surfaceId: null, text: 'something else entirely'},
+      ];
+      expect(draftWasSent({...CUT, previous}, REAL_LINES)).toBe(false);
+    });
+
+    test('thread drafts hides it, says so, and clears nothing', () => {
+      store(DRAFT);
+      sendLine('2026-11-06T13:49:22.909Z', MESSAGE);
+      sendLine('2026-11-06T14:04:28.461Z', 'a later message');
+      expect(listUnsentInputDrafts(env)).toMatchObject({
+        cleared: 0,
+        drafts: [],
+        sent: [{sessionId: S1}],
+        unchecked: [],
+      });
+      // writeStdout writes to fd 1 directly, so a spy sees nothing: run the CLI.
+      const cliEntry = join(import.meta.dirname, '..', 'src', 'cli.ts');
+      const run = Bun.spawnSync(
+        [process.execPath, cliEntry, 'thread', 'drafts'],
+        {
+          env: Object.fromEntries(
+            Object.entries({...process.env, ...env, NO_COLOR: '1'}).filter(
+              (entry): entry is [string, string] => entry[1] != null,
+            ),
+          ),
+          stdin: 'ignore',
+        },
+      );
+      const printed = run.stdout.toString();
+      expect(run.exitCode).toBe(0);
+      expect(printed).not.toContain('going to be');
+      expect(printed).toContain('1 sent but not yet marked');
+      // Read-only: the stored draft is untouched.
+      expect(readInputDraft(S1, env)).toMatchObject({
+        draft: {clearedAt: null, text: DRAFT},
+      });
+    });
+
+    test('an unreadable log keeps the draft visible and names the failure', async () => {
+      store(DRAFT);
+      // A directory where the log file belongs: reading it fails.
+      mkdirSync(messageLogPath(S1, env), {recursive: true});
+      const listed = listUnsentInputDrafts(env);
+      expect(listed).toMatchObject({drafts: [{sessionId: S1}], sent: []});
+      expect(listed.kind === 'read' ? listed.unchecked : []).toHaveLength(1);
+      const result = await scan([]);
+      expect(result.cleared).toEqual([]);
+      expect(result.failures.join(' ')).toContain('could not be read');
+      expect(readInputDraft(S1, env)).toMatchObject({
+        draft: {clearedAt: null},
+      });
+    });
+
+    test('with its pane gone, the scan clears it as sent', async () => {
+      store(DRAFT);
+      sendLine('2026-11-06T13:49:22.909Z', MESSAGE);
+      sendLine('2026-11-06T14:04:28.461Z', 'a later message');
+      expect((await scan([])).cleared).toMatchObject([
+        {sessionId: S1, why: 'sent'},
+      ]);
+    });
+
+    test('a box showing the same text again is stored afresh, so it stays visible', async () => {
+      // Both before the scan's own clock (NOW, 2026-10-18 12:00).
+      store('ship it', '2026-10-18T09:00:00.000Z');
+      sendLine('2026-10-18T10:00:00.000Z', 'ship it today');
+      const result = await scan([
+        {
+          screen: claudeScreen('ship it', S1),
+          surfaceId: 'SURF-1',
+          tty: 'ttys001',
+        },
+      ]);
+      expect(result.found.map((entry) => entry.outcome)).toEqual(['stored']);
+      expect(listUnsentInputDrafts(env)).toMatchObject({
+        drafts: [{sessionId: S1}],
+        sent: [],
+      });
     });
   });
 

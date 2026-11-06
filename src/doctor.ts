@@ -8,12 +8,13 @@
  * to justin-sdk.config.json automatically includes its doctor checks.
  */
 
-import type {CheckNode, CheckResult} from './check-runner';
+import type {CheckNode, CheckResult, WarningFilter} from './check-runner';
 import type {HandlersByKnob} from './hook-entries';
 
 import {execSync} from 'child_process';
 import {existsSync, readFileSync, statSync} from 'fs';
 import {join, resolve} from 'path';
+import {coerce, gt} from 'semver';
 
 import {SDK_BIN_SHADOW_SCRIPT, shadowsSdkBin} from './base-setup';
 import {
@@ -1307,6 +1308,17 @@ function makeTsconfigChecks(projectRoot: string): CheckNode[] {
               fixCommand: 'bun run justin-sdk add tsconfig',
               message: 'typescript is not in devDependencies',
               pass: false,
+            };
+          }
+          // A pin is a floor here, never a ceiling: telling a repo on 6.0.3 to
+          // move down to 5.9.2 is wrong advice (home-base-p05kz.4 change 2). A
+          // spec semver cannot read keeps the warning below, because "could not
+          // compare" is not "newer".
+          const installed = coerce(version);
+          if (installed != null && gt(installed, PINNED.typescript)) {
+            return {
+              message: `typescript ${version} (newer than the SDK pin ${PINNED.typescript})`,
+              pass: true,
             };
           }
           if (version !== PINNED.typescript) {
@@ -2608,7 +2620,7 @@ export async function runDoctor(
  */
 export async function renderDoctor(
   projectRoot: string = process.cwd(),
-  options: DoctorOptions = {},
+  options: DoctorOptions & {warningFilter?: WarningFilter} = {},
 ): Promise<DoctorReport> {
   const plan = await planDoctor(projectRoot);
   if (!plan.ok) {
@@ -2617,5 +2629,8 @@ export async function renderDoctor(
   if (plan.nodes.length === 0) {
     return {exitCode: 0, report: emptyPlanMessage(plan.componentCount)};
   }
-  return await renderCheckTree(plan.nodes, checkTreeOptions(options));
+  return await renderCheckTree(plan.nodes, {
+    ...checkTreeOptions(options),
+    warningFilter: options.warningFilter,
+  });
 }

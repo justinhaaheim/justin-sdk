@@ -25,7 +25,7 @@ import type {Sandbox} from './sandbox';
 import {afterEach, describe, expect, test} from 'bun:test';
 import {execFileSync} from 'child_process';
 import {mkdirSync, readFileSync, rmSync, writeFileSync} from 'fs';
-import {dirname, join} from 'path';
+import {basename, dirname, join} from 'path';
 
 import {brClose, brCreate, brShow, runBr} from '../src/beads/br';
 import {PLAIN_STYLE} from '../src/cli-style';
@@ -213,6 +213,29 @@ function writeTranscript(
     join(dir, `${SESSION}.jsonl`),
     `${records.map((record) => JSON.stringify(record)).join('\n')}\n`,
   );
+}
+
+/**
+ * A Write call as a transcript records it: what makes a dirty file this
+ * session's own (home-base-j8q3e.16).
+ */
+function writeCall(file: string, when: string): object {
+  return {
+    message: {
+      content: [
+        {
+          id: `toolu_write_${basename(file)}`,
+          input: {content: 'x\n', file_path: file},
+          name: 'Write',
+          type: 'tool_use',
+        },
+      ],
+      role: 'assistant',
+    },
+    sessionId: SESSION,
+    timestamp: when,
+    type: 'assistant',
+  };
 }
 
 function normalize(text: string, w: World): string {
@@ -437,6 +460,7 @@ async function workSession(): Promise<WorkWorld> {
     encoding: 'utf8',
   }).trim();
   writeTranscript(w, worktree, '11:30', 312_400, [
+    writeCall(join(worktree, 'RUNBOOK.md'), at('11:00')),
     ...bashCallRecords({
       at: '2030-01-01T09:59:59.000Z',
       command: "git commit -qm 'feat: faster export'",
@@ -1438,7 +1462,11 @@ describe('whatToMark', () => {
 
   test('an uncommitted edit outside .beads/ with no request filed', async () => {
     const w = questionOnly();
-    writeFileSync(join(w.repo, 'scratch.ts'), 'x\n');
+    const scratch = join(w.repo, 'scratch.ts');
+    writeFileSync(scratch, 'x\n');
+    writeTranscript(w, w.repo, '09:05', 41_200, [
+      writeCall(scratch, at('09:03')),
+    ]);
     const load = await report(w, true);
     expect(whatToMark(load.model, load.status, load.created)[0]).toEqual({
       commits: 0,
@@ -1446,6 +1474,35 @@ describe('whatToMark', () => {
       uncommitted: 1,
       unmatchedCommits: 0,
     });
+  });
+
+  test('j8q3e.16: another session\'s uncommitted file is not "work with no request" here', async () => {
+    const w = questionOnly();
+    writeFileSync(join(w.repo, 'scratch.ts'), 'x\n');
+    const load = await report(w, true);
+    expect(load.model.git.checkoutDirty).toEqual(measured(['scratch.ts']));
+    expect(load.model.git.uncommitted).toEqual(measured([]));
+    expect(
+      whatToMark(load.model, load.status, load.created).map(
+        (mark) => mark.kind,
+      ),
+    ).not.toContain('noRequest');
+  });
+
+  test('p05kz.3 item 4: Part 1 says a file no transcript names is in the checkout, without claiming it', async () => {
+    const w = questionOnly();
+    writeFileSync(join(w.repo, 'scratch.ts'), 'x\n');
+    const text = normalize(partOne(await report(w, true), false), w);
+    expect(text).toContain(
+      '**Also uncommitted in this checkout:** scratch.ts, not tied to this session',
+    );
+    expect(text).not.toContain('**Uncommitted:**');
+  });
+
+  test('p05kz.3 item 4: a clean checkout has no such line', async () => {
+    const w = questionOnly();
+    const text = normalize(partOne(await report(w, true), false), w);
+    expect(text).not.toContain('Also uncommitted');
   });
 });
 

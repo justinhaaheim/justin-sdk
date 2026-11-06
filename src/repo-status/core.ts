@@ -480,11 +480,17 @@ export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
       // it is live work — and hiding it is the exact failure the prime view
       // exists to prevent. Checked before both tests so the exemption is
       // visible as one rule rather than repeated inside each.
-      if (tip.worktreePath != null) {
-        if (
-          (excludeArchive && isArchiveRef(tip)) ||
-          (sinceDays !== null && !isRecentEnough(tip.lastCommitDate, sinceDays))
-        ) {
+      //
+      // `ageOutWorktrees` is the session-start view's exception: there, a
+      // worktree nobody has committed to in 30 days is the same stale branch as
+      // any other, and listing it every session is noise (home-base-p05kz.4).
+      // The branch this session stands on is never aged out.
+      const stale =
+        sinceDays !== null && !isRecentEnough(tip.lastCommitDate, sinceDays);
+      const agedOut =
+        opts.ageOutWorktrees === true && stale && tip.name !== currentBranch;
+      if (tip.worktreePath != null && !agedOut) {
+        if ((excludeArchive && isArchiveRef(tip)) || stale) {
           keptForWorktree += 1;
         }
         candidates.push(tip);

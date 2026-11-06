@@ -194,6 +194,7 @@ function fakeTime() {
 const PASS: HandoffGateResult = {
   facts: {
     chain: {kind: 'skipped'},
+    guardPassNote: null,
     liveSessions: {
       bySource: {agents: 0, hookStore: 0, ps: 3, screen: 0},
       kind: 'counted',
@@ -772,6 +773,47 @@ describe('knob on: --dry-run', () => {
     expect(off.text).not.toContain('JUSTIN_SDK_CONTINUES');
     expect(off.text).not.toContain('if it says the pickup is not done');
     expect(off.text).toContain('First run the command');
+  });
+
+  test('home-base-p05kz.3 item 8: the gate is told which kind of run this is', async () => {
+    const dry = gateOf(PASS);
+    await threadHandoffCommand(
+      opts(world(ON), {dryRun: true}),
+      deps(fakeCmux(), dry),
+    );
+    expect(dry.seen[0]).toMatchObject({dryRun: true});
+    const real = gateOf(REFUSED);
+    await threadHandoffCommand(
+      opts(world(ON), {dryRun: false}),
+      deps(fakeCmux(), real),
+    );
+    expect(real.seen[0]).toMatchObject({dryRun: false});
+  });
+
+  test('home-base-p05kz.3 item 8: a dry run with no valid pass says what a real run would do, and writes nothing', async () => {
+    const w = world(ON);
+    const cmux = fakeCmux();
+    const note = 'no guard pass at /p.json';
+    const result = await threadHandoffCommand(
+      opts(w, {dryRun: true}),
+      deps(
+        cmux,
+        gateOf({
+          ...PASS,
+          facts: {
+            ...PASS.facts,
+            guardPassNote: note,
+          },
+        } as HandoffGateResult),
+      ),
+    );
+    expect(result.exitCode).toBe(0);
+    const text = result.lines.join('\n');
+    expect(text).toMatch(/Gate:\s+passed/u);
+    expect(text).toContain(`A real run would refuse (guardNotSeen): ${note}`);
+    expect(writeCalls(cmux.calls)).toEqual([]);
+    expect(bead(w).labels).not.toContain('handed-off');
+    expect(bead(w).labels).not.toContain('handoff-refused');
   });
 
   test('a refusing gate is printed, and still nothing is written', async () => {

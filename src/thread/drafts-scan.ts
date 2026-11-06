@@ -22,8 +22,9 @@
  *     whitespace collapsed) is still in the box, so it is unsent: written
  *     with sentMatch true and shown with a note (F23, home-base-yukaf.14).
  * After the panes, a stored live draft whose session was not seen is cleared
- * when its text equals that session's newest sent line (sent from elsewhere);
- * a sentMatch draft only when that line is newer than the draft.
+ * when all its text went out: a later sent line begins with it, or it equals
+ * the newest sent line (draftWasSent, input-drafts.ts, home-base-p05kz.3 item
+ * 7); a sentMatch draft only by a later line.
  *
  * WHAT A SCREEN CAN AND CANNOT SAY (measured on the fixtures in
  * scripts/__fixtures__/pane-backfill and 1,029 input boxes in the 24 cmux
@@ -73,8 +74,11 @@ import {
 import {writeStdout} from '../write-stdout';
 import {realCmuxRunner} from './cmux';
 import {
+  checkDraftSent,
   clearInputDraft,
   listInputDrafts,
+  listUnsentInputDrafts,
+  normalizedText,
   readInputDraft,
   setInputDraftMissing,
   writeInputDraft,
@@ -202,11 +206,6 @@ export interface ScanDeps {
   run: CmuxRunner;
 }
 
-/** Whitespace collapsed: a screen wraps long text and indents its continuation lines. */
-export function normalizedText(text: string): string {
-  return text.replace(/\s+/gu, ' ').trim();
-}
-
 /**
  * The session's newest SENT user line, whitespace collapsed; null when the
  * log holds none. `failed` when the log exists and could not be read.
@@ -231,25 +230,6 @@ function newestSentText(
     kind: 'read',
     text: user == null ? null : normalizedText(user.text),
   };
-}
-
-/**
- * F23: was a stored draft sent? Its text equals the newest sent message,
- * and, for a draft stored as a sent-match (it already equalled that message
- * when it was seen), the message was sent AFTER the draft was seen. A time
- * that does not parse proves no later send, so the sent-match is kept.
- */
-function draftWasSent(
-  draft: {at: string; sentMatch: boolean; text: string},
-  sent: {at: string | null; text: string | null},
-): boolean {
-  if (sent.text == null || sent.text !== normalizedText(draft.text)) {
-    return false;
-  }
-  if (!draft.sentMatch) return true;
-  const sentMs = sent.at == null ? Number.NaN : Date.parse(sent.at);
-  const seenMs = Date.parse(draft.at);
-  return Number.isFinite(sentMs) && Number.isFinite(seenMs) && sentMs > seenMs;
 }
 
 /** `fn` over `items`, at most `limit` at a time, results in the items' order. */
@@ -538,7 +518,13 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
     // shown with a note. A live draft of other text moves into `previous`.
     const sentMatch =
       sent.kind === 'read' && sent.text === normalizedText(typed);
-    if (live?.text === typed && live.sentMatch === sentMatch) {
+    // home-base-p05kz.3 item 7: a box still holding text a later message began
+    // with holds it again, so its `at` moves on. Otherwise the read-only check
+    // in `thread inbox` and `thread drafts` would call it sent.
+    const liveCheck =
+      live == null ? null : checkDraftSent(pane.sessionId, live, deps.env);
+    const typedAgain = liveCheck?.kind === 'checked' && liveCheck.sent;
+    if (live?.text === typed && live.sentMatch === sentMatch && !typedAgain) {
       found.push({
         ...pane,
         failure: null,
@@ -594,12 +580,12 @@ export async function scanDrafts(deps: ScanDeps): Promise<ScanOutcome> {
         }
         continue;
       }
-      const sent = newestSentText(entry.sessionId, deps.env);
+      const sent = checkDraftSent(entry.sessionId, entry.draft, deps.env);
       if (sent.kind === 'failed') {
-        failures.push(sent.reason);
+        failures.push(tildeText(sent.reason));
         continue;
       }
-      if (draftWasSent(entry.draft, sent)) {
+      if (sent.sent) {
         clearOne(entry.sessionId, entry.draft, 'sent', null, null);
         continue;
       }
@@ -1006,7 +992,7 @@ export async function runThreadDraftsList(
 ): Promise<number> {
   const env = options.env ?? process.env;
   const style = options.style ?? outputStyle(process.stdout);
-  const listed = listInputDrafts(env);
+  const listed = listUnsentInputDrafts(env);
   if (listed.kind === 'failed') {
     if (options.json) {
       await writeStdout(`${JSON.stringify(listed, null, 2)}\n`);
@@ -1015,12 +1001,13 @@ export async function runThreadDraftsList(
     }
     return 1;
   }
-  const live = listed.drafts.filter((entry) => entry.draft.clearedAt == null);
+  const live = listed.drafts;
+  const failures = [...listed.failures, ...listed.unchecked];
   if (options.json) {
     await writeStdout(
-      `${JSON.stringify({drafts: live, failures: listed.failures, kind: 'read'}, null, 2)}\n`,
+      `${JSON.stringify({drafts: live, failures, kind: 'read', sentNotCleared: listed.sent.map((entry) => entry.sessionId)}, null, 2)}\n`,
     );
-    return listed.failures.length > 0 ? 1 : 0;
+    return failures.length > 0 ? 1 : 0;
   }
   const repoOf = repoResolver(env, null);
   const code = (text: string): string => paint(text, ['cyan'], style.color);
@@ -1049,7 +1036,10 @@ export async function runThreadDraftsList(
       verbatim(entry.draft.text),
     ].join('\n'),
   );
-  const cleared = listed.drafts.length - live.length;
+  const sentWords =
+    listed.sent.length === 0
+      ? ''
+      : `, ${listed.sent.length} sent but not yet marked (a later message holds all the text)`;
   await writeStdout(
     `${spacedList([
       sectionHeader('Unsent text in input boxes', {
@@ -1059,11 +1049,11 @@ export async function runThreadDraftsList(
       ...(entries.length === 0
         ? [`${pad(BODY_COLUMN)}None stored and still unsent.`]
         : entries),
-      ...listed.failures.map(
+      ...failures.map(
         (failure) => `${pad(BODY_COLUMN)}⚠️ ${tildeText(failure)}`,
       ),
-      `${pad(HEADER_COLUMN)}${plural(live.length, 'draft', 'drafts')} unsent, ${cleared} cleared (sent, or the box was seen empty). \`thread drafts scan\` refreshes the store from every open pane.`,
+      `${pad(HEADER_COLUMN)}${plural(live.length, 'draft', 'drafts')} unsent, ${listed.cleared} cleared (sent, or the box was seen empty)${sentWords}. \`thread drafts scan\` refreshes the store from every open pane.`,
     ])}\n`,
   );
-  return listed.failures.length > 0 ? 1 : 0;
+  return failures.length > 0 ? 1 : 0;
 }

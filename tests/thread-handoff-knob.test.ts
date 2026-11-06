@@ -68,8 +68,26 @@ describe('componentConfig.thread.handoff', () => {
         maxSessionPercentSource: 'default',
         maxWeekPercent: 90,
         maxWeekPercentSource: 'default',
+        paceHold: false,
+        paceHoldSource: 'default',
       },
     });
+  });
+
+  test('usage.paceHold resolves per layer; a non-boolean is named and ignored', () => {
+    const on = configWorld({
+      project: handoffIn({usage: {paceHold: true}}),
+    });
+    expect(resolveThreadConfig(on).handoff.usage).toMatchObject({
+      paceHold: true,
+      paceHoldSource: 'project',
+    });
+    const bad = configWorld({
+      project: handoffIn({usage: {paceHold: 'yes'}}),
+    });
+    const resolved = resolveThreadConfig(bad);
+    expect(resolved.handoff.usage.paceHold).toBe(false);
+    expect(resolved.problems.join('\n')).toContain('paceHold');
   });
 
   test('each field resolves per layer: the project file overrides only what it names', () => {
@@ -171,6 +189,7 @@ describe('componentConfig.thread.handoff', () => {
       'handoff.usage.maxSampleAgeMinutes': 'default 150',
       'handoff.usage.maxSessionPercent': 'default 85',
       'handoff.usage.maxWeekPercent': 'default 90',
+      'handoff.usage.paceHold': 'default false',
     };
     for (const [key, defaultText] of Object.entries(expected)) {
       const line = lines.find((entry) =>

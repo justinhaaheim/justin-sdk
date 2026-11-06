@@ -987,10 +987,13 @@ describe('cost to the session-start path', () => {
     // home-base-qyu1.33.1 so the branches this view HIDES are counted rather
     // than silently dropped. Both are cheap facts the core walk already had.
     expect(Object.keys(divergence ?? {}).sort()).toEqual([
+      'baselineRef',
       'currentBranch',
+      'defaultBranch',
       'enumerationFailures',
       'filtered',
       'groups',
+      'standing',
     ]);
     expect(divergence?.enumerationFailures).toEqual([]);
   });

@@ -119,12 +119,11 @@ export const THREAD_DEFAULT_NAME_WORKSPACES = false;
 export const THREAD_DEFAULT_TITLE_SUMMARY = false;
 
 /**
- * TRIAL (home-base-jm5kg.6 D5, 2026-10-30): the cmux workspace name lists the
- * session chain's other requests after its title, ✅ done then 🔳 open. Justin:
- * "Let's consider this a *trial*, and put it behind a knob. I'm not sure this
- * is what I will want." Off by default (feature-knobs rule).
+ * home-base-jm5kg.18 (2026-11-06): the cmux workspace description lists the
+ * session chain's requests, and the workspace name is the overarching request's
+ * short label. Off by default (feature-knobs rule); on in home-base.
  */
-export const THREAD_DEFAULT_WORKSPACE_NAME_ITEMS = false;
+export const THREAD_DEFAULT_WORKSPACE_DESCRIPTION = false;
 
 /**
  * Repo folder names that `thread inbox --by-repo` and the threads TUI's "by
@@ -280,7 +279,19 @@ export const HANDOFF_DEFAULTS = {
     maxSampleAgeMinutes: 150,
     maxSessionPercent: 85,
     maxWeekPercent: 90,
+    paceHold: false,
   },
+} as const;
+
+/**
+ * The pacing rule's margins, in points ahead of an even pace (thread/pacing.ts,
+ * home-base-jm5kg.17). PLACEHOLDERS (2026-11-06): home-base-npbse.5's default,
+ * to be replaced by margins proposed from two weeks of data. `paceHold` above
+ * stays false until then.
+ */
+export const PACING_DEFAULTS = {
+  holdPointsAhead: 25,
+  warnPointsAhead: 10,
 } as const;
 
 // ---------------------------------------------------------------------------

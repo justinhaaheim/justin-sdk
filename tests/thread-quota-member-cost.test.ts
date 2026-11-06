@@ -94,6 +94,7 @@ function knownGroup(main: string, other: string): GroupSpend {
   return {
     firstUnattendedAtMs: null,
     kind: 'known',
+    lastUnattendedAtMs: null,
     latestTypedAtMs: null,
     members: [
       {

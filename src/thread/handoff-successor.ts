@@ -44,7 +44,11 @@
 
 import type {Field, OutputStyle} from '../cli-style';
 import type {CmuxRunner} from './cmux';
-import type {HandoffGateResult, RecordRefusalOutcome} from './handoff-gate';
+import type {
+  HandoffDeferralReason,
+  HandoffGateResult,
+  RecordRefusalOutcome,
+} from './handoff-gate';
 import type {ResolvedHandoffConfig} from './handoff-knob';
 import type {EnvLike} from './paths';
 import type {FoundSession} from './session-select';
@@ -52,6 +56,7 @@ import type {FoundSession} from './session-select';
 import {mkdirSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 
+import {saysBeadsLocked} from '../beads/br';
 import {fieldLines, outputStyle, sectionHeader, stepColumn} from '../cli-style';
 import {SDK_BIN_BY_PATH, SDK_HANDOFF_CALL} from '../sdk-invocation';
 import {
@@ -356,6 +361,8 @@ export type HandoffGateRunner = (input: {
   /** D4: when the gate's cmux calls must stop, shared with the pane lookup. */
   cmuxDeadlineAtMs: number;
   cwd: string;
+  /** Required, so no caller can leave a real run's value to a default. */
+  dryRun: boolean;
   env: EnvLike;
   limits: ResolvedHandoffConfig;
   now: Date;
@@ -414,6 +421,7 @@ function refuse(text: string): ThreadHandoffResult {
 /** The real gate: runHandoffGate with the knob's limits and the real readers. */
 export const realHandoffGate: HandoffGateRunner = (input) =>
   runHandoffGate({
+    dryRun: input.dryRun,
     env: input.env,
     limits: input.limits,
     now: input.now,
@@ -466,6 +474,26 @@ function fullCmuxArgv(env: EnvLike, args: readonly string[]): string[] {
 }
 
 /**
+ * Exit 4 for a locked beads database (home-base-p05kz.5.1): a lock passes, so
+ * it never ends a handoff the way exit 1 or 2 would. A write that met the lock
+ * did not happen, and the next run repeats any write before it.
+ */
+function beadsLockedDeferral(
+  detail: string,
+  before: readonly string[] = [],
+): ThreadHandoffResult {
+  return {
+    exitCode: 4,
+    launch: null,
+    lines: [
+      ...before,
+      ...(before.length > 0 ? [''] : []),
+      handoffDeferralMessage('beadsLocked', detail),
+    ],
+  };
+}
+
+/**
  * The knob-on path. Exported for tests and for the post-launch steps of
  * mbnjv.3 and mbnjv.4; the CLI reaches it through threadHandoffCommand.
  */
@@ -495,6 +523,9 @@ export async function handoffWithSuccessor(
   const selected = selectSession({env, selector: null, sessionIdOption: null});
   if (selected.kind === 'checkoutMissing') {
     return refuse(`this session's checkout ${selected.checkoutPath} is gone`);
+  }
+  if (selected.kind === 'failed' && saysBeadsLocked(selected.reason)) {
+    return beadsLockedDeferral(selected.reason);
   }
   if (selected.kind !== 'found') return refuse(selected.reason);
   const {session} = selected;
@@ -537,6 +568,7 @@ export async function handoffWithSuccessor(
   const gate = await d.gate({
     cmuxDeadlineAtMs,
     cwd,
+    dryRun: options.dryRun,
     env,
     limits: options.limits,
     now,
@@ -560,6 +592,16 @@ export async function handoffWithSuccessor(
             ? 'passed'
             : `would ${gate.kind === 'deferred' ? 'defer' : 'refuse'}: ${gate.reason}: ${gate.detail}`,
       },
+      // home-base-p05kz.3 item 8: a dry run needs no guard pass, but the line
+      // says what a real run spelled this way would do.
+      ...(gate.kind === 'pass' && gate.facts.guardPassNote != null
+        ? [
+            {
+              label: 'Guard pass',
+              value: `not valid, which a dry run does not need. A real run would refuse (guardNotSeen): ${gate.facts.guardPassNote}`,
+            },
+          ]
+        : []),
       {label: 'Session bead', value: session.bead.id},
       {label: 'Block file', value: blockPath},
       {label: 'Successor name', value: name},
@@ -646,6 +688,9 @@ export async function handoffWithSuccessor(
       sessionId: null,
       to: null,
     });
+    if (handed.kind === 'failed' && saysBeadsLocked(handed.reason)) {
+      return beadsLockedDeferral(handed.reason);
+    }
     if (handed.kind === 'failed') {
       lines.push(
         `⚠️ The handoff itself was NOT recorded: ${handed.reason}`,
@@ -668,7 +713,11 @@ export async function handoffWithSuccessor(
     );
     return {exitCode: input.exitCode, launch: null, lines};
   };
-  const defer = (detail: string, message: string) =>
+  const defer = (
+    reason: HandoffDeferralReason,
+    detail: string,
+    message: string,
+  ) =>
     handOffAndRecord({
       exitCode: 4,
       message,
@@ -679,7 +728,7 @@ export async function handoffWithSuccessor(
           detail,
           env,
           now,
-          reason: 'cmuxSlow',
+          reason,
         }),
     });
 
@@ -701,7 +750,9 @@ export async function handoffWithSuccessor(
   }
 
   // ---- 2c. deferred: exit 4, nothing was decided (home-base-89c8h.1 D6) ----
-  if (gate.kind === 'deferred') return await defer(gate.detail, gate.message);
+  if (gate.kind === 'deferred') {
+    return await defer(gate.reason, gate.detail, gate.message);
+  }
 
   // ---- 3. the caller's pane, read-only ----
   const workspaceId = gate.facts.workspaceId;
@@ -714,7 +765,11 @@ export async function handoffWithSuccessor(
   const pane = await readPaneOfSurface(paneRunner, workspaceId, surfaceId);
   if (pane.kind === 'unreadable' && pane.timedOut) {
     const detail = `cmux did not return this tab's pane: ${pane.reason}`;
-    return await defer(detail, handoffDeferralMessage('cmuxSlow', detail));
+    return await defer(
+      'cmuxSlow',
+      detail,
+      handoffDeferralMessage('cmuxSlow', detail),
+    );
   }
   if (pane.kind !== 'found') {
     return refuse(
@@ -731,6 +786,9 @@ export async function handoffWithSuccessor(
     sessionId: null,
     to: null,
   });
+  if (handed.kind === 'failed' && saysBeadsLocked(handed.reason)) {
+    return beadsLockedDeferral(handed.reason);
+  }
   if (handed.kind === 'failed') {
     return {
       exitCode: 1,
@@ -752,6 +810,12 @@ export async function handoffWithSuccessor(
       ...HANDOFF_STEP_FAILED_INSTRUCTIONS,
     ],
   });
+  if (handed.followUpFailures.some((failure) => saysBeadsLocked(failure))) {
+    return beadsLockedDeferral(
+      `the session WAS marked handed off, but: ${handed.followUpFailures.join('; ')}. No successor was started`,
+      blockLines,
+    );
+  }
   if (handed.block === '' || handed.followUpFailures.length > 0) {
     return failed(
       `the session WAS marked handed off, but: ${handed.followUpFailures.join('; ')}. No successor was started.`,
@@ -776,6 +840,12 @@ export async function handoffWithSuccessor(
     now,
     text: `from tab ${surfaceId} into pane ${pane.paneId} of workspace ${workspaceId}, successor "${name}"`,
   });
+  if (launched.kind === 'failed' && saysBeadsLocked(launched.reason)) {
+    return beadsLockedDeferral(
+      `the launch record could not be written (${launched.reason}). The session WAS handed off and no successor was started; the block is in ${blockPath}`,
+      blockLines,
+    );
+  }
   if (launched.kind === 'failed') {
     return failed(
       `the launch record could not be written (${launched.reason}), so a second handoff could not be stopped; no successor was started. The session WAS handed off; the block is in ${blockPath}.`,

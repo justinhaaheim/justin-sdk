@@ -7,6 +7,8 @@
  * output.
  */
 
+import type {BranchDivergence} from '../src/repo-status/types';
+
 import {afterEach, describe, expect, test} from 'bun:test';
 import {execFileSync, execSync} from 'child_process';
 import {writeFileSync} from 'fs';
@@ -94,7 +96,7 @@ describe('project-prime', () => {
     const text = formatRepoState(report);
     expect(text).toContain('# Current repo state');
     expect(text).toContain('feature-x');
-    expect(text).toContain('1 commit ahead');
+    expect(text).toContain('1 commit not on main');
     // Just-created commit is within 72h, so last-touched includes HH:MM.
     expect(text).toMatch(/last touched \d{4}-\d{2}-\d{2} \d{2}:\d{2}/);
     // Guidance line when there IS unmerged work.
@@ -140,16 +142,21 @@ describe('project-prime', () => {
     expect(text).not.toContain('COULD NOT BE CHECKED');
   });
 
-  test('a worktree with ahead commits is flagged regardless of age, with its path set', () => {
-    const sb = track(createSandbox());
-    initRepo(sb);
+  /** A second checkout on `wt-feature`, holding one commit dated `dateIso`. */
+  function addWorktree(sb: Sandbox, dateIso?: string): string {
     git(sb.path, 'branch wt-feature');
     const wtPath = `${sb.path}-wt`;
     git(sb.path, `worktree add -q "${wtPath}" wt-feature`);
     writeFileSync(join(wtPath, 'wt.txt'), 'worktree work\n');
     git(wtPath, 'add wt.txt');
-    git(wtPath, 'commit -q -m "worktree work"', '2020-01-01T00:00:00');
+    git(wtPath, 'commit -q -m "worktree work"', dateIso);
+    return wtPath;
+  }
 
+  test('a recent worktree with ahead commits is flagged, with its path set', () => {
+    const sb = track(createSandbox());
+    initRepo(sb);
+    const wtPath = addWorktree(sb);
     try {
       const report = runDivergenceCheck({cwd: sb.path, sinceDays: 30});
       expect(report?.groups).toHaveLength(1);
@@ -159,6 +166,120 @@ describe('project-prime', () => {
     } finally {
       execSync(`git worktree remove --force "${wtPath}"`, {cwd: sb.path});
     }
+  });
+
+  test('a worktree branch past the age limit moves to the Not listed count', () => {
+    const sb = track(createSandbox());
+    initRepo(sb);
+    const wtPath = addWorktree(sb, '2020-01-01T00:00:00');
+    try {
+      const report = runDivergenceCheck({cwd: sb.path, sinceDays: 30});
+      expect(report?.groups).toHaveLength(0);
+      expect(report?.filtered.excludedAsStale).toBe(1);
+      expect(formatRepoState(report)).toContain(
+        'Not listed: 1 branch(es) with no commit in 30d',
+      );
+    } finally {
+      execSync(`git worktree remove --force "${wtPath}"`, {cwd: sb.path});
+    }
+  });
+
+  test('from a worktree branch: main is never listed, and the header says where it stands', () => {
+    const sb = track(createSandbox());
+    initRepo(sb);
+    const wtPath = addWorktree(sb);
+    // Main moves on after the worktree was cut. Against the current branch,
+    // this made `main` the one "branch with unmerged work" in 56 audited blocks.
+    commit(sb, 'later.txt', 'later on main');
+    try {
+      const text = formatRepoState(
+        runDivergenceCheck({cwd: wtPath, sinceDays: 30}),
+      );
+      expect(text).toContain(
+        'On `wt-feature` (1 ahead of `main`, 1 behind) — no unmerged work on any other branch or worktree.',
+      );
+      expect(text).not.toContain('- main');
+      expect(text).not.toContain('base from the feature branches');
+    } finally {
+      execSync(`git worktree remove --force "${wtPath}"`, {cwd: sb.path});
+    }
+  });
+
+  test('the base-from-feature-branches sentence prints on the default branch only', () => {
+    const sb = track(createSandbox());
+    initRepo(sb);
+    git(sb.path, 'checkout -q -b feature');
+    commit(sb, 'f.txt', 'feature');
+    git(sb.path, 'checkout -q -b other');
+    commit(sb, 'o.txt', 'other');
+    git(sb.path, 'checkout -q feature');
+    const fromFeature = formatRepoState(
+      runDivergenceCheck({cwd: sb.path, sinceDays: 30}),
+    );
+    expect(fromFeature).toContain('- other (2 commits not on main');
+    expect(fromFeature).not.toContain('base from the feature branches');
+
+    git(sb.path, 'checkout -q main');
+    expect(
+      formatRepoState(runDivergenceCheck({cwd: sb.path, sinceDays: 30})),
+    ).toContain('base from the feature branches');
+  });
+
+  test('a partly merged branch reads "1 of 2 commits not on main"', () => {
+    const sb = track(createSandbox());
+    initRepo(sb);
+    git(sb.path, 'checkout -q -b partly');
+    commit(sb, 'landed.txt', 'landed elsewhere');
+    commit(sb, 'unique.txt', 'still unique');
+    git(sb.path, 'checkout -q main');
+    // Main moves first, or the cherry-pick fast-forwards to the same hash.
+    commit(sb, 'moved.txt', 'main moved');
+    git(sb.path, 'cherry-pick partly~1');
+    const report = runDivergenceCheck({cwd: sb.path, sinceDays: 30});
+    expect(report?.groups[0]?.notOnBaseline).toBe(1);
+    expect(formatRepoState(report)).toContain('1 of 2 commits not on main');
+  });
+
+  test('a failed patch check falls back to the plain count and says so, never zero', () => {
+    const text = formatRepoState({
+      baselineRef: 'main',
+      currentBranch: 'main',
+      defaultBranch: 'main',
+      enumerationFailures: [],
+      filtered: {
+        excludeArchive: true,
+        excludedAsArchive: 0,
+        excludedAsStale: 0,
+        hiddenUnmerged: null,
+        keptForWorktree: 0,
+        sinceDays: 30,
+      },
+      groups: [
+        {
+          aheadOfCurrent: 3,
+          branches: [
+            {
+              divergence: {ahead: 3, behind: 0},
+              lastCommitDate: '2026-11-01T00:00:00Z',
+              name: 'x',
+              tipSha: 'abc',
+              worktreePath: null,
+            } as BranchDivergence,
+          ],
+          hasWorktree: false,
+          lastCommitDate: '2026-11-01T00:00:00Z',
+          notOnBaseline: null,
+          prNote: null,
+          tipSha: 'abc',
+        },
+      ],
+      standing: null,
+    });
+    expect(text).toContain(
+      '3 commits ahead of main, patch check failed so some may already be merged',
+    );
+    expect(text).not.toContain('0 of 3');
+    expect(text).not.toContain('commits not on main');
   });
 
   test('two branches at the same tip are grouped with a same-tip note', () => {

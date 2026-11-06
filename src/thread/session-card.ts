@@ -280,6 +280,7 @@ export type CardGitInput = Pick<
   | 'aheadOfDefault'
   | 'branch'
   | 'defaultBranch'
+  | 'localDefaultBehind'
   | 'merged'
   | 'uncommitted'
   | 'unpushed'
@@ -613,6 +614,7 @@ export interface CardGit {
   aheadOfDefault: SessionModel['git']['aheadOfDefault'];
   branch: SessionModel['git']['branch'];
   defaultBranch: SessionModel['git']['defaultBranch'];
+  localDefaultBehind: SessionModel['git']['localDefaultBehind'];
   merged: SessionModel['git']['merged'];
   uncommitted: {ok: false; reason: string} | {ok: true; value: number};
   unpushed: SessionModel['git']['unpushed'];
@@ -623,6 +625,7 @@ export function cardGit(git: CardGitInput): CardGit {
     aheadOfDefault: git.aheadOfDefault,
     branch: git.branch,
     defaultBranch: git.defaultBranch,
+    localDefaultBehind: git.localDefaultBehind,
     merged: git.merged,
     uncommitted: git.uncommitted.ok
       ? {ok: true, value: git.uncommitted.value.length}
@@ -685,12 +688,46 @@ function branchFact(git: CardGitInput): CardFact | null {
   if (state === 'isDefault') return null;
   if (state === 'merged')
     return {label: 'Branch', value: `${name}, merged into ${target}`};
+  if (state === 'onRemoteDefault') {
+    return {
+      label: 'Branch',
+      value: `${name}, landed: all its commits are on origin/${target}`,
+    };
+  }
   const ahead = git.aheadOfDefault.ok
     ? plural(git.aheadOfDefault.value, 'commit', 'commits')
     : `commits not counted: ${tildeText(git.aheadOfDefault.reason)}`;
   return {
     label: 'Branch',
     value: `${name}, not merged into ${target} (${ahead})`,
+  };
+}
+
+/**
+ * home-base-p05kz.3 item 3: local main being behind origin is its own fact, not
+ * a reason to land anything. Only where it bears on landing this branch: not on
+ * the default branch itself, nor on a branch already merged into local main.
+ */
+function localDefaultFact(git: CardGitInput): CardFact | null {
+  if (!git.merged.ok || !git.defaultBranch.ok) return null;
+  if (
+    git.merged.value !== 'notMerged' &&
+    git.merged.value !== 'onRemoteDefault'
+  ) {
+    return null;
+  }
+  const label = `Local ${git.defaultBranch.value}`;
+  const behind = git.localDefaultBehind;
+  if (!behind.ok) {
+    return {
+      label,
+      value: `how far it is behind origin is ${unknownBecause(behind.reason)}`,
+    };
+  }
+  if (behind.value == null || behind.value.count === 0) return null;
+  return {
+    label,
+    value: `${plural(behind.value.count, 'commit', 'commits')} behind ${behind.value.remote}`,
   };
 }
 
@@ -710,6 +747,8 @@ export function gitFacts(git: CardGitInput): CardFact[] {
   const facts: CardFact[] = [];
   const branch = branchFact(git);
   if (branch != null) facts.push(branch);
+  const localDefault = localDefaultFact(git);
+  if (localDefault != null) facts.push(localDefault);
   if (!git.uncommitted.ok) {
     facts.push({
       label: 'Uncommitted',
@@ -863,8 +902,17 @@ export function paneCommandOf(fact: PaneFact): string | null {
  * D7's words for the Pane line, in three parts so a renderer can style the
  * command: `before`, the command (or null), `after`. The command's format is
  * part-one.ts's Pane line: `cmux select-workspace --workspace <ws> (surface <id>)`.
+ *
+ * `summaryReason` (home-base-p05kz.3 item 5) is the lookup's failure when the
+ * inbox's summary already printed it. A card with exactly that reason says
+ * `unknown (see the summary)`, so a sandboxed run prints it once and not on
+ * every card. Still unknown, never none. A reason of the card's own, such as
+ * two sessions on one pane, keeps its words.
  */
-export function paneLineParts(fact: PaneFact): {
+export function paneLineParts(
+  fact: PaneFact,
+  summaryReason: string | null = null,
+): {
   after: string;
   before: string;
   command: string | null;
@@ -883,7 +931,7 @@ export function paneLineParts(fact: PaneFact): {
         command: null,
       };
     case 'unknown': {
-      const unknown = `unknown (${tildeText(fact.reason)})`;
+      const unknown = `unknown (${fact.reason === summaryReason ? 'see the summary' : tildeText(fact.reason)})`;
       const {recorded} = fact;
       if (recorded?.workspace != null) {
         return {

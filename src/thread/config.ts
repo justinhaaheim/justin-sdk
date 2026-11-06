@@ -53,7 +53,7 @@ import {
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
   THREAD_DEFAULT_TITLE_SUMMARY,
-  THREAD_DEFAULT_WORKSPACE_NAME_ITEMS,
+  THREAD_DEFAULT_WORKSPACE_DESCRIPTION,
   THREAD_ENFORCE_MODES,
   type ThreadAnswerUi,
   type ThreadDashboardUi,
@@ -233,12 +233,13 @@ export interface ResolvedThreadConfig {
   /** Which layer decided `titleSummary`. */
   titleSummarySource: ThreadConfigSource;
   /**
-   * TRIAL (home-base-jm5kg.6 D5): the workspace name lists the chain's other
-   * requests, ✅ done then 🔳 open, after its title. Off by default.
+   * home-base-jm5kg.18: the workspace description lists the chain's requests
+   * and the workspace name is the overarching request's short label. Off by
+   * default.
    */
-  workspaceNameItems: boolean;
-  /** Which layer decided `workspaceNameItems`. */
-  workspaceNameItemsSource: ThreadConfigSource;
+  workspaceDescription: boolean;
+  /** Which layer decided `workspaceDescription`. */
+  workspaceDescriptionSource: ThreadConfigSource;
   // NO `startOnSessionStart`. It is DEPRECATED (home-base-39co9 D2) and gates
   // nothing, so it is not resolved at all: a resolved field nobody reads would
   // look like a live switch. Configs carrying it still parse — sdk-config.ts
@@ -335,9 +336,9 @@ export function resolveThreadConfig(
     'titleSummary',
     THREAD_DEFAULT_TITLE_SUMMARY,
   );
-  const workspaceNameItems = resolveFlag(
-    'workspaceNameItems',
-    THREAD_DEFAULT_WORKSPACE_NAME_ITEMS,
+  const workspaceDescription = resolveFlag(
+    'workspaceDescription',
+    THREAD_DEFAULT_WORKSPACE_DESCRIPTION,
   );
 
   // `render` is the one NESTED block in the thread section, so it needs its own
@@ -593,8 +594,8 @@ export function resolveThreadConfig(
     stagesSource,
     titleSummary: titleSummary.value,
     titleSummarySource: titleSummary.source,
-    workspaceNameItems: workspaceNameItems.value,
-    workspaceNameItemsSource: workspaceNameItems.source,
+    workspaceDescription: workspaceDescription.value,
+    workspaceDescriptionSource: workspaceDescription.source,
   };
 }
 

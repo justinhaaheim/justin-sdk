@@ -9,8 +9,9 @@
  * the answer is nothing.
  *
  * It is a RENDERER over `buildCoreInventory`, not a second implementation of
- * the walk. Divergence is measured against the CURRENT branch here (not the
- * default branch), which is what makes it the right view for session start.
+ * the walk. Divergence is measured against the DEFAULT branch from any branch
+ * (home-base-p05kz.4), and the session's own branch reads as a clause in the
+ * header rather than as a row.
  *
  * Formerly `src/plugin/lib/repo-status/prime-view.ts`, and before that
  * `src/plugin/lib/project-prime.ts` (home-base-46w2/qyu1.11). It moved here
@@ -24,6 +25,7 @@ import type {
   FilterSummary,
 } from './types';
 
+import {countUnmergedByPatchId} from './content';
 import {buildCoreInventory} from './core';
 import {EMPTY_PR_INDEX, fetchPullRequests, prForBranch} from './prs';
 
@@ -54,13 +56,24 @@ export interface DivergentGroup {
   branches: BranchDivergence[];
   hasWorktree: boolean;
   lastCommitDate: string;
+  /**
+   * How many of those commits have no patch-equivalent on the baseline
+   * (`git cherry`), so a partly merged branch reads "1 of 3 commits not on
+   * main". NULL when that measurement failed: the renderer falls back to the
+   * plain count and says so. Never 0 on a failure (critical rules section 7).
+   */
+  notOnBaseline: number | null;
   /** e.g. "PR #12 open". Null when PR data was not requested or unavailable. */
   prNote: string | null;
   tipSha: string;
 }
 
 export interface DivergenceReport {
+  /** The branch the counts are measured against: the default branch when known. */
+  baselineRef: string;
   currentBranch: string;
+  /** Null when git cannot name a default branch: then the baseline is the current branch. */
+  defaultBranch: string | null;
   /**
    * Halves of the core walk git could not read (home-base-qyu1.23). NON-EMPTY
    * MEANS `groups` IS NOT A COMPLETE ANSWER, and in the `for-each-ref` case it
@@ -85,6 +98,8 @@ export interface DivergenceReport {
    */
   filtered: FilterSummary;
   groups: DivergentGroup[];
+  /** Null on the baseline itself, which has nothing to stand against. */
+  standing: BranchStanding | null;
 }
 
 export interface RunOptions {
@@ -99,9 +114,17 @@ export interface RunOptions {
   excludeArchive?: boolean;
   /** Include PR state. Off by default — see PRIME_PR_TIMEOUT_MS above for why. */
   prs?: boolean;
-  /** Branches with no commits within this many days are ignored unless they have a worktree. Default 30. */
+  /** Branches with no commits within this many days are hidden, worktree or not, and counted under `Not listed`. Default 30. */
   sinceDays?: number;
 }
+
+/**
+ * How the session's own branch stands against the baseline. Null when it IS the
+ * baseline, or when git could not measure it (see `standing` on the report).
+ */
+export type BranchStanding =
+  | {ahead: number; behind: number; kind: 'measured'}
+  | {kind: 'unmeasured'};
 
 function prNoteFor(
   branches: BranchDivergence[],
@@ -116,14 +139,35 @@ function prNoteFor(
 }
 
 export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
-  const inventory = buildCoreInventory({
-    baseline: 'current',
-    cwd: opts.cwd,
-    excludeArchive: opts.excludeArchive ?? true,
-    sinceDays: opts.sinceDays,
-  });
+  const inventoryAgainst = (baseline: 'current' | 'default') =>
+    buildCoreInventory({
+      ageOutWorktrees: true,
+      baseline,
+      cwd: opts.cwd,
+      excludeArchive: opts.excludeArchive ?? true,
+      sinceDays: opts.sinceDays,
+    });
+  // Against the DEFAULT branch, from any branch (home-base-p05kz.4). Against the
+  // current branch, a session cut earlier than main saw `main` listed as
+  // unmerged work: 56 of 163 blocks in the 2026-11-06 audit. A repo that cannot
+  // name its default branch still gets a block, measured from where it stands.
+  const inventory = inventoryAgainst('default') ?? inventoryAgainst('current');
   // Detached HEAD / not a repo — nothing sensible to report.
   if (inventory?.currentBranch == null) return null;
+  const {currentBranch, baselineRef, baselineSha} = inventory;
+
+  // The session's own branch is not "other work": it moves to the header.
+  const own = (inventory.branches ?? []).find((b) => b.name === currentBranch);
+  const standing: BranchStanding | null =
+    currentBranch === baselineRef
+      ? null
+      : own?.divergence != null
+        ? {
+            ahead: own.divergence.ahead,
+            behind: own.divergence.behind,
+            kind: 'measured',
+          }
+        : {kind: 'unmeasured'};
 
   // Only branches that HAVE something we might lose are worth surfacing here —
   // plus the ones where that could not be determined, which are exactly the
@@ -133,7 +177,9 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
   // filter. It yields no groups, and the enumeration failure below is what stops
   // that from being rendered as a clean repo.
   const withAhead = (inventory.branches ?? []).filter(
-    (b) => b.divergence == null || b.divergence.ahead > 0,
+    (b) =>
+      b.name !== currentBranch &&
+      (b.divergence == null || b.divergence.ahead > 0),
   );
 
   // Fetch PRs only when asked, and only when there is something to annotate —
@@ -159,6 +205,13 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
         (latest, b) => (b.lastCommitDate > latest ? b.lastCommitDate : latest),
         branches[0]?.lastCommitDate ?? '',
       ),
+      // One `git cherry` per LISTED group, never per hidden branch: this view
+      // runs on the first prompt, and the list is short once old branches age
+      // out. Skipped when rev-list already failed: there is no count to qualify.
+      notOnBaseline:
+        branches[0]?.divergence == null
+          ? null
+          : countUnmergedByPatchId(baselineSha, tipSha, opts.cwd),
       prNote: prNoteFor(branches, prIndex),
       tipSha,
     }),
@@ -175,10 +228,13 @@ export function runDivergenceCheck(opts: RunOptions): DivergenceReport | null {
   });
 
   return {
-    currentBranch: inventory.currentBranch,
+    baselineRef,
+    currentBranch,
+    defaultBranch: inventory.defaultBranch,
     enumerationFailures: inventory.enumerationFailures,
     filtered: inventory.filtered,
     groups,
+    standing,
   };
 }
 
@@ -241,6 +297,39 @@ function formatHidden(filtered: FilterSummary): string {
   return `Not listed: ${parts.join(', ')} — \`repo-status status --all\` shows everything.`;
 }
 
+/** The clause naming where the session's own branch stands, or '' on the baseline. */
+function formatStanding(report: DivergenceReport): string {
+  const {baselineRef, standing} = report;
+  if (standing == null) return '';
+  if (standing.kind === 'unmeasured') {
+    return ` (divergence from \`${baselineRef}\` UNKNOWN)`;
+  }
+  return ` (${standing.ahead} ahead of \`${baselineRef}\`, ${standing.behind} behind)`;
+}
+
+/**
+ * The count for one row.
+ *
+ * Three cases, and the failures stay visible (critical rules section 7):
+ *  - rev-list failed: it may hold anything, so it reads UNKNOWN, never zero.
+ *  - `git cherry` failed: the plain count, and the row says it is not proven.
+ *  - both measured: "1 of 3 commits not on main", or "3 commits not on main"
+ *    when none has an equivalent there.
+ */
+function formatAhead(group: DivergentGroup, baselineRef: string): string {
+  const ahead = group.aheadOfCurrent;
+  if (ahead == null) {
+    return 'commits ahead UNKNOWN — could not measure divergence';
+  }
+  const noun = ahead === 1 ? 'commit' : 'commits';
+  if (group.notOnBaseline == null) {
+    return `${ahead} ${noun} ahead of ${baselineRef}, patch check failed so some may already be merged`;
+  }
+  return group.notOnBaseline === ahead
+    ? `${ahead} ${noun} not on ${baselineRef}`
+    : `${group.notOnBaseline} of ${ahead} ${noun} not on ${baselineRef}`;
+}
+
 /**
  * Render the repo-state section for session-start injection. ALWAYS returns a
  * titled section when on a branch — including a "clean" line when there's no
@@ -282,12 +371,14 @@ export function formatRepoState(report: DivergenceReport | null): string {
 
   const hidden = formatHidden(report.filtered);
 
+  const here = `\`${report.currentBranch}\`${formatStanding(report)}`;
+
   if (report.groups.length === 0) {
     if (failed.length > 0) return failed.join('\n');
     return [
       header,
       '',
-      `On \`${report.currentBranch}\` — no unmerged work on any other branch or worktree.`,
+      `On ${here} — no unmerged work on any other branch or worktree.`,
       ...(hidden.length > 0 ? ['', hidden] : []),
     ].join('\n');
   }
@@ -303,18 +394,12 @@ export function formatRepoState(report: DivergenceReport | null): string {
       : [
           header,
           '',
-          `On \`${report.currentBranch}\`, ${report.groups.length} branch${one ? '' : 'es'} ${one ? 'has' : 'have'} unmerged work:`,
+          `On ${here}, ${report.groups.length} branch${one ? '' : 'es'} ${one ? 'has' : 'have'} unmerged work:`,
         ];
   for (const group of report.groups) {
     const names = group.branches.map((b) => b.name).join(' / ');
     const worktreeNote = group.hasWorktree ? 'worktree, ' : '';
-    // "unknown" rather than a number: `git rev-list` failed for this branch, so
-    // it may hold anything from nothing to everything, and the one thing it may
-    // not be reported as is zero.
-    const aheadNote =
-      group.aheadOfCurrent == null
-        ? 'commits ahead UNKNOWN — could not measure divergence'
-        : `${group.aheadOfCurrent} ${group.aheadOfCurrent === 1 ? 'commit' : 'commits'} ahead`;
+    const aheadNote = formatAhead(group, report.baselineRef);
     const sameTipNote =
       group.branches.length > 1
         ? ' -- same tip, may be the same underlying work'
@@ -325,9 +410,13 @@ export function formatRepoState(report: DivergenceReport | null): string {
     );
   }
   if (hidden.length > 0) lines.push('', hidden);
-  lines.push(
-    '',
-    'When there is unmerged work on feature branch(es), the human may prefer for new work to base from the feature branches rather than main. When in doubt, ask.',
-  );
+  // Only on the default branch: from a feature branch it pointed the wrong way
+  // (home-base-p05kz.4).
+  if (report.currentBranch === report.defaultBranch) {
+    lines.push(
+      '',
+      'When there is unmerged work on feature branch(es), the human may prefer for new work to base from the feature branches rather than main. When in doubt, ask.',
+    );
+  }
   return lines.join('\n');
 }

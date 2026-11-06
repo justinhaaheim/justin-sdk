@@ -7,6 +7,7 @@
  */
 
 import type {OkSample, Sample, SamplesRead} from '../src/claude-usage-samples';
+import type {GuardPassRead} from '../src/thread/guard-pass';
 import type {UnattendedChain} from '../src/thread/handoff-chain';
 import type {LiveSessionCountRead} from '../src/thread/live-count';
 import type {LiveSessions} from '../src/thread/live-sessions';
@@ -664,6 +665,103 @@ describe('fix round 2 (home-base-mbnjv.8): F2, F20, F11, F14, F16', () => {
       'guardNotSeen',
       'was written for a different call (thread spawn with other flags)',
     );
+  });
+});
+
+describe('home-base-p05kz.3 item 8: the guard pass on a dry run', () => {
+  const BAD_PASSES: GuardPassRead[] = [
+    {kind: 'missing', path: '/p.json'},
+    {ageMs: 61_000, kind: 'stale', path: '/p.json'},
+    {kind: 'mismatch', path: '/p.json', sub: 'spawn'},
+    {kind: 'invalid', path: '/p.json', reason: 'it is not JSON'},
+  ];
+  const run = (
+    guardPass: () => GuardPassRead,
+    more: {dryRun?: boolean; requireCmuxPane?: boolean},
+  ) =>
+    runHandoffGate({
+      env: PANE_ENV,
+      limits: LIMITS,
+      now: NOW,
+      readers: passingReaders({guardPass}),
+      ...more,
+    });
+
+  test('a real run refuses without a valid pass, whether dryRun is false or absent', async () => {
+    for (const read of BAD_PASSES) {
+      for (const more of [{dryRun: false}, {}]) {
+        const result = await run(() => read, more);
+        expect(result).toMatchObject({
+          kind: 'refused',
+          reason: 'guardNotSeen',
+        });
+      }
+    }
+    expect(
+      await run(
+        () => {
+          throw new Error('unreadable');
+        },
+        {dryRun: false},
+      ),
+    ).toMatchObject({kind: 'refused', reason: 'guardNotSeen'});
+  });
+
+  test('the refusal names the exact call', async () => {
+    const result = await run(
+      () => ({kind: 'mismatch', path: '/p.json', sub: 'spawn'}),
+      {},
+    );
+    expect(result.kind === 'refused' ? result.detail : '').toContain(
+      '`./node_modules/.bin/justin-sdk thread handoff --note "<one line>"`, alone in one Bash call',
+    );
+  });
+
+  test('thread spawn is not told to run thread handoff', async () => {
+    const result = await run(() => ({kind: 'missing', path: '/p.json'}), {
+      requireCmuxPane: false,
+    });
+    expect(result).toMatchObject({kind: 'refused', reason: 'guardNotSeen'});
+    expect(result.kind === 'refused' ? result.detail : '').not.toContain(
+      'thread handoff',
+    );
+  });
+
+  test('a dry run reports it, and passes on to the other checks', async () => {
+    for (const read of BAD_PASSES) {
+      const result = await run(() => read, {dryRun: true});
+      expect(result.kind).toBe('pass');
+      expect(
+        result.kind === 'pass' ? result.facts.guardPassNote : null,
+      ).toContain('thread handoff --note');
+    }
+    // A later check still refuses on a dry run.
+    const killed = await runHandoffGate({
+      dryRun: true,
+      env: PANE_ENV,
+      limits: LIMITS,
+      now: NOW,
+      readers: passingReaders({
+        guardPass: () => ({kind: 'missing', path: '/p.json'}),
+        launchRecord: () => ({detail: 'x', kind: 'started'}),
+      }),
+    });
+    expect(killed).toMatchObject({
+      kind: 'refused',
+      reason: 'alreadyHandedOff',
+    });
+  });
+
+  test('a valid pass leaves no note, on either kind of run', async () => {
+    for (const dryRun of [true, false]) {
+      const result = await run(() => ({kind: 'valid', path: '/p.json'}), {
+        dryRun,
+      });
+      expect(result).toMatchObject({
+        facts: {guardPassNote: null},
+        kind: 'pass',
+      });
+    }
   });
 });
 

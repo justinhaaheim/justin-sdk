@@ -22,15 +22,15 @@
  * workspace name, tab titles, a successor's inherited title) follows without
  * knowing about this module.
  *
- * D5 (trial, componentConfig.thread.workspaceNameItems): the workspace name
- * lists the chain's other requests after the title, ✅ done then 🔳 open.
+ * home-base-jm5kg.18: descriptionItemsOf lists the chain's other requests for
+ * the cmux workspace description (workspace-description.ts). It replaced the
+ * trial that listed them in the workspace name.
  *
  * Rule 7: a chain or an export that cannot be read is a `failed` read, never
  * "no overarching request" and never "no other requests".
  */
 
 import type {EnvLike} from './paths';
-import type {NameItem} from './session-name';
 import type {ExportRead, SessionTree, TreeIssue} from './session-tree';
 
 import {parseInstant} from './answer-store';
@@ -43,6 +43,7 @@ import {
 } from './session-bead';
 import {readSessionSightings} from './session-index';
 import {readBeadsExport, readSessionTree} from './session-tree';
+import {shortOrCutTitle} from './short-label';
 
 export const OVERARCHING_LABEL = 'overarching';
 export const OVERARCHING_SET_LABEL_PREFIX = 'overarching-set:';
@@ -289,7 +290,7 @@ export function pickOverarching(
 }
 
 // ---------------------------------------------------------------------------
-// D5: the workspace name with its items (trial)
+// The items of the workspace description (home-base-jm5kg.18)
 // ---------------------------------------------------------------------------
 
 function isClosed(issue: {status: string}): boolean {
@@ -304,16 +305,22 @@ function closedNotNeeded(issue: TreeIssue): boolean {
   );
 }
 
+export interface DescriptionItem {
+  done: boolean;
+  /** The request's short label, else its title cut with "…". */
+  label: string;
+}
+
 /**
- * D5: the items after the title. Every request of the chain except the
- * overarching one, any whose title is the head title itself (the first
- * request names a session with none marked), and any closed "not needed";
- * done before open, oldest first within each.
+ * One item per request of the chain except the overarching one, any whose
+ * title is the head title itself (the first request names a session with none
+ * marked), and any closed "not needed"; done before open, oldest first within
+ * each.
  */
-export function nameItemsOf(input: {
+export function descriptionItemsOf(input: {
   headTitle: string;
   requests: readonly TreeIssue[];
-}): NameItem[] {
+}): DescriptionItem[] {
   const {overarching} = pickOverarching(input.requests);
   const head = input.headTitle.trim();
   const listed = input.requests
@@ -328,8 +335,8 @@ export function nameItemsOf(input: {
   const done = listed.filter(isClosed);
   const open = listed.filter((request) => !isClosed(request));
   return [
-    ...done.map((request) => ({done: true, title: request.title})),
-    ...open.map((request) => ({done: false, title: request.title})),
+    ...done.map((request) => ({done: true, label: shortOrCutTitle(request)})),
+    ...open.map((request) => ({done: false, label: shortOrCutTitle(request)})),
   ];
 }
 

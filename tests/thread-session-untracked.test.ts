@@ -43,12 +43,12 @@ import {
   renderInbox,
 } from '../src/thread/session-inbox';
 import {
+  attributeUncommitted,
   measured,
   uncommittedFromPorcelain,
   unmeasured,
 } from '../src/thread/session-model';
 import {
-  attributeUncommitted,
   untrackedCard,
   untrackedLine,
   untrackedVerdict,
@@ -84,6 +84,7 @@ function fixture(over: Partial<UntrackedSession> = {}): UntrackedSession {
       aheadOfDefault: measured(0),
       branch: measured('main'),
       defaultBranch: measured('main'),
+      localDefaultBehind: measured(null),
       merged: measured('isDefault'),
       uncommitted: measured([]),
       unpushed: measured({kind: 'noUpstream'}),
@@ -253,6 +254,7 @@ describe('D6 verdict: what could not be measured is rule 10, never one line (cri
         aheadOfDefault: unmeasured(reason),
         branch: unmeasured(reason),
         defaultBranch: unmeasured(reason),
+        localDefaultBehind: unmeasured(reason),
         merged: unmeasured(reason),
         uncommitted: unmeasured(reason),
         unpushed: unmeasured(reason),
@@ -301,6 +303,7 @@ describe('D6 verdict: what could not be measured is rule 10, never one line (cri
       commonDir: '/dev/alpha/.git',
       defaultBranch: measured('main'),
       kind: 'measured' as const,
+      localDefaultBehind: measured(null),
       merged: measured('isDefault' as const),
       repo: 'alpha',
       top: '/dev/alpha',
@@ -312,7 +315,7 @@ describe('D6 verdict: what could not be measured is rule 10, never one line (cri
       cache: null,
       readWrites: () => ({ok: false, reason: 'could not read t.jsonl: EACCES'}),
       shared,
-      transcriptPath: '/projects/t.jsonl',
+      transcript: {ok: true, path: '/projects/t.jsonl'},
     });
     const reason =
       'the uncommitted files in /dev/alpha could not be attributed to this session: could not read t.jsonl: EACCES';
@@ -965,11 +968,13 @@ describe('every card shows its pane from the live join (j8q3e.7, end to end)', (
     expect(rowOf(r, 2)[0]?.card.paneFact.kind).toBe('live');
   });
 
-  test('a failed lookup is "unknown (<reason>)" on every card and in the summary, never "none found" (rule 7)', async () => {
+  test('p05kz.3 item 5: a failed lookup is said once, in the summary; each card says unknown and points there, never "none found" (rule 7)', async () => {
     const reason =
       'ps refused: Operation not permitted, as inside the Claude Code sandbox';
     const r = await read(() => Promise.resolve({ok: false, reason}));
-    const text = renderInbox(r, {
+    const cardCount = r.rows.filter((row) => row.display === 'card').length;
+    expect(cardCount).toBeGreaterThan(1);
+    const plain = renderInbox(r, {
       all: false,
       days: 30,
       now: NOW,
@@ -977,18 +982,62 @@ describe('every card shows its pane from the live join (j8q3e.7, end to end)', (
       style: PLAIN_STYLE,
       timeZone: 'UTC',
     });
-    expect(text).not.toContain('none found');
-    expect(text).toContain(`- **Pane:** unknown (${reason})`);
-    expect(text).toContain(
+    expect(plain).not.toContain('none found');
+    expect(plain).toContain(
       `- **🪟 Open panes with no request record:** unknown (${reason})`,
     );
+    expect(plain.split(reason).length - 1).toBe(1);
+    expect(
+      plain.split('- **Pane:** unknown (see the summary)').length - 1,
+    ).toBe(cardCount);
+    // The terminal's renderer, wrapping off so the reason stays one string.
+    const ansi = renderInbox(r, {
+      all: false,
+      days: 30,
+      now: NOW,
+      order: 'recent',
+      style: {color: true, width: null},
+      timeZone: 'UTC',
+    });
+    expect(ansi.split(reason).length - 1).toBe(1);
+    expect(ansi.split('unknown (see the summary)').length - 1).toBe(cardCount);
+    // The model and the JSON keep the full reason on every session.
     for (const row of r.rows) {
       expect(row.card.paneFact).toMatchObject({kind: 'unknown', reason});
     }
+    const json = JSON.stringify(inboxJson(r));
+    expect(json.split(reason).length - 1).toBeGreaterThan(r.rows.length);
+    expect(json).not.toContain('see the summary');
   });
 });
 
 describe('the Pane line words (j8q3e.7 D7, pure)', () => {
+  test("p05kz.3 item 5: only the summary's own reason is shortened, and the recorded pane survives", () => {
+    const failed: PaneLookup = {ok: false, reason: 'no socket'};
+    const recorded = paneFactOf(failed, 's-1', {
+      surface: 'SF-R',
+      workspace: 'WS-R',
+    });
+    expect(paneLineParts(recorded, 'no socket')).toEqual({
+      after: ' (surface SF-R)',
+      before: 'unknown (see the summary); recorded at session start: ',
+      command: 'cmux select-workspace --workspace WS-R',
+    });
+    // A reason of the card's own keeps its words, as does an absent summary.
+    const own = {
+      kind: 'unknown' as const,
+      reason: 'two sessions on one pane',
+      recorded: null,
+    };
+    expect(paneLineParts(own, 'no socket').before).toBe(
+      'unknown (two sessions on one pane)',
+    );
+    expect(paneLineParts(recorded).before).toStartWith('unknown (no socket)');
+    expect(paneLineParts(recorded, null).before).toStartWith(
+      'unknown (no socket)',
+    );
+  });
+
   test('a failed lookup adds the pane recorded at session start, labelled as recorded', () => {
     const failed: PaneLookup = {ok: false, reason: 'no socket'};
     expect(
@@ -1034,6 +1083,7 @@ describe('j8q3e.13 F10: a rename takes the newer of its two sides last commits',
         commonDir: join(repo, '.git'),
         defaultBranch: measured('main'),
         kind: 'measured' as const,
+        localDefaultBehind: measured(null),
         merged: measured('isDefault' as const),
         repo: 'renamed',
         top: repo,
@@ -1057,7 +1107,7 @@ describe('j8q3e.13 F10: a rename takes the newer of its two sides last commits',
             ok: true,
           }),
           shared,
-          transcriptPath: 't.jsonl',
+          transcript: {ok: true, path: 't.jsonl'},
         });
       expect((await wroteOldAt('2020-01-01T00:00:00.000Z'))?.own).toEqual(
         measured([]),
@@ -1377,7 +1427,7 @@ describe('uncommitted files are attributed to the session that wrote them (j8q3e
       timeZone: 'UTC',
     });
     expect(text).toContain(
-      `${shared.replace(process.env.HOME ?? '', '~')}: 1 uncommitted file that no Not-tracked session's transcript names (other.txt); 1 session there could not be checked.`,
+      `${shared.replace(process.env.HOME ?? '', '~')}: 1 uncommitted file that no listed session's transcript names (other.txt); 1 session there could not be checked.`,
     );
     // F4: never a claim that no session wrote the files.
     expect(text).toContain('transcript names');

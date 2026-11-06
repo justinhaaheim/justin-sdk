@@ -58,8 +58,8 @@ import type {
   HelperInFlight,
   LoadCache,
   Measured,
+  UncommittedDirt,
 } from './session-model';
-import type {WriteEvidence} from './session-writes';
 
 import {existsSync, readFileSync} from 'fs';
 import {homedir} from 'os';
@@ -88,9 +88,9 @@ import {
   workingText,
 } from './session-card';
 import {
+  attributeUncommitted,
   firstUserLine,
   lastAssistantLine,
-  lastCommitCached,
   measureCheckoutCached,
   measured,
   measureTranscriptAt,
@@ -99,11 +99,6 @@ import {
 } from './session-model';
 import {sessionDisplayName} from './session-name';
 import {recentHelpers, WORKING_WINDOW_MS} from './session-status';
-import {
-  ownDirtyPaths,
-  readWrittenPaths,
-  writtenDirtyPaths,
-} from './session-writes';
 
 /** D6: "every Claude Code session ... under ~/Dev". */
 export function defaultDevRoot(): string {
@@ -280,82 +275,17 @@ export interface UntrackedSession {
   wrapUpAt: number | null;
 }
 
-/** j8q3e.6 D3: a checkout's dirty paths, and the ones one session wrote. */
-export interface UncommittedDirt {
-  /** Every dirty `git status --porcelain` entry of the checkout, `.beads/` excluded. */
-  checkout: string[];
-  /** Of `checkout`, the ones this session wrote after their last commit; unmeasured = could not be attributed. */
-  own: Measured<string[]>;
-  /** The checkout's top (git's), which the per-checkout note groups by. */
-  top: string;
-}
-
 function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
 }
 
 /**
- * j8q3e.6 D1-D3: which of the checkout's dirty paths this session wrote after
- * their last commit. Its transcript is read only when the checkout is dirty,
- * and `git log` runs only for the dirty paths it wrote. A transcript, or a
- * `git log`, that cannot be read makes `own` unmeasured (D2, rule 7), never [].
- * `readWrites` is injected by the tests.
- */
-export async function attributeUncommitted(input: {
-  cache: LoadCache | null;
-  readWrites?: (
-    transcriptPath: string,
-  ) => {evidence: WriteEvidence; ok: true} | {ok: false; reason: string};
-  shared: CheckoutGit;
-  transcriptPath: string;
-}): Promise<UncommittedDirt | null> {
-  const {cache, shared} = input;
-  if (shared.kind === 'failed' || !shared.uncommitted.ok) return null;
-  const {top} = shared;
-  const dirty = shared.uncommitted.value;
-  if (dirty.length === 0) return {checkout: [], own: measured([]), top};
-  // No count in the words: the checkout's count moves whenever another
-  // session edits there, and this card must not (j8q3e.6 AC 4).
-  const cannot = (why: string): UncommittedDirt => ({
-    checkout: dirty,
-    own: unmeasured(
-      `the uncommitted files in ${top} could not be attributed to this session: ${why}`,
-    ),
-    top,
-  });
-  const writes = (input.readWrites ?? readWrittenPaths)(input.transcriptPath);
-  if (!writes.ok) return cannot(writes.reason);
-  const written = writtenDirtyPaths(dirty, top, writes.evidence);
-  const commits = await Promise.all(
-    written.map(
-      async (path) => [path, await lastCommitCached(top, path, cache)] as const,
-    ),
-  );
-  const lastCommitMs = new Map<string, number | null>();
-  for (const [path, commit] of commits) {
-    if (!commit.ok) return cannot(commit.reason);
-    lastCommitMs.set(path, commit.value);
-  }
-  return {
-    checkout: dirty,
-    own: measured(
-      ownDirtyPaths({
-        dirty: written,
-        evidence: writes.evidence,
-        lastCommitMs,
-        top,
-      }),
-    ),
-    top,
-  };
-}
-
-/**
- * j8q3e.6 D3: per checkout, its dirty paths that no listed untracked session's
- * transcript names as written — printed once, after the list, instead of on
- * every session that ever ran there. Not "that no session wrote" (j8q3e.13
- * F4): `bun add` or `prettier --write .` dirty files without naming them.
- * `unchecked` counts that checkout's sessions whose files could not be
+ * j8q3e.6 D3: per checkout, its dirty paths that no listed session's transcript
+ * names as written — printed once, after the list, instead of on every session
+ * that ever ran there. Tracked sessions count too (home-base-j8q3e.16, through
+ * `unattributedOfListed` in session-inbox.ts). Not "that no session wrote"
+ * (j8q3e.13 F4): `bun add` or `prettier --write .` dirty files without naming
+ * them. `unchecked` counts that checkout's sessions whose files could not be
  * attributed (their writes may be among `paths`).
  */
 export interface UnattributedDirt {
@@ -695,6 +625,7 @@ function checkoutGitInput(shared: CheckoutGit): CardGitInput {
       aheadOfDefault: unmeasured(reason),
       branch: unmeasured(reason),
       defaultBranch: unmeasured(reason),
+      localDefaultBehind: unmeasured(reason),
       merged: unmeasured(reason),
       uncommitted: unmeasured(reason),
       unpushed: unmeasured(reason),
@@ -807,7 +738,7 @@ export async function readUntracked(input: {
       const dirt = await attributeUncommitted({
         cache,
         shared,
-        transcriptPath: session.transcriptPath,
+        transcript: {ok: true, path: session.transcriptPath},
       });
       const checkoutGit = checkoutGitInput(shared);
       const configDir = shared.kind === 'measured' ? shared.top : cwd;

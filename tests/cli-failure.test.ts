@@ -48,9 +48,19 @@ describe('the real CLI', () => {
     const {status, stderr, stdout} = run(CLI, ['no-such-command']);
     expect(stdout).toBe('');
     expect(status).toBe(1);
-    // The reason, and the help to act on it, both on stderr.
+    // One line: the reason, and where the help is. Not the help itself, which
+    // printed 21k characters 167 times on 2026-10-22 (home-base-p05kz.4).
+    expect(stderr).toBe(
+      'Unknown argument: no-such-command. Run `bun run justin-sdk --help`.\n',
+    );
+  });
+
+  test('an unknown subcommand of a command group is one line too', () => {
+    const {status, stderr, stdout} = run(CLI, ['thread', 'no-such-command']);
+    expect(stdout).toBe('');
+    expect(status).toBe(1);
+    expect(stderr.trim().split('\n')).toHaveLength(1);
     expect(stderr).toContain('Unknown argument: no-such-command');
-    expect(stderr).toContain('justin-sdk <command>');
   });
 
   test('a missing positional writes NOTHING to stdout and exits 1', () => {
@@ -58,6 +68,9 @@ describe('the real CLI', () => {
     expect(stdout).toBe('');
     expect(status).toBe(1);
     expect(stderr).toContain('Not enough non-option arguments');
+    // Every other usage error keeps its help screen: that is the useful part.
+    expect(stderr).toContain('eas-update');
+    expect(stderr.split('\n').length).toBeGreaterThan(3);
   });
 
   test('--help still goes to STDOUT and exits 0', () => {

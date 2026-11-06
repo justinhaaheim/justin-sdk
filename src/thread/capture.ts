@@ -104,11 +104,17 @@ import {
   extractTranscriptTurns,
   type TranscriptTurns,
 } from './transcript-messages';
+import {
+  describeWorkspaceDescription,
+  type DescriptionReaders,
+  type WorkspaceDescriptionOutcome,
+} from './workspace-description';
 import {type WorkspaceSyncOutcome, workspaceSyncRecord} from './workspace-name';
 import {
   lookupWorkspaceSession,
   type SessionLookup,
   type SessionLookupFn,
+  syncDescriptionForCapture,
   syncTabForCapture,
   syncWorkspaceForCapture,
 } from './workspace-name-session';
@@ -835,6 +841,8 @@ export interface ApplyOptions {
    * without `--cwd`; the run record then names the default.
    */
   cwdDefaulted?: boolean;
+  /** What the workspace description reads; tests inject fixtures. */
+  descriptionReaders?: DescriptionReaders;
   env?: EnvLike;
   /** The spawning hook's synchronous ms (`--hook-ms`), recorded as-is. */
   hookElapsedMs?: number | null;
@@ -1072,6 +1080,11 @@ export type CaptureApplyOutcome =
        */
       tabTitle?: TabTitleOutcome | null;
       /**
+       * What writing the workspace description did (home-base-jm5kg.18);
+       * absent or null when the knob is off or the workspace sync did not run.
+       */
+      workspaceDescription?: null | WorkspaceDescriptionOutcome;
+      /**
        * What naming the cmux workspace did (home-base-j8q3e.5 D4 a); null
        * when no session bead was ensured or nameWorkspaces is off.
        */
@@ -1220,6 +1233,7 @@ export async function applyCapture(
   let pickup: CapturePickupOutcome | null = null;
   let workspaceName: WorkspaceSyncOutcome | null = null;
   let tabTitle: TabTitleOutcome | null = null;
+  let workspaceDescription: null | WorkspaceDescriptionOutcome = null;
   let cmuxLabels: CmuxLabelsOutcome | null = null;
   try {
     // Under the lock, before the first pass: the pass then applies the seeded
@@ -1306,6 +1320,24 @@ export async function applyCapture(
             reason: `threw: ${probeErrorMessage(error)}`,
           };
         }
+        // home-base-jm5kg.18: after the name sync, which resolved the
+        // workspace. A failure lands in the run record and leaves the text.
+        try {
+          workspaceDescription = await syncDescriptionForCapture({
+            cwd,
+            env,
+            lookup,
+            nameOutcome: workspaceName,
+            readers: options.descriptionReaders,
+            run: options.cmux,
+          });
+        } catch (error) {
+          workspaceDescription = {
+            kind: 'failed',
+            reason: `threw: ${probeErrorMessage(error)}`,
+            workspaceId: null,
+          };
+        }
       }
     }
     for (;;) {
@@ -1375,6 +1407,7 @@ export async function applyCapture(
     statusFile,
     tabTitle,
     workspaceName,
+    ...(workspaceDescription == null ? {} : {workspaceDescription}),
     ...(cmuxLabels == null ? {} : {cmuxLabels}),
     ...(pickup == null ? {} : {pickup}),
   };
@@ -1438,6 +1471,12 @@ export function captureRunRecord(
     record.tabTitle = {
       detail: describeTabTitle(outcome.tabTitle),
       kind: outcome.tabTitle.kind,
+    };
+  }
+  if (outcome.workspaceDescription != null) {
+    record.workspaceDescription = {
+      detail: describeWorkspaceDescription(outcome.workspaceDescription),
+      kind: outcome.workspaceDescription.kind,
     };
   }
   if (outcome.statusFile != null) {

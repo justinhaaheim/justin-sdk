@@ -36,9 +36,9 @@ import type {QuotaGateDecision, QuotaGateRead} from './quota-gate';
 import {lstatSync, readFileSync} from 'node:fs';
 import {join} from 'node:path';
 
-import {brShow, brUpdate, describeBrFailed} from '../beads/br';
+import {brShow, brUpdate, describeBrFailed, saysBeadsLocked} from '../beads/br';
 import {readSamples, samplesPath} from '../claude-usage-samples';
-import {SDK_BIN_BY_PATH} from '../sdk-invocation';
+import {SDK_BIN_BY_PATH, SDK_HANDOFF_CALL} from '../sdk-invocation';
 import {oneLine} from './ask-format';
 import {gateCmuxRunner, realCmuxRunner} from './cmux';
 import {consumeGuardPass, describeGuardPass} from './guard-pass';
@@ -49,6 +49,7 @@ import {
 import {realChainReaders, walkUnattendedChain} from './handoff-chain';
 import {countLiveSessions, describeLiveSessionCount} from './live-count';
 import {readLiveSessions, realLiveSessionDeps} from './live-sessions';
+import {describePace, newestUsableSample, paceFromSamples} from './pacing';
 import {statusLineIdOf} from './pane-join';
 import {threadsStateDir} from './paths';
 import {gateLine, quotaGateDecision, readQuotaForGate} from './quota-gate';
@@ -81,6 +82,9 @@ export const HANDOFF_REFUSAL_REASONS = [
   'cmuxUnreachable',
   'usageUnknown',
   'usageHigh',
+  // The pacing hold (home-base-jm5kg.17): only with usage.paceHold on.
+  'paceUnknown',
+  'paceHold',
   'chainUnknown',
   'tooManyUnattendedHandoffs',
   // The spend quota (home-base-ys9t7.5 D7, quota-gate.ts): enforce mode only.
@@ -119,16 +123,25 @@ export function handoffRefusalMessage(
 }
 
 /**
- * home-base-89c8h.1 D5: why the gate decided nothing. The only reason so far:
- * cmux still had not answered at the deadline.
+ * home-base-89c8h.1 D5: why nothing was decided. cmux still had not answered at
+ * the deadline, or another process held the beads database for the whole wait
+ * (home-base-p05kz.5.1).
  */
-export type HandoffDeferralReason = 'cmuxSlow';
+export type HandoffDeferralReason = 'beadsLocked' | 'cmuxSlow';
 
 /** What a deferred handoff tells the calling Claude, after its reason (D6). */
 export const HANDOFF_DEFERRAL_INSTRUCTIONS = [
   'Nothing was refused, and no successor was started.',
   'This command already waited for cmux. Run the same command again at once, up to 3 more times.',
   'If it still exits 4, include the handoff block printed above in your final report for Justin, and stop.',
+  'Never start a session another way: no cmux command, no claude command.',
+] as const;
+
+/** The same, when the beads database was locked: there may be no block to quote. */
+export const HANDOFF_BEADS_LOCKED_INSTRUCTIONS = [
+  'Nothing was refused, and no successor was started.',
+  'This command already waited for the beads database. Run the same command again at once, up to 3 more times.',
+  'If it still exits 4, quote this output in your final report for Justin, and stop.',
   'Never start a session another way: no cmux command, no claude command.',
 ] as const;
 
@@ -140,7 +153,9 @@ export function handoffDeferralMessage(
   return [
     `handoff deferred: ${reason}: ${detail}`,
     '',
-    ...HANDOFF_DEFERRAL_INSTRUCTIONS,
+    ...(reason === 'beadsLocked'
+      ? HANDOFF_BEADS_LOCKED_INSTRUCTIONS
+      : HANDOFF_DEFERRAL_INSTRUCTIONS),
   ].join('\n');
 }
 
@@ -230,9 +245,6 @@ export interface HandoffUsageFacts {
   weekPercent: number;
 }
 
-/** A sample dated more than this far in the future is not trusted. */
-const FUTURE_TOLERANCE_MINUTES = 5;
-
 export type UsageCheck =
   | {facts: HandoffUsageFacts; ok: true}
   | {detail: string; ok: false; reason: 'usageHigh' | 'usageUnknown'};
@@ -247,49 +259,11 @@ export function checkUsage(
   limits: HandoffUsageLimits,
   now: Date,
 ): UsageCheck {
-  const unknown = (detail: string): UsageCheck => ({
-    detail,
-    ok: false,
-    reason: 'usageUnknown',
-  });
-  if (read.kind === 'missing') {
-    return unknown(
-      `there is no usage history at ${read.path} (the hourly claude-usage-sample chore writes it)`,
-    );
+  const usable = newestUsableSample(read, limits.maxSampleAgeMinutes, now);
+  if (!usable.ok) {
+    return {detail: usable.detail, ok: false, reason: 'usageUnknown'};
   }
-  if (read.kind === 'failed') {
-    return unknown(`the usage history could not be read: ${read.reason}`);
-  }
-  // F20 (home-base-mbnjv.8): an unreadable LAST line may be the newest
-  // sample; an older one is not used in its place.
-  if (read.lastLineUnreadable) {
-    const last = read.unreadable.at(-1);
-    return unknown(
-      `the newest line of the usage history (${read.path}${last == null ? '' : ` line ${last.line}`}) could not be read${last == null ? '' : `: ${last.reason}`}; an older sample is not used in its place`,
-    );
-  }
-  const newest = read.samples.at(-1);
-  if (newest == null) {
-    return unknown(
-      `the usage history at ${read.path} holds no readable sample${read.unreadable.length > 0 ? ` (${read.unreadable.length} unreadable line${read.unreadable.length === 1 ? '' : 's'})` : ''}`,
-    );
-  }
-  if (!newest.ok) {
-    return unknown(
-      `the newest usage sample (${newest.sampledAt}) is a failed read: ${newest.reason}`,
-    );
-  }
-  const ageMinutes = (now.getTime() - Date.parse(newest.sampledAt)) / 60_000;
-  if (ageMinutes < -FUTURE_TOLERANCE_MINUTES) {
-    return unknown(
-      `the newest usage sample is dated ${newest.sampledAt}, in the future`,
-    );
-  }
-  if (ageMinutes > limits.maxSampleAgeMinutes) {
-    return unknown(
-      `the newest usage sample is ${Math.round(ageMinutes)} minutes old (${newest.sampledAt}), older than the ${limits.maxSampleAgeMinutes}-minute limit`,
-    );
-  }
+  const {ageMinutes, sample: newest} = usable;
   const over: string[] = [];
   // jm5kg.19 D4: the 5-hour ceiling applies only when the sample has a 5-hour
   // window. null is "the panel showed none", so there is nothing to compare.
@@ -326,6 +300,33 @@ export function checkUsage(
       weekPercent: newest.week.pct,
     },
     ok: true,
+  };
+}
+
+/**
+ * The pacing hold (home-base-jm5kg.17): at hold level, or with the pace unknown,
+ * this refuses; null passes. The gate calls it only with usage.paceHold on, and
+ * only after checkUsage passed, so the ceilings come first and stay as they are.
+ */
+export function checkPaceHold(
+  read: SamplesRead,
+  limits: Pick<HandoffUsageLimits, 'maxSampleAgeMinutes'>,
+  now: Date,
+): {detail: string; reason: 'paceHold' | 'paceUnknown'} | null {
+  const pace = paceFromSamples(read, {
+    maxSampleAgeMinutes: limits.maxSampleAgeMinutes,
+    now,
+  });
+  if (pace.kind === 'unknown') {
+    return {
+      detail: `the week's pace could not be worked out: ${pace.reason}`,
+      reason: 'paceUnknown',
+    };
+  }
+  if (pace.verdict !== 'hold') return null;
+  return {
+    detail: `${describePace(pace)}, read ${pace.readAt}, week resets ${pace.resetsAt}`,
+    reason: 'paceHold',
   };
 }
 
@@ -399,11 +400,21 @@ export interface HandoffGateReaders {
 export interface HandoffGateLimits {
   maxLiveSessions: number;
   maxUnattendedHandoffs: number;
-  /** `check: false` skips the usage check; absent checks. */
-  usage: HandoffUsageLimits & {check?: boolean};
+  /**
+   * `check: false` skips the usage check; absent checks. `paceHold: true` adds
+   * the pacing hold; absent or false leaves the gate exactly as it was.
+   */
+  usage: HandoffUsageLimits & {check?: boolean; paceHold?: boolean};
 }
 
 export interface HandoffGateInput {
+  /**
+   * home-base-p05kz.3 item 8: true only for `thread handoff --dry-run`, which
+   * opens nothing. A guard pass that is not valid is then reported in
+   * facts.guardPassNote instead of refusing. Absent or false refuses: a real
+   * run always needs the pass (F14).
+   */
+  dryRun?: boolean;
   /** The caller's environment: CMUX_WORKSPACE_ID and CMUX_SURFACE_ID. */
   env: EnvLike;
   limits: HandoffGateLimits;
@@ -419,6 +430,11 @@ export interface HandoffGateInput {
 /** What every check measured, when the gate passed. */
 export interface HandoffGateFacts {
   chain: {kind: 'skipped'} | Extract<UnattendedChain, {kind: 'counted'}>;
+  /**
+   * Why a real run would refuse with guardNotSeen, on a dry run that had no
+   * valid pass. Always null on a real run, which refuses instead.
+   */
+  guardPassNote: string | null;
   liveSessions: LiveSessionCount;
   /** CMUX_SURFACE_ID; null only when requireCmuxPane was false and it is unset. */
   surfaceId: string | null;
@@ -479,6 +495,18 @@ function deferredCmuxSlow(
     kind: 'deferred',
     message: handoffDeferralMessage('cmuxSlow', detail),
     reason: 'cmuxSlow',
+  };
+}
+
+/** home-base-p05kz.5.1: the gate's answer when a bead read met a locked database. */
+function deferredBeadsLocked(
+  detail: string,
+): Extract<HandoffGateResult, {kind: 'deferred'}> {
+  return {
+    detail,
+    kind: 'deferred',
+    message: handoffDeferralMessage('beadsLocked', detail),
+    reason: 'beadsLocked',
   };
 }
 
@@ -591,14 +619,20 @@ export async function runHandoffGate(
   // the one-time pass proves the guard ran and allowed it (it fails open on
   // a timeout, so the command must fail closed here).
   const pass = await attempt(readers.guardPass);
+  let guardPassNote: string | null = null;
   if ('threw' in pass) {
-    return refused(
-      'guardNotSeen',
-      `the guard pass could not be read: ${pass.threw}`,
+    guardPassNote = `the guard pass could not be read: ${pass.threw}`;
+  } else if (pass.value.kind !== 'valid') {
+    // `thread spawn` also comes through here and has other flags.
+    guardPassNote = describeGuardPass(
+      pass.value,
+      input.requireCmuxPane === false
+        ? null
+        : `${SDK_HANDOFF_CALL} --note "<one line>"`,
     );
   }
-  if (pass.value.kind !== 'valid') {
-    return refused('guardNotSeen', describeGuardPass(pass.value));
+  if (guardPassNote != null && input.dryRun !== true) {
+    return refused('guardNotSeen', guardPassNote);
   }
 
   // 1d. F11: one successor per session. A second handoff after exit 0, or
@@ -612,6 +646,11 @@ export async function runHandoffGate(
         : record.value.kind === 'failed'
           ? record.value.reason
           : null;
+    if (why != null && saysBeadsLocked(why)) {
+      return deferredBeadsLocked(
+        `whether this session already started a successor could not be checked: ${why}`,
+      );
+    }
     if (why != null) {
       return refused(
         'alreadyHandedOff',
@@ -722,6 +761,12 @@ export async function runHandoffGate(
     const usage = checkUsage(usageRead.value, limits.usage, now);
     if (!usage.ok) return refused(usage.reason, usage.detail);
     usageFacts = usage.facts;
+    // 4b. The pacing hold (home-base-jm5kg.17). Behind its own knob, default
+    // off, and after the ceilings: it adds a refusal and replaces nothing.
+    if (limits.usage.paceHold === true) {
+      const hold = checkPaceHold(usageRead.value, limits.usage, now);
+      if (hold != null) return refused(hold.reason, hold.detail);
+    }
   }
 
   // 5. Handoffs in a row since Justin last typed in the chain.
@@ -732,6 +777,14 @@ export async function runHandoffGate(
       return refused(
         'chainUnknown',
         `the handoff chain could not be read: ${walked.threw}`,
+      );
+    }
+    if (
+      walked.value.kind === 'unknown' &&
+      saysBeadsLocked(walked.value.reason)
+    ) {
+      return deferredBeadsLocked(
+        `the handoff chain could not be read: ${walked.value.reason}`,
       );
     }
     if (walked.value.kind === 'unknown') {
@@ -786,6 +839,7 @@ export async function runHandoffGate(
   return {
     facts: {
       chain,
+      guardPassNote,
       liveSessions: live.value,
       surfaceId: surfaceId === '' ? null : surfaceId,
       usage: usageFacts,

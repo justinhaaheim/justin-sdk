@@ -180,6 +180,7 @@ describe('thread spawn and the handoff gate', () => {
     const pass: HandoffGateResult = {
       facts: {
         chain: {kind: 'skipped'},
+        guardPassNote: null,
         liveSessions: {
           bySource: {agents: 0, hookStore: 0, ps: 1, screen: 0},
           kind: 'counted',

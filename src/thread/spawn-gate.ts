@@ -9,6 +9,9 @@
  * The spend quota (home-base-ys9t7.5 D7) runs inside the handoff gate, and
  * ON ITS OWN where successor is off: a spawn starts a session that spends.
  *
+ * The pacing hold (usage.paceHold, home-base-jm5kg.17) comes with the handoff
+ * gate's usage check, so it reaches a spawn only where successor is on.
+ *
  * A refusal exits 3, opens nothing, and is recorded on the caller's session
  * bead when the caller has one. The gate's own `message` is worded for
  * `thread handoff` ("include the handoff block printed above"), so the text

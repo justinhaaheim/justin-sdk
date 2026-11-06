@@ -55,6 +55,7 @@ function session(
       aheadOfDefault: measured(0),
       branch: measured('main'),
       defaultBranch: measured('main'),
+      localDefaultBehind: measured(null),
       merged: measured('isDefault'),
       uncommitted: measured([]),
       unpushed: measured<Unpushed>({
@@ -114,11 +115,12 @@ function read(rows: InboxRow[]): InboxRead {
     corrupt: [],
     hiddenByAge: {},
     indexPath: '/state/sessions.jsonl',
-    inputDrafts: {failures: [], kind: 'read', unshown: []},
+    inputDrafts: {failures: [], kind: 'read', unchecked: [], unshown: []},
     missing: false,
     panes: NO_PANES,
     readMarks: {kind: 'read'},
     ...shapeRows(rows),
+    sessionDirt: [],
     untracked: {
       devRoot: '/dev',
       failures: [],

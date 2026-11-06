@@ -229,6 +229,7 @@ describe('untrackedVerdict with helpers (F10)', () => {
       aheadOfDefault: measured(0),
       branch: measured('main'),
       defaultBranch: measured('main'),
+      localDefaultBehind: measured(null),
       merged: measured('isDefault'),
       uncommitted: measured([]),
       unpushed: unmeasured('not read'),

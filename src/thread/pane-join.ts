@@ -55,8 +55,12 @@ export interface HookSession {
   lastBody?: string | null;
   pid?: number | null;
   sessionId?: string | null;
+  /** Epoch seconds; measured 2026-11-06 on cmux 0.64.24. */
+  startedAt?: number | null;
   surfaceId?: string | null;
   transcriptPath?: string | null;
+  /** Epoch seconds; measured 2026-11-06 on cmux 0.64.24. */
+  updatedAt?: number | null;
   workspaceId?: string | null;
 }
 

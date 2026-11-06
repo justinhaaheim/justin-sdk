@@ -62,6 +62,7 @@ import {
   measured,
   unmeasured,
 } from './session-model';
+import {readShortLabel} from './short-label';
 
 /** Epic D2 step 2: a session whose last record is younger than this is working. */
 export const WORKING_WINDOW_MS = 3 * 60_000;
@@ -519,6 +520,11 @@ export type MarkItem =
     }
   | {kind: 'requestChildrenClosed'; request: TreeIssue}
   /**
+   * home-base-jm5kg.18 (componentConfig.thread.workspaceDescription on): an
+   * open request with no short label, so the description shows its cut title.
+   */
+  | {kind: 'shortLabel'; request: TreeIssue}
+  /**
    * home-base-vzwbj.4.16 G2: the yield would be ⚠️ Open work, and this open
    * request is why — nothing blocks it. Says what to do with it: close it
    * (work done); keep working, or file the P0 it cannot move without (not
@@ -794,6 +800,8 @@ export function whatToMark(
     overarching?: Measured<OverarchingFacts>;
     /** home-base-npbse.1.2 item 5: the handoff pickup has not held yet. */
     pickupNotDone?: null | PickupNotDone;
+    /** home-base-jm5kg.18: ask for a short label on each open request with none. */
+    shortLabels?: boolean;
     titleSummary?: boolean;
   } = {},
 ): MarkItem[] {
@@ -831,6 +839,12 @@ export function whatToMark(
       });
     } else if (childrenAllClosed(node)) {
       items.push({kind: 'requestChildrenClosed', request: node.request});
+    }
+    if (
+      options.shortLabels === true &&
+      readShortLabel(node.request.labels) == null
+    ) {
+      items.push({kind: 'shortLabel', request: node.request});
     }
   }
 

@@ -38,7 +38,7 @@ The command may refuse: too many sessions running, usage too high, or another re
 - **Exit 1: a step failed after the handoff was recorded.** The output says what was done. Quote it in your final report and stop. Do not run `thread handoff` again.
 - **Exit 2: nothing was written.** The output says why. If your call was wrong, fix it and run it again. Otherwise report the message and stop.
 - **Exit 3: the gate refused.** The handoff and the refusal are recorded, and nothing was opened. The refusal is final. Put the printed handoff block in your final report and stop. Do not run `thread handoff` again.
-- **Exit 4: deferred, cmux was too slow to decide.** Nothing was refused and nothing was opened. The command already waited, so run the same command again at once, up to 3 more times. If it still exits 4, put the printed handoff block in your final report and stop.
+- **Exit 4: deferred, cmux was too slow to decide or the beads database stayed locked.** Nothing was refused and nothing was opened. The command already waited, so run the same command again at once, up to 3 more times. If it still exits 4, put the printed output, with its handoff block if it has one, in your final report and stop.
 
 Where the old tab is set to exit or close after a handoff, it waits until the next session has linked and your last message is recorded. Do nothing to help it: finish your report and stop.
 

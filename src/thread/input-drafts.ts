@@ -43,7 +43,7 @@ import {
 import {join} from 'node:path';
 import {z} from 'zod';
 
-import {isSafeSessionId} from './message-log';
+import {isSafeSessionId, readMessageLog} from './message-log';
 import {threadsStateDir} from './paths';
 
 export type InputDraftSource = 'close' | 'scan' | 'undo';
@@ -419,4 +419,138 @@ export function listInputDrafts(env: EnvLike = process.env): InputDraftList {
   }
   drafts.sort((a, b) => b.draft.at.localeCompare(a.draft.at));
   return {drafts, failures, kind: 'read'};
+}
+
+// ---------------------------------------------------------------------------
+// Was it sent? (home-base-p05kz.3 item 7)
+// ---------------------------------------------------------------------------
+
+/** Whitespace collapsed: a screen wraps long text and indents its continuation lines. */
+export function normalizedText(text: string): string {
+  return text.replace(/\s+/gu, ' ').trim();
+}
+
+/** A sent user line. A line with no time (null) proves no later send. */
+interface SentLine {
+  at: string | null;
+  text: string;
+}
+
+/**
+ * Did a user line sent AFTER `at` begin with this text? A capture can be cut
+ * off mid-typing, so the sent message may run on past it. A time that does not
+ * parse proves no later send.
+ */
+function wentOutAfter(
+  text: string,
+  at: string,
+  userLines: readonly SentLine[],
+): boolean {
+  const want = normalizedText(text);
+  const seenMs = Date.parse(at);
+  if (want === '' || !Number.isFinite(seenMs)) return false;
+  return userLines.some((line) => {
+    const sentMs = line.at == null ? Number.NaN : Date.parse(line.at);
+    return (
+      Number.isFinite(sentMs) &&
+      sentMs > seenMs &&
+      normalizedText(line.text).startsWith(want)
+    );
+  });
+}
+
+/**
+ * All of a draft's text went out. Real case, 2026-11-06: session 58023c65's
+ * draft, seen at 13:32:26Z, stopped at "...threads tooling is going to be", and
+ * the whole message went at 13:49:22Z, then six more, so neither "equals" nor
+ * "the newest line" could match it.
+ *
+ * Every earlier text this draft replaced (F18) must have gone out too. Besides
+ * the prefix rule, a draft that is not a sent-match still counts when it equals
+ * the newest sent line, as it did before (F23).
+ */
+export function draftWasSent(
+  draft: Pick<InputDraft, 'at' | 'previous' | 'sentMatch' | 'text'>,
+  userLines: readonly SentLine[],
+): boolean {
+  const earlierOut = draft.previous.every((earlier) =>
+    wentOutAfter(earlier.text, earlier.at, userLines),
+  );
+  if (!earlierOut) return false;
+  if (wentOutAfter(draft.text, draft.at, userLines)) return true;
+  const newest = userLines.at(-1);
+  return (
+    !draft.sentMatch &&
+    newest != null &&
+    normalizedText(draft.text) !== '' &&
+    normalizedText(newest.text) === normalizedText(draft.text)
+  );
+}
+
+export type DraftSentCheck =
+  | {kind: 'checked'; sent: boolean}
+  | {kind: 'failed'; reason: string};
+
+/** Read-only. A log that cannot be read is `failed`, never "not sent" (rule 7). */
+export function checkDraftSent(
+  sessionId: string,
+  draft: Pick<InputDraft, 'at' | 'previous' | 'sentMatch' | 'text'>,
+  env: EnvLike = process.env,
+): DraftSentCheck {
+  const log = readMessageLog(sessionId, env);
+  if (log.kind === 'missing') return {kind: 'checked', sent: false};
+  if (log.kind === 'failed') {
+    return {
+      kind: 'failed',
+      reason: `the message log ${log.path} could not be read: ${log.error}`,
+    };
+  }
+  return {
+    kind: 'checked',
+    sent: draftWasSent(
+      draft,
+      log.lines.filter((line) => line.role === 'user'),
+    ),
+  };
+}
+
+export type UnsentDraftList =
+  | {
+      /** How many drafts in the store are cleared. */
+      cleared: number;
+      /** Live, and not shown to have been sent. Includes every unchecked one. */
+      drafts: ListedInputDraft[];
+      failures: string[];
+      kind: 'read';
+      /** Live on disk, but all their text went out; the next scan clears them. */
+      sent: ListedInputDraft[];
+      /** Why a draft's log could not be read; that draft stays in `drafts`. */
+      unchecked: string[];
+    }
+  | {kind: 'failed'; reason: string};
+
+/** What `thread inbox` and `thread drafts` show as unsent. Writes nothing. */
+export function listUnsentInputDrafts(
+  env: EnvLike = process.env,
+): UnsentDraftList {
+  const listed = listInputDrafts(env);
+  if (listed.kind === 'failed') return listed;
+  const drafts: ListedInputDraft[] = [];
+  const sent: ListedInputDraft[] = [];
+  const unchecked: string[] = [];
+  for (const entry of listed.drafts) {
+    if (entry.draft.clearedAt != null) continue;
+    const check = checkDraftSent(entry.sessionId, entry.draft, env);
+    if (check.kind === 'failed') unchecked.push(check.reason);
+    if (check.kind === 'checked' && check.sent) sent.push(entry);
+    else drafts.push(entry);
+  }
+  return {
+    cleared: listed.drafts.length - drafts.length - sent.length,
+    drafts,
+    failures: listed.failures,
+    kind: 'read',
+    sent,
+    unchecked,
+  };
 }

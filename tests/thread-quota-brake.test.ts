@@ -77,6 +77,7 @@ function knownGroup(spent: number, typedMinutesAgo: number | null): GroupSpend {
   return {
     firstUnattendedAtMs: NOW - 50 * MIN,
     kind: 'known',
+    lastUnattendedAtMs: NOW - MIN,
     latestTypedAtMs: typedAt,
     members: [
       {

@@ -20,10 +20,21 @@
  * load-bearing has to be importable to be tested against a real yargs instance.
  */
 
+import {sdkRun} from './sdk-invocation';
+
 /** The one thing this needs from a yargs instance. */
 export interface CliHelpPrinter {
   showHelp: (consoleLevel: string) => void;
 }
+
+/**
+ * An unknown command or flag gets one line and where the help is
+ * (home-base-p05kz.4 change 6). A hook that calls a command its SDK lacks fails
+ * on every event, and on 2026-10-22 that printed a 21k-character help screen 167
+ * times. Any other wording (a translated yargs, a future message) keeps the full
+ * help: more text, never less.
+ */
+const UNKNOWN_INPUT_RE = /^Unknown (?:argument|command)s?: /;
 
 /**
  * yargs' `.fail` handler for the whole CLI. Never returns — it exits 1.
@@ -33,7 +44,8 @@ export interface CliHelpPrinter {
  * nobody planned for is a bug report and the line number is the value in it.
  * `message` is a usage error — unknown command, missing positional, a `choices`
  * violation — where the help is the useful part; `showHelp('error')` is yargs'
- * own name for "print it to stderr".
+ * own name for "print it to stderr". An unknown command or flag is the exception:
+ * see {@link UNKNOWN_INPUT_RE}.
  */
 export function reportCliFailure(
   message: string | null,
@@ -42,6 +54,8 @@ export function reportCliFailure(
 ): never {
   if (error != null) {
     process.stderr.write(`${error.stack ?? String(error)}\n`);
+  } else if (message != null && UNKNOWN_INPUT_RE.test(message)) {
+    process.stderr.write(`${message}. Run \`${sdkRun('--help')}\`.\n`);
   } else {
     instance.showHelp('error');
     if (message != null && message.length > 0) {

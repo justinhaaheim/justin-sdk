@@ -20,6 +20,7 @@ const HOUR = 60 * MIN;
 const KNOWN_GROUP = {
   firstUnattendedAtMs: NOW - 2 * HOUR,
   kind: 'known' as const,
+  lastUnattendedAtMs: NOW - HOUR,
   latestTypedAtMs: NOW - 2 * HOUR,
   members: [],
   requests: 4,

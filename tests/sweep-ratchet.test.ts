@@ -869,7 +869,10 @@ describe('preflight removes a provably-empty leftover (F5)', () => {
     );
 
     expect(value).toBe(0);
-    expect(out).toContain('a leftover from an earlier run was left alone');
+    // p05kz.6: uncommitted changes, no commit, so "holding commits" would be false.
+    expect(out).toContain(
+      'unenrolled-with-work: 1 earlier sweep worktree kept: 1 kept for another reason',
+    );
     expect(out).not.toContain('COULD NOT SWEEP');
     expect(existsSync(worktree)).toBe(true);
   });

@@ -32,11 +32,13 @@ import {
   describeBrFailed,
   findBeadsWorkspace,
   resolveRecordedBeadsDb,
+  saysBeadsLocked,
 } from '../beads/br';
 import {markdownItems} from '../cli-style';
 import {sdkRun} from '../sdk-invocation';
 import {oneLine} from './ask-format';
 import {renderAsks} from './ask-render';
+import {handoffDeferralMessage} from './handoff-gate';
 import {absoluteWhen, statusWords, tildeText} from './part-one';
 import {notFoundButUnresolved} from './session-answer';
 import {
@@ -445,11 +447,16 @@ export async function handOff(
 }
 
 export function describeHandoffOutcome(outcome: HandoffOutcome): {
-  exitCode: 0 | 1;
+  exitCode: 0 | 1 | 4;
   lines: string[];
 } {
   if (outcome.kind === 'failed') {
-    return {exitCode: 1, lines: [`thread handoff: ${outcome.reason}`]};
+    return saysBeadsLocked(outcome.reason)
+      ? {
+          exitCode: 4,
+          lines: [handoffDeferralMessage('beadsLocked', outcome.reason)],
+        }
+      : {exitCode: 1, lines: [`thread handoff: ${outcome.reason}`]};
   }
   const lines: string[] = [];
   if (outcome.block !== '') lines.push(outcome.block, '');
@@ -472,6 +479,13 @@ export function describeHandoffOutcome(outcome: HandoffOutcome): {
       '⚠️ The session WAS marked handed off. But:',
       ...outcome.followUpFailures.map((failure) => `  - ${failure}`),
     );
+    const locked = outcome.followUpFailures.find((failure) =>
+      saysBeadsLocked(failure),
+    );
+    if (locked != null) {
+      lines.push('', handoffDeferralMessage('beadsLocked', locked));
+      return {exitCode: 4, lines};
+    }
     return {exitCode: 1, lines};
   }
   return {exitCode: 0, lines};

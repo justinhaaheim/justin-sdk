@@ -1,6 +1,5 @@
 /**
- * The overarching request (home-base-jm5kg.5 D1–D4) and the workspace-name
- * items trial (home-base-jm5kg.6 D5). Real br in throwaway repos; every
+ * The overarching request (home-base-jm5kg.5 D1–D4). Real br in throwaway repos; every
  * state file under a temp JUSTIN_THREADS_STATE_DIR; cmux is a fake.
  */
 
@@ -8,7 +7,6 @@ import type {CmuxCall, CmuxRunner} from '../src/thread/cmux';
 import type {SessionModel} from '../src/thread/session-model';
 import type {MarkItem, SessionStatus} from '../src/thread/session-status';
 import type {TreeIssue} from '../src/thread/session-tree';
-import type {WorkspaceSession} from '../src/thread/workspace-name';
 import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, test} from 'bun:test';
@@ -16,10 +14,8 @@ import {mkdirSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {brList, brShow, brUpdate, runBr} from '../src/beads/br';
-import {resolveThreadConfig} from '../src/thread/config';
 import {
   chainRequestList,
-  nameItemsOf,
   OVERARCHING_LABEL,
   OVERARCHING_SET_LABEL_PREFIX,
   readChainRequests,
@@ -32,18 +28,9 @@ import {
   renameSession,
 } from '../src/thread/request';
 import {ensureSessionBead} from '../src/thread/session-bead';
-import {
-  itemsDisplayName,
-  WORKSPACE_ITEMS_NAME_LIMIT,
-} from '../src/thread/session-name';
 import {markLine} from '../src/thread/session-report';
 import {whatToMark} from '../src/thread/session-status';
-import {syncWorkspaceName} from '../src/thread/workspace-name';
-import {
-  lookupWorkspaceSession,
-  withNameItems,
-  workspaceNameFollowUp,
-} from '../src/thread/workspace-name-session';
+import {lookupWorkspaceSession} from '../src/thread/workspace-name-session';
 import {initRepo} from './git-fixtures';
 import {needBr} from './pinned-br';
 import {createSandbox} from './sandbox';
@@ -67,7 +54,7 @@ interface World {
   sessionBeadId: string;
 }
 
-function world(knobs: {items?: boolean; titleSummary?: boolean} = {}): World {
+function world(knobs: {titleSummary?: boolean} = {}): World {
   const sb = createSandbox();
   sandboxes.push(sb);
   const xdg = join(sb.path, 'xdg');
@@ -81,7 +68,6 @@ function world(knobs: {items?: boolean; titleSummary?: boolean} = {}): World {
           nameWorkspaces: true,
           sessionBeads: true,
           titleSummary: knobs.titleSummary ?? true,
-          workspaceNameItems: knobs.items ?? false,
         },
       },
     }),
@@ -620,184 +606,3 @@ describe('D4: two unlinked sessions in one workspace (sticky owner)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// D5: the workspace name lists the requests (trial, behind a knob)
-// ---------------------------------------------------------------------------
-
-function fixture(
-  id: string,
-  title: string,
-  extra: Partial<TreeIssue> = {},
-): TreeIssue {
-  return {
-    acceptanceCriteria: null,
-    beadsDir: '/x/.beads',
-    closeReason: null,
-    createdAt: `2026-10-30T10:00:0${id.slice(-1)}.000Z`,
-    description: null,
-    id,
-    issueType: 'task',
-    labels: ['request'],
-    notes: null,
-    parentIds: [],
-    priority: 2,
-    status: 'in_progress',
-    title,
-    updatedAt: null,
-    ...extra,
-  } as TreeIssue;
-}
-
-const JUSTIN_EXAMPLE =
-  '[HOME] Handoff command refinements ✅ Spend quota blocks runaway usage 🔳 Improve cmux workspace naming 🔳 Improve notifications';
-
-describe('D5: the items trial', () => {
-  test('Justin’s example, exactly: done before open, the overarching request is the head', () => {
-    const requests = [
-      fixture('t-1', 'Improve cmux workspace naming'),
-      fixture('t-2', 'Handoff command refinements', {
-        labels: [
-          'request',
-          OVERARCHING_LABEL,
-          'overarching-set:2026-10-30T10:00:05Z',
-        ],
-      }),
-      fixture('t-3', 'Improve notifications'),
-      fixture('t-4', 'Spend quota blocks runaway usage', {status: 'closed'}),
-    ];
-    const items = nameItemsOf({
-      headTitle: 'Handoff command refinements',
-      requests,
-    });
-    expect(itemsDisplayName('HOME', 'Handoff command refinements', items)).toBe(
-      JUSTIN_EXAMPLE,
-    );
-  });
-
-  test('oldest first within each; "not needed" and the head title are left out', () => {
-    const items = nameItemsOf({
-      headTitle: 'First request',
-      requests: [
-        fixture('t-1', 'First request'),
-        fixture('t-2', 'Open, older'),
-        fixture('t-3', 'Done, older', {status: 'closed'}),
-        fixture('t-4', 'A placeholder', {
-          closeReason: 'not needed: the PDF export runs its own query',
-          status: 'closed',
-        }),
-        fixture('t-5', 'Open, newer'),
-        fixture('t-6', 'Done, newer', {status: 'closed'}),
-      ],
-    });
-    expect(items).toEqual([
-      {done: true, title: 'Done, older'},
-      {done: true, title: 'Done, newer'},
-      {done: false, title: 'Open, older'},
-      {done: false, title: 'Open, newer'},
-    ]);
-  });
-
-  test('cut at the limit with "…", never inside an emoji', () => {
-    const items = Array.from({length: 12}, (_, n) => ({
-      done: false,
-      title: `Open request number ${n}`,
-    }));
-    const name = itemsDisplayName('HOME', 'Head', items);
-    expect(Array.from(name)).toHaveLength(WORKSPACE_ITEMS_NAME_LIMIT);
-    expect(name.endsWith('…')).toBe(true);
-    expect(name).not.toMatch(/[\uD800-\uDBFF]…$/u);
-  });
-
-  test('the knob is off by default', () => {
-    needBr();
-    const sb = createSandbox();
-    sandboxes.push(sb);
-    const config = resolveThreadConfig({
-      cwd: sb.path,
-      env: {XDG_CONFIG_HOME: join(sb.path, 'none')},
-    });
-    expect(config.workspaceNameItems).toBe(false);
-    expect(config.workspaceNameItemsSource).toBe('default');
-  });
-
-  test('knob off: the plain name; knob on: the items name, from the real chain', async () => {
-    needBr();
-    const off = world({items: false});
-    const offCmux = fakeCmux([{id: WS, surfaces: [SURFACE], title: null}]);
-    await request(off, 'Handoff command refinements', {
-      overarching: true,
-      run: offCmux.run,
-    });
-    await request(off, 'Improve notifications', {run: offCmux.run});
-    await workspaceNameFollowUp({
-      cwd: off.repo,
-      env: off.env,
-      run: offCmux.run,
-      sessionId: SESSION,
-    });
-    expect(offCmux.spaces[0]?.title).toBe(
-      '[NAMED] Handoff command refinements',
-    );
-
-    const on = world({items: true});
-    const onCmux = fakeCmux([{id: WS, surfaces: [SURFACE], title: null}]);
-    await request(on, 'Handoff command refinements', {
-      overarching: true,
-      run: onCmux.run,
-    });
-    const quota = filedId(
-      await request(on, 'Spend quota blocks runaway usage', {run: onCmux.run}),
-    );
-    await request(on, 'Improve notifications', {run: onCmux.run});
-    expect(onCmux.spaces[0]?.title).toBe(
-      '[NAMED] Handoff command refinements 🔳 Spend quota blocks runaway usage 🔳 Improve notifications',
-    );
-    const closed = runBr(on.repo, ['close', quota, '--reason', 'built']);
-    expect(closed.ok).toBe(true);
-    await workspaceNameFollowUp({
-      cwd: on.repo,
-      env: on.env,
-      run: onCmux.run,
-      sessionId: SESSION,
-    });
-    expect(onCmux.spaces[0]?.title).toBe(
-      '[NAMED] Handoff command refinements ✅ Spend quota blocks runaway usage 🔳 Improve notifications',
-    );
-  });
-
-  test('requests that cannot be read: nothing is renamed, and it says why', async () => {
-    const session: WorkspaceSession = {
-      beadId: 't-s',
-      labels: [`cmux-surface:${SURFACE}`],
-      nameItems: {ok: false, reason: 'the export could not be read'},
-      repo: 'named',
-      repoTag: 'NAMED',
-      sessionId: SESSION,
-      title: 'Handoff command refinements',
-    };
-    const cmux = fakeCmux([{id: WS, surfaces: [SURFACE], title: 'Kept'}]);
-    const outcome = await syncWorkspaceName({
-      enabled: true,
-      env: {JUSTIN_THREADS_STATE_DIR: '/nonexistent/state'},
-      run: cmux.run,
-      session,
-    });
-    expect(outcome).toMatchObject({kind: 'failed'});
-    expect(outcome.kind === 'failed' ? outcome.reason : '').toContain(
-      'the export could not be read',
-    );
-    expect(cmux.calls).toEqual([]);
-    expect(cmux.spaces[0]?.title).toBe('Kept');
-  });
-
-  test('withNameItems leaves the lookup alone with the knob off', async () => {
-    needBr();
-    const w = world({items: false});
-    const lookup = lookupWorkspaceSession({
-      cwd: w.repo,
-      env: w.env,
-      session: SESSION,
-    });
-    const named = await withNameItems(lookup, {cwd: w.repo, env: w.env});
-    expect(named).toBe(lookup);
-  });
-});

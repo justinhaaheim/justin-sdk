@@ -216,10 +216,15 @@ export interface CoreInventory {
 
 export interface CoreOptions {
   /**
-   * What to measure divergence against. `current` is what the prime
-   * session-start view wants ("work you might not know about from where you
-   * are standing"); `default` is what reconcile wants (mergedness to main).
-   * An explicit ref string overrides both.
+   * Let a worktree branch past `sinceDays` be hidden like any other, except the
+   * branch the session stands on. Default false: `status` keeps every checked-out
+   * branch. Only the session-start view sets it (home-base-p05kz.4).
+   */
+  ageOutWorktrees?: boolean;
+  /**
+   * What to measure divergence against. `default` is what reconcile and the
+   * session-start view want (mergedness to main); `current` is the fallback for
+   * a repo with no nameable default branch. An explicit ref string overrides both.
    */
   baseline?: 'current' | 'default' | (string & {});
   cwd: string;

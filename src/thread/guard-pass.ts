@@ -178,10 +178,20 @@ export function consumeGuardPass(input: {
   return {kind: 'valid', path};
 }
 
-/** Why a read refuses, in one clause. */
-export function describeGuardPass(read: GuardPassRead): string {
-  const tail =
-    'so the session guard is not proven to have checked this call (it may have timed out, failed, or not run); nothing is started without it';
+/**
+ * Why a read refuses. `exactCall`, when given, is the spelling that gets a pass
+ * (home-base-p05kz.3 item 8): threadCallWords writes a pass for the first
+ * thread call of a Bash command only, so a second call in it never has one.
+ */
+export function describeGuardPass(
+  read: GuardPassRead,
+  exactCall: string | null = null,
+): string {
+  const fix =
+    exactCall == null
+      ? ''
+      : `. The guard checks one thread call per Bash command: the call it checks is \`${exactCall}\`, alone in one Bash call`;
+  const tail = `so the session guard is not proven to have checked this call (it may have timed out, failed, or not run); nothing is started without it${fix}`;
   switch (read.kind) {
     case 'missing': {
       return `no guard pass at ${read.path}, ${tail}`;

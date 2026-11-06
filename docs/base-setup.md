@@ -162,7 +162,7 @@ Auto-lint and auto-format on file edits:
         "hooks": [
           {
             "type": "command",
-            "command": "jq -r '.tool_input.file_path' | bash -c 'read file_path; if [[ \"$file_path\" != \"$CLAUDE_PROJECT_DIR\"/* ]]; then echo \"Skipping - file outside project\"; else if [[ \"$file_path\" =~ \\.(ts|tsx|js|jsx|cjs|mjs)$ ]]; then bun run lint:fix:file -- \"$file_path\"; fi; bun run prettier --write -u \"$file_path\"; fi'"
+            "command": "jq -r '.tool_input.file_path' | bash -c 'read file_path; if [[ \"$file_path\" == \"$CLAUDE_PROJECT_DIR\"/* ]]; then if [[ \"$file_path\" =~ \\.(ts|tsx|js|jsx|cjs|mjs)$ ]]; then bun run lint:fix:file -- \"$file_path\"; fi; bun run prettier --write -u \"$file_path\"; fi'"
           }
         ]
       }

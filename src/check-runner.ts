@@ -180,6 +180,41 @@ export interface RunChecksOptions {
   yes?: boolean;
 }
 
+/** One warn-level check that failed, as a {@link WarningFilter} sees it. */
+export interface WarningForFilter {
+  label: string;
+  /**
+   * What the warning says (message and fix, no colour), so a filter can tell
+   * that it changed. null when the check said nothing a filter could compare (a
+   * shell check): such a warning must not be hidden.
+   */
+  text: string | null;
+}
+
+export interface WarningFilterDecision {
+  /** Labels of warnings to leave out of the report. */
+  hide: readonly string[];
+  /** One line for the report: what was hidden, or why nothing could be. */
+  note: string | null;
+}
+
+/**
+ * Decide which warnings a report leaves out. Only ever offered warn-level
+ * failures, and anything else it names is ignored, so an error-level check
+ * cannot be hidden by construction. See doctor-warn-once.ts.
+ */
+export type WarningFilter = (
+  warnings: readonly WarningForFilter[],
+) => WarningFilterDecision;
+
+/**
+ * Options for {@link renderCheckTree}. `runCheckTree`, which is what `doctor` by
+ * hand uses, deliberately does not accept a filter.
+ */
+export interface RenderCheckTreeOptions extends RunChecksOptions {
+  warningFilter?: WarningFilter;
+}
+
 /** A check with optional children that only run if the parent passes. */
 export interface CheckNode {
   check: Check;
@@ -417,6 +452,7 @@ function formatSummary(
   results: InternalResult[],
   totalMs: number,
   quiet: boolean,
+  filtered: WarningFilterDecision = {hide: [], note: null},
 ): string {
   const out: string[] = [];
   const measured = results.filter(
@@ -428,6 +464,7 @@ function formatSummary(
   const warnings = measured.filter(
     (r) => r.exitCode !== 0 && r.severity === 'warn',
   );
+  const hidden = warnings.filter((r) => filtered.hide.includes(r.label));
   const passed = measured.filter((r) => r.exitCode === 0);
   const skipped = results.filter((r) => r.skipped);
   const notApplicable = results.filter(
@@ -440,12 +477,16 @@ function formatSummary(
   if (
     quiet &&
     errors.length === 0 &&
-    warnings.length === 0 &&
+    warnings.length === hidden.length &&
     skipped.length === 0 &&
     notApplicable.length === 0
   ) {
+    const note = filtered.note == null ? '' : ` ${filtered.note}`;
+    // "All N checks passed" would be false with a warning hidden.
     out.push(
-      `${GREEN}✓${RESET} All ${results.length} checks passed. ${DIM}[${formatDuration(totalMs)}]${RESET}`,
+      hidden.length === 0
+        ? `${GREEN}✓${RESET} All ${results.length} checks passed.${note} ${DIM}[${formatDuration(totalMs)}]${RESET}`
+        : `${YELLOW}⚠${RESET} ${passed.length} of ${results.length} checks passed.${note} ${DIM}[${formatDuration(totalMs)}]${RESET}`,
     );
     return out.join('\n');
   }
@@ -453,6 +494,8 @@ function formatSummary(
   out.push('');
 
   for (const r of results) {
+    if (hidden.includes(r)) continue;
+
     if (r.skipped === true) {
       // In quiet mode, skip the skipped checks too
       if (quiet) continue;
@@ -508,6 +551,10 @@ function formatSummary(
     out.push(line);
   }
 
+  if (filtered.note != null) {
+    out.push(` ${YELLOW}⚠${RESET} ${filtered.note}`);
+  }
+
   out.push('');
   if (passed.length > 0) out.push(` ${GREEN}${passed.length} pass${RESET}`);
   if (warnings.length > 0)
@@ -528,8 +575,39 @@ function emitSummary(
   totalMs: number,
   quiet: boolean,
   sink: OutputSink,
+  filtered?: WarningFilterDecision,
 ): void {
-  sink.line(formatSummary(results, totalMs, quiet));
+  sink.line(formatSummary(results, totalMs, quiet, filtered));
+}
+
+/**
+ * Ask a filter what to leave out. A filter that throws hides nothing and says
+ * so: failing to decide must never hide a warning (critical rule 7).
+ */
+function applyWarningFilter(
+  results: InternalResult[],
+  filter: WarningFilter,
+): WarningFilterDecision {
+  const warnings = results
+    .filter(
+      (r) =>
+        r.skipped !== true &&
+        r.notApplicable == null &&
+        r.exitCode !== 0 &&
+        r.severity === 'warn',
+    )
+    .map((r) => {
+      const said = [r.checkResult?.message, r.checkResult?.fix]
+        .filter((part) => part != null && part !== '')
+        .join('\n');
+      return {label: r.label, text: said === '' ? null : stripAnsi(said)};
+    });
+  try {
+    return filter(warnings);
+  } catch (error) {
+    const why = error instanceof Error ? error.message : String(error);
+    return {hide: [], note: `Showing every warning: ${why}`};
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -701,7 +779,7 @@ export async function runChecks(
  */
 async function runCheckTreeWithSink(
   nodes: CheckNode[],
-  options: RunChecksOptions,
+  options: RenderCheckTreeOptions,
   sink: OutputSink,
 ): Promise<number> {
   const {quiet = false, align = false, fix = false, yes = false} = options;
@@ -851,7 +929,15 @@ async function runCheckTreeWithSink(
   }
 
   const totalMs = Math.round(performance.now() - totalStart);
-  emitSummary(results, totalMs, quiet, sink);
+  emitSummary(
+    results,
+    totalMs,
+    quiet,
+    sink,
+    options.warningFilter == null
+      ? undefined
+      : applyWarningFilter(results, options.warningFilter),
+  );
 
   const hasErrors = results.some(
     (r) =>
@@ -890,7 +976,7 @@ export async function runCheckTree(
  */
 export async function renderCheckTree(
   nodes: CheckNode[],
-  options: RunChecksOptions = {},
+  options: RenderCheckTreeOptions = {},
 ): Promise<{exitCode: number; report: string}> {
   const chunks: string[] = [];
   const sink: OutputSink = {
