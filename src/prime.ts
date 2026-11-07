@@ -64,6 +64,13 @@ export interface SourceOptions {
 
 /** What `assemble` needs: where the source comes from, and which slice to take. */
 export interface AssembleOptions extends SourceOptions {
+  /**
+   * Keep only the top-level modules with these names (home-base-t6a0.17 D2/D3).
+   * Applied AFTER the partition and the predicates, so it can only narrow what
+   * this project resolves and never adds a module; see `InlineGate`. Absent
+   * means no narrowing. An empty list keeps no module at all.
+   */
+  modules?: readonly string[];
   partition?: Partition; // default 'full'
 }
 
@@ -448,10 +455,25 @@ export function evaluateInclude(
 
 const AT_REFERENCE = /^\s*@(\S+)\s*$/;
 
+/** One top-level module (an `@`-reference in the index itself). */
+export interface AssembledModule {
+  /** It has an `includeIf:`, so it applies only to some project types. */
+  conditional: boolean;
+  /** Basename without `.md`: what `prime --module` takes. */
+  name: string;
+}
+
 interface InlineResult {
   count: number;
+  /** Top-level modules that were inlined, in index order. */
+  modules: AssembledModule[];
   /** Basenames (no .md) of the modules that were included, in order. */
   names: string[];
+  /**
+   * Top-level modules that passed the partition and the predicates, in index
+   * order, BEFORE the `only` narrowing: what a `--module` name is checked against.
+   */
+  resolved: AssembledModule[];
   text: string;
   warnings: string[];
 }
@@ -467,8 +489,17 @@ interface InlineResult {
  * module deleted from a repo's list silently vanished from its rules, and
  * rules-drift certified all of it as in-sync. Whatever the index says, plus the
  * predicates evaluated against the project AS IT IS RIGHT NOW, is the answer.
+ *
+ * `only` is not that mode coming back (home-base-t6a0.17 D2/D3). It is applied
+ * after the partition and the predicates have decided, so it can only drop a
+ * module this project resolves, never add one; nothing records it; and the
+ * artifact writer and the drift check never pass it. Its two callers print or
+ * inject PART of what the predicates resolved: `prime --module <name>`, and the
+ * session-start budget that leaves whole modules out to stay under Claude
+ * Code's hook cap. null means no narrowing.
  */
 interface InlineGate {
+  only: ReadonlySet<string> | null;
   partition: Partition;
 }
 
@@ -485,7 +516,9 @@ function inlineFile(
   if (depth > MAX_INLINE_DEPTH) {
     return {
       count: 0,
+      modules: [],
       names: [],
+      resolved: [],
       text: '',
       warnings: [`max inline depth at ${filePath}`],
     };
@@ -493,7 +526,9 @@ function inlineFile(
   const {body} = stripFrontmatter(readFileSync(filePath, 'utf-8'));
   const out: string[] = [];
   let count = 0;
+  const modules: AssembledModule[] = [];
   const names: string[] = [];
+  const resolved: AssembledModule[] = [];
   const warnings: string[] = [];
 
   for (const line of body.split('\n')) {
@@ -530,15 +565,32 @@ function inlineFile(
       continue;
     }
     if (!included) continue;
+    if (depth === 0) {
+      const entry = {conditional: includeIf.length > 0, name};
+      resolved.push(entry);
+      // Narrowing, top level only, and only after the predicates (see InlineGate).
+      if (gate.only != null && !gate.only.has(name)) continue;
+      modules.push(entry);
+    }
     // Nested subtree is inlined in full (partition gating is top-level only).
-    const nested = inlineFile(refPath, ctx, depth + 1, {partition: 'full'});
+    const nested = inlineFile(refPath, ctx, depth + 1, {
+      only: null,
+      partition: 'full',
+    });
     out.push(nested.text);
     count += 1 + nested.count;
     names.push(name, ...nested.names);
     warnings.push(...nested.warnings);
   }
 
-  return {count, names, text: out.join('\n').trim(), warnings};
+  return {
+    count,
+    modules,
+    names,
+    resolved,
+    text: out.join('\n').trim(),
+    warnings,
+  };
 }
 
 // --- header ----------------------------------------------------------------
@@ -609,8 +661,15 @@ export interface Assembled {
   count: number;
   /** buildHeader() + text — the standalone rules document. */
   markdown: string;
+  /** Top-level modules inlined into `text`, in index order (after `modules` narrowing). */
+  modules: AssembledModule[];
   /** Basenames (no .md) of the included modules, in order. */
   names: string[];
+  /**
+   * Top-level modules this project resolves in this partition, in index order,
+   * BEFORE the `modules` narrowing. Equal to `modules` when nothing narrowed it.
+   */
+  resolved: AssembledModule[];
   /** HEAD sha + date of sourceDir, or null (non-git fixture / unavailable). */
   sourceCommit: PromptsCommit | null;
   /** The prompts dir actually read (the managed clone, unless overridden). */
@@ -654,9 +713,12 @@ export function assemble(
   const indexPath = rulesIndexPath(source);
   const ctx = loadProjectContext(projectRoot);
   const partition = opts.partition ?? 'full';
-  const {text, count, names, warnings} = inlineFile(indexPath, ctx, 0, {
-    partition,
-  });
+  const {text, count, modules, names, resolved, warnings} = inlineFile(
+    indexPath,
+    ctx,
+    0,
+    {only: opts.modules == null ? null : new Set(opts.modules), partition},
+  );
   // Number the body only, then prepend the title (the title carries no number).
   // The conditional partition is the hook injection, which coexists in-session
   // with the plain-numbered universal rules FILE — give it the 'P-' namespace so
@@ -668,13 +730,25 @@ export function assemble(
   return {
     count,
     markdown: `${buildHeader()}\n\n${numbered}`.trim(),
+    modules,
     names,
+    resolved,
     sourceCommit: headCommit(source),
     sourceDir: source,
     sourceRefresh: refresh,
     text: numbered,
     warnings,
   };
+}
+
+/** The requested `--module` names that are not among `resolved`, deduplicated. */
+export function unknownModules(
+  requested: readonly string[] | undefined,
+  resolved: readonly AssembledModule[],
+): string[] {
+  if (requested == null) return [];
+  const known = new Set(resolved.map((m) => m.name));
+  return [...new Set(requested)].filter((name) => !known.has(name));
 }
 
 export function runPrime(projectRoot: string, opts: PrimeOptions): number {
@@ -696,6 +770,21 @@ export function runPrime(projectRoot: string, opts: PrimeOptions): number {
     return 0; // never break the session over guidance
   }
 
+  // `--module` (home-base-t6a0.17 D3): a name this project does not resolve is
+  // an error that lists the names it does, never an empty document. Checked
+  // against `resolved`, so a module whose predicate fails here is unknown here.
+  const unknown = unknownModules(opts.modules, assembled.resolved);
+  if (unknown.length > 0) {
+    const valid = assembled.resolved.map((m) => m.name);
+    process.stderr.write(
+      `justin-sdk prime · unknown module${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}\n` +
+        `Valid names for this project (${opts.partition ?? 'full'} partition): ${
+          valid.length > 0 ? valid.join(', ') : 'none'
+        }\n`,
+    );
+    return 2;
+  }
+
   const {markdown, count, warnings} = assembled;
   const status =
     `justin-sdk prime · ${count} rule module${count === 1 ? '' : 's'} compiled` +
@@ -708,7 +797,12 @@ export function runPrime(projectRoot: string, opts: PrimeOptions): number {
       event: 'SessionStart',
       forClaude: markdown,
       forJustin: status,
-      fullTextCommand: sdkRun(`prime --partition ${opts.partition ?? 'full'}`),
+      fullTextCommand: sdkRun(
+        [
+          `prime --partition ${opts.partition ?? 'full'}`,
+          ...(opts.modules ?? []).map((name) => `--module ${name}`),
+        ].join(' '),
+      ),
     });
   } else {
     writeStdoutSync(`${markdown}\n`);

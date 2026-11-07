@@ -2,9 +2,10 @@
  * husky-setup.ts — Deterministic husky + lint-staged setup for any project.
  *
  * Orchestrates: package.json devDependencies (husky + lint-staged pinned),
- * package.json `prepare` script, `.husky/pre-commit` hook (chmod +x), the
- * managed `.husky/post-checkout` auto-hydration preamble, and a default
- * `lint-staged` config in package.json.
+ * package.json `prepare` script, `.husky/pre-commit` hook (chmod +x) with its
+ * managed type-check block when `componentConfig.husky.tsCheckInHook` is on
+ * (home-base-lzvh), the managed `.husky/post-checkout` auto-hydration preamble,
+ * and a default `lint-staged` config in package.json.
  *
  * Runs base-setup as a precondition so the foundation layer is always
  * present before husky-specific steps run.
@@ -29,11 +30,15 @@
  * `.husky/`, the preamble lives here.
  */
 
-import {chmodSync, cpSync, existsSync, readFileSync, writeFileSync} from 'fs';
+import {chmodSync, existsSync, readFileSync, writeFileSync} from 'fs';
 import {basename, resolve} from 'path';
 
 import {runBaseSetup} from './base-setup';
 import {PINNED} from './pinned-versions';
+import {
+  HUSKY_CONFIG_KEY,
+  TS_CHECK_IN_HOOK_DEFAULT,
+} from './pre-commit-ts-check/defaults';
 import {
   ensureDir,
   fail,
@@ -172,19 +177,236 @@ function stepPrepareScript(projectRoot: string): boolean {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// .husky/pre-commit — the managed type-check block (home-base-lzvh)
+// ---------------------------------------------------------------------------
+
 /**
- * Write `.husky/pre-commit` from the SDK template and ensure it's executable.
- *
- * Behavior:
- *  - Ensures `.husky/` exists.
- *  - Missing file → copy from template.
- *  - Exists and matches template → noop.
- *  - Exists and differs → warn + skip (unless `force`).
- *  - `force: true` → overwrite.
- *  - In all cases where the file ends up present, chmod +x to make it
- *    executable (husky requires this).
+ * Marker tokens delimiting the SDK's type-check block in `.husky/pre-commit`
+ * (home-base-lzvh D1). Matched with `startsWith`, like the post-checkout
+ * markers, so the BEGIN line's trailing note can change without orphaning
+ * blocks already installed.
  */
-function stepPreCommitHook(projectRoot: string, force: boolean): boolean {
+export const PRE_COMMIT_TS_CHECK_MARKER_BEGIN = '# >>> justin-sdk:ts-check';
+export const PRE_COMMIT_TS_CHECK_MARKER_END = '# <<< justin-sdk:ts-check';
+
+/**
+ * A hook line that already runs a type check (D1): `npm run ts-check`
+ * (audio-journal-1, health-logger-rn), `tsc`, `signal-source:TS`, or home-base's
+ * `pre-commit-ts-check`. Adding the block to such a hook would type-check every
+ * commit twice. `\btsc\b` does not match `tsconfig`.
+ */
+const OWN_TYPE_CHECK = /\bts-check\b|\btsc\b|signal-source:TS/;
+
+/** Path to the SDK-owned type-check block template. */
+function preCommitTsCheckTemplatePath(): string {
+  return resolve(
+    import.meta.dirname,
+    '..',
+    'templates',
+    'configs',
+    '.husky',
+    'pre-commit-ts-check.sh',
+  );
+}
+
+/**
+ * Read the type-check block from the SDK template, normalized to exactly one
+ * trailing newline. Returns null (after `fail`) when the template is missing or
+ * has lost its markers, for the reason readPostCheckoutPreamble gives.
+ */
+export function readPreCommitTsCheckBlock(): string | null {
+  const templatePath = preCommitTsCheckTemplatePath();
+  if (!existsSync(templatePath)) {
+    fail(`.husky/pre-commit type-check template not found at ${templatePath}`);
+    return null;
+  }
+  const content = readFileSync(templatePath, 'utf-8');
+  if (
+    !content.includes(PRE_COMMIT_TS_CHECK_MARKER_BEGIN) ||
+    !content.includes(PRE_COMMIT_TS_CHECK_MARKER_END)
+  ) {
+    fail(
+      `.husky/pre-commit type-check template lost its markers (${PRE_COMMIT_TS_CHECK_MARKER_BEGIN} … ${PRE_COMMIT_TS_CHECK_MARKER_END})`,
+    );
+    return null;
+  }
+  return `${content.trimEnd()}\n`;
+}
+
+/** Where the marked block sits in a hook's lines. */
+type MarkedSpan =
+  | {beginIdx: number; endIdx: number; kind: 'found'}
+  | {kind: 'absent'}
+  | {kind: 'unterminated'};
+
+function findTsCheckSpan(lines: readonly string[]): MarkedSpan {
+  const beginIdx = lines.findIndex((line) =>
+    line.startsWith(PRE_COMMIT_TS_CHECK_MARKER_BEGIN),
+  );
+  if (beginIdx === -1) return {kind: 'absent'};
+  const endIdx = lines.findIndex(
+    (line, index) =>
+      index > beginIdx && line.startsWith(PRE_COMMIT_TS_CHECK_MARKER_END),
+  );
+  if (endIdx === -1) return {kind: 'unterminated'};
+  return {beginIdx, endIdx, kind: 'found'};
+}
+
+/** The block as it stands in a hook, or null when there is no complete one. */
+export function extractPreCommitTsCheckBlock(hook: string): string | null {
+  const lines = hook.split('\n');
+  const span = findTsCheckSpan(lines);
+  if (span.kind !== 'found') return null;
+  return `${lines.slice(span.beginIdx, span.endIdx + 1).join('\n')}\n`;
+}
+
+/**
+ * The hook with the SDK's block and the blank line the insert puts after it
+ * taken out: what the template-body check compares against the template, so a
+ * hook the SDK composed still counts as "matches the template". Returns the
+ * hook unchanged when it has no complete block.
+ */
+export function withoutPreCommitTsCheckBlock(hook: string): string {
+  const lines = hook.split('\n');
+  const span = findTsCheckSpan(lines);
+  if (span.kind !== 'found') return hook;
+  const after = lines.slice(span.endIdx + 1);
+  while (after.length > 0 && (after[0] ?? '').trim() === '') after.shift();
+  return [...lines.slice(0, span.beginIdx), ...after].join('\n');
+}
+
+/** The first non-comment line that already type-checks, trimmed, or null. */
+export function findOwnTypeCheckLine(hook: string): string | null {
+  for (const line of hook.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) continue;
+    if (OWN_TYPE_CHECK.test(trimmed)) return trimmed;
+  }
+  return null;
+}
+
+export type PreCommitTsCheckComposition =
+  | {content: string; kind: 'inserted'}
+  | {content: string; kind: 'replaced'}
+  | {content: string; kind: 'unchanged'}
+  | {kind: 'own-type-check'; line: string}
+  | {kind: 'unterminated'};
+
+/**
+ * Compose `.husky/pre-commit` from a hook and the type-check block (D1). Pure;
+ * the step does the IO. A missing hook is composed from the template body, so a
+ * fresh install and an insert into the old one-line hook write the same bytes.
+ *
+ *  - markers present → replace the span in place; every other line survives
+ *    byte for byte. BEGIN without END → refuse, as post-checkout does.
+ *  - no markers, and a non-comment line already type-checks → insert nothing.
+ *  - no markers → insert the block at the top, below a shebang if there is
+ *    one, followed by one blank line.
+ */
+export function composePreCommitTsCheck(
+  existing: string,
+  block: string,
+): PreCommitTsCheckComposition {
+  const blockLines = block.trimEnd().split('\n');
+  const lines = existing.split('\n');
+
+  const span = findTsCheckSpan(lines);
+  if (span.kind === 'unterminated') return {kind: 'unterminated'};
+  if (span.kind === 'found') {
+    const content = [
+      ...lines.slice(0, span.beginIdx),
+      ...blockLines,
+      ...lines.slice(span.endIdx + 1),
+    ].join('\n');
+    return content === existing
+      ? {content, kind: 'unchanged'}
+      : {content, kind: 'replaced'};
+  }
+
+  const ownLine = findOwnTypeCheckLine(existing);
+  if (ownLine != null) return {kind: 'own-type-check', line: ownLine};
+
+  const remainderLines = [...lines];
+  // Keep a shebang first; a block above it would make it a comment.
+  const shebang =
+    remainderLines[0]?.startsWith('#!') === true
+      ? remainderLines.shift()
+      : null;
+  while (remainderLines.length > 0 && (remainderLines[0] ?? '').trim() === '') {
+    remainderLines.shift();
+  }
+  const remainder = remainderLines.join('\n').trimEnd();
+
+  const content =
+    (shebang == null ? '' : `${shebang}\n`) +
+    `${blockLines.join('\n')}\n` +
+    (remainder === '' ? '' : `\n${remainder}\n`);
+  return {content, kind: 'inserted'};
+}
+
+/** `componentConfig.husky.tsCheckInHook`, resolved; unreadable is its own state. */
+export type TsCheckInHookKnob =
+  | {kind: 'off'}
+  | {kind: 'on'}
+  | {kind: 'unknown'; reason: string};
+
+/**
+ * Resolve the knob (D3) from the project's `justin-sdk.config.json`. Absent
+ * file or key → the default. A file that cannot be used is `unknown`, which the
+ * step treats as neither adding nor updating the block and says so: an
+ * unreadable config must not decide a change to every commit in the repo.
+ *
+ * `sdk-config` is `await import`ed here, never imported at the top of this
+ * file (home-base-lzvh.1): it pulls in zod, and this module is statically
+ * reachable from cli-main.ts through components.ts, so a static import would
+ * put zod's 12-13 ms on every hook's startup. tests/health-notices-cli.test.ts
+ * ("zod is NOT statically reachable …") fails if it comes back.
+ */
+export async function readTsCheckInHookKnob(
+  projectRoot: string,
+): Promise<TsCheckInHookKnob> {
+  const fallback: TsCheckInHookKnob = TS_CHECK_IN_HOOK_DEFAULT
+    ? {kind: 'on'}
+    : {kind: 'off'};
+  const {describeConfigOutcome, readProjectConfig} = await import(
+    './sdk-config'
+  );
+  const outcome = readProjectConfig(projectRoot);
+  if (outcome.status === 'absent') return fallback;
+  if (outcome.status !== 'ok') {
+    return {kind: 'unknown', reason: describeConfigOutcome(outcome)};
+  }
+  const value = outcome.config.componentConfig?.husky?.tsCheckInHook;
+  if (value === undefined) return fallback;
+  return value ? {kind: 'on'} : {kind: 'off'};
+}
+
+/**
+ * Write `.husky/pre-commit` and ensure it's executable. Two independent parts:
+ *
+ * 1. The template body (behavior unchanged since before home-base-lzvh, except
+ *    that the comparison ignores the SDK's own type-check block):
+ *    - Missing file → the template.
+ *    - Matches template → noop.
+ *    - Differs → warn + skip (unless `force`).
+ *    - `force: true` → overwrite with the template.
+ * 2. The type-check block (D1), by `componentConfig.husky.tsCheckInHook` (D3).
+ *    On: add or update it; `force` is not consulted, because the block never
+ *    overwrites anything the project owns. Off or unreadable: add nothing,
+ *    update nothing, and keep a block that is already there, through `--force`
+ *    too.
+ *
+ * In all cases the file ends up chmod +x (husky requires this).
+ *
+ * `knob` is resolved by the caller with `readTsCheckInHookKnob`, which is
+ * async because it loads sdk-config lazily (home-base-lzvh.1).
+ */
+function stepPreCommitHook(
+  projectRoot: string,
+  force: boolean,
+  knob: TsCheckInHookKnob,
+): boolean {
   const huskyDir = resolve(projectRoot, '.husky');
   const targetPath = resolve(huskyDir, 'pre-commit');
   const templatePath = resolve(
@@ -201,36 +423,83 @@ function stepPreCommitHook(projectRoot: string, force: boolean): boolean {
     return false;
   }
 
+  const block = knob.kind === 'on' ? readPreCommitTsCheckBlock() : null;
+  if (knob.kind === 'on' && block == null) return false;
+
   ensureDir(huskyDir);
 
   const templateContent = readFileSync(templatePath, 'utf-8');
+  const existing = existsSync(targetPath)
+    ? readFileSync(targetPath, 'utf-8')
+    : null;
 
-  if (!existsSync(targetPath)) {
-    cpSync(templatePath, targetPath);
-    chmodSync(targetPath, 0o755);
+  // Part 1: the template body.
+  let content: string;
+  if (existing == null) {
+    content = templateContent;
     success('Copied .husky/pre-commit from template (chmod +x)');
-    return true;
-  }
-
-  const existingContent = readFileSync(targetPath, 'utf-8');
-
-  if (existingContent === templateContent) {
-    // Ensure executable bit is set even if file content matches.
-    chmodSync(targetPath, 0o755);
+  } else if (withoutPreCommitTsCheckBlock(existing) === templateContent) {
+    content = existing;
     success('.husky/pre-commit matches current template');
-    return true;
-  }
-
-  if (force) {
-    cpSync(templatePath, targetPath);
-    chmodSync(targetPath, 0o755);
+  } else if (force) {
+    content = templateContent;
     success('Overwrote .husky/pre-commit (--force, chmod +x)');
-    return true;
+  } else {
+    content = existing;
+    warn(
+      '.husky/pre-commit differs from SDK template (user-customized). Re-run with --force to overwrite.',
+    );
   }
 
-  warn(
-    '.husky/pre-commit differs from SDK template (user-customized). Re-run with --force to overwrite.',
-  );
+  // Part 2: the type-check block.
+  const knobName = `componentConfig.${HUSKY_CONFIG_KEY}.tsCheckInHook`;
+  if (block != null) {
+    const composed = composePreCommitTsCheck(content, block);
+    switch (composed.kind) {
+      case 'unterminated':
+        warn(
+          `.husky/pre-commit has ${PRE_COMMIT_TS_CHECK_MARKER_BEGIN} with no matching end marker — leaving the type-check block alone. Restore or delete the marker pair, then re-run.`,
+        );
+        break;
+      case 'own-type-check':
+        success(
+          `.husky/pre-commit already type-checks (\`${composed.line}\`) — not adding the SDK's type-check block`,
+        );
+        break;
+      case 'inserted':
+        content = composed.content;
+        success('Added the type-check block to .husky/pre-commit');
+        break;
+      case 'replaced':
+        content = composed.content;
+        success('Updated the .husky/pre-commit type-check block');
+        break;
+      case 'unchanged':
+        success('.husky/pre-commit type-check block is current');
+        break;
+    }
+  } else {
+    // Off or unknown: keep whatever block the hook already had, where it was.
+    // Only `--force` can have taken it out of `content`, and it goes back on.
+    const kept =
+      existing == null ? null : extractPreCommitTsCheckBlock(existing);
+    if (kept != null) {
+      const composed = composePreCommitTsCheck(content, kept);
+      if ('content' in composed) content = composed.content;
+    }
+    if (knob.kind === 'unknown') {
+      warn(
+        `Could not read ${knobName} (${knob.reason}) — the .husky/pre-commit type-check block was neither added nor updated`,
+      );
+    } else if (kept != null) {
+      success(
+        `.husky/pre-commit has the SDK's type-check block and ${knobName} is false — leaving it as it is`,
+      );
+    }
+  }
+
+  if (content !== existing) writeFileSync(targetPath, content);
+  chmodSync(targetPath, 0o755);
   return true;
 }
 
@@ -587,7 +856,10 @@ export async function runHuskySetup(
 
   // Step 3: .husky/pre-commit hook
   stepHeader('3. .husky/pre-commit');
-  if (!stepPreCommitHook(projectRoot, force)) return 1;
+  // Resolved here, after base-setup may have written the config, exactly when
+  // the step used to read it itself.
+  const tsCheckKnob = await readTsCheckInHookKnob(projectRoot);
+  if (!stepPreCommitHook(projectRoot, force, tsCheckKnob)) return 1;
 
   // Step 4: .husky/post-checkout auto-hydration preamble
   stepHeader('4. .husky/post-checkout (worktree auto-hydration)');

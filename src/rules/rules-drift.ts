@@ -170,6 +170,30 @@ export function rulesDriftAdvice(status: RulesDriftStatus): string | null {
   }
 }
 
+/**
+ * Is the rules artifact at `file` a whole file this tool generated: present,
+ * readable, stamped, and with bytes that hash to its own stamp's content hash?
+ *
+ * The same comparison as step 3 below, from local bytes only (no source, no
+ * network, no prettier). session-start asks it when the drift check returned
+ * cannot-check (home-base-t6a0.17 D1): a stamped, intact file is one Claude
+ * Code loads in full, so the session has its rules without the hook. A
+ * zero-byte file has no stamp, and a half-written one fails the hash, so
+ * neither counts. Total: anything it cannot establish is false.
+ */
+export function artifactMatchesItsStamp(file: string): boolean {
+  let bytes: string;
+  try {
+    if (!existsSync(file)) return false;
+    bytes = readFileSync(file, 'utf-8');
+  } catch {
+    return false;
+  }
+  const stamp = readDeployedStamp(file);
+  if (stamp?.contentHash == null) return false;
+  return contentHash(artifactBody(bytes).trimEnd()) === stamp.contentHash;
+}
+
 function result(
   status: RulesDriftStatus,
   message: string,

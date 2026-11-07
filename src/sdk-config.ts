@@ -34,6 +34,7 @@ import {
 import {HOOK_DISPATCH_DEFAULT} from './hook-entries';
 import {
   FULL_TS_CHECK_EVERY_HOURS_DEFAULT,
+  TS_CHECK_IN_HOOK_DEFAULT,
   TS_CHECK_ON_COMMIT_DEFAULT,
 } from './pre-commit-ts-check/defaults';
 import {sdkRunAtProjectRoot} from './sdk-invocation';
@@ -227,6 +228,12 @@ const componentConfigSchema = z
           .optional()
           .describe(
             'With tsCheckOnCommit "onlyWhenTsStaged": a commit that would skip the type-check runs it anyway when this checkout has no green type-check recorded within this many hours, so every repo still gets a regular full check (Justin 2026-10-26: catch a TS version difference or a missed earlier change). The record is per checkout, in its git dir. 0 or less type-checks every commit.',
+          ),
+        tsCheckInHook: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether the husky installer puts the SDK\'s type-check block in .husky/pre-commit (home-base-lzvh). Read when `add husky`, `install` or a sweep runs the husky component, not by the hook itself. true: it adds the block (between "# >>> justin-sdk:ts-check" and "# <<< justin-sdk:ts-check") at the top of the hook, or updates it in place, and adds nothing to a hook that already runs its own type check. The block runs `bun run signal-source:TS` through `justin-sdk pre-commit-ts-check` (so tsCheckOnCommit applies) when the repo has a tsconfig.json, and refuses the commit on a type error. false: it adds nothing and updates nothing; a block already in the hook stays until you delete it. Project file only.',
           ),
         tsCheckOnCommit: z
           .string()
@@ -914,6 +921,7 @@ export interface ResolvedHealthNoticesConfig {
 export const DEFAULT_COMPONENT_CONFIG = {
   husky: {
     fullTsCheckEveryHours: FULL_TS_CHECK_EVERY_HOURS_DEFAULT,
+    tsCheckInHook: TS_CHECK_IN_HOOK_DEFAULT,
     tsCheckOnCommit: TS_CHECK_ON_COMMIT_DEFAULT,
   },
   thread: {

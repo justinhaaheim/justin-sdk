@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.54.7",
+  "version": "0.55.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -22,6 +22,7 @@
     "measure:thread-hook": "bun scripts/measure-thread-hook.ts",
     "measure:inbox": "bun scripts/measure-inbox.ts",
     "measure:live-sessions": "bun scripts/measure-live-sessions.ts",
+    "measure:pre-commit-ts-check": "bun scripts/measure-pre-commit-ts-check.ts",
     "measure:quota": "bun scripts/measure-quota.ts",
     "measure:session-line": "bun scripts/measure-session-line.ts",
     "measure:session-tree": "bun scripts/measure-session-tree.ts",

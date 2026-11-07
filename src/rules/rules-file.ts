@@ -213,6 +213,11 @@ export function prettierMarkdown(
 export const SDK_BUNX = SDK_BOOTSTRAP;
 export const SYNC_RULES_CMD = `${SDK_BUNX} sync-rules`;
 export const PRIME_FULL_CMD = `${SDK_BUNX} prime --full`;
+/** Prints just these rule modules, in the same form as PRIME_FULL_CMD
+ * (home-base-t6a0.17 D3): session-start names it for each module it left out. */
+export function primeModulesCmd(names: readonly string[]): string {
+  return [`${SDK_BUNX} prime`, ...names.map((n) => `--module ${n}`)].join(' ');
+}
 
 /**
  * The LOCAL spelling, for commands whose only audience is someone sitting in a

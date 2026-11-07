@@ -32,6 +32,28 @@ export const TS_CHECK_ON_COMMIT_DEFAULT: TsCheckOnCommitMode = 'always';
 export const FULL_TS_CHECK_EVERY_HOURS_DEFAULT = 24;
 
 /**
+ * `componentConfig.husky.tsCheckInHook` (home-base-lzvh D3). Read by the husky
+ * INSTALLER, not by the hook: true adds or updates the SDK's marked type-check
+ * block in `.husky/pre-commit`, false adds nothing and updates nothing. It
+ * decides what the next install or sweep of the husky component writes, never
+ * what an already-installed hook does.
+ *
+ * The default was set by the measurement gate in the bead's acceptance
+ * criteria (criterion 7): true only if a real commit in clones of all six
+ * TypeScript consumer repos refused a type error, let a clean change through,
+ * and spent at most 10 s more on it. Measured 2026-11-07 with
+ * `bun run measure:pre-commit-ts-check`, in `--no-hardlinks` clones, load
+ * average 10 to 11: true. All six refused a staged type error and let two
+ * clean commits through. In imessage-exporter and userscripts-j (a tsconfig.json
+ * and no .ts file) the clean commits passed with the "no TypeScript files
+ * (TS18003)" line of D2 step 5, and a new .ts file with a type error was
+ * refused with a real TS2322. The slowest, browser-automation-central, added
+ * 3.0 s warm. (A first run without step 5 refused every clean commit in those
+ * two repos, so the default was false until step 5 landed.)
+ */
+export const TS_CHECK_IN_HOOK_DEFAULT = true;
+
+/**
  * Where the last green type-check is recorded, relative to the checkout's git
  * dir (`git rev-parse --git-path`). Per checkout, because a green check in one
  * worktree says nothing about another's working tree; inside the git dir,

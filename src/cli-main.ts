@@ -970,11 +970,18 @@ void yargs(ARGV)
           describe:
             'Force a fetch/pull of the managed prompts clone, bypassing the staleness gate',
           type: 'boolean',
+        })
+        .option('module', {
+          array: true,
+          describe:
+            'Print only this rule module (repeatable: --module a --module b). Names are the module file names without .md, among those this project resolves; an unknown name exits 2 and lists the valid ones. session-start names this command for any module it left out to stay under the hook limit.',
+          type: 'string',
         }),
     (argv) => {
       const exitCode = runPrime(process.cwd(), {
         forceUpdate: argv['force-update'],
         format: argv.format as 'markdown' | 'hook',
+        modules: argv.module,
         partition: argv.full
           ? 'full'
           : (argv.partition as 'universal' | 'conditional' | 'full'),

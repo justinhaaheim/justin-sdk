@@ -55,9 +55,10 @@ import {
   repoStateHookPresence,
   safeSessionId,
 } from './first-prompt';
-import {emitHookOutput} from './hook-output';
-import {assemble} from './prime';
+import {CLAUDE_CODE_HOOK_TEXT_CAP, emitHookOutput} from './hook-output';
+import {assemble, type Assembled, type AssembledModule} from './prime';
 import {
+  artifactMatchesItsStamp,
   checkRulesDrift,
   isRulesDriftProblem,
   rulesDriftAdvice,
@@ -69,6 +70,8 @@ import {
   deployedSourceSha,
   prettierMarkdown,
   PRIME_FULL_CMD,
+  primeModulesCmd,
+  projectRulesFilePath,
   readDeployedStamp,
   rulesFilePath,
   SYNC_RULES_CMD,
@@ -151,24 +154,125 @@ export interface SessionStartMessage {
 }
 
 /**
- * Does this repo already carry the rules, so injecting them would be a DUPLICATE?
+ * Does this repo already carry the rules, so the hook must not inject them?
  *
- * Ported unchanged from the plugin hook (home-base-anhw half B, D20). The three
- * `false` rows are exactly the states `checkRulesDrift` cannot reach without
- * having stat'd the artifact, so each `true` is a POSITIVE finding that the
- * repo has rules of its own. `cannot-check` keeps injecting because a failed
- * measurement is not a finding, and the two directions are not symmetric: a
- * wrong suppress silently costs a session its rules, a wrong inject costs a
- * duplicate.
+ * From the plugin hook (home-base-anhw half B, D20). The three `true` rows are
+ * states `checkRulesDrift` reaches only after it has read the artifact, so each
+ * is a POSITIVE finding that the repo has rules of its own, which Claude Code
+ * loads in full from `.claude/rules/`.
+ *
+ * `cannot-check` used to be `false`, on the reasoning that a wrong suppress
+ * costs a session its rules while a wrong inject only costs a duplicate. That
+ * reasoning is false (home-base-t6a0.17 D1). In a React Native repo the inject
+ * is the React, React Native and detailed React Native modules, 11,783
+ * characters (measured 2026-11-06): over Claude Code's 10,000-character hook
+ * cap, so Claude gets a file path and a 2,000-character preview, not a
+ * duplicate. And a file Claude Code loads anyway cannot cost the session its
+ * rules. So when the staleness check fails, one local question decides: is the
+ * artifact present, stamped and whole (`artifactMatchesItsStamp`)? If it is,
+ * nothing is injected; if not (absent, zero bytes, no stamp, half written), the
+ * rules are injected as before. Staleness stays UNKNOWN either way, and
+ * Justin's header line says so.
  */
-const REPO_CARRIES_RULES: Record<RulesDriftStatus, boolean> = {
-  'cannot-check': false,
+const REPO_CARRIES_RULES: Record<
+  RulesDriftStatus,
+  boolean | 'if-the-artifact-is-whole'
+> = {
+  'cannot-check': 'if-the-artifact-is-whole',
   'in-sync': true,
   'locally-modified': true,
   missing: false,
   'not-enrolled': false,
   stale: true,
 };
+
+/** REPO_CARRIES_RULES, with its one conditional row resolved against the disk. */
+export function repoCarriesRules(
+  status: RulesDriftStatus,
+  projectRoot: string,
+): boolean {
+  const rule = REPO_CARRIES_RULES[status];
+  return rule === 'if-the-artifact-is-whole'
+    ? artifactMatchesItsStamp(projectRulesFilePath(projectRoot))
+    : rule;
+}
+
+/**
+ * The most session-start puts into Claude's context, in characters
+ * (home-base-t6a0.17 D2). Claude Code replaces a hook's `additionalContext`
+ * longer than CLAUDE_CODE_HOOK_TEXT_CAP (10,000) with a file path and a
+ * 2,000-character preview, and an agent that saw that preview did not read the
+ * file (2026-07-15). 1,000 characters of margin under the cap.
+ */
+export const SESSION_START_INJECTION_BUDGET = CLAUDE_CODE_HOOK_TEXT_CAP - 1_000;
+
+/** What `fitToBudget` settled on. */
+export interface BudgetFit {
+  /** Top-level modules left out of `text`, in index order. */
+  dropped: AssembledModule[];
+  /**
+   * The final text. Over the budget only if it was still over with every
+   * module left out (the pointer line and the repo state are never dropped).
+   */
+  text: string;
+}
+
+/**
+ * D2: measure the FINAL string; while it is over the budget, leave out one
+ * more whole module and compose again. Conditional modules go first, from the
+ * end of the list; universal modules only once every conditional one is out
+ * (the case where the user-level rules file is missing and the full rules are
+ * injected). Leaving modules out from the end keeps the numbering of the ones
+ * that stay.
+ *
+ * `compose` builds the final Claude-bound string (prettier'd, repo state
+ * joined) for a set of kept modules, and is told which ones were left out so it
+ * can name them. The measurement is of what it returns, nothing earlier.
+ */
+export function fitToBudget(
+  modules: readonly AssembledModule[],
+  compose: (
+    kept: readonly AssembledModule[],
+    dropped: readonly AssembledModule[],
+  ) => string,
+  budget: number = SESSION_START_INJECTION_BUDGET,
+): BudgetFit {
+  const dropOrder = [
+    ...modules.filter((m) => m.conditional).reverse(),
+    ...modules.filter((m) => !m.conditional).reverse(),
+  ];
+  const out = new Set<AssembledModule>();
+  let text = compose(modules, []);
+  for (const next of dropOrder) {
+    if (text.length <= budget) break;
+    out.add(next);
+    text = compose(
+      modules.filter((m) => !out.has(m)),
+      modules.filter((m) => out.has(m)),
+    );
+  }
+  return {dropped: modules.filter((m) => out.has(m)), text};
+}
+
+/**
+ * The line that tells Claude which modules it did not get and how to get them
+ * (D2). One line, with one command that prints every module it names, in the
+ * same form the pointer line uses for `prime --full` (D3).
+ */
+function droppedModulesLine(dropped: readonly AssembledModule[]): string {
+  const names = (ms: readonly AssembledModule[]): string =>
+    ms.map((m) => m.name).join(', ');
+  const conditional = dropped.filter((m) => m.conditional);
+  const universal = dropped.filter((m) => !m.conditional);
+  const which =
+    universal.length === 0
+      ? names(conditional)
+      : conditional.length === 0
+        ? `the always-on modules ${names(universal)}`
+        : `the project-specific modules ${names(conditional)} and, because leaving those out was not enough, the always-on modules ${names(universal)}`;
+  const count = `${dropped.length} rule module${dropped.length === 1 ? '' : 's'}`;
+  return `⚠️ To stay under Claude Code's ${CLAUDE_CODE_HOOK_TEXT_CAP.toLocaleString('en-US')}-character hook limit, this injection leaves out ${count} that ${dropped.length === 1 ? 'applies' : 'apply'} to this repo: ${which}. Run \`${primeModulesCmd(dropped.map((m) => m.name))}\` and read the output before continuing. These rules are critical and override defaults.`;
+}
 
 const REPO_RULES_MARKER: Record<RulesDriftStatus, string> = {
   'cannot-check': '⚠️ staleness UNKNOWN',
@@ -191,11 +295,13 @@ function pointerLine(missing: boolean): string {
  * and the two must never look alike (critical rule 7).
  */
 function conditionalModulesSection(args: {
+  /** Left out to stay under the hook budget (D2): named as such, not "injected". */
+  dropped: ReadonlySet<string>;
   names: string[] | null;
   rulesFailed: string | null;
   suppressed: boolean;
 }): string {
-  const {names, rulesFailed, suppressed} = args;
+  const {dropped, names, rulesFailed, suppressed} = args;
   if (names == null) {
     return `conditional rule modules: UNKNOWN (${rulesFailed ?? 'the rules could not be assembled'})`;
   }
@@ -209,7 +315,12 @@ function conditionalModulesSection(args: {
     : 'injected into this session';
   return (
     `conditional rule modules that apply here (${label}):\n` +
-    names.map((n, i) => `  ${i + 1}. ${n}`).join('\n')
+    names
+      .map(
+        (n, i) =>
+          `  ${i + 1}. ${n}${dropped.has(n) ? ' (NOT injected: over the hook limit)' : ''}`,
+      )
+      .join('\n')
   );
 }
 
@@ -233,21 +344,15 @@ export function composeSessionStart(
   const fileMissing = stamp == null;
 
   // --- rules (may throw if the prompts source can't be loaded) --------------
-  let ruleText = '';
+  // Missing file -> inject the FULL rules as a fallback; otherwise just the
+  // project-specific CONDITIONAL rules (the universal bulk is in the file).
+  const partition = fileMissing ? 'full' : 'conditional';
+  let assembled: Assembled | null = null;
   let condNames: string[] | null = null;
-  let cloneSha: string | null = null;
-  let sourceDir: string | null = null;
   let rulesFailed: string | null = null;
 
   try {
-    // Missing file -> inject the FULL rules as a fallback; otherwise just the
-    // project-specific CONDITIONAL rules (the universal bulk is in the file).
-    const assembled = assemble(
-      {partition: fileMissing ? 'full' : 'conditional'},
-      projectRoot,
-    );
-    cloneSha = assembled.sourceCommit?.sha ?? null;
-    sourceDir = assembled.sourceDir;
+    assembled = assemble({partition}, projectRoot);
     // The FULL partition's names are every module, universal ones included,
     // so the conditional subset is asked for separately — from the same clone,
     // so nothing is fetched twice.
@@ -257,33 +362,85 @@ export function composeSessionStart(
           projectRoot,
         ).names
       : assembled.names;
-    const body = fileMissing ? assembled.markdown : assembled.text;
-    ruleText = [pointerLine(fileMissing), body]
-      .filter((s) => s.length > 0)
-      .join('\n\n');
   } catch (error) {
     rulesFailed = error instanceof Error ? error.message : String(error);
   }
+  const cloneSha = assembled?.sourceCommit?.sha ?? null;
+  const sourceDir = assembled?.sourceDir ?? null;
 
   // --- committed per-repo artifact: is THIS repo's rules file current? ------
   // Reported, never fixed: nothing inside the repo is written here (D4/D9).
   const repoRules = checkRulesDrift(projectRoot);
-  const suppressRuleText = REPO_CARRIES_RULES[repoRules.status];
+  const suppressRuleText = repoCarriesRules(repoRules.status, projectRoot);
 
   // --- repo state: only when the first-prompt hook could not be armed -------
   const repoState = firstPrompt.ok ? '' : composeRepoState(projectRoot);
 
-  // --- compose + Prettier the injection (for the model) --------------------
-  let forClaude = suppressRuleText ? '' : ruleText;
-  if (forClaude.length > 0) {
-    // Presentation only — this text is injected, never hashed or committed — so
-    // a prettier failure legitimately degrades to the unformatted (still
-    // complete) markdown. The drift hash below is a MEASUREMENT, handled
-    // differently.
-    const formatted = prettierMarkdown(forClaude);
-    if (formatted.status !== 'failed') forClaude = formatted.markdown;
-  }
-  forClaude = [forClaude, repoState].filter((b) => b.length > 0).join('\n\n');
+  // --- compose + Prettier the injection (for the model), within budget (D2) -
+  const injected = suppressRuleText ? null : assembled;
+  /**
+   * About the LAST compose, which is the one whose text is used: set when its
+   * narrowed re-assembly threw, so every module was left out.
+   */
+  const lastCompose: {narrowingFailed: string | null} = {narrowingFailed: null};
+  const composeForClaude = (
+    kept: readonly AssembledModule[],
+    dropped: readonly AssembledModule[],
+  ): string => {
+    lastCompose.narrowingFailed = null;
+    let rules = '';
+    if (injected != null) {
+      let body = fileMissing ? injected.markdown : injected.text;
+      let named = dropped;
+      if (dropped.length > 0) {
+        try {
+          // Same clone, so nothing is fetched again; `modules` only narrows.
+          const narrowed = assemble(
+            {
+              modules: kept.map((m) => m.name),
+              partition,
+              promptsDir: injected.sourceDir,
+            },
+            projectRoot,
+          );
+          body =
+            kept.length === 0
+              ? ''
+              : fileMissing
+                ? narrowed.markdown
+                : narrowed.text;
+        } catch (error) {
+          // The kept modules cannot be produced, so none are injected, and the
+          // line names every one of them: never a body that silently lacks some.
+          lastCompose.narrowingFailed =
+            error instanceof Error ? error.message : String(error);
+          body = '';
+          named = injected.modules;
+        }
+      }
+      rules = [
+        pointerLine(fileMissing),
+        named.length > 0 ? droppedModulesLine(named) : '',
+        body,
+      ]
+        .filter((s) => s.length > 0)
+        .join('\n\n');
+      // Presentation only — this text is injected, never hashed or committed —
+      // so a prettier failure legitimately degrades to the unformatted (still
+      // complete) markdown. The drift hash below is a MEASUREMENT, handled
+      // differently.
+      const formatted = prettierMarkdown(rules);
+      if (formatted.status !== 'failed') rules = formatted.markdown;
+    }
+    return [rules, repoState].filter((b) => b.length > 0).join('\n\n');
+  };
+  const fit = fitToBudget(injected?.modules ?? [], composeForClaude);
+  const forClaude = fit.text;
+  const {narrowingFailed} = lastCompose;
+  const droppedNames =
+    narrowingFailed != null
+      ? (injected?.modules ?? []).map((m) => m.name)
+      : fit.dropped.map((m) => m.name);
 
   // --- drift check (fast path: sha; slow path: Prettier'd content hash) -----
   const deployedSha = deployedSourceSha(stamp);
@@ -342,7 +499,30 @@ export function composeSessionStart(
   // Say it out loud. "The rules stopped appearing in my injection" must be
   // answerable from this line alone, or the next person to look debugs a feature.
   if (suppressRuleText) {
-    parts.push('rule text NOT injected (this repo carries its own)');
+    parts.push(
+      repoRules.status === 'cannot-check'
+        ? 'rule text NOT injected (this repo carries its own; its staleness is UNKNOWN)'
+        : 'rule text NOT injected (this repo carries its own)',
+    );
+  }
+  // D2: what the budget left out is Justin's to see too, by name. Not the
+  // command: it is in Claude's line, which the mirror below shows him, and
+  // repeating it here pushed a 16-module systemMessage to 9,828 of the same
+  // 10,000-character cap (measured 2026-11-07).
+  if (droppedNames.length > 0) {
+    parts.push(
+      `⚠️ ${droppedNames.length} rule module${droppedNames.length === 1 ? '' : 's'} left out to stay under the ${CLAUDE_CODE_HOOK_TEXT_CAP.toLocaleString('en-US')}-character hook limit (${droppedNames.join(', ')}); Claude was told how to print ${droppedNames.length === 1 ? 'it' : 'them'}`,
+    );
+  }
+  if (narrowingFailed != null) {
+    parts.push(
+      `⚠️ every rule module was left out because the shortened rules could not be assembled (${narrowingFailed})`,
+    );
+  }
+  if (forClaude.length > SESSION_START_INJECTION_BUDGET) {
+    parts.push(
+      `⚠️ the injection is ${forClaude.length} characters, over the ${SESSION_START_INJECTION_BUDGET}-character budget even with every rule module left out`,
+    );
   }
   // Same for the repo state: where it went, or why it did not go there.
   parts.push(
@@ -360,6 +540,7 @@ export function composeSessionStart(
   }
 
   forJustin += `\n${conditionalModulesSection({
+    dropped: new Set(droppedNames),
     names: condNames,
     rulesFailed,
     suppressed: suppressRuleText,

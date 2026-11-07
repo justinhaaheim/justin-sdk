@@ -29,6 +29,7 @@
 import {afterEach, describe, expect, test} from 'bun:test';
 import {spawnSync} from 'child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -44,6 +45,7 @@ import {
   refreshSucceeded,
 } from '../src/critical-rules-setup';
 import {projectRulesFilePath} from '../src/rules/rules-file';
+import {SESSION_START_INJECTION_BUDGET} from '../src/session-start';
 import {setQuiet} from '../src/setup-helpers';
 import {git} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -322,10 +324,10 @@ describe('the repo-rules segment of the systemMessage', () => {
     expect(detail).toContain('rules-update --force');
   });
 
-  test('cannot check: says UNKNOWN, never claims in sync, still injects the rules', () => {
+  test('cannot check: says UNKNOWN, never claims in sync, and says the repo carries its rules', () => {
     const dir = promptsFixture();
     const repo = projectFixture();
-    writeArtifact(repo, dir);
+    const artifact = writeArtifact(repo, dir);
     // A managed clone with readable-but-unrefreshable content: the trap (D5).
     const home = track(createSandbox());
     const cloneDir = join(home.path, 'config', 'justin-sdk', 'prompts');
@@ -339,8 +341,14 @@ describe('the repo-rules segment of the systemMessage', () => {
     expect(run.status).toBe(0);
     expect(run.systemMessage).toContain('repo rules ⚠️ staleness UNKNOWN');
     expect(run.systemMessage).not.toContain('repo rules ✓');
-    // A check that could not run must not cost the model its rules.
-    expect(run.additionalContext.length).toBeGreaterThan(0);
+    // A check that could not run must not cost the model its rules. It does
+    // not: the whole artifact is in the repo, and Claude Code loads it in full
+    // (home-base-t6a0.17 D1), so nothing is injected and the header says why.
+    expect(readFileSync(artifact, 'utf-8')).toContain('ALPHA_RULE');
+    expect(run.additionalContext).toBe('');
+    expect(run.systemMessage).toContain(
+      'rule text NOT injected (this repo carries its own; its staleness is UNKNOWN)',
+    );
   });
 
   test('a repo that is not enrolled says nothing about repo rules at all', () => {
@@ -538,10 +546,10 @@ describe('the hook does not re-deliver rules the repo already carries', () => {
     expect(run.systemMessage).not.toContain('rule text NOT injected');
   });
 
-  test('D20 — cannot-check: a failed MEASUREMENT never suppresses', () => {
+  test('t6a0.17 D1 — cannot-check with the whole artifact on disk: nothing injected, and it says so', () => {
     gatedPromptsFixture();
     const repo = rnProjectFixture();
-    writeArtifact(repo, gatedPromptsFixture());
+    const artifact = writeArtifact(repo, gatedPromptsFixture());
     // A managed clone that exists but cannot be refreshed (D5's trap).
     const home = track(createSandbox());
     initRepoAt(
@@ -555,8 +563,33 @@ describe('the hook does not re-deliver rules the repo already carries', () => {
       XDG_CONFIG_HOME: join(home.path, 'config'),
     });
     expect(run.systemMessage).toContain('repo rules ⚠️ staleness UNKNOWN');
-    expect(run.additionalContext).toContain('RN_ONLY_RULE');
-    expect(run.systemMessage).not.toContain('rule text NOT injected');
+    // Suppressing here is only right because the repo really has the rules.
+    expect(readFileSync(artifact, 'utf-8')).toContain('RN_ONLY_RULE');
+    expect(run.additionalContext).not.toContain('RN_ONLY_RULE');
+    expect(run.additionalContext).toBe('');
+    expect(run.systemMessage).toContain(
+      'rule text NOT injected (this repo carries its own; its staleness is UNKNOWN)',
+    );
+    expect(run.systemMessage).toContain(
+      'conditional rule modules that apply here (already in this repo’s rules artifact, not injected):\n  1. rn-only',
+    );
+  });
+
+  test('t6a0.17 D1 — cannot-check with an artifact that cannot be read: keep injecting', () => {
+    const dir = gatedPromptsFixture();
+    const repo = rnProjectFixture();
+    const artifact = writeArtifact(repo, dir);
+    // Unreadable: the drift check cannot read it (cannot-check), and neither
+    // can Claude Code, so this session must get the rules from the hook.
+    chmodSync(artifact, 0o000);
+    try {
+      const run = runHook(repo);
+      expect(run.systemMessage).toContain('repo rules ⚠️ staleness UNKNOWN');
+      expect(run.additionalContext).toContain('RN_ONLY_RULE');
+      expect(run.systemMessage).not.toContain('rule text NOT injected');
+    } finally {
+      chmodSync(artifact, 0o644);
+    }
   });
 
   test('STALE and LOCALLY MODIFIED still suppress — the file is loaded either way', () => {
@@ -632,5 +665,138 @@ describe('the SessionStart systemMessage names staleness and the conditional mod
     // A check label only doctor emits.
     expect(run.systemMessage).toContain('Ran ');
     expect(run.additionalContext).not.toContain('Ran ');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The injection stays under Claude Code's hook cap (home-base-t6a0.17 D2/D3)
+// ---------------------------------------------------------------------------
+
+/**
+ * Every runHook here has a throwaway HOME, so the user-level rules file is
+ * missing and the FULL rules are injected: the state where both halves of D2
+ * can be reached. The repo is not enrolled, so nothing suppresses the rules.
+ */
+function sizedPromptsFixture(files: Record<string, string>): string {
+  process.env.JSDK_PRIME_PRETTIER = '0';
+  const dir = initRepoAt(join(track(createSandbox()).path, 'prompts'), files);
+  process.env.JSDK_PROMPTS_DIR = dir;
+  return dir;
+}
+
+const RN = '---\nincludeIf: [isReactNative]\n---\n\n';
+const filler = (length: number): string =>
+  Array.from({length: Math.ceil(length / 80)}, () => 'x'.repeat(79)).join('\n');
+
+/** Run the CLI's `prime` in `repo`, as the line's command would (locally). */
+function primeIn(
+  repo: string,
+  promptsDir: string,
+  args: string[],
+): {status: number | null; stdout: string} {
+  const result = spawnSync(
+    process.execPath,
+    [CLI, 'prime', '--prompts-dir', promptsDir, ...args],
+    {
+      cwd: repo,
+      encoding: 'utf-8',
+      env: {
+        ...(process.env as Record<string, string>),
+        JUSTIN_SDK_HEALTH_NOTICES: 'off',
+      },
+    },
+  );
+  return {status: result.status, stdout: result.stdout ?? ''};
+}
+
+describe('the injection is held under the hook budget', () => {
+  test('over budget: the last conditional module is left out and named, with a command that prints it', () => {
+    const prompts = sizedPromptsFixture({
+      'src/rules/alpha.md': '# Alpha\n\nALPHA_RULE',
+      'src/rules/index.md': [
+        '@./alpha.md',
+        '@./rn-small.md',
+        '@./rn-big.md',
+      ].join('\n\n'),
+      'src/rules/rn-big.md': `${RN}# RN big\n\nRN_BIG_RULE\n\n${filler(9_500)}`,
+      'src/rules/rn-small.md': `${RN}# RN small\n\nRN_SMALL_RULE`,
+    });
+    const repo = rnProjectFixture({components: ['base-setup']});
+
+    const run = runHook(repo);
+    expect(run.status).toBe(0);
+    expect(run.additionalContext.length).toBeLessThanOrEqual(
+      SESSION_START_INJECTION_BUDGET,
+    );
+    expect(run.additionalContext).toContain('ALPHA_RULE');
+    expect(run.additionalContext).toContain('RN_SMALL_RULE');
+    expect(run.additionalContext).not.toContain('RN_BIG_RULE');
+    const command =
+      'bunx github:justinhaaheim/justin-sdk prime --module rn-big';
+    expect(run.additionalContext).toContain(`\`${command}\``);
+    expect(run.systemMessage).toContain(
+      '⚠️ 1 rule module left out to stay under the 10,000-character hook limit (rn-big); Claude was told how to print it',
+    );
+    // The command reaches Justin through the mirror of Claude's text.
+    expect(run.systemMessage).toContain(`\`${command}\``);
+    expect(run.systemMessage).not.toContain("over Claude Code's");
+
+    // The command it names prints exactly that module (run locally: the
+    // github: form resolves the published SDK).
+    const printed = primeIn(repo, prompts, ['--module', 'rn-big']);
+    expect(printed.status).toBe(0);
+    expect(printed.stdout).toContain('RN_BIG_RULE');
+    expect(printed.stdout).not.toContain('RN_SMALL_RULE');
+    expect(printed.stdout).not.toContain('ALPHA_RULE');
+  });
+
+  test('still over with every conditional module out: universal ones go too, from the end, and the line says so', () => {
+    const prompts = sizedPromptsFixture({
+      'src/rules/alpha.md': `# Alpha\n\nALPHA_RULE\n\n${filler(5_000)}`,
+      'src/rules/index.md': [
+        '@./alpha.md',
+        '@./omega.md',
+        '@./rn-small.md',
+      ].join('\n\n'),
+      'src/rules/omega.md': `# Omega\n\nOMEGA_RULE\n\n${filler(5_000)}`,
+      'src/rules/rn-small.md': `${RN}# RN small\n\nRN_SMALL_RULE`,
+    });
+    const repo = rnProjectFixture({components: ['base-setup']});
+
+    const run = runHook(repo);
+    expect(run.status).toBe(0);
+    expect(run.additionalContext.length).toBeLessThanOrEqual(
+      SESSION_START_INJECTION_BUDGET,
+    );
+    expect(run.additionalContext).toContain('ALPHA_RULE');
+    expect(run.additionalContext).not.toContain('OMEGA_RULE');
+    expect(run.additionalContext).not.toContain('RN_SMALL_RULE');
+    expect(run.additionalContext).toContain(
+      'the project-specific modules rn-small and, because leaving those out was not enough, the always-on modules omega.',
+    );
+    expect(run.additionalContext).toContain(
+      '`bunx github:justinhaaheim/justin-sdk prime --module omega --module rn-small`',
+    );
+
+    const printed = primeIn(repo, prompts, [
+      '--module',
+      'omega',
+      '--module',
+      'rn-small',
+    ]);
+    expect(printed.status).toBe(0);
+    expect(printed.stdout).toContain('OMEGA_RULE');
+    expect(printed.stdout).toContain('RN_SMALL_RULE');
+    expect(printed.stdout).not.toContain('ALPHA_RULE');
+  });
+
+  test('under budget: nothing is left out and no line is added', () => {
+    gatedPromptsFixture();
+    const repo = rnProjectFixture({components: ['base-setup']});
+
+    const run = runHook(repo);
+    expect(run.additionalContext).toContain('RN_ONLY_RULE');
+    expect(run.additionalContext).not.toContain('leaves out');
+    expect(run.systemMessage).not.toContain('left out to stay under');
   });
 });
