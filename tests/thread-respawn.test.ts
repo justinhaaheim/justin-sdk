@@ -97,6 +97,32 @@ describe('thread respawn: retired (C3)', () => {
 });
 
 describe('the helpers respawn.ts keeps', () => {
+  test('home-base-y0gdz: an ASCII word keeps its spelling exactly', () => {
+    expect(zshWord('plain-word_1.2')).toBe('plain-word_1.2');
+    expect(zshWord('two words')).toBe("'two words'");
+    expect(zshWord("it's")).toBe("'it'\\''s'");
+    expect(zshWord('=ls')).toBe("'=ls'");
+    expect(zshWord('[HOME] H? a \\ b $X !')).toBe("'[HOME] H? a \\ b $X !'");
+  });
+
+  test.each([
+    ['an em dash', 'a — b'],
+    ['an emoji', '😀 grin'],
+    ['an apostrophe and a backslash', "it's — a \\ b \\\\ c 😀"],
+    ['what a shell would expand', '— $X `date` $(date) "q" ! * ? [x] ~'],
+    ['control characters', 'é\n\ttab'],
+    ['hex digits right after an escape', '—abc def 😀0'],
+    ['a whole name', '[MAYOR] [HOME] H1 —😀 title'],
+  ])(
+    'home-base-y0gdz: %s arrives byte for byte, typed as pure ASCII',
+    (_name, word) => {
+      const typed = zshWord(word);
+      expect(typed).toMatch(/^[ -~]+$/u);
+      const out = execFileSync('zsh', ['-f', '-c', `printf %s ${typed}`]);
+      expect(out.equals(Buffer.from(word, 'utf8'))).toBe(true);
+    },
+  );
+
   test('kickoffText is prose that names the block file and the continues command', () => {
     const kickoff = kickoffText('/tmp/h/abc.md', 't-abc', TRICKY);
     expect(kickoff.startsWith('/')).toBe(false);

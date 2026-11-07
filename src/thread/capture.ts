@@ -41,6 +41,7 @@ import type {
   AutoPickupInput,
   CapturePickupOutcome,
 } from './handoff-auto-pickup';
+import type {ChainReaders} from './handoff-chain';
 import type {AppendOutcome, MessageLine} from './message-log';
 import type {EnvLike} from './paths';
 
@@ -93,6 +94,8 @@ import {
   ensureSessionBead,
   type SessionBeadOutcome,
 } from './session-bead';
+// Already in the hook's import graph through ./workspace-name-session.
+import {type HandoffNumberHeal, healHandoffNumber} from './session-handoff';
 import {sessionContextLine} from './session-line';
 import {
   type StatusFileOutcome,
@@ -844,6 +847,8 @@ export interface ApplyOptions {
   /** What the workspace description reads; tests inject fixtures. */
   descriptionReaders?: DescriptionReaders;
   env?: EnvLike;
+  /** What the self-heal reads (home-base-6n7my.2 D5); tests inject these. */
+  handoffNumberReaders?: ChainReaders;
   /** The spawning hook's synchronous ms (`--hook-ms`), recorded as-is. */
   hookElapsedMs?: number | null;
   /**
@@ -1056,6 +1061,11 @@ export type CaptureApplyOutcome =
        */
       cmuxLabels?: CmuxLabelsOutcome | null;
       commit: CommitOutcome | null;
+      /**
+       * What the handoff number's self-heal did (home-base-6n7my.2 D5); absent
+       * when the workspace sync did not run.
+       */
+      handoffNumber?: HandoffNumberHeal | null;
       kind: 'ran';
       last: ApplyPassOutcome;
       passes: number;
@@ -1235,6 +1245,7 @@ export async function applyCapture(
   let tabTitle: TabTitleOutcome | null = null;
   let workspaceDescription: null | WorkspaceDescriptionOutcome = null;
   let cmuxLabels: CmuxLabelsOutcome | null = null;
+  let handoffNumber: HandoffNumberHeal | null = null;
   try {
     // Under the lock, before the first pass: the pass then applies the seeded
     // log's tail. A thrown seed is a failed one, never a lost capture.
@@ -1289,6 +1300,25 @@ export async function applyCapture(
             ...lookup,
             session: {...lookup.session, labels: cmuxLabels.labels},
           };
+        }
+        // home-base-6n7my.2 D5: before the syncs, so a session linked before the
+        // label existed shows its number on this very prompt. It never throws.
+        if (lookup.kind === 'found') {
+          handoffNumber = healHandoffNumber({
+            beadId: lookup.session.beadId,
+            db: lookup.db ?? null,
+            env,
+            labels: lookup.session.labels,
+            ...(options.handoffNumberReaders != null
+              ? {readers: options.handoffNumberReaders}
+              : {}),
+          });
+          if (handoffNumber.kind === 'stamped') {
+            lookup = {
+              ...lookup,
+              session: {...lookup.session, labels: handoffNumber.labels},
+            };
+          }
         }
         try {
           workspaceName = await syncWorkspaceForCapture({
@@ -1409,6 +1439,7 @@ export async function applyCapture(
     workspaceName,
     ...(workspaceDescription == null ? {} : {workspaceDescription}),
     ...(cmuxLabels == null ? {} : {cmuxLabels}),
+    ...(handoffNumber == null ? {} : {handoffNumber}),
     ...(pickup == null ? {} : {pickup}),
   };
 }
@@ -1487,6 +1518,16 @@ export function captureRunRecord(
     record.cmuxLabels = {
       detail: outcome.cmuxLabels.detail,
       kind: outcome.cmuxLabels.kind,
+    };
+  }
+  // home-base-6n7my.2 D5: the same, so a chain that stays unknown can be traced.
+  if (
+    outcome.handoffNumber != null &&
+    outcome.handoffNumber.kind !== 'current'
+  ) {
+    record.handoffNumber = {
+      detail: outcome.handoffNumber.detail,
+      kind: outcome.handoffNumber.kind,
     };
   }
   if (last.kind === 'applied') {

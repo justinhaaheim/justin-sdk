@@ -39,6 +39,7 @@ import {spawnSync} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -51,10 +52,12 @@ import {homedir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
 import {z} from 'zod';
 
-import {brShow} from '../src/beads/br';
-import {messageLogPath} from '../src/thread/archive';
+import {brShow, brUpdate} from '../src/beads/br';
+import {captureRunLogPath, messageLogPath} from '../src/thread/archive';
 import {realCmuxRunner} from '../src/thread/cmux';
+import {resolveRepoTag, resolveThreadConfig} from '../src/thread/config';
 import {killSwitchPath} from '../src/thread/handoff-gate';
+import {mayorSuccessorSentence} from '../src/thread/handoff-number';
 import {
   focusCommandOf,
   PREDECESSOR_SETTLE_MS,
@@ -77,14 +80,17 @@ import {
   vimMode,
   workingIndicator,
 } from '../src/thread/pane-join';
-import {zshWord} from '../src/thread/respawn';
+import {KICKOFF_OPENING, zshWord} from '../src/thread/respawn';
 import {
   CONTINUED_BY_LABEL_PREFIX,
   CONTINUES_ENV,
   CONTINUES_LABEL_PREFIX,
+  HANDOFF_NUMBER_LABEL_PREFIX,
   HANDOFF_REFUSED_LABEL,
+  MAYOR_ROLE_LABEL,
   resolveSession,
 } from '../src/thread/session-bead';
+import {sessionDisplayName, sessionName} from '../src/thread/session-name';
 import {HANDED_OFF_TAB_PREFIX} from '../src/thread/tab-title';
 import {readWorkspaceNames} from '../src/thread/workspace-name';
 import {gateSpend} from './spend-gate';
@@ -96,7 +102,7 @@ import {gateSpend} from './spend-gate';
 /** The scenarios a run without --scenario runs, in order. */
 const SCENARIOS = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6'] as const;
 /** Scenarios run only when named: M, the note-character measurement (home-base-mbnjv.9). */
-const NAMED_ONLY = ['M', 'B', 'C', 'P'] as const;
+const NAMED_ONLY = ['M', 'B', 'C', 'P', 'K', 'N', 'F'] as const;
 type ScenarioId = (typeof NAMED_ONLY)[number] | (typeof SCENARIOS)[number];
 
 const HELP = `live-handoff: drive throwaway Claude Code sessions through real thread handoffs
@@ -132,7 +138,22 @@ Scenarios (each in its own throwaway cmux workspace, cwd = this checkout):
               \`cmux identify\`; the guard denies the first two naming thread
               handoff and lets the third through.
 
-Run only when named (--scenario B, C, M or P):
+Run only when named (--scenario B, C, F, K, M, N or P):
+  N   mayor   home-base-6n7my.2.3. A throwaway runs thread mark --mayor and hands
+              off, and its successor hands off again. Each successor's
+              custom-title record, bead labels, kickoff, workspace name and tab
+              title must carry [MAYOR] and its number. The title holds an em dash
+              and an emoji, which must arrive byte for byte (home-base-y0gdz).
+  F   hook    home-base-6n7my.2.2. A throwaway loads the deployed mayor skill with
+              a typed /mayor. Its frontmatter Stop hook must label the session,
+              and cmux must show the mark.
+  K   skill   home-base-6n7my.2.2. Does a skill's frontmatter hooks: entry fire?
+              Two sessions in scratch directories holding a small test skill:
+              one loads it with a typed /hook-probe, the other with the Skill
+              tool. Each has a control turn before the load and a later turn
+              after it. A hook on Stop, PostToolUse and UserPromptSubmit appends
+              to a file, which is the answer. Writes K-skill-hooks.json. A
+              measurement: its checks say it ran, and the file says what fired.
   P   pickup  home-base-npbse.1.2, needs componentConfig.thread.handoff.autoPickup
               on. A session files one request. A second session starts with
               JUSTIN_SDK_CONTINUES naming it and a prompt that never names the
@@ -641,6 +662,7 @@ async function createWorkspace(
   command: string,
   marker: string,
   scenario: string,
+  cwd: string = REPO_ROOT,
 ): Promise<CreatedWorkspace | {reason: string}> {
   const call = await fenced(
     [
@@ -648,7 +670,7 @@ async function createWorkspace(
       '--name',
       name,
       '--cwd',
-      REPO_ROOT,
+      cwd,
       '--command',
       command,
       '--focus',
@@ -1403,6 +1425,8 @@ async function waitForSuccessorTab(
   ctx: Ctx,
   t: Throwaway,
   timeoutMs: number,
+  /** Older tabs of the chain, which are not the new successor. */
+  olderSurfaces: readonly string[] = [],
 ): Promise<{
   dialog: string | null;
   screen: string;
@@ -1412,8 +1436,9 @@ async function waitForSuccessorTab(
   const found = await waitFor(timeoutMs, 1000, async () => {
     const tree = await readWorkspace(t.workspaceId, ctx.marker);
     if (tree.kind !== 'read') return null;
+    const known = [t.surfaceId, ...olderSurfaces].map((id) => id.toUpperCase());
     const other = tree.view.surfaces.find(
-      (surface) => surface.id.toUpperCase() !== t.surfaceId.toUpperCase(),
+      (surface) => !known.includes(surface.id.toUpperCase()),
     );
     if (other == null) return null;
     const screen = await readScreen(t.workspaceId, other.id, ctx.marker);
@@ -1471,6 +1496,36 @@ async function waitForLink(
     scenario: t.scenario,
   });
   return found.value;
+}
+
+/** The capture hook's first record of a done pickup for this session, or null. */
+function capturePickup(sessionId: string): {at: string} | null {
+  let text: string;
+  try {
+    text = readFileSync(captureRunLogPath(process.env), 'utf8');
+  } catch {
+    return null;
+  }
+  for (const line of text.split('\n')) {
+    if (!line.includes(sessionId) || !line.includes('"picked-up"')) continue;
+    try {
+      const record = JSON.parse(line) as {
+        at?: string;
+        pickup?: {kind?: string};
+        sessionId?: string;
+      };
+      if (
+        record.sessionId === sessionId &&
+        record.pickup?.kind === 'picked-up' &&
+        record.at != null
+      ) {
+        return {at: record.at};
+      }
+    } catch {
+      // A partial last line while a child is writing: the next read sees it.
+    }
+  }
+  return null;
 }
 
 /** The successor's `thread request --continues` call, from its transcript. */
@@ -1766,6 +1821,14 @@ async function scenarioS1(ctx: Ctx): Promise<void> {
     kickoff.slice(0, 400),
   );
   const request = linkCall(successorId);
+  const autoPickup = resolveThreadConfig({cwd: REPO_ROOT, env: process.env})
+    .handoff.autoPickup;
+  // The label lands before the capture child writes its record: 30 s in the
+  // measured run (20261107T010643Z).
+  const pickedUp = await waitFor(120_000, 1000, () =>
+    autoPickup ? capturePickup(successorId) : {at: ''},
+  );
+  const pickup = autoPickup && pickedUp.kind === 'ok' ? pickedUp.value : null;
   const succLines = messageLines(successorId);
   // Any writer's spelling: the capture rewrite turns Stop lines into backfill.
   const firstStop =
@@ -1773,13 +1836,20 @@ async function scenarioS1(ctx: Ctx): Promise<void> {
   const prompts = succLines.filter(
     (entry) => entry.role === 'user' && (entry.at ?? '') <= (request?.at ?? ''),
   );
+  // With autoPickup on the capture hook links, with no such call in the session
+  // (home-base-6n7my.2.3 F3), and its record can land after the first Stop.
+  const promptsBeforePickup = succLines.filter(
+    (entry) => entry.role === 'user' && (entry.at ?? '') <= (pickup?.at ?? ''),
+  );
   check(
     'S1',
     'the successor linked in its FIRST turn',
-    request != null &&
-      prompts.length === 1 &&
-      (firstStop == null || (firstStop.at ?? '') >= (request.at ?? '')),
-    `link call at ${request?.at ?? '(none)'}: ${request?.command ?? ''}\nprompts before it: ${prompts.length}; first Stop at ${firstStop?.at ?? '(none yet)'}\ntranscript ${transcriptPath(successorId)}`,
+    autoPickup && request == null
+      ? pickup != null && promptsBeforePickup.length === 1
+      : request != null &&
+          prompts.length === 1 &&
+          (firstStop == null || (firstStop.at ?? '') >= (request.at ?? '')),
+    `autoPickup ${String(autoPickup)}; capture pickup at ${pickup?.at ?? '(none)'}, prompts before it: ${promptsBeforePickup.length}\nlink call at ${request?.at ?? '(none)'}: ${request?.command ?? ''}\nprompts before it: ${prompts.length}; first Stop at ${firstStop?.at ?? '(none yet)'}\ntranscript ${transcriptPath(successorId)}`,
   );
   const named = await waitFor(180_000, 3000, async () => {
     const names = readWorkspaceNames(process.env);
@@ -3275,6 +3345,589 @@ async function scenarioC(ctx: Ctx): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// K: do a skill's frontmatter hooks fire? (home-base-6n7my.2.2)
+// ---------------------------------------------------------------------------
+
+const PROBE_SKILL = 'hook-probe';
+const PROBE_EVENTS = ['Stop', 'PostToolUse', 'UserPromptSubmit'] as const;
+
+/**
+ * A scratch directory holding one small test skill. Each event's hook appends the
+ * event and its payload to hooks.jsonl there, so the answer comes from a file and
+ * not from what the session says. No beads and no repo hooks: nothing here can
+ * mark anything. It lives in the run directory, so the checkout's folder trust
+ * covers it, and tmp/ is gitignored.
+ */
+function writeProbeScratch(ctx: Ctx, path: string): string {
+  const scratch = join(ctx.runDir, `K-${path}`);
+  const skillDir = join(scratch, '.claude', 'skills', PROBE_SKILL);
+  mkdirSync(skillDir, {recursive: true});
+  const hook = join(scratch, 'hook.sh');
+  writeFileSync(
+    hook,
+    [
+      '#!/bin/sh',
+      `# ${ctx.markerTag} a test hook of the live-handoff K scenario.`,
+      `printf '{"event":"%s","at":"%s","payload":%s}\\n' "$1" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(tr -d '\\n')" >> '${join(scratch, 'hooks.jsonl')}'`,
+      '',
+    ].join('\n'),
+  );
+  chmodSync(hook, 0o755);
+  const entries = PROBE_EVENTS.flatMap((event) => [
+    `  ${event}:`,
+    ...(event === 'PostToolUse'
+      ? ["    - matcher: '*'", '      hooks:']
+      : ['    - hooks:']),
+    '        - type: command',
+    `          command: '${hook} ${event}'`,
+  ]);
+  writeFileSync(
+    join(skillDir, 'SKILL.md'),
+    [
+      '---',
+      `name: ${PROBE_SKILL}`,
+      `description: '${ctx.markerTag} A test skill for a live test. Load it only when a prompt says to.'`,
+      'hooks:',
+      ...entries,
+      '---',
+      '',
+      `${ctx.markerTag} When this skill loads, reply with the single word loaded. Run no tools.`,
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(scratch, '.claude', 'settings.json'),
+    `${JSON.stringify({permissions: {allow: ['Skill', 'Bash(echo:*)']}}, null, 2)}\n`,
+  );
+  return scratch;
+}
+
+interface ProbeHookLine {
+  agentId: string | null;
+  at: string | null;
+  event: string;
+  raw: string;
+}
+
+/** Every line the test hook wrote. A line that does not parse is kept as raw. */
+function readProbeHooks(scratch: string): ProbeHookLine[] {
+  let text: string;
+  try {
+    text = readFileSync(join(scratch, 'hooks.jsonl'), 'utf8');
+  } catch {
+    return [];
+  }
+  return text
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((raw) => {
+      try {
+        const line = JSON.parse(raw) as {
+          at?: string;
+          event?: string;
+          payload?: {agent_id?: string};
+        };
+        return {
+          agentId: line.payload?.agent_id ?? null,
+          at: line.at ?? null,
+          event: line.event ?? '(no event)',
+          raw,
+        };
+      } catch {
+        return {agentId: null, at: null, event: '(unparsed)', raw};
+      }
+    });
+}
+
+/** The time of each ended turn: Claude Code's turn_duration records. */
+function endedTurns(transcript: string): string[] {
+  return (readTranscript(transcript) ?? [])
+    .filter(
+      (record) =>
+        record.type === 'system' && record.subtype === 'turn_duration',
+    )
+    .map((record) => record.timestamp ?? '');
+}
+
+async function probeRound(input: {
+  label: string;
+  scratch: string;
+  send: () => Promise<null | string>;
+  transcript: string;
+}): Promise<null | Record<string, unknown>> {
+  const {label, scratch, transcript} = input;
+  const turnsBefore = endedTurns(transcript).length;
+  const hooksBefore = readProbeHooks(scratch).length;
+  const sent = await input.send();
+  if (
+    !check('K', `${label}: the prompt is submitted`, sent == null, sent ?? '')
+  ) {
+    return null;
+  }
+  const ended = await waitFor(180_000, 1000, () =>
+    endedTurns(transcript).length > turnsBefore ? true : null,
+  );
+  if (!check('K', `${label}: the turn ends`, ended.kind === 'ok', transcript)) {
+    return null;
+  }
+  // A hook may still be running when the record lands.
+  await sleep(5000);
+  const lines = readProbeHooks(scratch).slice(hooksBefore);
+  return {
+    hooks: lines.map((line) => ({
+      agentId: line.agentId,
+      at: line.at,
+      event: line.event,
+    })),
+    round: label,
+    turnEndedAt: endedTurns(transcript).at(-1) ?? null,
+  };
+}
+
+async function probePath(
+  ctx: Ctx,
+  path: 'tool' | 'typed',
+): Promise<Record<string, unknown>> {
+  const scratch = writeProbeScratch(ctx, path);
+  const sessionId = randomUUID();
+  const name = `${ctx.markerTag} lh K ${path}`;
+  const line = claudeLine({
+    model: ctx.model,
+    name,
+    prompt: null,
+    sessionId,
+    settingsPath: null,
+    xdg: null,
+  });
+  const created = await createWorkspace(
+    `${ctx.markerTag} live-handoff ${ctx.stamp} K ${path}`,
+    line,
+    ctx.marker,
+    'K',
+    scratch,
+  );
+  if ('reason' in created) {
+    check('K', `${path}: the workspace opens`, false, created.reason);
+    return {path, stopped: 'the workspace did not open'};
+  }
+  const t: Throwaway = {name, scenario: 'K', sessionId, ...created};
+  const transcript = join(
+    CLAUDE_DIR,
+    'projects',
+    projectSlug(scratch),
+    `${sessionId}.jsonl`,
+  );
+  logEvent('session-started', {
+    command: line,
+    role: 'probe',
+    scenario: 'K',
+    sessionId,
+    surfaceId: created.surfaceId,
+    transcript,
+    workspaceId: created.workspaceId,
+  });
+  info(
+    'K',
+    `${path}: session ${sessionId}, scratch ${scratch}\ntranscript ${transcript}`,
+  );
+  const up = await waitFor(60_000, 500, async () => {
+    const screen = await readScreen(t.workspaceId, t.surfaceId, ctx.marker);
+    if (screen.kind !== 'read') return null;
+    const verdict = classifySuccessorScreen(screen.text);
+    if (verdict.kind === 'dialog')
+      return {dialog: verdict.label, text: screen.text};
+    return statusLineIdOf(screen.text) === sessionId
+      ? {dialog: null, text: screen.text}
+      : null;
+  });
+  if (
+    !check(
+      'K',
+      `${path}: Claude Code starts in the scratch directory with no dialog (never answered)`,
+      up.kind === 'ok' && up.value.dialog == null,
+      up.kind === 'ok'
+        ? `${up.value.dialog ?? ''}\n${lastLines(up.value.text, 30)}`
+        : 'no input box within 60 s',
+    )
+  ) {
+    return {path, stopped: 'the session did not come up'};
+  }
+  const rounds: Record<string, unknown>[] = [];
+  const steps: {label: string; send: () => Promise<null | string>}[] = [
+    {
+      // The control: the skill is on disk and not loaded yet.
+      label: `${path} turn 0, skill not loaded`,
+      send: () =>
+        typeLine(
+          ctx,
+          t,
+          `${ctx.markerTag} Reply with the single word zero. Run no tools.`,
+        ),
+    },
+    {
+      label: `${path} turn 1, skill loads`,
+      send: () =>
+        path === 'typed'
+          ? typeSlash(ctx, t, `/${PROBE_SKILL}`)
+          : typeLine(
+              ctx,
+              t,
+              `${ctx.markerTag} Load the skill ${PROBE_SKILL} with the Skill tool now, and follow what it says.`,
+            ),
+    },
+    {
+      label: `${path} turn 2, a later turn`,
+      send: () =>
+        typeLine(
+          ctx,
+          t,
+          `${ctx.markerTag} Run this Bash command: echo probe. Then reply with the single word second.`,
+        ),
+    },
+  ];
+  for (const step of steps) {
+    const round = await probeRound({
+      label: step.label,
+      scratch,
+      send: step.send,
+      transcript,
+    });
+    if (round == null) break;
+    rounds.push(round);
+  }
+  const records = readTranscript(transcript) ?? [];
+  const skillCalls = toolCalls(records).filter((call) => call.name === 'Skill');
+  const slashSeen = records.some((record) =>
+    textOf(record.message?.content).includes(
+      `<command-name>/${PROBE_SKILL}</command-name>`,
+    ),
+  );
+  check(
+    'K',
+    path === 'typed'
+      ? 'typed: the transcript shows the slash command, and no Skill tool call'
+      : 'tool: the transcript shows a Skill tool call, and no slash command',
+    path === 'typed'
+      ? slashSeen && skillCalls.length === 0
+      : !slashSeen && skillCalls.length > 0,
+    `slash command seen: ${slashSeen}; Skill tool calls: ${skillCalls.length}`,
+  );
+  logEvent('scenario-sessions', {caller: sessionId, scenario: 'K'});
+  return {path, rounds, sessionId, skillCalls: skillCalls.length, slashSeen};
+}
+
+async function scenarioK(ctx: Ctx): Promise<void> {
+  const version = spawnSync('claude', ['--version'], {encoding: 'utf8'});
+  const paths = [await probePath(ctx, 'typed'), await probePath(ctx, 'tool')];
+  const text = JSON.stringify(
+    {claudeCode: (version.stdout ?? '').trim(), paths},
+    null,
+    2,
+  );
+  writeFileSync(join(ctx.runDir, 'K-skill-hooks.json'), `${text}\n`);
+  logEvent('skill-hooks', {paths});
+  info('K', `the measurement (also K-skill-hooks.json):\n${text}`);
+  check(
+    'K',
+    'both paths ran all three turns',
+    paths.every(
+      (path) => Array.isArray(path.rounds) && path.rounds.length === 3,
+    ),
+    '',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// N: the mayor mark and the handoff numbers, end to end (home-base-6n7my.2.3 F5)
+// ---------------------------------------------------------------------------
+
+/**
+ * Non-ASCII first, so it survives the cut: this also proves home-base-y0gdz. It is
+ * set by the harness, not typed by a session, so the bytes are known.
+ */
+function mayorTitle(ctx: Ctx): string {
+  return `\u2014\u{1f600} ${ctx.markerTag}`;
+}
+
+function mayorTag(): string {
+  const tag = resolveRepoTag({
+    checkout: REPO_ROOT,
+    env: process.env,
+    repo: 'home-base',
+  });
+  return tag;
+}
+
+/** Set a throwaway's own bead title, so it names its workspace. */
+function titleThrowaway(t: Throwaway, title: string): string | null {
+  const bead = sessionBead(t.sessionId);
+  if (bead == null) return `session ${t.sessionId} has no bead`;
+  const written = brUpdate({db: bead.db, env: process.env}, bead.id, {
+    removeLabels: ['auto-title'],
+    title,
+  });
+  return written.kind === 'failed' ? 'br update failed' : null;
+}
+
+/** The newest custom-title record in a session's transcript, as stored. */
+function customTitleOf(sessionId: string): null | string {
+  const titles = (readTranscript(transcriptPath(sessionId)) ?? [])
+    .filter((record) => record.type === 'custom-title')
+    .map((record) => record.customTitle);
+  const newest = titles.at(-1);
+  return typeof newest === 'string' ? newest : null;
+}
+
+/** One successor: its tab, its link, and every record that must carry its marks. */
+async function checkSuccessor(
+  ctx: Ctx,
+  input: {
+    caller: Throwaway;
+    number: number;
+    olderSurfaces: readonly string[];
+    title: string;
+  },
+): Promise<null | Throwaway> {
+  const {caller, olderSurfaces, number, title} = input;
+  const label = `H${number}`;
+  const tab = await waitForSuccessorTab(ctx, caller, 90_000, olderSurfaces);
+  if (
+    !check(
+      'N',
+      `${label}: a new tab opens running Claude Code, with no dialog`,
+      tab != null && tab.dialog == null && tab.sessionId != null,
+      tab == null
+        ? 'no new tab within 90 s'
+        : `${tab.dialog ?? ''} session ${tab.sessionId ?? '?'}`,
+    ) ||
+    tab?.sessionId == null
+  ) {
+    return null;
+  }
+  const successorId = tab.sessionId;
+  const link = await waitForLink(caller, 240_000);
+  if (
+    !check(
+      'N',
+      `${label}: the successor links`,
+      link != null,
+      `caller ${caller.sessionId}`,
+    ) ||
+    link == null
+  ) {
+    return null;
+  }
+  const {labels} = link.successor;
+  check(
+    'N',
+    `${label}: its bead has session-role:mayor and handoff-number:${number}`,
+    labels.includes(MAYOR_ROLE_LABEL) &&
+      labels.includes(`${HANDOFF_NUMBER_LABEL_PREFIX}${number}`),
+    labels.join(', '),
+  );
+  const kickoff =
+    firstPrompt(readTranscript(transcriptPath(successorId)) ?? []) ?? '';
+  const sentence = mayorSuccessorSentence([MAYOR_ROLE_LABEL]) ?? '';
+  check(
+    'N',
+    `${label}: its kickoff starts with the opening and holds the mayor sentence`,
+    kickoff.startsWith(KICKOFF_OPENING) && kickoff.includes(sentence),
+    kickoff.slice(0, 700),
+  );
+  const marks = {handoff: number, mayor: true};
+  const launchName = sessionName(mayorTag(), title, marks);
+  const stored = await waitFor(60_000, 1000, () => customTitleOf(successorId));
+  const custom = stored.kind === 'ok' ? stored.value : null;
+  check(
+    'N',
+    `${label}: its custom-title record is the marked name, byte for byte`,
+    custom === launchName,
+    `custom-title: ${JSON.stringify(custom)}\nexpected:     ${JSON.stringify(launchName)}`,
+  );
+  logEvent('custom-title', {
+    customTitle: custom,
+    number,
+    sessionId: successorId,
+  });
+  const workspaceName = sessionDisplayName(mayorTag(), title, marks);
+  const named = await waitFor(180_000, 3000, async () => {
+    const tree = await readWorkspace(caller.workspaceId, ctx.marker);
+    if (tree.kind !== 'read') return null;
+    const own = tree.view.surfaces.find(
+      (surface) => surface.id.toUpperCase() === tab.surfaceId.toUpperCase(),
+    );
+    // This harness named the workspace, and a name the tool did not set is kept
+    // in parentheses after the tool's part (workspace-name.ts, rule 4).
+    const shown = tree.view.title ?? '';
+    const shows =
+      shown === workspaceName || shown.startsWith(`${workspaceName} (`);
+    return shows && own?.title === launchName
+      ? {tab: own.title, workspace: shown}
+      : null;
+  });
+  const seen = await readWorkspace(caller.workspaceId, ctx.marker);
+  check(
+    'N',
+    `${label}: the workspace and its tab carry the same marks`,
+    named.kind === 'ok',
+    seen.kind === 'read'
+      ? `workspace: "${seen.view.title ?? ''}"\ntabs: ${seen.view.surfaces.map((surface) => `"${surface.title}"`).join(', ')}\nexpected workspace "${workspaceName}", tab "${launchName}"`
+      : seen.reason,
+  );
+  logEvent('scenario-sessions', {
+    caller: caller.sessionId,
+    callerBead: link.caller.id,
+    scenario: 'N',
+    successor: successorId,
+    successorBead: link.successor.id,
+    successorSurface: tab.surfaceId,
+  });
+  return {
+    name: launchName,
+    ref: caller.ref,
+    scenario: 'N',
+    sessionId: successorId,
+    surfaceId: tab.surfaceId,
+    workspaceId: caller.workspaceId,
+  };
+}
+
+function mayorHandoffPrompt(ctx: Ctx, step: string): string {
+  return `${ctx.markerTag} Live test N. ${step} Run this Bash command exactly as written, as its own call, bare, with nothing before or after it: \`${HANDOFF_COMMAND} --note "${successorNote(ctx, 'N')}"\`. Then write a one-line final report and end your turn. ${HANDS_OFF}`;
+}
+
+async function scenarioN(ctx: Ctx): Promise<void> {
+  const t = await startThrowaway(ctx, 'N', 'keep');
+  if (t == null) return;
+  const title = mayorTitle(ctx);
+  const titled = titleThrowaway(t, title);
+  if (
+    !check('N', 'the throwaway gets its title', titled == null, titled ?? '')
+  ) {
+    return;
+  }
+  const since = new Date().toISOString();
+  const typed = await typeLine(
+    ctx,
+    t,
+    mayorHandoffPrompt(
+      ctx,
+      'First run this Bash command exactly as written, as its own call: `bun run justin-sdk thread mark --mayor`. Then:',
+    ),
+  );
+  if (!check('N', 'the prompt is submitted', typed == null, typed ?? ''))
+    return;
+  const call = await waitForHandoffCall(t, since, 300_000);
+  if (!checkStarted('N', call, 'args')) return;
+  const marked = sessionBead(t.sessionId)?.labels ?? [];
+  check(
+    'N',
+    'thread mark --mayor labelled the first session',
+    marked.includes(MAYOR_ROLE_LABEL),
+    marked.join(', '),
+  );
+  const first = await checkSuccessor(ctx, {
+    caller: t,
+    number: 1,
+    olderSurfaces: [],
+    title,
+  });
+  if (first == null) return;
+  // Its first turn must end before anything is typed into it.
+  const ended = await waitFor(300_000, 1000, () =>
+    stopAtOrAfter(first.sessionId, ''),
+  );
+  if (
+    !check('N', 'H1: its first turn ends', ended.kind === 'ok', first.sessionId)
+  ) {
+    return;
+  }
+  const since2 = new Date().toISOString();
+  const typed2 = await typeLine(
+    ctx,
+    first,
+    mayorHandoffPrompt(ctx, 'Now hand off again.'),
+  );
+  if (
+    !check('N', 'H1: the prompt is submitted', typed2 == null, typed2 ?? '')
+  ) {
+    return;
+  }
+  const call2 = await waitForHandoffCall(first, since2, 300_000);
+  if (!checkStarted('N', call2, 'args')) return;
+  const second = await checkSuccessor(ctx, {
+    caller: first,
+    number: 2,
+    olderSurfaces: [t.surfaceId],
+    title,
+  });
+  if (second == null) return;
+  info(
+    'N',
+    `custom-title of H1: ${JSON.stringify(customTitleOf(first.sessionId))}\ncustom-title of H2: ${JSON.stringify(customTitleOf(second.sessionId))}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// F: the real mayor skill's frontmatter hook marks a session (home-base-6n7my.2.2)
+// ---------------------------------------------------------------------------
+
+async function scenarioF(ctx: Ctx): Promise<void> {
+  const t = await startThrowaway(ctx, 'F', 'measure');
+  if (t == null) return;
+  const titled = titleThrowaway(t, `${ctx.markerTag} lh F`);
+  if (
+    !check('F', 'the throwaway gets its title', titled == null, titled ?? '')
+  ) {
+    return;
+  }
+  const before = sessionBead(t.sessionId)?.labels ?? [];
+  check(
+    'F',
+    'the control: no mayor label before the skill loads',
+    !before.includes(MAYOR_ROLE_LABEL),
+    before.join(', '),
+  );
+  const typed = await typeSlash(
+    ctx,
+    t,
+    `/mayor ${ctx.markerTag} Live test of this skill's hook. Reply with the single word ready. Run no tools and file nothing.`,
+  );
+  if (
+    !check('F', 'the typed /mayor is submitted', typed == null, typed ?? '')
+  ) {
+    return;
+  }
+  const labelled = await waitFor(180_000, 2000, () =>
+    (sessionBead(t.sessionId)?.labels ?? []).includes(MAYOR_ROLE_LABEL)
+      ? true
+      : null,
+  );
+  const records = readTranscript(transcriptPath(t.sessionId)) ?? [];
+  check(
+    'F',
+    'the Stop hook labelled the session, with no command from the session',
+    labelled.kind === 'ok' &&
+      !toolCalls(records).some((call) => call.command.includes('thread mark')),
+    `after ${labelled.kind === 'ok' ? Math.round(labelled.waitedMs / 1000) : '?'} s; labels: ${(sessionBead(t.sessionId)?.labels ?? []).join(', ')}`,
+  );
+  const named = await waitFor(120_000, 3000, async () => {
+    const tree = await readWorkspace(t.workspaceId, ctx.marker);
+    return tree.kind === 'read' &&
+      (tree.view.title ?? '').startsWith('[MAYOR] ')
+      ? tree.view.title
+      : null;
+  });
+  check(
+    'F',
+    'cmux shows the mark on the workspace',
+    named.kind === 'ok',
+    named.kind === 'ok' ? (named.value ?? '') : 'no [MAYOR] name within 120 s',
+  );
+  logEvent('scenario-sessions', {caller: t.sessionId, scenario: 'F'});
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -3310,6 +3963,16 @@ function printPlan(ctx: Ctx, scenarios: readonly ScenarioId[]): void {
       prompt: `${idPrompt(ctx, 'start')}\n      then /clear, the same prompt (after clear), /exit, a new workspace running claude --resume <id>, the same prompt (after resume)`,
       xdg: false,
     },
+    F: {
+      mode: 'measure',
+      prompt: `/mayor ${ctx.markerTag} Live test of this skill's hook. Reply with the single word ready. Run no tools and file nothing.`,
+      xdg: false,
+    },
+    K: {
+      mode: 'measure',
+      prompt: `${ctx.markerTag} Live test K. Two sessions in scratch directories, a control turn, the skill loaded by a typed /${PROBE_SKILL} in one and the Skill tool in the other, then a later turn.`,
+      xdg: false,
+    },
     M: {
       mode: 'measure',
       prompt: `${measurePrompt(ctx, '<run dir>/note-variants.txt', noteVariants(ctx).length)}\n      the file's lines:\n${noteVariants(
@@ -3317,6 +3980,11 @@ function printPlan(ctx: Ctx, scenarios: readonly ScenarioId[]): void {
       )
         .map((v) => `        ${v.command}`)
         .join('\n')}`,
+      xdg: false,
+    },
+    N: {
+      mode: 'keep',
+      prompt: mayorHandoffPrompt(ctx, 'First run thread mark --mayor. Then:'),
       xdg: false,
     },
     P: {
@@ -3492,7 +4160,10 @@ async function main(): Promise<number> {
   const runners: Record<ScenarioId, () => Promise<void>> = {
     B: () => scenarioB(ctx),
     C: () => scenarioC(ctx),
+    F: () => scenarioF(ctx),
+    K: () => scenarioK(ctx),
     M: () => scenarioM(ctx),
+    N: () => scenarioN(ctx),
     P: () => scenarioP(ctx),
     S1: () => scenarioS1(ctx),
     S2: () => scenarioAct(ctx, 'S2', 'exit'),

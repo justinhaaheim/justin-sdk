@@ -501,7 +501,7 @@ describe('home-base-mbnjv.12: thread request --continues moves the workspace nam
     return read.records;
   }
 
-  test('a link-only first turn titles the successor after its predecessor and records the name as its own', async () => {
+  test('a link-only first turn titles the successor after its predecessor and renames the workspace to its own number', async () => {
     const {cmux, w} = await handedOffWorld();
     const oldBead = w.beads[OLD] ?? '';
     const newBead = w.beads[NEW] ?? '';
@@ -533,27 +533,25 @@ describe('home-base-mbnjv.12: thread request --continues moves the workspace nam
       },
     });
     expect(labelsOf(w, newBead)).not.toContain('auto-title');
-    expect(
-      linked.kind === 'handoffPickup' &&
-        linked.pickup.kind === 'picked-up' &&
-        linked.pickup.workspaceNote,
-    ).toContain(`taken over from ${oldBead}`);
 
     const after = names(w);
     expect(after).toHaveLength(2);
-    // The successor's own line: the same name, its surface as the sticky
-    // claim, and Justin's name carried so --restore still puts it back.
+    // The successor's own line: its marks on the name (home-base-6n7my.2), its
+    // surface as the sticky claim, and Justin's name carried so --restore still
+    // puts it back.
     expect(after[1]).toMatchObject({
       beadId: newBead,
       hisName: 'his name',
-      nameSet: shownName,
       surfaceId: S_NEW,
       workspaceId: WS,
     });
-    // The name was already right: no rename was sent for it.
+    // The number changed, so one rename was sent for it, and his name stayed.
+    expect(after[1]?.nameSet).toBe(
+      shownName.replace(/^(\[[^\]]+\]) /u, '$1 H1 '),
+    );
     expect(
       cmux.calls.filter((call) => call[0] === 'rename-workspace'),
-    ).toHaveLength(renamesBefore);
+    ).toHaveLength(renamesBefore + 1);
     const lines = describeRequestOutcome(linked).lines.join('\n');
     expect(lines).toContain(
       `session ${newBead} titled after it: "Migrate the orders table"`,

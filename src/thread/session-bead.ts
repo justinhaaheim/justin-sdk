@@ -78,6 +78,20 @@ export const HANDED_OFF_LABEL = 'handed-off';
 export const CONTINUES_LABEL_PREFIX = 'continues:';
 export const CONTINUED_BY_LABEL_PREFIX = 'continued-by:';
 /**
+ * How many handoffs came before this session (home-base-6n7my.2 D2):
+ * `handoff-number:<N>`, N from 1. It lands in the same br write as `continues:`
+ * (continuationLabels in handoff-number.ts), or later through the capture
+ * child's self-heal (D5). A first session has none. Nothing takes the number as
+ * an argument.
+ */
+export const HANDOFF_NUMBER_LABEL_PREFIX = 'handoff-number:';
+/**
+ * A mayor session (home-base-6n7my.2 D6), which a link passes on to its
+ * successor. A session a mayor spawned is not a mayor: that one is `MAYOR_FORM`
+ * in handoff-auto-pickup.ts, and `mayor-intake` is something else again.
+ */
+export const MAYOR_ROLE_LABEL = 'session-role:mayor';
+/**
  * The handoff pickup's two end states on a successor's session bead
  * (home-base-npbse.1.1, handoff-pickup.ts). `picked-up`: linked, every open
  * request and question carried over, and the record written on both beads.

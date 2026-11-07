@@ -44,6 +44,7 @@
 
 import type {Field, OutputStyle} from '../cli-style';
 import type {CmuxRunner} from './cmux';
+import type {ChainReaders} from './handoff-chain';
 import type {
   HandoffDeferralReason,
   HandoffGateResult,
@@ -78,6 +79,11 @@ import {
   runHandoffGate,
 } from './handoff-gate';
 import {
+  handoffNumberOf,
+  mayorSuccessorSentence,
+  successorMarks,
+} from './handoff-number';
+import {
   appendPredecessorLog,
   appendSessionNote,
   focusCommandOf,
@@ -101,7 +107,11 @@ import {
   zshWord,
 } from './respawn';
 import {CONTINUES_ENV} from './session-bead';
-import {describeHandoffOutcome, handOff} from './session-handoff';
+import {
+  describeHandoffOutcome,
+  handOff,
+  realHandoffNumberReaders,
+} from './session-handoff';
 import {SESSION_NAME_LIMIT, sessionName} from './session-name';
 import {selectSession, sessionBeadsKnob} from './session-select';
 import {handedOffTabTitle} from './tab-title';
@@ -150,21 +160,32 @@ export const HANDOFF_STEP_FAILED_INSTRUCTIONS = [
 // ---------------------------------------------------------------------------
 
 /**
- * "[TAG] <session title>", cut to SUCCESSOR_NAME_LIMIT characters
+ * "[MAYOR] [TAG] H<n> <session title>", cut to SUCCESSOR_NAME_LIMIT characters
  * (home-base-mbnjv.3 item 6): the repo TAG resolved the way workspace naming
  * and the inbox resolve it (sessionRepoOf, then resolveRepoTag from the
  * session's own checkout), so the successor's --name, --remote-control name,
  * its tab title and the workspace name all start with the same tag.
+ * home-base-6n7my.2 D9: n is this session's own number plus 1, `H?` when its own
+ * number is unknown, and [MAYOR] only when this session has the label.
  */
-export function successorName(session: FoundSession, env: EnvLike): string {
+export function successorName(
+  session: FoundSession,
+  env: EnvLike,
+  readers: ChainReaders = realHandoffNumberReaders({
+    env,
+    fallbackDbs: [session.db],
+  }),
+): string {
   const repo = sessionRepoOf({
     beadsDir: session.beadsDir,
     checkoutPath: session.checkoutPath,
     sightings: session.sightings,
   });
+  const {id, labels} = session.bead;
   return sessionName(
     resolveRepoTag({checkout: session.checkoutPath, env, repo}),
     session.bead.title,
+    successorMarks(labels, handoffNumberOf({id, labels}, readers)),
   );
 }
 
@@ -538,7 +559,13 @@ export async function handoffWithSuccessor(
   );
   const name = successorName(session, env);
   const {autoPickup} = options.limits;
-  const kickoff = kickoffText(blockPath, session.bead.id, null, {autoPickup});
+  const kickoff = kickoffText(
+    blockPath,
+    session.bead.id,
+    // home-base-6n7my.2 D8: a mayor's successor is told to load the skill.
+    mayorSuccessorSentence(session.bead.labels),
+    {autoPickup},
+  );
   const words = successorClaudeWords({
     continues: autoPickup ? session.bead.id : null,
     kickoff,
@@ -553,7 +580,9 @@ export async function handoffWithSuccessor(
   // with these functions on 2026-11-03, 498 bytes for a typical title, 590 for
   // an 80-character one, 998 for 80 apostrophes, and no bound with --model.
   // The scope sentence (home-base-npbse.1.1, 2026-11-06) adds 122 bytes to each,
-  // so the 80-apostrophe title is now refused.
+  // so the 80-apostrophe title is now refused. Measured 2026-11-06 with the
+  // launch variable and the check-only kickoff: 790 for an 80-character name, 875
+  // with the mayor sentence (home-base-6n7my.2 D8), 899 with --model too.
   // Refused before the gate, so nothing is written, dry run included.
   const tooLong = typedCommandTooLong(command);
   if (tooLong != null) {

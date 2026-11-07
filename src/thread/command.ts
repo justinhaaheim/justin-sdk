@@ -36,7 +36,7 @@ THE KNOB. componentConfig.thread.handoff.successor, default false (epic home-bas
 
   3. Finds this tab's pane (cmux tree, read only), hands off, and writes the block to <threads state dir>/handoffs/<session id>.md.
 
-  4. Opens a new tab beside this one, in this workspace and this session's checkout, running claude --permission-mode <componentConfig.thread.handoff.permissionMode> --remote-control <name> --name <name> [--model <m>] '<kickoff>'. The kickoff tells the successor to read the block file and to run \`thread request --continues <this session's bead>\` first, which links the two sessions and carries every open request and question over to the new one. This tab stays open.
+  4. Opens a new tab beside this one, in this workspace and this session's checkout, running claude --permission-mode <componentConfig.thread.handoff.permissionMode> --remote-control <name> --name <name> [--model <m>] '<kickoff>'. <name> is "[TAG] H<n> <session title>", cut to 80 characters: n is this session's handoff number plus 1, "H?" when that number cannot be established, and "[MAYOR] " goes in front when this session is a mayor session. The kickoff tells the successor to read the block file and to run \`thread request --continues <this session's bead>\` first, which links the two sessions and carries every open request and question over to the new one. This tab stays open.
 
   5. Reads the new tab's screen for up to 20 s. Claude Code's input box with no dialog means it started. A trust or permission dialog is reported with the screen, never answered.
 
@@ -89,11 +89,11 @@ WHAT IT DOES, in order.
 
   0. Refuses (exit 2, nothing opened, --dry-run included) unless componentConfig.thread.spawn.allowed is true in the repo it runs in (default false; only home-base turns it on).
   1. Refuses (exit 2, nothing opened) when the directory does not exist or is not a directory. A leading ~ means your home directory; a relative path is read from the current directory.
-  2. Names the workspace "[TAG] new session <directory name>", or "[TAG] <name>" with --name. TAG is the projectTag in that repo's justin-sdk.config.json, else the repo folder name in capitals, the same tag the inbox shows.
+  2. Names the workspace "[TAG] new session <directory name>", or "[TAG] <name>" with --name, cut to 80 characters. TAG is the projectTag in that repo's justin-sdk.config.json, else the repo folder name in capitals, the same tag the inbox shows. With --continues the name also shows where the session sits in its chain: "[TAG] H2 <name>" when the session it continues is H1, "[TAG] H? <name>" when that number cannot be established, and "[MAYOR] " in front when that session is a mayor session. The tool works these out from the beads; nothing takes them as an argument.
   3. Refuses (exit 2, nothing written or opened, --dry-run included) when the command it would type is 1,000 bytes or more: a typed line is cut at 1,024 bytes (measured 2026-11-03), and a cut command never runs. The kickoff does not count toward that, because it is never typed.
   4. Refuses (exit 2) when cmux cannot be reached, and prints the sandbox setting that allows it (see SANDBOX HINT).
   5. With --kickoff or --kickoff-file, writes the kickoff to a file, $XDG_STATE_HOME/justin-sdk/spawn-kickoffs/<stamp>-<random>.md (default ~/.local/state/…), after cmux answered. The file is kept as the record of what the session was asked.
-  6. Opens a new cmux workspace in the directory, without switching to it, running \`claude [--model <m>] [--remote-control '<workspace name>'] ["$(command cat -- <kickoff file>)"]\`. With a kickoff the session starts on it, byte for byte, with no keystroke; without one it opens on an empty prompt.
+  6. Opens a new cmux workspace in the directory, without switching to it, running \`claude [--model <m>] [--remote-control '<workspace name>'] --name '<workspace name>' ["$(command cat -- <kickoff file>)"]\`. With a kickoff the session starts on it, byte for byte, with no keystroke; without one it opens on an empty prompt.
   7. Prints the workspace, its cmux id, the directory, the command and its size, and the kickoff file. With --remote-control it also says how to open the session from your phone.
 
 REMOTE CONTROL. The session runs on this Mac; the Claude app on your phone, or claude.ai/code, is a window onto it. Open the Claude app, tap Code, and pick the session by the name this command prints. The claude process in the workspace must keep running: closing the workspace or quitting claude takes the session offline. A Mac that sleeps reconnects when it wakes.
@@ -1056,7 +1056,7 @@ export const threadCommand: CommandModule = {
             })
             .option('name', {
               describe:
-                'The workspace title after "[TAG] " (default: "new session <directory name>")',
+                'The title after the tag and any marks, which also names the Claude Code session (default: "new session <directory name>")',
               type: 'string' as const,
             })
             .option('remote-control', {
@@ -1316,6 +1316,32 @@ export const threadCommand: CommandModule = {
             await runThreadTitle({
               sessionId: argv.session ?? null,
               title: (Array.isArray(words) ? words : [words]).join(' '),
+            }),
+          );
+        },
+      )
+      .command(
+        'mark',
+        'Mark this session as a mayor session (--mayor): label its bead session-role:mayor and run the workspace name follow-up, so cmux shows [MAYOR] at once. Safe to run again: a bead that has the label gets no write. It always acts on the session it runs in. Exit 0 the mark holds, or --hook and a subagent · 1 not marked, including no session bead yet (a bead is filed in the background after the first prompt), so run it again in a moment · 2 no mark named.',
+        (yy) =>
+          yy
+            .option('mayor', {
+              default: false,
+              describe: 'The mark: this session is a mayor session',
+              type: 'boolean' as const,
+            })
+            .option('hook', {
+              default: false,
+              describe:
+                'Read the hook payload from stdin. A payload with agent_id came from a subagent: nothing happens, because a subagent loading the skill must not mark its parent. The session is the payload’s session_id',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          const {runThreadMark} = await import('./mark-mayor');
+          process.exit(
+            await runThreadMark({
+              hook: argv.hook === true,
+              mayor: argv.mayor === true,
             }),
           );
         },

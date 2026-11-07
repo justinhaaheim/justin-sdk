@@ -19,9 +19,10 @@ import type {Sandbox} from './sandbox';
 import {afterEach, describe, expect, test} from 'bun:test';
 import {execFileSync} from 'child_process';
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
-import {join} from 'path';
+import {dirname, join} from 'path';
 
 import {brShow, runBr} from '../src/beads/br';
+import {messageLogPath} from '../src/thread/archive';
 import {readLaunchRecord, runHandoffGate} from '../src/thread/handoff-gate';
 import {
   classifySuccessorScreen,
@@ -34,6 +35,7 @@ import {
   successorName,
   threadHandoffCommand,
 } from '../src/thread/handoff-successor';
+import {serializeMessageLine} from '../src/thread/message-log';
 import {NO_BREAK_SPACE} from '../src/thread/pane-join';
 import {predecessorWatchSchema} from '../src/thread/predecessor-watch';
 import {kickoffText, TYPED_COMMAND_BYTE_LIMIT} from '../src/thread/respawn';
@@ -106,6 +108,20 @@ function world(handoff: Record<string, unknown> | null): World {
     sessionId: OLD,
   });
   if (filed.kind !== 'created') throw new Error(filed.detail);
+  // home-base-6n7my.2 D3: a first session's log says it began on his words, so
+  // its successor is H1. Without a log the number is unknown.
+  const logPath = messageLogPath(OLD, env);
+  mkdirSync(dirname(logPath), {recursive: true});
+  writeFileSync(
+    logPath,
+    serializeMessageLine({
+      at: '2030-01-01T09:00:00.000Z',
+      cwd: repo,
+      event: 'UserPromptSubmit',
+      role: 'user',
+      text: 'migrate the db',
+    }),
+  );
   return {beadId: filed.beadId, env, repo, stateDir};
 }
 
@@ -545,7 +561,7 @@ describe('knob on: the gate passes', () => {
     if (selected.kind !== 'found') throw new Error(selected.kind);
     const {session} = selected;
     const name = successorName(session, w.env);
-    expect(name).toBe('[HANDOFF-REPO] migrate the db');
+    expect(name).toBe('[HANDOFF-REPO] H1 migrate the db');
     const blockPath = blockPathOf(w);
     const kickoff = kickoffText(blockPath, w.beadId, null);
     expect(kickoff).toContain(
@@ -570,7 +586,7 @@ describe('knob on: the gate passes', () => {
       '--working-directory',
       session.checkoutPath,
       '--command',
-      `claude --permission-mode auto --remote-control '[HANDOFF-REPO] migrate the db' --name '[HANDOFF-REPO] migrate the db' --model haiku 'You are the successor of a handed-off Claude Code session. Read ${blockPath}. First run the command under its pick-up section: bun run justin-sdk thread request --continues ${w.beadId}. Every open request and question carries over to this session; the note is the order to take them in, not the whole scope. Then continue the work the block describes, starting from its note.'`,
+      `claude --permission-mode auto --remote-control '[HANDOFF-REPO] H1 migrate the db' --name '[HANDOFF-REPO] H1 migrate the db' --model haiku 'You are the successor of a handed-off Claude Code session. Read ${blockPath}. First run the command under its pick-up section: bun run justin-sdk thread request --continues ${w.beadId}. Every open request and question carries over to this session; the note is the order to take them in, not the whole scope. Then continue the work the block describes, starting from its note.'`,
       '--focus',
       'false',
     ]);
@@ -585,7 +601,7 @@ describe('knob on: the gate passes', () => {
         '--surface',
         SURF,
         '--',
-        handedOffTabTitle('[HANDOFF-REPO] migrate the db'),
+        handedOffTabTitle('[HANDOFF-REPO] H1 migrate the db'),
       ],
     ]);
     // AC4: no rename call targets any other surface (not the successor's).
@@ -593,7 +609,7 @@ describe('knob on: the gate passes', () => {
     expect(renames).toHaveLength(1);
     expect(renames[0]?.[4]).toBe(w.env.CMUX_SURFACE_ID);
     expect(result.lines.join('\n')).toContain(
-      'renamed "↪ handed off: [HANDOFF-REPO] migrate the db"',
+      'renamed "↪ handed off: [HANDOFF-REPO] H1 migrate the db"',
     );
 
     expect(bead(w).labels).toContain('handed-off');
@@ -603,7 +619,7 @@ describe('knob on: the gate passes', () => {
 
     const text = result.lines.join('\n');
     expect(text).toContain(blockPath);
-    expect(text).toContain('surface:306 "[HANDOFF-REPO] migrate the db"');
+    expect(text).toContain('surface:306 "[HANDOFF-REPO] H1 migrate the db"');
     expect(result.lines.at(-1)).toBe(SUCCESSOR_STARTED_NEXT);
     expect(result.launch).toEqual({
       blockPath,
@@ -658,7 +674,7 @@ describe('knob on: the gate passes', () => {
     expect(result.exitCode).toBe(1);
     const text = result.lines.join('\n');
     expect(text).toContain(
-      'the successor tab surface:306 ("[HANDOFF-REPO] migrate the db") is waiting on the folder-trust dialog',
+      'the successor tab surface:306 ("[HANDOFF-REPO] H1 migrate the db") is waiting on the folder-trust dialog',
     );
     expect(text).toContain('Nothing was answered and no key was sent');
     expect(text).toContain(
@@ -687,7 +703,7 @@ describe('knob on: the gate passes', () => {
     expect(result.exitCode).toBe(1);
     const text = result.lines.join('\n');
     expect(text).toContain(
-      'could not confirm the successor started within 2 s (tab surface:306, "[HANDOFF-REPO] migrate the db"): no Claude Code input box on the screen',
+      'could not confirm the successor started within 2 s (tab surface:306, "[HANDOFF-REPO] H1 migrate the db"): no Claude Code input box on the screen',
     );
     expect(text).toContain('The last screen:');
     expect(text).toContain('│ Last login:');
@@ -736,6 +752,31 @@ describe('knob on: the gate passes', () => {
 });
 
 describe('knob on: --dry-run', () => {
+  test('home-base-6n7my.2: a mayor`s dry run shows both marks and the mayor sentence, and writes nothing', async () => {
+    const w = world(ON);
+    const added = runBr(w.repo, [
+      'update',
+      w.beadId,
+      '--add-label=session-role:mayor',
+    ]);
+    if (!added.ok) throw new Error(added.reason ?? 'br update failed');
+    const before = bead(w).labels;
+    const cmux = fakeCmux();
+    const result = await threadHandoffCommand(
+      opts(w, {dryRun: true}),
+      deps(cmux, gateOf(PASS)),
+    );
+    expect(result.exitCode).toBe(0);
+    const text = result.lines.join('\n');
+    expect(text).toMatch(
+      /Successor name:\s+\[MAYOR\] \[HANDOFF-REPO\] H1 migrate the db/u,
+    );
+    expect(text).toContain('load the mayor skill with the Skill tool');
+    expect(text).toMatch(/Kickoff:\s+You are the successor of a handed-off/u);
+    expect(bead(w).labels).toEqual(before);
+    expect(existsSync(handoffsDir(w))).toBe(false);
+  });
+
   test('prints the gate, the block path, the full argv and the kickoff; writes and opens nothing', async () => {
     const w = world(ON);
     const cmux = fakeCmux();
@@ -746,6 +787,10 @@ describe('knob on: --dry-run', () => {
     expect(result.exitCode).toBe(0);
     const text = result.lines.join('\n');
     expect(text).toContain('Dry run: nothing written or opened');
+    expect(text).toMatch(
+      /Successor name:\s+\[HANDOFF-REPO\] H1 migrate the db/u,
+    );
+    expect(text).not.toContain('mayor');
     expect(text).toMatch(/Gate:\s+passed/u);
     expect(text).toContain(blockPathOf(w));
     expect(text).toContain(`"--socket","${SOCK}","new-surface"`);
@@ -1011,7 +1056,7 @@ describe('mbnjv.4: what happens to the old tab (predecessor keep, exit, close)',
     expect(watch.mode).toBe('exit');
     expect(watch.handedOffAt).toBe(NOW.toISOString());
     expect(watch.successor).toEqual({
-      name: '[HANDOFF-REPO] migrate the db',
+      name: '[HANDOFF-REPO] H1 migrate the db',
       surfaceId: SUCC,
       surfaceRef: 'surface:306',
     });
@@ -1022,7 +1067,7 @@ describe('mbnjv.4: what happens to the old tab (predecessor keep, exit, close)',
     );
     expect(watch.tombstone).toContain(`      claude --resume ${OLD}`);
     expect(watch.tombstone).toContain(
-      '   Handed off to:   [HANDOFF-REPO] migrate the db',
+      '   Handed off to:   [HANDOFF-REPO] H1 migrate the db',
     );
     expect(
       predecessorWatchSchema.safeParse(JSON.parse(JSON.stringify(watch)))
@@ -1192,7 +1237,7 @@ describe('F11 (home-base-mbnjv.8): one successor per session', () => {
     expect(first.exitCode).toBe(0);
     expect(bead(w).labels ?? []).toContain('successor-started');
     expect(bead(w).notes ?? '').toContain(
-      `successor launch started: from tab ${SURF} into pane ${PANE} of workspace ${WS}, successor "[HANDOFF-REPO] migrate the db"`,
+      `successor launch started: from tab ${SURF} into pane ${PANE} of workspace ${WS}, successor "[HANDOFF-REPO] H1 migrate the db"`,
     );
     const second = await secondGate(w);
     expect(second.kind).toBe('refused');

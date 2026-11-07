@@ -6,6 +6,7 @@
 
 import type {SpawnOutcome} from '../src/thread/capture';
 import type {CmuxCall, CmuxRunner} from '../src/thread/cmux';
+import type {ChainReaders} from '../src/thread/handoff-chain';
 import type {SessionModel} from '../src/thread/session-model';
 import type {MarkItem, SessionStatus} from '../src/thread/session-status';
 import type {TreeIssue} from '../src/thread/session-tree';
@@ -1385,6 +1386,79 @@ describe('j8q3e.5.3 F3: the capture child names the workspace', () => {
     expect(looked).toEqual([SESSION]);
   });
 
+  describe('home-base-6n7my.2 D5: the self-heal, before the names sync', () => {
+    async function linkedWorld() {
+      const w = await captureWorld();
+      const found = lookupWorkspaceSession({
+        cwd: w.repo,
+        env: w.env,
+        session: SESSION,
+      });
+      if (found.kind !== 'found') throw new Error(found.reason);
+      const labelled = runBr(w.repo, [
+        'update',
+        found.session.beadId,
+        '--add-label=continues:t-old',
+      ]);
+      if (!labelled.ok) throw new Error(labelled.reason ?? 'br update failed');
+      return w;
+    }
+
+    const heal = (
+      w: {env: Record<string, string | undefined>; repo: string},
+      run: CmuxRunner,
+      handoffNumberReaders: ChainReaders,
+    ) =>
+      applyCapture({
+        autoCommit: false,
+        cmux: run,
+        cwd: w.repo,
+        env: w.env,
+        handoffNumberReaders,
+        nameWorkspaces: true,
+        sessionBeads: true,
+        sessionId: SESSION,
+      });
+
+    test('it stamps the number, and this same capture names the workspace with it', async () => {
+      needBr();
+      const w = await linkedWorld();
+      const cmux = fakeCmux([{id: WS_A, surfaces: [SURFACE], title: null}]);
+      const outcome = await heal(w, cmux.run, {
+        readLog: () => ({kind: 'missing', path: '/x'}),
+        showBead: () => ({kind: 'found', labels: ['handoff-number:4']}),
+      });
+      expect(outcome).toMatchObject({
+        handoffNumber: {kind: 'stamped', number: 5},
+        kind: 'ran',
+        workspaceName: {kind: 'renamed', to: '[NAMED] H5 A real title'},
+      });
+      expect(
+        captureRunRecord(SESSION, outcome, 5, new Date()).handoffNumber,
+      ).toMatchObject({kind: 'stamped'});
+    });
+
+    test('a reader that throws never stops the capture: the name shows H?', async () => {
+      needBr();
+      const w = await linkedWorld();
+      const cmux = fakeCmux([{id: WS_A, surfaces: [SURFACE], title: null}]);
+      const outcome = await heal(w, cmux.run, {
+        readLog: () => {
+          throw new Error('log exploded');
+        },
+        showBead: () => {
+          throw new Error('br exploded');
+        },
+      });
+      expect(outcome).toMatchObject({
+        handoffNumber: {kind: 'unknown'},
+        kind: 'ran',
+        workspaceName: {kind: 'renamed', to: '[NAMED] H? A real title'},
+      });
+      expect(outcome.kind === 'ran' ? outcome.passes : 0).toBeGreaterThan(0);
+    });
+  });
+
   test('a throwing sync is recorded as failed and the capture still applies', async () => {
     needBr();
     const w = await captureWorld();
@@ -1847,9 +1921,10 @@ describe('home-base-ys9t7.9.1 item 2: a successor extends the chain’s summary'
       run: cmux.run,
       session: lookup.session,
     });
+    // H?: the predecessor here has no message log, so its number is unknown.
     expect(outcome).toMatchObject({
       kind: 'wouldRename',
-      to: '[NAMED] Build shortcut helper app; iterate on inspect utility',
+      to: '[NAMED] H? Build shortcut helper app; iterate on inspect utility',
     });
     expect(renames(cmux.calls)).toEqual([]);
   });

@@ -10,12 +10,13 @@
  *   is a refusal (exit 2) that prints the sandbox setting. `new-workspace
  *   --command` TYPES the command into the new pane's zsh, so every word goes
  *   through zshWord.
- * - The workspace is named sessionDisplayName(repoTag, title), the same
- *   "[TAG] title" the inbox and `thread open` use, with the tag from the
- *   resolver the inbox uses (resolveRepoTag).
- * - With --remote-control the same name goes to `claude --remote-control
- *   <name>`, so the Claude app lists the session under the name this command
- *   prints. Measured 2026-10-18 against code.claude.com/docs/en/remote-control:
+ * - The workspace is named sessionName(repoTag, title), the same "[TAG] title"
+ *   the inbox and `thread open` use, cut to 80 characters, with the tag from the
+ *   resolver the inbox uses (resolveRepoTag). With --continues the name also
+ *   carries that session's marks plus one handoff (home-base-6n7my.2 D9).
+ * - The same name always goes to `claude --name <name>`, and with
+ *   --remote-control to `claude --remote-control <name>`, so the Claude app
+ *   lists the session under the name this command prints. Measured 2026-10-18 against code.claude.com/docs/en/remote-control:
  *   a name passed to --remote-control is the first source of the session's
  *   title, and without one Claude Code makes one up from the hostname.
  * - The kickoff is never typed (home-base-8vywn). A typed line is cut at
@@ -42,13 +43,16 @@
 
 import type {Field} from '../cli-style';
 import type {CmuxRunner} from './cmux';
+import type {ChainReaders} from './handoff-chain';
 import type {EnvLike} from './paths';
+import type {SessionMarks} from './session-name';
 
 import {randomBytes} from 'node:crypto';
 import {mkdirSync, readFileSync, statSync, writeFileSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {basename, dirname, join, resolve} from 'node:path';
 
+import {findBeadsWorkspace} from '../beads/br';
 import {
   fieldLines,
   outputStyle,
@@ -60,6 +64,7 @@ import {xdgStateHome} from '../health-notices';
 import {oneLine} from './ask-format';
 import {cmuxArgv, realCmuxRunner, resolveCmuxBinary} from './cmux';
 import {primaryCheckoutOf, resolveRepoTag, resolveThreadConfig} from './config';
+import {handoffNumberOf, successorMarks} from './handoff-number';
 import {
   liveSocketPath,
   socketSettingsJson,
@@ -73,7 +78,8 @@ import {
   SPAWN_KICKOFF_ENV,
   SPAWNED_BY_SESSION_ENV,
 } from './session-bead';
-import {sessionDisplayName} from './session-name';
+import {realHandoffNumberReaders} from './session-handoff';
+import {NO_MARKS, sessionName} from './session-name';
 import {sessionIdFrom} from './session-select';
 import {spawnGate} from './spawn-gate';
 import {describeNewWorkspaceRecord, recordNewWorkspace} from './workspace-name';
@@ -101,7 +107,7 @@ export interface SpawnOptions {
   kickoff: string | null;
   /** `claude --model`; null: claude's own default. */
   model: string | null;
-  /** The title after "[TAG] "; null: "new session <dir basename>". */
+  /** The title after the tag and any marks; null: "new session <dir basename>". */
   name: string | null;
   /** The kickoff file's timestamp (default: now). */
   now?: Date;
@@ -112,6 +118,8 @@ export interface SpawnOptions {
 export interface SpawnDeps {
   /** The handoff gate (home-base-mbnjv.2, C4): null = go on. */
   gate: typeof spawnGate;
+  /** What --continues reads for its marks; the real ones read through br. */
+  numberReaders: ChainReaders;
   run: CmuxRunner;
 }
 
@@ -120,9 +128,6 @@ export interface SpawnResult {
   exitCode: 0 | 1 | 2 | 3 | 4;
   lines: string[];
 }
-
-/** respawn.ts caps a workspace name at 80 characters; so does this. */
-const NAME_LIMIT = 80;
 
 function stop(exitCode: 1 | 2, text: string): SpawnResult {
   const verb = exitCode === 2 ? 'refused' : 'failed';
@@ -277,17 +282,49 @@ export function spawnWindow(env: EnvLike): {
   };
 }
 
-/** "[TAG] <name>" or "[TAG] new session <dir basename>", at most 80 characters. */
+/**
+ * "[TAG] <name>" or "[TAG] new session <dir basename>", at most 80 characters.
+ * With `marks` (home-base-6n7my.2 D9, for --continues) the marks go around the
+ * tag, the same as every other launch name.
+ */
 export function spawnWorkspaceName(
   dir: string,
   name: string | null,
   env: EnvLike,
+  marks: SessionMarks = NO_MARKS,
 ): string {
   const repo = basename(primaryCheckoutOf(dir));
   const tag = resolveRepoTag({checkout: dir, env, repo});
-  const title = name ?? `new session ${basename(dir)}`;
-  const full = sessionDisplayName(tag, title);
-  return full.length > NAME_LIMIT ? `${full.slice(0, NAME_LIMIT - 1)}…` : full;
+  return sessionName(tag, name ?? `new session ${basename(dir)}`, marks);
+}
+
+/**
+ * The marks of a session started with `--continues <bead>`: that bead's number
+ * plus 1, and its mayor label (home-base-6n7my.2 D9). A bead that cannot be read
+ * gives `H?`: this session is known to continue another, so it must not read as
+ * a first session.
+ */
+export function spawnMarks(input: {
+  continues: null | string;
+  cwd: string;
+  dir: string;
+  env: EnvLike;
+  readers?: ChainReaders;
+}): SessionMarks {
+  const {continues, env} = input;
+  if (continues == null) return NO_MARKS;
+  const fallbackDbs = [input.dir, input.cwd].flatMap((from) => {
+    const space = findBeadsWorkspace(from);
+    return space.kind === 'found' ? [space.db] : [];
+  });
+  const readers = input.readers ?? realHandoffNumberReaders({env, fallbackDbs});
+  const read = readers.showBead(continues);
+  if (read.kind !== 'found') return {handoff: 'unknown', mayor: false};
+  const {labels} = read;
+  return successorMarks(
+    labels,
+    handoffNumberOf({id: continues, labels}, readers),
+  );
 }
 
 /**
@@ -373,6 +410,9 @@ export function spawnCommand(input: {
   const words = ['claude'];
   if (input.model != null) words.push('--model', input.model);
   if (input.remoteControl) words.push('--remote-control', input.name);
+  // home-base-6n7my.2 D9: always, so the title carries the marks with or without
+  // Remote Control, the same as a handoff's successor.
+  words.push('--name', input.name);
   const typed = [...assignments, ...words.map(zshWord)];
   // The prompt is claude's positional argument (`claude [options] [prompt]`),
   // so it goes last, after every flag.
@@ -432,7 +472,18 @@ export async function spawnSession(
   }
 
   // ---- the plan: every argument, before cmux is touched ----
-  const workspaceName = spawnWorkspaceName(dir, name, env);
+  const workspaceName = spawnWorkspaceName(
+    dir,
+    name,
+    env,
+    spawnMarks({
+      continues: options.continues ?? null,
+      cwd,
+      dir,
+      env,
+      ...(deps.numberReaders != null ? {readers: deps.numberReaders} : {}),
+    }),
+  );
   const {remoteControl} = options;
   // D8: the session running this, so the child links to it (item 3).
   const parent = sessionIdFrom(null, env);

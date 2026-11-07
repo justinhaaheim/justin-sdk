@@ -23,6 +23,7 @@
  * the link (a "not here" guess could label the wrong bead) — rule 7.
  */
 
+import type {ChainReaders} from './handoff-chain';
 import type {EnvLike} from './paths';
 import type {FoundSession} from './session-select';
 
@@ -39,6 +40,12 @@ import {sdkRun} from '../sdk-invocation';
 import {oneLine} from './ask-format';
 import {renderAsks} from './ask-render';
 import {handoffDeferralMessage} from './handoff-gate';
+import {
+  continuationLabels,
+  handoffNumberOf,
+  mayorSuccessorSentence,
+} from './handoff-number';
+import {readMessageLog} from './message-log';
 import {absoluteWhen, statusWords, tildeText} from './part-one';
 import {notFoundButUnresolved} from './session-answer';
 import {
@@ -46,12 +53,13 @@ import {
   CONTINUED_BY_LABEL_PREFIX,
   CONTINUES_LABEL_PREFIX,
   HANDED_OFF_LABEL,
+  HANDOFF_NUMBER_LABEL_PREFIX,
   PICKUP_EXPECTED_LABEL,
 } from './session-bead';
 import {readSessionIndex, readSessionSightings} from './session-index';
 import {appendNote} from './session-marks';
 import {loadSession} from './session-model';
-import {sessionDisplayName} from './session-name';
+import {sessionDisplayName, stampedHandoffNumber} from './session-name';
 import {selectSession, sessionBeadsKnob} from './session-select';
 import {
   deriveStatus,
@@ -127,6 +135,97 @@ export function locateSessionBead(
 }
 
 // ---------------------------------------------------------------------------
+// The handoff number (home-base-6n7my.2): the real readers and the self-heal
+// ---------------------------------------------------------------------------
+
+/** What handoffNumberOf reads for real: beads through locateSessionBead. */
+export function realHandoffNumberReaders(input: {
+  env: EnvLike;
+  fallbackDbs: readonly string[];
+}): ChainReaders {
+  const {env, fallbackDbs} = input;
+  return {
+    readLog: (sessionId) => readMessageLog(sessionId, env),
+    showBead: (beadId) => {
+      const located = locateSessionBead(beadId, env, fallbackDbs);
+      if (located.kind === 'failed') {
+        return {kind: 'failed', reason: located.reason};
+      }
+      if (located.kind === 'notFound') {
+        return {
+          kind: 'notFound',
+          reason: `not found in ${located.searched.length > 0 ? located.searched.join(' or ') : 'any beads DB'}`,
+        };
+      }
+      return {kind: 'found', labels: located.labels, title: located.title};
+    },
+  };
+}
+
+export type HandoffNumberHeal =
+  /** Nothing to do: no `continues:`, or it holds a number label already. */
+  | {kind: 'current'}
+  /** D3 could not establish it, so nothing was written and the name shows `H?`. */
+  | {detail: string; kind: 'unknown'}
+  | {detail: string; kind: 'failed'}
+  /** `labels` are the bead's as they are now, for the name syncs that follow. */
+  | {detail: string; kind: 'stamped'; labels: string[]; number: number};
+
+/**
+ * D5, the self-heal: a session bead that continues another and has no number
+ * label gets one when D3 can establish it. It reaches a session linked before
+ * the label existed, on its next prompt. Never throws: the capture child calls
+ * this, and a failure here must never stop a capture.
+ */
+export function healHandoffNumber(input: {
+  beadId: string;
+  /** Null when the caller does not know which DB holds the bead. */
+  db: null | string;
+  env: EnvLike;
+  labels: readonly string[];
+  readers?: ChainReaders;
+}): HandoffNumberHeal {
+  const {beadId, db, env, labels} = input;
+  try {
+    if (
+      stampedHandoffNumber(labels).kind !== 'none' ||
+      !labels.some((label) => label.startsWith(CONTINUES_LABEL_PREFIX))
+    ) {
+      return {kind: 'current'};
+    }
+    if (db == null) {
+      return {
+        detail: 'the beads DB of the session bead is not known',
+        kind: 'failed',
+      };
+    }
+    const number = handoffNumberOf(
+      {id: beadId, labels},
+      input.readers ?? realHandoffNumberReaders({env, fallbackDbs: [db]}),
+    );
+    if (number.kind === 'unknown') {
+      return {detail: number.reason, kind: 'unknown'};
+    }
+    const label = `${HANDOFF_NUMBER_LABEL_PREFIX}${number.number}`;
+    const written = brUpdate({db, env}, beadId, {addLabels: [label]});
+    if (written.kind === 'failed') {
+      return {
+        detail: `br update failed: ${describeBrFailed(written)}`,
+        kind: 'failed',
+      };
+    }
+    return {
+      detail: `${beadId} labelled ${label}`,
+      kind: 'stamped',
+      labels: [...labels, label],
+      number: number.number,
+    };
+  } catch (error) {
+    return {detail: `threw: ${String(error)}`, kind: 'failed'};
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The link
 // ---------------------------------------------------------------------------
 
@@ -148,11 +247,18 @@ export type LinkOutcome =
  * Label the NEW session bead `continues:<old>` and the old one
  * `continued-by:<new>`. Both writes are attempted; a failure names which
  * label is missing, so nothing is half-linked silently.
+ *
+ * This is the one place that writes `continues:` (home-base-6n7my.2 D4): the
+ * pickup, so auto pickup and `thread request --continues`, and `thread handoff
+ * --to` all reach it. The handoff number and the mayor label go in that same
+ * write, through continuationLabels.
  */
 export function linkContinuation(input: {
   cwd: string;
   env: EnvLike;
   newSession: {beadId: string; db: string};
+  /** Tests inject these; the real ones read through locateSessionBead. */
+  numberReaders?: ChainReaders;
   oldBeadId: string;
 }): LinkOutcome {
   const {cwd, env, newSession, oldBeadId} = input;
@@ -176,8 +282,17 @@ export function linkContinuation(input: {
     };
   }
   const failures: string[] = [];
+  const oldNumber = handoffNumberOf(
+    {id: oldBeadId, labels: old.labels},
+    input.numberReaders ??
+      realHandoffNumberReaders({env, fallbackDbs: fallbacks}),
+  );
   const mine = brUpdate({db: newSession.db, env}, newSession.beadId, {
-    addLabels: [`${CONTINUES_LABEL_PREFIX}${oldBeadId}`],
+    addLabels: continuationLabels({
+      oldBeadId,
+      oldLabels: old.labels,
+      oldNumber,
+    }),
   });
   if (mine.kind === 'failed') {
     failures.push(
@@ -318,6 +433,8 @@ export async function handoffBlock(input: {
     (problem) => `⚠️ ${problem} — requests and questions there are not shown.`,
   );
   const questions = openQuestions(model);
+  // home-base-6n7my.2 D8: for a session started by hand from this block.
+  const mayorLine = mayorSuccessorSentence(model.beads.session?.labels ?? []);
   const blocks = [
     // As a message: a `!` command does not run the capture hook, so the new
     // session would have no bead to link (home-base-nro7d.1).
@@ -342,6 +459,7 @@ export async function handoffBlock(input: {
       '**To pick it up:**',
       // Justin's wording (2026-10-26): addressed to the Claude reading it.
       `- Run \`${sdkRun(`thread request --continues ${input.sessionBeadId}`)}\` to receive the handoff from a previous session.`,
+      ...(mayorLine == null ? [] : [`- ${mayorLine}`]),
       // P6 (home-base-npbse.1.1): a session once took the note as the whole
       // scope and adopted 2 of its 10 open requests.
       '- Every open request and question above carries over to the new session. The note is the order to take them in, not the whole scope.',

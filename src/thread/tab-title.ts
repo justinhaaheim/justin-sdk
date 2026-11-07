@@ -3,10 +3,10 @@
  * built by home-base-mbnjv.3 item 5).
  *
  * - A SUCCESSOR's tab (a session bead with a `continues:` label) is titled
- *   after its session, sessionName(repoTag, title), the same name its
+ *   after its session, sessionName(repoTag, title, marks), the same name its
  *   workspace, its --name and its --remote-control name use (item 6). The
- *   tab is the bead's own `cmux-surface:` label, never a guess: no label, no
- *   rename.
+ *   marks come from its labels (home-base-6n7my.2 D9). The tab is the bead's
+ *   own `cmux-surface:` label, never a guess: no label, no rename.
  * - The PREDECESSOR's tab is marked handed off by `thread handoff` right after
  *   the successor's tab opened, on the caller's own CMUX_SURFACE_ID
  *   (handoff-successor.ts). A session labelled handed-off is never renamed
@@ -41,7 +41,7 @@ import {
   HANDED_OFF_LABEL,
   labelValue,
 } from './session-bead';
-import {sessionName} from './session-name';
+import {sessionMarksOf, sessionName} from './session-name';
 
 /** What the predecessor's tab title starts with once it handed off. */
 export const HANDED_OFF_TAB_PREFIX = '↪ handed off: ';
@@ -162,7 +162,11 @@ export async function syncTabTitle(input: {
       reason: `the session bead has no ${CMUX_SURFACE_LABEL_PREFIX} label, so its tab is not known`,
     };
   }
-  const title = sessionName(session.repoTag, session.title);
+  const title = sessionName(
+    session.repoTag,
+    session.title,
+    sessionMarksOf(labels),
+  );
   const read = readTabTitles(env);
   if (read.kind === 'failed') return {kind: 'failed', reason: read.reason};
   const want = surfaceId.toUpperCase();

@@ -400,7 +400,7 @@ describe('thread spawn: the directory', () => {
         '--cwd',
         w.tagged,
         '--command',
-        'claude',
+        `claude --name '[SPWN] new session tagged-repo'`,
         '--focus',
         'false',
       ],
@@ -530,7 +530,7 @@ describe('thread spawn: the command and --remote-control', () => {
     const cmux = fakeCmux();
     const result = await spawnSession(options(w, {}), cmux);
     const command = argAfter(cmux.calls[1], '--command') ?? '';
-    expect(command).toBe('claude');
+    expect(command).toBe(`claude --name '[SPWN] new session tagged-repo'`);
     expect(command).not.toContain('--remote-control');
     expect(result.lines.join('\n')).not.toContain('Connect from your phone');
   });
@@ -543,6 +543,8 @@ describe('thread spawn: the command and --remote-control', () => {
     const command = argAfter(cmux.calls[1], '--command') ?? '';
     expect(zshWords(command)).toEqual([
       '--remote-control',
+      '[SPWN] new session tagged-repo',
+      '--name',
       '[SPWN] new session tagged-repo',
     ]);
     const text = result.lines.join('\n');
@@ -569,6 +571,8 @@ describe('thread spawn: the command and --remote-control', () => {
       '--model',
       'haiku',
       '--remote-control',
+      `[SPWN] ${TRICKY}`,
+      '--name',
       `[SPWN] ${TRICKY}`,
     ]);
   });
@@ -607,11 +611,15 @@ describe('thread spawn: the parent link in the environment (home-base-ys9t7.5.4 
       true,
     );
     expect(command).toBe(
-      `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT} JUSTIN_SDK_SPAWN_KICKOFF=1 claude "$(command cat -- ${file})"`,
+      `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT} JUSTIN_SDK_SPAWN_KICKOFF=1 claude --name '[SPWN] new session tagged-repo' "$(command cat -- ${file})"`,
     );
     // The kickoff stays claude's prompt, untouched: a slash command still
     // starts with "/".
-    expect(zshWords(command)).toEqual([kickoff]);
+    expect(zshWords(command)).toEqual([
+      '--name',
+      '[SPWN] new session tagged-repo',
+      kickoff,
+    ]);
     expect(envSeen(command)).toEqual([
       `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT}`,
       'JUSTIN_SDK_SPAWN_KICKOFF=1',
@@ -624,7 +632,9 @@ describe('thread spawn: the parent link in the environment (home-base-ys9t7.5.4 
     const env = {...w.env, CLAUDE_CODE_SESSION_ID: PARENT};
     await spawnSession(options(w, {env}), cmux);
     const command = argAfter(cmux.calls[1], '--command') ?? '';
-    expect(command).toBe(`JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT} claude`);
+    expect(command).toBe(
+      `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT} claude --name '[SPWN] new session tagged-repo'`,
+    );
     expect(envSeen(command)).toEqual([
       `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT}`,
     ]);
@@ -637,9 +647,13 @@ describe('thread spawn: the parent link in the environment (home-base-ys9t7.5.4 
     const command = argAfter(cmux.calls[1], '--command') ?? '';
     const file = kickoffFileOf(command) ?? '';
     expect(command).toBe(
-      `JUSTIN_SDK_SPAWN_KICKOFF=1 claude "$(command cat -- ${file})"`,
+      `JUSTIN_SDK_SPAWN_KICKOFF=1 claude --name '[SPWN] new session tagged-repo' "$(command cat -- ${file})"`,
     );
-    expect(zshWords(command)).toEqual(['go']);
+    expect(zshWords(command)).toEqual([
+      '--name',
+      '[SPWN] new session tagged-repo',
+      'go',
+    ]);
     expect(envSeen(command)).toEqual(['JUSTIN_SDK_SPAWN_KICKOFF=1']);
   });
 });
@@ -675,6 +689,8 @@ describe('thread spawn --dry-run', () => {
     const command = argAfter(cmux.calls[1], '--command') ?? '';
     expect(zshWords(command)).toEqual([
       '--remote-control',
+      '[SPWN] new session tagged-repo',
+      '--name',
       '[SPWN] new session tagged-repo',
       kickoff,
     ]);
@@ -906,8 +922,8 @@ describe('thread spawn: the kickoff goes through a file, never the typed line (h
       env: {HOME: w.home, PATH: `${bin}:/usr/bin:/bin`, STUB_OUT: out},
     });
     expect(readFileSync(`${out}.prompt`)).toEqual(Buffer.from(kickoff, 'utf8'));
-    // --model haiku --remote-control <name> <prompt>
-    expect(readFileSync(`${out}.argc`, 'utf8')).toBe('5');
+    // --model haiku --remote-control <name> --name <name> <prompt>
+    expect(readFileSync(`${out}.argc`, 'utf8')).toBe('7');
     expect(readFileSync(`${out}.env`, 'utf8')).toBe(
       `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT}\nJUSTIN_SDK_SPAWN_KICKOFF=1\n`,
     );
@@ -930,12 +946,13 @@ describe('thread spawn: the kickoff goes through a file, never the typed line (h
   });
 
   test('the limit is exact: 999 typed bytes open, 1,000 are refused', async () => {
-    // No kickoff and no parent session: the command is `claude --model <m>`,
-    // 15 bytes plus the model.
+    // No kickoff and no parent session: the command is `claude --model <m> --name
+    // <name>`, the model plus the rest.
     const at = async (bytes: number) => {
       const w = world();
       const cmux = fakeCmux();
-      const model = 'm'.repeat(bytes - 'claude --model '.length);
+      const rest = `claude --model  --name '[SPWN] new session tagged-repo'`;
+      const model = 'm'.repeat(bytes - rest.length);
       const result = await spawnSession(options(w, {model}), cmux);
       const command = argAfter(cmux.calls[1], '--command');
       return {command, exitCode: result.exitCode};

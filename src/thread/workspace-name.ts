@@ -4,7 +4,8 @@
  * dispatch .1). The parent bead's design field is the contract; D-numbers
  * below refer to it.
  *
- * - D1: the tool's part is sessionDisplayName(repoTag, title), "[TAG] <title>"
+ * - D1: the tool's part is sessionDisplayName(repoTag, title, marks), "[TAG]
+ *   <title>" with the marks home-base-6n7my.2 adds, "[MAYOR] [TAG] H1 <title>"
  *   (the repo's projectTag, else its folder uppercased: home-base-bomy5.7.1).
  * - D2: workspace-names.jsonl records every name the tool set, written BEFORE
  *   the rename. A workspace name equal to ANY nameSet recorded for it is the
@@ -44,7 +45,7 @@ import {
   CONTINUES_LABEL_PREFIX,
   labelValue,
 } from './session-bead';
-import {sessionDisplayName} from './session-name';
+import {sessionDisplayName, sessionMarksOf} from './session-name';
 
 /**
  * The leading glyphs cmux shows on a pane title while Claude Code owns the
@@ -667,13 +668,16 @@ export function resolveWorkspace(
 
 /**
  * The tool's part of the name: "[TAG] <title>", or with the description knob on
- * (home-base-jm5kg.18) "[TAG] <overarching short label, else the title>".
+ * (home-base-jm5kg.18) "[TAG] <overarching short label, else the title>". The
+ * marks come from the bead's labels (home-base-6n7my.2 D9): "[MAYOR] [TAG] H1 …".
+ * A sticky predecessor keeps its own number until its successor takes the name.
  */
 export function workspaceToolPart(session: WorkspaceSession): string {
   const short = session.overarchingShort;
   return sessionDisplayName(
     session.repoTag,
     short?.ok === true && short.value != null ? short.value : session.title,
+    sessionMarksOf(session.labels),
   );
 }
 

@@ -34,11 +34,32 @@ export const RESPAWN_RETIRED_LINES = [
 ] as const;
 
 /**
+ * A word with a non-ASCII character, spelled in pure ASCII: `$'...'`, with each
+ * byte outside printable ASCII as \xHH (home-base-y0gdz). A non-ASCII character
+ * typed in a launch line arrived damaged, measured 2026-11-06: an em dash was
+ * stored as c3 a2 20 20. zsh rebuilds the exact bytes before the program runs.
+ * `!` is escaped too, so no history expansion can apply to the typed line.
+ */
+function zshAsciiWord(word: string): string {
+  let spelled = '';
+  for (const byte of Buffer.from(word, 'utf8')) {
+    if (byte === 0x5c) spelled += '\\\\';
+    else if (byte === 0x27) spelled += "\\'";
+    else if (byte >= 0x20 && byte < 0x7f && byte !== 0x21) {
+      spelled += String.fromCharCode(byte);
+    } else spelled += `\\x${byte.toString(16).padStart(2, '0')}`;
+  }
+  return `$'${spelled}'`;
+}
+
+/**
  * One word as zsh must receive it: bare when every character is safe and it
- * does not start with "=" (zsh's EQUALS expansion turns `=ls` into /bin/ls).
+ * does not start with "=" (zsh's EQUALS expansion turns `=ls` into /bin/ls). A
+ * word holding non-ASCII is spelled in pure ASCII; an ASCII word never is.
  */
 export function zshWord(word: string): string {
   if (/^[\w@%+=:,./-]+$/u.test(word) && !word.startsWith('=')) return word;
+  if (/[^\p{ASCII}]/u.test(word)) return zshAsciiWord(word);
   return `'${word.replaceAll("'", `'\\''`)}'`;
 }
 

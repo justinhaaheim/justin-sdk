@@ -45,6 +45,10 @@ const S_A = 'CCCC0000-1111-4222-8333-0000000000a1';
 const S_B = 'CCCC0000-1111-4222-8333-0000000000b1';
 const S_C = 'CCCC0000-1111-4222-8333-0000000000c1';
 const NAME_A = '[HOME-BASE] migrate the db';
+// What a successor with no number label shows (home-base-6n7my.2 D2). Two
+// sessions share a name only when both numbers are unknown; otherwise each
+// handoff changes it.
+const NAME_UNKNOWN = '[HOME-BASE] H? migrate the db';
 const NOW = new Date('2030-01-01T12:00:00.000Z');
 
 const sandboxes: Sandbox[] = [];
@@ -216,14 +220,19 @@ describe('syncWorkspaceName reads the owner and confirms both halves', () => {
   test('continues:t-a here and continued-by:t-b there: renamed to the successor', async () => {
     const {cmux, outcome, reads} = await sync({
       ownerLabels: ['session', 'continued-by:t-b', `cmux-surface:${S_A}`],
-      selfLabels: ['session', 'continues:t-a', `cmux-surface:${S_B}`],
+      selfLabels: [
+        'session',
+        'continues:t-a',
+        'handoff-number:1',
+        `cmux-surface:${S_B}`,
+      ],
     });
     expect(reads).toEqual(['t-a']);
     expect(outcome).toMatchObject({
       from: NAME_A,
       kind: 'renamed',
       rule: 'tools',
-      to: '[HOME-BASE] continue the migration',
+      to: '[HOME-BASE] H1 continue the migration',
     });
     expect(
       cmux.calls.filter((call) => call[0] === 'rename-workspace'),
@@ -247,9 +256,13 @@ describe('syncWorkspaceName reads the owner and confirms both halves', () => {
 
   test('mbnjv.12: the same title as the owner: no rename, but a line of its own carrying his name', async () => {
     const env = stateEnv();
-    const shown = `${NAME_A} (his name)`;
+    const shown = `${NAME_UNKNOWN} (his name)`;
     writeNames(env, [
-      {...recordOf('t-a', S_A, shown), hisName: 'his name', toolPart: NAME_A},
+      {
+        ...recordOf('t-a', S_A, shown),
+        hisName: 'his name',
+        toolPart: NAME_UNKNOWN,
+      },
     ]);
     for (const surfaces of [
       [S_A, S_B],
@@ -297,8 +310,8 @@ describe('syncWorkspaceName reads the owner and confirms both halves', () => {
   test('mbnjv.12: a closed predecessor with the same title is taken over too; a half link is not', async () => {
     for (const ownerLabels of [['continued-by:t-b'], []]) {
       const env = stateEnv();
-      writeNames(env, [recordOf('t-a', S_A, NAME_A)]);
-      const cmux = fakeCmux({name: NAME_A, surfaces: [S_B]});
+      writeNames(env, [recordOf('t-a', S_A, NAME_UNKNOWN)]);
+      const cmux = fakeCmux({name: NAME_UNKNOWN, surfaces: [S_B]});
       const outcome = await syncWorkspaceName({
         enabled: true,
         env,
@@ -327,8 +340,8 @@ describe('syncWorkspaceName reads the owner and confirms both halves', () => {
       {surfaces: [S_B], title: 'migrate the db'},
     ]) {
       const env = stateEnv();
-      writeNames(env, [recordOf('t-a', S_A, NAME_A)]);
-      const cmux = fakeCmux({name: NAME_A, surfaces});
+      writeNames(env, [recordOf('t-a', S_A, NAME_UNKNOWN)]);
+      const cmux = fakeCmux({name: NAME_UNKNOWN, surfaces});
       const reads: string[] = [];
       const outcome = await syncWorkspaceName({
         enabled: true,
@@ -439,6 +452,7 @@ describe('syncTabTitle: a successor titles its own tab (D8)', () => {
     session('t-b', [
       'session',
       'continues:t-a',
+      'handoff-number:1',
       `cmux-surface:${S_B}`,
       ...extra,
     ]);
@@ -453,7 +467,7 @@ describe('syncTabTitle: a successor titles its own tab (D8)', () => {
       run: cmux.run,
       session: successor(),
     });
-    const title = sessionName('HOME-BASE', 'continue the migration');
+    const title = '[HOME-BASE] H1 continue the migration';
     expect(outcome).toEqual({
       kind: 'renamed',
       recordFailed: null,
@@ -475,6 +489,30 @@ describe('syncTabTitle: a successor titles its own tab (D8)', () => {
     expect(second.kind).toBe('unchanged');
     expect(again.calls).toEqual([]);
     expect(tabTitlesPath(env)).toContain('tab-titles.jsonl');
+  });
+
+  test('home-base-6n7my.2 D9: the mayor mark and the number, cut to 80 characters', async () => {
+    const cmux = fakeCmux({name: null, surfaces: [S_B]});
+    const outcome = await syncTabTitle({
+      enabled: true,
+      env: stateEnv(),
+      now: NOW,
+      run: cmux.run,
+      session: session(
+        't-b',
+        [
+          'session',
+          'session-role:mayor',
+          'continues:t-a',
+          'handoff-number:2',
+          `cmux-surface:${S_B}`,
+        ],
+        'y'.repeat(200),
+      ),
+    });
+    const title = `[MAYOR] [HOME-BASE] H2 ${'y'.repeat(54)}...`;
+    expect(title).toHaveLength(80);
+    expect(outcome).toMatchObject({kind: 'renamed', title});
   });
 
   test('no rename without its own label, for a non-successor, a handed-off one, or the knob off', async () => {
