@@ -280,6 +280,7 @@ function seconds(iso: string): number {
 describe('R3: the three inputs that used to read as "0 commits" are partial, never answered', () => {
   const base = {cwd: '/repo', sessionId: A};
   const noRequestFacts = {
+    activityUnmeasured: [],
     beadProblems: [],
     contextTokens: 1000,
     handedOff: false,
@@ -808,6 +809,11 @@ describe('a checkout three sessions share (home-base-vzwbj.4.7)', () => {
     expect(text).toContain(
       "- **Commits this session:** 3 — no request filed\n  - ⚠️ counted on this branch since your first prompt, so other sessions' commits may be included: the transcript could not be read — no transcript",
     );
-    expect(c.status.kind).toBe('openWork');
+    // home-base-yd1co.2 D5: with no transcript the session's activity is
+    // unknown, so it is ❔ naming why, never ⚠️ "stopped with open work".
+    expect(c.status).toMatchObject({activityUnread: true, kind: 'unknown'});
+    expect(c.status.kind === 'unknown' && c.status.reasons[0]).toContain(
+      'no transcript',
+    );
   });
 });

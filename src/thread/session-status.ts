@@ -25,11 +25,23 @@
  *                          is not zero, R3), and the tree MEASURED clean
  *                          ignoring `.beads/`
  *   7. ❔ Unknown          commits or the tree could not be measured (or a
- *                          beads export could not be read): named, never 6
+ *                          beads export could not be read): named, never 6;
+ *                          or (home-base-yd1co.2 D5) the helpers or the last
+ *                          record could not be measured, or a helper in flight
+ *                          carries no time — named, and marked
+ *                          `activityUnread` so the inbox's age filter treats
+ *                          it as the ⚠️ it replaces
  *   8. ⚠️ Open work, no blocker — otherwise
  *
- * ⏳ Export behind (home-base-jm5kg.11.2) comes before 5: the session bead is in
- * the database and not in the export, so nothing from 5 on can be claimed.
+ * Between 4 and 5, in this order: Justin's `done:`/`archived:` mark (5's first
+ * half, final whatever else could be read); then ⏳ Export behind
+ * (home-base-jm5kg.11.2: the session bead is in the database and not in the
+ * export, so nothing from the requests on can be claimed); then ❔ Unknown for
+ * a helper that has not reported back (home-base-yd1co.2 D2, D3): a helper in
+ * flight whose newest record is 15 minutes to 2 hours old
+ * (`HELPER_QUIET_LIMIT_MS`) may be waiting on a long command or may have died,
+ * so neither "working" nor "stopped" nor "done" can be claimed. From 2 hours
+ * on the helper counts for nothing.
  *
  * Optional questions (P1–P3) and FYIs (P4) never change the status; they are
  * counted beside it. `asIfYielded` is the "if you stop now" verdict `thread
@@ -44,6 +56,7 @@ import type {CreatedBeads} from './session-created';
 import type {Measured, MergeState, SessionModel} from './session-model';
 import type {RequestNode, SessionTree, TreeIssue} from './session-tree';
 
+import {formatLocalDate, formatLocalTime} from '../date';
 import {parseInstant} from './answer-store';
 import {ARCHIVED_PREFIX, ASK_LABEL, DONE_PREFIX} from './ask-format';
 import {handedOffAtOf} from './handoff-view';
@@ -67,6 +80,7 @@ import {
   unmeasured,
 } from './session-model';
 import {readShortLabel} from './short-label';
+import {HELPER_QUIET_LIMIT_MS} from './transcript-messages';
 
 /** Epic D2 step 2: a session whose last record is younger than this is working. */
 export const WORKING_WINDOW_MS = 3 * 60_000;
@@ -94,6 +108,63 @@ export function recentHelpers(
 }
 
 /**
+ * D2 (home-base-yd1co.2): the in-flight helpers whose newest record is at
+ * least `HELPER_WINDOW_MS` and under `HELPER_QUIET_LIMIT_MS` old, oldest
+ * first. The evidence of work has gone stale, and a long wait cannot be told
+ * from a dead helper.
+ */
+export function quietHelpers(
+  helpersInFlight: readonly (string | null)[] | null,
+  now: Date,
+): string[] {
+  if (helpersInFlight == null) return [];
+  return helpersInFlight
+    .filter((at): at is string => {
+      const ms = at == null ? null : parseInstant(at);
+      if (ms == null) return false;
+      const age = now.getTime() - ms;
+      return age >= HELPER_WINDOW_MS && age < HELPER_QUIET_LIMIT_MS;
+    })
+    .sort();
+}
+
+/**
+ * D2's reason for one quiet helper. An absolute local time, never an elapsed
+ * count, so the text does not change between two reads of the same facts.
+ */
+export function quietHelperReason(at: string): string {
+  const ms = parseInstant(at);
+  const when =
+    ms == null
+      ? at
+      : `${formatLocalDate(new Date(ms))} ${formatLocalTime(new Date(ms)).slice(0, 5)}`;
+  return `a helper agent last wrote at ${when} and has not reported back; it may be waiting on a long command, or it may have died; look at its pane`;
+}
+
+/**
+ * D5 (home-base-yd1co.2): why the session's activity is unknown — the helpers
+ * or the last record could not be measured, or a helper in flight carries no
+ * readable time. Unmeasured helpers with no reason given still say so: a null
+ * is never read as "nothing in flight" (critical rule 7).
+ */
+function activityProblems(facts: StatusFacts): string[] {
+  const problems = [...facts.activityUnmeasured];
+  if (facts.helpersInFlight == null && problems.length === 0) {
+    problems.push('the helper agents could not be measured');
+  }
+  const undated =
+    facts.helpersInFlight?.some(
+      (at) => at == null || parseInstant(at) == null,
+    ) ?? false;
+  if (undated) {
+    problems.push(
+      'a helper agent in flight has no readable time on its records',
+    );
+  }
+  return [...new Set(problems)];
+}
+
+/**
  * The session's commits as `deriveStatus` reads them (home-base-vzwbj.4.9 R3):
  * counted; PARTIAL — some commit evidence matched no commit in the checkout
  * (`git -C ../other commit`, a script's commit elsewhere), so `matched` is a
@@ -106,6 +177,12 @@ export type CommitsFact =
 
 /** Everything `deriveStatus` reads — small on purpose, so a table can drive it. */
 export interface StatusFacts {
+  /**
+   * D5 (home-base-yd1co.2): why the helpers or the last record could not be
+   * measured; [] when both were. Never read as "stopped": the last fallback
+   * names them as ❔ Unknown instead of ⚠️ Open work.
+   */
+  activityUnmeasured: string[];
   /** Beads exports that could not be read: requests there are unknown. */
   beadProblems: string[];
   commits: CommitsFact;
@@ -167,7 +244,17 @@ export type SessionStatus =
       successor: string | null;
     }
   | {kind: 'openWork'}
-  | {kind: 'unknown'; reasons: string[]}
+  | {
+      /**
+       * D5 (home-base-yd1co.2): set only on the ❔ that replaces ⚠️ Open work
+       * because the session's activity could not be read, and nothing else is
+       * unknown. The inbox's age filter hides it exactly as it hid ⚠️ Open
+       * work; every other ❔ stays exempt.
+       */
+      activityUnread?: true;
+      kind: 'unknown';
+      reasons: string[];
+    }
   | {kind: 'waiting'; openP0: number}
   /** `helpers`: helper agents in flight (F10); 0 = Claude's own records are recent. */
   | {helpers: number; kind: 'working'; lastRecordAt: string};
@@ -258,6 +345,17 @@ export function deriveStatus(
     return {behind: facts.exportBehind, kind: 'exportBehind'};
   }
 
+  // home-base-yd1co.2 D2, D3: a helper that has gone quiet without reporting
+  // back. After Justin's mark and the export, before the requests: "every
+  // request closed, Done" cannot be claimed while a helper may still work.
+  const quiet = quietHelpers(facts.helpersInFlight, options.now);
+  if (quiet.length > 0) {
+    return {
+      kind: 'unknown',
+      reasons: [...new Set(quiet.map(quietHelperReason))],
+    };
+  }
+
   // Requests from an export that could not be read are unknown, so neither
   // "all closed" nor "none filed" is a claim this function can make.
   const beadsKnown = facts.beadProblems.length === 0;
@@ -303,8 +401,17 @@ export function deriveStatus(
   if (facts.commits.kind === 'unmeasured') reasons.push(facts.commits.reason);
   if (!facts.uncommitted.ok) reasons.push(facts.uncommitted.reason);
   reasons.push(...facts.beadProblems);
+  // D5 (home-base-yd1co.2): missing evidence of activity is said, never read
+  // as stopped. Alone, it is the ❔ the inbox's age filter treats as the ⚠️ it
+  // replaces (`activityUnread`).
+  const activity = activityProblems(facts);
   const unique = [...new Set(reasons)];
-  if (unique.length > 0) return {kind: 'unknown', reasons: unique};
+  if (unique.length > 0) {
+    return {kind: 'unknown', reasons: [...new Set([...unique, ...activity])]};
+  }
+  if (activity.length > 0) {
+    return {activityUnread: true, kind: 'unknown', reasons: activity};
+  }
 
   return {kind: 'openWork'};
 }
@@ -353,7 +460,14 @@ export function statusFactsOf(model: SessionModel): StatusFacts {
   if (session == null && beads.sessionMissing != null) {
     problems.push(beads.sessionMissing);
   }
+  const activityUnmeasured: string[] = [];
+  if (!transcript.helpers.ok)
+    activityUnmeasured.push(transcript.helpers.reason);
+  if (!transcript.lastRecordAt.ok) {
+    activityUnmeasured.push(transcript.lastRecordAt.reason);
+  }
   return {
+    activityUnmeasured: [...new Set(activityUnmeasured)],
     beadProblems: problems,
     commits: commitsFactOf(git.commits),
     contextTokens: transcript.contextTokens.ok

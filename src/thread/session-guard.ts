@@ -15,7 +15,9 @@
  *      (the payload carries agent_id): a subagent's Bash environment equals
  *      its parent's (measured 2026-10-29, epic design field), so it would
  *      hand off its parent. That refusal is recorded on the parent's session
- *      bead (recordRefusal, reason `subagent`).
+ *      bead (recordRefusal, reason `subagent`), unless the call is a dry run
+ *      (home-base-yd1co.3 D2, threadCallIsDryRun): it is refused all the
+ *      same, and nothing is written, because a dry run changes nothing.
  *
  * A SEATBELT AGAINST HONEST MISTAKES, NOT A BOUNDARY AGAINST AN ADVERSARY. A
  * command built at run time (`$C -p x` with C=claude), a script file, or an
@@ -151,11 +153,19 @@ export type GuardVerdict =
   | {
       /** The simple command that was refused, words joined by spaces. */
       command: string;
+      /**
+       * home-base-yd1co.3 D2: a subagent's `thread handoff|spawn --dry-run`,
+       * read from its words. Still refused, but not recorded. False for
+       * every other refusal, and whenever it is in doubt.
+       */
+      dryRun: boolean;
       kind: 'deny';
       reason: GuardDenyReason;
       /** One sentence: why that command is refused. */
       why: string;
     };
+
+type GuardDenial = Extract<GuardVerdict, {kind: 'deny'}>;
 
 const ALLOW: GuardVerdict = {kind: 'allow'};
 
@@ -163,8 +173,9 @@ function deny(
   reason: GuardDenyReason,
   words: readonly string[],
   why: string,
+  dryRun = false,
 ): GuardVerdict {
-  return {command: words.join(' '), kind: 'deny', reason, why};
+  return {command: words.join(' '), dryRun, kind: 'deny', reason, why};
 }
 
 /** The whole word cmux or claude, as the unreadable rule looks for it. */
@@ -174,6 +185,7 @@ function unreadable(raw: string, why: string): GuardVerdict {
   if (!SESSION_WORD.test(raw)) return ALLOW;
   return {
     command: raw.trim(),
+    dryRun: false,
     kind: 'deny',
     reason: 'unreadable',
     why: `could not read this command (${why}), and it names cmux or claude`,
@@ -865,6 +877,97 @@ export function threadCommandIn(
 }
 
 /**
+ * home-base-yd1co.3: the arguments of the refused thread commands that have a
+ * `--dry-run`, as src/thread/command.ts defines them. An option added there
+ * and not here reads as unknown, so the refusal is recorded: drift fails to
+ * the cautious side. `thread respawn` is retired and has no `--dry-run`.
+ */
+const THREAD_DRY_RUN_ARGS = new Map<
+  string,
+  {
+    /** Boolean options other than --dry-run. */
+    flags: ReadonlySet<string>;
+    positionals: number;
+    /** Options whose value is the next word, or glued on with `=`. */
+    valued: ReadonlySet<string>;
+  }
+>([
+  [
+    'handoff',
+    {
+      flags: new Set<string>(),
+      positionals: 0,
+      valued: new Set(['--model', '--note', '--session', '--to']),
+    },
+  ],
+  [
+    'spawn',
+    {
+      flags: new Set(['--remote-control']),
+      positionals: 1,
+      valued: new Set([
+        '--continues',
+        '--kickoff',
+        '--kickoff-file',
+        '--model',
+        '--name',
+      ]),
+    },
+  ],
+]);
+
+/**
+ * home-base-yd1co.3 D2: is this `thread <sub>` call a dry run? Read from the
+ * parsed words, never from the text. True only when `--dry-run` is one of the
+ * command's own words and every other word after `thread <sub>` is a known
+ * option, its value, or an allowed positional. Anything in doubt is false,
+ * and the refusal is then recorded: a real handoff must never go unrecorded.
+ *
+ * - A value that starts with `-` is in doubt. The shell's quotes are gone by
+ *   now, so `--note "--dry-run"` is the same words as `--note --dry-run`.
+ * - A word holding `$` or a substitution is in doubt: the shell may expand it
+ *   into words the guard cannot see.
+ * - `true` and `false` are in doubt: yargs reads `--dry-run false` as off.
+ */
+function threadCallIsDryRun(words: readonly string[], sub: string): boolean {
+  const grammar = THREAD_DRY_RUN_ARGS.get(sub);
+  if (grammar == null) return false;
+  const at = words.indexOf('thread');
+  if (words[at + 1] !== sub) return false;
+  const args = words.slice(at + 2);
+  if (
+    args.some((w) => w.includes('$') || w.includes(SUBSTITUTION_PLACEHOLDER))
+  ) {
+    return false;
+  }
+  let dryRun = false;
+  let positionals = 0;
+  for (let i = 0; i < args.length; i++) {
+    const word = args[i] ?? '';
+    if (word === '--dry-run') {
+      dryRun = true;
+      continue;
+    }
+    if (grammar.flags.has(word)) continue;
+    const name = word.split('=')[0] ?? word;
+    if (grammar.valued.has(name)) {
+      if (name === word) {
+        // The value is the next word.
+        i += 1;
+        if (args[i]?.startsWith('-') === true) return false;
+      }
+      continue;
+    }
+    if (word.startsWith('-') || word === 'true' || word === 'false') {
+      return false;
+    }
+    positionals += 1;
+    if (positionals > grammar.positionals) return false;
+  }
+  return dryRun;
+}
+
+/**
  * F14 (home-base-mbnjv.8): the words of the first top-level simple command
  * that runs `thread handoff` or `thread spawn` through the SDK, or null. Only
  * the top level: a call nested in `bash -c` gets no guard pass, so the
@@ -992,13 +1095,25 @@ function classifyWords(
         'subagentThread',
         rest,
         `a subagent may not run \`thread ${sub}\`: it shares its parent's session id, so it would act for the session that dispatched it`,
+        threadCallIsDryRun(rest, sub),
       );
     }
   }
   return ALLOW;
 }
 
-/** Classify one Bash command: the first refused simple command wins. */
+/**
+ * home-base-yd1co.3 D2: launchers that give their command words the guard
+ * cannot see. xargs appends words from stdin; the F13 multiplexers' words are
+ * read by guesswork. A dry run that one of them launches is recorded.
+ */
+const UNSEEN_WORDS_LAUNCHERS = new Set([...MULTIPLEXERS, 'xargs']);
+
+/**
+ * Classify one Bash command: the first refused simple command wins, except
+ * that a dry run (D2) is held while the rest is read. A real call later on
+ * the line wins over it, so it is not left unrecorded behind the dry run.
+ */
 export function classifyCommand(
   raw: string,
   options: ClassifyOptions,
@@ -1007,18 +1122,23 @@ export function classifyCommand(
   if (resolved.depth > MAX_DEPTH) return unreadable(raw, 'it nests too deeply');
   const scan = scanShell(raw);
   if (!scan.ok) return unreadable(raw, scan.why);
+  let heldDryRun: GuardDenial | null = null;
   for (const inner of scan.substitutions) {
     const verdict = classifyCommand(inner, {
       depth: resolved.depth + 1,
       subagent: resolved.subagent,
     });
-    if (verdict.kind === 'deny') return verdict;
+    if (verdict.kind !== 'deny') continue;
+    if (!verdict.dryRun) return verdict;
+    heldDryRun ??= verdict;
   }
   let tokens: Token[];
   try {
     // Variables stay as written ($HOME), so a path keeps its basename.
     tokens = parse<never>(scan.text, (key: string) => `$${key}`);
   } catch (error) {
+    // The rest of the line went unread: the dry run may not be alone.
+    if (heldDryRun != null) return {...heldDryRun, dryRun: false};
     return unreadable(
       raw,
       `the parser failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -1026,9 +1146,14 @@ export function classifyCommand(
   }
   for (const words of simpleCommands(tokens)) {
     const verdict = classifyWords(words, resolved, classifyCommand);
-    if (verdict.kind === 'deny') return verdict;
+    if (verdict.kind !== 'deny') continue;
+    if (!verdict.dryRun) return verdict;
+    if (words.some((w) => UNSEEN_WORDS_LAUNCHERS.has(basename(w)))) {
+      return {...verdict, dryRun: false};
+    }
+    heldDryRun ??= verdict;
   }
-  return ALLOW;
+  return heldDryRun ?? ALLOW;
 }
 
 // ---------------------------------------------------------------------------
@@ -1135,6 +1260,10 @@ async function realKnobOn(projectRoot: string, env: EnvLike): Promise<boolean> {
   return resolveThreadConfig({cwd: projectRoot, env}).handoff.successor;
 }
 
+/** home-base-yd1co.3 D2: the denial's last line for a subagent's dry run. */
+export const GUARD_DRY_RUN_NOT_RECORDED =
+  'Not recorded: this is a dry run, and a dry run changes nothing, so nothing was written to any session bead.';
+
 async function realRecordSubagent(
   input: Parameters<GuardHookDeps['recordSubagent']>[0],
 ): Promise<string> {
@@ -1216,17 +1345,23 @@ async function guardHookUnsafe(
   }
   let recorded: string | null = null;
   if (verdict.reason === 'subagentThread' && payload.agentId != null) {
-    try {
-      recorded = await (deps.recordSubagent ?? realRecordSubagent)({
-        agentId: payload.agentId,
-        agentType: payload.agentType,
-        command: verdict.command,
-        env,
-        now: args.now ?? new Date(),
-        sessionId: payload.sessionId,
-      });
-    } catch (error) {
-      recorded = `⚠️ The refusal was NOT recorded: ${error instanceof Error ? error.message : String(error)}`;
+    if (verdict.dryRun) {
+      // home-base-yd1co.3 D2: nobody was handing off, so the parent's bead
+      // gets no handoff-refused label for the watcher to report.
+      recorded = GUARD_DRY_RUN_NOT_RECORDED;
+    } else {
+      try {
+        recorded = await (deps.recordSubagent ?? realRecordSubagent)({
+          agentId: payload.agentId,
+          agentType: payload.agentType,
+          command: verdict.command,
+          env,
+          now: args.now ?? new Date(),
+          sessionId: payload.sessionId,
+        });
+      } catch (error) {
+        recorded = `⚠️ The refusal was NOT recorded: ${error instanceof Error ? error.message : String(error)}`;
+      }
     }
   }
   return {exitCode: 2, stderr: `${guardDenialMessage(verdict, recorded)}\n`};

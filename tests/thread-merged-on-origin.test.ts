@@ -70,6 +70,7 @@ async function measuredCheckout(
 describe('a branch and origin/main (home-base-p05kz.3 item 3)', () => {
   test('the verdict: closed requests on a landed branch are done, not "to land"', () => {
     const facts: Omit<StatusFacts, 'merged'> = {
+      activityUnmeasured: [],
       beadProblems: [],
       commits: {count: 2, kind: 'counted'},
       contextTokens: null,

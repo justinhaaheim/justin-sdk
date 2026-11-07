@@ -459,6 +459,7 @@ const workspacePanesSchema = z.object({
               ),
             }),
           ),
+          ref: z.string().nullish(),
         }),
       ),
     }),
@@ -567,6 +568,81 @@ export async function readSurfaceIdOfRef(
     };
   }
   return {kind: 'found', surfaceId: surface.id};
+}
+
+/**
+ * The one tab of a workspace: found, no such workspace or no tab, several
+ * tabs, or not readable (rule 7: four different facts).
+ */
+export type SoleSurfaceRead =
+  | {
+      kind: 'found';
+      surfaceId: string;
+      /** `surface:N`; null when the tree did not carry one. */
+      surfaceRef: string | null;
+      workspaceId: string;
+    }
+  | {count: number; kind: 'several'; reason: string}
+  | {kind: 'notFound'; reason: string}
+  | {kind: 'unreadable'; reason: string};
+
+/**
+ * home-base-edf4y D1: the tab `thread spawn` opened. `new-workspace` answers
+ * only "OK workspace:N", and `read-screen` without --surface reads
+ * $CMUX_SURFACE_ID, the CALLER's tab, which may itself show Claude Code's
+ * input box; so the new workspace's tab is looked up here, read-only, with the
+ * same tree read as readPaneOfSurface. `workspace` is its uuid or its
+ * `workspace:N` ref. A new workspace opened without --layout holds one tab;
+ * any other count is reported, never guessed at.
+ */
+export async function readSoleSurfaceOfWorkspace(
+  run: CmuxRunner,
+  workspace: string,
+): Promise<SoleSurfaceRead> {
+  const args = ['--json', '--id-format', 'both', 'tree'];
+  args.push('--workspace', workspace);
+  const call = await run(args);
+  if (call.kind === 'failed') return {kind: 'unreadable', reason: call.reason};
+  const parsed = workspacePanesSchema.safeParse(parseJson(call.stdout));
+  if (!parsed.success) {
+    return {
+      kind: 'unreadable',
+      reason: `cmux ${args.join(' ')} printed JSON this code cannot read: ${parsed.error.issues[0]?.message ?? 'not JSON'}`,
+    };
+  }
+  const wantId = workspace.toUpperCase();
+  const found = parsed.data.windows
+    .flatMap((window) => window.workspaces)
+    .find(
+      (entry) => entry.id.toUpperCase() === wantId || entry.ref === workspace,
+    );
+  if (found == null) {
+    return {
+      kind: 'notFound',
+      reason: `no open cmux workspace is ${workspace}`,
+    };
+  }
+  const surfaces = found.panes.flatMap((pane) => pane.surfaces);
+  const [only] = surfaces;
+  if (only == null) {
+    return {
+      kind: 'notFound',
+      reason: `workspace ${workspace} holds no tab`,
+    };
+  }
+  if (surfaces.length > 1) {
+    return {
+      count: surfaces.length,
+      kind: 'several',
+      reason: `workspace ${workspace} holds ${surfaces.length} tabs, not one, so which one runs claude is not known`,
+    };
+  }
+  return {
+    kind: 'found',
+    surfaceId: only.id,
+    surfaceRef: only.ref ?? null,
+    workspaceId: found.id,
+  };
 }
 
 /** Set a workspace's name, by uuid; `--` because a name may start with "-". */

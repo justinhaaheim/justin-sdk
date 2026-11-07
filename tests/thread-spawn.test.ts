@@ -28,6 +28,7 @@ import {
   typedCommandTooLong,
 } from '../src/thread/respawn';
 import {
+  SPAWN_NOT_CONFIRMED_INSTRUCTIONS,
   spawnKickoffPath,
   spawnSession,
   writeKickoffFile,
@@ -102,31 +103,81 @@ function world(setup: {spawnAllowed?: boolean | null} = {}): World {
 }
 
 const NEW_WS = 'DDDDDDDD-0000-4000-8000-00000000000D';
+const NEW_SURF = 'EEEEEEEE-0000-4000-8000-00000000000E';
+const NEW_TAB = 'surface:90';
 
-/** A fake cmux: records every call; ping and new-workspace answer as cmux does. */
-function fakeCmux(answers: Partial<Record<string, CmuxCall>> = {}) {
+/**
+ * Real Claude Code screens, captured by the handoff's M1 measurement
+ * (home-base-mbnjv.2) and shared with tests/thread-handoff-successor.test.ts.
+ */
+const SCREENS = join(import.meta.dir, 'fixtures', 'handoff-successor');
+const screenText = (name: string) => readFileSync(join(SCREENS, name), 'utf8');
+const CLAUDE_UP = screenText('claude-up-working.txt');
+const TRUST_DIALOG = screenText('trust-dialog.txt');
+const ZSH_BEFORE_CLAUDE = screenText('zsh-before-claude.txt');
+
+/** The new workspace as `cmux tree` lists it: one pane, one tab. */
+function treeJson(
+  surfaces: {id: string; ref: string}[] = [{id: NEW_SURF, ref: NEW_TAB}],
+  workspaceId = NEW_WS,
+): string {
+  const panes =
+    surfaces.length === 0 ? [] : [{id: 'P-9', ref: 'pane:90', surfaces}];
+  const workspace = {id: workspaceId, panes, ref: 'workspace:9'};
+  return JSON.stringify({
+    windows: [{id: 'W-1', ref: 'window:1', workspaces: [workspace]}],
+  });
+}
+
+/**
+ * A fake cmux: records every call; ping and new-workspace answer as cmux does.
+ * `tree --all` (the name record's read, B3) and `tree --workspace` (the tab
+ * lookup, home-base-edf4y) answer treeJson() unless `screen` overrides them;
+ * `read-screen` answers the next of `screen.screens` (the last repeats), or
+ * `screen.read` when set.
+ */
+function fakeCmux(
+  answers: Partial<Record<string, CmuxCall>> = {},
+  screen: {
+    allTree?: CmuxCall;
+    read?: CmuxCall;
+    screens?: string[];
+    tabTree?: CmuxCall;
+  } = {},
+) {
   const calls: string[][] = [];
+  const screens = screen.screens ?? [CLAUDE_UP];
+  let reads = 0;
   const run = (args: readonly string[]): Promise<CmuxCall> => {
     calls.push([...args]);
     const preset = answers[args[0] ?? ''];
     if (preset != null) return Promise.resolve(preset);
     if (args.includes('tree')) {
-      // The tree read after new-workspace, to find workspace:9's uuid (B3).
-      const tree = {
-        windows: [
-          {
-            id: 'W-1',
-            ref: 'window:1',
-            workspaces: [{id: NEW_WS, panes: [], ref: 'workspace:9'}],
-          },
-        ],
-      };
-      return Promise.resolve({kind: 'ok', stdout: JSON.stringify(tree)});
+      const override = args.includes('--all') ? screen.allTree : screen.tabTree;
+      return Promise.resolve(override ?? {kind: 'ok', stdout: treeJson()});
+    }
+    if (args[0] === 'read-screen') {
+      if (screen.read != null) return Promise.resolve(screen.read);
+      const text = screens[Math.min(reads, screens.length - 1)] ?? '';
+      reads += 1;
+      return Promise.resolve({kind: 'ok', stdout: text});
     }
     const stdout = args[0] === 'ping' ? 'PONG\n' : 'OK workspace:9\n';
     return Promise.resolve({kind: 'ok', stdout});
   };
   return {calls, run};
+}
+
+/** A fake clock: sleep advances it, so a timeout costs no real time. */
+function fakeTime() {
+  let now = 0;
+  return {
+    clock: () => now,
+    sleep: (ms: number) => {
+      now += ms;
+      return Promise.resolve();
+    },
+  };
 }
 
 function options(w: World, more: Partial<SpawnOptions>): SpawnOptions {
@@ -248,6 +299,9 @@ describe('thread spawn: who may run it (home-base-11ya7.9)', () => {
       'ping',
       'new-workspace',
       '--json',
+      // home-base-edf4y: the new tab's lookup, then its screen.
+      '--json',
+      'read-screen',
     ]);
   });
 
@@ -405,6 +459,9 @@ describe('thread spawn: the directory', () => {
         'false',
       ],
       ['--json', '--id-format', 'both', 'tree', '--all'],
+      // home-base-edf4y: the new tab, by the uuid the name record found.
+      ['--json', '--id-format', 'both', 'tree', '--workspace', NEW_WS],
+      ['read-screen', '--workspace', NEW_WS, '--surface', NEW_TAB],
     ]);
   });
 
@@ -521,6 +578,201 @@ describe('thread spawn: cmux failures', () => {
     const result = await spawnSession(options(w, {}), cmux);
     expect(result.exitCode).toBe(1);
     expect(result.lines.join('\n')).toContain('cmux printed "ERROR"');
+  });
+});
+
+describe('thread spawn: "Opened" only once claude is seen running (home-base-edf4y)', () => {
+  const NAME = '[SPWN] new session tagged-repo';
+  const READ = ['read-screen', '--workspace', NEW_WS, '--surface', NEW_TAB];
+  const isRead = (args: readonly string[]) =>
+    args.includes('tree') || args[0] === 'read-screen' || args[0] === 'ping';
+
+  /** spawnSession with a fake clock and the limits cut to 500 ms and 2 s. */
+  async function spawnWith(w: World, cmux: ReturnType<typeof fakeCmux>) {
+    const time = fakeTime();
+    return await spawnSession(options(w, {}), {
+      ...cmux,
+      clock: time.clock,
+      screenPollMs: 500,
+      screenTimeoutMs: 2000,
+      sleep: time.sleep,
+    });
+  }
+
+  test('a zsh screen, then claude’s input box: exit 0, "Opened", and a line saying the box was seen', async () => {
+    const w = world();
+    const cmux = fakeCmux({}, {screens: [ZSH_BEFORE_CLAUDE, CLAUDE_UP]});
+    const result = await spawnWith(w, cmux);
+    expect(result.exitCode).toBe(0);
+    const text = result.lines.join('\n');
+    expect(text).toContain('Opened a new session');
+    expect(text).toContain(
+      `running: its input box was seen in the new tab (${NEW_TAB})`,
+    );
+    expect(cmux.calls).toContainEqual([
+      '--json',
+      '--id-format',
+      'both',
+      'tree',
+      '--workspace',
+      NEW_WS,
+    ]);
+    // The new workspace's own tab, never a read-screen without --surface
+    // (that reads the caller's tab).
+    expect(cmux.calls.filter((args) => args[0] === 'read-screen')).toEqual([
+      READ,
+      READ,
+    ]);
+  });
+
+  test('claude never shows: exit 1 naming the workspace, the last screen, and not to run spawn again', async () => {
+    const w = world();
+    const cmux = fakeCmux({}, {screens: [ZSH_BEFORE_CLAUDE]});
+    const result = await spawnWith(w, cmux);
+    expect(result.exitCode).toBe(1);
+    expect(result.lines.slice(0, 2)).toEqual([
+      `thread spawn: failed: a workspace WAS opened: workspace:9 (${NEW_WS}) "${NAME}".`,
+      'Claude was not seen running in it within 2 s: no Claude Code input box on the screen.',
+    ]);
+    const text = result.lines.join('\n');
+    expect(text).toContain('The last screen:');
+    expect(text).toContain('│ Last login:');
+    expect(text).not.toContain('Opened a new session');
+    expect(text).not.toContain('did not confirm a new workspace');
+    expect(result.lines.slice(-2)).toEqual([
+      ...SPAWN_NOT_CONFIRMED_INSTRUCTIONS,
+    ]);
+    // 0, 500, 1000, 1500, 2000 ms: five reads, then the time is up.
+    const reads = cmux.calls.filter((args) => args[0] === 'read-screen');
+    expect(reads).toHaveLength(5);
+  });
+
+  test('a dialog: exit 1 at once, the dialog named and quoted, nothing answered or typed', async () => {
+    const w = world();
+    const cmux = fakeCmux({}, {screens: [ZSH_BEFORE_CLAUDE, TRUST_DIALOG]});
+    const result = await spawnWith(w, cmux);
+    expect(result.exitCode).toBe(1);
+    expect(result.lines[0]).toBe(
+      `thread spawn: failed: a workspace WAS opened: workspace:9 (${NEW_WS}) "${NAME}".`,
+    );
+    expect(result.lines[1]).toBe(
+      'Claude was not seen running in it: the new tab is waiting on the folder-trust dialog. Nothing was answered and no key was sent: Justin answers it on the Mac.',
+    );
+    const text = result.lines.join('\n');
+    expect(text).toContain('The screen:');
+    expect(text).toContain(
+      '│  Quick safety check: Is this a project you created',
+    );
+    expect(result.lines.slice(-2)).toEqual([
+      ...SPAWN_NOT_CONFIRMED_INSTRUCTIONS,
+    ]);
+    // At once: the second read showed the dialog, so there is no third.
+    expect(cmux.calls.filter((args) => args[0] === 'read-screen')).toEqual([
+      READ,
+      READ,
+    ]);
+    // new-workspace is the only call that is not a read: no send, no send-key.
+    expect(
+      cmux.calls.filter((args) => !isRead(args)).map((args) => args[0]),
+    ).toEqual(['new-workspace']);
+  });
+
+  test('the screen cannot be read: exit 1 says why, and quotes no screen', async () => {
+    const w = world();
+    const read: CmuxCall = {
+      kind: 'failed',
+      reason: 'Error: surface not found',
+      timedOut: false,
+    };
+    const cmux = fakeCmux({}, {read});
+    const result = await spawnWith(w, cmux);
+    expect(result.exitCode).toBe(1);
+    expect(result.lines[1]).toBe(
+      'Claude was not seen running in it within 2 s: the screen could not be read: Error: surface not found.',
+    );
+    expect(result.lines.join('\n')).not.toContain('The last screen:');
+    expect(result.lines.slice(-2)).toEqual([
+      ...SPAWN_NOT_CONFIRMED_INSTRUCTIONS,
+    ]);
+  });
+
+  test('the new tab cannot be found: exit 1 says why, and no screen is read', async () => {
+    const two = [
+      {id: NEW_SURF, ref: NEW_TAB},
+      {id: 'FFFFFFFF-0000-4000-8000-00000000000F', ref: 'surface:91'},
+    ];
+    const cases: [CmuxCall, string][] = [
+      [
+        {kind: 'ok', stdout: treeJson(two)},
+        `workspace ${NEW_WS} holds 2 tabs, not one, so which one runs claude is not known`,
+      ],
+      [{kind: 'ok', stdout: treeJson([])}, `workspace ${NEW_WS} holds no tab`],
+      [
+        {kind: 'ok', stdout: treeJson(undefined, 'OTHER-WS')},
+        `no open cmux workspace is ${NEW_WS}`,
+      ],
+      [
+        {kind: 'failed', reason: 'Error: Command timed out', timedOut: true},
+        'Error: Command timed out',
+      ],
+    ];
+    for (const [tabTree, reason] of cases) {
+      const w = world();
+      const cmux = fakeCmux({}, {tabTree});
+      const result = await spawnWith(w, cmux);
+      expect(result.exitCode).toBe(1);
+      expect(result.lines[1]).toBe(
+        `Claude was not seen running in it: its tab could not be found to read its screen: ${reason}.`,
+      );
+      expect(result.lines.slice(-2)).toEqual([
+        ...SPAWN_NOT_CONFIRMED_INSTRUCTIONS,
+      ]);
+      expect(cmux.calls.filter((args) => args[0] === 'read-screen')).toEqual(
+        [],
+      );
+    }
+  });
+
+  test('a name record that failed: the tab is looked up by cmux’s ref, and a failure names the ref', async () => {
+    const allTree: CmuxCall = {
+      kind: 'failed',
+      reason: 'Error: Command timed out',
+      timedOut: true,
+    };
+    const started = fakeCmux({}, {allTree});
+    const w = world();
+    const ok = await spawnWith(w, started);
+    expect(ok.exitCode).toBe(0);
+    expect(started.calls).toContainEqual([
+      '--json',
+      '--id-format',
+      'both',
+      'tree',
+      '--workspace',
+      'workspace:9',
+    ]);
+    // The read uses the uuid the lookup found.
+    expect(started.calls.at(-1)).toEqual(READ);
+    const never = fakeCmux({}, {allTree, screens: [ZSH_BEFORE_CLAUDE]});
+    const failed = await spawnWith(world(), never);
+    expect(failed.exitCode).toBe(1);
+    expect(failed.lines[0]).toBe(
+      `thread spawn: failed: a workspace WAS opened: workspace:9 "${NAME}".`,
+    );
+  });
+
+  test('cmux not confirming a workspace is the other exit 1: no screen read, no "WAS opened"', async () => {
+    const w = world();
+    const cmux = fakeCmux({
+      'new-workspace': {kind: 'ok', stdout: 'ERROR\n'},
+    });
+    const result = await spawnWith(w, cmux);
+    expect(result.exitCode).toBe(1);
+    expect(result.lines[0]).toStartWith(
+      'thread spawn: failed: cmux did not confirm a new workspace',
+    );
+    expect(result.lines.join('\n')).not.toContain('WAS opened');
+    expect(cmux.calls.filter((args) => args[0] === 'read-screen')).toEqual([]);
   });
 });
 

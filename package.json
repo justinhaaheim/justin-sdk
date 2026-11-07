@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.54.6",
+  "version": "0.54.7",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -26,6 +26,7 @@
     "measure:session-line": "bun scripts/measure-session-line.ts",
     "measure:session-tree": "bun scripts/measure-session-tree.ts",
     "measure:status-write": "bun scripts/measure-status-write.ts",
+    "replay:helper-waits": "bun scripts/replay-helper-waits.ts",
     "replay:trim-guard": "bun scripts/replay-trim-guard.ts",
     "probe:bg-env": "bun scripts/probe-bg-env.ts",
     "probe:capture-entrypoint": "bun scripts/probe-capture-entrypoint.ts",

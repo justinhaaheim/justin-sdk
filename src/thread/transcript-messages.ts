@@ -783,6 +783,17 @@ export function readLastRecordTimestamp(
 /** The tool a helper agent hands its report back with; its result ends the helper's transcript. */
 export const HANDBACK_TOOL = 'SubagentHandback';
 
+/**
+ * D2 (home-base-yd1co.2): an in-flight helper whose newest record is this old
+ * or older is no longer evidence of anything, and its session falls through to
+ * the verdict it would otherwise get. About 3 times the longest wait measured
+ * on a helper's own background shell (40.1 minutes, 15 waits, 2026-11-07).
+ * Between `HELPER_WINDOW_MS` (session-status.ts) and this, the session reads
+ * ❔ Unknown. It lives here, beside the reader, because `readHelperTail` needs
+ * it too and this module imports nothing from the status code.
+ */
+export const HELPER_QUIET_LIMIT_MS = 2 * 60 * 60_000;
+
 export type HelperTailRead =
   | {at: string | null; inFlight: boolean; kind: 'found'}
   | {kind: 'failed'; reason: string}
@@ -797,6 +808,111 @@ function contentBlocks(record: TranscriptRecord): Record<string, unknown>[] {
   );
 }
 
+/** The background shells a transcript launched and never heard back from. */
+export type OpenShellsRead =
+  | {kind: 'failed'; reason: string}
+  | {kind: 'read'; open: string[]};
+
+const TASK_NOTIFICATION =
+  /<task-notification>([\s\S]*?)<\/task-notification>/gu;
+const TASK_ID = /<task-id>\s*([^<\s]+)\s*<\/task-id>/u;
+
+/** Every task id a text's `<task-notification>` elements name. */
+function notifiedTaskIds(text: string): string[] {
+  const ids: string[] = [];
+  for (const match of text.matchAll(TASK_NOTIFICATION)) {
+    const id = TASK_ID.exec(match[1] ?? '')?.[1];
+    if (id != null) ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * Where a task notification's text sits (pkg CLAUDE.md, "Background work in a
+ * transcript"; measured again 2026-11-07 on helper a3909f4b, Claude Code
+ * 2.1.319): a user record's string content when the agent is idle, wrapped in
+ * "[SYSTEM NOTIFICATION - NOT USER INPUT]" text, or a `queued_command`
+ * attachment's `prompt` when it is busy. Null for any other record.
+ */
+function notificationText(record: TranscriptRecord): string | null {
+  if (record.type === 'user') {
+    const content = record.message?.content;
+    if (typeof content === 'string') return content;
+    const texts = contentBlocks(record)
+      .filter((block) => block.type === 'text')
+      .map((block) => asString(block.text))
+      .filter((text): text is string => text != null);
+    return texts.length > 0 ? texts.join('\n') : null;
+  }
+  if (
+    record.type === 'attachment' &&
+    record.attachment?.type === 'queued_command'
+  ) {
+    return asString(record.attachment.prompt);
+  }
+  return null;
+}
+
+/** A Bash tool result's `toolUseResult.backgroundTaskId`: the launch of a background shell. */
+function backgroundTaskIdOf(record: TranscriptRecord): string | null {
+  if (record.type !== 'user') return null;
+  const result = record.toolUseResult;
+  if (result == null || typeof result !== 'object') return null;
+  return asString((result as Record<string, unknown>).backgroundTaskId);
+}
+
+/**
+ * D1 (home-base-yd1co.2): the background shells this transcript launched with
+ * no LATER task notification naming them, read over the WHOLE file (a launch
+ * can sit megabytes before the tail). Only lines that mention a launch or a
+ * notification are parsed. An unreadable file fails, naming it (critical rule
+ * 7): "could not read" is never "no shell open".
+ */
+export function readOpenBackgroundShells(path: string): OpenShellsRead {
+  const open = new Set<string>();
+  try {
+    forEachTranscriptLine(path, (line) => {
+      const launch = line.includes('backgroundTaskId');
+      const note = line.includes('<task-notification>');
+      if (!launch && !note) return;
+      let record: TranscriptRecord;
+      try {
+        record = JSON.parse(line) as TranscriptRecord;
+      } catch {
+        // A partial last line on a live transcript.
+        return;
+      }
+      if (launch) {
+        const id = backgroundTaskIdOf(record);
+        if (id != null) open.add(id);
+      }
+      if (note) {
+        const text = notificationText(record);
+        if (text != null) {
+          for (const id of notifiedTaskIds(text)) open.delete(id);
+        }
+      }
+    });
+  } catch (error) {
+    return {
+      kind: 'failed',
+      reason: `could not read ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  return {kind: 'read', open: [...open]};
+}
+
+/**
+ * D1: whether a text-ended tail needs the whole-file scan. Only a tail younger
+ * than `HELPER_QUIET_LIMIT_MS` can change any verdict (an older in-flight
+ * helper counts for nothing, D2); one whose time cannot be read is scanned.
+ */
+function worthScanning(at: string | null, now: Date): boolean {
+  if (at == null) return true;
+  const ms = Date.parse(at);
+  return Number.isNaN(ms) || now.getTime() - ms < HELPER_QUIET_LIMIT_MS;
+}
+
 /**
  * A subagent (helper agent) transcript's tail, in ONE backwards read
  * (home-base-j8q3e.1.10 F10): the newest conversation record's timestamp,
@@ -809,15 +925,31 @@ function contentBlocks(record: TranscriptRecord): Record<string, unknown>[] {
  *
  *   in flight  an assistant record with a tool_use other than SubagentHandback;
  *              an assistant record of thinking only; a user record that does
- *              not answer SubagentHandback (a tool result, or the prompt)
+ *              not answer SubagentHandback (a tool result, the prompt, a task
+ *              notification); an assistant record ending in text with no
+ *              tool_use WHILE a background shell it launched is open (D1)
  *   finished   an assistant record handing back (its result not yet written),
- *              or ending in text with no tool_use; the handback's result
+ *              or the handback's result, whatever shell is still open; an
+ *              assistant record ending in text with no tool_use and no open
+ *              shell
+ *
+ * D1 (home-base-yd1co.2): a helper that starts a background shell and ends its
+ * turn to wait for it writes exactly the text-ended record; the shell's
+ * notification wakes it later. Measured 2026-11-07: 15 of the 15 helper gaps of
+ * 14 minutes or more that ended in text had an open shell. The open shells come
+ * from `readOpenBackgroundShells`, a whole-file scan run only for a text-ended
+ * tail younger than `HELPER_QUIET_LIMIT_MS` (`now`, default the real clock):
+ * in every other case the verdict is the same either way.
  *
  * A tool_result's tool is looked up by id in the records before it; the
  * window doubles until that id is found or the whole file has been read (an
  * id found nowhere answers no handback).
  */
-export function readHelperTail(path: string): HelperTailRead {
+export function readHelperTail(
+  path: string,
+  options: {now?: Date} = {},
+): HelperTailRead {
+  const now = options.now ?? new Date();
   let fd: number;
   try {
     fd = openSync(path, 'r');
@@ -879,9 +1011,17 @@ export function readHelperTail(path: string): HelperTailRead {
         const thinkingOnly =
           blocks.length > 0 &&
           blocks.every((block) => block.type === 'thinking');
-        const inFlight =
-          tools.some((name) => name !== HANDBACK_TOOL) || thinkingOnly;
-        return {at, inFlight, kind: 'found'};
+        if (tools.some((name) => name !== HANDBACK_TOOL) || thinkingOnly) {
+          return {at, inFlight: true, kind: 'found'};
+        }
+        // A handback is final whatever shell is still open (D1).
+        if (tools.length > 0) return {at, inFlight: false, kind: 'found'};
+        // D1: text with no tool_use is a finish, or a wait on its own shell.
+        if (!worthScanning(at, now))
+          return {at, inFlight: false, kind: 'found'};
+        const shells = readOpenBackgroundShells(path);
+        if (shells.kind === 'failed') return shells;
+        return {at, inFlight: shells.open.length > 0, kind: 'found'};
       }
       const answered = blocks
         .filter((block) => block.type === 'tool_result')

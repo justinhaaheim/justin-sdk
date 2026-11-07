@@ -27,6 +27,7 @@ import {threadHandoffCommand} from '../src/thread/handoff-successor';
 import {ensureSessionBead} from '../src/thread/session-bead';
 import {
   classifyCommand,
+  GUARD_DRY_RUN_NOT_RECORDED,
   guardHook,
   scanShell,
 } from '../src/thread/session-guard';
@@ -299,6 +300,132 @@ describe('subagents and the thread command', () => {
   }
 });
 
+describe('a subagent dry run is refused and not recorded (home-base-yd1co.3 D2)', () => {
+  const SUB = {agent_id: AGENT, agent_type: 'player'};
+
+  /** The guard as a subagent's call meets it, with every record attempt kept. */
+  async function runRecording(command: string) {
+    const recordCalls: string[] = [];
+    const result = await guardHook(
+      {env: {}, stdin: payload(command, SUB)},
+      {
+        knobOn: () => true,
+        recordSubagent: ({command: refused}) => {
+          recordCalls.push(refused);
+          return `Recorded on t-1: handoff refused: subagent — ${refused}`;
+        },
+      },
+    );
+    return {recordCalls, result};
+  }
+
+  for (const command of [
+    `${SDK_HANDOFF_CALL} --dry-run`,
+    `${SDK_HANDOFF_CALL} --dry-run --note "wrap up" --model haiku`,
+    `${SDK_HANDOFF_CALL} --note=--x --dry-run`,
+    `${SDK_HANDOFF_CALL} --dry-run > out.txt 2>&1`,
+    `cd /repo && ${SDK_HANDOFF_CALL} --dry-run`,
+    'bun run justin-sdk thread spawn --dry-run',
+    'bun run justin-sdk thread spawn ~/Dev/x --dry-run --name "new thing" --remote-control',
+  ]) {
+    test(`denied, not recorded: ${JSON.stringify(command)}`, async () => {
+      const {recordCalls, result} = await runRecording(command);
+      expect(result.exitCode).toBe(2);
+      expect(recordCalls).toEqual([]);
+      expect(result.stderr).toContain('a subagent may not run `thread ');
+      expect(result.stderr).toContain(GUARD_DRY_RUN_NOT_RECORDED);
+    });
+  }
+
+  const RECORDED: [string, string][] = [
+    [`${SDK_HANDOFF_CALL} --note x`, 'no dry run'],
+    ['bun run justin-sdk thread spawn ~/Dev/x', 'a spawn with no dry run'],
+    [`${SDK_HANDOFF_CALL} --note "--dry-run"`, 'only in a quoted note'],
+    [
+      `${SDK_HANDOFF_CALL} --note "wrap up --dry-run later"`,
+      'inside a quoted note',
+    ],
+    [
+      'bun run justin-sdk thread spawn ~/Dev/x --name "--dry-run"',
+      'a spawn with it only in a quoted name',
+    ],
+    [
+      `${SDK_HANDOFF_CALL} --dry-run --note "--no-dry-run"`,
+      'a value that reads as an option',
+    ],
+    [`echo --dry-run; ${SDK_HANDOFF_CALL} --note x`, 'on a command before it'],
+    [`${SDK_HANDOFF_CALL} --note x && ls --dry-run`, 'on a command after it'],
+    [
+      `${SDK_HANDOFF_CALL} --dry-run; ${SDK_HANDOFF_CALL} --note x`,
+      'a real call after a dry run on the same line',
+    ],
+    [
+      `X=$(${SDK_HANDOFF_CALL} --dry-run); ${SDK_HANDOFF_CALL} --note x`,
+      'a real call after a dry run in a substitution',
+    ],
+    [`${SDK_HANDOFF_CALL} --dry-run --no-dry-run`, 'a flag it does not know'],
+    [
+      'bun run justin-sdk thread spawn --dry-run --no-dry-run',
+      'a spawn flag it does not know, where a positional is allowed',
+    ],
+    [`${SDK_HANDOFF_CALL} --dry-run false`, 'yargs reads it as off'],
+    [
+      'bun run justin-sdk thread spawn --dry-run false',
+      'yargs reads it as off, where a positional is allowed',
+    ],
+    [`${SDK_HANDOFF_CALL} --dry-run $EXTRA`, 'a word the shell expands'],
+    [
+      `${SDK_HANDOFF_CALL} --dry-run --note $NOTE`,
+      'a value the shell may split into more words',
+    ],
+    [
+      'bun run justin-sdk thread spawn "$DIR" --dry-run',
+      'a spawn directory the shell expands',
+    ],
+    [
+      `${SDK_HANDOFF_CALL} --dry-run --note "$(cat note.txt)"`,
+      'a value that is a substitution',
+    ],
+    [`echo --x | xargs ${SDK_HANDOFF_CALL} --dry-run`, 'xargs appends words'],
+    [
+      `tmux new-session -d '${SDK_HANDOFF_CALL} --dry-run'`,
+      'a multiplexer launches it',
+    ],
+    ['bun run justin-sdk thread spawn a b --dry-run', 'a second positional'],
+    ['bun run justin-sdk thread respawn --dry-run', 'respawn has no dry run'],
+    [
+      'bun run justin-sdk --dry-run thread handoff',
+      'the --dry-run belongs to justin-sdk, not to thread handoff',
+    ],
+    [
+      `$(${SDK_HANDOFF_CALL} --dry-run) \${x`,
+      'the parser fails after the dry run',
+    ],
+  ];
+  for (const [command, why] of RECORDED) {
+    test(`denied and recorded (${why}): ${JSON.stringify(command)}`, async () => {
+      const {recordCalls, result} = await runRecording(command);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr).toContain('a subagent may not run `thread ');
+      expect(recordCalls).toHaveLength(1);
+      expect(result.stderr).toContain('Recorded on t-1');
+      expect(result.stderr).not.toContain(GUARD_DRY_RUN_NOT_RECORDED);
+    });
+  }
+
+  test('the verdict carries the dry run only for a subagent refusal', () => {
+    expect(
+      classifyCommand(`${SDK_HANDOFF_CALL} --dry-run`, {subagent: true}),
+    ).toMatchObject({dryRun: true, kind: 'deny', reason: 'subagentThread'});
+    expect(
+      classifyCommand(`${SDK_HANDOFF_CALL} --dry-run`, {subagent: false}),
+    ).toEqual({kind: 'allow'});
+    expect(
+      classifyCommand('cmux send --surface s:1 --dry-run', {subagent: true}),
+    ).toMatchObject({dryRun: false, reason: 'cmux'});
+  });
+});
+
 describe('when the guard does nothing', () => {
   test('the knob is off: even cmux new-surface passes', async () => {
     const result = await guardHook(
@@ -471,6 +598,33 @@ describe('the subagent refusal is recorded on the session bead (AC2, real br)', 
     expect(after.notes ?? '').toContain(
       `handoff refused: subagent — a subagent (player ${AGENT}) ran`,
     );
+  });
+
+  test('home-base-yd1co.3: a subagent dry run is denied and writes nothing to the bead; the real call after it is recorded', async () => {
+    const w = world();
+    const subagent = {agent_id: AGENT, agent_type: 'player', cwd: w.repo};
+
+    const dryRun = await guardHook({
+      env: w.env,
+      now: new Date('2030-01-01T10:00:00.000Z'),
+      stdin: payload(`${SDK_HANDOFF_CALL} --dry-run`, subagent),
+    });
+    expect(dryRun.exitCode).toBe(2);
+    expect(dryRun.stderr).toContain(GUARD_DRY_RUN_NOT_RECORDED);
+    const untouched = bead(w);
+    expect(untouched.labels ?? []).not.toContain('handoff-refused');
+    expect(untouched.notes ?? '').not.toContain('handoff refused');
+
+    const real = await guardHook({
+      env: w.env,
+      now: new Date('2030-01-01T10:05:00.000Z'),
+      stdin: payload(`${SDK_HANDOFF_CALL} --note "--dry-run"`, subagent),
+    });
+    expect(real.exitCode).toBe(2);
+    expect(real.stderr).toContain(
+      `Recorded on ${w.beadId}: handoff refused: subagent`,
+    );
+    expect(bead(w).labels ?? []).toContain('handoff-refused');
   });
 });
 

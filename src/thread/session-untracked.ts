@@ -98,7 +98,12 @@ import {
   userLines,
 } from './session-model';
 import {sessionDisplayName} from './session-name';
-import {recentHelpers, WORKING_WINDOW_MS} from './session-status';
+import {
+  quietHelperReason,
+  quietHelpers,
+  recentHelpers,
+  WORKING_WINDOW_MS,
+} from './session-status';
 
 /** D6: "every Claude Code session ... under ~/Dev". */
 export function defaultDevRoot(): string {
@@ -390,6 +395,15 @@ export function untrackedVerdict(
     : 0;
   if (helpers > 0) working = true;
   if (working) evidence.push('working');
+  // home-base-yd1co.2 D6: deriveStatus's bands. A helper quiet for 15 minutes
+  // to 2 hours, with nothing working, is Check by hand, never "stopped".
+  if (!working && session.helpers.ok) {
+    const quiet = quietHelpers(
+      session.helpers.value.map((helper) => helper.lastRecordAt),
+      now,
+    );
+    missing.push(...quiet.map(quietHelperReason));
+  }
 
   // v4 D2's rule: out of context only when both numbers are known (an
   // unmeasured context size is not evidence either way, as for tracked cards).

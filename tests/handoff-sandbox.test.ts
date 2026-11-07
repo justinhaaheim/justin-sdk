@@ -164,6 +164,7 @@ describe('one spelling of the handoff call (mbnjv.10 AC1)', () => {
       SANDBOXED_CALL_INSTRUCTIONS: SANDBOXED_CALL_INSTRUCTIONS.join('\n'),
       subagentDenial: guardDenialMessage({
         command: `${SDK_HANDOFF_CALL} --note x`,
+        dryRun: false,
         kind: 'deny',
         reason: 'subagentThread',
         why: 'a subagent may not run `thread handoff`',

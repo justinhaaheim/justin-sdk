@@ -21,6 +21,7 @@ import {
   BR_EXIT_SYNC_CONFLICT,
   type BrListProbe,
   compareBrPin,
+  detectBeadsWorkspace,
   mainCheckoutRoot,
   probeBrList,
 } from './beads-setup';
@@ -419,22 +420,116 @@ function worktreeDbShadowResult(
 }
 
 /**
- * No database found for this checkout. The primary checkout gets the old
- * result, `br init` included. A linked worktree NEVER gets `br init`: under a
- * br that shares the primary's database that would create a database of the
- * worktree's own, which br 0.7.6 then prefers over the primary's.
+ * A primary checkout whose `.beads/` holds a tracked artifact (`config.yaml` or
+ * `issues.jsonl`) and no database: the primary checkout of a fresh clone
+ * (home-base-q7c7 D2). Never `br init`, and no fixCommand on any branch, so
+ * `doctor --fix --yes`, which remote sessions run through setup-env, writes
+ * nothing here. `br init` there made an EMPTY database whose issue prefix was
+ * the clone's directory name (measured 2026-11-06 on br 0.1.37), and one
+ * `--no-auto-import` write then leaves it permanently short (home-base-dchjw.12).
+ *
+ * Measured 2026-11-07 on br 0.1.37 (home-base-q7c7), in the primary checkout of
+ * a fresh local clone of a repo with 3 committed issues: a plain `br list`
+ * created the database and imported 3 of 3 from issues.jsonl, with the issue
+ * prefix of the committed issues, and `br list --no-auto-import` did the same in a
+ * second clone. So a br that keeps one database per checkout passes, as the
+ * linked worktree does in `missingBeadsDbResult`.
+ *
+ * A br that shares one database across worktrees (0.4.1 and later) is a WARN
+ * under design D2, because the measurement the pass rests on was made on
+ * 0.1.37. One run by hand on br 0.7.6 in the same fixture also imported 3 of
+ * 3; 0.4.1 to 0.7.5 were not measured. An unreadable version is an UNKNOWN
+ * warn, never a pass (critical rules §7).
  */
-function missingBeadsDbResult(
+function committedWorkspaceNoDbResult(
+  projectRoot: string,
+  artifact: string,
+): CheckResult {
+  const version = brVersionIn(projectRoot);
+  if (version.kind === 'failed') {
+    return {
+      fix: 'Fix what the message names, then run doctor again. Do not run `br init` here: this checkout already has a .beads/ workspace.',
+      message: `UNKNOWN: no beads database in this checkout yet, and its .beads/ holds ${artifact}; whether br creates the database from it on first use depends on the br version, which could not be read: ${version.reason}`,
+      pass: false,
+      severity: 'warn',
+    };
+  }
+  if (!brSharesWorktreeDb(version)) {
+    return {
+      message: `no beads database in this checkout yet: br ${version.text} creates it from the committed .beads/ on first use`,
+      pass: true,
+    };
+  }
+  return {
+    fix: 'Run `br list` here once: br should create the database from .beads/ and import issues.jsonl into it. Do not run `br init`: it makes an empty database named after this directory. doctor does not do this for you.',
+    message: `no beads database in this checkout yet, and its .beads/ holds ${artifact}. doctor has measured br creating the database from it on first use on br 0.1.37 only, not on br ${version.text}.`,
+    pass: false,
+    severity: 'warn',
+  };
+}
+
+/**
+ * No database for the PRIMARY checkout (home-base-q7c7 D1). `br init` is the
+ * fix only where there is no `.beads/` at all. A tracked workspace with no
+ * database is a fresh clone (D2). Anything else in `.beads/` is left to a
+ * human: doctor offers no write on a `.beads/` it cannot classify.
+ *
+ * Decided from files alone. `findBeadsWorkspace` found no database, so
+ * `detectBeadsWorkspace` does not reach its `br list` probe, which imports.
+ * The guard on `.beads/beads.db` keeps that true where the two could disagree:
+ * a directory that is not a git checkout (findBeadsWorkspace stops before it
+ * looks at `.beads/`), or a database that appeared since.
+ */
+function primaryMissingDbResult(
   projectRoot: string,
   reason: string,
 ): CheckResult {
-  if (!isLinkedWorktree(projectRoot)) {
+  const db = join(projectRoot, '.beads', 'beads.db');
+  if (existsSync(db)) {
+    return {
+      fix: 'Fix what the message names, then run doctor again. doctor runs nothing on a database br does not find for this checkout.',
+      message: `${db} exists, but no beads database was found for this checkout: ${reason}`,
+      pass: false,
+    };
+  }
+  const workspace = detectBeadsWorkspace(projectRoot);
+  if (workspace.kind === 'none') {
     return {
       fix: 'Run: br init',
       fixCommand: 'br init',
       message: '.beads/beads.db not found — beads not initialized',
       pass: false,
     };
+  }
+  if (workspace.kind === 'tracked-not-hydrated') {
+    return committedWorkspaceNoDbResult(projectRoot, workspace.artifact);
+  }
+  const found =
+    workspace.kind === 'legacy'
+      ? workspace.reason
+      : workspace.kind === 'unreadable'
+        ? `a database appeared at ${db} while doctor ran, and br list failed on it: ${workspace.detail}`
+        : `a database appeared at ${db} while doctor ran`;
+  return {
+    fix: `Look at what ${join(projectRoot, '.beads')} holds and set beads up by hand. doctor offers no \`br init\` and runs nothing on a .beads/ it cannot classify.`,
+    message: `no beads database for this checkout, and its .beads/ is not a br workspace doctor can classify: ${found}`,
+    pass: false,
+  };
+}
+
+/**
+ * No database found for this checkout. The primary checkout is decided by
+ * `primaryMissingDbResult`: `br init` only where there is no `.beads/` at all.
+ * A linked worktree NEVER gets `br init`: under a br that shares the primary's
+ * database that would create a database of the worktree's own, which br 0.7.6
+ * then prefers over the primary's.
+ */
+function missingBeadsDbResult(
+  projectRoot: string,
+  reason: string,
+): CheckResult {
+  if (!isLinkedWorktree(projectRoot)) {
+    return primaryMissingDbResult(projectRoot, reason);
   }
   const version = brVersionIn(projectRoot);
   if (

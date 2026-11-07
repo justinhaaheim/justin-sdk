@@ -12,7 +12,7 @@ import type {HandoffGateResult} from '../src/thread/handoff-gate';
 import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {mkdirSync, writeFileSync} from 'fs';
+import {mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {brShow, runBr} from '../src/beads/br';
@@ -97,10 +97,55 @@ const REFUSED: HandoffGateResult = {
   reason: 'killSwitch',
 };
 
+/** A real Claude Code screen with its input box (home-base-mbnjv.2 M1). */
+const CLAUDE_UP = readFileSync(
+  join(
+    import.meta.dir,
+    'fixtures',
+    'handoff-successor',
+    'claude-up-working.txt',
+  ),
+  'utf8',
+);
+
+/** The new workspace as `cmux tree` lists it: one pane, one tab. */
+const TREE = JSON.stringify({
+  windows: [
+    {
+      id: 'W-1',
+      ref: 'window:1',
+      workspaces: [
+        {
+          id: 'DDDDDDDD-0000-4000-8000-00000000000D',
+          panes: [
+            {
+              id: 'P-9',
+              ref: 'pane:90',
+              surfaces: [
+                {id: 'EEEEEEEE-0000-4000-8000-00000000000E', ref: 'surface:90'},
+              ],
+            },
+          ],
+          ref: 'workspace:9',
+        },
+      ],
+    },
+  ],
+});
+
+/**
+ * A fake cmux: ping, new-workspace and the tree answer as cmux does, and
+ * read-screen shows claude's input box (home-base-edf4y).
+ */
 function fakeCmux() {
   const calls: string[][] = [];
   const run = (args: readonly string[]): Promise<CmuxCall> => {
     calls.push([...args]);
+    if (args.includes('tree'))
+      return Promise.resolve({kind: 'ok', stdout: TREE});
+    if (args[0] === 'read-screen') {
+      return Promise.resolve({kind: 'ok', stdout: CLAUDE_UP});
+    }
     const stdout = args[0] === 'ping' ? 'PONG\n' : 'OK workspace:9\n';
     return Promise.resolve({kind: 'ok', stdout});
   };
@@ -133,6 +178,9 @@ describe('thread spawn and the handoff gate', () => {
       'new-workspace',
       // home-base-ys9t7.9.1 B3: the tree read that finds workspace:9's uuid.
       '--json',
+      // home-base-edf4y: the new tab's lookup, then its screen.
+      '--json',
+      'read-screen',
     ]);
   });
 

@@ -82,7 +82,7 @@ const RESPAWN_RETIRED_SUMMARY =
   'RETIRED (epic home-base-mbnjv C3): starting a successor is now `thread handoff` with componentConfig.thread.handoff.successor on. This command prints that and exits 2, doing nothing.';
 
 const SPAWN_SUMMARY =
-  'Start a new Claude Code session in a directory you name: open a new cmux workspace there running `claude`, with Remote Control when you pass --remote-control, so you can reach it from the Claude app on your phone (home-base-yukaf.7). ONLY THE HOME-BASE MAYOR STARTS SESSIONS IN OTHER PROJECTS: it refuses (exit 2, nothing opened, --dry-run included) unless componentConfig.thread.spawn.allowed is true in the repo it runs in, which only home-base turns on; anywhere else, file the work as a bead and tell Justin (home-base-11ya7.9). Try --dry-run first. With componentConfig.thread.handoff.successor on in the repo it runs in, the handoff gate runs first (kill switch, cmux, usage, live sessions). Exit 0 opened, or a dry run · 1 cmux did not open it · 2 refused, nothing opened · 3 refused by the handoff gate, nothing opened · 4 deferred: cmux was too slow to decide, nothing opened, so run the same command again.';
+  'Start a new Claude Code session in a directory you name: open a new cmux workspace there running `claude`, with Remote Control when you pass --remote-control, so you can reach it from the Claude app on your phone (home-base-yukaf.7). ONLY THE HOME-BASE MAYOR STARTS SESSIONS IN OTHER PROJECTS: it refuses (exit 2, nothing opened, --dry-run included) unless componentConfig.thread.spawn.allowed is true in the repo it runs in, which only home-base turns on; anywhere else, file the work as a bead and tell Justin (home-base-11ya7.9). Try --dry-run first. With componentConfig.thread.handoff.successor on in the repo it runs in, the handoff gate runs first (kill switch, cmux, usage, live sessions). Exit 0 opened, and claude was seen running in it, or a dry run · 1 failed: cmux did not confirm a workspace, or a workspace opened and claude was not seen running in it, so do not run it again (see EXIT CODES) · 2 refused, nothing opened · 3 refused by the handoff gate, nothing opened · 4 deferred: cmux was too slow to decide, nothing opened, so run the same command again.';
 
 const SPAWN_NARRATIVE = `
 WHAT IT DOES, in order.
@@ -94,7 +94,24 @@ WHAT IT DOES, in order.
   4. Refuses (exit 2) when cmux cannot be reached, and prints the sandbox setting that allows it (see SANDBOX HINT).
   5. With --kickoff or --kickoff-file, writes the kickoff to a file, $XDG_STATE_HOME/justin-sdk/spawn-kickoffs/<stamp>-<random>.md (default ~/.local/state/…), after cmux answered. The file is kept as the record of what the session was asked.
   6. Opens a new cmux workspace in the directory, without switching to it, running \`claude [--model <m>] [--remote-control '<workspace name>'] --name '<workspace name>' ["$(command cat -- <kickoff file>)"]\`. With a kickoff the session starts on it, byte for byte, with no keystroke; without one it opens on an empty prompt.
-  7. Prints the workspace, its cmux id, the directory, the command and its size, and the kickoff file. With --remote-control it also says how to open the session from your phone.
+  7. Finds the new workspace's tab (cmux tree, read only) and reads its screen for up to 20 s, the same check thread handoff makes of its successor (home-base-edf4y). Claude Code's input box with no dialog means claude started. A dialog, such as a folder-trust prompt, is reported with the screen and never answered: nothing is typed and no key is sent.
+  8. Prints the workspace, its cmux id, the directory, the command and its size, the kickoff file, and that claude's input box was seen. With --remote-control it also says how to open the session from your phone.
+
+EXIT CODES, and what you do after each.
+
+  0  Opened, and claude's input box was seen in the new workspace; or a dry run, which opens nothing. Tell Justin the workspace name it prints.
+
+  1  Failed. Two different failures share this code, and the first line tells them apart.
+
+     "cmux did not confirm a new workspace": cmux failed, or printed something other than OK <workspace>, and the line quotes it. No workspace is known to be open, but one may have opened if cmux timed out. Report the output and stop.
+
+     "a workspace WAS opened": the workspace exists, and the output names it with its id. Claude was not seen running in it within 20 s, or it is waiting on a dialog. The output quotes the last screen, or says why the screen could not be read. Do not run thread spawn again: that opens a second session. Report the workspace it names, so Justin can find it in cmux and close it or answer it.
+
+  2  Refused, nothing opened: the message says why. When it says cmux cannot be reached and the call ran inside the sandbox, run it once more with the sandbox disabled (see SANDBOX HINT). Report any other refusal and stop.
+
+  3  Refused by the handoff gate, nothing opened. This is final: report it and stop. Never start a session another way: no cmux command, no claude command.
+
+  4  Deferred: cmux was too slow to decide, nothing opened. Run the same command again at once, up to 3 more times.
 
 REMOTE CONTROL. The session runs on this Mac; the Claude app on your phone, or claude.ai/code, is a window onto it. Open the Claude app, tap Code, and pick the session by the name this command prints. The claude process in the workspace must keep running: closing the workspace or quitting claude takes the session offline. A Mac that sleeps reconnects when it wakes.
 

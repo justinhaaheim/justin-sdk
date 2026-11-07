@@ -565,6 +565,7 @@ describe('deriveStatus follows epic D2 exactly', () => {
   });
   /** An open request, nothing else: ⚠️ open work. Each row flips from here. */
   const BASE: StatusFacts = {
+    activityUnmeasured: [],
     beadProblems: [],
     commits: counted(0),
     contextTokens: 100_000,

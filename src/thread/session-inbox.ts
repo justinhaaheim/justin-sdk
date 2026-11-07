@@ -11,8 +11,11 @@
  * applies to its activity — the newest line of its message log, else its
  * newest index sighting — EXCEPT that a 🛑 waiting or ❔ unknown session (or
  * one that could not be loaded) is never hidden by age (home-base-vzwbj.4.9
- * R5: a P0 left 31 days must not vanish). What the window hid is counted per
- * status in one line, never dropped silently.
+ * R5: a P0 left 31 days must not vanish). The one ❔ the window does hide is
+ * the one that replaced ⚠️ Open work because the session's activity could not
+ * be read (`activityUnread`, home-base-yd1co.2 D5): a deleted transcript must
+ * not bring an old session back into view forever. What the window hid is
+ * counted per status in one line, never dropped silently.
  *
  * AND EVERY OTHER SESSION (j8q3e.1 D6, home-base-j8q3e.1.2,
  * session-untracked.ts): each Claude Code session under ~/Dev in the window
@@ -276,7 +279,8 @@ export interface InboxRead {
   corrupt: {lineNumber: number; reason: string}[];
   /**
    * R5: sessions older than the window that it hid, counted by status kind
-   * (waiting and unknown are never hidden, so never here).
+   * (waiting is never hidden, so never here; unknown only as the activityUnread
+   * one, home-base-yd1co.2 D5 and `neverHiddenByAge`).
    */
   hiddenByAge: Partial<Record<SessionStatus['kind'], number>>;
   indexPath: string;
@@ -445,6 +449,18 @@ async function mapConcurrently<T, R>(
     Array.from({length: Math.max(1, Math.min(limit, items.length))}, worker),
   );
   return results;
+}
+
+/**
+ * R5 (home-base-vzwbj.4.9): the statuses the `--days` window never hides — 🛑
+ * waiting, ⏳ export behind, and ❔ unknown, except the ❔ that replaced ⚠️
+ * Open work because the session's activity could not be read
+ * (`activityUnread`, home-base-yd1co.2 D5), which is hidden by age exactly as
+ * the ⚠️ was.
+ */
+export function neverHiddenByAge(status: SessionStatus): boolean {
+  if (status.kind === 'waiting' || status.kind === 'exportBehind') return true;
+  return status.kind === 'unknown' && status.activityUnread !== true;
 }
 
 /** Read every session in the window. `failed` only when the index is unreadable. */
@@ -656,9 +672,7 @@ export async function readInbox(input: {
     if (
       old &&
       (lastActivityMs == null || lastActivityMs < since) &&
-      status.kind !== 'waiting' &&
-      status.kind !== 'unknown' &&
-      status.kind !== 'exportBehind' &&
+      !neverHiddenByAge(status) &&
       !liveDrafts.has(model.sessionId)
     ) {
       hiddenByAge[status.kind] = (hiddenByAge[status.kind] ?? 0) + 1;
@@ -1251,7 +1265,8 @@ const HIDDEN_STATUS_WORDS: Record<SessionStatus['kind'], string> = {
   handedOff: '🤝 handed off',
   openWork: '⚠️ open work',
   outOfContext: '🧯 out of context',
-  unknown: '❔ unknown',
+  // Only a ❔ whose activity could not be read is ever hidden by age (D5).
+  unknown: '❔ unknown (activity unreadable)',
   waiting: '🛑 waiting on you',
   working: '🏃 working',
 };
@@ -1272,7 +1287,7 @@ export function hiddenByAgeLine(
   const parts = entries
     .map(([kind, count]) => `${count} ${HIDDEN_STATUS_WORDS[kind]}`)
     .join(', ');
-  return `${plural(total, 'older session', 'older sessions')} hidden (no activity in the last ${plural(days, 'day', 'days')}; --days): ${parts}. Waiting and unknown sessions are never hidden by age.`;
+  return `${plural(total, 'older session', 'older sessions')} hidden (no activity in the last ${plural(days, 'day', 'days')}; --days): ${parts}. Waiting sessions are never hidden by age, and unknown ones only when their activity could not be read.`;
 }
 
 /**

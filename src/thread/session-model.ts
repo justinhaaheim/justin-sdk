@@ -1000,10 +1000,14 @@ export async function measureGit(input: {
  * From the same reads, the helper agents still in flight (F10,
  * home-base-j8q3e.1.10; `readHelperTail` says how a helper's tail is read).
  * Whatever makes the last activity unmeasured makes the helpers unmeasured
- * too, with the same reason.
+ * too, with the same reason. `now` (default the real clock) is only the
+ * reader's: whether a text-ended helper tail is young enough to need the
+ * whole-file scan for open shells (home-base-yd1co.2 D1). A replay passes the
+ * time it replays.
  */
 export function readActivity(
   transcriptPath: string,
+  options: {now?: Date} = {},
 ): Pick<TranscriptMeasurements, 'helpers' | 'lastRecordAt'> {
   const fail = (
     reason: string,
@@ -1024,7 +1028,7 @@ export function readActivity(
   if (main.kind === 'found') consider(main.at);
   const inFlight: HelperInFlight[] = [];
   for (const file of subagents.files) {
-    const read = readHelperTail(file);
+    const read = readHelperTail(file, options);
     if (read.kind === 'failed') return fail(read.reason);
     if (read.kind !== 'found') continue;
     if (read.at != null) consider(read.at);

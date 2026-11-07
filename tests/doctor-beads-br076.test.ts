@@ -25,8 +25,16 @@ import type {CheckResult} from '../src/check-runner';
 import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, test} from 'bun:test';
-import {chmodSync, existsSync, mkdirSync, readdirSync, writeFileSync} from 'fs';
-import {delimiter, join} from 'path';
+import {spawnSync} from 'child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'fs';
+import {delimiter, join, resolve} from 'path';
 
 import {runBr} from '../src/beads/br';
 import {stripAnsi} from '../src/check-runner';
@@ -281,6 +289,351 @@ describe('BR_DB finds the database the way br does', () => {
       message: '.beads/beads.db not found — beads not initialized',
       pass: false,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-q7c7: the PRIMARY checkout of a fresh clone with a committed .beads/
+// NEGATIVE CONTROL: make missingBeadsDbResult return the old primary result
+// (`br init`) for every primary checkout, and the AC1 test goes red on the
+// rendered BR_DB line (`✗ BR_DB`, `Fix: Run: br init`) and the AC2 test on the
+// logged `br init`. Each other test names its own break.
+// ---------------------------------------------------------------------------
+
+/**
+ * The primary checkout of a fresh local clone of a repo whose `.beads/` is
+ * committed: what a remote session or a new machine starts from. The origin's
+ * workspace is made by the br first on PATH (`br init`, then one `br create`
+ * per title) and committed; br's own .gitignore keeps the database out, so the
+ * clone has `.beads/` and no database.
+ */
+function freshCloneWithBeads(
+  sb: Sandbox,
+  titles: string[],
+): {clone: string; origin: string} {
+  const origin = initRepo(sb, 'origin', {
+    'README.md': '# origin\n',
+    'justin-sdk.config.json': `${JSON.stringify(DOCTOR_CONFIG)}\n`,
+  });
+  const init = runBr(origin, ['init', '--prefix', 't', '-q']);
+  if (!init.ok) throw new Error(`br init failed: ${init.reason ?? '?'}`);
+  for (const title of titles) {
+    const created = runBr(origin, ['create', title, '-q']);
+    if (!created.ok) {
+      throw new Error(`br create failed: ${created.reason ?? '?'}`);
+    }
+  }
+  git(origin, ['add', '-A']);
+  git(origin, ['commit', '-qm', 'beads']);
+  const clone = join(sb.path, 'clone');
+  git(sb.path, ['clone', '-q', origin, clone]);
+  return {clone, origin};
+}
+
+/**
+ * The same shape without a br: `.beads/` files written by hand, committed, and
+ * cloned. For the tests that run a fake br, or none.
+ */
+function freshCloneWithFiles(
+  sb: Sandbox,
+  beadsFiles: Record<string, string>,
+): string {
+  const origin = initRepo(sb, 'origin', {
+    'README.md': '# origin\n',
+    'justin-sdk.config.json': `${JSON.stringify(DOCTOR_CONFIG)}\n`,
+    ...beadsFiles,
+  });
+  const clone = join(sb.path, 'clone');
+  git(sb.path, ['clone', '-q', origin, clone]);
+  return clone;
+}
+
+/**
+ * A logging `br` for asserting what doctor EXECUTED, not its exit code. Each
+ * call appends `<cwd>\t<args>` to a log. `init` is recorded and never run, so a
+ * regression that reaches `br init` writes nothing anywhere, whatever the cwd;
+ * every other call runs `realBr`.
+ */
+function loggingBr(
+  sb: Sandbox,
+  realBr: string,
+): {calls: () => {args: string; cwd: string}[]; dir: string} {
+  const dir = join(sb.path, 'logging-br');
+  mkdirSync(dir, {recursive: true});
+  const log = join(dir, 'calls.log');
+  writeFileSync(
+    join(dir, 'br'),
+    [
+      '#!/bin/sh',
+      `printf '%s\\t%s\\n' "$(pwd -P)" "$*" >> '${log}'`,
+      'if [ "$1" = "init" ]; then exit 0; fi',
+      `exec '${realBr}' "$@"`,
+      '',
+    ].join('\n'),
+  );
+  chmodSync(join(dir, 'br'), 0o755);
+  return {
+    calls: () =>
+      existsSync(log)
+        ? readFileSync(log, 'utf8')
+            .split('\n')
+            .filter((line) => line !== '')
+            .map((line) => {
+              const [cwd = '', args = ''] = line.split('\t');
+              return {args, cwd};
+            })
+        : [],
+    dir,
+  };
+}
+
+/** Was this logged br call an `init`? */
+function isInit(call: {args: string}): boolean {
+  return /(^|\s)init(\s|$)/.test(call.args);
+}
+
+/** `br` as a person types it. `runBr` appends `--no-auto-import`, so not that. */
+function plainBr(
+  cwd: string,
+  args: string[],
+): {status: number | null; stdout: string} {
+  const proc = spawnSync('br', args, {
+    cwd,
+    encoding: 'utf-8',
+    env: process.env,
+  });
+  return {status: proc.status, stdout: proc.stdout ?? ''};
+}
+
+const CLI = resolve(import.meta.dirname, '..', 'src', 'cli.ts');
+
+/**
+ * `justin-sdk doctor --fix --yes`, as setup-env runs it in a remote session, in
+ * a subprocess started in `cwd` with `pathFirst` first on PATH.
+ *
+ * A subprocess, not `renderDoctor`, for two reasons. check-runner spawns a
+ * fixCommand with `Bun.spawn` and no `env`, which hands the child the
+ * environment Bun STARTED with: a br put first on `process.env.PATH` at run
+ * time never sees the fix (measured 2026-11-07 on Bun 1.4.2, home-base-q7c7;
+ * an in-process control run logged no `br init` while the startup PATH's real
+ * br initialised the fixture). And the fix runs in `process.cwd()`, which
+ * in-process is the SDK checkout.
+ */
+function doctorFixCli(
+  cwd: string,
+  pathFirst: string,
+): {out: string; status: number | null} {
+  const proc = spawnSync(process.execPath, [CLI, 'doctor', '--fix', '--yes'], {
+    cwd,
+    encoding: 'utf-8',
+    env: {
+      ...process.env,
+      PATH: `${pathFirst}${delimiter}${process.env.PATH ?? ''}`,
+    },
+    timeout: 120_000,
+  });
+  return {
+    out: stripAnsi(`${proc.stdout ?? ''}${proc.stderr ?? ''}`),
+    status: proc.status,
+  };
+}
+
+describe('BR_DB in the primary checkout of a fresh clone (home-base-q7c7)', () => {
+  with0137(
+    'premise: br 0.1.37 creates the database on first use there and imports every committed issue',
+    async () => {
+      await with0137Br(() => {
+        const sb = sandbox();
+        const {clone, origin} = freshCloneWithBeads(sb, [
+          'one',
+          'two',
+          'three',
+        ]);
+        const committed = readFileSync(
+          join(clone, '.beads', 'issues.jsonl'),
+          'utf8',
+        )
+          .split('\n')
+          .filter((line) => line !== '');
+        expect(committed).toHaveLength(3);
+        const db = join(clone, '.beads', 'beads.db');
+        expect(existsSync(db)).toBe(false);
+
+        const list = plainBr(clone, ['list', '--json']);
+        expect(list.status).toBe(0);
+        expect(existsSync(db)).toBe(true);
+        const listed = JSON.parse(list.stdout) as {issues: unknown[]};
+        expect(listed.issues).toHaveLength(3);
+
+        // --no-auto-import too: the database is made from the export either way.
+        const second = join(sb.path, 'clone-no-auto-import');
+        git(sb.path, ['clone', '-q', origin, second]);
+        const quiet = plainBr(second, ['list', '--json', '--no-auto-import']);
+        expect(quiet.status).toBe(0);
+        expect(
+          (JSON.parse(quiet.stdout) as {issues: unknown[]}).issues,
+        ).toHaveLength(3);
+      });
+    },
+  );
+
+  with0137(
+    'AC1: br 0.1.37, committed .beads/ and no DB: BR_DB passes, no fixCommand, nothing says br init, doctor creates nothing',
+    async () => {
+      await with0137Br(async () => {
+        const sb = sandbox();
+        const {clone} = freshCloneWithBeads(sb, ['one']);
+        expect(existsSync(join(clone, '.beads', 'beads.db'))).toBe(false);
+        expect(existsSync(join(clone, '.beads', 'issues.jsonl'))).toBe(true);
+        const before = readdirSync(join(clone, '.beads')).sort();
+
+        // The rendered report first, so the negative control shows the line.
+        const run = await renderDoctor(clone, {});
+        const section = brDbSection(run.report);
+        expect(section).toContain('✓ BR_DB');
+        expect(section).toContain(
+          'br 0.1.37 creates it from the committed .beads/ on first use',
+        );
+        expect(stripAnsi(run.report)).not.toContain('br init');
+
+        const result = brDbCheckResult(clone);
+        expect(result.pass).toBe(true);
+        expect(result.fixCommand).toBeUndefined();
+        expect(adviceText(result)).not.toContain('br init');
+        expect(readdirSync(join(clone, '.beads')).sort()).toEqual(before);
+      });
+    },
+  );
+
+  with0137(
+    'AC2: doctor --fix --yes there runs no br init, by what a logging br shim recorded',
+    async () => {
+      if (BR_0137.kind !== 'installed') throw new Error(BR_0137.reason);
+      const sb = sandbox();
+      const {clone} = await with0137Br(() => freshCloneWithBeads(sb, ['one']));
+      const shim = loggingBr(sb, BR_0137.path);
+
+      const run = doctorFixCli(clone, shim.dir);
+
+      const calls = shim.calls();
+      // The shim was the br doctor ran, in this clone.
+      expect(calls.some((call) => call.cwd === clone)).toBe(true);
+      expect(calls.filter(isInit)).toEqual([]);
+      expect(run.out).not.toContain('→ BR_DB');
+      expect(run.out).toContain('✓ BR_DB');
+      expect(existsSync(join(clone, '.beads', 'beads.db'))).toBe(false);
+    },
+  );
+
+  with0137(
+    'AC2 CONTROL: the same shim records br init when doctor --fix --yes runs in a repo with no .beads/',
+    () => {
+      if (BR_0137.kind !== 'installed') throw new Error(BR_0137.reason);
+      const sb = sandbox();
+      const repo = initRepo(sb, 'plain', {
+        'README.md': '# plain\n',
+        'justin-sdk.config.json': `${JSON.stringify(DOCTOR_CONFIG)}\n`,
+      });
+      const shim = loggingBr(sb, BR_0137.path);
+
+      const run = doctorFixCli(repo, shim.dir);
+
+      const inits = shim.calls().filter(isInit);
+      expect(inits.length).toBeGreaterThan(0);
+      expect(inits.every((call) => call.cwd === repo)).toBe(true);
+      expect(run.out).toContain('→ BR_DB: br init');
+    },
+  );
+
+  // NEGATIVE CONTROL: return a pass when the version is `failed` and this goes
+  // red on `pass`/`severity`.
+  test('AC4: br version unreadable there: an UNKNOWN warn with no fixCommand, never a pass', async () => {
+    const sb = sandbox();
+    const clone = freshCloneWithFiles(sb, {
+      '.beads/config.yaml': 'issue_prefix: t\n',
+      '.beads/issues.jsonl': '',
+    });
+    const broken = fakeBrDir(sb, {version: '?', versionCode: 3});
+
+    await withPathFirst(broken, () => {
+      const result = brDbCheckResult(clone);
+      expect(result.pass).toBe(false);
+      expect(result.severity).toBe('warn');
+      expect(result.message?.startsWith('UNKNOWN:')).toBe(true);
+      expect(result.message).toContain('could not be read');
+      expect(result.fixCommand).toBeUndefined();
+    });
+  });
+
+  // NEGATIVE CONTROL: drop the `brSharesWorktreeDb` branch (pass on any read
+  // version) and this goes red on `pass`.
+  test('a br that shares one database across worktrees (a fake 0.7.6) there: a WARN naming br list, no fixCommand', async () => {
+    const sb = sandbox();
+    const clone = freshCloneWithFiles(sb, {
+      '.beads/config.yaml': 'issue_prefix: t\n',
+      '.beads/issues.jsonl': '',
+    });
+    const fake = fakeBrDir(sb, {version: '0.7.6'});
+
+    await withPathFirst(fake, () => {
+      const result = brDbCheckResult(clone);
+      expect(result.pass).toBe(false);
+      expect(result.severity).toBe('warn');
+      expect(result.fixCommand).toBeUndefined();
+      expect(result.message).toContain('not on br 0.7.6');
+      expect(result.fix).toContain('Run `br list` here once');
+      expect(result.fix).toContain('Do not run `br init`');
+    });
+  });
+
+  // NEGATIVE CONTROL: give the `legacy` branch `fixCommand: 'br init'` and
+  // this goes red on `fixCommand`.
+  test('AC5: a .beads/ holding neither a database nor a tracked artifact: red, the reason named, no fixCommand', () => {
+    const sb = sandbox();
+    const clone = freshCloneWithFiles(sb, {'.beads/notes.txt': 'not beads\n'});
+
+    const result = brDbCheckResult(clone);
+    expect(result.pass).toBe(false);
+    expect(result.severity).toBeUndefined();
+    expect(result.fixCommand).toBeUndefined();
+    expect(result.message).toContain(
+      '.beads/ exists with neither a database nor a tracked config',
+    );
+  });
+
+  test('a Dolt (bd) workspace with a config.yaml: classified legacy, not a fresh clone, so no pass and no fixCommand', () => {
+    const sb = sandbox();
+    const clone = freshCloneWithFiles(sb, {
+      '.beads/config.yaml': 'issue_prefix: t\n',
+      '.beads/metadata.json': '{"backend": "dolt"}\n',
+    });
+
+    const result = brDbCheckResult(clone);
+    expect(result.pass).toBe(false);
+    expect(result.fixCommand).toBeUndefined();
+    expect(result.message).toContain('old Dolt (bd) backend');
+  });
+
+  // NEGATIVE CONTROL: remove the `.beads/beads.db` guard in
+  // primaryMissingDbResult and detectBeadsWorkspace runs `br list` (which
+  // imports); the logged `list` call turns this red.
+  test('a directory that is not a git checkout, with a .beads/beads.db: red, no fixCommand, and no br list run', async () => {
+    const sb = sandbox();
+    const dir = join(sb.path, 'not-git');
+    mkdirSync(join(dir, '.beads'), {recursive: true});
+    writeFileSync(join(dir, '.beads', 'beads.db'), '');
+    const fake = fakeBrDir(sb, {version: SDK_PIN});
+    const shim = loggingBr(sb, join(fake, 'br'));
+
+    const result = await withPathFirst(shim.dir, () => brDbCheckResult(dir));
+    expect(
+      shim.calls().filter((call) => /(^|\s)list(\s|$)/.test(call.args)),
+    ).toEqual([]);
+    expect(result.pass).toBe(false);
+    expect(result.fixCommand).toBeUndefined();
+    expect(result.message).toContain(
+      `${join(dir, '.beads', 'beads.db')} exists`,
+    );
   });
 });
 

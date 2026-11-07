@@ -27,6 +27,7 @@ import {
 import {measured, unmeasured} from '../src/thread/session-model';
 import {
   deriveStatus,
+  quietHelperReason,
   type SessionStatus,
   statusCounts,
   statusFactsOf,
@@ -599,6 +600,57 @@ describe('D3 rule 10: unknown or unreadable', () => {
       rule: 10,
       text: 'Check it by hand: git merge-base exited 128: bad object',
     });
+  });
+
+  // home-base-yd1co.2 D2: Claude's own last record an hour old, a helper in
+  // flight whose newest record is 40 minutes old (waiting on its own shell, or
+  // dead): Check by hand, never "Claude stopped with ... unfinished".
+  test('a helper quiet for 40 minutes: Check it by hand, in the checkByHand section', () => {
+    const model = fixture({
+      requests: [open('t-2', 'Refactor the parser')],
+      transcript: {
+        helpers: measured([
+          {
+            agentFile: '/projects/x/subagents/agent-a1.jsonl',
+            lastRecordAt: '2030-01-01T11:20:00.000Z',
+          },
+        ]),
+        lastRecordAt: measured('2030-01-01T11:20:00.000Z'),
+      },
+    });
+    const result = action(model);
+    expect(result.kind).toBe('unknown');
+    expect(result.rule).toBe(10);
+    expect(result.text).toBe(
+      `Check it by hand: ${quietHelperReason('2030-01-01T11:20:00.000Z')}`,
+    );
+    expect(sectionFor(10, statusOf(model), statusCounts(model))).toBe(
+      'checkByHand',
+    );
+  });
+
+  // home-base-yd1co.2 D5, through statusFactsOf.
+  test('unreadable helpers with open work: Check it by hand naming the reason; landed and closed: still Done', () => {
+    const unread: Partial<SessionModel['transcript']> = {
+      helpers: unmeasured('could not read /projects/x/subagents: EACCES'),
+      lastRecordAt: unmeasured('could not read /projects/x/subagents: EACCES'),
+    };
+    const openWork = fixture({
+      requests: [open('t-2', 'Refactor the parser')],
+      transcript: unread,
+    });
+    expect(action(openWork)).toEqual({
+      command: null,
+      kind: 'unknown',
+      rule: 10,
+      text: 'Check it by hand: could not read /projects/x/subagents: EACCES',
+    });
+    expect(statusOf(openWork)).toMatchObject({activityUnread: true});
+    const landed = fixture({
+      requests: [closed('t-2', 'Refactor the parser')],
+      transcript: unread,
+    });
+    expect(action(landed)).toMatchObject({kind: 'done', rule: 9});
   });
 });
 

@@ -27,6 +27,21 @@
  *   it back as claude's prompt with `"$(command cat -- <path>)"`. A command
  *   that would still reach TYPED_COMMAND_BYTE_LIMIT (a long --model, say) is
  *   refused with exit 2 before cmux is touched, --dry-run included.
+ * - "Opened" means claude was seen running (home-base-edf4y). On 2026-11-02 a
+ *   cut command left the tab at a zsh prompt while spawn said "Opened". After
+ *   cmux confirms the workspace and its name is recorded, the new tab is
+ *   looked up (readSoleSurfaceOfWorkspace: new-workspace names no tab, and a
+ *   read-screen without --surface reads the CALLER's tab) and read with the
+ *   handoff successor's screen check, waitForSuccessor, with its limits
+ *   (about 20 s). Claude Code's input box is exit 0. A dialog (folder trust,
+ *   say) is exit 1 at once, reported with the screen and never answered. No
+ *   input box in time, or no tab to read, is exit 1 with the last screen or
+ *   why it could not be read. Exit 1 then has two meanings, told apart by
+ *   their first line: "cmux did not confirm a new workspace" (nothing is
+ *   known to be open) and "a workspace WAS opened" (it names the workspace and
+ *   says not to run spawn again, since that opens a second session).
+ *   Unverified until a live run: whether read-screen reads a workspace opened
+ *   with --focus false and never selected.
  * - --dry-run prints the plan, the kickoff file's path and the typed command's
  *   length, writes nothing and touches no cmux. A real run writes the kickoff
  *   file only after cmux answered its ping. A sandboxed first try fails on the
@@ -62,9 +77,20 @@ import {
 } from '../cli-style';
 import {xdgStateHome} from '../health-notices';
 import {oneLine} from './ask-format';
-import {cmuxArgv, realCmuxRunner, resolveCmuxBinary} from './cmux';
+import {
+  cmuxArgv,
+  readSoleSurfaceOfWorkspace,
+  realCmuxRunner,
+  resolveCmuxBinary,
+} from './cmux';
 import {primaryCheckoutOf, resolveRepoTag, resolveThreadConfig} from './config';
 import {handoffNumberOf, successorMarks} from './handoff-number';
+import {
+  quoteScreen,
+  SUCCESSOR_POLL_MS,
+  SUCCESSOR_TIMEOUT_MS,
+  waitForSuccessor,
+} from './handoff-successor';
 import {
   liveSocketPath,
   socketSettingsJson,
@@ -116,14 +142,28 @@ export interface SpawnOptions {
 }
 
 export interface SpawnDeps {
+  /** The screen check's clock, in ms (home-base-edf4y D1, as the handoff's). */
+  clock: () => number;
   /** The handoff gate (home-base-mbnjv.2, C4): null = go on. */
   gate: typeof spawnGate;
   /** What --continues reads for its marks; the real ones read through br. */
   numberReaders: ChainReaders;
   run: CmuxRunner;
+  /**
+   * The screen check's limits: the handoff's SUCCESSOR_POLL_MS and
+   * SUCCESSOR_TIMEOUT_MS unless injected (tests shorten them).
+   */
+  screenPollMs: number;
+  screenTimeoutMs: number;
+  sleep: (ms: number) => Promise<void>;
 }
 
-/** Exit 0 opened (or a dry run) · 1 cmux did not open it · 2 refused · 3 refused by the handoff gate · 4 deferred: cmux too slow to decide. */
+/**
+ * Exit 0 opened and claude seen running in it (or a dry run) · 1 cmux did not
+ * confirm a workspace, or one opened and claude was not seen running in it ·
+ * 2 refused · 3 refused by the handoff gate · 4 deferred: cmux too slow to
+ * decide.
+ */
 export interface SpawnResult {
   exitCode: 0 | 1 | 2 | 3 | 4;
   lines: string[];
@@ -132,6 +172,99 @@ export interface SpawnResult {
 function stop(exitCode: 1 | 2, text: string): SpawnResult {
   const verb = exitCode === 2 ? 'refused' : 'failed';
   return {exitCode, lines: [`thread spawn: ${verb}: ${text}`]};
+}
+
+/**
+ * What the second kind of exit 1 tells the caller (home-base-edf4y D3): a
+ * workspace exists, so a second run opens a second session.
+ */
+export const SPAWN_NOT_CONFIRMED_INSTRUCTIONS = [
+  'Do not run thread spawn again: that opens a second session.',
+  'Look at the workspace named above: it is still open in cmux, so Justin can find it there and close it or answer what it shows.',
+] as const;
+
+/** The screen check's outcome: the handoff's, or no tab to read. */
+type NewTabScreen =
+  | Awaited<ReturnType<typeof waitForSuccessor>>
+  | {kind: 'noTab'; reason: string};
+
+/**
+ * home-base-edf4y D1: read the new workspace's one tab with the handoff
+ * successor's own screen check (waitForSuccessor, D7 of epic home-base-mbnjv),
+ * with its limits. Read-only: it sends no key and types nothing. The tab is
+ * looked up once; a failed lookup is reported as no tab, never retried into a
+ * guess. The read uses the workspace uuid and the tab's ref, the form the
+ * handoff reads its successor with (or the tab's uuid when the tree carries no
+ * ref, the form the handoff gate reads its caller with).
+ */
+async function readNewTab(input: {
+  clock: () => number;
+  pollMs: number;
+  run: CmuxRunner;
+  sleep: (ms: number) => Promise<void>;
+  timeoutMs: number;
+  workspace: string;
+}): Promise<{screen: NewTabScreen; tab: string | null}> {
+  const found = await readSoleSurfaceOfWorkspace(input.run, input.workspace);
+  if (found.kind !== 'found') {
+    return {screen: {kind: 'noTab', reason: found.reason}, tab: null};
+  }
+  const tab = found.surfaceRef ?? found.surfaceId;
+  const screen = await waitForSuccessor({
+    clock: input.clock,
+    pollMs: input.pollMs,
+    run: input.run,
+    sleep: input.sleep,
+    surfaceRef: tab,
+    timeoutMs: input.timeoutMs,
+    workspaceId: found.workspaceId,
+  });
+  return {screen, tab};
+}
+
+/**
+ * home-base-edf4y D2 and D3: the exit 1 for a workspace that opened while
+ * claude was not seen running in it. In order: the workspace WAS opened (its
+ * id and name), claude was not seen running in it and why, the screen, then
+ * SPAWN_NOT_CONFIRMED_INSTRUCTIONS. It never begins with "Opened", and its
+ * first line tells it apart from "cmux did not confirm a new workspace".
+ */
+function notConfirmed(input: {
+  name: string;
+  ref: string;
+  screen: Exclude<NewTabScreen, {kind: 'started'}>;
+  workspaceId: string | null;
+}): SpawnResult {
+  const {screen} = input;
+  const id =
+    input.workspaceId == null
+      ? input.ref
+      : `${input.ref} (${input.workspaceId})`;
+  const lines = [
+    `thread spawn: failed: a workspace WAS opened: ${id} "${input.name}".`,
+  ];
+  let shown: string[] = [];
+  if (screen.kind === 'dialog') {
+    lines.push(
+      `Claude was not seen running in it: the new tab is waiting on ${screen.label}. Nothing was answered and no key was sent: Justin answers it on the Mac.`,
+    );
+    shown = ['The screen:', '', ...quoteScreen(screen.text)];
+  } else if (screen.kind === 'timedOut') {
+    const seconds = Math.round(screen.waitedMs / 1000);
+    lines.push(
+      `Claude was not seen running in it within ${seconds} s: ${screen.why}.`,
+    );
+    if (screen.last.kind === 'read') {
+      shown = ['The last screen:', '', ...quoteScreen(screen.last.text)];
+    }
+  } else {
+    lines.push(
+      `Claude was not seen running in it: its tab could not be found to read its screen: ${screen.reason}.`,
+    );
+  }
+  if (shown.length > 0) lines.push('', ...shown);
+  lines.push('', ...SPAWN_NOT_CONFIRMED_INSTRUCTIONS);
+  return {exitCode: 1, lines};
 }
 
 /** What a spawn refused for want of the knob tells the calling Claude. */
@@ -641,6 +774,32 @@ export async function spawnSession(
   fields.push({
     label: 'Name record',
     value: describeNewWorkspaceRecord(recorded),
+  });
+
+  // ---- 4. the screen check (home-base-edf4y D1, D2): "Opened" only once
+  // claude's input box is seen. After the name record, so a failure can name
+  // the workspace. The uuid when the record found it, else cmux's ref. ----
+  const workspaceId =
+    recorded.kind === 'recorded' ? recorded.workspaceId : null;
+  const {screen, tab} = await readNewTab({
+    clock: deps.clock ?? Date.now,
+    pollMs: deps.screenPollMs ?? SUCCESSOR_POLL_MS,
+    run,
+    sleep:
+      deps.sleep ??
+      ((ms) =>
+        new Promise((done) => {
+          setTimeout(done, ms);
+        })),
+    timeoutMs: deps.screenTimeoutMs ?? SUCCESSOR_TIMEOUT_MS,
+    workspace: workspaceId ?? ref,
+  });
+  if (screen.kind !== 'started') {
+    return notConfirmed({name: workspaceName, ref, screen, workspaceId});
+  }
+  fields.push({
+    label: 'Claude',
+    value: `running: its input box was seen in the new tab (${tab ?? 'unknown tab'})`,
   });
   return {exitCode: 0, lines: render('Opened a new session', '🌱')};
 }
