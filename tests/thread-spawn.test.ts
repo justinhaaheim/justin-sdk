@@ -33,6 +33,12 @@ import {
   spawnSession,
   writeKickoffFile,
 } from '../src/thread/spawn';
+import {
+  beadIdsIn,
+  type checkKickoffHolders,
+  type KickoffHolders,
+  prefixOfBeadId,
+} from '../src/thread/spawn-holders';
 import {resolveSpawnConfig} from '../src/thread/spawn-knob';
 import {createSandbox} from './sandbox';
 
@@ -236,7 +242,11 @@ describe('thread spawn: who may run it (home-base-11ya7.9)', () => {
     const w = world({spawnAllowed: null});
     const config = resolveThreadConfig({cwd: w.root, env: w.env});
     expect(config.problems).toEqual([]);
-    expect(config.spawn).toEqual({allowed: false, allowedSource: 'default'});
+    expect(config.spawn).toEqual({
+      allowed: false,
+      allowedSource: 'default',
+      holdersGate: false,
+    });
     expect(SPAWN_DEFAULTS.allowed).toBe(false);
     expect(DEFAULT_COMPONENT_CONFIG.thread.spawn).toBe(SPAWN_DEFAULTS);
   });
@@ -288,6 +298,7 @@ describe('thread spawn: who may run it (home-base-11ya7.9)', () => {
     expect(resolveThreadConfig({cwd: w.root, env: w.env}).spawn).toEqual({
       allowed: true,
       allowedSource: 'project',
+      holdersGate: false,
     });
     const dry = await spawnSession(options(w, {dryRun: true}), fakeCmux());
     expect(dry.exitCode).toBe(0);
@@ -310,7 +321,7 @@ describe('thread spawn: who may run it (home-base-11ya7.9)', () => {
     const userOnly = world({spawnAllowed: true});
     expect(
       resolveThreadConfig({cwd: userOnly.root, env: userOnly.env}).spawn,
-    ).toEqual({allowed: true, allowedSource: 'user'});
+    ).toEqual({allowed: true, allowedSource: 'user', holdersGate: false});
 
     // User true, project false: refused, and the refusal names the project.
     const off = world({spawnAllowed: true});
@@ -318,6 +329,7 @@ describe('thread spawn: who may run it (home-base-11ya7.9)', () => {
     expect(resolveThreadConfig({cwd: off.root, env: off.env}).spawn).toEqual({
       allowed: false,
       allowedSource: 'project',
+      holdersGate: false,
     });
     const cmux = fakeCmux();
     const refused = await spawnSession(options(off, {}), cmux);
@@ -333,6 +345,7 @@ describe('thread spawn: who may run it (home-base-11ya7.9)', () => {
     expect(resolveThreadConfig({cwd: on.root, env: on.env}).spawn).toEqual({
       allowed: true,
       allowedSource: 'project',
+      holdersGate: false,
     });
     const allowed = await spawnSession(options(on, {dryRun: true}), fakeCmux());
     expect(allowed.exitCode).toBe(0);
@@ -358,14 +371,18 @@ describe('thread spawn: who may run it (home-base-11ya7.9)', () => {
       ],
       problems,
     );
-    expect(spawn).toEqual({allowed: true, allowedSource: 'user'});
+    expect(spawn).toEqual({
+      allowed: true,
+      allowedSource: 'user',
+      holdersGate: false,
+    });
     expect(problems).toEqual([
       'componentConfig.thread.spawn.allowed in the project config is "yes", which is not true or false — ignoring it and using true.',
     ]);
     const notObject: string[] = [];
     expect(
       resolveSpawnConfig([{name: 'project', section: true}], notObject),
-    ).toEqual({allowed: false, allowedSource: 'default'});
+    ).toEqual({allowed: false, allowedSource: 'default', holdersGate: false});
     expect(notObject).toEqual([
       'componentConfig.thread.spawn in the project config is true, which is not an object — ignoring it.',
     ]);
@@ -1286,5 +1303,115 @@ describe('thread spawn: the kickoff goes through a file, never the typed line (h
     expect(writeKickoffFile(path, 'first')).toBeNull();
     expect(writeKickoffFile(path, 'second')).toContain('EEXIST');
     expect(readFileSync(path, 'utf8')).toBe('first');
+  });
+});
+
+describe('the already-held check (home-base-5uu56.2.4, knob holdersGate, default off)', () => {
+  const KICKOFF = 'Build bac-fn0a and its acceptance criteria.';
+
+  function gateOn(w: World): void {
+    writeFileSync(
+      join(w.root, 'xdg', 'justin-sdk', 'config.json'),
+      JSON.stringify({
+        componentConfig: {thread: {spawn: {allowed: true, holdersGate: true}}},
+      }),
+    );
+  }
+
+  function fakeHolders(result: KickoffHolders): {
+    calls: number;
+    check: typeof checkKickoffHolders;
+  } {
+    const fake = {
+      calls: 0,
+      check: (() => {
+        fake.calls += 1;
+        return Promise.resolve(result);
+      }) as typeof checkKickoffHolders,
+    };
+    return fake;
+  }
+
+  const HELD: KickoffHolders = {kind: 'held', lines: ['  bac-fn0a · held']};
+
+  test('knob off (the default): the check never runs', async () => {
+    const w = world();
+    const holders = fakeHolders(HELD);
+    const result = await spawnSession(
+      options(w, {dryRun: true, kickoff: KICKOFF}),
+      {...fakeCmux(), holders: holders.check},
+    );
+    expect(result.exitCode).toBe(0);
+    expect(holders.calls).toBe(0);
+  });
+
+  test('knob on and the work is held: exit 3, and nothing reaches cmux', async () => {
+    const w = world();
+    gateOn(w);
+    const holders = fakeHolders(HELD);
+    const cmux = fakeCmux();
+    const result = await spawnSession(options(w, {kickoff: KICKOFF}), {
+      ...cmux,
+      holders: holders.check,
+    });
+    expect(result.exitCode).toBe(3);
+    expect(result.lines.join('\n')).toContain(
+      'an unfinished session already holds',
+    );
+    expect(result.lines.join('\n')).toContain('bac-fn0a · held');
+    expect(cmux.calls).toEqual([]);
+  });
+
+  test('knob on, nothing held: it goes ahead', async () => {
+    const w = world();
+    gateOn(w);
+    const holders = fakeHolders({kind: 'clear'});
+    const result = await spawnSession(
+      options(w, {dryRun: true, kickoff: KICKOFF}),
+      {...fakeCmux(), holders: holders.check},
+    );
+    expect(result.exitCode).toBe(0);
+    expect(holders.calls).toBe(1);
+  });
+
+  test('knob on, could not check: refused, never read as clear (rule 7)', async () => {
+    const w = world();
+    gateOn(w);
+    const holders = fakeHolders({kind: 'unchecked', reason: 'DB locked'});
+    const result = await spawnSession(
+      options(w, {dryRun: true, kickoff: KICKOFF}),
+      {...fakeCmux(), holders: holders.check},
+    );
+    expect(result.exitCode).toBe(3);
+    expect(result.lines.join('\n')).toContain(
+      'could not be checked (DB locked)',
+    );
+  });
+
+  test('--anyway skips the check', async () => {
+    const w = world();
+    gateOn(w);
+    const holders = fakeHolders(HELD);
+    const result = await spawnSession(
+      options(w, {anyway: true, dryRun: true, kickoff: KICKOFF}),
+      {...fakeCmux(), holders: holders.check},
+    );
+    expect(result.exitCode).toBe(0);
+    expect(holders.calls).toBe(0);
+  });
+
+  test('only the target repo’s own ids are taken for beads', () => {
+    expect(
+      beadIdsIn(
+        'Build bac-fn0a, then bac-gmp8.7; not abac-x, not bac-, and bac-fn0a again. home-base-vzwbj is another repo.',
+        'bac',
+      ),
+    ).toEqual(['bac-fn0a', 'bac-gmp8.7']);
+    expect(
+      beadIdsIn('see home-base-5uu56.2 and home-base-vzwbj', 'home-base'),
+    ).toEqual(['home-base-5uu56.2', 'home-base-vzwbj']);
+    expect(prefixOfBeadId('home-base-5uu56.2')).toBe('home-base');
+    expect(prefixOfBeadId('bac-fn0a')).toBe('bac');
+    expect(prefixOfBeadId('nodash')).toBeNull();
   });
 });

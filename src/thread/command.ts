@@ -1087,6 +1087,12 @@ export const threadCommand: CommandModule = {
                 'The session bead this new session continues. Typed as JUSTIN_SDK_CONTINUES before claude, so where componentConfig.thread.handoff.autoPickup is on the new session picks up that session’s open requests and questions by itself',
               type: 'string' as const,
             })
+            .option('anyway', {
+              default: false,
+              describe:
+                'Start even when the already-held check (componentConfig.thread.spawn.holdersGate, default off) finds a bead in the kickoff held by another unfinished session. Only on Justin’s go.',
+              type: 'boolean' as const,
+            })
             .option('model', {
               describe:
                 'The new session’s model (`claude --model`); default: claude’s own default',
@@ -1125,6 +1131,7 @@ export const threadCommand: CommandModule = {
           }
           process.exit(
             await runThreadSpawn({
+              anyway: argv.anyway === true,
               dir: argv.dir ?? null,
               dryRun: argv['dry-run'] === true,
               kickoff,
@@ -2192,6 +2199,33 @@ export const threadCommand: CommandModule = {
               limit: argv.limit,
               query: (Array.isArray(words) ? words : [words]).join(' '),
               regex: argv.regex === true,
+            }),
+          );
+        },
+      )
+      .command(
+        'holders <bead>',
+        'Which sessions already hold this bead (its sid: labels), in any repo, and how far each got: status, stages, the first line of its notes, and each session’s inbox status and resume command. Read-only. Run it before asking Justin to start a session for a bead, or before starting work on one. Exit 0 found · 1 a DB could not be read and the bead was not found elsewhere · 2 not found.',
+        (yy) =>
+          yy
+            .positional('bead', {
+              describe: 'A bead id, e.g. bac-fn0a',
+              type: 'string' as const,
+            })
+            .option('db', {
+              describe:
+                'Look only in this beads DB (default: this directory’s, then every DB the sessions index names)',
+              type: 'string' as const,
+            })
+            .epilogue(
+              'Built after 2026-11-08 (home-base-5uu56.2.3), when a session asked Justin to start a session for a bead another session had already built and merged. Run it with the Claude Code sandbox off when the bead may be in another repo: the sandbox cannot open another repo’s beads DB.',
+            ),
+        async (argv) => {
+          const {runThreadHolders} = await import('./holders');
+          process.exit(
+            await runThreadHolders({
+              beadId: argv.bead ?? '',
+              db: argv.db ?? null,
             }),
           );
         },

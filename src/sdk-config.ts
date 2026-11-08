@@ -576,6 +576,12 @@ const componentConfigSchema = z
               .describe(
                 'WHO MAY START SESSIONS (home-base-11ya7.9, 2026-11-03). DEFAULT FALSE: `thread spawn` refuses with exit 2 and opens nothing, `--dry-run` included, and tells the caller to file the work as a bead and tell Justin. True: `thread spawn` runs as before (the handoff gate and the spend quota still apply). Read from the repo the command runs in (its cwd). Justin wants only the home-base mayor to start sessions in other projects, so only home-base’s project file turns it on.',
               ),
+            holdersGate: z
+              .boolean()
+              .optional()
+              .describe(
+                'ALREADY-HELD CHECK (home-base-5uu56.2.4, 2026-11-08). DEFAULT FALSE: `thread spawn` does not look at the kickoff’s beads. True: before anything opens, `thread spawn` finds the target repo’s bead ids in the kickoff text and refuses with exit 3 when an unfinished session other than this one already holds one (`thread holders <bead>` shows what it found); `--anyway` starts it regardless. A bead that could not be checked refuses too.',
+              ),
           })
           .optional()
           .describe(

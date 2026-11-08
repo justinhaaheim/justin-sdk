@@ -48,6 +48,7 @@ Subagents (players, explorers, any agent dispatched by another session) never ru
 bun run justin-sdk thread ask "<one-line question>" --priority <0-4> [--header "<≤12 chars>"] [--context "<text>"]… [--option "Label: why"]… [--recommend <a|b|…>] [--default "<what you do if he never answers>"] [--to <request or bead id>] [--approve | --do]
 ```
 
+- **Before you ask him to start, build or decide work on a bead, run `bun run justin-sdk thread holders <bead id>`** (sandbox off when the bead is in another repo). It names every session that already holds the bead and how far each got. If another session holds it, tell him that instead of asking. Run it again before you restate an older question: on 2026-11-08 a question asked him to start a session for a fix that had been merged five days earlier.
 - Give two or more options, or none. Name the one you recommend with `--recommend`.
 - `--approve` makes it a yes/no. `--do` marks something he has to do himself, such as testing on a device.
 - A P0 takes no `--default`. P1–P3 require one. A P4 needs none.

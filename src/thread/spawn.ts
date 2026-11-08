@@ -108,9 +108,15 @@ import {realHandoffNumberReaders} from './session-handoff';
 import {NO_MARKS, sessionName} from './session-name';
 import {sessionIdFrom} from './session-select';
 import {spawnGate} from './spawn-gate';
+import {checkKickoffHolders, holdersRefusalLines} from './spawn-holders';
 import {describeNewWorkspaceRecord, recordNewWorkspace} from './workspace-name';
 
 export interface SpawnOptions {
+  /**
+   * `--anyway` (home-base-5uu56.2.4): start even when the already-held check
+   * finds the kickoff's work held by another session. Only on Justin's go.
+   */
+  anyway?: boolean;
   /**
    * `--continues <bead>` (home-base-npbse.1.2): the session this one continues,
    * typed as JUSTIN_SDK_CONTINUES. The new session's own repo decides, through
@@ -146,6 +152,8 @@ export interface SpawnDeps {
   clock: () => number;
   /** The handoff gate (home-base-mbnjv.2, C4): null = go on. */
   gate: typeof spawnGate;
+  /** The already-held check (home-base-5uu56.2.4), behind its knob. */
+  holders: typeof checkKickoffHolders;
   /** What --continues reads for its marks; the real ones read through br. */
   numberReaders: ChainReaders;
   run: CmuxRunner;
@@ -602,6 +610,22 @@ export async function spawnSession(
   }
   if (checked.kind === 'unreadable') {
     return stop(2, `${dir} cannot be read: ${checked.reason}`);
+  }
+
+  // ---- home-base-5uu56.2.4: is the kickoff's work already held? Knob, default off ----
+  if (
+    kickoff != null &&
+    options.anyway !== true &&
+    resolveThreadConfig({cwd, env}).spawn.holdersGate
+  ) {
+    const held = await (deps.holders ?? checkKickoffHolders)({
+      cwd,
+      dir,
+      env,
+      kickoff,
+    });
+    const refusal = holdersRefusalLines(held);
+    if (refusal != null) return {exitCode: 3, lines: refusal};
   }
 
   // ---- the plan: every argument, before cmux is touched ----

@@ -313,6 +313,8 @@ export const PACING_DEFAULTS = {
  */
 export const SPAWN_DEFAULTS = {
   allowed: false,
+  /** home-base-5uu56.2.4: off until a real spawn has shown it working. */
+  holdersGate: false,
 } as const;
 
 // ---------------------------------------------------------------------------

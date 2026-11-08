@@ -23,6 +23,11 @@ export interface ResolvedSpawnConfig {
    */
   allowed: boolean;
   allowedSource: ThreadConfigSource;
+  /**
+   * home-base-5uu56.2.4, default false: refuse a spawn whose kickoff names a
+   * bead an unfinished session already holds (spawn-holders.ts).
+   */
+  holdersGate: boolean;
 }
 
 /** One config layer's `componentConfig.thread.spawn`, as read (any shape). */
@@ -35,6 +40,31 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value);
 }
 
+type SpawnBooleanField = 'allowed' | 'holdersGate';
+
+function resolveBoolean(
+  layers: readonly SpawnLayer[],
+  field: SpawnBooleanField,
+  problems: string[],
+): {source: ThreadConfigSource; value: boolean} {
+  let value: boolean = SPAWN_DEFAULTS[field];
+  let source: ThreadConfigSource = 'default';
+  for (const layer of layers) {
+    if (!isObject(layer.section)) continue;
+    const raw = layer.section[field];
+    if (raw === undefined) continue;
+    if (typeof raw !== 'boolean') {
+      problems.push(
+        `componentConfig.thread.spawn.${field} in the ${layer.name} config is ${JSON.stringify(raw)}, which is not true or false — ignoring it and using ${JSON.stringify(value)}.`,
+      );
+      continue;
+    }
+    value = raw;
+    source = layer.name;
+  }
+  return {source, value};
+}
+
 /**
  * Resolve the spawn block from the layers, lowest first (user, then project).
  * Problems are appended to `problems`, the caller's list.
@@ -43,26 +73,18 @@ export function resolveSpawnConfig(
   layers: readonly SpawnLayer[],
   problems: string[],
 ): ResolvedSpawnConfig {
-  let allowed: boolean = SPAWN_DEFAULTS.allowed;
-  let allowedSource: ThreadConfigSource = 'default';
   for (const layer of layers) {
-    if (layer.section === undefined) continue;
-    if (!isObject(layer.section)) {
+    if (layer.section !== undefined && !isObject(layer.section)) {
       problems.push(
         `componentConfig.thread.spawn in the ${layer.name} config is ${JSON.stringify(layer.section)}, which is not an object — ignoring it.`,
       );
-      continue;
     }
-    const raw = layer.section.allowed;
-    if (raw === undefined) continue;
-    if (typeof raw !== 'boolean') {
-      problems.push(
-        `componentConfig.thread.spawn.allowed in the ${layer.name} config is ${JSON.stringify(raw)}, which is not true or false — ignoring it and using ${JSON.stringify(allowed)}.`,
-      );
-      continue;
-    }
-    allowed = raw;
-    allowedSource = layer.name;
   }
-  return {allowed, allowedSource};
+  const allowed = resolveBoolean(layers, 'allowed', problems);
+  const holdersGate = resolveBoolean(layers, 'holdersGate', problems);
+  return {
+    allowed: allowed.value,
+    allowedSource: allowed.source,
+    holdersGate: holdersGate.value,
+  };
 }
