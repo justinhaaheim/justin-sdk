@@ -228,7 +228,7 @@ function plural(count: number, one: string, many: string): string {
 }
 
 /** A session bead's notes say `thread handoff` ran (session-marks appendNote). */
-function hasHandoffNote(notes: string | null): boolean {
+export function hasHandoffNote(notes: string | null): boolean {
   return notes != null && /^- [^\n]*: handed off(?: —|$)/mu.test(notes);
 }
 

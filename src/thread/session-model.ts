@@ -297,11 +297,21 @@ const GIT_TIMEOUT_MS = 30_000;
  * The outcome has the same three shapes the synchronous runner had: `error`
  * (git could not run), `exit` (non-zero, or killed: status -1), `ok`.
  */
-function runGit(cwd: string, args: string[]): Promise<GitRun> {
+function runGit(cwd: string, args: string[], input?: string): Promise<GitRun> {
   return new Promise((done) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn('git', args, {cwd, stdio: ['ignore', 'pipe', 'pipe']});
+      child = spawn('git', args, {
+        cwd,
+        stdio: [input == null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      });
+      // home-base-9uzxw.2: `cat-file --batch-check` reads its names here. A
+      // git that exits before reading them makes the write fail (EPIPE); its
+      // exit, reported below, is the answer, so that error is not a crash.
+      if (input != null) {
+        child.stdin?.on('error', () => undefined);
+        child.stdin?.end(input);
+      }
     } catch (error) {
       done({
         kind: 'error',
@@ -619,8 +629,11 @@ async function sessionCommits(
     ? readCommitEvidence(transcript.path)
     : {ok: false as const, reason: transcript.reason};
   if (read.ok) {
-    const attributed = await attributeCommits(read.evidence, (args) =>
-      runGit(top, args),
+    const attributed = await attributeCommits(
+      read.evidence,
+      (args) => runGit(top, args),
+      // home-base-9uzxw.2 (D-PERF): every short sha in one git process.
+      (args, input) => runGit(top, args, input),
     );
     return attributed.ok
       ? measured(attributed.value)

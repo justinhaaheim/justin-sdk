@@ -1943,7 +1943,7 @@ export const threadCommand: CommandModule = {
             .option('json', {
               default: false,
               describe:
-                'Print the inbox as JSON (knob on: one record per session, newest first — its card with every field, the action line and its rule, the section, the git facts, `tracked` and `display` (card or line), and the session model with the message log summarised, or for an untracked session the facts it was read from — plus the summary counts)',
+                'Print the inbox as JSON (knob on: one record per session, newest first — its card with every field, the action line and its rule, the section, the git facts, `tracked` and `display` (card or line), and the session model with the message log summarised, or for an untracked session the facts it was read from — plus the summary counts, and `timings`: the wall time of each phase of this run, the child processes each one started, and the five slowest session loads)',
               type: 'boolean' as const,
             })
             .option('days', {
@@ -2192,6 +2192,55 @@ export const threadCommand: CommandModule = {
               limit: argv.limit,
               query: (Array.isArray(words) ? words : [words]).join(' '),
               regex: argv.regex === true,
+            }),
+          );
+        },
+      )
+      .command(
+        'focus <target>',
+        'Bring forward the cmux tab of the newest session of a handoff chain (home-base-9uzxw D-FOCUS), or refuse and say why. Exit 0 focused or dry run · 1 the cmux call failed · 2 usage · 3 refused.',
+        (yy) =>
+          yy
+            .epilogue(
+              `Everything is read fresh when it runs, never from a loaded inbox:
+
+  1. Forward along continued-by: labels, one br read per bead.
+
+  2. At the end, any bead labelled continues:<that bead> (a half-written link), by br list -l.
+
+  3. A session whose handoff ran (handed-off label or note line, a refused or deferred handoff, a successor's failed pickup) with no successor linked is refused.
+
+  4. The newest session's pane, from the same live lookup the inbox uses. Only a live pane is focused, with cmux focus-panel --panel <surface> --workspace <workspace>. The cmux-ws: and cmux-surface: labels recorded at session start are never used: they go stale.
+
+Refused (exit 3): a successor that cannot be found or read, two continued-by: labels, two beads that continue one, a loop, a chain longer than the walk limit (CHAIN_WALK_LIMIT in handoff-chain.ts), a head without exactly one sid: label, a pane that is none or unknown. A refusal prints the newest session's resume command, run in its checkout, when one is known. An untracked session (no session bead) is focused only when its pane is live, and the output says its handoff links are not recorded.
+
+Nothing but focus-panel is ever sent to cmux. Run it with the Claude Code sandbox off: sandboxed, cmux and ps are unreachable, every pane reads unknown, and every focus is refused.
+
+Exit codes: 0 focused (or --dry-run) · 1 the cmux call failed · 2 usage · 3 refused.`,
+            )
+            .positional('target', {
+              describe: 'A claude session id (uuid) or a session bead id',
+              type: 'string' as const,
+            })
+            .option('dry-run', {
+              default: false,
+              describe:
+                'Resolve the chain and the pane, print the cmux focus-panel argv, and run nothing',
+              type: 'boolean' as const,
+            })
+            .option('json', {
+              default: false,
+              describe:
+                'Print one JSON object: kind, exitCode, target, chain, head, argv, reason, resume, notes (the threads TUI reads it)',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          const {runThreadFocus} = await import('./focus');
+          process.exit(
+            await runThreadFocus({
+              dryRun: argv['dry-run'] === true,
+              json: argv.json === true,
+              target: argv.target ?? '',
             }),
           );
         },

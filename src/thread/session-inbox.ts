@@ -92,6 +92,14 @@ import {parseInstant} from './answer-store';
 import {messageLogPath} from './archive';
 import {resolveRepoTag, resolveThreadConfig} from './config';
 import {handoffStopOf} from './handoff-view';
+import {
+  inboxJsonWithTimings,
+  startTimings,
+  timed,
+  timedSession,
+  timedStart,
+  type TimingRecorder,
+} from './inbox-timings';
 import {listUnsentInputDrafts} from './input-drafts';
 import {
   isSafeSessionId,
@@ -480,11 +488,15 @@ export async function readInbox(input: {
   lookupPanes?: () => Promise<PaneLookup>;
   now: Date;
   repo: string | null;
+  /** home-base-9uzxw.2 (D-PERF): times each phase and counts its spawns. */
+  timings?: TimingRecorder | null;
 }): Promise<
   {kind: 'failed'; reason: string} | {kind: 'read'; read: InboxRead}
 > {
   const {cwd, env, now} = input;
-  const read = readSessionIndex(env);
+  const read = timed(input.timings, 'sessions index', () =>
+    readSessionIndex(env),
+  );
   if (read.kind === 'failed') {
     return {
       kind: 'failed',
@@ -495,7 +507,7 @@ export async function readInbox(input: {
   const pendingPanes: Promise<PaneLookup> =
     input.lookupPanes == null
       ? Promise.resolve({ok: false, reason: PANES_NOT_LOOKED_UP})
-      : input.lookupPanes();
+      : timed(input.timings, 'pane lookup', input.lookupPanes);
   // No index yet is a measured answer (no session bead was ever filed): there
   // are no tracked sessions, and every session is listed as untracked (D6).
   const index =
@@ -515,7 +527,9 @@ export async function readInbox(input: {
   // D-DRAFTS (home-base-yukaf.4): the live drafts, read once. A session with
   // one is never hidden by age: the text exists nowhere else.
   // home-base-p05kz.3 item 7: a draft all of whose text went out is not shown.
-  const draftList = listUnsentInputDrafts(env);
+  const draftList = timed(input.timings, 'drafts store', () =>
+    listUnsentInputDrafts(env),
+  );
   const liveDrafts = new Map<string, InboxInputDraft>();
   if (draftList.kind === 'read') {
     for (const entry of draftList.drafts) {
@@ -539,6 +553,7 @@ export async function readInbox(input: {
     old: boolean;
     sighting: SessionSighting;
   }[] = [];
+  const endLogs = timedStart(input.timings, 'message logs');
   for (const indexed of index.sessions) {
     const sighting =
       indexed.sightings.find((entry) => entry.event === 'created') ??
@@ -570,23 +585,28 @@ export async function readInbox(input: {
       sighting,
     });
   }
+  endLogs();
 
   // F7 (home-base-vzwbj.4.9): the sessions load CONCURRENTLY, `concurrency`
   // at a time, sharing one cache for this run only (each checkout's git facts
   // and each beads export, read once). The rows are then built in index
   // order, exactly as the one-at-a-time loop built them.
   const cache = createLoadCache();
-  const pendingLoads = mapConcurrently(
-    candidates,
-    input.concurrency ?? INBOX_CONCURRENCY,
-    async (candidate) =>
-      await loadSession({
-        cache,
-        cwd,
-        env,
-        selector: null,
-        sessionIdOption: candidate.indexed.sessionId,
-      }),
+  const pendingLoads = timed(input.timings, 'session loads', () =>
+    mapConcurrently(
+      candidates,
+      input.concurrency ?? INBOX_CONCURRENCY,
+      async (candidate) =>
+        await timedSession(input.timings, candidate.indexed.sessionId, () =>
+          loadSession({
+            cache,
+            cwd,
+            env,
+            selector: null,
+            sessionIdOption: candidate.indexed.sessionId,
+          }),
+        ),
+    ),
   );
   // D6 (home-base-j8q3e.1.2): every OTHER session under the dev root. Started
   // after the tracked loads, so their git runs while the transcripts are
@@ -594,20 +614,23 @@ export async function readInbox(input: {
   // EVERY id in the index is excluded, whatever its sightings: the tracked
   // half lists it (as a card, a ❔ card, or in the hidden-by-age count), so
   // none appears twice.
-  const pendingUntracked = readUntracked({
-    cache,
-    days: input.days,
-    devRoot: input.devRoot ?? defaultDevRoot(),
-    env,
-    exclude: new Set(index.sessions.map((indexed) => indexed.sessionId)),
-    now,
-    repo: input.repo,
-  });
+  const pendingUntracked = timed(input.timings, 'untracked scan', () =>
+    readUntracked({
+      cache,
+      days: input.days,
+      devRoot: input.devRoot ?? defaultDevRoot(),
+      env,
+      exclude: new Set(index.sessions.map((indexed) => indexed.sessionId)),
+      now,
+      repo: input.repo,
+    }),
+  );
   const [loads, untracked, panes] = await Promise.all([
     pendingLoads,
     pendingUntracked,
     pendingPanes,
   ]);
+  const endRows = timedStart(input.timings, 'rows');
   // home-base-mbnjv.3 (D9): every session bead loaded in this run, so a card
   // names its predecessor and successor by title and sees a half-written link.
   const neighbors = new Map<string, CardNeighbor>();
@@ -809,6 +832,7 @@ export async function readInbox(input: {
     ),
     unplaced: untracked.unplaced,
   };
+  endRows();
   return {
     kind: 'read',
     read: {
@@ -1647,47 +1671,66 @@ export async function runSessionInbox(
     Number.isFinite(options.days) && options.days > 0
       ? options.days
       : INBOX_DEFAULT_DAYS;
-  const result = await readInbox({
-    cwd,
-    days,
-    env,
-    // j8q3e.7 D6: the live pane lookup, once per run (tests inject theirs).
-    lookupPanes:
-      options.lookupPanes ??
-      (async () => await lookupLivePanes(realPaneSources(env))),
-    now,
-    repo: options.repo,
-  });
-  if (result.kind === 'failed') {
-    console.error(`thread inbox: ${result.reason}`);
-    return 1;
-  }
-  // D-PINS: the user file, then the project file, like every thread knob.
-  const config = resolveThreadConfig({cwd, env});
-  for (const problem of config.problems) {
-    if (problem.includes('pinnedProjects')) {
-      console.error(`thread inbox: ${problem}`);
+  // home-base-9uzxw.2 (D-PERF): the JSON carries where its time went.
+  const timings = options.json ? startTimings() : null;
+  // home-base-9uzxw.5 F15: finish() also puts Bun.spawn back, so it runs
+  // whatever throws (finish is idempotent).
+  try {
+    const result = await readInbox({
+      cwd,
+      days,
+      env,
+      // j8q3e.7 D6: the live pane lookup, once per run (tests inject theirs).
+      lookupPanes:
+        options.lookupPanes ??
+        (async () => await lookupLivePanes(realPaneSources(env))),
+      now,
+      repo: options.repo,
+      timings,
+    });
+    if (result.kind === 'failed') {
+      console.error(`thread inbox: ${result.reason}`);
+      return 1;
     }
-  }
-  const pinnedProjects = config.pinnedProjects;
-  if (options.json) {
-    // F2 (home-base-j8q3e.1.9): wait for a pipe to take all of it before the
-    // caller's process.exit.
+    // D-PINS: the user file, then the project file, like every thread knob.
+    const config = timed(timings, 'config', () =>
+      resolveThreadConfig({cwd, env}),
+    );
+    for (const problem of config.problems) {
+      if (problem.includes('pinnedProjects')) {
+        console.error(`thread inbox: ${problem}`);
+      }
+    }
+    const pinnedProjects = config.pinnedProjects;
+    if (options.json) {
+      // F2 (home-base-j8q3e.1.9): wait for a pipe to take all of it before the
+      // caller's process.exit.
+      const text = timed(timings, 'json build', () =>
+        JSON.stringify(inboxJson(result.read, {pinnedProjects}), null, 2),
+      );
+      const printed =
+        timings == null
+          ? {problem: null, text}
+          : inboxJsonWithTimings(text, timings.finish());
+      if (printed.problem != null) {
+        console.error(`thread inbox: ${printed.problem}`);
+      }
+      await writeStdout(`${printed.text}\n`);
+      return 0;
+    }
     await writeStdout(
-      `${JSON.stringify(inboxJson(result.read, {pinnedProjects}), null, 2)}\n`,
+      `${renderInbox(result.read, {
+        all: options.all,
+        days,
+        now,
+        order: options.order,
+        pinnedProjects,
+        style: options.style ?? outputStyle(process.stdout),
+        timeZone: options.timeZone,
+      })}\n`,
     );
     return 0;
+  } finally {
+    timings?.finish();
   }
-  await writeStdout(
-    `${renderInbox(result.read, {
-      all: options.all,
-      days,
-      now,
-      order: options.order,
-      pinnedProjects,
-      style: options.style ?? outputStyle(process.stdout),
-      timeZone: options.timeZone,
-    })}\n`,
-  );
-  return 0;
 }

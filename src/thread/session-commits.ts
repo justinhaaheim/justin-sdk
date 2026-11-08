@@ -15,8 +15,10 @@
  *  1. CONFIRMATION LINES. A Bash tool result carrying git's own commit line,
  *     `[<branch> <short sha>] <subject>` or `[<branch> (root-commit) <sha>] …`
  *     (also `[detached HEAD <sha>] …`). Each short SHA is resolved in the
- *     measured checkout with `git rev-parse --verify <sha>^{commit}`; one that
- *     does not resolve is REPORTED (`unresolved`), never counted.
+ *     measured checkout with `git rev-parse --verify <sha>^{commit}` (all of
+ *     a session's in one `git cat-file --batch-check`, which gives the same
+ *     answers: batchShortShaLookups); one that does not resolve is REPORTED
+ *     (`unresolved`), never counted.
  *  2. COMMIT WINDOWS (a player decision of home-base-vzwbj.4.4, recorded in its
  *     notes). Measured 2026-10-11 on this repo's real transcripts: every commit
  *     the conductor and its six players made used `git commit -q`, which prints
@@ -383,15 +385,97 @@ function describeGitFailure(args: string[], run: GitRun): string {
   return `git ${args.join(' ')} succeeded`;
 }
 
+/** One short sha's look-up: the `rev-parse` it stands for, and git's answer. */
+export interface ShortShaLookup {
+  args: string[];
+  run: GitRun;
+  shortSha: string;
+}
+
+/** The `git rev-parse` that resolves one short sha to a commit, or fails. */
+export function shortShaArgs(shortSha: string): string[] {
+  return ['rev-parse', '--verify', '--quiet', `${shortSha}^{commit}`];
+}
+
+/** git run with text on its stdin, bound to one checkout. */
+export type GitInputRunner = (
+  args: string[],
+  input: string,
+) => GitRun | Promise<GitRun>;
+
+/** The format `batchShortShaLookups` asks `git cat-file --batch-check` for. */
+export const BATCH_CHECK_ARGS = [
+  'cat-file',
+  '--batch-check=%(objectname) %(objecttype)',
+];
+
+/**
+ * Every short sha resolved by ONE `git cat-file --batch-check`, in the shape
+ * one `rev-parse --verify --quiet <sha>^{commit}` each would have given
+ * (home-base-9uzxw.2, D-PERF: one process per session instead of one per
+ * commit line; 1,203 of the inbox's 1,773 git processes on 2026-11-07).
+ * Measured 2026-11-07 on git 2.x: for a commit, both print its full sha; for
+ * a name that does not exist, a blob, or a prefix two commits share,
+ * rev-parse exits 1 silently and cat-file prints `<name> missing`. So a
+ * commit line becomes `ok` and a `missing` line becomes exit 1.
+ *
+ * Null when the batch cannot be trusted: git failed, or printed anything else
+ * (a line count that does not match, an `ambiguous`, an unknown type). The
+ * caller then runs the per-sha rev-parse, which reports its own failures, so
+ * the answer is never worse than before (critical rule 7).
+ */
+export async function batchShortShaLookups(
+  shorts: readonly string[],
+  run: GitInputRunner,
+): Promise<ShortShaLookup[] | null> {
+  if (shorts.length === 0) return [];
+  // Short shas come from a hex-only pattern; anything else is not batched.
+  if (shorts.some((shortSha) => !/^[0-9a-f]{4,64}$/.test(shortSha))) {
+    return null;
+  }
+  const names = shorts.map((shortSha) => `${shortSha}^{commit}`);
+  const batch = await run(BATCH_CHECK_ARGS, `${names.join('\n')}\n`);
+  if (batch.kind !== 'ok') return null;
+  const lines = batch.stdout.split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  if (lines.length !== shorts.length) return null;
+  const lookups: ShortShaLookup[] = [];
+  for (const [position, shortSha] of shorts.entries()) {
+    const line = lines[position] ?? '';
+    const args = shortShaArgs(shortSha);
+    // 40 hex only: the per-sha path below accepts nothing else either.
+    const commit = /^([0-9a-f]{40}) commit$/.exec(line);
+    if (commit?.[1]?.startsWith(shortSha) === true) {
+      lookups.push({
+        args,
+        run: {kind: 'ok', stdout: `${commit[1]}\n`},
+        shortSha,
+      });
+    } else if (line === `${names[position] ?? ''} missing`) {
+      lookups.push({
+        args,
+        run: {kind: 'exit', status: 1, stderr: ''},
+        shortSha,
+      });
+    } else {
+      return null;
+    }
+  }
+  return lookups;
+}
+
 /**
  * The session's commits from its transcript evidence, resolved with `git`
  * (a runner bound to the measured checkout). `{ok: false}` when git cannot
  * answer, or a commit call carries no timestamp to window it by — an unknown,
- * never a 0.
+ * never a 0. With `batch` (a runner that takes stdin), the short shas are
+ * looked up in one process (`batchShortShaLookups`), falling back to one
+ * rev-parse each when the batch cannot be trusted.
  */
 export async function attributeCommits(
   evidence: Pick<CommitEvidence, 'calls' | 'confirmations'>,
   git: GitRunner,
+  batch?: GitInputRunner,
 ): Promise<
   | {ok: false; reason: string}
   | {ok: true; value: Extract<SessionCommits, {source: 'transcript'}>}
@@ -403,12 +487,18 @@ export async function attributeCommits(
   ];
   // F7: every look-up runs at once; their answers are judged in order below,
   // so the first failure in transcript order still decides, as before.
-  const lookups = await Promise.all(
-    shorts.map(async (shortSha) => {
-      const args = ['rev-parse', '--verify', '--quiet', `${shortSha}^{commit}`];
-      return {args, run: await git(args), shortSha};
-    }),
-  );
+  const batched =
+    batch == null || shorts.length === 0
+      ? null
+      : await batchShortShaLookups(shorts, batch);
+  const lookups =
+    batched ??
+    (await Promise.all(
+      shorts.map(async (shortSha): Promise<ShortShaLookup> => {
+        const args = shortShaArgs(shortSha);
+        return {args, run: await git(args), shortSha};
+      }),
+    ));
   for (const {args, run, shortSha} of lookups) {
     if (run.kind === 'ok' && /^[0-9a-f]{40}$/.test(run.stdout.trim())) {
       shas.push(run.stdout.trim());
