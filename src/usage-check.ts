@@ -16,8 +16,25 @@
  * TWO HALVES, ONE ON BY DEFAULT (D8): the INFORMATIONAL notice — "this session
  * has used N tokens of context" — fires every SETPOINT_INTERVAL_TOKENS and is
  * what Justin wants in every session. The wrap-up DIRECTIVE that can ride along
- * with it is experimental and opt-in per repo, off unless a project sets a
- * numeric `wrapUpAt`. See UsageCheckConfig.wrapUpAt for the reasoning.
+ * with it stays off until a config file names a token count for it.
+ *
+ * TWO CONFIG FILES, ONE ANSWER (home-base-o5atv.1.1). The knobs are read from
+ * the repo's `justin-sdk.config.json` AND from the user file,
+ * `$XDG_CONFIG_HOME/justin-sdk/config.json`, so one `wrapUpAt` there reaches
+ * every repo that has this component. In Justin's words (2026-11-08): "Maybe we
+ * just do specify the 400k there for now? Will the hooks read from this?" The
+ * precedence, as the docs say it (D6): the repo's number wins. A repo's 0 turns
+ * the directive off there. A repo's null, or no key, uses the user file's
+ * number. No number anywhere means off. The user file supplies knob VALUES only
+ * (D2): it never switches the component on in a repo whose own file has no
+ * `usage-check` block, and its `enabled` is not read. See readUsageCheckLayers
+ * and layerUsageCheckConfig.
+ *
+ * WHAT THE DIRECTIVE SAYS depends on who hears it (D7): a top-level session in
+ * a repo where `thread handoff` starts a successor
+ * (componentConfig.thread.handoff.successor) is told to run that call; any
+ * other session, and every subagent, gets WRAP_UP_DIRECTIVE. See
+ * wrapUpDirectiveFor.
  *
  * WHERE THE NUMBER COMES FROM: every assistant entry in the transcript carries
  * `message.usage`, and the context size of that API call is
@@ -60,7 +77,13 @@
  *     - there is no previous notice (first crossing), or
  *     - C has reached the next setpoint ABOVE S (ordinary ascent), or
  *     - C has fallen more than `reArmDropFraction` (default 25%) below S,
- *       which is read as a compaction and re-arms the whole ladder.
+ *       which is read as a compaction and re-arms the whole ladder, or
+ *     - C is at or past `wrapUpAt` and that notice did NOT carry the wrap-up
+ *       directive (home-base-o5atv.2.1). This is a session that crossed the
+ *       threshold before one was set, or whose notice fired as an FYI: it is
+ *       told at its next check. The notice this writes carries the directive,
+ *       so the next evaluation sees "already told" and stays silent until the
+ *       ladder ascends or re-arms. That is the whole "once"; no extra state.
  *   A drop that small enough to stay within the fraction is treated as noise
  *   and changes nothing. Re-arming cannot chatter: the notice it emits names a
  *   setpoint <= C, so the very next evaluation sees S <= C and neither branch
@@ -79,10 +102,20 @@
  * @see home-base-1r6d.1, home-base-1r6d.23
  */
 
+// Type-only, so erased: sdk-config imports zod, and this module must not (D5).
+import type {EnvLike} from './sdk-config';
+
 import {closeSync, openSync, readFileSync, readSync, statSync} from 'fs';
 import {join, resolve} from 'path';
 
+// health-notices and thread-rules import only node builtins, and thread/defaults
+// imports nothing: all three keep this hook's import graph free of zod
+// (tests/health-notices-cli.test.ts asserts it).
+import {PROJECT_CONFIG_FILENAME, xdgConfigHome} from './health-notices';
 import {emitHookOutput} from './hook-output';
+import {SDK_HANDOFF_CALL} from './sdk-invocation';
+import {HANDOFF_DEFAULTS, THREAD_CONFIG_KEY} from './thread/defaults';
+import {HANDOFF_RULE_FILE, THREAD_RULES_DIR} from './thread-rules';
 
 /** Marks our own output so a later run can find it in the transcript. */
 export const USAGE_CHECK_MARKER = '[Automated Usage Check]';
@@ -116,11 +149,46 @@ const SETPOINT_TOKEN = new RegExp(
 export const USAGE_CHECK_CONFIG_KEY = 'usage-check';
 
 /**
- * The wrap-up directive, in Justin's words (home-base-1r6d.1, D5 REVISED).
- * Only ever said when a project has opted in with a numeric `wrapUpAt` (D8).
+ * The opening every wrap-up directive starts with, and the only thing the
+ * transcript scan looks for to learn whether a notice carried one
+ * (home-base-o5atv.2.1 E2). Both directives below are BUILT from it, so the
+ * writer and the reader cannot drift apart. It also reads every notice written
+ * before E2, which carry WRAP_UP_DIRECTIVE verbatim and no token for it.
+ *
+ * Reword the rest of a directive freely; change this opening only together
+ * with a reader that still accepts the old one, or every session past its
+ * threshold is told again.
  */
-export const WRAP_UP_DIRECTIVE =
-  'Wrap up your session at the next available opportunity. Follow the handoff/ralph-handoff protocol.';
+export const WRAP_UP_OPENING =
+  'Wrap up your session at the next available opportunity';
+
+/**
+ * The wrap-up directive, in Justin's words (home-base-1r6d.1, D5 REVISED).
+ * Said only when a `wrapUpAt` resolves to a threshold, from either config file
+ * (D6), and the context has reached it.
+ *
+ * This is the text a SUBAGENT gets, and a top-level session in a repo where
+ * `thread handoff` cannot start a successor (componentConfig.thread.handoff.
+ * successor off). It names no command on purpose: `thread handoff` is named
+ * only where that knob is on (home-base-jm5kg.8), and a subagent never runs it
+ * (handoff.md; the session guard refuses it). See wrapUpDirectiveFor.
+ */
+export const WRAP_UP_DIRECTIVE = `${WRAP_UP_OPENING}. Follow the handoff/ralph-handoff protocol.`;
+
+/** The installed rule that teaches a session how to hand off. */
+export const HANDOFF_RULE_PATH = `${THREAD_RULES_DIR}/${HANDOFF_RULE_FILE}`;
+
+/**
+ * The wrap-up directive for a top-level session in a repo where
+ * componentConfig.thread.handoff.successor is on (home-base-o5atv.1.1 D7).
+ * There the handoff rule is installed and `thread handoff` starts the next
+ * session itself, so the directive names the rule and the exact call.
+ *
+ * The call is spelled from SDK_HANDOFF_CALL, by path and never with a `bun`
+ * prefix: Claude Code never lets a command whose first word is `bun` out of its
+ * sandbox, and inside it the handoff cannot reach cmux (sdk-invocation.ts).
+ */
+export const HANDOFF_WRAP_UP_DIRECTIVE = `${WRAP_UP_OPENING}, then hand off as ${HANDOFF_RULE_PATH} describes: run \`${SDK_HANDOFF_CALL} --note "<one line the next session must know>"\` bare, from the repository root, with nothing before or after it.`;
 
 /**
  * The knobs, minus `enabled`. Written out as its own interface because a ROLE
@@ -138,17 +206,25 @@ export interface UsageCheckRoleConfig {
    */
   setpoints?: number[] | null;
   /**
-   * At or above this context size the notice adds WRAP_UP_DIRECTIVE. Keyed off
-   * the measured context rather than the announced setpoint, so it still fires
-   * when it sits between two setpoints.
+   * At or above this context size the notice adds the wrap-up directive. Keyed
+   * off the measured context rather than the announced setpoint, so it still
+   * fires when it sits between two setpoints.
    *
-   * null means never nag — and that is the DEFAULT (D8). The directive is
-   * experimental and opt-in per repo: Justin's reasoning (2026-08-24) is that
-   * "there are going to be sessions where I want to continue past 300k, and
-   * sessions where Claude Code is going to be confused where the message is
-   * coming from." The INFORMATIONAL half of this component he wants everywhere;
-   * the directive he wants only where he asked for it. Putting a number here IS
-   * the on switch, and null-vs-number is the whole of it.
+   * What each value says (home-base-o5atv.1.1 D3, D4):
+   *  - A number above 0 is the threshold. It wins over every layer below it.
+   *  - 0 turns the directive OFF here, deliberately, and also wins over the
+   *    layers below. So does any other number that is not positive and finite.
+   *  - null, or no key, says nothing. The value comes from the next layer down:
+   *    for a role, its top level; for a file, the user file; last, the SDK
+   *    default, which is off.
+   *
+   * null cannot mean "off", because `{"enabled": true, "wrapUpAt": null}` is
+   * the installer's seed, written into repos without anyone deciding anything.
+   * A string or `false` also says nothing here; the typed schema rejects both.
+   *
+   * Off by default because, in Justin's words (2026-08-24), "there are going to
+   * be sessions where I want to continue past 300k, and sessions where Claude
+   * Code is going to be confused where the message is coming from."
    */
   wrapUpAt?: number | null;
 }
@@ -164,9 +240,15 @@ export interface UsageCheckRoleConfig {
  * Expressed as a nested block rather than parallel `playerWrapUpAt` keys so
  * every knob is overridable by role without the key list being written twice.
  *
- * A role field left ABSENT inherits the top-level value; a role field set to
- * null means null FOR THAT ROLE (so `roles.player.wrapUpAt: null` really does
- * switch the directive off for players while the session keeps its own).
+ * A role field left ABSENT inherits the top-level value. For `wrapUpAt`, null
+ * inherits too (home-base-o5atv.1.1 D3), and `roles.player.wrapUpAt: 0` is how
+ * to switch the directive off for players while the session keeps its own
+ * (D4). For `setpoints`, null still means null FOR THAT ROLE: no ladder.
+ *
+ * With both config files, a player's `wrapUpAt` comes from the first of these
+ * that holds a number: project roles.player, user roles.player, project top
+ * level, user top level, SDK default (off). A session's: project top level,
+ * user top level, SDK default (D1).
  *
  * @see home-base-1r6d.23
  */
@@ -252,8 +334,9 @@ export function buildSetpointLadder(
  * Typed explicitly rather than as `Required<UsageCheckConfig>`: `Required` only
  * strips optionality, so the null half of `setpoints`' union would survive into
  * the defaults and make it un-iterable at every call site. `wrapUpAt` keeps its
- * null (D8) because null is not "missing" here — it is the value, and it means
- * the wrap-up directive is off until a project asks for it.
+ * null (D8) because null is not "missing" here: this is the bottom layer, and
+ * null means the directive is off until a config file names a number for it.
+ * The installer seeds the same null, which in a FILE says nothing (D3).
  */
 export const USAGE_CHECK_DEFAULTS: {
   enabled: boolean;
@@ -287,41 +370,263 @@ export interface ResolvedUsageCheckConfig {
 // Config
 // ---------------------------------------------------------------------------
 
+/*
+ * Both files are read here, by hand, rather than through sdk-config's typed
+ * readers or setup-helpers' readJson: this is the hot path of a hook that runs
+ * after every tool batch, sdk-config brings zod (12-13ms against a 40-50ms
+ * CLI start, health-notices.ts), and setup-helpers drags in the installer
+ * machinery. Same reason time-check imports nothing but `fs` and `path`. The
+ * cost of reading by hand is that a file the schema would reject still
+ * contributes here; the doc comment on UsageCheckRoleConfig.wrapUpAt says what
+ * each shape means to this reader (D4).
+ */
+
 /**
- * Read `componentConfig["usage-check"]` from justin-sdk.config.json.
+ * The user config file: `$XDG_CONFIG_HOME/justin-sdk/config.json`, or
+ * `~/.config/justin-sdk/config.json`. The same join as sdk-config's
+ * `userConfigPath`, which this module cannot import because it brings zod; a
+ * test proves the two agree.
+ */
+export function usageCheckUserConfigPath(env: EnvLike = process.env): string {
+  return join(xdgConfigHome(env), 'justin-sdk', 'config.json');
+}
+
+/** One config file as this hook reads it. Only ENOENT is absence. */
+type ConfigFileRead =
+  | {error: string; status: 'unreadable'}
+  | {json: unknown; status: 'ok'}
+  | {status: 'absent'};
+
+/** The errno of a thrown fs error, when it has one. */
+function errorCodeOf(error: unknown): string | null {
+  if (error == null || typeof error !== 'object' || !('code' in error)) {
+    return null;
+  }
+  const code = (error as {code: unknown}).code;
+  return typeof code === 'string' ? code : null;
+}
+
+/** An error's message on one line, so a stderr report stays one line. */
+function oneLineMessageOf(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Read and parse one config file. Never throws. The read is attempted directly
+ * and the errno decides: an `existsSync` first would answer false for every
+ * failure, so an unreadable file would pass for "there is no file".
+ */
+function readConfigFile(path: string): ConfigFileRead {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (error) {
+    return errorCodeOf(error) === 'ENOENT'
+      ? {status: 'absent'}
+      : {error: oneLineMessageOf(error), status: 'unreadable'};
+  }
+  try {
+    return {json: JSON.parse(raw) as unknown, status: 'ok'};
+  } catch (error) {
+    return {error: oneLineMessageOf(error), status: 'unreadable'};
+  }
+}
+
+/** `componentConfig[key]` of a parsed config file, or null when it is not an object. */
+function componentSectionOf(
+  json: unknown,
+  key: string,
+): Record<string, unknown> | null {
+  if (json == null || typeof json !== 'object') return null;
+  const componentConfig: unknown = (json as {componentConfig?: unknown})
+    .componentConfig;
+  if (componentConfig == null || typeof componentConfig !== 'object') {
+    return null;
+  }
+  const section: unknown = (componentConfig as Record<string, unknown>)[key];
+  if (section == null || typeof section !== 'object') return null;
+  return section as Record<string, unknown>;
+}
+
+function usageCheckSectionOf(json: unknown): UsageCheckConfig | null {
+  return componentSectionOf(json, USAGE_CHECK_CONFIG_KEY);
+}
+
+/**
+ * Read the PROJECT file's `componentConfig["usage-check"]` block, and only
+ * that. The hook and the thread report read readUsageCheckLayers instead,
+ * which adds the user file; this stays for callers that ask what the repo's
+ * own file says.
  *
- * Returns null when the file, the section, or the key is absent — meaning
- * "disabled". Absence is the safe default: this hook runs after every tool
- * batch, so a project that never opted in must pay nothing and say nothing.
- *
- * Deliberately reads the file itself rather than importing setup-helpers'
- * readJson: this is the hot path of a hook that runs many times per turn, and
- * setup-helpers drags in the installer machinery. Same reason time-check
- * imports nothing but `fs` and `path`.
+ * Returns null when the file, the section, or the key is absent, or when the
+ * file cannot be read or parsed: a malformed config must not break the user's
+ * prompt.
  */
 export function readUsageCheckConfig(
   projectRoot: string,
 ): UsageCheckConfig | null {
-  let raw: string;
-  try {
-    raw = readFileSync(resolve(projectRoot, 'justin-sdk.config.json'), 'utf8');
-  } catch {
-    return null;
+  const read = readConfigFile(resolve(projectRoot, PROJECT_CONFIG_FILENAME));
+  return read.status === 'ok' ? usageCheckSectionOf(read.json) : null;
+}
+
+/**
+ * Does this `wrapUpAt` say anything? Only a number does (D3, D4): null is the
+ * installer's seed and means "no opinion here", and a string or `false` is
+ * junk this reader treats the same way. 0 is a number, so a deliberate 0 wins
+ * over the layers below and then normalizes to "off".
+ */
+function statesWrapUpAt(value: unknown): value is number {
+  return typeof value === 'number';
+}
+
+/**
+ * One block's knobs over another's, field by field (D1). `upper` wins wherever
+ * it states a value: for `wrapUpAt` that means a number (statesWrapUpAt); for
+ * `setpoints` and `reArmDropFraction` it means any value but `undefined`, the
+ * rule applyRoleOverrides has always used for them, so a `setpoints: null`
+ * still switches the ladder off.
+ */
+function layerKnobs(
+  upper: UsageCheckRoleConfig,
+  lower: UsageCheckRoleConfig,
+): UsageCheckRoleConfig {
+  return {
+    reArmDropFraction:
+      upper.reArmDropFraction !== undefined
+        ? upper.reArmDropFraction
+        : lower.reArmDropFraction,
+    setpoints:
+      upper.setpoints !== undefined ? upper.setpoints : lower.setpoints,
+    wrapUpAt: statesWrapUpAt(upper.wrapUpAt) ? upper.wrapUpAt : lower.wrapUpAt,
+  };
+}
+
+/** `roles.player` of a block, when it is an object. */
+function playerBlockOf(config: UsageCheckConfig): UsageCheckRoleConfig | null {
+  const roles: unknown = config.roles;
+  if (roles == null || typeof roles !== 'object') return null;
+  const player: unknown = (roles as {player?: unknown}).player;
+  if (player == null || typeof player !== 'object') return null;
+  return player as UsageCheckRoleConfig;
+}
+
+/**
+ * The project's block over the user file's, field by field, at the top level
+ * and under `roles.player` (D1). The result is an ordinary UsageCheckConfig,
+ * so resolveUsageCheckConfig then layers the role over the top level exactly
+ * as it does for one file. That yields D1's order for a player's `wrapUpAt`:
+ * project roles.player, user roles.player, project top level, user top level,
+ * SDK default.
+ *
+ * `enabled` comes from the project block alone (D2): the user file supplies
+ * knob values, and which repos run the hook is decided by their own files.
+ * The caller only gets here with a project block in hand, which the type says.
+ */
+export function layerUsageCheckConfig(
+  project: UsageCheckConfig,
+  user: UsageCheckConfig | null,
+): UsageCheckConfig {
+  if (user == null) return project;
+  const layered: UsageCheckConfig = layerKnobs(project, user);
+  if (project.enabled !== undefined) layered.enabled = project.enabled;
+  const projectPlayer = playerBlockOf(project);
+  const userPlayer = playerBlockOf(user);
+  if (projectPlayer != null || userPlayer != null) {
+    layered.roles = {
+      player: layerKnobs(projectPlayer ?? {}, userPlayer ?? {}),
+    };
+  }
+  return layered;
+}
+
+/** `componentConfig.thread.handoff.successor` of one parsed file, when it is a boolean. */
+function handoffSuccessorIn(json: unknown): boolean | null {
+  const handoff = componentSectionOf(json, THREAD_CONFIG_KEY)?.handoff;
+  if (handoff == null || typeof handoff !== 'object') return null;
+  const successor: unknown = (handoff as {successor?: unknown}).successor;
+  return typeof successor === 'boolean' ? successor : null;
+}
+
+/**
+ * Whether `thread handoff` starts a successor in this repo (D7), from the two
+ * files this hook has already parsed: DEFAULT (false) <- user file <- project
+ * file, and only a boolean counts at each layer, as in thread/handoff-knob.ts.
+ * hookKnobOn answers the same question through resolveThreadConfig, which
+ * reaches zod; tests/usage-check-user-config.test.ts proves the two agree.
+ *
+ * Accepted difference: resolveThreadConfig drops a whole file that fails the
+ * schema, and this walk still reads that file's boolean.
+ */
+export function resolveHandoffSuccessor(
+  projectJson: unknown,
+  userJson: unknown,
+): boolean {
+  return (
+    handoffSuccessorIn(projectJson) ??
+    handoffSuccessorIn(userJson) ??
+    HANDOFF_DEFAULTS.successor
+  );
+}
+
+/**
+ * Everything the hook needs from the two config files.
+ *
+ * 'off' means the PROJECT file has no `usage-check` block or says
+ * `enabled: false`. The user file is not even read then: a repo without the
+ * component pays nothing and says nothing, and the user file cannot switch it
+ * on (D2).
+ */
+export type UsageCheckLayers =
+  | {
+      /** The project block over the user block (layerUsageCheckConfig). */
+      config: UsageCheckConfig;
+      /** See resolveHandoffSuccessor. */
+      handoffSuccessor: boolean;
+      status: 'on';
+      /**
+       * The user file exists but could not be read or parsed: its path and
+       * the error, on one line. That layer is ignored (D5). null otherwise,
+       * including when there is no user file.
+       */
+      userConfigProblem: string | null;
+    }
+  | {status: 'off'};
+
+/**
+ * Read the project file and, when it has the component, the user file (D5:
+ * one file more than before, and only then). Each is parsed once; the project
+ * JSON also answers the successor knob.
+ *
+ * The one resolver behind the hook AND the thread report (D8): both call this
+ * and then resolveUsageCheckConfig, so `thread status` cannot show a threshold
+ * the hook does not use.
+ */
+export function readUsageCheckLayers(
+  projectRoot: string,
+  env: EnvLike = process.env,
+): UsageCheckLayers {
+  const projectRead = readConfigFile(
+    resolve(projectRoot, PROJECT_CONFIG_FILENAME),
+  );
+  const projectJson = projectRead.status === 'ok' ? projectRead.json : null;
+  const project = usageCheckSectionOf(projectJson);
+  if (project == null || project.enabled === false) {
+    return {status: 'off'};
   }
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null; // A malformed config must not break the user's prompt.
-  }
-
-  const config = parsed as {componentConfig?: Record<string, unknown>};
-  const section = config.componentConfig?.[USAGE_CHECK_CONFIG_KEY];
-  if (section == null || typeof section !== 'object') {
-    return null;
-  }
-  return section as UsageCheckConfig;
+  const userPath = usageCheckUserConfigPath(env);
+  const userRead = readConfigFile(userPath);
+  const userJson = userRead.status === 'ok' ? userRead.json : null;
+  return {
+    config: layerUsageCheckConfig(project, usageCheckSectionOf(userJson)),
+    handoffSuccessor: resolveHandoffSuccessor(projectJson, userJson),
+    status: 'on',
+    userConfigProblem:
+      userRead.status === 'unreadable'
+        ? `${userPath}: ${userRead.error}`
+        : null,
+  };
 }
 
 /**
@@ -341,11 +646,12 @@ function normalizeWrapUpAt(value: number | null | undefined): number | null {
 /**
  * Layer `roles[role]` over the top-level knobs.
  *
- * Only keys the role states EXPLICITLY win — `undefined` means "inherit", which
- * is what makes a role block that names one knob (Justin's case: a player
- * wrapUpAt and nothing else) leave the ladder and re-arm fraction alone. Since
- * null is a meaningful value for `setpoints` and `wrapUpAt`, the test is
- * `!== undefined` rather than a truthiness or nullish check.
+ * Only keys the role states EXPLICITLY win, which is what makes a role block
+ * that names one knob (Justin's case: a player wrapUpAt and nothing else) leave
+ * the ladder and re-arm fraction alone. For `setpoints` and
+ * `reArmDropFraction`, `undefined` means "inherit" and null is a value, so the
+ * test is `!== undefined`. For `wrapUpAt`, only a number states and null
+ * inherits too (home-base-o5atv.1.1 D3); 0 is the role's deliberate "off" (D4).
  *
  * The 'session' role has no block by construction: the top-level knobs ARE the
  * session's, so there is only ever one place to write them.
@@ -365,13 +671,16 @@ function applyRoleOverrides(
         : config.reArmDropFraction,
     setpoints:
       override.setpoints !== undefined ? override.setpoints : config.setpoints,
-    wrapUpAt:
-      override.wrapUpAt !== undefined ? override.wrapUpAt : config.wrapUpAt,
+    wrapUpAt: statesWrapUpAt(override.wrapUpAt)
+      ? override.wrapUpAt
+      : config.wrapUpAt,
   };
 }
 
 /**
- * Merge a project's config over the defaults and normalize the ladder.
+ * Merge a config block over the defaults and normalize the ladder. The block
+ * is one file's, or the two files layered by layerUsageCheckConfig: the hook
+ * and the thread report pass the layered one (readUsageCheckLayers).
  *
  * A NUMERIC `wrapUpAt` is folded INTO the setpoints. Without that, a config
  * whose wrapUpAt sits between two setpoints would cross the wrap-up threshold
@@ -563,6 +872,13 @@ export interface TranscriptFacts {
   contextTokens: number | null;
   /** The setpoint named by our most recent notice, or null. */
   lastAnnouncedSetpoint: number | null;
+  /**
+   * Whether that same notice carried the wrap-up directive
+   * (home-base-o5atv.2.1 E1). Null exactly when lastAnnouncedSetpoint is null:
+   * both are read from one record, in one step, so a notice is never half
+   * known. See noticeCarriesWrapUp.
+   */
+  lastNoticeHadWrapUp: boolean | null;
   /**
    * Whether the scan reached the START of the transcript. This is what makes
    * `lastAnnouncedSetpoint: null` interpretable: with reachedStart true it
@@ -791,6 +1107,27 @@ function attachmentStrings(entry: Record<string, unknown>): string[] {
 interface ScanState {
   contextTokens: number | null;
   lastAnnouncedSetpoint: number | null;
+  lastNoticeHadWrapUp: boolean | null;
+}
+
+/**
+ * Whether the notice whose `notice-at=` token ends at `tokenEnd` in `content`
+ * carried the wrap-up directive (home-base-o5atv.2.1 E1, E2).
+ *
+ * formatNotice writes the directive as the line right after the token's line,
+ * and every notice ever written puts it there (verified 2026-11-08 against a
+ * real player transcript, where both `hook_additional_context` and
+ * `hook_system_message` hold `(notice-at=350000)\nWrap up your session …`). So
+ * this reads THAT line and asks whether it starts with WRAP_UP_OPENING. It does
+ * not search the whole string: the hook dispatcher joins every handler's text
+ * on one event with a blank line (hook-output.ts), so another handler's words
+ * could follow an FYI notice in the same string.
+ *
+ * No new I/O (E6): `content` is the text the scan already holds.
+ */
+function noticeCarriesWrapUp(content: string, tokenEnd: number): boolean {
+  const lineBreak = content.indexOf('\n', tokenEnd);
+  return lineBreak !== -1 && content.startsWith(WRAP_UP_OPENING, lineBreak + 1);
 }
 
 /**
@@ -868,7 +1205,13 @@ function scanWindow(
         }
         const match = SETPOINT_TOKEN.exec(content);
         if (match?.[1] != null) {
+          // Both from this one string, together (E1): readTranscriptFacts stops
+          // once it has a setpoint, so the flag must come from the same record.
           state.lastAnnouncedSetpoint = Number(match[1]);
+          state.lastNoticeHadWrapUp = noticeCarriesWrapUp(
+            content,
+            match.index + match[0].length,
+          );
           break;
         }
       }
@@ -897,7 +1240,11 @@ export function readTranscriptFacts(args: {
   scope?: MeasurementScope;
   transcriptPath: string;
 }): TranscriptFacts {
-  const state: ScanState = {contextTokens: null, lastAnnouncedSetpoint: null};
+  const state: ScanState = {
+    contextTokens: null,
+    lastAnnouncedSetpoint: null,
+    lastNoticeHadWrapUp: null,
+  };
   let windowBytes = args.initialWindowBytes ?? INITIAL_WINDOW_BYTES;
   let reachedStart = false;
 
@@ -926,14 +1273,19 @@ export function readTranscriptFacts(args: {
 // Decision
 // ---------------------------------------------------------------------------
 
-export type FireReason = 'first' | 'ascend' | 're-arm';
+/**
+ * Why a notice fires. 'wrap-up' is a notice that fires for no other reason
+ * than that the context is at or past `wrapUpAt` and the last notice did not
+ * say so (home-base-o5atv.2.1 E3).
+ */
+export type FireReason = 'first' | 'ascend' | 're-arm' | 'wrap-up';
 
 export interface UsageDecision {
   contextTokens: number;
   reason: FireReason;
   /** The setpoint being announced: the highest one at or below the context. */
   setpoint: number;
-  /** Whether to append WRAP_UP_DIRECTIVE. */
+  /** Whether to append the wrap-up directive (see wrapUpDirectiveFor). */
   wrapUp: boolean;
 }
 
@@ -961,14 +1313,26 @@ function lowestAbove(setpoints: number[], value: number): number | null {
  *
  * Returns null (silent) whenever the context has not reached the lowest
  * setpoint, when the ladder has not advanced, and when a shrink is too small
- * to read as a compaction.
+ * to read as a compaction — unless the context is at or past `wrapUpAt` and the
+ * last notice did not carry the directive, which fires 'wrap-up' once
+ * (home-base-o5atv.2.1 E3). The same rule holds for both roles (E5): `config`
+ * is already the role's.
  */
 export function decide(args: {
   config: ResolvedUsageCheckConfig;
   contextTokens: number;
   lastAnnouncedSetpoint: number | null;
+  /**
+   * Whether the notice that named `lastAnnouncedSetpoint` carried the wrap-up
+   * directive (TranscriptFacts.lastNoticeHadWrapUp). Required, not optional,
+   * so no caller can drop it and silently lose E3. Only `false` can fire
+   * 'wrap-up': null (no notice, or not known) stays silent, as unknown state
+   * always does here (E4).
+   */
+  lastNoticeHadWrapUp: boolean | null;
 }): UsageDecision | null {
-  const {config, contextTokens, lastAnnouncedSetpoint} = args;
+  const {config, contextTokens, lastAnnouncedSetpoint, lastNoticeHadWrapUp} =
+    args;
   const setpoint = highestAtOrBelow(config.setpoints, contextTokens);
   if (setpoint == null) {
     return null;
@@ -993,6 +1357,15 @@ export function decide(args: {
 
   if (contextTokens < lastAnnouncedSetpoint * (1 - config.reArmDropFraction)) {
     return fire('re-arm');
+  }
+
+  // E3: past the threshold, and the session has not been told. `wrapUp` is
+  // true only when wrapUpAt is a number and the context has reached it, and
+  // wrapUpAt is a rung of the ladder, so `setpoint` is at or above it. The
+  // notice this fires carries the directive; the next evaluation reads it back
+  // as told and stays silent.
+  if (wrapUp && lastNoticeHadWrapUp === false) {
+    return fire('wrap-up');
   }
 
   return null;
@@ -1034,7 +1407,7 @@ const SESSION_SUBJECT: NoticeSubject = {scope: 'session'};
  * handed itself off at 201,607 tokens.
  *
  * Left OUT when the wrap-up directive rides along: that directive is a real
- * instruction a project opted into (D8), and a notice saying "not a reason to
+ * instruction a config file asked for (D8, D6), and a notice saying "not a reason to
  * stop or hand off" one line above "Wrap up your session" would contradict it.
  */
 export const NOTICE_FYI =
@@ -1088,11 +1461,15 @@ export function regularLadderInterval(
  * `setpoints` is the ladder the decision was made on. It only decides whether
  * the notice can truthfully say "every N tokens" (see regularLadderInterval);
  * null leaves the interval out.
+ *
+ * `directive` is the second line when the wrap-up is due; runUsageCheck picks
+ * it with wrapUpDirectiveFor.
  */
 export function formatNotice(
   decision: UsageDecision,
   subject: NoticeSubject = SESSION_SUBJECT,
   setpoints: readonly number[] | null = null,
+  directive: string = WRAP_UP_DIRECTIVE,
 ): string {
   const tokens = formatTokens(decision.contextTokens);
 
@@ -1121,7 +1498,26 @@ export function formatNotice(
   parts.push(`(${NOTICE_TOKEN_NAME}=${decision.setpoint})`);
 
   const line = parts.join(' ');
-  return decision.wrapUp ? `${line}\n${WRAP_UP_DIRECTIVE}` : line;
+  return decision.wrapUp ? `${line}\n${directive}` : line;
+}
+
+/**
+ * Which wrap-up directive this reader gets (home-base-o5atv.1.1 D7):
+ *  - A top-level session where `thread handoff` starts a successor
+ *    (`handoffSuccessor`, resolveHandoffSuccessor): HANDOFF_WRAP_UP_DIRECTIVE,
+ *    which names the rule and the call.
+ *  - Any other session: WRAP_UP_DIRECTIVE, unchanged. `thread handoff` is
+ *    named only where that knob is on (home-base-jm5kg.8).
+ *  - A subagent, whatever the knob says: WRAP_UP_DIRECTIVE. A subagent never
+ *    runs `thread handoff`; it reports to the session that dispatched it.
+ */
+export function wrapUpDirectiveFor(args: {
+  handoffSuccessor: boolean;
+  scope: MeasurementScope;
+}): string {
+  return args.scope === 'session' && args.handoffSuccessor
+    ? HANDOFF_WRAP_UP_DIRECTIVE
+    : WRAP_UP_DIRECTIVE;
 }
 
 // ---------------------------------------------------------------------------
@@ -1170,7 +1566,11 @@ const DEFAULT_HOOK_EVENT = 'UserPromptSubmit';
  * cannot become per-batch spam in the conversation), and the line is visible in
  * `claude --debug` and when the hook is run by hand with a crafted payload.
  */
-export function runUsageCheck(args?: {stdin?: string}): number {
+export function runUsageCheck(args?: {
+  /** Where the user config is looked up (XDG_CONFIG_HOME, HOME). Tests inject it. */
+  env?: EnvLike;
+  stdin?: string;
+}): number {
   let input: HookInput = {};
   try {
     const raw = args?.stdin ?? readFileSync(0, 'utf8');
@@ -1180,15 +1580,23 @@ export function runUsageCheck(args?: {stdin?: string}): number {
   }
 
   const projectRoot = input.cwd ?? process.cwd();
-  const rawConfig = readUsageCheckConfig(projectRoot);
-  if (rawConfig == null || rawConfig.enabled === false) {
+  const layers = readUsageCheckLayers(projectRoot, args?.env ?? process.env);
+  if (layers.status === 'off') {
     return 0; // Not installed here, or explicitly disabled.
+  }
+  if (layers.userConfigProblem != null) {
+    // D5: that layer is ignored and the repo's own block still applies. Said on
+    // stderr only, like the UNKNOWN below: never stdout, so never the model's
+    // context, and the hook still exits 0.
+    console.error(
+      `${USAGE_CHECK_MARKER} ignoring the user config, which could not be read: ${layers.userConfigProblem}`,
+    );
   }
 
   // Presence of agent_id is the whole discriminant (see HookInput.agent_id).
   const role: UsageCheckRole =
     input.agent_id != null && input.agent_id !== '' ? 'player' : 'session';
-  const config = resolveUsageCheckConfig(rawConfig, role);
+  const config = resolveUsageCheckConfig(layers.config, role);
   if (config == null) {
     return 0; // Resolved to an empty ladder — nothing could ever fire.
   }
@@ -1221,6 +1629,7 @@ export function runUsageCheck(args?: {stdin?: string}): number {
     config,
     contextTokens: facts.contextTokens,
     lastAnnouncedSetpoint: facts.lastAnnouncedSetpoint,
+    lastNoticeHadWrapUp: facts.lastNoticeHadWrapUp,
   });
   if (decision == null) {
     return 0;
@@ -1230,6 +1639,10 @@ export function runUsageCheck(args?: {stdin?: string}): number {
     decision,
     {agentType: input.agent_type, scope: target.kind},
     config.setpoints,
+    wrapUpDirectiveFor({
+      handoffSuccessor: layers.handoffSuccessor,
+      scope: target.kind,
+    }),
   );
 
   // Emit BOTH channels, exactly as time-check does and for the same reason:

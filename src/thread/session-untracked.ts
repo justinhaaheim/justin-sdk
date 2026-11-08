@@ -360,8 +360,9 @@ export interface UntrackedVerdict {
 /**
  * D6's verdict, pure: the evidence of open work, what could not be measured,
  * the display, and the "You need to" line. Rule 10 first (critical rule 7: an
- * unread fact never ends in the one-liner), then D3 rules 2, 4 and 6, then
- * D6's "Read Claude's last reply". `git.uncommitted` is the session's OWN
+ * unread fact never ends in the one-liner), then D3 rules 2, 6 and 4 (6 before
+ * 4: home-base-o5atv.3 O2), then D6's "Read Claude's last reply".
+ * `git.uncommitted` is the session's OWN
  * uncommitted files (j8q3e.6), so rule 6 never names another session's.
  */
 export function untrackedVerdict(
@@ -441,17 +442,19 @@ export function untrackedVerdict(
     };
   } else if (working) {
     action = {command: null, rule: 2, text: workingText(helpers)};
+  } else if (notMerged || uncommitted > 0) {
+    // home-base-o5atv.3 O2: work waiting to land wins over out of context,
+    // as it does for a tracked session (O1): it needs landing, not a handoff.
+    action = {
+      command: null,
+      rule: 6,
+      text: landItText(git, {notMerged, uncommitted}),
+    };
   } else if (outOfContext) {
     action = {
       command: session.resume,
       rule: 4,
       text: 'Resume it and ask Claude for a handoff:',
-    };
-  } else if (notMerged || uncommitted > 0) {
-    action = {
-      command: null,
-      rule: 6,
-      text: landItText(git, {notMerged, uncommitted}),
     };
   } else {
     action = {
@@ -496,12 +499,16 @@ function untrackedAge(session: UntrackedSession, now: Date): string | null {
   return `${words}; transcript touched ${ageWords(new Date(touched), now)}`;
 }
 
-/** D2's "Where it is" for a session with no session bead: never "done". */
-function untrackedWhere(evidence: readonly OpenWorkEvidence[]): string {
-  if (evidence.includes('working')) {
+/**
+ * D2's "Where it is" for a session with no session bead: never "done". Out of
+ * context only when it is the verdict (rule 4): home-base-o5atv.3 O2, so a
+ * card whose action is "Land it" or "Check it by hand" never says it.
+ */
+function untrackedWhere(verdict: UntrackedVerdict): string {
+  if (verdict.evidence.includes('working')) {
     return '🏃 Working (not tracked: it has no session bead)';
   }
-  if (evidence.includes('outOfContext')) {
+  if (verdict.action.rule === 4) {
     return '🧯 Out of context (not tracked: it has no session bead)';
   }
   return '❔ Not tracked: it has no session bead, so this is read from git, its transcript and any old report';
@@ -537,7 +544,7 @@ export function untrackedCard(
       value: `unknown (${tildeText(session.lastActivityAt.reason)})`,
     });
   }
-  const where = untrackedWhere(verdict.evidence);
+  const where = untrackedWhere(verdict);
   const info = sectionInfo('notTracked');
   const oldTitle =
     session.oldReport.ok && session.oldReport.value?.title != null
@@ -762,7 +769,10 @@ export async function readUntracked(input: {
       let wrapUpAt: number | null = null;
       if (projectRoot != null) {
         if (!wrapUpByRoot.has(projectRoot)) {
-          wrapUpByRoot.set(projectRoot, resolveReportWrapUpAt(projectRoot));
+          wrapUpByRoot.set(
+            projectRoot,
+            resolveReportWrapUpAt(projectRoot, env),
+          );
         }
         wrapUpAt = wrapUpByRoot.get(projectRoot) ?? null;
       }

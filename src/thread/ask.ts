@@ -30,6 +30,7 @@
 import type {OutputStyle} from '../cli-style';
 import type {AskDefault, AskFields, AskForm, AskOption} from './ask-format';
 import type {EnvLike} from './paths';
+import type {SessionBeadRepair} from './session-repair';
 
 import {
   brCreate,
@@ -59,6 +60,7 @@ import {
   sidLabel,
   toLabelFor,
 } from './session-bead';
+import {repairMissingSessionBead, repairRefusalNote} from './session-repair';
 import {sessionBeadsKnob, sessionIdFrom} from './session-select';
 
 export interface AskInput {
@@ -200,6 +202,8 @@ export interface ThreadAskOptions extends AskInput {
   agentId?: string | null;
   cwd?: string;
   env?: EnvLike;
+  /** When the race window is measured from (home-base-4ay2j); tests pin it. */
+  now?: Date;
   sessionId: string | null;
   style?: OutputStyle;
   /**
@@ -219,6 +223,11 @@ export type ThreadAskOutcome =
       parent: string;
       priority: number;
       question: string;
+      /**
+       * home-base-4ay2j: this command filed or re-indexed the session bead the
+       * capture hook had failed to file; null when it was already there.
+       */
+      repair: Extract<SessionBeadRepair, {kind: 'repaired'}> | null;
       /** The request it is for (its `to:` label), or null when not linked. */
       request: {id: string; title: string} | null;
       /** Why it is not linked to a request, in words; null when it is. */
@@ -247,12 +256,42 @@ export async function fileAsk(
   if (!session.ok) return {kind: 'noSession', reason: session.reason};
   const knob = await sessionBeadsKnob(cwd, env);
   if (!knob.ok) return {kind: 'disabled', reason: knob.reason};
-  const resolution = resolveSession({env, sessionId: session.id});
-  if (resolution.kind === 'failed') {
-    return {kind: 'failed', reason: resolution.reason};
-  }
+  let resolution = resolveSession({env, sessionId: session.id});
+  // home-base-4ay2j D1: past the race, a bead the capture hook failed to file
+  // is filed (or re-indexed) here, once, under the capture lock (D3).
+  let repair: Extract<SessionBeadRepair, {kind: 'repaired'}> | null = null;
   if (resolution.kind === 'none') {
-    return {kind: 'noSession', reason: resolution.reason};
+    const attempted = await repairMissingSessionBead({
+      by: 'thread ask',
+      cwd,
+      env,
+      now: options.now ?? new Date(),
+      sessionId: session.id,
+    });
+    if (attempted.kind === 'repaired') {
+      repair = attempted;
+      resolution = resolveSession({env, sessionId: session.id});
+    }
+    const note =
+      attempted.kind === 'repaired'
+        ? attempted.line
+        : repairRefusalNote(attempted);
+    if (resolution.kind === 'none') {
+      return {
+        kind: 'noSession',
+        reason:
+          note == null ? resolution.reason : `${resolution.reason} ${note}`,
+      };
+    }
+  }
+  if (resolution.kind === 'failed') {
+    return {
+      kind: 'failed',
+      reason:
+        repair == null
+          ? resolution.reason
+          : `${resolution.reason} (${repair.line})`,
+    };
   }
   if (resolution.kind === 'checkoutMissing') {
     return {checkoutPath: resolution.checkoutPath, kind: 'checkoutMissing'};
@@ -355,6 +394,7 @@ export async function fileAsk(
     parent,
     priority: valid.priority,
     question: valid.question,
+    repair,
     request,
     unlinkedWhy,
   };
@@ -424,7 +464,12 @@ export function describeAskOutcome(
 /** `thread ask`: validate, file, print, return the exit code. */
 export async function runThreadAsk(options: ThreadAskOptions): Promise<number> {
   const style = options.style ?? outputStyle(process.stdout);
-  const {exitCode, lines} = describeAskOutcome(await fileAsk(options), style);
+  const outcome = await fileAsk(options);
+  // home-base-4ay2j D1: the one loud line, on stderr so stdout keeps its shape.
+  if (outcome.kind === 'filed' && outcome.repair != null) {
+    console.error(outcome.repair.line);
+  }
+  const {exitCode, lines} = describeAskOutcome(outcome, style);
   const write = exitCode === 0 ? console.log : console.error;
   for (const line of lines) write(line);
   return exitCode;

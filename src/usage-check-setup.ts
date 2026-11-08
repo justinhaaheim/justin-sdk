@@ -162,9 +162,12 @@ export function stepUsageCheckHooks(projectRoot: string): boolean {
  *
  * WHAT IS WRITTEN AND WHY: `enabled` and `wrapUpAt` are the knobs, so they are
  * spelled out even when they equal the defaults — `wrapUpAt: null` is how a
- * reader discovers that the wrap-up directive exists, is off, and is turned on
- * by putting a number there (D8). Both track USAGE_CHECK_DEFAULTS rather than
- * repeating literals, so there is still one source for the values.
+ * reader discovers that the wrap-up directive exists. In a file, null says
+ * nothing: the value comes from the user file, and is off when no file names a
+ * number; a number here wins, and 0 turns the directive off in this repo
+ * (home-base-o5atv.1.1 D3, D4). Both track USAGE_CHECK_DEFAULTS rather than
+ * repeating literals, so there is still one source for the values. The seed's
+ * bytes must not change: `remove` deletes a block only when it equals the seed.
  *
  * Only writes when the block is absent — a project that has tuned its
  * setpoints (or set `enabled: false`) must survive a re-run untouched.
@@ -196,7 +199,7 @@ export function stepUsageCheckConfig(projectRoot: string): boolean {
 
   const wrapUpSummary =
     USAGE_CHECK_DEFAULTS.wrapUpAt == null
-      ? 'wrapUpAt: null — the wrap-up directive is OFF; set a token count to opt in'
+      ? 'wrapUpAt: null — uses the user file’s wrapUpAt, if it has one; a token count here wins, and 0 turns the wrap-up directive off in this repo'
       : `wrapUpAt: ${USAGE_CHECK_DEFAULTS.wrapUpAt}`;
   success(`Added componentConfig.${USAGE_CHECK_CONFIG_KEY} (${wrapUpSummary})`);
   success(

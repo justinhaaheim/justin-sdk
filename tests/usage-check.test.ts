@@ -45,6 +45,7 @@ import {
   decide,
   formatNotice,
   formatTokens,
+  HANDOFF_WRAP_UP_DIRECTIVE,
   type NoticeSubject,
   NOTICE_FYI,
   readTranscriptFacts,
@@ -62,6 +63,7 @@ import {
   type UsageCheckRole,
   type UsageDecision,
   WRAP_UP_DIRECTIVE,
+  WRAP_UP_OPENING,
 } from '../src/usage-check';
 import {
   addUsageCheckHook,
@@ -74,6 +76,17 @@ import {captureWriteStdout} from './capture-stdout';
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'usage-check-'));
 }
+
+/**
+ * An XDG_CONFIG_HOME with no justin-sdk/config.json in it. The hook reads the
+ * user file too (home-base-o5atv.1.1), so every run here points it at this
+ * empty directory: these tests are about the project file alone, and must
+ * never read Justin's real ~/.config/justin-sdk/config.json. The layered
+ * behaviour is tested in usage-check-user-config.test.ts.
+ */
+const NO_USER_CONFIG_ENV = {
+  XDG_CONFIG_HOME: mkdtempSync(join(tmpdir(), 'usage-check-no-user-')),
+};
 
 function writeConfig(
   dir: string,
@@ -146,7 +159,10 @@ function runCapturing(input: unknown): Record<string, unknown> | null {
   });
   let exit: number;
   try {
-    exit = runUsageCheck({stdin: JSON.stringify(input)});
+    exit = runUsageCheck({
+      env: NO_USER_CONFIG_ENV,
+      stdin: JSON.stringify(input),
+    });
   } finally {
     capture.mockRestore();
   }
@@ -262,6 +278,7 @@ describe('config: ladder normalization', () => {
       config,
       contextTokens: 180_000,
       lastAnnouncedSetpoint: 100_000,
+      lastNoticeHadWrapUp: false,
     });
     expect(decision?.setpoint).toBe(175_000);
     expect(decision?.wrapUp).toBe(true);
@@ -344,6 +361,7 @@ describe('defaults: an every-100k ladder, wrap-up directive OFF (D7, D8)', () =>
         config,
         contextTokens,
         lastAnnouncedSetpoint: null,
+        lastNoticeHadWrapUp: null,
       });
       // The informational half still fires — this is not "off", it is "off
       // for the directive only".
@@ -531,7 +549,12 @@ describe('decide: the setpoint ladder', () => {
 
   test('silent below the lowest setpoint', () => {
     expect(
-      decide({config, contextTokens: 99_999, lastAnnouncedSetpoint: null}),
+      decide({
+        config,
+        contextTokens: 99_999,
+        lastAnnouncedSetpoint: null,
+        lastNoticeHadWrapUp: null,
+      }),
     ).toBeNull();
   });
 
@@ -540,6 +563,7 @@ describe('decide: the setpoint ladder', () => {
       config,
       contextTokens: 210_000,
       lastAnnouncedSetpoint: null,
+      lastNoticeHadWrapUp: null,
     });
     expect(decision).toEqual({
       contextTokens: 210_000,
@@ -551,17 +575,31 @@ describe('decide: the setpoint ladder', () => {
 
   test('silent once a setpoint has been announced and the ladder has not moved', () => {
     expect(
-      decide({config, contextTokens: 150_000, lastAnnouncedSetpoint: 100_000}),
+      decide({
+        config,
+        contextTokens: 150_000,
+        lastAnnouncedSetpoint: 100_000,
+        lastNoticeHadWrapUp: false,
+      }),
     ).toBeNull();
     expect(
-      decide({config, contextTokens: 199_999, lastAnnouncedSetpoint: 100_000}),
+      decide({
+        config,
+        contextTokens: 199_999,
+        lastAnnouncedSetpoint: 100_000,
+        lastNoticeHadWrapUp: false,
+      }),
     ).toBeNull();
   });
 
   test('ascending to the next setpoint announces again', () => {
     expect(
-      decide({config, contextTokens: 200_000, lastAnnouncedSetpoint: 100_000})
-        ?.reason,
+      decide({
+        config,
+        contextTokens: 200_000,
+        lastAnnouncedSetpoint: 100_000,
+        lastNoticeHadWrapUp: false,
+      })?.reason,
     ).toBe('ascend');
   });
 
@@ -570,6 +608,7 @@ describe('decide: the setpoint ladder', () => {
       config,
       contextTokens: 305_000,
       lastAnnouncedSetpoint: 100_000,
+      lastNoticeHadWrapUp: false,
     });
     expect(decision?.setpoint).toBe(300_000);
   });
@@ -577,7 +616,12 @@ describe('decide: the setpoint ladder', () => {
   test('a small shrink is noise and changes nothing', () => {
     // 240k is only 20% below the announced 300k — inside the 25% band.
     expect(
-      decide({config, contextTokens: 240_000, lastAnnouncedSetpoint: 300_000}),
+      decide({
+        config,
+        contextTokens: 240_000,
+        lastAnnouncedSetpoint: 300_000,
+        lastNoticeHadWrapUp: true,
+      }),
     ).toBeNull();
   });
 
@@ -586,6 +630,7 @@ describe('decide: the setpoint ladder', () => {
       config,
       contextTokens: 210_000,
       lastAnnouncedSetpoint: 300_000,
+      lastNoticeHadWrapUp: true,
     });
     expect(decision?.reason).toBe('re-arm');
     expect(decision?.setpoint).toBe(200_000);
@@ -593,7 +638,12 @@ describe('decide: the setpoint ladder', () => {
 
   test('re-arming below the lowest setpoint stays silent', () => {
     expect(
-      decide({config, contextTokens: 40_000, lastAnnouncedSetpoint: 300_000}),
+      decide({
+        config,
+        contextTokens: 40_000,
+        lastAnnouncedSetpoint: 300_000,
+        lastNoticeHadWrapUp: true,
+      }),
     ).toBeNull();
   });
 
@@ -604,6 +654,7 @@ describe('decide: the setpoint ladder', () => {
       config,
       contextTokens: 210_000,
       lastAnnouncedSetpoint: 300_000,
+      lastNoticeHadWrapUp: true,
     });
     expect(first?.setpoint).toBe(200_000);
     expect(
@@ -611,18 +662,27 @@ describe('decide: the setpoint ladder', () => {
         config,
         contextTokens: 210_000,
         lastAnnouncedSetpoint: first?.setpoint ?? null,
+        lastNoticeHadWrapUp: first?.wrapUp ?? null,
       }),
     ).toBeNull();
   });
 
   test('the wrap-up directive rides on the measured context, not the setpoint', () => {
     expect(
-      decide({config, contextTokens: 299_999, lastAnnouncedSetpoint: 100_000})
-        ?.wrapUp,
+      decide({
+        config,
+        contextTokens: 299_999,
+        lastAnnouncedSetpoint: 100_000,
+        lastNoticeHadWrapUp: false,
+      })?.wrapUp,
     ).toBe(false);
     expect(
-      decide({config, contextTokens: 300_000, lastAnnouncedSetpoint: 100_000})
-        ?.wrapUp,
+      decide({
+        config,
+        contextTokens: 300_000,
+        lastAnnouncedSetpoint: 100_000,
+        lastNoticeHadWrapUp: false,
+      })?.wrapUp,
     ).toBe(true);
   });
 
@@ -633,6 +693,7 @@ describe('decide: the setpoint ladder', () => {
         config: noNag,
         contextTokens: 400_000,
         lastAnnouncedSetpoint: null,
+        lastNoticeHadWrapUp: null,
       })?.wrapUp,
     ).toBe(false);
   });
@@ -703,8 +764,8 @@ describe('runUsageCheck: end to end over real files', () => {
   test('silent with no transcript_path, and on empty stdin', () => {
     const {dir} = setup(TEST_CONFIG, 400_000);
     expect(runCapturing({cwd: dir})).toBeNull();
-    expect(runUsageCheck({stdin: ''})).toBe(0);
-    expect(runUsageCheck({stdin: 'not json'})).toBe(0);
+    expect(runUsageCheck({env: NO_USER_CONFIG_ENV, stdin: ''})).toBe(0);
+    expect(runUsageCheck({env: NO_USER_CONFIG_ENV, stdin: 'not json'})).toBe(0);
   });
 
   test('silent when the transcript cannot be read at all', () => {
@@ -1095,13 +1156,25 @@ describe('config: per-role budgets (players vs the top-level session)', () => {
     expect(resolved(config).setpoints).toEqual([100_000]);
   });
 
-  test('a role may set null explicitly to switch its own directive off', () => {
+  test('a role switches its own directive off with 0, not null (o5atv.1.1 D4)', () => {
+    const config: UsageCheckConfig = {
+      enabled: true,
+      roles: {player: {wrapUpAt: 0}},
+      wrapUpAt: 200_000,
+    };
+    expect(resolvedFor(config, 'player').wrapUpAt).toBeNull();
+    expect(resolved(config).wrapUpAt).toBe(200_000);
+  });
+
+  test("a role's null wrapUpAt inherits the top level (o5atv.1.1 D3)", () => {
+    // Until 2026-11-08 this switched the directive off for players. null is
+    // the installer's seed value, so it now means "this says nothing here".
     const config: UsageCheckConfig = {
       enabled: true,
       roles: {player: {wrapUpAt: null}},
       wrapUpAt: 200_000,
     };
-    expect(resolvedFor(config, 'player').wrapUpAt).toBeNull();
+    expect(resolvedFor(config, 'player').wrapUpAt).toBe(200_000);
     expect(resolved(config).wrapUpAt).toBe(200_000);
   });
 
@@ -1537,6 +1610,366 @@ describe('runUsageCheck: upgrading over a transcript with legacy notices', () =>
 
     const asSession = noticeOf(runCapturing(base));
     expect(asSession).toContain('every 100,000 tokens (this one at 200,000)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-o5atv.2.1 — a session already past the threshold is told, once
+// ---------------------------------------------------------------------------
+
+/**
+ * The directive as every notice written before home-base-o5atv.2.1 carries
+ * it. A literal on purpose: live transcripts hold these bytes, so a later
+ * reword of WRAP_UP_DIRECTIVE must not quietly stop these tests checking them.
+ */
+const OLD_WRAP_UP_DIRECTIVE_TEXT =
+  'Wrap up your session at the next available opportunity. Follow the handoff/ralph-handoff protocol.';
+
+/**
+ * Verbatim from a live player transcript (session 98fff543, agent
+ * a1b0fc3b04048e679, 2026-11-06, Claude Code 2.1.319): the content of both
+ * its hook_additional_context and its hook_system_message record.
+ */
+const REAL_PLAYER_WRAP_UP_NOTICE = `${USAGE_CHECK_MARKER} This player subagent has now used 351,768 tokens of its OWN context, measured from its own transcript — this is your number, not the parent session's. This notice fires at preset token counts (this one at 350,000). (notice-at=350000)\n${OLD_WRAP_UP_DIRECTIVE_TEXT}`;
+
+/** A 400,000 threshold on the default ladder: the value planned for the user file. */
+const WRAP_UP_400K: UsageCheckConfig = {enabled: true, wrapUpAt: 400_000};
+
+/** The FYI notice a session got at `setpoint` on the default ladder. */
+function fyiNotice(setpoint: number, contextTokens: number): string {
+  return formatNotice(
+    {contextTokens, reason: 'ascend', setpoint, wrapUp: false},
+    {scope: 'session'},
+    USAGE_CHECK_DEFAULTS.setpoints,
+  );
+}
+
+/** A session notice at 700,000 carrying the OLD directive, as written before E2. */
+const OLD_SESSION_WRAP_UP_NOTICE = `${USAGE_CHECK_MARKER} This session has now used 712,345 tokens of context. This notice fires at preset token counts, every 100,000 tokens (this one at 700,000). (notice-at=700000)\n${OLD_WRAP_UP_DIRECTIVE_TEXT}`;
+
+/** What the scan reads from these entries, followed by a context of `contextTokens`. */
+function factsAfter(entries: unknown[], contextTokens: number) {
+  const path = writeTranscript(tempDir(), [
+    ...entries,
+    assistantEntry(contextTokens),
+  ]);
+  const facts = readTranscriptFacts({
+    lowestSetpoint: 100_000,
+    transcriptPath: path,
+  });
+  expect(facts.reachedStart).toBe(true);
+  return facts;
+}
+
+describe('the wrap-up opening (home-base-o5atv.2.1 E2, AC 3)', () => {
+  test('both directive constants start with the exported opening', () => {
+    expect(WRAP_UP_DIRECTIVE).toStartWith(WRAP_UP_OPENING);
+    expect(HANDOFF_WRAP_UP_DIRECTIVE).toStartWith(WRAP_UP_OPENING);
+  });
+
+  test('so does the text in notices written before it, which is unchanged', () => {
+    expect(OLD_WRAP_UP_DIRECTIVE_TEXT).toStartWith(WRAP_UP_OPENING);
+    expect(WRAP_UP_DIRECTIVE).toBe(OLD_WRAP_UP_DIRECTIVE_TEXT);
+  });
+});
+
+describe('transcript scan: did the last notice carry the directive (E1)', () => {
+  test('no notice at all: null, never false', () => {
+    const facts = factsAfter([], 720_000);
+    expect(facts.lastAnnouncedSetpoint).toBeNull();
+    expect(facts.lastNoticeHadWrapUp).toBeNull();
+  });
+
+  test('an FYI notice: false', () => {
+    const facts = factsAfter(
+      [noticeEntry(fyiNotice(700_000, 700_500))],
+      720_000,
+    );
+    expect(facts.lastAnnouncedSetpoint).toBe(700_000);
+    expect(facts.lastNoticeHadWrapUp).toBe(false);
+  });
+
+  test('a notice formatNotice wrote with either directive: true', () => {
+    for (const directive of [WRAP_UP_DIRECTIVE, HANDOFF_WRAP_UP_DIRECTIVE]) {
+      const notice = formatNotice(
+        {
+          contextTokens: 712_345,
+          reason: 'ascend',
+          setpoint: 700_000,
+          wrapUp: true,
+        },
+        {scope: 'session'},
+        USAGE_CHECK_DEFAULTS.setpoints,
+        directive,
+      );
+      expect(
+        factsAfter([noticeEntry(notice)], 720_000).lastNoticeHadWrapUp,
+      ).toBe(true);
+    }
+  });
+
+  test('a real player notice from a live transcript, with the OLD text: true', () => {
+    const facts = factsAfter(
+      [noticeEntry(REAL_PLAYER_WRAP_UP_NOTICE)],
+      360_000,
+    );
+    expect(facts.lastAnnouncedSetpoint).toBe(350_000);
+    expect(facts.lastNoticeHadWrapUp).toBe(true);
+  });
+
+  test('the systemMessage copy (content as a STRING) reads the same', () => {
+    const facts = factsAfter(
+      [
+        {
+          attachment: {
+            content: OLD_SESSION_WRAP_UP_NOTICE,
+            hookEvent: 'PostToolBatch',
+            type: 'hook_system_message',
+          },
+          type: 'attachment',
+        },
+      ],
+      720_000,
+    );
+    expect(facts.lastNoticeHadWrapUp).toBe(true);
+  });
+
+  test('a legacy setpoint= notice followed by the directive: true', () => {
+    const facts = factsAfter(
+      [noticeEntry(`${LEGACY_SESSION_NOTICE}\n${OLD_WRAP_UP_DIRECTIVE_TEXT}`)],
+      250_000,
+    );
+    expect(facts.lastAnnouncedSetpoint).toBe(200_000);
+    expect(facts.lastNoticeHadWrapUp).toBe(true);
+  });
+
+  test('only the MOST RECENT notice counts: an older directive does not make a newer FYI "told"', () => {
+    const facts = factsAfter(
+      [
+        noticeEntry(OLD_SESSION_WRAP_UP_NOTICE),
+        noticeEntry(fyiNotice(100_000, 105_000)),
+      ],
+      420_000,
+    );
+    expect(facts.lastAnnouncedSetpoint).toBe(100_000);
+    expect(facts.lastNoticeHadWrapUp).toBe(false);
+  });
+
+  test("another hook's text after an FYI, in the same dispatched string, is not this notice's directive", () => {
+    // The dispatcher joins every handler's additionalContext on one event with
+    // a blank line (hook-output.ts). Only the line right after the token is
+    // the notice's own directive line.
+    const joined = `${fyiNotice(700_000, 700_500)}\n\nSome other hook: ${OLD_WRAP_UP_DIRECTIVE_TEXT}\n${OLD_WRAP_UP_DIRECTIVE_TEXT}`;
+    const facts = factsAfter([noticeEntry(joined)], 720_000);
+    expect(facts.lastAnnouncedSetpoint).toBe(700_000);
+    expect(facts.lastNoticeHadWrapUp).toBe(false);
+  });
+});
+
+describe('decide: a session already past wrapUpAt is told once (home-base-o5atv.2.1 E3, AC 1)', () => {
+  const config = resolved(WRAP_UP_400K);
+
+  test('last notice an FYI at 700,000, context 720,000: fires wrap-up at 700,000 with the directive', () => {
+    expect(
+      decide({
+        config,
+        contextTokens: 720_000,
+        lastAnnouncedSetpoint: 700_000,
+        lastNoticeHadWrapUp: false,
+      }),
+    ).toEqual({
+      contextTokens: 720_000,
+      reason: 'wrap-up',
+      setpoint: 700_000,
+      wrapUp: true,
+    });
+  });
+
+  test('the same, with the last notice carrying the directive: silent', () => {
+    expect(
+      decide({
+        config,
+        contextTokens: 720_000,
+        lastAnnouncedSetpoint: 700_000,
+        lastNoticeHadWrapUp: true,
+      }),
+    ).toBeNull();
+  });
+
+  test('last notice an FYI at 300,000, context 350,000: silent, below the threshold', () => {
+    expect(
+      decide({
+        config,
+        contextTokens: 350_000,
+        lastAnnouncedSetpoint: 300_000,
+        lastNoticeHadWrapUp: false,
+      }),
+    ).toBeNull();
+  });
+
+  test('wrapUpAt null (or 0): never wrap-up, at any size', () => {
+    for (const off of [
+      resolved({enabled: true, wrapUpAt: null}),
+      resolved({enabled: true, wrapUpAt: 0}),
+    ]) {
+      expect(off.wrapUpAt).toBeNull();
+      for (const contextTokens of [720_000, 799_999]) {
+        expect(
+          decide({
+            config: off,
+            contextTokens,
+            lastAnnouncedSetpoint: 700_000,
+            lastNoticeHadWrapUp: false,
+          }),
+        ).toBeNull();
+      }
+    }
+  });
+
+  test('a notice carrying the OLD directive text counts as told', () => {
+    const facts = factsAfter(
+      [noticeEntry(OLD_SESSION_WRAP_UP_NOTICE)],
+      720_000,
+    );
+    expect(facts.lastNoticeHadWrapUp).toBe(true);
+    expect(facts.contextTokens).toBe(720_000);
+    expect(
+      decide({
+        config,
+        contextTokens: 720_000,
+        lastAnnouncedSetpoint: facts.lastAnnouncedSetpoint,
+        lastNoticeHadWrapUp: facts.lastNoticeHadWrapUp,
+      }),
+    ).toBeNull();
+  });
+
+  test('not known (null) stays silent, like every unknown state here (E4)', () => {
+    expect(
+      decide({
+        config,
+        contextTokens: 720_000,
+        lastAnnouncedSetpoint: 700_000,
+        lastNoticeHadWrapUp: null,
+      }),
+    ).toBeNull();
+  });
+
+  test('a player is under the same rule, at its role threshold; its session is not (E5)', () => {
+    // PLAYER_BOUND_CONFIG: players wrap up at 350,000, sessions never.
+    const args = {
+      contextTokens: 420_000,
+      lastAnnouncedSetpoint: 400_000,
+      lastNoticeHadWrapUp: false,
+    };
+    expect(
+      decide({...args, config: resolvedFor(PLAYER_BOUND_CONFIG, 'player')}),
+    ).toEqual({
+      contextTokens: 420_000,
+      reason: 'wrap-up',
+      setpoint: 400_000,
+      wrapUp: true,
+    });
+    expect(
+      decide({...args, config: resolvedFor(PLAYER_BOUND_CONFIG, 'session')}),
+    ).toBeNull();
+  });
+
+  test('the ordinary reasons still come first: an ascent past the threshold is an ascent', () => {
+    expect(
+      decide({
+        config,
+        contextTokens: 805_000,
+        lastAnnouncedSetpoint: 700_000,
+        lastNoticeHadWrapUp: false,
+      })?.reason,
+    ).toBe('ascend');
+  });
+});
+
+describe('runUsageCheck: told at the next check, once (home-base-o5atv.2.1 AC 2)', () => {
+  function pastThresholdSession() {
+    const dir = tempDir();
+    writeConfig(dir, WRAP_UP_400K);
+    const transcriptPath = writeTranscript(dir, [
+      assistantEntry(700_500),
+      noticeEntry(fyiNotice(700_000, 700_500)),
+      assistantEntry(720_000),
+    ]);
+    return {
+      input: {
+        cwd: dir,
+        hook_event_name: 'PostToolBatch',
+        transcript_path: transcriptPath,
+      },
+      transcriptPath,
+    };
+  }
+
+  test('last notice an FYI at 700,000, context 720,000: the directive, then nothing', () => {
+    const {input, transcriptPath} = pastThresholdSession();
+
+    const first = noticeOf(runCapturing(input));
+    expect(first).toContain('720,000 tokens of context');
+    expect(first?.split('\n')[0]).toEndWith('(notice-at=700000)');
+    expect(first?.split('\n')[1]).toBe(WRAP_UP_DIRECTIVE);
+    expect(first).not.toContain(NOTICE_FYI);
+
+    // Claude Code records the notice; that alone is the "already told" state.
+    if (first == null) throw new Error('expected the wrap-up notice');
+    recordNotice(transcriptPath, first);
+    expect(runCapturing(input)).toBeNull();
+
+    // Still silent as the context grows inside the rung…
+    appendFileSync(
+      transcriptPath,
+      `${JSON.stringify(assistantEntry(760_000))}\n`,
+    );
+    expect(runCapturing(input)).toBeNull();
+
+    // …and the ladder ascending still says it, as before this change.
+    appendFileSync(
+      transcriptPath,
+      `${JSON.stringify(assistantEntry(805_000))}\n`,
+    );
+    const ascent = noticeOf(runCapturing(input));
+    expect(ascent?.split('\n')[0]).toEndWith('(notice-at=800000)');
+    expect(ascent?.split('\n')[1]).toBe(WRAP_UP_DIRECTIVE);
+  });
+
+  test('the systemMessage copy alone also counts as told', () => {
+    const {input, transcriptPath} = pastThresholdSession();
+    const payload = runCapturing(input);
+    const mirror = payload?.systemMessage;
+    expect(typeof mirror).toBe('string');
+    appendFileSync(
+      transcriptPath,
+      `${JSON.stringify({
+        attachment: {
+          content: mirror,
+          hookEvent: 'PostToolBatch',
+          type: 'hook_system_message',
+        },
+        type: 'attachment',
+      })}\n`,
+    );
+    expect(runCapturing(input)).toBeNull();
+  });
+
+  test('a transcript already holding the OLD directive is not told again', () => {
+    const dir = tempDir();
+    writeConfig(dir, WRAP_UP_400K);
+    const transcriptPath = writeTranscript(dir, [
+      assistantEntry(712_345),
+      noticeEntry(OLD_SESSION_WRAP_UP_NOTICE),
+      assistantEntry(720_000),
+    ]);
+    expect(
+      runCapturing({
+        cwd: dir,
+        hook_event_name: 'PostToolBatch',
+        transcript_path: transcriptPath,
+      }),
+    ).toBeNull();
   });
 });
 

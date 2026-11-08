@@ -1098,7 +1098,7 @@ export async function runThreadReport(
   const renderConfig = {
     emojiHeader: threadConfig.emojiHeader,
     full: options.full === true,
-    wrapUpAt: resolveReportWrapUpAt(threadConfig.projectRoot),
+    wrapUpAt: resolveReportWrapUpAt(threadConfig.projectRoot, env),
   };
 
   // --- 4a. WHICH THREAD DOES THIS ONE CONTINUE? (D18) ---------------------

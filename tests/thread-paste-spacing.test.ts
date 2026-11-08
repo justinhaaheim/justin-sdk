@@ -78,6 +78,7 @@ describe('F7: two empty lines between sibling list items in pasted markdown', ()
         parent: 't-1',
         priority: 2,
         question: 'Which bucket?',
+        repair: null,
         request: null,
         unlinkedWhy: 'no request named',
       },

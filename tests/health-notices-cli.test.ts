@@ -497,6 +497,16 @@ describe('the CLI hot path', () => {
     expect(bare.has('zod')).toBe(false);
   });
 
+  test('usage-check.ts statically reaches no zod, now that it reads the user file (home-base-o5atv.1.1 D5)', () => {
+    // usage-check runs after every tool batch. It reads the user config by
+    // hand rather than through sdk-config's typed reader for exactly this.
+    const bare = staticImportGraph(join(SRC, 'usage-check.ts'));
+    expect([...bare].sort()).not.toContain('zod');
+    // Not vacuous: `os` is imported only by health-notices.ts, so finding it
+    // proves the walk followed usage-check's import of that module.
+    expect(bare.has('os')).toBe(true);
+  });
+
   test('sdk-config DOES import zod statically — so the check above is meaningful', () => {
     expect([...staticImportGraph(join(SRC, 'sdk-config.ts'))]).toContain('zod');
   });

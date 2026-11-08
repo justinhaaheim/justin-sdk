@@ -34,11 +34,14 @@ export async function titleSetEdit(input: {
 /**
  * What adopting did to the bead's status (home-base-vzwbj.4.9 F1). `already`:
  * it was in_progress, so no status change was sent. `left`: br refused the
- * claim (`cannot claim blocked issue`), so only the labels were added.
+ * claim (`cannot claim blocked issue`), so only the labels were added. `kept`:
+ * the caller asked for the status to stay (a closed request being marked
+ * overarching, home-base-b4t8w), so only the labels were added.
  */
 export type AdoptedStatus =
   | {from: string; kind: 'set'}
   | {kind: 'already'}
+  | {kind: 'kept'; status: string}
   | {blockers: string; kind: 'left'; status: string};
 
 const CLAIM_REFUSAL = /cannot claim blocked issue:?\s*([^\n]*)/;
@@ -67,11 +70,15 @@ export function claimRefusalBlockers(failureText: string): string | null {
  * already in_progress, and a claim br refuses (a bead it counts as blocked: br
  * 0.1.37 counts open children; br 0.7.6 does not and claims it, measured
  * 2026-10-26) still adopts, labels only.
+ *
+ * `keepStatus` adopts with labels only and never sends a status change.
  */
 export function adoptBead(input: {
   db: string;
   env: EnvLike;
   id: string;
+  /** Leave the status as it is (home-base-b4t8w). */
+  keepStatus?: boolean;
   sessionId: string;
   /** The bead's status as last read. */
   status: string;
@@ -90,6 +97,9 @@ export function adoptBead(input: {
   if (status === 'in_progress') {
     adopted = labelOnly();
     adoptedStatus = {kind: 'already'};
+  } else if (input.keepStatus === true) {
+    adopted = labelOnly();
+    adoptedStatus = {kind: 'kept', status};
   } else {
     adopted = update({db, env}, id, {
       addLabels: labels,

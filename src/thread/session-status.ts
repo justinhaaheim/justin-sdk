@@ -10,8 +10,7 @@
  *                          counted "if you stop now" too); or the transcript's
  *                          last record is under 3 minutes old
  *   3. 🤝 Handed off       the session bead carries `handed-off`
- *   4. 🧯 Out of context   context tokens at or above usage-check's wrapUpAt
- *   5. ✅ Done             Justin closed the session (`done: Justin…`, and —
+ *   4. ✅ Done             Justin closed the session (`done: Justin…`, and —
  *                          a decision of dispatch 3 — `archived: …`), whatever
  *                          git says; or every request closed (at least one)
  *                          AND git measured the branch merged into the default
@@ -19,21 +18,23 @@
  *                          vzwbj.4.9 R2)
  *      🔀 Done, not merged every request closed, but not merged or not clean;
  *                          git unmeasured there is ❔, never ✅ (R2)
- *   6. 💬 Answered         no request, the last message is Claude's, commits
+ *   5. 💬 Answered         no request, the last message is Claude's, commits
  *                          since the first prompt COUNTED zero (a partial
  *                          count — commit evidence that matched no commit —
  *                          is not zero, R3), and the tree MEASURED clean
  *                          ignoring `.beads/`
- *   7. ❔ Unknown          commits or the tree could not be measured (or a
- *                          beads export could not be read): named, never 6;
+ *   6. ❔ Unknown          commits or the tree could not be measured (or a
+ *                          beads export could not be read): named, never 5;
  *                          or (home-base-yd1co.2 D5) the helpers or the last
  *                          record could not be measured, or a helper in flight
  *                          carries no time — named, and marked
  *                          `activityUnread` so the inbox's age filter treats
  *                          it as the ⚠️ it replaces
+ *   7. 🧯 Out of context   what would be 8, with context tokens at or above
+ *                          usage-check's wrapUpAt (home-base-o5atv.3 O1)
  *   8. ⚠️ Open work, no blocker — otherwise
  *
- * Between 4 and 5, in this order: Justin's `done:`/`archived:` mark (5's first
+ * Between 3 and 4, in this order: Justin's `done:`/`archived:` mark (4's first
  * half, final whatever else could be read); then ⏳ Export behind
  * (home-base-jm5kg.11.2: the session bead is in the database and not in the
  * export, so nothing from the requests on can be claimed); then ❔ Unknown for
@@ -42,6 +43,15 @@
  * (`HELPER_QUIET_LIMIT_MS`) may be waiting on a long command or may have died,
  * so neither "working" nor "stopped" nor "done" can be claimed. From 2 hours
  * on the helper counts for nothing.
+ *
+ * OUT OF CONTEXT IS A KIND OF OPEN WORK (home-base-o5atv.3 O1, 2026-11-08). It
+ * replaces only ⚠️ Open work; every other verdict wins over it. Epic D2 put it
+ * at rung 4, above ✅ Done. That rung never fired in home-base until a
+ * user-level wrapUpAt (400k, home-base-o5atv.1.1) made it live, and then it hid
+ * finished and to-land sessions behind "ask Claude for a handoff", which would
+ * continue nothing: a finished session needs Justin to land or test it. An
+ * unknown stays the cautious verdict (critical rule 7). Do not restore D2's
+ * order.
  *
  * Optional questions (P1–P3) and FYIs (P4) never change the status; they are
  * counted beside it. `asIfYielded` is the "if you stop now" verdict `thread
@@ -286,7 +296,10 @@ function pickupOverdue(since: string | undefined, now: Date): boolean {
   return Number.isNaN(at) || now.getTime() - at >= PICKUP_OVERDUE_MS;
 }
 
-/** Epic D2's precedence, exactly. Pure: same facts and clock, same answer. */
+/**
+ * Epic D2's precedence, as revised by home-base-o5atv.3 O1 (out of context
+ * replaces only open work). Pure: same facts and clock, same answer.
+ */
 export function deriveStatus(
   facts: StatusFacts,
   options: DeriveOptions,
@@ -320,18 +333,6 @@ export function deriveStatus(
     return pickupOverdue(facts.pickupAwaitedSince, options.now)
       ? {kind: 'handedOff', notPickedUp: true, successor: facts.successor}
       : {kind: 'handedOff', successor: facts.successor};
-  }
-
-  if (
-    facts.contextTokens != null &&
-    facts.wrapUpAt != null &&
-    facts.contextTokens >= facts.wrapUpAt
-  ) {
-    return {
-      contextTokens: facts.contextTokens,
-      kind: 'outOfContext',
-      wrapUpAt: facts.wrapUpAt,
-    };
   }
 
   // Justin's mark is final whatever else could be read.
@@ -413,6 +414,21 @@ export function deriveStatus(
     return {activityUnread: true, kind: 'unknown', reasons: activity};
   }
 
+  // home-base-o5atv.3 O1: out of context is a kind of open work, so it is
+  // checked only here, where the verdict would otherwise be ⚠️ Open work.
+  // Both numbers must be known: an unmeasured context size is not evidence.
+  if (
+    facts.contextTokens != null &&
+    facts.wrapUpAt != null &&
+    facts.contextTokens >= facts.wrapUpAt
+  ) {
+    return {
+      contextTokens: facts.contextTokens,
+      kind: 'outOfContext',
+      wrapUpAt: facts.wrapUpAt,
+    };
+  }
+
   return {kind: 'openWork'};
 }
 
@@ -473,7 +489,16 @@ export function statusFactsOf(model: SessionModel): StatusFacts {
     contextTokens: transcript.contextTokens.ok
       ? transcript.contextTokens.value
       : null,
-    handedOff: session?.labels.includes(HANDED_OFF_LABEL) === true,
+    // home-base-5uu56.2: a session another one continues is handed off, whether
+    // the link came from its own `thread handoff` or from a session started by
+    // hand to continue it (2ignt, continued on 2026-10-24 with no handed-off
+    // label, read as live work for two weeks).
+    handedOff:
+      session?.labels.some(
+        (label) =>
+          label === HANDED_OFF_LABEL ||
+          label.startsWith(CONTINUED_BY_LABEL_PREFIX),
+      ) === true,
     ...(awaited == null ? {} : {pickupAwaitedSince: awaited}),
     ...(model.exportBehind == null ? {} : {exportBehind: model.exportBehind}),
     helpersInFlight: transcript.helpers.ok

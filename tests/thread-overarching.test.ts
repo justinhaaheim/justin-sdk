@@ -296,6 +296,48 @@ describe('D1: --overarching marks one request per chain', () => {
     expect(bead(w, w.sessionBeadId).title).toBe('Answer a simple question');
   });
 
+  test('marking a closed request overarching leaves it closed (home-base-b4t8w)', async () => {
+    needBr();
+    const w = world();
+    const id = filedId(
+      await request(w, 'Fix the Brave throttling', {overarching: true}),
+    );
+    const closed = runBr(w.repo, ['close', id, '--reason', 'done']);
+    if (!closed.ok) throw new Error(closed.reason ?? 'br close failed');
+
+    const confirmed = await request(w, null, {bead: id, overarching: true});
+    expect(confirmed).toMatchObject({
+      adoptedStatus: {kind: 'kept', status: 'closed'},
+      followUpFailures: [],
+      mode: 'adopted',
+      overarching: {id},
+    });
+    expect(bead(w, id).status).toBe('closed');
+    expect(marks(bead(w, id).labels)).toHaveLength(2);
+    expect(describeRequestOutcome(confirmed).lines.join('\n')).toContain(
+      'status left closed',
+    );
+
+    // Control: an open bead marked overarching is still claimed.
+    const open = runBr(w.repo, ['create', 'Open work', '--silent']);
+    if (!open.ok) throw new Error(open.reason ?? 'br create failed');
+    const openId = open.stdout.trim();
+    const claimed = await request(w, null, {bead: openId, overarching: true});
+    expect(claimed).toMatchObject({
+      adoptedStatus: {from: 'open', kind: 'set'},
+    });
+    expect(bead(w, openId).status).toBe('in_progress');
+
+    // Control: adopting a closed bead without --overarching still claims it.
+    const closedAgain = runBr(w.repo, ['close', openId, '--reason', 'done']);
+    if (!closedAgain.ok) throw new Error(closedAgain.reason ?? 'close failed');
+    const reopened = await request(w, null, {bead: openId});
+    expect(reopened).toMatchObject({
+      adoptedStatus: {from: 'closed', kind: 'set'},
+    });
+    expect(bead(w, openId).status).toBe('in_progress');
+  });
+
   test('a plain request never marks or unmarks anything', async () => {
     needBr();
     const w = world();

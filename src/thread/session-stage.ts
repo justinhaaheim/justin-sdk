@@ -19,6 +19,7 @@
 
 import type {BrTarget} from '../beads/br';
 import type {EnvLike} from './paths';
+import type {SessionBeadRepair} from './session-repair';
 
 import {
   brShow,
@@ -30,12 +31,15 @@ import {
 import {sdkRun} from '../sdk-invocation';
 import {REQUEST_LABEL, STAGE_LABEL_PREFIX} from './session-bead';
 import {readSessionSightings} from './session-index';
+import {repairMissingSessionBead, repairRefusalNote} from './session-repair';
 import {sessionBeadsKnob, sessionIdFrom} from './session-select';
 import {stageReached} from './session-status';
 
 export interface ThreadStageOptions {
   cwd?: string;
   env?: EnvLike;
+  /** When the race window is measured from (home-base-4ay2j); tests pin it. */
+  now?: Date;
   /** The request bead's id. */
   request: string | null;
   /** `--session`, else CLAUDE_CODE_SESSION_ID; optional here. */
@@ -45,7 +49,16 @@ export interface ThreadStageOptions {
   unset: boolean;
 }
 
-export type ThreadStageOutcome =
+export type ThreadStageOutcome = StageVerdict & {
+  /**
+   * home-base-4ay2j: what repairing this session's missing session bead did,
+   * printed on stderr; absent or null when there is nothing to say. Stage
+   * needs no session bead itself, so a failed repair never stops the mark.
+   */
+  repairLine?: string | null;
+};
+
+type StageVerdict =
   | {
       db: string;
       id: string;
@@ -92,33 +105,23 @@ function placesToLook(
   return {places: [...new Set(places)], problems};
 }
 
-/** The decision half: validates, writes the labels, prints nothing. */
-export async function markStage(
-  options: ThreadStageOptions,
-): Promise<ThreadStageOutcome> {
-  const env = options.env ?? process.env;
-  const cwd = options.cwd ?? process.cwd();
-  const id = options.request?.trim() ?? '';
-  const names = [
-    ...new Set(
-      options.stages.map((name) => name.trim()).filter((name) => name !== ''),
-    ),
-  ];
-  if (id === '' || names.length === 0) {
-    return {
-      kind: 'usage',
-      message: `give a request and at least one stage: ${sdkRun('thread stage <request id> <stage>… [--unset]')}`,
-    };
-  }
+/** The stage-side line for a repair: said when it filed, deferred or failed. */
+function stageRepairLine(repair: SessionBeadRepair): string | null {
+  if (repair.kind === 'repaired') return repair.line;
+  if (repair.kind !== 'deferred' && repair.kind !== 'failed') return null;
+  return `⚠️ thread stage: this session has no session bead (the capture hook did not file it). ${repairRefusalNote(repair) ?? ''}`.trim();
+}
 
-  const knob = await sessionBeadsKnob(cwd, env);
-  if (!knob.ok) return {kind: 'disabled', reason: knob.reason};
-
-  const {resolveThreadConfig} = await import('./config');
-  const ladder = resolveThreadConfig({cwd, env}).stages;
-  const unknown = names.filter((name) => !ladder.includes(name));
-  if (unknown.length > 0) return {kind: 'unknownStage', ladder, names: unknown};
-
+/** The request looked up in the session's DBs, then the cwd's, and marked. */
+function markInPlaces(input: {
+  cwd: string;
+  env: EnvLike;
+  id: string;
+  ladder: readonly string[];
+  names: string[];
+  options: ThreadStageOptions;
+}): StageVerdict {
+  const {cwd, env, id, ladder, names, options} = input;
   const {places, problems} = placesToLook(cwd, env, options.sessionId);
   if (places.length === 0) {
     return {
@@ -176,6 +179,52 @@ export async function markStage(
   return {id, kind: 'notFound', problems, searched: places};
 }
 
+/** The decision half: validates, writes the labels, prints nothing. */
+export async function markStage(
+  options: ThreadStageOptions,
+): Promise<ThreadStageOutcome> {
+  const env = options.env ?? process.env;
+  const cwd = options.cwd ?? process.cwd();
+  const id = options.request?.trim() ?? '';
+  const names = [
+    ...new Set(
+      options.stages.map((name) => name.trim()).filter((name) => name !== ''),
+    ),
+  ];
+  if (id === '' || names.length === 0) {
+    return {
+      kind: 'usage',
+      message: `give a request and at least one stage: ${sdkRun('thread stage <request id> <stage>… [--unset]')}`,
+    };
+  }
+
+  const knob = await sessionBeadsKnob(cwd, env);
+  if (!knob.ok) return {kind: 'disabled', reason: knob.reason};
+
+  const {resolveThreadConfig} = await import('./config');
+  const ladder = resolveThreadConfig({cwd, env}).stages;
+  const unknown = names.filter((name) => !ladder.includes(name));
+  if (unknown.length > 0) return {kind: 'unknownStage', ladder, names: unknown};
+
+  // home-base-4ay2j D1: a session whose bead the capture hook failed to file
+  // is repaired here too, BEFORE the index is read for the places to look, so
+  // its status and inbox come back. Stage itself needs no session bead.
+  const own = sessionIdFrom(options.sessionId, env);
+  const repairLine = own.ok
+    ? stageRepairLine(
+        await repairMissingSessionBead({
+          by: 'thread stage',
+          cwd,
+          env,
+          now: options.now ?? new Date(),
+          sessionId: own.id,
+        }),
+      )
+    : null;
+  const verdict = markInPlaces({cwd, env, id, ladder, names, options});
+  return repairLine == null ? verdict : {...verdict, repairLine};
+}
+
 export function describeStageOutcome(outcome: ThreadStageOutcome): {
   exitCode: 0 | 1 | 2;
   lines: string[];
@@ -229,7 +278,10 @@ export function describeStageOutcome(outcome: ThreadStageOutcome): {
 export async function runThreadStage(
   options: ThreadStageOptions,
 ): Promise<number> {
-  const {exitCode, lines} = describeStageOutcome(await markStage(options));
+  const outcome = await markStage(options);
+  // home-base-4ay2j: the repair line, on stderr so stdout keeps its shape.
+  if (outcome.repairLine != null) console.error(outcome.repairLine);
+  const {exitCode, lines} = describeStageOutcome(outcome);
   const write = exitCode === 0 ? console.log : console.error;
   for (const line of lines) write(line);
   return exitCode;

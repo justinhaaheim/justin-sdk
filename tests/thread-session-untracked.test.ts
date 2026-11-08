@@ -219,6 +219,62 @@ describe('D6 verdict: a full card for each kind of evidence of open work', () =>
         NOW,
       ).display,
     ).toBe('line');
+    const session = fixture({contextTokens: measured(150_000)});
+    expect(
+      untrackedCard(session, untrackedVerdict(session, NOW), NOW, NO_PANES)
+        .status,
+    ).toBe('🧯 Out of context (not tracked: it has no session bead)');
+  });
+
+  // home-base-o5atv.3 O2: out of context never displaces work waiting to land.
+  test('out of context AND a branch not merged: rule 6 merge, and the card never says out of context', () => {
+    const session = fixture({
+      contextTokens: measured(160_000),
+      git: {
+        ...fixture().git,
+        aheadOfDefault: measured(3),
+        branch: measured('feature'),
+        merged: measured('notMerged'),
+      },
+    });
+    const verdict = untrackedVerdict(session, NOW);
+    expect(verdict.display).toBe('card');
+    expect(verdict.evidence).toEqual(['outOfContext', 'unmerged']);
+    expect(verdict.action).toEqual({
+      command: null,
+      rule: 6,
+      text: 'Land it: merge feature into main (3 commits)',
+    });
+    expect(untrackedCard(session, verdict, NOW, NO_PANES).status).not.toContain(
+      'Out of context',
+    );
+  });
+
+  test('out of context AND its own uncommitted files: rule 6 commit', () => {
+    const verdict = untrackedVerdict(
+      fixture({
+        contextTokens: measured(160_000),
+        git: {...fixture().git, uncommitted: measured(['a.ts'])},
+      }),
+      NOW,
+    );
+    expect(verdict.action).toEqual({
+      command: null,
+      rule: 6,
+      text: 'Land it: commit the 1 uncommitted file on main',
+    });
+  });
+
+  test('out of context AND a fact unmeasured: rule 10, and the card never says out of context', () => {
+    const session = fixture({
+      contextTokens: measured(160_000),
+      git: {...fixture().git, merged: unmeasured('git merge-base failed')},
+    });
+    const verdict = untrackedVerdict(session, NOW);
+    expect(verdict.action.rule).toBe(10);
+    expect(untrackedCard(session, verdict, NOW, NO_PANES).status).not.toContain(
+      'Out of context',
+    );
   });
 
   test('an open blocking question in its old report: full card, read the last reply', () => {

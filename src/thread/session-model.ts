@@ -1350,7 +1350,7 @@ export async function loadSession(input: {
   const {resolveReportWrapUpAt, resolveRepoTag, resolveThreadConfig} =
     await import('./config');
   const stages = resolveThreadConfig({cwd: configDir, env}).stages;
-  const wrapUpAt = resolveReportWrapUpAt(findProjectRoot(configDir));
+  const wrapUpAt = resolveReportWrapUpAt(findProjectRoot(configDir), env);
   const repo = created.repo ?? git.repo;
   // The tag, unlike the ladder, never falls back to the caller's directory: a
   // cross-repo inbox would print the caller's tag on every repo's sessions.

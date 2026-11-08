@@ -44,6 +44,7 @@ import {ensureSessionBead, toLabel} from '../src/thread/session-bead';
 import {appendSessionSighting} from '../src/thread/session-index';
 import {
   composeSessionContext,
+  handedOffNotice,
   sessionContextLine,
 } from '../src/thread/session-line';
 import {
@@ -1268,6 +1269,61 @@ describe('the prompt-time line carries new answers', () => {
     expect(third.split('\n').slice(1)).toEqual([
       `- Later? (${later.id}) → Justin: new: with a colon`,
     ]);
+  });
+});
+
+describe('the prompt-time line says when the session was handed off (home-base-5uu56.2)', () => {
+  test('handedOffNotice reads continued-by: first, then handed-off, else nothing', () => {
+    expect(handedOffNotice(['session', 'continued-by:t-9'])).toEqual({
+      kind: 'continued',
+      successors: ['t-9'],
+    });
+    expect(
+      handedOffNotice(['handed-off', 'continued-by:t-9', 'continued-by:t-8']),
+    ).toEqual({kind: 'continued', successors: ['t-9', 't-8']});
+    expect(handedOffNotice(['session', 'handed-off'])).toEqual({
+      kind: 'awaiting',
+    });
+    // Control: a successor's own `continues:` is not a handoff of this session.
+    expect(handedOffNotice(['session', 'continues:t-1'])).toBeNull();
+  });
+
+  test('composeSessionContext: the warning opens the context, on its own line', () => {
+    const text = composeSessionContext({
+      beadId: 't-1',
+      handedOff: {kind: 'continued', successors: ['t-9']},
+      kind: 'session',
+      requests: {done: 0, kind: 'counted', open: 1},
+      title: 'Build the export',
+      titleProblem: null,
+    });
+    const [lead, line] = text.split('\n');
+    expect(lead).toStartWith('⚠️ HANDED OFF: session t-9 continues this one');
+    expect(lead).toContain('`bun run justin-sdk thread show t-9`');
+    expect(lead).toContain('tell Justin');
+    expect(line).toStartWith('[thread] session t-1 ');
+  });
+
+  test('end to end from the files: no warning, then one once a successor links', () => {
+    const w = world();
+    const before =
+      sessionContextLine({cwd: w.repo, env: w.env, sessionId: SESSION}) ?? '';
+    expect(before).not.toContain('HANDED OFF');
+    expect(before.split('\n')).toHaveLength(1);
+    const linked = runBr(w.repo, [
+      'update',
+      w.sessionBead,
+      '--add-label',
+      'continued-by:t-successor',
+    ]);
+    if (!linked.ok) throw new Error(linked.reason ?? 'br update failed');
+    const after =
+      sessionContextLine({cwd: w.repo, env: w.env, sessionId: SESSION}) ?? '';
+    const [lead, line] = after.split('\n');
+    expect(lead).toStartWith(
+      '⚠️ HANDED OFF: session t-successor continues this one',
+    );
+    expect(line).toStartWith(`[thread] session ${w.sessionBead} `);
   });
 });
 

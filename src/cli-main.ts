@@ -1073,7 +1073,7 @@ void yargs(ARGV)
   )
   .command(
     'usage-check',
-    'UserPromptSubmit + PostToolBatch hook: tell the session how many tokens of its OWN CONTEXT it has used (NOT subscription quota), as an FYI at preset token counts — by default every 100k tokens. When the payload carries an agent_id the number measured is the SUBAGENT\'s own, read from its own transcript, and componentConfig["usage-check"].roles.player overrides the budget for it. The wrap-up directive is opt-in and OFF unless a wrapUpAt names a token count (reads stdin, prints nothing when not due; a subagent whose transcript cannot be found prints UNKNOWN to stderr and measures nothing)',
+    "UserPromptSubmit + PostToolBatch hook: tell the session how many tokens of its OWN CONTEXT it has used (NOT subscription quota), as an FYI at preset token counts — by default every 100k tokens. When the payload carries an agent_id the number measured is the SUBAGENT's own, read from its own transcript, and componentConfig[\"usage-check\"].roles.player overrides the budget for it. The wrap-up directive is off until a wrapUpAt names a token count, read from the repo's justin-sdk.config.json and from the user file ($XDG_CONFIG_HOME/justin-sdk/config.json): the repo's number wins, a repo's 0 turns it off there, a repo's null or no key uses the user file's number, and no number anywhere means off. The user file never turns the hook on in a repo whose own file has no usage-check block. (Reads stdin, prints nothing when not due; a subagent whose transcript cannot be found prints UNKNOWN to stderr and measures nothing; a user file that cannot be read is named on stderr and ignored.)",
     (y) => y,
     () => {
       // Always exits 0: a failing UserPromptSubmit hook can block the prompt.

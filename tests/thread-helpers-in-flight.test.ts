@@ -553,11 +553,13 @@ describe('deriveStatus: the three bands of a helper in flight (home-base-yd1co.2
       false,
       {kind: 'handedOff', successor: null},
     ],
+    // home-base-o5atv.3 O1: out of context replaces only open work, so a
+    // quiet helper's unknown wins over it (it was the other way round).
     [
-      'out of context over the unknown band',
+      'the unknown band over out of context (O1)',
       {contextTokens: 160_000, helpersInFlight: [ago(60 * MINUTE)]},
       false,
-      {contextTokens: 160_000, kind: 'outOfContext', wrapUpAt: 150_000},
+      quiet(60 * MINUTE),
     ],
     [
       'every request closed, merged and clean, a helper quiet: unknown, not Done',

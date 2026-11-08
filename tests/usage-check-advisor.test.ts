@@ -57,6 +57,14 @@ function tempDir(): string {
 }
 
 /**
+ * An XDG_CONFIG_HOME with no user config in it, so the hook (which reads the
+ * user file too since home-base-o5atv.1.1) never reads Justin's real one.
+ */
+const NO_USER_CONFIG_ENV = {
+  XDG_CONFIG_HOME: mkdtempSync(join(tmpdir(), 'usage-check-advisor-no-user-')),
+};
+
+/**
  * A single-turn usage block, verbatim from record msg_…9z1AzP4N (08:29:07).
  * Note `server_tool_use` is PRESENT and zero — it is on essentially every
  * record, which is exactly why it cannot be the discriminant.
@@ -210,7 +218,10 @@ function runCapturing(input: unknown): Record<string, unknown> | null {
   });
   let exit: number;
   try {
-    exit = runUsageCheck({stdin: JSON.stringify(input)});
+    exit = runUsageCheck({
+      env: NO_USER_CONFIG_ENV,
+      stdin: JSON.stringify(input),
+    });
   } finally {
     capture.mockRestore();
   }

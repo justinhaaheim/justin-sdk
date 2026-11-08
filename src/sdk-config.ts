@@ -645,7 +645,12 @@ const componentConfigSchema = z
       .describe('time-check: the elapsed-time notice.'),
     'usage-check': z
       .looseObject({
-        enabled: z.boolean().optional(),
+        enabled: z
+          .boolean()
+          .optional()
+          .describe(
+            'Read from the project file only. false switches the hook off in this repo. In the user file this key is not read: the user file supplies knob values to every repo whose own file has a usage-check block, and never switches the hook on or off.',
+          ),
         reArmDropFraction: z
           .number()
           .optional()
@@ -663,7 +668,7 @@ const componentConfigSchema = z
               .nullable()
               .optional()
               .describe(
-                'Overrides for a dispatched subagent, whose budget differs from its conductor’s. An absent field inherits the top-level value.',
+                'Overrides for a dispatched subagent, whose budget differs from its conductor’s. An absent field inherits the top-level value, and so does a null wrapUpAt; a wrapUpAt of 0 turns the directive off for subagents. A subagent’s wrapUpAt is the first number in: project roles.player, user roles.player, project top level, user top level. None means off.',
               ),
           })
           .nullable()
@@ -681,7 +686,7 @@ const componentConfigSchema = z
           .nullable()
           .optional()
           .describe(
-            'Context size at or above which the notice adds the wrap-up directive. null (the default) never nags.',
+            'Context size at or above which the notice adds the wrap-up directive. Read from the project file and the user file. The repo’s number wins. A repo’s 0 turns the directive off there. A repo’s null, or no key, uses the user file’s number. No number anywhere means off (the default). Set it once in the user file to reach every repo with this component.',
           ),
       })
       .optional()

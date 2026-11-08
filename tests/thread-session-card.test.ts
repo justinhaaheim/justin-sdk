@@ -291,6 +291,24 @@ describe('D3 rule 3: handed off', () => {
     );
     expect(unknownSuccessor.command).toBe('bun run justin-sdk thread show t-1');
   });
+
+  test('a session continued by one started by hand (continued-by: only, no handed-off) is handed off too (home-base-5uu56.2)', () => {
+    const continued = fixture({
+      requests: [open('t-2', 'Migrate the orders table')],
+      session: {labels: ['session', 'continued-by:t-9']},
+    });
+    expect(action(continued, NEXT_SID)).toMatchObject({
+      command: `claude --resume ${NEXT_SID}`,
+      kind: 'handedOff',
+      rule: 3,
+    });
+    // Control: the same session with no successor label is open work, not handed off.
+    const notContinued = fixture({
+      requests: [open('t-2', 'Migrate the orders table')],
+      session: {labels: ['session']},
+    });
+    expect(action(notContinued).kind).not.toBe('handedOff');
+  });
 });
 
 describe('D3 rule 4: out of context', () => {
@@ -681,5 +699,106 @@ describe('D4 and D5: landing stages and sections', () => {
     );
     expect(sectionFor(10, null, null)).toBe('checkByHand');
     expect(sectionFor(5, null, null)).toBe('stoppedOpen');
+  });
+});
+
+// home-base-o5atv.3 O1 (2026-11-08): out of context replaces only open work.
+// Every fixture here is past the fixture's wrapUpAt (150k), as five finished
+// home-base sessions were once a 400k user-level wrapUpAt made rung 4 live:
+// each must keep its section, and only open work moves to out of context.
+describe('home-base-o5atv.3 O1: past wrapUpAt, a session keeps the section its work earns', () => {
+  const past = {contextTokens: measured(160_000)};
+
+  function placed(model: SessionModel): {
+    kind: SessionStatus['kind'];
+    rule: ActionLine['rule'];
+    section: ReturnType<typeof sectionFor>;
+  } {
+    const status = statusOf(model);
+    const {rule} = deriveAction({model, status, successorSessionId: null});
+    return {
+      kind: status.kind,
+      rule,
+      section: sectionFor(rule, status, statusCounts(model)),
+    };
+  }
+
+  test('every request closed on an unmerged branch: To land, not out of context', () => {
+    expect(
+      placed(
+        fixture({
+          git: {
+            aheadOfDefault: measured(3),
+            branch: measured('worktree-parser'),
+            merged: measured<MergeState>('notMerged'),
+          },
+          requests: [closed('t-2', 'Fix the date parser')],
+          transcript: past,
+        }),
+      ),
+    ).toEqual({kind: 'doneUnmerged', rule: 6, section: 'toLand'});
+  });
+
+  test('every request closed and merged, a landing stage not reached: To land', () => {
+    expect(
+      placed(
+        fixture({
+          requests: [
+            closed('t-2', 'Fix the date parser', [
+              'stage:code-done',
+              'stage:tested',
+            ]),
+          ],
+          transcript: past,
+        }),
+      ),
+    ).toEqual({kind: 'done', rule: 7, section: 'toLand'});
+  });
+
+  test('every request closed and landed: Done', () => {
+    expect(
+      placed(
+        fixture({
+          requests: [closed('t-2', 'Find out why the export is slow')],
+          transcript: past,
+        }),
+      ),
+    ).toEqual({kind: 'done', rule: 9, section: 'done'});
+  });
+
+  test("Justin's done mark with a request still open: Done (his mark wins)", () => {
+    expect(
+      placed(
+        fixture({
+          requests: [open('t-2', 'Big refactor')],
+          session: {closeReason: 'done: Justin', status: 'closed'},
+          transcript: past,
+        }),
+      ),
+    ).toEqual({kind: 'done', rule: 9, section: 'done'});
+  });
+
+  test('a question answered, no request, no commit, clean: Answered', () => {
+    expect(placed(fixture({transcript: past}))).toEqual({
+      kind: 'answered',
+      rule: 8,
+      section: 'answered',
+    });
+  });
+
+  test('a request still open, no blocker: out of context (the handed-off section)', () => {
+    expect(
+      placed(
+        fixture({requests: [open('t-2', 'Big refactor')], transcript: past}),
+      ),
+    ).toEqual({kind: 'outOfContext', rule: 4, section: 'handedOff'});
+  });
+
+  test('a request still open under wrapUpAt: stopped with work open (control)', () => {
+    expect(placed(fixture({requests: [open('t-2', 'Big refactor')]}))).toEqual({
+      kind: 'openWork',
+      rule: 5,
+      section: 'stoppedOpen',
+    });
   });
 });

@@ -660,11 +660,12 @@ describe('deriveStatus follows epic D2 exactly', () => {
       live,
       'openWork',
     ],
+    // home-base-o5atv.3 O1 reversed D2's "out of context beats done".
     [
-      'out of context beats done',
+      'O1: done beats out of context',
       {contextTokens: 500_000, requests: {closed: 1, total: 1}},
       live,
-      'outOfContext',
+      'done',
     ],
     [
       'every request closed is done',
@@ -891,6 +892,184 @@ describe('deriveStatus follows epic D2 exactly', () => {
       kind: 'unknown',
       reasons: ['checkout unreadable: /gone'],
     });
+  });
+});
+
+// home-base-o5atv.3 O1 (2026-11-08): out of context is a kind of open work. It
+// replaces only ⚠️ Open work; every other verdict wins over it. Every row is
+// past wrapUpAt unless it says otherwise.
+describe('home-base-o5atv.3 O1: out of context replaces only open work', () => {
+  const WRAP = 400_000;
+  const PAST: StatusFacts = {
+    activityUnmeasured: [],
+    beadProblems: [],
+    commits: {count: 0, kind: 'counted'},
+    contextTokens: 450_000,
+    handedOff: false,
+    helpersInFlight: [],
+    lastMessageRole: 'assistant',
+    lastRecordAt: at('11:00'),
+    merged: measured<MergeState>('merged'),
+    openP0: 0,
+    requests: {closed: 0, total: 1},
+    sessionCloseReason: null,
+    successor: null,
+    uncommitted: measured(0),
+    wrapUpAt: WRAP,
+  };
+  const live = {asIfYielded: false, now: NOW};
+  const outOfContext = (contextTokens: number): SessionStatus => ({
+    contextTokens,
+    kind: 'outOfContext',
+    wrapUpAt: WRAP,
+  });
+  const allClosed = {requests: {closed: 2, total: 2}};
+  const noRequest = {requests: {closed: 0, total: 0}};
+
+  const rows: [string, Partial<StatusFacts>, SessionStatus][] = [
+    // Out of context, where the work is open.
+    ['an open request: out of context', {}, outOfContext(450_000)],
+    [
+      'exactly at wrapUpAt: out of context',
+      {contextTokens: WRAP},
+      outOfContext(WRAP),
+    ],
+    [
+      'no request but a dirty tree (open work without a request): out of context',
+      {...noRequest, uncommitted: measured(2)},
+      outOfContext(450_000),
+    ],
+    [
+      'some requests still open: out of context',
+      {requests: {closed: 1, total: 2}},
+      outOfContext(450_000),
+    ],
+    // Every other verdict wins.
+    [
+      'every request closed, merged, clean: done',
+      allClosed,
+      {by: 'requests', kind: 'done', reason: null},
+    ],
+    [
+      'every request closed, the branch not merged: done, not merged (To land)',
+      {...allClosed, merged: measured<MergeState>('notMerged')},
+      {kind: 'doneUnmerged', notMerged: true, uncommitted: 0},
+    ],
+    [
+      'every request closed, a dirty tree: done, not merged (To land)',
+      {...allClosed, uncommitted: measured(3)},
+      {kind: 'doneUnmerged', notMerged: false, uncommitted: 3},
+    ],
+    [
+      "Justin's done mark, a request still open: done",
+      {sessionCloseReason: 'done: Justin — shipped'},
+      {by: 'justin', kind: 'done', reason: 'done: Justin — shipped'},
+    ],
+    [
+      "Justin's archive mark: done",
+      {sessionCloseReason: 'archived: not needed'},
+      {by: 'justin', kind: 'done', reason: 'archived: not needed'},
+    ],
+    [
+      'no request, Claude last, no commits, clean: answered',
+      noRequest,
+      {kind: 'answered'},
+    ],
+    [
+      'the export does not hold the session bead: export behind',
+      {
+        exportBehind: {
+          beadId: 'hb-1',
+          changes: measured(1),
+          conflictMarkers: false,
+          labels: ['session'],
+          title: 'Fix the parser',
+        },
+      },
+      {
+        behind: {
+          beadId: 'hb-1',
+          changes: measured(1),
+          conflictMarkers: false,
+          labels: ['session'],
+          title: 'Fix the parser',
+        },
+        kind: 'exportBehind',
+      },
+    ],
+    [
+      'every request closed, the merge state unmeasured: unknown',
+      {...allClosed, merged: unmeasured<MergeState>('git merge-base failed')},
+      {kind: 'unknown', reasons: ['git merge-base failed']},
+    ],
+    [
+      'an open request, commits unmeasured: unknown',
+      {commits: {kind: 'unmeasured', reason: 'checkout unreadable: /gone'}},
+      {kind: 'unknown', reasons: ['checkout unreadable: /gone']},
+    ],
+    [
+      'an open request, the activity unread: the unknown that stands in for open work',
+      {activityUnmeasured: ['could not read the transcript: EACCES']},
+      {
+        activityUnread: true,
+        kind: 'unknown',
+        reasons: ['could not read the transcript: EACCES'],
+      },
+    ],
+    ['an open P0: waiting', {openP0: 1}, {kind: 'waiting', openP0: 1}],
+    [
+      'handed off: handed off',
+      {handedOff: true},
+      {kind: 'handedOff', successor: null},
+    ],
+    [
+      'a record a minute old: working',
+      {lastRecordAt: at('11:59')},
+      {helpers: 0, kind: 'working', lastRecordAt: at('11:59')},
+    ],
+    // Out of context needs both numbers.
+    [
+      'context size unmeasured: open work, never out of context',
+      {contextTokens: null},
+      {kind: 'openWork'},
+    ],
+    [
+      'no wrapUpAt: open work, never out of context',
+      {wrapUpAt: null},
+      {kind: 'openWork'},
+    ],
+    [
+      'a token under wrapUpAt: open work',
+      {contextTokens: WRAP - 1},
+      {kind: 'openWork'},
+    ],
+  ];
+
+  for (const [name, overrides, expected] of rows) {
+    test(name, () => {
+      expect(deriveStatus({...PAST, ...overrides}, live)).toEqual(expected);
+    });
+  }
+
+  test('"if you stop now": out of context with a request open, done with every request closed', () => {
+    const yielded = {asIfYielded: true, now: NOW};
+    expect(deriveStatus({...PAST, lastRecordAt: at('11:59')}, yielded)).toEqual(
+      outOfContext(450_000),
+    );
+    expect(
+      deriveStatus({...PAST, ...allClosed, lastRecordAt: at('11:59')}, yielded),
+    ).toEqual({by: 'requests', kind: 'done', reason: null});
+  });
+
+  test('a done-not-merged session past wrapUpAt lands under To land', () => {
+    const status = deriveStatus(
+      {...PAST, ...allClosed, merged: measured<MergeState>('notMerged')},
+      live,
+    );
+    expect(statusWords(status)).toBe(
+      '🔀 Done, not merged — every request is closed, but the branch is not merged into the default branch',
+    );
+    expect(sectionFor(6, status, null)).toBe('toLand');
   });
 });
 

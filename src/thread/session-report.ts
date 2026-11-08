@@ -103,6 +103,8 @@ import {
   userLines,
 } from './session-model';
 import {SESSION_NAME_LIMIT} from './session-name';
+import {repairMissingSessionBead, repairRefusalNote} from './session-repair';
+import {sessionIdFrom} from './session-select';
 import {
   deriveStatus,
   statusCounts,
@@ -936,14 +938,37 @@ export async function runThreadStatus(
   const cwd = options.cwd ?? process.cwd();
   const now = options.now ?? new Date();
   const style = options.style ?? outputStyle(process.stdout);
-  const load = await loadForReport({
+  const loadInput = {
     asIfYielded: true,
     cwd,
     env,
     now,
     selector: null,
     sessionId: options.sessionId,
-  });
+  };
+  let load = await loadForReport(loadInput);
+  // home-base-4ay2j D1: past the race, a bead the capture hook failed to file
+  // is filed (or re-indexed) here, once, under the capture lock (D3). The line
+  // goes to stderr: stdout is the block a session pastes.
+  if (load.kind === 'noSession') {
+    const own = sessionIdFrom(options.sessionId, env);
+    if (own.ok) {
+      const repair = await repairMissingSessionBead({
+        by: 'thread status',
+        cwd,
+        env,
+        now,
+        sessionId: own.id,
+      });
+      if (repair.kind === 'repaired') {
+        console.error(repair.line);
+        load = await loadForReport(loadInput);
+      } else {
+        const note = repairRefusalNote(repair);
+        if (note != null) load = {...load, reason: `${load.reason}. ${note}`};
+      }
+    }
+  }
   if (load.kind === 'disabled') {
     // Exit 0: "off" is an answer the rule branches on, not a failure (D6).
     console.log(refusalLines('thread status', load).join('\n'));

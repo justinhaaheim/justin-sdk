@@ -62,7 +62,12 @@ import {
 } from './handoff-auto-pickup';
 import {probeErrorMessage} from './paths';
 // Already in the hook's import graph: capture.ts imports session-bead itself.
-import {REQUEST_LABEL, sidLabel} from './session-bead';
+import {
+  CONTINUED_BY_LABEL_PREFIX,
+  HANDED_OFF_LABEL,
+  REQUEST_LABEL,
+  sidLabel,
+} from './session-bead';
 import {
   corruptSightingsNote,
   readSessionSightings,
@@ -129,6 +134,13 @@ export type SessionLineParts =
       beadId: string;
       /** Parts later dispatches append (answers). Each is one ` · `-joined part. */
       extras?: string[];
+      /**
+       * home-base-5uu56.2: this session already has a successor, or ran its
+       * handoff. When set, the context OPENS with this warning on a line of its
+       * own, so neither Claude nor Justin (who sees the hook's mirror) can read
+       * past it. Null for a session that was never handed off.
+       */
+      handedOff?: HandedOffNotice | null;
       kind: 'session';
       requests: RequestCounts;
       /** null when the bead's record could not be found in the export. */
@@ -146,6 +158,47 @@ export type SessionLineParts =
 
 function oneLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * What the session bead's own labels say about a handoff (home-base-5uu56.2).
+ * `continued`: one or more sessions continue this one (`continued-by:`), which
+ * is true whether the link came from `thread handoff` or from a session started
+ * by hand to continue it (2026-10-24: home-base-0y9i0 continued 2ignt, which
+ * was then resumed and worked in for two weeks with nothing saying so).
+ * `awaiting`: `thread handoff` ran here and no successor has linked yet.
+ */
+export type HandedOffNotice =
+  | {kind: 'awaiting'}
+  | {kind: 'continued'; successors: string[]};
+
+export function handedOffNotice(
+  labels: readonly string[],
+): HandedOffNotice | null {
+  const successors = labels
+    .filter((label) => label.startsWith(CONTINUED_BY_LABEL_PREFIX))
+    .map((label) => label.slice(CONTINUED_BY_LABEL_PREFIX.length));
+  if (successors.length > 0) return {kind: 'continued', successors};
+  if (labels.includes(HANDED_OFF_LABEL)) return {kind: 'awaiting'};
+  return null;
+}
+
+/** The warning line itself. Claude reads it; the hook mirrors it to Justin. */
+export function handedOffWarning(notice: HandedOffNotice): string {
+  const before =
+    'Before doing any work, tell Justin and ask whether to go on here or there: work done here does not reach the other session, and he may be talking to the wrong one.';
+  if (notice.kind === 'awaiting') {
+    return `⚠️ HANDED OFF: this session already ran thread handoff, and no successor has linked yet. ${before}`;
+  }
+  const {successors} = notice;
+  const shows = successors
+    .map((id) => `\`${sdkRun(`thread show ${id}`)}\``)
+    .join(', ');
+  const who =
+    successors.length === 1
+      ? `session ${successors[0]} continues this one`
+      : `sessions ${successors.join(' and ')} continue this one`;
+  return `⚠️ HANDED OFF: ${who} (see ${shows}). ${before}`;
 }
 
 function describeCounts(counts: RequestCounts): string {
@@ -212,8 +265,11 @@ export function composeSessionContext(
 ): string {
   const line = composeSessionLine(parts, options);
   const answers = parts.kind === 'session' ? (parts.answers ?? []) : [];
-  if (answers.length === 0) return line;
+  const handedOff = parts.kind === 'session' ? (parts.handedOff ?? null) : null;
+  const lead = handedOff == null ? [] : [handedOffWarning(handedOff)];
+  if (answers.length === 0) return [...lead, line].join('\n');
   return [
+    ...lead,
     line,
     ...answers.map(
       (entry) =>
@@ -496,6 +552,7 @@ export function sessionLineParts(input: {
     answersProblem,
     beadId: sessionSighting.beadId,
     extras: [...corruptParts, ...pickupParts],
+    handedOff: bead == null ? null : handedOffNotice(bead.labels),
     kind: 'session',
     requests:
       problems.length > 0

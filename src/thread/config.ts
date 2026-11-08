@@ -31,7 +31,7 @@ import {
   readProjectConfig,
   readUserConfig,
 } from '../sdk-config';
-import {readUsageCheckConfig, resolveUsageCheckConfig} from '../usage-check';
+import {readUsageCheckLayers, resolveUsageCheckConfig} from '../usage-check';
 import {
   THREAD_ANSWER_UIS,
   THREAD_CONFIG_KEY,
@@ -716,16 +716,18 @@ export function resolveRepoTag(input: {
 /**
  * The wrap-up threshold the report header shows beside the token count (D19).
  *
- * REUSES usage-check's own resolver rather than re-reading the file: the
- * threshold is folded into a ladder, can be nulled per role, and has a
- * documented "absent means inherit" rule — three places for a second
- * implementation to disagree, and the number is about to be printed next to a
- * measurement as though it were one.
+ * REUSES usage-check's own read and resolver rather than re-reading the files
+ * (home-base-o5atv.1.1 D8): the threshold comes from two files layered field by
+ * field, is folded into a ladder, can be switched off per repo with 0, and
+ * inherits through null. That is four places for a second implementation to
+ * disagree, and the number is about to be printed next to a measurement as
+ * though it were one. `env` decides where the user file is looked up, so tests
+ * inject XDG_CONFIG_HOME.
  *
- * NULL IS A REAL ANSWER, and it is the common one: usage-check is disabled in
- * most repos, and `wrapUpAt` defaults to null even where it is on. Null means
- * "no threshold is configured", so the header prints `497k` with no second
- * number — never `497k / 0`, which would read as a budget that has been blown.
+ * NULL IS A REAL ANSWER: usage-check is not installed in many repos, and where
+ * it is, no file may name a number. Null means "no threshold is configured",
+ * so the header prints `497k` with no second number — never `497k / 0`, which
+ * would read as a budget that has been blown.
  *
  * The role is `session`, not `player`: a thread report is written by the main
  * session at its wrap-up. A dispatched subagent inherits its parent's session id
@@ -733,10 +735,11 @@ export function resolveRepoTag(input: {
  * explicitly), so there is no case here where the player budget is the right
  * one.
  */
-export function resolveReportWrapUpAt(projectRoot: string): number | null {
-  const resolved = resolveUsageCheckConfig(
-    readUsageCheckConfig(projectRoot),
-    'session',
-  );
-  return resolved?.wrapUpAt ?? null;
+export function resolveReportWrapUpAt(
+  projectRoot: string,
+  env: EnvLike = process.env,
+): number | null {
+  const layers = readUsageCheckLayers(projectRoot, env);
+  if (layers.status === 'off') return null;
+  return resolveUsageCheckConfig(layers.config, 'session')?.wrapUpAt ?? null;
 }

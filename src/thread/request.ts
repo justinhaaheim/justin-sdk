@@ -41,6 +41,7 @@ import type {ChainRequestReaders} from './overarching';
 import type {EnvLike} from './paths';
 import type {AdoptedStatus} from './request-writes';
 import type {SessionResolution} from './session-bead';
+import type {SessionBeadRepair} from './session-repair';
 
 import {
   brCreate,
@@ -52,7 +53,6 @@ import {
 } from '../beads/br';
 import {sdkRun} from '../sdk-invocation';
 import {carriedLines, describePickUp, pickUpHandoff} from './handoff-pickup';
-import {readMessageLog} from './message-log';
 import {
   chainRequestList,
   isOverarching,
@@ -73,6 +73,11 @@ import {
   sightingIn,
 } from './session-bead';
 import {appendSessionSighting, readSessionSightings} from './session-index';
+import {
+  raceStillOpen,
+  repairMissingSessionBead,
+  repairRefusalNote,
+} from './session-repair';
 import {sessionBeadsKnob, sessionIdFrom} from './session-select';
 import {
   checkShortText,
@@ -182,6 +187,11 @@ export type ThreadRequestOutcome =
       pickup: PickUpOutcome | null;
       /** Set when the title rule renamed the session bead. */
       renamedSession: {beadId: string; title: string} | null;
+      /**
+       * home-base-4ay2j: this command filed or re-indexed the session bead the
+       * capture hook had failed to file; null when it was already there.
+       */
+      repair: Extract<SessionBeadRepair, {kind: 'repaired'}> | null;
       /** `--short`: the short label it now carries; null = not asked or failed. */
       short: string | null;
       title: string;
@@ -207,60 +217,6 @@ export function oneLineTitle(text: string): string {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * F13 (home-base-vzwbj.4.9): P7's wait is for ONE race — the capture child
- * filing the session bead ~0.5 s after the first prompt. Only a first prompt
- * logged this recently can still be in that race.
- */
-export const SESSION_BEAD_RACE_WINDOW_MS = 30_000;
-
-/**
- * Whether a missing session bead may still be on its way: the session's first
- * user line in the message log is younger than SESSION_BEAD_RACE_WINDOW_MS.
- * Anything else — no log (capture never ran: the knob was off, say), an
- * unreadable log, an old first prompt — refuses at once, and says why.
- * `noLog` marks the case where no prompt was ever captured, which is also
- * what a session sees when it has only been sent `!` commands (they do not
- * run the capture hook; measured 2026-10-26, home-base-nro7d.1).
- */
-function raceStillOpen(
-  sessionId: string,
-  env: EnvLike,
-  now: Date,
-): {noLog: boolean; open: false; why: string} | {open: true} {
-  const log = readMessageLog(sessionId, env);
-  if (log.kind === 'missing') {
-    return {
-      noLog: true,
-      open: false,
-      why: 'this session has no message log, so the capture hook has not run for it',
-    };
-  }
-  if (log.kind === 'failed') {
-    return {
-      noLog: false,
-      open: false,
-      why: `its message log could not be read (${log.error})`,
-    };
-  }
-  const first = log.lines.find((line) => line.role === 'user');
-  const at = first?.at == null ? Number.NaN : Date.parse(first.at);
-  if (Number.isNaN(at)) {
-    return {
-      noLog: false,
-      open: false,
-      why: 'its message log has no dated first prompt',
-    };
-  }
-  const age = now.getTime() - at;
-  if (age >= 0 && age < SESSION_BEAD_RACE_WINDOW_MS) return {open: true};
-  return {
-    noLog: false,
-    open: false,
-    why: `the first prompt was logged ${Math.round(age / 1000)} s ago, so the capture hook has had its chance`,
-  };
 }
 
 /**
@@ -558,12 +514,32 @@ export async function fileRequest(
   // the capture child; otherwise a missing bead is refused at once.
   const race = raceStillOpen(sessionId, env, now);
   const waitMs = race.open ? (options.sessionWaitMs ?? 3000) : 0;
-  const resolution = await resolveSessionWaiting({
+  let resolution = await resolveSessionWaiting({
     env,
     pollMs: options.sessionPollMs ?? 250,
     sessionId,
     waitMs,
   });
+  // home-base-4ay2j D1: past the race, a bead the capture hook failed to file
+  // is filed (or re-indexed) here, once, under the capture lock (D3).
+  let repair: Extract<SessionBeadRepair, {kind: 'repaired'}> | null = null;
+  let repairNote: string | null = null;
+  if (resolution.kind === 'none') {
+    const attempted = await repairMissingSessionBead({
+      by: 'thread request',
+      cwd,
+      env,
+      now,
+      sessionId,
+    });
+    if (attempted.kind === 'repaired') {
+      repair = attempted;
+      resolution = resolveSession({env, sessionId});
+      repairNote = attempted.line;
+    } else {
+      repairNote = repairRefusalNote(attempted);
+    }
+  }
   if (resolution.kind === 'none') {
     // P7: the likeliest cause in a live session is the race, so it is named
     // first; the knob is the second thing to check, not the verdict.
@@ -579,13 +555,19 @@ export async function fileRequest(
       kind: 'noSession',
       reason: [
         `no session bead yet — the capture hook files it a moment after the first prompt (${waited}); ${next}`,
+        ...(repairNote != null ? [repairNote] : []),
         ...(resolution.corruptNote != null ? [resolution.corruptNote] : []),
         `(sessions index: ${resolution.indexPath}; the capture outcome is in capture.jsonl beside it)`,
       ].join(' '),
     };
   }
   const refusal = refuseResolution(resolution, options.here);
-  if (refusal != null) return refusal;
+  if (refusal != null) {
+    // A bead this command just filed is said even when the next step refused.
+    return repair != null && refusal.kind !== 'checkoutMissing'
+      ? {...refusal, reason: `${refusal.reason} (${repair.line})`}
+      : refusal;
+  }
   const usable = resolution as Usable;
   const sessionDb = usable.kind === 'found' ? usable.db : null;
 
@@ -761,6 +743,9 @@ export async function fileRequest(
       db: found.place.db,
       env,
       id,
+      // Marking a finished request overarching only sets the title; it must
+      // not reopen the request (home-base-b4t8w, seen three times).
+      keepStatus: options.overarching === true && found.status === 'closed',
       sessionId,
       status: found.status,
     });
@@ -910,6 +895,7 @@ export async function fileRequest(
     overarching,
     pickup,
     renamedSession,
+    repair,
     short,
     title: filedTitle,
     workspaceNote,
@@ -929,6 +915,10 @@ export function describeRequestOutcome(outcome: ThreadRequestOutcome): {
       ];
       if (outcome.adoptedStatus?.kind === 'already') {
         lines.push(`  adopted; status already in_progress, left as it was`);
+      } else if (outcome.adoptedStatus?.kind === 'kept') {
+        lines.push(
+          `  adopted; status left ${outcome.adoptedStatus.status}: --overarching only marks the title, so a finished request is not reopened`,
+        );
       } else if (outcome.adoptedStatus?.kind === 'left') {
         lines.push(
           `  adopted; status left ${outcome.adoptedStatus.status}: br refuses to claim a blocked issue (blocked by: ${outcome.adoptedStatus.blockers}; br 0.1.37 counts open children as blockers). The request and sid labels are on it.`,
@@ -1016,7 +1006,12 @@ export function describeRequestOutcome(outcome: ThreadRequestOutcome): {
 export async function runThreadRequest(
   options: ThreadRequestOptions,
 ): Promise<number> {
-  const {exitCode, lines} = describeRequestOutcome(await fileRequest(options));
+  const outcome = await fileRequest(options);
+  // home-base-4ay2j D1: the one loud line, on stderr so stdout keeps its shape.
+  if (outcome.kind === 'filed' && outcome.repair != null) {
+    console.error(outcome.repair.line);
+  }
+  const {exitCode, lines} = describeRequestOutcome(outcome);
   const write = exitCode === 0 ? console.log : console.error;
   for (const line of lines) write(line);
   return exitCode;

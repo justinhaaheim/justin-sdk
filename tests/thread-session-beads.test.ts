@@ -31,7 +31,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'fs';
-import {dirname, join} from 'path';
+import {delimiter, dirname, join} from 'path';
 
 import {
   brChildren,
@@ -50,13 +50,17 @@ import {
 } from '../src/beads/br';
 import {PLAIN_STYLE} from '../src/cli-style';
 import {
+  captureLocksDir,
   captureRunLogPath,
   messageLogPath,
   sessionIndexPath,
 } from '../src/thread/archive';
+import {fileAsk, runThreadAsk} from '../src/thread/ask';
 import {
+  releaseCaptureLock,
   runThreadCaptureApply,
   runThreadCaptureHook,
+  tryCaptureLock,
 } from '../src/thread/capture';
 import {serializeMessageLine} from '../src/thread/message-log';
 import {
@@ -83,10 +87,13 @@ import {
   YIELD_HINT,
 } from '../src/thread/session-line';
 import {closeSession} from '../src/thread/session-marks';
+import {repairCommand} from '../src/thread/session-repair';
 import {
   loadSessionReport,
   renderThreadStatus,
+  runThreadStatus,
 } from '../src/thread/session-report';
+import {markStage, runThreadStage} from '../src/thread/session-stage';
 import {
   readStatusFile,
   statusFilePath,
@@ -1880,14 +1887,18 @@ describe('thread request', () => {
   });
 
   // F13 (home-base-vzwbj.4.9): the wait is only for a first prompt still in
-  // the race; everything else is refused at once, saying why.
+  // the race; everything else is refused at once, saying why. Since
+  // home-base-4ay2j an old prompt in a beads checkout gets its bead filed by
+  // the repair (tested below), so this runs from a directory with no beads
+  // workspace, where the repair cannot file one either.
   test('F13: an OLD first prompt refuses in under 200 ms, without waiting, and says why', async () => {
     needBr();
     const w = world(ON);
-    const repo = beadsRepo(w.sb, 'race-old');
+    const plain = join(w.sb.path, 'no-beads-here');
+    mkdirSync(plain, {recursive: true});
     logFirstPrompt(w, 60_000);
     const started = Date.now();
-    const refused = await fileRequest(requestOptions(w, repo, {title: 'x'}));
+    const refused = await fileRequest(requestOptions(w, plain, {title: 'x'}));
     expect(Date.now() - started).toBeLessThan(200);
     expect(refused.kind).toBe('noSession');
     if (refused.kind !== 'noSession') return;
@@ -2054,6 +2065,425 @@ describe('thread request', () => {
     expect(resolveSession({env: w.env, sessionId: OTHER_SESSION}).kind).toBe(
       'none',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The repair of a session bead the capture hook failed to file
+// (home-base-4ay2j; home-base-irstv is its second case)
+// ---------------------------------------------------------------------------
+
+describe('session-bead repair (home-base-4ay2j)', () => {
+  type ShimMode = '' | 'busy' | 'create-then-timeout';
+
+  /**
+   * A `br` shim first on this world's PATH. `busy`: every `br list` fails the
+   * way a busy database does (4ay2j, 2026-11-06). `create-then-timeout`: the
+   * real create runs, then the call fails as a timed-out one (irstv,
+   * 2026-10-24: the bead exists, the caller is told it does not). Empty: the
+   * real br, untouched.
+   */
+  function brShim(w: World): (mode: ShimMode) => void {
+    const real = Bun.which('br', {
+      PATH: w.env.PATH ?? process.env.PATH ?? '',
+    });
+    if (real == null) throw new Error('br is not on PATH');
+    const dir = join(w.sb.path, 'br-shim');
+    mkdirSync(dir, {recursive: true});
+    const modeFile = join(dir, 'mode');
+    writeFileSync(modeFile, '');
+    writeFileSync(
+      join(dir, 'br'),
+      [
+        '#!/bin/sh',
+        `mode=$(cat '${modeFile}')`,
+        'case "$mode: $* " in',
+        `  "busy:"*" list "*) echo 'Error: database is busy' >&2; exit 1 ;;`,
+        `  "create-then-timeout:"*" create "*) '${real}' "$@" >/dev/null 2>&1; echo 'br timed out after 60 s' >&2; exit 1 ;;`,
+        'esac',
+        `exec '${real}' "$@"`,
+        '',
+      ].join('\n'),
+      {mode: 0o755},
+    );
+    w.env.PATH = `${dir}${delimiter}${w.env.PATH ?? process.env.PATH ?? ''}`;
+    return (mode) => {
+      writeFileSync(modeFile, mode);
+    };
+  }
+
+  /** A first prompt in `sessionId`'s message log, logged `ageMs` ago. */
+  function logPromptAgo(w: World, ageMs: number, sessionId = SESSION): void {
+    const path = messageLogPath(sessionId, w.env);
+    mkdirSync(dirname(path), {recursive: true});
+    writeFileSync(
+      path,
+      serializeMessageLine({
+        at: new Date(Date.now() - ageMs).toISOString(),
+        cwd: null,
+        event: 'UserPromptSubmit',
+        role: 'user',
+        text: 'Speed up the export',
+      }),
+    );
+  }
+
+  /** A request bead filed by hand, as a session whose bead is missing has. */
+  function handFiledRequest(w: World, repo: string): string {
+    const created = brCreate(
+      {cwd: repo, env: w.env},
+      {
+        labels: ['request', `sid:${SESSION}`],
+        priority: 2,
+        status: 'in_progress',
+        title: 'Speed up the export',
+        type: 'task',
+      },
+    );
+    if (created.kind !== 'ok') throw new Error(describeBrFailed(created));
+    return created.id;
+  }
+
+  const ASK = {
+    approve: false,
+    context: [],
+    default: null,
+    do: false,
+    header: null,
+    options: [],
+    priority: '4',
+    question: 'FYI: the export is slow',
+    recommend: null,
+    sessionId: null,
+    style: PLAIN_STYLE,
+    to: null,
+  };
+
+  const repairOf = (repo: string): string =>
+    `bun run justin-sdk thread capture --apply ${SESSION} --cwd ${repo}`;
+
+  test('D4: the repair command names the session id and the cwd, quoting a cwd that needs it', () => {
+    expect(repairCommand(SESSION, '/a/b')).toBe(
+      `bun run justin-sdk thread capture --apply ${SESSION} --cwd /a/b`,
+    );
+    expect(repairCommand(SESSION, "/a/it's here")).toBe(
+      `bun run justin-sdk thread capture --apply ${SESSION} --cwd '/a/it'\\''s here'`,
+    );
+  });
+
+  test('AC1 busy: the capture child hit a busy database and filed nothing; `thread request` files the session bead and the request, exit 0, one repair line', async () => {
+    needBr();
+    const cw = captureWorld(ON);
+    const shim = brShim(cw);
+    captureStdout();
+    shim('busy');
+    runHook(cw, prompt(cw, 'Please speed up the export'));
+    await runChild(cw);
+    expect(runRecords(cw).at(-1)?.sessionBead).toMatchObject({kind: 'failed'});
+    expect(JSON.stringify(runRecords(cw).at(-1)?.sessionBead)).toContain(
+      'database is busy',
+    );
+    expect(sessionBeads(cw.repo)).toHaveLength(0);
+    expect(indexLines(cw)).toHaveLength(0);
+    shim('');
+
+    const err = captureStderr();
+    const exit = await runThreadRequest(
+      requestOptions(cw, cw.repo, {
+        // The race window is closed: the first prompt is a minute old.
+        now: new Date(Date.now() + 60_000),
+        title: 'Fix the import',
+      }),
+    );
+    expect(exit).toBe(0);
+    const [bead] = sessionBeads(cw.repo);
+    if (bead == null) throw new Error('no session bead was filed');
+    expect(sessionBeads(cw.repo)).toHaveLength(1);
+    expect(indexLines(cw)).toHaveLength(1);
+    const repairLines = err.filter((line) =>
+      line.includes('⚠️ thread request'),
+    );
+    expect(repairLines).toHaveLength(1);
+    expect(repairLines[0]).toStartWith(
+      `⚠️ thread request: the capture hook had not filed this session's bead, so this command filed it: ${bead.id} (`,
+    );
+    // The request is filed UNDER the repaired session bead.
+    const requests = brList(
+      {cwd: cw.repo},
+      {all: true, labels: ['request', `sid:${SESSION}`]},
+    );
+    if (requests.kind !== 'ok') throw new Error(requests.reason);
+    expect(requests.issues.map((issue) => issue.title)).toEqual([
+      'Fix the import',
+    ]);
+    expect(requests.issues[0]?.id.startsWith(`${bead.id}.`)).toBe(true);
+  });
+
+  test('AC2 indexed late (irstv): the bead was created but its index line was not; `thread request` repairs the index and files no second session bead', async () => {
+    needBr();
+    const cw = captureWorld(ON);
+    const shim = brShim(cw);
+    captureStdout();
+    shim('create-then-timeout');
+    runHook(cw, prompt(cw, 'Please speed up the export'));
+    await runChild(cw);
+    expect(JSON.stringify(runRecords(cw).at(-1)?.sessionBead)).toContain(
+      'br create failed',
+    );
+    const [made] = sessionBeads(cw.repo);
+    if (made == null) throw new Error('the shim did not create the bead');
+    expect(sessionBeads(cw.repo)).toHaveLength(1);
+    expect(indexLines(cw)).toHaveLength(0);
+    shim('');
+
+    const err = captureStderr();
+    const filed = await fileRequest(
+      requestOptions(cw, cw.repo, {
+        now: new Date(Date.now() + 60_000),
+        title: 'Fix the import',
+      }),
+    );
+    expect(filed).toMatchObject({
+      kind: 'filed',
+      repair: {beadId: made.id, how: 'indexed', kind: 'repaired'},
+    });
+    if (filed.kind !== 'filed') return;
+    expect(filed.id.startsWith(`${made.id}.`)).toBe(true);
+    expect(filed.repair?.line).toContain(
+      `⚠️ thread request: the sessions index named no bead for this session, so this command found it and indexed it: ${made.id} (found in `,
+    );
+    expect(filed.repair?.line).toContain(
+      'missing from the index; index repaired',
+    );
+    // No second session bead; one index line.
+    expect(sessionBeads(cw.repo).map((issue) => issue.id)).toEqual([made.id]);
+    expect(indexLines(cw)).toHaveLength(1);
+    expect(err).toEqual([]);
+  });
+
+  test('AC3: `thread ask` repairs the missing bead and files the question under it', async () => {
+    needBr();
+    const w = world(ON);
+    const repo = beadsRepo(w.sb, 'repair-ask');
+    logPromptAgo(w, 60_000);
+    const err = captureStderr();
+    captureStdout();
+    expect(await runThreadAsk({...ASK, cwd: repo, env: w.env})).toBe(0);
+    const [bead] = sessionBeads(repo);
+    if (bead == null) throw new Error('no session bead was filed');
+    expect(err).toHaveLength(1);
+    expect(err[0]).toStartWith(
+      `⚠️ thread ask: the capture hook had not filed this session's bead, so this command filed it: ${bead.id} (`,
+    );
+    const asks = brList({cwd: repo}, {all: true, labels: ['ask']});
+    if (asks.kind !== 'ok') throw new Error(asks.reason);
+    expect(asks.issues).toHaveLength(1);
+    expect(asks.issues[0]?.id.startsWith(`${bead.id}.`)).toBe(true);
+  });
+
+  test('AC3: `thread stage` repairs the missing bead and still marks the stage', async () => {
+    needBr();
+    const w = world(ON);
+    const repo = beadsRepo(w.sb, 'repair-stage');
+    const request = handFiledRequest(w, repo);
+    logPromptAgo(w, 60_000);
+    const err = captureStderr();
+    const out = captureStdout();
+    expect(
+      await runThreadStage({
+        cwd: repo,
+        env: w.env,
+        request,
+        sessionId: null,
+        stages: ['tested'],
+        unset: false,
+      }),
+    ).toBe(0);
+    const [bead] = sessionBeads(repo);
+    if (bead == null) throw new Error('no session bead was filed');
+    expect(err).toHaveLength(1);
+    expect(err[0]).toStartWith(
+      `⚠️ thread stage: the capture hook had not filed this session's bead, so this command filed it: ${bead.id} (`,
+    );
+    expect(out.join('\n')).toContain('Stages marked: tested');
+    expect(indexLines(w)).toHaveLength(1);
+  });
+
+  test('AC3: `thread status` repairs the missing bead and prints Part 1', async () => {
+    needBr();
+    const w = world(ON);
+    const repo = beadsRepo(w.sb, 'repair-status');
+    logPromptAgo(w, 60_000);
+    const err = captureStderr();
+    const out = captureStdout();
+    expect(
+      await runThreadStatus({
+        cwd: repo,
+        env: w.env,
+        sessionId: null,
+        style: PLAIN_STYLE,
+        timeZone: 'UTC',
+      }),
+    ).toBe(0);
+    const [bead] = sessionBeads(repo);
+    if (bead == null) throw new Error('no session bead was filed');
+    expect(err).toHaveLength(1);
+    expect(err[0]).toStartWith(
+      `⚠️ thread status: the capture hook had not filed this session's bead, so this command filed it: ${bead.id} (`,
+    );
+    expect(out.join('\n')).toContain('🛑');
+  });
+
+  test('AC4 deferred: another process holds the capture lock; the refusal names it and the exact repair command, and nothing is written', async () => {
+    needBr();
+    const w = world(ON);
+    const repo = beadsRepo(w.sb, 'repair-deferred');
+    logPromptAgo(w, 60_000);
+    expect(tryCaptureLock(SESSION, w.env)).toBe(true);
+    try {
+      const err = captureStderr();
+      expect(
+        await runThreadRequest(requestOptions(w, repo, {title: 'x'})),
+      ).toBe(1);
+      const said = err.join('\n');
+      expect(said).toContain(
+        "This command tried to file it and was deferred: another process (most likely the capture hook's child) holds this session's capture lock, so nothing was written.",
+      );
+      expect(said).toContain(
+        `run the repair yourself: ${repairOf(repo)} (sessions index:`,
+      );
+      expect(sessionBeads(repo)).toHaveLength(0);
+      // The same from ask and status.
+      const asked = await fileAsk({...ASK, cwd: repo, env: w.env});
+      expect(asked.kind).toBe('noSession');
+      expect(JSON.stringify(asked)).toContain('was deferred');
+      expect(JSON.stringify(asked)).toContain(repairOf(repo));
+      err.length = 0;
+      expect(
+        await runThreadStatus({cwd: repo, env: w.env, sessionId: null}),
+      ).toBe(1);
+      expect(err.join('\n')).toContain('was deferred');
+      expect(err.join('\n')).toContain(repairOf(repo));
+      expect(sessionBeads(repo)).toHaveLength(0);
+    } finally {
+      releaseCaptureLock(SESSION, w.env);
+    }
+    // Once the lock is free, the same request is filed.
+    expect(
+      await fileRequest(requestOptions(w, repo, {title: 'x'})),
+    ).toMatchObject({kind: 'filed', repair: {how: 'filed'}});
+  });
+
+  test('AC4 failed: br is still busy during the repair; the refusal names the failure and the exact repair command, and nothing is written', async () => {
+    needBr();
+    const w = world(ON);
+    const repo = beadsRepo(w.sb, 'repair-failed');
+    const shim = brShim(w);
+    logPromptAgo(w, 60_000);
+    shim('busy');
+    const err = captureStderr();
+    expect(await runThreadRequest(requestOptions(w, repo, {title: 'x'}))).toBe(
+      1,
+    );
+    const said = err.join('\n');
+    expect(said).toContain(
+      'This command tried to file it and could not: br list failed, so absence is unproven: br exited 1: Error: database is busy',
+    );
+    expect(said).toContain(
+      `Once that is fixed, run the repair yourself: ${repairOf(repo)}`,
+    );
+    // Stage needs no session bead: it still marks, and names the failure.
+    shim('');
+    const request = handFiledRequest(w, repo);
+    shim('busy');
+    err.length = 0;
+    const staged = await markStage({
+      cwd: repo,
+      env: w.env,
+      request,
+      sessionId: null,
+      stages: ['tested'],
+      unset: false,
+    });
+    shim('');
+    // Only `br list` is busy, so the stage's own show and update land.
+    expect(staged).toMatchObject({kind: 'marked', now: ['tested']});
+    expect(staged.repairLine).toContain(
+      '⚠️ thread stage: this session has no session bead (the capture hook did not file it). This command tried to file it and could not: br list failed',
+    );
+    expect(staged.repairLine).toContain(repairOf(repo));
+    expect(sessionBeads(repo)).toHaveLength(0);
+  });
+
+  test('AC5 no message log (only `!` commands): today’s refusal, and no repair attempt from request, ask, stage or status', async () => {
+    needBr();
+    const w = world(ON);
+    const repo = beadsRepo(w.sb, 'repair-nolog');
+    const request = handFiledRequest(w, repo);
+    const err = captureStderr();
+    captureStdout();
+
+    const refused = await fileRequest(requestOptions(w, repo, {title: 'x'}));
+    expect(refused.kind).toBe('noSession');
+    if (refused.kind !== 'noSession') return;
+    expect(refused.reason).toStartWith(
+      'no session bead yet — the capture hook files it a moment after the first prompt (not waited for: this session has no message log, so the capture hook has not run for it); send this session a message first (a `!` command is not one), then run this again; if it has had one, check componentConfig.thread.sessionBeads. (sessions index: ',
+    );
+    expect(refused.reason).not.toContain('thread capture --apply');
+
+    const asked = await fileAsk({...ASK, cwd: repo, env: w.env});
+    expect(asked.kind).toBe('noSession');
+    expect(JSON.stringify(asked)).not.toContain('thread capture --apply');
+
+    const staged = await markStage({
+      cwd: repo,
+      env: w.env,
+      request,
+      sessionId: null,
+      stages: ['tested'],
+      unset: false,
+    });
+    expect(staged).toMatchObject({kind: 'marked'});
+    expect(staged.repairLine ?? null).toBeNull();
+
+    expect(
+      await runThreadStatus({cwd: repo, env: w.env, sessionId: null}),
+    ).toBe(1);
+    expect(err.join('\n')).not.toContain('thread capture --apply');
+    expect(err.join('\n')).not.toContain('⚠️');
+
+    // Nothing was filed, and no capture lock was ever taken.
+    expect(sessionBeads(repo)).toHaveLength(0);
+    expect(indexLines(w)).toHaveLength(0);
+    expect(existsSync(captureLocksDir(w.env))).toBe(false);
+  });
+
+  test('the race still open: no repair, and the refusal says how to run it if it keeps refusing', async () => {
+    needBr();
+    const w = world(ON);
+    const repo = beadsRepo(w.sb, 'repair-race');
+    logPromptAgo(w, 2000);
+    const refused = await fileRequest(
+      requestOptions(w, repo, {sessionWaitMs: 0, title: 'x'}),
+    );
+    expect(refused.kind).toBe('noSession');
+    expect(JSON.stringify(refused)).toContain(
+      `If it still refuses after that, run the repair yourself: ${repairOf(repo)}`,
+    );
+    expect(sessionBeads(repo)).toHaveLength(0);
+  });
+
+  test('another session’s id (`--session`): no repair from this cwd', async () => {
+    needBr();
+    const w = world(ON);
+    const repo = beadsRepo(w.sb, 'repair-other');
+    logPromptAgo(w, 60_000, OTHER_SESSION);
+    const refused = await fileRequest(
+      requestOptions(w, repo, {sessionId: OTHER_SESSION, title: 'x'}),
+    );
+    expect(refused.kind).toBe('noSession');
+    expect(JSON.stringify(refused)).not.toContain('thread capture --apply');
+    expect(sessionBeads(repo, OTHER_SESSION)).toHaveLength(0);
   });
 });
 

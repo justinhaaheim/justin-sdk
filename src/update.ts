@@ -7,7 +7,9 @@
  *
  * Phases:
  *   1. Preflight       — justin-sdk.config.json must exist; tree must be
- *                        clean unless --allow-dirty
+ *                        clean unless --allow-dirty. A tree whose only
+ *                        change is the SDK pin counts as clean (D1,
+ *                        update-tree-state.ts)
  *   2. Self-update     — bump the SDK in devDependencies; re-exec the
  *                        freshly installed CLI (unless --no-self-update)
  *   3. Reconcile       — delegate to `install`: add what the config lists and
@@ -25,6 +27,7 @@
  * Re-exec dance: when self-update bumps the SDK, this process is still
  * running the OLD code. We re-exec the freshly installed CLI with
  * --no-self-update so the rest of the update runs against the new pins.
+ * The child sees the bump as uncommitted changes; D1 is what lets it go on.
  */
 
 import {spawnSync} from 'child_process';
@@ -36,7 +39,7 @@ import {runDoctor} from './doctor';
 import {runInstall} from './install';
 import {getSdkVersion} from './sdk-identity';
 import {resolveWorktreeSdkBin, worktreeSdkArgv} from './sdk-invocation';
-import {selfUpdateSdk} from './self-update';
+import {type SelfUpdateDeps, selfUpdateSdk} from './self-update';
 import {
   exec,
   fail,
@@ -46,6 +49,7 @@ import {
   success,
   warn,
 } from './setup-helpers';
+import {readUpdateTreeState} from './update-tree-state';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -64,6 +68,11 @@ export interface UpdateOptions {
   noSelfUpdate?: boolean;
   projectRoot?: string;
   quiet?: boolean;
+  /**
+   * Test seams for the self-update: the tag lookup and the bump command.
+   * Absent in production, where the real `git ls-remote` and `bun add` run.
+   */
+  selfUpdateDeps?: SelfUpdateDeps;
 }
 
 /**
@@ -103,7 +112,10 @@ export function planUpdateReExec(
   // --no-self-update avoids infinite recursion; everything else is the flags
   // the user cared about, passed through.
   const args = ['update', '--no-self-update'];
-  if (flags.noCommit) args.push('--no-commit');
+  // Both directions, always. The CLI's `--commit` defaults to OFF, so a child
+  // given neither flag skips the commit: before this, `update --commit` lost
+  // its commit whenever a bump re-executed (home-base-ipx4a).
+  args.push(flags.noCommit ? '--no-commit' : '--commit');
   if (flags.allowDirty) args.push('--allow-dirty');
   if (flags.force) args.push('--force');
   if (flags.quiet) args.push('--quiet');
@@ -151,21 +163,39 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
     `Found justin-sdk.config.json (${components.length} components, ${resolved.source === 'core' ? 'from the core preset — no `components` key' : 'listed'})`,
   );
 
-  const gitStatus = exec('git status --porcelain', projectRoot);
-  const treeWasDirty =
-    gitStatus.exitCode === 0 && gitStatus.stdout.trim().length > 0;
-  if (treeWasDirty && !allowDirty) {
+  // D1 (home-base-ipx4a): when the only uncommitted change is the SDK pin —
+  // which is what a re-exec child sees after its parent's bump — the tree
+  // counts as clean, and the final commit carries the pin with the reconcile.
+  // The parent may be an old SDK that passes nothing but --no-self-update, so
+  // this is recognised from the tree itself, not from a flag.
+  const tree = readUpdateTreeState(projectRoot);
+  const treeWasDirty = tree.kind === 'dirty';
+  if (tree.kind === 'dirty' && !allowDirty) {
     fail(
       'Working tree has uncommitted changes. Re-run with --allow-dirty (no final commit) or commit/stash first.',
     );
+    fail(`Not just the SDK pin: ${tree.detail}.`);
     return 1;
   }
-  if (treeWasDirty) {
-    success(
-      'Proceeding with dirty tree (--allow-dirty; will skip final commit)',
-    );
-  } else {
-    success('Working tree clean');
+  switch (tree.kind) {
+    case 'dirty':
+      success(
+        'Proceeding with dirty tree (--allow-dirty; will skip final commit)',
+      );
+      break;
+    case 'sdk-pin-only':
+      success(
+        `The only uncommitted change is the SDK pin (${tree.paths.join(', ')}), so update goes on as on a clean tree${noCommit || dryRun ? '' : ' and commits it with the reconcile'}`,
+      );
+      break;
+    case 'unchecked':
+      // Unchanged behaviour: a tree git cannot read has always gone on as
+      // clean. What changed is that it no longer SAYS "clean".
+      warn(`Could not read the working tree (${tree.error}); going on anyway`);
+      break;
+    case 'clean':
+      success('Working tree clean');
+      break;
   }
 
   // -------------------------------------------------------------------------
@@ -173,7 +203,11 @@ export async function runUpdate(options: UpdateOptions = {}): Promise<number> {
   // -------------------------------------------------------------------------
   if (!noSelfUpdate && !dryRun) {
     stepHeader('2. Self-update SDK');
-    const result = await selfUpdateSdk(projectRoot);
+    const result = await selfUpdateSdk(projectRoot, options.selfUpdateDeps);
+    // D2: the bump ran but did not install what it pinned. selfUpdateSdk has
+    // already said so, with both versions and the fix; going on would re-exec
+    // or reconcile with the wrong SDK and report it as the new one.
+    if (result.failure != null) return 1;
     if (result.shouldReExec) {
       const reExec = planUpdateReExec(projectRoot, {
         allowDirty,
