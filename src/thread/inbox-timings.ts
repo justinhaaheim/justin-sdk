@@ -44,6 +44,26 @@ export type SpawnCounting =
   | {kind: 'counted'}
   | {kind: 'failed'; reason: string};
 
+/**
+ * home-base-9ihcl.4: how long work that was READY waited for the JavaScript
+ * thread. A timer asks to run every `intervalMs`; each time it runs late, the
+ * thread was busy (synchronous reads, parsing, spawning) or the process got
+ * no CPU. A finished git or cmux child waits exactly as long before its
+ * output is handled, so this is the cost one busy thread puts on work that
+ * runs in parallel.
+ */
+export interface EventLoopLag {
+  /** Every lateness added up: time the thread could not answer a ready timer. */
+  blockedMs: number;
+  intervalMs: number;
+  /** The longest single wait. */
+  maxLagMs: number;
+  /** Runs that were more than 100 ms late. */
+  over100ms: number;
+  /** Timer runs observed. */
+  samples: number;
+}
+
 export interface InboxTimings {
   /**
    * How long the process had run when the recorder started: bun's start,
@@ -52,6 +72,8 @@ export interface InboxTimings {
   bootMs: number;
   /** CPU this process used while recording (children not included). */
   cpu: {systemMs: number; userMs: number};
+  /** How late a 20 ms timer ran while recording (home-base-9ihcl.4). */
+  eventLoop: EventLoopLag;
   /** In start order. Phases that overlap say so through `startMs` and `ms`. */
   phases: PhaseTiming[];
   /** How many session loads were timed. */
@@ -245,11 +267,48 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
   );
 }
 
+/** The event-loop probe's period. */
+export const LAG_INTERVAL_MS = 20;
+
+/** Start the lag probe; `stop` ends it and returns what it saw. */
+function startLagProbe(): {stop: () => EventLoopLag} {
+  const lag: EventLoopLag = {
+    blockedMs: 0,
+    intervalMs: LAG_INTERVAL_MS,
+    maxLagMs: 0,
+    over100ms: 0,
+    samples: 0,
+  };
+  let expected = performance.now() + LAG_INTERVAL_MS;
+  const timer = setInterval(() => {
+    const now = performance.now();
+    const late = Math.max(0, now - expected);
+    lag.samples += 1;
+    lag.blockedMs += late;
+    if (late > lag.maxLagMs) lag.maxLagMs = late;
+    if (late > 100) lag.over100ms += 1;
+    expected = now + LAG_INTERVAL_MS;
+  }, LAG_INTERVAL_MS);
+  // Never the reason the process stays alive.
+  timer.unref();
+  return {
+    stop: () => {
+      clearInterval(timer);
+      return {
+        ...lag,
+        blockedMs: roundMs(lag.blockedMs),
+        maxLagMs: roundMs(lag.maxLagMs),
+      };
+    },
+  };
+}
+
 /** Start recording now. */
 export function startTimings(): TimingRecorder {
   const bootMs = roundMs(performance.now());
   const started = performance.now();
   const cpuStart = process.cpuUsage();
+  const lagProbe = startLagProbe();
   const counting = install();
   const counted = counting.kind === 'counted';
   const self: OpenRecorder = {countError: null, syncTargets: null, total: {}};
@@ -324,6 +383,7 @@ export function startTimings(): TimingRecorder {
           systemMs: roundMs(cpu.system / 1000),
           userMs: roundMs(cpu.user / 1000),
         },
+        eventLoop: lagProbe.stop(),
         phases:
           failure == null
             ? phases

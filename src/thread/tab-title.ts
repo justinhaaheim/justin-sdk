@@ -9,8 +9,8 @@
  *   own `cmux-surface:` label, never a guess: no label, no rename.
  * - The PREDECESSOR's tab is marked handed off by `thread handoff` right after
  *   the successor's tab opened, on the caller's own CMUX_SURFACE_ID
- *   (handoff-successor.ts). A session labelled handed-off is never renamed
- *   here, so the mark stays.
+ *   (handoff-successor.ts), with handedOffTabTitle below. A session labelled
+ *   handed-off is never renamed here, so the mark stays.
  *
  * IDEMPOTENT WITHOUT READING cmux. tab-titles.jsonl records every title this
  * module set, AFTER the rename succeeded. A tab whose newest record already
@@ -25,6 +25,7 @@
  */
 
 import type {CmuxRunner} from './cmux';
+import type {HandoffNumber} from './handoff-number';
 import type {EnvLike} from './paths';
 import type {WorkspaceSession} from './workspace-name';
 
@@ -44,11 +45,44 @@ import {
 import {sessionMarksOf, sessionName} from './session-name';
 
 /** What the predecessor's tab title starts with once it handed off. */
-export const HANDED_OFF_TAB_PREFIX = '↪ handed off: ';
+export const HANDED_OFF_TAB_MARK = '↪ ';
 
-/** The predecessor's tab title: the mark, then its session's name. */
-export function handedOffTabTitle(name: string): string {
-  return `${HANDED_OFF_TAB_PREFIX}${name}`;
+/**
+ * The predecessor's tab title (home-base-9ihcl.10): the mark, its OWN place in
+ * the chain and its successor's, then its own name without the H mark, for
+ * example `↪ H2 handed off to H3: [MAYOR] [HOME] <title>`. The original of a
+ * chain (number 0) reads `↪ handed off to H1: …`; an unknown number reads
+ * `↪ H? handed off to H?: …`, never a guess (rule 7).
+ *
+ * Before 2026-11-10 the title was `↪ handed off: ` plus the SUCCESSOR's name,
+ * so every handed-off tab showed the next session's H number and two tabs in
+ * one workspace could carry the same one.
+ */
+export function handedOffTabTitle(input: {
+  mayor: boolean;
+  /** This session's own number (handoffNumberOf), the one its successor's name adds 1 to. */
+  own: HandoffNumber;
+  repoTag: string | null;
+  /** This session's title, as its successor's name uses it. */
+  title: string;
+}): string {
+  const {own} = input;
+  const chain =
+    own.kind === 'unknown'
+      ? 'H? handed off to H?'
+      : own.number === 0
+        ? 'handed off to H1'
+        : `H${own.number} handed off to H${own.number + 1}`;
+  const name = sessionName(input.repoTag, input.title, {
+    handoff: null,
+    mayor: input.mayor,
+  });
+  return `${HANDED_OFF_TAB_MARK}${chain}: ${name}`;
+}
+
+/** Whether a tab title is one handedOffTabTitle wrote. */
+export function isHandedOffTabTitle(title: string): boolean {
+  return /^↪ (?:H(?:\d+|\?) )?handed off to H(?:\d+|\?): /u.test(title);
 }
 
 export function tabTitlesPath(env: EnvLike = process.env): string {

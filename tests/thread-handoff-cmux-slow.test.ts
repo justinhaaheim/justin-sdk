@@ -784,6 +784,7 @@ describe('thread handoff when the beads database is locked (home-base-p05kz.5.1)
       block: '',
       followUpFailures: [`the handoff block could not be built: ${LOCKED}`],
       kind: 'handedOff',
+      requests: {kind: 'unknown', reason: 'the block was not built'},
       successor: {kind: 'none'},
     });
     expect(result.exitCode).toBe(4);
@@ -887,6 +888,7 @@ describe('thread handoff when the beads database is locked (home-base-p05kz.5.1)
         block: 'the block',
         followUpFailures: [LOCKED],
         kind: 'handedOff',
+        requests: {kind: 'counted', open: 0, total: 0},
         successor: {kind: 'none'},
       }).exitCode,
     ).toBe(4);
@@ -895,6 +897,7 @@ describe('thread handoff when the beads database is locked (home-base-p05kz.5.1)
         block: 'the block',
         followUpFailures: ['the index is unreadable'],
         kind: 'handedOff',
+        requests: {kind: 'counted', open: 0, total: 0},
         successor: {kind: 'none'},
       }).exitCode,
     ).toBe(1);

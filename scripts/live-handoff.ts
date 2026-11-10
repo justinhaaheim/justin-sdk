@@ -91,7 +91,7 @@ import {
   resolveSession,
 } from '../src/thread/session-bead';
 import {sessionDisplayName, sessionName} from '../src/thread/session-name';
-import {HANDED_OFF_TAB_PREFIX} from '../src/thread/tab-title';
+import {isHandedOffTabTitle} from '../src/thread/tab-title';
 import {readWorkspaceNames} from '../src/thread/workspace-name';
 import {gateSpend} from './spend-gate';
 
@@ -1903,7 +1903,7 @@ async function scenarioS1(ctx: Ctx): Promise<void> {
   check(
     'S1',
     "the old tab's title marks it handed off",
-    (oldTab?.title ?? '').startsWith(HANDED_OFF_TAB_PREFIX),
+    isHandedOffTabTitle(oldTab?.title ?? ''),
     `old tab title: "${oldTab?.title ?? '(tab not found)'}"; successor tab title: "${newTab?.title ?? '(tab not found)'}"`,
   );
   const shown = sdk(['thread', 'show', link.successor.id], 120_000);

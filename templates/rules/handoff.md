@@ -34,13 +34,22 @@ Run this command once, from the repository root:
 
 The command may refuse: too many sessions running, usage too high, or another reason. Refusing is its job.
 
-- **Exit 0: handed off.** If the output names a new tab, the next session is already running there. If it does not, put the printed handoff block in your final report, so Justin can start the next session from it. Either way, write your final report now and end your turn. Do no more work: the next session works in the same checkout.
+- **Exit 0: handed off.** If the output names a new tab, the next session is already running there: end your turn with the handoff summary (below). If it does not, put the printed handoff block in your final report, so Justin can start the next session from it, and end your turn. Do no more work: the next session works in the same checkout.
 - **Exit 1: a step failed after the handoff was recorded.** The output says what was done. Quote it in your final report and stop. Do not run `thread handoff` again.
 - **Exit 2: nothing was written.** The output says why. If your call was wrong, fix it and run it again. Otherwise report the message and stop.
-- **Exit 3: the gate refused.** The handoff and the refusal are recorded, and nothing was opened. The refusal is final. Put the printed handoff block in your final report and stop. Do not run `thread handoff` again.
-- **Exit 4: deferred, cmux was too slow to decide or the beads database stayed locked.** Nothing was refused and nothing was opened. The command already waited, so run the same command again at once, up to 3 more times. If it still exits 4, put the printed output, with its handoff block if it has one, in your final report and stop.
+- **Exit 3: the gate refused.** The handoff and the refusal are recorded, and nothing was opened. The refusal is final. End your turn with the handoff summary, then the printed handoff block, and stop. Do not run `thread handoff` again.
+- **Exit 4: deferred, cmux was too slow to decide or the beads database stayed locked.** Nothing was refused and nothing was opened. The command already waited, so run the same command again at once, up to 3 more times. If it still exits 4, end your turn with the handoff summary and the handoff block if the output has them, or else with the printed output, and stop.
 
 Where the old tab is set to exit or close after a handoff, it waits until the next session has linked and your last message is recorded. Do nothing to help it: finish your report and stop.
+
+## Your final message: the handoff summary
+
+When the output ends with a summary headed `🤝 **Handed off**`, your final message is that summary, as printed. It replaces the status report: do not run `thread status` again, and do not paste its block. Justin asked for this on 2026-11-09: "a much more abbreviated status report".
+
+- The summary gives this session's H number, the command that focuses the new tab (or why no tab opened), the open and total requests, and the command that prints the full report.
+- On exit 0, send the summary and nothing else. The one addition: if a subagent or a background shell of yours is still running, add one line under the summary that says so.
+- On exit 3, and on exit 4 at your last try, send the summary, then the printed handoff block. No tab opened, so Justin starts the next session from the block.
+- On exit 1, or when the output has no summary, quote the output as the list above says.
 
 ## Never start a session another way
 

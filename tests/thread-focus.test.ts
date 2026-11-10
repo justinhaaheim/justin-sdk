@@ -516,6 +516,60 @@ describe('thread focus: runThreadFocus', () => {
     expect(json.exitCode).toBe(3);
     expect(json.chain).toEqual(['hb-a', 'hb-b']);
   });
+
+  // home-base-9ihcl.4: --json carries where the time went, one phase per
+  // reader call; the answer itself is the same object with `timings` added.
+  // NEGATIVE CONTROL (2026-11-10): with runThreadFocus not wrapping the
+  // readers, this failed (the phase names were []); restored, it passed.
+  test('--json carries a timings field with a phase per reader call', async () => {
+    const run = async (
+      json: boolean,
+    ): Promise<{code: number; printed: string}> => {
+      const {readers} = fake({
+        'hb-a': {labels: ['continued-by:hb-b', `sid:${sid(1)}`]},
+        'hb-b': {labels: ['continues:hb-a', 'handed-off', `sid:${sid(2)}`]},
+      });
+      const printed: string[] = [];
+      const capture = captureWriteStdout((text) => printed.push(text));
+      try {
+        const code = await runThreadFocus({
+          dryRun: true,
+          json,
+          readers,
+          target: 'hb-a',
+        });
+        return {code, printed: printed.join('')};
+      } finally {
+        capture.mockRestore();
+      }
+    };
+    const withJson = await run(true);
+    const parsed = JSON.parse(withJson.printed) as Record<string, unknown> & {
+      timings: {phases: {name: string; spawns: unknown}[]; totalMs: number};
+    };
+    expect(parsed.timings.phases.map((phase) => phase.name)).toEqual([
+      'bead read hb-a',
+      'bead read hb-b',
+      'reverse links hb-b',
+      'checkout lookup',
+    ]);
+    const {timings: _timings, ...answer} = parsed;
+    const {readers} = fake({
+      'hb-a': {labels: ['continued-by:hb-b', `sid:${sid(1)}`]},
+      'hb-b': {labels: ['continues:hb-a', 'handed-off', `sid:${sid(2)}`]},
+    });
+    const result = await resolveFocus('hb-a', readers, dry);
+    expect(answer).toEqual(
+      JSON.parse(JSON.stringify(focusJsonOf(result))) as Record<
+        string,
+        unknown
+      >,
+    );
+    // Text output stays as it was: no timings in it.
+    const text = await run(false);
+    expect(text.code).toBe(withJson.code);
+    expect(text.printed).not.toContain('timings');
+  });
 });
 
 // home-base-9uzxw.5 F9: every refusal carries its own code in --json, so the

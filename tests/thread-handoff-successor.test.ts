@@ -21,11 +21,19 @@ import {execFileSync} from 'child_process';
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {dirname, join} from 'path';
 
-import {brShow, runBr} from '../src/beads/br';
+import {brShow, brUpdate, runBr} from '../src/beads/br';
+import {stripAnsi} from '../src/check-runner';
+import {PLAIN_STYLE} from '../src/cli-style';
 import {messageLogPath} from '../src/thread/archive';
-import {readLaunchRecord, runHandoffGate} from '../src/thread/handoff-gate';
+import {
+  handoffDeferralMessage,
+  readLaunchRecord,
+  runHandoffGate,
+} from '../src/thread/handoff-gate';
 import {
   classifySuccessorScreen,
+  HANDOFF_DEFERRED_SUMMARY_NEXT,
+  HANDOFF_REFUSED_SUMMARY_NEXT,
   HANDOFF_STEP_FAILED_INSTRUCTIONS,
   parseNewSurface,
   SANDBOXED_CALL_INSTRUCTIONS,
@@ -35,14 +43,19 @@ import {
   successorName,
   threadHandoffCommand,
 } from '../src/thread/handoff-successor';
+import {handoffSummary} from '../src/thread/handoff-summary';
 import {serializeMessageLine} from '../src/thread/message-log';
 import {NO_BREAK_SPACE} from '../src/thread/pane-join';
 import {predecessorWatchSchema} from '../src/thread/predecessor-watch';
-import {kickoffText, TYPED_COMMAND_BYTE_LIMIT} from '../src/thread/respawn';
-import {ensureSessionBead} from '../src/thread/session-bead';
+import {fileRequest} from '../src/thread/request';
+import {
+  kickoffText,
+  TYPED_COMMAND_BYTE_LIMIT,
+  zshWord,
+} from '../src/thread/respawn';
+import {ensureSessionBead, MAYOR_ROLE_LABEL} from '../src/thread/session-bead';
 import {describeHandoffOutcome, handOff} from '../src/thread/session-handoff';
 import {selectSession} from '../src/thread/session-select';
-import {handedOffTabTitle} from '../src/thread/tab-title';
 import {initRepo} from './git-fixtures';
 import {needBr} from './pinned-br';
 import {createSandbox} from './sandbox';
@@ -260,6 +273,8 @@ function opts(
     note: 'pick up at step 3',
     now: NOW,
     sessionId: null,
+    // The output does not depend on whether the test's stdout is a TTY.
+    style: PLAIN_STYLE,
     to: null,
     ...more,
   };
@@ -284,6 +299,23 @@ function bead(w: World) {
   return shown.issue;
 }
 
+/**
+ * home-base-9ihcl.6: the summary's commands start in the session's checkout,
+ * so they work from any terminal (a bare `bun run justin-sdk` outside a repo
+ * reaches whatever justin-sdk is on PATH).
+ */
+function inRepo(w: World): string {
+  const selected = selectSession({
+    env: w.env,
+    selector: null,
+    sessionIdOption: null,
+  });
+  if (selected.kind !== 'found') throw new Error(selected.kind);
+  const checkout = selected.session.checkoutPath;
+  if (checkout == null) throw new Error('no checkout recorded');
+  return `cd ${zshWord(checkout)} && `;
+}
+
 const handoffsDir = (w: World) => join(w.stateDir, 'handoffs');
 const blockPathOf = (w: World) => join(handoffsDir(w), `${OLD}.md`);
 
@@ -303,6 +335,7 @@ describe('knob off (D10): thread handoff exactly as before', () => {
       block: '🤝 **HANDOFF** — fixed block',
       followUpFailures: [],
       kind: 'handedOff' as const,
+      requests: {kind: 'counted' as const, open: 1, total: 2},
       successor: {kind: 'noBeadYet' as const, sessionId: 'abc'},
     };
     const asked: unknown[] = [];
@@ -481,7 +514,21 @@ describe('knob on: the gate refuses (exit 3, C2)', () => {
     expect(text).toContain(
       `Recorded on ${w.beadId}: handoff refused: usageHigh — the 5-hour session window is at 91 % (ceiling 85 %)`,
     );
-    expect(result.lines.at(-1)).toBe(REFUSED.message);
+    // home-base-9ihcl.6: the refusal, what to end the turn with, the summary.
+    expect(result.lines.slice(-5)).toEqual([
+      REFUSED.message,
+      '',
+      HANDOFF_REFUSED_SUMMARY_NEXT,
+      '',
+      [
+        '🤝 **Handed off**',
+        '',
+        '- **This session:** the first session of its chain (no H number)',
+        '- **New tab:** none opened: the handoff was refused (usageHigh): the 5-hour session window is at 91 % (ceiling 85 %)',
+        '- **Requests:** none filed',
+        `- **Full report:** \`${inRepo(w)}bun run justin-sdk thread show ${w.beadId}\``,
+      ].join('\n'),
+    ]);
     const issue = bead(w);
     expect(issue.labels).toContain('handed-off');
     expect(issue.labels).toContain('handoff-refused');
@@ -601,7 +648,9 @@ describe('knob on: the gate passes', () => {
         '--surface',
         SURF,
         '--',
-        handedOffTabTitle('[HANDOFF-REPO] H1 migrate the db'),
+        // home-base-9ihcl.10: the original of a chain names its successor's
+        // number, and its own name carries no H mark.
+        '↪ handed off to H1: [HANDOFF-REPO] migrate the db',
       ],
     ]);
     // AC4: no rename call targets any other surface (not the successor's).
@@ -609,7 +658,7 @@ describe('knob on: the gate passes', () => {
     expect(renames).toHaveLength(1);
     expect(renames[0]?.[4]).toBe(w.env.CMUX_SURFACE_ID);
     expect(result.lines.join('\n')).toContain(
-      'renamed "↪ handed off: [HANDOFF-REPO] H1 migrate the db"',
+      'renamed "↪ handed off to H1: [HANDOFF-REPO] migrate the db"',
     );
 
     expect(bead(w).labels).toContain('handed-off');
@@ -620,7 +669,18 @@ describe('knob on: the gate passes', () => {
     const text = result.lines.join('\n');
     expect(text).toContain(blockPath);
     expect(text).toContain('surface:306 "[HANDOFF-REPO] H1 migrate the db"');
-    expect(result.lines.at(-1)).toBe(SUCCESSOR_STARTED_NEXT);
+    // home-base-9ihcl.6: the next step, then the short summary, last.
+    expect(result.lines.at(-3)).toBe(SUCCESSOR_STARTED_NEXT);
+    expect(result.lines.at(-1)).toBe(
+      [
+        '🤝 **Handed off**',
+        '',
+        '- **This session:** the first session of its chain (no H number)',
+        `- **New tab:** H1 opened. Focus it: \`${inRepo(w)}bun run justin-sdk thread focus ${w.beadId}\``,
+        '- **Requests:** none filed',
+        `- **Full report:** \`${inRepo(w)}bun run justin-sdk thread show ${w.beadId}\``,
+      ].join('\n'),
+    );
     expect(result.launch).toEqual({
       blockPath,
       caller: {paneId: PANE, surfaceId: SURF, workspaceId: WS},
@@ -751,6 +811,210 @@ describe('knob on: the gate passes', () => {
   });
 });
 
+describe('home-base-9ihcl.10 and .6: the old tab names its own place, and the run ends with the short summary', () => {
+  /** This session as the H2 of a mayor chain (the labels a link writes). */
+  function h2Mayor(w: World): void {
+    const written = brUpdate({cwd: w.repo}, w.beadId, {
+      addLabels: ['continues:t-earlier', 'handoff-number:2', MAYOR_ROLE_LABEL],
+    });
+    if (written.kind === 'failed') throw new Error('br update failed');
+  }
+
+  test('exit 0 from H2: the old tab reads H2 handed off to H3, the new tab H3, and no two tabs share an H number', async () => {
+    const w = world(ON);
+    h2Mayor(w);
+    const cmux = fakeCmux();
+    const result = await threadHandoffCommand(
+      opts(w),
+      deps(cmux, gateOf(PASS)),
+    );
+    expect(result.exitCode).toBe(0);
+    const opened = cmux.calls.find((call) => call[0] === 'new-surface') ?? [];
+    const command = opened[opened.indexOf('--command') + 1] ?? '';
+    expect(command).toContain(
+      "--name '[MAYOR] [HANDOFF-REPO] H3 migrate the db'",
+    );
+    const renames = cmux.calls.filter((call) => call[0] === 'rename-tab');
+    expect(renames).toEqual([
+      [
+        'rename-tab',
+        '--workspace',
+        WS,
+        '--surface',
+        SURF,
+        '--',
+        '↪ H2 handed off to H3: [MAYOR] [HANDOFF-REPO] migrate the db',
+      ],
+    ]);
+    // The negative-control target: the old title carries the successor's
+    // name (and so its H3) if the successor's name is put back.
+    const oldTitle = renames[0]?.at(-1) ?? '';
+    expect(oldTitle).not.toContain('H3 migrate the db');
+    expect(oldTitle.match(/H\d+/gu)).toEqual(['H2', 'H3']);
+    expect(result.launch?.name).toBe(
+      '[MAYOR] [HANDOFF-REPO] H3 migrate the db',
+    );
+
+    expect(result.lines.at(-1)).toBe(
+      [
+        '🤝 **Handed off**',
+        '',
+        '- **This session:** H2',
+        `- **New tab:** H3 opened. Focus it: \`${inRepo(w)}bun run justin-sdk thread focus ${w.beadId}\``,
+        '- **Requests:** none filed',
+        `- **Full report:** \`${inRepo(w)}bun run justin-sdk thread show ${w.beadId}\``,
+      ].join('\n'),
+    );
+  });
+
+  test('a session whose number cannot be established: H? on both sides, never a guess', async () => {
+    const w = world(ON);
+    // continues another bead, no number label, and that bead does not exist.
+    const written = brUpdate({cwd: w.repo}, w.beadId, {
+      addLabels: ['continues:t-missing'],
+    });
+    if (written.kind === 'failed') throw new Error('br update failed');
+    const cmux = fakeCmux();
+    const result = await threadHandoffCommand(
+      opts(w),
+      deps(cmux, gateOf(PASS)),
+    );
+    expect(result.exitCode).toBe(0);
+    const renames = cmux.calls.filter((call) => call[0] === 'rename-tab');
+    expect(renames[0]?.at(-1)).toBe(
+      '↪ H? handed off to H?: [HANDOFF-REPO] migrate the db',
+    );
+    const summary = result.lines.at(-1) ?? '';
+    expect(summary).toContain('- **This session:** H? (unknown: ');
+    expect(summary).toContain('- **New tab:** H? opened.');
+  });
+
+  test('exit 4 (cmux too slow): the deferral, what to end the turn with, then the summary; requests counted', async () => {
+    const w = world(ON);
+    h2Mayor(w);
+    const filed = await fileRequest({
+      bead: null,
+      cwd: w.repo,
+      doneWhen: null,
+      env: w.env,
+      here: false,
+      now: NOW,
+      sessionId: OLD,
+      title: 'Migrate the orders table',
+    });
+    if (filed.kind !== 'filed') throw new Error(JSON.stringify(filed));
+    const detail = 'cmux did not answer ping within 60 s';
+    const deferred: HandoffGateResult = {
+      detail,
+      kind: 'deferred',
+      message: handoffDeferralMessage('cmuxSlow', detail),
+      reason: 'cmuxSlow',
+    };
+    const cmux = fakeCmux();
+    const result = await threadHandoffCommand(
+      opts(w),
+      deps(cmux, gateOf(deferred)),
+    );
+    expect(result.exitCode).toBe(4);
+    expect(writeCalls(cmux.calls)).toEqual([]);
+    expect(result.lines.slice(-5)).toEqual([
+      deferred.message,
+      '',
+      HANDOFF_DEFERRED_SUMMARY_NEXT,
+      '',
+      [
+        '🤝 **Handed off**',
+        '',
+        '- **This session:** H2',
+        `- **New tab:** none opened: the handoff was deferred (cmuxSlow): ${detail}`,
+        '- **Requests:** 1 open of 1',
+        `- **Full report:** \`${inRepo(w)}bun run justin-sdk thread show ${w.beadId}\``,
+      ].join('\n'),
+    ]);
+    // Everything the handoff records is unchanged: labelled, and deferred.
+    expect(bead(w).labels).toContain('handed-off');
+    expect(bead(w).labels).toContain('handoff-deferred');
+  });
+
+  test('the handoff itself was not recorded: no summary', async () => {
+    const w = world(ON);
+    const cmux = fakeCmux();
+    const result = await threadHandoffCommand(opts(w), {
+      ...deps(cmux, gateOf(REFUSED)),
+      handOff: () => Promise.resolve({kind: 'failed', reason: 'br exited 2'}),
+    });
+    expect(result.exitCode).toBe(3);
+    const text = result.lines.join('\n');
+    expect(text).toContain(
+      '⚠️ The handoff itself was NOT recorded: br exited 2',
+    );
+    expect(text).not.toContain('🤝 **Handed off**');
+    expect(text).not.toContain(HANDOFF_REFUSED_SUMMARY_NEXT);
+  });
+
+  test('a TTY gets the same four fields as bold labels, no markdown', async () => {
+    const w = world(ON);
+    h2Mayor(w);
+    const result = await threadHandoffCommand(
+      opts(w, {style: {color: true, width: null}}),
+      deps(fakeCmux(), gateOf(PASS)),
+    );
+    const summary = result.lines.at(-1) ?? '';
+    expect(summary).not.toContain('**');
+    const plain = stripAnsi(summary);
+    expect(summary).not.toBe(plain);
+    expect(plain).toBe(
+      [
+        '  🤝 Handed off',
+        '',
+        '      This session:  H2',
+        `      New tab:       H3 opened. Focus it: ${inRepo(w)}bun run justin-sdk thread focus ${w.beadId}`,
+        '      Requests:      none filed',
+        `      Full report:   ${inRepo(w)}bun run justin-sdk thread show ${w.beadId}`,
+      ].join('\n'),
+    );
+  });
+
+  test('the pure summary: bare commands without a checkout, a quoted one with a space, and every request count', () => {
+    const base = {
+      own: {kind: 'known' as const, number: 1},
+      sessionBeadId: 't-1',
+      tab: {kind: 'opened' as const},
+    };
+    const bare = handoffSummary(
+      {...base, checkout: null, requests: {kind: 'counted', open: 0, total: 3}},
+      PLAIN_STYLE,
+    );
+    expect(bare).toContain('`bun run justin-sdk thread focus t-1`');
+    expect(bare).toContain('- **Requests:** 0 open of 3');
+    const spaced = handoffSummary(
+      {
+        ...base,
+        checkout: '/a b',
+        requests: {kind: 'partial', open: 2, reason: 'x', total: 5},
+      },
+      PLAIN_STYLE,
+    );
+    expect(spaced).toContain(
+      "- **Full report:** `cd '/a b' && bun run justin-sdk thread show t-1`",
+    );
+    expect(spaced).toContain(
+      '- **Requests:** 2 open of 5 (⚠️ not all counted: x)',
+    );
+    const unknown = handoffSummary(
+      {
+        ...base,
+        checkout: null,
+        requests: {kind: 'unknown', reason: 'the bead export is behind'},
+      },
+      PLAIN_STYLE,
+    );
+    expect(unknown).toContain(
+      '- **Requests:** unknown: the bead export is behind',
+    );
+  });
+});
+
 describe('knob on: --dry-run', () => {
   test('home-base-6n7my.2: a mayor`s dry run shows both marks and the mayor sentence, and writes nothing', async () => {
     const w = world(ON);
@@ -771,6 +1035,11 @@ describe('knob on: --dry-run', () => {
     expect(text).toMatch(
       /Successor name:\s+\[MAYOR\] \[HANDOFF-REPO\] H1 migrate the db/u,
     );
+    // home-base-9ihcl.10: the dry run shows what this tab would be renamed to.
+    expect(text).toMatch(
+      /This tab after:\s+↪ handed off to H1: \[MAYOR\] \[HANDOFF-REPO\] migrate the db/u,
+    );
+    expect(text).not.toContain('🤝 **Handed off**');
     expect(text).toContain('load the mayor skill with the Skill tool');
     expect(text).toMatch(/Kickoff:\s+You are the successor of a handed-off/u);
     expect(bead(w).labels).toEqual(before);

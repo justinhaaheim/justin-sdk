@@ -26,6 +26,7 @@
 import type {ChainReaders} from './handoff-chain';
 import type {EnvLike} from './paths';
 import type {FoundSession} from './session-select';
+import type {RequestNode} from './session-tree';
 
 import {
   brShow,
@@ -74,7 +75,16 @@ import {
 // ---------------------------------------------------------------------------
 
 export type BeadLocation =
-  | {db: string; kind: 'found'; labels: readonly string[]; title: string}
+  | {
+      db: string;
+      /** The id br show printed (home-base-9ihcl.4: focus reads it from here). */
+      id: string;
+      kind: 'found';
+      labels: readonly string[];
+      /** br show's notes, so a caller needs no second br show for them. */
+      notes: string | null;
+      title: string;
+    }
   | {kind: 'failed'; reason: string}
   | {kind: 'notFound'; searched: string[]};
 
@@ -122,8 +132,10 @@ export function locateSessionBead(
     if (shown.kind === 'ok') {
       return {
         db,
+        id: shown.issue.id,
         kind: 'found',
         labels: shown.issue.labels,
+        notes: shown.issue.notes,
         title: shown.issue.title,
       };
     }
@@ -333,12 +345,24 @@ export interface ThreadHandoffOptions {
   to: string | null;
 }
 
+/**
+ * The session's requests as the handoff block counted them, for the short
+ * handoff summary (home-base-9ihcl.6). `partial` is a floor, not a count: some
+ * beads could not be read. `unknown` is never zero (rule 7).
+ */
+export type HandoffRequestCount =
+  | {kind: 'counted'; open: number; total: number}
+  | {kind: 'partial'; open: number; reason: string; total: number}
+  | {kind: 'unknown'; reason: string};
+
 export type HandoffOutcome =
   | {
       block: string;
       /** Problems after the label was set; non-empty means exit 1. */
       followUpFailures: string[];
       kind: 'handedOff';
+      /** Open and total requests, read with the block (home-base-9ihcl.6). */
+      requests: HandoffRequestCount;
       /** What happened to --to: linked, waiting for the successor, or not asked. */
       successor:
         | {beadId: string; kind: 'linked'}
@@ -377,6 +401,24 @@ function successorBead(
   return {beadId: created.beadId, db: found.db, kind: 'found'};
 }
 
+/** Part 1's rules for its request count (part-one.ts), as a type. */
+function requestCountOf(model: {
+  beads: {problems: readonly string[]; requests: readonly RequestNode[]};
+  exportBehind?: unknown;
+}): HandoffRequestCount {
+  if (model.exportBehind != null) {
+    return {kind: 'unknown', reason: 'the bead export is behind'};
+  }
+  const {problems, requests} = model.beads;
+  const total = requests.length;
+  const open = requests.filter((node) => isOpen(node.request)).length;
+  if (problems.length === 0) return {kind: 'counted', open, total};
+  const reason = `some beads could not be read: ${problems.join('; ')}`;
+  return total === 0
+    ? {kind: 'unknown', reason}
+    : {kind: 'partial', open, reason, total};
+}
+
 /** The block to paste into the new session (markdown: it is for pasting). */
 export async function handoffBlock(input: {
   cwd: string;
@@ -386,7 +428,10 @@ export async function handoffBlock(input: {
   sessionBeadId: string;
   sessionId: string;
   timeZone?: string;
-}): Promise<{ok: false; reason: string} | {ok: true; text: string}> {
+}): Promise<
+  | {ok: false; reason: string}
+  | {ok: true; requests: HandoffRequestCount; text: string}
+> {
   const loaded = await loadSession({
     cwd: input.cwd,
     env: input.env,
@@ -466,7 +511,11 @@ export async function handoffBlock(input: {
       `- To read the old session: \`claude --resume ${input.sessionId}\` or \`${sdkRun(`thread show ${input.sessionBeadId}`)}\``,
     ].join('\n'),
   ];
-  return {ok: true, text: tildeText(blocks.join('\n\n'))};
+  return {
+    ok: true,
+    requests: requestCountOf(model),
+    text: tildeText(blocks.join('\n\n')),
+  };
 }
 
 export async function handOff(
@@ -560,6 +609,9 @@ export async function handOff(
     block: block.ok ? block.text : '',
     followUpFailures,
     kind: 'handedOff',
+    requests: block.ok
+      ? block.requests
+      : {kind: 'unknown', reason: block.reason},
     successor,
   };
 }

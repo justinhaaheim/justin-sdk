@@ -27,6 +27,7 @@ import {sessionDisplayName, sessionName} from '../src/thread/session-name';
 import {
   describeTabTitle,
   handedOffTabTitle,
+  isHandedOffTabTitle,
   syncTabTitle,
   tabTitlesPath,
 } from '../src/thread/tab-title';
@@ -539,8 +540,49 @@ describe('syncTabTitle: a successor titles its own tab (D8)', () => {
     }
   });
 
-  test('the handed-off mark and the shared name', () => {
-    expect(handedOffTabTitle(NAME_A)).toBe(`↪ handed off: ${NAME_A}`);
+  test('home-base-9ihcl.10: the handed-off mark names this session and its successor', () => {
+    const title = 'migrate the db';
+    const at = (number: number) => ({kind: 'known' as const, number});
+    expect(
+      handedOffTabTitle({
+        mayor: false,
+        own: at(0),
+        repoTag: 'HOME-BASE',
+        title,
+      }),
+    ).toBe(`↪ handed off to H1: ${NAME_A}`);
+    expect(
+      handedOffTabTitle({mayor: true, own: at(2), repoTag: 'HOME', title}),
+    ).toBe('↪ H2 handed off to H3: [MAYOR] [HOME] migrate the db');
+    expect(
+      handedOffTabTitle({
+        mayor: false,
+        own: {kind: 'unknown', reason: 'the chain loops'},
+        repoTag: 'HOME',
+        title,
+      }),
+    ).toBe('↪ H? handed off to H?: [HOME] migrate the db');
+    // The name part is cut like every session name.
+    const long = handedOffTabTitle({
+      mayor: false,
+      own: at(7),
+      repoTag: 'HOME',
+      title: 'y'.repeat(200),
+    });
+    expect(long.startsWith('↪ H7 handed off to H8: [HOME] yyy')).toBe(true);
+    expect(long.endsWith('...')).toBe(true);
+    for (const written of [
+      `↪ handed off to H1: ${NAME_A}`,
+      '↪ H2 handed off to H3: [MAYOR] [HOME] x',
+      '↪ H? handed off to H?: [HOME] x',
+    ]) {
+      expect(isHandedOffTabTitle(written)).toBe(true);
+    }
+    expect(isHandedOffTabTitle(NAME_A)).toBe(false);
+    expect(isHandedOffTabTitle(`↪ handed off: ${NAME_A}`)).toBe(false);
+  });
+
+  test('the shared name', () => {
     expect(sessionName('HOME-BASE', 'x')).toBe(
       sessionDisplayName('HOME-BASE', 'x'),
     );

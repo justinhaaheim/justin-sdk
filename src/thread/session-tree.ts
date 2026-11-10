@@ -252,6 +252,129 @@ export function recordsMatching(
   return {issues, ok: true};
 }
 
+/**
+ * One export, parsed ONCE and indexed by the three keys readSessionTree looks
+ * records up by: id, label, parent id (home-base-9uzxw.7, folded into
+ * home-base-9ihcl.4). Built per inbox run, in memory, in the run's LoadCache:
+ * the inbox loads ~200 sessions, and recordsMatching split and scanned the
+ * whole export (11 MB for home-base) three times for each of them, about 4.6 s
+ * of main-thread time per load (profile 2026-11-10, home-base-9ihcl.4 notes).
+ *
+ * The answers are exactly recordsMatching's, by construction:
+ *  - every record keeps its raw line, and a lookup keeps only the records
+ *    whose line contains one of the needles, as recordsMatching's prefilter
+ *    did (so a record br wrote in some other spelling is missed exactly as
+ *    before);
+ *  - results come back in file order;
+ *  - a line that does not parse is kept, and a lookup with a needle in such a
+ *    line FAILS with recordsMatching's own words, never reads as "no records"
+ *    (critical rule 7): it could be the very record.
+ */
+export interface ExportIndex {
+  beadsDir: string;
+  byId: Map<string, IndexedRecord[]>;
+  byLabel: Map<string, IndexedRecord[]>;
+  byParent: Map<string, IndexedRecord[]>;
+  path: string;
+  /** Lines that did not parse, in file order. */
+  unparsed: {lineNumber: number; raw: string; reason: string}[];
+}
+
+/** A parsed export line: the record, its line, and where it is in the file. */
+export interface IndexedRecord {
+  issue: TreeIssue;
+  /** 1-based, as recordsMatching numbers lines. */
+  lineNumber: number;
+  raw: string;
+}
+
+export type ExportIndexRead =
+  | {index: ExportIndex; kind: 'read'}
+  | {kind: 'failed'; path: string; reason: string};
+
+function pushTo(
+  map: Map<string, IndexedRecord[]>,
+  key: string,
+  record: IndexedRecord,
+): void {
+  const list = map.get(key);
+  if (list == null) map.set(key, [record]);
+  else list.push(record);
+}
+
+/** Index one export read. A failed read stays a failure, with its reason. */
+export function indexExport(
+  read: ExportRead,
+  beadsDir: string,
+): ExportIndexRead {
+  if (read.kind === 'failed') return read;
+  const index: ExportIndex = {
+    beadsDir,
+    byId: new Map(),
+    byLabel: new Map(),
+    byParent: new Map(),
+    path: read.path,
+    unparsed: [],
+  };
+  const lines = read.text.split('\n');
+  for (const [at, raw] of lines.entries()) {
+    if (raw.trim() === '') continue;
+    const parsed = parseExportLine(raw, beadsDir);
+    if (!parsed.ok) {
+      index.unparsed.push({lineNumber: at + 1, raw, reason: parsed.reason});
+      continue;
+    }
+    // recordsMatching skips tombstones, so the index never holds them.
+    if (parsed.issue.status === 'tombstone') continue;
+    const record: IndexedRecord = {
+      issue: parsed.issue,
+      lineNumber: at + 1,
+      raw,
+    };
+    pushTo(index.byId, parsed.issue.id, record);
+    for (const label of new Set(parsed.issue.labels)) {
+      pushTo(index.byLabel, label, record);
+    }
+    for (const parent of new Set(parsed.issue.parentIds)) {
+      pushTo(index.byParent, parent, record);
+    }
+  }
+  return {index, kind: 'read'};
+}
+
+/**
+ * recordsMatching over an index: of `candidates` (records found by key), the
+ * ones whose line holds one of `needles`, in file order; or the same failure
+ * recordsMatching gives when a line that does not parse holds a needle.
+ */
+export function indexedRecordsMatching(
+  index: ExportIndex,
+  needles: readonly string[],
+  candidates: readonly IndexedRecord[],
+): {issues: TreeIssue[]; ok: true} | {ok: false; reason: string} {
+  if (needles.length === 0) return {issues: [], ok: true};
+  const broken = index.unparsed.find((line) =>
+    needles.some((needle) => line.raw.includes(needle)),
+  );
+  if (broken != null) {
+    return {
+      ok: false,
+      reason: `line ${broken.lineNumber} of ${index.path} is not a bead record (${broken.reason})`,
+    };
+  }
+  const seen = new Set<IndexedRecord>();
+  const kept: IndexedRecord[] = [];
+  for (const record of candidates) {
+    if (seen.has(record)) continue;
+    seen.add(record);
+    if (needles.some((needle) => record.raw.includes(needle))) {
+      kept.push(record);
+    }
+  }
+  kept.sort((a, b) => a.lineNumber - b.lineNumber);
+  return {issues: kept.map((record) => record.issue), ok: true};
+}
+
 function isQuestion(issue: TreeIssue): boolean {
   return issue.labels.includes(ASK_LABEL);
 }
@@ -278,6 +401,50 @@ function addTo(map: Map<string, TreeIssue>, issue: TreeIssue): void {
   map.set(issue.id, existing == null ? issue : newer(existing, issue));
 }
 
+/** The keys a lookup's records are found by in an index (ids, labels, parents). */
+interface LookupKeys {
+  ids: readonly string[];
+  labels: readonly string[];
+  parents: readonly string[];
+}
+
+/** One export as readSessionTree reads it: scanned text, or an index. */
+interface TreeSource {
+  beadsDir: string;
+  /** recordsMatching's answer for `needles`; an index finds its candidates by `keys`. */
+  find: (
+    needles: readonly string[],
+    keys: LookupKeys,
+  ) => {issues: TreeIssue[]; ok: true} | {ok: false; reason: string};
+  path: string;
+}
+
+function textSource(beadsDir: string, path: string, text: string): TreeSource {
+  return {
+    beadsDir,
+    find: (needles) => recordsMatching(text, needles, beadsDir, path),
+    path,
+  };
+}
+
+function indexSource(index: ExportIndex): TreeSource {
+  return {
+    beadsDir: index.beadsDir,
+    find: (needles, keys) => {
+      const candidates: IndexedRecord[] = [];
+      for (const id of keys.ids) candidates.push(...(index.byId.get(id) ?? []));
+      for (const label of keys.labels) {
+        candidates.push(...(index.byLabel.get(label) ?? []));
+      }
+      for (const parent of keys.parents) {
+        candidates.push(...(index.byParent.get(parent) ?? []));
+      }
+      return indexedRecordsMatching(index, needles, candidates);
+    },
+    path: index.path,
+  };
+}
+
 /**
  * The session's tree from the exports of `beadsDirs` (the session bead's own
  * DB first, then every other DB the index names).
@@ -289,6 +456,13 @@ export function readSessionTree(input: {
    * reader that reads each export once per run (home-base-vzwbj.4.9 F7).
    */
   readExport?: (beadsDir: string) => ExportRead;
+  /**
+   * home-base-9uzxw.7: an export already indexed (indexExport), read once per
+   * run by the inbox. Given, it is used instead of `readExport`, with the same
+   * answers; omitted, each export's text is scanned as before, which is
+   * cheaper for one session than indexing a whole export.
+   */
+  readIndex?: (beadsDir: string) => ExportIndexRead;
   sessionBeadId: string;
   sessionId: string;
 }): SessionTree {
@@ -296,25 +470,32 @@ export function readSessionTree(input: {
   const readExport = input.readExport ?? readBeadsExport;
   const label = sidLabel(sessionId);
   const problems: string[] = [];
-  const texts: {beadsDir: string; path: string; text: string}[] = [];
+  const texts: TreeSource[] = [];
   for (const beadsDir of [...new Set(input.beadsDirs)]) {
+    if (input.readIndex != null) {
+      const indexed = input.readIndex(beadsDir);
+      if (indexed.kind === 'failed') {
+        problems.push(indexed.reason);
+        continue;
+      }
+      texts.push(indexSource(indexed.index));
+      continue;
+    }
     const read = readExport(beadsDir);
     if (read.kind === 'failed') {
       problems.push(read.reason);
       continue;
     }
-    texts.push({beadsDir, path: read.path, text: read.text});
+    texts.push(textSource(beadsDir, read.path, read.text));
   }
 
   // Pass 1: everything carrying the session's label, and the session bead.
   const labelled = new Map<string, TreeIssue>();
   const quoted = (id: string): string => JSON.stringify(id);
   for (const source of texts) {
-    const found = recordsMatching(
-      source.text,
+    const found = source.find(
       [quoted(label), `"id":${quoted(sessionBeadId)}`],
-      source.beadsDir,
-      source.path,
+      {ids: [sessionBeadId], labels: [label], parents: []},
     );
     if (!found.ok) {
       problems.push(found.reason);
@@ -345,12 +526,11 @@ export function readSessionTree(input: {
     const issues = new Map<string, TreeIssue>();
     const childProblems: string[] = [];
     for (const source of texts) {
-      const found = recordsMatching(
-        source.text,
-        parentIds.map(quoted),
-        source.beadsDir,
-        source.path,
-      );
+      const found = source.find(parentIds.map(quoted), {
+        ids: [],
+        labels: [],
+        parents: parentIds,
+      });
       if (!found.ok) {
         childProblems.push(found.reason);
         continue;

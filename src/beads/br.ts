@@ -1649,6 +1649,93 @@ export function brExportLag(
 }
 
 /**
+ * What `br sync --status --json` says about the export and the database, the
+ * fields a checked export read decides from (home-base-9ihcl.4.1).
+ */
+export interface BrSyncStatus {
+  /** The database changed after the export was last written. */
+  dbNewer: boolean;
+  /** Changes in the database that the export does not hold. */
+  dirtyCount: number;
+  /**
+   * The sha256 (hex) of the export as br last wrote or imported it. br STORES
+   * it; it is not computed from the file (measured on br 0.1.37, 2026-11-10:
+   * editing the export left it unchanged and turned `jsonl_newer` true).
+   * null when br printed none.
+   */
+  jsonlContentHash: string | null;
+  /** The export changed after br last wrote or imported it. */
+  jsonlNewer: boolean;
+}
+
+export type BrSyncStatusOutcome =
+  | {failed: BrFailed; ok: false}
+  | {ok: true; status: BrSyncStatus};
+
+/**
+ * `br sync --status --json`, parsed. A failed call, or one missing any field
+ * this reads, is a failure, never a status (critical rule 7): a reader that
+ * cannot tell whether the export is current must not treat it as current.
+ */
+export function brSyncStatus(target: BrTarget): BrSyncStatusOutcome {
+  const args = ['sync', '--status', '--json'];
+  const call = callBr(target, args);
+  if (!call.ok) return {failed: call.failed, ok: false};
+  const refused = (reason: string): BrSyncStatusOutcome => ({
+    failed: {
+      command: `br ${args.join(' ')} ${describeTarget(target)}`,
+      detail: [],
+      kind: 'failed',
+      reason,
+    },
+    ok: false,
+  });
+  const text = call.out.stdout;
+  const shown = JSON.stringify(text.slice(0, 200));
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text.slice(Math.max(0, text.indexOf('{'))));
+  } catch {
+    return refused(
+      `br sync --status --json printed no JSON (stdout: ${shown})`,
+    );
+  }
+  if (parsed == null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return refused(
+      `br sync --status --json printed no JSON object (stdout: ${shown})`,
+    );
+  }
+  const status = parsed as Record<string, unknown>;
+  const dirtyCount = status.dirty_count;
+  const jsonlNewer = status.jsonl_newer;
+  const dbNewer = status.db_newer;
+  const hash = status.jsonl_content_hash;
+  if (
+    typeof dirtyCount !== 'number' ||
+    typeof jsonlNewer !== 'boolean' ||
+    typeof dbNewer !== 'boolean'
+  ) {
+    return refused(
+      `br sync --status --json printed no number dirty_count and boolean jsonl_newer and db_newer (stdout: ${shown})`,
+    );
+  }
+  if (hash != null && typeof hash !== 'string') {
+    return refused(
+      `br sync --status --json printed a jsonl_content_hash that is not text (stdout: ${shown})`,
+    );
+  }
+  return {
+    ok: true,
+    status: {
+      dbNewer,
+      dirtyCount,
+      jsonlContentHash: hash ?? null,
+      jsonlNewer,
+    },
+  };
+}
+
+/**
  * P1 (home-base-vzwbj.4.9), revised by home-base-j8q3e.1.10 F3 (fixes
  * home-base-vzwbj.4.14): never write while the JSONL export is ahead of the
  * database. When ONLY the export is ahead, import it first and go on; refuse

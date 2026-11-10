@@ -244,6 +244,23 @@ describe('startTimings', () => {
     );
     timedStart(null, 'y')();
   });
+
+  // home-base-9ihcl.4: the event-loop lag is the evidence for "is something
+  // synchronous holding up the parallel work". NEGATIVE CONTROL (2026-11-10):
+  // with the probe never updating maxLagMs, this failed (Expected >= 100,
+  // Received 0); restored, it passed.
+  test('a thread blocked for 150 ms shows as event-loop lag', async () => {
+    const recorder = startTimings();
+    await Bun.sleep(30);
+    Bun.sleepSync(150);
+    await Bun.sleep(30);
+    const timings = recorder.finish();
+    expect(timings.eventLoop.intervalMs).toBe(20);
+    expect(timings.eventLoop.samples).toBeGreaterThan(0);
+    expect(timings.eventLoop.maxLagMs).toBeGreaterThanOrEqual(100);
+    expect(timings.eventLoop.over100ms).toBeGreaterThanOrEqual(1);
+    expect(timings.eventLoop.blockedMs).toBeGreaterThanOrEqual(100);
+  });
 });
 
 describe('withTimingsField', () => {

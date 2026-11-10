@@ -37,7 +37,7 @@ import type {MessageLine, MessageLogRead} from './message-log';
 import type {EnvLike} from './paths';
 import type {GitRun, SessionCommits} from './session-commits';
 import type {SessionSighting} from './session-index';
-import type {ExportRead, SessionTree} from './session-tree';
+import type {ExportIndexRead, SessionTree} from './session-tree';
 
 import {spawn} from 'child_process';
 import {existsSync} from 'fs';
@@ -68,6 +68,7 @@ import {
 } from './session-index';
 import {sessionIdForSelector, sessionIdFrom} from './session-select';
 import {
+  indexExport,
   parseExportLine,
   readBeadsExport,
   readSessionTree,
@@ -690,7 +691,12 @@ export type CheckoutGit =
  */
 export interface LoadCache {
   checkouts: Map<string, Promise<CheckoutGit>>;
-  exports: Map<string, ExportRead>;
+  /**
+   * home-base-9uzxw.7: each beads export read AND indexed once per run, so a
+   * session's tree is a few map lookups instead of three scans of the whole
+   * file. A failed read is kept as the failure, never as an empty index.
+   */
+  exportIndexes: Map<string, ExportIndexRead>;
   /** `lastCommitCached`'s answers, by checkout top and path (j8q3e.6 D3). */
   lastCommits: Map<string, Promise<Measured<number | null>>>;
   /** Each directory's declared `projectTag`, for `resolveRepoTag` (bomy5.7.2). */
@@ -700,7 +706,7 @@ export interface LoadCache {
 export function createLoadCache(): LoadCache {
   return {
     checkouts: new Map(),
-    exports: new Map(),
+    exportIndexes: new Map(),
     lastCommits: new Map(),
     repoTags: new Map(),
   };
@@ -1266,12 +1272,12 @@ export async function loadSession(input: {
     beadsDirs,
     ...(cache != null
       ? {
-          readExport: (dir: string): ExportRead => {
-            const known = cache.exports.get(dir);
+          readIndex: (dir: string): ExportIndexRead => {
+            const known = cache.exportIndexes.get(dir);
             if (known != null) return known;
-            const exported = readBeadsExport(dir);
-            cache.exports.set(dir, exported);
-            return exported;
+            const indexed = indexExport(readBeadsExport(dir), dir);
+            cache.exportIndexes.set(dir, indexed);
+            return indexed;
           },
         }
       : {}),

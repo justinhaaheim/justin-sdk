@@ -18,7 +18,9 @@
  * 3. At the head, the other half of a link (linkContinuation writes
  *    `continues:<old>` on the new bead and `continued-by:<new>` on the old
  *    one, and either write can fail): any bead labelled `continues:<head>`,
- *    by a fresh `br list -l`. One is followed; two are refused.
+ *    by a fresh read: the export when br confirms it holds the database's
+ *    state, else `br list -l` (continuing-read.ts, home-base-9ihcl.4.1). One
+ *    is followed; two are refused.
  * 4. A head whose handoff ran (its `handed-off` label or "handed off" note
  *    line, a refused or deferred handoff, or a successor's recorded pickup
  *    failure naming it) with no successor linked is refused.
@@ -38,24 +40,21 @@
  */
 
 import type {CmuxCall, CmuxRunner} from './cmux';
+import type {TimingRecorder} from './inbox-timings';
 import type {EnvLike} from './paths';
 import type {PaneFact} from './session-card';
 
 import {readdirSync} from 'node:fs';
 import {join} from 'node:path';
 
-import {
-  BEAD_ID_SOURCE,
-  brList,
-  brShow,
-  describeBrFailed,
-  findBeadsWorkspace,
-} from '../beads/br';
+import {BEAD_ID_SOURCE, findBeadsWorkspace} from '../beads/br';
 import {writeStdout} from '../write-stdout';
 import {CMUX_TIMEOUT_MS, realCmuxRunner} from './cmux';
+import {continuingInDb} from './continuing-read';
 import {readPickupFailure} from './handoff-auto-pickup';
 import {CHAIN_WALK_LIMIT} from './handoff-chain';
 import {continuedByOf, handoffStopOf} from './handoff-view';
+import {inboxJsonWithTimings, startTimings} from './inbox-timings';
 import {threadsStateDir} from './paths';
 import {zshWord} from './respawn';
 import {
@@ -116,7 +115,11 @@ export type PickupFailuresRead =
 export interface FocusReaders {
   /** The session's own checkout, for the resume command; null when unknown. */
   checkoutOf: (sessionId: string) => null | string;
-  /** Fresh `br list --all -l continues:<head>` in the head's DB (and cwd's). */
+  /**
+   * The beads labelled `continues:<head>` in the head's DB (and cwd's), read
+   * fresh: from the export when br confirms it is current, else by `br list
+   * --all -l` (continuing-read.ts, home-base-9ihcl.4.1).
+   */
   continuing: (headBeadId: string, db: string) => ContinuingRead;
   /** The sessions index: session id to session bead. */
   lookupSession: (sessionId: string) => SessionLookup;
@@ -743,6 +746,8 @@ function readPickupFailures(env: EnvLike): PickupFailuresRead {
 export function realFocusReaders(input: {
   cwd: string;
   env: EnvLike;
+  /** Where `continuing` records whether it read the export or br list, and why. */
+  timings?: TimingRecorder | null;
 }): FocusReaders {
   const {cwd, env} = input;
   const space = findBeadsWorkspace(cwd);
@@ -758,15 +763,19 @@ export function realFocusReaders(input: {
       const dbs = [db, ...(cwdDb == null || cwdDb === db ? [] : [cwdDb])];
       const ids: string[] = [];
       for (const each of dbs) {
-        const listed = brList(
-          {db: each, env},
-          {all: true, labels: [`${CONTINUES_LABEL_PREFIX}${headBeadId}`]},
-        );
-        if (listed.kind === 'failed') {
-          return {kind: 'failed', reason: describeBrFailed(listed)};
+        // home-base-9ihcl.4.1: the export when br confirms it is current,
+        // else br list (continuing-read.ts); the same ids in the same order.
+        const read = continuingInDb({
+          db: each,
+          env,
+          headBeadId,
+          timings: input.timings ?? null,
+        });
+        if (read.kind === 'failed') {
+          return {kind: 'failed', reason: read.reason};
         }
-        for (const issue of listed.issues) {
-          if (!ids.includes(issue.id)) ids.push(issue.id);
+        for (const id of read.ids) {
+          if (!ids.includes(id)) ids.push(id);
         }
       }
       return {ids, kind: 'read'};
@@ -809,20 +818,16 @@ export function realFocusReaders(input: {
           reason: `not in ${located.searched.length > 0 ? located.searched.join(' or ') : 'any beads DB'}`,
         };
       }
-      const shown = brShow({db: located.db, env}, beadId);
-      if (shown.kind === 'failed') {
-        return {kind: 'failed', reason: describeBrFailed(shown)};
-      }
-      if (shown.kind === 'notFound') {
-        return {kind: 'notFound', reason: `not in ${located.db}`};
-      }
+      // home-base-9ihcl.4: locateSessionBead found it with a fresh br show in
+      // that DB; a second br show of the same bead in the same DB (as before)
+      // doubled the br runs of every step of the walk and told nothing new.
       return {
         bead: {
           db: located.db,
-          id: shown.issue.id,
-          labels: shown.issue.labels,
-          notes: shown.issue.notes,
-          title: shown.issue.title,
+          id: located.id,
+          labels: located.labels,
+          notes: located.notes,
+          title: located.title,
         },
         kind: 'found',
       };
@@ -834,6 +839,42 @@ export function realFocusReaders(input: {
 // The command (its --help text is in command.ts, beside the registration)
 // ---------------------------------------------------------------------------
 
+/**
+ * home-base-9ihcl.4: each reader call timed as its own phase (named after the
+ * reader and, for a bead, its id), with the processes it started, so
+ * `--json`'s `timings` says where a slow `f` went. The answers are untouched.
+ */
+export function timedFocusReaders(
+  readers: FocusReaders,
+  timings: TimingRecorder | null,
+): FocusReaders {
+  if (timings == null) return readers;
+  return {
+    checkoutOf: (sessionId) =>
+      timings.phase('checkout lookup', () => readers.checkoutOf(sessionId)),
+    continuing: (headBeadId, db) =>
+      timings.phase(`reverse links ${headBeadId}`, () =>
+        readers.continuing(headBeadId, db),
+      ),
+    lookupSession: (sessionId) =>
+      timings.phase('sessions index', () => readers.lookupSession(sessionId)),
+    pane: async (sessionId) =>
+      await timings.phase(
+        'pane lookup',
+        async () => await readers.pane(sessionId),
+      ),
+    pickupFailures: () =>
+      timings.phase('pickup failures', () => readers.pickupFailures()),
+    run: async (args) =>
+      await timings.phase(
+        `cmux ${args[0] ?? ''}`,
+        async () => await readers.run(args),
+      ),
+    showBead: (beadId) =>
+      timings.phase(`bead read ${beadId}`, () => readers.showBead(beadId)),
+  };
+}
+
 export async function runThreadFocus(input: {
   cwd?: string;
   dryRun: boolean;
@@ -843,15 +884,24 @@ export async function runThreadFocus(input: {
   target: string;
 }): Promise<number> {
   const env = input.env ?? process.env;
-  const readers =
-    input.readers ?? realFocusReaders({cwd: input.cwd ?? process.cwd(), env});
+  // home-base-9ihcl.4: `--json` carries a `timings` field, as `thread inbox
+  // --json` does (the same record and the same splice); text output has none.
+  const timings = input.json ? startTimings() : null;
+  const readers = timedFocusReaders(
+    input.readers ??
+      realFocusReaders({cwd: input.cwd ?? process.cwd(), env, timings}),
+    timings,
+  );
   const result = await resolveFocus(input.target, readers, {
     dryRun: input.dryRun,
   });
-  await writeStdout(
-    input.json
-      ? `${JSON.stringify(focusJsonOf(result), null, 2)}\n`
-      : focusText(result),
-  );
+  if (!input.json || timings == null) {
+    await writeStdout(focusText(result));
+    return FOCUS_EXIT[result.kind];
+  }
+  const json = `${JSON.stringify(focusJsonOf(result), null, 2)}\n`;
+  const printed = inboxJsonWithTimings(json, timings.finish());
+  if (printed.problem != null) console.error(printed.problem);
+  await writeStdout(`${printed.text.trimEnd()}\n`);
   return FOCUS_EXIT[result.kind];
 }

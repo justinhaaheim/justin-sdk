@@ -31,7 +31,11 @@
  *      this module sends no key and types nothing. Claude Code's input box
  *      with no dialog is "started" (exit 0). Neither is exit 1 (rule 7: an
  *      unseen start is not a start).
- *   7. (mbnjv.3) The caller's own tab is titled "↪ handed off: …".
+ *   7. (mbnjv.3) The caller's own tab is titled "↪ H2 handed off to H3: …"
+ *      (home-base-9ihcl.10, tab-title.ts).
+ *   Exit 0, 3 and 4 after a recorded handoff end with the short handoff
+ *   summary (home-base-9ihcl.6, handoff-summary.ts): what the session pastes
+ *   as its final message in place of the status block.
  *   8. (mbnjv.4) predecessor exit or close: a detached watcher is started
  *      that acts on the caller's own tab only after the handshake
  *      (handoff-predecessor.ts). keep starts nothing.
@@ -51,7 +55,10 @@ import type {
   RecordRefusalOutcome,
 } from './handoff-gate';
 import type {ResolvedHandoffConfig} from './handoff-knob';
+import type {HandoffNumber} from './handoff-number';
+import type {HandoffSummaryTab} from './handoff-summary';
 import type {EnvLike} from './paths';
+import type {HandoffRequestCount} from './session-handoff';
 import type {FoundSession} from './session-select';
 
 import {mkdirSync, writeFileSync} from 'node:fs';
@@ -98,6 +105,7 @@ import {
   type WatcherStart,
   watcherStartedNote,
 } from './handoff-predecessor';
+import {handoffSummary} from './handoff-summary';
 import {dialogOnScreen, findInputBox, screenLines} from './pane-join';
 import {threadsStateDir} from './paths';
 import {
@@ -135,7 +143,18 @@ const QUOTED_SCREEN_LINES = 40;
 
 /** What exit 0 tells the caller (the 1r6d.31 failure: it kept working). */
 export const SUCCESSOR_STARTED_NEXT =
-  'Next: write your final report now and end your turn. Do not keep working: your successor is already working in the same checkout. If a subagent or a background shell of yours is still running, say so in that report: when this tab exits or closes, they end with it (hand off only with no background work running).';
+  'Next: end your turn now. Your final message is the handoff summary below, as printed, in place of the status block, and nothing else. Do not keep working: your successor is already working in the same checkout. If a subagent or a background shell of yours is still running, add one line under the summary saying so: when this tab exits or closes, they end with it (hand off only with no background work running).';
+
+/**
+ * What exit 3 tells the caller about its final message (home-base-9ihcl.6):
+ * nothing opened, so Justin starts the next session from the block.
+ */
+export const HANDOFF_REFUSED_SUMMARY_NEXT =
+  'Your final message is the handoff summary below, then the handoff block above, both as printed, in place of the status block.';
+
+/** The same for exit 4: only once the command has still exited 4 at its last try. */
+export const HANDOFF_DEFERRED_SUMMARY_NEXT =
+  'If this was your last try and it still exits 4, your final message is the handoff summary below, then the handoff block above, both as printed, in place of the status block.';
 
 /**
  * What exit 2 tells the caller when its call ran inside the Claude Code
@@ -159,6 +178,59 @@ export const HANDOFF_STEP_FAILED_INSTRUCTIONS = [
 // Pure parts: the name, the claude line, the cmux argv, the parse
 // ---------------------------------------------------------------------------
 
+/** The session's repo TAG, resolved as successorName (below) says. */
+export function sessionRepoTag(
+  session: FoundSession,
+  env: EnvLike,
+): null | string {
+  const repo = sessionRepoOf({
+    beadsDir: session.beadsDir,
+    checkoutPath: session.checkoutPath,
+    sightings: session.sightings,
+  });
+  return resolveRepoTag({checkout: session.checkoutPath, env, repo});
+}
+
+/** This session's own number (home-base-6n7my.2 D3). */
+export function ownHandoffNumber(
+  session: FoundSession,
+  readers: ChainReaders,
+): HandoffNumber {
+  const {id, labels} = session.bead;
+  return handoffNumberOf({id, labels}, readers);
+}
+
+/**
+ * successorName from a number already read, so the successor's name, the old
+ * tab's title and the handoff summary all show the same chain
+ * (home-base-9ihcl.10).
+ */
+export function successorNameOf(
+  session: FoundSession,
+  repoTag: null | string,
+  numbers: {own: HandoffNumber},
+): string {
+  return sessionName(
+    repoTag,
+    session.bead.title,
+    successorMarks(session.bead.labels, numbers.own),
+  );
+}
+
+/** The old tab's title once it handed off (tab-title.ts, home-base-9ihcl.10). */
+export function oldTabTitleOf(
+  session: FoundSession,
+  repoTag: null | string,
+  numbers: {own: HandoffNumber},
+): string {
+  return handedOffTabTitle({
+    mayor: successorMarks(session.bead.labels, numbers.own).mayor,
+    own: numbers.own,
+    repoTag,
+    title: session.bead.title,
+  });
+}
+
 /**
  * "[MAYOR] [TAG] H<n> <session title>", cut to SUCCESSOR_NAME_LIMIT characters
  * (home-base-mbnjv.3 item 6): the repo TAG resolved the way workspace naming
@@ -176,17 +248,9 @@ export function successorName(
     fallbackDbs: [session.db],
   }),
 ): string {
-  const repo = sessionRepoOf({
-    beadsDir: session.beadsDir,
-    checkoutPath: session.checkoutPath,
-    sightings: session.sightings,
+  return successorNameOf(session, sessionRepoTag(session, env), {
+    own: ownHandoffNumber(session, readers),
   });
-  const {id, labels} = session.bead;
-  return sessionName(
-    resolveRepoTag({checkout: session.checkoutPath, env, repo}),
-    session.bead.title,
-    successorMarks(labels, handoffNumberOf({id, labels}, readers)),
-  );
 }
 
 /**
@@ -557,7 +621,32 @@ export async function handoffWithSuccessor(
     'handoffs',
     `${session.sessionId}.md`,
   );
-  const name = successorName(session, env);
+  // home-base-9ihcl.10: one read of this session's number, so the successor's
+  // name, the old tab's title and the summary cannot disagree.
+  const numbers = {
+    own: ownHandoffNumber(
+      session,
+      realHandoffNumberReaders({env, fallbackDbs: [session.db]}),
+    ),
+  };
+  const repoTag = sessionRepoTag(session, env);
+  const name = successorNameOf(session, repoTag, numbers);
+  const oldTabTitle = oldTabTitleOf(session, repoTag, numbers);
+  // home-base-9ihcl.6: the short summary a handing-off session ends with.
+  const summaryOf = (
+    tab: HandoffSummaryTab,
+    requests: HandoffRequestCount,
+  ): string =>
+    handoffSummary(
+      {
+        checkout: session.checkoutPath,
+        own: numbers.own,
+        requests,
+        sessionBeadId: session.bead.id,
+        tab,
+      },
+      style,
+    );
   const {autoPickup} = options.limits;
   const kickoff = kickoffText(
     blockPath,
@@ -634,6 +723,7 @@ export async function handoffWithSuccessor(
       {label: 'Session bead', value: session.bead.id},
       {label: 'Block file', value: blockPath},
       {label: 'Successor name', value: name},
+      {label: 'This tab after', value: oldTabTitle},
     ];
     const workspaceId = env.CMUX_WORKSPACE_ID ?? '';
     const surfaceId = env.CMUX_SURFACE_ID ?? '';
@@ -707,6 +797,8 @@ export async function handoffWithSuccessor(
     exitCode: 3 | 4;
     message: string;
     record: () => RecordRefusalOutcome;
+    /** What the summary says about the new tab (home-base-9ihcl.6). */
+    tab: Exclude<HandoffSummaryTab, {kind: 'opened'}>;
   }): Promise<ThreadHandoffResult> => {
     const lines: string[] = [];
     const handed = await d.handOff({
@@ -740,6 +832,18 @@ export async function handoffWithSuccessor(
       '',
       input.message,
     );
+    // home-base-9ihcl.6: only a session that WAS handed off ends with the
+    // summary; one whose handoff was not recorded has nothing to summarise.
+    if (handed.kind === 'handedOff') {
+      lines.push(
+        '',
+        input.exitCode === 3
+          ? HANDOFF_REFUSED_SUMMARY_NEXT
+          : HANDOFF_DEFERRED_SUMMARY_NEXT,
+        '',
+        summaryOf(input.tab, handed.requests),
+      );
+    }
     return {exitCode: input.exitCode, launch: null, lines};
   };
   const defer = (
@@ -759,6 +863,7 @@ export async function handoffWithSuccessor(
           now,
           reason,
         }),
+      tab: {detail, kind: 'deferred', reason},
     });
 
   // ---- 2b. refused: exit 3, and the refusal is final ----
@@ -775,6 +880,7 @@ export async function handoffWithSuccessor(
           now,
           reason: gate.reason,
         }),
+      tab: {detail: gate.detail, kind: 'refused', reason: gate.reason},
     });
   }
 
@@ -945,7 +1051,9 @@ export async function handoffWithSuccessor(
   // 7. mbnjv.3 (D8, C7): mark the caller's own tab handed off. The surface is
   // CMUX_SURFACE_ID as the gate read it, never the successor's or a guess. A
   // failed mark is cosmetic: the successor started, so the exit stays 0.
-  const mark = handedOffTabTitle(name);
+  // home-base-9ihcl.10: the title names this session and its successor, not
+  // the successor's name (which put the next H number on the old tab).
+  const mark = oldTabTitle;
   const marked = await renameTab(d.run, workspaceId, surfaceId, mark);
   const fields: Field[] = [
     {label: 'Block file', value: blockPath},
@@ -1094,6 +1202,8 @@ export async function handoffWithSuccessor(
       fieldLines(fields, {...style, indent}),
       '',
       SUCCESSOR_STARTED_NEXT,
+      '',
+      summaryOf({kind: 'opened'}, handed.requests),
     ],
   };
 }

@@ -18,6 +18,8 @@ Rewritten 2026-10-11 for status report v4. Why it has this shape, in Justin's wo
 
 No JSON, no form, no progress percent. Do not repeat what Part 1 already shows: the requests, the questions, the repo facts.
 
+**One exception: a turn that ends in a handoff.** When a handoff prints its short summary, headed `🤝 **Handed off**`, that summary is your final message in place of both parts. The handoff rule, where this repo has one, says what goes with it. Justin, 2026-11-09: "a much more abbreviated status report", with the full report one command away.
+
 **Decide the branch once, at the start of a work turn.** Run `bun run justin-sdk thread status`. Where that says `Script not found`, the repo is not enrolled in justin-sdk: run `justin-sdk-latest thread status`. If its first line is `SESSION BEADS: ENABLED`, follow the checklist below. If it prints anything else (`SESSION BEADS: DISABLED`, a help screen, an unknown-command or not-found error), this repo is legacy: skip the checklist, put your asks in the report, and use the Legacy section at the end of this file. If it fails in any other way (for example, it finds no session bead for this session), use the Legacy section too, and quote its error in your report.
 
 ## Every turn: the whole checklist
