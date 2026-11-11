@@ -423,7 +423,7 @@ export function collectStrings(
 // ---------------------------------------------------------------------------
 
 export interface SessionMessageLog {
-  lines: MessageLine[];
+  lines: readonly Readonly<MessageLine>[];
   path: string;
   sessionId: string;
 }

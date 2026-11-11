@@ -28,6 +28,8 @@ import type {EnvLike} from './paths';
 import type {FoundSession} from './session-select';
 import type {RequestNode} from './session-tree';
 
+import {join} from 'node:path';
+
 import {
   brShow,
   brUpdate,
@@ -41,6 +43,7 @@ import {sdkRun} from '../sdk-invocation';
 import {oneLine} from './ask-format';
 import {renderAsks} from './ask-render';
 import {handoffDeferralMessage} from './handoff-gate';
+import {walkedSessionMarks} from './handoff-marks';
 import {
   continuationLabels,
   handoffNumberOf,
@@ -60,7 +63,11 @@ import {
 import {readSessionIndex, readSessionSightings} from './session-index';
 import {appendNote} from './session-marks';
 import {loadSession} from './session-model';
-import {sessionDisplayName, stampedHandoffNumber} from './session-name';
+import {
+  NO_MARKS,
+  sessionDisplayName,
+  stampedHandoffNumber,
+} from './session-name';
 import {selectSession, sessionBeadsKnob} from './session-select';
 import {
   deriveStatus,
@@ -450,8 +457,20 @@ export async function handoffBlock(input: {
     now: input.now,
   });
   const title = model.beads.session?.title ?? '(title unknown)';
+  // home-base-idnon: the marks, the number walked when no label holds it.
+  const bead = model.beads.session;
+  const marks =
+    bead == null
+      ? NO_MARKS
+      : walkedSessionMarks(
+          bead,
+          realHandoffNumberReaders({
+            env: input.env,
+            fallbackDbs: [join(bead.beadsDir, 'beads.db')],
+          }),
+        );
   const fields = [
-    `- **Session:** ${sessionDisplayName(model.repoTag, title)} (${input.sessionBeadId})`,
+    `- **Session:** ${sessionDisplayName(model.repoTag, title, marks)} (${input.sessionBeadId})`,
     `- **Status:** ${statusWords(status)}`,
     `- **Handed off:** ${absoluteWhen(input.now, input.timeZone)}`,
     ...(input.note == null ? [] : [`- **Note:** ${input.note}`]),

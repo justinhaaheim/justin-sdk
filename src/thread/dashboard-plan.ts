@@ -13,6 +13,7 @@
  */
 
 import type {InboxJson} from './session-inbox';
+import type {SessionMarks} from './session-name';
 import type {SdkNamedWorkspace} from './workspace-name';
 
 import {createHash} from 'node:crypto';
@@ -51,6 +52,8 @@ export interface DashboardSession {
     age: string | null;
     emoji: string;
     facts: CardFact[];
+    /** home-base-idnon: the heading's mayor mark and handoff number. */
+    marks: SessionMarks;
     optional: {command: string; text: string} | null;
     pane: string | null;
     repoTag: string | null;
@@ -162,6 +165,7 @@ export function dashboardInboxOf(json: InboxJson): DashboardInbox {
         age: card.age,
         emoji: card.emoji,
         facts: card.facts,
+        marks: card.marks,
         optional:
           card.optional == null
             ? null
@@ -339,7 +343,11 @@ export function planAction(
       if (s.checkout == null && !/^cd\s/u.test(s.card.resume)) {
         return {kind: 'refused', reason: NO_CHECKOUT};
       }
-      const name = sessionDisplayName(s.card.repoTag, s.card.title);
+      const name = sessionDisplayName(
+        s.card.repoTag,
+        s.card.title,
+        s.card.marks,
+      );
       return {
         command: {
           argv: [

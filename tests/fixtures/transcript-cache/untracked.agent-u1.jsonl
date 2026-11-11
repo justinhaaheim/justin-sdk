@@ -1,0 +1,2 @@
+{"cwd":"__CWD__","isSidechain":true,"message":{"content":"Read the importer [TEST_DATA_DELETABLE 9b0eb49b-f4dd-43f5-93e5-f6e6f3de4ef9 ]","role":"user"},"sessionId":"9b0eb49b-0000-4000-8000-00000000c002","timestamp":"2030-01-01T09:32:00.000Z","type":"user","uuid":"u1-u1"}
+{"cwd":"__CWD__","isSidechain":true,"message":{"content":[{"id":"toolu_r1","input":{"file_path":"__CWD__/importer.ts"},"name":"Read","type":"tool_use"}],"role":"assistant"},"sessionId":"9b0eb49b-0000-4000-8000-00000000c002","timestamp":"2030-01-01T09:33:00.000Z","type":"assistant","uuid":"u1-a1"}

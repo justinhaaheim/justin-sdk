@@ -855,7 +855,7 @@ function hookRecordsAfter(
     .map((text) => text.slice(0, 600));
 }
 
-function messageLines(sessionId: string): MessageLine[] {
+function messageLines(sessionId: string): readonly Readonly<MessageLine>[] {
   const read = readMessageLogAt(messageLogPath(sessionId));
   return read.kind === 'read' ? read.lines : [];
 }

@@ -73,6 +73,7 @@ import {
 } from '../repo-status/sessions';
 import {discoverSessionFiles, scanSessions} from './backfill';
 import {resolveReportWrapUpAt, resolveRepoTag} from './config';
+import {createFileMemo} from './file-memo';
 import {readMessageLog} from './message-log';
 import {readAskPriority} from './metadata';
 import {ageWords, FIRST_MESSAGE_CUT, firstLineOf, tildeText} from './part-one';
@@ -97,13 +98,15 @@ import {
   unmeasured,
   userLines,
 } from './session-model';
-import {sessionDisplayName} from './session-name';
+import {NO_MARKS, sessionDisplayName} from './session-name';
 import {
   quietHelperReason,
   quietHelpers,
   recentHelpers,
   WORKING_WINDOW_MS,
 } from './session-status';
+import {cachedTranscriptMessages} from './transcript-cache';
+import {extractTranscriptMessages} from './transcript-messages';
 
 /** D6: "every Claude Code session ... under ~/Dev". */
 export function defaultDevRoot(): string {
@@ -152,29 +155,8 @@ function metaString(metadata: unknown, key: string): string | null {
   return typeof value === 'string' && value !== '' ? value : null;
 }
 
-/**
- * Every old-style report, keyed by session id, READ ONLY. It reads the threads
- * repo's beads export (`.beads/issues.jsonl`, which bd writes within a second
- * of every write: `export.auto`, interval 1s) rather than running `bd list`
- * twice — measured 2026-10-15: 10 ms against 986 ms, and the dashboard's
- * whole budget is 3 s. Questions are paired with their thread the way
- * `thread board` pairs them: the parent, else `metadata.threadId`; open means
- * not closed; blocking is P0 by `readAskPriority`, the board's rule.
- */
-export function readOldReports(env: EnvLike): OldReports {
-  const repoDir = threadsRepoDir(env);
-  const path = join(repoDir, '.beads', 'issues.jsonl');
-  if (!existsSync(repoDir)) return {kind: 'missing', path};
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch (error) {
-    return {
-      kind: 'failed',
-      path,
-      reason: `could not read ${path}: ${error instanceof Error ? error.message : String(error)}`,
-    };
-  }
+/** The old reports in one export's text (`readOldReports`, below). */
+function oldReportsOfText(text: string, path: string): OldReports {
   const corrupt: number[] = [];
   const threads: ExportRow[] = [];
   const asks: ExportRow[] = [];
@@ -217,6 +199,40 @@ export function readOldReports(env: EnvLike): OldReports {
     });
   }
   return {bySession, corrupt, kind: 'read', path};
+}
+
+const oldReportsMemo = createFileMemo<OldReports>();
+
+/**
+ * Every old-style report, keyed by session id, READ ONLY. It reads the threads
+ * repo's beads export (`.beads/issues.jsonl`, which bd writes within a second
+ * of every write: `export.auto`, interval 1s) rather than running `bd list`
+ * twice — measured 2026-10-15: 10 ms against 986 ms, and the dashboard's
+ * whole budget is 3 s. Questions are paired with their thread the way
+ * `thread board` pairs them: the parent, else `metadata.threadId`; open means
+ * not closed; blocking is P0 by `readAskPriority`, the board's rule.
+ */
+export function readOldReports(env: EnvLike): OldReports {
+  const repoDir = threadsRepoDir(env);
+  const path = join(repoDir, '.beads', 'issues.jsonl');
+  if (!existsSync(repoDir)) return {kind: 'missing', path};
+  // home-base-9uzxw.12: 8.2 MB read on every --web refresh; kept until the
+  // export changes (file-memo.ts). A failed read is never cached.
+  const memoized = oldReportsMemo.read(path, (bytes) =>
+    oldReportsOfText(bytes.toString('utf8'), path),
+  );
+  if (memoized != null) return memoized;
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf8');
+  } catch (error) {
+    return {
+      kind: 'failed',
+      path,
+      reason: `could not read ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  return oldReportsOfText(text, path);
 }
 
 // ---------------------------------------------------------------------------
@@ -555,6 +571,8 @@ export function untrackedCard(
     age: untrackedAge(session, now),
     emoji: where.split(' ')[0] ?? '❔',
     facts,
+    // An untracked session has no session bead, so no marks (home-base-idnon).
+    marks: NO_MARKS,
     optional: null,
     pane: paneCommandOf(paneFact),
     paneFact,
@@ -686,7 +704,11 @@ export async function readUntracked(input: {
   const files = discovery.files.filter(
     (file) => !exclude.has(file.fileSessionId),
   );
-  const scan = scanSessions(files, windowStart);
+  // home-base-9uzxw.11: each transcript's messages from the transcript cache
+  // when it can; the window is applied by scanSessions after the cache.
+  const scan = scanSessions(files, windowStart, (path) =>
+    cachedTranscriptMessages(path, extractTranscriptMessages),
+  );
   failures.push(...scan.failures);
   const scanned = scan.sessions.filter(
     (session) => !exclude.has(session.sessionId),

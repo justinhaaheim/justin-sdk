@@ -28,7 +28,10 @@ import {appendFileSync, mkdirSync, readFileSync} from 'fs';
 import {dirname} from 'path';
 
 import {sessionIndexPath} from './archive';
+import {createFileMemo} from './file-memo';
 import {probeErrorMessage} from './paths';
+
+const sessionIndexTextMemo = createFileMemo<string>();
 
 export type SessionSightingEvent = 'adopted-in' | 'created';
 
@@ -257,12 +260,16 @@ export function readSessionSightings(
   env: EnvLike = process.env,
 ): SessionSightingsRead {
   const path = sessionIndexPath(env);
-  let text: string;
-  try {
-    text = readFileSync(path, 'utf8');
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return {kind: 'missing', path};
-    return {error: probeErrorMessage(error), kind: 'failed', path};
+  // home-base-9uzxw.12: an inbox load asks once per session (217 times on
+  // 2026-11-10), so the text is kept until the file changes (file-memo.ts).
+  let text = sessionIndexTextMemo.read(path, (bytes) => bytes.toString('utf8'));
+  if (text == null) {
+    try {
+      text = readFileSync(path, 'utf8');
+    } catch (error) {
+      if (errorCode(error) === 'ENOENT') return {kind: 'missing', path};
+      return {error: probeErrorMessage(error), kind: 'failed', path};
+    }
   }
   const sightings: SessionSighting[] = [];
   const corrupt: CorruptIndexLine[] = [];

@@ -81,6 +81,7 @@ function cand(n: number, over: Partial<OpenCandidate> = {}): OpenCandidate {
   return {
     checkout: '/dev/repo-a',
     lastActivityAt: ago(n * HOUR),
+    marks: {handoff: null, mayor: false},
     repo: 'repo-a',
     repoTag: 'A',
     section: 'needsYou',

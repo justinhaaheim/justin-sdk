@@ -266,7 +266,7 @@ function detailsHtml(s: DashboardSession): string {
 
 /** One card. Its data attributes are what every button sends (file comment). */
 export function renderCardHtml(s: DashboardSession): string {
-  const name = sessionDisplayName(s.card.repoTag, s.card.title);
+  const name = sessionDisplayName(s.card.repoTag, s.card.title, s.card.marks);
   const meta = [
     s.card.repoTag ?? s.repo ?? 'unknown repo',
     s.card.age,

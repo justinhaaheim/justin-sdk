@@ -14,6 +14,9 @@
  *   the inbox and `thread open` use, cut to 80 characters, with the tag from the
  *   resolver the inbox uses (resolveRepoTag). With --continues the name also
  *   carries that session's marks plus one handoff (home-base-6n7my.2 D9).
+ * - Every spawned session starts in auto mode: `claude --permission-mode auto`,
+ *   whatever the repo's own settings say, with no knob (home-base-v8z8d.3,
+ *   Justin 2026-11-11: "Yes, always in Auto.").
  * - The same name always goes to `claude --name <name>`, and with
  *   --remote-control to `claude --remote-control <name>`, so the Claude app
  *   lists the session under the name this command prints. Measured 2026-10-18 against code.claude.com/docs/en/remote-control:
@@ -58,6 +61,7 @@
 
 import type {Field} from '../cli-style';
 import type {CmuxRunner} from './cmux';
+import type {HandoffPermissionMode} from './defaults';
 import type {ChainReaders} from './handoff-chain';
 import type {EnvLike} from './paths';
 import type {SessionMarks} from './session-name';
@@ -514,6 +518,16 @@ export function writeKickoffFile(path: string, kickoff: string): string | null {
 }
 
 /**
+ * home-base-v8z8d.3: every spawned session starts in auto mode, whatever the
+ * repo's own settings say, the same as a handoff's successor. Justin,
+ * 2026-11-11: "Yes, always in Auto." A spawned session that stopped on a
+ * permission prompt sat waiting with nobody watching. There is deliberately no
+ * knob for it; the accepted cost is that it overrides a stricter mode a repo's
+ * local settings chose.
+ */
+export const SPAWN_PERMISSION_MODE: HandoffPermissionMode = 'auto';
+
+/**
  * The text `new-workspace --command` types into the new pane's zsh.
  *
  * D8 (home-base-ys9t7.5.4 item 3): environment assignments come first, so
@@ -548,7 +562,9 @@ export function spawnCommand(input: {
     );
   }
   if (input.kickoffFile != null) assignments.push(`${SPAWN_KICKOFF_ENV}=1`);
-  const words = ['claude'];
+  // home-base-v8z8d.3: always auto mode, first among the flags as in the
+  // handoff successor's command (D7 there). No knob: Justin, 2026-11-11.
+  const words = ['claude', '--permission-mode', SPAWN_PERMISSION_MODE];
   if (input.model != null) words.push('--model', input.model);
   if (input.remoteControl) words.push('--remote-control', input.name);
   // home-base-6n7my.2 D9: always, so the title carries the marks with or without

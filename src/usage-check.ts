@@ -115,6 +115,7 @@ import {PROJECT_CONFIG_FILENAME, xdgConfigHome} from './health-notices';
 import {emitHookOutput} from './hook-output';
 import {SDK_HANDOFF_CALL} from './sdk-invocation';
 import {HANDOFF_DEFAULTS, THREAD_CONFIG_KEY} from './thread/defaults';
+import {readTextMemoized} from './thread/file-memo';
 import {HANDOFF_RULE_FILE, THREAD_RULES_DIR} from './thread-rules';
 
 /** Marks our own output so a later run can find it in the transcript. */
@@ -420,7 +421,9 @@ function oneLineMessageOf(error: unknown): string {
 function readConfigFile(path: string): ConfigFileRead {
   let raw: string;
   try {
-    raw = readFileSync(path, 'utf8');
+    // home-base-9uzxw.16: kept in memory until the file changes; any failure
+    // of the memo reads the file as before, so the errno still decides.
+    raw = readTextMemoized(path) ?? readFileSync(path, 'utf8');
   } catch (error) {
     return errorCodeOf(error) === 'ENOENT'
       ? {status: 'absent'}
@@ -1240,6 +1243,48 @@ export function readTranscriptFacts(args: {
   scope?: MeasurementScope;
   transcriptPath: string;
 }): TranscriptFacts {
+  return transcriptFactsWith(args, (windowBytes) =>
+    readTailWindow(args.transcriptPath, windowBytes),
+  );
+}
+
+/**
+ * `readTailWindow` over a transcript's bytes already in memory (the threads
+ * transcript cache, home-base-9uzxw.11): the same window, the same first-line
+ * drop.
+ */
+function bytesTailWindow(bytes: Buffer, windowBytes: number): TailWindow {
+  const size = bytes.length;
+  const start = Math.max(0, size - windowBytes);
+  const reachedStart = start === 0;
+  if (size - start === 0) {
+    return {reachedStart: true, text: ''};
+  }
+  let text = bytes.toString('utf8', start, size);
+  if (!reachedStart) {
+    const firstBreak = text.indexOf('\n');
+    text = firstBreak === -1 ? '' : text.slice(firstBreak + 1);
+  }
+  return {reachedStart, text};
+}
+
+/**
+ * `readTranscriptFacts` over a transcript's bytes, already read whole. The
+ * `transcriptPath` in `args` is not opened.
+ */
+export function readTranscriptFactsFromBytes(
+  bytes: Buffer,
+  args: Parameters<typeof readTranscriptFacts>[0],
+): TranscriptFacts {
+  return transcriptFactsWith(args, (windowBytes) =>
+    bytesTailWindow(bytes, windowBytes),
+  );
+}
+
+function transcriptFactsWith(
+  args: Parameters<typeof readTranscriptFacts>[0],
+  readWindow: (windowBytes: number) => TailWindow | null,
+): TranscriptFacts {
   const state: ScanState = {
     contextTokens: null,
     lastAnnouncedSetpoint: null,
@@ -1249,7 +1294,7 @@ export function readTranscriptFacts(args: {
   let reachedStart = false;
 
   for (;;) {
-    const window = readTailWindow(args.transcriptPath, windowBytes);
+    const window = readWindow(windowBytes);
     if (window == null) {
       // I/O failure: report what we have, and that we did NOT reach the start.
       return {...state, reachedStart: false};

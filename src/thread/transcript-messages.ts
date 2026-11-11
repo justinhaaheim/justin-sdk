@@ -534,113 +534,151 @@ export function forEachTranscriptLine(
   }
 }
 
+/**
+ * `forEachTranscriptLine` over bytes already in memory: the same lines (cut at
+ * 0x0A, each decoded on its own; a last line with no newline still counts).
+ */
+export function forEachBytesLine(
+  bytes: Buffer,
+  onLine: (line: string, index: number) => void,
+): void {
+  let start = 0;
+  let index = 0;
+  for (;;) {
+    const newline = bytes.indexOf(0x0a, start);
+    if (newline === -1) break;
+    onLine(bytes.toString('utf8', start, newline), index);
+    index += 1;
+    start = newline + 1;
+  }
+  if (start < bytes.length) onLine(bytes.toString('utf8', start), index);
+}
+
 // ---------------------------------------------------------------------------
 // The extractor
 // ---------------------------------------------------------------------------
 
 /**
- * Everything a thread needs to know about one session's transcript (K1).
- *
- * THROWS when the file cannot be opened or stat'd. Everything else it cannot
- * measure is null-plus-a-named-failure.
+ * `extractTranscriptMessages`' state between lines (home-base-9uzxw.16), kept
+ * by the transcript cache so a grown transcript is folded from its new lines.
+ * `result` holds every field before `finishMessagesFold` (no failures, no
+ * resume command yet); the counters decide which bad lines are failures.
  */
-export function extractTranscriptMessages(
-  transcriptPath: string,
-): TranscriptMessages {
-  // Fails loudly here rather than producing an all-null "measurement".
-  statSync(transcriptPath);
+export interface MessagesFold {
+  /** Index of the last line seen; -1 before the first. */
+  lastIndex: number;
+  /** Index of the last line that was not valid JSON; -1 when none. */
+  lastMalformedIndex: number;
+  malformed: number;
+  result: TranscriptMessages;
+}
 
-  const failures: string[] = [];
-  const result: TranscriptMessages = {
-    cwd: null,
-    entrypoint: null,
-    failures,
-    firstCwd: null,
-    firstTimestamp: null,
-    firstUserMessage: null,
-    firstUserMessageAt: null,
-    gitBranch: null,
-    lastAssistantMessage: null,
-    lastAssistantMessageAt: null,
-    lastTimestamp: null,
-    lastUserMessage: null,
-    lastUserMessageAt: null,
-    model: null,
-    resumeCommand: null,
-    resumeCwd: null,
-    resumeCwdSource: null,
-    sessionId: null,
-    transcriptPath,
+export function newMessagesFold(transcriptPath: string): MessagesFold {
+  return {
+    lastIndex: -1,
+    lastMalformedIndex: -1,
+    malformed: 0,
+    result: {
+      cwd: null,
+      entrypoint: null,
+      failures: [],
+      firstCwd: null,
+      firstTimestamp: null,
+      firstUserMessage: null,
+      firstUserMessageAt: null,
+      gitBranch: null,
+      lastAssistantMessage: null,
+      lastAssistantMessageAt: null,
+      lastTimestamp: null,
+      lastUserMessage: null,
+      lastUserMessageAt: null,
+      model: null,
+      resumeCommand: null,
+      resumeCwd: null,
+      resumeCwdSource: null,
+      sessionId: null,
+      transcriptPath,
+    },
   };
+}
 
-  let malformed = 0;
-  let lastMalformedIndex = -1;
-  let lastIndex = -1;
+/** One line (the `index`-th of the file) into `fold`: `extractTranscriptMessages`' loop body. */
+export function messagesFoldLine(
+  fold: MessagesFold,
+  line: string,
+  index: number,
+): void {
+  const {result} = fold;
+  fold.lastIndex = index;
+  if (line.trim() === '') return;
+  let record: TranscriptRecord;
+  try {
+    record = JSON.parse(line) as TranscriptRecord;
+  } catch {
+    fold.malformed += 1;
+    fold.lastMalformedIndex = index;
+    return;
+  }
 
-  forEachTranscriptLine(transcriptPath, (line, index) => {
-    lastIndex = index;
-    if (line.trim() === '') return;
-    let record: TranscriptRecord;
-    try {
-      record = JSON.parse(line) as TranscriptRecord;
-    } catch {
-      malformed += 1;
-      lastMalformedIndex = index;
-      return;
-    }
+  // Session-level facts come from ANY record type, sidechains excluded: a
+  // subagent's records carry the parent's session id but its own nothing else.
+  if (record.isSidechain === true) return;
 
-    // Session-level facts come from ANY record type, sidechains excluded: a
-    // subagent's records carry the parent's session id but its own nothing else.
-    if (record.isSidechain === true) return;
+  const timestamp = asString(record.timestamp);
+  if (timestamp != null) {
+    result.firstTimestamp ??= timestamp;
+    result.lastTimestamp = timestamp;
+  }
+  const cwd = asString(record.cwd);
+  if (cwd != null) {
+    result.firstCwd ??= cwd;
+    result.cwd = cwd;
+  }
+  const branch = asString(record.gitBranch);
+  if (branch != null) result.gitBranch = branch;
+  result.sessionId ??= asString(record.sessionId);
+  result.entrypoint ??= asString(record.entrypoint);
 
-    const timestamp = asString(record.timestamp);
-    if (timestamp != null) {
-      result.firstTimestamp ??= timestamp;
-      result.lastTimestamp = timestamp;
+  if (record.type === 'assistant') {
+    const model = asString(record.message?.model);
+    if (model != null) result.model = model;
+    const text = assistantText(record);
+    if (text != null) {
+      result.lastAssistantMessage = text;
+      // Read from the SAME record in the same pass, so the text and its
+      // timestamp can never describe different records.
+      result.lastAssistantMessageAt = timestamp;
     }
-    const cwd = asString(record.cwd);
-    if (cwd != null) {
-      result.firstCwd ??= cwd;
-      result.cwd = cwd;
-    }
-    const branch = asString(record.gitBranch);
-    if (branch != null) result.gitBranch = branch;
-    result.sessionId ??= asString(record.sessionId);
-    result.entrypoint ??= asString(record.entrypoint);
+    return;
+  }
 
-    if (record.type === 'assistant') {
-      const model = asString(record.message?.model);
-      if (model != null) result.model = model;
-      const text = assistantText(record);
-      if (text != null) {
-        result.lastAssistantMessage = text;
-        // Read from the SAME record in the same pass, so the text and its
-        // timestamp can never describe different records.
-        result.lastAssistantMessageAt = timestamp;
-      }
-      return;
-    }
+  // A user record, or a message Justin queued while Claude worked (D-18B):
+  // the same "substantive" either way, so the last thing he said is right
+  // even when he said it mid-turn.
+  let text: string | null = null;
+  let at: string | null = null;
+  if (record.type === 'user') {
+    text = substantiveUserText(record);
+    at = timestamp;
+  } else if (record.type === 'attachment') {
+    text = queuedPromptText(record);
+    at = queuedPromptTimestamp(record);
+  }
+  if (text == null) return;
+  if (result.firstUserMessage == null) {
+    result.firstUserMessage = text;
+    result.firstUserMessageAt = at;
+  }
+  result.lastUserMessage = text;
+  result.lastUserMessageAt = at;
+}
 
-    // A user record, or a message Justin queued while Claude worked (D-18B):
-    // the same "substantive" either way, so the last thing he said is right
-    // even when he said it mid-turn.
-    let text: string | null = null;
-    let at: string | null = null;
-    if (record.type === 'user') {
-      text = substantiveUserText(record);
-      at = timestamp;
-    } else if (record.type === 'attachment') {
-      text = queuedPromptText(record);
-      at = queuedPromptTimestamp(record);
-    }
-    if (text == null) return;
-    if (result.firstUserMessage == null) {
-      result.firstUserMessage = text;
-      result.firstUserMessageAt = at;
-    }
-    result.lastUserMessage = text;
-    result.lastUserMessageAt = at;
-  });
+/** What `fold` says, failures and resume command included. Reads `fold`, never changes it. */
+export function finishMessagesFold(fold: MessagesFold): TranscriptMessages {
+  const {malformed, lastIndex, lastMalformedIndex} = fold;
+  const failures: string[] = [];
+  const result: TranscriptMessages = {...fold.result, failures};
+  const {transcriptPath} = result;
 
   // A partially-written LAST line is normal on a live transcript and is not a
   // measurement failure; a bad line anywhere else is one.
@@ -682,6 +720,47 @@ export function extractTranscriptMessages(
   return result;
 }
 
+/** `extractTranscriptMessages`' fold, over any line source. */
+function messagesOfLines(
+  transcriptPath: string,
+  eachLine: EachLine,
+): TranscriptMessages {
+  const fold = newMessagesFold(transcriptPath);
+  eachLine((line, index) => {
+    messagesFoldLine(fold, line, index);
+  });
+  return finishMessagesFold(fold);
+}
+
+/**
+ * Everything a thread needs to know about one session's transcript (K1).
+ *
+ * THROWS when the file cannot be opened or stat'd. Everything else it cannot
+ * measure is null-plus-a-named-failure.
+ */
+export function extractTranscriptMessages(
+  transcriptPath: string,
+): TranscriptMessages {
+  // Fails loudly here rather than producing an all-null "measurement".
+  statSync(transcriptPath);
+  return messagesOfLines(transcriptPath, (onLine) => {
+    forEachTranscriptLine(transcriptPath, onLine);
+  });
+}
+
+/**
+ * `extractTranscriptMessages` over a transcript's bytes, already read whole
+ * (the transcript cache, home-base-9uzxw.11): the same lines, the same fold.
+ */
+export function transcriptMessagesOfBytes(
+  bytes: Buffer,
+  transcriptPath: string,
+): TranscriptMessages {
+  return messagesOfLines(transcriptPath, (onLine) => {
+    forEachBytesLine(bytes, onLine);
+  });
+}
+
 // ---------------------------------------------------------------------------
 // The last record's time, from the tail (home-base-vzwbj.4.3)
 // ---------------------------------------------------------------------------
@@ -693,6 +772,78 @@ export type LastRecordRead =
   | {at: string; kind: 'found'}
   | {kind: 'failed'; reason: string}
   | {kind: 'none'; reason: string};
+
+/**
+ * The text of bytes [start, start + length) of a transcript, as much as could
+ * be read (home-base-9uzxw.11). The tail readers below take one, so the same
+ * window walk runs over an open file or over bytes the transcript cache
+ * already holds: one algorithm, so the two cannot drift.
+ */
+type WindowText = (start: number, length: number) => string;
+
+function fdWindowText(fd: number): WindowText {
+  return (start, length) => {
+    const buffer = Buffer.alloc(length);
+    let read = 0;
+    while (read < length) {
+      const bytes = readSync(fd, buffer, read, length - read, start + read);
+      if (bytes === 0) break;
+      read += bytes;
+    }
+    return buffer.toString('utf8', 0, read);
+  };
+}
+
+function bytesWindowText(bytes: Buffer): WindowText {
+  return (start, length) => bytes.toString('utf8', start, start + length);
+}
+
+/** `readLastRecordTimestamp`'s walk, over any window source. */
+function lastRecordIn(
+  windowText: WindowText,
+  size: number,
+  path: string,
+  options: {sidechain?: boolean},
+): LastRecordRead {
+  for (let window = LAST_RECORD_WINDOW_BYTES; ; window *= 2) {
+    const length = Math.min(size, window);
+    const start = size - length;
+    let text = windowText(start, length);
+    // Started mid-file: the first fragment is half a line. Drop it.
+    if (start > 0) {
+      const newline = text.indexOf('\n');
+      text = newline === -1 ? '' : text.slice(newline + 1);
+    }
+    const lines = text.split('\n');
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index] ?? '';
+      if (line.trim() === '') continue;
+      let record: TranscriptRecord;
+      try {
+        record = JSON.parse(line) as TranscriptRecord;
+      } catch {
+        // A partial last line on a live transcript; keep walking back.
+        continue;
+      }
+      // A subagent transcript is ALL sidechain records (pkg CLAUDE.md), so
+      // its reader opts in (home-base-vzwbj.4.9 F6); the main transcript's
+      // reader skips them.
+      if (record.isSidechain === true && options.sidechain !== true) continue;
+      // P5 (home-base-vzwbj.4.9): only conversation records date activity.
+      // Hook and system records are written AT the yield, so counting them
+      // kept a just-stopped session "working" for three minutes.
+      if (record.type !== 'user' && record.type !== 'assistant') continue;
+      const timestamp = asString(record.timestamp);
+      if (timestamp != null) return {at: timestamp, kind: 'found'};
+    }
+    if (start === 0) {
+      return {
+        kind: 'none',
+        reason: `no user or assistant record in ${path} carries a timestamp`,
+      };
+    }
+  }
+}
 
 /**
  * The timestamp of the transcript's last CONVERSATION record — the last
@@ -725,51 +876,7 @@ export function readLastRecordTimestamp(
   }
   try {
     const size = statSync(path).size;
-    for (let window = LAST_RECORD_WINDOW_BYTES; ; window *= 2) {
-      const length = Math.min(size, window);
-      const start = size - length;
-      const buffer = Buffer.alloc(length);
-      let read = 0;
-      while (read < length) {
-        const bytes = readSync(fd, buffer, read, length - read, start + read);
-        if (bytes === 0) break;
-        read += bytes;
-      }
-      let text = buffer.toString('utf8', 0, read);
-      // Started mid-file: the first fragment is half a line. Drop it.
-      if (start > 0) {
-        const newline = text.indexOf('\n');
-        text = newline === -1 ? '' : text.slice(newline + 1);
-      }
-      const lines = text.split('\n');
-      for (let index = lines.length - 1; index >= 0; index -= 1) {
-        const line = lines[index] ?? '';
-        if (line.trim() === '') continue;
-        let record: TranscriptRecord;
-        try {
-          record = JSON.parse(line) as TranscriptRecord;
-        } catch {
-          // A partial last line on a live transcript; keep walking back.
-          continue;
-        }
-        // A subagent transcript is ALL sidechain records (pkg CLAUDE.md), so
-        // its reader opts in (home-base-vzwbj.4.9 F6); the main transcript's
-        // reader skips them.
-        if (record.isSidechain === true && options.sidechain !== true) continue;
-        // P5 (home-base-vzwbj.4.9): only conversation records date activity.
-        // Hook and system records are written AT the yield, so counting them
-        // kept a just-stopped session "working" for three minutes.
-        if (record.type !== 'user' && record.type !== 'assistant') continue;
-        const timestamp = asString(record.timestamp);
-        if (timestamp != null) return {at: timestamp, kind: 'found'};
-      }
-      if (start === 0) {
-        return {
-          kind: 'none',
-          reason: `no user or assistant record in ${path} carries a timestamp`,
-        };
-      }
-    }
+    return lastRecordIn(fdWindowText(fd), size, path, options);
   } catch (error) {
     return {
       kind: 'failed',
@@ -778,6 +885,19 @@ export function readLastRecordTimestamp(
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * `readLastRecordTimestamp` over a transcript's bytes, already read whole
+ * (the transcript cache, home-base-9uzxw.11). Never `failed`: there is no read
+ * left to fail.
+ */
+export function lastRecordTimestampOfBytes(
+  bytes: Buffer,
+  path: string,
+  options: {sidechain?: boolean} = {},
+): LastRecordRead {
+  return lastRecordIn(bytesWindowText(bytes), bytes.length, path, options);
 }
 
 /** The tool a helper agent hands its report back with; its result ends the helper's transcript. */
@@ -861,6 +981,46 @@ function backgroundTaskIdOf(record: TranscriptRecord): string | null {
   return asString((result as Record<string, unknown>).backgroundTaskId);
 }
 
+/** Every line of a transcript, from whichever source holds it. */
+type EachLine = (onLine: (line: string, index: number) => void) => void;
+
+/**
+ * One line into the set of open background shells (`readOpenBackgroundShells`'
+ * loop body; home-base-9uzxw.16 folds a grown transcript with it). The set's
+ * insertion order is the answer's order.
+ */
+export function openShellsFoldLine(open: Set<string>, line: string): void {
+  const launch = line.includes('backgroundTaskId');
+  const note = line.includes('<task-notification>');
+  if (!launch && !note) return;
+  let record: TranscriptRecord;
+  try {
+    record = JSON.parse(line) as TranscriptRecord;
+  } catch {
+    // A partial last line on a live transcript.
+    return;
+  }
+  if (launch) {
+    const id = backgroundTaskIdOf(record);
+    if (id != null) open.add(id);
+  }
+  if (note) {
+    const text = notificationText(record);
+    if (text != null) {
+      for (const id of notifiedTaskIds(text)) open.delete(id);
+    }
+  }
+}
+
+/** `readOpenBackgroundShells`' scan, over any line source. */
+function openShellsOfLines(eachLine: EachLine): string[] {
+  const open = new Set<string>();
+  eachLine((line) => {
+    openShellsFoldLine(open, line);
+  });
+  return [...open];
+}
+
 /**
  * D1 (home-base-yd1co.2): the background shells this transcript launched with
  * no LATER task notification naming them, read over the WHOLE file (a launch
@@ -869,37 +1029,19 @@ function backgroundTaskIdOf(record: TranscriptRecord): string | null {
  * 7): "could not read" is never "no shell open".
  */
 export function readOpenBackgroundShells(path: string): OpenShellsRead {
-  const open = new Set<string>();
   try {
-    forEachTranscriptLine(path, (line) => {
-      const launch = line.includes('backgroundTaskId');
-      const note = line.includes('<task-notification>');
-      if (!launch && !note) return;
-      let record: TranscriptRecord;
-      try {
-        record = JSON.parse(line) as TranscriptRecord;
-      } catch {
-        // A partial last line on a live transcript.
-        return;
-      }
-      if (launch) {
-        const id = backgroundTaskIdOf(record);
-        if (id != null) open.add(id);
-      }
-      if (note) {
-        const text = notificationText(record);
-        if (text != null) {
-          for (const id of notifiedTaskIds(text)) open.delete(id);
-        }
-      }
-    });
+    return {
+      kind: 'read',
+      open: openShellsOfLines((onLine) => {
+        forEachTranscriptLine(path, onLine);
+      }),
+    };
   } catch (error) {
     return {
       kind: 'failed',
       reason: `could not read ${path}: ${error instanceof Error ? error.message : String(error)}`,
     };
   }
-  return {kind: 'read', open: [...open]};
 }
 
 /**
@@ -911,6 +1053,107 @@ function worthScanning(at: string | null, now: Date): boolean {
   if (at == null) return true;
   const ms = Date.parse(at);
   return Number.isNaN(ms) || now.getTime() - ms < HELPER_QUIET_LIMIT_MS;
+}
+
+/**
+ * What a helper's tail says, before the clock is consulted (home-base-9uzxw.11):
+ * a function of the file's bytes alone, so the transcript cache can keep it.
+ * `textEnded` is the D1 case whose verdict depends on `now` and, when the tail
+ * is young, on the open background shells.
+ */
+type HelperTailShape =
+  | {at: string | null; kind: 'found'; tail: 'finished' | 'inFlight'}
+  | {at: string | null; kind: 'found'; tail: 'textEnded'}
+  | {kind: 'none'; reason: string};
+
+/** `readHelperTail`'s window walk, over any window source. */
+function helperTailIn(
+  windowText: WindowText,
+  size: number,
+  path: string,
+): HelperTailShape {
+  for (let window = LAST_RECORD_WINDOW_BYTES; ; window *= 2) {
+    const length = Math.min(size, window);
+    const start = size - length;
+    let text = windowText(start, length);
+    if (start > 0) {
+      const newline = text.indexOf('\n');
+      text = newline === -1 ? '' : text.slice(newline + 1);
+    }
+    const records: TranscriptRecord[] = [];
+    for (const line of text.split('\n')) {
+      if (line.trim() === '') continue;
+      try {
+        const record = JSON.parse(line) as TranscriptRecord;
+        if (record.type === 'user' || record.type === 'assistant') {
+          records.push(record);
+        }
+      } catch {
+        // A partial last line on a live transcript.
+      }
+    }
+    const last = records.at(-1);
+    if (last == null) {
+      if (start === 0) {
+        return {
+          kind: 'none',
+          reason: `no user or assistant record in ${path}`,
+        };
+      }
+      continue;
+    }
+    const at =
+      records
+        .map((record) => asString(record.timestamp))
+        .findLast((value) => value != null) ?? null;
+    if (at == null && start > 0) continue;
+    const blocks = contentBlocks(last);
+    if (last.type === 'assistant') {
+      const tools = blocks
+        .filter((block) => block.type === 'tool_use')
+        .map((block) => block.name);
+      const thinkingOnly =
+        blocks.length > 0 && blocks.every((block) => block.type === 'thinking');
+      if (tools.some((name) => name !== HANDBACK_TOOL) || thinkingOnly) {
+        return {at, kind: 'found', tail: 'inFlight'};
+      }
+      // A handback is final whatever shell is still open (D1).
+      if (tools.length > 0) return {at, kind: 'found', tail: 'finished'};
+      // D1: text with no tool_use is a finish, or a wait on its own shell.
+      return {at, kind: 'found', tail: 'textEnded'};
+    }
+    const answered = blocks
+      .filter((block) => block.type === 'tool_result')
+      .map((block) => block.tool_use_id);
+    if (answered.length === 0) return {at, kind: 'found', tail: 'inFlight'};
+    const names = new Map<unknown, unknown>();
+    for (const record of records) {
+      for (const block of contentBlocks(record)) {
+        if (block.type === 'tool_use') names.set(block.id, block.name);
+      }
+    }
+    const unresolved = answered.some((id) => !names.has(id));
+    if (unresolved && start > 0) continue;
+    const handedBack = answered.some((id) => names.get(id) === HANDBACK_TOOL);
+    return {at, kind: 'found', tail: handedBack ? 'finished' : 'inFlight'};
+  }
+}
+
+/** The tail's verdict at `now`; `openShells` runs only for a young text-ended tail (D1). */
+function finishHelperTail(
+  shape: HelperTailShape,
+  now: Date,
+  openShells: () => OpenShellsRead,
+): HelperTailRead {
+  if (shape.kind === 'none') return shape;
+  const {at} = shape;
+  if (shape.tail !== 'textEnded') {
+    return {at, inFlight: shape.tail === 'inFlight', kind: 'found'};
+  }
+  if (!worthScanning(at, now)) return {at, inFlight: false, kind: 'found'};
+  const shells = openShells();
+  if (shells.kind === 'failed') return shells;
+  return {at, inFlight: shells.open.length > 0, kind: 'found'};
 }
 
 /**
@@ -961,83 +1204,11 @@ export function readHelperTail(
   }
   try {
     const size = statSync(path).size;
-    for (let window = LAST_RECORD_WINDOW_BYTES; ; window *= 2) {
-      const length = Math.min(size, window);
-      const start = size - length;
-      const buffer = Buffer.alloc(length);
-      let read = 0;
-      while (read < length) {
-        const bytes = readSync(fd, buffer, read, length - read, start + read);
-        if (bytes === 0) break;
-        read += bytes;
-      }
-      let text = buffer.toString('utf8', 0, read);
-      if (start > 0) {
-        const newline = text.indexOf('\n');
-        text = newline === -1 ? '' : text.slice(newline + 1);
-      }
-      const records: TranscriptRecord[] = [];
-      for (const line of text.split('\n')) {
-        if (line.trim() === '') continue;
-        try {
-          const record = JSON.parse(line) as TranscriptRecord;
-          if (record.type === 'user' || record.type === 'assistant') {
-            records.push(record);
-          }
-        } catch {
-          // A partial last line on a live transcript.
-        }
-      }
-      const last = records.at(-1);
-      if (last == null) {
-        if (start === 0) {
-          return {
-            kind: 'none',
-            reason: `no user or assistant record in ${path}`,
-          };
-        }
-        continue;
-      }
-      const at =
-        records
-          .map((record) => asString(record.timestamp))
-          .findLast((value) => value != null) ?? null;
-      if (at == null && start > 0) continue;
-      const blocks = contentBlocks(last);
-      if (last.type === 'assistant') {
-        const tools = blocks
-          .filter((block) => block.type === 'tool_use')
-          .map((block) => block.name);
-        const thinkingOnly =
-          blocks.length > 0 &&
-          blocks.every((block) => block.type === 'thinking');
-        if (tools.some((name) => name !== HANDBACK_TOOL) || thinkingOnly) {
-          return {at, inFlight: true, kind: 'found'};
-        }
-        // A handback is final whatever shell is still open (D1).
-        if (tools.length > 0) return {at, inFlight: false, kind: 'found'};
-        // D1: text with no tool_use is a finish, or a wait on its own shell.
-        if (!worthScanning(at, now))
-          return {at, inFlight: false, kind: 'found'};
-        const shells = readOpenBackgroundShells(path);
-        if (shells.kind === 'failed') return shells;
-        return {at, inFlight: shells.open.length > 0, kind: 'found'};
-      }
-      const answered = blocks
-        .filter((block) => block.type === 'tool_result')
-        .map((block) => block.tool_use_id);
-      if (answered.length === 0) return {at, inFlight: true, kind: 'found'};
-      const names = new Map<unknown, unknown>();
-      for (const record of records) {
-        for (const block of contentBlocks(record)) {
-          if (block.type === 'tool_use') names.set(block.id, block.name);
-        }
-      }
-      const unresolved = answered.some((id) => !names.has(id));
-      if (unresolved && start > 0) continue;
-      const handedBack = answered.some((id) => names.get(id) === HANDBACK_TOOL);
-      return {at, inFlight: !handedBack, kind: 'found'};
-    }
+    return finishHelperTail(
+      helperTailIn(fdWindowText(fd), size, path),
+      now,
+      () => readOpenBackgroundShells(path),
+    );
   } catch (error) {
     return {
       kind: 'failed',
@@ -1046,6 +1217,193 @@ export function readHelperTail(
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * A helper tail as the transcript cache keeps it: the shape, plus the open
+ * background shells when the tail is text-ended (scanned from the same bytes,
+ * whatever the clock says, so the entry holds nothing but the file's facts).
+ */
+export type HelperTailFacts =
+  | {
+      at: string | null;
+      kind: 'found';
+      openShells: string[] | null;
+      tail: 'finished' | 'inFlight' | 'textEnded';
+    }
+  | {kind: 'none'; reason: string};
+
+/** `HelperTailFacts` of a transcript's bytes, already read whole. */
+export function helperTailFactsOfBytes(
+  bytes: Buffer,
+  path: string,
+): HelperTailFacts {
+  const shape = helperTailIn(bytesWindowText(bytes), bytes.length, path);
+  if (shape.kind === 'none') return shape;
+  return {
+    ...shape,
+    openShells:
+      shape.tail === 'textEnded'
+        ? openShellsOfLines((onLine) => {
+            forEachBytesLine(bytes, onLine);
+          })
+        : null,
+  };
+}
+
+/** `readHelperTail`'s answer from cached facts, at `options.now` (default the real clock). */
+export function helperTailFromFacts(
+  facts: HelperTailFacts,
+  options: {now?: Date} = {},
+): HelperTailRead {
+  if (facts.kind === 'none') return facts;
+  const {at, openShells, tail} = facts;
+  return finishHelperTail(
+    {at, kind: 'found', tail},
+    options.now ?? new Date(),
+    () =>
+      openShells == null
+        ? {kind: 'failed', reason: 'the cached helper tail holds no shell scan'}
+        : {kind: 'read', open: openShells},
+  );
+}
+
+// ---------------------------------------------------------------------------
+// A helper tail folded from a transcript's new lines (home-base-9uzxw.16)
+// ---------------------------------------------------------------------------
+
+/*
+ * `helperTailIn`'s window walk gives what a whole-file pass would: its window
+ * is always a suffix of the file's lines and only grows, so the last user or
+ * assistant record, the newest timestamp among them and the newest tool_use
+ * naming an id are the file's own once the window holds them (it grows until
+ * it does, or reaches the start). So a transcript that only grew needs, from
+ * its old lines, just the old answer and which tool ids a SubagentHandback
+ * tool_use named last; the new lines supply the rest. The equality with
+ * `helperTailFactsOfBytes` is tested step by step
+ * (tests/thread-transcript-fold.test.ts).
+ */
+
+/**
+ * A tool id as `helperTailIn`'s Map compares it (SameValueZero): the type and
+ * the value. Null for an object id, which no other parsed value equals.
+ */
+function toolIdKey(id: unknown): string | null {
+  if (id != null && typeof id === 'object') return null;
+  return `${typeof id}:${String(id)}`;
+}
+
+/** A user or assistant record's tool_use blocks into the handback set: the newest name per id wins. */
+function handbackFoldRecord(keys: Set<string>, record: TranscriptRecord): void {
+  for (const block of contentBlocks(record)) {
+    if (block.type !== 'tool_use') continue;
+    const key = toolIdKey(block.id);
+    if (key == null) continue;
+    if (block.name === HANDBACK_TOOL) keys.add(key);
+    else keys.delete(key);
+  }
+}
+
+/**
+ * One line into the set of tool ids whose newest tool_use, in a user or
+ * assistant record, names SubagentHandback. Only lines that can hold a
+ * tool_use are parsed: the type `"tool_use"` appears literally, or the line
+ * holds a `\u` escape (the only other way JSON can spell it), so the filter
+ * loses no record.
+ */
+export function handbackFoldLine(keys: Set<string>, line: string): void {
+  if (!line.includes('"tool_use"') && !line.includes('\\u')) return;
+  if (line.trim() === '') return;
+  let record: TranscriptRecord;
+  try {
+    record = JSON.parse(line) as TranscriptRecord;
+  } catch {
+    return;
+  }
+  if (record.type !== 'user' && record.type !== 'assistant') return;
+  handbackFoldRecord(keys, record);
+}
+
+/** The tail shape of the file's last user or assistant record (`helperTailIn` once its window holds everything it needs). */
+function helperTailOfLast(
+  last: TranscriptRecord,
+  at: string | null,
+  handback: Set<string>,
+): HelperTailShape {
+  const blocks = contentBlocks(last);
+  if (last.type === 'assistant') {
+    const tools = blocks
+      .filter((block) => block.type === 'tool_use')
+      .map((block) => block.name);
+    const thinkingOnly =
+      blocks.length > 0 && blocks.every((block) => block.type === 'thinking');
+    if (tools.some((name) => name !== HANDBACK_TOOL) || thinkingOnly) {
+      return {at, kind: 'found', tail: 'inFlight'};
+    }
+    if (tools.length > 0) return {at, kind: 'found', tail: 'finished'};
+    return {at, kind: 'found', tail: 'textEnded'};
+  }
+  const answered = blocks
+    .filter((block) => block.type === 'tool_result')
+    .map((block) => block.tool_use_id);
+  if (answered.length === 0) return {at, kind: 'found', tail: 'inFlight'};
+  const handedBack = answered.some((id) => {
+    const key = toolIdKey(id);
+    return key != null && handback.has(key);
+  });
+  return {at, kind: 'found', tail: handedBack ? 'finished' : 'inFlight'};
+}
+
+/**
+ * The helper tail of a file that only grew: `old` is its facts before, and
+ * `region` its new bytes, starting on a line boundary. `handback` (`handbackFoldLine`
+ * over the old lines, or an earlier fold) and `shells` (the open shells
+ * in their order) are advanced through the new lines in place. Returns what
+ * `helperTailFactsOfBytes` gives for the whole file.
+ */
+export function foldHelperTail(input: {
+  handback: Set<string>;
+  old: HelperTailFacts;
+  path: string;
+  region: Buffer;
+  shells: Set<string>;
+}): HelperTailFacts {
+  const {handback, old, path, region, shells} = input;
+  const seen: {at: string | null; last: TranscriptRecord | null} = {
+    at: null,
+    last: null,
+  };
+  forEachBytesLine(region, (line) => {
+    openShellsFoldLine(shells, line);
+    if (line.trim() === '') return;
+    let record: TranscriptRecord;
+    try {
+      record = JSON.parse(line) as TranscriptRecord;
+    } catch {
+      return;
+    }
+    if (record.type !== 'user' && record.type !== 'assistant') return;
+    seen.last = record;
+    seen.at = asString(record.timestamp) ?? seen.at;
+    handbackFoldRecord(handback, record);
+  });
+  let shape: HelperTailShape;
+  if (seen.last == null) {
+    if (old.kind === 'none') {
+      return {kind: 'none', reason: `no user or assistant record in ${path}`};
+    }
+    shape = {at: old.at, kind: 'found', tail: old.tail};
+  } else {
+    const oldAt = old.kind === 'found' ? old.at : null;
+    shape = helperTailOfLast(seen.last, seen.at ?? oldAt, handback);
+  }
+  if (shape.kind === 'none') return shape;
+  // The same construction as `helperTailFactsOfBytes`, so the keys come out
+  // in the same order and the cached JSON is byte-identical.
+  return {
+    ...shape,
+    openShells: shape.tail === 'textEnded' ? [...shells] : null,
+  };
 }
 
 // ---------------------------------------------------------------------------

@@ -1,0 +1,4 @@
+[test]
+# A temporary $XDG_CACHE_HOME for every test run (home-base-9uzxw.11): the
+# threads transcript cache must never write test entries into ~/.cache.
+preload = ["./tests/preload-test-env.ts"]

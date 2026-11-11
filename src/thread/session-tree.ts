@@ -53,6 +53,7 @@ import {parseBrIssues} from '../beads/br';
 import {BEADS_JSONL, recordedBeadsJsonl} from '../beads/jsonl';
 import {parseInstant} from './answer-store';
 import {ASK_LABEL} from './ask-format';
+import {createFileMemo} from './file-memo';
 import {probeErrorMessage} from './paths';
 import {REQUEST_LABEL, sidLabel, toLabel} from './session-bead';
 
@@ -95,24 +96,13 @@ export type ExportRead =
   | {kind: 'failed'; path: string; reason: string}
   | {kind: 'read'; path: string; text: string};
 
-/**
- * The export br writes for the beads of `beadsDir`, whole. The file is the one
- * beside the DB br uses (`recordedBeadsJsonl`, home-base-dj5m9.1.2): for a
- * linked worktree whose br shares its primary checkout's DB (br 0.4.1 on),
- * the PRIMARY's export, not the worktree's own copy, which stays at the
- * branch's last commit. Under br before 0.4.1 it is `beadsDir`'s own, as
- * before. Not knowing which file it is is a failed read, never a guess.
- */
-export function readBeadsExport(beadsDir: string): ExportRead {
-  const located = recordedBeadsJsonl(beadsDir);
-  if (located.kind === 'failed') {
-    return {
-      kind: 'failed',
-      path: join(beadsDir, BEADS_JSONL),
-      reason: located.reason,
-    };
-  }
-  const {path} = located;
+/** The failed read of an export whose file could not be located. */
+function unlocatedExport(beadsDir: string, reason: string): ExportRead {
+  return {kind: 'failed', path: join(beadsDir, BEADS_JSONL), reason};
+}
+
+/** The export at `path`, whole; a failure names the file. */
+function readExportAt(path: string): ExportRead {
   try {
     return {kind: 'read', path, text: readFileSync(path, 'utf8')};
   } catch (error) {
@@ -130,6 +120,21 @@ export function readBeadsExport(beadsDir: string): ExportRead {
           : `could not read ${path}: ${probeErrorMessage(error)}`,
     };
   }
+}
+
+/**
+ * The export br writes for the beads of `beadsDir`, whole. The file is the one
+ * beside the DB br uses (`recordedBeadsJsonl`, home-base-dj5m9.1.2): for a
+ * linked worktree whose br shares its primary checkout's DB (br 0.4.1 on),
+ * the PRIMARY's export, not the worktree's own copy, which stays at the
+ * branch's last commit. Under br before 0.4.1 it is `beadsDir`'s own, as
+ * before. Not knowing which file it is is a failed read, never a guess.
+ */
+export function readBeadsExport(beadsDir: string): ExportRead {
+  const located = recordedBeadsJsonl(beadsDir);
+  return located.kind === 'failed'
+    ? unlocatedExport(beadsDir, located.reason)
+    : readExportAt(located.path);
 }
 
 /** The parent ids in a record's `dependencies` (type parent-child). */
@@ -343,6 +348,39 @@ export function indexExport(
 }
 
 /**
+ * home-base-9uzxw.12: each export's index, kept in memory until the file
+ * changes (file-memo.ts), so a long-lived process (the --web server) does not
+ * read and index every export again on every refresh. The `.beads/` directory
+ * is part of the key: two directories can share one export (a worktree whose
+ * br uses its primary's DB), and the index records which one it was built for.
+ */
+const exportIndexMemo = createFileMemo<ExportIndexRead>();
+
+/**
+ * `indexExport(readBeadsExport(beadsDir), beadsDir)`, from the memo when the
+ * export has not changed. Which export to read is decided on every call (the
+ * locator is never cached), and a failed read is never cached.
+ */
+export function readExportIndex(beadsDir: string): ExportIndexRead {
+  const located = recordedBeadsJsonl(beadsDir);
+  if (located.kind === 'failed') {
+    return indexExport(unlocatedExport(beadsDir, located.reason), beadsDir);
+  }
+  const {path} = located;
+  return (
+    exportIndexMemo.read(
+      path,
+      (bytes) =>
+        indexExport(
+          {kind: 'read', path, text: bytes.toString('utf8')},
+          beadsDir,
+        ),
+      beadsDir,
+    ) ?? indexExport(readExportAt(path), beadsDir)
+  );
+}
+
+/**
  * recordsMatching over an index: of `candidates` (records found by key), the
  * ones whose line holds one of `needles`, in file order; or the same failure
  * recordsMatching gives when a line that does not parse holds a needle.
@@ -394,6 +432,31 @@ function newer(a: TreeIssue, b: TreeIssue): TreeIssue {
   if (at == null) return b;
   if (bt == null) return a;
   return bt > at ? b : a;
+}
+
+/**
+ * Of several records with one id, in file order: the one newer() keeps, as
+ * readSessionTree does, and whether updated_at decided it. It did not when a
+ * record's updated_at does not parse or the newest instant is shared: the
+ * pick then fell to file order alone (home-base-hg6lz.4 R2). One record is
+ * always decided. Null for none.
+ */
+export function newestRecord(
+  records: readonly TreeIssue[],
+): {decided: boolean; issue: TreeIssue} | null {
+  const [first, ...rest] = records;
+  if (first == null) return null;
+  let issue = first;
+  for (const next of rest) issue = newer(issue, next);
+  if (rest.length === 0) return {decided: true, issue};
+  const instants = records.map((record) => parseInstant(record.updatedAt));
+  const known = instants.filter((at): at is number => at != null);
+  if (known.length < instants.length) return {decided: false, issue};
+  const newest = Math.max(...known);
+  return {
+    decided: known.filter((at) => at === newest).length === 1,
+    issue,
+  };
 }
 
 function addTo(map: Map<string, TreeIssue>, issue: TreeIssue): void {

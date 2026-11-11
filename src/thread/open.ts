@@ -41,6 +41,7 @@ import type {RestoreDeps, RestoreRecord, RestoreTarget} from './open-restore';
 import type {EnvLike} from './paths';
 import type {InboxSection} from './session-card';
 import type {InboxRow} from './session-inbox';
+import type {SessionMarks} from './session-name';
 
 import {
   existsSync,
@@ -133,6 +134,8 @@ export interface OpenCandidate {
   /** The checkout the session works in (absolute), or null when unknown. */
   checkout: string | null;
   lastActivityAt: string | null;
+  /** home-base-idnon: the mayor mark and handoff number the name shows. */
+  marks: SessionMarks;
   repo: string | null;
   repoTag: string | null;
   section: InboxSection;
@@ -149,6 +152,7 @@ export function candidateOf(row: InboxRow): OpenCandidate {
   return {
     checkout: rowCheckout(row),
     lastActivityAt: row.lastActivityAt,
+    marks: row.card.marks,
     repo: row.repo,
     repoTag: row.card.repoTag,
     section: row.section,
@@ -174,6 +178,8 @@ export interface PlannedSession {
   /** The text `new-workspace --command` types into the new pane's zsh. */
   command: string;
   lastActivityAt: string | null;
+  /** home-base-idnon: the mayor mark and handoff number the name shows. */
+  marks: SessionMarks;
   /** The workspace name: sessionDisplayName(repoTag, title). */
   name: string;
   repo: string | null;
@@ -188,6 +194,8 @@ export interface AlreadyOpen {
   /** `cmux select-workspace …` when its workspace is known, else null. */
   command: string | null;
   lastActivityAt: string | null;
+  /** home-base-idnon: the mayor mark and handoff number the name shows. */
+  marks: SessionMarks;
   /**
    * yukaf.22 --include-open: why this live session is NOT moved into the new
    * window (no cmux workspace, a workspace shared with another session, …);
@@ -221,6 +229,8 @@ export interface MoveCandidate {
    * window, so cmux leaves a blank workspace there (scripts/CLAUDE.md).
    */
   leavesBlank: boolean;
+  /** home-base-idnon: the mayor mark and handoff number the name shows. */
+  marks: SessionMarks;
   /** The workspace name it would have if opened: sessionDisplayName. */
   name: string;
   /**
@@ -328,6 +338,8 @@ function otherPanesOf(tree: CmuxTree | null, workspaceId: string): number {
 
 export interface SkippedSession {
   lastActivityAt: string | null;
+  /** home-base-idnon: the mayor mark and handoff number the name shows. */
+  marks: SessionMarks;
   reason: string;
   repo: string | null;
   repoTag: string | null;
@@ -341,6 +353,8 @@ export interface OverLimitSession {
   /** What the run would have done with it: open it, or move its workspace. */
   action: 'move' | 'open';
   lastActivityAt: string | null;
+  /** home-base-idnon: the mayor mark and handoff number the name shows. */
+  marks: SessionMarks;
   repo: string | null;
   repoTag: string | null;
   section: InboxSection;
@@ -477,6 +491,7 @@ export function planOpen(input: {
     }
     const base = {
       lastActivityAt: candidate.lastActivityAt,
+      marks: candidate.marks,
       repo: candidate.repo,
       repoTag: candidate.repoTag,
       section: candidate.section,
@@ -519,6 +534,7 @@ export function planOpen(input: {
             name: sessionDisplayName(
               candidate.repoTag,
               candidate.title,
+              candidate.marks,
             ).trimEnd(),
             otherPanes: otherPanesOf(tree, live.workspaceId),
             pid: live.pid,
@@ -571,7 +587,11 @@ export function planOpen(input: {
       ...base,
       checkout: candidate.checkout,
       command: resumeCommand(candidate.sessionId),
-      name: sessionDisplayName(candidate.repoTag, candidate.title).trimEnd(),
+      name: sessionDisplayName(
+        candidate.repoTag,
+        candidate.title,
+        candidate.marks,
+      ).trimEnd(),
       sessionBeadId: candidate.sessionBeadId,
     });
   }
@@ -591,6 +611,7 @@ export function planOpen(input: {
       plan.overLimit.push({
         action: item.action,
         lastActivityAt: item.entry.lastActivityAt,
+        marks: item.entry.marks,
         repo: item.entry.repo,
         repoTag: item.entry.repoTag,
         section: item.entry.section,
@@ -1455,7 +1476,7 @@ export function renderOpen(
         : `${made?.workspaceRef ?? 'opened'}${made?.workspaceId == null ? ' (uuid unknown)' : ` (${made.workspaceId})`}`;
       openRecords.push(
         recordBlock(
-          sessionDisplayName(session.repoTag, session.title),
+          sessionDisplayName(session.repoTag, session.title, session.marks),
           [
             {label: 'Repo', value: session.repo ?? 'unknown'},
             {label: 'Section', value: sectionWords(session.section)},
@@ -1495,7 +1516,7 @@ export function renderOpen(
         if (!rec.dryRun && made?.movedAt == null) continue;
         moveRecords.push(
           recordBlock(
-            sessionDisplayName(move.repoTag, move.title),
+            sessionDisplayName(move.repoTag, move.title, move.marks),
             [
               {label: 'Repo', value: move.repo ?? 'unknown'},
               {label: 'Section', value: sectionWords(move.section)},
@@ -1596,7 +1617,7 @@ export function renderOpen(
       spacedList(
         rec.overLimit.map((entry) =>
           recordBlock(
-            sessionDisplayName(entry.repoTag, entry.title),
+            sessionDisplayName(entry.repoTag, entry.title, entry.marks),
             [
               {label: 'Repo', value: entry.repo ?? 'unknown'},
               {label: 'Section', value: sectionWords(entry.section)},
@@ -1632,7 +1653,7 @@ export function renderOpen(
       spacedList(
         rec.alreadyOpen.map((entry) =>
           recordBlock(
-            sessionDisplayName(entry.repoTag, entry.title),
+            sessionDisplayName(entry.repoTag, entry.title, entry.marks),
             [
               {label: 'Repo', value: entry.repo ?? 'unknown'},
               {label: 'Section', value: sectionWords(entry.section)},
@@ -1690,7 +1711,7 @@ export function renderOpen(
       spacedList(
         rec.skipped.map((entry) =>
           recordBlock(
-            sessionDisplayName(entry.repoTag, entry.title),
+            sessionDisplayName(entry.repoTag, entry.title, entry.marks),
             [
               {label: 'Repo', value: entry.repo ?? 'unknown'},
               {label: 'Section', value: sectionWords(entry.section)},

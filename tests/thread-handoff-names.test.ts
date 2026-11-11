@@ -431,9 +431,12 @@ describe('the preview agrees with the sync', () => {
       `cmux-surface:${S_B}`,
     ]);
     expect(item.namer?.beadId).toBe('t-b');
+    // home-base-idnon: the preview names what the sync writes
+    // (workspaceToolPart), marks included. t-b continues t-a and carries no
+    // handoff-number label, so the labels say H? (home-base-6n7my.2 D2).
     expect(item.verdict).toMatchObject({
       kind: 'rename',
-      to: '[HOME-BASE] continue the migration',
+      to: '[HOME-BASE] H? continue the migration',
     });
   });
 

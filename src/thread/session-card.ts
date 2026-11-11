@@ -45,6 +45,7 @@ import {
   CONTINUES_LABEL_PREFIX,
 } from './session-bead';
 import {firstUserLine} from './session-model';
+import {NO_MARKS, type SessionMarks, sessionMarksOf} from './session-name';
 import {
   isOpen,
   openQuestions,
@@ -588,6 +589,13 @@ export interface SessionCard {
   emoji: string;
   /** Branch / Uncommitted / Unpushed / Checkout / Could not read. */
   facts: CardFact[];
+  /**
+   * home-base-idnon: the mayor mark and handoff number the heading shows
+   * through sessionDisplayName. The inbox passes them with the number walked
+   * when the bead has no label for it (handoff-marks.ts); otherwise from the
+   * labels alone, as the tab title. None for an untracked or unloaded session.
+   */
+  marks: SessionMarks;
   /** The open P1–P4 questions (D2 "Optional"), or null when there are none. */
   optional: OptionalLine | null;
   /**
@@ -1070,6 +1078,11 @@ export interface CardInput {
   action: ActionLine;
   age: string | null;
   counts: StatusCounts;
+  /**
+   * home-base-idnon: the marks, walked by the caller (walkedSessionMarks);
+   * null or absent: from the session bead's labels alone.
+   */
+  marks?: SessionMarks | null;
   model: SessionModel;
   /**
    * Session beads by id, for naming this session's predecessor and successor
@@ -1104,6 +1117,7 @@ export function buildCard(input: CardInput): SessionCard {
     age: input.age,
     emoji: where.split(' ')[0] ?? '❔',
     facts,
+    marks: input.marks ?? sessionMarksOf(model.beads.session?.labels ?? []),
     optional: optionalLine(counts, model.sessionBeadId),
     pane: paneCommandOf(paneFact),
     paneFact,
@@ -1192,6 +1206,7 @@ export function unreadableCard(input: {
     age: input.age,
     emoji: '❔',
     facts: [],
+    marks: NO_MARKS,
     optional: null,
     pane: paneCommandOf(paneFact),
     paneFact,

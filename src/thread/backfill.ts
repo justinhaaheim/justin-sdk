@@ -324,6 +324,12 @@ export interface ScanResult {
 export function scanSessions(
   files: readonly DiscoveredFile[],
   windowStart: Date,
+  /**
+   * home-base-9uzxw.11: the inbox's untracked scan passes the transcript
+   * cache's extractor. It throws exactly as the default does, and the window
+   * is applied below, after it, never inside a cached entry.
+   */
+  extract: (path: string) => TranscriptMessages = extractTranscriptMessages,
 ): ScanResult {
   const result: ScanResult = {
     failures: [],
@@ -338,7 +344,7 @@ export function scanSessions(
   for (const file of files) {
     let messages: TranscriptMessages;
     try {
-      messages = extractTranscriptMessages(file.path);
+      messages = extract(file.path);
     } catch (error) {
       result.failures.push(
         `read ${file.path}: ${error instanceof Error ? error.message : String(error)}`,

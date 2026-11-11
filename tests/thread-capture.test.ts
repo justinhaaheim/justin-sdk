@@ -168,7 +168,7 @@ function hook(h: Harness, stdin: string, now = new Date()) {
   });
 }
 
-function logLines(h: Harness): MessageLine[] {
+function logLines(h: Harness): readonly Readonly<MessageLine>[] {
   const read = readMessageLog(SESSION, h.env);
   if (read.kind !== 'read') throw new Error(`log not read: ${read.kind}`);
   return read.lines;

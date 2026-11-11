@@ -52,6 +52,7 @@ function session(
       age: '5 minutes ago',
       emoji: '🛑',
       facts: [{label: 'Branch', value: 'main'}],
+      marks: {handoff: null, mayor: false},
       optional: null,
       pane: null,
       repoTag: 'DEMO',
@@ -838,4 +839,113 @@ describe('dashboardInboxOf', () => {
       'Read / unread could not be checked',
     );
   });
+});
+
+describe('inbox loads never overlap (home-base-9uzxw.11)', () => {
+  /** A loader that holds each load open until the test releases it. */
+  function gatedLoader(inbox: DashboardInbox) {
+    const state = {active: 0, maxActive: 0, started: 0};
+    const gates: (() => void)[] = [];
+    const load = async (): Promise<InboxLoad> => {
+      state.started += 1;
+      state.active += 1;
+      state.maxActive = Math.max(state.maxActive, state.active);
+      await new Promise<void>((resolve) => gates.push(resolve));
+      state.active -= 1;
+      return {inbox, kind: 'read'};
+    };
+    /** Resolve once a load is waiting, then let it finish. */
+    const release = async (): Promise<void> => {
+      for (let tries = 0; gates.length === 0 && tries < 200; tries += 1) {
+        await Bun.sleep(5);
+      }
+      gates.shift()?.();
+    };
+    return {load, release, state};
+  }
+
+  function gatedSetup() {
+    const sessions = [session({sessionId: SID_A})];
+    const inbox = inboxOf(sessions);
+    const loader = gatedLoader(inbox);
+    const runner = fakeRunner();
+    const server = createDashboardServer({
+      loadInbox: loader.load,
+      runner: runner.run,
+      stateDir: mkdtempSync(join(tmpdir(), 'dashboard-web-')),
+    });
+    servers.push(server);
+    const base = `http://127.0.0.1:${server.port}`;
+    return {base, inbox, loader, runner, server};
+  }
+
+  test('three state requests while one load runs share it: one load', async () => {
+    const {base, loader, server} = gatedSetup();
+    const requests = [1, 2, 3].map(
+      async () => await fetch(`${base}/api/state?t=${server.token}`),
+    );
+    await loader.release();
+    const responses = await Promise.all(requests);
+    expect(responses.map((res) => res.status)).toEqual([200, 200, 200]);
+    expect(loader.state.started).toBe(1);
+    expect(loader.state.maxActive).toBe(1);
+  });
+
+  test('an action during a running state load waits for it, then runs its own load; never two at once', async () => {
+    const {base, inbox, loader, runner, server} = gatedSetup();
+    const stateRequest = fetch(`${base}/api/state?t=${server.token}`);
+    // Let the state load start before the action arrives.
+    for (let tries = 0; loader.state.started === 0 && tries < 200; tries += 1) {
+      await Bun.sleep(5);
+    }
+    const s = pick(inbox.sessions, SID_A);
+    const action = fetch(`${base}/api/action`, {
+      body: JSON.stringify(bodyFor(s, server.token, 'archive')),
+      headers: {'content-type': 'application/json'},
+      method: 'POST',
+    });
+    await Bun.sleep(50);
+    // The action has not started a second load while the first runs.
+    expect(loader.state.started).toBe(1);
+    await loader.release();
+    expect((await stateRequest).status).toBe(200);
+    await loader.release();
+    expect((await action).status).toBe(200);
+    expect(loader.state.started).toBe(2);
+    expect(loader.state.maxActive).toBe(1);
+    expect(runner.calls).toHaveLength(1);
+  });
+});
+
+describe('a slow inbox load (home-base-9uzxw.13)', () => {
+  // Bun.serve closes a connection that sends nothing for `idleTimeout`
+  // seconds, 10 by default, and a request waiting on a load sends nothing. A
+  // real load took 10 to 18 s on a loaded Mac (2026-11-10).
+  const SLOW_MS = 12_000;
+
+  test(
+    'a GET /api/state whose load takes longer than 10 s gets its answer, not a reset',
+    async () => {
+      const inbox = inboxOf([session({sessionId: SID_A})]);
+      const stateDir = mkdtempSync(join(tmpdir(), 'dashboard-web-'));
+      const server = createDashboardServer({
+        loadInbox: async () => {
+          await Bun.sleep(SLOW_MS);
+          return {inbox, kind: 'read'};
+        },
+        runner: fakeRunner().run,
+        stateDir,
+      });
+      servers.push(server);
+      const started = performance.now();
+      const res = await fetch(
+        `http://127.0.0.1:${server.port}/api/state?t=${server.token}`,
+      );
+      const body = (await res.json()) as {sessions: DashboardSession[]};
+      expect(performance.now() - started).toBeGreaterThanOrEqual(SLOW_MS);
+      expect(res.status).toBe(200);
+      expect(body.sessions.map((s) => s.sessionId)).toEqual([SID_A]);
+    },
+    SLOW_MS + 15_000,
+  );
 });

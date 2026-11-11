@@ -66,6 +66,7 @@ import {
   THREAD_DEFAULT_TRIM_GUARD,
   THREAD_DEFAULT_WORKSPACE_DESCRIPTION,
 } from './thread/defaults';
+import {readTextMemoized} from './thread/file-memo';
 import {TIME_CHECK_DEFAULTS} from './time-check';
 import {USAGE_CHECK_DEFAULTS} from './usage-check';
 
@@ -814,7 +815,9 @@ function readConfigFile<T>(
 ): ConfigReadOutcome<T> {
   let raw: string;
   try {
-    raw = readFileSync(path, 'utf-8');
+    // home-base-9uzxw.16: kept in memory until the file changes; any failure
+    // of the memo reads the file as before, so the errno still decides.
+    raw = readTextMemoized(path) ?? readFileSync(path, 'utf-8');
   } catch (error) {
     if (errorCode(error) === 'ENOENT') return {path, status: 'absent'};
     return {error: errorMessage(error), path, status: 'unreadable'};

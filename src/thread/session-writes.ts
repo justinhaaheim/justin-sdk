@@ -80,6 +80,100 @@ function contentBlocks(record: unknown): unknown[] {
 }
 
 /**
+ * `rawWrittenPathsFromText`'s state between lines (home-base-9uzxw.16), kept
+ * by the transcript cache so a grown transcript is folded from its new lines.
+ * `rawWrittenPathsFromText` is new + one `writeFoldLine` per line +
+ * `finishWriteFold`, so the full read and the fold cannot drift.
+ */
+export interface WriteFold {
+  /** Every write seen, by tool_use id, in first-seen order. */
+  byId: Map<
+    string,
+    {kind: 'bash' | 'path'; value: string; writtenAt: string | null}
+  >;
+  unparsedLines: number;
+}
+
+export function newWriteFold(): WriteFold {
+  return {byId: new Map(), unparsedLines: 0};
+}
+
+/** One line of a transcript into `fold` (`rawWrittenPathsFromText`'s loop body). */
+export function writeFoldLine(fold: WriteFold, line: string): void {
+  if (!line.includes('"tool_use"') || !TOOL_NAME_IN_RAW.test(line)) return;
+  const {byId} = fold;
+  let record: unknown;
+  try {
+    record = JSON.parse(line);
+  } catch {
+    fold.unparsedLines += 1;
+    return;
+  }
+  const at = stringField(record, 'timestamp');
+  for (const block of contentBlocks(record)) {
+    if (block == null || typeof block !== 'object') continue;
+    const entry = block as Record<string, unknown>;
+    if (entry.type !== 'tool_use' || typeof entry.name !== 'string') continue;
+    const id = stringField(entry, 'id');
+    if (id == null) continue;
+    let found: {kind: 'bash' | 'path'; value: string} | null = null;
+    if (entry.name === 'Bash') {
+      const command = stringField(entry.input, 'command');
+      if (command != null) found = {kind: 'bash', value: command};
+    } else {
+      const key = PATH_TOOLS[entry.name];
+      const path = key == null ? null : stringField(entry.input, key);
+      if (path != null) found = {kind: 'path', value: path};
+    }
+    if (found == null) continue;
+    byId.set(id, {...found, writtenAt: byId.get(id)?.writtenAt ?? at});
+  }
+}
+
+/** The raw evidence `fold` holds. Reads `fold`, never changes it. */
+export function finishWriteFold(
+  fold: WriteFold,
+  file: string,
+): Omit<WriteEvidence, 'files'> {
+  const paths: PathWrite[] = [];
+  const commands: BashWrite[] = [];
+  for (const entry of fold.byId.values()) {
+    if (entry.kind === 'path') {
+      paths.push({file, path: entry.value, writtenAt: entry.writtenAt});
+    } else {
+      commands.push({command: entry.value, file, writtenAt: entry.writtenAt});
+    }
+  }
+  return {commands, paths, unparsedLines: fold.unparsedLines};
+}
+
+/**
+ * `writtenPathsFromText` before `resolve`: each path as the tool_use names it
+ * (home-base-9uzxw.11). `resolve` reads the process's working directory for a
+ * relative path, so the transcript cache keeps this form, which depends on
+ * the file's bytes alone, and resolves after.
+ */
+export function rawWrittenPathsFromText(
+  text: string,
+  file: string,
+): Omit<WriteEvidence, 'files'> {
+  const fold = newWriteFold();
+  for (const line of text.split('\n')) writeFoldLine(fold, line);
+  return finishWriteFold(fold, file);
+}
+
+/** Raw write evidence with each path `resolve`d, as `writtenPathsFromText` gives it. */
+export function resolveWrittenPaths(
+  raw: Omit<WriteEvidence, 'files'>,
+): Omit<WriteEvidence, 'files'> {
+  return {
+    commands: raw.commands,
+    paths: raw.paths.map((write) => ({...write, path: resolve(write.path)})),
+    unparsedLines: raw.unparsedLines,
+  };
+}
+
+/**
  * D1's evidence in one transcript file's text. Pure: the tests drive it with
  * literal JSONL. A tool_use id seen twice (Claude Code's `api-request-blob`
  * record repeats an assistant message with no timestamp, home-base-j8q3e.1.4)
@@ -89,58 +183,21 @@ export function writtenPathsFromText(
   text: string,
   file: string,
 ): Omit<WriteEvidence, 'files'> {
-  const byId = new Map<
-    string,
-    {kind: 'bash' | 'path'; value: string; writtenAt: string | null}
-  >();
-  let unparsedLines = 0;
-  for (const line of text.split('\n')) {
-    if (!line.includes('"tool_use"') || !TOOL_NAME_IN_RAW.test(line)) continue;
-    let record: unknown;
-    try {
-      record = JSON.parse(line);
-    } catch {
-      unparsedLines += 1;
-      continue;
-    }
-    const at = stringField(record, 'timestamp');
-    for (const block of contentBlocks(record)) {
-      if (block == null || typeof block !== 'object') continue;
-      const entry = block as Record<string, unknown>;
-      if (entry.type !== 'tool_use' || typeof entry.name !== 'string') continue;
-      const id = stringField(entry, 'id');
-      if (id == null) continue;
-      let found: {kind: 'bash' | 'path'; value: string} | null = null;
-      if (entry.name === 'Bash') {
-        const command = stringField(entry.input, 'command');
-        if (command != null) found = {kind: 'bash', value: command};
-      } else {
-        const key = PATH_TOOLS[entry.name];
-        const path = key == null ? null : stringField(entry.input, key);
-        if (path != null) found = {kind: 'path', value: resolve(path)};
-      }
-      if (found == null) continue;
-      byId.set(id, {...found, writtenAt: byId.get(id)?.writtenAt ?? at});
-    }
-  }
-  const paths: PathWrite[] = [];
-  const commands: BashWrite[] = [];
-  for (const entry of byId.values()) {
-    if (entry.kind === 'path') {
-      paths.push({file, path: entry.value, writtenAt: entry.writtenAt});
-    } else {
-      commands.push({command: entry.value, file, writtenAt: entry.writtenAt});
-    }
-  }
-  return {commands, paths, unparsedLines};
+  return resolveWrittenPaths(rawWrittenPathsFromText(text, file));
 }
 
 /**
  * D1 over the main transcript and every subagent transcript beside it, or why
  * one of them could not be read (D2: never an empty list for that).
+ *
+ * `cachedFile` (home-base-9uzxw.11) gives one file's RAW evidence from the
+ * transcript cache, or null when the cache cannot; that file is then read here
+ * as before. The subagent listing is never cached.
  */
 export function readWrittenPaths(
   transcriptPath: string,
+  cachedFile: (file: string) => Omit<WriteEvidence, 'files'> | null = () =>
+    null,
 ): {evidence: WriteEvidence; ok: true} | {ok: false; reason: string} {
   const subagents = subagentTranscripts(transcriptPath);
   if (!subagents.ok) return subagents;
@@ -152,16 +209,22 @@ export function readWrittenPaths(
     unparsedLines: 0,
   };
   for (const file of files) {
-    let text: string;
-    try {
-      text = readFileSync(file, 'utf8');
-    } catch (error) {
-      return {
-        ok: false,
-        reason: `could not read ${file}: ${error instanceof Error ? error.message : String(error)}`,
-      };
+    const cached = cachedFile(file);
+    let one: Omit<WriteEvidence, 'files'>;
+    if (cached != null) {
+      one = resolveWrittenPaths(cached);
+    } else {
+      let text: string;
+      try {
+        text = readFileSync(file, 'utf8');
+      } catch (error) {
+        return {
+          ok: false,
+          reason: `could not read ${file}: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      one = writtenPathsFromText(text, file);
     }
-    const one = writtenPathsFromText(text, file);
     evidence.paths.push(...one.paths);
     evidence.commands.push(...one.commands);
     evidence.unparsedLines += one.unparsedLines;

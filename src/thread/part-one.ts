@@ -61,6 +61,7 @@ import type {OutputStyle} from '../cli-style';
 import type {ActionLine, OptionalLine} from './session-card';
 import type {SessionCommits} from './session-commits';
 import type {SessionModel} from './session-model';
+import type {SessionMarks} from './session-name';
 import type {SessionStatus, StatusCounts} from './session-status';
 import type {RequestNode, TreeIssue} from './session-tree';
 
@@ -84,7 +85,7 @@ import {renderAsks, sortAsks} from './ask-render';
 import {exportBehindWords} from './export-behind';
 import {cutOnWord} from './session-bead';
 import {firstUserLine, newestLogAt, userLines} from './session-model';
-import {sessionDisplayName} from './session-name';
+import {sessionDisplayName, sessionMarksOf} from './session-name';
 import {isOpen, openQuestions, stageReached} from './session-status';
 
 /** The legacy report's rule (render-markdown.ts RULE_STOP), kept identical. */
@@ -391,6 +392,11 @@ export interface PartOneInput {
    */
   action: ActionLine;
   counts: StatusCounts;
+  /**
+   * home-base-idnon: the Session line's marks, the number walked by the
+   * caller (walkedSessionMarks); absent: from the bead's labels alone.
+   */
+  marks?: SessionMarks;
   model: SessionModel;
   now: Date;
   /** The dashboard's "Optional" line (`optionalLine`), null when none. */
@@ -812,7 +818,13 @@ export function partOneView(input: PartOneInput): PartOneView {
     resume: tilded(resume),
     session: field(
       'Session',
-      tildeText(sessionDisplayName(model.repoTag, title)),
+      tildeText(
+        sessionDisplayName(
+          model.repoTag,
+          title,
+          input.marks ?? sessionMarksOf(model.beads.session?.labels ?? []),
+        ),
+      ),
     ),
     state: tilded(state),
     times: tilded(times),

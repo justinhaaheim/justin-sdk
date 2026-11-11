@@ -55,6 +55,7 @@
 import type {Field, OutputStyle} from '../cli-style';
 import type {HandoffStop} from './handoff-view';
 import type {InputDraft} from './input-drafts';
+import type {MessageLogRead} from './message-log';
 import type {PaneLookup, UnplacedKind} from './pane-join';
 import type {EnvLike} from './paths';
 import type {
@@ -91,6 +92,8 @@ import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
 import {messageLogPath} from './archive';
 import {resolveRepoTag, resolveThreadConfig} from './config';
+import {dropUnusedFileMemo, fileMemoMark} from './file-memo';
+import {inboxChainReaders, walkedSessionMarks} from './handoff-marks';
 import {handoffStopOf} from './handoff-view';
 import {
   inboxJsonWithTimings,
@@ -103,7 +106,7 @@ import {
 import {listUnsentInputDrafts} from './input-drafts';
 import {
   isSafeSessionId,
-  readLastAssistantLine,
+  readLastAssistantLineMemoized,
   readMessageLog,
 } from './message-log';
 import {lookupPanes as lookupLivePanes, realPaneSources} from './pane-join';
@@ -145,6 +148,11 @@ import {
   untrackedLine,
   untrackedVerdict,
 } from './session-untracked';
+import {
+  dropUnusedTranscriptMemory,
+  evictTranscriptCache,
+  transcriptCacheMark,
+} from './transcript-cache';
 
 export const INBOX_DEFAULT_DAYS = 30;
 
@@ -471,8 +479,8 @@ export function neverHiddenByAge(status: SessionStatus): boolean {
   return status.kind === 'unknown' && status.activityUnread !== true;
 }
 
-/** Read every session in the window. `failed` only when the index is unreadable. */
-export async function readInbox(input: {
+/** One inbox load; `readInbox` (below) is the entry point. */
+async function readInboxOnce(input: {
   /** Sessions loaded at once; default INBOX_CONCURRENCY. 1 = one at a time. */
   concurrency?: number;
   cwd: string;
@@ -634,12 +642,24 @@ export async function readInbox(input: {
   // home-base-mbnjv.3 (D9): every session bead loaded in this run, so a card
   // names its predecessor and successor by title and sees a half-written link.
   const neighbors = new Map<string, CardNeighbor>();
+  // home-base-idnon: each loaded session's message log, for the walk below.
+  const loadedLogs = new Map<string, MessageLogRead>();
   for (const loaded of loads) {
-    const bead = loaded?.kind === 'loaded' ? loaded.model.beads.session : null;
+    if (loaded?.kind !== 'loaded') continue;
+    loadedLogs.set(loaded.model.sessionId, loaded.model.log);
+    const bead = loaded.model.beads.session;
     if (bead != null) {
       neighbors.set(bead.id, {labels: bead.labels, title: bead.title});
     }
   }
+  // home-base-idnon: a bead that continues another and has no number label
+  // gets its number walked from what this run already read; nothing written.
+  const chainReaders = inboxChainReaders({
+    beads: neighbors,
+    env,
+    exportIndexes: cache.exportIndexes,
+    logs: loadedLogs,
+  });
   for (const [position, candidate] of candidates.entries()) {
     const {activity, indexed, lastAssistantAt, old, sighting} = candidate;
     const loaded = loads[position];
@@ -721,6 +741,10 @@ export async function readInbox(input: {
         action,
         age: ageOf(lastActivityAt, now),
         counts,
+        marks:
+          model.beads.session == null
+            ? null
+            : walkedSessionMarks(model.beads.session, chainReaders),
         model,
         neighbors,
         panes,
@@ -760,7 +784,7 @@ export async function readInbox(input: {
     const card = untrackedCard(session, verdict, now, panes);
     // D-READ-STATE: an untracked session's log is read from its end only.
     const assistant = isSafeSessionId(session.sessionId)
-      ? readLastAssistantLine(messageLogPath(session.sessionId, env))
+      ? readLastAssistantLineMemoized(messageLogPath(session.sessionId, env))
       : null;
     rows.push({
       card,
@@ -855,6 +879,38 @@ export async function readInbox(input: {
       untracked: untrackedRead,
     },
   };
+}
+
+/**
+ * Read every session in the window. `failed` only when the index is unreadable.
+ *
+ * home-base-9uzxw.14: after a load that read, the in-memory caches drop what
+ * it did not use (so a long-lived --web server holds one load's files, not
+ * every file it ever read), and the transcript cache's disk entries whose
+ * transcript is gone, or older than the window and unused, are removed (at
+ * most hourly; never after a load filtered to one repo, which uses only part
+ * of the cache). The window is at least the default one, so a shorter
+ * `--days` never evicts what the default dashboard reads. Neither changes
+ * any answer: a dropped entry is read again when next asked for.
+ */
+export async function readInbox(
+  input: Parameters<typeof readInboxOnce>[0],
+): ReturnType<typeof readInboxOnce> {
+  const fileMark = fileMemoMark();
+  const transcriptMark = transcriptCacheMark();
+  const result = await readInboxOnce(input);
+  if (result.kind === 'read') {
+    dropUnusedFileMemo(fileMark);
+    dropUnusedTranscriptMemory(transcriptMark);
+    if (input.repo == null) {
+      evictTranscriptCache({
+        now: input.now,
+        usedSince: transcriptMark,
+        windowDays: Math.max(input.days, INBOX_DEFAULT_DAYS),
+      });
+    }
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,7 +1167,7 @@ function unreadLead(unread: boolean | null): string {
 }
 
 function headingText(card: SessionCard, unread: boolean | null): string {
-  return `${unreadLead(unread)}${card.emoji} ${tildeText(sessionDisplayName(card.repoTag, card.title))}`;
+  return `${unreadLead(unread)}${card.emoji} ${tildeText(sessionDisplayName(card.repoTag, card.title, card.marks))}`;
 }
 
 function markdownCard(

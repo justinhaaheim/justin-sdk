@@ -29,6 +29,8 @@ import {
 } from '../src/thread/respawn';
 import {
   SPAWN_NOT_CONFIRMED_INSTRUCTIONS,
+  SPAWN_PERMISSION_MODE,
+  spawnCommand,
   spawnKickoffPath,
   spawnSession,
   writeKickoffFile,
@@ -471,7 +473,7 @@ describe('thread spawn: the directory', () => {
         '--cwd',
         w.tagged,
         '--command',
-        `claude --name '[SPWN] new session tagged-repo'`,
+        `claude --permission-mode auto --name '[SPWN] new session tagged-repo'`,
         '--focus',
         'false',
       ],
@@ -799,7 +801,9 @@ describe('thread spawn: the command and --remote-control', () => {
     const cmux = fakeCmux();
     const result = await spawnSession(options(w, {}), cmux);
     const command = argAfter(cmux.calls[1], '--command') ?? '';
-    expect(command).toBe(`claude --name '[SPWN] new session tagged-repo'`);
+    expect(command).toBe(
+      `claude --permission-mode auto --name '[SPWN] new session tagged-repo'`,
+    );
     expect(command).not.toContain('--remote-control');
     expect(result.lines.join('\n')).not.toContain('Connect from your phone');
   });
@@ -811,6 +815,8 @@ describe('thread spawn: the command and --remote-control', () => {
     const result = await spawnSession(opts, cmux);
     const command = argAfter(cmux.calls[1], '--command') ?? '';
     expect(zshWords(command)).toEqual([
+      '--permission-mode',
+      'auto',
       '--remote-control',
       '[SPWN] new session tagged-repo',
       '--name',
@@ -837,6 +843,8 @@ describe('thread spawn: the command and --remote-control', () => {
     expect(name).toBe(`[SPWN] ${TRICKY}`);
     const command = argAfter(cmux.calls[1], '--command') ?? '';
     expect(zshWords(command)).toEqual([
+      '--permission-mode',
+      'auto',
       '--model',
       'haiku',
       '--remote-control',
@@ -844,6 +852,73 @@ describe('thread spawn: the command and --remote-control', () => {
       '--name',
       `[SPWN] ${TRICKY}`,
     ]);
+  });
+});
+
+describe('thread spawn: always auto mode (home-base-v8z8d.3)', () => {
+  const NAME = '[SPWN] x';
+  const FILE = '/k/kickoff.md';
+
+  test('every flag combination: --permission-mode auto comes before --name and before the kickoff', () => {
+    for (const remoteControl of [false, true]) {
+      for (const model of [null, 'haiku']) {
+        for (const kickoffFile of [null, FILE]) {
+          const command = spawnCommand({
+            kickoffFile,
+            model,
+            name: NAME,
+            remoteControl,
+          });
+          const label = JSON.stringify({kickoffFile, model, remoteControl});
+          const words = zshWords(command.replace(/ "\$\(command cat.*$/u, ''));
+          const mode = words.indexOf('--permission-mode');
+          expect({label, mode}).toEqual({label, mode: 0});
+          expect(words[mode + 1]).toBe(SPAWN_PERMISSION_MODE);
+          expect(SPAWN_PERMISSION_MODE).toBe('auto');
+          expect(mode).toBeLessThan(words.indexOf('--name'));
+          // The kickoff is claude's positional prompt: still the last word.
+          if (kickoffFile != null) {
+            expect(command.endsWith(`"$(command cat -- ${FILE})"`)).toBe(true);
+            expect(command.indexOf('--permission-mode')).toBeLessThan(
+              command.indexOf('"$(command cat'),
+            );
+          }
+        }
+      }
+    }
+  });
+
+  test('no knob: a repo or user config asking for another mode changes nothing', async () => {
+    const w = world();
+    const manual = {
+      componentConfig: {
+        thread: {
+          handoff: {permissionMode: 'manual'},
+          spawn: {allowed: true, permissionMode: 'manual'},
+        },
+      },
+    };
+    writeFileSync(
+      join(w.root, 'xdg', 'justin-sdk', 'config.json'),
+      JSON.stringify(manual),
+    );
+    writeFileSync(
+      join(w.root, 'justin-sdk.config.json'),
+      JSON.stringify(manual),
+    );
+    writeFileSync(
+      join(w.tagged, 'justin-sdk.config.json'),
+      JSON.stringify({...manual, projectTag: 'SPWN'}),
+    );
+    const cmux = fakeCmux();
+    const result = await spawnSession(options(w, {}), cmux);
+    expect(result.exitCode).toBe(0);
+    const command = argAfter(cmux.calls[1], '--command') ?? '';
+    expect(zshWords(command).slice(0, 2)).toEqual([
+      '--permission-mode',
+      'auto',
+    ]);
+    expect(command).not.toContain('manual');
   });
 });
 
@@ -880,11 +955,13 @@ describe('thread spawn: the parent link in the environment (home-base-ys9t7.5.4 
       true,
     );
     expect(command).toBe(
-      `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT} JUSTIN_SDK_SPAWN_KICKOFF=1 claude --name '[SPWN] new session tagged-repo' "$(command cat -- ${file})"`,
+      `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT} JUSTIN_SDK_SPAWN_KICKOFF=1 claude --permission-mode auto --name '[SPWN] new session tagged-repo' "$(command cat -- ${file})"`,
     );
     // The kickoff stays claude's prompt, untouched: a slash command still
     // starts with "/".
     expect(zshWords(command)).toEqual([
+      '--permission-mode',
+      'auto',
       '--name',
       '[SPWN] new session tagged-repo',
       kickoff,
@@ -902,7 +979,7 @@ describe('thread spawn: the parent link in the environment (home-base-ys9t7.5.4 
     await spawnSession(options(w, {env}), cmux);
     const command = argAfter(cmux.calls[1], '--command') ?? '';
     expect(command).toBe(
-      `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT} claude --name '[SPWN] new session tagged-repo'`,
+      `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT} claude --permission-mode auto --name '[SPWN] new session tagged-repo'`,
     );
     expect(envSeen(command)).toEqual([
       `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT}`,
@@ -916,9 +993,11 @@ describe('thread spawn: the parent link in the environment (home-base-ys9t7.5.4 
     const command = argAfter(cmux.calls[1], '--command') ?? '';
     const file = kickoffFileOf(command) ?? '';
     expect(command).toBe(
-      `JUSTIN_SDK_SPAWN_KICKOFF=1 claude --name '[SPWN] new session tagged-repo' "$(command cat -- ${file})"`,
+      `JUSTIN_SDK_SPAWN_KICKOFF=1 claude --permission-mode auto --name '[SPWN] new session tagged-repo' "$(command cat -- ${file})"`,
     );
     expect(zshWords(command)).toEqual([
+      '--permission-mode',
+      'auto',
       '--name',
       '[SPWN] new session tagged-repo',
       'go',
@@ -940,7 +1019,7 @@ describe('thread spawn --dry-run', () => {
     expect(text).toContain('[SPWN] new session tagged-repo');
     expect(text).toContain(w.tagged);
     expect(text).toContain(
-      `claude --remote-control '[SPWN] new session tagged-repo'`,
+      `claude --permission-mode auto --remote-control '[SPWN] new session tagged-repo'`,
     );
     expect(text).toContain(SOCK);
   });
@@ -957,6 +1036,8 @@ describe('thread spawn --dry-run', () => {
     expect(text).toContain(kickoff);
     const command = argAfter(cmux.calls[1], '--command') ?? '';
     expect(zshWords(command)).toEqual([
+      '--permission-mode',
+      'auto',
       '--remote-control',
       '[SPWN] new session tagged-repo',
       '--name',
@@ -1191,8 +1272,9 @@ describe('thread spawn: the kickoff goes through a file, never the typed line (h
       env: {HOME: w.home, PATH: `${bin}:/usr/bin:/bin`, STUB_OUT: out},
     });
     expect(readFileSync(`${out}.prompt`)).toEqual(Buffer.from(kickoff, 'utf8'));
-    // --model haiku --remote-control <name> --name <name> <prompt>
-    expect(readFileSync(`${out}.argc`, 'utf8')).toBe('7');
+    // --permission-mode auto --model haiku --remote-control <name> --name
+    // <name> <prompt>
+    expect(readFileSync(`${out}.argc`, 'utf8')).toBe('9');
     expect(readFileSync(`${out}.env`, 'utf8')).toBe(
       `JUSTIN_SDK_SPAWNED_BY_SESSION=${PARENT}\nJUSTIN_SDK_SPAWN_KICKOFF=1\n`,
     );
@@ -1215,12 +1297,12 @@ describe('thread spawn: the kickoff goes through a file, never the typed line (h
   });
 
   test('the limit is exact: 999 typed bytes open, 1,000 are refused', async () => {
-    // No kickoff and no parent session: the command is `claude --model <m> --name
-    // <name>`, the model plus the rest.
+    // No kickoff and no parent session: the command is `claude --permission-mode
+    // auto --model <m> --name <name>`, the model plus the rest.
     const at = async (bytes: number) => {
       const w = world();
       const cmux = fakeCmux();
-      const rest = `claude --model  --name '[SPWN] new session tagged-repo'`;
+      const rest = `claude --permission-mode auto --model  --name '[SPWN] new session tagged-repo'`;
       const model = 'm'.repeat(bytes - rest.length);
       const result = await spawnSession(options(w, {model}), cmux);
       const command = argAfter(cmux.calls[1], '--command');

@@ -68,9 +68,9 @@ import {
 } from './session-index';
 import {sessionIdForSelector, sessionIdFrom} from './session-select';
 import {
-  indexExport,
   parseExportLine,
   readBeadsExport,
+  readExportIndex,
   readSessionTree,
 } from './session-tree';
 import {
@@ -80,6 +80,13 @@ import {
   type WriteEvidence,
   writtenDirtyPaths,
 } from './session-writes';
+import {
+  cachedCommitEvidence,
+  cachedContextTokens,
+  cachedHelperTail,
+  cachedLastRecordTimestamp,
+  cachedRawWrites,
+} from './transcript-cache';
 import {readHelperTail, readLastRecordTimestamp} from './transcript-messages';
 
 /** A measurement: its value, or why it could not be taken. Never a stand-in. */
@@ -227,7 +234,9 @@ export type SessionLoad =
 // ---------------------------------------------------------------------------
 
 /** The log's lines, or null when there is no log or it could not be read. */
-export function logLines(log: MessageLogRead): MessageLine[] | null {
+export function logLines(
+  log: MessageLogRead,
+): readonly Readonly<MessageLine>[] | null {
   return log.kind === 'read' ? log.lines : null;
 }
 
@@ -627,7 +636,7 @@ async function sessionCommits(
   firstPromptAt: Measured<string>,
 ): Promise<Measured<SessionCommits>> {
   const read = transcript.ok
-    ? readCommitEvidence(transcript.path)
+    ? readCommitEvidence(transcript.path, cachedCommitEvidence)
     : {ok: false as const, reason: transcript.reason};
   if (read.ok) {
     const attributed = await attributeCommits(
@@ -912,7 +921,10 @@ export async function attributeUncommitted(input: {
     top,
   });
   if (!transcript.ok) return cannot(transcript.reason);
-  const writes = (input.readWrites ?? readWrittenPaths)(transcript.path);
+  const writes = (
+    input.readWrites ??
+    ((path: string) => readWrittenPaths(path, cachedRawWrites))
+  )(transcript.path);
   if (!writes.ok) return cannot(writes.reason);
   const written = writtenDirtyPaths(dirty, top, writes.evidence);
   const commits = await Promise.all(
@@ -1034,7 +1046,11 @@ export function readActivity(
     helpers: unmeasured(reason),
     lastRecordAt: unmeasured(reason),
   });
-  const main = readLastRecordTimestamp(transcriptPath);
+  // home-base-9uzxw.11: each file from the transcript cache when it can,
+  // else read here as before. The subagent listing is never cached.
+  const main =
+    cachedLastRecordTimestamp(transcriptPath) ??
+    readLastRecordTimestamp(transcriptPath);
   if (main.kind === 'failed') return fail(main.reason);
   const subagents = subagentTranscripts(transcriptPath);
   if (!subagents.ok) return fail(subagents.reason);
@@ -1047,7 +1063,8 @@ export function readActivity(
   if (main.kind === 'found') consider(main.at);
   const inFlight: HelperInFlight[] = [];
   for (const file of subagents.files) {
-    const read = readHelperTail(file, options);
+    const read =
+      cachedHelperTail(file, options) ?? readHelperTail(file, options);
     if (read.kind === 'failed') return fail(read.reason);
     if (read.kind !== 'found') continue;
     if (read.at != null) consider(read.at);
@@ -1087,11 +1104,15 @@ export function measureTranscriptAt(path: string): TranscriptMeasurements {
     // usage-check's reader, never a sum of message.usage here (pkg CLAUDE.md:
     // an advisor record's usage double-counts). MAX_SAFE_INTEGER keeps its
     // second job — hunting back for a prior notice — from ever running.
-    const facts = readTranscriptFacts({
-      lowestSetpoint: Number.MAX_SAFE_INTEGER,
-      scope: 'session',
-      transcriptPath: path,
-    });
+    // home-base-9uzxw.11: the transcript cache computes the same call over
+    // the same bytes (transcript-cache.ts), or says it cannot.
+    const facts =
+      cachedContextTokens(path) ??
+      readTranscriptFacts({
+        lowestSetpoint: Number.MAX_SAFE_INTEGER,
+        scope: 'session',
+        transcriptPath: path,
+      });
     contextTokens =
       facts.contextTokens != null
         ? measured(facts.contextTokens)
@@ -1275,7 +1296,8 @@ export async function loadSession(input: {
           readIndex: (dir: string): ExportIndexRead => {
             const known = cache.exportIndexes.get(dir);
             if (known != null) return known;
-            const indexed = indexExport(readBeadsExport(dir), dir);
+            // home-base-9uzxw.12: from the memo across loads when unchanged.
+            const indexed = readExportIndex(dir);
             cache.exportIndexes.set(dir, indexed);
             return indexed;
           },

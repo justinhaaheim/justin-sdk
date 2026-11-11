@@ -348,6 +348,7 @@ function cand(n: number): OpenCandidate {
   return {
     checkout: '/dev/repo-a',
     lastActivityAt: new Date(NOW.getTime() - n * HOUR).toISOString(),
+    marks: {handoff: null, mayor: false},
     repo: 'repo-a',
     repoTag: 'A',
     section: 'unsentDraft',
@@ -943,6 +944,7 @@ describe('openedTargets: only what the run opened', () => {
       checkout: '/dev/repo-a',
       command: `claude --resume ${sid(n)}`,
       lastActivityAt: null,
+      marks: {handoff: null, mayor: false},
       name: `[A] session ${n}`,
       repo: 'repo-a',
       repoTag: 'A',

@@ -215,6 +215,114 @@ function contentBlocks(record: unknown): unknown[] {
 }
 
 /**
+ * `commitEvidenceFromText`'s state between lines (home-base-9uzxw.16): the
+ * transcript cache keeps it, so a transcript that only grew is folded from
+ * its new lines instead of read again. `commitEvidenceFromText` is exactly
+ * new + one `commitFoldLine` per line + `finishCommitFold`, so the full read
+ * and the fold cannot drift.
+ */
+export interface CommitFold {
+  /** Every Bash call seen, by tool_use id, in first-seen order. */
+  bashCalls: Map<
+    string,
+    {command: string; isCommit: boolean; startedAt: string | null}
+  >;
+  confirmations: CommitConfirmation[];
+  /** When each Bash call's result was written, by tool_use id. */
+  results: Map<string, string | null>;
+  unparsedLines: number;
+}
+
+export function newCommitFold(): CommitFold {
+  return {
+    bashCalls: new Map(),
+    confirmations: [],
+    results: new Map(),
+    unparsedLines: 0,
+  };
+}
+
+/** One line of a transcript into `fold` (`commitEvidenceFromText`'s loop body). */
+export function commitFoldLine(
+  fold: CommitFold,
+  line: string,
+  file: string,
+): void {
+  const {bashCalls, confirmations, results} = fold;
+  const isUse = line.includes('"tool_use"') && line.includes('"Bash"');
+  const isResult = line.includes('"tool_result"');
+  if (!isUse && !isResult) return;
+  let record: unknown;
+  if (isResult && !isUse) {
+    // Parse a result only when it answers a Bash call that commits, or its
+    // raw text carries a confirmation line.
+    const ids = [...line.matchAll(/"tool_use_id":"([^"]+)"/g)].map(
+      (match) => match[1] ?? '',
+    );
+    const wanted = ids.some(
+      (id) =>
+        bashCalls.get(id)?.isCommit === true ||
+        (bashCalls.has(id) && CONFIRMATION_IN_RAW.test(line)),
+    );
+    if (!wanted) return;
+  }
+  try {
+    record = JSON.parse(line);
+  } catch {
+    fold.unparsedLines += 1;
+    return;
+  }
+  const at = stringField(record, 'timestamp');
+  for (const block of contentBlocks(record)) {
+    if (block == null || typeof block !== 'object') continue;
+    const entry = block as Record<string, unknown>;
+    if (entry.type === 'tool_use' && entry.name === 'Bash') {
+      const id = stringField(entry, 'id');
+      const command = stringField(entry.input, 'command');
+      if (id == null || command == null) continue;
+      // home-base-j8q3e.1.4 (F1): Claude Code also writes an
+      // `api-request-blob` record that repeats an assistant message, its
+      // tool_use blocks included, with NO timestamp (measured 2026-10-15:
+      // 19 of 21 undated commit calls in session f7cb268b). The same id seen
+      // twice keeps the first time either record carries; a call that no
+      // record dates stays undated, so the count is still refused (rule 7).
+      bashCalls.set(id, {
+        command,
+        isCommit: isGitCommitCommand(command),
+        startedAt: bashCalls.get(id)?.startedAt ?? at,
+      });
+    } else if (entry.type === 'tool_result') {
+      const id = stringField(entry, 'tool_use_id');
+      if (id == null || !bashCalls.has(id)) continue;
+      results.set(id, at);
+      confirmations.push(...confirmationsIn(textOfResult(entry.content), file));
+    }
+  }
+}
+
+/** The evidence `fold` holds. Reads `fold`, never changes it. */
+export function finishCommitFold(
+  fold: CommitFold,
+  file: string,
+): Omit<CommitEvidence, 'files'> {
+  const calls: CommitCall[] = [];
+  for (const [id, call] of fold.bashCalls) {
+    if (!call.isCommit) continue;
+    calls.push({
+      command: call.command,
+      endedAt: fold.results.get(id) ?? null,
+      file,
+      startedAt: call.startedAt,
+    });
+  }
+  return {
+    calls,
+    confirmations: [...fold.confirmations],
+    unparsedLines: fold.unparsedLines,
+  };
+}
+
+/**
  * The commit evidence in one transcript file's text. Pure: the table tests
  * drive it with literal JSONL.
  *
@@ -226,77 +334,9 @@ export function commitEvidenceFromText(
   text: string,
   file: string,
 ): Omit<CommitEvidence, 'files'> {
-  const bashCalls = new Map<
-    string,
-    {command: string; isCommit: boolean; startedAt: string | null}
-  >();
-  const confirmations: CommitConfirmation[] = [];
-  const results = new Map<string, string | null>();
-  let unparsedLines = 0;
-  for (const line of text.split('\n')) {
-    const isUse = line.includes('"tool_use"') && line.includes('"Bash"');
-    const isResult = line.includes('"tool_result"');
-    if (!isUse && !isResult) continue;
-    let record: unknown;
-    if (isResult && !isUse) {
-      // Parse a result only when it answers a Bash call that commits, or its
-      // raw text carries a confirmation line.
-      const ids = [...line.matchAll(/"tool_use_id":"([^"]+)"/g)].map(
-        (match) => match[1] ?? '',
-      );
-      const wanted = ids.some(
-        (id) =>
-          bashCalls.get(id)?.isCommit === true ||
-          (bashCalls.has(id) && CONFIRMATION_IN_RAW.test(line)),
-      );
-      if (!wanted) continue;
-    }
-    try {
-      record = JSON.parse(line);
-    } catch {
-      unparsedLines += 1;
-      continue;
-    }
-    const at = stringField(record, 'timestamp');
-    for (const block of contentBlocks(record)) {
-      if (block == null || typeof block !== 'object') continue;
-      const entry = block as Record<string, unknown>;
-      if (entry.type === 'tool_use' && entry.name === 'Bash') {
-        const id = stringField(entry, 'id');
-        const command = stringField(entry.input, 'command');
-        if (id == null || command == null) continue;
-        // home-base-j8q3e.1.4 (F1): Claude Code also writes an
-        // `api-request-blob` record that repeats an assistant message, its
-        // tool_use blocks included, with NO timestamp (measured 2026-10-15:
-        // 19 of 21 undated commit calls in session f7cb268b). The same id seen
-        // twice keeps the first time either record carries; a call that no
-        // record dates stays undated, so the count is still refused (rule 7).
-        bashCalls.set(id, {
-          command,
-          isCommit: isGitCommitCommand(command),
-          startedAt: bashCalls.get(id)?.startedAt ?? at,
-        });
-      } else if (entry.type === 'tool_result') {
-        const id = stringField(entry, 'tool_use_id');
-        if (id == null || !bashCalls.has(id)) continue;
-        results.set(id, at);
-        confirmations.push(
-          ...confirmationsIn(textOfResult(entry.content), file),
-        );
-      }
-    }
-  }
-  const calls: CommitCall[] = [];
-  for (const [id, call] of bashCalls) {
-    if (!call.isCommit) continue;
-    calls.push({
-      command: call.command,
-      endedAt: results.get(id) ?? null,
-      file,
-      startedAt: call.startedAt,
-    });
-  }
-  return {calls, confirmations, unparsedLines};
+  const fold = newCommitFold();
+  for (const line of text.split('\n')) commitFoldLine(fold, line, file);
+  return finishCommitFold(fold, file);
 }
 
 /** The subagent transcripts beside a session transcript (`<id>/subagents/agent-*.jsonl`). */
@@ -329,9 +369,18 @@ export function subagentTranscripts(
   }
 }
 
-/** Every file's evidence, or why one of them could not be read. */
+/**
+ * Every file's evidence, or why one of them could not be read.
+ *
+ * `cachedFile` (home-base-9uzxw.11) gives one file's evidence from the
+ * transcript cache, or null when the cache cannot; that file is then read here
+ * as before. The subagent listing is never cached, so a new subagent file is
+ * always seen.
+ */
 export function readCommitEvidence(
   transcriptPath: string,
+  cachedFile: (file: string) => Omit<CommitEvidence, 'files'> | null = () =>
+    null,
 ): {evidence: CommitEvidence; ok: true} | {ok: false; reason: string} {
   const subagents = subagentTranscripts(transcriptPath);
   if (!subagents.ok) return subagents;
@@ -343,16 +392,19 @@ export function readCommitEvidence(
     unparsedLines: 0,
   };
   for (const file of files) {
-    let text: string;
-    try {
-      text = readFileSync(file, 'utf8');
-    } catch (error) {
-      return {
-        ok: false,
-        reason: `could not read ${file}: ${error instanceof Error ? error.message : String(error)}`,
-      };
+    let one = cachedFile(file);
+    if (one == null) {
+      let text: string;
+      try {
+        text = readFileSync(file, 'utf8');
+      } catch (error) {
+        return {
+          ok: false,
+          reason: `could not read ${file}: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      one = commitEvidenceFromText(text, file);
     }
-    const one = commitEvidenceFromText(text, file);
     evidence.calls.push(...one.calls);
     evidence.confirmations.push(...one.confirmations);
     evidence.unparsedLines += one.unparsedLines;

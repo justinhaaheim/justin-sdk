@@ -575,9 +575,12 @@ describe('D9: thread spawn', () => {
       name: '[HOME] H? x',
       remoteControl: false,
     };
-    expect(spawnCommand(base)).toBe(`claude --name '[HOME] H? x'`);
+    // home-base-v8z8d.3: every spawned session starts in auto mode.
+    expect(spawnCommand(base)).toBe(
+      `claude --permission-mode auto --name '[HOME] H? x'`,
+    );
     expect(spawnCommand({...base, remoteControl: true})).toBe(
-      `claude --remote-control '[HOME] H? x' --name '[HOME] H? x'`,
+      `claude --permission-mode auto --remote-control '[HOME] H? x' --name '[HOME] H? x'`,
     );
   });
 });

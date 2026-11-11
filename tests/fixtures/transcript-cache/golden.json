@@ -1,0 +1,253 @@
+{
+  "facts": {
+    "tracked.jsonl": {
+      "commits": {
+        "calls": [
+          {
+            "command": "git commit -qm 'notes [TEST_DATA_DELETABLE 9b0eb49b-f4dd-43f5-93e5-f6e6f3de4ef9 ]'",
+            "endedAt": "2030-01-01T09:10:01.000Z",
+            "file": "/fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001.jsonl",
+            "startedAt": "2030-01-01T09:09:59.000Z"
+          }
+        ],
+        "confirmations": [
+          {
+            "file": "/fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001.jsonl",
+            "shortSha": "abc1234",
+            "subject": "notes"
+          }
+        ],
+        "unparsedLines": 0
+      },
+      "helper": null,
+      "main": {
+        "contextTokens": 3012,
+        "lastRecord": {
+          "at": "2030-01-01T09:20:00.000Z",
+          "kind": "found"
+        }
+      },
+      "messages": {
+        "cwd": "/fixture/Dev/notes",
+        "entrypoint": "cli",
+        "failures": [],
+        "firstCwd": "/fixture/Dev/notes",
+        "firstTimestamp": "2030-01-01T09:00:00.000Z",
+        "firstUserMessage": "Build the release notes [TEST_DATA_DELETABLE 9b0eb49b-f4dd-43f5-93e5-f6e6f3de4ef9 ]",
+        "firstUserMessageAt": "2030-01-01T09:00:00.000Z",
+        "gitBranch": "main",
+        "lastAssistantMessage": "The notes are drafted and committed.",
+        "lastAssistantMessageAt": "2030-01-01T09:20:00.000Z",
+        "lastTimestamp": "2030-01-01T09:20:01.000Z",
+        "lastUserMessage": "Build the release notes [TEST_DATA_DELETABLE 9b0eb49b-f4dd-43f5-93e5-f6e6f3de4ef9 ]",
+        "lastUserMessageAt": "2030-01-01T09:00:00.000Z",
+        "model": "claude-test",
+        "resumeCommand": "cd '/fixture/Dev/notes' && claude --resume 9b0eb49b-0000-4000-8000-00000000c001",
+        "resumeCwd": "/fixture/Dev/notes",
+        "resumeCwdSource": "lastCwd",
+        "sessionId": "9b0eb49b-0000-4000-8000-00000000c001",
+        "transcriptPath": "/fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001.jsonl"
+      },
+      "writes": {
+        "commands": [
+          {
+            "command": "git commit -qm 'notes [TEST_DATA_DELETABLE 9b0eb49b-f4dd-43f5-93e5-f6e6f3de4ef9 ]'",
+            "file": "/fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001.jsonl",
+            "writtenAt": "2030-01-01T09:09:59.000Z"
+          }
+        ],
+        "paths": [
+          {
+            "file": "/fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001.jsonl",
+            "path": "/fixture/Dev/notes/notes.md",
+            "writtenAt": "2030-01-01T09:11:00.000Z"
+          }
+        ],
+        "unparsedLines": 0
+      }
+    },
+    "tracked.agent-p1.jsonl": {
+      "commits": {
+        "calls": [],
+        "confirmations": [],
+        "unparsedLines": 0
+      },
+      "helper": {
+        "at": "2030-01-01T09:14:00.000Z",
+        "kind": "found",
+        "tail": "textEnded",
+        "openShells": ["bash_1"]
+      },
+      "main": null,
+      "messages": {
+        "cwd": null,
+        "entrypoint": null,
+        "failures": [
+          "firstUserMessage: no human-authored user record found in /fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001/subagents/agent-p1.jsonl",
+          "lastUserMessage: no human-authored user record found in /fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001/subagents/agent-p1.jsonl",
+          "lastAssistantMessage: no assistant record with text found in /fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001/subagents/agent-p1.jsonl",
+          "resumeCommand: no session id in the transcript"
+        ],
+        "firstCwd": null,
+        "firstTimestamp": null,
+        "firstUserMessage": null,
+        "firstUserMessageAt": null,
+        "gitBranch": null,
+        "lastAssistantMessage": null,
+        "lastAssistantMessageAt": null,
+        "lastTimestamp": null,
+        "lastUserMessage": null,
+        "lastUserMessageAt": null,
+        "model": null,
+        "resumeCommand": null,
+        "resumeCwd": null,
+        "resumeCwdSource": null,
+        "sessionId": null,
+        "transcriptPath": "/fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001/subagents/agent-p1.jsonl"
+      },
+      "writes": {
+        "commands": [
+          {
+            "command": "sleep 600",
+            "file": "/fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001/subagents/agent-p1.jsonl",
+            "writtenAt": "2030-01-01T09:13:00.000Z"
+          }
+        ],
+        "paths": [],
+        "unparsedLines": 0
+      }
+    },
+    "tracked.agent-p2.jsonl": {
+      "commits": {
+        "calls": [],
+        "confirmations": [],
+        "unparsedLines": 0
+      },
+      "helper": {
+        "at": "2030-01-01T09:16:01.000Z",
+        "kind": "found",
+        "tail": "finished",
+        "openShells": null
+      },
+      "main": null,
+      "messages": {
+        "cwd": null,
+        "entrypoint": null,
+        "failures": [
+          "firstUserMessage: no human-authored user record found in /fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001/subagents/agent-p2.jsonl",
+          "lastUserMessage: no human-authored user record found in /fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001/subagents/agent-p2.jsonl",
+          "lastAssistantMessage: no assistant record with text found in /fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001/subagents/agent-p2.jsonl",
+          "resumeCommand: no session id in the transcript"
+        ],
+        "firstCwd": null,
+        "firstTimestamp": null,
+        "firstUserMessage": null,
+        "firstUserMessageAt": null,
+        "gitBranch": null,
+        "lastAssistantMessage": null,
+        "lastAssistantMessageAt": null,
+        "lastTimestamp": null,
+        "lastUserMessage": null,
+        "lastUserMessageAt": null,
+        "model": null,
+        "resumeCommand": null,
+        "resumeCwd": null,
+        "resumeCwdSource": null,
+        "sessionId": null,
+        "transcriptPath": "/fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c001/subagents/agent-p2.jsonl"
+      },
+      "writes": {
+        "commands": [],
+        "paths": [],
+        "unparsedLines": 0
+      }
+    },
+    "untracked.jsonl": {
+      "commits": {
+        "calls": [],
+        "confirmations": [],
+        "unparsedLines": 0
+      },
+      "helper": null,
+      "main": {
+        "contextTokens": 4020,
+        "lastRecord": {
+          "at": "2030-01-01T09:31:00.000Z",
+          "kind": "found"
+        }
+      },
+      "messages": {
+        "cwd": "/fixture/Dev/notes",
+        "entrypoint": "cli",
+        "failures": [],
+        "firstCwd": "/fixture/Dev/notes",
+        "firstTimestamp": "2030-01-01T09:30:00.000Z",
+        "firstUserMessage": "What does the importer do?",
+        "firstUserMessageAt": "2030-01-01T09:30:00.000Z",
+        "gitBranch": "main",
+        "lastAssistantMessage": "It reads rows. [TEST_DATA_DELETABLE 9b0eb49b-f4dd-43f5-93e5-f6e6f3de4ef9 ]",
+        "lastAssistantMessageAt": "2030-01-01T09:31:00.000Z",
+        "lastTimestamp": "2030-01-01T09:31:00.000Z",
+        "lastUserMessage": "What does the importer do?",
+        "lastUserMessageAt": "2030-01-01T09:30:00.000Z",
+        "model": "claude-test",
+        "resumeCommand": "cd '/fixture/Dev/notes' && claude --resume 9b0eb49b-0000-4000-8000-00000000c002",
+        "resumeCwd": "/fixture/Dev/notes",
+        "resumeCwdSource": "lastCwd",
+        "sessionId": "9b0eb49b-0000-4000-8000-00000000c002",
+        "transcriptPath": "/fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c002.jsonl"
+      },
+      "writes": {
+        "commands": [],
+        "paths": [],
+        "unparsedLines": 0
+      }
+    },
+    "untracked.agent-u1.jsonl": {
+      "commits": {
+        "calls": [],
+        "confirmations": [],
+        "unparsedLines": 0
+      },
+      "helper": {
+        "at": "2030-01-01T09:33:00.000Z",
+        "kind": "found",
+        "tail": "inFlight",
+        "openShells": null
+      },
+      "main": null,
+      "messages": {
+        "cwd": null,
+        "entrypoint": null,
+        "failures": [
+          "firstUserMessage: no human-authored user record found in /fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c002/subagents/agent-u1.jsonl",
+          "lastUserMessage: no human-authored user record found in /fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c002/subagents/agent-u1.jsonl",
+          "lastAssistantMessage: no assistant record with text found in /fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c002/subagents/agent-u1.jsonl",
+          "resumeCommand: no session id in the transcript"
+        ],
+        "firstCwd": null,
+        "firstTimestamp": null,
+        "firstUserMessage": null,
+        "firstUserMessageAt": null,
+        "gitBranch": null,
+        "lastAssistantMessage": null,
+        "lastAssistantMessageAt": null,
+        "lastTimestamp": null,
+        "lastUserMessage": null,
+        "lastUserMessageAt": null,
+        "model": null,
+        "resumeCommand": null,
+        "resumeCwd": null,
+        "resumeCwdSource": null,
+        "sessionId": null,
+        "transcriptPath": "/fixture/projects/-fixture-Dev-notes/9b0eb49b-0000-4000-8000-00000000c002/subagents/agent-u1.jsonl"
+      },
+      "writes": {
+        "commands": [],
+        "paths": [],
+        "unparsedLines": 0
+      }
+    }
+  },
+  "version": 1
+}

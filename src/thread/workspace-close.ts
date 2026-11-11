@@ -58,6 +58,13 @@ export interface StopAndCloseFailure {
   step: StopAndCloseStep;
 }
 
+/** stopThenCloseSurface's failure: the stop steps, then `close-surface`. */
+export interface StopAndCloseSurfaceFailure {
+  reason: string;
+  /** stopProcesses never yields 'close-workspace'; its type just allows it. */
+  step: StopAndCloseStep | 'close-surface';
+}
+
 export const STOP_POLL_MS = 250;
 
 function cut(text: string, max: number): string {
@@ -153,6 +160,32 @@ export async function stopThenCloseWorkspace(
     : {
         reason: `close-workspace failed after Claude exited (the session stays resumable): ${closed}`,
         step: 'close-workspace',
+      };
+}
+
+/**
+ * Stop, wait, close ONE TAB (home-base-v8z8d.2.1, `thread close --tab`): the
+ * same stop half, then the caller's close of that one cmux surface. The
+ * workspace and its other tabs are never touched here.
+ */
+export async function stopThenCloseSurface(
+  procs: readonly ProcessToStop[],
+  deps: StopDeps & {
+    /** Close the one surface: null when closed, else why not. */
+    closeSurface: () => Promise<string | null>;
+  },
+): Promise<StopAndCloseSurfaceFailure | null> {
+  const stopped = await stopProcesses(procs, {
+    ...deps,
+    leftAs: deps.leftAs ?? 'the tab was left open',
+  });
+  if (stopped != null) return stopped;
+  const closed = await deps.closeSurface();
+  return closed == null
+    ? null
+    : {
+        reason: `close-surface failed after Claude exited (the session stays resumable): ${closed}`,
+        step: 'close-surface',
       };
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.57.0",
+  "version": "0.58.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -9,6 +9,7 @@
   "scripts": {
     "test": "bun test",
     "test:watch": "bun test --watch",
+    "test:transcript-cache:golden": "bun scripts/transcript-cache-golden.ts",
     "e2e:justin-loop": "bun scripts/e2e-justin-loop.ts",
     "e2e:thread-answer-web": "bun scripts/e2e-thread-answer-web.ts",
     "live:handoff": "bun scripts/live-handoff.ts",
@@ -33,7 +34,8 @@
     "probe:capture-entrypoint": "bun scripts/probe-capture-entrypoint.ts",
     "probe:capture-live": "bun scripts/probe-capture-live.ts",
     "tmp:restore-threads-k0b8n19": "bun scripts/restore-thread-records.ts th-fs3 th-ttp th-mq0 --from 1b912a6~1 --damaged-at 1b912a6",
-    "tmp:migrate-ask-parents": "bun scripts/migrate-ask-parents.ts"
+    "tmp:migrate-ask-parents": "bun scripts/migrate-ask-parents.ts",
+    "test:transcript-fold:replay": "bun scripts/replay-transcript-fold.ts"
   },
   "exports": {
     "./check-runner": "./src/check-runner.ts",

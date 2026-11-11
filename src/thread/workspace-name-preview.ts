@@ -30,7 +30,6 @@ import {
 } from '../cli-style';
 import {readCmuxTree, readWindowWorkspaces} from './cmux';
 import {AUTO_TITLE_LABEL} from './session-bead';
-import {sessionDisplayName} from './session-name';
 import {
   confirmedPredecessor,
   decideWorkspaceName,
@@ -41,6 +40,7 @@ import {
   resolveWorkspace,
   RULE_WORDS,
   unchangedWords,
+  workspaceToolPart,
 } from './workspace-name';
 
 /** One session bead, as the dashboard's session model knows it. */
@@ -128,7 +128,8 @@ function verdictFor(
     current,
     records,
     self: {beadId: namer.beadId, handedOffFrom, surfaceIdsHere},
-    toolPart: sessionDisplayName(namer.repoTag, namer.title),
+    // home-base-idnon: the same tool part the real sync writes, marks included.
+    toolPart: workspaceToolPart(namer),
   });
   if (decision.kind === 'rename') {
     return {

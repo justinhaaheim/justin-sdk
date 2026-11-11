@@ -82,7 +82,7 @@ const RESPAWN_RETIRED_SUMMARY =
   'RETIRED (epic home-base-mbnjv C3): starting a successor is now `thread handoff` with componentConfig.thread.handoff.successor on. This command prints that and exits 2, doing nothing.';
 
 const SPAWN_SUMMARY =
-  'Start a new Claude Code session in a directory you name: open a new cmux workspace there running `claude`, with Remote Control when you pass --remote-control, so you can reach it from the Claude app on your phone (home-base-yukaf.7). ONLY THE HOME-BASE MAYOR STARTS SESSIONS IN OTHER PROJECTS: it refuses (exit 2, nothing opened, --dry-run included) unless componentConfig.thread.spawn.allowed is true in the repo it runs in, which only home-base turns on; anywhere else, file the work as a bead and tell Justin (home-base-11ya7.9). Try --dry-run first. With componentConfig.thread.handoff.successor on in the repo it runs in, the handoff gate runs first (kill switch, cmux, usage, live sessions). Exit 0 opened, and claude was seen running in it, or a dry run · 1 failed: cmux did not confirm a workspace, or a workspace opened and claude was not seen running in it, so do not run it again (see EXIT CODES) · 2 refused, nothing opened · 3 refused by the handoff gate, nothing opened · 4 deferred: cmux was too slow to decide, nothing opened, so run the same command again.';
+  'Start a new Claude Code session in a directory you name: open a new cmux workspace there running `claude`, always in auto mode (home-base-v8z8d.3), with Remote Control when you pass --remote-control, so you can reach it from the Claude app on your phone (home-base-yukaf.7). ONLY THE HOME-BASE MAYOR STARTS SESSIONS IN OTHER PROJECTS: it refuses (exit 2, nothing opened, --dry-run included) unless componentConfig.thread.spawn.allowed is true in the repo it runs in, which only home-base turns on; anywhere else, file the work as a bead and tell Justin (home-base-11ya7.9). Try --dry-run first. With componentConfig.thread.handoff.successor on in the repo it runs in, the handoff gate runs first (kill switch, cmux, usage, live sessions). Exit 0 opened, and claude was seen running in it, or a dry run · 1 failed: cmux did not confirm a workspace, or a workspace opened and claude was not seen running in it, so do not run it again (see EXIT CODES) · 2 refused, nothing opened · 3 refused by the handoff gate, nothing opened · 4 deferred: cmux was too slow to decide, nothing opened, so run the same command again.';
 
 const SPAWN_NARRATIVE = `
 WHAT IT DOES, in order.
@@ -93,7 +93,7 @@ WHAT IT DOES, in order.
   3. Refuses (exit 2, nothing written or opened, --dry-run included) when the command it would type is 1,000 bytes or more: a typed line is cut at 1,024 bytes (measured 2026-11-03), and a cut command never runs. The kickoff does not count toward that, because it is never typed.
   4. Refuses (exit 2) when cmux cannot be reached, and prints the sandbox setting that allows it (see SANDBOX HINT).
   5. With --kickoff or --kickoff-file, writes the kickoff to a file, $XDG_STATE_HOME/justin-sdk/spawn-kickoffs/<stamp>-<random>.md (default ~/.local/state/…), after cmux answered. The file is kept as the record of what the session was asked.
-  6. Opens a new cmux workspace in the directory, without switching to it, running \`claude [--model <m>] [--remote-control '<workspace name>'] --name '<workspace name>' ["$(command cat -- <kickoff file>)"]\`. With a kickoff the session starts on it, byte for byte, with no keystroke; without one it opens on an empty prompt.
+  6. Opens a new cmux workspace in the directory, without switching to it, running \`claude --permission-mode auto [--model <m>] [--remote-control '<workspace name>'] --name '<workspace name>' ["$(command cat -- <kickoff file>)"]\`. With a kickoff the session starts on it, byte for byte, with no keystroke; without one it opens on an empty prompt. Every spawned session starts in auto mode, whatever the repo's own settings say, like a handoff's successor; nothing turns it off (home-base-v8z8d.3).
   7. Finds the new workspace's tab (cmux tree, read only) and reads its screen for up to 20 s, the same check thread handoff makes of its successor (home-base-edf4y). Claude Code's input box with no dialog means claude started. A dialog, such as a folder-trust prompt, is reported with the screen and never answered: nothing is typed and no key is sent.
   8. Prints the workspace, its cmux id, the directory, the command and its size, the kickoff file, and that claude's input box was seen. With --remote-control it also says how to open the session from your phone.
 
@@ -207,6 +207,20 @@ THE RECORD. Before the first Claude process is stopped, one line per workspace t
 CLOSING. Right before its turn, each workspace is checked again; if anything changed, it is kept. Then its Claude process is stopped (SIGTERM, up to 15 seconds to exit, never SIGKILL; the session stays resumable), and only then is the workspace closed. A window closes with its last workspace, and the output says so.
 
 NEVER CLOSED. The workspace this command runs in (CMUX_WORKSPACE_ID): naming it refuses the whole run, and nothing is touched. A --session that no live Claude process holds, that runs outside cmux, or that shows in more than one workspace refuses the run too. A workspace that is not open is listed under "Not found"; the others still go ahead.
+
+TABS (--tab, home-base-v8z8d.2.1). A handed-off session and its successor usually share one workspace as two tabs, and a workspace holding two sessions is always kept whole. --tab closes only the one tab holding each named session, with close-surface --surface <uuid> --workspace <uuid>, and never close-workspace while the workspace holds other tabs. Before anything is signalled, all of these must hold, or the session is kept with the reason printed:
+
+  1. Exactly one live workspace holds the session, and exactly one claude process names it, on its command line or in the cmux hook store.
+
+  2. That process's terminal is on exactly one tab, in that workspace; no other tab reports the same terminal. (A bead's cmux-surface label is never trusted: after a /clear or a resume that tab may hold another session.)
+
+  3. That tab passes checks 1 to 4 above, its ⌗ line shows the requested session, and its claude process is the one that names it. The workspace's other tabs are only read, to prove none shows the session too; they are not checked, signalled or closed.
+
+  4. Both ids are uuids. A missing or malformed surface or workspace id keeps the session, since cmux's own --surface is optional.
+
+  When the session's tab is the only tab in its workspace, the whole-workspace checks run and the workspace closes, and the output says so. The record, the re-check right before each close, SIGTERM only with 15 s to exit, and the kept-open tab when Claude does not exit are as above. A session no live process holds is listed under "Not found", and the command's own tab (CMUX_SURFACE_ID) is kept, as is the only tab of the command's own workspace (CMUX_WORKSPACE_ID); none of these refuses the run. Run inside a cmux workspace (CMUX_WORKSPACE_ID set) without CMUX_SURFACE_ID, --tab cannot tell its own tab apart, so it refuses the run and touches nothing.
+
+HANDED OFF (--handed-off). Reads the session beads of the repo it runs in that carry the handed-off label, closed beads included, and selects each whose bead also has a continued-by: label (a successor picked it up), names exactly one session (sid:), and whose session a live Claude process holds. Each is added as if named with --session, and every check still applies. The selection is printed, with each bead id, title and successor bead, and why the others were not selected. Use it with --tab: without --tab, each selected session's whole workspace is the target, as with --session.
 
 LIMITS (measured 2026-10-22 on Claude Code 2.1.308, and read in its code back to 2.1.289):
   - The screen is read as plain text, without colours. Claude Code can draw a suggested next prompt, dimmed, in an EMPTY input box after a turn ("❯ push main"); pressing Enter on it sends nothing. On screen it looks exactly like typed text. Check 1 tells them apart only by the line under the box: while nothing is typed, Claude Code ends it with "← N agents", and drops it as soon as anything is typed. A box whose text has that line under it passes check 1, and nothing is stored for it.
@@ -1275,7 +1289,7 @@ export const threadCommand: CommandModule = {
         (yy) =>
           yy
             .usage(
-              `${helpHeader('justin-sdk', dirname(import.meta.dirname))}\n\n$0 thread close <workspace…> [--session <id>…] [--dry-run] [--json]\n\n${CLOSE_SUMMARY}`,
+              `${helpHeader('justin-sdk', dirname(import.meta.dirname))}\n\n$0 thread close <workspace…> [--session <id>…] [--dry-run] [--json]\n$0 thread close --tab (--session <id>… | --handed-off) [--dry-run] [--json]\n\n${CLOSE_SUMMARY}`,
             )
             .epilogue(CLOSE_NARRATIVE)
             .positional('workspaces', {
@@ -1289,6 +1303,18 @@ export const threadCommand: CommandModule = {
                 'Close the workspace that holds this Claude session (repeat for several); refused when no live process holds it or it shows in more than one workspace',
               string: true,
               type: 'array' as const,
+            })
+            .option('tab', {
+              default: false,
+              describe:
+                'Close only the tab (cmux surface) holding each --session or --handed-off session, with close-surface; its workspace and other tabs stay open and are not signalled. The only tab in its workspace closes the workspace (see TABS). Takes no workspaces',
+              type: 'boolean' as const,
+            })
+            .option('handed-off', {
+              default: false,
+              describe:
+                'Add every live session whose session bead (in this repo) has the handed-off label and a continued-by: label, as if each were named with --session; the selection is printed. A handed-off session no successor picked up is not selected',
+              type: 'boolean' as const,
             })
             .option('dry-run', {
               default: false,
@@ -1307,8 +1333,10 @@ export const threadCommand: CommandModule = {
           process.exit(
             await runThreadClose({
               dryRun: argv['dry-run'] === true,
+              handedOff: argv['handed-off'] === true,
               json: argv.json === true,
               sessions: (argv.session ?? []).map(String),
+              tab: argv.tab === true,
               workspaces: (Array.isArray(given)
                 ? given
                 : given == null

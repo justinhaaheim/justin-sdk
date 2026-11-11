@@ -70,6 +70,7 @@ import {
   pickupState,
 } from './handoff-auto-pickup';
 import {realChainReaders, walkUnattendedChain} from './handoff-chain';
+import {walkedSessionMarks} from './handoff-marks';
 import {
   chainLines,
   type ChainViewReaders,
@@ -95,6 +96,7 @@ import {threadsBeadsDir} from './paths';
 import {findRelatedEpics, renderRelatedEpics} from './related-epics';
 import {deriveAction, optionalLine} from './session-card';
 import {loadCreatedBeads} from './session-created';
+import {realHandoffNumberReaders} from './session-handoff';
 import {readSessionIndex, sessionBeadSighting} from './session-index';
 import {
   lastAssistantLine,
@@ -102,7 +104,7 @@ import {
   resolveSessionId,
   userLines,
 } from './session-model';
-import {SESSION_NAME_LIMIT} from './session-name';
+import {NO_MARKS, SESSION_NAME_LIMIT, type SessionMarks} from './session-name';
 import {repairMissingSessionBead, repairRefusalNote} from './session-repair';
 import {sessionIdFrom} from './session-select';
 import {
@@ -186,6 +188,11 @@ export type ReportLoad =
        */
       handoffSuccessor: boolean;
       kind: 'loaded';
+      /**
+       * home-base-idnon: the mayor mark and handoff number for the status
+       * block's Session line, the number walked when no label holds it.
+       */
+      marks: SessionMarks;
       model: SessionModel;
       /** The dashboard's "Optional" line, null when no P1–P4 is open. */
       optional: OptionalLine | null;
@@ -361,6 +368,16 @@ async function loadForReport(input: {
     created,
     handoffSuccessor: knob.handoffSuccessor,
     kind: 'loaded',
+    marks:
+      model.beads.session == null
+        ? NO_MARKS
+        : walkedSessionMarks(
+            model.beads.session,
+            realHandoffNumberReaders({
+              env: input.env,
+              fallbackDbs: [join(model.beads.session.beadsDir, 'beads.db')],
+            }),
+          ),
     model,
     optional: optionalLine(counts, model.sessionBeadId),
     overarching: knob.titleSummary ? overarchingFactsOf(model, input) : null,
@@ -852,6 +869,7 @@ function statusPartOneView(
   return partOneView({
     action: load.action,
     counts: load.counts,
+    marks: load.marks,
     model: load.model,
     now: options.now,
     optional: load.optional,
@@ -1124,6 +1142,7 @@ export function renderSessionShow(
     partOneView({
       action: load.action,
       counts: load.counts,
+      marks: load.marks,
       model,
       now,
       optional: load.optional,

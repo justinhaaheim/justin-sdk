@@ -44,6 +44,7 @@ import {
 import {dirname} from 'path';
 
 import {messageLogPath} from './archive';
+import {createFileMemo} from './file-memo';
 import {probeErrorMessage} from './paths';
 import {extractTranscriptTurns, stripHarnessNoise} from './transcript-messages';
 
@@ -166,7 +167,15 @@ export function parseMessageLine(raw: string): MessageLine | null {
 export type MessageLogRead =
   | {kind: 'missing'; path: string}
   | {error: string; kind: 'failed'; path: string}
-  | {failures: string[]; kind: 'read'; lines: MessageLine[]; path: string};
+  | {
+      // Read-only: a memoized read is frozen and shared by every caller
+      // (messageLogMemo below), so the compiler refuses a mutation the
+      // freeze would only catch at run time (home-base-hg6lz.4 F1).
+      failures: readonly string[];
+      kind: 'read';
+      lines: readonly Readonly<MessageLine>[];
+      path: string;
+    };
 
 function errorCode(error: unknown): string {
   return error != null && typeof error === 'object' && 'code' in error
@@ -207,7 +216,30 @@ function parseLogText(
   };
 }
 
+/**
+ * home-base-9uzxw.12: each log, parsed once and kept in memory until the file
+ * changes (file-memo.ts). An inbox load read every session's log twice, and
+ * the --web server loads every 10 s. The value is frozen, because every
+ * caller shares it.
+ */
+const messageLogMemo = createFileMemo<MessageLogRead>();
+
+function frozenRead(path: string, bytes: Buffer): MessageLogRead {
+  const parsed = parseLogText(bytes.toString('utf8'), path);
+  for (const line of parsed.lines) Object.freeze(line);
+  return Object.freeze({
+    failures: Object.freeze(parsed.failures),
+    kind: 'read',
+    lines: Object.freeze(parsed.lines),
+    path,
+  });
+}
+
 export function readMessageLogAt(path: string): MessageLogRead {
+  const memoized = messageLogMemo.read(path, (bytes) =>
+    frozenRead(path, bytes),
+  );
+  if (memoized != null) return memoized;
   let text: string;
   try {
     text = readFileSync(path, 'utf8');
@@ -366,6 +398,40 @@ export function readLastAssistantLine(
     .reverse()
     .find((line) => line.role === 'assistant');
   return last == null ? {kind: 'none'} : {kind: 'found', line: last};
+}
+
+/**
+ * `readLastAssistantLine` over a whole log's bytes: the newest line whose role
+ * is assistant. The window walk above finds that same line, because its
+ * window is a suffix of the log and it reads the whole log when the window
+ * holds none. Frozen: the memo below shares it between callers.
+ */
+function lastAssistantOfBytes(bytes: Buffer): LastAssistantRead {
+  const lines = bytes.toString('utf8').split('\n');
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const raw = lines[index] ?? '';
+    if (raw.trim() === '') continue;
+    const parsed = parseMessageLine(raw);
+    if (parsed?.role === 'assistant') {
+      return {kind: 'found', line: Object.freeze(parsed)};
+    }
+  }
+  return {kind: 'none'};
+}
+
+const lastAssistantMemo = createFileMemo<LastAssistantRead>();
+
+/**
+ * home-base-9uzxw.16: `readLastAssistantLine`, kept in memory until the log
+ * changes (file-memo.ts). The inbox asks it for every untracked session on
+ * every load (41 tail reads, 0.9 MiB, per --web refresh, traced 2026-11-11).
+ * When the memo cannot answer, the log is read as before.
+ */
+export function readLastAssistantLineMemoized(path: string): LastAssistantRead {
+  return (
+    lastAssistantMemo.read(path, lastAssistantOfBytes) ??
+    readLastAssistantLine(path)
+  );
 }
 
 // ---------------------------------------------------------------------------

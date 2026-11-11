@@ -262,14 +262,24 @@ export function createDashboardServer(
     };
   });
 
-  // A state read already in flight is shared by the /api/state calls that
-  // arrive meanwhile. Actions never share it: each re-reads after it starts.
-  let inflight: Promise<InboxLoad> | null = null;
-  const stateLoad = (): Promise<InboxLoad> => {
-    inflight ??= safeLoad(options.loadInbox).finally(() => {
-      inflight = null;
+  // home-base-9uzxw.11: never two inbox loads at once. A page load or a
+  // /api/state call shares the load already running, whoever started it. An
+  // action never shares a load that started before it (its check is against
+  // the inbox as it is now): it waits for the running load to finish, then
+  // starts its own, which later state calls share.
+  let running: Promise<InboxLoad> | null = null;
+  const startLoad = (): Promise<InboxLoad> => {
+    const load: Promise<InboxLoad> = safeLoad(options.loadInbox).finally(() => {
+      if (running === load) running = null;
     });
-    return inflight;
+    running = load;
+    return load;
+  };
+  const stateLoad = (): Promise<InboxLoad> => running ?? startLoad();
+  const freshLoad = async (): Promise<InboxLoad> => {
+    // safeLoad never rejects, so each wait ends when that load does.
+    while (running != null) await running;
+    return await startLoad();
   };
 
   // One action at a time, in the order they arrived.
@@ -358,7 +368,7 @@ export function createDashboardServer(
     }
 
     // Fresh, never the cache: the check is against the inbox as it is now.
-    const load = await safeLoad(options.loadInbox);
+    const load = await freshLoad();
     if (load.kind === 'failed') {
       return finish(
         500,
@@ -381,7 +391,11 @@ export function createDashboardServer(
         `Session ${sessionId} is not in the inbox any more (it may have moved out of the window). Nothing was run.`,
       );
     }
-    const name = sessionDisplayName(session.card.repoTag, session.card.title);
+    const name = sessionDisplayName(
+      session.card.repoTag,
+      session.card.title,
+      session.card.marks,
+    );
     if (session.sessionBeadId !== sessionBeadId) {
       return refuse(
         409,
@@ -570,6 +584,12 @@ export function createDashboardServer(
     },
     // 127.0.0.1, never 0.0.0.0: these buttons archive sessions.
     hostname: '127.0.0.1',
+    // home-base-9uzxw.13: never time a connection out. Bun's default (10 s)
+    // reset every request whose inbox load took longer, and a load takes 10
+    // to 18 s on a loaded Mac; an action can wait for a running load, then
+    // its own, then a command of up to DASHBOARD_COMMAND_TIMEOUT_MS. The
+    // server is local and every request ends when its load or command does.
+    idleTimeout: 0,
     port: options.port ?? 0,
   });
 
