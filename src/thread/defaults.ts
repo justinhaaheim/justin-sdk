@@ -268,6 +268,20 @@ export const HANDOFF_PERMISSION_MODES = [
 export type HandoffPermissionMode = (typeof HANDOFF_PERMISSION_MODES)[number];
 
 /**
+ * What a handoff does when its usage reading is unknown: no history, a failed
+ * newest sample, or one older than maxSampleAgeMinutes (home-base-2gi9h.7,
+ * Justin 2026-11-12). `allow` hands off anyway and says so in its output and
+ * on the session bead; `refuse` is the behaviour before that date. A known-high
+ * reading refuses either way, and so does a stale one whose week window was
+ * over its ceiling and has not reset since. `thread spawn` always refuses on
+ * unknown: it starts new work, where a handoff continues work already running.
+ */
+export const HANDOFF_USAGE_UNKNOWN_MODES = ['allow', 'refuse'] as const;
+
+export type HandoffUsageUnknownMode =
+  (typeof HANDOFF_USAGE_UNKNOWN_MODES)[number];
+
+/**
  * The handoff knob's defaults (C1). `successor: false` is the feature knob
  * (D10): off, `thread handoff` behaves exactly as it did before the epic.
  *
@@ -286,6 +300,7 @@ export const HANDOFF_DEFAULTS = {
     maxSampleAgeMinutes: 150,
     maxSessionPercent: 85,
     maxWeekPercent: 90,
+    onUnknown: 'allow' as HandoffUsageUnknownMode,
     paceHold: false,
   },
 } as const;

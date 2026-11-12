@@ -720,6 +720,15 @@ export async function handoffWithSuccessor(
             },
           ]
         : []),
+      // home-base-2gi9h.7: an unknown usage reading that passes says so.
+      ...(gate.kind === 'pass' && 'unknown' in gate.facts.usage
+        ? [
+            {
+              label: 'Usage',
+              value: `⚠️ unknown, and a real run would hand off anyway (usage.onUnknown is allow): ${gate.facts.usage.unknown}`,
+            },
+          ]
+        : []),
       {label: 'Session bead', value: session.bead.id},
       {label: 'Block file', value: blockPath},
       {label: 'Successor name', value: name},
@@ -1192,6 +1201,22 @@ export async function handoffWithSuccessor(
         value: `⚠️ kept: the watcher that would ${mode === 'exit' ? 'exit' : 'close'} it did not start: ${started.reason}${noted.kind === 'recorded' ? '' : ` (and not noted on ${session.bead.id}: ${noted.reason})`}`,
       });
     }
+  }
+  // home-base-2gi9h.7: an unknown usage reading passed only because
+  // usage.onUnknown is allow. Say so on screen and on the bead.
+  if ('unknown' in gate.facts.usage) {
+    const unknown = gate.facts.usage.unknown;
+    const noted = appendSessionNote({
+      beadId: session.bead.id,
+      db: session.db,
+      env,
+      now,
+      text: `usage unknown at handoff; handed off anyway because componentConfig.thread.handoff.usage.onUnknown is allow: ${unknown}`,
+    });
+    fields.push({
+      label: 'Usage',
+      value: `⚠️ unknown, handed off anyway (usage.onUnknown is allow): ${unknown}${noted.kind === 'recorded' ? '' : ` (not noted on ${session.bead.id}: ${noted.reason})`}`,
+    });
   }
   return {
     exitCode: 0,

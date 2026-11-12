@@ -22,8 +22,10 @@ import {
   HANDOFF_DEFAULTS,
   HANDOFF_PERMISSION_MODES,
   HANDOFF_PREDECESSOR_MODES,
+  HANDOFF_USAGE_UNKNOWN_MODES,
   type HandoffPermissionMode,
   type HandoffPredecessorMode,
+  type HandoffUsageUnknownMode,
 } from './defaults';
 
 /** The handoff gate's usage ceilings (C1), each with the layer that set it. */
@@ -43,6 +45,12 @@ export interface ResolvedHandoffUsage {
   /** The all-models week window's ceiling, in percent. Above it: refused. */
   maxWeekPercent: number;
   maxWeekPercentSource: ThreadConfigSource;
+  /**
+   * What a handoff does when the usage reading is unknown (home-base-2gi9h.7):
+   * `allow` (default) hands off and says so, `refuse` refuses as before.
+   */
+  onUnknown: HandoffUsageUnknownMode;
+  onUnknownSource: ThreadConfigSource;
   /**
    * The pacing hold (home-base-jm5kg.17, feature knob, default false). True: at
    * hold level, or with the pace unknown, the gate refuses. It adds a refusal
@@ -89,6 +97,13 @@ export interface HandoffLayer {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return value != null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isUsageUnknownMode(value: unknown): value is HandoffUsageUnknownMode {
+  return (
+    typeof value === 'string' &&
+    (HANDOFF_USAGE_UNKNOWN_MODES as readonly string[]).includes(value)
+  );
 }
 
 function isPredecessorMode(value: unknown): value is HandoffPredecessorMode {
@@ -260,6 +275,15 @@ export function resolveHandoffConfig(
     read: (section) => section.check,
     sections: usageLayers,
   });
+  const onUnknown = resolveField({
+    accept: isUsageUnknownMode,
+    dotted: 'handoff.usage.onUnknown',
+    expected: `one of ${HANDOFF_USAGE_UNKNOWN_MODES.join(', ')}`,
+    fallback: HANDOFF_DEFAULTS.usage.onUnknown,
+    problems,
+    read: (section) => section.onUnknown,
+    sections: usageLayers,
+  });
   const paceHold = resolveField({
     accept: (value): value is boolean => typeof value === 'boolean',
     dotted: 'handoff.usage.paceHold',
@@ -292,6 +316,8 @@ export function resolveHandoffConfig(
       maxSessionPercentSource: maxSessionPercent.source,
       maxWeekPercent: maxWeekPercent.value,
       maxWeekPercentSource: maxWeekPercent.source,
+      onUnknown: onUnknown.value,
+      onUnknownSource: onUnknown.source,
       paceHold: paceHold.value,
       paceHoldSource: paceHold.source,
     },

@@ -68,6 +68,8 @@ describe('componentConfig.thread.handoff', () => {
         maxSessionPercentSource: 'default',
         maxWeekPercent: 90,
         maxWeekPercentSource: 'default',
+        onUnknown: 'allow',
+        onUnknownSource: 'default',
         paceHold: false,
         paceHoldSource: 'default',
       },

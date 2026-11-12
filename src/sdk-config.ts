@@ -408,7 +408,7 @@ const componentConfigSchema = z
                   .positive()
                   .optional()
                   .describe(
-                    'The newest /usage sample (the hourly claude-usage history) must be at most this many minutes old; an older one, a missing history or a failed newest sample refuses the handoff.',
+                    'The newest /usage sample (the hourly claude-usage history) must be at most this many minutes old; an older one, a missing history or a failed newest sample makes the reading unknown, and `onUnknown` says what happens then.',
                   ),
                 maxSessionPercent: z
                   .number()
@@ -425,6 +425,12 @@ const componentConfigSchema = z
                   .optional()
                   .describe(
                     'The handoff gate refuses when the newest sample’s all-models week window is above this percentage.',
+                  ),
+                onUnknown: z
+                  .enum(['allow', 'refuse'])
+                  .optional()
+                  .describe(
+                    'What a handoff does when the usage reading is unknown (no history, a failed newest sample, or one older than maxSampleAgeMinutes). `allow` (default since 2026-11-12, home-base-2gi9h.7) hands off anyway, prints a ⚠️ Usage line and notes it on the session bead; it still refuses when the newest good sample’s week window was over maxWeekPercent and has not reset since. `refuse` refuses with usageUnknown, as before. `thread spawn` refuses on an unknown reading whatever this says.',
                   ),
                 paceHold: z
                   .boolean()

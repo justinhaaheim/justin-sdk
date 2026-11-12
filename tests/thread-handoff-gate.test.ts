@@ -1181,3 +1181,123 @@ describe('the spend quota at the handoff and spawn gates', () => {
     expect(offRun).toBeNull();
   });
 });
+
+describe('usage.onUnknown (home-base-2gi9h.7)', () => {
+  const withOnUnknown = (
+    onUnknown: 'allow' | 'refuse' | undefined,
+    usage: HandoffGateReaders['usage'],
+    extra: {paceHold?: boolean} = {},
+  ) =>
+    runHandoffGate({
+      env: PANE_ENV,
+      limits: {...LIMITS, usage: {...LIMITS.usage, onUnknown, ...extra}},
+      now: NOW,
+      readers: passingReaders({usage}),
+    });
+  const failed: Sample = {
+    ok: false,
+    reason: 'claude -p /usage timed out',
+    sampledAt: new Date(NOW.getTime() - 10 * 60_000).toISOString(),
+    schema: 1,
+  };
+  const unknownShapes: [string, HandoffGateReaders['usage'], string][] = [
+    [
+      'a 433-minute-old sample (the 2026-11-12 refusal)',
+      () => history(okSample({minutesAgo: 433})),
+      'is 433 minutes old',
+    ],
+    [
+      'no history',
+      () => ({kind: 'missing', path: '/fake/samples.jsonl'}),
+      'there is no usage history',
+    ],
+    [
+      'a failed newest sample',
+      () => history(okSample({minutesAgo: 70}), failed),
+      'is a failed read',
+    ],
+    [
+      'an unreadable history',
+      () => ({kind: 'failed', path: '/fake/samples.jsonl', reason: 'EACCES'}),
+      'EACCES',
+    ],
+    [
+      'a history reader that throws',
+      () => {
+        throw new Error('disk gone');
+      },
+      'disk gone',
+    ],
+  ];
+
+  for (const [name, usage, detail] of unknownShapes) {
+    test(`allow passes ${name}, and reports it as unknown`, async () => {
+      const result = await withOnUnknown('allow', usage);
+      expect(result.kind).toBe('pass');
+      if (result.kind !== 'pass') return;
+      const facts = result.facts.usage;
+      expect('unknown' in facts ? facts.unknown : null).toContain(detail);
+    });
+
+    test(`refuse, and an absent setting, refuse ${name}`, async () => {
+      expectRefused(
+        await withOnUnknown('refuse', usage),
+        'usageUnknown',
+        detail,
+      );
+      expectRefused(
+        await withOnUnknown(undefined, usage),
+        'usageUnknown',
+        detail,
+      );
+    });
+  }
+
+  test('allow still refuses a stale sample whose week was over its ceiling with no reset since', async () => {
+    const stale = okSample({minutesAgo: 433, week: 95});
+    expectRefused(
+      await withOnUnknown('allow', () => history(stale)),
+      'usageHigh',
+      'the week window was at 95 % (ceiling 90 %)',
+    );
+  });
+
+  test('allow passes a stale over-ceiling sample whose week has reset since', async () => {
+    const stale = okSample({minutesAgo: 433, week: 95});
+    stale.week = {
+      ...stale.week,
+      resetsAt: new Date(NOW.getTime() - 60_000).toISOString(),
+    };
+    const result = await withOnUnknown('allow', () => history(stale));
+    expect(result.kind).toBe('pass');
+  });
+
+  test('allow does not pass a fresh reading that is over its ceiling', async () => {
+    expectRefused(
+      await withOnUnknown('allow', () =>
+        history(okSample({minutesAgo: 30, week: 95})),
+      ),
+      'usageHigh',
+      'the week window is at 95 %',
+    );
+  });
+
+  test('a fresh reading under the ceilings passes as a reading, not as unknown', async () => {
+    const result = await withOnUnknown('allow', () =>
+      history(okSample({minutesAgo: 30})),
+    );
+    expect(result.kind).toBe('pass');
+    if (result.kind !== 'pass') return;
+    expect('unknown' in result.facts.usage).toBe(false);
+  });
+
+  test('with the pacing hold on, an unknown reading refuses as paceUnknown', async () => {
+    expectRefused(
+      await withOnUnknown('allow', () => history(okSample({minutesAgo: 433})), {
+        paceHold: true,
+      }),
+      'paceUnknown',
+      'the usage reading is unknown',
+    );
+  });
+});

@@ -22,8 +22,10 @@
  * reason. Nothing unknown ever passes.
  */
 
-import type {SamplesRead} from '../claude-usage-samples';
+import type {UsageWindow} from '../claude-usage';
+import type {OkSample, SamplesRead} from '../claude-usage-samples';
 import type {CmuxRunner} from './cmux';
+import type {HandoffUsageUnknownMode} from './defaults';
 import type {GuardPassRead} from './guard-pass';
 import type {GuardRegistration} from './guard-registration';
 import type {UnattendedChain} from './handoff-chain';
@@ -304,6 +306,49 @@ export function checkUsage(
 }
 
 /**
+ * home-base-2gi9h.7: with the current reading unknown and usage.onUnknown
+ * allow, the newest ok sample of ANY age still refuses when one of its week
+ * windows was over the ceiling and has not reset since. A null reset time
+ * counts as not reset (the cautious direction). The 5-hour window is not
+ * checked: a stale one says nothing about now. null: nothing known is high.
+ */
+export function staleWeekOverCeiling(
+  read: SamplesRead,
+  limits: Pick<HandoffUsageLimits, 'maxWeekPercent'>,
+  now: Date,
+): string | null {
+  if (read.kind !== 'ok') return null;
+  let newestOk: OkSample | null = null;
+  for (let i = read.samples.length - 1; i >= 0; i--) {
+    const sample = read.samples[i];
+    if (sample?.ok === true) {
+      newestOk = sample;
+      break;
+    }
+  }
+  if (newestOk == null) return null;
+  const over: string[] = [];
+  const checkWindow = (label: string, window: UsageWindow): void => {
+    if (window.pct <= limits.maxWeekPercent) return;
+    if (
+      window.resetsAt != null &&
+      Date.parse(window.resetsAt) <= now.getTime()
+    ) {
+      return;
+    }
+    over.push(
+      `the ${label} window was at ${window.pct} % (ceiling ${limits.maxWeekPercent} %) and ${window.resetsAt == null ? 'its reset time is unknown' : `resets ${window.resetsAt}`}`,
+    );
+  };
+  checkWindow('week', newestOk.week);
+  for (const [model, window] of Object.entries(newestOk.weekByModel)) {
+    checkWindow(`${model} week`, window);
+  }
+  if (over.length === 0) return null;
+  return `${over.join(' and ')}, in the newest good sample (${newestOk.sampledAt})`;
+}
+
+/**
  * The pacing hold (home-base-jm5kg.17): at hold level, or with the pace unknown,
  * this refuses; null passes. The gate calls it only with usage.paceHold on, and
  * only after checkUsage passed, so the ceilings come first and stay as they are.
@@ -404,7 +449,16 @@ export interface HandoffGateLimits {
    * `check: false` skips the usage check; absent checks. `paceHold: true` adds
    * the pacing hold; absent or false leaves the gate exactly as it was.
    */
-  usage: HandoffUsageLimits & {check?: boolean; paceHold?: boolean};
+  usage: HandoffUsageLimits & {
+    check?: boolean;
+    /**
+     * home-base-2gi9h.7: `allow` passes an unknown usage reading (and reports
+     * it as `{unknown}` in the facts); absent or `refuse` refuses, as before.
+     * The resolved knob defaults to allow; `thread spawn` passes refuse.
+     */
+    onUnknown?: HandoffUsageUnknownMode;
+    paceHold?: boolean;
+  };
 }
 
 export interface HandoffGateInput {
@@ -438,8 +492,12 @@ export interface HandoffGateFacts {
   liveSessions: LiveSessionCount;
   /** CMUX_SURFACE_ID; null only when requireCmuxPane was false and it is unset. */
   surfaceId: string | null;
-  /** What the newest sample said, or why the usage check was skipped. */
-  usage: HandoffUsageFacts | {skipped: string};
+  /**
+   * What the newest sample said, why the usage check was skipped, or (with
+   * usage.onUnknown allow) why the reading is unknown. `unknown` is never a
+   * pass-shaped reading: the handoff prints it and notes it on the bead.
+   */
+  usage: HandoffUsageFacts | {skipped: string} | {unknown: string};
   /** CMUX_WORKSPACE_ID; null only when requireCmuxPane was false and it is unset. */
   workspaceId: string | null;
 }
@@ -751,20 +809,46 @@ export async function runHandoffGate(
         'componentConfig.thread.handoff.usage.check is false: the usage check was not run',
     };
   } else {
+    // home-base-2gi9h.7: with onUnknown allow, an unknown reading passes as
+    // {unknown}, never as a reading; absent or refuse refuses as before.
+    const allowUnknown = limits.usage.onUnknown === 'allow';
     const usageRead = await attempt(readers.usage);
+    let samples: SamplesRead | null = null;
     if ('threw' in usageRead) {
-      return refused(
-        'usageUnknown',
-        `the usage history could not be read: ${usageRead.threw}`,
-      );
+      const detail = `the usage history could not be read: ${usageRead.threw}`;
+      if (!allowUnknown) return refused('usageUnknown', detail);
+      usageFacts = {unknown: detail};
+    } else {
+      samples = usageRead.value;
+      const usage = checkUsage(samples, limits.usage, now);
+      if (usage.ok) {
+        usageFacts = usage.facts;
+      } else if (usage.reason === 'usageUnknown' && allowUnknown) {
+        // A stale reading whose week was already over its ceiling is still
+        // high until that week resets: unknown is not "fine".
+        const staleHigh = staleWeekOverCeiling(samples, limits.usage, now);
+        if (staleHigh != null) {
+          return refused(
+            'usageHigh',
+            `${staleHigh}; the current reading is unknown: ${usage.detail}`,
+          );
+        }
+        usageFacts = {unknown: usage.detail};
+      } else {
+        return refused(usage.reason, usage.detail);
+      }
     }
-    const usage = checkUsage(usageRead.value, limits.usage, now);
-    if (!usage.ok) return refused(usage.reason, usage.detail);
-    usageFacts = usage.facts;
     // 4b. The pacing hold (home-base-jm5kg.17). Behind its own knob, default
     // off, and after the ceilings: it adds a refusal and replaces nothing.
+    // With the reading unknown the pace is unknown too, and that refuses.
     if (limits.usage.paceHold === true) {
-      const hold = checkPaceHold(usageRead.value, limits.usage, now);
+      if (samples == null || 'unknown' in usageFacts) {
+        return refused(
+          'paceUnknown',
+          `the week's pace could not be worked out: the usage reading is unknown: ${'unknown' in usageFacts ? usageFacts.unknown : 'the history could not be read'}`,
+        );
+      }
+      const hold = checkPaceHold(samples, limits.usage, now);
       if (hold != null) return refused(hold.reason, hold.detail);
     }
   }

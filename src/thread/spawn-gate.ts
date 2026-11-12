@@ -87,7 +87,12 @@ const realQuotaCheck: SpawnGateDeps['quotaCheck'] = ({cwd, env, now}) =>
 const realSpawnGate: SpawnGateDeps['gate'] = (input) =>
   runHandoffGate({
     env: input.env,
-    limits: input.limits,
+    // home-base-2gi9h.7: a spawn starts new work, so an unknown usage reading
+    // refuses it whatever usage.onUnknown says; only a handoff may pass one.
+    limits: {
+      ...input.limits,
+      usage: {...input.limits.usage, onUnknown: 'refuse'},
+    },
     now: input.now,
     readers: realHandoffGateReaders({
       // F14: the CLI's own words, the half of the guard pass it must match.
