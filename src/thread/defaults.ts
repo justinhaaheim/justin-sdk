@@ -126,6 +126,14 @@ export const THREAD_DEFAULT_TITLE_SUMMARY = false;
 export const THREAD_DEFAULT_TRIM_GUARD = false;
 
 /**
+ * home-base-1rxt0.4 D3 (2026-11-12): in `thread status`, an open P2 to P4
+ * question the last report showed unchanged takes one line. ON by default:
+ * Justin asked for it, with a user-level switch to turn it off ("Let's make
+ * this change toggleable via a user-level knob/config").
+ */
+export const THREAD_DEFAULT_COMPACT_QUESTIONS = true;
+
+/**
  * home-base-jm5kg.18 (2026-11-06): the cmux workspace description lists the
  * session chain's requests, and the workspace name is the overarching request's
  * short label. Off by default (feature-knobs rule); on in home-base.

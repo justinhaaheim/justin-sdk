@@ -37,6 +37,7 @@ import type {MessageLine} from './message-log';
 import type {PartOneView, Piece} from './part-one';
 import type {EnvLike} from './paths';
 import type {RelatedEpics} from './related-epics';
+import type {ReportDelta} from './report-delta';
 import type {ActionLine, OptionalLine} from './session-card';
 import type {CreatedBeads} from './session-created';
 import type {Measured, SessionModel} from './session-model';
@@ -96,6 +97,7 @@ import {
 } from './part-one';
 import {threadsBeadsDir} from './paths';
 import {findRelatedEpics, renderRelatedEpics} from './related-epics';
+import {reportBaselineFor, saveReportSnapshot} from './report-snapshots';
 import {deriveAction, optionalLine} from './session-card';
 import {loadCreatedBeads} from './session-created';
 import {realHandoffNumberReaders} from './session-handoff';
@@ -176,6 +178,11 @@ export type ReportLoad =
   | {
       /** The dashboard's "You need to" line (deriveAction), for Part 1. */
       action: ActionLine;
+      /**
+       * componentConfig.thread.compactQuestions (home-base-1rxt0.4 D3):
+       * unchanged P2 to P4 questions take one line in `thread status`.
+       */
+      compactQuestions: boolean;
       counts: StatusCounts;
       /**
        * The beads this session created with a plain `br create`, for What to
@@ -231,6 +238,7 @@ async function knobOn(
   | {ok: false; reason: string}
   | {
       autoPickup: boolean;
+      compactQuestions: boolean;
       handoffSuccessor: boolean;
       ok: true;
       shortLabels: boolean;
@@ -243,6 +251,7 @@ async function knobOn(
   return config.sessionBeads
     ? {
         autoPickup: config.handoff.autoPickup,
+        compactQuestions: config.compactQuestions,
         handoffSuccessor: config.handoff.successor,
         ok: true,
         shortLabels: config.nameWorkspaces && config.workspaceDescription,
@@ -383,6 +392,7 @@ async function loadForReport(input: {
       status,
       successorSessionId: successorSessionIdOf(facts.successor, input.env),
     }),
+    compactQuestions: knob.compactQuestions,
     counts,
     created,
     handoffSuccessor: knob.handoffSuccessor,
@@ -431,6 +441,11 @@ function refusalLines(
 // ---------------------------------------------------------------------------
 
 export interface ThreadStatusOptions extends CommonOptions {
+  /**
+   * `--full` (home-base-1rxt0.4 D5): every question in full, whatever
+   * componentConfig.thread.compactQuestions says. The markers stay.
+   */
+  full?: boolean;
   sessionId: string | null;
 }
 
@@ -880,11 +895,12 @@ export function verdictLines(
 /** The view Part 1 renders from, whichever form it is rendered in. */
 function statusPartOneView(
   load: Extract<ReportLoad, {kind: 'loaded'}>,
-  options: {now: Date; timeZone?: string},
+  options: {delta?: ReportDelta | null; now: Date; timeZone?: string},
 ): PartOneView {
   return partOneView({
     action: load.action,
     counts: load.counts,
+    delta: options.delta ?? null,
     jobs: load.jobHealth,
     marks: load.marks,
     model: load.model,
@@ -897,7 +913,16 @@ function statusPartOneView(
 
 export function renderThreadStatus(
   load: Extract<ReportLoad, {kind: 'loaded'}>,
-  options: {now: Date; style: OutputStyle; timeZone?: string},
+  options: {
+    /**
+     * home-base-1rxt0.4: the last report and the compact switch. Absent: no
+     * markers, every question in full.
+     */
+    delta?: ReportDelta | null;
+    now: Date;
+    style: OutputStyle;
+    timeZone?: string;
+  },
 ): string {
   const {style} = options;
   const partOne = renderPartOne(statusPartOneView(load, options), style);
@@ -1019,15 +1044,53 @@ export async function runThreadStatus(
   // prints ANSI. Only the session running the command: a run of `--session
   // <other>` saves nothing, because a session on an old SDK saves nothing itself
   // and would be held to a block its own paste can never match.
-  if (load.trimGuard && env.CLAUDE_CODE_SESSION_ID === load.model.sessionId) {
+  const own = env.CLAUDE_CODE_SESSION_ID === load.model.sessionId;
+  // home-base-1rxt0.4 D6: ONE delta for the save and the print, so the block
+  // the trim guard holds is the block printed. The last report is read before
+  // this run's own snapshot is saved, though the order does not matter: this
+  // run is after the previous turn ended, so its snapshot is never chosen.
+  const delta: ReportDelta = {
+    baseline: reportBaselineFor({
+      env,
+      sessionId: load.model.sessionId,
+      transcript:
+        load.model.transcript.path != null
+          ? {ok: true, path: load.model.transcript.path}
+          : {
+              ok: false,
+              reason: load.model.transcript.lastRecordAt.ok
+                ? 'the transcript path is not known'
+                : load.model.transcript.lastRecordAt.reason,
+            },
+    }),
+    compact: load.compactQuestions && options.full !== true,
+  };
+  const view = statusPartOneView(load, {
+    delta,
+    now,
+    timeZone: options.timeZone,
+  });
+  // Only the session's own run saves, like the block below: a `--session
+  // <other>` run must not become another session's last report.
+  if (own) {
+    const snapshot = saveReportSnapshot({
+      at: now,
+      env,
+      items: view.snapshot,
+      sessionId: load.model.sessionId,
+    });
+    if (snapshot.kind === 'failed') {
+      console.error(
+        `thread status: could not save what this report shows at ${snapshot.path}, so the next turn's report marks nothing and prints every question in full: ${snapshot.error}`,
+      );
+    }
+  }
+  if (load.trimGuard && own) {
     const saved = saveStatusBlock({
       at: now,
       env,
       sessionId: load.model.sessionId,
-      text: renderPartOne(
-        statusPartOneView(load, {now, timeZone: options.timeZone}),
-        PLAIN_STYLE,
-      ),
+      text: renderPartOne(view, PLAIN_STYLE),
     });
     if (saved.kind === 'failed') {
       console.error(
@@ -1036,7 +1099,7 @@ export async function runThreadStatus(
     }
   }
   await writeStdout(
-    `${renderThreadStatus(load, {now, style, timeZone: options.timeZone})}\n`,
+    `${renderThreadStatus(load, {delta, now, style, timeZone: options.timeZone})}\n`,
   );
   return 0;
 }

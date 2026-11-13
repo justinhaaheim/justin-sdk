@@ -40,6 +40,7 @@ import {
   THREAD_DEFAULT_AUTO_COMMIT,
   THREAD_DEFAULT_AUTO_PUSH,
   THREAD_DEFAULT_CAPTURE,
+  THREAD_DEFAULT_COMPACT_QUESTIONS,
   THREAD_DEFAULT_DASHBOARD_UI,
   THREAD_DEFAULT_EMOJI_HEADER,
   THREAD_DEFAULT_ENABLED,
@@ -117,6 +118,13 @@ export interface ResolvedThreadConfig {
   captureActive: boolean;
   /** Which layer decided `capture`. */
   captureSource: ThreadConfigSource;
+  /**
+   * home-base-1rxt0.4 D3: unchanged P2 to P4 questions take one line in
+   * `thread status`. On by default; the user file turns it off everywhere.
+   */
+  compactQuestions: boolean;
+  /** Which layer decided `compactQuestions`. */
+  compactQuestionsSource: ThreadConfigSource;
   /**
    * Which dashboard `thread dashboard` opens without --web / --tui
    * (home-base-yukaf.11, D-WEB). Default `tui`; a misspelled value is NAMED
@@ -346,6 +354,10 @@ export function resolveThreadConfig(
     THREAD_DEFAULT_TITLE_SUMMARY,
   );
   const trimGuard = resolveFlag('trimGuard', THREAD_DEFAULT_TRIM_GUARD);
+  const compactQuestions = resolveFlag(
+    'compactQuestions',
+    THREAD_DEFAULT_COMPACT_QUESTIONS,
+  );
   const workspaceDescription = resolveFlag(
     'workspaceDescription',
     THREAD_DEFAULT_WORKSPACE_DESCRIPTION,
@@ -570,6 +582,8 @@ export function resolveThreadConfig(
     capture: capture.value,
     captureActive: enabled.value && capture.value,
     captureSource: capture.source,
+    compactQuestions: compactQuestions.value,
+    compactQuestionsSource: compactQuestions.source,
     dashboardUi,
     dashboardUiSource,
     emojiHeader,

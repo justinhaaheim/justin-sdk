@@ -603,6 +603,15 @@ Run it BEFORE YIELDING on a work turn (status report v4). It prints, in order:
   If you stop now the inbox will say: <status> — for ⚠️ open work also what
       that leads to (Justin is told to resume the session) and the way out
 
+Part 1 ends with a line of ♒; paste from the 🛑 line through it. Repeat
+reports (home-base-1rxt0.4): 🆕 before a request or question new since the
+report at the end of your previous turn, 🔄 before one that changed, and an
+unchanged P2 to P4 question on one line, named in a line after the questions.
+The first report of a session prints every question in full. --full prints
+every question in full; componentConfig.thread.compactQuestions false (user
+file) turns the one-line questions off everywhere. What each report showed is
+kept in <threads state dir>/report-snapshots/<session id>.jsonl.
+
 The status is derived (epic D2), most urgent first: 🛑 waiting on you (an open
 P0) · 🏃 working (shown by thread show, never here) · 🤝 handed off · 🧯 out
 of context · ✅ done · 💬 answered (no request, no commit, clean tree) · ❔
@@ -1588,14 +1597,25 @@ export const threadCommand: CommandModule = {
         'status',
         'Before yielding on a work turn: print Part 1 of the status report (generated, ready to paste), what you still have to mark, and what the inbox will say if you stop now. "Nothing to mark." on a question-only turn. SESSION BEADS: DISABLED (exit 0) when componentConfig.thread.sessionBeads is off. Exit 0 printed · 1 no session bead.',
         (yy) =>
-          yy.epilogue(STATUS_NARRATIVE).option('session', {
-            describe: 'Session id (default: $CLAUDE_CODE_SESSION_ID)',
-            type: 'string' as const,
-          }),
+          yy
+            .epilogue(STATUS_NARRATIVE)
+            .option('full', {
+              default: false,
+              describe:
+                'Print every question in full, including the unchanged P2 to P4 ones a repeat report puts on one line (run it when Justin asks for the full report)',
+              type: 'boolean' as const,
+            })
+            .option('session', {
+              describe: 'Session id (default: $CLAUDE_CODE_SESSION_ID)',
+              type: 'string' as const,
+            }),
         async (argv) => {
           const {runThreadStatus} = await import('./session-report');
           process.exit(
-            await runThreadStatus({sessionId: argv.session ?? null}),
+            await runThreadStatus({
+              full: argv.full === true,
+              sessionId: argv.session ?? null,
+            }),
           );
         },
       )

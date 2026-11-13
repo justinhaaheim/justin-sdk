@@ -28,6 +28,7 @@
 
 import type {OutputStyle, StyleName} from '../cli-style';
 import type {AskFields} from './ask-format';
+import type {QuestionShown} from './report-delta';
 
 import {
   BODY_COLUMN,
@@ -39,6 +40,7 @@ import {
   wrapHanging,
 } from '../cli-style';
 import {optionLetter, parseAsk} from './ask-format';
+import {markEmoji} from './report-delta';
 
 /** The fields of a question bead the renderer reads. `BrIssue` satisfies it. */
 export interface AskBeadView {
@@ -139,10 +141,20 @@ export function escapeLeadingListMarker(line: string): string {
     .replace(/^(\s*)([-*+])(?=\s|$)/u, '$1\\$2');
 }
 
+/**
+ * home-base-1rxt0.4 D2: the marker of a question new or changed since the last
+ * report, right after its number so it is the first thing on the line, with
+ * the space that follows it. '' for none.
+ */
+function markPrefix(shown: QuestionShown | null): string {
+  return shown?.mark == null ? '' : `${markEmoji(shown.mark)} `;
+}
+
 function markdownItem(
   question: AskBeadView,
   number: number,
   gap: ItemGap,
+  shown: QuestionShown | null,
 ): string {
   const marker = `${number}. `;
   const indent = pad(marker.length);
@@ -150,7 +162,9 @@ function markdownItem(
   const header =
     parsed.ok && parsed.ask.header != null ? `${parsed.ask.header} · ` : '';
   const form = parsed.ok ? `${formTag(parsed.ask)} ` : '';
-  const first = `${marker}${priorityBadge(question.priority)} · ${form}${header}**${question.title}** (${question.id})`;
+  const first = `${marker}${markPrefix(shown)}${priorityBadge(question.priority)} · ${form}${header}**${question.title}** (${question.id})`;
+  // home-base-1rxt0.4 D3: an unchanged P2 to P4 question is its first line.
+  if (shown?.compact === true) return first;
   const blocks: Block[] = [];
   if (!parsed.ok) {
     blocks.push({
@@ -199,6 +213,7 @@ function ansiItem(
   question: AskBeadView,
   number: number,
   style: OutputStyle,
+  shown: QuestionShown | null,
 ): string {
   const {color, width} = style;
   const parsed = parseAsk(question.description);
@@ -213,10 +228,11 @@ function ansiItem(
     : '';
   const marker = `${number}. `;
   const first = wrap(
-    `${paint(marker, ['bold'], color)}${paint(priorityBadge(question.priority), badgeStyles(question.priority), color)} · ${form}${header}${paint(question.title, ['bold'], color)} ${paint(`(${question.id})`, ['dim'], color)}`,
+    `${paint(marker, ['bold'], color)}${markPrefix(shown)}${paint(priorityBadge(question.priority), badgeStyles(question.priority), color)} · ${form}${header}${paint(question.title, ['bold'], color)} ${paint(`(${question.id})`, ['dim'], color)}`,
     BODY_COLUMN,
     BODY_COLUMN + marker.length,
   );
+  if (shown?.compact === true) return first;
   const blocks: string[] = [first];
   if (!parsed.ok) {
     blocks.push(
@@ -289,24 +305,39 @@ export function renderAsk(
   number: number,
   style: OutputStyle,
   gap: ItemGap = 1,
+  shown: QuestionShown | null = null,
 ): string {
   return style.color
-    ? ansiItem(question, number, style)
-    : markdownItem(question, number, gap);
+    ? ansiItem(question, number, style, shown)
+    : markdownItem(question, number, gap, shown);
 }
 
 /**
  * Every question, most urgent first, numbered from 1, a blank line after each
  * item (two in markdown with `itemGap: 2`, for text Claude Code will draw).
  * Empty input renders as an empty string (the caller says "none").
+ *
+ * `shown` (home-base-1rxt0.4, `thread status` only): per question id, its
+ * new or changed marker and whether it is one line. A question it does not
+ * name is in full and unmarked.
  */
 export function renderAsks(
   questions: readonly AskBeadView[],
-  options: {itemGap?: ItemGap; style: OutputStyle},
+  options: {
+    itemGap?: ItemGap;
+    shown?: ReadonlyMap<string, QuestionShown>;
+    style: OutputStyle;
+  },
 ): string {
   const gap = options.itemGap ?? 1;
   const items = sortAsks(questions).map((question, index) =>
-    renderAsk(question, index + 1, options.style, gap),
+    renderAsk(
+      question,
+      index + 1,
+      options.style,
+      gap,
+      options.shown?.get(question.id) ?? null,
+    ),
   );
   return !options.style.color && gap === 2
     ? markdownItems(items)

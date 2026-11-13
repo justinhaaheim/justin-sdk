@@ -70,12 +70,14 @@ function question(
 /** Two requests (3 and 2 children), three questions (5, 1 and 0 sub-items). */
 const VIEW: PartOneView = {
   beadProblems: [],
+  deltaProblem: null,
   git: [field('Repo', 'work-repo'), field('Branch', 'feature/export')],
   messages: [
     {label: 'Your first message', note: null, quote: '"Make it fast."'},
     {label: 'Your last message', note: null, quote: '"keep going"'},
   ],
   progress: '1 of 2 requests done',
+  questionShown: new Map(),
   questions: [
     question('t-1.3', 0, 'Which bucket should the runbook name?', {
       context: ['The runbook names one bucket.', 'Both buckets exist today.'],
@@ -106,6 +108,7 @@ const VIEW: PartOneView = {
       recommended: null,
     }),
   ],
+  questionsNote: null,
   requests: [
     {
       blockedOn: null,
@@ -116,6 +119,7 @@ const VIEW: PartOneView = {
       ],
       icon: '🔲',
       id: 't-1.1',
+      mark: null,
       stage: 'tested — next: built',
       title: 'Make the nightly export twice as fast',
     },
@@ -127,12 +131,14 @@ const VIEW: PartOneView = {
       ],
       icon: '🛑',
       id: 't-1.2',
+      mark: null,
       stage: null,
       title: 'Write the export runbook',
     },
   ],
   resume: [field('Resume', 'claude --resume 0000')],
   session: field('Session', '[WORK-REPO] Make the nightly export faster'),
+  snapshot: {},
   state: [
     field('Status', '🛑 Waiting on you'),
     field('You need to', 'Answer: Which bucket should the runbook name?'),

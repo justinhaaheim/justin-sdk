@@ -35,6 +35,7 @@ import {
   isSeparatorLine,
   isSessionFieldLine,
   PART_ONE_RULE,
+  PART_ONE_SEPARATOR,
 } from './part-one';
 
 // ---------------------------------------------------------------------------
@@ -59,6 +60,10 @@ export function normalizeBlockLine(line: string): string | null {
   const collapsed = line.trim().replace(/\s+/gu, ' ');
   if (collapsed === '' || collapsed === '---') return null;
   if (isRuleLine(collapsed)) return PART_ONE_RULE;
+  // home-base-1rxt0.4 D1: like the rule, any line of ♒ is the separator.
+  if (isSeparatorLine(collapsed) && collapsed.includes('♒')) {
+    return PART_ONE_SEPARATOR;
+  }
   const bulleted = collapsed.startsWith('* ')
     ? `- ${collapsed.slice(2)}`
     : collapsed;
@@ -318,7 +323,7 @@ export function trimGuardBlockReason(difference: BlockDifference): string {
     );
   }
   sections.push(
-    `Run ${SDK_RUN} thread status, read ALL of its output with no sed, head or tail, then paste from the 🛑 line through the ──── line verbatim. Do not shorten any question.`,
+    `Run ${SDK_RUN} thread status, read ALL of its output with no sed, head or tail, then paste from the 🛑 line through the line of ♒ verbatim. Do not shorten any question.`,
   );
   return sections.join('\n\n');
 }

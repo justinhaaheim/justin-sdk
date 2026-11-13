@@ -32,7 +32,13 @@
  *   ---  Repo / Branch / Worktree / Context / Uncommitted (only when > 0 or
  *        unknown) / Unpushed (only when > 0 or not countable) / Commits this
  *        session, then Resume / Pane
- *   ─── separator — the line `thread show` strips a pasted Part 1 through
+ *   ♒ separator — the block's last line, and the line `thread show` strips a
+ *        pasted Part 1 through (`───` before home-base-1rxt0.4 D1)
+ *
+ * In `thread status` only (home-base-1rxt0.4, report-delta.ts): 🆕 or 🔄 right
+ * after the number of a request or question new or changed since the last
+ * report, an unchanged P2 to P4 question on one line, and one line after the
+ * questions naming those. Nothing is reordered.
  *
  * SPACING IS MEASURED, NOT ASSUMED (home-base-j8q3e.1.7.1, Claude Code
  * 2.1.300, docs/reference/claude-code-markdown-rendering.md): Claude Code's
@@ -59,6 +65,12 @@
 
 import type {OutputStyle} from '../cli-style';
 import type {JobHealthNotice} from '../job-health';
+import type {
+  ItemMark,
+  QuestionShown,
+  ReportDelta,
+  SnapshotItems,
+} from './report-delta';
 import type {ActionLine, OptionalLine} from './session-card';
 import type {SessionCommits} from './session-commits';
 import type {SessionModel} from './session-model';
@@ -85,6 +97,17 @@ import {parseInstant} from './answer-store';
 import {ARCHIVED_PREFIX, DONE_PREFIX} from './ask-format';
 import {renderAsks, sortAsks} from './ask-render';
 import {exportBehindWords} from './export-behind';
+import {
+  baselineProblem,
+  compactQuestionsNote,
+  markEmoji,
+  markOf,
+  questionFingerprint,
+  questionKey,
+  questionShown,
+  requestFingerprint,
+  requestKey,
+} from './report-delta';
 import {cutOnWord} from './session-bead';
 import {firstUserLine, newestLogAt, userLines} from './session-model';
 import {sessionDisplayName, sessionMarksOf} from './session-name';
@@ -95,8 +118,15 @@ import {isOpen, openQuestions, stageReached} from './session-status';
 // that shows the start of the report. Detection (isRuleLine) needs three.
 export const PART_ONE_RULE = '🛑'.repeat(6);
 
-/** The end of Part 1, and what `thread show` strips through. */
-export const PART_ONE_SEPARATOR = '─'.repeat(28);
+/**
+ * The end of Part 1, and what `thread show` strips through. A line of ♒ since
+ * home-base-1rxt0.4 D1 (Justin, 2026-11-12: "It'd be helpful if we just
+ * distinguished that section more clearly -- say, with a few of these ♒?"):
+ * Claude's own message starts right after it. Ten, like the 🛑 rule kept
+ * short, so it fits one line on a phone. Blocks pasted before then end with
+ * `─` × 28, which isSeparatorLine still reads.
+ */
+export const PART_ONE_SEPARATOR = '♒'.repeat(10);
 
 /**
  * The rule between Part 1's sections in markdown. Claude Code draws every rule
@@ -145,6 +175,8 @@ export interface RequestView {
   children: RequestChildView[];
   icon: string;
   id: string;
+  /** home-base-1rxt0.4 D2: new or changed since the last report, else null. */
+  mark: ItemMark | null;
   /** "tested — next: built", or null when no stage label is on the ladder. */
   stage: string | null;
   title: string;
@@ -164,18 +196,32 @@ export interface MessageView {
 export interface PartOneView {
   /** Beads exports that could not be read, said above the requests. */
   beadProblems: string[];
+  /**
+   * home-base-1rxt0.4: why nothing is marked new or changed and every question
+   * is in full, when the last report could not be established; else null.
+   */
+  deltaProblem: string | null;
   /** Repo / Branch / Worktree / Context / Uncommitted / Unpushed / Commits. */
   git: PartField[];
   /** Your first message, then Your last message when it differs (F10). */
   messages: MessageView[];
   /** "1 of 3 requests done", or why the count is unknown. */
   progress: string;
+  /** home-base-1rxt0.4: per question id, its marker and whether it is one line. */
+  questionShown: ReadonlyMap<string, QuestionShown>;
   /** The OPEN questions; `renderAsks` orders them, P0 first. */
   questions: TreeIssue[];
+  /** home-base-1rxt0.4 D3: the line after the questions, or null. */
+  questionsNote: string | null;
   requests: RequestView[];
   resume: PartField[];
   /** The Session field: `[REPO] title`. */
   session: PartField;
+  /**
+   * home-base-1rxt0.4 D6: what this report shows, for `thread status` to save
+   * as the snapshot the next turn compares with.
+   */
+  snapshot: SnapshotItems;
   /** Status / You need to / Optional. */
   state: PartField[];
   /** Started / Last activity. */
@@ -394,6 +440,12 @@ export interface PartOneInput {
    */
   action: ActionLine;
   counts: StatusCounts;
+  /**
+   * home-base-1rxt0.4: the last report and the compact switch, from `thread
+   * status` only. Null or absent (`thread show`, the inbox): nothing marked,
+   * every question in full.
+   */
+  delta?: ReportDelta | null;
   /**
    * home-base-1rxt0.10 D5: what the chores health file says about the
    * recurring jobs on this Mac (job-health.ts). Null or absent: nothing to
@@ -635,23 +687,22 @@ export function partOneView(input: PartOneInput): PartOneView {
           : done;
 
   // ---- Requests ----
+  // home-base-1rxt0.4: what this report shows goes in `snapshot`, keyed and
+  // fingerprinted the way the next turn's report compares it (D6).
+  const delta = input.delta ?? null;
+  const snapshot: SnapshotItems = {};
   const ordered = sortAsks(openQuestions(model));
   const requests: RequestView[] = beads.requests.map((node) => {
     const blocking = blockingNumbers(node, ordered);
     const stage = stageReached(node.request.labels, model.stages);
     const open = isOpen(node.request);
-    return {
-      blockedOn:
-        open && blocking.length > 0
-          ? `blocked on ${blocking.length === 1 ? 'question' : 'questions'} ${blocking.join(', ')}`
-          : null,
+    const shape = {
       children: node.children.map((child) => ({
         icon: isOpen(child) ? '🔲' : '✅',
         id: child.id,
         title: child.title,
       })),
       icon: !open ? '✅' : blocking.length > 0 ? '🛑' : '🔲',
-      id: node.request.id,
       stage:
         stage == null
           ? null
@@ -660,6 +711,28 @@ export function partOneView(input: PartOneInput): PartOneView {
             : `${stage.reached} — next: ${stage.next}`,
       title: node.request.title,
     };
+    const key = requestKey(node.request.id);
+    const fingerprint = requestFingerprint(shape);
+    snapshot[key] = fingerprint;
+    return {
+      ...shape,
+      blockedOn:
+        open && blocking.length > 0
+          ? `blocked on ${blocking.length === 1 ? 'question' : 'questions'} ${blocking.join(', ')}`
+          : null,
+      id: node.request.id,
+      mark: delta == null ? null : markOf(key, fingerprint, delta.baseline),
+    };
+  });
+
+  // ---- Questions (home-base-1rxt0.4 D2, D3) ----
+  const shownById = new Map<string, QuestionShown>();
+  const compactNumbers: number[] = [];
+  ordered.forEach((question, index) => {
+    snapshot[questionKey(question.id)] = questionFingerprint(question);
+    const shown = questionShown(question, delta);
+    shownById.set(question.id, shown);
+    if (shown.compact) compactNumbers.push(index + 1);
   });
 
   // ---- Repo / Branch / Worktree / Context / … ----
@@ -823,8 +896,10 @@ export function partOneView(input: PartOneInput): PartOneView {
       sub: tildeSub(entry.sub),
       value: tildePieces(entry.value),
     }));
+  const problem = delta == null ? null : baselineProblem(delta.baseline);
   return {
     beadProblems: beads.problems.map(tildeText),
+    deltaProblem: problem == null ? null : tildeText(problem),
     git: tilded(gitFields),
     messages: messages.map((message) => ({
       label: message.label,
@@ -832,7 +907,9 @@ export function partOneView(input: PartOneInput): PartOneView {
       quote: message.quote,
     })),
     progress,
+    questionShown: shownById,
     questions: openQuestions(model),
+    questionsNote: compactQuestionsNote(compactNumbers),
     requests,
     resume: tilded(resume),
     session: field(
@@ -845,6 +922,7 @@ export function partOneView(input: PartOneInput): PartOneView {
         ),
       ),
     ),
+    snapshot,
     state: tilded(state),
     times: tilded(times),
   };
@@ -920,6 +998,14 @@ export const PROGRESS_HEADING = 'Progress';
 export const QUESTIONS_HEADING = 'Questions for you';
 
 /**
+ * home-base-1rxt0.4 D2: 🆕 or 🔄 and a space, right after an item's number,
+ * so it is the first thing on the line; '' for neither.
+ */
+function markText(mark: ItemMark | null): string {
+  return mark == null ? '' : `${markEmoji(mark)} `;
+}
+
+/**
  * One request as a numbered markdown item: its line (title in bold, the
  * request being what Justin asked for), its stage, and its children. The
  * children are sibling list items: two empty lines apart (MARKDOWN_ITEM_GAP).
@@ -929,7 +1015,7 @@ function markdownRequest(request: RequestView, number: number): string {
   const indent = pad(marker.length);
   const blocked = request.blockedOn == null ? '' : ` — ${request.blockedOn}`;
   return spacedList([
-    `${marker}${request.icon} **${request.title}** (${request.id})${blocked}`,
+    `${marker}${markText(request.mark)}${request.icon} **${request.title}** (${request.id})${blocked}`,
     request.stage == null ? '' : `${indent}**Stage:** ${request.stage}`,
     markdownItems(
       request.children.map(
@@ -948,6 +1034,7 @@ function markdownProgress(view: PartOneView): string {
       (problem) =>
         `⚠️ ${problem} — requests and questions there are not shown.`,
     ),
+    view.deltaProblem == null ? '' : `⚠️ ${view.deltaProblem}`,
     markdownItems(
       view.requests.map((request, index) =>
         markdownRequest(request, index + 1),
@@ -982,8 +1069,10 @@ function renderMarkdown(view: PartOneView): string {
           `## ${QUESTIONS_HEADING}`,
           renderAsks(view.questions, {
             itemGap: 2,
+            shown: view.questionShown,
             style: {color: false, width: null},
           }),
+          view.questionsNote == null ? '' : `*${view.questionsNote}*`,
         ]);
   const [timesMarker, stateMarker, gitMarker, resumeMarker] =
     alternatingMarkers([view.times, view.state, view.git, view.resume]);
@@ -1073,11 +1162,20 @@ function ansiProgress(view: PartOneView, style: OutputStyle): string {
       ),
     );
   }
+  if (view.deltaProblem != null) {
+    blocks.push(
+      wrapHanging(`⚠️ ${view.deltaProblem}`, {
+        hang: BODY_COLUMN + 3,
+        indent: BODY_COLUMN,
+        width,
+      }),
+    );
+  }
   view.requests.forEach((request, index) => {
     const marker = `${index + 1}. `;
     const parts = [
       wrapHanging(
-        `${paint(marker, ['bold'], color)}${request.icon} ${paint(request.title, ['bold'], color)} ${paint(`(${request.id})`, ['dim'], color)}${request.blockedOn == null ? '' : ` — ${paint(request.blockedOn, ['bold', 'red'], color)}`}`,
+        `${paint(marker, ['bold'], color)}${markText(request.mark)}${request.icon} ${paint(request.title, ['bold'], color)} ${paint(`(${request.id})`, ['dim'], color)}${request.blockedOn == null ? '' : ` — ${paint(request.blockedOn, ['bold', 'red'], color)}`}`,
         {hang: BODY_COLUMN + marker.length, indent: BODY_COLUMN, width},
       ),
     ];
@@ -1145,7 +1243,14 @@ function renderAnsi(view: PartOneView, style: OutputStyle): string {
       ? ''
       : spacedList([
           sectionHeader(QUESTIONS_HEADING, {color: style.color, emoji: '🙋'}),
-          renderAsks(view.questions, {style}),
+          renderAsks(view.questions, {shown: view.questionShown, style}),
+          view.questionsNote == null
+            ? ''
+            : wrapHanging(paint(view.questionsNote, ['italic'], style.color), {
+                hang: BODY_COLUMN,
+                indent: BODY_COLUMN,
+                width: style.width,
+              }),
         ]);
   const sections = [
     ansiFields([view.session], labelWidth, style),
@@ -1185,9 +1290,13 @@ export function isRuleLine(line: string): boolean {
   return /^(?:🛑){3,}$/u.test(line.trim());
 }
 
-/** A line that is only box-drawing dashes — three or more — is the separator. */
+/**
+ * A line that is only ♒ — three or more, each with or without the emoji
+ * variation selector — is the separator; so is one of only box-drawing
+ * dashes, the separator before home-base-1rxt0.4 D1.
+ */
 export function isSeparatorLine(line: string): boolean {
-  return /^─{3,}$/u.test(line.trim());
+  return /^(?:─{3,}|(?:♒️?){3,})$/u.test(line.trim());
 }
 
 /**

@@ -258,6 +258,20 @@ export function statusBlocksPath(
 }
 
 /**
+ * What each `thread status` run of one session showed, newest last, one
+ * `{at, items}` per line (home-base-1rxt0.4 D6): the requests and questions,
+ * each with a fingerprint of its content. Written by every run of the
+ * session's own `thread status`; read by the next run to mark what is new or
+ * changed and to put unchanged questions on one line (report-snapshots.ts).
+ */
+export function reportSnapshotsPath(
+  sessionId: string,
+  env: EnvLike = process.env,
+): string {
+  return join(threadsStateDir(env), 'report-snapshots', `${sessionId}.jsonl`);
+}
+
+/**
  * One JSON line per capture-child run: what it did to which bead, or why it
  * could not (K10 c). The child runs detached with its stdio ignored, so this
  * file is the ONLY place a bd failure can be loud.

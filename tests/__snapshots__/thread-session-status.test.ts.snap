@@ -36,7 +36,7 @@ exports[`fixture 1: a question-only session Part 1 snapshot, markdown and ANSI 1
 
 * **Resume:** \`claude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\`
 
-────────────────────────────"
+♒♒♒♒♒♒♒♒♒♒"
 `;
 
 exports[`fixture 1: a question-only session Part 1 snapshot, markdown and ANSI 2`] = `
@@ -76,7 +76,7 @@ exports[`fixture 1: a question-only session Part 1 snapshot, markdown and ANSI 2
 
       \x1B[1mResume:\x1B[0m                \x1B[36mclaude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\x1B[0m
 
-────────────────────────────"
+♒♒♒♒♒♒♒♒♒♒"
 `;
 
 exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part 1 snapshot, markdown and ANSI 1`] = `
@@ -157,7 +157,7 @@ exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part
 * **Resume:** \`claude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\`
 * **Pane:** \`cmux select-workspace --workspace A1B2C3D4-0000-4000-8000-00000000000W\` (surface A1B2C3D4-0000-4000-8000-00000000000S)
 
-────────────────────────────"
+♒♒♒♒♒♒♒♒♒♒"
 `;
 
 exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part 1 snapshot, markdown and ANSI 2`] = `
@@ -235,7 +235,7 @@ exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part
       \x1B[1mPane:\x1B[0m                  \x1B[36mcmux select-workspace --workspace A1B2C3D4-0000-4000-8000-00000000000W\x1B[0m
                              (surface A1B2C3D4-0000-4000-8000-00000000000S)
 
-────────────────────────────"
+♒♒♒♒♒♒♒♒♒♒"
 `;
 
 exports[`fixture 3: a session whose checkout is gone Part 1 snapshot, markdown and ANSI 1`] = `
@@ -278,7 +278,7 @@ exports[`fixture 3: a session whose checkout is gone Part 1 snapshot, markdown a
 
 * **Resume:** \`claude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\`
 
-────────────────────────────"
+♒♒♒♒♒♒♒♒♒♒"
 `;
 
 exports[`fixture 3: a session whose checkout is gone Part 1 snapshot, markdown and ANSI 2`] = `
@@ -320,7 +320,7 @@ exports[`fixture 3: a session whose checkout is gone Part 1 snapshot, markdown a
 
       \x1B[1mResume:\x1B[0m                \x1B[36mclaude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\x1B[0m
 
-────────────────────────────"
+♒♒♒♒♒♒♒♒♒♒"
 `;
 
 exports[`fixture 4: 14 commit commands that matched nothing here (F14) Part 1 snapshot, markdown and ANSI 1`] = `
@@ -364,7 +364,7 @@ exports[`fixture 4: 14 commit commands that matched nothing here (F14) Part 1 sn
 
 * **Resume:** \`claude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\`
 
-────────────────────────────"
+♒♒♒♒♒♒♒♒♒♒"
 `;
 
 exports[`fixture 4: 14 commit commands that matched nothing here (F14) Part 1 snapshot, markdown and ANSI 2`] = `
@@ -411,5 +411,5 @@ exports[`fixture 4: 14 commit commands that matched nothing here (F14) Part 1 sn
 
       \x1B[1mResume:\x1B[0m                \x1B[36mclaude --resume 5e551011-cccc-4ddd-8eee-0123456789ab\x1B[0m
 
-────────────────────────────"
+♒♒♒♒♒♒♒♒♒♒"
 `;

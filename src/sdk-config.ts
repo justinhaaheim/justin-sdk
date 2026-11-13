@@ -50,6 +50,7 @@ import {
   THREAD_DEFAULT_AUTO_COMMIT,
   THREAD_DEFAULT_AUTO_PUSH,
   THREAD_DEFAULT_CAPTURE,
+  THREAD_DEFAULT_COMPACT_QUESTIONS,
   THREAD_DEFAULT_DASHBOARD_UI,
   THREAD_DEFAULT_EMOJI_HEADER,
   THREAD_DEFAULT_ENABLED,
@@ -321,6 +322,12 @@ const componentConfigSchema = z
           .optional()
           .describe(
             'Whether the `thread capture` hooks installed by `justin-sdk add thread-hooks` record every user prompt (UserPromptSubmit) and every final Claude message (Stop) of a session (home-base-k0b8n.9, K10). DEFAULT TRUE, and gated by `enabled` as well: BOTH must be true. Each turn appends one line to ~/.local/state/justin-threads/messages/<sessionId>.jsonl (local only — never committed, never pushed) and a detached child keeps the thread bead’s last user message / last Claude response current, creating the bead if the session has none, so threads stay up to date whether or not a status report is ever written. Subagents, `claude -p` runs (CLAUDE_CODE_ENTRYPOINT=sdk-cli) and empty messages are never captured. The hook always exits 0 and prints nothing. Set it false in a repo’s justin-sdk.config.json to opt that repo out.',
+          ),
+        compactQuestions: z
+          .boolean()
+          .optional()
+          .describe(
+            'SHORTER REPEAT REPORTS (home-base-1rxt0.4 D3, built 2026-11-12). DEFAULT TRUE. In `thread status`, an open P2 to P4 question that the report at the end of Claude’s previous turn showed with the same content prints as its one first line (number, priority, title, id), and one line after the questions names them and says to ask for the full report. In full every time: P0 and P1 questions, a question that is new or changed since that report, every question in a session’s first report (a successor’s too), and everything under `thread status --full`. 🆕 and 🔄 mark what is new and changed whatever this says. False: every question in full, as before. Set it false in the user file to turn it off everywhere.',
           ),
         dashboardUi: z
           .enum(['tui', 'web'])
@@ -955,6 +962,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     autoCommit: THREAD_DEFAULT_AUTO_COMMIT,
     autoPush: THREAD_DEFAULT_AUTO_PUSH,
     capture: THREAD_DEFAULT_CAPTURE,
+    compactQuestions: THREAD_DEFAULT_COMPACT_QUESTIONS,
     dashboardUi: THREAD_DEFAULT_DASHBOARD_UI,
     enabled: THREAD_DEFAULT_ENABLED,
     enforce: THREAD_DEFAULT_ENFORCE,

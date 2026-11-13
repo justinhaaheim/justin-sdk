@@ -561,7 +561,7 @@ describe('trimGuardBlockReason (D8)', () => {
     expect(reason).not.toContain('added 4');
     expect(reason).toContain('bun run justin-sdk thread status');
     expect(reason).toContain('no sed, head or tail');
-    expect(reason).toContain('through the ──── line verbatim');
+    expect(reason).toContain('through the line of ♒ verbatim');
     expect(reason).toContain('Do not shorten any question');
   });
 
@@ -1086,6 +1086,21 @@ function statusWorld(knobs: Record<string, unknown>): StatusWorld {
   if (filed.kind !== 'created') {
     throw new Error(`session bead not filed: ${filed.detail}`);
   }
+  // A transcript, as every real session has (home-base-1rxt0.4): without one,
+  // a second `thread status` cannot tell this turn's reports from earlier
+  // ones and says so in its block, so two runs of the same state differ.
+  const transcriptDir = join(sb.path, 'projects', 'status-repo');
+  mkdirSync(transcriptDir, {recursive: true});
+  writeFileSync(
+    join(transcriptDir, `${SESSION}.jsonl`),
+    `${JSON.stringify({
+      cwd: repo,
+      message: {content: 'Look at the export', role: 'user'},
+      sessionId: SESSION,
+      timestamp: NOW.toISOString(),
+      type: 'user',
+    })}\n`,
+  );
   return {env, repo};
 }
 
