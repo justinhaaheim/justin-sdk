@@ -96,6 +96,7 @@ import {
   whenWords,
 } from './part-one';
 import {threadsBeadsDir} from './paths';
+import {assignMissingQuestionIds} from './question-id-assign';
 import {findRelatedEpics, renderRelatedEpics} from './related-epics';
 import {reportBaselineFor, saveReportSnapshot} from './report-snapshots';
 import {deriveAction, optionalLine} from './session-card';
@@ -113,6 +114,7 @@ import {repairMissingSessionBead, repairRefusalNote} from './session-repair';
 import {sessionIdFrom} from './session-select';
 import {
   deriveStatus,
+  openQuestions,
   statusCounts,
   statusFactsOf,
   whatToMark,
@@ -895,7 +897,12 @@ export function verdictLines(
 /** The view Part 1 renders from, whichever form it is rendered in. */
 function statusPartOneView(
   load: Extract<ReportLoad, {kind: 'loaded'}>,
-  options: {delta?: ReportDelta | null; now: Date; timeZone?: string},
+  options: {
+    delta?: ReportDelta | null;
+    now: Date;
+    questionIdProblems?: readonly string[];
+    timeZone?: string;
+  },
 ): PartOneView {
   return partOneView({
     action: load.action,
@@ -906,6 +913,7 @@ function statusPartOneView(
     model: load.model,
     now: options.now,
     optional: load.optional,
+    questionIdProblems: options.questionIdProblems ?? [],
     status: load.status,
     timeZone: options.timeZone,
   });
@@ -920,6 +928,8 @@ export function renderThreadStatus(
      */
     delta?: ReportDelta | null;
     now: Date;
+    /** home-base-1rxt0.4 D4: why some questions got no id in this run. */
+    questionIdProblems?: readonly string[];
     style: OutputStyle;
     timeZone?: string;
   },
@@ -1045,6 +1055,40 @@ export async function runThreadStatus(
   // <other>` saves nothing, because a session on an old SDK saves nothing itself
   // and would be held to a block its own paste can never match.
   const own = env.CLAUDE_CODE_SESSION_ID === load.model.sessionId;
+  // home-base-1rxt0.4 D4: an open question with no id (filed before ids
+  // existed, or when its number could not be worked out) gets one now, once.
+  // In the session's own run only, like the saves below, and before anything is
+  // rendered, so the block printed and the block saved hold the same ids.
+  let questionIdProblems: string[] = [];
+  const sessionBead = load.model.beads.session;
+  if (own && sessionBead != null) {
+    const ids = assignMissingQuestionIds({
+      beadsDir: sessionBead.beadsDir,
+      env,
+      questions: openQuestions(load.model),
+      session: sessionBead,
+    });
+    questionIdProblems = ids.problems;
+    const added = new Map(ids.assigned.map((entry) => [entry.id, entry.label]));
+    if (added.size > 0) {
+      const {model} = load;
+      load = {
+        ...load,
+        model: {
+          ...model,
+          beads: {
+            ...model.beads,
+            questions: model.beads.questions.map((question) => {
+              const label = added.get(question.id);
+              return label == null
+                ? question
+                : {...question, labels: [...question.labels, label]};
+            }),
+          },
+        },
+      };
+    }
+  }
   // home-base-1rxt0.4 D6: ONE delta for the save and the print, so the block
   // the trim guard holds is the block printed. The last report is read before
   // this run's own snapshot is saved, though the order does not matter: this
@@ -1068,6 +1112,7 @@ export async function runThreadStatus(
   const view = statusPartOneView(load, {
     delta,
     now,
+    questionIdProblems,
     timeZone: options.timeZone,
   });
   // Only the session's own run saves, like the block below: a `--session
@@ -1099,7 +1144,7 @@ export async function runThreadStatus(
     }
   }
   await writeStdout(
-    `${renderThreadStatus(load, {delta, now, style, timeZone: options.timeZone})}\n`,
+    `${renderThreadStatus(load, {delta, now, questionIdProblems, style, timeZone: options.timeZone})}\n`,
   );
   return 0;
 }

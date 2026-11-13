@@ -544,7 +544,7 @@ describe('thread status: repeat reports (D1, D2, D3, D6)', () => {
     expect(inFull(first, 'Keep the old export a week?')).toBe(false);
     expect(inFull(first, 'Gzip the output?')).toBe(false);
     expect(questionLine(first, w.questions.p3)).toMatch(
-      /^4\. ⚪ P3 · \[Answer\] \*\*Gzip the output\?\*\* \(t-[^)]+\)$/u,
+      /^4\. \[BD4\] ⚪ P3 · \[Answer\] \*\*Gzip the output\?\*\* \(t-[^)]+\)$/u,
     );
     expect(first).toContain(
       '*Questions 3 and 4 have not changed since the last report, so each is on one line. Ask for the full report to see them in full.*',
@@ -595,16 +595,18 @@ describe('thread status: repeat reports (D1, D2, D3, D6)', () => {
     const again = await status(w, at(6));
     expect(block(again)).toBe(block(first));
     expect(questionLine(first, outcome.id)).toContain(
-      `5. ${NEW_MARK} ⚪ P4 · `,
+      `5. ${NEW_MARK} [BD5] ⚪ P4 · `,
     );
     expect(inFull(first, 'Rename the job?')).toBe(true);
     expect(questionLine(first, w.questions.p3)).toContain(
-      `4. ${CHANGED_MARK} ⚪ P3 · `,
+      `4. ${CHANGED_MARK} [BD4] ⚪ P3 · `,
     );
     // Changed, so in full: its context (filed under the old title) is shown.
     expect(first).toContain('Context for Gzip the output?');
     // Unchanged: the P2 is one line and carries no marker.
-    expect(questionLine(first, w.questions.p2)).toMatch(/^3\. 🟡 P2 · /u);
+    expect(questionLine(first, w.questions.p2)).toMatch(
+      /^3\. \[BD3\] 🟡 P2 · /u,
+    );
     expect(questionLine(first, request.id)).toContain(
       `${NEW_MARK} 🔲 **Write the runbook**`,
     );

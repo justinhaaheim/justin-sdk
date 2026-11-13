@@ -150,11 +150,20 @@ function markPrefix(shown: QuestionShown | null): string {
   return shown?.mark == null ? '' : `${markEmoji(shown.mark)} `;
 }
 
+/**
+ * home-base-1rxt0.4 D4: the question's id in brackets, after the marker and
+ * before the badge, with the space that follows it. '' when it has none.
+ */
+function idPrefix(id: null | string): string {
+  return id == null ? '' : `[${id}] `;
+}
+
 function markdownItem(
   question: AskBeadView,
   number: number,
   gap: ItemGap,
   shown: QuestionShown | null,
+  id: null | string,
 ): string {
   const marker = `${number}. `;
   const indent = pad(marker.length);
@@ -162,7 +171,7 @@ function markdownItem(
   const header =
     parsed.ok && parsed.ask.header != null ? `${parsed.ask.header} · ` : '';
   const form = parsed.ok ? `${formTag(parsed.ask)} ` : '';
-  const first = `${marker}${markPrefix(shown)}${priorityBadge(question.priority)} · ${form}${header}**${question.title}** (${question.id})`;
+  const first = `${marker}${markPrefix(shown)}${idPrefix(id)}${priorityBadge(question.priority)} · ${form}${header}**${question.title}** (${question.id})`;
   // home-base-1rxt0.4 D3: an unchanged P2 to P4 question is its first line.
   if (shown?.compact === true) return first;
   const blocks: Block[] = [];
@@ -214,6 +223,7 @@ function ansiItem(
   number: number,
   style: OutputStyle,
   shown: QuestionShown | null,
+  id: null | string,
 ): string {
   const {color, width} = style;
   const parsed = parseAsk(question.description);
@@ -228,7 +238,7 @@ function ansiItem(
     : '';
   const marker = `${number}. `;
   const first = wrap(
-    `${paint(marker, ['bold'], color)}${markPrefix(shown)}${paint(priorityBadge(question.priority), badgeStyles(question.priority), color)} · ${form}${header}${paint(question.title, ['bold'], color)} ${paint(`(${question.id})`, ['dim'], color)}`,
+    `${paint(marker, ['bold'], color)}${markPrefix(shown)}${id == null ? '' : `${paint(`[${id}]`, ['bold'], color)} `}${paint(priorityBadge(question.priority), badgeStyles(question.priority), color)} · ${form}${header}${paint(question.title, ['bold'], color)} ${paint(`(${question.id})`, ['dim'], color)}`,
     BODY_COLUMN,
     BODY_COLUMN + marker.length,
   );
@@ -306,10 +316,12 @@ export function renderAsk(
   style: OutputStyle,
   gap: ItemGap = 1,
   shown: QuestionShown | null = null,
+  /** home-base-1rxt0.4 D4: the text for its brackets (`BD7`), or null. */
+  id: null | string = null,
 ): string {
   return style.color
-    ? ansiItem(question, number, style, shown)
-    : markdownItem(question, number, gap, shown);
+    ? ansiItem(question, number, style, shown, id)
+    : markdownItem(question, number, gap, shown, id);
 }
 
 /**
@@ -320,10 +332,15 @@ export function renderAsk(
  * `shown` (home-base-1rxt0.4, `thread status` only): per question id, its
  * new or changed marker and whether it is one line. A question it does not
  * name is in full and unmarked.
+ *
+ * `ids` (home-base-1rxt0.4 D4): per question id, what its brackets hold
+ * (`BD7`, or its bead id when its short id cannot be shown). A question it
+ * does not name has no brackets.
  */
 export function renderAsks(
   questions: readonly AskBeadView[],
   options: {
+    ids?: ReadonlyMap<string, string>;
     itemGap?: ItemGap;
     shown?: ReadonlyMap<string, QuestionShown>;
     style: OutputStyle;
@@ -337,6 +354,7 @@ export function renderAsks(
       options.style,
       gap,
       options.shown?.get(question.id) ?? null,
+      options.ids?.get(question.id) ?? null,
     ),
   );
   return !options.style.color && gap === 2

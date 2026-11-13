@@ -54,6 +54,8 @@ import {
   renderAskDescription,
 } from './ask-format';
 import {priorityBadge, renderAsk} from './ask-render';
+import {nextQuestionIdLabel} from './question-id-assign';
+import {shortIdText} from './question-ids';
 import {
   REQUEST_LABEL,
   resolveSession,
@@ -230,6 +232,10 @@ export type ThreadAskOutcome =
       repair: Extract<SessionBeadRepair, {kind: 'repaired'}> | null;
       /** The request it is for (its `to:` label), or null when not linked. */
       request: {id: string; title: string} | null;
+      /** home-base-1rxt0.4 D4: its id (`BD7`), or null when it got none. */
+      shortId: null | string;
+      /** Why it got no id; null when it has one. */
+      shortIdWhy: null | string;
       /** Why it is not linked to a request, in words; null when it is. */
       unlinkedWhy: string | null;
     }
@@ -371,6 +377,17 @@ export async function fileAsk(
     }
   }
 
+  // home-base-1rxt0.4 D4: the next id of this session's chain, written in the
+  // same br write that files the question. No id is never fatal: the question
+  // is filed without one, the reason is printed, and the next `thread status`
+  // gives it one.
+  const nextId = nextQuestionIdLabel({
+    beadsDir: resolution.beadsDir,
+    env,
+    session: resolution.bead,
+  });
+  if (nextId.kind === 'label') labels.push(nextId.label);
+
   const description = renderAskDescription(valid.fields);
   const created = brCreate(target, {
     description,
@@ -396,6 +413,8 @@ export async function fileAsk(
     question: valid.question,
     repair,
     request,
+    shortId: nextId.kind === 'label' ? shortIdText(nextId.number) : null,
+    shortIdWhy: nextId.kind === 'none' ? nextId.reason : null,
     unlinkedWhy,
   };
 }
@@ -419,7 +438,12 @@ export function describeAskOutcome(
       return {
         exitCode: 0,
         lines: [
-          `ask ${outcome.id} · ${priorityBadge(outcome.priority)} · filed under ${outcome.parent} (${askLinkWords(outcome)})`,
+          `ask ${outcome.id} · ${outcome.shortId == null ? '' : `${outcome.shortId} · `}${priorityBadge(outcome.priority)} · filed under ${outcome.parent} (${askLinkWords(outcome)})`,
+          ...(outcome.shortIdWhy == null
+            ? []
+            : [
+                `⚠️ No id like BD7 yet; the next thread status gives it one. Why: ${outcome.shortIdWhy}`,
+              ]),
           '',
           'Justin will see:',
           '',
@@ -435,6 +459,8 @@ export function describeAskOutcome(
             // Markdown when piped: Claude may paste it, and Claude Code drops
             // one empty line between list items (home-base-j8q3e.1.10 F7).
             2,
+            null,
+            outcome.shortId,
           ),
         ],
       };

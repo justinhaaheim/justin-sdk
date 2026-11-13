@@ -347,7 +347,7 @@ describe('G1: a question is a child of the session bead, linked to its request b
     expect(run.code).toBe(0);
     const id = /^ask (\S+) · /.exec(run.out)?.[1] ?? '';
     expect(run.out.split('\n')[0]).toBe(
-      `ask ${id} · ⚪ P3 · filed under ${w.sessionBead} (for ${r}: Find out why the export is slow)`,
+      `ask ${id} · BD1 · ⚪ P3 · filed under ${w.sessionBead} (for ${r}: Find out why the export is slow)`,
     );
     const shown = runBr(w.repo, ['show', id, '--json']);
     expect(shown.ok).toBe(true);

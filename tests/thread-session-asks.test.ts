@@ -567,7 +567,13 @@ describe('thread ask (real br)', () => {
     const issue = show(w, outcome.id);
     expect(issue.issueType).toBe('question');
     expect(issue.priority).toBe(2);
-    expect(issue.labels.sort()).toEqual(['ask', `sid:${SESSION}`]);
+    // home-base-1rxt0.4 D4: its id, the first of this session's chain.
+    expect(issue.labels.sort()).toEqual([
+      'ask',
+      `qid:${w.sessionBead}:1`,
+      `sid:${SESSION}`,
+    ]);
+    expect(outcome.shortId).toBe('BD1');
     expect(issue.title).toBe(VALID.question);
     expect(issue.id.startsWith(`${w.sessionBead}.`)).toBe(true);
     const parsed = parseAsk(issue.description);
@@ -577,10 +583,12 @@ describe('thread ask (real br)', () => {
     const printed = describeAskOutcome(outcome, PLAIN_STYLE);
     expect(printed.exitCode).toBe(0);
     expect(printed.lines[0]).toMatch(
-      new RegExp(`^ask ${outcome.id} · 🟡 P2 · filed under ${w.sessionBead}`),
+      new RegExp(
+        `^ask ${outcome.id} · BD1 · 🟡 P2 · filed under ${w.sessionBead}`,
+      ),
     );
     expect(printed.lines.join('\n')).toContain(
-      `1. 🟡 P2 · [Pick a/b] Export DB · **${VALID.question}** (${outcome.id})`,
+      `1. [BD1] 🟡 P2 · [Pick a/b] Export DB · **${VALID.question}** (${outcome.id})`,
     );
   });
 
@@ -923,7 +931,11 @@ describe('thread answer (Justin, in the terminal)', () => {
       id: filed.id,
       kind: 'answeredOne',
       reason: 'answer: b, but only for now',
+      shortId: filed.shortId,
+      title: filed.question,
     });
+    // home-base-1rxt0.4 D4: every filed question gets an id.
+    expect(filed.shortId).toMatch(/^BD[1-9][0-9]*$/u);
     expect(show(w, filed.id).closeReason).toBe('answer: b, but only for now');
     const again = await answerSessionQuestions({
       ask: filed.id,

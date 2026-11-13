@@ -97,6 +97,7 @@ import {parseInstant} from './answer-store';
 import {ARCHIVED_PREFIX, DONE_PREFIX} from './ask-format';
 import {renderAsks, sortAsks} from './ask-render';
 import {exportBehindWords} from './export-behind';
+import {questionIdsShown} from './question-ids';
 import {
   baselineProblem,
   compactQuestionsNote,
@@ -207,6 +208,16 @@ export interface PartOneView {
   messages: MessageView[];
   /** "1 of 3 requests done", or why the count is unknown. */
   progress: string;
+  /**
+   * home-base-1rxt0.4 D4: lines under the questions: a question shown by its
+   * bead id and why, and why ids could not be given. Empty when none.
+   */
+  questionIdNotes: string[];
+  /**
+   * home-base-1rxt0.4 D4: per question id, what its brackets hold (`BD7`, or
+   * its bead id when its short id cannot be shown). No entry: no brackets.
+   */
+  questionIds: ReadonlyMap<string, string>;
   /** home-base-1rxt0.4: per question id, its marker and whether it is one line. */
   questionShown: ReadonlyMap<string, QuestionShown>;
   /** The OPEN questions; `renderAsks` orders them, P0 first. */
@@ -462,6 +473,11 @@ export interface PartOneInput {
   now: Date;
   /** The dashboard's "Optional" line (`optionalLine`), null when none. */
   optional: OptionalLine | null;
+  /**
+   * home-base-1rxt0.4 D4: why some questions got no id in this run of
+   * `thread status`; absent or empty when every one has one.
+   */
+  questionIdProblems?: readonly string[];
   status: SessionStatus;
   /** IANA zone for times; undefined = this machine's. Tests pin it. */
   timeZone?: string;
@@ -734,6 +750,14 @@ export function partOneView(input: PartOneInput): PartOneView {
     shownById.set(question.id, shown);
     if (shown.compact) compactNumbers.push(index + 1);
   });
+  // home-base-1rxt0.4 D4: never one id twice in a report (questionIdsShown).
+  const ids = questionIdsShown(ordered);
+  const questionIdNotes = [
+    ...ids.notes,
+    ...(input.questionIdProblems ?? []).map(
+      (problem) => `⚠️ Question ids: ${problem}`,
+    ),
+  ].map(tildeText);
 
   // ---- Repo / Branch / Worktree / Context / … ----
   const gitFields: PartField[] = [
@@ -907,6 +931,10 @@ export function partOneView(input: PartOneInput): PartOneView {
       quote: message.quote,
     })),
     progress,
+    questionIdNotes,
+    questionIds: new Map(
+      [...ids.byId].map(([id, shown]) => [id, shown.text] as const),
+    ),
     questionShown: shownById,
     questions: openQuestions(model),
     questionsNote: compactQuestionsNote(compactNumbers),
@@ -1068,11 +1096,13 @@ function renderMarkdown(view: PartOneView): string {
       : spacedList([
           `## ${QUESTIONS_HEADING}`,
           renderAsks(view.questions, {
+            ids: view.questionIds,
             itemGap: 2,
             shown: view.questionShown,
             style: {color: false, width: null},
           }),
           view.questionsNote == null ? '' : `*${view.questionsNote}*`,
+          ...view.questionIdNotes.map((note) => `*${note}*`),
         ]);
   const [timesMarker, stateMarker, gitMarker, resumeMarker] =
     alternatingMarkers([view.times, view.state, view.git, view.resume]);
@@ -1243,14 +1273,20 @@ function renderAnsi(view: PartOneView, style: OutputStyle): string {
       ? ''
       : spacedList([
           sectionHeader(QUESTIONS_HEADING, {color: style.color, emoji: '🙋'}),
-          renderAsks(view.questions, {shown: view.questionShown, style}),
-          view.questionsNote == null
-            ? ''
-            : wrapHanging(paint(view.questionsNote, ['italic'], style.color), {
-                hang: BODY_COLUMN,
-                indent: BODY_COLUMN,
-                width: style.width,
-              }),
+          renderAsks(view.questions, {
+            ids: view.questionIds,
+            shown: view.questionShown,
+            style,
+          }),
+          ...[view.questionsNote, ...view.questionIdNotes].map((note) =>
+            note == null
+              ? ''
+              : wrapHanging(paint(note, ['italic'], style.color), {
+                  hang: BODY_COLUMN,
+                  indent: BODY_COLUMN,
+                  width: style.width,
+                }),
+          ),
         ]);
   const sections = [
     ansiFields([view.session], labelWidth, style),

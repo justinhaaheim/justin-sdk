@@ -92,50 +92,120 @@ function firstSessionNumber(
   return {kind: 'known', number: 0};
 }
 
-function walkBack(
+/** One backward walk's decisions; the walk itself is walkChainBack. */
+interface BackWalk<T> {
+  /** Every bead, before its predecessor is read; non-null ends the walk. */
+  at: (
+    current: {id: string; labels: readonly string[]},
+    steps: number,
+  ) => null | T;
+  /** The bead with no `continues:` label. */
+  first: (current: {id: string; labels: readonly string[]}, steps: number) => T;
+  unknown: (reason: string) => T;
+}
+
+/**
+ * Back through `continues:` from `start`. Two predecessors, a loop, a bead
+ * that cannot be read or a walk past `limit` is `walk.unknown`. Shared by the
+ * handoff number (D3) and the chain root of question ids (home-base-1rxt0.4
+ * D4), so the two never disagree on what a chain is.
+ */
+function walkChainBack<T>(
   start: {id: string; labels: readonly string[]},
-  readers: ChainReaders,
+  readers: Pick<ChainReaders, 'showBead'>,
   limit: number,
-): HandoffNumber {
+  walk: BackWalk<T>,
+): T {
   const seen = new Set<string>();
   let current = start;
   for (let steps = 0; ; steps += 1) {
     seen.add(current.id);
-    const stamped = stampedHandoffNumber(current.labels);
-    if (stamped.kind === 'number') {
-      return {kind: 'known', number: stamped.number + steps};
-    }
-    if (stamped.kind === 'unreadable') {
-      return unknown(`${current.id}: ${stamped.reason}`);
-    }
+    const stop = walk.at(current, steps);
+    if (stop != null) return stop;
     const predecessors = labelsWith(current.labels, CONTINUES_LABEL_PREFIX);
     const [predecessor] = predecessors;
-    if (predecessor == null) {
-      const first = firstSessionNumber(current, readers);
-      return first.kind === 'known'
-        ? {kind: 'known', number: first.number + steps}
-        : first;
-    }
+    if (predecessor == null) return walk.first(current, steps);
     if (predecessors.length > 1) {
-      return unknown(
+      return walk.unknown(
         `${current.id} names ${predecessors.length} predecessors (${predecessors.join(', ')})`,
       );
     }
     if (seen.has(predecessor)) {
-      return unknown(`the chain loops back to ${predecessor}`);
+      return walk.unknown(`the chain loops back to ${predecessor}`);
     }
     if (steps >= limit) {
-      return unknown(
+      return walk.unknown(
         `the chain is longer than ${limit} sessions; the walk stopped at ${current.id}`,
       );
     }
     const read = readers.showBead(predecessor);
     if (read.kind !== 'found') {
-      return unknown(
+      return walk.unknown(
         `${current.id} continues ${predecessor}, which could not be read: ${read.reason}`,
       );
     }
     current = {id: predecessor, labels: read.labels};
+  }
+}
+
+function walkBack(
+  start: {id: string; labels: readonly string[]},
+  readers: ChainReaders,
+  limit: number,
+): HandoffNumber {
+  return walkChainBack<HandoffNumber>(start, readers, limit, {
+    at: (current, steps) => {
+      const stamped = stampedHandoffNumber(current.labels);
+      if (stamped.kind === 'number') {
+        return {kind: 'known', number: stamped.number + steps};
+      }
+      if (stamped.kind === 'unreadable') {
+        return unknown(`${current.id}: ${stamped.reason}`);
+      }
+      return null;
+    },
+    first: (current, steps) => {
+      const first = firstSessionNumber(current, readers);
+      return first.kind === 'known'
+        ? {kind: 'known', number: first.number + steps}
+        : first;
+    },
+    unknown,
+  });
+}
+
+export type ChainRoot =
+  | {kind: 'known'; root: string}
+  | {kind: 'unknown'; reason: string};
+
+/**
+ * home-base-1rxt0.4 D4: the first session bead of `start`'s chain, the one
+ * with no `continues:` label, where question ids are numbered from. Unlike the
+ * handoff number it walks past `handoff-number:` labels, and it reads no
+ * message log: a first session that began on a kickoff and never linked (F12)
+ * is its own root until it links. Never throws.
+ */
+export function chainRootOf(
+  start: {id: string; labels: readonly string[]},
+  readers: Pick<ChainReaders, 'showBead'>,
+  options: {limit?: number} = {},
+): ChainRoot {
+  try {
+    return walkChainBack<ChainRoot>(
+      start,
+      readers,
+      options.limit ?? NUMBER_WALK_LIMIT,
+      {
+        at: () => null,
+        first: (current) => ({kind: 'known', root: current.id}),
+        unknown: (reason) => ({kind: 'unknown', reason}),
+      },
+    );
+  } catch (error) {
+    return {
+      kind: 'unknown',
+      reason: `reading the chain threw: ${String(error)}`,
+    };
   }
 }
 

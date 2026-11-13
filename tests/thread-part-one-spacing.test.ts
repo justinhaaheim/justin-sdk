@@ -77,6 +77,8 @@ const VIEW: PartOneView = {
     {label: 'Your last message', note: null, quote: '"keep going"'},
   ],
   progress: '1 of 2 requests done',
+  questionIdNotes: [],
+  questionIds: new Map(),
   questionShown: new Map(),
   questions: [
     question('t-1.3', 0, 'Which bucket should the runbook name?', {

@@ -80,6 +80,8 @@ describe('F7: two empty lines between sibling list items in pasted markdown', ()
         question: 'Which bucket?',
         repair: null,
         request: null,
+        shortId: null,
+        shortIdWhy: null,
         unlinkedWhy: 'no request named',
       },
       PLAIN_STYLE,

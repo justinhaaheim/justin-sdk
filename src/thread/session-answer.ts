@@ -14,7 +14,9 @@
  *       Each answer is written before the next question is shown, so a ctrl-C
  *       mid-walk loses nothing already typed.
  *   thread answer --ask <id> "<text>"
- *       answers one question, no prompt.
+ *       answers one question, no prompt. <id> is its bead id, or its short id
+ *       (`BD7`, home-base-1rxt0.4 D4): the open question of this session
+ *       that its report shows with that id.
  *
  * The answer is the question bead's CLOSE REASON, never a comment (critical
  * rule 3.2). The web answer page is not retargeted in this push (D5).
@@ -47,12 +49,20 @@ import {
   QUESTION_BEAD_TYPE,
 } from './ask-format';
 import {renderAsk, sortAsks} from './ask-render';
+import {
+  parseShortId,
+  questionIdOf,
+  questionIdsShown,
+  shortIdText,
+} from './question-ids';
 import {readSessionIndex} from './session-index';
 import {
   selectSession,
   sessionBeadsKnob,
   sessionBeadsLabelled,
 } from './session-select';
+import {isOpen} from './session-status';
+import {readSessionTree} from './session-tree';
 
 /** How the walk talks to the terminal. Tests inject a scripted one. */
 export interface AnswerTerminal {
@@ -289,7 +299,15 @@ export async function walkQuestions(
 }
 
 export type SessionAnswerOutcome =
-  | {id: string; kind: 'answeredOne'; reason: string}
+  | {
+      id: string;
+      kind: 'answeredOne';
+      reason: string;
+      /** Its id (`BD7`), or null when it has none. */
+      shortId: null | string;
+      /** The question, so the answer can be checked against it. */
+      title: string;
+    }
   | {kind: 'disabled'; reason: string}
   | {kind: 'failed'; reason: string}
   | {kind: 'nothingOpen'; problems: string[]; session: string}
@@ -298,6 +316,80 @@ export type SessionAnswerOutcome =
 
 function sessionLabel(session: FoundSession): string {
   return `${session.bead.id} "${session.bead.title}"`;
+}
+
+/**
+ * home-base-1rxt0.4 D4: the open question of this session that its report
+ * shows as `BD<short>`. Resolved over the same rule the report uses
+ * (questionIdsShown), so a number two questions share names the one shown with
+ * it, never the other. Not found is refused, never guessed.
+ */
+function resolveShortId(input: {
+  env: EnvLike;
+  sessionId: null | string;
+  short: number;
+}):
+  | {db: string; issue: BrIssue; kind: 'found'; shortId: string}
+  | {kind: 'failed'; reason: string} {
+  const text = shortIdText(input.short);
+  const selection = selectSession({
+    env: input.env,
+    selector: null,
+    sessionIdOption: input.sessionId,
+  });
+  if (selection.kind !== 'found') {
+    const why =
+      selection.kind === 'checkoutMissing'
+        ? `this session's beads live in ${selection.checkoutPath}, which no longer exists`
+        : selection.reason;
+    return {
+      kind: 'failed',
+      reason: `${text} is the id of a question in one session's report, and which session could not be told: ${why}. Pass --session <session id>, or answer by the bead id`,
+    };
+  }
+  // The questions the report reads, the same way (the export beside each DB
+  // the sessions index names), so the id means what the report showed. A
+  // `br list` of them took 17 s on home-base's DB (measured 2026-11-12).
+  const {session} = selection;
+  const tree = readSessionTree({
+    beadsDirs: [
+      ...new Set([
+        session.beadsDir,
+        ...session.sightings.map((entry) => entry.beadsDir),
+      ]),
+    ],
+    sessionBeadId: session.bead.id,
+    sessionId: session.sessionId,
+  });
+  if (tree.problems.length > 0) {
+    return {
+      kind: 'failed',
+      reason: `${text} could not be looked up, because some of this session's questions could not be read: ${tree.problems.join('; ')}. Answer by the bead id`,
+    };
+  }
+  const open = sortAsks(tree.questions.filter(isOpen));
+  const shown = questionIdsShown(open);
+  const matches = open.filter(
+    (question) => shown.byId.get(question.id)?.text === text,
+  );
+  const [only] = matches;
+  if (only != null && matches.length === 1) {
+    const db = resolveRecordedBeadsDb(only.beadsDir);
+    if (db.kind !== 'found') {
+      return {
+        kind: 'failed',
+        reason: `${text} is ${only.id}, whose beads DB in ${only.beadsDir} could not be found${db.kind === 'failed' ? `: ${db.reason}` : ''}`,
+      };
+    }
+    return {db: db.db, issue: only, kind: 'found', shortId: text};
+  }
+  const ids = open
+    .map((question) => shown.byId.get(question.id)?.text)
+    .filter((id): id is string => id != null);
+  return {
+    kind: 'failed',
+    reason: `no open question of ${sessionLabel(selection.session)} is shown as ${text}${ids.length > 0 ? ` (its open questions: ${ids.join(', ')})` : ''}`,
+  };
 }
 
 /** The whole command, minus printing the outcome. */
@@ -321,26 +413,52 @@ export async function answerSessionQuestions(
           'give the question id and the answer: thread answer --ask <id> "<answer>"',
       };
     }
-    const located = locateBead(id, cwd, env);
-    if (located.kind === 'failed')
-      return {kind: 'failed', reason: located.reason};
-    if (located.kind === 'notFound') {
-      return {
-        kind: 'failed',
-        reason: `${id} was not found${located.searched.length > 0 ? ` in ${located.searched.join(' or ')}` : ' (no beads DB to look in: not a recorded session and no beads workspace here)'}`,
+    let target: {db: string; issue: BrIssue; shortId: null | string};
+    const short = parseShortId(id);
+    if (short != null) {
+      const resolved = resolveShortId({
+        env,
+        sessionId: options.sessionId,
+        short,
+      });
+      if (resolved.kind === 'failed') {
+        return {kind: 'failed', reason: resolved.reason};
+      }
+      target = resolved;
+    } else {
+      const located = locateBead(id, cwd, env);
+      if (located.kind === 'failed')
+        return {kind: 'failed', reason: located.reason};
+      if (located.kind === 'notFound') {
+        return {
+          kind: 'failed',
+          reason: `${id} was not found${located.searched.length > 0 ? ` in ${located.searched.join(' or ')}` : ' (no beads DB to look in: not a recorded session and no beads workspace here)'}`,
+        };
+      }
+      const read = questionIdOf(located.issue.labels);
+      target = {
+        db: located.db,
+        issue: located.issue,
+        shortId: read.kind === 'one' ? shortIdText(read.number) : null,
       };
     }
-    const refusal = refuseNonQuestion(located.issue);
+    const refusal = refuseNonQuestion(target.issue);
     if (refusal != null) return {kind: 'failed', reason: refusal};
     const reason = answerReason(text);
-    const closed = brClose({db: located.db, env}, id, reason);
+    const closed = brClose({db: target.db, env}, target.issue.id, reason);
     if (closed.kind === 'failed') {
       return {
         kind: 'failed',
-        reason: `${id} was NOT recorded: ${describeBrFailed(closed)}`,
+        reason: `${target.issue.id} was NOT recorded: ${describeBrFailed(closed)}`,
       };
     }
-    return {id, kind: 'answeredOne', reason};
+    return {
+      id: target.issue.id,
+      kind: 'answeredOne',
+      reason,
+      shortId: target.shortId,
+      title: target.issue.title,
+    };
   }
 
   // ---- the walk: a session's open questions, or one question ----
@@ -430,7 +548,11 @@ export function describeSessionAnswerOutcome(outcome: SessionAnswerOutcome): {
     case 'answeredOne':
       return {
         exitCode: 0,
-        lines: [`✓ ${outcome.id} recorded: ${outcome.reason}`],
+        lines: [
+          `✓ ${outcome.id}${outcome.shortId == null ? '' : ` [${outcome.shortId}]`} recorded: ${outcome.reason}`,
+          // home-base-1rxt0.4 D4: the question too, so a wrong id shows.
+          `  Question: ${outcome.title}`,
+        ],
       };
     case 'nothingOpen':
       return {

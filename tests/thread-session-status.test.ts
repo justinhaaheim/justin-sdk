@@ -255,10 +255,11 @@ const ANSI = /\u001b\[[0-9;]*m/g;
 
 /**
  * The ONE sanctioned ` · `: the ask renderer's badge line, `1. 🛑 P0 · …`
- * (home-base-vzwbj.4.3 brief). Every other line joining fields with ` · ` is
+ * (home-base-vzwbj.4.3 brief), with the 🆕/🔄 marker and the `[BD7]` id
+ * that may follow the number (home-base-1rxt0.4 D2, D4). Every other line joining fields with ` · ` is
  * the long row Justin rejected ("Do NOT lay things out in long rows").
  */
-const ASK_BADGE_LINE = /^\s*\d+\. \S+ P[0-4?] · /u;
+const ASK_BADGE_LINE = /^\s*\d+\. (?:\S+ )?(?:\[[^\]\s]+\] )?\S+ P[0-4?] · /u;
 
 function dotRows(text: string): string[] {
   return text
