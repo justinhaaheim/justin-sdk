@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.59.0",
+  "version": "0.60.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -47,6 +47,7 @@
     "./cmux": "./src/thread/cmux.ts",
     "./date": "./src/date.ts",
     "./input-drafts": "./src/thread/input-drafts.ts",
+    "./job-health": "./src/job-health.ts",
     "./open-colors": "./src/thread/open-colors.ts",
     "./pane-join": "./src/thread/pane-join.ts",
     "./session-cost": "./src/session-cost.ts",

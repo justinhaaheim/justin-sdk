@@ -1061,6 +1061,9 @@ function statusWorld(knobs: Record<string, unknown>): StatusWorld {
     }),
   );
   const env: Record<string, string | undefined> = {
+    // An empty chores dir (home-base-1rxt0.10): no Jobs line from this Mac's
+    // real health file in the status block.
+    CHORES_STATE_DIR: join(sb.path, 'chores-state'),
     CLAUDE_CODE_ENTRYPOINT: 'cli',
     CLAUDE_CODE_SESSION_ID: SESSION,
     CMUX_SURFACE_ID: undefined,

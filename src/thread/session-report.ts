@@ -30,6 +30,7 @@
  */
 
 import type {OutputStyle} from '../cli-style';
+import type {JobHealthNotice} from '../job-health';
 import type {PickupLabelsRead, PickupState} from './handoff-auto-pickup';
 import type {ChainReaders} from './handoff-chain';
 import type {MessageLine} from './message-log';
@@ -59,6 +60,7 @@ import {
   spacedList,
   wrapHanging,
 } from '../cli-style';
+import {jobHealthNotice, readJobHealth} from '../job-health';
 import {SDK_HANDOFF_CALL, sdkRun} from '../sdk-invocation';
 import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
@@ -187,6 +189,11 @@ export type ReportLoad =
        * verdict name the handoff call (home-base-jm5kg.8).
        */
       handoffSuccessor: boolean;
+      /**
+       * home-base-1rxt0.10 D5: the chores health file, read now, for Part 1's
+       * Jobs line. Null: nothing broken, or chores never ran on this Mac.
+       */
+      jobHealth: JobHealthNotice | null;
       kind: 'loaded';
       /**
        * home-base-idnon: the mayor mark and handoff number for the status
@@ -367,6 +374,7 @@ async function loadForReport(input: {
     counts,
     created,
     handoffSuccessor: knob.handoffSuccessor,
+    jobHealth: jobHealthNotice(readJobHealth(input.env), input.now),
     kind: 'loaded',
     marks:
       model.beads.session == null
@@ -869,6 +877,7 @@ function statusPartOneView(
   return partOneView({
     action: load.action,
     counts: load.counts,
+    jobs: load.jobHealth,
     marks: load.marks,
     model: load.model,
     now: options.now,
@@ -1142,6 +1151,7 @@ export function renderSessionShow(
     partOneView({
       action: load.action,
       counts: load.counts,
+      jobs: load.jobHealth,
       marks: load.marks,
       model,
       now,

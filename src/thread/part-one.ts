@@ -58,6 +58,7 @@
  */
 
 import type {OutputStyle} from '../cli-style';
+import type {JobHealthNotice} from '../job-health';
 import type {ActionLine, OptionalLine} from './session-card';
 import type {SessionCommits} from './session-commits';
 import type {SessionModel} from './session-model';
@@ -79,6 +80,7 @@ import {
   spacedList,
   wrapHanging,
 } from '../cli-style';
+import {JOB_HEALTH_DETAILS_COMMAND, jobHealthReportText} from '../job-health';
 import {parseInstant} from './answer-store';
 import {ARCHIVED_PREFIX, DONE_PREFIX} from './ask-format';
 import {renderAsks, sortAsks} from './ask-render';
@@ -393,6 +395,12 @@ export interface PartOneInput {
   action: ActionLine;
   counts: StatusCounts;
   /**
+   * home-base-1rxt0.10 D5: what the chores health file says about the
+   * recurring jobs on this Mac (job-health.ts). Null or absent: nothing to
+   * show, so no Jobs line.
+   */
+  jobs?: JobHealthNotice | null;
+  /**
    * home-base-idnon: the Session line's marks, the number walked by the
    * caller (walkedSessionMarks); absent: from the bead's labels alone.
    */
@@ -596,6 +604,16 @@ export function partOneView(input: PartOneInput): PartOneView {
     state.push(
       field('Optional', input.optional.text, ' ', {
         code: input.optional.command,
+      }),
+    );
+  }
+  // home-base-1rxt0.10 D5: one line, near the top, while a recurring job on
+  // this Mac is broken or its health cannot be vouched for. It is the channel
+  // that reaches the iPhone app, and it reads the same in every repo.
+  if (input.jobs != null) {
+    state.push(
+      field('Jobs', jobHealthReportText(input.jobs, timeZone), ' — details: ', {
+        code: JOB_HEALTH_DETAILS_COMMAND,
       }),
     );
   }

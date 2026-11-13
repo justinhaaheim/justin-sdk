@@ -24,7 +24,8 @@ import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, test} from 'bun:test';
 import {execFileSync} from 'child_process';
-import {mkdirSync, readFileSync, rmSync, writeFileSync} from 'fs';
+import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'fs';
+import {tmpdir} from 'os';
 import {basename, dirname, join} from 'path';
 
 import {brClose, brCreate, brShow, runBr} from '../src/beads/br';
@@ -120,6 +121,9 @@ function world(
     JSON.stringify({componentConfig: {thread: options.knobs ?? ON}}),
   );
   const env: Record<string, string | undefined> = {
+    // An empty chores dir (home-base-1rxt0.10): no Jobs line from this Mac's
+    // real health file in any Part 1 below.
+    CHORES_STATE_DIR: join(sb.path, 'chores-state'),
     CLAUDE_CODE_ENTRYPOINT: 'cli',
     CLAUDE_CODE_SESSION_ID: SESSION,
     CMUX_SURFACE_ID:
@@ -1128,6 +1132,65 @@ describe('fixture 1: a question-only session', () => {
     expect(dotRows(ansi)).toEqual([]);
     expect(markdown).not.toContain('Requests:');
     expect(markdown).not.toContain('Questions for you:');
+  });
+
+  test('the Jobs line (home-base-1rxt0.10 D5): read from CHORES_STATE_DIR, shown under the state fields, absent when nothing is broken', async () => {
+    const w = questionOnly();
+    const choresDir = mkdtempSync(join(tmpdir(), 'status-jobs-'));
+    writeFileSync(
+      join(choresDir, 'health.json'),
+      JSON.stringify({
+        at: new Date(NOW.getTime() - 60_000).toISOString(),
+        checked: 10,
+        problems: [
+          {
+            id: 'life-daily-run',
+            kind: 'failing',
+            name: 'life daily run',
+            reason: '13 failed',
+            since: '2026-10-31T07:00:00.000Z',
+          },
+        ],
+        version: 1,
+      }),
+    );
+    const view = (load: Awaited<ReturnType<typeof report>>) =>
+      renderPartOne(
+        partOneView({
+          action: load.action,
+          counts: load.counts,
+          jobs: load.jobHealth,
+          model: load.model,
+          now: NOW,
+          optional: load.optional,
+          status: load.status,
+          timeZone: 'America/Los_Angeles',
+        }),
+        PLAIN_STYLE,
+      );
+    const broken = await loadSessionReport({
+      asIfYielded: false,
+      cwd: w.repo,
+      env: {...w.env, CHORES_STATE_DIR: choresDir},
+      now: NOW,
+      selector: null,
+      sessionId: null,
+    });
+    if (broken.kind !== 'loaded') throw new Error(broken.kind);
+    expect(broken.jobHealth?.kind).toBe('broken');
+    const lines = view(broken).split('\n');
+    const jobs = lines.findIndex((line) => line.includes('**Jobs:**'));
+    expect(lines[jobs]).toContain(
+      '⚠️ life daily run failing since 2026-10-31 — details: `chores`',
+    );
+    expect(jobs).toBeGreaterThan(
+      lines.findIndex((line) => line.includes('**You need to:**')),
+    );
+    // Negative control: the preload's empty chores dir is "never ran here".
+    const quiet = await report(w, false);
+    expect(quiet.jobHealth).toBeNull();
+    expect(view(quiet)).not.toContain('Jobs:');
+    rmSync(choresDir, {force: true, recursive: true});
   });
 
   test('thread status: Part 1, "Nothing to mark.", the verdict', async () => {
