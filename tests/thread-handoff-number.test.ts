@@ -69,26 +69,26 @@ const TITLE = 'migrate the db';
 describe('D1: the exact names', () => {
   test('a mayor after one handoff', () => {
     expect(sessionDisplayName('HOME', TITLE, {handoff: 1, mayor: true})).toBe(
-      '[MAYOR] [HOME] H1 migrate the db',
+      '[MAYOR][HOME][#1] migrate the db',
     );
   });
 
   test('an ordinary session after two handoffs', () => {
     expect(sessionDisplayName('HOME', TITLE, {handoff: 2, mayor: false})).toBe(
-      '[HOME] H2 migrate the db',
+      '[HOME][#2] migrate the db',
     );
   });
 
   test('a number that cannot be established', () => {
     expect(
       sessionDisplayName('HOME', TITLE, {handoff: 'unknown', mayor: false}),
-    ).toBe('[HOME] H? migrate the db');
+    ).toBe('[HOME][#?] migrate the db');
   });
 
   test('a first mayor session shows no number', () => {
     expect(
       sessionDisplayName('HOME', TITLE, {handoff: null, mayor: true}),
-    ).toBe('[MAYOR] [HOME] migrate the db');
+    ).toBe('[MAYOR][HOME] migrate the db');
   });
 
   test('a first ordinary session shows no marks, passed or not', () => {
@@ -105,13 +105,13 @@ describe('D2: the marks come from labels alone', () => {
 
   test('a number label gives its number, with or without continues:', () => {
     expect(name([`${NUMBER_LABEL}3`, 'continues:t-a'])).toBe(
-      '[HOME] H3 migrate the db',
+      '[HOME][#3] migrate the db',
     );
-    expect(name([`${NUMBER_LABEL}3`])).toBe('[HOME] H3 migrate the db');
+    expect(name([`${NUMBER_LABEL}3`])).toBe('[HOME][#3] migrate the db');
   });
 
-  test('continues: with no number label gives H?', () => {
-    expect(name(['continues:t-a'])).toBe('[HOME] H? migrate the db');
+  test('continues: with no number label gives [#?]', () => {
+    expect(name(['continues:t-a'])).toBe('[HOME][#?] migrate the db');
   });
 
   test('neither gives no mark', () => {
@@ -119,12 +119,12 @@ describe('D2: the marks come from labels alone', () => {
   });
 
   test('the mayor label gives the mayor mark, whatever else is there', () => {
-    expect(name([MAYOR_ROLE_LABEL])).toBe('[MAYOR] [HOME] migrate the db');
+    expect(name([MAYOR_ROLE_LABEL])).toBe('[MAYOR][HOME] migrate the db');
     expect(name([MAYOR_ROLE_LABEL, `${NUMBER_LABEL}1`, 'continues:t-a'])).toBe(
-      '[MAYOR] [HOME] H1 migrate the db',
+      '[MAYOR][HOME][#1] migrate the db',
     );
     expect(name([MAYOR_ROLE_LABEL, 'continues:t-a'])).toBe(
-      '[MAYOR] [HOME] H? migrate the db',
+      '[MAYOR][HOME][#?] migrate the db',
     );
   });
 
@@ -138,13 +138,13 @@ describe('D2: the marks come from labels alone', () => {
     [`${NUMBER_LABEL}0`],
     [`${NUMBER_LABEL}-1`],
     [`${NUMBER_LABEL}1.5`],
-  ])('an unreadable label %s gives H?, never no mark', (label) => {
-    expect(name([label])).toBe('[HOME] H? migrate the db');
+  ])('an unreadable label %s gives [#?], never no mark', (label) => {
+    expect(name([label])).toBe('[HOME][#?] migrate the db');
   });
 
-  test('two number labels give H?: neither is trusted', () => {
+  test('two number labels give [#?]: neither is trusted', () => {
     expect(name([`${NUMBER_LABEL}2`, `${NUMBER_LABEL}3`])).toBe(
-      '[HOME] H? migrate the db',
+      '[HOME][#?] migrate the db',
     );
   });
 });
@@ -167,7 +167,7 @@ describe('home-base-pz6gc: the cut', () => {
   test('marks are kept: they are in front, and the title is what is cut', () => {
     const name = sessionName('HOME', LONG, {handoff: 12, mayor: true});
     expect(name).toHaveLength(80);
-    expect(name.startsWith('[MAYOR] [HOME] H12 yyy')).toBe(true);
+    expect(name.startsWith('[MAYOR][HOME][#12] yyy')).toBe(true);
     expect(name.endsWith('y...')).toBe(true);
   });
 
@@ -497,7 +497,7 @@ describe('D4: continuationLabels', () => {
     ).toEqual(['continues:t-a', `${NUMBER_LABEL}1`]);
   });
 
-  test('unknown writes no number label, so the reader shows H?', () => {
+  test('unknown writes no number label, so the reader shows [#?]', () => {
     const labels = continuationLabels({
       oldBeadId: 't-a',
       oldLabels: [],
@@ -509,7 +509,7 @@ describe('D4: continuationLabels', () => {
 });
 
 describe('D9: successorMarks', () => {
-  test('its own number plus 1, and H? when unknown', () => {
+  test('its own number plus 1, and [#?] when unknown', () => {
     expect(successorMarks([], {kind: 'known', number: 0})).toEqual({
       handoff: 1,
       mayor: false,
@@ -550,7 +550,7 @@ describe('D9: thread spawn', () => {
     expect(readers.shown).toEqual([]);
   });
 
-  test('--continues with a bead that cannot be read gives H?', () => {
+  test('--continues with a bead that cannot be read gives [#?]', () => {
     expect(
       spawnMarks({
         continues: 't-gone',
@@ -565,22 +565,22 @@ describe('D9: thread spawn', () => {
   test('the name carries the marks', () => {
     expect(
       spawnWorkspaceName('/nowhere/repo', TITLE, {}, {handoff: 3, mayor: true}),
-    ).toBe('[MAYOR] [REPO] H3 migrate the db');
+    ).toBe('[MAYOR][REPO][#3] migrate the db');
   });
 
   test('--name is always typed, with or without Remote Control', () => {
     const base = {
       kickoffFile: null,
       model: null,
-      name: '[HOME] H? x',
+      name: '[HOME][#?] x',
       remoteControl: false,
     };
     // home-base-v8z8d.3: every spawned session starts in auto mode.
     expect(spawnCommand(base)).toBe(
-      `claude --permission-mode auto --name '[HOME] H? x'`,
+      `claude --permission-mode auto --name '[HOME][#?] x'`,
     );
     expect(spawnCommand({...base, remoteControl: true})).toBe(
-      `claude --permission-mode auto --remote-control '[HOME] H? x' --name '[HOME] H? x'`,
+      `claude --permission-mode auto --remote-control '[HOME][#?] x' --name '[HOME][#?] x'`,
     );
   });
 });
@@ -783,7 +783,7 @@ function expectOneWrite(w: World, old: string, labels: string[]): void {
 }
 
 describe('D4: every link path stamps the number and the mayor in one write', () => {
-  test('linkContinuation: a first session`s successor is H1', () => {
+  test('linkContinuation: a first session`s successor is #1', () => {
     const w = world([A, B]);
     addLabels(w, A, [MAYOR_ROLE_LABEL]);
     link(w, A, B);
@@ -925,22 +925,26 @@ describe('D9: successorName, against real beads', () => {
     addLabels(w, A, [MAYOR_ROLE_LABEL]);
     link(w, A, B);
     expect(successorName(found(w, A), w.env)).toMatch(
-      /^\[MAYOR\] \[CHAIN-REPO\] H1 /u,
+      /^\[MAYOR\]\[CHAIN-REPO\]\[#1\] /u,
     );
     expect(successorName(found(w, B), w.env)).toMatch(
-      /^\[MAYOR\] \[CHAIN-REPO\] H2 /u,
+      /^\[MAYOR\]\[CHAIN-REPO\]\[#2\] /u,
     );
   });
 
-  test('H? when its own number is unknown', () => {
+  test('[#?] when its own number is unknown', () => {
     const w = world([A]);
     writeLog(A, kickoffText('/s/b.md', 't-old', null), w.env, w.repo);
-    expect(successorName(found(w, A), w.env)).toMatch(/^\[CHAIN-REPO\] H\? /u);
+    expect(successorName(found(w, A), w.env)).toMatch(
+      /^\[CHAIN-REPO\]\[#\?\] /u,
+    );
   });
 
-  test('an ordinary first session`s successor is H1 with no mayor mark', () => {
+  test('an ordinary first session`s successor is #1 with no mayor mark', () => {
     const w = world([A]);
-    expect(successorName(found(w, A), w.env)).toMatch(/^\[CHAIN-REPO\] H1 /u);
+    expect(successorName(found(w, A), w.env)).toMatch(
+      /^\[CHAIN-REPO\]\[#1\] /u,
+    );
   });
 });
 
@@ -1050,12 +1054,12 @@ describe('D9: the workspace name and the tab title', () => {
       workspaceToolPart(
         session([MAYOR_ROLE_LABEL, 'continues:t-a', `${NUMBER_LABEL}1`]),
       ),
-    ).toBe('[MAYOR] [HOME] H1 migrate the db');
+    ).toBe('[MAYOR][HOME][#1] migrate the db');
     expect(workspaceToolPart(session(['continues:t-a']))).toBe(
-      '[HOME] H? migrate the db',
+      '[HOME][#?] migrate the db',
     );
     expect(workspaceToolPart(session([MAYOR_ROLE_LABEL]))).toBe(
-      '[MAYOR] [HOME] migrate the db',
+      '[MAYOR][HOME] migrate the db',
     );
   });
 
@@ -1065,6 +1069,6 @@ describe('D9: the workspace name and the tab title', () => {
         ...session(['continues:t-a', `${NUMBER_LABEL}2`]),
         overarchingShort: {ok: true, value: 'db move'},
       }),
-    ).toBe('[HOME] H2 db move');
+    ).toBe('[HOME][#2] db move');
   });
 });

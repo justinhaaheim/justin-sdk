@@ -232,13 +232,13 @@ export function oldTabTitleOf(
 }
 
 /**
- * "[MAYOR] [TAG] H<n> <session title>", cut to SUCCESSOR_NAME_LIMIT characters
+ * "[MAYOR][TAG][#<n>] <session title>", cut to SUCCESSOR_NAME_LIMIT characters
  * (home-base-mbnjv.3 item 6): the repo TAG resolved the way workspace naming
  * and the inbox resolve it (sessionRepoOf, then resolveRepoTag from the
  * session's own checkout), so the successor's --name, --remote-control name,
  * its tab title and the workspace name all start with the same tag.
- * home-base-6n7my.2 D9: n is this session's own number plus 1, `H?` when its own
- * number is unknown, and [MAYOR] only when this session has the label.
+ * home-base-6n7my.2 D9: n is this session's own number plus 1, `[#?]` when its
+ * own number is unknown, and [MAYOR] only when this session has the label.
  */
 export function successorName(
   session: FoundSession,

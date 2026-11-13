@@ -49,7 +49,7 @@ const NAME_A = '[HOME-BASE] migrate the db';
 // What a successor with no number label shows (home-base-6n7my.2 D2). Two
 // sessions share a name only when both numbers are unknown; otherwise each
 // handoff changes it.
-const NAME_UNKNOWN = '[HOME-BASE] H? migrate the db';
+const NAME_UNKNOWN = '[HOME-BASE][#?] migrate the db';
 const NOW = new Date('2030-01-01T12:00:00.000Z');
 
 const sandboxes: Sandbox[] = [];
@@ -233,7 +233,7 @@ describe('syncWorkspaceName reads the owner and confirms both halves', () => {
       from: NAME_A,
       kind: 'renamed',
       rule: 'tools',
-      to: '[HOME-BASE] H1 continue the migration',
+      to: '[HOME-BASE][#1] continue the migration',
     });
     expect(
       cmux.calls.filter((call) => call[0] === 'rename-workspace'),
@@ -433,10 +433,10 @@ describe('the preview agrees with the sync', () => {
     expect(item.namer?.beadId).toBe('t-b');
     // home-base-idnon: the preview names what the sync writes
     // (workspaceToolPart), marks included. t-b continues t-a and carries no
-    // handoff-number label, so the labels say H? (home-base-6n7my.2 D2).
+    // handoff-number label, so the labels say [#?] (home-base-6n7my.2 D2).
     expect(item.verdict).toMatchObject({
       kind: 'rename',
-      to: '[HOME-BASE] H? continue the migration',
+      to: '[HOME-BASE][#?] continue the migration',
     });
   });
 
@@ -471,7 +471,7 @@ describe('syncTabTitle: a successor titles its own tab (D8)', () => {
       run: cmux.run,
       session: successor(),
     });
-    const title = '[HOME-BASE] H1 continue the migration';
+    const title = '[HOME-BASE][#1] continue the migration';
     expect(outcome).toEqual({
       kind: 'renamed',
       recordFailed: null,
@@ -514,7 +514,7 @@ describe('syncTabTitle: a successor titles its own tab (D8)', () => {
         'y'.repeat(200),
       ),
     });
-    const title = `[MAYOR] [HOME-BASE] H2 ${'y'.repeat(54)}...`;
+    const title = `[MAYOR][HOME-BASE][#2] ${'y'.repeat(54)}...`;
     expect(title).toHaveLength(80);
     expect(outcome).toMatchObject({kind: 'renamed', title});
   });
@@ -553,10 +553,10 @@ describe('syncTabTitle: a successor titles its own tab (D8)', () => {
         repoTag: 'HOME-BASE',
         title,
       }),
-    ).toBe(`↪ handed off to H1: ${NAME_A}`);
+    ).toBe(`↪ handed off to #1: ${NAME_A}`);
     expect(
       handedOffTabTitle({mayor: true, own: at(2), repoTag: 'HOME', title}),
-    ).toBe('↪ H2 handed off to H3: [MAYOR] [HOME] migrate the db');
+    ).toBe('↪ #2 handed off to #3: [MAYOR][HOME] migrate the db');
     expect(
       handedOffTabTitle({
         mayor: false,
@@ -564,7 +564,7 @@ describe('syncTabTitle: a successor titles its own tab (D8)', () => {
         repoTag: 'HOME',
         title,
       }),
-    ).toBe('↪ H? handed off to H?: [HOME] migrate the db');
+    ).toBe('↪ #? handed off to #?: [HOME] migrate the db');
     // The name part is cut like every session name.
     const long = handedOffTabTitle({
       mayor: false,
@@ -572,12 +572,12 @@ describe('syncTabTitle: a successor titles its own tab (D8)', () => {
       repoTag: 'HOME',
       title: 'y'.repeat(200),
     });
-    expect(long.startsWith('↪ H7 handed off to H8: [HOME] yyy')).toBe(true);
+    expect(long.startsWith('↪ #7 handed off to #8: [HOME] yyy')).toBe(true);
     expect(long.endsWith('...')).toBe(true);
     for (const written of [
-      `↪ handed off to H1: ${NAME_A}`,
-      '↪ H2 handed off to H3: [MAYOR] [HOME] x',
-      '↪ H? handed off to H?: [HOME] x',
+      `↪ handed off to #1: ${NAME_A}`,
+      '↪ #2 handed off to #3: [MAYOR][HOME] x',
+      '↪ #? handed off to #?: [HOME] x',
     ]) {
       expect(isHandedOffTabTitle(written)).toBe(true);
     }

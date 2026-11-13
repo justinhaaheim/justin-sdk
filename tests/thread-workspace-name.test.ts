@@ -1431,14 +1431,14 @@ describe('j8q3e.5.3 F3: the capture child names the workspace', () => {
       expect(outcome).toMatchObject({
         handoffNumber: {kind: 'stamped', number: 5},
         kind: 'ran',
-        workspaceName: {kind: 'renamed', to: '[NAMED] H5 A real title'},
+        workspaceName: {kind: 'renamed', to: '[NAMED][#5] A real title'},
       });
       expect(
         captureRunRecord(SESSION, outcome, 5, new Date()).handoffNumber,
       ).toMatchObject({kind: 'stamped'});
     });
 
-    test('a reader that throws never stops the capture: the name shows H?', async () => {
+    test('a reader that throws never stops the capture: the name shows [#?]', async () => {
       needBr();
       const w = await linkedWorld();
       const cmux = fakeCmux([{id: WS_A, surfaces: [SURFACE], title: null}]);
@@ -1453,7 +1453,7 @@ describe('j8q3e.5.3 F3: the capture child names the workspace', () => {
       expect(outcome).toMatchObject({
         handoffNumber: {kind: 'unknown'},
         kind: 'ran',
-        workspaceName: {kind: 'renamed', to: '[NAMED] H? A real title'},
+        workspaceName: {kind: 'renamed', to: '[NAMED][#?] A real title'},
       });
       expect(outcome.kind === 'ran' ? outcome.passes : 0).toBeGreaterThan(0);
     });
@@ -1921,10 +1921,10 @@ describe('home-base-ys9t7.9.1 item 2: a successor extends the chain’s summary'
       run: cmux.run,
       session: lookup.session,
     });
-    // H?: the predecessor here has no message log, so its number is unknown.
+    // [#?]: the predecessor here has no message log, so its number is unknown.
     expect(outcome).toMatchObject({
       kind: 'wouldRename',
-      to: '[NAMED] H? Build shortcut helper app; iterate on inspect utility',
+      to: '[NAMED][#?] Build shortcut helper app; iterate on inspect utility',
     });
     expect(renames(cmux.calls)).toEqual([]);
   });

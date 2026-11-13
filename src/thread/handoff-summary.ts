@@ -7,7 +7,7 @@
  * command to show the full status report if needed."
  *
  * FOUR FIELDS, one per line with a bold label (home-base terminal style):
- *   This session  its own H number (handoffNumberOf), never a guess
+ *   This session  its own number, `#7` (handoffNumberOf), never a guess
  *   New tab       the focus command, or the refusal or deferral and its reason
  *   Requests      open of total, as the handoff block counted them
  *   Full report   `thread show <this session's bead>`
@@ -37,6 +37,7 @@ import type {HandoffRequestCount} from './session-handoff';
 import {fieldLines, sectionHeader, stepColumn} from '../cli-style';
 import {sdkRun} from '../sdk-invocation';
 import {zshWord} from './respawn';
+import {handoffNumberText} from './session-name';
 
 /** What happened to the new tab. */
 export type HandoffSummaryTab =
@@ -78,16 +79,21 @@ export function handoffReportCommand(
   return inCheckout(checkout, sdkRun(`thread show ${sessionBeadId}`));
 }
 
-/** The successor's H number in words: this session's plus 1, or unknown. */
-function successorH(own: HandoffNumber): string {
-  return own.kind === 'known' ? `H${own.number + 1}` : 'H?';
+/**
+ * The successor's number in words: this session's plus 1, or unknown. Spelled
+ * `#7` as in the session name (home-base-1rxt0.2 D4).
+ */
+function successorNumber(own: HandoffNumber): string {
+  return handoffNumberText(own.kind === 'known' ? own.number + 1 : 'unknown');
 }
 
 function ownText(own: HandoffNumber): string {
-  if (own.kind === 'unknown') return `H? (unknown: ${own.reason})`;
+  if (own.kind === 'unknown') {
+    return `${handoffNumberText('unknown')} (unknown: ${own.reason})`;
+  }
   return own.number === 0
-    ? 'the first session of its chain (no H number)'
-    : `H${own.number}`;
+    ? 'the first session of its chain (no number)'
+    : handoffNumberText(own.number);
 }
 
 function requestsText(requests: HandoffRequestCount): string {
@@ -112,7 +118,7 @@ interface SummaryField {
 }
 
 function summaryFields(input: HandoffSummaryInput): SummaryField[] {
-  const next = successorH(input.own);
+  const next = successorNumber(input.own);
   const tab: SummaryField =
     input.tab.kind === 'opened'
       ? {

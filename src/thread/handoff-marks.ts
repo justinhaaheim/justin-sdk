@@ -1,17 +1,17 @@
 /**
- * A session's marks ("[MAYOR] [TAG] H3 <title>") where its bead may predate
+ * A session's marks ("[MAYOR][TAG][#3] <title>") where its bead may predate
  * the `handoff-number:` label (home-base-idnon, conductor decision in
  * home-base-9ihcl.2's design field).
  *
  * The cmux tab title and the launch name read the marks from the bead's
  * labels alone (sessionMarksOf, home-base-6n7my.2 D2). A dormant bead that
- * continues another but has no number label then reads `H?`: the self-heal
+ * continues another but has no number label then reads `[#?]`: the self-heal
  * stamps the number only on a session's next prompt, and no backfill was
  * built. The inbox, the dashboard, the status block and the handoff block show
  * old sessions too, so here a bead with `continues:` and no number label gets
  * its number by walking the chain at read time (handoffNumberOf, D3). Nothing
  * is written. A chain that cannot be walked (a bead not found, two
- * predecessors, a loop) stays `H?`: never a guess, and never no mark.
+ * predecessors, a loop) stays `[#?]`: never a guess, and never no mark.
  *
  * A bead with no `continues:` keeps the labels' answer (no mark), as the tab
  * title does: a first session that began on a kickoff and never linked (F12)

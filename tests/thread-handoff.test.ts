@@ -547,7 +547,7 @@ describe('home-base-mbnjv.12: thread request --continues moves the workspace nam
     });
     // The number changed, so one rename was sent for it, and his name stayed.
     expect(after[1]?.nameSet).toBe(
-      shownName.replace(/^(\[[^\]]+\]) /u, '$1 H1 '),
+      shownName.replace(/^(\[[^\]]+\]) /u, '$1[#1] '),
     );
     expect(
       cmux.calls.filter((call) => call[0] === 'rename-workspace'),

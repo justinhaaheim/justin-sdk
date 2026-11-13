@@ -90,7 +90,12 @@ import {
   MAYOR_ROLE_LABEL,
   resolveSession,
 } from '../src/thread/session-bead';
-import {sessionDisplayName, sessionName} from '../src/thread/session-name';
+import {
+  handoffNumberText,
+  parseSessionName,
+  sessionDisplayName,
+  sessionName,
+} from '../src/thread/session-name';
 import {isHandedOffTabTitle} from '../src/thread/tab-title';
 import {readWorkspaceNames} from '../src/thread/workspace-name';
 import {gateSpend} from './spend-gate';
@@ -3689,7 +3694,7 @@ async function checkSuccessor(
   },
 ): Promise<null | Throwaway> {
   const {caller, olderSurfaces, number, title} = input;
-  const label = `H${number}`;
+  const label = handoffNumberText(number);
   const tab = await waitForSuccessorTab(ctx, caller, 90_000, olderSurfaces);
   if (
     !check(
@@ -3913,8 +3918,9 @@ async function scenarioF(ctx: Ctx): Promise<void> {
   );
   const named = await waitFor(120_000, 3000, async () => {
     const tree = await readWorkspace(t.workspaceId, ctx.marker);
+    // home-base-1rxt0.2 D2: the mark is read with the one parser, either spelling.
     return tree.kind === 'read' &&
-      (tree.view.title ?? '').startsWith('[MAYOR] ')
+      parseSessionName(tree.view.title ?? '')?.marks.mayor === true
       ? tree.view.title
       : null;
   });

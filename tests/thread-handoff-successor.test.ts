@@ -122,7 +122,7 @@ function world(handoff: Record<string, unknown> | null): World {
   });
   if (filed.kind !== 'created') throw new Error(filed.detail);
   // home-base-6n7my.2 D3: a first session's log says it began on his words, so
-  // its successor is H1. Without a log the number is unknown.
+  // its successor is #1. Without a log the number is unknown.
   const logPath = messageLogPath(OLD, env);
   mkdirSync(dirname(logPath), {recursive: true});
   writeFileSync(
@@ -523,7 +523,7 @@ describe('knob on: the gate refuses (exit 3, C2)', () => {
       [
         '🤝 **Handed off**',
         '',
-        '- **This session:** the first session of its chain (no H number)',
+        '- **This session:** the first session of its chain (no number)',
         '- **New tab:** none opened: the handoff was refused (usageHigh): the 5-hour session window is at 91 % (ceiling 85 %)',
         '- **Requests:** none filed',
         `- **Full report:** \`${inRepo(w)}bun run justin-sdk thread show ${w.beadId}\``,
@@ -608,7 +608,7 @@ describe('knob on: the gate passes', () => {
     if (selected.kind !== 'found') throw new Error(selected.kind);
     const {session} = selected;
     const name = successorName(session, w.env);
-    expect(name).toBe('[HANDOFF-REPO] H1 migrate the db');
+    expect(name).toBe('[HANDOFF-REPO][#1] migrate the db');
     const blockPath = blockPathOf(w);
     const kickoff = kickoffText(blockPath, w.beadId, null);
     expect(kickoff).toContain(
@@ -633,7 +633,7 @@ describe('knob on: the gate passes', () => {
       '--working-directory',
       session.checkoutPath,
       '--command',
-      `claude --permission-mode auto --remote-control '[HANDOFF-REPO] H1 migrate the db' --name '[HANDOFF-REPO] H1 migrate the db' --model haiku 'You are the successor of a handed-off Claude Code session. Read ${blockPath}. First run the command under its pick-up section: bun run justin-sdk thread request --continues ${w.beadId}. Every open request and question carries over to this session; the note is the order to take them in, not the whole scope. Then continue the work the block describes, starting from its note.'`,
+      `claude --permission-mode auto --remote-control '[HANDOFF-REPO][#1] migrate the db' --name '[HANDOFF-REPO][#1] migrate the db' --model haiku 'You are the successor of a handed-off Claude Code session. Read ${blockPath}. First run the command under its pick-up section: bun run justin-sdk thread request --continues ${w.beadId}. Every open request and question carries over to this session; the note is the order to take them in, not the whole scope. Then continue the work the block describes, starting from its note.'`,
       '--focus',
       'false',
     ]);
@@ -650,7 +650,7 @@ describe('knob on: the gate passes', () => {
         '--',
         // home-base-9ihcl.10: the original of a chain names its successor's
         // number, and its own name carries no H mark.
-        '↪ handed off to H1: [HANDOFF-REPO] migrate the db',
+        '↪ handed off to #1: [HANDOFF-REPO] migrate the db',
       ],
     ]);
     // AC4: no rename call targets any other surface (not the successor's).
@@ -658,7 +658,7 @@ describe('knob on: the gate passes', () => {
     expect(renames).toHaveLength(1);
     expect(renames[0]?.[4]).toBe(w.env.CMUX_SURFACE_ID);
     expect(result.lines.join('\n')).toContain(
-      'renamed "↪ handed off to H1: [HANDOFF-REPO] migrate the db"',
+      'renamed "↪ handed off to #1: [HANDOFF-REPO] migrate the db"',
     );
 
     expect(bead(w).labels).toContain('handed-off');
@@ -668,15 +668,15 @@ describe('knob on: the gate passes', () => {
 
     const text = result.lines.join('\n');
     expect(text).toContain(blockPath);
-    expect(text).toContain('surface:306 "[HANDOFF-REPO] H1 migrate the db"');
+    expect(text).toContain('surface:306 "[HANDOFF-REPO][#1] migrate the db"');
     // home-base-9ihcl.6: the next step, then the short summary, last.
     expect(result.lines.at(-3)).toBe(SUCCESSOR_STARTED_NEXT);
     expect(result.lines.at(-1)).toBe(
       [
         '🤝 **Handed off**',
         '',
-        '- **This session:** the first session of its chain (no H number)',
-        `- **New tab:** H1 opened. Focus it: \`${inRepo(w)}bun run justin-sdk thread focus ${w.beadId}\``,
+        '- **This session:** the first session of its chain (no number)',
+        `- **New tab:** #1 opened. Focus it: \`${inRepo(w)}bun run justin-sdk thread focus ${w.beadId}\``,
         '- **Requests:** none filed',
         `- **Full report:** \`${inRepo(w)}bun run justin-sdk thread show ${w.beadId}\``,
       ].join('\n'),
@@ -734,7 +734,7 @@ describe('knob on: the gate passes', () => {
     expect(result.exitCode).toBe(1);
     const text = result.lines.join('\n');
     expect(text).toContain(
-      'the successor tab surface:306 ("[HANDOFF-REPO] H1 migrate the db") is waiting on the folder-trust dialog',
+      'the successor tab surface:306 ("[HANDOFF-REPO][#1] migrate the db") is waiting on the folder-trust dialog',
     );
     expect(text).toContain('Nothing was answered and no key was sent');
     expect(text).toContain(
@@ -763,7 +763,7 @@ describe('knob on: the gate passes', () => {
     expect(result.exitCode).toBe(1);
     const text = result.lines.join('\n');
     expect(text).toContain(
-      'could not confirm the successor started within 2 s (tab surface:306, "[HANDOFF-REPO] H1 migrate the db"): no Claude Code input box on the screen',
+      'could not confirm the successor started within 2 s (tab surface:306, "[HANDOFF-REPO][#1] migrate the db"): no Claude Code input box on the screen',
     );
     expect(text).toContain('The last screen:');
     expect(text).toContain('│ Last login:');
@@ -812,7 +812,7 @@ describe('knob on: the gate passes', () => {
 });
 
 describe('home-base-9ihcl.10 and .6: the old tab names its own place, and the run ends with the short summary', () => {
-  /** This session as the H2 of a mayor chain (the labels a link writes). */
+  /** This session as the #2 of a mayor chain (the labels a link writes). */
   function h2Mayor(w: World): void {
     const written = brUpdate({cwd: w.repo}, w.beadId, {
       addLabels: ['continues:t-earlier', 'handoff-number:2', MAYOR_ROLE_LABEL],
@@ -820,7 +820,7 @@ describe('home-base-9ihcl.10 and .6: the old tab names its own place, and the ru
     if (written.kind === 'failed') throw new Error('br update failed');
   }
 
-  test('exit 0 from H2: the old tab reads H2 handed off to H3, the new tab H3, and no two tabs share an H number', async () => {
+  test('exit 0 from #2: the old tab reads #2 handed off to #3, the new tab #3, and no two tabs share a number', async () => {
     const w = world(ON);
     h2Mayor(w);
     const cmux = fakeCmux();
@@ -832,7 +832,7 @@ describe('home-base-9ihcl.10 and .6: the old tab names its own place, and the ru
     const opened = cmux.calls.find((call) => call[0] === 'new-surface') ?? [];
     const command = opened[opened.indexOf('--command') + 1] ?? '';
     expect(command).toContain(
-      "--name '[MAYOR] [HANDOFF-REPO] H3 migrate the db'",
+      "--name '[MAYOR][HANDOFF-REPO][#3] migrate the db'",
     );
     const renames = cmux.calls.filter((call) => call[0] === 'rename-tab');
     expect(renames).toEqual([
@@ -843,31 +843,31 @@ describe('home-base-9ihcl.10 and .6: the old tab names its own place, and the ru
         '--surface',
         SURF,
         '--',
-        '↪ H2 handed off to H3: [MAYOR] [HANDOFF-REPO] migrate the db',
+        '↪ #2 handed off to #3: [MAYOR][HANDOFF-REPO] migrate the db',
       ],
     ]);
     // The negative-control target: the old title carries the successor's
-    // name (and so its H3) if the successor's name is put back.
+    // name (and so its [#3]) if the successor's name is put back.
     const oldTitle = renames[0]?.at(-1) ?? '';
-    expect(oldTitle).not.toContain('H3 migrate the db');
-    expect(oldTitle.match(/H\d+/gu)).toEqual(['H2', 'H3']);
+    expect(oldTitle).not.toContain('[#3] migrate the db');
+    expect(oldTitle.match(/#\d+/gu)).toEqual(['#2', '#3']);
     expect(result.launch?.name).toBe(
-      '[MAYOR] [HANDOFF-REPO] H3 migrate the db',
+      '[MAYOR][HANDOFF-REPO][#3] migrate the db',
     );
 
     expect(result.lines.at(-1)).toBe(
       [
         '🤝 **Handed off**',
         '',
-        '- **This session:** H2',
-        `- **New tab:** H3 opened. Focus it: \`${inRepo(w)}bun run justin-sdk thread focus ${w.beadId}\``,
+        '- **This session:** #2',
+        `- **New tab:** #3 opened. Focus it: \`${inRepo(w)}bun run justin-sdk thread focus ${w.beadId}\``,
         '- **Requests:** none filed',
         `- **Full report:** \`${inRepo(w)}bun run justin-sdk thread show ${w.beadId}\``,
       ].join('\n'),
     );
   });
 
-  test('a session whose number cannot be established: H? on both sides, never a guess', async () => {
+  test('a session whose number cannot be established: #? on both sides, never a guess', async () => {
     const w = world(ON);
     // continues another bead, no number label, and that bead does not exist.
     const written = brUpdate({cwd: w.repo}, w.beadId, {
@@ -882,11 +882,11 @@ describe('home-base-9ihcl.10 and .6: the old tab names its own place, and the ru
     expect(result.exitCode).toBe(0);
     const renames = cmux.calls.filter((call) => call[0] === 'rename-tab');
     expect(renames[0]?.at(-1)).toBe(
-      '↪ H? handed off to H?: [HANDOFF-REPO] migrate the db',
+      '↪ #? handed off to #?: [HANDOFF-REPO] migrate the db',
     );
     const summary = result.lines.at(-1) ?? '';
-    expect(summary).toContain('- **This session:** H? (unknown: ');
-    expect(summary).toContain('- **New tab:** H? opened.');
+    expect(summary).toContain('- **This session:** #? (unknown: ');
+    expect(summary).toContain('- **New tab:** #? opened.');
   });
 
   test('exit 4 (cmux too slow): the deferral, what to end the turn with, then the summary; requests counted', async () => {
@@ -925,7 +925,7 @@ describe('home-base-9ihcl.10 and .6: the old tab names its own place, and the ru
       [
         '🤝 **Handed off**',
         '',
-        '- **This session:** H2',
+        '- **This session:** #2',
         `- **New tab:** none opened: the handoff was deferred (cmuxSlow): ${detail}`,
         '- **Requests:** 1 open of 1',
         `- **Full report:** \`${inRepo(w)}bun run justin-sdk thread show ${w.beadId}\``,
@@ -967,8 +967,8 @@ describe('home-base-9ihcl.10 and .6: the old tab names its own place, and the ru
       [
         '  🤝 Handed off',
         '',
-        '      This session:  H2',
-        `      New tab:       H3 opened. Focus it: ${inRepo(w)}bun run justin-sdk thread focus ${w.beadId}`,
+        '      This session:  #2',
+        `      New tab:       #3 opened. Focus it: ${inRepo(w)}bun run justin-sdk thread focus ${w.beadId}`,
         '      Requests:      none filed',
         `      Full report:   ${inRepo(w)}bun run justin-sdk thread show ${w.beadId}`,
       ].join('\n'),
@@ -1033,11 +1033,11 @@ describe('knob on: --dry-run', () => {
     expect(result.exitCode).toBe(0);
     const text = result.lines.join('\n');
     expect(text).toMatch(
-      /Successor name:\s+\[MAYOR\] \[HANDOFF-REPO\] H1 migrate the db/u,
+      /Successor name:\s+\[MAYOR\]\[HANDOFF-REPO\]\[#1\] migrate the db/u,
     );
     // home-base-9ihcl.10: the dry run shows what this tab would be renamed to.
     expect(text).toMatch(
-      /This tab after:\s+↪ handed off to H1: \[MAYOR\] \[HANDOFF-REPO\] migrate the db/u,
+      /This tab after:\s+↪ handed off to #1: \[MAYOR\]\[HANDOFF-REPO\] migrate the db/u,
     );
     expect(text).not.toContain('🤝 **Handed off**');
     expect(text).toContain('load the mayor skill with the Skill tool');
@@ -1057,7 +1057,7 @@ describe('knob on: --dry-run', () => {
     const text = result.lines.join('\n');
     expect(text).toContain('Dry run: nothing written or opened');
     expect(text).toMatch(
-      /Successor name:\s+\[HANDOFF-REPO\] H1 migrate the db/u,
+      /Successor name:\s+\[HANDOFF-REPO\]\[#1\] migrate the db/u,
     );
     expect(text).not.toContain('mayor');
     expect(text).toMatch(/Gate:\s+passed/u);
@@ -1325,7 +1325,7 @@ describe('mbnjv.4: what happens to the old tab (predecessor keep, exit, close)',
     expect(watch.mode).toBe('exit');
     expect(watch.handedOffAt).toBe(NOW.toISOString());
     expect(watch.successor).toEqual({
-      name: '[HANDOFF-REPO] H1 migrate the db',
+      name: '[HANDOFF-REPO][#1] migrate the db',
       surfaceId: SUCC,
       surfaceRef: 'surface:306',
     });
@@ -1336,7 +1336,7 @@ describe('mbnjv.4: what happens to the old tab (predecessor keep, exit, close)',
     );
     expect(watch.tombstone).toContain(`      claude --resume ${OLD}`);
     expect(watch.tombstone).toContain(
-      '   Handed off to:   [HANDOFF-REPO] H1 migrate the db',
+      '   Handed off to:   [HANDOFF-REPO][#1] migrate the db',
     );
     expect(
       predecessorWatchSchema.safeParse(JSON.parse(JSON.stringify(watch)))
@@ -1506,7 +1506,7 @@ describe('F11 (home-base-mbnjv.8): one successor per session', () => {
     expect(first.exitCode).toBe(0);
     expect(bead(w).labels ?? []).toContain('successor-started');
     expect(bead(w).notes ?? '').toContain(
-      `successor launch started: from tab ${SURF} into pane ${PANE} of workspace ${WS}, successor "[HANDOFF-REPO] H1 migrate the db"`,
+      `successor launch started: from tab ${SURF} into pane ${PANE} of workspace ${WS}, successor "[HANDOFF-REPO][#1] migrate the db"`,
     );
     const second = await secondGate(w);
     expect(second.kind).toBe('refused');

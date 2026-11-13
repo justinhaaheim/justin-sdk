@@ -103,6 +103,8 @@ describe('the helpers respawn.ts keeps', () => {
     expect(zshWord("it's")).toBe("'it'\\''s'");
     expect(zshWord('=ls')).toBe("'=ls'");
     expect(zshWord('[HOME] H? a \\ b $X !')).toBe("'[HOME] H? a \\ b $X !'");
+    // home-base-1rxt0.2: the name's spelling since 2026-11-12, # and all.
+    expect(zshWord('[HOME][#?] a \\ b $X !')).toBe("'[HOME][#?] a \\ b $X !'");
   });
 
   test.each([
@@ -113,6 +115,7 @@ describe('the helpers respawn.ts keeps', () => {
     ['control characters', 'é\n\ttab'],
     ['hex digits right after an escape', '—abc def 😀0'],
     ['a whole name', '[MAYOR] [HOME] H1 —😀 title'],
+    ['a whole name, spelled since 2026-11-12', '[MAYOR][HOME][#1] —😀 title'],
   ])(
     'home-base-y0gdz: %s arrives byte for byte, typed as pure ASCII',
     (_name, word) => {

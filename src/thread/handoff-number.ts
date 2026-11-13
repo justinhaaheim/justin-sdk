@@ -153,8 +153,8 @@ export function handoffNumberOf(
 }
 
 /**
- * D9: the marks of a session that continues this one: its number plus 1, `H?`
- * when its own number is unknown, and the mayor mark when it has one.
+ * D9: the marks of a session that continues this one: its number plus 1,
+ * `[#?]` when its own number is unknown, and the mayor mark when it has one.
  */
 export function successorMarks(
   predecessorLabels: readonly string[],
@@ -171,9 +171,9 @@ export function successorMarks(
 
 /**
  * D4: every label a link puts on the new session bead, so they land in one br
- * write. No number label when the number is unknown, so the reader shows `H?`.
- * If the new bead already holds a different number, the two labels read as `H?`
- * rather than one being trusted.
+ * write. No number label when the number is unknown, so the reader shows
+ * `[#?]`. If the new bead already holds a different number, the two labels read
+ * as `[#?]` rather than one being trusted.
  */
 export function continuationLabels(input: {
   oldBeadId: string;

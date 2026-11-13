@@ -1,11 +1,16 @@
 /**
- * The one spelling of a session's name: "[MAYOR] [TAG] H1 <title>"
- * (home-base-j8q3e.5 D1; the marks are home-base-6n7my.2 D1 and D2). Plain text,
- * no markdown escaping and no truncation: callers that render markdown wrap it
- * in tildeText themselves, and the cmux workspace name uses it as it is.
+ * The one spelling of a session's name: "[MAYOR][TAG][#7] <title>"
+ * (home-base-1rxt0.2 D1; the name is home-base-j8q3e.5 D1, the marks
+ * home-base-6n7my.2 D1 and D2). Until 2026-11-12 it was spelled
+ * "[MAYOR] [TAG] H7 <title>". sessionNameParts is the one builder and
+ * parseSessionName the one parser, which reads both spellings (1rxt0.2 D2, D3):
+ * no other code spells a mark. Plain text, no markdown escaping and no
+ * truncation: callers that render markdown wrap it in tildeText themselves, and
+ * the cmux workspace name uses it as it is.
  *
  * The marks go in front because a name is cut from the end. Without marks the
- * name is "[TAG] <title>", which is what every caller that passes none shows.
+ * name is "[TAG] <title>", which is what every caller that passes none shows,
+ * and which both spellings share.
  *
  * `repoTag` is the RESOLVED tag (home-base-bomy5.7.1): the repo's declared
  * `projectTag`, else its folder name uppercased — `resolveRepoTag` in
@@ -24,10 +29,11 @@ import {
 /**
  * What a name shows in front of the title.
  *
- * `handoff`: a number shows `H<N>`, null shows nothing (a first session), and
- * 'unknown' shows `H?`: the session is known to continue another and its number
- * cannot be established. A broken chain must never look like a first session
- * (critical rules, section 7), so unknown is its own member and never 0 or null.
+ * `handoff`: a number shows `[#N]`, null shows nothing (a first session), and
+ * 'unknown' shows `[#?]`: the session is known to continue another and its
+ * number cannot be established. A broken chain must never look like a first
+ * session (critical rules, section 7), so unknown is its own member and never 0
+ * or null.
  */
 export interface SessionMarks {
   handoff: 'unknown' | number | null;
@@ -81,17 +87,144 @@ export function sessionMarksOf(labels: readonly string[]): SessionMarks {
   return {handoff: continues ? 'unknown' : null, mayor};
 }
 
+/** The mark of a mayor session, first in its name. */
+export const MAYOR_MARK = '[MAYOR]';
+
+/** The tag a name shows when the repo is unknown (repoTag null). */
+const UNKNOWN_REPO_TAG = 'UNKNOWN REPO';
+
+/**
+ * 1rxt0.2 D4: a handoff number as the reader sees it, inside a name's bracket
+ * and in prose ("#2 handed off to #3"): `#7`, or `#?` when it cannot be
+ * established. The `handoff-number:` label on beads is not this: it stays a bare
+ * number.
+ */
+export function handoffNumberText(handoff: 'unknown' | number): string {
+  return `#${handoff === 'unknown' ? '?' : String(handoff)}`;
+}
+
+/**
+ * A name in three parts, so the threads dashboard can colour the tag alone:
+ * `before` is the mayor mark or '', `tag` is "[TAG]", and `after` is the number
+ * bracket (or nothing), one space and the text. Joined, they are
+ * sessionDisplayName.
+ */
+export interface SessionNameParts {
+  after: string;
+  before: string;
+  tag: string;
+}
+
+/** 1rxt0.2 D2: the one builder of a session's marks. */
+export function sessionNameParts(
+  repoTag: string | null,
+  text: string,
+  marks: SessionMarks = NO_MARKS,
+): SessionNameParts {
+  const number =
+    marks.handoff == null ? '' : `[${handoffNumberText(marks.handoff)}]`;
+  return {
+    after: `${number} ${text}`,
+    before: marks.mayor ? MAYOR_MARK : '',
+    tag: `[${repoTag ?? UNKNOWN_REPO_TAG}]`,
+  };
+}
+
 export function sessionDisplayName(
   repoTag: string | null,
   text: string,
   marks: SessionMarks = NO_MARKS,
 ): string {
-  const mayor = marks.mayor ? '[MAYOR] ' : '';
-  const handoff =
-    marks.handoff == null
-      ? ''
-      : `H${marks.handoff === 'unknown' ? '?' : marks.handoff} `;
-  return `${mayor}[${repoTag ?? 'UNKNOWN REPO'}] ${handoff}${text}`;
+  const parts = sessionNameParts(repoTag, text, marks);
+  return `${parts.before}${parts.tag}${parts.after}`;
+}
+
+/** What parseSessionName reads from a name. */
+export interface ParsedSessionName {
+  marks: SessionMarks;
+  /** The tag without its brackets; null for "[UNKNOWN REPO]", as the builder takes it. */
+  repoTag: string | null;
+  /**
+   * 'current' is "[MAYOR][TAG][#7] …"; 'old' is "[MAYOR] [TAG] H7 …", the
+   * spelling until 2026-11-12. A name with no mark is spelled the same both
+   * ways and reads 'current'.
+   */
+  spelling: 'current' | 'old';
+  /**
+   * Everything after the marks and one space: the title, plus any " (…)" the
+   * workspace sync added after it (workspace-name.ts keeps Justin's own name
+   * there).
+   */
+  text: string;
+}
+
+function regExpSource(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+/**
+ * A tag is what resolveRepoTag can give: a projectTag (A-Z, 0-9, "-") or a
+ * folder name uppercased, so no space and no lowercase letter, or the unknown
+ * tag. That keeps "[TEST_DATA_DELETABLE <uuid> ] …" and other bracketed text
+ * Justin or a test types from reading as a tag.
+ */
+const TAG_SOURCE = String.raw`${regExpSource(UNKNOWN_REPO_TAG)}|[^\s\[\]\p{Ll}]+`;
+const NUMBER_SOURCE = String.raw`[1-9]\d*|\?`;
+const MAYOR_SOURCE = regExpSource(MAYOR_MARK);
+
+/** "[MAYOR][TAG][#7] text": the builder's spelling. */
+const CURRENT_SPELLING = new RegExp(
+  String.raw`^(${MAYOR_SOURCE})?\[(${TAG_SOURCE})\](?:\[#(${NUMBER_SOURCE})\])?(?: (.*))?$`,
+  'su',
+);
+
+/** "[MAYOR] [TAG] H7 text": the spelling before 2026-11-12 (D3). */
+const OLD_SPELLING = new RegExp(
+  String.raw`^(${MAYOR_SOURCE} )?\[(${TAG_SOURCE})\](?: H(${NUMBER_SOURCE})(?= |$))?(?: (.*))?$`,
+  'su',
+);
+
+function parsedFrom(
+  match: RegExpExecArray,
+  spelling: ParsedSessionName['spelling'],
+): ParsedSessionName {
+  const [, mayor, tag, number, text] = match;
+  return {
+    marks: {
+      handoff:
+        number == null ? null : number === '?' ? 'unknown' : Number(number),
+      mayor: mayor != null,
+    },
+    repoTag: tag == null || tag === UNKNOWN_REPO_TAG ? null : tag,
+    spelling,
+    text: text ?? '',
+  };
+}
+
+/**
+ * 1rxt0.2 D2, D3: the one parser of a session name, in either spelling. Null
+ * when the name does not start with a tag. The old spelling wins only when it
+ * finds a mark, so "[HOME] H7 x" reads as number 7, as the old builder meant it.
+ * A title that itself starts "H7 " is read that way too; the old spelling was
+ * just as ambiguous.
+ */
+export function parseSessionName(name: string): ParsedSessionName | null {
+  const old = OLD_SPELLING.exec(name);
+  if (old != null && (old[1] != null || old[3] != null)) {
+    return parsedFrom(old, 'old');
+  }
+  const current = CURRENT_SPELLING.exec(name);
+  return current == null ? null : parsedFrom(current, 'current');
+}
+
+/**
+ * Whether a name carries a session mark in either spelling: the mayor mark or a
+ * handoff number. A "[TAG] title" with no mark does not count: Justin types
+ * those himself (home-base-fuxmk).
+ */
+export function carriesSessionMarks(name: string): boolean {
+  const parsed = parseSessionName(name);
+  return parsed != null && (parsed.marks.mayor || parsed.marks.handoff != null);
 }
 
 /** A session name used as a tab title or a Claude Code session name is cut here. */

@@ -446,7 +446,7 @@ export function spawnWorkspaceName(
 /**
  * The marks of a session started with `--continues <bead>`: that bead's number
  * plus 1, and its mayor label (home-base-6n7my.2 D9). A bead that cannot be read
- * gives `H?`: this session is known to continue another, so it must not read as
+ * gives `[#?]`: this session is known to continue another, so it must not read as
  * a first session.
  */
 export function spawnMarks(input: {

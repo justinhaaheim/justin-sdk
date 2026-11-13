@@ -5,8 +5,9 @@
  * below refer to it.
  *
  * - D1: the tool's part is sessionDisplayName(repoTag, title, marks), "[TAG]
- *   <title>" with the marks home-base-6n7my.2 adds, "[MAYOR] [TAG] H1 <title>"
- *   (the repo's projectTag, else its folder uppercased: home-base-bomy5.7.1).
+ *   <title>" with the marks home-base-6n7my.2 adds, "[MAYOR][TAG][#1] <title>"
+ *   since home-base-1rxt0.2 (the repo's projectTag, else its folder
+ *   uppercased: home-base-bomy5.7.1).
  * - D2: workspace-names.jsonl records every name the tool set, written BEFORE
  *   the rename. A workspace name equal to ANY nameSet recorded for it is the
  *   tool's (F1). decideWorkspaceName is the whole ownership rule.
@@ -45,7 +46,11 @@ import {
   CONTINUES_LABEL_PREFIX,
   labelValue,
 } from './session-bead';
-import {sessionDisplayName, sessionMarksOf} from './session-name';
+import {
+  carriesSessionMarks,
+  sessionDisplayName,
+  sessionMarksOf,
+} from './session-name';
 
 /**
  * The leading glyphs cmux shows on a pane title while Claude Code owns the
@@ -78,16 +83,28 @@ export function isGeneratedName(name: string): boolean {
 }
 
 /**
+ * home-base-1rxt0.2 D3: a name a tool generated, not Justin: a pane glyph in
+ * front (rule 3), or a session mark in either spelling, "[MAYOR] [HOME] H7 …"
+ * (until 2026-11-12) or "[MAYOR][HOME][#7] …". A "[TAG] title" with no mark is
+ * not enough, because Justin types those himself (home-base-fuxmk). Kept apart
+ * from isGeneratedName, which cmux-restart reads for pane titles only.
+ */
+function isToolGeneratedName(name: string): boolean {
+  return isGeneratedName(name) || carriesSessionMarks(name);
+}
+
+/**
  * home-base-ys9t7.9.1 B2: a recorded hisName that starts with a pane glyph was
  * misread as Justin's by the old rule 3 (B1). It is demoted to replacedName,
  * so it stops riding along in parentheses and `--restore` still puts it back
- * when nothing better was recorded.
+ * when nothing better was recorded. home-base-1rxt0.2 D3: a hisName carrying a
+ * session mark is demoted the same way.
  */
 function demoteGenerated(record: {
   hisName: string | null;
   replacedName: string | null;
 }): {hisName: string | null; replacedName: string | null} {
-  if (record.hisName == null || !isGeneratedName(record.hisName)) {
+  if (record.hisName == null || !isToolGeneratedName(record.hisName)) {
     return {hisName: record.hisName, replacedName: record.replacedName};
   }
   return {hisName: null, replacedName: record.replacedName ?? record.hisName};
@@ -248,6 +265,7 @@ export type WorkspaceNameRule =
   | 'generated'
   | 'handedOff'
   | 'his'
+  | 'marked'
   | 'matchesToolPart'
   | 'sticky'
   | 'tools';
@@ -303,6 +321,8 @@ export const RULE_WORDS: Record<WorkspaceNameRule, string> = {
   handedOff:
     'the session that set the name handed off to this one, which now owns it (D8)',
   his: 'the name is not one the tool set, so it is Justin’s and is kept in parentheses (rule 4)',
+  marked:
+    'the name carries the tool’s session marks ([MAYOR], [#7], or the older H7), so the tool set it, not Justin (rule 3)',
   matchesToolPart: 'the name already equals the tool’s name (rule 0)',
   sticky:
     'another session named it and is still open in this workspace (sticky)',
@@ -518,12 +538,16 @@ export function decideWorkspaceName(input: {
       rule: 'tools',
       target: kept.hisName != null ? `${toolPart} (${kept.hisName})` : toolPart,
     };
-  } else if (isGeneratedName(current)) {
+  } else if (isToolGeneratedName(current)) {
+    // Rule 3, and home-base-1rxt0.2 D3: a marked name no record claims (an
+    // older SDK path that set it without a line) is still the tool's, so the
+    // rename replaces it rather than keeping it in parentheses. replacedName
+    // keeps it for `--restore`.
     decided = {
       hisName: null,
       kind: 'rename',
       replacedName: current,
-      rule: 'generated',
+      rule: isGeneratedName(current) ? 'generated' : 'marked',
       target: toolPart,
     };
   } else {
@@ -669,7 +693,7 @@ export function resolveWorkspace(
 /**
  * The tool's part of the name: "[TAG] <title>", or with the description knob on
  * (home-base-jm5kg.18) "[TAG] <overarching short label, else the title>". The
- * marks come from the bead's labels (home-base-6n7my.2 D9): "[MAYOR] [TAG] H1 …".
+ * marks come from the bead's labels (home-base-6n7my.2 D9): "[MAYOR][TAG][#1] …".
  * A sticky predecessor keeps its own number until its successor takes the name.
  */
 export function workspaceToolPart(session: WorkspaceSession): string {

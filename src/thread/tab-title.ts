@@ -42,20 +42,22 @@ import {
   HANDED_OFF_LABEL,
   labelValue,
 } from './session-bead';
-import {sessionMarksOf, sessionName} from './session-name';
+import {handoffNumberText, sessionMarksOf, sessionName} from './session-name';
 
 /** What the predecessor's tab title starts with once it handed off. */
 export const HANDED_OFF_TAB_MARK = '↪ ';
 
 /**
  * The predecessor's tab title (home-base-9ihcl.10): the mark, its OWN place in
- * the chain and its successor's, then its own name without the H mark, for
- * example `↪ H2 handed off to H3: [MAYOR] [HOME] <title>`. The original of a
- * chain (number 0) reads `↪ handed off to H1: …`; an unknown number reads
- * `↪ H? handed off to H?: …`, never a guess (rule 7).
+ * the chain and its successor's, then its own name without the number, for
+ * example `↪ #2 handed off to #3: [MAYOR][HOME] <title>`. The original of a
+ * chain (number 0) reads `↪ handed off to #1: …`; an unknown number reads
+ * `↪ #? handed off to #?: …`, never a guess (rule 7). The numbers are spelled
+ * by handoffNumberText, as in the session name (home-base-1rxt0.2 D4); until
+ * 2026-11-12 they were `H2` and `H3`.
  *
  * Before 2026-11-10 the title was `↪ handed off: ` plus the SUCCESSOR's name,
- * so every handed-off tab showed the next session's H number and two tabs in
+ * so every handed-off tab showed the next session's number and two tabs in
  * one workspace could carry the same one.
  */
 export function handedOffTabTitle(input: {
@@ -67,12 +69,13 @@ export function handedOffTabTitle(input: {
   title: string;
 }): string {
   const {own} = input;
+  const unknown = handoffNumberText('unknown');
   const chain =
     own.kind === 'unknown'
-      ? 'H? handed off to H?'
+      ? `${unknown} handed off to ${unknown}`
       : own.number === 0
-        ? 'handed off to H1'
-        : `H${own.number} handed off to H${own.number + 1}`;
+        ? `handed off to ${handoffNumberText(1)}`
+        : `${handoffNumberText(own.number)} handed off to ${handoffNumberText(own.number + 1)}`;
   const name = sessionName(input.repoTag, input.title, {
     handoff: null,
     mayor: input.mayor,
@@ -80,9 +83,12 @@ export function handedOffTabTitle(input: {
   return `${HANDED_OFF_TAB_MARK}${chain}: ${name}`;
 }
 
-/** Whether a tab title is one handedOffTabTitle wrote. */
+/**
+ * Whether a tab title is one handedOffTabTitle wrote, in either spelling: `#2`
+ * since home-base-1rxt0.2, `H2` before it (old tabs keep their titles).
+ */
 export function isHandedOffTabTitle(title: string): boolean {
-  return /^↪ (?:H(?:\d+|\?) )?handed off to H(?:\d+|\?): /u.test(title);
+  return /^↪ (?:[H#](?:\d+|\?) )?handed off to [H#](?:\d+|\?): /u.test(title);
 }
 
 export function tabTitlesPath(env: EnvLike = process.env): string {

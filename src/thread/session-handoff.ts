@@ -184,7 +184,7 @@ export function realHandoffNumberReaders(input: {
 export type HandoffNumberHeal =
   /** Nothing to do: no `continues:`, or it holds a number label already. */
   | {kind: 'current'}
-  /** D3 could not establish it, so nothing was written and the name shows `H?`. */
+  /** D3 could not establish it, so nothing was written and the name shows `[#?]`. */
   | {detail: string; kind: 'unknown'}
   | {detail: string; kind: 'failed'}
   /** `labels` are the bead's as they are now, for the name syncs that follow. */
