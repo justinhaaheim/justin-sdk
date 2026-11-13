@@ -71,6 +71,7 @@ import {
   describeCommit,
 } from '../src/thread/commit';
 import {type EnvLike, threadsRepoDirResolution} from '../src/thread/paths';
+import {ownerOfMetadata} from '../src/thread/privacy';
 import {isRenderedReport} from '../src/thread/report-lines';
 import {
   NO_REPORT_GLANCE,
@@ -1085,7 +1086,14 @@ export async function runRestore(options: RestoreOptions): Promise<number> {
     const target = plan.detail?.target;
     if (target == null) continue;
     blank(printer);
-    const result = await updateThreadBody(ctx, plan.id, target);
+    // home-base-bj5xm D2: the record's own session decides; a private one is
+    // refused by the adapter and reported as WRITE FAILED below.
+    const result = await updateThreadBody(
+      ctx,
+      ownerOfMetadata(target.metadata),
+      plan.id,
+      target,
+    );
     if (!result.ok) {
       failed = true;
       emit(

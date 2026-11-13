@@ -89,6 +89,7 @@ import {
   syncMessageLogFromTurns,
 } from './message-log';
 import {probeErrorMessage} from './paths';
+import {ownerOf, sessionPrivacy} from './privacy';
 import {
   cmuxLabelRefresh,
   ensureSessionBead,
@@ -811,9 +812,14 @@ export function seedMessageLogOnce(
   };
 }
 
-/** What one pass did to the bead. */
+/**
+ * What one pass did to the bead. `private` (home-base-bj5xm D1, D3): the
+ * session must not reach the threads repo, so no bd call was made; its message
+ * stays in the local log.
+ */
 export type ApplyPassOutcome =
   | {kind: 'noLog'}
+  | {kind: 'private'; reason: string}
   | {error: string; kind: 'logUnreadable'}
   | {failure: BdFailure; kind: 'bdFailed'; stage: string}
   | {
@@ -898,6 +904,15 @@ export async function applyCaptureOnce(
 ): Promise<ApplyPassOutcome> {
   const env = options.env ?? process.env;
   const now = options.now ?? new Date();
+  // home-base-bj5xm: FIRST, before the log or bd. A private session gets no
+  // thread bead and no update; the adapter refuses its writes too, and this
+  // check makes the skip a named outcome rather than a bd failure. A missing
+  // cwd is D3's "cannot tell", and so private.
+  const owner = ownerOf(options.sessionId, [options.cwd]);
+  const privacy = sessionPrivacy(owner, env);
+  if (privacy.kind === 'private') {
+    return {kind: 'private', reason: privacy.reason};
+  }
   const log = readMessageLog(options.sessionId, env);
   if (log.kind === 'missing') return {kind: 'noLog'};
   if (log.kind === 'failed') return {error: log.error, kind: 'logUnreadable'};
@@ -928,7 +943,7 @@ export async function applyCaptureOnce(
       sessionId: options.sessionId,
       startedAt: now.toISOString(),
     });
-    const made = await createStartThread(ctx, fields);
+    const made = await createStartThread(ctx, owner, fields);
     if (!made.ok)
       return {failure: made.failure, kind: 'bdFailed', stage: 'create'};
     created = true;
@@ -940,7 +955,7 @@ export async function applyCaptureOnce(
     };
     meta = fields.metadata;
   } else if (thread.status === 'open' && meta.source === 'backfill') {
-    const moved = await setThreadInProgress(ctx, thread.id);
+    const moved = await setThreadInProgress(ctx, owner, thread.id);
     if (moved.ok) adopted = true;
     else statusFailure = moved.failure;
   }
@@ -962,7 +977,7 @@ export async function applyCaptureOnce(
       wrote: created || adopted,
     };
   }
-  const merged = await mergeMetadata(ctx, thread.id, patch);
+  const merged = await mergeMetadata(ctx, owner, thread.id, patch);
   if (!merged.ok)
     return {failure: merged.failure, kind: 'bdFailed', stage: 'metadata'};
   return {
@@ -1543,6 +1558,9 @@ export function captureRunRecord(
     record.error = describeBdFailure(last.failure);
   } else if (last.kind === 'logUnreadable') {
     record.error = last.error;
+  } else if (last.kind === 'private') {
+    // home-base-bj5xm D3: the logged reason for the skip.
+    record.private = last.reason;
   }
   return record;
 }

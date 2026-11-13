@@ -1693,7 +1693,7 @@ describe('k0b8n.13: a claude -p session (entrypoint sdk-cli) is counted, never i
     });
 
     expect(describeBackfill(summary)).toContain(
-      '0 skipped (no user message), 1 skipped (claude -p, non-interactive), 0 unchanged',
+      '0 skipped (no user message), 1 skipped (claude -p, non-interactive), 0 skipped (private), 0 unchanged',
     );
   });
 

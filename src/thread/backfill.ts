@@ -69,6 +69,12 @@ import {NON_INTERACTIVE_ENTRYPOINT} from './capture';
 import {commitThreadsRepo, describeCommit} from './commit';
 import {readGitFacts, transcriptsRoot} from './facts';
 import {syncMessageLogFromTranscript} from './message-log';
+import {
+  ownerOf,
+  readPrivateRepos,
+  sessionPrivacy,
+  type WriteOwner,
+} from './privacy';
 import {THREAD_SCHEMA_VERSION} from './schema';
 import {extractTranscriptMessages} from './transcript-messages';
 
@@ -821,6 +827,40 @@ export function syncSessionLogs(
   return {counts, failures};
 }
 
+/**
+ * Whose session a backfill write is for: the session and every directory its
+ * transcript recorded (home-base-bj5xm D1). The cwd inside the transcript, never
+ * the project directory's name, which is a lossy encoding of it. A transcript
+ * that recorded none gives an owner that is private (D3).
+ */
+export function backfillOwner(session: BackfillSession): WriteOwner {
+  return ownerOf(session.sessionId, [
+    session.messages.cwd,
+    session.messages.firstCwd,
+  ]);
+}
+
+/**
+ * Split the in-window sessions into those the threads repo may hear about and
+ * those it may not, with one line per private session naming why.
+ */
+export function partitionPrivate(
+  sessions: readonly BackfillSession[],
+  env: EnvLike,
+): {privateSessions: string[]; publicSessions: BackfillSession[]} {
+  const privateSessions: string[] = [];
+  const publicSessions: BackfillSession[] = [];
+  for (const session of sessions) {
+    const verdict = sessionPrivacy(backfillOwner(session), env);
+    if (verdict.kind === 'private') {
+      privateSessions.push(`session ${session.sessionId}: ${verdict.reason}`);
+    } else {
+      publicSessions.push(session);
+    }
+  }
+  return {privateSessions, publicSessions};
+}
+
 export interface BackfillSummary {
   created: number;
   days: number;
@@ -835,6 +875,12 @@ export interface BackfillSummary {
    * not a failure.
    */
   notOwned: string[];
+  /**
+   * One line per in-window session that is private (home-base-bj5xm): its id
+   * and why. Nothing was written to the threads repo for it, and an existing
+   * bead of it was left exactly as it was. A named skip, not a failure.
+   */
+  privateSessions: string[];
   refreshed: number;
   refreshedBackfill: number;
   /** Metadata-merge writes: the verbatim messages, the D-B label, or both. */
@@ -862,6 +908,8 @@ export interface BackfillSummary {
     undatedFiles: string[];
   };
   sessionsInWindow: number;
+  /** In-window sessions left out because they are private (home-base-bj5xm). */
+  skippedPrivate: number;
   unchanged: number;
 }
 
@@ -890,7 +938,7 @@ export function describeBackfill(
     `${pad(HEADER_COLUMN)}📼 ${paint(title, ['bold'], color)}`,
     body(`${summary.sessionsInWindow} sessions in window`),
     body(
-      `${summary.created} created, ${summary.refreshed} refreshed, ${summary.scan.skippedNoUserMessage} skipped (no user message), ${summary.scan.skippedNonInteractive} skipped (claude -p, non-interactive), ${summary.unchanged} unchanged`,
+      `${summary.created} created, ${summary.refreshed} refreshed, ${summary.scan.skippedNoUserMessage} skipped (no user message), ${summary.scan.skippedNonInteractive} skipped (claude -p, non-interactive), ${summary.skippedPrivate} skipped (private), ${summary.unchanged} unchanged`,
     ),
     body(
       `message logs: ${logs.written} ${summary.dryRun ? 'would be written' : 'written'} (${logs.messages} messages), ${logs.unchanged} unchanged${failed}`,
@@ -971,6 +1019,7 @@ export async function backfillThreads(
     failures: [...discovery.failures, ...scan.failures, ...logs.failures],
     messageLogs: logs.counts,
     notOwned: [],
+    privateSessions: [],
     refreshed: 0,
     refreshedBackfill: 0,
     refreshedMessages: 0,
@@ -988,8 +1037,24 @@ export async function backfillThreads(
       undatedFiles: scan.undatedFiles,
     },
     sessionsInWindow: scan.sessions.length,
+    skippedPrivate: 0,
     unchanged: 0,
   };
+
+  // home-base-bj5xm: PRIVATE SESSIONS NEVER REACH THE PLAN. Their message logs
+  // were rewritten above (local, never pushed, D4); here they are left out of
+  // the threads repo entirely, existing beads included: no create, no refresh.
+  const privacy = partitionPrivate(scan.sessions, env);
+  summary.skippedPrivate = privacy.privateSessions.length;
+  summary.privateSessions = privacy.privateSessions;
+  // A user config that cannot be used makes every session private (D3). That
+  // is a broken run, not a quiet one: the chore goes red and says why.
+  const repos = readPrivateRepos(env);
+  if (repos.kind === 'unreadable') {
+    summary.failures.push(
+      `PRIVACY — ${repos.reason}. No thread bead was created or refreshed this run.`,
+    );
+  }
 
   const ctx: BdContext = bdContext(env);
   // ONE READ, every thread, CLOSED INCLUDED — see planBackfill.
@@ -1001,7 +1066,7 @@ export async function backfillThreads(
     return summary;
   }
 
-  const plan = planBackfill(scan.sessions, threads.value);
+  const plan = planBackfill(privacy.publicSessions, threads.value);
   summary.failures.push(...plan.failures);
   summary.notOwned.push(...plan.notOwned);
 
@@ -1027,7 +1092,7 @@ export async function backfillThreads(
 
     if (action.kind === 'create') {
       const git = gitFactsForSession(action.session);
-      const created = await createThread(ctx, {
+      const created = await createThread(ctx, backfillOwner(action.session), {
         description: backfillDescription(action.session, git),
         metadata: backfillMetadata(action.session, git),
         notes: backfillNotes(action.session),
@@ -1048,12 +1113,17 @@ export async function backfillThreads(
 
     if (action.kind === 'refreshBackfill') {
       const git = gitFactsForSession(action.session);
-      const updated = await updateThreadBody(ctx, action.threadId, {
-        description: backfillDescription(action.session, git),
-        metadata: backfillMetadata(action.session, git),
-        notes: backfillNotes(action.session),
-        title: backfillTitle(action.session),
-      });
+      const updated = await updateThreadBody(
+        ctx,
+        backfillOwner(action.session),
+        action.threadId,
+        {
+          description: backfillDescription(action.session, git),
+          metadata: backfillMetadata(action.session, git),
+          notes: backfillNotes(action.session),
+          title: backfillTitle(action.session),
+        },
+      );
       if (!updated.ok) {
         summary.failures.push(
           `NOT REFRESHED — ${action.threadId} (session ${action.session.sessionId}): ${describeBdFailure(updated.failure)}`,
@@ -1067,7 +1137,12 @@ export async function backfillThreads(
 
     // refreshMessages: the message fields and, for D-B, the label — nothing
     // else (K5, k0b8n.19).
-    const merged = await mergeMetadata(ctx, action.threadId, action.patch);
+    const merged = await mergeMetadata(
+      ctx,
+      backfillOwner(action.session),
+      action.threadId,
+      action.patch,
+    );
     if (!merged.ok) {
       summary.failures.push(
         `NOT REFRESHED — ${action.threadId} (session ${action.session.sessionId})${action.relabel == null ? '' : ', and NOT relabelled source=report'}: ${describeBdFailure(merged.failure)}`,
@@ -1140,6 +1215,14 @@ export async function runThreadBackfill(
     if (note != null) {
       console.error('');
       console.error(note);
+    }
+    // home-base-bj5xm D3: every private skip is logged with its reason. Ids
+    // and reasons only; never a word of what the session said.
+    for (const line of summary.privateSessions) {
+      console.error('');
+      console.error(
+        `  note: private, not written to the threads repo — ${line}`,
+      );
     }
     if (summary.failures.length > 0) console.error('');
     for (const line of summary.failures) console.error(`  ⚠️ ${line}`);

@@ -652,6 +652,7 @@ describe('the FIRST prompt creates the thread (home-base-39co9 D1)', () => {
       const firstApply = await applyCapture({
         ...spawnedAt(h, 0),
         autoCommit: false,
+        cwd: h.cwd,
       });
       expect(firstApply).toMatchObject({kind: 'ran', last: {created: true}});
       const created = onlyThread(h);
@@ -670,6 +671,7 @@ describe('the FIRST prompt creates the thread (home-base-39co9 D1)', () => {
       const secondApply = await applyCapture({
         ...spawnedAt(h, 1),
         autoCommit: false,
+        cwd: h.cwd,
       });
       expect(secondApply).toMatchObject({
         kind: 'ran',
@@ -756,6 +758,7 @@ describe('K10 c · the bead update', () => {
     hook(h, payload(h, 'Stop', 'a live yield'));
     const outcome = await applyCapture({
       autoCommit: false,
+      cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
     });
@@ -789,7 +792,12 @@ describe('K10 c · the bead update', () => {
     });
     // A log that holds ONLY Claude's line: capture was installed mid-session.
     hook(h, payload(h, 'Stop', 'the newest yield'));
-    await applyCapture({autoCommit: false, env: h.env, sessionId: SESSION});
+    await applyCapture({
+      autoCommit: false,
+      cwd: h.cwd,
+      env: h.env,
+      sessionId: SESSION,
+    });
     const thread = onlyThread(h);
     expect(thread.title).toBe('the reported title');
     expect(thread.description).toBe('THE REPORTED DESCRIPTION');
@@ -829,7 +837,12 @@ describe('K10 c · the bead update', () => {
       title: 'the reported title',
     });
     hook(h, payload(h, 'Stop', 'a live yield after the report'));
-    await applyCapture({autoCommit: false, env: h.env, sessionId: SESSION});
+    await applyCapture({
+      autoCommit: false,
+      cwd: h.cwd,
+      env: h.env,
+      sessionId: SESSION,
+    });
     const thread = onlyThread(h);
     expect(thread.title).toBe('the reported title');
     expect(thread.description).toBe('GOAL: the report description');
@@ -853,7 +866,12 @@ describe('K10 c · the bead update', () => {
       title: 'done thread',
     });
     hook(h, payload(h, 'Stop', 'resumed and answered'));
-    await applyCapture({autoCommit: false, env: h.env, sessionId: SESSION});
+    await applyCapture({
+      autoCommit: false,
+      cwd: h.cwd,
+      env: h.env,
+      sessionId: SESSION,
+    });
     const thread = onlyThread(h);
     expect(thread.status).toBe('closed');
     expect(thread.metadata?.lastAssistantMessage).toBe('resumed and answered');
@@ -862,10 +880,16 @@ describe('K10 c · the bead update', () => {
   test('an unchanged log writes nothing to bd', async () => {
     const h = harness();
     hook(h, payload(h, 'Stop', 'a yield'));
-    await applyCapture({autoCommit: false, env: h.env, sessionId: SESSION});
+    await applyCapture({
+      autoCommit: false,
+      cwd: h.cwd,
+      env: h.env,
+      sessionId: SESSION,
+    });
     const before = h.fake.read().log.length;
     const outcome = await applyCapture({
       autoCommit: false,
+      cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
     });
@@ -944,6 +968,7 @@ describe('K10 c · two quick captures converge on the NEWEST message (lock + dir
     writeFileSync(captureLockPath(SESSION, h.env), String(process.ppid));
     const outcome = await applyCapture({
       autoCommit: false,
+      cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
     });
@@ -960,6 +985,7 @@ describe('K10 c · two quick captures converge on the NEWEST message (lock + dir
     writeFileSync(captureLockPath(SESSION, h.env), String(dead));
     const outcome = await applyCapture({
       autoCommit: false,
+      cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
     });
@@ -1228,6 +1254,7 @@ async function midSessionCapture(h: Harness, transcript: string) {
   );
   return await applyCapture({
     autoCommit: false,
+    cwd: h.cwd,
     env: h.env,
     sessionId: SESSION,
     transcriptPath: transcript,
@@ -1273,6 +1300,7 @@ describe('k0b8n.16 · the first capture seeds a mid-session log from the transcr
     ]);
     const again = await applyCapture({
       autoCommit: false,
+      cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
       transcriptPath: transcript,
@@ -1321,6 +1349,7 @@ describe('k0b8n.16 · the first capture seeds a mid-session log from the transcr
     hook(h, payload(h, 'Stop', 'a live yield', {transcript_path: missing}));
     const first = await applyCapture({
       autoCommit: false,
+      cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
       transcriptPath: missing,
@@ -1330,6 +1359,7 @@ describe('k0b8n.16 · the first capture seeds a mid-session log from the transcr
     const transcript = writeTranscript(h, MID_SESSION);
     const second = await applyCapture({
       autoCommit: false,
+      cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
       transcriptPath: transcript,
@@ -1358,6 +1388,7 @@ describe('k0b8n.15 · capture fills a missing resumeCommand, and never overwrite
     hook(h, payload(h, 'Stop', 'a yield', {transcript_path: transcript}));
     await applyCapture({
       autoCommit: false,
+      cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
       transcriptPath: transcript,
@@ -1389,6 +1420,7 @@ describe('k0b8n.15 · capture fills a missing resumeCommand, and never overwrite
     hook(h, payload(h, 'Stop', 'a yield', {transcript_path: missing}));
     await applyCapture({
       autoCommit: false,
+      cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
       transcriptPath: missing,
@@ -1403,6 +1435,7 @@ describe('k0b8n.15 · capture fills a missing resumeCommand, and never overwrite
     const before = h.fake.read().log.length;
     await applyCapture({
       autoCommit: false,
+      cwd: h.cwd,
       env: h.env,
       sessionId: SESSION,
       transcriptPath: missing,

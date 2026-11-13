@@ -55,6 +55,7 @@ import {
   writeDraft,
 } from './drafts';
 import {threadsStateDir} from './paths';
+import {ownerOfMetadata} from './privacy';
 import {contextFor, resolveThread, type ThreadRef} from './resolve';
 
 export interface SubmitDecision {
@@ -452,7 +453,7 @@ export async function runThreadAnswerWeb(
     stateDir,
     threadId: thread.id,
     threadTitle: thread.title ?? '(no title)',
-    writer: bdWriter(ctx, thread.id),
+    writer: bdWriter(ctx, thread.id, ownerOfMetadata(thread.metadata)),
   });
 
   console.log(`thread answer · ${thread.id} · ${asks.value.length} open asks`);

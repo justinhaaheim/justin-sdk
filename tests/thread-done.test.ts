@@ -47,7 +47,7 @@ function recorder(options: {asks?: BdIssue[]; failOn?: string} = {}): Recorder {
   return {
     calls,
     deps: {
-      closeIssue(_ctx, id, reason): Promise<BdResult<true>> {
+      closeIssue(_ctx, _owner, id, reason): Promise<BdResult<true>> {
         calls.push(`close:${id}:${reason}`);
         if (options.failOn === id) {
           return Promise.resolve({
@@ -65,7 +65,7 @@ function recorder(options: {asks?: BdIssue[]; failOn?: string} = {}): Recorder {
         calls.push('listOpenAsks');
         return Promise.resolve({ok: true, value: asks});
       },
-      reopenIssue(_ctx, id, reason): Promise<BdResult<true>> {
+      reopenIssue(_ctx, _owner, id, reason): Promise<BdResult<true>> {
         calls.push(`reopen:${id}:${reason}`);
         return Promise.resolve({ok: true, value: true});
       },

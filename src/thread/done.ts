@@ -35,6 +35,7 @@ import {
   reopenIssue,
 } from './bd';
 import {type CommitOutcome, commitThreadsRepo, describeCommit} from './commit';
+import {ownerOfMetadata} from './privacy';
 import {contextFor, resolveThread, type ThreadRef} from './resolve';
 
 export const DEFAULT_DONE_REASON = 'thread closed by Justin';
@@ -87,6 +88,9 @@ export async function runThreadDone(
     return 2;
   }
   const thread = resolved.issue;
+  // home-base-bj5xm D2: the thread's own session owns its asks too, so a
+  // private session's thread is not closed through the threads repo.
+  const owner = ownerOfMetadata(thread.metadata);
   const reason =
     options.reason != null && options.reason !== ''
       ? options.reason
@@ -105,6 +109,7 @@ export async function runThreadDone(
   for (const ask of asks.value) {
     const closed = await deps.closeIssue(
       ctx,
+      owner,
       ask.id,
       `no longer relevant: ${reason}`,
     );
@@ -117,7 +122,7 @@ export async function runThreadDone(
     closedAsks.push(ask.id);
   }
 
-  const closed = await deps.closeIssue(ctx, thread.id, reason);
+  const closed = await deps.closeIssue(ctx, owner, thread.id, reason);
   if (!closed.ok) {
     console.error(
       `thread done: closed ${closedAsks.length} ask(s), but could NOT close the thread ${thread.id} — ${describeBdFailure(closed.failure)}`,
@@ -162,7 +167,12 @@ export async function runThreadReopen(
       ? options.reason
       : 'reopened by Justin';
 
-  const reopened = await deps.reopenIssue(ctx, thread.id, reason);
+  const reopened = await deps.reopenIssue(
+    ctx,
+    ownerOfMetadata(thread.metadata),
+    thread.id,
+    reason,
+  );
   if (!reopened.ok) {
     console.error(
       `thread reopen: could not reopen ${thread.id} — ${describeBdFailure(reopened.failure)}`,

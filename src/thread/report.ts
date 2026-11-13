@@ -66,6 +66,7 @@ import {
   predecessorSessionId,
   resolvePredecessor,
 } from './predecessor';
+import {ownerOf, sessionPrivacy} from './privacy';
 import {
   type CarriedAsk,
   numberingFieldsOf,
@@ -280,6 +281,11 @@ export type BdWriteOutcome =
       warnings: string[];
     }
   | {failure: BdFailure; rendered: string; status: 'bdFailed'}
+  /**
+   * The session is private (home-base-bj5xm): nothing was read or written in
+   * the threads repo. Carries the report so it still prints, and the reason.
+   */
+  | {reason: string; rendered: string; status: 'private'}
   | {missing: string[]; status: 'refused'}
   /**
    * An ask's `supersedes` names something this report cannot close (D24).
@@ -399,6 +405,25 @@ export async function writeReportToBd(
   const renderWithoutBead = (): string =>
     render({askIds: payload.asks.map(() => null), threadId: null});
 
+  // --- 3b. PRIVATE SESSIONS STOP HERE (home-base-bj5xm) --------------------
+  //
+  // Before any bd call, read or write: a private session gets no thread bead,
+  // no asks and no link from its predecessor. Every write below names this
+  // owner too, so the adapter refuses them even if this check were removed.
+  const owner = ownerOf(sessionId, [
+    facts.cwd,
+    facts.repoPath,
+    facts.worktreePath,
+  ]);
+  const privacy = sessionPrivacy(owner, ctx.env);
+  if (privacy.kind === 'private') {
+    return {
+      reason: privacy.reason,
+      rendered: renderWithoutBead(),
+      status: 'private',
+    };
+  }
+
   // --- 4. read the existing thread and its open asks ----------------------
   const existing = await findThreadBySession(ctx, sessionId);
   if (!existing.ok) {
@@ -481,6 +506,7 @@ export async function writeReportToBd(
   for (const orphan of orphans) {
     const closed = await closeAsk(
       ctx,
+      owner,
       orphan.id,
       'incomplete report attempt — this ask was recreated by the retry',
     );
@@ -763,7 +789,7 @@ export async function writeReportToBd(
 
   let threadId: string;
   if (existingThread == null) {
-    const created = await createThread(ctx, {
+    const created = await createThread(ctx, owner, {
       description,
       metadata: provisionalMetadata,
       notes: provisionalNotes,
@@ -779,7 +805,7 @@ export async function writeReportToBd(
     threadId = created.value;
   } else {
     threadId = existingThread.id;
-    const updated = await updateThread(ctx, threadId, {
+    const updated = await updateThread(ctx, owner, threadId, {
       description,
       metadata: provisionalMetadata,
       notes: provisionalNotes,
@@ -814,7 +840,7 @@ export async function writeReportToBd(
     // still live. `reparentIssue` stays in bd.ts for one release, unused by this
     // path, so that asks already re-parented by v2 keep working and so the
     // measurement behind it is not lost; it goes when the v2 bridge does.
-    const linked = await mergeMetadata(ctx, continuesFrom, {
+    const linked = await mergeMetadata(ctx, owner, continuesFrom, {
       continuedBy: threadId,
     });
     if (!linked.ok) {
@@ -837,6 +863,7 @@ export async function writeReportToBd(
     if (!previous.includes(line)) {
       const noted = await setIssueDescription(
         ctx,
+        owner,
         continuesFrom,
         previous === '' ? line : `${previous}\n${line}`,
       );
@@ -857,7 +884,7 @@ export async function writeReportToBd(
 
   const askIds: (string | null)[] = [];
   for (const [index, ask] of payload.asks.entries()) {
-    const created = await createAsk(ctx, threadId, {
+    const created = await createAsk(ctx, owner, threadId, {
       description: renderAskDescription(ask, threadId),
       metadata: buildAskMetadata({
         askIndex: index,
@@ -917,6 +944,7 @@ export async function writeReportToBd(
   for (const prior of closePlan) {
     const closed = await closeAsk(
       ctx,
+      owner,
       prior.id,
       `${prior.disposition}: ${prior.detail}`,
     );
@@ -946,6 +974,7 @@ export async function writeReportToBd(
   // compact — the compaction is a choice about a terminal, not about the record.
   const notesWritten = await finalizeThread(
     ctx,
+    owner,
     threadId,
     render({
       askIds,
@@ -1199,6 +1228,27 @@ export async function runThreadReport(
       rendered: outcome.rendered,
       report,
     });
+  }
+
+  if (outcome.status === 'private') {
+    // home-base-bj5xm: the report still prints, so the session can paste it,
+    // and exit 0: keeping it out of the threads repo is the intended outcome.
+    console.log(
+      ansiFromReportText(outcome.rendered, {
+        color: shouldStyle(),
+        width: terminalWidth(),
+      }),
+    );
+    console.error('');
+    console.error(
+      `THREAD NOT RECORDED, on purpose: this session is private (${outcome.reason}). Nothing was written to the threads repo, which is pushed to GitHub.`,
+    );
+    console.error(
+      archivePath == null
+        ? '  the payload could not be archived locally either'
+        : `  the payload is archived locally (never pushed) at ${archivePath}`,
+    );
+    return 0;
   }
 
   if (outcome.status === 'superseded') {

@@ -626,7 +626,11 @@ function seededFake(): FakeBd {
   state.issues = [
     {
       id: 'jl-t1',
-      metadata: {reportedAt: '2026-09-12T10:00:00.000Z', sessionId: SESSION},
+      metadata: {
+        cwd: '/Users/jhaa/Dev/pretend-repo',
+        reportedAt: '2026-09-12T10:00:00.000Z',
+        sessionId: SESSION,
+      },
       notes: 'THE RENDERED REPORT',
       parent: null,
       status: 'in_progress',
@@ -671,7 +675,13 @@ function seededFake(): FakeBd {
 }
 
 function envFor(fake: FakeBd): Record<string, string | undefined> {
-  return {...fake.env, JUSTIN_THREADS_REPO_DIR: fake.dir};
+  // home-base-bj5xm: no user config, so no repo is private; and the real
+  // ~/.config is never read.
+  return {
+    ...fake.env,
+    JUSTIN_THREADS_REPO_DIR: fake.dir,
+    XDG_CONFIG_HOME: `${fake.dir}/no-user-config`,
+  };
 }
 
 /** Timestamps and temp paths differ between runs; everything else must not. */

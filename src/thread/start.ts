@@ -38,7 +38,7 @@
  */
 
 import type {WriteResult} from './archive';
-import type {BdContext, BdFailure, ThreadBeadFields} from './bd';
+import type {BdContext, BdFailure, ThreadBeadFields, WriteOwner} from './bd';
 import type {CommitOutcome} from './commit';
 import type {ThreadFacts} from './facts';
 import type {EnvLike} from './paths';
@@ -66,6 +66,7 @@ import {
   threadsBeadsMissingLine,
   threadsStateDir,
 } from './paths';
+import {ownerOf} from './privacy';
 
 /**
  * What one `thread start` did. A tagged union rather than a boolean-and-a-string
@@ -199,22 +200,26 @@ export function startThreadFields(input: {
  * The caller commits: `thread start` commits with the configured push, and
  * `thread capture` commits once after its own metadata write with the push
  * forced off (K10 d).
+ *
+ * `owner` is the session the bead is for; a private one is refused by the
+ * adapter before bd runs (home-base-bj5xm D2).
  */
 export async function createStartThread(
   ctx: BdContext,
+  owner: WriteOwner,
   fields: ThreadBeadFields,
 ): Promise<
   | {failure: BdFailure; ok: false}
   | {ok: true; statusFailure: BdFailure | null; threadId: string}
 > {
-  const created = await createThread(ctx, fields);
+  const created = await createThread(ctx, owner, fields);
   if (!created.ok) return {failure: created.failure, ok: false};
 
   // 7. STATUS. `bd create` has no status flag, so `in_progress` (D10) costs a
   // second write. If it fails the bead still EXISTS — reporting that as a plain
   // failure would be its own rule-6 violation in the other direction, so the
   // outcome carries both the id and the named failure.
-  const status = await setThreadInProgress(ctx, created.value);
+  const status = await setThreadInProgress(ctx, owner, created.value);
   return {
     ok: true,
     statusFailure: status.ok ? null : status.failure,
@@ -309,6 +314,12 @@ export async function startThread(
   }
 
   const ctx = bdContext(env);
+  // home-base-bj5xm D2: whose session every write below is for.
+  const owner = ownerOf(sessionId, [
+    facts.cwd,
+    facts.repoPath,
+    facts.worktreePath,
+  ]);
 
   // 5. IDEMPOTENCY. `thread capture` or `thread report` may already have created
   // the bead, and a human may run this twice, so the lookup is the
@@ -378,7 +389,7 @@ export async function startThread(
   if (adopting != null) {
     // `updateThread` sends every field including the whole metadata document
     // and `-s in_progress`, which is exactly the rewrite an adoption is.
-    const adopted = await updateThread(ctx, adopting.id, fields);
+    const adopted = await updateThread(ctx, owner, adopting.id, fields);
     if (!adopted.ok) {
       return {
         failure: adopted.failure,
@@ -405,7 +416,7 @@ export async function startThread(
       title,
     };
   }
-  const created = await createStartThread(ctx, fields);
+  const created = await createStartThread(ctx, owner, fields);
   if (!created.ok) {
     return {
       failure: created.failure,

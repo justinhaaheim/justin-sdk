@@ -42,6 +42,8 @@ No JSON, no form, no progress percent. Do not repeat what Part 1 already shows: 
 
 `thread done`, `thread archive` and `thread note` are Justin's marks. Do not run them unless he asks. `/thread-done` and `/thread-archive` are him asking.
 
+When Justin says this session is private, run `bun run justin-sdk thread private` at once. From then on nothing from the session is written to the threads repo, which is pushed to GitHub.
+
 Subagents (players, explorers, any agent dispatched by another session) never run `thread` commands: they inherit the parent's session id and would write into its session. They report to the session that dispatched them; that session reports for the arc.
 
 ## Asking

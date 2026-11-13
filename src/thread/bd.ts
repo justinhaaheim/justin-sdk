@@ -40,6 +40,7 @@
  */
 
 import type {EnvLike} from './paths';
+import type {WriteOwner} from './privacy';
 
 import {spawnSync} from 'child_process';
 import {mkdtempSync, rmSync, writeFileSync} from 'fs';
@@ -48,8 +49,18 @@ import {join} from 'path';
 
 import {SDK_RUN} from '../sdk-invocation';
 import {threadsRepoDir} from './paths';
+import {sessionPrivacy} from './privacy';
 
+export type {WriteOwner} from './privacy';
+
+/**
+ * `private` (home-base-bj5xm D2): the write is for a session that must not
+ * reach the threads repo, so bd was never run. Its `command` names only the
+ * bd subcommand, never the arguments: those carry the very text being kept
+ * out.
+ */
 export type BdFailure =
+  | {command: string; detail: string; kind: 'private'}
   | {command: string; detail: string; kind: 'sandbox-denied'}
   | {command: string; detail: string; kind: 'unreachable'}
   | {command: string; detail: string; kind: 'locked'}
@@ -80,6 +91,8 @@ function shortCommand(command: string): string {
 export function describeBdFailure(rawFailure: BdFailure): string {
   const failure = {...rawFailure, command: shortCommand(rawFailure.command)};
   switch (failure.kind) {
+    case 'private':
+      return `${failure.command} — not written: the session is private (${failure.detail})`;
     case 'sandbox-denied':
       return `${failure.command} — the sandbox refused it (${failure.detail})`;
     case 'unreachable':
@@ -247,17 +260,76 @@ export function bdContext(env: EnvLike = process.env): BdContext {
 /** The one line every command prints when `ctx.exportUnstaged` is set. */
 export const EXPORT_UNSTAGED_WARNING = `⚠️ WARNING: recorded in Dolt, but .beads/issues.jsonl could not be git-staged and therefore was NOT committed (the sandbox denies ~/Dev/threads/.git). Nothing was lost; \`${SDK_RUN} thread board\` reminds you what is uncommitted.`;
 
+/** The bd subcommands that only read. Everything else counts as a write. */
+const READ_ONLY_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  'list',
+  'show',
+  'types',
+]);
+
+/**
+ * Does this bd command only read? (home-base-bj5xm D2.)
+ *
+ * An ALLOW-LIST of reads, so a write this file learns later is checked for
+ * privacy without anyone remembering to add it: an unknown subcommand counts
+ * as a write. `comments <id>` reads and `comments add` writes.
+ */
+export function isReadOnlyBdCommand(args: readonly string[]): boolean {
+  const [subcommand, second] = args;
+  if (subcommand == null) return false;
+  if (subcommand === 'comments') return second !== 'add';
+  return READ_ONLY_SUBCOMMANDS.has(subcommand);
+}
+
+/**
+ * The privacy check every write passes through (home-base-bj5xm D2, D3).
+ *
+ * HERE, in the one function that spawns bd, so no writer can reach the threads
+ * repo without it: a write that names no owner is refused as if private,
+ * because "whose session is this?" unanswered is D3's "cannot tell".
+ */
+function privateWriteRefusal(
+  ctx: BdContext,
+  args: readonly string[],
+  owner: null | WriteOwner,
+): BdResult<string> | null {
+  if (isReadOnlyBdCommand(args)) return null;
+  const verdict =
+    owner == null
+      ? {
+          kind: 'private' as const,
+          reason:
+            'the write named no session, so it could not be checked for privacy',
+        }
+      : sessionPrivacy(owner, ctx.env);
+  if (verdict.kind === 'public') return null;
+  return {
+    failure: {
+      command: `bd ${args[0] ?? ''}`.trim(),
+      detail: verdict.reason,
+      kind: 'private',
+    },
+    ok: false,
+  };
+}
+
 /**
  * Run one bd command, retrying only a `locked` failure.
  *
  * stdout is returned even on success paths that print nothing; stderr is
  * captured rather than inherited so a lock warning never lands in the middle of
  * the rendered report on the user's terminal.
+ *
+ * `owner` is whose session a WRITE is for. Reads pass nothing; a write is
+ * refused before bd runs when its owner is private or missing.
  */
 async function runBd(
   ctx: BdContext,
   args: string[],
+  owner: null | WriteOwner = null,
 ): Promise<BdResult<string>> {
+  const refused = privateWriteRefusal(ctx, args, owner);
+  if (refused != null) return refused;
   const command = `bd ${args.join(' ')}`;
   let last: BdFailure | null = null;
   for (let attempt = 0; attempt < MAX_LOCK_ATTEMPTS; attempt += 1) {
@@ -567,24 +639,29 @@ export interface ThreadBeadFields {
  */
 export async function createThread(
   ctx: BdContext,
+  owner: WriteOwner,
   fields: ThreadBeadFields,
 ): Promise<BdResult<string>> {
   const result = await withMetadataFile(fields.metadata, (metaPath) =>
-    runBd(ctx, [
-      'create',
-      fields.title,
-      '-t',
-      'thread',
-      '-p',
-      '2',
-      '-d',
-      fields.description,
-      '--notes',
-      fields.notes,
-      '--metadata',
-      `@${metaPath}`,
-      '--silent',
-    ]),
+    runBd(
+      ctx,
+      [
+        'create',
+        fields.title,
+        '-t',
+        'thread',
+        '-p',
+        '2',
+        '-d',
+        fields.description,
+        '--notes',
+        fields.notes,
+        '--metadata',
+        `@${metaPath}`,
+        '--silent',
+      ],
+      owner,
+    ),
   );
   if (!result.ok) return result;
   const id = result.value.trim().split('\n').pop()?.trim() ?? '';
@@ -617,24 +694,29 @@ export async function createThread(
  */
 export async function updateThread(
   ctx: BdContext,
+  owner: WriteOwner,
   id: string,
   fields: ThreadBeadFields,
 ): Promise<BdResult<true>> {
   const result = await withMetadataFile(fields.metadata, (metaPath) =>
-    runBd(ctx, [
-      'update',
-      id,
-      '--title',
-      fields.title,
-      '-d',
-      fields.description,
-      '--notes',
-      fields.notes,
-      '--metadata',
-      `@${metaPath}`,
-      '-s',
-      'in_progress',
-    ]),
+    runBd(
+      ctx,
+      [
+        'update',
+        id,
+        '--title',
+        fields.title,
+        '-d',
+        fields.description,
+        '--notes',
+        fields.notes,
+        '--metadata',
+        `@${metaPath}`,
+        '-s',
+        'in_progress',
+      ],
+      owner,
+    ),
   );
   if (!result.ok) return result;
   return {ok: true, value: true};
@@ -650,22 +732,27 @@ export async function updateThread(
  */
 export async function updateThreadBody(
   ctx: BdContext,
+  owner: WriteOwner,
   id: string,
   fields: ThreadBeadFields,
 ): Promise<BdResult<true>> {
   const result = await withMetadataFile(fields.metadata, (metaPath) =>
-    runBd(ctx, [
-      'update',
-      id,
-      '--title',
-      fields.title,
-      '-d',
-      fields.description,
-      '--notes',
-      fields.notes,
-      '--metadata',
-      `@${metaPath}`,
-    ]),
+    runBd(
+      ctx,
+      [
+        'update',
+        id,
+        '--title',
+        fields.title,
+        '-d',
+        fields.description,
+        '--notes',
+        fields.notes,
+        '--metadata',
+        `@${metaPath}`,
+      ],
+      owner,
+    ),
   );
   if (!result.ok) return result;
   return {ok: true, value: true};
@@ -684,21 +771,26 @@ export async function updateThreadBody(
  */
 export async function finalizeThread(
   ctx: BdContext,
+  owner: WriteOwner,
   id: string,
   notes: string,
   metadata: Record<string, unknown>,
 ): Promise<BdResult<true>> {
   const result = await withMetadataFile(metadata, (metaPath) =>
-    runBd(ctx, [
-      'update',
-      id,
-      '--notes',
-      notes,
-      '--metadata',
-      `@${metaPath}`,
-      '-s',
-      'in_progress',
-    ]),
+    runBd(
+      ctx,
+      [
+        'update',
+        id,
+        '--notes',
+        notes,
+        '--metadata',
+        `@${metaPath}`,
+        '-s',
+        'in_progress',
+      ],
+      owner,
+    ),
   );
   if (!result.ok) return result;
   return {ok: true, value: true};
@@ -717,9 +809,10 @@ export async function finalizeThread(
  */
 export async function setThreadInProgress(
   ctx: BdContext,
+  owner: WriteOwner,
   id: string,
 ): Promise<BdResult<true>> {
-  const result = await runBd(ctx, ['update', id, '-s', 'in_progress']);
+  const result = await runBd(ctx, ['update', id, '-s', 'in_progress'], owner);
   if (!result.ok) return result;
   return {ok: true, value: true};
 }
@@ -741,25 +834,30 @@ export interface AskBeadFields {
 /** Create one ask bead as a child of the thread (D3). Returns its id. */
 export async function createAsk(
   ctx: BdContext,
+  owner: WriteOwner,
   threadId: string,
   fields: AskBeadFields,
 ): Promise<BdResult<string>> {
   const result = await withMetadataFile(fields.metadata, (metaPath) =>
-    runBd(ctx, [
-      'create',
-      fields.title,
-      '-t',
-      'ask',
-      '-p',
-      String(Math.min(4, Math.max(0, Math.round(fields.priority)))),
-      '--parent',
-      threadId,
-      '-d',
-      fields.description,
-      '--metadata',
-      `@${metaPath}`,
-      '--silent',
-    ]),
+    runBd(
+      ctx,
+      [
+        'create',
+        fields.title,
+        '-t',
+        'ask',
+        '-p',
+        String(Math.min(4, Math.max(0, Math.round(fields.priority)))),
+        '--parent',
+        threadId,
+        '-d',
+        fields.description,
+        '--metadata',
+        `@${metaPath}`,
+        '--silent',
+      ],
+      owner,
+    ),
   );
   if (!result.ok) return result;
   const id = result.value.trim().split('\n').pop()?.trim() ?? '';
@@ -785,10 +883,11 @@ export async function createAsk(
  */
 export async function closeIssue(
   ctx: BdContext,
+  owner: WriteOwner,
   id: string,
   reason: string,
 ): Promise<BdResult<true>> {
-  const result = await runBd(ctx, ['close', id, '--reason', reason]);
+  const result = await runBd(ctx, ['close', id, '--reason', reason], owner);
   if (!result.ok) return result;
   return {ok: true, value: true};
 }
@@ -803,10 +902,11 @@ export async function closeIssue(
  */
 export async function closeAsk(
   ctx: BdContext,
+  owner: WriteOwner,
   id: string,
   reason: string,
 ): Promise<BdResult<true>> {
-  return await closeIssue(ctx, id, reason);
+  return await closeIssue(ctx, owner, id, reason);
 }
 
 /**
@@ -833,10 +933,11 @@ export async function closeAsk(
  */
 export async function reopenIssue(
   ctx: BdContext,
+  owner: WriteOwner,
   id: string,
   reason: string,
 ): Promise<BdResult<true>> {
-  const result = await runBd(ctx, ['reopen', id, '-r', reason]);
+  const result = await runBd(ctx, ['reopen', id, '-r', reason], owner);
   if (!result.ok) return result;
   return {ok: true, value: true};
 }
@@ -853,10 +954,11 @@ export async function reopenIssue(
  */
 export async function addComment(
   ctx: BdContext,
+  owner: WriteOwner,
   id: string,
   text: string,
 ): Promise<BdResult<true>> {
-  const result = await runBd(ctx, ['comments', 'add', id, text]);
+  const result = await runBd(ctx, ['comments', 'add', id, text], owner);
   if (!result.ok) return result;
   return {ok: true, value: true};
 }
@@ -885,10 +987,11 @@ export async function addComment(
  */
 export async function reparentIssue(
   ctx: BdContext,
+  owner: WriteOwner,
   id: string,
   parentId: string,
 ): Promise<BdResult<true>> {
-  const result = await runBd(ctx, ['update', id, '--parent', parentId]);
+  const result = await runBd(ctx, ['update', id, '--parent', parentId], owner);
   if (!result.ok) return result;
   return {ok: true, value: true};
 }
@@ -904,10 +1007,11 @@ export async function reparentIssue(
  */
 export async function setIssueDescription(
   ctx: BdContext,
+  owner: WriteOwner,
   id: string,
   description: string,
 ): Promise<BdResult<true>> {
-  const result = await runBd(ctx, ['update', id, '-d', description]);
+  const result = await runBd(ctx, ['update', id, '-d', description], owner);
   if (!result.ok) return result;
   return {ok: true, value: true};
 }
@@ -926,11 +1030,12 @@ export async function setIssueDescription(
  */
 export async function mergeMetadata(
   ctx: BdContext,
+  owner: WriteOwner,
   id: string,
   metadata: Record<string, unknown>,
 ): Promise<BdResult<true>> {
   const result = await withMetadataFile(metadata, (metaPath) =>
-    runBd(ctx, ['update', id, '--metadata', `@${metaPath}`]),
+    runBd(ctx, ['update', id, '--metadata', `@${metaPath}`], owner),
   );
   if (!result.ok) return result;
   return {ok: true, value: true};

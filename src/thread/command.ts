@@ -2259,6 +2259,34 @@ export const threadCommand: CommandModule = {
         },
       )
       .command(
+        'private',
+        'Mark this session private: from now on nothing from it is written to the threads repo (~/Dev/threads), which is pushed to GitHub. What it wrote before stays there. Its messages are still kept in the local message log, which is never pushed. Run it when Justin says a session is private. Exit 0 marked (or already) · 1 the mark could not be written · 2 no session id.',
+        (yy) =>
+          yy
+            .option('session', {
+              describe:
+                'The session to mark (default: CLAUDE_CODE_SESSION_ID). A subagent shares its parent’s id, so a subagent marks its parent.',
+              type: 'string' as const,
+            })
+            .option('check', {
+              describe:
+                'Print whether the session is private, and why, for the current directory; change nothing',
+              type: 'boolean' as const,
+            })
+            .epilogue(
+              'Built for home-base-bj5xm (2026-11-13). A whole repo is made private in the USER config instead: componentConfig.thread.privateRepos in ~/.config/justin-sdk/config.json (`justin-sdk config schema` describes it). The mark is a file in <threads state dir>/private-sessions/, never in a git repo. Every writer into the threads repo checks it: the capture hook, the hourly backfill, `thread report`, `thread start`, `thread done` and `thread answer`.',
+            ),
+        async (argv) => {
+          const {runThreadPrivate} = await import('./privacy');
+          process.exit(
+            runThreadPrivate({
+              check: argv.check === true,
+              sessionId: argv.session ?? null,
+            }),
+          );
+        },
+      )
+      .command(
         'focus <target>',
         'Bring forward the cmux tab of the newest session of a handoff chain (home-base-9uzxw D-FOCUS), or refuse and say why. Exit 0 focused or dry run · 1 the cmux call failed · 2 usage · 3 refused.',
         (yy) =>

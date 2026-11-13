@@ -69,8 +69,10 @@ import {
   EXPORT_UNSTAGED_WARNING,
   listOpenAsks,
   mergeMetadata,
+  type WriteOwner,
 } from './bd';
 import {commitThreadsRepo, describeCommit} from './commit';
+import {ownerOfMetadata} from './privacy';
 import {
   compareAsksForNumbering,
   numberingFieldsOf,
@@ -446,13 +448,21 @@ export interface AnswerOptions extends ThreadRef {
  * out loud — telling him to re-type an answer bd already holds would be its own
  * small lie.
  */
-export function bdWriter(ctx: BdContext, threadId: string): AnswerWriter {
+export function bdWriter(
+  ctx: BdContext,
+  threadId: string,
+  /**
+   * The session the thread is for (its metadata, `ownerOfMetadata`). An answer
+   * on a private session's ask is refused by the adapter (home-base-bj5xm D2).
+   */
+  owner: WriteOwner,
+): AnswerWriter {
   const writeComment = async (
     id: string,
     text: string,
     stamp: Record<string, unknown>,
   ): Promise<WriteOutcome> => {
-    const wrote = await addComment(ctx, id, text);
+    const wrote = await addComment(ctx, owner, id, text);
     if (!wrote.ok) {
       return {
         detail: `comment — ${describeBdFailure(wrote.failure)}`,
@@ -460,7 +470,7 @@ export function bdWriter(ctx: BdContext, threadId: string): AnswerWriter {
         retry: retryCommandFor(id, text),
       };
     }
-    const stamped = await mergeMetadata(ctx, id, stamp);
+    const stamped = await mergeMetadata(ctx, owner, id, stamp);
     if (!stamped.ok) {
       return {
         detail: `metadata stamp — ${describeBdFailure(stamped.failure)} (the answer itself IS recorded)`,
@@ -607,7 +617,7 @@ export async function runThreadAnswer(
     result = await walkAsks(
       asks.value.map(askViewOf),
       io,
-      bdWriter(ctx, thread.id),
+      bdWriter(ctx, thread.id, ownerOfMetadata(thread.metadata)),
       style,
     );
   } finally {

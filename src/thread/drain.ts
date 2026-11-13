@@ -40,7 +40,7 @@ import {linkArchivedPredecessor} from './predecessor';
 import {type BdWriteOutcome, writeReportToBd} from './report';
 import {validateThreadFacts, validateThreadReport} from './schema';
 
-export type SpoolOutcomeKind = 'applied' | 'superseded' | 'kept';
+export type SpoolOutcomeKind = 'applied' | 'kept' | 'private' | 'superseded';
 
 export interface SpoolOutcome {
   detail: string;
@@ -52,6 +52,11 @@ export interface DrainSummary {
   applied: number;
   kept: number;
   outcomes: SpoolOutcome[];
+  /**
+   * Reports of private sessions (home-base-bj5xm): taken out of the spool and
+   * NOT written, because no retry may ever write them. Still in the archive.
+   */
+  private: number;
   /** Inflight files left by a drain that died; renamed back and replayed here. */
   reclaimed: number;
   /** Files another drain had already claimed. NOT ours to report on. */
@@ -307,6 +312,7 @@ export async function drainSpool(
     applied: 0,
     kept: 0,
     outcomes: [],
+    private: 0,
     reclaimed,
     skippedConcurrent: 0,
     superseded: 0,
@@ -363,6 +369,16 @@ export async function drainSpool(
         detail: `→ ${outcome.threadId} (report #${outcome.reportCount})`,
         file: name,
         kind: 'applied',
+      });
+      continue;
+    }
+    if (outcome.status === 'private') {
+      rmSync(path, {force: true});
+      summary.private += 1;
+      summary.outcomes.push({
+        detail: `private session, NOT written to the threads repo (${outcome.reason}). The payload is still in the local archive.`,
+        file: name,
+        kind: 'private',
       });
       continue;
     }
@@ -423,6 +439,9 @@ export function renderDrain(summary: DrainSummary | null): string[] {
   const lines = [
     `applied ${summary.applied} spooled report${summary.applied === 1 ? '' : 's'}` +
       (summary.superseded > 0 ? ` · ${summary.superseded} superseded` : '') +
+      (summary.private > 0
+        ? ` · ${summary.private} private, not recorded`
+        : '') +
       (summary.kept > 0 ? ` · ${summary.kept} STILL SPOOLED` : '') +
       (summary.reclaimed > 0
         ? ` · ${summary.reclaimed} reclaimed from an interrupted drain`

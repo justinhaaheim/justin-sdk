@@ -472,6 +472,12 @@ const componentConfigSchema = z
           .describe(
             'PINNED PROJECTS (home-base-yukaf.9 D-PINS, built 2026-10-18). DEFAULT []. Repo folder names (as `thread inbox` shows them, e.g. "home-base") that `thread inbox --by-repo` and the threads TUI’s "by repo" grouping (g) list first, in this order; the other repos follow, newest session first. Matched ignoring case; a pinned repo with no session in view adds nothing. A later config layer replaces the list. Only reorders: nothing is hidden or added.',
           ),
+        privateRepos: z
+          .array(z.string())
+          .optional()
+          .describe(
+            'PRIVATE REPOS (home-base-bj5xm, 2026-11-13). Read from the USER file only; a project file’s value is ignored. Paths (~ allowed) of repos whose sessions must never reach the threads repo (~/Dev/threads), which is pushed to GitHub. A session whose working directory is inside one of them (worktrees included, matched by path prefix) gets no thread bead and no thread-bead updates from any writer: the capture hook, the hourly backfill, `thread report`, `thread start`, `thread done`, `thread answer`. Its messages stay in the local message log, which is never pushed. `thread private` marks one session the same way. Fails closed: a user file that cannot be read or parsed, or an entry that is not an absolute or ~ path, makes EVERY session private until it is fixed. DEFAULT none.',
+          ),
         quota: z
           .looseObject({
             attendedGraceMinutes: z
@@ -959,6 +965,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     nudge: THREAD_DEFAULT_NUDGE,
     openSince: THREAD_DEFAULT_OPEN_SINCE,
     pinnedProjects: THREAD_DEFAULT_PINNED_PROJECTS,
+    privateRepos: [],
     quota: QUOTA_DEFAULTS,
     render: {emojiHeader: THREAD_DEFAULT_EMOJI_HEADER},
     repoDir: '~/Dev/threads',
