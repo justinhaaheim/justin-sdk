@@ -13,11 +13,11 @@
  *     {version: 1, at, checked, problems: [{id, name, kind, since, reason}]}
  *
  * ONE WRITER, TWO READERS. home-base's chores runner writes it after every
- * hourly tick (src/chores/health.ts). The Claude Code statusline
- * (home-base src/starship/job-health-segment.ts) and the status report's Part 1
- * (thread/part-one.ts, through session-report.ts) read it. Both readers go
- * through `readJobHealth` and `jobHealthNotice` here, so the rules below are
- * decided once.
+ * hourly tick (src/chores/health.ts). The Claude Code statusline's bottom line
+ * (home-base src/starship/job-health-alert.ts) and, in mayor sessions only,
+ * the status report's Part 1 (thread/part-one.ts, through session-report.ts)
+ * read it. Both readers go through `readJobHealth` and `jobHealthNotice` here,
+ * so the rules below are decided once.
  *
  * THIS MODULE IS A LEAF ON PURPOSE: it imports only node's fs, os and path.
  * The statusline imports it on every render, like thread/status-file.ts.
@@ -352,8 +352,9 @@ function problemPhrase(problem: JobProblem, now: Date): string {
 }
 
 /**
- * The statusline badge (D4): "⚠ life daily run failing 13d", "⚠ 3 jobs
- * broken", "⚠ chores not running", "⚠ job health unknown".
+ * The statusline alert's opening words (D4, R1): "⚠ life daily run failing
+ * 13d", "⚠ 3 jobs broken", "⚠ chores not running", "⚠ job health unknown".
+ * The statusline adds ": run chores".
  */
 export function jobHealthBadge(notice: JobHealthNotice, now: Date): string {
   switch (notice.kind) {

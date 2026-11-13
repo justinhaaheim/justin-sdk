@@ -190,8 +190,10 @@ export type ReportLoad =
        */
       handoffSuccessor: boolean;
       /**
-       * home-base-1rxt0.10 D5: the chores health file, read now, for Part 1's
-       * Jobs line. Null: nothing broken, or chores never ran on this Mac.
+       * home-base-1rxt0.10 D5 and R3: the chores health file, read now, for
+       * Part 1's Jobs line, IN A MAYOR SESSION ONLY (its bead labelled
+       * session-role:mayor). Null: not a mayor session (the file is not read),
+       * nothing broken, or chores never ran on this Mac.
        */
       jobHealth: JobHealthNotice | null;
       kind: 'loaded';
@@ -363,6 +365,16 @@ async function loadForReport(input: {
       ? 'the transcript path is not known'
       : model.transcript.lastRecordAt.reason,
   });
+  const marks =
+    model.beads.session == null
+      ? NO_MARKS
+      : walkedSessionMarks(
+          model.beads.session,
+          realHandoffNumberReaders({
+            env: input.env,
+            fallbackDbs: [join(model.beads.session.beadsDir, 'beads.db')],
+          }),
+        );
   return {
     // home-base-j8q3e.1.7.2 item 3: Part 1's "You need to" is the dashboard's
     // line, from the same function, so the two never disagree.
@@ -374,18 +386,14 @@ async function loadForReport(input: {
     counts,
     created,
     handoffSuccessor: knob.handoffSuccessor,
-    jobHealth: jobHealthNotice(readJobHealth(input.env), input.now),
+    // home-base-1rxt0.10 R3 (Justin, 2026-11-12: "print into the cc mayor
+    // session -- ie a place where we can actually act on it"): only a mayor
+    // session's report carries the Jobs line; every other session's has none.
+    jobHealth: marks.mayor
+      ? jobHealthNotice(readJobHealth(input.env), input.now)
+      : null,
     kind: 'loaded',
-    marks:
-      model.beads.session == null
-        ? NO_MARKS
-        : walkedSessionMarks(
-            model.beads.session,
-            realHandoffNumberReaders({
-              env: input.env,
-              fallbackDbs: [join(model.beads.session.beadsDir, 'beads.db')],
-            }),
-          ),
+    marks,
     model,
     optional: optionalLine(counts, model.sessionBeadId),
     overarching: knob.titleSummary ? overarchingFactsOf(model, input) : null,

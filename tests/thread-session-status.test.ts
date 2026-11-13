@@ -28,7 +28,7 @@ import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'fs';
 import {tmpdir} from 'os';
 import {basename, dirname, join} from 'path';
 
-import {brClose, brCreate, brShow, runBr} from '../src/beads/br';
+import {brClose, brCreate, brShow, brUpdate, runBr} from '../src/beads/br';
 import {PLAIN_STYLE} from '../src/cli-style';
 import {messageLogPath} from '../src/thread/archive';
 import {fileAsk} from '../src/thread/ask';
@@ -46,7 +46,7 @@ import {
   stripPastedPartOne,
 } from '../src/thread/part-one';
 import {fileRequest} from '../src/thread/request';
-import {ensureSessionBead} from '../src/thread/session-bead';
+import {ensureSessionBead, MAYOR_ROLE_LABEL} from '../src/thread/session-bead';
 import {sectionFor} from '../src/thread/session-card';
 import {loadSession, measured, unmeasured} from '../src/thread/session-model';
 import {
@@ -1134,7 +1134,7 @@ describe('fixture 1: a question-only session', () => {
     expect(markdown).not.toContain('Questions for you:');
   });
 
-  test('the Jobs line (home-base-1rxt0.10 D5): read from CHORES_STATE_DIR, shown under the state fields, absent when nothing is broken', async () => {
+  test('the Jobs line (home-base-1rxt0.10 D5, R3): a mayor session only, read from CHORES_STATE_DIR, shown under the state fields, absent when nothing is broken', async () => {
     const w = questionOnly();
     const choresDir = mkdtempSync(join(tmpdir(), 'status-jobs-'));
     writeFileSync(
@@ -1168,15 +1168,30 @@ describe('fixture 1: a question-only session', () => {
         }),
         PLAIN_STYLE,
       );
-    const broken = await loadSessionReport({
-      asIfYielded: false,
-      cwd: w.repo,
-      env: {...w.env, CHORES_STATE_DIR: choresDir},
-      now: NOW,
-      selector: null,
-      sessionId: null,
+    const loadWith = async (choresStateDir: string) => {
+      const load = await loadSessionReport({
+        asIfYielded: false,
+        cwd: w.repo,
+        env: {...w.env, CHORES_STATE_DIR: choresStateDir},
+        now: NOW,
+        selector: null,
+        sessionId: null,
+      });
+      if (load.kind !== 'loaded') throw new Error(load.kind);
+      return load;
+    };
+    // R3, negative control: the same broken file, in a session that is not a
+    // mayor session, gives no Jobs line.
+    const notMayor = await loadWith(choresDir);
+    expect(notMayor.marks.mayor).toBe(false);
+    expect(notMayor.jobHealth).toBeNull();
+    expect(view(notMayor)).not.toContain('Jobs:');
+    const labelled = brUpdate({cwd: w.repo}, w.sessionBead, {
+      addLabels: [MAYOR_ROLE_LABEL],
     });
-    if (broken.kind !== 'loaded') throw new Error(broken.kind);
+    expect(labelled.kind).not.toBe('failed');
+    const broken = await loadWith(choresDir);
+    expect(broken.marks.mayor).toBe(true);
     expect(broken.jobHealth?.kind).toBe('broken');
     const lines = view(broken).split('\n');
     const jobs = lines.findIndex((line) => line.includes('**Jobs:**'));
@@ -1186,8 +1201,10 @@ describe('fixture 1: a question-only session', () => {
     expect(jobs).toBeGreaterThan(
       lines.findIndex((line) => line.includes('**You need to:**')),
     );
-    // Negative control: the preload's empty chores dir is "never ran here".
+    // Negative control: a mayor session whose chores dir is empty ("never ran
+    // here") has no Jobs line either.
     const quiet = await report(w, false);
+    expect(quiet.marks.mayor).toBe(true);
     expect(quiet.jobHealth).toBeNull();
     expect(view(quiet)).not.toContain('Jobs:');
     rmSync(choresDir, {force: true, recursive: true});

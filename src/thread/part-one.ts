@@ -397,7 +397,8 @@ export interface PartOneInput {
   /**
    * home-base-1rxt0.10 D5: what the chores health file says about the
    * recurring jobs on this Mac (job-health.ts). Null or absent: nothing to
-   * show, so no Jobs line.
+   * show, so no Jobs line. The caller passes it for a mayor session only
+   * (R3, session-report.ts loadForReport).
    */
   jobs?: JobHealthNotice | null;
   /**
@@ -608,8 +609,8 @@ export function partOneView(input: PartOneInput): PartOneView {
     );
   }
   // home-base-1rxt0.10 D5: one line, near the top, while a recurring job on
-  // this Mac is broken or its health cannot be vouched for. It is the channel
-  // that reaches the iPhone app, and it reads the same in every repo.
+  // this Mac is broken or its health cannot be vouched for. Mayor sessions
+  // only (R3): the caller passes `jobs` for nothing else.
   if (input.jobs != null) {
     state.push(
       field('Jobs', jobHealthReportText(input.jobs, timeZone), ' — details: ', {
