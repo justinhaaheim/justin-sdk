@@ -137,6 +137,7 @@ function world(
     JUSTIN_SDK_HEALTH_NOTICES: 'off',
     JUSTIN_THREADS_STATE_DIR: join(sb.path, 'state'),
     JUSTIN_THREADS_TRANSCRIPTS_ROOT: join(sb.path, 'projects'),
+    VITALS_STATE_DIR: join(sb.path, 'vitals-state'),
     XDG_CONFIG_HOME: xdg,
   };
   const repo = initRepo(sb, options.name ?? 'export-repo', {
@@ -1209,6 +1210,102 @@ describe('fixture 1: a question-only session', () => {
     expect(quiet.jobHealth).toBeNull();
     expect(view(quiet)).not.toContain('Jobs:');
     rmSync(choresDir, {force: true, recursive: true});
+  });
+
+  test('the Vitals line (home-base-sg9q9.7 D4): a mayor session only, every non-ok check but jobs, nothing when those are ok, a stale result shown', async () => {
+    const w = questionOnly();
+    const vitalsDir = mkdtempSync(join(tmpdir(), 'status-vitals-'));
+    const disk = {
+      check: 'disk',
+      findings: [{key: 'disk:low', level: 'warning', summary: '22.0 GB free'}],
+      name: 'disk',
+      status: 'warning',
+      summary: '22.0 GB free',
+    };
+    const diskOk = {
+      check: 'disk',
+      findings: [],
+      name: 'disk',
+      status: 'ok',
+      summary: '80.0 GB free',
+    };
+    const jobs = {
+      check: 'jobs',
+      findings: [{key: 'jobs:x', level: 'error', summary: 'x failing'}],
+      name: 'jobs',
+      status: 'error',
+      summary: 'x failing',
+    };
+    const write = (ageMs: number, checks: object[]) =>
+      writeFileSync(
+        join(vitalsDir, 'latest.json'),
+        JSON.stringify({
+          at: new Date(NOW.getTime() - ageMs).toISOString(),
+          checks,
+          grades: {cpu: 'ok', memory: 'ok'},
+          version: 1,
+        }),
+      );
+    const view = (load: Awaited<ReturnType<typeof report>>) =>
+      renderPartOne(
+        partOneView({
+          action: load.action,
+          counts: load.counts,
+          model: load.model,
+          now: NOW,
+          optional: load.optional,
+          status: load.status,
+          timeZone: 'America/Los_Angeles',
+          vitals: load.vitals,
+        }),
+        PLAIN_STYLE,
+      );
+    const load = async () => {
+      const loaded = await loadSessionReport({
+        asIfYielded: false,
+        cwd: w.repo,
+        env: {...w.env, VITALS_STATE_DIR: vitalsDir},
+        now: NOW,
+        selector: null,
+        sessionId: null,
+      });
+      if (loaded.kind !== 'loaded') throw new Error(loaded.kind);
+      return loaded;
+    };
+    write(60_000, [jobs, disk]);
+    // Negative control: the same file, in a session that is not a mayor
+    // session, gives no Vitals line.
+    const notMayor = await load();
+    expect(notMayor.marks.mayor).toBe(false);
+    expect(notMayor.vitals).toBeNull();
+    expect(view(notMayor)).not.toContain('Vitals:');
+    const labelled = brUpdate({cwd: w.repo}, w.sessionBead, {
+      addLabels: [MAYOR_ROLE_LABEL],
+    });
+    expect(labelled.kind).not.toBe('failed');
+    const mayor = await load();
+    expect(mayor.vitals?.kind).toBe('problems');
+    const lines = view(mayor).split('\n');
+    const vitalsAt = lines.findIndex((line) => line.includes('**Vitals:**'));
+    expect(lines[vitalsAt]).toContain(
+      '⚠️ disk: 22.0 GB free — details: `vitals`',
+    );
+    // The Jobs line carries jobs; the Vitals line never repeats them.
+    expect(lines[vitalsAt]).not.toContain('x failing');
+    expect(vitalsAt).toBeGreaterThan(
+      lines.findIndex((line) => line.includes('**You need to:**')),
+    );
+    // Every check but jobs ok: no line.
+    write(60_000, [jobs, diskOk]);
+    expect((await load()).vitals).toBeNull();
+    // A result older than 3 hours is itself shown.
+    write(4 * 60 * 60 * 1000, [diskOk]);
+    const stale = await load();
+    expect(stale.vitals?.kind).toBe('not-running');
+    expect(view(stale)).toContain(
+      'vitals not running: its latest result is 4 hours old',
+    );
+    rmSync(vitalsDir, {force: true, recursive: true});
   });
 
   test('thread status: Part 1, "Nothing to mark.", the verdict', async () => {

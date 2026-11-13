@@ -25,3 +25,12 @@ process.env.XDG_CACHE_HOME = mkdtempSync(
 process.env.CHORES_STATE_DIR = mkdtempSync(
   join(tmpdir(), 'justin-sdk-test-chores-'),
 );
+
+/**
+ * The same for the Vitals line (src/vitals.ts, home-base-sg9q9.7): an EMPTY
+ * vitals state dir, so no Part 1 shows what home-base `vitals` found on this
+ * Mac today.
+ */
+process.env.VITALS_STATE_DIR = mkdtempSync(
+  join(tmpdir(), 'justin-sdk-test-vitals-'),
+);

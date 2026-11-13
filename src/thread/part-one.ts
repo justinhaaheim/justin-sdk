@@ -65,6 +65,7 @@
 
 import type {OutputStyle} from '../cli-style';
 import type {JobHealthNotice} from '../job-health';
+import type {VitalsNotice} from '../vitals';
 import type {
   ItemMark,
   QuestionShown,
@@ -93,6 +94,7 @@ import {
   wrapHanging,
 } from '../cli-style';
 import {JOB_HEALTH_DETAILS_COMMAND, jobHealthReportText} from '../job-health';
+import {VITALS_DETAILS_COMMAND, vitalsReportText} from '../vitals';
 import {parseInstant} from './answer-store';
 import {ARCHIVED_PREFIX, DONE_PREFIX} from './ask-format';
 import {renderAsks, sortAsks} from './ask-render';
@@ -481,6 +483,12 @@ export interface PartOneInput {
   status: SessionStatus;
   /** IANA zone for times; undefined = this machine's. Tests pin it. */
   timeZone?: string;
+  /**
+   * home-base-sg9q9.7 D4: what home-base `vitals` last recorded about this
+   * Mac and its Claude Code setup (vitals.ts). Null or absent: nothing to
+   * show, so no Vitals line. The caller passes it for a mayor session only.
+   */
+  vitals?: VitalsNotice | null;
 }
 
 /**
@@ -683,6 +691,15 @@ export function partOneView(input: PartOneInput): PartOneView {
     state.push(
       field('Jobs', jobHealthReportText(input.jobs, timeZone), ' — details: ', {
         code: JOB_HEALTH_DETAILS_COMMAND,
+      }),
+    );
+  }
+  // home-base-sg9q9.7 D4: one line under Jobs while a vitals check other than
+  // jobs is not ok, or the latest result is stale. Mayor sessions only.
+  if (input.vitals != null) {
+    state.push(
+      field('Vitals', vitalsReportText(input.vitals), ' — details: ', {
+        code: VITALS_DETAILS_COMMAND,
       }),
     );
   }

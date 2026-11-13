@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.66.0",
+  "version": "0.67.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -63,6 +63,7 @@
     "./transcript-activity": "./src/thread/transcript-activity.ts",
     "./usage-attribution": "./src/usage-attribution.ts",
     "./usage-check": "./src/usage-check.ts",
+    "./vitals": "./src/vitals.ts",
     "./workspace-close": "./src/thread/workspace-close.ts",
     "./workspace-name": "./src/thread/workspace-name.ts",
     "./write-stdout": "./src/write-stdout.ts"

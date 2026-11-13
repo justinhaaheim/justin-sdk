@@ -31,6 +31,7 @@
 
 import type {OutputStyle} from '../cli-style';
 import type {JobHealthNotice} from '../job-health';
+import type {VitalsNotice} from '../vitals';
 import type {PickupLabelsRead, PickupState} from './handoff-auto-pickup';
 import type {ChainReaders} from './handoff-chain';
 import type {MessageLine} from './message-log';
@@ -63,6 +64,7 @@ import {
 } from '../cli-style';
 import {jobHealthNotice, readJobHealth} from '../job-health';
 import {SDK_HANDOFF_CALL, sdkRun} from '../sdk-invocation';
+import {readVitals, vitalsNotice} from '../vitals';
 import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
 import {readBeadFromDb} from './export-behind';
@@ -228,6 +230,13 @@ export type ReportLoad =
       titleSummary: boolean;
       /** componentConfig.thread.trimGuard (home-base-7761p.23). */
       trimGuard: boolean;
+      /**
+       * home-base-sg9q9.7 D4: home-base `vitals`'s latest result, read now,
+       * for Part 1's Vitals line, IN A MAYOR SESSION ONLY, like `jobHealth`.
+       * Null: not a mayor session (the file is not read), every check but
+       * jobs ok, or vitals never recorded on this Mac.
+       */
+      vitals: VitalsNotice | null;
     }
   | {detail: string; kind: 'unreadable'}
   | {kind: 'disabled'; reason: string}
@@ -421,6 +430,8 @@ async function loadForReport(input: {
     status,
     titleSummary: knob.titleSummary,
     trimGuard: knob.trimGuard,
+    // home-base-sg9q9.7 D4: the same rule as the Jobs line, R3 above.
+    vitals: marks.mayor ? vitalsNotice(readVitals(input.env), input.now) : null,
   };
 }
 
@@ -916,6 +927,7 @@ function statusPartOneView(
     questionIdProblems: options.questionIdProblems ?? [],
     status: load.status,
     timeZone: options.timeZone,
+    vitals: load.vitals,
   });
 }
 
@@ -1274,6 +1286,7 @@ export function renderSessionShow(
       optional: load.optional,
       status: load.status,
       timeZone,
+      vitals: load.vitals,
     }),
     style,
   );

@@ -225,6 +225,7 @@ function envFor(
     JUSTIN_SDK_HEALTH_NOTICES: 'off',
     JUSTIN_THREADS_STATE_DIR: join(sb.path, 'state'),
     JUSTIN_THREADS_TRANSCRIPTS_ROOT: join(sb.path, 'projects'),
+    VITALS_STATE_DIR: join(sb.path, 'vitals-state'),
     XDG_CONFIG_HOME: join(sb.path, 'xdg'),
   };
 }
