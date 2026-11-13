@@ -209,6 +209,26 @@ export const THREAD_BRAKE_HOOK_FINGERPRINT = sdkScript(THREAD_BRAKE_SUBCOMMAND);
 export const THREAD_BRAKE_HOOK_EVENT = 'PreToolUse';
 
 /**
+ * The /full-report answer (home-base-1rxt0.14): `thread full-report` on
+ * UserPromptSubmit, no matcher (the event has none). Written as its own entry
+ * ONLY where componentConfig.thread.fullReportCommand is on (hook-knobs.ts),
+ * and then it starts on every prompt and checks the prompt itself; in dispatch
+ * mode the dispatcher starts it only for `/full-report`. With the knob off,
+ * install takes back the exact entry it wrote.
+ */
+const THREAD_FULL_REPORT_SUBCOMMAND = 'thread full-report';
+
+export const THREAD_FULL_REPORT_HOOK_COMMAND = sdkRun(
+  THREAD_FULL_REPORT_SUBCOMMAND,
+);
+
+export const THREAD_FULL_REPORT_HOOK_FINGERPRINT = sdkScript(
+  THREAD_FULL_REPORT_SUBCOMMAND,
+);
+
+export const THREAD_FULL_REPORT_HOOK_EVENT = 'UserPromptSubmit';
+
+/**
  * Register one hook command under one event in a settings object.
  *
  * Hooks are ADDITIVE in Claude Code — several may be registered for one event
@@ -287,6 +307,18 @@ export function addThreadBrakeHook(settings: Record<string, unknown>): boolean {
     event: THREAD_BRAKE_HOOK_EVENT,
     matcher: null,
     subcommand: THREAD_BRAKE_SUBCOMMAND,
+  });
+}
+
+/** Register `thread full-report` on UserPromptSubmit (home-base-1rxt0.14). */
+export function addThreadFullReportHook(
+  settings: Record<string, unknown>,
+): boolean {
+  return addHook(settings, {
+    command: THREAD_FULL_REPORT_HOOK_COMMAND,
+    event: THREAD_FULL_REPORT_HOOK_EVENT,
+    matcher: null,
+    subcommand: THREAD_FULL_REPORT_SUBCOMMAND,
   });
 }
 
@@ -423,6 +455,11 @@ export function stepThreadHooks(
   const brakeOn = byKnob.enabled.some(
     (h) => h.command === THREAD_BRAKE_HOOK_COMMAND,
   );
+  // The /full-report answer waits on componentConfig.thread.fullReportCommand
+  // (home-base-1rxt0.14).
+  const fullReportOn = byKnob.enabled.some(
+    (h) => h.command === THREAD_FULL_REPORT_HOOK_COMMAND,
+  );
 
   // hooks.dispatch on (home-base-rtsx1.2): the UserPromptSubmit, Stop and
   // PostToolUse [Bash] dispatcher entries run the thread handlers, and their
@@ -460,6 +497,7 @@ export function stepThreadHooks(
   const addedNudge = addThreadNudgeHook(settings);
   const addedGuard = guardOn && addThreadGuardHook(settings);
   const addedBrake = brakeOn && addThreadBrakeHook(settings);
+  const addedFullReport = fullReportOn && addThreadFullReportHook(settings);
   const knobOff = removeKnobOffEntries(settings, 'thread-hooks-setup', byKnob);
   const cleared = removeDispatchEntriesForComponent(
     settings,
@@ -473,6 +511,7 @@ export function stepThreadHooks(
     addedNudge ||
     addedGuard ||
     addedBrake ||
+    addedFullReport ||
     knobOff.length > 0 ||
     cleared.length > 0
   ) {
@@ -499,11 +538,17 @@ export function stepThreadHooks(
     !addedNudge &&
     !addedGuard &&
     !addedBrake &&
+    !addedFullReport &&
     knobOff.length === 0 &&
     cleared.length === 0
   ) {
     success('.claude/settings.json already has every thread hook');
     return true;
+  }
+  if (addedFullReport) {
+    success(
+      `Updated .claude/settings.json (${THREAD_FULL_REPORT_HOOK_EVENT} → thread full-report; componentConfig.thread.fullReportCommand is on)`,
+    );
   }
   if (addedBrake) {
     success(

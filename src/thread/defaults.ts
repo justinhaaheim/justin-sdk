@@ -141,6 +141,15 @@ export const THREAD_DEFAULT_COMPACT_QUESTIONS = true;
 export const THREAD_DEFAULT_WORKSPACE_DESCRIPTION = false;
 
 /**
+ * home-base-1rxt0.14 (2026-11-13): a typed `/full-report` is answered by the
+ * UserPromptSubmit hook `thread full-report`, which blocks the prompt with the
+ * output of `thread status --full` as the reason shown to Justin, so no model
+ * turn happens. Off by default (feature-knobs rule): nobody has yet seen how
+ * Claude Code shows a blocked prompt's reason in the terminal or the iPhone app.
+ */
+export const THREAD_DEFAULT_FULL_REPORT_COMMAND = false;
+
+/**
  * Repo folder names that `thread inbox --by-repo` and the threads TUI's "by
  * repo" grouping list first, in this order (home-base-yukaf.9, D-PINS). Not a
  * feature gate: it only reorders groups. Default none.

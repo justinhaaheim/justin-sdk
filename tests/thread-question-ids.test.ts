@@ -17,6 +17,7 @@ import {PLAIN_STYLE} from '../src/cli-style';
 import {fileAsk} from '../src/thread/ask';
 import {renderAsks} from '../src/thread/ask-render';
 import {chainRootOf} from '../src/thread/handoff-number';
+import {PART_ONE_RULE, PART_ONE_SEPARATOR} from '../src/thread/part-one';
 import {
   chainMaxNumber,
   parseShortId,
@@ -29,6 +30,7 @@ import {fileRequest} from '../src/thread/request';
 import {answerSessionQuestions} from '../src/thread/session-answer';
 import {ensureSessionBead} from '../src/thread/session-bead';
 import {runThreadStatus} from '../src/thread/session-report';
+import {runThreadStopCheck} from '../src/thread/stop-check';
 import {captureWriteStdout} from './capture-stdout';
 import {initRepo} from './git-fixtures';
 import {needBr} from './pinned-br';
@@ -372,7 +374,22 @@ describe('thread ask and thread status: ids end to end', () => {
     // The list keeps its priority numbering; the id follows the number.
     expect(lineOf(first, p0.id)).toMatch(/^1\. \[BD2\] 🛑 P0 · /u);
     expect(lineOf(first, p3.id)).toMatch(/^2\. \[BD1\] ⚪ P3 · /u);
-    // The next turn: the P3 is one line, and keeps its id.
+    // The turn ends with the block pasted (home-base-sg9q9.11 F1: only a
+    // report Justin was shown counts), then the next turn: the P3 is one line,
+    // and keeps its id.
+    const start = first.indexOf(PART_ONE_RULE);
+    const end = first.indexOf(PART_ONE_SEPARATOR) + PART_ONE_SEPARATOR.length;
+    const stop = runThreadStopCheck({
+      env: w.env,
+      now: at(2),
+      stdin: JSON.stringify({
+        cwd: w.repo,
+        hook_event_name: 'Stop',
+        last_assistant_message: first.slice(start, end),
+        session_id: SESSION,
+      }),
+    });
+    expect(stop.exitCode).toBe(0);
     writeFileSync(
       join(w.projects, 'ids-repo', `${SESSION}.jsonl`),
       `${JSON.stringify({durationMs: 1, subtype: 'turn_duration', timestamp: at(2).toISOString(), type: 'system'})}\n`,

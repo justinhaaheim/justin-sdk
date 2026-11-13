@@ -2252,6 +2252,19 @@ export function makeThreadRulesChecks(
               `Run: ${command} (it replaces them with the SDK's copy; look at the diff first if you edited them)`,
             );
           }
+          // home-base-1rxt0.14: a /full-report command the SDK did not write.
+          // Install leaves it alone, so it is named here or nowhere.
+          const foreign = states
+            .filter((state) => state.kind === 'foreign')
+            .map((state) => threadRulesInstalledPath(state.file));
+          if (foreign.length > 0) {
+            problems.push(
+              `${foreign.join(', ')} is this repo's own command, not the SDK's (it lacks the justin-sdk marker line), so it runs instead of the SDK's and install leaves it alone`,
+            );
+            fixes.push(
+              `Keep it if it is yours; to get the SDK's, move it aside and run: ${command}`,
+            );
+          }
           if (stray != null) {
             // Install never removes, so this is the only place a stray
             // handoff rule is named after the run that left it.
@@ -2300,7 +2313,7 @@ export function makeThreadRulesChecks(
             };
           }
           return {
-            message: `${states.length} rule files match the SDK's copy${knob.kind === 'off' ? ` (${HANDOFF_RULE_FILE} is not expected here: componentConfig.thread.handoff.successor is off)` : ''}`,
+            message: `${states.length} thread-rules files match the SDK's copy${knob.kind === 'off' ? ` (${HANDOFF_RULE_FILE} is not expected here: componentConfig.thread.handoff.successor is off)` : ''}`,
             pass: true,
           };
         },

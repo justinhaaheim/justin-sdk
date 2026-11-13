@@ -197,6 +197,30 @@ export function stopBlockJson(reason: string): StopBlockJson {
   };
 }
 
+/** The JSON a blocking UserPromptSubmit hook prints. */
+export interface PromptBlockJson {
+  decision: 'block';
+  reason: string;
+}
+
+/**
+ * A blocking UserPromptSubmit decision (home-base-1rxt0.14): the prompt never
+ * reaches Claude, and `reason` is "Shown to the user when `decision` is
+ * `"block"`. Not added to context" (hooks reference, read 2026-11-13). So,
+ * unlike a Stop block, nothing here is Claude-bound and there is nothing to
+ * mirror: a `systemMessage` copy would print the same text to Justin twice.
+ * ANSI is stripped, as everywhere else in this module.
+ *
+ * The cap: the hooks reference names `additionalContext`, `systemMessage`,
+ * `initialUserMessage` and plain stdout as capped at 10,000 characters, and
+ * does not name `reason`. Whether `reason` is cut is unmeasured, so a caller
+ * with a long reason fits it to CLAUDE_CODE_HOOK_TEXT_CAP itself and says so
+ * (thread/full-report-hook.ts).
+ */
+export function promptBlockJson(reason: string): PromptBlockJson {
+  return {decision: 'block', reason: stripAnsi(reason)};
+}
+
 // ---------------------------------------------------------------------------
 // Merging several handlers into one hook output (home-base-rtsx1.1)
 // ---------------------------------------------------------------------------

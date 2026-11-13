@@ -39,6 +39,8 @@ export function hookKnobOn(
   env: Env = process.env,
 ): boolean {
   switch (knob) {
+    case 'thread.fullReportCommand':
+      return resolveThreadConfig({cwd: projectRoot, env}).fullReportCommand;
     case 'thread.handoff.successor':
       return resolveThreadConfig({cwd: projectRoot, env}).handoff.successor;
     case 'thread.quota.mode':

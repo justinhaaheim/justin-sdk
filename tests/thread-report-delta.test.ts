@@ -32,17 +32,22 @@ import {
   questionShown,
   type ReportBaseline,
   type ReportDelta,
+  type ReportSnapshot,
   type SnapshotsRead,
 } from '../src/thread/report-delta';
 import {
+  blockShownIn,
+  markReportsShown,
   readNewestTurnEnd,
   readReportSnapshots,
   REPORT_SNAPSHOTS_KEPT,
   saveReportSnapshot,
+  snapshotBlockOf,
 } from '../src/thread/report-snapshots';
 import {fileRequest} from '../src/thread/request';
 import {ensureSessionBead} from '../src/thread/session-bead';
 import {runThreadStatus} from '../src/thread/session-report';
+import {runThreadStopCheck} from '../src/thread/stop-check';
 import {
   decideTrimGuard,
   normalizeBlockLine,
@@ -73,7 +78,29 @@ const P2_QUESTION = {
 };
 
 function found(items: Record<string, string>): ReportBaseline {
-  return {kind: 'found', snapshot: {at: at(0).toISOString(), items}};
+  return {
+    kind: 'found',
+    snapshot: {
+      at: at(0).toISOString(),
+      block: {digest: 'd', lines: 3},
+      items,
+      shownAt: at(0).toISOString(),
+    },
+  };
+}
+
+/** A snapshot saved at `minute`, shown at `shown` (null: never pasted). */
+function snap(
+  minute: number,
+  items: Record<string, string>,
+  shown: null | number,
+): ReportSnapshot {
+  return {
+    at: at(minute).toISOString(),
+    block: {digest: `d${minute}`, lines: 3},
+    items,
+    shownAt: shown == null ? null : at(shown).toISOString(),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -175,22 +202,48 @@ describe('chooseBaseline (D6)', () => {
   const snapshots: SnapshotsRead = {
     kind: 'found',
     snapshots: [
-      {at: at(1).toISOString(), items: {'q:a': 'turn1'}},
-      {at: at(5).toISOString(), items: {'q:a': 'turn2-first'}},
-      {at: at(9).toISOString(), items: {'q:a': 'turn2-last'}},
-      {at: at(21).toISOString(), items: {'q:a': 'this-turn'}},
+      snap(1, {'q:a': 'turn1'}, 2),
+      snap(5, {'q:a': 'turn2-first'}, null),
+      snap(9, {'q:a': 'turn2-last'}, 10),
+      snap(21, {'q:a': 'this-turn'}, 22),
     ],
   };
 
-  test('the newest snapshot at or before the previous turn ended', () => {
+  test('the newest shown snapshot at or before the previous turn ended', () => {
     const baseline = chooseBaseline(snapshots, () => ({
       at: at(10).toISOString(),
       kind: 'found',
     }));
     expect(baseline).toEqual({
       kind: 'found',
-      snapshot: {at: at(9).toISOString(), items: {'q:a': 'turn2-last'}},
+      snapshot: snap(9, {'q:a': 'turn2-last'}, 10),
     });
+  });
+
+  test('F1: a snapshot never pasted is skipped; none pasted is the first report', () => {
+    // Turn 2 ran status twice and pasted neither: turn 1's report is the last.
+    const unpasted: SnapshotsRead = {
+      kind: 'found',
+      snapshots: [
+        snap(1, {'q:a': 'turn1'}, 2),
+        snap(5, {'q:a': 'turn2-first'}, null),
+        snap(9, {'q:a': 'turn2-last'}, null),
+      ],
+    };
+    expect(
+      chooseBaseline(unpasted, () => ({
+        at: at(10).toISOString(),
+        kind: 'found',
+      })),
+    ).toEqual({kind: 'found', snapshot: snap(1, {'q:a': 'turn1'}, 2)});
+    // No report was ever pasted: everything in full, nothing marked.
+    const never: SnapshotsRead = {
+      kind: 'found',
+      snapshots: [snap(1, {'q:a': 'x'}, null), snap(9, {'q:a': 'y'}, null)],
+    };
+    expect(
+      chooseBaseline(never, () => ({at: at(10).toISOString(), kind: 'found'})),
+    ).toEqual({kind: 'first'});
   });
 
   test('every snapshot is from this turn, or no turn has ended: the first report', () => {
@@ -307,6 +360,7 @@ describe('the snapshot file', () => {
     for (let index = 0; index < REPORT_SNAPSHOTS_KEPT + 2; index += 1) {
       const saved = saveReportSnapshot({
         at: new Date(at(0).getTime() + index * 1000),
+        block: {digest: `d${index}`, lines: 4},
         env: e,
         items: {'q:a': String(index)},
         sessionId: SESSION,
@@ -317,6 +371,8 @@ describe('the snapshot file', () => {
     if (read.kind !== 'found') throw new Error(read.kind);
     expect(read.snapshots).toHaveLength(REPORT_SNAPSHOTS_KEPT);
     expect(read.snapshots[0]?.items).toEqual({'q:a': '2'});
+    expect(read.snapshots[0]?.block).toEqual({digest: 'd2', lines: 4});
+    expect(read.snapshots[0]?.shownAt).toBeNull();
     expect(read.snapshots.at(-1)?.items).toEqual({
       'q:a': String(REPORT_SNAPSHOTS_KEPT + 1),
     });
@@ -328,12 +384,140 @@ describe('the snapshot file', () => {
     mkdirSync(join(path, '..'), {recursive: true});
     writeFileSync(path, 'not json\n');
     expect(readReportSnapshots(SESSION, e).kind).toBe('unknown');
+    // F1: a block or shownAt of the wrong shape is malformed too.
+    for (const bad of [
+      {block: {digest: 'd', lines: 0}},
+      {block: 'd'},
+      {shownAt: 'yesterday'},
+    ]) {
+      appendFileSync(
+        path,
+        `${JSON.stringify({at: at(1).toISOString(), items: {}, ...bad})}\n`,
+      );
+    }
+    expect(readReportSnapshots(SESSION, e).kind).toBe('unknown');
+    // A line saved before F1 (no block, no shownAt) is read, never as shown.
     appendFileSync(
       path,
       `${JSON.stringify({at: at(1).toISOString(), items: {'q:a': 'f'}})}\n`,
     );
     const read = readReportSnapshots(SESSION, e);
-    expect(read.kind === 'found' ? read.snapshots.length : -1).toBe(1);
+    if (read.kind !== 'found') throw new Error(read.kind);
+    expect(read.snapshots).toEqual([
+      {
+        at: at(1).toISOString(),
+        block: null,
+        items: {'q:a': 'f'},
+        shownAt: null,
+      },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F1 (home-base-sg9q9.11): only a report Justin was shown is the last report
+// ---------------------------------------------------------------------------
+
+const BLOCK_TEXT = [
+  PART_ONE_RULE,
+  '',
+  '**Session:** [X] Speed up the export',
+  '',
+  '**Last activity:** 9:01am',
+  '',
+  '1. [BD1] ⚪ P3 · [Answer] **Gzip the output?** (t-q3)',
+  '',
+  PART_ONE_SEPARATOR,
+].join('\n');
+
+describe('F1: the Stop hook marks the reports a final message showed', () => {
+  function env(): Record<string, string> {
+    const sb = createSandbox();
+    sandboxes.push(sb);
+    return {JUSTIN_THREADS_STATE_DIR: join(sb.path, 'state')};
+  }
+
+  function saveAt(e: Record<string, string>, minute: number, text: string) {
+    const saved = saveReportSnapshot({
+      at: at(minute),
+      block: snapshotBlockOf(text),
+      env: e,
+      items: {'q:t-q3': String(minute)},
+      sessionId: SESSION,
+    });
+    expect(saved.kind).toBe('saved');
+  }
+
+  function shownAts(e: Record<string, string>): (null | string)[] {
+    const read = readReportSnapshots(SESSION, e);
+    if (read.kind !== 'found') throw new Error(read.kind);
+    return read.snapshots.map((snapshot) => snapshot.shownAt);
+  }
+
+  test('a block pasted whole, with Part 2 after it, marks its snapshot, once', () => {
+    const e = env();
+    saveAt(e, 1, BLOCK_TEXT);
+    const reply = `${BLOCK_TEXT}\n\n## Deviations\n\n- none`;
+    expect(
+      markReportsShown({env: e, now: at(2), reply, sessionId: SESSION}),
+    ).toMatchObject({kind: 'marked', marked: [at(1).toISOString()]});
+    expect(shownAts(e)).toEqual([at(2).toISOString()]);
+    // Pasted again later: the first showing stands.
+    expect(
+      markReportsShown({env: e, now: at(4), reply, sessionId: SESSION}).kind,
+    ).toBe('noMatch');
+    expect(shownAts(e)).toEqual([at(2).toISOString()]);
+    // The next save keeps it.
+    saveAt(e, 5, BLOCK_TEXT.replace('9:01am', '9:05am'));
+    expect(shownAts(e)).toEqual([at(2).toISOString(), null]);
+  });
+
+  test('a reply with no block reads nothing; a cut block or an old snapshot marks nothing', () => {
+    const e = env();
+    // No file at all, and still no read: the common Stop.
+    expect(
+      markReportsShown({
+        env: e,
+        now: at(2),
+        reply: 'I am waiting for the players.',
+        sessionId: SESSION,
+      }),
+    ).toEqual({kind: 'noBlock'});
+    saveAt(e, 1, BLOCK_TEXT);
+    const cut = BLOCK_TEXT.split('\n')
+      .filter((line) => !line.includes('Gzip'))
+      .join('\n');
+    expect(
+      markReportsShown({env: e, now: at(2), reply: cut, sessionId: SESSION})
+        .kind,
+    ).toBe('noMatch');
+    // A snapshot saved before F1 has no block, so no reply can show it.
+    const path = reportSnapshotsPath(SESSION, e);
+    appendFileSync(
+      path,
+      `${JSON.stringify({at: at(3).toISOString(), items: {}})}\n`,
+    );
+    expect(shownAts(e)).toEqual([null, null]);
+    expect(
+      markReportsShown({
+        env: e,
+        now: at(4),
+        reply: BLOCK_TEXT,
+        sessionId: SESSION,
+      }),
+    ).toMatchObject({kind: 'marked', marked: [at(1).toISOString()]});
+    expect(shownAts(e)).toEqual([at(4).toISOString(), null]);
+  });
+
+  test('the block digest is the trim guard comparison: volatile fields may differ, nothing else', () => {
+    const saved = snapshotBlockOf(BLOCK_TEXT);
+    if (saved == null) throw new Error('no block');
+    const later = normalizeText(BLOCK_TEXT.replace('9:01am', '9:30am'));
+    expect(blockShownIn(saved, later)).toBe(true);
+    const retitled = normalizeText(BLOCK_TEXT.replace('Gzip', 'Zstd'));
+    expect(blockShownIn(saved, retitled)).toBe(false);
+    // Text that does not start with the rule line is no block.
+    expect(snapshotBlockOf(`Hello\n${BLOCK_TEXT}`)).toBeNull();
   });
 });
 
@@ -505,9 +689,69 @@ function inFull(out: string, title: string): boolean {
   return out.includes(`Context for ${title}`);
 }
 
-/** Claude's turn ended at `minute`: the record Claude Code writes. */
-function endTurn(w: World, minute: number): void {
+/** A final message that pastes `out`'s block, then Claude's own words. */
+function pasted(out: string): string {
+  return `${block(out)}\n\n## Things you should know\n\n- none`;
+}
+
+/** The Stop hook, as Claude Code runs it, on Claude's final message. */
+function stopHook(
+  w: World,
+  message: string,
+  minute: number,
+  extra: object = {},
+): void {
+  const result = runThreadStopCheck({
+    env: w.env,
+    now: at(minute),
+    stdin: JSON.stringify({
+      cwd: w.repo,
+      hook_event_name: 'Stop',
+      last_assistant_message: message,
+      session_id: SESSION,
+      stop_hook_active: false,
+      transcript_path: w.transcript,
+      ...extra,
+    }),
+  });
+  expect(result.exitCode).toBe(0);
+}
+
+/**
+ * Claude's turn ended at `minute` with `message` as its final message: the
+ * Stop hook runs on it, then Claude Code writes the turn's end.
+ */
+function endTurn(w: World, minute: number, message: string): void {
+  stopHook(w, message, minute);
   appendFileSync(w.transcript, `${turnEnd(minute)}\n`);
+}
+
+/** A final message with no status block in it. */
+const NO_BLOCK = 'I am waiting for the players to report. Nothing to show yet.';
+
+/** File one more question, for request `w.request`. */
+async function askMore(
+  w: World,
+  priority: string,
+  question: string,
+): Promise<string> {
+  const outcome = await fileAsk({
+    approve: false,
+    context: [`Context for ${question}`],
+    cwd: w.repo,
+    default: 'I keep going as planned.',
+    do: false,
+    env: w.env,
+    header: null,
+    options: [],
+    priority,
+    question,
+    recommend: null,
+    sessionId: null,
+    to: w.request,
+  });
+  if (outcome.kind !== 'filed') throw new Error(outcome.kind);
+  return outcome.id;
 }
 
 describe('thread status: repeat reports (D1, D2, D3, D6)', () => {
@@ -535,8 +779,7 @@ describe('thread status: repeat reports (D1, D2, D3, D6)', () => {
   test('the next turn: unchanged P2 and P3 on one line, P0 and P1 in full, the same both times', async () => {
     const w = await world();
     await status(w, at(1));
-    await status(w, at(2));
-    endTurn(w, 3);
+    endTurn(w, 3, pasted(await status(w, at(2))));
     const first = await status(w, at(5));
     const again = await status(w, at(6));
     expect(block(again)).toBe(block(first));
@@ -556,8 +799,7 @@ describe('thread status: repeat reports (D1, D2, D3, D6)', () => {
 
   test('a new question, a changed question and a new request are marked, in place, and stay marked all turn', async () => {
     const w = await world();
-    await status(w, at(1));
-    endTurn(w, 3);
+    endTurn(w, 3, pasted(await status(w, at(1))));
     const retitled = runBr(w.repo, [
       'update',
       w.questions.p3,
@@ -613,7 +855,7 @@ describe('thread status: repeat reports (D1, D2, D3, D6)', () => {
     );
     expect(questionLine(first, w.request)).not.toContain(NEW_MARK);
     // The next turn: nothing new any more, and the P3 and P4 are one line.
-    endTurn(w, 7);
+    endTurn(w, 7, pasted(again));
     const next = await status(w, at(8));
     expect(next).not.toContain(NEW_MARK);
     expect(next).not.toContain(CHANGED_MARK);
@@ -622,15 +864,13 @@ describe('thread status: repeat reports (D1, D2, D3, D6)', () => {
 
   test('the knob off, and --full: every question in full, the markers kept', async () => {
     const off = await world({compactQuestions: false});
-    await status(off, at(1));
-    endTurn(off, 3);
+    endTurn(off, 3, pasted(await status(off, at(1))));
     const offOut = await status(off, at(5));
     expect(inFull(offOut, 'Gzip the output?')).toBe(true);
     expect(offOut).not.toContain('Ask for the full report');
 
     const w = await world();
-    await status(w, at(1));
-    endTurn(w, 3);
+    endTurn(w, 3, pasted(await status(w, at(1))));
     runBr(w.repo, ['update', w.questions.p2, '--title', 'Keep it a month?']);
     const full = await status(w, at(5), {full: true});
     expect(inFull(full, 'Gzip the output?')).toBe(true);
@@ -642,8 +882,7 @@ describe('thread status: repeat reports (D1, D2, D3, D6)', () => {
 
   test('the trim guard passes a pasted compact block, from either run of the turn', async () => {
     const w = await world();
-    await status(w, at(1));
-    endTurn(w, 3);
+    endTurn(w, 3, pasted(await status(w, at(1))));
     const first = await status(w, at(5));
     const again = await status(w, at(6));
     expect(inFull(first, 'Gzip the output?')).toBe(false);
@@ -681,11 +920,69 @@ describe('thread status: repeat reports (D1, D2, D3, D6)', () => {
     const path = reportSnapshotsPath(SESSION, w.env);
     mkdirSync(join(path, '..'), {recursive: true});
     writeFileSync(path, 'garbage\n');
-    endTurn(w, 3);
+    appendFileSync(w.transcript, `${turnEnd(3)}\n`);
     const out = await status(w, at(5));
     expect(out).toContain(
       'Nothing is marked new or changed, and every question is in full',
     );
     expect(inFull(out, 'Gzip the output?')).toBe(true);
+  });
+});
+
+describe('F1 (home-base-sg9q9.11): the last report is one Justin was shown', () => {
+  test('a turn that ran thread status and never pasted it: the next report shows its new question in full, with 🆕', async () => {
+    const w = await world();
+    endTurn(w, 3, pasted(await status(w, at(1))));
+    const rename = await askMore(w, '3', 'Rename the job?');
+    const unseen = await status(w, at(5));
+    expect(questionLine(unseen, rename)).toContain(`${NEW_MARK} [BD5]`);
+    // The turn ends with no block: Justin never saw this report.
+    endTurn(w, 7, NO_BLOCK);
+    const next = await status(w, at(8));
+    expect(questionLine(next, rename)).toContain(`${NEW_MARK} [BD5]`);
+    expect(inFull(next, 'Rename the job?')).toBe(true);
+    // What he did see stays as designed: unchanged P2 and P3 on one line.
+    expect(inFull(next, 'Gzip the output?')).toBe(false);
+    expect(inFull(next, 'Keep the old export a week?')).toBe(false);
+  });
+
+  test('the block was pasted: the next report compacts as designed', async () => {
+    const w = await world();
+    endTurn(w, 3, pasted(await status(w, at(1))));
+    const rename = await askMore(w, '3', 'Rename the job?');
+    const seen = await status(w, at(5));
+    expect(inFull(seen, 'Rename the job?')).toBe(true);
+    endTurn(w, 7, pasted(seen));
+    const next = await status(w, at(8));
+    expect(questionLine(next, rename)).not.toContain(NEW_MARK);
+    expect(inFull(next, 'Rename the job?')).toBe(false);
+    expect(inFull(next, 'Gzip the output?')).toBe(false);
+  });
+
+  test('no report ever pasted: the next turn marks nothing and prints every question in full', async () => {
+    const w = await world();
+    await status(w, at(1));
+    endTurn(w, 3, NO_BLOCK);
+    const out = await status(w, at(5));
+    for (const title of ['Keep the old export a week?', 'Gzip the output?']) {
+      expect(inFull(out, title)).toBe(true);
+    }
+    expect(out).not.toContain(NEW_MARK);
+    expect(out).not.toContain('Ask for the full report');
+  });
+
+  test('the Stop hook marks a pasted report with the trim guard off, and never for a subagent', async () => {
+    const w = await world({trimGuard: false});
+    const out = await status(w, at(1));
+    const shown = (): (null | string)[] => {
+      const read = readReportSnapshots(SESSION, w.env);
+      if (read.kind !== 'found') throw new Error(read.kind);
+      return read.snapshots.map((snapshot) => snapshot.shownAt);
+    };
+    // A subagent's final message goes to its parent session, not to Justin.
+    stopHook(w, pasted(out), 2, {agent_id: 'a1b2c3'});
+    expect(shown()).toEqual([null]);
+    stopHook(w, pasted(out), 2);
+    expect(shown()).toEqual([at(2).toISOString()]);
   });
 });

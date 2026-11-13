@@ -47,6 +47,7 @@ import {
   THREAD_DEFAULT_ENFORCE,
   THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
   THREAD_DEFAULT_ENFORCE_MODE,
+  THREAD_DEFAULT_FULL_REPORT_COMMAND,
   THREAD_DEFAULT_NAME_WORKSPACES,
   THREAD_DEFAULT_NUDGE,
   THREAD_DEFAULT_OPEN_SINCE,
@@ -148,6 +149,14 @@ export interface ResolvedThreadConfig {
   enforceModeSource: ThreadConfigSource;
   /** Which layer decided `enforce`. */
   enforceSource: ThreadConfigSource;
+  /**
+   * home-base-1rxt0.14: a typed `/full-report` is blocked by the
+   * UserPromptSubmit hook `thread full-report`, with the full status report as
+   * the reason shown to Justin. Off by default.
+   */
+  fullReportCommand: boolean;
+  /** Which layer decided `fullReportCommand`. */
+  fullReportCommandSource: ThreadConfigSource;
   /**
    * `componentConfig.thread.handoff` (epic home-base-mbnjv C1): whether
    * `thread handoff` starts a successor, and the limits its gate enforces.
@@ -361,6 +370,10 @@ export function resolveThreadConfig(
   const workspaceDescription = resolveFlag(
     'workspaceDescription',
     THREAD_DEFAULT_WORKSPACE_DESCRIPTION,
+  );
+  const fullReportCommand = resolveFlag(
+    'fullReportCommand',
+    THREAD_DEFAULT_FULL_REPORT_COMMAND,
   );
 
   // `render` is the one NESTED block in the thread section, so it needs its own
@@ -595,6 +608,8 @@ export function resolveThreadConfig(
     enforceMode,
     enforceModeSource,
     enforceSource: enforce.source,
+    fullReportCommand: fullReportCommand.value,
+    fullReportCommandSource: fullReportCommand.source,
     handoff,
     nameWorkspaces: nameWorkspaces.value,
     nameWorkspacesSource: nameWorkspaces.source,

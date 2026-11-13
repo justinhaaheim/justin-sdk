@@ -15,7 +15,9 @@
  *     components with `resolveComponents`, so an absent `components` key still
  *     means `core`.
  *  3. Picks every handler in `hook-registry.ts` registered for this event whose
- *     component the repo has and whose matcher accepts the payload's tool.
+ *     component the repo has, whose matcher accepts the payload's tool, and
+ *     whose prompt filter, if it has one, matches the payload's prompt
+ *     (home-base-1rxt0.14: `thread full-report` starts only for `/full-report`).
  *  4. Runs them as child processes of the SAME bun and the SAME cli.ts, in
  *     parallel, each fed the payload verbatim, with health notices silenced.
  *  5. Prints ONE merged output (`mergeHandlerOutputs` in hook-output.ts).
@@ -104,27 +106,37 @@ export function defaultHandlerCommand(): string[] {
   ];
 }
 
-/** The two payload fields the dispatcher itself needs. */
+/**
+ * The payload fields the dispatcher itself needs. `prompt` feeds a handler's
+ * prompt filter (home-base-1rxt0.14); an unreadable payload has none, so a
+ * filtered handler is not started.
+ */
 function payloadFields(stdin: string): {
   cwd: string | null;
+  prompt: string | null;
   toolName: string | null;
 } {
   try {
     const parsed: unknown = JSON.parse(stdin);
     if (parsed == null || typeof parsed !== 'object') {
-      return {cwd: null, toolName: null};
+      return {cwd: null, prompt: null, toolName: null};
     }
-    const fields = parsed as {cwd?: unknown; tool_name?: unknown};
+    const fields = parsed as {
+      cwd?: unknown;
+      prompt?: unknown;
+      tool_name?: unknown;
+    };
     return {
       cwd:
         typeof fields.cwd === 'string' && fields.cwd !== '' ? fields.cwd : null,
+      prompt: typeof fields.prompt === 'string' ? fields.prompt : null,
       toolName:
         typeof fields.tool_name === 'string' && fields.tool_name !== ''
           ? fields.tool_name
           : null,
     };
   } catch {
-    return {cwd: null, toolName: null};
+    return {cwd: null, prompt: null, toolName: null};
   }
 }
 
@@ -165,7 +177,7 @@ export function planDispatch(args: {
   handlers?: readonly HookHandler[];
   stdin: string;
 }): DispatchPlan {
-  const {cwd, toolName} = payloadFields(args.stdin);
+  const {cwd, prompt, toolName} = payloadFields(args.stdin);
   const projectDir = args.env.CLAUDE_PROJECT_DIR;
   const projectRoot =
     projectDir != null && projectDir !== ''
@@ -205,6 +217,7 @@ export function planDispatch(args: {
       components: resolved.components,
       event: args.event,
       ...(args.handlers == null ? {} : {handlers: args.handlers}),
+      prompt,
       toolName,
     }),
     ok: true,

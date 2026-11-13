@@ -10,10 +10,18 @@
  * snapshots and the transcript's turn boundary, and Part 1 (part-one.ts)
  * renders what this module decides.
  *
- * D6: the LAST REPORT is the newest snapshot saved at or before the end of
- * Claude's previous turn (the transcript's newest `turn_duration`). Every run
- * inside one turn therefore compares against the same snapshot, so running
- * `thread status` twice in a turn shows the same markers both times.
+ * D6: the LAST REPORT is the newest snapshot that Justin was SHOWN, among
+ * those saved at or before the end of Claude's previous turn (the transcript's
+ * newest `turn_duration`). Every run inside one turn therefore compares
+ * against the same snapshot, so running `thread status` twice in a turn shows
+ * the same markers both times.
+ *
+ * SHOWN (home-base-sg9q9.11 F1): a snapshot is shown once its block appeared
+ * in a final assistant message. The Stop hook records that
+ * (report-snapshots.ts markReportsShown), from the payload's
+ * `last_assistant_message`. A report Claude ran and never pasted (a "waiting
+ * for players" turn, a question-only turn, a handoff summary) is never the
+ * last report: a question Justin never saw in full must not print on one line.
  *
  * Nothing here is ever a reassuring default (critical rule 7): with no last
  * report, or one that could not be read, nothing is marked AND every question
@@ -43,10 +51,25 @@ export function markEmoji(mark: ItemMark): string {
  */
 export type SnapshotItems = Record<string, string>;
 
+/**
+ * The printed block, as the trim guard compares it: the digest of its
+ * normalized lines (trim-guard.ts normalizeText) and how many there are. A
+ * reply shows the block when that many lines, from one of its block starts,
+ * have the same digest (the trim guard's blockIsInReply, by digest).
+ */
+export interface SnapshotBlock {
+  digest: string;
+  lines: number;
+}
+
 /** What one `thread status` run showed, saved in local state (D6). */
 export interface ReportSnapshot {
   at: string;
+  /** Null for a snapshot saved before F1: it can never count as shown. */
+  block: SnapshotBlock | null;
   items: SnapshotItems;
+  /** When a final assistant message first held its block; null until then. */
+  shownAt: string | null;
 }
 
 /**
@@ -89,6 +112,11 @@ function digest(value: unknown): string {
     .update(JSON.stringify(value))
     .digest('hex')
     .slice(0, 16);
+}
+
+/** F1: a block's normalized lines, as one digest (SnapshotBlock). */
+export function blockDigest(lines: readonly string[]): string {
+  return digest(lines);
 }
 
 /**
@@ -210,8 +238,9 @@ export type SnapshotsRead =
   | {kind: 'unknown'; reason: string};
 
 /**
- * D6: the newest snapshot saved at or before the end of the previous turn.
- * The transcript is read only when there are snapshots to choose from.
+ * D6: the newest SHOWN snapshot saved at or before the end of the previous
+ * turn (F1). None shown is the first report: nothing marked, every question in
+ * full. The transcript is read only when there are snapshots to choose from.
  */
 export function chooseBaseline(
   snapshots: SnapshotsRead,
@@ -242,12 +271,14 @@ export function chooseBaseline(
   }
   for (let index = snapshots.snapshots.length - 1; index >= 0; index -= 1) {
     const snapshot = snapshots.snapshots[index];
-    if (snapshot == null) continue;
+    // F1: a report nobody pasted is not a report Justin saw.
+    if (snapshot?.shownAt == null) continue;
     const atMs = Date.parse(snapshot.at);
     if (!Number.isNaN(atMs) && atMs <= endMs) {
       return {kind: 'found', snapshot};
     }
   }
-  // Snapshots, but all from this turn: no earlier turn printed a report.
+  // No earlier turn showed Justin a report (every snapshot is from this turn,
+  // or none was pasted), so everything is in full.
   return {kind: 'first'};
 }

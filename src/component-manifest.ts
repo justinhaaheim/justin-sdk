@@ -66,6 +66,9 @@ import {
   THREAD_BRAKE_HOOK_COMMAND,
   THREAD_BRAKE_HOOK_EVENT,
   THREAD_BRAKE_HOOK_FINGERPRINT,
+  THREAD_FULL_REPORT_HOOK_COMMAND,
+  THREAD_FULL_REPORT_HOOK_EVENT,
+  THREAD_FULL_REPORT_HOOK_FINGERPRINT,
   THREAD_GUARD_HOOK_COMMAND,
   THREAD_GUARD_HOOK_EVENT,
   THREAD_GUARD_HOOK_FINGERPRINT,
@@ -80,6 +83,7 @@ import {
   THREAD_STOP_HOOK_FINGERPRINT,
 } from './thread-hooks-setup';
 import {
+  inSdkDirectory,
   THREAD_RULES_FILES,
   threadRulesInstalledPath,
   threadRulesTemplateText,
@@ -489,6 +493,13 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
         event: THREAD_BRAKE_HOOK_EVENT,
         fingerprint: THREAD_BRAKE_HOOK_FINGERPRINT,
       },
+      // The /full-report answer (home-base-1rxt0.14): UserPromptSubmit, only
+      // where componentConfig.thread.fullReportCommand is on.
+      {
+        command: THREAD_FULL_REPORT_HOOK_COMMAND,
+        event: THREAD_FULL_REPORT_HOOK_EVENT,
+        fingerprint: THREAD_FULL_REPORT_HOOK_FINGERPRINT,
+      },
     ],
     purpose:
       'UserPromptSubmit/Stop hooks that capture every prompt and yield (creating the thread bead on the first prompt) and refuse to end a session without a report.',
@@ -514,10 +525,12 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
       pristine: () => threadRulesTemplateText(file),
     })),
     purpose:
-      'The threads and status-report rules (status-report-format.md, requests.md), plus the handoff rule (handoff.md) only where componentConfig.thread.handoff.successor is on, copied from the SDK into .claude/rules/justin-sdk/. Applies only where componentConfig.thread.enabled is true.',
+      'The threads and status-report rules (status-report-format.md, requests.md), plus the handoff rule (handoff.md) only where componentConfig.thread.handoff.successor is on, copied from the SDK into .claude/rules/justin-sdk/, and the /full-report command, copied into .claude/commands/full-report.md. Applies only where componentConfig.thread.enabled is true.',
     // Namespaced under .claude/rules/justin-sdk/, which nothing but the SDK
-    // writes — provenance enough to adopt on, like critical-rules.md.
-    sdkOwnedPaths: THREAD_RULES_FILES.map((file) =>
+    // writes — provenance enough to adopt on, like critical-rules.md. NOT the
+    // command: .claude/commands/full-report.md could be anybody's
+    // (home-base-1rxt0.14), so it is no evidence of this component.
+    sdkOwnedPaths: THREAD_RULES_FILES.filter(inSdkDirectory).map((file) =>
       threadRulesInstalledPath(file),
     ),
   },

@@ -40,6 +40,8 @@ import {buildComponentListing, renderComponentListing} from '../src/list';
 import {removeComponent, runRemove} from '../src/remove';
 import {SDK_HANDOFF_CALL} from '../src/sdk-invocation';
 import {
+  FULL_REPORT_COMMAND_FILE,
+  SDK_COMMAND_MARKER,
   THREAD_RULES_FILES,
   threadRulesFilesFor,
   threadRulesInstalledPath,
@@ -158,27 +160,95 @@ async function addThreadRules(root: string): Promise<void> {
 }
 
 describe('the templates', () => {
-  test('all three ship with the SDK and are not empty', () => {
+  test('all four ship with the SDK and are not empty', () => {
     for (const file of THREAD_RULES_FILES) {
-      expect(template(file).length).toBeGreaterThan(1000);
+      // The /full-report command is a short instruction, not a rule.
+      expect(template(file).length).toBeGreaterThan(
+        file === FULL_REPORT_COMMAND_FILE ? 200 : 1000,
+      );
     }
     expect(THREAD_RULES_FILES).toEqual([
       'status-report-format.md',
       'requests.md',
       'handoff.md',
+      'full-report.md',
     ]);
   });
 
-  test('the manifest owns all three files, with the template as pristine content', () => {
+  test('the manifest owns all four files, with the template as pristine content', () => {
     const files = COMPONENT_MANIFESTS['thread-rules'].files;
     expect(files.map((f) => f.path)).toEqual([
       '.claude/rules/justin-sdk/status-report-format.md',
       '.claude/rules/justin-sdk/requests.md',
       '.claude/rules/justin-sdk/handoff.md',
+      '.claude/commands/full-report.md',
     ]);
     for (const [index, file] of THREAD_RULES_FILES.entries()) {
       expect(files[index]?.pristine()).toBe(template(file));
     }
+  });
+
+  test('the command is no evidence of the component: .claude/commands/ is not the SDK’s', () => {
+    expect(COMPONENT_MANIFESTS['thread-rules'].sdkOwnedPaths).toEqual([
+      '.claude/rules/justin-sdk/status-report-format.md',
+      '.claude/rules/justin-sdk/requests.md',
+      '.claude/rules/justin-sdk/handoff.md',
+    ]);
+  });
+
+  test('the command template is user-only and carries the marker that makes it the SDK’s', () => {
+    const text = template(FULL_REPORT_COMMAND_FILE);
+    expect(text.startsWith('---\n')).toBe(true);
+    expect(text).toContain('disable-model-invocation: true');
+    expect(text).toContain('bun run justin-sdk thread status --full');
+    expect(text).toContain(SDK_COMMAND_MARKER);
+  });
+});
+
+describe('the /full-report command file (home-base-1rxt0.14)', () => {
+  test('install writes it with threads on, whatever fullReportCommand says', async () => {
+    const root = threadsRepo(true, false);
+    await addThreadRules(root);
+    expect(
+      readFileSync(join(root, '.claude/commands/full-report.md'), 'utf-8'),
+    ).toBe(template(FULL_REPORT_COMMAND_FILE));
+  });
+
+  test('an older SDK copy (marker present) is replaced', () => {
+    const root = threadsRepo(true, false);
+    const path = join(root, '.claude/commands/full-report.md');
+    mkdirSync(join(root, '.claude/commands'), {recursive: true});
+    writeFileSync(path, `old text\n<!-- ${SDK_COMMAND_MARKER} -->\n`);
+    expect(writeThreadRules(root, {kind: 'off'})).toBe(true);
+    expect(readFileSync(path, 'utf-8')).toBe(
+      template(FULL_REPORT_COMMAND_FILE),
+    );
+  });
+
+  test("a repo's own full-report.md (no marker) is left byte for byte, and said", async () => {
+    const root = threadsRepo(true, false);
+    const path = join(root, '.claude/commands/full-report.md');
+    mkdirSync(join(root, '.claude/commands'), {recursive: true});
+    const mine = 'My own full report command.\n';
+    writeFileSync(path, mine);
+    const {out, value} = await captureOutput(() =>
+      writeThreadRules(root, {kind: 'off'}),
+    );
+    expect(value).toBe(true);
+    expect(readFileSync(path, 'utf-8')).toBe(mine);
+    expect(out).toContain(
+      "left in place: .claude/commands/full-report.md — a command of this repo's own",
+    );
+  });
+
+  test("remove leaves a repo's own full-report.md in place", () => {
+    const root = threadsRepo(true, false);
+    const path = join(root, '.claude/commands/full-report.md');
+    mkdirSync(join(root, '.claude/commands'), {recursive: true});
+    const mine = 'My own full report command.\n';
+    writeFileSync(path, mine);
+    removeComponent(root, 'thread-rules', {dryRun: false});
+    expect(readFileSync(path, 'utf-8')).toBe(mine);
   });
 });
 
@@ -354,6 +424,7 @@ describe('the handoff rule follows componentConfig.thread.handoff.successor (jm5
     expect(threadRulesFilesFor(false)).toEqual([
       'status-report-format.md',
       'requests.md',
+      'full-report.md',
     ]);
   });
 
@@ -428,6 +499,8 @@ describe('remove deletes by identity (AC 1)', () => {
       },
       {kind: 'removed', what: '.claude/rules/justin-sdk/requests.md'},
       {kind: 'removed', what: '.claude/rules/justin-sdk/handoff.md'},
+      // home-base-1rxt0.14: the SDK's own command, byte-identical, goes too.
+      {kind: 'removed', what: '.claude/commands/full-report.md'},
     ]);
     for (const file of THREAD_RULES_FILES) {
       expect(existsSync(installed(root, file))).toBe(false);

@@ -100,7 +100,11 @@ import {
 import {threadsBeadsDir} from './paths';
 import {assignMissingQuestionIds} from './question-id-assign';
 import {findRelatedEpics, renderRelatedEpics} from './related-epics';
-import {reportBaselineFor, saveReportSnapshot} from './report-snapshots';
+import {
+  reportBaselineFor,
+  saveReportSnapshot,
+  snapshotBlockOf,
+} from './report-snapshots';
 import {deriveAction, optionalLine} from './session-card';
 import {loadCreatedBeads} from './session-created';
 import {realHandoffNumberReaders} from './session-handoff';
@@ -1127,18 +1131,23 @@ export async function runThreadStatus(
     questionIdProblems,
     timeZone: options.timeZone,
   });
+  // The markdown block a session sees and pastes: the trim guard's saved text,
+  // and (home-base-sg9q9.11 F1) what the Stop hook looks for in the final
+  // message to mark this snapshot shown.
+  const blockText = renderPartOne(view, PLAIN_STYLE);
   // Only the session's own run saves, like the block below: a `--session
   // <other>` run must not become another session's last report.
   if (own) {
     const snapshot = saveReportSnapshot({
       at: now,
+      block: snapshotBlockOf(blockText),
       env,
       items: view.snapshot,
       sessionId: load.model.sessionId,
     });
     if (snapshot.kind === 'failed') {
       console.error(
-        `thread status: could not save what this report shows at ${snapshot.path}, so the next turn's report marks nothing and prints every question in full: ${snapshot.error}`,
+        `thread status: could not save what this report shows at ${snapshot.path}, so this report can never count as one Justin saw: the next turn's report compares with an earlier report he saw, or, with none, prints every question in full: ${snapshot.error}`,
       );
     }
   }
@@ -1147,7 +1156,7 @@ export async function runThreadStatus(
       at: now,
       env,
       sessionId: load.model.sessionId,
-      text: renderPartOne(view, PLAIN_STYLE),
+      text: blockText,
     });
     if (saved.kind === 'failed') {
       console.error(

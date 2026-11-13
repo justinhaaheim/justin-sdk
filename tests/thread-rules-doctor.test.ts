@@ -86,23 +86,47 @@ describe('THREAD_RULES doctor check (AC 4)', () => {
     }
   }
 
-  test('ok when every file matches (successor on: all three belong)', async () => {
+  test('ok when every file matches (successor on: all four belong)', async () => {
     const root = threadsRepo(true, true);
     writeRules(root);
     const line = await doctorLine(root);
     expect(line).toContain('✓ THREAD_RULES');
-    expect(line).toContain("3 rule files match the SDK's copy");
+    expect(line).toContain("4 thread-rules files match the SDK's copy");
   });
 
   test('jm5kg.8: successor off, no handoff.md: ok, and handoff.md is not counted as missing', async () => {
     const root = threadsRepo(true, false);
-    writeRules(root, ['status-report-format.md', 'requests.md']);
+    writeRules(root, [
+      'status-report-format.md',
+      'requests.md',
+      'full-report.md',
+    ]);
     const line = await doctorLine(root);
     expect(line).toContain('✓ THREAD_RULES');
     expect(line).toContain(
-      "2 rule files match the SDK's copy (handoff.md is not expected here: componentConfig.thread.handoff.successor is off)",
+      "3 thread-rules files match the SDK's copy (handoff.md is not expected here: componentConfig.thread.handoff.successor is off)",
     );
     expect(line).not.toContain('missing');
+  });
+
+  test('1rxt0.14: threads on and no /full-report command: warn, missing, run install', async () => {
+    const root = threadsRepo(true, false);
+    writeRules(root, ['status-report-format.md', 'requests.md']);
+    const line = await doctorLine(root);
+    expect(line).toContain('THREAD_RULES');
+    expect(line).toContain('.claude/commands/full-report.md is missing');
+  });
+
+  test("1rxt0.14: a repo's own full-report.md (no marker) is named, never called a match", async () => {
+    const root = threadsRepo(true, false);
+    writeRules(root, ['status-report-format.md', 'requests.md']);
+    mkdirSync(join(root, '.claude/commands'), {recursive: true});
+    writeFileSync(join(root, '.claude/commands/full-report.md'), 'mine\n');
+    const line = await doctorLine(root);
+    expect(line).not.toContain('match the SDK');
+    expect(line).toContain(
+      ".claude/commands/full-report.md is this repo's own command, not the SDK's",
+    );
   });
 
   test('jm5kg.8: successor off, the SDK copy of handoff.md present: warn, naming it, with the identity verdict', async () => {

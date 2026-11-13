@@ -57,6 +57,7 @@ import {
   THREAD_DEFAULT_ENFORCE,
   THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
   THREAD_DEFAULT_ENFORCE_MODE,
+  THREAD_DEFAULT_FULL_REPORT_COMMAND,
   THREAD_DEFAULT_NAME_WORKSPACES,
   THREAD_DEFAULT_NUDGE,
   THREAD_DEFAULT_OPEN_SINCE,
@@ -359,6 +360,12 @@ const componentConfigSchema = z
           .optional()
           .describe(
             'WHAT an armed `thread stop-check` refuses (home-base-k0b8n.11, K12 — the refusal experiment). DEFAULT "reportShaped": only a final message shaped like a status report that was not recorded, which has never fired in practice. "workTurns" ALSO refuses, once per turn, a turn that ran a `git commit` or lasted at least enforceMinTurnMinutes and yields with no report archived since Justin’s last message. Needs `enforce: true`. Every decision, pass or block, is logged to ~/.local/state/justin-threads/stop-check.jsonl; `thread stop-check --stats` summarises it.',
+          ),
+        fullReportCommand: z
+          .boolean()
+          .optional()
+          .describe(
+            'THE /full-report COMMAND ANSWERS ITSELF (home-base-1rxt0.14, built 2026-11-13). DEFAULT FALSE. The thread-rules component installs `.claude/commands/full-report.md`, so `/full-report` is a known command. On: the UserPromptSubmit hook `thread full-report` blocks a prompt of exactly `/full-report` and shows Justin the output of `thread status --full` as the reason, so no model turn happens. A report longer than Claude Code’s 10,000-character hook cap is cut at a line and ends with one line saying how to print the rest. Any failure lets the prompt through, says so in a hook message, and Claude then runs the command as the command file tells it. Off: the prompt goes to Claude, which runs `thread status --full` and pastes it. Install writes a per-handler entry only where this is on; in dispatch mode the dispatcher starts the hook only for that exact prompt.',
           ),
         handoff: z
           .looseObject({
@@ -968,6 +975,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     enforce: THREAD_DEFAULT_ENFORCE,
     enforceMinTurnMinutes: THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
     enforceMode: THREAD_DEFAULT_ENFORCE_MODE,
+    fullReportCommand: THREAD_DEFAULT_FULL_REPORT_COMMAND,
     handoff: HANDOFF_DEFAULTS,
     nameWorkspaces: THREAD_DEFAULT_NAME_WORKSPACES,
     nudge: THREAD_DEFAULT_NUDGE,

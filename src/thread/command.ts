@@ -948,6 +948,15 @@ export const threadCommand: CommandModule = {
         },
       )
       .command(
+        'full-report',
+        'Hook (UserPromptSubmit): answers a prompt of exactly /full-report (home-base-1rxt0.14). Reads the payload on stdin. With componentConfig.thread.fullReportCommand on, it blocks that prompt and shows Justin the output of `thread status --full --session <the payload’s session>` as the reason, so no model turn happens; a report over 10,000 characters is cut at a line and ends with one line saying how to print the rest. Any failure lets the prompt through and says why in a hook message. Off, or any other prompt: prints nothing. Always exit 0. By hand, run `thread status --full` instead.',
+        (yy) => yy,
+        async () => {
+          const {runThreadFullReportHook} = await import('./full-report-hook');
+          process.exit(await runThreadFullReportHook());
+        },
+      )
+      .command(
         'request [title..]',
         'File what Justin asked for as a REQUEST bead under this session’s bead, in the session’s own beads DB (or adopt an existing bead with --bead). The first request also names the session. Needs componentConfig.thread.sessionBeads. Exit 0 filed, or with --continues done or nothing to do · 1 refused or failed (with --continues, a step failed, and running it again finishes it) · 2 usage, or with --continues another session already continues that one.',
         (yy) =>

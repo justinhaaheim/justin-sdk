@@ -43,6 +43,16 @@ export interface HookHandlerEvent {
    * or null for events with no matcher dimension.
    */
   matcher: string | null;
+  /**
+   * UserPromptSubmit only (home-base-1rxt0.14): the DISPATCHER starts this
+   * handler only when the payload's `prompt`, trimmed, is exactly this text.
+   * Absent: every prompt. Claude Code has no matcher on UserPromptSubmit ("no
+   * matcher support", hooks reference), so a per-handler settings entry cannot
+   * carry it: there the handler runs on every prompt and checks the prompt
+   * itself. This is what keeps `thread full-report` from costing a process on
+   * every other prompt.
+   */
+  prompt?: string;
 }
 
 export interface HookHandler {
@@ -69,9 +79,19 @@ export interface HookHandler {
  * session guard is written only where sessions may start successors.
  * `thread.quota.mode` is componentConfig.thread.quota.mode (request
  * home-base-ys9t7.5 D5): ON means any mode but `off`, so the brake is written
- * wherever it observes or enforces.
+ * wherever it observes or enforces. `thread.fullReportCommand` is
+ * componentConfig.thread.fullReportCommand (home-base-1rxt0.14).
  */
-export type HookHandlerKnob = 'thread.handoff.successor' | 'thread.quota.mode';
+export type HookHandlerKnob =
+  | 'thread.fullReportCommand'
+  | 'thread.handoff.successor'
+  | 'thread.quota.mode';
+
+/**
+ * The prompt `thread full-report` answers (home-base-1rxt0.14). Here, in the
+ * leaf, because the dispatcher's prompt filter and the handler must agree.
+ */
+export const FULL_REPORT_PROMPT = '/full-report';
 
 function handler(
   component: string,
@@ -144,6 +164,22 @@ export const HOOK_HANDLERS: readonly HookHandler[] = [
     ['thread', 'brake'],
     [{event: 'PreToolUse', matcher: NO_MATCHER}],
     'thread.quota.mode',
+  ),
+  // /full-report (home-base-1rxt0.14): blocks that exact prompt with the full
+  // status report as the reason shown to Justin. The dispatcher starts it only
+  // for that prompt; install writes a per-handler entry only where
+  // componentConfig.thread.fullReportCommand is on.
+  handler(
+    'thread-hooks-setup',
+    ['thread', 'full-report'],
+    [
+      {
+        event: 'UserPromptSubmit',
+        matcher: NO_MATCHER,
+        prompt: FULL_REPORT_PROMPT,
+      },
+    ],
+    'thread.fullReportCommand',
   ),
 ];
 
@@ -231,22 +267,41 @@ export function matcherAccepts(
 }
 
 /**
+ * Does a handler's prompt filter accept this prompt? No filter accepts every
+ * prompt. A missing prompt never satisfies a filter, like a missing tool name
+ * never satisfies a matcher.
+ */
+export function promptAccepts(
+  filter: string | undefined,
+  prompt: string | null,
+): boolean {
+  if (filter == null) return true;
+  return prompt?.trim() === filter;
+}
+
+/**
  * The handlers one dispatch runs: registered for `event`, owned by a component
- * the repo has, and accepting the tool when the event has a matcher.
+ * the repo has, accepting the tool when the event has a matcher, and accepting
+ * the prompt when the handler has a prompt filter.
  */
 export function selectHandlers(args: {
   components: readonly string[];
   event: DispatchedEvent;
   handlers?: readonly HookHandler[];
+  /** The payload's `prompt`, or null when it has none (every event but UserPromptSubmit). */
+  prompt?: string | null;
   toolName: string | null;
 }): HookHandler[] {
   const handlers = args.handlers ?? HOOK_HANDLERS;
+  const prompt = args.prompt ?? null;
   return handlers.filter(
     (h) =>
       args.components.includes(h.component) &&
       h.events.some(
         (e) =>
-          e.event === args.event && matcherAccepts(e.matcher, args.toolName),
+          e.event === args.event &&
+          matcherAccepts(e.matcher, args.toolName) &&
+          promptAccepts(e.prompt, prompt),
       ),
   );
 }

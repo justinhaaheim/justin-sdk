@@ -91,6 +91,7 @@ import {
   writeStopMark,
 } from './archive';
 import {resolveThreadConfig} from './config';
+import {markReportsShown} from './report-snapshots';
 import {THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES} from './defaults';
 import {findTranscript} from './facts';
 import {sessionBraked} from './quota-brake-state';
@@ -558,11 +559,54 @@ interface DecisionLogContext {
   sessionId: string | null;
   /**
    * Only a trim guard run adds keys (home-base-7761p.23 D9), so with the knob off
-   * the log line is what it always was. Null: nothing to add.
+   * the log line is what it always was. Null: nothing to add. The one other key
+   * is `reportShown` (home-base-sg9q9.11 F1), added only when a report was
+   * marked shown or the marking failed.
    */
   trimGuard: Record<string, number> | null;
   turnCommits: number | null;
   turnMinutes: number | null;
+}
+
+/**
+ * home-base-sg9q9.11 F1: mark the reports this final message showed Justin,
+ * so only a report he saw becomes the next one's last report. Before every
+ * knob, because the markers and one-line questions need it with the trim
+ * guard off too. Never in a subagent: its final message goes to the session
+ * that dispatched it, not to Justin. The common Stop (no block in the reply)
+ * reads nothing. Returns what the log line records, or null for nothing.
+ */
+function markShownReports(input: {
+  agentId: string | null;
+  env: EnvLike;
+  explain: boolean;
+  lastAssistantMessage: string | null;
+  nowMs: number;
+  sessionId: string | null;
+}): string | null {
+  const {agentId, lastAssistantMessage, sessionId} = input;
+  if (agentId != null && agentId !== '') return null;
+  if (sessionId == null || sessionId === '' || lastAssistantMessage == null) {
+    return null;
+  }
+  const outcome = markReportsShown({
+    env: input.env,
+    now: new Date(input.nowMs),
+    reply: lastAssistantMessage,
+    sessionId,
+  });
+  if (outcome.kind === 'noBlock') return null;
+  if (outcome.kind === 'failed') {
+    if (input.explain) {
+      console.error(
+        `[thread stop-check] could not mark the report shown at ${outcome.path}: ${outcome.error}`,
+      );
+    }
+    return `failed: ${outcome.error}`;
+  }
+  // Logged only when something was written, so a Stop that marks nothing
+  // keeps the log line it always had (home-base-7761p.23 D9).
+  return outcome.kind === 'marked' ? `marked ${outcome.marked.length}` : null;
 }
 
 /** One line per run, passes included. FAILS SOFT: returns the error, never throws. */
@@ -695,6 +739,8 @@ export function runThreadStopCheck(args?: {
     turnCommits: null,
     turnMinutes: null,
   };
+  /** F1: what markShownReports did, for the log line; null adds nothing. */
+  let reportShown: string | null = null;
 
   const finish = (
     decision: StopCheckDecision,
@@ -713,6 +759,7 @@ export function runThreadStopCheck(args?: {
       turnMinutes: logged.turnMinutes,
       why: decision.why,
       ...logged.trimGuard,
+      ...(reportShown == null ? {} : {reportShown}),
     });
     if (explain && logError != null) {
       console.error(`[thread stop-check] decision NOT logged: ${logError}`);
@@ -740,6 +787,16 @@ export function runThreadStopCheck(args?: {
     const lastAssistantMessage = input.last_assistant_message ?? null;
     logged.sessionId = sessionId;
     logged.cwd = input.cwd ?? null;
+
+    // home-base-sg9q9.11 F1: before the knobs, and it never decides anything.
+    reportShown = markShownReports({
+      agentId,
+      env,
+      explain,
+      lastAssistantMessage,
+      nowMs,
+      sessionId,
+    });
 
     // The knob and the subagent test come before ANY filesystem work, so the
     // overwhelmingly common Stop — knob off, or a player finishing — costs one

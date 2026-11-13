@@ -8,6 +8,11 @@
  * beside the committed critical-rules.md. Claude Code autoloads them from there at CLAUDE.md priority, and because the
  * files are committed they reach web sessions, CI and fresh clones too.
  *
+ * Also `.claude/commands/full-report.md` from `templates/commands/`
+ * (home-base-1rxt0.14), so `/full-report` is a known command. That directory is
+ * not the SDK's alone, so a differing file there without the SDK's marker line
+ * is `foreign` and is left exactly as it is.
+ *
  * THE SDK'S COPY WINS. A re-run (`install`, `update`, a sweep) rewrites a file
  * that differs from the template, so a pin bump updates the instructions
  * together with the code they describe — that is the point of moving them
@@ -76,7 +81,9 @@ function strayHandoffRuleLine(state: ThreadRulesFileState): string | null {
   const rel = threadRulesInstalledPath(state.file);
   const why = `componentConfig.thread.handoff.successor is off here, so the SDK does not install it, and it teaches thread handoff and spawn to sessions in a repo where they are not on`;
   switch (state.kind) {
+    // `foreign`: only handoff.md reaches this function, and it never is one.
     case 'missing':
+    case 'foreign':
       return null;
     case 'matches':
       return `left in place: ${rel} — ${why}. install never removes; it is byte-identical to the SDK's copy, so deleting it loses nothing: git rm ${rel}`;
@@ -126,6 +133,14 @@ export function writeThreadRules(
     switch (state.kind) {
       case 'matches':
         success(`${rel} matches the SDK's copy`);
+        break;
+      case 'foreign':
+        // home-base-1rxt0.14: a command of the same name that the SDK did not
+        // write. Never overwritten; said even under quiet, because the SDK's
+        // /full-report is then not what runs here.
+        warnAlways(
+          `left in place: ${rel} — a command of this repo's own (it lacks the justin-sdk marker line), so install does not overwrite it, and /full-report runs it instead of the SDK's`,
+        );
         break;
       case 'template-unreadable':
         fail(

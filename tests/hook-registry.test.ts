@@ -13,9 +13,11 @@ import {
   dispatchCommand,
   DISPATCHED_EVENTS,
   dispatchMatcher,
+  FULL_REPORT_PROMPT,
   HOOK_HANDLERS,
   isDispatchCommand,
   matcherAccepts,
+  promptAccepts,
   retiredDispatchCommand,
   selectHandlers,
 } from '../src/hook-registry';
@@ -25,6 +27,8 @@ import {
   THREAD_BRAKE_HOOK_EVENT,
   THREAD_CAPTURE_HOOK_COMMAND,
   THREAD_CAPTURE_HOOK_EVENTS,
+  THREAD_FULL_REPORT_HOOK_COMMAND,
+  THREAD_FULL_REPORT_HOOK_EVENT,
   THREAD_GUARD_HOOK_COMMAND,
   THREAD_GUARD_HOOK_EVENT,
   THREAD_GUARD_HOOK_MATCHER,
@@ -60,6 +64,9 @@ describe('the registry says what the installers write', () => {
     expect(byId('thread nudge').command).toBe(THREAD_NUDGE_HOOK_COMMAND);
     expect(byId('thread guard').command).toBe(THREAD_GUARD_HOOK_COMMAND);
     expect(byId('thread brake').command).toBe(THREAD_BRAKE_HOOK_COMMAND);
+    expect(byId('thread full-report').command).toBe(
+      THREAD_FULL_REPORT_HOOK_COMMAND,
+    );
   });
 
   test('events and matchers', () => {
@@ -82,9 +89,28 @@ describe('the registry says what the installers write', () => {
       {event: THREAD_BRAKE_HOOK_EVENT, matcher: null},
     ]);
     expect(byId('thread brake').knob).toBe('thread.quota.mode');
+    // /full-report (home-base-1rxt0.14): UserPromptSubmit, started by the
+    // dispatcher only for that exact prompt, gated on its own knob.
+    expect(byId('thread full-report').events).toEqual([
+      {
+        event: THREAD_FULL_REPORT_HOOK_EVENT,
+        matcher: null,
+        prompt: FULL_REPORT_PROMPT,
+      },
+    ]);
+    expect(byId('thread full-report').knob).toBe('thread.fullReportCommand');
+    expect(FULL_REPORT_PROMPT).toBe('/full-report');
     expect(
       HOOK_HANDLERS.filter((h) => h.knob != null).map((h) => h.id),
-    ).toEqual(['thread guard', 'thread brake']);
+    ).toEqual(['thread guard', 'thread brake', 'thread full-report']);
+  });
+
+  test('only thread full-report has a prompt filter', () => {
+    expect(
+      HOOK_HANDLERS.filter((h) => h.events.some((e) => e.prompt != null)).map(
+        (h) => h.id,
+      ),
+    ).toEqual(['thread full-report']);
   });
 
   test('every handler is on a dispatched event', () => {
@@ -206,6 +232,38 @@ describe('selectHandlers', () => {
       'thread nudge',
     ]);
     expect(ids(['thread-hooks-setup'], 'PostToolUse', 'Edit')).toEqual([]);
+  });
+
+  // home-base-1rxt0.14: the prompt filter is what keeps `thread full-report`
+  // from costing a process on every prompt.
+  test('a prompt filter starts its handler only for that exact prompt, trimmed', () => {
+    const ids = (prompt: string | null) =>
+      selectHandlers({
+        components: ['thread-hooks-setup'],
+        event: 'UserPromptSubmit',
+        prompt,
+        toolName: null,
+      }).map((h) => h.id);
+
+    expect(ids('/full-report')).toEqual([
+      'thread capture',
+      'thread full-report',
+    ]);
+    expect(ids('  /full-report\n')).toEqual([
+      'thread capture',
+      'thread full-report',
+    ]);
+    expect(ids('hello')).toEqual(['thread capture']);
+    expect(ids('/full-report please')).toEqual(['thread capture']);
+    expect(ids('/full-reports')).toEqual(['thread capture']);
+    expect(ids(null)).toEqual(['thread capture']);
+  });
+
+  test('promptAccepts: no filter takes every prompt; a filter needs a prompt', () => {
+    expect(promptAccepts(undefined, null)).toBe(true);
+    expect(promptAccepts(undefined, 'anything')).toBe(true);
+    expect(promptAccepts('/full-report', null)).toBe(false);
+    expect(promptAccepts('/full-report', '/full-report')).toBe(true);
   });
 });
 
