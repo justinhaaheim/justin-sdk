@@ -81,7 +81,7 @@ describe('F7: two empty lines between sibling list items in pasted markdown', ()
         repair: null,
         request: null,
         shortId: null,
-        shortIdWhy: null,
+        shownAs: {kind: 'none', why: 'no id in this fixture'},
         unlinkedWhy: 'no request named',
       },
       PLAIN_STYLE,

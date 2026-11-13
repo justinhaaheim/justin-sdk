@@ -18,7 +18,7 @@
  */
 
 import type {BdIssue} from '../src/thread/bd';
-import type {SearchResult, SearchRow} from '../src/thread/search';
+import type {SearchHit, SearchResult, SearchRow} from '../src/thread/search';
 
 import {afterEach, describe, expect, spyOn, test} from 'bun:test';
 import {mkdirSync, mkdtempSync, writeFileSync} from 'fs';
@@ -31,12 +31,17 @@ import {
   buildSnippet,
   compileQuery,
   countCorpus,
+  dedupeHits,
   displayFieldName,
+  hitLabel,
   incompleteLine,
   moreLine,
   noMatchesLine,
+  parseWrittenSince,
+  projectFolderOf,
   readArchivedReports,
   renderSearchRow,
+  rowProject,
   runThreadSearch,
   searchCorpus,
   searchJson,
@@ -44,6 +49,7 @@ import {
   SECTION_NAME_CUT,
   sectionOf,
   sessionActivityAt,
+  sessionLocation,
   SNIPPET_RADIUS,
   THREAD_SEARCH_FIELDS,
   withinWindow,
@@ -113,12 +119,16 @@ interface SearchJson {
   days: number | null;
   failures: string[];
   matched: number;
+  noProjectSkipped: number;
   query: string;
   regex: boolean;
+  repos: string[] | null;
   rows: SearchRow[];
   sessionsSearched: number;
   shown: number;
   threadsSearched: number;
+  undatedOnlySkipped: number;
+  writtenSince: string | null;
 }
 
 function parseSearchJson(text: string): SearchJson {
@@ -433,6 +443,97 @@ describe('the snippet', () => {
       'notes',
       'description',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// No cut splits an emoji (home-base-c82t4.3, D5)
+// ---------------------------------------------------------------------------
+
+/** A character outside the BMP: two UTF-16 code units. */
+const EMOJI = '\u{1F600}';
+
+/**
+ * Every lone surrogate in `text`. This is what made jq refuse
+ * `thread search --json` on 2026-11-13: JSON.stringify escapes a lone half as
+ * `\udXXX`, and jq rejects the document.
+ */
+function loneSurrogates(value: unknown): string[] {
+  const text = JSON.stringify(value);
+  return text.match(/\\ud[89a-f][0-9a-f]{2}/giu) ?? [];
+}
+
+describe('no cut splits an emoji (home-base-c82t4.3, D5)', () => {
+  test('the cut BEFORE the match drops the half, never keeps it', () => {
+    // NEEDLE at 82, so the before-cut lands at 2: between the halves at 1 and 2.
+    const text = `x${EMOJI}${'a'.repeat(79)}NEEDLE`;
+    expect(text.indexOf('NEEDLE') - SNIPPET_RADIUS).toBe(2);
+    const snippet = buildSnippet(text, text.indexOf('NEEDLE'), 6);
+    expect(loneSurrogates(snippet)).toEqual([]);
+    expect(snippet.before).toBe(`…${'a'.repeat(79)}`);
+    expect(snippet.match).toBe('NEEDLE');
+  });
+
+  test('the cut AFTER the match drops the half, never keeps it', () => {
+    // The after-cut lands at 6 + 80 = 86: between the halves at 85 and 86.
+    const text = `NEEDLE${'b'.repeat(79)}${EMOJI}tail`;
+    expect(text.indexOf(EMOJI)).toBe(6 + SNIPPET_RADIUS - 1);
+    const snippet = buildSnippet(text, 0, 6);
+    expect(loneSurrogates(snippet)).toEqual([]);
+    expect(snippet.after).toBe(`${'b'.repeat(79)}…`);
+  });
+
+  test('a --regex match that ends inside an emoji takes the whole emoji', () => {
+    // `.` without the u flag matches ONE code unit: half the emoji.
+    const corpus = buildCorpus(
+      [thread('th-1', {lastUserMessage: `say NEEDLE${EMOJI} again`})],
+      [],
+    );
+    const row = firstRow(searchCorpus(corpus, pattern('needle.', true)));
+    expect(loneSurrogates(row.hits)).toEqual([]);
+    expect(row.hit.snippet.match).toBe(`NEEDLE${EMOJI}`);
+    expect(row.hit.snippet.after).toBe(' again');
+  });
+
+  test('the 100-character title of a message-log row drops the half', () => {
+    // 98 characters, then the emoji at 98 and 99: the cut at 99 splits it.
+    const firstLine = `${'c'.repeat(98)}${EMOJI}${'d'.repeat(10)}`;
+    const [row] = buildCorpus(
+      [],
+      [],
+      [
+        {
+          lines: [
+            {
+              at: '2026-09-18T10:00:00.000Z',
+              cwd: null,
+              event: 'UserPromptSubmit',
+              role: 'user',
+              text: firstLine,
+            },
+          ],
+          path: '/m/s1.jsonl',
+          sessionId: 's1',
+        },
+      ],
+    );
+    expect(row?.title).toBe(`${'c'.repeat(98)}…`);
+    expect(loneSurrogates(row?.title)).toEqual([]);
+  });
+
+  test('a cut section heading drops the half', () => {
+    // The cut keeps SECTION_NAME_CUT - 1 = 79 units: between the halves at 78 and 79.
+    const heading = `${'e'.repeat(SECTION_NAME_CUT - 2)}${EMOJI}${'f'.repeat(10)}`;
+    const text = `## ${heading}\nthe needle`;
+    const section = sectionOf(text, text.indexOf('needle'));
+    expect(section).toBe(`${'e'.repeat(SECTION_NAME_CUT - 2)}…`);
+    expect(loneSurrogates(section)).toEqual([]);
+  });
+
+  test('a snippet that does not cut through an emoji keeps it whole', () => {
+    const snippet = buildSnippet(`${EMOJI} NEEDLE ${EMOJI}`, 3, 6);
+    expect(snippet.before).toBe(`${EMOJI} `);
+    expect(snippet.after).toBe(` ${EMOJI}`);
   });
 });
 
@@ -1002,7 +1103,12 @@ describe('rendering', () => {
     // 'the gates are green' is both what he said and what the archived
     // payload's stopReason says — one row, two fields, and now it says so.
     const row = firstRow(searchCorpus(corpus, pattern('gates are green')));
-    expect(row.hit.field).toBe('lastUserMessage');
+    // The two snippets are identical, and only the archived one is dated (the
+    // fixture has no lastUserMessageAt), so it is the one shown
+    // (home-base-c82t4.4 F5). Both fields are still named.
+    expect(row.hit.field).toBe(
+      'archived report 2026-09-14T01:00:00.000Z · payload.stopReason',
+    );
     expect(row.matchedFields).toEqual([
       'lastUserMessage',
       'archived report 2026-09-14T01:00:00.000Z · payload.stopReason',
@@ -1747,5 +1853,744 @@ describe('the session bead titles the row (home-base-y1hg0.7)', () => {
       kind: 'none',
       reason: 'this row has no session id',
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// --repo and --written-since (home-base-c82t4.2, D3 and D4)
+// ---------------------------------------------------------------------------
+
+interface ProjectHarness {
+  /** A dev root holding alpha/ and garden-tools/ (tag GARDEN), each with a .git. */
+  devRoot: string;
+  env: Record<string, string | undefined>;
+  h: Harness;
+}
+
+function projectHarness(): ProjectHarness {
+  const h = harness();
+  const devRoot = join(h.root, 'Dev');
+  mkdirSync(join(devRoot, 'alpha', '.git'), {recursive: true});
+  mkdirSync(join(devRoot, 'garden-tools', '.git'), {recursive: true});
+  writeFileSync(
+    join(devRoot, 'garden-tools', 'justin-sdk.config.json'),
+    JSON.stringify({projectTag: 'GARDEN'}),
+  );
+  const xdg = join(h.root, 'xdg');
+  mkdirSync(xdg, {recursive: true});
+  return {devRoot, env: {...h.env, XDG_CONFIG_HOME: xdg}, h};
+}
+
+/** A session's message log where the capture hook writes it. */
+function writeLog(
+  h: Harness,
+  sessionId: string,
+  lines: {at: string | null; cwd: string | null; text: string}[],
+): void {
+  const dir = join(h.root, 'state', 'messages');
+  mkdirSync(dir, {recursive: true});
+  writeFileSync(
+    join(dir, `${sessionId}.jsonl`),
+    `${lines.map((line) => JSON.stringify({...line, event: 'UserPromptSubmit', role: 'user'})).join('\n')}\n`,
+  );
+}
+
+function ago(ms: number): string {
+  return new Date(NOW.getTime() - ms).toISOString();
+}
+
+describe('--repo (home-base-c82t4.2, D3)', () => {
+  async function sessionsFor(
+    p: ProjectHarness,
+    repos: string[],
+  ): Promise<(string | null)[]> {
+    const found = await searchSessions({
+      devRoot: p.devRoot,
+      env: p.env,
+      limit: 0,
+      now: NOW,
+      query: 'needle',
+      repos,
+    });
+    if (!found.ok) throw new Error(found.error);
+    return found.result.rows.map((row) => row.sessionId).sort();
+  }
+
+  test('keeps only that project: folder or tag, any case, brackets, repeated or comma-separated', async () => {
+    const p = projectHarness();
+    seedThreads(p.h, [
+      thread('th-a', {repo: 'alpha', sessionId: 's-a'}, {title: 'a needle'}),
+      thread(
+        'th-g',
+        {repo: 'garden-tools', sessionId: 's-g'},
+        {title: 'g needle'},
+      ),
+      thread('th-o', {repo: 'orchard', sessionId: 's-o'}, {title: 'o needle'}),
+    ]);
+    expect(await sessionsFor(p, ['alpha'])).toEqual(['s-a']);
+    expect(await sessionsFor(p, ['garden'])).toEqual(['s-g']);
+    expect(await sessionsFor(p, ['[Garden]'])).toEqual(['s-g']);
+    expect(await sessionsFor(p, ['ALPHA', 'garden'])).toEqual(['s-a', 's-g']);
+    expect(await sessionsFor(p, ['alpha,garden-tools'])).toEqual([
+      's-a',
+      's-g',
+    ]);
+    // orchard is not under the dev root: the corpus's own repo names are known too.
+    expect(await sessionsFor(p, ['Orchard'])).toEqual(['s-o']);
+    expect(await sessionsFor(p, [])).toEqual(['s-a', 's-g', 's-o']);
+  });
+
+  test('an unknown value exits 2, prints no rows, and lists the known projects one per line', async () => {
+    const p = projectHarness();
+    seedThreads(p.h, [
+      thread('th-a', {repo: 'alpha', sessionId: 's-a'}, {title: 'a needle'}),
+    ]);
+    const out = captureStdout();
+    const err = captureStderr();
+    const code = await runThreadSearch({
+      color: false,
+      devRoot: p.devRoot,
+      env: p.env,
+      now: NOW,
+      query: 'needle',
+      repos: ['alpha', 'nope'],
+    });
+    expect(code).toBe(2);
+    expect(out.join('')).toBe('');
+    const lines = err.join('\n').split('\n');
+    expect(lines[0]).toBe(
+      'thread search: No project is named "nope". The known projects (folder, then tag):',
+    );
+    expect(lines).toContain('alpha  [ALPHA]');
+    expect(lines).toContain('garden-tools  [GARDEN]');
+  });
+
+  test('an unknown value under --json is the error object and exit 2; a blank value is refused too', async () => {
+    const p = projectHarness();
+    seedThreads(p.h, [
+      thread('th-a', {repo: 'alpha', sessionId: 's-a'}, {title: 'a needle'}),
+    ]);
+    const out = captureStdout();
+    const code = await runThreadSearch({
+      devRoot: p.devRoot,
+      env: p.env,
+      json: true,
+      now: NOW,
+      query: 'needle',
+      repos: ['nope'],
+    });
+    expect(code).toBe(2);
+    expect(JSON.parse(out.join('')) as unknown).toMatchObject({ok: false});
+    const blank = await searchSessions({
+      devRoot: p.devRoot,
+      env: p.env,
+      now: NOW,
+      query: 'needle',
+      repos: [' , '],
+    });
+    expect(blank.ok).toBe(false);
+  });
+
+  test('sessionLocation: the bead first, then the NEWEST log line with a cwd, then the resume cd', () => {
+    const log = (lines: {at: string; cwd: string | null}[]) => ({
+      lines: lines.map((line) => ({
+        ...line,
+        event: 'UserPromptSubmit' as const,
+        role: 'user' as const,
+        text: 'hello',
+      })),
+      path: '/m/s1.jsonl',
+      sessionId: 's1',
+    });
+    const resume = `cd '/dev/it'\\''s' && claude --resume s1`;
+    const lines = [
+      {at: ago(2 * DAY), cwd: '/dev/old'},
+      {at: ago(DAY), cwd: '/dev/new'},
+      {at: ago(DAY / 2), cwd: null},
+    ];
+    const [withBead] = buildCorpus(
+      [
+        thread('th-1', {
+          cwd: '/dev/bead',
+          resumeCommand: resume,
+          sessionId: 's1',
+        }),
+      ],
+      [],
+      [log(lines)],
+    );
+    const [withLog] = buildCorpus(
+      [thread('th-1', {resumeCommand: resume, sessionId: 's1'})],
+      [],
+      [log(lines)],
+    );
+    const [withResume] = buildCorpus(
+      [thread('th-1', {resumeCommand: resume, sessionId: 's1'})],
+      [],
+    );
+    const [withNothing] = buildCorpus([thread('th-1', {sessionId: 's1'})], []);
+    if (withBead == null || withLog == null || withResume == null)
+      throw new Error('expected rows');
+    expect(sessionLocation(withBead)).toEqual({
+      path: '/dev/bead',
+      source: 'bead',
+    });
+    expect(sessionLocation(withLog)).toEqual({path: '/dev/new', source: 'log'});
+    expect(sessionLocation(withResume)).toEqual({
+      path: "/dev/it's",
+      source: 'resume',
+    });
+    expect(
+      withNothing == null ? 'no row' : sessionLocation(withNothing),
+    ).toBeNull();
+  });
+
+  test('projectFolderOf: the folder directly under the dev root; a worktree belongs to the folder holding .claude', () => {
+    expect(projectFolderOf('/u/Dev/alpha', '/u/Dev')).toBe('alpha');
+    expect(
+      projectFolderOf('/u/Dev/alpha/.claude/worktrees/fix-it/src', '/u/Dev/'),
+    ).toBe('alpha');
+    expect(projectFolderOf('/u/Dev', '/u/Dev')).toBeNull();
+    expect(projectFolderOf('/u/Devices/alpha', '/u/Dev')).toBeNull();
+    expect(projectFolderOf('/private/tmp/x', '/u/Dev')).toBeNull();
+    expect(projectFolderOf('alpha/src', '/u/Dev')).toBeNull();
+  });
+
+  test('rowProject: a recorded repo, a placed one, outside the dev root, and a relative path that names no place', () => {
+    const row = (metadata: Record<string, unknown>) => {
+      const [only] = buildCorpus([thread('th-1', metadata)], []);
+      if (only == null) throw new Error('expected a row');
+      return only;
+    };
+    expect(
+      rowProject(row({cwd: '/u/Dev/beta', repo: 'alpha'}), '/u/Dev'),
+    ).toEqual({folder: 'alpha', kind: 'recorded'});
+    expect(rowProject(row({cwd: '/u/Dev/beta/src'}), '/u/Dev')).toEqual({
+      folder: 'beta',
+      kind: 'placed',
+      source: 'bead',
+    });
+    expect(rowProject(row({cwd: '/private/tmp/x'}), '/u/Dev')).toEqual({
+      kind: 'outside',
+      source: 'bead',
+    });
+    expect(rowProject(row({cwd: 'beta/src'}), '/u/Dev')).toEqual({
+      kind: 'unknown',
+    });
+    expect(rowProject(row({}), '/u/Dev')).toEqual({kind: 'unknown'});
+  });
+
+  test('F3 (home-base-c82t4.4): a placed row carries placedRepo and its Repo line says where it came from; the others stay null', () => {
+    const corpus = buildCorpus(
+      [
+        thread(
+          'th-placed',
+          {cwd: '/u/Dev/beta/.claude/worktrees/w', sessionId: 's-placed'},
+          {title: 'needle placed'},
+        ),
+        thread(
+          'th-recorded',
+          {cwd: '/u/Dev/beta', repo: 'alpha', sessionId: 's-recorded'},
+          {title: 'needle recorded'},
+        ),
+        thread(
+          'th-outside',
+          {cwd: '/private/tmp/x', sessionId: 's-outside'},
+          {title: 'needle outside'},
+        ),
+        thread('th-none', {sessionId: 's-none'}, {title: 'needle nowhere'}),
+      ],
+      [],
+    );
+    const bySession = (devRoot: string | null): Map<string, SearchRow> =>
+      new Map(
+        searchCorpus(corpus, pattern('needle'), {devRoot, limit: 0}).rows.map(
+          (row) => [row.sessionId ?? '', row],
+        ),
+      );
+    const rows = bySession('/u/Dev');
+    expect(
+      [...rows.entries()].map(([id, row]) => [id, row.placedRepo]).sort(),
+    ).toEqual([
+      ['s-none', null],
+      ['s-outside', null],
+      ['s-placed', 'beta'],
+      ['s-recorded', null],
+    ]);
+    const render = (id: string): string => {
+      const row = rows.get(id);
+      if (row == null) throw new Error(`expected a row for ${id}`);
+      return renderSearchRow(row, NOW, {color: false});
+    };
+    expect(render('s-placed')).toContain('Repo:     beta (from where it ran)');
+    expect(render('s-recorded')).toContain('Repo:     alpha\n');
+    expect(render('s-outside')).toContain('Repo:     no repo recorded');
+    expect(render('s-none')).toContain('Repo:     no repo recorded');
+    // With no dev root nothing is placed.
+    expect(bySession(null).get('s-placed')?.placedRepo).toBeNull();
+  });
+
+  test('F3: the --json row carries placedRepo, with --repo and without it', async () => {
+    const p = projectHarness();
+    const alpha = join(p.devRoot, 'alpha');
+    seedThreads(p.h, [
+      thread(
+        'th-placed',
+        {cwd: join(alpha, 'sub'), sessionId: 's-placed'},
+        {title: 'needle placed'},
+      ),
+      thread(
+        'th-recorded',
+        {repo: 'alpha', sessionId: 's-recorded'},
+        {title: 'needle recorded'},
+      ),
+    ]);
+    for (const repos of [['alpha'], []]) {
+      const out = captureStdout();
+      const code = await runThreadSearch({
+        devRoot: p.devRoot,
+        env: p.env,
+        json: true,
+        limit: 0,
+        now: NOW,
+        query: 'needle',
+        repos,
+      });
+      expect(code).toBe(0);
+      const json = parseSearchJson(out.join(''));
+      expect(
+        json.rows.map((row) => [row.sessionId, row.placedRepo]).sort(),
+      ).toEqual([
+        ['s-placed', 'alpha'],
+        ['s-recorded', null],
+      ]);
+      spies.splice(0).forEach((spy) => {
+        spy.mockRestore();
+      });
+    }
+  });
+
+  test('a row with no repo is placed by where it ran; outside the dev root is left out quietly; no location at all is COUNTED', async () => {
+    const p = projectHarness();
+    const alpha = join(p.devRoot, 'alpha');
+    seedThreads(p.h, [
+      thread(
+        'th-bead',
+        {cwd: join(alpha, '.claude', 'worktrees', 'x'), sessionId: 's-bead'},
+        {title: 'needle by bead'},
+      ),
+      thread('th-log', {sessionId: 's-log'}, {title: 'needle by log'}),
+      thread(
+        'th-resume',
+        {
+          resumeCommand: `cd '${alpha}' && claude --resume s-resume`,
+          sessionId: 's-resume',
+        },
+        {title: 'needle by resume'},
+      ),
+      thread(
+        'th-tmp',
+        {cwd: '/private/tmp/scratch', sessionId: 's-tmp'},
+        {title: 'needle in tmp'},
+      ),
+      thread('th-none', {sessionId: 's-none'}, {title: 'needle nowhere'}),
+      thread(
+        'th-garden',
+        {cwd: join(p.devRoot, 'garden-tools'), sessionId: 's-garden'},
+        {title: 'needle in the garden'},
+      ),
+    ]);
+    writeLog(p.h, 's-log', [
+      {at: ago(2 * DAY), cwd: '/elsewhere', text: 'hello'},
+      {at: ago(DAY), cwd: join(alpha, 'sub'), text: 'hello'},
+    ]);
+    writeLog(p.h, 's-logonly', [
+      {at: ago(DAY), cwd: alpha, text: 'a needle in a log only'},
+    ]);
+
+    expect(await sessionsFor(p, ['alpha'])).toEqual([
+      's-bead',
+      's-log',
+      's-logonly',
+      's-resume',
+    ]);
+
+    const out = captureStdout();
+    const code = await runThreadSearch({
+      devRoot: p.devRoot,
+      env: p.env,
+      json: true,
+      limit: 0,
+      now: NOW,
+      query: 'needle',
+      repos: ['alpha'],
+    });
+    expect(code).toBe(0);
+    const json = parseSearchJson(out.join(''));
+    expect(json.repos).toEqual(['alpha']);
+    expect(json.noProjectSkipped).toBe(1);
+    expect(json.sessionsSearched).toBe(4);
+
+    out.length = 0;
+    await runThreadSearch({
+      color: false,
+      devRoot: p.devRoot,
+      env: p.env,
+      limit: 0,
+      now: NOW,
+      query: 'needle',
+      repos: ['alpha'],
+    });
+    expect(out.join('')).toContain(
+      '1 session with no recorded project was not searched',
+    );
+    expect(out.join('')).not.toContain('needle in tmp');
+  });
+
+  test('the count is said on the zero-match line too, and nothing is said without --repo', async () => {
+    const p = projectHarness();
+    seedThreads(p.h, [
+      thread('th-a', {repo: 'alpha', sessionId: 's-a'}, {title: 'a needle'}),
+      thread('th-n1', {sessionId: 's-n1'}, {title: 'no place'}),
+      thread('th-n2', {sessionId: 's-n2'}, {title: 'no place either'}),
+    ]);
+    const out = captureStdout();
+    const code = await runThreadSearch({
+      color: false,
+      devRoot: p.devRoot,
+      env: p.env,
+      now: NOW,
+      query: 'haystack',
+      repos: ['alpha'],
+    });
+    expect(code).toBe(1);
+    const text = out.join('');
+    expect(text).toContain('no matches in 1 sessions searched');
+    expect(text).toContain(
+      '2 sessions with no recorded project were not searched',
+    );
+
+    out.length = 0;
+    await runThreadSearch({
+      devRoot: p.devRoot,
+      env: p.env,
+      json: true,
+      now: NOW,
+      query: 'needle',
+    });
+    const json = parseSearchJson(out.join(''));
+    expect(json.repos).toBeNull();
+    expect(json.noProjectSkipped).toBe(0);
+    expect(json.sessionsSearched).toBe(3);
+  });
+});
+
+describe('--written-since (home-base-c82t4.2, D4)', () => {
+  const CUTOFF = NOW.getTime() - 3 * DAY;
+
+  test('parseWrittenSince: 24h, 3d, 2w back from now; a date is local midnight; anything else is refused', () => {
+    expect(parseWrittenSince('24h', NOW)).toEqual({
+      at: new Date(NOW.getTime() - DAY),
+      kind: 'ok',
+    });
+    expect(parseWrittenSince('2w', NOW)).toEqual({
+      at: new Date(NOW.getTime() - 14 * DAY),
+      kind: 'ok',
+    });
+    expect(parseWrittenSince('2026-09-17', NOW)).toEqual({
+      at: new Date(2026, 8, 17),
+      kind: 'ok',
+    });
+    for (const bad of [
+      '7',
+      '1.5d',
+      '0d',
+      '2026-02-30',
+      '2026-9-17',
+      'today',
+      '',
+    ]) {
+      expect(parseWrittenSince(bad, NOW).kind).toBe('bad');
+    }
+  });
+
+  test('a bare date is LOCAL midnight, not UTC midnight', () => {
+    // bun test runs in UTC, where the two are the same instant; Denver is not.
+    const saved = process.env.TZ;
+    process.env.TZ = 'America/Denver';
+    try {
+      expect(parseWrittenSince('2026-09-17', NOW)).toEqual({
+        at: new Date('2026-09-17T06:00:00.000Z'),
+        kind: 'ok',
+      });
+    } finally {
+      if (saved == null) delete process.env.TZ;
+      else process.env.TZ = saved;
+    }
+  });
+
+  test('each hit is dated by its own record: log line, bead message stamp, archived report', () => {
+    const line = (sessionId: string, at: string) => ({
+      lines: [
+        {
+          at,
+          cwd: null,
+          event: 'UserPromptSubmit' as const,
+          role: 'user' as const,
+          text: 'a needle',
+        },
+      ],
+      path: `/m/${sessionId}.jsonl`,
+      sessionId,
+    });
+    const corpus = buildCorpus(
+      [
+        thread('th-first', {
+          firstUserMessage: 'a needle',
+          firstUserMessageAt: ago(3_600_000),
+          sessionId: 's-first',
+        }),
+        thread('th-first-old', {
+          firstUserMessage: 'a needle',
+          firstUserMessageAt: ago(10 * DAY),
+          sessionId: 's-first-old',
+        }),
+        thread('th-notes', {sessionId: 's-notes'}, {notes: 'a needle'}),
+        thread('th-mixed', {sessionId: 's-mixed'}, {notes: 'a needle'}),
+      ],
+      [
+        {
+          document: {payload: {title: 'a needle'}},
+          path: '/a/1.json',
+          repo: null,
+          reportedAt: ago(DAY),
+          resumeCommand: null,
+          sessionId: 's-archive',
+          title: null,
+        },
+      ],
+      [
+        line('s-log-new', ago(DAY)),
+        line('s-log-old', ago(10 * DAY)),
+        line('s-mixed', ago(10 * DAY)),
+      ],
+    );
+    const result = searchCorpus(corpus, pattern('needle'), {
+      limit: 0,
+      writtenSince: CUTOFF,
+    });
+    expect(result.rows.map((row) => row.sessionId).sort()).toEqual([
+      's-archive',
+      's-first',
+      's-log-new',
+    ]);
+    // Only s-notes is counted: it matched only in undated text. s-mixed also
+    // matched in a log line older than the cutoff, so its words are dated
+    // (D4: "a session whose only hits are undated"); the old log line and the
+    // old bead message are measured misses too. None of those three counts.
+    expect(result.undatedOnlySkipped).toBe(1);
+    for (const row of result.rows) {
+      expect(Date.parse(row.hit.writtenAt ?? '')).toBeGreaterThanOrEqual(
+        CUTOFF,
+      );
+    }
+    // Without the filter every one of them matches and nothing is counted.
+    const all = searchCorpus(corpus, pattern('needle'), {limit: 0});
+    expect(all.matched).toBe(7);
+    expect(all.undatedOnlySkipped).toBe(0);
+  });
+
+  test('DATE BEFORE DEDUPE: an undated bead field and a dated log line hold the same words; the session is kept', () => {
+    const words = 'fix the flaky upload';
+    const corpus = buildCorpus(
+      [thread('th-1', {sessionId: 's1'}, {title: words})],
+      [],
+      [
+        {
+          lines: [
+            {
+              at: ago(DAY),
+              cwd: null,
+              event: 'UserPromptSubmit',
+              role: 'user',
+              text: words,
+            },
+          ],
+          path: '/m/s1.jsonl',
+          sessionId: 's1',
+        },
+      ],
+    );
+    // Without the filter the two are ONE snippet, and it is the dated log
+    // line's (home-base-c82t4.4 F5): the title is still a matched field.
+    const plain = firstRow(searchCorpus(corpus, pattern('flaky upload')));
+    expect(plain.hits).toHaveLength(1);
+    expect(plain.hit.field).toMatch(/^you · /u);
+    expect(plain.matchedFields[0]).toBe('title');
+    const since = searchCorpus(corpus, pattern('flaky upload'), {
+      writtenSince: CUTOFF,
+    });
+    expect(since.rows.map((row) => row.sessionId)).toEqual(['s1']);
+    expect(since.undatedOnlySkipped).toBe(0);
+    expect(firstRow(since).hit.field).toMatch(/^you · /u);
+  });
+
+  test('F5 (home-base-c82t4.4): the dedupe keeps the dated copy of a snippet, in the place the undated copy held', () => {
+    const snippet = (match: string): SearchHit['snippet'] => ({
+      after: ' here',
+      before: 'the ',
+      match,
+    });
+    const hits: SearchHit[] = [
+      {
+        field: 'title',
+        section: null,
+        snippet: snippet('needle'),
+        writtenAt: null,
+      },
+      {
+        field: 'notes',
+        section: null,
+        snippet: snippet('other needle'),
+        writtenAt: null,
+      },
+      {
+        field: 'you · 2026-09-18 10:00',
+        section: null,
+        snippet: snippet('needle'),
+        writtenAt: '2026-09-18T10:00:00.000Z',
+      },
+      // A second dated copy does not replace the first dated one.
+      {
+        field: 'Claude · 2026-09-18 11:00',
+        section: null,
+        snippet: snippet('needle'),
+        writtenAt: '2026-09-18T11:00:00.000Z',
+      },
+      // An undated copy never replaces anything.
+      {
+        field: 'description',
+        section: null,
+        snippet: snippet('other needle'),
+        writtenAt: null,
+      },
+    ];
+    const match = dedupeHits(hits);
+    expect(match?.hits.map((hit) => hit.field)).toEqual([
+      'you · 2026-09-18 10:00',
+      'notes',
+    ]);
+    expect(match?.hit.writtenAt).toBe('2026-09-18T10:00:00.000Z');
+    expect(match?.matchedFields).toEqual(hits.map((hit) => hit.field));
+  });
+
+  test('a bead message names when it was written in its label; the title and notes have no date', () => {
+    const at = '2026-09-18T10:00:00.000Z';
+    const local = `${formatLocalDate(new Date(at))} ${formatLocalTime(new Date(at)).slice(0, 5)}`;
+    const row = firstRow(
+      searchCorpus(
+        buildCorpus(
+          [
+            thread(
+              'th-1',
+              {
+                firstUserMessage: 'a needle',
+                firstUserMessageAt: at,
+                sessionId: 's1',
+              },
+              {notes: 'the needle again'},
+            ),
+          ],
+          [],
+        ),
+        pattern('needle'),
+      ),
+    );
+    expect(row.hit.writtenAt).toBe(at);
+    expect(hitLabel(row.hit)).toBe(`firstUserMessage (${local})`);
+    expect(row.hits[1]?.writtenAt).toBeNull();
+    const text = renderSearchRow(row, NOW, {color: false});
+    expect(text).toMatch(
+      new RegExp(`Matched: +firstUserMessage \\(${local}\\)`, 'u'),
+    );
+    expect(text).toContain('Match (notes):');
+  });
+
+  test('end to end: the JSON carries the cutoff and the count, the text says it, a bad value exits 2', async () => {
+    const h = harness();
+    seedThreads(h, [
+      thread('th-notes', {sessionId: 's-notes'}, {notes: 'a needle'}),
+      thread('th-new', {sessionId: 's-new'}, {title: 'something else'}),
+    ]);
+    writeLog(h, 's-new', [{at: ago(DAY), cwd: null, text: 'a needle'}]);
+
+    const out = captureStdout();
+    expect(
+      await runThreadSearch({
+        env: h.env,
+        json: true,
+        now: NOW,
+        query: 'needle',
+        writtenSince: '3d',
+      }),
+    ).toBe(0);
+    const json = parseSearchJson(out.join(''));
+    expect(json.writtenSince).toBe(new Date(CUTOFF).toISOString());
+    expect(json.undatedOnlySkipped).toBe(1);
+    expect(json.rows.map((row) => row.sessionId)).toEqual(['s-new']);
+
+    out.length = 0;
+    await runThreadSearch({
+      color: false,
+      env: h.env,
+      now: NOW,
+      query: 'needle',
+      writtenSince: '3d',
+    });
+    expect(out.join('')).toContain(
+      '1 session matched only in undated text (the title, the notes or the bead body) and is not shown; drop --written-since to see it',
+    );
+
+    const err = captureStderr();
+    expect(
+      await runThreadSearch({
+        env: h.env,
+        now: NOW,
+        query: 'needle',
+        writtenSince: 'last week',
+      }),
+    ).toBe(2);
+    expect(err.join('\n')).toContain(
+      '--written-since takes 24h, 3d or 2w (a whole number above 0 and h, d or w) or a date as YYYY-MM-DD; not "last week"',
+    );
+  });
+});
+
+describe('thread search --help (home-base-c82t4.4 F4)', () => {
+  test('EXIT names the two new exit-2 causes, and --repo and --written-since each have a paragraph', () => {
+    const cli = join(import.meta.dir, '..', 'src', 'cli.ts');
+    const help = Bun.spawnSync(
+      [process.execPath, cli, 'thread', 'search', '--help'],
+      {
+        env: {...process.env, JUSTIN_SDK_HEALTH_NOTICES: 'off', NO_COLOR: '1'},
+        stdin: 'ignore',
+      },
+    );
+    expect(help.exitCode).toBe(0);
+    // Compared with the whitespace folded: yargs may re-wrap the epilogue.
+    const text = help.stdout.toString().replace(/\s+/gu, ' ');
+    expect(text).toContain(
+      'a --repo that names no known project (the known ones are listed) or two of them, or a --written-since that is not 24h, 3d, 2w or YYYY-MM-DD.',
+    );
+    expect(text).toContain(
+      "--repo keeps one project's sessions: a folder name under ~/Dev or its project tag",
+    );
+    expect(text).toContain('COUNTED in a line under the rows: any of them');
+    expect(text).toContain(
+      '--written-since filters on when the matching WORDS were written',
+    );
+    expect(text).toContain(
+      'Sessions that match only in undated text (the title, the notes, the bead body) are left out and COUNTED',
+    );
   });
 });

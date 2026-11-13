@@ -49,20 +49,14 @@ import {
   QUESTION_BEAD_TYPE,
 } from './ask-format';
 import {renderAsk, sortAsks} from './ask-render';
-import {
-  parseShortId,
-  questionIdOf,
-  questionIdsShown,
-  shortIdText,
-} from './question-ids';
+import {parseShortId, questionIdOf, shortIdText} from './question-ids';
+import {readShownQuestionIds} from './question-ids-read';
 import {readSessionIndex} from './session-index';
 import {
   selectSession,
   sessionBeadsKnob,
   sessionBeadsLabelled,
 } from './session-select';
-import {isOpen} from './session-status';
-import {readSessionTree} from './session-tree';
 
 /** How the walk talks to the terminal. Tests inject a scripted one. */
 export interface AnswerTerminal {
@@ -347,28 +341,16 @@ function resolveShortId(input: {
       reason: `${text} is the id of a question in one session's report, and which session could not be told: ${why}. Pass --session <session id>, or answer by the bead id`,
     };
   }
-  // The questions the report reads, the same way (the export beside each DB
-  // the sessions index names), so the id means what the report showed. A
-  // `br list` of them took 17 s on home-base's DB (measured 2026-11-12).
-  const {session} = selection;
-  const tree = readSessionTree({
-    beadsDirs: [
-      ...new Set([
-        session.beadsDir,
-        ...session.sightings.map((entry) => entry.beadsDir),
-      ]),
-    ],
-    sessionBeadId: session.bead.id,
-    sessionId: session.sessionId,
-  });
-  if (tree.problems.length > 0) {
+  // The ids the report shows, read the way it reads them
+  // (question-ids-read.ts, shared with `thread ask`).
+  const read = readShownQuestionIds({session: selection.session});
+  if (read.kind === 'unreadable') {
     return {
       kind: 'failed',
-      reason: `${text} could not be looked up, because some of this session's questions could not be read: ${tree.problems.join('; ')}. Answer by the bead id`,
+      reason: `${text} could not be looked up, because some of this session's questions could not be read: ${read.problems.join('; ')}. Answer by the bead id`,
     };
   }
-  const open = sortAsks(tree.questions.filter(isOpen));
-  const shown = questionIdsShown(open);
+  const {open, shown} = read;
   const matches = open.filter(
     (question) => shown.byId.get(question.id)?.text === text,
   );

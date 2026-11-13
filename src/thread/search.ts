@@ -43,10 +43,11 @@ import type {Field} from '../cli-style';
 import type {BdIssue} from './bd';
 import type {MessageLine} from './message-log';
 import type {EnvLike} from './paths';
+import type {KnownProjects} from './projects';
 import type {ExportRead} from './session-tree';
 
 import {readdirSync, readFileSync} from 'fs';
-import {join} from 'path';
+import {isAbsolute, join, normalize} from 'path';
 
 import {
   BODY_COLUMN,
@@ -67,9 +68,12 @@ import {messagesDir, reportsRootDir} from './archive';
 import {bdContext, describeBdFailure, listThreads} from './bd';
 import {formatAge} from './board';
 import {readMessageLogAt} from './message-log';
+import {matchesRepo, parseSince, repoValues} from './open-filters';
 import {probeErrorMessage} from './paths';
+import {knownProjects, resolutionErrorText, resolveProjects} from './projects';
 import {readSessionIndex, sessionBeadSighting} from './session-index';
 import {exportRecordById, readBeadsExport} from './session-tree';
+import {defaultDevRoot} from './session-untracked';
 
 /** Rows printed before the `N more (--limit)` line. `0` means every row. */
 export const DEFAULT_SEARCH_LIMIT = 20;
@@ -176,20 +180,71 @@ function oneLine(text: string): string {
   return text.replace(/\s+/g, ' ');
 }
 
-/** ±SNIPPET_RADIUS characters around one match, ready to print. */
+// ---------------------------------------------------------------------------
+// Cutting text without splitting a character (home-base-c82t4.3, D5)
+// ---------------------------------------------------------------------------
+
+/**
+ * True when `index` falls between the two halves of a UTF-16 surrogate pair:
+ * a cut there leaves a lone surrogate on each side.
+ *
+ * WHY THIS MATTERS. An emoji outside the Basic Multilingual Plane is TWO code
+ * units, and `String.prototype.slice` cuts code units. A snippet cut through
+ * one carried a lone `\ud83d` into `--json`; JSON.stringify escapes it, and jq
+ * then refused the whole document ("Invalid \uXXXX\uXXXX surrogate pair
+ * escape", seen 2026-11-13), which broke the mayor's read of `thread search`.
+ */
+function splitsPair(text: string, index: number): boolean {
+  if (index <= 0 || index >= text.length) return false;
+  const high = text.charCodeAt(index - 1);
+  const low = text.charCodeAt(index);
+  return high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff;
+}
+
+/** `index`, or one code unit earlier when it would split a pair. */
+function boundaryBefore(text: string, index: number): number {
+  return splitsPair(text, index) ? index - 1 : index;
+}
+
+/** `index`, or one code unit later when it would split a pair. */
+function boundaryAfter(text: string, index: number): number {
+  return splitsPair(text, index) ? index + 1 : index;
+}
+
+/**
+ * The first `limit` code units of `text`, one fewer when the last of them is
+ * the first half of a pair (D5): never ends on half a character.
+ */
+export function cutText(text: string, limit: number): string {
+  return text.slice(0, boundaryBefore(text, limit));
+}
+
+/**
+ * ±SNIPPET_RADIUS characters around one match, ready to print.
+ *
+ * EVERY CUT LANDS BETWEEN CHARACTERS (D5). The context on each side shrinks by
+ * one code unit rather than keep half an emoji; the match grows to whole
+ * characters instead, because it must hold what matched, and a `--regex` such
+ * as `.` matches ONE code unit, so it can end inside a pair.
+ */
 export function buildSnippet(
   text: string,
   index: number,
   length: number,
 ): SearchSnippet {
-  const start = Math.max(0, index - SNIPPET_RADIUS);
-  const end = Math.min(text.length, index + length + SNIPPET_RADIUS);
-  const before = oneLine(text.slice(start, index));
-  const after = oneLine(text.slice(index + length, end));
+  const matchStart = boundaryBefore(text, index);
+  const matchEnd = boundaryAfter(text, index + length);
+  const start = boundaryAfter(text, Math.max(0, matchStart - SNIPPET_RADIUS));
+  const end = boundaryBefore(
+    text,
+    Math.min(text.length, matchEnd + SNIPPET_RADIUS),
+  );
+  const before = oneLine(text.slice(start, matchStart));
+  const after = oneLine(text.slice(matchEnd, end));
   return {
     after: end < text.length ? `${after}…` : after,
     before: start > 0 ? `…${before}` : before,
-    match: oneLine(text.slice(index, index + length)),
+    match: oneLine(text.slice(matchStart, matchEnd)),
   };
 }
 
@@ -229,9 +284,10 @@ function headingOf(line: string): string | null {
     .replace(/:$/u, '')
     .trim();
   if (clean === '') return null;
+  // cutText, not slice: the section is in `--json` too (D5).
   return clean.length <= SECTION_NAME_CUT
     ? clean
-    : `${clean.slice(0, SECTION_NAME_CUT - 1)}…`;
+    : `${cutText(clean, SECTION_NAME_CUT - 1)}…`;
 }
 
 /**
@@ -650,7 +706,7 @@ export function buildCorpus(
           ? '(message log, no thread bead)'
           : firstLine.length <= 100
             ? firstLine
-            : `${firstLine.slice(0, 99)}…`,
+            : `${cutText(firstLine, 99)}…`, // never half an emoji (D5)
     };
     order.push(row);
     bySession.set(log.sessionId, row);
@@ -679,6 +735,13 @@ export interface SearchHit {
    */
   section: string | null;
   snippet: SearchSnippet;
+  /**
+   * When the matched words were written (home-base-c82t4 D4), or null when
+   * nothing dates them: a message-log line's `at`, an archived report's
+   * `reportedAt`, a bead message's `<field>At` stamp. The bead's title, notes
+   * and description are never dated.
+   */
+  writtenAt: string | null;
 }
 
 /** What one session matched: the first field (with its snippet) and every other one. */
@@ -722,6 +785,13 @@ export interface SearchRow {
   hits: SearchHit[];
   /** Every field of this session that matched, the one in `hit` first (F4). */
   matchedFields: string[];
+  /**
+   * home-base-c82t4.4 F3: the dev-root folder a row with no recorded repo was
+   * placed in by where it ran (D3, `rowProject` kind `placed`). Null when the
+   * repo was recorded, or the row was not placed (outside the dev root, no
+   * location, or `searchCorpus` was given no dev root). Display only.
+   */
+  placedRepo: string | null;
   repo: string | null;
   resumeCommand: string | null;
   /**
@@ -755,6 +825,117 @@ function threadFieldText(
 }
 
 /**
+ * When a bead field's words were written (D4): the metadata stamp of the
+ * record the message came from. The title, the notes and the description are
+ * written by tools at many moments, so nothing dates them.
+ */
+function threadFieldWrittenAt(
+  thread: BdIssue,
+  field: ThreadSearchField,
+): string | null {
+  const meta = metaOf(thread);
+  switch (field) {
+    case 'firstUserMessage':
+      return asText(meta.firstUserMessageAt);
+    case 'lastUserMessage':
+      return asText(meta.lastUserMessageAt);
+    case 'lastAssistantMessage':
+      return asText(meta.lastAssistantMessageAt);
+    case 'description':
+    case 'notes':
+    case 'title':
+      return null;
+  }
+}
+
+/**
+ * EVERY hit of this session, each dated (D4), in THREAD_SEARCH_FIELDS order,
+ * then the message log, then the archive. Nothing is deduplicated here: the
+ * `--written-since` filter must see a dated log line even when an undated bead
+ * field holds the same words (DATE BEFORE DEDUPE), so the filter runs on this
+ * list and `dedupeHits` runs on what it keeps.
+ */
+export function datedHits(
+  session: CorpusSession,
+  pattern: RegExp,
+): SearchHit[] {
+  const hits: SearchHit[] = [];
+  const take = (
+    field: string,
+    found: FieldMatch,
+    writtenAt: string | null,
+  ): void => {
+    hits.push({
+      field,
+      section: found.section,
+      snippet: found.snippet,
+      writtenAt,
+    });
+  };
+
+  if (session.thread != null) {
+    for (const field of THREAD_SEARCH_FIELDS) {
+      const text = threadFieldText(session.thread, field);
+      if (text == null) continue;
+      const found = firstMatch(pattern, text);
+      if (found != null)
+        take(field, found, threadFieldWrittenAt(session.thread, field));
+    }
+  }
+  // Every logged message (K10 f): after the bead's own fields, which already
+  // hold the first and last of them, and before the archive.
+  for (const line of session.messageLog?.lines ?? []) {
+    const found = firstMatch(pattern, line.text);
+    if (found != null) take(messageFieldName(line), found, line.at);
+  }
+  for (const file of session.archives) {
+    const strings: {path: string; text: string}[] = [];
+    collectStrings(file.document, '', strings);
+    for (const entry of strings) {
+      const found = firstMatch(pattern, entry.text);
+      if (found == null) continue;
+      const stamp = file.reportedAt ?? 'undated';
+      take(`archived report ${stamp} · ${entry.path}`, found, file.reportedAt);
+    }
+  }
+  return hits;
+}
+
+/**
+ * The hits as a row shows them, or null when there are none.
+ *
+ * The message log repeats the bead's first and last messages, so the same
+ * utterance would print twice: a snippet identical to one already kept still
+ * counts as a matched field, but is not a second snippet.
+ *
+ * THE DATED COPY IS KEPT (home-base-c82t4.4 F5). The bead fields come before
+ * the log lines, so an undated title can hold the same words as a dated log
+ * line. When a later copy is dated and the kept one is not, the later one
+ * takes the kept one's place, so the row's label says when the words were
+ * written. `matchedFields` is unchanged.
+ */
+export function dedupeHits(all: readonly SearchHit[]): SessionMatch | null {
+  const hits: SearchHit[] = [];
+  const matchedFields: string[] = [];
+  for (const candidate of all) {
+    matchedFields.push(candidate.field);
+    const seenAt = hits.findIndex(
+      (hit) =>
+        hit.snippet.before === candidate.snippet.before &&
+        hit.snippet.match === candidate.snippet.match &&
+        hit.snippet.after === candidate.snippet.after,
+    );
+    if (seenAt === -1) {
+      hits.push(candidate);
+    } else if (hits[seenAt]?.writtenAt == null && candidate.writtenAt != null) {
+      hits[seenAt] = candidate;
+    }
+  }
+  const [hit] = hits;
+  return hit == null ? null : {hit, hits, matchedFields};
+}
+
+/**
  * Every field of this session that matches, in THREAD_SEARCH_FIELDS order.
  *
  * The FIRST one carries the snippet the row prints; the rest are named. The
@@ -767,49 +948,42 @@ export function matchSession(
   session: CorpusSession,
   pattern: RegExp,
 ): SessionMatch | null {
-  const hits: SearchHit[] = [];
-  const matchedFields: string[] = [];
-  const take = (field: string, found: FieldMatch): void => {
-    matchedFields.push(field);
-    // The message log repeats the bead's first and last messages, so the same
-    // utterance would print twice: a snippet identical to one already taken
-    // still counts as a matched field, but is not a second snippet.
-    const seen = hits.some(
-      (hit) =>
-        hit.snippet.before === found.snippet.before &&
-        hit.snippet.match === found.snippet.match &&
-        hit.snippet.after === found.snippet.after,
-    );
-    if (!seen)
-      hits.push({field, section: found.section, snippet: found.snippet});
-  };
+  return dedupeHits(datedHits(session, pattern));
+}
 
-  if (session.thread != null) {
-    for (const field of THREAD_SEARCH_FIELDS) {
-      const text = threadFieldText(session.thread, field);
-      if (text == null) continue;
-      const found = firstMatch(pattern, text);
-      if (found != null) take(field, found);
-    }
-  }
-  // Every logged message (K10 f): after the bead's own fields, which already
-  // hold the first and last of them, and before the archive.
-  for (const line of session.messageLog?.lines ?? []) {
-    const found = firstMatch(pattern, line.text);
-    if (found != null) take(messageFieldName(line), found);
-  }
-  for (const file of session.archives) {
-    const strings: {path: string; text: string}[] = [];
-    collectStrings(file.document, '', strings);
-    for (const entry of strings) {
-      const found = firstMatch(pattern, entry.text);
-      if (found == null) continue;
-      const stamp = file.reportedAt ?? 'undated';
-      take(`archived report ${stamp} · ${entry.path}`, found);
-    }
-  }
-  const [hit] = hits;
-  return hit == null ? null : {hit, hits, matchedFields};
+/** A stamp as epoch milliseconds, or null when it is absent or unreadable. */
+function stampMs(at: string | null): number | null {
+  if (at == null) return null;
+  const ms = Date.parse(at);
+  return Number.isNaN(ms) ? null : ms;
+}
+
+/**
+ * D4: what `--written-since` keeps of one session's hits. `kept` are the hits
+ * dated at or after `since`, still in their order and not yet deduplicated.
+ * `undatedOnly` is true when EVERY hit has no date: nothing says when that
+ * session's words were written, so it is counted rather than dropped in
+ * silence (critical rule 7).
+ *
+ * A session with older dated hits AND undated ones is left out uncounted, as
+ * D4 words it ("a session whose only hits are undated"): its dated hits say
+ * when the words were written. Counting those too was tried and dropped on
+ * 2026-11-13: `thread search the --written-since 2d` counted 502 sessions, 462
+ * of them with older dated hits, a line too big to act on.
+ */
+export function hitsWrittenSince(
+  hits: readonly SearchHit[],
+  since: number,
+): {kept: SearchHit[]; undatedOnly: boolean} {
+  const kept = hits.filter((hit) => {
+    const ms = stampMs(hit.writtenAt);
+    return ms != null && ms >= since;
+  });
+  return {
+    kept,
+    undatedOnly:
+      hits.length > 0 && hits.every((hit) => stampMs(hit.writtenAt) == null),
+  };
 }
 
 export interface SearchCounts {
@@ -871,21 +1045,199 @@ export function withinWindow(
   });
 }
 
+// ---------------------------------------------------------------------------
+// --repo: which project a session belongs to (home-base-c82t4 D3)
+// ---------------------------------------------------------------------------
+
+/** Which record gave a session's location when its row has no repo. */
+export type LocationSource = 'bead' | 'log' | 'resume';
+
+/** The directory `cd '<dir>' && claude --resume …` starts in, unquoted. */
+function resumeDirectory(command: string | null): string | null {
+  if (command == null) return null;
+  // shellQuote (transcript-messages.ts) writes a quote inside as '\''.
+  const found = /^cd '((?:[^']|'\\'')*)' /u.exec(command);
+  return found?.[1] == null ? null : found[1].replaceAll(`'\\''`, `'`);
+}
+
+/**
+ * Where a session ran, for a row whose repo is null (D3), in this order: the
+ * checkout or working directory its thread bead records (`repoPath`, then
+ * `worktreePath`, then `cwd`); the newest message-log line that names a cwd;
+ * the directory its resume command `cd`s into. Null when none of them says.
+ */
+export function sessionLocation(
+  session: CorpusSession,
+): {path: string; source: LocationSource} | null {
+  const meta = session.thread == null ? {} : metaOf(session.thread);
+  const bead =
+    asText(meta.repoPath) ?? asText(meta.worktreePath) ?? asText(meta.cwd);
+  if (bead != null) return {path: bead, source: 'bead'};
+  // The newest by `at`; a later line in the file wins a tie or a missing stamp.
+  let newest: MessageLine | null = null;
+  for (const line of session.messageLog?.lines ?? []) {
+    if (line.cwd == null || line.cwd === '') continue;
+    if (newest == null || (line.at ?? '') >= (newest.at ?? '')) newest = line;
+  }
+  if (newest?.cwd != null) return {path: newest.cwd, source: 'log'};
+  const resume = resumeDirectory(session.resumeCommand);
+  if (resume != null && resume !== '') return {path: resume, source: 'resume'};
+  return null;
+}
+
+/**
+ * The folder directly under the dev root that holds `path` (D3), or null when
+ * `path` is not inside the dev root. A worktree under
+ * `<devRoot>/home-base/.claude/worktrees/<x>` belongs to `home-base`, the
+ * folder that holds its `.claude`. The dev root itself is not a project.
+ */
+export function projectFolderOf(path: string, devRoot: string): string | null {
+  if (!isAbsolute(path)) return null;
+  const root = normalize(devRoot).replace(/\/+$/u, '');
+  const at = normalize(path);
+  if (!at.startsWith(`${root}/`)) return null;
+  const [folder] = at.slice(root.length + 1).split('/');
+  return folder == null || folder === '' ? null : folder;
+}
+
+/**
+ * The project a corpus row belongs to (D3). `recorded`: the row names its
+ * repo. `placed`: the row names none, and its recorded location is inside a
+ * dev-root folder. `outside`: its location is measured and is not inside the
+ * dev root (the /private/tmp test sessions), so it is not one of these
+ * projects. `unknown`: nothing records where it ran.
+ */
+export type RowProject =
+  | {folder: string; kind: 'placed'; source: LocationSource}
+  | {folder: string; kind: 'recorded'}
+  | {kind: 'outside'; source: LocationSource}
+  | {kind: 'unknown'};
+
+export function rowProject(
+  session: CorpusSession,
+  devRoot: string,
+): RowProject {
+  if (session.repo != null) return {folder: session.repo, kind: 'recorded'};
+  const location = sessionLocation(session);
+  // A relative path names no place: it is not evidence of "outside" (rule 7).
+  if (location == null || !isAbsolute(location.path)) return {kind: 'unknown'};
+  const folder = projectFolderOf(location.path, devRoot);
+  return folder == null
+    ? {kind: 'outside', source: location.source}
+    : {folder, kind: 'placed', source: location.source};
+}
+
+/**
+ * D3: only the rows whose project is one of `folders`. A row that is outside
+ * the dev root is left out without a note; a row with no location at all is
+ * left out and COUNTED, because it might belong to one of them.
+ */
+export function withinRepos(
+  corpus: readonly CorpusSession[],
+  folders: readonly string[],
+  devRoot: string,
+): {kept: CorpusSession[]; noProjectSkipped: number} {
+  const kept: CorpusSession[] = [];
+  let noProjectSkipped = 0;
+  for (const session of corpus) {
+    const project = rowProject(session, devRoot);
+    if (project.kind === 'unknown') {
+      noProjectSkipped += 1;
+      continue;
+    }
+    if (project.kind === 'outside') continue;
+    if (matchesRepo({repo: project.folder, repoTag: null}, folders)) {
+      kept.push(session);
+    }
+  }
+  return {kept, noProjectSkipped};
+}
+
+// ---------------------------------------------------------------------------
+// --written-since (home-base-c82t4 D4)
+// ---------------------------------------------------------------------------
+
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/u;
+
+export type WrittenSinceParse =
+  | {at: Date; kind: 'ok'}
+  | {kind: 'bad'; reason: string};
+
+/**
+ * `24h`, `3d`, `2w` (back from `now`, as `--since` reads them) or a date
+ * `YYYY-MM-DD`, which means local midnight at the start of that day. Anything
+ * else, an impossible date included, is refused.
+ */
+export function parseWrittenSince(raw: string, now: Date): WrittenSinceParse {
+  const bad: WrittenSinceParse = {
+    kind: 'bad',
+    reason: `--written-since takes 24h, 3d or 2w (a whole number above 0 and h, d or w) or a date as YYYY-MM-DD; not ${JSON.stringify(raw)}`,
+  };
+  const text = raw.trim();
+  const date = DATE_ONLY.exec(text);
+  if (date != null) {
+    const [year, month, day] = [date[1], date[2], date[3]].map(Number);
+    if (year == null || month == null || day == null) return bad;
+    const at = new Date(year, month - 1, day);
+    // new Date rolls 2026-02-30 over to March; a date that moved is refused.
+    const same =
+      at.getFullYear() === year &&
+      at.getMonth() === month - 1 &&
+      at.getDate() === day;
+    return same ? {at, kind: 'ok'} : bad;
+  }
+  const since = parseSince(text);
+  if (since.kind === 'bad') return bad;
+  return {at: new Date(now.getTime() - since.ms), kind: 'ok'};
+}
+
 export interface SearchResult {
   /** Every session that matched, before `--limit` cut the list. */
   matched: number;
   rows: SearchRow[];
 }
 
-/** Pure: the corpus, a pattern and a limit in; the rows to print out. */
+/** What `searchCorpus` found: the rows, and what `--written-since` left out. */
+export interface CorpusSearchResult extends SearchResult {
+  /**
+   * Sessions that matched only in text with no date (D4), left out under
+   * `--written-since`. 0 without it.
+   */
+  undatedOnlySkipped: number;
+}
+
+/**
+ * Pure: the corpus, a pattern and a limit in; the rows to print out. With
+ * `writtenSince` (epoch ms, D4) each session keeps only its hits dated at or
+ * after it, filtered BEFORE the dedupe. With `devRoot`, a row with no
+ * recorded repo carries the folder it was placed in (F3, `placedRepo`).
+ */
 export function searchCorpus(
   corpus: readonly CorpusSession[],
   pattern: RegExp,
-  options: {limit?: number} = {},
-): SearchResult {
+  options: {
+    devRoot?: string | null;
+    limit?: number;
+    writtenSince?: number | null;
+  } = {},
+): CorpusSearchResult {
+  const devRoot = options.devRoot ?? null;
+  const placedRepoOf = (session: CorpusSession): string | null => {
+    if (devRoot == null || session.repo != null) return null;
+    const project = rowProject(session, devRoot);
+    return project.kind === 'placed' ? project.folder : null;
+  };
   const hits: SearchRow[] = [];
+  const since = options.writtenSince ?? null;
+  let undatedOnlySkipped = 0;
   for (const session of corpus) {
-    const match = matchSession(session, pattern);
+    let all = datedHits(session, pattern);
+    if (since != null) {
+      const filtered = hitsWrittenSince(all, since);
+      if (filtered.undatedOnly) undatedOnlySkipped += 1;
+      all = filtered.kept;
+    }
+    const match = dedupeHits(all);
     if (match == null) continue;
     hits.push({
       activityAt: session.activityAt,
@@ -893,6 +1245,7 @@ export function searchCorpus(
       hit: match.hit,
       hits: match.hits,
       matchedFields: match.matchedFields,
+      placedRepo: placedRepoOf(session),
       repo: session.repo,
       resumeCommand: session.resumeCommand,
       sessionBead: null,
@@ -915,6 +1268,7 @@ export function searchCorpus(
   return {
     matched: hits.length,
     rows: limit > 0 ? hits.slice(0, limit) : hits,
+    undatedOnlySkipped,
   };
 }
 
@@ -1086,6 +1440,39 @@ export function noMatchesLine(counts: SearchCounts): string {
 }
 
 /** The `N more (--limit)` line, or null when nothing was cut. */
+/** What `--repo` and `--written-since` did to one search (D3, D4). */
+export interface SearchFilters {
+  /** Rows with no recorded location, left out under `--repo` (D3). 0 without it. */
+  noProjectSkipped: number;
+  /** The `--repo` values resolved to folder names, or null when none was given. */
+  repos: string[] | null;
+  /** See CorpusSearchResult.undatedOnlySkipped (D4). 0 without `--written-since`. */
+  undatedOnlySkipped: number;
+  /** The `--written-since` cutoff as an ISO stamp, or null when none was given. */
+  writtenSince: string | null;
+}
+
+/**
+ * One line per thing the filters left out, with its count, or none (D3, D4).
+ * A left-out session is never a silent drop; nothing is printed for a zero.
+ */
+export function filterNotes(filters: SearchFilters): string[] {
+  const lines: string[] = [];
+  const noProject = filters.noProjectSkipped;
+  if (noProject > 0) {
+    lines.push(
+      `${noProject} session${noProject === 1 ? '' : 's'} with no recorded project ${noProject === 1 ? 'was' : 'were'} not searched`,
+    );
+  }
+  const undated = filters.undatedOnlySkipped;
+  if (undated > 0) {
+    lines.push(
+      `${undated} session${undated === 1 ? '' : 's'} matched only in undated text (the title, the notes or the bead body) and ${undated === 1 ? 'is' : 'are'} not shown; drop --written-since to see ${undated === 1 ? 'it' : 'them'}`,
+    );
+  }
+  return lines;
+}
+
 export function moreLine(result: SearchResult): string | null {
   const hidden = result.matched - result.rows.length;
   if (hidden <= 0) return null;
@@ -1105,6 +1492,27 @@ export function moreLine(result: SearchResult): string | null {
 export function displayFieldName(field: string): string {
   const [head = field, ...rest] = field.split(' · ');
   return rest.length === 0 ? head : `${head} (${rest.join(', ')})`;
+}
+
+/**
+ * A hit's field as its label prints it, with when its words were written
+ * where that is known (D4): `firstUserMessage (2026-11-10 05:24)`. A log
+ * line's name and an archived report's name already carry their time, so only
+ * a bead message gains one here; the title, notes and description have none.
+ * Display only, like displayFieldName: `--json` keeps `field` as it was and
+ * carries `writtenAt` beside it.
+ */
+export function hitLabel(hit: SearchHit): string {
+  const beadField = (THREAD_SEARCH_FIELDS as readonly string[]).includes(
+    hit.field,
+  );
+  const at =
+    beadField && hit.writtenAt != null ? new Date(hit.writtenAt) : null;
+  const when =
+    at == null || Number.isNaN(at.getTime())
+      ? ''
+      : ` · ${formatLocalDate(at)} ${formatLocalTime(at).slice(0, 5)}`;
+  return displayFieldName(`${hit.field}${when}`);
 }
 
 /**
@@ -1207,7 +1615,15 @@ export function renderSearchRow(
         ? `UNKNOWN — ${row.sessionBead.reason}`
         : null;
   const fields: Field[] = [
-    {label: 'Repo', value: row.repo ?? missing('no repo recorded')},
+    {
+      label: 'Repo',
+      // F3: a row placed by where it ran says so; only an unplaced one is "none".
+      value:
+        row.repo ??
+        (row.placedRepo == null
+          ? missing('no repo recorded')
+          : `${row.placedRepo} ${missing('(from where it ran)')}`),
+    },
     {
       label: 'When',
       value:
@@ -1215,7 +1631,7 @@ export function renderSearchRow(
     },
     {label: 'Session', value: row.sessionId ?? missing('no session id')},
     ...(bead == null ? [] : [{label: 'Bead', value: bead}]),
-    {label: 'Matched', value: displayFieldName(row.hit.field)},
+    {label: 'Matched', value: hitLabel(row.hit)},
     ...(row.hit.section == null
       ? []
       : [{label: 'Section', value: row.hit.section}]),
@@ -1237,7 +1653,7 @@ export function renderSearchRow(
   const moreMatches = shown
     .slice(1)
     .flatMap((hit) => [
-      `${pad(BODY_COLUMN)}${paint(`Match (${displayFieldName(hit.field)}):`, ['bold'], color)}`,
+      `${pad(BODY_COLUMN)}${paint(`Match (${hitLabel(hit)}):`, ['bold'], color)}`,
       snippetLines(hit),
     ]);
   const leftLine =
@@ -1282,11 +1698,22 @@ export function incompleteLine(failures: readonly string[]): string {
 /** What `searchSessions` takes: the query and the window, nothing about printing. */
 export interface SearchSessionsOptions {
   days?: number | null;
+  /** Where `--repo` places a row by its location (D3); default ~/Dev. */
+  devRoot?: string;
   env?: EnvLike;
+  /**
+   * Injectable for tests: the known projects given the corpus's repo names
+   * (D2). Default `knownProjects` over the dev root and the sessions index.
+   */
+  knownProjects?: (extraNames: readonly string[]) => KnownProjects;
   limit?: number;
   now?: Date;
   query: string;
   regex?: boolean;
+  /** `--repo` values as typed, each possibly comma-separated (D3). */
+  repos?: readonly string[];
+  /** `--written-since` as typed: 24h, 3d, 2w or YYYY-MM-DD (D4). */
+  writtenSince?: string | null;
 }
 
 export interface SearchOptions extends SearchSessionsOptions {
@@ -1312,6 +1739,7 @@ export type SearchSessionsResult =
       complete: boolean;
       counts: SearchCounts;
       failures: string[];
+      filters: SearchFilters;
       ok: true;
       result: SearchResult;
     };
@@ -1338,6 +1766,25 @@ export async function searchSessions(
     };
   }
 
+  // Both flags are checked before any read too (D3, D4): a typo never runs a
+  // search over something other than what was asked for.
+  let writtenSince: Date | null = null;
+  if (options.writtenSince != null) {
+    const parsed = parseWrittenSince(options.writtenSince, now);
+    if (parsed.kind === 'bad') {
+      return {error: `thread search: ${parsed.reason}`, ok: false};
+    }
+    writtenSince = parsed.at;
+  }
+  const typedRepos = options.repos ?? [];
+  const repoWanted = repoValues(typedRepos);
+  if (typedRepos.length > 0 && repoWanted.length === 0) {
+    return {
+      error: `thread search: --repo takes a folder name under ~/Dev or its project tag; not ${JSON.stringify(typedRepos.join(','))}`,
+      ok: false,
+    };
+  }
+
   const ctx = bdContext(env);
   const threads = await listThreads(ctx, {includeClosed: true});
   if (!threads.ok) {
@@ -1352,16 +1799,54 @@ export async function searchSessions(
   // A log that could not be read makes the search INCOMPLETE exactly as an
   // unreadable archive does (rule 7): exit 2, never a calm "no matches".
   const failures = [...archive.failures, ...logs.failures];
-  const corpus = withinWindow(
-    buildCorpus(threads.value, archive.files, logs.logs),
-    options.days ?? null,
-    now,
-  );
-  const result = searchCorpus(corpus, compiled.value, {limit: options.limit});
+  const built = buildCorpus(threads.value, archive.files, logs.logs);
+
+  // D3: --repo resolves through the D2 resolver, with the corpus's own repo
+  // names as known projects too, before anything is matched. An unknown or
+  // ambiguous value is a search that did not run (exit 2), never zero rows.
+  const devRoot = options.devRoot ?? defaultDevRoot();
+  let folders: string[] | null = null;
+  if (repoWanted.length > 0) {
+    const extraNames = [
+      ...new Set(
+        built
+          .map((session) => session.repo)
+          .filter((repo): repo is string => repo != null),
+      ),
+    ];
+    const known =
+      options.knownProjects?.(extraNames) ??
+      knownProjects({devRoot, env, extraNames});
+    const resolution = resolveProjects(repoWanted, known.projects);
+    if (resolution.kind !== 'ok') {
+      return {
+        error: `thread search: ${resolutionErrorText(resolution, known)}`,
+        ok: false,
+      };
+    }
+    folders = resolution.projects.map((project) => project.folder);
+  }
+
+  const windowed = withinWindow(built, options.days ?? null, now);
+  const {kept: corpus, noProjectSkipped} =
+    folders == null
+      ? {kept: windowed, noProjectSkipped: 0}
+      : withinRepos(windowed, folders, devRoot);
+  const result = searchCorpus(corpus, compiled.value, {
+    devRoot,
+    limit: options.limit,
+    writtenSince: writtenSince?.getTime() ?? null,
+  });
   return {
     complete: failures.length === 0,
     counts: countCorpus(corpus),
     failures,
+    filters: {
+      noProjectSkipped,
+      repos: folders,
+      undatedOnlySkipped: result.undatedOnlySkipped,
+      writtenSince: writtenSince?.toISOString() ?? null,
+    },
     ok: true,
     // Only the rows that are printed are looked up: one index read, one read
     // per beads export they name (home-base-y1hg0.7).
@@ -1387,12 +1872,21 @@ export function searchJson(
     failures: found.failures,
     matched: found.result.matched,
     messageLogsSearched: found.counts.messageLogs,
+    // D3: rows with no recorded location, left out under --repo.
+    noProjectSkipped: found.filters.noProjectSkipped,
     query: options.query,
     regex: options.regex === true,
+    // D3: the --repo values as resolved to folder names; null without --repo.
+    repos: found.filters.repos,
     rows: found.result.rows,
     sessionsSearched: found.counts.sessions,
     shown: found.result.rows.length,
     threadsSearched: found.counts.threads,
+    // D4: sessions left out because they match only in undated text; 0
+    // without --written-since.
+    undatedOnlySkipped: found.filters.undatedOnlySkipped,
+    // D4: the --written-since cutoff as an ISO stamp; null without it.
+    writtenSince: found.filters.writtenSince,
   };
 }
 
@@ -1452,6 +1946,14 @@ export async function runThreadSearch(options: SearchOptions): Promise<number> {
   if (more != null) {
     printed.push('', `${pad(HEADER_COLUMN)}${paint(more, ['dim'], color)}`);
   }
+  // What --repo and --written-since left out (D3, D4), each with its count:
+  // under the rows here, or under the no-matches line below.
+  const notes = filterNotes(found.filters).map((note) =>
+    wrapHanging(note, {hang: BODY_COLUMN, indent: HEADER_COLUMN, width}),
+  );
+  if (result.matched > 0 || !complete) {
+    for (const note of notes) printed.push('', note);
+  }
   if (printed.length > 0) await writeStdout(`${printed.join('\n')}\n`);
 
   if (!complete) {
@@ -1469,7 +1971,7 @@ export async function runThreadSearch(options: SearchOptions): Promise<number> {
       indent: HEADER_COLUMN,
       width,
     });
-    await writeStdout(`\n${wrapped}\n`);
+    await writeStdout(`\n${[wrapped, ...notes].join('\n\n')}\n`);
     return 1;
   }
   return 0;

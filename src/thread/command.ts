@@ -353,12 +353,26 @@ MATCHES the words you type joined into ONE phrase, case-insensitively, as a
 
 EXIT    0 something matched · 1 NOTHING matched, and the line says how many
         sessions that was measured over · 2 could not search — a failed bd read,
-        an unreadable archive, or a bad regex. 2 is never silently a 1: anything
-        found is still printed, with a line saying the corpus was incomplete.
+        an unreadable archive, a bad regex, a --repo that names no known project
+        (the known ones are listed) or two of them, or a --written-since that is
+        not 24h, 3d, 2w or YYYY-MM-DD. 2 is never silently a 1: anything found
+        is still printed, with a line saying the corpus was incomplete.
 
 --days filters on last activity (lastActivityAt, else reportedAt, else
 startedAt). A session that dates itself NOWHERE is never filtered out — an
 unknown date is not proof that it is old.
+
+--repo keeps one project's sessions: a folder name under ~/Dev or its project
+tag, any case. Repeat it or comma-separate for several. A session that records
+no repo is placed by where it ran, and its Repo line says "(from where it ran)".
+Sessions with no recorded location at all are left out and COUNTED in a line
+under the rows: any of them may belong to the project.
+
+--written-since filters on when the matching WORDS were written, not on last
+activity: a log line by when it was said, an archived report by when it was
+written, a bead message by its stamp. Sessions that match only in undated text
+(the title, the notes, the bead body) are left out and COUNTED in a line under
+the rows.
 
 TITLES  a v4 session is titled by its session bead (found through the
         sessions index and that repo's .beads/issues.jsonl), and its Bead line
@@ -2219,8 +2233,20 @@ export const threadCommand: CommandModule = {
             })
             .option('days', {
               describe:
-                'Only sessions whose last activity is within this many days (default: all of them)',
+                'Only sessions whose LAST ACTIVITY is within this many days (default: all of them). This is when the session was last used, not when the matching words were written: for that, use --written-since.',
               type: 'number' as const,
+            })
+            // home-base-c82t4.2 (D3): one or more projects.
+            .option('repo', {
+              describe:
+                'Only sessions of this project: a folder name under ~/Dev or its project tag, any case (life, shortcut-helpers, SHORTCUTS). Repeat the flag or comma-separate for several. An unknown name exits 2 and lists the known projects. A session that records no repo is placed by where it ran; one that records no location at all is left out and counted.',
+              type: 'string' as const,
+            })
+            // home-base-c82t4.2 (D4): when the matching words were written.
+            .option('written-since', {
+              describe:
+                'Only matches whose words were WRITTEN at or after this point: 24h, 3d, 2w, or a date YYYY-MM-DD (local midnight). A log line is dated by when it was said, an archived report by when it was written, a bead message by its stamp. A session that matches only in undated text (title, notes, the bead body) is left out and counted. A bad value exits 2.',
+              type: 'string' as const,
             })
             .option('json', {
               default: false,
@@ -2248,6 +2274,14 @@ export const threadCommand: CommandModule = {
         async (argv) => {
           const {runThreadSearch} = await import('./search');
           const words = (argv.query as string[] | string | undefined) ?? [];
+          // A repeated --repo arrives as an array. It is not declared as one,
+          // because an array option would swallow the query words after it.
+          const repo: unknown = argv.repo;
+          const repos =
+            repo == null
+              ? []
+              : (Array.isArray(repo) ? repo : [repo]).map(String);
+          const since: unknown = argv['written-since'];
           process.exit(
             await runThreadSearch({
               allMatches: argv['all-matches'] === true,
@@ -2256,6 +2290,50 @@ export const threadCommand: CommandModule = {
               limit: argv.limit,
               query: (Array.isArray(words) ? words : [words]).join(' '),
               regex: argv.regex === true,
+              repos,
+              // Given twice, the two values join and are refused (exit 2).
+              writtenSince:
+                since == null ? null : [since].flat().map(String).join(','),
+            }),
+          );
+        },
+      )
+      .command(
+        // home-base-c82t4.1 (D1, D2): one project's latest sessions.
+        ['sessions <project>', 'latest <project>'],
+        'What are my latest sessions in the X project? Lists one project’s sessions newest first, each with its title, when it was last active, its status and a resume command that works from any directory. The project is a folder name under ~/Dev or its tag, in any case (shortcut-helpers, SHORTCUTS and [shortcuts] are the same project). Done and archived sessions are included, and there is no age window unless --since is given. Exit 0 listed · 1 the project has no sessions · 2 unknown project, or something could not be read so the list may be incomplete.',
+        (yy) =>
+          yy
+            .positional('project', {
+              describe:
+                'A folder name under ~/Dev (life, shortcut-helpers) or its project tag (SHORTCUTS), any case',
+              type: 'string' as const,
+            })
+            .option('limit', {
+              default: 5,
+              describe:
+                'How many sessions to print, newest first. 0 prints every one.',
+              type: 'number' as const,
+            })
+            .option('since', {
+              describe:
+                'Only sessions active within this long: 24h, 3d or 2w (default: no limit)',
+              type: 'string' as const,
+            })
+            .option('json', {
+              default: false,
+              describe:
+                'Print the project, the counts, the shown rows and anything that could not be read as JSON',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          const {runThreadSessions} = await import('./sessions-list');
+          process.exit(
+            await runThreadSessions({
+              json: argv.json === true,
+              limit: argv.limit,
+              project: String(argv.project ?? ''),
+              since: argv.since ?? null,
             }),
           );
         },

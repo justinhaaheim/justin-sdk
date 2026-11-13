@@ -363,7 +363,8 @@ export function unattributedOfListed(
   );
 }
 
-function byNewest(a: InboxRow, b: InboxRow): number {
+/** Newest activity first, undated last: the inbox's order (and `thread sessions`'). */
+export function byNewest(a: InboxRow, b: InboxRow): number {
   const am = a.lastActivityAt == null ? null : parseInstant(a.lastActivityAt);
   const bm = b.lastActivityAt == null ? null : parseInstant(b.lastActivityAt);
   return (bm ?? -Infinity) - (am ?? -Infinity);
@@ -435,7 +436,7 @@ export function shapeRows(
 }
 
 /** How many sessions a row stands for (a folded line, F6, is several). */
-function sessionsIn(row: InboxRow): number {
+export function sessionsIn(row: InboxRow): number {
   return row.repeats?.count ?? 1;
 }
 

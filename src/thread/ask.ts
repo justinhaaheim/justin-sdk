@@ -30,7 +30,9 @@
 import type {OutputStyle} from '../cli-style';
 import type {AskDefault, AskFields, AskForm, AskOption} from './ask-format';
 import type {EnvLike} from './paths';
+import type {IdQuestion} from './question-ids';
 import type {SessionBeadRepair} from './session-repair';
+import type {FoundSession} from './session-select';
 
 import {
   brCreate,
@@ -56,6 +58,7 @@ import {
 import {priorityBadge, renderAsk} from './ask-render';
 import {nextQuestionIdLabel} from './question-id-assign';
 import {shortIdText} from './question-ids';
+import {readShownQuestionIds} from './question-ids-read';
 import {
   REQUEST_LABEL,
   resolveSession,
@@ -206,6 +209,8 @@ export interface ThreadAskOptions extends AskInput {
   env?: EnvLike;
   /** When the race window is measured from (home-base-4ay2j); tests pin it. */
   now?: Date;
+  /** How the report's ids are read after filing; tests inject a failing one. */
+  readShownIds?: typeof readShownQuestionIds;
   sessionId: string | null;
   style?: OutputStyle;
   /**
@@ -214,6 +219,22 @@ export interface ThreadAskOptions extends AskInput {
    */
   to: string | null;
 }
+
+/**
+ * home-base-sg9q9.11 F4: what the report shows for a question just filed, so
+ * `thread ask` prints exactly that and nothing a reader could relay wrongly.
+ * - `short`: its id, `BD7`.
+ * - `beadId`: its bead id, because its number is also an older question's
+ *   (questionIdsShown); `BD7` there would answer the older one.
+ * - `unchecked`: a label was written but the report's questions could not be
+ *   read, so which id it shows is unknown; never a guess.
+ * - `none`: no label was written; the next `thread status` gives it one.
+ */
+export type AskShownAs =
+  | {kind: 'beadId'; why: string}
+  | {kind: 'none'; why: string}
+  | {kind: 'short'; text: string}
+  | {kind: 'unchecked'; why: string};
 
 export type ThreadAskOutcome =
   | {
@@ -232,10 +253,14 @@ export type ThreadAskOutcome =
       repair: Extract<SessionBeadRepair, {kind: 'repaired'}> | null;
       /** The request it is for (its `to:` label), or null when not linked. */
       request: {id: string; title: string} | null;
-      /** home-base-1rxt0.4 D4: its id (`BD7`), or null when it got none. */
+      /**
+       * home-base-1rxt0.4 D4: the id its label was given (`BD7`), or null when
+       * no label was written. Not always what the report shows: print
+       * `shownAs`.
+       */
       shortId: null | string;
-      /** Why it got no id; null when it has one. */
-      shortIdWhy: null | string;
+      /** What the report shows in its brackets (home-base-sg9q9.11 F4). */
+      shownAs: AskShownAs;
       /** Why it is not linked to a request, in words; null when it is. */
       unlinkedWhy: string | null;
     }
@@ -245,6 +270,40 @@ export type ThreadAskOutcome =
   | {kind: 'failed'; reason: string}
   | {kind: 'invalid'; reason: string}
   | {kind: 'noSession'; reason: string};
+
+/**
+ * home-base-sg9q9.11 F4: the id the report will show for the question just
+ * filed, by the report's own rule (questionIdsShown over the session's open
+ * questions). A read that fails or throws is `unchecked`: the question is
+ * already filed, so this never fails the command.
+ */
+function shownAfterFiling(input: {
+  filed: IdQuestion;
+  read: typeof readShownQuestionIds;
+  session: FoundSession;
+}): AskShownAs {
+  const unchecked = (why: string): AskShownAs => ({kind: 'unchecked', why});
+  let read: ReturnType<typeof readShownQuestionIds>;
+  try {
+    read = input.read({include: input.filed, session: input.session});
+  } catch (error) {
+    return unchecked(
+      `reading this session's questions threw: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  if (read.kind === 'unreadable') {
+    return unchecked(
+      `some of this session's questions could not be read: ${read.problems.join('; ')}`,
+    );
+  }
+  const shown = read.shown.byId.get(input.filed.id);
+  if (shown == null) {
+    return unchecked('the report gives it no id, though it carries one');
+  }
+  return shown.why == null
+    ? {kind: 'short', text: shown.text}
+    : {kind: 'beadId', why: shown.why};
+}
 
 /** The decision half of `thread ask`: validates, writes one bead, prints nothing. */
 export async function fileAsk(
@@ -414,9 +473,61 @@ export async function fileAsk(
     repair,
     request,
     shortId: nextId.kind === 'label' ? shortIdText(nextId.number) : null,
-    shortIdWhy: nextId.kind === 'none' ? nextId.reason : null,
+    shownAs:
+      nextId.kind === 'none'
+        ? {kind: 'none', why: nextId.reason}
+        : shownAfterFiling({
+            filed: {
+              // Only used when the export does not hold it yet: it was filed
+              // just now, so it is the newest of its number.
+              createdAt: new Date().toISOString(),
+              id: created.id,
+              labels,
+              priority: valid.priority,
+            },
+            read: options.readShownIds ?? readShownQuestionIds,
+            session: resolution,
+          }),
     unlinkedWhy,
   };
+}
+
+/** The text in the brackets of the question's line, as the report shows it. */
+function askBracket(
+  outcome: Extract<ThreadAskOutcome, {kind: 'filed'}>,
+): null | string {
+  switch (outcome.shownAs.kind) {
+    case 'short':
+      return outcome.shownAs.text;
+    case 'beadId':
+      return outcome.id;
+    case 'none':
+    case 'unchecked':
+      return null;
+  }
+}
+
+/** The warning under the first line, when the question has no usable short id. */
+function askIdWarning(
+  outcome: Extract<ThreadAskOutcome, {kind: 'filed'}>,
+): string[] {
+  const {shownAs} = outcome;
+  switch (shownAs.kind) {
+    case 'short':
+      return [];
+    case 'none':
+      return [
+        `⚠️ No id like BD7 yet; the next thread status gives it one. Why: ${shownAs.why}`,
+      ];
+    case 'beadId':
+      return [
+        `⚠️ The report shows this question by its bead id, because ${shownAs.why}. Answer it by its bead id: ${outcome.id}.`,
+      ];
+    case 'unchecked':
+      return [
+        `⚠️ Could not check which id the report shows for this question, so refer to it by its bead id: ${outcome.id}. Why: ${shownAs.why}`,
+      ];
+  }
 }
 
 /** Where a filed question went, in words: `for <id>: <title>` or why not linked. */
@@ -435,15 +546,13 @@ export function describeAskOutcome(
 ): {exitCode: 0 | 1 | 2; lines: string[]} {
   switch (outcome.kind) {
     case 'filed':
+      // home-base-sg9q9.11 F4: only what the report shows. The first line
+      // keeps the shape `ask <bead id> · …`, which a caller parses (1cecf024).
       return {
         exitCode: 0,
         lines: [
-          `ask ${outcome.id} · ${outcome.shortId == null ? '' : `${outcome.shortId} · `}${priorityBadge(outcome.priority)} · filed under ${outcome.parent} (${askLinkWords(outcome)})`,
-          ...(outcome.shortIdWhy == null
-            ? []
-            : [
-                `⚠️ No id like BD7 yet; the next thread status gives it one. Why: ${outcome.shortIdWhy}`,
-              ]),
+          `ask ${outcome.id} · ${outcome.shownAs.kind === 'short' ? `${outcome.shownAs.text} · ` : ''}${priorityBadge(outcome.priority)} · filed under ${outcome.parent} (${askLinkWords(outcome)})`,
+          ...askIdWarning(outcome),
           '',
           'Justin will see:',
           '',
@@ -460,7 +569,7 @@ export function describeAskOutcome(
             // one empty line between list items (home-base-j8q3e.1.10 F7).
             2,
             null,
-            outcome.shortId,
+            askBracket(outcome),
           ),
         ],
       };

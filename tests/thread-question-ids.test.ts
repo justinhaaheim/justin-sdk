@@ -14,7 +14,7 @@ import {join} from 'path';
 
 import {runBr} from '../src/beads/br';
 import {PLAIN_STYLE} from '../src/cli-style';
-import {fileAsk} from '../src/thread/ask';
+import {describeAskOutcome, fileAsk} from '../src/thread/ask';
 import {renderAsks} from '../src/thread/ask-render';
 import {chainRootOf} from '../src/thread/handoff-number';
 import {PART_ONE_RULE, PART_ONE_SEPARATOR} from '../src/thread/part-one';
@@ -26,9 +26,10 @@ import {
   questionIdOf,
   questionIdsShown,
 } from '../src/thread/question-ids';
+import {readShownQuestionIds} from '../src/thread/question-ids-read';
 import {fileRequest} from '../src/thread/request';
 import {answerSessionQuestions} from '../src/thread/session-answer';
-import {ensureSessionBead} from '../src/thread/session-bead';
+import {ensureSessionBead, resolveSession} from '../src/thread/session-bead';
 import {runThreadStatus} from '../src/thread/session-report';
 import {runThreadStopCheck} from '../src/thread/stop-check';
 import {captureWriteStdout} from './capture-stdout';
@@ -298,12 +299,15 @@ async function world(): Promise<World> {
   return w;
 }
 
+type Filed = Extract<Awaited<ReturnType<typeof fileAsk>>, {kind: 'filed'}>;
+
 async function ask(
   w: World,
   priority: string,
   title: string,
   env = w.env,
-): Promise<{id: string; shortId: null | string}> {
+  readShownIds?: typeof readShownQuestionIds,
+): Promise<{id: string; outcome: Filed; shortId: null | string}> {
   const outcome = await fileAsk({
     approve: false,
     context: [`Context for ${title}`],
@@ -315,12 +319,27 @@ async function ask(
     options: [],
     priority,
     question: title,
+    readShownIds,
     recommend: null,
     sessionId: null,
     to: w.request,
   });
   if (outcome.kind !== 'filed') throw new Error(`ask: ${outcome.kind}`);
-  return {id: outcome.id, shortId: outcome.shortId};
+  return {id: outcome.id, outcome, shortId: outcome.shortId};
+}
+
+/**
+ * Moves question `id` off this chain's number `number` to another chain's
+ * number 1, as an adopted request's question would carry.
+ */
+function moveToOtherChain(w: World, id: string, number: number): void {
+  const moved = runBr(w.repo, [
+    'update',
+    id,
+    `--remove-label=qid:${w.sessionBead}:${number}`,
+    '--add-label=qid:t-elsewhere:1',
+  ]);
+  if (!moved.ok) throw new Error(`br update ${id} failed`);
 }
 
 async function status(w: World, now: Date, env = w.env): Promise<string> {
@@ -545,5 +564,131 @@ describe('thread answer --ask with a short id', () => {
     // BD1 is the one shown as BD1; the other is answered by its bead id.
     expect(shared).toMatchObject({kind: 'answeredOne', shortId: 'BD1'});
     expect(shared.kind === 'answeredOne' ? shared.id : '').not.toBe(other.id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-sg9q9.11 F4: thread ask prints only what the report shows
+// ---------------------------------------------------------------------------
+
+describe('thread ask prints the id the report shows, never a guess', () => {
+  test('two questions share a number: ask names the new one by its bead id, as the report does, and BD1 answers the older one', async () => {
+    const w = await world();
+    // The older question moves to another chain's number 1. This chain then
+    // holds no number, so the next ask's label is BD1 too.
+    const other = await ask(w, '3', 'From the other chain?');
+    moveToOtherChain(w, other.id, 1);
+    const mine = await ask(w, '2', 'Keep the old export?');
+    expect(mine.shortId).toBe('BD1');
+    expect(idLabels(labelsOf(w, mine.id))).toEqual([`qid:${w.sessionBead}:1`]);
+    const why = `BD1 is also the id of ${other.id}, filed earlier`;
+    expect(mine.outcome.shownAs).toEqual({kind: 'beadId', why});
+
+    const printed = describeAskOutcome(mine.outcome, PLAIN_STYLE);
+    const text = printed.lines.join('\n');
+    expect(printed.exitCode).toBe(0);
+    // The first line keeps the shape a caller parses: `ask <bead id> · …`.
+    expect(/^ask (\S+) · /.exec(printed.lines[0] ?? '')?.[1]).toBe(mine.id);
+    expect(printed.lines[0]).toStartWith(
+      `ask ${mine.id} · 🟡 P2 · filed under ${w.sessionBead}`,
+    );
+    expect(text).not.toContain('BD1 ·');
+    expect(text).not.toContain('[BD1]');
+    expect(printed.lines[1]).toBe(
+      `⚠️ The report shows this question by its bead id, because ${why}. Answer it by its bead id: ${mine.id}.`,
+    );
+    expect(text).toContain(`1. [${mine.id}] 🟡 P2 · `);
+
+    // The report agrees: the new question by its bead id, the older as BD1.
+    const out = await status(w, at(1));
+    expect(lineOf(out, mine.id)).toContain(`[${mine.id}]`);
+    expect(lineOf(out, other.id)).toContain('[BD1]');
+
+    // So BD1, had ask printed it, would have answered the older question.
+    const answered = await answerSessionQuestions({
+      ask: 'BD1',
+      cwd: w.repo,
+      env: w.env,
+      selector: null,
+      sessionId: null,
+      style: PLAIN_STYLE,
+      text: 'yes',
+    });
+    expect(answered).toMatchObject({
+      id: other.id,
+      kind: 'answeredOne',
+      title: 'From the other chain?',
+    });
+  });
+
+  test('no shared number: ask prints its BD id, as before', async () => {
+    const w = await world();
+    const only = await ask(w, '2', 'Keep the old export?');
+    expect(only.outcome.shownAs).toEqual({kind: 'short', text: 'BD1'});
+    const printed = describeAskOutcome(only.outcome, PLAIN_STYLE);
+    expect(printed.lines[0]).toStartWith(`ask ${only.id} · BD1 · 🟡 P2 · `);
+    expect(printed.lines[1]).toBe('');
+  });
+
+  test('a read that fails or throws prints "could not check" and no BD id', async () => {
+    const w = await world();
+    const problem =
+      'the beads export could not be read: /x/issues.jsonl: EACCES';
+    const failed = await ask(w, '2', 'Keep the old export?', w.env, () => ({
+      kind: 'unreadable',
+      problems: [problem],
+    }));
+    const thrown = await ask(w, '3', 'Rename the job?', w.env, () => {
+      throw new Error('export vanished');
+    });
+    // The labels were written; only what the report shows is unknown.
+    expect(failed.shortId).toBe('BD1');
+    expect(thrown.shortId).toBe('BD2');
+    expect(failed.outcome.shownAs).toEqual({
+      kind: 'unchecked',
+      why: `some of this session's questions could not be read: ${problem}`,
+    });
+    expect(thrown.outcome.shownAs).toEqual({
+      kind: 'unchecked',
+      why: "reading this session's questions threw: export vanished",
+    });
+    for (const [filed, planned] of [
+      [failed, 'BD1'],
+      [thrown, 'BD2'],
+    ] as const) {
+      const printed = describeAskOutcome(filed.outcome, PLAIN_STYLE);
+      const text = printed.lines.join('\n');
+      expect(printed.exitCode).toBe(0);
+      expect(printed.lines[0]).toMatch(
+        new RegExp(`^ask ${filed.id} · [⚪🟡]`, 'u'),
+      );
+      expect(text).not.toContain(planned);
+      expect(printed.lines[1]).toStartWith(
+        `⚠️ Could not check which id the report shows for this question, so refer to it by its bead id: ${filed.id}. Why: `,
+      );
+    }
+  });
+
+  test('a question the export does not hold yet is still counted, so a lagging export cannot hide a shared number', async () => {
+    const w = await world();
+    const other = await ask(w, '3', 'From the other chain?');
+    moveToOtherChain(w, other.id, 1);
+    const resolution = resolveSession({env: w.env, sessionId: SESSION});
+    if (resolution.kind !== 'found') throw new Error(resolution.kind);
+    // Filed after `other`, with this chain's number 1, and absent from the export.
+    const lagging = {
+      createdAt: at(30).toISOString(),
+      id: `${w.sessionBead}.99`,
+      labels: ['ask', `sid:${SESSION}`, `qid:${w.sessionBead}:1`],
+      priority: 2,
+    };
+    const read = readShownQuestionIds({include: lagging, session: resolution});
+    if (read.kind !== 'read') throw new Error(read.problems.join('; '));
+    expect(read.open.map((entry) => entry.id)).not.toContain(lagging.id);
+    expect(read.shown.byId.get(lagging.id)).toEqual({
+      text: lagging.id,
+      why: `BD1 is also the id of ${other.id}, filed earlier`,
+    });
+    expect(read.shown.byId.get(other.id)).toEqual({text: 'BD1', why: null});
   });
 });
