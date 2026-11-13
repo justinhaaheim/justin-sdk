@@ -16,6 +16,10 @@
  * "✅ Item 1" to "✅ Item 3". The count covers the namer's own requests; each
  * other session's block lists its open requests first too.
  *
+ * Since 2026-11-12 the namer's times line follows the count line (the first
+ * line when there is none): when that session started and was last active,
+ * from its message log (home-base-1rxt0.8; format in workspace-times.ts).
+ *
  * WHOSE ITEMS COME FIRST: those of the chain that names the workspace. The
  * sticky owner keeps the name while its surface is open (workspace-name.ts), so
  * a second, unlinked session writing its own items first would put them under
@@ -38,6 +42,7 @@ import type {ChainRequestReaders, DescriptionItem} from './overarching';
 import type {HookStore, Proc, SourceRead} from './pane-join';
 import type {EnvLike} from './paths';
 import type {WorkspaceSession} from './workspace-name';
+import type {SessionTimesRead} from './workspace-times';
 
 import {homedir} from 'node:os';
 
@@ -48,6 +53,7 @@ import {
 } from './cmux';
 import {realChainViewReaders} from './handoff-view';
 import {isSessionProc} from './live-sessions';
+import {readMessageLog} from './message-log';
 import {
   chainRequestList,
   descriptionItemsOf,
@@ -65,6 +71,7 @@ import {
   CMUX_SURFACE_LABEL_PREFIX,
   labelValue,
   resolveSession,
+  SID_LABEL_PREFIX,
 } from './session-bead';
 import {cutTitle, readShortLabel} from './short-label';
 import {
@@ -73,6 +80,11 @@ import {
   recordsFor,
   stickyOwner,
 } from './workspace-name';
+import {
+  formatTimesLine,
+  sessionTimesFromLog,
+  TIMES_LINE,
+} from './workspace-times';
 
 export const DONE_MARK = '✅';
 export const OPEN_MARK = '🔳';
@@ -105,15 +117,18 @@ const COUNT_LINE = /^📈 \d+\/\d+ Completed$/u;
 
 /**
  * The whole text, as Justin's examples have it: the count line when the namer
- * has requests, then each item in the order given (open first). Empty when
- * there is nothing.
+ * has requests, then the namer's times line (home-base-1rxt0.8 D3; the first
+ * line when there is no count line), then each item in the order given (open
+ * first). Empty when there is nothing.
  */
 export function renderDescription(
   own: readonly DescriptionItem[],
   others: readonly OtherSessionBlock[],
+  timesLine: string | null,
 ): string {
   return [
     ...(own.length === 0 ? [] : [countLine(own)]),
+    ...(timesLine == null ? [] : [timesLine]),
     ...own.map(itemLine),
     ...others.flatMap((block) => [
       `${OTHER_SESSION_MARK} ${block.title}`,
@@ -134,6 +149,7 @@ export function isToolDescription(text: string): boolean {
       (line) =>
         line.trim() === '' ||
         COUNT_LINE.test(line) ||
+        TIMES_LINE.test(line) ||
         line.startsWith(`${DONE_MARK} `) ||
         line.startsWith(`${OPEN_MARK} `) ||
         line.startsWith(`${OTHER_SESSION_MARK} `),
@@ -220,6 +236,11 @@ export interface DescriptionReaders {
       }
     | {kind: 'failed'; reason: string}
     | {kind: 'none'};
+  /**
+   * When one session started and was last active (home-base-1rxt0.8), from
+   * its message log, which the capture hook appends to before this runs.
+   */
+  sessionTimes: (sessionId: string) => SessionTimesRead;
   /** One session bead by id: the sticky owner of the workspace name. */
   showBead: (beadId: string) =>
     | {
@@ -249,8 +270,37 @@ export function realDescriptionReaders(input: {
         ? {kind: 'failed', reason: resolved.reason}
         : {kind: 'none'};
     },
+    sessionTimes: (sessionId) =>
+      sessionTimesFromLog(readMessageLog(sessionId, env)),
     showBead: (beadId) => view.showBead(beadId),
   };
+}
+
+/**
+ * The Claude session id whose times the description shows: the namer's. The
+ * writer's own is in hand; another session's is its bead's one `sid:` label.
+ */
+function headSessionId(
+  head: {id: string; labels: readonly string[]},
+  session: WorkspaceSession,
+): {kind: 'failed'; reason: string} | {kind: 'found'; sessionId: string} {
+  if (head.id === session.beadId && session.sessionId != null) {
+    return {kind: 'found', sessionId: session.sessionId};
+  }
+  const sids = head.labels
+    .filter((label) => label.startsWith(SID_LABEL_PREFIX))
+    .map((label) => label.slice(SID_LABEL_PREFIX.length));
+  const [sessionId] = sids;
+  if (sessionId == null || sids.length !== 1) {
+    return {
+      kind: 'failed',
+      reason:
+        sessionId == null
+          ? `${head.id} has no ${SID_LABEL_PREFIX} label, so its times cannot be found`
+          : `${head.id} has ${sids.length} ${SID_LABEL_PREFIX} labels, so which session's times to show is unknown`,
+    };
+  }
+  return {kind: 'found', sessionId};
 }
 
 /** The overarching request's short label, else the session title, cut. */
@@ -312,6 +362,8 @@ export interface WorkspaceDescriptionInput {
   /** workspaceDescription and nameWorkspaces; a dry run passes true. */
   enabled: boolean;
   env: EnvLike;
+  /** The clock that decides "today" for the times line; tests pin it. */
+  now?: Date;
   readers: DescriptionReaders;
   run: CmuxRunner;
   session: WorkspaceSession;
@@ -368,6 +420,17 @@ export async function syncWorkspaceDescription(
   });
   const seen = new Set(headChain.sessions.map((entry) => entry.bead.id));
 
+  // The namer's times (home-base-1rxt0.8). D2: always dated, because nothing
+  // rewrites the line at midnight yet (D4).
+  const headSid = headSessionId(head, session);
+  if (headSid.kind === 'failed') return failed(headSid.reason);
+  const times = readers.sessionTimes(headSid.sessionId);
+  if (times.kind === 'failed') return failed(times.reason);
+  const timesLine = formatTimesLine(times.times, {
+    compactToday: false,
+    now: input.now ?? new Date(),
+  });
+
   // Then every other live session here, once per chain.
   const store = readers.hookStore();
   if (!store.ok) return failed(store.reason);
@@ -413,7 +476,7 @@ export async function syncWorkspaceDescription(
     });
   }
 
-  const to = renderDescription(own, others);
+  const to = renderDescription(own, others, timesLine);
   const from = state.description;
   if ((from ?? '') === to) return {kind: 'unchanged', workspaceId};
   if (from != null && !isToolDescription(from)) {

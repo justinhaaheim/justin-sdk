@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.62.0",
+  "version": "0.63.0",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -51,6 +51,7 @@
     "./open-colors": "./src/thread/open-colors.ts",
     "./pane-join": "./src/thread/pane-join.ts",
     "./session-cost": "./src/session-cost.ts",
+    "./session-glyphs": "./src/session-glyphs.ts",
     "./thread-config": "./src/thread/config.ts",
     "./thread-pacing": "./src/thread/pacing.ts",
     "./thread-quota-group": "./src/thread/quota-group.ts",

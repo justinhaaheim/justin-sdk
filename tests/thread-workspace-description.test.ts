@@ -12,6 +12,7 @@ import type {MarkItem, SessionStatus} from '../src/thread/session-status';
 import type {TreeIssue} from '../src/thread/session-tree';
 import type {DescriptionReaders} from '../src/thread/workspace-description';
 import type {WorkspaceSession} from '../src/thread/workspace-name';
+import type {SessionTimes} from '../src/thread/workspace-times';
 import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, test} from 'bun:test';
@@ -19,6 +20,7 @@ import {mkdirSync, writeFileSync} from 'fs';
 import {join} from 'path';
 
 import {brShow, runBr} from '../src/beads/br';
+import {ICON_LAST, ICON_STARTED} from '../src/session-glyphs';
 import {applyCapture, captureRunRecord} from '../src/thread/capture';
 import {resolveThreadConfig} from '../src/thread/config';
 import {descriptionItemsOf} from '../src/thread/overarching';
@@ -56,6 +58,7 @@ import {
   withOverarchingShort,
   workspaceNameFollowUp,
 } from '../src/thread/workspace-name-session';
+import {TIMES_LINE} from '../src/thread/workspace-times';
 import {initRepo} from './git-fixtures';
 import {needBr} from './pinned-br';
 import {createSandbox} from './sandbox';
@@ -71,6 +74,9 @@ const WS = 'AAAAAAAA-0000-4000-8000-00000000000A';
 const SURFACE = '5F5F5F5F-0000-4000-8000-000000000001';
 const SURFACE_2 = '5F5F5F5F-0000-4000-8000-000000000002';
 const SURFACE_ELSEWHERE = '5F5F5F5F-0000-4000-8000-000000000009';
+
+/** The times line for a session with no timed message (home-base-1rxt0.8). */
+const NO_TIMES = `${ICON_STARTED} —  ${ICON_LAST} —`;
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -241,6 +247,10 @@ function readers(input: {
   procs?: Proc[];
   procsFail?: string;
   requests?: Record<string, TreeIssue[]>;
+  /** By Claude session id; a session not listed has no timed message. */
+  times?: Record<string, SessionTimes>;
+  timesAsked?: string[];
+  timesFail?: string;
 }): DescriptionReaders {
   const chain: ChainRequestReaders = {
     chainBeads: (start) => ({beads: [start], kind: 'read', selfIndex: 0}),
@@ -269,6 +279,18 @@ function readers(input: {
     session: (sessionId) => {
       const id = input.bySession?.[sessionId];
       return id == null ? {kind: 'none'} : {bead: beadOf(id), kind: 'found'};
+    },
+    sessionTimes: (sessionId) => {
+      input.timesAsked?.push(sessionId);
+      return input.timesFail != null
+        ? {kind: 'failed', reason: input.timesFail}
+        : {
+            kind: 'read',
+            times: input.times?.[sessionId] ?? {
+              lastActiveAt: null,
+              startedAt: null,
+            },
+          };
     },
     showBead: (id) =>
       input.beads?.[id] == null
@@ -538,6 +560,7 @@ describe('the description text', () => {
             title: 'Fix zshrc issue',
           },
         ],
+        null,
       ),
     ).toBe(
       [
@@ -562,7 +585,7 @@ describe('the description text', () => {
         issue('t-5', 'Item 5'),
       ],
     });
-    expect(renderDescription(own, [])).toBe(
+    expect(renderDescription(own, [], null)).toBe(
       [
         '📈 3/5 Completed',
         '🔳 Item 4',
@@ -575,11 +598,12 @@ describe('the description text', () => {
   });
 
   test('no count line when the namer has no requests listed, and none for another session', () => {
-    expect(renderDescription([], [])).toBe('');
+    expect(renderDescription([], [], null)).toBe('');
     expect(
       renderDescription(
         [],
         [{items: [{done: false, label: 'ABC'}], title: 'Fix zshrc issue'}],
+        null,
       ),
     ).toBe(['💬💬💬 [Session] Fix zshrc issue', '🔳 ABC'].join('\n'));
   });
@@ -708,8 +732,7 @@ describe('syncWorkspaceDescription', () => {
       session: session('t-s', 'Head'),
       workspaceId: WS,
     });
-    const text =
-      '📈 1/2 Completed\n🔳 Open thing\n✅ A long title for the done request';
+    const text = `📈 1/2 Completed\n${NO_TIMES}\n🔳 Open thing\n✅ A long title for the done request`;
     expect(outcome).toMatchObject({
       kind: 'written',
       readback: {description: text, kind: 'read'},
@@ -849,20 +872,19 @@ describe('syncWorkspaceDescription', () => {
     expect(cmux.description.value).toBe(his);
   });
 
-  test('nothing to list: the tool’s old text is cleared; no description stays none', async () => {
-    const cleared = fakeCmux({description: '🔳 Old item'});
+  test('no requests: the times line alone replaces the tool’s old text, and fills an empty description (D3)', async () => {
+    const replaced = fakeCmux({description: '🔳 Old item'});
     expect(
       await syncWorkspaceDescription({
         enabled: true,
         env: stateEnv(),
         readers: readers({}),
-        run: cleared.run,
+        run: replaced.run,
         session: session('t-s', 'Head'),
         workspaceId: WS,
       }),
-    ).toMatchObject({kind: 'written', to: ''});
-    expect(cleared.writes()[0]?.[2]).toBe('clear-description');
-    expect(cleared.description.value).toBeNull();
+    ).toMatchObject({kind: 'written', to: NO_TIMES});
+    expect(replaced.description.value).toBe(NO_TIMES);
 
     const none = fakeCmux();
     expect(
@@ -874,8 +896,8 @@ describe('syncWorkspaceDescription', () => {
         session: session('t-s', 'Head'),
         workspaceId: WS,
       }),
-    ).toMatchObject({kind: 'unchanged'});
-    expect(none.writes()).toEqual([]);
+    ).toMatchObject({kind: 'written', to: NO_TIMES});
+    expect(none.description.value).toBe(NO_TIMES);
   });
 
   test('a dry run writes nothing', async () => {
@@ -891,6 +913,257 @@ describe('syncWorkspaceDescription', () => {
     });
     expect(outcome).toMatchObject({kind: 'wouldWrite'});
     expect(cmux.writes()).toEqual([]);
+  });
+
+  // home-base-1rxt0.8: the namer's times line.
+  const NOW = new Date(2026, 10, 12, 18, 0);
+  const TODAY = {
+    lastActiveAt: new Date(2026, 10, 12, 15, 30),
+    startedAt: new Date(2026, 10, 12, 10, 0),
+  };
+  const TODAY_LINE = `${ICON_STARTED} 11/12 10a  ${ICON_LAST} 11/12 3:30p`;
+  const OLD_LINE = `${ICON_STARTED} 11/10 9a  ${ICON_LAST} 11/10 4p`;
+  const twoItemsText = [
+    '📈 1/2 Completed',
+    TODAY_LINE,
+    '🔳 Open thing',
+    '✅ A long title for the done request',
+  ].join('\n');
+  const timesLines = (text: string): string[] =>
+    text.split('\n').filter((line) => TIMES_LINE.test(line));
+
+  test('the namer’s times, on their own line under the count line', async () => {
+    const asked: string[] = [];
+    const cmux = fakeCmux();
+    const outcome = await syncWorkspaceDescription({
+      enabled: true,
+      env: stateEnv(),
+      now: NOW,
+      readers: readers({
+        ...twoItems,
+        times: {[SESSION]: TODAY},
+        timesAsked: asked,
+      }),
+      run: cmux.run,
+      session: session('t-s', 'Head'),
+      workspaceId: WS,
+    });
+    expect(outcome).toMatchObject({kind: 'written', to: twoItemsText});
+    expect(asked).toEqual([SESSION]);
+  });
+
+  test('no requests of its own: the times line comes first, above another session’s block', async () => {
+    const cmux = fakeCmux({surfaces: [SURFACE, SURFACE_2]});
+    const outcome = await syncWorkspaceDescription({
+      enabled: true,
+      env: stateEnv(),
+      now: NOW,
+      readers: readers({
+        beads: {'t-o': {title: 'Their head'}, 't-s': {title: 'Head'}},
+        bySession: {[OTHER]: 't-o', [SESSION]: 't-s'},
+        hookStore: {
+          sessions: {
+            [OTHER]: {pid: 7, sessionId: OTHER, surfaceId: SURFACE_2},
+          },
+        },
+        procs: [proc(7)],
+        requests: {'t-o': [issue('t-5', 'Their head'), issue('t-6', 'ABC')]},
+        times: {[SESSION]: TODAY},
+      }),
+      run: cmux.run,
+      session: session('t-s', 'Head'),
+      workspaceId: WS,
+    });
+    expect(outcome).toMatchObject({
+      to: [TODAY_LINE, '💬💬💬 [Session] Their head', '🔳 ABC'].join('\n'),
+    });
+  });
+
+  test.each([
+    [
+      'under the count line',
+      [
+        '📈 0/2 Completed',
+        OLD_LINE,
+        '🔳 Open thing',
+        '🔳 A long title for the done request',
+      ].join('\n'),
+    ],
+    ['as the first line', [OLD_LINE, '🔳 Open thing'].join('\n')],
+    ['alone', OLD_LINE],
+  ])(
+    'an old times line of the tool’s, %s, is replaced and never duplicated',
+    async (_where, old) => {
+      expect(isToolDescription(old)).toBe(true);
+      const cmux = fakeCmux({description: old});
+      const outcome = await syncWorkspaceDescription({
+        enabled: true,
+        env: stateEnv(),
+        now: NOW,
+        readers: readers({...twoItems, times: {[SESSION]: TODAY}}),
+        run: cmux.run,
+        session: session('t-s', 'Head'),
+        workspaceId: WS,
+      });
+      expect(outcome).toMatchObject({kind: 'written', to: twoItemsText});
+      expect(timesLines(cmux.description.value ?? '')).toEqual([TODAY_LINE]);
+    },
+  );
+
+  test.each([
+    [
+      'with a note after it',
+      `${ICON_STARTED} 11/12 10a  ${ICON_LAST} 11/12 3:30p call Bob`,
+    ],
+    ['in ordinary emoji', '🕐 11/12 10a  💬 3:30p'],
+    ['with ":00"', `${ICON_STARTED} 11/12 10:00a  ${ICON_LAST} 11/12 3:30p`],
+  ])(
+    'a times line he wrote, %s, keeps the whole description his',
+    async (_how, his) => {
+      const text = ['📈 1/2 Completed', his, '🔳 Open thing'].join('\n');
+      expect(isToolDescription(text)).toBe(false);
+      const cmux = fakeCmux({description: text});
+      const outcome = await syncWorkspaceDescription({
+        enabled: true,
+        env: stateEnv(),
+        now: NOW,
+        readers: readers({...twoItems, times: {[SESSION]: TODAY}}),
+        run: cmux.run,
+        session: session('t-s', 'Head'),
+        workspaceId: WS,
+      });
+      expect(outcome).toMatchObject({current: text, kind: 'leftAlone'});
+      expect(cmux.writes()).toEqual([]);
+      expect(cmux.description.value).toBe(text);
+    },
+  );
+
+  test('the times are the namer’s, found by its sid label, so either session writes the same line', async () => {
+    const env = stateEnv();
+    appendWorkspaceName(
+      {
+        at: '2026-10-30T10:00:00.000Z',
+        beadId: 't-o',
+        hisName: null,
+        nameSet: '[NAMED] Their head',
+        replacedName: null,
+        repo: 'named',
+        sessionId: OTHER,
+        setBy: null,
+        surfaceId: SURFACE_2,
+        toolPart: '[NAMED] Their head',
+        workspaceId: WS,
+      },
+      env,
+    );
+    const asked: string[] = [];
+    const cmux = fakeCmux({
+      surfaces: [SURFACE, SURFACE_2],
+      title: '[NAMED] Their head',
+    });
+    const outcome = await syncWorkspaceDescription({
+      enabled: true,
+      env,
+      now: NOW,
+      readers: readers({
+        beads: {
+          't-o': {
+            labels: [`cmux-surface:${SURFACE_2}`, `sid:${OTHER}`],
+            title: 'Their head',
+          },
+          't-s': {labels: [`cmux-surface:${SURFACE}`], title: 'Head'},
+        },
+        bySession: {[SESSION]: 't-s'},
+        requests: {'t-o': [issue('t-5', 'Their head'), issue('t-6', 'Theirs')]},
+        times: {
+          [OTHER]: TODAY,
+          [SESSION]: {
+            lastActiveAt: new Date(2026, 10, 12, 17, 0),
+            startedAt: new Date(2026, 10, 12, 17, 0),
+          },
+        },
+        timesAsked: asked,
+      }),
+      run: cmux.run,
+      session: session('t-s', 'Head'),
+      workspaceId: WS,
+    });
+    expect(asked).toEqual([OTHER]);
+    expect(outcome).toMatchObject({
+      to: `📈 0/1 Completed\n${TODAY_LINE}\n🔳 Theirs\n💬💬💬 [Session] Head`,
+    });
+  });
+
+  test.each([
+    [
+      'an unreadable message log',
+      {timesFail: 'the message log x could not be read: EACCES'},
+      'EACCES',
+    ],
+  ])(
+    '%s leaves the old description, and says why',
+    async (_what, reader, reason) => {
+      const old = '🔳 What it said before';
+      const cmux = fakeCmux({description: old});
+      const outcome = await syncWorkspaceDescription({
+        enabled: true,
+        env: stateEnv(),
+        now: NOW,
+        readers: readers({...twoItems, ...reader}),
+        run: cmux.run,
+        session: session('t-s', 'Head'),
+        workspaceId: WS,
+      });
+      expect(outcome).toMatchObject({kind: 'failed'});
+      expect(outcome.kind === 'failed' ? outcome.reason : '').toContain(reason);
+      expect(cmux.writes()).toEqual([]);
+      expect(cmux.description.value).toBe(old);
+    },
+  );
+
+  test('a namer with no sid label leaves it: whose times to show is unknown', async () => {
+    const env = stateEnv();
+    appendWorkspaceName(
+      {
+        at: '2026-10-30T10:00:00.000Z',
+        beadId: 't-o',
+        hisName: null,
+        nameSet: '[NAMED] Their head',
+        replacedName: null,
+        repo: 'named',
+        sessionId: OTHER,
+        setBy: null,
+        surfaceId: SURFACE_2,
+        toolPart: '[NAMED] Their head',
+        workspaceId: WS,
+      },
+      env,
+    );
+    const old = '🔳 What it said before';
+    const cmux = fakeCmux({
+      description: old,
+      surfaces: [SURFACE, SURFACE_2],
+      title: '[NAMED] Their head',
+    });
+    const outcome = await syncWorkspaceDescription({
+      enabled: true,
+      env,
+      now: NOW,
+      readers: readers({
+        beads: {
+          't-o': {labels: [`cmux-surface:${SURFACE_2}`], title: 'Their head'},
+        },
+        requests: {'t-o': [issue('t-5', 'Their head')]},
+      }),
+      run: cmux.run,
+      session: session('t-s', 'Head'),
+      workspaceId: WS,
+    });
+    expect(outcome).toMatchObject({kind: 'failed'});
+    expect(outcome.kind === 'failed' ? outcome.reason : '').toContain(
+      'has no sid: label',
+    );
+    expect(cmux.description.value).toBe(old);
   });
 
   const twoSessions = {
@@ -941,7 +1214,9 @@ describe('syncWorkspaceDescription', () => {
     });
     expect(outcome).toMatchObject({
       kind: 'written',
-      to: ['📈 0/1 Completed', '🔳 Mine', ...blockForOther].join('\n'),
+      to: ['📈 0/1 Completed', NO_TIMES, '🔳 Mine', ...blockForOther].join(
+        '\n',
+      ),
     });
   });
 
@@ -971,7 +1246,7 @@ describe('syncWorkspaceDescription', () => {
       workspaceId: WS,
     });
     expect(outcome).toMatchObject({
-      to: '📈 0/1 Completed\n🔳 Mine\n💬💬💬 [Session] Fix zshrc issue',
+      to: `📈 0/1 Completed\n${NO_TIMES}\n🔳 Mine\n💬💬💬 [Session] Fix zshrc issue`,
     });
   });
 
@@ -1025,7 +1300,7 @@ describe('syncWorkspaceDescription', () => {
       workspaceId: WS,
     });
     expect(outcome).toMatchObject({
-      to: `📈 0/1 Completed\n🔳 Mine\n💬💬💬 [Session] ${NO_TITLE_YET}`,
+      to: `📈 0/1 Completed\n${NO_TIMES}\n🔳 Mine\n💬💬💬 [Session] ${NO_TITLE_YET}`,
     });
   });
 
@@ -1051,7 +1326,10 @@ describe('syncWorkspaceDescription', () => {
     const shared = readers({
       ...twoSessions,
       beads: {
-        't-o': {labels: [`cmux-surface:${SURFACE_2}`], title: 'Their head'},
+        't-o': {
+          labels: [`cmux-surface:${SURFACE_2}`, `sid:${OTHER}`],
+          title: 'Their head',
+        },
         't-s': {labels: [`cmux-surface:${SURFACE}`], title: 'Head'},
       },
       requests: {
@@ -1081,8 +1359,7 @@ describe('syncWorkspaceDescription', () => {
       session: session('t-s', 'Head'),
       workspaceId: WS,
     });
-    const text =
-      '📈 0/1 Completed\n🔳 Theirs\n💬💬💬 [Session] My head\n🔳 Mine';
+    const text = `📈 0/1 Completed\n${NO_TIMES}\n🔳 Theirs\n💬💬💬 [Session] My head\n🔳 Mine`;
     expect(asSelf).toMatchObject({to: text});
 
     const fromOwner = fakeCmux({
@@ -1400,7 +1677,9 @@ describe('the capture hook', () => {
       sessionBeads: true,
       sessionId: SESSION,
     });
-    expect(cmux.description.value).toBe('📈 0/1 Completed\n🔳 My item');
+    expect(cmux.description.value).toBe(
+      `📈 0/1 Completed\n${NO_TIMES}\n🔳 My item`,
+    );
     const record = captureRunRecord(SESSION, outcome, 1, new Date());
     expect(record).toMatchObject({
       workspaceDescription: {kind: 'written'},
