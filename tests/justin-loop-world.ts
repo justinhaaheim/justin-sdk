@@ -173,6 +173,8 @@ export interface LoopResult {
   stderr: string;
   stdout: string;
   stopCalls: string[];
+  /** How many times the injected `/usage` reader was called (home-base-iqdmz). */
+  usageReads: number;
 }
 
 export const MAX_POLLS = 500;
@@ -249,6 +251,7 @@ export async function runLoop(spec: {
   let scanIndex = 0;
   let dispatched = 0;
   let polls = 0;
+  let usageReads = 0;
   const pollsFor = new Map<string, number>();
 
   let created = 0;
@@ -458,6 +461,7 @@ export async function runLoop(spec: {
         : {kind: 'found', sessionId: row.fullSessionId};
     },
     readUsage: () => {
+      usageReads++;
       const reads = spec.usage ?? [];
       const read: UsageRead = (reads.length > 1 ? reads.shift() : reads[0]) ?? {
         kind: 'failed',
@@ -513,6 +517,7 @@ export async function runLoop(spec: {
     stderr,
     stdout,
     stopCalls,
+    usageReads,
   };
 }
 

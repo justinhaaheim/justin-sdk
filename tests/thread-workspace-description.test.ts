@@ -522,7 +522,7 @@ describe('thread request --short', () => {
 // ---------------------------------------------------------------------------
 
 describe('the description text', () => {
-  test('Justin’s example, exactly', () => {
+  test('the count line, then each block in the order given (Justin’s 2026-11-03 example lines)', () => {
     expect(
       renderDescription(
         [
@@ -541,6 +541,7 @@ describe('the description text', () => {
       ),
     ).toBe(
       [
+        '📈 1/2 Completed',
         '✅ Spend quota blocks runaway usage',
         '🔳 Improve cmux workspace naming',
         '💬💬💬 [Session] Fix zshrc issue',
@@ -550,7 +551,40 @@ describe('the description text', () => {
     );
   });
 
-  test('done before open, oldest first; overarching, "not needed" and the head title are left out', () => {
+  test('Justin’s 2026-11-12 example: the count, then unfinished, then finished', () => {
+    const own = descriptionItemsOf({
+      headTitle: 'The whole session',
+      requests: [
+        issue('t-1', 'Item 1', {status: 'closed'}),
+        issue('t-2', 'Item 2', {status: 'closed'}),
+        issue('t-3', 'Item 3', {status: 'closed'}),
+        issue('t-4', 'Item 4'),
+        issue('t-5', 'Item 5'),
+      ],
+    });
+    expect(renderDescription(own, [])).toBe(
+      [
+        '📈 3/5 Completed',
+        '🔳 Item 4',
+        '🔳 Item 5',
+        '✅ Item 1',
+        '✅ Item 2',
+        '✅ Item 3',
+      ].join('\n'),
+    );
+  });
+
+  test('no count line when the namer has no requests listed, and none for another session', () => {
+    expect(renderDescription([], [])).toBe('');
+    expect(
+      renderDescription(
+        [],
+        [{items: [{done: false, label: 'ABC'}], title: 'Fix zshrc issue'}],
+      ),
+    ).toBe(['💬💬💬 [Session] Fix zshrc issue', '🔳 ABC'].join('\n'));
+  });
+
+  test('open before done, oldest first; overarching, "not needed" and the head title are left out', () => {
     expect(
       descriptionItemsOf({
         headTitle: 'First request',
@@ -576,10 +610,10 @@ describe('the description text', () => {
         ],
       }),
     ).toEqual([
-      {done: true, label: 'Done, older'},
-      {done: true, label: 'Done, newer'},
       {done: false, label: 'Open older'},
       {done: false, label: 'Open, newer'},
+      {done: true, label: 'Done, older'},
+      {done: true, label: 'Done, newer'},
     ]);
   });
 
@@ -591,6 +625,10 @@ describe('the description text', () => {
       isToolDescription('This is workspace description.\nItem A\nItem B'),
     ).toBe(false);
     expect(isToolDescription('✅ One\nA line he added')).toBe(false);
+    expect(isToolDescription('📈 1/2 Completed\n🔳 Two\n✅ One')).toBe(true);
+    // Only the exact count line is the tool's: his own 📈 text stays his.
+    expect(isToolDescription('📈 Sales are up\n✅ One')).toBe(false);
+    expect(isToolDescription('📈 1/2 Completed today\n✅ One')).toBe(false);
   });
 });
 
@@ -670,7 +708,8 @@ describe('syncWorkspaceDescription', () => {
       session: session('t-s', 'Head'),
       workspaceId: WS,
     });
-    const text = '✅ A long title for the done request\n🔳 Open thing';
+    const text =
+      '📈 1/2 Completed\n🔳 Open thing\n✅ A long title for the done request';
     expect(outcome).toMatchObject({
       kind: 'written',
       readback: {description: text, kind: 'read'},
@@ -886,8 +925,8 @@ describe('syncWorkspaceDescription', () => {
   };
   const blockForOther = [
     '💬💬💬 [Session] Fix the zshrc issue in the dotfiles rep…',
-    '✅ XYZ item',
     '🔳 ABC item',
+    '✅ XYZ item',
   ];
 
   test('another unlinked session gets its line and its own items', async () => {
@@ -902,7 +941,7 @@ describe('syncWorkspaceDescription', () => {
     });
     expect(outcome).toMatchObject({
       kind: 'written',
-      to: ['🔳 Mine', ...blockForOther].join('\n'),
+      to: ['📈 0/1 Completed', '🔳 Mine', ...blockForOther].join('\n'),
     });
   });
 
@@ -932,7 +971,7 @@ describe('syncWorkspaceDescription', () => {
       workspaceId: WS,
     });
     expect(outcome).toMatchObject({
-      to: '🔳 Mine\n💬💬💬 [Session] Fix zshrc issue',
+      to: '📈 0/1 Completed\n🔳 Mine\n💬💬💬 [Session] Fix zshrc issue',
     });
   });
 
@@ -986,7 +1025,7 @@ describe('syncWorkspaceDescription', () => {
       workspaceId: WS,
     });
     expect(outcome).toMatchObject({
-      to: `🔳 Mine\n💬💬💬 [Session] ${NO_TITLE_YET}`,
+      to: `📈 0/1 Completed\n🔳 Mine\n💬💬💬 [Session] ${NO_TITLE_YET}`,
     });
   });
 
@@ -1042,7 +1081,8 @@ describe('syncWorkspaceDescription', () => {
       session: session('t-s', 'Head'),
       workspaceId: WS,
     });
-    const text = '🔳 Theirs\n💬💬💬 [Session] My head\n🔳 Mine';
+    const text =
+      '📈 0/1 Completed\n🔳 Theirs\n💬💬💬 [Session] My head\n🔳 Mine';
     expect(asSelf).toMatchObject({to: text});
 
     const fromOwner = fakeCmux({
@@ -1360,7 +1400,7 @@ describe('the capture hook', () => {
       sessionBeads: true,
       sessionId: SESSION,
     });
-    expect(cmux.description.value).toBe('🔳 My item');
+    expect(cmux.description.value).toBe('📈 0/1 Completed\n🔳 My item');
     const record = captureRunRecord(SESSION, outcome, 1, new Date());
     expect(record).toMatchObject({
       workspaceDescription: {kind: 'written'},

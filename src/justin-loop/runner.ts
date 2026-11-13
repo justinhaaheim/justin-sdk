@@ -44,10 +44,15 @@ import {dirname, join} from 'node:path';
 
 import {resolveClaudeBin} from '../claude-bin';
 import {
+  type FailedUsageAttempt,
   parseUsagePanel,
   readUsagePanel,
+  readUsageWithRetries,
   resetsTextWithoutZone,
+  type UsageAttemptFailure,
   type UsagePanel,
+  USAGE_RETRY_ATTEMPTS,
+  USAGE_RETRY_DELAYS_MS,
 } from '../claude-usage';
 import {
   type BrOutcome,
@@ -210,6 +215,16 @@ export interface JustinLoopOptions {
    * 0%, because an absent measurement must look absent (critical rule 6).
    */
   usageGate: boolean;
+  /**
+   * `--usage-retries`: how many times a failed `/usage` read is retried before
+   * the run fails closed (home-base-iqdmz). 2 by default, so 3 reads in all,
+   * 10 s then 30 s apart: the hourly sampler's policy, through the same SDK
+   * loop (`readUsageWithRetries`). 0 is one read, as before the retry existed.
+   * Every read the run makes gets it: the dry run, the pre-session gate and the
+   * re-check while paused. After the last attempt the run fails closed exactly
+   * as it always has: unknown quota is never 0% and never starts a session.
+   */
+  usageRetries: number;
   weeklyStopPct: number;
 }
 
@@ -249,6 +264,8 @@ export const DEFAULT_OPTIONS: JustinLoopOptions = {
   stopPollSec: 5,
   timeoutMin: 0,
   usageGate: true,
+  // The attempts after the first, so the default is the sampler's 3 in all.
+  usageRetries: USAGE_RETRY_ATTEMPTS - 1,
   weeklyStopPct: 80,
 };
 
@@ -1758,6 +1775,83 @@ export async function readUsage(
     return {kind: 'failed', reason: read.reason};
   }
   return {kind: 'ok', usage: snapshotFromPanel(read.panel, read.raw)};
+}
+
+/** A wait in the words the run output uses: `10 s`. */
+function secondsText(ms: number): string {
+  return `${Math.round(ms / 1000)} s`;
+}
+
+/**
+ * One failed attempt, printed as it happens (home-base-iqdmz): which read
+ * failed, why, and how long until the next, or that none is left.
+ */
+export function describeFailedUsageAttempt(
+  failure: UsageAttemptFailure,
+): string {
+  const next =
+    failure.nextInMs == null
+      ? 'No reads left, so the run fails closed: the quota is unknown, not 0%.'
+      : `Reading it again in ${secondsText(failure.nextInMs)}.`;
+  return (
+    `${YELLOW}⚠${RESET}  /usage read ${failure.attempt} of ${failure.attempts} failed: ${failure.reason}\n` +
+    `   ${DIM}${next}${RESET}\n`
+  );
+}
+
+/**
+ * The reason a run stops with when every read failed: each attempt's own
+ * reason, in order, never only the last (critical rule 7).
+ */
+export function everyUsageAttemptReason(
+  failedAttempts: readonly FailedUsageAttempt<{reason: string}>[],
+  last: {reason: string},
+): string {
+  const reasons = [...failedAttempts.map((f) => f.read.reason), last.reason];
+  return (
+    `all ${reasons.length} reads failed: ` +
+    reasons.map((reason, i) => `read ${i + 1}: ${reason}`).join('; ')
+  );
+}
+
+/**
+ * `deps.readUsage`, retried (home-base-iqdmz). `runJustinLoop` puts this in
+ * place of the injected reader ONCE, so every caller of `deps.readUsage` (the
+ * dry run, the pre-session gate, the re-check while paused) retries the same
+ * way and a new caller cannot forget to.
+ *
+ * The loop is the SDK's `readUsageWithRetries`, the one the hourly sampler uses:
+ * `usageRetries + 1` reads, 10 s then 30 s apart, waiting through `deps.sleep`.
+ * Every failed attempt is printed as it happens when a retry is possible. With
+ * 0 retries nothing extra is printed and a failure's reason is the reader's own,
+ * exactly as before. A final failure is still `failed`, so every caller still
+ * fails closed on it.
+ */
+export function retryingUsageReader(
+  deps: Pick<RunnerDeps, 'now' | 'readUsage' | 'sleep' | 'write'>,
+  usageRetries: number,
+): (cwd: string) => Promise<UsageRead> {
+  const attempts = usageRetries + 1;
+  return async (cwd) => {
+    const out = await readUsageWithRetries(
+      () => deps.readUsage(cwd),
+      {attempts, delaysMs: USAGE_RETRY_DELAYS_MS, sleep: deps.sleep},
+      {
+        now: () => new Date(deps.now()),
+        onFailedAttempt:
+          attempts > 1
+            ? (failure) => deps.write(describeFailedUsageAttempt(failure))
+            : undefined,
+      },
+    );
+    if (out.read.kind === 'ok' || out.failedAttempts.length === 0) {
+      return out.read;
+    }
+    return {
+      kind: 'failed',
+      reason: everyUsageAttemptReason(out.failedAttempts, out.read),
+    };
+  };
 }
 
 /**
@@ -3302,9 +3396,16 @@ async function waitForGate(
 export async function runJustinLoop(
   cwd: string,
   overrides: Partial<JustinLoopOptions> = {},
-  deps: RunnerDeps = REAL_DEPS,
+  injected: RunnerDeps = REAL_DEPS,
 ): Promise<number> {
   const opts: JustinLoopOptions = {...DEFAULT_OPTIONS, ...overrides};
+  // Every /usage read this run makes is retried, and this is the one place
+  // that decides it (home-base-iqdmz): the reader is swapped here rather than
+  // wrapped at each call site, so no caller of `deps.readUsage` can skip it.
+  const deps: RunnerDeps = {
+    ...injected,
+    readUsage: retryingUsageReader(injected, opts.usageRetries),
+  };
 
   for (const problem of await deps.preflight(cwd)) {
     deps.writeErr(
@@ -3341,7 +3442,7 @@ export async function runJustinLoop(
     `${DIM}prompt=${opts.prompt}  model=${opts.model}  perms=${opts.permissionMode}  ` +
       `max=${opts.maxSessions} sessions  labels=${sessionLabel(slug, startN)}…${sessionLabel(slug, startN + opts.maxSessions - 1)}  ` +
       (opts.usageGate
-        ? `session-stop=${opts.sessionStopPct}%  week-stop=${opts.weeklyStopPct}%`
+        ? `session-stop=${opts.sessionStopPct}%  week-stop=${opts.weeklyStopPct}%  usage-retries=${opts.usageRetries}`
         : `usage-gate=DISABLED`) +
       `${RESET}\n` +
       `${DIM}${timeoutDescription(opts.timeoutMin)}; ${blockedWaitDescription(opts.blockedWaitMin)}${RESET}\n` +

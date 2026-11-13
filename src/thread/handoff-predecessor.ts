@@ -680,6 +680,13 @@ export function checkStop(input: {
  *   stopped 18 (`running` appears only in TaskOutput results).
  * - A finished subagent can be resumed with SendMessage (input.to = its id),
  *   and then notifies again: a SendMessage to a known id reopens it.
+ * - A TaskStop often writes NO notification (MEASURED 2026-11-12, Claude Code
+ *   2.1.322, home-base-2gi9h.4.1: the H5 mayor's stopped watcher shell held
+ *   its tab open until the timeout). Its only trace is the TaskStop tool
+ *   result: a user record whose toolUseResult is an object
+ *   {message: "Successfully stopped task: <id> (<command>)", task_id,
+ *   task_type, command}. A failed TaskStop's toolUseResult is a STRING
+ *   ("Error: Task <id> is not running …"), so it never matches.
  * Anything unreadable that looks like a launch counts as running (rule 7).
  */
 export interface BackgroundTask {
@@ -716,6 +723,7 @@ const LEDGER_WORDS = [
   '"isAsync"',
   '<task-notification>',
   '"SendMessage"',
+  'Successfully stopped task',
 ];
 
 /** The ledger as it is folded, record by record, in file order. */
@@ -784,6 +792,19 @@ export function foldLedgerLine(ledger: BackgroundLedger, line: string): void {
           `an async launch at ${at ?? 'an unknown time'} whose agent id could not be read`,
         );
       }
+    }
+    // A successful TaskStop ends a task the ledger already holds, by its id
+    // and its message together (home-base-2gi9h.4.1). An id the ledger does
+    // not hold, or any other shape, changes nothing.
+    if (
+      r.type === 'user' &&
+      typeof t.task_id === 'string' &&
+      typeof t.message === 'string' &&
+      (t.message === `Successfully stopped task: ${t.task_id}` ||
+        t.message.startsWith(`Successfully stopped task: ${t.task_id} (`))
+    ) {
+      const task = ledger.tasks.get(t.task_id);
+      if (task != null) task.ended = {at, status: 'stopped'};
     }
   }
   const text = notificationText(r);

@@ -10,6 +10,12 @@
  *   ✅ XYZ
  *   🔳 ABC
  *
+ * Since 2026-11-12 a count line comes first and unfinished requests before
+ * finished ones, because cmux shows only about 12 lines of a description.
+ * Justin's example: "📈 3/5 Completed", then "🔳 Item 4", "🔳 Item 5", then
+ * "✅ Item 1" to "✅ Item 3". The count covers the namer's own requests; each
+ * other session's block lists its open requests first too.
+ *
  * WHOSE ITEMS COME FIRST: those of the chain that names the workspace. The
  * sticky owner keeps the name while its surface is open (workspace-name.ts), so
  * a second, unlinked session writing its own items first would put them under
@@ -70,6 +76,7 @@ import {
 
 export const DONE_MARK = '✅';
 export const OPEN_MARK = '🔳';
+export const COUNT_MARK = '📈';
 export const OTHER_SESSION_MARK = '💬💬💬 [Session]';
 
 /** Shown for a live session with no session bead to take a title from. */
@@ -87,12 +94,26 @@ function itemLine(item: DescriptionItem): string {
   return `${item.done ? DONE_MARK : OPEN_MARK} ${item.label}`;
 }
 
-/** The whole text, as Justin's example has it. Empty when there is nothing. */
+/** "📈 3/5 Completed": how many of the namer's own requests are done. */
+export function countLine(own: readonly DescriptionItem[]): string {
+  const done = own.filter((item) => item.done).length;
+  return `${COUNT_MARK} ${done}/${own.length} Completed`;
+}
+
+/** Only the exact count line the tool writes, so his own 📈 text stays his. */
+const COUNT_LINE = /^📈 \d+\/\d+ Completed$/u;
+
+/**
+ * The whole text, as Justin's examples have it: the count line when the namer
+ * has requests, then each item in the order given (open first). Empty when
+ * there is nothing.
+ */
 export function renderDescription(
   own: readonly DescriptionItem[],
   others: readonly OtherSessionBlock[],
 ): string {
   return [
+    ...(own.length === 0 ? [] : [countLine(own)]),
     ...own.map(itemLine),
     ...others.flatMap((block) => [
       `${OTHER_SESSION_MARK} ${block.title}`,
@@ -112,6 +133,7 @@ export function isToolDescription(text: string): boolean {
     .every(
       (line) =>
         line.trim() === '' ||
+        COUNT_LINE.test(line) ||
         line.startsWith(`${DONE_MARK} `) ||
         line.startsWith(`${OPEN_MARK} `) ||
         line.startsWith(`${OTHER_SESSION_MARK} `),

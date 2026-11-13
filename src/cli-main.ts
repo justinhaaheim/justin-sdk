@@ -845,6 +845,23 @@ void yargs(ARGV)
             'Read your real /usage quota before every session and refuse to run when it cannot be read. Pass --no-usage-gate to skip the gate entirely — no /usage call is made and quota is reported as UNKNOWN, never 0%. Use it only when the spend is bounded up front (e.g. --max-sessions 1), not for long chains.',
           type: 'boolean',
         })
+        .option('usage-retries', {
+          default: LOOP_DEFAULTS.usageRetries,
+          describe:
+            'How many times a failed /usage read is tried again before the run fails closed: 10 s after the first failure, then 30 s apart. Each failed read is printed as it happens, and the stop reason names every one. 0 makes one read and stops on its failure. Applies to every read: the dry run, the gate before each session, and the re-check while paused.',
+          type: 'number',
+        })
+        .check((argv) => {
+          const retries = argv['usage-retries'];
+          // A fraction or a negative is a number nobody meant: refuse it rather
+          // than round it to some count of reads.
+          if (!(Number.isInteger(retries) && retries >= 0)) {
+            throw new Error(
+              '--usage-retries must be a whole number, 0 or more',
+            );
+          }
+          return true;
+        })
         .option('session-stop-pct', {
           default: LOOP_DEFAULTS.sessionStopPct,
           describe:
@@ -930,6 +947,7 @@ void yargs(ARGV)
         // `no-usage-gate` kept its own default, so passing the flag would
         // silently do nothing (measured on yargs 18).
         usageGate: argv['usage-gate'],
+        usageRetries: argv['usage-retries'],
         weeklyStopPct: argv['weekly-stop-pct'],
       });
       process.exit(exitCode);

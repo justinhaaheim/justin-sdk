@@ -1341,6 +1341,111 @@ describe('mbnjv.13: the background-task ledger', () => {
     expect(checkBackground(ledgerOf(lines)).ok).toBe(true);
   });
 
+  /**
+   * The TaskStop result as Claude Code 2.1.322 wrote it for the H5 mayor's
+   * watcher shell (session 27b0d3e4, 2026-11-12, home-base-2gi9h.4.1): the
+   * same keys and message form, with a shorter command. No notification
+   * followed it.
+   */
+  const COMMAND =
+    'until out=$(bun scripts/mayor-watch.ts --once 2>&1); do sleep 300; done; printf \'%s\\n\' "$out"';
+  const taskStopResult = (
+    id: string,
+    at: string,
+    toolUseResult: unknown = {
+      command: COMMAND,
+      message: `Successfully stopped task: ${id} (${COMMAND})`,
+      task_id: id,
+      task_type: 'local_bash',
+    },
+  ) =>
+    JSON.stringify({
+      isSidechain: false,
+      message: {
+        content: [
+          {
+            content: JSON.stringify(toolUseResult),
+            tool_use_id: 'toolu_018DM1kgHksjXW5KSiujreo1',
+            type: 'tool_result',
+          },
+        ],
+        role: 'user',
+      },
+      timestamp: at,
+      toolUseResult,
+      type: 'user',
+    });
+
+  test('2gi9h.4.1: a successful TaskStop ends a shell that never notifies', () => {
+    const read = ledgerOf([
+      shellLaunch('bard830af', '2030-01-01T09:09:42.834Z'),
+      taskStopResult('bard830af', '2030-01-01T11:18:00.000Z'),
+    ]);
+    expect(checkBackground(read)).toEqual({
+      ok: true,
+      saw: 'all 1 background tasks of this session have ended',
+    });
+    expect(read.kind === 'read' ? read.tasks[0]?.ended : null).toEqual({
+      at: '2030-01-01T11:18:00.000Z',
+      status: 'stopped',
+    });
+  });
+
+  test('2gi9h.4.1: a failed TaskStop, another id, or a quoted stop ends nothing', () => {
+    const launch = shellLaunch('bard830af', '2030-01-01T09:09:42.834Z');
+    const failed = taskStopResult(
+      'bard830af',
+      '2030-01-01T11:18:00.000Z',
+      'Error: Task bard830af is not running (status: completed)',
+    );
+    const otherId = taskStopResult('bzzz1', '2030-01-01T11:18:00.000Z');
+    const mismatched = taskStopResult('bard830af', '2030-01-01T11:18:00.000Z', {
+      message: 'Successfully stopped task: bard830afX (sleep 1)',
+      task_id: 'bard830af',
+      task_type: 'local_bash',
+    });
+    const quoted = JSON.stringify({
+      message: {
+        content: [
+          {
+            content: 'Successfully stopped task: bard830af (sleep 1)',
+            tool_use_id: 't',
+            type: 'tool_result',
+          },
+        ],
+      },
+      timestamp: '2030-01-01T11:18:00.000Z',
+      toolUseResult: {
+        stdout: 'Successfully stopped task: bard830af (sleep 1)',
+      },
+      type: 'user',
+    });
+    const said = JSON.stringify({
+      message: {
+        content: [{text: 'Successfully stopped task: bard830af', type: 'text'}],
+      },
+      timestamp: '2030-01-01T11:18:00.000Z',
+      type: 'assistant',
+    });
+    for (const record of [failed, otherId, mismatched, quoted, said]) {
+      expect(checkBackground(ledgerOf([launch, record])).ok).toBe(false);
+    }
+  });
+
+  test('2gi9h.4.1: SendMessage after a TaskStop reopens a subagent', () => {
+    const lines = [
+      agentLaunch('ag1', '2030-01-01T09:59:00.000Z'),
+      taskStopResult('ag1', '2030-01-01T10:00:00.000Z', {
+        message: 'Successfully stopped task: ag1',
+        task_id: 'ag1',
+        task_type: 'local_agent',
+      }),
+    ];
+    expect(checkBackground(ledgerOf(lines)).ok).toBe(true);
+    lines.push(sendMessage('ag1', '2030-01-01T10:01:00.000Z'));
+    expect(checkBackground(ledgerOf(lines)).ok).toBe(false);
+  });
+
   test('an async launch without an id, or a launch-shaped line that is not JSON, counts as running', () => {
     const noId = JSON.stringify({
       timestamp: '2030-01-01T09:59:00.000Z',

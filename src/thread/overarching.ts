@@ -321,8 +321,9 @@ export interface DescriptionItem {
 /**
  * One item per request of the chain except the overarching one, any whose
  * title is the head title itself (the first request names a session with none
- * marked), and any closed "not needed"; done before open, oldest first within
- * each.
+ * marked), and any closed "not needed"; open before done, oldest first within
+ * each (Justin, 2026-11-12: "show incomplete requests first, followed by
+ * completed", because cmux shows only about 12 lines of a description).
  */
 export function descriptionItemsOf(input: {
   headTitle: string;
@@ -342,8 +343,8 @@ export function descriptionItemsOf(input: {
   const done = listed.filter(isClosed);
   const open = listed.filter((request) => !isClosed(request));
   return [
-    ...done.map((request) => ({done: true, label: shortOrCutTitle(request)})),
     ...open.map((request) => ({done: false, label: shortOrCutTitle(request)})),
+    ...done.map((request) => ({done: true, label: shortOrCutTitle(request)})),
   ];
 }
 

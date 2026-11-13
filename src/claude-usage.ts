@@ -42,7 +42,10 @@
  *     come from different parts of the line.
  *
  * justin-loop's usage gate (justin-loop/runner.ts `parseUsage`/`readUsage`) is
- * built on this module, so there is exactly one reading of the panel.
+ * built on this module, so there is exactly one reading of the panel. Both it
+ * and home-base's hourly sampler retry a failed read through
+ * `readUsageWithRetries` below, so there is exactly one retry loop too
+ * (home-base-iqdmz).
  */
 import {tmpdir} from 'node:os';
 
@@ -658,4 +661,129 @@ export async function readUsagePanel(
     };
   }
   return {kind: 'ok', panel: panel.panel, raw: result, sampledAt};
+}
+
+// ---------------------------------------------------------------------------
+// Retrying a failed read
+// ---------------------------------------------------------------------------
+
+/**
+ * How a failed read is retried (home-base-neapv.5). Justin, 2026-10-17: "it
+ * looks like sometimes those reads fail. Do we attempt any sort of retry? I
+ * think we should, with some sensible backoff logic." 7 of ~500 hourly reads
+ * had failed by then: 4 hung until the SDK killed them at 60 s, and 3 printed a
+ * panel with no quota lines. Both are the transient kind a later attempt fixes.
+ *
+ * The loop lived in home-base's sampler until home-base-iqdmz lifted it here, so
+ * justin-loop's gate could use the same one: a single failed read used to stop
+ * a whole run (life jl-tr5v, a 60 s timeout on 2026-09-25).
+ */
+export interface UsageRetryPolicy {
+  /** Total attempts, including the first. 1 means no retry. */
+  attempts: number;
+  /** The wait before attempt 2, 3, …; the last entry repeats if attempts outnumber it. */
+  delaysMs: readonly number[];
+  sleep: (ms: number) => Promise<void>;
+}
+
+/** 3 attempts in all: the sampler's policy, and justin-loop's default. */
+export const USAGE_RETRY_ATTEMPTS = 3;
+
+/** 10 s before the second attempt, 30 s before the third and every later one. */
+export const USAGE_RETRY_DELAYS_MS: readonly number[] = [10_000, 30_000];
+
+/**
+ * What a retried read must look like: ok, or failed with a reason. Both
+ * `UsagePanelRead` and justin-loop's `UsageRead` have this shape, so one loop
+ * serves both.
+ */
+export type RetryableUsageRead =
+  | {kind: 'failed'; reason: string}
+  | {kind: 'ok'};
+
+/** One attempt that failed before the final outcome. */
+export interface FailedUsageAttempt<F> {
+  /** 1-based. */
+  attempt: number;
+  /** The failed read, whole: its reason and anything else its reader carries. */
+  read: F;
+  /** When this attempt started. */
+  startedAt: Date;
+}
+
+/** A failed attempt as it happens, for a caller that prints progress. */
+export interface UsageAttemptFailure {
+  /** 1-based. */
+  attempt: number;
+  /** Total attempts allowed, including the first. */
+  attempts: number;
+  /** The wait before the next attempt; null when no attempt is left. */
+  nextInMs: number | null;
+  reason: string;
+}
+
+export interface UsageReadWithRetries<R extends RetryableUsageRead> {
+  /**
+   * Every attempt that failed BEFORE `read`, oldest first. Never includes
+   * `read` itself, so a final failure is `read`, not the last entry here.
+   */
+  failedAttempts: FailedUsageAttempt<Extract<R, {kind: 'failed'}>>[];
+  /** The last attempt's outcome: the first ok, or the final failure. */
+  read: R;
+  /** When the attempt that produced `read` started (neapv.1 review finding 2). */
+  startedAt: Date;
+}
+
+export interface ReadUsageWithRetriesOptions {
+  /** The clock each attempt's start is read from. */
+  now?: () => Date;
+  /** Called for every failed attempt, the last one included, before any wait. */
+  onFailedAttempt?: (failure: UsageAttemptFailure) => void;
+}
+
+function isFailedRead<R extends RetryableUsageRead>(
+  read: R,
+): read is Extract<R, {kind: 'failed'}> {
+  return read.kind === 'failed';
+}
+
+/**
+ * Read until one attempt succeeds or the attempts run out. Every failed attempt
+ * is kept as its own entry, so a caller can say how hard the read was, and a
+ * final failure still carries the earlier reasons (critical rule 7: a failed
+ * read is never collapsed into a value, or into the last failure alone).
+ *
+ * `retry` absent means one attempt. Never throws when `read` never does.
+ */
+export async function readUsageWithRetries<R extends RetryableUsageRead>(
+  read: () => Promise<R>,
+  retry: UsageRetryPolicy | undefined,
+  opts: ReadUsageWithRetriesOptions = {},
+): Promise<UsageReadWithRetries<R>> {
+  const now = opts.now ?? (() => new Date());
+  const attempts = Math.max(1, retry?.attempts ?? 1);
+  const failedAttempts: FailedUsageAttempt<Extract<R, {kind: 'failed'}>>[] = [];
+  for (let attempt = 1; ; attempt++) {
+    const startedAt = now();
+    const result = await read();
+    if (!isFailedRead(result)) {
+      return {failedAttempts, read: result, startedAt};
+    }
+    const delays = retry?.delaysMs ?? [];
+    const nextInMs =
+      retry == null || attempt >= attempts
+        ? null
+        : (delays[Math.min(attempt - 1, delays.length - 1)] ?? 0);
+    opts.onFailedAttempt?.({
+      attempt,
+      attempts,
+      nextInMs,
+      reason: result.reason,
+    });
+    if (retry == null || nextInMs == null) {
+      return {failedAttempts, read: result, startedAt};
+    }
+    failedAttempts.push({attempt, read: result, startedAt});
+    await retry.sleep(nextInMs);
+  }
 }

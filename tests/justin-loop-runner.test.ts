@@ -53,7 +53,7 @@ import {
   type UsageSnapshot,
 } from '../src/justin-loop/runner';
 import {initRepo} from './git-fixtures';
-import {runLoop} from './justin-loop-world';
+import {beadFrom, runLoop} from './justin-loop-world';
 import {createSandbox, type Sandbox} from './sandbox';
 
 const REAL_USAGE_OUTPUT = `You are currently using your subscription to power your Claude Code usage
@@ -413,6 +413,161 @@ Last 24h · 348 requests · 5 sessions
 });
 
 /**
+ * A failed /usage read is retried before the run fails closed (home-base-iqdmz).
+ * One slow or failed read used to stop the whole run (life jl-tr5v, a 60 s
+ * timeout on 2026-09-25). The reader is the world's scripted one and the world's
+ * sleep only moves its clock, so nothing here spawns `claude` or waits.
+ */
+describe('a failed /usage read is retried (home-base-iqdmz)', () => {
+  const plain = stripAnsi;
+
+  function failed(reason: string): UsageRead {
+    return {kind: 'failed', reason};
+  }
+
+  function ok(weekPct: number): UsageRead {
+    return {
+      kind: 'ok',
+      usage: {
+        isSubscription: true,
+        raw: 'fixture',
+        sessionPct: 5,
+        sessionResetsAt: null,
+        weekPct,
+        weekResetsAt: null,
+      },
+    };
+  }
+
+  function count(haystack: string, needle: string): number {
+    return haystack.split(needle).length - 1;
+  }
+
+  /** Nothing waiting at the start; the one session hands off `done`. */
+  const ONE_DONE_SESSION = [
+    [],
+    [beadFrom('hoff-1', {disposition: 'done', from: 'the-arc-1'})],
+  ];
+
+  test('one failed read, then a good one: the session starts, and the output names the failed read and why', async () => {
+    const res = await runLoop({
+      opts: {label: 'the-arc', maxSessions: 1, usageGate: true},
+      scans: ONE_DONE_SESSION,
+      sessions: [{}],
+      usage: [failed('claude -p /usage timed out after 60000ms'), ok(10)],
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.dispatches).toHaveLength(1);
+    expect(res.ledger[0]?.outcome).toBe('done');
+    expect(res.usageReads).toBe(2);
+    const out = plain(res.stdout);
+    expect(out).toContain(
+      '/usage read 1 of 3 failed: claude -p /usage timed out after 60000ms',
+    );
+    expect(out).toContain('Reading it again in 10 s.');
+    expect(out).not.toContain('could not read /usage');
+  });
+
+  test('every read fails: the run fails closed, starts nothing, and the stop reason names every read', async () => {
+    const res = await runLoop({
+      opts: {maxSessions: 1, usageGate: true},
+      sessions: [{}],
+      usage: [
+        failed('timed out after 60000ms'),
+        failed('no week line'),
+        failed('exited 1'),
+      ],
+    });
+    expect(res.exitCode).toBe(2);
+    expect(res.dispatches).toEqual([]);
+    expect(res.usageReads).toBe(3);
+    const out = plain(res.stdout);
+    expect(out).toContain(
+      '/usage read 1 of 3 failed: timed out after 60000ms\n   Reading it again in 10 s.',
+    );
+    expect(out).toContain(
+      '/usage read 2 of 3 failed: no week line\n   Reading it again in 30 s.',
+    );
+    expect(out).toContain(
+      '/usage read 3 of 3 failed: exited 1\n   No reads left, so the run fails closed',
+    );
+    expect(out).toContain(
+      'stopped     could not read /usage: all 3 reads failed: read 1: timed out after 60000ms; read 2: no week line; read 3: exited 1 — failing closed rather than spending unknown quota',
+    );
+  });
+
+  test('--usage-retries 0 is one read, stopped on with the reader’s own reason, as before the retry', async () => {
+    const res = await runLoop({
+      opts: {maxSessions: 1, usageGate: true, usageRetries: 0},
+      sessions: [{}],
+      usage: [failed('exited 1'), ok(10)],
+    });
+    expect(res.exitCode).toBe(2);
+    expect(res.dispatches).toEqual([]);
+    expect(res.usageReads).toBe(1);
+    const out = plain(res.stdout);
+    expect(out).toContain(
+      'stopped     could not read /usage: exited 1 — failing closed',
+    );
+    expect(out).not.toContain('/usage read 1 of');
+  });
+
+  test('--usage-retries sets the count: 4 is five reads, and the last wait repeats', async () => {
+    const res = await runLoop({
+      opts: {maxSessions: 1, usageGate: true, usageRetries: 4},
+      sessions: [{}],
+      usage: [failed('exited 1')],
+    });
+    expect(res.exitCode).toBe(2);
+    expect(res.usageReads).toBe(5);
+    const out = plain(res.stdout);
+    expect(count(out, 'Reading it again in 10 s.')).toBe(1);
+    expect(count(out, 'Reading it again in 30 s.')).toBe(3);
+    expect(out).toContain('/usage read 5 of 5 failed: exited 1');
+    expect(out).toContain('all 5 reads failed');
+  });
+
+  test('the re-check while paused at the gate is retried too', async () => {
+    const res = await runLoop({
+      opts: {
+        label: 'the-arc',
+        maxSessions: 1,
+        usageGate: true,
+        weeklyStopPct: 80,
+      },
+      scans: ONE_DONE_SESSION,
+      sessions: [{}],
+      usage: [ok(90), failed('exited 1'), ok(10)],
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.dispatches).toHaveLength(1);
+    expect(res.ledger[0]?.outcome).toBe('done');
+    expect(res.usageReads).toBe(3);
+    expect(plain(res.stdout)).toContain('/usage read 1 of 3 failed: exited 1');
+  });
+
+  test('the dry run is retried too', async () => {
+    const res = await runLoop({
+      opts: {dryRun: true, usageGate: true},
+      usage: [failed('exited 1'), ok(10)],
+    });
+    expect(res.exitCode).toBe(0);
+    expect(res.usageReads).toBe(2);
+    const out = plain(res.stdout);
+    expect(out).toContain('/usage read 1 of 3 failed: exited 1');
+    expect(out).toMatch(/week\s+\[[-=|]+\] 10%/);
+  });
+
+  test('the run header says how many retries it will make', async () => {
+    const res = await runLoop({
+      opts: {dryRun: true, usageGate: true},
+      usage: [ok(10)],
+    });
+    expect(plain(res.stdout)).toContain('usage-retries=2');
+  });
+});
+
+/**
  * `readUsage` names WHICH failure happened (home-base-685h F1).
  *
  * Every one of these used to be the same `null`. They are driven through a
@@ -714,10 +869,14 @@ describe('justin-loop --dry-run, end to end with a fake claude on PATH', () => {
   }
 
   test('without the flag: spawns /usage, cannot read it, and refuses to run', () => {
-    // The default, unchanged — and a live reproduction of the bug the flag
-    // exists for. This is also the negative control for the next test: it
-    // proves the fake IS reachable and IS consulted.
-    const result = runDryRun(fixture(), []);
+    // The gate's default, and a live reproduction of the bug the flag exists
+    // for. This is also the negative control for the next test: it proves the
+    // fake IS reachable and IS consulted. `--usage-retries 0` because a retry
+    // here waits a real 10 s (home-base-iqdmz; the retry is tested with an
+    // injected sleep in 'a failed /usage read is retried'), and the single
+    // /usage call below is what proves the flag reaches the runner: without it
+    // the default makes three.
+    const result = runDryRun(fixture(), ['--usage-retries', '0']);
     expect(result.calls.filter((c) => c.includes('/usage')).length).toBe(1);
     expect(result.out).toContain('could not read /usage');
     expect(result.status).toBe(1);
@@ -758,9 +917,21 @@ describe('justin-loop --dry-run, end to end with a fake claude on PATH', () => {
 
   test('with the gate ON, a repo with no handoffs still reports the scan', () => {
     // Silence must be a claim: the scan line appears on every run, so "nothing
-    // waiting" is never confused with "nobody looked".
-    const result = runDryRun(fixture(), []);
+    // waiting" is never confused with "nobody looked". One read: a retry would
+    // wait a real 10 s (home-base-iqdmz).
+    const result = runDryRun(fixture(), ['--usage-retries', '0']);
     expect(result.out).toContain('handoff');
+  });
+
+  test('--usage-retries refuses a negative or a fraction, and reads nothing', () => {
+    for (const bad of ['-1', '1.5']) {
+      const result = runDryRun(fixture(), ['--usage-retries', bad]);
+      expect(result.status).not.toBe(0);
+      expect(result.out).toContain(
+        '--usage-retries must be a whole number, 0 or more',
+      );
+      expect(result.calls.filter((c) => c.includes('/usage'))).toEqual([]);
+    }
   });
 });
 

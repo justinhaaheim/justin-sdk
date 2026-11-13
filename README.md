@@ -155,6 +155,7 @@ A handoff carries one of three dispositions, and the runner acts on it:
 | `--handoff-settle-min` | Opt-in belt for the measured D15 stall: a session whose handoff bead is written while its `claude agents` row never reaches `done`. No scan is made until you set it, because settling can stop a session mid-commit |
 | `--blocked-wait-min` | How long a blocked session waits for Justin. Omitted, it waits indefinitely — blocked means waiting for him, and the runner does not decide he took too long |
 | `--session-stop-pct` / `--weekly-stop-pct` | The 5-hour and weekly quota windows. `--usage-gate` is ON and refuses to run when /usage cannot be read — an unreadable quota is reported as UNKNOWN, never as 0% |
+| `--usage-retries` | How many times a failed /usage read is tried again before the run fails closed: 2 by default (3 reads, 10 s then 30 s apart). Each failed read is printed as it happens, and the stop reason names every one. 0 is a single read |
 | `--model` / `--permission-mode` | What every session in the chain is spawned with |
 
 `--dry-run` prints the quota and what is waiting, then exits without spawning. Run state is appended to `runs.jsonl` under `--state-dir` (`~/.local/state/justin-sdk/justin-loop`), outside git on purpose — the facts you read live in the committed handoff beads.
