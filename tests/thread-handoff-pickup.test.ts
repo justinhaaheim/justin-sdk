@@ -202,8 +202,13 @@ function pickUp(
     here: false,
     now: NOW,
     ...(options.deps != null ? {pickupDeps: options.deps} : {}),
+    // home-base-ttztr: a running holder is waited for longer; keep it short here.
     ...(options.lockWaitMs != null
-      ? {pickupLockPollMs: 10, pickupLockWaitMs: options.lockWaitMs}
+      ? {
+          pickupLockHolderWaitMs: options.lockWaitMs * 2,
+          pickupLockPollMs: 10,
+          pickupLockWaitMs: options.lockWaitMs,
+        }
       : {}),
     sessionId: options.session ?? NEW,
     title: options.title ?? null,

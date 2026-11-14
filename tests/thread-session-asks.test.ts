@@ -567,13 +567,10 @@ describe('thread ask (real br)', () => {
     const issue = show(w, outcome.id);
     expect(issue.issueType).toBe('question');
     expect(issue.priority).toBe(2);
-    // home-base-1rxt0.4 D4: its id, the first of this session's chain.
-    expect(issue.labels.sort()).toEqual([
-      'ask',
-      `qid:${w.sessionBead}:1`,
-      `sid:${SESSION}`,
-    ]);
-    expect(outcome.shortId).toBe('BD1');
+    // home-base-4wfoz D2: its id, the first the machine-wide counter hands
+    // out (this test's state dir starts empty).
+    expect(issue.labels.sort()).toEqual(['ask', 'qid:100', `sid:${SESSION}`]);
+    expect(outcome.shortId).toBe('BD100');
     expect(issue.title).toBe(VALID.question);
     expect(issue.id.startsWith(`${w.sessionBead}.`)).toBe(true);
     const parsed = parseAsk(issue.description);
@@ -584,11 +581,11 @@ describe('thread ask (real br)', () => {
     expect(printed.exitCode).toBe(0);
     expect(printed.lines[0]).toMatch(
       new RegExp(
-        `^ask ${outcome.id} · BD1 · 🟡 P2 · filed under ${w.sessionBead}`,
+        `^ask ${outcome.id} · BD100 · 🟡 P2 · filed under ${w.sessionBead}`,
       ),
     );
     expect(printed.lines.join('\n')).toContain(
-      `1. [BD1] 🟡 P2 · [Pick a/b] Export DB · **${VALID.question}** (${outcome.id})`,
+      `1. [BD100] 🟡 P2 · [Pick a/b] Export DB · **${VALID.question}** (${outcome.id})`,
     );
   });
 

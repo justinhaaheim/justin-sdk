@@ -23,6 +23,7 @@
 
 import type {InputDraft} from './input-drafts';
 import type {PaneLookup} from './pane-join';
+import type {RequestStateLine} from './request-state';
 import type {MergeState, SessionModel} from './session-model';
 import type {SessionStatus, StatusCounts} from './session-status';
 import type {TreeIssue} from './session-tree';
@@ -40,6 +41,7 @@ import {
 } from './handoff-view';
 import {SHARED_PANE_REASON} from './pane-join';
 import {FIRST_MESSAGE_CUT, firstLineOf, tildeText} from './part-one';
+import {landingActionText, landingStages} from './request-state';
 import {
   CONTINUED_BY_LABEL_PREFIX,
   CONTINUES_LABEL_PREFIX,
@@ -166,31 +168,6 @@ export function workingText(helpers: number): string {
     ? "Nothing yet. Claude's helper agents are still working."
     : 'Nothing yet. Claude is working.';
 }
-
-/** D4: stages after this one are LANDING stages; rule 7 looks only at them. */
-export const LANDED_AFTER_STAGE = 'tested';
-
-/**
- * D4: the landing stages of a ladder — the ones after `tested`. A ladder with
- * no `tested` has none, so rule 7 never fires there (a reading of D4, which
- * defines landing stages only relative to `tested`).
- */
-export function landingStages(ladder: readonly string[]): string[] {
-  const at = ladder.indexOf(LANDED_AFTER_STAGE);
-  return at < 0 ? [] : ladder.slice(at + 1);
-}
-
-/**
- * D3 rule 7: the words for each landing stage (D4, amended 2026-10-15: the
- * `approved` line is exactly "Try it, then mark it approved:"). Each ends in
- * the command that marks the stage, so the card can be cleared by whoever
- * did the step.
- */
-const LANDING_ACTIONS: Readonly<Record<string, string>> = {
-  approved: 'Try it, then mark it approved:',
-  built: 'Land it: build the app, then mark it built:',
-  'link-sent': 'Land it: send the build link, then mark it link-sent:',
-};
 
 /**
  * D3 rule 7: the first landing stage that a CLOSED request has not reached,
@@ -428,9 +405,7 @@ export function deriveAction(input: ActionInput): ActionLine {
               `thread stage ${unlanded.request.id} ${unlanded.stage} --session ${model.sessionId}`,
             ),
             rule: 7,
-            text:
-              LANDING_ACTIONS[unlanded.stage] ??
-              `Land it: reach the ${unlanded.stage} stage, then mark it ${unlanded.stage}:`,
+            text: landingActionText(unlanded.stage),
           };
         }
       }
@@ -544,6 +519,12 @@ export interface CardRequest {
   /** The highest ladder stage its labels reach; null when none is marked. */
   stage: string | null;
   state: 'blocked' | 'closed' | 'open';
+  /**
+   * home-base-l2ejg.5 (D7): where the request is now and what comes next,
+   * computed by request-state.ts; null when the card's caller computed none.
+   * Printed through part-one.ts `requestStateText`, which adds the age.
+   */
+  stateLine: RequestStateLine | null;
   title: string;
 }
 
@@ -784,7 +765,10 @@ export function gitFacts(git: CardGitInput): CardFact[] {
   return facts;
 }
 
-function youAskedOf(model: SessionModel): YouAsked {
+function youAskedOf(
+  model: SessionModel,
+  states: ReadonlyMap<string, RequestStateLine> | null,
+): YouAsked {
   const {beads} = model;
   if (beads.requests.length === 0) {
     const first = firstUserLine(model.log);
@@ -836,6 +820,7 @@ function youAskedOf(model: SessionModel): YouAsked {
         nextStage: reached?.next ?? null,
         stage: reached?.reached ?? null,
         state,
+        stateLine: states?.get(node.request.id) ?? null,
         title: node.request.title,
       };
     }),
@@ -1091,6 +1076,12 @@ export interface CardInput {
   neighbors?: ReadonlyMap<string, CardNeighbor> | null;
   /** The run's live pane lookup (j8q3e.7 D6). */
   panes: PaneLookup;
+  /**
+   * home-base-l2ejg.5: each request's state line by request id
+   * (`requestStatesOf`, which follows the handoff chain); null or absent:
+   * the card's requests carry none.
+   */
+  requestStates?: ReadonlyMap<string, RequestStateLine> | null;
   section: InboxSection;
   status: SessionStatus;
   title: string;
@@ -1130,7 +1121,7 @@ export function buildCard(input: CardInput): SessionCard {
     status: statusWithRefusal(where, model),
     title: input.title,
     unsent: null,
-    youAsked: youAskedOf(model),
+    youAsked: youAskedOf(model, input.requestStates ?? null),
   };
 }
 

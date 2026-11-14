@@ -257,10 +257,16 @@ export function createFakeBd(
   // (correctly) reports "life beads dir missing" and never reaches bd at all.
   mkdirSync(join(dir, '.beads'), {recursive: true});
   writeFileSync(script, SCRIPT);
-  writeFileSync(
-    join(dir, 'package.json'),
-    JSON.stringify({name: 'fake-life', scripts: {bd: `bun ${script}`}}),
-  );
+  // NO `bd` script (home-base-ejsq2.3 part D). The adapter still spawns a real
+  // `bun run bd` here; with no script of that name, bun runs `bd.ts` in that
+  // same process. A `bd` script made bun start a shell and a SECOND bun for
+  // every call: 105 ms a call against about 50 ms (measured 2026-11-14 at load
+  // 20 to 35; each bun start costs about 50 ms there, its imports nothing).
+  // Stdout and exit code are the same; stderr no longer carries bun's own
+  // `$ bun …/bd.ts …` and `error: script "bd" exited with code N` lines. A test
+  // that writes a `bd` script into package.json still gets that script: a
+  // script wins over the file.
+  writeFileSync(join(dir, 'package.json'), JSON.stringify({name: 'fake-life'}));
   const initial: FakeState = {
     comments: [],
     exportFails,

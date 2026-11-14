@@ -53,6 +53,7 @@
  */
 
 import type {Field, OutputStyle} from '../cli-style';
+import type {ChainNamer} from './chain-names';
 import type {HandoffStop} from './handoff-view';
 import type {InputDraft} from './input-drafts';
 import type {MessageLogRead} from './message-log';
@@ -91,6 +92,7 @@ import {sdkRun} from '../sdk-invocation';
 import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
 import {messageLogPath} from './archive';
+import {chainNamesKnob, registryChainNamer} from './chain-names';
 import {resolveRepoTag, resolveThreadConfig} from './config';
 import {dropUnusedFileMemo, fileMemoMark} from './file-memo';
 import {inboxChainReaders, walkedSessionMarks} from './handoff-marks';
@@ -110,9 +112,15 @@ import {
   readMessageLog,
 } from './message-log';
 import {lookupPanes as lookupLivePanes, realPaneSources} from './pane-join';
-import {ageWords, tildeText} from './part-one';
+import {ageWords, requestStateText, tildeText} from './part-one';
 import {pinnedFirst} from './pinned-projects';
 import {readReadMarks, UNREAD_MARKER, unreadFor} from './read-marks';
+import {
+  type ChainLookup,
+  type ChainSession,
+  chainSessionOf,
+  requestStatesOf,
+} from './request-state';
 import {
   buildCard,
   CARD_REQUESTS_SHOWN,
@@ -482,6 +490,13 @@ export function neverHiddenByAge(status: SessionStatus): boolean {
 
 /** One inbox load; `readInbox` (below) is the entry point. */
 async function readInboxOnce(input: {
+  /**
+   * home-base-l2ejg.11: names a chain whose session bead holds no `chain:`
+   * label, from the registry, by its first session (registryChainNamer). It
+   * writes no bead. Absent or null: only the labels name chains. Used only
+   * where componentConfig.thread.chainNames is on in `cwd`.
+   */
+  chainNamer?: ChainNamer | null;
   /** Sessions loaded at once; default INBOX_CONCURRENCY. 1 = one at a time. */
   concurrency?: number;
   cwd: string;
@@ -645,14 +660,37 @@ async function readInboxOnce(input: {
   const neighbors = new Map<string, CardNeighbor>();
   // home-base-idnon: each loaded session's message log, for the walk below.
   const loadedLogs = new Map<string, MessageLogRead>();
+  // home-base-l2ejg.5 (D7): every loaded session's status, derived once, and
+  // each session bead as a chain link, so a request a successor carries
+  // shows the successor's state on its predecessor's card.
+  // home-base-l2ejg.11: the knob where the inbox runs, read once per run; the
+  // chain links name their sessions with it too.
+  const chainNames = chainNamesKnob(cwd, env);
+  const statuses = new Map<string, SessionStatus>();
+  const chainSessions = new Map<string, ChainSession>();
   for (const loaded of loads) {
     if (loaded?.kind !== 'loaded') continue;
     loadedLogs.set(loaded.model.sessionId, loaded.model.log);
+    const status = deriveStatus(statusFactsOf(loaded.model), {
+      asIfYielded: false,
+      now,
+    });
+    statuses.set(loaded.model.sessionId, status);
     const bead = loaded.model.beads.session;
     if (bead != null) {
       neighbors.set(bead.id, {labels: bead.labels, title: bead.title});
+      chainSessions.set(
+        bead.id,
+        chainSessionOf(loaded.model, status, {chainNames}),
+      );
     }
   }
+  const chainLookup: ChainLookup = (beadId) => {
+    const found = chainSessions.get(beadId);
+    return found == null
+      ? {kind: 'unknown', reason: 'it is not in this inbox'}
+      : {kind: 'found', session: found};
+  };
   // home-base-idnon: a bead that continues another and has no number label
   // gets its number walked from what this run already read; nothing written.
   const chainReaders = inboxChainReaders({
@@ -707,7 +745,9 @@ async function readInboxOnce(input: {
     }
     const {model} = loaded;
     const facts = statusFactsOf(model);
-    const status = deriveStatus(facts, {asIfYielded: false, now});
+    const status =
+      statuses.get(model.sessionId) ??
+      deriveStatus(facts, {asIfYielded: false, now});
     const lastRecord = model.transcript.lastRecordAt.ok
       ? model.transcript.lastRecordAt.value
       : null;
@@ -745,10 +785,17 @@ async function readInboxOnce(input: {
         marks:
           model.beads.session == null
             ? null
-            : walkedSessionMarks(model.beads.session, chainReaders),
+            : walkedSessionMarks(model.beads.session, chainReaders, {
+                chainNames,
+                namer: chainNames ? (input.chainNamer ?? null) : null,
+              }),
         model,
         neighbors,
         panes,
+        requestStates: requestStatesOf({
+          lookup: chainLookup,
+          session: chainSessionOf(model, status, {chainNames}),
+        }),
         section,
         status,
         title,
@@ -1159,6 +1206,29 @@ function youAskedLines(asked: YouAsked): string[] {
 }
 
 /**
+ * D2 "You asked": each line of its value, the requests capped at five. Under
+ * each request, its state line (home-base-l2ejg.5, D7) when the card has one.
+ */
+function youAskedRows(
+  asked: YouAsked,
+  now: Date,
+): {line: string; state: string | null}[] {
+  if (asked.kind !== 'requests') {
+    return youAskedLines(asked).map((line) => ({line, state: null}));
+  }
+  const rows = asked.requests.slice(0, CARD_REQUESTS_SHOWN).map((request) => ({
+    line: `${request.icon} ${request.title}${stageWords(request)}`,
+    state:
+      request.stateLine == null
+        ? null
+        : tildeText(requestStateText(request.stateLine, {now})),
+  }));
+  const more = asked.requests.length - CARD_REQUESTS_SHOWN;
+  if (more > 0) rows.push({line: `and ${more} more`, state: null});
+  return rows;
+}
+
+/**
  * D-READ-STATE (home-base-yukaf.9): an unread session's heading starts with
  * UNREAD_MARKER. Only `unread === true` gets it; null (could not tell) does
  * not, and the inbox says why once.
@@ -1176,16 +1246,22 @@ function markdownCard(
   showSection: boolean,
   unread: boolean | null,
   paneSummaryReason: string | null,
+  now: Date,
 ): string {
   const lines: string[] = [];
   if (showSection) {
     lines.push(`- **Section:** ${card.sectionEmoji} ${card.sectionTitle}`);
   }
-  const asked = youAskedLines(card.youAsked);
   if (card.youAsked.kind === 'requests') {
-    lines.push('- **You asked:**', ...asked.map((line) => `  - ${line}`));
+    lines.push(
+      '- **You asked:**',
+      ...youAskedRows(card.youAsked, now).flatMap((row) => [
+        `  - ${row.line}`,
+        ...(row.state == null ? [] : [`    - **Now:** ${row.state}`]),
+      ]),
+    );
   } else {
-    lines.push(`- **You asked:** ${asked.join(' ')}`);
+    lines.push(`- **You asked:** ${youAskedLines(card.youAsked).join(' ')}`);
   }
   lines.push(
     `- **Where it is:** ${card.status}`,
@@ -1238,6 +1314,7 @@ function ansiCard(
   style: OutputStyle,
   unread: boolean | null,
   paneSummaryReason: string | null,
+  now: Date,
 ): string {
   const {color, width} = style;
   const code = (text: string): string => paint(text, ['cyan'], color);
@@ -1250,7 +1327,14 @@ function ansiCard(
   }
   fields.push({
     label: 'You asked',
-    value: youAskedLines(card.youAsked).join('\n'),
+    value: youAskedRows(card.youAsked, now)
+      .flatMap((row) => [
+        row.line,
+        ...(row.state == null
+          ? []
+          : [`   ${paint('Now:', ['bold'], color)} ${row.state}`]),
+      ])
+      .join('\n'),
   });
   fields.push({
     label: 'Where it is',
@@ -1320,11 +1404,12 @@ function renderRow(
   showSection: boolean,
   style: OutputStyle,
   paneSummaryReason: string | null,
+  now: Date,
 ): string {
   if (row.display === 'line') return lineEntry(row, style);
   return style.color
-    ? ansiCard(row.card, showSection, style, row.unread, paneSummaryReason)
-    : markdownCard(row.card, showSection, row.unread, paneSummaryReason);
+    ? ansiCard(row.card, showSection, style, row.unread, paneSummaryReason, now)
+    : markdownCard(row.card, showSection, row.unread, paneSummaryReason, now);
 }
 
 function header(
@@ -1475,7 +1560,9 @@ export function renderInbox(
         header(`${section.title} (${rows.length})`, section.emoji, 2, style),
       );
       for (const row of rows) {
-        blocks.push(renderRow(row, false, style, paneSummaryReason));
+        blocks.push(
+          renderRow(row, false, style, paneSummaryReason, options.now),
+        );
       }
     }
   } else if (order === 'repo') {
@@ -1493,13 +1580,15 @@ export function renderInbox(
       const rows = groups.get(repo) ?? [];
       blocks.push(header(`${repo} (${rows.length})`, '📁', 2, style));
       for (const row of rows) {
-        blocks.push(renderRow(row, true, style, paneSummaryReason));
+        blocks.push(
+          renderRow(row, true, style, paneSummaryReason, options.now),
+        );
       }
     }
   } else if (visible.length > 0) {
     blocks.push(header('Sessions, newest first', '🕒', 2, style));
     for (const row of visible) {
-      blocks.push(renderRow(row, true, style, paneSummaryReason));
+      blocks.push(renderRow(row, true, style, paneSummaryReason, options.now));
     }
   }
 
@@ -1704,6 +1793,11 @@ export type InboxJson = ReturnType<typeof inboxJson>;
 
 export interface ThreadInboxOptions {
   all: boolean;
+  /**
+   * home-base-l2ejg.11: the namer for chains with no label. Absent: the
+   * registry's. Null: none (tests pin it, so their names are not random).
+   */
+  chainNamer?: ChainNamer | null;
   cwd?: string;
   days: number;
   env?: EnvLike;
@@ -1734,6 +1828,11 @@ export async function runSessionInbox(
   // whatever throws (finish is idempotent).
   try {
     const result = await readInbox({
+      // home-base-l2ejg.11: chains with no label are named from the registry.
+      chainNamer:
+        options.chainNamer === undefined
+          ? registryChainNamer(env)
+          : options.chainNamer,
       cwd,
       days,
       env,

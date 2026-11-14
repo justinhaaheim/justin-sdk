@@ -522,7 +522,9 @@ status in_progress. Run it as soon as he asks for work — one command, no form.
       the old session, carries over its unanswered questions, takes its title
       if this session has none yet, and sets the workspace name. Run it again
       at any time: a run after a failure finishes the rest, and a run that
-      finds it all done writes nothing. Each session has one successor: when
+      finds it all done writes nothing. While a running process holds this
+      session's lock (the capture hook's background run), it says so on
+      stderr and waits for it, up to 90 s, then runs. Each session has one successor: when
       another session already continues the old one, nothing is linked or
       carried, this session is labelled not-a-successor, and the exit code is 2.
       Each session has one predecessor: when this session already continues
@@ -666,7 +668,19 @@ answers the session's QUESTION beads instead, in this terminal:
       walks the open questions, most urgent first: type an answer, press
       Enter to skip (it stays open), or d to take the default (not for a P0).
   thread answer --ask <question id> "<answer>"
-      answers one question without a prompt.
+      answers one question without a prompt. A BD id this session does not
+      hold is refused, and the refusal says where the id lives.
+  thread answer --ask <BD n | question bead id> --relay "<answer>"
+      answers a question of ANY session, in ANY repo, at its source: that
+      repo's own beads database, written by the br that repo pins. A BD id is
+      looked up in every known repo's export. A bead id is looked up in the
+      database of the session it was filed under, else in the primary
+      checkout of the repo whose sessions use its prefix, else in that repo's
+      worktrees. It prints the question, its repo and its session. The
+      question is read again at its source just before the write. Nothing is
+      written, and it exits 1 saying why, when the id names no question or
+      more than one, a database cannot be read, or the question is already
+      closed. No session is needed: the mayor relays Justin's answers this way.
 Each answer is the question bead's close reason, "answer: <text>".`;
 
 /** A repeatable string flag as a list (never greedy: see the ask options). */
@@ -1933,7 +1947,7 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'answer [threadId..]',
-        'Answer this thread’s open asks. Opens a local page where drafts autosave to disk and no key discards text; --classic walks them in the terminal instead. With componentConfig.thread.sessionBeads ON: walks the session’s open QUESTION beads in this terminal (text answers, Enter skips, d takes the default), or --ask <id> "<text>" answers one. Exit 0 recorded · 1 a write failed · 2 nothing recorded / usage.',
+        'Answer this thread’s open asks. Opens a local page where drafts autosave to disk and no key discards text; --classic walks them in the terminal instead. With componentConfig.thread.sessionBeads ON: walks the session’s open QUESTION beads in this terminal (text answers, Enter skips, d takes the default), or --ask <id> "<text>" answers one; add --relay to answer a question of any session in any repo at its source. Exit 0 recorded · 1 a write failed · 2 nothing recorded / usage.',
         (yy) =>
           yy
             .epilogue(`${ANSWER_NARRATIVE}\n${SESSION_ANSWER_NARRATIVE}`)
@@ -1958,6 +1972,12 @@ export const threadCommand: CommandModule = {
               describe: 'The most recently reported thread, whatever session',
               type: 'boolean' as const,
             })
+            .option('relay', {
+              default: false,
+              describe:
+                'With --ask: answer the question at its source, in whichever repo and session holds it (a BD id or a bead id). Refuses, writing nothing, on no match, two matches, an unreadable database or a question already closed',
+              type: 'boolean' as const,
+            })
             .option('session', {
               describe: 'Look up by this session id instead of the current one',
               type: 'string' as const,
@@ -1970,6 +1990,12 @@ export const threadCommand: CommandModule = {
             }),
         async (argv) => {
           const target = positionalWords(argv.threadId);
+          if (argv.relay === true && argv.ask == null) {
+            console.error(
+              'thread answer --relay: needs --ask <BD n | question bead id> "<answer>"',
+            );
+            process.exit(2);
+          }
           // R8 (home-base-vzwbj.4.9): a legacy thread id v4 cannot resolve
           // goes to the legacy answer flow below, knob on or off.
           const legacy =
@@ -1984,6 +2010,7 @@ export const threadCommand: CommandModule = {
             process.exit(
               await runSessionAnswer({
                 ask: argv.ask ?? null,
+                relay: argv.relay === true,
                 selector: argv.ask != null ? null : (target[0] ?? null),
                 sessionId: argv.session ?? null,
                 text: argv.ask != null ? target.join(' ') : null,

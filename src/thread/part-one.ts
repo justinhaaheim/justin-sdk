@@ -72,6 +72,7 @@ import type {
   ReportDelta,
   SnapshotItems,
 } from './report-delta';
+import type {RequestStateLine} from './request-state';
 import type {ActionLine, OptionalLine} from './session-card';
 import type {SessionCommits} from './session-commits';
 import type {SessionModel} from './session-model';
@@ -111,6 +112,11 @@ import {
   requestFingerprint,
   requestKey,
 } from './report-delta';
+import {
+  chainSessionOf,
+  NO_CHAIN_LOOKUP,
+  requestStatesOf,
+} from './request-state';
 import {cutOnWord} from './session-bead';
 import {firstUserLine, newestLogAt, userLines} from './session-model';
 import {sessionDisplayName, sessionMarksOf} from './session-name';
@@ -182,6 +188,11 @@ export interface RequestView {
   mark: ItemMark | null;
   /** "tested — next: built", or null when no stage label is on the ladder. */
   stage: string | null;
+  /**
+   * home-base-l2ejg.5 (D7): "Stopped: open work, no blocker — next: tested —
+   * since Tue 2030-01-01 9:00 am" (`requestStateText`, absolute time).
+   */
+  stateLine: string;
   title: string;
 }
 
@@ -415,6 +426,34 @@ function dateOf(iso: string): Date | null {
   return ms == null ? null : new Date(ms);
 }
 
+/**
+ * home-base-l2ejg.5 (D7): a request's state line in words, the one printer
+ * Part 1, the inbox, the dashboard and `threads --json` share: "Stopped: open
+ * work, no blocker — next: tested — since 2 days ago". `absolute` gives the
+ * time as Part 1 prints times (item 6c: a pasted block is read days later);
+ * otherwise its age. A last change with no readable time is "since unknown".
+ */
+export function requestStateText(
+  line: Pick<RequestStateLine, 'carriedBy' | 'next' | 'since' | 'state'>,
+  options: {absolute?: boolean; now: Date; timeZone?: string},
+): string {
+  const parts = [
+    line.carriedBy == null
+      ? line.state
+      : `Carried by ${line.carriedBy}: ${line.state}`,
+  ];
+  if (line.next != null) parts.push(`next: ${line.next}`);
+  const at = line.since == null ? null : dateOf(line.since);
+  parts.push(
+    at == null
+      ? 'since unknown'
+      : options.absolute === true
+        ? `since ${absoluteWhen(at, options.timeZone)}`
+        : `since ${ageWords(at, options.now)}`,
+  );
+  return parts.join(' — ');
+}
+
 // ---------------------------------------------------------------------------
 // The view
 // ---------------------------------------------------------------------------
@@ -480,6 +519,12 @@ export interface PartOneInput {
    * `thread status`; absent or empty when every one has one.
    */
   questionIdProblems?: readonly string[];
+  /**
+   * home-base-l2ejg.5: each request's state line by request id, computed by
+   * the caller through the handoff chain (session-report.ts). Absent: from
+   * this session alone, and a successor is said as not looked up.
+   */
+  requestStates?: ReadonlyMap<string, RequestStateLine>;
   status: SessionStatus;
   /** IANA zone for times; undefined = this machine's. Tests pin it. */
   timeZone?: string;
@@ -725,6 +770,16 @@ export function partOneView(input: PartOneInput): PartOneView {
   const delta = input.delta ?? null;
   const snapshot: SnapshotItems = {};
   const ordered = sortAsks(openQuestions(model));
+  // home-base-l2ejg.5: computed here only when the caller passed none, and
+  // then without reading any successor (said as "not looked up").
+  const requestStates =
+    input.requestStates ??
+    requestStatesOf({
+      lookup: NO_CHAIN_LOOKUP,
+      // No successor is looked up here, so no session name is printed and the
+      // chainNames knob changes nothing; session-report.ts passes the real one.
+      session: chainSessionOf(model, status, {chainNames: false}),
+    });
   const requests: RequestView[] = beads.requests.map((node) => {
     const blocking = blockingNumbers(node, ordered);
     const stage = stageReached(node.request.labels, model.stages);
@@ -747,6 +802,9 @@ export function partOneView(input: PartOneInput): PartOneView {
     const key = requestKey(node.request.id);
     const fingerprint = requestFingerprint(shape);
     snapshot[key] = fingerprint;
+    // The state line is NOT in the fingerprint: its age moves every turn, and
+    // a 🔄 on every request each turn would mark nothing.
+    const stateLine = requestStates.get(node.request.id);
     return {
       ...shape,
       blockedOn:
@@ -755,6 +813,15 @@ export function partOneView(input: PartOneInput): PartOneView {
           : null,
       id: node.request.id,
       mark: delta == null ? null : markOf(key, fingerprint, delta.baseline),
+      stateLine: tildeText(
+        stateLine == null
+          ? 'Unknown: no state line was computed for this request'
+          : requestStateText(stateLine, {
+              absolute: true,
+              now: input.now,
+              timeZone,
+            }),
+      ),
     };
   });
 
@@ -1062,6 +1129,7 @@ function markdownRequest(request: RequestView, number: number): string {
   return spacedList([
     `${marker}${markText(request.mark)}${request.icon} **${request.title}** (${request.id})${blocked}`,
     request.stage == null ? '' : `${indent}**Stage:** ${request.stage}`,
+    `${indent}**Now:** ${request.stateLine}`,
     markdownItems(
       request.children.map(
         (child) => `${indent}- ${child.icon} ${child.title} (${child.id})`,
@@ -1235,6 +1303,13 @@ function ansiProgress(view: PartOneView, style: OutputStyle): string {
         }),
       );
     }
+    parts.push(
+      wrapHanging(`${paint('Now:', ['bold'], color)} ${request.stateLine}`, {
+        hang: DETAIL_COLUMN,
+        indent: DETAIL_COLUMN,
+        width,
+      }),
+    );
     for (const child of request.children) {
       parts.push(
         wrapHanging(

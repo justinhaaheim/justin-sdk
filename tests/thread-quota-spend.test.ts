@@ -55,6 +55,9 @@ describe('weekSpendOf', () => {
   test('haiku and Mythos take `other` and `fable`, as the calibration classified them', () => {
     expect(quotaFamilyOf('claude-haiku-5-5')).toBe('other');
     expect(quotaFamilyOf('claude-mythos-5-1')).toBe('fable');
+    // home-base-smu63 D5: a Fable 5.2 or Mythos 5.2 dollar converts at the fable rate.
+    expect(quotaFamilyOf('claude-fable-5-2')).toBe('fable');
+    expect(quotaFamilyOf('claude-mythos-5-2')).toBe('fable');
     expect(quotaFamilyOf('some-new-model')).toBe('other');
     // haiku-4-5 lists output at $5 per million: $5 at the `other` rate of $1.
     const spend = weekSpendOf(
@@ -85,5 +88,38 @@ describe('weekSpendOf', () => {
     expect(spend.reason).toContain('no list price for claude-unreleased-9');
     // No number that reads as complete.
     expect('weekPercent' in spend).toBe(false);
+  });
+
+  test("a made-up id in a priced family is unknown: never 0 %, never its family's price (home-base-smu63)", () => {
+    // A made-up id, so no future release can price it. It is in the fable
+    // family, so the only thing keeping it unknown is that the table has no row
+    // for it: nothing may price a new model by its family or its nearest name.
+    const madeUp = 'claude-fable-made-up-0';
+    expect(quotaFamilyOf(madeUp)).toBe('fable');
+    const spend = weekSpendOf(
+      estimateCost([
+        request('a', 'claude-fable-5-2', 1_000_000),
+        request('b', madeUp, 1_000_000),
+      ]),
+      TEST_RATES,
+    );
+    expect(spend.kind).toBe('unknown');
+    if (spend.kind !== 'unknown') return;
+    expect(spend.unpricedModels).toEqual([madeUp]);
+    // Fable 5.2 lists output at $40 per million: $40 at the fable rate of $10.
+    expect(spend.lowerBound.byFamily.fable).toEqual({usd: 40, weekPercent: 4});
+    expect(spend.lowerBound.weekPercent).toBe(4);
+    expect(spend.reason).toContain('at least 4.00 % of the week');
+    expect(spend.reason).toContain(`no list price for ${madeUp}`);
+    expect('weekPercent' in spend).toBe(false);
+
+    // On its own it is still unknown, with a lower bound of zero that is
+    // labelled as a bound, never a known 0 %.
+    const alone = weekSpendOf(
+      estimateCost([request('c', madeUp, 1_000_000)]),
+      TEST_RATES,
+    );
+    expect(alone.kind).toBe('unknown');
+    expect(alone).not.toHaveProperty('weekPercent');
   });
 });

@@ -50,6 +50,7 @@
  * committed export) and writes to it, which 0.7.6 in that worktree would then
  * use instead of the primary's (see `findBeadsWorkspace`).
  */
+import {Database} from 'bun:sqlite';
 import {spawnSync} from 'node:child_process';
 import {
   existsSync,
@@ -1089,35 +1090,70 @@ export type DbSchemaRead =
   | {kind: 'locked'; reason: string}
   | {kind: 'read'; schema: number};
 
-function readDbSchemaOnce(db: string, waitMs: number): DbSchemaRead {
-  const proc = spawnSync(
-    'sqlite3',
-    ['-readonly', '-cmd', `.timeout ${waitMs}`, db, 'PRAGMA user_version'],
-    {encoding: 'utf-8', env: brSpawnEnv(undefined), timeout: waitMs + 10_000},
-  );
-  if (proc.error != null) {
-    return {
-      kind: 'failed',
-      reason: `sqlite3 could not run to read the schema of ${db}: ${proc.error.message}`,
-    };
+/** An error's SQLite code and message, as one line ("SQLITE_BUSY: database is locked"). */
+function sqliteErrorText(error: unknown): string {
+  if (error instanceof Error) {
+    const code = (error as {code?: unknown}).code;
+    const message = error.message === '' ? 'no message' : error.message;
+    return typeof code === 'string' && code !== ''
+      ? `${code}: ${message}`
+      : message;
   }
-  const out = (proc.stdout ?? '').trim();
-  if (proc.status !== 0 || !/^\d+$/.test(out)) {
-    const said = capturedStderr(proc.stderr)?.split('\n')[0] ?? out;
-    return {
-      kind: saysBeadsLocked(said) ? 'locked' : 'failed',
-      reason: `sqlite3 could not read the schema of ${db} (${proc.status != null ? `exit ${proc.status}` : `killed: ${proc.signal ?? 'unknown signal'}`}): ${said === '' ? 'it printed nothing' : said}`,
-    };
-  }
-  return {kind: 'read', schema: Number(out)};
+  return String(error);
 }
 
 /**
- * A database's schema (`PRAGMA user_version`), read by `sqlite3 -readonly`
- * with a bounded wait, so no br opens the file to answer it. Measured
- * 2026-10-29 on 0.1.37 and 0.7.6 DBs with WAL frames: the read leaves the DB
- * and WAL bytes unchanged and both brs work on afterwards; when the `-shm` is
- * missing, SQLite creates it, as any br open does. A failed read is `failed`,
+ * One read of `PRAGMA user_version`, in this process, through a READ-ONLY
+ * connection that is closed before it returns (home-base-ejsq2.3 part A). It
+ * replaced a `sqlite3 -readonly` child: the same SQLite (3.54.0 for both on
+ * 2026-11-14), the same open flag and the same busy wait, and every case that
+ * child told apart is still told apart (tests/beads-schema-read.test.ts holds
+ * one test per case). A read-only open never creates a missing file.
+ * Nothing is kept between calls.
+ */
+function readDbSchemaOnce(db: string, waitMs: number): DbSchemaRead {
+  let handle: Database | null = null;
+  try {
+    handle = new Database(db, {readonly: true});
+    // What `sqlite3 -cmd '.timeout N'` set: wait up to N ms for a lock.
+    handle.run(`PRAGMA busy_timeout = ${waitMs}`);
+    const row: unknown = handle.query('PRAGMA user_version').get();
+    const schema =
+      row != null && typeof row === 'object'
+        ? (row as {user_version?: unknown}).user_version
+        : undefined;
+    // The old reader accepted digits only, so a negative version is a failure.
+    if (
+      typeof schema !== 'number' ||
+      !Number.isSafeInteger(schema) ||
+      schema < 0
+    ) {
+      return {
+        kind: 'failed',
+        reason: `could not read the schema of ${db}: PRAGMA user_version answered ${JSON.stringify(row ?? null)}`,
+      };
+    }
+    return {kind: 'read', schema};
+  } catch (error) {
+    const said = sqliteErrorText(error);
+    return {
+      kind: saysBeadsLocked(said) ? 'locked' : 'failed',
+      reason: `could not read the schema of ${db}: ${said}`,
+    };
+  } finally {
+    handle?.close();
+  }
+}
+
+/**
+ * A database's schema (`PRAGMA user_version`), read in this process through a
+ * read-only connection with a bounded wait, so no br opens the file to answer
+ * it. Measured 2026-10-29 with `sqlite3 -readonly` on 0.1.37 and 0.7.6 DBs
+ * with WAL frames: the read leaves the DB and WAL bytes unchanged and both brs
+ * work on afterwards; when the `-shm` is missing, SQLite creates it, as any br
+ * open does. The in-process read was measured to do the same on 2026-11-14
+ * (home-base-ejsq2.3, `bun run measure:schema-read`), and to fail fewer
+ * concurrent br 0.7.6 writes than the child did. A failed read is `failed`,
  * never a schema.
  */
 export function readDbSchema(

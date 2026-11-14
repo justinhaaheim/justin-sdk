@@ -30,6 +30,7 @@
  * imports only with the knob on.
  */
 
+import type {CaptureLockHolder} from './capture-lock';
 import type {PickUpStep} from './handoff-pickup';
 import type {EnvLike} from './paths';
 
@@ -199,6 +200,14 @@ export function pickupNotDoneText(notice: PickupNotDone): string {
   return `${pickupNotDoneWords(notice.reason)} ${notice.command}`;
 }
 
+/**
+ * home-base-ttztr: what `thread status` says in place of the command while an
+ * attempt holds the lock, so a successor does not race it.
+ */
+export function pickupRunningWords(pid: number): string {
+  return `handoff pickup running in the background (process ${pid} holds this session's lock); run thread status again in a minute:`;
+}
+
 /** The one line that says the pickup could not be checked. */
 export function pickupUncheckedText(reason: string): string {
   return `handoff pickup: could not check: ${reason}`;
@@ -229,6 +238,12 @@ export type PickupState =
   /** `picked-up` holds. `via`: which source showed it. */
   | {kind: 'done'; via: 'database' | 'export'}
   | ({kind: 'notDone'} & PickupNotDone)
+  /**
+   * home-base-ttztr: not done, and a running process holds this session's
+   * capture lock, so an attempt is in flight. Only a caller that passes
+   * `lockHolder` gets it; a holder that cannot be checked leaves `notDone`.
+   */
+  | {kind: 'running'; pid: number}
   /** home-base-npbse.1.4: it already continues another session; no retry. */
   | {kind: 'refused'; reason: string}
   | {kind: 'couldNotCheck'; reason: string};
@@ -250,6 +265,11 @@ export function pickupState(input: {
   autoPickup: boolean;
   env: EnvLike;
   exportLabels: readonly string[] | null;
+  /**
+   * home-base-ttztr: who holds the session's capture lock, asked only once the
+   * answer is otherwise `notDone`. Absent: never `running` (the [thread] line).
+   */
+  lockHolder?: () => CaptureLockHolder;
   ownSession: boolean;
   readLabels: () => PickupLabelsRead;
   sessionId: string;
@@ -303,6 +323,8 @@ export function pickupState(input: {
       reason: logProblem ?? 'whether this session is a successor is not known',
     };
   }
+  const holder = input.lockHolder?.();
+  if (holder?.kind === 'alive') return {kind: 'running', pid: holder.pid};
   return {
     command: sdkRun(`thread request --continues ${predecessor}`),
     kind: 'notDone',

@@ -18,13 +18,15 @@
  * is not looked for here.
  */
 
+import type {ChainNamer} from './chain-names';
 import type {ChainBeadRead, ChainReaders} from './handoff-chain';
 import type {MessageLogRead} from './message-log';
 import type {EnvLike} from './paths';
 import type {SessionMarks} from './session-name';
 import type {ExportIndexRead} from './session-tree';
 
-import {handoffNumberOf} from './handoff-number';
+import {chainNameText} from './chain-name';
+import {chainRootOf, handoffNumberOf} from './handoff-number';
 import {readMessageLog} from './message-log';
 import {
   CONTINUES_LABEL_PREFIX,
@@ -56,24 +58,71 @@ function chainLabelsDisagree(
   return new Set(keys).size > 1;
 }
 
-/** The marks of one session bead, its number walked when no label holds it. */
+/** What walkedSessionMarks may use beyond the bead's labels. */
+export interface WalkedMarksOptions {
+  /** componentConfig.thread.chainNames (home-base-l2ejg.11). */
+  chainNames?: boolean;
+  /**
+   * Names a chain whose bead holds no `chain:` label, by its first session
+   * (registryChainNamer). Absent or null: such a chain shows no name.
+   */
+  namer?: ChainNamer | null;
+}
+
+/** The registry's name, when the labels gave none. Never throws. */
+function withRegistryName(
+  marks: SessionMarks,
+  bead: {id: string; labels: readonly string[]},
+  readers: ChainReaders,
+  options: WalkedMarksOptions,
+): SessionMarks {
+  const {namer} = options;
+  if (options.chainNames !== true || namer == null || marks.chain != null) {
+    return marks;
+  }
+  try {
+    const root = chainRootOf(bead, readers);
+    if (root.kind === 'unknown') return marks;
+    const named = namer.nameFor(root.root);
+    return named.kind === 'failed'
+      ? marks
+      : {...marks, chain: chainNameText(named.name)};
+  } catch {
+    // A name is a nicety: a failure to find one shows the marks without it.
+    return marks;
+  }
+}
+
+/**
+ * The marks of one session bead, its number walked when no label holds it.
+ *
+ * home-base-l2ejg.11: with chainNames on, a bead with no readable `chain:`
+ * label (a chain dropped before names existed, a session on an older SDK pin)
+ * is named from the registry by its chain's first session, found with the
+ * same readers, and the registry hands one out when the chain has none. No
+ * bead is written: the label is the capture's job (healChainName).
+ */
 export function walkedSessionMarks(
   bead: {id: string; labels: readonly string[]},
   readers: ChainReaders,
+  options: WalkedMarksOptions = {},
 ): SessionMarks {
-  const fromLabels = sessionMarksOf(bead.labels);
+  const fromLabels = sessionMarksOf(bead.labels, {
+    chainNames: options.chainNames === true,
+  });
+  const marks = withRegistryName(fromLabels, bead, readers, options);
   // Only "continues another, number not stamped" is walked: a stamped number
   // is the answer, an unreadable one stays unknown, and no `continues:` is a
   // first session.
   if (
-    fromLabels.handoff !== 'unknown' ||
+    marks.handoff !== 'unknown' ||
     stampedHandoffNumber(bead.labels).kind !== 'none'
   ) {
-    return fromLabels;
+    return marks;
   }
   const number = handoffNumberOf(bead, readers);
   return {
-    ...fromLabels,
+    ...marks,
     handoff:
       number.kind === 'known' && number.number > 0 ? number.number : 'unknown',
   };

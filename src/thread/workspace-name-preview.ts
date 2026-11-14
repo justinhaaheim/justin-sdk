@@ -46,6 +46,8 @@ import {
 /** One session bead, as the dashboard's session model knows it. */
 export interface PreviewSession {
   beadId: string;
+  /** componentConfig.thread.chainNames in its checkout (home-base-l2ejg.11). */
+  chainNames?: boolean;
   labels: readonly string[];
   /** ISO; null when nothing dates it (sorts oldest). */
   lastActivityAt: string | null;

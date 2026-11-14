@@ -35,6 +35,7 @@
  */
 
 import type {BdContext, BdFailure, BdIssue} from './bd';
+import type {ChainNamer} from './chain-names';
 import type {CmuxRunner} from './cmux';
 import type {CommitOutcome} from './commit';
 import type {
@@ -76,7 +77,8 @@ import {
   mergeMetadata,
   setThreadInProgress,
 } from './bd';
-import {commitThreadsRepo, pidAlive} from './commit';
+import {readCaptureLockHolder} from './capture-lock';
+import {commitThreadsRepo} from './commit';
 import {resolveThreadConfig} from './config';
 // Already in the hook's import graph through ./archive, so static costs nothing.
 import {findTranscript} from './facts';
@@ -96,7 +98,12 @@ import {
   type SessionBeadOutcome,
 } from './session-bead';
 // Already in the hook's import graph through ./workspace-name-session.
-import {type HandoffNumberHeal, healHandoffNumber} from './session-handoff';
+import {
+  type ChainNameHeal,
+  type HandoffNumberHeal,
+  healChainName,
+  healHandoffNumber,
+} from './session-handoff';
 import {sessionContextLine} from './session-line';
 import {
   type StatusFileOutcome,
@@ -840,6 +847,13 @@ export interface ApplyOptions {
    * `runThreadCaptureApply` resolves it when absent; absent here means off.
    */
   autoPickup?: boolean;
+  /** What the chain-name self-heal uses; tests inject a failing registry. */
+  chainNamer?: ChainNamer;
+  /**
+   * componentConfig.thread.chainNames (home-base-l2ejg.11).
+   * `runThreadCaptureApply` resolves it when absent; absent here means off.
+   */
+  chainNames?: boolean;
   /** The cmux runner for workspace naming; tests inject a fake. */
   cmux?: CmuxRunner;
   /** The spawning hook's context-line ms (`--line-ms`), recorded as-is. */
@@ -1013,16 +1027,9 @@ export function tryCaptureLock(sessionId: string, env: EnvLike): boolean {
       closeSync(fd);
       return true;
     } catch {
-      let owner: number | null = null;
-      try {
-        const raw = readFileSync(path, 'utf8').trim();
-        owner = /^[0-9]+$/.test(raw) ? Number(raw) : null;
-      } catch {
-        owner = null;
-      }
-      if (owner == null || owner === process.pid || pidAlive(owner) !== false) {
-        return false;
-      }
+      // home-base-ttztr: the one holder rule, shared with `thread request
+      // --continues` and `thread status` (capture-lock.ts).
+      if (readCaptureLockHolder(sessionId, env).kind !== 'gone') return false;
       try {
         rmSync(path, {force: true});
       } catch {
@@ -1070,6 +1077,11 @@ function markDirty(sessionId: string, env: EnvLike): void {
 export type CaptureApplyOutcome =
   | {kind: 'deferred'}
   | {
+      /**
+       * What the chain-name self-heal did (home-base-l2ejg.11); absent when
+       * the knob is off or the workspace sync did not run.
+       */
+      chainName?: ChainNameHeal | null;
       /**
        * What refreshing the bead's cmux labels did (home-base-ys9t7.9.1 B4);
        * absent or null when the workspace sync did not run.
@@ -1261,6 +1273,7 @@ export async function applyCapture(
   let workspaceDescription: null | WorkspaceDescriptionOutcome = null;
   let cmuxLabels: CmuxLabelsOutcome | null = null;
   let handoffNumber: HandoffNumberHeal | null = null;
+  let chainName: ChainNameHeal | null = null;
   try {
     // Under the lock, before the first pass: the pass then applies the seeded
     // log's tail. A thrown seed is a failed one, never a lost capture.
@@ -1332,6 +1345,26 @@ export async function applyCapture(
             lookup = {
               ...lookup,
               session: {...lookup.session, labels: handoffNumber.labels},
+            };
+          }
+          // home-base-l2ejg.11: after the number, before the syncs, so the
+          // names show the chain's name on this very prompt. It never throws,
+          // and a failure leaves the session unnamed, in the run record.
+          chainName = healChainName({
+            beadId: lookup.session.beadId,
+            db: lookup.db ?? null,
+            enabled: options.chainNames === true,
+            env,
+            labels: lookup.session.labels,
+            ...(options.chainNamer != null ? {namer: options.chainNamer} : {}),
+            ...(options.handoffNumberReaders != null
+              ? {readers: options.handoffNumberReaders}
+              : {}),
+          });
+          if (chainName.kind === 'named') {
+            lookup = {
+              ...lookup,
+              session: {...lookup.session, labels: chainName.labels},
             };
           }
         }
@@ -1455,6 +1488,7 @@ export async function applyCapture(
     ...(workspaceDescription == null ? {} : {workspaceDescription}),
     ...(cmuxLabels == null ? {} : {cmuxLabels}),
     ...(handoffNumber == null ? {} : {handoffNumber}),
+    ...(chainName == null || chainName.kind === 'off' ? {} : {chainName}),
     ...(pickup == null ? {} : {pickup}),
   };
 }
@@ -1545,6 +1579,17 @@ export function captureRunRecord(
       kind: outcome.handoffNumber.kind,
     };
   }
+  // home-base-l2ejg.11: the same, so a chain that stays unnamed can be traced.
+  if (
+    outcome.chainName != null &&
+    outcome.chainName.kind !== 'current' &&
+    outcome.chainName.kind !== 'off'
+  ) {
+    record.chainName = {
+      detail: outcome.chainName.detail,
+      kind: outcome.chainName.kind,
+    };
+  }
   if (last.kind === 'applied') {
     record.threadId = last.threadId;
     record.created = last.created;
@@ -1605,9 +1650,14 @@ export async function runThreadCaptureApply(
       options.autoPickup ??
       (sessionBeads &&
         resolveThreadConfig({cwd: cwd ?? undefined, env}).handoff.autoPickup);
+    const chainNames =
+      options.chainNames ??
+      (nameWorkspaces &&
+        resolveThreadConfig({cwd: cwd ?? undefined, env}).chainNames);
     outcome = await applyCapture({
       ...options,
       autoPickup,
+      chainNames,
       cwd,
       nameWorkspaces,
       sessionBeads,

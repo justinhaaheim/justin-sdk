@@ -123,6 +123,8 @@ const VIEW: PartOneView = {
       id: 't-1.1',
       mark: null,
       stage: 'tested — next: built',
+      stateLine:
+        'Stopped: open work, no blocker — next: built — since Tue 2030-01-01 9:00 am',
       title: 'Make the nightly export twice as fast',
     },
     {
@@ -135,6 +137,8 @@ const VIEW: PartOneView = {
       id: 't-1.2',
       mark: null,
       stage: null,
+      stateLine:
+        'Waiting on you: BD101 Who owns the runbook? — next: your answer to BD101 — since Tue 2030-01-01 9:00 am',
       title: 'Write the export runbook',
     },
   ],

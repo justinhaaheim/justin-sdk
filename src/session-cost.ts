@@ -50,9 +50,9 @@ export interface ModelPrice {
 }
 
 /** The date the table was taken, and from where. */
-export const PRICE_TABLE_AS_OF = '2026-10-30';
+export const PRICE_TABLE_AS_OF = '2026-11-14';
 export const PRICE_TABLE_SOURCE =
-  'claude-api skill (Claude Code 2.1.312; model table cached 2026-10-06; https://platform.claude.com/docs/en/about-claude/pricing.md): input/output per model, cache read per model, cache write 1.25x input (5 min) and 2x input (1 hour); cross-checked against Claude Code cost-state records';
+  'claude-api skill (Claude Code 2.1.325; model table cached 2026-11-03; shared/model-migration.md and shared/prompt-caching.md; https://platform.claude.com/docs/en/about-claude/pricing.md): input/output per model, cache read per model, cache write 1.25x input (5 min) and 2x input (1 hour); cross-checked against Claude Code cost-state records';
 
 /** Cache writes are 1.25x input (5 minutes) and 2x input (1 hour) on every model. */
 function rates(input: number, output: number, cacheRead: number): Rates {
@@ -86,6 +86,10 @@ function flat(
 export const PRICE_TABLE: Readonly<Record<string, ModelPrice>> = {
   'claude-fable-5': flat(10, 50, 1),
   'claude-fable-5-1': flat(10, 50, 0.25),
+  // $8 / $40, cache read $0.20 (5-minute write $10, 1-hour $16), fast mode
+  // $16 / $80. Mythos 5.2 is the same model at the same per-token prices
+  // (home-base-smu63 D1).
+  'claude-fable-5-2': flat(8, 40, 0.2, 2),
   'claude-haiku-4-5': flat(1, 5, 0.1),
   // $0.10 / $0.50 up to 100K prompt tokens, $0.50 / $2.50 above. The upper
   // tier's cache rates assume the same multiples of input (not verified).
@@ -95,6 +99,7 @@ export const PRICE_TABLE: Readonly<Record<string, ModelPrice>> = {
     rates: rates(0.1, 0.5, 0.01),
   },
   'claude-mythos-5-1': flat(10, 50, 0.25),
+  'claude-mythos-5-2': flat(8, 40, 0.2, 2),
   'claude-opus-4-6': flat(5, 25, 0.5),
   'claude-opus-4-7': flat(5, 25, 0.5),
   'claude-opus-4-8': flat(5, 25, 0.5, 2),
@@ -102,7 +107,9 @@ export const PRICE_TABLE: Readonly<Record<string, ModelPrice>> = {
   'claude-opus-5-5': flat(4, 20, 0.2, 2),
   'claude-sonnet-4-6': flat(3, 15, 0.3),
   'claude-sonnet-5': flat(2, 10, 0.2),
-  'claude-sonnet-5-5': flat(2, 10, 0.2),
+  // Sonnet 5's prices, except cache reads at $0.10, half its rate
+  // (home-base-smu63 D2).
+  'claude-sonnet-5-5': flat(2, 10, 0.1),
 };
 
 /**

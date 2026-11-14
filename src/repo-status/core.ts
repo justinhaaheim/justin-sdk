@@ -31,6 +31,8 @@ import type {
 
 import {execFileSync} from 'child_process';
 
+import {revParseBatchArgs, splitRevParseBatch} from '../git-rev-parse-batch';
+
 const DEFAULT_SINCE_DAYS = 30;
 
 const ARCHIVE_PREFIX = 'archive/';
@@ -101,13 +103,37 @@ export function renderGitCommand(argv: string[]): string {
   return ['git', ...argv.map(quote)].join(' ');
 }
 
+const REPO_ROOT_ARGS = ['rev-parse', '--show-toplevel'];
+const CURRENT_BRANCH_ARGS = ['rev-parse', '--abbrev-ref', 'HEAD'];
+
+function repoRootFrom(out: string | null): string | null {
+  return out?.trim() ?? null;
+}
+
+function currentBranchFrom(out: string | null): string | null {
+  const trimmed = out?.trim();
+  return trimmed != null && trimmed.length > 0 && trimmed !== 'HEAD'
+    ? trimmed
+    : null;
+}
+
 export function getRepoRoot(cwd: string): string | null {
-  return gitArgv(['rev-parse', '--show-toplevel'], cwd)?.trim() ?? null;
+  return repoRootFrom(gitArgv(REPO_ROOT_ARGS, cwd));
 }
 
 export function getCurrentBranch(cwd: string): string | null {
-  const out = gitArgv(['rev-parse', '--abbrev-ref', 'HEAD'], cwd)?.trim();
-  return out != null && out.length > 0 && out !== 'HEAD' ? out : null;
+  return currentBranchFrom(gitArgv(CURRENT_BRANCH_ARGS, cwd));
+}
+
+/**
+ * What `getRepoRoot` and `getCurrentBranch` print, from ONE git call
+ * (home-base-ejsq2.3 part B); null when that call is not a clean answer, and
+ * the caller then asks each on its own, as before.
+ */
+function repoRootAndBranchOutputs(cwd: string): string[] | null {
+  const calls = [REPO_ROOT_ARGS, CURRENT_BRANCH_ARGS];
+  const out = gitArgv(revParseBatchArgs(calls), cwd);
+  return out == null ? null : splitRevParseBatch(out, calls.length);
 }
 
 function refExists(name: string, cwd: string): boolean {
@@ -424,10 +450,13 @@ function resolveBaseline(
  */
 export function buildCoreInventory(opts: CoreOptions): CoreInventory | null {
   const {cwd} = opts;
-  const repoRoot = getRepoRoot(cwd);
+  const batch = repoRootAndBranchOutputs(cwd);
+  const repoRoot =
+    batch != null ? repoRootFrom(batch[0] ?? null) : getRepoRoot(cwd);
   if (repoRoot == null) return null;
 
-  const currentBranch = getCurrentBranch(cwd);
+  const currentBranch =
+    batch != null ? currentBranchFrom(batch[1] ?? null) : getCurrentBranch(cwd);
   const defaultBranch = detectDefaultBranch(cwd);
   const baselineRef = resolveBaseline(opts, currentBranch, defaultBranch);
   if (baselineRef == null) return null;

@@ -67,11 +67,14 @@ import {SDK_HANDOFF_CALL, sdkRun} from '../sdk-invocation';
 import {readVitals, vitalsNotice} from '../vitals';
 import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
+import {readCaptureLockHolder} from './capture-lock';
+import {registryChainNamer} from './chain-names';
 import {readBeadFromDb} from './export-behind';
 import {
   PICKUP_DONE_LINE,
   pickupNotDoneWords,
   pickupRefusedText,
+  pickupRunningWords,
   pickupState,
 } from './handoff-auto-pickup';
 import {realChainReaders, walkUnattendedChain} from './handoff-chain';
@@ -105,6 +108,15 @@ import {
   saveReportSnapshot,
   snapshotBlockOf,
 } from './report-snapshots';
+import {
+  CHAIN_STATE_LIMIT,
+  type ChainLookup,
+  chainSessionOf,
+  NO_CHAIN_LOOKUP,
+  type RequestStateLine,
+  requestStatesOf,
+  successorBeadOf,
+} from './request-state';
 import {deriveAction, optionalLine} from './session-card';
 import {loadCreatedBeads} from './session-created';
 import {realHandoffNumberReaders} from './session-handoff';
@@ -227,6 +239,11 @@ export type ReportLoad =
       overarching: Measured<OverarchingFacts> | null;
       /** home-base-npbse.1.2 item 5, home-base-jm5kg.11.2. */
       pickup: PickupState;
+      /**
+       * home-base-l2ejg.5 (D7): each request's state line, by request id,
+       * following the handoff chain when this session has a successor.
+       */
+      requestStates: ReadonlyMap<string, RequestStateLine>;
       /** componentConfig.thread.workspaceDescription (home-base-jm5kg.18). */
       shortLabels: boolean;
       status: SessionStatus;
@@ -253,6 +270,8 @@ async function knobOn(
   | {ok: false; reason: string}
   | {
       autoPickup: boolean;
+      /** componentConfig.thread.chainNames (home-base-l2ejg.11). */
+      chainNames: boolean;
       compactQuestions: boolean;
       handoffSuccessor: boolean;
       ok: true;
@@ -266,6 +285,7 @@ async function knobOn(
   return config.sessionBeads
     ? {
         autoPickup: config.handoff.autoPickup,
+        chainNames: config.chainNames,
         compactQuestions: config.compactQuestions,
         handoffSuccessor: config.handoff.successor,
         ok: true,
@@ -301,6 +321,77 @@ function successorSessionIdOf(
     }
   }
   return null;
+}
+
+/**
+ * home-base-l2ejg.5 (D7): the successors of a handed-off session, read for its
+ * requests' state lines, so a request the next session carries shows that
+ * session's state. Read only when the session bead names a successor
+ * (`continued-by:`), one load per link, at most CHAIN_STATE_LIMIT links. Never
+ * throws: a successor that cannot be found or loaded is recorded with why,
+ * and its requests' lines say so.
+ */
+async function successorChainOf(
+  model: SessionModel,
+  input: {
+    /** componentConfig.thread.chainNames, as loadForReport resolved it. */
+    chainNames: boolean;
+    cwd: string;
+    env: EnvLike;
+    now: Date;
+  },
+): Promise<ChainLookup> {
+  const found = new Map<string, ReturnType<ChainLookup>>();
+  let labels: readonly string[] = model.beads.session?.labels ?? [];
+  for (let hop = 0; hop < CHAIN_STATE_LIMIT; hop += 1) {
+    const beadId = successorBeadOf(labels);
+    if (beadId == null || found.has(beadId)) break;
+    const sessionId = successorSessionIdOf(beadId, input.env);
+    if (sessionId == null) {
+      found.set(beadId, {
+        kind: 'unknown',
+        reason: 'the sessions index names no session for it',
+      });
+      break;
+    }
+    try {
+      const loaded = await loadSession({
+        cwd: input.cwd,
+        env: input.env,
+        selector: null,
+        sessionIdOption: sessionId,
+      });
+      if (loaded.kind !== 'loaded') {
+        found.set(beadId, {
+          kind: 'unknown',
+          reason: loaded.kind === 'unreadable' ? loaded.detail : loaded.reason,
+        });
+        break;
+      }
+      const status = deriveStatus(statusFactsOf(loaded.model), {
+        asIfYielded: false,
+        now: input.now,
+      });
+      found.set(beadId, {
+        kind: 'found',
+        session: chainSessionOf(loaded.model, status, {
+          chainNames: input.chainNames,
+        }),
+      });
+      labels = loaded.model.beads.session?.labels ?? [];
+    } catch (error) {
+      found.set(beadId, {
+        kind: 'unknown',
+        reason: `it could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+      });
+      break;
+    }
+  }
+  return (beadId) =>
+    found.get(beadId) ?? {
+      kind: 'unknown',
+      reason: 'the next session was not looked up',
+    };
 }
 
 /**
@@ -398,7 +489,23 @@ async function loadForReport(input: {
             env: input.env,
             fallbackDbs: [join(model.beads.session.beadsDir, 'beads.db')],
           }),
+          // home-base-l2ejg.11: the chain's name, from the label or else the
+          // registry, looked up only: `thread status` hands out no name.
+          {
+            chainNames: knob.chainNames,
+            namer: knob.chainNames
+              ? registryChainNamer(input.env, {assign: false})
+              : null,
+          },
         );
+  // home-base-l2ejg.5: successors are read only when the bead names one.
+  const lookup =
+    successorBeadOf(model.beads.session?.labels ?? []) == null
+      ? NO_CHAIN_LOOKUP
+      : await successorChainOf(model, {
+          ...input,
+          chainNames: knob.chainNames,
+        });
   return {
     // home-base-j8q3e.1.7.2 item 3: Part 1's "You need to" is the dashboard's
     // line, from the same function, so the two never disagree.
@@ -426,9 +533,16 @@ async function loadForReport(input: {
       autoPickup: knob.autoPickup,
       env: input.env,
       exportLabels: model.beads.session?.labels ?? null,
+      // home-base-ttztr: while an attempt holds the lock, What to mark says so
+      // instead of offering a command that would wait on it.
+      lockHolder: () => readCaptureLockHolder(model.sessionId, input.env),
       ownSession: input.env.CLAUDE_CODE_SESSION_ID === model.sessionId,
       readLabels: () => readModelBeadFromDb(model, input.env),
       sessionId: model.sessionId,
+    }),
+    requestStates: requestStatesOf({
+      lookup,
+      session: chainSessionOf(model, status, {chainNames: knob.chainNames}),
     }),
     shortLabels: knob.shortLabels,
     status,
@@ -741,6 +855,25 @@ export function markLine(item: MarkItem): MarkView {
         sub: [],
         text: `Request ${item.request.id} ("${item.request.title}") has no short label, so the cmux workspace description shows its title cut. Give it one, like a compact commit message:`,
       };
+    case 'unstaged': {
+      // home-base-l2ejg.5 (D7): the stage is what each request's state line
+      // reads its "next" from; the ladder is named so the right one is picked.
+      const made = plural(item.commits, 'commit', 'commits');
+      const ladder = item.ladder.join(', ');
+      const [only] = item.requests;
+      if (item.requests.length === 1 && only != null) {
+        return {
+          code: sdkRun(`thread stage ${only.id} <stage>`),
+          sub: [],
+          text: `Request ${only.id} ("${only.title}") has no stage, and this session made ${made}. Mark the stage it reached (${ladder}):`,
+        };
+      }
+      return {
+        code: sdkRun('thread stage <request id> <stage>'),
+        sub: [],
+        text: `${item.requests.length} open requests have no stage, and this session made ${made}: ${item.requests.map((request) => request.id).join(', ')}. Mark the stage each reached (${ladder}):`,
+      };
+    }
     case 'noRequest': {
       const what = [
         item.commits > 0
@@ -805,6 +938,12 @@ export function markLine(item: MarkItem): MarkView {
         code: item.command,
         sub: [],
         text: pickupNotDoneWords(item.reason),
+      };
+    case 'pickupRunning':
+      return {
+        code: sdkRun('thread status'),
+        sub: [],
+        text: pickupRunningWords(item.pid),
       };
     case 'titleSummary':
       return titleSummaryLine(item);
@@ -929,6 +1068,7 @@ function statusPartOneView(
     now: options.now,
     optional: load.optional,
     questionIdProblems: options.questionIdProblems ?? [],
+    requestStates: load.requestStates,
     status: load.status,
     timeZone: options.timeZone,
     vitals: load.vitals,
@@ -1071,10 +1211,12 @@ export async function runThreadStatus(
   // <other>` saves nothing, because a session on an old SDK saves nothing itself
   // and would be held to a block its own paste can never match.
   const own = env.CLAUDE_CODE_SESSION_ID === load.model.sessionId;
-  // home-base-1rxt0.4 D4: an open question with no id (filed before ids
-  // existed, or when its number could not be worked out) gets one now, once.
-  // In the session's own run only, like the saves below, and before anything is
-  // rendered, so the block printed and the block saved hold the same ids.
+  // home-base-1rxt0.4 D4, home-base-4wfoz D2: an open question with no id
+  // from the machine-wide counter (filed before it existed, even one holding
+  // an old per-chain id, or when no number could be handed out) gets one now,
+  // once. In the session's own run only, like the saves below, and before
+  // anything is rendered, so the block printed and the block saved hold the
+  // same ids. It never throws: a failure is a line in the block.
   let questionIdProblems: string[] = [];
   const sessionBead = load.model.beads.session;
   if (own && sessionBead != null) {
@@ -1082,7 +1224,6 @@ export async function runThreadStatus(
       beadsDir: sessionBead.beadsDir,
       env,
       questions: openQuestions(load.model),
-      session: sessionBead,
     });
     questionIdProblems = ids.problems;
     const added = new Map(ids.assigned.map((entry) => [entry.id, entry.label]));
@@ -1293,6 +1434,7 @@ export function renderSessionShow(
       model,
       now,
       optional: load.optional,
+      requestStates: load.requestStates,
       status: load.status,
       timeZone,
       vitals: load.vitals,

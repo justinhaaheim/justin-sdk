@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.69.0",
+  "version": "0.69.1",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -9,6 +9,7 @@
   "scripts": {
     "test": "bun test",
     "test:watch": "bun test --watch",
+    "test:timing": "bun scripts/test-timing.ts",
     "test:transcript-cache:golden": "bun scripts/transcript-cache-golden.ts",
     "e2e:justin-loop": "bun scripts/e2e-justin-loop.ts",
     "e2e:thread-answer-web": "bun scripts/e2e-thread-answer-web.ts",
@@ -18,6 +19,7 @@
     "measure:br-export-clobber": "bun scripts/measure-br-export-clobber.ts",
     "measure:br-import-only": "bun scripts/measure-br-import-only.ts",
     "measure:br-local-files": "bun scripts/measure-br-local-files.ts",
+    "measure:br-routing": "bun scripts/measure-br-routing.ts",
     "measure:brake-latency": "bun scripts/measure-brake-latency.ts",
     "measure:hook-dispatch": "bun scripts/measure-hook-dispatch.ts",
     "measure:thread-hook": "bun scripts/measure-thread-hook.ts",
@@ -25,6 +27,7 @@
     "measure:live-sessions": "bun scripts/measure-live-sessions.ts",
     "measure:pre-commit-ts-check": "bun scripts/measure-pre-commit-ts-check.ts",
     "measure:quota": "bun scripts/measure-quota.ts",
+    "measure:schema-read": "bun scripts/measure-schema-read.ts",
     "measure:session-line": "bun scripts/measure-session-line.ts",
     "measure:session-tree": "bun scripts/measure-session-tree.ts",
     "measure:status-write": "bun scripts/measure-status-write.ts",

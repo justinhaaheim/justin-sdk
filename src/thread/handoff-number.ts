@@ -25,8 +25,9 @@
  */
 
 import type {ChainReaders} from './handoff-chain';
-import type {SessionMarks} from './session-name';
+import type {SessionMarks, SessionMarksOptions} from './session-name';
 
+import {chainNameLabel, chainNameOfLabels, chainNameText} from './chain-name';
 import {KICKOFF_OPENING} from './respawn';
 import {
   CONTINUES_LABEL_PREFIX,
@@ -225,18 +226,26 @@ export function handoffNumberOf(
 /**
  * D9: the marks of a session that continues this one: its number plus 1,
  * `[#?]` when its own number is unknown, and the mayor mark when it has one.
+ * With chainNames on, the predecessor's chain name too (home-base-l2ejg.11):
+ * a successor keeps its chain's name.
  */
 export function successorMarks(
   predecessorLabels: readonly string[],
   predecessorNumber: HandoffNumber,
+  options: SessionMarksOptions = {},
 ): SessionMarks {
-  return {
+  const marks: SessionMarks = {
     handoff:
       predecessorNumber.kind === 'known'
         ? predecessorNumber.number + 1
         : 'unknown',
     mayor: predecessorLabels.includes(MAYOR_ROLE_LABEL),
   };
+  const named =
+    options.chainNames === true ? chainNameOfLabels(predecessorLabels) : null;
+  return named?.kind === 'one'
+    ? {...marks, chain: chainNameText(named.name)}
+    : marks;
 }
 
 /**
@@ -244,6 +253,12 @@ export function successorMarks(
  * write. No number label when the number is unknown, so the reader shows
  * `[#?]`. If the new bead already holds a different number, the two labels read
  * as `[#?]` rather than one being trusted.
+ *
+ * home-base-l2ejg.11: the predecessor's chain name is copied too, as the mayor
+ * label is, whatever componentConfig.thread.chainNames says (a label is not a
+ * name handed out, and the knob decides only what shows). A new bead that was
+ * named as its own chain before it linked then holds two names, which read as
+ * none until the capture's self-heal keeps the chain's.
  */
 export function continuationLabels(input: {
   oldBeadId: string;
@@ -251,12 +266,14 @@ export function continuationLabels(input: {
   oldNumber: HandoffNumber;
 }): string[] {
   const {oldNumber} = input;
+  const chain = chainNameOfLabels(input.oldLabels);
   return [
     `${CONTINUES_LABEL_PREFIX}${input.oldBeadId}`,
     ...(oldNumber.kind === 'known'
       ? [`${HANDOFF_NUMBER_LABEL_PREFIX}${oldNumber.number + 1}`]
       : []),
     ...(input.oldLabels.includes(MAYOR_ROLE_LABEL) ? [MAYOR_ROLE_LABEL] : []),
+    ...(chain.kind === 'one' ? [chainNameLabel(chain.name)] : []),
   ];
 }
 

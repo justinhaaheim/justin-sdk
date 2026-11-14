@@ -12,6 +12,9 @@ import {mkdtempSync} from 'fs';
 import {tmpdir} from 'os';
 import {join} from 'path';
 
+import {installGitPin} from './pinned-git';
+import {installSpawnRecorderFromEnv} from './spawn-recorder';
+
 process.env.XDG_CACHE_HOME = mkdtempSync(
   join(tmpdir(), 'justin-sdk-test-cache-'),
 );
@@ -34,3 +37,19 @@ process.env.CHORES_STATE_DIR = mkdtempSync(
 process.env.VITALS_STATE_DIR = mkdtempSync(
   join(tmpdir(), 'justin-sdk-test-vitals-'),
 );
+
+/**
+ * Git without the /usr/bin/git xcrun shim (tests/pinned-git.ts,
+ * home-base-ejsq2.2): the same binary the shim runs, about 4 ms sooner per
+ * call. Where it cannot be pinned (no xcrun, as on Linux) it changes nothing
+ * and prints one line saying why.
+ */
+installGitPin();
+
+/**
+ * The subprocess recorder (tests/spawn-recorder.ts, home-base-ejsq2.1), OFF
+ * unless JUSTIN_SDK_TEST_SPAWN_LOG names a jsonl file:
+ * `bun run test:timing --help` runs the suite with it on. Unset, this call
+ * returns at once and the run is what it was without it.
+ */
+installSpawnRecorderFromEnv();

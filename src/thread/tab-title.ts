@@ -61,6 +61,11 @@ export const HANDED_OFF_TAB_MARK = '↪ ';
  * one workspace could carry the same one.
  */
 export function handedOffTabTitle(input: {
+  /**
+   * The chain's name (home-base-l2ejg.11), shown after the tag as in every
+   * name: `[TAG][Moe] <title>`. Absent or null: no name, as before.
+   */
+  chain?: null | string;
   mayor: boolean;
   /** This session's own number (handoffNumberOf), the one its successor's name adds 1 to. */
   own: HandoffNumber;
@@ -77,6 +82,7 @@ export function handedOffTabTitle(input: {
         ? `handed off to ${handoffNumberText(1)}`
         : `${handoffNumberText(own.number)} handed off to ${handoffNumberText(own.number + 1)}`;
   const name = sessionName(input.repoTag, input.title, {
+    chain: input.chain ?? null,
     handoff: null,
     mayor: input.mayor,
   });
@@ -205,7 +211,7 @@ export async function syncTabTitle(input: {
   const title = sessionName(
     session.repoTag,
     session.title,
-    sessionMarksOf(labels),
+    sessionMarksOf(labels, {chainNames: session.chainNames === true}),
   );
   const read = readTabTitles(env);
   if (read.kind === 'failed') return {kind: 'failed', reason: read.reason};

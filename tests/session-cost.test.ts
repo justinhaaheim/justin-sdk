@@ -5,6 +5,7 @@ import {join} from 'node:path';
 
 import {
   canonicalModel,
+  type CostPart,
   type CostRequest,
   estimateCost,
   estimateTranscriptCost,
@@ -89,6 +90,46 @@ function only(request: CostRequest | null): CostRequest {
   return request;
 }
 
+const TOKEN_KINDS = [
+  'cacheRead',
+  'cacheWrite1h',
+  'cacheWrite5m',
+  'input',
+  'output',
+] as const;
+
+/**
+ * What the REAL table charges for one million tokens of each kind on `model`,
+ * read through pricePart so the test pins what a session is billed, not the
+ * table's literal. Throws when the model has no price.
+ */
+function listPricePerMillion(
+  model: string,
+  speed: string | null = null,
+): Record<(typeof TOKEN_KINDS)[number], number> {
+  const zero: CostPart = {
+    cacheRead: 0,
+    cacheWrite1h: 0,
+    cacheWrite5m: 0,
+    input: 0,
+    model,
+    output: 0,
+    speed,
+    unsplitCacheWrite: 0,
+  };
+  const prices = TOKEN_KINDS.map((kind) => {
+    // The count comes after the spread, so sorting the keys cannot undo it.
+    const price = pricePart({...zero, [kind]: 1_000_000});
+    if (price.kind !== 'known') throw new Error(price.reason);
+    // Round off float noise, so a price compares as the number published.
+    return [kind, Math.round(price.usd * 1e9) / 1e9] as const;
+  });
+  return Object.fromEntries(prices) as Record<
+    (typeof TOKEN_KINDS)[number],
+    number
+  >;
+}
+
 describe('pricing per token type', () => {
   test('each token type is priced at its own rate, per million', () => {
     const request = only(
@@ -155,6 +196,43 @@ describe('pricing per token type', () => {
     );
     expect(estimateCost([small], TEST_TABLE).usd).toBe(100);
     expect(estimateCost([large], TEST_TABLE).usd).toBe(505);
+  });
+
+  test('Fable 5.2 and Mythos 5.2 list at $8 / $40, cache read $0.20, writes $10 / $16, fast 2x (home-base-smu63 D1)', () => {
+    for (const model of ['claude-fable-5-2', 'claude-mythos-5-2']) {
+      expect(listPricePerMillion(model)).toEqual({
+        cacheRead: 0.2,
+        cacheWrite1h: 16,
+        cacheWrite5m: 10,
+        input: 8,
+        output: 40,
+      });
+      // Fast mode is $16 / $80: every rate times 2.
+      expect(listPricePerMillion(model, 'fast')).toEqual({
+        cacheRead: 0.4,
+        cacheWrite1h: 32,
+        cacheWrite5m: 20,
+        input: 16,
+        output: 80,
+      });
+    }
+  });
+
+  test("Sonnet 5.5 lists at Sonnet 5's prices except cache reads at $0.10 (home-base-smu63 D2)", () => {
+    expect(listPricePerMillion('claude-sonnet-5-5')).toEqual({
+      cacheRead: 0.1,
+      cacheWrite1h: 4,
+      cacheWrite5m: 2.5,
+      input: 2,
+      output: 10,
+    });
+    expect(listPricePerMillion('claude-sonnet-5')).toEqual({
+      cacheRead: 0.2,
+      cacheWrite1h: 4,
+      cacheWrite5m: 2.5,
+      input: 2,
+      output: 10,
+    });
   });
 
   test('the real table reproduces a measured Claude Code cost-state exactly', () => {

@@ -44,6 +44,7 @@ import {existsSync} from 'fs';
 import {basename, dirname, isAbsolute, relative, resolve} from 'path';
 
 import {findBeadsWorkspace} from '../beads/br';
+import {revParseBatchArgs, splitRevParseBatch} from '../git-rev-parse-batch';
 import {findProjectRoot} from '../health-notices';
 import {readTranscriptFacts} from '../usage-check';
 import {checkExportBehind} from './export-behind';
@@ -783,14 +784,6 @@ async function measureCheckout(checkout: string): Promise<CheckoutGit> {
     };
   }
   const topArgs = ['rev-parse', '--show-toplevel'];
-  const topRun = await runGit(checkout, topArgs);
-  if (topRun.kind !== 'ok' || topRun.stdout.trim() === '') {
-    return {
-      kind: 'failed',
-      reason: `checkout unreadable: ${checkout} (${gitFailure(topArgs, topRun)})`,
-    };
-  }
-  const top = topRun.stdout.trim();
   // ALL ASYNCHRONOUS (home-base-j8q3e.1.2): the dashboard measures every
   // checkout any recent session used (29 on 2026-10-15), and the synchronous
   // `readGitFacts` this used to call ran 8 git commands per checkout one after
@@ -804,12 +797,40 @@ async function measureCheckout(checkout: string): Promise<CheckoutGit> {
     '--path-format=absolute',
     '--git-common-dir',
   ];
+  // home-base-ejsq2.3 part B: those three and the top level from ONE git call
+  // (the branch last: `--abbrev-ref` abbreviates every revision after it).
+  // Anything but a clean answer runs the four separately, as before, so each
+  // failure keeps its own text. They answer the same from the checkout as from
+  // its top level: both find the same repository.
+  const batchCalls = [topArgs, gitDirArgs, commonArgs, branchArgs];
+  const batchRun = await runGit(checkout, revParseBatchArgs(batchCalls));
+  const batch =
+    batchRun.kind === 'ok'
+      ? splitRevParseBatch(batchRun.stdout, batchCalls.length)
+      : null;
+  const topRun: GitRun =
+    batch?.[0] != null
+      ? {kind: 'ok', stdout: batch[0]}
+      : await runGit(checkout, topArgs);
+  if (topRun.kind !== 'ok' || topRun.stdout.trim() === '') {
+    return {
+      kind: 'failed',
+      reason: `checkout unreadable: ${checkout} (${gitFailure(topArgs, topRun)})`,
+    };
+  }
+  const top = topRun.stdout.trim();
+  const fromBatch = (index: number, args: string[]): Promise<GitRun> => {
+    const line = batch?.[index];
+    return line != null
+      ? Promise.resolve({kind: 'ok', stdout: line})
+      : runGit(top, args);
+  };
   const statusArgs = ['status', '--porcelain'];
   const [branchRun, gitDirRun, commonRun, defaultBranch, status, unpushed] =
     await Promise.all([
-      runGit(top, branchArgs),
-      runGit(top, gitDirArgs),
-      runGit(top, commonArgs),
+      fromBatch(3, branchArgs),
+      fromBatch(1, gitDirArgs),
+      fromBatch(2, commonArgs),
       defaultBranchOf(top),
       runGit(top, statusArgs),
       unpushedOf(top),

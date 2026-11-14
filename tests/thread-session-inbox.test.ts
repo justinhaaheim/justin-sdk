@@ -314,16 +314,21 @@ function render(
   r: InboxRead,
   options: {all?: boolean; order?: InboxOrder} = {},
 ): string {
-  return renderInbox(r, {
-    all: options.all ?? false,
-    days: 30,
-    now: NOW,
-    order: options.order ?? 'recent',
-    style: PLAIN_STYLE,
-    timeZone: TZ,
-  })
-    .split(sb.path)
-    .join('<sandbox>');
+  return (
+    renderInbox(r, {
+      all: options.all ?? false,
+      days: 30,
+      now: NOW,
+      order: options.order ?? 'recent',
+      style: PLAIN_STYLE,
+      timeZone: TZ,
+    })
+      .split(sb.path)
+      .join('<sandbox>')
+      // home-base-l2ejg.5: a request's state line ends with the age of its
+      // last change, and br writes the fixture's beads on the real clock.
+      .replace(/ — since [^\n]*$/gmu, ' — since <its last change>')
+  );
 }
 
 function sectionOfTitle(r: InboxRead, title: string): string | null {
@@ -457,6 +462,7 @@ describe('thread inbox: sections (j8q3e.1 D5)', () => {
         '- **Section:** 🛑 Needs you',
         '- **You asked:**',
         '  - 🛑 Write the export runbook',
+        '    - **Now:** Waiting on you: BD100 Which bucket? — next: your answer to BD100 — since <its last change>',
         '- **Where it is:** 🛑 Waiting on you (1 blocking question)',
         `- **You need to:** **Answer: Which bucket?** \`bun run justin-sdk thread answer ${s1}\``,
         `- **Resume:** \`claude --resume ${sid(1)}\``,
@@ -755,6 +761,15 @@ describe('thread inbox: --repo and --json', () => {
         nextStage: null,
         stage: null,
         state: 'open',
+        // home-base-l2ejg.5 (D7): the state line, with the request's last
+        // change (br's updated_at, on the real clock).
+        stateLine: {
+          carriedBy: null,
+          kind: 'working',
+          next: 'code-done',
+          since: expect.any(String) as unknown as string,
+          state: 'Working',
+        },
         title: 'Refactor the parser',
       },
     ]);

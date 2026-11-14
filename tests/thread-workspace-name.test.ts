@@ -5,6 +5,7 @@
  */
 
 import type {SpawnOutcome} from '../src/thread/capture';
+import type {ChainNamer} from '../src/thread/chain-names';
 import type {CmuxCall, CmuxRunner} from '../src/thread/cmux';
 import type {ChainReaders} from '../src/thread/handoff-chain';
 import type {SessionModel} from '../src/thread/session-model';
@@ -33,6 +34,7 @@ import {
   captureRunRecord,
   runThreadCaptureHook,
 } from '../src/thread/capture';
+import {chainNamesPath} from '../src/thread/chain-names';
 import {realCmuxRunner} from '../src/thread/cmux';
 import {resolveThreadConfig} from '../src/thread/config';
 import {
@@ -1456,6 +1458,141 @@ describe('j8q3e.5.3 F3: the capture child names the workspace', () => {
         workspaceName: {kind: 'renamed', to: '[NAMED][#?] A real title'},
       });
       expect(outcome.kind === 'ran' ? outcome.passes : 0).toBeGreaterThan(0);
+    });
+  });
+
+  // home-base-l2ejg.11 (D5 of home-base-l2ejg.3): the capture names the chain.
+  describe('chain names: the capture self-heal', () => {
+    const name = (
+      w: {env: Record<string, string | undefined>; repo: string},
+      run: CmuxRunner,
+      options: {chainNamer?: ChainNamer; chainNames: boolean},
+    ) =>
+      applyCapture({
+        autoCommit: false,
+        cmux: run,
+        cwd: w.repo,
+        env: w.env,
+        nameWorkspaces: true,
+        sessionBeads: true,
+        sessionId: SESSION,
+        ...options,
+      });
+
+    const sessionBead = (w: {
+      env: Record<string, string | undefined>;
+      repo: string;
+    }) => {
+      const found = lookupWorkspaceSession({
+        cwd: w.repo,
+        env: w.env,
+        session: SESSION,
+      });
+      if (found.kind !== 'found') throw new Error(found.reason);
+      return found.session;
+    };
+    const chainLabels = (w: {
+      env: Record<string, string | undefined>;
+      repo: string;
+    }) => sessionBead(w).labels.filter((label) => label.startsWith('chain:'));
+
+    test('a first session is named from the registry, and this same capture names the workspace with it', async () => {
+      needBr();
+      const w = await captureWorld();
+      const cmux = fakeCmux([{id: WS_A, surfaces: [SURFACE], title: null}]);
+      const outcome = await name(w, cmux.run, {chainNames: true});
+      expect(outcome).toMatchObject({chainName: {kind: 'named'}, kind: 'ran'});
+      const given =
+        outcome.kind === 'ran' && outcome.chainName?.kind === 'named'
+          ? outcome.chainName.name
+          : null;
+      expect(given).toMatch(/^[A-Z][a-z]+$/u);
+      expect(chainLabels(w)).toEqual([`chain:${given ?? ''}`]);
+      expect(outcome).toMatchObject({
+        workspaceName: {
+          kind: 'renamed',
+          to: `[NAMED][${given ?? ''}] A real title`,
+        },
+      });
+      // The registry holds the one line, for this bead as the chain's root.
+      const lines = readFileSync(chainNamesPath(w.env), 'utf8')
+        .trim()
+        .split('\n');
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0] ?? '{}')).toMatchObject({
+        name: given,
+        root: sessionBead(w).beadId,
+      });
+      // The next prompt finds it named: nothing is written again.
+      const again = await name(w, cmux.run, {chainNames: true});
+      expect(again).toMatchObject({chainName: {kind: 'current'}});
+      expect(
+        captureRunRecord(SESSION, again, 5, new Date()).chainName,
+      ).toBeUndefined();
+      expect(
+        readFileSync(chainNamesPath(w.env), 'utf8').trim().split('\n'),
+      ).toHaveLength(1);
+    });
+
+    test('a registry that cannot be read never stops the capture: the session stays unnamed', async () => {
+      needBr();
+      const w = await captureWorld();
+      // A directory where the file should be: every read fails with EISDIR.
+      mkdirSync(chainNamesPath(w.env), {recursive: true});
+      const cmux = fakeCmux([{id: WS_A, surfaces: [SURFACE], title: null}]);
+      const outcome = await name(w, cmux.run, {chainNames: true});
+      expect(outcome).toMatchObject({
+        chainName: {kind: 'failed'},
+        kind: 'ran',
+        workspaceName: {kind: 'renamed', to: '[NAMED] A real title'},
+      });
+      expect(outcome.kind === 'ran' ? outcome.passes : 0).toBeGreaterThan(0);
+      expect(chainLabels(w)).toEqual([]);
+      expect(
+        captureRunRecord(SESSION, outcome, 5, new Date()).chainName,
+      ).toMatchObject({kind: 'failed'});
+    });
+
+    test('a registry that throws never stops the capture either', async () => {
+      needBr();
+      const w = await captureWorld();
+      const cmux = fakeCmux([{id: WS_A, surfaces: [SURFACE], title: null}]);
+      const outcome = await name(w, cmux.run, {
+        chainNamer: {
+          nameFor: () => {
+            throw new Error('registry exploded');
+          },
+        },
+        chainNames: true,
+      });
+      expect(outcome).toMatchObject({
+        chainName: {kind: 'failed'},
+        kind: 'ran',
+        workspaceName: {kind: 'renamed', to: '[NAMED] A real title'},
+      });
+      expect(outcome.kind === 'ran' ? outcome.passes : 0).toBeGreaterThan(0);
+      expect(chainLabels(w)).toEqual([]);
+    });
+
+    test('the knob off: no name is handed out or written, and the name is as before', async () => {
+      needBr();
+      const w = await captureWorld();
+      const cmux = fakeCmux([{id: WS_A, surfaces: [SURFACE], title: null}]);
+      const outcome = await name(w, cmux.run, {
+        chainNamer: {
+          nameFor: () => {
+            throw new Error('the knob is off: the namer must not be asked');
+          },
+        },
+        chainNames: false,
+      });
+      expect(outcome).toMatchObject({
+        kind: 'ran',
+        workspaceName: {kind: 'renamed', to: '[NAMED] A real title'},
+      });
+      expect(outcome).not.toHaveProperty('chainName');
+      expect(chainLabels(w)).toEqual([]);
+      expect(existsSync(chainNamesPath(w.env))).toBe(false);
     });
   });
 

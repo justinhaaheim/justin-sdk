@@ -150,6 +150,15 @@ export const THREAD_DEFAULT_WORKSPACE_DESCRIPTION = false;
 export const THREAD_DEFAULT_FULL_REPORT_COMMAND = false;
 
 /**
+ * home-base-l2ejg.11 (2026-11-14): every chain of handed-off sessions gets a
+ * name from a pool of Simpsons characters, shown in its titles as
+ * `[TAG][Moe-7]`. On by default (feature-knobs rule): Justin asked for it, and
+ * it is not controversial. Off: the titles show `[#7]` as before, and no name
+ * is handed out or written.
+ */
+export const THREAD_DEFAULT_CHAIN_NAMES = true;
+
+/**
  * Repo folder names that `thread inbox --by-repo` and the threads TUI's "by
  * repo" grouping list first, in this order (home-base-yukaf.9, D-PINS). Not a
  * feature gate: it only reorders groups. Default none.

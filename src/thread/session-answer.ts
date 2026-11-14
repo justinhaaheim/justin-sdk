@@ -15,8 +15,14 @@
  *       mid-walk loses nothing already typed.
  *   thread answer --ask <id> "<text>"
  *       answers one question, no prompt. <id> is its bead id, or its short id
- *       (`BD7`, home-base-1rxt0.4 D4): the open question of this session
- *       that its report shows with that id.
+ *       (`BD107`, home-base-1rxt0.4 D4, home-base-4wfoz D2): the one open
+ *       question of this session that holds it. An id from an older report
+ *       (per chain) still answers when it names one question here; an id this
+ *       session does not hold, or that names two, is refused with where it
+ *       lives, and nothing is written.
+ *   thread answer --ask <BD n | bead id> --relay "<text>"
+ *       answers a question of any session in any repo at its source
+ *       (home-base-l2ejg.6, D8; question-relay.ts). No session is needed.
  *
  * The answer is the question bead's CLOSE REASON, never a comment (critical
  * rule 3.2). The web answer page is not retargeted in this push (D5).
@@ -49,8 +55,16 @@ import {
   QUESTION_BEAD_TYPE,
 } from './ask-format';
 import {renderAsk, sortAsks} from './ask-render';
-import {parseShortId, questionIdOf, shortIdText} from './question-ids';
+import {locatedWords, locateQuestionId} from './question-id-locate';
+import {
+  chainNumbersOf,
+  parseShortId,
+  questionIdLabel,
+  questionIdOf,
+  shortIdText,
+} from './question-ids';
 import {readShownQuestionIds} from './question-ids-read';
+import {relayAnswer, relayedLines, type RelayOutcome} from './question-relay';
 import {readSessionIndex} from './session-index';
 import {
   selectSession,
@@ -70,6 +84,12 @@ export interface SessionAnswerOptions {
   ask: string | null;
   cwd?: string;
   env?: EnvLike;
+  /**
+   * `--relay` (home-base-l2ejg.6, D8): answer the `--ask` question wherever it
+   * lives, at its source (question-relay.ts). Off, an id this session does
+   * not hold is refused with where it lives (D2), exactly as before.
+   */
+  relay?: boolean;
   /** A session bead id, a session id, or a question id (the positional). */
   selector: string | null;
   /** `--session`, else CLAUDE_CODE_SESSION_ID. */
@@ -293,6 +313,7 @@ export async function walkQuestions(
 }
 
 export type SessionAnswerOutcome =
+  | Extract<RelayOutcome, {kind: 'relayed'}>
   | {
       id: string;
       kind: 'answeredOne';
@@ -312,11 +333,53 @@ function sessionLabel(session: FoundSession): string {
   return `${session.bead.id} "${session.bead.title}"`;
 }
 
+/** At most this many places are named in a refusal; the rest are counted. */
+const PLACES_NAMED = 6;
+
 /**
- * home-base-1rxt0.4 D4: the open question of this session that its report
- * shows as `BD<short>`. Resolved over the same rule the report uses
- * (questionIdsShown), so a number two questions share names the one shown with
- * it, never the other. Not found is refused, never guessed.
+ * The refusal for an id this session does not hold: where it does live, and a
+ * question back (home-base-4wfoz D2). Nothing is written.
+ */
+function notHeldRefusal(input: {
+  env: EnvLike;
+  session: FoundSession;
+  short: number;
+}): string {
+  const text = shortIdText(input.short);
+  const here = `${text} is not an open question of this session (${sessionLabel(input.session)}), so nothing was recorded.`;
+  let located: ReturnType<typeof locateQuestionId>;
+  try {
+    located = locateQuestionId({
+      env: input.env,
+      firstDirs: [input.session.beadsDir],
+      number: input.short,
+    });
+  } catch (error) {
+    return `${here} Where ${text} lives could not be looked up: ${error instanceof Error ? error.message : String(error)}. Which question did you mean? Answer it by its bead id.`;
+  }
+  const {found, problems} = located;
+  const unread =
+    problems.length > 0
+      ? ` These could not be read, so it may be there too: ${problems.join('; ')}.`
+      : '';
+  if (found.length === 0) {
+    return `${here} No question in any known repo holds ${text}.${unread} Which question did you mean? Answer it by its bead id.`;
+  }
+  const named = found.slice(0, PLACES_NAMED).map(locatedWords);
+  const more =
+    found.length > PLACES_NAMED
+      ? `; and ${found.length - PLACES_NAMED} more`
+      : '';
+  return `${here} ${text} is ${found.length === 1 ? '' : `held by ${found.length} questions: `}${named.join('; ')}${more}.${unread} Did you mean ${found.length === 1 ? 'that question' : 'one of these'}? Answer it in its own session, or by its bead id.`;
+}
+
+/**
+ * home-base-1rxt0.4 D4 and home-base-4wfoz D2: the ONE open question of this
+ * session that `BD<short>` names. It names a question when that question
+ * carries the D2 label `qid:<short>`, or, for an id from a report printed
+ * before D2, an old per-chain label numbered `<short>`. An id that names no
+ * open question here, or two of them, is refused with a question back and
+ * nothing is written: never a guess.
  */
 function resolveShortId(input: {
   env: EnvLike;
@@ -351,9 +414,19 @@ function resolveShortId(input: {
     };
   }
   const {open, shown} = read;
-  const matches = open.filter(
-    (question) => shown.byId.get(question.id)?.text === text,
-  );
+  const matches = open.filter((question) => {
+    const id = questionIdOf(question.labels);
+    if (id.kind === 'one' && id.number === input.short) return true;
+    // A `bad` read (two D2 labels) still holds this number: it counts, so the
+    // id names two questions rather than silently naming the other one.
+    if (
+      id.kind === 'bad' &&
+      question.labels.includes(questionIdLabel(input.short))
+    ) {
+      return true;
+    }
+    return chainNumbersOf(question.labels).includes(input.short);
+  });
   const [only] = matches;
   if (only != null && matches.length === 1) {
     const db = resolveRecordedBeadsDb(only.beadsDir);
@@ -363,14 +436,29 @@ function resolveShortId(input: {
         reason: `${text} is ${only.id}, whose beads DB in ${only.beadsDir} could not be found${db.kind === 'failed' ? `: ${db.reason}` : ''}`,
       };
     }
-    return {db: db.db, issue: only, kind: 'found', shortId: text};
+    // Recorded with the id the report shows for it now, which is the one to
+    // check the answer against.
+    const now = shown.byId.get(only.id);
+    return {
+      db: db.db,
+      issue: only,
+      kind: 'found',
+      shortId: now != null && now.why == null ? now.text : text,
+    };
   }
-  const ids = open
-    .map((question) => shown.byId.get(question.id)?.text)
-    .filter((id): id is string => id != null);
+  if (matches.length > 1) {
+    return {
+      kind: 'failed',
+      reason: `${text} names ${matches.length} open questions of ${sessionLabel(selection.session)}, so nothing was recorded: ${matches.map((question) => `${question.id} "${question.title}"`).join('; ')}. Which one did you mean? Answer it by its bead id.`,
+    };
+  }
   return {
     kind: 'failed',
-    reason: `no open question of ${sessionLabel(selection.session)} is shown as ${text}${ids.length > 0 ? ` (its open questions: ${ids.join(', ')})` : ''}`,
+    reason: notHeldRefusal({
+      env: input.env,
+      session: selection.session,
+      short: input.short,
+    }),
   };
 }
 
@@ -394,6 +482,12 @@ export async function answerSessionQuestions(
         message:
           'give the question id and the answer: thread answer --ask <id> "<answer>"',
       };
+    }
+    if (options.relay === true) {
+      const relayed = relayAnswer({ask: id, env, reason: answerReason(text)});
+      return relayed.kind === 'relayed'
+        ? relayed
+        : {kind: 'failed', reason: relayed.reason};
     }
     let target: {db: string; issue: BrIssue; shortId: null | string};
     const short = parseShortId(id);
@@ -541,6 +635,8 @@ export function describeSessionAnswerOutcome(outcome: SessionAnswerOutcome): {
         exitCode: 0,
         lines: [`No open questions for ${outcome.session}.`],
       };
+    case 'relayed':
+      return {exitCode: 0, lines: relayedLines(outcome)};
     case 'walked': {
       const {answered, failures, skipped} = outcome.result;
       const lines = [

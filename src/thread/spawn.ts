@@ -81,6 +81,7 @@ import {
 } from '../cli-style';
 import {xdgStateHome} from '../health-notices';
 import {oneLine} from './ask-format';
+import {chainNamesKnob} from './chain-names';
 import {
   cmuxArgv,
   readSoleSurfaceOfWorkspace,
@@ -469,6 +470,8 @@ export function spawnMarks(input: {
   return successorMarks(
     labels,
     handoffNumberOf({id: continues, labels}, readers),
+    // home-base-l2ejg.11: a session that continues another keeps its name.
+    {chainNames: chainNamesKnob(input.dir, env)},
   );
 }
 

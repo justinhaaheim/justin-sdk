@@ -6,7 +6,9 @@
  * focus the new tab, # of open requests vs total, etc. And we should print the
  * command to show the full status report if needed."
  *
- * FOUR FIELDS, one per line with a bold label (home-base terminal style):
+ * FOUR FIELDS, one per line with a bold label (home-base terminal style),
+ * and a fifth when the chain has a name (home-base-l2ejg.11):
+ *   Chain         its name, `Moe`, which the next session keeps
  *   This session  its own number, `#7` (handoffNumberOf), never a guess
  *   New tab       the focus command, or the refusal or deferral and its reason
  *   Requests      open of total, as the handoff block counted them
@@ -46,6 +48,11 @@ export type HandoffSummaryTab =
   | {detail: string; kind: 'refused'; reason: HandoffRefusalReason};
 
 export interface HandoffSummaryInput {
+  /**
+   * The chain's name (home-base-l2ejg.11), `Moe` or `Moe II`. Absent or
+   * null: no name (the knob is off, or the session has none), and no line.
+   */
+  chain?: null | string;
   /** This session's checkout, which the commands `cd` into; null when unknown. */
   checkout: null | string;
   /** This session's own number, the one its successor's name adds 1 to. */
@@ -137,7 +144,17 @@ function summaryFields(input: HandoffSummaryInput): SummaryField[] {
             label: 'New tab',
             text: `none opened: the handoff was deferred (${input.tab.reason}): ${input.tab.detail}`,
           };
+  const chain = input.chain ?? null;
   return [
+    ...(chain == null || chain === ''
+      ? []
+      : [
+          {
+            code: null,
+            label: 'Chain',
+            text: `${chain} (the next session keeps the name)`,
+          },
+        ]),
     {code: null, label: 'This session', text: ownText(input.own)},
     tab,
     {code: null, label: 'Requests', text: requestsText(input.requests)},

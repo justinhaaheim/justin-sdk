@@ -36,7 +36,7 @@
 
 import type {BeadsWorkspace, BrTarget} from '../beads/br';
 import type {CmuxRunner} from './cmux';
-import type {PickUpDeps, PickUpOutcome} from './handoff-pickup';
+import type {PickUpDeps, PickUpLockWait, PickUpOutcome} from './handoff-pickup';
 import type {ChainRequestReaders} from './overarching';
 import type {EnvLike} from './paths';
 import type {AdoptedStatus} from './request-writes';
@@ -52,6 +52,7 @@ import {
   resolveRecordedBeadsDb,
 } from '../beads/br';
 import {sdkRun} from '../sdk-invocation';
+import {readCaptureLockHolder} from './capture-lock';
 import {carriedLines, describePickUp, pickUpHandoff} from './handoff-pickup';
 import {
   chainRequestList,
@@ -66,6 +67,7 @@ import {adoptBead, titleSetEdit} from './request-writes';
 import {
   AUTO_TITLE_LABEL,
   CONTINUES_LABEL_PREFIX,
+  PICKED_UP_LABEL,
   REQUEST_LABEL,
   resolveSession,
   SESSION_BEAD_PRIORITY,
@@ -119,6 +121,11 @@ export interface ThreadRequestOptions {
   here: boolean;
   now?: Date;
   /**
+   * home-base-ttztr: told once, when `--continues` first finds a running
+   * process holding the lock. The CLI prints it on stderr.
+   */
+  onPickupLockWait?: (line: string) => void;
+  /**
    * `--overarching` (home-base-jm5kg.5 D1): mark the filed or adopted request
    * as the overarching request of this session and the sessions it
    * continues, unmark every other one there, and give the session its title
@@ -128,10 +135,16 @@ export interface ThreadRequestOptions {
   /** What the pickup calls outside itself; tests inject failures. */
   pickupDeps?: Partial<PickUpDeps>;
   /**
+   * How long `--continues` waits while a RUNNING process holds the lock
+   * (home-base-ttztr). Default PICKUP_HOLDER_WAIT_MS.
+   */
+  pickupLockHolderWaitMs?: number;
+  /**
    * How long `--continues` waits for the per-session lock before it fails,
-   * naming the step. Default 30000 ms, polled every `pickupLockPollMs` (default
-   * 250). A capture child holds the lock for seconds, and the capture lock
-   * itself never waits (capture.ts).
+   * naming the step, when it cannot see the holder running. Default 30000 ms,
+   * polled every `pickupLockPollMs` (default 250). A capture child usually
+   * holds the lock for seconds, and the capture lock itself never waits
+   * (capture.ts).
    */
   pickupLockPollMs?: number;
   pickupLockWaitMs?: number;
@@ -204,11 +217,26 @@ export type ThreadRequestOutcome =
   | {agentId: string; kind: 'subagent'}
   | {id: string; kind: 'notFound'; searched: string[]}
   /** `--continues` alone: the pickup's outcome, and the command that re-runs it. */
-  | {kind: 'handoffPickup'; pickup: PickUpOutcome; retryCommand: string}
+  | {
+      kind: 'handoffPickup';
+      /** home-base-ttztr: the running holder it waited for first; null = none. */
+      lockWait: null | PickUpLockWait;
+      pickup: PickUpOutcome;
+      retryCommand: string;
+    }
   | {kind: 'disabled'; reason: string}
   | {kind: 'failed'; reason: string}
   | {kind: 'noSession'; reason: string}
   | {kind: 'usage'; message: string};
+
+/**
+ * home-base-ttztr: how long `--continues` waits while a running process holds
+ * the session's lock. On 2026-11-13 the capture hook's background pickup held it
+ * past the 30 s wait twice in a row, and was gone about a minute later. 90 s,
+ * not more: Claude Code's Bash tool stops a command at 120 s by default, and the
+ * pickup itself still has to run after the wait.
+ */
+export const PICKUP_HOLDER_WAIT_MS = 90_000;
 
 /** Collapse whitespace: a bead title is one line. */
 export function oneLineTitle(text: string): string {
@@ -260,35 +288,75 @@ async function pickUpUnderLock(input: {
   cwd: string;
   deps: Partial<PickUpDeps>;
   env: EnvLike;
+  /** How long it waits while a RUNNING process holds the lock (home-base-ttztr). */
+  holderWaitMs: number;
   now: Date | undefined;
+  /** Called once, when it first finds a running process holding the lock. */
+  onWait: (line: string) => void;
   pollMs: number;
   session: Extract<SessionResolution, {kind: 'found'}>;
   sessionId: string;
   waitMs: number;
-}): Promise<PickUpOutcome> {
+}): Promise<{lockWait: null | PickUpLockWait; outcome: PickUpOutcome}> {
   const {env, sessionId} = input;
   const {releaseCaptureLock, tryCaptureLock} = await import('./capture');
-  const deadline = Date.now() + input.waitMs;
+  const started = Date.now();
+  // home-base-ttztr: a holder this cannot see running (an unreadable lock, a
+  // pid it cannot check) gets `waitMs`, as before. A running one is the capture
+  // hook's background run, which can hold the lock past 30 s on a loaded Mac,
+  // so it gets `holderWaitMs`. A measurably dead holder's lock is taken by
+  // tryCaptureLock itself, capture.ts's one rule (capture-lock.ts).
+  const deadline = started + input.waitMs;
+  const holderDeadline = started + Math.max(input.waitMs, input.holderWaitMs);
+  let lockWait: null | PickUpLockWait = null;
+  const failed = (reason: string) => ({
+    lockWait,
+    outcome: {
+      done: {
+        alreadyHeld: {questions: [], requests: []},
+        carried: {questions: [], requests: []},
+        link: null,
+        pickedUpLabelled: false,
+        renamedSession: null,
+        workspaceNote: null,
+      },
+      kind: 'failed' as const,
+      reason,
+      step: 'lock' as const,
+    },
+  });
   while (!tryCaptureLock(sessionId, env)) {
-    if (Date.now() >= deadline) {
-      return {
-        done: {
-          alreadyHeld: {questions: [], requests: []},
-          carried: {questions: [], requests: []},
-          link: null,
-          pickedUpLabelled: false,
-          renamedSession: null,
-          workspaceNote: null,
-        },
-        kind: 'failed',
-        reason: `another process held this session's lock for ${Math.round(input.waitMs / 1000)} s, or the lock could not be taken, so nothing was written`,
-        step: 'lock',
+    const holder = readCaptureLockHolder(sessionId, env);
+    const now = Date.now();
+    if (holder.kind === 'alive' && lockWait == null) {
+      // Read once, so the output can say whether the holder did the pickup.
+      const mine = brShow({db: input.session.db, env}, input.session.bead.id);
+      lockWait = {
+        holderPid: holder.pid,
+        pickedUpBefore:
+          mine.kind === 'ok'
+            ? mine.issue.labels.includes(PICKED_UP_LABEL)
+            : null,
+        waitedMs: 0,
       };
+      input.onWait(
+        `thread request: process ${holder.pid} holds this session's lock, most likely the capture hook's background run; waiting for it, up to ${Math.round((holderDeadline - started) / 1000)} s.`,
+      );
     }
-    await sleep(Math.max(1, Math.min(input.pollMs, deadline - Date.now())));
+    if (lockWait != null) lockWait.waitedMs = now - started;
+    const limit = holder.kind === 'alive' ? holderDeadline : deadline;
+    if (now >= limit) {
+      return failed(
+        holder.kind === 'alive'
+          ? `process ${holder.pid} still holds this session's lock after ${Math.round((now - started) / 1000)} s, most likely the capture hook's background pickup, so nothing was written. Run ${sdkRun('thread status')} in a minute: it says whether that pickup finished`
+          : `another process held this session's lock for ${Math.round(input.waitMs / 1000)} s, or the lock could not be taken, so nothing was written`,
+      );
+    }
+    await sleep(Math.max(1, Math.min(input.pollMs, limit - now)));
   }
+  if (lockWait != null) lockWait.waitedMs = Date.now() - started;
   try {
-    return await pickUpHandoff(
+    const outcome = await pickUpHandoff(
       {
         cwd: input.cwd,
         env,
@@ -302,6 +370,7 @@ async function pickUpUnderLock(input: {
       },
       input.deps,
     );
+    return {lockWait, outcome};
   } finally {
     releaseCaptureLock(sessionId, env);
   }
@@ -576,13 +645,15 @@ export async function fileRequest(
   const pickUp = async (
     found: Extract<SessionResolution, {kind: 'found'}>,
     syncNames: PickUpDeps['syncNames'],
-  ): Promise<PickUpOutcome> =>
+  ): Promise<{lockWait: null | PickUpLockWait; outcome: PickUpOutcome}> =>
     await pickUpUnderLock({
       continues: continues ?? '',
       cwd,
       deps: {syncNames, ...options.pickupDeps},
       env,
+      holderWaitMs: options.pickupLockHolderWaitMs ?? PICKUP_HOLDER_WAIT_MS,
       now: options.now,
+      onWait: options.onPickupLockWait ?? (() => undefined),
       pollMs: options.pickupLockPollMs ?? 250,
       session: found,
       sessionId,
@@ -594,11 +665,13 @@ export async function fileRequest(
     if (usable.kind !== 'found') {
       return {checkoutPath: usable.checkoutPath, kind: 'checkoutMissing'};
     }
+    const picked = await pickUp(usable, (names) =>
+      workspaceNameFollowUp({...names, run: options.cmux}),
+    );
     return {
       kind: 'handoffPickup',
-      pickup: await pickUp(usable, (names) =>
-        workspaceNameFollowUp({...names, run: options.cmux}),
-      ),
+      lockWait: picked.lockWait,
+      pickup: picked.outcome,
       retryCommand,
     };
   }
@@ -825,7 +898,7 @@ export async function fileRequest(
         `this session was NOT linked to ${continues}: its session bead's checkout is gone`,
       );
     } else {
-      pickup = await pickUp(usable, () => Promise.resolve(null));
+      pickup = (await pickUp(usable, () => Promise.resolve(null))).outcome;
       if (pickup.kind === 'picked-up') {
         continued = {oldBeadId: pickup.oldBeadId, oldTitle: pickup.oldTitle};
       } else if (pickup.kind === 'failed') {
@@ -985,7 +1058,11 @@ export function describeRequestOutcome(outcome: ThreadRequestOutcome): {
         ],
       };
     case 'handoffPickup':
-      return describePickUp(outcome.pickup, outcome.retryCommand);
+      return describePickUp(
+        outcome.pickup,
+        outcome.retryCommand,
+        outcome.lockWait,
+      );
     case 'subagent':
       return {
         exitCode: 1,
@@ -1006,7 +1083,12 @@ export function describeRequestOutcome(outcome: ThreadRequestOutcome): {
 export async function runThreadRequest(
   options: ThreadRequestOptions,
 ): Promise<number> {
-  const outcome = await fileRequest(options);
+  // home-base-ttztr: the wait line on stderr too, as it happens.
+  const outcome = await fileRequest({
+    ...options,
+    onPickupLockWait:
+      options.onPickupLockWait ?? ((line) => console.error(line)),
+  });
   // home-base-4ay2j D1: the one loud line, on stderr so stdout keeps its shape.
   if (outcome.kind === 'filed' && outcome.repair != null) {
     console.error(outcome.repair.line);

@@ -28,6 +28,86 @@ export function git(cwd: string, args: string[]): string {
   });
 }
 
+/** The identity every fixture repo commits as. */
+export const FIXTURE_IDENTITY = {email: 'test@example.com', name: 'Test'};
+
+export type FixtureRepoConfig = {
+  /** `core.excludesFile`; absent: not set. */
+  excludesFile?: string;
+  /** `user.email`, then `user.name`; absent: neither is set. */
+  identity?: {email: string; name: string};
+};
+
+/**
+ * A value `git config` writes as it is: no quoting, no escapes. Anything else
+ * (a space, `#`, `;`, a quote, a backslash, a control character) goes through
+ * `git config` itself.
+ */
+const PLAIN_CONFIG_VALUE = /^[A-Za-z0-9._@/+:-]+$/;
+
+/**
+ * The `.git/config` that `git config user.email`, `git config user.name` and
+ * then `git config core.excludesFile` would leave, run in that order on the
+ * config `git init` just wrote; null when that is not certain.
+ *
+ * It is certain only for the config a fresh `git init` writes: one `[core]`
+ * section and nothing else. `git config` appends a key it does not find to
+ * the end of its section, and a section it does not find to the end of the
+ * file, with a tab before the key and ` = ` around the value. So user.email
+ * creates `[user]` at the end, user.name joins it, and core.excludesFile goes
+ * at the end of `[core]`, which is just before `[user]`. tests/git-fixtures.test.ts
+ * compares the result byte for byte with what git itself writes.
+ */
+export function fixtureConfigText(
+  initConfig: string,
+  config: FixtureRepoConfig,
+): string | null {
+  const lines = initConfig.split('\n');
+  if (lines[0] !== '[core]' || !initConfig.endsWith('\n')) return null;
+  if (lines.slice(1).some((line) => line.startsWith('['))) return null;
+  const values = [
+    config.excludesFile,
+    config.identity?.email,
+    config.identity?.name,
+  ];
+  if (values.some((v) => v != null && !PLAIN_CONFIG_VALUE.test(v))) {
+    return null;
+  }
+  let text = initConfig;
+  if (config.excludesFile != null) {
+    text += `\texcludesFile = ${config.excludesFile}\n`;
+  }
+  if (config.identity != null) {
+    text += `[user]\n\temail = ${config.identity.email}\n\tname = ${config.identity.name}\n`;
+  }
+  return text;
+}
+
+/**
+ * `git init -q -b main .` in `root`, then the fixture's local config, in ONE
+ * git process where the old four (init, user.email, user.name,
+ * core.excludesFile) were four (home-base-ejsq2.2). The repo it leaves is the
+ * one those four left, byte for byte: `.git/config` is written as
+ * `fixtureConfigText` says git would write it, and when that is not certain
+ * the keys go through `git config`, as before.
+ */
+export function initFixtureRepo(root: string, config: FixtureRepoConfig): void {
+  git(root, ['init', '-q', '-b', 'main', '.']);
+  const configPath = join(root, '.git', 'config');
+  const text = fixtureConfigText(readFileSync(configPath, 'utf-8'), config);
+  if (text != null) {
+    writeFileSync(configPath, text);
+    return;
+  }
+  if (config.identity != null) {
+    git(root, ['config', 'user.email', config.identity.email]);
+    git(root, ['config', 'user.name', config.identity.name]);
+  }
+  if (config.excludesFile != null) {
+    git(root, ['config', 'core.excludesFile', config.excludesFile]);
+  }
+}
+
 /**
  * A bare git repo carrying the tag this SDK would pin to.
  *
@@ -51,9 +131,7 @@ export function sdkRemoteWithOwnTag(
   const host = register(createSandbox());
   const work = join(host.path, 'remote-work');
   mkdirSync(work, {recursive: true});
-  git(work, ['init', '-q', '-b', 'main', '.']);
-  git(work, ['config', 'user.email', 'test@example.com']);
-  git(work, ['config', 'user.name', 'Test']);
+  initFixtureRepo(work, {identity: FIXTURE_IDENTITY});
   git(work, ['commit', '-q', '--allow-empty', '-m', 'init']);
   const version = JSON.parse(
     readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf-8'),
@@ -90,12 +168,12 @@ export function initPrimary(
 ): string {
   const primary = join(sb.path, 'primary');
   mkdirSync(primary, {recursive: true});
-  git(primary, ['init', '-q', '-b', 'main', '.']);
-  git(primary, ['config', 'user.email', 'test@example.com']);
-  git(primary, ['config', 'user.name', 'Test']);
   const excludes = join(primary, '.git', 'controlled-excludes');
+  initFixtureRepo(primary, {
+    excludesFile: excludes,
+    identity: FIXTURE_IDENTITY,
+  });
   writeFileSync(excludes, '');
-  git(primary, ['config', 'core.excludesFile', excludes]);
   for (const [relPath, content] of Object.entries(files)) {
     write(primary, relPath, content);
   }
@@ -128,12 +206,9 @@ export function initRepo(
 ): string {
   const root = join(sb.path, name);
   mkdirSync(root, {recursive: true});
-  git(root, ['init', '-q', '-b', 'main', '.']);
-  git(root, ['config', 'user.email', 'test@example.com']);
-  git(root, ['config', 'user.name', 'Test']);
   const excludes = join(root, '.git', 'controlled-excludes');
+  initFixtureRepo(root, {excludesFile: excludes, identity: FIXTURE_IDENTITY});
   writeFileSync(excludes, '');
-  git(root, ['config', 'core.excludesFile', excludes]);
   for (const [relPath, content] of Object.entries(files)) {
     write(root, relPath, content);
   }

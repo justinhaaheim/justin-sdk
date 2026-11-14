@@ -572,6 +572,12 @@ export function decideWorkspaceName(input: {
 
 export interface WorkspaceSession {
   beadId: string;
+  /**
+   * componentConfig.thread.chainNames where the session ran
+   * (home-base-l2ejg.11): on, the name shows the chain's name from its
+   * `chain:` label, `[TAG][Moe-7]`. Absent or false: `[TAG][#7]`.
+   */
+  chainNames?: boolean;
   labels: readonly string[];
   /**
    * home-base-jm5kg.11.2: why overarchingShort is unread, when the reason is that
@@ -701,7 +707,7 @@ export function workspaceToolPart(session: WorkspaceSession): string {
   return sessionDisplayName(
     session.repoTag,
     short?.ok === true && short.value != null ? short.value : session.title,
-    sessionMarksOf(session.labels),
+    sessionMarksOf(session.labels, {chainNames: session.chainNames === true}),
   );
 }
 

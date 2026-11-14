@@ -9,12 +9,25 @@ import type {MessageLogRead} from '../src/thread/message-log';
 import type {Sandbox} from './sandbox';
 
 import {afterEach, describe, expect, setDefaultTimeout, test} from 'bun:test';
-import {chmodSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import {delimiter, dirname, join} from 'node:path';
 
 import {brShow, brUpdate, findBeadsWorkspace, runBr} from '../src/beads/br';
 import {messageLogPath} from '../src/thread/archive';
+import {
+  type ChainNamer,
+  chainNamesPath,
+  readChainNames,
+  registryChainNamer,
+} from '../src/thread/chain-names';
 import {runAutoPickup} from '../src/thread/handoff-auto-pickup-run';
+import {walkedSessionMarks} from '../src/thread/handoff-marks';
 import {
   continuationLabels,
   handoffNumberOf,
@@ -37,8 +50,10 @@ import {
 import {ensureSessionBead, MAYOR_ROLE_LABEL} from '../src/thread/session-bead';
 import {
   handOff,
+  healChainName,
   healHandoffNumber,
   linkContinuation,
+  realHandoffNumberReaders,
 } from '../src/thread/session-handoff';
 import {
   NO_MARKS,
@@ -52,6 +67,7 @@ import {
   spawnMarks,
   spawnWorkspaceName,
 } from '../src/thread/spawn';
+import {handedOffTabTitle} from '../src/thread/tab-title';
 import {workspaceToolPart} from '../src/thread/workspace-name';
 import {initRepo} from './git-fixtures';
 import {needBr, PINNED_BR} from './pinned-br';
@@ -1070,5 +1086,183 @@ describe('D9: the workspace name and the tab title', () => {
         overarchingShort: {ok: true, value: 'db move'},
       }),
     ).toBe('[HOME][#2] db move');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Chain names on a real chain (home-base-l2ejg.11, D5 of home-base-l2ejg.3)
+// ---------------------------------------------------------------------------
+
+describe('chain names: a handed-off chain keeps one name', () => {
+  const on = {chainNames: true};
+  const healOf = (w: World, session: string, namer: ChainNamer) =>
+    healChainName({
+      beadId: beadOf(w, session),
+      db: w.db,
+      enabled: true,
+      env: w.env,
+      labels: labelsOf(w, session),
+      namer,
+    });
+  const nameOf = (heal: ReturnType<typeof healChainName>): string => {
+    if (heal.kind !== 'named') throw new Error(`not named: ${heal.kind}`);
+    return heal.name;
+  };
+  const chainLabels = (w: World, session: string) =>
+    labelsOf(w, session).filter((label) => label.startsWith('chain:'));
+  const neverAsked: ChainNamer = {
+    nameFor: () => {
+      throw new Error('the namer must not be asked');
+    },
+  };
+
+  test('a successor keeps its predecessor`s name, in every name, through two handoffs', () => {
+    const w = world([A, B, C]);
+    const namer = registryChainNamer(w.env);
+    const name = nameOf(healOf(w, A, namer));
+    expect(chainLabels(w, A)).toEqual([`chain:${name}`]);
+    link(w, A, B);
+    // The link copies the name in the same write as continues: (D4).
+    expectOneWrite(w, beadOf(w, A), [`chain:${name}`]);
+    expect(healOf(w, B, neverAsked)).toEqual({kind: 'current'});
+    link(w, B, C);
+    expect(healOf(w, C, neverAsked)).toEqual({kind: 'current'});
+
+    const shown = (session: string) =>
+      sessionDisplayName(
+        'HOME',
+        TITLE,
+        sessionMarksOf(labelsOf(w, session), on),
+      );
+    expect(shown(A)).toBe(`[HOME][${name}] ${TITLE}`);
+    expect(shown(B)).toBe(`[HOME][${name}-1] ${TITLE}`);
+    expect(shown(C)).toBe(`[HOME][${name}-2] ${TITLE}`);
+    // The workspace name, the next successor's launch name, the old tab.
+    expect(
+      workspaceToolPart({
+        beadId: beadOf(w, C),
+        chainNames: true,
+        labels: labelsOf(w, C),
+        repo: 'chain-repo',
+        repoTag: 'HOME',
+        sessionId: C,
+        title: TITLE,
+      }),
+    ).toBe(`[HOME][${name}-2] ${TITLE}`);
+    const own = {kind: 'known', number: 2} as const;
+    expect(
+      sessionName('HOME', TITLE, successorMarks(labelsOf(w, C), own, on)),
+    ).toBe(`[HOME][${name}-3] ${TITLE}`);
+    expect(
+      handedOffTabTitle({
+        chain: name,
+        mayor: false,
+        own,
+        repoTag: 'HOME',
+        title: TITLE,
+      }),
+    ).toBe(`↪ #2 handed off to #3: [HOME][${name}] ${TITLE}`);
+    // The knob off: the same labels show [#2], as before chain names.
+    expect(
+      sessionDisplayName('HOME', TITLE, sessionMarksOf(labelsOf(w, C))),
+    ).toBe(`[HOME][#2] ${TITLE}`);
+    // One chain, one line in the registry, under its first session.
+    const read = readChainNames(w.env);
+    if (read.kind !== 'read') throw new Error(read.reason);
+    expect(read.entries.map((entry) => entry.root)).toEqual([beadOf(w, A)]);
+  });
+
+  test('a chain with no label is named from the registry by its first session, and no bead is written', () => {
+    const w = world([A, B]);
+    link(w, A, B);
+    const before = readFileSync(w.brLog, 'utf8').length;
+    const readers = realHandoffNumberReaders({env: w.env, fallbackDbs: [w.db]});
+    const namer = registryChainNamer(w.env);
+    const marksOf = (session: string) =>
+      walkedSessionMarks(
+        {id: beadOf(w, session), labels: labelsOf(w, session)},
+        readers,
+        {chainNames: true, namer},
+      );
+    const second = marksOf(B);
+    const first = marksOf(A);
+    expect(second.chain).toMatch(/^[A-Z][a-z]+$/u);
+    expect(first.chain).toBe(second.chain);
+    expect(second.handoff).toBe(1);
+    const calls = readFileSync(w.brLog, 'utf8')
+      .slice(before)
+      .split('\n')
+      .filter((line) => line !== '');
+    expect(calls.length).toBeGreaterThan(0);
+    expect(
+      calls.filter((line) =>
+        /(^| )(update|create|close|label)( |$)/u.test(line),
+      ),
+    ).toEqual([]);
+    expect(chainLabels(w, A)).toEqual([]);
+    expect(chainLabels(w, B)).toEqual([]);
+    const read = readChainNames(w.env);
+    if (read.kind !== 'read') throw new Error(read.reason);
+    expect(read.entries).toMatchObject([{root: beadOf(w, A)}]);
+    // The knob off: no name, and the namer is not asked.
+    expect(
+      walkedSessionMarks({id: beadOf(w, B), labels: labelsOf(w, B)}, readers, {
+        chainNames: false,
+        namer: neverAsked,
+      }).chain,
+    ).toBeUndefined();
+  });
+
+  test('a session named as its own chain before it linked takes its chain`s name on the next heal', () => {
+    const w = world([A, B]);
+    const namer = registryChainNamer(w.env);
+    const chain = nameOf(healOf(w, A, namer));
+    const own = nameOf(healOf(w, B, namer));
+    expect(own).not.toBe(chain);
+    link(w, A, B);
+    // Two names: neither is shown until the heal settles them.
+    expect(chainLabels(w, B).sort()).toEqual(
+      [`chain:${chain}`, `chain:${own}`].sort(),
+    );
+    expect(sessionMarksOf(labelsOf(w, B), on).chain).toBeUndefined();
+    expect(nameOf(healOf(w, B, namer))).toBe(chain);
+    expect(chainLabels(w, B)).toEqual([`chain:${chain}`]);
+  });
+
+  test('a successor named as its own chain, whose predecessor had none, is renamed after its first session', () => {
+    const w = world([A, B]);
+    const namer = registryChainNamer(w.env);
+    const own = nameOf(healOf(w, B, namer));
+    link(w, A, B);
+    expect(chainLabels(w, B)).toEqual([`chain:${own}`]);
+    const chain = nameOf(healOf(w, B, namer));
+    expect(chain).not.toBe(own);
+    expect(chainLabels(w, B)).toEqual([`chain:${chain}`]);
+    // The first session, named on its own next prompt, gets the same name.
+    expect(nameOf(healOf(w, A, namer))).toBe(chain);
+  });
+
+  test('the knob off: nothing is read or written', () => {
+    const w = world([A]);
+    const before = readFileSync(w.brLog, 'utf8');
+    expect(
+      healChainName({
+        beadId: beadOf(w, A),
+        db: w.db,
+        enabled: false,
+        env: w.env,
+        labels: [],
+        namer: neverAsked,
+      }),
+    ).toEqual({kind: 'off'});
+    expect(readFileSync(w.brLog, 'utf8')).toBe(before);
+    expect(existsSync(chainNamesPath(w.env))).toBe(false);
+  });
+
+  test('a namer that throws leaves the session unnamed, and nothing throws', () => {
+    const w = world([A]);
+    const healed = healOf(w, A, neverAsked);
+    expect(healed).toMatchObject({kind: 'failed'});
+    expect(chainLabels(w, A)).toEqual([]);
   });
 });

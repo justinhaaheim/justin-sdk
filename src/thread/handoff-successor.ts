@@ -67,6 +67,7 @@ import {join} from 'node:path';
 import {saysBeadsLocked} from '../beads/br';
 import {fieldLines, outputStyle, sectionHeader, stepColumn} from '../cli-style';
 import {SDK_BIN_BY_PATH, SDK_HANDOFF_CALL} from '../sdk-invocation';
+import {chainNamesKnob} from './chain-names';
 import {
   cmuxArgv,
   gateCmuxRunner,
@@ -120,7 +121,11 @@ import {
   handOff,
   realHandoffNumberReaders,
 } from './session-handoff';
-import {SESSION_NAME_LIMIT, sessionName} from './session-name';
+import {
+  SESSION_NAME_LIMIT,
+  type SessionMarksOptions,
+  sessionName,
+} from './session-name';
 import {selectSession, sessionBeadsKnob} from './session-select';
 import {handedOffTabTitle} from './tab-title';
 import {sessionRepoOf} from './workspace-name-session';
@@ -209,11 +214,12 @@ export function successorNameOf(
   session: FoundSession,
   repoTag: null | string,
   numbers: {own: HandoffNumber},
+  options: SessionMarksOptions = {},
 ): string {
   return sessionName(
     repoTag,
     session.bead.title,
-    successorMarks(session.bead.labels, numbers.own),
+    successorMarks(session.bead.labels, numbers.own, options),
   );
 }
 
@@ -222,9 +228,12 @@ export function oldTabTitleOf(
   session: FoundSession,
   repoTag: null | string,
   numbers: {own: HandoffNumber},
+  options: SessionMarksOptions = {},
 ): string {
+  const marks = successorMarks(session.bead.labels, numbers.own, options);
   return handedOffTabTitle({
-    mayor: successorMarks(session.bead.labels, numbers.own).mayor,
+    chain: marks.chain ?? null,
+    mayor: marks.mayor,
     own: numbers.own,
     repoTag,
     title: session.bead.title,
@@ -630,8 +639,13 @@ export async function handoffWithSuccessor(
     ),
   };
   const repoTag = sessionRepoTag(session, env);
-  const name = successorNameOf(session, repoTag, numbers);
-  const oldTabTitle = oldTabTitleOf(session, repoTag, numbers);
+  // home-base-l2ejg.11: the chain's name, from this session's own label: the
+  // successor keeps it, and the summary says it.
+  const chainNames = {chainNames: chainNamesKnob(cwd, env)};
+  const name = successorNameOf(session, repoTag, numbers, chainNames);
+  const oldTabTitle = oldTabTitleOf(session, repoTag, numbers, chainNames);
+  const chain =
+    successorMarks(session.bead.labels, numbers.own, chainNames).chain ?? null;
   // home-base-9ihcl.6: the short summary a handing-off session ends with.
   const summaryOf = (
     tab: HandoffSummaryTab,
@@ -639,6 +653,7 @@ export async function handoffWithSuccessor(
   ): string =>
     handoffSummary(
       {
+        chain,
         checkout: session.checkoutPath,
         own: numbers.own,
         requests,

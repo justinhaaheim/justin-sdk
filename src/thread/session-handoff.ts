@@ -23,6 +23,7 @@
  * the link (a "not here" guess could label the wrong bead) — rule 7.
  */
 
+import type {ChainNamer} from './chain-names';
 import type {ChainReaders} from './handoff-chain';
 import type {EnvLike} from './paths';
 import type {FoundSession} from './session-select';
@@ -42,9 +43,21 @@ import {markdownItems} from '../cli-style';
 import {sdkRun} from '../sdk-invocation';
 import {oneLine} from './ask-format';
 import {renderAsks} from './ask-render';
+import {
+  chainNameLabel,
+  chainNameOfLabels,
+  chainNameText,
+  sameChainName,
+} from './chain-name';
+import {
+  chainNamesKnob,
+  readChainNames,
+  registryChainNamer,
+} from './chain-names';
 import {handoffDeferralMessage} from './handoff-gate';
 import {walkedSessionMarks} from './handoff-marks';
 import {
+  chainRootOf,
   continuationLabels,
   handoffNumberOf,
   mayorSuccessorSentence,
@@ -54,6 +67,7 @@ import {absoluteWhen, statusWords, tildeText} from './part-one';
 import {notFoundButUnresolved} from './session-answer';
 import {
   AUTO_TITLE_LABEL,
+  CHAIN_NAME_LABEL_PREFIX,
   CONTINUED_BY_LABEL_PREFIX,
   CONTINUES_LABEL_PREFIX,
   HANDED_OFF_LABEL,
@@ -238,6 +252,118 @@ export function healHandoffNumber(input: {
       kind: 'stamped',
       labels: [...labels, label],
       number: number.number,
+    };
+  } catch (error) {
+    return {detail: `threw: ${String(error)}`, kind: 'failed'};
+  }
+}
+
+// ---------------------------------------------------------------------------
+// The chain name (home-base-l2ejg.11): the capture's self-heal
+// ---------------------------------------------------------------------------
+
+export type ChainNameHeal =
+  /** componentConfig.thread.chainNames is off: nothing read, nothing written. */
+  | {kind: 'off'}
+  /** The bead holds its chain's name already. */
+  | {kind: 'current'}
+  /** The chain's first session could not be found, so nothing was written. */
+  | {detail: string; kind: 'unknown'}
+  | {detail: string; kind: 'failed'}
+  /** `labels` are the bead's as they are now, for the name syncs that follow. */
+  | {detail: string; kind: 'named'; labels: string[]; name: string};
+
+/**
+ * D5 of home-base-l2ejg.3: the current session's bead gets its chain's name
+ * when it has none. The name is the registry's for the chain's first session
+ * (chainRootOf), handed out there when the chain has none yet, then written as
+ * the bead's `chain:` label in one br write that also drops any other `chain:`
+ * label. Most sessions need nothing: a first session names itself once, and a
+ * successor is handed its predecessor's label by the link (continuationLabels).
+ *
+ * Re-resolved, as for no label: two different `chain:` labels (a session named
+ * as its own chain before it linked, then given its predecessor's by the
+ * link), and a successor whose one label the registry gave to the session
+ * itself as a root (the same, where the predecessor had no name to pass on).
+ *
+ * Never throws: the capture child calls this on every prompt, and a failure
+ * here must never stop a capture. It leaves the session unnamed and says why.
+ */
+export function healChainName(input: {
+  beadId: string;
+  /** Null when the caller does not know which DB holds the bead. */
+  db: null | string;
+  /** componentConfig.thread.chainNames. */
+  enabled: boolean;
+  env: EnvLike;
+  labels: readonly string[];
+  /** Tests inject these; the real ones read the registry and br. */
+  namer?: ChainNamer;
+  readers?: Pick<ChainReaders, 'showBead'>;
+}): ChainNameHeal {
+  const {beadId, db, env, labels} = input;
+  if (!input.enabled) return {kind: 'off'};
+  try {
+    const held = chainNameOfLabels(labels);
+    const continues = labels.some((label) =>
+      label.startsWith(CONTINUES_LABEL_PREFIX),
+    );
+    if (held.kind === 'one') {
+      if (!continues) return {kind: 'current'};
+      // A successor's one name is right unless the registry gave it to this
+      // very bead as a chain's first session. A registry that cannot be read
+      // cannot say so, and the label stays.
+      const read = readChainNames(env);
+      const ownRoot =
+        read.kind === 'read' &&
+        read.entries.some(
+          (entry) =>
+            entry.root === beadId && sameChainName(entry.name, held.name),
+        );
+      if (!ownRoot) return {kind: 'current'};
+    }
+    if (db == null) {
+      return {
+        detail: 'the beads DB of the session bead is not known',
+        kind: 'failed',
+      };
+    }
+    const root = continues
+      ? chainRootOf(
+          {id: beadId, labels},
+          input.readers ?? realHandoffNumberReaders({env, fallbackDbs: [db]}),
+        )
+      : ({kind: 'known', root: beadId} as const);
+    if (root.kind === 'unknown') {
+      return {detail: root.reason, kind: 'unknown'};
+    }
+    const named = (input.namer ?? registryChainNamer(env)).nameFor(root.root);
+    if (named.kind === 'failed') {
+      return {detail: named.reason, kind: 'failed'};
+    }
+    const label = chainNameLabel(named.name);
+    const others = labels.filter(
+      (other) => other.startsWith(CHAIN_NAME_LABEL_PREFIX) && other !== label,
+    );
+    if (labels.includes(label) && others.length === 0) return {kind: 'current'};
+    const written = brUpdate({db, env}, beadId, {
+      addLabels: labels.includes(label) ? [] : [label],
+      ...(others.length > 0 ? {removeLabels: others} : {}),
+    });
+    if (written.kind === 'failed') {
+      return {
+        detail: `br update failed: ${describeBrFailed(written)}`,
+        kind: 'failed',
+      };
+    }
+    return {
+      detail: `${beadId} labelled ${label} (chain root ${root.root}, ${named.kind} in the registry)${others.length > 0 ? `; removed ${others.join(', ')}` : ''}`,
+      kind: 'named',
+      labels: [
+        ...labels.filter((other) => !others.includes(other)),
+        ...(labels.includes(label) ? [] : [label]),
+      ],
+      name: chainNameText(named.name),
     };
   } catch (error) {
     return {detail: `threw: ${String(error)}`, kind: 'failed'};
@@ -468,6 +594,13 @@ export async function handoffBlock(input: {
             env: input.env,
             fallbackDbs: [join(bead.beadsDir, 'beads.db')],
           }),
+          // home-base-l2ejg.11: the chain's name, as Part 1 shows it.
+          chainNamesKnob(input.cwd, input.env)
+            ? {
+                chainNames: true,
+                namer: registryChainNamer(input.env, {assign: false}),
+              }
+            : {},
         );
   const fields = [
     `- **Session:** ${sessionDisplayName(model.repoTag, title, marks)} (${input.sessionBeadId})`,

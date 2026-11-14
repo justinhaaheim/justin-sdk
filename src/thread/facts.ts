@@ -32,6 +32,7 @@ import {readdirSync, statSync} from 'fs';
 import {homedir} from 'os';
 import {basename, dirname, join, resolve} from 'path';
 
+import {revParseBatchArgs, splitRevParseBatch} from '../git-rev-parse-batch';
 import {readTranscriptFacts} from '../usage-check';
 import {
   extractTranscriptMessages,
@@ -250,6 +251,34 @@ function git(cwd: string, args: string[]): GitRead {
   }
 }
 
+const TOP_LEVEL = ['rev-parse', '--show-toplevel'];
+const GIT_DIR = ['rev-parse', '--absolute-git-dir'];
+const COMMON_DIR = ['rev-parse', '--path-format=absolute', '--git-common-dir'];
+const HEAD_SHA = ['rev-parse', 'HEAD'];
+/** Last in the batch: `--abbrev-ref` abbreviates every revision after it. */
+const BRANCH = ['rev-parse', '--abbrev-ref', 'HEAD'];
+const BATCH = [TOP_LEVEL, GIT_DIR, COMMON_DIR, HEAD_SHA, BRANCH] as const;
+
+/**
+ * The five rev-parse answers below from ONE git call (home-base-ejsq2.3 part
+ * B), each as its own call's `git()` would have returned it; null when the
+ * batch is not a clean success, and the caller then runs the five as before.
+ */
+function revParseBatch(cwd: string): GitRead[] | null {
+  let out: string;
+  try {
+    out = execFileSync('git', revParseBatchArgs(BATCH), {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  } catch {
+    return null;
+  }
+  const lines = splitRevParseBatch(out, BATCH.length);
+  return lines?.map((line) => ({ok: true, value: line.trim()})) ?? null;
+}
+
 export interface GitFacts {
   aheadBehind: AheadBehind | null;
   branch: string | null;
@@ -290,27 +319,26 @@ export function readGitFacts(cwd: string): GitFacts {
     worktreePath: null,
   };
 
-  const topLevel = git(cwd, ['rev-parse', '--show-toplevel']);
+  // One git call for all five when it can; otherwise each runs alone, in the
+  // order and with the failure text it always had.
+  const batch = revParseBatch(cwd);
+  const topLevel = batch?.[0] ?? git(cwd, TOP_LEVEL);
   if (!topLevel.ok) {
     failures.push(`repoPath: ${topLevel.error}`);
     return facts;
   }
   facts.repoPath = topLevel.value;
 
-  const branch = git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  const branch = batch?.[4] ?? git(cwd, BRANCH);
   if (branch.ok) facts.branch = branch.value;
   else failures.push(`branch: ${branch.error}`);
 
-  const head = git(cwd, ['rev-parse', 'HEAD']);
+  const head = batch?.[3] ?? git(cwd, HEAD_SHA);
   if (head.ok) facts.headSha = head.value;
   else failures.push(`headSha: ${head.error}`);
 
-  const gitDir = git(cwd, ['rev-parse', '--absolute-git-dir']);
-  const commonDir = git(cwd, [
-    'rev-parse',
-    '--path-format=absolute',
-    '--git-common-dir',
-  ]);
+  const gitDir = batch?.[1] ?? git(cwd, GIT_DIR);
+  const commonDir = batch?.[2] ?? git(cwd, COMMON_DIR);
   if (gitDir.ok && commonDir.ok) {
     facts.isWorktree = resolve(gitDir.value) !== resolve(commonDir.value);
     facts.worktreePath = facts.isWorktree ? facts.repoPath : null;

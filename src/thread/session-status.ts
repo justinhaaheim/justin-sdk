@@ -627,6 +627,8 @@ export type MarkItem =
     }
   | {kind: 'autoTitle'; sessionBeadId: string; title: string}
   | {command: string; kind: 'pickupNotDone'; reason: string}
+  /** home-base-ttztr: not done, and an attempt holds the lock: no command. */
+  | {kind: 'pickupRunning'; pid: number}
   /**
    * home-base-ys9t7.9.1 (componentConfig.thread.titleSummary on; it replaces
    * autoTitle then): the session title no longer covers the conversation.
@@ -679,6 +681,18 @@ export type MarkItem =
    */
   | {kind: 'shortLabel'; request: TreeIssue}
   /**
+   * home-base-l2ejg.5 (D7): open requests with no stage on the ladder, in a
+   * session that made commits. One item per request up to UNSTAGED_LISTED;
+   * past that, ONE item naming them all, so What to mark stays rare enough
+   * to act on.
+   */
+  | {
+      commits: number;
+      kind: 'unstaged';
+      ladder: readonly string[];
+      requests: TreeIssue[];
+    }
+  /**
    * home-base-vzwbj.4.16 G2: the yield would be ⚠️ Open work, and this open
    * request is why — nothing blocks it. Says what to do with it: close it
    * (work done); keep working, or file the P0 it cannot move without (not
@@ -718,6 +732,12 @@ export type MarkItem =
    */
   | {bead: TreeIssue; kind: 'undecided'}
   | {kind: 'unchecked'; reason: string; what: string};
+
+/**
+ * home-base-l2ejg.5: up to this many unstaged requests get one What to mark
+ * item each; more fold into one item.
+ */
+export const UNSTAGED_LISTED = 3;
 
 /** Oldest first by created_at, then by id, so the order is stable. */
 function byCreatedAt(a: TreeIssue, b: TreeIssue): number {
@@ -968,6 +988,8 @@ export function whatToMark(
       kind: 'pickupNotDone',
       reason: options.pickup.reason,
     });
+  } else if (options.pickup?.kind === 'running') {
+    items.push({kind: 'pickupRunning', pid: options.pickup.pid});
   } else if (options.pickup?.kind === 'couldNotCheck') {
     items.push({
       kind: 'unchecked',
@@ -1013,6 +1035,42 @@ export function whatToMark(
       readShortLabel(node.request.labels) == null
     ) {
       items.push({kind: 'shortLabel', request: node.request});
+    }
+  }
+
+  // home-base-l2ejg.5 (D7): a session that made commits and left open
+  // requests with no stage. Rule 7: commits that could not be counted are
+  // said, never read as none. A model with no ladder (an odd or partial one)
+  // has no stage to ask for, so nothing is listed.
+  const ladder: readonly string[] = Array.isArray(model.stages)
+    ? model.stages
+    : [];
+  const unstaged = beads.requests
+    .map((node) => node.request)
+    .filter(
+      (request) =>
+        isOpen(request) && stageReached(request.labels, ladder) == null,
+    );
+  if (unstaged.length > 0 && ladder.length > 0) {
+    if (!git.commits.ok) {
+      items.push({
+        kind: 'unchecked',
+        reason: git.commits.reason,
+        what: 'whether the open requests with no stage need one (the commits of this session could not be counted)',
+      });
+    } else if (git.commits.value.count > 0) {
+      const base = {
+        commits: git.commits.value.count,
+        kind: 'unstaged' as const,
+        ladder,
+      };
+      if (unstaged.length > UNSTAGED_LISTED) {
+        items.push({...base, requests: unstaged});
+      } else {
+        for (const request of unstaged) {
+          items.push({...base, requests: [request]});
+        }
+      }
     }
   }
 

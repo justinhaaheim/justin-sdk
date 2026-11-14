@@ -1,135 +1,186 @@
 /**
- * Question ids like `BD7` (home-base-1rxt0.4 D4, decided by question
- * home-base-sg9q9.9, option a). Justin, 2026-11-12 (verbatim on
+ * Question ids like `BD107` (home-base-1rxt0.4 D4, decided by question
+ * home-base-sg9q9.9, option a; numbered machine-wide since home-base-4wfoz,
+ * design D2 in home-base-l2ejg.3). Justin, 2026-11-12 (verbatim on
  * home-base-sg9q9.2): "if I answer what I think is question 5 but you
  * interpret it as question 6, there's basically no way for us to even catch
  * that … let's give each question a clear, unambiguous ID also, and I'll just
  * try to use the ID", and "`BD7` … It just needs to be fairly simple to type on
- * a phone keyboard."
+ * a phone keyboard." And (home-base CLAUDE.md, 2026-11-12): "An id he types
+ * must not be confusable with another."
  *
- * THE RULES
- * - A question gets its number once, as a label `qid:<chain root>:<n>`, and
- *   the label is never rewritten. `<chain root>` is the first session bead of
- *   its session chain (the sessions linked by `continues:` labels), so every
- *   session of one chain numbers from the same place, and a question carried
- *   over in a handoff keeps its id.
- * - `<n>` is one more than the highest number any question of the chain holds,
- *   open or closed, so an id is never reused.
- * - Part 1 shows it as `[BD<n>]` after the item number. The list keeps its
- *   priority numbering.
- * - No report shows two questions with one id. Two can share a number when
- *   they come from different chains (a request adopted with `thread request
- *   --bead`) or when two sessions of one chain filed at once. Then the one
- *   filed later shows its bead id in the brackets instead, and a line under the
- *   questions says why (questionIdsShown).
+ * THE RULES (D2)
+ * - A question gets its number once, as a label `qid:<n>`, and the label is
+ *   never rewritten. `<n>` comes from ONE counter for the whole machine
+ *   (question-counter.ts), so no two questions in any repo or session share
+ *   one, and a number is never reused.
+ * - The first number is above 99 and above every number any repo's export
+ *   holds, so a new id never equals an old per-chain one.
+ * - The OLD form, `qid:<chain root>:<n>`, numbered per session chain, gave the
+ *   same id to different questions in different sessions (home-base-4wfoz:
+ *   BD1, BD4 and BD7 meant six questions across two chains). It is still read
+ *   (an answer may name it, and the counter's seed counts it) but never shown,
+ *   and never rewritten.
+ * - Part 1 shows a question's id as `[BD<n>]` after the item number, for a
+ *   `qid:<n>` label only. A question without one shows no brackets; its bead
+ *   id ends its line, as on every question line.
+ * - No report shows two questions with one id. Should two share a number
+ *   anyway (the counter cannot be the cause, but a hand-added label can), the
+ *   one filed later shows its bead id in the brackets instead, and a line under
+ *   the questions says why (questionIdsShown).
  *
- * PURE: no filesystem and no br. question-id-assign.ts reads and writes.
+ * PURE: no filesystem and no br. question-counter.ts and question-id-assign.ts
+ * read and write.
  */
 
 import {parseInstant} from './answer-store';
-import {BR_LABEL_MAX} from './session-bead';
 
-/** The label that holds a question's number: `qid:<chain root>:<n>`. */
+/** The start of every label that holds a question's number. */
 export const QUESTION_ID_LABEL_PREFIX = 'qid:';
 
-/** What Justin types: `BD7`. */
+/** What Justin types: `BD107`. */
 export const SHORT_ID_PREFIX = 'BD';
 
-/** br's label characters (session-bead.ts BR_LABEL_SHAPE, measured there). */
-const BR_LABEL_SHAPE = /^[A-Za-z0-9_:-]+$/;
-
 /**
- * The start of every id label of the chain that begins at `root`. br refuses a
- * `.` in a label, so each `.` of the id is written `:`, as `toLabel` does.
+ * D2: every number minted is above this, so the first new id is at least
+ * BD100 and never equals an old per-chain id (the highest in any export was 23
+ * on 2026-11-14).
  */
-export function chainLabelPrefix(root: string): string {
-  return `${QUESTION_ID_LABEL_PREFIX}${root.replaceAll('.', ':')}:`;
+export const QUESTION_NUMBER_FLOOR = 99;
+
+/** The label for question number `number` (D2's form): `qid:107`. */
+export function questionIdLabel(number: number): string {
+  return `${QUESTION_ID_LABEL_PREFIX}${number}`;
 }
 
-/** The label for question number `number` of the chain that begins at `root`. */
-export function questionIdLabelFor(
-  root: string,
-  number: number,
-): {label: string; ok: true} | {ok: false; reason: string} {
-  const label = `${chainLabelPrefix(root)}${number}`;
-  if (label.length > BR_LABEL_MAX) {
-    return {
-      ok: false,
-      reason: `its label ${label} is ${label.length} characters; br allows ${BR_LABEL_MAX}`,
-    };
-  }
-  if (!BR_LABEL_SHAPE.test(label)) {
-    return {
-      ok: false,
-      reason: `its label ${label} holds a character br refuses in a label`,
-    };
-  }
-  return {label, ok: true};
-}
-
-/** `BD7`. */
+/** `BD107`. */
 export function shortIdText(number: number): string {
   return `${SHORT_ID_PREFIX}${number}`;
 }
 
+/** Escapes a string for use inside a RegExp. */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const SHORT_ID_SHAPE = new RegExp(
+  `^${escapeRegExp(SHORT_ID_PREFIX)}([1-9][0-9]*)$`,
+  'i',
+);
+
 /**
- * The number in what Justin typed: `BD7`, `bd7` or `Bd7`. Null for anything
- * else, including a bare `7` or `Q7`: those are list numbers, and the rules
- * say Claude asks back rather than guess.
+ * The number in what Justin typed: `BD107`, `bd107` or `Bd107`. Null for
+ * anything else, including a bare `7` or `Q7`: those are list numbers, and the
+ * rules say Claude asks back rather than guess.
  */
 export function parseShortId(text: string): number | null {
-  const match = /^bd([1-9][0-9]*)$/i.exec(text.trim());
+  const match = SHORT_ID_SHAPE.exec(text.trim());
   if (match?.[1] == null) return null;
   const number = Number(match[1]);
   return Number.isSafeInteger(number) ? number : null;
 }
 
-/** A question's id, read from its labels. */
+/** One `qid:` label, read. */
+export type ParsedQuestionIdLabel =
+  /** The old per-chain form, `qid:<chain root>:<n>`: read, never shown. */
+  | {form: 'chain'; number: number; root: string}
+  /** D2's form, `qid:<n>`. */
+  | {form: 'machine'; number: number}
+  /** Starts with `qid:` and holds no number either form can read. */
+  | {form: 'unreadable'};
+
+/** br's label characters (session-bead.ts BR_LABEL_SHAPE, measured there). */
+const BR_LABEL_CHARS = /^[A-Za-z0-9_:-]+$/;
+
+/**
+ * Reads one label in either form. Null when it is not a `qid:` label at all.
+ * A chain root is written with each `.` as `:` (br refuses a `.` in a label),
+ * so `qid:t-abc:2:7` is number 7 of the chain that begins at `t-abc.2`.
+ */
+export function parseQuestionIdLabel(
+  label: string,
+): ParsedQuestionIdLabel | null {
+  if (!label.startsWith(QUESTION_ID_LABEL_PREFIX)) return null;
+  const rest = label.slice(QUESTION_ID_LABEL_PREFIX.length);
+  if (!BR_LABEL_CHARS.test(rest)) return {form: 'unreadable'};
+  const machine = /^([1-9][0-9]*)$/.exec(rest);
+  if (machine?.[1] != null) {
+    const number = Number(machine[1]);
+    return Number.isSafeInteger(number)
+      ? {form: 'machine', number}
+      : {form: 'unreadable'};
+  }
+  const chain = /^(.*[^:]):([1-9][0-9]*)$/.exec(rest);
+  if (chain?.[1] != null && chain[2] != null) {
+    const number = Number(chain[2]);
+    return Number.isSafeInteger(number)
+      ? {form: 'chain', number, root: chain[1]}
+      : {form: 'unreadable'};
+  }
+  return {form: 'unreadable'};
+}
+
+/** A question's D2 id, read from its labels. */
 export type QuestionIdRead =
   | {kind: 'bad'; reason: string}
   | {kind: 'none'}
   | {kind: 'one'; number: number};
 
 /**
- * The question's number. Two id labels, or one whose number cannot be read,
- * is `bad`, never a guess at one of them (critical rule 7).
+ * The question's D2 number (`qid:<n>`). Old per-chain labels are not read
+ * here: a question that holds only one has no id, and `thread status` gives it
+ * one. Two D2 labels, or a `qid:` label that holds no number, is `bad`, never
+ * a guess at one of them (critical rule 7).
  */
 export function questionIdOf(labels: readonly string[]): QuestionIdRead {
-  const found = [
-    ...new Set(
-      labels.filter((label) => label.startsWith(QUESTION_ID_LABEL_PREFIX)),
-    ),
-  ];
-  const [only] = found;
-  if (only == null) return {kind: 'none'};
-  if (found.length > 1) {
+  const numbers = new Set<number>();
+  const unreadable: string[] = [];
+  for (const label of new Set(labels)) {
+    const parsed = parseQuestionIdLabel(label);
+    if (parsed == null || parsed.form === 'chain') continue;
+    if (parsed.form === 'unreadable') unreadable.push(label);
+    else numbers.add(parsed.number);
+  }
+  const [only] = unreadable;
+  if (only != null) {
+    return {kind: 'bad', reason: `its id label ${only} holds no number`};
+  }
+  const [number] = numbers;
+  if (number == null) return {kind: 'none'};
+  if (numbers.size > 1) {
     return {
       kind: 'bad',
-      reason: `it carries ${found.length} id labels (${found.join(', ')})`,
+      reason: `it carries ${numbers.size} id labels (${[...numbers].map(questionIdLabel).join(', ')})`,
     };
-  }
-  const match = /:([1-9][0-9]*)$/.exec(only);
-  const number = match?.[1] == null ? Number.NaN : Number(match[1]);
-  if (!Number.isSafeInteger(number)) {
-    return {kind: 'bad', reason: `its id label ${only} holds no number`};
   }
   return {kind: 'one', number};
 }
 
 /**
- * The highest number the chain that begins at `root` has used, among every
- * label given (an export's labels: open and closed questions alike). 0 when
- * it has used none.
+ * The numbers a question's OLD per-chain labels give it (`qid:<root>:<n>`).
+ * Only `thread answer` reads these: an id from a report printed before D2
+ * still answers inside its own session when it names one question there.
  */
-export function chainMaxNumber(labels: Iterable<string>, root: string): number {
-  const prefix = chainLabelPrefix(root);
+export function chainNumbersOf(labels: readonly string[]): number[] {
+  const numbers = new Set<number>();
+  for (const label of labels) {
+    const parsed = parseQuestionIdLabel(label);
+    if (parsed?.form === 'chain') numbers.add(parsed.number);
+  }
+  return [...numbers];
+}
+
+/**
+ * The highest number any label holds, in either form (an export's labels:
+ * open and closed questions alike). 0 when none does. The counter's seed
+ * (question-counter.ts) starts above it.
+ */
+export function maxQuestionNumber(labels: Iterable<string>): number {
   let max = 0;
   for (const label of labels) {
-    if (!label.startsWith(prefix)) continue;
-    const rest = label.slice(prefix.length);
-    if (!/^[1-9][0-9]*$/.test(rest)) continue;
-    const number = Number(rest);
-    if (Number.isSafeInteger(number) && number > max) max = number;
+    const parsed = parseQuestionIdLabel(label);
+    if (parsed == null || parsed.form === 'unreadable') continue;
+    if (parsed.number > max) max = parsed.number;
   }
   return max;
 }
@@ -153,27 +204,32 @@ function byCreated(a: IdQuestion, b: IdQuestion): number {
 }
 
 /**
- * D4: the numbers for questions that have none, after `after` (the chain's
- * highest), in a stable order: most urgent first, then oldest first. The same
- * questions and the same `after` always give the same numbers.
+ * Which of the numbers `numbers` (reserved from the counter, in order) each
+ * question that has none gets, in a stable order: most urgent first, then
+ * oldest first. Questions beyond the numbers given get none.
  */
 export function planQuestionIds(
   missing: readonly IdQuestion[],
-  after: number,
+  numbers: readonly number[],
 ): {id: string; number: number}[] {
   const rank = (priority: number | null): number => priority ?? 99;
-  return [...missing]
+  const planned: {id: string; number: number}[] = [];
+  [...missing]
     .sort((a, b) => {
       const byRank = rank(a.priority) - rank(b.priority);
       return byRank !== 0 ? byRank : byCreated(a, b);
     })
-    .map((question, index) => ({id: question.id, number: after + index + 1}));
+    .forEach((question, index) => {
+      const number = numbers[index];
+      if (number != null) planned.push({id: question.id, number});
+    });
+  return planned;
 }
 
 /**
  * What the brackets on a question's line hold: its short id, or its bead id
  * when its short id cannot be shown (`why` says why). Absent from the map: the
- * question has no id yet, and its line has no brackets.
+ * question has no D2 id, and its line has no brackets.
  */
 export type ShownId = {text: string; why: null} | {text: string; why: string};
 
@@ -184,10 +240,10 @@ export interface QuestionIdsShown {
 }
 
 /**
- * D4's invariant: no two questions of one report show the same id. Of
+ * The invariant: no two questions of one report show the same id. Of
  * questions that share a number, the oldest keeps it and each later one shows
  * its bead id, with a note. A question whose id cannot be read shows its bead
- * id too.
+ * id too. Only D2 ids are shown (questionIdOf).
  */
 export function questionIdsShown(
   questions: readonly IdQuestion[],

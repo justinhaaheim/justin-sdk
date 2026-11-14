@@ -166,6 +166,14 @@ export type PickUpOutcome =
       step: PickUpStep;
     };
 
+/** home-base-ttztr: the running holder `--continues` waited for, before it took the lock. */
+export interface PickUpLockWait {
+  holderPid: number;
+  /** `picked-up` was on this session's bead when the wait began; null = not read. */
+  pickedUpBefore: boolean | null;
+  waitedMs: number;
+}
+
 export interface PickUpInput {
   cwd: string;
   env: EnvLike;
@@ -774,18 +782,35 @@ export function carriedLines(
 export function describePickUp(
   outcome: PickUpOutcome,
   retryCommand: string,
+  lockWait: null | PickUpLockWait = null,
 ): {exitCode: 0 | 1 | 2; lines: string[]} {
   switch (outcome.kind) {
     case 'picked-up': {
       const {newBeadId, oldBeadId, oldTitle} = outcome;
+      const waited =
+        lockWait == null ? null : (lockWait.waitedMs / 1000).toFixed(1);
+      // home-base-ttztr: not picked up when the wait began, nothing left to
+      // write after it, so the process that held the lock did it.
+      const byHolder = !outcome.wrote && lockWait?.pickedUpBefore === false;
       const lines = outcome.wrote
         ? [
             `session ${newBeadId} continues ${oldBeadId} ("${oldTitle}")`,
             `  labels: ${CONTINUES_LABEL_PREFIX}${oldBeadId} here, ${CONTINUED_BY_LABEL_PREFIX}${newBeadId} there`,
           ]
-        : [
-            `Nothing to do: session ${newBeadId} has already picked up ${oldBeadId} ("${oldTitle}"). Nothing was written.`,
-          ];
+        : byHolder
+          ? [
+              `Nothing to do: the background attempt already picked up ${oldBeadId} ("${oldTitle}") for session ${newBeadId}, with ${itemCount(outcome.alreadyHeld)}. Nothing was written.`,
+            ]
+          : [
+              `Nothing to do: session ${newBeadId} has already picked up ${oldBeadId} ("${oldTitle}"). Nothing was written.`,
+            ];
+      if (lockWait != null) {
+        lines.push(
+          byHolder
+            ? `  This command waited ${waited} s for process ${lockWait.holderPid}, which held this session's lock; the pickup was not done when the wait began.`
+            : `  This command first waited ${waited} s for process ${lockWait.holderPid}, which held this session's lock.`,
+        );
+      }
       lines.push(...carriedLines(outcome));
       if (
         outcome.wrote &&

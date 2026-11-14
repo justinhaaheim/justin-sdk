@@ -34,6 +34,7 @@ import {join} from 'node:path';
 
 import {findProjectRoot, silencedChildEnv} from '../health-notices';
 import {openInBrowser} from './answer-web';
+import {registryChainNamer} from './chain-names';
 import {resolveThreadConfig} from './config';
 import {renderDashboardPage, renderInboxHtml} from './dashboard-page';
 import {
@@ -130,6 +131,8 @@ export function liveInboxLoader(input: {
 }): () => Promise<InboxLoad> {
   return async () => {
     const result = await readInbox({
+      // home-base-l2ejg.11: as `thread inbox --json` names chains.
+      chainNamer: registryChainNamer(input.env),
       cwd: input.cwd,
       days: input.days,
       env: input.env,

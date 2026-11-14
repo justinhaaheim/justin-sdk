@@ -334,6 +334,7 @@ describe('thread request --continues', () => {
     // The old session is still auto-titled, so the new one keeps its own.
     expect(linked).toEqual({
       kind: 'handoffPickup',
+      lockWait: null,
       pickup: {
         alreadyHeld: {questions: [], requests: []},
         carried: {questions: [], requests: []},

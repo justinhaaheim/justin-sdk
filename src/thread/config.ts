@@ -40,6 +40,7 @@ import {
   THREAD_DEFAULT_AUTO_COMMIT,
   THREAD_DEFAULT_AUTO_PUSH,
   THREAD_DEFAULT_CAPTURE,
+  THREAD_DEFAULT_CHAIN_NAMES,
   THREAD_DEFAULT_COMPACT_QUESTIONS,
   THREAD_DEFAULT_DASHBOARD_UI,
   THREAD_DEFAULT_EMOJI_HEADER,
@@ -119,6 +120,13 @@ export interface ResolvedThreadConfig {
   captureActive: boolean;
   /** Which layer decided `capture`. */
   captureSource: ThreadConfigSource;
+  /**
+   * home-base-l2ejg.11: each chain of handed-off sessions is named from a pool
+   * (`[TAG][Moe-7]`). On by default; off shows `[#7]` and names nothing.
+   */
+  chainNames: boolean;
+  /** Which layer decided `chainNames`. */
+  chainNamesSource: ThreadConfigSource;
   /**
    * home-base-1rxt0.4 D3: unchanged P2 to P4 questions take one line in
    * `thread status`. On by default; the user file turns it off everywhere.
@@ -375,6 +383,7 @@ export function resolveThreadConfig(
     'fullReportCommand',
     THREAD_DEFAULT_FULL_REPORT_COMMAND,
   );
+  const chainNames = resolveFlag('chainNames', THREAD_DEFAULT_CHAIN_NAMES);
 
   // `render` is the one NESTED block in the thread section, so it needs its own
   // walk rather than `resolveFlag`'s. Same layering: default, then user, then
@@ -595,6 +604,8 @@ export function resolveThreadConfig(
     capture: capture.value,
     captureActive: enabled.value && capture.value,
     captureSource: capture.source,
+    chainNames: chainNames.value,
+    chainNamesSource: chainNames.source,
     compactQuestions: compactQuestions.value,
     compactQuestionsSource: compactQuestions.source,
     dashboardUi,

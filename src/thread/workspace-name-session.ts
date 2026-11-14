@@ -25,6 +25,7 @@ import {basename, dirname} from 'node:path';
 
 import {brShow, describeBrFailed, findBeadsWorkspace} from '../beads/br';
 import {outputStyle} from '../cli-style';
+import {chainNamesKnob} from './chain-names';
 import {readCmuxTree, realCmuxRunner} from './cmux';
 import {resolveRepoTag} from './config';
 import {realChainViewReaders} from './handoff-view';
@@ -176,6 +177,7 @@ export function lookupWorkspaceSession(input: {
       kind: 'found',
       session: {
         beadId: resolution.bead.id,
+        chainNames: chainNamesKnob(resolution.checkoutPath, env),
         labels: resolution.bead.labels,
         repo,
         repoTag: resolveRepoTag({
@@ -217,6 +219,7 @@ export function lookupWorkspaceSession(input: {
     kind: 'found',
     session: {
       beadId: shown.issue.id,
+      chainNames: chainNamesKnob(space.root, env),
       labels: shown.issue.labels,
       repo,
       repoTag: resolveRepoTag({checkout: space.root, env, repo}),
@@ -615,6 +618,7 @@ async function runWorkspaceNamePreview(input: {
     const {repo, repoTag} = row.loaded.model;
     sessions.push({
       beadId: bead.id,
+      chainNames: chainNamesKnob(row.loaded.model.git.checkout, env),
       labels: bead.labels,
       lastActivityAt: row.lastActivityAt,
       repo,

@@ -244,11 +244,19 @@ function writeCall(file: string, when: string): object {
 }
 
 function normalize(text: string, w: World): string {
-  return text
-    .split(w.sb.path)
-    .join('<sandbox>')
-    .split(w.sessionBead)
-    .join('t-SESS');
+  return (
+    text
+      .split(w.sb.path)
+      .join('<sandbox>')
+      .split(w.sessionBead)
+      .join('t-SESS')
+      // home-base-l2ejg.5: a request's state line says when br last changed
+      // it, and the fixture's beads are written now, on the real clock.
+      .replace(
+        /since (?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{4}-\d{2}-\d{2} \d{1,2}:\d{2} [ap]m/gu,
+        'since <its last change>',
+      )
+  );
 }
 
 // eslint-disable-next-line no-control-regex -- matching the ANSI escape byte is the point
@@ -1483,14 +1491,22 @@ describe('fixture 2: a work session with two requests, stages, a P0 and a P3', (
     expect(single).not.toContain('Your last message');
   });
 
-  test('thread status lists only what cannot be derived — here, nothing — and says 🛑', async () => {
+  // home-base-l2ejg.5 (D7): the one thing it cannot derive here is the stage
+  // of t-SESS.2, an open request with no stage in a session with 2 commits.
+  test('thread status lists only what cannot be derived — here, the unstaged request — and says 🛑', async () => {
     const w = await workSession();
-    const out = renderThreadStatus(await report(w, true), {
-      now: NOW,
-      style: PLAIN_STYLE,
-      timeZone: TZ,
-    });
-    expect(out).toContain('Nothing to mark.');
+    const out = normalize(
+      renderThreadStatus(await report(w, true), {
+        now: NOW,
+        style: PLAIN_STYLE,
+        timeZone: TZ,
+      }),
+      w,
+    );
+    const marks = out.slice(out.indexOf('**What to mark:**'));
+    expect(marks.split('\n').filter((line) => line.startsWith('- '))).toEqual([
+      '- Request t-SESS.2 ("Write the export runbook") has no stage, and this session made 2 commits. Mark the stage it reached (code-done, tested, built, link-sent, approved): `bun run justin-sdk thread stage t-SESS.2 <stage>`',
+    ]);
     expect(out.trimEnd().split('\n').at(-1)).toBe(
       'If you stop now the inbox will say: 🛑 Waiting on you',
     );

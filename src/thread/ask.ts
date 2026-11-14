@@ -30,6 +30,7 @@
 import type {OutputStyle} from '../cli-style';
 import type {AskDefault, AskFields, AskForm, AskOption} from './ask-format';
 import type {EnvLike} from './paths';
+import type {reserveQuestionNumbers} from './question-counter';
 import type {IdQuestion} from './question-ids';
 import type {SessionBeadRepair} from './session-repair';
 import type {FoundSession} from './session-select';
@@ -211,6 +212,8 @@ export interface ThreadAskOptions extends AskInput {
   now?: Date;
   /** How the report's ids are read after filing; tests inject a failing one. */
   readShownIds?: typeof readShownQuestionIds;
+  /** The question counter (home-base-4wfoz); tests inject a failing one. */
+  reserveQuestionNumbers?: typeof reserveQuestionNumbers;
   sessionId: string | null;
   style?: OutputStyle;
   /**
@@ -436,14 +439,14 @@ export async function fileAsk(
     }
   }
 
-  // home-base-1rxt0.4 D4: the next id of this session's chain, written in the
-  // same br write that files the question. No id is never fatal: the question
-  // is filed without one, the reason is printed, and the next `thread status`
-  // gives it one.
+  // home-base-4wfoz D2: the next number of the machine-wide counter, written
+  // in the same br write that files the question. No id is never fatal: the
+  // question is filed without one, the reason is printed, and the next `thread
+  // status` gives it one.
   const nextId = nextQuestionIdLabel({
     beadsDir: resolution.beadsDir,
     env,
-    session: resolution.bead,
+    reserve: options.reserveQuestionNumbers,
   });
   if (nextId.kind === 'label') labels.push(nextId.label);
 
@@ -517,7 +520,7 @@ function askIdWarning(
       return [];
     case 'none':
       return [
-        `⚠️ No id like BD7 yet; the next thread status gives it one. Why: ${shownAs.why}`,
+        `⚠️ No id like BD107 yet, so refer to it by its bead id: ${outcome.id}. The next thread status tries again. Why: ${shownAs.why}`,
       ];
     case 'beadId':
       return [

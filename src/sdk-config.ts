@@ -50,6 +50,7 @@ import {
   THREAD_DEFAULT_AUTO_COMMIT,
   THREAD_DEFAULT_AUTO_PUSH,
   THREAD_DEFAULT_CAPTURE,
+  THREAD_DEFAULT_CHAIN_NAMES,
   THREAD_DEFAULT_COMPACT_QUESTIONS,
   THREAD_DEFAULT_DASHBOARD_UI,
   THREAD_DEFAULT_EMOJI_HEADER,
@@ -323,6 +324,12 @@ const componentConfigSchema = z
           .optional()
           .describe(
             'Whether the `thread capture` hooks installed by `justin-sdk add thread-hooks` record every user prompt (UserPromptSubmit) and every final Claude message (Stop) of a session (home-base-k0b8n.9, K10). DEFAULT TRUE, and gated by `enabled` as well: BOTH must be true. Each turn appends one line to ~/.local/state/justin-threads/messages/<sessionId>.jsonl (local only — never committed, never pushed) and a detached child keeps the thread bead’s last user message / last Claude response current, creating the bead if the session has none, so threads stay up to date whether or not a status report is ever written. Subagents, `claude -p` runs (CLAUDE_CODE_ENTRYPOINT=sdk-cli) and empty messages are never captured. The hook always exits 0 and prints nothing. Set it false in a repo’s justin-sdk.config.json to opt that repo out.',
+          ),
+        chainNames: z
+          .boolean()
+          .optional()
+          .describe(
+            'CHAIN NAMES (home-base-l2ejg.11, built 2026-11-14). DEFAULT TRUE. Every chain of handed-off sessions gets a name no other chain has had, from a pool of Simpsons characters of seasons 1 to 9, and its titles show the name and the handoff number in one mark: "[MAYOR][HOME][Moe-7] <title>", "[HOME][Moe] <title>" for a first session. The names are handed out by a machine-wide registry, `<threads state dir>/chain-names.jsonl`, one line per chain; when the pool is used up the next generation is "Moe II". The capture hook writes the name as a `chain:Moe` label on the session bead (a link copies it to the successor), and the inbox, the dashboard and `thread status` name a chain without the label from the registry, writing no bead. A failure leaves the session unnamed and is recorded in capture.jsonl as `chainName`. Off: titles show "[#7]" as before, and no name is handed out or written.',
           ),
         compactQuestions: z
           .boolean()
@@ -969,6 +976,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     autoCommit: THREAD_DEFAULT_AUTO_COMMIT,
     autoPush: THREAD_DEFAULT_AUTO_PUSH,
     capture: THREAD_DEFAULT_CAPTURE,
+    chainNames: THREAD_DEFAULT_CHAIN_NAMES,
     compactQuestions: THREAD_DEFAULT_COMPACT_QUESTIONS,
     dashboardUi: THREAD_DEFAULT_DASHBOARD_UI,
     enabled: THREAD_DEFAULT_ENABLED,

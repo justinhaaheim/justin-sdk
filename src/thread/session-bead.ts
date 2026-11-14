@@ -92,6 +92,14 @@ export const HANDOFF_NUMBER_LABEL_PREFIX = 'handoff-number:';
  */
 export const MAYOR_ROLE_LABEL = 'session-role:mayor';
 /**
+ * The name of the chain a session belongs to (home-base-l2ejg.11, D5 in
+ * home-base-l2ejg.3): `chain:Moe`, or `chain:Moe_II` for a later generation.
+ * The capture child writes it on the chain's sessions (healChainName in
+ * session-handoff.ts) and a link passes it on to the successor, as it does
+ * MAYOR_ROLE_LABEL. Spelled by chain-name.ts.
+ */
+export const CHAIN_NAME_LABEL_PREFIX = 'chain:';
+/**
  * The handoff pickup's two end states on a successor's session bead
  * (home-base-npbse.1.1, handoff-pickup.ts). `picked-up`: linked, every open
  * request and question carried over, and the record written on both beads.

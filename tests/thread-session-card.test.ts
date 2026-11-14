@@ -18,10 +18,10 @@ import type {RequestNode, TreeIssue} from '../src/thread/session-tree';
 import {describe, expect, test} from 'bun:test';
 
 import {THREAD_DEFAULT_STAGES} from '../src/thread/defaults';
+import {landingStages} from '../src/thread/request-state';
 import {
   type ActionLine,
   deriveAction,
-  landingStages,
   sectionFor,
 } from '../src/thread/session-card';
 import {measured, unmeasured} from '../src/thread/session-model';
