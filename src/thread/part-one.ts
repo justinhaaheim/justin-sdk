@@ -294,7 +294,7 @@ export function statusWords(status: SessionStatus): string {
         ? '🤝 Handed off'
         : `🤝 Handed off to ${status.successor}`;
     case 'outOfContext':
-      return '🧯 Out of context';
+      return '🧯 Past wind-down notice';
     case 'done':
       if (status.by === 'requests') return '✅ Done';
       if (status.reason?.startsWith(ARCHIVED_PREFIX) === true) {
@@ -906,13 +906,15 @@ export function partOneView(input: PartOneInput): PartOneView {
     ),
   );
 
+  // home-base-qlxlp: the wind-down threshold is not a capacity. "342k of
+  // 400k tokens" read as 90% full, and sessions handed off before the notice.
   gitFields.push(
     field(
       'Context',
       !transcript.contextTokens.ok
         ? unknownBecause(transcript.contextTokens.reason)
         : model.wrapUpAt != null
-          ? `${tokensWords(transcript.contextTokens.value).replace(' tokens', '')} of ${tokensWords(model.wrapUpAt)}`
+          ? `${tokensWords(transcript.contextTokens.value)} used (wind-down notice at ${tokensWords(model.wrapUpAt).replace(' tokens', '')})`
           : tokensWords(transcript.contextTokens.value),
     ),
   );

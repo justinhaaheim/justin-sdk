@@ -582,7 +582,7 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
       },
     ],
     purpose:
-      'The hooks that report a session’s context usage against its wrap-up threshold.',
+      'The hooks that report a session’s context usage against its wind-down threshold.',
   },
 };
 

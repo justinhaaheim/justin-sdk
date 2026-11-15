@@ -150,23 +150,40 @@ const SETPOINT_TOKEN = new RegExp(
 export const USAGE_CHECK_CONFIG_KEY = 'usage-check';
 
 /**
- * The opening every wrap-up directive starts with, and the only thing the
+ * The opening every wind-down notice's directive starts with, and what the
  * transcript scan looks for to learn whether a notice carried one
  * (home-base-o5atv.2.1 E2). Both directives below are BUILT from it, so the
- * writer and the reader cannot drift apart. It also reads every notice written
- * before E2, which carry WRAP_UP_DIRECTIVE verbatim and no token for it.
+ * writer and the reader cannot drift apart.
  *
  * Reword the rest of a directive freely; change this opening only together
  * with a reader that still accepts the old one, or every session past its
- * threshold is told again.
+ * threshold is told again. The reader is WRAP_UP_OPENINGS.
  */
-export const WRAP_UP_OPENING =
-  'Wrap up your session at the next available opportunity';
+export const WRAP_UP_OPENING = 'This is the wind-down notice';
 
 /**
- * The wrap-up directive, in Justin's words (home-base-1r6d.1, D5 REVISED).
- * Said only when a `wrapUpAt` resolves to a threshold, from either config file
- * (D6), and the context has reached it.
+ * The opening every directive carried until home-base-qlxlp (2026-11-15).
+ * READ, never written: live transcripts hold notices that start with it,
+ * including every notice written before E2, which carry the old directive
+ * verbatim and no token for it. A reader that forgot it would find "not told"
+ * and send each of those sessions the wind-down notice a second time.
+ */
+export const LEGACY_WRAP_UP_OPENING =
+  'Wrap up your session at the next available opportunity';
+
+/** Every opening that marks a notice as carrying the directive. */
+export const WRAP_UP_OPENINGS: readonly string[] = [
+  WRAP_UP_OPENING,
+  LEGACY_WRAP_UP_OPENING,
+];
+
+/**
+ * The directive of the wind-down notice (home-base-1r6d.1, D5 REVISED; terms
+ * from home-base-qlxlp: the handoff rule's Terms section defines them). Said
+ * only when a `wrapUpAt` resolves to a threshold, from either config file
+ * (D6), and the context has reached it. The threshold is not a limit: the
+ * session finishes the work in progress and hands off at the next good
+ * stopping point, which may be well past it.
  *
  * This is the text a SUBAGENT gets, and a top-level session in a repo where
  * `thread handoff` cannot start a successor (componentConfig.thread.handoff.
@@ -174,7 +191,7 @@ export const WRAP_UP_OPENING =
  * only where that knob is on (home-base-jm5kg.8), and a subagent never runs it
  * (handoff.md; the session guard refuses it). See wrapUpDirectiveFor.
  */
-export const WRAP_UP_DIRECTIVE = `${WRAP_UP_OPENING}. Follow the handoff/ralph-handoff protocol.`;
+export const WRAP_UP_DIRECTIVE = `${WRAP_UP_OPENING}. It is not a limit: finish the work in progress, then hand off at the next good stopping point. Follow the handoff/ralph-handoff protocol.`;
 
 /** The installed rule that teaches a session how to hand off. */
 export const HANDOFF_RULE_PATH = `${THREAD_RULES_DIR}/${HANDOFF_RULE_FILE}`;
@@ -189,7 +206,7 @@ export const HANDOFF_RULE_PATH = `${THREAD_RULES_DIR}/${HANDOFF_RULE_FILE}`;
  * prefix: Claude Code never lets a command whose first word is `bun` out of its
  * sandbox, and inside it the handoff cannot reach cmux (sdk-invocation.ts).
  */
-export const HANDOFF_WRAP_UP_DIRECTIVE = `${WRAP_UP_OPENING}, then hand off as ${HANDOFF_RULE_PATH} describes: run \`${SDK_HANDOFF_CALL} --note "<one line the next session must know>"\` bare, from the repository root, with nothing before or after it.`;
+export const HANDOFF_WRAP_UP_DIRECTIVE = `${WRAP_UP_OPENING}. It is not a limit: finish the work in progress, then, at the next good stopping point, hand off as ${HANDOFF_RULE_PATH} describes: run \`${SDK_HANDOFF_CALL} --note "<one line the next session must know>"\` bare, from the repository root, with nothing before or after it.`;
 
 /**
  * The knobs, minus `enabled`. Written out as its own interface because a ROLE
@@ -586,6 +603,12 @@ export type UsageCheckLayers =
       config: UsageCheckConfig;
       /** See resolveHandoffSuccessor. */
       handoffSuccessor: boolean;
+      /**
+       * The project file's own block, before the user file is layered under
+       * it. windDownThresholdFor reads it to learn whether the threshold
+       * depended on a user file that could not be read.
+       */
+      project: UsageCheckConfig;
       status: 'on';
       /**
        * The user file exists but could not be read or parsed: its path and
@@ -624,12 +647,52 @@ export function readUsageCheckLayers(
   return {
     config: layerUsageCheckConfig(project, usageCheckSectionOf(userJson)),
     handoffSuccessor: resolveHandoffSuccessor(projectJson, userJson),
+    project,
     status: 'on',
     userConfigProblem:
       userRead.status === 'unreadable'
         ? `${userPath}: ${userRead.error}`
         : null,
   };
+}
+
+/**
+ * What an FYI notice can say about the wind-down threshold (home-base-qlxlp).
+ *
+ * 'unread' is its own member (critical rule 7): when the user file could not
+ * be read and this role's threshold would have come from it, the hook does not
+ * know whether a threshold is set, and the notice must not say "none".
+ */
+export type WindDownThreshold =
+  | {at: number; kind: 'set'}
+  | {kind: 'none'}
+  | {kind: 'unread'};
+
+/**
+ * The wind-down threshold this role's notices name. `wrapUpAt` is the role's
+ * resolved threshold (resolveUsageCheckConfig). When it is null, the answer is
+ * 'none' only if the user file was read, or the project file decided it before
+ * the user file's turn came (a number states; 0 is the deliberate off).
+ * Otherwise the threshold fell through to an unreadable user file: 'unread'.
+ *
+ * "Before the user file's turn" follows D1's order. A session's first layer is
+ * the project top level. A player's is the project's roles.player, and then
+ * the USER's roles.player, so a project top-level number decides nothing for a
+ * player whose user file could not be read.
+ */
+export function windDownThresholdFor(args: {
+  layers: Extract<UsageCheckLayers, {status: 'on'}>;
+  role: UsageCheckRole;
+  wrapUpAt: number | null;
+}): WindDownThreshold {
+  const {layers, role, wrapUpAt} = args;
+  if (wrapUpAt != null) return {at: wrapUpAt, kind: 'set'};
+  if (layers.userConfigProblem == null) return {kind: 'none'};
+  const projectDecided =
+    role === 'player'
+      ? statesWrapUpAt(playerBlockOf(layers.project)?.wrapUpAt)
+      : statesWrapUpAt(layers.project.wrapUpAt);
+  return projectDecided ? {kind: 'none'} : {kind: 'unread'};
 }
 
 /**
@@ -1121,7 +1184,8 @@ interface ScanState {
  * and every notice ever written puts it there (verified 2026-11-08 against a
  * real player transcript, where both `hook_additional_context` and
  * `hook_system_message` hold `(notice-at=350000)\nWrap up your session …`). So
- * this reads THAT line and asks whether it starts with WRAP_UP_OPENING. It does
+ * this reads THAT line and asks whether it starts with one of WRAP_UP_OPENINGS,
+ * the current opening or the one before home-base-qlxlp. It does
  * not search the whole string: the hook dispatcher joins every handler's text
  * on one event with a blank line (hook-output.ts), so another handler's words
  * could follow an FYI notice in the same string.
@@ -1130,7 +1194,12 @@ interface ScanState {
  */
 function noticeCarriesWrapUp(content: string, tokenEnd: number): boolean {
   const lineBreak = content.indexOf('\n', tokenEnd);
-  return lineBreak !== -1 && content.startsWith(WRAP_UP_OPENING, lineBreak + 1);
+  return (
+    lineBreak !== -1 &&
+    WRAP_UP_OPENINGS.some((opening) =>
+      content.startsWith(opening, lineBreak + 1),
+    )
+  );
 }
 
 /**
@@ -1452,11 +1521,27 @@ const SESSION_SUBJECT: NoticeSubject = {scope: 'session'};
  * handed itself off at 201,607 tokens.
  *
  * Left OUT when the wrap-up directive rides along: that directive is a real
- * instruction a config file asked for (D8, D6), and a notice saying "not a reason to
- * stop or hand off" one line above "Wrap up your session" would contradict it.
+ * instruction a config file asked for (D8, D6), and a notice saying "FYI only"
+ * one line above "This is the wind-down notice" would contradict it.
+ *
+ * Shorter since home-base-qlxlp, and it names the coming wind-down notice when
+ * one is set (Justin, 2026-11-15: "This is just an FYI. You will receive an
+ * explicit instruction to wind down at a later token threshold. Do not wind
+ * down. Do not do a handoff before then unless you're instructed explicitly").
  */
-export const NOTICE_FYI =
-  'This is just an FYI: not a limit, and not a reason to stop or hand off.';
+export const NOTICE_FYI = 'FYI only';
+
+/** What the FYI notice says about the wind-down threshold; see WindDownThreshold. */
+export function windDownSentence(windDown: WindDownThreshold): string {
+  switch (windDown.kind) {
+    case 'set':
+      return `The wind-down notice comes at ${formatTokens(windDown.at)} tokens; do not wind down or hand off before it unless explicitly told to.`;
+    case 'none':
+      return 'No wind-down notice is set, and this is not a limit.';
+    case 'unread':
+      return 'The wind-down threshold could not be read; this is not a limit. Do not wind down or hand off unless explicitly told to.';
+  }
+}
 
 /**
  * The spacing of a ladder whose rungs are exactly 1x, 2x, 3x … of its first
@@ -1508,19 +1593,26 @@ export function regularLadderInterval(
  * null leaves the interval out.
  *
  * `directive` is the second line when the wrap-up is due; runUsageCheck picks
- * it with wrapUpDirectiveFor.
+ * it with wrapUpDirectiveFor. A notice that carries it says only whose number
+ * it is and the token: it is the wind-down notice, not an FYI one.
+ *
+ * `windDown` is what an FYI notice says about the coming wind-down notice
+ * (windDownThresholdFor). Its default is 'unread', the cautious answer: a
+ * caller that does not say must never make the notice claim that no threshold
+ * is set (critical rule 7).
  */
 export function formatNotice(
   decision: UsageDecision,
   subject: NoticeSubject = SESSION_SUBJECT,
   setpoints: readonly number[] | null = null,
   directive: string = WRAP_UP_DIRECTIVE,
+  windDown: WindDownThreshold = {kind: 'unread'},
 ): string {
   const tokens = formatTokens(decision.contextTokens);
 
   let count: string;
   if (subject.scope === 'session') {
-    count = `This session has now used ${tokens} tokens of context.`;
+    count = `This session has used ${tokens} tokens of context.`;
   } else {
     // agent_type is what Claude Code called the subagent ("player", "Explore").
     // Absent, "This subagent" still says the one thing that matters: not you.
@@ -1528,22 +1620,30 @@ export function formatNotice(
       subject.agentType == null || subject.agentType === ''
         ? 'This subagent'
         : `This ${subject.agentType} subagent`;
-    count = `${who} has now used ${tokens} tokens of its OWN context, measured from its own transcript — this is your number, not the parent session's.`;
+    count = `${who} has used ${tokens} tokens of its OWN context, measured from its own transcript — this is your number, not the parent session's.`;
+  }
+
+  const token = `(${NOTICE_TOKEN_NAME}=${decision.setpoint})`;
+  if (decision.wrapUp) {
+    return `${[USAGE_CHECK_MARKER, count, token].join(' ')}\n${directive}`;
   }
 
   const interval = setpoints == null ? null : regularLadderInterval(setpoints);
-  const every =
-    interval == null ? '' : `, every ${formatTokens(interval)} tokens`;
-  const cadence = `This notice fires at preset token counts${every} (this one at ${formatTokens(decision.setpoint)}).`;
+  const sent =
+    interval == null
+      ? 'sent at preset token counts'
+      : `sent every ${formatTokens(interval)} tokens`;
+  // The rung is not repeated in words: the notice-at token already names it
+  // (home-base-qlxlp review: the notices had to get shorter).
+  const cadence = `${NOTICE_FYI}, ${sent}.`;
 
-  const parts = [USAGE_CHECK_MARKER, count, cadence];
-  if (!decision.wrapUp) {
-    parts.push(NOTICE_FYI);
-  }
-  parts.push(`(${NOTICE_TOKEN_NAME}=${decision.setpoint})`);
-
-  const line = parts.join(' ');
-  return decision.wrapUp ? `${line}\n${directive}` : line;
+  return [
+    USAGE_CHECK_MARKER,
+    count,
+    cadence,
+    windDownSentence(windDown),
+    token,
+  ].join(' ');
 }
 
 /**
@@ -1688,6 +1788,7 @@ export function runUsageCheck(args?: {
       handoffSuccessor: layers.handoffSuccessor,
       scope: target.kind,
     }),
+    windDownThresholdFor({layers, role, wrapUpAt: config.wrapUpAt}),
   );
 
   // Emit BOTH channels, exactly as time-check does and for the same reason:

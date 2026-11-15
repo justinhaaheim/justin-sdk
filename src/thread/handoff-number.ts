@@ -28,6 +28,7 @@ import type {ChainReaders} from './handoff-chain';
 import type {SessionMarks, SessionMarksOptions} from './session-name';
 
 import {chainNameLabel, chainNameOfLabels, chainNameText} from './chain-name';
+import {MAYOR_SUCCESSOR_SENTENCE} from './mayor-sentence';
 import {KICKOFF_OPENING} from './respawn';
 import {
   CONTINUES_LABEL_PREFIX,
@@ -286,7 +287,5 @@ export function continuationLabels(input: {
 export function mayorSuccessorSentence(
   labels: readonly string[],
 ): null | string {
-  return labels.includes(MAYOR_ROLE_LABEL)
-    ? 'This session continues a mayor session, so load the mayor skill with the Skill tool.'
-    : null;
+  return labels.includes(MAYOR_ROLE_LABEL) ? MAYOR_SUCCESSOR_SENTENCE : null;
 }

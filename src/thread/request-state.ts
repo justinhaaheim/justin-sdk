@@ -215,7 +215,7 @@ function stoppedWords(
     case 'openWork':
       return {kind: 'stopped', state: 'Stopped: open work, no blocker'};
     case 'outOfContext':
-      return {kind: 'stopped', state: 'Stopped: out of context'};
+      return {kind: 'stopped', state: 'Stopped: past wind-down notice'};
     case 'handedOff': {
       if (carrier?.kind === 'notCarried') {
         return {

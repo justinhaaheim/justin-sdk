@@ -30,8 +30,9 @@
  *                          carries no time — named, and marked
  *                          `activityUnread` so the inbox's age filter treats
  *                          it as the ⚠️ it replaces
- *   7. 🧯 Out of context   what would be 8, with context tokens at or above
- *                          usage-check's wrapUpAt (home-base-o5atv.3 O1)
+ *   7. 🧯 Past wind-down notice   what would be 8, with context tokens at or
+ *                          above usage-check's wrapUpAt (home-base-o5atv.3 O1;
+ *                          shown as "out of context" until home-base-qlxlp)
  *   8. ⚠️ Open work, no blocker — otherwise
  *
  * Between 3 and 4, in this order: Justin's `done:`/`archived:` mark (4's first
@@ -237,6 +238,7 @@ export interface StatusFacts {
 
 export type SessionStatus =
   | {by: 'justin' | 'requests'; kind: 'done'; reason: string | null}
+  /** Means past the wind-down threshold, not out of context (home-base-qlxlp). */
   | {contextTokens: number; kind: 'outOfContext'; wrapUpAt: number}
   | {kind: 'answered'}
   /**

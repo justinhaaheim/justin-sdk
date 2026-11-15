@@ -42,10 +42,19 @@ import {
 import {join} from 'path';
 
 import {hookEntriesFor} from './component-manifest';
-import {xdgStateHome} from './health-notices';
+import {PROJECT_CONFIG_FILENAME, xdgStateHome} from './health-notices';
 import {hasDispatchEntry} from './hook-entries';
+import {
+  jobHealthNotice,
+  type JobHealthRead,
+  jobHealthSessionText,
+  localDay,
+  readJobHealth,
+} from './job-health';
 import {formatRepoState, runDivergenceCheck} from './repo-status/prime-view';
 import {prettierMarkdown} from './rules/rules-file';
+// From the leaf, not from handoff-number.ts, whose imports reach zod.
+import {MAYOR_SUCCESSOR_SENTENCE} from './thread/mayor-sentence';
 import {userSettingsPath} from './user-level-hook';
 
 type EnvLike = Record<string, string | undefined>;
@@ -136,6 +145,11 @@ export function repoStateHookPresence(
 export interface HookPayload {
   cwd?: string;
   hook_event_name?: string;
+  /**
+   * UserPromptSubmit only: the prompt as typed. A slash command arrives as
+   * typed (`/mayor …`), not as the transcript's `<command-name>` form.
+   */
+  prompt?: string;
   session_id?: string;
   /** SessionStart only: startup | resume | clear | compact | fork. */
   source?: string;
@@ -341,7 +355,7 @@ export function claimFirstPrompt(
  * because a thrown git inspection is not a clean repo and used to be silently
  * omitted.
  */
-export function composeRepoState(projectRoot: string): string {
+function composeRepoStateBlock(projectRoot: string): string {
   let block: string;
   try {
     // PR state is a network call (~600ms against ~150ms for the core walk) and
@@ -362,4 +376,238 @@ export function composeRepoState(projectRoot: string): string {
   // (still complete) block.
   const formatted = prettierMarkdown(block);
   return formatted.status === 'failed' ? block : formatted.markdown;
+}
+
+/** `value[key]` when both are plain JSON objects; otherwise null. */
+function jsonObjectField(
+  value: unknown,
+  key: string,
+): Record<string, unknown> | null {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const field = (value as Record<string, unknown>)[key];
+  if (field == null || typeof field !== 'object' || Array.isArray(field)) {
+    return null;
+  }
+  return field as Record<string, unknown>;
+}
+
+/**
+ * Has this repo opted in to the jobs section (home-base-9dcx9.2 D2)? The health
+ * file is machine-wide, so only a repo whose own config sets
+ * `componentConfig["job-health"].sessionNotice` to true gets it; home-base
+ * does. A config that is absent, unreadable or not JSON has not opted in, and
+ * doctor's config check already names a broken one.
+ *
+ * Read by hand, like `hookDispatchEnabled`, NOT through sdk-config's typed
+ * reader: this module is in the command tree every hook loads on every
+ * prompt, and sdk-config brings zod (12-13 ms) with it
+ * (tests/health-notices-cli.test.ts, "the CLI hot path"). The key's schema
+ * entry in sdk-config.ts stays, for `config schema` and doctor.
+ */
+export function jobHealthSessionNoticeOn(projectRoot: string): boolean {
+  let config: unknown;
+  try {
+    config = JSON.parse(
+      readFileSync(join(projectRoot, PROJECT_CONFIG_FILENAME), 'utf-8'),
+    );
+  } catch {
+    return false;
+  }
+  const componentConfig = jsonObjectField(config, 'componentConfig');
+  const block = jsonObjectField(componentConfig, 'job-health');
+  return block?.sessionNotice === true;
+}
+
+export interface JobHealthSectionOptions {
+  /** Where the chores state dir is resolved from. Default: process.env. */
+  env?: EnvLike;
+  now?: Date;
+  /** The health file reader (tests). Default: `readJobHealth`. */
+  read?: (env: EnvLike) => JobHealthRead;
+  /** For the "since" days. Default: this machine's. */
+  timeZone?: string;
+}
+
+/**
+ * The jobs section, or '' when every job checked out fine or chores has never
+ * run here (`jobHealthNotice` returned null). Never throws (D5): a failure in
+ * here is an "unknown" section naming the error, never nothing (rule 7).
+ */
+export function composeJobHealthSection(
+  options: JobHealthSectionOptions = {},
+): string {
+  const env = options.env ?? process.env;
+  try {
+    const notice = jobHealthNotice(
+      (options.read ?? readJobHealth)(env),
+      options.now ?? new Date(),
+    );
+    return notice == null ? '' : jobHealthSessionText(notice, options.timeZone);
+  } catch (error) {
+    return jobHealthSessionText({
+      error: `composing this notice failed (${error instanceof Error ? error.message : String(error)})`,
+      kind: 'unknown',
+      // Not shown; the read may not have got as far as a path.
+      path: '(not resolved)',
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// How often the jobs section shows (home-base-lv87w.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which rule decides whether the jobs section shows (home-base-lv87w.2).
+ *
+ * - `mayor`: a mayor session's first prompt. Always shows, and records today.
+ * - `daily`: any other home-base session. Shows only when no session has
+ *   shown it yet today, and records today when it does.
+ * - `always`: `justin-sdk repo-state` typed by a human or an agent (D4).
+ *   Always shows, and records nothing.
+ *
+ * Justin, 2026-11-15: "let's have it show in all mayor sessions, AND once a
+ * day in a home base session (which could be the mayor session)."
+ */
+export type JobsNoticeRule = 'always' | 'daily' | 'mayor';
+
+/** A typed `/mayor`, alone or with arguments, at the start of the prompt. */
+const MAYOR_COMMAND = /^\s*\/mayor(?:\s|$)/u;
+
+/**
+ * Is this the first prompt of a mayor session (home-base-lv87w.2 D1)? It is
+ * when it starts with a typed `/mayor`, or when it carries the sentence a mayor
+ * session's successor is given in its kickoff. Anything that is not a string
+ * is not.
+ *
+ * By the prompt's text only: the session bead's `session-role:mayor` label is
+ * written at the end of the first turn, so it is usually absent here. A mayor
+ * session whose first prompt is something else gets the daily rule.
+ */
+export function isMayorFirstPrompt(prompt: unknown): boolean {
+  if (typeof prompt !== 'string') return false;
+  return (
+    MAYOR_COMMAND.test(prompt) || prompt.includes(MAYOR_SUCCESSOR_SENTENCE)
+  );
+}
+
+/**
+ * Where the day the jobs section was last shown is recorded (D6): the SDK's own
+ * state dir, beside the first-prompt markers. Machine-wide, like the health
+ * file it is about.
+ */
+export function jobsNoticeRecordPath(env: EnvLike = process.env): string {
+  return join(xdgStateHome(env), 'justin-sdk', 'job-health-notice.json');
+}
+
+/** What the record says. `none` and `unreadable` both count as "not shown today" (D3). */
+export type JobsNoticeRecord =
+  | {day: string; kind: 'shown'}
+  | {kind: 'none'}
+  | {kind: 'unreadable'; why: string};
+
+const RECORD_DAY = /^\d{4}-\d{2}-\d{2}$/u;
+
+export function readJobsNoticeRecord(
+  env: EnvLike = process.env,
+): JobsNoticeRecord {
+  const path = jobsNoticeRecordPath(env);
+  if (!existsSync(path)) return {kind: 'none'};
+  try {
+    const record: unknown = JSON.parse(readFileSync(path, 'utf-8'));
+    const day =
+      record != null && typeof record === 'object' && !Array.isArray(record)
+        ? (record as Record<string, unknown>).day
+        : undefined;
+    if (typeof day === 'string' && RECORD_DAY.test(day)) {
+      return {day, kind: 'shown'};
+    }
+    return {kind: 'unreadable', why: `${path} holds no day`};
+  } catch (error) {
+    return {
+      kind: 'unreadable',
+      why: `could not read ${path}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+}
+
+/**
+ * Record that the jobs section was shown on `day`. Via a temp file and a
+ * rename, like the markers. Returns the failure rather than throwing.
+ */
+function recordJobsNoticeShown(
+  day: string,
+  env: EnvLike,
+  now: Date,
+): {ok: true} | {error: string; ok: false} {
+  const path = jobsNoticeRecordPath(env);
+  try {
+    mkdirSync(join(xdgStateHome(env), 'justin-sdk'), {recursive: true});
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify({at: now.toISOString(), day})}\n`);
+    renameSync(tmp, path);
+    return {ok: true};
+  } catch (error) {
+    return {
+      error: `could not write ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      ok: false,
+    };
+  }
+}
+
+export interface RepoStateComposeOptions extends JobHealthSectionOptions {
+  /**
+   * Which rule decides whether the jobs section shows (home-base-lv87w.2).
+   * Default `always`: shows and records nothing, the cautious side (D3).
+   */
+  jobsNotice?: JobsNoticeRule;
+}
+
+/**
+ * The jobs section under `options.jobsNotice`. `env` resolves both the chores
+ * state dir and the record's state dir.
+ *
+ * Nothing broken: '' and no record, so a job that breaks at 3pm shows in the
+ * next session after that. A record that cannot be read counts as "not shown
+ * today" (D3). A record that cannot be written leaves the section shown, says
+ * so in it, and the next session shows it again.
+ */
+function jobsSectionUnderRule(options: RepoStateComposeOptions): string {
+  const section = composeJobHealthSection(options);
+  const rule = options.jobsNotice ?? 'always';
+  if (section === '' || rule === 'always') return section;
+
+  const env = options.env ?? process.env;
+  const now = options.now ?? new Date();
+  const today = localDay(now.toISOString(), options.timeZone);
+  if (rule === 'daily') {
+    const record = readJobsNoticeRecord(env);
+    if (record.kind === 'shown' && record.day === today) return '';
+  }
+  const recorded = recordJobsNoticeShown(today, env, now);
+  return recorded.ok
+    ? section
+    : `${section}\n\n⚠️ Could not record that this notice was shown today (${recorded.error}), so the next home-base session shows it again.`;
+}
+
+/**
+ * What the first prompt gets: the repo-state block above, then, in a repo that
+ * opted in, the jobs section (home-base-9dcx9.2): which recurring jobs on this
+ * Mac are broken, under the rule `options.jobsNotice` names
+ * (home-base-lv87w.2). '' only when both parts are empty.
+ */
+export function composeRepoState(
+  projectRoot: string,
+  options: RepoStateComposeOptions = {},
+): string {
+  const parts = [composeRepoStateBlock(projectRoot)];
+  // home-base-9dcx9.2 D1: the jobs section rides on this block, so the
+  // first-prompt hook and session-start's fallback both carry it. It stands on
+  // its own: a detached HEAD ('' above) still gets it.
+  if (jobHealthSessionNoticeOn(projectRoot)) {
+    parts.push(jobsSectionUnderRule(options));
+  }
+  return parts.filter((part) => part !== '').join('\n\n');
 }

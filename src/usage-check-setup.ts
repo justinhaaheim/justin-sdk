@@ -199,7 +199,7 @@ export function stepUsageCheckConfig(projectRoot: string): boolean {
 
   const wrapUpSummary =
     USAGE_CHECK_DEFAULTS.wrapUpAt == null
-      ? 'wrapUpAt: null — uses the user file’s wrapUpAt, if it has one; a token count here wins, and 0 turns the wrap-up directive off in this repo'
+      ? 'wrapUpAt: null — uses the user file’s wrapUpAt, if it has one; a token count here wins, and 0 turns the wind-down notice off in this repo'
       : `wrapUpAt: ${USAGE_CHECK_DEFAULTS.wrapUpAt}`;
   success(`Added componentConfig.${USAGE_CHECK_CONFIG_KEY} (${wrapUpSummary})`);
   success(

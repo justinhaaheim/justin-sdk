@@ -379,7 +379,7 @@ describe('thread inbox: sections (j8q3e.1 D5)', () => {
         '- **⚠️ Stopped with work open:** 1',
         '- **❔ Check by hand:** 1',
         '- **🏃 Working:** 1',
-        '- **🤝 Handed off or out of context:** 1',
+        '- **🤝 Handed off or past wind-down notice:** 1',
         '- **💬 Answered:** 1',
         // j8q3e.7 D8: this test runs no pane lookup.
         '- **🪟 Open panes with no request record:** unknown (the pane lookup was not run)',
@@ -421,7 +421,7 @@ describe('thread inbox: sections (j8q3e.1 D5)', () => {
       '## ⚠️ Stopped with work open (1)',
       '## ❔ Check by hand (1)',
       '## 🏃 Working (1)',
-      '## 🤝 Handed off or out of context (1)',
+      '## 🤝 Handed off or past wind-down notice (1)',
       '## 💬 Answered (1)',
     ]);
     const all = render(r, {all: true, order: 'status'})

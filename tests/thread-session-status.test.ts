@@ -1144,6 +1144,25 @@ describe('fixture 1: a question-only session', () => {
     expect(markdown).not.toContain('Questions for you:');
   });
 
+  // home-base-qlxlp: "41k of 400k tokens" read as a capacity, so a session at
+  // 360k thought it was 90% full and handed off before its wind-down notice.
+  test('the Context field names the wind-down notice, never a capacity', async () => {
+    const w = questionOnly();
+    const load = await report(w, false);
+    const withThreshold = {
+      ...load,
+      model: {...load.model, wrapUpAt: 400_000},
+    };
+    const markdown = normalize(partOne(withThreshold, false), w);
+    expect(markdown).toContain(
+      '- **Context:** 41k tokens used (wind-down notice at 400k)',
+    );
+    expect(markdown).not.toContain('of 400k');
+    expect(normalize(partOne(load, false), w)).toContain(
+      '- **Context:** 41k tokens\n',
+    );
+  });
+
   test('the Jobs line (home-base-1rxt0.10 D5, R3): a mayor session only, read from CHORES_STATE_DIR, shown under the state fields, absent when nothing is broken', async () => {
     const w = questionOnly();
     const choresDir = mkdtempSync(join(tmpdir(), 'status-jobs-'));

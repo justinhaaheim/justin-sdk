@@ -111,7 +111,7 @@ export const INBOX_SECTIONS: readonly {
     emoji: '🤝',
     key: 'handedOff',
     onlyWithAll: false,
-    title: 'Handed off or out of context',
+    title: 'Handed off or past wind-down notice',
   },
   {emoji: '💬', key: 'answered', onlyWithAll: false, title: 'Answered'},
   // home-base-vzwbj.4.16 G4: a Done session with an open P1 or P2 question
@@ -642,7 +642,7 @@ export function whereWords(status: SessionStatus): string {
         ? '🤝 Handed off, not picked up'
         : '🤝 Handed off';
     case 'outOfContext':
-      return '🧯 Out of context';
+      return '🧯 Past wind-down notice';
     case 'done':
       if (status.by === 'requests') return '✅ Done';
       if (status.reason?.startsWith(ARCHIVED_PREFIX) === true) {

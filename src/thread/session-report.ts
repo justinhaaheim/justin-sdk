@@ -12,8 +12,8 @@
  *     entry per open request: the close command, keep working, or the P0
  *     (home-base-vzwbj.4.16 G2; home-base-tg45h).
  *   If you stop now the inbox will say: <status> — and for ⚠️ only, what that
- *     leads to, how to settle each open request, and that handing off is only
- *     for a session that cannot go on (G2; home-base-tg45h)
+ *     leads to, how to settle each open request, and the only reasons to hand
+ *     off (G2; home-base-tg45h; home-base-qlxlp)
  * With the knob off it prints `SESSION BEADS: DISABLED` and exits 0 — the line
  * the v4 rule branches on to write the legacy report instead (D6).
  *
@@ -994,6 +994,15 @@ export const OPEN_WORK_SETTLE: readonly Piece[] = [
 ];
 
 /**
+ * The reasons to hand off, in the words of the handoff rule's "When to hand
+ * off" (templates/rules/handoff.md; home-base-qlxlp). "Its context is nearly
+ * full" is gone: it was undefined, so sessions guessed, and seven of eight
+ * mayor sessions handed off before their 400k wind-down notice arrived.
+ */
+const HANDOFF_REASONS =
+  ' only when Justin tells you to, when a wind-down notice tells you to, or when you are in the last 10% of a hard limit whose size you have been told. Never hand off before a wind-down notice in anticipation of one.';
+
+/**
  * home-base-tg45h decision 1: handing off is not a way to stop. It used to
  * sit beside "close" and "file the P0" as a peer, and on 2026-10-19 a session
  * whose only pending questions were optional handed off with its context far
@@ -1002,7 +1011,7 @@ export const OPEN_WORK_SETTLE: readonly Piece[] = [
 export const OPEN_WORK_HANDOFF: readonly Piece[] = [
   'Handing off is not a way to stop: run ',
   {code: SDK_HANDOFF_CALL},
-  ' only when this session cannot go on (its context is nearly full, or Justin asked for a new session).',
+  HANDOFF_REASONS,
 ];
 
 /**
@@ -1011,13 +1020,13 @@ export const OPEN_WORK_HANDOFF: readonly Piece[] = [
  * because Justin is not ready for repos without the knob to learn it.
  */
 export const OPEN_WORK_HANDOFF_UNNAMED: readonly Piece[] = [
-  'Handing off is not a way to stop: hand off only when this session cannot go on (its context is nearly full, or Justin asked for a new session).',
+  `Handing off is not a way to stop: hand off${HANDOFF_REASONS}`,
 ];
 
 /**
  * The verdict: one line, and for ⚠️ two more saying what to do (G2;
- * home-base-tg45h): settle each open request, and hand off only when the
- * session cannot go on. `handoffSuccessor` is the repo's successor knob: only
+ * home-base-tg45h): settle each open request, and hand off only for the
+ * handoff rule's reasons. `handoffSuccessor` is the repo's successor knob: only
  * where it is on does the last line name the handoff call.
  */
 export function verdictLines(

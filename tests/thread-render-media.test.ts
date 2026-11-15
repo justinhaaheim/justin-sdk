@@ -265,12 +265,14 @@ describe('the emoji header knob and the wrap-up threshold (D19)', () => {
     expect(titled).not.toContain('📦 home-base');
   });
 
-  test('tokens render as "497k / 470k" when a wrapUpAt is configured', () => {
+  test('tokens render as "497k (wind-down at 470k)" when a wrapUpAt is configured, never as a capacity', () => {
     expect(MARKDOWN).toContain('🔢 497k');
-    expect(MARKDOWN).not.toContain('497k /');
+    expect(MARKDOWN).not.toContain('wind-down at');
     expect(renderMarkdown(model({wrapUpAt: 470_000}))).toContain(
-      '🔢 497k / 470k',
+      '🔢 497k (wind-down at 470k)',
     );
+    // home-base-qlxlp: "497k / 470k" read as a capacity that was nearly used.
+    expect(renderMarkdown(model({wrapUpAt: 470_000}))).not.toContain('/ 470k');
   });
 
   test('no wrapUpAt prints ONE number, never a fabricated budget', () => {

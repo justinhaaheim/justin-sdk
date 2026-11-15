@@ -51,6 +51,7 @@ import {
   claimFirstPrompt,
   composeRepoState,
   type HookPayload,
+  isMayorFirstPrompt,
   readHookPayload,
   repoStateHookPresence,
   safeSessionId,
@@ -374,7 +375,11 @@ export function composeSessionStart(
   const suppressRuleText = repoCarriesRules(repoRules.status, projectRoot);
 
   // --- repo state: only when the first-prompt hook could not be armed -------
-  const repoState = firstPrompt.ok ? '' : composeRepoState(projectRoot);
+  // No prompt here, so no way to know a mayor session: the jobs section takes
+  // the daily rule (home-base-lv87w.2).
+  const repoState = firstPrompt.ok
+    ? ''
+    : composeRepoState(projectRoot, {jobsNotice: 'daily'});
 
   // --- compose + Prettier the injection (for the model), within budget (D2) -
   const injected = suppressRuleText ? null : assembled;
@@ -677,7 +682,11 @@ export function runRepoState(options: RepoStateOptions = {}): number {
   const userLevel = options.userLevel === true;
 
   if (options.hook !== true) {
-    const block = composeRepoState(sessionProjectRoot(cwd));
+    // Someone asked: the jobs section always shows and records nothing
+    // (home-base-lv87w.2 D4).
+    const block = composeRepoState(sessionProjectRoot(cwd), {
+      jobsNotice: 'always',
+    });
     if (block === '') {
       console.error(
         'repo-state: nothing to report here (not a git repository, or a detached HEAD)',
@@ -717,7 +726,11 @@ export function runRepoState(options: RepoStateOptions = {}): number {
 
   emitHookOutput({
     event: 'UserPromptSubmit',
-    forClaude: composeRepoState(projectRoot),
+    // home-base-lv87w.2: a mayor session always gets the jobs section; any
+    // other session gets it once a day.
+    forClaude: composeRepoState(projectRoot, {
+      jobsNotice: isMayorFirstPrompt(payload?.prompt) ? 'mayor' : 'daily',
+    }),
     forJustin:
       claim.recordError == null
         ? ''

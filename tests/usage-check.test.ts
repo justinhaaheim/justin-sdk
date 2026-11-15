@@ -62,8 +62,10 @@ import {
   type UsageCheckConfig,
   type UsageCheckRole,
   type UsageDecision,
+  type WindDownThreshold,
   WRAP_UP_DIRECTIVE,
   WRAP_UP_OPENING,
+  WRAP_UP_OPENINGS,
 } from '../src/usage-check';
 import {
   addUsageCheckHook,
@@ -709,16 +711,33 @@ describe('formatting', () => {
   });
 
   test('the notice carries the marker and the machine-readable setpoint', () => {
+    const notice = formatNotice(
+      {
+        contextTokens: 152_431,
+        reason: 'first',
+        setpoint: 150_000,
+        wrapUp: false,
+      },
+      {scope: 'session'},
+      null,
+      WRAP_UP_DIRECTIVE,
+      {at: 400_000, kind: 'set'},
+    );
+    expect(notice).toBe(
+      `${USAGE_CHECK_MARKER} This session has used 152,431 tokens of context. FYI only, sent at preset token counts. The wind-down notice comes at 400,000 tokens; do not wind down or hand off before it unless explicitly told to. (notice-at=150000)`,
+    );
+    expect(notice).not.toContain(WRAP_UP_DIRECTIVE);
+  });
+
+  test('a caller that does not say what the threshold is gets "could not be read", never "none" (rule 7)', () => {
     const notice = formatNotice({
       contextTokens: 152_431,
       reason: 'first',
       setpoint: 150_000,
       wrapUp: false,
     });
-    expect(notice).toBe(
-      `${USAGE_CHECK_MARKER} This session has now used 152,431 tokens of context. This notice fires at preset token counts (this one at 150,000). This is just an FYI: not a limit, and not a reason to stop or hand off. (notice-at=150000)`,
-    );
-    expect(notice).not.toContain(WRAP_UP_DIRECTIVE);
+    expect(notice).toContain('The wind-down threshold could not be read');
+    expect(notice).not.toContain('No wind-down notice is set');
   });
 
   test('the wrap-up notice adds the directive verbatim', () => {
@@ -1254,7 +1273,7 @@ describe('runUsageCheck: a player is measured on ITS OWN transcript', () => {
         transcript_path: fx.sessionPath,
       }),
     );
-    expect(notice).toContain('This subagent has now used 210,000 tokens');
+    expect(notice).toContain('This subagent has used 210,000 tokens');
   });
 
   test('the once-per-setpoint contract closes in the SUBAGENT file', () => {
@@ -1471,15 +1490,31 @@ describe('the notice reads as an FYI, not a limit (home-base-y1hg0.22)', () => {
     return notices;
   }
 
-  test('the exact text a session sees at 200,000 on the default ladder', () => {
-    expect(
-      formatNotice(
-        decision(false),
-        {scope: 'session'},
-        USAGE_CHECK_DEFAULTS.setpoints,
-      ),
-    ).toBe(
-      `${USAGE_CHECK_MARKER} This session has now used 201,607 tokens of context. This notice fires at preset token counts, every 100,000 tokens (this one at 200,000). This is just an FYI: not a limit, and not a reason to stop or hand off. (notice-at=200000)`,
+  // home-base-qlxlp: shorter, and it names the coming wind-down notice.
+  const sessionAt200k = (windDown: WindDownThreshold): string =>
+    formatNotice(
+      decision(false),
+      {scope: 'session'},
+      USAGE_CHECK_DEFAULTS.setpoints,
+      WRAP_UP_DIRECTIVE,
+      windDown,
+    );
+
+  test('the exact text a session sees at 200,000 on the default ladder, threshold set', () => {
+    expect(sessionAt200k({at: 400_000, kind: 'set'})).toBe(
+      `${USAGE_CHECK_MARKER} This session has used 201,607 tokens of context. FYI only, sent every 100,000 tokens. The wind-down notice comes at 400,000 tokens; do not wind down or hand off before it unless explicitly told to. (notice-at=200000)`,
+    );
+  });
+
+  test('the exact text with no threshold set', () => {
+    expect(sessionAt200k({kind: 'none'})).toBe(
+      `${USAGE_CHECK_MARKER} This session has used 201,607 tokens of context. FYI only, sent every 100,000 tokens. No wind-down notice is set, and this is not a limit. (notice-at=200000)`,
+    );
+  });
+
+  test('the exact text when the threshold could not be read', () => {
+    expect(sessionAt200k({kind: 'unread'})).toBe(
+      `${USAGE_CHECK_MARKER} This session has used 201,607 tokens of context. FYI only, sent every 100,000 tokens. The wind-down threshold could not be read; this is not a limit. Do not wind down or hand off unless explicitly told to. (notice-at=200000)`,
     );
   });
 
@@ -1491,22 +1526,41 @@ describe('the notice reads as an FYI, not a limit (home-base-y1hg0.22)', () => {
     }
   });
 
-  test('every variant says it fires at preset token counts and names its rung', () => {
+  test('every variant ends its first line with the token, and none repeats the rung in words', () => {
+    // home-base-qlxlp review: "(this one at 200,000)" was cut to shorten the
+    // FYI notices; the notice-at token already names the rung.
     for (const notice of everyVariant()) {
-      expect(notice).toContain('This notice fires at preset token counts');
-      expect(notice).toContain('(this one at 200,000)');
       expect(notice.split('\n')[0]).toEndWith('(notice-at=200000)');
+      expect(notice).not.toContain('this one at');
     }
   });
 
-  test('without the directive, it says it is an FYI and not a limit or a reason to stop', () => {
+  test('without the directive, it says it is an FYI, and either names the wind-down notice or says it is not a limit', () => {
     expect(NOTICE_FYI).toContain('FYI');
-    expect(NOTICE_FYI).toContain('not a limit');
-    expect(NOTICE_FYI).toContain('not a reason to stop or hand off');
+    const states: WindDownThreshold[] = [
+      {at: 350_000, kind: 'set'},
+      {kind: 'none'},
+      {kind: 'unread'},
+    ];
     for (const subject of SUBJECTS) {
-      const notice = formatNotice(decision(false), subject, null);
-      expect(notice).toContain(NOTICE_FYI);
-      expect(notice).not.toContain(WRAP_UP_DIRECTIVE);
+      for (const windDown of states) {
+        const notice = formatNotice(
+          decision(false),
+          subject,
+          null,
+          WRAP_UP_DIRECTIVE,
+          windDown,
+        );
+        expect(notice).toContain(NOTICE_FYI);
+        expect(notice).not.toContain(WRAP_UP_DIRECTIVE);
+        if (windDown.kind === 'set') {
+          expect(notice).toContain(
+            'The wind-down notice comes at 350,000 tokens; do not wind down or hand off before it',
+          );
+        } else {
+          expect(notice).toContain('not a limit');
+        }
+      }
     }
   });
 
@@ -1525,11 +1579,11 @@ describe('the notice reads as an FYI, not a limit (home-base-y1hg0.22)', () => {
     const on = (ladder: number[] | null) =>
       formatNotice(decision(false), {scope: 'session'}, ladder);
     expect(on(USAGE_CHECK_DEFAULTS.setpoints)).toContain(
-      'preset token counts, every 100,000 tokens (this one at 200,000)',
+      'FYI only, sent every 100,000 tokens.',
     );
     // 350,000 sits between rungs, so "every 100,000" would be false here.
     expect(on(FOLDED_LADDER)).toContain(
-      'preset token counts (this one at 200,000)',
+      'FYI only, sent at preset token counts.',
     );
     expect(on(FOLDED_LADDER)).not.toContain('every');
     expect(on([200_000])).not.toContain('every');
@@ -1583,7 +1637,7 @@ describe('runUsageCheck: upgrading over a transcript with legacy notices', () =>
     );
     const next = noticeOf(runCapturing(input));
     expect(next).toContain('(notice-at=300000)');
-    expect(next).toContain('every 100,000 tokens (this one at 300,000)');
+    expect(next).toContain('sent every 100,000 tokens.');
     expect(next).toContain(NOTICE_FYI);
     expect(next?.toLowerCase()).not.toContain('setpoint');
   });
@@ -1604,12 +1658,14 @@ describe('runUsageCheck: upgrading over a transcript with legacy notices', () =>
     const asPlayer = noticeOf(
       runCapturing({...base, agent_id: 'a405a84daeae6cd2b'}),
     );
-    expect(asPlayer).toContain('preset token counts (this one at 200,000)');
+    expect(asPlayer).toContain('sent at preset token counts.');
+    expect(asPlayer).toContain('(notice-at=200000)');
     expect(asPlayer).not.toContain('every');
     expect(asPlayer).toContain(NOTICE_FYI);
 
     const asSession = noticeOf(runCapturing(base));
-    expect(asSession).toContain('every 100,000 tokens (this one at 200,000)');
+    expect(asSession).toContain('sent every 100,000 tokens.');
+    expect(asSession).toContain('(notice-at=200000)');
   });
 });
 
@@ -1661,15 +1717,55 @@ function factsAfter(entries: unknown[], contextTokens: number) {
   return facts;
 }
 
-describe('the wrap-up opening (home-base-o5atv.2.1 E2, AC 3)', () => {
+/**
+ * The session directive as notices carried it from home-base-o5atv.1.1 D7
+ * until home-base-qlxlp: a literal, for the same reason as the one above.
+ */
+const OLD_HANDOFF_WRAP_UP_DIRECTIVE_TEXT =
+  'Wrap up your session at the next available opportunity, then hand off as .claude/rules/justin-sdk/handoff.md describes: run `./node_modules/.bin/justin-sdk thread handoff --note "<one line the next session must know>"` bare, from the repository root, with nothing before or after it.';
+
+describe('the wrap-up opening (home-base-o5atv.2.1 E2, AC 3; home-base-qlxlp)', () => {
   test('both directive constants start with the exported opening', () => {
     expect(WRAP_UP_DIRECTIVE).toStartWith(WRAP_UP_OPENING);
     expect(HANDOFF_WRAP_UP_DIRECTIVE).toStartWith(WRAP_UP_OPENING);
   });
 
-  test('so does the text in notices written before it, which is unchanged', () => {
-    expect(OLD_WRAP_UP_DIRECTIVE_TEXT).toStartWith(WRAP_UP_OPENING);
-    expect(WRAP_UP_DIRECTIVE).toBe(OLD_WRAP_UP_DIRECTIVE_TEXT);
+  test('the directive says it is the wind-down notice, not a limit, and to finish the work first', () => {
+    for (const directive of [WRAP_UP_DIRECTIVE, HANDOFF_WRAP_UP_DIRECTIVE]) {
+      expect(directive).toStartWith('This is the wind-down notice. ');
+      expect(directive).toContain(
+        'It is not a limit: finish the work in progress, then',
+      );
+      expect(directive).toContain('at the next good stopping point');
+    }
+  });
+
+  test('the reader accepts the current opening AND the one before home-base-qlxlp', () => {
+    expect(WRAP_UP_OPENINGS).toContain(WRAP_UP_OPENING);
+    expect(WRAP_UP_OPENINGS).toContain(
+      'Wrap up your session at the next available opportunity',
+    );
+    expect(OLD_WRAP_UP_DIRECTIVE_TEXT).not.toStartWith(WRAP_UP_OPENING);
+  });
+
+  test('an old-format notice with either old directive still reads as told (no second wind-down notice)', () => {
+    for (const oldDirective of [
+      OLD_WRAP_UP_DIRECTIVE_TEXT,
+      OLD_HANDOFF_WRAP_UP_DIRECTIVE_TEXT,
+    ]) {
+      const notice = `${USAGE_CHECK_MARKER} This session has now used 412,345 tokens of context. This notice fires at preset token counts, every 100,000 tokens (this one at 400,000). (notice-at=400000)\n${oldDirective}`;
+      const facts = factsAfter([noticeEntry(notice)], 430_000);
+      expect(facts.lastAnnouncedSetpoint).toBe(400_000);
+      expect(facts.lastNoticeHadWrapUp).toBe(true);
+      expect(
+        decide({
+          config: resolvedFor(WRAP_UP_400K, 'session'),
+          contextTokens: 430_000,
+          lastAnnouncedSetpoint: 400_000,
+          lastNoticeHadWrapUp: facts.lastNoticeHadWrapUp,
+        }),
+      ).toBeNull();
+    }
   });
 });
 

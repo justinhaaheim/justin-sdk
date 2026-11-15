@@ -287,8 +287,9 @@ export interface BuildReportModelOptions {
   /** The thread bead id, or null when bd never took the report. */
   threadId: string | null;
   /**
-   * usage-check's resolved wrap-up threshold for this session's role, when the
-   * config sets one (D19). A number renders "497k / 470k"; null renders "497k".
+   * usage-check's resolved wind-down threshold for this session's role, when
+   * the config sets one (D19). A number renders "497k (wind-down at 470k)";
+   * null renders "497k".
    * Null is the honest value for "no threshold is configured" — it is NOT the
    * same as a threshold of zero, and the renderers never invent one.
    */
@@ -348,9 +349,11 @@ function renderTree(facts: ThreadFacts): string {
 /**
  * The token reading, in the shape the header wants (D19).
  *
- * `497k / 470k` only when usage-check's resolved config for this role actually
- * carries a numeric `wrapUpAt`. Without one there is no second number to show,
- * and inventing a plausible budget would be a measurement nobody made.
+ * `497k (wind-down at 470k)` only when usage-check's resolved config for this
+ * role actually carries a numeric `wrapUpAt`. Without one there is no second
+ * number to show, and inventing a plausible budget would be a measurement
+ * nobody made. Never `497k / 470k`: the threshold is not a capacity, and that
+ * shape read as one (home-base-qlxlp).
  */
 function renderTokens(
   facts: ThreadFacts,
@@ -364,7 +367,9 @@ function renderTokens(
     return `${formatTokens(facts.tokensAtStop)} tokens of context`;
   }
   const used = compactTokens(facts.tokensAtStop);
-  return wrapUpAt == null ? used : `${used} / ${compactTokens(wrapUpAt)}`;
+  return wrapUpAt == null
+    ? used
+    : `${used} (wind-down at ${compactTokens(wrapUpAt)})`;
 }
 
 /**

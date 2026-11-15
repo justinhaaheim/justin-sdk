@@ -16,7 +16,7 @@
  *   - A number is an opt-in bound for an UNATTENDED run.
  *   - Time spent blocked never counts toward `timeoutMin`, either way.
  *   - `timeoutMin: 0` — the DEFAULT since D7 — means there is no wall-clock
- *     timeout at all. Sessions are bounded by the ~300k wrap-up notice.
+ *     timeout at all. Sessions are bounded by the wind-down notice.
  *   - A timeout that IS configured still fires for a session running away; the
  *     last tests here keep the fix from being "the timeout was quietly removed".
  *
@@ -301,7 +301,7 @@ describe('--blocked-wait-min is an opt-in bound (D3)', () => {
 describe('no wall-clock timeout by default (D7)', () => {
   test('timeoutMin 0 lets a long session run to its own ending', async () => {
     // The default. 500 simulated minutes of work, far past the old 45-minute
-    // timeout, and nothing reaps it — the wrap-up notice does that job now.
+    // timeout, and nothing reaps it — the wind-down notice does that job now.
     const sim = await simulate({
       maxPolls: 600,
       opts: {timeoutMin: 0},

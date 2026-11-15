@@ -2,13 +2,24 @@
 
 This file says when and how a session hands its work on to a fresh session. In Justin's words (2026-10-29): "claude code's job is to call our tool to kickoff the new session, and that that tool may opt not to open the session due to session limits, rate limits, or any other reason. So there's a clear API, claude knows what to do, and claude doesn't try to hack around it (i don't want claude "going rogue" like that opening new cc sessions)."
 
+## Terms
+
+These words mean the same thing in every rule, skill, notice and report.
+
+- **Wind-down notice:** the automated notice a session gets when its context reaches its wind-down threshold. It is not a limit. After it, keep working to a natural stopping point, then hand off. Handing off well past the threshold, at 450k or 500k tokens, is expected.
+- **Wind-down threshold:** the token count at which the wind-down notice is sent, set by `wrapUpAt` in the `usage-check` config.
+- **FYI notice:** the notices sent at preset token counts, every 100,000 tokens by default. They are information only. When a wind-down threshold is set, they name it.
+- **Hard limit:** the model's real context window. Only a hard limit is something to hand off ahead of, and only when you have been told its size. A session that has not been told the size of its context window does not know it.
+
 ## When to hand off
 
-Hand off only when this session cannot go on:
+Hand off only for one of these reasons:
 
-- its context is nearly full,
-- Justin asked for a new session, or
-- a wrap-up notice told it to hand off.
+1. Justin tells you to hand off.
+2. A wind-down notice tells you to hand off. Finish the work in progress, then hand off at the next good stopping point. If Justin then tells you to keep going, keep going: his word wins.
+3. You are in the last 10% of a hard limit whose size you have been told.
+
+Never hand off before a wind-down notice in anticipation of one. The token counts that `thread status` and the FYI notices show are not limits.
 
 Never hand off as a way to stop with open work.
 

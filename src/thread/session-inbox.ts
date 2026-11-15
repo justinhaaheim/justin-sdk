@@ -1430,7 +1430,7 @@ const HIDDEN_STATUS_WORDS: Record<SessionStatus['kind'], string> = {
   exportBehind: '⏳ export behind',
   handedOff: '🤝 handed off',
   openWork: '⚠️ open work',
-  outOfContext: '🧯 out of context',
+  outOfContext: '🧯 past wind-down notice',
   // Only a ❔ whose activity could not be read is ever hidden by age (D5).
   unknown: '❔ unknown (activity unreadable)',
   waiting: '🛑 waiting on you',

@@ -149,7 +149,7 @@ describe('the state line, one state at a time', () => {
         kind: 'outOfContext',
         wrapUpAt: 400_000,
       }).state,
-    ).toBe('Stopped: out of context');
+    ).toBe('Stopped: past wind-down notice');
     expect(line(request, {kind: 'handedOff', successor: null}).state).toBe(
       'Stopped: handed off',
     );

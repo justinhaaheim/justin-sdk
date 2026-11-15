@@ -11,7 +11,6 @@ import {join} from 'path';
 import {
   choresStateDir,
   JOB_HEALTH_STALE_MS,
-  jobHealthBadge,
   type JobHealthFile,
   jobHealthNotice,
   jobHealthPath,
@@ -151,30 +150,6 @@ describe('jobHealthNotice', () => {
 });
 
 describe('words', () => {
-  test('statusline badge: one problem names it with its age', () => {
-    expect(jobHealthBadge({kind: 'broken', problems: [LIFE]}, NOW)).toBe(
-      '⚠ life daily run failing 12d',
-    );
-  });
-
-  test('statusline badge: several problems are counted', () => {
-    expect(
-      jobHealthBadge(
-        {kind: 'broken', problems: [LIFE, {...LIFE, id: 'b', name: 'b'}]},
-        NOW,
-      ),
-    ).toBe('⚠ 2 jobs broken');
-  });
-
-  test('statusline badge: not running and unknown', () => {
-    expect(
-      jobHealthBadge({ageMs: null, kind: 'not-running', path: '/p'}, NOW),
-    ).toBe('⚠ chores not running');
-    expect(jobHealthBadge({error: 'e', kind: 'unknown', path: '/p'}, NOW)).toBe(
-      '⚠ job health unknown',
-    );
-  });
-
   test('report text: which jobs, since which local day', () => {
     expect(
       jobHealthReportText(

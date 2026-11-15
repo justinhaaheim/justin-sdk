@@ -12,15 +12,19 @@
  *   <chores state dir>/health.json
  *     {version: 1, at, checked, problems: [{id, name, kind, since, reason}]}
  *
- * ONE WRITER, TWO READERS. home-base's chores runner writes it after every
- * hourly tick (src/chores/health.ts). The Claude Code statusline's bottom line
- * (home-base src/starship/job-health-alert.ts) and, in mayor sessions only,
- * the status report's Part 1 (thread/part-one.ts, through session-report.ts)
- * read it. Both readers go through `readJobHealth` and `jobHealthNotice` here,
- * so the rules below are decided once.
+ * ONE WRITER, SEVERAL READERS. home-base's chores runner writes it after every
+ * hourly tick (src/chores/health.ts). The status report's Part 1, in mayor
+ * sessions only (thread/part-one.ts, through session-report.ts), home-base
+ * `vitals` (src/vitals/checks.ts), and the first-prompt repo-state block in a
+ * repo that sets `componentConfig["job-health"].sessionNotice` (first-prompt.ts,
+ * home-base-9dcx9.2; home-base sets it) read it. Every reader goes through
+ * `readJobHealth` and `jobHealthNotice` here, so the rules below are decided
+ * once. The Claude Code statusline does NOT read it: its alert was removed on
+ * 2026-11-14 (home-base-9dcx9.1; Justin wants broken jobs raised where he can
+ * act on them).
  *
- * THIS MODULE IS A LEAF ON PURPOSE: it imports only node's fs, os and path.
- * The statusline imports it on every render, like thread/status-file.ts.
+ * THIS MODULE IS A LEAF ON PURPOSE: it imports only node's fs, os and path, so
+ * any reader can import it cheaply.
  *
  * RULE 7, the whole point. Each outcome is its own value, and none of them
  * becomes "all clear" by accident:
@@ -334,45 +338,16 @@ export function problemWords(kind: JobProblemKind): string {
 }
 
 const HOUR_MS = 60 * 60 * 1000;
-const DAY_MS = 24 * HOUR_MS;
-
-/** "12d", "5h", "<1h": whole units elapsed, rounded down. Null for a future time. */
-export function compactAge(fromMs: number, now: Date): string | null {
-  const elapsed = now.getTime() - fromMs;
-  if (Number.isNaN(elapsed) || elapsed < 0) return null;
-  if (elapsed >= DAY_MS) return `${Math.floor(elapsed / DAY_MS)}d`;
-  if (elapsed >= HOUR_MS) return `${Math.floor(elapsed / HOUR_MS)}h`;
-  return '<1h';
-}
-
-function problemPhrase(problem: JobProblem, now: Date): string {
-  const age =
-    problem.since == null ? null : compactAge(Date.parse(problem.since), now);
-  return `${problem.name} ${problemWords(problem.kind)}${age == null ? '' : ` ${age}`}`;
-}
-
-/**
- * The statusline alert's opening words (D4, R1): "⚠ life daily run failing
- * 13d", "⚠ 3 jobs broken", "⚠ chores not running", "⚠ job health unknown".
- * The statusline adds ": run chores".
- */
-export function jobHealthBadge(notice: JobHealthNotice, now: Date): string {
-  switch (notice.kind) {
-    case 'broken': {
-      const [only] = notice.problems;
-      return notice.problems.length === 1 && only != null
-        ? `⚠ ${problemPhrase(only, now)}`
-        : `⚠ ${notice.problems.length} jobs broken`;
-    }
-    case 'not-running':
-      return '⚠ chores not running';
-    case 'unknown':
-      return '⚠ job health unknown';
-  }
-}
 
 /** YYYY-MM-DD of an instant in `timeZone` (undefined: this machine's). */
-function localDay(instant: string, timeZone: string | undefined): string {
+/**
+ * The calendar day of `instant` as `YYYY-MM-DD`, in `timeZone` (default: this
+ * machine's). Also the day the session notice records (home-base-lv87w.2 D2).
+ */
+export function localDay(
+  instant: string,
+  timeZone: string | undefined,
+): string {
   return new Intl.DateTimeFormat('en-CA', {
     day: '2-digit',
     month: '2-digit',
@@ -413,4 +388,62 @@ export function jobHealthReportText(
     case 'unknown':
       return `⚠️ job health unknown: ${notice.error}`;
   }
+}
+
+/** The heading every session notice starts with (home-base-9dcx9.2 D4). */
+export const JOB_HEALTH_SESSION_HEADING = '# Recurring jobs on this Mac';
+
+/**
+ * What the session is told to do with the notice (home-base-9dcx9.2 D4). The
+ * same words for every kind: Justin raises it, and Claude does not start fixing
+ * on its own.
+ */
+export const JOB_HEALTH_SESSION_INSTRUCTION =
+  'In your first reply, tell Justin which jobs are broken, in a short list, and propose one next step for each. Do not start fixing them unless he asks.';
+
+/**
+ * When the notice shows (home-base-lv87w.2): the rule `composeRepoState`
+ * applies in first-prompt.ts, said in the notice so neither reader wonders why
+ * it is missing from a session.
+ */
+export const JOB_HEALTH_SESSION_WHEN =
+  'Shown in every mayor session and in the first home-base session each day.';
+
+/**
+ * The jobs section a home-base session gets on its first prompt
+ * (home-base-9dcx9.2 D4): which jobs are broken, since when and why, the
+ * details command, when the notice shows, and what to do in the first reply.
+ * For `not-running` and `unknown` the heading says so and the body is the
+ * status report's line.
+ */
+export function jobHealthSessionText(
+  notice: JobHealthNotice,
+  timeZone?: string,
+): string {
+  let headline: string;
+  let body: string[];
+  switch (notice.kind) {
+    case 'broken':
+      headline = `${notice.problems.length} broken`;
+      body = notice.problems.map(
+        (problem) =>
+          `- **${problem.name}** (\`${problem.id}\`): ${problemWords(problem.kind)}${problem.since == null ? '' : ` since ${localDay(problem.since, timeZone)}`}. ${problem.reason}`,
+      );
+      break;
+    case 'not-running':
+      headline = 'chores not running';
+      body = [jobHealthReportText(notice, timeZone)];
+      break;
+    case 'unknown':
+      headline = 'health unknown';
+      body = [jobHealthReportText(notice, timeZone)];
+      break;
+  }
+  return [
+    `${JOB_HEALTH_SESSION_HEADING}: ${headline}`,
+    body.join('\n'),
+    `Details: run \`${JOB_HEALTH_DETAILS_COMMAND}\`.`,
+    JOB_HEALTH_SESSION_WHEN,
+    JOB_HEALTH_SESSION_INSTRUCTION,
+  ].join('\n\n');
 }

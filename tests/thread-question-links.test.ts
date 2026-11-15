@@ -599,14 +599,14 @@ describe('G2: thread status says what to do with each open request when the yiel
     expect(verdictLines({kind: 'openWork'}, PLAIN_STYLE, true)).toEqual([
       'If you stop now the inbox will say: ⚠️ Open work, no blocker — Justin will be told to resume this session.',
       'Before you stop, settle each open request: close it if its work is done; keep working if you can, acting on the default of any P1–P3 question Justin has not answered; or, if it cannot move without his answer, file that question as a P0.',
-      'Handing off is not a way to stop: run `./node_modules/.bin/justin-sdk thread handoff` only when this session cannot go on (its context is nearly full, or Justin asked for a new session).',
+      'Handing off is not a way to stop: run `./node_modules/.bin/justin-sdk thread handoff` only when Justin tells you to, when a wind-down notice tells you to, or when you are in the last 10% of a hard limit whose size you have been told. Never hand off before a wind-down notice in anticipation of one.',
     ]);
     // home-base-jm5kg.8: with componentConfig.thread.handoff.successor off,
     // the same rule, and no handoff command named.
     expect(verdictLines({kind: 'openWork'}, PLAIN_STYLE, false)).toEqual([
       'If you stop now the inbox will say: ⚠️ Open work, no blocker — Justin will be told to resume this session.',
       'Before you stop, settle each open request: close it if its work is done; keep working if you can, acting on the default of any P1–P3 question Justin has not answered; or, if it cannot move without his answer, file that question as a P0.',
-      'Handing off is not a way to stop: hand off only when this session cannot go on (its context is nearly full, or Justin asked for a new session).',
+      'Handing off is not a way to stop: hand off only when Justin tells you to, when a wind-down notice tells you to, or when you are in the last 10% of a hard limit whose size you have been told. Never hand off before a wind-down notice in anticipation of one.',
     ]);
   });
 
@@ -626,8 +626,8 @@ describe('G2: thread status says what to do with each open request when the yiel
         expect(said).toContain('file that question as a P0');
         expect(said).toMatch(
           successor
-            ? /Handing off is not a way to stop: run \S*\.\/node_modules\/\.bin\/justin-sdk thread handoff\S* only when this session cannot go on/u
-            : /Handing off is not a way to stop: hand off only when this session cannot go on/u,
+            ? /Handing off is not a way to stop: run \S*\.\/node_modules\/\.bin\/justin-sdk thread handoff\S* only when Justin tells you to, when a wind-down notice tells you to/u
+            : /Handing off is not a way to stop: hand off only when Justin tells you to, when a wind-down notice tells you to/u,
         );
       }
     }
@@ -675,7 +675,7 @@ describe('G2: thread status says what to do with each open request when the yiel
 
     const off = await render();
     expect(off).toContain(
-      'Handing off is not a way to stop: hand off only when this session cannot go on',
+      'Handing off is not a way to stop: hand off only when Justin tells you to, when a wind-down notice tells you to',
     );
     expect(off).not.toContain('thread handoff');
     expect(off).not.toContain('thread spawn');
@@ -688,7 +688,7 @@ describe('G2: thread status says what to do with each open request when the yiel
     );
     const on = await render();
     expect(on).toContain(
-      'Handing off is not a way to stop: run `./node_modules/.bin/justin-sdk thread handoff` only when this session cannot go on',
+      'Handing off is not a way to stop: run `./node_modules/.bin/justin-sdk thread handoff` only when Justin tells you to, when a wind-down notice tells you to',
     );
   });
 });

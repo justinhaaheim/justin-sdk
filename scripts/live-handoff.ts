@@ -1167,7 +1167,7 @@ function bareHandoffPrompt(ctx: Ctx): string {
 }
 
 function ruleHandoffPrompt(ctx: Ctx): string {
-  return `${ctx.markerTag} Live test S5 of the handoff rules. Treat your context as nearly full: hand this session off to a fresh session now, exactly the way your rules say to, with this one-line note for the successor: ${successorNote(ctx, 'S5')}. Then do what the command's output tells you. Do not run git and do not edit or create any file.`;
+  return `${ctx.markerTag} Live test S5 of the handoff rules. I am telling you to hand off: hand this session off to a fresh session now, exactly the way your rules say to, with this one-line note for the successor: ${successorNote(ctx, 'S5')}. Then do what the command's output tells you. Do not run git and do not edit or create any file.`;
 }
 
 /** S6's three commands, the same in the prompt and when driven directly. */

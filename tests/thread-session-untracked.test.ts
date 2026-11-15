@@ -223,7 +223,7 @@ describe('D6 verdict: a full card for each kind of evidence of open work', () =>
     expect(
       untrackedCard(session, untrackedVerdict(session, NOW), NOW, NO_PANES)
         .status,
-    ).toBe('🧯 Out of context (not tracked: it has no session bead)');
+    ).toBe('🧯 Past wind-down notice (not tracked: it has no session bead)');
   });
 
   // home-base-o5atv.3 O2: out of context never displaces work waiting to land.
@@ -246,7 +246,7 @@ describe('D6 verdict: a full card for each kind of evidence of open work', () =>
       text: 'Land it: merge feature into main (3 commits)',
     });
     expect(untrackedCard(session, verdict, NOW, NO_PANES).status).not.toContain(
-      'Out of context',
+      'Past wind-down notice',
     );
   });
 
@@ -273,7 +273,7 @@ describe('D6 verdict: a full card for each kind of evidence of open work', () =>
     const verdict = untrackedVerdict(session, NOW);
     expect(verdict.action.rule).toBe(10);
     expect(untrackedCard(session, verdict, NOW, NO_PANES).status).not.toContain(
-      'Out of context',
+      'Past wind-down notice',
     );
   });
 

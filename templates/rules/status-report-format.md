@@ -111,7 +111,7 @@ Write the whole report by hand as your final message, in the template below. The
 
 | Next step      | Means                                                    |
 | -------------- | -------------------------------------------------------- |
-| `handoff`      | I am out of context; the next session picks this up      |
+| `handoff`      | I am handing off; the next session picks this up         |
 | `answerAsks`   | I need your answers before the next move is worth making |
 | `continue`     | I keep going on this arc                                 |
 | `done`         | The arc is finished                                      |

@@ -24,6 +24,9 @@ import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'fs';
 import {join, resolve} from 'path';
 
 import {REPO_STATE_HOOK_COMMAND} from '../src/base-setup';
+import {jobsNoticeRecordPath} from '../src/first-prompt';
+import {JOB_HEALTH_SESSION_HEADING, localDay} from '../src/job-health';
+import {MAYOR_SUCCESSOR_SENTENCE} from '../src/thread/mayor-sentence';
 import {USER_LEVEL_PROMPT_HOOK_COMMAND} from '../src/user-level-hook';
 import {git} from './git-fixtures';
 import {createSandbox, type Sandbox} from './sandbox';
@@ -83,7 +86,15 @@ function settingsWith(command: string): string {
 }
 
 function world(
-  options: {enrolled?: boolean; promptHook?: boolean} = {},
+  options: {
+    enrolled?: boolean;
+    /**
+     * Opt the repo in to the jobs section and give it a chores state dir
+     * whose fresh health file lists one broken job (home-base-lv87w.2).
+     */
+    jobs?: boolean;
+    promptHook?: boolean;
+  } = {},
 ): World {
   const enrolled = options.enrolled !== false;
   const promptHook = options.promptHook !== false;
@@ -92,10 +103,16 @@ function world(
     'src/rules/alpha.md': '# Alpha\n\nALPHA_RULE',
     'src/rules/index.md': '@./alpha.md',
   });
+  const config = {
+    components: ['base-setup'],
+    ...(options.jobs === true
+      ? {componentConfig: {'job-health': {sessionNotice: true}}}
+      : {}),
+  };
   const repo = initRepoAt(join(sb.path, 'repo'), {
     ...(enrolled
       ? {
-          'justin-sdk.config.json': `${JSON.stringify({components: ['base-setup']}, null, 2)}\n`,
+          'justin-sdk.config.json': `${JSON.stringify(config, null, 2)}\n`,
           // What base-setup writes (M5) — the hook session-start checks for
           // before it promises the repo state to the first prompt.
           ...(promptHook
@@ -121,9 +138,32 @@ function world(
     );
   }
   const stateHome = join(sb.path, 'state');
+  const choresState = join(sb.path, 'chores');
+  if (options.jobs === true) {
+    mkdirSync(choresState, {recursive: true});
+    writeFileSync(
+      join(choresState, 'health.json'),
+      JSON.stringify({
+        at: new Date().toISOString(),
+        checked: 3,
+        problems: [
+          {
+            id: 'life-daily-run',
+            kind: 'failing',
+            name: 'life daily run',
+            reason: '13 failed',
+            since: '2026-10-31T07:00:00.000Z',
+          },
+        ],
+        version: 1,
+      }),
+    );
+  }
   return {
     env: {
       ...(process.env as Record<string, string>),
+      // Never this Mac's real health file.
+      CHORES_STATE_DIR: choresState,
       CLAUDE_PROJECT_DIR: repo,
       HOME: home,
       JSDK_PRIME_PRETTIER: '0',
@@ -194,11 +234,12 @@ function prompt(
   w: World,
   sessionId: string,
   extraArgs: string[] = [],
+  text = 'hello',
 ): HookRun {
   return run(w, ['repo-state', '--hook', ...extraArgs], {
     cwd: w.repo,
     hook_event_name: 'UserPromptSubmit',
-    prompt: 'hello',
+    prompt: text,
     session_id: sessionId,
     transcript_path: join(w.repo, 'none.jsonl'),
   });
@@ -410,5 +451,92 @@ describe('repo-state without --hook', () => {
     expect(existsSync(join(w.stateHome, 'justin-sdk', 'first-prompt'))).toBe(
       false,
     );
+  });
+});
+
+describe('the broken-jobs section: every mayor session, once a day elsewhere (home-base-lv87w.2)', () => {
+  const JOBS_HEADER = `${JOB_HEALTH_SESSION_HEADING}: 1 broken`;
+  const today = (): string => localDay(new Date().toISOString(), undefined);
+  const recordPath = (w: World): string =>
+    jobsNoticeRecordPath({XDG_STATE_HOME: w.stateHome});
+  const recordedDay = (w: World): null | string =>
+    existsSync(recordPath(w))
+      ? (JSON.parse(readFileSync(recordPath(w), 'utf-8')) as {day: string}).day
+      : null;
+
+  test('non-mayor sessions: the first one today gets the section and records the day, the next gets the repo state alone', () => {
+    const w = world({jobs: true});
+    const first = prompt(w, 'sess-jobs-a');
+    expect(first.additionalContext).toContain(REPO_STATE_HEADER);
+    expect(first.additionalContext).toContain(JOBS_HEADER);
+    expect(first.systemMessage).toBe(first.additionalContext);
+    expect(recordedDay(w)).toBe(today());
+
+    const second = prompt(w, 'sess-jobs-b');
+    expect(second.additionalContext).toContain(REPO_STATE_HEADER);
+    expect(second.additionalContext).not.toContain(JOB_HEALTH_SESSION_HEADING);
+  });
+
+  test('a mayor session gets it even when today is recorded: a typed /mayor, and a mayor successor kickoff', () => {
+    const w = world({jobs: true});
+    prompt(w, 'sess-jobs-plain');
+    expect(recordedDay(w)).toBe(today());
+
+    const typed = prompt(w, 'sess-jobs-mayor', [], '/mayor brain dump');
+    expect(typed.additionalContext).toContain(JOBS_HEADER);
+    const successor = prompt(
+      w,
+      'sess-jobs-successor',
+      [],
+      `You continue session bead home-base-x. ${MAYOR_SUCCESSOR_SENTENCE}`,
+    );
+    expect(successor.additionalContext).toContain(JOBS_HEADER);
+    expect(recordedDay(w)).toBe(today());
+
+    // Neither one turned an ordinary session back on.
+    expect(prompt(w, 'sess-jobs-plain-2').additionalContext).not.toContain(
+      JOB_HEALTH_SESSION_HEADING,
+    );
+  });
+
+  test('a mayor session that starts the day records it, so the next ordinary session is quiet', () => {
+    const w = world({jobs: true});
+    expect(prompt(w, 'sess-jobs-m', [], '/mayor').additionalContext).toContain(
+      JOBS_HEADER,
+    );
+    expect(recordedDay(w)).toBe(today());
+    expect(prompt(w, 'sess-jobs-o').additionalContext).not.toContain(
+      JOB_HEALTH_SESSION_HEADING,
+    );
+  });
+
+  test('`repo-state` typed by hand always shows it and never writes the record (D4)', () => {
+    const w = world({jobs: true});
+    const typed = (): string =>
+      spawnSync(process.execPath, [CLI, 'repo-state'], {
+        cwd: w.repo,
+        encoding: 'utf-8',
+        env: w.env,
+      }).stdout;
+    expect(typed()).toContain(JOBS_HEADER);
+    expect(typed()).toContain(JOBS_HEADER);
+    expect(recordedDay(w)).toBeNull();
+
+    // And once a session has used up the day, the command still shows it.
+    prompt(w, 'sess-jobs-c');
+    expect(recordedDay(w)).toBe(today());
+    expect(typed()).toContain(JOBS_HEADER);
+  });
+
+  test("session-start's fallback (no prompt hook) applies the daily rule", () => {
+    const w = world({jobs: true, promptHook: false});
+    const first = sessionStart(w, 'sess-jobs-fb-1', 'startup');
+    expect(first.additionalContext).toContain(REPO_STATE_HEADER);
+    expect(first.additionalContext).toContain(JOBS_HEADER);
+    expect(recordedDay(w)).toBe(today());
+
+    const second = sessionStart(w, 'sess-jobs-fb-2', 'startup');
+    expect(second.additionalContext).toContain(REPO_STATE_HEADER);
+    expect(second.additionalContext).not.toContain(JOB_HEALTH_SESSION_HEADING);
   });
 });

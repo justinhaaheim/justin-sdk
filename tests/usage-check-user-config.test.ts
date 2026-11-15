@@ -49,10 +49,6 @@ import {
 import {stepUsageCheckConfig} from '../src/usage-check-setup';
 import {captureWriteStdout} from './capture-stdout';
 
-/** The directive text before this bead, verbatim: "session + successor off is the old text". */
-const OLD_DIRECTIVE_TEXT =
-  'Wrap up your session at the next available opportunity. Follow the handoff/ralph-handoff protocol.';
-
 const HANDOFF_CALL = './node_modules/.bin/justin-sdk thread handoff';
 
 const AGENT = 'a405a84daeae6cd2b';
@@ -508,12 +504,12 @@ describe('the directive text (AC 2, D7)', () => {
     expect(directiveOf(sessionAt(fx, 410_000))).toBe(HANDOFF_WRAP_UP_DIRECTIVE);
   });
 
-  test('session + successor off: the old text, word for word', () => {
+  test('session + successor off: WRAP_UP_DIRECTIVE, which names no command', () => {
     const fx = fixture();
     writeSeedProject(fx, {handoff: {successor: false}});
     writeUser(fx, userUsageCheck({wrapUpAt: 400_000}));
     const directive = directiveOf(sessionAt(fx, 410_000));
-    expect(directive).toBe(OLD_DIRECTIVE_TEXT);
+    expect(directive).toBe(WRAP_UP_DIRECTIVE);
     expect(directive).not.toContain('thread handoff');
   });
 
@@ -523,7 +519,7 @@ describe('the directive text (AC 2, D7)', () => {
     writeUser(fx, userUsageCheck({wrapUpAt: 400_000}));
     const run = playerAt(fx, 410_000);
     expect(run.notice).toContain('This player subagent');
-    expect(directiveOf(run)).toBe(OLD_DIRECTIVE_TEXT);
+    expect(directiveOf(run)).toBe(WRAP_UP_DIRECTIVE);
     expect(run.notice).not.toContain('thread handoff');
   });
 
@@ -533,12 +529,75 @@ describe('the directive text (AC 2, D7)', () => {
     );
     expect(
       wrapUpDirectiveFor({handoffSuccessor: false, scope: 'session'}),
-    ).toBe(OLD_DIRECTIVE_TEXT);
+    ).toBe(WRAP_UP_DIRECTIVE);
     for (const handoffSuccessor of [true, false]) {
       expect(
         wrapUpDirectiveFor({handoffSuccessor, scope: 'subagent'}),
       ).not.toContain('thread handoff');
     }
+  });
+});
+
+// home-base-qlxlp: the FYI notice names the coming wind-down notice, and never
+// says "none" when the threshold could not be read (critical rule 7).
+describe('what the FYI notice says about the wind-down threshold', () => {
+  const NAMES_400K =
+    'The wind-down notice comes at 400,000 tokens; do not wind down or hand off before it unless explicitly told to.';
+  const NONE = 'No wind-down notice is set, and this is not a limit.';
+  const UNREAD = 'The wind-down threshold could not be read';
+
+  test('seed repo + user 400000: names 400,000', () => {
+    const fx = fixture();
+    writeSeedProject(fx);
+    writeUser(fx, userUsageCheck({wrapUpAt: 400_000}));
+    const notice = sessionAt(fx, 110_000).notice;
+    expect(notice).toContain(NAMES_400K);
+    expect(notice).not.toContain(NONE);
+  });
+
+  test('seed repo, no user file: none is set', () => {
+    const fx = fixture();
+    writeSeedProject(fx);
+    expect(sessionAt(fx, 110_000).notice).toContain(NONE);
+  });
+
+  test('seed repo + an unreadable user file: could not be read, never none', () => {
+    const fx = fixture();
+    writeSeedProject(fx);
+    writeUser(fx, '{"componentConfig": ');
+    const notice = sessionAt(fx, 110_000).notice;
+    expect(notice).toContain(UNREAD);
+    expect(notice).not.toContain(NONE);
+  });
+
+  test('project 0 + an unreadable user file: none, because the project decided', () => {
+    const fx = fixture();
+    writeProject(fx, {enabled: true, wrapUpAt: 0});
+    writeUser(fx, '{"componentConfig": ');
+    expect(sessionAt(fx, 110_000).notice).toContain(NONE);
+  });
+
+  test('a player: the project top level does not decide before the user file’s roles.player', () => {
+    const fx = fixture();
+    writeProject(fx, {enabled: true, wrapUpAt: 0});
+    writeUser(fx, '{"componentConfig": ');
+    const notice = playerAt(fx, 110_000).notice;
+    expect(notice).toContain('This player subagent');
+    expect(notice).toContain(UNREAD);
+    expect(notice).not.toContain(NONE);
+  });
+
+  test('a player with its own project threshold: names it, whatever the user file', () => {
+    const fx = fixture();
+    writeProject(fx, {
+      enabled: true,
+      roles: {player: {wrapUpAt: 350_000}},
+      wrapUpAt: null,
+    });
+    writeUser(fx, '{"componentConfig": ');
+    expect(playerAt(fx, 110_000).notice).toContain(
+      'The wind-down notice comes at 350,000 tokens',
+    );
   });
 });
 

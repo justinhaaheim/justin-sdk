@@ -248,6 +248,21 @@ const componentConfigSchema = z
       })
       .optional()
       .describe('husky: the git pre-commit hook.'),
+    // home-base-9dcx9.2 D2: a scoping switch, not an experiment knob. Not a
+    // component: the block is named for what it reads (job-health.ts).
+    'job-health': z
+      .looseObject({
+        sessionNotice: z
+          .boolean()
+          .optional()
+          .describe(
+            'Whether the first-prompt repo-state block (`repo-state --hook`, and session-start when that hook cannot be armed) ends with a section listing the recurring jobs on this Mac that are broken, not running or unchecked, read from the chores health file, with an instruction to raise them in the first reply (home-base-9dcx9.2). true: it does, and adds nothing while every job is fine or chores has never run here. It shows in every mayor session (first prompt `/mayor …`, or the kickoff of a mayor successor) and otherwise once a day, in the first session to start on that local day; the day is recorded in `$XDG_STATE_HOME/justin-sdk/job-health-notice.json`, and `justin-sdk repo-state` typed by hand always shows it and records nothing (home-base-lv87w.2). Absent or false: no section. The health file is machine-wide, so set it in the one repo where you want to hear about it (home-base). Project file only.',
+          ),
+      })
+      .optional()
+      .describe(
+        'job-health: the broken-recurring-jobs notice at the start of a session.',
+      ),
     // Read by `justin-sdk mac-build` through mac-build-config.ts, which checks
     // the values itself (it must stay zod-free: prime.ts gates the component on
     // it). These entries document the keys for `config schema` and give doctor's
@@ -726,11 +741,13 @@ const componentConfigSchema = z
           .nullable()
           .optional()
           .describe(
-            'Context size at or above which the notice adds the wrap-up directive. Read from the project file and the user file. The repo’s number wins. A repo’s 0 turns the directive off there. A repo’s null, or no key, uses the user file’s number. No number anywhere means off (the default). Set it once in the user file to reach every repo with this component.',
+            'Context size at or above which the notice becomes the wind-down notice (finish the work in progress, then hand off; the threshold is not a limit). Read from the project file and the user file. The repo’s number wins. A repo’s 0 turns the directive off there. A repo’s null, or no key, uses the user file’s number. No number anywhere means off (the default). Set it once in the user file to reach every repo with this component.',
           ),
       })
       .optional()
-      .describe('usage-check: the context-size ladder and wrap-up directive.'),
+      .describe(
+        'usage-check: the context-size FYI notices and the wind-down notice.',
+      ),
   })
   .describe('Per-component settings, keyed by component name.');
 
@@ -971,6 +988,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     tsCheckInHook: TS_CHECK_IN_HOOK_DEFAULT,
     tsCheckOnCommit: TS_CHECK_ON_COMMIT_DEFAULT,
   },
+  'job-health': {sessionNotice: false},
   thread: {
     answerUi: THREAD_DEFAULT_ANSWER_UI,
     autoCommit: THREAD_DEFAULT_AUTO_COMMIT,

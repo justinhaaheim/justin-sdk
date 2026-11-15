@@ -215,7 +215,7 @@ export function untrackedStatusText(
   } else if (verdict.action.rule === 6) {
     findings.push(lowerFirst(verdict.action.text));
   } else if (verdict.action.rule === 4) {
-    findings.push('out of context');
+    findings.push('past wind-down notice');
   }
   const report = session.oldReport.ok ? session.oldReport.value : null;
   if (verdict.evidence.includes('blockingAsks') && report != null) {

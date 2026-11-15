@@ -147,8 +147,8 @@ describe('defaults', () => {
   test('there is NO wall-clock timeout by default (D7)', () => {
     // The 2026-09-07 pilot's worst failure: a 45-minute timeout fired, declared
     // CRASH, did NOT stop the session, and spawned a successor onto the live
-    // predecessor (home-base-1r6d.31/.32). Sessions are bounded by the ~300k
-    // wrap-up notice, not by minutes. 0 means none — and it must stay 0.
+    // predecessor (home-base-1r6d.31/.32). Sessions are bounded by the
+    // wind-down notice, not by minutes. 0 means none — and it must stay 0.
     expect(DEFAULT_OPTIONS.timeoutMin).toBe(0);
   });
 
@@ -1243,12 +1243,16 @@ describe('sessionContract — the handoff protocol', () => {
     );
   });
 
-  test('names the wrap-up notice as the normal ending (D11)', () => {
+  test('names the wind-down notice as the normal ending (D11; home-base-qlxlp)', () => {
     // Sessions here are bounded by context, not by the clock — the notice is
-    // the trigger, so the contract has to say so or the session runs on.
+    // the trigger, so the contract has to say so or the session runs on. And
+    // only the notice is: never a handoff in anticipation of it.
     expect(contract).toContain('WIND DOWN AND HAND OFF');
-    expect(contract).toContain('tells you to wrap up');
+    expect(contract).toContain('wind-down notice tells you to');
     expect(contract).toContain('bounded by context, not by the clock');
+    expect(contract).toContain(
+      'Never\n  hand off before it in anticipation of it',
+    );
   });
 
   test('warns about clap eating values that start with a dash', () => {

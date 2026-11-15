@@ -525,7 +525,7 @@ function untrackedWhere(verdict: UntrackedVerdict): string {
     return '🏃 Working (not tracked: it has no session bead)';
   }
   if (verdict.action.rule === 4) {
-    return '🧯 Out of context (not tracked: it has no session bead)';
+    return '🧯 Past wind-down notice (not tracked: it has no session bead)';
   }
   return '❔ Not tracked: it has no session bead, so this is read from git, its transcript and any old report';
 }

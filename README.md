@@ -151,7 +151,7 @@ A handoff carries one of three dispositions, and the runner acts on it:
 | Flag | What it bounds |
 | --- | --- |
 | `--max-sessions` | How many sessions the chain may spawn in total |
-| `--timeout-min` | Per-session wall clock. Off by default — a session is then bounded by the ~300k wrap-up notice rather than by the clock |
+| `--timeout-min` | Per-session wall clock. Off by default — a session is then bounded by the wind-down notice at its wind-down threshold (usage-check `wrapUpAt`) rather than by the clock |
 | `--handoff-settle-min` | Opt-in belt for the measured D15 stall: a session whose handoff bead is written while its `claude agents` row never reaches `done`. No scan is made until you set it, because settling can stop a session mid-commit |
 | `--blocked-wait-min` | How long a blocked session waits for Justin. Omitted, it waits indefinitely — blocked means waiting for him, and the runner does not decide he took too long |
 | `--session-stop-pct` / `--weekly-stop-pct` | The 5-hour and weekly quota windows. `--usage-gate` is ON and refuses to run when /usage cannot be read — an unreadable quota is reported as UNKNOWN, never as 0% |

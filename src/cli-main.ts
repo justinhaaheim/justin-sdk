@@ -775,7 +775,7 @@ void yargs(ARGV)
         .option('timeout-min', {
           default: LOOP_DEFAULTS.timeoutMin,
           describe:
-            'Per-session wall-clock timeout in minutes. 0 (the default) is NONE: a session is bounded by the ~300k wrap-up notice, not by the clock. When set, an expired session is stopped and CONFIRMED gone, and its handoff beads are then read exactly like any other ending — a valid handoff written before it hung is honoured rather than thrown away.',
+            'Per-session wall-clock timeout in minutes. 0 (the default) is NONE: a session is bounded by the wind-down notice it gets at its wind-down threshold (usage-check wrapUpAt), not by the clock. When set, an expired session is stopped and CONFIRMED gone, and its handoff beads are then read exactly like any other ending — a valid handoff written before it hung is honoured rather than thrown away.',
           type: 'number',
         })
         .option('handoff-retries', {
@@ -1091,7 +1091,7 @@ void yargs(ARGV)
   )
   .command(
     'usage-check',
-    "UserPromptSubmit + PostToolBatch hook: tell the session how many tokens of its OWN CONTEXT it has used (NOT subscription quota), as an FYI at preset token counts — by default every 100k tokens. When the payload carries an agent_id the number measured is the SUBAGENT's own, read from its own transcript, and componentConfig[\"usage-check\"].roles.player overrides the budget for it. The wrap-up directive is off until a wrapUpAt names a token count, read from the repo's justin-sdk.config.json and from the user file ($XDG_CONFIG_HOME/justin-sdk/config.json): the repo's number wins, a repo's 0 turns it off there, a repo's null or no key uses the user file's number, and no number anywhere means off. The user file never turns the hook on in a repo whose own file has no usage-check block. (Reads stdin, prints nothing when not due; a subagent whose transcript cannot be found prints UNKNOWN to stderr and measures nothing; a user file that cannot be read is named on stderr and ignored.)",
+    "UserPromptSubmit + PostToolBatch hook: tell the session how many tokens of its OWN CONTEXT it has used (NOT subscription quota), as an FYI at preset token counts — by default every 100k tokens. When the payload carries an agent_id the number measured is the SUBAGENT's own, read from its own transcript, and componentConfig[\"usage-check\"].roles.player overrides the budget for it. The wind-down notice (the directive to finish the work in progress and hand off; its threshold is not a limit) is off until a wrapUpAt names a token count, read from the repo's justin-sdk.config.json and from the user file ($XDG_CONFIG_HOME/justin-sdk/config.json): the repo's number wins, a repo's 0 turns it off there, a repo's null or no key uses the user file's number, and no number anywhere means off. The user file never turns the hook on in a repo whose own file has no usage-check block. (Reads stdin, prints nothing when not due; a subagent whose transcript cannot be found prints UNKNOWN to stderr and measures nothing; a user file that cannot be read is named on stderr and ignored.)",
     (y) => y,
     () => {
       // Always exits 0: a failing UserPromptSubmit hook can block the prompt.
