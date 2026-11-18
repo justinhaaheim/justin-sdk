@@ -233,6 +233,9 @@ const treeSchema = z.object({
           panes: z.array(
             z.object({surfaces: z.array(z.object({id: z.string()}))}),
           ),
+          // home-base-kwand.13: cmux refuses to close a pinned workspace.
+          // Measured 2026-11-18 on cmux 0.65.2: 28 of 28 workspaces carry it.
+          pinned: z.boolean().nullish(),
           // home-base-yukaf.31: `thread close workspace:N` and its Title line.
           // Measured 2026-10-20: every workspace carries both.
           ref: z.string().nullish(),
@@ -255,6 +258,12 @@ export interface CmuxTree {
     ref: string;
     workspaces: {
       id: string;
+      /**
+       * Whether it is pinned (cmux then refuses `close-workspace` with
+       * "protected: Pinned workspaces can't be closed while pinned"); null
+       * when the tree did not say, which is not the same as false.
+       */
+      pinned: boolean | null;
       /** `workspace:N`; null when the tree did not carry one. */
       ref: string | null;
       surfaceIds: string[];
@@ -306,6 +315,7 @@ export function parseCmuxTree(stdout: string): CmuxTreeRead {
         ref: window.ref,
         workspaces: window.workspaces.map((workspace) => ({
           id: workspace.id,
+          pinned: workspace.pinned ?? null,
           ref: workspace.ref ?? null,
           surfaceIds: workspace.panes.flatMap((pane) =>
             pane.surfaces.map((surface) => surface.id),

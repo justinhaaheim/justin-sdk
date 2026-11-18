@@ -206,9 +206,13 @@ THE CHECKS. Every pane of the workspace is read, and the workspace is kept open 
 
   A workspace holding more than one Claude session or more than one Claude process is kept, and so is a session whose resume command cannot be built from its transcript. A pane where Claude is not running passes only when it shows an idle shell prompt (or a blank screen) with nothing else running on its terminal. These are the checks thread open --undo uses, minus its "used since the run" check: a named close has no run to compare with.
 
+  A pinned workspace is kept, with the reason "pinned", and its Claude is never stopped: cmux refuses to close a pinned workspace. So is one whose pinned state cmux tree does not report ("pinned?"). Unpin it in cmux to close it (home-base-kwand.13).
+
 THE RECORD. Before the first Claude process is stopped, one line per workspace that passed is appended to <threads state dir>/closes.jsonl: when, the workspace and window, the session, its title, repo and checkout, its Claude pid, and its resume command (cd '<checkout>' && claude --resume <id>), with outcome "closing". If those lines cannot be written, nothing is stopped or closed. After each workspace, one more line gives its outcome: closed, kept (with why), or failed. The resume command is printed for every closed workspace too, so every close can be undone by hand.
 
 CLOSING. Right before its turn, each workspace is checked again; if anything changed, it is kept. Then its Claude process is stopped (SIGTERM, up to 15 seconds to exit, never SIGKILL; the session stays resumable), and only then is the workspace closed. A window closes with its last workspace, and the output says so.
+
+  If cmux still refuses the close, the workspace is listed under Failed with cmux's reason in plain words, and never as closed. When its Claude was already stopped, its Claude line says STOPPED and the workspace is still open with no Claude in it: resume the session with its Resume command. thread close never passes --force to cmux.
 
 NEVER CLOSED. The workspace this command runs in (CMUX_WORKSPACE_ID): naming it refuses the whole run, and nothing is touched. A --session that no live Claude process holds, that runs outside cmux, or that shows in more than one workspace refuses the run too. A workspace that is not open is listed under "Not found"; the others still go ahead.
 
@@ -229,6 +233,7 @@ HANDED OFF (--handed-off). Reads the session beads of the repo it runs in that c
 LIMITS (measured 2026-10-22 on Claude Code 2.1.308, and read in its code back to 2.1.289):
   - The screen is read as plain text, without colours. Claude Code can draw a suggested next prompt, dimmed, in an EMPTY input box after a turn ("❯ push main"); pressing Enter on it sends nothing. On screen it looks exactly like typed text. Check 1 tells them apart only by the line under the box: while nothing is typed, Claude Code ends it with "← N agents", and drops it as soon as anything is typed. A box whose text has that line under it passes check 1, and nothing is stored for it.
   - Without that "← N agents" line (no agents running, or a Claude Code version without the hint) a suggestion cannot be told from typed text: it keeps the workspace open and is stored as unsent text.
+  - cmux can refuse a close with "Workspace has a running process; retry with --force" even when every tab holds only an idle shell (measured 2026-11-18 on cmux 0.65.2: 4 workspaces, 9 tabs, each tab's shell in the foreground with no child process). cmux decides it from a per-tab shell state that its shell integration reports, and no read-only cmux command shows that state, so --dry-run cannot predict it. Such a workspace is listed under Failed with that reason (home-base-kwand.13).
 
 --dry-run runs every check and prints what would close and what would be kept and why. It signals nothing, closes nothing, writes no record and stores no draft.
 

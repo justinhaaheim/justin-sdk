@@ -74,6 +74,7 @@ import type {
 import type {HookStore, Proc, ProcessRunner, SourceRead} from './pane-join';
 import type {EnvLike} from './paths';
 import type {
+  CmuxCloseRefusal,
   PidCommand,
   StopAndCloseFailure,
   StopAndCloseSurfaceFailure,
@@ -137,6 +138,7 @@ import {
 } from './session-bead';
 import {extractTranscriptMessages} from './transcript-messages';
 import {
+  cmuxCloseRefusal,
   realPidCommand,
   realSigterm,
   stopThenCloseSurface,
@@ -147,6 +149,12 @@ const POLL_MS = 250;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
 const WORKSPACE_REF = /^workspace:\d+$/iu;
+
+/**
+ * home-base-kwand.13: how a kept reason for a pinned workspace starts, so a
+ * caller (thread close --all-except, home-base-kwand.7) can count it.
+ */
+export const PINNED_REASON = 'pinned';
 
 /** `<threadsStateDir>/closes.jsonl`: one line per workspace and step. */
 export function closesLogPath(env: EnvLike): string {
@@ -264,6 +272,14 @@ export interface CloseClosed extends CloseEntry {
 }
 
 export interface CloseFailed extends CloseEntry {
+  /**
+   * home-base-kwand.13 fix 3: its Claude was stopped and then the close
+   * failed, so the workspace (or tab) is open with no Claude in it; the
+   * output says so and points at the resume command.
+   */
+  claudeStopped: boolean;
+  /** cmux's refusal of the close, when it was one it names; else null. */
+  cmuxRefusal: CmuxCloseRefusal | null;
   reason: string;
   step: string;
 }
@@ -594,6 +610,17 @@ async function assess(
   );
   const [sessionId] = gate.sessions.length === 1 ? gate.sessions : [];
   const reasons = [...gate.reasons];
+  // home-base-kwand.13 fix 1: cmux refuses close-workspace on a pinned
+  // workspace, so predict it here, before any Claude is stopped. Only a
+  // whole-workspace close (no `onlySurface`, which includes --tab's only-tab
+  // D4 path) is refused for it. Not knowing is not "unpinned" (rule 7).
+  if (onlySurface == null && workspace.pinned !== false) {
+    reasons.unshift(
+      workspace.pinned === true
+        ? `${PINNED_REASON}: cmux refuses to close a pinned workspace ("Pinned workspaces can't be closed while pinned"); unpin it in cmux to close it`
+        : `${PINNED_REASON}?: cmux tree did not say whether it is pinned, and cmux refuses to close a pinned workspace`,
+    );
+  }
   let resume: ResumeLookup | null = null;
   if (sessionId != null) {
     resume = deps.resumeOf(sessionId);
@@ -1109,6 +1136,17 @@ function claudeWords(pid: number | null, done: boolean): string {
   return `${done ? 'stopped' : 'would be stopped'} with SIGTERM first (pid ${pid})`;
 }
 
+/** home-base-kwand.13 fix 3: a failed close says whether its Claude was stopped. */
+function failedClaudeWords(entry: CloseFailed): string {
+  if (entry.claudeStopped) {
+    return `STOPPED (pid ${entry.pid ?? 'unknown'}) before the close failed: the ${entry.tab == null || entry.tab.onlyTab ? 'workspace' : 'tab'} is still open with no Claude in it. Resume the session with the Resume command above`;
+  }
+  if (entry.pid == null) return 'none ran there; nothing was stopped';
+  return entry.step === 'wait-exit'
+    ? `sent SIGTERM (pid ${entry.pid}), and it has not exited`
+    : `not stopped (pid ${entry.pid})`;
+}
+
 export function renderClose(state: CloseState, style: OutputStyle): string {
   const header = (text: string, emoji: string): string =>
     sectionHeader(text, {color: style.color, emoji});
@@ -1333,6 +1371,7 @@ export function renderClose(state: CloseState, style: OutputStyle): string {
             headingOf(entry),
             [
               ...baseFields(entry, null),
+              {label: 'Claude', value: failedClaudeWords(entry)},
               {label: 'Why', value: `${entry.step}: ${entry.reason}`},
             ],
             style,
@@ -1343,10 +1382,13 @@ export function renderClose(state: CloseState, style: OutputStyle): string {
     );
   }
 
+  const stoppedOpen = state.failed.filter(
+    (entry) => entry.claudeStopped,
+  ).length;
   const keptWords = `kept ${state.kept.length + unresolved.length}${withDraft.length > 0 ? ` (${withDraft.length} with unsent text)` : ''}`;
   const summary = state.dryRun
     ? `Would close ${state.planned.length}, ${keptWords}, not found ${state.notFound.length}. Run it again without --dry-run to close them.`
-    : `Closed ${state.closed.length}, ${keptWords}, not found ${state.notFound.length}${state.failed.length > 0 ? `, failed ${state.failed.length}` : ''}.`;
+    : `Closed ${state.closed.length}, ${keptWords}, not found ${state.notFound.length}${state.failed.length > 0 ? `, failed ${state.failed.length}` : ''}.${stoppedOpen > 0 ? ` ${stoppedOpen} of the failed had their Claude stopped and are still open: resume each with its Resume command.` : ''}`;
   blocks.push(
     wrapHanging(paint(summary, ['bold'], style.color), {
       hang: HEADER_COLUMN,
@@ -1481,8 +1523,14 @@ async function closePlanned(input: {
         });
         outcome = 'closed';
       } else {
+        const closeStep =
+          failure.step === 'close-workspace' ||
+          failure.step === 'close-surface';
         state.failed.push({
           ...entry,
+          // Every pid was seen to exit before a close step ran.
+          claudeStopped: closeStep && assessment.claude.length > 0,
+          cmuxRefusal: closeStep ? cmuxCloseRefusal(failure.reason) : null,
           reason: failure.reason,
           step: failure.step,
         });

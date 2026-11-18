@@ -15,6 +15,7 @@ import type {
 import {describe, expect, test} from 'bun:test';
 
 import {
+  cmuxCloseRefusal,
   STOP_POLL_MS,
   stopThenCloseWorkspace,
 } from '../src/thread/workspace-close';
@@ -220,7 +221,52 @@ describe('stopThenCloseWorkspace (F4)', () => {
 
     const close = fake({101: CLAUDE_A}, {closeFails: 'cmux: not found'});
     expect((await stopThenCloseWorkspace(ONLY_A, close.deps))?.reason).toBe(
-      'close-workspace failed after Claude exited (the session stays resumable): cmux: not found',
+      'close-workspace failed AFTER Claude was stopped, so the workspace is still open with no Claude running in it; resume the session with its resume command: cmux: not found',
+    );
+  });
+});
+
+// cmux 0.65.2's own words, from the 2026-11-18 01:29 run (closes.jsonl).
+const RUNNING =
+  'cmux close-workspace --workspace W failed: Error: confirmation_required: Workspace has a running process; retry with --force';
+const PINNED =
+  "cmux close-workspace --workspace W failed: Error: protected: Pinned workspaces can't be closed while pinned. Unpin the workspace first.";
+
+describe("cmux's close refusals (home-base-kwand.13)", () => {
+  test('tells pinned and running-process apart by cmux error code, and nothing else', () => {
+    expect(cmuxCloseRefusal(PINNED)).toBe('pinned');
+    expect(cmuxCloseRefusal(RUNNING)).toBe('running-process');
+    expect(
+      cmuxCloseRefusal(
+        'Error: confirmation_required: Surface has a running process; retry with --force',
+      ),
+    ).toBe('running-process');
+    expect(cmuxCloseRefusal('cmux close-workspace timed out')).toBeNull();
+    expect(cmuxCloseRefusal('cmux: not found')).toBeNull();
+  });
+
+  test('a refusal with no Claude to stop says nothing was stopped, and says what cmux meant', async () => {
+    const w = fake({}, {closeFails: RUNNING});
+    const failure = await stopThenCloseWorkspace([], w.deps);
+    expect(failure?.step).toBe('close-workspace');
+    expect(failure?.reason).toStartWith(
+      'close-workspace failed, and no Claude ran there, so nothing was stopped: ',
+    );
+    expect(failure?.reason).toContain(RUNNING);
+    expect(failure?.reason).toContain(
+      'cmux counts a tab in it as still running a command',
+    );
+    expect(w.events.some((event) => event.startsWith('kill'))).toBe(false);
+  });
+
+  test('a refusal after the stop says the workspace is open with its Claude stopped', async () => {
+    const w = fake({101: CLAUDE_A}, {closeFails: PINNED});
+    const failure = await stopThenCloseWorkspace(ONLY_A, w.deps);
+    expect(failure?.reason).toStartWith(
+      'close-workspace failed AFTER Claude was stopped, so the workspace is still open with no Claude running in it',
+    );
+    expect(failure?.reason).toContain(
+      'cmux refuses to close a pinned workspace; unpin it in cmux first',
     );
   });
 });

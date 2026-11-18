@@ -24,6 +24,7 @@ function tree(...ids: string[]): CmuxTreeRead {
           ref: 'window:1',
           workspaces: ids.map((id, index) => ({
             id,
+            pinned: false,
             ref: `workspace:${index + 1}`,
             surfaceIds: [],
             title: null,

@@ -147,6 +147,42 @@ export async function stopProcesses(
   return null;
 }
 
+/**
+ * home-base-kwand.13: the two refusals cmux gave `close-workspace` on
+ * 2026-11-18 (cmux 0.65.2), told apart by cmux's own error code:
+ * - `pinned`: "protected: Pinned workspaces can't be closed while pinned.
+ *   Unpin the workspace first." The checks predict it from `cmux tree`'s
+ *   `pinned`, so a run that sees it here lost a race.
+ * - `running-process`: "confirmation_required: Workspace has a running
+ *   process; retry with --force" (also "Surface has a running process").
+ *   cmux keeps a per-tab shell state (prompt or running) that its shell
+ *   integration reports from zsh's precmd/preexec hooks, and no read-only
+ *   cmux command shows it, so it cannot be predicted. Nothing here ever
+ *   passes --force (Justin's question Q181; its default is never).
+ * Used for wording only: no decision is made from the text.
+ */
+export type CmuxCloseRefusal = 'pinned' | 'running-process';
+
+export function cmuxCloseRefusal(text: string): CmuxCloseRefusal | null {
+  if (/\bprotected: Pinned workspaces?\b/u.test(text)) return 'pinned';
+  if (/\bconfirmation_required:.*running process/u.test(text)) {
+    return 'running-process';
+  }
+  return null;
+}
+
+/** What a cmux refusal means, in plain words, or null for any other failure. */
+export function cmuxCloseRefusalWords(text: string): string | null {
+  switch (cmuxCloseRefusal(text)) {
+    case 'pinned':
+      return 'cmux refuses to close a pinned workspace; unpin it in cmux first';
+    case 'running-process':
+      return 'cmux counts a tab in it as still running a command, even when its shell sits idle at a prompt; thread close cannot read that state before it tries, and never passes --force. Look at its tabs and close it in cmux by hand';
+    case null:
+      return null;
+  }
+}
+
 /** Stop, wait, close. Returns the failure, or null when the workspace closed. */
 export async function stopThenCloseWorkspace(
   procs: readonly ProcessToStop[],
@@ -155,12 +191,18 @@ export async function stopThenCloseWorkspace(
   const stopped = await stopProcesses(procs, deps);
   if (stopped != null) return stopped;
   const closed = await deps.closeWorkspace();
-  return closed == null
-    ? null
-    : {
-        reason: `close-workspace failed after Claude exited (the session stays resumable): ${closed}`,
-        step: 'close-workspace',
-      };
+  if (closed == null) return null;
+  const plain = cmuxCloseRefusalWords(closed);
+  const because = `${closed}${plain == null ? '' : ` (${plain})`}`;
+  // home-base-kwand.13 fix 3: a refusal after the stop leaves the workspace
+  // open with its Claude stopped; say so, never as a quiet "failed".
+  return {
+    reason:
+      procs.length === 0
+        ? `close-workspace failed, and no Claude ran there, so nothing was stopped: ${because}`
+        : `close-workspace failed AFTER Claude was stopped, so the workspace is still open with no Claude running in it; resume the session with its resume command: ${because}`,
+    step: 'close-workspace',
+  };
 }
 
 /**
@@ -181,12 +223,16 @@ export async function stopThenCloseSurface(
   });
   if (stopped != null) return stopped;
   const closed = await deps.closeSurface();
-  return closed == null
-    ? null
-    : {
-        reason: `close-surface failed after Claude exited (the session stays resumable): ${closed}`,
-        step: 'close-surface',
-      };
+  if (closed == null) return null;
+  const plain = cmuxCloseRefusalWords(closed);
+  const because = `${closed}${plain == null ? '' : ` (${plain})`}`;
+  return {
+    reason:
+      procs.length === 0
+        ? `close-surface failed, and no Claude ran there, so nothing was stopped: ${because}`
+        : `close-surface failed AFTER Claude was stopped, so the tab is still open with no Claude running in it; resume the session with its resume command: ${because}`,
+    step: 'close-surface',
+  };
 }
 
 /** The real `ps -p <pid> -o command=`: running, gone, or unreadable (never guessed). */

@@ -102,6 +102,11 @@ interface Pane {
 interface Workspace {
   id: string;
   panes: Pane[];
+  /**
+   * cmux tree's `pinned` (home-base-kwand.13); absent means false, as real
+   * cmux 0.65.2 reports it on every workspace. null leaves the field out.
+   */
+  pinned?: boolean | null;
   ref: string;
   title: string;
 }
@@ -119,6 +124,8 @@ interface Proc {
 }
 
 interface World {
+  /** Every cmux argv the run built, in order (home-base-kwand.13: no --force). */
+  calls: (readonly string[])[];
   deps: Partial<CloseDeps>;
   events: string[];
   /** For each kill, in order: the closes.jsonl lines on disk at that moment. */
@@ -196,6 +203,11 @@ function world(input: {
   noTranscript?: string[];
   options?: Partial<CloseOptions>;
   procs?: Proc[];
+  /**
+   * home-base-kwand.13: workspace id → the error cmux gives its
+   * close-workspace (the workspace stays open), as the real CLI's stderr.
+   */
+  refuseClose?: Record<string, string>;
 }): World {
   const root = mkdtempSync(join(tmpdir(), 'thread-close-'));
   dirs.push(root);
@@ -208,6 +220,7 @@ function world(input: {
   };
   const logPath = closesLogPath(env);
   const events: string[] = [];
+  const calls: (readonly string[])[] = [];
   const logAtKill: CloseLogLine[][] = [];
   const procs = new Map(
     (input.procs ?? []).map((proc) => [proc.pid, {...proc}]),
@@ -240,6 +253,7 @@ function world(input: {
             },
           ],
         })),
+        ...(entry.pinned === null ? {} : {pinned: entry.pinned ?? false}),
         ref: entry.ref,
         title: entry.title,
       })),
@@ -252,6 +266,7 @@ function world(input: {
   };
 
   const run = (args: readonly string[]): Promise<CmuxCall> => {
+    calls.push([...args]);
     const respond = (): CmuxCall => {
       if (args[0] === 'ping') {
         events.push('ping');
@@ -286,6 +301,14 @@ function world(input: {
           `close-workspace ${value(args, '--workspace')} --window ${value(args, '--window')}`,
         );
         const target = value(args, '--workspace');
+        const refusal = input.refuseClose?.[target];
+        if (refusal != null) {
+          return {
+            kind: 'failed',
+            reason: `cmux close-workspace --workspace ${target} failed: ${refusal}`,
+            timedOut: false,
+          };
+        }
         for (const window of input.model.windows) {
           window.workspaces = window.workspaces.filter(
             (entry) => entry.id !== target,
@@ -398,6 +421,7 @@ function world(input: {
     ...input.options,
   };
   return {
+    calls,
     deps,
     events,
     logAtKill,
@@ -956,5 +980,186 @@ describe("Claude Code's prompt suggestion (home-base-yukaf.36 D3)", () => {
     expect(result.output).toContain(
       'Would close 1, kept 1 (1 with unsent text), not found 0.',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-kwand.13: closes cmux refuses (pinned, "a running process")
+// ---------------------------------------------------------------------------
+
+// cmux 0.65.2's own stderr, from the 2026-11-18 01:29 run (closes.jsonl).
+const CMUX_PINNED =
+  "Error: protected: Pinned workspaces can't be closed while pinned. Unpin the workspace first.";
+const CMUX_RUNNING =
+  'Error: confirmation_required: Workspace has a running process; retry with --force';
+
+/** A shell prompt with nothing typed, as an idle tab shows it. */
+const IDLE_SHELL = 'Last login: Tue Nov 17 21:37:07 on ttys050\n%';
+
+/** No cmux call this run built carries --force (Q181's default: never). */
+function expectNoForce(w: World): void {
+  expect(w.calls.length).toBeGreaterThan(0);
+  expect(w.calls.filter((args) => args.includes('--force'))).toEqual([]);
+}
+
+describe('cmux refusals (home-base-kwand.13)', () => {
+  test('fix 1: a pinned workspace is planned as kept ("pinned") in the dry run, and its Claude is never signalled in the real run', async () => {
+    const model = (): Model =>
+      oneWindow([
+        {n: 1, screens: [idleClaude(sid(1))]},
+        {n: 2, screens: [idleClaude(sid(2))]},
+      ]);
+    const dry = world({
+      model: model(),
+      options: {dryRun: true, workspaces: [wsId(1), wsId(2)]},
+      procs: [claudeProc(1), claudeProc(2)],
+    });
+    const pin = (w: World): void => {
+      const first = w.model.windows[0]?.workspaces[0];
+      if (first == null) throw new Error('no workspace 1');
+      first.pinned = true;
+    };
+    pin(dry);
+    const planned = await closeWorkspaces(dry.options, dry.deps);
+    expect(planned.exitCode).toBe(0);
+    expect(planned.state?.planned.map((entry) => entry.workspaceId)).toEqual([
+      wsId(2),
+    ]);
+    expect(planned.state?.kept.map((entry) => entry.workspaceId)).toEqual([
+      wsId(1),
+    ]);
+    expect(planned.state?.kept[0]?.reasons[0]).toStartWith('pinned: ');
+    expect(planned.output).toContain('pinned: cmux refuses to close');
+    expect(writes(dry)).toEqual([]);
+
+    const real = world({
+      model: model(),
+      options: {workspaces: [wsId(1), wsId(2)]},
+      procs: [claudeProc(1), claudeProc(2)],
+      refuseClose: {[wsId(1)]: CMUX_PINNED},
+    });
+    pin(real);
+    const result = await closeWorkspaces(real.options, real.deps);
+    expect(result.exitCode).toBe(0);
+    expect(kills(real)).toEqual(['kill 1002']);
+    expect(closes(real)).toEqual([
+      `close-workspace ${wsId(2)} --window ${winId(1)}`,
+    ]);
+    expect(result.state?.failed).toEqual([]);
+    expect(result.state?.kept[0]?.workspaceId).toBe(wsId(1));
+    expectNoForce(real);
+  });
+
+  test('fix 1, rule 7: a tree that does not say whether a workspace is pinned keeps it ("pinned?"), unsignalled', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: [idleClaude(sid(1))]}]),
+      options: {workspaces: [wsId(1)]},
+      procs: [claudeProc(1)],
+    });
+    const first = w.model.windows[0]?.workspaces[0];
+    if (first == null) throw new Error('no workspace 1');
+    first.pinned = null;
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(0);
+    expect(result.state?.kept[0]?.reasons[0]).toStartWith('pinned?: ');
+    expect(writes(w)).toEqual([]);
+  });
+
+  test('fix 3: pinned between the first check and its turn: the second check keeps it, and nothing is signalled or closed', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: [idleClaude(sid(1))]}]),
+      options: {workspaces: [wsId(1)]},
+      procs: [claudeProc(1)],
+    });
+    const append = w.deps.appendLog;
+    if (append == null) throw new Error('no appendLog');
+    w.deps.appendLog = (line) => {
+      // Justin pins it right after the run wrote its `closing` line.
+      const first = w.model.windows[0]?.workspaces[0];
+      if (line.outcome === 'closing' && first != null) first.pinned = true;
+      return append(line);
+    };
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(0);
+    expect(writes(w)).toEqual([
+      `log ${wsId(1)} closing`,
+      `log ${wsId(1)} kept`,
+    ]);
+    expect(readLog(w.logPath).at(-1)?.outcome).toStartWith('kept: pinned: ');
+    expectNoForce(w);
+  });
+
+  test('fix 3: a close cmux refuses after the stop is Failed, never Closed, says STOPPED and gives the resume command', async () => {
+    const w = world({
+      model: oneWindow([
+        {n: 1, screens: [idleClaude(sid(1))]},
+        {n: 2, screens: [idleClaude(sid(2))]},
+      ]),
+      options: {workspaces: [wsId(1), wsId(2)]},
+      procs: [claudeProc(1), claudeProc(2)],
+      // The pinned one is the race the checks cannot see (cmux said false).
+      refuseClose: {[wsId(1)]: CMUX_RUNNING, [wsId(2)]: CMUX_PINNED},
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(1);
+    expect(result.state?.closed).toEqual([]);
+    expect(
+      result.state?.failed.map((entry) => [
+        entry.workspaceId,
+        entry.step,
+        entry.claudeStopped,
+        entry.cmuxRefusal,
+      ]),
+    ).toEqual([
+      [wsId(1), 'close-workspace', true, 'running-process'],
+      [wsId(2), 'close-workspace', true, 'pinned'],
+    ]);
+    // One close attempt each: no retry, and never --force.
+    expect(closes(w)).toEqual([
+      `close-workspace ${wsId(1)} --window ${winId(1)}`,
+      `close-workspace ${wsId(2)} --window ${winId(1)}`,
+    ]);
+    expectNoForce(w);
+    expect(
+      readLog(w.logPath).map((line) => line.outcome.split(':')[0]),
+    ).toEqual(['closing', 'closing', 'failed', 'failed']);
+    expect(result.output).toContain('Closed (0)');
+    expect(result.output).toContain('Failed (2)');
+    expect(result.output).toContain(
+      'Claude:     STOPPED (pid 1001) before the close failed: the workspace is still open with no Claude in it. Resume the session with the Resume command above',
+    );
+    expect(result.output).toContain(
+      `Resume:     cd '/Users/x/Dev/repo-a' && claude --resume ${sid(1)}`,
+    );
+    expect(result.output).toContain(
+      'cmux counts a tab in it as still running a command',
+    );
+    expect(result.output).toContain(
+      'cmux refuses to close a pinned workspace; unpin it in cmux first',
+    );
+    expect(result.output).toContain(
+      '2 of the failed had their Claude stopped and are still open: resume each with its Resume command.',
+    );
+  });
+
+  test('fix 2: an idle-shell workspace cmux refuses as "running a process" fails with that reason and nothing stopped', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: [IDLE_SHELL]}]),
+      options: {workspaces: [wsId(1)]},
+      refuseClose: {[wsId(1)]: CMUX_RUNNING},
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(1);
+    expect(kills(w)).toEqual([]);
+    expect(result.state?.failed[0]?.claudeStopped).toBe(false);
+    expect(result.state?.failed[0]?.cmuxRefusal).toBe('running-process');
+    expect(result.state?.failed[0]?.reason).toStartWith(
+      'close-workspace failed, and no Claude ran there, so nothing was stopped: ',
+    );
+    expect(result.output).toContain(
+      'Claude:     none ran there; nothing was stopped',
+    );
+    expect(result.output).not.toContain('STOPPED');
+    expectNoForce(w);
   });
 });

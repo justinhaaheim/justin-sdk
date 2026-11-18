@@ -95,6 +95,8 @@ interface Pane {
 interface Workspace {
   id: string;
   panes: Pane[];
+  /** cmux tree's `pinned` (home-base-kwand.13); absent means false. */
+  pinned?: boolean;
   ref: string;
   title: string;
 }
@@ -238,6 +240,7 @@ function world(input: {
             },
           ],
         })),
+        pinned: entry.pinned ?? false,
         ref: entry.ref,
         title: entry.title,
       })),
@@ -628,6 +631,26 @@ describe('--tab: D4, the only tab in its workspace', () => {
     expect(result.output).toContain(
       'the only tab in its workspace, so the whole workspace closes with it (D4)',
     );
+  });
+
+  test('home-base-kwand.13: the only tab of a PINNED workspace is kept ("pinned"), and its Claude is never signalled', async () => {
+    const model = windowOf([
+      {n: 1, tabs: [tab(1, [idleClaude(sid(1))])]},
+      {n: 5, tabs: [tab(5, ['% '])]},
+    ]);
+    const pinned = model.windows[0]?.workspaces[0];
+    if (pinned == null) throw new Error('no workspace 1');
+    pinned.pinned = true;
+    const w = world({
+      hookStore: hookStoreOf([[sid(1), 1001]]),
+      model,
+      options: {sessions: [sid(1)]},
+      procs: [claudeProc(1)],
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(0);
+    expect(writes(w)).toEqual([]);
+    expect(result.state?.kept[0]?.reasons[0]).toStartWith('pinned: ');
   });
 
   test('an only tab in the command’s own workspace is kept, even when CMUX_SURFACE_ID names another tab (home-base-hg6lz.4 R1)', async () => {
