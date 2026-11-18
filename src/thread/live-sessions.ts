@@ -65,6 +65,7 @@ import {execFile} from 'node:child_process';
 import {homedir} from 'node:os';
 import {z} from 'zod';
 
+import {EXIT_GRACE_MS, noExitReason, settleByDeadline} from '../exit-deadline';
 import {CMUX_TIMEOUT_MS, realCmuxRunner} from './cmux';
 import {
   defaultHookStorePath,
@@ -302,35 +303,49 @@ export function realAgentsRunner(
   env: EnvLike,
   timeoutMs: number = CMUX_TIMEOUT_MS,
 ): AgentsRunner {
-  return () =>
-    new Promise((resolve) => {
-      try {
-        execFile(
-          'claude',
-          [...AGENTS_ARGS],
-          {
-            env: env as NodeJS.ProcessEnv,
-            maxBuffer: 32 * 1024 * 1024,
-            timeout: timeoutMs,
-          },
-          (error, stdout, stderr) => {
-            if (error != null) {
-              const detail = String(stderr).trim();
-              resolve({
-                kind: 'failed',
-                reason: `claude ${AGENTS_ARGS.join(' ')} failed: ${detail !== '' ? detail.split('\n')[0] : error.message}`,
-              });
-              return;
-            }
-            resolve({kind: 'ok', stdout: String(stdout)});
-          },
-        );
-      } catch (error) {
-        resolve({
-          kind: 'failed',
-          reason: `claude ${AGENTS_ARGS.join(' ')} could not start: ${error instanceof Error ? error.message : String(error)}`,
-        });
-      }
+  // home-base-iprgd: settles even when claude's exit is never reported.
+  const deadlineMs = timeoutMs + EXIT_GRACE_MS;
+  return async () =>
+    await settleByDeadline<Awaited<ReturnType<AgentsRunner>>>({
+      deadlineMs,
+      late: () => ({
+        kind: 'failed',
+        reason: noExitReason(
+          `claude ${AGENTS_ARGS.join(' ')}`,
+          deadlineMs,
+          timeoutMs,
+        ),
+      }),
+      start: (resolve) => {
+        try {
+          return execFile(
+            'claude',
+            [...AGENTS_ARGS],
+            {
+              env: env as NodeJS.ProcessEnv,
+              maxBuffer: 32 * 1024 * 1024,
+              timeout: timeoutMs,
+            },
+            (error, stdout, stderr) => {
+              if (error != null) {
+                const detail = String(stderr).trim();
+                resolve({
+                  kind: 'failed',
+                  reason: `claude ${AGENTS_ARGS.join(' ')} failed: ${detail !== '' ? detail.split('\n')[0] : error.message}`,
+                });
+                return;
+              }
+              resolve({kind: 'ok', stdout: String(stdout)});
+            },
+          );
+        } catch (error) {
+          resolve({
+            kind: 'failed',
+            reason: `claude ${AGENTS_ARGS.join(' ')} could not start: ${error instanceof Error ? error.message : String(error)}`,
+          });
+          return null;
+        }
+      },
     });
 }
 

@@ -21,6 +21,7 @@ import {execFile} from 'node:child_process';
 import {accessSync, constants, statSync} from 'node:fs';
 import {z} from 'zod';
 
+import {EXIT_GRACE_MS, noExitReason, settleByDeadline} from '../exit-deadline';
 import {cmuxCallIsReadOnly} from './cmux-read-only';
 
 export type CmuxCall =
@@ -131,44 +132,58 @@ export function realCmuxRunner(
   timeoutMs: number = CMUX_TIMEOUT_MS,
   env: EnvLike = process.env,
 ): CmuxRunner {
-  return (args, limit) =>
-    new Promise((resolve) => {
-      const callMs = limit?.timeoutMs ?? timeoutMs;
-      execFile(
-        resolveCmuxBinary(env).path,
-        cmuxArgv(env, args),
-        {
-          env: {
-            [CMUX_CLI_TIMEOUT_ENV]: String(Math.ceil(callMs / 1000) + 5),
-            ...env,
-            CMUX_QUIET: '1',
+  return async (args, limit) => {
+    const callMs = limit?.timeoutMs ?? timeoutMs;
+    // home-base-iprgd: settles even when cmux's exit is never reported.
+    const deadlineMs = callMs + EXIT_GRACE_MS;
+    return await settleByDeadline<CmuxCall>({
+      deadlineMs,
+      late: () => ({
+        kind: 'failed',
+        reason: noExitReason(
+          `cmux ${args.slice(0, 3).join(' ')}`,
+          deadlineMs,
+          callMs,
+        ),
+        timedOut: true,
+      }),
+      start: (resolve) =>
+        execFile(
+          resolveCmuxBinary(env).path,
+          cmuxArgv(env, args),
+          {
+            env: {
+              [CMUX_CLI_TIMEOUT_ENV]: String(Math.ceil(callMs / 1000) + 5),
+              ...env,
+              CMUX_QUIET: '1',
+            },
+            maxBuffer: 16 * 1024 * 1024,
+            timeout: callMs,
           },
-          maxBuffer: 16 * 1024 * 1024,
-          timeout: callMs,
-        },
-        (error, stdout, stderr) => {
-          if (error != null) {
-            const detail = String(stderr).trim();
-            const killed = error.killed === true;
-            const cliGaveUp = detail
-              .split('\n')
-              .some((line) => line.trim() === CMUX_CLI_TIMEOUT_TEXT);
-            const how = killed
-              ? `timed out after ${callMs} ms`
-              : cliGaveUp
-                ? "timed out at the cmux CLI's own limit"
-                : 'failed';
-            resolve({
-              kind: 'failed',
-              reason: `cmux ${args.slice(0, 3).join(' ')} ${how}: ${detail !== '' ? detail : error.message}`,
-              timedOut: killed || cliGaveUp,
-            });
-            return;
-          }
-          resolve({kind: 'ok', stdout: String(stdout)});
-        },
-      );
+          (error, stdout, stderr) => {
+            if (error != null) {
+              const detail = String(stderr).trim();
+              const killed = error.killed === true;
+              const cliGaveUp = detail
+                .split('\n')
+                .some((line) => line.trim() === CMUX_CLI_TIMEOUT_TEXT);
+              const how = killed
+                ? `timed out after ${callMs} ms`
+                : cliGaveUp
+                  ? "timed out at the cmux CLI's own limit"
+                  : 'failed';
+              resolve({
+                kind: 'failed',
+                reason: `cmux ${args.slice(0, 3).join(' ')} ${how}: ${detail !== '' ? detail : error.message}`,
+                timedOut: killed || cliGaveUp,
+              });
+              return;
+            }
+            resolve({kind: 'ok', stdout: String(stdout)});
+          },
+        ),
     });
+  };
 }
 
 /** D3: the wait before each retry of a timed-out read. */

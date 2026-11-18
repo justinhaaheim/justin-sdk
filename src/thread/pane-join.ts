@@ -45,6 +45,7 @@ import {existsSync, readFileSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {join} from 'node:path';
 
+import {EXIT_GRACE_MS, noExitReason, settleByDeadline} from '../exit-deadline';
 import {CMUX_TIMEOUT_MS, realCmuxRunner} from './cmux';
 import {
   defaultSessionFilePath,
@@ -359,34 +360,44 @@ export const PS_ARGS = ['-Ao', 'pid,ppid,tty,etime,command'] as const;
 export function realProcessRunner(
   timeoutMs: number = CMUX_TIMEOUT_MS,
 ): ProcessRunner {
-  return () =>
-    new Promise((resolve) => {
-      try {
-        // `ps -Ao ... -t <tty>` does NOT filter (-A overrides -t); dump once.
-        execFile(
-          'ps',
-          [...PS_ARGS],
-          {maxBuffer: 32 * 1024 * 1024, timeout: timeoutMs},
-          (error, stdout, stderr) => {
-            if (error != null) {
-              const detail = String(stderr).trim();
-              resolve({
-                kind: 'failed',
-                reason: `ps ${PS_ARGS.join(' ')} failed: ${detail !== '' ? detail : error.message}`,
-              });
-              return;
-            }
-            resolve({kind: 'ok', stdout: String(stdout)});
-          },
-        );
-      } catch (error) {
-        // Measured 2026-10-17: inside the Claude Code sandbox the spawn
-        // itself throws (EPERM) instead of calling back.
-        resolve({
-          kind: 'failed',
-          reason: `ps ${PS_ARGS.join(' ')} could not start: ${errorText(error)}`,
-        });
-      }
+  // home-base-iprgd: settles even when ps's exit is never reported.
+  const deadlineMs = timeoutMs + EXIT_GRACE_MS;
+  return async () =>
+    await settleByDeadline<Awaited<ReturnType<ProcessRunner>>>({
+      deadlineMs,
+      late: () => ({
+        kind: 'failed',
+        reason: noExitReason(`ps ${PS_ARGS.join(' ')}`, deadlineMs, timeoutMs),
+      }),
+      start: (resolve) => {
+        try {
+          // `ps -Ao ... -t <tty>` does NOT filter (-A overrides -t); dump once.
+          return execFile(
+            'ps',
+            [...PS_ARGS],
+            {maxBuffer: 32 * 1024 * 1024, timeout: timeoutMs},
+            (error, stdout, stderr) => {
+              if (error != null) {
+                const detail = String(stderr).trim();
+                resolve({
+                  kind: 'failed',
+                  reason: `ps ${PS_ARGS.join(' ')} failed: ${detail !== '' ? detail : error.message}`,
+                });
+                return;
+              }
+              resolve({kind: 'ok', stdout: String(stdout)});
+            },
+          );
+        } catch (error) {
+          // Measured 2026-10-17: inside the Claude Code sandbox the spawn
+          // itself throws (EPERM) instead of calling back.
+          resolve({
+            kind: 'failed',
+            reason: `ps ${PS_ARGS.join(' ')} could not start: ${errorText(error)}`,
+          });
+          return null;
+        }
+      },
     });
 }
 

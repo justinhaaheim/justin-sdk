@@ -44,6 +44,7 @@ import {existsSync} from 'fs';
 import {basename, dirname, isAbsolute, relative, resolve} from 'path';
 
 import {findBeadsWorkspace} from '../beads/br';
+import {EXIT_GRACE_MS, noExitReason, settleByDeadline} from '../exit-deadline';
 import {revParseBatchArgs, splitRevParseBatch} from '../git-rev-parse-batch';
 import {findProjectRoot} from '../health-notices';
 import {readTranscriptFacts} from '../usage-check';
@@ -308,49 +309,69 @@ const GIT_TIMEOUT_MS = 30_000;
  * The outcome has the same three shapes the synchronous runner had: `error`
  * (git could not run), `exit` (non-zero, or killed: status -1), `ok`.
  */
-function runGit(cwd: string, args: string[], input?: string): Promise<GitRun> {
-  return new Promise((done) => {
-    let child: ReturnType<typeof spawn>;
-    try {
-      child = spawn('git', args, {
-        cwd,
-        stdio: [input == null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
-      });
-      // home-base-9uzxw.2: `cat-file --batch-check` reads its names here. A
-      // git that exits before reading them makes the write fail (EPIPE); its
-      // exit, reported below, is the answer, so that error is not a crash.
-      if (input != null) {
-        child.stdin?.on('error', () => undefined);
-        child.stdin?.end(input);
-      }
-    } catch (error) {
-      done({
-        kind: 'error',
-        message: error instanceof Error ? error.message : String(error),
-      });
-      return;
-    }
-    const out: Buffer[] = [];
-    const err: Buffer[] = [];
-    child.stdout?.on('data', (chunk: Buffer) => out.push(chunk));
-    child.stderr?.on('data', (chunk: Buffer) => err.push(chunk));
-    const timer = setTimeout(() => child.kill('SIGTERM'), GIT_TIMEOUT_MS);
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      done({kind: 'error', message: error.message});
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      if (code === 0) {
-        done({kind: 'ok', stdout: Buffer.concat(out).toString('utf8')});
-      } else {
-        done({
-          kind: 'exit',
-          status: code ?? -1,
-          stderr: Buffer.concat(err).toString('utf8').trim(),
+async function runGit(
+  cwd: string,
+  args: string[],
+  input?: string,
+): Promise<GitRun> {
+  // home-base-iprgd: the kill below ends a git that runs too long; this
+  // settles the call even when git's exit is never reported. The failure
+  // reads `git <args> could not run: git <args> gave no exit within 35 s …`.
+  const deadlineMs = GIT_TIMEOUT_MS + EXIT_GRACE_MS;
+  return await settleByDeadline<GitRun>({
+    deadlineMs,
+    late: () => ({
+      kind: 'error',
+      message: noExitReason(
+        `git ${args.join(' ')}`,
+        deadlineMs,
+        GIT_TIMEOUT_MS,
+      ),
+    }),
+    start: (done) => {
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawn('git', args, {
+          cwd,
+          stdio: [input == null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
         });
+        // home-base-9uzxw.2: `cat-file --batch-check` reads its names here. A
+        // git that exits before reading them makes the write fail (EPIPE); its
+        // exit, reported below, is the answer, so that error is not a crash.
+        if (input != null) {
+          child.stdin?.on('error', () => undefined);
+          child.stdin?.end(input);
+        }
+      } catch (error) {
+        done({
+          kind: 'error',
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return null;
       }
-    });
+      const out: Buffer[] = [];
+      const err: Buffer[] = [];
+      child.stdout?.on('data', (chunk: Buffer) => out.push(chunk));
+      child.stderr?.on('data', (chunk: Buffer) => err.push(chunk));
+      const timer = setTimeout(() => child.kill('SIGTERM'), GIT_TIMEOUT_MS);
+      child.on('error', (error) => {
+        clearTimeout(timer);
+        done({kind: 'error', message: error.message});
+      });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) {
+          done({kind: 'ok', stdout: Buffer.concat(out).toString('utf8')});
+        } else {
+          done({
+            kind: 'exit',
+            status: code ?? -1,
+            stderr: Buffer.concat(err).toString('utf8').trim(),
+          });
+        }
+      });
+      return child;
+    },
   });
 }
 

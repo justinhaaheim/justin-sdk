@@ -22,6 +22,7 @@ import {
   stepColumn,
   wrapHanging,
 } from '../cli-style';
+import {EXIT_GRACE_MS, noExitReason, settleByDeadline} from '../exit-deadline';
 import {writeStdout} from '../write-stdout';
 import {
   cmuxSupportDir,
@@ -54,39 +55,58 @@ export type TimeRead = {ms: number; ok: true} | {ok: false; reason: string};
 /** Reads one clock. Injected so tests are hermetic. */
 export type ClockReader = () => Promise<TimeRead>;
 
-function run(
+/** When a clock read is killed. */
+const CLOCK_TIMEOUT_MS = 10_000;
+
+async function run(
   file: string,
   args: readonly string[],
 ): Promise<{ok: false; reason: string} | {ok: true; stdout: string}> {
-  return new Promise((resolve) => {
-    try {
-      execFile(
-        file,
-        [...args],
-        {
-          env: {...process.env, LC_ALL: 'C'},
-          maxBuffer: 16 * 1024 * 1024,
-          timeout: 10_000,
-        },
-        (error, stdout, stderr) => {
-          if (error != null) {
-            const detail = String(stderr).trim();
-            resolve({
-              ok: false,
-              reason: `${file} ${args.join(' ')} failed: ${detail !== '' ? detail : error.message}`,
-            });
-            return;
-          }
-          resolve({ok: true, stdout: String(stdout)});
-        },
-      );
-    } catch (error) {
-      // Inside the Claude Code sandbox the spawn itself can throw (EPERM).
-      resolve({
-        ok: false,
-        reason: `${file} could not start: ${error instanceof Error ? error.message : String(error)}`,
-      });
-    }
+  // home-base-iprgd: settles even when the child's exit is never reported.
+  const deadlineMs = CLOCK_TIMEOUT_MS + EXIT_GRACE_MS;
+  return await settleByDeadline<
+    {ok: false; reason: string} | {ok: true; stdout: string}
+  >({
+    deadlineMs,
+    late: () => ({
+      ok: false,
+      reason: noExitReason(
+        `${file} ${args.join(' ')}`,
+        deadlineMs,
+        CLOCK_TIMEOUT_MS,
+      ),
+    }),
+    start: (resolve) => {
+      try {
+        return execFile(
+          file,
+          [...args],
+          {
+            env: {...process.env, LC_ALL: 'C'},
+            maxBuffer: 16 * 1024 * 1024,
+            timeout: CLOCK_TIMEOUT_MS,
+          },
+          (error, stdout, stderr) => {
+            if (error != null) {
+              const detail = String(stderr).trim();
+              resolve({
+                ok: false,
+                reason: `${file} ${args.join(' ')} failed: ${detail !== '' ? detail : error.message}`,
+              });
+              return;
+            }
+            resolve({ok: true, stdout: String(stdout)});
+          },
+        );
+      } catch (error) {
+        // Inside the Claude Code sandbox the spawn itself can throw (EPERM).
+        resolve({
+          ok: false,
+          reason: `${file} could not start: ${error instanceof Error ? error.message : String(error)}`,
+        });
+        return null;
+      }
+    },
   });
 }
 

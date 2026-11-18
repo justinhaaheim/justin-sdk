@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.76.5",
+  "version": "0.76.6",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",
@@ -36,6 +36,7 @@
     "probe:bg-env": "bun scripts/probe-bg-env.ts",
     "probe:capture-entrypoint": "bun scripts/probe-capture-entrypoint.ts",
     "probe:capture-live": "bun scripts/probe-capture-live.ts",
+    "repro:lost-exit": "bun scripts/repro-lost-exit.ts",
     "tmp:restore-threads-k0b8n19": "bun scripts/restore-thread-records.ts th-fs3 th-ttp th-mq0 --from 1b912a6~1 --damaged-at 1b912a6",
     "tmp:migrate-ask-parents": "bun scripts/migrate-ask-parents.ts",
     "test:transcript-fold:replay": "bun scripts/replay-transcript-fold.ts"

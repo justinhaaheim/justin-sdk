@@ -114,6 +114,7 @@ import type {
 
 import {execFile} from 'node:child_process';
 
+import {EXIT_GRACE_MS, noExitReason, settleByDeadline} from '../exit-deadline';
 import {CMUX_TIMEOUT_MS, realCmuxRunner} from './cmux';
 import {cmuxSupportDir} from './cmux-session-file';
 import {primaryCheckoutOf} from './config';
@@ -305,34 +306,45 @@ export function parseLsofCwds(stdout: string): Map<number, string> {
  * other process, so every pane there reads as `anything` (never narrower).
  */
 export function realCwdReader(timeoutMs: number = CMUX_TIMEOUT_MS): CwdReader {
-  return (pids) =>
-    new Promise((resolve) => {
-      const args = ['-a', '-w', '-d', 'cwd', '-p', pids.join(','), '-F', 'pn'];
-      try {
-        execFile(
-          'lsof',
-          args,
-          {timeout: timeoutMs},
-          (error, stdout, stderr) => {
-            const listed = parseLsofCwds(String(stdout));
-            if (error != null && listed.size === 0) {
-              const detail = String(stderr).trim().split('\n')[0] ?? '';
-              resolve({
-                ok: false,
-                reason: `lsof ${args.join(' ')} failed: ${detail !== '' ? detail : error.message}`,
-              });
-              return;
-            }
-            resolve({ok: true, value: listed});
-          },
-        );
-      } catch (error) {
-        resolve({
-          ok: false,
-          reason: `lsof could not start: ${error instanceof Error ? error.message : String(error)}`,
-        });
-      }
+  // home-base-iprgd: settles even when lsof's exit is never reported.
+  const deadlineMs = timeoutMs + EXIT_GRACE_MS;
+  return async (pids) => {
+    const args = ['-a', '-w', '-d', 'cwd', '-p', pids.join(','), '-F', 'pn'];
+    return await settleByDeadline<Awaited<ReturnType<CwdReader>>>({
+      deadlineMs,
+      late: () => ({
+        ok: false,
+        reason: noExitReason(`lsof ${args.join(' ')}`, deadlineMs, timeoutMs),
+      }),
+      start: (resolve) => {
+        try {
+          return execFile(
+            'lsof',
+            args,
+            {timeout: timeoutMs},
+            (error, stdout, stderr) => {
+              const listed = parseLsofCwds(String(stdout));
+              if (error != null && listed.size === 0) {
+                const detail = String(stderr).trim().split('\n')[0] ?? '';
+                resolve({
+                  ok: false,
+                  reason: `lsof ${args.join(' ')} failed: ${detail !== '' ? detail : error.message}`,
+                });
+                return;
+              }
+              resolve({ok: true, value: listed});
+            },
+          );
+        } catch (error) {
+          resolve({
+            ok: false,
+            reason: `lsof could not start: ${error instanceof Error ? error.message : String(error)}`,
+          });
+          return null;
+        }
+      },
     });
+  };
 }
 
 /** cmux's own restore error on a tab's screen (measured, module comment). */
