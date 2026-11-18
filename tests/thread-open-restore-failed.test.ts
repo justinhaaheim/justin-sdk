@@ -31,6 +31,7 @@ import {
   openRestoreFailed,
 } from '../src/thread/open-restore-failed';
 import {recordedWorkspaces, tabsNotClosed} from '../src/thread/open-undo';
+import {NO_REOPEN_SIGNALS} from '../src/thread/reopen-order';
 import {OLD_TAB_RESUME_STATES, restoreTabArgs} from '../src/thread/restore-tab';
 
 const NOW = new Date('2026-11-18T12:00:00.000Z');
@@ -61,6 +62,7 @@ function cand(n: number, over: Partial<OpenCandidate> = {}): OpenCandidate {
     checkout: '/dev/repo-a',
     lastActivityAt: new Date(NOW.getTime() - n * HOUR).toISOString(),
     marks: {handoff: null, mayor: false},
+    reopen: NO_REOPEN_SIGNALS,
     repo: 'repo-a',
     repoTag: 'A',
     section: 'needsYou',

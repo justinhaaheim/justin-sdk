@@ -1,6 +1,6 @@
 {
   "name": "@justinhaaheim/justin-sdk",
-  "version": "0.72.0",
+  "version": "0.72.1",
   "type": "module",
   "bin": {
     "justin-sdk": "./src/cli.ts",

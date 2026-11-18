@@ -154,13 +154,15 @@ FILTERS. Think of thread open as a filter over your sessions, and the new cmux w
 
   --repo <name>: only sessions in that repo, by its folder name or its project tag, any case. Repeat it for several. A name that matches nothing is said.
 
-  --limit N: at most N sessions, newest first (opened and moved together). The rest are listed under "Not opened: over the limit".
+  --limit N: at most N sessions, the first N in the reopen order (opened and moved together; see ORDER). The rest are listed under "Not opened: over the limit".
 
   --include-open: a session already open in another cmux window is still never resumed a second time. Its existing workspace is MOVED into the new window instead (it keeps running), so all the matching sessions sit in one place. Without the flag those sessions are listed under "Already open elsewhere", with the command that selects each pane. The whole workspace moves, its other panes (shell splits and the like) with it, and the plan says "moved with its N other panes". A session with no cmux workspace (a background worker, a terminal cmux does not own), whose workspace holds another Claude session too, or whose workspace is the one this command runs in (CMUX_WORKSPACE_ID), is never moved and says why. A move that empties a window leaves a blank workspace there, which the plan says and --undo closes again while it holds only an idle shell.
 
 CANNOT TELL. When a live Claude pane does not show which session it holds, thread open opens nothing: that pane could be one of the sessions it would open. It lists those panes; look at them, then pass --force-unplaced to open anyway.
 
-LAYOUT. Default: one new cmux window. --per-project: one new window per project, the project with the newest session first. Inside a window the newest session is at the top. Each workspace is named "[TAG] <session title>".
+ORDER. Sessions are planned, opened and cut by --limit in one order: starred first (⭐, thread star), then waiting on you (an open blocking question: 🛑 Needs you), then cut off mid-turn (✂️: its last turn never finished), then the rest; newest activity first inside each, and a session whose last activity is unknown last in its group. Each session in the plan says which of these put it there, on its "Why here" line ("⭐ starred", "🙋 waiting on you: 2 questions", "✂️ cut off mid-turn at 6:39pm", "🕒 last active 3 days ago"), and --json carries it as reopen {tier, text}. The threads dashboard's Dropped view and its before-the-restart grouping use the same order.
+
+LAYOUT. Default: one new cmux window. --per-project: one new window per project, the project with the first session in the order above first. Inside a window the sessions keep that order, the first at the top. Each workspace is named "[TAG] <session title>".
 
 COLOURS. After a window is built, each workspace this run OPENED gets its project's colour the way cmux-arrange chooses it: from ~/.config/cmux-arrange/colors.json ($XDG_CONFIG_HOME/cmux-arrange/colors.json) "overrides" first, then "assigned", then cmux-arrange's built-in project colours unless the file's "exclude" lists that colour; with no file, the built-in project colours alone. thread open makes no new picks. A workspace moved in with --include-open keeps the colour it had: --undo moves it back but cannot restore a colour. An unreadable or invalid file colours nothing. Each of these, and a project with no colour, is said in one line and the run goes on; a colour that cannot be set is reported and never stops the run. --no-color skips colouring.
 
@@ -1346,7 +1348,7 @@ export const threadCommand: CommandModule = {
             })
             .option('limit', {
               describe:
-                'Open at most N sessions, newest first; the rest are listed under "Not opened: over the limit"',
+                'Open at most N sessions, the first N in the reopen order (starred, waiting on you, cut off mid-turn, then newest; see ORDER); the rest are listed under "Not opened: over the limit"',
               type: 'number' as const,
             })
             .option('repo', {

@@ -52,6 +52,7 @@ import {
 import {DEFAULT_PROJECT_COLORS} from '../src/thread/open-colors';
 import {parseSince} from '../src/thread/open-filters';
 import {readRuns, renderRuns} from '../src/thread/open-list';
+import {NO_REOPEN_SIGNALS} from '../src/thread/reopen-order';
 
 const NOW = new Date('2026-10-18T12:00:00.000Z');
 const HOUR = 60 * 60_000;
@@ -82,6 +83,7 @@ function cand(n: number, over: Partial<OpenCandidate> = {}): OpenCandidate {
     checkout: '/dev/repo-a',
     lastActivityAt: ago(n * HOUR),
     marks: {handoff: null, mayor: false},
+    reopen: NO_REOPEN_SIGNALS,
     repo: 'repo-a',
     repoTag: 'A',
     section: 'needsYou',
@@ -1343,7 +1345,13 @@ describe('filters (home-base-yukaf.22)', () => {
       /^ +Since: +24h \(the last 24 hours; --since\)$/mu,
     );
     expect(setOutput).toMatch(/^ +Repo: +home-base$/mu);
-    expect(setOutput).toMatch(/^ +Limit: +at most 3 sessions, newest first$/mu);
+    // home-base-kwand.6: --limit keeps the first of the reopen order.
+    expect(setOutput).toMatch(
+      /^ +Limit: +at most 3 sessions, the first in the order below$/mu,
+    );
+    expect(setOutput).toMatch(
+      /^ +Order: +starred first, then waiting on you/mu,
+    );
   });
 });
 

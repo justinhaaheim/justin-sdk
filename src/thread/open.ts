@@ -39,6 +39,7 @@ import type {
 } from './live-sessions';
 import type {RestoreDeps, RestoreRecord, RestoreTarget} from './open-restore';
 import type {EnvLike} from './paths';
+import type {ReopenKey, ReopenReason, ReopenSignals} from './reopen-order';
 import type {InboxSection} from './session-card';
 import type {InboxRow} from './session-inbox';
 import type {SessionMarks} from './session-name';
@@ -100,6 +101,12 @@ import {
 } from './open-restore';
 import {ageWords, tildeText} from './part-one';
 import {threadsStateDir} from './paths';
+import {
+  REOPEN_ORDER_WORDS,
+  reopenReason,
+  reopenSignalsOfRow,
+  sortForReopen,
+} from './reopen-order';
 import {liveSocketPath, socketSettingsJson, zshWord} from './respawn';
 import {sectionInfo, selectWorkspaceCommand} from './session-card';
 import {readInbox, rowCheckout} from './session-inbox';
@@ -136,6 +143,8 @@ export interface OpenCandidate {
   lastActivityAt: string | null;
   /** home-base-idnon: the mayor mark and handoff number the name shows. */
   marks: SessionMarks;
+  /** home-base-kwand.6 (D6): star, question waiting, cut off: what the order reads. */
+  reopen: ReopenSignals;
   repo: string | null;
   repoTag: string | null;
   section: InboxSection;
@@ -153,6 +162,7 @@ export function candidateOf(row: InboxRow): OpenCandidate {
     checkout: rowCheckout(row),
     lastActivityAt: row.lastActivityAt,
     marks: row.card.marks,
+    reopen: reopenSignalsOfRow(row),
     repo: row.repo,
     repoTag: row.card.repoTag,
     section: row.section,
@@ -182,6 +192,8 @@ export interface PlannedSession {
   marks: SessionMarks;
   /** The workspace name: sessionDisplayName(repoTag, title). */
   name: string;
+  /** home-base-kwand.6 (D6): its tier in the reopen order, and why, in words. */
+  reopen: ReopenReason;
   repo: string | null;
   repoTag: string | null;
   section: InboxSection;
@@ -239,6 +251,8 @@ export interface MoveCandidate {
    */
   otherPanes: number;
   pid: number | null;
+  /** home-base-kwand.6 (D6): its tier in the reopen order, and why, in words. */
+  reopen: ReopenReason;
   repo: string | null;
   repoTag: string | null;
   section: InboxSection;
@@ -355,6 +369,8 @@ export interface OverLimitSession {
   lastActivityAt: string | null;
   /** home-base-idnon: the mayor mark and handoff number the name shows. */
   marks: SessionMarks;
+  /** home-base-kwand.6 (D6): its tier in the reopen order, and why, in words. */
+  reopen: ReopenReason;
   repo: string | null;
   repoTag: string | null;
   section: InboxSection;
@@ -368,7 +384,7 @@ export interface OpenPlan {
   hidden: {doneOrArchived: number; olderThanCutoff: number; otherRepo: number};
   /** Live sessions found, so a reader sees the liveness read ran. */
   liveSessionsFound: number;
-  /** Newest first: what --limit cut, oldest of the shown ones last. */
+  /** What --limit cut, in the reopen order (home-base-kwand.6). */
   overLimit: OverLimitSession[];
   planned: PlannedSession[];
   skipped: SkippedSession[];
@@ -401,6 +417,14 @@ function byNewest<T extends {lastActivityAt: string | null}>(
   );
 }
 
+/** home-base-kwand.6 (D6): what the reopen order reads of a planned entry. */
+function reopenKey(entry: {
+  lastActivityAt: string | null;
+  reopen: ReopenReason;
+}): ReopenKey {
+  return {lastActivityAt: entry.lastActivityAt, tier: entry.reopen.tier};
+}
+
 /** `claude --resume <id>`, each word as zsh must receive it (respawn.ts rule). */
 export function resumeCommand(sessionId: string): string {
   return ['claude', '--resume', sessionId].map(zshWord).join(' ');
@@ -424,7 +448,10 @@ function sectionReason(section: InboxSection): string {
  * counted; an untracked one only counted; a done or archived one only
  * counted; one outside the sections skipped with why; a live one listed as
  * already open; one whose checkout is unknown or gone skipped; the rest
- * planned. Last, --limit keeps the newest `limit` and lists the rest.
+ * planned. The newest row of a session decides (F21). Then what opens and
+ * what moves are put in the reopen order (home-base-kwand.6, D6: starred,
+ * waiting on Justin, cut off mid-turn, then newest), and --limit keeps the
+ * first `limit` of it and lists the rest.
  */
 export function planOpen(input: {
   candidates: readonly OpenCandidate[];
@@ -498,6 +525,11 @@ export function planOpen(input: {
       sessionId: candidate.sessionId,
       title: candidate.title,
     };
+    // home-base-kwand.6 (D6): its place in the reopen order, and why.
+    const reopen = reopenReason(
+      {...candidate.reopen, lastActivityAt: candidate.lastActivityAt},
+      input.now,
+    );
     if (!input.sections.has(candidate.section)) {
       plan.skipped.push({...base, reason: sectionReason(candidate.section)});
       continue;
@@ -538,6 +570,7 @@ export function planOpen(input: {
             ).trimEnd(),
             otherPanes: otherPanesOf(tree, live.workspaceId),
             pid: live.pid,
+            reopen,
             workspaceId: live.workspaceId,
           });
           continue;
@@ -592,17 +625,25 @@ export function planOpen(input: {
         candidate.title,
         candidate.marks,
       ).trimEnd(),
+      reopen,
       sessionBeadId: candidate.sessionBeadId,
     });
   }
   plan.unmatchedRepos = repos.filter((value) => !repoSeen.has(value));
-  // yukaf.22 --limit: the newest `limit` of what the window would show
-  // (opened and moved together) stay; the rest are listed, newest first.
+  // home-base-kwand.6 (D6): what opens and what moves, in the reopen order.
+  plan.planned = sortForReopen(plan.planned, reopenKey);
+  plan.toMove = sortForReopen(plan.toMove, reopenKey);
+  // yukaf.22 --limit, kwand.6: the first `limit` of what the window would
+  // show (opened and moved together) in the reopen order stay; the rest are
+  // listed, in that order.
   const limit = input.limit ?? null;
-  const shown = [
-    ...plan.planned.map((entry) => ({action: 'open' as const, entry})),
-    ...plan.toMove.map((entry) => ({action: 'move' as const, entry})),
-  ].sort((a, b) => byNewest(a.entry, b.entry));
+  const shown = sortForReopen(
+    [
+      ...plan.planned.map((entry) => ({action: 'open' as const, entry})),
+      ...plan.toMove.map((entry) => ({action: 'move' as const, entry})),
+    ],
+    (item) => reopenKey(item.entry),
+  );
   if (limit != null && shown.length > limit) {
     const cut = new Set(
       shown.slice(limit).map((item) => item.entry.sessionId.toLowerCase()),
@@ -612,6 +653,7 @@ export function planOpen(input: {
         action: item.action,
         lastActivityAt: item.entry.lastActivityAt,
         marks: item.entry.marks,
+        reopen: item.entry.reopen,
         repo: item.entry.repo,
         repoTag: item.entry.repoTag,
         section: item.entry.section,
@@ -641,26 +683,30 @@ export function planOpen(input: {
 /** One window's share of the plan: what it opens, what it moves in, and the order. */
 export interface WindowGroup {
   moves: MoveCandidate[];
-  /** Every session id of the window, opened and moved, newest first. */
+  /** Every session id of the window, opened and moved, in the reopen order. */
   order: string[];
   repo: string | null;
   sessions: PlannedSession[];
 }
 
 /**
- * D-LAYOUT: one window of every session, or one per repo by its newest
+ * D-LAYOUT: one window of every session, or one per repo by its first
  * session. Moved workspaces (yukaf.22 --include-open) take their place in
- * the same newest-first order as the opened ones.
+ * the same order as the opened ones: the reopen order (home-base-kwand.6,
+ * D6), so a starred session is at the top of its window.
  */
 export function windowGroups(
   planned: readonly PlannedSession[],
   perProject: boolean,
   moves: readonly MoveCandidate[] = [],
 ): WindowGroup[] {
-  const items = [
-    ...planned.map((entry) => ({entry, move: false})),
-    ...moves.map((entry) => ({entry, move: true})),
-  ].sort((a, b) => byNewest(a.entry, b.entry));
+  const items = sortForReopen(
+    [
+      ...planned.map((entry) => ({entry, move: false})),
+      ...moves.map((entry) => ({entry, move: true})),
+    ],
+    (item) => reopenKey(item.entry),
+  );
   const groups = new Map<string, WindowGroup>();
   for (const item of items) {
     const key = perProject ? (item.entry.repo ?? '') : '';
@@ -1243,8 +1289,9 @@ async function applyWindow(
   // window's only one.
   if (window.workspaces.length === 0 && movedHere.length === 0) return true;
 
-  // D-LAYOUT: the final order is set explicitly, newest first (opened and
-  // moved together), so where new-workspace or a move inserts does not matter.
+  // D-LAYOUT: the final order is set explicitly, in the reopen order
+  // (home-base-kwand.6; opened and moved together), so where new-workspace
+  // or a move inserts does not matter.
   const idOf = new Map<string, string>();
   for (const entry of window.workspaces) {
     const id = entry.workspaceId ?? entry.workspaceRef;
@@ -1429,8 +1476,10 @@ export function renderOpen(
           value:
             filters.limit == null
               ? 'none (--limit <n> opens at most n)'
-              : `at most ${plural(filters.limit, 'session', 'sessions')}, newest first`,
+              : `at most ${plural(filters.limit, 'session', 'sessions')}, the first in the order below`,
         },
+        // home-base-kwand.6 (D6): the order the plan and the window follow.
+        {label: 'Order', value: REOPEN_ORDER_WORDS},
         {
           label: 'Include open',
           value: filters.includeOpen
@@ -1478,6 +1527,7 @@ export function renderOpen(
         recordBlock(
           sessionDisplayName(session.repoTag, session.title, session.marks),
           [
+            {label: 'Why here', value: session.reopen.text},
             {label: 'Repo', value: session.repo ?? 'unknown'},
             {label: 'Section', value: sectionWords(session.section)},
             {
@@ -1518,6 +1568,7 @@ export function renderOpen(
           recordBlock(
             sessionDisplayName(move.repoTag, move.title, move.marks),
             [
+              {label: 'Why here', value: move.reopen.text},
               {label: 'Repo', value: move.repo ?? 'unknown'},
               {label: 'Section', value: sectionWords(move.section)},
               {
@@ -1609,7 +1660,7 @@ export function renderOpen(
     );
     blocks.push(
       prose(
-        `--limit ${filters.limit ?? '?'} kept the newest ${plural(filters.limit ?? 0, 'session', 'sessions')}. Pass --limit ${total} (or leave --limit off) to open these too.`,
+        `--limit ${filters.limit ?? '?'} kept the first ${plural(filters.limit ?? 0, 'session', 'sessions')} in the reopen order (${REOPEN_ORDER_WORDS}). Pass --limit ${total} (or leave --limit off) to open these too.`,
         style,
       ),
     );
@@ -1619,6 +1670,7 @@ export function renderOpen(
           recordBlock(
             sessionDisplayName(entry.repoTag, entry.title, entry.marks),
             [
+              {label: 'Why here', value: entry.reopen.text},
               {label: 'Repo', value: entry.repo ?? 'unknown'},
               {label: 'Section', value: sectionWords(entry.section)},
               {
@@ -1845,7 +1897,7 @@ export interface OpenOptions {
   includeOpen?: boolean;
   includeUntracked: boolean;
   json: boolean;
-  /** `--limit`: open at most this many sessions, newest first. */
+  /** `--limit`: open at most this many sessions, the first in the reopen order. */
   limit?: number | null;
   /** `--list`: print the recorded runs instead (open-list.ts). */
   list?: boolean;

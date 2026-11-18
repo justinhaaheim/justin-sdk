@@ -40,6 +40,7 @@ import {
   sendArgs,
 } from '../src/thread/open-restore';
 import {NO_BREAK_SPACE} from '../src/thread/pane-join';
+import {NO_REOPEN_SIGNALS} from '../src/thread/reopen-order';
 
 const NOW = new Date('2026-10-20T12:00:00.000Z');
 const HOUR = 60 * 60_000;
@@ -349,6 +350,7 @@ function cand(n: number): OpenCandidate {
     checkout: '/dev/repo-a',
     lastActivityAt: new Date(NOW.getTime() - n * HOUR).toISOString(),
     marks: {handoff: null, mayor: false},
+    reopen: NO_REOPEN_SIGNALS,
     repo: 'repo-a',
     repoTag: 'A',
     section: 'unsentDraft',
@@ -946,6 +948,7 @@ describe('openedTargets: only what the run opened', () => {
       lastActivityAt: null,
       marks: {handoff: null, mayor: false},
       name: `[A] session ${n}`,
+      reopen: {text: '🕒 last activity unknown', tier: 'recent'},
       repo: 'repo-a',
       repoTag: 'A',
       section: 'needsYou',
