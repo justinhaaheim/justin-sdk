@@ -795,3 +795,19 @@ describe('--tab refusals', () => {
     }
   });
 });
+
+describe('home-base-kwand.20 item 1: a tab of a pinned workspace', () => {
+  test('one tab of several (close-surface) in a PINNED workspace is kept ("pinned"), and its Claude is never signalled: whether cmux refuses close-surface there is not known', async () => {
+    const pair = handoffPair();
+    const pinned = pair.model.windows[0]?.workspaces[0];
+    if (pinned == null) throw new Error('no workspace 1');
+    pinned.pinned = true;
+    const w = world({...pair, options: {sessions: [sid(1)]}});
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(0);
+    expect(writes(w)).toEqual([]);
+    expect(result.state?.kept[0]?.reasons[0]).toStartWith(
+      'pinned: its workspace is pinned, and whether cmux refuses to close a tab',
+    );
+  });
+});

@@ -1113,16 +1113,20 @@ describe('a pane with a blank screen is kept as unknown (kwand.27)', () => {
     noForce(w);
   });
 
-  test('a named close still passes a blank pane whose tty runs only shells (kwand.20: unchanged)', async () => {
+  // Inverted by home-base-kwand.20 item 4: until then this guarded that the
+  // named close was unchanged by kwand.27; kwand.20 gives it the same keep.
+  test('a named close keeps a blank pane whose tty runs only shells too (kwand.20 item 4)', async () => {
     const w = world({
       ...shellsOnly('', false),
       options: {allExcept: false, dryRun: true, workspaces: ['workspace:3']},
     });
     const result = await closeWorkspaces(w.options, w.deps);
-    expect(result.state?.planned.map((entry) => entry.workspaceRef)).toEqual([
+    expect(result.state?.planned).toEqual([]);
+    expect(result.state?.kept.map((entry) => entry.workspaceRef)).toEqual([
       'workspace:3',
     ]);
-    expect(result.state?.kept).toEqual([]);
+    expect(result.state?.kept[0]?.reasonKinds).toEqual(['unknown']);
+    expect(result.state?.kept[0]?.reasons[0]).toContain(BLANK);
   });
 });
 

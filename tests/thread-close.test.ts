@@ -1146,6 +1146,17 @@ describe('cmux refusals (home-base-kwand.13)', () => {
     const w = world({
       model: oneWindow([{n: 1, screens: [IDLE_SHELL]}]),
       options: {workspaces: [wsId(1)]},
+      // home-base-kwand.20 item 4: the shell runs on its tty, as on a live
+      // terminal; a tty with no process at all now keeps the workspace.
+      procs: [
+        {
+          command: 'login -pflq jhaa /bin/zsh',
+          onTerm: 'exit',
+          pid: 2001,
+          tty: 'ttys01',
+        },
+        {command: '-zsh', onTerm: 'exit', pid: 2002, tty: 'ttys01'},
+      ],
       refuseClose: {[wsId(1)]: CMUX_RUNNING},
     });
     const result = await closeWorkspaces(w.options, w.deps);
@@ -1161,5 +1172,86 @@ describe('cmux refusals (home-base-kwand.13)', () => {
     );
     expect(result.output).not.toContain('STOPPED');
     expectNoForce(w);
+  });
+});
+
+describe('home-base-kwand.20: unseen panes and a SIGTERM wait that timed out', () => {
+  const shells = (n: number): Proc[] => [
+    {
+      command: 'login -pflq jhaa /bin/zsh',
+      onTerm: 'exit',
+      pid: 2000 + n * 10,
+      tty: `ttys0${n}`,
+    },
+    {command: '-zsh', onTerm: 'exit', pid: 2001 + n * 10, tty: `ttys0${n}`},
+  ];
+
+  test('item 4: a named close keeps a pane whose tty runs no process at all (kind unknown), and signals and closes nothing', async () => {
+    for (const dryRun of [true, false]) {
+      const w = world({
+        model: oneWindow([{n: 1, screens: [IDLE_SHELL]}]),
+        options: {dryRun, workspaces: [wsId(1)]},
+      });
+      const result = await closeWorkspaces(w.options, w.deps);
+      expect(result.state?.planned).toEqual([]);
+      expect(result.state?.kept[0]?.reasonKinds).toEqual(['unknown']);
+      expect(result.state?.kept[0]?.reasons[0]).toContain(
+        'no process at all runs on tty ttys01, which pane surface:1 reports',
+      );
+      expect(kills(w)).toEqual([]);
+      expect(closes(w)).toEqual([]);
+    }
+  });
+
+  test('item 4: a named close keeps a pane with a blank screen whose tty runs only shells', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: ['']}]),
+      options: {dryRun: true, workspaces: [wsId(1)]},
+      procs: shells(1),
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.state?.planned).toEqual([]);
+    expect(result.state?.kept[0]?.reasonKinds).toEqual(['unknown']);
+    expect(result.state?.kept[0]?.reasons[0]).toContain(
+      'pane surface:1 shows a blank screen',
+    );
+  });
+
+  test('item 4, at the re-check: the plan saw an idle prompt, the check right before closing sees a blank screen: kept, nothing closed', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: [IDLE_SHELL, '']}]),
+      options: {workspaces: [wsId(1)]},
+      procs: shells(1),
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.state?.planned.map((entry) => entry.workspaceId)).toEqual([
+      wsId(1),
+    ]);
+    expect(closes(w)).toEqual([]);
+    expect(result.state?.closed).toEqual([]);
+    expect(result.state?.kept[0]?.reasonKinds).toEqual(['unknown']);
+    expect(readLog(w.logPath).map((line) => line.outcome.slice(0, 15))).toEqual(
+      ['closing', 'kept: unknown: '],
+    );
+    expectNoForce(w);
+  });
+
+  test('item 3: a SIGTERM whose wait times out counts as stopped and still open, and says SIGTERM was sent', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: [idleClaude(sid(1))]}]),
+      options: {workspaces: [wsId(1)]},
+      procs: [claudeProc(1, 'ignore')],
+    });
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(1);
+    expect(closes(w)).toEqual([]);
+    expect(result.state?.failed[0]?.step).toBe('wait-exit');
+    expect(result.state?.failed[0]?.claudeStopped).toBe(true);
+    expect(result.output).toContain(
+      'SENT SIGTERM (pid 1001), and it had not exited when the wait ended',
+    );
+    expect(result.output).toContain(
+      '1 of the failed had their Claude stopped and are still open',
+    );
   });
 });

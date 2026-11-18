@@ -173,6 +173,8 @@ import {recordTabs, tabRecordDir} from './tab-record';
 import {extractTranscriptMessages} from './transcript-messages';
 import {
   cmuxCloseRefusal,
+  PINNED_REASON,
+  pinnedKeepWords,
   realPidCommand,
   realSigterm,
   stopThenCloseSurface,
@@ -186,9 +188,10 @@ const WORKSPACE_REF = /^workspace:\d+$/iu;
 
 /**
  * home-base-kwand.13: how a kept reason for a pinned workspace starts, so a
- * caller (thread close --all-except, home-base-kwand.7) can count it.
+ * caller (thread close --all-except, home-base-kwand.7) can count it. Lives
+ * in workspace-close.ts since home-base-kwand.20, with the words.
  */
-export const PINNED_REASON = 'pinned';
+export {PINNED_REASON};
 
 /** `<threadsStateDir>/closes.jsonl`: one line per workspace and step. */
 export function closesLogPath(env: EnvLike): string {
@@ -320,7 +323,9 @@ export interface CloseFailed extends CloseEntry {
   /**
    * home-base-kwand.13 fix 3: its Claude was stopped and then the close
    * failed, so the workspace (or tab) is open with no Claude in it; the
-   * output says so and points at the resume command.
+   * output says so and points at the resume command. home-base-kwand.20
+   * item 3: also true when SIGTERM was sent and the wait for the exit timed
+   * out (step `wait-exit`): it may exit moments later and leave the same.
    */
   claudeStopped: boolean;
   /** cmux's refusal of the close, when it was one it names; else null. */
@@ -715,16 +720,18 @@ async function assess(
   const reasons = [...gate.reasons];
   const kinds: KeepKind[] = [...gate.kinds];
   // home-base-kwand.13 fix 1: cmux refuses close-workspace on a pinned
-  // workspace, so predict it here, before any Claude is stopped. Only a
-  // whole-workspace close (no `onlySurface`, which includes --tab's only-tab
-  // D4 path) is refused for it. Not knowing is not "unpinned" (rule 7).
-  if (onlySurface == null && workspace.pinned !== false) {
+  // workspace, so predict it here, before any Claude is stopped (a whole-
+  // workspace close: no `onlySurface`, which includes --tab's only-tab D4
+  // path). home-base-kwand.20 item 1: one tab of several (`onlySurface`,
+  // close-surface) is kept too, since whether cmux refuses close-surface in
+  // a pinned workspace is not known. Not knowing is not "unpinned" (rule 7).
+  const pinned = pinnedKeepWords(
+    workspace.pinned,
+    onlySurface == null ? 'workspace' : 'tab',
+  );
+  if (pinned != null) {
     kinds.unshift('pinned');
-    reasons.unshift(
-      workspace.pinned === true
-        ? `${PINNED_REASON}: cmux refuses to close a pinned workspace ("Pinned workspaces can't be closed while pinned"); unpin it in cmux to close it`
-        : `${PINNED_REASON}?: cmux tree did not say whether it is pinned, and cmux refuses to close a pinned workspace`,
-    );
+    reasons.unshift(pinned);
   }
   let resume: ResumeLookup | null = null;
   if (sessionId != null) {
@@ -778,6 +785,43 @@ async function assess(
     noProcessTty: gate.noProcessTty,
     sessions: gate.sessions,
     weak: gate.weak,
+  };
+}
+
+/**
+ * home-base-kwand.20 item 4: the named close (`thread close <workspace…>`
+ * and `--session`) keeps a workspace with a pane whose reported tty runs no
+ * process at all (kwand.24 R1) or whose screen is blank (kwand.27), as
+ * --all-except does, in the plan and at the re-check. gatePane lets such a
+ * pane pass as an idle shell, and neither shows what runs in the pane. The
+ * words are --all-except's (kind `unknown`). --all-except keeps these itself
+ * and never calls this, so its output is unchanged.
+ */
+function withUnseenPaneKeeps(assessment: Assessment): Assessment {
+  if (assessment.kind === 'notFound') return assessment;
+  const noProcess = assessment.noProcessTty ?? [];
+  const blank = assessment.blankPanes ?? [];
+  const held: KeepReason[] = [
+    ...(noProcess.length > 0 ? [noProcessTtyKeep(noProcess)] : []),
+    ...(blank.length > 0 ? [blankScreenKeep(blank)] : []),
+  ];
+  if (held.length === 0) return assessment;
+  if (assessment.kind === 'kept') {
+    return {
+      ...assessment,
+      kinds: [...(assessment.kinds ?? []), ...held.map((each) => each.kind)],
+      reasons: [...assessment.reasons, ...held.map((each) => each.text)],
+    };
+  }
+  return {
+    blankPanes: assessment.blankPanes,
+    drafts: [],
+    entry: assessment.entry,
+    kind: 'kept',
+    kinds: held.map((each) => each.kind),
+    noProcessTty: assessment.noProcessTty,
+    reasons: held.map((each) => each.text),
+    ...(assessment.weak == null ? {} : {weak: assessment.weak}),
   };
 }
 
@@ -1266,8 +1310,13 @@ function claudeWords(pid: number | null, done: boolean): string {
 
 /** home-base-kwand.13 fix 3: a failed close says whether its Claude was stopped. */
 function failedClaudeWords(entry: CloseFailed): string {
+  const where = entry.tab == null || entry.tab.onlyTab ? 'workspace' : 'tab';
+  // home-base-kwand.20 item 3: sent SIGTERM, still running after the wait.
+  if (entry.claudeStopped && entry.step === 'wait-exit') {
+    return `SENT SIGTERM (pid ${entry.pid ?? 'unknown'}), and it had not exited when the wait ended; the ${where} is still open, and once it exits no Claude runs in it. Resume the session with the Resume command above`;
+  }
   if (entry.claudeStopped) {
-    return `STOPPED (pid ${entry.pid ?? 'unknown'}) before the close failed: the ${entry.tab == null || entry.tab.onlyTab ? 'workspace' : 'tab'} is still open with no Claude in it. Resume the session with the Resume command above`;
+    return `STOPPED (pid ${entry.pid ?? 'unknown'}) before the close failed: the ${where} is still open with no Claude in it. Resume the session with the Resume command above`;
   }
   if (entry.pid == null) return 'none ran there; nothing was stopped';
   return entry.step === 'wait-exit'
@@ -1778,7 +1827,12 @@ async function closePlanned(input: {
         state.failed.push({
           ...entry,
           // Every pid was seen to exit before a close step ran.
-          claudeStopped: closeStep && assessment.claude.length > 0,
+          // home-base-kwand.20 item 3: a SIGTERM whose wait timed out counts
+          // too: every pid was sent it, and one may exit moments later and
+          // leave the same open workspace with no Claude in it.
+          claudeStopped:
+            (closeStep || failure.step === 'wait-exit') &&
+            assessment.claude.length > 0,
           cmuxRefusal: closeStep ? cmuxCloseRefusal(failure.reason) : null,
           reason: failure.reason,
           step: failure.step,
@@ -2823,7 +2877,9 @@ export async function closeWorkspaces(
   const closable: Closable[] = [];
   const hookPids = hookStorePids(store.value);
   for (const target of resolved) {
-    const assessment = await assess(target, first.view, hookPids, full);
+    const assessment = withUnseenPaneKeeps(
+      await assess(target, first.view, hookPids, full),
+    );
     if (assessment.kind === 'notFound') {
       notFound.push({given: target.given, reason: assessment.reason});
     } else if (assessment.kind === 'kept') {
@@ -2856,11 +2912,8 @@ export async function closeWorkspaces(
       if (again.kind !== 'read' || !storeAgain.ok) {
         return unreadAgain(planned, again, storeAgain);
       }
-      return await assess(
-        target,
-        again.view,
-        hookStorePids(storeAgain.value),
-        full,
+      return withUnseenPaneKeeps(
+        await assess(target, again.view, hookStorePids(storeAgain.value), full),
       );
     },
     startedAt,

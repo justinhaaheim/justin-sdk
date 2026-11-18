@@ -30,9 +30,11 @@
  *   does not name the run's session (not started by this run); a tty that
  *   more than one pane reports (whose processes are whose cannot be told).
  *   A pane with NO input box, no claude process on its tty and only the shell
- *   on it, whose screen is blank or a bare shell prompt, is closable without
- *   SIGTERM: `--focus false` may leave a workspace's shell unstarted, or
- *   Claude never launched (yukaf.1 notes, UNVERIFIED). No input box with a
+ *   on it, whose screen is a bare shell prompt, is closable without SIGTERM:
+ *   Claude never launched (yukaf.1 notes, UNVERIFIED). Since
+ *   home-base-kwand.20 a BLANK screen, or a tty with no process at all on it,
+ *   keeps the workspace: neither shows what runs in the pane. A pinned
+ *   workspace is kept too (cmux refuses to close it). No input box with a
  *   claude process on the tty is kept ("Claude is starting or showing a
  *   dialog").
  * - Closing, per workspace, in this order: the gates run again right before
@@ -82,6 +84,7 @@ import {
   wrapHanging,
 } from '../cli-style';
 import {writeStdout} from '../write-stdout';
+import {blankScreenKeep, noProcessTtyKeep} from './close-all-except';
 import {readCmuxTree, realCmuxRunner, surfacesOfWorkspace} from './cmux';
 import {findTranscript} from './facts';
 import {writeInputDraft} from './input-drafts';
@@ -106,6 +109,7 @@ import {tildeText} from './part-one';
 import {liveSocketPath, socketSettingsJson} from './respawn';
 import {readActivity} from './transcript-activity';
 import {
+  pinnedKeepWords,
   realPidCommand,
   realSigterm,
   stopThenCloseWorkspace,
@@ -611,9 +615,9 @@ export interface SurfacesGate {
    * home-base-kwand.27: each pane whose screen was read and is blank, in
    * words. cmux returns an empty screen for a pane that has not drawn yet
    * (F20), so a blank screen does not show what runs there. gatePane lets
-   * such a pane pass as an idle shell when its tty runs only shells; only
-   * `thread close --all-except` reads this list and keeps the workspace for
-   * it, so the named close and `--undo` are unchanged (home-base-kwand.20).
+   * such a pane pass as an idle shell when its tty runs only shells; every
+   * whole-workspace close keeps the workspace for it: `thread close
+   * --all-except` (kwand.27), the named close and `--undo` (kwand.20).
    */
   blankPanes: string[];
   /** Claude session processes on the workspace's panes, to stop first. */
@@ -625,9 +629,9 @@ export interface SurfacesGate {
    * home-base-kwand.24 R1: each pane whose reported tty (known) has no
    * process on it at all, in words. A live terminal always holds a login and
    * a shell, so that tty is stale and what runs in the pane cannot be seen.
-   * gatePane lets such a pane pass on its screen alone; only `thread close
-   * --all-except` reads this list and keeps the workspace for it, so the
-   * named close and `--undo` are unchanged (home-base-kwand.20).
+   * gatePane lets such a pane pass on its screen alone; every whole-
+   * workspace close keeps the workspace for it: `thread close --all-except`
+   * (kwand.24), the named close and `--undo` (kwand.20).
    */
   noProcessTty: string[];
   /** Why the workspace is kept; empty = it may close. */
@@ -804,6 +808,26 @@ export interface GateOptions {
   sharedTtyIdleShells?: boolean;
 }
 
+/**
+ * home-base-kwand.20 item 4: --undo (its own workspaces and G3's blank one)
+ * keeps a workspace with a pane whose reported tty runs no process at all
+ * (kwand.24 R1) or whose screen is blank (kwand.27), as `thread close`
+ * does: gatePane lets such a pane pass as an idle shell, and neither shows
+ * what runs in it. The words are thread close's.
+ */
+function unseenPaneReasons(
+  gate: Pick<SurfacesGate, 'blankPanes' | 'noProcessTty'>,
+): string[] {
+  return [
+    ...(gate.noProcessTty.length > 0
+      ? [noProcessTtyKeep(gate.noProcessTty).text]
+      : []),
+    ...(gate.blankPanes.length > 0
+      ? [blankScreenKeep(gate.blankPanes).text]
+      : []),
+  ];
+}
+
 async function assessWorkspace(
   entry: RecordedWorkspace,
   view: LiveView,
@@ -828,12 +852,20 @@ async function assessWorkspace(
   if (surfaceIds == null || windowId == null) {
     return {entry, kind: 'gone', workspaceId};
   }
-  const {claude, drafts, reasons, suggestions} = await gateSurfaces(
-    surfaceIds,
-    view,
-    deps.run,
-    entry.sessionId,
+  const gate = await gateSurfaces(surfaceIds, view, deps.run, entry.sessionId);
+  const {claude, drafts, suggestions} = gate;
+  const reasons = [...gate.reasons, ...unseenPaneReasons(gate)];
+  // home-base-kwand.20 item 1: cmux refuses close-workspace on a pinned
+  // workspace, so it is kept here, before any Claude is stopped. This runs
+  // in the plan and again right before each SIGTERM, on a fresh tree.
+  const pinned = pinnedKeepWords(
+    view.tree.windows
+      .flatMap((window) => window.workspaces)
+      .find((each) => each.id.toUpperCase() === workspaceId.toUpperCase())
+      ?.pinned,
+    'workspace',
   );
+  if (pinned != null) reasons.unshift(pinned);
   const activity = await deps.readActivity(entry.sessionId);
   if (activity.kind === 'unknown') {
     reasons.push(
@@ -1380,6 +1412,7 @@ async function closeLeftBlank(
       continue;
     }
     const gate = await gateSurfaces(blank.surfaceIds, read.view, deps.run, '');
+    gate.reasons.push(...unseenPaneReasons(gate));
     if (gate.claude.length > 0) {
       gate.reasons.push('a Claude process runs on it');
     }

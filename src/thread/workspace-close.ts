@@ -171,6 +171,40 @@ export function cmuxCloseRefusal(text: string): CmuxCloseRefusal | null {
   return null;
 }
 
+/**
+ * home-base-kwand.13: how a kept reason for a pinned workspace starts, so a
+ * caller (thread close --all-except, home-base-kwand.7) can count it.
+ */
+export const PINNED_REASON = 'pinned';
+
+/**
+ * home-base-kwand.20 item 1: why a close is kept for cmux's pinned state,
+ * checked BEFORE any Claude is stopped; null only when cmux said "not
+ * pinned". Every caller of stopThenCloseWorkspace (thread close, thread open
+ * --undo, scripts/cmux-arrange-close.ts) asks it first, on a fresh read.
+ * - `workspace`: cmux refuses close-workspace on a pinned workspace
+ *   (measured 2026-11-18, kwand.13).
+ * - `tab`: one tab of a workspace with other tabs (thread close --tab,
+ *   close-surface). Whether cmux refuses close-surface in a pinned workspace
+ *   was not measured (no real tab may be closed to find out), so it is kept
+ *   either way: a refusal after the stop would leave the tab with no Claude.
+ * Not knowing is not "unpinned" (critical rule 7): null or undefined keeps.
+ */
+export function pinnedKeepWords(
+  pinned: boolean | null | undefined,
+  scope: 'tab' | 'workspace',
+): string | null {
+  if (pinned === false) return null;
+  if (scope === 'workspace') {
+    return pinned === true
+      ? `${PINNED_REASON}: cmux refuses to close a pinned workspace ("Pinned workspaces can't be closed while pinned"); unpin it in cmux to close it`
+      : `${PINNED_REASON}?: cmux tree did not say whether it is pinned, and cmux refuses to close a pinned workspace`;
+  }
+  return pinned === true
+    ? `${PINNED_REASON}: its workspace is pinned, and whether cmux refuses to close a tab of a pinned workspace is not known, so its Claude is not stopped; unpin the workspace in cmux to close the tab`
+    : `${PINNED_REASON}?: cmux tree did not say whether its workspace is pinned, and whether cmux refuses to close a tab of a pinned workspace is not known, so its Claude is not stopped`;
+}
+
 /** What a cmux refusal means, in plain words, or null for any other failure. */
 export function cmuxCloseRefusalWords(text: string): string | null {
   switch (cmuxCloseRefusal(text)) {

@@ -108,7 +108,16 @@ interface Model {
   windows: {
     id: string;
     ref: string;
-    workspaces: {id: string; panes: Pane[]; ref: string}[];
+    workspaces: {
+      id: string;
+      panes: Pane[];
+      /**
+       * cmux tree's `pinned` (home-base-kwand.20); absent means false, as
+       * real cmux reports it; null leaves it out of the tree.
+       */
+      pinned?: boolean | null;
+      ref: string;
+    }[];
   }[];
 }
 
@@ -240,6 +249,9 @@ function world(input: {
                     },
                   ],
                 })),
+                ...(workspace.pinned === null
+                  ? {}
+                  : {pinned: workspace.pinned ?? false}),
                 ref: workspace.ref,
                 title: workspace.ref,
               })),
@@ -1245,7 +1257,20 @@ describe('G3: the blank workspace cmux leaves when a window loses its last works
         ],
       },
       options: over.options,
-      procs: [claudeProc(1), claudeProc(9), ...(over.procs ?? [])],
+      procs: [
+        claudeProc(1),
+        claudeProc(9),
+        // home-base-kwand.20 item 4: the blank workspace's shell runs on its
+        // tty, as on a live terminal; a tty with no process keeps it now.
+        {
+          command: 'login -pflq jhaa /bin/zsh',
+          onTerm: 'exit',
+          pid: 2050,
+          tty: 'ttys050',
+        },
+        {command: '-zsh', onTerm: 'exit', pid: 2051, tty: 'ttys050'},
+        ...(over.procs ?? []),
+      ],
       record: [{sessions: [1], window: 1}],
       recordExtra: {
         moved: [
@@ -1350,6 +1375,107 @@ describe('G3: the blank workspace cmux leaves when a window loses its last works
     expect(windowTwo(w)).toEqual([wsId(50)]);
     expect(result.state?.blank[0]?.reason).toContain(
       'closing it would close the window',
+    );
+  });
+
+  test('home-base-kwand.20 item 4: a blank screen, or a tty with no process at all, keeps the blank workspace', async () => {
+    const blankScreen = blankWorld({blank: {screens: ['']}});
+    const one = await undoOpen(blankScreen.options, blankScreen.deps);
+    expect(one.state?.blank[0]?.outcome).toBe('kept');
+    expect(one.state?.blank[0]?.reason).toContain(
+      'pane surface:50 shows a blank screen',
+    );
+    expect(closes(blankScreen)).not.toContain(
+      `close-workspace ${wsId(50)} --window ${winId(2)}`,
+    );
+    const noProcess = blankWorld({blank: {tty: 'ttys059'}});
+    const two = await undoOpen(noProcess.options, noProcess.deps);
+    expect(two.state?.blank[0]?.outcome).toBe('kept');
+    expect(two.state?.blank[0]?.reason).toContain(
+      'no process at all runs on tty ttys059, which pane surface:50 reports',
+    );
+  });
+});
+
+describe('home-base-kwand.20: pinned workspaces and unseen panes', () => {
+  const shells = (n: number): Proc[] => [
+    {
+      command: 'login -pflq jhaa /bin/zsh',
+      onTerm: 'exit',
+      pid: 2000 + n * 10,
+      tty: `ttys0${n}`,
+    },
+    {command: '-zsh', onTerm: 'exit', pid: 2001 + n * 10, tty: `ttys0${n}`},
+  ];
+  const pinnedWorld = (pinned: boolean | null): World => {
+    const model = oneWindow([{n: 1, screens: [idleClaude(sid(1))]}]);
+    const first = model.windows[0]?.workspaces[0];
+    if (first == null) throw new Error('no workspace 1');
+    first.pinned = pinned;
+    return world({
+      model,
+      procs: [claudeProc(1)],
+      record: [{sessions: [1], window: 1}],
+    });
+  };
+
+  test('item 1: a pinned workspace is kept before any SIGTERM; an unreported pinned state keeps it too (rule 7)', async () => {
+    for (const [pinned, starts] of [
+      [true, 'pinned: cmux refuses to close a pinned workspace'],
+      [null, 'pinned?: '],
+    ] as const) {
+      const w = pinnedWorld(pinned);
+      const result = await undoOpen(w.options, w.deps);
+      expect(kills(w)).toEqual([]);
+      expect(closes(w)).toEqual([]);
+      expect(result.state?.planned).toEqual([]);
+      expect(result.state?.kept[0]?.reasons[0]).toStartWith(starts);
+    }
+  });
+
+  test('item 1: pinned between the plan and its turn: the check right before SIGTERM keeps it, nothing signalled or closed', async () => {
+    const w = pinnedWorld(false);
+    const result = await undoOpen(w.options, {
+      ...w.deps,
+      writeRecord: (path, recordValue) => {
+        const first = w.model.windows[0]?.workspaces[0];
+        if (first != null) first.pinned = true;
+        return w.deps.writeRecord?.(path, recordValue) ?? null;
+      },
+    });
+    expect(result.state?.planned.map((entry) => entry.workspaceId)).toEqual([
+      wsId(1),
+    ]);
+    expect(kills(w)).toEqual([]);
+    expect(closes(w)).toEqual([]);
+    expect(result.state?.kept[0]?.reasons[0]).toStartWith('pinned: ');
+  });
+
+  test('item 4: a pane whose tty runs no process at all is kept, never closed unsignalled', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: [IDLE_SHELL]}]),
+      record: [{sessions: [1], window: 1}],
+    });
+    const result = await undoOpen(w.options, w.deps);
+    expect(closes(w)).toEqual([]);
+    expect(result.state?.kept[0]?.reason).toContain(
+      'no process at all runs on tty ttys01, which pane surface:1 reports',
+    );
+  });
+
+  test('item 4, at the re-check: the plan saw an idle prompt, the check right before closing sees a blank screen: kept, nothing closed', async () => {
+    const w = world({
+      model: oneWindow([{n: 1, screens: [IDLE_SHELL, '']}]),
+      procs: shells(1),
+      record: [{sessions: [1], window: 1}],
+    });
+    const result = await undoOpen(w.options, w.deps);
+    expect(result.state?.planned.map((entry) => entry.workspaceId)).toEqual([
+      wsId(1),
+    ]);
+    expect(closes(w)).toEqual([]);
+    expect(result.state?.kept[0]?.reason).toContain(
+      'pane surface:1 shows a blank screen',
     );
   });
 });
