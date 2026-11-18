@@ -60,6 +60,9 @@ describe('componentConfig.thread.handoff', () => {
       pickupMessagesSource: 'default',
       predecessor: 'keep',
       predecessorSource: 'default',
+      // home-base-6ujwi D6: the reading line is off by default.
+      readMessages: false,
+      readMessagesSource: 'default',
       successor: false,
       successorSource: 'default',
       usage: {
@@ -120,6 +123,23 @@ describe('componentConfig.thread.handoff', () => {
       maxWeekPercent: 70,
       maxWeekPercentSource: 'user',
     });
+  });
+
+  test('readMessages (home-base-6ujwi D6) resolves from the repo config; a non-boolean is named and ignored', () => {
+    const on = configWorld({project: handoffIn({readMessages: true})});
+    expect(resolveThreadConfig(on).handoff).toMatchObject({
+      readMessages: true,
+      readMessagesSource: 'project',
+    });
+    const problems: string[] = [];
+    const bad = resolveHandoffConfig(
+      [{name: 'project', section: {readMessages: 'yes'}}],
+      problems,
+    );
+    expect(bad.readMessages).toBe(false);
+    expect(problems.join('\n')).toContain(
+      'componentConfig.thread.handoff.readMessages in the project config is "yes"',
+    );
   });
 
   test('a bad predecessor is named in the problems and ignored', () => {
@@ -189,6 +209,7 @@ describe('componentConfig.thread.handoff', () => {
       'handoff.maxUnattendedHandoffs': 'default 3',
       'handoff.permissionMode': 'default "auto"',
       'handoff.predecessor': 'default "keep"',
+      'handoff.readMessages': 'default false',
       'handoff.successor': 'default false',
       'handoff.usage': null,
       'handoff.usage.maxSampleAgeMinutes': 'default 150',

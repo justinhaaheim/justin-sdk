@@ -1939,7 +1939,7 @@ export function isSessionFieldLine(line: string): boolean {
 }
 
 /** The end of a pasted Part 1 that starts at `rule`, or null when it is not one. */
-function pastedPartOneEnd(
+export function pastedPartOneEnd(
   lines: readonly string[],
   rule: number,
 ): number | null {

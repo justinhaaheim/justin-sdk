@@ -64,6 +64,7 @@ import {
   THREAD_DEFAULT_NUDGE,
   THREAD_DEFAULT_OPEN_SINCE,
   THREAD_DEFAULT_PINNED_PROJECTS,
+  THREAD_DEFAULT_REQUEST_MESSAGE,
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
   THREAD_DEFAULT_TAB_RECORD,
@@ -439,6 +440,12 @@ const componentConfigSchema = z
               .describe(
                 'What becomes of the handed-off session’s tab once its successor has linked itself (D6): "keep" leaves it running, "exit" ends Claude Code there and leaves a tombstone naming the successor, "close" closes the tab. exit and close act only after the handshake, which reads the tab’s screen and needs the status line to show the session id as "⌗ <session id>": without it they never act, and the tab is kept after 20 minutes ("handshake failed: screen"). They also end any subagent or background shell still running in that tab.',
               ),
+            readMessages: z
+              .boolean()
+              .optional()
+              .describe(
+                "home-base-6ujwi D6. DEFAULT FALSE: the handoff block is unchanged. True: the handoff block of a mayor session (its session bead carries session-role:mayor) gets one more line in its \"To pick it up\" list, after the mayor-skill line, telling the successor to run `thread messages --chain <the handing-off session's bead> --sessions 3 --annotate` first and read all of its output: Justin's own words from his last 3 sessions, each followed by what Claude did after it. Every other session's block is unchanged.",
+              ),
             successor: z
               .boolean()
               .optional()
@@ -624,6 +631,12 @@ const componentConfigSchema = z
           .optional()
           .describe(
             'The bd workspace holding `thread` and `ask` beads (home-base-p1uj.11). DEFAULT ~/Dev/threads. Overridden by the JUSTIN_THREADS_REPO_DIR env var, which outranks both config files.',
+          ),
+        requestMessage: z
+          .boolean()
+          .optional()
+          .describe(
+            'REQUEST CARRIES JUSTIN’S MESSAGE (home-base-6ujwi D9 to D14, built 2026-11-18). DEFAULT FALSE. When true, `thread request "<title>"` (with or without `--overarching`) and `thread request --bead <id>` append a section to the request bead’s description holding Justin’s newest message in this session, verbatim, with its id (`thread messages --context <id>` resolves it) and its local time. Existing description text is never changed, and a section for the same message is written once. A session with no message of his gets one line saying how it began; a private session gets nothing; when the message log lags the transcript nothing is attached and the section says the message could not be established. The command prints one line saying what was attached or why not, and a failed attach never changes its exit code. Requests carried over by `--continues` get nothing. Off: the message log is not read and the output is as before.',
           ),
         sessionBeads: z
           .boolean()
@@ -1032,6 +1045,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     quota: QUOTA_DEFAULTS,
     render: {emojiHeader: THREAD_DEFAULT_EMOJI_HEADER},
     repoDir: '~/Dev/threads',
+    requestMessage: THREAD_DEFAULT_REQUEST_MESSAGE,
     sessionBeads: THREAD_DEFAULT_SESSION_BEADS,
     spawn: SPAWN_DEFAULTS,
     stages: THREAD_DEFAULT_STAGES,

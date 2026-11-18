@@ -4,8 +4,14 @@
  * SYNTHETIC; no screen text from Justin's machine is in this file.
  */
 
+import type {CwdReader} from '../src/thread/before-restart-state';
 import type {CmuxRunner} from '../src/thread/cmux';
-import type {LiveSurface, PaneLookup, Proc} from '../src/thread/pane-join';
+import type {
+  LiveSurface,
+  PaneLookup,
+  Proc,
+  UnplacedPane,
+} from '../src/thread/pane-join';
 import type {BeforeRestart} from '../src/thread/tab-record-command';
 
 import {describe, expect, test} from 'bun:test';
@@ -13,13 +19,17 @@ import {describe, expect, test} from 'bun:test';
 import {
   beforeRestartLine,
   beforeRestartStates,
+  parseLsofCwds,
   showsFailedRestore,
 } from '../src/thread/before-restart-state';
+import {isOldTabResumeState} from '../src/thread/restore-tab';
 
 const RESTART = new Date(2031, 2, 10, 21, 36, 52).getTime();
 
 interface TabSpec {
   carried?: boolean;
+  /** Claude's working directory before the restart; null: none recorded. */
+  directory?: string | null;
   id: string;
   sessionId: string | null;
 }
@@ -54,12 +64,13 @@ function before(tabs: TabSpec[]): BeforeRestart {
         index: 0,
         workspaces: [
           {
-            currentDirectory: '/synthetic/project',
+            currentDirectory: null,
             tabs: tabs.map((tab) => ({
               agentKind: tab.sessionId == null ? null : 'claude',
-              agentWorkingDirectory: null,
+              agentWorkingDirectory: tab.directory ?? null,
               autoResume: true,
-              directory: '/synthetic/project',
+              directory:
+                tab.directory === undefined ? '/synthetic/project' : null,
               id: tab.id,
               lastKnownSeenAt: tab.sessionId == null ? null : RESTART - 2000,
               lastKnownSessionId: tab.sessionId,
@@ -113,8 +124,13 @@ const CLAUDE_SCREEN =
 
 function lookup(over: {
   bySession?: Map<string, {surfaceId: string}>;
-  live?: {procs: Proc[]; surfaces: LiveSurface[]} | null;
+  live?: {
+    placedPids?: Map<number, string>;
+    procs: Proc[];
+    surfaces: LiveSurface[];
+  } | null;
   unknown?: Map<string, string>;
+  unplaced?: UnplacedPane[];
 }): PaneLookup {
   const bySession = new Map(
     [...(over.bySession ?? new Map<string, {surfaceId: string}>())].map(
@@ -137,7 +153,7 @@ function lookup(over: {
     statusLine: {
       failure: null,
       unknownSessions: over.unknown ?? new Map<string, string>(),
-      unplaced: [],
+      unplaced: over.unplaced ?? [],
     },
   };
 }
@@ -322,6 +338,66 @@ describe('the state now of each session that was in a tab before the restart', (
     expect(read.facts.get('s-b')?.state).toBe('unknown');
   });
 
+  // home-base-kwand.14 (conductor's decision): the shared-tty shell-in-tab
+  // case gets the old-workspace resume only when the session itself is not
+  // the one running on that tty. The pane join already says so: when the
+  // Claude there runs THIS session it is placed, so runningAgain, never
+  // resumed. When it runs the twin's own session, this session's
+  // shell-prompt tab (an unmatched pane whose one Claude process the pid
+  // join placed in the twin) is shellInTab, and gets the resume.
+  // NEGATIVE CONTROL run 2026-11-18: firstPass skipping its runningAgain
+  // branch for s-a -> this test failed (expected runningAgain, received
+  // unknown: kwand.12's own-tab hold, the pid join's `matched` s-a, still
+  // kept it from shellInTab, so it is not resumed either way).
+  test('a tty two tabs share: the resume is offered only when the Claude there is not this session (kwand.14)', async () => {
+    const b = before([
+      {id: 'T-a', sessionId: 's-a'},
+      {id: 'T-b', sessionId: 's-b'},
+    ]);
+    const twinA = surface('T-a', 'ttys009', 'a');
+    const live = (placed: string) => ({
+      placedPids: new Map([[20, placed]]),
+      procs: [proc(20, 'ttys009', CLAUDE)],
+      surfaces: [twinA, surface('T-b', 'ttys009', 'b')],
+    });
+    const shellTwin: UnplacedPane = {
+      detail: 'synthetic: a shell prompt on a Claude tty',
+      fileSessionId: null,
+      kind: 'noScreenId',
+      screenSessionId: null,
+      surface: twinA,
+    };
+    const screens = {'surface:a': SHELL_SCREEN, 'surface:b': CLAUDE_SCREEN};
+    // The Claude on the shared tty runs s-a itself: placed, so runningAgain.
+    const itself = await beforeRestartStates({
+      before: b,
+      cmux: fakeCmux(screens).run,
+      panes: lookup({
+        bySession: new Map([['s-a', {surfaceId: 'T-b'}]]),
+        live: live('s-a'),
+        unplaced: [shellTwin],
+      }),
+    });
+    if (!itself.ok) throw new Error(itself.reason);
+    expect(itself.facts.get('s-a')?.state).toBe('runningAgain');
+    expect(isOldTabResumeState(itself.facts.get('s-a')?.state)).toBe(false);
+    // It runs the twin's session s-b: s-a's own tab is a shell prompt.
+    const other = await beforeRestartStates({
+      before: b,
+      cmux: fakeCmux(screens).run,
+      panes: lookup({
+        bySession: new Map([['s-b', {surfaceId: 'T-b'}]]),
+        live: live('s-b'),
+        unplaced: [shellTwin],
+      }),
+    });
+    if (!other.ok) throw new Error(other.reason);
+    expect(other.facts.get('s-a')?.state).toBe('shellInTab');
+    expect(isOldTabResumeState(other.facts.get('s-a')?.state)).toBe(true);
+    expect(other.facts.get('s-b')?.state).toBe('runningAgain');
+    expect(isOldTabResumeState(other.facts.get('s-b')?.state)).toBe(false);
+  });
+
   test('a session running in another tab is running again, and says so', async () => {
     const b = before([{id: 'T-old', sessionId: 's-moved'}]);
     const read = await beforeRestartStates({
@@ -364,6 +440,16 @@ describe('the state now of each session that was in a tab before the restart', (
     });
   });
 
+  test('lsof cwd output parses to a pid map', () => {
+    expect([
+      ...parseLsofCwds('p50\nfcwd\nn/synthetic/dev/alpha\np51\nfcwd\nn/x y\n'),
+    ]).toEqual([
+      [50, '/synthetic/dev/alpha'],
+      [51, '/x y'],
+    ]);
+    expect(parseLsofCwds('').size).toBe(0);
+  });
+
   test("cmux's restore error is recognised; a plain shell is not", () => {
     expect(showsFailedRestore(FAILED_SCREEN)).toBe(true);
     expect(showsFailedRestore(SHELL_SCREEN)).toBe(false);
@@ -383,5 +469,285 @@ describe('the state now of each session that was in a tab before the restart', (
     expect(beforeRestartLine(fact, next)).toBe(
       '🔁 was open before the Mar 10, 9:36pm restart: restore failed',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-kwand.12: a live Claude pane the join could not place makes only
+// the sessions it could hold unknown. All paths and ids are synthetic.
+// ---------------------------------------------------------------------------
+
+const ALPHA = '/synthetic/dev/alpha';
+const BETA = '/synthetic/dev/beta';
+const ARGV_ID = '11111111-2222-4333-8444-555555555555';
+const SHOWN_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+
+/** Five sessions whose tabs are gone, in two repos and none. */
+function goneTabs(): TabSpec[] {
+  return [
+    {directory: ALPHA, id: 'T-alpha', sessionId: 's-alpha'},
+    {directory: BETA, id: 'T-beta', sessionId: 's-beta'},
+    {directory: null, id: 'T-nodir', sessionId: 's-nodir'},
+    {directory: BETA, id: 'T-argv', sessionId: ARGV_ID},
+    {directory: BETA, id: 'T-shown', sessionId: SHOWN_ID},
+  ];
+}
+
+const UNMATCHED = surface('P-unmatched', 'ttys050', '50');
+
+function claudeProc(pid: number, tty: string, args = ''): Proc {
+  return {...proc(pid, tty, CLAUDE), command: `${CLAUDE}${args}`};
+}
+
+/** The live view with one unmatched pane; `procs` on its tty (default one Claude). */
+function unmatchedLookup(over: {
+  kind?: UnplacedPane['kind'];
+  placedPids?: Map<number, string>;
+  procs?: Proc[];
+  screen?: string | null;
+}): PaneLookup {
+  const procs = over.procs ?? [
+    claudeProc(50, 'ttys050', ` --resume ${ARGV_ID}`),
+  ];
+  return lookup({
+    live: {
+      ...(over.placedPids == null ? {} : {placedPids: over.placedPids}),
+      procs,
+      surfaces: [UNMATCHED],
+    },
+    unplaced: [
+      {
+        detail: 'synthetic',
+        fileSessionId: null,
+        kind: over.kind ?? 'noScreenId',
+        screenSessionId: over.screen ?? null,
+        surface: UNMATCHED,
+      },
+    ],
+  });
+}
+
+/** A fake lsof: cwds by pid, every call recorded. */
+function fakeCwds(byPid: Record<number, string> | {fail: string}): {
+  calls: number[][];
+  read: CwdReader;
+} {
+  const calls: number[][] = [];
+  const read: CwdReader = (pids) => {
+    calls.push([...pids]);
+    if ('fail' in byPid) {
+      return Promise.resolve({ok: false as const, reason: byPid.fail});
+    }
+    return Promise.resolve({
+      ok: true as const,
+      value: new Map(
+        Object.entries(byPid).map(([pid, cwd]) => [Number(pid), cwd]),
+      ),
+    });
+  };
+  return {calls, read};
+}
+
+async function statesOf(input: {
+  cwds?: CwdReader;
+  panes: PaneLookup;
+  tabs?: TabSpec[];
+}): Promise<{
+  read: Extract<Awaited<ReturnType<typeof beforeRestartStates>>, {ok: true}>;
+  states: Record<string, string>;
+}> {
+  const read = await beforeRestartStates({
+    before: before(input.tabs ?? goneTabs()),
+    cmux: fakeCmux({}).run,
+    ...(input.cwds == null ? {} : {cwds: input.cwds}),
+    panes: input.panes,
+  });
+  if (!read.ok) throw new Error(read.reason);
+  return {
+    read,
+    states: Object.fromEntries(
+      [...read.facts].map(([sid, fact]) => [sid, fact.state]),
+    ),
+  };
+}
+
+describe('an unmatched live Claude pane makes only the sessions it could hold unknown (kwand.12)', () => {
+  test('the text of a notRestored session names the unmatched panes that cannot hold it', async () => {
+    const {read} = await statesOf({
+      panes: unmatchedLookup({kind: 'unconfirmedId', screen: SHOWN_ID}),
+    });
+    expect(read.facts.get('s-beta')?.reason).toBe(
+      'its tab is gone and it does not run (the one live Claude pane the tools could not match to a session cannot hold it)',
+    );
+  });
+
+  test('its status line shows a session: only that session stays unknown, the rest are not restored, and lsof is not run', async () => {
+    const cwds = fakeCwds({50: BETA});
+    const {read, states} = await statesOf({
+      cwds: cwds.read,
+      panes: unmatchedLookup({kind: 'unconfirmedId', screen: SHOWN_ID}),
+    });
+    expect(states).toEqual({
+      [ARGV_ID]: 'notRestored',
+      [SHOWN_ID]: 'unknown',
+      's-alpha': 'notRestored',
+      's-beta': 'notRestored',
+      's-nodir': 'notRestored',
+    });
+    expect(read.facts.get(SHOWN_ID)?.reason).toBe(
+      'its tab is gone, and a live Claude pane the tools could not match to a session could hold it (surface:50 shows it on its status line), so it may run there',
+    );
+    expect(read.unplaced).toEqual([
+      {
+        hold: {kind: 'session', sessionId: SHOWN_ID},
+        kind: 'unconfirmedId',
+        sessionsUnknown: 1,
+        surface: 'surface:50',
+      },
+    ]);
+    expect(cwds.calls).toEqual([]);
+  });
+
+  test('no status line: its Claude process works in one repo, so sessions of that repo (a worktree too), with no recorded directory, or named by its argv stay unknown; another repo is not restored', async () => {
+    const cwds = fakeCwds({50: `${ALPHA}/.claude/worktrees/w1`});
+    const {read, states} = await statesOf({
+      cwds: cwds.read,
+      panes: unmatchedLookup({}),
+    });
+    expect(states).toEqual({
+      [ARGV_ID]: 'unknown',
+      [SHOWN_ID]: 'notRestored',
+      's-alpha': 'unknown',
+      's-beta': 'notRestored',
+      's-nodir': 'unknown',
+    });
+    expect(read.facts.get('s-alpha')?.reason).toContain(
+      `surface:50 runs Claude in ${ALPHA}`,
+    );
+    expect(read.unplaced[0]).toEqual({
+      hold: {checkouts: [ALPHA], kind: 'checkouts', sessionIds: [ARGV_ID]},
+      kind: 'noScreenId',
+      sessionsUnknown: 3,
+      surface: 'surface:50',
+    });
+    expect(cwds.calls).toEqual([[50]]);
+  });
+
+  test('a pane whose Claude process the pid join already placed (a twin on the same tty) holds no other session, and lsof is not run', async () => {
+    const cwds = fakeCwds({50: ALPHA});
+    const placed = '99999999-8888-4777-8666-555555555555';
+    const {read, states} = await statesOf({
+      cwds: cwds.read,
+      panes: unmatchedLookup({placedPids: new Map([[50, placed]])}),
+    });
+    expect(states).toEqual({
+      [ARGV_ID]: 'notRestored',
+      [SHOWN_ID]: 'notRestored',
+      's-alpha': 'notRestored',
+      's-beta': 'notRestored',
+      's-nodir': 'notRestored',
+    });
+    expect(read.unplaced[0]?.hold).toEqual({
+      kind: 'matched',
+      sessionIds: [placed],
+    });
+    expect(cwds.calls).toEqual([]);
+    // A second Claude process on the tty that the join did not place is read.
+    const mixed = fakeCwds({51: BETA});
+    const second = await statesOf({
+      cwds: mixed.read,
+      panes: unmatchedLookup({
+        placedPids: new Map([[50, placed]]),
+        procs: [claudeProc(50, 'ttys050'), claudeProc(51, 'ttys050')],
+      }),
+    });
+    expect(mixed.calls).toEqual([[51]]);
+    expect(second.states).toMatchObject({
+      's-alpha': 'notRestored',
+      's-beta': 'unknown',
+      's-nodir': 'unknown',
+    });
+  });
+
+  test('a status line id with two Claude processes on the tty does not settle it: their working directories do', async () => {
+    const {states} = await statesOf({
+      cwds: fakeCwds({50: BETA, 51: BETA}).read,
+      panes: unmatchedLookup({
+        procs: [claudeProc(50, 'ttys050'), claudeProc(51, 'ttys050')],
+        screen: SHOWN_ID,
+      }),
+    });
+    expect(states).toMatchObject({
+      [SHOWN_ID]: 'unknown',
+      's-alpha': 'notRestored',
+      's-beta': 'unknown',
+      's-nodir': 'unknown',
+    });
+  });
+
+  test('with nothing known about the pane, every gone-tab session is unknown (the guard before kwand.12)', async () => {
+    const everyUnknown = {
+      [ARGV_ID]: 'unknown',
+      [SHOWN_ID]: 'unknown',
+      's-alpha': 'unknown',
+      's-beta': 'unknown',
+      's-nodir': 'unknown',
+    };
+    // No cwd reader at all.
+    const none = await statesOf({panes: unmatchedLookup({})});
+    expect(none.states).toEqual(everyUnknown);
+    expect(none.read.unplaced[0]?.hold).toEqual({
+      kind: 'anything',
+      reason: 'the working directory of its Claude process was not read',
+    });
+    // lsof failed.
+    const failed = await statesOf({
+      cwds: fakeCwds({fail: 'lsof refused'}).read,
+      panes: unmatchedLookup({}),
+    });
+    expect(failed.states).toEqual(everyUnknown);
+    expect(failed.read.facts.get('s-beta')?.reason).toContain('lsof refused');
+    // lsof listed every process but this one (as inside the sandbox).
+    const unlisted = await statesOf({
+      cwds: fakeCwds({99: BETA}).read,
+      panes: unmatchedLookup({}),
+    });
+    expect(unlisted.states).toEqual(everyUnknown);
+    // No Claude process found on its tty.
+    const noProc = await statesOf({
+      cwds: fakeCwds({}).read,
+      panes: unmatchedLookup({procs: []}),
+    });
+    expect(noProc.states).toEqual(everyUnknown);
+  });
+
+  test("a session whose own tab is an unmatched pane it could be in is unknown, not another session's tab", async () => {
+    const own = surface('T-own', 'ttys060', '60');
+    const ownLookup = (screen: string | null): PaneLookup =>
+      lookup({
+        live: {procs: [claudeProc(60, 'ttys060')], surfaces: [own]},
+        unplaced: [
+          {
+            detail: 'synthetic',
+            fileSessionId: null,
+            kind: screen == null ? 'noScreenId' : 'unconfirmedId',
+            screenSessionId: screen,
+            surface: own,
+          },
+        ],
+      });
+    const tabs: TabSpec[] = [
+      {directory: ALPHA, id: 'T-own', sessionId: 's-own'},
+    ];
+    const could = await statesOf({
+      cwds: fakeCwds({60: ALPHA}).read,
+      panes: ownLookup(null),
+      tabs,
+    });
+    expect(could.states).toEqual({'s-own': 'unknown'});
+    expect(could.read.unplaced[0]?.sessionsUnknown).toBe(1);
+    // Its status line shows another session: that is another session's tab.
+    const other = await statesOf({panes: ownLookup(SHOWN_ID), tabs});
+    expect(other.states).toEqual({'s-own': 'otherSession'});
   });
 });

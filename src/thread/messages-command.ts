@@ -6,6 +6,19 @@
  * lines around it, his and Claude's; `--annotate` adds what Claude did with
  * each message, from the transcript.
  *
+ * THE WINDOW (home-base-6ujwi D1, D4). `--sessions <n>`: only the n sessions
+ * of the chain that end at the start session (the current one, or the one
+ * `--chain` names), oldest first. A chain with fewer says how many it has.
+ * Without it, the sessions read are exactly as before.
+ *
+ * PRIVATE SESSIONS (home-base-6ujwi D3). Every session read is checked with
+ * privacy.ts's sessionPrivacy, its working directories taken from its own
+ * message log (every line records one). A private session's messages are
+ * never printed, with or without `--sessions`, nor its text searched: the
+ * output names it and counts the messages of his it left out. A check that
+ * cannot decide counts as private, with its reason. It still counts as one of
+ * the n sessions. `--context` refuses a message of a private session.
+ *
  * Justin, 2026-11-15: "if there was an easy way for you to just sort of print
  * those, if there was an easy way for you to search or filter those, ... I
  * could say something like, I asked you a question about such and such in a
@@ -14,7 +27,8 @@
  * EXIT CODES, the same contract as `thread search`: 0 printed messages, 1
  * measured none, 2 could not read (a chain or a log it could not read,
  * printed above the messages, or a bad flag). Messages are printed on the 2
- * path too.
+ * path too. Messages left out as private are not "none": the output names
+ * them, and with nothing else to print the exit is 1.
  */
 
 import type {Field} from '../cli-style';
@@ -22,6 +36,7 @@ import type {ChainMember, ChainWalk, ChainWalkReaders} from './chain-walk';
 import type {JustinMessage, SessionMessages} from './justin-messages';
 import type {MessageLogRead} from './message-log';
 import type {EnvLike} from './paths';
+import type {Privacy} from './privacy';
 import type {MessageActions} from './transcript-actions';
 
 import {
@@ -50,6 +65,7 @@ import {
 import {findTranscript} from './facts';
 import {classifySessionLog, parseMessageId} from './justin-messages';
 import {readMessageLog} from './message-log';
+import {ownerOf, sessionPrivacy} from './privacy';
 import {compileQuery, parseWrittenSince} from './search';
 import {annotateFromTranscript, replyPreview} from './transcript-actions';
 
@@ -78,10 +94,17 @@ export interface ThreadMessagesOptions {
   limit?: null | number;
   newestFirst?: boolean;
   now?: Date;
+  /** Injected in tests; privacy.ts's sessionPrivacy otherwise (D3). */
+  privacyOf?: PrivacyCheck;
   query?: null | string;
   /** Injected in tests; the real readers otherwise. */
   readers?: ChainWalkReaders;
   regex?: boolean;
+  /**
+   * `--sessions <n>` (D1): only the n sessions ending at the start session.
+   * A positive whole number; anything else exits 2. Null: no window.
+   */
+  sessions?: null | number | string;
   /** Wrap width; `terminalWidth()` when absent, null never wraps. */
   width?: null | number;
   writtenSince?: null | string;
@@ -91,22 +114,61 @@ export interface ThreadMessagesOptions {
 // Reading
 // ---------------------------------------------------------------------------
 
+/**
+ * Whether a session is private (D3): privacy.ts's sessionPrivacy for its id
+ * and its working directories. Injected in tests.
+ */
+export type PrivacyCheck = (
+  sessionId: string,
+  cwds: readonly string[],
+) => Privacy;
+
+export function realPrivacyCheck(env: EnvLike): PrivacyCheck {
+  return (sessionId, cwds) => sessionPrivacy(ownerOf(sessionId, cwds), env);
+}
+
 export interface SessionRead {
   member: ChainMember;
   /** Null when the log could not be read: `problem` says why. */
   messages: null | SessionMessages;
+  /**
+   * The privacy verdict (D3); null when the log could not be read, so there
+   * is nothing of his to print or withhold.
+   */
+  privacy: null | Privacy;
   problem: null | string;
+}
+
+export function isPrivateRead(session: SessionRead): boolean {
+  return session.privacy?.kind === 'private';
+}
+
+/**
+ * Every working directory a session's log records, in first-seen order. Each
+ * line carries the cwd of the hook or transcript record that wrote it
+ * (message-log.ts), the same directory capture.ts asks privacy.ts about.
+ */
+export function logCwds(lines: readonly {cwd: null | string}[]): string[] {
+  const cwds: string[] = [];
+  for (const line of lines) {
+    if (line.cwd != null && line.cwd !== '' && !cwds.includes(line.cwd)) {
+      cwds.push(line.cwd);
+    }
+  }
+  return cwds;
 }
 
 /** One member's log, classified; a log that is missing or unreadable is a problem. */
 export function readMemberMessages(
   member: ChainMember,
   readLog: (sessionId: string) => MessageLogRead,
+  privacyOf: PrivacyCheck,
 ): SessionRead {
   if (member.sessionId == null) {
     return {
       member,
       messages: null,
+      privacy: null,
       problem: member.sessionIdProblem ?? `${member.beadId} has no session id`,
     };
   }
@@ -115,6 +177,7 @@ export function readMemberMessages(
     return {
       member,
       messages: null,
+      privacy: null,
       problem: `${member.name} ${member.beadId} has no message log at ${log.path}`,
     };
   }
@@ -122,6 +185,7 @@ export function readMemberMessages(
     return {
       member,
       messages: null,
+      privacy: null,
       problem: `the message log of ${member.name} ${member.beadId} could not be read: ${log.path}: ${log.error}`,
     };
   }
@@ -135,6 +199,7 @@ export function readMemberMessages(
   return {
     member,
     messages,
+    privacy: privacyOf(member.sessionId, logCwds(log.lines)),
     problem:
       failure == null
         ? null
@@ -142,28 +207,47 @@ export function readMemberMessages(
   };
 }
 
+/** The `--sessions` window as read (D1, D4). */
+export interface SessionsWindow {
+  /** The n asked for. */
+  asked: number;
+  /** The start session the window ends at. */
+  endsAt: string;
+  /** How many sessions the window holds: fewer than `asked` when the chain is short. */
+  held: number;
+}
+
 export interface ChainMessages {
   problems: string[];
   sessions: SessionRead[];
   walk: Exclude<ChainWalk, {kind: 'failed'}>;
+  /** Null without `--sessions`. */
+  window: null | SessionsWindow;
 }
 
 /**
- * The chain's members to read and their messages. `throughStart`: only the
+ * The chain's members to read and their messages. `window` (D1): only the n
+ * sessions ending at the start session. Otherwise `throughStart`: only the
  * start session and the ones before it (the default chain: this session and
- * every earlier one); otherwise the whole chain.
+ * every earlier one); else the whole chain.
  */
 export function chainMessages(input: {
+  privacyOf: PrivacyCheck;
   readLog: (sessionId: string) => MessageLogRead;
   throughStart: boolean;
   walk: Exclude<ChainWalk, {kind: 'failed'}>;
+  window?: null | number;
 }): ChainMessages {
   const {walk} = input;
-  const members = input.throughStart
-    ? walk.members.slice(0, walk.startIndex + 1)
-    : walk.members;
+  const asked = input.window ?? null;
+  const end =
+    input.throughStart || asked != null
+      ? walk.startIndex + 1
+      : walk.members.length;
+  const begin = asked == null ? 0 : Math.max(0, end - asked);
+  const members = walk.members.slice(begin, end);
   const sessions = members.map((member) =>
-    readMemberMessages(member, input.readLog),
+    readMemberMessages(member, input.readLog, input.privacyOf),
   );
   const problems = [
     ...(walk.kind === 'incomplete'
@@ -173,7 +257,69 @@ export function chainMessages(input: {
       session.problem == null ? [] : [session.problem],
     ),
   ];
-  return {problems, sessions, walk};
+  return {
+    problems,
+    sessions,
+    walk,
+    window:
+      asked == null
+        ? null
+        : {
+            asked,
+            endsAt: walk.members[walk.startIndex]?.beadId ?? '?',
+            held: members.length,
+          },
+  };
+}
+
+/**
+ * `--sessions` as given: null when absent, else a positive whole number, or
+ * the one-line reason it is not (exit 2).
+ */
+export function parseSessionsWindow(
+  value: null | number | string | undefined,
+): {kind: 'bad'; reason: string} | {kind: 'ok'; n: null | number} {
+  if (value == null) return {kind: 'ok', n: null};
+  const text = String(value).trim();
+  if (/^[1-9][0-9]*$/u.test(text)) {
+    const n = Number(text);
+    if (Number.isSafeInteger(n)) return {kind: 'ok', n};
+  }
+  return {
+    kind: 'bad',
+    reason: `--sessions takes a positive whole number of sessions (such as 3), not ${JSON.stringify(text)}`,
+  };
+}
+
+/** A private session in the sessions read, as printed (D3). */
+export interface PrivateSession {
+  beadId: string;
+  /** False when its log has lines that could not be read: there may be more. */
+  countComplete: boolean;
+  /** His messages in it, none of them printed. */
+  messages: number;
+  name: string;
+  reason: string;
+  sessionId: null | string;
+}
+
+export function privateSessionsOf(
+  sessions: readonly SessionRead[],
+): PrivateSession[] {
+  return sessions.flatMap((session) =>
+    session.privacy?.kind === 'private'
+      ? [
+          {
+            beadId: session.member.beadId,
+            countComplete: session.problem == null,
+            messages: session.messages?.messages.length ?? 0,
+            name: session.member.name,
+            reason: session.privacy.reason,
+            sessionId: session.member.sessionId,
+          },
+        ]
+      : [],
+  );
 }
 
 /** One of his messages, with its session. */
@@ -290,6 +436,22 @@ function problemLines(problems: readonly string[], style: Style): string[] {
   ];
 }
 
+/** The reply line (D5): never the pasted status block. */
+function replyLine(reply: null | string, style: Style): string {
+  if (reply == null) {
+    return `${pad(DETAIL)}${paint('no reply text in that turn', ['dim'], style.color)}`;
+  }
+  const preview = replyPreview(reply);
+  if (preview.kind === 'blockOnly') {
+    return `${pad(DETAIL)}${paint('only the status block, with no From Claude section in it and nothing after it', ['dim'], style.color)}`;
+  }
+  return wrapHanging(preview.text, {
+    hang: DETAIL,
+    indent: DETAIL,
+    width: style.width,
+  });
+}
+
 function annotationLines(
   annotation: MessageActions | null | undefined,
   style: Style,
@@ -321,13 +483,44 @@ function annotationLines(
         )),
     '',
     `${pad(TEXT_COLUMN)}${paint('Reply:', ['bold'], style.color)}`,
-    annotation.reply == null
-      ? `${pad(DETAIL)}${paint('no reply text in that turn', ['dim'], style.color)}`
-      : wrapHanging(replyPreview(annotation.reply), {
-          hang: DETAIL,
-          indent: DETAIL,
-          width: style.width,
-        }),
+    replyLine(annotation.reply, style),
+  ];
+}
+
+/** The window field (D1, D4): how many sessions, ending where, and a short chain named. */
+function windowText(found: ChainMessages): null | string {
+  const {walk, window} = found;
+  if (window == null) return null;
+  const base = `${plural(window.held, 'session')}, ending at ${window.endsAt} (--sessions ${window.asked})`;
+  if (window.held >= window.asked) return base;
+  return walk.root == null
+    ? `${base}: only ${window.held} could be read back from there; the chain is incomplete (below)`
+    : `${base}: the chain has only ${plural(window.held, 'session')} up to there`;
+}
+
+/** The private sessions (D3): named, with how many of his messages each left out. */
+function privateLines(
+  privateSessions: readonly PrivateSession[],
+  style: Style,
+): string[] {
+  if (privateSessions.length === 0) return [];
+  return [
+    '',
+    wrapHanging(
+      paint(
+        `🔒 PRIVATE — the messages of ${privateSessions.length === 1 ? 'this session are' : 'these sessions are'} not printed:`,
+        ['bold'],
+        style.color,
+      ),
+      {hang: BODY_COLUMN, indent: HEADER_COLUMN, width: style.width},
+    ),
+    ...privateSessions.flatMap((session) => [
+      '',
+      wrapHanging(
+        `- ${session.name} ${session.beadId}: ${plural(session.messages, 'message')} of his left out${session.countComplete ? '' : ', or more: its log has lines that could not be read'}. Why it counts as private: ${session.reason}.`,
+        {hang: BODY_COLUMN + 2, indent: BODY_COLUMN, width: style.width},
+      ),
+    ]),
   ];
 }
 
@@ -338,26 +531,41 @@ function renderList(input: {
   listed: readonly ListedMessage[];
   newestFirst: boolean;
   pattern: null | RegExp;
+  privateSessions: readonly PrivateSession[];
   query: null | string;
   sessionNotes: readonly string[];
   style: Style;
   writtenSince: Date | null;
 }): string {
-  const {counts, found, style} = input;
+  const {counts, found, privateSessions, style} = input;
   const {walk} = found;
   const chainWords =
     walk.chainName == null
       ? `the chain of ${walk.members[walk.startIndex]?.beadId ?? '?'}`
       : `chain ${walk.chainName}`;
+  const window = windowText(found);
+  const privateMessages = privateSessions.reduce(
+    (n, session) => n + session.messages,
+    0,
+  );
   const fields: Field[] = [
     {
       label: 'Chain',
       value: `${walk.chainName ?? 'no name'}, ${plural(walk.members.length, 'session')}${walk.root == null ? ', its first session unknown' : ` from ${walk.root}`}`,
     },
+    ...(window == null ? [] : [{label: 'Window', value: window}]),
     {
       label: 'Read',
       value: `${plural(found.sessions.length, 'session')}, ${plural(counts.messages, 'message')} of his`,
     },
+    ...(privateSessions.length === 0
+      ? []
+      : [
+          {
+            label: 'Private',
+            value: `${plural(privateSessions.length, 'session')}, ${plural(privateMessages, 'message')} of his not printed (named below)`,
+          },
+        ]),
     {
       label: 'Left out',
       value: `${plural(counts.kickoffs, 'kickoff prompt')} and ${plural(counts.machine, 'machine-sent line')}`,
@@ -403,6 +611,7 @@ function renderList(input: {
       width: style.width,
     }),
     ...problemLines(found.problems, style),
+    ...privateLines(privateSessions, style),
     ...input.sessionNotes.flatMap((note) => [
       '',
       wrapHanging(paint(note, ['dim'], style.color), {
@@ -441,10 +650,16 @@ function renderList(input: {
     );
   }
   if (ordered.length === 0) {
-    lines.push(
-      '',
-      `${pad(HEADER_COLUMN)}${input.query == null && input.writtenSince == null ? 'He typed no messages in these sessions.' : 'No message of his matches.'}`,
-    );
+    const unfiltered = input.query == null && input.writtenSince == null;
+    const none =
+      privateMessages > 0
+        ? unfiltered
+          ? 'No message of his is printed: every one of them is in a private session, named above.'
+          : 'No message of his matches outside the private sessions named above, whose messages were not searched.'
+        : unfiltered
+          ? 'He typed no messages in these sessions.'
+          : 'No message of his matches.';
+    lines.push('', `${pad(HEADER_COLUMN)}${none}`);
   } else {
     lines.push(
       '',
@@ -568,6 +783,16 @@ async function runContext(
   if (log.failures.length > 0) {
     return await refuse(
       `${log.failures.join('; ')}: one of them could be a message of his, so the numbering is not certain`,
+    );
+  }
+  // D3: a private session's words never print, here either.
+  const privacy = (options.privacyOf ?? realPrivacyCheck(env))(
+    sessionId,
+    logCwds(log.lines),
+  );
+  if (privacy.kind === 'private') {
+    return await refuse(
+      `session ${sessionId} counts as private, so its messages are not printed. Why: ${privacy.reason}`,
     );
   }
   const classified = classifySessionLog({labels, lines: log.lines, sessionId});
@@ -701,6 +926,8 @@ export async function runThreadMessages(
     if (parsed.kind === 'bad') return await fail(parsed.reason);
     since = parsed.at;
   }
+  const sessionsWindow = parseSessionsWindow(options.sessions);
+  if (sessionsWindow.kind === 'bad') return await fail(sessionsWindow.reason);
 
   // ---- which chain ----
   let startBead: string;
@@ -731,17 +958,25 @@ export async function runThreadMessages(
     return await fail(`the chain could not be read: ${walk.reason}`);
   }
   const found = chainMessages({
+    privacyOf: options.privacyOf ?? realPrivacyCheck(env),
     readLog: (sessionId) => readMessageLog(sessionId, env),
     throughStart: ownChain,
     walk,
+    window: sessionsWindow.n,
   });
-  const {counts, listed} = filterMessages(found.sessions, {
+  // D3: a private session's messages are neither searched, counted as his,
+  // annotated nor printed; privateSessions names them instead.
+  const publicSessions = found.sessions.filter(
+    (session) => !isPrivateRead(session),
+  );
+  const privateSessions = privateSessionsOf(found.sessions);
+  const {counts, listed} = filterMessages(publicSessions, {
     limit: options.limit ?? null,
     pattern,
     since,
   });
   const annotated =
-    options.annotate === true ? annotateSessions(found.sessions, env) : null;
+    options.annotate === true ? annotateSessions(publicSessions, env) : null;
   const complete = found.problems.length === 0;
 
   if (json) {
@@ -776,7 +1011,10 @@ export async function runThreadMessages(
           })),
           notes: annotated?.notes ?? [],
           ok: true,
+          private: privateSessions,
           problems: found.problems,
+          sessionsRead: found.sessions.map((session) => session.member.beadId),
+          window: found.window,
         },
         null,
         2,
@@ -791,6 +1029,7 @@ export async function runThreadMessages(
         listed,
         newestFirst: options.newestFirst === true,
         pattern,
+        privateSessions,
         query,
         sessionNotes: annotated?.notes ?? [],
         style,

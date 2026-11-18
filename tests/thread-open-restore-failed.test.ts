@@ -13,7 +13,10 @@ import type {
   FailedRestore,
   RestoreFailedDeps,
   RestoreFailedRecord,
+  StateCounts,
 } from '../src/thread/open-restore-failed';
+import type {OldTabResumeState} from '../src/thread/restore-tab';
+import type {BeforeRestartEntry} from '../src/thread/session-inbox';
 
 import {afterEach, describe, expect, test} from 'bun:test';
 import {existsSync, mkdtempSync, readdirSync, readFileSync, rmSync} from 'fs';
@@ -21,10 +24,14 @@ import {tmpdir} from 'os';
 import {join} from 'path';
 
 import {PLAIN_STYLE} from '../src/cli-style';
+import {BEFORE_RESTART_STATES} from '../src/thread/before-restart-state';
 import {opensDir} from '../src/thread/open';
-import {openRestoreFailed} from '../src/thread/open-restore-failed';
+import {
+  oldTabSessions,
+  openRestoreFailed,
+} from '../src/thread/open-restore-failed';
 import {recordedWorkspaces, tabsNotClosed} from '../src/thread/open-undo';
-import {restoreTabArgs} from '../src/thread/restore-tab';
+import {OLD_TAB_RESUME_STATES, restoreTabArgs} from '../src/thread/restore-tab';
 
 const NOW = new Date('2026-11-18T12:00:00.000Z');
 const HOUR = 60 * 60_000;
@@ -46,6 +53,8 @@ const GONE_WS = 'c0000009-0000-4000-8000-000000000000';
 const FAILED_TAB = 'd0000001-0000-4000-8000-000000000000';
 const OTHER_TAB = 'd0000002-0000-4000-8000-000000000000';
 const FAILED_TAB_2 = 'd0000003-0000-4000-8000-000000000000';
+/** kwand.14: a tab back as a plain shell, in OTHER_WS. */
+const SHELL_TAB = 'd0000004-0000-4000-8000-000000000000';
 
 function cand(n: number, over: Partial<OpenCandidate> = {}): OpenCandidate {
   return {
@@ -68,12 +77,34 @@ function failed(
   n: number,
   workspaceId: string,
   over: Partial<OpenCandidate> | null = {},
+  state: OldTabResumeState = 'restoreFailed',
 ): FailedRestore {
   return {
     candidate: over == null ? null : cand(n, over),
     sessionId: sid(n),
+    state,
     tabId: n === 1 ? FAILED_TAB : FAILED_TAB_2,
     workspaceId,
+  };
+}
+
+/** kwand.14: a session whose old tab is back as a plain shell, no error shown. */
+function shell(
+  n: number,
+  workspaceId: string,
+  over: Partial<OpenCandidate> | null = {},
+): FailedRestore {
+  return {...failed(n, workspaceId, over, 'shellInTab'), tabId: SHELL_TAB};
+}
+
+/** counts.byState with every count zero but those given. */
+function byState(
+  over: Partial<Record<OldTabResumeState, Partial<StateCounts>>> = {},
+): Record<OldTabResumeState, StateCounts> {
+  const zero = {newWorkspace: 0, oldWorkspace: 0, sessions: 0, skipped: 0};
+  return {
+    restoreFailed: {...zero, ...over.restoreFailed},
+    shellInTab: {...zero, ...over.shellInTab},
   };
 }
 
@@ -123,7 +154,7 @@ function fakeCmux(
   const recordSeenAtWrite: boolean[] = [];
   const workspaces: FakeWorkspace[] = [
     {id: OLD_WS, ref: 'workspace:1', surfaces: [FAILED_TAB, OTHER_TAB]},
-    {id: OTHER_WS, ref: 'workspace:2', surfaces: [FAILED_TAB_2]},
+    {id: OTHER_WS, ref: 'workspace:2', surfaces: [FAILED_TAB_2, SHELL_TAB]},
   ];
   let next = 0;
   const value = (args: readonly string[], flag: string): string =>
@@ -267,6 +298,7 @@ function expectFailedTabsUntouched(calls: readonly string[][]): void {
     for (const verb of NEVER) expect(args).not.toContain(verb);
     expect(args).not.toContain(FAILED_TAB);
     expect(args).not.toContain(FAILED_TAB_2);
+    expect(args).not.toContain(SHELL_TAB);
     expect(args).not.toContain('--surface');
     expect(args).not.toContain('--pane');
   }
@@ -297,7 +329,14 @@ describe('thread open --restore-failed --dry-run', () => {
     const rec = JSON.parse(result.output) as RestoreFailedRecord;
     expect(rec.dryRun).toBe(true);
     expect(rec.tabs).toEqual([]);
-    expect(rec.counts).toEqual({newWorkspace: 1, oldWorkspace: 1, skipped: {}});
+    expect(rec.counts).toEqual({
+      byState: byState({
+        restoreFailed: {newWorkspace: 1, oldWorkspace: 1, sessions: 2},
+      }),
+      newWorkspace: 1,
+      oldWorkspace: 1,
+      skipped: {},
+    });
     expect(rec.planned.map((entry) => [entry.sessionId, entry.target])).toEqual(
       [
         [sid(1), 'oldWorkspace'],
@@ -471,6 +510,7 @@ describe('which sessions are skipped, by reason', () => {
     expect(result.exitCode).toBe(0);
     expect(s.cmux.writes()).toEqual([]);
     expect(result.record?.counts).toEqual({
+      byState: byState({restoreFailed: {sessions: 8, skipped: 8}}),
       newWorkspace: 0,
       oldWorkspace: 0,
       skipped: {
@@ -566,6 +606,176 @@ describe('refusals', () => {
       (await openRestoreFailed(forced.options, forced.deps)).exitCode,
     ).toBe(0);
     expect(forced.cmux.writes()).toHaveLength(1);
+  });
+});
+
+/** A restart grouping entry with no inbox row (oldTabSessions' input). */
+function entryOf(
+  sessionId: string,
+  state: (typeof BEFORE_RESTART_STATES)[number],
+): BeforeRestartEntry {
+  return {
+    fact: {
+      reason: 'synthetic',
+      restartAt: NOW.toISOString(),
+      restartKind: 'cmux launch',
+      source: {kind: 'launch record', savedAt: NOW.toISOString()},
+      state,
+      tab: {
+        carried: false,
+        id: `tab-${sessionId}`,
+        title: null,
+        windowIndex: 0,
+        workspaceId: OTHER_WS,
+        workspaceTitle: null,
+      },
+    },
+    row: null,
+    sessionId,
+  };
+}
+
+// home-base-kwand.14: a session whose old tab is back as a plain shell with
+// no cmux error shown gets the same resume, and the output keeps the two
+// states apart.
+describe('thread open --restore-failed, shell in tab (kwand.14)', () => {
+  const RESUME_3 = `cd /dev/repo-a && claude --resume ${sid(3)}`;
+
+  // NEGATIVE CONTROLS run 2026-11-18: (a) the planner treating a shell-in-tab
+  // session's workspace as always present -> this test failed (oldWorkspace
+  // where newWorkspace was expected for the gone one); (b) the dry-run early
+  // return removed -> it failed, with the two dry-run tests above.
+  test('--dry-run plans a new tab in its old workspace, falls back to a new workspace when it is gone, writes nothing, and counts each state apart', async () => {
+    const s = setup(
+      [failed(1, OLD_WS), shell(3, OTHER_WS), shell(4, GONE_WS)],
+      {dryRun: true, json: true},
+    );
+    const result = await openRestoreFailed(s.options, s.deps);
+    expect(result.exitCode).toBe(0);
+    expect(recordFiles(s.stateDir)).toEqual([]);
+    expect(existsSync(s.stateDir)).toBe(false);
+    expect(s.cmux.writes()).toEqual([]);
+    const rec = JSON.parse(result.output) as RestoreFailedRecord;
+    expect(
+      rec.planned.map((entry) => [entry.sessionId, entry.state, entry.target]),
+    ).toEqual([
+      [sid(1), 'restoreFailed', 'oldWorkspace'],
+      [sid(3), 'shellInTab', 'oldWorkspace'],
+      [sid(4), 'shellInTab', 'newWorkspace'],
+    ]);
+    expect(rec.planned[1]?.args).toEqual([
+      'new-surface',
+      '--type',
+      'terminal',
+      '--workspace',
+      OTHER_WS,
+      '--command',
+      RESUME_3,
+      '--focus',
+      'false',
+    ]);
+    expect(rec.planned[1]?.failedTabId).toBe(SHELL_TAB);
+    expect(rec.planned[2]?.args.slice(0, 2)).toEqual([
+      'new-workspace',
+      '--name',
+    ]);
+    expect(rec.planned[2]?.args).toContain(`claude --resume ${sid(4)}`);
+    expect(rec.counts).toEqual({
+      byState: byState({
+        restoreFailed: {oldWorkspace: 1, sessions: 1},
+        shellInTab: {newWorkspace: 1, oldWorkspace: 1, sessions: 2},
+      }),
+      newWorkspace: 1,
+      oldWorkspace: 2,
+      skipped: {},
+    });
+  });
+
+  test('the text names each state on its own line and on each old tab', async () => {
+    const s = setup([failed(1, OLD_WS), shell(3, OTHER_WS)], {dryRun: true});
+    const result = await openRestoreFailed(s.options, s.deps);
+    expect(result.output).toContain(
+      'sessions whose old tab came back without Claude',
+    );
+    expect(result.output).toMatch(
+      /Restore failed: +💥 1 session \(restore failed: it shows cmux's restore error\); would open 1, skipped 0/u,
+    );
+    expect(result.output).toMatch(
+      /Shell in tab: +🐚 1 session \(back as a plain shell, no Claude, no cmux error shown\); would open 1, skipped 0/u,
+    );
+    expect(result.output).toContain(
+      `💥 ${FAILED_TAB}: restore failed: it shows cmux's restore error`,
+    );
+    expect(result.output).toContain(
+      `🐚 ${SHELL_TAB}: back as a plain shell, no Claude, no cmux error shown`,
+    );
+  });
+
+  // NEGATIVE CONTROL run 2026-11-18: the planner's live check applied to
+  // restoreFailed only -> the running shell-in-tab session was opened too and
+  // this test failed.
+  test('a real run opens the shell-in-tab session beside its old tab, never touches that tab, and skips one that runs again', async () => {
+    const s = setup(
+      [shell(3, OTHER_WS), shell(5, OTHER_WS)],
+      {json: true},
+      {readLive: () => Promise.resolve(liveRead({[sid(5)]: {pid: 9}}))},
+    );
+    const result = await openRestoreFailed(s.options, s.deps);
+    expect(result.exitCode).toBe(0);
+    // NEGATIVE CONTROL run 2026-11-18: the planner appending `--surface <shell
+    // tab>` to a shell-in-tab session's new-surface -> this line failed
+    // ("Expected to not contain" the shell tab's id).
+    expectFailedTabsUntouched(s.cmux.calls);
+    expect(s.cmux.writes()).toEqual([
+      [
+        'new-surface',
+        '--type',
+        'terminal',
+        '--workspace',
+        OTHER_WS,
+        '--command',
+        RESUME_3,
+        '--focus',
+        'false',
+      ],
+    ]);
+    expect(s.cmux.recordSeenAtWrite).toEqual([true]);
+    expect(s.cmux.workspaces[1]?.surfaces.slice(0, 2)).toEqual([
+      FAILED_TAB_2,
+      SHELL_TAB,
+    ]);
+    expect(
+      result.record?.tabs.map((tab) => [tab.sessionId, tab.state, tab.target]),
+    ).toEqual([[sid(3), 'shellInTab', 'oldWorkspace']]);
+    expect(result.record?.skipped.map((entry) => entry.state)).toEqual([
+      'shellInTab',
+    ]);
+    expect(result.record?.counts.byState.shellInTab).toEqual({
+      newWorkspace: 0,
+      oldWorkspace: 1,
+      sessions: 2,
+      skipped: 1,
+    });
+  });
+
+  // NEGATIVE CONTROL run 2026-11-18: oldTabSessions also taking `unknown`
+  // -> this test failed (the unknown session was selected).
+  test('only restore failed and shell in tab are selected from the restart grouping; every other state is left out', () => {
+    expect([...OLD_TAB_RESUME_STATES]).toEqual(['restoreFailed', 'shellInTab']);
+    const groups = BEFORE_RESTART_STATES.map((state, index) => ({
+      entries: [entryOf(sid(10 + index), state)],
+      state,
+    }));
+    const picked = oldTabSessions(groups);
+    expect(picked.map((entry) => [entry.sessionId, entry.state])).toEqual([
+      [sid(10), 'restoreFailed'],
+      [sid(11), 'shellInTab'],
+    ]);
+    expect(picked[1]).toMatchObject({
+      candidate: null,
+      tabId: `tab-${sid(11)}`,
+      workspaceId: OTHER_WS,
+    });
   });
 });
 

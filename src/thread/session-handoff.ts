@@ -62,6 +62,10 @@ import {
   handoffNumberOf,
   mayorSuccessorSentence,
 } from './handoff-number';
+import {
+  blockGetsReadMessagesLine,
+  readMessagesLine,
+} from './handoff-read-messages';
 import {readMessageLog} from './message-log';
 import {absoluteWhen, statusWords, tildeText} from './part-one';
 import {notFoundButUnresolved} from './session-answer';
@@ -603,6 +607,12 @@ export async function handoffBlock(input: {
    * Absent: componentConfig.thread.handoff.pickupMessages (default false).
    */
   pickupMessages?: boolean;
+  /**
+   * home-base-6ujwi D6: a mayor's block tells its successor to read his last
+   * 3 sessions' words. Absent: componentConfig.thread.handoff.readMessages
+   * (default false).
+   */
+  readMessages?: boolean;
   sessionBeadId: string;
   sessionId: string;
   timeZone?: string;
@@ -610,12 +620,16 @@ export async function handoffBlock(input: {
   | {ok: false; reason: string}
   | {ok: true; requests: HandoffRequestCount; text: string}
 > {
+  const configured =
+    input.pickupMessages == null || input.readMessages == null
+      ? (await import('./config')).resolveThreadConfig({
+          cwd: input.cwd,
+          env: input.env,
+        }).handoff
+      : null;
   const pickupMessages =
-    input.pickupMessages ??
-    (await import('./config')).resolveThreadConfig({
-      cwd: input.cwd,
-      env: input.env,
-    }).handoff.pickupMessages;
+    input.pickupMessages ?? configured?.pickupMessages ?? false;
+  const readMessages = input.readMessages ?? configured?.readMessages ?? false;
   const loaded = await loadSession({
     cwd: input.cwd,
     env: input.env,
@@ -683,6 +697,13 @@ export async function handoffBlock(input: {
   const questions = openQuestions(model);
   // home-base-6n7my.2 D8: for a session started by hand from this block.
   const mayorLine = mayorSuccessorSentence(model.beads.session?.labels ?? []);
+  // home-base-6ujwi D6: off, or not a mayor, nothing is added.
+  const readLine = blockGetsReadMessagesLine(
+    readMessages,
+    model.beads.session?.labels ?? [],
+  )
+    ? readMessagesLine(input.sessionBeadId)
+    : null;
   // home-base-z7o2m D7: off, nothing is added, so the block is as before.
   const messagesSection = pickupMessages
     ? await pickupSection({
@@ -717,6 +738,7 @@ export async function handoffBlock(input: {
       // Justin's wording (2026-10-26): addressed to the Claude reading it.
       `- Run \`${sdkRun(`thread request --continues ${input.sessionBeadId}`)}\` to receive the handoff from a previous session.`,
       ...(mayorLine == null ? [] : [`- ${mayorLine}`]),
+      ...(readLine == null ? [] : [`- ${readLine}`]),
       // P6 (home-base-npbse.1.1): a session once took the note as the whole
       // scope and adopted 2 of its 10 open requests.
       '- Every open request and question above carries over to the new session. The note is the order to take them in, not the whole scope.',

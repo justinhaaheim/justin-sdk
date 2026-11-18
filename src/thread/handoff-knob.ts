@@ -87,6 +87,12 @@ export interface ResolvedHandoffConfig {
   predecessor: HandoffPredecessorMode;
   predecessorSource: ThreadConfigSource;
   /**
+   * home-base-6ujwi D6, feature knob, default false. True: a mayor session's
+   * handoff block tells its successor to read his last 3 sessions' words.
+   */
+  readMessages: boolean;
+  readMessagesSource: ThreadConfigSource;
+  /**
    * The feature knob (D10). False: `thread handoff` behaves exactly as it did
    * before the epic, and nothing is started.
    */
@@ -275,6 +281,12 @@ export function resolveHandoffConfig(
     'true or false',
     HANDOFF_DEFAULTS.pickupMessages as boolean,
   );
+  const readMessages = field(
+    'readMessages',
+    (value): value is boolean => typeof value === 'boolean',
+    'true or false',
+    HANDOFF_DEFAULTS.readMessages as boolean,
+  );
   const maxSessionPercent = usageField('maxSessionPercent');
   const maxWeekPercent = usageField('maxWeekPercent');
   const maxSampleAgeMinutes = usageField('maxSampleAgeMinutes');
@@ -319,6 +331,8 @@ export function resolveHandoffConfig(
     pickupMessagesSource: pickupMessages.source,
     predecessor: predecessor.value,
     predecessorSource: predecessor.source,
+    readMessages: readMessages.value,
+    readMessagesSource: readMessages.source,
     successor: successor.value,
     successorSource: successor.source,
     usage: {

@@ -58,6 +58,7 @@ import type {
   BeforeRestartRead,
   BeforeRestartReader,
   BeforeRestartState,
+  UnplacedPaneHold,
 } from './before-restart-state';
 import type {ChainNamer} from './chain-names';
 import type {HandoffStop} from './handoff-view';
@@ -134,6 +135,7 @@ import {
   chainSessionOf,
   requestStatesOf,
 } from './request-state';
+import {CONTINUES_LABEL_PREFIX} from './session-bead';
 import {
   buildCard,
   CARD_REQUESTS_SHOWN,
@@ -146,6 +148,7 @@ import {
   unreadableCard,
   withInputDraft,
 } from './session-card';
+import {type ChainFlags, chainFlagsOf} from './session-flags';
 import {readSessionIndex} from './session-index';
 import {
   createLoadCache,
@@ -344,7 +347,25 @@ export function beforeRestartJson(read: InboxRead) {
     sessionsTotal: answer.facts.size,
     source: answer.source,
     tabsWithSession: answer.tabsWithSession,
+    // kwand.12: each live Claude pane the join could not place, what it could
+    // hold, and how many of these sessions it leaves unknown.
+    unplaced: answer.unplaced,
   };
+}
+
+/** kwand.12: one unmatched pane as the text inbox names it. */
+function unplacedPaneWords(pane: UnplacedPaneHold): string {
+  const unknown = `${pane.sessionsUnknown} ${pane.sessionsUnknown === 1 ? 'session' : 'sessions'} left unknown`;
+  switch (pane.hold.kind) {
+    case 'session':
+      return `${pane.surface} shows session ${pane.hold.sessionId} on its status line, so it holds only that one (${unknown})`;
+    case 'matched':
+      return `${pane.surface}'s Claude process is one the tools already matched to running session ${pane.hold.sessionIds.join(' and ')}, so it holds no other session (${unknown})`;
+    case 'checkouts':
+      return `${pane.surface} runs Claude in ${pane.hold.checkouts.map((dir) => tildeText(dir)).join(' and ')}, so it could hold a session of that repo (${unknown})`;
+    case 'anything':
+      return `${pane.surface} could hold any session: ${tildeText(pane.hold.reason)} (${unknown})`;
+  }
 }
 
 /** j8q3e.1 D5: newest first (the default), by D5 section, or by repo. */
@@ -370,6 +391,14 @@ export interface InboxRow {
    * with the reason, when it could not be told.
    */
   ending: SessionEnding;
+  /**
+   * home-base-kwand.5 (D4): Justin's flags (⭐ and any other emoji) on this
+   * session's chain: the union over every session of the chain, with the
+   * labels that do not decode and the sessions that could not be read. Null
+   * when the session has no session bead loaded to carry them; absent only
+   * from a row built outside readInbox.
+   */
+  flags?: ChainFlags | null;
   /** The git facts the card reads; null for a session that did not load. */
   git: CardGit | null;
   /**
@@ -1106,6 +1135,39 @@ async function readInboxOnce(input: {
       card: withBeforeRestart(row.card, fact, now),
     };
   }
+  // home-base-kwand.5 (D4): Justin's flags, the union over each chain, from
+  // the session beads this run loaded and, for a chain session it did not
+  // load, the exports it read (no br call).
+  const continuingOf = new Map<string, string[]>();
+  for (const [id, bead] of neighbors) {
+    for (const label of bead.labels) {
+      if (!label.startsWith(CONTINUES_LABEL_PREFIX)) continue;
+      const older = label.slice(CONTINUES_LABEL_PREFIX.length);
+      continuingOf.set(older, [...(continuingOf.get(older) ?? []), id]);
+    }
+  }
+  for (const [position, row] of rows.entries()) {
+    const startId = row.sessionBeadId;
+    if (startId == null || row.loaded?.model.beads.session == null) {
+      rows[position] = {...row, flags: null};
+      continue;
+    }
+    rows[position] = {
+      ...row,
+      flags: chainFlagsOf({
+        continuing: (id) => continuingOf.get(id) ?? [],
+        labelsOf: (id) => {
+          const loaded = neighbors.get(id);
+          if (loaded != null) return {kind: 'found', labels: loaded.labels};
+          const shown = chainReaders.showBead(id);
+          return shown.kind === 'found'
+            ? {kind: 'found', labels: shown.labels}
+            : {kind: 'unknown', reason: shown.reason};
+        },
+        startId,
+      }),
+    };
+  }
   // home-base-kwand.4 (G12): how each session's last turn ended, from the
   // transcript cache's entry the load above already read (no second read), with
   // liveness from this run's pane lookup (D5), as a field and a card line.
@@ -1490,8 +1552,19 @@ function unreadLead(unread: boolean | null): string {
   return unread === true ? `${UNREAD_MARKER} ` : '';
 }
 
-function headingText(card: SessionCard, unread: boolean | null): string {
-  return `${unreadLead(unread)}${card.emoji} ${tildeText(sessionDisplayName(card.repoTag, card.title, card.marks))}`;
+/** home-base-kwand.5: Justin's flags before the title, `⭐ `, or ''. */
+export function flagsLead(flags: ChainFlags | null | undefined): string {
+  return flags == null || flags.emoji.length === 0
+    ? ''
+    : `${flags.emoji.join('')} `;
+}
+
+function headingText(
+  card: SessionCard,
+  unread: boolean | null,
+  flags: ChainFlags | null | undefined,
+): string {
+  return `${unreadLead(unread)}${card.emoji} ${flagsLead(flags)}${tildeText(sessionDisplayName(card.repoTag, card.title, card.marks))}`;
 }
 
 function markdownCard(
@@ -1500,6 +1573,7 @@ function markdownCard(
   unread: boolean | null,
   paneSummaryReason: string | null,
   now: Date,
+  flags: ChainFlags | null | undefined,
 ): string {
   const lines: string[] = [];
   if (showSection) {
@@ -1545,7 +1619,7 @@ function markdownCard(
     `- **Pane:** ${pane.before}${pane.command == null ? '' : `\`${pane.command}\``}${pane.after}`,
   );
   return [
-    `**${headingText(card, unread)}**${card.age == null ? '' : ` (${card.age})`}`,
+    `**${headingText(card, unread, flags)}**${card.age == null ? '' : ` (${card.age})`}`,
     lines.join('\n'),
   ].join('\n\n');
 }
@@ -1568,6 +1642,7 @@ function ansiCard(
   unread: boolean | null,
   paneSummaryReason: string | null,
   now: Date,
+  flags: ChainFlags | null | undefined,
 ): string {
   const {color, width} = style;
   const code = (text: string): string => paint(text, ['cyan'], color);
@@ -1622,7 +1697,7 @@ function ansiCard(
     label: 'Pane',
     value: `${pane.before}${pane.command == null ? '' : code(pane.command)}${pane.after}`,
   });
-  const heading = `${paint(headingText(card, unread), ['bold'], color)}${card.age == null ? '' : `  ${paint(`(${card.age})`, ['dim'], color)}`}`;
+  const heading = `${paint(headingText(card, unread, flags), ['bold'], color)}${card.age == null ? '' : `  ${paint(`(${card.age})`, ['dim'], color)}`}`;
   return [
     wrapHanging(heading, {hang: BODY_COLUMN + 3, indent: BODY_COLUMN, width}),
     fieldLines(fields, {
@@ -1673,8 +1748,23 @@ function renderRow(
 ): string {
   if (row.display === 'line') return lineEntry(row, style, now);
   return style.color
-    ? ansiCard(row.card, showSection, style, row.unread, paneSummaryReason, now)
-    : markdownCard(row.card, showSection, row.unread, paneSummaryReason, now);
+    ? ansiCard(
+        row.card,
+        showSection,
+        style,
+        row.unread,
+        paneSummaryReason,
+        now,
+        row.flags,
+      )
+    : markdownCard(
+        row.card,
+        showSection,
+        row.unread,
+        paneSummaryReason,
+        now,
+        row.flags,
+      );
 }
 
 function header(
@@ -1956,6 +2046,11 @@ export function renderBeforeRestartInbox(
       label: `${BEFORE_RESTART_WORDS[group.state].emoji} ${BEFORE_RESTART_WORDS[group.state].title}`,
       value: String(group.entries.length),
     })),
+    // kwand.12: why sessions whose tab is gone can still be unknown.
+    ...answer.unplaced.map((pane) => ({
+      label: 'unmatched Claude pane',
+      value: unplacedPaneWords(pane),
+    })),
   ];
   blocks.push(
     style.color
@@ -2070,6 +2165,13 @@ export function inboxJson(
       // home-base-kwand.4: how its last turn ended (replied, cutOff with
       // inFlight and live, workingNow, or unknown with the reason).
       ending: row.ending,
+      // home-base-kwand.5 (D4): Justin's flags, NOT `card.marks` (that is the
+      // chain name, handoff number and mayor role). `emoji` is the union over
+      // the session's chain (⭐ for a starred one), `labels` the `mark:` labels
+      // it came from, `undecodable` the `mark:` labels ignored with why, and
+      // `problems` the chain sessions whose flags could not be read. Null: no
+      // session bead was loaded to carry flags.
+      flags: row.flags ?? null,
       git: row.git,
       // home-base-89c8h.3: a refused or deferred handoff with no successor yet.
       handoff: row.handoff,

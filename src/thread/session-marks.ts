@@ -824,11 +824,13 @@ export interface UnmarkOptions {
 export type UnmarkOutcome =
   | {
       failures: string[];
+      /** Session beads whose flags a flag mark changed, put back (home-base-kwand.5). */
+      flagsRestored: string[];
       /** Beads left with another session that got this session's label back. */
       heldAgain: string[];
       kind: 'unmarked';
       labelsRemoved: string[];
-      mode: CloseMode;
+      mode: MarkUndoRecord['mode'];
       relabelled: string[];
       /** Each bead put back, with the status it has again. */
       reopened: {id: string; status: string}[];
@@ -875,8 +877,8 @@ export async function unmarkSession(
   if (record == null) {
     const scope =
       options.session == null || options.session.trim() === ''
-        ? 'no done or archive mark'
-        : `no done or archive mark for ${options.session.trim()}`;
+        ? 'no done, archive or flag mark'
+        : `no done, archive or flag mark for ${options.session.trim()}`;
     return {
       kind: 'nothing',
       reason: `nothing to undo: ${marksUndoPath(env)} holds ${scope} that is not already undone`,
@@ -884,6 +886,23 @@ export async function unmarkSession(
   }
 
   const failures: string[] = [];
+  // home-base-kwand.5: a flag mark's label changes, each reversed on its own
+  // bead (the labels it added removed, the ones it removed given back).
+  const flagsRestored: string[] = [];
+  for (const change of record.labelChanges) {
+    if (change.added.length === 0 && change.removed.length === 0) continue;
+    const result = brUpdate({db: change.db, env}, change.id, {
+      ...(change.removed.length > 0 ? {addLabels: change.removed} : {}),
+      ...(change.added.length > 0 ? {removeLabels: change.added} : {}),
+    });
+    if (result.kind === 'failed') {
+      failures.push(
+        `${change.id} did NOT get its flags back: ${describeBrFailed(result)}`,
+      );
+    } else {
+      flagsRestored.push(change.id);
+    }
+  }
   const reopened: {id: string; status: string}[] = [];
   for (const bead of [...record.closed].reverse()) {
     const target = {db: bead.db, env};
@@ -981,22 +1000,26 @@ export async function unmarkSession(
     }
     // D-STATUSLINE: the status line stops saying done or archived now, not at
     // the next capture. A failure here only delays that, so it is said, not fatal.
-    const written = await writeStatusForSession({
-      cwd,
-      env,
-      keepNewer: false,
-      now,
-      sessionId: record.sessionId,
-    });
-    statusFile =
-      written.kind === 'failed'
-        ? `not rewritten: ${written.error}`
-        : written.kind === 'skipped'
-          ? `not rewritten: ${written.reason}`
-          : 'rewritten';
+    // A flag mark never changed what the status line shows.
+    if (record.mode !== 'flag') {
+      const written = await writeStatusForSession({
+        cwd,
+        env,
+        keepNewer: false,
+        now,
+        sessionId: record.sessionId,
+      });
+      statusFile =
+        written.kind === 'failed'
+          ? `not rewritten: ${written.error}`
+          : written.kind === 'skipped'
+            ? `not rewritten: ${written.reason}`
+            : 'rewritten';
+    }
   }
   return {
     failures,
+    flagsRestored,
     heldAgain,
     kind: 'unmarked',
     labelsRemoved,
@@ -1027,6 +1050,9 @@ export function describeUnmarkOutcome(outcome: UnmarkOutcome): {
         lines.push('', `Reopened (${outcome.reopened.length}):`, '');
         for (const bead of outcome.reopened)
           lines.push(`  - ${bead.id} · ${bead.status}`, '');
+      }
+      if (outcome.flagsRestored.length > 0) {
+        lines.push('', `Flags put back: ${outcome.flagsRestored.join(', ')}`);
       }
       if (outcome.labelsRemoved.length > 0) {
         lines.push('', `Label removed: ${outcome.labelsRemoved.join(', ')}`);

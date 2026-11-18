@@ -7,7 +7,8 @@
  * message (requests filed, questions asked, answers recorded, sessions started
  * or handed off, messages sent, beads created, closed and updated, commits,
  * files edited, subagents dispatched), a count of every other tool call, and
- * the first lines of Claude's reply to it.
+ * the first lines of Claude's reply to it, after any status block pasted at its
+ * top (home-base-6ujwi D5).
  *
  * MATCHING. A transcript prompt (a user record's substantive text, or a
  * prompt queued mid-turn; transcript-messages.ts, the same text the message
@@ -24,6 +25,13 @@
 
 import type {JustinMessage} from './justin-messages';
 
+import {
+  CLAUDE_MESSAGE_HEADING,
+  isOmRuleLine,
+  isRuleLine,
+  PART_ONE_SECTION_RULE,
+  pastedPartOneEnd,
+} from './part-one';
 import {
   assistantText,
   forEachTranscriptLine,
@@ -290,7 +298,97 @@ export function annotateFromTranscript(
   return {byId, kind: 'read', malformed: real};
 }
 
-/** Claude's reply cut for the annotated view: one line, about REPLY_CUT characters. */
-export function replyPreview(reply: string): string {
-  return cut(oneLine(reply), REPLY_CUT);
+/**
+ * The end of a legacy report (the template before status report v4) that
+ * starts at the 🛑 line `rule`: the next line made only of 🕉. Null when
+ * another 🛑 line comes first or there is none: then nothing is taken out.
+ */
+function legacyReportEnd(
+  lines: readonly string[],
+  rule: number,
+): null | number {
+  for (let at = rule + 1; at < lines.length; at += 1) {
+    const candidate = lines[at] ?? '';
+    if (isOmRuleLine(candidate)) return at;
+    if (isRuleLine(candidate)) return null;
+  }
+  return null;
+}
+
+/**
+ * Claude's own words inside a pasted Part 1: its `## From Claude` section
+ * (home-base-88y8m D4, `thread status --message`), up to the section rule
+ * before the footer, which is the block's last `---`. None when the block has
+ * no such section.
+ */
+function claudeMessageIn(block: readonly string[]): string[] {
+  const heading = block.findIndex(
+    (line) => line.trim() === `## ${CLAUDE_MESSAGE_HEADING}`,
+  );
+  if (heading < 0) return [];
+  let end = block.length - 1;
+  for (let at = block.length - 1; at > heading; at -= 1) {
+    if ((block[at] ?? '').trim() === PART_ONE_SECTION_RULE) {
+      end = at;
+      break;
+    }
+  }
+  return block.slice(heading + 1, end);
+}
+
+/**
+ * Claude's reply with every pasted status block taken out (home-base-6ujwi
+ * D5), keeping Claude's own words:
+ *
+ * - A Part 1, from its 🛑 line through its ♒ line (the `───` line before
+ *   2026-11-12), bounded exactly as part-one's strip rule bounds it, is
+ *   replaced by its `## From Claude` section, or by nothing.
+ * - A legacy report, from its 🛑 line through its 🕉 line, is taken out.
+ *
+ * MEASURED 2026-11-18 over every assistant line of every message log: 804
+ * replies began with a 🛑 line; 553 were a Part 1 (closed by ♒ or `───`), 244
+ * a legacy report (closed by 🕉), and 7 legacy reports had no closing line and
+ * are left as they are. In the mayor chain the final message is the block
+ * alone, with Claude's words in its From Claude section, so dropping the
+ * whole block would hide them. Null when nothing else is left. A handoff
+ * summary (`🤝 **Handed off**`) is a real reply and is kept.
+ */
+export function replyWithoutStatusBlock(reply: string): null | string {
+  const lines = reply.split('\n');
+  const kept: string[] = [];
+  let index = 0;
+  while (index < lines.length) {
+    const line = lines[index] ?? '';
+    if (isRuleLine(line)) {
+      const partOne = pastedPartOneEnd(lines, index);
+      if (partOne != null) {
+        kept.push(...claudeMessageIn(lines.slice(index, partOne + 1)));
+        index = partOne + 1;
+        continue;
+      }
+      const legacy = legacyReportEnd(lines, index);
+      if (legacy != null) {
+        index = legacy + 1;
+        continue;
+      }
+    }
+    kept.push(line);
+    index += 1;
+  }
+  const text = kept.join('\n').trim();
+  return text === '' ? null : text;
+}
+
+export type ReplyPreview = {kind: 'blockOnly'} | {kind: 'text'; text: string};
+
+/**
+ * Claude's reply cut for the annotated view: one line, about REPLY_CUT
+ * characters, after any pasted status block (D5); `blockOnly` when the reply
+ * was nothing but the block.
+ */
+export function replyPreview(reply: string): ReplyPreview {
+  const text = replyWithoutStatusBlock(reply);
+  return text == null
+    ? {kind: 'blockOnly'}
+    : {kind: 'text', text: cut(oneLine(text), REPLY_CUT)};
 }

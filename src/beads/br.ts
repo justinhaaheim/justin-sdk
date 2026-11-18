@@ -1930,6 +1930,11 @@ export interface BrUpdateInput {
   acceptanceCriteria?: string | null;
   addLabels?: string[];
   /**
+   * REPLACES the description (`br update --description`). To append, read the
+   * bead first and write the whole text back (home-base-6ujwi D10 does).
+   */
+  description?: string | null;
+  /**
    * `br update --force`: br otherwise refuses `--status=in_progress` on a bead
    * with open children ("cannot claim blocked issue", exit 4, measured
    * 2026-11-06, home-base-npbse.1.3). Only `thread unmark` passes it, to put back
@@ -1969,6 +1974,9 @@ export function brUpdate(
   const args = ['update', id];
   if (input.title != null) args.push(`--title=${input.title}`);
   if (input.status != null) args.push(`--status=${input.status}`);
+  if (input.description != null) {
+    args.push(`--description=${input.description}`);
+  }
   if (input.acceptanceCriteria != null) {
     args.push(`--acceptance-criteria=${input.acceptanceCriteria}`);
   }

@@ -31,9 +31,11 @@ import {
   resolveRepoTag,
   resolveThreadConfig,
 } from '../src/thread/config';
+import {readMessagesLine} from '../src/thread/handoff-read-messages';
+import {MAYOR_SUCCESSOR_SENTENCE} from '../src/thread/mayor-sentence';
 import {serializeMessageLine} from '../src/thread/message-log';
 import {partOneView, renderPartOne} from '../src/thread/part-one';
-import {ensureSessionBead} from '../src/thread/session-bead';
+import {ensureSessionBead, MAYOR_ROLE_LABEL} from '../src/thread/session-bead';
 import {unreadableAction} from '../src/thread/session-card';
 import {handoffBlock} from '../src/thread/session-handoff';
 import {inboxJson, readInbox, renderInbox} from '../src/thread/session-inbox';
@@ -321,6 +323,66 @@ describe('Part 1 and the handoff block (AC 1)', () => {
         name,
         session: expect.stringContaining(want) as string,
       });
+    }
+  });
+
+  // home-base-6ujwi.2 D6: componentConfig.thread.handoff.readMessages.
+  test("the readMessages knob adds the reading line to a mayor's block only; every other block is byte-for-byte the same", async () => {
+    const title = TITLES['audio-journal-1'] ?? '';
+    const beadId = beads[title] ?? '';
+    const repo = repos['audio-journal-1'] ?? '';
+    const call = async (readMessages?: boolean) => {
+      const block = await handoffBlock({
+        cwd: repo,
+        env,
+        note: null,
+        now: NOW,
+        readMessages,
+        sessionBeadId: beadId,
+        sessionId: ids[title] ?? '',
+        timeZone: TZ,
+      });
+      if (!block.ok) throw new Error(block.reason);
+      return block.text;
+    };
+    const line = `- ${readMessagesLine(beadId)}`;
+    const command = `bun run justin-sdk thread messages --chain ${beadId} --sessions 3 --annotate`;
+
+    // Not a mayor: the knob changes nothing.
+    const plainDefault = await call();
+    expect(await call(true)).toBe(plainDefault);
+    expect(plainDefault).not.toContain('--sessions 3');
+
+    const added = runBr(repo, ['label', 'add', beadId, '-l', MAYOR_ROLE_LABEL]);
+    if (!added.ok) throw new Error(`br label add: ${added.reason ?? '?'}`);
+    try {
+      const mayorOff = await call(false);
+      const mayorOn = await call(true);
+      expect(mayorOff).toContain(MAYOR_SUCCESSOR_SENTENCE);
+      expect(mayorOff).not.toContain('--sessions 3');
+      expect(mayorOn).toContain(line);
+      expect(mayorOn).toContain(`\`${command}\``);
+      // Right after the mayor-skill line, and the only difference.
+      expect(mayorOn).toContain(`- ${MAYOR_SUCCESSOR_SENTENCE}\n${line}\n`);
+      expect(mayorOn.replace(`\n${line}`, '')).toBe(mayorOff);
+
+      // Absent from the call: the repo config decides.
+      const config = join(repo, 'justin-sdk.config.json');
+      const before = readFileSync(config, 'utf8');
+      writeFileSync(
+        config,
+        JSON.stringify({
+          ...(JSON.parse(before) as object),
+          componentConfig: {thread: {handoff: {readMessages: true}}},
+        }),
+      );
+      try {
+        expect(await call()).toBe(mayorOn);
+      } finally {
+        writeFileSync(config, before);
+      }
+    } finally {
+      runBr(repo, ['label', 'remove', beadId, '-l', MAYOR_ROLE_LABEL]);
     }
   });
 

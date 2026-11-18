@@ -39,6 +39,7 @@ import type {CmuxRunner} from './cmux';
 import type {PickUpDeps, PickUpLockWait, PickUpOutcome} from './handoff-pickup';
 import type {ChainRequestReaders} from './overarching';
 import type {EnvLike} from './paths';
+import type {RequestMessageOutcome} from './request-message';
 import type {AdoptedStatus} from './request-writes';
 import type {SessionResolution} from './session-bead';
 import type {SessionBeadRepair} from './session-repair';
@@ -63,6 +64,7 @@ import {
   readChainRequests,
   realChainRequestReaders,
 } from './overarching';
+import {attachRequestMessage, requestMessageLine} from './request-message';
 import {adoptBead, titleSetEdit} from './request-writes';
 import {
   AUTO_TITLE_LABEL,
@@ -205,6 +207,11 @@ export type ThreadRequestOutcome =
        * capture hook had failed to file; null when it was already there.
        */
       repair: Extract<SessionBeadRepair, {kind: 'repaired'}> | null;
+      /**
+       * home-base-6ujwi D9 to D14: the message of his that led to it; null when
+       * componentConfig.thread.requestMessage is off. Never an exit-code change.
+       */
+      requestMessage: null | RequestMessageOutcome;
       /** `--short`: the short label it now carries; null = not asked or failed. */
       short: string | null;
       title: string;
@@ -696,6 +703,8 @@ export async function fileRequest(
   let filedTitle: string;
   let filedLabels: string[];
   let adoptedStatus: AdoptedStatus | null = null;
+  // --bead: the bead's labels before this call adopted it (home-base-6ujwi.3 F1).
+  let labelsBeforeAdoption: null | readonly string[] = null;
   const followUpFailures: string[] = [];
 
   if (title != null && title !== '') {
@@ -826,6 +835,7 @@ export async function fileRequest(
       return {kind: 'failed', reason: adopted.reason};
     }
     adoptedStatus = adopted.adoptedStatus;
+    labelsBeforeAdoption = found.labels;
     target = found.place;
     filedId = id;
     filedTitle = found.title;
@@ -942,6 +952,18 @@ export async function fileRequest(
     renamedSession = marked.renamedSession;
   }
 
+  // home-base-6ujwi D9 to D14: never a followUpFailure (D14).
+  const requestMessage = await attachRequestMessage({
+    beadId: filedId,
+    continued,
+    cwd,
+    db: target.db,
+    env,
+    labelsBeforeAdoption,
+    sessionId,
+    sessionLabels: usable.kind === 'found' ? usable.bead.labels : [],
+  });
+
   // After the --continues link (home-base-mbnjv.3, C7): a successor's first
   // naming sync then sees both halves of the link and takes the workspace
   // name from its predecessor at once, instead of on its next prompt.
@@ -969,6 +991,7 @@ export async function fileRequest(
     pickup,
     renamedSession,
     repair,
+    requestMessage,
     short,
     title: filedTitle,
     workspaceNote,
@@ -1025,6 +1048,9 @@ export function describeRequestOutcome(outcome: ThreadRequestOutcome): {
       }
       if (outcome.pickup != null) {
         lines.push(...carriedLines(outcome.pickup));
+      }
+      if (outcome.requestMessage != null) {
+        lines.push(requestMessageLine(outcome.requestMessage));
       }
       if (outcome.followUpFailures.length > 0) {
         lines.push(

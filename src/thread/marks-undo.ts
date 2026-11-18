@@ -8,6 +8,10 @@
  * about to leave with another session, and every label they are about to add. A mark whose line cannot be written is refused, so nothing
  * is ever closed that `thread unmark` could not put back.
  *
+ * `thread star` / `unstar` / `flag` (session-flags.ts, home-base-kwand.5)
+ * append a `mark` line of mode `flag` the same way, BEFORE their first br
+ * write: each flag label they add to or remove from each session bead.
+ *
  * `thread unmark` reverses the newest mark line not yet undone and then
  * appends an `undone` line naming it. Append-only on purpose (the
  * workspace-names.jsonl pattern): rewriting the file in place would race a
@@ -38,6 +42,19 @@ const markLine = z.object({
   closed: z.array(located.extend({priorStatus: z.string()})),
   id: z.string(),
   kind: z.literal('mark'),
+  /**
+   * home-base-kwand.5 (D4): the flag labels (`mark:<code points>`) a `flag`
+   * mark adds to or removes from each session bead, only those it really
+   * changes. Empty for done and archive; absent from a line written before.
+   */
+  labelChanges: z
+    .array(
+      located.extend({
+        added: z.array(z.string()),
+        removed: z.array(z.string()),
+      }),
+    )
+    .default([]),
   /** Labels the mark adds to the session bead (`archived`, when it lacked it). */
   labelsAdded: z.array(z.string()),
   /**
@@ -45,7 +62,12 @@ const markLine = z.object({
    * `sid:` (home-base-npbse.1.3). A line written before that has no such beads.
    */
   leftWithOthers: z.array(located).default([]),
-  mode: z.enum(['archive', 'done']),
+  /**
+   * `flag` (home-base-kwand.5): `thread star`, `unstar` or `flag`. An SDK
+   * older than it refuses the whole file once one is there ("line N is not a
+   * marks-undo record"), so its `thread unmark` stops working.
+   */
+  mode: z.enum(['archive', 'done', 'flag']),
   /** Adopted requests the mark releases (their request and sid labels removed). */
   released: z.array(located),
   sessionBeadId: z.string(),
@@ -62,7 +84,7 @@ const undoneLine = z.object({
 
 const line = z.discriminatedUnion('kind', [markLine, undoneLine]);
 
-export type MarkUndoInput = Omit<z.infer<typeof markLine>, 'id' | 'kind'>;
+export type MarkUndoInput = Omit<z.input<typeof markLine>, 'id' | 'kind'>;
 export type MarkUndoRecord = z.infer<typeof markLine> & {
   /** When `thread unmark` reversed it; null while it can still be undone. */
   undoneAt: string | null;
@@ -128,7 +150,7 @@ export function readMarksUndo(env: EnvLike = process.env): MarksUndoRead {
 }
 
 function append(
-  value: z.infer<typeof line>,
+  value: z.input<typeof line>,
   env: EnvLike,
 ): {error: string; kind: 'failed'} | {kind: 'ok'} {
   const path = marksUndoPath(env);

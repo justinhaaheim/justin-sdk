@@ -54,6 +54,7 @@ import {
   THREAD_DEFAULT_NUDGE,
   THREAD_DEFAULT_OPEN_SINCE,
   THREAD_DEFAULT_PINNED_PROJECTS,
+  THREAD_DEFAULT_REQUEST_MESSAGE,
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
   THREAD_DEFAULT_TAB_RECORD,
@@ -236,6 +237,13 @@ export interface ResolvedThreadConfig {
   /** Which layer decided `repoDir`. */
   repoDirSource: ThreadConfigSource;
   /**
+   * home-base-6ujwi D9: `thread request` writes the message of Justin's that
+   * led to the request into its bead. Off by default.
+   */
+  requestMessage: boolean;
+  /** Which layer decided `requestMessage`. */
+  requestMessageSource: ThreadConfigSource;
+  /**
    * Whether capture files a session bead in the repo and injects the
    * prompt-time line, and `thread request` / `thread title` work (status report
    * v4, home-base-vzwbj.4.1). The RAW knob: the hook only runs when
@@ -385,6 +393,10 @@ export function resolveThreadConfig(
   const titleSummary = resolveFlag(
     'titleSummary',
     THREAD_DEFAULT_TITLE_SUMMARY,
+  );
+  const requestMessage = resolveFlag(
+    'requestMessage',
+    THREAD_DEFAULT_REQUEST_MESSAGE,
   );
   const trimGuard = resolveFlag('trimGuard', THREAD_DEFAULT_TRIM_GUARD);
   const compactQuestions = resolveFlag(
@@ -659,6 +671,8 @@ export function resolveThreadConfig(
     quota,
     repoDir,
     repoDirSource,
+    requestMessage: requestMessage.value,
+    requestMessageSource: requestMessage.source,
     sessionBeads: sessionBeads.value,
     sessionBeadsSource: sessionBeads.source,
     source: enabled.source,

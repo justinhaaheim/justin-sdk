@@ -1558,6 +1558,7 @@ describe('home-base-kwand.2: the before-restart fact on untracked sessions', () 
           screens: {ms: 0, read: 0, unreadable: 0},
           source: {kind: 'launch record' as const, savedAt: NOW.toISOString()},
           tabsWithSession: 2,
+          unplaced: [],
         }),
       cwd: alpha,
       days: 30,

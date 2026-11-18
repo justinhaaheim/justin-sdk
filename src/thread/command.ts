@@ -182,7 +182,7 @@ UNDO. thread open --undo closes the workspaces the latest run opened (--run <tim
 
   A workspace that passes has its Claude process stopped first (SIGTERM, up to 15 seconds to exit; the session stays resumable with claude --resume), and only then is the workspace closed. A window closes with its last workspace. The record is rewritten before the first process is stopped; if that fails, nothing is stopped or closed. --undo --dry-run runs the same checks and prints what would close and what would be kept; it closes nothing and writes nothing. It exits 1 when there is no run to undo or a step failed.
 
-RESTORE FAILED. thread open --restore-failed opens a different set: every session whose cmux restore failed after the last restart (thread inbox --before-restart lists them under "restore failed": the old tab came back as a plain shell showing cmux's restore error). Each opens as a NEW tab of the workspace it was in, beside the failed tab, running cd <checkout> && claude --resume <id>, newest activity first, with --focus false so nothing jumps to the front. The failed tab is never typed into, sent to or closed. A session whose old workspace no longer exists opens in a new workspace instead. The same checks as above apply: a session running again, one whose checkout is unknown or gone, and one marked done, archived or handed off are skipped and said why; a live Claude pane that cannot be placed refuses the run unless --force-unplaced; ps is read again right before each open. One with no inbox row, or no session bead, is only listed. The restart record decides which sessions qualify, so --since and --days do not apply; --repo, --limit, --dry-run and --json do, and every other flag is refused. Stored drafts are not typed, and nothing is coloured. The first open that fails stops the run. The record is written the same way, with each open under "tabs". thread open --undo closes a new workspace it made, with the checks above, and does not close a tab it opened in an old workspace: closing that workspace would close the other tabs there. It names each such tab instead, for you to close by hand.
+RESTORE FAILED. thread open --restore-failed opens a different set: every session whose old tab came back after the last restart without its Claude. It covers two of the states thread inbox --before-restart lists: "restore failed" (the old tab is a plain shell showing cmux's restore error) and "shell in tab" (the old tab is a plain shell with no error shown, or a shell prompt on a tty another tab's Claude holds; the session itself does not run there, or it would be "running again"). No other state is opened: not restored, another session, unknown and running again are left out. The output keeps the two apart: a count line for each, the state of each session's old tab, and in --json counts.byState and a state on every planned, skipped and opened entry. Each opens as a NEW tab of the workspace it was in, beside the old tab, running cd <checkout> && claude --resume <id>, newest activity first, with --focus false so nothing jumps to the front. The old tab is never typed into, sent to or closed. A session whose old workspace no longer exists opens in a new workspace instead. The same checks as above apply: a session running again, one whose checkout is unknown or gone, and one marked done, archived or handed off are skipped and said why; a live Claude pane that cannot be placed refuses the run unless --force-unplaced; ps is read again right before each open. One with no inbox row, or no session bead, is only listed. The restart record decides which sessions qualify, so --since and --days do not apply; --repo, --limit, --dry-run and --json do, and every other flag is refused. Stored drafts are not typed, and nothing is coloured. The first open that fails stops the run. The record is written the same way, with each open under "tabs". thread open --undo closes a new workspace it made, with the checks above, and does not close a tab it opened in an old workspace: closing that workspace would close the other tabs there. It names each such tab instead, for you to close by hand.
 
 RUNS AS A VIEW. A filtered thread open makes a window appear (for example thread open --repo audio-journal-1 --include-open: all of that repo's unfinished work in one new window), and thread open --undo --run <stamp> makes it disappear again: what it opened closes, what it moved goes back. thread open --list prints every recorded run with its stamp, filters, counts, whether it was undone, and the command that undoes it. --list reads the records only: no cmux, no ps.
 
@@ -362,6 +362,16 @@ WHICH SESSIONS  The handoff chain: sessions linked by continues: / continued-by:
         labels on their session beads. Spawned sessions are not part of it.
         Without --chain, the current session and every one before it; with
         --chain, every session of that chain.
+        --sessions <n>: only the n sessions ending at the current session, or
+        at the one --chain names, oldest first. A chain with fewer says how
+        many it has.
+
+PRIVATE  A session that thread private marked, or that ran in a repo the user
+        config lists in componentConfig.thread.privateRepos, is private: its
+        messages are never printed or searched, with or without --sessions,
+        and --context refuses them. The output names each one and counts the
+        messages of his it left out. A check that cannot decide counts as
+        private and says why. A private session still counts as one of the n.
 
 WHICH LINES  Each session's message log, <state dir>/messages/<session id>.jsonl.
         A line counts as his when he typed it: not a kickoff prompt (the
@@ -387,6 +397,8 @@ EXAMPLES
   thread messages --chain Scorpio --regex 'Apple TV|tvOS'
   thread messages --context f7a1dceb.4      that message, with the replies
   thread messages --chain Scorpio --annotate --limit 5
+  thread messages --chain home-base-ibm9f --sessions 3 --annotate
+                                            that session and the 2 before it
 `;
 
 const SEARCH_NARRATIVE = `
@@ -1376,7 +1388,7 @@ export const threadCommand: CommandModule = {
             .option('restore-failed', {
               default: false,
               describe:
-                'Instead: open every session whose cmux restore failed after the last restart as a new tab of its old workspace, newest first, leaving the failed tab alone (see RESTORE FAILED)',
+                'Instead: open every session whose old tab came back after the last restart without its Claude (states "restore failed" and "shell in tab") as a new tab of its old workspace, newest first, leaving the old tab alone (see RESTORE FAILED)',
               type: 'boolean' as const,
             })
             .option('include-untracked', {
@@ -1558,6 +1570,83 @@ export const threadCommand: CommandModule = {
             await runThreadMark({
               hook: argv.hook === true,
               mayor: argv.mayor === true,
+            }),
+          );
+        },
+      )
+      .command(
+        'star <ref>',
+        'Star a session: shorthand for `thread flag <ref> --add ⭐` (home-base-kwand.5). <ref> is a session bead id, a claude session id (or its first 8 or more characters), or a chain name; a session that handed off stars its chain’s newest session. Works from any repo for a session bead in another repo’s database. Prints "Undo: thread unmark --mark <id>". Exit 0 starred, or already starred · 1 not written (why is printed) · 2 usage.',
+        (yy) =>
+          yy.positional('ref', {
+            describe:
+              'The session: its session bead id, its claude session id or first 8+ characters, or its chain name',
+            type: 'string' as const,
+          }),
+        async (argv) => {
+          const {runThreadFlag, STAR} = await import('./session-flags');
+          process.exit(
+            runThreadFlag('thread star', {
+              emoji: STAR,
+              op: 'add',
+              ref: argv.ref ?? null,
+            }),
+          );
+        },
+      )
+      .command(
+        'unstar <ref>',
+        'Unstar a session: shorthand for `thread flag <ref> --remove ⭐` (home-base-kwand.5). The star is removed from EVERY session of the chain, so the chain shows none. <ref> as for `thread star`. Prints "Undo: thread unmark --mark <id>". Exit 0 unstarred, or not starred · 1 not written (why is printed) · 2 usage.',
+        (yy) =>
+          yy.positional('ref', {
+            describe:
+              'The session: its session bead id, its claude session id or first 8+ characters, or its chain name',
+            type: 'string' as const,
+          }),
+        async (argv) => {
+          const {runThreadFlag, STAR} = await import('./session-flags');
+          process.exit(
+            runThreadFlag('thread unstar', {
+              emoji: STAR,
+              op: 'remove',
+              ref: argv.ref ?? null,
+            }),
+          );
+        },
+      )
+      .command(
+        'flag <ref>',
+        'Justin’s flags on a session: a set of emoji, ⭐ by default (home-base-kwand.5, epic home-base-kwand D4). Each flag is a label `mark:<code points>` on the session bead: the emoji’s code points in lowercase hex joined by -, with U+FE0F and U+FE0E dropped, so ⭐ and ⭐️ are one flag (`mark:2b50`). A chain shows the union of its sessions’ flags: --add puts the flag on the chain’s newest session, --remove takes it off every session of the chain. A chain that cannot be read whole is refused, nothing written. Not the same as `thread mark --mayor`. Each change is recorded in marks-undo.jsonl first; `thread unmark --mark <id>` reverses it. Exit 0 written, or nothing to change · 1 not written · 2 usage.',
+        (yy) =>
+          yy
+            .positional('ref', {
+              describe:
+                'The session: its session bead id, its claude session id or first 8+ characters, or its chain name',
+              type: 'string' as const,
+            })
+            .option('add', {
+              describe: 'The emoji to add',
+              type: 'string' as const,
+            })
+            .option('remove', {
+              describe: 'The emoji to remove',
+              type: 'string' as const,
+            })
+            .conflicts('add', 'remove'),
+        async (argv) => {
+          const {runThreadFlag} = await import('./session-flags');
+          const emoji = argv.add ?? argv.remove ?? null;
+          if (emoji == null) {
+            console.error(
+              'thread flag: name the change: --add <emoji> or --remove <emoji>. Nothing was written.',
+            );
+            process.exit(2);
+          }
+          process.exit(
+            runThreadFlag('thread flag', {
+              emoji,
+              op: argv.add == null ? 'remove' : 'add',
+              ref: argv.ref ?? null,
             }),
           );
         },
@@ -1891,7 +1980,7 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'unmark',
-        'Undo Justin’s newest `thread done` or `thread archive` (for --session, or the newest of all; --mark <id> names exactly one): reopen every bead it closed and give each the status it had (in_progress comes back as in_progress), remove the archived label it added, give adopted requests it released their request labels back, and give beads it left with another session this session’s label back. Read from ~/.local/state/justin-threads/marks-undo.jsonl, which done and archive write before they close anything. Exit 0 restored · 1 a br call failed (each id named; the record is kept, so running it again retries) · 2 nothing to undo.',
+        'Undo Justin’s newest `thread done`, `thread archive`, `thread star`, `unstar` or `flag` (for --session, or the newest of all; --mark <id> names exactly one). A flag mark gets its flag labels back as they were. A done or archive mark: reopen every bead it closed and give each the status it had (in_progress comes back as in_progress), remove the archived label it added, give adopted requests it released their request labels back, and give beads it left with another session this session’s label back. Read from ~/.local/state/justin-threads/marks-undo.jsonl, which done and archive write before they close anything. Exit 0 restored · 1 a br call failed (each id named; the record is kept, so running it again retries) · 2 nothing to undo.',
         (yy) =>
           yy
             .option('session', {
@@ -2576,6 +2665,11 @@ export const threadCommand: CommandModule = {
                 'Another chain, all of it: a chain name (Scorpio, "Scorpio II", Scorpio_II), any session bead in it, or a Claude session id (the first 8 or more characters will do when only one session starts with them). Without it: the current session (CLAUDE_CODE_SESSION_ID) and every session before it.',
               type: 'string' as const,
             })
+            .option('sessions', {
+              describe:
+                'Only the n sessions of the chain that end at the current session (or at the one --chain names), oldest first: 3 is this session and the 2 before it. A positive whole number; anything else exits 2.',
+              type: 'string' as const,
+            })
             .option('regex', {
               default: false,
               describe:
@@ -2642,6 +2736,7 @@ export const threadCommand: CommandModule = {
               newestFirst: argv['newest-first'] === true,
               query: text === '' ? null : text,
               regex: argv.regex === true,
+              sessions: argv.sessions ?? null,
               writtenSince:
                 since == null ? null : [since].flat().map(String).join(','),
             }),

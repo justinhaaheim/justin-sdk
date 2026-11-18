@@ -119,6 +119,13 @@ export const THREAD_DEFAULT_NAME_WORKSPACES = false;
 export const THREAD_DEFAULT_TITLE_SUMMARY = false;
 
 /**
+ * home-base-6ujwi D9 (2026-11-18): `thread request` writes the message of
+ * Justin's that led to the request into the request bead's description.
+ * Off until Justin turns it on (feature-knobs rule); on in home-base.
+ */
+export const THREAD_DEFAULT_REQUEST_MESSAGE = false;
+
+/**
  * home-base-7761p.23 (2026-11-06): `thread status` saves the block it printed,
  * and the Stop hook sends a session back once when its reply's block differs.
  * Independent of `enforce`. Off by default (feature-knobs rule); on in home-base.
@@ -338,6 +345,7 @@ export const HANDOFF_DEFAULTS = {
   permissionMode: 'auto' as HandoffPermissionMode,
   pickupMessages: false,
   predecessor: 'keep' as HandoffPredecessorMode,
+  readMessages: false,
   successor: false,
   usage: {
     maxSampleAgeMinutes: 150,

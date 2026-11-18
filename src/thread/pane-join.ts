@@ -1301,7 +1301,17 @@ export type PaneLookup =
        * before-restart state joins on them without reading them again. Absent
        * (a test's lookup): that state is unknown, never "not restored".
        */
-      live?: {procs: Proc[]; surfaces: LiveSurface[]};
+      live?: {
+        /**
+         * home-base-kwand.12: each Claude pid the hook store's pid join tied to
+         * a session this lookup placed in a live pane. A pane cmux restored
+         * onto the same tty as a placed one (its twin) is unplaced, yet its
+         * Claude process is this one. Absent: none known.
+         */
+        placedPids?: ReadonlyMap<number, string>;
+        procs: Proc[];
+        surfaces: LiveSurface[];
+      };
       ok: true;
       statusLine: Pick<
         StatusLineResult,
@@ -1483,9 +1493,21 @@ export async function lookupPanes(sources: PaneSources): Promise<PaneLookup> {
   for (const [sessionId, why] of sharedUnknown) {
     if (!bySession.has(sessionId)) unknownSessions.set(sessionId, why);
   }
+  // kwand.12: the pids the pid join tied to a placed session (F8: of a pid's
+  // stored sessions, the one placed).
+  const placedPids = new Map<number, string>();
+  for (const session of attributed) {
+    if (
+      session.alive &&
+      session.pid != null &&
+      bySession.has(session.sessionId)
+    ) {
+      placedPids.set(session.pid, session.sessionId);
+    }
+  }
   return {
     bySession,
-    live: {procs: procs.value, surfaces: surfaces.value},
+    live: {placedPids, procs: procs.value, surfaces: surfaces.value},
     ok: true,
     statusLine: {
       failure:

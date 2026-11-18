@@ -1,10 +1,15 @@
 /**
  * `thread open --restore-failed` (home-base-kwand.3 item 2, gap G3 of epic
- * home-base-kwand): every session whose cmux restore failed after the last
- * restart (before-restart-state.ts, state `restoreFailed`: its old tab is back
- * as a plain shell showing cmux's restore error) is opened again as a NEW tab
- * of its old workspace, newest activity first. A session whose old workspace
- * is gone opens in a new workspace instead, as the dashboard's `o` does.
+ * home-base-kwand): every session whose old tab came back after the last
+ * restart without its Claude is opened again as a NEW tab of its old
+ * workspace, newest activity first. A session whose old workspace is gone
+ * opens in a new workspace instead, as the dashboard's `o` does.
+ *
+ * Which sessions: OLD_TAB_RESUME_STATES (restore-tab.ts), the before-restart
+ * states (before-restart-state.ts) `restoreFailed` (the old tab shows cmux's
+ * restore error) and, since home-base-kwand.14, `shellInTab` (the old tab is a
+ * plain shell with no error shown). Every entry, skip, record tab and count
+ * carries its state, so the two stay apart in the output.
  *
  * - Decision D2: the failed tab is never typed into, sent to or closed. The
  *   new tab comes from restore-tab.ts, the one builder the dashboard's `o`
@@ -31,10 +36,13 @@
  */
 
 import type {Field, OutputStyle} from '../cli-style';
+import type {BeforeRestartState} from './before-restart-state';
 import type {CmuxCall, CmuxRunner, CmuxTree, CmuxTreeRead} from './cmux';
 import type {LateLiveCheck, LiveSessions, UnplacedLive} from './live-sessions';
 import type {OpenCandidate, OpenOptions} from './open';
 import type {EnvLike} from './paths';
+import type {OldTabResumeState} from './restore-tab';
+import type {BeforeRestartEntry} from './session-inbox';
 
 import {existsSync} from 'node:fs';
 import {join} from 'node:path';
@@ -52,7 +60,10 @@ import {
   wrapHanging,
 } from '../cli-style';
 import {writeStdout} from '../write-stdout';
-import {realBeforeRestartReader} from './before-restart-state';
+import {
+  BEFORE_RESTART_WORDS,
+  realBeforeRestartReader,
+} from './before-restart-state';
 import {readCmuxTree, realCmuxRunner} from './cmux';
 import {
   readLiveSessions,
@@ -76,7 +87,12 @@ import {matchesRepo, parseLimit, repoValues} from './open-filters';
 import {lookupPanes, realPaneSources} from './pane-join';
 import {tildeText} from './part-one';
 import {liveSocketPath, socketSettingsJson, zshWord} from './respawn';
-import {CMUX_UUID, restoreTabArgs} from './restore-tab';
+import {
+  CMUX_UUID,
+  isOldTabResumeState,
+  OLD_TAB_RESUME_STATES,
+  restoreTabArgs,
+} from './restore-tab';
 import {
   beforeRestartGroups,
   INBOX_DEFAULT_DAYS,
@@ -89,12 +105,17 @@ import {recordSdkWorkspaceName} from './workspace-name';
 // The sessions (read) and the plan (pure)
 // ---------------------------------------------------------------------------
 
-/** One session whose cmux restore failed, as the restart record and the inbox know it. */
+/**
+ * One session whose old tab came back without its Claude (restore failed, or
+ * shell in tab), as the restart record and the inbox know it.
+ */
 export interface FailedRestore {
   /** Its inbox row as thread open reads one; null when the inbox has no row for it. */
   candidate: OpenCandidate | null;
   sessionId: string;
-  /** The failed tab (a cmux surface id). Never touched (D2); named in the output. */
+  /** kwand.14: what its old tab shows now; every list keeps the two apart. */
+  state: OldTabResumeState;
+  /** The old tab (a cmux surface id). Never touched (D2); named in the output. */
   tabId: string;
   /** The workspace that tab is in. */
   workspaceId: string;
@@ -125,13 +146,18 @@ export interface PlannedTab {
   /** The argv after `cmux`: new-surface (oldWorkspace) or new-workspace. */
   args: string[];
   checkout: string;
-  /** The failed tab, left as it is (D2). */
+  /**
+   * The old tab, left as it is (D2). Named for kwand.3's state; since
+   * kwand.14 it is the old shell tab of a shellInTab session too.
+   */
   failedTabId: string;
   lastActivityAt: string | null;
   name: string;
   repo: string | null;
   sessionBeadId: string | null;
   sessionId: string;
+  /** kwand.14: what its old tab shows now. */
+  state: OldTabResumeState;
   target: TabTarget;
   title: string;
   /** The old workspace (oldWorkspace); the one it was in, gone (newWorkspace). */
@@ -144,12 +170,25 @@ export interface SkippedTab {
   name: string;
   reason: string;
   sessionId: string;
+  /** kwand.14: what its old tab shows now. */
+  state: OldTabResumeState;
+}
+
+/** kwand.14: one state's share of the plan. */
+export interface StateCounts {
+  newWorkspace: number;
+  oldWorkspace: number;
+  /** Sessions of this state the run was given. */
+  sessions: number;
+  skipped: number;
 }
 
 export interface RestoreFailedPlan {
   cannotTell: UnplacedLive[];
   /** What the plan holds, by target and by skip reason (AC 2 reads these). */
   counts: {
+    /** kwand.14: the same, for each state on its own. */
+    byState: Record<OldTabResumeState, StateCounts>;
     newWorkspace: number;
     oldWorkspace: number;
     skipped: Partial<Record<RestoreSkipKind, number>>;
@@ -187,9 +226,15 @@ export function planRestoreFailed(input: {
   sessions: readonly FailedRestore[];
   tree: CmuxTree;
 }): RestoreFailedPlan {
+  const byState = Object.fromEntries(
+    OLD_TAB_RESUME_STATES.map((state): [OldTabResumeState, StateCounts] => [
+      state,
+      {newWorkspace: 0, oldWorkspace: 0, sessions: 0, skipped: 0},
+    ]),
+  ) as Record<OldTabResumeState, StateCounts>;
   const plan: RestoreFailedPlan = {
     cannotTell: input.live.unplaced,
-    counts: {newWorkspace: 0, oldWorkspace: 0, skipped: {}},
+    counts: {byState, newWorkspace: 0, oldWorkspace: 0, skipped: {}},
     liveSessionsFound: input.live.bySessionId.size,
     planned: [],
     skipped: [],
@@ -217,6 +262,7 @@ export function planRestoreFailed(input: {
         name,
         reason,
         sessionId: session.sessionId,
+        state: session.state,
       });
     };
     if (candidate == null) {
@@ -312,6 +358,7 @@ export function planRestoreFailed(input: {
       repo: candidate.repo,
       sessionBeadId: candidate.sessionBeadId,
       sessionId: session.sessionId,
+      state: session.state,
       target: present ? 'oldWorkspace' : 'newWorkspace',
       title: candidate.title,
       workspaceId: session.workspaceId,
@@ -325,14 +372,20 @@ export function planRestoreFailed(input: {
         name: cut.name,
         reason: `--limit ${input.limit} kept the newest ${input.limit}`,
         sessionId: cut.sessionId,
+        state: cut.state,
       });
     }
     plan.planned = plan.planned.slice(0, input.limit);
   }
-  for (const entry of plan.planned) plan.counts[entry.target] += 1;
+  for (const session of input.sessions) byState[session.state].sessions += 1;
+  for (const entry of plan.planned) {
+    plan.counts[entry.target] += 1;
+    byState[entry.state][entry.target] += 1;
+  }
   for (const entry of plan.skipped) {
     plan.counts.skipped[entry.kind] =
       (plan.counts.skipped[entry.kind] ?? 0) + 1;
+    byState[entry.state].skipped += 1;
   }
   return plan;
 }
@@ -355,6 +408,8 @@ export interface OpenedTab {
   /** When cmux answered OK; null before the call or when it failed. */
   openedAt: string | null;
   sessionId: string;
+  /** kwand.14: what its old tab showed. */
+  state: OldTabResumeState;
   /** The new tab's surface uuid (oldWorkspace), read from the tree after the call. */
   surfaceId: string | null;
   target: TabTarget;
@@ -394,9 +449,32 @@ const LABELS: readonly Field[] = [
   'Last activity',
   'Checkout',
   'Opens in',
-  'Failed tab',
+  'Old tab',
   'Why',
 ].map((label) => ({label, value: ''}));
+
+/** kwand.14: what an old tab shows, in the words of the restart grouping. */
+const OLD_TAB_WORDS: Record<OldTabResumeState, string> = {
+  restoreFailed: "restore failed: it shows cmux's restore error",
+  shellInTab: 'back as a plain shell, no Claude, no cmux error shown',
+};
+
+function oldTabLine(state: OldTabResumeState, tabId: string): string {
+  return `${BEFORE_RESTART_WORDS[state].emoji} ${tabId}: ${OLD_TAB_WORDS[state]}`;
+}
+
+/** kwand.14: one header line per state, so the two stay apart. */
+function stateFields(rec: RestoreFailedRecord): Field[] {
+  return OLD_TAB_RESUME_STATES.map((state) => {
+    const counts = rec.counts.byState[state];
+    const plural = counts.sessions === 1 ? 'session' : 'sessions';
+    const opens = counts.oldWorkspace + counts.newWorkspace;
+    return {
+      label: state === 'restoreFailed' ? 'Restore failed' : 'Shell in tab',
+      value: `${BEFORE_RESTART_WORDS[state].emoji} ${counts.sessions} ${plural} (${OLD_TAB_WORDS[state]}); ${rec.dryRun ? 'would open' : 'planned'} ${opens}, skipped ${counts.skipped}`,
+    };
+  });
+}
 
 function block(title: string, fields: readonly Field[], style: OutputStyle) {
   return [
@@ -443,7 +521,7 @@ export function renderRestoreFailed(
     sectionHeader(text, {color: style.color, emoji});
   const blocks: string[] = [
     header(
-      'thread open --restore-failed: sessions whose cmux restore failed',
+      'thread open --restore-failed: sessions whose old tab came back without Claude',
       '💥',
     ),
     fieldLines(
@@ -468,8 +546,9 @@ export function renderRestoreFailed(
               ? 'none (--limit <n> opens at most n)'
               : `at most ${rec.filters.limit}, newest first`,
         },
+        ...stateFields(rec),
         {
-          label: 'Failed tabs',
+          label: 'Old tabs',
           value:
             'left as they are: never typed into, sent to or closed (the new tab opens beside each one)',
         },
@@ -522,7 +601,10 @@ export function renderRestoreFailed(
                   },
                   {label: 'Checkout', value: tildeText(entry.checkout)},
                   {label: 'Opens in', value: openedIn(entry, tab)},
-                  {label: 'Failed tab', value: entry.failedTabId},
+                  {
+                    label: 'Old tab',
+                    value: oldTabLine(entry.state, entry.failedTabId),
+                  },
                   ...(tab?.idProblem == null
                     ? []
                     : [{label: 'Why', value: tab.idProblem}]),
@@ -565,6 +647,10 @@ export function renderRestoreFailed(
               {
                 label: 'Last activity',
                 value: activityWords(entry.lastActivityAt, now),
+              },
+              {
+                label: 'Old tab',
+                value: `${BEFORE_RESTART_WORDS[entry.state].emoji} ${OLD_TAB_WORDS[entry.state]}`,
               },
               {label: 'Why', value: entry.reason},
             ],
@@ -655,7 +741,37 @@ function conflictingFlags(options: OpenOptions): string[] {
   ].filter((flag): flag is string => flag != null);
 }
 
-/** The real sessions: the inbox with the restart record joined, its `restoreFailed` group. */
+/**
+ * kwand.14, pure: the sessions of the restart grouping that get the
+ * old-workspace resume, each with its state. Every other state is left out.
+ */
+export function oldTabSessions(
+  groups: readonly {
+    entries: readonly BeforeRestartEntry[];
+    state: BeforeRestartState;
+  }[],
+): FailedRestore[] {
+  return groups.flatMap(({entries, state}) =>
+    isOldTabResumeState(state)
+      ? entries.map((entry) => ({
+          // A folded untracked line stands for several sessions: this one's id.
+          candidate:
+            entry.row == null
+              ? null
+              : {...candidateOf(entry.row), sessionId: entry.sessionId},
+          sessionId: entry.sessionId,
+          state,
+          tabId: entry.fact.tab.id,
+          workspaceId: entry.fact.tab.workspaceId,
+        }))
+      : [],
+  );
+}
+
+/**
+ * The real sessions: the inbox with the restart record joined, its groups in
+ * OLD_TAB_RESUME_STATES (`restoreFailed`, and `shellInTab` since kwand.14).
+ */
 async function realFailedRestores(
   cwd: string,
   env: EnvLike,
@@ -678,21 +794,9 @@ async function realFailedRestores(
       reason: `what was open before the last restart could not be read: ${read.read.beforeRestart.reason}`,
     };
   }
-  const group = beforeRestartGroups(read.read).find(
-    (entry) => entry.state === 'restoreFailed',
-  );
   return {
     kind: 'read',
-    sessions: (group?.entries ?? []).map((entry) => ({
-      // A folded untracked line stands for several sessions: this one's id.
-      candidate:
-        entry.row == null
-          ? null
-          : {...candidateOf(entry.row), sessionId: entry.sessionId},
-      sessionId: entry.sessionId,
-      tabId: entry.fact.tab.id,
-      workspaceId: entry.fact.tab.workspaceId,
-    })),
+    sessions: oldTabSessions(beforeRestartGroups(read.read)),
   };
 }
 
@@ -735,7 +839,7 @@ export async function openRestoreFailed(
   const conflicts = conflictingFlags(options);
   if (conflicts.length > 0) {
     return refuse(
-      `${conflicts.join(', ')} ${conflicts.length === 1 ? 'does' : 'do'} not go with --restore-failed: the restart record decides which sessions open (every one whose cmux restore failed, whatever its age), and each opens where it was. --repo, --limit, --force-unplaced, --dry-run and --json apply.`,
+      `${conflicts.join(', ')} ${conflicts.length === 1 ? 'does' : 'do'} not go with --restore-failed: the restart record decides which sessions open (every one whose old tab came back without Claude, restore failed or shell in tab, whatever its age), and each opens where it was. --repo, --limit, --force-unplaced, --dry-run and --json apply.`,
     );
   }
   const limit = parseLimit(options.limit ?? null);
@@ -901,6 +1005,7 @@ export async function openRestoreFailed(
         name: entry.name,
         openedAt: null,
         sessionId: entry.sessionId,
+        state: entry.state,
         surfaceId: null,
         target: entry.target,
         workspaceId: entry.target === 'oldWorkspace' ? entry.workspaceId : null,
