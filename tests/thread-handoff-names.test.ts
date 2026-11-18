@@ -681,6 +681,70 @@ describe('readHandoffChain', () => {
     expect(forward.links).toEqual(['complete', 'onlyContinued']);
   });
 
+  test('home-base-lasun.1 F1: a successor that carries only continues: is found by the reverse search', () => {
+    // t-b lost its continued-by:t-c; t-c still says it continues t-b.
+    const half = CHAIN.map((bead) =>
+      bead.id === 't-b'
+        ? {...bead, labels: ['session', 'handed-off', 'continues:t-a']}
+        : bead,
+    );
+    const carrying = (beadId: string): {ids: string[]; kind: 'read'} => ({
+      ids: half
+        .filter((bead) => bead.labels.includes(`continues:${beadId}`))
+        .map((bead) => bead.id),
+      kind: 'read',
+    });
+    const chain = readHandoffChain('t-a', {
+      findContinuing: carrying,
+      showBead: beadsOf(half),
+    });
+    if ('kind' in chain) throw new Error(chain.reason);
+    expect(chain.nodes.map((node) => node.beadId)).toEqual([
+      't-a',
+      't-b',
+      't-c',
+    ]);
+    expect(chain.links).toEqual(['complete', 'onlyContinues']);
+    expect(chain.problems).toEqual([]);
+    expect(
+      chainLines(chain, {count: 0, kind: 'counted', newest: 't-c'}).join('\n'),
+    ).toContain(
+      '⚠️ half-written link: t-c has continues:t-b, but t-b has no continued-by:t-c',
+    );
+
+    // Readers with no reverse search end where continued-by: ends, as before.
+    const without = readHandoffChain('t-a', {showBead: beadsOf(half)});
+    if ('kind' in without) throw new Error(without.reason);
+    expect(without.nodes.map((node) => node.beadId)).toEqual(['t-a', 't-b']);
+  });
+
+  test('home-base-lasun.1 F1: a failed or forked reverse search is a problem, never the end', () => {
+    const failed = readHandoffChain('t-c', {
+      findContinuing: () => ({kind: 'failed', reason: 'export unreadable'}),
+      showBead: beadsOf(CHAIN),
+    });
+    if ('kind' in failed) throw new Error(failed.reason);
+    expect(failed.problems).toEqual([
+      'could not check whether a session continues t-c (it has no continued-by: label): export unreadable',
+    ]);
+    const forked = readHandoffChain('t-c', {
+      findContinuing: () => ({ids: ['t-x', 't-y'], kind: 'read'}),
+      showBead: beadsOf(CHAIN),
+    });
+    if ('kind' in forked) throw new Error(forked.reason);
+    expect(forked.problems).toEqual([
+      '2 sessions carry continues:t-c (t-x, t-y), so the chain after it is not shown',
+    ]);
+    const gone = readHandoffChain('t-c', {
+      findContinuing: () => ({ids: ['t-x'], kind: 'read'}),
+      showBead: beadsOf(CHAIN),
+    });
+    if ('kind' in gone) throw new Error(gone.reason);
+    expect(gone.problems).toEqual([
+      't-x carries continues:t-c, but t-x could not be read: no t-x',
+    ]);
+  });
+
   test('an unreadable neighbour stops the walk and says so', () => {
     const missing = CHAIN.filter((bead) => bead.id !== 't-c');
     const chain = readHandoffChain('t-a', {showBead: beadsOf(missing)});

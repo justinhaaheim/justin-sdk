@@ -10,7 +10,14 @@
 import type {Sandbox} from './sandbox';
 
 import {afterAll, beforeAll, describe, expect, test} from 'bun:test';
-import {mkdirSync, readFileSync, rmSync, writeFileSync} from 'fs';
+import {
+  appendFileSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'fs';
 import {dirname, join} from 'path';
 
 import {brClose, brUpdate, runBr} from '../src/beads/br';
@@ -126,6 +133,9 @@ function session(
         timestamp: times.record,
         type: 'assistant',
       },
+      // home-base-kwand.4: the turn ended (the log's Stop), so the card
+      // carries no cut-off line.
+      {subtype: 'turn_duration', timestamp: times.record, type: 'system'},
     ]
       .map((record) => JSON.stringify(record))
       .join('\n'),
@@ -462,7 +472,7 @@ describe('thread inbox: sections (j8q3e.1 D5)', () => {
         '- **Section:** 🛑 Needs you',
         '- **You asked:**',
         '  - 🛑 Write the export runbook',
-        '    - **Now:** Waiting on you: BD100 Which bucket? — next: your answer to BD100 — since <its last change>',
+        '    - **Now:** Waiting on you: Q100 Which bucket? — next: your answer to Q100 — since <its last change>',
         '- **Where it is:** 🛑 Waiting on you (1 blocking question)',
         `- **You need to:** **Answer: Which bucket?** \`bun run justin-sdk thread answer ${s1}\``,
         `- **Resume:** \`claude --resume ${sid(1)}\``,
@@ -483,6 +493,57 @@ describe('thread inbox: sections (j8q3e.1 D5)', () => {
     expect(text.split('- **You need to:**').length - 1).toBe(
       headings(text).length,
     );
+  });
+});
+
+describe('thread inbox: cut off mid-turn (home-base-kwand.4, G12)', () => {
+  /** Session `n`'s transcript in this file's shared world. */
+  function transcriptOf(n: number): string {
+    const projects = join(sb.path, 'projects');
+    for (const dir of readdirSync(projects)) {
+      const path = join(projects, dir, `${sid(n)}.jsonl`);
+      try {
+        readFileSync(path);
+        return path;
+      } catch {
+        // Not in this project directory.
+      }
+    }
+    throw new Error(`no transcript for session ${n}`);
+  }
+
+  test('a session whose last turn has no stop mark carries the line and the field; a replied one neither', async () => {
+    const path = transcriptOf(2);
+    const original = readFileSync(path, 'utf8');
+    try {
+      // A prompt, then a tool call with no result: the session was killed.
+      appendFileSync(
+        path,
+        `\n${JSON.stringify({message: {content: 'and the other one', role: 'user'}, timestamp: '2026-09-26T09:00:00.000Z', type: 'user'})}\n${JSON.stringify({message: {content: [{id: 'tu1', input: {}, name: 'Bash', type: 'tool_use'}], role: 'assistant'}, timestamp: '2026-09-26T09:00:05.000Z', type: 'assistant'})}\n`,
+      );
+      const r = await read();
+      const cut = r.rows.find((row) => row.sessionId === sid(2));
+      const replied = r.rows.find((row) => row.sessionId === sid(1));
+      expect(cut?.ending).toEqual({
+        at: '2026-09-26T09:00:05.000Z',
+        inFlight: 'toolCall',
+        kind: 'cutOff',
+        // The pane lookup did not run: whether it runs is unknown, and an old
+        // record never reads as working now.
+        live: null,
+      });
+      expect(replied?.ending.kind).toBe('replied');
+      const text = render(r);
+      expect(text).toContain(
+        '- **Where it is:** ⚠️ Open work, no blocker\n  - **Last turn:** ✂️ cut off mid-turn at ',
+      );
+      expect(text).toContain(
+        ': a tool call had no result (whether it runs now is unknown)',
+      );
+      expect(text.match(/\*\*Last turn:\*\*/g)?.length).toBe(1);
+    } finally {
+      writeFileSync(path, original);
+    }
   });
 });
 

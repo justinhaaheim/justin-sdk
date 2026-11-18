@@ -77,6 +77,12 @@ export interface ResolvedHandoffConfig {
   /** The successor's `claude --permission-mode` (D7). */
   permissionMode: HandoffPermissionMode;
   permissionModeSource: ThreadConfigSource;
+  /**
+   * home-base-z7o2m D7, feature knob, default false. True: the handoff block
+   * carries the messages Justin typed in the session handing off.
+   */
+  pickupMessages: boolean;
+  pickupMessagesSource: ThreadConfigSource;
   /** What becomes of the old tab once the successor has linked (D6). */
   predecessor: HandoffPredecessorMode;
   predecessorSource: ThreadConfigSource;
@@ -263,6 +269,12 @@ export function resolveHandoffConfig(
     `one of ${HANDOFF_PERMISSION_MODES.join(', ')}`,
     HANDOFF_DEFAULTS.permissionMode,
   );
+  const pickupMessages = field(
+    'pickupMessages',
+    (value): value is boolean => typeof value === 'boolean',
+    'true or false',
+    HANDOFF_DEFAULTS.pickupMessages as boolean,
+  );
   const maxSessionPercent = usageField('maxSessionPercent');
   const maxWeekPercent = usageField('maxWeekPercent');
   const maxSampleAgeMinutes = usageField('maxSampleAgeMinutes');
@@ -303,6 +315,8 @@ export function resolveHandoffConfig(
     maxUnattendedHandoffsSource: maxUnattendedHandoffs.source,
     permissionMode: permissionMode.value,
     permissionModeSource: permissionMode.source,
+    pickupMessages: pickupMessages.value,
+    pickupMessagesSource: pickupMessages.source,
     predecessor: predecessor.value,
     predecessorSource: predecessor.source,
     successor: successor.value,

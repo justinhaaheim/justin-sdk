@@ -164,6 +164,7 @@ function markdownItem(
   gap: ItemGap,
   shown: QuestionShown | null,
   id: null | string,
+  withDefault: boolean,
 ): string {
   const marker = `${number}. `;
   const indent = pad(marker.length);
@@ -202,11 +203,15 @@ function markdownItem(
       // The context bullets and the options are ONE nested list in markdown,
       // so every one of them is a sibling of the next: two empty lines each.
       const items = [...context, ...options].map((line) => `${indent}${line}`);
-      return spacedList([first, markdownItems(items), `${indent}${fallback}`]);
+      return spacedList([
+        first,
+        markdownItems(items),
+        withDefault ? `${indent}${fallback}` : '',
+      ]);
     }
     if (context.length > 0) blocks.push({lines: context});
     for (const option of options) blocks.push({lines: [option]});
-    blocks.push({lines: [fallback]});
+    if (withDefault) blocks.push({lines: [fallback]});
   }
   return [
     first,
@@ -224,6 +229,7 @@ function ansiItem(
   style: OutputStyle,
   shown: QuestionShown | null,
   id: null | string,
+  withDefault: boolean,
 ): string {
   const {color, width} = style;
   const parsed = parseAsk(question.description);
@@ -295,17 +301,19 @@ function ansiItem(
       wrap(`${letter} ${mark}${label}${why}`, DETAIL_COLUMN, DETAIL_COLUMN + 3),
     );
   });
-  blocks.push(
-    wrap(
-      paint(
-        `If you don't answer: ${defaultSentence(ask, question.priority)}`,
-        ['italic'],
-        color,
+  if (withDefault) {
+    blocks.push(
+      wrap(
+        paint(
+          `If you don't answer: ${defaultSentence(ask, question.priority)}`,
+          ['italic'],
+          color,
+        ),
+        DETAIL_COLUMN,
+        DETAIL_COLUMN,
       ),
-      DETAIL_COLUMN,
-      DETAIL_COLUMN,
-    ),
-  );
+    );
+  }
   return blocks.join('\n\n');
 }
 
@@ -316,12 +324,17 @@ export function renderAsk(
   style: OutputStyle,
   gap: ItemGap = 1,
   shown: QuestionShown | null = null,
-  /** home-base-1rxt0.4 D4: the text for its brackets (`BD7`), or null. */
+  /** home-base-1rxt0.4 D4: the text for its brackets (`Q107`), or null. */
   id: null | string = null,
+  /**
+   * home-base-88y8m.3 F2: false leaves out the "If you don't answer" line,
+   * for a question that is no longer open. Every open question keeps it.
+   */
+  withDefault = true,
 ): string {
   return style.color
-    ? ansiItem(question, number, style, shown, id)
-    : markdownItem(question, number, gap, shown, id);
+    ? ansiItem(question, number, style, shown, id, withDefault)
+    : markdownItem(question, number, gap, shown, id, withDefault);
 }
 
 /**
@@ -334,27 +347,40 @@ export function renderAsk(
  * name is in full and unmarked.
  *
  * `ids` (home-base-1rxt0.4 D4): per question id, what its brackets hold
- * (`BD7`, or its bead id when its short id cannot be shown). A question it
+ * (`Q107`, or its bead id when its short id cannot be shown). A question it
  * does not name has no brackets.
+ *
+ * `numbers` (home-base-88y8m D1, `thread status --changes`): per question id,
+ * its number in the full list, so a question keeps the number the full report
+ * gives it when the others are left out. A question it does not name is
+ * numbered by its place here, from 1.
+ *
+ * `withoutDefault` (home-base-88y8m.3 F2): the ids of questions that are no
+ * longer open (answered or closed), whose "If you don't answer" line is left
+ * out: it would read as if the question still needed him. A question it does
+ * not name keeps the line.
  */
 export function renderAsks(
   questions: readonly AskBeadView[],
   options: {
     ids?: ReadonlyMap<string, string>;
     itemGap?: ItemGap;
+    numbers?: ReadonlyMap<string, number>;
     shown?: ReadonlyMap<string, QuestionShown>;
     style: OutputStyle;
+    withoutDefault?: ReadonlySet<string>;
   },
 ): string {
   const gap = options.itemGap ?? 1;
   const items = sortAsks(questions).map((question, index) =>
     renderAsk(
       question,
-      index + 1,
+      options.numbers?.get(question.id) ?? index + 1,
       options.style,
       gap,
       options.shown?.get(question.id) ?? null,
       options.ids?.get(question.id) ?? null,
+      options.withoutDefault?.has(question.id) !== true,
     ),
   );
   return !options.style.color && gap === 2

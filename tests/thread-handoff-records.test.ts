@@ -183,9 +183,13 @@ async function chainWorld(): Promise<World> {
 }
 
 describe('thread show prints the whole chain (AC1)', () => {
-  test('from any of the three, all three in order, each with its title and when it handed off', async () => {
+  // home-base-lasun.1 F1 changed this test: the forward walk now runs the
+  // reverse search at C, so D (only continues:C) is the fourth session from A,
+  // B and C too, its link is printed as half-written, and the count is taken
+  // back from D. Before, the chain ended at C and counted 2 from C.
+  test('from any of the three, all four in order (D by the reverse search), each with its title and when it handed off', async () => {
     const w = await chainWorld();
-    const ids = [A, B, C].map((session) => bead(w, session));
+    const ids = [A, B, C, D].map((session) => bead(w, session));
     for (const session of [A, B, C]) {
       const text = await showText(w, session);
       expect(text).toContain('**Handoff chain:**');
@@ -200,7 +204,10 @@ describe('thread show prints the whole chain (AC1)', () => {
         `link to 2: linked (continued-by:${ids[1]} on ${ids[0]}, continues:${ids[0]} on ${ids[1]})`,
       );
       expect(text).toContain(
-        `Handoffs in a row since Justin last typed: 2, counted back from ${ids[2]}, the newest session`,
+        `link to 4: ⚠️ half-written link: ${ids[3]} has continues:${ids[2]}, but ${ids[2]} has no continued-by:${ids[3]}`,
+      );
+      expect(text).toContain(
+        `Handoffs in a row since Justin last typed: 3, counted back from ${ids[3]}, the newest session`,
       );
     }
   });

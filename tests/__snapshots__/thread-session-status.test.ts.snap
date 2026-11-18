@@ -103,7 +103,7 @@ exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part
 
    **Stage:** tested — next: built
 
-   **Now:** Stopped: the session waits on your answer to BD100 — next: going ahead with: I leave the output uncompressed. — since <its last change>
+   **Now:** Stopped: the session waits on your answer to Q100 — next: going ahead with: I leave the output uncompressed. — since <its last change>
 
    - ✅ Profile the slow query (t-SESS.1.1)
 
@@ -113,7 +113,7 @@ exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part
 
 2. 🛑 **Write the export runbook** (t-SESS.2) — blocked on question 1
 
-   **Now:** Waiting on you: BD100 Which S3 bucket should the runbook point at? — next: your answer to BD100 — since <its last change>
+   **Now:** Waiting on you: Q100 Which S3 bucket should the runbook point at? — next: your answer to Q100 — since <its last change>
 
 ---
 
@@ -129,7 +129,7 @@ exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part
 
 ## Questions for you
 
-1. [BD100] 🛑 P0 · [Pick a/b] **Which S3 bucket should the runbook point at?** (t-SESS.3)
+1. [Q100] 🛑 P0 · [Pick a/b] **Which S3 bucket should the runbook point at?** (t-SESS.3)
 
    - The runbook has to name the bucket the export writes to.
 
@@ -142,7 +142,7 @@ exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part
    *If you don't answer: I stop here; this one is yours.*
 
 
-2. [BD101] ⚪ P3 · [Answer] **Should the export also gzip its output?** (t-SESS.4)
+2. [Q101] ⚪ P3 · [Answer] **Should the export also gzip its output?** (t-SESS.4)
 
    - Compressed files are a third of the size.
 
@@ -190,7 +190,7 @@ exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part
 
          \x1B[1mStage:\x1B[0m tested — next: built
 
-         \x1B[1mNow:\x1B[0m Stopped: the session waits on your answer to BD100 — next: going ahead with: I leave
+         \x1B[1mNow:\x1B[0m Stopped: the session waits on your answer to Q100 — next: going ahead with: I leave
          the output uncompressed. — since <its last change>
 
          \x1B[2m-\x1B[0m ✅ Profile the slow query \x1B[2m(t-SESS.1.1)\x1B[0m
@@ -199,8 +199,8 @@ exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part
 
       \x1B[1m2. \x1B[0m🛑 \x1B[1mWrite the export runbook\x1B[0m \x1B[2m(t-SESS.2)\x1B[0m — \x1B[1;31mblocked on question 1\x1B[0m
 
-         \x1B[1mNow:\x1B[0m Waiting on you: BD100 Which S3 bucket should the runbook point at? — next: your answer
-         to BD100 — since <its last change>
+         \x1B[1mNow:\x1B[0m Waiting on you: Q100 Which S3 bucket should the runbook point at? — next: your answer
+         to Q100 — since <its last change>
 
   \x1B[2m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\x1B[0m
 
@@ -214,7 +214,7 @@ exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part
 
   🙋 \x1B[1;35mQuestions for you\x1B[0m
 
-      \x1B[1m1. \x1B[0m\x1B[1m[BD100]\x1B[0m \x1B[1;31m🛑 P0\x1B[0m · \x1B[36m[Pick a/b]\x1B[0m \x1B[1mWhich S3 bucket should the runbook point at?\x1B[0m \x1B[2m(t-SESS.3)\x1B[0m
+      \x1B[1m1. \x1B[0m\x1B[1m[Q100]\x1B[0m \x1B[1;31m🛑 P0\x1B[0m · \x1B[36m[Pick a/b]\x1B[0m \x1B[1mWhich S3 bucket should the runbook point at?\x1B[0m \x1B[2m(t-SESS.3)\x1B[0m
 
          \x1B[2m-\x1B[0m The runbook has to name the bucket the export writes to.
 
@@ -224,7 +224,7 @@ exports[`fixture 2: a work session with two requests, stages, a P0 and a P3 Part
 
          \x1B[3mIf you don't answer: I stop here; this one is yours.\x1B[0m
 
-      \x1B[1m2. \x1B[0m\x1B[1m[BD101]\x1B[0m \x1B[2m⚪ P3\x1B[0m · \x1B[36m[Answer]\x1B[0m \x1B[1mShould the export also gzip its output?\x1B[0m \x1B[2m(t-SESS.4)\x1B[0m
+      \x1B[1m2. \x1B[0m\x1B[1m[Q101]\x1B[0m \x1B[2m⚪ P3\x1B[0m · \x1B[36m[Answer]\x1B[0m \x1B[1mShould the export also gzip its output?\x1B[0m \x1B[2m(t-SESS.4)\x1B[0m
 
          \x1B[2m-\x1B[0m Compressed files are a third of the size.
 

@@ -84,6 +84,7 @@ function found(items: Record<string, string>): ReportBaseline {
       at: at(0).toISOString(),
       block: {digest: 'd', lines: 3},
       items,
+      message: null,
       shownAt: at(0).toISOString(),
     },
   };
@@ -99,6 +100,7 @@ function snap(
     at: at(minute).toISOString(),
     block: {digest: `d${minute}`, lines: 3},
     items,
+    message: null,
     shownAt: shown == null ? null : at(shown).toISOString(),
   };
 }
@@ -389,6 +391,8 @@ describe('the snapshot file', () => {
       {block: {digest: 'd', lines: 0}},
       {block: 'd'},
       {shownAt: 'yesterday'},
+      // home-base-88y8m D4: a message that is not a string is malformed.
+      {message: 7},
     ]) {
       appendFileSync(
         path,
@@ -396,7 +400,8 @@ describe('the snapshot file', () => {
       );
     }
     expect(readReportSnapshots(SESSION, e).kind).toBe('unknown');
-    // A line saved before F1 (no block, no shownAt) is read, never as shown.
+    // A line saved before F1 (no block, no shownAt) is read, never as shown,
+    // and (home-base-88y8m D4) one saved before D4 has no message.
     appendFileSync(
       path,
       `${JSON.stringify({at: at(1).toISOString(), items: {'q:a': 'f'}})}\n`,
@@ -408,6 +413,7 @@ describe('the snapshot file', () => {
         at: at(1).toISOString(),
         block: null,
         items: {'q:a': 'f'},
+        message: null,
         shownAt: null,
       },
     ]);
@@ -425,7 +431,7 @@ const BLOCK_TEXT = [
   '',
   '**Last activity:** 9:01am',
   '',
-  '1. [BD1] ⚪ P3 · [Answer] **Gzip the output?** (t-q3)',
+  '1. [Q101] ⚪ P3 · [Answer] **Gzip the output?** (t-q3)',
   '',
   PART_ONE_SEPARATOR,
 ].join('\n');
@@ -788,7 +794,7 @@ describe('thread status: repeat reports (D1, D2, D3, D6)', () => {
     expect(inFull(first, 'Keep the old export a week?')).toBe(false);
     expect(inFull(first, 'Gzip the output?')).toBe(false);
     expect(questionLine(first, w.questions.p3)).toMatch(
-      /^4\. \[BD103\] ⚪ P3 · \[Answer\] \*\*Gzip the output\?\*\* \(t-[^)]+\)$/u,
+      /^4\. \[Q103\] ⚪ P3 · \[Answer\] \*\*Gzip the output\?\*\* \(t-[^)]+\)$/u,
     );
     expect(first).toContain(
       '*Questions 3 and 4 have not changed since the last report, so each is on one line. Ask for the full report to see them in full.*',
@@ -838,17 +844,17 @@ describe('thread status: repeat reports (D1, D2, D3, D6)', () => {
     const again = await status(w, at(6));
     expect(block(again)).toBe(block(first));
     expect(questionLine(first, outcome.id)).toContain(
-      `5. ${NEW_MARK} [BD104] ⚪ P4 · `,
+      `5. ${NEW_MARK} [Q104] ⚪ P4 · `,
     );
     expect(inFull(first, 'Rename the job?')).toBe(true);
     expect(questionLine(first, w.questions.p3)).toContain(
-      `4. ${CHANGED_MARK} [BD103] ⚪ P3 · `,
+      `4. ${CHANGED_MARK} [Q103] ⚪ P3 · `,
     );
     // Changed, so in full: its context (filed under the old title) is shown.
     expect(first).toContain('Context for Gzip the output?');
     // Unchanged: the P2 is one line and carries no marker.
     expect(questionLine(first, w.questions.p2)).toMatch(
-      /^3\. \[BD102\] 🟡 P2 · /u,
+      /^3\. \[Q102\] 🟡 P2 · /u,
     );
     expect(questionLine(first, request.id)).toContain(
       `${NEW_MARK} 🔲 **Write the runbook**`,
@@ -935,11 +941,11 @@ describe('F1 (home-base-sg9q9.11): the last report is one Justin was shown', () 
     endTurn(w, 3, pasted(await status(w, at(1))));
     const rename = await askMore(w, '3', 'Rename the job?');
     const unseen = await status(w, at(5));
-    expect(questionLine(unseen, rename)).toContain(`${NEW_MARK} [BD104]`);
+    expect(questionLine(unseen, rename)).toContain(`${NEW_MARK} [Q104]`);
     // The turn ends with no block: Justin never saw this report.
     endTurn(w, 7, NO_BLOCK);
     const next = await status(w, at(8));
-    expect(questionLine(next, rename)).toContain(`${NEW_MARK} [BD104]`);
+    expect(questionLine(next, rename)).toContain(`${NEW_MARK} [Q104]`);
     expect(inFull(next, 'Rename the job?')).toBe(true);
     // What he did see stays as designed: unchanged P2 and P3 on one line.
     expect(inFull(next, 'Gzip the output?')).toBe(false);

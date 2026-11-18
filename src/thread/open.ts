@@ -1861,6 +1861,11 @@ export interface OpenOptions {
    * the sessions this run opens (default true).
    */
   restore?: boolean;
+  /**
+   * home-base-kwand.3: `--restore-failed`, open every session whose cmux
+   * restore failed as a new tab of its old workspace (open-restore-failed.ts).
+   */
+  restoreFailed?: boolean;
   /** Reserved for the --undo dispatch. */
   run: string | null;
   /** `--since 24h|3d|2w`; null when not given (then --days, then config). */
@@ -2000,7 +2005,7 @@ export function takeOpenLock(
 }
 
 /** Remove the run lock, only when it is still this run's own. */
-function releaseOpenLock(path: string, pid: number): void {
+export function releaseOpenLock(path: string, pid: number): void {
   try {
     const parsed = lockSchema.safeParse(
       JSON.parse(readFileSync(path, 'utf8')) as unknown,
@@ -2154,6 +2159,11 @@ export async function openSessions(
   if (options.undo || options.run != null) {
     return refuse(
       'openSessions only opens: thread open --undo (and --run) runs undoOpen in open-undo.ts.',
+    );
+  }
+  if (options.restoreFailed === true) {
+    return refuse(
+      'openSessions opens unfinished sessions: thread open --restore-failed runs openRestoreFailed in open-restore-failed.ts.',
     );
   }
   if (options.includeUntracked) {
@@ -2445,6 +2455,12 @@ export async function openSessions(
 }
 
 export async function runThreadOpen(options: OpenOptions): Promise<number> {
+  // home-base-kwand.3: first, so it refuses --list, --undo and --run itself.
+  if (options.restoreFailed === true) {
+    // A dynamic import: open-restore-failed imports this module.
+    const {runRestoreFailed} = await import('./open-restore-failed');
+    return await runRestoreFailed(options);
+  }
   // yukaf.22 item 6: --list reads the records only (no cmux, no ps).
   if (options.list === true) {
     if (options.undo || options.run != null) {

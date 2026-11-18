@@ -66,6 +66,9 @@ import {
   THREAD_BRAKE_HOOK_COMMAND,
   THREAD_BRAKE_HOOK_EVENT,
   THREAD_BRAKE_HOOK_FINGERPRINT,
+  THREAD_DRAFTS_HOOK_COMMAND,
+  THREAD_DRAFTS_HOOK_EVENTS,
+  THREAD_DRAFTS_HOOK_FINGERPRINT,
   THREAD_FULL_REPORT_HOOK_COMMAND,
   THREAD_FULL_REPORT_HOOK_EVENT,
   THREAD_FULL_REPORT_HOOK_FINGERPRINT,
@@ -500,6 +503,13 @@ export const COMPONENT_MANIFESTS: Record<ComponentName, ComponentManifest> = {
         event: THREAD_FULL_REPORT_HOOK_EVENT,
         fingerprint: THREAD_FULL_REPORT_HOOK_FINGERPRINT,
       },
+      // The hourly drafts scan (home-base-fmf1n): UserPromptSubmit and Stop,
+      // only where componentConfig.thread.draftsScanHook is on.
+      ...THREAD_DRAFTS_HOOK_EVENTS.map((event) => ({
+        command: THREAD_DRAFTS_HOOK_COMMAND,
+        event,
+        fingerprint: THREAD_DRAFTS_HOOK_FINGERPRINT,
+      })),
     ],
     purpose:
       'UserPromptSubmit/Stop hooks that capture every prompt and yield (creating the thread bead on the first prompt) and refuse to end a session without a report.',

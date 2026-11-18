@@ -3,6 +3,7 @@
  * temporary threads state dir. Nothing here talks to the real cmux or ps.
  */
 import type {CmuxCall} from '../src/thread/cmux';
+import type {DraftsScanRun} from '../src/thread/drafts-scan-runs';
 
 import {afterEach, beforeEach, describe, expect, spyOn, test} from 'bun:test';
 import {
@@ -27,6 +28,7 @@ import {
   scanDrafts,
   type ScanResult,
 } from '../src/thread/drafts-scan';
+import {readDraftsScanRuns} from '../src/thread/drafts-scan-runs';
 import {
   draftWasSent,
   inputDraftsDir,
@@ -945,6 +947,165 @@ describe('thread drafts scan', () => {
     expect(await reasonOf(env, fakeCmux([], true).run)).toContain(
       `cmux: Failed to connect to socket, at the socket ${env.CMUX_SOCKET_PATH} (from CMUX_SOCKET_PATH)`,
     );
+  });
+
+  // home-base-fmf1n D8: the launchd agent's refusal used to be blamed on the
+  // sandbox.
+  test("cmux's refusal of an outside process names the Socket Control Mode, not the sandbox", async () => {
+    const lines: string[] = [];
+    const spy = spyOn(console, 'error').mockImplementation((...args) => {
+      lines.push(args.join(' '));
+    });
+    const refuse = (reason: string) => (): Promise<CmuxCall> =>
+      Promise.resolve({kind: 'failed', reason, timedOut: false});
+    try {
+      expect(
+        await runThreadDraftsScan({
+          deps: {
+            hookStorePath,
+            nowIso: () => NOW,
+            ps: psOf([]),
+            run: refuse(
+              'cmux ping failed: Error: ERROR: Access denied - only processes started inside cmux can connect.',
+            ),
+          },
+          env,
+          json: false,
+          style: PLAIN_STYLE,
+        }),
+      ).toBe(2);
+      const refused = lines.join('\n');
+      expect(refused).toContain(
+        "cmux's Socket Control Mode refused this process",
+      );
+      expect(refused).toContain('the Claude Code sandbox is not the cause');
+      expect(refused).not.toContain('the sandbox blocks the cmux socket');
+      lines.length = 0;
+      // Any other failure keeps the sandbox hint.
+      await runThreadDraftsScan({
+        deps: {
+          hookStorePath,
+          nowIso: () => NOW,
+          ps: psOf([]),
+          run: refuse('cmux: Failed to connect to socket'),
+        },
+        env,
+        json: false,
+        style: PLAIN_STYLE,
+      });
+      expect(lines.join('\n')).toContain('the sandbox blocks the cmux socket');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  // home-base-fmf1n D5: every run appends one record, whatever its end.
+  test('every scan run appends one record to the run log', async () => {
+    const runs: DraftsScanRun[] = [];
+    const recordRun = (run: DraftsScanRun): null => {
+      runs.push(run);
+      return null;
+    };
+    const base = {
+      env,
+      json: true,
+      recordRun,
+      style: PLAIN_STYLE,
+    };
+    const out = spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const err = spyOn(console, 'error').mockImplementation((...args) => {
+      void args;
+    });
+    try {
+      const panes = [
+        {
+          screen: claudeScreen('half a thought', S1),
+          surfaceId: 'SURF-1',
+          tty: null,
+        },
+        {screen: 'plain shell $', surfaceId: 'SURF-2', tty: null},
+      ];
+      expect(
+        await runThreadDraftsScan({
+          ...base,
+          deps: {
+            hookStorePath,
+            nowIso: () => NOW,
+            ps: psOf([]),
+            run: fakeCmux(panes).run,
+          },
+          trigger: 'hook',
+        }),
+      ).toBe(0);
+      expect(
+        await runThreadDraftsScan({
+          ...base,
+          deps: {
+            hookStorePath,
+            nowIso: () => NOW,
+            ps: psOf([]),
+            run: fakeCmux([], true).run,
+          },
+        }),
+      ).toBe(2);
+      // A scan that never finishes stops itself and says so.
+      expect(
+        await runThreadDraftsScan({
+          ...base,
+          deps: {
+            hookStorePath,
+            nowIso: () => NOW,
+            ps: psOf([]),
+            run: () => new Promise<CmuxCall>(() => undefined),
+          },
+          timeoutMs: 20,
+          trigger: 'hook',
+        }),
+      ).toBe(1);
+    } finally {
+      out.mockRestore();
+      err.mockRestore();
+    }
+    expect(runs.map((run) => [run.trigger, run.outcome, run.exitCode])).toEqual(
+      [
+        ['hook', 'scanned', 0],
+        ['manual', 'unreachable', 2],
+        ['hook', 'timed-out', 1],
+      ],
+    );
+    expect(runs[0]?.counts).toMatchObject({
+      claudePanes: 1,
+      found: 1,
+      surfacesRead: 2,
+    });
+    expect(runs[1]?.counts).toBeNull();
+    expect(runs[1]?.error).toContain('Nothing was written');
+    expect(runs[2]?.error).toContain('did not finish within 0.02 s');
+    expect(runs[0]?.pid).toBe(process.pid);
+  });
+
+  test('the default run log is <threads state dir>/drafts-scan/runs.jsonl', async () => {
+    const out = spyOn(process.stdout, 'write').mockImplementation(() => true);
+    try {
+      await runThreadDraftsScan({
+        deps: {
+          hookStorePath,
+          nowIso: () => NOW,
+          ps: psOf([]),
+          run: fakeCmux([]).run,
+        },
+        env,
+        json: true,
+        style: PLAIN_STYLE,
+      });
+    } finally {
+      out.mockRestore();
+    }
+    const read = readDraftsScanRuns(env);
+    expect(read.kind).toBe('read');
+    if (read.kind !== 'read') return;
+    expect(read.path).toBe(join(dir, 'state', 'drafts-scan', 'runs.jsonl'));
+    expect(read.runs.map((run) => run.outcome)).toEqual(['scanned']);
   });
 
   test('normalizedText collapses the wrap a screen adds', () => {

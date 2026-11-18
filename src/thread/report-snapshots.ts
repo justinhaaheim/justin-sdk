@@ -104,26 +104,47 @@ function shownAtField(value: unknown): FieldRead<string> {
   return {ok: true, value};
 }
 
+/**
+ * home-base-88y8m D4: a snapshot's `message`: absent (a snapshot saved before
+ * D4) or null is null; a string is kept; anything else makes the line
+ * malformed.
+ */
+function messageField(value: unknown): FieldRead<string> {
+  if (value === undefined || value === null) return {ok: true, value: null};
+  return typeof value === 'string' ? {ok: true, value} : {ok: false};
+}
+
 /** One snapshot as a line of the file, every field written. */
 function snapshotLine(entry: ReportSnapshot): string {
   return `${JSON.stringify({
     at: entry.at,
     block: entry.block,
     items: entry.items,
+    message: entry.message,
     shownAt: entry.shownAt,
   })}\n`;
 }
 
-/** The well-formed snapshots in a file's text, and how many lines were not. */
+/**
+ * The well-formed snapshots in a file's text, and how many lines were not.
+ * home-base-88y8m.8 R4: also where each sits, by its 1-based line number in
+ * the file, so a reader can tell a malformed line that came after a snapshot.
+ */
 function parseSnapshotsText(raw: string): {
+  /** The line number of the last malformed line; null when there is none. */
+  lastMalformedLine: number | null;
   lines: number;
   malformed: number;
+  /** Each snapshot's line number, in the order of `snapshots`. */
+  snapshotLines: number[];
   snapshots: ReportSnapshot[];
 } {
   const snapshots: ReportSnapshot[] = [];
+  const snapshotLines: number[] = [];
+  let lastMalformedLine: number | null = null;
   let lines = 0;
   let malformed = 0;
-  for (const line of raw.split('\n')) {
+  for (const [index, line] of raw.split('\n').entries()) {
     if (line.trim() === '') continue;
     lines += 1;
     let parsed: unknown;
@@ -131,34 +152,76 @@ function parseSnapshotsText(raw: string): {
       parsed = JSON.parse(line) as unknown;
     } catch {
       malformed += 1;
+      lastMalformedLine = index + 1;
       continue;
     }
     const entry = (parsed ?? {}) as {
       at?: unknown;
       block?: unknown;
       items?: unknown;
+      message?: unknown;
       shownAt?: unknown;
     };
     const block = blockField(entry.block);
+    const message = messageField(entry.message);
     const shownAt = shownAtField(entry.shownAt);
     if (
       typeof entry.at !== 'string' ||
       Number.isNaN(Date.parse(entry.at)) ||
       !isItems(entry.items) ||
       !block.ok ||
+      !message.ok ||
       !shownAt.ok
     ) {
       malformed += 1;
+      lastMalformedLine = index + 1;
       continue;
     }
     snapshots.push({
       at: entry.at,
       block: block.value,
       items: entry.items,
+      message: message.value,
       shownAt: shownAt.value,
     });
+    snapshotLines.push(index + 1);
   }
-  return {lines, malformed, snapshots};
+  return {lastMalformedLine, lines, malformed, snapshotLines, snapshots};
+}
+
+/**
+ * This session's snapshot file, parsed, with its path. No file, or a file with
+ * no lines, is `none`. An unreadable file, or one with lines and none
+ * parseable, is `unknown`: never read as "no earlier report" (critical rule 7).
+ */
+function readSnapshotsFile(
+  sessionId: string,
+  env: EnvLike,
+):
+  | {kind: 'none'}
+  | {
+      kind: 'parsed';
+      parsed: ReturnType<typeof parseSnapshotsText>;
+      path: string;
+    }
+  | {kind: 'unknown'; reason: string} {
+  const path = reportSnapshotsPath(sessionId, env);
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (error) {
+    if (errorCode(error) === 'ENOENT') return {kind: 'none'};
+    return {kind: 'unknown', reason: `read ${path}: ${errorText(error)}`};
+  }
+  const parsed = parseSnapshotsText(raw);
+  if (parsed.lines === 0) return {kind: 'none'};
+  if (parsed.snapshots.length === 0) {
+    return {
+      kind: 'unknown',
+      reason: `${path}: none of its ${parsed.lines} line(s) could be parsed`,
+    };
+  }
+  return {kind: 'parsed', parsed, path};
 }
 
 /**
@@ -170,23 +233,67 @@ export function readReportSnapshots(
   sessionId: string,
   env: EnvLike = process.env,
 ): SnapshotsRead {
-  const path = reportSnapshotsPath(sessionId, env);
-  let raw: string;
-  try {
-    raw = readFileSync(path, 'utf8');
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return {kind: 'none'};
-    return {kind: 'unknown', reason: `read ${path}: ${errorText(error)}`};
+  const file = readSnapshotsFile(sessionId, env);
+  if (file.kind !== 'parsed') return file;
+  return {kind: 'found', snapshots: file.parsed.snapshots};
+}
+
+/** home-base-88y8m D4: what `thread show` reads for its `## From Claude`. */
+export type ShownMessageRead =
+  /** No snapshot was shown, or the newest shown one had no message. */
+  | {kind: 'none'}
+  | {
+      at: string;
+      /**
+       * home-base-88y8m.8 R4: that snapshot's printed block, so `thread show`
+       * can tell whether Claude's last message is that report; null when the
+       * snapshot has none.
+       */
+      block: SnapshotBlock | null;
+      kind: 'found';
+      message: string;
+    }
+  | {kind: 'unknown'; reason: string};
+
+/**
+ * D4: the message of the NEWEST snapshot Justin was shown (any turn). A newest
+ * shown snapshot without one is `none`: an older message would be stale. An
+ * unreadable file is `unknown`, never `none` (critical rule 7).
+ *
+ * home-base-88y8m.8 R4: so is a file with a malformed line AFTER the newest
+ * shown snapshot (or with no shown snapshot at all): that line may be a newer
+ * shown snapshot, and its message, or its lack of one, cannot be read. An
+ * older message must not then be shown as the current one.
+ */
+export function newestShownMessage(
+  sessionId: string,
+  env: EnvLike = process.env,
+): ShownMessageRead {
+  const file = readSnapshotsFile(sessionId, env);
+  if (file.kind !== 'parsed') return file;
+  const {lastMalformedLine, snapshotLines, snapshots} = file.parsed;
+  let newestIndex = -1;
+  for (let index = snapshots.length - 1; index >= 0; index -= 1) {
+    if (snapshots[index]?.shownAt != null) {
+      newestIndex = index;
+      break;
+    }
   }
-  const {lines, snapshots} = parseSnapshotsText(raw);
-  if (lines === 0) return {kind: 'none'};
-  if (snapshots.length === 0) {
+  const newestLine = snapshotLines[newestIndex] ?? 0;
+  if (lastMalformedLine != null && lastMalformedLine > newestLine) {
     return {
       kind: 'unknown',
-      reason: `${path}: none of its ${lines} line(s) could be parsed`,
+      reason: `${file.path}: line ${lastMalformedLine} could not be parsed, and it comes after ${newestIndex < 0 ? 'every snapshot' : 'the newest report you were shown'}, so a newer report you saw may be in it`,
     };
   }
-  return {kind: 'found', snapshots};
+  const newest = snapshots[newestIndex];
+  if (newest?.message == null) return {kind: 'none'};
+  return {
+    at: newest.at,
+    block: newest.block,
+    kind: 'found',
+    message: newest.message,
+  };
 }
 
 export type SnapshotSaveOutcome =
@@ -257,6 +364,8 @@ export function saveReportSnapshot(args: {
   block: SnapshotBlock | null;
   env?: EnvLike;
   items: SnapshotItems;
+  /** home-base-88y8m D4: the `--message` text; null or absent for none. */
+  message?: string | null;
   sessionId: string;
 }): SnapshotSaveOutcome {
   const env = args.env ?? process.env;
@@ -274,6 +383,7 @@ export function saveReportSnapshot(args: {
         at: args.at.toISOString(),
         block: args.block,
         items: args.items,
+        message: args.message ?? null,
         shownAt: null,
       },
     ].slice(-REPORT_SNAPSHOTS_KEPT);

@@ -8,7 +8,7 @@
  * THE CHAIN. A successor's session bead carries `continues:<predecessor
  * bead>` (session-bead.ts; written by linkContinuation). This is the first
  * reader of that label. The walk starts at the caller's bead and follows it
- * back.
+ * back, one chain-step.ts back step at a time (home-base-lasun.1 F1).
  *
  * ATTENDED. A session counts as attended when its message log
  * (<threads state dir>/messages/<session id>.jsonl, read only through
@@ -31,9 +31,11 @@
  * longer than the walk's limit. The gate refuses on unknown (chainUnknown).
  */
 
+import type {StepBead} from './chain-step';
 import type {EnvLike} from './paths';
 
 import {brShow, describeBrFailed, findBeadsWorkspace} from '../beads/br';
+import {backLinkOf, stepBack} from './chain-step';
 import {type MessageLogRead, readMessageLog} from './message-log';
 import {KICKOFF_OPENING} from './respawn';
 import {CONTINUES_LABEL_PREFIX, SID_LABEL_PREFIX} from './session-bead';
@@ -150,35 +152,37 @@ export function walkUnattendedChain(
 ): UnattendedChain {
   const limit = options.limit ?? CHAIN_WALK_LIMIT;
   const links: ChainLink[] = [];
-  const seen = new Set<string>();
   const unknown = (reason: string): UnattendedChain => ({
     kind: 'unknown',
     links,
     reason,
   });
+  // The start is read here; every predecessor through chain-step.ts's back
+  // step (home-base-lasun.1 F1). This walk counts the start in its limit, so
+  // the step is given limit - 1.
+  if (limit <= 0) {
+    return unknown(
+      `the chain is longer than ${limit} sessions; the walk stopped at ${startBeadId}`,
+    );
+  }
+  const first = readers.showBead(startBeadId);
+  if (first.kind !== 'found') {
+    return unknown(`session bead ${startBeadId}: ${first.reason}`);
+  }
+  const seen = new Set<string>([startBeadId]);
   let current = startBeadId;
+  let bead: {labels: readonly string[]} = first;
   for (;;) {
-    if (seen.has(current)) {
-      return unknown(`the chain loops back to ${current}`);
-    }
-    if (links.length >= limit) {
-      return unknown(
-        `the chain is longer than ${limit} sessions; the walk stopped at ${current}`,
-      );
-    }
-    seen.add(current);
-    const bead = readers.showBead(current);
-    if (bead.kind !== 'found') {
-      return unknown(`session bead ${current}: ${bead.reason}`);
-    }
-    const predecessors = labelsWith(bead.labels, CONTINUES_LABEL_PREFIX);
+    // The fork is checked from the labels before the log is read: a bead with
+    // two predecessors is unknown whether or not Justin typed in it.
+    const back = backLinkOf(bead.labels);
     const sids = labelsWith(bead.labels, SID_LABEL_PREFIX);
-    if (predecessors.length > 1) {
+    if (back.kind === 'twoPredecessors') {
       return unknown(
-        `${current} names ${predecessors.length} predecessors (${predecessors.map((id) => `${CONTINUES_LABEL_PREFIX}${id}`).join(', ')})`,
+        `${current} names ${back.ids.length} predecessors (${back.ids.map((id) => `${CONTINUES_LABEL_PREFIX}${id}`).join(', ')})`,
       );
     }
-    const continues = predecessors[0] ?? null;
+    const continues = back.kind === 'one' ? back.id : null;
     const [sessionId] = sids;
     if (sessionId == null || sids.length !== 1) {
       return unknown(
@@ -233,7 +237,36 @@ export function walkUnattendedChain(
       continues,
       sessionId,
     });
-    current = continues;
+    const step = stepBack<StepBead>(
+      {id: current, labels: bead.labels},
+      {limit: limit - 1, seen, taken: links.length - 1},
+      (beadId) => {
+        const read = readers.showBead(beadId);
+        return read.kind === 'found'
+          ? {bead: {id: beadId, labels: read.labels}, kind: 'found'}
+          : read;
+      },
+    );
+    switch (step.kind) {
+      case 'loop':
+        return unknown(`the chain loops back to ${step.id}`);
+      case 'next':
+        current = step.id;
+        bead = step.bead;
+        break;
+      case 'root':
+      case 'twoPredecessors':
+        // backLinkOf said one predecessor above, from the same labels.
+        return unknown(
+          `${current}'s ${CONTINUES_LABEL_PREFIX} label read differently twice`,
+        );
+      case 'tooLong':
+        return unknown(
+          `the chain is longer than ${limit} sessions; the walk stopped at ${step.id}`,
+        );
+      case 'unreadable':
+        return unknown(`session bead ${step.id}: ${step.read.reason}`);
+    }
   }
 }
 

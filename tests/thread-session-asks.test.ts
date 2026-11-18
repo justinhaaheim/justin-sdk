@@ -570,7 +570,7 @@ describe('thread ask (real br)', () => {
     // home-base-4wfoz D2: its id, the first the machine-wide counter hands
     // out (this test's state dir starts empty).
     expect(issue.labels.sort()).toEqual(['ask', 'qid:100', `sid:${SESSION}`]);
-    expect(outcome.shortId).toBe('BD100');
+    expect(outcome.shortId).toBe('Q100');
     expect(issue.title).toBe(VALID.question);
     expect(issue.id.startsWith(`${w.sessionBead}.`)).toBe(true);
     const parsed = parseAsk(issue.description);
@@ -581,11 +581,11 @@ describe('thread ask (real br)', () => {
     expect(printed.exitCode).toBe(0);
     expect(printed.lines[0]).toMatch(
       new RegExp(
-        `^ask ${outcome.id} · BD100 · 🟡 P2 · filed under ${w.sessionBead}`,
+        `^ask ${outcome.id} · Q100 · 🟡 P2 · filed under ${w.sessionBead}`,
       ),
     );
     expect(printed.lines.join('\n')).toContain(
-      `1. [BD100] 🟡 P2 · [Pick a/b] Export DB · **${VALID.question}** (${outcome.id})`,
+      `1. [Q100] 🟡 P2 · [Pick a/b] Export DB · **${VALID.question}** (${outcome.id})`,
     );
   });
 
@@ -932,7 +932,7 @@ describe('thread answer (Justin, in the terminal)', () => {
       title: filed.question,
     });
     // home-base-1rxt0.4 D4: every filed question gets an id.
-    expect(filed.shortId).toMatch(/^BD[1-9][0-9]*$/u);
+    expect(filed.shortId).toMatch(/^Q[1-9][0-9]*$/u);
     expect(show(w, filed.id).closeReason).toBe('answer: b, but only for now');
     const again = await answerSessionQuestions({
       ask: filed.id,

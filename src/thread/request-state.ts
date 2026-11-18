@@ -96,7 +96,7 @@ export interface RequestStateLine {
   carriedBy: string | null;
   kind: RequestStateKind;
   /**
-   * What comes next: the next stage on the ladder; "your answer to BD12"
+   * What comes next: the next stage on the ladder; "your answer to Q112"
    * when it waits on Justin; "going ahead with: <default>" when an open P1 to
    * P3 question is linked to it; rule 7's landing words for a closed request
    * short of the last stage. Null when nothing is next.
@@ -104,7 +104,7 @@ export interface RequestStateLine {
   next: string | null;
   /** The request's last change (its `updated_at`), ISO; null when unreadable. */
   since: string | null;
-  /** "Working", "Stopped: <why>", "Waiting on you: BD12 <question>", "Done", "Unknown: <why>". */
+  /** "Working", "Stopped: <why>", "Waiting on you: Q112 <question>", "Done", "Unknown: <why>". */
   state: string;
 }
 
@@ -128,7 +128,7 @@ export type RequestCarrier =
 /** A question's title in a state line is cut here. */
 export const STATE_QUESTION_CUT = 80;
 
-/** `BD<n>` for a new-form id, else the bead id (D2 of home-base-l2ejg.3). */
+/** `Q<n>` for a new-form id, else the bead id (D2 of home-base-l2ejg.3). */
 export function questionShownId(question: {
   id: string;
   labels: readonly string[];
@@ -153,7 +153,7 @@ function blockingQuestions(questions: readonly TreeIssue[]): TreeIssue[] {
     .sort(byFiling);
 }
 
-/** "BD12 <title>", the title on one line and cut. */
+/** "Q112 <title>", the title on one line and cut. */
 function questionWords(question: TreeIssue): string {
   return `${questionShownId(question)} ${cutOnWord(oneLine(question.title), STATE_QUESTION_CUT)}`;
 }

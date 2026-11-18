@@ -33,6 +33,11 @@
  */
 
 import type {CmuxRunner} from './cmux';
+import type {
+  SessionFile,
+  SessionPanel,
+  SessionWorkspace,
+} from './cmux-session-file';
 import type {EnvLike} from './paths';
 
 import {execFile} from 'node:child_process';
@@ -41,8 +46,24 @@ import {homedir} from 'node:os';
 import {join} from 'node:path';
 
 import {CMUX_TIMEOUT_MS, realCmuxRunner} from './cmux';
+import {
+  defaultSessionFilePath,
+  readSessionFile,
+  sessionPanels,
+} from './cmux-session-file';
 
 export type {CmuxCall, CmuxRunner} from './cmux';
+export type {
+  SessionFile,
+  SessionPanel,
+  SessionResumeBinding,
+  SessionWorkspace,
+} from './cmux-session-file';
+export {
+  defaultSessionFilePath,
+  readSessionFile,
+  sessionPanels,
+} from './cmux-session-file';
 
 // ---------------------------------------------------------------------------
 // The three sources (only the fields the join reads)
@@ -438,106 +459,10 @@ export async function readLiveSurfaces(
 }
 
 // ---------------------------------------------------------------------------
-// cmux's session file (moved here from scripts/cmux-restore-state.ts for
-// j8q3e.17 D1; that module re-exports these)
+// cmux's session file: moved to ./cmux-session-file.ts (home-base-kwand.1),
+// the one reader the tab record shares. Re-exported here so
+// scripts/cmux-restore-state.ts and the tests keep their imports.
 // ---------------------------------------------------------------------------
-
-export interface SessionResumeBinding {
-  checkpointId?: string | null;
-  command?: unknown;
-  cwd?: string | null;
-  kind?: string | null;
-}
-
-export interface SessionPanel {
-  directory?: string | null;
-  /** The surface's uuid: the live tree's surface `id` (97 of 97, 2026-10-17). */
-  id: string;
-  terminal?: {
-    agent?: {
-      kind?: string | null;
-      sessionId?: string | null;
-      workingDirectory?: string | null;
-    } | null;
-    resumeBinding?: SessionResumeBinding | null;
-    wasAgentRunning?: boolean | null;
-    workingDirectory?: string | null;
-  } | null;
-  title?: string | null;
-  ttyName?: string | null;
-  type?: string | null;
-}
-
-export interface SessionWorkspace {
-  currentDirectory?: string | null;
-  customTitle?: string | null;
-  panels?: SessionPanel[];
-  processTitle?: string | null;
-  stableId?: string | null;
-  workspaceId?: string | null;
-}
-
-export interface SessionFile {
-  windows?: {
-    tabManager?: {workspaces?: SessionWorkspace[]};
-  }[];
-}
-
-/** cmux's session file, under the user's home directory. */
-export function defaultSessionFilePath(home: string = homedir()): string {
-  return join(
-    home,
-    'Library',
-    'Application Support',
-    'cmux',
-    'session-com.cmuxterm.app.json',
-  );
-}
-
-/** Every panel of the session file, with the workspace that holds it. */
-export function sessionPanels(
-  session: SessionFile,
-): {panel: SessionPanel; workspace: SessionWorkspace}[] {
-  const out: {panel: SessionPanel; workspace: SessionWorkspace}[] = [];
-  for (const window of session.windows ?? []) {
-    for (const workspace of window.tabManager?.workspaces ?? []) {
-      for (const panel of workspace.panels ?? []) {
-        out.push({panel, workspace});
-      }
-    }
-  }
-  return out;
-}
-
-/**
- * The session file. A missing file is a failure, as for the hook store:
- * without it no status-line id can be confirmed (critical rule 7).
- */
-export function readSessionFile(path: string): SourceRead<SessionFile> {
-  if (!existsSync(path)) {
-    return {ok: false, reason: `no cmux session file at ${path}`};
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(readFileSync(path, 'utf8')) as unknown;
-  } catch (error) {
-    return {
-      ok: false,
-      reason: `could not read the cmux session file ${path}: ${firstLine(error)}`,
-    };
-  }
-  if (
-    parsed == null ||
-    typeof parsed !== 'object' ||
-    !Array.isArray((parsed as {windows?: unknown}).windows)
-  ) {
-    return {
-      ok: false,
-      reason: `the cmux session file ${path} has no windows list`,
-    };
-  }
-  return {ok: true, value: parsed as SessionFile};
-}
 
 // ---------------------------------------------------------------------------
 // Reading a Claude screen (moved here from scripts/pane-backfill-classify.ts
@@ -877,6 +802,20 @@ const SHELL_NAMES: ReadonlySet<string> = new Set([
   'bash',
   '-bash',
 ]);
+
+const IDLE_PROMPT = /^(?:❯|\$|%|#|>|➜)$/u;
+
+/**
+ * A blank screen, or one whose last line is a bare shell prompt with nothing
+ * typed. Moved here from ./open-undo (home-base-kwand.2), which re-exports it.
+ */
+export function idleShellScreen(lines: readonly string[]): boolean {
+  const shown = lines
+    .map((line) => line.replaceAll(NO_BREAK_SPACE, ' ').trim())
+    .filter((line) => line !== '');
+  const last = shown.at(-1);
+  return last == null || IDLE_PROMPT.test(last);
+}
 
 /**
  * login and the shell itself; anything else on a tty is running. Moved here
@@ -1357,6 +1296,12 @@ export interface LivePane {
 export type PaneLookup =
   | {
       bySession: Map<string, LivePane>;
+      /**
+       * home-base-kwand.2: the live tabs and processes this lookup read, so the
+       * before-restart state joins on them without reading them again. Absent
+       * (a test's lookup): that state is unknown, never "not restored".
+       */
+      live?: {procs: Proc[]; surfaces: LiveSurface[]};
       ok: true;
       statusLine: Pick<
         StatusLineResult,
@@ -1540,6 +1485,7 @@ export async function lookupPanes(sources: PaneSources): Promise<PaneLookup> {
   }
   return {
     bySession,
+    live: {procs: procs.value, surfaces: surfaces.value},
     ok: true,
     statusLine: {
       failure:

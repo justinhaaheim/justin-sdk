@@ -431,6 +431,9 @@ describe('the real registry, through the real CLI, without running a handler', (
       'time-check',
       'usage-check',
       'thread capture',
+      // home-base-fmf1n: started wherever the component is; it reads its
+      // own knob (componentConfig.thread.draftsScanHook) and does nothing off.
+      'thread drafts hook',
     ]);
     expect(body.componentSource).toBe('core');
   });
@@ -440,6 +443,7 @@ describe('the real registry, through the real CLI, without running a handler', (
     expect(dryRun('Stop', root).body.handlers).toEqual([
       'thread capture',
       'thread stop-check',
+      'thread drafts hook',
     ]);
     expect(dryRun('PostToolBatch', root).body.handlers).toEqual([
       'usage-check',

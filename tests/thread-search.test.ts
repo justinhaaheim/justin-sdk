@@ -1315,7 +1315,10 @@ describe('runThreadSearch', () => {
     ]);
     const out = captureStdout();
     captureStderr();
+    // The row's own shape, as --by-session prints it (home-base-lasun L1:
+    // grouped by chain is the default, and indents every row one step).
     const code = await runThreadSearch({
+      bySession: true,
       color: false,
       env: h.env,
       now: NOW,
@@ -1759,7 +1762,9 @@ describe('the session bead titles the row (home-base-y1hg0.7)', () => {
     });
     const out = captureStdout();
     captureStderr();
+    // The row's own shape, as --by-session prints it (home-base-lasun L1).
     const code = await runThreadSearch({
+      bySession: true,
       color: false,
       env: h.env,
       now: NOW,

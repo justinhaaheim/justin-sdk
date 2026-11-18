@@ -182,6 +182,8 @@ UNDO. thread open --undo closes the workspaces the latest run opened (--run <tim
 
   A workspace that passes has its Claude process stopped first (SIGTERM, up to 15 seconds to exit; the session stays resumable with claude --resume), and only then is the workspace closed. A window closes with its last workspace. The record is rewritten before the first process is stopped; if that fails, nothing is stopped or closed. --undo --dry-run runs the same checks and prints what would close and what would be kept; it closes nothing and writes nothing. It exits 1 when there is no run to undo or a step failed.
 
+RESTORE FAILED. thread open --restore-failed opens a different set: every session whose cmux restore failed after the last restart (thread inbox --before-restart lists them under "restore failed": the old tab came back as a plain shell showing cmux's restore error). Each opens as a NEW tab of the workspace it was in, beside the failed tab, running cd <checkout> && claude --resume <id>, newest activity first, with --focus false so nothing jumps to the front. The failed tab is never typed into, sent to or closed. A session whose old workspace no longer exists opens in a new workspace instead. The same checks as above apply: a session running again, one whose checkout is unknown or gone, and one marked done, archived or handed off are skipped and said why; a live Claude pane that cannot be placed refuses the run unless --force-unplaced; ps is read again right before each open. One with no inbox row, or no session bead, is only listed. The restart record decides which sessions qualify, so --since and --days do not apply; --repo, --limit, --dry-run and --json do, and every other flag is refused. Stored drafts are not typed, and nothing is coloured. The first open that fails stops the run. The record is written the same way, with each open under "tabs". thread open --undo closes a new workspace it made, with the checks above, and does not close a tab it opened in an old workspace: closing that workspace would close the other tabs there. It names each such tab instead, for you to close by hand.
+
 RUNS AS A VIEW. A filtered thread open makes a window appear (for example thread open --repo audio-journal-1 --include-open: all of that repo's unfinished work in one new window), and thread open --undo --run <stamp> makes it disappear again: what it opened closes, what it moved goes back. thread open --list prints every recorded run with its stamp, filters, counts, whether it was undone, and the command that undoes it. --list reads the records only: no cmux, no ps.
 
 SANDBOX. The Claude Code sandbox blocks the cmux socket and ps. Run it from a terminal, or with the sandbox disabled.`;
@@ -312,7 +314,14 @@ SCAN, read-only on cmux (it writes only that store):
   1. Reads every pane's screen and keeps the Claude input boxes.
   2. Places each one in a session by the "⌗ <session id>" your status line shows under the box, else by the claude process on the pane's tty. A pane it cannot place is listed under "Unplaced panes" with why, and nothing is stored for it.
   3. Text in the box is stored, unless the store already holds exactly that text. An empty box clears the stored draft only in the pane the draft was seen in, or once that pane is gone. A stored draft whose pane is gone (no pane shows its session, and the pane it was seen in is no longer in cmux) is cleared by the second scan in a row that finds it so; "thread drafts dismiss <session id…>" (x in the threads dashboard) clears one at once. Cleared text stays in its file. Text equal to the newest message you sent in that session (spacing ignored) is still in the box, so it is stored too, marked sentMatch, and its card says "(the same as your last sent message)". A stored draft whose pane is gone is cleared as sent when that session's newest sent message equals it (a sentMatch draft: only a message sent after it was seen).
-  An hourly chore (thread-drafts-scan) runs it, and the threads dashboard runs it before loading.
+  The threads dashboard runs it before loading, and the hourly hook below runs it once an hour.
+
+THE HOURLY SCAN (home-base-fmf1n, 2026-11-15), behind componentConfig.thread.draftsScanHook (default false; set it false in the repo's justin-sdk.config.json to turn it off):
+  - "thread drafts hook" runs on every prompt and every turn end (UserPromptSubmit and Stop). The first one of each wall-clock hour, in a session inside cmux (CMUX_SOCKET_CAPABILITY is set), claims the hour with a file in <threads state dir>/drafts-scan/claims/ and starts "thread drafts scan --trigger hook" detached; every later one that hour does nothing. It prints nothing and exits 0 whatever happens; --explain says what it decided on stderr.
+  - Why a hook: cmux lets in only processes it started or that carry its capability variable, so the launchd chores agent that used to run this scan was refused on every tick from 2026-10-19. A hook's detached child inherits the variable.
+  - A hook-started scan stops itself after 2 minutes and records timed-out.
+  - Every scan, by hook or by hand, appends one record to <threads state dir>/drafts-scan/runs.jsonl: when it started and ended, what started it, the outcome (scanned, unreachable, failed, timed-out), the exit code, the counts and the error. The chores board ("unsent-drafts scan") judges the hook-started runs in that log only: failed when two hook runs in a row were not scanned, or when home-base sessions were active in two whole hours after the last hook run started (whatever its outcome) and no hook run followed; idle time is fine. One failed hook run is tolerated: the board reads ok, names the failure, and the next hook run decides, because a single scan fails when the Mac is too busy for cmux to answer in time. Scans by hand, and the dashboard's, are recorded but never judged: one refused by the Claude Code sandbox says nothing about the hook, and one that worked does not prove the hook works.
+  - A scan by hand can overlap a hook-started one. That is safe: every store write is a whole-file rename, so no file is torn, and both scans write what the same screens show.
 
 CLAUDE'S SUGGESTION (measured 2026-10-22 on Claude Code 2.1.308, and read in its code back to 2.1.289): after a turn, Claude Code can draw a suggested next prompt, dimmed, in the EMPTY input box ("❯ push main"). It is not your typing: pressing Enter on it sends nothing (Tab would insert it as real text), and it stays until a prompt is sent. The scan reads the screen as plain text, without colours, so on screen it looks exactly like typed text. What tells them apart is the line under the box: while nothing is typed, Claude Code ends it with "← N agents" ("-- INSERT -- ⏵⏵ auto mode on (shift+tab to cycle) · ← 19 agents"), and drops it as soon as anything is typed. A box whose text has that line under it counts as empty: nothing is stored, a stored draft is cleared as for an empty box (the text stays in its file), and the pane is listed under "Claude's suggestion, not your typing" with the text.
 
@@ -323,6 +332,61 @@ LIMITS, measured on Claude Code 2.1.302 unless dated:
   - Text recalled into the box with the up arrow equals your last message, so it is stored as a sentMatch draft although you never typed it.
 
 Run it with the Claude Code sandbox off: the sandbox blocks the cmux socket and ps.
+`;
+
+/** home-base-kwand.1: kept here so `--help` loads nothing heavy. */
+const TABS_NARRATIVE = `
+WHAT IT ANSWERS: "Where can I see a list of all the windows/sessions/workspaces that were open before the restart?" (Justin, 2026-11-17). Run "thread tabs before-restart".
+
+THE SOURCES: cmux's own saved session files, never the cmux socket, so the recorder also runs from launchd. They are in ~/Library/Application Support/cmux/ (set JUSTIN_THREADS_CMUX_SUPPORT_DIR to read another directory):
+  - session-com.cmuxterm.app.json: rewritten by cmux while it runs.
+  - session-com.cmuxterm.app-previous.json and session-history/session-com.cmuxterm.app-<epoch ms>-w<N>-p<N>.json: written at a launch; the layout cmux restored. These rest on cmux 0.65.2 (2026-11-17): a missing or unrecognised launch file is named in the output, not a failure, and the hourly records answer without them.
+  Only these fields are copied: the file's createdAt and version; each window's position; each workspace's id, title (customTitle, else processTitle) and directory; each tab's id (the CMUX_SURFACE_ID, stable across a relaunch), title (customTitle, else title), tty, directory, type, Claude agent kind, session id and working directory, and whether cmux would resume it. Never notifications, log or status entries, resume commands, environments or scrollback. An unknown version or a missing key is a failure that names the file and the key.
+
+record: reads the files and appends to <threads state dir>/tab-records/ (default ~/.local/state/justin-threads; never the pushed threads repo). Record kinds:
+  - hourly: the live file's tab set (in hourly-<local date>.jsonl).
+  - unchanged: a small line when the live tab set equals the newest full record of the same day.
+  - failed: the live file could not be read or parsed; carries the reason. Exit 1.
+  - launch: the layout cmux restored at a launch, recorded once per launch (launches.jsonl).
+  Every record keeps the FILE's createdAt and when it was recorded. Every tab also keeps its last-known Claude session id, carried forward by tab id from earlier records, apart from the id this file holds: cmux drops a tab's id after a failed restore. Records older than 60 days are pruned, never the newest launch record. The hourly chores job thread-tab-record runs it.
+
+before-restart: "the restart" is the later of the last Mac boot (sysctl kern.boottime) and the last cmux launch (the running cmux process's start time, checked against the launch records; the newest launch record when ps cannot be read). What was open before it is chosen by the FILE's createdAt: cmux's launch record of that launch; else the newest of the recorded tab sets and the live file that cmux saved before the restart (after a boot, cmux's last save before shutdown can be newer than the last hourly record; on a tie the record is used). It says which source it used and how old it is, then lists window, workspace and tab, each tab with its Claude session id ("carried forward" when only an earlier record had it). Writes nothing.
+
+OFF SWITCH: componentConfig.thread.tabRecord (default true). False: record says it is off, writes nothing and exits 0; before-restart still reads what was recorded.
+
+Run both with the Claude Code sandbox off: it denies writes to the state dir, and sysctl and ps for the restart time.
+`;
+
+const MESSAGES_NARRATIVE = `
+WHICH SESSIONS  The handoff chain: sessions linked by continues: / continued-by:
+        labels on their session beads. Spawned sessions are not part of it.
+        Without --chain, the current session and every one before it; with
+        --chain, every session of that chain.
+
+WHICH LINES  Each session's message log, <state dir>/messages/<session id>.jsonl.
+        A line counts as his when he typed it: not a kickoff prompt (the
+        first line of a spawned session, or of a session that continues
+        another when it is the handoff kickoff or the mayor's "You continue
+        session bead" form),
+        and not a line a machine sent (a task notification, a message another
+        session typed, Claude Code's "automated notice" that a watched session
+        went idle). The heading counts what was left out.
+
+IDS     <first 8 characters of the session id>.<n>, n counting his messages in
+        that session from 1 (f7a1dceb.4). --context <id> resolves one to its
+        line in the log and prints the lines around it; an id it cannot
+        resolve exits 2 and says why.
+
+EXIT    0 printed messages · 1 measured none · 2 could not read: a chain
+        bead, a message log or a flag. On 2 the messages it could read are
+        still printed, under a line that says what is missing.
+
+EXAMPLES
+  thread messages                           this session and the ones before it
+  thread messages apple tv                  his messages that mention it
+  thread messages --chain Scorpio --regex 'Apple TV|tvOS'
+  thread messages --context f7a1dceb.4      that message, with the replies
+  thread messages --chain Scorpio --annotate --limit 5
 `;
 
 const SEARCH_NARRATIVE = `
@@ -340,9 +404,22 @@ the \`Also in\` line still names the other fields that matched:
   <state dir>/reports/<sessionId>/, which is what covers reports written before
   the verbatim messages were stored on the bead at all.
 
-CORPUS  one \`bd list -t thread --all\` — closed threads included — plus the
-        report archive. Sessions \`thread backfill\` recorded are in it, which is
-        what makes a session that never reported findable.
+CORPUS  three reads: one \`bd list -t thread --all\` — closed threads included —,
+        the report archive, and every message log. Sessions \`thread backfill\`
+        recorded are in it, which is what makes a session that never reported
+        findable.
+
+CHAINS  by default the matching sessions are grouped by handoff chain: one
+        block per chain, headed by its name (Scorpio) and how many of its
+        sessions matched, with its NEWEST session and that session's resume
+        command, then each matching session one step in. A session with no
+        session bead is its own block, marked "No chain". A chain that could
+        not be read, or was read only in part, says so in its block and the
+        search exits 2. --limit counts chains here. --by-session prints one
+        row per session instead, newest first, and --limit counts sessions.
+        --chain <name|bead|session> keeps one chain's sessions, resolved as
+        \`thread messages --chain\` resolves it; \`thread chain <member>\`
+        lists a chain's sessions in order.
 
 MATCHES the words you type joined into ONE phrase, case-insensitively, as a
         plain substring — except that a space matches ANY run of whitespace, so
@@ -628,13 +705,43 @@ every question in full; componentConfig.thread.compactQuestions false (user
 file) turns the one-line questions off everywhere. What each report showed is
 kept in <threads state dir>/report-snapshots/<session id>.jsonl.
 
+--changes (home-base-88y8m D1) prints the same Part 1 with only the new and
+changed requests and questions, each in full under the number the full report
+gives it, then one line per section counting the rest, and a line naming the
+questions answered or closed since the last report. With no last report, or
+one that cannot be read, it prints every item and says why. The block it
+prints is the one to paste, and the one the Stop hook looks for.
+
+--report-file <path> (home-base-88y8m D2) also writes the full report, the
+block alone, to <path> in the same run: every item and question in full, with
+the markers. Stdout still prints first. Exit 1 when the file is not written.
+
+--message <file> (home-base-88y8m D4) puts your reply to Justin inside the
+block, verbatim, as "## From Claude", after the questions and before the
+footer, so the pasted block is your whole final message. It is in the printed
+block, the --report-file file and the saved report, and thread show prints the
+message of the newest report Justin saw, with its time. Under --changes it is
+always shown. Exit 2, with nothing printed or saved, when the file cannot be
+read, is empty, or holds a line made only of 🛑, of ♒ or of 🕉: such a line
+would end the block early. A sentence that mentions one of them is fine.
+
+Every question id the message names, Q131 or BD131 in any case (D5), is shown
+whole: an open question of this session in Questions for you (kept there under
+--changes), and any other question, of any session, this one's answered or
+closed questions included, under "## Other questions the message names", with
+its session, its repo and its state (open, answered with the answer, or
+closed). An id that matches nothing, matches two questions, or could not be
+looked up gets one line saying which.
+
 The status is derived (epic D2), most urgent first: 🛑 waiting on you (an open
 P0) · 🏃 working (shown by thread show, never here) · 🤝 handed off · 🧯 out
 of context · ✅ done · 💬 answered (no request, no commit, clean tree) · ❔
 unknown (something could not be measured — never "answered") · ⚠️ open work,
 no blocker. Optional questions are counted beside it, never part of it.
 
-Exit 0 printed (DISABLED too) · 1 no session bead / sessions index unreadable.`;
+Exit 0 printed (DISABLED too, unless --report-file was given) · 1 no session
+bead / sessions index unreadable / the report file not written · 2 --changes
+with --full, or a --message file refused.`;
 
 const SHOW_V4_NARRATIVE = `
 WITH componentConfig.thread.sessionBeads ON (status report v4):
@@ -668,11 +775,15 @@ answers the session's QUESTION beads instead, in this terminal:
       walks the open questions, most urgent first: type an answer, press
       Enter to skip (it stays open), or d to take the default (not for a P0).
   thread answer --ask <question id> "<answer>"
-      answers one question without a prompt. A BD id this session does not
-      hold is refused, and the refusal says where the id lives.
-  thread answer --ask <BD n | question bead id> --relay "<answer>"
+      answers one question without a prompt. The id is the one in brackets
+      in the report, such as Q131 (any case; the older BD131 still works),
+      or the question's bead id. A Q id this session does not hold is
+      refused, and the refusal says where the id lives. A Q with a number
+      of 99 or less could be a place in a list, not an id: it is refused,
+      with a question back, and nothing is written (home-base-88y8m D6).
+  thread answer --ask <Q n | question bead id> --relay "<answer>"
       answers a question of ANY session, in ANY repo, at its source: that
-      repo's own beads database, written by the br that repo pins. A BD id is
+      repo's own beads database, written by the br that repo pins. A Q id is
       looked up in every known repo's export. A bead id is looked up in the
       database of the session it was filed under, else in the primary
       checkout of the repo whose sessions use its prefix, else in that repo's
@@ -1262,6 +1373,12 @@ export const threadCommand: CommandModule = {
                 'Type the unsent text stored for each session it opens back into the new input box, on one line, never sent (see RESTORED DRAFTS); --no-restore skips it',
               type: 'boolean' as const,
             })
+            .option('restore-failed', {
+              default: false,
+              describe:
+                'Instead: open every session whose cmux restore failed after the last restart as a new tab of its old workspace, newest first, leaving the failed tab alone (see RESTORE FAILED)',
+              type: 'boolean' as const,
+            })
             .option('include-untracked', {
               default: false,
               describe:
@@ -1322,6 +1439,7 @@ export const threadCommand: CommandModule = {
               // G6: absent stays absent, so a bare or blank --repo can refuse.
               repos: argv.repo?.map(String),
               restore: argv.restore !== false,
+              restoreFailed: argv['restore-failed'] === true,
               run: argv.run ?? null,
               since: argv.since ?? null,
               undo: argv.undo === true,
@@ -1632,15 +1750,31 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'status',
-        'Before yielding on a work turn: print Part 1 of the status report (generated, ready to paste), what you still have to mark, and what the inbox will say if you stop now. "Nothing to mark." on a question-only turn. SESSION BEADS: DISABLED (exit 0) when componentConfig.thread.sessionBeads is off. Exit 0 printed · 1 no session bead.',
+        'Before yielding on a work turn: print Part 1 of the status report (generated, ready to paste), what you still have to mark, and what the inbox will say if you stop now. "Nothing to mark." on a question-only turn. SESSION BEADS: DISABLED (exit 0) when componentConfig.thread.sessionBeads is off. --changes prints only what changed since the last report; --report-file writes the full report for Justin to a file; --message puts your reply inside the block as From Claude. Exit 0 printed · 1 no session bead, or the report file not written · 2 --changes with --full, or a message file refused.',
         (yy) =>
           yy
             .epilogue(STATUS_NARRATIVE)
+            .option('changes', {
+              default: false,
+              describe:
+                'In Progress and Questions for you, print only the requests and questions new or changed since the last report Justin saw, each in full, and one line counting the rest. The header, his messages and the footer print as usual. Cannot be used with --full (exit 2)',
+              type: 'boolean' as const,
+            })
             .option('full', {
               default: false,
               describe:
                 'Print every question in full, including the unchanged P2 to P4 ones a repeat report puts on one line (run it when Justin asks for the full report)',
               type: 'boolean' as const,
+            })
+            .option('message', {
+              describe:
+                'Your reply to Justin, as a markdown file: shown verbatim inside the block as "## From Claude", after the questions and before the footer, in every form of the report (plain, --full, --changes, --report-file), and stored with the report so thread show and the dashboard show it. Every question id it names (Q131 or BD131) is shown whole: an open one of this session\'s in Questions for you, any other under "## Other questions the message names". A file that cannot be read, is empty, or holds a line made only of 🛑, of ♒ or of 🕉: exit 2, nothing printed or saved',
+              type: 'string' as const,
+            })
+            .option('report-file', {
+              describe:
+                'Also write the full report for Justin to this file, as markdown: every request and question in full, with the new and changed markers, from the 🛑 line through the ♒ line and nothing after it. A file that cannot be written: said on stderr, exit 1',
+              type: 'string' as const,
             })
             .option('session', {
               describe: 'Session id (default: $CLAUDE_CODE_SESSION_ID)',
@@ -1650,7 +1784,10 @@ export const threadCommand: CommandModule = {
           const {runThreadStatus} = await import('./session-report');
           process.exit(
             await runThreadStatus({
+              changes: argv.changes === true,
               full: argv.full === true,
+              message: argv.message ?? null,
+              reportFile: argv['report-file'] ?? null,
               sessionId: argv.session ?? null,
             }),
           );
@@ -1886,7 +2023,7 @@ export const threadCommand: CommandModule = {
             .epilogue(SHOW_V4_NARRATIVE)
             .positional('threadId', {
               describe:
-                'Thread bead id (e.g. jl-x7q). Omit for this session. Knob on: a session bead id, a session id, or a request/question id.',
+                'Thread bead id (e.g. jl-x7q). Omit for this session. Knob on: a session bead id, a session id, a request/question id, or a chain name (Scorpio), which shows the chain’s newest session.',
               type: 'string' as const,
             })
             // NO default: the legacy handler never read `full` (it prints in
@@ -1916,19 +2053,35 @@ export const threadCommand: CommandModule = {
         async (argv) => {
           if (argv.messages !== true && (await sessionBeadsOn())) {
             const report = await import('./session-report');
+            // home-base-lasun L5: a chain name shows the chain's newest
+            // session; any other selector is unchanged.
+            let selector = argv.threadId ?? null;
+            if (selector != null) {
+              const {newestOfChainName} = await import('./chain-command');
+              const newest = newestOfChainName({
+                cwd: process.cwd(),
+                env: process.env,
+                value: selector,
+              });
+              if (newest.kind === 'failed') {
+                console.error(`thread show: ${newest.reason}`);
+                process.exit(2);
+              }
+              if (newest.kind === 'newest') selector = newest.beadId;
+            }
             // R8 (home-base-vzwbj.4.9): a legacy thread id v4 cannot resolve
             // falls through to the legacy handler below.
             if (
               !report.routesToLegacyThread({
                 cwd: process.cwd(),
                 env: process.env,
-                selector: argv.threadId ?? null,
+                selector,
               })
             ) {
               process.exit(
                 await report.runSessionShow({
                   full: argv.full === true,
-                  selector: argv.threadId ?? null,
+                  selector,
                   sessionId: argv.session ?? null,
                 }),
               );
@@ -1975,7 +2128,7 @@ export const threadCommand: CommandModule = {
             .option('relay', {
               default: false,
               describe:
-                'With --ask: answer the question at its source, in whichever repo and session holds it (a BD id or a bead id). Refuses, writing nothing, on no match, two matches, an unreadable database or a question already closed',
+                'With --ask: answer the question at its source, in whichever repo and session holds it (a Q id such as Q131, the older BD131, or a bead id). Refuses, writing nothing, on no match, two matches, an unreadable database or a question already closed',
               type: 'boolean' as const,
             })
             .option('session', {
@@ -1992,7 +2145,7 @@ export const threadCommand: CommandModule = {
           const target = positionalWords(argv.threadId);
           if (argv.relay === true && argv.ask == null) {
             console.error(
-              'thread answer --relay: needs --ask <BD n | question bead id> "<answer>"',
+              'thread answer --relay: needs --ask <Q n | question bead id> "<answer>"',
             );
             process.exit(2);
           }
@@ -2075,6 +2228,13 @@ export const threadCommand: CommandModule = {
               type: 'boolean' as const,
             })
             .conflicts('by-status', 'by-repo')
+            // No `default: false`: yargs counts a default as given (above).
+            .option('before-restart', {
+              describe:
+                'Knob on: only the sessions that were in a cmux tab before the last restart (the Mac boot or cmux launch; `thread tabs before-restart` says which and lists the tabs), grouped by what they are now — restore failed (the tab shows the restore error cmux printed), its tab is back with a shell (no error shown), its tab runs another Claude session, not restored (the tab is gone), unknown (something could not be read; never shown as not restored), running again — with counts, newest activity first inside each. Never hides one of them by age; one the inbox has no card for is a line naming its tab. With --json: the same JSON as always, whose `beforeRestart` lists them. Sandbox off: it reads ps, sysctl, the cmux socket and the screens of tabs whose session does not run (in memory only)',
+              type: 'boolean' as const,
+            })
+            .conflicts('before-restart', ['by-status', 'by-repo'])
             .option('flat', {
               default: false,
               describe:
@@ -2101,6 +2261,7 @@ export const threadCommand: CommandModule = {
             process.exit(
               await runSessionInbox({
                 all: argv.all === true,
+                beforeRestart: argv['before-restart'] === true,
                 days: argv.days,
                 json: argv.json === true,
                 order:
@@ -2203,15 +2364,28 @@ export const threadCommand: CommandModule = {
       )
       .command(
         'drafts [action] [sessionIds..]',
-        'Unsent text in Claude Code input boxes. `thread drafts` lists what is stored and still unsent; `thread drafts scan` reads every open cmux pane and updates the store; `thread drafts dismiss <session id…>` marks stored text you no longer want as cleared (the text stays in the file). Exit 0 read · 1 something failed (named) · 2 cmux unreachable or no session id given, nothing written.',
+        'Unsent text in Claude Code input boxes. `thread drafts` lists what is stored and still unsent; `thread drafts scan` reads every open cmux pane and updates the store; `thread drafts dismiss <session id…>` marks stored text you no longer want as cleared (the text stays in the file); `thread drafts hook` is the hourly hook that starts the scan (see THE HOURLY SCAN below). Exit 0 read · 1 something failed (named) · 2 cmux unreachable or no session id given, nothing written. The hook always exits 0.',
         (yy) =>
           yy
             .epilogue(DRAFTS_NARRATIVE)
             .positional('action', {
-              choices: ['scan', 'dismiss'] as const,
+              choices: ['scan', 'dismiss', 'hook'] as const,
               describe:
-                'scan: read every cmux pane and record the unsent text in each Claude input box. dismiss: clear the stored text of the sessions named after it. Omit to list what is stored.',
+                'scan: read every cmux pane and record the unsent text in each Claude input box. dismiss: clear the stored text of the sessions named after it. hook: the UserPromptSubmit and Stop hook that starts a scan once an hour (reads the payload on stdin). Omit to list what is stored.',
               type: 'string' as const,
+            })
+            .option('trigger', {
+              choices: ['hook', 'manual'] as const,
+              default: 'manual' as const,
+              describe:
+                'scan only: what started this run, for the run log. The hook passes hook, which also stops the scan after 2 minutes.',
+              type: 'string' as const,
+            })
+            .option('explain', {
+              default: false,
+              describe:
+                'hook only: say what the hook decided on stderr (it prints nothing otherwise)',
+              type: 'boolean' as const,
             })
             .positional('sessionIds', {
               array: true,
@@ -2225,6 +2399,13 @@ export const threadCommand: CommandModule = {
               type: 'boolean' as const,
             }),
         async (argv) => {
+          if (argv.action === 'hook') {
+            // home-base-fmf1n D2: the hot path loads only its own module.
+            const {runThreadDraftsHook} = await import('./drafts-scan-hook');
+            process.exit(
+              await runThreadDraftsHook({explain: argv.explain === true}),
+            );
+          }
           const {
             runThreadDraftsDismiss,
             runThreadDraftsList,
@@ -2240,7 +2421,10 @@ export const threadCommand: CommandModule = {
           }
           process.exit(
             argv.action === 'scan'
-              ? await runThreadDraftsScan({json})
+              ? await runThreadDraftsScan({
+                  json,
+                  trigger: argv.trigger === 'hook' ? 'hook' : 'manual',
+                })
               : argv.action === 'dismiss'
                 ? runThreadDraftsDismiss({json, sessionIds: ids})
                 : await runThreadDraftsList({json}),
@@ -2248,8 +2432,43 @@ export const threadCommand: CommandModule = {
         },
       )
       .command(
+        'tabs [action]',
+        "What was open in cmux, from cmux's own saved session files. `thread tabs record` appends the open windows, workspaces and tabs to the tab records (hourly from chores); `thread tabs before-restart` lists what was open before the last Mac boot or cmux launch. Exit 0 done (or record is off) · 1 failed, named · 2 bad arguments.",
+        (yy) =>
+          yy
+            .epilogue(TABS_NARRATIVE)
+            // No yargs `choices`: its refusal exits 1 through the CLI-wide
+            // failure handler, and a bad action here must exit 2 (kwand.1).
+            .positional('action', {
+              describe:
+                "record: read cmux's session files and append a tab record. before-restart: list what was open before the last restart.",
+              type: 'string' as const,
+            })
+            .option('json', {
+              default: false,
+              describe: 'Print the result as JSON',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          if (argv.action !== 'record' && argv.action !== 'before-restart') {
+            console.error(
+              `thread tabs: unknown action "${String(argv.action)}"; use record or before-restart (see thread tabs --help). Nothing was read or written.`,
+            );
+            process.exit(2);
+          }
+          const {runThreadTabsBeforeRestart, runThreadTabsRecord} =
+            await import('./tab-record-command');
+          const json = argv.json === true;
+          process.exit(
+            argv.action === 'record'
+              ? await runThreadTabsRecord({json})
+              : await runThreadTabsBeforeRestart({json}),
+          );
+        },
+      )
+      .command(
         'search <query..>',
-        'Find the session in which a phrase was written. Searches every thread bead (the three verbatim messages, the title, the stored report) and every archived report JSON; prints repo · age · title · session id, the matching snippet, and the command that resumes it.',
+        'Find the session in which a phrase was written. Searches every thread bead (the three verbatim messages, the title, the stored report), every archived report JSON and every message log; groups the matching sessions by handoff chain, each chain with its newest session and the command that resumes it, then each session with its repo, age, title, session id and the matching snippet. --by-session prints one row per session instead.',
         (yy) =>
           yy
             .epilogue(SEARCH_NARRATIVE)
@@ -2283,8 +2502,21 @@ export const threadCommand: CommandModule = {
             })
             .option('limit', {
               default: 20,
-              describe: 'How many rows to print. 0 prints every match.',
+              describe:
+                'How many chains to print (with --by-session: how many sessions). 0 prints every match.',
               type: 'number' as const,
+            })
+            // home-base-lasun L1, L2.
+            .option('by-session', {
+              default: false,
+              describe:
+                'One row per session, newest first, as before chains were grouped: no chain blocks, and --limit counts sessions',
+              type: 'boolean' as const,
+            })
+            .option('chain', {
+              describe:
+                'Only the sessions of one handoff chain: a chain name (Scorpio, "Scorpio II", Scorpio_II), any session bead in it, or a Claude session id (the first 8 or more characters will do when only one session starts with them), as thread messages --chain takes it',
+              type: 'string' as const,
             })
             .option('regex', {
               default: false,
@@ -2312,6 +2544,8 @@ export const threadCommand: CommandModule = {
           process.exit(
             await runThreadSearch({
               allMatches: argv['all-matches'] === true,
+              bySession: argv['by-session'] === true,
+              chain: argv.chain ?? null,
               days: argv.days ?? null,
               json: argv.json === true,
               limit: argv.limit,
@@ -2319,6 +2553,95 @@ export const threadCommand: CommandModule = {
               regex: argv.regex === true,
               repos,
               // Given twice, the two values join and are refused (exit 2).
+              writtenSince:
+                since == null ? null : [since].flat().map(String).join(','),
+            }),
+          );
+        },
+      )
+      .command(
+        // home-base-z7o2m D2, D5, D6.
+        'messages [query..]',
+        "Print every message Justin typed in this session and in the sessions before it in its handoff chain: his words only, never Claude's replies. Filter by words or a regex, by date or count; --context <id> shows one message with the replies around it; --annotate adds what Claude did with each.",
+        (yy) =>
+          yy
+            .epilogue(MESSAGES_NARRATIVE)
+            .positional('query', {
+              describe:
+                'Only messages that contain this phrase (case-insensitive; several words are ONE phrase, and a space matches any run of whitespace), as `thread search` matches.',
+              type: 'string' as const,
+            })
+            .option('chain', {
+              describe:
+                'Another chain, all of it: a chain name (Scorpio, "Scorpio II", Scorpio_II), any session bead in it, or a Claude session id (the first 8 or more characters will do when only one session starts with them). Without it: the current session (CLAUDE_CODE_SESSION_ID) and every session before it.',
+              type: 'string' as const,
+            })
+            .option('regex', {
+              default: false,
+              describe:
+                'Treat the query as a JS regular expression (case-insensitive) instead of a literal phrase',
+              type: 'boolean' as const,
+            })
+            .option('written-since', {
+              describe:
+                'Only messages written at or after this point: 24h, 3d, 2w, or a date YYYY-MM-DD (local midnight). A message whose log line has no time is left out and counted.',
+              type: 'string' as const,
+            })
+            .option('limit', {
+              describe:
+                'Keep only the newest n matching messages. 0 or none keeps every one.',
+              type: 'number' as const,
+            })
+            .option('newest-first', {
+              default: false,
+              describe:
+                'Print the newest message first (default: oldest first)',
+              type: 'boolean' as const,
+            })
+            .option('annotate', {
+              default: false,
+              describe:
+                "Under each message, what Claude did before his next one (requests filed, questions asked, answers recorded, sessions started, messages sent, beads changed, commits, files edited, subagents) and the first lines of Claude's reply, read from the session's transcript",
+              type: 'boolean' as const,
+            })
+            .option('context', {
+              describe:
+                "Print one message (its id, such as f7a1dceb.4) with the message-log lines around it, his and Claude's, each marked by who wrote it",
+              type: 'string' as const,
+            })
+            .option('before', {
+              default: 2,
+              describe: 'With --context: how many log lines before it',
+              type: 'number' as const,
+            })
+            .option('after', {
+              default: 5,
+              describe: 'With --context: how many log lines after it',
+              type: 'number' as const,
+            })
+            .option('json', {
+              default: false,
+              describe:
+                'Print the chain, the counts, the messages and any problem as JSON',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          const {runThreadMessages} = await import('./messages-command');
+          const words = (argv.query as string[] | string | undefined) ?? [];
+          const text = (Array.isArray(words) ? words : [words]).join(' ');
+          const since: unknown = argv['written-since'];
+          process.exit(
+            await runThreadMessages({
+              after: argv.after,
+              annotate: argv.annotate === true,
+              before: argv.before,
+              chain: argv.chain ?? null,
+              context: argv.context ?? null,
+              json: argv.json === true,
+              limit: argv.limit ?? null,
+              newestFirst: argv['newest-first'] === true,
+              query: text === '' ? null : text,
+              regex: argv.regex === true,
               writtenSince:
                 since == null ? null : [since].flat().map(String).join(','),
             }),
@@ -2438,12 +2761,15 @@ export const threadCommand: CommandModule = {
 
 Refused (exit 3): a successor that cannot be found or read, two continued-by: labels, two beads that continue one, a loop, a chain longer than the walk limit (CHAIN_WALK_LIMIT in handoff-chain.ts), a head without exactly one sid: label, a pane that is none or unknown. A refusal prints the newest session's resume command, run in its checkout, when one is known. An untracked session (no session bead) is focused only when its pane is live, and the output says its handoff links are not recorded.
 
-Nothing but focus-panel is ever sent to cmux. Run it with the Claude Code sandbox off: sandboxed, cmux and ps are unreachable, every pane reads unknown, and every focus is refused.
+--workspace <uuid> also says whether that workspace exists now (present, gone, or unknown when the cmux tree cannot be read), from one read-only cmux tree; the threads dashboard's o asks it of the old workspace of a session whose cmux restore failed.
+
+Nothing but focus-panel is ever sent to cmux, besides that one tree read. Run it with the Claude Code sandbox off: sandboxed, cmux and ps are unreachable, every pane reads unknown, and every focus is refused.
 
 Exit codes: 0 focused (or --dry-run) · 1 the cmux call failed · 2 usage · 3 refused.`,
             )
             .positional('target', {
-              describe: 'A claude session id (uuid) or a session bead id',
+              describe:
+                'A claude session id (uuid), a session bead id, or a chain name (Scorpio): the walk starts at the chain’s first session and focuses its newest',
               type: 'string' as const,
             })
             .option('dry-run', {
@@ -2455,16 +2781,71 @@ Exit codes: 0 focused (or --dry-run) · 1 the cmux call failed · 2 usage · 3 r
             .option('json', {
               default: false,
               describe:
-                'Print one JSON object: kind, exitCode, target, chain, head, argv, reason, resume, notes (the threads TUI reads it)',
+                'Print one JSON object: kind, exitCode, target, chain, head, argv, reason, resume, notes, workspace (the threads TUI reads it)',
               type: 'boolean' as const,
+            })
+            .option('workspace', {
+              describe:
+                'A cmux workspace uuid: also say whether it exists now (JSON field workspace: present, gone or unknown). Read-only',
+              type: 'string' as const,
             }),
         async (argv) => {
           const {runThreadFocus} = await import('./focus');
+          // home-base-lasun L5: a chain name starts the walk at the chain's
+          // first session; focus's own fresh walk finds the newest.
+          const {chainTargetOf} = await import('./chain-command');
+          const typed = argv.target ?? '';
+          const named = chainTargetOf(typed, process.env);
+          if (named.kind === 'failed') {
+            console.error(`thread focus: ${named.reason}`);
+            process.exit(2);
+          }
           process.exit(
             await runThreadFocus({
               dryRun: argv['dry-run'] === true,
               json: argv.json === true,
-              target: argv.target ?? '',
+              target: named.kind === 'chain' ? named.root : typed,
+              workspace: argv.workspace ?? null,
+            }),
+          );
+        },
+      )
+      .command(
+        // home-base-lasun L3.
+        'chain [member]',
+        'List one handoff chain’s sessions in order, oldest first: each with its name ([Scorpio-12]), session id, session bead, when it started and was last active, its status, and how it ended (handed off, done, archived or open). Read-only. Exit 0 listed · 2 the chain could not be read (an incomplete chain still prints what was read).',
+        (yy) =>
+          yy
+            .epilogue(
+              `MEMBER  a chain name (Scorpio, "Scorpio II", Scorpio_II), any session bead in the chain, or a Claude session id (the first 8 or more characters will do when only one session starts with them). Without it: the current session's chain (CLAUDE_CODE_SESSION_ID).
+
+THE CHAIN  handoff links only: continues: and continued-by: labels on session beads, walked both ways from the member by the one chain walk that thread messages and thread search use. A session the mayor spawned is its own chain.
+
+DATES  Started and Last active are the first and newest dated lines of the session's message log. A session with no log, or no dated line, says unknown and why.
+
+ENDED  handed off (every session but the last, and the last when its handoff ran), done (its session bead is closed), archived (closed and labelled archived), or open.
+
+EXAMPLES
+  thread chain                 this session's chain
+  thread chain Scorpio         the mayor chain
+  thread chain f7a1dceb        the chain of that session`,
+            )
+            .positional('member', {
+              describe:
+                'A chain name, a session bead id or a Claude session id; omit for the current session',
+              type: 'string' as const,
+            })
+            .option('json', {
+              default: false,
+              describe: 'Print the chain, its sessions and any problem as JSON',
+              type: 'boolean' as const,
+            }),
+        async (argv) => {
+          const {runThreadChain} = await import('./chain-command');
+          process.exit(
+            await runThreadChain({
+              json: argv.json === true,
+              member: argv.member ?? null,
             }),
           );
         },

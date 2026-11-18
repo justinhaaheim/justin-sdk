@@ -54,6 +54,10 @@ const runSchema = z.looseObject({
     .array(z.looseObject({movedAt: z.string().nullable().optional()}))
     .optional(),
   previousUndos: z.array(z.unknown()).optional(),
+  // home-base-kwand.3: what --restore-failed opened (open-restore-failed.ts).
+  tabs: z
+    .array(z.looseObject({openedAt: z.string().nullable().optional()}))
+    .optional(),
   undo: z
     .looseObject({
       closed: z.array(z.unknown()).optional(),
@@ -87,6 +91,8 @@ export interface RunSummary {
   /** Why the file could not be read; null when it was. */
   readFailure: string | null;
   stamp: string;
+  /** home-base-kwand.3: sessions --restore-failed opened (tabs and fallback workspaces). */
+  tabs: number;
   /** The undo in words: not undone, undone at …, started and not finished. */
   undo: string;
   windows: number;
@@ -177,6 +183,7 @@ export function readRuns(env: EnvLike, now: Date): RunsRead {
       path,
       readFailure: null,
       stamp,
+      tabs: 0,
       undo: 'unknown',
       windows: 0,
     };
@@ -213,6 +220,8 @@ export function readRuns(env: EnvLike, now: Date): RunsRead {
       path,
       readFailure: null,
       stamp,
+      tabs: (parsed.tabs ?? []).filter((entry) => entry.openedAt != null)
+        .length,
       undo: undoWords(parsed, now),
       windows: windows.length,
     };
@@ -290,7 +299,7 @@ export function renderRuns(
                 ...run.filters,
                 {
                   label: 'Opened',
-                  value: `${run.opened} workspace${run.opened === 1 ? '' : 's'} in ${run.windows} window${run.windows === 1 ? '' : 's'}${run.finishedAt == null ? ' (the run did not finish)' : ''}`,
+                  value: `${run.opened} workspace${run.opened === 1 ? '' : 's'} in ${run.windows} window${run.windows === 1 ? '' : 's'}${run.tabs > 0 ? `; ${run.tabs} restored session${run.tabs === 1 ? '' : 's'} (--restore-failed: a new tab of its old workspace, or a new workspace)` : ''}${run.finishedAt == null ? ' (the run did not finish)' : ''}`,
                 },
                 {label: 'Moved in', value: String(run.moved)},
                 {label: 'Undone', value: run.undo},

@@ -72,7 +72,7 @@ export type VitalsGrade = (typeof VITALS_GRADES)[number];
 /** One problem a check found. */
 export interface VitalsFinding {
   /**
-   * Stable: the check plus the kind of problem (`disk:low`, `jobs:<job id>`,
+   * Stable: the check plus the kind of problem (`disk:warning`, `jobs:<job id>`,
    * `cpu:unchecked`). Dispatch B of home-base-sg9q9.7 (D5) starts at most one
    * research session per key, so a key must not change while the problem lasts.
    */

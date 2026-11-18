@@ -89,8 +89,8 @@ import {argvSessionId, isSessionProc} from './live-sessions';
 import {activityWords, locateWorkspace, opensDir, writeJsonFile} from './open';
 import {
   findInputBox,
+  idleShellScreen,
   isShellScaffolding,
-  NO_BREAK_SPACE,
   normalizeTty,
   readLiveSurfaces,
   readProcesses,
@@ -151,6 +151,20 @@ const recordSchema = z.looseObject({
     )
     .optional(),
   previousUndos: z.array(z.unknown()).optional(),
+  // home-base-kwand.3: `thread open --restore-failed` opens tabs, each
+  // written before its cmux call (open-restore-failed.ts).
+  tabs: z
+    .array(
+      z.looseObject({
+        name: z.string().optional(),
+        openedAt: z.string().nullable().optional(),
+        sessionId: z.string(),
+        surfaceId: z.string().nullable().optional(),
+        target: z.string().optional(),
+        workspaceId: z.string().nullable().optional(),
+      }),
+    )
+    .optional(),
   undo: z.unknown().optional(),
   windows: z.array(
     z.looseObject({
@@ -275,6 +289,8 @@ export interface UndoState {
   kept: UndoKept[];
   /** yukaf.22: moved workspaces put back, BEFORE anything is closed. */
   movedBack: UndoMovedBack[];
+  /** home-base-kwand.3: tabs --restore-failed opened in old workspaces, not closed. */
+  notClosed: UndoTabNotClosed[];
   /** Moved workspaces left where they are, and why. */
   notMovedBack: {
     name: string;
@@ -295,17 +311,6 @@ export interface UndoState {
 // ---------------------------------------------------------------------------
 // The gates (pure, per pane)
 // ---------------------------------------------------------------------------
-
-const IDLE_PROMPT = /^(?:❯|\$|%|#|>|➜)$/u;
-
-/** A blank screen, or one whose last line is a bare shell prompt with nothing typed. */
-export function idleShellScreen(lines: readonly string[]): boolean {
-  const shown = lines
-    .map((line) => line.replaceAll(NO_BREAK_SPACE, ' ').trim())
-    .filter((line) => line !== '');
-  const last = shown.at(-1);
-  return last == null || IDLE_PROMPT.test(last);
-}
 
 function pad2(value: number): string {
   return String(value).padStart(2, '0');
@@ -881,13 +886,62 @@ export function recordedWorkspaces(record: ParsedRecord): RecordedWorkspace[] {
       entry.name ?? entry.title ?? entry.sessionId,
     ]),
   );
-  return record.windows.flatMap((window) =>
+  const opened = record.windows.flatMap((window) =>
     window.workspaces.map((workspace) => ({
       name: names.get(workspace.sessionId) ?? workspace.sessionId,
       sessionId: workspace.sessionId,
       windowId: window.windowId,
       workspaceId: workspace.workspaceId,
     })),
+  );
+  // home-base-kwand.3: a workspace --restore-failed made because the old one
+  // was gone is closed like any other, through the same gates. Its window was
+  // not made by the run, so it is never checked for emptying (windowId null).
+  const made = (record.tabs ?? []).flatMap((tab) =>
+    tab.target === 'newWorkspace' && tab.workspaceId != null
+      ? [
+          {
+            name: tab.name ?? names.get(tab.sessionId) ?? tab.sessionId,
+            sessionId: tab.sessionId,
+            windowId: null,
+            workspaceId: tab.workspaceId,
+          },
+        ]
+      : [],
+  );
+  return [...opened, ...made];
+}
+
+/** A tab `--restore-failed` opened in an old workspace: --undo does not close it. */
+export interface UndoTabNotClosed {
+  name: string;
+  reason: string;
+  sessionId: string;
+  /** The new tab's surface uuid; null when the run could not read it. */
+  surfaceId: string | null;
+  workspaceId: string | null;
+}
+
+/**
+ * home-base-kwand.3: every tab the record says `--restore-failed` opened (or
+ * tried to: an entry is written before its call, and a failed answer is no
+ * proof nothing opened) in an OLD workspace. --undo closes whole workspaces,
+ * and closing that one would close Justin's other tabs there, so each is
+ * named for him to close by hand (closing one tab: follow-up bead).
+ */
+export function tabsNotClosed(record: ParsedRecord): UndoTabNotClosed[] {
+  return (record.tabs ?? []).flatMap((tab) =>
+    tab.target === 'oldWorkspace'
+      ? [
+          {
+            name: tab.name ?? tab.sessionId,
+            reason: `it was opened as a new tab of its old workspace${tab.workspaceId == null ? '' : ` ${tab.workspaceId}`}, and --undo closes only whole workspaces it opened (closing that one would close the other tabs there). Close the tab by hand${tab.surfaceId == null ? ' (its surface uuid was not recorded)' : ` (surface ${tab.surfaceId})`}.`,
+            sessionId: tab.sessionId,
+            surfaceId: tab.surfaceId ?? null,
+            workspaceId: tab.workspaceId ?? null,
+          },
+        ]
+      : [],
   );
 }
 
@@ -1622,6 +1676,30 @@ export function renderUndo(
     );
   }
 
+  if (state.notClosed.length > 0) {
+    blocks.push(
+      header(
+        `Not closed: tabs opened in an old workspace (${state.notClosed.length})`,
+        '🚧',
+      ),
+    );
+    blocks.push(
+      spacedList(
+        state.notClosed.map((entry) =>
+          block(
+            entry.name,
+            [
+              {label: 'Session', value: entry.sessionId},
+              {label: 'Workspace', value: entry.workspaceId ?? 'unknown'},
+              {label: 'Why', value: entry.reason},
+            ],
+            style,
+          ),
+        ),
+      ),
+    );
+  }
+
   if (state.gone.length > 0) {
     blocks.push(header(`Already gone (${state.gone.length})`, '👻'));
     blocks.push(
@@ -1666,7 +1744,7 @@ export function renderUndo(
     );
   }
 
-  const keptWords = `kept ${state.kept.length}${withDraft.length > 0 ? ` (${withDraft.length} with unsent text)` : ''}`;
+  const keptWords = `kept ${state.kept.length}${withDraft.length > 0 ? ` (${withDraft.length} with unsent text)` : ''}${state.notClosed.length > 0 ? `, ${state.notClosed.length} ${state.notClosed.length === 1 ? 'tab' : 'tabs'} to close by hand` : ''}`;
   const summary = state.dryRun
     ? `Would close ${state.planned.length}, ${keptWords}, already gone ${state.gone.length}. Run it again without --dry-run to close them.`
     : `Closed ${state.closed.length}, ${keptWords}, already gone ${state.gone.length}${state.failed.length > 0 ? `, failed ${state.failed.length}` : ''}.`;
@@ -1776,6 +1854,7 @@ export async function undoOpen(
     gone: [],
     kept: [],
     movedBack: [],
+    notClosed: tabsNotClosed(read.parsed),
     notMovedBack: [],
     planned: [],
     startedAt,
@@ -1985,8 +2064,13 @@ export async function undoOpen(
       `the final rewrite of the record ${tildeText(pick.path)} failed`,
     );
   }
+  // home-base-kwand.3: a tab left for Justin to close is an undo not finished.
   return finish(
-    state.failures.length === 0 && state.failed.length === 0 ? 0 : 1,
+    state.failures.length === 0 &&
+      state.failed.length === 0 &&
+      state.notClosed.length === 0
+      ? 0
+      : 1,
   );
 }
 

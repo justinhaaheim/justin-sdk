@@ -107,6 +107,40 @@ describe('a blocked /full-report', () => {
     expect(Object.keys(json).sort()).toEqual(['decision', 'reason']);
   });
 
+  test('home-base-88y8m D2: only the block, none of the lines meant for Claude', async () => {
+    const block = [
+      '🛑🛑🛑🛑🛑🛑',
+      '',
+      '**Session:** [X] Speed up the export',
+      '',
+      '## Questions for you',
+      '',
+      '1. 🆕 [Q107] ⚪ P3 · [Answer] **Gzip the output?** (t-q3)',
+      '',
+      '♒♒♒♒♒♒♒♒♒♒',
+    ].join('\n');
+    const stdout = [
+      'SESSION BEADS: ENABLED',
+      '',
+      block,
+      '',
+      '**What to mark:**',
+      '',
+      '- Close t-1 if its work is done `br close t-1`',
+      '',
+      'If you stop now the inbox will say: ⚠️ Open work, no blocker',
+      '',
+    ].join('\n');
+    const {deps} = recording(true, okRun(stdout));
+    const reason = parsed(await hook(payload('/full-report'), deps))
+      .reason as string;
+    expect(reason).toBe(block);
+    expect(reason).toContain('🆕');
+    expect(reason).not.toContain('SESSION BEADS');
+    expect(reason).not.toContain('What to mark');
+    expect(reason).not.toContain('If you stop now');
+  });
+
   test('ANSI colour in the report is stripped', async () => {
     const esc = String.fromCharCode(27);
     const {deps} = recording(true, okRun(`${esc}[1mbold${esc}[0m\n`));

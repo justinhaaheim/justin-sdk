@@ -81,8 +81,11 @@ export interface HookHandler {
  * home-base-ys9t7.5 D5): ON means any mode but `off`, so the brake is written
  * wherever it observes or enforces. `thread.fullReportCommand` is
  * componentConfig.thread.fullReportCommand (home-base-1rxt0.14).
+ * `thread.draftsScanHook` is componentConfig.thread.draftsScanHook
+ * (home-base-fmf1n D7).
  */
 export type HookHandlerKnob =
+  | 'thread.draftsScanHook'
   | 'thread.fullReportCommand'
   | 'thread.handoff.successor'
   | 'thread.quota.mode';
@@ -180,6 +183,19 @@ export const HOOK_HANDLERS: readonly HookHandler[] = [
       },
     ],
     'thread.fullReportCommand',
+  ),
+  // The hourly unsent-drafts scan (home-base-fmf1n D1): the first hook of each
+  // wall-clock hour, in a session inside cmux, starts `thread drafts scan`
+  // detached. The dispatcher runs it wherever the component is; the handler
+  // reads componentConfig.thread.draftsScanHook itself and does nothing off.
+  handler(
+    'thread-hooks-setup',
+    ['thread', 'drafts', 'hook'],
+    [
+      {event: 'UserPromptSubmit', matcher: NO_MATCHER},
+      {event: 'Stop', matcher: NO_MATCHER},
+    ],
+    'thread.draftsScanHook',
   ),
 ];
 

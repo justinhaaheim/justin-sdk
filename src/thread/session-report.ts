@@ -35,10 +35,11 @@ import type {VitalsNotice} from '../vitals';
 import type {PickupLabelsRead, PickupState} from './handoff-auto-pickup';
 import type {ChainReaders} from './handoff-chain';
 import type {MessageLine} from './message-log';
-import type {PartOneView, Piece} from './part-one';
+import type {MessageQuestions} from './message-questions';
+import type {ClaudeMessageInput, PartOneView, Piece} from './part-one';
 import type {EnvLike} from './paths';
 import type {RelatedEpics} from './related-epics';
-import type {ReportDelta} from './report-delta';
+import type {ReportDelta, SnapshotBlock} from './report-delta';
 import type {ActionLine, OptionalLine} from './session-card';
 import type {CreatedBeads} from './session-created';
 import type {Measured, SessionModel} from './session-model';
@@ -49,8 +50,8 @@ import type {
   StatusCounts,
 } from './session-status';
 
-import {readFileSync} from 'fs';
-import {join} from 'path';
+import {readFileSync, renameSync, rmSync, writeFileSync} from 'fs';
+import {join, resolve} from 'path';
 
 import {
   BODY_COLUMN,
@@ -69,6 +70,7 @@ import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
 import {readCaptureLockHolder} from './capture-lock';
 import {registryChainNamer} from './chain-names';
+import {realChainWalkReaders} from './chain-walk';
 import {readBeadFromDb} from './export-behind';
 import {
   PICKUP_DONE_LINE,
@@ -87,12 +89,16 @@ import {
   realChainViewReaders,
   type UnattendedCountView,
 } from './handoff-view';
+import {resolveMessageQuestions} from './message-questions';
 import {
   chainRequestList,
   readChainRequests,
   realChainRequestReaders,
 } from './overarching';
 import {
+  isOmRuleLine,
+  isRuleLine,
+  isSeparatorLine,
   partOneView,
   renderPartOne,
   statusWords,
@@ -104,6 +110,8 @@ import {threadsBeadsDir} from './paths';
 import {assignMissingQuestionIds} from './question-id-assign';
 import {findRelatedEpics, renderRelatedEpics} from './related-epics';
 import {
+  blockShownIn,
+  newestShownMessage,
   reportBaselineFor,
   saveReportSnapshot,
   snapshotBlockOf,
@@ -137,7 +145,7 @@ import {
   statusFactsOf,
   whatToMark,
 } from './session-status';
-import {saveStatusBlock} from './trim-guard';
+import {normalizeText, saveStatusBlock} from './trim-guard';
 
 /** `thread show` cuts each of Justin's messages here unless `--full`. */
 export const USER_MESSAGE_CUT = 400;
@@ -573,12 +581,90 @@ function refusalLines(
 
 export interface ThreadStatusOptions extends CommonOptions {
   /**
+   * `--changes` (home-base-88y8m D1): Progress and Questions for you keep only
+   * what is new or changed since the last report. The block saved for the
+   * Stop hook is this one; the snapshot's items stay the full set.
+   */
+  changes?: boolean;
+  /**
    * `--full` (home-base-1rxt0.4 D5): every question in full, whatever
    * componentConfig.thread.compactQuestions says. The markers stay.
    */
   full?: boolean;
+  /**
+   * `--message <path>` (home-base-88y8m D4): Claude's reply, as markdown, shown
+   * verbatim inside the block as `## From Claude` and stored in the snapshot.
+   * Null or absent: no such section.
+   */
+  message?: string | null;
+  /**
+   * `--report-file <path>` (home-base-88y8m D2): also write the full report,
+   * the block alone, to this path (relative to `cwd`). Null or absent: none.
+   */
+  reportFile?: string | null;
   sessionId: string | null;
 }
+
+/**
+ * D4: why a `--message` file is refused (exit 2, nothing saved), or its text:
+ * line endings normalised to `\n` and trailing blank lines trimmed, otherwise
+ * as written. A line the block's bounds read (a 🛑 rule, a ♒ separator, a 🕉
+ * rule) would end the pasted block early, so `thread show`, the Stop hook and
+ * the `/full-report` hook would cut Claude's message out of it: refused too.
+ * home-base-88y8m.3 F3: only a line MADE of 🕉 is refused (isOmRuleLine, the
+ * same test the bounds use); a sentence that mentions 🕉 passes.
+ */
+export function readMessageFile(
+  path: string,
+): {ok: false; why: string} | {ok: true; text: string} {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (error) {
+    return {
+      ok: false,
+      why: `it could not be read: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  const lines = raw.replace(/\r\n?/g, '\n').split('\n');
+  while (lines.length > 0 && (lines.at(-1) ?? '').trim() === '') lines.pop();
+  if (lines.length === 0) return {ok: false, why: 'it is empty'};
+  const text = lines.join('\n');
+  const bound = lines.findIndex(
+    (line) => isRuleLine(line) || isSeparatorLine(line),
+  );
+  if (bound !== -1) {
+    return {
+      ok: false,
+      why: `line ${bound + 1} is a line of 🛑 or ♒ (or ─), which would end the report block early`,
+    };
+  }
+  const om = lines.findIndex(isOmRuleLine);
+  if (om !== -1) {
+    return {
+      ok: false,
+      why: `line ${om + 1} is a line of 🕉, which would end the report block early`,
+    };
+  }
+  return {ok: true, text};
+}
+
+/** D4: the stderr line for a refused `--message` file. */
+export function messageFileRefusedLine(path: string, why: string): string {
+  return `thread status: the message file ${path} was refused: ${why}. Nothing was printed or saved.`;
+}
+
+/**
+ * home-base-88y8m.8 R5: the stderr line when a readable `--message` file had no
+ * report to go into, so its message was neither shown nor saved (exit 1).
+ */
+export function messageNotShownLine(path: string, why: string): string {
+  return `thread status: the message in ${path} was not shown or saved: ${why}.`;
+}
+
+/** D1: `--changes` with `--full`, refused with exit 2. */
+export const CHANGES_WITH_FULL_REFUSAL =
+  'thread status: --changes and --full cannot be used together: --changes prints only what changed, --full prints every question in full.';
 
 /**
  * One "What to mark" entry, in plain words, with the command that fixes it,
@@ -1061,7 +1147,12 @@ export function verdictLines(
 function statusPartOneView(
   load: Extract<ReportLoad, {kind: 'loaded'}>,
   options: {
+    changesOnly?: boolean;
     delta?: ReportDelta | null;
+    /** home-base-88y8m D4: `--message`'s text, shown as `## From Claude`. */
+    message?: null | string;
+    /** home-base-88y8m D5: the ids that text names, resolved once per run. */
+    messageQuestions?: MessageQuestions | null;
     now: Date;
     questionIdProblems?: readonly string[];
     timeZone?: string;
@@ -1069,10 +1160,13 @@ function statusPartOneView(
 ): PartOneView {
   return partOneView({
     action: load.action,
+    changesOnly: options.changesOnly === true,
     counts: load.counts,
     delta: options.delta ?? null,
     jobs: load.jobHealth,
     marks: load.marks,
+    message: options.message == null ? null : {at: null, text: options.message},
+    messageQuestions: options.messageQuestions ?? null,
     model: load.model,
     now: options.now,
     optional: load.optional,
@@ -1087,11 +1181,17 @@ function statusPartOneView(
 export function renderThreadStatus(
   load: Extract<ReportLoad, {kind: 'loaded'}>,
   options: {
+    /** home-base-88y8m D1: `--changes`, only what changed (needs `delta`). */
+    changesOnly?: boolean;
     /**
      * home-base-1rxt0.4: the last report and the compact switch. Absent: no
      * markers, every question in full.
      */
     delta?: ReportDelta | null;
+    /** home-base-88y8m D4: `--message`'s text. */
+    message?: null | string;
+    /** home-base-88y8m D5: the ids the message names, resolved. */
+    messageQuestions?: MessageQuestions | null;
     now: Date;
     /** home-base-1rxt0.4 D4: why some questions got no id in this run. */
     questionIdProblems?: readonly string[];
@@ -1165,6 +1265,37 @@ export function renderThreadStatus(
   ]);
 }
 
+/**
+ * D2: the stderr line when `--report-file` wrote nothing. A file already at the
+ * path is left as it was, and the line says it is not this run's.
+ */
+export function reportFileFailedLine(path: string, why: string): string {
+  return `thread status: the report file was not written to ${path}: ${why}. Any file already there is from an earlier run.`;
+}
+
+/**
+ * D2: write the report file. Null when written, else why it was not.
+ * home-base-88y8m.8 R2: through a temporary file in the same directory and a
+ * rename, as report-snapshots.ts writeSnapshots does, so a failed write never
+ * leaves half a report at the path, and reportFileFailedLine stays true: any
+ * file there is a whole one from an earlier run.
+ */
+export function writeReportFile(path: string, text: string): string | null {
+  const temp = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temp, `${text}\n`);
+    renameSync(temp, path);
+    return null;
+  } catch (error) {
+    try {
+      rmSync(temp, {force: true});
+    } catch {
+      // The temp file is the smaller problem; the caller reports the real one.
+    }
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 /** `thread status`: print, return the exit code. */
 export async function runThreadStatus(
   options: ThreadStatusOptions,
@@ -1173,6 +1304,27 @@ export async function runThreadStatus(
   const cwd = options.cwd ?? process.cwd();
   const now = options.now ?? new Date();
   const style = options.style ?? outputStyle(process.stdout);
+  // home-base-88y8m D1: one prints only what changed, the other every
+  // question in full; refused before anything is read or written.
+  if (options.changes === true && options.full === true) {
+    console.error(CHANGES_WITH_FULL_REFUSAL);
+    return 2;
+  }
+  // home-base-88y8m D4: read before anything is loaded, printed or saved, so a
+  // message that cannot be shown stops the run instead of being dropped.
+  let message: null | string = null;
+  const messagePath =
+    options.message == null ? null : resolve(cwd, options.message);
+  if (messagePath != null) {
+    const read = readMessageFile(messagePath);
+    if (!read.ok) {
+      console.error(messageFileRefusedLine(messagePath, read.why));
+      return 2;
+    }
+    message = read.text;
+  }
+  const reportPath =
+    options.reportFile == null ? null : resolve(cwd, options.reportFile);
   const loadInput = {
     asIfYielded: true,
     cwd,
@@ -1207,10 +1359,36 @@ export async function runThreadStatus(
   if (load.kind === 'disabled') {
     // Exit 0: "off" is an answer the rule branches on, not a failure (D6).
     console.log(refusalLines('thread status', load).join('\n'));
-    return 0;
+    // home-base-88y8m D2: a report file was asked for and none was written,
+    // so this is a failure for that caller, said on stderr. home-base-88y8m.8
+    // R5: so is a message that went into no report.
+    let failed = false;
+    if (messagePath != null) {
+      console.error(
+        messageNotShownLine(messagePath, 'session beads are off here'),
+      );
+      failed = true;
+    }
+    if (reportPath != null) {
+      console.error(
+        reportFileFailedLine(reportPath, 'session beads are off here'),
+      );
+      failed = true;
+    }
+    return failed ? 1 : 0;
   }
   if (load.kind !== 'loaded') {
     console.error(refusalLines('thread status', load).join('\n'));
+    if (messagePath != null) {
+      console.error(
+        messageNotShownLine(messagePath, 'there is no report to put it in'),
+      );
+    }
+    if (reportPath != null) {
+      console.error(
+        reportFileFailedLine(reportPath, 'there is no report to write'),
+      );
+    }
     return 1;
   }
   // home-base-7761p.23 D2: BEFORE anything is printed, because sessions pipe
@@ -1275,15 +1453,35 @@ export async function runThreadStatus(
     }),
     compact: load.compactQuestions && options.full !== true,
   };
+  const changesOnly = options.changes === true;
+  // home-base-88y8m D5: the question ids the message names, looked up ONCE
+  // (the lookup reads every export the sessions index knows) and shown in the
+  // printed block, the saved block and the report file alike.
+  const messageQuestions =
+    message == null
+      ? null
+      : resolveMessageQuestions({
+          env,
+          firstDirs: [
+            ...new Set(load.model.sightings.map((entry) => entry.beadsDir)),
+          ],
+          open: openQuestions(load.model),
+          text: message,
+        });
   const view = statusPartOneView(load, {
+    changesOnly,
     delta,
+    message,
+    messageQuestions,
     now,
     questionIdProblems,
     timeZone: options.timeZone,
   });
   // The markdown block a session sees and pastes: the trim guard's saved text,
   // and (home-base-sg9q9.11 F1) what the Stop hook looks for in the final
-  // message to mark this snapshot shown.
+  // message to mark this snapshot shown. Under --changes (home-base-88y8m D1)
+  // it is the changes-only block, because that is the one pasted; the
+  // snapshot's items below are still every item (view.snapshot).
   const blockText = renderPartOne(view, PLAIN_STYLE);
   // Only the session's own run saves, like the block below: a `--session
   // <other>` run must not become another session's last report.
@@ -1293,6 +1491,7 @@ export async function runThreadStatus(
       block: snapshotBlockOf(blockText),
       env,
       items: view.snapshot,
+      message,
       sessionId: load.model.sessionId,
     });
     if (snapshot.kind === 'failed') {
@@ -1314,9 +1513,33 @@ export async function runThreadStatus(
       );
     }
   }
+  // home-base-88y8m D2: the full report for Justin, from the same load and the
+  // same last report: every item, the markers, every question whole (no
+  // one-line fold), and nothing after the ♒ line. Written before stdout, like
+  // the saves above, so a closed pipe cannot lose it; a failure is said after
+  // stdout, which the session still needs.
+  let reportFileError: string | null = null;
+  if (reportPath != null) {
+    const fileView = statusPartOneView(load, {
+      delta: {...delta, compact: false},
+      message,
+      messageQuestions,
+      now,
+      questionIdProblems,
+      timeZone: options.timeZone,
+    });
+    reportFileError = writeReportFile(
+      reportPath,
+      renderPartOne(fileView, PLAIN_STYLE),
+    );
+  }
   await writeStdout(
-    `${renderThreadStatus(load, {delta, now, questionIdProblems, style, timeZone: options.timeZone})}\n`,
+    `${renderThreadStatus(load, {changesOnly, delta, message, messageQuestions, now, questionIdProblems, style, timeZone: options.timeZone})}\n`,
   );
+  if (reportPath != null && reportFileError != null) {
+    console.error(reportFileFailedLine(reportPath, reportFileError));
+    return 1;
+  }
   return 0;
 }
 
@@ -1406,14 +1629,24 @@ export function handoffSectionLines(
   return chainLines(chain, unattended);
 }
 
-/** The real readers of the "Handoff chain" section. */
+/**
+ * The real readers of the "Handoff chain" section. The beads are read fresh
+ * through br, as before; the reverse search for a half-written link
+ * (home-base-lasun.1 F1) is walkChain's own, over the beads exports the
+ * sessions index names. Like walkChain's, it misses a `continues:` label that
+ * is in a database and not yet in its export.
+ */
 export function realHandoffSectionReaders(input: {cwd: string; env: EnvLike}): {
   chain: ChainReaders;
   view: ChainViewReaders;
 } {
+  const walkReaders = realChainWalkReaders(input);
   return {
     chain: realChainReaders(input),
-    view: realChainViewReaders(input),
+    view: {
+      ...realChainViewReaders(input),
+      findContinuing: (beadId) => walkReaders.findContinuing(beadId, null),
+    },
   };
 }
 
@@ -1423,6 +1656,20 @@ export function renderSessionShow(
     full: boolean;
     /** The "Handoff chain" section (`handoffSectionLines`); null = none. */
     handoff?: string[] | null;
+    /**
+     * home-base-88y8m D4: the newest shown report's message (`storedMessageOf`),
+     * shown in Part 1 as `## From Claude` with its time. Null or absent: none.
+     */
+    message?: ClaudeMessageInput | null;
+    /**
+     * home-base-88y8m.8 R4: the printed block of the report that message was
+     * stored with (`storedMessageOf`). The From Claude line says the message
+     * is in Part 1 above only when Claude's last message holds this block.
+     * Null or absent: it is not said.
+     */
+    messageBlock?: SnapshotBlock | null;
+    /** home-base-88y8m D5: the ids that message names, resolved. */
+    messageQuestions?: MessageQuestions | null;
     now: Date;
     /** The "Related epics" section's content (`relatedEpicsOf`). */
     related: RelatedEpics;
@@ -1434,12 +1681,15 @@ export function renderSessionShow(
   const {model} = load;
   const related = renderRelatedEpics(options.related, style);
   const handoff = options.handoff ?? null;
+  const message = options.message ?? null;
   const partOne = renderPartOne(
     partOneView({
       action: load.action,
       counts: load.counts,
       jobs: load.jobHealth,
       marks: load.marks,
+      message,
+      messageQuestions: options.messageQuestions ?? null,
       model,
       now,
       optional: load.optional,
@@ -1459,10 +1709,20 @@ export function renderSessionShow(
     claude = '(Claude has not yielded in this session yet.)';
   else {
     const stripped = stripPastedPartOne(last.value.text);
+    // home-base-88y8m D4: with a stored message, the pasted block WAS Claude's
+    // message, and Part 1 above shows it. home-base-88y8m.8 R4: only when the
+    // block pasted last is the one that message was stored with; a later
+    // block that was never marked shown is another report.
+    const messageBlock = options.messageBlock ?? null;
     claude =
-      stripped === ''
-        ? '(Claude’s last message was only a pasted Part 1.)'
-        : stripped;
+      stripped !== ''
+        ? stripped
+        : message != null &&
+            'text' in message &&
+            messageBlock != null &&
+            blockShownIn(messageBlock, normalizeText(last.value.text))
+          ? '(Claude’s last message was the report; its message is in Part 1 above, under From Claude.)'
+          : '(Claude’s last message was only a pasted Part 1.)';
   }
 
   // ---- Your messages ----
@@ -1526,6 +1786,38 @@ export function renderSessionShow(
   ]);
 }
 
+/**
+ * home-base-88y8m D4: what `thread show` shows as `## From Claude`: the newest
+ * shown report's message with its time, why it could not be read, or null
+ * (none stored: the session never used `--message`, or its last shown report
+ * had none). home-base-88y8m.8 R4: with that report's printed block, or null
+ * when there is none to compare.
+ */
+export function storedMessageOf(
+  sessionId: string,
+  env: EnvLike,
+): {block: SnapshotBlock | null; message: ClaudeMessageInput} | null {
+  const read = newestShownMessage(sessionId, env);
+  switch (read.kind) {
+    case 'none':
+      return null;
+    case 'unknown':
+      return {
+        block: null,
+        message: {
+          problem: `Claude's message from the last report you saw could not be read: ${read.reason}`,
+        },
+      };
+    case 'found': {
+      const ms = parseInstant(read.at);
+      return {
+        block: read.block,
+        message: {at: ms == null ? null : new Date(ms), text: read.message},
+      };
+    }
+  }
+}
+
 /** `thread show` with the knob on: print, return the exit code. */
 export async function runSessionShow(
   options: SessionShowOptions,
@@ -1547,10 +1839,28 @@ export async function runSessionShow(
     console.error(lines.join('\n'));
     return 1;
   }
+  const stored = storedMessageOf(load.model.sessionId, env);
+  const message = stored?.message ?? null;
+  // D5: the same resolution `thread status --message` ran, over the stored
+  // message, so the dashboard's detail view shows those questions too.
+  const messageQuestions =
+    message != null && 'text' in message
+      ? resolveMessageQuestions({
+          env,
+          firstDirs: [
+            ...new Set(load.model.sightings.map((entry) => entry.beadsDir)),
+          ],
+          open: openQuestions(load.model),
+          text: message.text,
+        })
+      : null;
   await writeStdout(
     `${renderSessionShow(load, {
       full: options.full,
       handoff: handoffSectionLines(load, realHandoffSectionReaders({cwd, env})),
+      message,
+      messageBlock: stored?.block ?? null,
+      messageQuestions,
       now,
       related: relatedEpicsOf(load),
       style,

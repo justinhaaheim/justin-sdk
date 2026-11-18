@@ -1,13 +1,26 @@
 /**
- * Question ids like `BD107` (home-base-1rxt0.4 D4, decided by question
+ * Question ids like `Q107` (home-base-1rxt0.4 D4, decided by question
  * home-base-sg9q9.9, option a; numbered machine-wide since home-base-4wfoz,
- * design D2 in home-base-l2ejg.3). Justin, 2026-11-12 (verbatim on
- * home-base-sg9q9.2): "if I answer what I think is question 5 but you
- * interpret it as question 6, there's basically no way for us to even catch
- * that … let's give each question a clear, unambiguous ID also, and I'll just
- * try to use the ID", and "`BD7` … It just needs to be fairly simple to type on
- * a phone keyboard." And (home-base CLAUDE.md, 2026-11-12): "An id he types
- * must not be confusable with another."
+ * design D2 in home-base-l2ejg.3; shown with a Q since home-base-88y8m D6).
+ * Justin, 2026-11-12 (verbatim on home-base-sg9q9.2): "if I answer what I
+ * think is question 5 but you interpret it as question 6, there's basically no
+ * way for us to even catch that … let's give each question a clear,
+ * unambiguous ID also, and I'll just try to use the ID", and "`BD7` … It just
+ * needs to be fairly simple to type on a phone keyboard." Then, 2026-11-15
+ * (verbatim on home-base-88y8m): "let's change the question ID's from `BD###`
+ * to `Q###` going forward." And (home-base CLAUDE.md, 2026-11-12): "An id he
+ * types must not be confusable with another, and an ambiguous reply gets a
+ * question back, never a guess."
+ *
+ * THE PREFIX (home-base-88y8m D6)
+ * - Every id is shown as `Q<n>`. The number is the same machine-wide counter
+ *   the `BD<n>` ids came from, so BD131 and Q131 are one question.
+ * - What he types is read as `Q<n>` or `BD<n>`, any case (parseShortId).
+ * - A `Q<n>` at or below QUESTION_NUMBER_FLOOR is never looked up: no id was
+ *   ever shown with a Q that low, and "Q7" reads like the seventh question of
+ *   a list, which is exactly the mix-up ids exist to prevent. Every caller
+ *   answers it with listPositionRefusal, a question back.
+ * - A `BD<n>` keeps what it did before D6, an old per-chain `BD7` included.
  *
  * THE RULES (D2)
  * - A question gets its number once, as a label `qid:<n>`, and the label is
@@ -19,9 +32,9 @@
  * - The OLD form, `qid:<chain root>:<n>`, numbered per session chain, gave the
  *   same id to different questions in different sessions (home-base-4wfoz:
  *   BD1, BD4 and BD7 meant six questions across two chains). It is still read
- *   (an answer may name it, and the counter's seed counts it) but never shown,
- *   and never rewritten.
- * - Part 1 shows a question's id as `[BD<n>]` after the item number, for a
+ *   (an answer may name it as `BD<n>`, and the counter's seed counts it) but
+ *   never shown, and never rewritten.
+ * - Part 1 shows a question's id as `[Q<n>]` after the item number, for a
  *   `qid:<n>` label only. A question without one shows no brackets; its bead
  *   id ends its line, as on every question line.
  * - No report shows two questions with one id. Should two share a number
@@ -38,13 +51,20 @@ import {parseInstant} from './answer-store';
 /** The start of every label that holds a question's number. */
 export const QUESTION_ID_LABEL_PREFIX = 'qid:';
 
-/** What Justin types: `BD107`. */
-export const SHORT_ID_PREFIX = 'BD';
+/** What every report shows, and what Justin types: `Q107` (D6). */
+export const SHORT_ID_PREFIX = 'Q';
+
+/**
+ * The prefix before D6 (home-base-88y8m): `BD107`. Still read wherever he
+ * types an id, never shown.
+ */
+export const OLD_SHORT_ID_PREFIX = 'BD';
 
 /**
  * D2: every number minted is above this, so the first new id is at least
- * BD100 and never equals an old per-chain id (the highest in any export was 23
- * on 2026-11-14).
+ * Q100 and never equals an old per-chain id (the highest in any export was 23
+ * on 2026-11-14). D6: a `Q<n>` at or below it could be a list position, so it
+ * is refused with a question back (listPositionRefusal).
  */
 export const QUESTION_NUMBER_FLOOR = 99;
 
@@ -53,7 +73,7 @@ export function questionIdLabel(number: number): string {
   return `${QUESTION_ID_LABEL_PREFIX}${number}`;
 }
 
-/** `BD107`. */
+/** `Q107`. */
 export function shortIdText(number: number): string {
   return `${SHORT_ID_PREFIX}${number}`;
 }
@@ -64,20 +84,58 @@ function escapeRegExp(text: string): string {
 }
 
 const SHORT_ID_SHAPE = new RegExp(
-  `^${escapeRegExp(SHORT_ID_PREFIX)}([1-9][0-9]*)$`,
+  `^(${escapeRegExp(SHORT_ID_PREFIX)}|${escapeRegExp(OLD_SHORT_ID_PREFIX)})([1-9][0-9]*)$`,
   'i',
 );
 
+/** What an id Justin typed reads as (parseShortId). */
+export type ShortIdRead =
+  /**
+   * An id to look up: `Q<n>` above the floor, or `BD<n>` at any number. `text`
+   * is what he typed, its prefix upper-cased (`Q131`, `BD131`, `BD7`), for
+   * every reply that names it. `prefix` says which form: only a `BD<n>` can
+   * name an old per-chain id.
+   */
+  | {kind: 'id'; number: number; prefix: 'BD' | 'Q'; text: string}
+  /**
+   * D6: a `Q<n>` at or below QUESTION_NUMBER_FLOOR. No id was ever shown that
+   * low with a Q, so it could be a position in a list. Never a number to look
+   * up: every caller replies with listPositionRefusal and records nothing.
+   */
+  | {kind: 'listPosition'; number: number; text: string};
+
 /**
- * The number in what Justin typed: `BD107`, `bd107` or `Bd107`. Null for
- * anything else, including a bare `7` or `Q7`: those are list numbers, and the
- * rules say Claude asks back rather than guess.
+ * What Justin typed, read as a question id: `Q107`, `q107`, `BD107`, `bd107`
+ * (D6). A `Q<n>` at or below the floor is `listPosition`, never a number.
+ * Null for anything else, a bare `7` included: not an id, so the caller treats
+ * it as a bead id or refuses it.
  */
-export function parseShortId(text: string): number | null {
+export function parseShortId(text: string): ShortIdRead | null {
   const match = SHORT_ID_SHAPE.exec(text.trim());
-  if (match?.[1] == null) return null;
-  const number = Number(match[1]);
-  return Number.isSafeInteger(number) ? number : null;
+  const typed = match?.[1];
+  const digits = match?.[2];
+  if (typed == null || digits == null) return null;
+  const number = Number(digits);
+  if (!Number.isSafeInteger(number)) return null;
+  const prefix =
+    typed.toUpperCase() === SHORT_ID_PREFIX
+      ? SHORT_ID_PREFIX
+      : OLD_SHORT_ID_PREFIX;
+  const shown = `${prefix}${digits}`;
+  if (prefix === SHORT_ID_PREFIX && number <= QUESTION_NUMBER_FLOOR) {
+    return {kind: 'listPosition', number, text: shown};
+  }
+  return {kind: 'id', number, prefix, text: shown};
+}
+
+/**
+ * D6: the reply to a `Q<n>` that could be a list position (`text` is what he
+ * typed, `Q7`). It says why, records nothing, and asks which id he means:
+ * never a guess (home-base CLAUDE.md, "an ambiguous reply gets a question
+ * back").
+ */
+export function listPositionRefusal(text: string): string {
+  return `${text} could be a position in a list, not a question id, so nothing was recorded. Every question id is Q followed by a number above ${QUESTION_NUMBER_FLOOR}. Which question did you mean? Answer with the id shown in brackets on its line in the report, for example ${shortIdText(131)}, or with its bead id.`;
 }
 
 /** One `qid:` label, read. */

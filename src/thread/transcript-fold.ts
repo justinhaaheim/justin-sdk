@@ -57,6 +57,7 @@ import {
   newCommitFold,
 } from './session-commits';
 import {finishWriteFold, newWriteFold, writeFoldLine} from './session-writes';
+import {endingFoldLine, newEndingFold} from './transcript-ending';
 import {
   finishMessagesFold,
   foldHelperTail,
@@ -211,9 +212,12 @@ export function transcriptFileReadOfBytes(
     shells: subagent ? new Set() : null,
     writes: newWriteFold(),
   };
+  // home-base-kwand.4: how a main file ends, in the same pass.
+  const ending = subagent ? null : newEndingFold();
   for (const line of text.split('\n')) {
     commitFoldLine(states.commits, line, path);
     writeFoldLine(states.writes, line);
+    if (ending != null) endingFoldLine(ending, line);
     if (states.shells != null) openShellsFoldLine(states.shells, line);
     if (states.handback != null) handbackFoldLine(states.handback, line);
   }
@@ -224,12 +228,16 @@ export function transcriptFileReadOfBytes(
     });
   }
   let main: TranscriptFileFacts['main'] = null;
-  if (!subagent) {
+  if (ending != null) {
     const lastRecord = lastRecordTimestampOfBytes(bytes, path);
     if (lastRecord.kind === 'failed') {
       throw new Error(`unreachable: a read of bytes in memory failed`);
     }
-    main = {contextTokens: contextTokensOfBytes(bytes, path), lastRecord};
+    main = {
+      contextTokens: contextTokensOfBytes(bytes, path),
+      ending,
+      lastRecord,
+    };
   }
   const facts: TranscriptFileFacts = {
     commits: finishCommitFold(states.commits, path),
@@ -415,9 +423,14 @@ export function foldGrownTranscript(
   const region = tail.subarray(oldSize - seamStart);
 
   try {
+    // home-base-kwand.4: the ending walk is sequential, so a fold continues
+    // it from the state the facts hold (a copy: the entry is not changed).
+    const ending =
+      facts.main == null ? null : structuredClone(facts.main.ending);
     for (const line of region.toString('utf8').split('\n')) {
       commitFoldLine(states.commits, line, path);
       writeFoldLine(states.writes, line);
+      if (ending != null) endingFoldLine(ending, line);
     }
     const messages = states.messages;
     if (messages != null) {
@@ -427,13 +440,14 @@ export function foldGrownTranscript(
       });
     }
     let main: TranscriptFileFacts['main'] = null;
-    if (facts.main != null) {
+    if (facts.main != null && ending != null) {
       // The last qualifying line of the file is the new region's when it has
       // one, else the old answer (the walkers return that line, D4).
       const lastRecord = lastRecordTimestampOfBytes(region, path);
       main = {
         contextTokens:
           contextTokensOfBytes(region, path) ?? facts.main.contextTokens,
+        ending,
         lastRecord:
           lastRecord.kind === 'found' ? lastRecord : facts.main.lastRecord,
       };

@@ -340,6 +340,38 @@ describe('Part 1 and the handoff block (AC 1)', () => {
       `- **Session:** [AJ] ${title} (${beads[title] ?? ''})`,
     );
   });
+
+  // home-base-z7o2m D7: componentConfig.thread.handoff.pickupMessages.
+  test("the pickupMessages knob adds his typed messages; off, the block is byte-for-byte the default's", async () => {
+    const title = TITLES['audio-journal-1'] ?? '';
+    const call = (pickupMessages?: boolean) =>
+      handoffBlock({
+        cwd: repos['audio-journal-1'] ?? '',
+        env,
+        note: null,
+        now: NOW,
+        pickupMessages,
+        sessionBeadId: beads[title] ?? '',
+        sessionId: ids[title] ?? '',
+        timeZone: TZ,
+      });
+    const unset = await call();
+    const off = await call(false);
+    const on = await call(true);
+    if (!unset.ok || !off.ok || !on.ok) throw new Error('no block');
+    expect(off.text).toBe(unset.text);
+    expect(off.text).not.toContain("Justin's messages in this session");
+    const id = `${(ids[title] ?? '').slice(0, 8)}.1`;
+    expect(on.text).toContain(
+      `**Justin's messages in this session** — his words only, as he typed them; Claude's replies are not included:\n\n- \`${id}\``,
+    );
+    expect(on.text).toContain(`   ${title}`);
+    expect(on.text).toContain('thread messages --context <id>');
+    // The section sits before the pickup steps, which stay last.
+    expect(on.text.indexOf("Justin's messages")).toBeLessThan(
+      on.text.indexOf('**To pick it up:**'),
+    );
+  });
 });
 
 /**

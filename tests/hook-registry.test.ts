@@ -27,6 +27,8 @@ import {
   THREAD_BRAKE_HOOK_EVENT,
   THREAD_CAPTURE_HOOK_COMMAND,
   THREAD_CAPTURE_HOOK_EVENTS,
+  THREAD_DRAFTS_HOOK_COMMAND,
+  THREAD_DRAFTS_HOOK_EVENTS,
   THREAD_FULL_REPORT_HOOK_COMMAND,
   THREAD_FULL_REPORT_HOOK_EVENT,
   THREAD_GUARD_HOOK_COMMAND,
@@ -67,6 +69,7 @@ describe('the registry says what the installers write', () => {
     expect(byId('thread full-report').command).toBe(
       THREAD_FULL_REPORT_HOOK_COMMAND,
     );
+    expect(byId('thread drafts hook').command).toBe(THREAD_DRAFTS_HOOK_COMMAND);
   });
 
   test('events and matchers', () => {
@@ -100,9 +103,20 @@ describe('the registry says what the installers write', () => {
     ]);
     expect(byId('thread full-report').knob).toBe('thread.fullReportCommand');
     expect(FULL_REPORT_PROMPT).toBe('/full-report');
+    // The hourly drafts scan (home-base-fmf1n D1): UserPromptSubmit and Stop,
+    // gated on its own knob, which the handler also reads itself.
+    expect(eventsOf('thread drafts hook')).toEqual([
+      ...THREAD_DRAFTS_HOOK_EVENTS,
+    ]);
+    expect(byId('thread drafts hook').knob).toBe('thread.draftsScanHook');
     expect(
       HOOK_HANDLERS.filter((h) => h.knob != null).map((h) => h.id),
-    ).toEqual(['thread guard', 'thread brake', 'thread full-report']);
+    ).toEqual([
+      'thread guard',
+      'thread brake',
+      'thread full-report',
+      'thread drafts hook',
+    ]);
   });
 
   test('only thread full-report has a prompt filter', () => {
@@ -227,6 +241,7 @@ describe('selectHandlers', () => {
     expect(ids(['base-setup', 'thread-hooks-setup'], 'Stop')).toEqual([
       'thread capture',
       'thread stop-check',
+      'thread drafts hook',
     ]);
     expect(ids(['thread-hooks-setup'], 'PostToolUse', 'Bash')).toEqual([
       'thread nudge',
@@ -245,18 +260,21 @@ describe('selectHandlers', () => {
         toolName: null,
       }).map((h) => h.id);
 
+    const every = ['thread capture', 'thread drafts hook'];
     expect(ids('/full-report')).toEqual([
       'thread capture',
       'thread full-report',
+      'thread drafts hook',
     ]);
     expect(ids('  /full-report\n')).toEqual([
       'thread capture',
       'thread full-report',
+      'thread drafts hook',
     ]);
-    expect(ids('hello')).toEqual(['thread capture']);
-    expect(ids('/full-report please')).toEqual(['thread capture']);
-    expect(ids('/full-reports')).toEqual(['thread capture']);
-    expect(ids(null)).toEqual(['thread capture']);
+    expect(ids('hello')).toEqual(every);
+    expect(ids('/full-report please')).toEqual(every);
+    expect(ids('/full-reports')).toEqual(every);
+    expect(ids(null)).toEqual(every);
   });
 
   test('promptAccepts: no filter takes every prompt; a filter needs a prompt', () => {

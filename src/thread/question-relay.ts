@@ -1,16 +1,18 @@
 /**
- * `thread answer --ask <BD n | bead id> --relay "<answer>"` (home-base-l2ejg.6;
+ * `thread answer --ask <Q n | bead id> --relay "<answer>"` (home-base-l2ejg.6;
  * D8 in home-base-l2ejg.3): answer a question of ANY session, in ANY repo, at
  * its source. The mayor links to other projects' questions instead of copying
  * them into home-base, so an answer has to reach the one copy that exists.
  *
  * WHERE THE QUESTION IS
- * - `BD<n>`: every export the sessions index knows is read for the label
- *   `qid:<n>` (locateQuestionId, which the D2 refusal uses too). Only D2's form
- *   counts: an old per-chain id names different questions in different chains,
- *   so it is never relayed. Exactly one question must hold it, and every export
- *   must have been read: an export that could not be read may hold a second.
- * - A bead id, and the one bead a `BD<n>` named: its SOURCE database is looked
+ * - `Q<n>`, or the older `BD<n>` (home-base-88y8m D6): every export the
+ *   sessions index knows is read for the label `qid:<n>` (locateQuestionId,
+ *   which the D2 refusal uses too). Only D2's form counts: an old per-chain id
+ *   names different questions in different chains, so it is never relayed.
+ *   Exactly one question must hold it, and every export must have been read:
+ *   an export that could not be read may hold a second. A `Q<n>` at or below
+ *   99 could be a list position: refused with a question back (D6).
+ * - A bead id, and the one bead a `Q<n>` named: its SOURCE database is looked
  *   for in three steps, and the first step that holds it decides.
  *     1. `session`: the database of the session it was filed under (a question
  *        is a dot-child of its session bead; the index records that bead's
@@ -52,11 +54,18 @@ import {
 } from '../beads/br';
 import {QUESTION_BEAD_TYPE} from './ask-format';
 import {
+  EXPORT_MAY_TRAIL,
   locatedWords,
   locateQuestionId,
   repoOfBeadsDir,
 } from './question-id-locate';
-import {parseShortId, questionIdOf, shortIdText} from './question-ids';
+import {
+  listPositionRefusal,
+  parseShortId,
+  questionIdOf,
+  type ShortIdRead,
+  shortIdText,
+} from './question-ids';
 import {readSessionIndex} from './session-index';
 
 /** Which step of the lookup found the source (see the header). */
@@ -79,7 +88,7 @@ export type RelayOutcome =
       repo: string;
       /** The bead it was filed under, or null for a bead not under one. */
       session: {id: string; title: null | string} | null;
-      /** Its `BD<n>`, or null when it has no D2 id. */
+      /** Its `Q<n>`, or null when it has no D2 id. */
       shortId: null | string;
       /** The session ids its `sid:` labels name. */
       sids: string[];
@@ -274,12 +283,16 @@ export function locateRelaySource(id: string, env: EnvLike): SourceLookup {
   };
 }
 
-/** The one bead `BD<number>` names, in every known export, or why not. */
+/** A typed id that names a number to look up (D6: not a list position). */
+type TypedShortId = Extract<ShortIdRead, {kind: 'id'}>;
+
+/** The one bead `Q<n>` (or `BD<n>`) names, in every known export, or why not. */
 function beadOfShortId(
-  number: number,
+  short: TypedShortId,
   env: EnvLike,
 ): {id: string; kind: 'one'} | {kind: 'refused'; reason: string} {
-  const text = shortIdText(number);
+  // As he typed it (D6): `BD7` must not come back as `Q7`.
+  const {number, text} = short;
   let located: ReturnType<typeof locateQuestionId>;
   try {
     located = locateQuestionId({env, number});
@@ -311,14 +324,14 @@ function beadOfShortId(
       : ` ${old.length === 1 ? 'One question holds' : `${old.length} questions hold`} it as an old per-chain id, which names different questions in different chains and is never relayed: ${old.map(locatedWords).join('; ')}.`;
   return {
     kind: 'refused',
-    reason: `no question in any known repo's export holds ${text}.${oldWords} An export can trail its database by a moment after a question is filed. Which question did you mean? Answer it by its bead id`,
+    reason: `no question in any known repo's export holds ${text}.${oldWords} ${EXPORT_MAY_TRAIL} Which question did you mean? Answer it by its bead id`,
   };
 }
 
 /** Why the fresh read must not be answered, or null when it may be. */
 function freshRefusal(
   issue: BrIssue,
-  shortNumber: null | number,
+  short: null | TypedShortId,
   db: string,
 ): null | string {
   if (issue.issueType !== QUESTION_BEAD_TYPE) {
@@ -330,18 +343,18 @@ function freshRefusal(
   if (issue.status === 'tombstone') {
     return `${issue.id} is deleted at its source (tombstone)`;
   }
-  if (shortNumber != null) {
+  if (short != null) {
     const read = questionIdOf(issue.labels);
-    if (read.kind !== 'one' || read.number !== shortNumber) {
-      return `${issue.id} no longer holds ${shortIdText(shortNumber)} in ${db} (${read.kind === 'one' ? `it holds ${shortIdText(read.number)}` : read.kind === 'bad' ? read.reason : 'it has no id'}), though its export did`;
+    if (read.kind !== 'one' || read.number !== short.number) {
+      return `${issue.id} no longer holds ${short.text} in ${db} (${read.kind === 'one' ? `it holds ${shortIdText(read.number)}` : read.kind === 'bad' ? read.reason : 'it has no id'}), though its export did`;
     }
   }
   return null;
 }
 
 /**
- * Answer `ask` (a `BD<n>` or a bead id) at its source with the close reason
- * `reason`. The whole relay; refusals write nothing.
+ * Answer `ask` (a `Q<n>`, a `BD<n>` or a bead id) at its source with the close
+ * reason `reason`. The whole relay; refusals write nothing.
  */
 export function relayAnswer(input: {
   ask: string;
@@ -350,10 +363,15 @@ export function relayAnswer(input: {
 }): RelayOutcome {
   const {env, reason} = input;
   const ask = input.ask.trim();
-  const shortNumber = parseShortId(ask);
+  const parsed = parseShortId(ask);
+  if (parsed?.kind === 'listPosition') {
+    // D6: `Q7` could be the seventh question of a list. Ask back.
+    return {kind: 'refused', reason: listPositionRefusal(parsed.text)};
+  }
+  const short = parsed;
   let id = ask;
-  if (shortNumber != null) {
-    const named = beadOfShortId(shortNumber, env);
+  if (short != null) {
+    const named = beadOfShortId(short, env);
     if (named.kind === 'refused') {
       return {
         kind: 'refused',
@@ -395,7 +413,7 @@ export function relayAnswer(input: {
       reason: `${id} is no longer in ${candidate.db}. Nothing was recorded.`,
     };
   }
-  const refusal = freshRefusal(fresh.issue, shortNumber, candidate.db);
+  const refusal = freshRefusal(fresh.issue, short, candidate.db);
   if (refusal != null) {
     return {kind: 'refused', reason: `${refusal}. Nothing was recorded.`};
   }

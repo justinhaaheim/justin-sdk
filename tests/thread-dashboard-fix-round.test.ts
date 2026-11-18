@@ -88,8 +88,10 @@ function row(s: UntrackedSession): InboxRow {
   const verdict = untrackedVerdict(s, NOW);
   const card = untrackedCard(s, verdict, NOW, NO_PANES);
   return {
+    beforeRestart: null,
     card,
     display: verdict.display,
+    ending: {kind: 'unknown', reason: 'not read in this test'},
     git: null,
     handoff: null,
     inputDraft: null,
@@ -112,6 +114,7 @@ function row(s: UntrackedSession): InboxRow {
 
 function read(rows: InboxRow[]): InboxRead {
   return {
+    beforeRestart: {ok: false, reason: 'not read in this test'},
     corrupt: [],
     hiddenByAge: {},
     indexPath: '/state/sessions.jsonl',

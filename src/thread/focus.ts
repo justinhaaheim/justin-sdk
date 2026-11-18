@@ -20,7 +20,8 @@
  *    one, and either write can fail): any bead labelled `continues:<head>`,
  *    by a fresh read: the export when br confirms it holds the database's
  *    state, else `br list -l` (continuing-read.ts, home-base-9ihcl.4.1). One
- *    is followed; two are refused.
+ *    is followed; two are refused. Steps 2 and 3 are chain-step.ts's forward
+ *    step, the one every chain reader takes (home-base-lasun.1 F1).
  * 4. A head whose handoff ran (its `handed-off` label or "handed off" note
  *    line, a refused or deferred handoff, or a successor's recorded pickup
  *    failure naming it) with no successor linked is refused.
@@ -36,10 +37,11 @@
  *    is live, and the output says its links are not recorded.
  *
  * CRITICAL RULE 7. Every read that fails, every ambiguity and every pane that
- * is not live refuses (exit 3). Nothing but `focus-panel` is sent to cmux.
+ * is not live refuses (exit 3). Nothing but `focus-panel` is sent to cmux,
+ * and with `--workspace` one read-only `cmux tree` (home-base-kwand.3).
  */
 
-import type {CmuxCall, CmuxRunner} from './cmux';
+import type {CmuxCall, CmuxRunner, CmuxTreeRead} from './cmux';
 import type {TimingRecorder} from './inbox-timings';
 import type {EnvLike} from './paths';
 import type {PaneFact} from './session-card';
@@ -49,7 +51,8 @@ import {join} from 'node:path';
 
 import {BEAD_ID_SOURCE, findBeadsWorkspace} from '../beads/br';
 import {writeStdout} from '../write-stdout';
-import {CMUX_TIMEOUT_MS, realCmuxRunner} from './cmux';
+import {stepForward} from './chain-step';
+import {CMUX_TIMEOUT_MS, readCmuxTree, realCmuxRunner} from './cmux';
 import {continuingInDb} from './continuing-read';
 import {readPickupFailure} from './handoff-auto-pickup';
 import {CHAIN_WALK_LIMIT} from './handoff-chain';
@@ -207,6 +210,39 @@ export type FocusResult =
     }
   | {kind: 'usage'; reason: string; target: string};
 
+/**
+ * home-base-kwand.3: `--workspace <uuid>`, read fresh from the cmux tree:
+ * whether that workspace exists now. The threads dashboard's `o` on a
+ * session whose cmux restore failed asks it of the session's old workspace:
+ * present opens a new tab there, gone falls back to a new workspace, unknown
+ * opens nothing (critical rule 7: an unread tree is not a gone workspace).
+ */
+export type WorkspaceNow =
+  | {id: string; reason: string; state: 'unknown'}
+  | {id: string; state: 'gone' | 'present'};
+
+const WORKSPACE_UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+
+/** Whether `id` is a workspace of the tree now. Pure. */
+export function workspaceNowOf(tree: CmuxTreeRead, id: string): WorkspaceNow {
+  if (!WORKSPACE_UUID.test(id)) {
+    return {id, reason: 'it is not a workspace uuid', state: 'unknown'};
+  }
+  if (tree.kind !== 'read') {
+    return {
+      id,
+      reason: `the cmux tree could not be read: ${tree.reason}`,
+      state: 'unknown',
+    };
+  }
+  const want = id.toLowerCase();
+  const present = tree.tree.windows.some((window) =>
+    window.workspaces.some((workspace) => workspace.id.toLowerCase() === want),
+  );
+  return {id, state: present ? 'present' : 'gone'};
+}
+
 /** What `--json` prints: one object, every field present (null when not known). */
 export interface FocusJson {
   argv: null | string[];
@@ -220,6 +256,8 @@ export interface FocusJson {
   refusal: FocusRefusal | null;
   resume: null | string;
   target: string;
+  /** `--workspace`'s answer (home-base-kwand.3); null when it was not passed. */
+  workspace: WorkspaceNow | null;
 }
 
 export const FOCUS_EXIT = {
@@ -450,66 +488,69 @@ export async function resolveFocus(
   let head = start.bead;
   chain.push(head.id);
   const seen = new Set<string>([head.id]);
+  // Steps 2 and 3 are chain-step.ts's forward step (home-base-lasun.1 F1);
+  // each outcome maps to this command's own refusal code and words. This walk
+  // counts the start in its limit, so the step is given limit - 1.
   for (;;) {
-    const successors = continuedByOf(head.labels);
-    let nextId: string;
-    let via: string;
-    if (successors.length > 1) {
+    const step = stepForward(
+      head,
+      {limit: limit - 1, seen, taken: chain.length - 1},
+      {
+        // Step 3: the half of a link that lives on the successor.
+        findContinuing: (bead) => readers.continuing(bead.id, bead.db),
+        readBead: readers.showBead,
+      },
+    );
+    if (step.kind === 'end') break;
+    if (step.kind === 'twoSuccessors') {
       return refuse(
         'twoSuccessors',
-        `${head.id} names ${successors.length} successors (${successors.map((id) => `${CONTINUED_BY_LABEL_PREFIX}${id}`).join(', ')}), so which session is newest is unknown`,
+        `${head.id} names ${step.ids.length} successors (${step.ids.map((id) => `${CONTINUED_BY_LABEL_PREFIX}${id}`).join(', ')}), so which session is newest is unknown`,
       );
     }
-    const [forward] = successors;
-    if (forward != null) {
-      nextId = forward;
-      via = `${head.id} names ${CONTINUED_BY_LABEL_PREFIX}${forward}`;
-    } else {
-      // Step 3: the half of a link that lives on the successor.
-      const back = readers.continuing(head.id, head.db);
-      if (back.kind === 'failed') {
-        return refuse(
-          'reverseFailed',
-          `could not check for a session that continues ${head.id} (a half-written link): ${back.reason}`,
-        );
-      }
-      const others = back.ids.filter((id) => id !== head.id);
-      if (others.length > 1) {
-        return refuse(
-          'reverseAmbiguous',
-          `${others.length} session beads say they continue ${head.id} (${others.map((id) => `${id} has ${CONTINUES_LABEL_PREFIX}${head.id}`).join(', ')}), so which session is newest is unknown`,
-        );
-      }
-      const [reverse] = others;
-      if (reverse == null) break;
-      nextId = reverse;
-      via = `${reverse} has ${CONTINUES_LABEL_PREFIX}${head.id}`;
+    if (step.kind === 'reverseFailed') {
+      return refuse(
+        'reverseFailed',
+        `could not check for a session that continues ${head.id} (a half-written link): ${step.reason}`,
+      );
+    }
+    if (step.kind === 'twoContinuing') {
+      return refuse(
+        'reverseAmbiguous',
+        `${step.ids.length} session beads say they continue ${head.id} (${step.ids.map((id) => `${id} has ${CONTINUES_LABEL_PREFIX}${head.id}`).join(', ')}), so which session is newest is unknown`,
+      );
+    }
+    const nextId = step.id;
+    const via =
+      step.via === 'continuedBy'
+        ? `${head.id} names ${CONTINUED_BY_LABEL_PREFIX}${nextId}`
+        : `${nextId} has ${CONTINUES_LABEL_PREFIX}${head.id}`;
+    if (step.via === 'continues') {
       notes.push(
-        `half-written link followed: ${reverse} has ${CONTINUES_LABEL_PREFIX}${head.id}, but ${head.id} has no ${CONTINUED_BY_LABEL_PREFIX}${reverse}`,
+        `half-written link followed: ${nextId} has ${CONTINUES_LABEL_PREFIX}${head.id}, but ${head.id} has no ${CONTINUED_BY_LABEL_PREFIX}${nextId}`,
       );
     }
-    if (seen.has(nextId)) {
+    if (step.kind === 'loop') {
       return refuse(
         'loop',
         `the handoff chain loops back to ${nextId} (${via})`,
       );
     }
-    if (chain.length >= limit) {
+    if (step.kind === 'tooLong') {
       return refuse(
         'chainTooLong',
         `the handoff chain is longer than ${limit} sessions; the walk stopped at ${head.id}`,
       );
     }
-    const next = readers.showBead(nextId);
-    if (next.kind !== 'found') {
+    if (step.kind === 'unreadable') {
+      const missing = step.read.kind === 'notFound';
       return refuse(
-        next.kind === 'notFound' ? 'successorMissing' : 'successorUnreadable',
-        `${via}, but ${nextId} ${next.kind === 'notFound' ? 'could not be found' : 'could not be read'}: ${next.reason}. Its pane is not looked up, and ${head.id}'s is not used: ${head.id} handed off`,
+        missing ? 'successorMissing' : 'successorUnreadable',
+        `${via}, but ${nextId} ${missing ? 'could not be found' : 'could not be read'}: ${step.read.reason}. Its pane is not looked up, and ${head.id}'s is not used: ${head.id} handed off`,
       );
     }
-    seen.add(nextId);
     chain.push(nextId);
-    head = next.bead;
+    head = step.bead;
   }
 
   const sids = labelsWith(head.labels, SID_LABEL_PREFIX);
@@ -580,11 +621,15 @@ export async function resolveFocus(
 // Printing
 // ---------------------------------------------------------------------------
 
-export function focusJsonOf(result: FocusResult): FocusJson {
+export function focusJsonOf(
+  result: FocusResult,
+  workspace: WorkspaceNow | null = null,
+): FocusJson {
   const base = {
     exitCode: FOCUS_EXIT[result.kind],
     refusal: result.kind === 'refused' ? result.code : null,
     target: result.target,
+    workspace,
   };
   switch (result.kind) {
     case 'usage':
@@ -880,8 +925,12 @@ export async function runThreadFocus(input: {
   dryRun: boolean;
   env?: EnvLike;
   json: boolean;
+  /** home-base-kwand.3: the tree `--workspace` reads; default: cmux tree. */
+  readTree?: () => Promise<CmuxTreeRead>;
   readers?: FocusReaders;
   target: string;
+  /** home-base-kwand.3 `--workspace <uuid>`: say whether it exists now. */
+  workspace?: string | null;
 }): Promise<number> {
   const env = input.env ?? process.env;
   // home-base-9ihcl.4: `--json` carries a `timings` field, as `thread inbox
@@ -895,11 +944,26 @@ export async function runThreadFocus(input: {
   const result = await resolveFocus(input.target, readers, {
     dryRun: input.dryRun,
   });
+  // home-base-kwand.3: one read-only tree read, only when asked.
+  const asked = input.workspace ?? null;
+  const workspace =
+    asked == null
+      ? null
+      : workspaceNowOf(
+          await (
+            input.readTree ?? (async () => await readCmuxTree(readers.run))
+          )(),
+          asked,
+        );
   if (!input.json || timings == null) {
-    await writeStdout(focusText(result));
+    const line =
+      workspace == null
+        ? ''
+        : `\nWorkspace ${workspace.id}: ${workspace.state === 'unknown' ? `unknown (${workspace.reason})` : workspace.state === 'present' ? 'exists now' : 'gone'}\n`;
+    await writeStdout(`${focusText(result)}${line}`);
     return FOCUS_EXIT[result.kind];
   }
-  const json = `${JSON.stringify(focusJsonOf(result), null, 2)}\n`;
+  const json = `${JSON.stringify(focusJsonOf(result, workspace), null, 2)}\n`;
   const printed = inboxJsonWithTimings(json, timings.finish());
   if (printed.problem != null) console.error(printed.problem);
   await writeStdout(`${printed.text.trimEnd()}\n`);

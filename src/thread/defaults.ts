@@ -126,6 +126,22 @@ export const THREAD_DEFAULT_TITLE_SUMMARY = false;
 export const THREAD_DEFAULT_TRIM_GUARD = false;
 
 /**
+ * home-base-fmf1n D7 (2026-11-15): the UserPromptSubmit and Stop hook `thread
+ * drafts hook` starts the unsent-drafts scan at most once a wall-clock hour,
+ * from a session inside cmux. Off by default (feature-knobs rule); on in
+ * home-base.
+ */
+export const THREAD_DEFAULT_DRAFTS_SCAN_HOOK = false;
+
+/**
+ * home-base-kwand.1 (epic D8, 2026-11-17): `thread tabs record` appends the
+ * open cmux tabs, read from cmux's own saved session files, to
+ * <threads state dir>/tab-records/. ON by default: Justin asked for it. False
+ * makes the recorder say it is off and write nothing.
+ */
+export const THREAD_DEFAULT_TAB_RECORD = true;
+
+/**
  * home-base-1rxt0.4 D3 (2026-11-12): in `thread status`, an open P2 to P4
  * question the last report showed unchanged takes one line. ON by default:
  * Justin asked for it, with a user-level switch to turn it off ("Let's make
@@ -320,6 +336,7 @@ export const HANDOFF_DEFAULTS = {
   maxLiveSessions: 25,
   maxUnattendedHandoffs: 3,
   permissionMode: 'auto' as HandoffPermissionMode,
+  pickupMessages: false,
   predecessor: 'keep' as HandoffPredecessorMode,
   successor: false,
   usage: {

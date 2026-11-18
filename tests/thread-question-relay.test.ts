@@ -1,6 +1,8 @@
 /**
- * `thread answer --ask <BD n | bead id> --relay` (home-base-l2ejg.6; D8 in
+ * `thread answer --ask <Q n | bead id> --relay` (home-base-l2ejg.6; D8 in
  * home-base-l2ejg.3): a question in ANOTHER repo is answered at its source.
+ * The older `BD<n>` still relays; a `Q<n>` at or below 99 is refused with a
+ * question back (home-base-88y8m D6).
  *
  * The fixtures are two (and once three) throwaway repos with real br
  * databases, sharing one threads state dir, so the sessions index knows them
@@ -18,6 +20,7 @@ import {join} from 'path';
 import {runBr} from '../src/beads/br';
 import {PLAIN_STYLE} from '../src/cli-style';
 import {fileAsk} from '../src/thread/ask';
+import {listPositionRefusal} from '../src/thread/question-ids';
 import {
   answerSessionQuestions,
   describeSessionAnswerOutcome,
@@ -221,29 +224,29 @@ function reasonOf(outcome: Awaited<ReturnType<typeof answer>>): string {
 
 describe('thread answer --relay answers a question at its source', () => {
   test(
-    'a BD id held in another repo: refused without --relay as before, answered there with it, and the reply names its question, repo and session',
+    'a Q id held in another repo: refused without --relay as before, answered there with it, and the reply names its question, repo and session',
     async () => {
       const w = world();
       const mine = await ask(w.home, '2', 'Keep the mayor list?');
       const theirs = await ask(w.other, '1', 'Drop the nightly sync?');
-      expect(theirs.shortId).toBe('BD101');
+      expect(theirs.shortId).toBe('Q101');
 
       // Without --relay: D2's refusal, unchanged, and nothing written.
-      const refused = await answer(w, 'BD101', 'yes, drop it', false);
+      const refused = await answer(w, 'Q101', 'yes, drop it', false);
       expect(reasonOf(refused)).toContain(
-        `BD101 is not an open question of this session (${w.home.bead}`,
+        `Q101 is not an open question of this session (${w.home.bead}`,
       );
       expect(reasonOf(refused)).toContain('Did you mean that question?');
       expect(statusOf(w.other.repo, theirs.id)).toBe('open');
 
-      const relayed = await answer(w, 'bd101', 'yes, drop it');
+      const relayed = await answer(w, 'q101', 'yes, drop it');
       expect(relayed).toMatchObject({
         id: theirs.id,
         kind: 'relayed',
         reason: 'answer: yes, drop it',
         repo: 'other-repo',
         session: {id: w.other.bead, title: 'Speed up the sync job'},
-        shortId: 'BD101',
+        shortId: 'Q101',
         sids: [OTHER_SESSION],
         step: 'session',
         title: 'Drop the nightly sync?',
@@ -258,11 +261,35 @@ describe('thread answer --relay answers a question at its source', () => {
       const printed = describeSessionAnswerOutcome(relayed);
       expect(printed.exitCode).toBe(0);
       expect(printed.lines).toEqual([
-        `✓ ${theirs.id} [BD101] recorded at its source: answer: yes, drop it`,
+        `✓ ${theirs.id} [Q101] recorded at its source: answer: yes, drop it`,
         '  Question: Drop the nightly sync?',
         `  Repo:     other-repo (${join(w.other.repo, '.beads', 'beads.db')})`,
         `  Session:  ${w.other.bead} "Speed up the sync job"`,
       ]);
+    },
+    SLOW,
+  );
+
+  test(
+    'Q101, q101 and BD101 relay to the same question (D6)',
+    async () => {
+      const w = world();
+      await ask(w.home, '2', 'Keep the mayor list?');
+      const theirs = await ask(w.other, '1', 'Drop the nightly sync?');
+      expect(theirs.shortId).toBe('Q101');
+      for (const typed of ['Q101', 'q101', 'BD101']) {
+        const relayed = await answer(w, typed, `yes (${typed})`);
+        expect(relayed).toMatchObject({
+          id: theirs.id,
+          kind: 'relayed',
+          shortId: 'Q101',
+        });
+        expect(closeReasonOf(w.other.repo, theirs.id)).toBe(
+          `answer: yes (${typed})`,
+        );
+        // Open again, so the next form has the same question to answer.
+        expect(runBr(w.other.repo, ['reopen', theirs.id]).ok).toBe(true);
+      }
     },
     SLOW,
   );
@@ -307,7 +334,37 @@ describe('thread answer --relay answers a question at its source', () => {
 
 describe('thread answer --relay refuses, writing nothing', () => {
   test(
-    'no match: an unknown BD id, an id only an old per-chain label holds, an unknown bead id, and an unknown prefix',
+    'Q7 and Q99 could be list positions: refused with a question back, and nothing is written (D6)',
+    async () => {
+      const w = world();
+      // A guess would answer this one: it holds a hand-made label 99.
+      const low = await ask(w.other, '2', 'Hand-labelled low?');
+      relabel(w.other.repo, low.id, ['qid:100'], ['qid:99']);
+      for (const [typed, shown] of [
+        ['Q7', 'Q7'],
+        ['q99', 'Q99'],
+        ['Q99', 'Q99'],
+      ] as const) {
+        const refused = await answer(w, typed, 'yes');
+        expect(refused).toEqual({
+          kind: 'failed',
+          reason: listPositionRefusal(shown),
+        });
+        expect(describeSessionAnswerOutcome(refused).exitCode).toBe(1);
+        expect(statusOf(w.other.repo, low.id)).toBe('open');
+      }
+      // Control: BD99 is not a list position, and relays to that question.
+      expect(await answer(w, 'BD99', 'yes')).toMatchObject({
+        id: low.id,
+        kind: 'relayed',
+      });
+      expect(statusOf(w.other.repo, low.id)).toBe('closed');
+    },
+    SLOW,
+  );
+
+  test(
+    'no match: an unknown Q or BD id, an id only an old per-chain label holds, an unknown bead id, and an unknown prefix',
     async () => {
       const w = world();
       const q = await ask(w.other, '2', 'Keep the old export?');
@@ -315,11 +372,14 @@ describe('thread answer --relay refuses, writing nothing', () => {
       // As if filed before D2: only an old per-chain id, BD4.
       relabel(w.other.repo, old.id, ['qid:101'], ['qid:ob-root:4']);
 
-      const unknown = await answer(w, 'BD999', 'yes');
-      expect(reasonOf(unknown)).toContain(
-        "no question in any known repo's export holds BD999.",
-      );
-      expect(reasonOf(unknown)).toContain('Nothing was recorded.');
+      for (const typed of ['Q999', 'BD999']) {
+        const missing = await answer(w, typed, 'yes');
+        expect(reasonOf(missing)).toContain(
+          `no question in any known repo's export holds ${typed}.`,
+        );
+        expect(reasonOf(missing)).toContain('Nothing was recorded.');
+      }
+      const unknown = await answer(w, 'Q999', 'yes');
 
       const perChain = await answer(w, 'BD4', 'yes');
       expect(reasonOf(perChain)).toContain(
@@ -346,7 +406,7 @@ describe('thread answer --relay refuses, writing nothing', () => {
   );
 
   test(
-    'two matches: a BD id two questions hold, and a bead id in the primary databases of two repos that share a prefix',
+    'two matches: a Q id two questions hold, and a bead id in the primary databases of two repos that share a prefix',
     async () => {
       const w = world();
       const first = await ask(w.other, '2', 'Keep the old export?');
@@ -354,8 +414,8 @@ describe('thread answer --relay refuses, writing nothing', () => {
       // A hand-edited label: the counter never hands one number out twice.
       relabel(w.other.repo, second.id, ['qid:101'], ['qid:100']);
 
-      const shared = await answer(w, 'BD100', 'yes');
-      expect(reasonOf(shared)).toContain('BD100 is held by 2 questions:');
+      const shared = await answer(w, 'Q100', 'yes');
+      expect(reasonOf(shared)).toContain('Q100 is held by 2 questions:');
       expect(reasonOf(shared)).toContain(`${first.id} in other-repo`);
       expect(reasonOf(shared)).toContain(`${second.id} in other-repo`);
       expect(reasonOf(shared)).toContain('Which one did you mean?');
@@ -397,7 +457,7 @@ describe('thread answer --relay refuses, writing nothing', () => {
       }
       writeFileSync(join(beads, 'beads.db'), 'not a database\n'.repeat(200));
 
-      for (const id of ['BD100', q.id]) {
+      for (const id of ['Q100', q.id]) {
         const refused = await answer(w, id, 'yes');
         expect(reasonOf(refused)).toContain(
           `${q.id} was looked for in the database of the session it was filed under, and one database could not be read, so it may be there:`,
@@ -410,7 +470,7 @@ describe('thread answer --relay refuses, writing nothing', () => {
   );
 
   test(
-    'an export that trails its database: the export still says BD100, the database no longer does, so the fresh read refuses',
+    'an export that trails its database: the export still says Q100, the database no longer does, so the fresh read refuses',
     async () => {
       const w = world();
       const q = await ask(w.other, '2', 'Keep the old export?');
@@ -429,9 +489,9 @@ describe('thread answer --relay refuses, writing nothing', () => {
       );
       expect(exported).toContain('"qid:100"');
 
-      const refused = await answer(w, 'BD100', 'yes');
+      const refused = await answer(w, 'Q100', 'yes');
       expect(reasonOf(refused)).toBe(
-        `${q.id} no longer holds BD100 in ${join(w.other.repo, '.beads', 'beads.db')} (it holds BD150), though its export did. Nothing was recorded.`,
+        `${q.id} no longer holds Q100 in ${join(w.other.repo, '.beads', 'beads.db')} (it holds Q150), though its export did. Nothing was recorded.`,
       );
       expect(statusOf(w.other.repo, q.id)).toBe('open');
     },
@@ -450,7 +510,7 @@ describe('thread answer --relay refuses, writing nothing', () => {
       ]);
       expect(closed.ok).toBe(true);
 
-      for (const id of ['BD100', q.id]) {
+      for (const id of ['Q100', q.id]) {
         const refused = await answer(w, id, 'yes, keep it');
         expect(reasonOf(refused)).toBe(
           `${q.id} is already closed at its source (answer: no, drop it). Nothing was recorded.`,

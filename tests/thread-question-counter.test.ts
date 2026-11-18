@@ -90,7 +90,7 @@ function reserve(f: Fixture, count: number) {
 }
 
 describe('the seed: above 99 and above every number any export holds', () => {
-  test('with no export holding a number, the first id is BD100, and the counter only goes up', () => {
+  test('with no export holding a number, the first id is Q100, and the counter only goes up', () => {
     const f = fixture();
     expect(reserve(f, 1)).toEqual({kind: 'reserved', numbers: [100]});
     expect(reserve(f, 3)).toEqual({kind: 'reserved', numbers: [101, 102, 103]});

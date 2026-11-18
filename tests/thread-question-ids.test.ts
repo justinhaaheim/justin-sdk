@@ -1,6 +1,7 @@
 /**
- * Question ids like BD107 (home-base-1rxt0.4 D4, dispatch B; numbered
- * machine-wide by home-base-4wfoz, D2 in home-base-l2ejg.3). The fixtures are
+ * Question ids like Q107 (home-base-1rxt0.4 D4, dispatch B; numbered
+ * machine-wide by home-base-4wfoz, D2 in home-base-l2ejg.3; shown with a Q,
+ * and still read as BD107, since home-base-88y8m D6). The fixtures are
  * synthetic, except the two session chains of home-base-4wfoz's description,
  * whose real old labels are copied below.
  *
@@ -27,6 +28,7 @@ import {
 } from '../src/thread/question-counter';
 import {
   chainNumbersOf,
+  listPositionRefusal,
   maxQuestionNumber,
   parseQuestionIdLabel,
   parseShortId,
@@ -34,6 +36,7 @@ import {
   questionIdLabel,
   questionIdOf,
   questionIdsShown,
+  shortIdText,
 } from '../src/thread/question-ids';
 import {readShownQuestionIds} from '../src/thread/question-ids-read';
 import {fileRequest} from '../src/thread/request';
@@ -49,6 +52,9 @@ import {createSandbox, type Sandbox} from './sandbox';
 const SESSION = '9d000001-aaaa-4bbb-8ccc-0123456789ab';
 const SUCCESSOR = '9d000002-aaaa-4bbb-8ccc-0123456789ab';
 const OTHER_CHAIN = '9d000003-aaaa-4bbb-8ccc-0123456789ab';
+
+/** A test that spawns br a few dozen times; the CPU is shared. */
+const SLOW = 60_000;
 
 const sandboxes: Sandbox[] = [];
 afterEach(() => {
@@ -73,13 +79,73 @@ function question(
 // ---------------------------------------------------------------------------
 
 describe('short ids and their labels', () => {
-  test('parseShortId reads BD107 in any case, and nothing else', () => {
-    expect(parseShortId('BD107')).toBe(107);
-    expect(parseShortId(' bd12 ')).toBe(12);
-    expect(parseShortId('Bd3')).toBe(3);
-    for (const text of ['7', 'Q7', 'BD', 'BD0', 'BD07', 'BD7a', 'B7', '#7']) {
+  test('parseShortId reads Q107 and the older BD107 in any case, and nothing else (D6)', () => {
+    expect(parseShortId('Q107')).toEqual({
+      kind: 'id',
+      number: 107,
+      prefix: 'Q',
+      text: 'Q107',
+    });
+    expect(parseShortId(' q131 ')).toEqual({
+      kind: 'id',
+      number: 131,
+      prefix: 'Q',
+      text: 'Q131',
+    });
+    expect(parseShortId('BD107')).toEqual({
+      kind: 'id',
+      number: 107,
+      prefix: 'BD',
+      text: 'BD107',
+    });
+    // An old per-chain BD id is still an id to look up, at any number.
+    expect(parseShortId(' bd12 ')).toEqual({
+      kind: 'id',
+      number: 12,
+      prefix: 'BD',
+      text: 'BD12',
+    });
+    expect(parseShortId('Bd3')).toMatchObject({kind: 'id', number: 3});
+    for (const text of [
+      '7',
+      'Q',
+      'Q0',
+      'Q07',
+      'Q107a',
+      'QQ107',
+      'BD',
+      'BD0',
+      'BD07',
+      'BD7a',
+      'B7',
+      '#7',
+    ]) {
       expect(parseShortId(text)).toBeNull();
     }
+  });
+
+  test('a Q id at or below the floor could be a list position, never a number (D6)', () => {
+    for (const [typed, number] of [
+      ['Q7', 7],
+      ['q7', 7],
+      ['Q1', 1],
+      ['Q99', 99],
+    ] as const) {
+      expect(parseShortId(typed)).toEqual({
+        kind: 'listPosition',
+        number,
+        text: `Q${number}`,
+      });
+    }
+    // Control: the first number above the floor is an id.
+    expect(parseShortId('Q100')).toMatchObject({kind: 'id', number: 100});
+    expect(listPositionRefusal('Q7')).toBe(
+      'Q7 could be a position in a list, not a question id, so nothing was recorded. Every question id is Q followed by a number above 99. Which question did you mean? Answer with the id shown in brackets on its line in the report, for example Q131, or with its bead id.',
+    );
+  });
+
+  test('every id is shown with a Q (D6)', () => {
+    expect(shortIdText(131)).toBe('Q131');
   });
 
   test('a label is read in the D2 form and the old per-chain form', () => {
@@ -154,12 +220,12 @@ describe('questionIdsShown: never one id twice in a report', () => {
       question('t-a.3', ['qid:103'], 3, 2),
       question('t-a.4', ['qid:t-a:4'], 3, 3),
     ]);
-    expect(shown.byId.get('t-a.2')).toEqual({text: 'BD102', why: null});
-    expect(shown.byId.get('t-a.3')).toEqual({text: 'BD103', why: null});
+    expect(shown.byId.get('t-a.2')).toEqual({text: 'Q102', why: null});
+    expect(shown.byId.get('t-a.3')).toEqual({text: 'Q103', why: null});
     expect(shown.byId.get('t-b.9')?.text).toBe('t-b.9');
     expect(shown.byId.has('t-a.4')).toBe(false);
     expect(shown.notes).toEqual([
-      't-b.9 is shown by its bead id because BD102 is also the id of t-a.2, filed earlier. Answer it by its bead id.',
+      't-b.9 is shown by its bead id because Q102 is also the id of t-a.2, filed earlier. Answer it by its bead id.',
     ]);
   });
 
@@ -210,15 +276,15 @@ describe('questionIdsShown: never one id twice in a report', () => {
         title: 'Keep it?',
       },
     ];
-    const ids = new Map([['t-a.2', 'BD102']]);
+    const ids = new Map([['t-a.2', 'Q102']]);
     const full = renderAsks(asks, {ids, style: PLAIN_STYLE});
-    expect(full.split('\n')[0]).toBe('1. [BD102] 🟡 P2 · **Keep it?** (t-a.2)');
+    expect(full.split('\n')[0]).toBe('1. [Q102] 🟡 P2 · **Keep it?** (t-a.2)');
     const compact = renderAsks(asks, {
       ids,
       shown: new Map([['t-a.2', {compact: true, mark: 'changed' as const}]]),
       style: PLAIN_STYLE,
     });
-    expect(compact).toBe('1. 🔄 [BD102] 🟡 P2 · **Keep it?** (t-a.2)');
+    expect(compact).toBe('1. 🔄 [Q102] 🟡 P2 · **Keep it?** (t-a.2)');
   });
 });
 
@@ -492,17 +558,17 @@ function answer(w: World, id: string, text: string, env = w.env) {
 }
 
 describe('thread ask and thread status: ids end to end', () => {
-  test('ask numbers each question once from BD100, and every report shows the same ids', async () => {
+  test('ask numbers each question once from Q100, and every report shows the same ids', async () => {
     const w = await world();
     const p3 = await ask(w, '3', 'Gzip the output?');
     const p0 = await ask(w, '0', 'Which bucket?');
-    expect(p3.shortId).toBe('BD100');
-    expect(p0.shortId).toBe('BD101');
+    expect(p3.shortId).toBe('Q100');
+    expect(p0.shortId).toBe('Q101');
     expect(idLabels(labelsOf(w, p3.id))).toEqual(['qid:100']);
     const first = await status(w, at(1));
     // The list keeps its priority numbering; the id follows the number.
-    expect(lineOf(first, p0.id)).toMatch(/^1\. \[BD101\] 🛑 P0 · /u);
-    expect(lineOf(first, p3.id)).toMatch(/^2\. \[BD100\] ⚪ P3 · /u);
+    expect(lineOf(first, p0.id)).toMatch(/^1\. \[Q101\] 🛑 P0 · /u);
+    expect(lineOf(first, p3.id)).toMatch(/^2\. \[Q100\] ⚪ P3 · /u);
     // The turn ends with the block pasted (home-base-sg9q9.11 F1: only a
     // report Justin was shown counts), then the next turn: the P3 is one line,
     // and keeps its id.
@@ -526,13 +592,13 @@ describe('thread ask and thread status: ids end to end', () => {
     );
     const next = await status(w, at(3));
     expect(next).not.toContain('Context for Gzip the output?');
-    expect(lineOf(next, p3.id)).toMatch(/^2\. \[BD100\] ⚪ P3 · /u);
+    expect(lineOf(next, p3.id)).toMatch(/^2\. \[Q100\] ⚪ P3 · /u);
     expect(idLabels(labelsOf(w, p3.id))).toEqual(['qid:100']);
   });
 
   test('questions filed before D2 get a new id at the first report, even when they hold an old one, in priority then age order, written once', async () => {
     const w = await world();
-    // One question that keeps its id: BD100.
+    // One question that keeps its id: Q100.
     const kept = await ask(w, '4', 'Labelled already?');
     const old = [];
     for (const [priority, title, oldLabel] of [
@@ -545,7 +611,7 @@ describe('thread ask and thread status: ids end to end', () => {
       relabel(
         w,
         filed.id,
-        [questionIdLabel(Number(filed.shortId?.slice(2)))],
+        [questionIdLabel(Number(filed.shortId?.slice(1)))],
         oldLabel == null ? [] : [oldLabel],
       );
       old.push(filed.id);
@@ -555,12 +621,12 @@ describe('thread ask and thread status: ids end to end', () => {
     // The counter handed out 100 to 103 at filing; the next are 104 on, most
     // urgent first, then oldest.
     const out = await status(w, at(1));
-    expect(lineOf(out, p1a)).toMatch(/^1\. \[BD104\] /u);
-    expect(lineOf(out, p1b)).toMatch(/^2\. \[BD105\] /u);
-    expect(lineOf(out, p3)).toMatch(/^3\. \[BD106\] /u);
-    expect(lineOf(out, kept.id)).toMatch(/^4\. \[BD100\] /u);
+    expect(lineOf(out, p1a)).toMatch(/^1\. \[Q104\] /u);
+    expect(lineOf(out, p1b)).toMatch(/^2\. \[Q105\] /u);
+    expect(lineOf(out, p3)).toMatch(/^3\. \[Q106\] /u);
+    expect(lineOf(out, kept.id)).toMatch(/^4\. \[Q100\] /u);
     // No old id is shown.
-    expect(out).not.toMatch(/\[BD[13]\]/u);
+    expect(out).not.toMatch(/\[(?:Q|BD)[13]\]/u);
     const again = await status(w, at(2));
     expect(lineOf(again, p3)).toBe(lineOf(out, p3));
     // The old label stays, never rewritten; the new one is added once.
@@ -595,7 +661,7 @@ describe('thread ask and thread status: ids end to end', () => {
         relabel(
           w,
           q.id,
-          [questionIdLabel(Number(q.shortId?.slice(2)))],
+          [questionIdLabel(Number(q.shortId?.slice(1)))],
           [`qid:${chain.root}:${number}`],
         );
         filed.push({env: chain.env, id: q.id});
@@ -608,10 +674,10 @@ describe('thread ask and thread status: ids end to end', () => {
     );
     // Every question has an id, every id is new (100 and above), and no id
     // names two questions across the two reports.
-    for (const text of shown) expect(text).toMatch(/^BD[1-9][0-9]{2,}$/u);
+    for (const text of shown) expect(text).toMatch(/^Q[1-9][0-9]{2,}$/u);
     expect(new Set(shown).size).toBe(filed.length);
     for (const report of [mayorReport, jobsReport]) {
-      expect(report).not.toMatch(/\[BD[147]\]/u);
+      expect(report).not.toMatch(/\[(?:Q|BD)[147]\]/u);
     }
   });
 
@@ -643,11 +709,11 @@ describe('thread ask and thread status: ids end to end', () => {
     }
     writeTranscript(w.projects, w.repo, SUCCESSOR);
     const c = await ask(w, '2', 'Ship on Friday?', env2);
-    expect(c.shortId).toBe('BD102');
+    expect(c.shortId).toBe('Q102');
     const out = await status(w, at(6), env2);
-    expect(lineOf(out, a.id)).toContain('[BD100]');
-    expect(lineOf(out, b.id)).toContain('[BD101]');
-    expect(lineOf(out, c.id)).toContain('[BD102]');
+    expect(lineOf(out, a.id)).toContain('[Q100]');
+    expect(lineOf(out, b.id)).toContain('[Q101]');
+    expect(lineOf(out, c.id)).toContain('[Q102]');
   });
 
   test('two questions with one id in a report: the later shows its bead id, and the report says so', async () => {
@@ -657,11 +723,11 @@ describe('thread ask and thread status: ids end to end', () => {
     const other = await ask(w, '3', 'Hand-labelled?');
     relabel(w, other.id, ['qid:101'], ['qid:100']);
     const out = await status(w, at(1));
-    expect(lineOf(out, mine.id)).toContain('[BD100]');
+    expect(lineOf(out, mine.id)).toContain('[Q100]');
     expect(lineOf(out, other.id)).toContain(`[${other.id}]`);
-    expect(out.split('[BD100]').length - 1).toBe(1);
+    expect(out.split('[Q100]').length - 1).toBe(1);
     expect(out).toContain(
-      `${other.id} is shown by its bead id because BD100 is also the id of ${mine.id}, filed earlier.`,
+      `${other.id} is shown by its bead id because Q100 is also the id of ${mine.id}, filed earlier.`,
     );
   });
 
@@ -674,7 +740,7 @@ describe('thread ask and thread status: ids end to end', () => {
     const out = await status(w, at(1));
     expect(bracketOf(out, filed.id)).toBeNull();
     expect(lineOf(out, filed.id)).toContain(`(${filed.id})`);
-    expect(out).not.toMatch(/\[BD[0-9]+\]/u);
+    expect(out).not.toMatch(/\[(?:Q|BD)[0-9]+\]/u);
     const why =
       '1 question has no id yet, so it is shown by bead id: the question counter could not be read:';
     expect(out.split(why).length - 1).toBe(1);
@@ -688,35 +754,104 @@ describe('thread ask and thread status: ids end to end', () => {
     expect(idLabels(labelsOf(w, next.id))).toEqual([]);
     const printed = describeAskOutcome(next.outcome, PLAIN_STYLE);
     expect(printed.lines[1]).toStartWith(
-      `⚠️ No id like BD107 yet, so refer to it by its bead id: ${next.id}.`,
+      `⚠️ No id like Q107 yet, so refer to it by its bead id: ${next.id}.`,
     );
   });
 });
 
 describe('thread answer --ask with a short id', () => {
-  test('BD101 and bd101 answer the question that holds it; an unknown id is refused', async () => {
+  test(
+    'Q101, q101 and BD101 all answer the question that holds it (D6); an unknown id is refused as typed',
+    async () => {
+      const w = await world();
+      const first = await ask(w, '2', 'Keep the old export?');
+      const second = await ask(w, '3', 'Rename the job?');
+      expect(second.shortId).toBe('Q101');
+      for (const typed of ['Q109', 'BD109']) {
+        const missing = await answer(w, typed, 'yes');
+        expect(missing.kind).toBe('failed');
+        expect(missing.kind === 'failed' ? missing.reason : '').toContain(
+          `No question in any known repo holds ${typed}.`,
+        );
+      }
+      for (const typed of ['Q101', 'q101', 'BD101']) {
+        const done = await answer(w, typed, `no rename (${typed})`);
+        expect(done).toMatchObject({
+          id: second.id,
+          kind: 'answeredOne',
+          shortId: 'Q101',
+          title: 'Rename the job?',
+        });
+        const closed = runBr(w.repo, ['show', second.id, '--json']);
+        expect(closed.stdout).toContain(`answer: no rename (${typed})`);
+        expect(statusOf(w, first.id)).toBe('open');
+        // Open again, so the next form has the same question to answer.
+        expect(runBr(w.repo, ['reopen', second.id]).ok).toBe(true);
+      }
+      // A bare number is not an id.
+      const bare = await answer(w, '1', 'yes');
+      expect(bare.kind).toBe('failed');
+    },
+    SLOW,
+  );
+
+  test(
+    'Q7 and Q99 could be list positions: refused with a question back, and nothing is recorded (D6)',
+    async () => {
+      const w = await world();
+      // A guess would answer either: one question holds an old per-chain 7, the
+      // other a hand-made label 99.
+      const chained = await ask(w, '2', 'Stop the threads push?');
+      relabel(w, chained.id, ['qid:100'], [`qid:${w.sessionBead}:7`]);
+      const low = await ask(w, '3', 'Hand-labelled low?');
+      relabel(w, low.id, ['qid:101'], ['qid:99']);
+      for (const [typed, shown] of [
+        ['Q7', 'Q7'],
+        ['q7', 'Q7'],
+        ['Q99', 'Q99'],
+      ] as const) {
+        const refused = await answer(w, typed, 'yes');
+        expect(refused).toEqual({
+          kind: 'failed',
+          reason: listPositionRefusal(shown),
+        });
+        const reason = refused.kind === 'failed' ? refused.reason : '';
+        expect(reason).toContain(`${shown} could be a position in a list`);
+        expect(reason).toContain('Which question did you mean?');
+        expect(reason).toContain('for example Q131');
+        expect(statusOf(w, chained.id)).toBe('open');
+        expect(statusOf(w, low.id)).toBe('open');
+      }
+      // Control: the same numbers typed as BD ids still answer, so the refusal
+      // is the Q rule, not a question that is missing.
+      expect(await answer(w, 'BD7', 'yes, stop it')).toMatchObject({
+        id: chained.id,
+        kind: 'answeredOne',
+      });
+      expect(await answer(w, 'BD99', 'yes')).toMatchObject({
+        id: low.id,
+        kind: 'answeredOne',
+      });
+    },
+    SLOW,
+  );
+
+  test('a Q id names only the D2 label, never an old per-chain number (D6)', async () => {
     const w = await world();
-    const first = await ask(w, '2', 'Keep the old export?');
-    const second = await ask(w, '3', 'Rename the job?');
-    const missing = await answer(w, 'BD109', 'yes');
-    expect(missing.kind).toBe('failed');
-    expect(missing.kind === 'failed' ? missing.reason : '').toContain(
-      'No question in any known repo holds BD109.',
+    // An old per-chain label with a number above the floor: only BD reads it.
+    const old = await ask(w, '2', 'Old and high?');
+    relabel(w, old.id, ['qid:100'], [`qid:${w.sessionBead}:120`]);
+    const refused = await answer(w, 'Q120', 'yes');
+    expect(refused.kind).toBe('failed');
+    expect(refused.kind === 'failed' ? refused.reason : '').toContain(
+      'Q120 is not an open question of this session',
     );
-    const done = await answer(w, 'bd101', 'no rename');
-    expect(done).toMatchObject({
-      id: second.id,
+    expect(statusOf(w, old.id)).toBe('open');
+    // Control: BD120 answers it, as before D6.
+    expect(await answer(w, 'BD120', 'yes')).toMatchObject({
+      id: old.id,
       kind: 'answeredOne',
-      shortId: 'BD101',
-      title: 'Rename the job?',
     });
-    const closed = runBr(w.repo, ['show', second.id, '--json']);
-    expect(closed.stdout).toContain('answer: no rename');
-    const open = runBr(w.repo, ['show', first.id, '--json']);
-    expect(open.stdout).not.toContain('answer: no rename');
-    // A bare number is not an id.
-    const bare = await answer(w, '1', 'yes');
-    expect(bare.kind).toBe('failed');
   });
 
   test('an id another session holds is refused with where it lives, and nothing is written', async () => {
@@ -724,12 +859,12 @@ describe('thread answer --ask with a short id', () => {
     const jobs = secondSession(w, OTHER_CHAIN, 10);
     const mine = await ask(w, '2', 'Keep the old export?');
     const theirs = await ask(w, '2', 'Let jobs control cmux?', jobs.env);
-    expect(theirs.shortId).toBe('BD101');
-    const refused = await answer(w, 'BD101', 'yes');
+    expect(theirs.shortId).toBe('Q101');
+    const refused = await answer(w, 'Q101', 'yes');
     expect(refused.kind).toBe('failed');
     const reason = refused.kind === 'failed' ? refused.reason : '';
     expect(reason).toContain(
-      `BD101 is not an open question of this session (${w.sessionBead}`,
+      `Q101 is not an open question of this session (${w.sessionBead}`,
     );
     expect(reason).toContain('nothing was recorded');
     expect(reason).toContain(
@@ -766,10 +901,10 @@ describe('thread answer --ask with a short id', () => {
     const first = await ask(w, '2', 'Keep the old export?');
     const other = await ask(w, '3', 'Hand-labelled?');
     relabel(w, other.id, ['qid:101'], ['qid:100']);
-    const shared = await answer(w, 'BD100', 'yes');
+    const shared = await answer(w, 'Q100', 'yes');
     expect(shared.kind).toBe('failed');
     const reason = shared.kind === 'failed' ? shared.reason : '';
-    expect(reason).toContain('BD100 names 2 open questions of');
+    expect(reason).toContain('Q100 names 2 open questions of');
     expect(reason).toContain(`${first.id} "Keep the old export?"`);
     expect(reason).toContain(`${other.id} "Hand-labelled?"`);
     expect(reason).toContain('Which one did you mean?');
@@ -801,9 +936,9 @@ describe('thread ask prints the id the report shows, never a guess', () => {
         numbers: [101],
       }),
     );
-    expect(mine.shortId).toBe('BD101');
+    expect(mine.shortId).toBe('Q101');
     expect(idLabels(labelsOf(w, mine.id))).toEqual(['qid:101']);
-    const why = `BD101 is also the id of ${other.id}, filed earlier`;
+    const why = `Q101 is also the id of ${other.id}, filed earlier`;
     expect(mine.outcome.shownAs).toEqual({kind: 'beadId', why});
 
     const printed = describeAskOutcome(mine.outcome, PLAIN_STYLE);
@@ -814,29 +949,29 @@ describe('thread ask prints the id the report shows, never a guess', () => {
     expect(printed.lines[0]).toStartWith(
       `ask ${mine.id} · 🟡 P2 · filed under ${w.sessionBead}`,
     );
-    expect(text).not.toContain('BD101 ·');
-    expect(text).not.toContain('[BD101]');
+    expect(text).not.toContain('Q101 ·');
+    expect(text).not.toContain('[Q101]');
     expect(printed.lines[1]).toBe(
       `⚠️ The report shows this question by its bead id, because ${why}. Answer it by its bead id: ${mine.id}.`,
     );
     expect(text).toContain(`1. [${mine.id}] 🟡 P2 · `);
 
-    // The report agrees: the new question by its bead id, the older as BD101.
+    // The report agrees: the new question by its bead id, the older as Q101.
     const out = await status(w, at(1));
     expect(lineOf(out, mine.id)).toContain(`[${mine.id}]`);
-    expect(lineOf(out, other.id)).toContain('[BD101]');
+    expect(lineOf(out, other.id)).toContain('[Q101]');
   });
 
-  test('no shared number: ask prints its BD id, as before', async () => {
+  test('no shared number: ask prints its Q id, as before', async () => {
     const w = await world();
     const only = await ask(w, '2', 'Keep the old export?');
-    expect(only.outcome.shownAs).toEqual({kind: 'short', text: 'BD100'});
+    expect(only.outcome.shownAs).toEqual({kind: 'short', text: 'Q100'});
     const printed = describeAskOutcome(only.outcome, PLAIN_STYLE);
-    expect(printed.lines[0]).toStartWith(`ask ${only.id} · BD100 · 🟡 P2 · `);
+    expect(printed.lines[0]).toStartWith(`ask ${only.id} · Q100 · 🟡 P2 · `);
     expect(printed.lines[1]).toBe('');
   });
 
-  test('a read that fails or throws prints "could not check" and no BD id', async () => {
+  test('a read that fails or throws prints "could not check" and no Q id', async () => {
     const w = await world();
     const problem =
       'the beads export could not be read: /x/issues.jsonl: EACCES';
@@ -848,8 +983,8 @@ describe('thread ask prints the id the report shows, never a guess', () => {
       throw new Error('export vanished');
     });
     // The labels were written; only what the report shows is unknown.
-    expect(failed.shortId).toBe('BD100');
-    expect(thrown.shortId).toBe('BD101');
+    expect(failed.shortId).toBe('Q100');
+    expect(thrown.shortId).toBe('Q101');
     expect(failed.outcome.shownAs).toEqual({
       kind: 'unchecked',
       why: `some of this session's questions could not be read: ${problem}`,
@@ -859,8 +994,8 @@ describe('thread ask prints the id the report shows, never a guess', () => {
       why: "reading this session's questions threw: export vanished",
     });
     for (const [filed, planned] of [
-      [failed, 'BD100'],
-      [thrown, 'BD101'],
+      [failed, 'Q100'],
+      [thrown, 'Q101'],
     ] as const) {
       const printed = describeAskOutcome(filed.outcome, PLAIN_STYLE);
       const text = printed.lines.join('\n');
@@ -893,8 +1028,8 @@ describe('thread ask prints the id the report shows, never a guess', () => {
     expect(read.open.map((entry) => entry.id)).not.toContain(lagging.id);
     expect(read.shown.byId.get(lagging.id)).toEqual({
       text: lagging.id,
-      why: `BD101 is also the id of ${other.id}, filed earlier`,
+      why: `Q101 is also the id of ${other.id}, filed earlier`,
     });
-    expect(read.shown.byId.get(other.id)).toEqual({text: 'BD101', why: null});
+    expect(read.shown.byId.get(other.id)).toEqual({text: 'Q101', why: null});
   });
 });

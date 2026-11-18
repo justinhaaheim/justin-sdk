@@ -110,6 +110,11 @@ export function resolveQuotaGroup(
   };
 
   // UP: one parent at most, through either kind of link.
+  //
+  // NOT chain-step.ts's steps (home-base-lasun.1 F1): a quota group follows
+  // spawn links (`spawned-by:` / `spawned:`) as well as handoff links, and a
+  // handoff chain is handoff links only. A step that took either kind would
+  // change what every chain reader calls a chain, so this walk stays its own.
   let current = startBeadId;
   const upPath = new Set<string>();
   for (;;) {

@@ -137,7 +137,7 @@ describe('the state line, one state at a time', () => {
     );
     expect(state.kind).toBe('stopped');
     expect(text(state)).toBe(
-      'Stopped: the session waits on your answer to BD120 — next: code-done — since 2 days ago',
+      'Stopped: the session waits on your answer to Q120 — next: code-done — since 2 days ago',
     );
   });
 
@@ -176,7 +176,7 @@ describe('the state line, one state at a time', () => {
     const state = line(node(issue('r-1'), [p0]), WORKING);
     expect(state.kind).toBe('waiting');
     expect(text(state)).toBe(
-      'Waiting on you: BD101 Which S3 bucket should the runbook point at? — next: your answer to BD101 — since 2 days ago',
+      'Waiting on you: Q101 Which S3 bucket should the runbook point at? — next: your answer to Q101 — since 2 days ago',
     );
   });
 
@@ -364,7 +364,7 @@ describe('a request carried down a handoff chain', () => {
       session: predecessor,
     });
     expect(text(state)).toBe(
-      'Carried by [HOME][Moe-3] Threads hub: Waiting on you: BD130 Ship it? — next: your answer to BD130 — since 2 days ago',
+      'Carried by [HOME][Moe-3] Threads hub: Waiting on you: Q130 Ship it? — next: your answer to Q130 — since 2 days ago',
     );
   });
 

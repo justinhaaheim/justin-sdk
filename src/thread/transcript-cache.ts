@@ -52,6 +52,7 @@
 
 import type {CommitEvidence} from './session-commits';
 import type {WriteEvidence} from './session-writes';
+import type {EndingFold, TranscriptEnding} from './transcript-ending';
 import type {TranscriptFold} from './transcript-fold';
 import type {
   HelperTailFacts,
@@ -79,6 +80,7 @@ import {homedir} from 'os';
 import {basename, dirname, join} from 'path';
 
 import {readStableBytes, stampOf} from './file-memo';
+import {endingOfFold} from './transcript-ending';
 import {
   foldGrownTranscript,
   incrementalReadsEnabled,
@@ -95,7 +97,7 @@ import {helperTailFromFacts} from './transcript-messages';
  * this number does not, and `bun run test:transcript-cache:golden --update`
  * refuses to record a new output under an old number.
  */
-export const TRANSCRIPT_CACHE_VERSION = 1;
+export const TRANSCRIPT_CACHE_VERSION = 2;
 
 /** The knob: this environment variable set to `off` turns the cache off. */
 export const TRANSCRIPT_CACHE_KNOB = 'JUSTIN_THREADS_TRANSCRIPT_CACHE';
@@ -106,9 +108,14 @@ export interface TranscriptFileFacts {
   commits: Omit<CommitEvidence, 'files'>;
   /** A subagent file's tail (`readHelperTail` before the clock); null for a main file. */
   helper: HelperTailFacts | null;
-  /** A main file's facts: context size and last conversation record; null for a subagent file. */
+  /**
+   * A main file's facts: context size, how it ends (the walk's state,
+   * transcript-ending.ts; version 2, home-base-kwand.4) and last conversation
+   * record; null for a subagent file.
+   */
   main: {
     contextTokens: number | null;
+    ending: EndingFold;
     lastRecord: Exclude<LastRecordRead, {kind: 'failed'}>;
   } | null;
   /** `extractTranscriptMessages`; null when no caller has asked for it. */
@@ -286,12 +293,43 @@ function validHelper(value: unknown): boolean {
   );
 }
 
+const IN_FLIGHT_KINDS = new Set([
+  'interrupt',
+  'notification',
+  'prompt',
+  'reply',
+  'thinking',
+  'toolCall',
+  'toolResult',
+]);
+
+function validEnding(value: unknown): boolean {
+  if (!isObject(value)) return false;
+  const {conversation, finishedAt, marks, open} = value;
+  if (
+    typeof conversation !== 'boolean' ||
+    typeof marks !== 'boolean' ||
+    !isStringOrNull(finishedAt)
+  ) {
+    return false;
+  }
+  return (
+    open === null ||
+    (isObject(open) &&
+      isStringOrNull(open.at) &&
+      typeof open.endTurn === 'boolean' &&
+      typeof open.kind === 'string' &&
+      IN_FLIGHT_KINDS.has(open.kind))
+  );
+}
+
 function validMain(value: unknown): boolean {
   if (value === null) return true;
   if (!isObject(value)) return false;
   if (value.contextTokens !== null && typeof value.contextTokens !== 'number') {
     return false;
   }
+  if (!validEnding(value.ending)) return false;
   const last = value.lastRecord;
   if (!isObject(last)) return false;
   return last.kind === 'found'
@@ -601,6 +639,15 @@ export function cachedRawWrites(
 /** A main transcript's last conversation record (`readLastRecordTimestamp`, no sidechain). */
 export function cachedLastRecordTimestamp(path: string): LastRecordRead | null {
   return copy(factsOf(path, false)?.main?.lastRecord);
+}
+
+/**
+ * home-base-kwand.4: how a main transcript ends (transcript-ending.ts), from
+ * the walk's state the cache keeps; null when the cache cannot give it.
+ */
+export function cachedTranscriptEnding(path: string): TranscriptEnding | null {
+  const ending = factsOf(path, false)?.main?.ending;
+  return ending == null ? null : endingOfFold(ending);
 }
 
 /** A main transcript's context size, as measureTranscriptAt's `readTranscriptFacts` call gives it. */

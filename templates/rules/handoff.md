@@ -62,6 +62,10 @@ When the output ends with a summary headed `🤝 **Handed off**`, your final mes
 - On exit 3, and on exit 4 at your last try, send the summary, then the printed handoff block. No tab opened, so Justin starts the next session from the block.
 - On exit 1, or when the output has no summary, quote the output as the list above says.
 
+## When Justin refers to something he said earlier
+
+A session that continues another one does not have the earlier sessions' messages in its context. When Justin refers to something he said that is not in your context, run `bun run justin-sdk thread messages <words>` before you say you do not know. It searches every message he typed in this session and in the sessions before it in its handoff chain, his words only; add `--regex` for a pattern, or `--chain <name or bead>` for another chain. `bun run justin-sdk thread messages --context <id>` prints one of them with the replies around it.
+
 ## Never start a session another way
 
 - `thread handoff` is the only way to start the session that continues this one.

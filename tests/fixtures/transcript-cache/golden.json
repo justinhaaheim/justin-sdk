@@ -22,6 +22,12 @@
       "helper": null,
       "main": {
         "contextTokens": 3012,
+        "ending": {
+          "conversation": true,
+          "finishedAt": "2030-01-01T09:20:01.000Z",
+          "marks": true,
+          "open": null
+        },
         "lastRecord": {
           "at": "2030-01-01T09:20:00.000Z",
           "kind": "found"
@@ -171,6 +177,16 @@
       "helper": null,
       "main": {
         "contextTokens": 4020,
+        "ending": {
+          "conversation": true,
+          "finishedAt": null,
+          "marks": false,
+          "open": {
+            "at": "2030-01-01T09:31:00.000Z",
+            "endTurn": false,
+            "kind": "reply"
+          }
+        },
         "lastRecord": {
           "at": "2030-01-01T09:31:00.000Z",
           "kind": "found"
@@ -249,5 +265,5 @@
       }
     }
   },
-  "version": 1
+  "version": 2
 }

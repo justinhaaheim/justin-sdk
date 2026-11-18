@@ -53,6 +53,12 @@
  */
 
 import type {Field, OutputStyle} from '../cli-style';
+import type {
+  BeforeRestartFact,
+  BeforeRestartRead,
+  BeforeRestartReader,
+  BeforeRestartState,
+} from './before-restart-state';
 import type {ChainNamer} from './chain-names';
 import type {HandoffStop} from './handoff-view';
 import type {InputDraft} from './input-drafts';
@@ -92,6 +98,13 @@ import {sdkRun} from '../sdk-invocation';
 import {writeStdout} from '../write-stdout';
 import {parseInstant} from './answer-store';
 import {messageLogPath} from './archive';
+import {
+  BEFORE_RESTART_STATES,
+  BEFORE_RESTART_WORDS,
+  beforeRestartLine,
+  realBeforeRestartReader,
+  restartWhen,
+} from './before-restart-state';
 import {chainNamesKnob, registryChainNamer} from './chain-names';
 import {resolveRepoTag, resolveThreadConfig} from './config';
 import {dropUnusedFileMemo, fileMemoMark} from './file-memo';
@@ -157,20 +170,193 @@ import {
   untrackedVerdict,
 } from './session-untracked';
 import {
+  cachedTranscriptEnding,
   dropUnusedTranscriptMemory,
   evictTranscriptCache,
   transcriptCacheMark,
 } from './transcript-cache';
+import {
+  ENDING_FACT_LABEL,
+  endingLine,
+  readTranscriptEnding,
+  type SessionEnding,
+  sessionEnding,
+} from './transcript-ending';
 
 export const INBOX_DEFAULT_DAYS = 30;
 
 /** Why a card's pane is unknown when the caller ran no lookup (j8q3e.7 D6). */
 export const PANES_NOT_LOOKED_UP = 'the pane lookup was not run';
 
+/** Why there is no before-restart answer when the caller ran no reader (kwand.2). */
+export const BEFORE_RESTART_NOT_READ =
+  'the before-restart tab record was not read';
+
+/** The card fact's label (kwand.2): one short line under "Where it is". */
+export const BEFORE_RESTART_FACT_LABEL = 'Before the restart';
+
+/** The card with its kwand.2 line: "🔁 was open before the 9:36pm restart: …". */
+export function withBeforeRestart(
+  card: SessionCard,
+  fact: BeforeRestartFact,
+  now: Date,
+): SessionCard {
+  return {
+    ...card,
+    facts: [
+      ...card.facts,
+      {label: BEFORE_RESTART_FACT_LABEL, value: beforeRestartLine(fact, now)},
+    ],
+  };
+}
+
+/** Why a row's ending is unknown before `rowEnding` ran (kwand.4). */
+export const ENDING_NOT_READ = 'its transcript was not read';
+
+/**
+ * The card with its kwand.4 line, "✂️ cut off mid-turn at 6:39pm: …", for a
+ * session cut off mid-turn only: a mark on every card would mark nothing
+ * (home-base design principle: an alert must be rare enough to act on). The
+ * JSON's `ending` carries every session's, replied and unknown too.
+ */
+export function withEnding(
+  card: SessionCard,
+  ending: SessionEnding,
+  now: Date,
+): SessionCard {
+  if (ending.kind !== 'cutOff') return card;
+  return {
+    ...card,
+    facts: [
+      ...card.facts,
+      {label: ENDING_FACT_LABEL, value: endingLine(ending, now)},
+    ],
+  };
+}
+
+/**
+ * home-base-kwand.4: a row's ending. The transcript is the loaded model's (or
+ * the untracked scan's); the cache gives its walk, else it is read here. Live
+ * is the card's pane fact: a live pane holds a Claude process; unknown when
+ * the lookup could not tell (D5: a separate fact, never hiding a cut-off).
+ */
+function rowEnding(row: InboxRow, now: Date): SessionEnding {
+  let path: string | null = null;
+  let lastRecordAt: string | null = null;
+  if (row.loaded != null) {
+    const {transcript} = row.loaded.model;
+    path = transcript.path;
+    if (path == null) {
+      return {
+        kind: 'unknown',
+        reason: transcript.lastRecordAt.ok
+          ? 'its transcript was not found'
+          : `its transcript was not found: ${transcript.lastRecordAt.reason}`,
+      };
+    }
+    lastRecordAt = transcript.lastRecordAt.ok
+      ? transcript.lastRecordAt.value
+      : null;
+  } else if (row.untracked != null) {
+    path = row.untracked.session.transcriptPath;
+    const activity = row.untracked.session.lastActivityAt;
+    lastRecordAt = activity.ok ? activity.value : null;
+  } else {
+    return {
+      kind: 'unknown',
+      reason: `the session could not be loaded${row.unreadable == null ? '' : `: ${row.unreadable}`}`,
+    };
+  }
+  const ending = cachedTranscriptEnding(path) ?? readTranscriptEnding(path);
+  const pane = row.card.paneFact;
+  return sessionEnding(ending, {
+    lastRecordAt,
+    live: pane.kind === 'live' ? true : pane.kind === 'none' ? false : null,
+    now,
+  });
+}
+
+/** One session of the before set as `--before-restart` and the JSON list it. */
+export interface BeforeRestartEntry {
+  fact: BeforeRestartFact;
+  /** The inbox row, or null when the inbox has none (not tracked and not found, or hidden). */
+  row: InboxRow | null;
+  sessionId: string;
+}
+
+/**
+ * home-base-kwand.2: every session of the before set, grouped by the state
+ * now in BEFORE_RESTART_STATES order, newest activity first inside each group
+ * (sessions with no row, so no known activity, last). A session the inbox has
+ * no row for is still listed: the record is the authority, not the window.
+ */
+export function beforeRestartGroups(
+  read: InboxRead,
+): {entries: BeforeRestartEntry[]; state: BeforeRestartState}[] {
+  if (!read.beforeRestart.ok) return [];
+  const rowById = new Map(read.rows.map((row) => [row.sessionId, row]));
+  // A folded line (F6) stands for several sessions: each finds its row.
+  for (const row of read.rows) {
+    for (const id of row.repeats?.sessionIds ?? []) {
+      if (!rowById.has(id)) rowById.set(id, row);
+    }
+  }
+  const entries: BeforeRestartEntry[] = [
+    ...read.beforeRestart.facts.entries(),
+  ].map(([sessionId, fact]) => ({
+    fact,
+    row: rowById.get(sessionId) ?? null,
+    sessionId,
+  }));
+  const activity = (entry: BeforeRestartEntry): number =>
+    parseInstant(entry.row?.lastActivityAt ?? '') ?? -Infinity;
+  return BEFORE_RESTART_STATES.map((state) => ({
+    entries: entries
+      .filter((entry) => entry.fact.state === state)
+      .sort((a, b) => activity(b) - activity(a)),
+    state,
+  })).filter((group) => group.entries.length > 0);
+}
+
+/** The JSON's top-level `beforeRestart` (kwand.2): the whole before set, grouped. */
+export function beforeRestartJson(read: InboxRead) {
+  const answer = read.beforeRestart;
+  if (!answer.ok) return {ok: false as const, reason: answer.reason};
+  const groups = beforeRestartGroups(read);
+  return {
+    counts: Object.fromEntries(
+      groups.map((group) => [group.state, group.entries.length]),
+    ) as Partial<Record<BeforeRestartState, number>>,
+    ok: true as const,
+    restartAt: answer.restartAt,
+    restartKind: answer.restartKind,
+    screens: answer.screens,
+    sessions: groups.flatMap((group) =>
+      group.entries.map((entry) => ({
+        ...entry.fact,
+        // Whether the inbox has a row for it; its title when it does.
+        inInbox: entry.row != null,
+        lastActivityAt: entry.row?.lastActivityAt ?? null,
+        sessionId: entry.sessionId,
+        title: entry.row?.title ?? null,
+      })),
+    ),
+    sessionsTotal: answer.facts.size,
+    source: answer.source,
+    tabsWithSession: answer.tabsWithSession,
+  };
+}
+
 /** j8q3e.1 D5: newest first (the default), by D5 section, or by repo. */
 export type InboxOrder = 'recent' | 'repo' | 'status';
 
 export interface InboxRow {
+  /**
+   * home-base-kwand.2: the tab this session was in before the last restart and
+   * what that is now; null for a session that was in no recorded tab (or when
+   * the before set could not be read: `InboxRead.beforeRestart` says which).
+   */
+  beforeRestart: BeforeRestartFact | null;
   /** The card (j8q3e.1 D2): every field the printed inbox and the JSON show. */
   card: SessionCard;
   /**
@@ -178,6 +364,12 @@ export interface InboxRow {
    * ONE line; every other session is a full card.
    */
   display: 'card' | 'line';
+  /**
+   * home-base-kwand.4 (G12, D5): how the session's last turn ended, from its
+   * main transcript (transcript-ending.ts), with liveness beside it. Unknown,
+   * with the reason, when it could not be told.
+   */
+  ending: SessionEnding;
   /** The git facts the card reads; null for a session that did not load. */
   git: CardGit | null;
   /**
@@ -299,6 +491,11 @@ function unreadableOf(model: SessionModel): string | null {
 }
 
 export interface InboxRead {
+  /**
+   * home-base-kwand.2: what was open before the last restart, per session, or
+   * why it could not be told. The facts cover sessions with no row too.
+   */
+  beforeRestart: BeforeRestartRead;
   /** Index lines that could not be parsed: named, never dropped silently. */
   corrupt: {lineNumber: number; reason: string}[];
   /**
@@ -491,6 +688,12 @@ export function neverHiddenByAge(status: SessionStatus): boolean {
 /** One inbox load; `readInbox` (below) is the entry point. */
 async function readInboxOnce(input: {
   /**
+   * home-base-kwand.2: reads what was open before the last restart and joins
+   * it with this run's pane lookup. Omitted or null: not read, and every row's
+   * `beforeRestart` is null with the read saying why.
+   */
+  beforeRestart?: BeforeRestartReader | null;
+  /**
    * home-base-l2ejg.11: names a chain whose session bead holds no `chain:`
    * label, from the registry, by its first session (registryChainNamer). It
    * writes no bead. Absent or null: only the labels name chains. Used only
@@ -504,6 +707,11 @@ async function readInboxOnce(input: {
   /** D6: untracked sessions are listed only under this directory (~/Dev). */
   devRoot?: string;
   env: EnvLike;
+  /**
+   * home-base-kwand.2: `--before-restart`. A session that was in a tab before
+   * the restart is never hidden by age.
+   */
+  keepBeforeRestart?: boolean;
   /**
    * j8q3e.7 D6: the live pane lookup, run once per inbox run. Omitted, no
    * lookup runs and every card says its pane is unknown — `thread inbox`
@@ -532,6 +740,16 @@ async function readInboxOnce(input: {
     input.lookupPanes == null
       ? Promise.resolve({ok: false, reason: PANES_NOT_LOOKED_UP})
       : timed(input.timings, 'pane lookup', input.lookupPanes);
+  // home-base-kwand.2: the before set is read now; its state joins the panes.
+  const readBefore = input.beforeRestart;
+  const pendingBefore: Promise<BeforeRestartRead> =
+    readBefore == null
+      ? Promise.resolve({ok: false, reason: BEFORE_RESTART_NOT_READ})
+      : timed(
+          input.timings,
+          'before restart',
+          async () => await readBefore(pendingPanes),
+        );
   // No index yet is a measured answer (no session bead was ever filed): there
   // are no tracked sessions, and every session is listed as untracked (D6).
   const index =
@@ -649,11 +867,13 @@ async function readInboxOnce(input: {
       repo: input.repo,
     }),
   );
-  const [loads, untracked, panes] = await Promise.all([
+  const [loads, untracked, panes, beforeRestart] = await Promise.all([
     pendingLoads,
     pendingUntracked,
     pendingPanes,
+    pendingBefore,
   ]);
+  const beforeFacts = beforeRestart.ok ? beforeRestart.facts : null;
   const endRows = timedStart(input.timings, 'rows');
   // home-base-mbnjv.3 (D9): every session bead loaded in this run, so a card
   // names its predecessor and successor by title and sees a half-written link.
@@ -708,6 +928,7 @@ async function readInboxOnce(input: {
         loaded.kind === 'unreadable' ? loaded.detail : loaded.reason;
       const title = '(could not load this session)';
       rows.push({
+        beforeRestart: null,
         card: unreadableCard({
           age: ageOf(activity, now),
           detail,
@@ -723,6 +944,7 @@ async function readInboxOnce(input: {
           title,
         }),
         display: 'card',
+        ending: {kind: 'unknown', reason: ENDING_NOT_READ},
         git: null,
         handoff: null,
         inputDraft: null,
@@ -757,7 +979,11 @@ async function readInboxOnce(input: {
       old &&
       (lastActivityMs == null || lastActivityMs < since) &&
       !neverHiddenByAge(status) &&
-      !liveDrafts.has(model.sessionId)
+      !liveDrafts.has(model.sessionId) &&
+      !(
+        input.keepBeforeRestart === true &&
+        beforeFacts?.has(model.sessionId) === true
+      )
     ) {
       hiddenByAge[status.kind] = (hiddenByAge[status.kind] ?? 0) + 1;
       continue;
@@ -778,6 +1004,7 @@ async function readInboxOnce(input: {
       '⚠️ title unknown (the session bead could not be read)';
     const unreadable = unreadableOf(model);
     rows.push({
+      beforeRestart: null,
       card: buildCard({
         action,
         age: ageOf(lastActivityAt, now),
@@ -802,6 +1029,7 @@ async function readInboxOnce(input: {
         unreadable,
       }),
       display: 'card',
+      ending: {kind: 'unknown', reason: ENDING_NOT_READ},
       git: cardGit(model.git),
       handoff:
         model.beads.session == null
@@ -835,8 +1063,10 @@ async function readInboxOnce(input: {
       ? readLastAssistantLineMemoized(messageLogPath(session.sessionId, env))
       : null;
     rows.push({
+      beforeRestart: null,
       card,
       display: verdict.display,
+      ending: {kind: 'unknown', reason: ENDING_NOT_READ},
       git: cardGit(session.git),
       handoff: null,
       inputDraft: null,
@@ -863,6 +1093,28 @@ async function readInboxOnce(input: {
     rows[position] = {
       ...row,
       unread: unreadFor(marks, row.sessionId, row.lastAssistantAt),
+    };
+  }
+  // home-base-kwand.2: the tab each session was in before the restart, and
+  // what that is now, as a field and as a line on the card.
+  for (const [position, row] of rows.entries()) {
+    const fact = beforeFacts?.get(row.sessionId) ?? null;
+    if (fact == null) continue;
+    rows[position] = {
+      ...row,
+      beforeRestart: fact,
+      card: withBeforeRestart(row.card, fact, now),
+    };
+  }
+  // home-base-kwand.4 (G12): how each session's last turn ended, from the
+  // transcript cache's entry the load above already read (no second read), with
+  // liveness from this run's pane lookup (D5), as a field and a card line.
+  for (const [position, row] of rows.entries()) {
+    const ending = rowEnding(row, now);
+    rows[position] = {
+      ...row,
+      card: withEnding(row.card, ending, now),
+      ending,
     };
   }
   // D-DRAFTS: a row with a live draft goes first, as a full card.
@@ -908,6 +1160,7 @@ async function readInboxOnce(input: {
   return {
     kind: 'read',
     read: {
+      beforeRestart,
       corrupt: index.corrupt.map((line) => ({
         lineNumber: line.lineNumber,
         reason: line.reason,
@@ -1382,20 +1635,32 @@ function ansiCard(
 }
 
 /** D6's one-line entry, on a TTY at the cards' heading indent. */
-function lineEntry(row: InboxRow, style: OutputStyle): string {
+function lineEntry(row: InboxRow, style: OutputStyle, now: Date): string {
   const line = untrackedLine(
     row.card,
     row.untracked?.session.firstMessage ?? null,
     sessionsIn(row),
   );
   const lead = unreadLead(row.unread);
-  if (!style.color) return lead === '' ? line : `**${lead.trim()}** ${line}`;
+  // kwand.2: the before-restart line goes under the one-liner, on its own line;
+  // kwand.4: so does a cut-off mark (a one-liner shows no other ending).
+  const under = [
+    row.beforeRestart == null
+      ? null
+      : beforeRestartLine(row.beforeRestart, now),
+    row.ending.kind === 'cutOff' ? endingLine(row.ending, now) : null,
+  ].filter((value): value is string => value != null);
+  if (!style.color) {
+    const text = lead === '' ? line : `**${lead.trim()}** ${line}`;
+    return [text, ...under.map((value) => `  ${value}`)].join('\n');
+  }
   const text = lead === '' ? line : `${paint(lead, ['bold'], true)}${line}`;
-  return wrapHanging(text, {
-    hang: BODY_COLUMN + 3,
-    indent: BODY_COLUMN,
-    width: style.width,
-  });
+  const wrap = (value: string, indent: number): string =>
+    wrapHanging(value, {hang: indent + 3, indent, width: style.width});
+  return [
+    wrap(text, BODY_COLUMN),
+    ...under.map((value) => wrap(value, BODY_COLUMN + 3)),
+  ].join('\n');
 }
 
 /** A session as the inbox prints it: its full card, or D6's one line. */
@@ -1406,7 +1671,7 @@ function renderRow(
   paneSummaryReason: string | null,
   now: Date,
 ): string {
-  if (row.display === 'line') return lineEntry(row, style);
+  if (row.display === 'line') return lineEntry(row, style, now);
   return style.color
     ? ansiCard(row.card, showSection, style, row.unread, paneSummaryReason, now)
     : markdownCard(row.card, showSection, row.unread, paneSummaryReason, now);
@@ -1654,6 +1919,79 @@ export function renderInbox(
   return spacedList(blocks);
 }
 
+/**
+ * `thread inbox --before-restart` (home-base-kwand.2): only the sessions that
+ * were in a tab before the last restart, grouped by the state now with counts,
+ * newest activity first inside each group. A session with no inbox row is a
+ * short line naming its tab, never dropped.
+ */
+export function renderBeforeRestartInbox(
+  read: InboxRead,
+  options: Pick<RenderInboxOptions, 'now' | 'style'>,
+): string {
+  const {now, style} = options;
+  const blocks: string[] = [
+    header('Sessions open before the last restart', '🔁', 1, style),
+  ];
+  const answer = read.beforeRestart;
+  if (!answer.ok) {
+    blocks.push(`Unknown: ${tildeText(answer.reason)}`);
+    return spacedList(blocks);
+  }
+  const groups = beforeRestartGroups(read);
+  const fields: Field[] = [
+    {
+      label: 'restart',
+      value: `${answer.restartKind === 'boot' ? 'Mac boot' : 'cmux launch'} at ${restartWhen(answer.restartAt, now)} (${ageOf(answer.restartAt, now) ?? 'unknown age'})`,
+    },
+    {
+      label: 'source',
+      value: `${answer.source.kind}, saved by cmux at ${restartWhen(answer.source.savedAt, now)}`,
+    },
+    {
+      label: 'sessions',
+      value: `${answer.facts.size} (in ${answer.tabsWithSession} tabs)`,
+    },
+    ...groups.map((group) => ({
+      label: `${BEFORE_RESTART_WORDS[group.state].emoji} ${BEFORE_RESTART_WORDS[group.state].title}`,
+      value: String(group.entries.length),
+    })),
+  ];
+  blocks.push(
+    style.color
+      ? fieldLines(fields, {
+          color: true,
+          indent: BODY_COLUMN,
+          width: style.width,
+        })
+      : fields
+          .map((entry) => `- **${entry.label}:** ${entry.value}`)
+          .join('\n'),
+  );
+  const paneSummaryReason = read.panes.ok ? null : read.panes.reason;
+  for (const group of groups) {
+    const words = BEFORE_RESTART_WORDS[group.state];
+    blocks.push(
+      header(`${words.title} (${group.entries.length})`, words.emoji, 2, style),
+    );
+    for (const entry of group.entries) {
+      if (entry.row != null) {
+        blocks.push(renderRow(entry.row, true, style, paneSummaryReason, now));
+        continue;
+      }
+      const tab = entry.fact.tab;
+      const line = `${tab.title ?? '(untitled tab)'} — not in this inbox (session ${entry.sessionId}${tab.workspaceTitle == null ? '' : `, workspace ${tab.workspaceTitle}`})`;
+      const reason = `${beforeRestartLine(entry.fact, now)}${entry.fact.state === 'unknown' ? '' : ` (${entry.fact.reason})`}`;
+      blocks.push(
+        style.color
+          ? `${wrapHanging(line, {hang: BODY_COLUMN + 3, indent: BODY_COLUMN, width: style.width})}\n${wrapHanging(reason, {hang: BODY_COLUMN + 6, indent: BODY_COLUMN + 3, width: style.width})}`
+          : `${line}\n  ${reason}`,
+      );
+    }
+  }
+  return spacedList(blocks);
+}
+
 /** The old reports as JSON: how they were read, and how many sessions have one. */
 function oldReportsJson(old: InboxRead['untracked']['oldReports']): unknown {
   if (old == null) return null;
@@ -1684,6 +2022,9 @@ export function inboxJson(
 ) {
   const sorted = [...read.rows].sort(byNewest);
   return {
+    // home-base-kwand.2: every session of the before set, grouped by the state
+    // now, those with no row in this inbox included; or why it is unknown.
+    beforeRestart: beforeRestartJson(read),
     corrupt: read.corrupt,
     hiddenByAge: read.hiddenByAge,
     indexPath: read.indexPath,
@@ -1717,12 +2058,18 @@ export function inboxJson(
     readMarks: read.readMarks,
     sessions: sorted.map((row) => ({
       action: row.card.action,
+      // home-base-kwand.2: the tab it was in before the restart, and what that
+      // is now; null when it was in no recorded tab.
+      beforeRestart: row.beforeRestart,
       card: row.card,
       // F24: where `claude --resume` must run; null when no checkout is known.
       checkout: rowCheckout(row),
       counts: row.loaded?.counts ?? null,
       // D6 (home-base-j8q3e.1.2): a full card or one line.
       display: row.display,
+      // home-base-kwand.4: how its last turn ended (replied, cutOff with
+      // inFlight and live, workingNow, or unknown with the reason).
+      ending: row.ending,
       git: row.git,
       // home-base-89c8h.3: a refused or deferred handoff with no successor yet.
       handoff: row.handoff,
@@ -1794,6 +2141,13 @@ export type InboxJson = ReturnType<typeof inboxJson>;
 export interface ThreadInboxOptions {
   all: boolean;
   /**
+   * home-base-kwand.2: `--before-restart`, only the sessions that were in a
+   * tab before the last restart, grouped by the state now.
+   */
+  beforeRestart?: boolean;
+  /** Default: the real reader (clocks, tab record, cmux's files, screens). */
+  beforeRestartReader?: BeforeRestartReader | null;
+  /**
    * home-base-l2ejg.11: the namer for chains with no label. Absent: the
    * registry's. Null: none (tests pin it, so their names are not random).
    */
@@ -1828,6 +2182,15 @@ export async function runSessionInbox(
   // whatever throws (finish is idempotent).
   try {
     const result = await readInbox({
+      // home-base-kwand.2: what was open before the restart. Real only with
+      // the real pane lookup, so a test that fakes the panes never reads this
+      // machine's cmux files; tests inject their own reader.
+      beforeRestart:
+        options.beforeRestartReader !== undefined
+          ? options.beforeRestartReader
+          : options.lookupPanes == null
+            ? realBeforeRestartReader(env)
+            : null,
       // home-base-l2ejg.11: chains with no label are named from the registry.
       chainNamer:
         options.chainNamer === undefined
@@ -1836,6 +2199,7 @@ export async function runSessionInbox(
       cwd,
       days,
       env,
+      keepBeforeRestart: options.beforeRestart === true,
       // j8q3e.7 D6: the live pane lookup, once per run (tests inject theirs).
       lookupPanes:
         options.lookupPanes ??
@@ -1872,6 +2236,15 @@ export async function runSessionInbox(
         console.error(`thread inbox: ${printed.problem}`);
       }
       await writeStdout(`${printed.text}\n`);
+      return 0;
+    }
+    if (options.beforeRestart === true) {
+      await writeStdout(
+        `${renderBeforeRestartInbox(result.read, {
+          now,
+          style: options.style ?? outputStyle(process.stdout),
+        })}\n`,
+      );
       return 0;
     }
     await writeStdout(

@@ -226,9 +226,9 @@ export interface ThreadAskOptions extends AskInput {
 /**
  * home-base-sg9q9.11 F4: what the report shows for a question just filed, so
  * `thread ask` prints exactly that and nothing a reader could relay wrongly.
- * - `short`: its id, `BD7`.
+ * - `short`: its id, `Q107`.
  * - `beadId`: its bead id, because its number is also an older question's
- *   (questionIdsShown); `BD7` there would answer the older one.
+ *   (questionIdsShown); `Q107` there would answer the older one.
  * - `unchecked`: a label was written but the report's questions could not be
  *   read, so which id it shows is unknown; never a guess.
  * - `none`: no label was written; the next `thread status` gives it one.
@@ -257,7 +257,7 @@ export type ThreadAskOutcome =
       /** The request it is for (its `to:` label), or null when not linked. */
       request: {id: string; title: string} | null;
       /**
-       * home-base-1rxt0.4 D4: the id its label was given (`BD7`), or null when
+       * home-base-1rxt0.4 D4: the id its label was given (`Q107`), or null when
        * no label was written. Not always what the report shows: print
        * `shownAs`.
        */
@@ -520,7 +520,7 @@ function askIdWarning(
       return [];
     case 'none':
       return [
-        `⚠️ No id like BD107 yet, so refer to it by its bead id: ${outcome.id}. The next thread status tries again. Why: ${shownAs.why}`,
+        `⚠️ No id like Q107 yet, so refer to it by its bead id: ${outcome.id}. The next thread status tries again. Why: ${shownAs.why}`,
       ];
     case 'beadId':
       return [

@@ -552,12 +552,57 @@ function requestCountOf(model: {
     : {kind: 'partial', open, reason, total};
 }
 
+/**
+ * home-base-z7o2m D7: the block's section of Justin's typed messages from the
+ * session handing off. A log that cannot be read is said in the section,
+ * never an empty list (rule 7).
+ */
+async function pickupSection(input: {
+  env: EnvLike;
+  labels: readonly string[];
+  sessionId: string;
+}): Promise<string> {
+  const {classifySessionLog, pickupMessagesSection} = await import(
+    './justin-messages'
+  );
+  const contextCommand = sdkRun('thread messages --context <id>');
+  const log = readMessageLog(input.sessionId, input.env);
+  if (log.kind !== 'read') {
+    return pickupMessagesSection({
+      contextCommand,
+      messages: [],
+      problem:
+        log.kind === 'missing'
+          ? `this session has no message log at ${log.path}`
+          : `${log.path}: ${log.error}`,
+    });
+  }
+  const classified = classifySessionLog({
+    labels: input.labels,
+    lines: log.lines,
+    sessionId: input.sessionId,
+  });
+  return pickupMessagesSection({
+    contextCommand,
+    messages: classified.messages,
+    problem:
+      log.failures.length > 0
+        ? `${log.failures.join('; ')}, and any of them could be one of his`
+        : null,
+  });
+}
+
 /** The block to paste into the new session (markdown: it is for pasting). */
 export async function handoffBlock(input: {
   cwd: string;
   env: EnvLike;
   note: string | null;
   now: Date;
+  /**
+   * home-base-z7o2m D7: add Justin's typed messages from this session.
+   * Absent: componentConfig.thread.handoff.pickupMessages (default false).
+   */
+  pickupMessages?: boolean;
   sessionBeadId: string;
   sessionId: string;
   timeZone?: string;
@@ -565,6 +610,12 @@ export async function handoffBlock(input: {
   | {ok: false; reason: string}
   | {ok: true; requests: HandoffRequestCount; text: string}
 > {
+  const pickupMessages =
+    input.pickupMessages ??
+    (await import('./config')).resolveThreadConfig({
+      cwd: input.cwd,
+      env: input.env,
+    }).handoff.pickupMessages;
   const loaded = await loadSession({
     cwd: input.cwd,
     env: input.env,
@@ -632,6 +683,14 @@ export async function handoffBlock(input: {
   const questions = openQuestions(model);
   // home-base-6n7my.2 D8: for a session started by hand from this block.
   const mayorLine = mayorSuccessorSentence(model.beads.session?.labels ?? []);
+  // home-base-z7o2m D7: off, nothing is added, so the block is as before.
+  const messagesSection = pickupMessages
+    ? await pickupSection({
+        env: input.env,
+        labels: model.beads.session?.labels ?? [],
+        sessionId: input.sessionId,
+      })
+    : null;
   const blocks = [
     // As a message: a `!` command does not run the capture hook, so the new
     // session would have no bead to link (home-base-nro7d.1).
@@ -652,6 +711,7 @@ export async function handoffBlock(input: {
             style: {color: false, width: null},
           }),
         ].join('\n\n'),
+    ...(messagesSection == null ? [] : [messagesSection]),
     [
       '**To pick it up:**',
       // Justin's wording (2026-10-26): addressed to the Claude reading it.

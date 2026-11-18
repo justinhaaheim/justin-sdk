@@ -47,6 +47,12 @@
 
 import type {OutputStyle} from '../cli-style';
 import type {CmuxRunner} from './cmux';
+import type {
+  DraftsScanCounts,
+  DraftsScanOutcome,
+  DraftsScanRun,
+  DraftsScanTrigger,
+} from './drafts-scan-runs';
 import type {InputDraft, InputDraftList} from './input-drafts';
 import type {
   HookStore,
@@ -73,6 +79,7 @@ import {
 } from '../cli-style';
 import {writeStdout} from '../write-stdout';
 import {realCmuxRunner} from './cmux';
+import {appendDraftsScanRun} from './drafts-scan-runs';
 import {
   checkDraftSent,
   clearInputDraft,
@@ -837,16 +844,63 @@ export interface DraftsScanOptions {
   deps?: Partial<Omit<ScanDeps, 'env'>>;
   env?: EnvLike;
   json: boolean;
+  /** home-base-fmf1n D5: writes the run record; tests replace it. */
+  recordRun?: (run: DraftsScanRun, env: EnvLike) => string | null;
   style?: OutputStyle;
+  /**
+   * home-base-fmf1n D4: the run stops itself after this long and records
+   * timed-out. Default: HOOK_SCAN_TIMEOUT_MS for a hook-started run, no limit
+   * for one typed by hand (Ctrl-C stops that).
+   */
+  timeoutMs?: number | null;
+  /** home-base-fmf1n D5: what started this run, for the run log. Default manual. */
+  trigger?: DraftsScanTrigger;
 }
 
-/** 0 scanned (drafts or none) · 1 scanned, but something failed · 2 cmux unreachable, nothing written. */
-export async function runThreadDraftsScan(
+/** D4: the old chore's ceiling. One scan of 101 panes took about 2.5 s. */
+export const HOOK_SCAN_TIMEOUT_MS = 2 * 60 * 1000;
+
+/** What cmux says when its Socket Control Mode refuses a process it did not start. */
+export const CMUX_OUTSIDER_REFUSAL = 'only processes started inside cmux';
+
+/**
+ * Why cmux would not answer a ping, and what to do (D8). The sandbox hint was
+ * once the only one, and blamed the sandbox for the launchd agent's refusal.
+ */
+export function unreachableHint(
+  pingReason: string,
+  socketPath: string,
+): string {
+  if (pingReason.includes(CMUX_OUTSIDER_REFUSAL)) {
+    return "cmux's Socket Control Mode refused this process because cmux did not start it (the launchd chores agent is one such process); the Claude Code sandbox is not the cause. Run the scan from a terminal inside cmux; the hourly scan starts from the hooks of sessions inside cmux (componentConfig.thread.draftsScanHook).";
+  }
+  const allow = socketSettingsJson(socketPath).trim();
+  return `If this session is sandboxed, the sandbox blocks the cmux socket and ps: add ${allow} to your Claude Code user settings, or retry with the sandbox disabled.`;
+}
+
+/** What one scan run came to, before it is recorded (D5). */
+interface ScanRunResult {
+  counts: DraftsScanCounts | null;
+  error: string | null;
+  exitCode: number;
+  outcome: DraftsScanOutcome;
+}
+
+const ERROR_TEXT_MAX = 2000;
+
+function cut(text: string): string {
+  return text.length <= ERROR_TEXT_MAX
+    ? text
+    : `${text.slice(0, ERROR_TEXT_MAX)} … (${text.length - ERROR_TEXT_MAX} more characters)`;
+}
+
+/** The scan and its output; runThreadDraftsScan records what it came to. */
+async function scanAndPrint(
   options: DraftsScanOptions,
-): Promise<number> {
-  const env = options.env ?? process.env;
+  env: EnvLike,
+): Promise<ScanRunResult> {
   const style = options.style ?? outputStyle(process.stdout);
-  const unreachable = async (reason: string): Promise<number> => {
+  const unreachable = async (reason: string): Promise<ScanRunResult> => {
     if (options.json) {
       await writeStdout(
         `${JSON.stringify({kind: 'unreachable', reason}, null, 2)}\n`,
@@ -854,7 +908,12 @@ export async function runThreadDraftsScan(
     } else {
       console.error(`thread drafts scan: ${reason}`);
     }
-    return 2;
+    return {
+      counts: null,
+      error: cut(reason),
+      exitCode: 2,
+      outcome: 'unreachable',
+    };
   };
   const socket = liveSocketPath(env);
   if ('reason' in socket) {
@@ -884,9 +943,8 @@ export async function runThreadDraftsScan(
   const where = `the socket ${socket.path} (from ${from})`;
   const ping = await deps.run(['ping']);
   if (ping.kind === 'failed') {
-    const allow = socketSettingsJson(socket.path).trim();
     return await unreachable(
-      `cmux cannot be reached at ${where}: ${ping.reason}. Nothing was written. If this session is sandboxed, the sandbox blocks the cmux socket and ps: add ${allow} to your Claude Code user settings, or retry with the sandbox disabled.`,
+      `cmux cannot be reached at ${where}: ${ping.reason}. Nothing was written. ${unreachableHint(ping.reason, socket.path)}`,
     );
   }
   const result = await scanDrafts(deps);
@@ -900,7 +958,102 @@ export async function runThreadDraftsScan(
   } else {
     await writeStdout(`${renderScan(result, style)}\n`);
   }
-  return result.failures.length > 0 ? 1 : 0;
+  const counts: DraftsScanCounts = {
+    claudePanes: result.claudePanes,
+    cleared: result.cleared.length,
+    failures: result.failures.length,
+    found: result.found.length,
+    surfacesRead: result.surfacesRead,
+    unplaced: result.unplaced.length,
+    unreadable: result.unreadable.length,
+  };
+  // D5: a scan that finished but could not store or read something is a
+  // failed run, as it was a failing chore (exit 1). Its counts are kept.
+  return result.failures.length > 0
+    ? {
+        counts,
+        error: cut(
+          result.failures.map((failure) => tildeText(failure)).join('; '),
+        ),
+        exitCode: 1,
+        outcome: 'failed',
+      }
+    : {counts, error: null, exitCode: 0, outcome: 'scanned'};
+}
+
+/**
+ * 0 scanned (drafts or none) · 1 scanned, but something failed, or the run
+ * failed or timed out · 2 cmux unreachable, nothing written. Every run
+ * appends one record to the run log (drafts-scan-runs.ts), whatever its end.
+ */
+export async function runThreadDraftsScan(
+  options: DraftsScanOptions,
+): Promise<number> {
+  const env = options.env ?? process.env;
+  const trigger = options.trigger ?? 'manual';
+  const timeoutMs =
+    options.timeoutMs !== undefined
+      ? options.timeoutMs
+      : trigger === 'hook'
+        ? HOOK_SCAN_TIMEOUT_MS
+        : null;
+  const startedAt = new Date().toISOString();
+  // A throw has no exit code of its own, so the record takes null for it.
+  const record = (
+    result: Omit<ScanRunResult, 'exitCode'> & {exitCode: number | null},
+  ): void => {
+    const failed = (options.recordRun ?? appendDraftsScanRun)(
+      {
+        counts: result.counts,
+        endedAt: new Date().toISOString(),
+        error: result.error,
+        exitCode: result.exitCode,
+        outcome: result.outcome,
+        parentPidAtEnd: process.ppid,
+        pid: process.pid,
+        startedAt,
+        trigger,
+      },
+      env,
+    );
+    if (failed != null) console.error(`thread drafts scan: ${failed}`);
+  };
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const run = scanAndPrint(options, env);
+  const timedOut =
+    timeoutMs == null
+      ? null
+      : new Promise<ScanRunResult>((resolvePromise) => {
+          timer = setTimeout(() => {
+            resolvePromise({
+              counts: null,
+              error: `the scan did not finish within ${timeoutMs / 1000} s and stopped itself`,
+              exitCode: 1,
+              outcome: 'timed-out',
+            });
+          }, timeoutMs);
+        });
+  let result: ScanRunResult;
+  try {
+    result = await (timedOut == null ? run : Promise.race([run, timedOut]));
+  } catch (error) {
+    record({
+      counts: null,
+      error: cut(
+        `the scan threw: ${error instanceof Error ? error.message : String(error)}`,
+      ),
+      exitCode: null,
+      outcome: 'failed',
+    });
+    throw error;
+  } finally {
+    if (timer != null) clearTimeout(timer);
+  }
+  record(result);
+  if (result.outcome === 'timed-out') {
+    console.error(`thread drafts scan: ${result.error ?? 'timed out'}`);
+  }
+  return result.exitCode;
 }
 
 export interface DraftsDismissOptions {

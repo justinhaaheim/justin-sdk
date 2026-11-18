@@ -37,9 +37,11 @@ import {lookupPanes as realLookupPanes} from '../src/thread/pane-join';
 import {ensureSessionBead} from '../src/thread/session-bead';
 import {paneFactOf, paneLineParts} from '../src/thread/session-card';
 import {
+  BEFORE_RESTART_FACT_LABEL,
   inboxJson,
   type InboxRead,
   readInbox,
+  renderBeforeRestartInbox,
   renderInbox,
 } from '../src/thread/session-inbox';
 import {
@@ -1523,5 +1525,72 @@ describe('uncommitted files are attributed to the session that wrote them (j8q3e
     } finally {
       rmSync(join(shared, 'scratch-by-another-session.txt'), {force: true});
     }
+  });
+});
+
+describe('home-base-kwand.2: the before-restart fact on untracked sessions', () => {
+  test('an untracked session in the record is listed with its fact; one with no row still appears', async () => {
+    const fact = (state: 'restoreFailed' | 'notRestored', tab: string) => ({
+      reason: 'synthetic',
+      restartAt: new Date(NOW.getTime() - 60 * 60 * 1000).toISOString(),
+      restartKind: 'cmux launch' as const,
+      source: {kind: 'launch record' as const, savedAt: NOW.toISOString()},
+      state,
+      tab: {
+        carried: false,
+        id: tab,
+        title: `synthetic ${tab}`,
+        windowIndex: 0,
+        workspaceId: 'ws-synthetic',
+        workspaceTitle: null,
+      },
+    });
+    const result = await readInbox({
+      beforeRestart: async () =>
+        await Promise.resolve({
+          facts: new Map([
+            [sid(1), fact('restoreFailed', 'T-1')],
+            ['no-such-session', fact('notRestored', 'T-x')],
+          ]),
+          ok: true as const,
+          restartAt: new Date(NOW.getTime() - 60 * 60 * 1000).toISOString(),
+          restartKind: 'cmux launch' as const,
+          screens: {ms: 0, read: 0, unreadable: 0},
+          source: {kind: 'launch record' as const, savedAt: NOW.toISOString()},
+          tabsWithSession: 2,
+        }),
+      cwd: alpha,
+      days: 30,
+      devRoot,
+      env,
+      now: NOW,
+      repo: null,
+    });
+    if (result.kind !== 'read') throw new Error(result.reason);
+    const [row] = rowOf(result.read, 1);
+    expect(row?.tracked).toBe(false);
+    expect(row?.beforeRestart?.state).toBe('restoreFailed');
+    expect(row?.card.facts.map((f) => f.label)).toContain(
+      BEFORE_RESTART_FACT_LABEL,
+    );
+    const json = inboxJson(result.read).beforeRestart;
+    if (!json.ok) throw new Error(json.reason);
+    expect(
+      json.sessions.map((s) => ({id: s.sessionId, inInbox: s.inInbox})),
+    ).toEqual([
+      {id: sid(1), inInbox: true},
+      {id: 'no-such-session', inInbox: false},
+    ]);
+    expect(json.counts).toEqual({notRestored: 1, restoreFailed: 1});
+    const text = renderBeforeRestartInbox(result.read, {
+      now: NOW,
+      style: PLAIN_STYLE,
+    });
+    expect(text).toContain('restore failed (1)');
+    expect(text).toContain('synthetic T-x — not in this inbox');
+    // Without a reader, no row carries a fact and the read says why.
+    const plain = await read();
+    expect(plain.rows.every((r) => r.beforeRestart == null)).toBe(true);
+    expect(plain.beforeRestart.ok).toBe(false);
   });
 });

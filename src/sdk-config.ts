@@ -53,6 +53,7 @@ import {
   THREAD_DEFAULT_CHAIN_NAMES,
   THREAD_DEFAULT_COMPACT_QUESTIONS,
   THREAD_DEFAULT_DASHBOARD_UI,
+  THREAD_DEFAULT_DRAFTS_SCAN_HOOK,
   THREAD_DEFAULT_EMOJI_HEADER,
   THREAD_DEFAULT_ENABLED,
   THREAD_DEFAULT_ENFORCE,
@@ -65,6 +66,7 @@ import {
   THREAD_DEFAULT_PINNED_PROJECTS,
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
+  THREAD_DEFAULT_TAB_RECORD,
   THREAD_DEFAULT_TITLE_SUMMARY,
   THREAD_DEFAULT_TRIM_GUARD,
   THREAD_DEFAULT_WORKSPACE_DESCRIPTION,
@@ -358,6 +360,12 @@ const componentConfigSchema = z
           .describe(
             'Which dashboard `thread dashboard` opens (home-base-yukaf.11 D-WEB, built 2026-10-18). DEFAULT "tui": the full-screen terminal dashboard (`bun run threads` in home-base). "web" is the EXPERIMENT: a page on 127.0.0.1 (ephemeral port, a per-run token in the URL) listing the inbox sections as cards with Open in cmux / Archive / Done / Mark read or unread buttons. Each button names the session by id and session bead id plus the card’s version; the server re-reads the inbox and refuses (409, reason shown on the page) when the session is gone, its bead id differs or the card changed since the page showed it, and only then runs the same command the TUI key runs. Every action is logged to ~/.local/state/justin-threads/dashboard-web.jsonl. Overridden per run by `thread dashboard --web` / `--tui`.',
           ),
+        draftsScanHook: z
+          .boolean()
+          .optional()
+          .describe(
+            'UNSENT-DRAFTS SCAN FROM THE HOOKS (home-base-fmf1n, built 2026-11-15). DEFAULT FALSE. On: the UserPromptSubmit and Stop hook `thread drafts hook` starts `thread drafts scan` at most once per wall-clock hour on this machine, from a session inside cmux, as a detached child that outlives the hook. It is a process cmux started, so cmux lets it in, where the launchd chores agent is refused. The first hook of each hour claims the hour with a file under <threads state dir>/drafts-scan/claims/; every scan, hook-started or typed, appends one record to <threads state dir>/drafts-scan/runs.jsonl. The chores board judges the hook-started records only, because a scan by hand (or by the threads dashboard) says nothing about whether the hook works, and it tolerates one failed hook-started scan: it reads failed only on the second in a row, because a single scan fails when the Mac is too busy for cmux to answer in time. The hook prints nothing and exits 0 whatever happens. Off: the hook does nothing.',
+          ),
         enabled: z
           .boolean()
           .optional()
@@ -418,6 +426,12 @@ const componentConfigSchema = z
               .optional()
               .describe(
                 'The `claude --permission-mode` the successor session starts in (D7).',
+              ),
+            pickupMessages: z
+              .boolean()
+              .optional()
+              .describe(
+                "home-base-z7o2m D7. DEFAULT FALSE: the handoff block is unchanged. True: `thread handoff` adds a section to the block with every message Justin typed in the session handing off (his words only, never Claude's replies; successor openings and machine-sent lines left out), each with its id for `thread messages --context <id>`, the newest kept when the section passes 40,000 characters.",
               ),
             predecessor: z
               .enum(HANDOFF_PREDECESSOR_MODES)
@@ -647,6 +661,12 @@ const componentConfigSchema = z
           .optional()
           .describe(
             'DEPRECATED (2026-10-05, home-base-39co9 D2): it has NO EFFECT. It used to let a SessionStart hook create the session’s thread bead before anything happened in it; the bead is now created by `thread capture` on the session’s first prompt, and `thread start --hook` does nothing. Still accepted so configs that carry it keep parsing; delete it from your config when convenient.',
+          ),
+        tabRecord: z
+          .boolean()
+          .optional()
+          .describe(
+            'TAB RECORD (home-base-kwand.1, built 2026-11-17). DEFAULT TRUE. `thread tabs record` (the hourly `thread-tab-record` chores job in home-base) reads cmux’s own saved session files under ~/Library/Application Support/cmux/ (never the cmux socket) and appends the open windows, workspaces and tabs, each tab with its Claude session id, to <threads state dir>/tab-records/ (local only, never committed or pushed). `thread tabs before-restart` reads those records to list what was open before the last boot or cmux launch. False: `thread tabs record` says it is off, writes nothing and exits 0; `before-restart` still reads what was recorded.',
           ),
         titleSummary: z
           .boolean()
@@ -997,6 +1017,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     chainNames: THREAD_DEFAULT_CHAIN_NAMES,
     compactQuestions: THREAD_DEFAULT_COMPACT_QUESTIONS,
     dashboardUi: THREAD_DEFAULT_DASHBOARD_UI,
+    draftsScanHook: THREAD_DEFAULT_DRAFTS_SCAN_HOOK,
     enabled: THREAD_DEFAULT_ENABLED,
     enforce: THREAD_DEFAULT_ENFORCE,
     enforceMinTurnMinutes: THREAD_DEFAULT_ENFORCE_MIN_TURN_MINUTES,
@@ -1014,6 +1035,7 @@ export const DEFAULT_COMPONENT_CONFIG = {
     sessionBeads: THREAD_DEFAULT_SESSION_BEADS,
     spawn: SPAWN_DEFAULTS,
     stages: THREAD_DEFAULT_STAGES,
+    tabRecord: THREAD_DEFAULT_TAB_RECORD,
     titleSummary: THREAD_DEFAULT_TITLE_SUMMARY,
     trimGuard: THREAD_DEFAULT_TRIM_GUARD,
     workspaceDescription: THREAD_DEFAULT_WORKSPACE_DESCRIPTION,

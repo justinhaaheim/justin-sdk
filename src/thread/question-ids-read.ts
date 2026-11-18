@@ -4,8 +4,8 @@
  * home-base-sg9q9.11 F4).
  *
  * Two commands must agree with the report, and both go through here:
- * - `thread answer --ask BD7` answers the open question the report shows as
- *   `BD7` (session-answer.ts resolveShortId).
+ * - `thread answer --ask Q107` answers the open question the report shows as
+ *   `Q107` (session-answer.ts resolveShortId).
  * - `thread ask` prints what the report will show for the question it just
  *   filed (ask.ts). It used to print the number it wrote, which on a shared
  *   number is the OLDER question's id in the report, so relaying it would

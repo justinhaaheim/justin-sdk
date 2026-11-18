@@ -15,12 +15,14 @@
  *       mid-walk loses nothing already typed.
  *   thread answer --ask <id> "<text>"
  *       answers one question, no prompt. <id> is its bead id, or its short id
- *       (`BD107`, home-base-1rxt0.4 D4, home-base-4wfoz D2): the one open
- *       question of this session that holds it. An id from an older report
- *       (per chain) still answers when it names one question here; an id this
- *       session does not hold, or that names two, is refused with where it
- *       lives, and nothing is written.
- *   thread answer --ask <BD n | bead id> --relay "<text>"
+ *       (`Q107`, or the older `BD107`; home-base-1rxt0.4 D4, home-base-4wfoz
+ *       D2, home-base-88y8m D6): the one open question of this session that
+ *       holds it. A `BD<n>` from an older report (per chain) still answers when
+ *       it names one question here; an id this session does not hold, or that
+ *       names two, is refused with where it lives, and nothing is written. A
+ *       `Q<n>` at or below 99 could be a list position: refused with a
+ *       question back, and nothing is written (D6).
+ *   thread answer --ask <Q n | bead id> --relay "<text>"
  *       answers a question of any session in any repo at its source
  *       (home-base-l2ejg.6, D8; question-relay.ts). No session is needed.
  *
@@ -58,9 +60,11 @@ import {renderAsk, sortAsks} from './ask-render';
 import {locatedWords, locateQuestionId} from './question-id-locate';
 import {
   chainNumbersOf,
+  listPositionRefusal,
   parseShortId,
   questionIdLabel,
   questionIdOf,
+  type ShortIdRead,
   shortIdText,
 } from './question-ids';
 import {readShownQuestionIds} from './question-ids-read';
@@ -318,7 +322,7 @@ export type SessionAnswerOutcome =
       id: string;
       kind: 'answeredOne';
       reason: string;
-      /** Its id (`BD7`), or null when it has none. */
+      /** Its id (`Q107`), or null when it has none. */
       shortId: null | string;
       /** The question, so the answer can be checked against it. */
       title: string;
@@ -336,6 +340,9 @@ function sessionLabel(session: FoundSession): string {
 /** At most this many places are named in a refusal; the rest are counted. */
 const PLACES_NAMED = 6;
 
+/** A typed id that names a number to look up (D6: not a list position). */
+type TypedShortId = Extract<ShortIdRead, {kind: 'id'}>;
+
 /**
  * The refusal for an id this session does not hold: where it does live, and a
  * question back (home-base-4wfoz D2). Nothing is written.
@@ -343,16 +350,17 @@ const PLACES_NAMED = 6;
 function notHeldRefusal(input: {
   env: EnvLike;
   session: FoundSession;
-  short: number;
+  short: TypedShortId;
 }): string {
-  const text = shortIdText(input.short);
+  // As he typed it (D6): `BD7` must not come back as `Q7`.
+  const {text} = input.short;
   const here = `${text} is not an open question of this session (${sessionLabel(input.session)}), so nothing was recorded.`;
   let located: ReturnType<typeof locateQuestionId>;
   try {
     located = locateQuestionId({
       env: input.env,
       firstDirs: [input.session.beadsDir],
-      number: input.short,
+      number: input.short.number,
     });
   } catch (error) {
     return `${here} Where ${text} lives could not be looked up: ${error instanceof Error ? error.message : String(error)}. Which question did you mean? Answer it by its bead id.`;
@@ -374,21 +382,23 @@ function notHeldRefusal(input: {
 }
 
 /**
- * home-base-1rxt0.4 D4 and home-base-4wfoz D2: the ONE open question of this
- * session that `BD<short>` names. It names a question when that question
- * carries the D2 label `qid:<short>`, or, for an id from a report printed
- * before D2, an old per-chain label numbered `<short>`. An id that names no
- * open question here, or two of them, is refused with a question back and
- * nothing is written: never a guess.
+ * home-base-1rxt0.4 D4, home-base-4wfoz D2 and home-base-88y8m D6: the ONE
+ * open question of this session that `Q<n>` or `BD<n>` names. It names a
+ * question when that question carries the D2 label `qid:<n>`, or, for a
+ * `BD<n>` from a report printed before D2, an old per-chain label numbered
+ * `<n>` (a `Q<n>` was never shown before D2, so it names no old id). An id
+ * that names no open question here, or two of them, is refused with a question
+ * back and nothing is written: never a guess.
  */
 function resolveShortId(input: {
   env: EnvLike;
   sessionId: null | string;
-  short: number;
+  short: TypedShortId;
 }):
   | {db: string; issue: BrIssue; kind: 'found'; shortId: string}
   | {kind: 'failed'; reason: string} {
-  const text = shortIdText(input.short);
+  const {number, text} = input.short;
+  const readsOldIds = input.short.prefix === 'BD';
   const selection = selectSession({
     env: input.env,
     selector: null,
@@ -416,16 +426,16 @@ function resolveShortId(input: {
   const {open, shown} = read;
   const matches = open.filter((question) => {
     const id = questionIdOf(question.labels);
-    if (id.kind === 'one' && id.number === input.short) return true;
+    if (id.kind === 'one' && id.number === number) return true;
     // A `bad` read (two D2 labels) still holds this number: it counts, so the
     // id names two questions rather than silently naming the other one.
     if (
       id.kind === 'bad' &&
-      question.labels.includes(questionIdLabel(input.short))
+      question.labels.includes(questionIdLabel(number))
     ) {
       return true;
     }
-    return chainNumbersOf(question.labels).includes(input.short);
+    return readsOldIds && chainNumbersOf(question.labels).includes(number);
   });
   const [only] = matches;
   if (only != null && matches.length === 1) {
@@ -491,6 +501,10 @@ export async function answerSessionQuestions(
     }
     let target: {db: string; issue: BrIssue; shortId: null | string};
     const short = parseShortId(id);
+    if (short?.kind === 'listPosition') {
+      // D6: `Q7` could be the seventh question of a list. Ask back.
+      return {kind: 'failed', reason: listPositionRefusal(short.text)};
+    }
     if (short != null) {
       const resolved = resolveShortId({
         env,

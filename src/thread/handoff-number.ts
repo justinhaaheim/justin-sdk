@@ -18,16 +18,20 @@
  * The walk goes back through `continues:` only. A problem further forward, such
  * as two `continued-by:` labels, says nothing about this number. So this does
  * not use readHandoffChain, whose forward walk adds to `problems`, nor
- * walkUnattendedChain, which stops at the newest attended session.
+ * walkUnattendedChain, which stops at the newest attended session. Each of its
+ * steps is chain-step.ts's back step, the one those readers take too
+ * (home-base-lasun.1 F1).
  *
  * The real readers and the self-heal (D5) are in session-handoff.ts, next to
  * linkContinuation, which this file must not import.
  */
 
+import type {StepBead, StepRead} from './chain-step';
 import type {ChainReaders} from './handoff-chain';
 import type {SessionMarks, SessionMarksOptions} from './session-name';
 
 import {chainNameLabel, chainNameOfLabels, chainNameText} from './chain-name';
+import {stepBack} from './chain-step';
 import {MAYOR_SUCCESSOR_SENTENCE} from './mayor-sentence';
 import {KICKOFF_OPENING} from './respawn';
 import {
@@ -118,35 +122,42 @@ function walkChainBack<T>(
   limit: number,
   walk: BackWalk<T>,
 ): T {
-  const seen = new Set<string>();
+  // Each step is chain-step.ts's stepBack (home-base-lasun.1 F1); this walk
+  // keeps its early stop (`walk.at`, before any read), its back-only
+  // direction, its words and its limit (beads read after the start).
+  const readBead = (beadId: string): StepRead<StepBead> => {
+    const read = readers.showBead(beadId);
+    return read.kind === 'found'
+      ? {bead: {id: beadId, labels: read.labels}, kind: 'found'}
+      : read;
+  };
+  const seen = new Set<string>([start.id]);
   let current = start;
   for (let steps = 0; ; steps += 1) {
-    seen.add(current.id);
     const stop = walk.at(current, steps);
     if (stop != null) return stop;
-    const predecessors = labelsWith(current.labels, CONTINUES_LABEL_PREFIX);
-    const [predecessor] = predecessors;
-    if (predecessor == null) return walk.first(current, steps);
-    if (predecessors.length > 1) {
-      return walk.unknown(
-        `${current.id} names ${predecessors.length} predecessors (${predecessors.join(', ')})`,
-      );
+    const step = stepBack(current, {limit, seen, taken: steps}, readBead);
+    switch (step.kind) {
+      case 'loop':
+        return walk.unknown(`the chain loops back to ${step.id}`);
+      case 'next':
+        current = step.bead;
+        break;
+      case 'root':
+        return walk.first(current, steps);
+      case 'tooLong':
+        return walk.unknown(
+          `the chain is longer than ${limit} sessions; the walk stopped at ${current.id}`,
+        );
+      case 'twoPredecessors':
+        return walk.unknown(
+          `${current.id} names ${step.ids.length} predecessors (${step.ids.join(', ')})`,
+        );
+      case 'unreadable':
+        return walk.unknown(
+          `${current.id} continues ${step.id}, which could not be read: ${step.read.reason}`,
+        );
     }
-    if (seen.has(predecessor)) {
-      return walk.unknown(`the chain loops back to ${predecessor}`);
-    }
-    if (steps >= limit) {
-      return walk.unknown(
-        `the chain is longer than ${limit} sessions; the walk stopped at ${current.id}`,
-      );
-    }
-    const read = readers.showBead(predecessor);
-    if (read.kind !== 'found') {
-      return walk.unknown(
-        `${current.id} continues ${predecessor}, which could not be read: ${read.reason}`,
-      );
-    }
-    current = {id: predecessor, labels: read.labels};
   }
 }
 

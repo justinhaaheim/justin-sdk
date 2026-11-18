@@ -1,6 +1,6 @@
 /**
  * The machine-wide question counter (home-base-4wfoz; design D2 in
- * home-base-l2ejg.3). Every `BD<n>` on this machine comes from here, so one
+ * home-base-l2ejg.3). Every `Q<n>` on this machine comes from here, so one
  * number never names two questions, in any repo or session.
  *
  * THE FILE: `<threads state dir>/question-ids/counter.json`, holding
@@ -9,7 +9,7 @@
  * THE RULE: the next number is
  *   max(the file's `last`, the highest `qid:` number in every known repo's
  *       export, open or closed questions alike, 99) + 1.
- * So the first new id is at least BD100, never equals an old per-chain id, and
+ * So the first new id is at least Q100, never equals an old per-chain id, and
  * a counter file that is missing (first run, or a lost state dir) is re-derived
  * the same way. "Every known repo export": the beads dirs the sessions index
  * knows, as `thread holders` walks them (holders.ts candidateDbs), plus the

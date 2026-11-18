@@ -11,7 +11,7 @@
  * archive — small enough that plain substring matching in process beats any
  * index, and honest enough that "N sessions searched" is a number we can say.
  *
- * THE CORPUS IS TWO READS, NEVER MORE.
+ * THE CORPUS IS THREE READS, NEVER MORE.
  *
  *   1. ONE `bd list -t thread --all` (`listThreads(ctx, {includeClosed: true})`,
  *      the same read the board and the backfill use). Closed threads included:
@@ -21,6 +21,13 @@
  *      the reports written BEFORE K4 existed, whose bead never carried the
  *      verbatim messages, and they are the only record of a session whose bead
  *      was lost.
+ *   3. Every `<state>/messages/<sessionId>.jsonl` message log (K10 f,
+ *      readMessageLogs): every prompt and every final Claude message.
+ *
+ * GROUPED BY CHAIN (home-base-lasun L1). By default the matched sessions are
+ * then placed in their handoff chains (search-chains.ts) and printed one block
+ * per chain; `--by-session` prints one row per session as before. `--chain`
+ * (L2) keeps only the sessions of one chain.
  *
  * A report archive whose session has a thread is attributed to that thread's row
  * — one row per session, never two. One without gets its own row built from what
@@ -41,9 +48,11 @@
 
 import type {Field} from '../cli-style';
 import type {BdIssue} from './bd';
+import type {ChainWalkReaders} from './chain-walk';
 import type {MessageLine} from './message-log';
 import type {EnvLike} from './paths';
 import type {KnownProjects} from './projects';
+import type {SearchChainGroup, SearchRowChain} from './search-chains';
 import type {ExportRead} from './session-tree';
 
 import {readdirSync, readFileSync} from 'fs';
@@ -67,10 +76,17 @@ import {writeStdout} from '../write-stdout';
 import {messagesDir, reportsRootDir} from './archive';
 import {bdContext, describeBdFailure, listThreads} from './bd';
 import {formatAge} from './board';
+import {
+  realChainWalkReaders,
+  registryChainNames,
+  resolveChainStart,
+  walkChain,
+} from './chain-walk';
 import {readMessageLogAt} from './message-log';
 import {matchesRepo, parseSince, repoValues} from './open-filters';
 import {probeErrorMessage} from './paths';
 import {knownProjects, resolutionErrorText, resolveProjects} from './projects';
+import {chainProblems, groupByChain, renderSearchGroup} from './search-chains';
 import {readSessionIndex, sessionBeadSighting} from './session-index';
 import {exportRecordById, readBeadsExport} from './session-tree';
 import {defaultDevRoot} from './session-untracked';
@@ -780,6 +796,11 @@ export interface SearchRow {
   activityAt: string | null;
   /** How many archived report files this session has. 0 is a measured zero. */
   archivedReports: number;
+  /**
+   * The handoff chain the row was grouped into (home-base-lasun L1); null when
+   * the search was not grouped (`--by-session`, or `searchCorpus` alone).
+   */
+  chain: null | SearchRowChain;
   hit: SearchHit;
   /** Every hit of this session, the one in `hit` first, each with its snippet. */
   hits: SearchHit[];
@@ -1242,6 +1263,7 @@ export function searchCorpus(
     hits.push({
       activityAt: session.activityAt,
       archivedReports: session.archives.length,
+      chain: null,
       hit: match.hit,
       hits: match.hits,
       matchedFields: match.matchedFields,
@@ -1697,6 +1719,16 @@ export function incompleteLine(failures: readonly string[]): string {
 
 /** What `searchSessions` takes: the query and the window, nothing about printing. */
 export interface SearchSessionsOptions {
+  /** `--by-session`: one row per session, not grouped by chain (L1). */
+  bySession?: boolean;
+  /** `--chain <name|bead|session>`: only that chain's sessions (L2). */
+  chain?: null | string;
+  /** Injectable for tests: the chain names, root to name; the registry otherwise. */
+  chainNameOfRoot?: (root: string) => null | string;
+  /** Injectable for tests: what the chain walk reads; the real readers otherwise. */
+  chainReaders?: ChainWalkReaders;
+  /** Where the chain walk's fallback beads workspace is found; process.cwd() otherwise. */
+  cwd?: string;
   days?: number | null;
   /** Where `--repo` places a row by its location (D3); default ~/Dev. */
   devRoot?: string;
@@ -1736,13 +1768,30 @@ export interface SearchOptions extends SearchSessionsOptions {
 export type SearchSessionsResult =
   | {error: string; ok: false}
   | {
+      /** The chain `--chain` named, or null without it (L2). */
+      chainFilter: null | SearchChainFilter;
+      /** What could not be read about the matched rows' chains (L1); empty when every chain was read. */
+      chainProblems: string[];
+      /** How many chains matched; null in `--by-session` mode. */
+      chainsMatched: null | number;
       complete: boolean;
       counts: SearchCounts;
       failures: string[];
       filters: SearchFilters;
+      /** The shown chains, newest match first; null in `--by-session` mode. */
+      groups: null | SearchChainGroup[];
       ok: true;
+      /** In grouped mode `rows` are the shown groups' rows, in group order. */
       result: SearchResult;
     };
+
+/** The chain `--chain` kept (L2). */
+export interface SearchChainFilter {
+  name: null | string;
+  root: null | string;
+  /** The Claude session ids of its sessions, oldest first. */
+  sessionIds: string[];
+}
 
 /**
  * The search pipeline without the printing (home-base-yukaf.10): the corpus,
@@ -1827,30 +1876,121 @@ export async function searchSessions(
     folders = resolution.projects.map((project) => project.folder);
   }
 
+  // The chain walk's readers: one instance, so the index and each export are
+  // read once for the whole search (chain-walk.ts, L6).
+  const readers =
+    options.chainReaders ??
+    realChainWalkReaders({cwd: options.cwd ?? process.cwd(), env});
+  const chainNameOfRoot = options.chainNameOfRoot ?? registryChainNames(env);
+
+  // L2: --chain keeps one chain's sessions. Resolved as `thread messages
+  // --chain` resolves it, before anything is matched; a value that names no
+  // chain is a search that did not run (exit 2). A chain read only in part is
+  // searched as far as it was read, and the search is incomplete (exit 2).
+  let chainFilter: null | SearchChainFilter = null;
+  if (options.chain != null) {
+    const start = resolveChainStart({env, readers, value: options.chain});
+    if (start.kind === 'failed') {
+      return {error: `thread search: --chain: ${start.reason}`, ok: false};
+    }
+    const walk = walkChain(start.beadId, readers, {chainNameOfRoot});
+    if (walk.kind === 'failed') {
+      return {
+        error: `thread search: --chain: the chain could not be read: ${walk.reason}`,
+        ok: false,
+      };
+    }
+    if (walk.kind === 'incomplete') {
+      failures.push(...walk.problems.map((problem) => `--chain: ${problem}`));
+    }
+    for (const member of walk.members) {
+      if (member.sessionId == null) {
+        failures.push(
+          `--chain: ${member.sessionIdProblem ?? `${member.beadId} has no session id`}, so it was not searched`,
+        );
+      }
+    }
+    chainFilter = {
+      name: walk.chainName,
+      root: walk.root,
+      sessionIds: walk.members
+        .map((member) => member.sessionId)
+        .filter((id): id is string => id != null),
+    };
+  }
+
   const windowed = withinWindow(built, options.days ?? null, now);
-  const {kept: corpus, noProjectSkipped} =
+  const {kept: inRepos, noProjectSkipped} =
     folders == null
       ? {kept: windowed, noProjectSkipped: 0}
       : withinRepos(windowed, folders, devRoot);
+  const chainSessions =
+    chainFilter == null ? null : new Set(chainFilter.sessionIds);
+  const corpus =
+    chainSessions == null
+      ? inRepos
+      : inRepos.filter(
+          (session) =>
+            session.sessionId != null && chainSessions.has(session.sessionId),
+        );
+  const grouped = options.bySession !== true;
+  const limit = options.limit ?? DEFAULT_SEARCH_LIMIT;
   const result = searchCorpus(corpus, compiled.value, {
     devRoot,
-    limit: options.limit,
+    // Grouped, --limit counts chains (L1): every row is needed to group.
+    limit: grouped ? 0 : limit,
     writtenSince: writtenSince?.getTime() ?? null,
   });
+  const filters: SearchFilters = {
+    noProjectSkipped,
+    repos: folders,
+    undatedOnlySkipped: result.undatedOnlySkipped,
+    writtenSince: writtenSince?.toISOString() ?? null,
+  };
+  if (!grouped) {
+    return {
+      chainFilter,
+      chainProblems: [],
+      chainsMatched: null,
+      complete: failures.length === 0,
+      counts: countCorpus(corpus),
+      failures,
+      filters,
+      groups: null,
+      ok: true,
+      // Only the rows that are printed are looked up: one index read, one
+      // read per beads export they name (home-base-y1hg0.7).
+      result: {...result, rows: withSessionBeads(result.rows, env)},
+    };
+  }
+
+  // L1: every matched row's session bead, then its chain. The resume command
+  // of a chain's newest session comes from the corpus, matched or not.
+  const resumes = new Map<string, string>();
+  for (const session of built) {
+    if (session.sessionId != null && session.resumeCommand != null) {
+      resumes.set(session.sessionId, session.resumeCommand);
+    }
+  }
+  const all = groupByChain(withSessionBeads(result.rows, env), {
+    resumeOf: (sessionId) => resumes.get(sessionId) ?? null,
+    walkOf: (beadId) => walkChain(beadId, readers, {chainNameOfRoot}),
+  });
+  const shown = limit > 0 ? all.slice(0, limit) : all;
   return {
+    chainFilter,
+    chainProblems: chainProblems(all),
+    chainsMatched: all.length,
     complete: failures.length === 0,
     counts: countCorpus(corpus),
     failures,
-    filters: {
-      noProjectSkipped,
-      repos: folders,
-      undatedOnlySkipped: result.undatedOnlySkipped,
-      writtenSince: writtenSince?.toISOString() ?? null,
-    },
+    filters,
+    groups: shown,
     ok: true,
-    // Only the rows that are printed are looked up: one index read, one read
-    // per beads export they name (home-base-y1hg0.7).
-    result: {...result, rows: withSessionBeads(result.rows, env)},
+    result: {
+      matched: result.matched,
+      rows: shown.flatMap((group) => group.rows),
+    },
   };
 }
 
@@ -1867,9 +2007,22 @@ export function searchJson(
     // BOTH archive numbers (F3): files, and the sessions they sit under.
     archivedReportSessionsSearched: found.counts.archivedReportSessions,
     archivedReportsSearched: found.counts.archivedReports,
-    complete: found.complete,
+    // L2: the chain --chain kept; null without it.
+    chain: found.chainFilter,
+    // L1: what could not be read about the matched rows' chains.
+    chainProblems: found.chainProblems,
+    // L1: one entry per shown chain, each with its matched sessions; null
+    // with --by-session. Every row carries its own `chain` too.
+    chains:
+      found.groups?.map((group) => ({
+        ...group.chain,
+        matchedSessionIds: group.rows.map((row) => row.sessionId),
+      })) ?? null,
+    chainsMatched: found.chainsMatched,
+    complete: found.complete && found.chainProblems.length === 0,
     days: options.days ?? null,
     failures: found.failures,
+    grouped: found.groups != null,
     matched: found.result.matched,
     messageLogsSearched: found.counts.messageLogs,
     // D3: rows with no recorded location, left out under --repo.
@@ -1915,13 +2068,24 @@ export async function runThreadSearch(options: SearchOptions): Promise<number> {
   }
   const {complete, counts, result} = found;
   const corpusFailures = found.failures;
+  // L1: a chain that could not be read makes the grouping a claim nobody
+  // checked, so the search exits 2 and says which (critical rule 7).
+  const chainTrouble = found.chainProblems;
+  const reportChainTrouble = (): void => {
+    if (chainTrouble.length === 0) return;
+    console.error(
+      `thread search: ${chainTrouble.length} chain problem${chainTrouble.length === 1 ? '' : 's'}: the blocks they name may hold the wrong sessions or name the wrong newest one`,
+    );
+    for (const problem of chainTrouble) console.error(`  ⚠️ ${problem}`);
+  };
 
   if (json) {
     await writeStdout(
       `${JSON.stringify(searchJson(found, options), null, 2)}\n`,
     );
     for (const failure of corpusFailures) console.error(`  ⚠️ ${failure}`);
-    if (!complete) return 2;
+    reportChainTrouble();
+    if (!complete || chainTrouble.length > 0) return 2;
     return result.rows.length > 0 ? 0 : 1;
   }
 
@@ -1939,10 +2103,47 @@ export async function runThreadSearch(options: SearchOptions): Promise<number> {
   // One print for all the rows: enough small console.log calls lose lines once
   // the pipe is full (see write-stdout.ts).
   const printed: string[] = [];
-  for (const row of result.rows) {
-    printed.push('', renderSearchRow(row, now, {allMatches, color, width}));
+  if (found.chainFilter != null) {
+    const {chainFilter} = found;
+    const which =
+      chainFilter.name ??
+      `of ${chainFilter.root ?? 'an unknown first session'}`;
+    printed.push(
+      '',
+      wrapHanging(
+        paint(
+          `Searching chain ${which}: ${chainFilter.sessionIds.length} session${chainFilter.sessionIds.length === 1 ? '' : 's'}`,
+          ['bold'],
+          color,
+        ),
+        {hang: BODY_COLUMN, indent: HEADER_COLUMN, width},
+      ),
+    );
   }
-  const more = moreLine(result);
+  if (found.groups == null) {
+    for (const row of result.rows) {
+      printed.push('', renderSearchRow(row, now, {allMatches, color, width}));
+    }
+  } else {
+    // L1: one block per chain, its matching sessions one step in.
+    for (const group of found.groups) {
+      printed.push(
+        '',
+        renderSearchGroup(
+          group,
+          (row, rowWidth) =>
+            renderSearchRow(row, now, {allMatches, color, width: rowWidth}),
+          {color, width},
+        ),
+      );
+    }
+  }
+  const more =
+    found.groups == null || found.chainsMatched == null
+      ? moreLine(result)
+      : found.chainsMatched > found.groups.length
+        ? `${found.chainsMatched - found.groups.length} more chain${found.chainsMatched - found.groups.length === 1 ? '' : 's'} (--limit counts chains; --by-session counts sessions)`
+        : null;
   if (more != null) {
     printed.push('', `${pad(HEADER_COLUMN)}${paint(more, ['dim'], color)}`);
   }
@@ -1961,6 +2162,11 @@ export async function runThreadSearch(options: SearchOptions): Promise<number> {
     // whole corpus was read, and here it was not.
     console.error(incompleteLine(corpusFailures));
     for (const failure of corpusFailures) console.error(`  ⚠️ ${failure}`);
+    reportChainTrouble();
+    return 2;
+  }
+  if (chainTrouble.length > 0) {
+    reportChainTrouble();
     return 2;
   }
   if (result.matched === 0) {

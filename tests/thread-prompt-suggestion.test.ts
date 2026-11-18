@@ -200,6 +200,7 @@ describe('check 1 of thread close and thread open --undo (yukaf.36 D3)', () => {
       gone: [],
       kept: [],
       movedBack: [],
+      notClosed: [],
       notMovedBack: [],
       planned: [
         {

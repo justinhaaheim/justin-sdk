@@ -229,6 +229,23 @@ export const THREAD_FULL_REPORT_HOOK_FINGERPRINT = sdkScript(
 export const THREAD_FULL_REPORT_HOOK_EVENT = 'UserPromptSubmit';
 
 /**
+ * The hourly unsent-drafts scan (home-base-fmf1n D1): `thread drafts hook` on
+ * UserPromptSubmit AND Stop, no matcher. Written as its own entries ONLY where
+ * componentConfig.thread.draftsScanHook is on (hook-knobs.ts); with it off,
+ * install takes back the exact entries it wrote. The handler reads the knob
+ * itself too, so a leftover entry does nothing.
+ */
+const THREAD_DRAFTS_HOOK_SUBCOMMAND = 'thread drafts hook';
+
+export const THREAD_DRAFTS_HOOK_COMMAND = sdkRun(THREAD_DRAFTS_HOOK_SUBCOMMAND);
+
+export const THREAD_DRAFTS_HOOK_FINGERPRINT = sdkScript(
+  THREAD_DRAFTS_HOOK_SUBCOMMAND,
+);
+
+export const THREAD_DRAFTS_HOOK_EVENTS = ['UserPromptSubmit', 'Stop'] as const;
+
+/**
  * Register one hook command under one event in a settings object.
  *
  * Hooks are ADDITIVE in Claude Code — several may be registered for one event
@@ -320,6 +337,23 @@ export function addThreadFullReportHook(
     matcher: null,
     subcommand: THREAD_FULL_REPORT_SUBCOMMAND,
   });
+}
+
+/**
+ * Register `thread drafts hook` on UserPromptSubmit AND Stop (home-base-fmf1n).
+ * Returns the events it changed.
+ */
+export function addThreadDraftsHooks(
+  settings: Record<string, unknown>,
+): string[] {
+  return THREAD_DRAFTS_HOOK_EVENTS.filter((event) =>
+    addHook(settings, {
+      command: THREAD_DRAFTS_HOOK_COMMAND,
+      event,
+      matcher: null,
+      subcommand: THREAD_DRAFTS_HOOK_SUBCOMMAND,
+    }),
+  );
 }
 
 /**
@@ -460,6 +494,11 @@ export function stepThreadHooks(
   const fullReportOn = byKnob.enabled.some(
     (h) => h.command === THREAD_FULL_REPORT_HOOK_COMMAND,
   );
+  // The hourly drafts scan waits on componentConfig.thread.draftsScanHook
+  // (home-base-fmf1n D7).
+  const draftsOn = byKnob.enabled.some(
+    (h) => h.command === THREAD_DRAFTS_HOOK_COMMAND,
+  );
 
   // hooks.dispatch on (home-base-rtsx1.2): the UserPromptSubmit, Stop and
   // PostToolUse [Bash] dispatcher entries run the thread handlers, and their
@@ -498,6 +537,7 @@ export function stepThreadHooks(
   const addedGuard = guardOn && addThreadGuardHook(settings);
   const addedBrake = brakeOn && addThreadBrakeHook(settings);
   const addedFullReport = fullReportOn && addThreadFullReportHook(settings);
+  const addedDrafts = draftsOn ? addThreadDraftsHooks(settings) : [];
   const knobOff = removeKnobOffEntries(settings, 'thread-hooks-setup', byKnob);
   const cleared = removeDispatchEntriesForComponent(
     settings,
@@ -512,6 +552,7 @@ export function stepThreadHooks(
     addedGuard ||
     addedBrake ||
     addedFullReport ||
+    addedDrafts.length > 0 ||
     knobOff.length > 0 ||
     cleared.length > 0
   ) {
@@ -539,11 +580,17 @@ export function stepThreadHooks(
     !addedGuard &&
     !addedBrake &&
     !addedFullReport &&
+    addedDrafts.length === 0 &&
     knobOff.length === 0 &&
     cleared.length === 0
   ) {
     success('.claude/settings.json already has every thread hook');
     return true;
+  }
+  for (const event of addedDrafts) {
+    success(
+      `Updated .claude/settings.json (${event} → thread drafts hook; componentConfig.thread.draftsScanHook is on)`,
+    );
   }
   if (addedFullReport) {
     success(

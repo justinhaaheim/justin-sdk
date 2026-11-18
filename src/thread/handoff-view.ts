@@ -25,9 +25,11 @@
  * ending there.
  */
 
+import type {BackStep, ContinuingLookup, ForwardStep} from './chain-step';
 import type {EnvLike} from './paths';
 
 import {brShow, describeBrFailed, findBeadsWorkspace} from '../beads/br';
+import {stepBack, stepForward} from './chain-step';
 import {CHAIN_WALK_LIMIT} from './handoff-chain';
 import {
   CONTINUED_BY_LABEL_PREFIX,
@@ -186,6 +188,14 @@ export type ChainViewBeadRead =
   | {kind: 'notFound'; reason: string};
 
 export interface ChainViewReaders {
+  /**
+   * The reverse search for a half-written link (home-base-lasun.1 F1): the
+   * beads that carry `continues:<beadId>`, asked at a bead with no
+   * `continued-by:`. Absent where the walk models no reverse search
+   * (overarching.ts's cached walk, tests written before it): the forward walk
+   * then ends at a bead with no `continued-by:`, as it did before.
+   */
+  findContinuing?: (beadId: string) => ContinuingLookup;
   showBead: (beadId: string) => ChainViewBeadRead;
 }
 
@@ -228,11 +238,57 @@ function nodeOf(bead: ChainViewBead): ChainNode {
   };
 }
 
+/** A back step that stopped thread show's walk, in its words. */
+function backWords(
+  step: Exclude<BackStep<ChainViewBead>, {kind: 'next' | 'root'}>,
+  currentId: string,
+  startBeadId: string,
+  limit: number,
+): string {
+  switch (step.kind) {
+    case 'loop':
+      return `the chain loops back to ${step.id}`;
+    case 'tooLong':
+      return `the chain is longer than ${limit} sessions before ${startBeadId}; the walk stopped at ${currentId}`;
+    case 'twoPredecessors':
+      return `${currentId} names ${step.ids.length} predecessors (${step.ids.map((id) => `${CONTINUES_LABEL_PREFIX}${id}`).join(', ')}), so the chain before it is not shown`;
+    case 'unreadable':
+      return `${currentId} names ${CONTINUES_LABEL_PREFIX}${step.id}, but ${step.id} could not be read: ${step.read.reason}`;
+  }
+}
+
+/** A forward step that stopped thread show's walk, in its words. */
+function forwardWords(
+  step: Exclude<ForwardStep<ChainViewBead>, {kind: 'end' | 'next'}>,
+  currentId: string,
+  startBeadId: string,
+  limit: number,
+): string {
+  switch (step.kind) {
+    case 'loop':
+      return `the chain loops back to ${step.id}`;
+    case 'reverseFailed':
+      return `could not check whether a session continues ${currentId} (it has no ${CONTINUED_BY_LABEL_PREFIX} label): ${step.reason}`;
+    case 'tooLong':
+      return `the chain is longer than ${limit} sessions after ${startBeadId}; the walk stopped at ${currentId}`;
+    case 'twoContinuing':
+      return `${step.ids.length} sessions carry ${CONTINUES_LABEL_PREFIX}${currentId} (${step.ids.join(', ')}), so the chain after it is not shown`;
+    case 'twoSuccessors':
+      return `${currentId} names ${step.ids.length} successors (${step.ids.map((id) => `${CONTINUED_BY_LABEL_PREFIX}${id}`).join(', ')}), so the chain after it is not shown`;
+    case 'unreadable':
+      return step.via === 'continues'
+        ? `${step.id} carries ${CONTINUES_LABEL_PREFIX}${currentId}, but ${step.id} could not be read: ${step.read.reason}`
+        : `${currentId} names ${CONTINUED_BY_LABEL_PREFIX}${step.id}, but ${step.id} could not be read: ${step.read.reason}`;
+  }
+}
+
 /**
  * The whole chain through `startBeadId`: back through `continues:` to the
- * first session, forward through `continued-by:` to the newest. A neighbour
- * is followed through whichever half of the link exists, and the state of
- * every link is kept.
+ * first session, forward through `continued-by:` to the newest, and, at a
+ * bead with no `continued-by:`, through the reverse search when the readers
+ * have one (home-base-lasun.1 F1). A neighbour is followed through whichever
+ * half of the link exists, and the state of every link is kept. The steps
+ * are chain-step.ts's, shared with every chain reader.
  */
 export function readHandoffChain(
   startBeadId: string,
@@ -247,61 +303,52 @@ export function readHandoffChain(
   const seen = new Set<string>([start.bead.id]);
   const problems: string[] = [];
 
-  const walk = (
-    direction: 'back' | 'forward',
-  ): {beads: ChainViewBead[]; links: ChainLinkState[]} => {
-    const beads: ChainViewBead[] = [];
-    const links: ChainLinkState[] = [];
-    let current = start.bead;
-    for (;;) {
-      const next =
-        direction === 'back'
-          ? continuesOf(current.labels)
-          : continuedByOf(current.labels);
-      const label =
-        direction === 'back'
-          ? CONTINUES_LABEL_PREFIX
-          : CONTINUED_BY_LABEL_PREFIX;
-      if (next.length === 0) return {beads, links};
-      if (next.length > 1) {
-        problems.push(
-          `${current.id} names ${next.length} ${direction === 'back' ? 'predecessors' : 'successors'} (${next.map((id) => `${label}${id}`).join(', ')}), so the chain ${direction === 'back' ? 'before' : 'after'} it is not shown`,
-        );
-        return {beads, links};
-      }
-      const [nextId = ''] = next;
-      if (seen.has(nextId)) {
-        problems.push(`the chain loops back to ${nextId}`);
-        return {beads, links};
-      }
-      if (beads.length >= limit) {
-        problems.push(
-          `the chain is longer than ${limit} sessions ${direction === 'back' ? 'before' : 'after'} ${startBeadId}; the walk stopped at ${current.id}`,
-        );
-        return {beads, links};
-      }
-      const read = readers.showBead(nextId);
-      if (read.kind !== 'found') {
-        problems.push(
-          `${current.id} names ${label}${nextId}, but ${nextId} could not be read: ${read.reason}`,
-        );
-        return {beads, links};
-      }
-      seen.add(nextId);
-      const back = direction === 'back';
-      const reverse = back
-        ? continuedByOf(read.bead.labels).includes(current.id)
-        : continuesOf(read.bead.labels).includes(current.id);
-      let state: ChainLinkState = 'complete';
-      if (!reverse) state = back ? 'onlyContinues' : 'onlyContinued';
-      beads.push(read.bead);
-      links.push(state);
-      current = read.bead;
-    }
+  const before: {beads: ChainViewBead[]; links: ChainLinkState[]} = {
+    beads: [],
+    links: [],
   };
+  for (let current = start.bead; ; ) {
+    const step = stepBack(
+      current,
+      {limit, seen, taken: before.beads.length},
+      readers.showBead,
+    );
+    if (step.kind === 'root') break;
+    if (step.kind === 'next') {
+      before.beads.push(step.bead);
+      before.links.push(step.link);
+      current = step.bead;
+      continue;
+    }
+    problems.push(backWords(step, current.id, startBeadId, limit));
+    break;
+  }
 
-  const before = walk('back');
-  const after = walk('forward');
+  const {findContinuing} = readers;
+  const after: {beads: ChainViewBead[]; links: ChainLinkState[]} = {
+    beads: [],
+    links: [],
+  };
+  for (let current = start.bead; ; ) {
+    const step = stepForward(
+      current,
+      {limit, seen, taken: after.beads.length},
+      {
+        findContinuing:
+          findContinuing == null ? null : (bead) => findContinuing(bead.id),
+        readBead: readers.showBead,
+      },
+    );
+    if (step.kind === 'end') break;
+    if (step.kind === 'next') {
+      after.beads.push(step.bead);
+      after.links.push(step.link);
+      current = step.bead;
+      continue;
+    }
+    problems.push(forwardWords(step, current.id, startBeadId, limit));
+    break;
+  }
   const nodes = [
     ...[...before.beads].reverse().map(nodeOf),
     nodeOf(start.bead),

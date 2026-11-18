@@ -12,8 +12,10 @@
  * "as you typed it rather than the expanded skill content" (hooks reference,
  * read 2026-11-13). With componentConfig.thread.fullReportCommand on, this
  * handler blocks that prompt, and Claude Code shows the block's `reason` to
- * Justin and does not add it to Claude's context. So the reason is the output
- * of `thread status --full`, and no model turn happens. Off, it prints
+ * Justin and does not add it to Claude's context. So the reason is the Part 1
+ * block that `thread status --full` prints, without the lines after it meant
+ * for Claude (home-base-88y8m D2: every surface Justin reads holds only the
+ * block), and no model turn happens. Off, it prints
  * nothing, the command expands, and the command file tells Claude to run
  * `thread status --full` and paste it, as the status report rule already does.
  *
@@ -276,6 +278,23 @@ export function fitFullReport(
   return kept === 0 ? tail : `${lines.slice(0, kept).join('\n')}\n\n${tail}`;
 }
 
+/**
+ * home-base-88y8m D2: what Justin is shown of the report run's stdout: the
+ * Part 1 block alone, from its 🛑 line through its ♒ line. The SESSION BEADS
+ * line, What to mark, the pickup line and the "If you stop now" verdict are
+ * for Claude, so they stay out. Stdout with no block (SESSION BEADS:
+ * DISABLED, a refusal) is shown as printed: it is then the tool's own answer,
+ * and nothing in it is meant for Claude alone.
+ *
+ * `await import`: part-one.ts reaches most of the report code, and in
+ * per-handler mode this handler starts on every prompt; only a /full-report
+ * gets this far.
+ */
+export async function justinsPart(stdout: string): Promise<string> {
+  const {partOneBlockOf} = await import('./part-one');
+  return partOneBlockOf(stdout) ?? stdout;
+}
+
 /** The hook message for a failure: the prompt goes through, and Justin is told why. */
 function failOpen(detail: string): string {
   return renderHookOutput({
@@ -339,7 +358,8 @@ export async function fullReportHook(input: {
     });
     const problem = describeRun(run);
     if (problem != null) return failOpen(problem);
-    return `${JSON.stringify(promptBlockJson(fitFullReport(run.stdout, fields.sessionId)))}\n`;
+    const shown = await justinsPart(run.stdout);
+    return `${JSON.stringify(promptBlockJson(fitFullReport(shown, fields.sessionId)))}\n`;
   } catch (error) {
     return failOpen(
       `it threw (${error instanceof Error ? error.message : String(error)})`,

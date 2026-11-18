@@ -264,7 +264,7 @@ const ANSI = /\u001b\[[0-9;]*m/g;
 
 /**
  * The ONE sanctioned ` · `: the ask renderer's badge line, `1. 🛑 P0 · …`
- * (home-base-vzwbj.4.3 brief), with the 🆕/🔄 marker and the `[BD7]` id
+ * (home-base-vzwbj.4.3 brief), with the 🆕/🔄 marker and the `[Q107]` id
  * that may follow the number (home-base-1rxt0.4 D2, D4). Every other line joining fields with ` · ` is
  * the long row Justin rejected ("Do NOT lay things out in long rows").
  */

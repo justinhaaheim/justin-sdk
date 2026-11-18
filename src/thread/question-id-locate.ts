@@ -1,7 +1,7 @@
 /**
  * Where a question id lives (home-base-4wfoz; D2 in home-base-l2ejg.3).
  *
- * `thread answer --ask BD<n>` answers only a question of the session it runs
+ * `thread answer --ask Q<n>` answers only a question of the session it runs
  * in. When that session does not hold the id, the refusal names where it does
  * live, so Justin (or the session relaying him) can tell which question he
  * meant: its repo, the session bead it was filed under, and its title. This
@@ -47,6 +47,11 @@ export interface LocatedQuestion {
   /** `machine` for a `qid:<n>` label; `chain` for an old per-chain one. */
   form: 'chain' | 'machine';
   id: string;
+  /**
+   * home-base-88y8m D5: the whole record, so a report can show the question
+   * whole (its description, priority and close reason), as renderAsks does.
+   */
+  issue: TreeIssue;
   /** The bead it was filed under (its session bead), with its title. */
   parent: {id: string; title: string | null} | null;
   repo: string;
@@ -59,6 +64,15 @@ export interface LocatedQuestionId {
   /** Exports or the index that could not be read: the id may be there too. */
   problems: string[];
 }
+
+/**
+ * Why an id found in no export may still be a question: this lookup reads
+ * exports, and br writes one a moment after a question is filed. Said by the
+ * relay's refusal and by the report's note for an unfound id
+ * (home-base-88y8m.8 R3), so both say it the same way.
+ */
+export const EXPORT_MAY_TRAIL =
+  'An export can trail its database by a moment after a question is filed.';
 
 /**
  * The repo a `.beads/` dir belongs to, for a reader: `home-base`. Shared with
@@ -126,6 +140,7 @@ export function locateQuestionId(input: {
       found.set(issue.id, {
         form,
         id: issue.id,
+        issue,
         parent: parentId == null ? null : {id: parentId, title: parentTitle},
         repo: repoOfBeadsDir(dir, named),
         status: issue.status,

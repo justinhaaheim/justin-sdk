@@ -43,6 +43,7 @@ import {
   THREAD_DEFAULT_CHAIN_NAMES,
   THREAD_DEFAULT_COMPACT_QUESTIONS,
   THREAD_DEFAULT_DASHBOARD_UI,
+  THREAD_DEFAULT_DRAFTS_SCAN_HOOK,
   THREAD_DEFAULT_EMOJI_HEADER,
   THREAD_DEFAULT_ENABLED,
   THREAD_DEFAULT_ENFORCE,
@@ -55,6 +56,7 @@ import {
   THREAD_DEFAULT_PINNED_PROJECTS,
   THREAD_DEFAULT_SESSION_BEADS,
   THREAD_DEFAULT_STAGES,
+  THREAD_DEFAULT_TAB_RECORD,
   THREAD_DEFAULT_TITLE_SUMMARY,
   THREAD_DEFAULT_TRIM_GUARD,
   THREAD_DEFAULT_WORKSPACE_DESCRIPTION,
@@ -142,6 +144,13 @@ export interface ResolvedThreadConfig {
   dashboardUi: ThreadDashboardUi;
   /** Which layer decided `dashboardUi`. */
   dashboardUiSource: ThreadConfigSource;
+  /**
+   * home-base-fmf1n D7: the hook `thread drafts hook` starts the unsent-drafts
+   * scan at most once a wall-clock hour. Off by default.
+   */
+  draftsScanHook: boolean;
+  /** Which layer decided `draftsScanHook`. */
+  draftsScanHookSource: ThreadConfigSource;
   /** Whether the report header is emoji-prefixed values or titled fields (D19). */
   emojiHeader: boolean;
   /** Which layer decided `emojiHeader`. */
@@ -250,6 +259,13 @@ export interface ResolvedThreadConfig {
   stages: readonly string[];
   /** Which layer decided `stages`. */
   stagesSource: ThreadConfigSource;
+  /**
+   * home-base-kwand.1 (epic D8): `thread tabs record` writes tab records. On by
+   * default; false makes it write nothing.
+   */
+  tabRecord: boolean;
+  /** Which layer decided `tabRecord`. */
+  tabRecordSource: ThreadConfigSource;
   /**
    * Whether `thread status` asks the session to keep its title a summary of
    * the whole conversation, and the title-set time is recorded
@@ -384,6 +400,11 @@ export function resolveThreadConfig(
     THREAD_DEFAULT_FULL_REPORT_COMMAND,
   );
   const chainNames = resolveFlag('chainNames', THREAD_DEFAULT_CHAIN_NAMES);
+  const draftsScanHook = resolveFlag(
+    'draftsScanHook',
+    THREAD_DEFAULT_DRAFTS_SCAN_HOOK,
+  );
+  const tabRecord = resolveFlag('tabRecord', THREAD_DEFAULT_TAB_RECORD);
 
   // `render` is the one NESTED block in the thread section, so it needs its own
   // walk rather than `resolveFlag`'s. Same layering: default, then user, then
@@ -610,6 +631,8 @@ export function resolveThreadConfig(
     compactQuestionsSource: compactQuestions.source,
     dashboardUi,
     dashboardUiSource,
+    draftsScanHook: draftsScanHook.value,
+    draftsScanHookSource: draftsScanHook.source,
     emojiHeader,
     emojiHeaderSource,
     enabled: enabled.value,
@@ -642,6 +665,8 @@ export function resolveThreadConfig(
     spawn,
     stages,
     stagesSource,
+    tabRecord: tabRecord.value,
+    tabRecordSource: tabRecord.source,
     titleSummary: titleSummary.value,
     titleSummarySource: titleSummary.source,
     trimGuard: trimGuard.value,

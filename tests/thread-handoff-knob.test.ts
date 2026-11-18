@@ -55,6 +55,9 @@ describe('componentConfig.thread.handoff', () => {
       maxUnattendedHandoffsSource: 'default',
       permissionMode: 'auto',
       permissionModeSource: 'default',
+      // home-base-z7o2m D7: the pickup-messages knob is off by default.
+      pickupMessages: false,
+      pickupMessagesSource: 'default',
       predecessor: 'keep',
       predecessorSource: 'default',
       successor: false,

@@ -68,6 +68,12 @@ export interface ReportSnapshot {
   /** Null for a snapshot saved before F1: it can never count as shown. */
   block: SnapshotBlock | null;
   items: SnapshotItems;
+  /**
+   * home-base-88y8m D4: Claude's message (`thread status --message`), as the
+   * block showed it under `## From Claude`. Null when the run had none, and
+   * for every snapshot saved before D4.
+   */
+  message: string | null;
   /** When a final assistant message first held its block; null until then. */
   shownAt: string | null;
 }
@@ -219,6 +225,72 @@ export function baselineProblem(baseline: ReportBaseline): string | null {
   return baseline.kind === 'unknown'
     ? `Nothing is marked new or changed, and every question is in full: ${baseline.reason}`
     : null;
+}
+
+// ---------------------------------------------------------------------------
+// home-base-88y8m D1: `thread status --changes`, only what changed
+// ---------------------------------------------------------------------------
+
+/**
+ * D1: said in Progress when `--changes` has no last report to compare with
+ * (the `first` baseline), so every item is printed. home-base-88y8m.8 R6:
+ * says only what is known. chooseBaseline returns `first` when no report was
+ * ever saved, and also when none was marked shown (the Stop hook did not run
+ * or could not write, or the block was cut) or the one shown fell out of the
+ * REPORT_SNAPSHOTS_KEPT kept, so "you have not seen one" would be a claim.
+ */
+export const CHANGES_ALL_SHOWN_FIRST =
+  'Every request and question is shown: no report of this session that you saw could be found.';
+
+/**
+ * D1: the one line for the items of a section that `--changes` leaves out,
+ * against a FOUND last report only (critical rule 7: "unchanged" is a claim,
+ * and without a last report nothing was compared). Null when the section is
+ * empty or every item in it is shown.
+ */
+export function unchangedCountLine(
+  kind: 'question' | 'request',
+  shown: number,
+  total: number,
+): string | null {
+  const unchanged = total - shown;
+  if (total <= 0 || unchanged <= 0) return null;
+  if (shown === 0) {
+    return `No ${kind} has changed since the last report (${unchanged} unchanged).`;
+  }
+  return unchanged === 1
+    ? `1 more ${kind} has not changed since the last report.`
+    : `${unchanged} more ${kind}s have not changed since the last report.`;
+}
+
+/**
+ * D1: the question ids the last report listed that are not open now, in the
+ * last report's order. Empty unless the baseline was found.
+ */
+export function questionsLeftSince(
+  baseline: ReportBaseline,
+  openIds: ReadonlySet<string>,
+): string[] {
+  if (baseline.kind !== 'found') return [];
+  return Object.keys(baseline.snapshot.items)
+    .filter((key) => key.startsWith('q:'))
+    .map((key) => key.slice(2))
+    .filter((id) => !openIds.has(id));
+}
+
+/**
+ * D1: "Answered or closed since the last report: Q105 (title), Q107." Each
+ * entry is its id and, when its title could be read, the title in brackets.
+ * Null for none.
+ */
+export function answeredSinceLine(
+  entries: readonly {id: string; title: null | string}[],
+): string | null {
+  if (entries.length === 0) return null;
+  const named = entries.map((entry) =>
+    entry.title == null ? entry.id : `${entry.id} (${entry.title})`,
+  );
+  return `Answered or closed since the last report: ${named.join(', ')}.`;
 }
 
 // ---------------------------------------------------------------------------
