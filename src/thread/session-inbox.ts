@@ -237,13 +237,26 @@ export function withEnding(
   };
 }
 
+/** The card's pane fact as liveness: a live pane holds a Claude process. */
+function livenessOfPane(row: InboxRow): boolean | null {
+  const pane = row.card.paneFact;
+  return pane.kind === 'live' ? true : pane.kind === 'none' ? false : null;
+}
+
 /**
  * home-base-kwand.4: a row's ending. The transcript is the loaded model's (or
  * the untracked scan's); the cache gives its walk, else it is read here. Live
  * is the card's pane fact: a live pane holds a Claude process; unknown when
  * the lookup could not tell (D5: a separate fact, never hiding a cut-off).
+ *
+ * `live` (home-base-kwand.7): a caller that has proven by its own join that a
+ * Claude process runs the session passes true, in place of the pane fact.
  */
-function rowEnding(row: InboxRow, now: Date): SessionEnding {
+export function rowEnding(
+  row: InboxRow,
+  now: Date,
+  live: boolean | null = livenessOfPane(row),
+): SessionEnding {
   let path: string | null = null;
   let lastRecordAt: string | null = null;
   if (row.loaded != null) {
@@ -271,12 +284,7 @@ function rowEnding(row: InboxRow, now: Date): SessionEnding {
     };
   }
   const ending = cachedTranscriptEnding(path) ?? readTranscriptEnding(path);
-  const pane = row.card.paneFact;
-  return sessionEnding(ending, {
-    lastRecordAt,
-    live: pane.kind === 'live' ? true : pane.kind === 'none' ? false : null,
-    now,
-  });
+  return sessionEnding(ending, {lastRecordAt, live, now});
 }
 
 /** One session of the before set as `--before-restart` and the JSON list it. */

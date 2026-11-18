@@ -191,7 +191,7 @@ RUNS AS A VIEW. A filtered thread open makes a window appear (for example thread
 SANDBOX. The Claude Code sandbox blocks the cmux socket and ps. Run it from a terminal, or with the sandbox disabled.`;
 
 const CLOSE_SUMMARY =
-  'Close the cmux workspaces you name, by uuid (from cmux tree --id-format both) or workspace:N, or by the session they hold (--session <id>). Each one is checked first and kept open, with the reason printed, unless nothing could be lost; its Claude process is stopped before the workspace closes, and a resume command for it is written down first. Try --dry-run first. It exits 0 when done (kept workspaces included), 1 when a step failed, 2 when it refused and touched nothing.';
+  'Close the cmux workspaces you name, by uuid (from cmux tree --id-format both) or workspace:N, or by the session they hold (--session <id>). Each one is checked first and kept open, with the reason printed, unless nothing could be lost; its Claude process is stopped before the workspace closes, and a resume command for it is written down first. Try --dry-run first. With --all-except it takes every workspace except the ones that matter (see ALL EXCEPT), and only looks unless --apply is given. It exits 0 when done (kept workspaces included), 1 when a step failed, 2 when it refused and touched nothing.';
 
 const CLOSE_NARRATIVE = `
 THE CHECKS. Every pane of the workspace is read, and the workspace is kept open unless every pane passes all of these:
@@ -236,6 +236,34 @@ LIMITS (measured 2026-10-22 on Claude Code 2.1.308, and read in its code back to
   - cmux can refuse a close with "Workspace has a running process; retry with --force" even when every tab holds only an idle shell (measured 2026-11-18 on cmux 0.65.2: 4 workspaces, 9 tabs, each tab's shell in the foreground with no child process). cmux decides it from a per-tab shell state that its shell integration reports, and no read-only cmux command shows that state, so --dry-run cannot predict it. Such a workspace is listed under Failed with that reason (home-base-kwand.13).
 
 --dry-run runs every check and prints what would close and what would be kept and why. It signals nothing, closes nothing, writes no record and stores no draft.
+
+ALL EXCEPT (--all-except, home-base-kwand.7). Every workspace in every cmux window is a target, except the ones kept below. It is a DRY RUN BY DEFAULT: without --apply it closes nothing, signals nothing and writes nothing, and prints what would close, what is kept and why, and the counts. --dry-run is accepted and means the same. Each workspace is kept, with every reason printed and counted once under the first of these:
+
+  1. The workspace this command runs in (CMUX_WORKSPACE_ID). Outside cmux, where that cannot be known, --all-except refuses.
+
+  2. A session marked ⭐ or with any other mark, on any session of its handoff chain.
+
+  3. A session working now: its screen shows Claude working, or its last turn has not finished and its newest record is under 15 minutes old.
+
+  4. Unsent text in an input box (stored as above when --apply runs).
+
+  5. An untracked session (no session bead): nothing would let you find it again.
+
+  6. A session active within --keep-active (default 24h; 30m, 24h, 2d, or 0).
+
+  7. A workspace named with --keep, by uuid, workspace:N, a session id or a session bead id. A --keep value that matches nothing open refuses the run.
+
+  8. Every check above (THE CHECKS): pinned, a shared tty, an unreadable screen, more than one Claude, and the rest.
+
+  A fact one of these needs that cannot be read (a session's marks, its activity, whether it is working) keeps the workspace as "unknown", never as unmarked or idle; an inbox that cannot be read at all refuses the run. A workspace with no Claude session goes through THE CHECKS alone and closes when every tab holds an idle shell. The sessions are read from the inbox with no age window, so a session idle for months is still known.
+
+  A shared tty (two tabs report the same terminal) still keeps the workspace, unless every process on that terminal is a login or an idle shell: then whichever tab owns them, closing this one stops no running program. Each workspace kept for a shared tty prints how to close it by hand.
+
+  With --apply, it first runs thread tabs record, so the tab set before the close is on record, and refuses with nothing closed if that fails. Then every workspace not kept closes exactly as a named close does: the record, the re-check right before each close, SIGTERM, close-workspace. The plan says how old cmux's saved session file is, since the tab record reads that file.
+
+  cmux may still refuse a close with "Workspace has a running process" when every tab holds an idle shell: no read-only check can predict it (see LIMITS). Such a workspace shows under "Would close" in the dry run and under Failed after --apply. --force is never passed.
+
+  Refused, exit 2, nothing touched: --all-except with workspaces, --session, --tab or --handed-off; --apply, --keep or --keep-active without --all-except; --apply with --dry-run; a --keep-active that is not a duration.
 
 SANDBOX. The Claude Code sandbox blocks the cmux socket and ps. Run it from a terminal, or with the sandbox disabled.`;
 
@@ -1472,7 +1500,7 @@ export const threadCommand: CommandModule = {
         (yy) =>
           yy
             .usage(
-              `${helpHeader('justin-sdk', dirname(import.meta.dirname))}\n\n$0 thread close <workspace…> [--session <id>…] [--dry-run] [--json]\n$0 thread close --tab (--session <id>… | --handed-off) [--dry-run] [--json]\n\n${CLOSE_SUMMARY}`,
+              `${helpHeader('justin-sdk', dirname(import.meta.dirname))}\n\n$0 thread close <workspace…> [--session <id>…] [--dry-run] [--json]\n$0 thread close --tab (--session <id>… | --handed-off) [--dry-run] [--json]\n$0 thread close --all-except [--keep <workspace|session|bead>…] [--keep-active <duration>] [--apply] [--json]\n\n${CLOSE_SUMMARY}`,
             )
             .epilogue(CLOSE_NARRATIVE)
             .positional('workspaces', {
@@ -1499,10 +1527,33 @@ export const threadCommand: CommandModule = {
                 'Add every live session whose session bead (in this repo) has the handed-off label and a continued-by: label, as if each were named with --session; the selection is printed. A handed-off session no successor picked up is not selected',
               type: 'boolean' as const,
             })
+            .option('all-except', {
+              default: false,
+              describe:
+                'Close every workspace in every cmux window except the kept ones (see ALL EXCEPT). A dry run unless --apply is given',
+              type: 'boolean' as const,
+            })
+            .option('keep', {
+              describe:
+                '--all-except only: also keep this workspace (uuid or workspace:N), or the workspace of this session id or session bead id (repeat for several); a value that matches nothing refuses the run',
+              string: true,
+              type: 'array' as const,
+            })
+            .option('keep-active', {
+              describe:
+                '--all-except only: keep a session active within this long (30m, 24h, 2d, or 0). Default 24h',
+              type: 'string' as const,
+            })
+            .option('apply', {
+              default: false,
+              describe:
+                '--all-except only: close for real. Runs thread tabs record first and closes nothing if it fails',
+              type: 'boolean' as const,
+            })
             .option('dry-run', {
               default: false,
               describe:
-                'Run every check and print what would close and what would be kept; signal, close and write nothing',
+                'Run every check and print what would close and what would be kept; signal, close and write nothing (--all-except does this by default)',
               type: 'boolean' as const,
             })
             .option('json', {
@@ -1515,9 +1566,16 @@ export const threadCommand: CommandModule = {
           const given = argv.workspaces as string[] | string | undefined;
           process.exit(
             await runThreadClose({
+              allExcept: argv['all-except'] === true,
+              apply: argv.apply === true,
               dryRun: argv['dry-run'] === true,
               handedOff: argv['handed-off'] === true,
               json: argv.json === true,
+              keep: (argv.keep ?? []).map(String),
+              keepActive:
+                argv['keep-active'] == null
+                  ? null
+                  : String(argv['keep-active']),
               sessions: (argv.session ?? []).map(String),
               tab: argv.tab === true,
               workspaces: (Array.isArray(given)

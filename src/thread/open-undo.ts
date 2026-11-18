@@ -327,6 +327,26 @@ function cut(text: string, max: number): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
+/**
+ * home-base-kwand.7 K6: what kind of reason a gate keeps a pane or workspace
+ * for. `thread close --all-except` counts kept workspaces by these.
+ */
+export type GateReasonKind =
+  | 'noClaudeProcess'
+  | 'noPane'
+  | 'noSessionLine'
+  | 'notIdle'
+  | 'otherSession'
+  | 'running'
+  | 'severalClaude'
+  | 'sharedTty'
+  | 'startingOrDialog'
+  | 'ttyUnknown'
+  | 'unconfirmedProcess'
+  | 'unreadableScreen'
+  | 'unsentText'
+  | 'working';
+
 export interface PaneGate {
   /** Claude session processes on the pane's tty, to stop before closing. */
   claude: Proc[];
@@ -337,6 +357,11 @@ export interface PaneGate {
    * under a session, and the pane is kept (F19).
    */
   draft: {sessionId: string | null; text: string} | null;
+  /**
+   * home-base-kwand.7 K6: the kind of each reason, in the same order as
+   * `reasons`, so a caller counts kept workspaces by kind, never by text.
+   */
+  kinds: GateReasonKind[];
   /** Why the pane keeps its workspace open; empty = it may close. */
   reasons: string[];
   /** The session id the input box's status line shows, lowercased; null when none. */
@@ -405,6 +430,7 @@ export function gatePane(input: {
     return {
       claude: [],
       draft: null,
+      kinds: ['unreadableScreen'],
       reasons: [
         `the screen of ${label} could not be read: ${input.screen.reason}`,
       ],
@@ -413,11 +439,17 @@ export function gatePane(input: {
     };
   }
   const reasons: string[] = [];
+  const kinds: GateReasonKind[] = [];
+  // K6 (home-base-kwand.7): every reason is pushed with its kind, together.
+  const keep = (kind: GateReasonKind, text: string): void => {
+    kinds.push(kind);
+    reasons.push(text);
+  };
   const lines = screenLines(input.screen.text);
   const claude = (input.procsOnTty ?? []).filter((proc) => isSessionProc(proc));
   const working = workingIndicator(lines);
   if (working != null) {
-    reasons.push(`Claude is working in ${label}: "${cut(working, 70)}"`);
+    keep('working', `Claude is working in ${label}: "${cut(working, 70)}"`);
   }
   const box = findInputBox(lines);
   let draft: PaneGate['draft'] = null;
@@ -428,14 +460,15 @@ export function gatePane(input: {
     // workspace as before.
     if (box.draft !== '' && !box.suggested) {
       draft = {sessionId: shown ?? input.sessionId, text: box.draft};
-      reasons.push(`unsent text in the input box of ${label}`);
+      keep('unsentText', `unsent text in the input box of ${label}`);
     }
     if (
       input.sessionId != null &&
       shown != null &&
       shown !== input.sessionId.toLowerCase()
     ) {
-      reasons.push(
+      keep(
+        'otherSession',
         `${label} shows session ${shown}, which is not the one this run opened`,
       );
     }
@@ -444,16 +477,19 @@ export function gatePane(input: {
     // old --resume id), and the activity gate reads only the recorded
     // session, so a pane Justin switched sessions in would pass both.
     if (shown == null) {
-      reasons.push(
+      keep(
+        'noSessionLine',
         `cannot tell which session ${label} holds: its input box shows no "⌗ <session id>" line`,
       );
     }
     if (input.procsOnTty == null) {
-      reasons.push(
+      keep(
+        'ttyUnknown',
         `Claude is on ${label} but its tty is unknown, so its process cannot be found and stopped first`,
       );
     } else if (claude.length === 0) {
-      reasons.push(
+      keep(
+        'noClaudeProcess',
         `Claude is on ${label} but no claude process runs on its tty ${input.tty ?? '?'}, so it cannot be stopped first`,
       );
     }
@@ -472,7 +508,8 @@ export function gatePane(input: {
       );
       const [other] = foreign;
       if (other != null) {
-        reasons.push(
+        keep(
+          'unconfirmedProcess',
           input.sessionId == null
             ? `the claude process on ${label} (pid ${other.pid}) names neither on its command line nor in the cmux hook store the session its screen shows (${want}), so which session it runs cannot be confirmed and it is not stopped`
             : `the claude process on ${label} (pid ${other.pid}) does not name session ${want} on its command line, so it was not started by this run and is not stopped`,
@@ -482,16 +519,18 @@ export function gatePane(input: {
     return {
       claude,
       draft,
+      kinds,
       reasons,
       shown,
       suggestion: box.suggested ? box.draft : null,
     };
   }
   if (claude.length > 0) {
-    reasons.push(
+    keep(
+      'startingOrDialog',
       `${label} shows no Claude input box but a claude process runs on its tty: Claude is starting or showing a dialog`,
     );
-    return {claude, draft, reasons, shown: null, suggestion: null};
+    return {claude, draft, kinds, reasons, shown: null, suggestion: null};
   }
   // F20 (home-base-yukaf.14): an unknown tty always keeps the pane, a blank
   // screen included. cmux returns an empty screen for a pane that has not
@@ -499,24 +538,26 @@ export function gatePane(input: {
   // Claude runs there; closing it without SIGTERM would leave that Claude's
   // PTY unplaced, and every later `thread open` would refuse.
   if (input.procsOnTty == null) {
-    reasons.push(
+    keep(
+      'ttyUnknown',
       `${label} shows no Claude input box and its tty is unknown, so what runs there cannot be checked`,
     );
-    return {claude, draft, reasons, shown: null, suggestion: null};
+    return {claude, draft, kinds, reasons, shown: null, suggestion: null};
   }
   const busy = input.procsOnTty.filter((proc) => !isShellScaffolding(proc));
   const [first] = busy;
   if (first != null) {
-    reasons.push(`${label} is running ${cut(first.command, 70)}`);
-    return {claude, draft, reasons, shown: null, suggestion: null};
+    keep('running', `${label} is running ${cut(first.command, 70)}`);
+    return {claude, draft, kinds, reasons, shown: null, suggestion: null};
   }
   if (!idleShellScreen(lines)) {
     const last = lines.filter((line) => line.trim() !== '').at(-1) ?? '';
-    reasons.push(
+    keep(
+      'notIdle',
       `${label} shows neither a Claude input box nor an idle shell prompt (last line: "${cut(last, 60)}")`,
     );
   }
-  return {claude, draft, reasons, shown: null, suggestion: null};
+  return {claude, draft, kinds, reasons, shown: null, suggestion: null};
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +609,8 @@ export interface SurfacesGate {
   /** Claude session processes on the workspace's panes, to stop first. */
   claude: Proc[];
   drafts: GateDraft[];
+  /** K6 (home-base-kwand.7): the kind of each reason, in `reasons`' order. */
+  kinds: GateReasonKind[];
   /** Why the workspace is kept; empty = it may close. */
   reasons: string[];
   /** Every distinct session id its panes' status lines show, lowercased. */
@@ -594,14 +637,20 @@ export async function gateSurfaces(
   run: CmuxRunner,
   sessionId: string | null,
   hookPids?: HookStorePids,
+  options: GateOptions = {},
 ): Promise<SurfacesGate> {
   const reasons: string[] = [];
+  const kinds: GateReasonKind[] = [];
+  const keep = (kind: GateReasonKind, text: string): void => {
+    kinds.push(kind);
+    reasons.push(text);
+  };
   const drafts: GateDraft[] = [];
   const claude: Proc[] = [];
   const sessions: string[] = [];
   const suggestions: GateSuggestion[] = [];
   if (surfaceIds.length === 0) {
-    reasons.push('cmux lists no pane in it, so nothing on it can be checked');
+    keep('noPane', 'cmux lists no pane in it, so nothing on it can be checked');
   }
   for (const surfaceId of surfaceIds) {
     const surface = view.surfaces.find(
@@ -618,15 +667,23 @@ export async function gateSurfaces(
         : view.surfaces.filter(
             (candidate) => normalizeTty(candidate.tty) === tty,
           ).length;
-    if (sharers > 1) {
-      reasons.push(
-        `${label} reports tty ${tty}, which ${sharers - 1} other pane${sharers === 2 ? '' : 's'} also report, so which processes are its own cannot be told`,
-      );
-    }
     const procsOnTty =
       tty == null
         ? null
         : view.procs.filter((proc) => normalizeTty(proc.tty) === tty);
+    // home-base-kwand.7 K7, opt-in (`thread close --all-except` only): when
+    // every process on the shared tty is shell scaffolding (login, an idle
+    // shell), whichever pane owns them, closing this one loses no running
+    // program; every other check below still applies to this pane.
+    const onlyShells =
+      options.sharedTtyIdleShells === true &&
+      procsOnTty?.every((proc) => isShellScaffolding(proc)) === true;
+    if (sharers > 1 && !onlyShells) {
+      keep(
+        'sharedTty',
+        `${label} reports tty ${tty}, which ${sharers - 1} other pane${sharers === 2 ? '' : 's'} also report, so which processes are its own cannot be told`,
+      );
+    }
     // F6: a draft taller than the screen is read back from the scrollback.
     const screen = await readScreenForBox(run, surface?.ref ?? surfaceId);
     const gate = gatePane({
@@ -638,6 +695,7 @@ export async function gateSurfaces(
       tty,
     });
     reasons.push(...gate.reasons);
+    kinds.push(...gate.kinds);
     claude.push(...gate.claude);
     if (gate.draft != null) drafts.push({...gate.draft, surfaceId});
     if (gate.suggestion != null) {
@@ -653,18 +711,30 @@ export async function gateSurfaces(
   }
   if (sessionId == null) {
     if (sessions.length > 1) {
-      reasons.push(
+      keep(
+        'severalClaude',
         `it holds ${sessions.length} Claude sessions (${sessions.join(', ')}), and closing it would stop all of them`,
       );
     }
     const pids = [...new Set(claude.map((proc) => proc.pid))];
     if (pids.length > 1) {
-      reasons.push(
+      keep(
+        'severalClaude',
         `${pids.length} Claude processes run in it (pid ${pids.join(', ')}), and closing it would stop all of them`,
       );
     }
   }
-  return {claude, drafts, reasons, sessions, suggestions};
+  return {claude, drafts, kinds, reasons, sessions, suggestions};
+}
+
+/** Options of {@link gateSurfaces}; every caller but one passes none. */
+export interface GateOptions {
+  /**
+   * home-base-kwand.7 K7: a pane whose tty other panes also report passes
+   * the shared-tty check when every process on that tty is shell scaffolding.
+   * Only `thread close --all-except` sets it; named closes are unchanged.
+   */
+  sharedTtyIdleShells?: boolean;
 }
 
 async function assessWorkspace(

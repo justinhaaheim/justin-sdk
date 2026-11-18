@@ -62,10 +62,18 @@
 
 import type {OutputStyle} from '../cli-style';
 import type {RepoResolution} from '../repo-status/sessions';
+import type {
+  AllExceptInfo,
+  KeepKind,
+  KeepReason,
+  SessionFactsRead,
+  SessionFileFact,
+} from './close-all-except';
 import type {CmuxRunner, CmuxTree} from './cmux';
 import type {InputDraftWrite, WriteInputDraftInput} from './input-drafts';
 import type {LiveSessions} from './live-sessions';
 import type {
+  GateOptions,
   GateSuggestion,
   HookStorePids,
   LiveView,
@@ -101,7 +109,23 @@ import {
 } from '../cli-style';
 import {resolveRepoRoot} from '../repo-status/sessions';
 import {writeStdout} from '../write-stdout';
+import {
+  KEEP_ACTIVE_DEFAULT,
+  KEEP_KIND_ORDER,
+  KEEP_KIND_WORDS,
+  parseKeepActive,
+  primaryKind,
+  realReadSessionFacts,
+  resolveKeep,
+  sessionKeeps,
+  sharedTtyWorkspaces,
+} from './close-all-except';
 import {readCmuxTree, realCmuxRunner, surfacesOfWorkspace} from './cmux';
+import {
+  cmuxSupportDir,
+  LIVE_SESSION_FILE,
+  readTabSet,
+} from './cmux-session-file';
 import {findTranscript} from './facts';
 import {writeInputDraft} from './input-drafts';
 import {
@@ -136,6 +160,7 @@ import {
   SESSION_LABEL,
   SID_LABEL_PREFIX,
 } from './session-bead';
+import {recordTabs, tabRecordDir} from './tab-record';
 import {extractTranscriptMessages} from './transcript-messages';
 import {
   cmuxCloseRefusal,
@@ -262,6 +287,11 @@ export interface CloseEntry {
 
 export interface CloseKept extends CloseEntry {
   drafts: UndoDraft[];
+  /**
+   * home-base-kwand.7 K6: the kind of each reason, in `reasons`' order.
+   * Absent on a --tab entry, whose tab checks are not typed.
+   */
+  reasonKinds?: KeepKind[];
   reasons: string[];
 }
 
@@ -290,6 +320,8 @@ export interface CloseNotFound {
 }
 
 export interface CloseState {
+  /** `--all-except` only (home-base-kwand.7): its rules and counts. */
+  allExcept?: AllExceptInfo;
   closed: CloseClosed[];
   dryRun: boolean;
   failed: CloseFailed[];
@@ -314,6 +346,13 @@ export interface CloseState {
 }
 
 export interface CloseOptions {
+  /**
+   * `--all-except` (home-base-kwand.7): every workspace in every cmux window
+   * is a target, minus the kept ones (K2). A dry run unless `apply` is set.
+   */
+  allExcept?: boolean;
+  /** `--apply`: `--all-except` closes for real (K4). */
+  apply?: boolean;
   dryRun: boolean;
   env?: EnvLike;
   /**
@@ -323,6 +362,10 @@ export interface CloseOptions {
    */
   handedOff?: boolean;
   json: boolean;
+  /** `--keep` (K2 g): workspace uuids or refs, session ids, session bead ids. */
+  keep?: readonly string[];
+  /** `--keep-active <duration>` (K2 f); null or absent: the default, 24h. */
+  keepActive?: string | null;
   /** `--session <id>`: each resolves to the one workspace that holds it. */
   sessions: readonly string[];
   style?: OutputStyle;
@@ -349,6 +392,14 @@ export interface CloseDeps {
   readHookStore: () => SourceRead<HookStore>;
   /** The live sessions (readLiveSessions), read only when --session is given. */
   readLive: () => Promise<LiveSessions>;
+  /** `--all-except` (K9): the inbox's session facts, no age window. */
+  readSessionFacts: (live: ReadonlySet<string>) => Promise<SessionFactsRead>;
+  /** `--all-except`: cmux's live session file, for its age and workspace count. */
+  readSessionFile: () => SessionFileFact;
+  /** `--all-except --apply` (K4): `thread tabs record`, run first: what it recorded, or why not. */
+  recordTabs: () =>
+    | {kind: 'failed'; reason: string}
+    | {kind: 'recorded'; words: string};
   resumeOf: (sessionId: string) => ResumeLookup;
   run: CmuxRunner;
   sleep: (ms: number) => Promise<void>;
@@ -575,6 +626,8 @@ type Assessment =
       drafts: {sessionId: string | null; surfaceId: string; text: string}[];
       entry: CloseEntry;
       kind: 'kept';
+      /** K6: each reason's kind, in order; absent from --tab's own checks. */
+      kinds?: KeepKind[];
       reasons: string[];
     }
   | {kind: 'notFound'; reason: string};
@@ -589,6 +642,7 @@ async function assess(
   hookPids: HookStorePids,
   deps: Pick<CloseDeps, 'resumeOf' | 'run'>,
   onlySurface: string | null = null,
+  gateOptions: GateOptions = {},
 ): Promise<Assessment> {
   const at = locateWorkspace(view.tree, target.workspaceId);
   const surfaceIds = surfacesOfWorkspace(view.tree, target.workspaceId);
@@ -607,14 +661,17 @@ async function assess(
     deps.run,
     null,
     hookPids,
+    gateOptions,
   );
   const [sessionId] = gate.sessions.length === 1 ? gate.sessions : [];
   const reasons = [...gate.reasons];
+  const kinds: KeepKind[] = [...gate.kinds];
   // home-base-kwand.13 fix 1: cmux refuses close-workspace on a pinned
   // workspace, so predict it here, before any Claude is stopped. Only a
   // whole-workspace close (no `onlySurface`, which includes --tab's only-tab
   // D4 path) is refused for it. Not knowing is not "unpinned" (rule 7).
   if (onlySurface == null && workspace.pinned !== false) {
+    kinds.unshift('pinned');
     reasons.unshift(
       workspace.pinned === true
         ? `${PINNED_REASON}: cmux refuses to close a pinned workspace ("Pinned workspaces can't be closed while pinned"); unpin it in cmux to close it`
@@ -625,6 +682,7 @@ async function assess(
   if (sessionId != null) {
     resume = deps.resumeOf(sessionId);
     if (resume.kind === 'unknown') {
+      kinds.push('noResume');
       reasons.push(
         `no resume command could be built for session ${sessionId} (${resume.reason}), so closing it could not be undone by hand`,
       );
@@ -653,7 +711,7 @@ async function assess(
     workspaceRef: workspace.ref,
   };
   if (reasons.length > 0) {
-    return {drafts: gate.drafts, entry, kind: 'kept', reasons};
+    return {drafts: gate.drafts, entry, kind: 'kept', kinds, reasons};
   }
   return {
     claude: gate.claude,
@@ -703,7 +761,12 @@ function keptOf(
   assessment: Extract<Assessment, {kind: 'kept'}>,
   drafts: UndoDraft[],
 ): CloseKept {
-  return {...assessment.entry, drafts, reasons: assessment.reasons};
+  return {
+    ...assessment.entry,
+    drafts,
+    ...(assessment.kinds == null ? {} : {reasonKinds: assessment.kinds}),
+    reasons: assessment.reasons,
+  };
 }
 
 function logLine(
@@ -1042,6 +1105,8 @@ const LABELS = [
   'Input box',
   'Stored',
   'Why',
+  'Kept as',
+  'By hand',
 ].map((label) => ({label, value: ''}));
 
 function block(
@@ -1147,6 +1212,73 @@ function failedClaudeWords(entry: CloseFailed): string {
     : `not stopped (pid ${entry.pid})`;
 }
 
+/** --all-except: the rules it ran with and what the tab record reads. */
+function allExceptFields(all: AllExceptInfo): {label: string; value: string}[] {
+  const file = all.sessionFile;
+  const fileWords =
+    file.kind === 'read'
+      ? `cmux's saved session file was written ${Math.round(file.ageMs / 60_000)} min ago (${file.createdAt}); it lists ${file.workspaces} workspaces, cmux tree ${all.treeWorkspaces}${file.workspaces === all.treeWorkspaces ? '' : ' (cmux rewrites the file from time to time, so they can differ)'}`
+      : `cmux's saved session file ${tildeText(file.path)} could not be read: ${file.reason}`;
+  return [
+    {
+      label: 'Keeps',
+      value: `this command's own workspace; a marked session (⭐ or any mark, on any session of its chain); Claude working now; unsent text; an untracked session; activity within --keep-active ${all.keepActive}${all.keep.length > 0 ? `; --keep ${all.keep.join(', ')}` : ''}; and every check a named close makes. A fact that cannot be read keeps the workspace as unknown`,
+    },
+    {
+      label: 'Tab record',
+      value:
+        all.tabRecord == null
+          ? `--apply runs thread tabs record first, and closes nothing if it fails. ${fileWords}`
+          : `${all.tabRecord}. ${fileWords}`,
+    },
+  ];
+}
+
+/** --all-except: a kept workspace's first reason (K6), and K7's manual way out. */
+function keptAsFields(entry: CloseKept): {label: string; value: string}[] {
+  const kinds = entry.reasonKinds ?? ['notChecked'];
+  const kind = primaryKind(kinds);
+  return [
+    {label: 'Kept as', value: KEEP_KIND_WORDS[kind]},
+    ...(kinds.includes('sharedTty')
+      ? [
+          {
+            label: 'By hand',
+            value: `which tab owns the shared tty's processes cannot be told, so this tool will not close it. Look at the tab; if nothing there matters, close it with cmux close-workspace --workspace ${entry.workspaceId} --window ${entry.windowId}, which stops nothing first and writes no resume command`,
+          },
+        ]
+      : []),
+  ];
+}
+
+/** --all-except: the counts, kept by kind (K6), the shared-tty measure (K7). */
+function allExceptCounts(
+  all: AllExceptInfo,
+  dryRun: boolean,
+): {label: string; value: string}[] {
+  const byKind = KEEP_KIND_ORDER.filter(
+    (kind) => (all.counts.keptByKind[kind] ?? 0) > 0,
+  ).map(
+    (kind) => `${all.counts.keptByKind[kind] ?? 0} ${KEEP_KIND_WORDS[kind]}`,
+  );
+  return [
+    {
+      label: dryRun ? 'Would close' : 'Closed',
+      value: String(all.counts.wouldClose),
+    },
+    {
+      label: 'Kept',
+      value: `${all.counts.kept}${byKind.length > 0 ? `: ${byKind.join(', ')}` : ''}`,
+    },
+    ...(dryRun ? [] : [{label: 'Failed', value: String(all.counts.failed)}]),
+    {
+      label: 'Shared tty',
+      value: `${all.sharedTty.workspaces} workspaces have a tab whose tty another tab reports; ${all.sharedTty.keptFor} kept for it, ${all.sharedTty.passedByRule} ${dryRun ? 'would close' : 'went to close'} because only an idle shell runs on that tty`,
+    },
+    {label: 'Workspaces', value: `${all.treeWorkspaces} in every cmux window`},
+  ];
+}
+
 export function renderClose(state: CloseState, style: OutputStyle): string {
   const header = (text: string, emoji: string): string =>
     sectionHeader(text, {color: style.color, emoji});
@@ -1158,11 +1290,14 @@ export function renderClose(state: CloseState, style: OutputStyle): string {
     });
   const blocks: string[] = [];
   const tabMode = state.tabMode === true;
+  const all = state.allExcept ?? null;
   blocks.push(
     header(
-      tabMode
-        ? 'thread close --tab: close the tabs of named Claude sessions'
-        : 'thread close: close named cmux workspaces',
+      all != null
+        ? 'thread close --all-except: close every cmux workspace but the ones that matter'
+        : tabMode
+          ? 'thread close --tab: close the tabs of named Claude sessions'
+          : 'thread close: close named cmux workspaces',
       '🧹',
     ),
   );
@@ -1172,9 +1307,12 @@ export function renderClose(state: CloseState, style: OutputStyle): string {
         {
           label: 'Mode',
           value: state.dryRun
-            ? 'dry run: nothing closed, nothing signalled, nothing written'
+            ? all != null
+              ? 'dry run (the default): nothing closed, nothing signalled, nothing written. Add --apply to close'
+              : 'dry run: nothing closed, nothing signalled, nothing written'
             : 'closing',
         },
+        ...(all == null ? [] : allExceptFields(all)),
         {
           label: 'Gates',
           value:
@@ -1315,6 +1453,7 @@ export function renderClose(state: CloseState, style: OutputStyle): string {
             headingOf(entry),
             [
               ...baseFields(entry, null),
+              ...(all == null ? [] : keptAsFields(entry)),
               {label: 'Why', value: entry.reasons.join('\n')},
             ],
             style,
@@ -1382,13 +1521,36 @@ export function renderClose(state: CloseState, style: OutputStyle): string {
     );
   }
 
+  if (all != null) {
+    blocks.push(header('Counts', '🔢'));
+    blocks.push(
+      fieldLines(allExceptCounts(all, state.dryRun), {
+        color: style.color,
+        indent: BODY_COLUMN,
+        width: style.width,
+      }),
+    );
+    if (state.dryRun) {
+      // K5: said once, so a refusal after --apply is no surprise.
+      blocks.push(
+        prose(
+          'cmux may still refuse some of these with "Workspace has a running process" even when every tab holds an idle shell: no read-only check can predict it, and --force is never passed. Such a workspace is listed under Failed after --apply, with nothing stopped when no Claude ran there.',
+        ),
+      );
+    }
+  }
   const stoppedOpen = state.failed.filter(
     (entry) => entry.claudeStopped,
   ).length;
   const keptWords = `kept ${state.kept.length + unresolved.length}${withDraft.length > 0 ? ` (${withDraft.length} with unsent text)` : ''}`;
-  const summary = state.dryRun
-    ? `Would close ${state.planned.length}, ${keptWords}, not found ${state.notFound.length}. Run it again without --dry-run to close them.`
-    : `Closed ${state.closed.length}, ${keptWords}, not found ${state.notFound.length}${state.failed.length > 0 ? `, failed ${state.failed.length}` : ''}.${stoppedOpen > 0 ? ` ${stoppedOpen} of the failed had their Claude stopped and are still open: resume each with its Resume command.` : ''}`;
+  const summary =
+    all != null
+      ? state.dryRun
+        ? `Would close ${state.planned.length}, ${keptWords}. Nothing was closed: run it again with --apply to close them.`
+        : `Closed ${state.closed.length}, ${keptWords}${state.failed.length > 0 ? `, failed ${state.failed.length}` : ''}.${stoppedOpen > 0 ? ` ${stoppedOpen} of the failed had their Claude stopped and are still open: resume each with its Resume command.` : ''}`
+      : state.dryRun
+        ? `Would close ${state.planned.length}, ${keptWords}, not found ${state.notFound.length}. Run it again without --dry-run to close them.`
+        : `Closed ${state.closed.length}, ${keptWords}, not found ${state.notFound.length}${state.failed.length > 0 ? `, failed ${state.failed.length}` : ''}.${stoppedOpen > 0 ? ` ${stoppedOpen} of the failed had their Claude stopped and are still open: resume each with its Resume command.` : ''}`;
   blocks.push(
     wrapHanging(paint(summary, ['bold'], style.color), {
       hang: HEADER_COLUMN,
@@ -1429,6 +1591,7 @@ function unreadAgain(
     drafts: [],
     entry: planned.entry,
     kind: 'kept',
+    kinds: ['notChecked'],
     reasons: [`what is open now could not be read again: ${unread.join('; ')}`],
   };
 }
@@ -1468,6 +1631,7 @@ async function closePlanned(input: {
         state.kept.push({
           ...entry.entry,
           drafts: [],
+          reasonKinds: ['notChecked'],
           reasons: ['the close log could not be written first'],
         });
       }
@@ -1492,6 +1656,7 @@ async function closePlanned(input: {
           drafts: [],
           entry: planned.entry,
           kind: 'kept',
+          kinds: ['changed'],
           reasons: [
             `it changed since it was first checked (session ${orNone(planned.sessions.join(', '))} → ${orNone(assessment.sessions.join(', '))}; Claude pid ${orNone(pidsThen)} → ${orNone(pidsNow)})`,
           ],
@@ -1548,6 +1713,7 @@ async function closePlanned(input: {
         state.kept.push({
           ...rest.entry,
           drafts: [],
+          reasonKinds: ['notChecked'],
           reasons: ['not attempted: the run stopped when the close log failed'],
         });
       }
@@ -1702,6 +1868,7 @@ async function closeTabs(input: {
           drafts: [],
           entry: planned.entry,
           kind: 'kept',
+          kinds: ['changed'],
           reasons: [
             `it changed since it was first checked (tab ${target.surfaceRef} → ${now.target.surfaceRef}; Claude pid ${target.pid} → ${now.target.pid})`,
           ],
@@ -1785,6 +1952,333 @@ async function closeTabs(input: {
   );
 }
 
+// ---------------------------------------------------------------------------
+// --all-except (home-base-kwand.7): every workspace but the ones that matter
+// ---------------------------------------------------------------------------
+
+/** K7: the one gate option `--all-except` runs assess with, both passes. */
+const ALL_EXCEPT_GATES: GateOptions = {sharedTtyIdleShells: true};
+
+/** The words `--apply`'s tab record (K4) reports; tab-record-command.ts's form. */
+function recordWords(
+  result: ReturnType<typeof recordTabs>,
+): {kind: 'failed'; reason: string} | {kind: 'recorded'; words: string} {
+  const {live} = result;
+  if (live.kind === 'failed') {
+    return {
+      kind: 'failed',
+      reason: `cmux's live session file ${tildeText(live.file)} could not be read: ${live.reason}`,
+    };
+  }
+  return {
+    kind: 'recorded',
+    words: `${live.kind === 'unchanged' ? 'unchanged since the last record' : 'recorded'}: ${live.counts.windows} windows, ${live.counts.workspaces} workspaces, ${live.counts.tabs} tabs, ${live.counts.claudeTabs} with a Claude session`,
+  };
+}
+
+/** cmux's live session file as a fact: when cmux wrote it, how many workspaces. */
+function realReadSessionFile(env: EnvLike, nowMs: number): SessionFileFact {
+  const path = join(cmuxSupportDir(env), LIVE_SESSION_FILE);
+  const read = readTabSet(path);
+  if (!read.ok) {
+    return {kind: 'failed', path, reason: read.reason};
+  }
+  const {fileCreatedAt, windows} = read.tabSet;
+  return {
+    ageMs: nowMs - fileCreatedAt,
+    createdAt: new Date(fileCreatedAt).toISOString(),
+    kind: 'read',
+    path,
+    workspaces: windows.reduce(
+      (total, window) => total + window.workspaces.length,
+      0,
+    ),
+  };
+}
+
+/** The plan's counts (K6) and facts, from the finished state. */
+function allExceptInfo(input: {
+  first: LiveView;
+  keep: readonly string[];
+  keepActiveText: string;
+  sessionFile: SessionFileFact;
+  state: CloseState;
+  tabRecord: string | null;
+}): AllExceptInfo {
+  const {first, state} = input;
+  const keptByKind: Partial<Record<KeepKind, number>> = {};
+  for (const entry of state.kept) {
+    const kind = primaryKind(entry.reasonKinds ?? ['notChecked']);
+    keptByKind[kind] = (keptByKind[kind] ?? 0) + 1;
+  }
+  const workspaces = first.tree.windows.flatMap((window) => window.workspaces);
+  const shared = sharedTtyWorkspaces(
+    workspaces.flatMap((workspace) =>
+      (surfacesOfWorkspace(first.tree, workspace.id) ?? []).map((id) => ({
+        tty:
+          first.surfaces.find(
+            (surface) => surface.id?.toUpperCase() === id.toUpperCase(),
+          )?.tty ?? null,
+        workspaceId: workspace.id,
+      })),
+    ),
+  );
+  const goes = state.dryRun
+    ? state.planned
+    : [...state.closed, ...state.failed];
+  return {
+    counts: {
+      failed: state.failed.length,
+      kept: state.kept.length,
+      keptByKind,
+      wouldClose: state.dryRun ? state.planned.length : state.closed.length,
+    },
+    keep: [...input.keep],
+    keepActive: input.keepActiveText,
+    sessionFile: input.sessionFile,
+    sharedTty: {
+      keptFor: state.kept.filter(
+        (entry) => entry.reasonKinds?.includes('sharedTty') === true,
+      ).length,
+      passedByRule: goes.filter((entry) =>
+        shared.has(entry.workspaceId.toUpperCase()),
+      ).length,
+      workspaces: shared.size,
+    },
+    tabRecord: input.tabRecord,
+    treeWorkspaces: workspaces.length,
+  };
+}
+
+/** One implementation of SIGTERM-wait-close for a whole workspace (workspace-close.ts). */
+async function stopAndCloseWorkspace(
+  assessment: Closable,
+  full: CloseDeps,
+): Promise<StopAndCloseFailure | null> {
+  const entry = assessment.entry;
+  return await stopThenCloseWorkspace(assessment.claude, {
+    closeWorkspace: async () => {
+      const closed = await full.run([
+        'close-workspace',
+        '--workspace',
+        entry.workspaceId,
+        '--window',
+        entry.windowId,
+      ]);
+      return closed.kind === 'failed' ? closed.reason : null;
+    },
+    commandOf: full.commandOf,
+    exitTimeoutMs: full.exitTimeoutMs,
+    kill: full.kill,
+    nowMs: full.nowMs,
+    sleep: full.sleep,
+  });
+}
+
+/**
+ * K1: `--all-except` chooses the targets (every workspace in every cmux
+ * window) and keeps some by K2 (a) to (g) and K3; every workspace then goes
+ * through `assess`, and what passes both goes through closePlanned and
+ * stopThenCloseWorkspace exactly as a named close does.
+ */
+async function closeAllExcept(input: {
+  apply: boolean;
+  first: LiveView;
+  full: CloseDeps;
+  hookPids: HookStorePids;
+  json: boolean;
+  keep: readonly string[];
+  keepActiveMs: number;
+  keepActiveText: string;
+  logPath: string;
+  ownId: string;
+  style: OutputStyle;
+}): Promise<CloseResult> {
+  const {first, full, ownId} = input;
+  const dryRun = !input.apply;
+  const now = new Date(full.nowMs());
+
+  // ---- the facts every keep rule reads; a failed read refuses (K3) ----
+  const live = await full.readLive();
+  if (live.kind === 'failed') {
+    return refuse(
+      `--all-except needs to know which Claude sessions run in each workspace, and the live sessions could not be read: ${live.reason}`,
+    );
+  }
+  const facts = await full.readSessionFacts(
+    new Set(live.workspacesBySessionId.keys()),
+  );
+  if (facts.kind === 'failed') {
+    return refuse(
+      `the inbox could not be read, so no session's marks or activity are known (K3): ${facts.reason}`,
+    );
+  }
+  const keep = resolveKeep({
+    facts,
+    keep: input.keep,
+    live,
+    tree: first.tree,
+  });
+  if (keep.kind === 'refused') return refuse(keep.reason);
+  const sessionFile = full.readSessionFile();
+
+  // ---- K4: with --apply, the tab record first; if it fails, nothing closes ----
+  let tabRecord: string | null = null;
+  if (input.apply) {
+    const recorded = full.recordTabs();
+    if (recorded.kind === 'failed') {
+      return refuse(
+        `the tab record (thread tabs record) failed, so what was open before this close would not be on record: ${recorded.reason}`,
+      );
+    }
+    tabRecord = recorded.words;
+  }
+
+  // ---- every workspace in every window: K2's keeps, then assess ----
+  const sessionsByWorkspace = new Map<string, Set<string>>();
+  for (const [sessionId, workspaceIds] of live.workspacesBySessionId) {
+    for (const workspaceId of workspaceIds) {
+      const key = workspaceId.toUpperCase();
+      const set = sessionsByWorkspace.get(key) ?? new Set<string>();
+      set.add(sessionId.toLowerCase());
+      sessionsByWorkspace.set(key, set);
+    }
+  }
+  const startedAt = now.toISOString();
+  const state: CloseState = {
+    closed: [],
+    dryRun,
+    failed: [],
+    failures: [],
+    finishedAt: null,
+    kept: [],
+    logPath: input.logPath,
+    notFound: [],
+    planned: [],
+    startedAt,
+  };
+  const workspaces = first.tree.windows.flatMap((window) => window.workspaces);
+  const closable: Closable[] = [];
+  for (const workspace of workspaces) {
+    const target: Resolved = {
+      given: [workspace.ref ?? workspace.id],
+      workspaceId: workspace.id,
+    };
+    const assessment = await assess(
+      target,
+      first,
+      input.hookPids,
+      full,
+      null,
+      ALL_EXCEPT_GATES,
+    );
+    if (assessment.kind === 'notFound') {
+      state.notFound.push({given: target.given, reason: assessment.reason});
+      continue;
+    }
+    const key = workspace.id.toUpperCase();
+    const pre: KeepReason[] = [];
+    if (key === ownId) {
+      pre.push({
+        kind: 'own',
+        text: `own: this command runs in it (CMUX_WORKSPACE_ID ${ownId})`,
+      });
+    }
+    const sessions = new Set(sessionsByWorkspace.get(key) ?? []);
+    if (assessment.entry.sessionId != null) {
+      sessions.add(assessment.entry.sessionId.toLowerCase());
+    }
+    for (const sessionId of [...sessions].sort()) {
+      pre.push(
+        ...sessionKeeps(sessionId, facts, {
+          keepActiveMs: input.keepActiveMs,
+          keepActiveText: input.keepActiveText,
+          now,
+        }),
+      );
+    }
+    const named = keep.byWorkspace.get(key);
+    if (named != null) {
+      pre.push({
+        kind: 'keepFlag',
+        text: `named with --keep ${named.join(', ')}`,
+      });
+    }
+    if (pre.length === 0 && assessment.kind === 'closable') {
+      closable.push(assessment);
+      state.planned.push(assessment.entry);
+      continue;
+    }
+    const merged: Extract<Assessment, {kind: 'kept'}> = {
+      drafts: assessment.kind === 'kept' ? assessment.drafts : [],
+      entry: assessment.entry,
+      kind: 'kept',
+      kinds: [
+        ...pre.map((reason) => reason.kind),
+        ...(assessment.kind === 'kept' ? (assessment.kinds ?? []) : []),
+      ],
+      reasons: [
+        ...pre.map((reason) => reason.text),
+        ...(assessment.kind === 'kept' ? assessment.reasons : []),
+      ],
+    };
+    // (d): the unsent text is stored as a named close stores it (not in a dry run).
+    state.kept.push(
+      keptOf(merged, storeDrafts(merged, full, dryRun, state.failures)),
+    );
+  }
+
+  const finish = (exitCode: 0 | 1): CloseResult => {
+    state.allExcept = allExceptInfo({
+      first,
+      keep: input.keep,
+      keepActiveText: input.keepActiveText,
+      sessionFile,
+      state,
+      tabRecord,
+    });
+    return {
+      exitCode,
+      output: input.json
+        ? JSON.stringify({close: state}, null, 2)
+        : renderClose(state, input.style),
+      state,
+    };
+  };
+  if (dryRun) return finish(0);
+
+  // ---- K1: the one close pipeline, unchanged ----
+  await closePlanned({
+    closable,
+    full,
+    logPath: input.logPath,
+    reassess: async (planned) => {
+      const again = await readView(full);
+      const storeAgain = full.readHookStore();
+      if (again.kind !== 'read' || !storeAgain.ok) {
+        return unreadAgain(planned, again, storeAgain);
+      }
+      return await assess(
+        {given: planned.entry.given, workspaceId: planned.entry.workspaceId},
+        again.view,
+        hookStorePids(storeAgain.value),
+        full,
+        null,
+        ALL_EXCEPT_GATES,
+      );
+    },
+    startedAt,
+    state,
+    stopAndClose: async (assessment) =>
+      await stopAndCloseWorkspace(assessment, full),
+    windowNote: async (entry) => await windowNoteAfterClose(entry, full),
+  });
+  state.finishedAt = new Date(full.nowMs()).toISOString();
+  return finish(
+    state.failures.length === 0 && state.failed.length === 0 ? 0 : 1,
+  );
+}
+
 export async function closeWorkspaces(
   options: CloseOptions,
   deps: Partial<CloseDeps> = {},
@@ -1794,7 +2288,48 @@ export async function closeWorkspaces(
 
   // ---- 1. the arguments, before any cmux call ----
   const handedOff = options.handedOff === true;
+  const allExcept = options.allExcept === true;
+  const keepGiven = options.keep ?? [];
+  // K11 (home-base-kwand.7): a named close closes by default and --all-except
+  // does not, so the two never mix.
+  if (allExcept) {
+    const mixed = [
+      ...(options.workspaces.length > 0 ? ['workspaces'] : []),
+      ...(options.sessions.length > 0 ? ['--session'] : []),
+      ...(options.tab === true ? ['--tab'] : []),
+      ...(handedOff ? ['--handed-off'] : []),
+    ];
+    if (mixed.length > 0) {
+      return refuse(
+        `--all-except chooses its own targets (every workspace but the kept ones) and takes no ${mixed.join(', ')}. Name what to keep with --keep, or drop --all-except to close named workspaces`,
+      );
+    }
+    if (options.apply === true && options.dryRun) {
+      return refuse(
+        '--apply and --dry-run contradict each other; --all-except is a dry run unless --apply is given',
+      );
+    }
+  } else {
+    const allExceptOnly = [
+      ...(options.apply === true ? ['--apply'] : []),
+      ...(keepGiven.length > 0 ? ['--keep'] : []),
+      ...(options.keepActive != null ? ['--keep-active'] : []),
+    ];
+    if (allExceptOnly.length > 0) {
+      return refuse(
+        `${allExceptOnly.join(', ')} only go with --all-except. A named close (thread close <workspace…>) closes for real without them; use --dry-run to only look`,
+      );
+    }
+  }
+  const keepActiveText = options.keepActive ?? KEEP_ACTIVE_DEFAULT;
+  const keepActiveMs = parseKeepActive(keepActiveText);
+  if (allExcept && keepActiveMs == null) {
+    return refuse(
+      `--keep-active takes a duration such as 30m, 24h or 2d (or 0); not ${JSON.stringify(keepActiveText)}`,
+    );
+  }
   if (
+    !allExcept &&
     options.workspaces.length === 0 &&
     options.sessions.length === 0 &&
     !handedOff
@@ -1825,6 +2360,12 @@ export async function closeWorkspaces(
   }
   const own = env.CMUX_WORKSPACE_ID;
   const ownId = own != null && own !== '' ? own.toUpperCase() : null;
+  // K2 (a): its own workspace is always kept, so it must be known.
+  if (allExcept && ownId == null) {
+    return refuse(
+      '--all-except keeps the workspace it runs in, and CMUX_WORKSPACE_ID is not set, so that workspace cannot be told. Run it from a cmux tab',
+    );
+  }
   for (const given of options.workspaces) {
     if (ownId != null && given.toUpperCase() === ownId) {
       return ownPaneRefusal(ownId, given);
@@ -1868,6 +2409,37 @@ export async function closeWorkspaces(
     readLive:
       deps.readLive ??
       (async () => await readLiveSessions(realLiveSessionDeps(cmuxEnv))),
+    readSessionFacts:
+      deps.readSessionFacts ??
+      (async (live) =>
+        await realReadSessionFacts({
+          cwd: process.cwd(),
+          env,
+          live,
+          now: new Date(deps.nowMs?.() ?? Date.now()),
+        })),
+    readSessionFile:
+      deps.readSessionFile ??
+      (() => realReadSessionFile(env, deps.nowMs?.() ?? Date.now())),
+    recordTabs:
+      deps.recordTabs ??
+      (() => {
+        const storeDir = tabRecordDir(threadsStateDir(env));
+        try {
+          return recordWords(
+            recordTabs({
+              now: Date.now(),
+              storeDir,
+              supportDir: cmuxSupportDir(env),
+            }),
+          );
+        } catch (error) {
+          return {
+            kind: 'failed',
+            reason: `the tab records under ${tildeText(storeDir)} could not be written: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }),
     resumeOf:
       deps.resumeOf ?? ((sessionId) => realResumeOf(sessionId, env, repoCache)),
     run: deps.run ?? realCmuxRunner(undefined, cmuxEnv),
@@ -1898,6 +2470,23 @@ export async function closeWorkspaces(
     return refuse(
       `the cmux hook store could not be read, so no Claude process can be matched to its session: ${store.reason}`,
     );
+  }
+
+  // ---- 3a. --all-except (home-base-kwand.7): its own target choice ----
+  if (allExcept && ownId != null && keepActiveMs != null) {
+    return await closeAllExcept({
+      apply: options.apply === true,
+      first: first.view,
+      full,
+      hookPids: hookStorePids(store.value),
+      json: options.json,
+      keep: keepGiven,
+      keepActiveMs,
+      keepActiveText,
+      logPath,
+      ownId,
+      style,
+    });
   }
 
   // The live sessions, read at most once, and only when a session is named.
@@ -2072,27 +2661,8 @@ export async function closeWorkspaces(
     },
     startedAt,
     state,
-    stopAndClose: async (assessment) => {
-      const entry = assessment.entry;
-      // One implementation of SIGTERM-wait-close (workspace-close.ts).
-      return await stopThenCloseWorkspace(assessment.claude, {
-        closeWorkspace: async () => {
-          const closed = await full.run([
-            'close-workspace',
-            '--workspace',
-            entry.workspaceId,
-            '--window',
-            entry.windowId,
-          ]);
-          return closed.kind === 'failed' ? closed.reason : null;
-        },
-        commandOf: full.commandOf,
-        exitTimeoutMs: full.exitTimeoutMs,
-        kill: full.kill,
-        nowMs: full.nowMs,
-        sleep: full.sleep,
-      });
-    },
+    stopAndClose: async (assessment) =>
+      await stopAndCloseWorkspace(assessment, full),
     windowNote: async (entry) => await windowNoteAfterClose(entry, full),
   });
   state.finishedAt = new Date(full.nowMs()).toISOString();
