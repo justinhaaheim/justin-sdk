@@ -68,6 +68,7 @@ import type {
   KeepReason,
   SessionFactsRead,
   SessionFileFact,
+  UnknownCause,
   UnplacedClaude,
 } from './close-all-except';
 import type {CmuxRunner, CmuxTree} from './cmux';
@@ -111,6 +112,8 @@ import {
 import {resolveRepoRoot} from '../repo-status/sessions';
 import {writeStdout} from '../write-stdout';
 import {
+  blankScreenKeep,
+  firstUnknownCause,
   KEEP_ACTIVE_DEFAULT,
   KEEP_KIND_ORDER,
   KEEP_KIND_WORDS,
@@ -121,6 +124,7 @@ import {
   resolveKeep,
   sessionKeeps,
   sharedTtyWorkspaces,
+  UNKNOWN_KEPT_AS,
   unplacedClaude,
   unplacedKeep,
 } from './close-all-except';
@@ -297,6 +301,12 @@ export interface CloseKept extends CloseEntry {
    */
   reasonKinds?: KeepKind[];
   reasons: string[];
+  /**
+   * home-base-kwand.27: --all-except only, the cause of its first `unknown`
+   * reason; it picks the "Kept as" words when unknown is the first kind.
+   * Absent when no reason is `unknown`.
+   */
+  unknownCause?: UnknownCause;
 }
 
 export interface CloseClosed extends CloseEntry {
@@ -626,6 +636,12 @@ function sessionWorkspace(
 
 type Assessment =
   | {
+      /**
+       * home-base-kwand.27: gateSurfaces' blank-screen panes. Required here
+       * (only assess builds a closable), so a closable workspace can never
+       * lack the fact.
+       */
+      blankPanes: string[];
       claude: Proc[];
       entry: CloseEntry;
       kind: 'closable';
@@ -640,6 +656,11 @@ type Assessment =
       weak?: string[];
     }
   | {
+      /**
+       * home-base-kwand.27: gateSurfaces' blank-screen panes; set by assess.
+       * A kept workspace stays kept, so its absence elsewhere is safe.
+       */
+      blankPanes?: string[];
       drafts: {sessionId: string | null; surfaceId: string; text: string}[];
       entry: CloseEntry;
       kind: 'kept';
@@ -651,6 +672,8 @@ type Assessment =
        */
       noProcessTty?: string[];
       reasons: string[];
+      /** home-base-kwand.27: --all-except's cause of its first `unknown` reason. */
+      unknownCause?: UnknownCause;
       /** home-base-kwand.21 F2: gateSurfaces' weak evidence; set by assess. */
       weak?: string[];
     }
@@ -736,6 +759,7 @@ async function assess(
   };
   if (reasons.length > 0) {
     return {
+      blankPanes: gate.blankPanes,
       drafts: gate.drafts,
       entry,
       kind: 'kept',
@@ -746,6 +770,7 @@ async function assess(
     };
   }
   return {
+    blankPanes: gate.blankPanes,
     claude: gate.claude,
     entry,
     kind: 'closable',
@@ -800,6 +825,9 @@ function keptOf(
     drafts,
     ...(assessment.kinds == null ? {} : {reasonKinds: assessment.kinds}),
     reasons: assessment.reasons,
+    ...(assessment.unknownCause == null
+      ? {}
+      : {unknownCause: assessment.unknownCause}),
   };
 }
 
@@ -1256,7 +1284,7 @@ function allExceptFields(all: AllExceptInfo): {label: string; value: string}[] {
   return [
     {
       label: 'Keeps',
-      value: `this command's own workspace; a marked session (⭐ or any mark, on any session of its chain); Claude working now; unsent text; an untracked session; activity within --keep-active ${all.keepActive}${all.keep.length > 0 ? `; --keep ${all.keep.join(', ')}` : ''}; and every check a named close makes. A fact that cannot be read keeps the workspace as unknown, and so does a blank pane, a pane whose tty runs nothing, or a shared tty while any live Claude process is placed in no workspace`,
+      value: `this command's own workspace; a marked session (⭐ or any mark, on any session of its chain); Claude working now; unsent text; an untracked session; activity within --keep-active ${all.keepActive}${all.keep.length > 0 ? `; --keep ${all.keep.join(', ')}` : ''}; and every check a named close makes. A fact that cannot be read keeps the workspace as unknown, and so do a blank pane and a pane whose tty runs nothing, always, and a shared tty while any live Claude process is placed in no workspace`,
     },
     {
       label: 'Tab record',
@@ -1272,8 +1300,14 @@ function allExceptFields(all: AllExceptInfo): {label: string; value: string}[] {
 function keptAsFields(entry: CloseKept): {label: string; value: string}[] {
   const kinds = entry.reasonKinds ?? ['notChecked'];
   const kind = primaryKind(kinds);
+  // home-base-kwand.27: an unknown keep names its cause, so a keep where
+  // nothing failed to read never says a fact could not be read.
+  const words =
+    kind === 'unknown' && entry.unknownCause != null
+      ? UNKNOWN_KEPT_AS[entry.unknownCause]
+      : KEEP_KIND_WORDS[kind];
   return [
-    {label: 'Kept as', value: KEEP_KIND_WORDS[kind]},
+    {label: 'Kept as', value: words},
     ...(kinds.includes('sharedTty')
       ? [
           {
@@ -2288,6 +2322,10 @@ async function closeAllExcept(input: {
     // kept as unknown, with or without an unplaced Claude or the flag.
     const noProcess = assessment.noProcessTty ?? [];
     if (noProcess.length > 0) pre.push(noProcessTtyKeep(noProcess));
+    // home-base-kwand.27: a pane whose screen is blank is kept as unknown,
+    // whatever runs on its tty, with or without an unplaced Claude or the flag.
+    const blankPanes = assessment.blankPanes ?? [];
+    if (blankPanes.length > 0) pre.push(blankScreenKeep(blankPanes));
     const weak = assessment.weak ?? [];
     if (unplaced.length > 0 && weak.length > 0) {
       pre.push(unplacedKeep(unplaced, weak));
@@ -2298,6 +2336,7 @@ async function closeAllExcept(input: {
       state.planned.push(assessment.entry);
       continue;
     }
+    const unknownCause = firstUnknownCause(pre);
     const merged: Extract<Assessment, {kind: 'kept'}> = {
       drafts: assessment.kind === 'kept' ? assessment.drafts : [],
       entry: assessment.entry,
@@ -2310,6 +2349,7 @@ async function closeAllExcept(input: {
         ...pre.map((reason) => reason.text),
         ...(assessment.kind === 'kept' ? assessment.reasons : []),
       ],
+      ...(unknownCause == null ? {} : {unknownCause}),
     };
     // (d): the unsent text is stored as a named close stores it (not in a dry run).
     state.kept.push(
@@ -2360,16 +2400,27 @@ async function closeAllExcept(input: {
       );
       if (assessed.kind !== 'closable') return assessed;
       // home-base-kwand.24 R1 at the moment of closing: the plan saw
-      // processes on the tty, and the re-check sees none.
-      if (assessed.noProcessTty.length > 0) {
-        const reason = noProcessTtyKeep(assessed.noProcessTty);
+      // processes on the tty, and the re-check sees none. home-base-kwand.27
+      // likewise: the plan saw a drawn screen, and the re-check sees a blank.
+      const held: KeepReason[] = [
+        ...(assessed.noProcessTty.length > 0
+          ? [noProcessTtyKeep(assessed.noProcessTty)]
+          : []),
+        ...(assessed.blankPanes.length > 0
+          ? [blankScreenKeep(assessed.blankPanes)]
+          : []),
+      ];
+      const heldCause = firstUnknownCause(held);
+      if (held.length > 0) {
         return {
+          blankPanes: assessed.blankPanes,
           drafts: [],
           entry: assessed.entry,
           kind: 'kept',
-          kinds: [reason.kind],
+          kinds: held.map((reason) => reason.kind),
           noProcessTty: assessed.noProcessTty,
-          reasons: [reason.text],
+          reasons: held.map((reason) => reason.text),
+          ...(heldCause == null ? {} : {unknownCause: heldCause}),
           ...(assessed.weak == null ? {} : {weak: assessed.weak}),
         };
       }
@@ -2383,6 +2434,7 @@ async function closeAllExcept(input: {
       const reason: KeepReason | null =
         liveAgain.kind === 'failed'
           ? {
+              cause: 'unreadFact',
               kind: 'unknown',
               text: `unknown: ${weak.join('; ')}, and the live sessions could not be read again to show that no Claude runs here unseen: ${liveAgain.reason}`,
             }
@@ -2390,12 +2442,14 @@ async function closeAllExcept(input: {
             ? unplacedKeep(unplacedNow, weak)
             : null;
       if (reason == null) return assessed;
+      const reasonCause = firstUnknownCause([reason]);
       return {
         drafts: [],
         entry: assessed.entry,
         kind: 'kept',
         kinds: [reason.kind],
         reasons: [reason.text],
+        ...(reasonCause == null ? {} : {unknownCause: reasonCause}),
         weak,
       };
     },

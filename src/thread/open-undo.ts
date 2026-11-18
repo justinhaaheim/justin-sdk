@@ -607,6 +607,15 @@ export interface GateDraft {
 }
 
 export interface SurfacesGate {
+  /**
+   * home-base-kwand.27: each pane whose screen was read and is blank, in
+   * words. cmux returns an empty screen for a pane that has not drawn yet
+   * (F20), so a blank screen does not show what runs there. gatePane lets
+   * such a pane pass as an idle shell when its tty runs only shells; only
+   * `thread close --all-except` reads this list and keeps the workspace for
+   * it, so the named close and `--undo` are unchanged (home-base-kwand.20).
+   */
+  blankPanes: string[];
   /** Claude session processes on the workspace's panes, to stop first. */
   claude: Proc[];
   drafts: GateDraft[];
@@ -667,6 +676,7 @@ export async function gateSurfaces(
   const suggestions: GateSuggestion[] = [];
   const weak: string[] = [];
   const noProcessTty: string[] = [];
+  const blankPanes: string[] = [];
   if (surfaceIds.length === 0) {
     keep('noPane', 'cmux lists no pane in it, so nothing on it can be checked');
   }
@@ -705,7 +715,10 @@ export async function gateSurfaces(
         `no process at all runs on tty ${tty ?? '?'}, which ${label} reports`,
       );
     }
-    if (blank) weak.push(`${label} shows a blank screen`);
+    if (blank) {
+      weak.push(`${label} shows a blank screen`);
+      blankPanes.push(`${label} shows a blank screen`);
+    }
     // home-base-kwand.7 K7, made opt-in and stricter by home-base-kwand.21
     // F1 (`thread close --all-except --close-shared-tty` only, and only when
     // the caller found every Claude process placed): every process on the
@@ -766,6 +779,7 @@ export async function gateSurfaces(
     }
   }
   return {
+    blankPanes,
     claude,
     drafts,
     kinds,

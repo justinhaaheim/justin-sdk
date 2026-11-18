@@ -97,16 +97,50 @@ export const KEEP_KIND_WORDS: Record<KeepKind, string> = {
   startingOrDialog: 'Claude starting or showing a dialog',
   ttyUnknown: 'tty unknown',
   unconfirmedProcess: 'claude process not confirmed',
-  unknown: 'unknown (a fact could not be read)',
+  // home-base-kwand.27: the counts' word covers every cause below; a kept
+  // workspace's "Kept as" line names its own cause (UNKNOWN_KEPT_AS).
+  unknown:
+    'unknown (a fact could not be read, or what runs in a tab cannot be seen)',
   unreadableScreen: 'unreadable screen',
   unsentText: 'unsent text',
   untracked: 'untracked session',
   working: 'Claude working now',
 };
 
-export interface KeepReason {
-  kind: KeepKind;
-  text: string;
+/**
+ * home-base-kwand.27: why a workspace was kept as `unknown`. The JSON kind
+ * stays `unknown` (K6 counts it once); the cause only picks the words of its
+ * "Kept as" line, so a keep where nothing failed to read never says so.
+ */
+export type UnknownCause =
+  | 'blankScreen'
+  | 'noProcessTty'
+  | 'unreadFact'
+  | 'unseenClaude';
+
+/** The "Kept as" words of a workspace kept as `unknown`, by cause. */
+export const UNKNOWN_KEPT_AS: Record<UnknownCause, string> = {
+  blankScreen:
+    'unknown (a tab shows a blank screen, so what runs in it cannot be seen)',
+  noProcessTty:
+    'unknown (no process runs on the terminal a tab reports, so what runs in that tab cannot be seen)',
+  unreadFact: 'unknown (a fact could not be read)',
+  unseenClaude: 'unknown (a Claude process could be running here unseen)',
+};
+
+/** An `unknown` reason always carries its cause (kwand.27); no other does. */
+export type KeepReason =
+  | {cause: UnknownCause; kind: 'unknown'; text: string}
+  | {kind: Exclude<KeepKind, 'unknown'>; text: string};
+
+/** The cause of the first `unknown` reason, or null when there is none. */
+export function firstUnknownCause(
+  reasons: readonly KeepReason[],
+): UnknownCause | null {
+  for (const reason of reasons) {
+    if (reason.kind === 'unknown') return reason.cause;
+  }
+  return null;
 }
 
 /** K6: the first kind of a kept workspace, in KEEP_KIND_ORDER. */
@@ -268,6 +302,7 @@ export function sessionKeeps(
     if (facts.testSessions.has(key)) {
       return [
         {
+          cause: 'unreadFact',
           kind: 'unknown',
           text: `unknown: session ${key} is a test session, which the inbox leaves out, so its marks and activity were not read`,
         },
@@ -276,6 +311,7 @@ export function sessionKeeps(
     if (facts.partial != null) {
       return [
         {
+          cause: 'unreadFact',
           kind: 'unknown',
           text: `unknown: session ${key} has no inbox row, and the inbox load was partial (${facts.partial})`,
         },
@@ -297,6 +333,7 @@ export function sessionKeeps(
     });
   } else if (found.flags == null) {
     out.push({
+      cause: 'unreadFact',
       kind: 'unknown',
       text: `unknown: the marks of session ${key} could not be read (${found.unreadable ?? 'its session bead was not loaded'})`,
     });
@@ -309,12 +346,14 @@ export function sessionKeeps(
     }
     if (found.flags.undecodable.length > 0) {
       out.push({
+        cause: 'unreadFact',
         kind: 'unknown',
         text: `unknown: session ${key}'s chain carries mark labels that do not decode (${found.flags.undecodable.map((entry) => entry.label).join(', ')})`,
       });
     }
     if (found.flags.problems.length > 0) {
       out.push({
+        cause: 'unreadFact',
         kind: 'unknown',
         text: `unknown: the marks of part of session ${key}'s chain could not be read (${found.flags.problems.join('; ')})`,
       });
@@ -332,12 +371,14 @@ export function sessionKeeps(
     (lastMs == null || nowMs - lastMs < WORKING_NOW_WINDOW_MS)
   ) {
     out.push({
+      cause: 'unreadFact',
       kind: 'unknown',
       text: `unknown: whether session ${key} is working now could not be told (${ending == null ? 'its ending was not read' : ending.reason})`,
     });
   }
   if (lastMs == null) {
     out.push({
+      cause: 'unreadFact',
       kind: 'unknown',
       text: `unknown: session ${key}'s last activity could not be dated, so whether it was active within --keep-active ${input.keepActiveText} cannot be told`,
     });
@@ -426,8 +467,25 @@ export function unplacedClaude(
  */
 export function noProcessTtyKeep(panes: readonly string[]): KeepReason {
   return {
+    cause: 'noProcessTty',
     kind: 'unknown',
     text: `unknown: ${panes.join('; ')}. A live terminal always runs at least a shell, so that tty is stale and what runs in the pane cannot be checked`,
+  };
+}
+
+/**
+ * home-base-kwand.27: each pane whose screen was read and is blank keeps its
+ * workspace as `unknown`, whatever runs on its tty, whether or not any Claude
+ * is unplaced and with or without --close-shared-tty. cmux returns an empty
+ * screen for a pane that has not drawn yet (F20), and gatePane passes a blank
+ * screen as an idle shell, so a pane whose tty report is stale could hide a
+ * Claude that another stale report placed elsewhere.
+ */
+export function blankScreenKeep(panes: readonly string[]): KeepReason {
+  return {
+    cause: 'blankScreen',
+    kind: 'unknown',
+    text: `unknown: ${panes.join('; ')}. cmux shows a blank screen for a tab that has not drawn yet, so a blank screen does not show what runs in the tab`,
   };
 }
 
@@ -440,6 +498,7 @@ export function unplacedKeep(
     ...new Set(unplaced.map((entry) => entry.pid ?? 'unknown')),
   ].join(', ');
   return {
+    cause: 'unseenClaude',
     kind: 'unknown',
     text: `unknown: ${unplaced.length === 1 ? '1 live Claude process' : `${unplaced.length} live Claude processes`} could not be placed in any workspace (pid ${pids}), and ${weak.join('; ')}, so one of them could be running here unseen`,
   };

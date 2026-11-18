@@ -261,7 +261,11 @@ ALL EXCEPT (--all-except, home-base-kwand.7). Every workspace in every cmux wind
 
   A tab whose terminal runs no process at all keeps its workspace as unknown, whatever its screen shows (a blank screen or an idle prompt), with or without --close-shared-tty, in the plan and again in the re-check right before each close. A live terminal always runs at least a shell, so that terminal report is stale and what runs in the tab cannot be checked.
 
+  A tab whose screen is blank keeps its workspace as unknown, whatever runs on its terminal, with or without --close-shared-tty, in the plan and again in the re-check right before each close. cmux shows a blank screen for a tab that has not drawn yet, so a blank screen does not show what runs in the tab. (A named close still passes a blank tab whose terminal runs only shells.)
+
   A live Claude process that cannot be placed in any workspace (no session named for it, or it runs on a terminal no single tab reports, even when another process of the same session is in a tab) could be running behind a tab whose evidence is weak. While one exists, every workspace with a blank tab, a tab whose terminal runs no process, or a shared tty is kept as unknown, naming the pid, with or without --close-shared-tty. The counts say how many there were.
+
+  A workspace kept as unknown says why on its "Kept as" line: "a fact could not be read"; "a Claude process could be running here unseen" (a Claude placed in no workspace, as above); "no process runs on the terminal a tab reports, so what runs in that tab cannot be seen"; or "a tab shows a blank screen, so what runs in it cannot be seen". When a workspace has more than one, the line names the first. --json keeps the kind unknown for all four and names the first in unknownCause: unreadFact, unseenClaude, noProcessTty or blankScreen.
 
   If CMUX_WORKSPACE_ID names no workspace in the cmux tree (a stale id after a restore), --all-except refuses, since its own workspace could not be kept.
 
