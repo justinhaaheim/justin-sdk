@@ -789,6 +789,14 @@ async function readInboxOnce(input: {
   lookupPanes?: () => Promise<PaneLookup>;
   now: Date;
   repo: string | null;
+  /**
+   * home-base-kwand.22: read only these sessions (lowercase ids) of the
+   * sessions index, and skip the untracked scan, so the read costs a few
+   * sessions' loads instead of every transcript. A session not in the index
+   * then has no row at all, which `thread close --all-except` keeps as
+   * untracked, as it keeps an untracked row. Absent or null: every session.
+   */
+  sessionIds?: ReadonlySet<string> | null;
   /** home-base-9uzxw.2 (D-PERF): times each phase and counts its spawns. */
   timings?: TimingRecorder | null;
 }): Promise<
@@ -865,7 +873,14 @@ async function readInboxOnce(input: {
     sighting: SessionSighting;
   }[] = [];
   const endLogs = timedStart(input.timings, 'message logs');
+  const onlySessions = input.sessionIds ?? null;
   for (const indexed of index.sessions) {
+    if (
+      onlySessions != null &&
+      !onlySessions.has(indexed.sessionId.toLowerCase())
+    ) {
+      continue;
+    }
     const sighting =
       indexed.sightings.find((entry) => entry.event === 'created') ??
       indexed.sightings[0];
@@ -925,17 +940,31 @@ async function readInboxOnce(input: {
   // EVERY id in the index is excluded, whatever its sightings: the tracked
   // half lists it (as a card, a ❔ card, or in the hidden-by-age count), so
   // none appears twice.
-  const pendingUntracked = timed(input.timings, 'untracked scan', () =>
-    readUntracked({
-      cache,
-      days: input.days,
-      devRoot: input.devRoot ?? defaultDevRoot(),
-      env,
-      exclude: new Set(index.sessions.map((indexed) => indexed.sessionId)),
-      now,
-      repo: input.repo,
-    }),
-  );
+  // home-base-kwand.22: a read of named sessions scans no untracked transcript.
+  const pendingUntracked: Promise<UntrackedRead> =
+    onlySessions != null
+      ? Promise.resolve({
+          devRoot: input.devRoot ?? defaultDevRoot(),
+          failures: [],
+          oldReports: null,
+          outsideRoot: {directories: 0, sessions: 0},
+          sessions: [],
+          unattributed: [],
+          unplaced: 0,
+        })
+      : timed(input.timings, 'untracked scan', () =>
+          readUntracked({
+            cache,
+            days: input.days,
+            devRoot: input.devRoot ?? defaultDevRoot(),
+            env,
+            exclude: new Set(
+              index.sessions.map((indexed) => indexed.sessionId),
+            ),
+            now,
+            repo: input.repo,
+          }),
+        );
   const [loads, untracked, panes, beforeRestart] = await Promise.all([
     pendingLoads,
     pendingUntracked,
@@ -1328,7 +1357,9 @@ export async function readInbox(
   const fileMark = fileMemoMark();
   const transcriptMark = transcriptCacheMark();
   const result = await readInboxOnce(input);
-  if (result.kind === 'read') {
+  // home-base-kwand.22: a read of named sessions uses only part of the
+  // caches, so it drops and evicts nothing (as a load of one repo evicts nothing).
+  if (result.kind === 'read' && input.sessionIds == null) {
     dropUnusedFileMemo(fileMark);
     dropUnusedTranscriptMemory(transcriptMark);
     if (input.repo == null) {

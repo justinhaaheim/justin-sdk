@@ -417,8 +417,16 @@ export interface CloseDeps {
   readHookStore: () => SourceRead<HookStore>;
   /** The live sessions (readLiveSessions), read only when --session is given. */
   readLive: () => Promise<LiveSessions>;
-  /** `--all-except` (K9): the inbox's session facts, no age window. */
-  readSessionFacts: (live: ReadonlySet<string>) => Promise<SessionFactsRead>;
+  /**
+   * `--all-except` (K9): the inbox's session facts, no age window. `live`
+   * names the sessions whose ending is read (a Claude process runs them).
+   * `only` (home-base-kwand.22, the re-read before each close): read just
+   * these sessions and no untracked transcript; absent, every session.
+   */
+  readSessionFacts: (
+    live: ReadonlySet<string>,
+    only?: ReadonlySet<string>,
+  ) => Promise<SessionFactsRead>;
   /** `--all-except`: cmux's live session file, for its age and workspace count. */
   readSessionFile: () => SessionFileFact;
   /** `--all-except --apply` (K4): `thread tabs record`, run first: what it recorded, or why not. */
@@ -1329,7 +1337,7 @@ function allExceptFields(all: AllExceptInfo): {label: string; value: string}[] {
   const file = all.sessionFile;
   const fileWords =
     file.kind === 'read'
-      ? `cmux's saved session file was written ${Math.round(file.ageMs / 60_000)} min ago (${file.createdAt}); it lists ${file.workspaces} workspaces, cmux tree ${all.treeWorkspaces}${file.workspaces === all.treeWorkspaces ? '' : ' (cmux rewrites the file from time to time, so they can differ)'}`
+      ? `cmux's saved session file was written ${Math.round(file.ageMs / 60_000)} min ago (${file.createdAt}); it lists ${file.workspaces} workspaces, cmux tree ${all.treeWorkspaces}${file.workspaces === all.treeWorkspaces ? '' : '. They differ, so --apply refuses until they agree: a tree missing a workspace would leave it unchecked (cmux rewrites the file from time to time, so run it again in a minute)'}`
       : `cmux's saved session file ${tildeText(file.path)} could not be read: ${file.reason}`;
   return [
     {
@@ -2287,9 +2295,40 @@ async function closeAllExcept(input: {
   const sharedPlaced = placedOnSharedTty(live, first);
   const gateOptions = allExceptGates(input.closeSharedTty, unplaced);
   let unplacedKeptFor = 0;
-  const facts = await full.readSessionFacts(
-    new Set(live.workspacesBySessionId.keys()),
-  );
+
+  // ---- every workspace in every window through assess (read-only) ----
+  // home-base-kwand.22 finding 5: assessed before the facts are read, so the
+  // ending of a session the gate saw run but the live join did not place is
+  // read from its transcript like every other live session's.
+  const assessments: {assessment: Assessment; target: Resolved}[] = [];
+  for (const workspace of workspaces) {
+    const target: Resolved = {
+      given: [workspace.ref ?? workspace.id],
+      workspaceId: workspace.id,
+    };
+    assessments.push({
+      assessment: await assess(
+        target,
+        first,
+        input.hookPids,
+        full,
+        null,
+        gateOptions,
+      ),
+      target,
+    });
+  }
+  // A closable workspace's sessions each have a claude process the gate
+  // confirmed by its command line or the hook store (gatePane), so they are
+  // live; a kept workspace's are not read as live (it stays kept anyway).
+  const liveIds = new Set(live.workspacesBySessionId.keys());
+  for (const {assessment} of assessments) {
+    if (assessment.kind !== 'closable') continue;
+    for (const sessionId of assessment.sessions) {
+      liveIds.add(sessionId.toLowerCase());
+    }
+  }
+  const facts = await full.readSessionFacts(liveIds);
   if (facts.kind === 'failed') {
     return refuse(
       `the inbox could not be read, so no session's marks or activity are known (K3): ${facts.reason}`,
@@ -2303,6 +2342,20 @@ async function closeAllExcept(input: {
   });
   if (keep.kind === 'refused') return refuse(keep.reason);
   const sessionFile = full.readSessionFile();
+
+  // ---- home-base-kwand.22 finding 4: a partial tree refuses --apply ----
+  // A workspace missing from cmux tree is never checked or closed, so a tree
+  // that lists fewer workspaces than cmux's own session file would close
+  // calmly while leaving tabs nobody looked at. The dry run prints both.
+  if (
+    input.apply &&
+    sessionFile.kind === 'read' &&
+    sessionFile.workspaces !== workspaces.length
+  ) {
+    return refuse(
+      `cmux tree lists ${workspaces.length} workspaces and cmux's saved session file (written ${Math.round(sessionFile.ageMs / 60_000)} min ago) lists ${sessionFile.workspaces}, so which workspaces are open cannot be told for sure. cmux rewrites that file from time to time: wait a minute and run it again, and if the numbers still differ, look at cmux tree --all`,
+    );
+  }
 
   // ---- K4: with --apply, the tab record first; if it fails, nothing closes ----
   let tabRecord: string | null = null;
@@ -2340,24 +2393,12 @@ async function closeAllExcept(input: {
     startedAt,
   };
   const closable: Closable[] = [];
-  for (const workspace of workspaces) {
-    const target: Resolved = {
-      given: [workspace.ref ?? workspace.id],
-      workspaceId: workspace.id,
-    };
-    const assessment = await assess(
-      target,
-      first,
-      input.hookPids,
-      full,
-      null,
-      gateOptions,
-    );
+  for (const {assessment, target} of assessments) {
     if (assessment.kind === 'notFound') {
       state.notFound.push({given: target.given, reason: assessment.reason});
       continue;
     }
-    const key = workspace.id.toUpperCase();
+    const key = target.workspaceId.toUpperCase();
     const pre: KeepReason[] = [];
     if (key === ownId) {
       pre.push({
@@ -2447,6 +2488,58 @@ async function closeAllExcept(input: {
   };
   if (dryRun) return finish(0);
 
+  /**
+   * home-base-kwand.22 (finding 1 of the kwand.7 review): right before each
+   * close, the keep rules that read session facts (a mark, activity within
+   * --keep-active, Claude working by its transcript, an untracked session,
+   * and K3's unknown) are read again, for this workspace's sessions only:
+   * the plan's live-join sessions here and the sessions the re-check's gate
+   * sees. Unsent text and Claude working on screen are the gate's, which the
+   * re-check has just run. So a session starred or resumed between the plan
+   * and its turn keeps its workspace. Only these sessions are read (`only`),
+   * so the cost is a few sessions' loads per workspace, never the whole
+   * inbox; a workspace with no Claude session reads nothing (K10).
+   */
+  const factsAgain = async (assessedNow: Closable): Promise<Assessment> => {
+    const ids = new Set([
+      ...(sessionsByWorkspace.get(
+        assessedNow.entry.workspaceId.toUpperCase(),
+      ) ?? []),
+      ...assessedNow.sessions.map((sessionId) => sessionId.toLowerCase()),
+    ]);
+    if (ids.size === 0) return assessedNow;
+    const sorted = [...ids].sort();
+    const read = await full.readSessionFacts(ids, ids);
+    const nowAgain = new Date(full.nowMs());
+    const held: KeepReason[] =
+      read.kind === 'failed'
+        ? [
+            {
+              cause: 'unreadFact',
+              kind: 'unknown',
+              text: `unknown: the marks and activity of session ${sorted.join(', ')} could not be read again right before closing: ${read.reason}`,
+            },
+          ]
+        : sorted.flatMap((sessionId) =>
+            sessionKeeps(sessionId, read, {
+              keepActiveMs: input.keepActiveMs,
+              keepActiveText: input.keepActiveText,
+              now: nowAgain,
+            }),
+          );
+    if (held.length === 0) return assessedNow;
+    const heldCause = firstUnknownCause(held);
+    return {
+      drafts: [],
+      entry: assessedNow.entry,
+      kind: 'kept',
+      kinds: held.map((reason) => reason.kind),
+      reasons: held.map((reason) => reason.text),
+      ...(heldCause == null ? {} : {unknownCause: heldCause}),
+      ...(assessedNow.weak == null ? {} : {weak: assessedNow.weak}),
+    };
+  };
+
   // ---- K1: the one close pipeline, unchanged ----
   await closePlanned({
     closable,
@@ -2495,33 +2588,37 @@ async function closeAllExcept(input: {
       // F2 at the moment of closing: a workspace that passed with a weak-
       // evidence pane passes again only while every Claude is still placed.
       const weak = assessed.weak ?? [];
-      if (weak.length === 0) return assessed;
-      const liveAgain = await full.readLive();
-      const unplacedNow =
-        liveAgain.kind === 'read'
-          ? unplacedClaude(liveAgain, again.view)
-          : null;
-      const reason: KeepReason | null =
-        liveAgain.kind === 'failed'
-          ? {
-              cause: 'unreadFact',
-              kind: 'unknown',
-              text: `unknown: ${weak.join('; ')}, and the live sessions could not be read again to show that no Claude runs here unseen: ${liveAgain.reason}`,
-            }
-          : unplacedNow != null && unplacedNow.length > 0
-            ? unplacedKeep(unplacedNow, weak)
+      if (weak.length > 0) {
+        const liveAgain = await full.readLive();
+        const unplacedNow =
+          liveAgain.kind === 'read'
+            ? unplacedClaude(liveAgain, again.view)
             : null;
-      if (reason == null) return assessed;
-      const reasonCause = firstUnknownCause([reason]);
-      return {
-        drafts: [],
-        entry: assessed.entry,
-        kind: 'kept',
-        kinds: [reason.kind],
-        reasons: [reason.text],
-        ...(reasonCause == null ? {} : {unknownCause: reasonCause}),
-        weak,
-      };
+        const reason: KeepReason | null =
+          liveAgain.kind === 'failed'
+            ? {
+                cause: 'unreadFact',
+                kind: 'unknown',
+                text: `unknown: ${weak.join('; ')}, and the live sessions could not be read again to show that no Claude runs here unseen: ${liveAgain.reason}`,
+              }
+            : unplacedNow != null && unplacedNow.length > 0
+              ? unplacedKeep(unplacedNow, weak)
+              : null;
+        if (reason != null) {
+          const reasonCause = firstUnknownCause([reason]);
+          return {
+            drafts: [],
+            entry: assessed.entry,
+            kind: 'kept',
+            kinds: [reason.kind],
+            reasons: [reason.text],
+            ...(reasonCause == null ? {} : {unknownCause: reasonCause}),
+            weak,
+          };
+        }
+      }
+      // home-base-kwand.22: the session facts again, right before this close.
+      return await factsAgain(assessed);
     },
     startedAt,
     state,
@@ -2668,12 +2765,13 @@ export async function closeWorkspaces(
       (async () => await readLiveSessions(realLiveSessionDeps(cmuxEnv))),
     readSessionFacts:
       deps.readSessionFacts ??
-      (async (live) =>
+      (async (live, only) =>
         await realReadSessionFacts({
           cwd: process.cwd(),
           env,
           live,
           now: new Date(deps.nowMs?.() ?? Date.now()),
+          only: only ?? null,
         })),
     readSessionFile:
       deps.readSessionFile ??

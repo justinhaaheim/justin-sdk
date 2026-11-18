@@ -110,12 +110,21 @@ function fact(n: number, over: Partial<SessionFacts> = {}): SessionFacts {
 }
 
 interface WorldInput {
+  /**
+   * kwand.22: as the real read (factsOfInbox), a session's ending is given
+   * only when the read names it live; any other session's ending is null.
+   */
+  endingOnlyForLive?: boolean;
   facts?: SessionFacts[];
   factsRead?: SessionFactsRead;
+  /** kwand.22: what every read after the plan's (the re-read before each close) returns. */
+  factsReadLater?: SessionFactsRead;
   /** ps lines that vanish right after the first live read (kwand.24 R1, the re-check). */
   goneProcs?: string[];
   /** ps lines that appear right after the first live read (kwand.21 F2, second pass). */
   lateProcs?: string[];
+  /** kwand.22: the facts every read after the plan's returns. */
+  laterFacts?: SessionFacts[];
   /**
    * The screen a surface shows from its second read-screen on, by surface
    * number (kwand.27, the re-check). The plan reads each screen once; the
@@ -131,8 +140,15 @@ interface WorldInput {
    * plan's own view was read (kwand.26: a pid missing from the gate's ps).
    */
   procsBeforeLive?: string[];
+  /**
+   * kwand.22: ps lines that vanish right before the first live read, so after
+   * the plan's own view was read: the gate sees the process, the live join not.
+   */
+  procsGoneBeforeLive?: string[];
   recordFails?: boolean;
   refuseClose?: Record<string, string>;
+  /** kwand.22: workspaces cmux's session file lists; absent, the tree's count. */
+  sessionFileWorkspaces?: number;
   workspaces: Ws[];
 }
 
@@ -240,14 +256,19 @@ function world(input: WorldInput) {
       timedOut: false,
     });
   };
-  const factsRead: SessionFactsRead = input.factsRead ?? {
-    bySession: new Map(
-      (input.facts ?? []).map((entry) => [entry.sessionId, entry]),
-    ),
+  const readOf = (list: readonly SessionFacts[]): SessionFactsRead => ({
+    bySession: new Map(list.map((entry) => [entry.sessionId, entry])),
     kind: 'read',
     partial: null,
     testSessions: new Set(),
-  };
+  });
+  const factsRead: SessionFactsRead =
+    input.factsRead ?? readOf(input.facts ?? []);
+  const factsLater: SessionFactsRead =
+    input.factsReadLater ??
+    (input.laterFacts == null ? factsRead : readOf(input.laterFacts));
+  /** kwand.22: each facts read's `live` set and its `only` set (null: every session). */
+  const factReads: {live: string[]; only: string[] | null}[] = [];
   const deps: Partial<CloseDeps> = {
     appendLog: (line) => {
       events.push(`log ${line.outcome.split(':')[0]}`);
@@ -276,7 +297,13 @@ function world(input: WorldInput) {
     readHookStore: () => ({ok: true, value: {}}),
     readLive: () => {
       events.push('read-live');
-      if (liveReads === 0) procLines.push(...(input.procsBeforeLive ?? []));
+      if (liveReads === 0) {
+        procLines.push(...(input.procsBeforeLive ?? []));
+        for (const gone of input.procsGoneBeforeLive ?? []) {
+          const at = procLines.indexOf(gone);
+          if (at !== -1) procLines.splice(at, 1);
+        }
+      }
       const live = {
         kind: 'read' as const,
         ...joinLiveSessions({
@@ -302,16 +329,34 @@ function world(input: WorldInput) {
       }
       return Promise.resolve(live);
     },
-    readSessionFacts: () => {
-      events.push('read-facts');
-      return Promise.resolve(factsRead);
+    readSessionFacts: (live, only) => {
+      const sortedOnly = only == null ? null : [...only].sort();
+      events.push(
+        sortedOnly == null
+          ? 'read-facts'
+          : `read-facts-again ${sortedOnly.join(',')}`,
+      );
+      factReads.push({live: [...live].sort(), only: sortedOnly});
+      const read = factReads.length === 1 ? factsRead : factsLater;
+      if (input.endingOnlyForLive !== true || read.kind === 'failed') {
+        return Promise.resolve(read);
+      }
+      return Promise.resolve({
+        ...read,
+        bySession: new Map(
+          [...read.bySession].map(([key, entry]) => [
+            key,
+            {...entry, ending: live.has(key) ? entry.ending : null},
+          ]),
+        ),
+      });
     },
     readSessionFile: () => ({
       ageMs: 120_000,
       createdAt: new Date(NOW - 120_000).toISOString(),
       kind: 'read',
       path: '/x/session-com.cmuxterm.app.json',
-      workspaces: workspaces.length,
+      workspaces: input.sessionFileWorkspaces ?? workspaces.length,
     }),
     recordTabs: () => {
       events.push('record-tabs');
@@ -340,7 +385,7 @@ function world(input: WorldInput) {
     workspaces: [],
     ...input.options,
   };
-  return {calls, deps, events, options};
+  return {calls, deps, events, factReads, options};
 }
 
 type World = ReturnType<typeof world>;
@@ -1414,6 +1459,202 @@ describe('a Claude on a shared tty counts as placed when its session is in a wor
     const help = run.stdout.toString().replaceAll(/\s+/gu, ' ');
     expect(help).toContain(
       'One exception: a Claude process on a shared tty counts as placed when its session is placed in a workspace that holds one of the tabs reporting that tty.',
+    );
+  });
+});
+
+const STAR = {
+  emoji: ['⭐'],
+  labels: ['mark:2b50'],
+  problems: [],
+  undecodable: [],
+};
+const WORKING_NOW = {
+  at: null,
+  inFlight: 'toolCall' as const,
+  kind: 'workingNow' as const,
+  lastRecordAt: new Date(NOW - 60_000).toISOString(),
+};
+
+describe('the session facts are read again right before each close (kwand.22 finding 1)', () => {
+  test('a star set between the plan and the close keeps the workspace, with nothing signalled or closed there; the re-read names only its sessions', async () => {
+    const {result, w} = await plan({
+      facts: [fact(1)],
+      laterFacts: [fact(1, {flags: STAR})],
+      options: {apply: true},
+      procs: [claudeProc(1), ...OWN_PROCS, ...shellProcs('ttys02', 2000)],
+      workspaces: withOwn([ws(1, idleClaude(sid(1))), ws(2, IDLE_SHELL)]),
+    });
+    expect(writes(w)).toEqual([
+      'record-tabs',
+      'log closing',
+      'log closing',
+      'log kept',
+      `close-workspace ${wsId(2)}`,
+      'log closed',
+    ]);
+    // One plan read of every session, then one re-read of workspace 1's
+    // session only; workspace 2 holds no Claude session and reads nothing.
+    expect(w.factReads.map((read) => read.only)).toEqual([null, [sid(1)]]);
+    expect(w.factReads[1]?.live).toEqual([sid(1)]);
+    const kept = result.state?.kept.find(
+      (entry) => entry.workspaceRef === 'workspace:1',
+    );
+    expect(kept?.reasonKinds).toEqual(['marked']);
+    expect(result.state?.allExcept?.counts).toMatchObject({
+      keptByKind: {marked: 1, own: 1},
+      wouldClose: 1,
+    });
+    noForce(w);
+  });
+
+  test('activity, a working transcript or a missing row since the plan keeps it too, and a re-read that fails keeps it as unknown', async () => {
+    const cases: {
+      expected: KeepKind[];
+      later: Pick<WorldInput, 'factsReadLater' | 'laterFacts'>;
+      options?: Partial<CloseOptions>;
+    }[] = [
+      {
+        expected: ['recentlyActive'],
+        later: {
+          laterFacts: [
+            fact(1, {lastActivityAt: new Date(NOW - 60_000).toISOString()}),
+          ],
+        },
+      },
+      {
+        expected: ['working'],
+        later: {
+          laterFacts: [
+            fact(1, {
+              ending: WORKING_NOW,
+              lastActivityAt: new Date(NOW - 60_000).toISOString(),
+            }),
+          ],
+        },
+        options: {keepActive: '0'},
+      },
+      {expected: ['untracked'], later: {laterFacts: []}},
+      {
+        expected: ['unknown'],
+        later: {
+          factsReadLater: {
+            kind: 'failed',
+            reason: 'the sessions index is unreadable',
+          },
+        },
+      },
+    ];
+    for (const each of cases) {
+      const {result, w} = await plan({
+        facts: [fact(1)],
+        ...each.later,
+        options: {apply: true, ...each.options},
+        procs: [claudeProc(1), ...OWN_PROCS],
+        workspaces: withOwn([ws(1, idleClaude(sid(1)))]),
+      });
+      expect(writes(w)).toEqual(['record-tabs', 'log closing', 'log kept']);
+      expect(result.state?.kept.map((entry) => entry.reasonKinds)).toEqual([
+        ['own'],
+        each.expected,
+      ]);
+    }
+  });
+
+  test('the unknown keep of a failed re-read says what could not be read', async () => {
+    const {result} = await plan({
+      facts: [fact(1)],
+      factsReadLater: {kind: 'failed', reason: 'the sessions index is gone'},
+      options: {apply: true},
+      procs: [claudeProc(1), ...OWN_PROCS],
+      workspaces: withOwn([ws(1, idleClaude(sid(1)))]),
+    });
+    const kept = result.state?.kept.find(
+      (entry) => entry.workspaceRef === 'workspace:1',
+    );
+    expect(kept?.reasons).toEqual([
+      `unknown: the marks and activity of session ${sid(1)} could not be read again right before closing: the sessions index is gone`,
+    ]);
+    expect(kept?.unknownCause).toBe('unreadFact');
+  });
+});
+
+describe('a session the gate sees run but the live join did not place (kwand.22 finding 5)', () => {
+  test('its ending is read from its transcript as for every other live session', async () => {
+    const {keptKinds, w} = await plan({
+      endingOnlyForLive: true,
+      facts: [
+        fact(1, {
+          ending: WORKING_NOW,
+          lastActivityAt: new Date(NOW - 60_000).toISOString(),
+        }),
+      ],
+      options: {keepActive: '0'},
+      procs: [claudeProc(1), ...OWN_PROCS],
+      // The plan's own view saw the process; the live join, read after it, did not.
+      procsGoneBeforeLive: [claudeProc(1)],
+      workspaces: withOwn([ws(1, idleClaude(sid(1)))]),
+    });
+    // Not read, its ending was null and the keep was `unknown` only while its
+    // last activity was under 15 minutes old.
+    expect(keptKinds.get('workspace:1')).toEqual(['working']);
+    expect(w.factReads[0]?.live).toEqual([sid(1)]);
+  });
+});
+
+describe('cmux tree and the session file list different workspace counts (kwand.22, finding 4 of kwand.7)', () => {
+  const input = (apply: boolean): WorldInput => ({
+    facts: [fact(1)],
+    options: apply ? {apply: true} : {},
+    procs: [claudeProc(1), ...OWN_PROCS],
+    sessionFileWorkspaces: 3,
+    workspaces: withOwn([ws(1, idleClaude(sid(1)))]),
+  });
+
+  test('--apply refuses with both numbers named, before the tab record, with nothing written', async () => {
+    const {result, w} = await plan(input(true));
+    expect(result.exitCode).toBe(2);
+    const output = result.output.replaceAll(/\s+/gu, ' ');
+    expect(output).toContain(
+      "cmux tree lists 2 workspaces and cmux's saved session file (written 2 min ago) lists 3",
+    );
+    expect(writes(w)).toEqual([]);
+  });
+
+  test('the dry run still plans and prints both numbers, saying --apply would refuse', async () => {
+    const {planned, result} = await plan(input(false));
+    expect(result.exitCode).toBe(0);
+    expect(planned).toEqual(['workspace:1']);
+    const output = result.output.replaceAll(/\s+/gu, ' ');
+    expect(output).toContain('it lists 3 workspaces, cmux tree 2');
+    expect(output).toContain(
+      'They differ, so --apply refuses until they agree',
+    );
+    expect(result.state?.allExcept?.treeWorkspaces).toBe(2);
+    expect(result.state?.allExcept?.sessionFile).toMatchObject({workspaces: 3});
+  });
+
+  test('equal counts do not refuse --apply', async () => {
+    const {result} = await plan({...input(true), sessionFileWorkspaces: 2});
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('--help names the re-read before each close and the count refusal', () => {
+    const cli = join(import.meta.dirname, '..', 'src', 'cli.ts');
+    const run = Bun.spawnSync(
+      [process.execPath, cli, 'thread', 'close', '--help'],
+      {
+        env: {...process.env, JUSTIN_SDK_HEALTH_NOTICES: 'off', NO_COLOR: '1'},
+        stdin: 'ignore',
+      },
+    );
+    expect(run.exitCode).toBe(0);
+    const help = run.stdout.toString().replaceAll(/\s+/gu, ' ');
+    expect(help).toContain(
+      "The re-check right before each close also reads that workspace's sessions again from the inbox",
+    );
+    expect(help).toContain(
+      "--apply also refuses, with nothing closed, when cmux tree and cmux's saved session file list a different number of workspaces",
     );
   });
 });

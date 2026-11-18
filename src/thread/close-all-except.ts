@@ -261,12 +261,19 @@ export function factsOfInbox(
   };
 }
 
-/** The real read: the inbox with no age window, every repo, no pane lookup. */
+/**
+ * The real read: the inbox with no age window, every repo, no pane lookup.
+ * `only` (home-base-kwand.22, the re-read before each close): just those
+ * sessions of the sessions index, and no untracked scan, so it costs a few
+ * sessions' loads. A session it finds no row for is kept as untracked by
+ * sessionKeeps, as the whole read keeps an untracked row.
+ */
 export async function realReadSessionFacts(input: {
   cwd: string;
   env: EnvLike;
   live: ReadonlySet<string>;
   now: Date;
+  only: ReadonlySet<string> | null;
 }): Promise<SessionFactsRead> {
   const read = await readInbox({
     cwd: input.cwd,
@@ -274,6 +281,7 @@ export async function realReadSessionFacts(input: {
     env: input.env,
     now: input.now,
     repo: null,
+    sessionIds: input.only,
   });
   if (read.kind === 'failed') return read;
   return factsOfInbox(read.read, input.live, input.now);

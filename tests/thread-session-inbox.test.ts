@@ -41,6 +41,7 @@ import {
   type InboxRead,
   readInbox,
   renderInbox,
+  rowEnding,
 } from '../src/thread/session-inbox';
 import {loadSession} from '../src/thread/session-model';
 import {initRepo} from './git-fixtures';
@@ -1163,6 +1164,42 @@ describe('thread inbox: concurrent loads (F7)', () => {
     expect(JSON.stringify(inboxJson(eight.read))).toBe(
       JSON.stringify(inboxJson(one.read)),
     );
+  });
+
+  test('a read of named sessions (home-base-kwand.22) lists only their rows, with the same facts thread close --all-except reads as the whole read', async () => {
+    const whole = await read();
+    const picked = whole.rows
+      .filter((row) => row.loaded != null)
+      .slice(0, 2)
+      .map((row) => row.sessionId);
+    expect(picked.length).toBe(2);
+    const result = await readInbox({
+      cwd: alpha,
+      days: 30,
+      env,
+      now: NOW,
+      repo: null,
+      sessionIds: new Set(picked.map((id) => id.toLowerCase())),
+    });
+    if (result.kind !== 'read') throw new Error(result.reason);
+    const facts = (rows: InboxRead['rows']) =>
+      rows
+        .filter((row) => picked.includes(row.sessionId))
+        .map((row) => ({
+          ending: rowEnding(row, NOW, true),
+          flags: row.flags ?? null,
+          lastActivityAt: row.lastActivityAt,
+          sessionBeadId: row.sessionBeadId,
+          sessionId: row.sessionId,
+          tracked: row.tracked,
+          unreadable: row.unreadable,
+        }))
+        .sort((a, b) => a.sessionId.localeCompare(b.sessionId));
+    expect(result.read.rows.map((row) => row.sessionId).sort()).toEqual(
+      [...picked].sort(),
+    );
+    expect(facts(result.read.rows)).toEqual(facts(whole.rows));
+    expect(result.read.untracked.failures).toEqual([]);
   });
 
   test('every row from the shared cache equals that session loaded ALONE — the gone checkout fails only its own row', async () => {

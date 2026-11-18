@@ -273,6 +273,10 @@ ALL EXCEPT (--all-except, home-base-kwand.7). Every workspace in every cmux wind
 
   With --apply, it first runs thread tabs record, so the tab set before the close is on record, and refuses with nothing closed if that fails. This record runs even when the hourly recorder is switched off (componentConfig.thread.tabRecord false). Then every workspace not kept closes exactly as a named close does: the record, the re-check right before each close, SIGTERM, close-workspace. The plan says how old cmux's saved session file is, since the tab record reads that file.
 
+  The re-check right before each close also reads that workspace's sessions again from the inbox (only those sessions, so it takes well under a second): a session starred, marked, active within --keep-active, working, or untracked since the plan keeps its workspace, and a session whose facts cannot be read again keeps it as unknown.
+
+  --apply also refuses, with nothing closed, when cmux tree and cmux's saved session file list a different number of workspaces: a tree missing a workspace would leave it unchecked. The dry run prints both numbers. cmux rewrites the file from time to time, so run it again in a minute.
+
   cmux may still refuse a close with "Workspace has a running process" when every tab holds an idle shell: no read-only check can predict it (see LIMITS). Such a workspace shows under "Would close" in the dry run and under Failed after --apply. --force is never passed.
 
   Refused, exit 2, nothing touched: --all-except with workspaces, --session, --tab or --handed-off; --apply, --keep, --keep-active or --close-shared-tty without --all-except; --apply with --dry-run; a --keep-active that is not a duration; a CMUX_WORKSPACE_ID that names no open workspace.
