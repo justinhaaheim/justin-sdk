@@ -796,6 +796,222 @@ describe('--tab refusals', () => {
   });
 });
 
+function flagValue(args: readonly string[], flag: string): string {
+  return args[args.indexOf(flag) + 1] ?? '';
+}
+
+/** cmux answers OK to `command` (close-surface or close-workspace) and closes nothing. */
+function closeAnswersOkAndKeeps(
+  w: World,
+  command: 'close-surface' | 'close-workspace',
+  only: string | null = null,
+): void {
+  const run = w.deps.run;
+  if (run == null) throw new Error('the fake has no cmux runner');
+  w.deps.run = async (args) => {
+    if (args[0] !== command || (only != null && !args.includes(only))) {
+      return await run(args);
+    }
+    w.events.push(
+      command === 'close-surface'
+        ? `close-surface ${args.slice(1).join(' ')}`
+        : `close-workspace ${flagValue(args, '--workspace')}`,
+    );
+    return {kind: 'ok', stdout: 'OK\n'};
+  };
+}
+
+const TREE_TIMED_OUT: CmuxCall = {
+  kind: 'failed',
+  reason: 'Error: Command timed out',
+  timedOut: true,
+};
+
+/**
+ * Every read of the cmux tree fails once `closes` close-surface calls have
+ * run, after the first `okReads` reads that follow them.
+ */
+function treeUnreadableAfterCloses(
+  w: World,
+  closes: number,
+  okReads = 0,
+): void {
+  const run = w.deps.run;
+  if (run == null) throw new Error('the fake has no cmux runner');
+  let closed = 0;
+  let readsAfter = 0;
+  w.deps.run = async (args) => {
+    if (args[0] === 'close-surface') closed += 1;
+    if (closed >= closes && args.includes('tree')) {
+      readsAfter += 1;
+      if (readsAfter > okReads) return TREE_TIMED_OUT;
+    }
+    return await run(args);
+  };
+}
+
+describe('home-base-kwand.30: --tab counts a tab closed only once the cmux tree no longer lists it', () => {
+  test('close-surface answers OK but cmux still lists the tab 5 s later: Failed at step verify, never Closed; exit 1', async () => {
+    const w = world({...handoffPair(), options: {sessions: [sid(1)]}});
+    closeAnswersOkAndKeeps(w, 'close-surface');
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(1);
+    expect(result.state?.closed).toEqual([]);
+    const failed = result.state?.failed ?? [];
+    expect(failed.map((entry) => entry.tab?.surfaceId)).toEqual([surfId(1)]);
+    expect(failed[0]?.step).toBe('verify');
+    expect(failed[0]?.claudeStopped).toBe(true);
+    expect(failed[0]?.cmuxRefusal).toBeNull();
+    expect(failed[0]?.reason).toBe(
+      `close-surface answered OK, but tab surface:1 (${surfId(1)}) is still open 5 s later`,
+    );
+    expect(failed[0]).not.toHaveProperty('closedAt');
+    expect(failed[0]).not.toHaveProperty('windowNote');
+    expect(result.state?.failures).toEqual([]);
+    expect(result.output).toContain('Failed (1)');
+    expect(result.output).toContain(
+      'it may still be open with no Claude in it',
+    );
+    expect(result.output).toContain(
+      'Closed 0, kept 0, not found 0, failed 1. 1 of the failed had their Claude stopped, and cmux has not shown them gone, so they may still be open',
+    );
+  });
+
+  test('D4: close-workspace answers OK for an only tab but cmux still lists it: Failed at step verify, and the reason names close-workspace', async () => {
+    const w = world({
+      hookStore: hookStoreOf([[sid(1), 1001]]),
+      model: windowOf([
+        {n: 1, tabs: [tab(1, [idleClaude(sid(1))])]},
+        {n: 5, tabs: [tab(5, ['% '])]},
+      ]),
+      options: {sessions: [sid(1)]},
+      procs: [claudeProc(1)],
+    });
+    closeAnswersOkAndKeeps(w, 'close-workspace');
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(1);
+    expect(closeCalls(w)).toEqual([`close-workspace ${wsId(1)}`]);
+    expect(result.state?.closed).toEqual([]);
+    expect(result.state?.failed.map((entry) => entry.reason)).toEqual([
+      `close-workspace answered OK, but tab surface:1 (${surfId(1)}) is still open 5 s later`,
+    ]);
+    expect(result.state?.failed[0]?.step).toBe('verify');
+  });
+
+  test('R1: the closes log gets one more line for that tab, failed: verify, after its closed line', async () => {
+    const w = world({...handoffPair(), options: {sessions: [sid(1)]}});
+    closeAnswersOkAndKeeps(w, 'close-surface');
+    await closeWorkspaces(w.options, w.deps);
+    expect(writes(w)).toEqual([
+      `log ${surfId(1)} closing`,
+      'kill 1001',
+      `close-surface --surface ${surfId(1)} --workspace ${wsId(1)}`,
+      `log ${surfId(1)} closed`,
+      `log ${surfId(1)} failed`,
+    ]);
+    const lines = readLog(w.logPath);
+    expect(lines.map((line) => line.outcome)).toEqual([
+      'closing',
+      'closed',
+      `failed: verify: close-surface answered OK, but tab surface:1 (${surfId(1)}) is still open 5 s later`,
+    ]);
+    // The same run, tab and resume command as the line it corrects.
+    const last = lines.at(-1);
+    expect(last?.runAt).toBe(lines[1]?.runAt ?? '');
+    expect(last?.surfaceId).toBe(surfId(1));
+    expect(last?.resumeCommand).toBe(
+      `cd '/Users/x/Dev/repo-a' && claude --resume ${sid(1)}`,
+    );
+  });
+
+  test('R1: when that line cannot be written, the run says the log still reads closed', async () => {
+    const w = world({...handoffPair(), options: {sessions: [sid(1)]}});
+    closeAnswersOkAndKeeps(w, 'close-surface');
+    const append = w.deps.appendLog;
+    if (append == null) throw new Error('no appendLog');
+    w.deps.appendLog = (line) =>
+      line.outcome.startsWith('failed: verify')
+        ? 'EACCES: permission denied'
+        : append(line);
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(result.exitCode).toBe(1);
+    expect(result.state?.failed.map((entry) => entry.step)).toEqual(['verify']);
+    expect(result.state?.failures).toHaveLength(1);
+    expect(result.state?.failures[0]).toEndWith(
+      `could not be corrected for tab surface:1 (${surfId(1)}): its last line there still says closed (EACCES: permission denied)`,
+    );
+  });
+
+  test('R2: the tree cannot be read after the close: Failed at step verify, the reason names the unreadable tree, never Closed; exit 1', async () => {
+    const w = world({...handoffPair(), options: {sessions: [sid(1)]}});
+    treeUnreadableAfterCloses(w, 1);
+    const result = await closeWorkspaces(w.options, w.deps);
+    // cmux did close it; nothing could confirm that.
+    expect(w.model.windows[0]?.workspaces[0]?.panes.map((p) => p.ref)).toEqual([
+      'surface:2',
+    ]);
+    expect(result.exitCode).toBe(1);
+    expect(result.state?.closed).toEqual([]);
+    const failed = result.state?.failed ?? [];
+    expect(failed.map((entry) => entry.tab?.surfaceId)).toEqual([surfId(1)]);
+    expect(failed[0]?.step).toBe('verify');
+    expect(failed[0]?.claudeStopped).toBe(true);
+    expect(failed[0]?.reason).toBe(
+      `close-surface answered OK, but whether tab surface:1 (${surfId(1)}) is gone could not be checked within 5 s: the cmux tree could not be read (Error: Command timed out)`,
+    );
+    // No separate failures line: the tab itself is failed.
+    expect(result.state?.failures).toEqual([]);
+    expect(readLog(w.logPath).map((line) => line.outcome)).toEqual([
+      'closing',
+      'closed',
+      `failed: verify: ${failed[0]?.reason ?? ''}`,
+    ]);
+  });
+
+  test('R2: a tab one read showed gone stays Closed when later reads fail; only the tab never seen gone is Failed', async () => {
+    // Workspaces 1 and 3 each hold a handed-off session and its successor.
+    // cmux keeps tab 3 after close-surface; the first tree read after both
+    // closes shows tab 1 gone, and every read after it fails.
+    const w = world({
+      hookStore: hookStoreOf([
+        [sid(1), 1001],
+        [sid(2), 1002],
+        [sid(3), 1003],
+        [sid(4), 1004],
+      ]),
+      model: windowOf([
+        {
+          n: 1,
+          tabs: [tab(1, [idleClaude(sid(1))]), tab(2, [idleClaude(sid(2))])],
+        },
+        {
+          n: 3,
+          tabs: [tab(3, [idleClaude(sid(3))]), tab(4, [idleClaude(sid(4))])],
+        },
+      ]),
+      options: {sessions: [sid(1), sid(3)]},
+      procs: [claudeProc(1), successorProc(2), claudeProc(3), successorProc(4)],
+    });
+    closeAnswersOkAndKeeps(w, 'close-surface', surfId(3));
+    treeUnreadableAfterCloses(w, 2, 1);
+    const result = await closeWorkspaces(w.options, w.deps);
+    expect(kills(w)).toEqual(['kill 1001', 'kill 1003']);
+    expect(result.exitCode).toBe(1);
+    expect(result.state?.closed.map((entry) => entry.tab?.surfaceId)).toEqual([
+      surfId(1),
+    ]);
+    expect(result.state?.failed.map((entry) => entry.reason)).toEqual([
+      `close-surface answered OK, but whether tab surface:3 (${surfId(3)}) is gone could not be checked within 5 s: the cmux tree could not be read (Error: Command timed out)`,
+    ]);
+    const outcomes = (surface: string): string[] =>
+      readLog(w.logPath)
+        .filter((line) => line.surfaceId === surface)
+        .map((line) => line.outcome.split(':')[0] ?? '');
+    expect(outcomes(surfId(1))).toEqual(['closing', 'closed']);
+    expect(outcomes(surfId(3))).toEqual(['closing', 'closed', 'failed']);
+  });
+});
+
 describe('home-base-kwand.20 item 1: a tab of a pinned workspace', () => {
   test('one tab of several (close-surface) in a PINNED workspace is kept ("pinned"), and its Claude is never signalled: whether cmux refuses close-surface there is not known', async () => {
     const pair = handoffPair();

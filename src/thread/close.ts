@@ -1327,6 +1327,12 @@ export function failedClaudeWords(entry: CloseFailed): string {
   if (entry.claudeStopped && entry.step === 'wait-exit') {
     return `SENT SIGTERM (pid ${entry.pid ?? 'unknown'}), and it had not exited when the wait ended; the ${where} is still open, and once it exits no Claude runs in it. Resume the session with the Resume command above`;
   }
+  // home-base-kwand.30: only confirmTabsGone fails a stopped Claude at step
+  // verify. cmux answered OK to the close, then still listed the tab, or the
+  // tree could not be read (R2), so "still open" is not known: say "may".
+  if (entry.claudeStopped && entry.step === 'verify') {
+    return `STOPPED (pid ${entry.pid ?? 'unknown'}) before the close, and cmux has not shown the ${where} gone (see Why): it may still be open with no Claude in it. Resume the session with the Resume command above`;
+  }
   if (entry.claudeStopped) {
     return `STOPPED (pid ${entry.pid ?? 'unknown'}) before the close failed: the ${where} is still open with no Claude in it. Resume the session with the Resume command above`;
   }
@@ -1685,17 +1691,22 @@ export function renderClose(state: CloseState, style: OutputStyle): string {
     }
   }
   const stoppedOpen = state.failed.filter(
-    (entry) => entry.claudeStopped,
+    (entry) => entry.claudeStopped && entry.step !== 'verify',
   ).length;
+  // home-base-kwand.30: --tab's closes cmux answered OK but did not confirm.
+  const stoppedUnconfirmed = state.failed.filter(
+    (entry) => entry.claudeStopped && entry.step === 'verify',
+  ).length;
+  const stoppedWords = `${stoppedOpen > 0 ? ` ${stoppedOpen} of the failed had their Claude stopped and are still open: resume each with its Resume command.` : ''}${stoppedUnconfirmed > 0 ? ` ${stoppedUnconfirmed} of the failed had their Claude stopped, and cmux has not shown them gone, so they may still be open: resume each with its Resume command.` : ''}`;
   const keptWords = `kept ${state.kept.length + unresolved.length}${withDraft.length > 0 ? ` (${withDraft.length} with unsent text)` : ''}`;
   const summary =
     all != null
       ? state.dryRun
         ? `Would close ${state.planned.length}, ${keptWords}. Nothing was closed: run it again with --apply to close them.`
-        : `Closed ${state.closed.length}, ${keptWords}${state.failed.length > 0 ? `, failed ${state.failed.length}` : ''}.${stoppedOpen > 0 ? ` ${stoppedOpen} of the failed had their Claude stopped and are still open: resume each with its Resume command.` : ''}`
+        : `Closed ${state.closed.length}, ${keptWords}${state.failed.length > 0 ? `, failed ${state.failed.length}` : ''}.${stoppedWords}`
       : state.dryRun
         ? `Would close ${state.planned.length}, ${keptWords}, not found ${state.notFound.length}. Run it again without --dry-run to close them.`
-        : `Closed ${state.closed.length}, ${keptWords}, not found ${state.notFound.length}${state.failed.length > 0 ? `, failed ${state.failed.length}` : ''}.${stoppedOpen > 0 ? ` ${stoppedOpen} of the failed had their Claude stopped and are still open: resume each with its Resume command.` : ''}`;
+        : `Closed ${state.closed.length}, ${keptWords}, not found ${state.notFound.length}${state.failed.length > 0 ? `, failed ${state.failed.length}` : ''}.${stoppedWords}`;
   blocks.push(
     wrapHanging(paint(summary, ['bold'], style.color), {
       hang: HEADER_COLUMN,
@@ -1942,6 +1953,107 @@ async function stopAndCloseTab(
   });
 }
 
+/** The workspace a surface is in now, and how many tabs that workspace holds. */
+function surfaceHome(
+  tree: CmuxTree,
+  surfaceId: string,
+): {tabs: number; workspaceId: string} | null {
+  const want = surfaceId.toUpperCase();
+  for (const window of tree.windows) {
+    for (const workspace of window.workspaces) {
+      const ids = surfacesOfWorkspace(tree, workspace.id) ?? [];
+      if (ids.some((id) => id.toUpperCase() === want)) {
+        return {tabs: ids.length, workspaceId: workspace.id};
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * home-base-kwand.11: close-surface answering OK is not proof the tab is
+ * gone. Read the tree until every closed tab has left it, for up to
+ * windowGoneTimeoutMs. A tab one read shows gone stays gone: a closed
+ * surface's uuid does not come back. Used by thread close --tab
+ * (home-base-kwand.30) and thread open --undo --close-tabs.
+ *
+ * At the deadline, a tab not yet seen gone moves from `closed` to `failed`
+ * (step verify), so neither the output nor the record calls it closed; its
+ * Claude was stopped before the close, and the failed entry says so. That is
+ * a tab the last read still lists (home-base-kwand.31 F4), or, when the last
+ * read failed, a tab whose leaving could not be seen (home-base-kwand.30 R2:
+ * an unconfirmed close is never closed, critical rule 7). Each such tab gets
+ * one more closes.jsonl line, `failed: verify: <reason>`, after its `closed`
+ * line, so the log's last word on it is not closed (home-base-kwand.30 R1).
+ */
+async function confirmTabsGone(
+  state: CloseState,
+  full: Pick<
+    CloseDeps,
+    'appendLog' | 'nowMs' | 'run' | 'sleep' | 'windowGoneTimeoutMs'
+  >,
+): Promise<void> {
+  const closedTabs = state.closed.flatMap((entry) =>
+    entry.tab == null ? [] : [{entry, tab: entry.tab}],
+  );
+  if (closedTabs.length === 0) return;
+  const seconds = Math.round(full.windowGoneTimeoutMs / 1000);
+  const deadline = full.nowMs() + full.windowGoneTimeoutMs;
+  const seenGone = new Set<CloseClosed>();
+  for (;;) {
+    const tree = await readCmuxTree(full.run);
+    if (tree.kind === 'read') {
+      for (const {entry, tab} of closedTabs) {
+        if (surfaceHome(tree.tree, tab.surfaceId) == null) seenGone.add(entry);
+      }
+    }
+    const open = closedTabs.filter(({entry}) => !seenGone.has(entry));
+    if (open.length === 0) return;
+    if (full.nowMs() >= deadline) {
+      const unread = tree.kind === 'read' ? null : tree.reason;
+      const notClosed = new Set(open.map(({entry}) => entry));
+      state.closed = state.closed.filter((entry) => !notClosed.has(entry));
+      for (const {entry: closed, tab} of open) {
+        // The entry without closedAt and windowNote: it did not close.
+        const entry: CloseEntry &
+          Partial<Pick<CloseClosed, 'closedAt' | 'windowNote'>> = {...closed};
+        delete entry.closedAt;
+        delete entry.windowNote;
+        // D4: an only tab closed with its workspace.
+        const command = tab.onlyTab ? 'close-workspace' : 'close-surface';
+        const which = `tab ${tab.surfaceRef ?? '?'} (${tab.surfaceId})`;
+        const reason =
+          unread == null
+            ? `${command} answered OK, but ${which} is still open ${seconds} s later`
+            : `${command} answered OK, but whether ${which} is gone could not be checked within ${seconds} s: the cmux tree could not be read (${unread})`;
+        state.failed.push({
+          ...entry,
+          // stopAndCloseTab stops every Claude before the close runs.
+          claudeStopped: entry.pid != null,
+          cmuxRefusal: null,
+          reason,
+          step: 'verify',
+        });
+        const wrote = full.appendLog(
+          logLine(
+            entry,
+            `failed: verify: ${reason}`,
+            state.startedAt,
+            full.nowMs(),
+          ),
+        );
+        if (wrote != null) {
+          state.failures.push(
+            `${tildeText(state.logPath)} could not be corrected for ${which}: its last line there still says closed (${wrote})`,
+          );
+        }
+      }
+      return;
+    }
+    await full.sleep(POLL_MS);
+  }
+}
+
 /**
  * `--tab` (home-base-v8z8d.2.1): close the one tab of each session. D2 proves
  * the tab, assessTab gates it, closePlanned keeps the record and the order,
@@ -2129,6 +2241,9 @@ async function closeTabs(input: {
         ? await windowNoteAfterClose(entry, full)
         : 'its workspace stays open with its other tabs',
   });
+  // home-base-kwand.30: a close cmux answered OK counts as closed only once
+  // the tree no longer lists the tab; else it is failed (step verify), exit 1.
+  await confirmTabsGone(state, full);
   state.finishedAt = new Date(full.nowMs()).toISOString();
   return finish(
     state.failures.length === 0 && state.failed.length === 0 ? 0 : 1,
@@ -2187,23 +2302,6 @@ type RecordedCheck =
       pane: Extract<Assessment, {kind: 'kept'}> | null;
       reasons: string[];
     };
-
-/** The workspace a surface is in now, and how many tabs that workspace holds. */
-function surfaceHome(
-  tree: CmuxTree,
-  surfaceId: string,
-): {tabs: number; workspaceId: string} | null {
-  const want = surfaceId.toUpperCase();
-  for (const window of tree.windows) {
-    for (const workspace of window.workspaces) {
-      const ids = surfacesOfWorkspace(tree, workspace.id) ?? [];
-      if (ids.some((id) => id.toUpperCase() === want)) {
-        return {tabs: ids.length, workspaceId: workspace.id};
-      }
-    }
-  }
-  return null;
-}
 
 /**
  * One recorded tab against what is open now, read-only, in both passes. The
@@ -2291,61 +2389,6 @@ async function checkRecordedTab(input: {
         : {drafts: [], entry: assessment.entry, kind: 'kept', reasons: extra},
     kind: 'assessed',
   };
-}
-
-/**
- * home-base-kwand.11: close-surface answering OK is not proof the tab is
- * gone. Read the tree until every closed tab has left it, for up to
- * windowGoneTimeoutMs; one still listed then is a failure, said loudly (as
- * --undo says of a workspace still open after close-workspace).
- * home-base-kwand.31 F4: that tab moves from `closed` to `failed` (step
- * verify), so neither the output nor the record calls it closed; its Claude
- * was stopped before the close, and the failed entry says so.
- */
-async function confirmTabsGone(
-  state: CloseState,
-  full: Pick<CloseDeps, 'nowMs' | 'run' | 'sleep' | 'windowGoneTimeoutMs'>,
-): Promise<void> {
-  const closedTabs = state.closed.filter((entry) => entry.tab != null);
-  if (closedTabs.length === 0) return;
-  const deadline = full.nowMs() + full.windowGoneTimeoutMs;
-  for (;;) {
-    const tree = await readCmuxTree(full.run);
-    const open =
-      tree.kind === 'read'
-        ? closedTabs.filter(
-            (entry) =>
-              surfaceHome(tree.tree, entry.tab?.surfaceId ?? '') != null,
-          )
-        : closedTabs;
-    if (tree.kind === 'read' && open.length === 0) return;
-    if (full.nowMs() >= deadline) {
-      if (tree.kind !== 'read') {
-        state.failures.push(
-          `whether the closed tabs are gone could not be checked: ${tree.reason}`,
-        );
-        return;
-      }
-      state.closed = state.closed.filter((entry) => !open.includes(entry));
-      for (const closed of open) {
-        // The entry without closedAt and windowNote: it did not close.
-        const entry: CloseEntry &
-          Partial<Pick<CloseClosed, 'closedAt' | 'windowNote'>> = {...closed};
-        delete entry.closedAt;
-        delete entry.windowNote;
-        state.failed.push({
-          ...entry,
-          // stopAndCloseTab stops every Claude before close-surface runs.
-          claudeStopped: entry.pid != null,
-          cmuxRefusal: null,
-          reason: `close-surface answered OK, but tab ${entry.tab?.surfaceRef ?? '?'} (${entry.tab?.surfaceId ?? '?'}) is still open ${Math.round(full.windowGoneTimeoutMs / 1000)} s later`,
-          step: 'verify',
-        });
-      }
-      return;
-    }
-    await full.sleep(POLL_MS);
-  }
 }
 
 /**

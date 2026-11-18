@@ -41,16 +41,26 @@ import {createSandbox} from './sandbox';
 const SESSION = '9e5711c5-0a19-4c00-8000-000000000001';
 
 /**
- * The per-version --apply tests' own limit (home-base-hpxw3). Measured
- * 2026-11-18 on bun 1.4.2, this file alone, 5 runs at a 1-minute load of 4.4 to
- * 5.4: the br 0.1.37 test took 1.54 to 1.91 s, the br 0.7.6 test 1.10 to 1.23 s.
+ * The limit of every test in this file that runs a real br (home-base-hpxw3,
+ * home-base-kwand.32): the two per-version --apply tests, the CLI dry run,
+ * "refused by name" and "applyMove reads its write back". The --help test runs
+ * no br and keeps bun's default 5 s.
+ *
+ * Measured 2026-11-18 on bun 1.4.2, this file alone:
+ * - 5 runs at a 1-minute load of 4.0 to 5.4: --apply on br 0.1.37 1.54 to
+ *   1.91 s, on br 0.7.6 1.10 to 1.23 s; the dry run about 1.0 s, "refused by
+ *   name" 1.6 to 2.2 s, the read-back about 1.1 s.
+ * - 3 runs at a load of 46 to 64: --apply on br 0.1.37 1.96 to 2.69 s, on br
+ *   0.7.6 2.54 to 6.72 s; the dry run 0.97 to 1.53 s, "refused by name" 1.96 to
+ *   2.85 s, the read-back 1.56 to 1.72 s.
  * In the full suite at load 5.7 (the sdk:publish run of 2026-11-18 12:22) the
- * br 0.7.6 test was still running at bun's default 5 s. 30 s is about 15 times
- * the worst run alone and 6 times that full-suite figure. A limit that is too
- * short does not only report a timeout: bun SIGTERMs the br the test is
- * waiting on and every br after it, so runMigration returns 1 as well.
+ * br 0.7.6 --apply test was still running at bun's default 5 s. 30 s is about 4
+ * times the worst run alone (6.72 s, at load 64) and 6 times that full-suite
+ * figure. A limit that is too short does not only report a timeout: bun
+ * SIGTERMs the br the test is waiting on and every br after it, so the test
+ * also fails on a second, misleading error (runMigration returns 1).
  */
-const APPLY_TEST_TIMEOUT_MS = 30_000;
+const REAL_BR_TEST_TIMEOUT_MS = 30_000;
 
 const BRS = [
   {br: installedBr('0.1.37'), version: '0.1.37'},
@@ -220,46 +230,50 @@ describe('migrate-ask-parents', () => {
     expect(bare.stderr.toString()).toContain('Missing required argument: cwd');
   });
 
-  test('the CLI defaults to a dry run: it prints the moves and the br commands, and the database is unchanged', async () => {
-    const w = await world();
-    const exportBefore = readFileSync(
-      join(w.repo, '.beads', 'issues.jsonl'),
-      'utf8',
-    );
-    const script = join(
-      import.meta.dirname,
-      '..',
-      'scripts',
-      'migrate-ask-parents.ts',
-    );
-    const run = Bun.spawnSync([process.execPath, script, '--cwd', w.repo], {
-      env: Object.fromEntries(
-        Object.entries({...process.env, ...w.env}).filter(
-          (entry): entry is [string, string] => entry[1] != null,
+  test(
+    'the CLI defaults to a dry run: it prints the moves and the br commands, and the database is unchanged',
+    async () => {
+      const w = await world();
+      const exportBefore = readFileSync(
+        join(w.repo, '.beads', 'issues.jsonl'),
+        'utf8',
+      );
+      const script = join(
+        import.meta.dirname,
+        '..',
+        'scripts',
+        'migrate-ask-parents.ts',
+      );
+      const run = Bun.spawnSync([process.execPath, script, '--cwd', w.repo], {
+        env: Object.fromEntries(
+          Object.entries({...process.env, ...w.env}).filter(
+            (entry): entry is [string, string] => entry[1] != null,
+          ),
         ),
-      ),
-      stdin: 'ignore',
-    });
-    const out = run.stdout.toString();
-    expect(run.stderr.toString()).toBe('');
-    expect(run.exitCode).toBe(0);
-    expect(out).toContain('dry run (nothing is written; --apply writes)');
-    expect(out).toContain(
-      `br update ${w.openQuestion} --add-label=${toLabel(w.request)} --parent=`,
-    );
-    expect(out).toContain(
-      `br update ${w.openQuestion} --parent=${w.sessionBead}`,
-    );
-    expect(out).toContain(w.closedQuestion);
-    expect(out).not.toContain(w.newShape);
-    expect(out).toContain('2 to move, 0 refused.');
-    expect(childIds(w, w.request)).toEqual(
-      [w.closedQuestion, w.openQuestion].sort(),
-    );
-    expect(readFileSync(join(w.repo, '.beads', 'issues.jsonl'), 'utf8')).toBe(
-      exportBefore,
-    );
-  });
+        stdin: 'ignore',
+      });
+      const out = run.stdout.toString();
+      expect(run.stderr.toString()).toBe('');
+      expect(run.exitCode).toBe(0);
+      expect(out).toContain('dry run (nothing is written; --apply writes)');
+      expect(out).toContain(
+        `br update ${w.openQuestion} --add-label=${toLabel(w.request)} --parent=`,
+      );
+      expect(out).toContain(
+        `br update ${w.openQuestion} --parent=${w.sessionBead}`,
+      );
+      expect(out).toContain(w.closedQuestion);
+      expect(out).not.toContain(w.newShape);
+      expect(out).toContain('2 to move, 0 refused.');
+      expect(childIds(w, w.request)).toEqual(
+        [w.closedQuestion, w.openQuestion].sort(),
+      );
+      expect(readFileSync(join(w.repo, '.beads', 'issues.jsonl'), 'utf8')).toBe(
+        exportBefore,
+      );
+    },
+    REAL_BR_TEST_TIMEOUT_MS,
+  );
 
   async function applyAndClose(version: '0.1.37' | '0.7.6'): Promise<void> {
     const w = await world();
@@ -349,58 +363,66 @@ describe('migrate-ask-parents', () => {
           await applyAndClose(version);
         });
       },
-      APPLY_TEST_TIMEOUT_MS,
+      REAL_BR_TEST_TIMEOUT_MS,
     );
   }
 
-  test('a question whose session bead is not in the DB is refused by name (exit 1) and left where it is', async () => {
-    const w = await world();
-    const stray = brCreate(
-      {cwd: w.repo},
-      {
-        labels: [REQUEST_LABEL, 'sid:00000000-0000-4000-8000-0000000000aa'],
-        title: 'A request from another session',
-        type: 'task',
-      },
-    );
-    if (stray.kind !== 'ok') throw new Error('stray not filed');
-    const orphan = brCreate(
-      {cwd: w.repo},
-      {
-        labels: [ASK_LABEL, 'sid:00000000-0000-4000-8000-0000000000aa'],
-        parent: stray.id,
-        priority: 3,
-        title: 'A question from another session',
-        type: 'question',
-      },
-    );
-    if (orphan.kind !== 'ok') throw new Error('orphan not filed');
-    const plan = planMigration({cwd: w.repo, env: w.env});
-    if (plan.kind !== 'planned') throw new Error(plan.reason);
-    expect(plan.refusals.map((refusal) => refusal.question)).toEqual([
-      {id: orphan.id, title: 'A question from another session'},
-    ]);
-    expect(plan.refusals[0]?.reason).toContain('no session bead');
-    const lines = quiet();
-    expect(runMigration({apply: true, cwd: w.repo, env: w.env})).toBe(1);
-    expect(lines.join('\n')).toContain(`NOT MOVED — no session bead`);
-    expect(childIds(w, stray.id)).toEqual([orphan.id]);
-  });
+  test(
+    'a question whose session bead is not in the DB is refused by name (exit 1) and left where it is',
+    async () => {
+      const w = await world();
+      const stray = brCreate(
+        {cwd: w.repo},
+        {
+          labels: [REQUEST_LABEL, 'sid:00000000-0000-4000-8000-0000000000aa'],
+          title: 'A request from another session',
+          type: 'task',
+        },
+      );
+      if (stray.kind !== 'ok') throw new Error('stray not filed');
+      const orphan = brCreate(
+        {cwd: w.repo},
+        {
+          labels: [ASK_LABEL, 'sid:00000000-0000-4000-8000-0000000000aa'],
+          parent: stray.id,
+          priority: 3,
+          title: 'A question from another session',
+          type: 'question',
+        },
+      );
+      if (orphan.kind !== 'ok') throw new Error('orphan not filed');
+      const plan = planMigration({cwd: w.repo, env: w.env});
+      if (plan.kind !== 'planned') throw new Error(plan.reason);
+      expect(plan.refusals.map((refusal) => refusal.question)).toEqual([
+        {id: orphan.id, title: 'A question from another session'},
+      ]);
+      expect(plan.refusals[0]?.reason).toContain('no session bead');
+      const lines = quiet();
+      expect(runMigration({apply: true, cwd: w.repo, env: w.env})).toBe(1);
+      expect(lines.join('\n')).toContain(`NOT MOVED — no session bead`);
+      expect(childIds(w, stray.id)).toEqual([orphan.id]);
+    },
+    REAL_BR_TEST_TIMEOUT_MS,
+  );
 
-  test('applyMove reads its write back: a move whose read-back disagrees is a failure, never "moved"', async () => {
-    const w = await world();
-    const plan = planMigration({cwd: w.repo, env: w.env});
-    if (plan.kind !== 'planned') throw new Error(plan.reason);
-    const [move] = plan.moves;
-    if (move == null) throw new Error('no move');
-    // Claim the question was in a status it is not in: the read-back says so.
-    const result = applyMove(
-      {...move, question: {...move.question, status: 'deferred'}},
-      {db: plan.db, env: w.env},
-    );
-    expect(result.kind).toBe('failed');
-    if (result.kind === 'failed') {
-      expect(result.reason).toContain('its status changed from deferred to');
-    }
-  });
+  test(
+    'applyMove reads its write back: a move whose read-back disagrees is a failure, never "moved"',
+    async () => {
+      const w = await world();
+      const plan = planMigration({cwd: w.repo, env: w.env});
+      if (plan.kind !== 'planned') throw new Error(plan.reason);
+      const [move] = plan.moves;
+      if (move == null) throw new Error('no move');
+      // Claim the question was in a status it is not in: the read-back says so.
+      const result = applyMove(
+        {...move, question: {...move.question, status: 'deferred'}},
+        {db: plan.db, env: w.env},
+      );
+      expect(result.kind).toBe('failed');
+      if (result.kind === 'failed') {
+        expect(result.reason).toContain('its status changed from deferred to');
+      }
+    },
+    REAL_BR_TEST_TIMEOUT_MS,
+  );
 });

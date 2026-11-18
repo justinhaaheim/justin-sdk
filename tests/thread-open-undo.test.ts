@@ -8,6 +8,7 @@
  * (D-NO-LIVE-RUNS).
  */
 
+import type {CloseLogLine} from '../src/thread/close';
 import type {CmuxCall} from '../src/thread/cmux';
 import type {PidCommand, UndoDeps, UndoOptions} from '../src/thread/open-undo';
 import type {ActivityTimes} from '../src/thread/transcript-activity';
@@ -1762,6 +1763,85 @@ describe('home-base-kwand.11: --close-tabs closes the tabs --restore-failed open
     expect(result.output).toContain(
       'Closed tabs opened in an old workspace (0)',
     );
+    const onDisk = JSON.parse(readFileSync(w.recordPath, 'utf8')) as {
+      undo?: {tabs?: {closed?: unknown[]; failed?: unknown[]}};
+    };
+    expect(onDisk.undo?.tabs?.closed).toEqual([]);
+    expect(onDisk.undo?.tabs?.failed).toHaveLength(1);
+    expect(result.exitCode).toBe(1);
+  });
+
+  /** Every line the close log is asked to append, in order. */
+  const captureLog = (w: World): CloseLogLine[] => {
+    const lines: CloseLogLine[] = [];
+    const append = w.deps.appendLog;
+    if (append == null) throw new Error('no appendLog');
+    w.deps.appendLog = (line) => {
+      lines.push(line);
+      return append(line);
+    };
+    return lines;
+  };
+
+  test('home-base-kwand.30 R1: that tab gets one more closes-log line, failed: verify, after its closed line', async () => {
+    const w = tabWorld();
+    const run = w.deps.run;
+    if (run == null) throw new Error('no run');
+    // cmux answers OK to close-surface and keeps the surface.
+    w.deps.run = async (args) =>
+      args[0] === 'close-surface'
+        ? await Promise.resolve({kind: 'ok' as const, stdout: 'OK\n'})
+        : await run(args);
+    const lines = captureLog(w);
+    const result = await undoOpen(w.options, w.deps);
+    expect(result.exitCode).toBe(1);
+    expect(
+      lines
+        .filter((line) => line.surfaceId === surfId(5))
+        .map((line) => line.outcome),
+    ).toEqual([
+      'closing',
+      'closed',
+      `failed: verify: close-surface answered OK, but tab surface:5 (${surfId(5)}) is still open 5 s later`,
+    ]);
+  });
+
+  test('home-base-kwand.30 R2: the tree cannot be read after the close: failed at step verify naming the unreadable tree, never closed, in the output or the record; exit 1', async () => {
+    const w = tabWorld();
+    const run = w.deps.run;
+    if (run == null) throw new Error('no run');
+    let closed = false;
+    w.deps.run = async (args) => {
+      if (args[0] === 'close-surface') closed = true;
+      return closed && args.includes('tree')
+        ? await Promise.resolve({
+            kind: 'failed' as const,
+            reason: 'Error: Command timed out',
+            timedOut: true,
+          })
+        : await run(args);
+    };
+    const lines = captureLog(w);
+    const result = await undoOpen(w.options, w.deps);
+    expect(kills(w)).toEqual(['kill 1005']);
+    expect(result.state?.tabs?.closed).toEqual([]);
+    const failed = result.state?.tabs?.failed ?? [];
+    expect(failed.map((entry) => entry.tab?.surfaceId)).toEqual([surfId(5)]);
+    expect(failed[0]?.step).toBe('verify');
+    expect(failed[0]?.claudeStopped).toBe(true);
+    expect(failed[0]?.reason).toBe(
+      `close-surface answered OK, but whether tab surface:5 (${surfId(5)}) is gone could not be checked within 5 s: the cmux tree could not be read (Error: Command timed out)`,
+    );
+    expect(result.state?.failures).toEqual([]);
+    expect(result.output).toContain('Tabs not closed: a step failed (1)');
+    expect(result.output).toContain(
+      'Closed tabs opened in an old workspace (0)',
+    );
+    expect(lines.map((line) => line.outcome.split(':')[0])).toEqual([
+      'closing',
+      'closed',
+      'failed',
+    ]);
     const onDisk = JSON.parse(readFileSync(w.recordPath, 'utf8')) as {
       undo?: {tabs?: {closed?: unknown[]; failed?: unknown[]}};
     };
