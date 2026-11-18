@@ -1998,6 +1998,38 @@ export function olderShownGroups(rows: readonly InboxRow[]): {
 }
 
 /**
+ * home-base-kwand.25: how many sessions older than the window are shown
+ * anyway, per reason, for `thread inbox --json`; every reason is a key, 0
+ * when no row has it. Sessions, not rows, as the summary counts them: a
+ * folded line (F6) counts every session in it. `unsentDraft` is counted
+ * here, though the text summary counts it on ✍️'s line, not the 🕰️ line.
+ *
+ * Critical rule 7: a 0 here is measured. The JSON is only built from a read
+ * that succeeded (a failed read exits 1 and prints none), so these rows were
+ * read. A row with no `olderShown` is within the window, as its JSON says
+ * (`olderShown: null`).
+ */
+export function olderShownCounts(
+  rows: readonly InboxRow[],
+): Record<OlderShownReason, number> {
+  const counts: Record<OlderShownReason, number> = {
+    beforeRestart: 0,
+    exportBehind: 0,
+    indexUndated: 0,
+    transcriptWritten: 0,
+    unknown: 0,
+    unreadable: 0,
+    unsentDraft: 0,
+    waiting: 0,
+  };
+  for (const row of rows) {
+    const reason = row.olderShown ?? null;
+    if (reason != null) counts[reason] += sessionsIn(row);
+  }
+  return counts;
+}
+
+/**
  * The summary's older line: "35 (34 waiting on you, 1 export behind), listed
  * last", or null. It counts only the cards listed last, so an older card with
  * unsent text is counted in ✍️'s line instead (home-base-kwand.23).
@@ -2392,6 +2424,10 @@ export function inboxJson(
     // D-DRAFTS: how the drafts store was read, and the drafts no row carries.
     inputDrafts: read.inputDrafts,
     missing: read.missing,
+    // home-base-kwand.25: the sessions older than the --days window shown
+    // anyway, per `olderShown` reason (every reason, 0 when none), beside
+    // `summary`'s counts and over the same rows.
+    olderShownCounts: olderShownCounts(sorted),
     // j8q3e.7 D6/D8: how the panes were looked up (the Map would print as
     // `{}`, which reads as "no panes"), and the D8 count.
     openPanesWithoutRequest: openPanesWithoutRequest(sorted, read.panes),

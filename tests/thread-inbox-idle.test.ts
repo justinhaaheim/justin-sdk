@@ -266,4 +266,40 @@ describe('the --days window: older cards shown anyway sit under their own headin
       ['old-waiting', 'waiting'],
     ]);
   });
+
+  // home-base-kwand.25: a top-level count per reason, every reason a key.
+  test('the JSON counts the older sessions per reason at the top level, 0 for a reason with none', () => {
+    expect(inboxJson(r).olderShownCounts).toEqual({
+      beforeRestart: 0,
+      exportBehind: 0,
+      indexUndated: 0,
+      transcriptWritten: 0,
+      unknown: 0,
+      unreadable: 0,
+      unsentDraft: 1,
+      waiting: 1,
+    });
+  });
+
+  test('a folded line older than the window counts every session in it, as the summary does', () => {
+    const folded = read([
+      row('fresh', at(2 * HOUR)),
+      row('old-line', at(10 * 24 * HOUR), {
+        display: 'line',
+        olderShown: 'transcriptWritten',
+        repeats: {
+          count: 3,
+          oldestAt: at(12 * 24 * HOUR),
+          sessionIds: ['old-line', 'older-line', 'oldest-line'],
+        },
+      }),
+      row('old-waiting', at(30 * 24 * HOUR), {olderShown: 'waiting'}),
+    ]);
+    const counts = inboxJson(folded).olderShownCounts;
+    expect(counts.transcriptWritten).toBe(3);
+    expect(counts.waiting).toBe(1);
+    expect(Object.values(counts).reduce((sum, count) => sum + count, 0)).toBe(
+      4,
+    );
+  });
 });

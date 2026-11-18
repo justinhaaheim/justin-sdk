@@ -34,6 +34,10 @@ import {tmpdir} from 'os';
 import {join} from 'path';
 
 import {PLAIN_STYLE} from '../src/cli-style';
+import {
+  BEFORE_RESTART_STATES,
+  BEFORE_RESTART_WORDS,
+} from '../src/thread/before-restart-state';
 import {resolveThreadConfig} from '../src/thread/config';
 import {
   argvSessionId,
@@ -45,6 +49,7 @@ import {
   openLockPath,
   opensDir,
   openSessions,
+  OVER_LIMIT_MARK,
   OWN_PANE_REASON,
   resumeCommand,
   writeJsonFile,
@@ -52,7 +57,10 @@ import {
 import {DEFAULT_PROJECT_COLORS} from '../src/thread/open-colors';
 import {parseSince} from '../src/thread/open-filters';
 import {readRuns, renderRuns} from '../src/thread/open-list';
-import {NO_REOPEN_SIGNALS} from '../src/thread/reopen-order';
+import {NO_REOPEN_SIGNALS, reopenReason} from '../src/thread/reopen-order';
+import {INBOX_SECTIONS} from '../src/thread/session-card';
+import {encodeFlag, STAR} from '../src/thread/session-flags';
+import {CUT_OFF_MARK} from '../src/thread/transcript-ending';
 
 const NOW = new Date('2026-10-18T12:00:00.000Z');
 const HOUR = 60 * 60_000;
@@ -1317,6 +1325,56 @@ describe('filters (home-base-yukaf.22)', () => {
     ).toHaveLength(2);
     expect(result.output).toContain('Not opened: over the limit (2)');
     expect(result.output).toContain('Pass --limit 4 (or leave --limit off)');
+  });
+
+  // home-base-kwand.17 item 2. NEGATIVE CONTROL run: OVER_LIMIT_MARK set back
+  // to '✂️' -> the header assertion failed (received "✂️ Not opened: over the
+  // limit (2)"); with it commented out, the state-mark assertion failed on
+  // its own ("mark:2702", CUT_OFF_MARK's).
+  test('the over-the-limit header carries a mark no session state uses', async () => {
+    const s = setup([cand(1), cand(2), cand(3)], {limit: 1});
+    const result = await openSessions(s.options, s.deps);
+    const headerLine = result.output
+      .split('\n')
+      .find((line) => line.includes('Not opened: over the limit'));
+    expect(headerLine?.trim()).toBe('📏 Not opened: over the limit (2)');
+    // Every mark a thread view gives a session's state: cut off, starred,
+    // each before-restart state, each inbox section, each reopen reason.
+    const reasons = [
+      {starred: true},
+      {waiting: {questions: null}},
+      {toLand: {landable: true, questions: null}},
+      {toLand: {landable: false, questions: 1}},
+      {cutOff: {at: null}},
+      {},
+    ].map(
+      (facts) =>
+        reopenReason(
+          {
+            ...NO_REOPEN_SIGNALS,
+            lastActivityAt: '2026-11-18T00:00:00.000Z',
+            ...facts,
+          },
+          new Date('2026-11-18T12:00:00.000Z'),
+        ).text.split(' ')[0] ?? '',
+    );
+    // One emoji with or without U+FE0F is the same mark (✂ and ✂️): compare
+    // them as flag labels, which drop the variation selectors.
+    const identity = (mark: string): string => {
+      const encoded = encodeFlag(mark);
+      return encoded.kind === 'ok' ? encoded.label : mark;
+    };
+    const stateMarks = [
+      CUT_OFF_MARK,
+      STAR,
+      ...BEFORE_RESTART_STATES.map(
+        (state) => BEFORE_RESTART_WORDS[state].emoji,
+      ),
+      ...INBOX_SECTIONS.map((section) => section.emoji),
+      ...reasons,
+    ].map(identity);
+    expect(stateMarks).toContain(identity('✂'));
+    expect(stateMarks).not.toContain(identity(OVER_LIMIT_MARK));
   });
 
   test('--limit refuses anything but a whole number above 0', async () => {

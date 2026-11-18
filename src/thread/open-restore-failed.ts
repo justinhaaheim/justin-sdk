@@ -2,8 +2,10 @@
  * `thread open --restore-failed` (home-base-kwand.3 item 2, gap G3 of epic
  * home-base-kwand): every session whose old tab came back after the last
  * restart without its Claude is opened again as a NEW tab of its old
- * workspace, newest activity first. A session whose old workspace is gone
- * opens in a new workspace instead, as the dashboard's `o` does.
+ * workspace, in the reopen order (decision D6, reopen-order.ts; it was
+ * newest activity first until home-base-kwand.17). A session whose old
+ * workspace is gone opens in a new workspace instead, as the dashboard's `o`
+ * does.
  *
  * Which sessions: OLD_TAB_RESUME_STATES (restore-tab.ts), the before-restart
  * states (before-restart-state.ts) `restoreFailed` (the old tab shows cmux's
@@ -41,6 +43,7 @@ import type {CmuxCall, CmuxRunner, CmuxTree, CmuxTreeRead} from './cmux';
 import type {LateLiveCheck, LiveSessions, UnplacedLive} from './live-sessions';
 import type {OpenCandidate, OpenOptions} from './open';
 import type {EnvLike} from './paths';
+import type {ReopenReason} from './reopen-order';
 import type {OldTabResumeState} from './restore-tab';
 import type {BeforeRestartEntry} from './session-inbox';
 
@@ -86,6 +89,12 @@ import {
 import {matchesRepo, parseLimit, repoValues} from './open-filters';
 import {lookupPanes, realPaneSources} from './pane-join';
 import {tildeText} from './part-one';
+import {
+  REOPEN_ORDER_WORDS,
+  reopenReason,
+  reopenTier,
+  sortForReopen,
+} from './reopen-order';
 import {liveSocketPath, socketSettingsJson, zshWord} from './respawn';
 import {
   CMUX_UUID,
@@ -153,6 +162,8 @@ export interface PlannedTab {
   failedTabId: string;
   lastActivityAt: string | null;
   name: string;
+  /** home-base-kwand.17 (D6): its tier in the reopen order, and why, in words. */
+  reopen: ReopenReason;
   repo: string | null;
   sessionBeadId: string | null;
   sessionId: string;
@@ -194,15 +205,9 @@ export interface RestoreFailedPlan {
     skipped: Partial<Record<RestoreSkipKind, number>>;
   };
   liveSessionsFound: number;
-  /** Newest activity first. */
+  /** In the reopen order (D6, home-base-kwand.17). */
   planned: PlannedTab[];
   skipped: SkippedTab[];
-}
-
-function activityMs(iso: string | null): number {
-  if (iso == null) return -Infinity;
-  const ms = Date.parse(iso);
-  return Number.isNaN(ms) ? -Infinity : ms;
 }
 
 /** The text new-surface types into the new tab's zsh: cd to the checkout, then resume. */
@@ -211,17 +216,22 @@ export function restoreTabCommand(checkout: string, sessionId: string): string {
 }
 
 /**
- * The plan, newest activity first. In order, a session is skipped when the
- * inbox has no row for it, it is in another --repo, it is untracked, done,
- * archived or handed off, it runs now, its checkout is unknown or gone, it is
- * listed twice, or its workspace id is not a uuid; else it opens in its old
- * workspace when the tree holds it, or in a new workspace when not. Last,
- * --limit keeps the newest `limit`.
+ * The plan, in the reopen order (D6, home-base-kwand.17): starred, waiting on
+ * you, to land or a P1 to P3 question, cut off mid-turn, then the rest; the
+ * newest activity first inside each, as plain thread open orders its plan.
+ * In order, a session is skipped when the inbox has no row for it, it is in
+ * another --repo, it is untracked, done, archived or handed off, it runs now,
+ * its checkout is unknown or gone, it is listed twice, or its workspace id is
+ * not a uuid; else it opens in its old workspace when the tree holds it, or in
+ * a new workspace when not. Last, --limit keeps the first `limit` of that
+ * order.
  */
 export function planRestoreFailed(input: {
   checkoutExists: (path: string) => boolean;
   limit: number | null;
   live: Extract<LiveSessions, {kind: 'read'}>;
+  /** For each session's "why here" words (the cut-off time, the age). */
+  now: Date;
   repos: readonly string[];
   sessions: readonly FailedRestore[];
   tree: CmuxTree;
@@ -239,11 +249,22 @@ export function planRestoreFailed(input: {
     planned: [],
     skipped: [],
   };
-  const sorted = [...input.sessions].sort(
-    (a, b) =>
-      activityMs(b.candidate?.lastActivityAt ?? null) -
-      activityMs(a.candidate?.lastActivityAt ?? null),
-  );
+  // home-base-kwand.17 (D6): the candidates carry the reopen facts
+  // (candidateOf reads them from the inbox row). A session with no inbox row
+  // has none, so it sorts with the rest, by an unknown activity: last.
+  const sorted = sortForReopen(input.sessions, (session) => {
+    const candidate = session.candidate;
+    return {
+      lastActivityAt: candidate?.lastActivityAt ?? null,
+      tier:
+        candidate == null
+          ? 'recent'
+          : reopenTier({
+              ...candidate.reopen,
+              lastActivityAt: candidate.lastActivityAt,
+            }),
+    };
+  });
   const seen = new Set<string>();
   for (const session of sorted) {
     const candidate = session.candidate;
@@ -355,6 +376,10 @@ export function planRestoreFailed(input: {
       failedTabId: session.tabId,
       lastActivityAt: candidate.lastActivityAt,
       name,
+      reopen: reopenReason(
+        {...candidate.reopen, lastActivityAt: candidate.lastActivityAt},
+        input.now,
+      ),
       repo: candidate.repo,
       sessionBeadId: candidate.sessionBeadId,
       sessionId: session.sessionId,
@@ -370,7 +395,7 @@ export function planRestoreFailed(input: {
         kind: 'overLimit',
         lastActivityAt: cut.lastActivityAt,
         name: cut.name,
-        reason: `--limit ${input.limit} kept the newest ${input.limit}`,
+        reason: `--limit ${input.limit} kept the first ${input.limit} in the reopen order`,
         sessionId: cut.sessionId,
         state: cut.state,
       });
@@ -445,6 +470,7 @@ export type JsonWriter = (
 // ---------------------------------------------------------------------------
 
 const LABELS: readonly Field[] = [
+  'Why here',
   'Repo',
   'Last activity',
   'Checkout',
@@ -544,8 +570,9 @@ export function renderRestoreFailed(
           value:
             rec.filters.limit == null
               ? 'none (--limit <n> opens at most n)'
-              : `at most ${rec.filters.limit}, newest first`,
+              : `at most ${rec.filters.limit}, the first in the reopen order`,
         },
+        {label: 'Order', value: REOPEN_ORDER_WORDS},
         ...stateFields(rec),
         {
           label: 'Old tabs',
@@ -594,6 +621,7 @@ export function renderRestoreFailed(
               block(
                 entry.name,
                 [
+                  {label: 'Why here', value: entry.reopen.text},
                   {label: 'Repo', value: entry.repo ?? 'unknown'},
                   {
                     label: 'Last activity',
@@ -913,6 +941,7 @@ export async function openRestoreFailed(
       checkoutExists: deps.checkoutExists ?? existsSync,
       limit: limit.limit,
       live,
+      now,
       repos,
       sessions: sessions.sessions,
       tree: treeRead.tree,
@@ -977,7 +1006,7 @@ export async function openRestoreFailed(
     const lateLive = deps.lateLive ?? realLateLiveCheck();
     let known = allIds(treeRead.tree);
 
-    // ---- 5. one open per session, newest first ----
+    // ---- 5. one open per session, in the reopen order ----
     for (const entry of plan.planned) {
       // F21: ps again, right before; unreadable stops ("not live" is never assumed).
       const check = await lateLive(entry.sessionId);

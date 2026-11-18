@@ -116,6 +116,13 @@ import {recordSdkWorkspaceName} from './workspace-name';
 /** D-CUTOFF. */
 export const OPEN_DEFAULT_DAYS = 7;
 
+/**
+ * The mark on the "Not opened: over the limit" header (home-base-kwand.17).
+ * It was ✂️ until ✂️ came to mean "cut off mid-turn" (CUT_OFF_MARK,
+ * home-base-kwand.4); no thread view uses 📏 for a session's state.
+ */
+export const OVER_LIMIT_MARK = '📏';
+
 /** D-UNFINISHED: the sections reopened by default, in the inbox's order. */
 export const OPEN_DEFAULT_SECTIONS: readonly InboxSection[] = [
   // home-base-yukaf.4: a session with unsent text moves to this section from
@@ -1657,7 +1664,10 @@ export function renderOpen(
   if (rec.overLimit.length > 0) {
     const total = rec.overLimit.length + (filters.limit ?? 0);
     blocks.push(
-      header(`Not opened: over the limit (${rec.overLimit.length})`, '✂️'),
+      header(
+        `Not opened: over the limit (${rec.overLimit.length})`,
+        OVER_LIMIT_MARK,
+      ),
     );
     blocks.push(
       prose(

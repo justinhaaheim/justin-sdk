@@ -15,6 +15,7 @@ import type {
   RestoreFailedRecord,
   StateCounts,
 } from '../src/thread/open-restore-failed';
+import type {ReopenSignals} from '../src/thread/reopen-order';
 import type {OldTabResumeState} from '../src/thread/restore-tab';
 import type {BeforeRestartEntry} from '../src/thread/session-inbox';
 
@@ -540,6 +541,72 @@ describe('which sessions are skipped, by reason', () => {
       sid(1),
     ]);
     expect(result.record?.counts.skipped).toEqual({overLimit: 1});
+  });
+});
+
+describe('the reopen order (home-base-kwand.17, decision D6)', () => {
+  /** Sessions 1 to 6, newest first by activity, each in a different tier. */
+  function tiered(): FailedRestore[] {
+    const signals = (over: Partial<ReopenSignals>): Partial<OpenCandidate> => ({
+      reopen: {...NO_REOPEN_SIGNALS, ...over},
+    });
+    return [
+      failed(1, OLD_WS),
+      failed(2, OLD_WS, signals({cutOff: {at: null}})),
+      failed(3, OLD_WS, signals({toLand: {landable: true, questions: null}})),
+      failed(4, OLD_WS, signals({waiting: {questions: 2}})),
+      failed(5, OLD_WS, signals({starred: true})),
+      failed(6, OLD_WS, signals({starred: true})),
+    ];
+  }
+
+  // NEGATIVE CONTROL run: planRestoreFailed's sort key given tier 'recent'
+  // for every session, which is the newest-first sort it replaced -> both
+  // tests failed: the planned order was sessions 1 to 6, and --limit 2 kept
+  // sessions 1 and 2. The other 22 tests here passed.
+  test('plans starred, waiting on you, to land, cut off, then the rest, newest first inside each, and says why', async () => {
+    const s = setup(tiered(), {dryRun: true, json: true});
+    const result = await openRestoreFailed(s.options, s.deps);
+    expect(result.exitCode).toBe(0);
+    expect(
+      result.record?.planned.map((entry) => [entry.sessionId, entry.reopen]),
+    ).toEqual([
+      [sid(5), {text: '⭐ starred', tier: 'starred'}],
+      [sid(6), {text: '⭐ starred', tier: 'starred'}],
+      [sid(4), {text: '🙋 waiting on you: 2 P0 questions', tier: 'waiting'}],
+      [sid(3), {text: '🛬 ready for you to land', tier: 'toLand'}],
+      [sid(2), {text: '✂️ cut off mid-turn', tier: 'cutOff'}],
+      [sid(1), {text: '🕒 last active 1 hour ago', tier: 'recent'}],
+    ]);
+    const text = await openRestoreFailed({...s.options, json: false}, s.deps);
+    const lines = text.output.split('\n');
+    expect(
+      lines.some((line) => /Why here:\s+⭐ starred$/.test(line.trimEnd())),
+    ).toBe(true);
+    expect(lines.some((line) => /^\s+Order:\s+starred first/.test(line))).toBe(
+      true,
+    );
+  });
+
+  test('--limit keeps the first of the reopen order, not the newest', async () => {
+    const s = setup(tiered(), {dryRun: true, json: true, limit: 2});
+    const result = await openRestoreFailed(s.options, s.deps);
+    expect(result.record?.planned.map((entry) => entry.sessionId)).toEqual([
+      sid(5),
+      sid(6),
+    ]);
+    const cut = result.record?.skipped.filter(
+      (entry) => entry.kind === 'overLimit',
+    );
+    expect(cut?.map((entry) => entry.sessionId)).toEqual([
+      sid(4),
+      sid(3),
+      sid(2),
+      sid(1),
+    ]);
+    expect(cut?.[0]?.reason).toBe(
+      '--limit 2 kept the first 2 in the reopen order',
+    );
   });
 });
 
