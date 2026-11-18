@@ -211,29 +211,59 @@ describe('thread inbox --idle-for (home-base-kwand.8, G4)', () => {
 });
 
 describe('the --days window: older cards shown anyway sit under their own heading (home-base-kwand.8 item 4)', () => {
-  test('by repo: the cards active within the window first, then "Older than 5 days, waiting on you (1)", then the unsent one', () => {
-    const r = read([
-      row('fresh', at(2 * HOUR)),
-      row('old-waiting', at(30 * 24 * HOUR), {olderShown: 'waiting'}),
-      row('old-draft', at(20 * 24 * HOUR), {olderShown: 'unsentDraft'}),
+  // home-base-kwand.23 (D-DRAFTS): of the two older cards, only the waiting
+  // one is listed last; the one with unsent text stays with the other cards
+  // (by repo: in its repo), and the summary counts it on the ✍️ line, never
+  // on the 🕰️ line that says "listed last".
+  const r = read([
+    row('fresh', at(2 * HOUR)),
+    row('old-waiting', at(30 * 24 * HOUR), {olderShown: 'waiting'}),
+    row('old-draft', at(20 * 24 * HOUR), {
+      olderShown: 'unsentDraft',
+      section: 'unsentDraft',
+    }),
+  ]);
+
+  for (const order of ['repo', 'recent'] as const) {
+    test(`${order}: the waiting card is listed last under "Older than 5 days, waiting on you (1)"; the unsent one is not`, () => {
+      const text = render(r, order);
+      const waiting = text.indexOf(
+        '## 🛑 Older than 5 days, waiting on you (1)',
+      );
+      expect(waiting).toBeGreaterThan(-1);
+      // By repo, the old card with unsent text is one of app's two cards.
+      const top = text.indexOf(
+        order === 'repo' ? '## 📁 app (2)' : '## 🕒 Sessions, newest first',
+      );
+      expect(top).toBeGreaterThan(-1);
+      expect(top).toBeLessThan(waiting);
+      // Each card once (its resume line); only the waiting one after its heading.
+      for (const id of ['fresh', 'old-waiting', 'old-draft']) {
+        expect(text.split(`claude --resume ${id}`).length - 1).toBe(1);
+      }
+      expect(text.indexOf('claude --resume old-waiting')).toBeGreaterThan(
+        waiting,
+      );
+      expect(text.indexOf('claude --resume fresh')).toBeLessThan(waiting);
+      expect(text.indexOf('claude --resume old-draft')).toBeLessThan(waiting);
+      expect(text).not.toContain('Older than 5 days, unsent text');
+      expect(text).toContain(
+        '- **🕰️ Older than 5 days, shown anyway:** 1 (1 waiting on you), listed last',
+      );
+      expect(text).toContain(
+        '- **✍️ Unsent text in the input box:** 1 (1 older than 5 days)',
+      );
+    });
+  }
+
+  test('the JSON keeps olderShown on both older rows', () => {
+    const json = inboxJson(r);
+    expect(
+      json.sessions.map((entry) => [entry.sessionId, entry.olderShown]),
+    ).toEqual([
+      ['fresh', null],
+      ['old-draft', 'unsentDraft'],
+      ['old-waiting', 'waiting'],
     ]);
-    const text = render(r, 'repo');
-    const repoHeading = text.indexOf('## 📁 app (1)');
-    const waiting = text.indexOf('## 🛑 Older than 5 days, waiting on you (1)');
-    const draft = text.indexOf(
-      '## ✍️ Older than 5 days, unsent text in the input box (1)',
-    );
-    expect(repoHeading).toBeGreaterThan(-1);
-    expect(waiting).toBeGreaterThan(repoHeading);
-    expect(draft).toBeGreaterThan(waiting);
-    // Each card once (its resume line), under its own heading.
-    expect(text.split('claude --resume old-waiting').length - 1).toBe(1);
-    expect(text.indexOf('claude --resume old-waiting')).toBeGreaterThan(
-      waiting,
-    );
-    expect(text.indexOf('claude --resume fresh')).toBeLessThan(waiting);
-    expect(text).toContain(
-      '- **🕰️ Older than 5 days, shown anyway:** 2 (1 waiting on you, 1 unsent text in the input box), listed last',
-    );
   });
 });

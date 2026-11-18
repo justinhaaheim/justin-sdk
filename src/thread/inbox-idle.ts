@@ -43,19 +43,25 @@ export type OlderShownReason =
   | 'unknown'
   /** A session that could not be loaded is never dropped. */
   | 'unreadable'
-  /** D-DRAFTS: text typed and never sent exists nowhere else. */
+  /**
+   * D-DRAFTS: text typed and never sent exists nowhere else. The only reason
+   * NOT listed last (home-base-kwand.23): see `listedLast`.
+   */
   | 'unsentDraft'
   /** R5: 🛑 waiting on you is never hidden by age. */
   | 'waiting';
 
-/** The order the older groups are listed in, and each one's words. */
+/**
+ * The older groups listed last, in their order, and each one's words. Every
+ * reason but `unsentDraft` is here (home-base-kwand.23, D-DRAFTS): a card
+ * with unsent text is never listed last, whatever its age.
+ */
 export const OLDER_SHOWN_GROUPS: readonly {
   emoji: string;
-  reason: OlderShownReason;
+  reason: Exclude<OlderShownReason, 'unsentDraft'>;
   words: string;
 }[] = [
   {emoji: '🛑', reason: 'waiting', words: 'waiting on you'},
-  {emoji: '✍️', reason: 'unsentDraft', words: 'unsent text in the input box'},
   {emoji: '🔁', reason: 'beforeRestart', words: 'open before the restart'},
   {emoji: '⏳', reason: 'exportBehind', words: 'export behind'},
   {emoji: '❔', reason: 'unknown', words: 'status unknown'},
@@ -71,6 +77,23 @@ export const OLDER_SHOWN_GROUPS: readonly {
     words: 'not tracked, its transcript file was written inside the window',
   },
 ];
+
+/**
+ * Whether a card older than the window is listed last, under its reason's
+ * heading: every reason in OLDER_SHOWN_GROUPS is. `unsentDraft` is not
+ * (home-base-kwand.23, D-DRAFTS: text typed and never sent exists nowhere
+ * else, so a draft goes first): such a card is placed where every card with
+ * unsent text is (first, under ✍️, in the --by-status order) and shows its
+ * age there; its JSON row keeps `olderShown: 'unsentDraft'`. A row within the
+ * window (null) is not listed last. A reason missing from the groups is
+ * placed with the cards within the window, so no card is ever dropped.
+ */
+export function listedLast(reason: OlderShownReason | null): boolean {
+  return (
+    reason != null &&
+    OLDER_SHOWN_GROUPS.some((group) => group.reason === reason)
+  );
+}
 
 /** "Older than 5 days, waiting on you": the heading of one older group. */
 export function olderHeading(reason: OlderShownReason, days: number): string {

@@ -639,21 +639,42 @@ describe('thread inbox: unsent input-box text (home-base-yukaf.4, D-DRAFTS)', ()
       });
 
       const text = render(r, {order: 'status'});
-      // home-base-kwand.8 item 4: session 9 is 61 days old, outside the
-      // window, and shown for its draft: it sits under its own heading after
-      // every card within the window, and the summary still counts it.
+      // home-base-kwand.23 (D-DRAFTS over kwand.8 item 4): session 9 is 61
+      // days old, outside the window, and shown for its draft. It stays in
+      // the top ✍️ section with session 1, showing its age, never under an
+      // "Older than" heading at the end.
       const firstSection = text.indexOf(
-        '## ✍️ Unsent text in the input box (1)',
+        '## ✍️ Unsent text in the input box (2)',
       );
       expect(firstSection).toBeGreaterThan(-1);
       // Session 1 was the only one in Needs you: its draft moved it here.
       expect(text).not.toContain('## 🛑 Needs you');
-      expect(firstSection).toBeLessThan(text.indexOf('## 🏃 Working'));
-      const olderDraft = text.indexOf(
-        '## ✍️ Older than 30 days, unsent text in the input box (1)',
+      const working = text.indexOf('## 🏃 Working');
+      expect(firstSection).toBeLessThan(working);
+      expect(text).not.toContain('Older than 30 days, unsent text');
+      const nineAt = text.indexOf(`--resume ${sid(9)}`);
+      expect(nineAt).toBeGreaterThan(firstSection);
+      expect(nineAt).toBeLessThan(working);
+      expect(text.indexOf(`--resume ${sid(1)}`)).toBeLessThan(nineAt);
+      // Its card heading still says how old it is.
+      expect(text).toContain('**💬 [ALPHA] An old question** (61 days ago)');
+      // The JSON still says why it is shown.
+      expect(r.rows.find((row) => row.sessionId === sid(9))?.olderShown).toBe(
+        'unsentDraft',
       );
-      expect(olderDraft).toBeGreaterThan(text.indexOf('## 🏃 Working'));
-      expect(text.indexOf(`--resume ${sid(9)}`)).toBeGreaterThan(olderDraft);
+      // AC 3: the summary names it on the ✍️ line, and no line that says
+      // "listed last" counts it (here, nothing else is older: no such line).
+      expect(text).toContain(
+        '- **✍️ Unsent text in the input box:** 2 (1 also waiting on you, 1 older than 30 days)',
+      );
+      expect(text).not.toContain('listed last');
+      // In every order its card is listed once, and never under "Older than".
+      for (const order of ['recent', 'repo'] as const) {
+        const other = render(r, {order});
+        expect(other).not.toContain('Older than 30 days');
+        expect(other.split(`--resume ${sid(9)}`).length - 1).toBe(1);
+        expect(other).toContain('1 older than 30 days)');
+      }
       expect(text).toContain(
         '**You typed, never sent:** use the cron bucket\n      and tell me why',
       );
@@ -666,9 +687,10 @@ describe('thread inbox: unsent input-box text (home-base-yukaf.4, D-DRAFTS)', ()
           '  - **You have unsent text in that pane: open it and send or clear it:** `cmux select-workspace --workspace WS-1`',
         ].join('\n'),
       );
-      expect(text).toContain('2 (1 also waiting on you)');
-
       const json = inboxJson(r);
+      expect(
+        json.sessions.find((s) => s.sessionId === sid(9))?.olderShown,
+      ).toBe('unsentDraft');
       expect(json.summary[0]).toMatchObject({
         alsoWaiting: 1,
         count: 2,

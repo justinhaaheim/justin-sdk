@@ -116,6 +116,7 @@ import {
   idleForNote,
   type IdleForRead,
   idleMsAt,
+  listedLast,
   OLDER_SHOWN_GROUPS,
   olderHeading,
   type OlderShownReason,
@@ -1247,7 +1248,8 @@ async function readInboxOnce(input: {
       card: withInputDraft(row.card, draft),
       display: 'card',
       inputDraft: draft,
-      // kwand.8: an older row with a draft is listed for the draft first.
+      // kwand.8: an older row with a draft is listed for the draft first;
+      // kwand.23: under ✍️ with the other drafts, never last (listedLast).
       olderShown: row.olderShown == null ? null : 'unsentDraft',
       section: 'unsentDraft',
     };
@@ -1414,15 +1416,23 @@ export function inboxSummary(
 /**
  * A summary entry's value: the count, and for Not tracked what it holds
  * (j8q3e.7 D4: a one-liner is "no request recorded", never "nothing open").
+ * `olderNote` is ✍️'s "1 older than 30 days" (home-base-kwand.23), else null.
  */
-function summaryValue(entry: {
-  alsoWaiting: number;
-  count: number;
-  lines: number;
-}): string {
-  if (entry.alsoWaiting > 0) {
-    return `${entry.count} (${entry.alsoWaiting} also waiting on you)`;
-  }
+function summaryValue(
+  entry: {
+    alsoWaiting: number;
+    count: number;
+    lines: number;
+  },
+  olderNote: string | null,
+): string {
+  const notes = [
+    ...(entry.alsoWaiting > 0
+      ? [`${entry.alsoWaiting} also waiting on you`]
+      : []),
+    ...(olderNote == null ? [] : [olderNote]),
+  ];
+  if (notes.length > 0) return `${entry.count} (${notes.join(', ')})`;
   if (entry.lines === 0) return String(entry.count);
   const cards = entry.count - entry.lines;
   return `${entry.count} (${cards} with something open or unreadable, ${entry.lines} with no request recorded)`;
@@ -1904,9 +1914,10 @@ export function inputDraftNotes(drafts: InboxDrafts): string[] {
 }
 
 /**
- * home-base-kwand.8 (G4): the rows older than the window and shown anyway,
- * one group per reason in OLDER_SHOWN_GROUPS order, newest first inside each
- * (the order `rows` came in). Empty groups are left out.
+ * home-base-kwand.8 (G4): the rows older than the window, shown anyway and
+ * listed last, one group per reason in OLDER_SHOWN_GROUPS order, newest first
+ * inside each (the order `rows` came in). Empty groups are left out. A row
+ * with unsent text is in none of them (home-base-kwand.23, `listedLast`).
  */
 export function olderShownGroups(rows: readonly InboxRow[]): {
   emoji: string;
@@ -1920,7 +1931,11 @@ export function olderShownGroups(rows: readonly InboxRow[]): {
   })).filter((group) => group.rows.length > 0);
 }
 
-/** The summary's older line: "35 (34 waiting on you, 1 unsent text …)", or null. */
+/**
+ * The summary's older line: "35 (34 waiting on you, 1 export behind), listed
+ * last", or null. It counts only the cards listed last, so an older card with
+ * unsent text is counted in ✍️'s line instead (home-base-kwand.23).
+ */
 function olderSummaryValue(
   groups: ReturnType<typeof olderShownGroups>,
 ): string | null {
@@ -1965,8 +1980,17 @@ export function renderInbox(
     .sort(byNewest);
   // home-base-kwand.8 (G4): the cards active within the window first, in the
   // chosen order; then the older ones shown anyway, under their own headings.
-  const within = visible.filter((row) => row.olderShown == null);
+  // home-base-kwand.23 (D-DRAFTS): an older card with unsent text is not
+  // listed last: it is placed with the others, so under ✍️ by status.
+  const within = visible.filter((row) => !listedLast(row.olderShown ?? null));
   const olderGroups = olderShownGroups(visible);
+  // ✍️'s summary line names them, since the 🕰️ line says "listed last".
+  const olderDrafts = visible
+    .filter(
+      (row) =>
+        row.section === 'unsentDraft' && row.olderShown === 'unsentDraft',
+    )
+    .reduce((sum, row) => sum + sessionsIn(row), 0);
 
   // j8q3e.1 D5: the summary first, one line per non-empty section.
   const summary = inboxSummary(visible, all);
@@ -1979,7 +2003,12 @@ export function renderInbox(
     blocks.push(header('Summary', '📊', 2, style));
     const fields = summary.map((entry) => ({
       label: `${entry.emoji} ${entry.title}`,
-      value: summaryValue(entry),
+      value: summaryValue(
+        entry,
+        entry.key === 'unsentDraft' && olderDrafts > 0
+          ? `${olderDrafts} older than ${plural(options.days, 'day', 'days')}`
+          : null,
+      ),
     }));
     // j8q3e.7 D8: the panes he cannot yet close safely.
     const openPanes = openPanesWithoutRequest(visible, read.panes);

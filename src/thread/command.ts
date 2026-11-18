@@ -2378,7 +2378,7 @@ export const threadCommand: CommandModule = {
             .option('days', {
               default: 30,
               describe:
-                'Knob on: sessions with activity in the last N days (an undated tracked session is always listed; an untracked one is in the window when its transcript was last written inside it). Some older sessions are always shown — waiting on you, unsent text, export behind, unknown, could not be loaded — and they are listed last, under headings such as "Older than 5 days, waiting on you (34)"; in --json each says why in `olderShown`',
+                'Knob on: sessions with activity in the last N days (an undated tracked session is always listed; an untracked one is in the window when its transcript was last written inside it). Some older sessions are always shown — waiting on you, unsent text, export behind, unknown, could not be loaded — and they are listed last, under headings such as "Older than 5 days, waiting on you (34)", except a session with unsent text, which is listed with the other unsent text (first, under ✍️, with --by-status) and counted on the ✍️ line of the summary; in --json each says why in `olderShown`',
               type: 'number' as const,
             })
             .option('idle-for', {
