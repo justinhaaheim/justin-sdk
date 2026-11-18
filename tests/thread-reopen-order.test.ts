@@ -243,6 +243,7 @@ describe('the signals of an inbox row', () => {
 const NO_LIVE: Extract<LiveSessions, {kind: 'read'}> = {
   bySessionId: new Map(),
   kind: 'read',
+  namedProcesses: [],
   unplaced: [],
   workspacesBySessionId: new Map(),
 };

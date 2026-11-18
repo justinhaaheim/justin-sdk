@@ -117,7 +117,26 @@ function liveRead(
       workspacesBySessionId.set(id, [entry.workspaceId.toUpperCase()]);
     }
   }
-  return {bySessionId, kind: 'read', unplaced, workspacesBySessionId};
+  // home-base-kwand.24 R2: each named process's placement, as the join records it.
+  const namedProcesses = [...bySessionId].flatMap(([id, entry]) =>
+    entry.pid == null
+      ? []
+      : [
+          {
+            pid: entry.pid,
+            sessionId: id.toLowerCase(),
+            source: entry.source,
+            workspaceId: entry.workspaceId?.toUpperCase() ?? null,
+          },
+        ],
+  );
+  return {
+    bySessionId,
+    kind: 'read',
+    namedProcesses,
+    unplaced,
+    workspacesBySessionId,
+  };
 }
 
 /** The cmux commands that change something; everything else only reads. */

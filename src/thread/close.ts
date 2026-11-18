@@ -114,6 +114,7 @@ import {
   KEEP_ACTIVE_DEFAULT,
   KEEP_KIND_ORDER,
   KEEP_KIND_WORDS,
+  noProcessTtyKeep,
   parseKeepActive,
   primaryKind,
   realReadSessionFacts,
@@ -628,6 +629,12 @@ type Assessment =
       claude: Proc[];
       entry: CloseEntry;
       kind: 'closable';
+      /**
+       * home-base-kwand.24 R1: gateSurfaces' zero-process panes. Required
+       * here (only assess builds a closable), so a closable workspace can
+       * never lack the fact.
+       */
+      noProcessTty: string[];
       sessions: string[];
       /** home-base-kwand.21 F2: gateSurfaces' weak evidence; set by assess. */
       weak?: string[];
@@ -638,6 +645,11 @@ type Assessment =
       kind: 'kept';
       /** K6: each reason's kind, in order; absent from --tab's own checks. */
       kinds?: KeepKind[];
+      /**
+       * home-base-kwand.24 R1: gateSurfaces' zero-process panes; set by
+       * assess. A kept workspace stays kept, so its absence elsewhere is safe.
+       */
+      noProcessTty?: string[];
       reasons: string[];
       /** home-base-kwand.21 F2: gateSurfaces' weak evidence; set by assess. */
       weak?: string[];
@@ -728,6 +740,7 @@ async function assess(
       entry,
       kind: 'kept',
       kinds,
+      noProcessTty: gate.noProcessTty,
       reasons,
       weak: gate.weak,
     };
@@ -736,6 +749,7 @@ async function assess(
     claude: gate.claude,
     entry,
     kind: 'closable',
+    noProcessTty: gate.noProcessTty,
     sessions: gate.sessions,
     weak: gate.weak,
   };
@@ -2270,6 +2284,10 @@ async function closeAllExcept(input: {
         text: `named with --keep ${named.join(', ')}`,
       });
     }
+    // home-base-kwand.24 R1: a pane whose reported tty runs nothing at all is
+    // kept as unknown, with or without an unplaced Claude or the flag.
+    const noProcess = assessment.noProcessTty ?? [];
+    if (noProcess.length > 0) pre.push(noProcessTtyKeep(noProcess));
     const weak = assessment.weak ?? [];
     if (unplaced.length > 0 && weak.length > 0) {
       pre.push(unplacedKeep(unplaced, weak));
@@ -2340,10 +2358,25 @@ async function closeAllExcept(input: {
         null,
         gateOptions,
       );
+      if (assessed.kind !== 'closable') return assessed;
+      // home-base-kwand.24 R1 at the moment of closing: the plan saw
+      // processes on the tty, and the re-check sees none.
+      if (assessed.noProcessTty.length > 0) {
+        const reason = noProcessTtyKeep(assessed.noProcessTty);
+        return {
+          drafts: [],
+          entry: assessed.entry,
+          kind: 'kept',
+          kinds: [reason.kind],
+          noProcessTty: assessed.noProcessTty,
+          reasons: [reason.text],
+          ...(assessed.weak == null ? {} : {weak: assessed.weak}),
+        };
+      }
       // F2 at the moment of closing: a workspace that passed with a weak-
       // evidence pane passes again only while every Claude is still placed.
-      const weak = assessed.kind === 'closable' ? (assessed.weak ?? []) : [];
-      if (assessed.kind !== 'closable' || weak.length === 0) return assessed;
+      const weak = assessed.weak ?? [];
+      if (weak.length === 0) return assessed;
       const liveAgain = await full.readLive();
       const unplacedNow =
         liveAgain.kind === 'read' ? unplacedClaude(liveAgain) : null;

@@ -90,6 +90,22 @@ export interface LiveSession {
   workspaceId: string | null;
 }
 
+/**
+ * home-base-kwand.24 R2: one claude process a source named a session for, and
+ * the workspace the join placed that process in. `bySessionId` keeps one
+ * placement per session, so a second process of a session placed elsewhere
+ * (a session resumed twice, one copy on a terminal no tab reports) shows only
+ * here. Several sources can name one pid: one entry per naming.
+ */
+export interface NamedLive {
+  pid: number;
+  /** Lowercased. */
+  sessionId: string;
+  source: LiveSource;
+  /** The workspace its tty places it in (uppercase); null: on no single cmux surface. */
+  workspaceId: string | null;
+}
+
 /** A claude session process that no source could name a session for. */
 export interface UnplacedLive {
   /** Why no session id could be read for it. */
@@ -110,6 +126,8 @@ export type LiveSessions =
   | {
       bySessionId: Map<string, LiveSession>;
       kind: 'read';
+      /** home-base-kwand.24 R2: every named claude process and its placement. */
+      namedProcesses: NamedLive[];
       unplaced: UnplacedLive[];
       /** Every workspace uuid any source placed each session in (see the join). */
       workspacesBySessionId: Map<string, string[]>;
@@ -400,6 +418,8 @@ export function joinLiveSessions(input: {
   surfaces: readonly LiveSurface[];
 }): {
   bySessionId: Map<string, LiveSession>;
+  /** home-base-kwand.24 R2: every named claude process and its placement. */
+  namedProcesses: NamedLive[];
   unplaced: UnplacedLive[];
   /**
    * home-base-yukaf.31: every distinct workspace uuid (uppercase) a source
@@ -440,9 +460,20 @@ export function joinLiveSessions(input: {
 
   const bySessionId = new Map<string, LiveSession>();
   const workspacesBySessionId = new Map<string, string[]>();
+  const namedProcesses: NamedLive[] = [];
   const pidsNamed = new Set<number>();
   const add = (sessionId: string, found: LiveSession): void => {
     const key = sessionId.toLowerCase();
+    // home-base-kwand.24 R2: each process's own placement, before the
+    // per-session merge below keeps only the first one.
+    if (found.pid != null) {
+      namedProcesses.push({
+        pid: found.pid,
+        sessionId: key,
+        source: found.source,
+        workspaceId: found.workspaceId?.toUpperCase() ?? null,
+      });
+    }
     if (found.workspaceId != null) {
       const seen = workspacesBySessionId.get(key) ?? [];
       const workspace = found.workspaceId.toUpperCase();
@@ -627,7 +658,7 @@ export function joinLiveSessions(input: {
       });
     }
   }
-  return {bySessionId, unplaced, workspacesBySessionId};
+  return {bySessionId, namedProcesses, unplaced, workspacesBySessionId};
 }
 
 /** What `readLiveSessions` reads; every source is injectable for tests. */

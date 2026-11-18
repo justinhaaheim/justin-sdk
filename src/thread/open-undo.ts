@@ -612,6 +612,15 @@ export interface SurfacesGate {
   drafts: GateDraft[];
   /** K6 (home-base-kwand.7): the kind of each reason, in `reasons`' order. */
   kinds: GateReasonKind[];
+  /**
+   * home-base-kwand.24 R1: each pane whose reported tty (known) has no
+   * process on it at all, in words. A live terminal always holds a login and
+   * a shell, so that tty is stale and what runs in the pane cannot be seen.
+   * gatePane lets such a pane pass on its screen alone; only `thread close
+   * --all-except` reads this list and keeps the workspace for it, so the
+   * named close and `--undo` are unchanged (home-base-kwand.20).
+   */
+  noProcessTty: string[];
   /** Why the workspace is kept; empty = it may close. */
   reasons: string[];
   /** Every distinct session id its panes' status lines show, lowercased. */
@@ -657,6 +666,7 @@ export async function gateSurfaces(
   const sessions: string[] = [];
   const suggestions: GateSuggestion[] = [];
   const weak: string[] = [];
+  const noProcessTty: string[] = [];
   if (surfaceIds.length === 0) {
     keep('noPane', 'cmux lists no pane in it, so nothing on it can be checked');
   }
@@ -691,6 +701,9 @@ export async function gateSurfaces(
     }
     if (procsOnTty?.length === 0) {
       weak.push(`no process runs on ${label}'s tty ${tty ?? '?'}`);
+      noProcessTty.push(
+        `no process at all runs on tty ${tty ?? '?'}, which ${label} reports`,
+      );
     }
     if (blank) weak.push(`${label} shows a blank screen`);
     // home-base-kwand.7 K7, made opt-in and stricter by home-base-kwand.21
@@ -698,9 +711,13 @@ export async function gateSurfaces(
     // the caller found every Claude process placed): every process on the
     // shared tty is shell scaffolding, AND this pane's own screen shows a
     // NON-BLANK idle shell prompt. A blank screen proves nothing (F20).
+    // home-base-kwand.24 R3: "every process is a shell" needs at least one
+    // process; `[].every(…)` is true, and an empty tty proves nothing either.
     const onlyShells =
       options.sharedTtyIdleShells === true &&
-      procsOnTty?.every((proc) => isShellScaffolding(proc)) === true &&
+      procsOnTty != null &&
+      procsOnTty.length > 0 &&
+      procsOnTty.every((proc) => isShellScaffolding(proc)) &&
       screen.kind === 'read' &&
       !blank &&
       idleShellScreen(screenLines(screen.text));
@@ -748,7 +765,16 @@ export async function gateSurfaces(
       );
     }
   }
-  return {claude, drafts, kinds, reasons, sessions, suggestions, weak};
+  return {
+    claude,
+    drafts,
+    kinds,
+    noProcessTty,
+    reasons,
+    sessions,
+    suggestions,
+    weak,
+  };
 }
 
 /** Options of {@link gateSurfaces}; every caller but one passes none. */

@@ -357,7 +357,11 @@ export function sessionKeeps(
 /** One live Claude process the live join placed in no workspace. */
 export interface UnplacedClaude {
   detail: string;
-  /** `unnamed`: in live.unplaced. `noWorkspace`: a session named, on no tab. */
+  /**
+   * `unnamed`: in live.unplaced. `noWorkspace`: a session named for it, but
+   * the process is on no tab (home-base-kwand.24 R2: judged per process, so a
+   * second process of a session placed elsewhere counts too).
+   */
   kind: 'noWorkspace' | 'unnamed';
   pid: number | null;
 }
@@ -371,6 +375,12 @@ export interface UnplacedClaude {
  * whose own evidence is weak, so the caller keeps such panes while any
  * exists. The live read itself failing refuses the run (K3), so there is no
  * "could not say" case left to treat as unplaced here.
+ *
+ * home-base-kwand.24 R2: placement is judged per PROCESS. A named process the
+ * join placed in no workspace is unplaced even when another process of the
+ * same session is placed (a session resumed twice, one copy in a tab and one
+ * on a terminal no tab reports). The per-session rule above stays, so this
+ * only ever adds; a pid already listed is not listed twice.
  */
 export function unplacedClaude(
   live: Extract<LiveSessions, {kind: 'read'}>,
@@ -389,7 +399,36 @@ export function unplacedClaude(
       pid: found.pid,
     });
   }
+  const placedPids = new Set(
+    live.namedProcesses
+      .filter((entry) => entry.workspaceId != null)
+      .map((entry) => entry.pid),
+  );
+  const listed = new Set(out.map((entry) => entry.pid));
+  for (const entry of live.namedProcesses) {
+    if (placedPids.has(entry.pid) || listed.has(entry.pid)) continue;
+    listed.add(entry.pid);
+    out.push({
+      detail: `pid ${entry.pid} runs session ${entry.sessionId} (found by ${entry.source}) on a terminal no single cmux tab reports, whether or not another process of that session is in a tab`,
+      kind: 'noWorkspace',
+      pid: entry.pid,
+    });
+  }
   return out;
+}
+
+/**
+ * home-base-kwand.24 R1: each pane whose reported tty has no process at all
+ * keeps its workspace as `unknown`, whether or not any Claude is unplaced. A
+ * live terminal always holds at least a login and a shell, so the tty it
+ * reports is stale and what runs in the pane cannot be checked; its screen
+ * (blank or an idle prompt) does not close that gap.
+ */
+export function noProcessTtyKeep(panes: readonly string[]): KeepReason {
+  return {
+    kind: 'unknown',
+    text: `unknown: ${panes.join('; ')}. A live terminal always runs at least a shell, so that tty is stale and what runs in the pane cannot be checked`,
+  };
 }
 
 /** F2: the `unknown` keep of a pane with weak evidence while any Claude is unplaced. */

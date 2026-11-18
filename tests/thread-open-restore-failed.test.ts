@@ -126,6 +126,7 @@ function liveRead(
   return {
     bySessionId,
     kind: 'read',
+    namedProcesses: [],
     unplaced: [],
     workspacesBySessionId: new Map(),
   };

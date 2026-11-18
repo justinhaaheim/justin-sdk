@@ -112,6 +112,8 @@ function fact(n: number, over: Partial<SessionFacts> = {}): SessionFacts {
 interface WorldInput {
   facts?: SessionFacts[];
   factsRead?: SessionFactsRead;
+  /** ps lines that vanish right after the first live read (kwand.24 R1, the re-check). */
+  goneProcs?: string[];
   /** ps lines that appear right after the first live read (kwand.21 F2, second pass). */
   lateProcs?: string[];
   noOwn?: boolean;
@@ -269,7 +271,13 @@ function world(input: WorldInput) {
         }),
       };
       liveReads += 1;
-      if (liveReads === 1) procLines.push(...(input.lateProcs ?? []));
+      if (liveReads === 1) {
+        procLines.push(...(input.lateProcs ?? []));
+        for (const gone of input.goneProcs ?? []) {
+          const at = procLines.indexOf(gone);
+          if (at !== -1) procLines.splice(at, 1);
+        }
+      }
       return Promise.resolve(live);
     },
     readSessionFacts: () => {
@@ -843,9 +851,12 @@ describe('a Claude placed in no workspace keeps weak-evidence panes (kwand.21 F2
   /** Named on its command line, but its tty is on no tab: placed in no workspace. */
   const NO_WORKSPACE = `7778 1 ttys78 01:00 ${CLAUDE} --session-id ${sid(8)}`;
 
-  test('without one, the blank pane and the pane whose tty runs nothing are planned (as before)', async () => {
-    const {planned, result} = await plan(weakWorld([]));
-    expect(planned).toEqual(['workspace:2', 'workspace:3', 'workspace:4']);
+  // kwand.24 R1 changed this expectation: workspace 4 (no process at all on
+  // its tty) was planned here and is now kept as unknown on its own.
+  test('without one, the blank pane is planned; the pane whose tty runs nothing is kept as unknown (kwand.24 R1)', async () => {
+    const {keptKinds, planned, result} = await plan(weakWorld([]));
+    expect(planned).toEqual(['workspace:2', 'workspace:3']);
+    expect(keptKinds.get('workspace:4')).toEqual(['unknown']);
     expect(result.state?.allExcept?.unplaced).toEqual({
       keptFor: 0,
       noWorkspace: 0,
@@ -858,7 +869,8 @@ describe('a Claude placed in no workspace keeps weak-evidence panes (kwand.21 F2
     const {keptKinds, planned, result} = await plan(weakWorld([UNNAMED]));
     expect(planned).toEqual(['workspace:2']);
     expect(keptKinds.get('workspace:3')).toEqual(['unknown']);
-    expect(keptKinds.get('workspace:4')).toEqual(['unknown']);
+    // kwand.24 R1 changed this expectation: the R1 unknown, then the F2 one.
+    expect(keptKinds.get('workspace:4')).toEqual(['unknown', 'unknown']);
     expect(result.state?.allExcept?.unplaced.unnamed).toBe(1);
     expect(result.output).toContain('pane surface:3 shows a blank screen');
     expect(result.output).toContain(
@@ -870,7 +882,8 @@ describe('a Claude placed in no workspace keeps weak-evidence panes (kwand.21 F2
     const {keptKinds, planned, result} = await plan(weakWorld([NO_WORKSPACE]));
     expect(planned).toEqual(['workspace:2']);
     expect(keptKinds.get('workspace:3')).toEqual(['unknown']);
-    expect(keptKinds.get('workspace:4')).toEqual(['unknown']);
+    // kwand.24 R1 changed this expectation: the R1 unknown, then the F2 one.
+    expect(keptKinds.get('workspace:4')).toEqual(['unknown', 'unknown']);
     expect(result.state?.allExcept?.unplaced).toEqual({
       keptFor: 2,
       noWorkspace: 1,
@@ -889,5 +902,96 @@ describe('a Claude placed in no workspace keeps weak-evidence panes (kwand.21 F2
     expect(writes(w)).toEqual(['record-tabs', 'log closing', 'log kept']);
     expect(keptKinds.get('workspace:3')).toEqual(['unknown']);
     expect(result.state?.closed).toEqual([]);
+  });
+});
+
+describe('a pane whose tty runs no process at all is kept as unknown (kwand.24)', () => {
+  const NO_PROCESS =
+    'no process at all runs on tty ttys04, which pane surface:4 reports';
+  const NO_UNPLACED = {keptFor: 0, noWorkspace: 0, pids: [], unnamed: 0};
+
+  test('R1: a blank screen with zero processes on its tty is kept as unknown with nothing unplaced, with or without --close-shared-tty', async () => {
+    for (const closeSharedTty of [false, true]) {
+      const {keptKinds, planned, result} = await plan({
+        options: {closeSharedTty},
+        procs: [...OWN_PROCS, ...shellProcs('ttys02', 2000)],
+        workspaces: withOwn([ws(2, IDLE_SHELL), ws(4, '')]),
+      });
+      expect(planned).toEqual(['workspace:2']);
+      expect(keptKinds.get('workspace:4')).toEqual(['unknown']);
+      expect(result.state?.allExcept?.unplaced).toEqual(NO_UNPLACED);
+      expect(result.output).toContain(NO_PROCESS);
+    }
+  });
+
+  test('R1: a non-blank idle prompt with zero processes on its tty is still kept (the empty tty is the gap, not the screen)', async () => {
+    const {keptKinds, planned, result} = await plan({
+      procs: [...OWN_PROCS, ...shellProcs('ttys02', 2000)],
+      workspaces: withOwn([ws(2, IDLE_SHELL), ws(4, IDLE_SHELL)]),
+    });
+    expect(planned).toEqual(['workspace:2']);
+    expect(keptKinds.get('workspace:4')).toEqual(['unknown']);
+    expect(result.state?.allExcept?.unplaced).toEqual(NO_UNPLACED);
+    expect(result.state?.allExcept?.counts.keptByKind.unknown).toBe(1);
+  });
+
+  test('R1 at the re-check: the plan saw shells on the tty, the re-check sees none, so it is kept with nothing signalled or closed', async () => {
+    const shells = shellProcs('ttys04', 4000);
+    const {keptKinds, result, w} = await plan({
+      goneProcs: shells,
+      options: {apply: true},
+      procs: [...OWN_PROCS, ...shells],
+      workspaces: withOwn([ws(4, IDLE_SHELL)]),
+    });
+    expect(result.state?.planned.map((entry) => entry.workspaceRef)).toEqual([
+      'workspace:4',
+    ]);
+    expect(writes(w)).toEqual(['record-tabs', 'log closing', 'log kept']);
+    expect(keptKinds.get('workspace:4')).toEqual(['unknown']);
+    expect(result.state?.closed).toEqual([]);
+    noForce(w);
+  });
+
+  test('R3: with --close-shared-tty, a shared tty with zero processes does not pass the shared-tty check', async () => {
+    const {keptKinds, planned, result} = await plan({
+      options: {closeSharedTty: true},
+      procs: OWN_PROCS,
+      workspaces: withOwn([
+        {n: 1, panes: [{screen: IDLE_SHELL, surface: 1, tty: 'ttys05'}]},
+        {n: 2, panes: [{screen: IDLE_SHELL, surface: 2, tty: 'ttys05'}]},
+      ]),
+    });
+    expect(planned).toEqual([]);
+    expect(keptKinds.get('workspace:1')).toEqual(['unknown', 'sharedTty']);
+    expect(keptKinds.get('workspace:2')).toEqual(['unknown', 'sharedTty']);
+    expect(result.state?.allExcept?.sharedTty).toEqual({
+      keptFor: 2,
+      passedByRule: 0,
+      workspaces: 2,
+    });
+  });
+
+  test('R2: a second Claude process of a session already placed, on a tty no tab reports, counts as unplaced and keeps the weak-evidence workspace', async () => {
+    const SECOND = `7779 1 ttys79 01:00 ${CLAUDE} --session-id ${sid(1)} --settings x`;
+    const base = {
+      facts: [fact(1)],
+      procs: [claudeProc(1), ...OWN_PROCS, ...shellProcs('ttys03', 3000)],
+      workspaces: withOwn([ws(1, idleClaude(sid(1))), ws(3, '')]),
+    };
+    // Control: one process, placed; the blank pane with shells is planned.
+    const one = await plan(base);
+    expect(one.planned).toEqual(['workspace:1', 'workspace:3']);
+    const two = await plan({...base, procs: [...base.procs, SECOND]});
+    expect(two.planned).toEqual(['workspace:1']);
+    expect(two.keptKinds.get('workspace:3')).toEqual(['unknown']);
+    expect(two.result.state?.allExcept?.unplaced).toEqual({
+      keptFor: 1,
+      noWorkspace: 1,
+      pids: [7779],
+      unnamed: 0,
+    });
+    expect(two.result.output).toContain(
+      '1 live Claude process could not be placed in any workspace (pid 7779)',
+    );
   });
 });

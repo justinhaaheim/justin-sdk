@@ -889,6 +889,7 @@ describe('countLiveSessions', () => {
         ['c', {pid: null, source: 'screen', surfaceId: 's3', workspaceId: 'w'}],
       ]),
       kind: 'read',
+      namedProcesses: [],
       unplaced: [
         {
           detail: 'x',

@@ -365,6 +365,7 @@ function cand(n: number): OpenCandidate {
 const NO_LIVE: LiveSessions = {
   bySessionId: new Map(),
   kind: 'read',
+  namedProcesses: [],
   unplaced: [],
   workspacesBySessionId: new Map(),
 };

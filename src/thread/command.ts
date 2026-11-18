@@ -257,9 +257,11 @@ ALL EXCEPT (--all-except, home-base-kwand.7). Every workspace in every cmux wind
 
   A fact one of these needs that cannot be read (a session's marks, its activity, whether it is working) keeps the workspace as "unknown", never as unmarked or idle; an inbox that cannot be read at all refuses the run. A workspace with no Claude session goes through THE CHECKS alone and closes when every tab holds an idle shell. The sessions are read from the inbox with no age window, so a session idle for months is still known.
 
-  A shared tty (two tabs report the same terminal) keeps the workspace, and each workspace kept for it prints how to close it by hand. A shared tty exists because one tab reports a stale terminal, so the processes on it may be another tab's, and which tab they belong to cannot be proven. --close-shared-tty (with --all-except only) lets such a tab through, and only when all three hold: every process on that terminal is a login or an idle shell; the tab's own screen shows an idle shell prompt, not a blank screen; and every live Claude process was placed in a workspace. The workspace's other checks still apply.
+  A shared tty (two tabs report the same terminal) keeps the workspace, and each workspace kept for it prints how to close it by hand. A shared tty exists because one tab reports a stale terminal, so the processes on it may be another tab's, and which tab they belong to cannot be proven. --close-shared-tty (with --all-except only) lets such a tab through, and only when all three hold: at least one process runs on that terminal and every one is a login or an idle shell; the tab's own screen shows an idle shell prompt, not a blank screen; and every live Claude process was placed in a workspace. The workspace's other checks still apply.
 
-  A live Claude process that cannot be placed in any workspace (no session named for it, or it runs on a terminal no single tab reports) could be running behind a tab whose evidence is weak. While one exists, every workspace with a blank tab, a tab whose terminal runs no process, or a shared tty is kept as unknown, naming the pid, with or without --close-shared-tty. The counts say how many there were.
+  A tab whose terminal runs no process at all keeps its workspace as unknown, whatever its screen shows (a blank screen or an idle prompt), with or without --close-shared-tty, in the plan and again in the re-check right before each close. A live terminal always runs at least a shell, so that terminal report is stale and what runs in the tab cannot be checked.
+
+  A live Claude process that cannot be placed in any workspace (no session named for it, or it runs on a terminal no single tab reports, even when another process of the same session is in a tab) could be running behind a tab whose evidence is weak. While one exists, every workspace with a blank tab, a tab whose terminal runs no process, or a shared tty is kept as unknown, naming the pid, with or without --close-shared-tty. The counts say how many there were.
 
   If CMUX_WORKSPACE_ID names no workspace in the cmux tree (a stale id after a restore), --all-except refuses, since its own workspace could not be kept.
 
@@ -1551,7 +1553,7 @@ export const threadCommand: CommandModule = {
             .option('close-shared-tty', {
               default: false,
               describe:
-                '--all-except only: let a tab whose terminal another tab also reports close, when only a login and idle shells run on that terminal, its own screen shows an idle shell prompt (not a blank screen) and every live Claude process was placed (see ALL EXCEPT). Off by default',
+                '--all-except only: let a tab whose terminal another tab also reports close, when a login or an idle shell runs on that terminal and nothing else does, its own screen shows an idle shell prompt (not a blank screen) and every live Claude process was placed (see ALL EXCEPT). Off by default',
               type: 'boolean' as const,
             })
             .option('apply', {
