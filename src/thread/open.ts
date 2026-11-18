@@ -450,7 +450,8 @@ function sectionReason(section: InboxSection): string {
  * already open; one whose checkout is unknown or gone skipped; the rest
  * planned. The newest row of a session decides (F21). Then what opens and
  * what moves are put in the reopen order (home-base-kwand.6, D6: starred,
- * waiting on Justin, cut off mid-turn, then newest), and --limit keeps the
+ * waiting on Justin, to land or a P1 to P3 question (home-base-kwand.19),
+ * cut off mid-turn, then newest), and --limit keeps the
  * first `limit` of it and lists the rest.
  */
 export function planOpen(input: {

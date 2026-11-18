@@ -5,16 +5,22 @@
  * cmux windows and only reopen what we need."
  *
  * ONE order, used by `thread open`, the dashboard's Dropped view and its
- * restart grouping: starred first, then waiting on Justin, then cut off
- * mid-turn, then the rest. Inside each tier the newest activity comes first,
- * and a session whose last activity is unknown comes last in its tier. Each
- * session says which tier put it there, in words (`reopenReason`).
+ * restart grouping, and the importance sort of the unfinished chains
+ * (chain-fold.ts): starred first, then waiting on Justin (blockers), then
+ * waiting on Justin (to land), then cut off mid-turn, then the rest. Inside
+ * each tier the newest activity comes first, and a session whose last
+ * activity is unknown comes last in its tier. Each session says which tier
+ * put it there, in words (`reopenReason`).
  *
  * Every fact here is one the inbox already derives; nothing is measured again:
  * - starred: the chain's flags hold ⭐ (`STAR_LABEL`, home-base-kwand.5);
- * - waiting on you: an open P0 question, which is D3 rule 1 and the
+ * - waiting on you, blockers: an open P0 question, which is D3 rule 1 and the
  *   "🛑 Needs you" section (session-status.ts `waiting`), also when unsent
  *   text moved the card to "✍️ Unsent text" from beneath "Needs you";
+ * - waiting on you, to land (home-base-kwand.19, Justin's Q188, option c by
+ *   default): the "🛬 To land" section (also from beneath unsent text, as
+ *   above), or an open P1 to P3 question to him (`StatusCounts.optional`,
+ *   which counts a question with no priority too). P4 is FYI and never counts;
  * - cut off mid-turn: the transcript's ending (home-base-kwand.4, D5).
  */
 import type {InboxSection} from './session-card';
@@ -26,13 +32,23 @@ import {ageWords} from './part-one';
 import {STAR_LABEL} from './session-flags';
 import {CUT_OFF_MARK, endingWhen} from './transcript-ending';
 
-/** The tiers, first to last (D6). */
-export const REOPEN_TIERS = ['starred', 'waiting', 'cutOff', 'recent'] as const;
+/**
+ * The tiers, first to last (D6). `waiting` is waiting on you with a blocker;
+ * `toLand` is waiting on you with work to land or a question that has a
+ * default (home-base-kwand.19): it sits below the blockers and above cut off.
+ */
+export const REOPEN_TIERS = [
+  'starred',
+  'waiting',
+  'toLand',
+  'cutOff',
+  'recent',
+] as const;
 export type ReopenTier = (typeof REOPEN_TIERS)[number];
 
 /** The order in words, for `--help`, plan headers and the dashboard. */
 export const REOPEN_ORDER_WORDS =
-  'starred first, then waiting on you (an open blocking question), then cut off mid-turn, then the rest; newest activity first inside each';
+  'starred first, then waiting on you (an open P0 question, or Needs you), then ready for you to land or an open P1 to P3 question, then cut off mid-turn, then the rest; newest activity first inside each';
 
 /** What the order reads of one session. */
 export interface ReopenFacts {
@@ -42,7 +58,13 @@ export interface ReopenFacts {
   /** Its chain carries ⭐. */
   starred: boolean;
   /**
-   * Waiting on Justin: his open blocking questions on it (null when the
+   * Waiting on Justin, to land (home-base-kwand.19): `landable` when the
+   * session is in To land; `questions` its open P1 to P3 questions (null when
+   * they were not read). Null when neither holds.
+   */
+  toLand: {landable: boolean; questions: number | null} | null;
+  /**
+   * Waiting on Justin, blockers: his open P0 questions on it (null when the
    * section says so and the count was not read), or null when it is not.
    */
   waiting: {questions: number | null} | null;
@@ -51,16 +73,21 @@ export interface ReopenFacts {
 /** The facts besides the activity, as a candidate carries them beside its own `lastActivityAt`. */
 export type ReopenSignals = Omit<ReopenFacts, 'lastActivityAt'>;
 
-/** No star, no question waiting, not cut off: the last tier, by activity alone. */
+/** No star, nothing waiting on Justin, not cut off: the last tier, by activity alone. */
 export const NO_REOPEN_SIGNALS: ReopenSignals = {
   cutOff: null,
   starred: false,
+  toLand: null,
   waiting: null,
 };
 
 /** Where a session sits in the order, and why, in words. */
 export interface ReopenReason {
-  /** "⭐ starred", "🙋 waiting on you: 2 questions", "✂️ cut off mid-turn at 6:39pm", "🕒 last active 3 days ago". */
+  /**
+   * "⭐ starred", "🙋 waiting on you: 2 P0 questions", "🛬 ready for you to
+   * land", "❓ 1 open question for you", "✂️ cut off mid-turn at 6:39pm",
+   * "🕒 last active 3 days ago".
+   */
   text: string;
   tier: ReopenTier;
 }
@@ -75,6 +102,7 @@ export interface ReopenKey {
 export function reopenTier(facts: ReopenFacts): ReopenTier {
   if (facts.starred) return 'starred';
   if (facts.waiting != null) return 'waiting';
+  if (facts.toLand != null) return 'toLand';
   if (facts.cutOff != null) return 'cutOff';
   return 'recent';
 }
@@ -103,7 +131,20 @@ export function reopenReason(
         text:
           count == null || count === 0
             ? '🙋 waiting on you'
-            : `🙋 waiting on you: ${plural(count, 'question', 'questions')}`,
+            : `🙋 waiting on you: ${plural(count, 'P0 question', 'P0 questions')}`,
+        tier,
+      };
+    }
+    case 'toLand': {
+      // Landable work says so first: it is what he can act on at once.
+      const count = facts.toLand?.questions ?? null;
+      return {
+        text:
+          facts.toLand?.landable === true
+            ? '🛬 ready for you to land'
+            : count == null || count === 0
+              ? '❓ open question for you'
+              : `❓ ${plural(count, 'open question', 'open questions')} for you`,
         tier,
       };
     }
@@ -162,14 +203,24 @@ export function sortForReopen<T>(
 /** The fields of an inbox row the signals come from. */
 export type ReopenRowInput = Pick<InboxRow, 'ending' | 'flags' | 'section'> & {
   card: {unsent: {beneath: InboxSection} | null};
-  loaded: {counts: Pick<StatusCounts, 'blocking'>} | null;
+  loaded: {counts: Pick<StatusCounts, 'blocking' | 'optional'>} | null;
 };
+
+/** The session is in `section`, or its ✍️ card sits beneath it. */
+function inSection(
+  input: {section: string; unsentBeneath: string | null},
+  section: InboxSection,
+): boolean {
+  return input.section === section || input.unsentBeneath === section;
+}
 
 /**
  * The signals from the facts the inbox derived, in the plain shape both the
  * SDK's rows and the dashboard's zod rows can give, so the rule is written
  * once: ⭐ in the chain's flag labels; an open blocking question, or the
- * Needs you section (where unsent text sits beneath it too); a cut-off ending.
+ * Needs you section (where unsent text sits beneath it too); the To land
+ * section (the same), or an open P1 to P3 question (home-base-kwand.19); a
+ * cut-off ending.
  */
 export function reopenSignals(input: {
   /** Open P0 questions; null when the session's model did not load. */
@@ -178,18 +229,24 @@ export function reopenSignals(input: {
   cutOff: {at: string | null} | null;
   /** The chain's flag labels; null when none were read. */
   flagLabels: readonly string[] | null;
+  /**
+   * Open P1 to P3 questions (`StatusCounts.optional`, with a question of no
+   * priority); null when the session's model did not load.
+   */
+  optional: number | null;
   section: string;
   /** The section a ✍️ card sits beneath; null without unsent text. */
   unsentBeneath: string | null;
 }): ReopenSignals {
-  const {blocking} = input;
-  const needsYou =
-    input.section === 'needsYou' || input.unsentBeneath === 'needsYou';
+  const {blocking, optional} = input;
+  const landable = inSection(input, 'toLand');
   return {
     cutOff: input.cutOff,
     starred: input.flagLabels?.includes(STAR_LABEL) === true,
+    toLand:
+      landable || (optional ?? 0) > 0 ? {landable, questions: optional} : null,
     waiting:
-      (blocking ?? 0) > 0 || needsYou
+      (blocking ?? 0) > 0 || inSection(input, 'needsYou')
         ? {questions: blocking != null && blocking > 0 ? blocking : null}
         : null,
   };
@@ -201,6 +258,7 @@ export function reopenSignalsOfRow(row: ReopenRowInput): ReopenSignals {
     blocking: row.loaded?.counts.blocking ?? null,
     cutOff: row.ending.kind === 'cutOff' ? {at: row.ending.at} : null,
     flagLabels: row.flags?.labels ?? null,
+    optional: row.loaded?.counts.optional ?? null,
     section: row.section,
     unsentBeneath: row.card.unsent?.beneath ?? null,
   });

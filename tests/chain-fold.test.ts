@@ -215,4 +215,35 @@ describe('unfinishedChains (G5)', () => {
       'undated',
     ]);
   });
+
+  // home-base-kwand.19: the reopen order's to-land tier reaches this sort too.
+  // NEGATIVE CONTROL run 2026-11-18: REOPEN_TIERS with toLand below cutOff
+  // put "cut-off" before "to-land" and this test failed.
+  test('importance puts a chain whose head is to land below the blockers and above cut off', () => {
+    const items = [
+      session('cut-off', {
+        lastActivityAt: '2026-11-18T12:00:00.000Z',
+        reopen: {...NO_REOPEN_SIGNALS, cutOff: {at: null}},
+        requests: [{id: 'r-c', state: 'open'}],
+      }),
+      session('to-land', {
+        lastActivityAt: '2026-11-17T12:00:00.000Z',
+        reopen: {
+          ...NO_REOPEN_SIGNALS,
+          toLand: {landable: true, questions: 0},
+        },
+        requests: [{id: 'r-l', state: 'open'}],
+      }),
+      session('waiting', {
+        lastActivityAt: '2026-11-01T12:00:00.000Z',
+        reopen: {...NO_REOPEN_SIGNALS, waiting: {questions: 1}},
+        requests: [{id: 'r-w', state: 'open'}],
+      }),
+    ];
+    expect(
+      unfinishedChains(items, facts, 'importance').chains.map(
+        (chain) => chain.head.name,
+      ),
+    ).toEqual(['waiting', 'to-land', 'cut-off']);
+  });
 });

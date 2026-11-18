@@ -160,7 +160,7 @@ FILTERS. Think of thread open as a filter over your sessions, and the new cmux w
 
 CANNOT TELL. When a live Claude pane does not show which session it holds, thread open opens nothing: that pane could be one of the sessions it would open. It lists those panes; look at them, then pass --force-unplaced to open anyway.
 
-ORDER. Sessions are planned, opened and cut by --limit in one order: starred first (⭐, thread star), then waiting on you (an open blocking question: 🛑 Needs you), then cut off mid-turn (✂️: its last turn never finished), then the rest; newest activity first inside each, and a session whose last activity is unknown last in its group. Each session in the plan says which of these put it there, on its "Why here" line ("⭐ starred", "🙋 waiting on you: 2 questions", "✂️ cut off mid-turn at 6:39pm", "🕒 last active 3 days ago"), and --json carries it as reopen {tier, text}. The threads dashboard's Dropped view and its before-the-restart grouping use the same order.
+ORDER. Sessions are planned, opened and cut by --limit in one order: starred first (⭐, thread star), then waiting on you (an open P0 question, or 🛑 Needs you), then waiting on you to land (🛬 To land: finished work for you to approve or merge, or an open P1 to P3 question to you, which has a default), then cut off mid-turn (✂️: its last turn never finished), then the rest; newest activity first inside each, and a session whose last activity is unknown last in its group. Each session in the plan says which of these put it there, on its "Why here" line ("⭐ starred", "🙋 waiting on you: 2 P0 questions", "🛬 ready for you to land", "❓ 1 open question for you", "✂️ cut off mid-turn at 6:39pm", "🕒 last active 3 days ago"), and --json carries it as reopen {tier, text}, the tier one of starred, waiting, toLand, cutOff, recent. The threads dashboard's Dropped view and its before-the-restart grouping use the same order.
 
 LAYOUT. Default: one new cmux window. --per-project: one new window per project, the project with the first session in the order above first. Inside a window the sessions keep that order, the first at the top. Each workspace is named "[TAG] <session title>".
 
@@ -1393,7 +1393,7 @@ export const threadCommand: CommandModule = {
             })
             .option('limit', {
               describe:
-                'Open at most N sessions, the first N in the reopen order (starred, waiting on you, cut off mid-turn, then newest; see ORDER); the rest are listed under "Not opened: over the limit"',
+                'Open at most N sessions, the first N in the reopen order (starred, waiting on you, to land or an open question, cut off mid-turn, then newest; see ORDER); the rest are listed under "Not opened: over the limit"',
               type: 'number' as const,
             })
             .option('repo', {
@@ -2422,7 +2422,7 @@ export const threadCommand: CommandModule = {
             .option('sort', {
               choices: ['importance', 'activity'] as const,
               describe:
-                'With --unfinished: importance (the default) is the reopen order — starred, then waiting on you, then cut off mid-turn, then the rest, newest activity first inside each; activity is newest activity first',
+                'With --unfinished: importance (the default) is the reopen order — starred, then waiting on you (an open P0 question, or Needs you), then ready for you to land or an open P1 to P3 question, then cut off mid-turn, then the rest, newest activity first inside each; activity is newest activity first',
               type: 'string' as const,
             })
             .implies('sort', 'unfinished')
