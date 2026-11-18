@@ -351,6 +351,62 @@ export function sessionKeeps(
 }
 
 // ---------------------------------------------------------------------------
+// Claude processes placed in no workspace (home-base-kwand.21 F2)
+// ---------------------------------------------------------------------------
+
+/** One live Claude process the live join placed in no workspace. */
+export interface UnplacedClaude {
+  detail: string;
+  /** `unnamed`: in live.unplaced. `noWorkspace`: a session named, on no tab. */
+  kind: 'noWorkspace' | 'unnamed';
+  pid: number | null;
+}
+
+/**
+ * F2: every live Claude process the join could not place in a workspace.
+ * `thread open`'s reading of `live.unplaced` (every entry; it refuses while
+ * one exists, live-sessions.ts header), plus every session a source named
+ * but placed in no workspace: its process runs on a tty no single cmux tab
+ * reports. A stale tty report can leave either one running behind a pane
+ * whose own evidence is weak, so the caller keeps such panes while any
+ * exists. The live read itself failing refuses the run (K3), so there is no
+ * "could not say" case left to treat as unplaced here.
+ */
+export function unplacedClaude(
+  live: Extract<LiveSessions, {kind: 'read'}>,
+): UnplacedClaude[] {
+  const out: UnplacedClaude[] = live.unplaced.map((entry) => ({
+    detail: entry.detail,
+    kind: 'unnamed',
+    pid: entry.pid,
+  }));
+  for (const [sessionId, found] of live.bySessionId) {
+    const placed = live.workspacesBySessionId.get(sessionId) ?? [];
+    if (found.workspaceId != null || placed.length > 0) continue;
+    out.push({
+      detail: `session ${sessionId} runs (found by ${found.source}) on a terminal no single cmux tab reports`,
+      kind: 'noWorkspace',
+      pid: found.pid,
+    });
+  }
+  return out;
+}
+
+/** F2: the `unknown` keep of a pane with weak evidence while any Claude is unplaced. */
+export function unplacedKeep(
+  unplaced: readonly UnplacedClaude[],
+  weak: readonly string[],
+): KeepReason {
+  const pids = [
+    ...new Set(unplaced.map((entry) => entry.pid ?? 'unknown')),
+  ].join(', ');
+  return {
+    kind: 'unknown',
+    text: `unknown: ${unplaced.length === 1 ? '1 live Claude process' : `${unplaced.length} live Claude processes`} could not be placed in any workspace (pid ${pids}), and ${weak.join('; ')}, so one of them could be running here unseen`,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // --keep (K2 g)
 // ---------------------------------------------------------------------------
 
@@ -452,6 +508,8 @@ export type SessionFileFact =
 
 /** What `--all-except` adds to the state: the rules it ran with and the counts. */
 export interface AllExceptInfo {
+  /** home-base-kwand.21 F1: whether --close-shared-tty was given. */
+  closeSharedTty: boolean;
   counts: {
     failed: number;
     kept: number;
@@ -476,4 +534,14 @@ export interface AllExceptInfo {
   tabRecord: string | null;
   /** Workspaces in every cmux window when the plan was made. */
   treeWorkspaces: number;
+  /** home-base-kwand.21 F2: live Claude processes placed in no workspace. */
+  unplaced: {
+    /** Workspaces kept as unknown for them (a pane with weak evidence). */
+    keptFor: number;
+    /** Sessions named by a source but placed in no workspace. */
+    noWorkspace: number;
+    pids: (number | null)[];
+    /** live.unplaced: Claude processes no source named a session for. */
+    unnamed: number;
+  };
 }

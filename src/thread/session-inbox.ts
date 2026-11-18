@@ -112,6 +112,16 @@ import {dropUnusedFileMemo, fileMemoMark} from './file-memo';
 import {inboxChainReaders, walkedSessionMarks} from './handoff-marks';
 import {handoffStopOf} from './handoff-view';
 import {
+  filterIdleFor,
+  idleForNote,
+  type IdleForRead,
+  idleMsAt,
+  OLDER_SHOWN_GROUPS,
+  olderHeading,
+  type OlderShownReason,
+  parseIdleFor,
+} from './inbox-idle';
+import {
   inboxJsonWithTimings,
   startTimings,
   timed,
@@ -312,13 +322,16 @@ export function beforeRestartGroups(
       if (!rowById.has(id)) rowById.set(id, row);
     }
   }
-  const entries: BeforeRestartEntry[] = [
-    ...read.beforeRestart.facts.entries(),
-  ].map(([sessionId, fact]) => ({
-    fact,
-    row: rowById.get(sessionId) ?? null,
-    sessionId,
-  }));
+  const entries: BeforeRestartEntry[] = [...read.beforeRestart.facts.entries()]
+    .map(([sessionId, fact]) => ({
+      fact,
+      row: rowById.get(sessionId) ?? null,
+      sessionId,
+    }))
+    // home-base-kwand.8: under --idle-for only sessions known to be idle are
+    // listed; one with no row has no activity to date (rule 7), and one the
+    // filter removed must not come back as "not in this inbox".
+    .filter((entry) => read.idleFor == null || entry.row != null);
   const activity = (entry: BeforeRestartEntry): number =>
     parseInstant(entry.row?.lastActivityAt ?? '') ?? -Infinity;
   return BEFORE_RESTART_STATES.map((state) => ({
@@ -416,6 +429,12 @@ export interface InboxRow {
    */
   handoff: HandoffStop | null;
   /**
+   * home-base-kwand.8 (G4): milliseconds from `lastActivityAt` to the read's
+   * clock, or null when the last activity cannot be dated (never counted as
+   * idle, critical rule 7). Absent only from a row built outside readInbox.
+   */
+  idleMs?: number | null;
+  /**
    * D-DRAFTS (home-base-yukaf.4): the live unsent text the drafts store holds
    * for this session, or null when it holds none (or could not be read: then
    * `InboxRead.inputDrafts` says so).
@@ -435,6 +454,12 @@ export interface InboxRow {
     model: SessionModel;
     status: SessionStatus;
   } | null;
+  /**
+   * home-base-kwand.8 (G4): why a row whose last activity is older than the
+   * `--days` window is shown anyway; null when it is inside the window or
+   * cannot be dated. Absent only from a row built outside readInbox.
+   */
+  olderShown?: OlderShownReason | null;
   /**
    * F6 (home-base-j8q3e.1.10): this one-liner stands for `count` sessions
    * whose repo and first message match (`repeatKey`); it is the newest of them
@@ -541,6 +566,11 @@ export interface InboxRead {
    * one, home-base-yd1co.2 D5 and `neverHiddenByAge`).
    */
   hiddenByAge: Partial<Record<SessionStatus['kind'], number>>;
+  /**
+   * home-base-kwand.8 (G4): `--idle-for`, what it left out and why; null or
+   * absent when no idle filter was applied (filterIdleFor sets it).
+   */
+  idleFor?: IdleForRead | null;
   indexPath: string;
   /** D-DRAFTS: how the drafts store was read, and the drafts no row shows. */
   inputDrafts: InboxDrafts;
@@ -988,6 +1018,8 @@ async function readInboxOnce(input: {
         lastActivityAt: activity,
         lastAssistantAt,
         loaded: null,
+        // kwand.8: a session that could not be loaded is never hidden by age.
+        olderShown: old ? 'unreadable' : null,
         repeats: null,
         repo: sighting.repo,
         section: 'checkByHand',
@@ -1012,19 +1044,31 @@ async function readInboxOnce(input: {
       : null;
     const lastActivityAt = newest(lastRecord, activity);
     const lastActivityMs = parseInstant(lastActivityAt ?? '');
+    const keptBeforeRestart =
+      input.keepBeforeRestart === true &&
+      beforeFacts?.has(model.sessionId) === true;
     if (
       old &&
       (lastActivityMs == null || lastActivityMs < since) &&
       !neverHiddenByAge(status) &&
       !liveDrafts.has(model.sessionId) &&
-      !(
-        input.keepBeforeRestart === true &&
-        beforeFacts?.has(model.sessionId) === true
-      )
+      !keptBeforeRestart
     ) {
       hiddenByAge[status.kind] = (hiddenByAge[status.kind] ?? 0) + 1;
       continue;
     }
+    // home-base-kwand.8 (G4): older than the window and shown anyway: which
+    // of the rules above kept it. The drafts pass below names a draft.
+    const olderShown: OlderShownReason | null =
+      lastActivityMs == null || lastActivityMs >= since
+        ? null
+        : status.kind === 'waiting' ||
+            status.kind === 'exportBehind' ||
+            (status.kind === 'unknown' && neverHiddenByAge(status))
+          ? status.kind
+          : keptBeforeRestart
+            ? 'beforeRestart'
+            : 'indexUndated';
     const counts = statusCounts(model);
     const action = deriveAction({
       model,
@@ -1079,6 +1123,7 @@ async function readInboxOnce(input: {
       lastActivityAt,
       lastAssistantAt,
       loaded: {counts, model, status},
+      olderShown,
       repeats: null,
       repo: model.repo,
       section,
@@ -1099,6 +1144,8 @@ async function readInboxOnce(input: {
     const assistant = isSafeSessionId(session.sessionId)
       ? readLastAssistantLineMemoized(messageLogPath(session.sessionId, env))
       : null;
+    // kwand.8: in the window by its file's write time, older by its records.
+    const untrackedMs = parseInstant(untrackedActivityAt(session) ?? '');
     rows.push({
       beforeRestart: null,
       card,
@@ -1110,6 +1157,8 @@ async function readInboxOnce(input: {
       lastActivityAt: untrackedActivityAt(session),
       lastAssistantAt: assistant?.kind === 'found' ? assistant.line.at : null,
       loaded: null,
+      olderShown:
+        untrackedMs != null && untrackedMs < since ? 'transcriptWritten' : null,
       repeats: null,
       repo: session.repo,
       section: 'notTracked',
@@ -1198,8 +1247,14 @@ async function readInboxOnce(input: {
       card: withInputDraft(row.card, draft),
       display: 'card',
       inputDraft: draft,
+      // kwand.8: an older row with a draft is listed for the draft first.
+      olderShown: row.olderShown == null ? null : 'unsentDraft',
       section: 'unsentDraft',
     };
+  }
+  // home-base-kwand.8 (G4): each row's idle time, from this read's clock.
+  for (const [position, row] of rows.entries()) {
+    rows[position] = {...row, idleMs: idleMsAt(row.lastActivityAt, now)};
   }
   const inputDrafts: InboxDrafts =
     draftList.kind === 'failed'
@@ -1848,6 +1903,38 @@ export function inputDraftNotes(drafts: InboxDrafts): string[] {
   return notes;
 }
 
+/**
+ * home-base-kwand.8 (G4): the rows older than the window and shown anyway,
+ * one group per reason in OLDER_SHOWN_GROUPS order, newest first inside each
+ * (the order `rows` came in). Empty groups are left out.
+ */
+export function olderShownGroups(rows: readonly InboxRow[]): {
+  emoji: string;
+  reason: OlderShownReason;
+  rows: InboxRow[];
+}[] {
+  return OLDER_SHOWN_GROUPS.map((group) => ({
+    emoji: group.emoji,
+    reason: group.reason,
+    rows: rows.filter((row) => row.olderShown === group.reason),
+  })).filter((group) => group.rows.length > 0);
+}
+
+/** The summary's older line: "35 (34 waiting on you, 1 unsent text …)", or null. */
+function olderSummaryValue(
+  groups: ReturnType<typeof olderShownGroups>,
+): string | null {
+  const count = (rows: readonly InboxRow[]): number =>
+    rows.reduce((sum, row) => sum + sessionsIn(row), 0);
+  const total = groups.reduce((sum, group) => sum + count(group.rows), 0);
+  if (total === 0) return null;
+  const parts = groups.map(
+    (group) =>
+      `${count(group.rows)} ${OLDER_SHOWN_GROUPS.find((entry) => entry.reason === group.reason)?.words ?? group.reason}`,
+  );
+  return `${total} (${parts.join(', ')}), listed last`;
+}
+
 export interface RenderInboxOptions {
   all: boolean;
   days: number;
@@ -1865,7 +1952,8 @@ export function renderInbox(
 ): string {
   const {all, order, style} = options;
   const blocks: string[] = [];
-  const title = `Inbox — sessions with activity in the last ${plural(options.days, 'day', 'days')}${all ? ', done and archived included' : ''}`;
+  const idleFor = read.idleFor ?? null;
+  const title = `Inbox — sessions with activity in the last ${plural(options.days, 'day', 'days')}${idleFor == null ? '' : `, idle for at least ${idleFor.words}`}${all ? ', done and archived included' : ''}`;
   blocks.push(header(title, '📥', 1, style));
   if (read.missing) {
     blocks.push(
@@ -1875,6 +1963,10 @@ export function renderInbox(
   const visible = read.rows
     .filter((row) => sectionVisible(row.section, all))
     .sort(byNewest);
+  // home-base-kwand.8 (G4): the cards active within the window first, in the
+  // chosen order; then the older ones shown anyway, under their own headings.
+  const within = visible.filter((row) => row.olderShown == null);
+  const olderGroups = olderShownGroups(visible);
 
   // j8q3e.1 D5: the summary first, one line per non-empty section.
   const summary = inboxSummary(visible, all);
@@ -1902,6 +1994,14 @@ export function renderInbox(
     if (unplaced != null) {
       fields.push({label: `🪟 ${UNPLACED_PANES_LABEL}`, value: unplaced});
     }
+    // home-base-kwand.8 (G4): the cards older than the window, said up front.
+    const olderValue = olderSummaryValue(olderGroups);
+    if (olderValue != null) {
+      fields.push({
+        label: `🕰️ Older than ${plural(options.days, 'day', 'days')}, shown anyway`,
+        value: olderValue,
+      });
+    }
     blocks.push(
       style.color
         ? fieldLines(fields, {
@@ -1917,7 +2017,7 @@ export function renderInbox(
 
   if (order === 'status') {
     for (const section of INBOX_SECTIONS) {
-      const rows = visible.filter((row) => row.section === section.key);
+      const rows = within.filter((row) => row.section === section.key);
       if (rows.length === 0) continue;
       blocks.push(
         header(`${section.title} (${rows.length})`, section.emoji, 2, style),
@@ -1930,7 +2030,7 @@ export function renderInbox(
     }
   } else if (order === 'repo') {
     const groups = new Map<string, InboxRow[]>();
-    for (const row of visible) {
+    for (const row of within) {
       const key = row.repo ?? 'unknown repo';
       groups.set(key, [...(groups.get(key) ?? []), row]);
     }
@@ -1948,10 +2048,32 @@ export function renderInbox(
         );
       }
     }
-  } else if (visible.length > 0) {
+  } else if (within.length > 0) {
     blocks.push(header('Sessions, newest first', '🕒', 2, style));
-    for (const row of visible) {
+    for (const row of within) {
       blocks.push(renderRow(row, true, style, paneSummaryReason, options.now));
+    }
+  }
+  // home-base-kwand.8 (G4): after the cards active within the window.
+  for (const group of olderGroups) {
+    blocks.push(
+      header(
+        `${olderHeading(group.reason, options.days)} (${group.rows.length})`,
+        group.emoji,
+        2,
+        style,
+      ),
+    );
+    for (const row of group.rows) {
+      blocks.push(
+        renderRow(
+          row,
+          order !== 'status',
+          style,
+          paneSummaryReason,
+          options.now,
+        ),
+      );
     }
   }
 
@@ -1959,11 +2081,16 @@ export function renderInbox(
   if (!read.missing && visible.length === 0) {
     blocks.push(
       read.rows.length === 0
-        ? `No session had activity in the last ${plural(options.days, 'day', 'days')}.`
+        ? idleFor == null
+          ? `No session had activity in the last ${plural(options.days, 'day', 'days')}.`
+          : `No session listed: none in this window has been idle for at least ${idleFor.words}.`
         : 'Nothing open.',
     );
   }
   const notes: string[] = [];
+  // home-base-kwand.8 (G4): what --idle-for left out, and why (rule 7).
+  const idleNote = idleFor == null ? null : idleForNote(idleFor);
+  if (idleNote != null) notes.push(idleNote);
   if (hidden > 0) {
     notes.push(
       `${plural(hidden, 'session is', 'sessions are')} done or archived and hidden; --all shows ${hidden === 1 ? 'it' : 'them'}.`,
@@ -2050,6 +2177,15 @@ export function renderBeforeRestartInbox(
       label: 'sessions',
       value: `${answer.facts.size} (in ${answer.tabsWithSession} tabs)`,
     },
+    // home-base-kwand.8: how many the idle filter leaves out of that set.
+    ...(read.idleFor == null
+      ? []
+      : [
+          {
+            label: `idle for at least ${read.idleFor.words}`,
+            value: `${groups.reduce((sum, group) => sum + group.entries.length, 0)} listed; the rest were active more recently, or have no known activity (never counted as idle)`,
+          },
+        ]),
     ...groups.map((group) => ({
       label: `${BEFORE_RESTART_WORDS[group.state].emoji} ${BEFORE_RESTART_WORDS[group.state].title}`,
       value: String(group.entries.length),
@@ -2130,6 +2266,18 @@ export function inboxJson(
     beforeRestart: beforeRestartJson(read),
     corrupt: read.corrupt,
     hiddenByAge: read.hiddenByAge,
+    // home-base-kwand.8 (G4): `--idle-for` and what it left out (active
+    // sessions counted, undated ones named); null when it was not given.
+    idleFor:
+      read.idleFor == null
+        ? null
+        : {
+            leftOutActive: read.idleFor.active.length,
+            leftOutUndated: read.idleFor.undated,
+            ms: read.idleFor.ms,
+            text: read.idleFor.text,
+            words: read.idleFor.words,
+          },
     indexPath: read.indexPath,
     // D-DRAFTS: how the drafts store was read, and the drafts no row carries.
     inputDrafts: read.inputDrafts,
@@ -2183,6 +2331,9 @@ export function inboxJson(
       git: row.git,
       // home-base-89c8h.3: a refused or deferred handoff with no successor yet.
       handoff: row.handoff,
+      // home-base-kwand.8 (G4): ms from lastActivityAt to the read's clock;
+      // null when the last activity cannot be dated (never idle, rule 7).
+      idleMs: row.idleMs ?? null,
       // D-DRAFTS: the live unsent text for this session, or null.
       inputDraft: row.inputDraft,
       lastActivityAt: row.lastActivityAt,
@@ -2200,6 +2351,10 @@ export function inboxJson(
                   ? {kind: 'read', lines: row.loaded.model.log.lines.length}
                   : row.loaded.model.log,
             },
+      // home-base-kwand.8 (G4): why a row older than the --days window is
+      // shown anyway (waiting, unsentDraft, beforeRestart, exportBehind,
+      // unknown, unreadable, indexUndated, transcriptWritten); null inside it.
+      olderShown: row.olderShown ?? null,
       // F6: a folded one-liner names every session it stands for.
       repeats: row.repeats,
       repo: row.repo,
@@ -2265,6 +2420,11 @@ export interface ThreadInboxOptions {
   cwd?: string;
   days: number;
   env?: EnvLike;
+  /**
+   * home-base-kwand.8 (G4): `--idle-for` as typed (`24h`, `3d`, `2w`): only
+   * sessions whose last activity is at least that old. Null or absent: none.
+   */
+  idleFor?: string | null;
   json: boolean;
   /** Default: the real lookup (cmux, ps, the hook store). */
   lookupPanes?: () => Promise<PaneLookup>;
@@ -2275,7 +2435,10 @@ export interface ThreadInboxOptions {
   timeZone?: string;
 }
 
-/** `thread inbox` (knob on): print, return the exit code. 1 = index unreadable. */
+/**
+ * `thread inbox` (knob on): print, return the exit code. 1 = index
+ * unreadable, 2 = a bad `--idle-for` (nothing read).
+ */
 export async function runSessionInbox(
   options: ThreadInboxOptions,
 ): Promise<number> {
@@ -2286,6 +2449,13 @@ export async function runSessionInbox(
     Number.isFinite(options.days) && options.days > 0
       ? options.days
       : INBOX_DEFAULT_DAYS;
+  // home-base-kwand.8 (G4): refused before anything is read.
+  const idleFor =
+    options.idleFor == null ? null : parseIdleFor(options.idleFor);
+  if (idleFor?.kind === 'bad') {
+    console.error(`thread inbox: ${idleFor.reason}`);
+    return 2;
+  }
   // home-base-9uzxw.2 (D-PERF): the JSON carries where its time went.
   const timings = options.json ? startTimings() : null;
   // home-base-9uzxw.5 F15: finish() also puts Bun.spawn back, so it runs
@@ -2322,6 +2492,8 @@ export async function runSessionInbox(
       console.error(`thread inbox: ${result.reason}`);
       return 1;
     }
+    const read =
+      idleFor == null ? result.read : filterIdleFor(result.read, idleFor, now);
     // D-PINS: the user file, then the project file, like every thread knob.
     const config = timed(timings, 'config', () =>
       resolveThreadConfig({cwd, env}),
@@ -2336,7 +2508,7 @@ export async function runSessionInbox(
       // F2 (home-base-j8q3e.1.9): wait for a pipe to take all of it before the
       // caller's process.exit.
       const text = timed(timings, 'json build', () =>
-        JSON.stringify(inboxJson(result.read, {pinnedProjects}), null, 2),
+        JSON.stringify(inboxJson(read, {pinnedProjects}), null, 2),
       );
       const printed =
         timings == null
@@ -2350,7 +2522,7 @@ export async function runSessionInbox(
     }
     if (options.beforeRestart === true) {
       await writeStdout(
-        `${renderBeforeRestartInbox(result.read, {
+        `${renderBeforeRestartInbox(read, {
           now,
           style: options.style ?? outputStyle(process.stdout),
         })}\n`,
@@ -2358,7 +2530,7 @@ export async function runSessionInbox(
       return 0;
     }
     await writeStdout(
-      `${renderInbox(result.read, {
+      `${renderInbox(read, {
         all: options.all,
         days,
         now,

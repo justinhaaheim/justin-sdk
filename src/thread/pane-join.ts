@@ -818,6 +818,17 @@ export function idleShellScreen(lines: readonly string[]): boolean {
 }
 
 /**
+ * home-base-kwand.21 F1: a screen with nothing on it. idleShellScreen counts
+ * such a screen as idle, but cmux returns an empty screen for a pane that has
+ * not drawn yet (F20), so a blank screen is no evidence of what runs there.
+ */
+export function blankScreen(lines: readonly string[]): boolean {
+  return lines.every(
+    (line) => line.replaceAll(NO_BREAK_SPACE, ' ').trim() === '',
+  );
+}
+
+/**
  * login and the shell itself; anything else on a tty is running. Moved here
  * from scripts/cmux-arrange-close.ts (home-base-yukaf.2), which imports it
  * back.

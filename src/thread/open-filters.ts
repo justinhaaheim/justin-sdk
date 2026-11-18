@@ -29,9 +29,10 @@ export type SinceParse =
 /**
  * `24h`, `3d`, `2w`: a whole number above 0 and one unit letter (h, d, w).
  * Anything else (`1.5d`, `7`, `2m`, `0d`, `-1d`) is refused, so a typo never
- * silently widens or narrows the window.
+ * silently widens or narrows the window. `flag` names the option in the
+ * refusal (home-base-kwand.8: `thread inbox --idle-for` takes the same form).
  */
-export function parseSince(raw: string): SinceParse {
+export function parseSince(raw: string, flag = '--since'): SinceParse {
   const text = raw.trim().toLowerCase();
   const match = SINCE_FORMAT.exec(text);
   const count = match == null ? Number.NaN : Number(match[1]);
@@ -39,7 +40,7 @@ export function parseSince(raw: string): SinceParse {
   if (unit == null || !Number.isInteger(count) || count <= 0) {
     return {
       kind: 'bad',
-      reason: `--since takes a whole number above 0 and h (hours), d (days) or w (weeks), like 24h, 3d or 2w; not ${JSON.stringify(raw)}`,
+      reason: `${flag} takes a whole number above 0 and h (hours), d (days) or w (weeks), like 24h, 3d or 2w; not ${JSON.stringify(raw)}`,
     };
   }
   return {

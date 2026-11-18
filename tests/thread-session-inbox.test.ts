@@ -24,6 +24,7 @@ import {brClose, brUpdate, runBr} from '../src/beads/br';
 import {PLAIN_STYLE} from '../src/cli-style';
 import {messageLogPath} from '../src/thread/archive';
 import {fileAsk} from '../src/thread/ask';
+import {filterIdleFor, parseIdleFor} from '../src/thread/inbox-idle';
 import {
   clearInputDraft,
   inputDraftsDir,
@@ -638,13 +639,21 @@ describe('thread inbox: unsent input-box text (home-base-yukaf.4, D-DRAFTS)', ()
       });
 
       const text = render(r, {order: 'status'});
+      // home-base-kwand.8 item 4: session 9 is 61 days old, outside the
+      // window, and shown for its draft: it sits under its own heading after
+      // every card within the window, and the summary still counts it.
       const firstSection = text.indexOf(
-        '## ✍️ Unsent text in the input box (2)',
+        '## ✍️ Unsent text in the input box (1)',
       );
       expect(firstSection).toBeGreaterThan(-1);
       // Session 1 was the only one in Needs you: its draft moved it here.
       expect(text).not.toContain('## 🛑 Needs you');
       expect(firstSection).toBeLessThan(text.indexOf('## 🏃 Working'));
+      const olderDraft = text.indexOf(
+        '## ✍️ Older than 30 days, unsent text in the input box (1)',
+      );
+      expect(olderDraft).toBeGreaterThan(text.indexOf('## 🏃 Working'));
+      expect(text.indexOf(`--resume ${sid(9)}`)).toBeGreaterThan(olderDraft);
       expect(text).toContain(
         '**You typed, never sent:** use the cron bucket\n      and tell me why',
       );
@@ -896,6 +905,78 @@ describe('thread inbox: the window never hides a waiting session (R5)', () => {
       '1 older session hidden (no activity in the last 30 days; --days): 1 💬 answered.',
     );
     expect(text).toContain('- **🛑 Needs you:** 2');
+  });
+
+  // home-base-kwand.8 item 4 (G4): Justin's `--days 5` showed a card "36 days
+  // ago" among the recent ones. The window keeps its meaning; the older card
+  // now sits under its own counted heading, after the cards within it.
+  test('with --days, the 40-day-old waiting card is listed last under "Older than 30 days, waiting on you (1)", in the text and the JSON', async () => {
+    const s10 = sid(10);
+    const r = await read({days: 30});
+    const old = r.rows.find((entry) => entry.sessionId === s10);
+    expect(old?.olderShown).toBe('waiting');
+    expect(
+      r.rows
+        .filter((entry) => entry.sessionId !== s10)
+        .every((entry) => entry.olderShown == null),
+    ).toBe(true);
+
+    for (const order of ['recent', 'status', 'repo'] as const) {
+      const text = render(r, {order});
+      const heading = text.indexOf(
+        '## 🛑 Older than 30 days, waiting on you (1)',
+      );
+      expect(heading).toBeGreaterThan(-1);
+      // Its card once, after the heading; every recent card before it.
+      expect(text.split(`--resume ${s10}`).length - 1).toBe(1);
+      expect(text.indexOf(`--resume ${s10}`)).toBeGreaterThan(heading);
+      expect(text.indexOf(`--resume ${sid(1)}`)).toBeLessThan(heading);
+      expect(text.indexOf(`--resume ${sid(2)}`)).toBeLessThan(heading);
+    }
+    expect(render(r, {order: 'status'})).toContain('## 🛑 Needs you (1)');
+    expect(render(r)).toContain(
+      '- **🕰️ Older than 30 days, shown anyway:** 1 (1 waiting on you), listed last',
+    );
+
+    const json = inboxJson(r);
+    const entry = json.sessions.find((one) => one.sessionId === s10);
+    expect(entry?.olderShown).toBe('waiting');
+    expect(entry?.idleMs).toBe(
+      NOW.getTime() - Date.parse('2029-11-22T09:05:00.000Z'),
+    );
+    expect(
+      json.sessions.find((one) => one.sessionId === sid(1))?.olderShown,
+    ).toBeNull();
+  });
+
+  // home-base-kwand.8 (G4): --days and --idle-for together are a band.
+  test('--days 30 with --idle-for 2h: idle for 2 hours or more and active within 30 days; the 61-day-old one stays out', async () => {
+    const parsed = parseIdleFor('2h');
+    if (parsed.kind !== 'ok') throw new Error(parsed.reason);
+    const r = filterIdleFor(await read({days: 30}), parsed, NOW);
+    const ids = r.rows.map((entry) => entry.sessionId);
+    // 1 (10:05) and 3 (11:59) were active in the last 2 hours of 12:00.
+    expect(r.idleFor?.active.sort()).toEqual([sid(1), sid(3)].sort());
+    expect(ids).not.toContain(sid(1));
+    expect(ids).not.toContain(sid(3));
+    // 2 (08:30) and 5 (09:02) are in the band; 10 (40 days, waiting) is kept
+    // by the window's own rule and is idle, so it is listed, under its heading.
+    expect(ids).toContain(sid(2));
+    expect(ids).toContain(sid(5));
+    expect(ids).toContain(sid(10));
+    // 9 (61 days, answered) is outside the window: the window hid it.
+    expect(ids).not.toContain(sid(9));
+    expect(r.idleFor?.undated).toEqual([]);
+    for (const row of r.rows) {
+      expect(row.idleMs ?? -1).toBeGreaterThanOrEqual(2 * 60 * 60_000);
+    }
+    const text = render(r);
+    expect(text).toContain(
+      'sessions with activity in the last 30 days, idle for at least 2 hours',
+    );
+    expect(text).toContain(
+      '--idle-for 2h left out 2 active in the last 2 hours.',
+    );
   });
 });
 

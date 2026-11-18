@@ -68,6 +68,7 @@ import type {
   KeepReason,
   SessionFactsRead,
   SessionFileFact,
+  UnplacedClaude,
 } from './close-all-except';
 import type {CmuxRunner, CmuxTree} from './cmux';
 import type {InputDraftWrite, WriteInputDraftInput} from './input-drafts';
@@ -119,6 +120,8 @@ import {
   resolveKeep,
   sessionKeeps,
   sharedTtyWorkspaces,
+  unplacedClaude,
+  unplacedKeep,
 } from './close-all-except';
 import {readCmuxTree, realCmuxRunner, surfacesOfWorkspace} from './cmux';
 import {
@@ -353,6 +356,11 @@ export interface CloseOptions {
   allExcept?: boolean;
   /** `--apply`: `--all-except` closes for real (K4). */
   apply?: boolean;
+  /**
+   * `--close-shared-tty` (home-base-kwand.21 F1): with `--all-except` only,
+   * turn on the K7 shared-tty pass, under its stricter conditions.
+   */
+  closeSharedTty?: boolean;
   dryRun: boolean;
   env?: EnvLike;
   /**
@@ -621,6 +629,8 @@ type Assessment =
       entry: CloseEntry;
       kind: 'closable';
       sessions: string[];
+      /** home-base-kwand.21 F2: gateSurfaces' weak evidence; set by assess. */
+      weak?: string[];
     }
   | {
       drafts: {sessionId: string | null; surfaceId: string; text: string}[];
@@ -629,6 +639,8 @@ type Assessment =
       /** K6: each reason's kind, in order; absent from --tab's own checks. */
       kinds?: KeepKind[];
       reasons: string[];
+      /** home-base-kwand.21 F2: gateSurfaces' weak evidence; set by assess. */
+      weak?: string[];
     }
   | {kind: 'notFound'; reason: string};
 
@@ -711,13 +723,21 @@ async function assess(
     workspaceRef: workspace.ref,
   };
   if (reasons.length > 0) {
-    return {drafts: gate.drafts, entry, kind: 'kept', kinds, reasons};
+    return {
+      drafts: gate.drafts,
+      entry,
+      kind: 'kept',
+      kinds,
+      reasons,
+      weak: gate.weak,
+    };
   }
   return {
     claude: gate.claude,
     entry,
     kind: 'closable',
     sessions: gate.sessions,
+    weak: gate.weak,
   };
 }
 
@@ -1222,7 +1242,7 @@ function allExceptFields(all: AllExceptInfo): {label: string; value: string}[] {
   return [
     {
       label: 'Keeps',
-      value: `this command's own workspace; a marked session (⭐ or any mark, on any session of its chain); Claude working now; unsent text; an untracked session; activity within --keep-active ${all.keepActive}${all.keep.length > 0 ? `; --keep ${all.keep.join(', ')}` : ''}; and every check a named close makes. A fact that cannot be read keeps the workspace as unknown`,
+      value: `this command's own workspace; a marked session (⭐ or any mark, on any session of its chain); Claude working now; unsent text; an untracked session; activity within --keep-active ${all.keepActive}${all.keep.length > 0 ? `; --keep ${all.keep.join(', ')}` : ''}; and every check a named close makes. A fact that cannot be read keeps the workspace as unknown, and so does a blank pane, a pane whose tty runs nothing, or a shared tty while any live Claude process is placed in no workspace`,
     },
     {
       label: 'Tab record',
@@ -1273,7 +1293,16 @@ function allExceptCounts(
     ...(dryRun ? [] : [{label: 'Failed', value: String(all.counts.failed)}]),
     {
       label: 'Shared tty',
-      value: `${all.sharedTty.workspaces} workspaces have a tab whose tty another tab reports; ${all.sharedTty.keptFor} kept for it, ${all.sharedTty.passedByRule} ${dryRun ? 'would close' : 'went to close'} because only an idle shell runs on that tty`,
+      value: all.closeSharedTty
+        ? `${all.sharedTty.workspaces} workspaces have a tab whose tty another tab reports; ${all.sharedTty.keptFor} kept for it, ${all.sharedTty.passedByRule} ${dryRun ? 'would close' : 'went to close'} under --close-shared-tty (only login and idle shells on that tty, an idle prompt on the tab's own screen, every Claude placed)`
+        : `${all.sharedTty.workspaces} workspaces have a tab whose tty another tab reports; ${all.sharedTty.keptFor} kept for it (--close-shared-tty not given)`,
+    },
+    {
+      label: 'Unplaced',
+      value:
+        all.unplaced.pids.length === 0
+          ? 'every live Claude process was placed in a workspace'
+          : `${all.unplaced.pids.length} live Claude ${all.unplaced.pids.length === 1 ? 'process' : 'processes'} placed in no workspace (pid ${[...new Set(all.unplaced.pids.map((pid) => pid ?? 'unknown'))].join(', ')}): ${all.unplaced.unnamed} with no session named, ${all.unplaced.noWorkspace} on a terminal no single tab reports. ${all.unplaced.keptFor} ${all.unplaced.keptFor === 1 ? 'workspace' : 'workspaces'} with a blank pane, a pane whose tty runs nothing, or a shared tty kept as unknown`,
     },
     {label: 'Workspaces', value: `${all.treeWorkspaces} in every cmux window`},
   ];
@@ -1956,8 +1985,20 @@ async function closeTabs(input: {
 // --all-except (home-base-kwand.7): every workspace but the ones that matter
 // ---------------------------------------------------------------------------
 
-/** K7: the one gate option `--all-except` runs assess with, both passes. */
-const ALL_EXCEPT_GATES: GateOptions = {sharedTtyIdleShells: true};
+/**
+ * K7 as home-base-kwand.21 F1 narrowed it: the gate option `--all-except`
+ * runs assess with, both passes. The shared-tty pass is OFF unless
+ * --close-shared-tty is given, and stays off while any live Claude process
+ * is placed in no workspace (F2).
+ */
+function allExceptGates(
+  closeSharedTty: boolean,
+  unplaced: readonly UnplacedClaude[],
+): GateOptions {
+  return closeSharedTty && unplaced.length === 0
+    ? {sharedTtyIdleShells: true}
+    : {};
+}
 
 /** The words `--apply`'s tab record (K4) reports; tab-record-command.ts's form. */
 function recordWords(
@@ -1998,12 +2039,15 @@ function realReadSessionFile(env: EnvLike, nowMs: number): SessionFileFact {
 
 /** The plan's counts (K6) and facts, from the finished state. */
 function allExceptInfo(input: {
+  closeSharedTty: boolean;
   first: LiveView;
   keep: readonly string[];
   keepActiveText: string;
   sessionFile: SessionFileFact;
   state: CloseState;
   tabRecord: string | null;
+  unplaced: readonly UnplacedClaude[];
+  unplacedKeptFor: number;
 }): AllExceptInfo {
   const {first, state} = input;
   const keptByKind: Partial<Record<KeepKind, number>> = {};
@@ -2027,6 +2071,7 @@ function allExceptInfo(input: {
     ? state.planned
     : [...state.closed, ...state.failed];
   return {
+    closeSharedTty: input.closeSharedTty,
     counts: {
       failed: state.failed.length,
       kept: state.kept.length,
@@ -2047,6 +2092,15 @@ function allExceptInfo(input: {
     },
     tabRecord: input.tabRecord,
     treeWorkspaces: workspaces.length,
+    unplaced: {
+      keptFor: input.unplacedKeptFor,
+      noWorkspace: input.unplaced.filter(
+        (entry) => entry.kind === 'noWorkspace',
+      ).length,
+      pids: input.unplaced.map((entry) => entry.pid),
+      unnamed: input.unplaced.filter((entry) => entry.kind === 'unnamed')
+        .length,
+    },
   };
 }
 
@@ -2083,6 +2137,7 @@ async function stopAndCloseWorkspace(
  */
 async function closeAllExcept(input: {
   apply: boolean;
+  closeSharedTty: boolean;
   first: LiveView;
   full: CloseDeps;
   hookPids: HookStorePids;
@@ -2097,6 +2152,14 @@ async function closeAllExcept(input: {
   const {first, full, ownId} = input;
   const dryRun = !input.apply;
   const now = new Date(full.nowMs());
+  const workspaces = first.tree.windows.flatMap((window) => window.workspaces);
+
+  // ---- home-base-kwand.21 F3: K2 (a) needs its own workspace in the tree ----
+  if (!workspaces.some((workspace) => workspace.id.toUpperCase() === ownId)) {
+    return refuse(
+      `CMUX_WORKSPACE_ID is ${ownId}, and no workspace in the cmux tree has that uuid (a stale id after a restore, or not a uuid), so this command's own workspace cannot be told and --all-except would keep nothing as its own. Run it from a cmux tab whose CMUX_WORKSPACE_ID names an open workspace`,
+    );
+  }
 
   // ---- the facts every keep rule reads; a failed read refuses (K3) ----
   const live = await full.readLive();
@@ -2105,6 +2168,10 @@ async function closeAllExcept(input: {
       `--all-except needs to know which Claude sessions run in each workspace, and the live sessions could not be read: ${live.reason}`,
     );
   }
+  // F2: a Claude placed in no workspace could run behind a weak-evidence pane.
+  const unplaced = unplacedClaude(live);
+  const gateOptions = allExceptGates(input.closeSharedTty, unplaced);
+  let unplacedKeptFor = 0;
   const facts = await full.readSessionFacts(
     new Set(live.workspacesBySessionId.keys()),
   );
@@ -2157,7 +2224,6 @@ async function closeAllExcept(input: {
     planned: [],
     startedAt,
   };
-  const workspaces = first.tree.windows.flatMap((window) => window.workspaces);
   const closable: Closable[] = [];
   for (const workspace of workspaces) {
     const target: Resolved = {
@@ -2170,7 +2236,7 @@ async function closeAllExcept(input: {
       input.hookPids,
       full,
       null,
-      ALL_EXCEPT_GATES,
+      gateOptions,
     );
     if (assessment.kind === 'notFound') {
       state.notFound.push({given: target.given, reason: assessment.reason});
@@ -2204,6 +2270,11 @@ async function closeAllExcept(input: {
         text: `named with --keep ${named.join(', ')}`,
       });
     }
+    const weak = assessment.weak ?? [];
+    if (unplaced.length > 0 && weak.length > 0) {
+      pre.push(unplacedKeep(unplaced, weak));
+      unplacedKeptFor += 1;
+    }
     if (pre.length === 0 && assessment.kind === 'closable') {
       closable.push(assessment);
       state.planned.push(assessment.entry);
@@ -2230,12 +2301,15 @@ async function closeAllExcept(input: {
 
   const finish = (exitCode: 0 | 1): CloseResult => {
     state.allExcept = allExceptInfo({
+      closeSharedTty: input.closeSharedTty,
       first,
       keep: input.keep,
       keepActiveText: input.keepActiveText,
       sessionFile,
       state,
       tabRecord,
+      unplaced,
+      unplacedKeptFor,
     });
     return {
       exitCode,
@@ -2258,14 +2332,39 @@ async function closeAllExcept(input: {
       if (again.kind !== 'read' || !storeAgain.ok) {
         return unreadAgain(planned, again, storeAgain);
       }
-      return await assess(
+      const assessed = await assess(
         {given: planned.entry.given, workspaceId: planned.entry.workspaceId},
         again.view,
         hookStorePids(storeAgain.value),
         full,
         null,
-        ALL_EXCEPT_GATES,
+        gateOptions,
       );
+      // F2 at the moment of closing: a workspace that passed with a weak-
+      // evidence pane passes again only while every Claude is still placed.
+      const weak = assessed.kind === 'closable' ? (assessed.weak ?? []) : [];
+      if (assessed.kind !== 'closable' || weak.length === 0) return assessed;
+      const liveAgain = await full.readLive();
+      const unplacedNow =
+        liveAgain.kind === 'read' ? unplacedClaude(liveAgain) : null;
+      const reason: KeepReason | null =
+        liveAgain.kind === 'failed'
+          ? {
+              kind: 'unknown',
+              text: `unknown: ${weak.join('; ')}, and the live sessions could not be read again to show that no Claude runs here unseen: ${liveAgain.reason}`,
+            }
+          : unplacedNow != null && unplacedNow.length > 0
+            ? unplacedKeep(unplacedNow, weak)
+            : null;
+      if (reason == null) return assessed;
+      return {
+        drafts: [],
+        entry: assessed.entry,
+        kind: 'kept',
+        kinds: [reason.kind],
+        reasons: [reason.text],
+        weak,
+      };
     },
     startedAt,
     state,
@@ -2314,6 +2413,7 @@ export async function closeWorkspaces(
       ...(options.apply === true ? ['--apply'] : []),
       ...(keepGiven.length > 0 ? ['--keep'] : []),
       ...(options.keepActive != null ? ['--keep-active'] : []),
+      ...(options.closeSharedTty === true ? ['--close-shared-tty'] : []),
     ];
     if (allExceptOnly.length > 0) {
       return refuse(
@@ -2476,6 +2576,7 @@ export async function closeWorkspaces(
   if (allExcept && ownId != null && keepActiveMs != null) {
     return await closeAllExcept({
       apply: options.apply === true,
+      closeSharedTty: options.closeSharedTty === true,
       first: first.view,
       full,
       hookPids: hookStorePids(store.value),

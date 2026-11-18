@@ -112,6 +112,8 @@ function fact(n: number, over: Partial<SessionFacts> = {}): SessionFacts {
 interface WorldInput {
   facts?: SessionFacts[];
   factsRead?: SessionFactsRead;
+  /** ps lines that appear right after the first live read (kwand.21 F2, second pass). */
+  lateProcs?: string[];
   noOwn?: boolean;
   options?: Partial<CloseOptions>;
   own?: number;
@@ -136,7 +138,8 @@ function world(input: WorldInput) {
   const calls: string[][] = [];
   let workspaces = [...input.workspaces];
   const killed = new Set<number>();
-  const procLines = input.procs ?? [];
+  const procLines = [...(input.procs ?? [])];
+  let liveReads = 0;
   const psText = (): string =>
     `${[
       '  PID  PPID TTY      ELAPSED COMMAND',
@@ -248,8 +251,9 @@ function world(input: WorldInput) {
     nowMs: () => NOW,
     ps: () => Promise.resolve({kind: 'ok', stdout: psText()}),
     readHookStore: () => ({ok: true, value: {}}),
-    readLive: () =>
-      Promise.resolve({
+    readLive: () => {
+      events.push('read-live');
+      const live = {
         kind: 'read' as const,
         ...joinLiveSessions({
           agents: [],
@@ -263,7 +267,11 @@ function world(input: WorldInput) {
           store: {},
           surfaces: flattenTree(rawTree()),
         }),
-      }),
+      };
+      liveReads += 1;
+      if (liveReads === 1) procLines.push(...(input.lateProcs ?? []));
+      return Promise.resolve(live);
+    },
     readSessionFacts: () => {
       events.push('read-facts');
       return Promise.resolve(factsRead);
@@ -309,7 +317,7 @@ type World = ReturnType<typeof world>;
 
 /** Anything that changes something: a log line, a signal, a close, a record. */
 const writes = (w: World): string[] =>
-  w.events.filter((event) => !event.startsWith('read-facts'));
+  w.events.filter((event) => !event.startsWith('read-'));
 const noForce = (w: World): void => {
   expect(w.calls.some((args) => args.includes('--force'))).toBe(false);
 };
@@ -602,6 +610,15 @@ describe('refusals (K11, K2 a, --keep)', () => {
       {keepActive: 'soon'},
       'takes a duration',
     ],
+    [
+      '--close-shared-tty without --all-except (kwand.21 F1)',
+      {
+        allExcept: false,
+        closeSharedTty: true,
+        workspaces: ['workspace:1'],
+      },
+      ONLY,
+    ],
   ];
   for (const [name, options, words] of refusals) {
     test(`${name} is exit 2, before any cmux call`, async () => {
@@ -617,6 +634,21 @@ describe('refusals (K11, K2 a, --keep)', () => {
     expect(result.exitCode).toBe(2);
     expect(result.output).toContain('CMUX_WORKSPACE_ID');
     expect(w.calls).toEqual([]);
+  });
+
+  test('kwand.21 F3: a CMUX_WORKSPACE_ID that names no workspace in the tree is exit 2, with nothing read past the tree or written', async () => {
+    // A dry run: with --apply and the check removed, the fake clock never
+    // lets the window-gone poll end, so the negative control would hang.
+    const {result, w} = await plan({
+      own: 77,
+      procs: [...OWN_PROCS, ...shellProcs('ttys02', 2000)],
+      workspaces: withOwn([ws(2, IDLE_SHELL)]),
+    });
+    expect(result.exitCode).toBe(2);
+    expect(result.output).toContain(
+      `CMUX_WORKSPACE_ID is ${wsId(77)}, and no workspace in the cmux tree has that uuid`,
+    );
+    expect(w.events).toEqual([]);
   });
 
   test('a --keep that matches nothing is exit 2 and closes nothing', async () => {
@@ -685,20 +717,46 @@ describe('--apply', () => {
   });
 });
 
-describe('shared tty (K7)', () => {
+describe('shared tty (K7, made opt-in by kwand.21 F1)', () => {
   /** Workspaces 1 and 2 both report ttys05; 2 is the own workspace's neighbour. */
-  function shared(onTty: string[]): WorldInput {
+  function shared(
+    onTty: string[],
+    screens: [string, string] = [IDLE_SHELL, IDLE_SHELL],
+    extra: Partial<WorldInput> = {},
+  ): WorldInput {
     return {
       procs: [...OWN_PROCS, ...onTty],
       workspaces: withOwn([
-        {n: 1, panes: [{screen: IDLE_SHELL, surface: 1, tty: 'ttys05'}]},
-        {n: 2, panes: [{screen: IDLE_SHELL, surface: 2, tty: 'ttys05'}]},
+        {n: 1, panes: [{screen: screens[0], surface: 1, tty: 'ttys05'}]},
+        {n: 2, panes: [{screen: screens[1], surface: 2, tty: 'ttys05'}]},
       ]),
+      ...extra,
     };
   }
+  const FLAG = {options: {closeSharedTty: true}};
 
-  test('only shells on the shared tty: both are planned, counted as passed by the rule', async () => {
-    const {planned, result} = await plan(shared(shellProcs('ttys05', 5000)));
+  test('without --close-shared-tty a shared-tty workspace is kept as before, with the manual command', async () => {
+    const {keptKinds, planned, result} = await plan(
+      shared(shellProcs('ttys05', 5000)),
+    );
+    expect(planned).toEqual([]);
+    expect(keptKinds.get('workspace:1')).toEqual(['sharedTty']);
+    expect(keptKinds.get('workspace:2')).toEqual(['sharedTty']);
+    expect(result.output).toContain(
+      `cmux close-workspace --workspace ${wsId(1)} --window ${WINDOW}`,
+    );
+    expect(result.state?.allExcept?.closeSharedTty).toBe(false);
+    expect(result.state?.allExcept?.sharedTty).toEqual({
+      keptFor: 2,
+      passedByRule: 0,
+      workspaces: 2,
+    });
+  });
+
+  test('with it, only shells on the shared tty and an idle prompt on each own screen: both are planned, counted as passed by the rule', async () => {
+    const {planned, result} = await plan(
+      shared(shellProcs('ttys05', 5000), undefined, FLAG),
+    );
     expect(planned).toEqual(['workspace:1', 'workspace:2']);
     expect(result.state?.allExcept?.sharedTty).toEqual({
       keptFor: 0,
@@ -707,16 +765,48 @@ describe('shared tty (K7)', () => {
     });
   });
 
-  test('anything else on the shared tty keeps both, with the manual command', async () => {
+  test('with it, a shared-tty pane with a blank screen is kept; its neighbour with an idle prompt passes', async () => {
+    const {keptKinds, planned} = await plan(
+      shared(shellProcs('ttys05', 5000), ['', IDLE_SHELL], FLAG),
+    );
+    expect(keptKinds.get('workspace:1')).toEqual(['sharedTty']);
+    expect(planned).toEqual(['workspace:2']);
+  });
+
+  test('with it, anything else on the shared tty keeps both, with the manual command', async () => {
     const {keptKinds, result} = await plan(
-      shared([
-        ...shellProcs('ttys05', 5000),
-        '5002 5001 ttys05 01:00 vim notes.md',
-      ]),
+      shared(
+        [...shellProcs('ttys05', 5000), '5002 5001 ttys05 01:00 vim notes.md'],
+        undefined,
+        FLAG,
+      ),
     );
     expect(keptKinds.get('workspace:1')).toEqual(['sharedTty', 'running']);
     expect(result.output).toContain(
       `cmux close-workspace --workspace ${wsId(1)} --window ${WINDOW}`,
+    );
+  });
+
+  test('with it but a Claude process placed in no workspace, both are kept as unknown, naming the pid', async () => {
+    const {keptKinds, planned, result} = await plan(
+      shared(
+        [...shellProcs('ttys05', 5000), `7777 1 ttys77 01:00 ${CLAUDE} --x`],
+        undefined,
+        FLAG,
+      ),
+    );
+    expect(planned).toEqual([]);
+    expect(keptKinds.get('workspace:1')).toEqual(['unknown', 'sharedTty']);
+    expect(keptKinds.get('workspace:2')).toEqual(['unknown', 'sharedTty']);
+    expect(result.state?.allExcept?.counts.keptByKind.unknown).toBe(2);
+    expect(result.state?.allExcept?.unplaced).toEqual({
+      keptFor: 2,
+      noWorkspace: 0,
+      pids: [7777],
+      unnamed: 1,
+    });
+    expect(result.output).toContain(
+      '1 live Claude process could not be placed in any workspace (pid 7777)',
     );
   });
 
@@ -728,5 +818,76 @@ describe('shared tty (K7)', () => {
     });
     const result = await closeWorkspaces(w.options, w.deps);
     expect(result.state?.kept[0]?.reasonKinds).toEqual(['sharedTty']);
+  });
+});
+
+describe('a Claude placed in no workspace keeps weak-evidence panes (kwand.21 F2)', () => {
+  /**
+   * Workspace 3: a blank screen, shells on its own tty. Workspace 4: an idle
+   * prompt, no process at all on its tty. Workspace 2: an idle prompt with
+   * shells on its own tty (strong evidence, the control).
+   */
+  function weakWorld(extraProcs: string[]): WorldInput {
+    return {
+      procs: [
+        ...OWN_PROCS,
+        ...shellProcs('ttys02', 2000),
+        ...shellProcs('ttys03', 3000),
+        ...extraProcs,
+      ],
+      workspaces: withOwn([ws(2, IDLE_SHELL), ws(3, ''), ws(4, IDLE_SHELL)]),
+    };
+  }
+  /** No session id anywhere: in live.unplaced. */
+  const UNNAMED = `7777 1 ttys77 01:00 ${CLAUDE} --x`;
+  /** Named on its command line, but its tty is on no tab: placed in no workspace. */
+  const NO_WORKSPACE = `7778 1 ttys78 01:00 ${CLAUDE} --session-id ${sid(8)}`;
+
+  test('without one, the blank pane and the pane whose tty runs nothing are planned (as before)', async () => {
+    const {planned, result} = await plan(weakWorld([]));
+    expect(planned).toEqual(['workspace:2', 'workspace:3', 'workspace:4']);
+    expect(result.state?.allExcept?.unplaced).toEqual({
+      keptFor: 0,
+      noWorkspace: 0,
+      pids: [],
+      unnamed: 0,
+    });
+  });
+
+  test('an unplaced Claude (no session named) keeps them as unknown, even without --close-shared-tty; the strong-evidence workspace still closes', async () => {
+    const {keptKinds, planned, result} = await plan(weakWorld([UNNAMED]));
+    expect(planned).toEqual(['workspace:2']);
+    expect(keptKinds.get('workspace:3')).toEqual(['unknown']);
+    expect(keptKinds.get('workspace:4')).toEqual(['unknown']);
+    expect(result.state?.allExcept?.unplaced.unnamed).toBe(1);
+    expect(result.output).toContain('pane surface:3 shows a blank screen');
+    expect(result.output).toContain(
+      "no process runs on pane surface:4's tty ttys04",
+    );
+  });
+
+  test('a session named but placed in no workspace keeps them the same way', async () => {
+    const {keptKinds, planned, result} = await plan(weakWorld([NO_WORKSPACE]));
+    expect(planned).toEqual(['workspace:2']);
+    expect(keptKinds.get('workspace:3')).toEqual(['unknown']);
+    expect(keptKinds.get('workspace:4')).toEqual(['unknown']);
+    expect(result.state?.allExcept?.unplaced).toEqual({
+      keptFor: 2,
+      noWorkspace: 1,
+      pids: [7778],
+      unnamed: 0,
+    });
+  });
+
+  test('--apply: one that appears after the plan keeps the weak pane at its re-check, with nothing signalled or closed there', async () => {
+    const {keptKinds, result, w} = await plan({
+      ...weakWorld([]),
+      lateProcs: [UNNAMED],
+      options: {apply: true},
+      workspaces: withOwn([ws(3, '')]),
+    });
+    expect(writes(w)).toEqual(['record-tabs', 'log closing', 'log kept']);
+    expect(keptKinds.get('workspace:3')).toEqual(['unknown']);
+    expect(result.state?.closed).toEqual([]);
   });
 });

@@ -88,6 +88,7 @@ import {writeInputDraft} from './input-drafts';
 import {argvSessionId, isSessionProc} from './live-sessions';
 import {activityWords, locateWorkspace, opensDir, writeJsonFile} from './open';
 import {
+  blankScreen,
   findInputBox,
   idleShellScreen,
   isShellScaffolding,
@@ -617,6 +618,12 @@ export interface SurfacesGate {
   sessions: string[];
   /** yukaf.36 D3: panes whose box showed only Claude Code's suggestion. */
   suggestions: GateSuggestion[];
+  /**
+   * home-base-kwand.21 F2: each pane whose evidence could hide a running
+   * Claude (a tty another pane reports, no process on its tty, a blank
+   * screen), in words. Only `thread close --all-except` reads it.
+   */
+  weak: string[];
 }
 
 /**
@@ -649,6 +656,7 @@ export async function gateSurfaces(
   const claude: Proc[] = [];
   const sessions: string[] = [];
   const suggestions: GateSuggestion[] = [];
+  const weak: string[] = [];
   if (surfaceIds.length === 0) {
     keep('noPane', 'cmux lists no pane in it, so nothing on it can be checked');
   }
@@ -671,21 +679,37 @@ export async function gateSurfaces(
       tty == null
         ? null
         : view.procs.filter((proc) => normalizeTty(proc.tty) === tty);
-    // home-base-kwand.7 K7, opt-in (`thread close --all-except` only): when
-    // every process on the shared tty is shell scaffolding (login, an idle
-    // shell), whichever pane owns them, closing this one loses no running
-    // program; every other check below still applies to this pane.
+    // F6: a draft taller than the screen is read back from the scrollback.
+    const screen = await readScreenForBox(run, surface?.ref ?? surfaceId);
+    const blank =
+      screen.kind === 'read' && blankScreen(screenLines(screen.text));
+    // home-base-kwand.21 F2: what this pane's evidence cannot rule out. A
+    // stale tty report can leave a running Claude on a tty no pane reports;
+    // the caller keeps a pane like this when such a Claude exists.
+    if (sharers > 1) {
+      weak.push(`${label} reports tty ${tty}, which another pane reports too`);
+    }
+    if (procsOnTty?.length === 0) {
+      weak.push(`no process runs on ${label}'s tty ${tty ?? '?'}`);
+    }
+    if (blank) weak.push(`${label} shows a blank screen`);
+    // home-base-kwand.7 K7, made opt-in and stricter by home-base-kwand.21
+    // F1 (`thread close --all-except --close-shared-tty` only, and only when
+    // the caller found every Claude process placed): every process on the
+    // shared tty is shell scaffolding, AND this pane's own screen shows a
+    // NON-BLANK idle shell prompt. A blank screen proves nothing (F20).
     const onlyShells =
       options.sharedTtyIdleShells === true &&
-      procsOnTty?.every((proc) => isShellScaffolding(proc)) === true;
+      procsOnTty?.every((proc) => isShellScaffolding(proc)) === true &&
+      screen.kind === 'read' &&
+      !blank &&
+      idleShellScreen(screenLines(screen.text));
     if (sharers > 1 && !onlyShells) {
       keep(
         'sharedTty',
         `${label} reports tty ${tty}, which ${sharers - 1} other pane${sharers === 2 ? '' : 's'} also report, so which processes are its own cannot be told`,
       );
     }
-    // F6: a draft taller than the screen is read back from the scrollback.
-    const screen = await readScreenForBox(run, surface?.ref ?? surfaceId);
     const gate = gatePane({
       ...(hookPids == null ? {} : {hookPids}),
       label,
@@ -724,15 +748,18 @@ export async function gateSurfaces(
       );
     }
   }
-  return {claude, drafts, kinds, reasons, sessions, suggestions};
+  return {claude, drafts, kinds, reasons, sessions, suggestions, weak};
 }
 
 /** Options of {@link gateSurfaces}; every caller but one passes none. */
 export interface GateOptions {
   /**
-   * home-base-kwand.7 K7: a pane whose tty other panes also report passes
-   * the shared-tty check when every process on that tty is shell scaffolding.
-   * Only `thread close --all-except` sets it; named closes are unchanged.
+   * home-base-kwand.7 K7, narrowed by home-base-kwand.21 F1: a pane whose tty
+   * other panes also report passes the shared-tty check when every process
+   * on that tty is shell scaffolding AND the pane's own screen shows a
+   * non-blank idle shell prompt. Only `thread close --all-except
+   * --close-shared-tty` sets it, and only when the live join placed every
+   * Claude process (F2); named closes are unchanged.
    */
   sharedTtyIdleShells?: boolean;
 }

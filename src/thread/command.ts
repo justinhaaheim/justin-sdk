@@ -257,13 +257,17 @@ ALL EXCEPT (--all-except, home-base-kwand.7). Every workspace in every cmux wind
 
   A fact one of these needs that cannot be read (a session's marks, its activity, whether it is working) keeps the workspace as "unknown", never as unmarked or idle; an inbox that cannot be read at all refuses the run. A workspace with no Claude session goes through THE CHECKS alone and closes when every tab holds an idle shell. The sessions are read from the inbox with no age window, so a session idle for months is still known.
 
-  A shared tty (two tabs report the same terminal) still keeps the workspace, unless every process on that terminal is a login or an idle shell: then whichever tab owns them, closing this one stops no running program. Each workspace kept for a shared tty prints how to close it by hand.
+  A shared tty (two tabs report the same terminal) keeps the workspace, and each workspace kept for it prints how to close it by hand. A shared tty exists because one tab reports a stale terminal, so the processes on it may be another tab's, and which tab they belong to cannot be proven. --close-shared-tty (with --all-except only) lets such a tab through, and only when all three hold: every process on that terminal is a login or an idle shell; the tab's own screen shows an idle shell prompt, not a blank screen; and every live Claude process was placed in a workspace. The workspace's other checks still apply.
 
-  With --apply, it first runs thread tabs record, so the tab set before the close is on record, and refuses with nothing closed if that fails. Then every workspace not kept closes exactly as a named close does: the record, the re-check right before each close, SIGTERM, close-workspace. The plan says how old cmux's saved session file is, since the tab record reads that file.
+  A live Claude process that cannot be placed in any workspace (no session named for it, or it runs on a terminal no single tab reports) could be running behind a tab whose evidence is weak. While one exists, every workspace with a blank tab, a tab whose terminal runs no process, or a shared tty is kept as unknown, naming the pid, with or without --close-shared-tty. The counts say how many there were.
+
+  If CMUX_WORKSPACE_ID names no workspace in the cmux tree (a stale id after a restore), --all-except refuses, since its own workspace could not be kept.
+
+  With --apply, it first runs thread tabs record, so the tab set before the close is on record, and refuses with nothing closed if that fails. This record runs even when the hourly recorder is switched off (componentConfig.thread.tabRecord false). Then every workspace not kept closes exactly as a named close does: the record, the re-check right before each close, SIGTERM, close-workspace. The plan says how old cmux's saved session file is, since the tab record reads that file.
 
   cmux may still refuse a close with "Workspace has a running process" when every tab holds an idle shell: no read-only check can predict it (see LIMITS). Such a workspace shows under "Would close" in the dry run and under Failed after --apply. --force is never passed.
 
-  Refused, exit 2, nothing touched: --all-except with workspaces, --session, --tab or --handed-off; --apply, --keep or --keep-active without --all-except; --apply with --dry-run; a --keep-active that is not a duration.
+  Refused, exit 2, nothing touched: --all-except with workspaces, --session, --tab or --handed-off; --apply, --keep, --keep-active or --close-shared-tty without --all-except; --apply with --dry-run; a --keep-active that is not a duration; a CMUX_WORKSPACE_ID that names no open workspace.
 
 SANDBOX. The Claude Code sandbox blocks the cmux socket and ps. Run it from a terminal, or with the sandbox disabled.`;
 
@@ -1500,7 +1504,7 @@ export const threadCommand: CommandModule = {
         (yy) =>
           yy
             .usage(
-              `${helpHeader('justin-sdk', dirname(import.meta.dirname))}\n\n$0 thread close <workspace…> [--session <id>…] [--dry-run] [--json]\n$0 thread close --tab (--session <id>… | --handed-off) [--dry-run] [--json]\n$0 thread close --all-except [--keep <workspace|session|bead>…] [--keep-active <duration>] [--apply] [--json]\n\n${CLOSE_SUMMARY}`,
+              `${helpHeader('justin-sdk', dirname(import.meta.dirname))}\n\n$0 thread close <workspace…> [--session <id>…] [--dry-run] [--json]\n$0 thread close --tab (--session <id>… | --handed-off) [--dry-run] [--json]\n$0 thread close --all-except [--keep <workspace|session|bead>…] [--keep-active <duration>] [--close-shared-tty] [--apply] [--json]\n\n${CLOSE_SUMMARY}`,
             )
             .epilogue(CLOSE_NARRATIVE)
             .positional('workspaces', {
@@ -1544,6 +1548,12 @@ export const threadCommand: CommandModule = {
                 '--all-except only: keep a session active within this long (30m, 24h, 2d, or 0). Default 24h',
               type: 'string' as const,
             })
+            .option('close-shared-tty', {
+              default: false,
+              describe:
+                '--all-except only: let a tab whose terminal another tab also reports close, when only a login and idle shells run on that terminal, its own screen shows an idle shell prompt (not a blank screen) and every live Claude process was placed (see ALL EXCEPT). Off by default',
+              type: 'boolean' as const,
+            })
             .option('apply', {
               default: false,
               describe:
@@ -1568,6 +1578,7 @@ export const threadCommand: CommandModule = {
             await runThreadClose({
               allExcept: argv['all-except'] === true,
               apply: argv.apply === true,
+              closeSharedTty: argv['close-shared-tty'] === true,
               dryRun: argv['dry-run'] === true,
               handedOff: argv['handed-off'] === true,
               json: argv.json === true,
@@ -2361,8 +2372,13 @@ export const threadCommand: CommandModule = {
             .option('days', {
               default: 30,
               describe:
-                'Knob on: sessions with activity in the last N days (an undated tracked session is always listed; an untracked one is in the window when its transcript was last written inside it)',
+                'Knob on: sessions with activity in the last N days (an undated tracked session is always listed; an untracked one is in the window when its transcript was last written inside it). Some older sessions are always shown — waiting on you, unsent text, export behind, unknown, could not be loaded — and they are listed last, under headings such as "Older than 5 days, waiting on you (34)"; in --json each says why in `olderShown`',
               type: 'number' as const,
+            })
+            .option('idle-for', {
+              describe:
+                'Knob on: only sessions with no activity for at least this long: a whole number and h, d or w (24h, 3d, 2w); exactly that long counts. With --days it gives a band (active within --days, idle for at least --idle-for). A session whose last activity cannot be dated is never counted as idle: it is left out and named. --json adds `idleMs` to every session (null when undated) and `idleFor` (what it left out). Exit 2 on a bad value',
+              type: 'string' as const,
             })
             .option('all', {
               default: false,
@@ -2417,6 +2433,7 @@ export const threadCommand: CommandModule = {
                 all: argv.all === true,
                 beforeRestart: argv['before-restart'] === true,
                 days: argv.days,
+                idleFor: argv['idle-for'] ?? null,
                 json: argv.json === true,
                 order:
                   argv['by-status'] === true
