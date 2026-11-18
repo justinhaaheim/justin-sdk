@@ -303,10 +303,25 @@ function startLagProbe(): {stop: () => EventLoopLag} {
   };
 }
 
+export interface StartTimingsOptions {
+  /**
+   * The clock every time in the record reads, in ms: `bootMs`, each phase's
+   * `startMs` and `ms`, each session load's `ms`, and `totalMs`. Default
+   * `performance.now()`. A test passes a fake one so an order it asserts
+   * cannot flip when the machine is busy (home-base-5frxo). The event-loop
+   * lag probe always reads the real clock: lag is real time, which a fake
+   * clock cannot show.
+   */
+  now?: () => number;
+}
+
 /** Start recording now. */
-export function startTimings(): TimingRecorder {
-  const bootMs = roundMs(performance.now());
-  const started = performance.now();
+export function startTimings(
+  options: StartTimingsOptions = {},
+): TimingRecorder {
+  const now = options.now ?? ((): number => performance.now());
+  const bootMs = roundMs(now());
+  const started = now();
   const cpuStart = process.cpuUsage();
   const lagProbe = startLagProbe();
   const counting = install();
@@ -315,7 +330,7 @@ export function startTimings(): TimingRecorder {
   open.add(self);
   const phases: PhaseTiming[] = [];
   const sessions: SessionLoadTiming[] = [];
-  const elapsed = (): number => performance.now() - started;
+  const elapsed = (): number => now() - started;
   let finished: InboxTimings | null = null;
 
   const begin = (name: string): {end: () => void; entry: PhaseTiming} => {
@@ -326,10 +341,10 @@ export function startTimings(): TimingRecorder {
       startMs: roundMs(elapsed()),
     };
     phases.push(entry);
-    const at = performance.now();
+    const at = now();
     return {
       end: () => {
-        entry.ms = roundMs(performance.now() - at);
+        entry.ms = roundMs(now() - at);
       },
       entry,
     };
@@ -414,11 +429,11 @@ export function startTimings(): TimingRecorder {
         spawns: counted ? {} : null,
       };
       sessions.push(entry);
-      const at = performance.now();
+      const at = now();
       try {
         return await within(entry.spawns, run);
       } finally {
-        entry.ms = roundMs(performance.now() - at);
+        entry.ms = roundMs(now() - at);
       }
     },
     start: (name: string) => {

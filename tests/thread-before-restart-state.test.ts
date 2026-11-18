@@ -6,15 +6,18 @@
 
 import type {CwdReader} from '../src/thread/before-restart-state';
 import type {CmuxRunner} from '../src/thread/cmux';
+import type {AgentsRunner} from '../src/thread/live-sessions';
 import type {
   LiveSurface,
   PaneLookup,
   Proc,
+  ProcessRunner,
   UnplacedPane,
 } from '../src/thread/pane-join';
 import type {BeforeRestart} from '../src/thread/tab-record-command';
 
 import {describe, expect, test} from 'bun:test';
+import {join} from 'path';
 
 import {
   beforeRestartLine,
@@ -22,7 +25,9 @@ import {
   parseLsofCwds,
   showsFailedRestore,
 } from '../src/thread/before-restart-state';
+import {lookupPanes} from '../src/thread/pane-join';
 import {isOldTabResumeState} from '../src/thread/restore-tab';
+import {createSandbox} from './sandbox';
 
 const RESTART = new Date(2031, 2, 10, 21, 36, 52).getTime();
 
@@ -127,6 +132,7 @@ function lookup(over: {
   live?: {
     placedPids?: Map<number, string>;
     procs: Proc[];
+    storedPids?: Map<number, string[]>;
     surfaces: LiveSurface[];
   } | null;
   unknown?: Map<string, string>;
@@ -749,5 +755,373 @@ describe('an unmatched live Claude pane makes only the sessions it could hold un
     // Its status line shows another session: that is another session's tab.
     const other = await statesOf({panes: ownLookup(SHOWN_ID), tabs});
     expect(other.states).toEqual({'s-own': 'otherSession'});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-kwand.16: a Claude process outside any live tab (its tty no tab
+// reports, or none). All pids, paths and ids are synthetic. Negative controls
+// are recorded in home-base-kwand.16's notes.
+// ---------------------------------------------------------------------------
+
+/** A process whose argv0 is a bare `claude` (a background worker, a spawned -p). */
+function bareClaude(pid: number, tty: string, args: string, ppid = 1): Proc {
+  return {
+    command: `claude ${args}`.trim(),
+    etime: '01:00',
+    exePath: 'claude',
+    name: 'claude',
+    pid,
+    ppid,
+    tty,
+  };
+}
+
+/** The live view: one ordinary tab (ttys001) and `procs`, some on no tab's tty. */
+function outsideLookup(
+  procs: Proc[],
+  storedPids?: Map<number, string[]>,
+): PaneLookup {
+  return lookup({
+    live: {
+      procs: [proc(1, 'ttys001', ZSH), ...procs],
+      ...(storedPids == null ? {} : {storedPids}),
+      surfaces: [surface('T-live', 'ttys001', '1')],
+    },
+  });
+}
+
+/** A fake `claude agents --json`: the entries, or a failure; calls counted. */
+function fakeAgents(
+  entries: {kind?: string; pid: number; sessionId?: string}[] | {fail: string},
+): {calls: () => number; run: AgentsRunner} {
+  let calls = 0;
+  const run: AgentsRunner = () => {
+    calls += 1;
+    return Promise.resolve(
+      'fail' in entries
+        ? {kind: 'failed' as const, reason: entries.fail}
+        : {kind: 'ok' as const, stdout: JSON.stringify(entries)},
+    );
+  };
+  return {calls: () => calls, run};
+}
+
+async function outsideStates(input: {
+  agents?: AgentsRunner;
+  cwds?: CwdReader;
+  panes: PaneLookup;
+}) {
+  const read = await beforeRestartStates({
+    ...(input.agents == null ? {} : {agents: input.agents}),
+    before: before(goneTabs()),
+    cmux: fakeCmux({}).run,
+    ...(input.cwds == null ? {} : {cwds: input.cwds}),
+    panes: input.panes,
+  });
+  if (!read.ok) throw new Error(read.reason);
+  const states: Record<string, string> = Object.fromEntries(
+    [...read.facts].map(([sid, fact]) => [sid, fact.state]),
+  );
+  return {read, states};
+}
+
+const EVERY_GONE_NOT_RESTORED: Record<string, string> = {
+  [ARGV_ID]: 'notRestored',
+  [SHOWN_ID]: 'notRestored',
+  's-alpha': 'notRestored',
+  's-beta': 'notRestored',
+  's-nodir': 'notRestored',
+};
+
+describe('a Claude process outside any live tab (kwand.16)', () => {
+  test('one that names a session (argv, hook store or agents registry) makes it running again, outside any tab, and holds nothing else', async () => {
+    const agents = fakeAgents([
+      {kind: 'background', pid: 73, sessionId: SHOWN_ID},
+    ]);
+    const cwds = fakeCwds({});
+    const {read, states} = await outsideStates({
+      agents: agents.run,
+      cwds: cwds.read,
+      panes: outsideLookup(
+        [
+          // argv names it; no tty (a closed pane's process can lose it too).
+          claudeProc(70, '??', ` --resume ${ARGV_ID}`),
+          // cmux's hook store names its pid; on a tty no tab reports.
+          claudeProc(71, 'ttys071'),
+          // A background session: its host, and the worker the registry names.
+          bareClaude(72, 'ttys073', 'bg-pty-host --synthetic'),
+          bareClaude(73, 'ttys073', 'bg-spare --bg-spare /synthetic.sock', 72),
+        ],
+        new Map([[71, ['s-beta']]]),
+      ),
+    });
+    expect(states).toEqual({
+      [ARGV_ID]: 'runningAgain',
+      [SHOWN_ID]: 'runningAgain',
+      's-alpha': 'notRestored',
+      's-beta': 'runningAgain',
+      's-nodir': 'notRestored',
+    });
+    const argvFact = read.facts.get(ARGV_ID);
+    expect(argvFact?.reason).toBe('it runs outside any cmux tab (pid 70)');
+    if (argvFact == null) throw new Error('no fact');
+    expect(beforeRestartLine(argvFact, new Date(RESTART + 60_000))).toBe(
+      '🔁 was open before the 9:36pm restart: running again, outside any cmux tab',
+    );
+    expect(read.facts.get('s-alpha')?.reason).toBe(
+      'its tab is gone and it does not run',
+    );
+    expect(read.outside).toEqual([
+      {
+        pid: 70,
+        sessionsRunning: 1,
+        sessionsUnknown: 0,
+        tty: null,
+        verdict: {kind: 'named', sessionIds: [ARGV_ID]},
+      },
+      {
+        pid: 71,
+        sessionsRunning: 1,
+        sessionsUnknown: 0,
+        tty: 'ttys071',
+        verdict: {kind: 'named', sessionIds: ['s-beta']},
+      },
+      {
+        pid: 72,
+        sessionsRunning: 0,
+        sessionsUnknown: 0,
+        tty: 'ttys073',
+        verdict: {
+          kind: 'ignored',
+          reason:
+            'the terminal host of a background session (claude bg-pty-host); its worker is judged instead',
+        },
+      },
+      {
+        pid: 73,
+        sessionsRunning: 1,
+        sessionsUnknown: 0,
+        tty: 'ttys073',
+        verdict: {kind: 'named', sessionIds: [SHOWN_ID]},
+      },
+    ]);
+    // The registry was read once (argv and the store left the worker
+    // unnamed); no outside process needed its directory.
+    expect(agents.calls()).toBe(1);
+    expect(cwds.calls).toEqual([]);
+  });
+
+  test('one that names no session keeps the sessions of its repo unknown (a worktree too, and one with no recorded directory); a session in another repo still reads not restored', async () => {
+    const cwds = fakeCwds({80: `${ALPHA}/.claude/worktrees/w1`});
+    const {read, states} = await outsideStates({
+      cwds: cwds.read,
+      panes: outsideLookup([claudeProc(80, 'ttys080')]),
+    });
+    expect(states).toEqual({
+      [ARGV_ID]: 'notRestored',
+      [SHOWN_ID]: 'notRestored',
+      's-alpha': 'unknown',
+      's-beta': 'notRestored',
+      's-nodir': 'unknown',
+    });
+    expect(read.facts.get('s-alpha')?.reason).toBe(
+      `its tab is gone, and a Claude process outside any cmux tab that names no session could hold it (pid 80 runs Claude in ${ALPHA}), so it may run there`,
+    );
+    expect(read.facts.get('s-beta')?.reason).toBe(
+      'its tab is gone and it does not run (the one Claude process outside any cmux tab that names no session cannot hold it)',
+    );
+    expect(read.outside).toEqual([
+      {
+        pid: 80,
+        sessionsRunning: 0,
+        sessionsUnknown: 2,
+        tty: 'ttys080',
+        verdict: {
+          hold: {checkouts: [ALPHA], kind: 'checkouts', sessionIds: []},
+          kind: 'held',
+        },
+      },
+    ]);
+    expect(cwds.calls).toEqual([[80]]);
+  });
+
+  test('its directory cannot be read: it could hold any session whose tab is gone', async () => {
+    const everyUnknown = {
+      [ARGV_ID]: 'unknown',
+      [SHOWN_ID]: 'unknown',
+      's-alpha': 'unknown',
+      's-beta': 'unknown',
+      's-nodir': 'unknown',
+    };
+    const failed = await outsideStates({
+      cwds: fakeCwds({fail: 'lsof refused'}).read,
+      panes: outsideLookup([claudeProc(80, '??')]),
+    });
+    expect(failed.states).toEqual(everyUnknown);
+    expect(failed.read.facts.get('s-beta')?.reason).toContain('lsof refused');
+    // No cwd reader at all, and lsof listing another pid only.
+    expect(
+      (await outsideStates({panes: outsideLookup([claudeProc(80, '??')])}))
+        .states,
+    ).toEqual(everyUnknown);
+    expect(
+      (
+        await outsideStates({
+          cwds: fakeCwds({99: BETA}).read,
+          panes: outsideLookup([claudeProc(80, '??')]),
+        })
+      ).states,
+    ).toEqual(everyUnknown);
+  });
+
+  test('with an unmatched pane too, lsof runs once for both, and each reason names the right one', async () => {
+    const cwds = fakeCwds({50: BETA, 80: ALPHA});
+    const panes = unmatchedLookup({});
+    if (!panes.ok || panes.live == null) throw new Error('no live view');
+    const {read, states} = await outsideStates({
+      cwds: cwds.read,
+      panes: {
+        ...panes,
+        live: {
+          ...panes.live,
+          procs: [...panes.live.procs, claudeProc(80, '??')],
+        },
+      },
+    });
+    expect(cwds.calls).toEqual([[50, 80]]);
+    expect(states).toEqual({
+      [ARGV_ID]: 'unknown',
+      [SHOWN_ID]: 'unknown',
+      's-alpha': 'unknown',
+      's-beta': 'unknown',
+      's-nodir': 'unknown',
+    });
+    expect(read.facts.get('s-nodir')?.reason).toBe(
+      `its tab is gone, and a live Claude pane the tools could not match to a session and a Claude process outside any cmux tab that names no session could hold it (surface:50 runs Claude in ${BETA}; pid 80 runs Claude in ${ALPHA}), so it may run there`,
+    );
+    expect(read.unplaced[0]?.sessionsUnknown).toBe(4);
+    expect(read.outside[0]?.sessionsUnknown).toBe(2);
+  });
+
+  test('`claude -p` naming no session holds none; with -c or --resume it may hold one', async () => {
+    const agents = fakeAgents([]);
+    const cwds = fakeCwds({90: BETA});
+    const headless = await outsideStates({
+      agents: agents.run,
+      cwds: cwds.read,
+      panes: outsideLookup([
+        claudeProc(
+          90,
+          '??',
+          ' -p /usage --output-format json --no-session-persistence',
+        ),
+      ]),
+    });
+    expect(headless.states).toEqual(EVERY_GONE_NOT_RESTORED);
+    expect(headless.read.outside[0]?.verdict).toEqual({
+      kind: 'ignored',
+      reason:
+        'claude -p with no session flag runs a new session, so it holds none from before the restart',
+    });
+    // Neither the registry nor lsof was needed.
+    expect(agents.calls()).toBe(0);
+    expect(cwds.calls).toEqual([]);
+    // `-p -c` continues the newest session of its directory: held by its repo.
+    const continued = await outsideStates({
+      cwds: fakeCwds({90: BETA}).read,
+      panes: outsideLookup([claudeProc(90, '??', ' -p -c "go on"')]),
+    });
+    expect(continued.states).toMatchObject({
+      [ARGV_ID]: 'unknown',
+      's-alpha': 'notRestored',
+      's-beta': 'unknown',
+    });
+    // `--print --resume <id>` names it.
+    const resumed = await outsideStates({
+      panes: outsideLookup([
+        claudeProc(90, '??', ` --print --resume ${ARGV_ID} "go on"`),
+      ]),
+    });
+    expect(resumed.states).toEqual({
+      ...EVERY_GONE_NOT_RESTORED,
+      [ARGV_ID]: 'runningAgain',
+    });
+  });
+
+  test("the daemon's unclaimed spare (no tty, not in the registry) and claude subcommands hold none", async () => {
+    const spare = bareClaude(95, '??', 'bg-spare --bg-spare /synthetic.sock');
+    const listed = fakeAgents([]);
+    const cwds = fakeCwds({95: ALPHA});
+    const {read, states} = await outsideStates({
+      agents: listed.run,
+      cwds: cwds.read,
+      panes: outsideLookup([
+        spare,
+        claudeProc(96, '??', ' agents --json'),
+        bareClaude(97, '??', 'daemon run --synthetic'),
+      ]),
+    });
+    expect(states).toEqual(EVERY_GONE_NOT_RESTORED);
+    expect(read.outside.map((entry) => entry.verdict.kind)).toEqual([
+      'ignored',
+      'ignored',
+      'ignored',
+    ]);
+    expect(listed.calls()).toBe(1);
+    expect(cwds.calls).toEqual([]);
+    expect(read.agentsFailure).toBeNull();
+    // The registry could not be read: the spare is held by its directory.
+    const unreadable = await outsideStates({
+      agents: fakeAgents({fail: 'synthetic: agents refused'}).run,
+      cwds: fakeCwds({95: ALPHA}).read,
+      panes: outsideLookup([spare]),
+    });
+    expect(unreadable.states).toMatchObject({
+      's-alpha': 'unknown',
+      's-beta': 'notRestored',
+    });
+    expect(unreadable.read.agentsFailure).toBe('synthetic: agents refused');
+    // A worker holding a terminal the registry does not list may run a
+    // session (live-sessions.ts): held by its directory.
+    const claimed = await outsideStates({
+      agents: fakeAgents([]).run,
+      cwds: fakeCwds({95: ALPHA}).read,
+      panes: outsideLookup([{...spare, tty: 'ttys095'}]),
+    });
+    expect(claimed.states).toMatchObject({
+      's-alpha': 'unknown',
+      's-beta': 'notRestored',
+    });
+  });
+
+  test('a failed ps read keeps every session unknown, never not restored (critical rule 7)', async () => {
+    const sb = createSandbox();
+    try {
+      sb.writeFile('hooks.json', JSON.stringify({sessions: {}}));
+      sb.writeFile('session.json', JSON.stringify({windows: []}));
+      const psFails: ProcessRunner = () =>
+        Promise.resolve({kind: 'failed', reason: 'synthetic: ps refused'});
+      const tree: CmuxRunner = () =>
+        Promise.resolve({kind: 'ok', stdout: JSON.stringify({windows: []})});
+      const panes = await lookupPanes({
+        cmux: tree,
+        hookStorePath: join(sb.path, 'hooks.json'),
+        ps: psFails,
+        sessionFilePath: join(sb.path, 'session.json'),
+      });
+      const {read, states} = await outsideStates({
+        agents: fakeAgents([]).run,
+        cwds: fakeCwds({}).read,
+        panes,
+      });
+      expect(new Set(Object.values(states))).toEqual(new Set(['unknown']));
+      expect(read.facts.get('s-alpha')?.reason).toContain(
+        'synthetic: ps refused',
+      );
+      expect(read.outside).toEqual([]);
+    } finally {
+      sb.cleanup();
+    }
   });
 });

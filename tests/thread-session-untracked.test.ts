@@ -1548,11 +1548,13 @@ describe('home-base-kwand.2: the before-restart fact on untracked sessions', () 
     const result = await readInbox({
       beforeRestart: async () =>
         await Promise.resolve({
+          agentsFailure: null,
           facts: new Map([
             [sid(1), fact('restoreFailed', 'T-1')],
             ['no-such-session', fact('notRestored', 'T-x')],
           ]),
           ok: true as const,
+          outside: [],
           restartAt: new Date(NOW.getTime() - 60 * 60 * 1000).toISOString(),
           restartKind: 'cmux launch' as const,
           screens: {ms: 0, read: 0, unreadable: 0},

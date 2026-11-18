@@ -114,20 +114,50 @@ describe('startTimings', () => {
     expect(timings.spawns).toEqual({true: 8});
   });
 
+  // home-base-5frxo: a fake clock sets each load's duration. With real sleeps
+  // setting them, s5 and s4 swapped places once in sdk:publish's full suite.
+  // The seven loads still run at the same time, and s7 still makes a real
+  // spawn, so the count per session load is still measured.
   test('a session load counts to its phase and to itself; the slowest five are named, slowest first', async () => {
-    const recorder = startTimings();
-    const ids = ['s1', 's2', 's3', 's4', 's5', 's6', 's7'];
-    await recorder.phase('loads', async () => {
+    /** Each load's fake duration, in ms. */
+    const plan = [
+      {id: 's1', ms: 5},
+      {id: 's2', ms: 13},
+      {id: 's3', ms: 21},
+      {id: 's4', ms: 29},
+      {id: 's5', ms: 37},
+      {id: 's6', ms: 45},
+      {id: 's7', ms: 53},
+    ];
+    let clock = 1000;
+    const recorder = startTimings({now: () => clock});
+    const release = new Map<string, () => void>();
+    const ended = new Map<string, Promise<void>>();
+    const loads = recorder.phase('loads', async () => {
       await Promise.all(
-        ids.map(
-          async (id, position) =>
-            await recorder.session(id, async () => {
-              await Bun.sleep(5 + position * 8);
-              if (id === 's7') await execTrue();
-            }),
-        ),
+        plan.map(async ({id}) => {
+          const load = recorder.session(id, async () => {
+            await new Promise<void>((resolve) => {
+              release.set(id, resolve);
+            });
+            if (id === 's7') await execTrue();
+          });
+          ended.set(id, load);
+          await load;
+        }),
       );
     });
+    // Every load has started and none has ended: all seven are open at once.
+    expect(release.size).toBe(plan.length);
+    // End each load at its fake duration, shortest first. The clock moves on
+    // only after that load has recorded its end.
+    const begun = clock;
+    for (const {id, ms} of [...plan].sort((a, b) => a.ms - b.ms)) {
+      clock = begun + ms;
+      release.get(id)?.();
+      await ended.get(id);
+    }
+    await loads;
     const timings = recorder.finish();
     expect(timings.sessionLoads).toBe(7);
     expect(timings.slowestSessions).toHaveLength(SLOWEST_SESSIONS);
@@ -138,9 +168,34 @@ describe('startTimings', () => {
       's4',
       's3',
     ]);
+    expect(timings.slowestSessions.map((s) => s.ms)).toEqual([
+      53, 45, 37, 29, 21,
+    ]);
+    expect(timings.phases[0]?.ms).toBe(53);
     expect(timings.slowestSessions[0]?.spawns).toEqual({true: 1});
     expect(timings.slowestSessions[1]?.spawns).toEqual({});
     expect(timings.phases[0]?.spawns).toEqual({true: 1});
+  });
+
+  // home-base-5frxo: the injected clock sets every time in the record; the
+  // event-loop lag probe stays on the real clock, since lag is real time.
+  test('an injected clock sets every recorded time; the event-loop lag stays real', async () => {
+    let clock = 500;
+    const recorder = startTimings({now: () => clock});
+    clock = 510;
+    const stop = recorder.start('marked');
+    clock = 540;
+    Bun.sleepSync(150);
+    stop();
+    await Bun.sleep(30);
+    clock = 600;
+    const timings = recorder.finish();
+    expect(timings.bootMs).toBe(500);
+    expect(
+      timings.phases.map((p) => ({ms: p.ms, name: p.name, startMs: p.startMs})),
+    ).toEqual([{ms: 30, name: 'marked', startMs: 10}]);
+    expect(timings.totalMs).toBe(100);
+    expect(timings.eventLoop.maxLagMs).toBeGreaterThanOrEqual(100);
   });
 
   test('a phase that throws still ends, and the error reaches the caller', async () => {

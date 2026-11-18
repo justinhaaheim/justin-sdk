@@ -54,9 +54,48 @@
  *    (read from the binary, 2026-11-18). The repo, not the checkout, because
  *    /resume may list the repo's own worktrees;
  *  - a cwd that cannot be read: any session (the guard before kwand.12).
+ *
+ * CLAUDE PROCESSES OUTSIDE ANY TAB (home-base-kwand.16). cmux keeps a closed
+ * pane's processes alive (scripts/CLAUDE.md, reap-orphaned-panes), and the
+ * pane join sees a Claude process only through a live tab's tty. So every
+ * process named `claude` (live-sessions.ts `isClaudeBinary`) whose tty no
+ * live tab reports, or that has no tty, is judged from the same ps read, in
+ * this order (`judgeOutside`):
+ *  - `claude bg-pty-host`: the terminal host of a background session; holds
+ *    none itself (its `bg-spare` worker is judged). A claude subcommand that
+ *    is not a session (`daemon`, `agents`, `mcp` …, live-sessions.ts
+ *    `isSessionProc`): holds none. Measured 2026-11-18: the measurement's own
+ *    `claude agents --json` shows up here, with no tty.
+ *  - it NAMES sessions: its argv (`--resume`, `-r`, `--session-id`), cmux's
+ *    hook store (`live.storedPids`) or `claude agents --json` (its pid; a
+ *    worker's host pid too) names them. Each one reads runningAgain, "it runs
+ *    outside any cmux tab (pid N)", never notRestored, and the process holds
+ *    no other session. Like live-sessions.ts, every id any source names counts
+ *    (after a /clear the argv id is the old one): that only keeps a session
+ *    from reading not restored.
+ *  - `claude -p` / `--print` with no -r, -c, --resume, --continue or
+ *    --session-id word: it runs a new session, so it holds none from before
+ *    the restart. Measured 2026-11-18 (scripts/measure-claude-outside-tabs.ts
+ *    --watch over 10:57): the hourly claude-usage-sample chore's `claude -p
+ *    /usage` ran with no tty for about 4 s (chores runs.jsonl: 4 to 30 s at
+ *    :57 each hour), named by no argv and no hook store entry, so without
+ *    this rule an inbox run in that window would bring back kwand.12's coarse
+ *    unknowns. The agents registry did list it, under its own new session.
+ *  - a `bg-spare` worker with no tty that `claude agents --json` (read) does
+ *    not list: the daemon's unclaimed spare, which holds none (live-sessions.ts
+ *    header). With the registry unread or unreadable it is judged below.
+ *  - anything else names no session, so it is held like an unmatched pane:
+ *    the sessions of the repo its cwd is in (`couldHold`), any session when
+ *    its cwd cannot be read. It keeps a session unknown only where its tab is
+ *    gone, as an unmatched pane does.
+ * `claude agents --json` is read only when a process is left unnamed by argv
+ * and the hook store, and lsof once for the panes and processes together. A
+ * failed ps read fails the pane lookup, so every session stays unknown
+ * (critical rule 7).
  */
 
 import type {CmuxRunner} from './cmux';
+import type {AgentEntry, AgentsRunner} from './live-sessions';
 import type {
   LiveSurface,
   PaneLookup,
@@ -78,7 +117,14 @@ import {execFile} from 'node:child_process';
 import {CMUX_TIMEOUT_MS, realCmuxRunner} from './cmux';
 import {cmuxSupportDir} from './cmux-session-file';
 import {primaryCheckoutOf} from './config';
-import {argvSessionId} from './live-sessions';
+import {
+  argvSessionId,
+  backgroundRole,
+  isClaudeBinary,
+  isSessionProc,
+  readAgents,
+  realAgentsRunner,
+} from './live-sessions';
 import {
   idleShellScreen,
   isClaudeProc,
@@ -129,6 +175,9 @@ export const BEFORE_RESTART_WORDS: Record<
   unknown: {emoji: '❔', title: 'unknown'},
 };
 
+/** kwand.16: how a runningAgain reason begins when the session runs outside any tab. */
+export const OUTSIDE_RUNNING = 'it runs outside any cmux tab';
+
 /** The tab a session was in before the restart. */
 export interface BeforeRestartTab {
   /** True when the record carried the session id forward (cmux had dropped it). */
@@ -158,8 +207,16 @@ export interface BeforeRestartFact {
 /** The whole answer for one run, or why there is none. */
 export type BeforeRestartRead =
   | {
+      /**
+       * kwand.16: why `claude agents --json` could not be read when a Claude
+       * process outside any tab needed it (that process is then judged by
+       * its cwd); null: read, or not needed.
+       */
+      agentsFailure: string | null;
       facts: Map<string, BeforeRestartFact>;
       ok: true;
+      /** kwand.16: each Claude process outside any live tab, and what it means here. */
+      outside: OutsideProcess[];
       restartAt: string;
       restartKind: 'boot' | 'cmux launch';
       /** Screens read for this answer, and how long they took. */
@@ -195,6 +252,27 @@ export interface UnplacedPaneHold {
   sessionsUnknown: number;
   /** The cmux surface ref, e.g. `surface:106`. */
   surface: string;
+}
+
+/** kwand.16: what one Claude process outside any live tab means (module comment). */
+export type OutsideVerdict =
+  /** It holds no session, and why. */
+  | {kind: 'ignored'; reason: string}
+  /** It names no session, so it could hold these (kwand.12's rules, by its cwd). */
+  | {hold: UnplacedHold; kind: 'held'}
+  /** argv, cmux's hook store or `claude agents --json` names what it runs (lowercased). */
+  | {kind: 'named'; sessionIds: string[]};
+
+/** kwand.16: one Claude process whose tty no live tab reports, or that has none. */
+export interface OutsideProcess {
+  pid: number;
+  /** Sessions of the before set it runs (`named` only; else 0). */
+  sessionsRunning: number;
+  /** Sessions of the before set it leaves unknown (`held` only; else 0). */
+  sessionsUnknown: number;
+  /** Its tty, which no live tab reports; null: it has none. */
+  tty: string | null;
+  verdict: OutsideVerdict;
 }
 
 /**
@@ -373,6 +451,51 @@ function screenSettles(entry: UnplacedPaneProcs): string | null {
 }
 
 /**
+ * kwand.12, pure: the repo each of `procs` works in, from cwds already read;
+ * or the `anything` hold that says why one could not be told (kwand.16 holds
+ * an outside process by the same rule).
+ */
+function reposOf(
+  procs: readonly Proc[],
+  cwds: SourceRead<Map<number, string>> | null,
+  primaryOf: (dir: string) => string,
+): {checkouts: string[]; ok: true} | {hold: UnplacedHold; ok: false} {
+  if (cwds == null) {
+    return {
+      hold: {
+        kind: 'anything',
+        reason: 'the working directory of its Claude process was not read',
+      },
+      ok: false,
+    };
+  }
+  if (!cwds.ok) {
+    return {
+      hold: {
+        kind: 'anything',
+        reason: `the working directory of its Claude process could not be read: ${cwds.reason}`,
+      },
+      ok: false,
+    };
+  }
+  const checkouts = new Set<string>();
+  for (const proc of procs) {
+    const cwd = cwds.value.get(proc.pid);
+    if (cwd == null) {
+      return {
+        hold: {
+          kind: 'anything',
+          reason: `lsof did not list the working directory of its Claude process (pid ${proc.pid})`,
+        },
+        ok: false,
+      };
+    }
+    checkouts.add(primaryOf(cwd));
+  }
+  return {checkouts: [...checkouts].sort(), ok: true};
+}
+
+/**
  * kwand.12, pure but for `cwds` already read: what each unmatched pane could
  * hold (module comment). `beforeIdsByTab` gives the before record's session
  * for a tab id, so a pane in a tab that held a session names it.
@@ -402,29 +525,8 @@ function paneHolds(
     if (procs.length === 0) {
       return {kind: 'matched', sessionIds: [...new Set(matchedIds)].sort()};
     }
-    if (cwds == null) {
-      return {
-        kind: 'anything',
-        reason: 'the working directory of its Claude process was not read',
-      };
-    }
-    if (!cwds.ok) {
-      return {
-        kind: 'anything',
-        reason: `the working directory of its Claude process could not be read: ${cwds.reason}`,
-      };
-    }
-    const checkouts = new Set<string>();
-    for (const proc of procs) {
-      const cwd = cwds.value.get(proc.pid);
-      if (cwd == null) {
-        return {
-          kind: 'anything',
-          reason: `lsof did not list the working directory of its Claude process (pid ${proc.pid})`,
-        };
-      }
-      checkouts.add(primaryOf(cwd));
-    }
+    const repos = reposOf(procs, cwds, primaryOf);
+    if (!repos.ok) return repos.hold;
     const ids = new Set<string>(matchedIds);
     for (const id of [
       pane.screenSessionId,
@@ -437,11 +539,121 @@ function paneHolds(
       if (id != null) ids.add(id.toLowerCase());
     }
     return {
-      checkouts: [...checkouts].sort(),
+      checkouts: repos.checkouts,
       kind: 'checkouts',
       sessionIds: [...ids].sort(),
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// kwand.16: Claude processes outside any live tab (module comment)
+// ---------------------------------------------------------------------------
+
+/** Every process named `claude` whose tty no live tab reports, or that has none. Pure. */
+function outsideProcs(live: {procs: Proc[]; surfaces: LiveSurface[]}): Proc[] {
+  const tabTtys = new Set<string>();
+  for (const surface of live.surfaces) {
+    const tty = normalizeTty(surface.tty);
+    if (tty != null) tabTtys.add(tty);
+  }
+  return live.procs.filter((proc) => {
+    if (!isClaudeBinary(proc)) return false;
+    const tty = normalizeTty(proc.tty);
+    return tty == null || !tabTtys.has(tty);
+  });
+}
+
+/** A command line's words, split on whitespace. Pure. */
+function argvWords(command: string): string[] {
+  return command.split(/\s+/u);
+}
+
+/** `claude -p` / `--print` (kwand.16). Pure. */
+export function printsOnly(command: string): boolean {
+  return argvWords(command).some((word) => word === '-p' || word === '--print');
+}
+
+/**
+ * A flag that resumes or continues a session (-r, -c, --resume, --continue,
+ * --session-id, with or without `=`): such a `claude -p` may hold an older
+ * session. Pure.
+ */
+export function resumesASession(command: string): boolean {
+  return argvWords(command).some((word) =>
+    /^(?:-r|-c|--resume|--continue|--session-id)(?:=|$)/u.test(word),
+  );
+}
+
+/** The registry read, or null when it was not read. */
+type AgentsRead =
+  | {entries: AgentEntry[]; ok: true}
+  | {ok: false; reason: string}
+  | null;
+
+/** An entry of the registry for this process: its pid, or a worker's host (live-sessions.ts). */
+function agentEntriesOf(proc: Proc, agents: AgentsRead): AgentEntry[] {
+  if (agents?.ok !== true) return [];
+  const worker = backgroundRole(proc) === 'worker';
+  return agents.entries.filter(
+    (entry) => entry.pid === proc.pid || (worker && entry.pid === proc.ppid),
+  );
+}
+
+/** One outside process before its cwd is read: named, ignored, or unnamed (to hold). */
+type OutsideStep =
+  | {kind: 'unnamed'}
+  | Extract<OutsideVerdict, {kind: 'ignored'} | {kind: 'named'}>;
+
+/** kwand.16, pure: what one outside process is, in the module comment's order. */
+function judgeOutside(
+  proc: Proc,
+  storedPids: ReadonlyMap<number, readonly string[]>,
+  agents: AgentsRead,
+): OutsideStep {
+  const role = backgroundRole(proc);
+  if (role === 'host') {
+    return {
+      kind: 'ignored',
+      reason:
+        'the terminal host of a background session (claude bg-pty-host); its worker is judged instead',
+    };
+  }
+  if (role == null && !isSessionProc(proc)) {
+    return {
+      kind: 'ignored',
+      reason:
+        'a claude subcommand that is not a session (daemon, agents, mcp and the like)',
+    };
+  }
+  const named = new Set<string>();
+  const argv = argvSessionId(proc.command);
+  if (argv != null) named.add(argv);
+  for (const id of storedPids.get(proc.pid) ?? []) named.add(id.toLowerCase());
+  for (const entry of agentEntriesOf(proc, agents)) {
+    if (entry.sessionId != null) named.add(entry.sessionId);
+  }
+  if (named.size > 0) return {kind: 'named', sessionIds: [...named].sort()};
+  if (printsOnly(proc.command) && !resumesASession(proc.command)) {
+    return {
+      kind: 'ignored',
+      reason:
+        'claude -p with no session flag runs a new session, so it holds none from before the restart',
+    };
+  }
+  if (
+    role === 'worker' &&
+    normalizeTty(proc.tty) == null &&
+    agents?.ok === true &&
+    agentEntriesOf(proc, agents).length === 0
+  ) {
+    return {
+      kind: 'ignored',
+      reason:
+        "the daemon's unclaimed background spare (no terminal, and claude agents --json does not list it)",
+    };
+  }
+  return {kind: 'unnamed'};
 }
 
 /** `a` is `b` or a directory above it. Pure. */
@@ -493,37 +705,98 @@ function holdWords(surface: string, hold: UnplacedHold): string {
   }
 }
 
-/** The unmatched panes with their holds, as `firstPass` reads them. */
+/**
+ * One thing that could hold a session whose tab is gone: an unmatched pane
+ * (kwand.12) or a Claude process outside any tab that names no session
+ * (kwand.16).
+ */
+interface Holder {
+  hold: UnplacedHold;
+  /** How a reason names it: the surface ref, or `pid <n>`. */
+  label: string;
+  /** The unmatched pane's surface ref; null for a process outside any tab. */
+  surfaceRef: string | null;
+}
+
+/** kwand.16: one outside process, judged; `holder` indexes `Unmatched.holders` when held. */
+interface OutsideJudged {
+  holder: number | null;
+  proc: Proc;
+  verdict: OutsideVerdict;
+}
+
+/** The unmatched panes and outside processes with their holds, as `firstPass` reads them. */
 interface Unmatched {
-  holds: UnplacedHold[];
+  /** kwand.16: why the agents registry could not be read when needed; else null. */
+  agentsFailure: string | null;
+  /** The panes' holders first, in `panes` order, then the held outside processes'. */
+  holders: Holder[];
+  /** kwand.16: every Claude process outside any live tab. */
+  outside: OutsideJudged[];
+  /** kwand.16: each session (lowercased) an outside process names, and those pids. */
+  outsideNamed: Map<string, number[]>;
   panes: UnplacedPaneProcs[];
   primaryOf: (dir: string) => string;
 }
 
-/** The panes among `unmatched` that could hold this session, as indices. */
+/** The holders among `unmatched` that could hold this session, as indices. */
 function holdersOf(
   unmatched: Unmatched,
   sessionId: string,
   directory: string | null,
 ): number[] {
   const primary = directory == null ? null : unmatched.primaryOf(directory);
-  return unmatched.holds.flatMap((hold, index) =>
-    couldHold(hold, sessionId, primary) ? [index] : [],
+  return unmatched.holders.flatMap((holder, index) =>
+    couldHold(holder.hold, sessionId, primary) ? [index] : [],
   );
 }
 
 function holdersReason(unmatched: Unmatched, holders: number[]): string {
-  const words = holders.map((index) =>
-    holdWords(
-      unmatched.panes[index]?.pane.surface.ref ?? '?',
-      unmatched.holds[index] ?? {kind: 'anything', reason: '?'},
-    ),
-  );
+  const words = holders.map((index) => {
+    const holder = unmatched.holders[index];
+    return holder == null ? '?' : holdWords(holder.label, holder.hold);
+  });
   return words.join('; ');
 }
 
+/** "a live Claude pane …", "2 Claude processes outside any cmux tab …", or both. */
+function holdersNoun(panes: number, procs: number): string {
+  const parts: string[] = [];
+  if (panes > 0) {
+    parts.push(
+      `${panes === 1 ? 'a live Claude pane' : `${panes} live Claude panes`} the tools could not match to a session`,
+    );
+  }
+  if (procs > 0) {
+    parts.push(
+      procs === 1
+        ? 'a Claude process outside any cmux tab that names no session'
+        : `${procs} Claude processes outside any cmux tab that name no session`,
+    );
+  }
+  return parts.join(' and ');
+}
+
+/** Why none of the holders can hold a not-restored session, in brackets; '' with none. */
+function noHolderWords(panes: number, procs: number): string {
+  if (panes + procs === 0) return '';
+  const paneWords = `live Claude ${panes === 1 ? 'pane' : 'panes'} the tools could not match to a session`;
+  const procWords = `Claude ${procs === 1 ? 'process' : 'processes'} outside any cmux tab that ${procs === 1 ? 'names' : 'name'} no session`;
+  if (procs === 0) {
+    return panes === 1
+      ? ` (the one ${paneWords} cannot hold it)`
+      : ` (none of the ${panes} ${paneWords} can hold it)`;
+  }
+  if (panes === 0) {
+    return procs === 1
+      ? ` (the one ${procWords} cannot hold it)`
+      : ` (none of the ${procs} ${procWords} can hold it)`;
+  }
+  return ` (none of the ${panes} ${paneWords} and the ${procs} ${procWords} can hold it)`;
+}
+
 type Verdict = {
-  /** kwand.12: the unmatched panes (indices) that leave it unknown. */
+  /** kwand.12: the holders (indices into `Unmatched.holders`) that leave it unknown. */
   heldBy?: number[];
   reason: string;
   state: BeforeRestartState;
@@ -556,6 +829,14 @@ function firstPass(
       state: 'runningAgain',
     };
   }
+  // kwand.16: a Claude process outside any live tab names it, so it runs.
+  const outsidePids = unmatched.outsideNamed.get(sessionId.toLowerCase());
+  if (outsidePids != null) {
+    return {
+      reason: `${OUTSIDE_RUNNING} (${outsidePids.length === 1 ? 'pid' : 'pids'} ${outsidePids.join(', ')})`,
+      state: 'runningAgain',
+    };
+  }
   const unsettled = panes.statusLine.unknownSessions.get(sessionId);
   if (unsettled != null) return {reason: unsettled, state: 'unknown'};
   if (live == null) {
@@ -566,22 +847,22 @@ function firstPass(
   }
   const surface = live.surfaceById.get(tab.id);
   if (surface == null) {
-    // kwand.12: only the unmatched panes that could hold it keep it unknown.
+    // kwand.12: only the unmatched panes that could hold it keep it unknown;
+    // kwand.16: and the outside processes that name no session.
     const holders = holdersOf(unmatched, sessionId, entry.directory);
     if (holders.length > 0) {
-      const count = holders.length;
+      const paneCount = holders.filter(
+        (index) => unmatched.holders[index]?.surfaceRef != null,
+      ).length;
       return {
         heldBy: holders,
-        reason: `its tab is gone, and ${count === 1 ? 'a live Claude pane' : `${count} live Claude panes`} the tools could not match to a session could hold it (${holdersReason(unmatched, holders)}), so it may run there`,
+        reason: `its tab is gone, and ${holdersNoun(paneCount, holders.length - paneCount)} could hold it (${holdersReason(unmatched, holders)}), so it may run there`,
         state: 'unknown',
       };
     }
-    const others = unmatched.panes.length;
+    const panesCount = unmatched.panes.length;
     return {
-      reason:
-        others === 0
-          ? 'its tab is gone and it does not run'
-          : `its tab is gone and it does not run (${others === 1 ? 'the one live Claude pane the tools could not match to a session cannot' : `none of the ${others} live Claude panes the tools could not match to a session can`} hold it)`,
+      reason: `its tab is gone and it does not run${noHolderWords(panesCount, unmatched.holders.length - panesCount)}`,
       state: 'notRestored',
     };
   }
@@ -597,10 +878,10 @@ function firstPass(
   const shared = (live.surfacesPerTty.get(tty) ?? 0) > 1;
   // kwand.12: its own tab is an unmatched Claude pane that could hold it, so
   // "another session" would be a guess.
-  const ownPane = unmatched.panes.findIndex(
-    (candidate) => candidate.pane.surface.ref === surface.ref,
+  const ownPane = unmatched.holders.findIndex(
+    (candidate) => candidate.surfaceRef === surface.ref,
   );
-  const ownHold = unmatched.holds[ownPane];
+  const ownHold = unmatched.holders[ownPane]?.hold;
   if (
     ownHold != null &&
     couldHold(
@@ -686,30 +967,58 @@ async function mapLimited<T, R>(
 }
 
 /**
- * kwand.12: the unmatched panes and what each could hold. lsof runs only when
- * a pane's status line does not settle it; a failed lookup has no panes.
+ * kwand.12: the unmatched panes and what each could hold; kwand.16: the
+ * Claude processes outside any live tab, judged. lsof runs once, only for a
+ * pane its status line does not settle and an outside process that names no
+ * session; the agents registry only when argv and the hook store leave an
+ * outside process unnamed. A failed lookup has neither.
  */
-async function unmatchedPanes(
+async function unmatchedHolders(
   tabs: readonly TabOfSession[],
   panes: PaneLookup,
-  cwdReader: CwdReader | null,
+  readers: {agents: AgentsRunner | null; cwds: CwdReader | null},
   primaryOf: (dir: string) => string,
 ): Promise<Unmatched> {
-  if (!panes.ok) return {holds: [], panes: [], primaryOf};
+  if (!panes.ok) {
+    return {
+      agentsFailure: null,
+      holders: [],
+      outside: [],
+      outsideNamed: new Map(),
+      panes: [],
+      primaryOf,
+    };
+  }
   const entries = unplacedWithProcs(
     panes.statusLine.unplaced,
     panes.live ?? null,
   );
   const placedPids = panes.live?.placedPids ?? new Map<number, string>();
+  // kwand.16: the outside processes, judged without the registry first.
+  const outsideList = panes.live == null ? [] : outsideProcs(panes.live);
+  const storedPids =
+    panes.live?.storedPids ?? new Map<number, readonly string[]>();
+  let steps = outsideList.map((proc) => judgeOutside(proc, storedPids, null));
+  let agentsFailure: string | null = null;
+  if (readers.agents != null && steps.some((step) => step.kind === 'unnamed')) {
+    const agents = await readAgents(readers.agents);
+    if (!agents.ok) agentsFailure = agents.reason;
+    steps = outsideList.map((proc) => judgeOutside(proc, storedPids, agents));
+  }
+  const unnamed = outsideList.filter(
+    (_, index) => steps[index]?.kind === 'unnamed',
+  );
   const pids = [
-    ...new Set(
-      entries.flatMap((entry) =>
+    ...new Set([
+      ...entries.flatMap((entry) =>
         screenSettles(entry) == null
           ? unmatchedProcs(entry, placedPids).map((proc) => proc.pid)
           : [],
       ),
-    ),
+      ...unnamed.map((proc) => proc.pid),
+    ]),
   ];
+  const cwdReader = readers.cwds;
   let cwds: SourceRead<Map<number, string>> | null = null;
   if (pids.length > 0 && cwdReader != null) {
     try {
@@ -728,8 +1037,40 @@ async function unmatchedPanes(
       entry.sessionId,
     ]);
   }
+  const paneHoldList = paneHolds(
+    entries,
+    cwds,
+    beforeIdsByTab,
+    placedPids,
+    primaryOf,
+  );
+  const holders: Holder[] = entries.map((entry, index) => ({
+    hold: paneHoldList[index] ?? {kind: 'anything', reason: 'no hold computed'},
+    label: entry.pane.surface.ref,
+    surfaceRef: entry.pane.surface.ref,
+  }));
+  const outside = outsideList.map((proc, index): OutsideJudged => {
+    const step = steps[index] ?? {kind: 'unnamed'};
+    if (step.kind !== 'unnamed') return {holder: null, proc, verdict: step};
+    const repos = reposOf([proc], cwds, primaryOf);
+    const hold: UnplacedHold = repos.ok
+      ? {checkouts: repos.checkouts, kind: 'checkouts', sessionIds: []}
+      : repos.hold;
+    holders.push({hold, label: `pid ${proc.pid}`, surfaceRef: null});
+    return {holder: holders.length - 1, proc, verdict: {hold, kind: 'held'}};
+  });
+  const outsideNamed = new Map<string, number[]>();
+  for (const entry of outside) {
+    if (entry.verdict.kind !== 'named') continue;
+    for (const id of entry.verdict.sessionIds) {
+      outsideNamed.set(id, [...(outsideNamed.get(id) ?? []), entry.proc.pid]);
+    }
+  }
   return {
-    holds: paneHolds(entries, cwds, beforeIdsByTab, placedPids, primaryOf),
+    agentsFailure,
+    holders,
+    outside,
+    outsideNamed,
     panes: entries,
     primaryOf,
   };
@@ -740,11 +1081,19 @@ async function unmatchedPanes(
  * leaves open; writes nothing.
  */
 export async function beforeRestartStates(input: {
+  /**
+   * kwand.16: `claude agents --json`, read only when a Claude process outside
+   * any tab is left unnamed by argv and the hook store. Absent (a test's
+   * default): not read, so such a process is held by its cwd.
+   */
+  agents?: AgentsRunner;
   before: BeforeRestart;
   cmux: CmuxRunner;
   /**
-   * kwand.12: the cwd of each unmatched pane's Claude process. Absent (a
-   * test's default): such a pane could hold any session, the guard before.
+   * kwand.12: the cwd of each unmatched pane's Claude process (kwand.16: and
+   * of each outside process that names no session). Absent (a test's
+   * default): such a pane or process could hold any session, the guard
+   * before.
    */
   cwds?: CwdReader;
   now?: () => number;
@@ -757,10 +1106,10 @@ export async function beforeRestartStates(input: {
   const clock = input.now ?? Date.now;
   const {tabs} = tabsOfSessions(before);
   const live = panes.ok && panes.live != null ? liveTabsOf(panes.live) : null;
-  const unmatched = await unmatchedPanes(
+  const unmatched = await unmatchedHolders(
     tabs,
     panes,
-    input.cwds ?? null,
+    {agents: input.agents ?? null, cwds: input.cwds ?? null},
     input.primaryOf ?? primaryCheckoutOf,
   );
   const firsts = tabs.map((entry) => firstPass(entry, panes, live, unmatched));
@@ -808,17 +1157,30 @@ export async function beforeRestartStates(input: {
       heldBy.set(entry.sessionId, verdict.heldBy ?? []);
     }
   }
-  // Per pane, the sessions it leaves unknown in the final answer.
-  const unknownPerPane = unmatched.panes.map(() => 0);
+  // Per holder (pane or outside process), the sessions it leaves unknown in
+  // the final answer.
+  const unknownPerHolder = unmatched.holders.map(() => 0);
   for (const [sessionId, fact] of facts) {
     if (fact.state !== 'unknown') continue;
     for (const index of heldBy.get(sessionId) ?? []) {
-      unknownPerPane[index] = (unknownPerPane[index] ?? 0) + 1;
+      unknownPerHolder[index] = (unknownPerHolder[index] ?? 0) + 1;
     }
   }
+  const beforeIds = new Set([...facts.keys()].map((id) => id.toLowerCase()));
   return {
+    agentsFailure: unmatched.agentsFailure,
     facts,
     ok: true,
+    outside: unmatched.outside.map(({holder, proc, verdict}) => ({
+      pid: proc.pid,
+      sessionsRunning:
+        verdict.kind === 'named'
+          ? verdict.sessionIds.filter((id) => beforeIds.has(id)).length
+          : 0,
+      sessionsUnknown: holder == null ? 0 : (unknownPerHolder[holder] ?? 0),
+      tty: normalizeTty(proc.tty),
+      verdict,
+    })),
     restartAt,
     restartKind: before.restart.kind,
     screens: {
@@ -829,12 +1191,12 @@ export async function beforeRestartStates(input: {
     source,
     tabsWithSession: tabs.length,
     unplaced: unmatched.panes.map((entry, index) => ({
-      hold: unmatched.holds[index] ?? {
+      hold: unmatched.holders[index]?.hold ?? {
         kind: 'anything' as const,
         reason: 'no hold computed',
       },
       kind: entry.pane.kind,
-      sessionsUnknown: unknownPerPane[index] ?? 0,
+      sessionsUnknown: unknownPerHolder[index] ?? 0,
       surface: entry.pane.surface.ref,
     })),
   };
@@ -871,6 +1233,7 @@ export function realBeforeRestartReader(
       };
     }
     return await beforeRestartStates({
+      agents: realAgentsRunner(env),
       before,
       cmux: realCmuxRunner(CMUX_TIMEOUT_MS, env),
       cwds: realCwdReader(),
@@ -902,6 +1265,9 @@ export function beforeRestartLine(fact: BeforeRestartFact, now: Date): string {
       ? `unknown (${fact.reason})`
       : fact.state === 'runningAgain' && fact.reason.includes('another tab')
         ? 'running again, in another tab'
-        : words.title;
+        : fact.state === 'runningAgain' &&
+            fact.reason.startsWith(OUTSIDE_RUNNING)
+          ? 'running again, outside any cmux tab'
+          : words.title;
   return `🔁 was open before the ${restartWhen(fact.restartAt, now)} restart: ${detail}`;
 }

@@ -1321,6 +1321,14 @@ export type PaneLookup =
          */
         placedPids?: ReadonlyMap<number, string>;
         procs: Proc[];
+        /**
+         * home-base-kwand.16: every pid the hook store records, with each
+         * session it records for that pid (lowercased), as read: whether the
+         * pid is a live Claude process is the reader's check against `procs`.
+         * A Claude process outside any live tab is named by it. Absent: not
+         * read.
+         */
+        storedPids?: ReadonlyMap<number, readonly string[]>;
         surfaces: LiveSurface[];
       };
       ok: true;
@@ -1516,9 +1524,23 @@ export async function lookupPanes(sources: PaneSources): Promise<PaneLookup> {
       placedPids.set(session.pid, session.sessionId);
     }
   }
+  // kwand.16: the store's sessions by pid, whatever tty the pid is on (the
+  // pid join above sees only pids on a live tab's tty).
+  const storedPids = new Map<number, string[]>();
+  for (const [key, stored] of Object.entries(store.value.sessions ?? {})) {
+    if (stored.pid == null) continue;
+    const id = (stored.sessionId ?? key).toLowerCase();
+    const known = storedPids.get(stored.pid) ?? [];
+    if (!known.includes(id)) storedPids.set(stored.pid, [...known, id]);
+  }
   return {
     bySession,
-    live: {placedPids, procs: procs.value, surfaces: surfaces.value},
+    live: {
+      placedPids,
+      procs: procs.value,
+      storedPids,
+      surfaces: surfaces.value,
+    },
     ok: true,
     statusLine: {
       failure:

@@ -58,6 +58,7 @@ import type {
   BeforeRestartRead,
   BeforeRestartReader,
   BeforeRestartState,
+  OutsideProcess,
   UnplacedPaneHold,
 } from './before-restart-state';
 import type {UnfinishedSort} from './chain-fold';
@@ -350,10 +351,15 @@ export function beforeRestartJson(read: InboxRead) {
   if (!answer.ok) return {ok: false as const, reason: answer.reason};
   const groups = beforeRestartGroups(read);
   return {
+    // kwand.16: why claude agents --json could not be read, when needed.
+    agentsFailure: answer.agentsFailure,
     counts: Object.fromEntries(
       groups.map((group) => [group.state, group.entries.length]),
     ) as Partial<Record<BeforeRestartState, number>>,
     ok: true as const,
+    // kwand.16: each Claude process outside any live tab, and what it names
+    // or could hold.
+    outside: answer.outside,
     restartAt: answer.restartAt,
     restartKind: answer.restartKind,
     screens: answer.screens,
@@ -374,6 +380,34 @@ export function beforeRestartJson(read: InboxRead) {
     // hold, and how many of these sessions it leaves unknown.
     unplaced: answer.unplaced,
   };
+}
+
+/**
+ * kwand.16: one Claude process outside any live tab as the text inbox names
+ * it, or null when it bears on no session of the before set (ignored, or
+ * named sessions all outside it).
+ */
+function outsideProcessWords(proc: OutsideProcess): string | null {
+  const where =
+    proc.tty == null
+      ? 'on no terminal'
+      : `on ${proc.tty}, which no cmux tab reports`;
+  switch (proc.verdict.kind) {
+    case 'ignored':
+      return null;
+    case 'named': {
+      if (proc.sessionsRunning === 0) return null;
+      const ids = proc.verdict.sessionIds;
+      return `pid ${proc.pid} (${where}) runs ${ids.length === 1 ? 'session' : 'sessions'} ${ids.join(' and ')}, so ${proc.sessionsRunning === 1 ? 'that session reads' : `${proc.sessionsRunning} sessions read`} running again`;
+    }
+    case 'held': {
+      const unknown = `${proc.sessionsUnknown} ${proc.sessionsUnknown === 1 ? 'session' : 'sessions'} left unknown`;
+      const {hold} = proc.verdict;
+      return hold.kind === 'checkouts'
+        ? `pid ${proc.pid} (${where}) names no session and runs Claude in ${hold.checkouts.map((dir) => tildeText(dir)).join(' and ')}, so it could hold a session of that repo (${unknown})`
+        : `pid ${proc.pid} (${where}) names no session and could hold any: ${hold.kind === 'anything' ? tildeText(hold.reason) : 'no reason recorded'} (${unknown})`;
+    }
+  }
 }
 
 /** kwand.12: one unmatched pane as the text inbox names it. */
@@ -2256,6 +2290,21 @@ export function renderBeforeRestartInbox(
       label: 'unmatched Claude pane',
       value: unplacedPaneWords(pane),
     })),
+    // kwand.16: Claude processes outside any tab that bear on this set.
+    ...answer.outside.flatMap((proc) => {
+      const value = outsideProcessWords(proc);
+      return value == null
+        ? []
+        : [{label: 'Claude process outside any tab', value}];
+    }),
+    ...(answer.agentsFailure == null
+      ? []
+      : [
+          {
+            label: 'claude agents --json',
+            value: `could not be read (${tildeText(answer.agentsFailure)}), so a Claude process outside any tab that names no session was judged by its directory`,
+          },
+        ]),
   ];
   blocks.push(
     style.color

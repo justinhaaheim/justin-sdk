@@ -172,6 +172,23 @@ describe('lookupPanes (D6): one map of live panes, or why there is none', () => 
     });
   });
 
+  // home-base-kwand.16. NEGATIVE CONTROL run 2026-11-18: lookupPanes leaving
+  // storedPids out of `live` -> this test failed (received an empty list).
+  test('live.storedPids names every stored pid, a pid on no surface too (kwand.16)', async () => {
+    const lookup = await lookupPanes({
+      cmux: fakeCmux(JSON.stringify(TREE)),
+      hookStorePath: storePath,
+      ps: okPs,
+      sessionFilePath,
+    });
+    if (!lookup.ok) throw new Error(lookup.reason);
+    expect([...(lookup.live?.storedPids ?? new Map())].sort()).toEqual([
+      [101, [LIVE]],
+      [202, [GONE]],
+      [303, [NO_SURFACE]],
+    ]);
+  });
+
   test('a cmux runner failure is {ok: false, reason}, never an empty map (rule 7)', async () => {
     const failing: CmuxRunner = () =>
       Promise.resolve({
