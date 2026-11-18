@@ -1894,6 +1894,12 @@ export function renderOpen(
 export interface OpenOptions {
   /** What was typed after `thread open`, for the record. */
   argv: string[];
+  /**
+   * home-base-kwand.11, `--close-tabs` (with --undo only; default off): close
+   * the tabs a --restore-failed run opened in old workspaces, through thread
+   * close --tab's checks, instead of naming them for closing by hand.
+   */
+  closeTabs?: boolean;
   /** `--no-color` makes this false: no workspace is coloured (default true). */
   color?: boolean;
   cwd?: string;
@@ -2524,6 +2530,13 @@ export async function runThreadOpen(options: OpenOptions): Promise<number> {
     const {runRestoreFailed} = await import('./open-restore-failed');
     return await runRestoreFailed(options);
   }
+  // home-base-kwand.11: --close-tabs only changes what --undo does.
+  if (options.closeTabs === true && !options.undo) {
+    console.error(
+      'thread open: refused: --close-tabs only goes with --undo (it closes the tabs a --restore-failed run opened in old workspaces)',
+    );
+    return 2;
+  }
   // yukaf.22 item 6: --list reads the records only (no cmux, no ps).
   if (options.list === true) {
     if (options.undo || options.run != null) {
@@ -2539,6 +2552,7 @@ export async function runThreadOpen(options: OpenOptions): Promise<number> {
     // A dynamic import: open-undo imports this module, never the other way.
     const {runThreadUndo} = await import('./open-undo');
     return await runThreadUndo({
+      ...(options.closeTabs === true ? {closeTabs: true} : {}),
       dryRun: options.dryRun,
       json: options.json,
       run: options.run,

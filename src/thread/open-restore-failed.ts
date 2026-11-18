@@ -758,6 +758,7 @@ function refuse(text: string): RestoreFailedResult {
 function conflictingFlags(options: OpenOptions): string[] {
   return [
     options.undo ? '--undo' : null,
+    options.closeTabs === true ? '--close-tabs' : null,
     options.run == null ? null : '--run',
     options.list === true ? '--list' : null,
     options.includeOpen === true ? '--include-open' : null,

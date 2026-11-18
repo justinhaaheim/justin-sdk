@@ -1196,9 +1196,13 @@ async function assessTab(
   };
   if (base.kind === 'kept' || reasons.length > 0) {
     return {
+      // home-base-kwand.11: carried for withUnseenPaneKeeps, which only
+      // `thread open --undo --close-tabs` applies to a tab; --tab ignores them.
+      ...(base.blankPanes == null ? {} : {blankPanes: base.blankPanes}),
       drafts: base.kind === 'kept' ? base.drafts : [],
       entry,
       kind: 'kept',
+      ...(base.noProcessTty == null ? {} : {noProcessTty: base.noProcessTty}),
       reasons,
     };
   }
@@ -1317,7 +1321,7 @@ function claudeWords(pid: number | null, done: boolean): string {
 }
 
 /** home-base-kwand.13 fix 3: a failed close says whether its Claude was stopped. */
-function failedClaudeWords(entry: CloseFailed): string {
+export function failedClaudeWords(entry: CloseFailed): string {
   const where = entry.tab == null || entry.tab.onlyTab ? 'workspace' : 'tab';
   // home-base-kwand.20 item 3: sent SIGTERM, still running after the wait.
   if (entry.claudeStopped && entry.step === 'wait-exit') {
@@ -1746,6 +1750,13 @@ function unreadAgain(
  * closes it; one outcome line follows. Mutates `state`.
  */
 async function closePlanned(input: {
+  /**
+   * home-base-kwand.11: run after each target's outcome line, to rewrite the
+   * caller's own record (`thread open --undo`): null when written, else the
+   * failure in words, which stops the run like a failed outcome line.
+   * Absent for thread close's own paths, which are unchanged.
+   */
+  afterEach?: () => string | null;
   closable: Closable[];
   full: CloseDeps;
   logPath: string;
@@ -1865,7 +1876,70 @@ async function closePlanned(input: {
       }
       break;
     }
+    const after = input.afterEach?.() ?? null;
+    if (after != null) {
+      state.failures.push(after);
+      for (const rest of closable.slice(index + 1)) {
+        state.kept.push({
+          ...rest.entry,
+          drafts: [],
+          reasonKinds: ['notChecked'],
+          reasons: [
+            'not attempted: the run stopped when its record could not be rewritten',
+          ],
+        });
+      }
+      break;
+    }
   }
+}
+
+/**
+ * `--tab`'s stop-and-close of one proven tab (D3, D4), ONE implementation for
+ * thread close --tab and `thread open --undo --close-tabs` (home-base-kwand.11):
+ * SIGTERM-wait, then `close-surface` with both ids, or today's
+ * `close-workspace` when the tab is its workspace's only one (D4).
+ */
+async function stopAndCloseTab(
+  assessment: Closable,
+  full: CloseDeps,
+): Promise<StopAndCloseFailure | StopAndCloseSurfaceFailure | null> {
+  const entry = assessment.entry;
+  const stop = {
+    commandOf: full.commandOf,
+    exitTimeoutMs: full.exitTimeoutMs,
+    kill: full.kill,
+    nowMs: full.nowMs,
+    sleep: full.sleep,
+  };
+  if (entry.tab?.onlyTab === true) {
+    // D4: the only tab, so today's whole-workspace close.
+    return await stopThenCloseWorkspace(assessment.claude, {
+      ...stop,
+      closeWorkspace: async () => {
+        const closed = await full.run([
+          'close-workspace',
+          '--workspace',
+          entry.workspaceId,
+          '--window',
+          entry.windowId,
+        ]);
+        return closed.kind === 'failed' ? closed.reason : null;
+      },
+    });
+  }
+  const ids = closeSurfaceArgs(entry.tab?.surfaceId, entry.workspaceId);
+  if (ids.kind === 'refused') {
+    // Unreachable after reassess; never signal without a close to follow.
+    return {reason: ids.reason, step: 'verify'};
+  }
+  return await stopThenCloseSurface(assessment.claude, {
+    ...stop,
+    closeSurface: async () => {
+      const closed = await full.run(ids.args);
+      return closed.kind === 'failed' ? closed.reason : null;
+    },
+  });
 }
 
 /**
@@ -2049,44 +2123,7 @@ async function closeTabs(input: {
     },
     startedAt,
     state,
-    stopAndClose: async (assessment) => {
-      const entry = assessment.entry;
-      const stop = {
-        commandOf: full.commandOf,
-        exitTimeoutMs: full.exitTimeoutMs,
-        kill: full.kill,
-        nowMs: full.nowMs,
-        sleep: full.sleep,
-      };
-      if (entry.tab?.onlyTab === true) {
-        // D4: the only tab, so today's whole-workspace close.
-        return await stopThenCloseWorkspace(assessment.claude, {
-          ...stop,
-          closeWorkspace: async () => {
-            const closed = await full.run([
-              'close-workspace',
-              '--workspace',
-              entry.workspaceId,
-              '--window',
-              entry.windowId,
-            ]);
-            return closed.kind === 'failed' ? closed.reason : null;
-          },
-        });
-      }
-      const ids = closeSurfaceArgs(entry.tab?.surfaceId, entry.workspaceId);
-      if (ids.kind === 'refused') {
-        // Unreachable after reassess; never signal without a close to follow.
-        return {reason: ids.reason, step: 'verify'};
-      }
-      return await stopThenCloseSurface(assessment.claude, {
-        ...stop,
-        closeSurface: async () => {
-          const closed = await full.run(ids.args);
-          return closed.kind === 'failed' ? closed.reason : null;
-        },
-      });
-    },
+    stopAndClose: async (assessment) => await stopAndCloseTab(assessment, full),
     windowNote: async (entry) =>
       entry.tab?.onlyTab === true
         ? await windowNoteAfterClose(entry, full)
@@ -2096,6 +2133,452 @@ async function closeTabs(input: {
   return finish(
     state.failures.length === 0 && state.failed.length === 0 ? 0 : 1,
   );
+}
+
+// ---------------------------------------------------------------------------
+// thread open --undo --close-tabs (home-base-kwand.11): the tabs one run of
+// thread open --restore-failed opened in old workspaces, closed through
+// --tab's pipeline above (resolveTab, assessTab, closePlanned, stopAndCloseTab)
+// ---------------------------------------------------------------------------
+
+/** One tab `thread open --restore-failed` opened in an old workspace, as its record names it. */
+export interface RecordedTab {
+  name: string;
+  /** The session the run resumed in it. */
+  sessionId: string;
+  /** The new tab's surface uuid, as the run read it. */
+  surfaceId: string;
+  /** The old workspace the run opened it in. */
+  workspaceId: string;
+}
+
+/** A recorded tab kept before --tab's checks could run, and why. */
+export interface RecordedTabUnproven {
+  drafts: UndoDraft[];
+  reasons: string[];
+  tab: RecordedTab;
+}
+
+export interface RecordedTabsResult {
+  /**
+   * Kept and named for closing by hand: the only tab of its workspace now,
+   * in the first pass or the re-check right before its turn (home-base-kwand.31
+   * F3). One found at the re-check is in `state.kept` too: list it here only.
+   */
+  byHand: {reason: string; tab: RecordedTab}[];
+  /**
+   * No longer open in any workspace, in either pass (F2). One found at the
+   * re-check is in `state.notFound` too, by name only: read it here.
+   */
+  gone: RecordedTab[];
+  /** --tab's own state: planned, closed, kept, failed, failures. */
+  state: CloseState;
+  /** The session's tab could not be proven to be the recorded one. */
+  unproven: RecordedTabUnproven[];
+}
+
+type RecordedCheck =
+  | {assessment: Assessment; kind: 'assessed'}
+  | {kind: 'byHand'; reason: string}
+  | {kind: 'gone'}
+  | {
+      kind: 'unproven';
+      /** The recorded tab's own checks, when they keep it (drafts included). */
+      pane: Extract<Assessment, {kind: 'kept'}> | null;
+      reasons: string[];
+    };
+
+/** The workspace a surface is in now, and how many tabs that workspace holds. */
+function surfaceHome(
+  tree: CmuxTree,
+  surfaceId: string,
+): {tabs: number; workspaceId: string} | null {
+  const want = surfaceId.toUpperCase();
+  for (const window of tree.windows) {
+    for (const workspace of window.workspaces) {
+      const ids = surfacesOfWorkspace(tree, workspace.id) ?? [];
+      if (ids.some((id) => id.toUpperCase() === want)) {
+        return {tabs: ids.length, workspaceId: workspace.id};
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * One recorded tab against what is open now, read-only, in both passes. The
+ * recorded uuid is a pointer: the tab closes only when --tab's D2 proves the
+ * run's session is on exactly that surface. Its workspace was not made by the
+ * run, so an only tab is never closed (that would be --tab's D4
+ * whole-workspace close). `extraReasons` is the caller's own keeps (undo:
+ * activity since the run).
+ */
+async function checkRecordedTab(input: {
+  extraReasons: (tab: RecordedTab) => Promise<string[]>;
+  full: CloseDeps;
+  hookPids: HookStorePids;
+  live: Extract<LiveSessions, {kind: 'read'}>;
+  ownSurface: string | null;
+  ownWorkspace: string | null;
+  tab: RecordedTab;
+  view: LiveView;
+}): Promise<RecordedCheck> {
+  const {full, hookPids, tab, view} = input;
+  const home = surfaceHome(view.tree, tab.surfaceId);
+  if (home == null) return {kind: 'gone'};
+  if (home.workspaceId.toUpperCase() !== tab.workspaceId.toUpperCase()) {
+    return {
+      kind: 'unproven',
+      pane: null,
+      reasons: [
+        `its tab ${tab.surfaceId} is in workspace ${home.workspaceId} now, not in ${tab.workspaceId}, where the run opened it`,
+      ],
+    };
+  }
+  if (home.tabs === 1) {
+    return {
+      kind: 'byHand',
+      reason: `it is the only tab of its old workspace ${tab.workspaceId} now. The run did not open that workspace, and closing its last tab would close it, so --undo leaves it. Close the tab by hand (surface ${tab.surfaceId}).`,
+    };
+  }
+  const given = [tab.name];
+  const found = resolveTab(
+    tab.sessionId,
+    given,
+    view,
+    hookPids,
+    input.live,
+    input.ownSurface,
+  );
+  if (
+    found.kind !== 'tab' ||
+    found.target.surfaceId.toUpperCase() !== tab.surfaceId.toUpperCase()
+  ) {
+    const why =
+      found.kind === 'tab'
+        ? `session ${tab.sessionId} runs on tab ${found.target.surfaceRef} (${found.target.surfaceId}), not on the tab the run opened (${tab.surfaceId}), so that tab cannot be shown to hold it`
+        : `session ${tab.sessionId}: ${found.reason}`;
+    // The recorded tab's own checks, read-only, so a blank screen, a tty with
+    // no process, unsent text and the like are named too.
+    const pane = withUnseenPaneKeeps(
+      await assess(
+        {given, workspaceId: tab.workspaceId},
+        view,
+        hookPids,
+        full,
+        tab.surfaceId,
+      ),
+    );
+    return {
+      kind: 'unproven',
+      pane: pane.kind === 'kept' ? pane : null,
+      reasons: [why, ...(pane.kind === 'kept' ? pane.reasons : [])],
+    };
+  }
+  // home-base-kwand.20 item 4's keeps (a tty with no process, a blank
+  // screen) apply here as on every --undo close.
+  const assessment = withUnseenPaneKeeps(
+    await assessTab(found.target, view, hookPids, full, input.ownWorkspace),
+  );
+  const extra = await input.extraReasons(tab);
+  if (extra.length === 0 || assessment.kind === 'notFound') {
+    return {assessment, kind: 'assessed'};
+  }
+  return {
+    assessment:
+      assessment.kind === 'kept'
+        ? {...assessment, reasons: [...assessment.reasons, ...extra]}
+        : {drafts: [], entry: assessment.entry, kind: 'kept', reasons: extra},
+    kind: 'assessed',
+  };
+}
+
+/**
+ * home-base-kwand.11: close-surface answering OK is not proof the tab is
+ * gone. Read the tree until every closed tab has left it, for up to
+ * windowGoneTimeoutMs; one still listed then is a failure, said loudly (as
+ * --undo says of a workspace still open after close-workspace).
+ * home-base-kwand.31 F4: that tab moves from `closed` to `failed` (step
+ * verify), so neither the output nor the record calls it closed; its Claude
+ * was stopped before the close, and the failed entry says so.
+ */
+async function confirmTabsGone(
+  state: CloseState,
+  full: Pick<CloseDeps, 'nowMs' | 'run' | 'sleep' | 'windowGoneTimeoutMs'>,
+): Promise<void> {
+  const closedTabs = state.closed.filter((entry) => entry.tab != null);
+  if (closedTabs.length === 0) return;
+  const deadline = full.nowMs() + full.windowGoneTimeoutMs;
+  for (;;) {
+    const tree = await readCmuxTree(full.run);
+    const open =
+      tree.kind === 'read'
+        ? closedTabs.filter(
+            (entry) =>
+              surfaceHome(tree.tree, entry.tab?.surfaceId ?? '') != null,
+          )
+        : closedTabs;
+    if (tree.kind === 'read' && open.length === 0) return;
+    if (full.nowMs() >= deadline) {
+      if (tree.kind !== 'read') {
+        state.failures.push(
+          `whether the closed tabs are gone could not be checked: ${tree.reason}`,
+        );
+        return;
+      }
+      state.closed = state.closed.filter((entry) => !open.includes(entry));
+      for (const closed of open) {
+        // The entry without closedAt and windowNote: it did not close.
+        const entry: CloseEntry &
+          Partial<Pick<CloseClosed, 'closedAt' | 'windowNote'>> = {...closed};
+        delete entry.closedAt;
+        delete entry.windowNote;
+        state.failed.push({
+          ...entry,
+          // stopAndCloseTab stops every Claude before close-surface runs.
+          claudeStopped: entry.pid != null,
+          cmuxRefusal: null,
+          reason: `close-surface answered OK, but tab ${entry.tab?.surfaceRef ?? '?'} (${entry.tab?.surfaceId ?? '?'}) is still open ${Math.round(full.windowGoneTimeoutMs / 1000)} s later`,
+          step: 'verify',
+        });
+      }
+      return;
+    }
+    await full.sleep(POLL_MS);
+  }
+}
+
+/**
+ * home-base-kwand.11: close each recorded tab, one at a time, through --tab's
+ * pipeline: D2's proof (resolveTab) that the run's session is on exactly the
+ * recorded surface, assessTab's checks plus the unseen-pane keeps and the
+ * caller's own, the record and the re-check right before each SIGTERM
+ * (closePlanned, which also calls `afterEach` after every tab), and
+ * stopAndCloseTab's `close-surface --surface <uuid> --workspace <uuid>`. An
+ * only tab is kept and named for closing by hand, never closed with its
+ * workspace. A dry run stops after the first pass and writes nothing.
+ */
+export async function closeRecordedTabs(input: {
+  /** After each tab's outcome: rewrite the caller's record; null when written, else the failure in words (the run stops). */
+  afterEach: (progress: RecordedTabsResult) => string | null;
+  /**
+   * After the first pass, before the first SIGTERM: rewrite the caller's
+   * record; null when written, else the failure in words, and then nothing is
+   * signalled or closed.
+   */
+  beforeClose: (planned: RecordedTabsResult) => string | null;
+  dryRun: boolean;
+  env: EnvLike;
+  extraReasons: (tab: RecordedTab) => Promise<string[]>;
+  full: CloseDeps;
+  tabs: readonly RecordedTab[];
+  /** What is open now, when the caller just read it; null reads it here. */
+  view: LiveView | null;
+}): Promise<RecordedTabsResult> {
+  const {env, full} = input;
+  const logPath = closesLogPath(env);
+  const startedAt = new Date(full.nowMs()).toISOString();
+  const state: CloseState = {
+    closed: [],
+    dryRun: input.dryRun,
+    failed: [],
+    failures: [],
+    finishedAt: null,
+    kept: [],
+    logPath,
+    notFound: [],
+    planned: [],
+    startedAt,
+    tabMode: true,
+  };
+  const result: RecordedTabsResult = {
+    byHand: [],
+    gone: [],
+    state,
+    unproven: [],
+  };
+  const keepAll = (reason: string): RecordedTabsResult => {
+    for (const tab of input.tabs) {
+      result.unproven.push({drafts: [], reasons: [reason], tab});
+    }
+    state.finishedAt = new Date(full.nowMs()).toISOString();
+    return result;
+  };
+  if (input.tabs.length === 0) return result;
+  const upper = (value: string | undefined): string | null =>
+    value != null && value !== '' ? value.toUpperCase() : null;
+  const ownWorkspace = upper(env.CMUX_WORKSPACE_ID);
+  const ownSurface = upper(env.CMUX_SURFACE_ID);
+  // home-base-hg6lz.4 R1, as thread close --tab refuses it.
+  if (ownWorkspace != null && ownSurface == null) {
+    return keepAll(
+      `this command runs in cmux workspace ${ownWorkspace} (CMUX_WORKSPACE_ID), but CMUX_SURFACE_ID is not set, so its own tab cannot be told apart from a tab it would close`,
+    );
+  }
+  let view = input.view;
+  if (view == null) {
+    const read = await readView(full);
+    if (read.kind !== 'read') {
+      return keepAll(`what is open now could not be read: ${read.reason}`);
+    }
+    view = read.view;
+  }
+  const store = full.readHookStore();
+  if (!store.ok) {
+    return keepAll(
+      `the cmux hook store could not be read, so no Claude process can be matched to its session: ${store.reason}`,
+    );
+  }
+  const live = await full.readLive();
+  if (live.kind === 'failed') {
+    return keepAll(
+      `which tab holds each session needs the live sessions, and they could not be read: ${live.reason}`,
+    );
+  }
+  const check = async (
+    tab: RecordedTab,
+    at: LiveView,
+    pids: HookStorePids,
+  ): Promise<RecordedCheck> =>
+    await checkRecordedTab({
+      extraReasons: input.extraReasons,
+      full,
+      hookPids: pids,
+      live,
+      ownSurface,
+      ownWorkspace,
+      tab,
+      view: at,
+    });
+
+  const closable: Closable[] = [];
+  const tabOf = new Map<string, RecordedTab>();
+  for (const tab of input.tabs) {
+    const found = await check(tab, view, hookStorePids(store.value));
+    if (found.kind === 'gone') {
+      result.gone.push(tab);
+    } else if (found.kind === 'byHand') {
+      result.byHand.push({reason: found.reason, tab});
+    } else if (found.kind === 'unproven') {
+      result.unproven.push({
+        drafts:
+          found.pane == null
+            ? []
+            : storeDrafts(found.pane, full, input.dryRun, state.failures),
+        reasons: found.reasons,
+        tab,
+      });
+    } else if (found.assessment.kind === 'notFound') {
+      result.gone.push(tab);
+    } else if (found.assessment.kind === 'kept') {
+      state.kept.push(
+        keptOf(
+          found.assessment,
+          storeDrafts(found.assessment, full, input.dryRun, state.failures),
+        ),
+      );
+    } else {
+      closable.push(found.assessment);
+      state.planned.push(found.assessment.entry);
+      tabOf.set(tab.surfaceId.toUpperCase(), tab);
+    }
+  }
+  if (input.dryRun || closable.length === 0) {
+    state.finishedAt = new Date(full.nowMs()).toISOString();
+    return result;
+  }
+  const first = input.beforeClose(result);
+  if (first != null) {
+    state.failures.push(first);
+    for (const entry of closable) {
+      state.kept.push({
+        ...entry.entry,
+        drafts: [],
+        reasonKinds: ['notChecked'],
+        reasons: ['the record could not be written first'],
+      });
+    }
+    state.planned = [];
+    state.finishedAt = new Date(full.nowMs()).toISOString();
+    return result;
+  }
+
+  await closePlanned({
+    afterEach: () => input.afterEach(result),
+    closable,
+    full,
+    logPath,
+    reassess: async (planned) => {
+      const tab = tabOf.get(planned.entry.tab?.surfaceId.toUpperCase() ?? '');
+      if (tab == null) {
+        return {
+          drafts: [],
+          entry: planned.entry,
+          kind: 'kept',
+          reasons: ['its recorded tab was lost between the passes'],
+        };
+      }
+      const again = await readView(full);
+      const storeAgain = full.readHookStore();
+      if (again.kind !== 'read' || !storeAgain.ok) {
+        return unreadAgain(planned, again, storeAgain);
+      }
+      const now = await check(tab, again.view, hookStorePids(storeAgain.value));
+      // home-base-kwand.31 F2: a tab that closed between the passes is listed
+      // under gone, as in the first pass. closePlanned also files it under
+      // state.notFound, which names it only by `given` (two recorded tabs can
+      // share a name), so the caller reads `gone`, never state.notFound.
+      if (now.kind === 'gone') {
+        result.gone.push(tab);
+        return {
+          kind: 'notFound',
+          reason: `its tab ${tab.surfaceId} is not open in cmux now`,
+        };
+      }
+      if (now.kind === 'assessed' && now.assessment.kind === 'notFound') {
+        result.gone.push(tab);
+        return now.assessment;
+      }
+      // F3: an only tab now is named for closing by hand, as in the first
+      // pass. closePlanned also files it under state.kept (it logs the keep);
+      // the caller lists a tab in byHand there only.
+      if (now.kind === 'byHand') {
+        result.byHand.push({reason: now.reason, tab});
+        return {
+          drafts: [],
+          entry: planned.entry,
+          kind: 'kept',
+          reasons: [now.reason],
+        };
+      }
+      if (now.kind === 'unproven') {
+        return {
+          drafts: now.pane?.drafts ?? [],
+          entry: planned.entry,
+          kind: 'kept',
+          reasons: now.reasons,
+        };
+      }
+      return now.assessment;
+    },
+    startedAt,
+    state,
+    stopAndClose: async (assessment) =>
+      // Never --tab's D4 here: the run did not make the workspace. checkRecordedTab
+      // keeps an only tab, so this is a second guard, before any signal.
+      assessment.entry.tab?.onlyTab === true
+        ? {
+            reason:
+              'it became the only tab of its workspace, and --undo never closes a workspace the run did not open',
+            step: 'verify',
+          }
+        : await stopAndCloseTab(assessment, full),
+    windowNote: async () =>
+      await Promise.resolve('its workspace stays open with its other tabs'),
+  });
+  await confirmTabsGone(state, full);
+  state.finishedAt = new Date(full.nowMs()).toISOString();
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -2632,6 +3115,80 @@ async function closeAllExcept(input: {
   );
 }
 
+/**
+ * thread close's real dependencies, each one replaced by `deps` where given.
+ * ONE place builds them: closeWorkspaces, and `thread open --undo
+ * --close-tabs` (home-base-kwand.11), which closes tabs through this file's
+ * pipeline.
+ */
+export function closeDepsOf(
+  deps: Partial<CloseDeps>,
+  env: EnvLike,
+  cmuxEnv: EnvLike,
+): CloseDeps {
+  const home = env.HOME != null && env.HOME !== '' ? env.HOME : homedir();
+  const repoCache = new Map<string, RepoResolution>();
+  const logPath = closesLogPath(env);
+  return {
+    appendLog: deps.appendLog ?? realAppendLog(logPath),
+    commandOf: deps.commandOf ?? realPidCommand,
+    exitTimeoutMs: deps.exitTimeoutMs ?? UNDO_EXIT_TIMEOUT_MS,
+    kill: deps.kill ?? realSigterm,
+    nowMs: deps.nowMs ?? (() => Date.now()),
+    ps: deps.ps ?? realProcessRunner(),
+    readHandedOff:
+      deps.readHandedOff ?? (() => realReadHandedOff(process.cwd(), env)),
+    readHookStore:
+      deps.readHookStore ?? (() => readHookStore(defaultHookStorePath(home))),
+    readLive:
+      deps.readLive ??
+      (async () => await readLiveSessions(realLiveSessionDeps(cmuxEnv))),
+    readSessionFacts:
+      deps.readSessionFacts ??
+      (async (live, only) =>
+        await realReadSessionFacts({
+          cwd: process.cwd(),
+          env,
+          live,
+          now: new Date(deps.nowMs?.() ?? Date.now()),
+          only: only ?? null,
+        })),
+    readSessionFile:
+      deps.readSessionFile ??
+      (() => realReadSessionFile(env, deps.nowMs?.() ?? Date.now())),
+    recordTabs:
+      deps.recordTabs ??
+      (() => {
+        const storeDir = tabRecordDir(threadsStateDir(env));
+        try {
+          return recordWords(
+            recordTabs({
+              now: Date.now(),
+              storeDir,
+              supportDir: cmuxSupportDir(env),
+            }),
+          );
+        } catch (error) {
+          return {
+            kind: 'failed',
+            reason: `the tab records under ${tildeText(storeDir)} could not be written: ${error instanceof Error ? error.message : String(error)}`,
+          };
+        }
+      }),
+    resumeOf:
+      deps.resumeOf ?? ((sessionId) => realResumeOf(sessionId, env, repoCache)),
+    run: deps.run ?? realCmuxRunner(undefined, cmuxEnv),
+    sleep:
+      deps.sleep ??
+      (async (ms) => {
+        await new Promise((resolve) => setTimeout(resolve, ms));
+      }),
+    windowGoneTimeoutMs:
+      deps.windowGoneTimeoutMs ?? UNDO_WINDOW_GONE_TIMEOUT_MS,
+    writeDraft: deps.writeDraft ?? ((input) => writeInputDraft(input, env)),
+  };
+}
+
 export async function closeWorkspaces(
   options: CloseOptions,
   deps: Partial<CloseDeps> = {},
@@ -2746,67 +3303,8 @@ export async function closeWorkspaces(
     );
   }
   const cmuxEnv = {...env, CMUX_QUIET: '1', CMUX_SOCKET_PATH: socket.path};
-  const home = env.HOME != null && env.HOME !== '' ? env.HOME : homedir();
-  const repoCache = new Map<string, RepoResolution>();
   const logPath = closesLogPath(env);
-  const full: CloseDeps = {
-    appendLog: deps.appendLog ?? realAppendLog(logPath),
-    commandOf: deps.commandOf ?? realPidCommand,
-    exitTimeoutMs: deps.exitTimeoutMs ?? UNDO_EXIT_TIMEOUT_MS,
-    kill: deps.kill ?? realSigterm,
-    nowMs: deps.nowMs ?? (() => Date.now()),
-    ps: deps.ps ?? realProcessRunner(),
-    readHandedOff:
-      deps.readHandedOff ?? (() => realReadHandedOff(process.cwd(), env)),
-    readHookStore:
-      deps.readHookStore ?? (() => readHookStore(defaultHookStorePath(home))),
-    readLive:
-      deps.readLive ??
-      (async () => await readLiveSessions(realLiveSessionDeps(cmuxEnv))),
-    readSessionFacts:
-      deps.readSessionFacts ??
-      (async (live, only) =>
-        await realReadSessionFacts({
-          cwd: process.cwd(),
-          env,
-          live,
-          now: new Date(deps.nowMs?.() ?? Date.now()),
-          only: only ?? null,
-        })),
-    readSessionFile:
-      deps.readSessionFile ??
-      (() => realReadSessionFile(env, deps.nowMs?.() ?? Date.now())),
-    recordTabs:
-      deps.recordTabs ??
-      (() => {
-        const storeDir = tabRecordDir(threadsStateDir(env));
-        try {
-          return recordWords(
-            recordTabs({
-              now: Date.now(),
-              storeDir,
-              supportDir: cmuxSupportDir(env),
-            }),
-          );
-        } catch (error) {
-          return {
-            kind: 'failed',
-            reason: `the tab records under ${tildeText(storeDir)} could not be written: ${error instanceof Error ? error.message : String(error)}`,
-          };
-        }
-      }),
-    resumeOf:
-      deps.resumeOf ?? ((sessionId) => realResumeOf(sessionId, env, repoCache)),
-    run: deps.run ?? realCmuxRunner(undefined, cmuxEnv),
-    sleep:
-      deps.sleep ??
-      (async (ms) => {
-        await new Promise((resolve) => setTimeout(resolve, ms));
-      }),
-    windowGoneTimeoutMs:
-      deps.windowGoneTimeoutMs ?? UNDO_WINDOW_GONE_TIMEOUT_MS,
-    writeDraft: deps.writeDraft ?? ((input) => writeInputDraft(input, env)),
-  };
+  const full = closeDepsOf(deps, env, cmuxEnv);
   const ping = await full.run(['ping']);
   if (ping.kind === 'failed') {
     const allow = socketSettingsJson(socket.path).trim();

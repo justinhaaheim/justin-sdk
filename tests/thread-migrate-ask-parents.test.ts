@@ -40,6 +40,18 @@ import {createSandbox} from './sandbox';
 
 const SESSION = '9e5711c5-0a19-4c00-8000-000000000001';
 
+/**
+ * The per-version --apply tests' own limit (home-base-hpxw3). Measured
+ * 2026-11-18 on bun 1.4.2, this file alone, 5 runs at a 1-minute load of 4.4 to
+ * 5.4: the br 0.1.37 test took 1.54 to 1.91 s, the br 0.7.6 test 1.10 to 1.23 s.
+ * In the full suite at load 5.7 (the sdk:publish run of 2026-11-18 12:22) the
+ * br 0.7.6 test was still running at bun's default 5 s. 30 s is about 15 times
+ * the worst run alone and 6 times that full-suite figure. A limit that is too
+ * short does not only report a timeout: bun SIGTERMs the br the test is
+ * waiting on and every br after it, so runMigration returns 1 as well.
+ */
+const APPLY_TEST_TIMEOUT_MS = 30_000;
+
 const BRS = [
   {br: installedBr('0.1.37'), version: '0.1.37'},
   {br: installedBr('0.7.6'), version: '0.7.6'},
@@ -337,6 +349,7 @@ describe('migrate-ask-parents', () => {
           await applyAndClose(version);
         });
       },
+      APPLY_TEST_TIMEOUT_MS,
     );
   }
 

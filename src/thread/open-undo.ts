@@ -52,6 +52,14 @@
  */
 
 import type {OutputStyle} from '../cli-style';
+import type {
+  CloseClosed,
+  CloseDeps,
+  CloseEntry,
+  CloseFailed,
+  RecordedTab,
+  RecordedTabsResult,
+} from './close';
 import type {CmuxRunner, CmuxTree} from './cmux';
 import type {InputDraftWrite, WriteInputDraftInput} from './input-drafts';
 import type {
@@ -84,6 +92,7 @@ import {
   wrapHanging,
 } from '../cli-style';
 import {writeStdout} from '../write-stdout';
+import {closeDepsOf, closeRecordedTabs, failedClaudeWords} from './close';
 import {blankScreenKeep, noProcessTtyKeep} from './close-all-except';
 import {readCmuxTree, realCmuxRunner, surfacesOfWorkspace} from './cmux';
 import {findTranscript} from './facts';
@@ -307,6 +316,12 @@ export interface UndoState {
   planned: UndoClosing[];
   /** Written to the record before the first SIGTERM. */
   startedAt: string;
+  /**
+   * home-base-kwand.11, `--close-tabs` only (absent without it, so the
+   * record and --json stay as before): the tabs --restore-failed opened in
+   * old workspaces, closed through thread close --tab's pipeline.
+   */
+  tabs?: UndoTabs;
   /** Windows this undo emptied that cmux then closed. */
   windowsClosed: string[];
   /** Windows that are still open after this undo emptied them of ours, and why. */
@@ -828,6 +843,27 @@ function unseenPaneReasons(
   ];
 }
 
+/**
+ * D-UNDO-SAFETY gate 3: the session was not used after the run opened it.
+ * Shared by the workspaces and `--close-tabs`' tabs (home-base-kwand.11).
+ */
+function activityReasons(
+  activity: ActivityTimes,
+  recordAtMs: number,
+): string[] {
+  if (activity.kind === 'unknown') {
+    return [
+      `its last activity could not be read (${activity.reason}), so it may have been used since`,
+    ];
+  }
+  if (activity.lastMs > recordAtMs) {
+    return [
+      `it was used after the run opened it: its last activity is ${localStamp(activity.lastMs)}, the run was at ${localStamp(recordAtMs)}`,
+    ];
+  }
+  return [];
+}
+
 async function assessWorkspace(
   entry: RecordedWorkspace,
   view: LiveView,
@@ -866,16 +902,9 @@ async function assessWorkspace(
     'workspace',
   );
   if (pinned != null) reasons.unshift(pinned);
-  const activity = await deps.readActivity(entry.sessionId);
-  if (activity.kind === 'unknown') {
-    reasons.push(
-      `its last activity could not be read (${activity.reason}), so it may have been used since`,
-    );
-  } else if (activity.lastMs > recordAtMs) {
-    reasons.push(
-      `it was used after the run opened it: its last activity is ${localStamp(activity.lastMs)}, the run was at ${localStamp(recordAtMs)}`,
-    );
-  }
+  reasons.push(
+    ...activityReasons(await deps.readActivity(entry.sessionId), recordAtMs),
+  );
   if (reasons.length > 0) {
     return {drafts, entry, kind: 'kept', reasons, suggestions};
   }
@@ -897,6 +926,8 @@ async function assessWorkspace(
 export type {PidCommand};
 
 export interface UndoDeps {
+  /** `--close-tabs` (home-base-kwand.11): thread close's closes.jsonl line. */
+  appendLog: CloseDeps['appendLog'];
   /** `ps -p <pid> -o command=`: what a pid runs now, gone, or unreadable. */
   commandOf: (pid: number) => Promise<PidCommand>;
   exitTimeoutMs: number;
@@ -905,6 +936,12 @@ export interface UndoDeps {
   nowMs: () => number;
   ps: ProcessRunner;
   readActivity: (sessionId: string) => Promise<ActivityTimes>;
+  /** `--close-tabs`: the cmux hook store, as thread close --tab reads it. */
+  readHookStore: CloseDeps['readHookStore'];
+  /** `--close-tabs`: the live sessions, as thread close --tab reads them. */
+  readLive: CloseDeps['readLive'];
+  /** `--close-tabs`: a session's resume command, for closes.jsonl. */
+  resumeOf: CloseDeps['resumeOf'];
   run: CmuxRunner;
   sleep: (ms: number) => Promise<void>;
   windowGoneTimeoutMs: number;
@@ -914,6 +951,12 @@ export interface UndoDeps {
 }
 
 export interface UndoOptions {
+  /**
+   * home-base-kwand.11, `--close-tabs`, default off: close each tab
+   * --restore-failed opened in an old workspace (thread close --tab's
+   * pipeline) instead of naming it for closing by hand.
+   */
+  closeTabs?: boolean;
   dryRun: boolean;
   env?: EnvLike;
   json: boolean;
@@ -1112,6 +1155,121 @@ export function tabsNotClosed(record: ParsedRecord): UndoTabNotClosed[] {
         ]
       : [],
   );
+}
+
+/** home-base-kwand.11: a recorded tab kept open by a check, and why. */
+export interface UndoTabKept {
+  drafts: UndoDraft[];
+  name: string;
+  reasons: string[];
+  /** The run's session for this tab. */
+  sessionId: string;
+  surfaceId: string;
+  workspaceId: string;
+}
+
+/** home-base-kwand.11, `--close-tabs`: what happened to each recorded tab. */
+export interface UndoTabs {
+  /** Stopped and closed with close-surface (thread close --tab's entries). */
+  closed: CloseClosed[];
+  /** A step failed; `claudeStopped` says when its Claude was stopped first. */
+  failed: CloseFailed[];
+  /** No longer open. */
+  gone: UndoTabNotClosed[];
+  kept: UndoTabKept[];
+  /** What the first pass let through, in order (a dry run: what would close). */
+  planned: CloseEntry[];
+}
+
+/**
+ * home-base-kwand.11: the recorded tabs `--close-tabs` hands to thread close
+ * --tab's pipeline. One with no surface uuid or no workspace uuid stays named
+ * for closing by hand, as without the flag: which tab it is cannot be told.
+ */
+function closableRecordedTabs(record: ParsedRecord): RecordedTab[] {
+  return (record.tabs ?? []).flatMap((tab) =>
+    tab.target === 'oldWorkspace' &&
+    tab.surfaceId != null &&
+    tab.workspaceId != null
+      ? [
+          {
+            name: tab.name ?? tab.sessionId,
+            sessionId: tab.sessionId,
+            surfaceId: tab.surfaceId,
+            workspaceId: tab.workspaceId,
+          },
+        ]
+      : [],
+  );
+}
+
+/** The undo's view of thread close's result, rebuilt before each rewrite of the record. */
+function undoTabsOf(
+  result: RecordedTabsResult,
+  recorded: readonly RecordedTab[],
+): UndoTabs {
+  const kept = (
+    tab: RecordedTab,
+    reasons: string[],
+    drafts: UndoDraft[],
+  ): UndoTabKept => ({
+    drafts,
+    name: tab.name,
+    reasons,
+    sessionId: tab.sessionId,
+    surfaceId: tab.surfaceId,
+    workspaceId: tab.workspaceId,
+  });
+  // Every entry thread close returns came from one recorded tab, by surface.
+  const recordedOf = (entry: CloseEntry): RecordedTab =>
+    recorded.find(
+      (tab) =>
+        tab.surfaceId.toUpperCase() === entry.tab?.surfaceId.toUpperCase(),
+    ) ?? {
+      name: entry.given[0] ?? entry.workspaceId,
+      sessionId: entry.sessionId ?? 'unknown',
+      surfaceId: entry.tab?.surfaceId ?? 'unknown',
+      workspaceId: entry.workspaceId,
+    };
+  // home-base-kwand.31 F3: a tab the re-check found to be its workspace's
+  // only tab is in byHand (named for closing by hand, exit 1) and in
+  // state.kept; it is listed under byHand only, as in the first pass.
+  const byHand = new Set(
+    result.byHand.map(({tab}) => tab.surfaceId.toUpperCase()),
+  );
+  return {
+    closed: result.state.closed,
+    failed: result.state.failed,
+    gone: result.gone.map((tab) => ({
+      name: tab.name,
+      reason: 'it is not open in cmux now',
+      sessionId: tab.sessionId,
+      surfaceId: tab.surfaceId,
+      workspaceId: tab.workspaceId,
+    })),
+    kept: [
+      ...result.unproven.map((entry) =>
+        kept(entry.tab, entry.reasons, entry.drafts),
+      ),
+      ...result.state.kept
+        .filter(
+          (entry) => !byHand.has(entry.tab?.surfaceId.toUpperCase() ?? ''),
+        )
+        .map((entry) => kept(recordedOf(entry), entry.reasons, entry.drafts)),
+    ],
+    planned: result.state.planned,
+  };
+}
+
+/** The only-tab keeps of `--close-tabs`, named for closing by hand like today's tabs. */
+function byHandOf(result: RecordedTabsResult): UndoTabNotClosed[] {
+  return result.byHand.map(({reason, tab}) => ({
+    name: tab.name,
+    reason,
+    sessionId: tab.sessionId,
+    surfaceId: tab.surfaceId,
+    workspaceId: tab.workspaceId,
+  }));
 }
 
 export type ViewRead =
@@ -1645,6 +1803,128 @@ function claudeWords(pids: readonly number[], done: boolean): string {
   return `${done ? 'stopped' : 'would be stopped'} with SIGTERM first (pid ${pids.join(', ')})`;
 }
 
+/** home-base-kwand.11, `--close-tabs`: the recorded tabs' sections, in the order things happen. */
+function tabBlocks(
+  tabs: UndoTabs,
+  dryRun: boolean,
+  style: OutputStyle,
+): string[] {
+  const header = (text: string, emoji: string): string =>
+    sectionHeader(text, {color: style.color, emoji});
+  const where = (entry: {
+    sessionId: string | null;
+    surfaceId: string | null;
+    workspaceId: string | null;
+  }): {label: string; value: string}[] => [
+    {label: 'Session', value: entry.sessionId ?? 'unknown'},
+    {label: 'Workspace', value: entry.workspaceId ?? 'unknown'},
+    {label: 'Tab', value: entry.surfaceId ?? 'unknown'},
+  ];
+  const tabOf = (entry: CloseEntry): string | null =>
+    entry.tab == null
+      ? null
+      : `${entry.tab.surfaceRef ?? '?'} (${entry.tab.surfaceId}); the workspace and its ${entry.tab.siblings} other ${entry.tab.siblings === 1 ? 'tab' : 'tabs'} stay open`;
+  const resume = (entry: CloseEntry): {label: string; value: string} => ({
+    label: 'Resume',
+    value: entry.resumeCommand ?? `none: ${entry.resumeNote ?? 'unknown'}`,
+  });
+  const blocks: string[] = [];
+  const done = dryRun ? tabs.planned : tabs.closed;
+  blocks.push(
+    header(
+      `${dryRun ? 'Would close tabs' : 'Closed tabs'} opened in an old workspace (${done.length})`,
+      dryRun ? '🔎' : '🧹',
+    ),
+  );
+  blocks.push(
+    done.length === 0
+      ? wrapHanging('Nothing.', {
+          hang: BODY_COLUMN,
+          indent: BODY_COLUMN,
+          width: style.width,
+        })
+      : spacedList(
+          done.map((entry) =>
+            block(
+              entry.given[0] ?? entry.workspaceId,
+              [
+                ...where({...entry, surfaceId: tabOf(entry)}),
+                {
+                  label: 'Claude',
+                  value: claudeWords(
+                    entry.pid == null ? [] : [entry.pid],
+                    !dryRun,
+                  ),
+                },
+                ...suggestionFields(entry.suggestions),
+                resume(entry),
+              ],
+              style,
+            ),
+          ),
+        ),
+  );
+  if (tabs.failed.length > 0) {
+    blocks.push(
+      header(`Tabs not closed: a step failed (${tabs.failed.length})`, '🛑'),
+    );
+    blocks.push(
+      spacedList(
+        tabs.failed.map((entry) =>
+          block(
+            entry.given[0] ?? entry.workspaceId,
+            [
+              ...where({...entry, surfaceId: tabOf(entry)}),
+              {label: 'Claude', value: failedClaudeWords(entry)},
+              resume(entry),
+              {label: 'Why', value: `${entry.step}: ${entry.reason}`},
+            ],
+            style,
+          ),
+        ),
+      ),
+    );
+  }
+  if (tabs.kept.length > 0) {
+    blocks.push(header(`Tabs kept open (${tabs.kept.length})`, '🛡️'));
+    blocks.push(
+      spacedList(
+        tabs.kept.map((entry) =>
+          [
+            block(
+              entry.name,
+              [
+                ...where(entry),
+                ...entry.drafts.map((found) => ({
+                  label: 'Stored',
+                  value:
+                    found.stored != null
+                      ? tildeText(found.stored)
+                      : found.storeFailure != null
+                        ? `NOT STORED: ${found.storeFailure} (it is still in the open tab)`
+                        : 'not stored (dry run)',
+                })),
+                {label: 'Why', value: entry.reasons.join('\n')},
+              ],
+              style,
+            ),
+            ...entry.drafts.map((found) => verbatim(found.text)),
+          ].join('\n\n'),
+        ),
+      ),
+    );
+  }
+  if (tabs.gone.length > 0) {
+    blocks.push(header(`Tabs already gone (${tabs.gone.length})`, '👻'));
+    blocks.push(
+      spacedList(
+        tabs.gone.map((entry) => block(entry.name, [...where(entry)], style)),
+      ),
+    );
+  }
+  return blocks;
+}
+
 export function renderUndo(
   state: UndoState,
   input: {now: Date; recordAt: string; recordPath: string; style: OutputStyle},
@@ -1870,6 +2150,9 @@ export function renderUndo(
     );
   }
 
+  if (state.tabs != null)
+    blocks.push(...tabBlocks(state.tabs, state.dryRun, style));
+
   if (state.gone.length > 0) {
     blocks.push(header(`Already gone (${state.gone.length})`, '👻'));
     blocks.push(
@@ -1914,10 +2197,15 @@ export function renderUndo(
     );
   }
 
+  const tabs = state.tabs;
+  const tabWords =
+    tabs == null
+      ? ''
+      : `; tabs: ${state.dryRun ? `would close ${tabs.planned.length}` : `closed ${tabs.closed.length}`}, kept ${tabs.kept.length}, already gone ${tabs.gone.length}${tabs.failed.length > 0 ? `, failed ${tabs.failed.length}` : ''}`;
   const keptWords = `kept ${state.kept.length}${withDraft.length > 0 ? ` (${withDraft.length} with unsent text)` : ''}${state.notClosed.length > 0 ? `, ${state.notClosed.length} ${state.notClosed.length === 1 ? 'tab' : 'tabs'} to close by hand` : ''}`;
   const summary = state.dryRun
-    ? `Would close ${state.planned.length}, ${keptWords}, already gone ${state.gone.length}. Run it again without --dry-run to close them.`
-    : `Closed ${state.closed.length}, ${keptWords}, already gone ${state.gone.length}${state.failed.length > 0 ? `, failed ${state.failed.length}` : ''}.`;
+    ? `Would close ${state.planned.length}, ${keptWords}, already gone ${state.gone.length}${tabWords}. Run it again without --dry-run to close them.`
+    : `Closed ${state.closed.length}, ${keptWords}, already gone ${state.gone.length}${state.failed.length > 0 ? `, failed ${state.failed.length}` : ''}${tabWords}.`;
   blocks.push(
     wrapHanging(paint(summary, ['bold'], style.color), {
       hang: HEADER_COLUMN,
@@ -1977,7 +2265,10 @@ export async function undoOpen(
     );
   }
   const cmuxEnv = {...env, CMUX_QUIET: '1', CMUX_SOCKET_PATH: socket.path};
+  // home-base-kwand.11: thread close's own real reads, for --close-tabs.
+  const closeReal = closeDepsOf(deps, env, cmuxEnv);
   const full: UndoDeps = {
+    appendLog: closeReal.appendLog,
     commandOf: deps.commandOf ?? realCommandOf,
     exitTimeoutMs: deps.exitTimeoutMs ?? UNDO_EXIT_TIMEOUT_MS,
     kill: deps.kill ?? realKill,
@@ -1986,6 +2277,9 @@ export async function undoOpen(
     readActivity:
       deps.readActivity ??
       (async (sessionId) => await realActivity(sessionId, env)),
+    readHookStore: closeReal.readHookStore,
+    readLive: closeReal.readLive,
+    resumeOf: closeReal.resumeOf,
     run: deps.run ?? realCmuxRunner(undefined, cmuxEnv),
     sleep:
       deps.sleep ??
@@ -2014,6 +2308,15 @@ export async function undoOpen(
     );
   }
   const startedAt = new Date(full.nowMs()).toISOString();
+  // home-base-kwand.11: without --close-tabs every recorded tab is named for
+  // closing by hand, exactly as before; with it, only those whose surface or
+  // workspace uuid was not recorded (plus, later, an only tab).
+  const closeTabs = options.closeTabs === true;
+  const recordedTabs = closeTabs ? closableRecordedTabs(read.parsed) : [];
+  const handNamed = tabsNotClosed(read.parsed).filter(
+    (entry) =>
+      !closeTabs || entry.surfaceId == null || entry.workspaceId == null,
+  );
   const state: UndoState = {
     blank: [],
     closed: [],
@@ -2024,12 +2327,72 @@ export async function undoOpen(
     gone: [],
     kept: [],
     movedBack: [],
-    notClosed: tabsNotClosed(read.parsed),
+    notClosed: handNamed,
     notMovedBack: [],
     planned: [],
     startedAt,
+    ...(closeTabs
+      ? {tabs: {closed: [], failed: [], gone: [], kept: [], planned: []}}
+      : {}),
     windowsClosed: [],
     windowsLeft: [],
+  };
+  // ---- home-base-kwand.11: --close-tabs, through thread close --tab ----
+  const tabRecord = {failed: false};
+  const runTabs = async (
+    view: LiveView | null,
+    save: () => string | null,
+  ): Promise<void> => {
+    if (!closeTabs) return;
+    const sync = (result: RecordedTabsResult): void => {
+      state.tabs = undoTabsOf(result, recordedTabs);
+      state.notClosed = [...handNamed, ...byHandOf(result)];
+    };
+    const rewrite = (
+      result: RecordedTabsResult,
+      words: string,
+    ): string | null => {
+      sync(result);
+      const failure = save();
+      if (failure == null) return null;
+      tabRecord.failed = true;
+      return `${words}: ${failure}`;
+    };
+    const result = await closeRecordedTabs({
+      afterEach: (progress) =>
+        rewrite(
+          progress,
+          `rewriting the record ${tildeText(pick.path)} failed after closing a tab, so the undo stopped`,
+        ),
+      beforeClose: (planned) =>
+        rewrite(
+          planned,
+          `the record ${tildeText(pick.path)} could not be rewritten before stopping any tab's Claude, so no tab was signalled or closed`,
+        ),
+      dryRun: options.dryRun,
+      env,
+      // D-UNDO-SAFETY gate 3 on top of --tab's checks: no use since the run.
+      extraReasons: async (tab) =>
+        activityReasons(await full.readActivity(tab.sessionId), recordAtMs),
+      full: closeDepsOf(full, env, cmuxEnv),
+      tabs: recordedTabs,
+      view,
+    });
+    sync(result);
+    state.failures.push(...result.state.failures);
+  };
+  // home-base-kwand.31 F1: when the undo stops before step 5b, the recorded
+  // tabs were never checked; each is listed as kept, never left out.
+  const tabsNotAttempted = (): void => {
+    if (state.tabs == null) return;
+    state.tabs.kept = recordedTabs.map((tab) => ({
+      drafts: [],
+      name: tab.name,
+      reasons: ['not attempted: the undo stopped before the tabs'],
+      sessionId: tab.sessionId,
+      surfaceId: tab.surfaceId,
+      workspaceId: tab.workspaceId,
+    }));
   };
   const moves = read.parsed.moved ?? [];
   const closable: Extract<Assessment, {kind: 'closable'}>[] = [];
@@ -2084,6 +2447,7 @@ export async function undoOpen(
     // yukaf.22: what would move back, read-only.
     await moveBack(moves, full, state, true, () => null);
     await closeLeftBlank(moves, full, state, true, () => null);
+    await runTabs(first.view, () => null);
     return finish(0);
   }
 
@@ -2116,17 +2480,20 @@ export async function undoOpen(
       });
     }
     state.planned = [];
+    tabsNotAttempted();
     state.finishedAt = new Date(full.nowMs()).toISOString();
     return finish(1);
   }
 
   // ---- 4b. yukaf.22: moved workspaces go back BEFORE anything closes ----
   if (!(await moveBack(moves, full, state, false, save))) {
+    tabsNotAttempted();
     state.finishedAt = new Date(full.nowMs()).toISOString();
     return finish(1);
   }
   // G3: the blank workspace cmux left where a window's last one moved out.
   if (!(await closeLeftBlank(moves, full, state, false, save))) {
+    tabsNotAttempted();
     state.finishedAt = new Date(full.nowMs()).toISOString();
     return finish(1);
   }
@@ -2211,6 +2578,14 @@ export async function undoOpen(
     }
   }
 
+  // ---- 5b. home-base-kwand.11: --close-tabs, one recorded tab at a time ----
+  if (!recordFailed) {
+    await runTabs(null, save);
+    if (tabRecord.failed) recordFailed = true;
+  } else {
+    tabsNotAttempted();
+  }
+
   // ---- 6. a window closes with its last workspace: confirm it did ----
   const stillOurs = new Set(
     [...state.kept, ...state.failed]
@@ -2238,7 +2613,8 @@ export async function undoOpen(
   return finish(
     state.failures.length === 0 &&
       state.failed.length === 0 &&
-      state.notClosed.length === 0
+      state.notClosed.length === 0 &&
+      (state.tabs?.failed.length ?? 0) === 0
       ? 0
       : 1,
   );

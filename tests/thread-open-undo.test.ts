@@ -26,9 +26,15 @@ import {join} from 'path';
 
 import {PLAIN_STYLE} from '../src/cli-style';
 import {inputDraftPath, inputDraftsDir} from '../src/thread/input-drafts';
+import {joinLiveSessions} from '../src/thread/live-sessions';
 import {opensDir, writeJsonFile} from '../src/thread/open';
 import {gatePane, recordFileName, undoOpen} from '../src/thread/open-undo';
-import {NO_BREAK_SPACE, scrolledBoxText} from '../src/thread/pane-join';
+import {
+  flattenTree,
+  NO_BREAK_SPACE,
+  parseProcessList,
+  scrolledBoxText,
+} from '../src/thread/pane-join';
 
 const RUN_AT = '2026-10-18T12:00:00.000Z';
 const RUN_MS = Date.parse(RUN_AT);
@@ -204,6 +210,8 @@ function world(input: {
   }[];
   /** More top-level record fields (yukaf.22: `moved`). */
   recordExtra?: Record<string, unknown>;
+  /** home-base-kwand.11: cmux refuses close-surface with this message. */
+  refuseCloseSurface?: string;
 }): World {
   const root = mkdtempSync(join(tmpdir(), 'thread-open-undo-'));
   dirs.push(root);
@@ -340,6 +348,27 @@ function world(input: {
         );
         return {kind: 'ok', stdout: 'OK\n'};
       }
+      if (args[0] === 'close-surface') {
+        const target = value(args, '--surface');
+        events.push(
+          `close-surface ${target} --workspace ${value(args, '--workspace')}`,
+        );
+        if (input.refuseCloseSurface != null) {
+          return {
+            kind: 'failed',
+            reason: input.refuseCloseSurface,
+            timedOut: false,
+          };
+        }
+        for (const window of input.model.windows) {
+          for (const workspace of window.workspaces) {
+            workspace.panes = workspace.panes.filter(
+              (pane) => pane.id !== target,
+            );
+          }
+        }
+        return {kind: 'ok', stdout: 'OK\n'};
+      }
       return {
         kind: 'failed',
         reason: `the fake does not know ${args.join(' ')}`,
@@ -349,13 +378,47 @@ function world(input: {
     return Promise.resolve(respond());
   };
 
-  const ps = (): Promise<{kind: 'ok'; stdout: string}> => {
+  const psText = (): string => {
     const lines = ['  PID  PPID TTY      ELAPSED COMMAND'];
     for (const proc of procs.values()) {
       if (terminated.has(proc.pid) && proc.onTerm !== 'ignore') continue;
       lines.push(`${proc.pid} 1 ${proc.tty} 01:00 ${proc.command}`);
     }
-    return Promise.resolve({kind: 'ok', stdout: `${lines.join('\n')}\n`});
+    return `${lines.join('\n')}\n`;
+  };
+  const ps = (): Promise<{kind: 'ok'; stdout: string}> =>
+    Promise.resolve({kind: 'ok', stdout: psText()});
+  // home-base-kwand.11: thread close --tab's live-session join, over the
+  // same model (screens as the next read would see them, without reading).
+  const readLive: UndoDeps['readLive'] = async () => {
+    const tree = await run(['tree', '--json']);
+    const raw =
+      tree.kind === 'ok'
+        ? (JSON.parse(tree.stdout) as Parameters<typeof flattenTree>[0])
+        : {windows: []};
+    return {
+      kind: 'read' as const,
+      ...joinLiveSessions({
+        agents: [],
+        procs: parseProcessList(psText()),
+        screens: new Map(
+          allPanes().map((pane) => {
+            const text =
+              pane.screens[
+                Math.min(reads.get(pane.id) ?? 0, pane.screens.length - 1)
+              ] ?? null;
+            return [
+              pane.ref,
+              text == null
+                ? {kind: 'unreadable' as const, reason: 'not ready'}
+                : {kind: 'read' as const, text},
+            ];
+          }),
+        ),
+        store: {},
+        surfaces: flattenTree(raw),
+      }),
+    };
   };
 
   const commandOf = (pid: number): Promise<PidCommand> => {
@@ -370,6 +433,12 @@ function world(input: {
   };
 
   const deps: Partial<UndoDeps> = {
+    appendLog: (line) => {
+      events.push(
+        `log ${line.surfaceId ?? line.workspaceId} ${line.outcome.split(':')[0]}`,
+      );
+      return null;
+    },
     commandOf,
     exitTimeoutMs: 15_000,
     kill: (pid) => {
@@ -388,6 +457,15 @@ function world(input: {
           startedMs: RUN_MS - 86_400_000,
         },
       ),
+    readHookStore: () => ({ok: true, value: {}}),
+    readLive,
+    resumeOf: (sessionId) => ({
+      checkout: '/Users/x/Dev/repo-a',
+      command: `cd '/Users/x/Dev/repo-a' && claude --resume ${sessionId}`,
+      kind: 'found',
+      repo: 'repo-a',
+      warning: null,
+    }),
     run,
     sleep: (ms) => {
       clock += ms;
@@ -1477,5 +1555,709 @@ describe('home-base-kwand.20: pinned workspaces and unseen panes', () => {
     expect(result.state?.kept[0]?.reason).toContain(
       'pane surface:1 shows a blank screen',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// home-base-kwand.11: --close-tabs closes the tabs --restore-failed opened in
+// old workspaces, through thread close --tab's pipeline. Old workspace 50
+// holds the tab whose restore failed (surface 9, an idle shell showing cmux's
+// error) and the tab the run opened (surface 5, session 5).
+// ---------------------------------------------------------------------------
+
+const RESTORE_FAILED_SHELL = [
+  'Error: Session restore failed: no conversation found',
+  '',
+  ' jhaa  home-base  main',
+  '❯',
+].join('\n');
+
+function shellProc(pid: number, tty: string): Proc {
+  return {command: '-zsh', onTerm: 'exit', pid, tty};
+}
+
+const TAB_RECORD = {
+  name: '[A] session 5',
+  openedAt: RUN_AT,
+  sessionId: sid(5),
+  surfaceId: surfId(5),
+  target: 'oldWorkspace',
+  workspaceId: wsId(50),
+};
+
+function tabWorld(
+  input: {
+    activity?: Record<string, ActivityTimes>;
+    closeTabs?: boolean;
+    dryRun?: boolean;
+    /** The run's tab: its screens and tty (default: idle Claude of session 5). */
+    newTab?: {screens?: (string | null)[]; tty?: string | null};
+    /** Keep the tab whose restore failed (default true). */
+    oldTab?: boolean;
+    /** A third tab in the old workspace. */
+    otherTab?: boolean;
+    pinned?: boolean;
+    procs?: Proc[];
+    refuseCloseSurface?: string;
+    tab?: Record<string, unknown>;
+  } = {},
+): World {
+  const panes: Pane[] = [
+    ...(input.oldTab === false
+      ? []
+      : [
+          {
+            id: surfId(9),
+            ref: 'surface:9',
+            screens: [RESTORE_FAILED_SHELL],
+            tty: 'ttys09',
+          },
+        ]),
+    {
+      id: surfId(5),
+      ref: 'surface:5',
+      screens: input.newTab?.screens ?? [idleClaude(sid(5))],
+      tty: input.newTab?.tty === undefined ? 'ttys05' : input.newTab.tty,
+    },
+    ...(input.otherTab === true
+      ? [
+          {
+            id: surfId(7),
+            ref: 'surface:7',
+            screens: [IDLE_SHELL],
+            tty: 'ttys07',
+          },
+        ]
+      : []),
+  ];
+  return world({
+    ...(input.activity == null ? {} : {activity: input.activity}),
+    model: {
+      windows: [
+        {
+          id: winId(2),
+          ref: 'window:2',
+          workspaces: [
+            {
+              id: wsId(50),
+              panes,
+              ...(input.pinned == null ? {} : {pinned: input.pinned}),
+              ref: 'workspace:50',
+            },
+          ],
+        },
+      ],
+    },
+    options: {
+      ...(input.closeTabs === false ? {} : {closeTabs: true}),
+      dryRun: input.dryRun ?? false,
+    },
+    procs: input.procs ?? [
+      shellProc(509, 'ttys09'),
+      shellProc(505, 'ttys05'),
+      claudeProc(5),
+      shellProc(507, 'ttys07'),
+    ],
+    record: [],
+    recordExtra: {tabs: [{...TAB_RECORD, ...input.tab}]},
+    ...(input.refuseCloseSurface == null
+      ? {}
+      : {refuseCloseSurface: input.refuseCloseSurface}),
+  });
+}
+
+/** Every cmux close call, of any kind. */
+const anyClose = (w: World): string[] =>
+  w.events.filter((event) => event.startsWith('close-'));
+
+/**
+ * The Run line prints the run's time in the process's local timezone, and bun
+ * runs every test file in one process, where another file may set TZ. The pin
+ * was captured in UTC; this is RUN_AT as the Run line prints it here,
+ * computed independently of the code under test.
+ */
+const UTC_RUN_STAMP = '(2026-10-18 12:00)';
+function localRunStamp(): string {
+  const at = new Date(RUN_MS);
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `(${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ${pad(at.getHours())}:${pad(at.getMinutes())})`;
+}
+
+/** Captured from the code before home-base-kwand.11 (HEAD fbabb12a), in UTC. */
+const KNOB_OFF_OUTPUT =
+  "  🧹 thread open --undo: close what one run of thread open opened\n\n      Mode:    closing\n      Run:     1 hour ago (2026-10-18 12:00)\n      Record:  <state>/opens/2026-10-18T12-00-00.000Z.json\n      Gates:   an empty input box (one showing only Claude Code's suggestion counts as empty), Claude not working, no activity since the run (else kept)\n\n  🧹 Closed (0)\n\n      Nothing.\n\n  🚧 Not closed: tabs opened in an old workspace (1)\n\n      [A] session 5\n          Session:    00000005-1111-4222-8333-000000000000\n          Workspace:  C0000050-AAAA-4AAA-8AAA-AAAAAAAAAAAA\n          Why:        it was opened as a new tab of its old workspace C0000050-AAAA-4AAA-8AAA-AAAAAAAAAAAA, and --undo closes only whole workspaces it opened (closing that one would close the other tabs there). Close the tab by hand (surface E0000005-AAAA-4AAA-8AAA-AAAAAAAAAAAA).\n\n  Closed 0, kept 0, 1 tab to close by hand, already gone 0.";
+const KNOB_OFF_KEYS: string[] = [
+  'blank',
+  'closed',
+  'dryRun',
+  'failed',
+  'failures',
+  'finishedAt',
+  'gone',
+  'kept',
+  'movedBack',
+  'notClosed',
+  'notMovedBack',
+  'planned',
+  'startedAt',
+  'windowsClosed',
+  'windowsLeft',
+];
+describe('home-base-kwand.11: --close-tabs closes the tabs --restore-failed opened in old workspaces', () => {
+  test('a tab whose checks pass: record, closing line, SIGTERM, then close-surface naming its surface and workspace uuid; the tree shows it gone', async () => {
+    const w = tabWorld({otherTab: true});
+    const result = await undoOpen(w.options, w.deps);
+    expect(w.events.filter((event) => !event.startsWith('read-'))).toEqual([
+      'record',
+      'record',
+      `log ${surfId(5)} closing`,
+      'kill 1005',
+      `close-surface ${surfId(5)} --workspace ${wsId(50)}`,
+      `log ${surfId(5)} closed`,
+      'record',
+      'record',
+    ]);
+    // The tab whose restore failed and the third tab are never named in a close.
+    expect(anyClose(w)).toEqual([
+      `close-surface ${surfId(5)} --workspace ${wsId(50)}`,
+    ]);
+    expect(
+      w.model.windows[0]?.workspaces[0]?.panes.map((pane) => pane.id),
+    ).toEqual([surfId(9), surfId(7)]);
+    expect(
+      result.state?.tabs?.closed.map((entry) => entry.tab?.surfaceId),
+    ).toEqual([surfId(5)]);
+    expect(result.state?.failures).toEqual([]);
+    expect(result.state?.notClosed).toEqual([]);
+    expect(result.output).toContain(
+      'Closed tabs opened in an old workspace (1)',
+    );
+    expect(result.output).toContain(
+      "cd '/Users/x/Dev/repo-a' && claude --resume",
+    );
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('close-surface answers OK but the tab is still listed: failed at step verify, never "closed", in the output or the record; exit 1 (home-base-kwand.31 F4)', async () => {
+    const w = tabWorld();
+    const run = w.deps.run;
+    if (run == null) throw new Error('no run');
+    // cmux answers OK to close-surface and keeps the surface.
+    w.deps.run = async (args) =>
+      args[0] === 'close-surface'
+        ? await Promise.resolve({kind: 'ok' as const, stdout: 'OK\n'})
+        : await run(args);
+    const result = await undoOpen(w.options, w.deps);
+    expect(kills(w)).toEqual(['kill 1005']);
+    expect(result.state?.tabs?.closed).toEqual([]);
+    const failed = result.state?.tabs?.failed ?? [];
+    expect(failed.map((entry) => entry.tab?.surfaceId)).toEqual([surfId(5)]);
+    expect(failed[0]?.step).toBe('verify');
+    expect(failed[0]?.claudeStopped).toBe(true);
+    expect(failed[0]?.reason).toContain(
+      `close-surface answered OK, but tab surface:5 (${surfId(5)}) is still open`,
+    );
+    expect(failed[0]).not.toHaveProperty('closedAt');
+    expect(result.output).toContain('Tabs not closed: a step failed (1)');
+    expect(result.output).toContain(
+      'Closed tabs opened in an old workspace (0)',
+    );
+    const onDisk = JSON.parse(readFileSync(w.recordPath, 'utf8')) as {
+      undo?: {tabs?: {closed?: unknown[]; failed?: unknown[]}};
+    };
+    expect(onDisk.undo?.tabs?.closed).toEqual([]);
+    expect(onDisk.undo?.tabs?.failed).toHaveLength(1);
+    expect(result.exitCode).toBe(1);
+  });
+
+  const keptCases: {
+    name: string;
+    setup: Parameters<typeof tabWorld>[0];
+    why: string;
+  }[] = [
+    {
+      name: 'unsent text',
+      setup: {newTab: {screens: [draftClaude(sid(5), 'half a thought')]}},
+      why: 'unsent text in the input box of pane surface:5',
+    },
+    {
+      name: 'Claude working',
+      setup: {newTab: {screens: [workingClaude(sid(5))]}},
+      why: 'Claude is working in pane surface:5',
+    },
+    {
+      name: 'activity since the run',
+      setup: {
+        activity: {
+          [sid(5)]: {
+            kind: 'known',
+            lastMs: RUN_MS + 60_000,
+            startedMs: RUN_MS - 86_400_000,
+          },
+        },
+      },
+      why: 'it was used after the run opened it',
+    },
+    {
+      name: 'another session on its screen',
+      setup: {newTab: {screens: [idleClaude(sid(6))]}},
+      why: `surface:5 shows session ${sid(6)}, not ${sid(5)}`,
+    },
+    {
+      name: 'a blank screen',
+      setup: {newTab: {screens: ['']}},
+      why: 'pane surface:5 shows a blank screen',
+    },
+    {
+      name: 'no process on its tty',
+      setup: {
+        newTab: {screens: [IDLE_SHELL]},
+        procs: [shellProc(509, 'ttys09')],
+      },
+      why: 'no process at all runs on tty ttys05, which pane surface:5 reports',
+    },
+    {
+      name: 'a pinned workspace',
+      setup: {pinned: true},
+      why: 'pinned',
+    },
+  ];
+  for (const each of keptCases) {
+    test(`kept, with the reason: ${each.name}; nothing signalled or closed`, async () => {
+      const w = tabWorld(each.setup);
+      const result = await undoOpen(w.options, w.deps);
+      expect(kills(w)).toEqual([]);
+      expect(anyClose(w)).toEqual([]);
+      const kept = result.state?.tabs?.kept ?? [];
+      expect(kept.map((entry) => entry.surfaceId)).toEqual([surfId(5)]);
+      expect(kept[0]?.reasons.join('\n')).toContain(each.why);
+      expect(result.output).toContain('Tabs kept open (1)');
+      expect(result.state?.notClosed).toEqual([]);
+    });
+  }
+
+  test('the recorded tab is now its workspace only tab: kept and named for closing by hand, never closed with the workspace', async () => {
+    const w = tabWorld({oldTab: false});
+    const result = await undoOpen(w.options, w.deps);
+    expect(kills(w)).toEqual([]);
+    expect(anyClose(w)).toEqual([]);
+    expect(result.state?.notClosed.map((entry) => entry.surfaceId)).toEqual([
+      surfId(5),
+    ]);
+    expect(result.state?.notClosed[0]?.reason).toContain(
+      `it is the only tab of its old workspace ${wsId(50)} now`,
+    );
+    expect(result.output).toContain(
+      'Not closed: tabs opened in an old workspace (1)',
+    );
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('a recorded tab with no surface uuid stays named for closing by hand, as without the flag', async () => {
+    const w = tabWorld({tab: {surfaceId: null}});
+    const result = await undoOpen(w.options, w.deps);
+    expect(kills(w)).toEqual([]);
+    expect(anyClose(w)).toEqual([]);
+    expect(result.state?.notClosed.map((entry) => entry.sessionId)).toEqual([
+      sid(5),
+    ]);
+    expect(result.state?.notClosed[0]?.reason).toContain(
+      'its surface uuid was not recorded',
+    );
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('cmux refuses close-surface after the stop: STOPPED with the resume command, never closed, exit 1', async () => {
+    const w = tabWorld({refuseCloseSurface: 'Error: surface is pinned'});
+    const result = await undoOpen(w.options, w.deps);
+    expect(kills(w)).toEqual(['kill 1005']);
+    expect(result.state?.tabs?.closed).toEqual([]);
+    expect(result.state?.tabs?.failed[0]?.claudeStopped).toBe(true);
+    expect(result.output).toContain(
+      'STOPPED (pid 1005) before the close failed: the tab is still open with no Claude in it',
+    );
+    expect(result.output).toContain(
+      `cd '/Users/x/Dev/repo-a' && claude --resume ${sid(5)}`,
+    );
+    expect(result.output).not.toContain(
+      'Closed tabs opened in an old workspace (1)',
+    );
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('--dry-run with --close-tabs: says what would close, signals nothing, writes nothing', async () => {
+    const w = tabWorld({dryRun: true});
+    const result = await undoOpen(w.options, w.deps);
+    expect(w.events.filter((event) => !event.startsWith('read-'))).toEqual([]);
+    expect(result.output).toContain(
+      'Would close tabs opened in an old workspace (1)',
+    );
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('knob off (no --close-tabs): output, JSON and exit code exactly as before', async () => {
+    const w = tabWorld({closeTabs: false, otherTab: true});
+    const result = await undoOpen(w.options, w.deps);
+    expect(kills(w)).toEqual([]);
+    expect(anyClose(w)).toEqual([]);
+    expect(result.exitCode).toBe(1);
+    // Only the Run line's stamp follows the timezone; the rest is byte-exact.
+    expect(KNOB_OFF_OUTPUT).toContain(`Run:     1 hour ago ${UTC_RUN_STAMP}`);
+    expect(result.output.replaceAll(w.stateDir, '<state>')).toBe(
+      KNOB_OFF_OUTPUT.replace(UTC_RUN_STAMP, localRunStamp()),
+    );
+    const json = await undoOpen({...w.options, json: true}, w.deps);
+    expect(json.exitCode).toBe(1);
+    expect(
+      Object.keys((JSON.parse(json.output) as {undo: object}).undo),
+    ).toEqual(KNOB_OFF_KEYS);
+  });
+});
+
+/** Make the world's record write fail on its `n`th call (1-based). */
+function failRecordWrite(w: World, n: number): void {
+  const write = w.deps.writeRecord;
+  if (write == null) throw new Error('no writeRecord');
+  let calls = 0;
+  w.deps.writeRecord = (path, value) => {
+    calls += 1;
+    return calls === n ? 'EACCES: permission denied' : write(path, value);
+  };
+}
+
+/** Run `change` on the model when the close log gets its `closing` line: between the passes. */
+function betweenPasses(w: World, change: (model: Model) => void): void {
+  const log = w.deps.appendLog;
+  if (log == null) throw new Error('no appendLog');
+  w.deps.appendLog = (line) => {
+    if (line.outcome === 'closing') change(w.model);
+    return log(line);
+  };
+}
+
+/** The old workspace 50 of a tab world. */
+function workspace50(
+  model: Model,
+): Model['windows'][number]['workspaces'][number] {
+  const found = model.windows
+    .flatMap((window) => window.workspaces)
+    .find((workspace) => workspace.id === wsId(50));
+  if (found == null) throw new Error('no workspace 50');
+  return found;
+}
+
+/**
+ * home-base-kwand.31: a run that opened workspace 1, moved session 8's
+ * workspace in from window 3 (its only one, so cmux left blank workspace 30
+ * there), and opened two tabs (sessions 5 and 6) in old workspace 50. Its
+ * record writes, in order: 1 before anything, 2 after the move back, 3 after
+ * the blank workspace closes, 4 after workspace 1 closes, 5 before the first
+ * tab's SIGTERM (beforeClose), 6 and 7 after each tab (afterEach), 8 last.
+ */
+function stopsEarlyWorld(): World {
+  const pane = (n: number): Pane => ({
+    id: surfId(n),
+    ref: `surface:${n}`,
+    screens: [idleClaude(sid(n))],
+    tty: `ttys0${n}`,
+  });
+  return world({
+    model: {
+      windows: [
+        {
+          id: winId(1),
+          ref: 'window:1',
+          workspaces: [
+            {id: wsId(8), panes: [pane(8)], ref: 'workspace:8'},
+            {id: wsId(1), panes: [pane(1)], ref: 'workspace:1'},
+          ],
+        },
+        {
+          id: winId(2),
+          ref: 'window:2',
+          workspaces: [
+            {
+              id: wsId(50),
+              panes: [
+                {
+                  id: surfId(9),
+                  ref: 'surface:9',
+                  screens: [RESTORE_FAILED_SHELL],
+                  tty: 'ttys09',
+                },
+                pane(5),
+                pane(6),
+              ],
+              ref: 'workspace:50',
+            },
+          ],
+        },
+        {
+          id: winId(3),
+          ref: 'window:3',
+          workspaces: [
+            {
+              id: wsId(30),
+              panes: [
+                {
+                  id: surfId(30),
+                  ref: 'surface:30',
+                  screens: [IDLE_SHELL],
+                  tty: 'ttys030',
+                },
+              ],
+              ref: 'workspace:30',
+            },
+          ],
+        },
+      ],
+    },
+    options: {closeTabs: true},
+    procs: [
+      claudeProc(1),
+      claudeProc(8),
+      shellProc(509, 'ttys09'),
+      shellProc(505, 'ttys05'),
+      claudeProc(5),
+      shellProc(506, 'ttys06'),
+      claudeProc(6),
+      {
+        command: 'login -pflq jhaa /bin/zsh',
+        onTerm: 'exit',
+        pid: 2030,
+        tty: 'ttys030',
+      },
+      shellProc(2031, 'ttys030'),
+    ],
+    record: [{sessions: [1], window: 1}],
+    recordExtra: {
+      moved: [
+        {
+          failure: null,
+          fromIndex: 0,
+          fromWindowCount: 1,
+          fromWindowId: winId(3),
+          fromWindowRef: 'window:3',
+          movedAt: RUN_AT,
+          name: '[A] session 8',
+          sessionId: sid(8),
+          toWindowId: winId(1),
+          workspaceId: wsId(8),
+        },
+      ],
+      tabs: [
+        TAB_RECORD,
+        {
+          ...TAB_RECORD,
+          name: '[A] session 6',
+          sessionId: sid(6),
+          surfaceId: surfId(6),
+        },
+      ],
+    },
+  });
+}
+
+const tabKills = (w: World): string[] =>
+  kills(w).filter((event) => event === 'kill 1005' || event === 'kill 1006');
+const surfaceCloses = (w: World): string[] =>
+  w.events.filter((event) => event.startsWith('close-surface'));
+
+describe('home-base-kwand.31: --close-tabs reports every recorded tab when the undo stops early or a tab changes between passes', () => {
+  test('control: with every record write working, both tabs close and the undo exits 0', async () => {
+    const w = stopsEarlyWorld();
+    const result = await undoOpen(w.options, w.deps);
+    expect(w.events.filter((event) => event === 'record')).toHaveLength(8);
+    expect(surfaceCloses(w)).toEqual([
+      `close-surface ${surfId(5)} --workspace ${wsId(50)}`,
+      `close-surface ${surfId(6)} --workspace ${wsId(50)}`,
+    ]);
+    expect(result.state?.failures).toEqual([]);
+    expect(result.exitCode).toBe(0);
+  });
+
+  const stops: {at: number; path: string; words: string}[] = [
+    {
+      at: 1,
+      path: 'the first record write',
+      words:
+        'could not be rewritten before stopping anything, so nothing was signalled or closed',
+    },
+    {
+      at: 2,
+      path: 'the move back',
+      words:
+        'rewriting the record failed after moving workspaces back, so the undo stopped',
+    },
+    {
+      at: 3,
+      path: 'the blank workspace close',
+      words:
+        'rewriting the record failed after closing a blank workspace, so the undo stopped',
+    },
+    {
+      at: 4,
+      path: 'the workspace loop',
+      words: '.json failed, so the undo stopped',
+    },
+  ];
+  for (const stop of stops) {
+    test(`F1: the undo stops at ${stop.path}: both recorded tabs are listed as kept, not attempted; none signalled or closed; exit 1`, async () => {
+      const w = stopsEarlyWorld();
+      failRecordWrite(w, stop.at);
+      const result = await undoOpen(w.options, w.deps);
+      expect(result.state?.failures.join('\n')).toContain(stop.words);
+      expect(tabKills(w)).toEqual([]);
+      expect(surfaceCloses(w)).toEqual([]);
+      const kept = result.state?.tabs?.kept ?? [];
+      expect(kept.map((entry) => entry.surfaceId)).toEqual([
+        surfId(5),
+        surfId(6),
+      ]);
+      for (const entry of kept) {
+        expect(entry.reasons).toEqual([
+          'not attempted: the undo stopped before the tabs',
+        ]);
+      }
+      expect(result.output).toContain('Tabs kept open (2)');
+      expect(result.output).toContain(
+        'not attempted: the undo stopped before the tabs',
+      );
+      expect(result.exitCode).toBe(1);
+    });
+  }
+
+  test("F5 (d), beforeClose: the record write before the first tab's SIGTERM fails: no tab signalled or closed, both kept, exit 1", async () => {
+    const w = stopsEarlyWorld();
+    failRecordWrite(w, 5);
+    const result = await undoOpen(w.options, w.deps);
+    expect(result.state?.failures.join('\n')).toContain(
+      "could not be rewritten before stopping any tab's Claude, so no tab was signalled or closed",
+    );
+    expect(tabKills(w)).toEqual([]);
+    expect(surfaceCloses(w)).toEqual([]);
+    const kept = result.state?.tabs?.kept ?? [];
+    expect(kept.map((entry) => entry.surfaceId)).toEqual([
+      surfId(5),
+      surfId(6),
+    ]);
+    expect(kept[0]?.reasons).toEqual(['the record could not be written first']);
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('F5 (d), afterEach: the record write after the first tab fails: the run stops, the second tab is not signalled or closed and is kept, exit 1', async () => {
+    const w = stopsEarlyWorld();
+    failRecordWrite(w, 6);
+    const result = await undoOpen(w.options, w.deps);
+    expect(result.state?.failures.join('\n')).toContain(
+      'failed after closing a tab, so the undo stopped',
+    );
+    expect(tabKills(w)).toEqual(['kill 1005']);
+    expect(surfaceCloses(w)).toEqual([
+      `close-surface ${surfId(5)} --workspace ${wsId(50)}`,
+    ]);
+    expect(
+      result.state?.tabs?.closed.map((entry) => entry.tab?.surfaceId),
+    ).toEqual([surfId(5)]);
+    const kept = result.state?.tabs?.kept ?? [];
+    expect(kept.map((entry) => entry.surfaceId)).toEqual([surfId(6)]);
+    expect(kept[0]?.reasons).toEqual([
+      'not attempted: the run stopped when its record could not be rewritten',
+    ]);
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('F5 (a): text typed into the tab between the first check and its turn keeps it, stored, nothing signalled or closed', async () => {
+    const w = tabWorld({
+      newTab: {
+        screens: [idleClaude(sid(5)), draftClaude(sid(5), 'one more thing')],
+      },
+      otherTab: true,
+    });
+    const result = await undoOpen(w.options, w.deps);
+    // The first pass planned it; the check right before its turn kept it.
+    expect(w.events.filter((event) => event.startsWith('log'))).toEqual([
+      `log ${surfId(5)} closing`,
+      `log ${surfId(5)} kept`,
+    ]);
+    expect(kills(w)).toEqual([]);
+    expect(anyClose(w)).toEqual([]);
+    const kept = result.state?.tabs?.kept ?? [];
+    expect(kept.map((entry) => entry.surfaceId)).toEqual([surfId(5)]);
+    expect(kept[0]?.reasons.join('\n')).toContain(
+      'unsent text in the input box of pane surface:5',
+    );
+    expect(kept[0]?.drafts.map((entry) => entry.text)).toEqual([
+      'one more thing',
+    ]);
+    expect(kept[0]?.drafts[0]?.stored).not.toBeNull();
+    expect(result.output).toContain('one more thing');
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('F2 / F5 (b): a tab that closes between the first check and its turn is listed under already gone, exit 0', async () => {
+    const w = tabWorld({otherTab: true});
+    betweenPasses(w, (model) => {
+      const home = workspace50(model);
+      home.panes = home.panes.filter((pane) => pane.id !== surfId(5));
+    });
+    const result = await undoOpen(w.options, w.deps);
+    expect(kills(w)).toEqual([]);
+    expect(anyClose(w)).toEqual([]);
+    expect(result.state?.tabs?.gone.map((entry) => entry.surfaceId)).toEqual([
+      surfId(5),
+    ]);
+    expect(result.state?.tabs?.kept).toEqual([]);
+    expect(result.state?.tabs?.closed).toEqual([]);
+    expect(result.output).toContain('Tabs already gone (1)');
+    expect(result.exitCode).toBe(0);
+  });
+
+  test('F3: a tab that becomes its workspace only tab between the passes is named for closing by hand, listed there only, exit 1 as in the first pass', async () => {
+    const w = tabWorld();
+    betweenPasses(w, (model) => {
+      const home = workspace50(model);
+      home.panes = home.panes.filter((pane) => pane.id !== surfId(9));
+    });
+    const result = await undoOpen(w.options, w.deps);
+    expect(kills(w)).toEqual([]);
+    expect(anyClose(w)).toEqual([]);
+    expect(result.state?.notClosed.map((entry) => entry.surfaceId)).toEqual([
+      surfId(5),
+    ]);
+    expect(result.state?.notClosed[0]?.reason).toContain(
+      `it is the only tab of its old workspace ${wsId(50)} now`,
+    );
+    expect(result.state?.tabs?.kept).toEqual([]);
+    expect(result.output).toContain(
+      'Not closed: tabs opened in an old workspace (1)',
+    );
+    expect(result.output).not.toContain('Tabs kept open');
+    expect(result.exitCode).toBe(1);
+  });
+
+  test('F5 (c): a tab moved to another workspace between the passes is kept with why, never signalled or closed', async () => {
+    const w = tabWorld({otherTab: true});
+    betweenPasses(w, (model) => {
+      const home = workspace50(model);
+      const moving = home.panes.find((pane) => pane.id === surfId(5));
+      if (moving == null) throw new Error('no tab 5');
+      home.panes = home.panes.filter((pane) => pane !== moving);
+      model.windows[0]?.workspaces.push({
+        id: wsId(60),
+        panes: [moving],
+        ref: 'workspace:60',
+      });
+    });
+    const result = await undoOpen(w.options, w.deps);
+    expect(kills(w)).toEqual([]);
+    expect(anyClose(w)).toEqual([]);
+    const kept = result.state?.tabs?.kept ?? [];
+    expect(kept.map((entry) => entry.surfaceId)).toEqual([surfId(5)]);
+    expect(kept[0]?.reasons.join('\n')).toContain(
+      `is in workspace ${wsId(60)} now, not in ${wsId(50)}`,
+    );
+    expect(result.state?.notClosed).toEqual([]);
+    expect(result.exitCode).toBe(0);
   });
 });
