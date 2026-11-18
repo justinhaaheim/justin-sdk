@@ -60,6 +60,7 @@ import type {
   BeforeRestartState,
   UnplacedPaneHold,
 } from './before-restart-state';
+import type {UnfinishedSort} from './chain-fold';
 import type {ChainNamer} from './chain-names';
 import type {HandoffStop} from './handoff-view';
 import type {InputDraft} from './input-drafts';
@@ -2460,8 +2461,12 @@ export interface ThreadInboxOptions {
   now?: Date;
   order: InboxOrder;
   repo: string | null;
+  /** home-base-kwand.9: `--sort` for `--unfinished`; absent: importance. */
+  sort?: UnfinishedSort;
   style?: OutputStyle;
   timeZone?: string;
+  /** home-base-kwand.9 (G5): `--unfinished`, one row per chain with an unfinished request. */
+  unfinished?: boolean;
 }
 
 /**
@@ -2533,6 +2538,35 @@ export async function runSessionInbox(
       }
     }
     const pinnedProjects = config.pinnedProjects;
+    // home-base-kwand.9 (G5): one row per handoff chain with an unfinished
+    // request, from the fold the dashboard uses (chain-fold.ts). Imported
+    // here, not at the top: inbox-unfinished.ts reads helpers from this file.
+    if (options.unfinished === true) {
+      const unfinishedModule = await import('./inbox-unfinished');
+      const sort = options.sort ?? 'importance';
+      const chains = unfinishedModule.unfinishedOfRead(read, sort);
+      await writeStdout(
+        `${
+          options.json
+            ? JSON.stringify(
+                unfinishedModule.unfinishedInboxJson(read, chains, {
+                  days,
+                  now,
+                  sort,
+                }),
+                null,
+                2,
+              )
+            : unfinishedModule.renderUnfinishedInbox(read, chains, {
+                days,
+                now,
+                sort,
+                style: options.style ?? outputStyle(process.stdout),
+              })
+        }\n`,
+      );
+      return 0;
+    }
     if (options.json) {
       // F2 (home-base-j8q3e.1.9): wait for a pipe to take all of it before the
       // caller's process.exit.

@@ -2411,6 +2411,25 @@ export const threadCommand: CommandModule = {
               type: 'boolean' as const,
             })
             .conflicts('before-restart', ['by-status', 'by-repo'])
+            // home-base-kwand.9 (G5). No `default: false` (see above).
+            .option('unfinished', {
+              describe:
+                'Knob on: one row per handoff chain with an unfinished request (a request that is not closed, in any session of the chain; a request two sessions hold counts once), the chain shown as its newest session, which must not be done, archived or handed off. Each row: why it sits where it is, its last activity, the chain’s unfinished requests, its open questions, its sessions, and how to resume it. A chain whose requests could not be read is listed and says so. Same chains and counts as the threads dashboard’s "unfinished" grouping. Within --days (default 30; sessions waiting on you are never hidden by age); --repo applies. With --json: {days, sort, order, totals: {chains, unfinishedRequests, openQuestions, sessions, requestsUnknownChains}, hiddenByAge, unplaced, chains: [{sessionId, beadId, chainName, title, repo, section, lastActivityAt, flags, counts: {unfinishedRequests, openQuestions, sessions}, requestsUnknown, outside, reason: {tier, text}, resume, sessionIds}]}',
+              type: 'boolean' as const,
+            })
+            .option('sort', {
+              choices: ['importance', 'activity'] as const,
+              describe:
+                'With --unfinished: importance (the default) is the reopen order — starred, then waiting on you, then cut off mid-turn, then the rest, newest activity first inside each; activity is newest activity first',
+              type: 'string' as const,
+            })
+            .implies('sort', 'unfinished')
+            .conflicts('unfinished', [
+              'by-status',
+              'by-repo',
+              'before-restart',
+              'idle-for',
+            ])
             .option('flat', {
               default: false,
               describe:
@@ -2448,6 +2467,8 @@ export const threadCommand: CommandModule = {
                       ? 'repo'
                       : 'recent',
                 repo: argv.repo ?? null,
+                sort: argv.sort === 'activity' ? 'activity' : 'importance',
+                unfinished: argv.unfinished === true,
               }),
             );
           }
