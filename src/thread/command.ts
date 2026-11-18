@@ -265,6 +265,8 @@ ALL EXCEPT (--all-except, home-base-kwand.7). Every workspace in every cmux wind
 
   A live Claude process that cannot be placed in any workspace (no session named for it, or it runs on a terminal no single tab reports, even when another process of the same session is in a tab) could be running behind a tab whose evidence is weak. While one exists, every workspace with a blank tab, a tab whose terminal runs no process, or a shared tty is kept as unknown, naming the pid, with or without --close-shared-tty. The counts say how many there were.
 
+  One exception: a Claude process on a shared tty counts as placed when its session is placed in a workspace that holds one of the tabs reporting that tty. Every tab reporting that tty is still kept as a shared tty, since a Claude runs on it. A Claude on a terminal no tab reports, or whose session is in no workspace with a tab reporting its tty, still counts as unplaced. The Unplaced count line names the pids this exception placed.
+
   A workspace kept as unknown says why on its "Kept as" line: "a fact could not be read"; "a Claude process could be running here unseen" (a Claude placed in no workspace, as above); "no process runs on the terminal a tab reports, so what runs in that tab cannot be seen"; or "a tab shows a blank screen, so what runs in it cannot be seen". When a workspace has more than one, the line names the first. --json keeps the kind unknown for all four and names the first in unknownCause: unreadFact, unseenClaude, noProcessTty or blankScreen.
 
   If CMUX_WORKSPACE_ID names no workspace in the cmux tree (a stale id after a restore), --all-except refuses, since its own workspace could not be kept.

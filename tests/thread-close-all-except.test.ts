@@ -126,6 +126,11 @@ interface WorldInput {
   options?: Partial<CloseOptions>;
   own?: number;
   procs?: string[];
+  /**
+   * ps lines that appear right before the first live read, so after the
+   * plan's own view was read (kwand.26: a pid missing from the gate's ps).
+   */
+  procsBeforeLive?: string[];
   recordFails?: boolean;
   refuseClose?: Record<string, string>;
   workspaces: Ws[];
@@ -271,6 +276,7 @@ function world(input: WorldInput) {
     readHookStore: () => ({ok: true, value: {}}),
     readLive: () => {
       events.push('read-live');
+      if (liveReads === 0) procLines.push(...(input.procsBeforeLive ?? []));
       const live = {
         kind: 'read' as const,
         ...joinLiveSessions({
@@ -1210,5 +1216,200 @@ describe('the "Kept as" line of an unknown keep says what happened (kwand.27)', 
       const words = cause.slice('unknown ('.length, -1);
       expect(help).toContain(`"${words}"`);
     }
+  });
+});
+
+describe('a Claude on a shared tty counts as placed when its session is in a workspace with a tab reporting that tty (kwand.26)', () => {
+  const NO_UNPLACED = {keptFor: 0, noWorkspace: 0, pids: [], unnamed: 0};
+  /** Claude 1 (pid 1001, named on its command line) on ttys05, beside its login and shell. */
+  const CLAUDE_ON_05 = [claudeProc(1, 'ttys05'), ...shellProcs('ttys05', 5000)];
+  /**
+   * Workspaces 1 and 2 both report ttys05: 1 shows session 1's status line
+   * (the screen join places the session there), 2 an idle prompt. Workspaces
+   * 3 and 4 share ttys06, which runs only shells, each with an idle prompt:
+   * --close-shared-tty lets them through only while every Claude is placed.
+   */
+  function sharedClaude(extra: Partial<WorldInput> = {}): WorldInput {
+    return {
+      facts: [fact(1)],
+      options: {closeSharedTty: true},
+      procs: [...OWN_PROCS, ...CLAUDE_ON_05, ...shellProcs('ttys06', 6000)],
+      workspaces: withOwn([
+        {
+          n: 1,
+          panes: [{screen: idleClaude(sid(1)), surface: 1, tty: 'ttys05'}],
+        },
+        {n: 2, panes: [{screen: IDLE_SHELL, surface: 2, tty: 'ttys05'}]},
+        {n: 3, panes: [{screen: IDLE_SHELL, surface: 3, tty: 'ttys06'}]},
+        {n: 4, panes: [{screen: IDLE_SHELL, surface: 4, tty: 'ttys06'}]},
+      ]),
+      ...extra,
+    };
+  }
+
+  test('with --close-shared-tty it is not unplaced, every tab reporting its tty stays kept as sharedTty, and the shells-only shared tty passes again', async () => {
+    const {keptKinds, planned, result} = await plan(sharedClaude());
+    const all = result.state?.allExcept;
+    expect(all?.unplaced).toEqual(NO_UNPLACED);
+    expect(all?.placedOnSharedTty).toEqual([1001]);
+    expect(planned).toEqual(['workspace:3', 'workspace:4']);
+    for (const ref of ['workspace:1', 'workspace:2']) {
+      expect(keptKinds.get(ref)?.[0]).toBe('sharedTty');
+      expect(keptKinds.get(ref)).not.toContain('unknown');
+    }
+    expect(all?.counts.keptByKind).toEqual({own: 1, sharedTty: 2});
+    expect(all?.sharedTty).toEqual({
+      keptFor: 2,
+      passedByRule: 2,
+      workspaces: 4,
+    });
+    expect(result.output).toContain(
+      '1 live Claude process on a shared tty (pid 1001) counted as placed, since its session is in a workspace with a tab that reports its tty',
+    );
+  });
+
+  test('without --close-shared-tty nothing more closes, and the shells-only shared tty is kept as sharedTty, not unknown', async () => {
+    const {keptKinds, planned, result} = await plan(
+      sharedClaude({options: {}}),
+    );
+    expect(planned).toEqual([]);
+    expect(result.state?.allExcept?.unplaced).toEqual(NO_UNPLACED);
+    expect(result.state?.allExcept?.placedOnSharedTty).toEqual([1001]);
+    expect(keptKinds.get('workspace:3')).toEqual(['sharedTty']);
+    expect(keptKinds.get('workspace:4')).toEqual(['sharedTty']);
+  });
+
+  test('the compound stale case is still kept, by the blank-screen keep: every tab reporting the Claude’s tty is stale, and its real tab reports a shells-only tty with a blank screen', async () => {
+    const {keptKinds, planned, result} = await plan(
+      sharedClaude({
+        procs: [
+          ...OWN_PROCS,
+          ...CLAUDE_ON_05,
+          ...shellProcs('ttys06', 6000),
+          ...shellProcs('ttys07', 7000),
+        ],
+        workspaces: withOwn([
+          // Stale: it still shows session 1's last screen, which places the session here.
+          {
+            n: 1,
+            panes: [{screen: idleClaude(sid(1)), surface: 1, tty: 'ttys05'}],
+          },
+          {n: 2, panes: [{screen: IDLE_SHELL, surface: 2, tty: 'ttys05'}]},
+          {n: 3, panes: [{screen: IDLE_SHELL, surface: 3, tty: 'ttys06'}]},
+          {n: 4, panes: [{screen: IDLE_SHELL, surface: 4, tty: 'ttys06'}]},
+          // The Claude's real tab: it reports ttys07, where only shells run, and is blank.
+          {n: 7, panes: [{screen: '', surface: 7, tty: 'ttys07'}]},
+        ]),
+      }),
+    );
+    expect(result.state?.allExcept?.unplaced).toEqual(NO_UNPLACED);
+    expect(result.state?.allExcept?.placedOnSharedTty).toEqual([1001]);
+    expect(planned).toEqual(['workspace:3', 'workspace:4']);
+    expect(keptKinds.get('workspace:7')).toEqual(['unknown']);
+    expect(
+      result.state?.kept.find((entry) => entry.workspaceRef === 'workspace:7')
+        ?.unknownCause,
+    ).toBe('blankScreen');
+  });
+
+  test('a Claude on a shared tty whose session is placed only in a workspace with no tab reporting that tty stays unplaced', async () => {
+    // Session 1 runs in workspace 1 on its own ttys01; a second process of
+    // it runs on ttys05, which workspaces 2 and 5 report.
+    const SECOND = `7779 1 ttys05 01:00 ${CLAUDE} --session-id ${sid(1)} --settings x`;
+    const input = (screenOf2: string): WorldInput => ({
+      facts: [fact(1)],
+      options: {closeSharedTty: true},
+      procs: [
+        claudeProc(1),
+        ...OWN_PROCS,
+        SECOND,
+        ...shellProcs('ttys05', 5000),
+        ...shellProcs('ttys06', 6000),
+      ],
+      workspaces: withOwn([
+        ws(1, idleClaude(sid(1))),
+        {n: 2, panes: [{screen: screenOf2, surface: 2, tty: 'ttys05'}]},
+        {n: 5, panes: [{screen: IDLE_SHELL, surface: 5, tty: 'ttys05'}]},
+        {n: 3, panes: [{screen: IDLE_SHELL, surface: 3, tty: 'ttys06'}]},
+        {n: 4, panes: [{screen: IDLE_SHELL, surface: 4, tty: 'ttys06'}]},
+      ]),
+    });
+    const elsewhere = await plan(input(IDLE_SHELL));
+    expect(elsewhere.result.state?.allExcept?.unplaced).toEqual({
+      keptFor: 4,
+      noWorkspace: 1,
+      pids: [7779],
+      unnamed: 0,
+    });
+    expect(elsewhere.result.state?.allExcept?.placedOnSharedTty).toEqual([]);
+    expect(elsewhere.planned).toEqual(['workspace:1']);
+    expect(elsewhere.keptKinds.get('workspace:3')).toEqual([
+      'unknown',
+      'sharedTty',
+    ]);
+    // Control: workspace 2 shows session 1's status line, so the session is
+    // placed with a tab reporting ttys05 as well, and the second process is placed.
+    const withTab = await plan(input(idleClaude(sid(1))));
+    expect(withTab.result.state?.allExcept?.unplaced).toEqual(NO_UNPLACED);
+    expect(withTab.result.state?.allExcept?.placedOnSharedTty).toEqual([7779]);
+    expect(withTab.planned).toEqual([
+      'workspace:1',
+      'workspace:3',
+      'workspace:4',
+    ]);
+  });
+
+  test('a Claude on a shared tty missing from the plan’s own ps (it started after the plan read ps) stays unplaced, so no tab reporting its tty is planned', async () => {
+    const late = await plan(
+      sharedClaude({
+        procs: [
+          ...OWN_PROCS,
+          ...shellProcs('ttys05', 5000),
+          ...shellProcs('ttys06', 6000),
+        ],
+        procsBeforeLive: [claudeProc(1, 'ttys05')],
+      }),
+    );
+    expect(late.result.state?.allExcept?.unplaced.pids).toEqual([1001]);
+    expect(late.result.state?.allExcept?.placedOnSharedTty).toEqual([]);
+    expect(late.planned).toEqual([]);
+    expect(late.keptKinds.get('workspace:2')).toContain('sharedTty');
+    expect(late.keptKinds.get('workspace:3')).toEqual(['unknown', 'sharedTty']);
+  });
+
+  test('--apply: the re-check reads the placement against its own view, so the shells-only shared tty closes and the tabs reporting the Claude’s tty stay', async () => {
+    const {result, w} = await plan(
+      sharedClaude({options: {apply: true, closeSharedTty: true}}),
+    );
+    expect(writes(w)).toEqual([
+      'record-tabs',
+      'log closing',
+      'log closing',
+      `close-workspace ${wsId(3)}`,
+      'log closed',
+      `close-workspace ${wsId(4)}`,
+      'log closed',
+    ]);
+    expect(result.state?.closed.map((entry) => entry.workspaceRef)).toEqual([
+      'workspace:3',
+      'workspace:4',
+    ]);
+    noForce(w);
+  });
+
+  test('--help names the shared-tty exception', () => {
+    const cli = join(import.meta.dirname, '..', 'src', 'cli.ts');
+    const run = Bun.spawnSync(
+      [process.execPath, cli, 'thread', 'close', '--help'],
+      {
+        env: {...process.env, JUSTIN_SDK_HEALTH_NOTICES: 'off', NO_COLOR: '1'},
+        stdin: 'ignore',
+      },
+    );
+    expect(run.exitCode).toBe(0);
+    const help = run.stdout.toString().replaceAll(/\s+/gu, ' ');
+    expect(help).toContain(
+      'One exception: a Claude process on a shared tty counts as placed when its session is placed in a workspace that holds one of the tabs reporting that tty.',
+    );
   });
 });

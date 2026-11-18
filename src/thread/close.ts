@@ -119,6 +119,7 @@ import {
   KEEP_KIND_WORDS,
   noProcessTtyKeep,
   parseKeepActive,
+  placedOnSharedTty,
   primaryKind,
   realReadSessionFacts,
   resolveKeep,
@@ -1347,10 +1348,16 @@ function allExceptCounts(
     },
     {
       label: 'Unplaced',
-      value:
+      value: `${
         all.unplaced.pids.length === 0
           ? 'every live Claude process was placed in a workspace'
-          : `${all.unplaced.pids.length} live Claude ${all.unplaced.pids.length === 1 ? 'process' : 'processes'} placed in no workspace (pid ${[...new Set(all.unplaced.pids.map((pid) => pid ?? 'unknown'))].join(', ')}): ${all.unplaced.unnamed} with no session named, ${all.unplaced.noWorkspace} on a terminal no single tab reports. ${all.unplaced.keptFor} ${all.unplaced.keptFor === 1 ? 'workspace' : 'workspaces'} with a blank pane, a pane whose tty runs nothing, or a shared tty kept as unknown`,
+          : `${all.unplaced.pids.length} live Claude ${all.unplaced.pids.length === 1 ? 'process' : 'processes'} placed in no workspace (pid ${[...new Set(all.unplaced.pids.map((pid) => pid ?? 'unknown'))].join(', ')}): ${all.unplaced.unnamed} with no session named, ${all.unplaced.noWorkspace} on a terminal no single tab reports. ${all.unplaced.keptFor} ${all.unplaced.keptFor === 1 ? 'workspace' : 'workspaces'} with a blank pane, a pane whose tty runs nothing, or a shared tty kept as unknown`
+      }${
+        // home-base-kwand.26: say which were placed only through their session.
+        all.placedOnSharedTty.length === 0
+          ? ''
+          : `. ${all.placedOnSharedTty.length} live Claude ${all.placedOnSharedTty.length === 1 ? 'process' : 'processes'} on a shared tty (pid ${all.placedOnSharedTty.join(', ')}) counted as placed, since its session is in a workspace with a tab that reports its tty`
+      }`,
     },
     {label: 'Workspaces', value: `${all.treeWorkspaces} in every cmux window`},
   ];
@@ -2037,7 +2044,9 @@ async function closeTabs(input: {
  * K7 as home-base-kwand.21 F1 narrowed it: the gate option `--all-except`
  * runs assess with, both passes. The shared-tty pass is OFF unless
  * --close-shared-tty is given, and stays off while any live Claude process
- * is placed in no workspace (F2).
+ * is placed in no workspace (F2). A Claude on a shared tty whose session is
+ * placed in a workspace with a tab reporting that tty counts as placed
+ * (home-base-kwand.26, placedOnSharedTty).
  */
 function allExceptGates(
   closeSharedTty: boolean,
@@ -2091,6 +2100,7 @@ function allExceptInfo(input: {
   first: LiveView;
   keep: readonly string[];
   keepActiveText: string;
+  placedOnSharedTty: readonly number[];
   sessionFile: SessionFileFact;
   state: CloseState;
   tabRecord: string | null;
@@ -2128,6 +2138,7 @@ function allExceptInfo(input: {
     },
     keep: [...input.keep],
     keepActive: input.keepActiveText,
+    placedOnSharedTty: [...input.placedOnSharedTty],
     sessionFile: input.sessionFile,
     sharedTty: {
       keptFor: state.kept.filter(
@@ -2217,7 +2228,9 @@ async function closeAllExcept(input: {
     );
   }
   // F2: a Claude placed in no workspace could run behind a weak-evidence pane.
-  const unplaced = unplacedClaude(live);
+  // home-base-kwand.26: read against the plan's own view, which the gates read.
+  const unplaced = unplacedClaude(live, first);
+  const sharedPlaced = placedOnSharedTty(live, first);
   const gateOptions = allExceptGates(input.closeSharedTty, unplaced);
   let unplacedKeptFor = 0;
   const facts = await full.readSessionFacts(
@@ -2363,6 +2376,7 @@ async function closeAllExcept(input: {
       first,
       keep: input.keep,
       keepActiveText: input.keepActiveText,
+      placedOnSharedTty: sharedPlaced,
       sessionFile,
       state,
       tabRecord,
@@ -2430,7 +2444,9 @@ async function closeAllExcept(input: {
       if (weak.length === 0) return assessed;
       const liveAgain = await full.readLive();
       const unplacedNow =
-        liveAgain.kind === 'read' ? unplacedClaude(liveAgain) : null;
+        liveAgain.kind === 'read'
+          ? unplacedClaude(liveAgain, again.view)
+          : null;
       const reason: KeepReason | null =
         liveAgain.kind === 'failed'
           ? {

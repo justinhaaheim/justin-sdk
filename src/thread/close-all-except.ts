@@ -14,14 +14,14 @@
  */
 
 import type {CmuxTree} from './cmux';
-import type {LiveSessions} from './live-sessions';
-import type {GateReasonKind} from './open-undo';
+import type {LiveSessions, NamedLive} from './live-sessions';
+import type {GateReasonKind, LiveView} from './open-undo';
 import type {EnvLike} from './paths';
 import type {ChainFlags} from './session-flags';
 import type {InboxRead} from './session-inbox';
 import type {SessionEnding} from './transcript-ending';
 
-import {normalizeTty} from './pane-join';
+import {isShellScaffolding, normalizeTty} from './pane-join';
 import {ageWords} from './part-one';
 import {readInbox, rowEnding} from './session-inbox';
 import {WORKING_NOW_WINDOW_MS} from './transcript-ending';
@@ -408,6 +408,74 @@ export interface UnplacedClaude {
 }
 
 /**
+ * home-base-kwand.26: the named Claude processes the join put on no surface
+ * that still count as placed, because they run on a SHARED tty T (two or more
+ * tabs report it, F22) and their session is placed in a workspace holding one
+ * of the tabs that report T. Such a Claude stays protected: it is a process
+ * on T that is not shell scaffolding, so every tab reporting T fails the
+ * --close-shared-tty "only shells" check and its workspace stays kept as
+ * sharedTty. The case kwand.24 kept R2 literal for (every tab reporting T is
+ * stale, and the Claude's real tab reports another tty that runs only shells,
+ * with a blank screen) is kept by kwand.27's blank-screen keep.
+ *
+ * Every condition is read from `view`, the gate's own read, so the
+ * protection above holds for the very panes the gate checks: the pid is in
+ * the view's ps on tty T and is not shell scaffolding, two or more of the
+ * view's surfaces report T (as gateSurfaces counts sharers), and the view's
+ * tree puts one of those surfaces in a workspace `live` places the session
+ * in. A process on a tty no tab reports, on no tty, missing from the view's
+ * ps, or whose session is placed only in workspaces without a tab reporting
+ * T stays unplaced. A pid several sources named counts only when every one
+ * of its namings passes. Sorted, each pid once.
+ */
+export function placedOnSharedTty(
+  live: Extract<LiveSessions, {kind: 'read'}>,
+  view: LiveView,
+): number[] {
+  const sharers = new Map<string, number>();
+  for (const surface of view.surfaces) {
+    const tty = normalizeTty(surface.tty);
+    if (tty != null) sharers.set(tty, (sharers.get(tty) ?? 0) + 1);
+  }
+  // Each shared tty, and the workspaces whose tabs report it.
+  const holders = new Map<string, Set<string>>();
+  for (const window of view.tree.windows) {
+    for (const workspace of window.workspaces) {
+      for (const surfaceId of workspace.surfaceIds) {
+        const surface = view.surfaces.find(
+          (candidate) =>
+            candidate.id?.toUpperCase() === surfaceId.toUpperCase(),
+        );
+        const tty = normalizeTty(surface?.tty);
+        if (tty == null || (sharers.get(tty) ?? 0) < 2) continue;
+        const set = holders.get(tty) ?? new Set<string>();
+        set.add(workspace.id.toUpperCase());
+        holders.set(tty, set);
+      }
+    }
+  }
+  const passes = (entry: NamedLive): boolean => {
+    if (entry.workspaceId != null) return false;
+    const proc = view.procs.find((candidate) => candidate.pid === entry.pid);
+    if (proc == null || isShellScaffolding(proc)) return false;
+    const tty = normalizeTty(proc.tty);
+    const reporting = tty == null ? undefined : holders.get(tty);
+    if (reporting == null) return false;
+    return (live.workspacesBySessionId.get(entry.sessionId) ?? []).some(
+      (workspaceId) => reporting.has(workspaceId.toUpperCase()),
+    );
+  };
+  const pids = [...new Set(live.namedProcesses.map((entry) => entry.pid))];
+  return pids
+    .filter((pid) =>
+      live.namedProcesses
+        .filter((entry) => entry.pid === pid)
+        .every((entry) => passes(entry)),
+    )
+    .sort((left, right) => left - right);
+}
+
+/**
  * F2: every live Claude process the join could not place in a workspace.
  * `thread open`'s reading of `live.unplaced` (every entry; it refuses while
  * one exists, live-sessions.ts header), plus every session a source named
@@ -422,9 +490,14 @@ export interface UnplacedClaude {
  * same session is placed (a session resumed twice, one copy in a tab and one
  * on a terminal no tab reports). The per-session rule above stays, so this
  * only ever adds; a pid already listed is not listed twice.
+ *
+ * home-base-kwand.26 narrows R2: a named process that placedOnSharedTty
+ * places (a shared tty, its session in a workspace with a tab reporting that
+ * tty, read from `view`) is not unplaced.
  */
 export function unplacedClaude(
   live: Extract<LiveSessions, {kind: 'read'}>,
+  view: LiveView,
 ): UnplacedClaude[] {
   const out: UnplacedClaude[] = live.unplaced.map((entry) => ({
     detail: entry.detail,
@@ -446,8 +519,15 @@ export function unplacedClaude(
       .map((entry) => entry.pid),
   );
   const listed = new Set(out.map((entry) => entry.pid));
+  const onSharedTty = new Set(placedOnSharedTty(live, view));
   for (const entry of live.namedProcesses) {
-    if (placedPids.has(entry.pid) || listed.has(entry.pid)) continue;
+    if (
+      placedPids.has(entry.pid) ||
+      listed.has(entry.pid) ||
+      onSharedTty.has(entry.pid)
+    ) {
+      continue;
+    }
     listed.add(entry.pid);
     out.push({
       detail: `pid ${entry.pid} runs session ${entry.sessionId} (found by ${entry.source}) on a terminal no single cmux tab reports, whether or not another process of that session is in a tab`,
@@ -618,6 +698,12 @@ export interface AllExceptInfo {
   };
   keep: string[];
   keepActive: string;
+  /**
+   * home-base-kwand.26: pids of the named Claude processes on a shared tty
+   * counted as placed because their session is placed in a workspace with a
+   * tab reporting that tty (placedOnSharedTty); not in `unplaced`.
+   */
+  placedOnSharedTty: number[];
   /** cmux's live session file, which the tab record reads (D1). */
   sessionFile: SessionFileFact;
   /** K7: workspaces with a pane on a tty another pane reports, and how many the rule let through. */
